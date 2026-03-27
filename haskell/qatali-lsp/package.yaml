@@ -1,0 +1,56 @@
+spec-version: 0.36.0
+name: qatali-lsp
+version: 0.1.0.0
+synopsis: LSP server for Qatali
+author: yukikurage
+license: MIT
+
+language: GHC2021
+
+default-extensions:
+  - OverloadedStrings
+  - OverloadedRecordDot
+  - DuplicateRecordFields
+  - TypeFamilies
+  - LambdaCase
+  - DerivingStrategies
+
+dependencies:
+  - base >= 4.18 && < 5
+  - text
+  - bytestring
+  - containers
+  - mtl
+  - transformers
+  - stm
+  - async
+  - lsp
+  - lsp-types
+  - prettyprinter
+  - aeson
+  - unordered-containers
+  - filepath
+  - directory
+  - qatali-compiler
+
+library:
+  source-dirs: src
+
+executables:
+  qatali-lsp:
+    main: Main.hs
+    source-dirs: app
+    dependencies:
+      - qatali-lsp
+    ghc-options:
+      - -threaded
+      - -rtsopts
+      - -with-rtsopts=-N
+
+tests:
+  qatali-lsp-test:
+    main: Spec.hs
+    source-dirs: test
+    dependencies:
+      - qatali-lsp
+      - hspec

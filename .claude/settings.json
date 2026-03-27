@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo install:*)",
+      "Bash(/home/yukikurage/.cargo/bin/just build-rust:*)",
+      "Bash(stack build:*)",
+      "Bash(stack test:*)"
+    ]
+  }
+}

@@ -1,0 +1,19 @@
+# Haskell / Stack
+.stack-work/
+*.cabal
+dist-newstyle/
+*.hi
+*.o
+.hie/
+.hls/
+
+# Rust / Cargo
+rust/target/
+
+# Editor / OS
+.DS_Store
+.env
+.idea/
+.vscode/
+*~
+*.swp

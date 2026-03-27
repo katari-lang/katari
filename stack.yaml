@@ -1,0 +1,13 @@
+snapshot: lts-22.44   # GHC 9.6.7
+
+packages:
+  - haskell/qatali-compiler
+  - haskell/qatali-cli
+  - haskell/qatali-lsp
+
+ghc-options:
+  "$locals": -Wall -Wcompat -Wincomplete-record-updates
+             -Wincomplete-uni-patterns -Wmissing-home-modules
+             -Wredundant-constraints
+
+extra-deps: []

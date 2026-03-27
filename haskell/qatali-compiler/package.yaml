@@ -1,0 +1,47 @@
+spec-version: 0.36.0
+name: qatali-compiler
+version: 0.1.0.0
+synopsis: Qatali language compiler and typechecker
+author: yukikurage
+license: MIT
+
+language: GHC2021
+
+default-extensions:
+  - OverloadedStrings
+  - OverloadedRecordDot
+  - DuplicateRecordFields
+  - TypeFamilies
+  - PatternSynonyms
+  - ViewPatterns
+  - LambdaCase
+  - DerivingStrategies
+
+dependencies:
+  - base >= 4.18 && < 5
+  - text
+  - containers
+  - mtl
+  - transformers
+  - prettyprinter
+  - prettyprinter-ansi-terminal
+  - bytestring
+  - aeson
+  - unordered-containers
+  - hashable
+  - vector
+  - filepath
+  - directory
+  - megaparsec
+  - parser-combinators
+
+library:
+  source-dirs: src
+
+tests:
+  qatali-compiler-test:
+    main: Spec.hs
+    source-dirs: test
+    dependencies:
+      - qatali-compiler
+      - hspec
