@@ -29,11 +29,7 @@ let pi: number = 3.14159
 
 // --- 無名関数 (fn の body は必ず block) ---
 
-let add = fn (x: integer, y: integer): integer => { x + y }
-
-// --- オブジェクト ---
-
-let point = {x = 1, y = 2}
+let add = fn (x: integer, y: integer): number => { x + y }
 
 // --- 配列 ---
 
@@ -54,22 +50,35 @@ let describe = fn (v: boolean): string => {
 
 // --- fn 宣言形式 ---
 
-fn double(x: integer): integer => { x * 2 }
+fn double(x: integer): number => { x * 2 }
 
 // --- ブロック本体 ---
 
-fn add_and_double(x: integer, y: integer): integer => {
+fn add_and_double(x: integer, y: integer): number => {
   let z = x + y
   return z * 2
 }
 
-// --- データ型 ---
+// --- データ型 (タプル形式) ---
 
 data Box<out T>(value: T)
 
 fn unbox(b: Box<integer>): integer => {
   match b {
     case (Box(v)) => v
+  }
+}
+
+// --- データ型 (レコード形式) ---
+
+data User<out ID> {
+  id: ID,
+  name: string
+}
+
+fn getUserName(u: User<integer>): string => {
+  match u {
+    case User {name = n} => n
   }
 }
 
@@ -105,10 +114,6 @@ fn compose(
 fn branch(b: boolean): integer | string => {
   if b { 42 } else { "hello" }
 }
-
-// --- オブジェクトの部分型 ---
-
-fn wider(): {a: integer} => { {a = 1, b = "extra"} }
 
 // --- Result 型パターンマッチ ---
 

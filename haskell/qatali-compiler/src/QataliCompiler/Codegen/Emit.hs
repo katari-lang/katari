@@ -1,7 +1,8 @@
-{- | Code generation: Qatali IR → output text (or binary).
+{- | Code generation: Qatali IR → output text or binary.
 
-Currently targets a human-readable text format of the IR.
-Future backends may emit binary bytecode or other formats.
+Supports two output formats:
+  * 'FormatText'   — human-readable pretty-printed IR (for debugging)
+  * 'FormatBinary' — compact binary bytecode for the runtime
 -}
 module QataliCompiler.Codegen.Emit (
     EmitConfig (..),
@@ -10,35 +11,39 @@ module QataliCompiler.Codegen.Emit (
     emitToText,
 ) where
 
-import           Data.Text                 (Text)
-import           Prettyprinter             (defaultLayoutOptions, layoutPretty)
-import           Prettyprinter.Render.Text (renderStrict)
+import qualified Data.ByteString.Lazy       as BL
+import           Data.Text                  (Text)
+import           Prettyprinter              (defaultLayoutOptions, layoutPretty)
+import           Prettyprinter.Render.Text  (renderStrict)
 
-import           QataliCompiler.IR.IR      (IRModule)
-import           QataliCompiler.IR.Pretty  (prettyModule)
+import           QataliCompiler.IR.Binary   (encodeProgram)
+import           QataliCompiler.IR.Module   (Program)
+import           QataliCompiler.IR.Pretty   (prettyProgram)
 
 -- | Output format for code generation.
 data OutputFormat
     = -- | Human-readable IR text (for debugging)
       FormatText
-    | -- | TODO: binary bytecode for qatali-runtime
+    | -- | Binary bytecode for qatali-runtime
       FormatBinary
     deriving (Eq, Show)
 
 -- | Configuration for the emit phase.
-data EmitConfig = EmitConfig
-    { format :: !OutputFormat
+newtype EmitConfig = EmitConfig
+    { format :: OutputFormat
     }
     deriving (Eq, Show)
 
--- | Emit an IR module to text.
-emitToText :: IRModule -> Text
-emitToText m = renderStrict (layoutPretty defaultLayoutOptions (prettyModule m))
+-- | Emit a program to human-readable text.
+emitToText :: Program -> Text
+emitToText p = renderStrict (layoutPretty defaultLayoutOptions (prettyProgram p))
 
-{- | Emit an IR module according to the given config.
-TODO: implement binary emission
--}
-emit :: EmitConfig -> IRModule -> Either Text Text
-emit cfg m = case cfg.format of
-    FormatText   -> Right (emitToText m)
-    FormatBinary -> Left "TODO: binary emission not yet implemented"
+-- | Emit a program according to the given config.
+data EmitResult
+    = EmitText   !Text
+    | EmitBinary !BL.ByteString
+
+emit :: EmitConfig -> Program -> Either Text EmitResult
+emit cfg p = case cfg.format of
+    FormatText   -> Right (EmitText (emitToText p))
+    FormatBinary -> Right (EmitBinary (encodeProgram p))

@@ -13,11 +13,10 @@ module QataliCompiler.Type.Subtype (
     isEffectSubtype,
 ) where
 
-import qualified Data.Map.Strict                    as Map
-
-import           QataliCompiler.Name                (Name)
-import           QataliCompiler.Type.Normalize      (TypeDefs (..), DataDef (..),
-                                                      normalizeEffect)
+import           QataliCompiler.Type.Normalize      (TypeDefs (..),
+                                                      normalizeEffect,
+                                                      typeCategory,
+                                                      getVariancesDef)
 import           QataliCompiler.Type.NormalizedType  (NormalizedEffect (..),
                                                       NormalizedEffectRef (..))
 import           QataliCompiler.Type.Type
@@ -70,25 +69,13 @@ isSubtype defs = go
             go r1 r2 &&
             isEffectSubtype defs (normalizeEffect defs e1) (normalizeEffect defs e2)
 
-        -- Object: for every field k in b, a[k] <: b[k]
-        (TObject fa, TObject fb) ->
-            all (\(k, bTy) -> case Map.lookup k fa of
-                Just aTy -> go aTy bTy
-                Nothing  -> False
-            ) (Map.toList fb)
-
-        -- Tuple: length a >= length b, element-wise covariant
-        (TTuple ts1, TTuple ts2) ->
-            length ts1 >= length ts2 &&
-            all (uncurry go) (zip ts1 ts2)
-
         -- Array: covariant
         (TArray e1, TArray e2) -> go e1 e2
 
         -- Data: same name → variance-based; different name → false
         (TData n1 args1, TData n2 args2)
             | n1 == n2, length args1 == length args2 ->
-                let vs = getVariances defs n1 (length args1)
+                let vs = getVariancesDef defs n1 (length args1)
                 in  and [isSubByVariance defs v a' b' | (v, a', b') <- zip3 vs args1 args2]
             | otherwise -> False
 
@@ -96,40 +83,13 @@ isSubtype defs = go
         _ -> False
 
 -- | Simplify an intersection of two types.
--- Detects disjoint types (→ never) and merges object fields.
+-- Detects disjoint types (→ never).
 simplifyIntersect :: Type -> Type -> Type
 simplifyIntersect a b
-    -- Object intersection: merge fields
-    | TObject fa <- a, TObject fb <- b =
-        TObject (Map.unionWith TIntersection fa fb)
     -- Disjoint categories → never
     | Just ca <- typeCategory a, Just cb <- typeCategory b, ca /= cb = TNever
     -- Cannot simplify
     | otherwise = TIntersection a b
-
--- | Classify a type into a category for disjointness detection.
--- Returns Nothing for compound types (union, intersection, unknown, never, var).
-data TypeCategory = CatNumber | CatString | CatBoolean | CatNull
-                  | CatObject | CatTuple | CatArray | CatFunction | CatData
-    deriving (Eq)
-
-typeCategory :: Type -> Maybe TypeCategory
-typeCategory = \case
-    TPrim PrimInteger  -> Just CatNumber
-    TPrim PrimNumber   -> Just CatNumber
-    TPrim PrimString   -> Just CatString
-    TPrim PrimBoolean  -> Just CatBoolean
-    TPrim PrimNull     -> Just CatNull
-    TLit (LitIntegerType _) -> Just CatNumber
-    TLit (LitNumberType _)  -> Just CatNumber
-    TLit (LitStringType _)  -> Just CatString
-    TLit (LitBooleanType _) -> Just CatBoolean
-    TObject _  -> Just CatObject
-    TTuple _   -> Just CatTuple
-    TArray _   -> Just CatArray
-    TFun {}    -> Just CatFunction
-    TData {}   -> Just CatData
-    _          -> Nothing
 
 -- | Check subtype relationship according to variance.
 isSubByVariance :: TypeDefs -> Variance -> Type -> Type -> Bool
@@ -138,12 +98,6 @@ isSubByVariance defs v a b = case v of
     Contravariant -> isSubtype defs b a
     Invariant     -> isSubtype defs a b && isSubtype defs b a
     Bivariant     -> True
-
--- | Get variance list for a data type's parameters.
-getVariances :: TypeDefs -> Name -> Int -> [Variance]
-getVariances defs name len = case Map.lookup name (tdData defs) of
-    Just dd | length (ddParams dd) == len -> map dtpVariance (ddParams dd)
-    _ -> replicate len Covariant
 
 
 -- ---------------------------------------------------------------------------

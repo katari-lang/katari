@@ -7,7 +7,10 @@ Syntax overview:
   * Comments: @\/\/@ (line), @\/* *\/@ (block, nestable)
   * Statement separator: semicolon or newline
   * Trailing commas allowed
-  * Object construction uses @=@, type annotation uses @:@
+  * Record construction uses @=@, type annotation uses @:@
+  * Block: @{ stmt; stmt; }@
+  * Record construction: @Name { field = expr }@
+  * Tuple construction: @Name(expr, expr)@ (via function application)
 -}
 module QataliCompiler.Parse.Parser (
     QParseError,
@@ -201,8 +204,7 @@ pTyAtom = do
 pTyPrimary :: Parser (TyExpr SrcSpan)
 pTyPrimary = choice
     [ pTyFun
-    , pTyObject
-    , pTyTupleOrParens
+    , pTyParens
     , pTyLit
     , pTyKeywordType
     , pTyNamed
@@ -277,30 +279,13 @@ pTyFunParam = do
     ty <- pTyExpr
     pure (name, ty)
 
--- | Object type: @{a: T, b: U}@
-pTyObject :: Parser (TyExpr SrcSpan)
-pTyObject = do
-    (sp0, _) <- withSpan (symbol "{")
-    fields <- commaSep pTyObjField
-    (sp1, _) <- withSpan (symbol "}")
-    pure (TyObject (sp0 <-> sp1) fields)
-
-pTyObjField :: Parser (Name, TyExpr SrcSpan)
-pTyObjField = do
-    name <- pIdent
-    _ <- symbol ":"
+-- | Parenthesized type: @(A)@.
+pTyParens :: Parser (TyExpr SrcSpan)
+pTyParens = do
+    _ <- symbol "("
     ty <- pTyExpr
-    pure (name, ty)
-
--- | Tuple type @(A, B)@ or parenthesized type @(A)@.
-pTyTupleOrParens :: Parser (TyExpr SrcSpan)
-pTyTupleOrParens = do
-    (sp0, _) <- withSpan (symbol "(")
-    elems <- commaSep pTyExpr
-    (sp1, _) <- withSpan (symbol ")")
-    case elems of
-        [one] -> pure one  -- parenthesized
-        _        -> pure (TyTuple (sp0 <-> sp1) elems)
+    _ <- symbol ")"
+    pure ty
 
 -- | Named type (any identifier — variable or constructor).
 -- Whether it's a type variable is determined at resolution time via the type env.
@@ -316,8 +301,6 @@ tySpan = \case
     TyCon sp _       -> sp
     TyApp sp _ _     -> sp
     TyFun sp _ _ _   -> sp
-    TyObject sp _    -> sp
-    TyTuple sp _     -> sp
     TyArray sp _     -> sp
     TyUnion sp _ _   -> sp
     TyIntersect sp _ _ -> sp
@@ -329,9 +312,8 @@ tySpan = \case
 
 pPat :: Parser (Pat SrcSpan)
 pPat = choice
-    [ pPatCon
-    , pPatObject
-    , pPatTuple
+    [ pPatRecord
+    , pPatCon
     , pPatArray
     , pPatLit
     , pPatWild
@@ -353,7 +335,7 @@ pPatWild = do
     (sp, _) <- withSpan (symbol "_")
     pure (PWild sp)
 
--- | Constructor pattern: @Con(p1, p2)@
+-- | Constructor (tuple-data) pattern: @Con(p1, p2)@
 pPatCon :: Parser (Pat SrcSpan)
 pPatCon = try $ do
     (sp0, name) <- withSpan pConName
@@ -362,47 +344,21 @@ pPatCon = try $ do
     (sp1, _) <- withSpan (symbol ")")
     pure (PCon (sp0 <-> sp1) (QualifiedName Nothing name) pats)
 
--- | Object pattern: @{a = p1, b = p2, ...rest}@
-pPatObject :: Parser (Pat SrcSpan)
-pPatObject = do
-    (sp0, _) <- withSpan (symbol "{")
-    (fields, rest) <- pObjPatFields
+-- | Record-data pattern: @Name { field1 = pat1, field2 = pat2 }@
+pPatRecord :: Parser (Pat SrcSpan)
+pPatRecord = try $ do
+    (sp0, name) <- withSpan pConName
+    _ <- symbol "{"
+    fields <- commaSep pRecordPatField
     (sp1, _) <- withSpan (symbol "}")
-    pure (PObject (sp0 <-> sp1) (ObjectPat fields rest))
+    pure (PRecord (sp0 <-> sp1) (QualifiedName Nothing name) fields)
 
-pObjPatFields :: Parser ([(Name, Pat SrcSpan)], Maybe (SrcSpan, Name))
-pObjPatFields = do
-    items <- commaSep pObjPatItem
-    let fields = [f | Left f <- items]
-    let rests  = [r | Right r <- items]
-    case rests of
-        []  -> pure (fields, Nothing)
-        [r] -> pure (fields, Just r)
-        _   -> fail "at most one ...rest in object pattern"
-
-pObjPatItem :: Parser (Either (Name, Pat SrcSpan) (SrcSpan, Name))
-pObjPatItem = (Right <$> try pObjPatSpread) <|> (Left <$> pObjPatField)
-
-pObjPatSpread :: Parser (SrcSpan, Name)
-pObjPatSpread = do
-    (sp, _) <- withSpan (symbol "...")
-    name <- pLowerIdent
-    pure (sp, name)
-
-pObjPatField :: Parser (Name, Pat SrcSpan)
-pObjPatField = do
+pRecordPatField :: Parser (Name, Pat SrcSpan)
+pRecordPatField = do
     name <- pIdent
     _ <- symbol "="
     pat <- pPat
     pure (name, pat)
-
--- | Tuple pattern: @(p1, ...rest, p2)@
-pPatTuple :: Parser (Pat SrcSpan)
-pPatTuple = try $ do
-    (sp0, _) <- withSpan (symbol "(")
-    spread <- pSpreadPat
-    (sp1, _) <- withSpan (symbol ")")
-    pure (PTuple (sp0 <-> sp1) spread)
 
 -- | Array pattern: @[p1, ...rest, p2]@
 pPatArray :: Parser (Pat SrcSpan)
@@ -487,7 +443,7 @@ pExprUnary = choice
     , pExprPostfix
     ]
 
--- | Postfix: field access, indexing, function call.
+-- | Postfix: indexing, function call.
 pExprPostfix :: Parser (Expr SrcSpan)
 pExprPostfix = do
     base <- pExprAtom
@@ -496,11 +452,7 @@ pExprPostfix = do
     postfixes e = (postfix e >>= postfixes) <|> pure e
 
     postfix e = choice
-        [ -- .field
-          do _ <- symbol "."
-             (sp, name) <- withSpan pIdent
-             pure (EField (exprSpan e <-> sp) e name)
-        , -- [index]
+        [ -- [index]
           do _ <- symbol "["
              idx <- pExpr
              (sp, _) <- withSpan (symbol "]")
@@ -521,11 +473,13 @@ pExprAtom = choice
     , pExprIf
     , pExprMatch
     , pExprHandle
+    , pExprContinue
     , pExprFn
     , pExprTemplateLit
     , pExprArray
-    , pExprObjectOrBlock
-    , pExprTupleOrParens
+    , pExprConstruct
+    , pExprBlock
+    , pExprParens
     , pExprVar
     ]
 
@@ -549,7 +503,11 @@ pExprIf = do
     sp1 <- curSpan
     pure (EIf (sp0 <-> sp1) cond thn els)
 
--- | @match expr { case (pat) => expr, ... }@
+-- | @match expr { case pat => expr, ... }@
+-- Match arms can have the pattern bare or in parentheses:
+--   @case Pat => expr@
+--   @case (Pat) => expr@
+--   @case Name { ... } => expr@
 pExprMatch :: Parser (Expr SrcSpan)
 pExprMatch = do
     (sp0, _) <- withSpan (keyword "match")
@@ -562,13 +520,24 @@ pExprMatch = do
 pMatchArm :: Parser (MatchArm SrcSpan)
 pMatchArm = do
     (sp, _) <- withSpan (keyword "case")
-    _ <- symbol "("
-    pat <- pPat
-    _ <- symbol ")"
+    pat <- pMatchPat
     _ <- symbol "=>"
     body <- pExpr
     pOptSep
     pure (MatchArm sp pat body)
+
+-- | Parse a pattern in a match arm.
+-- Supports both @case (pat) => ...@ (parenthesized) and @case pat => ...@ (bare).
+pMatchPat :: Parser (Pat SrcSpan)
+pMatchPat = pParenthesizedPat <|> pPat
+
+-- | Parenthesized pattern: @(pat)@ — just wrapping, no tuple semantics.
+pParenthesizedPat :: Parser (Pat SrcSpan)
+pParenthesizedPat = try $ do
+    _ <- symbol "("
+    pat <- pPat
+    _ <- symbol ")"
+    pure pat
 
 -- | @handle expr { case Eff(x) => ..., return x => ... }@
 pExprHandle :: Parser (Expr SrcSpan)
@@ -602,6 +571,15 @@ pHandleReturn = do
     pOptSep
     pure (HandleReturn sp name body)
 
+-- | @continue(expr)@ — resume computation in handle case body.
+pExprContinue :: Parser (Expr SrcSpan)
+pExprContinue = do
+    (sp0, _) <- withSpan (keyword "continue")
+    _ <- symbol "("
+    arg <- pExpr
+    (sp1, _) <- withSpan (symbol ")")
+    pure (EContinue (sp0 <-> sp1) arg)
+
 -- | Anonymous function: @fn \<T\>(x: A): B => expr | { block }@
 pExprFn :: Parser (Expr SrcSpan)
 pExprFn = do
@@ -623,7 +601,7 @@ pFnBody = do
     _ <- symbol "}"
     pure (FnBlock sp stmts)
 
--- | Parse a block: @{ stmt; stmt; ... }@ — always interpreted as a block, never an object.
+-- | Parse a block: @{ stmt; stmt; ... }@ — always interpreted as a block.
 pBlock :: Parser (Expr SrcSpan)
 pBlock = do
     (sp0, _) <- withSpan (symbol "{")
@@ -669,58 +647,40 @@ pExprArray = do
 pArrayElem :: Parser (ArrayElem SrcSpan)
 pArrayElem = (ASpread <$> (symbol "..." *> pExpr)) <|> (AElem <$> pExpr)
 
--- | Object literal @{ ...spread, a = 1, b = 2 }@ or block @{ stmt; stmt }@.
--- Disambiguation: if starts with @...@ or @ident =@ it's an object, otherwise block.
-pExprObjectOrBlock :: Parser (Expr SrcSpan)
-pExprObjectOrBlock = do
-    (sp0, _) <- withSpan (symbol "{")
-    -- Try to detect object vs block
-    choice
-        [ -- Empty braces → empty object
-          do (sp1, _) <- withSpan (symbol "}")
-             pure (EObject (sp0 <-> sp1) Nothing [])
-        , -- Spread → definitely object
-          do spread <- Just <$> (symbol "..." *> pExpr)
-             fields <- many (symbol "," *> pObjField)
-             _ <- optional (symbol ",")
-             (sp1, _) <- withSpan (symbol "}")
-             pure (EObject (sp0 <-> sp1) spread fields)
-        , -- name = → object field
-          try $ do
-             fields <- commaSep1 pObjField
-             (sp1, _) <- withSpan (symbol "}")
-             pure (EObject (sp0 <-> sp1) Nothing fields)
-        , -- Otherwise → block
-          do stmts <- pStmts
-             (sp1, _) <- withSpan (symbol "}")
-             pure (EBlock (sp0 <-> sp1) stmts)
-        ]
+-- | Record construction: @Name { field1 = expr1, field2 = expr2 }@
+-- Starts with an uppercase identifier followed by @{@.
+pExprConstruct :: Parser (Expr SrcSpan)
+pExprConstruct = try $ do
+    (sp0, name) <- withSpan pConName
+    _ <- symbol "{"
+    fields <- commaSep pConstructField
+    (sp1, _) <- withSpan (symbol "}")
+    pure (EConstruct (sp0 <-> sp1) (QualifiedName Nothing name) fields)
 
-pObjField :: Parser (Name, Expr SrcSpan)
-pObjField = do
+pConstructField :: Parser (Name, Expr SrcSpan)
+pConstructField = do
     name <- pIdent
     _ <- symbol "="
     val <- pExpr
     pure (name, val)
 
--- | Tuple @(a, b)@ or parenthesized expression @(expr)@.
--- Also handles spread: @(a, ...t, b)@
-pExprTupleOrParens :: Parser (Expr SrcSpan)
-pExprTupleOrParens = do
-    (sp0, _) <- withSpan (symbol "(")
-    -- Check empty tuple
-    mClose <- optional (symbol ")")
-    case mClose of
-        Just _ -> pure (ETuple sp0 [])
-        Nothing -> do
-            elems <- commaSep1 pTupleElem
-            (sp1, _) <- withSpan (symbol ")")
-            case elems of
-                [TElem e] -> pure e  -- parenthesized expression
-                _         -> pure (ETuple (sp0 <-> sp1) elems)
+-- | Block expression: @{ stmt; stmt; ... }@
+-- Braces always start a block (never an object).
+pExprBlock :: Parser (Expr SrcSpan)
+pExprBlock = do
+    (sp0, _) <- withSpan (symbol "{")
+    stmts <- pStmts
+    (sp1, _) <- withSpan (symbol "}")
+    pure (EBlock (sp0 <-> sp1) stmts)
 
-pTupleElem :: Parser (TupleElem SrcSpan)
-pTupleElem = (TSpread <$> (symbol "..." *> pExpr)) <|> (TElem <$> pExpr)
+-- | Parenthesized expression: @(expr)@.
+-- No tuple literal syntax — parentheses are purely for grouping.
+pExprParens :: Parser (Expr SrcSpan)
+pExprParens = do
+    _ <- symbol "("
+    e <- pExpr
+    _ <- symbol ")"
+    pure e
 
 -- =========================================================================
 -- Statements
@@ -793,9 +753,9 @@ pDeclLet = do
 pLetTarget :: Parser (LetTarget SrcSpan)
 pLetTarget = (LetPat <$> try pPatDestructure) <|> (LetName <$> pIdent)
 
--- | Destructuring patterns that are unambiguous (object/tuple/array).
+-- | Destructuring patterns that are unambiguous (record/array).
 pPatDestructure :: Parser (Pat SrcSpan)
-pPatDestructure = pPatObject <|> pPatTuple <|> pPatArray
+pPatDestructure = pPatRecord <|> pPatArray
 
 -- | @fn name\<T\>(x: A, y: B): C => expr | { block }@
 pDeclFn :: Parser (Decl SrcSpan)
@@ -821,16 +781,35 @@ pDeclType = do
     ty <- pTyExpr
     pure (DeclType sp name tyParams ty)
 
--- | @data Name\<out T sub U\>(field1: T1, field2: T2)@
+-- | @data Name\<out T\> { field: T, ... }@  (record syntax)
+-- or @data Name\<out T\>(field: T, ...)@       (tuple syntax)
 pDeclData :: Parser (Decl SrcSpan)
 pDeclData = do
     (sp, _) <- withSpan (keyword "data")
     name <- pConName
     dtParams <- fromMaybe [] <$> optional pDataTypeParams
+    (kind, fields) <- pDataBody
+    pure (DeclData sp name dtParams kind fields)
+
+-- | Parse the body of a data declaration, returning the kind and fields.
+pDataBody :: Parser (DataDeclKind, [(Name, TyExpr SrcSpan)])
+pDataBody = pDataBodyRecord <|> pDataBodyTuple
+
+-- | Record body: @{ field1: T1, field2: T2 }@
+pDataBodyRecord :: Parser (DataDeclKind, [(Name, TyExpr SrcSpan)])
+pDataBodyRecord = do
+    _ <- symbol "{"
+    fields <- commaSep pFieldDecl
+    _ <- symbol "}"
+    pure (DeclRecord, fields)
+
+-- | Tuple body: @(field1: T1, field2: T2)@
+pDataBodyTuple :: Parser (DataDeclKind, [(Name, TyExpr SrcSpan)])
+pDataBodyTuple = do
     _ <- symbol "("
     fields <- commaSep pFieldDecl
     _ <- symbol ")"
-    pure (DeclData sp name dtParams fields)
+    pure (DeclTuple, fields)
 
 -- | @effect Name\<out T\>(field: T) => RetTy@
 pDeclEffect :: Parser (Decl SrcSpan)
@@ -922,12 +901,11 @@ exprSpan = \case
     EIf sp _ _ _        -> sp
     EBlock sp _         -> sp
     EHandle sp _ _ _    -> sp
-    EObject sp _ _      -> sp
-    ETuple sp _         -> sp
+    EConstruct sp _ _   -> sp
     EArray sp _         -> sp
-    EField sp _ _       -> sp
     EIndex sp _ _       -> sp
     EReturn sp _        -> sp
     ETemplateLit sp _   -> sp
     EBinOp sp _ _ _     -> sp
     EUnaryOp sp _ _     -> sp
+    EContinue sp _      -> sp

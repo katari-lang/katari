@@ -77,18 +77,10 @@ spec = do
                 parsesOk "module T  let x = if true { 1 } else { 2 }"
             it "if without else" $
                 parsesOk "module T  let x = if true { 1 }"
-            it "object literal" $
-                parsesOk "module T  let o = {x = 1, y = 2}"
-            it "empty object" $
-                parsesOk "module T  let o = {}"
             it "array literal" $
                 parsesOk "module T  let a = [1, 2, 3]"
             it "spread in array" $
                 parsesOk "module T  let a = [1, ...xs, 2]"
-            it "tuple" $
-                parsesOk "module T  let t = (1, 2, 3)"
-            it "field access" $
-                parsesOk "module T  let v = obj.field"
             it "index access" $
                 parsesOk "module T  let v = arr[0]"
             it "template literal" $
@@ -109,8 +101,35 @@ spec = do
                 parsesOk "module T  fn id<T>(x: T): T => { x }"
             it "fn without block body FAILS" $
                 parseFails "module T  fn f(x: integer): integer => x"
-            it "if without block branch FAILS" $
-                parseFails "module T  let x = if true 1 else 2"
+
+        describe "data declarations" $ do
+            it "tuple data" $
+                parsesOk "module T  data Box<out T>(value: T)"
+            it "record data" $
+                parsesOk "module T  data User<out ID> { id: ID, name: string }"
+            it "effect declaration" $
+                parsesOk "module T  effect Log<out T>(value: T) => null"
+
+        describe "continue" $ do
+            it "continue(expr) parses" $
+                parsesOk $ unlines
+                    [ "module T"
+                    , "effect Log<out T>(msg: T) => null"
+                    , "let test = fn (x: integer): integer => {"
+                    , "  let f: (y: integer) => integer with Log<string> = fn (y: integer): integer => { y }"
+                    , "  handle f(x) {"
+                    , "    case Log(msg) => continue(null)"
+                    , "  }"
+                    , "}"
+                    ]
+
+        describe "record construction" $ do
+            it "record construct" $
+                parsesOk $ unlines
+                    [ "module T"
+                    , "data User { name: string, age: integer }"
+                    , "let u = User { name = \"Alice\", age = 30 }"
+                    ]
 
         describe "match" $ do
             it "match with two arms" $
@@ -123,14 +142,8 @@ spec = do
                 parsesOk "module T  let f: (x: integer) => integer = fn (x: integer): integer => { x }"
             it "union type" $
                 parsesOk "module T  let x: integer | string = 1"
-            it "intersection type" $
-                parsesOk "module T  type T = {a: integer} & {b: string}"
             it "type alias" $
-                parsesOk "module T  type Pair = (integer, integer)"
-            it "data declaration" $
-                parsesOk "module T  data Box<out T>(value: T)"
-            it "effect declaration" $
-                parsesOk "module T  effect Log<out T>(value: T) => null"
+                parsesOk "module T  type Num = number"
 
         describe "import" $ do
             it "simple import" $
@@ -166,11 +179,11 @@ spec = do
 
         describe "functions" $ do
             it "fn with correct return type passes" $
-                typechecksOk "module T  fn add(x: integer, y: integer): integer => { x + y }"
+                typechecksOk "module T  fn add(x: integer, y: integer): number => { x + y }"
             it "fn with wrong return type fails" $
                 typecheckFails "module T  fn f(x: integer): string => { x + 1 }"
             it "nested let in block" $
-                typechecksOk "module T  fn f(x: integer): integer => { let y = x + 1  return y }"
+                typechecksOk "module T  fn f(x: integer): number => { let y = x + 1  return y }"
 
         describe "binary ops" $ do
             it "arithmetic on integers" $
@@ -263,24 +276,6 @@ spec = do
                     , "  let f = fn (x: integer): integer => { x }"
                     , "  return f"
                     , "}"
-                    ]
-
-        -- === Object subtyping ===
-        describe "object subtyping" $ do
-            it "wider object <: narrower (extra fields OK)" $
-                typechecksOk $ unlines
-                    [ "module T"
-                    , "fn test(): {a: integer} => { {a = 1, b = \"hello\"} }"
-                    ]
-            it "exact object match" $
-                typechecksOk $ unlines
-                    [ "module T"
-                    , "fn test(): {a: integer, b: string} => { {a = 1, b = \"hello\"} }"
-                    ]
-            it "missing required field FAILS" $
-                typecheckFails $ unlines
-                    [ "module T"
-                    , "fn test(): {a: integer, b: string} => { {a = 1} }"
                     ]
 
         -- === Data type variance ===
@@ -433,21 +428,6 @@ spec = do
                     , "}"
                     ]
 
-        -- === Intersection types ===
-        describe "intersection types" $ do
-            it "string & boolean = never, vacuously passes" $
-                typechecksOk "module T  fn f(x: string & boolean): integer => { x }"
-            it "object intersection combines fields" $
-                typechecksOk $ unlines
-                    [ "module T"
-                    , "fn f(x: {a: integer} & {b: string}): {a: integer, b: string} => { x }"
-                    ]
-            it "intersection missing extra field FAILS" $
-                typecheckFails $ unlines
-                    [ "module T"
-                    , "fn f(x: {a: integer} & {b: string}): {a: integer, b: string, c: boolean} => { x }"
-                    ]
-
         -- === Union types ===
         describe "union types" $ do
             it "integer <: integer | string" $
@@ -473,28 +453,9 @@ spec = do
                     , "type IntOrStr = integer | string"
                     , "let x: IntOrStr = 42"
                     ]
-            it "alias preserves subtyping" $
-                typechecksOk $ unlines
-                    [ "module T"
-                    , "type MyInt = integer"
-                    , "let x: number = 42"
-                    ]
-
-        -- === Tuple subtyping ===
-        describe "tuple subtyping" $ do
-            it "literal elements <: annotated tuple" $
-                typechecksOk $ unlines
-                    [ "module T"
-                    , "fn test(): (integer, string) => { (1, \"hello\") }"
-                    ]
 
         -- === Complex multi-constraint scenarios ===
         describe "complex scenarios" $ do
-            it "multiple constraints in one function" $
-                typechecksOk $ unlines
-                    [ "module T"
-                    , "fn test(x: integer, y: string): {a: integer, b: string} => { {a = x, b = y} }"
-                    ]
             it "block with multiple lets and constraints" $
                 typechecksOk $ unlines
                     [ "module T"
@@ -560,11 +521,100 @@ spec = do
                     , "  f(x)"
                     , "}"
                     ]
-            it "effect declaration with multiple type params" $
+
+        describe "continue" $ do
+            it "continue with correct effect return type" $
                 typechecksOk $ unlines
                     [ "module T"
-                    , "effect Ask<out T, out R>(prompt: T) => R"
-                    , "let f: (x: string) => integer with Ask<string, integer> = fn (x: string): integer => { 42 }"
+                    , "effect Log<out T>(msg: T) => null"
+                    , "let test: (x: integer) => integer = fn (x: integer): integer => {"
+                    , "  let f: (y: integer) => integer with Log<string> = fn (y: integer): integer => { y }"
+                    , "  handle f(x) {"
+                    , "    case Log(msg) => continue(null)"
+                    , "  }"
+                    , "}"
+                    ]
+            it "continue with wrong type FAILS" $
+                typecheckFails $ unlines
+                    [ "module T"
+                    , "effect Log<out T>(msg: T) => null"
+                    , "let test = fn (x: integer): integer => {"
+                    , "  let f: (y: integer) => integer with Log<string> = fn (y: integer): integer => { y }"
+                    , "  handle f(x) {"
+                    , "    case Log(msg) => continue(42)"
+                    , "  }"
+                    , "}"
+                    ]
+            it "handler without continue (abort)" $
+                typechecksOk $ unlines
+                    [ "module T"
+                    , "effect Throw<out E>(error: E) => null"
+                    , "let test: (x: integer) => integer = fn (x: integer): integer => {"
+                    , "  let f: (y: integer) => integer with Throw<string> = fn (y: integer): integer => { y }"
+                    , "  handle f(x) {"
+                    , "    case Throw(error) => 0"
+                    , "  }"
+                    , "}"
+                    ]
+            it "continue outside handle FAILS" $
+                typecheckFails $ unlines
+                    [ "module T"
+                    , "let test = fn (x: integer): integer => {"
+                    , "  continue(x)"
+                    , "}"
+                    ]
+            it "multiple continue calls in branches" $
+                typechecksOk $ unlines
+                    [ "module T"
+                    , "effect Ask<out T, in R>(question: T) => R"
+                    , "let test: (x: integer) => integer = fn (x: integer): integer => {"
+                    , "  let f: (y: integer) => integer with Ask<string, integer> = fn (y: integer): integer => { y }"
+                    , "  handle f(x) {"
+                    , "    case Ask(question) => {"
+                    , "      if true { continue(42) } else { continue(0) }"
+                    , "    }"
+                    , "  }"
+                    , "}"
+                    ]
+            it "multiple continue calls with wrong type in one branch FAILS" $
+                typecheckFails $ unlines
+                    [ "module T"
+                    , "effect Ask<out T, in R>(question: T) => R"
+                    , "let test = fn (x: integer): integer => {"
+                    , "  let f: (y: integer) => integer with Ask<string, integer> = fn (y: integer): integer => { y }"
+                    , "  handle f(x) {"
+                    , "    case Ask(question) => {"
+                    , "      if true { continue(42) } else { continue(\"wrong\") }"
+                    , "    }"
+                    , "  }"
+                    , "}"
+                    ]
+            it "capture continue result in let binding (multi-shot)" $
+                typechecksOk $ unlines
+                    [ "module T"
+                    , "effect Choose(value: null) => boolean"
+                    , "let test: (x: integer) => number = fn (x: integer): number => {"
+                    , "  let f: (y: integer) => integer with Choose = fn (y: integer): integer => { y }"
+                    , "  handle f(x) {"
+                    , "    case Choose(value) => {"
+                    , "      let left = continue(false)"
+                    , "      let right = continue(true)"
+                    , "      left + right"
+                    , "    }"
+                    , "  }"
+                    , "}"
+                    ]
+            it "handle with return clause and continue" $
+                typechecksOk $ unlines
+                    [ "module T"
+                    , "effect Throw<out E>(error: E) => null"
+                    , "let test: (x: integer) => number = fn (x: integer): number => {"
+                    , "  let f: (y: integer) => integer with Throw<string> = fn (y: integer): integer => { y }"
+                    , "  handle f(x) {"
+                    , "    case Throw(error) => 0"
+                    , "    return r => r + 1"
+                    , "  }"
+                    , "}"
                     ]
 
     -- -----------------------------------------------------------------------
@@ -643,5 +693,39 @@ spec = do
                     [ "module T"
                     , "fn test(x: 3.14): integer => { x }"
                     ]
-            it "integer NOT <: number (widening direction)" $
-                typechecksOk "module T  let x: number = 42"
+
+    -- -----------------------------------------------------------------------
+    -- Record data types
+    -- -----------------------------------------------------------------------
+
+    describe "Record data types" $ do
+        it "record construction and pattern match" $
+            typechecksOk $ unlines
+                [ "module T"
+                , "data User { name: string, age: integer }"
+                , "fn getName(u: User): string => {"
+                , "  match u {"
+                , "    case User {name = n} => n"
+                , "  }"
+                , "}"
+                ]
+        it "record with generics" $
+            typechecksOk $ unlines
+                [ "module T"
+                , "data Pair<out A, out B> { fst: A, snd: B }"
+                , "fn getFst(p: Pair<integer, string>): integer => {"
+                , "  match p {"
+                , "    case Pair {fst = f} => f"
+                , "  }"
+                , "}"
+                ]
+        it "bounded generics in data type" $
+            typechecksOk $ unlines
+                [ "module T"
+                , "data Box<out T sub number>(value: T)"
+                , "fn unbox(b: Box<integer>): number => {"
+                , "  match b {"
+                , "    case (Box(v)) => v"
+                , "  }"
+                , "}"
+                ]

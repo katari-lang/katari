@@ -33,6 +33,11 @@ module QataliCompiler.Type.Type (
     typeVarNames,
     substituteTVars,
 
+    -- * Unknown variable utilities
+    containsUnknownVar,
+    unknownVarNames,
+    substituteUnknownVars,
+
     -- * Display
     showType,
     showPrim,
@@ -131,8 +136,6 @@ data Type
     | TNever                            -- ^ @never@   — bottom type
     | TPrim         !PrimType           -- ^ Primitive: integer, number, string, boolean, null
     | TLit          !LitType            -- ^ Literal type: @1@, @"hello"@, @true@
-    | TObject       !(Map Name Type)    -- ^ Object type: @{a: string, b: integer}@
-    | TTuple        ![Type]             -- ^ Tuple type: @(string, integer)@
     | TArray        !Type               -- ^ Array type: @Array\<T\>@
     | TFun          ![FunParam] !Type !Effect
                                         -- ^ Function: @(params) => RetTy with Effect@
@@ -140,6 +143,7 @@ data Type
     | TUnion        !Type !Type         -- ^ Union: @A | B@
     | TIntersection !Type !Type         -- ^ Intersection: @A & B@
     | TVar          !Name               -- ^ Type variable (from generics)
+    | TUnknownVar   !Name               -- ^ Unknown variable (solver-introduced)
     deriving (Eq, Ord, Show)
 
 -- | A named function parameter with its type.
@@ -164,8 +168,6 @@ typeVarNames = \case
     TNever            -> Set.empty
     TPrim _           -> Set.empty
     TLit _            -> Set.empty
-    TObject fields    -> foldMap typeVarNames fields
-    TTuple ts         -> foldMap typeVarNames ts
     TArray t          -> typeVarNames t
     TFun params ret eff ->
         foldMap (typeVarNames . fpType) params
@@ -174,6 +176,7 @@ typeVarNames = \case
     TData _ args      -> foldMap typeVarNames args
     TUnion a b        -> typeVarNames a <> typeVarNames b
     TIntersection a b -> typeVarNames a <> typeVarNames b
+    TUnknownVar _     -> Set.empty
 
 -- | Collect type variable names from an effect.
 effectTVarNames :: Effect -> Set Name
@@ -194,8 +197,6 @@ substituteTVars subst = go
         TNever -> TNever
         TPrim p -> TPrim p
         TLit l -> TLit l
-        TObject fields -> TObject (Map.map go fields)
-        TTuple ts -> TTuple (map go ts)
         TArray t -> TArray (go t)
         TFun params ret eff ->
             TFun (map (\fp -> fp { fpType = go (fpType fp) }) params)
@@ -203,6 +204,7 @@ substituteTVars subst = go
         TData name args -> TData name (map go args)
         TUnion a b -> TUnion (go a) (go b)
         TIntersection a b -> TIntersection (go a) (go b)
+        TUnknownVar n -> TUnknownVar n
 
     goEff = \case
         EffPure -> EffPure
@@ -222,8 +224,7 @@ showType = \case
     TPrim p        -> showPrim p
     TLit l         -> showLit l
     TVar n         -> unName n
-    TObject _      -> "{...}"
-    TTuple ts      -> "(" <> T.intercalate ", " (map showType ts) <> ")"
+    TUnknownVar n  -> "?" <> unName n
     TArray t       -> "Array<" <> showType t <> ">"
     TFun _ ret _   -> "(...) => " <> showType ret
     TData n args   -> unName n <> if null args then "" else "<" <> T.intercalate ", " (map showType args) <> ">"
@@ -244,3 +245,63 @@ showLit = \case
     LitNumberType d  -> T.pack (show d)
     LitStringType s  -> "\"" <> s <> "\""
     LitBooleanType b -> if b then "true" else "false"
+
+-- ---------------------------------------------------------------------------
+-- Unknown variable utilities
+
+-- | Does the type contain any TUnknownVar?
+containsUnknownVar :: Type -> Bool
+containsUnknownVar = not . Set.null . unknownVarNames
+
+-- | Collect all unknown variable names occurring in a type.
+unknownVarNames :: Type -> Set Name
+unknownVarNames = \case
+    TUnknownVar n     -> Set.singleton n
+    TVar _            -> Set.empty
+    TUnknown          -> Set.empty
+    TNever            -> Set.empty
+    TPrim _           -> Set.empty
+    TLit _            -> Set.empty
+    TArray t          -> unknownVarNames t
+    TFun params ret eff ->
+        foldMap (unknownVarNames . fpType) params
+        <> unknownVarNames ret
+        <> effectUnknownVarNames eff
+    TData _ args      -> foldMap unknownVarNames args
+    TUnion a b        -> unknownVarNames a <> unknownVarNames b
+    TIntersection a b -> unknownVarNames a <> unknownVarNames b
+
+-- | Collect unknown variable names from an effect.
+effectUnknownVarNames :: Effect -> Set Name
+effectUnknownVarNames = \case
+    EffPure          -> Set.empty
+    EffSingle _ args -> foldMap unknownVarNames args
+    EffUnion effs    -> foldMap effectUnknownVarNames effs
+    EffImpure        -> Set.empty
+    EffVar _         -> Set.empty
+
+-- | Substitute unknown variables using a mapping.
+substituteUnknownVars :: Map Name Type -> Type -> Type
+substituteUnknownVars subst = go
+  where
+    go = \case
+        TUnknownVar n -> Map.findWithDefault (TUnknownVar n) n subst
+        TVar n -> TVar n
+        TUnknown -> TUnknown
+        TNever -> TNever
+        TPrim p -> TPrim p
+        TLit l -> TLit l
+        TArray t -> TArray (go t)
+        TFun params ret eff ->
+            TFun (map (\fp -> fp { fpType = go (fpType fp) }) params)
+                 (go ret) (goEff eff)
+        TData name args -> TData name (map go args)
+        TUnion a b -> TUnion (go a) (go b)
+        TIntersection a b -> TIntersection (go a) (go b)
+
+    goEff = \case
+        EffPure -> EffPure
+        EffImpure -> EffImpure
+        EffSingle name args -> EffSingle name (map go args)
+        EffUnion effs -> EffUnion (map goEff effs)
+        EffVar n -> EffVar n

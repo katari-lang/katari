@@ -13,6 +13,7 @@ module QataliCompiler.Syntax.AST (
     -- * Top-level
     Module (..),
     Decl (..),
+    DataDeclKind (..),
 
     -- * Source-level type parameters
     SrcTypeParam (..),
@@ -35,13 +36,11 @@ module QataliCompiler.Syntax.AST (
     BinOp (..),
     UnaryOp (..),
 
-    -- * Tuple / Array elements (with spread)
-    TupleElem (..),
+    -- * Array elements (with spread)
     ArrayElem (..),
 
     -- * Patterns
     Pat (..),
-    ObjectPat (..),
     SpreadPat (..),
 
     -- * Type expressions (source syntax)
@@ -94,6 +93,10 @@ data SrcVariance = SrcOut | SrcIn | SrcInOut | SrcNone
 -- ---------------------------------------------------------------------------
 -- Top-level
 
+-- | Whether a data declaration uses record or tuple syntax.
+data DataDeclKind = DeclRecord | DeclTuple
+    deriving (Eq, Ord, Show)
+
 -- | A source module.
 data Module ann = Module
     { modAnn   :: !ann
@@ -110,8 +113,8 @@ data Decl ann
       -- ^ @fn name\<T\>(x: A, y: B): C => expr | block@
     | DeclType !ann !Name ![SrcTypeParam ann] !(TyExpr ann)
       -- ^ @type Name\<T\> = ...@
-    | DeclData !ann !Name ![SrcDataTypeParam ann] ![(Name, TyExpr ann)]
-      -- ^ @data Name\<out T sub U\>(field1: T1, field2: T2)@
+    | DeclData !ann !Name ![SrcDataTypeParam ann] !DataDeclKind ![(Name, TyExpr ann)]
+      -- ^ @data Name\<out T\> { field: T }@ or @data Name\<out T\>(field: T)@
     | DeclEffect !ann !Name ![SrcDataTypeParam ann] ![(Name, TyExpr ann)] !(TyExpr ann)
       -- ^ @effect Name\<out T\>(field: T) => RetTy@
     | DeclImport !ann !ModuleName !(Maybe Name) !(Maybe [Name])
@@ -151,7 +154,7 @@ data Expr ann
     | ELit         !ann !Literal
       -- ^ Literal value
     | EApp         !ann !(Expr ann) ![TyExpr ann] ![Expr ann]
-      -- ^ Function application @f\<T\>(arg1, arg2)@
+      -- ^ Function / tuple-constructor application @f\<T\>(arg1, arg2)@
     | EFn          !ann ![SrcTypeParam ann] ![Param ann] !(Maybe (TyExpr ann)) !(FnBody ann)
       -- ^ Anonymous function @fn \<T\>(x: A): B => expr | block@
     | EMatch       !ann !(Expr ann) ![MatchArm ann]
@@ -162,14 +165,10 @@ data Expr ann
       -- ^ Block expression @{ stmt; stmt; expr }@
     | EHandle      !ann !(Expr ann) ![HandleCase ann] !(Maybe (HandleReturn ann))
       -- ^ Effect handler @handle expr { case Eff(x) => ..., return x => ... }@
-    | EObject      !ann !(Maybe (Expr ann)) ![(Name, Expr ann)]
-      -- ^ Object literal @{ ...spread, a = 1, b = 2 }@
-    | ETuple       !ann ![TupleElem ann]
-      -- ^ Tuple literal @(a, ...t, b)@
+    | EConstruct   !ann !QualifiedName ![(Name, Expr ann)]
+      -- ^ Record construction @User { id = 1, name = "Alice" }@
     | EArray       !ann ![ArrayElem ann]
       -- ^ Array literal @[a, ...arr, b]@
-    | EField       !ann !(Expr ann) !Name
-      -- ^ Field access @expr.field@
     | EIndex       !ann !(Expr ann) !(Expr ann)
       -- ^ Indexing @expr[expr]@
     | EReturn      !ann !(Maybe (Expr ann))
@@ -180,6 +179,8 @@ data Expr ann
       -- ^ Binary operation
     | EUnaryOp     !ann !UnaryOp !(Expr ann)
       -- ^ Unary operation
+    | EContinue    !ann !(Expr ann)
+      -- ^ Effect continuation @continue(expr)@
     deriving (Eq, Show, Functor, Foldable, Traversable)
 
 -- | A template literal segment.
@@ -236,13 +237,7 @@ data UnaryOp = OpNeg | OpNot
     deriving (Eq, Ord, Show)
 
 -- ---------------------------------------------------------------------------
--- Tuple / Array elements (with spread support)
-
--- | A tuple element: plain or spread.
-data TupleElem ann
-    = TElem   !(Expr ann)
-    | TSpread !(Expr ann)
-    deriving (Eq, Show, Functor, Foldable, Traversable)
+-- Array elements (with spread support)
 
 -- | An array element: plain or spread.
 data ArrayElem ann
@@ -262,23 +257,14 @@ data Pat ann
     | PWild   !ann
       -- ^ Wildcard @_@
     | PCon    !ann !QualifiedName ![Pat ann]
-      -- ^ Constructor pattern @Con(p1, p2)@
-    | PObject !ann !(ObjectPat ann)
-      -- ^ Object pattern @{a = p1, b = p2, ...rest}@
-    | PTuple  !ann !(SpreadPat ann)
-      -- ^ Tuple pattern @(p1, ...rest, p2)@
+      -- ^ Tuple-data constructor pattern @Point(x, y)@
+    | PRecord !ann !QualifiedName ![(Name, Pat ann)]
+      -- ^ Record-data pattern @User { id = i, name = n }@
     | PArray  !ann !(SpreadPat ann)
       -- ^ Array pattern @[p1, ...rest, p2]@
     deriving (Eq, Show, Functor, Foldable, Traversable)
 
--- | Object pattern: named fields + optional rest spread (at end only).
-data ObjectPat ann = ObjectPat
-    { opFields :: ![(Name, Pat ann)]
-    , opRest   :: !(Maybe (ann, Name))
-    }
-    deriving (Eq, Show, Functor, Foldable, Traversable)
-
--- | Spread pattern for tuples/arrays: at most one spread at any position.
+-- | Spread pattern for arrays: at most one spread at any position.
 data SpreadPat ann = SpreadPat
     { spBefore :: ![Pat ann]
     , spSpread :: !(Maybe (ann, Pat ann))
@@ -299,10 +285,6 @@ data TyExpr ann
       -- ^ Type application @F\<A, B\>@
     | TyFun       !ann ![(Name, TyExpr ann)] !(TyExpr ann) !(Maybe (TyExpr ann))
       -- ^ Function type @(x: A, y: B) => C with Effect@
-    | TyObject    !ann ![(Name, TyExpr ann)]
-      -- ^ Object type @{a: T, b: U}@
-    | TyTuple     !ann ![TyExpr ann]
-      -- ^ Tuple type @(A, B, C)@
     | TyArray     !ann !(TyExpr ann)
       -- ^ Array type @Array\<T\>@
     | TyUnion     !ann !(TyExpr ann) !(TyExpr ann)
