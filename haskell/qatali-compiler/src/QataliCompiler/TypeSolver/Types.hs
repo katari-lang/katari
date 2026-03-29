@@ -23,7 +23,7 @@ import           Data.Set                           (Set)
 import qualified Data.Set                           as Set
 
 import           QataliCompiler.Name                (Name)
-import           QataliCompiler.Type.Normalize      (TypeDefs)
+import           QataliCompiler.Type.Defs           (TypeDefs)
 import           QataliCompiler.Type.Type           (Bound, Type)
 import           QataliCompiler.TypeSolver.Constraint (Assumption)
 

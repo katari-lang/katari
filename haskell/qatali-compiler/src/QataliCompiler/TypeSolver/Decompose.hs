@@ -25,8 +25,9 @@ import qualified Data.Text                             as T
 
 import           QataliCompiler.Name                   (Name (..))
 import           QataliCompiler.SrcLoc                 (SrcSpan (..))
-import           QataliCompiler.Type.Normalize         (normalizeEffect,
-                                                         getVariancesDef)
+import           QataliCompiler.Type.Defs              (getVariancesDef)
+import           QataliCompiler.Type.Normalize         (normalizeEffect)
+import           QataliCompiler.Type.Simplify          (typeCategory)
 import           QataliCompiler.Type.Subtype           (isSubtype,
                                                          isEffectSubtype)
 import           QataliCompiler.Type.Type
@@ -194,42 +195,8 @@ decompose env sp left right = case (left, right) of
     -- -----------------------------------------------------------------
     -- 10. Cross-category mismatches (concrete vs concrete)
     -- -----------------------------------------------------------------
-    (TData n _, TPrim p) ->
-        Contradiction sp $ "data type " <> unName n <> " is not a subtype of " <> showPrim p
-    (TPrim p, TData n _) ->
-        Contradiction sp $ showPrim p <> " is not a subtype of data type " <> unName n
-    (TData n _, TLit l) ->
-        Contradiction sp $ "data type " <> unName n <> " is not a subtype of " <> showLit l
-    (TLit l, TData n _) ->
-        Contradiction sp $ showLit l <> " is not a subtype of data type " <> unName n
-    (TFun {}, TPrim p) ->
-        Contradiction sp $ "function is not a subtype of " <> showPrim p
-    (TPrim p, TFun {}) ->
-        Contradiction sp $ showPrim p <> " is not a subtype of function"
-    (TFun {}, TLit l) ->
-        Contradiction sp $ "function is not a subtype of " <> showLit l
-    (TLit l, TFun {}) ->
-        Contradiction sp $ showLit l <> " is not a subtype of function"
-    (TArray _, TPrim p) ->
-        Contradiction sp $ "array is not a subtype of " <> showPrim p
-    (TPrim p, TArray _) ->
-        Contradiction sp $ showPrim p <> " is not a subtype of array"
-    (TArray _, TLit l) ->
-        Contradiction sp $ "array is not a subtype of " <> showLit l
-    (TLit l, TArray _) ->
-        Contradiction sp $ showLit l <> " is not a subtype of array"
-    (TFun {}, TData n _) ->
-        Contradiction sp $ "function is not a subtype of " <> unName n
-    (TData n _, TFun {}) ->
-        Contradiction sp $ unName n <> " is not a subtype of function"
-    (TFun {}, TArray _) ->
-        Contradiction sp "function is not a subtype of array"
-    (TArray _, TFun {}) ->
-        Contradiction sp "array is not a subtype of function"
-    (TArray _, TData n _) ->
-        Contradiction sp $ "array is not a subtype of " <> unName n
-    (TData n _, TArray _) ->
-        Contradiction sp $ unName n <> " is not a subtype of array"
+    _ | Just ca <- typeCategory left, Just cb <- typeCategory right, ca /= cb ->
+        Contradiction sp $ showType left <> " is not a subtype of " <> showType right
 
     -- -----------------------------------------------------------------
     -- 11. Contains type variables → Kept for branching
@@ -275,9 +242,3 @@ decomposeByVariance env sp dName args1 args2 =
         cs = concat $ zipWith3 (mkVarianceConstraints sp) variances args1 args2
     in  Decomposed cs
 
-mkVarianceConstraints :: SrcSpan -> Variance -> Type -> Type -> [Constraint]
-mkVarianceConstraints sp v a b = case v of
-    Covariant     -> [IsSubtypeOf sp a b]
-    Contravariant -> [IsSubtypeOf sp b a]
-    Invariant     -> [IsSubtypeOf sp a b, IsSubtypeOf sp b a]
-    Bivariant     -> []

@@ -30,7 +30,7 @@ import           QataliCompiler.Diagnostic
 import           QataliCompiler.Name
 import           QataliCompiler.Parse.Parser    (parseModule)
 import           QataliCompiler.SrcLoc
-import           QataliCompiler.Type.Normalize  (TypeDefs (..))
+import           QataliCompiler.Type.Defs       (TypeDefs (..))
 import           QataliCompiler.Typecheck.Check  (checkModule, runCheckWithDefs)
 
 -- | Errors that can occur during compilation.

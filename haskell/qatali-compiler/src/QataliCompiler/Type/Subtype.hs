@@ -1,4 +1,4 @@
-{- | Subtype judgment on Type values directly (no NormalizedType).
+{- | Subtype judgment on Type values directly.
 
 Subtyping operates on the Type AST.  Union/intersection are decomposed
 using standard lattice rules:
@@ -13,11 +13,12 @@ module QataliCompiler.Type.Subtype (
     isEffectSubtype,
 ) where
 
-import           QataliCompiler.Type.Normalize      (TypeDefs (..),
-                                                      normalizeEffect,
-                                                      typeCategory,
-                                                      getVariancesDef)
-import           QataliCompiler.Type.NormalizedType  (NormalizedEffect (..),
+import           QataliCompiler.Type.Defs           (TypeDefs (..),
+                                                      getVariancesDef,
+                                                      getEffectVariancesDef)
+import           QataliCompiler.Type.Normalize      (normalizeEffect)
+import           QataliCompiler.Type.Simplify       (typeCategory)
+import           QataliCompiler.Type.NormalizedEffect  (NormalizedEffect (..),
                                                       NormalizedEffectRef (..))
 import           QataliCompiler.Type.Type
 
@@ -105,19 +106,24 @@ isSubByVariance defs v a b = case v of
 
 -- | Check whether effect @a <: b@.
 isEffectSubtype :: TypeDefs -> NormalizedEffect -> NormalizedEffect -> Bool
-isEffectSubtype _defs effA effB =
+isEffectSubtype defs effA effB =
     case (effA, effB) of
-        (NEffPure, _)         -> True
-        (_, NEffImpure)       -> True
-        (NEffImpure, NEffSet _) -> False
-        (NEffImpure, NEffPure)  -> False
-        (NEffSet _, NEffPure)   -> False
-        (NEffSet as, NEffSet bs) ->
-            all (\a -> any (isEffRefSubtype a) bs) as
+        (NEffPure, _)              -> True
+        (_, NEffImpure)            -> True
+        (NEffImpure, _)            -> False
+        (_, NEffPure)              -> False
+        (NEffVar n1, NEffVar n2)   -> n1 == n2
+        (NEffVar _, _)             -> False
+        (_, NEffVar _)             -> False
+        (NEffSet as, NEffSet bs)   ->
+            all (\a -> any (isEffRefSubtype defs a) bs) as
 
--- | Check whether a single effect ref is a subtype of another.
-isEffRefSubtype :: NormalizedEffectRef -> NormalizedEffectRef -> Bool
-isEffRefSubtype a b =
+-- | Check whether a single effect ref is a subtype of another,
+-- respecting variance of the effect's type parameters.
+isEffRefSubtype :: TypeDefs -> NormalizedEffectRef -> NormalizedEffectRef -> Bool
+isEffRefSubtype defs a b =
     nerName a == nerName b &&
     length (nerArgs a) == length (nerArgs b) &&
-    nerArgs a == nerArgs b
+    let vs = getEffectVariancesDef defs (nerName a) (length (nerArgs a))
+    in  and [isSubByVariance defs v argA argB
+            | (v, argA, argB) <- zip3 vs (nerArgs a) (nerArgs b)]

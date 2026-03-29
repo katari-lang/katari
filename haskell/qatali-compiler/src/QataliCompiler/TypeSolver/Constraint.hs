@@ -21,13 +21,19 @@ module QataliCompiler.TypeSolver.Constraint (
     isGroundConstraint,
     isTrivialConstraint,
     hasVariables,
+    mkVarianceConstraints,
+    propagateTransitive,
 ) where
 
+import           Data.Proxy             (Proxy)
 import           Data.Set               (Set)
+import qualified Data.Set               as Set
 import           QataliCompiler.Name    (Name)
 import           QataliCompiler.SrcLoc  (SrcSpan (..))
-import           QataliCompiler.Type.Type (Type (..), containsTVar, containsUnknownVar,
-                                           typeVarNames, unknownVarNames)
+import           QataliCompiler.Type.Type (Type (..), TypeVar (..), Variance (..),
+                                           containsTVar, containsUnknownVar,
+                                           freeVarsOf, typeVarNames,
+                                           unknownVarNames)
 
 -- | A subtype constraint: @left <: right@ with source location.
 data Constraint = IsSubtypeOf !SrcSpan !Type !Type
@@ -88,3 +94,50 @@ hasVariables :: Constraint -> Bool
 hasVariables (IsSubtypeOf _ a b) =
     containsTVar a || containsTVar b ||
     containsUnknownVar a || containsUnknownVar b
+
+-- | Generate constraints from a variance-aware comparison of two types.
+mkVarianceConstraints :: SrcSpan -> Variance -> Type -> Type -> [Constraint]
+mkVarianceConstraints sp v a b = case v of
+    Covariant     -> [IsSubtypeOf sp a b]
+    Contravariant -> [IsSubtypeOf sp b a]
+    Invariant     -> [IsSubtypeOf sp a b, IsSubtypeOf sp b a]
+    Bivariant     -> []
+
+-- ---------------------------------------------------------------------------
+-- Transitive propagation (generic over variable kind)
+
+-- | Propagate transitive relationships for variables of the given kind
+-- until fixpoint or fuel exhaustion.
+--
+-- For each variable @v@ of the given kind, if @A <: v@ and @v <: B@ both
+-- exist, add @A <: B@.
+propagateTransitive :: forall v. TypeVar v => Proxy v -> Int -> Set Constraint -> Set Constraint
+propagateTransitive p fuel = go fuel
+  where
+    go 0 cs = cs
+    go n cs =
+        case propagateOnceWith cs of
+            Nothing    -> cs
+            Just newCs -> go (n - 1) (Set.union cs newCs)
+
+    propagateOnceWith :: Set Constraint -> Maybe (Set Constraint)
+    propagateOnceWith cs =
+        let asList = Set.toList cs
+            vars = Set.toList $ Set.unions
+                [ freeVarsOf p l <> freeVarsOf p r
+                | IsSubtypeOf _ l r <- asList
+                ]
+            boundsFor name =
+                let lowers = [ t | IsSubtypeOf _ t rhs <- asList, extractVar p rhs == Just name ]
+                    uppers = [ t | IsSubtypeOf _ lhs t <- asList, extractVar p lhs == Just name ]
+                in  [ IsSubtypeOf NoSpan lo hi | lo <- lowers, hi <- uppers ]
+            newConstraints = filter isActuallyNew (concatMap boundsFor vars)
+            isActuallyNew c@(IsSubtypeOf _ a b) =
+                a /= b && not (Set.member c cs)
+                && case (a, b) of
+                    (TNever, _)   -> False
+                    (_, TUnknown) -> False
+                    _             -> True
+        in  if null newConstraints
+                then Nothing
+                else Just (Set.fromList newConstraints)

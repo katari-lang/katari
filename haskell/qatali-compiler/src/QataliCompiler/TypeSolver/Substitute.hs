@@ -28,7 +28,8 @@ import           Data.Text                             (Text)
 import           QataliCompiler.Name                   (Name)
 import           QataliCompiler.SrcLoc                 (SrcSpan (..))
 import           QataliCompiler.Type.Subtype           (isSubtype)
-import           QataliCompiler.Type.Type              (Type (..),
+import           Data.Proxy                            (Proxy (..))
+import           QataliCompiler.Type.Type              (Type (..), UnknownVarKind,
                                                          containsUnknownVar,
                                                          containsTVar,
                                                          unknownVarNames,
@@ -190,27 +191,9 @@ buildSubstForVar varName lowers uppers =
 -- (corresponds to memento's calculatePropagationAll)
 
 -- | Add transitivity constraints for all unknown variables.
--- Runs to fixpoint. Does NOT remove variables.
+-- Runs to fixpoint (up to fuel limit). Does NOT remove variables.
 propagateAll :: Set Constraint -> Set Constraint
-propagateAll cs =
-    case propagateOnce cs of
-        Nothing    -> cs
-        Just newCs -> propagateAll (Set.union cs newCs)
-
--- | Single propagation step.
-propagateOnce :: Set Constraint -> Maybe (Set Constraint)
-propagateOnce cs =
-    let vars = allUnknownVars cs
-        boundsFor v =
-            let (lowers, uppers) = calculateBounds v cs
-            in  [IsSubtypeOf NoSpan lo hi | lo <- lowers, hi <- uppers]
-        newConstraints = filter isActuallyNew (concatMap boundsFor (Set.toList vars))
-        isActuallyNew c@(IsSubtypeOf _ a b) =
-            a /= b && not (Set.member c cs) &&
-            not (isNeverTy a) && not (isUnknownTy b)
-    in  if null newConstraints
-            then Nothing
-            else Just (Set.fromList newConstraints)
+propagateAll = propagateTransitive (Proxy :: Proxy UnknownVarKind) 100
 
 -- ---------------------------------------------------------------------------
 -- collectFinalSubstitutions

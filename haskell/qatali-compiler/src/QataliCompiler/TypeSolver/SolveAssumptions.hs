@@ -21,13 +21,16 @@ import qualified Data.Map.Strict                       as Map
 import           Data.Set                              (Set)
 import qualified Data.Set                              as Set
 
+import           Data.Proxy                            (Proxy (..))
 import           QataliCompiler.Name                   (Name (..))
 import           QataliCompiler.SrcLoc                 (SrcSpan (..))
-import           QataliCompiler.Type.Normalize         (TypeDefs,
+import           QataliCompiler.Type.Defs              (TypeDefs,
                                                         getVariancesDef)
 import           QataliCompiler.Type.Type
 import           QataliCompiler.TypeSolver.Constraint  (Assumption,
-                                                        Constraint (..))
+                                                        Constraint (..),
+                                                        mkVarianceConstraints,
+                                                        propagateTransitive)
 import           QataliCompiler.TypeSolver.Types       (GenericInfo (..))
 
 -- ---------------------------------------------------------------------------
@@ -125,7 +128,7 @@ decomposeAssumption defs generics (IsSubtypeOf _sp t1 t2)
         (TData n1 args1, TData n2 args2)
             | n1 == n2, length args1 == length args2 ->
                 let variances = getVariancesDef defs n1 (length args1)
-                    newCs = concat $ zipWith3 mkVarianceAssumptions variances args1 args2
+                    newCs = concat $ zipWith3 (mkVarianceConstraints NoSpan) variances args1 args2
                 in  (Set.empty, Set.fromList newCs)
 
         -- Same data type on left, union on right
@@ -170,47 +173,12 @@ decomposeAssumption defs generics (IsSubtypeOf _sp t1 t2)
         -- Cannot decompose further
         _ -> (Set.empty, Set.empty)
 
-    mkVarianceAssumptions v a1 a2 = case v of
-        Covariant     -> [IsSubtypeOf NoSpan a1 a2]
-        Contravariant -> [IsSubtypeOf NoSpan a2 a1]
-        Invariant     -> [IsSubtypeOf NoSpan a1 a2, IsSubtypeOf NoSpan a2 a1]
-        Bivariant     -> []
-
 -- ---------------------------------------------------------------------------
 -- Propagation
 
 -- | Propagate transitive relationships until fixpoint.
 propagateAll :: Set Assumption -> Set Assumption
-propagateAll = go (50 :: Int)
-  where
-    go 0 assumptions = assumptions
-    go fuel assumptions =
-        case propagateOnce assumptions of
-            Nothing    -> assumptions
-            Just newAs -> go (fuel - 1) (Set.union assumptions newAs)
-
--- | One propagation step.
-propagateOnce :: Set Assumption -> Maybe (Set Assumption)
-propagateOnce assumptions =
-    let asList = Set.toList assumptions
-        varNames = Set.toList $ Set.unions
-            [ Set.union (typeVarNames l) (typeVarNames r)
-            | IsSubtypeOf _ l r <- asList
-            ]
-        boundsFor name =
-            let uppers = [ t | IsSubtypeOf _ (TVar n) t <- asList, n == name ]
-                lowers = [ t | IsSubtypeOf _ t (TVar n) <- asList, n == name ]
-            in  [ IsSubtypeOf NoSpan lo hi | lo <- lowers, hi <- uppers ]
-        newConstraints = filter notTrivialOrExisting (concatMap boundsFor varNames)
-        notTrivialOrExisting c@(IsSubtypeOf _ a b) =
-            a /= b && not (Set.member c assumptions)
-            && case (a, b) of
-                (TNever, _)    -> False
-                (_, TUnknown)  -> False
-                _              -> True
-    in  if null newConstraints
-            then Nothing
-            else Just (Set.fromList newConstraints)
+propagateAll = propagateTransitive (Proxy :: Proxy TyVarKind) 50
 
 -- ---------------------------------------------------------------------------
 -- Collect bounds

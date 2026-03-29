@@ -2,12 +2,8 @@
 
 After normalization, effects are either pure, impure, or a flat
 list of distinct single effects (no nesting).
-
-Note: This module previously contained NormalizedType with category slots.
-That representation has been removed — subtype checking now operates
-directly on Type.  Only the effect normalization types remain.
 -}
-module QataliCompiler.Type.NormalizedType (
+module QataliCompiler.Type.NormalizedEffect (
     -- * Normalized effect
     NormalizedEffect (..),
     NormalizedEffectRef (..),
@@ -29,6 +25,8 @@ data NormalizedEffect
     -- ^ No effect
     | NEffSet ![NormalizedEffectRef]
     -- ^ Union of distinct effects (sorted, no duplicates)
+    | NEffVar !Name
+    -- ^ An effect type variable (preserved from EffVar)
     | NEffImpure
     -- ^ Any effect (top)
     deriving (Eq, Ord, Show)

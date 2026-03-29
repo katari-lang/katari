@@ -1,7 +1,7 @@
 {- | Internal type representation for the Qatali type system.
 
 This module defines the /un-normalized/ type language used during
-type checking.  After normalization (see "QataliCompiler.Type.NormalizedType"),
+type checking.  After normalization (see "QataliCompiler.Type.NormalizedEffect"),
 types are in a canonical form suitable for subtype comparison.
 
 Key design decisions:
@@ -28,12 +28,23 @@ module QataliCompiler.Type.Type (
     Type (..),
     FunParam (..),
 
-    -- * Type variable utilities
+    -- * Type variable abstraction
+    TypeVar (..),
+    TyVarKind,
+    UnknownVarKind,
+
+    -- * Generic variable utilities
+    freeVarsOf,
+    effectFreeVarsOf,
+    substituteVarsOf,
+    containsVarOf,
+
+    -- * Type variable utilities (convenience)
     containsTVar,
     typeVarNames,
     substituteTVars,
 
-    -- * Unknown variable utilities
+    -- * Unknown variable utilities (convenience)
     containsUnknownVar,
     unknownVarNames,
     substituteUnknownVars,
@@ -46,6 +57,7 @@ module QataliCompiler.Type.Type (
 
 import           Data.Map.Strict     (Map)
 import qualified Data.Map.Strict     as Map
+import           Data.Proxy          (Proxy (..))
 import           Data.Set            (Set)
 import qualified Data.Set            as Set
 import           Data.Text           (Text)
@@ -154,57 +166,74 @@ data FunParam = FunParam
     deriving (Eq, Ord, Show)
 
 -- ---------------------------------------------------------------------------
--- Type variable utilities
+-- Type variable abstraction
 
--- | Does the type contain any TVar?
-containsTVar :: Type -> Bool
-containsTVar = not . Set.null . typeVarNames
+-- | Type class abstracting over the two kinds of type variables
+-- (user-introduced 'TVar' vs solver-introduced 'TUnknownVar').
+class TypeVar v where
+    -- | Extract a variable name from a type, if it matches this kind.
+    extractVar :: Proxy v -> Type -> Maybe Name
+    -- | Construct a type variable of this kind from a name.
+    injectVar  :: Proxy v -> Name -> Type
 
--- | Collect all type variable names occurring in a type.
-typeVarNames :: Type -> Set Name
-typeVarNames = \case
-    TVar n            -> Set.singleton n
-    TUnknown          -> Set.empty
-    TNever            -> Set.empty
-    TPrim _           -> Set.empty
-    TLit _            -> Set.empty
-    TArray t          -> typeVarNames t
-    TFun params ret eff ->
-        foldMap (typeVarNames . fpType) params
-        <> typeVarNames ret
-        <> effectTVarNames eff
-    TData _ args      -> foldMap typeVarNames args
-    TUnion a b        -> typeVarNames a <> typeVarNames b
-    TIntersection a b -> typeVarNames a <> typeVarNames b
-    TUnknownVar _     -> Set.empty
+-- | Phantom type tag for user-introduced type variables ('TVar').
+data TyVarKind
 
--- | Collect type variable names from an effect.
-effectTVarNames :: Effect -> Set Name
-effectTVarNames = \case
+-- | Phantom type tag for solver-introduced unknown variables ('TUnknownVar').
+data UnknownVarKind
+
+instance TypeVar TyVarKind where
+    extractVar _ (TVar n) = Just n
+    extractVar _ _        = Nothing
+    injectVar _ = TVar
+
+instance TypeVar UnknownVarKind where
+    extractVar _ (TUnknownVar n) = Just n
+    extractVar _ _               = Nothing
+    injectVar _ = TUnknownVar
+
+-- ---------------------------------------------------------------------------
+-- Generic variable utilities
+
+-- | Collect all variable names of a given kind occurring in a type.
+freeVarsOf :: forall v. TypeVar v => Proxy v -> Type -> Set Name
+freeVarsOf p = go
+  where
+    go ty = case extractVar p ty of
+        Just n  -> Set.singleton n
+        Nothing -> case ty of
+            TArray t          -> go t
+            TFun params ret eff ->
+                foldMap (go . fpType) params <> go ret <> effectFreeVarsOf p eff
+            TData _ args      -> foldMap go args
+            TUnion a b        -> go a <> go b
+            TIntersection a b -> go a <> go b
+            _                 -> Set.empty  -- TUnknown, TNever, TPrim, TLit, other var kind
+
+-- | Collect variable names of a given kind from an effect.
+effectFreeVarsOf :: forall v. TypeVar v => Proxy v -> Effect -> Set Name
+effectFreeVarsOf p = \case
     EffPure          -> Set.empty
-    EffSingle _ args -> foldMap typeVarNames args
-    EffUnion effs    -> foldMap effectTVarNames effs
+    EffSingle _ args -> foldMap (freeVarsOf p) args
+    EffUnion effs    -> foldMap (effectFreeVarsOf p) effs
     EffImpure        -> Set.empty
     EffVar _         -> Set.empty
 
--- | Substitute type variables using a mapping.
-substituteTVars :: Map Name Type -> Type -> Type
-substituteTVars subst = go
+-- | Substitute variables of a given kind using a mapping.
+substituteVarsOf :: forall v. TypeVar v => Proxy v -> Map Name Type -> Type -> Type
+substituteVarsOf p subst = go
   where
-    go = \case
-        TVar n -> Map.findWithDefault (TVar n) n subst
-        TUnknown -> TUnknown
-        TNever -> TNever
-        TPrim p -> TPrim p
-        TLit l -> TLit l
-        TArray t -> TArray (go t)
-        TFun params ret eff ->
-            TFun (map (\fp -> fp { fpType = go (fpType fp) }) params)
-                 (go ret) (goEff eff)
-        TData name args -> TData name (map go args)
-        TUnion a b -> TUnion (go a) (go b)
-        TIntersection a b -> TIntersection (go a) (go b)
-        TUnknownVar n -> TUnknownVar n
+    go ty = case extractVar p ty of
+        Just n  -> Map.findWithDefault (injectVar p n) n subst
+        Nothing -> case ty of
+            TArray t -> TArray (go t)
+            TFun params ret eff ->
+                TFun (map (\fp -> fp { fpType = go (fpType fp) }) params)
+                     (go ret) (goEff eff)
+            TData name args -> TData name (map go args)
+            TUnion a b -> TUnion (go a) (go b)
+            TIntersection a b -> TIntersection (go a) (go b)
+            other -> other  -- TUnknown, TNever, TPrim, TLit, other var kind
 
     goEff = \case
         EffPure -> EffPure
@@ -212,6 +241,40 @@ substituteTVars subst = go
         EffSingle name args -> EffSingle name (map go args)
         EffUnion effs -> EffUnion (map goEff effs)
         EffVar n -> EffVar n
+
+-- | Does the type contain any variable of the given kind?
+containsVarOf :: forall v. TypeVar v => Proxy v -> Type -> Bool
+containsVarOf p = not . Set.null . freeVarsOf p
+
+-- ---------------------------------------------------------------------------
+-- Convenience wrappers (type variable)
+
+-- | Does the type contain any TVar?
+containsTVar :: Type -> Bool
+containsTVar = containsVarOf (Proxy :: Proxy TyVarKind)
+
+-- | Collect all type variable names occurring in a type.
+typeVarNames :: Type -> Set Name
+typeVarNames = freeVarsOf (Proxy :: Proxy TyVarKind)
+
+-- | Substitute type variables using a mapping.
+substituteTVars :: Map Name Type -> Type -> Type
+substituteTVars = substituteVarsOf (Proxy :: Proxy TyVarKind)
+
+-- ---------------------------------------------------------------------------
+-- Convenience wrappers (unknown variable)
+
+-- | Does the type contain any TUnknownVar?
+containsUnknownVar :: Type -> Bool
+containsUnknownVar = containsVarOf (Proxy :: Proxy UnknownVarKind)
+
+-- | Collect all unknown variable names occurring in a type.
+unknownVarNames :: Type -> Set Name
+unknownVarNames = freeVarsOf (Proxy :: Proxy UnknownVarKind)
+
+-- | Substitute unknown variables using a mapping.
+substituteUnknownVars :: Map Name Type -> Type -> Type
+substituteUnknownVars = substituteVarsOf (Proxy :: Proxy UnknownVarKind)
 
 -- ---------------------------------------------------------------------------
 -- Display
@@ -246,62 +309,3 @@ showLit = \case
     LitStringType s  -> "\"" <> s <> "\""
     LitBooleanType b -> if b then "true" else "false"
 
--- ---------------------------------------------------------------------------
--- Unknown variable utilities
-
--- | Does the type contain any TUnknownVar?
-containsUnknownVar :: Type -> Bool
-containsUnknownVar = not . Set.null . unknownVarNames
-
--- | Collect all unknown variable names occurring in a type.
-unknownVarNames :: Type -> Set Name
-unknownVarNames = \case
-    TUnknownVar n     -> Set.singleton n
-    TVar _            -> Set.empty
-    TUnknown          -> Set.empty
-    TNever            -> Set.empty
-    TPrim _           -> Set.empty
-    TLit _            -> Set.empty
-    TArray t          -> unknownVarNames t
-    TFun params ret eff ->
-        foldMap (unknownVarNames . fpType) params
-        <> unknownVarNames ret
-        <> effectUnknownVarNames eff
-    TData _ args      -> foldMap unknownVarNames args
-    TUnion a b        -> unknownVarNames a <> unknownVarNames b
-    TIntersection a b -> unknownVarNames a <> unknownVarNames b
-
--- | Collect unknown variable names from an effect.
-effectUnknownVarNames :: Effect -> Set Name
-effectUnknownVarNames = \case
-    EffPure          -> Set.empty
-    EffSingle _ args -> foldMap unknownVarNames args
-    EffUnion effs    -> foldMap effectUnknownVarNames effs
-    EffImpure        -> Set.empty
-    EffVar _         -> Set.empty
-
--- | Substitute unknown variables using a mapping.
-substituteUnknownVars :: Map Name Type -> Type -> Type
-substituteUnknownVars subst = go
-  where
-    go = \case
-        TUnknownVar n -> Map.findWithDefault (TUnknownVar n) n subst
-        TVar n -> TVar n
-        TUnknown -> TUnknown
-        TNever -> TNever
-        TPrim p -> TPrim p
-        TLit l -> TLit l
-        TArray t -> TArray (go t)
-        TFun params ret eff ->
-            TFun (map (\fp -> fp { fpType = go (fpType fp) }) params)
-                 (go ret) (goEff eff)
-        TData name args -> TData name (map go args)
-        TUnion a b -> TUnion (go a) (go b)
-        TIntersection a b -> TIntersection (go a) (go b)
-
-    goEff = \case
-        EffPure -> EffPure
-        EffImpure -> EffImpure
-        EffSingle name args -> EffSingle name (map go args)
-        EffUnion effs -> EffUnion (map goEff effs)
-        EffVar n -> EffVar n

@@ -30,7 +30,7 @@ import           QataliCompiler.Name        (ModuleName, Name (..), QualifiedNam
 import           QataliCompiler.SrcLoc      (SrcSpan (..), noSpan)
 import qualified QataliCompiler.Syntax.AST  as AST
 import           QataliCompiler.Syntax.Literal (Literal (..))
-import           QataliCompiler.Type.Normalize (DataDef (..), TypeDefs (..))
+import           QataliCompiler.Type.Defs      (DataDef (..), TypeDefs (..))
 
 -- =========================================================================
 -- SimpleType

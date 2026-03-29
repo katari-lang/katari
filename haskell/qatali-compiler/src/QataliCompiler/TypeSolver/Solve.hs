@@ -24,7 +24,7 @@ import qualified Data.Text                             as T
 
 import           QataliCompiler.Name                   (Name (..), mkName)
 import           QataliCompiler.SrcLoc                 (SrcSpan (..))
-import           QataliCompiler.Type.Normalize         (TypeDefs,
+import           QataliCompiler.Type.Defs              (TypeDefs,
                                                          getVariancesDef)
 import           QataliCompiler.Type.Type
 import           QataliCompiler.TypeSolver.Constraint
@@ -271,14 +271,6 @@ branchArrayVsUnknownRight xName elemTy =
 
 -- ---------------------------------------------------------------------------
 -- Helpers
-
--- | Generate variance-based constraints.
-mkVarianceConstraints :: SrcSpan -> Variance -> Type -> Type -> [Constraint]
-mkVarianceConstraints sp v a b = case v of
-    Covariant     -> [IsSubtypeOf sp a b]
-    Contravariant -> [IsSubtypeOf sp b a]
-    Invariant     -> [IsSubtypeOf sp a b, IsSubtypeOf sp b a]
-    Bivariant     -> []
 
 -- | Convert unknown bounds to constraints.
 boundsToConstraints :: Map Name UnknownBounds -> [Constraint]

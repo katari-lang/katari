@@ -7,7 +7,7 @@ import           System.FilePath          ((</>))
 import           Test.Hspec
 
 import           QataliCompiler.Parse.Parser    (parseModule)
-import           QataliCompiler.Type.Normalize  (TypeDefs (..))
+import           QataliCompiler.Type.Defs       (TypeDefs (..))
 import           QataliCompiler.Typecheck.Check (checkModule, runCheck)
 
 main :: IO ()
@@ -304,20 +304,20 @@ spec = do
                     , "data Consumer<in T>(consume: (x: T) => null)"
                     , "fn test(c: Consumer<integer>): Consumer<number> => { c }"
                     ]
-            it "invariant: same type passes" $
+            it "bivariant (no annotation): any types pass" $
                 typechecksOk $ unlines
-                    [ "module T"
-                    , "data Cell<T>(value: T)"
-                    , "fn test(c: Cell<integer>): Cell<integer> => { c }"
-                    ]
-            it "invariant: different types FAIL" $
-                typecheckFails $ unlines
                     [ "module T"
                     , "data Cell<T>(value: T)"
                     , "fn test(c: Cell<integer>): Cell<number> => { c }"
                     ]
-            it "bivariant (phantom): any types pass" $
+            it "invariant (in out): same type passes" $
                 typechecksOk $ unlines
+                    [ "module T"
+                    , "data Phantom<in out T>(value: integer)"
+                    , "fn test(p: Phantom<integer>): Phantom<integer> => { p }"
+                    ]
+            it "invariant (in out): different types FAIL" $
+                typecheckFails $ unlines
                     [ "module T"
                     , "data Phantom<in out T>(value: integer)"
                     , "fn test(p: Phantom<integer>): Phantom<string> => { p }"
