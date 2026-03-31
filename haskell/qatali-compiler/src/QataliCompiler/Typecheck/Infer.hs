@@ -24,6 +24,7 @@ import           QataliCompiler.Syntax.AST
 import           QataliCompiler.Type.Defs              (DataDef (..),
                                                         DataKind (..),
                                                         EffectDef (..),
+                                                        ImplDef (..),
                                                         TypeDefs (..))
 import           QataliCompiler.Type.Normalize         (normalizeEffect)
 import           QataliCompiler.Type.NormalizedEffect    (NormalizedEffect (..),
@@ -41,7 +42,7 @@ inferExpr = \case
     ELit _ lit -> pure (inferLiteral lit)
 
     EVar ann qn -> do
-        mTy <- lookupVar (qnName qn)
+        mTy <- lookupVarQualified qn
         case mTy of
             Just ty -> pure ty
             Nothing -> do
@@ -65,9 +66,22 @@ inferExpr = \case
                 defs <- getTypeDefs
                 addEffect (normalizeEffect defs eff)
             _ -> pure ()
+        -- Trait resolution: if callee is a trait function, resolve impl statically
+        case fun of
+            EVar _ qn -> do
+                defs <- getTypeDefs
+                let calleeName = qnName qn
+                case Map.lookup calleeName (tdTraits defs) of
+                    Just _traitDef -> do
+                        let matchingImpls = filter (\impl -> idTraitName impl == calleeName) (tdImpls defs)
+                        case matchingImpls of
+                            [impl] -> recordResolvedImpl ann (idFnName impl)
+                            _      -> pure ()  -- 0 or 2+: defer to runtime
+                    Nothing -> pure ()
+            _ -> pure ()
         pure resultTy
 
-    EFn ann stps params mRetTy fnBody -> do
+    EFn ann stps params mRetTy _mEffTy fnBody -> do
         tvBindings <- resolveSrcTypeParams stps
         withTypeVars tvBindings $ do
             paramBindings <- forM params $ \p -> do
@@ -101,16 +115,23 @@ inferExpr = \case
         resultTy <- freshUnknown
         forM_ arms $ \arm -> do
             bindings <- inferPattern scrutTy (maPat arm)
-            armTy <- withBindings bindings $ inferExpr (maBody arm)
-            addConstraint (maAnn arm) armTy resultTy
+            withBindings bindings $ do
+                -- Check guard expression returns boolean
+                case maGuard arm of
+                    Just guardE -> do
+                        guardTy <- inferExpr guardE
+                        addConstraint (maAnn arm) guardTy (TPrim PrimBoolean)
+                    Nothing -> pure ()
+                armTy <- inferExpr (maBody arm)
+                addConstraint (maAnn arm) armTy resultTy
         pure resultTy
 
-    EHandle ann expr cases mRet -> do
+    EHandle ann expr hvars cases mRet -> do
         -- 1. Infer the handled expression's type and effects
         (exprTy, exprEff) <- withFreshEffects $ inferExpr expr
 
         -- 2. Caught effect names
-        let caughtNames = Set.fromList (map hcEffect cases)
+        let caughtNames = Set.fromList (map (qnName . hcEffect) cases)
 
         -- 3. Propagate uncaught effects upward
         addEffect (removeEffects caughtNames exprEff)
@@ -118,23 +139,35 @@ inferExpr = \case
         -- 4. Fresh unknown for handle result type
         handleResultTy <- freshUnknown
 
-        -- 5. Check return clause
+        -- 5. Infer handler variable types
+        hvarBindings <- forM hvars $ \hv -> do
+            initTy <- inferExpr (hvInit hv)
+            varTy <- case hvType hv of
+                Just tyE -> do
+                    annTy <- resolveTyExpr tyE
+                    addConstraint (hvAnn hv) initTy annTy
+                    pure annTy
+                Nothing -> pure initTy
+            pure (hvName hv, varTy)
+
+        -- 6. Check return clause (with handler vars in scope)
         case mRet of
             Just hr -> do
-                retBodyTy <- withBindings [(hrParam hr, exprTy)] $
+                retBodyTy <- withBindings (hvarBindings ++ [(hrParam hr, exprTy)]) $
                     inferExpr (hrBody hr)
                 addConstraint (hrAnn hr) retBodyTy handleResultTy
             Nothing ->
                 -- No return clause: expr type = handle result type
                 addConstraint ann exprTy handleResultTy
 
-        -- 6. Check each handle case
+        -- 7. Check each handle case (with handler vars in scope)
         defs <- getTypeDefs
         forM_ cases $ \hc -> do
-            case Map.lookup (hcEffect hc) (tdEffects defs) of
+            let effName = qnName (hcEffect hc)
+            case Map.lookup effName (tdEffects defs) of
                 Just ed -> do
                     -- a. Get type args from accumulated effects
-                    let effectArgs = findEffectArgs (hcEffect hc) exprEff
+                    let effectArgs = findEffectArgs effName exprEff
                     -- b. Substitution: param names → type args
                     let subst = Map.fromList (zip (edParamNames ed) effectArgs)
                     -- c. Substitute into field types
@@ -142,17 +175,17 @@ inferExpr = \case
                     -- d. Substitute into effect return type (continue's param type)
                     let effRetTy = substituteTVars subst (edReturnTy ed)
                     -- e. Infer pattern bindings
-                    bindings <- concat <$>
+                    patBindings <- concat <$>
                         zipWithM inferPattern fieldTys (hcParams hc)
-                    -- f. Check case body with continue info
+                    -- f. Check case body with handler vars + pattern bindings + continue info
                     caseTy <- withContinueInfo effRetTy handleResultTy $
-                        withBindings bindings $
+                        withBindings (hvarBindings ++ patBindings) $
                             inferExpr (hcBody hc)
                     -- g. Case body type <: handle result type
                     addConstraint (hcAnn hc) caseTy handleResultTy
                 Nothing ->
                     emitError (hcAnn hc)
-                        ("unknown effect in handle: " <> unName (hcEffect hc))
+                        ("unknown effect in handle: " <> unName effName)
 
         pure handleResultTy
 
@@ -217,7 +250,7 @@ inferExpr = \case
 
     EUnaryOp ann op expr -> inferUnaryOp ann op expr
 
-    EContinue ann arg -> do
+    EContinue ann arg _mUpdates -> do
         mInfo <- asks ceContinueInfo
         case mInfo of
             Nothing -> do
@@ -228,6 +261,10 @@ inferExpr = \case
                 argTy <- inferExpr arg
                 addConstraint ann argTy effRetTy
                 pure handleResTy
+
+    EBreak _ valE -> do
+        _ <- inferExpr valE
+        pure TNever
 
 -- =========================================================================
 -- Function body / block inference
@@ -339,7 +376,7 @@ inferPattern scrutTy = \case
     PLit _ _    -> pure []
     PWild _     -> pure []
 
-    PCon ann qn pats -> do
+    PCon ann qn _tyVars pats -> do
         defs <- getTypeDefs
         let conName = qnName qn
         case Map.lookup conName (tdData defs) of
@@ -359,7 +396,7 @@ inferPattern scrutTy = \case
                 emitError ann ("unknown data type in pattern: " <> unName conName)
                 concat <$> mapM (inferPattern TUnknown) pats
 
-    PRecord ann qn fieldPats -> do
+    PRecord ann qn _tyVars fieldPats -> do
         defs <- getTypeDefs
         let conName = qnName qn
         case Map.lookup conName (tdData defs) of

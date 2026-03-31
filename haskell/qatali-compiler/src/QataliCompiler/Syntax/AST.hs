@@ -32,6 +32,7 @@ module QataliCompiler.Syntax.AST (
     MatchArm (..),
     HandleCase (..),
     HandleReturn (..),
+    HandleVar (..),
     TemplateSegment (..),
     BinOp (..),
     UnaryOp (..),
@@ -107,18 +108,29 @@ data Module ann = Module
 
 -- | A top-level declaration.
 data Decl ann
-    = DeclLet !ann !(LetTarget ann) ![SrcTypeParam ann] !(Maybe (TyExpr ann)) !(Expr ann)
-      -- ^ @let name\<T sub U\>: Type = expr@
-    | DeclFn !ann !Name ![SrcTypeParam ann] ![Param ann] !(Maybe (TyExpr ann)) !(FnBody ann)
-      -- ^ @fn name\<T\>(x: A, y: B): C => expr | block@
+    = DeclLet !ann !Bool !(LetTarget ann) ![SrcTypeParam ann] !(Maybe (TyExpr ann)) !(Expr ann)
+      -- ^ @[pub] let name\<T\>: Type = expr@, Bool = isPub
+    | DeclFn !ann !Bool !Name ![SrcTypeParam ann] ![(QualifiedName, [TyExpr ann])] ![Param ann] !(Maybe (TyExpr ann)) !(Maybe (TyExpr ann)) !(FnBody ann)
+      -- ^ @[pub] fn name\<T\>[Trait\<T\>](x: A) -> B with E { body }@
+      --   Fields: ann, isPub, name, typeParams, traitAnnots, params, retTy, effectTy, body
     | DeclType !ann !Name ![SrcTypeParam ann] !(TyExpr ann)
       -- ^ @type Name\<T\> = ...@
-    | DeclData !ann !Name ![SrcDataTypeParam ann] !DataDeclKind ![(Name, TyExpr ann)]
-      -- ^ @data Name\<out T\> { field: T }@ or @data Name\<out T\>(field: T)@
-    | DeclEffect !ann !Name ![SrcDataTypeParam ann] ![(Name, TyExpr ann)] !(TyExpr ann)
-      -- ^ @effect Name\<out T\>(field: T) => RetTy@
+    | DeclData !ann !Bool !Name ![SrcDataTypeParam ann] !DataDeclKind ![(Name, TyExpr ann)]
+      -- ^ @[pub] data Name\<out T\> { field: T }@ or tuple syntax, Bool = isPub (exports constructors)
+    | DeclEffect !ann !Bool !Name ![SrcDataTypeParam ann] ![(Name, TyExpr ann)] !(TyExpr ann)
+      -- ^ @[pub] effect Name\<out T\>(field: T) -> RetTy@, Bool = isPub
     | DeclImport !ann !ModuleName !(Maybe Name) !(Maybe [Name])
-      -- ^ @import Foo.Bar as F (item1, item2)@
+      -- ^ @import "path.to.module" [as alias] [{ item1, item2 }]@
+    | DeclExport !ann !ModuleName !(Maybe [Name])
+      -- ^ @export "path.to.module"@ or @export { name1 } from "path"@
+    | DeclForeignFn !ann !Name ![Param ann] !(TyExpr ann) !(Maybe (TyExpr ann))
+      -- ^ @foreign fn name(args) -> RetType [with Effect]@
+    | DeclTrait !ann !Name ![SrcDataTypeParam ann] ![Param ann] !(TyExpr ann)
+      -- ^ @trait Name\<out T\>(arg: T) -> RetTy@
+    | DeclImpl !ann !Name !QualifiedName ![TyExpr ann]
+      -- ^ @impl fn_name as TraitName\<TypeA, TypeB\>@
+    | DeclDerive !ann !QualifiedName ![TyExpr ann]
+      -- ^ @derive TraitName\<Type\>@
     deriving (Eq, Show, Functor, Foldable, Traversable)
 
 -- ---------------------------------------------------------------------------
@@ -155,16 +167,17 @@ data Expr ann
       -- ^ Literal value
     | EApp         !ann !(Expr ann) ![TyExpr ann] ![Expr ann]
       -- ^ Function / tuple-constructor application @f\<T\>(arg1, arg2)@
-    | EFn          !ann ![SrcTypeParam ann] ![Param ann] !(Maybe (TyExpr ann)) !(FnBody ann)
-      -- ^ Anonymous function @fn \<T\>(x: A): B => expr | block@
+    | EFn          !ann ![SrcTypeParam ann] ![Param ann] !(Maybe (TyExpr ann)) !(Maybe (TyExpr ann)) !(FnBody ann)
+      -- ^ Anonymous function @fn \<T\>(x: A) -> B with E { body }@
+      --   Fields: ann, typeParams, params, retTy, effectTy, body
     | EMatch       !ann !(Expr ann) ![MatchArm ann]
-      -- ^ Pattern match @match expr { case pat => expr, ... }@
+      -- ^ Pattern match @match expr { case pat [if cond] => expr, ... }@
     | EIf          !ann !(Expr ann) !(Expr ann) !(Maybe (Expr ann))
       -- ^ Conditional @if cond then else@
     | EBlock       !ann ![Stmt ann]
       -- ^ Block expression @{ stmt; stmt; expr }@
-    | EHandle      !ann !(Expr ann) ![HandleCase ann] !(Maybe (HandleReturn ann))
-      -- ^ Effect handler @handle expr { case Eff(x) => ..., return x => ... }@
+    | EHandle      !ann !(Expr ann) ![HandleVar ann] ![HandleCase ann] !(Maybe (HandleReturn ann))
+      -- ^ Effect handler @handle { block } with { [var decls] case Eff(x) => ..., return x => ... }@
     | EConstruct   !ann !QualifiedName ![(Name, Expr ann)]
       -- ^ Record construction @User { id = 1, name = "Alice" }@
     | EArray       !ann ![ArrayElem ann]
@@ -179,8 +192,10 @@ data Expr ann
       -- ^ Binary operation
     | EUnaryOp     !ann !UnaryOp !(Expr ann)
       -- ^ Unary operation
-    | EContinue    !ann !(Expr ann)
-      -- ^ Effect continuation @continue(expr)@
+    | EContinue    !ann !(Expr ann) !(Maybe [(Name, Expr ann)])
+      -- ^ Effect continuation @continue value [with { foo = ...; }]@
+    | EBreak       !ann !(Expr ann)
+      -- ^ Break from handler: @break value@
     deriving (Eq, Show, Functor, Foldable, Traversable)
 
 -- | A template literal segment.
@@ -196,18 +211,29 @@ data Stmt ann
     | StmtReturn !ann !(Maybe (Expr ann))
     deriving (Eq, Show, Functor, Foldable, Traversable)
 
--- | A match arm: pattern → body.
+-- | A match arm: pattern + optional guard → body.
 data MatchArm ann = MatchArm
-    { maAnn  :: !ann
-    , maPat  :: !(Pat ann)
-    , maBody :: !(Expr ann)
+    { maAnn   :: !ann
+    , maPat   :: !(Pat ann)
+    , maGuard :: !(Maybe (Expr ann))  -- ^ Optional guard: @if condition@
+    , maBody  :: !(Expr ann)
+    }
+    deriving (Eq, Show, Functor, Foldable, Traversable)
+
+-- | A handler variable declaration inside a handle's with-block.
+data HandleVar ann = HandleVar
+    { hvAnn  :: !ann
+    , hvName :: !Name
+    , hvType :: !(Maybe (TyExpr ann))
+    , hvInit :: !(Expr ann)
     }
     deriving (Eq, Show, Functor, Foldable, Traversable)
 
 -- | A handler case for an effect.
 data HandleCase ann = HandleCase
     { hcAnn    :: !ann
-    , hcEffect :: !Name
+    , hcEffect :: !QualifiedName   -- ^ Effect name (may be qualified, e.g. @cron.Triggered@)
+    , hcTyVars :: ![Name]          -- ^ Type vars introduced (e.g. @T@ in @case Effect\<T\>(x)@)
     , hcParams :: ![Pat ann]
     , hcBody   :: !(Expr ann)
     }
@@ -256,10 +282,10 @@ data Pat ann
       -- ^ Literal pattern
     | PWild   !ann
       -- ^ Wildcard @_@
-    | PCon    !ann !QualifiedName ![Pat ann]
-      -- ^ Tuple-data constructor pattern @Point(x, y)@
-    | PRecord !ann !QualifiedName ![(Name, Pat ann)]
-      -- ^ Record-data pattern @User { id = i, name = n }@
+    | PCon    !ann !QualifiedName ![Name] ![Pat ann]
+      -- ^ Tuple-data constructor pattern @Point\<T\>(x, y)@ where [Name] are introduced type vars
+    | PRecord !ann !QualifiedName ![Name] ![(Name, Pat ann)]
+      -- ^ Record-data pattern @User\<T\> { id = i, name = n }@ where [Name] are introduced type vars
     | PArray  !ann !(SpreadPat ann)
       -- ^ Array pattern @[p1, ...rest, p2]@
     deriving (Eq, Show, Functor, Foldable, Traversable)

@@ -19,7 +19,7 @@ let lt = 2 < 3
 
 // --- 条件式 (if の body は必ず block) ---
 
-let abs_val = fn (x: number): number => {
+let abs_val = fn (x: number) -> number {
   if x < 0 { 0 - x } else { x }
 }
 
@@ -29,7 +29,7 @@ let pi: number = 3.14159
 
 // --- 無名関数 (fn の body は必ず block) ---
 
-let add = fn (x: integer, y: integer): number => { x + y }
+let add = fn (x: integer, y: integer) -> number { x + y }
 
 // --- 配列 ---
 
@@ -41,7 +41,7 @@ let greeting = `hello`
 
 // --- match 式 ---
 
-let describe = fn (v: boolean): string => {
+let describe = fn (v: boolean) -> string {
   match v {
     case (true)  => "yes"
     case (false) => "no"
@@ -50,11 +50,11 @@ let describe = fn (v: boolean): string => {
 
 // --- fn 宣言形式 ---
 
-fn double(x: integer): number => { x * 2 }
+fn double(x: integer) -> number { x * 2 }
 
 // --- ブロック本体 ---
 
-fn add_and_double(x: integer, y: integer): number => {
+fn add_and_double(x: integer, y: integer) -> number {
   let z = x + y
   return z * 2
 }
@@ -63,7 +63,7 @@ fn add_and_double(x: integer, y: integer): number => {
 
 data Box<out T>(value: T)
 
-fn unbox(b: Box<integer>): integer => {
+fn unbox(b: Box<integer>) -> integer {
   match b {
     case (Box(v)) => v
   }
@@ -76,7 +76,7 @@ data User<out ID> {
   name: string
 }
 
-fn getUserName(u: User<integer>): string => {
+fn getUserName(u: User<integer>) -> string {
   match u {
     case User {name = n} => n
   }
@@ -90,28 +90,28 @@ let aliased: IntOrStr = 42
 
 // --- ジェネリクス ---
 
-fn identity<T>(x: T): T => { x }
+fn identity<T>(x: T) -> T { x }
 
-fn bounded<T sub number>(x: T): number => { x }
+fn bounded<T sub number>(x: T) -> number { x }
 
 // --- エフェクト宣言 ---
 
-effect Log<out T>(message: T) => null
-effect Ask<in T, out R>(prompt: T) => R
+effect Log<out T>(message: T) -> null
+effect Ask<in T, out R>(prompt: T) -> R
 
 // --- 高階関数 ---
 
-fn apply(f: (x: integer) => string, x: integer): string => { f(x) }
+fn apply(f: (x: integer) => string, x: integer) -> string { f(x) }
 
 fn compose(
   f: (x: integer) => string,
   g: (x: string) => boolean,
   x: integer
-): boolean => { g(f(x)) }
+) -> boolean { g(f(x)) }
 
 // --- if-else union ---
 
-fn branch(b: boolean): integer | string => {
+fn branch(b: boolean) -> integer | string {
   if b { 42 } else { "hello" }
 }
 
@@ -123,7 +123,7 @@ data Err<out E>(error: E)
 fn dispatch(
   r: Ok<integer> | Err<string>,
   fallback: (x: string) => integer
-): integer => {
+) -> integer {
   match r {
     case (Ok(v)) => v
     case (Err(e)) => fallback(e)

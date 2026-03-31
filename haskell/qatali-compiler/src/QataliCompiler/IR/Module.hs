@@ -47,8 +47,6 @@ data Module = Module
       -- ^ Constant pool. Indexed by 'ConstId' (0-based).
     , mFunctions    :: ![Function]
       -- ^ Functions defined in this module.
-    , mEntryFunc    :: !(Maybe FuncId)
-      -- ^ Optional entry point (the module's top-level init function).
     }
     deriving (Eq, Show, Generic)
 

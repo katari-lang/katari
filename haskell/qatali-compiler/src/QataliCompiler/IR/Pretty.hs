@@ -101,11 +101,6 @@ prettyModule m =
             ++
             -- Functions
             [ prettyFunction nt f | f <- m.mFunctions ]
-            ++
-            -- Entry
-            (case m.mEntryFunc of
-                Nothing -> []
-                Just fid -> [mempty, "entry" <+> prettyFuncRef nt fid])
         , rbrace
         ]
 
@@ -196,9 +191,7 @@ prettyInstr nt = \case
     IArrLen d a     -> pv d <+> "=" <+> "arr_len" <> parens (pv a)
     IArrPush d a v  -> pv d <+> "=" <+> "arr_push" <> parens (pv a <> comma <+> pv v)
     IArrConcat d a b -> binOp d "arr_concat" a b
-
-    INewTuple d es  -> pv d <+> "=" <+> "new_tuple" <+> prettyVars nt es
-    ITupGet d t idx -> pv d <+> "=" <+> pv t <> "." <> pretty idx
+    IArrSlice d a f t -> pv d <+> "=" <+> pv a <> brackets (pv f <> ".." <> pv t)
 
     IMakeClosure d fid caps ->
         pv d <+> "=" <+> "closure" <+> prettyFuncRef nt fid <+> prettyVars nt caps
@@ -258,27 +251,33 @@ prettyTerminator nt = \case
     THandle hi ->
         vsep
             [ "handle" <+> lbrace
-            , indent 2 $ vsep
-                [ "body:" <+> pv hi.hBody
-                , vsep [ "on" <+> prettyEffRef nt eid <+> "->" <+> prettyBlockRef hd.hdBlock
-                         <+> parens ("args:" <+> prettyVars nt hd.hdArgs
-                                    <> comma <+> "cont:" <+> pv hd.hdCont)
-                       | (eid, hd) <- hi.hHandlers
-                       ]
-                , case hi.hReturnDef of
-                    Nothing -> mempty
-                    Just rd -> "return" <+> pv rd.rdArg <+> "->" <+> prettyBlockRef rd.rdBlock
-                , "result:" <+> pv hi.hResultVar <+> "->" <+> prettyBlockRef hi.hContBlock
-                ]
+            , indent 2 $ vsep $
+                [ "body:" <+> pv hi.hBody ]
+                ++ [ "on" <+> prettyEffRef nt eid <+> "->" <+> pv closure
+                   | (eid, closure) <- hi.hHandlers
+                   ]
+                ++ [ case hi.hReturn of
+                        Nothing -> mempty
+                        Just rv -> "return:" <+> pv rv
+                   ]
+                ++ (if null hi.hVarInits then []
+                    else [ "vars:" <+> prettyVars nt hi.hVarInits ])
+                ++ [ "result:" <+> pv hi.hResultVar <+> "->" <+> prettyBlockRef hi.hContBlock ]
             , rbrace
             ]
 
-    TContinue k v d cont ->
+    TContinue k v hvs d cont ->
         "continue" <+> pv d <+> "=" <+> pv k <+> pv v
+        <+> (if null hvs then mempty else "with" <+> prettyVars nt hvs)
         <+> "->" <+> prettyBlockRef cont
 
-    THandleRet v ->
-        "handle_ret" <+> pv v
+    TFfiCall d modName fnName args cont ->
+        "ffi_call" <+> pv d <+> "=" <+> dquotes (pretty modName) <> "." <> dquotes (pretty fnName)
+        <> tupled (map pv args) <+> "->" <+> prettyBlockRef cont
+
+    TParAll d tasks cont ->
+        "par_all" <+> pv d <+> "=" <+> prettyVars nt tasks
+        <+> "->" <+> prettyBlockRef cont
 
     TUnreachable ->
         "unreachable"

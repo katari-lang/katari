@@ -16,8 +16,6 @@ module QataliCompiler.IR.Instruction (
     SwitchCase (..),
     -- * Handle-related types
     HandleInfo (..),
-    HandlerDef (..),
-    ReturnDef (..),
 ) where
 
 import           Data.Text              (Text)
@@ -90,12 +88,8 @@ data Instr
       -- ^ @dst = push(arr, elem)@ — produces a new array.
     | IArrConcat   !VarId !VarId !VarId
       -- ^ @dst = arr1 ++ arr2@
-
-    -- ** Tuple operations
-    | INewTuple    !VarId ![VarId]
-      -- ^ @dst = (elems...)@
-    | ITupGet      !VarId !VarId !Word16
-      -- ^ @dst = tuple.index@
+    | IArrSlice   !VarId !VarId !VarId !VarId
+      -- ^ @dst = arr[from..to]@ — slice from index (inclusive) to index (exclusive).
 
     -- ** Closure operations
     | IMakeClosure !VarId !FuncId ![VarId]
@@ -139,12 +133,21 @@ data Terminator
       -- Suspends until a handler resumes with a value.
     | THandle     !HandleInfo
       -- ^ Set up a handler and call the body closure.
-    | TContinue   !VarId !VarId !VarId !BlockId
-      -- ^ @continue(contVar, valueVar) -> resultVar, contBlock@
-      -- Multi-shot: resume body with valueVar, body's result goes to resultVar,
-      -- then continue at contBlock. contVar is NOT consumed (reusable).
-    | THandleRet  !VarId
-      -- ^ Produce the handle expression's result (abort the body).
+    | TContinue   !VarId !VarId ![VarId] !VarId !BlockId
+      -- ^ @continue(contVar, valueVar, hvUpdates) -> resultVar, contBlock@
+      -- One-shot: resume body with valueVar, body's result goes to resultVar,
+      -- then continue at contBlock. contVar IS consumed (not reusable).
+      -- hvUpdates are updated handler variable values (same order as hVarInits).
+
+    -- ** FFI
+    | TFfiCall    !VarId !Text !Text ![VarId] !BlockId
+      -- ^ @dst = ffi_call(moduleName, fnName, args...)@, continue at contBlock.
+      -- Calls a foreign (JavaScript) function by module/name.
+
+    -- ** Parallel execution
+    | TParAll     !VarId ![VarId] !BlockId
+      -- ^ @dst = parallel_all(task_closures...)@, continue at contBlock.
+      -- Executes task closures in parallel, collects results into an array.
 
     -- ** Unreachable
     | TUnreachable
@@ -168,45 +171,52 @@ data SwitchCase
 
 -- | Information for a @handle@ expression.
 --
+-- All handler cases and the optional return handler are compiled as
+-- **separate closures** (each gets its own 'Function'). This ensures
+-- that each handler invocation receives its own stack frame.
+--
+-- One-shot semantics: each continuation can be used at most once
+-- (via 'TContinue' or discarded via 'TReturn' / break).
+--
 -- Execution flow:
 --
--- 1. Runtime pushes handler frame, calls body closure (@hBody@).
--- 2. If body performs a handled effect → capture continuation, jump to handler.
--- 3. Handler can 'TContinue' (resume body) or 'THandleRet' (short-circuit).
--- 4. If body returns normally → optional return handler, then @hContBlock@.
+-- 1. Runtime pushes handler frame with initial handler var values (@hVarInits@),
+--    then calls body closure (@hBody@).
+-- 2. If body performs a handled effect:
+--    a. Capture continuation (one-shot).
+--    b. Call the handler closure with
+--       @[captures..., effect_args..., continuation, hvar_current_values...]@.
+--    c. Handler may 'TContinue' (resume body with updated hvar values)
+--       or 'TReturn' (produce result / break).
+--    d. Handler's 'TReturn' value → @hResultVar@, pop handler, jump @hContBlock@.
+-- 3. If body returns normally:
+--    a. If return handler exists: call it with
+--       @[captures..., body_return_value, hvar_current_values...]@.
+--       Its 'TReturn' value is the effective result.
+--    b. If no return handler: body's return value is the effective result.
+--    c. Effective result → @hResultVar@, pop handler, jump @hContBlock@.
 data HandleInfo = HandleInfo
     { hBody      :: !VarId
-      -- ^ Body closure (zero-argument). Compiled as a separate function
-      -- with captured variables via 'IMakeClosure'.
-    , hHandlers  :: ![(EffectId, HandlerDef)]
-      -- ^ One handler per effect being handled.
-    , hReturnDef :: !(Maybe ReturnDef)
-      -- ^ Optional return handler (transforms the body's return value).
-      -- If absent, the body's return value becomes the handle result directly.
+      -- ^ Body closure (zero user-arguments). Compiled as a separate
+      -- function with captured variables via 'IMakeClosure'.
+    , hHandlers  :: ![(EffectId, VarId)]
+      -- ^ One handler closure per effect being handled.
+      -- Each closure's parameters are:
+      -- @[captures..., effect_arg_1, ..., effect_arg_N, continuation, hvar_1, hvar_2, ...]@.
+      -- The closure produces the handle result via 'TReturn' (break)
+      -- or resumes via 'TContinue'.
+    , hReturn    :: !(Maybe VarId)
+      -- ^ Optional return handler closure. Parameters:
+      -- @[captures..., body_return_value, hvar_1, hvar_2, ...]@.
+      -- Transforms the body's return value; its 'TReturn' value is the
+      -- effective body result. If absent, the body's return value is
+      -- used directly.
     , hResultVar :: !VarId
       -- ^ Variable to store the final result of the handle expression.
     , hContBlock :: !BlockId
       -- ^ Block to continue at after the handle expression completes.
-    }
-    deriving (Eq, Show, Generic)
-
--- | Definition of a single effect handler case.
-data HandlerDef = HandlerDef
-    { hdBlock :: !BlockId
-      -- ^ Block that implements this handler.
-    , hdArgs  :: ![VarId]
-      -- ^ Variables pre-assigned for the effect's arguments
-      -- (filled by the runtime when the effect is performed).
-    , hdCont  :: !VarId
-      -- ^ Variable pre-assigned for the captured continuation object.
-    }
-    deriving (Eq, Show, Generic)
-
--- | Definition of the return handler clause.
-data ReturnDef = ReturnDef
-    { rdBlock :: !BlockId
-      -- ^ Block that implements the return handler.
-    , rdArg   :: !VarId
-      -- ^ Variable pre-assigned for the body's return value.
+    , hVarInits  :: ![VarId]
+      -- ^ Initial values for handler variables, in declaration order.
+      -- These are VarIds in the enclosing function's scope.
     }
     deriving (Eq, Show, Generic)

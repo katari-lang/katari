@@ -9,10 +9,14 @@ Compilation pipeline:
 >   → (Emit)      → Text / Binary
 -}
 module QataliCompiler.Lib (
-    -- * Pipeline entry point
+    -- * Single-file pipeline
     compileText,
     CompileResult (..),
     CompileError (..),
+
+    -- * Multi-module pipeline
+    compileModules,
+    ModuleInput (..),
 
     -- * Re-exports for convenience
     module QataliCompiler.SrcLoc,
@@ -20,18 +24,24 @@ module QataliCompiler.Lib (
     module QataliCompiler.Diagnostic,
 ) where
 
-import qualified Data.Map.Strict                as Map
-import           Data.Text                      (Text)
-import qualified Data.Text                      as T
+import           Data.List.NonEmpty               (NonEmpty (..))
+import           Data.Text                       (Text)
+import qualified Data.Text                       as T
 
-import           QataliCompiler.Codegen.Emit    (emitToText)
-import           QataliCompiler.Compile.Lower   (lowerModule)
+import           QataliCompiler.Codegen.Emit     (emitToText)
+import           QataliCompiler.Compile.Lower    (lowerModule)
 import           QataliCompiler.Diagnostic
 import           QataliCompiler.Name
-import           QataliCompiler.Parse.Parser    (parseModule)
+import           QataliCompiler.Parse.Parser     (parseModule)
 import           QataliCompiler.SrcLoc
-import           QataliCompiler.Type.Defs       (TypeDefs (..))
-import           QataliCompiler.Typecheck.Check  (checkModule, runCheckWithDefs)
+import           QataliCompiler.Type.Defs        (ModuleInterface (..),
+                                                   emptyModuleInterface,
+                                                   mergeTypeDefs)
+import           QataliCompiler.Typecheck.Check  (checkModule,
+                                                   runCheckWithDefs,
+                                                   runCheckWithInterfaces)
+import           QataliCompiler.Typecheck.Prim  (primInterfaces,
+                                                   primTypeDefs)
 
 -- | Errors that can occur during compilation.
 data CompileError
@@ -43,28 +53,52 @@ data CompileError
 
 -- | The result of a successful compilation.
 data CompileResult = CompileResult
-    { crOutput :: !Text
+    { crOutput    :: !Text
+    , crInterface :: !ModuleInterface  -- ^ exported interface for downstream modules
     }
     deriving (Show)
 
--- | Empty type definitions (used until declaration registration is fully wired).
-emptyTypeDefs :: TypeDefs
-emptyTypeDefs = TypeDefs Map.empty Map.empty Map.empty
+-- | Input for one module in a multi-module compilation.
+data ModuleInput = ModuleInput
+    { miInputModuleName :: !ModuleName
+    , miFilePath        :: !FilePath
+    , miSource          :: !Text
+    }
 
--- | Compile a source file through the full pipeline.
+-- | Compile a single source file through the full pipeline.
 compileText :: FilePath -> Text -> Either CompileError CompileResult
 compileText fp src = do
-    -- Phase 1: Parse
     ast <- case parseModule fp src of
         Left  e -> Left (ParseError (T.pack (show e)))
         Right a -> Right a
-    -- Phase 2: Typecheck (also collects TypeDefs)
-    ((), typeDefs) <- case runCheckWithDefs emptyTypeDefs (checkModule ast) of
+    ((), typeDefs, resolvedImpls) <- case runCheckWithDefs primTypeDefs (checkModule ast) of
         Left  errs -> Left (TypeError errs)
         Right r    -> Right r
-    -- Phase 3: Lower (AST → IR)
-    program <- case lowerModule typeDefs ast of
+    program <- case lowerModule typeDefs resolvedImpls ast of
         Left  errs -> Left (LowerError errs)
         Right p    -> Right p
-    -- Phase 4: Emit (IR → Text)
-    Right (CompileResult (emitToText program))
+    -- Build a stub module interface (no module name available in single-file mode)
+    let stubName = ModuleName ("_main" :| [])
+        iface    = emptyModuleInterface stubName
+    Right (CompileResult (emitToText program) iface)
+
+-- | Compile multiple modules in dependency order.
+-- Each module may reference interfaces from previously compiled modules.
+compileModules :: [ModuleInput] -> Either CompileError [CompileResult]
+compileModules inputs = go [] inputs
+  where
+    go acc [] = Right (reverse acc)
+    go acc (ModuleInput mn fp src : rest) = do
+        ast <- case parseModule fp src of
+            Left  e -> Left (ParseError (T.pack (show e)))
+            Right a -> Right a
+        -- Merge prim + previously compiled interfaces into a single TypeDefs
+        let prevIfaces   = primInterfaces ++ map crInterface acc
+            mergedDefs   = foldr (mergeTypeDefs . miTypeDefs) primTypeDefs prevIfaces
+        ((), iface, typeDefs, resolvedImpls) <- case runCheckWithInterfaces mergedDefs prevIfaces mn (checkModule ast) of
+            Left  errs -> Left (TypeError errs)
+            Right r    -> Right r
+        program <- case lowerModule typeDefs resolvedImpls ast of
+            Left  errs -> Left (LowerError errs)
+            Right p    -> Right p
+        go (CompileResult (emitToText program) iface : acc) rest

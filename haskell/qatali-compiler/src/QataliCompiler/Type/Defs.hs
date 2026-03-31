@@ -9,6 +9,12 @@ module QataliCompiler.Type.Defs (
     DataKind (..),
     TypeSynDef (..),
     EffectDef (..),
+    TraitDef (..),
+    ImplDef (..),
+    ModuleInterface (..),
+    emptyTypeDefs,
+    emptyModuleInterface,
+    mergeTypeDefs,
     getVariancesDef,
     getEffectVariancesDef,
 ) where
@@ -16,7 +22,7 @@ module QataliCompiler.Type.Defs (
 import           Data.Map.Strict            (Map)
 import qualified Data.Map.Strict            as Map
 
-import           QataliCompiler.Name        (Name)
+import           QataliCompiler.Name        (Name, ModuleName)
 import           QataliCompiler.Type.Type
 
 -- ---------------------------------------------------------------------------
@@ -59,13 +65,56 @@ data EffectDef = EffectDef
     }
     deriving (Show)
 
+-- | A trait definition (like a type class): name + params + fields + return type.
+data TraitDef = TraitDef
+    { trParamNames :: ![Name]
+    , trParams     :: ![DataTypeParam]
+    , trBounds     :: ![Bound]
+    , trFields     :: ![(Name, Type)]
+    , trReturnTy   :: !Type
+    }
+    deriving (Show)
+
+-- | An impl mapping: a function implements a trait for given type arguments.
+data ImplDef = ImplDef
+    { idFnName    :: !Name
+    , idTraitName :: !Name
+    , idTypeArgs  :: ![Type]
+    }
+    deriving (Show)
+
 -- | All type\/data\/effect definitions in scope.
 data TypeDefs = TypeDefs
     { tdData    :: !(Map Name DataDef)
     , tdTypes   :: !(Map Name TypeSynDef)
     , tdEffects :: !(Map Name EffectDef)
+    , tdTraits  :: !(Map Name TraitDef)
+    , tdImpls   :: ![ImplDef]
     }
     deriving (Show)
+
+emptyTypeDefs :: TypeDefs
+emptyTypeDefs = TypeDefs Map.empty Map.empty Map.empty Map.empty []
+
+mergeTypeDefs :: TypeDefs -> TypeDefs -> TypeDefs
+mergeTypeDefs a b = TypeDefs
+    { tdData    = tdData    a `Map.union` tdData    b
+    , tdTypes   = tdTypes   a `Map.union` tdTypes   b
+    , tdEffects = tdEffects a `Map.union` tdEffects b
+    , tdTraits  = tdTraits  a `Map.union` tdTraits  b
+    , tdImpls   = tdImpls   a <>           tdImpls  b
+    }
+
+-- | The exported interface of a compiled module.
+data ModuleInterface = ModuleInterface
+    { miModuleName :: !ModuleName
+    , miTypeDefs   :: !TypeDefs          -- ^ exported type/data/effect defs
+    , miValues     :: !(Map Name Type)   -- ^ exported value bindings (pub only)
+    }
+    deriving (Show)
+
+emptyModuleInterface :: ModuleName -> ModuleInterface
+emptyModuleInterface mn = ModuleInterface mn emptyTypeDefs Map.empty
 
 -- ---------------------------------------------------------------------------
 -- Variance lookups

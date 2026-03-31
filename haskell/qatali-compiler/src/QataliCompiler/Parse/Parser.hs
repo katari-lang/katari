@@ -10,7 +10,8 @@ Syntax overview:
   * Record construction uses @=@, type annotation uses @:@
   * Block: @{ stmt; stmt; }@
   * Record construction: @Name { field = expr }@
-  * Tuple construction: @Name(expr, expr)@ (via function application)
+  * Function declaration: @[pub] fn name\<T\>[Trait\<T\>](params) -> RetTy with E { body }@
+  * Handle: @handle { body } with { [var x = e;] [case Eff(p) =>] [return x =>] }@
 -}
 module QataliCompiler.Parse.Parser (
     QParseError,
@@ -18,21 +19,22 @@ module QataliCompiler.Parse.Parser (
     parseExpr,
 ) where
 
-import           Control.Monad                (void)
-import           Data.List.NonEmpty           (NonEmpty (..))
+import           Control.Monad                  (void)
+import           Data.List.NonEmpty             (NonEmpty (..))
 import           Control.Monad.Combinators.Expr (Operator (..), makeExprParser)
-import           Data.Maybe                   (fromMaybe)
-import           Data.Text                    (Text)
-import qualified Data.Text                    as T
-import           Data.Void                    (Void)
-import           Text.Megaparsec              hiding (ParseError)
+import           Data.Maybe                     (fromMaybe)
+import           Data.Text                      (Text)
+import qualified Data.Text                      as T
+import           Data.Void                      (Void)
+import           Text.Megaparsec                hiding (ParseError)
 import           Text.Megaparsec.Char
-import qualified Text.Megaparsec.Char.Lexer   as L
+import qualified Text.Megaparsec.Char.Lexer     as L
 
-import           QataliCompiler.Name          (ModuleName (..), Name (..),
-                                               QualifiedName (..))
-import           QataliCompiler.SrcLoc        (SrcPos (..), SrcSpan (..),
-                                               (<->))
+import           QataliCompiler.Name            (ModuleName (..), Name (..),
+                                                 QualifiedName (..), qualify,
+                                                 unqualify)
+import           QataliCompiler.SrcLoc          (SrcPos (..), SrcSpan (..),
+                                                 (<->))
 import           QataliCompiler.Syntax.AST
 import           QataliCompiler.Syntax.Literal
 
@@ -78,8 +80,9 @@ symbol :: Text -> Parser Text
 symbol = L.symbol sc
 
 -- | Parse a keyword (must not be followed by identifier chars).
+-- Uses 'try' so it never partially consumes input on failure.
 keyword :: Text -> Parser Text
-keyword kw = lexeme (string kw <* notFollowedBy identContChar)
+keyword kw = try $ lexeme (string kw <* notFollowedBy identContChar)
 
 -- | Characters that can appear after the first char of an identifier.
 identContChar :: Parser Char
@@ -96,9 +99,11 @@ identOrKeyword = lexeme $ do
 reservedWords :: [Text]
 reservedWords =
     [ "let", "fn", "if", "else", "match", "case", "return"
-    , "handle", "continue", "effect", "data", "type", "import"
-    , "as", "module", "sub", "sup", "is", "in", "out", "with"
+    , "handle", "continue", "break", "effect", "data", "type"
+    , "import", "export", "from", "as", "module"
+    , "sub", "sup", "is", "in", "out", "with"
     , "null", "true", "false", "pure", "impure"
+    , "pub", "foreign", "trait", "impl", "derive", "var"
     ]
 
 -- | Parse a non-reserved identifier.
@@ -173,6 +178,39 @@ pStringLit :: Parser Text
 pStringLit = lexeme (char '"' *> (T.pack <$> manyTill L.charLiteral (char '"')))
 
 -- =========================================================================
+-- Qualified name helpers
+-- =========================================================================
+
+-- | Parse a (possibly qualified) name: @name@, @module.name@, @a.b.name@.
+-- All segments are joined, last is the identifier, rest form the module path.
+pQualName :: Parser QualifiedName
+pQualName = do
+    first <- pIdent
+    rest  <- many (try (symbol "." *> pIdent))
+    let parts   = first : rest
+        nameN   = last parts
+        modSegs = init parts
+    case modSegs of
+        []     -> pure (unqualify nameN)
+        (x:xs) -> pure (qualify (ModuleName (unName x :| map unName xs)) nameN)
+
+-- | Parse a qualified uppercase (constructor) name: @Con@, @module.Con@.
+pQualConName :: Parser QualifiedName
+pQualConName = try $ do
+    qn <- pQualName
+    case T.uncons (unName (qnName qn)) of
+        Just (c, _) | c >= 'A' && c <= 'Z' -> pure qn
+        _ -> fail "expected uppercase constructor name"
+
+-- | Parse a module path from a string literal: @\"prim.json\"@.
+pModuleNameStr :: Parser ModuleName
+pModuleNameStr = do
+    str <- pStringLit
+    case T.splitOn "." str of
+        []     -> fail "empty module name"
+        (x:xs) -> pure (ModuleName (x :| xs))
+
+-- =========================================================================
 -- Type expressions
 -- =========================================================================
 
@@ -230,13 +268,14 @@ pTyKeywordType = do
     (sp, _) <- withSpan (keyword "null")
     pure (TyCon sp (QualifiedName Nothing (Name "null")))
 
--- | Function type: @(x: A, y: B) => C@ or @(x: A, y: B) => C with E@
+-- | Function type: @(x: A, y: B) -> C@ or @(x: A, y: B) -> C with E@
+-- Also supports legacy @=>@ arrow.
 pTyFun :: Parser (TyExpr SrcSpan)
 pTyFun = try $ do
     (sp0, _) <- withSpan (symbol "(")
     params <- commaSep pTyFunParam
     _ <- symbol ")"
-    _ <- symbol "=>"
+    _ <- symbol "->" <|> symbol "=>"
     ret <- pTyExpr
     eff <- optional (keyword "with" *> pEffectExpr)
     sp1 <- curSpan
@@ -269,7 +308,7 @@ pEffectPrimary = choice
          pure (TyCon sp (QualifiedName Nothing (Name "pure")))
     , do (sp, _) <- withSpan (keyword "impure")
          pure (TyCon sp (QualifiedName Nothing (Name "impure")))
-    , pTyNamed  -- effect names (e.g. Log, Ask)
+    , pTyNamed  -- qualified effect names (e.g. Log, Throw, prim.Task)
     ]
 
 pTyFunParam :: Parser (Name, TyExpr SrcSpan)
@@ -287,24 +326,25 @@ pTyParens = do
     _ <- symbol ")"
     pure ty
 
--- | Named type (any identifier — variable or constructor).
--- Whether it's a type variable is determined at resolution time via the type env.
+-- | Named type: any identifier, possibly qualified (e.g. @T@, @List@, @prim.Json@).
 pTyNamed :: Parser (TyExpr SrcSpan)
 pTyNamed = do
-    (sp, name) <- withSpan pIdent
-    pure (TyCon sp (QualifiedName Nothing name))
+    sp0 <- curSpan
+    qn  <- pQualName
+    sp1 <- curSpan
+    pure (TyCon (sp0 <-> sp1) qn)
 
 -- | Extract span from a type expression.
 tySpan :: TyExpr SrcSpan -> SrcSpan
 tySpan = \case
-    TyVar sp _       -> sp
-    TyCon sp _       -> sp
-    TyApp sp _ _     -> sp
-    TyFun sp _ _ _   -> sp
-    TyArray sp _     -> sp
-    TyUnion sp _ _   -> sp
+    TyVar sp _         -> sp
+    TyCon sp _         -> sp
+    TyApp sp _ _       -> sp
+    TyFun sp _ _ _     -> sp
+    TyArray sp _       -> sp
+    TyUnion sp _ _     -> sp
     TyIntersect sp _ _ -> sp
-    TyLit sp _       -> sp
+    TyLit sp _         -> sp
 
 -- =========================================================================
 -- Patterns
@@ -335,23 +375,27 @@ pPatWild = do
     (sp, _) <- withSpan (symbol "_")
     pure (PWild sp)
 
--- | Constructor (tuple-data) pattern: @Con(p1, p2)@
+-- | Constructor (tuple-data) pattern: @Con\<T\>(p1, p2)@ or @mod.Con\<T\>(p)@
 pPatCon :: Parser (Pat SrcSpan)
 pPatCon = try $ do
-    (sp0, name) <- withSpan pConName
+    sp0   <- curSpan
+    qname <- pQualConName
+    tyVars <- option [] (try (symbol "<" *> commaSep1 pIdent <* symbol ">"))
     _ <- symbol "("
     pats <- commaSep pPat
     (sp1, _) <- withSpan (symbol ")")
-    pure (PCon (sp0 <-> sp1) (QualifiedName Nothing name) pats)
+    pure (PCon (sp0 <-> sp1) qname tyVars pats)
 
--- | Record-data pattern: @Name { field1 = pat1, field2 = pat2 }@
+-- | Record-data pattern: @Name\<T\> { field1 = pat1 }@ or @mod.Name { ... }@
 pPatRecord :: Parser (Pat SrcSpan)
 pPatRecord = try $ do
-    (sp0, name) <- withSpan pConName
+    sp0   <- curSpan
+    qname <- pQualConName
+    tyVars <- option [] (try (symbol "<" *> commaSep1 pIdent <* symbol ">"))
     _ <- symbol "{"
     fields <- commaSep pRecordPatField
     (sp1, _) <- withSpan (symbol "}")
-    pure (PRecord (sp0 <-> sp1) (QualifiedName Nothing name) fields)
+    pure (PRecord (sp0 <-> sp1) qname tyVars fields)
 
 pRecordPatField :: Parser (Name, Pat SrcSpan)
 pRecordPatField = do
@@ -474,12 +518,14 @@ pExprAtom = choice
     , pExprMatch
     , pExprHandle
     , pExprContinue
+    , pExprBreak
     , pExprFn
     , pExprTemplateLit
     , pExprArray
     , pExprConstruct
     , pExprBlock
     , pExprParens
+    , pExprReturn
     , pExprVar
     ]
 
@@ -488,26 +534,25 @@ pExprLit = do
     (sp, lit) <- withSpan pLiteral
     pure (ELit sp lit)
 
+-- | Variable reference, possibly qualified: @name@, @module.name@.
 pExprVar :: Parser (Expr SrcSpan)
 pExprVar = do
-    (sp, name) <- withSpan pIdent
-    pure (EVar sp (QualifiedName Nothing name))
+    sp0 <- curSpan
+    qn  <- pQualName
+    sp1 <- curSpan
+    pure (EVar (sp0 <-> sp1) qn)
 
--- | @if cond { stmts } else { stmts }@  (else is optional)
+-- | @if cond { stmts } [else { stmts } | else if ...]@
 pExprIf :: Parser (Expr SrcSpan)
 pExprIf = do
     (sp0, _) <- withSpan (keyword "if")
     cond <- pExpr
     thn <- pBlock
-    els <- optional (keyword "else" *> pBlock)
+    els <- optional (keyword "else" *> (pExprIf <|> pBlock))
     sp1 <- curSpan
     pure (EIf (sp0 <-> sp1) cond thn els)
 
--- | @match expr { case pat => expr, ... }@
--- Match arms can have the pattern bare or in parentheses:
---   @case Pat => expr@
---   @case (Pat) => expr@
---   @case Name { ... } => expr@
+-- | @match expr { case pat [if guard] => expr, ... }@
 pExprMatch :: Parser (Expr SrcSpan)
 pExprMatch = do
     (sp0, _) <- withSpan (keyword "match")
@@ -521,17 +566,17 @@ pMatchArm :: Parser (MatchArm SrcSpan)
 pMatchArm = do
     (sp, _) <- withSpan (keyword "case")
     pat <- pMatchPat
+    guard' <- optional (keyword "if" *> pExpr)
     _ <- symbol "=>"
     body <- pExpr
     pOptSep
-    pure (MatchArm sp pat body)
+    pure (MatchArm sp pat guard' body)
 
 -- | Parse a pattern in a match arm.
--- Supports both @case (pat) => ...@ (parenthesized) and @case pat => ...@ (bare).
 pMatchPat :: Parser (Pat SrcSpan)
 pMatchPat = pParenthesizedPat <|> pPat
 
--- | Parenthesized pattern: @(pat)@ — just wrapping, no tuple semantics.
+-- | Parenthesized pattern: @(pat)@
 pParenthesizedPat :: Parser (Pat SrcSpan)
 pParenthesizedPat = try $ do
     _ <- symbol "("
@@ -539,28 +584,43 @@ pParenthesizedPat = try $ do
     _ <- symbol ")"
     pure pat
 
--- | @handle expr { case Eff(x) => ..., return x => ... }@
+-- | @handle { body } with { [var x: T = e;] [case Eff\<T\>(p) => expr;] [return x => expr] }@
 pExprHandle :: Parser (Expr SrcSpan)
 pExprHandle = do
     (sp0, _) <- withSpan (keyword "handle")
-    expr <- pExpr
+    body  <- pBlock
+    _ <- keyword "with"
     _ <- symbol "{"
+    hvars <- many (try pHandleVar)
     cases <- many (try pHandleCase)
-    ret <- optional pHandleReturn
+    ret   <- optional pHandleReturn
     (sp1, _) <- withSpan (symbol "}")
-    pure (EHandle (sp0 <-> sp1) expr cases ret)
+    pure (EHandle (sp0 <-> sp1) body hvars cases ret)
 
+-- | Handler variable declaration: @var name[: Type] = expr;@
+pHandleVar :: Parser (HandleVar SrcSpan)
+pHandleVar = do
+    (sp, _) <- withSpan (keyword "var")
+    name <- pIdent
+    ty   <- optional (symbol ":" *> pTyExpr)
+    _ <- symbol "="
+    val <- pExpr
+    pSep
+    pure (HandleVar sp name ty val)
+
+-- | Handler case: @case Eff[\<T\>](p1, p2) => expr@
 pHandleCase :: Parser (HandleCase SrcSpan)
 pHandleCase = do
     (sp, _) <- withSpan (keyword "case")
-    effName <- pConName
+    effName <- pQualConName
+    tyVars  <- option [] (try (symbol "<" *> commaSep1 pIdent <* symbol ">"))
     _ <- symbol "("
     params <- commaSep pPat
     _ <- symbol ")"
     _ <- symbol "=>"
     body <- pExpr
     pOptSep
-    pure (HandleCase sp effName params body)
+    pure (HandleCase sp effName tyVars params body)
 
 pHandleReturn :: Parser (HandleReturn SrcSpan)
 pHandleReturn = do
@@ -571,16 +631,38 @@ pHandleReturn = do
     pOptSep
     pure (HandleReturn sp name body)
 
--- | @continue(expr)@ — resume computation in handle case body.
+-- | @continue expr [with { name = expr; ... }]@
 pExprContinue :: Parser (Expr SrcSpan)
 pExprContinue = do
     (sp0, _) <- withSpan (keyword "continue")
-    _ <- symbol "("
     arg <- pExpr
-    (sp1, _) <- withSpan (symbol ")")
-    pure (EContinue (sp0 <-> sp1) arg)
+    mUpdates <- optional $ do
+        _ <- keyword "with"
+        _ <- symbol "{"
+        updates <- many pHandleVarUpdate
+        _ <- symbol "}"
+        pure updates
+    sp1 <- curSpan
+    pure (EContinue (sp0 <-> sp1) arg mUpdates)
 
--- | Anonymous function: @fn \<T\>(x: A): B => expr | { block }@
+-- | A single handler variable update: @name = expr;@
+pHandleVarUpdate :: Parser (Name, Expr SrcSpan)
+pHandleVarUpdate = do
+    name <- pIdent
+    _ <- symbol "="
+    val <- pExpr
+    pSep
+    pure (name, val)
+
+-- | @break expr@
+pExprBreak :: Parser (Expr SrcSpan)
+pExprBreak = do
+    (sp0, _) <- withSpan (keyword "break")
+    arg <- pExpr
+    sp1 <- curSpan
+    pure (EBreak (sp0 <-> sp1) arg)
+
+-- | Anonymous function: @fn \<T\>(x: A) -> B with E { body }@
 pExprFn :: Parser (Expr SrcSpan)
 pExprFn = do
     (sp0, _) <- withSpan (keyword "fn")
@@ -588,12 +670,13 @@ pExprFn = do
     _ <- symbol "("
     params <- commaSep pParam
     _ <- symbol ")"
-    retTy <- optional (symbol ":" *> pTyExpr)
-    _ <- symbol "=>"
-    body <- pFnBody
-    sp1 <- curSpan
-    pure (EFn (sp0 <-> sp1) tyParams params retTy body)
+    retTy <- optional (symbol "->" *> pTyExpr)
+    effTy <- optional (keyword "with" *> pEffectExpr)
+    body  <- pFnBody
+    sp1   <- curSpan
+    pure (EFn (sp0 <-> sp1) tyParams params retTy effTy body)
 
+-- | Function body: always a block @{ stmts }@.
 pFnBody :: Parser (FnBody SrcSpan)
 pFnBody = do
     (sp, _) <- withSpan (symbol "{")
@@ -647,15 +730,15 @@ pExprArray = do
 pArrayElem :: Parser (ArrayElem SrcSpan)
 pArrayElem = (ASpread <$> (symbol "..." *> pExpr)) <|> (AElem <$> pExpr)
 
--- | Record construction: @Name { field1 = expr1, field2 = expr2 }@
--- Starts with an uppercase identifier followed by @{@.
+-- | Record construction: @Name { field1 = expr1 }@ or @mod.Name { ... }@
 pExprConstruct :: Parser (Expr SrcSpan)
 pExprConstruct = try $ do
-    (sp0, name) <- withSpan pConName
+    sp0   <- curSpan
+    qname <- pQualConName
     _ <- symbol "{"
     fields <- commaSep pConstructField
     (sp1, _) <- withSpan (symbol "}")
-    pure (EConstruct (sp0 <-> sp1) (QualifiedName Nothing name) fields)
+    pure (EConstruct (sp0 <-> sp1) qname fields)
 
 pConstructField :: Parser (Name, Expr SrcSpan)
 pConstructField = do
@@ -665,7 +748,6 @@ pConstructField = do
     pure (name, val)
 
 -- | Block expression: @{ stmt; stmt; ... }@
--- Braces always start a block (never an object).
 pExprBlock :: Parser (Expr SrcSpan)
 pExprBlock = do
     (sp0, _) <- withSpan (symbol "{")
@@ -674,13 +756,20 @@ pExprBlock = do
     pure (EBlock (sp0 <-> sp1) stmts)
 
 -- | Parenthesized expression: @(expr)@.
--- No tuple literal syntax — parentheses are purely for grouping.
 pExprParens :: Parser (Expr SrcSpan)
 pExprParens = do
     _ <- symbol "("
     e <- pExpr
     _ <- symbol ")"
     pure e
+
+-- | @return [expr]@
+pExprReturn :: Parser (Expr SrcSpan)
+pExprReturn = do
+    (sp0, _) <- withSpan (keyword "return")
+    val <- optional (try pExpr)
+    sp1 <- curSpan
+    pure (EReturn (sp0 <-> sp1) val)
 
 -- =========================================================================
 -- Statements
@@ -731,24 +820,31 @@ pModuleName = do
 
 pDecl :: Parser (Decl SrcSpan)
 pDecl = choice
-    [ pDeclFn
-    , pDeclLet
+    [ try pDeclFn
+    , try pDeclLet
     , pDeclType
-    , pDeclData
-    , pDeclEffect
-    , pDeclImport
+    , try pDeclData
+    , try pDeclEffect
+    , try pDeclImport
+    , try pDeclExport
+    , try pDeclForeignFn
+    , try pDeclTrait
+    , try pDeclImpl
+    , pDeclDerive
     ]
 
--- | @let name\<T\>: Type = expr@ or @let pattern: Type = expr@
+-- | @[pub] let name\<T\>: Type = expr@
 pDeclLet :: Parser (Decl SrcSpan)
 pDeclLet = do
-    (sp, _) <- withSpan (keyword "let")
+    sp0    <- curSpan
+    isPub  <- option False (True <$ keyword "pub")
+    _      <- keyword "let"
     target <- pLetTarget
     tyParams <- fromMaybe [] <$> optional pTypeParams
-    tyAnn <- optional (symbol ":" *> pTyExpr)
+    tyAnn  <- optional (symbol ":" *> pTyExpr)
     _ <- symbol "="
     val <- pExpr
-    pure (DeclLet sp target tyParams tyAnn val)
+    pure (DeclLet sp0 isPub target tyParams tyAnn val)
 
 pLetTarget :: Parser (LetTarget SrcSpan)
 pLetTarget = (LetPat <$> try pPatDestructure) <|> (LetName <$> pIdent)
@@ -757,19 +853,22 @@ pLetTarget = (LetPat <$> try pPatDestructure) <|> (LetName <$> pIdent)
 pPatDestructure :: Parser (Pat SrcSpan)
 pPatDestructure = pPatRecord <|> pPatArray
 
--- | @fn name\<T\>(x: A, y: B): C => expr | { block }@
+-- | @[pub] fn name\<T\>[Trait\<T\>](params) -> RetTy with E { body }@
 pDeclFn :: Parser (Decl SrcSpan)
 pDeclFn = do
-    (sp, _) <- withSpan (keyword "fn")
-    name <- pIdent
-    tyParams <- fromMaybe [] <$> optional pTypeParams
-    _ <- symbol "("
-    params <- commaSep pParam
-    _ <- symbol ")"
-    retTy <- optional (symbol ":" *> pTyExpr)
-    _ <- symbol "=>"
-    body <- pFnBody
-    pure (DeclFn sp name tyParams params retTy body)
+    sp0         <- curSpan
+    isPub       <- option False (True <$ keyword "pub")
+    _           <- keyword "fn"
+    name        <- pIdent
+    tyParams    <- fromMaybe [] <$> optional pTypeParams
+    traitAnnots <- pTraitAnnots
+    _           <- symbol "("
+    params      <- commaSep pParam
+    _           <- symbol ")"
+    retTy       <- optional (symbol "->" *> pTyExpr)
+    effTy       <- optional (keyword "with" *> pEffectExpr)
+    body        <- pFnBody
+    pure (DeclFn sp0 isPub name tyParams traitAnnots params retTy effTy body)
 
 -- | @type Name\<T\> = TyExpr@
 pDeclType :: Parser (Decl SrcSpan)
@@ -781,21 +880,22 @@ pDeclType = do
     ty <- pTyExpr
     pure (DeclType sp name tyParams ty)
 
--- | @data Name\<out T\> { field: T, ... }@  (record syntax)
--- or @data Name\<out T\>(field: T, ...)@       (tuple syntax)
+-- | @[pub] data Name\<out T\> { field: T, ... }@  (record syntax)
+-- or @[pub] data Name\<out T\>(field: T, ...)@     (tuple syntax)
 pDeclData :: Parser (Decl SrcSpan)
 pDeclData = do
-    (sp, _) <- withSpan (keyword "data")
-    name <- pConName
+    sp0     <- curSpan
+    isPub   <- option False (True <$ keyword "pub")
+    _       <- keyword "data"
+    name    <- pConName
     dtParams <- fromMaybe [] <$> optional pDataTypeParams
     (kind, fields) <- pDataBody
-    pure (DeclData sp name dtParams kind fields)
+    pure (DeclData sp0 isPub name dtParams kind fields)
 
--- | Parse the body of a data declaration, returning the kind and fields.
+-- | Parse the body of a data declaration.
 pDataBody :: Parser (DataDeclKind, [(Name, TyExpr SrcSpan)])
 pDataBody = pDataBodyRecord <|> pDataBodyTuple
 
--- | Record body: @{ field1: T1, field2: T2 }@
 pDataBodyRecord :: Parser (DataDeclKind, [(Name, TyExpr SrcSpan)])
 pDataBodyRecord = do
     _ <- symbol "{"
@@ -803,7 +903,6 @@ pDataBodyRecord = do
     _ <- symbol "}"
     pure (DeclRecord, fields)
 
--- | Tuple body: @(field1: T1, field2: T2)@
 pDataBodyTuple :: Parser (DataDeclKind, [(Name, TyExpr SrcSpan)])
 pDataBodyTuple = do
     _ <- symbol "("
@@ -811,27 +910,106 @@ pDataBodyTuple = do
     _ <- symbol ")"
     pure (DeclTuple, fields)
 
--- | @effect Name\<out T\>(field: T) => RetTy@
+-- | @[pub] effect Name\<out T\>(field: T) -> RetTy@
 pDeclEffect :: Parser (Decl SrcSpan)
 pDeclEffect = do
-    (sp, _) <- withSpan (keyword "effect")
-    name <- pConName
+    sp0     <- curSpan
+    isPub   <- option False (True <$ keyword "pub")
+    _       <- keyword "effect"
+    name    <- pConName
     dtParams <- fromMaybe [] <$> optional pDataTypeParams
     _ <- symbol "("
     fields <- commaSep pFieldDecl
     _ <- symbol ")"
-    _ <- symbol "=>"
+    _ <- symbol "->"
     retTy <- pTyExpr
-    pure (DeclEffect sp name dtParams fields retTy)
+    pure (DeclEffect sp0 isPub name dtParams fields retTy)
 
--- | @import Foo.Bar as F (item1, item2)@
+-- | @import "path.to.module" [as alias]@
+-- or @import { name1, name2 } from "path.to.module"@
 pDeclImport :: Parser (Decl SrcSpan)
 pDeclImport = do
     (sp, _) <- withSpan (keyword "import")
-    mname <- pModuleName
-    alias <- optional (keyword "as" *> pIdent)
-    items <- optional (symbol "(" *> commaSep pIdent <* symbol ")")
-    pure (DeclImport sp mname alias items)
+    choice
+        [ -- import { names } from "path"
+          try $ do
+            _ <- symbol "{"
+            items <- commaSep pIdent
+            _ <- symbol "}"
+            _ <- keyword "from"
+            mname <- pModuleNameStr
+            pure (DeclImport sp mname Nothing (Just items))
+        , -- import "path" [as alias]
+          do
+            mname <- pModuleNameStr
+            alias <- optional (keyword "as" *> pIdent)
+            pure (DeclImport sp mname alias Nothing)
+        ]
+
+-- | @export "path.to.module"@
+-- or @export { name1, name2 } from "path.to.module"@
+pDeclExport :: Parser (Decl SrcSpan)
+pDeclExport = do
+    (sp, _) <- withSpan (keyword "export")
+    choice
+        [ -- export { names } from "path"
+          try $ do
+            _ <- symbol "{"
+            items <- commaSep pIdent
+            _ <- symbol "}"
+            _ <- keyword "from"
+            mname <- pModuleNameStr
+            pure (DeclExport sp mname (Just items))
+        , -- export "path"
+          do
+            mname <- pModuleNameStr
+            pure (DeclExport sp mname Nothing)
+        ]
+
+-- | @foreign fn name(params) -> RetTy [with Effect]@
+pDeclForeignFn :: Parser (Decl SrcSpan)
+pDeclForeignFn = do
+    (sp, _) <- withSpan (keyword "foreign")
+    _ <- keyword "fn"
+    name   <- pIdent
+    _ <- symbol "("
+    params <- commaSep pParam
+    _ <- symbol ")"
+    _ <- symbol "->"
+    retTy  <- pTyExpr
+    effTy  <- optional (keyword "with" *> pEffectExpr)
+    pure (DeclForeignFn sp name params retTy effTy)
+
+-- | @trait Name\<out T\>(params) -> RetTy@
+pDeclTrait :: Parser (Decl SrcSpan)
+pDeclTrait = do
+    (sp, _) <- withSpan (keyword "trait")
+    name    <- pConName
+    dtParams <- fromMaybe [] <$> optional pDataTypeParams
+    _ <- symbol "("
+    params <- commaSep pParam
+    _ <- symbol ")"
+    _ <- symbol "->"
+    retTy  <- pTyExpr
+    pure (DeclTrait sp name dtParams params retTy)
+
+-- | @impl fn_name as TraitName[\<TypeA, TypeB\>]@
+pDeclImpl :: Parser (Decl SrcSpan)
+pDeclImpl = do
+    (sp, _) <- withSpan (keyword "impl")
+    fnName    <- pIdent
+    _ <- keyword "as"
+    traitName <- pQualConName
+    tyArgs    <- option [] (symbol "<" *> commaSep1 pTyExpr <* symbol ">")
+    pure (DeclImpl sp fnName traitName tyArgs)
+
+-- | @derive TraitName[\<Type\>]@
+pDeclDerive :: Parser (Decl SrcSpan)
+pDeclDerive = do
+    (sp, _) <- withSpan (keyword "derive")
+    traitName <- pQualConName
+    tyArgs    <- option [] (symbol "<" *> commaSep1 pTyExpr <* symbol ">")
+    pure (DeclDerive sp traitName tyArgs)
 
 -- =========================================================================
 -- Shared helpers
@@ -890,17 +1068,27 @@ pSrcVariance = choice
     , pure SrcNone
     ]
 
+-- | Trait annotations for function declarations: @[Trait1\<T\>, Trait2\<T\>]@
+pTraitAnnots :: Parser [(QualifiedName, [TyExpr SrcSpan])]
+pTraitAnnots = option [] (symbol "[" *> commaSep1 pTraitAnnot <* symbol "]")
+
+pTraitAnnot :: Parser (QualifiedName, [TyExpr SrcSpan])
+pTraitAnnot = do
+    qname  <- pQualConName
+    tyArgs <- option [] (symbol "<" *> commaSep1 pTyExpr <* symbol ">")
+    pure (qname, tyArgs)
+
 -- | Extract span from an expression.
 exprSpan :: Expr SrcSpan -> SrcSpan
 exprSpan = \case
     EVar sp _           -> sp
     ELit sp _           -> sp
     EApp sp _ _ _       -> sp
-    EFn sp _ _ _ _      -> sp
+    EFn sp _ _ _ _ _    -> sp
     EMatch sp _ _       -> sp
     EIf sp _ _ _        -> sp
     EBlock sp _         -> sp
-    EHandle sp _ _ _    -> sp
+    EHandle sp _ _ _ _  -> sp
     EConstruct sp _ _   -> sp
     EArray sp _         -> sp
     EIndex sp _ _       -> sp
@@ -908,4 +1096,5 @@ exprSpan = \case
     ETemplateLit sp _   -> sp
     EBinOp sp _ _ _     -> sp
     EUnaryOp sp _ _     -> sp
-    EContinue sp _      -> sp
+    EContinue sp _ _    -> sp
+    EBreak sp _         -> sp

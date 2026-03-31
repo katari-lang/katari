@@ -17,7 +17,7 @@ main = hspec spec
 -- Helpers
 
 emptyDefs :: TypeDefs
-emptyDefs = TypeDefs Map.empty Map.empty Map.empty
+emptyDefs = TypeDefs Map.empty Map.empty Map.empty Map.empty []
 
 examplesDir :: FilePath
 examplesDir = "test/examples"
@@ -88,19 +88,19 @@ spec = do
             it "block" $
                 parsesOk "module T  let x = { let y = 1  y }"
             it "return in fn block" $
-                parsesOk "module T  fn f(x: integer): integer => { return x }"
+                parsesOk "module T  fn f(x: integer) -> integer { return x }"
 
         describe "function" $ do
             it "fn declaration with block body" $
-                parsesOk "module T  fn add(x: integer, y: integer): integer => { x + y }"
+                parsesOk "module T  fn add(x: integer, y: integer) -> integer { x + y }"
             it "fn expression with block body" $
-                parsesOk "module T  let f = fn (x: integer): integer => { x }"
+                parsesOk "module T  let f = fn (x: integer) -> integer { x }"
             it "fn with return in block" $
-                parsesOk "module T  fn f(x: integer): integer => { return x * 2 }"
+                parsesOk "module T  fn f(x: integer) -> integer { return x * 2 }"
             it "fn with generics" $
-                parsesOk "module T  fn id<T>(x: T): T => { x }"
+                parsesOk "module T  fn id<T>(x: T) -> T { x }"
             it "fn without block body FAILS" $
-                parseFails "module T  fn f(x: integer): integer => x"
+                parseFails "module T  fn f(x: integer) -> integer x"
 
         describe "data declarations" $ do
             it "tuple data" $
@@ -108,17 +108,17 @@ spec = do
             it "record data" $
                 parsesOk "module T  data User<out ID> { id: ID, name: string }"
             it "effect declaration" $
-                parsesOk "module T  effect Log<out T>(value: T) => null"
+                parsesOk "module T  effect Log<out T>(value: T) -> null"
 
         describe "continue" $ do
-            it "continue(expr) parses" $
+            it "continue expr parses" $
                 parsesOk $ unlines
                     [ "module T"
-                    , "effect Log<out T>(msg: T) => null"
-                    , "let test = fn (x: integer): integer => {"
-                    , "  let f: (y: integer) => integer with Log<string> = fn (y: integer): integer => { y }"
-                    , "  handle f(x) {"
-                    , "    case Log(msg) => continue(null)"
+                    , "effect Log<out T>(msg: T) -> null"
+                    , "let test = fn (x: integer) -> integer {"
+                    , "  let f: (y: integer) => integer with Log<string> = fn (y: integer) -> integer { y }"
+                    , "  handle { f(x) } with {"
+                    , "    case Log(msg) => continue null"
                     , "  }"
                     , "}"
                     ]
@@ -139,7 +139,7 @@ spec = do
             it "primitive types" $
                 parsesOk "module T  let x: integer = 1"
             it "function type" $
-                parsesOk "module T  let f: (x: integer) => integer = fn (x: integer): integer => { x }"
+                parsesOk "module T  let f: (x: integer) => integer = fn (x: integer) -> integer { x }"
             it "union type" $
                 parsesOk "module T  let x: integer | string = 1"
             it "type alias" $
@@ -147,9 +147,9 @@ spec = do
 
         describe "import" $ do
             it "simple import" $
-                parsesOk "module T  import Foo.Bar"
+                parsesOk "module T  import \"Foo.Bar\""
             it "aliased import" $
-                parsesOk "module T  import Foo.Bar as F"
+                parsesOk "module T  import \"Foo.Bar\" as F"
 
         describe "basic.qtl example file" $ do
             it "parses successfully" $ do
@@ -179,11 +179,11 @@ spec = do
 
         describe "functions" $ do
             it "fn with correct return type passes" $
-                typechecksOk "module T  fn add(x: integer, y: integer): number => { x + y }"
+                typechecksOk "module T  fn add(x: integer, y: integer) -> number { x + y }"
             it "fn with wrong return type fails" $
-                typecheckFails "module T  fn f(x: integer): string => { x + 1 }"
+                typecheckFails "module T  fn f(x: integer) -> string { x + 1 }"
             it "nested let in block" $
-                typechecksOk "module T  fn f(x: integer): number => { let y = x + 1  return y }"
+                typechecksOk "module T  fn f(x: integer) -> number { let y = x + 1  return y }"
 
         describe "binary ops" $ do
             it "arithmetic on integers" $
@@ -195,26 +195,26 @@ spec = do
 
         describe "if expression" $ do
             it "if without else" $
-                typechecksOk "module T  fn f(b: boolean): boolean => { if b { true } }"
+                typechecksOk "module T  fn f(b: boolean) -> boolean { if b { true } }"
             it "if with else unifies branches" $
                 typechecksOk "module T  let x = if true { 1 } else { 2 }"
 
         describe "return validation" $ do
             it "return as last stmt in fn body is OK" $
-                typechecksOk "module T  fn f(x: integer): integer => { return x }"
+                typechecksOk "module T  fn f(x: integer) -> integer { return x }"
             it "return in middle of fn body FAILS" $
-                typecheckFails "module T  fn f(x: integer): integer => { return x  x }"
+                typecheckFails "module T  fn f(x: integer) -> integer { return x  x }"
             it "return in if branch FAILS" $
                 typecheckFails $ unlines
                     [ "module T"
-                    , "fn f(b: boolean): integer => {"
+                    , "fn f(b: boolean) -> integer {"
                     , "  if b { return 1 } else { 2 }"
                     , "}"
                     ]
             it "return in nested block FAILS" $
                 typecheckFails $ unlines
                     [ "module T"
-                    , "fn f(): integer => {"
+                    , "fn f() -> integer {"
                     , "  let x = { return 1 }"
                     , "  x"
                     , "}"
@@ -237,43 +237,43 @@ spec = do
         -- === Generic bounds ===
         describe "generic bounds" $ do
             it "identity function: T -> T" $
-                typechecksOk "module T  fn id<T>(x: T): T => { x }"
+                typechecksOk "module T  fn id<T>(x: T) -> T { x }"
             it "T sub number, return number" $
-                typechecksOk "module T  fn f<T sub number>(x: T): number => { x }"
+                typechecksOk "module T  fn f<T sub number>(x: T) -> number { x }"
             it "T sub number, return T (same as assumption)" $
-                typechecksOk "module T  fn f<T sub number>(x: T): T => { x }"
+                typechecksOk "module T  fn f<T sub number>(x: T) -> T { x }"
             it "T sub number, return string FAILS" $
-                typecheckFails "module T  fn f<T sub number>(x: T): string => { x }"
+                typecheckFails "module T  fn f<T sub number>(x: T) -> string { x }"
             it "T sub integer, widened to integer | string" $
-                typechecksOk "module T  fn f<T sub integer>(x: T): integer | string => { x }"
+                typechecksOk "module T  fn f<T sub integer>(x: T) -> integer | string { x }"
             it "unbounded T, any return type accepted (conservative)" $
-                typechecksOk "module T  fn f<T>(x: T): T => { x }"
+                typechecksOk "module T  fn f<T>(x: T) -> T { x }"
 
         -- === Function subtyping via block ===
         describe "function subtyping" $ do
             it "same function type" $
-                typechecksOk "module T  let f: (x: integer) => integer = fn (x: integer): integer => { x }"
+                typechecksOk "module T  let f: (x: integer) => integer = fn (x: integer) -> integer { x }"
             it "contravariant params + covariant return" $
                 typechecksOk $ unlines
                     [ "module T"
-                    , "fn test(): (x: integer) => number => {"
-                    , "  let f = fn (x: number): integer => { 42 }"
+                    , "fn test() -> (x: integer) => number {"
+                    , "  let f = fn (x: number) -> integer { 42 }"
                     , "  return f"
                     , "}"
                     ]
             it "wrong variance FAILS" $
                 typecheckFails $ unlines
                     [ "module T"
-                    , "fn test(): (x: number) => integer => {"
-                    , "  let f = fn (x: integer): number => { 42 }"
+                    , "fn test() -> (x: number) => integer {"
+                    , "  let f = fn (x: integer) -> number { 42 }"
                     , "  return f"
                     , "}"
                     ]
             it "arity mismatch FAILS" $
                 typecheckFails $ unlines
                     [ "module T"
-                    , "fn test(): (x: integer, y: integer) => integer => {"
-                    , "  let f = fn (x: integer): integer => { x }"
+                    , "fn test() -> (x: integer, y: integer) => integer {"
+                    , "  let f = fn (x: integer) -> integer { x }"
                     , "  return f"
                     , "}"
                     ]
@@ -284,56 +284,56 @@ spec = do
                 typechecksOk $ unlines
                     [ "module T"
                     , "data Box<out T>(value: T)"
-                    , "fn test(b: Box<integer>): Box<number> => { b }"
+                    , "fn test(b: Box<integer>) -> Box<number> { b }"
                     ]
             it "covariant: Box<number> NOT <: Box<integer>" $
                 typecheckFails $ unlines
                     [ "module T"
                     , "data Box<out T>(value: T)"
-                    , "fn test(b: Box<number>): Box<integer> => { b }"
+                    , "fn test(b: Box<number>) -> Box<integer> { b }"
                     ]
             it "contravariant: Consumer<number> <: Consumer<integer>" $
                 typechecksOk $ unlines
                     [ "module T"
                     , "data Consumer<in T>(consume: (x: T) => null)"
-                    , "fn test(c: Consumer<number>): Consumer<integer> => { c }"
+                    , "fn test(c: Consumer<number>) -> Consumer<integer> { c }"
                     ]
             it "contravariant: Consumer<integer> NOT <: Consumer<number>" $
                 typecheckFails $ unlines
                     [ "module T"
                     , "data Consumer<in T>(consume: (x: T) => null)"
-                    , "fn test(c: Consumer<integer>): Consumer<number> => { c }"
+                    , "fn test(c: Consumer<integer>) -> Consumer<number> { c }"
                     ]
             it "bivariant (no annotation): any types pass" $
                 typechecksOk $ unlines
                     [ "module T"
                     , "data Cell<T>(value: T)"
-                    , "fn test(c: Cell<integer>): Cell<number> => { c }"
+                    , "fn test(c: Cell<integer>) -> Cell<number> { c }"
                     ]
             it "invariant (in out): same type passes" $
                 typechecksOk $ unlines
                     [ "module T"
                     , "data Phantom<in out T>(value: integer)"
-                    , "fn test(p: Phantom<integer>): Phantom<integer> => { p }"
+                    , "fn test(p: Phantom<integer>) -> Phantom<integer> { p }"
                     ]
             it "invariant (in out): different types FAIL" $
                 typecheckFails $ unlines
                     [ "module T"
                     , "data Phantom<in out T>(value: integer)"
-                    , "fn test(p: Phantom<integer>): Phantom<string> => { p }"
+                    , "fn test(p: Phantom<integer>) -> Phantom<string> { p }"
                     ]
             it "data type mismatch FAILS" $
                 typecheckFails $ unlines
                     [ "module T"
                     , "data Box<out T>(value: T)"
                     , "data Wrap<out T>(inner: T)"
-                    , "fn test(b: Box<integer>): Wrap<integer> => { b }"
+                    , "fn test(b: Box<integer>) -> Wrap<integer> { b }"
                     ]
             it "nested covariant data" $
                 typechecksOk $ unlines
                     [ "module T"
                     , "data Box<out T>(value: T)"
-                    , "fn test(b: Box<Box<integer>>): Box<Box<number>> => { b }"
+                    , "fn test(b: Box<Box<integer>>) -> Box<Box<number>> { b }"
                     ]
 
         -- === Pattern matching with data types ===
@@ -342,7 +342,7 @@ spec = do
                 typechecksOk $ unlines
                     [ "module T"
                     , "data Box<out T>(value: T)"
-                    , "fn unbox(b: Box<integer>): integer => {"
+                    , "fn unbox(b: Box<integer>) -> integer {"
                     , "  match b {"
                     , "    case (Box(v)) => v"
                     , "  }"
@@ -352,7 +352,7 @@ spec = do
                 typecheckFails $ unlines
                     [ "module T"
                     , "data Box<out T>(value: T)"
-                    , "fn unbox(b: Box<string>): integer => {"
+                    , "fn unbox(b: Box<string>) -> integer {"
                     , "  match b {"
                     , "    case (Box(v)) => v"
                     , "  }"
@@ -363,7 +363,7 @@ spec = do
                     [ "module T"
                     , "data Some<out T>(value: T)"
                     , "data None()"
-                    , "fn unwrap(x: Some<integer> | None): integer | null => {"
+                    , "fn unwrap(x: Some<integer> | None) -> integer | null {"
                     , "  match x {"
                     , "    case (Some(v)) => v"
                     , "    case (None()) => null"
@@ -374,7 +374,7 @@ spec = do
                 typechecksOk $ unlines
                     [ "module T"
                     , "data Box<out T>(value: T)"
-                    , "fn test(x: Box<integer> | Box<string>): integer | string => {"
+                    , "fn test(x: Box<integer> | Box<string>) -> integer | string {"
                     , "  match x {"
                     , "    case (Box(v)) => v"
                     , "  }"
@@ -384,7 +384,7 @@ spec = do
                 typechecksOk $ unlines
                     [ "module T"
                     , "data Box<out T>(value: T)"
-                    , "fn deep(b: Box<Box<integer>>): integer => {"
+                    , "fn deep(b: Box<Box<integer>>) -> integer {"
                     , "  match b {"
                     , "    case (Box(inner)) => match inner {"
                     , "      case (Box(v)) => v"
@@ -398,17 +398,17 @@ spec = do
             it "apply function argument" $
                 typechecksOk $ unlines
                     [ "module T"
-                    , "fn apply(f: (x: integer) => string, x: integer): string => { f(x) }"
+                    , "fn apply(f: (x: integer) => string, x: integer) -> string { f(x) }"
                     ]
             it "compose functions" $
                 typechecksOk $ unlines
                     [ "module T"
-                    , "fn compose(f: (x: integer) => string, g: (x: string) => boolean, x: integer): boolean => { g(f(x)) }"
+                    , "fn compose(f: (x: integer) => string, g: (x: string) => boolean, x: integer) -> boolean { g(f(x)) }"
                     ]
             it "wrong arg type to function FAILS" $
                 typecheckFails $ unlines
                     [ "module T"
-                    , "fn apply(f: (x: string) => integer, x: integer): integer => { f(x) }"
+                    , "fn apply(f: (x: string) => integer, x: integer) -> integer { f(x) }"
                     ]
 
         -- === If-else union ===
@@ -416,14 +416,14 @@ spec = do
             it "branches form union matching annotation" $
                 typechecksOk $ unlines
                     [ "module T"
-                    , "fn test(b: boolean): integer | string => {"
+                    , "fn test(b: boolean) -> integer | string {"
                     , "  if b { 42 } else { \"hello\" }"
                     , "}"
                     ]
             it "annotation too narrow for union FAILS" $
                 typecheckFails $ unlines
                     [ "module T"
-                    , "fn test(b: boolean): integer => {"
+                    , "fn test(b: boolean) -> integer {"
                     , "  if b { 42 } else { \"hello\" }"
                     , "}"
                     ]
@@ -459,7 +459,7 @@ spec = do
             it "block with multiple lets and constraints" $
                 typechecksOk $ unlines
                     [ "module T"
-                    , "fn test(): integer => {"
+                    , "fn test() -> integer {"
                     , "  let x: number = 42"
                     , "  let y: integer = 10"
                     , "  return y"
@@ -470,7 +470,7 @@ spec = do
                     [ "module T"
                     , "data Ok<out T>(value: T)"
                     , "data Err<out E>(error: E)"
-                    , "fn dispatch(r: Ok<integer> | Err<string>, fallback: (x: string) => integer): integer => {"
+                    , "fn dispatch(r: Ok<integer> | Err<string>, fallback: (x: string) => integer) -> integer {"
                     , "  match r {"
                     , "    case (Ok(v)) => v"
                     , "    case (Err(e)) => fallback(e)"
@@ -483,31 +483,31 @@ spec = do
             it "pure fn assignable to effectful function type (pure <: Log<string>)" $
                 typechecksOk $ unlines
                     [ "module T"
-                    , "effect Log<out T>(msg: T) => null"
-                    , "let f: (x: string) => null with Log<string> = fn (x: string): null => { null }"
+                    , "effect Log<out T>(msg: T) -> null"
+                    , "let f: (x: string) => null with Log<string> = fn (x: string) -> null { null }"
                     ]
             it "pure fn assignable to impure function type (pure <: impure)" $
                 typechecksOk $ unlines
                     [ "module T"
-                    , "let f: (x: string) => null with impure = fn (x: string): null => { null }"
+                    , "let f: (x: string) => null with impure = fn (x: string) -> null { null }"
                     ]
             it "effectful fn NOT assignable to pure type FAILS" $
                 typecheckFails $ unlines
                     [ "module T"
-                    , "effect Log<out T>(msg: T) => null"
+                    , "effect Log<out T>(msg: T) -> null"
                     , "// inner fn body calls effectful f, so outer fn has Log effect"
-                    , "let test: (x: string) => null = fn (x: string): null => {"
-                    , "  let f: (x: string) => null with Log<string> = fn (y: string): null => { null }"
+                    , "let test: (x: string) => null = fn (x: string) -> null {"
+                    , "  let f: (x: string) => null with Log<string> = fn (y: string) -> null { null }"
                     , "  f(x)"
                     , "}"
                     ]
             it "handle catches effect, making fn pure" $
                 typechecksOk $ unlines
                     [ "module T"
-                    , "effect Log<out T>(msg: T) => null"
-                    , "let test: (x: string) => null = fn (x: string): null => {"
-                    , "  let f: (x: string) => null with Log<string> = fn (y: string): null => { null }"
-                    , "  handle f(x) {"
+                    , "effect Log<out T>(msg: T) -> null"
+                    , "let test: (x: string) => null = fn (x: string) -> null {"
+                    , "  let f: (x: string) => null with Log<string> = fn (y: string) -> null { null }"
+                    , "  handle { f(x) } with {"
                     , "    case Log(msg) => null"
                     , "  }"
                     , "}"
@@ -515,9 +515,9 @@ spec = do
             it "effect subtype: single effect <: impure" $
                 typechecksOk $ unlines
                     [ "module T"
-                    , "effect Log<out T>(msg: T) => null"
-                    , "let test: (x: string) => null with impure = fn (x: string): null => {"
-                    , "  let f: (x: string) => null with Log<string> = fn (y: string): null => { null }"
+                    , "effect Log<out T>(msg: T) -> null"
+                    , "let test: (x: string) => null with impure = fn (x: string) -> null {"
+                    , "  let f: (x: string) => null with Log<string> = fn (y: string) -> null { null }"
                     , "  f(x)"
                     , "}"
                     ]
@@ -526,32 +526,32 @@ spec = do
             it "continue with correct effect return type" $
                 typechecksOk $ unlines
                     [ "module T"
-                    , "effect Log<out T>(msg: T) => null"
-                    , "let test: (x: integer) => integer = fn (x: integer): integer => {"
-                    , "  let f: (y: integer) => integer with Log<string> = fn (y: integer): integer => { y }"
-                    , "  handle f(x) {"
-                    , "    case Log(msg) => continue(null)"
+                    , "effect Log<out T>(msg: T) -> null"
+                    , "let test: (x: integer) => integer = fn (x: integer) -> integer {"
+                    , "  let f: (y: integer) => integer with Log<string> = fn (y: integer) -> integer { y }"
+                    , "  handle { f(x) } with {"
+                    , "    case Log(msg) => continue null"
                     , "  }"
                     , "}"
                     ]
             it "continue with wrong type FAILS" $
                 typecheckFails $ unlines
                     [ "module T"
-                    , "effect Log<out T>(msg: T) => null"
-                    , "let test = fn (x: integer): integer => {"
-                    , "  let f: (y: integer) => integer with Log<string> = fn (y: integer): integer => { y }"
-                    , "  handle f(x) {"
-                    , "    case Log(msg) => continue(42)"
+                    , "effect Log<out T>(msg: T) -> null"
+                    , "let test = fn (x: integer) -> integer {"
+                    , "  let f: (y: integer) => integer with Log<string> = fn (y: integer) -> integer { y }"
+                    , "  handle { f(x) } with {"
+                    , "    case Log(msg) => continue 42"
                     , "  }"
                     , "}"
                     ]
             it "handler without continue (abort)" $
                 typechecksOk $ unlines
                     [ "module T"
-                    , "effect Throw<out E>(error: E) => null"
-                    , "let test: (x: integer) => integer = fn (x: integer): integer => {"
-                    , "  let f: (y: integer) => integer with Throw<string> = fn (y: integer): integer => { y }"
-                    , "  handle f(x) {"
+                    , "effect Throw<out E>(error: E) -> null"
+                    , "let test: (x: integer) => integer = fn (x: integer) -> integer {"
+                    , "  let f: (y: integer) => integer with Throw<string> = fn (y: integer) -> integer { y }"
+                    , "  handle { f(x) } with {"
                     , "    case Throw(error) => 0"
                     , "  }"
                     , "}"
@@ -559,19 +559,19 @@ spec = do
             it "continue outside handle FAILS" $
                 typecheckFails $ unlines
                     [ "module T"
-                    , "let test = fn (x: integer): integer => {"
-                    , "  continue(x)"
+                    , "let test = fn (x: integer) -> integer {"
+                    , "  continue x"
                     , "}"
                     ]
             it "multiple continue calls in branches" $
                 typechecksOk $ unlines
                     [ "module T"
-                    , "effect Ask<out T, in R>(question: T) => R"
-                    , "let test: (x: integer) => integer = fn (x: integer): integer => {"
-                    , "  let f: (y: integer) => integer with Ask<string, integer> = fn (y: integer): integer => { y }"
-                    , "  handle f(x) {"
+                    , "effect Ask<out T, in R>(question: T) -> R"
+                    , "let test: (x: integer) => integer = fn (x: integer) -> integer {"
+                    , "  let f: (y: integer) => integer with Ask<string, integer> = fn (y: integer) -> integer { y }"
+                    , "  handle { f(x) } with {"
                     , "    case Ask(question) => {"
-                    , "      if true { continue(42) } else { continue(0) }"
+                    , "      if true { continue 42 } else { continue 0 }"
                     , "    }"
                     , "  }"
                     , "}"
@@ -579,12 +579,12 @@ spec = do
             it "multiple continue calls with wrong type in one branch FAILS" $
                 typecheckFails $ unlines
                     [ "module T"
-                    , "effect Ask<out T, in R>(question: T) => R"
-                    , "let test = fn (x: integer): integer => {"
-                    , "  let f: (y: integer) => integer with Ask<string, integer> = fn (y: integer): integer => { y }"
-                    , "  handle f(x) {"
+                    , "effect Ask<out T, in R>(question: T) -> R"
+                    , "let test = fn (x: integer) -> integer {"
+                    , "  let f: (y: integer) => integer with Ask<string, integer> = fn (y: integer) -> integer { y }"
+                    , "  handle { f(x) } with {"
                     , "    case Ask(question) => {"
-                    , "      if true { continue(42) } else { continue(\"wrong\") }"
+                    , "      if true { continue 42 } else { continue \"wrong\" }"
                     , "    }"
                     , "  }"
                     , "}"
@@ -592,13 +592,13 @@ spec = do
             it "capture continue result in let binding (multi-shot)" $
                 typechecksOk $ unlines
                     [ "module T"
-                    , "effect Choose(value: null) => boolean"
-                    , "let test: (x: integer) => number = fn (x: integer): number => {"
-                    , "  let f: (y: integer) => integer with Choose = fn (y: integer): integer => { y }"
-                    , "  handle f(x) {"
+                    , "effect Choose(value: null) -> boolean"
+                    , "let test: (x: integer) => number = fn (x: integer) -> number {"
+                    , "  let f: (y: integer) => integer with Choose = fn (y: integer) -> integer { y }"
+                    , "  handle { f(x) } with {"
                     , "    case Choose(value) => {"
-                    , "      let left = continue(false)"
-                    , "      let right = continue(true)"
+                    , "      let left = continue false"
+                    , "      let right = continue true"
                     , "      left + right"
                     , "    }"
                     , "  }"
@@ -607,10 +607,10 @@ spec = do
             it "handle with return clause and continue" $
                 typechecksOk $ unlines
                     [ "module T"
-                    , "effect Throw<out E>(error: E) => null"
-                    , "let test: (x: integer) => number = fn (x: integer): number => {"
-                    , "  let f: (y: integer) => integer with Throw<string> = fn (y: integer): integer => { y }"
-                    , "  handle f(x) {"
+                    , "effect Throw<out E>(error: E) -> null"
+                    , "let test: (x: integer) => number = fn (x: integer) -> number {"
+                    , "  let f: (y: integer) => integer with Throw<string> = fn (y: integer) -> integer { y }"
+                    , "  handle { f(x) } with {"
                     , "    case Throw(error) => 0"
                     , "    return r => r + 1"
                     , "  }"
@@ -626,24 +626,24 @@ spec = do
             it "\"foo\" | \"bar\" <: \"foo\" | \"bar\" | \"baz\"" $
                 typechecksOk $ unlines
                     [ "module T"
-                    , "fn test(x: \"foo\" | \"bar\"): \"foo\" | \"bar\" | \"baz\" => { x }"
+                    , "fn test(x: \"foo\" | \"bar\") -> \"foo\" | \"bar\" | \"baz\" { x }"
                     ]
             it "\"foo\" | \"bar\" | \"baz\" NOT <: \"foo\" | \"bar\"" $
                 typecheckFails $ unlines
                     [ "module T"
-                    , "fn test(x: \"foo\" | \"bar\" | \"baz\"): \"foo\" | \"bar\" => { x }"
+                    , "fn test(x: \"foo\" | \"bar\" | \"baz\") -> \"foo\" | \"bar\" { x }"
                     ]
 
         describe "integer literal unions" $ do
             it "1 | 2 <: 1 | 2 | 3" $
                 typechecksOk $ unlines
                     [ "module T"
-                    , "fn test(x: 1 | 2): 1 | 2 | 3 => { x }"
+                    , "fn test(x: 1 | 2) -> 1 | 2 | 3 { x }"
                     ]
             it "1 | 2 | 3 NOT <: 1 | 2" $
                 typecheckFails $ unlines
                     [ "module T"
-                    , "fn test(x: 1 | 2 | 3): 1 | 2 => { x }"
+                    , "fn test(x: 1 | 2 | 3) -> 1 | 2 { x }"
                     ]
 
         describe "literal to primitive" $ do
@@ -662,36 +662,36 @@ spec = do
             it "string NOT <: \"hello\"" $
                 typecheckFails $ unlines
                     [ "module T"
-                    , "fn test(x: string): \"hello\" => { x }"
+                    , "fn test(x: string) -> \"hello\" { x }"
                     ]
             it "integer NOT <: 1" $
                 typecheckFails $ unlines
                     [ "module T"
-                    , "fn test(x: integer): 1 => { x }"
+                    , "fn test(x: integer) -> 1 { x }"
                     ]
 
         describe "mixed literal unions" $ do
             it "1 | \"hello\" <: integer | string" $
                 typechecksOk $ unlines
                     [ "module T"
-                    , "fn test(x: 1 | \"hello\"): integer | string => { x }"
+                    , "fn test(x: 1 | \"hello\") -> integer | string { x }"
                     ]
             it "true | 42 <: boolean | integer" $
                 typechecksOk $ unlines
                     [ "module T"
-                    , "fn test(x: true | 42): boolean | integer => { x }"
+                    , "fn test(x: true | 42) -> boolean | integer { x }"
                     ]
             it "1 | true NOT <: integer | string" $
                 typecheckFails $ unlines
                     [ "module T"
-                    , "fn test(x: 1 | true): integer | string => { x }"
+                    , "fn test(x: 1 | true) -> integer | string { x }"
                     ]
 
         describe "float literals" $ do
             it "3.14 NOT <: integer" $
                 typecheckFails $ unlines
                     [ "module T"
-                    , "fn test(x: 3.14): integer => { x }"
+                    , "fn test(x: 3.14) -> integer { x }"
                     ]
 
     -- -----------------------------------------------------------------------
@@ -703,7 +703,7 @@ spec = do
             typechecksOk $ unlines
                 [ "module T"
                 , "data User { name: string, age: integer }"
-                , "fn getName(u: User): string => {"
+                , "fn getName(u: User) -> string {"
                 , "  match u {"
                 , "    case User {name = n} => n"
                 , "  }"
@@ -713,7 +713,7 @@ spec = do
             typechecksOk $ unlines
                 [ "module T"
                 , "data Pair<out A, out B> { fst: A, snd: B }"
-                , "fn getFst(p: Pair<integer, string>): integer => {"
+                , "fn getFst(p: Pair<integer, string>) -> integer {"
                 , "  match p {"
                 , "    case Pair {fst = f} => f"
                 , "  }"
@@ -723,7 +723,7 @@ spec = do
             typechecksOk $ unlines
                 [ "module T"
                 , "data Box<out T sub number>(value: T)"
-                , "fn unbox(b: Box<integer>): number => {"
+                , "fn unbox(b: Box<integer>) -> number {"
                 , "  match b {"
                 , "    case (Box(v)) => v"
                 , "  }"

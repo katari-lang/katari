@@ -8,15 +8,17 @@ module QataliCompiler.Compile.Lower (
     lowerModule,
 ) where
 
-import           Control.Monad              (forM, forM_, foldM, when)
+import           Control.Monad              (forM, forM_)
 import           Control.Monad.Reader       (ReaderT (..), asks, local, runReaderT)
 import           Control.Monad.State.Strict (StateT (..), gets, modify', runStateT)
 import           Data.Foldable              (foldlM)
+import           Data.List.NonEmpty          (toList)
 import           Data.Map.Strict            (Map)
 import qualified Data.Map.Strict            as Map
-import           Data.Maybe                 (mapMaybe)
+import           Data.Maybe                 (isNothing, mapMaybe)
 import qualified Data.Set                   as Set
 import           Data.Text                  (Text)
+import qualified Data.Text                  as T
 import           Data.Word                  (Word16, Word32)
 
 import           QataliCompiler.Diagnostic  (Diagnostic, mkError)
@@ -25,12 +27,17 @@ import           QataliCompiler.IR.Module   (Block (..), Constant (..), Function
                                               IREffectDef (..), Module (..), NominalTypeDef (..),
                                               Program (..))
 import           QataliCompiler.IR.Types
-import           QataliCompiler.Name        (ModuleName, Name (..), QualifiedName (..),
-                                              unqualify)
+import           QataliCompiler.Name        (ModuleName (..), Name (..), QualifiedName (..),
+                                              unName, unqualify)
 import           QataliCompiler.SrcLoc      (SrcSpan (..), noSpan)
 import qualified QataliCompiler.Syntax.AST  as AST
 import           QataliCompiler.Syntax.Literal (Literal (..))
 import           QataliCompiler.Type.Defs      (DataDef (..), TypeDefs (..))
+
+-- | Reserved name for the continuation variable inside handler closures.
+-- Uses @$@ prefix to avoid collision with user-defined names.
+contName :: Name
+contName = Name "$cont"
 
 -- =========================================================================
 -- SimpleType
@@ -44,13 +51,16 @@ data SimpleType = STInt | STFloat | STString | STBool | STNull | STUnknown
 -- =========================================================================
 
 data LowerEnv = LowerEnv
-    { leModuleName   :: !ModuleName
-    , leTypeDefs     :: !TypeDefs
-    , leLocals       :: !(Map Name VarId)
-    , leEffectIds    :: !(Map Name EffectId)
-    , leDataIds      :: !(Map Name TypeId)
-    , leFuncNames    :: !(Map Name FuncId)
-    , leContinuation :: !(Maybe VarId)
+    { leModuleName     :: !ModuleName
+    , leTypeDefs       :: !TypeDefs
+    , leLocals         :: !(Map Name VarId)
+    , leEffectIds      :: !(Map Name EffectId)
+    , leDataIds        :: !(Map Name TypeId)
+    , leFuncNames      :: !(Map Name FuncId)
+    , leResolvedImpls  :: !(Map SrcSpan Name)
+    -- ^ Trait call sites resolved to impl function names by the type checker.
+    , leHandlerVarNames :: ![Name]
+    -- ^ Names of handler variables currently in scope (for continue with updates).
     }
 
 data SavedBlockState = SavedBlockState
@@ -58,6 +68,8 @@ data SavedBlockState = SavedBlockState
     , sbsCurrentInstrs  :: ![Instr]
     , sbsBlocks         :: ![Block]
     , sbsNextBlock      :: !Word16
+    , sbsNextVar        :: !Word32
+    , sbsVarTypes       :: !(Map VarId SimpleType)
     }
 
 data LowerState = LowerState
@@ -172,6 +184,8 @@ saveBlockState = SavedBlockState
     <*> gets lsCurrentInstrs
     <*> gets lsBlocks
     <*> gets lsNextBlock
+    <*> gets lsNextVar
+    <*> gets lsVarTypes
 
 restoreBlockState :: SavedBlockState -> LowerM ()
 restoreBlockState sbs = modify' (\s -> s
@@ -179,6 +193,8 @@ restoreBlockState sbs = modify' (\s -> s
     , lsCurrentInstrs  = sbsCurrentInstrs sbs
     , lsBlocks         = sbsBlocks sbs
     , lsNextBlock      = sbsNextBlock sbs
+    , lsNextVar        = sbsNextVar sbs
+    , lsVarTypes       = sbsVarTypes sbs
     })
 
 startFreshBlocks :: LowerM ()
@@ -187,6 +203,8 @@ startFreshBlocks = modify' (\s -> s
     , lsCurrentBlockId = BlockId 0
     , lsCurrentInstrs  = []
     , lsBlocks         = []
+    , lsNextVar        = 0
+    , lsVarTypes       = Map.empty
     })
 
 collectBlocks :: LowerM [Block]
@@ -268,14 +286,14 @@ freeVarsExpr = \case
     AST.EVar _ _ -> Set.empty
     AST.ELit _ _ -> Set.empty
     AST.EApp _ f _ args -> freeVarsExpr f <> foldMap freeVarsExpr args
-    AST.EFn _ _ ps _ body ->
+    AST.EFn _ _ ps _ _ body ->
         let pn = Set.fromList [AST.paramName p | p <- ps]
         in  freeVarsFnBody body `Set.difference` pn
     AST.EMatch _ s arms -> freeVarsExpr s <> foldMap fvArm arms
     AST.EIf _ c t me -> freeVarsExpr c <> freeVarsExpr t <> foldMap freeVarsExpr me
     AST.EBlock _ stmts -> freeVarsStmts stmts
-    AST.EHandle _ body cs mr ->
-        freeVarsExpr body <> foldMap fvHC cs <> foldMap fvHR mr
+    AST.EHandle _ body hvars cs mr ->
+        freeVarsExpr body <> foldMap fvHVar hvars <> foldMap fvHC cs <> foldMap fvHR mr
     AST.EConstruct _ _ fs -> foldMap (freeVarsExpr . snd) fs
     AST.EArray _ es -> foldMap fvAE es
     AST.EIndex _ a i -> freeVarsExpr a <> freeVarsExpr i
@@ -283,10 +301,16 @@ freeVarsExpr = \case
     AST.ETemplateLit _ segs -> foldMap fvSeg segs
     AST.EBinOp _ _ l r -> freeVarsExpr l <> freeVarsExpr r
     AST.EUnaryOp _ _ e -> freeVarsExpr e
-    AST.EContinue _ e -> freeVarsExpr e
+    AST.EContinue _ e mUpdates ->
+        Set.insert contName (freeVarsExpr e)
+        <> foldMap (foldMap (freeVarsExpr . snd)) mUpdates
+    AST.EBreak _ e -> freeVarsExpr e
   where
-    fvArm arm = freeVarsExpr (AST.maBody arm) `Set.difference` patBound (AST.maPat arm)
-    fvHC hc = freeVarsExpr (AST.hcBody hc) `Set.difference` foldMap patBound (AST.hcParams hc)
+    fvArm arm = (freeVarsExpr (AST.maBody arm) <> foldMap freeVarsExpr (AST.maGuard arm))
+                `Set.difference` patBound (AST.maPat arm)
+    fvHVar hv = freeVarsExpr (AST.hvInit hv)
+    fvHC hc = (freeVarsExpr (AST.hcBody hc) `Set.difference` foldMap patBound (AST.hcParams hc))
+              `Set.difference` Set.singleton contName
     fvHR hr = freeVarsExpr (AST.hrBody hr) `Set.difference` Set.singleton (AST.hrParam hr)
     fvAE (AST.AElem e) = freeVarsExpr e
     fvAE (AST.ASpread e) = freeVarsExpr e
@@ -313,8 +337,8 @@ patBound = \case
     AST.PVar _ n -> Set.singleton n
     AST.PLit _ _ -> Set.empty
     AST.PWild _ -> Set.empty
-    AST.PCon _ _ ps -> foldMap patBound ps
-    AST.PRecord _ _ fs -> foldMap (patBound . snd) fs
+    AST.PCon _ _ _ ps -> foldMap patBound ps
+    AST.PRecord _ _ _ fs -> foldMap (patBound . snd) fs
     AST.PArray _ sp ->
         foldMap patBound (AST.spBefore sp)
         <> foldMap (\(_, p) -> patBound p) (AST.spSpread sp)
@@ -328,20 +352,23 @@ lowerExpr :: AST.Expr SrcSpan -> LowerM VarId
 lowerExpr = \case
     AST.ELit _ lit -> lowerLit lit
     AST.EVar ann qn -> lowerVar ann qn
+    AST.EBinOp _ AST.OpAnd l r -> lowerShortCircuit True l r
+    AST.EBinOp _ AST.OpOr  l r -> lowerShortCircuit False l r
     AST.EBinOp _ op l r -> lowerBinOp op l r
     AST.EUnaryOp _ op e -> lowerUnaryOp op e
     AST.EIf _ c t me -> lowerIf c t me
     AST.EBlock _ stmts -> lowerStmts stmts
     AST.EApp ann callee _tyArgs args -> lowerApp ann callee args
-    AST.EFn _ _tp params _mrt body -> lowerFn params body
+    AST.EFn _ _tp params _mrt _meff body -> lowerFn params body
     AST.EMatch _ scrut arms -> lowerMatch scrut arms
-    AST.EHandle _ body cases mRet -> lowerHandle body cases mRet
+    AST.EHandle _ body hvars cases mRet -> lowerHandle body hvars cases mRet
     AST.EConstruct ann qn fields -> lowerConstruct ann qn fields
     AST.EArray _ elems -> lowerArray elems
     AST.EIndex _ a i -> lowerIndex a i
     AST.EReturn _ me -> lowerReturn me
     AST.ETemplateLit _ segs -> lowerTemplateLit segs
-    AST.EContinue ann argE -> lowerContinue ann argE
+    AST.EContinue ann argE mUpdates -> lowerContinue ann argE mUpdates
+    AST.EBreak _ valE -> lowerReturn (Just valE)
 
 -- =========================================================================
 -- Literal
@@ -386,6 +413,44 @@ lowerVar ann qn = do
                     emitInstr (IMakeClosure dst fid [])
                     pure dst
         Nothing -> lookupLocalOrError ann name
+
+-- =========================================================================
+-- Short-circuit Boolean operators
+-- =========================================================================
+
+-- | Short-circuit evaluation for @&&@ (isAnd=True) and @||@ (isAnd=False).
+--
+-- @a && b@ compiles to: eval a; if a then eval b else false
+-- @a || b@ compiles to: eval a; if a then true else eval b
+lowerShortCircuit :: Bool -> AST.Expr SrcSpan -> AST.Expr SrcSpan -> LowerM VarId
+lowerShortCircuit isAnd lE rE = do
+    resultV <- freshVar
+    setVarType resultV STBool
+    lv <- lowerExpr lE
+    rhsBid   <- freshBlock
+    mergeBid <- freshBlock
+    if isAnd
+        then do
+            -- a && b: if a then eval b else false
+            shortBid <- freshBlock
+            finishBlock (TBranch lv rhsBid shortBid) shortBid
+            -- short-circuit block: result = false
+            cid <- addConstant (CBool False)
+            emitInstr (ILoadConst resultV cid)
+            finishBlock (TJump mergeBid) rhsBid
+        else do
+            -- a || b: if a then true else eval b
+            shortBid <- freshBlock
+            finishBlock (TBranch lv shortBid rhsBid) shortBid
+            -- short-circuit block: result = true
+            cid <- addConstant (CBool True)
+            emitInstr (ILoadConst resultV cid)
+            finishBlock (TJump mergeBid) rhsBid
+    -- rhs block: eval b, result = b
+    rv <- lowerExpr rE
+    emitInstr (IMove resultV rv)
+    finishBlock (TJump mergeBid) mergeBid
+    pure resultV
 
 -- =========================================================================
 -- Binary operators
@@ -434,9 +499,9 @@ lowerBinOp op lE rE = do
     pickBin AST.OpLe  _       d a b = ICmpLe d a b
     pickBin AST.OpGt  _       d a b = ICmpGt d a b
     pickBin AST.OpGe  _       d a b = ICmpGe d a b
-    pickBin AST.OpAnd _       d a b = IAnd d a b
-    pickBin AST.OpOr  _       d a b = IOr d a b
     pickBin AST.OpConcat _    d a b = IConcat d a b
+    pickBin AST.OpAnd _       _ _ _ = error "unreachable: OpAnd handled by lowerShortCircuit"
+    pickBin AST.OpOr  _       _ _ _ = error "unreachable: OpOr handled by lowerShortCircuit"
 
 -- =========================================================================
 -- Unary operators
@@ -535,7 +600,7 @@ lowerReturn me = do
 -- =========================================================================
 
 lowerApp :: SrcSpan -> AST.Expr SrcSpan -> [AST.Expr SrcSpan] -> LowerM VarId
-lowerApp _ann callee args = do
+lowerApp ann callee args = do
     -- Check if callee is an effect
     case callee of
         AST.EVar _ (QualifiedName _ effName) -> do
@@ -554,21 +619,32 @@ lowerApp _ann callee args = do
         argVs <- mapM lowerExpr args
         dst <- freshVar
         contBid <- freshBlock
-        case callee of
-            AST.EVar _ (QualifiedName _ name) -> do
-                mfid <- asks (Map.lookup name . leFuncNames)
-                mloc <- asks (Map.lookup name . leLocals)
-                case (mloc, mfid) of
-                    (Just locV, _) ->
-                        finishBlock (TCall dst locV argVs contBid) contBid
-                    (Nothing, Just fid) ->
-                        finishBlock (TCallDirect dst fid argVs contBid) contBid
+        -- Check for statically resolved trait impl
+        mImplName <- asks (Map.lookup ann . leResolvedImpls)
+        case mImplName of
+            Just implName -> do
+                mfid <- asks (Map.lookup implName . leFuncNames)
+                case mfid of
+                    Just fid -> finishBlock (TCallDirect dst fid argVs contBid) contBid
+                    Nothing  -> do
+                        funV <- lowerExpr callee
+                        finishBlock (TCall dst funV argVs contBid) contBid
+            Nothing ->
+                case callee of
+                    AST.EVar _ (QualifiedName _ name) -> do
+                        mfid <- asks (Map.lookup name . leFuncNames)
+                        mloc <- asks (Map.lookup name . leLocals)
+                        case (mloc, mfid) of
+                            (Just locV, _) ->
+                                finishBlock (TCall dst locV argVs contBid) contBid
+                            (Nothing, Just fid) ->
+                                finishBlock (TCallDirect dst fid argVs contBid) contBid
+                            _ -> do
+                                funV <- lowerExpr callee
+                                finishBlock (TCall dst funV argVs contBid) contBid
                     _ -> do
                         funV <- lowerExpr callee
                         finishBlock (TCall dst funV argVs contBid) contBid
-            _ -> do
-                funV <- lowerExpr callee
-                finishBlock (TCall dst funV argVs contBid) contBid
         pure dst
 
 -- =========================================================================
@@ -623,15 +699,20 @@ lowerMatch scrut arms = do
 
     let go [] = finishBlock TUnreachable mergeBid
         go [arm] = do
-            bindings <- bindPat scrutV (AST.maPat arm)
+            -- Last arm: verify pattern defensively, panic if it fails
+            panicBid <- freshBlock
+            matchBid <- freshBlock
+            bindings <- compileAndBindPat scrutV (AST.maPat arm) panicBid matchBid
+            applyGuard (AST.maGuard arm) bindings panicBid
             bodyV <- withLocals bindings (lowerExpr (AST.maBody arm))
             emitInstr (IMove resultV bodyV)
-            finishBlock (TJump mergeBid) mergeBid
+            finishBlock (TJump mergeBid) panicBid
+            finishBlock TUnreachable mergeBid
         go (arm:rest) = do
             matchBid <- freshBlock
             nextBid  <- freshBlock
-            compilePat scrutV (AST.maPat arm) nextBid matchBid
-            bindings <- bindPat scrutV (AST.maPat arm)
+            bindings <- compileAndBindPat scrutV (AST.maPat arm) nextBid matchBid
+            applyGuard (AST.maGuard arm) bindings nextBid
             bodyV <- withLocals bindings (lowerExpr (AST.maBody arm))
             emitInstr (IMove resultV bodyV)
             finishBlock (TJump mergeBid) nextBid
@@ -639,14 +720,31 @@ lowerMatch scrut arms = do
     go arms
     pure resultV
 
+-- | Apply match guard: branch on guard expression to success or fail block.
+-- After this, the current block is the one that passed the guard.
+applyGuard :: Maybe (AST.Expr SrcSpan) -> [(Name, VarId)] -> BlockId -> LowerM ()
+applyGuard Nothing _ _ = pure ()
+applyGuard (Just guardE) bindings failBid = do
+    guardV <- withLocals bindings (lowerExpr guardE)
+    guardSuccBid <- freshBlock
+    finishBlock (TBranch guardV guardSuccBid failBid) guardSuccBid
+
 -- =========================================================================
 -- Pattern compilation
 -- =========================================================================
 
-compilePat :: VarId -> AST.Pat SrcSpan -> BlockId -> BlockId -> LowerM ()
-compilePat scrutV pat failBid succBid = case pat of
-    AST.PVar _ _ -> finishBlock (TJump succBid) succBid
-    AST.PWild _  -> finishBlock (TJump succBid) succBid
+-- | Unified pattern compilation: checks the pattern (branching to failBid on
+-- mismatch) and produces variable bindings in one pass, avoiding duplicate
+-- field extraction.
+compileAndBindPat :: VarId -> AST.Pat SrcSpan -> BlockId -> BlockId -> LowerM [(Name, VarId)]
+compileAndBindPat scrutV pat failBid succBid = case pat of
+    AST.PVar _ name -> do
+        registerVarName scrutV name
+        finishBlock (TJump succBid) succBid
+        pure [(name, scrutV)]
+    AST.PWild _ -> do
+        finishBlock (TJump succBid) succBid
+        pure []
     AST.PLit _ lit -> do
         litV <- case lit of
             LitNull -> do v <- freshVar; emitInstr (ILoadNull v); pure v
@@ -654,7 +752,8 @@ compilePat scrutV pat failBid succBid = case pat of
         cmpV <- freshVar
         emitInstr (ICmpEq cmpV scrutV litV)
         finishBlock (TBranch cmpV succBid failBid) succBid
-    AST.PCon _ qn subPats -> do
+        pure []
+    AST.PCon _ qn _tyVars subPats -> do
         let name = qnName qn
         mtid <- asks (Map.lookup name . leDataIds)
         case mtid of
@@ -663,14 +762,17 @@ compilePat scrutV pat failBid succBid = case pat of
                 emitInstr (IGetTag tagV scrutV)
                 matchBid <- freshBlock
                 finishBlock (TSwitch tagV [(CaseTag tid, matchBid)] failBid) matchBid
-                forM_ (zip [0..] subPats) $ \(i, subP) -> do
+                bindings <- concat <$> forM (zip [0..] subPats) (\(i, subP) -> do
                     fV <- freshVar
                     emitInstr (IGetField fV scrutV i)
                     nb <- freshBlock
-                    compilePat fV subP failBid nb
+                    compileAndBindPat fV subP failBid nb)
                 finishBlock (TJump succBid) succBid
-            Nothing -> finishBlock (TJump succBid) succBid
-    AST.PRecord _ qn fieldPats -> do
+                pure bindings
+            Nothing -> do
+                finishBlock (TJump succBid) succBid
+                pure []
+    AST.PRecord _ qn _tyVars fieldPats -> do
         let name = qnName qn
         mtid <- asks (Map.lookup name . leDataIds)
         defs <- asks leTypeDefs
@@ -682,67 +784,70 @@ compilePat scrutV pat failBid succBid = case pat of
                 finishBlock (TSwitch tagV [(CaseTag tid, matchBid)] failBid) matchBid
                 let mdd = Map.lookup name (tdData defs)
                     fieldOrder = maybe [] (map fst . ddFields) mdd
-                forM_ fieldPats $ \(fname, subP) -> do
+                bindings <- concat <$> forM fieldPats (\(fname, subP) -> do
                     let idx = maybe 0 id (lookupIdx fname fieldOrder)
                     fV <- freshVar
                     emitInstr (IGetField fV scrutV (fromIntegral idx))
                     nb <- freshBlock
-                    compilePat fV subP failBid nb
+                    compileAndBindPat fV subP failBid nb)
                 finishBlock (TJump succBid) succBid
-            Nothing -> finishBlock (TJump succBid) succBid
+                pure bindings
+            Nothing -> do
+                finishBlock (TJump succBid) succBid
+                pure []
     AST.PArray _ sp -> do
-        let minLen = length (AST.spBefore sp) + length (AST.spAfter sp)
+        let beforeLen = length (AST.spBefore sp)
+            afterLen  = length (AST.spAfter sp)
+            minLen    = beforeLen + afterLen
         lenV <- freshVar
         emitInstr (IArrLen lenV scrutV)
         minV <- freshVar
         cid <- addConstant (CInt (fromIntegral minLen))
         emitInstr (ILoadConst minV cid)
         cmpV <- freshVar
-        if null (AST.spSpread sp)
+        if isNothing (AST.spSpread sp)
             then emitInstr (ICmpEq cmpV lenV minV)
             else emitInstr (ICmpGe cmpV lenV minV)
         chkBid <- freshBlock
         finishBlock (TBranch cmpV chkBid failBid) chkBid
-        forM_ (zip [0..] (AST.spBefore sp)) $ \(i, subP) -> do
+        -- Before elements
+        beforeBinds <- concat <$> forM (zip [0..] (AST.spBefore sp)) (\(i, subP) -> do
             idxV <- freshVar
             ic <- addConstant (CInt i)
             emitInstr (ILoadConst idxV ic)
             eV <- freshVar
             emitInstr (IArrGet eV scrutV idxV)
             nb <- freshBlock
-            compilePat eV subP failBid nb
-        finishBlock (TJump succBid) succBid
-
-bindPat :: VarId -> AST.Pat SrcSpan -> LowerM [(Name, VarId)]
-bindPat scrutV = \case
-    AST.PVar _ name -> do
-        registerVarName scrutV name
-        pure [(name, scrutV)]
-    AST.PWild _ -> pure []
-    AST.PLit _ _ -> pure []
-    AST.PCon _ _ subPats ->
-        concat <$> forM (zip [0..] subPats) (\(i, subP) -> do
-            fV <- freshVar
-            emitInstr (IGetField fV scrutV i)
-            bindPat fV subP)
-    AST.PRecord _ qn fieldPats -> do
-        defs <- asks leTypeDefs
-        let name = qnName qn
-            mdd = Map.lookup name (tdData defs)
-            fieldOrder = maybe [] (map fst . ddFields) mdd
-        concat <$> forM fieldPats (\(fname, subP) -> do
-            let idx = maybe 0 id (lookupIdx fname fieldOrder)
-            fV <- freshVar
-            emitInstr (IGetField fV scrutV (fromIntegral idx))
-            bindPat fV subP)
-    AST.PArray _ sp ->
-        concat <$> forM (zip [0..] (AST.spBefore sp)) (\(i, subP) -> do
+            compileAndBindPat eV subP failBid nb)
+        -- After elements: index (len - afterLen + i)
+        afterBinds <- concat <$> forM (zip [0..] (AST.spAfter sp)) (\(i, subP) -> do
+            offC <- addConstant (CInt (fromIntegral afterLen - i))
+            offV <- freshVar
+            emitInstr (ILoadConst offV offC)
             idxV <- freshVar
-            ic <- addConstant (CInt i)
-            emitInstr (ILoadConst idxV ic)
+            emitInstr (ISubInt idxV lenV offV)
             eV <- freshVar
             emitInstr (IArrGet eV scrutV idxV)
-            bindPat eV subP)
+            nb <- freshBlock
+            compileAndBindPat eV subP failBid nb)
+        -- Spread element: slice arr[beforeLen .. len - afterLen]
+        spreadBinds <- case AST.spSpread sp of
+            Nothing -> pure []
+            Just (_, subP) -> do
+                fromC <- addConstant (CInt (fromIntegral beforeLen))
+                fromV <- freshVar
+                emitInstr (ILoadConst fromV fromC)
+                toOffC <- addConstant (CInt (fromIntegral afterLen))
+                toOffV <- freshVar
+                emitInstr (ILoadConst toOffV toOffC)
+                toV <- freshVar
+                emitInstr (ISubInt toV lenV toOffV)
+                sliceV <- freshVar
+                emitInstr (IArrSlice sliceV scrutV fromV toV)
+                nb <- freshBlock
+                compileAndBindPat sliceV subP failBid nb
+        finishBlock (TJump succBid) succBid
+        pure (beforeBinds ++ afterBinds ++ spreadBinds)
 
 lookupIdx :: Name -> [Name] -> Maybe Int
 lookupIdx _ [] = Nothing
@@ -750,92 +855,152 @@ lookupIdx n (x:xs)
     | n == x    = Just 0
     | otherwise = (+ 1) <$> lookupIdx n xs
 
+-- | Bind-only pattern matching (for let/handler params where the type checker
+-- guarantees the pattern always matches). Failures jump to TUnreachable.
+bindPat :: VarId -> AST.Pat SrcSpan -> LowerM [(Name, VarId)]
+bindPat scrutV pat = do
+    panicBid <- freshBlock
+    contBid  <- freshBlock
+    bindings <- compileAndBindPat scrutV pat panicBid contBid
+    -- panicBid: should never be reached
+    finishBlock TUnreachable contBid
+    pure bindings
+
 -- =========================================================================
 -- Handle expression
 -- =========================================================================
 
-lowerHandle :: AST.Expr SrcSpan -> [AST.HandleCase SrcSpan]
+lowerHandle :: AST.Expr SrcSpan -> [AST.HandleVar SrcSpan] -> [AST.HandleCase SrcSpan]
             -> Maybe (AST.HandleReturn SrcSpan) -> LowerM VarId
-lowerHandle bodyExpr cases mReturn = do
-    -- 1. Compile body as zero-arg closure
-    bodyFid <- freshFunc
-    let bodyFV = freeVarsExpr bodyExpr
-    locals <- asks leLocals
-    let capNames = filter (`Set.member` bodyFV) (Map.keys locals)
-        capVars  = mapMaybe (`Map.lookup` locals) capNames
+lowerHandle bodyExpr hvars cases mReturn = do
+    let hvarNames = map AST.hvName hvars
+        nHVars   = length hvars
 
-    saved <- saveBlockState
-    startFreshBlocks
-    capBinds <- forM capNames $ \n -> do
-        v <- freshNamedVar n STUnknown; pure (n, v)
-    retV <- withLocals capBinds (lowerExpr bodyExpr)
-    finishBlockFinal (TReturn retV)
-    bodyBlocks <- collectBlocks
-    modify' (\s -> s { lsFunctions = Function bodyFid (fromIntegral (length capBinds)) (map snd capBinds) bodyBlocks : lsFunctions s })
-    restoreBlockState saved
+    -- 0. Compile handler variable initial values
+    hvarInitVs <- forM hvars $ \hv -> lowerExpr (AST.hvInit hv)
 
-    bodyClosV <- freshVar
-    emitInstr (IMakeClosure bodyClosV bodyFid capVars)
+    -- 1. Compile body as zero-arg closure (unchanged)
+    bodyClosV <- compileClosure (freeVarsExpr bodyExpr) [] $ \_ ->
+        lowerExpr bodyExpr
 
-    -- 2. Handler cases
-    handlers <- forM cases $ \hc -> do
-        let effName = AST.hcEffect hc
+    -- 2. Handler cases — each compiled as a separate closure
+    --    Params: [captures..., effect_args..., continuation, hvar_1, hvar_2, ...]
+    handlerClosures <- forM cases $ \hc -> do
+        let effName = qnName (AST.hcEffect hc)
         meid <- asks (Map.lookup effName . leEffectIds)
         eid <- case meid of
             Just e  -> pure e
             Nothing -> lowerError noSpan ("unknown effect: " <> unName effName)
 
-        argVars <- forM (AST.hcParams hc) $ \_ -> freshVar
-        contVar <- freshVar
-        hBid <- freshBlock
+        -- Free variables: handler body FV minus pattern-bound, contName, and hvar names
+        let handlerFV = freeVarsExpr (AST.hcBody hc)
+                        `Set.difference` foldMap patBound (AST.hcParams hc)
+                        `Set.difference` Set.singleton contName
+                        `Set.difference` Set.fromList hvarNames
 
-        curBid <- gets lsCurrentBlockId
-        curIns <- gets lsCurrentInstrs
-        modify' (\s -> s { lsCurrentBlockId = hBid, lsCurrentInstrs = [] })
+        -- Extra params: effect args + continuation + handler vars
+        let nEffArgs = length (AST.hcParams hc)
+            nExtra   = nEffArgs + 1 + nHVars
 
-        argBinds <- concat <$> forM (zip argVars (AST.hcParams hc)) (\(av, p) -> bindPat av p)
-        hRetV <- withLocals argBinds $
-            local (\env -> env { leContinuation = Just contVar }) $
-                lowerExpr (AST.hcBody hc)
-        finishBlockFinal (THandleRet hRetV)
+        handlerClosV <- compileClosure handlerFV (replicate nExtra STUnknown) $ \extraParams -> do
+            let argParamVars  = take nEffArgs extraParams
+                contParamVar  = extraParams !! nEffArgs
+                hvarParamVars = drop (nEffArgs + 1) extraParams
+            -- Bind effect arg patterns
+            argBinds <- concat <$> forM (zip argParamVars (AST.hcParams hc))
+                         (\(av, p) -> bindPat av p)
+            -- Compile handler body with continuation + handler vars in scope
+            let hvarBinds = zip hvarNames hvarParamVars
+            withLocals (argBinds ++ [(contName, contParamVar)] ++ hvarBinds) $
+                local (\env -> env { leHandlerVarNames = hvarNames }) $
+                    lowerExpr (AST.hcBody hc)
 
-        modify' (\s -> s { lsCurrentBlockId = curBid, lsCurrentInstrs = curIns })
-        pure (eid, HandlerDef hBid argVars contVar)
+        pure (eid, handlerClosV)
 
-    -- 3. Return clause
-    mRetDef <- case mReturn of
+    -- 3. Return handler — compiled as a separate closure (if present)
+    --    Params: [captures..., body_return_value, hvar_1, hvar_2, ...]
+    mRetClosV <- case mReturn of
         Nothing -> pure Nothing
         Just hr -> do
-            rArgV <- freshNamedVar (AST.hrParam hr) STUnknown
-            rBid <- freshBlock
-            curBid <- gets lsCurrentBlockId
-            curIns <- gets lsCurrentInstrs
-            modify' (\s -> s { lsCurrentBlockId = rBid, lsCurrentInstrs = [] })
-            rBodyV <- withLocals [(AST.hrParam hr, rArgV)] (lowerExpr (AST.hrBody hr))
-            finishBlockFinal (THandleRet rBodyV)
-            modify' (\s -> s { lsCurrentBlockId = curBid, lsCurrentInstrs = curIns })
-            pure (Just (ReturnDef rBid rArgV))
+            let retFV = freeVarsExpr (AST.hrBody hr)
+                        `Set.difference` Set.singleton (AST.hrParam hr)
+                        `Set.difference` Set.fromList hvarNames
+            closV <- compileClosure retFV (replicate (1 + nHVars) STUnknown) $ \extraParams -> do
+                let retArgV       = head extraParams
+                    hvarParamVars = tail extraParams
+                registerVarName retArgV (AST.hrParam hr)
+                let hvarBinds = zip hvarNames hvarParamVars
+                withLocals ([(AST.hrParam hr, retArgV)] ++ hvarBinds) $
+                    lowerExpr (AST.hrBody hr)
+            pure (Just closV)
 
-    -- 4. Emit THandle
+    -- 4. Emit THandle with handler variable inits
     resultV <- freshVar
     contBid <- freshBlock
-    finishBlock (THandle (HandleInfo bodyClosV handlers mRetDef resultV contBid)) contBid
+    finishBlock (THandle (HandleInfo bodyClosV handlerClosures mRetClosV resultV contBid hvarInitVs)) contBid
     pure resultV
 
+-- | Compile a closure: a separate 'Function' that captures free variables.
+--
+-- @compileClosure freeVars extraParamTypes bodyFn@ does the following:
+--
+-- 1. Filters @freeVars@ against current @leLocals@ to determine captures.
+-- 2. Allocates a fresh 'FuncId'.
+-- 3. Creates parameters: @[capture_params..., extra_params...]@.
+-- 4. Calls @bodyFn extra_param_varids@ to compile the body (which should
+--    return the result 'VarId'). The capture bindings are already in scope.
+-- 5. Emits 'IMakeClosure' and returns the closure 'VarId'.
+compileClosure :: Set.Set Name -> [SimpleType] -> ([VarId] -> LowerM VarId) -> LowerM VarId
+compileClosure freeVars extraParamTypes bodyFn = do
+    fid <- freshFunc
+    locals <- asks leLocals
+    let capNames = filter (`Set.member` freeVars) (Map.keys locals)
+        capVars  = mapMaybe (`Map.lookup` locals) capNames
+
+    saved <- saveBlockState
+    startFreshBlocks
+
+    -- Capture parameters (fresh VarIds inside the new function)
+    capBinds <- forM capNames $ \n -> do
+        v <- freshNamedVar n STUnknown; pure (n, v)
+
+    -- Extra parameters (effect args, continuation, return value, etc.)
+    extraParamVars <- forM extraParamTypes $ \st -> do
+        v <- freshVar; setVarType v st; pure v
+
+    let allParams = map snd capBinds ++ extraParamVars
+
+    retV <- withLocals capBinds (bodyFn extraParamVars)
+    finishBlockFinal (TReturn retV)
+    blocks <- collectBlocks
+
+    modify' (\s -> s { lsFunctions = Function fid (fromIntegral (length allParams)) allParams blocks : lsFunctions s })
+    restoreBlockState saved
+
+    dst <- freshVar
+    emitInstr (IMakeClosure dst fid capVars)
+    pure dst
+
 -- =========================================================================
--- Continue (multi-shot)
+-- Continue (one-shot) with handler variable updates
 -- =========================================================================
 
-lowerContinue :: SrcSpan -> AST.Expr SrcSpan -> LowerM VarId
-lowerContinue ann argE = do
+lowerContinue :: SrcSpan -> AST.Expr SrcSpan -> Maybe [(Name, AST.Expr SrcSpan)] -> LowerM VarId
+lowerContinue ann argE mUpdates = do
     argV <- lowerExpr argE
-    mContVar <- asks leContinuation
+    mContVar <- asks (Map.lookup contName . leLocals)
     case mContVar of
         Nothing -> lowerError ann "continue used outside of a handler case"
         Just contVar -> do
+            -- Build handler variable update values in declaration order
+            hvarNames <- asks leHandlerVarNames
+            hvUpdateVs <- forM hvarNames $ \hvName ->
+                case mUpdates >>= lookup hvName of
+                    Just updateE -> lowerExpr updateE
+                    Nothing      -> lookupLocalOrError ann hvName  -- use current value
             resultV <- freshVar
             contBid <- freshBlock
-            finishBlock (TContinue contVar argV resultV contBid) contBid
+            finishBlock (TContinue contVar argV hvUpdateVs resultV contBid) contBid
             pure resultV
 
 -- =========================================================================
@@ -934,17 +1099,17 @@ lowerTemplateLit segs = do
 
 lowerDecl :: AST.Decl SrcSpan -> LowerM ()
 lowerDecl = \case
-    AST.DeclData _ name _ _kind fields -> do
+    AST.DeclData _ _isPub name _ _kind fields -> do
         mtid <- asks (Map.lookup name . leDataIds)
         forM_ mtid $ \t ->
             modify' (\s -> s { lsNominalTypes = NominalTypeDef t (fromIntegral (length fields)) (map (unName . fst) fields) : lsNominalTypes s })
 
-    AST.DeclEffect _ name _ fields _ -> do
+    AST.DeclEffect _ _isPub name _ fields _ -> do
         meid <- asks (Map.lookup name . leEffectIds)
         forM_ meid $ \e ->
             modify' (\s -> s { lsEffectDefs = IREffectDef e (fromIntegral (length fields)) : lsEffectDefs s })
 
-    AST.DeclFn _ name _ params _ body -> do
+    AST.DeclFn _ _isPub name _ _traits params _ _ body -> do
         mfid <- asks (Map.lookup name . leFuncNames)
         forM_ mfid $ \fid -> do
             saved <- saveBlockState
@@ -960,28 +1125,52 @@ lowerDecl = \case
             modify' (\s -> s { lsFunctions = Function fid (fromIntegral (length pvs)) pvs blocks : lsFunctions s })
             restoreBlockState saved
 
+    AST.DeclForeignFn _ name params _retTyE _mEffTyE -> do
+        mfid <- asks (Map.lookup name . leFuncNames)
+        forM_ mfid $ \fid -> do
+            saved <- saveBlockState
+            startFreshBlocks
+            pvs <- forM params $ \p ->
+                freshNamedVar (AST.paramName p) (resolveTyExprSimple (AST.paramType p))
+            -- Build module name text for FFI lookup
+            modName <- asks leModuleName
+            let ModuleName segs = modName
+                modNameText = T.intercalate "." (toList segs)
+            resultV <- freshVar
+            contBid <- freshBlock
+            finishBlock (TFfiCall resultV modNameText (unName name) pvs contBid) contBid
+            finishBlockFinal (TReturn resultV)
+            blocks <- collectBlocks
+            modify' (\s -> s { lsFunctions = Function fid (fromIntegral (length pvs)) pvs blocks : lsFunctions s })
+            restoreBlockState saved
+
     AST.DeclType {} -> pure ()
     AST.DeclImport {} -> pure ()
+    AST.DeclExport {} -> pure ()
     AST.DeclLet {} -> pure ()
+    AST.DeclTrait {} -> pure ()
+    AST.DeclImpl {} -> pure ()
+    AST.DeclDerive {} -> pure ()
 
 -- =========================================================================
 -- Module lowering (entry point)
 -- =========================================================================
 
-lowerModule :: TypeDefs -> AST.Module SrcSpan -> Either [Diagnostic] Program
-lowerModule defs astMod = do
+lowerModule :: TypeDefs -> Map SrcSpan Name -> AST.Module SrcSpan -> Either [Diagnostic] Program
+lowerModule defs resolvedImpls astMod = do
     let modName = AST.modName astMod
         decls   = AST.modDecls astMod
         (dataIds, effIds, funcIds, initState) = preAllocateIds decls
 
     let env0 = LowerEnv
-            { leModuleName   = modName
-            , leTypeDefs     = defs
-            , leLocals       = Map.empty
-            , leEffectIds    = effIds
-            , leDataIds      = dataIds
-            , leFuncNames    = funcIds
-            , leContinuation = Nothing
+            { leModuleName     = modName
+            , leTypeDefs       = defs
+            , leLocals         = Map.empty
+            , leEffectIds      = effIds
+            , leDataIds        = dataIds
+            , leFuncNames      = funcIds
+            , leResolvedImpls  = resolvedImpls
+            , leHandlerVarNames = []
             }
 
     ((), finalState) <- runStateT (runReaderT (mainPass decls) env0) initState
@@ -993,9 +1182,6 @@ lowerModule defs astMod = do
             , mEffects      = reverse (lsEffectDefs finalState)
             , mConstants    = reverse (lsConstants finalState)
             , mFunctions    = reverse (lsFunctions finalState)
-            , mEntryFunc    = if hasTopLevelLets decls
-                              then Just (FuncId (lsNextFunc initState - 1))
-                              else Nothing
             }
     Right (Program [irMod])
 
@@ -1005,14 +1191,11 @@ preAllocateIds decls =
     let (dids, s1) = foldr allocData (Map.empty, initS) decls
         (eids, s2) = foldr allocEff  (Map.empty, s1) decls
         (fids, s3) = foldr allocFn   (Map.empty, s2) decls
-        s4 = if hasTopLevelLets decls
-             then s3 { lsNextFunc = lsNextFunc s3 + 1 }
-             else s3
-    in (dids, eids, fids, s4)
+    in (dids, eids, fids, s3)
   where
     initS = LowerState 0 0 0 0 0 0 [] Map.empty emptyNameTable (BlockId 0) [] [] [] [] [] Map.empty
 
-    allocData (AST.DeclData _ name _ _ _) (m, s) =
+    allocData (AST.DeclData _ _ name _ _ _) (m, s) =
         let tid = TypeId (lsNextType s)
             nt  = lsNameTable s
         in ( Map.insert name tid m
@@ -1020,7 +1203,7 @@ preAllocateIds decls =
                , lsNameTable = nt { ntTypes = Map.insert tid (unName name) (ntTypes nt) } })
     allocData _ acc = acc
 
-    allocEff (AST.DeclEffect _ name _ _ _) (m, s) =
+    allocEff (AST.DeclEffect _ _ name _ _ _) (m, s) =
         let eid = EffectId (lsNextEffect s)
             nt  = lsNameTable s
         in ( Map.insert name eid m
@@ -1028,34 +1211,53 @@ preAllocateIds decls =
                , lsNameTable = nt { ntEffects = Map.insert eid (unName name) (ntEffects nt) } })
     allocEff _ acc = acc
 
-    allocFn (AST.DeclFn _ name _ _ _ _) (m, s) =
+    allocFn (AST.DeclFn _ _ name _ _ _ _ _ _) (m, s) =
         let fid = FuncId (lsNextFunc s)
             nt  = lsNameTable s
             qn  = unqualify name
         in ( Map.insert name fid m
            , s { lsNextFunc = lsNextFunc s + 1
                , lsNameTable = nt { ntFuncs = Map.insert fid qn (ntFuncs nt) } })
+    -- Foreign fn: allocate a FuncId for the wrapper function
+    allocFn (AST.DeclForeignFn _ name _ _ _) (m, s) =
+        let fid = FuncId (lsNextFunc s)
+            nt  = lsNameTable s
+            qn  = unqualify name
+        in ( Map.insert name fid m
+           , s { lsNextFunc = lsNextFunc s + 1
+               , lsNameTable = nt { ntFuncs = Map.insert fid qn (ntFuncs nt) } })
+    -- Top-level let: each binding becomes a zero-arg function callable by name
+    allocFn (AST.DeclLet _ _ target _ _ _) (m, s) =
+        case letTargetName target of
+            Just name ->
+                let fid = FuncId (lsNextFunc s)
+                    nt  = lsNameTable s
+                    qn  = unqualify name
+                in ( Map.insert name fid m
+                   , s { lsNextFunc = lsNextFunc s + 1
+                       , lsNameTable = nt { ntFuncs = Map.insert fid qn (ntFuncs nt) } })
+            Nothing -> (m, s)
     allocFn _ acc = acc
 
-hasTopLevelLets :: [AST.Decl SrcSpan] -> Bool
-hasTopLevelLets = any (\case AST.DeclLet {} -> True; _ -> False)
+    letTargetName :: AST.LetTarget SrcSpan -> Maybe Name
+    letTargetName (AST.LetName n) = Just n
+    letTargetName (AST.LetPat _)  = Nothing
 
 mainPass :: [AST.Decl SrcSpan] -> LowerM ()
 mainPass decls = do
     forM_ decls lowerDecl
-    let topLets = [(target, rhs) | AST.DeclLet _ target _ _ rhs <- decls]
-    when (not (null topLets)) $ do
-        entryFid <- FuncId . subtract 1 <$> gets lsNextFunc
-        saved <- saveBlockState
-        startFreshBlocks
-        _ <- foldM (\binds (target, rhs) -> do
-            rhsV <- withLocals binds (lowerExpr rhs)
-            newBinds <- lowerLetTarget target rhsV
-            pure (binds ++ newBinds)
-            ) [] topLets
-        nullV <- freshVar
-        emitInstr (ILoadNull nullV)
-        finishBlockFinal (TReturn nullV)
-        blocks <- collectBlocks
-        modify' (\s -> s { lsFunctions = Function entryFid 0 [] blocks : lsFunctions s })
-        restoreBlockState saved
+    -- Compile top-level lets as individual named zero-arg functions
+    forM_ decls $ \case
+        AST.DeclLet _ _ target _ _ rhs -> case target of
+            AST.LetName name -> do
+                mfid <- asks (Map.lookup name . leFuncNames)
+                forM_ mfid $ \fid -> do
+                    saved <- saveBlockState
+                    startFreshBlocks
+                    retV <- lowerExpr rhs
+                    finishBlockFinal (TReturn retV)
+                    blocks <- collectBlocks
+                    modify' (\s -> s { lsFunctions = Function fid 0 [] blocks : lsFunctions s })
+                    restoreBlockState saved
+            AST.LetPat _ -> lowerError noSpan "top-level pattern destructuring is not supported"
+        _ -> pure ()
