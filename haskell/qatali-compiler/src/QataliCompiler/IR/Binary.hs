@@ -20,18 +20,19 @@ module QataliCompiler.IR.Binary (
     decodeProgram,
 ) where
 
-import           Data.Binary            (Binary (..), decodeOrFail, encode,
-                                         putWord8)
-import qualified Data.ByteString.Lazy   as BL
-import           Data.List.NonEmpty     (NonEmpty (..))
-import qualified Data.List.NonEmpty     as NE
-import           Data.Text              (Text)
-import           Data.Word              (Word8, Word32)
+import           Data.Binary                   (Binary (..), decodeOrFail,
+                                                encode, putWord8)
+import qualified Data.ByteString.Lazy          as BL
+import           Data.List.NonEmpty            (NonEmpty (..))
+import qualified Data.List.NonEmpty            as NE
+import           Data.Text                     (Text)
+import           Data.Word                     (Word32, Word8)
 
 import           QataliCompiler.IR.Instruction
 import           QataliCompiler.IR.Module
 import           QataliCompiler.IR.Types
-import           QataliCompiler.Name    (ModuleName (..), Name (..), QualifiedName (..))
+import           QataliCompiler.Name           (ModuleName (..), Name (..),
+                                                QualifiedName (..))
 
 -- ---------------------------------------------------------------------------
 -- Orphan Binary instances for name types
