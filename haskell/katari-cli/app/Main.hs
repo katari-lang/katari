@@ -15,6 +15,7 @@ import Katari.Module (buildGlobalEnv, ModuleError (..))
 import Katari.Typechecker (typecheck, TypeError (..))
 import Katari.Lowering (lowerModules, LowerError (..))
 import Katari.Emit (emitModule)
+import Katari.IRPrint (printIRModule)
 import Katari.Syntax (Module (..))
 
 -- ---------------------------------------------------------------------------
@@ -23,6 +24,7 @@ import Katari.Syntax (Module (..))
 
 data Command
   = Compile CompileOpts
+  | Dump    FilePath
   deriving (Show)
 
 data CompileOpts = CompileOpts
@@ -33,12 +35,17 @@ data CompileOpts = CompileOpts
 cliParser :: Parser Command
 cliParser = subparser
   (  command "compile" (info compileParser (progDesc "Compile a .ktr file to .ktri binary"))
+  <> command "dump"    (info dumpParser    (progDesc "Dump IR of a .ktr file as text"))
   )
 
 compileParser :: Parser Command
 compileParser = fmap Compile $ CompileOpts
   <$> argument str (metavar "FILE" <> help "Input .ktr file")
   <*> optional (option str (short 'o' <> long "output" <> metavar "OUT" <> help "Output .ktri file"))
+
+dumpParser :: Parser Command
+dumpParser = Dump
+  <$> argument str (metavar "FILE" <> help "Input .ktr file")
 
 -- ---------------------------------------------------------------------------
 -- Main
@@ -49,6 +56,7 @@ main = do
   cmd <- execParser (info (cliParser <**> helper) (fullDesc <> progDesc "Katari compiler"))
   case cmd of
     Compile opts -> runCompile opts
+    Dump    fp   -> runDump fp
 
 runCompile :: CompileOpts -> IO ()
 runCompile opts = do
@@ -101,6 +109,38 @@ runCompile opts = do
   let binary = emitModule irModule
   BS.writeFile out binary
   putStrLn ("Compiled: " ++ fp ++ " → " ++ out)
+
+runDump :: FilePath -> IO ()
+runDump fp = do
+  src <- TIO.readFile fp `catch` \(e :: SomeException) -> do
+    hPutStrLn stderr ("Error reading file: " ++ show e)
+    exitFailure
+  toks <- case lexFile fp src of
+    Left (LexError msg) -> do
+      hPutStrLn stderr ("Lex error: " ++ msg)
+      exitFailure
+    Right toks -> return toks
+  m <- case parseModule fp toks of
+    Left err -> do
+      hPutStrLn stderr ("Parse error: " ++ show err)
+      exitFailure
+    Right m -> return m
+  ge <- case buildGlobalEnv [m] of
+    Left err -> do
+      hPutStrLn stderr ("Module error: " ++ show err)
+      exitFailure
+    Right ge -> return ge
+  case typecheck ge [m] of
+    Left err -> do
+      hPutStrLn stderr ("Type error: " ++ show err)
+      exitFailure
+    Right () -> return ()
+  irModule <- case lowerModules ge [m] of
+    Left (LowerError msg) -> do
+      hPutStrLn stderr ("Lowering error: " ++ msg)
+      exitFailure
+    Right ir -> return ir
+  TIO.putStrLn (printIRModule irModule)
 
 -- Replace file extension
 replaceExt :: FilePath -> String -> FilePath
