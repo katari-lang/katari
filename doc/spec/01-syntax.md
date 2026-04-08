@@ -14,8 +14,10 @@
 ```
 val let task if else match case return reply next break
 request type import as with from for finally of var handle
-external null true false par throw
+external null true false par
 ```
+
+`throw` はキーワードではなく `prim` モジュールの組み込み request であり、ユーザーコードからも通常の関数呼び出し構文で使用できる。`div`, `mod` も同様に prim の組み込み関数である。
 
 ### 識別子
 
@@ -60,10 +62,12 @@ template_char     ::= string_char | '${' expr '}'
 ### 演算子と区切り文字
 
 ```
-+  -  *  /  %  ==  !=  <  >  <=  >=  &&  ||  ++  !
++  -  *  /  ==  !=  <  >  <=  >=  &&  ||  ++  !
 =  ->  :  .  ,  ;  @  ?
 (  )  {  }  [  ]
 ```
+
+**注意**: `%` 演算子は存在しない。剰余演算は `prim.mod(a, b)` を使用する。
 
 ## セミコロン自動挿入
 
@@ -72,7 +76,7 @@ template_char     ::= string_char | '${' expr '}'
 1. 行末のトークンが以下の**いずれでもない**場合、改行はセミコロンとして扱われる:
    - `{`, `(`, `[`
    - `,`
-   - 二項演算子: `+`, `-`, `*`, `/`, `%`, `==`, `!=`, `<`, `>`, `<=`, `>=`, `&&`, `||`, `++`
+   - 二項演算子: `+`, `-`, `*`, `/`, `==`, `!=`, `<`, `>`, `<=`, `>=`, `&&`, `||`, `++`
    - `=`, `->`, `:`, `with`, `of`, `@`, `.`
 
 2. 次の行の先頭トークンが以下の場合、先行する改行はセミコロンとして扱われ**ない**:
@@ -89,14 +93,16 @@ template_char     ::= string_char | '${' expr '}'
 
 | 優先度 | 演算子 | 結合性 | 説明 |
 |--------|--------|--------|------|
-| 7 | `-` (単項), `!` | 右 | 単項マイナス、論理否定 |
-| 6 | `*`, `/`, `%` | 左 | 乗算、除算、剰余 |
-| 5 | `+`, `-` | 左 | 加算、減算 |
-| 4 | `++` | 左 | 文字列結合 / 配列結合 |
-| 3 | `<`, `>`, `<=`, `>=` | なし | 比較 (チェイン不可) |
-| 2 | `==`, `!=` | なし | 等値比較 (チェイン不可) |
-| 1 | `&&` | 左 | 論理積 |
-| 0 | `\|\|` | 左 | 論理和 |
+| 6 | `-` (単項), `!` | 右 | 単項マイナス、論理否定 |
+| 5 | `*`, `/` | 左 | 乗算、除算 |
+| 4 | `+`, `-` | 左 | 加算、減算 |
+| 3 | `++` | 左 | 文字列結合 / 配列結合 |
+| 2 | `<`, `>`, `<=`, `>=` | なし | 比較 (チェイン不可) |
+| 1 | `==`, `!=` | なし | 等値比較 (チェイン不可) |
+| 0 | `&&` | 左 | 論理積 (非短絡評価) |
+| -1 | `\|\|` | 左 | 論理和 (非短絡評価) |
+
+**注意**: `&&` と `||` は**非短絡評価**である。左辺の値に関わらず右辺も常に評価される。
 
 ## 文法 (EBNF)
 
@@ -210,16 +216,24 @@ for_bindings
 for_let     ::= 'let' pattern 'of' expr
 for_var     ::= 'var' identifier (':' type)? annotation? '=' expr
 
+-- 注意: 現在の文法では for_let (',' for_let)* の後にしか for_var は来ない
+-- (var の後に let は書けない)。これは実装の簡略化のための制約であり、
+-- 意味論的な制限ではない。
+
 par_expr    ::= 'par' '[' par_block (',' par_block)* ','? ']'
               | 'par' '[' ']'
 
 par_block   ::= '{' stmt* expr '}'
               | '{' stmt* '}'
 
+-- 注意: par_block 内では return_stmt は使用不可。
+-- par ブロックは独立したエージェントとして実行されるため、return の意味が曖昧になる。
+-- 代わりにブロック末尾の式を戻り値として使用する。
+
 block_expr  ::= block
 
 binary_expr ::= unary_expr (binary_op unary_expr)*
-binary_op   ::= '+' | '-' | '*' | '/' | '%'
+binary_op   ::= '+' | '-' | '*' | '/'
               | '==' | '!=' | '<' | '>' | '<=' | '>='
               | '&&' | '||' | '++'
 
@@ -358,11 +372,24 @@ object_type_field
 ```ebnf
 request_effect
             ::= request_effect_union
+              | 'task'                    -- 特別形式: throw 以外の request なし (後述)
 request_effect_union
             ::= request_effect_single ('|' request_effect_single)*
 request_effect_single
-            ::= identifier                -- request 名の参照 (module path 含む)
+            ::= identifier               -- request 名の参照 (module path 含む)
 ```
+
+**`with task` の意味**:
+
+`with task` と書いた場合、「このタスクの body には throw 以外の request が存在しない」ことを明示する。型チェッカ的には「effect なし（throw は全 task に暗黙に含まれるので除く）」と同じ扱いになる。
+
+- `with task` と書いたタスクの body 内で throw 以外の request を書くと型エラー
+- `with` 節を省略した場合は body から request を推論する
+- request を一個も発生させないタスク（throw のみ）に `with` 節がなければ、`with task` と同等に扱われる
+
+**throw との関係**:
+
+`throw` は全てのタスクに暗黙的に含まれる組み込み request である。`with task` を含む全てのタスクで `throw(...)` は呼び出し可能。`with` 節への明示も可能だが、省略しても常に有効である。
 
 ### モジュールパス
 
@@ -545,10 +572,11 @@ external request get_user_input(prompt: string) -> string from "discord_server:i
 ### throw (組み込み request)
 
 ```katari
-// throw は組み込み request として定義済み:
+// throw は prim モジュールの組み込み request として定義済み:
 // request throw(message: string) -> never
+// 全ての task は暗黙的に with throw を持つため、throw は with 節なしで書ける
 
-task risky_operation() -> string with throw {
+task risky_operation() -> string {
   throw("something went wrong")
 }
 
@@ -562,4 +590,4 @@ task main() -> string {
 }
 ```
 
-`throw` は組み込みの request であり、ランタイムがトップレベルのハンドラを提供する。ユーザーが `handle` ブロックで捕捉しない場合、ランタイムのデフォルトハンドラがエラーを報告してエージェントを終了する。
+`throw` は prim モジュールの組み込み request であり、全 task で使用可能（`with throw` の明示は不要）。ランタイムがトップレベルのデフォルトハンドラを提供する。ユーザーが `handle` ブロックで捕捉しない場合、デフォルトハンドラがエラーを報告してエージェントを終了する。

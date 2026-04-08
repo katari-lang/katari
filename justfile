@@ -28,31 +28,31 @@ build-hs:
 
 # コンパイラのみビルド
 build-compiler:
-    stack build qatali-compiler
+    stack build katari-compiler
 
 # CLI のみビルド
 build-cli:
-    stack build qatali-cli
+    stack build katari-cli
 
 # LSP のみビルド
 build-lsp:
-    stack build qatali-lsp
+    stack build katari-lsp
 
 # 全 Haskell テスト
 test-hs:
     stack test
 
-# 特定パッケージのテスト（例: just test-hs-pkg qatali-compiler）
+# 特定パッケージのテスト（例: just test-hs-pkg katari-compiler）
 test-hs-pkg pkg:
     stack test {{ pkg }}
 
-# qatali CLI を実行
+# katari CLI を実行
 run-cli *args:
-    stack run qatali -- {{ args }}
+    stack run katari -- {{ args }}
 
 # LSP サーバーを実行
 run-lsp:
-    stack run qatali-lsp
+    stack run katari-lsp
 
 # Haskell ビルドキャッシュを削除
 clean-hs:
@@ -86,7 +86,7 @@ test-rust:
 
 # ランタイムを実行
 run-runtime *args:
-    cargo run --manifest-path {{ rust_dir }}/Cargo.toml -p qatali-runtime -- {{ args }}
+    cargo run --manifest-path {{ rust_dir }}/Cargo.toml -p katari-runtime -- {{ args }}
 
 # Rust ビルドキャッシュを削除
 clean-rust:

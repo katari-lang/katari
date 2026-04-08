@@ -71,11 +71,38 @@ task parse_boolean(s: string) -> boolean with parse_error
 request throw(message: string) -> never
 ```
 
-エラーをスローする組み込み request。`-> never` のため、handler は `break` のみ可能。
+エラーをスローする組み込み request。`-> never` のため、handler は `break` のみ可能。`throw` 自身は `with task` である（他の request を発生させない）。
 
 **暗黙的な包含**: 全ての task は暗黙的に `with throw` を含む。`with` 節に明示しなくても `throw` は常に perform 可能。
 
+**effect 型への影響なし**: `handle` ブロック内に `throw` case を書いた場合も、effect 型には一切影響を与えない（throw は常に暗黙であるため）。
+
 ランタイムはトップレベルに暗黙的な throw handler を提供する。ユーザーコードで handle block により throw を処理した場合、ランタイムのデフォルトハンドラは上書きされる。ユーザーコードで throw が処理されなかった場合、ランタイムがエラーメッセージとスタックトレースと共にエージェントを終了させる。
+
+### div / mod (整数商・剰余)
+
+```katari
+task div(a: integer | number, b: integer | number) -> integer
+task mod(a: integer | number, b: integer | number) -> number
+```
+
+**floor division** (負の方向への切り捨て) を行う組み込み関数。
+
+| 関数 | 説明 |
+|------|------|
+| `div(a, b)` | `a ÷ b` の商（floor）。常に `integer` を返す |
+| `mod(a, b)` | `a ÷ b` の余り。常に `number` を返す |
+
+```
+div(7, 2)    = 3       mod(7, 2)    = 1.0
+div(4, 1.5)  = 2       mod(4, 1.5)  = 1.0
+div(-7, 2)   = -4      mod(-7, 2)   = 1.0
+div(-4, 1.5) = -3      mod(-4, 1.5) = 0.5
+```
+
+不変条件: `div(a, b) * b + mod(a, b) == a`
+
+**注意**: `/` 演算子は通常の浮動小数点除算（常に `number` を返す）であり、`div` とは異なる。`%` 演算子は存在しない。
 
 ### par
 
@@ -103,14 +130,12 @@ task error(message: string) -> null
 | `+` | `number` | `integer` | `number` |
 | `-` | (同上) | (同上) | (同上) |
 | `*` | (同上) | (同上) | (同上) |
-| `%` | `integer` | `integer` | `integer` |
-| `%` | `number` | `number` | `number` |
 | `/` | `integer` | `integer` | `number` |
 | `/` | `number` | `number` | `number` |
 | `/` | `integer` | `number` | `number` |
 | `/` | `number` | `integer` | `number` |
 
-**注意**: `/` は常に `number` を返す (整数除算ではない)。
+**注意**: `/` は常に `number` を返す (整数除算ではない)。整数商・余りは `prim.div` / `prim.mod` 関数を使用。
 
 `integer` と `number` が混在する場合、`integer` 側が暗黙的に `number` に昇格する。
 
@@ -146,8 +171,7 @@ task error(message: string) -> null
 | `&&` | `boolean` | `boolean` | `boolean` |
 | `\|\|` | `boolean` | `boolean` | `boolean` |
 
-`&&` は短絡評価: 左辺が `false` なら右辺を評価しない。
-`||` は短絡評価: 左辺が `true` なら右辺を評価しない。
+`&&` と `||` は**非短絡評価**である。左辺の値に関わらず右辺も常に評価される。
 
 ## テンプレートリテラル
 

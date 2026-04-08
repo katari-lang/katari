@@ -114,13 +114,15 @@ Katari Protocol は正確に 6 つの操作で構成される。
     "name": "string",
     "description": "string",
     "arg_types": ["JSON Schema"],
-    "return_type": "JSON Schema"
+    "return_type": "JSON Schema",
+    "with_effects": ["string"]
   }
 ]
 ```
 
 - `task_id`: task の一意な識別子。
 - `task_where`: task が位置する URL。POST /agent する際の宛先。
+- `with_effects`: この task が発生させる可能性のある request 名のリスト。AI server がツール登録可否を判断する際に使用する。
 
 **runtime サーバーの場合**: `external` 以外の全 task を返す。
 
@@ -187,13 +189,17 @@ agent の詳細情報を返す。
   "args": ["any"],
   "parent_agent_id": "string",
   "parent_agent_where": "URL",
-  "with_effects": ["string"]
+  "with_effects": ["string"],
+  "call_stack": [
+    { "task_id": "string", "task_where": "URL", "task_name": "string" }
+  ]
 }
 ```
 
 - `parent_agent_id`: 親 agent の識別子。
 - `parent_agent_where`: 結果を返すべき場所 (親 agent が位置する URL)。子 agent が request を発行する際の送信先にもなる。
 - `with_effects`: この agent が発行できる request 名のリスト。型検証に使用。
+- `call_stack`: この agent が起動されるまでの task の呼び出し経路（最古 → 最新順）。各エントリは `task_id`、`task_where`（起動サーバーの URL）、`task_name`（デバッグ用の名前）で構成される。runtime が新たに spawn する際、自身の task 情報を末尾に追加して渡す。AI server はこれを system prompt として AI に渡す（無限再帰防止）。
 
 **Response:**
 
@@ -483,7 +489,7 @@ handle パラメータは r1 → r2 の順で更新される。
 
 ## 設定ファイル
 
-### katari_config.yaml
+### katari_config.yaml（runtime サーバー用）
 
 ```yaml
 runtime:
@@ -496,3 +502,14 @@ external_katari_endpoints:
 
 - `runtime.katari_endpoint`: runtime サーバー自身の katari base URL。全プロトコルエンドポイントはこの URL 以下に配置される。
 - `external_katari_endpoints`: 外部サーバー名と katari base URL のマッピング。`external task` / `external request` の `from "server_name:..."` と対応。
+
+### .env（外部サーバー用）
+
+runtime 以外の外部サーバー（AI server、Cron server 等）は `katari_config.yaml` を読まない。代わりに環境変数で runtime の URL を受け取る:
+
+```
+RUNTIME_KATARI_ENDPOINT=http://runtime:8000/katari
+```
+
+- AI server はこの環境変数を参照して runtime の `GET /task` から task 一覧を取得し、ツール登録を行う。
+- この値は docker-compose の `environment` セクション、または `.env` ファイルで設定する。

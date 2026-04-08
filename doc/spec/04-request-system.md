@@ -199,6 +199,40 @@ task counted_process() -> {result: string, log_count: integer} {
 - `return` 節がある場合、handle ブロック全体の型は return 節の body の型になる。
 - `break` によりスコープが中断された場合、`return` 節は呼ばれない。
 
+### Handle ブロックの型（Koka スタイル）
+
+`handle` ブロックは、それ以降の body の型を変換する文として働く（Koka の handler と同じ）。
+
+- `handle` より後の body の「生の返値」が `return` 節のパターンに渡される。
+- `return` 節がある場合 → handle ブロック以降の式全体の型は `return` 節の body の型
+- `return` 節がない場合 → body の型がそのまま
+- `break` が発生した場合 → break の型が加わる
+
+```
+handle ブロック全体の型 = (return 節の型 または body の型) | (各 case body の break の型)
+```
+
+例:
+
+```katari
+// return 節あり、break あり
+let result = {
+  handle(count: integer = 0) {
+    request log(msg) => {
+      if count >= 10 {
+        break "too many logs"   // break の型: string
+      }
+      reply null with { count = count + 1 }
+    }
+    return r => {               // return 節の型: {value: integer, count: integer}
+      {value = r, count = count}
+    }
+  }
+  42   // body の型: integer → return 節で変換される
+}
+// result の型: {value: integer, count: integer} | string
+```
+
 ### Handle block のスコープ
 
 `handle` ブロックのスコープは、`handle` 文の位置から、それを囲むブロックの終端までである。
@@ -506,16 +540,28 @@ task example() -> null {
 }
 ```
 
-- 初期値式内でタスク呼び出しを行うことは許可される。
+- 初期値式は通常の `let` と同じロジックで実行される（task 呼び出しを含むことができる）。
+- 初期値式実行中は、それ以前の（既存の）handler は有効である（子 task から request が来れば処理できる）。
 - ハンドラは、全てのパラメータの初期化が完了した後に有効になる。
-- パラメータ初期化中は、このハンドラは request を処理しない。
+- パラメータ初期化中は、この handle ブロックのハンドラは request を処理しない。
 
 ## 7. throw (組み込み request)
 
-`throw` は組み込みの request として定義されている:
+`throw` は prim モジュールの組み込み request として定義されている:
 
 ```katari
 request throw(message: string) -> never
+```
+
+`throw` は通常の prim request であり、ユーザーコードから直接呼び出せる:
+
+```katari
+task safe_divide(a: number, b: number) -> number {
+  if b == 0 {
+    throw("division by zero")
+  }
+  a / b
+}
 ```
 
 ### 暗黙的な包含
@@ -529,6 +575,22 @@ task foo() -> number { ... }
 ```
 
 これは、`throw` がどのタスクからでも発生し得る基本的なエラーメカニズムであるためである。
+
+### effect 型への影響なし
+
+`handle` ブロック内に `throw` case を書いた場合も、effect 型には一切影響を与えない（throw は常に暗黙であるため）:
+
+```katari
+// throw handler を書いても with 節の推論には影響しない
+task foo() -> number {
+  handle {
+    request throw(e) => {
+      break 0
+    }
+  }
+  risky()   // risky() は throw のみを発生させると仮定 → foo は with なしでよい
+}
+```
 
 ### ランタイムのデフォルトハンドラ
 
@@ -553,15 +615,27 @@ task main() -> string {
 
 ランタイムはエージェントの呼び出し階層を自動的に追跡し、throw 発生時にスタックトレースとして提示する。明示的なスタックトレース操作は不要である。
 
-## 8. Body 完了時の子エージェント終了
+## 8. Body 完了時の子エージェント
 
-タスクの body が正常に完了した場合 (return / ブロック終端に到達)、生存中の子エージェントが存在する場合は以下の手順で終了処理が行われる:
+タスクの body が正常に完了した場合 (return / ブロック終端に到達)、ICall と IPar は**同期サスペンションポイント**であるため、body が完了した時点で全ての子エージェントはすでに終了している。
 
-1. 全ての生存中の子エージェントに `terminate` が送信される。
-2. 各子エージェントは再帰的に自身の子エージェントに `terminate` を伝播する。
-3. 全ての `terminate_ack` を受信した後、エージェントが完了する。
+- `task_name(args)` (ICall): 子エージェントの完了を待機してから次に進む。
+- `par [...]` (IPar): 全ての par ブロックエージェントが完了するまで待機してから次に進む。
 
-これにより、親エージェントが完了した後に子エージェントが孤立して実行を続けることが防止される。
+body 正常完了時に生存中の子エージェントは存在しない（terminate は不要）。
+
+### terminate が送信されるケース
+
+terminate が子エージェントに送信されるのは以下の場合のみ:
+
+1. **`break` 時**: handle ブロックが `break` で中断された場合、スコープ内で未完了の par ブロックがあれば、それらの子エージェントに terminate が送信される。
+2. **親からの terminate 伝播**: 親エージェントが terminate を受け取った場合、子エージェントに伝播する。
+
+### case body 末尾到達時の動作（ランタイム）
+
+ランタイムは型情報を持たないため、`-> never` の request handler の case body が末尾まで実行された場合でも、ランタイムはそのまま暗黙的に reply する（null などの値で）。
+
+このような状況は正常なコード（型チェックを通過したコード）では発生しない。`-> never` の handler で末尾到達するコードは型チェックでコンパイルエラーとなるためである。
 
 ## 9. for ループ
 
@@ -701,6 +775,34 @@ task foo() -> integer with throw | log {
 - `task` は request union には現れない。`with log` は「log request が発生する可能性がある (かつ暗黙的に task、暗黙的に throw)」の意味。
 - `with task` は「throw 以外の request なし」を意味する。
 - request annotation 完全省略は「request 推論」を意味する。
+
+### val の制約
+
+`val` は effect を発火できない。`val` の右辺式は effect-free な式のみ（task 呼び出しを含む式は不可）。
+
+```katari
+// OK: 定数式
+val PI: number = 3.14159
+
+// NG: task 呼び出しは val では書けない (コンパイルエラー)
+val config: string = load_config()   // load_config は task
+```
+
+`with` 節を書けるのは `task` 宣言のみ。`val` には `with` 節は存在しない。
+
+### 再帰 task 呼び出し
+
+task の再帰呼び出しは可能である。直接再帰・相互再帰ともに許可される。深さ制限は現時点では特に設けない。
+
+```katari
+task factorial(n: integer) -> integer {
+  if n <= 1 {
+    1
+  } else {
+    n * factorial(n - 1)
+  }
+}
+```
 
 ## 12. External Request
 

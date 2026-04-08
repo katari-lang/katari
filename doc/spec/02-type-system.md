@@ -141,6 +141,7 @@ FieldInfo   = {
 - `never` は全ての kind が absent の `NormalFields` になる。
 - 判別可能 union の条件を満たす場合は `DISC` バリアントになる (03-discriminated-unions.md 参照)。
 - それ以外は `NormalFields` の対応する kind に格納される。
+- **object 型の never 伝播**: object 型の任意のフィールドの型が `never` に確定した場合、その object 型全体を `never` に潰す。
 
 ## Union の正規化
 
@@ -414,8 +415,8 @@ Unknown は NormalizedType の独立したバリアントである:
 
 | 演算 | オペランド型 | 結果型 |
 |------|-------------|--------|
-| `+`, `-`, `*`, `%` | `integer, integer` | `integer` |
-| `+`, `-`, `*`, `%` | `number, number` (integer 含む) | `number` |
+| `+`, `-`, `*` | `integer, integer` | `integer` |
+| `+`, `-`, `*` | `number, number` (integer 含む) | `number` |
 | `/` | `integer, integer` | `number` |
 | `/` | `number, number` | `number` |
 | `<`, `>`, `<=`, `>=` | `number, number` | `boolean` |
@@ -427,7 +428,9 @@ Unknown は NormalizedType の独立したバリアントである:
 | `++` | `string, string` | `string` |
 | `++` | `array[S], array[T]` | `array[S \| T]` |
 
-**注意**: `integer / integer` は `number` を返す (整数除算ではない)。
+**注意**: `integer / integer` は `number` を返す (整数除算ではない)。整数商・余りは `prim.div(a, b)` / `prim.mod(a, b)` を使用。
+
+`&&` と `||` は**非短絡評価**である（両辺を常に評価する）。
 
 ## Optional フィールド
 
@@ -462,4 +465,13 @@ type UserId = integer
 type Response = {status: integer, body: string}
 ```
 
-型エイリアスは展開されて使用される。再帰的な型エイリアスは禁止。
+型エイリアスは展開されて使用される。直接再帰・相互再帰ともに禁止（コンパイルエラー）。
+
+```katari
+// NG: 直接再帰
+type A = {child: A}
+
+// NG: 相互再帰
+type A = {b: B}
+type B = {a: A}
+```

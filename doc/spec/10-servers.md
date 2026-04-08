@@ -6,15 +6,24 @@ KATARI の分散実行環境は、Katari Protocol を実装した複数のサー
 
 全サーバーは docker-compose で管理される。
 
+**TODO**: 公開設定（pub/private）は現時点では未定義。今後 specify する予定。
+
+**TODO**: 外部 API 連携は基本的に wrapper server 経由で external task として定義するが、wrapper server の自動生成ツールの整備は改善予定。
+
 ## サーバーの共通仕様
 
 全サーバーは以下を満たす:
 
-1. Katari Protocol のエンドポイントを katari base URL 以下に提供する (→ [07-katari-protocol.md](07-katari-protocol.md))
+1. Katari Protocol の**全エンドポイント**を katari base URL 以下に提供する (→ [07-katari-protocol.md](07-katari-protocol.md))
+   - `GET /request`, `GET /task`, `GET /agent`, `GET /agent/:agent_id`
+   - `POST /agent`, `POST /agent/request`, `POST /agent/reply`, `POST /agent/terminate`, `POST /agent/return`, `POST /agent/terminate_ack`
+   - 全エンドポイントの実装が必須（サーバー間で全プロトコル操作が可能）
 2. `GET /task` で提供する task 一覧を返す
 3. `GET /request` で提供する request 一覧を返す
 4. `POST /agent` で agent を生成・実行可能
 5. agent のライフサイクル管理 (request, reply, terminate, return, terminate_ack)
+
+**TODO**: Katari Protocol 共通実装のライブラリ化を検討中（各サーバーがボイラープレートを共有できるように）。
 
 ## Runtime Server
 
@@ -240,7 +249,7 @@ external_katari_endpoints:
 
 ### 役割
 
-AI/LLM に関する task と request を提供するサーバー。
+AI/LLM に関する task と request を提供するサーバー。KATARI の agent が AI に処理を委譲し、AI が自律的に他のタスクを呼び出せる仕組みを提供する。
 
 ### 提供する Request
 
@@ -278,7 +287,7 @@ AI にストリーミングで質問する。各チャンクが `ai_stream` requ
 #### ai_structured
 
 ```
-task ai_structured(prompt: string, schema: string, thread_id: string | null, system: string | null) -> string
+task ai_structured(prompt: string, schema: string, thread_id: string | null, system: string | null) -> string with task
 ```
 
 AI に構造化された出力を要求する。`schema` は JSON Schema の文字列表現。戻り値は JSON 文字列。
@@ -290,6 +299,46 @@ task make_thread() -> string
 ```
 
 会話スレッドを作成する。戻り値はスレッド ID。
+
+### Agent 動作（AI tool call の仕組み）
+
+AI server は `POST /agent` を受け取った際、以下の手順で動作する:
+
+#### 1. Tool の登録
+
+- `with_effects` リスト（spawn 時に親から渡された）を参照し、各 request の JSON Schema を `GET /request` で取得済みのものから検索する。
+- それらの request を「request tool」として AI に登録する。
+
+#### 2. Task ツールのフィルタリング
+
+- `RUNTIME_KATARI_ENDPOINT`（環境変数）の `GET /task` から runtime の task 一覧を取得する。
+- 各 task について、その `with_effects`（タスクが発生させる可能性のある request 集合）が、spawn 時に渡された `with_effects`（現コンテキストで handle 可能な request 集合）に**完全に含まれる**場合のみ、「task tool」として AI に提供する。
+  - `task.with_effects ⊆ spawn.with_effects` が成立する task のみ提供
+  - この計算は AI server 内で決定的に行う
+
+#### 3. AI の実行
+
+- 登録した tool（request tool + task tool）と、spawn 時の `call_stack` を system prompt として AI に渡す。
+- AI が tool call を行うと、以下のように処理する:
+
+**request tool の場合**:
+AI が tool call → AI server が `parent_agent_where` の `POST /agent/request` にリクエストを送信 → reply を受け取り AI に返す。
+
+**task tool の場合**:
+AI が tool call → AI server が `RUNTIME_KATARI_ENDPOINT` の `POST /agent` に直接 spawn する（AI server の agent が親となる）→ 完了を待って AI に結果を返す。
+
+#### 4. Handler Proxy
+
+AI server の agent は Katari Protocol の全エンドポイントを実装しているため、自身が spawn した子 agent（task tool で起動した agent）から request が飛んできた場合、以下のように処理する:
+
+- 自身が handle できる request（= `with_effects` に含まれる）の場合: その request を `parent_agent_where` の `POST /agent/request` に転送（proxy）し、reply を受け取って子 agent に転送する。
+- handle できない request の場合: エラーとして処理する（型チェックが通っていれば発生しない）。
+
+**Future plan**: AI 自身が handler block を定義できるようにする（現時点では proxy のみ）。
+
+#### call_stack による無限再帰防止
+
+spawn 時に受け取った `call_stack` を system prompt として AI に渡すことで、AI が同じ task を再帰的に呼び出し続けることを防ぐ。
 
 ### KATARI 側の宣言例
 
@@ -316,6 +365,13 @@ external task make_thread() -> string from "ai_server:make_thread"
 ```yaml
 external_katari_endpoints:
   ai_server: "http://ai:8000/katari"
+```
+
+環境変数（AI server の `.env` または docker-compose の `environment`）:
+
+```
+RUNTIME_KATARI_ENDPOINT=http://runtime:8000/katari
+ANTHROPIC_API_KEY=...
 ```
 
 ---
