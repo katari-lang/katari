@@ -1,73 +1,81 @@
 {-# LANGUAGE TypeFamilies #-}
+
 module Katari.Parser
-  ( ParseError
-  , parseModule
-  ) where
+  ( ParseError,
+    parseModule,
+  )
+where
 
-import Data.Text (Text)
-import qualified Data.Text as T
-import Data.Void (Void)
-import Data.Proxy (Proxy (..))
-import qualified Data.List.NonEmpty as NE
-import Text.Megaparsec hiding (Token, ParseError)
-import qualified Text.Megaparsec as MP
-import Text.Megaparsec.Pos (mkPos, SourcePos(..))
 import Control.Monad.Combinators.Expr
-import Data.Maybe (fromMaybe, catMaybes, isJust)
-
+import Data.List.NonEmpty qualified as NE
+import Data.Maybe (catMaybes, fromMaybe, isJust)
+import Data.Proxy (Proxy (..))
+import Data.Text (Text)
+import Data.Text qualified as T
+import Data.Void (Void)
+import Katari.Lexer (FStrPart (..), TokKind (..), Token (..))
 import Katari.Syntax
-import Katari.Lexer (Token (..), TokKind (..), FStrPart (..))
+import Text.Megaparsec hiding (ParseError, Token)
+import Text.Megaparsec qualified as MP
+import Text.Megaparsec.Pos (SourcePos (..), mkPos)
 
 -- ---------------------------------------------------------------------------
 -- Token stream for megaparsec
 -- ---------------------------------------------------------------------------
 
-newtype TokenStream = TS { unTS :: [Token] }
+newtype TokenStream = TS {unTS :: [Token]}
   deriving (Show, Eq)
 
 instance Stream TokenStream where
-  type Token TokenStream  = Token
+  type Token TokenStream = Token
   type Tokens TokenStream = [Token]
-  tokenToChunk  _   x    = [x]
-  tokensToChunk _   xs   = xs
-  chunkToTokens _         = id
-  chunkLength   _ xs      = length xs
-  chunkEmpty    _ xs      = null xs
-  take1_ (TS [])     = Nothing
-  take1_ (TS (x:xs)) = Just (x, TS xs)
+  tokenToChunk _ x = [x]
+  tokensToChunk _ xs = xs
+  chunkToTokens _ = id
+  chunkLength _ xs = length xs
+  chunkEmpty _ xs = null xs
+  take1_ (TS []) = Nothing
+  take1_ (TS (x : xs)) = Just (x, TS xs)
   takeN_ n (TS s)
-    | n <= 0   = Just ([], TS s)
-    | null s   = Nothing
+    | n <= 0 = Just ([], TS s)
+    | null s = Nothing
     | otherwise = let (pre, post) = splitAt n s in Just (pre, TS post)
   takeWhile_ f (TS s) = let (pre, post) = span f s in (pre, TS post)
 
 instance VisualStream TokenStream where
   showTokens _ ts = unwords (map showTok (NE.toList ts))
-    where showTok t = show (tokKind t)
+    where
+      showTok t = show (tokKind t)
 
 instance TraversableStream TokenStream where
-  reachOffset o pstate@PosState{..} =
-    let n      = max 0 (o - pstateOffset)
-        toks   = unTS pstateInput
-        toks'  = drop n toks
-        newSP  = case toks' of
-                   [] -> pstateSourcePos
-                   (t:_) -> pstateSourcePos
-                     { sourceLine   = mkPos (tokLine t)
-                     , sourceColumn = mkPos (tokCol  t) }
-    in ( Nothing
-       , PosState { pstateInput      = TS toks'
-                  , pstateOffset     = o
-                  , pstateSourcePos  = newSP
-                  , pstateTabWidth   = pstateTabWidth
-                  , pstateLinePrefix = pstateLinePrefix } )
+  reachOffset o pstate@PosState {..} =
+    let n = max 0 (o - pstateOffset)
+        toks = unTS pstateInput
+        toks' = drop n toks
+        newSP = case toks' of
+          [] -> pstateSourcePos
+          (t : _) ->
+            pstateSourcePos
+              { sourceLine = mkPos (tokLine t),
+                sourceColumn = mkPos (tokCol t)
+              }
+     in ( Nothing,
+          PosState
+            { pstateInput = TS toks',
+              pstateOffset = o,
+              pstateSourcePos = newSP,
+              pstateTabWidth = pstateTabWidth,
+              pstateLinePrefix = pstateLinePrefix
+            }
+        )
 
 -- ---------------------------------------------------------------------------
 -- Parser type and helpers
 -- ---------------------------------------------------------------------------
 
 type ParseError = MP.ParseErrorBundle TokenStream Void
-type Parser     = Parsec Void TokenStream
+
+type Parser = Parsec Void TokenStream
 
 -- Context for break disambiguation
 data BreakCtx = BreakForCtx | BreakHandleCtx deriving (Eq)
@@ -89,7 +97,7 @@ ident = do
   t <- satisfy isIdent <?> "identifier"
   case tokKind t of
     TKIdent n -> return n
-    _         -> fail "expected identifier"
+    _ -> fail "expected identifier"
   where
     isIdent t = case tokKind t of TKIdent _ -> True; _ -> False
 
@@ -103,8 +111,9 @@ annot = optional $ do
   t <- satisfy isStr <?> "string"
   case tokKind t of
     TKStr s -> return s
-    _       -> fail "expected string annotation"
-  where isStr t = case tokKind t of TKStr _ -> True; _ -> False
+    _ -> fail "expected string annotation"
+  where
+    isStr t = case tokKind t of TKStr _ -> True; _ -> False
 
 spanOf :: Token -> SrcSpan
 spanOf t = SrcSpan "<source>" (tokLine t) (tokCol t)
@@ -113,7 +122,7 @@ currentSpan :: Parser SrcSpan
 currentSpan = do
   mt <- optional (lookAhead (satisfy (const True)))
   return $ case mt of
-    Just t  -> spanOf t
+    Just t -> spanOf t
     Nothing -> noSpan
 
 -- Comma-separated list (trailing comma allowed)
@@ -122,10 +131,10 @@ commaSep p = do
   first <- optional p
   case first of
     Nothing -> return []
-    Just x  -> do
+    Just x -> do
       rest <- many (tok_ TKComma *> p)
       optional (tok_ TKComma)
-      return (x:rest)
+      return (x : rest)
 
 -- Comma or semicolon separated list
 commaOrSemiSep :: Parser a -> Parser [a]
@@ -133,11 +142,12 @@ commaOrSemiSep p = do
   first <- optional p
   case first of
     Nothing -> return []
-    Just x  -> do
+    Just x -> do
       rest <- many (sep *> p)
       optional sep
-      return (x:rest)
-  where sep = tok_ TKComma <|> tok_ TKSemi
+      return (x : rest)
+  where
+    sep = tok_ TKComma <|> tok_ TKSemi
 
 -- ---------------------------------------------------------------------------
 -- Entry point
@@ -146,13 +156,15 @@ commaOrSemiSep p = do
 parseModule :: FilePath -> [Token] -> Either ParseError Module
 parseModule fp toks =
   let initPos = SourcePos fp (mkPos 1) (mkPos 1)
-      initState = PosState
-        { pstateInput      = TS toks
-        , pstateOffset     = 0
-        , pstateSourcePos  = initPos
-        , pstateTabWidth   = mkPos 8
-        , pstateLinePrefix = "" }
-  in MP.runParser pModule fp (TS toks)
+      initState =
+        PosState
+          { pstateInput = TS toks,
+            pstateOffset = 0,
+            pstateSourcePos = initPos,
+            pstateTabWidth = mkPos 8,
+            pstateLinePrefix = ""
+          }
+   in MP.runParser pModule fp (TS toks)
 
 pModule :: Parser Module
 pModule = do
@@ -168,12 +180,12 @@ pDecl :: Parser Decl
 pDecl = do
   sp <- currentSpan
   choice
-    [ pImportDecl sp
-    , pValDecl    sp
-    , pTaskDecl   sp
-    , pRequestDecl sp
-    , pExternalDecl sp
-    , pTypeDecl   sp
+    [ pImportDecl sp,
+      pValDecl sp,
+      pTaskDecl sp,
+      pRequestDecl sp,
+      pExternalDecl sp,
+      pTypeDecl sp
     ]
 
 pImportDecl :: SrcSpan -> Parser Decl
@@ -188,41 +200,41 @@ pImportDecl sp = do
 pModulePath :: Parser [Text]
 pModulePath = do
   first <- ident
-  rest  <- many (tok_ TKDot *> ident)
-  return (first:rest)
+  rest <- many (tok_ TKDot *> ident)
+  return (first : rest)
 
 pValDecl :: SrcSpan -> Parser Decl
 pValDecl sp = do
   a <- annot
   tok_ TKVal
   name <- ident
-  ty   <- optional (tok_ TKColon *> pType)
+  ty <- optional (tok_ TKColon *> pType)
   tok_ TKEq
-  e    <- pExpr BreakHandleCtx
+  e <- pExpr BreakHandleCtx
   optSemi
   let vty = fromMaybe TUnknown ty
   return $ DeclVal sp (ValDecl a name vty e)
 
 pTaskDecl :: SrcSpan -> Parser Decl
 pTaskDecl sp = do
-  a    <- annot
+  a <- annot
   tok_ TKTask
   name <- ident
-  ps   <- between (tok_ TKLParen) (tok_ TKRParen) pParams
-  ret  <- optional (tok_ TKArrow *> pType)
-  eff  <- optional (tok_ TKWith *> pRequestEffect)
+  ps <- between (tok_ TKLParen) (tok_ TKRParen) pParams
+  ret <- optional (tok_ TKArrow *> pType)
+  eff <- optional (tok_ TKWith *> pRequestEffect)
   body <- pBlock BreakHandleCtx
   optSemi
   return $ DeclTask sp (TaskDecl a name ps ret eff body)
 
 pRequestDecl :: SrcSpan -> Parser Decl
 pRequestDecl sp = do
-  a    <- annot
+  a <- annot
   tok_ TKRequest
   name <- ident
-  ps   <- between (tok_ TKLParen) (tok_ TKRParen) pParams
+  ps <- between (tok_ TKLParen) (tok_ TKRParen) pParams
   tok_ TKArrow
-  ret  <- pType
+  ret <- pType
   optSemi
   return $ DeclRequest sp (RequestDecl a name ps ret)
 
@@ -231,20 +243,20 @@ pExternalDecl sp = do
   a <- annot
   tok_ TKExternal
   choice
-    [ pExtTaskDecl sp a
-    , pExtReqDecl  sp a
+    [ pExtTaskDecl sp a,
+      pExtReqDecl sp a
     ]
 
 pExtTaskDecl :: SrcSpan -> Maybe Text -> Parser Decl
 pExtTaskDecl sp a = do
   tok_ TKTask
   name <- ident
-  ps   <- between (tok_ TKLParen) (tok_ TKRParen) pParams
+  ps <- between (tok_ TKLParen) (tok_ TKRParen) pParams
   tok_ TKArrow
-  ret  <- pType
-  eff  <- optional (tok_ TKWith *> pRequestEffect)
+  ret <- pType
+  eff <- optional (tok_ TKWith *> pRequestEffect)
   tok_ TKFrom
-  src  <- pStrLit
+  src <- pStrLit
   optSemi
   return $ DeclExtTask sp (ExternalTaskDecl a name ps (Just ret) eff src)
 
@@ -252,11 +264,11 @@ pExtReqDecl :: SrcSpan -> Maybe Text -> Parser Decl
 pExtReqDecl sp a = do
   tok_ TKRequest
   name <- ident
-  ps   <- between (tok_ TKLParen) (tok_ TKRParen) pParams
+  ps <- between (tok_ TKLParen) (tok_ TKRParen) pParams
   tok_ TKArrow
-  ret  <- pType
+  ret <- pType
   tok_ TKFrom
-  src  <- pStrLit
+  src <- pStrLit
   optSemi
   return $ DeclExtReq sp (ExternalReqDecl a name ps ret src)
 
@@ -265,7 +277,7 @@ pTypeDecl sp = do
   tok_ TKType
   name <- ident
   tok_ TKEq
-  ty   <- pType
+  ty <- pType
   optSemi
   return $ DeclType sp (TypeAliasDecl name ty)
 
@@ -273,26 +285,27 @@ pParams :: Parser [(Text, Type)]
 pParams = commaSep pParam
   where
     pParam = do
-      n  <- ident
+      n <- ident
       tok_ TKColon
       ty <- pType
-      _  <- annot  -- optional annotation on param
+      _ <- annot -- optional annotation on param
       return (n, ty)
 
 pRequestEffect :: Parser RequestEffect
 pRequestEffect =
   (tok_ TKTask >> return RETask) <|> do
     first <- ident
-    rest  <- many (tok_ TKPipe *> ident)
-    return (RENames (first:rest))
+    rest <- many (tok_ TKPipe *> ident)
+    return (RENames (first : rest))
 
 pStrLit :: Parser Text
 pStrLit = do
   t <- satisfy isStr <?> "string literal"
   case tokKind t of
     TKStr s -> return s
-    _       -> fail "expected string"
-  where isStr t = case tokKind t of TKStr _ -> True; _ -> False
+    _ -> fail "expected string"
+  where
+    isStr t = case tokKind t of TKStr _ -> True; _ -> False
 
 -- ---------------------------------------------------------------------------
 -- Types
@@ -304,38 +317,39 @@ pType = pUnionType
 pUnionType :: Parser Type
 pUnionType = do
   first <- pIntersectType
-  rest  <- many (tok_ TKPipe *> pIntersectType)
+  rest <- many (tok_ TKPipe *> pIntersectType)
   return $ case rest of
     [] -> first
-    _  -> TUnion (first:rest)
+    _ -> TUnion (first : rest)
 
 pIntersectType :: Parser Type
 pIntersectType = do
   first <- pPrimaryType
-  rest  <- many (tok_ TKAmp *> pPrimaryType)
+  rest <- many (tok_ TKAmp *> pPrimaryType)
   return $ case rest of
     [] -> first
-    _  -> TInter (first:rest)
+    _ -> TInter (first : rest)
 
 pPrimaryType :: Parser Type
-pPrimaryType = choice
-  [ tok_ TKNull    *> pure TNull
-  , tok_ (TKIdent "unknown") *> pure TUnknown
-  , tok_ (TKIdent "never")   *> pure TNever
-  , satisfy isBool >>= \t -> case tokKind t of
-      TKBool b -> return (TLitBool b)
-      _        -> fail "bool"
-  , tok_ (TKIdent "integer") *> pure TInteger
-  , tok_ (TKIdent "number")  *> pure TNumber
-  , tok_ (TKIdent "boolean") *> pure TBoolean
-  , tok_ (TKIdent "string")  *> pure TString
-  , pNumLit
-  , pStrLitType
-  , pArrayType
-  , pObjectType
-  , between (tok_ TKLParen) (tok_ TKRParen) pType
-  , TAlias <$> ident
-  ]
+pPrimaryType =
+  choice
+    [ tok_ TKNull *> pure TNull,
+      tok_ (TKIdent "unknown") *> pure TUnknown,
+      tok_ (TKIdent "never") *> pure TNever,
+      satisfy isBool >>= \t -> case tokKind t of
+        TKBool b -> return (TLitBool b)
+        _ -> fail "bool",
+      tok_ (TKIdent "integer") *> pure TInteger,
+      tok_ (TKIdent "number") *> pure TNumber,
+      tok_ (TKIdent "boolean") *> pure TBoolean,
+      tok_ (TKIdent "string") *> pure TString,
+      pNumLit,
+      pStrLitType,
+      pArrayType,
+      pObjectType,
+      between (tok_ TKLParen) (tok_ TKRParen) pType,
+      TAlias <$> ident
+    ]
   where
     isBool t = case tokKind t of TKBool _ -> True; _ -> False
 
@@ -345,8 +359,9 @@ pNumLit = do
   case tokKind t of
     TKInt i -> return (TLitInt i)
     TKNum n -> return (TLitNum n)
-    _       -> fail "number"
-  where isNum t = case tokKind t of TKInt _ -> True; TKNum _ -> True; _ -> False
+    _ -> fail "number"
+  where
+    isNum t = case tokKind t of TKInt _ -> True; TKNum _ -> True; _ -> False
 
 pStrLitType :: Parser Type
 pStrLitType = TLitStr <$> pStrLit
@@ -363,7 +378,7 @@ pObjectType = do
   -- Empty object
   mbEmpty <- optional (tok_ TKRBrace)
   case mbEmpty of
-    Just _  -> return (TObj [])
+    Just _ -> return (TObj [])
     Nothing -> do
       fields <- commaOrSemiSep pObjTypeField
       tok_ TKRBrace
@@ -372,11 +387,11 @@ pObjectType = do
 pObjTypeField :: Parser ObjField
 pObjTypeField = do
   isUniq <- isJust <$> optional uniqKw
-  name   <- ident
-  isOpt  <- isJust <$> optional (tok_ TKQuestion)
+  name <- ident
+  isOpt <- isJust <$> optional (tok_ TKQuestion)
   tok_ TKColon
-  ty     <- pType
-  _      <- annot  -- optional annotation
+  ty <- pType
+  _ <- annot -- optional annotation
   return (ObjField name isOpt isUniq ty)
 
 -- ---------------------------------------------------------------------------
@@ -389,8 +404,8 @@ pBlock ctx = do
   (stmts, mExpr) <- pBlockContents ctx
   tok_ TKRBrace
   let stmts' = case mExpr of
-                 Nothing -> stmts
-                 Just e  -> stmts ++ [SExpr noSpan e]
+        Nothing -> stmts
+        Just e -> stmts ++ [SExpr noSpan e]
   return (Block stmts')
 
 -- Parse block contents: statements then optional final expression
@@ -415,22 +430,23 @@ pBlockContents ctx = do
               mSemi <- optional (tok_ TKSemi)
               mClose <- optional (lookAhead (tok TKRBrace))
               case mClose of
-                Just _ -> return (acc, Just expr)  -- final expression
+                Just _ -> return (acc, Just expr) -- final expression
                 Nothing ->
                   case mSemi of
-                    Just _  -> go (acc ++ [SExpr noSpan expr])
+                    Just _ -> go (acc ++ [SExpr noSpan expr])
                     Nothing -> return (acc, Just expr)
 
 pStmtOrExpr :: BreakCtx -> Parser (Either Stmt Expr)
-pStmtOrExpr ctx = choice
-  [ Left  <$> pLetStmt
-  , Left  <$> pHandleStmt
-  , Left  <$> pReturnStmt
-  , Left  <$> pReplyStmt
-  , Left  <$> pNextStmt
-  , Left  <$> pBreakStmt ctx
-  , Right <$> pExpr ctx
-  ]
+pStmtOrExpr ctx =
+  choice
+    [ Left <$> pLetStmt,
+      Left <$> pHandleStmt,
+      Left <$> pReturnStmt,
+      Left <$> pReplyStmt,
+      Left <$> pNextStmt,
+      Left <$> pBreakStmt ctx,
+      Right <$> pExpr ctx
+    ]
 
 pLetStmt :: Parser Stmt
 pLetStmt = do
@@ -438,7 +454,7 @@ pLetStmt = do
   tok_ TKLet
   pat <- pPat
   tok_ TKEq
-  e   <- pExpr BreakHandleCtx
+  e <- pExpr BreakHandleCtx
   optSemi
   return (SLet sp pat e)
 
@@ -446,16 +462,17 @@ pHandleStmt :: Parser Stmt
 pHandleStmt = do
   sp <- currentSpan
   tok_ TKHandle
-  params <- option [] $
-    between (tok_ TKLParen) (tok_ TKRParen) (commaSep pHandleParam)
+  params <-
+    option [] $
+      between (tok_ TKLParen) (tok_ TKRParen) (commaSep pHandleParam)
   tok_ TKLBrace
   items <- many pHandleItem
   tok_ TKRBrace
   optSemi
-  let reqs   = [ (n, args, body) | HReq n args body <- items ]
-      retCase = case [ (var, body) | HRet var body <- items ] of
-                  []    -> Nothing
-                  (x:_) -> Just x
+  let reqs = [(n, args, body) | HReq n args body <- items]
+      retCase = case [(var, body) | HRet var body <- items] of
+        [] -> Nothing
+        (x : _) -> Just x
   return (SHandle sp (HandleStmt params reqs retCase))
 
 data HandleItem = HReq Text [Pat] Block | HRet Text Block
@@ -463,19 +480,20 @@ data HandleItem = HReq Text [Pat] Block | HRet Text Block
 pHandleParam :: Parser (Text, Type, Expr)
 pHandleParam = do
   _ <- annot
-  n  <- ident
+  n <- ident
   tok_ TKColon
   ty <- pType
-  _  <- annot
+  _ <- annot
   tok_ TKEq
-  e  <- pExpr BreakHandleCtx
+  e <- pExpr BreakHandleCtx
   return (n, ty, e)
 
 pHandleItem :: Parser HandleItem
-pHandleItem = choice
-  [ pHandleReqItem
-  , pHandleRetItem
-  ]
+pHandleItem =
+  choice
+    [ pHandleReqItem,
+      pHandleRetItem
+    ]
 
 pHandleReqItem :: Parser HandleItem
 pHandleReqItem = do
@@ -490,7 +508,7 @@ pHandleReqItem = do
 pHandleRetItem :: Parser HandleItem
 pHandleRetItem = do
   tok_ TKReturn
-  var  <- ident
+  var <- ident
   tok_ TKFatArrow
   body <- pBlock BreakHandleCtx
   optSemi
@@ -500,7 +518,7 @@ pReturnStmt :: Parser Stmt
 pReturnStmt = do
   sp <- currentSpan
   tok_ TKReturn
-  e  <- pExpr BreakHandleCtx
+  e <- pExpr BreakHandleCtx
   optSemi
   return (SReturn sp e)
 
@@ -508,7 +526,7 @@ pReplyStmt :: Parser Stmt
 pReplyStmt = do
   sp <- currentSpan
   tok_ TKReply
-  e   <- pExpr BreakHandleCtx
+  e <- pExpr BreakHandleCtx
   upd <- optional (tok_ TKWith *> pStateUpdate)
   optSemi
   return (SReply sp e upd)
@@ -525,54 +543,56 @@ pBreakStmt :: BreakCtx -> Parser Stmt
 pBreakStmt ctx = do
   sp <- currentSpan
   tok_ TKBreak
-  e  <- pExpr BreakHandleCtx
+  e <- pExpr BreakHandleCtx
   optSemi
   return $ case ctx of
-    BreakForCtx    -> SForBreak sp e
-    BreakHandleCtx -> SBreak    sp e
+    BreakForCtx -> SForBreak sp e
+    BreakHandleCtx -> SBreak sp e
 
 pStateUpdate :: Parser [(Text, Expr)]
 pStateUpdate = between (tok_ TKLBrace) (tok_ TKRBrace) (commaSep pUpdateField)
-  where pUpdateField = do
-          n <- ident
-          tok_ TKEq
-          e <- pExpr BreakHandleCtx
-          return (n, e)
+  where
+    pUpdateField = do
+      n <- ident
+      tok_ TKEq
+      e <- pExpr BreakHandleCtx
+      return (n, e)
 
 -- ---------------------------------------------------------------------------
 -- Expressions
 -- ---------------------------------------------------------------------------
 
 pExpr :: BreakCtx -> Parser Expr
-pExpr ctx = choice
-  [ pIfExpr ctx
-  , pMatchExpr ctx
-  , pForExpr ctx
-  , pParExpr ctx
-  , pBinExpr ctx
-  ]
+pExpr ctx =
+  choice
+    [ pIfExpr ctx,
+      pMatchExpr ctx,
+      pForExpr ctx,
+      pParExpr ctx,
+      pBinExpr ctx
+    ]
 
 pIfExpr :: BreakCtx -> Parser Expr
 pIfExpr ctx = do
-  sp   <- currentSpan
+  sp <- currentSpan
   tok_ TKIf
   cond <- pBinExpr ctx
-  thn  <- pBlock ctx
+  thn <- pBlock ctx
   mEls <- optional (tok_ TKElse *> pElseBranch ctx)
   return $ EIf sp cond thn (fromMaybe (Block []) mEls)
 
 pElseBranch :: BreakCtx -> Parser Block
 pElseBranch ctx =
   choice
-    [ do e <- pIfExpr ctx; return (Block [SExpr noSpan e])
-    , pBlock ctx
+    [ do e <- pIfExpr ctx; return (Block [SExpr noSpan e]),
+      pBlock ctx
     ]
 
 pMatchExpr :: BreakCtx -> Parser Expr
 pMatchExpr ctx = do
-  sp   <- currentSpan
+  sp <- currentSpan
   tok_ TKMatch
-  e    <- pBinExpr ctx
+  e <- pBinExpr ctx
   tok_ TKLBrace
   arms <- many (pCaseArm ctx)
   tok_ TKRBrace
@@ -581,7 +601,7 @@ pMatchExpr ctx = do
 pCaseArm :: BreakCtx -> Parser CaseArm
 pCaseArm ctx = do
   tok_ TKCase
-  pat  <- pPat
+  pat <- pPat
   tok_ TKFatArrow
   body <- pBlock ctx
   optSemi
@@ -589,10 +609,10 @@ pCaseArm ctx = do
 
 pForExpr :: BreakCtx -> Parser Expr
 pForExpr _ctx = do
-  sp      <- currentSpan
+  sp <- currentSpan
   tok_ TKFor
   (lets, vars) <- between (tok_ TKLParen) (tok_ TKRParen) pForBindings
-  body    <- pBlock BreakForCtx
+  body <- pBlock BreakForCtx
   finally <- optional (tok_ TKFinally *> pBlock BreakForCtx)
   return (EFor sp (ForExpr lets vars body finally))
 
@@ -609,7 +629,7 @@ pForLet = do
   -- simplified: just a variable name (not full pattern)
   name <- ident
   tok_ TKOf
-  e    <- pExpr BreakHandleCtx
+  e <- pExpr BreakHandleCtx
   optional (tok_ TKComma)
   return (name, e)
 
@@ -617,10 +637,10 @@ pForVar :: Parser (Text, Type, Expr)
 pForVar = do
   tok_ TKVar
   name <- ident
-  ty   <- option TUnknown (tok_ TKColon *> pType)
-  _    <- annot
+  ty <- option TUnknown (tok_ TKColon *> pType)
+  _ <- annot
   tok_ TKEq
-  e    <- pExpr BreakHandleCtx
+  e <- pExpr BreakHandleCtx
   optional (tok_ TKComma)
   return (name, ty, e)
 
@@ -644,8 +664,8 @@ pParBlock ctx = do
   (stmts, mExpr) <- pBlockContents ctx
   tok_ TKRBrace
   let stmts' = case mExpr of
-                 Nothing -> stmts
-                 Just e  -> stmts ++ [SExpr noSpan e]
+        Nothing -> stmts
+        Just e -> stmts ++ [SExpr noSpan e]
   return (Block stmts')
 
 -- Binary expression with operator precedence
@@ -654,30 +674,30 @@ pBinExpr ctx = makeExprParser (pUnaryExpr ctx) operatorTable
 
 operatorTable :: [[Operator Parser Expr]]
 operatorTable =
-  [ [ prefix TKMinus (\sp e -> EUnOp sp UnNeg e)
-    , prefix TKBang  (\sp e -> EUnOp sp UnNot e)
-    ]
-  , [ binL TKStar  OpMul
-    , binL TKSlash OpDiv
-    ]
-  , [ binL TKPlus  OpAdd
-    , binL TKMinus OpSub
-    ]
-  , [ binL TKPlusPlus OpConcat ]
-  , [ binN TKLt OpLt
-    , binN TKGt OpGt
-    , binN TKLe OpLe
-    , binN TKGe OpGe
-    ]
-  , [ binN TKEqEq OpEq
-    , binN TKNeq   OpNe
-    ]
-  , [ binL TKAmpAmp OpAnd ]
-  , [ binL TKPipePipe OpOr ]
+  [ [ prefix TKMinus (\sp e -> EUnOp sp UnNeg e),
+      prefix TKBang (\sp e -> EUnOp sp UnNot e)
+    ],
+    [ binL TKStar OpMul,
+      binL TKSlash OpDiv
+    ],
+    [ binL TKPlus OpAdd,
+      binL TKMinus OpSub
+    ],
+    [binL TKPlusPlus OpConcat],
+    [ binN TKLt OpLt,
+      binN TKGt OpGt,
+      binN TKLe OpLe,
+      binN TKGe OpGe
+    ],
+    [ binN TKEqEq OpEq,
+      binN TKNeq OpNe
+    ],
+    [binL TKAmpAmp OpAnd],
+    [binL TKPipePipe OpOr]
   ]
   where
-    binL tk op = InfixL  (do sp <- currentSpan; tok_ tk; return (\l r -> EBinOp sp op l r))
-    binN tk op = InfixN  (do sp <- currentSpan; tok_ tk; return (\l r -> EBinOp sp op l r))
+    binL tk op = InfixL (do sp <- currentSpan; tok_ tk; return (\l r -> EBinOp sp op l r))
+    binN tk op = InfixN (do sp <- currentSpan; tok_ tk; return (\l r -> EBinOp sp op l r))
     prefix tk f = Prefix (do sp <- currentSpan; tok_ tk; return (f sp))
 
 pUnaryExpr :: BreakCtx -> Parser Expr
@@ -696,35 +716,39 @@ applyPostfixes ctx e = do
     Just e' -> applyPostfixes ctx e'
 
 pPostfix :: BreakCtx -> Expr -> Parser Expr
-pPostfix ctx e = choice
-  [ do sp   <- currentSpan
-       tok_ TKLParen
-       args <- commaSep (pExpr ctx)
-       tok_ TKRParen
-       return (ECall sp e args)
-  , do sp    <- currentSpan
-       tok_ TKDot
-       field <- ident
-       return (EField sp e field)
-  , do sp  <- currentSpan
-       tok_ TKLBracket
-       idx <- pExpr ctx
-       tok_ TKRBracket
-       -- Array indexing: ECall (EField e "get") [idx]? Or use EBinOp?
-       -- We'll represent it as a special call
-       return (ECall sp (EField sp e "__index__") [idx])
-  ]
+pPostfix ctx e =
+  choice
+    [ do
+        sp <- currentSpan
+        tok_ TKLParen
+        args <- commaSep (pExpr ctx)
+        tok_ TKRParen
+        return (ECall sp e args),
+      do
+        sp <- currentSpan
+        tok_ TKDot
+        field <- ident
+        return (EField sp e field),
+      do
+        sp <- currentSpan
+        tok_ TKLBracket
+        idx <- pExpr ctx
+        tok_ TKRBracket
+        -- Array indexing: ECall (EField e "get") [idx]? Or use EBinOp?
+        -- We'll represent it as a special call
+        return (ECall sp (EField sp e "__index__") [idx])
+    ]
 
 pPrimaryExpr :: BreakCtx -> Parser Expr
 pPrimaryExpr ctx = do
   sp <- currentSpan
   choice
-    [ pBlockExpr ctx
-    , pLitExpr   sp
-    , pTemplExpr sp
-    , pObjOrQual sp ctx
-    , pArrExpr   sp ctx
-    , between (tok_ TKLParen) (tok_ TKRParen) (pExpr ctx)
+    [ pBlockExpr ctx,
+      pLitExpr sp,
+      pTemplExpr sp,
+      pObjOrQual sp ctx,
+      pArrExpr sp ctx,
+      between (tok_ TKLParen) (tok_ TKRParen) (pExpr ctx)
     ]
 
 pBlockExpr :: BreakCtx -> Parser Expr
@@ -745,10 +769,10 @@ isObjectLiteral = do
     tok_ TKLBrace
     mt <- optional (satisfy (const True))
     case mt of
-      Nothing -> return True  -- empty {} → could be either, but spec says empty object
+      Nothing -> return True -- empty {} → could be either, but spec says empty object
       Just t2 ->
         case tokKind t2 of
-          TKRBrace -> return True  -- {} → empty object
+          TKRBrace -> return True -- {} → empty object
           TKIdent _ -> do
             mt3 <- optional (satisfy (const True))
             case mt3 of
@@ -772,27 +796,27 @@ pObjField :: BreakCtx -> Parser (Text, Expr)
 pObjField ctx = do
   name <- ident
   tok_ TKEq
-  e    <- pExpr ctx
+  e <- pExpr ctx
   return (name, e)
 
 pLitExpr :: SrcSpan -> Parser Expr
 pLitExpr sp = do
   t <- satisfy isLit <?> "literal"
   case tokKind t of
-    TKNull   -> return (ELit sp LNull)
+    TKNull -> return (ELit sp LNull)
     TKBool b -> return (ELit sp (LBool b))
-    TKInt  i -> return (ELit sp (LInt  i))
-    TKNum  n -> return (ELit sp (LNum  n))
-    TKStr  s -> return (ELit sp (LStr  s))
-    _        -> fail "literal"
+    TKInt i -> return (ELit sp (LInt i))
+    TKNum n -> return (ELit sp (LNum n))
+    TKStr s -> return (ELit sp (LStr s))
+    _ -> fail "literal"
   where
     isLit t = case tokKind t of
-      TKNull   -> True
+      TKNull -> True
       TKBool _ -> True
-      TKInt  _ -> True
-      TKNum  _ -> True
-      TKStr  _ -> True
-      _        -> False
+      TKInt _ -> True
+      TKNum _ -> True
+      TKStr _ -> True
+      _ -> False
 
 pTemplExpr :: SrcSpan -> Parser Expr
 pTemplExpr sp = do
@@ -804,19 +828,12 @@ pTemplExpr sp = do
     _ -> fail "template"
   where
     isFStr t = case tokKind t of TKFStr _ -> True; _ -> False
-    convertPart (FStrLit s)   = return (TemplStr s)
-    convertPart (FStrExpr ts) = do
-      -- Re-parse the expression tokens
-      let initPos = SourcePos "<template>" (mkPos 1) (mkPos 1)
-          initState = PosState
-            { pstateInput      = TS (ts ++ [Token TKEof 1 0])
-            , pstateOffset     = 0
-            , pstateSourcePos  = initPos
-            , pstateTabWidth   = mkPos 8
-            , pstateLinePrefix = "" }
-      case runParser (pExpr BreakHandleCtx <* tok_ TKEof) "<template>" (TS (ts ++ [Token TKEof 1 0])) of
-        Left err  -> fail ("Template expression error: " ++ show err)
-        Right e   -> return (TemplExpr e)
+    convertPart = \case
+      FStrLit s -> return (TemplStr s)
+      FStrExpr ts ->
+        case runParser (pExpr BreakHandleCtx <* tok_ TKEof) "<template>" (TS (ts ++ [Token TKEof 1 0])) of
+          Left err -> fail ("Template expression error: " ++ show err)
+          Right e -> return (TemplExpr e)
 
 pObjOrQual :: SrcSpan -> BreakCtx -> Parser Expr
 pObjOrQual sp ctx = do
@@ -825,7 +842,7 @@ pObjOrQual sp ctx = do
   rest <- many (tok_ TKDot *> ident)
   case rest of
     [] -> return (EVar sp name)
-    _  -> return $ foldl (\e n -> EField sp e n) (EVar sp name) rest
+    _ -> return $ foldl (\e n -> EField sp e n) (EVar sp name) rest
 
 pArrExpr :: SrcSpan -> BreakCtx -> Parser Expr
 pArrExpr sp ctx = do
@@ -839,13 +856,14 @@ pArrExpr sp ctx = do
 -- ---------------------------------------------------------------------------
 
 pPat :: Parser Pat
-pPat = choice
-  [ pPrimTagPat
-  , pObjPat
-  , pArrPat
-  , pLitPat
-  , pVarPat
-  ]
+pPat =
+  choice
+    [ pPrimTagPat,
+      pObjPat,
+      pArrPat,
+      pLitPat,
+      pVarPat
+    ]
 
 pPrimTagPat :: Parser Pat
 pPrimTagPat = do
@@ -853,19 +871,19 @@ pPrimTagPat = do
   let primTag = case tokKind tag of
         TKIdent "boolean" -> TagBoolean
         TKIdent "integer" -> TagInteger
-        TKIdent "number"  -> TagNumber
-        TKIdent "string"  -> TagString
-        _                 -> TagBoolean  -- unreachable
+        TKIdent "number" -> TagNumber
+        TKIdent "string" -> TagString
+        _ -> TagBoolean -- unreachable
   tok_ TKLParen
   var <- ident
-  _   <- optional (tok_ TKColon *> pType)
-  _   <- annot
+  _ <- optional (tok_ TKColon *> pType)
+  _ <- annot
   tok_ TKRParen
   return (PTag primTag var)
   where
     isTag t = case tokKind t of
       TKIdent s -> s `elem` ["boolean", "integer", "number", "string"]
-      _         -> False
+      _ -> False
 
 pObjPat :: Parser Pat
 pObjPat = do
@@ -881,9 +899,9 @@ pObjPat = do
 pObjFieldPat :: Parser (Text, Bool, Pat)
 pObjFieldPat = do
   isUniq_ <- isJust <$> optional uniqKw
-  name    <- ident
+  name <- ident
   tok_ TKEq
-  pat     <- pPat
+  pat <- pPat
   return (name, isUniq_, pat)
 
 pArrPat :: Parser Pat
@@ -897,22 +915,26 @@ pLitPat :: Parser Pat
 pLitPat = do
   t <- satisfy isLitPat <?> "literal pattern"
   return $ case tokKind t of
-    TKNull   -> PLit LNull
+    TKNull -> PLit LNull
     TKBool b -> PLit (LBool b)
-    TKInt  i -> PLit (LInt  i)
-    TKNum  n -> PLit (LNum  n)
-    TKStr  s -> PLit (LStr  s)
-    _        -> PLit LNull  -- unreachable
+    TKInt i -> PLit (LInt i)
+    TKNum n -> PLit (LNum n)
+    TKStr s -> PLit (LStr s)
+    _ -> PLit LNull -- unreachable
   where
     isLitPat t = case tokKind t of
-      TKNull -> True; TKBool _ -> True; TKInt _ -> True
-      TKNum _ -> True; TKStr _ -> True; _ -> False
+      TKNull -> True
+      TKBool _ -> True
+      TKInt _ -> True
+      TKNum _ -> True
+      TKStr _ -> True
+      _ -> False
 
 pVarPat :: Parser Pat
 pVarPat = do
   name <- ident
-  mty  <- optional (tok_ TKColon *> pType)
-  _    <- annot
+  mty <- optional (tok_ TKColon *> pType)
+  _ <- annot
   return $ case mty of
     Nothing -> PVar name
     Just ty -> PTyped name ty
