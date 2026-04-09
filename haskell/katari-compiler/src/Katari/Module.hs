@@ -23,7 +23,7 @@ import Katari.Syntax
     ExternalReqDecl (..),
     ExternalTaskDecl (..),
     ImportDecl (..),
-    Module (Module),
+    Module (..),
     ObjField (..),
     RequestDecl (..),
     RequestEffect (..),

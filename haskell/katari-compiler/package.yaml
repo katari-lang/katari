@@ -21,16 +21,16 @@ library:
 
 dependencies:
   - base >= 4.18 && < 5
-  - megaparsec >= 9.6
-  - parser-combinators >= 1.3
-  - text >= 2.0
-  - bytestring >= 0.11
-  - containers >= 0.6
-  - mtl >= 2.3
-  - transformers >= 0.6
-  - aeson >= 2.0
-  - scientific >= 0.3
-  - vector >= 0.12
+  - megaparsec
+  - parser-combinators
+  - text
+  - bytestring
+  - containers
+  - mtl
+  - transformers
+  - aeson
+  - scientific
+  - vector
 
 default-extensions:
   - GHC2021
