@@ -27,15 +27,23 @@ module Katari.Types
     subtypeNT,
     subtractNT,
     patternTypeNT,
+    tryMakeDISC,
   )
 where
 
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
+import Data.Maybe (catMaybes, fromMaybe)
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Katari.Syntax
+  ( Lit (..),
+    ObjField (..),
+    Pat (..),
+    PrimTag (..),
+    Type (..),
+  )
 
 -- ---------------------------------------------------------------------------
 -- NormalizedType
@@ -75,14 +83,15 @@ data NumPart = NumAbsent | NumFull | NumLits (Set Double)
 data StringKind = StringFull | StringLits (Set Text)
   deriving (Show, Eq)
 
-data ObjectFields = ObjectFields
+newtype ObjectFields = ObjectFields
   { ofFields :: Map Text FieldInfo
   }
   deriving (Show, Eq)
 
 data FieldInfo = FieldInfo
   { fiType :: NormalizedType,
-    fiOptional :: Bool
+    fiOptional :: Bool,
+    fiAnnot :: Maybe Text
   }
   deriving (Show, Eq)
 
@@ -167,18 +176,17 @@ normalize ty env = case ty of
   TLitNum n -> NTFields emptyFields {nfNumeric = Just (NumericKind IntAbsent (NumLits (Set.singleton n)))}
   TLitStr s -> NTFields emptyFields {nfString = Just (StringLits (Set.singleton s))}
   TArray t -> NTFields emptyFields {nfArray = Just (normalize t env)}
-  TUnion ts -> foldr unionNT ntNever (map (`normalize` env) ts)
-  TInter ts -> foldr intersectNT NTUnknown (map (`normalize` env) ts)
-  TAlias name -> case Map.lookup name env of
-    Just nt -> nt
-    Nothing -> ntNever -- unknown alias → never
+  TUnion ts -> foldr (unionNT . (`normalize` env)) ntNever ts
+  TInter ts -> foldr (intersectNT . (`normalize` env)) NTUnknown ts
+  TAlias name -> fromMaybe ntNever (Map.lookup name env) -- unknown alias → never
   TObj fields ->
     let ofields =
           Map.fromList
             [ ( ofName f,
                 FieldInfo
                   { fiType = normalize (ofType f) env,
-                    fiOptional = ofOptional f
+                    fiOptional = ofOptional f,
+                    fiAnnot = ofAnnot f
                   }
               )
               | f <- fields
@@ -232,8 +240,13 @@ unionNT a b = case (a, b) of
   (NTDISC d1, NTDISC d2)
     | discField d1 == discField d2 -> NTDISC (unionDisc d1 d2)
     | otherwise -> NTFields (unionFields (discToFields d1) (discToFields d2))
-  (NTDISC d, NTFields nf) -> NTFields (unionFields (discToFields d) nf)
-  (NTFields nf, NTDISC d) -> NTFields (unionFields nf (discToFields d))
+  -- never ∪ disc = disc, disc ∪ never = disc (preserve DISC structure).
+  (NTDISC d, NTFields nf)
+    | isNeverFields nf -> NTDISC d
+    | otherwise -> NTFields (unionFields (discToFields d) nf)
+  (NTFields nf, NTDISC d)
+    | isNeverFields nf -> NTDISC d
+    | otherwise -> NTFields (unionFields nf (discToFields d))
   (NTFields f1, NTFields f2) -> NTFields (unionFields f1 f2)
 
 unionDisc :: Discriminator -> Discriminator -> Discriminator
@@ -309,17 +322,19 @@ unionArr a b = case (a, b) of
 
 unionObj :: Maybe ObjectFields -> Maybe ObjectFields -> Maybe ObjectFields
 unionObj a b = case (a, b) of
-  (Nothing, _) -> Nothing
-  (_, Nothing) -> Nothing
+  -- Nothing = no objects in this set; union with the other side.
+  (Nothing, x) -> x
+  (x, Nothing) -> x
   (Just o1, Just o2) ->
-    -- keep only common fields, with union types
+    -- keep only common fields, with union types (widening).
     let common = Map.intersectionWith mergeField (ofFields o1) (ofFields o2)
      in Just (ObjectFields common)
   where
     mergeField fi1 fi2 =
       FieldInfo
         { fiType = unionNT (fiType fi1) (fiType fi2),
-          fiOptional = fiOptional fi1 || fiOptional fi2
+          fiOptional = fiOptional fi1 || fiOptional fi2,
+          fiAnnot = fiAnnot fi1
         }
 
 -- ---------------------------------------------------------------------------
@@ -414,8 +429,9 @@ intersectArr a b = case (a, b) of
 
 intersectObj :: Maybe ObjectFields -> Maybe ObjectFields -> Maybe ObjectFields
 intersectObj a b = case (a, b) of
-  (Nothing, x) -> x
-  (x, Nothing) -> x
+  -- Nothing = no objects in the set; intersection with anything = Nothing.
+  (Nothing, _) -> Nothing
+  (_, Nothing) -> Nothing
   (Just o1, Just o2) ->
     let -- For common fields, also check optional
         common = Map.intersectionWith mergeCommon (ofFields o1) (ofFields o2)
@@ -431,7 +447,8 @@ intersectObj a b = case (a, b) of
     mergeCommon fi1 fi2 =
       FieldInfo
         { fiType = intersectNT (fiType fi1) (fiType fi2),
-          fiOptional = fiOptional fi1 && fiOptional fi2
+          fiOptional = fiOptional fi1 && fiOptional fi2,
+          fiAnnot = fiAnnot fi1
         }
 
 -- ---------------------------------------------------------------------------
@@ -529,12 +546,14 @@ subtypeObj a b = case (a, b) of
   (Nothing, _) -> True
   (_, Nothing) -> False
   (Just o1, Just o2) ->
-    -- For every field in o2, it must be in o1 with compatible type
+    -- For every field in o2 it must be present in o1 (with a compatible
+    -- type), unless the field is optional in o2 in which case its absence
+    -- from o1 is fine too.
     all (checkField o1) (Map.toList (ofFields o2))
   where
     checkField o1 (name, fi2) =
       case Map.lookup name (ofFields o1) of
-        Nothing -> False
+        Nothing -> fiOptional fi2
         Just fi1 ->
           subtypeNT (fiType fi1) (fiType fi2)
             && (fiOptional fi2 || not (fiOptional fi1))
@@ -650,10 +669,10 @@ subtractObjField a b = case (a, b) of
             Nothing -> Nothing -- field in pattern not in type, no subtraction
             Just fi1 -> Just (subtractNT (fiType fi1) (fiType fi2))
         go = map subtractFld (Map.toList (ofFields o2))
-     in if null [r | Just r <- go]
+     in if null (catMaybes go)
           then Just o1 -- no common fields
           else
-            if all isNeverNT [r | Just r <- go]
+            if all isNeverNT (catMaybes go)
               then Nothing -- all common fields subtracted to never
               else Just o1 -- conservative: keep
 
@@ -676,7 +695,7 @@ patternTypeNT = \case
     -- Check for DISC (exactly one uniq field with literal pattern)
     let objFields =
           Map.fromList
-            [ (n, FieldInfo (patternTypeNT p) False)
+            [ (n, FieldInfo (patternTypeNT p) False Nothing)
               | (n, _, p) <- fields
             ]
      in case [(name, pat) | (name, True, pat) <- fields] of

@@ -4,17 +4,66 @@ module Katari.Typechecker
   )
 where
 
-import Control.Monad (forM, forM_, unless)
+import Control.Monad (forM, forM_, unless, void)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe)
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
-import Data.Text qualified as T
 import Katari.Module
+  ( GlobalEnv (..),
+    RequestInfo (..),
+    TaskInfo (..),
+    ValInfo (..),
+    resolveQualified,
+  )
 import Katari.Syntax
+  ( BinOp (..),
+    Block (..),
+    CaseArm (..),
+    Decl (..),
+    Expr (..),
+    ForExpr (..),
+    HandleStmt (..),
+    Lit (..),
+    Module (..),
+    ObjField (..),
+    Pat (..),
+    RequestEffect (..),
+    SrcSpan,
+    Stmt (..),
+    TaskDecl (..),
+    TemplElem (..),
+    Type (..),
+    UnOp (..),
+    ValDecl (..),
+  )
 import Katari.Types
+  ( BoolKind (..),
+    Discriminator (..),
+    FieldInfo (..),
+    IntPart (..),
+    NormalFields (..),
+    NormalizedType (..),
+    NumPart (..),
+    NumericKind (..),
+    ObjectFields (..),
+    StringKind (..),
+    intersectNT,
+    isNeverNT,
+    normalize,
+    ntBool,
+    ntInteger,
+    ntNever,
+    ntNull,
+    ntNumber,
+    ntString,
+    patternTypeNT,
+    subtractNT,
+    subtypeNT,
+    unionNT,
+  )
 
 -- ---------------------------------------------------------------------------
 -- Type error
@@ -27,6 +76,7 @@ data TypeError
   | NonExhaustive SrcSpan
   | ValWithEffect SrcSpan Text
   | InvalidOp SrcSpan String
+  | ArityMismatch SrcSpan Text Int Int -- site, name, expected, actual
   deriving (Show)
 
 -- ---------------------------------------------------------------------------
@@ -36,18 +86,49 @@ data TypeError
 data TypeEnv = TypeEnv
   { teVars :: Map Text NormalizedType,
     teGlobal :: GlobalEnv,
+    teModuleName :: Text,
     teEffects :: Maybe (Set Text),
-    teReturn :: Maybe NormalizedType
+    teReturn :: Maybe NormalizedType,
+    teReply :: Maybe NormalizedType -- expected type for SReply (current request's riRet)
   }
 
-emptyTEnv :: GlobalEnv -> TypeEnv
-emptyTEnv ge =
+emptyTEnv :: GlobalEnv -> Text -> TypeEnv
+emptyTEnv ge mname =
   TypeEnv
     { teVars = Map.empty,
       teGlobal = ge,
+      teModuleName = mname,
       teEffects = Nothing,
-      teReturn = Nothing
+      teReturn = Nothing,
+      teReply = Nothing
     }
+
+-- | Resolve a local (possibly dotted) name to a fully-qualified name
+-- visible in the current module's alias table. Returns the input unchanged
+-- if no alias matches (the caller will then look up the input directly,
+-- which succeeds for names that are already qualified).
+resolveLocal :: TypeEnv -> Text -> Text
+resolveLocal env = resolveQualified (teGlobal env) (teModuleName env)
+
+-- | Rewrite every 'TAlias name' in a type to its fully-qualified form as
+-- seen from the current module, so the result can be fed directly into
+-- 'normalize' (which looks up qualified names in 'geTypeEnv').
+qualifyType :: TypeEnv -> Type -> Type
+qualifyType env = go
+  where
+    go t = case t of
+      TAlias name -> TAlias (resolveLocal env name)
+      TArray inner -> TArray (go inner)
+      TUnion ts -> TUnion (map go ts)
+      TInter ts -> TInter (map go ts)
+      TObj flds -> TObj (map goField flds)
+      _ -> t
+    goField f = f {ofType = go (ofType f)}
+
+-- | Normalize a type as seen from the current module, first qualifying any
+-- local type alias references.
+normalizeIn :: TypeEnv -> Type -> NormalizedType
+normalizeIn env ty = normalize (qualifyType env ty) (geTypeEnv (teGlobal env))
 
 withVar :: Text -> NormalizedType -> TypeEnv -> TypeEnv
 withVar n t env = env {teVars = Map.insert n t (teVars env)}
@@ -66,22 +147,22 @@ type TC a = Either TypeError a
 -- ---------------------------------------------------------------------------
 
 typecheck :: GlobalEnv -> [Module] -> Either TypeError ()
-typecheck ge modules = mapM_ checkMod modules
+typecheck ge = mapM_ checkMod
   where
-    checkMod m = mapM_ (checkDecl ge) (modDecls m)
+    checkMod m = mapM_ (checkDecl ge (modName m)) (modDecls m)
 
-checkDecl :: GlobalEnv -> Decl -> TC ()
-checkDecl ge = \case
-  DeclTask sp td -> checkTask ge sp td
-  DeclVal sp vd -> checkVal ge sp vd
+checkDecl :: GlobalEnv -> Text -> Decl -> TC ()
+checkDecl ge mname = \case
+  DeclTask sp td -> checkTask ge mname sp td
+  DeclVal sp vd -> checkVal ge mname sp vd
   _ -> return ()
 
-checkTask :: GlobalEnv -> SrcSpan -> TaskDecl -> TC ()
-checkTask ge sp td = do
-  let env0 = emptyTEnv ge
-      paramVars = map (\(n, t) -> (n, normalize t (geTypeEnv ge))) (taskParams td)
+checkTask :: GlobalEnv -> Text -> SrcSpan -> TaskDecl -> TC ()
+checkTask ge mname sp td = do
+  let env0 = emptyTEnv ge mname
+      paramVars = map (\(n, t, _) -> (n, normalizeIn env0 t)) (taskParams td)
       env1 = withVars paramVars env0
-      retType = normalize (fromMaybe TNull (taskRet td)) (geTypeEnv ge)
+      retType = normalizeIn env0 (fromMaybe TNull (taskRet td))
       env2 = env1 {teReturn = Just retType}
   bodyType <- inferBlock env2 (taskBody td)
   unless (subtypeNT bodyType retType) $ Left (TypeMismatch sp bodyType retType)
@@ -89,22 +170,34 @@ checkTask ge sp td = do
   case taskWith td of
     Nothing -> return () -- inferred: skip check
     Just eff -> do
-      reqs <- collectRequestsBlock ge (taskBody td)
-      let nonThrow = Set.delete "throw" reqs
+      reqs <- collectRequestsBlock env2 (taskBody td)
+      let nonThrow = Set.delete "prim.throw" reqs
       case eff of
         RETask ->
           unless (Set.null nonThrow) $
             Left (EffectMismatch sp (Set.toList nonThrow) [])
         RENames ns -> do
-          let excess = Set.difference nonThrow (Set.fromList ns)
+          -- `with` 節に書かれた名前はローカル alias の可能性があるので qualify する。
+          let qualifiedExpected =
+                Set.fromList (map (resolveQualified ge mname) ns)
+              excess = Set.difference nonThrow qualifiedExpected
           unless (Set.null excess) $
             Left (EffectMismatch sp (Set.toList excess) ns)
 
-checkVal :: GlobalEnv -> SrcSpan -> ValDecl -> TC ()
-checkVal ge _sp vd = do
-  let env = (emptyTEnv ge) {teEffects = Just Set.empty}
-  _ <- inferExpr env (valExpr vd)
-  return ()
+checkVal :: GlobalEnv -> Text -> SrcSpan -> ValDecl -> TC ()
+checkVal ge mname sp vd = do
+  let env = (emptyTEnv ge mname) {teEffects = Just Set.empty}
+  nt <- inferExpr env (valExpr vd)
+  -- val must be effect-free (throw is implicit and allowed everywhere)
+  reqs <- collectRequestsExpr env (valExpr vd)
+  let nonThrow = Set.delete "prim.throw" reqs
+  case Set.toList nonThrow of
+    [] -> return ()
+    (r : _) -> Left (ValWithEffect sp r)
+  -- Check declared type
+  let declared = normalizeIn env (valType vd)
+  unless (subtypeNT nt declared) $
+    Left (TypeMismatch sp nt declared)
 
 -- ---------------------------------------------------------------------------
 -- Block inference
@@ -125,18 +218,18 @@ goStmts env stmts = case stmts of
 -- Side-effect checking for non-final statements
 checkStmt :: TypeEnv -> Stmt -> TC ()
 checkStmt env = \case
-  SHandle sp hs -> () <$ inferStmt env (SHandle sp hs)
-  SExpr _sp e -> () <$ inferExpr env e
+  SHandle sp hs -> void (inferStmt env (SHandle sp hs))
+  SExpr _sp e -> void (inferExpr env e)
   SLet sp pat e -> do
     nt <- inferExpr env e
-    checkPatAnnot sp pat nt (geTypeEnv (teGlobal env))
+    checkPatAnnot env sp pat nt
   _ -> return ()
 
 -- Check that the inferred type matches any type annotation in the pattern
-checkPatAnnot :: SrcSpan -> Pat -> NormalizedType -> Map Text NormalizedType -> TC ()
-checkPatAnnot sp pat nt typeEnv = case pat of
+checkPatAnnot :: TypeEnv -> SrcSpan -> Pat -> NormalizedType -> TC ()
+checkPatAnnot env sp pat nt = case pat of
   PTyped _ ty ->
-    let annotNT = normalize ty typeEnv
+    let annotNT = normalizeIn env ty
      in unless (subtypeNT nt annotNT) $ Left (TypeMismatch sp nt annotNT)
   _ -> return ()
 
@@ -152,28 +245,32 @@ inferStmt :: TypeEnv -> Stmt -> TC NormalizedType
 inferStmt env = \case
   SLet sp pat e -> do
     nt <- inferExpr env e
-    checkPatAnnot sp pat nt (geTypeEnv (teGlobal env))
+    checkPatAnnot env sp pat nt
     return ntNull
   SHandle sp hs -> do
     let ge = teGlobal env
-        typeEnv = geTypeEnv ge
     -- Check state var init expressions and collect types
-    stateVarTypes <- forM (hParams hs) $ \(name, ty, initExpr) -> do
-      let nt = normalize ty typeEnv
+    stateVarTypes <- forM (hParams hs) $ \(name, ty, _, initExpr) -> do
+      let nt = normalizeIn env ty
       _ <- inferExpr env initExpr
       return (name, nt)
     let stateEnv = withVars stateVarTypes env
-    -- Check each request case body (state vars + request args in scope)
-    forM_ (hReqCases hs) $ \(reqName, pats, body) ->
-      case Map.lookup reqName (geRequests ge) of
+    -- Check each request case body with teReply set to the request's return type
+    forM_ (hReqCases hs) $ \(reqName, pats, body) -> do
+      let qreq = resolveLocal env reqName
+      case Map.lookup qreq (geRequests ge) of
         Nothing -> Left (UndefinedName sp reqName)
         Just ri -> do
-          let paramTypes = map (\(_, t) -> normalize t typeEnv) (riParams ri)
+          let paramTypes = map (\(_, t, _) -> normalizeIn env t) (riParams ri)
+          let replyType = normalizeIn env (riRet ri)
           let patEnv =
-                foldr
-                  (\(pat, nt) e -> bindPat pat nt e)
-                  stateEnv
-                  (zip pats paramTypes)
+                ( foldr
+                    (\(pat, nt) e -> bindPat pat nt e)
+                    stateEnv
+                    (zip pats paramTypes)
+                )
+                  { teReply = Just replyType
+                  }
           _ <- inferBlock patEnv body
           return ()
     -- Check return case body (state vars in scope, return var bound to Unknown)
@@ -185,15 +282,22 @@ inferStmt env = \case
         return ()
     return ntNull
   SExpr _sp e -> inferExpr env e
-  SReturn _sp e -> do
+  SReturn sp e -> do
     nt <- inferExpr env e
     case teReturn env of
       Nothing -> return ntNull
       Just ret -> do
         unless (subtypeNT nt ret) $
-          Left (TypeMismatch noSpan ret nt)
+          Left (TypeMismatch sp nt ret)
         return nt
-  SReply _sp e _upd -> inferExpr env e >> return ntNull
+  SReply sp e _upd -> do
+    nt <- inferExpr env e
+    case teReply env of
+      Nothing -> return ntNull
+      Just expected -> do
+        unless (subtypeNT nt expected) $
+          Left (TypeMismatch sp nt expected)
+        return ntNull
   SNext _sp _upd -> return ntNull
   SBreak _sp e -> inferExpr env e >> return ntNull
   SForBreak _sp e -> inferExpr env e >> return ntNull
@@ -216,9 +320,7 @@ bindPat pat nt env = case pat of
 fieldType :: NormalizedType -> Text -> NormalizedType
 fieldType nt name = case nt of
   NTFields f -> case nfObject f of
-    Just ofields -> case Map.lookup name (ofFields ofields) of
-      Just fi -> fiType fi
-      Nothing -> NTUnknown
+    Just ofields -> maybe NTUnknown fiType (Map.lookup name (ofFields ofields))
     Nothing -> NTUnknown
   NTDISC d ->
     foldr
@@ -249,16 +351,16 @@ inferExpr env = \case
       mapM
         ( \(n, e) -> do
             nt <- inferExpr env e
-            return (n, FieldInfo nt False)
+            return (n, FieldInfo nt False Nothing)
         )
         fields
     return (NTFields emptyNF {nfObject = Just (ObjectFields (Map.fromList fieldNTs))})
-  ECall _sp callee args -> case callee of
-    EVar _ name -> inferCall env noSpan name args
+  ECall sp callee args -> case callee of
+    EVar _ name -> inferCall env sp name args
     EField _sp2 obj fname
       | fname == "__index__" -> do
           arrayNT <- inferExpr env obj
-          _ <- mapM (inferExpr env) args
+          mapM_ (inferExpr env) args
           return
             ( fromMaybe
                 NTUnknown
@@ -287,12 +389,26 @@ inferExpr env = \case
     t1 <- inferBlock env thn
     t2 <- inferBlock env els
     return (unionNT t1 t2)
-  EMatch _sp e arms -> do
+  EMatch sp e arms -> do
     nt <- inferExpr env e
-    armTypes <- mapM (inferArm env nt) arms
+    (remaining, armTypes) <- foldStep nt [] arms
+    -- Exhaustiveness check: remaining type must be Never.
+    -- subtractNT is conservative for arrays/objects, so this may false-positive
+    -- on some DISC-free cases. That's acceptable for now.
+    unless (isNeverNT remaining) $ Left (NonExhaustive sp)
     case armTypes of
       [] -> return ntNever
       _ -> return (foldr1 unionNT armTypes)
+    where
+      foldStep :: NormalizedType -> [NormalizedType] -> [CaseArm] -> TC (NormalizedType, [NormalizedType])
+      foldStep rem_ acc [] = return (rem_, reverse acc)
+      foldStep rem_ acc (arm : rest) = do
+        let patNT = patternTypeNT (caPat arm)
+            narrowed = intersectNT rem_ patNT
+            armEnv = bindPat (caPat arm) narrowed env
+        bodyT <- inferBlock armEnv (caBody arm)
+        let rem' = subtractNT rem_ patNT
+        foldStep rem' (bodyT : acc) rest
   EFor _sp fe -> inferFor env fe
   EPar _sp blocks -> do
     ts <- mapM (inferBlock env) blocks
@@ -304,14 +420,8 @@ inferExpr env = \case
   ETempl _sp elems -> do
     forM_ elems $ \case
       TemplStr _ -> return ()
-      TemplExpr e -> () <$ inferExpr env e
+      TemplExpr e -> void (inferExpr env e)
     return ntString
-
-inferArm :: TypeEnv -> NormalizedType -> CaseArm -> TC NormalizedType
-inferArm env scrutineeType (CaseArm pat body) = do
-  let patNT = patternTypeNT pat
-      env' = bindPat pat (intersectNT scrutineeType patNT) env
-  inferBlock env' body
 
 inferFor :: TypeEnv -> ForExpr -> TC NormalizedType
 inferFor env fe = do
@@ -329,7 +439,7 @@ inferFor env fe = do
     mapM
       ( \(n, ty, e) -> do
           _ <- inferExpr env e
-          let nt = normalize ty (geTypeEnv (teGlobal env))
+          let nt = normalizeIn env ty
           return (n, nt)
       )
       (fVarBinds fe)
@@ -381,27 +491,47 @@ collectForBreakExpr env = \case
   _ -> return ntNever
 
 inferCall :: TypeEnv -> SrcSpan -> Text -> [Expr] -> TC NormalizedType
-inferCall env _sp name args = do
+inferCall env sp name args = do
   let ge = teGlobal env
-  mapM_ (inferExpr env) args
-  case Map.lookup name (geTasks ge) of
-    Just ti -> return (normalize (tiRet ti) (geTypeEnv ge))
+      typeEnv = geTypeEnv ge
+      qname = resolveLocal env name
+  case Map.lookup qname (geTasks ge) of
+    Just ti -> do
+      checkArgs sp name (tiParams ti) args typeEnv
+      return (normalize (tiRet ti) typeEnv)
     Nothing ->
-      case Map.lookup name (geRequests ge) of
-        Just ri -> return (normalize (riRet ri) (geTypeEnv ge))
+      case Map.lookup qname (geRequests ge) of
+        Just ri -> do
+          checkArgs sp name (riParams ri) args typeEnv
+          return (normalize (riRet ri) typeEnv)
         Nothing ->
           case Map.lookup name (teVars env) of
-            Just nt -> return nt
-            Nothing -> return NTUnknown
+            Just nt -> do
+              mapM_ (inferExpr env) args
+              return nt
+            Nothing -> Left (UndefinedName sp name)
+  where
+    checkArgs :: SrcSpan -> Text -> [(Text, Type, Maybe Text)] -> [Expr] -> Map Text NormalizedType -> TC ()
+    checkArgs callSp callName params callArgs typeEnv = do
+      let expected = length params
+          actual = length callArgs
+      unless (expected == actual) $
+        Left (ArityMismatch callSp callName expected actual)
+      forM_ (zip params callArgs) $ \((_pn, pty, _pa), argE) -> do
+        argNT <- inferExpr env argE
+        let paramNT = normalize pty typeEnv
+        unless (subtypeNT argNT paramNT) $
+          Left (TypeMismatch callSp argNT paramNT)
 
 lookupVar :: TypeEnv -> SrcSpan -> Text -> TC NormalizedType
 lookupVar env sp name =
   case Map.lookup name (teVars env) of
     Just nt -> return nt
     Nothing ->
-      case Map.lookup name (geVals (teGlobal env)) of
-        Just vi -> return (viType vi)
-        Nothing -> Left (UndefinedName sp name)
+      let qname = resolveLocal env name
+       in case Map.lookup qname (geVals (teGlobal env)) of
+            Just vi -> return (viType vi)
+            Nothing -> Left (UndefinedName sp name)
 
 -- ---------------------------------------------------------------------------
 -- Literal inference
@@ -476,93 +606,108 @@ emptyNF = NormalFields False Nothing Nothing Nothing Nothing Nothing
 
 -- Collect the set of request names that may occur in a block,
 -- accounting for handle blocks removing handled requests.
-collectRequestsBlock :: GlobalEnv -> Block -> TC (Set Text)
-collectRequestsBlock ge (Block stmts) = collectRequestsStmts ge stmts
+-- All returned names are fully qualified.
+collectRequestsBlock :: TypeEnv -> Block -> TC (Set Text)
+collectRequestsBlock env (Block stmts) = collectRequestsStmts env stmts
 
-collectRequestsStmts :: GlobalEnv -> [Stmt] -> TC (Set Text)
-collectRequestsStmts ge stmts = case stmts of
+collectRequestsStmts :: TypeEnv -> [Stmt] -> TC (Set Text)
+collectRequestsStmts env stmts = case stmts of
   [] -> return Set.empty
   SHandle _ hs : rest -> do
     -- Collect from the scope body (everything after this handle)
-    restReqs <- collectRequestsStmts ge rest
-    -- Remove requests handled by this handle block
-    let handledNames = Set.fromList [n | (n, _, _) <- hReqCases hs]
+    restReqs <- collectRequestsStmts env rest
+    -- Remove requests handled by this handle block (resolve to qualified).
+    let handledNames =
+          Set.fromList [resolveLocal env n | (n, _, _) <- hReqCases hs]
     let scopeReqs = Set.difference restReqs handledNames
     -- Add requests from handler case bodies (they escape to outer scope)
-    caseReqs <- mapM (\(_, _, b) -> collectRequestsBlock ge b) (hReqCases hs)
+    caseReqs <- mapM (\(_, _, b) -> collectRequestsBlock env b) (hReqCases hs)
     -- Add requests from handle param init exprs
-    initReqs <- mapM (\(_, _, e) -> collectRequestsExpr ge e) (hParams hs)
+    initReqs <- mapM (\(_, _, _, e) -> collectRequestsExpr env e) (hParams hs)
     -- Add requests from return case body
-    retReqs <- maybe (return Set.empty) (\(_, b) -> collectRequestsBlock ge b) (hReturnCase hs)
+    retReqs <-
+      maybe
+        (return Set.empty)
+        (\(_, b) -> collectRequestsBlock env b)
+        (hReturnCase hs)
     return $ Set.unions (scopeReqs : retReqs : caseReqs ++ initReqs)
   s : rest -> do
-    a <- collectRequestsStmt ge s
-    b <- collectRequestsStmts ge rest
+    a <- collectRequestsStmt env s
+    b <- collectRequestsStmts env rest
     return (Set.union a b)
 
-collectRequestsStmt :: GlobalEnv -> Stmt -> TC (Set Text)
-collectRequestsStmt ge = \case
-  SLet _ _ e -> collectRequestsExpr ge e
-  SExpr _ e -> collectRequestsExpr ge e
-  SReturn _ e -> collectRequestsExpr ge e
-  SReply _ e _ -> collectRequestsExpr ge e
-  SBreak _ e -> collectRequestsExpr ge e
-  SForBreak _ e -> collectRequestsExpr ge e
+collectRequestsStmt :: TypeEnv -> Stmt -> TC (Set Text)
+collectRequestsStmt env = \case
+  SLet _ _ e -> collectRequestsExpr env e
+  SExpr _ e -> collectRequestsExpr env e
+  SReturn _ e -> collectRequestsExpr env e
+  SReply _ e _ -> collectRequestsExpr env e
+  SBreak _ e -> collectRequestsExpr env e
+  SForBreak _ e -> collectRequestsExpr env e
   _ -> return Set.empty
 
-collectRequestsExpr :: GlobalEnv -> Expr -> TC (Set Text)
-collectRequestsExpr ge = \case
+collectRequestsExpr :: TypeEnv -> Expr -> TC (Set Text)
+collectRequestsExpr env = \case
   ECall _ (EVar _ name) args -> do
-    argReqs <- Set.unions <$> mapM (collectRequestsExpr ge) args
-    let direct = case Map.lookup name (geRequests ge) of
-          Just _ -> Set.singleton name
+    argReqs <- Set.unions <$> mapM (collectRequestsExpr env) args
+    let ge = teGlobal env
+        qname = resolveLocal env name
+    let direct = case Map.lookup qname (geRequests ge) of
+          Just _ -> Set.singleton qname
           Nothing -> Set.empty
-    let transitive = case Map.lookup name (geTasks ge) of
-          Just ti -> taskEffectSet ti
+    let transitive = case Map.lookup qname (geTasks ge) of
+          Just ti -> taskEffectSet env ti
           Nothing -> Set.empty
     return (Set.unions [direct, transitive, argReqs])
   ECall _ callee args -> do
-    a <- collectRequestsExpr ge callee
-    b <- Set.unions <$> mapM (collectRequestsExpr ge) args
+    a <- collectRequestsExpr env callee
+    b <- Set.unions <$> mapM (collectRequestsExpr env) args
     return (Set.union a b)
   EIf _ cond thn els -> do
-    a <- collectRequestsExpr ge cond
-    b <- collectRequestsBlock ge thn
-    c <- collectRequestsBlock ge els
+    a <- collectRequestsExpr env cond
+    b <- collectRequestsBlock env thn
+    c <- collectRequestsBlock env els
     return (Set.unions [a, b, c])
   EMatch _ e arms -> do
-    a <- collectRequestsExpr ge e
-    bs <- mapM (\(CaseArm _ body) -> collectRequestsBlock ge body) arms
+    a <- collectRequestsExpr env e
+    bs <- mapM (\(CaseArm _ body) -> collectRequestsBlock env body) arms
     return (Set.unions (a : bs))
   EFor _ fe -> do
-    ls <- mapM (\(_, e) -> collectRequestsExpr ge e) (fLetBinds fe)
-    vs <- mapM (\(_, _, e) -> collectRequestsExpr ge e) (fVarBinds fe)
-    b <- collectRequestsBlock ge (fBody fe)
-    f <- maybe (return Set.empty) (collectRequestsBlock ge) (fFinally fe)
+    ls <- mapM (\(_, e) -> collectRequestsExpr env e) (fLetBinds fe)
+    vs <- mapM (\(_, _, e) -> collectRequestsExpr env e) (fVarBinds fe)
+    b <- collectRequestsBlock env (fBody fe)
+    f <- maybe (return Set.empty) (collectRequestsBlock env) (fFinally fe)
     return (Set.unions (ls ++ vs ++ [b, f]))
   EPar _ blocks ->
-    Set.unions <$> mapM (collectRequestsBlock ge) blocks
-  EBlock _ b -> collectRequestsBlock ge b
+    Set.unions <$> mapM (collectRequestsBlock env) blocks
+  EBlock _ b -> collectRequestsBlock env b
   ETempl _ els ->
     Set.unions <$> mapM goElem els
     where
       goElem = \case
         TemplStr _ -> return Set.empty
-        TemplExpr e -> collectRequestsExpr ge e
+        TemplExpr e -> collectRequestsExpr env e
   EBinOp _ _ l r ->
-    Set.union <$> collectRequestsExpr ge l <*> collectRequestsExpr ge r
-  EUnOp _ _ e -> collectRequestsExpr ge e
-  EField _ e _ -> collectRequestsExpr ge e
+    Set.union <$> collectRequestsExpr env l <*> collectRequestsExpr env r
+  EUnOp _ _ e -> collectRequestsExpr env e
+  EField _ e _ -> collectRequestsExpr env e
   EArr _ elems ->
-    Set.unions <$> mapM (collectRequestsExpr ge) elems
+    Set.unions <$> mapM (collectRequestsExpr env) elems
   EObj _ fields ->
-    Set.unions <$> mapM (\(_, e) -> collectRequestsExpr ge e) fields
+    Set.unions <$> mapM (\(_, e) -> collectRequestsExpr env e) fields
   _ -> return Set.empty
 
 -- Extract the declared effect set from a task's with annotation.
 -- Tasks with no annotation (inferred) are treated as having no known effects.
-taskEffectSet :: TaskInfo -> Set Text
-taskEffectSet ti = case tiWith ti of
+-- The names declared in `with` may be unqualified local references in the
+-- task's home module, so we resolve them via the alias table of the module
+-- they were declared in. We don't track that module here, so we instead use
+-- the *caller's* module context. Since `with` names are eventually compared
+-- against fully-qualified request names from the callee site, the caller-
+-- module alias table is what matters for comparison purposes. Any name that
+-- fails to resolve is passed through unchanged.
+taskEffectSet :: TypeEnv -> TaskInfo -> Set Text
+taskEffectSet env ti = case tiWith ti of
   Just RETask -> Set.empty
-  Just (RENames ns) -> Set.fromList ns
+  Just (RENames ns) -> Set.fromList (map (resolveLocal env) ns)
   Nothing -> Set.empty

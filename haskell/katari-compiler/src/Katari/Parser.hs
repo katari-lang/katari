@@ -6,18 +6,47 @@ module Katari.Parser
   )
 where
 
+import Control.Monad (void)
 import Control.Monad.Combinators.Expr
+  ( Operator (..),
+    makeExprParser,
+  )
+import Data.Functor (($>))
 import Data.List.NonEmpty qualified as NE
-import Data.Maybe (catMaybes, fromMaybe, isJust)
-import Data.Proxy (Proxy (..))
+import Data.Maybe (fromMaybe, isJust)
 import Data.Text (Text)
-import Data.Text qualified as T
 import Data.Void (Void)
 import Katari.Lexer (FStrPart (..), TokKind (..), Token (..))
 import Katari.Syntax
+  ( BinOp (..),
+    Block (..),
+    CaseArm (..),
+    Decl (..),
+    Expr (..),
+    ExternalReqDecl (..),
+    ExternalTaskDecl (..),
+    ForExpr (..),
+    HandleStmt (..),
+    ImportDecl (..),
+    Lit (..),
+    Module (..),
+    ObjField (..),
+    Pat (..),
+    PrimTag (..),
+    RequestDecl (..),
+    RequestEffect (..),
+    SrcSpan (..),
+    Stmt (..),
+    TaskDecl (..),
+    TemplElem (..),
+    Type (..),
+    TypeAliasDecl (..),
+    UnOp (..),
+    ValDecl (..),
+    noSpan,
+  )
 import Text.Megaparsec hiding (ParseError, Token)
 import Text.Megaparsec qualified as MP
-import Text.Megaparsec.Pos (SourcePos (..), mkPos)
 
 -- ---------------------------------------------------------------------------
 -- Token stream for megaparsec
@@ -32,8 +61,8 @@ instance Stream TokenStream where
   tokenToChunk _ x = [x]
   tokensToChunk _ xs = xs
   chunkToTokens _ = id
-  chunkLength _ xs = length xs
-  chunkEmpty _ xs = null xs
+  chunkLength _ = length
+  chunkEmpty _ = null
   take1_ (TS []) = Nothing
   take1_ (TS (x : xs)) = Just (x, TS xs)
   takeN_ n (TS s)
@@ -48,26 +77,34 @@ instance VisualStream TokenStream where
       showTok t = show (tokKind t)
 
 instance TraversableStream TokenStream where
-  reachOffset o pstate@PosState {..} =
-    let n = max 0 (o - pstateOffset)
-        toks = unTS pstateInput
-        toks' = drop n toks
-        newSP = case toks' of
-          [] -> pstateSourcePos
-          (t : _) ->
-            pstateSourcePos
-              { sourceLine = mkPos (tokLine t),
-                sourceColumn = mkPos (tokCol t)
+  reachOffset
+    o
+    PosState
+      { pstateInput,
+        pstateOffset,
+        pstateSourcePos,
+        pstateTabWidth,
+        pstateLinePrefix
+      } =
+      let n = max 0 (o - pstateOffset)
+          toks = unTS pstateInput
+          toks' = drop n toks
+          newSP = case toks' of
+            [] -> pstateSourcePos
+            (t : _) ->
+              pstateSourcePos
+                { sourceLine = mkPos (tokLine t),
+                  sourceColumn = mkPos (tokCol t)
+                }
+       in ( Nothing,
+            PosState
+              { pstateInput = TS toks',
+                pstateOffset = o,
+                pstateSourcePos = newSP,
+                pstateTabWidth = pstateTabWidth,
+                pstateLinePrefix = pstateLinePrefix
               }
-     in ( Nothing,
-          PosState
-            { pstateInput = TS toks',
-              pstateOffset = o,
-              pstateSourcePos = newSP,
-              pstateTabWidth = pstateTabWidth,
-              pstateLinePrefix = pstateLinePrefix
-            }
-        )
+          )
 
 -- ---------------------------------------------------------------------------
 -- Parser type and helpers
@@ -84,13 +121,10 @@ tok :: TokKind -> Parser Token
 tok k = satisfy (\t -> tokKind t == k) <?> show k
 
 tok_ :: TokKind -> Parser ()
-tok_ k = () <$ tok k
-
-semi :: Parser ()
-semi = tok_ TKSemi
+tok_ k = void (tok k)
 
 optSemi :: Parser ()
-optSemi = optional (tok_ TKSemi) >> pure ()
+optSemi = void (optional (tok_ TKSemi))
 
 ident :: Parser Text
 ident = do
@@ -103,7 +137,7 @@ ident = do
 
 -- "uniq" is a contextual keyword (just an identifier)
 uniqKw :: Parser ()
-uniqKw = () <$ satisfy (\t -> tokKind t == TKIdent "uniq") <?> "uniq"
+uniqKw = void (satisfy (\t -> tokKind t == TKIdent "uniq") <?> "uniq")
 
 annot :: Parser (Maybe Text)
 annot = optional $ do
@@ -121,9 +155,7 @@ spanOf t = SrcSpan "<source>" (tokLine t) (tokCol t)
 currentSpan :: Parser SrcSpan
 currentSpan = do
   mt <- optional (lookAhead (satisfy (const True)))
-  return $ case mt of
-    Just t -> spanOf t
-    Nothing -> noSpan
+  return (maybe noSpan spanOf mt)
 
 -- Comma-separated list (trailing comma allowed)
 commaSep :: Parser a -> Parser [a]
@@ -133,7 +165,7 @@ commaSep p = do
     Nothing -> return []
     Just x -> do
       rest <- many (tok_ TKComma *> p)
-      optional (tok_ TKComma)
+      void (optional (tok_ TKComma))
       return (x : rest)
 
 -- Comma or semicolon separated list
@@ -144,7 +176,7 @@ commaOrSemiSep p = do
     Nothing -> return []
     Just x -> do
       rest <- many (sep *> p)
-      optional sep
+      void (optional sep)
       return (x : rest)
   where
     sep = tok_ TKComma <|> tok_ TKSemi
@@ -153,39 +185,46 @@ commaOrSemiSep p = do
 -- Entry point
 -- ---------------------------------------------------------------------------
 
-parseModule :: FilePath -> [Token] -> Either ParseError Module
-parseModule fp toks =
-  let initPos = SourcePos fp (mkPos 1) (mkPos 1)
-      initState =
-        PosState
-          { pstateInput = TS toks,
-            pstateOffset = 0,
-            pstateSourcePos = initPos,
-            pstateTabWidth = mkPos 8,
-            pstateLinePrefix = ""
-          }
-   in MP.runParser pModule fp (TS toks)
+parseModule :: FilePath -> Text -> [Token] -> Either ParseError Module
+parseModule fp mname toks =
+  MP.runParser (pModule fp mname) fp (TS toks)
 
-pModule :: Parser Module
-pModule = do
+pModule :: FilePath -> Text -> Parser Module
+pModule fp mname = do
   ds <- many pDecl
   _ <- tok_ TKEof
-  return (Module "<source>" ds)
+  return (Module fp mname ds)
 
 -- ---------------------------------------------------------------------------
 -- Declarations
 -- ---------------------------------------------------------------------------
 
+-- | Parse a top-level declaration. Imports and type aliases are
+--   annotation-free; everything else optionally takes an @"..."@
+--   annotation, which is consumed once up-front and then dispatched on
+--   the following keyword.
 pDecl :: Parser Decl
 pDecl = do
   sp <- currentSpan
   choice
     [ pImportDecl sp,
-      pValDecl sp,
-      pTaskDecl sp,
-      pRequestDecl sp,
-      pExternalDecl sp,
-      pTypeDecl sp
+      pTypeDecl sp,
+      pAnnotatedDecl sp
+    ]
+
+-- | Parse a declaration that may carry an annotation: val, task, request
+--   or external. A newline between the annotation and the declaration
+--   keyword is allowed: the lexer's automatic-semicolon inserter places a
+--   'TKSemi' there, which we transparently skip.
+pAnnotatedDecl :: SrcSpan -> Parser Decl
+pAnnotatedDecl sp = do
+  a <- annot
+  _ <- many (tok_ TKSemi)
+  choice
+    [ pValBody sp a,
+      pTaskBody sp a,
+      pRequestBody sp a,
+      pExternalBody sp a
     ]
 
 pImportDecl :: SrcSpan -> Parser Decl
@@ -203,9 +242,8 @@ pModulePath = do
   rest <- many (tok_ TKDot *> ident)
   return (first : rest)
 
-pValDecl :: SrcSpan -> Parser Decl
-pValDecl sp = do
-  a <- annot
+pValBody :: SrcSpan -> Maybe Text -> Parser Decl
+pValBody sp a = do
   tok_ TKVal
   name <- ident
   ty <- optional (tok_ TKColon *> pType)
@@ -215,9 +253,8 @@ pValDecl sp = do
   let vty = fromMaybe TUnknown ty
   return $ DeclVal sp (ValDecl a name vty e)
 
-pTaskDecl :: SrcSpan -> Parser Decl
-pTaskDecl sp = do
-  a <- annot
+pTaskBody :: SrcSpan -> Maybe Text -> Parser Decl
+pTaskBody sp a = do
   tok_ TKTask
   name <- ident
   ps <- between (tok_ TKLParen) (tok_ TKRParen) pParams
@@ -227,9 +264,8 @@ pTaskDecl sp = do
   optSemi
   return $ DeclTask sp (TaskDecl a name ps ret eff body)
 
-pRequestDecl :: SrcSpan -> Parser Decl
-pRequestDecl sp = do
-  a <- annot
+pRequestBody :: SrcSpan -> Maybe Text -> Parser Decl
+pRequestBody sp a = do
   tok_ TKRequest
   name <- ident
   ps <- between (tok_ TKLParen) (tok_ TKRParen) pParams
@@ -238,9 +274,8 @@ pRequestDecl sp = do
   optSemi
   return $ DeclRequest sp (RequestDecl a name ps ret)
 
-pExternalDecl :: SrcSpan -> Parser Decl
-pExternalDecl sp = do
-  a <- annot
+pExternalBody :: SrcSpan -> Maybe Text -> Parser Decl
+pExternalBody sp a = do
   tok_ TKExternal
   choice
     [ pExtTaskDecl sp a,
@@ -281,15 +316,15 @@ pTypeDecl sp = do
   optSemi
   return $ DeclType sp (TypeAliasDecl name ty)
 
-pParams :: Parser [(Text, Type)]
+pParams :: Parser [(Text, Type, Maybe Text)]
 pParams = commaSep pParam
   where
     pParam = do
       n <- ident
       tok_ TKColon
       ty <- pType
-      _ <- annot -- optional annotation on param
-      return (n, ty)
+      a <- annot
+      return (n, ty, a)
 
 pRequestEffect :: Parser RequestEffect
 pRequestEffect =
@@ -333,16 +368,16 @@ pIntersectType = do
 pPrimaryType :: Parser Type
 pPrimaryType =
   choice
-    [ tok_ TKNull *> pure TNull,
-      tok_ (TKIdent "unknown") *> pure TUnknown,
-      tok_ (TKIdent "never") *> pure TNever,
+    [ tok_ TKNull $> TNull,
+      tok_ (TKIdent "unknown") $> TUnknown,
+      tok_ (TKIdent "never") $> TNever,
       satisfy isBool >>= \t -> case tokKind t of
         TKBool b -> return (TLitBool b)
         _ -> fail "bool",
-      tok_ (TKIdent "integer") *> pure TInteger,
-      tok_ (TKIdent "number") *> pure TNumber,
-      tok_ (TKIdent "boolean") *> pure TBoolean,
-      tok_ (TKIdent "string") *> pure TString,
+      tok_ (TKIdent "integer") $> TInteger,
+      tok_ (TKIdent "number") $> TNumber,
+      tok_ (TKIdent "boolean") $> TBoolean,
+      tok_ (TKIdent "string") $> TString,
       pNumLit,
       pStrLitType,
       pArrayType,
@@ -391,8 +426,7 @@ pObjTypeField = do
   isOpt <- isJust <$> optional (tok_ TKQuestion)
   tok_ TKColon
   ty <- pType
-  _ <- annot -- optional annotation
-  return (ObjField name isOpt isUniq ty)
+  ObjField name isOpt isUniq ty <$> annot
 
 -- ---------------------------------------------------------------------------
 -- Blocks and statements
@@ -477,16 +511,15 @@ pHandleStmt = do
 
 data HandleItem = HReq Text [Pat] Block | HRet Text Block
 
-pHandleParam :: Parser (Text, Type, Expr)
+pHandleParam :: Parser (Text, Type, Maybe Text, Expr)
 pHandleParam = do
-  _ <- annot
   n <- ident
   tok_ TKColon
   ty <- pType
-  _ <- annot
+  a <- annot
   tok_ TKEq
   e <- pExpr BreakHandleCtx
-  return (n, ty, e)
+  return (n, ty, a, e)
 
 pHandleItem :: Parser HandleItem
 pHandleItem =
@@ -630,7 +663,7 @@ pForLet = do
   name <- ident
   tok_ TKOf
   e <- pExpr BreakHandleCtx
-  optional (tok_ TKComma)
+  void (optional (tok_ TKComma))
   return (name, e)
 
 pForVar :: Parser (Text, Type, Expr)
@@ -641,7 +674,7 @@ pForVar = do
   _ <- annot
   tok_ TKEq
   e <- pExpr BreakHandleCtx
-  optional (tok_ TKComma)
+  void (optional (tok_ TKComma))
   return (name, ty, e)
 
 pParExpr :: BreakCtx -> Parser Expr
@@ -674,8 +707,8 @@ pBinExpr ctx = makeExprParser (pUnaryExpr ctx) operatorTable
 
 operatorTable :: [[Operator Parser Expr]]
 operatorTable =
-  [ [ prefix TKMinus (\sp e -> EUnOp sp UnNeg e),
-      prefix TKBang (\sp e -> EUnOp sp UnNot e)
+  [ [ prefix TKMinus (`EUnOp` UnNeg),
+      prefix TKBang (`EUnOp` UnNot)
     ],
     [ binL TKStar OpMul,
       binL TKSlash OpDiv
@@ -696,12 +729,12 @@ operatorTable =
     [binL TKPipePipe OpOr]
   ]
   where
-    binL tk op = InfixL (do sp <- currentSpan; tok_ tk; return (\l r -> EBinOp sp op l r))
-    binN tk op = InfixN (do sp <- currentSpan; tok_ tk; return (\l r -> EBinOp sp op l r))
+    binL tk op = InfixL (do sp <- currentSpan; tok_ tk; return (EBinOp sp op))
+    binN tk op = InfixN (do sp <- currentSpan; tok_ tk; return (EBinOp sp op))
     prefix tk f = Prefix (do sp <- currentSpan; tok_ tk; return (f sp))
 
 pUnaryExpr :: BreakCtx -> Parser Expr
-pUnaryExpr ctx = pPostfixExpr ctx
+pUnaryExpr = pPostfixExpr
 
 pPostfixExpr :: BreakCtx -> Parser Expr
 pPostfixExpr ctx = do
@@ -727,8 +760,7 @@ pPostfix ctx e =
       do
         sp <- currentSpan
         tok_ TKDot
-        field <- ident
-        return (EField sp e field),
+        EField sp e <$> ident,
       do
         sp <- currentSpan
         tok_ TKLBracket
@@ -756,7 +788,7 @@ pBlockExpr ctx = do
   sp <- currentSpan
   -- Only accept as block if it's not an object literal
   -- Look ahead to distinguish: if '{' ident '=' → object, '{}' → empty obj
-  t <- lookAhead (tok TKLBrace)
+  void $ lookAhead (tok TKLBrace)
   isObj <- isObjectLiteral
   if isObj
     then pObjLitExpr sp ctx
@@ -836,13 +868,13 @@ pTemplExpr sp = do
           Right e -> return (TemplExpr e)
 
 pObjOrQual :: SrcSpan -> BreakCtx -> Parser Expr
-pObjOrQual sp ctx = do
+pObjOrQual sp _ = do
   name <- ident
   -- Check if this is a qualified name (a.b.c)
   rest <- many (tok_ TKDot *> ident)
   case rest of
     [] -> return (EVar sp name)
-    _ -> return $ foldl (\e n -> EField sp e n) (EVar sp name) rest
+    _ -> return $ foldl (EField sp) (EVar sp name) rest
 
 pArrExpr :: SrcSpan -> BreakCtx -> Parser Expr
 pArrExpr sp ctx = do

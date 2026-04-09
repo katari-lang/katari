@@ -6,22 +6,64 @@ where
 
 import Control.Monad (foldM)
 import Control.Monad.State
-import Data.List (nub, (\\))
+  ( MonadState (..),
+    MonadTrans (..),
+    StateT (..),
+    gets,
+    modify,
+  )
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (fromMaybe, mapMaybe)
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Word (Word32)
 import Katari.IR
+  ( ConstId,
+    ConstVal (..),
+    HandlerId,
+    IRHandleBlock (..),
+    IRModule (..),
+    IRRequestDef (..),
+    IRTask (..),
+    Instruction (..),
+    NameTable (..),
+    RequestId,
+    TaskId,
+    VarId,
+    emptyNameTable,
+  )
 import Katari.Module
+  ( GlobalEnv (..),
+    resolveQualified,
+  )
 import Katari.Syntax
+  ( BinOp (..),
+    Block (..),
+    CaseArm (..),
+    Decl (..),
+    Expr (..),
+    ExternalReqDecl (..),
+    ExternalTaskDecl (..),
+    ForExpr (..),
+    HandleStmt (..),
+    Lit (..),
+    Module (..),
+    Pat (..),
+    PrimTag (..),
+    RequestDecl (..),
+    Stmt (..),
+    TaskDecl (..),
+    TemplElem (..),
+    Type,
+    UnOp (..),
+  )
 
 -- ---------------------------------------------------------------------------
 -- Error
 -- ---------------------------------------------------------------------------
 
-data LowerError = LowerError String
+newtype LowerError = LowerError String
   deriving (Show)
 
 -- ---------------------------------------------------------------------------
@@ -37,10 +79,11 @@ data LowerSt = LowerSt
     lsStateVarIdxMap :: Map Text Word32, -- current state var name → index (for next/reply with)
     lsCurrentHandler :: Maybe HandlerId, -- handler ID currently being lowered (for reply/break)
     lsForBreakCtx :: Maybe (VarId, LabelId), -- (dst, lbl_after) for SForBreak inside for loops
+    lsCurrentModule :: Text, -- module name currently being lowered (for name resolution)
     lsConstPool :: [ConstVal], -- reversed
     lsTasks :: [IRTask], -- accumulated tasks
-    lsTaskIds :: Map Text Word32, -- task name → ID
-    lsReqIds :: Map Text Word32, -- request name → ID
+    lsTaskIds :: Map Text Word32, -- qualified task name → ID
+    lsReqIds :: Map Text Word32, -- qualified request name → ID
     lsRequests :: [IRRequestDef], -- accumulated request defs
     lsNameTable :: NameTable
   }
@@ -77,6 +120,7 @@ lowerModules ge modules = do
             lsStateVarIdxMap = Map.empty,
             lsCurrentHandler = Nothing,
             lsForBreakCtx = Nothing,
+            lsCurrentModule = "",
             lsConstPool = [],
             lsTasks = [],
             lsTaskIds = Map.empty,
@@ -102,32 +146,44 @@ lowerAll ge modules = do
   mapM_ (lowerModule ge) modules
 
 preregisterModule :: GlobalEnv -> Module -> Lower ()
-preregisterModule ge m =
-  mapM_ (preregisterDecl ge) (modDecls m)
+preregisterModule ge m = do
+  modify (\st -> st {lsCurrentModule = modName m})
+  mapM_ (preregisterDecl ge (modName m)) (modDecls m)
 
-preregisterDecl :: GlobalEnv -> Decl -> Lower ()
-preregisterDecl _ge = \case
+preregisterDecl :: GlobalEnv -> Text -> Decl -> Lower ()
+preregisterDecl _ge mname = \case
   DeclTask _ td -> do
-    _tid <- allocTask (taskName td)
+    _tid <- allocTask (qualify mname (taskName td))
     return ()
   DeclRequest _ rd -> do
-    rid <- allocRequest (reqName rd)
-    addRequestDef (IRRequestDef rid (reqName rd) Nothing)
+    let qname = qualify mname (reqName rd)
+    rid <- allocRequest qname
+    addRequestDef (IRRequestDef rid qname Nothing)
   DeclExtTask _ etd -> do
-    _tid <- allocTask (extTaskName etd)
+    _tid <- allocTask (qualify mname (extTaskName etd))
     return ()
   DeclExtReq _ erd -> do
-    rid <- allocRequest (extReqName erd)
-    addRequestDef (IRRequestDef rid (extReqName erd) (Just (extReqFrom erd)))
+    let qname = qualify mname (extReqName erd)
+    rid <- allocRequest qname
+    addRequestDef (IRRequestDef rid qname (Just (extReqFrom erd)))
   _ -> return ()
 
-lowerModule :: GlobalEnv -> Module -> Lower ()
-lowerModule ge m =
-  mapM_ (lowerDecl ge) (modDecls m)
+qualify :: Text -> Text -> Text
+qualify mname local = mname <> "." <> local
 
-lowerDecl :: GlobalEnv -> Decl -> Lower ()
-lowerDecl ge = \case
-  DeclTask _ td -> lowerTask ge td Map.empty
+-- Resolve a local name to its qualified form using the global alias table
+-- for the current module.
+resolveLocal :: GlobalEnv -> Text -> Text -> Text
+resolveLocal = resolveQualified
+
+lowerModule :: GlobalEnv -> Module -> Lower ()
+lowerModule ge m = do
+  modify (\st -> st {lsCurrentModule = modName m})
+  mapM_ (lowerDecl ge (modName m)) (modDecls m)
+
+lowerDecl :: GlobalEnv -> Text -> Decl -> Lower ()
+lowerDecl ge mname = \case
+  DeclTask _ td -> lowerTask ge mname td Map.empty
   DeclExtTask _ _ -> return () -- no body to lower
   _ -> return ()
 
@@ -135,11 +191,12 @@ lowerDecl ge = \case
 -- Task lowering
 -- ---------------------------------------------------------------------------
 
-lowerTask :: GlobalEnv -> TaskDecl -> Map Text VarId -> Lower ()
-lowerTask ge td extraCaptures = do
-  tid <- lookupTask (taskName td)
+lowerTask :: GlobalEnv -> Text -> TaskDecl -> Map Text VarId -> Lower ()
+lowerTask ge mname td extraCaptures = do
+  let qname = qualify mname (taskName td)
+  tid <- lookupTask qname
   -- Allocate parameter variables
-  paramVars <- mapM (\(n, _) -> do v <- freshVar; return (n, v)) (taskParams td)
+  paramVars <- mapM (\(n, _, _) -> do v <- freshVar; return (n, v)) (taskParams td)
   let captures = Map.toList extraCaptures
   captureVars <- mapM (\(n, cv) -> return (n, cv)) captures
   let allParams = map snd paramVars
@@ -154,7 +211,7 @@ lowerTask ge td extraCaptures = do
   let irTask =
         IRTask
           { irTaskId = tid,
-            irTaskName = taskName td,
+            irTaskName = qname,
             irTaskParams = allParams,
             irTaskBody = resolved,
             irTaskHandlers = handlers
@@ -186,7 +243,7 @@ lowerStmts ge env stmts = case stmts of
     -- Lower the handle params (init exprs)
     (paramInstrs, stateVars) <- lowerHandleParams ge env (hParams hs)
     -- Build env extended with state variable names → their VarIds
-    let stateNames = map (\(n, _, _) -> n) (hParams hs)
+    let stateNames = map (\(n, _, _, _) -> n) (hParams hs)
         stateEnv = foldr (\(n, v) e -> Map.insert n v e) env (zip stateNames stateVars)
     -- Lower the handlers (with stateEnv so bodies can reference state vars)
     (reqCases, retCase, innerHs) <- lowerHandlers ge stateEnv hid hs
@@ -247,8 +304,7 @@ lowerFinalStmt ge env = \case
         -- Set for-expression result to v, then jump past the finally block
         return (v, instrs ++ [AI (IMove dstV v), AIJump lbl_after], handlers)
       Nothing ->
-        -- Fallback: emit IForBreak (runtime must handle it)
-        return (v, instrs ++ [AI (IForBreak v)], handlers)
+        liftEither (Left (LowerError "for_break outside of for expression"))
   SReply _sp e upd -> do
     (v, instrs, handlers) <- lowerExpr ge env e
     (updInstrs, stateUpds) <- lowerStateUpdates ge env (fromMaybe [] upd)
@@ -278,7 +334,7 @@ lowerStateUpdates ge env upds = do
     mapM
       ( \(n, e) -> do
           (v, instrs, _) <- lowerExpr ge env e
-          let idx = maybe 0 id (Map.lookup n idxMap)
+          let idx = fromMaybe 0 (Map.lookup n idxMap)
           return (instrs, (idx, v))
       )
       upds
@@ -293,12 +349,12 @@ lowerStateUpdates ge env upds = do
 lowerHandleParams ::
   GlobalEnv ->
   Env ->
-  [(Text, Type, Expr)] ->
+  [(Text, Type, Maybe Text, Expr)] ->
   Lower ([AInstr], [VarId])
 lowerHandleParams ge env params = do
   results <-
     mapM
-      ( \(_n, _ty, e) -> do
+      ( \(_n, _ty, _an, e) -> do
           (v, instrs, _) <- lowerExpr ge env e
           return (v, instrs)
       )
@@ -315,7 +371,7 @@ lowerHandlers ::
   Lower ([(RequestId, [VarId], [Instruction])], Maybe (VarId, [Instruction]), [IRHandleBlock])
 lowerHandlers ge env hid hs = do
   -- Set state var index map and current handler ID for reply/break in req/return cases
-  let paramIdxMap = Map.fromList (zip (map (\(n, _, _) -> n) (hParams hs)) [0 ..])
+  let paramIdxMap = Map.fromList (zip (map (\(n, _, _, _) -> n) (hParams hs)) [0 ..])
   oldIdxMap <- gets lsStateVarIdxMap
   oldHandler <- gets lsCurrentHandler
   modify (\st -> st {lsStateVarIdxMap = paramIdxMap, lsCurrentHandler = Just hid})
@@ -370,9 +426,11 @@ lowerReqCase ::
   (Text, [Pat], Block) ->
   Lower (RequestId, [VarId], [Instruction], [IRHandleBlock])
 lowerReqCase ge env (reqName, argPats, body) = do
-  rid <- lookupOrAllocRequest reqName
+  mname <- gets lsCurrentModule
+  let qname = resolveLocal ge mname reqName
+  rid <- lookupOrAllocRequest qname
   -- Allocate one fresh var per argument position (runtime fills these with request args)
-  argVars <- mapM (\_ -> freshVar) argPats
+  argVars <- mapM (const freshVar) argPats
   -- Bind each pattern against its argument var
   (bindInstrs, env') <-
     foldM
@@ -451,14 +509,16 @@ lowerExpr ge env = \case
     case callee of
       EVar _ name -> do
         dst <- freshVar
-        case Map.lookup name (geTasks ge) of
+        mname <- gets lsCurrentModule
+        let qname = resolveLocal ge mname name
+        case Map.lookup qname (geTasks ge) of
           Just _ti -> do
-            tid <- lookupOrAllocTask name
+            tid <- lookupOrAllocTask qname
             return (dst, argInstrs ++ [AI (ICall dst tid argVars)], argHandlers)
           Nothing ->
-            case Map.lookup name (geRequests ge) of
+            case Map.lookup qname (geRequests ge) of
               Just _ri -> do
-                rid <- lookupOrAllocRequest name
+                rid <- lookupOrAllocRequest qname
                 return (dst, argInstrs ++ [AI (IRequest dst rid argVars)], argHandlers)
               Nothing ->
                 -- Treat as variable call - simplify to load null
@@ -482,7 +542,7 @@ lowerExpr ge env = \case
     (src, instrs, handlers) <- lowerExpr ge env e
     dst <- freshVar
     let instr = case op of
-          UnNeg -> INegInt dst src -- simplified
+          UnNeg -> INeg dst src
           UnNot -> INot dst src
     return (dst, instrs ++ [AI instr], handlers)
   EIf _sp cond thn els -> do
@@ -549,23 +609,68 @@ lowerExpr ge env = \case
         )
         lets
     let letInstrs = concatMap (\(_, _, is) -> is) letResults
-    -- For now, support exactly one let binding (iterate over one array)
-    case letResults of
-      [(letName, arrVar, _)] -> do
-        -- Loop variables: index counter
+        letArrs = [(n, v) | (n, v, _) <- letResults]
+    case letArrs of
+      [] -> do
+        v <- freshVar
+        return (v, letInstrs ++ varInstrs ++ [AI (ILoadNull v)], [])
+      _ -> do
+        -- Loop variables
         idxVar <- freshVar
-        lenVar <- freshVar
-        condVar <- freshVar
-        elemVar <- freshVar
         idxCid <- addConst (CVInt 0)
         oneCid <- addConst (CVInt 1)
         oneVar <- freshVar
+        condVar <- freshVar
         newIdxVar <- freshVar
         lbl_loop <- freshLabel
         lbl_body <- freshLabel
         lbl_end <- freshLabel
         lbl_after <- freshLabel -- after the entire for expression (break target)
-        let env' = Map.insert letName elemVar varEnv
+        -- Compute length of each array and then min
+        lenVars <- mapM (const freshVar) letArrs
+        let lenInstrs =
+              [ AI (IArrLen lv av)
+                | ((_, av), lv) <- zip letArrs lenVars
+              ]
+        -- Compute minimum length across all let arrays:
+        -- minVar starts as lenVars[0]; for each subsequent l:
+        --   if l < minVar then minVar := l
+        (minVar, minInstrs) <- case lenVars of
+          [] -> do
+            m <- freshVar
+            return (m, [AI (ILoadConst m idxCid)])
+          [l] -> return (l, [])
+          (l : ls) -> do
+            m <- freshVar
+            let initMove = [AI (IMove m l)]
+            stepInstrs <-
+              mapM
+                ( \l' -> do
+                    cmp <- freshVar
+                    lbl_if <- freshLabel
+                    lbl_cont <- freshLabel
+                    return
+                      [ AI (ICmpLt cmp l' m),
+                        AIBranch cmp lbl_if lbl_cont,
+                        AILabel lbl_if,
+                        AI (IMove m l'),
+                        AIJump lbl_cont,
+                        AILabel lbl_cont
+                      ]
+                )
+                ls
+            return (m, initMove ++ concat stepInstrs)
+        -- Get elements at current index for each let binding
+        elemVars <- mapM (const freshVar) letArrs
+        let getInstrs =
+              [ AI (IArrGet ev av idxVar)
+                | ((_, av), ev) <- zip letArrs elemVars
+              ]
+            env' =
+              foldr
+                (\((n, _), ev) e -> Map.insert n ev e)
+                varEnv
+                (zip letArrs elemVars)
         -- Set state var index map and for-break context
         let varIdxMap = Map.fromList (zip (map (\(n, _, _) -> n) vars) [0 ..])
         oldIdxMap <- gets lsStateVarIdxMap
@@ -594,17 +699,18 @@ lowerExpr ge env = \case
         let instrs =
               letInstrs
                 ++ varInstrs
-                ++ [ AI (ILoadConst idxVar idxCid),
-                     AI (IArrLen lenVar arrVar),
-                     AILabel lbl_loop,
-                     AI (ICmpGe condVar idxVar lenVar),
+                ++ [AI (ILoadConst idxVar idxCid)]
+                ++ lenInstrs
+                ++ minInstrs
+                ++ [ AILabel lbl_loop,
+                     AI (ICmpGe condVar idxVar minVar),
                      AIBranch condVar lbl_end lbl_body,
-                     AILabel lbl_body,
-                     AI (IArrGet elemVar arrVar idxVar)
+                     AILabel lbl_body
                    ]
+                ++ getInstrs
                 ++ bodyI
                 ++ [ AI (ILoadConst oneVar oneCid),
-                     AI (IAddInt newIdxVar idxVar oneVar),
+                     AI (IAdd newIdxVar idxVar oneVar),
                      AI (IMove idxVar newIdxVar),
                      AIJump lbl_loop,
                      AILabel lbl_end
@@ -614,10 +720,6 @@ lowerExpr ge env = \case
                      AILabel lbl_after -- break jumps here, skipping finally
                    ]
         return (dst, instrs, bodyH ++ finH)
-      _ -> do
-        -- No let bindings or multiple - simplified fallback
-        v <- freshVar
-        return (v, letInstrs ++ varInstrs ++ [AI (ILoadNull v)], [])
   EPar _sp blocks -> do
     dst <- freshVar
     let captures = Map.toList env
@@ -630,16 +732,19 @@ lowerExpr ge env = \case
     let allInstrs = concatMap fst results
         strs = map snd results
     (v, extraInstrs) <- case strs of
-      [] -> do fv <- freshVar; return (fv, [AI (ILoadNull fv)])
+      [] -> do
+        fv <- freshVar
+        cid <- addConst (CVStr "")
+        return (fv, [AI (ILoadConst fv cid)])
       [sv] -> return (sv, [])
-      (sv : svs) -> foldM' sv [] svs
+      (sv : svs) -> do
+        (final, accI) <- foldM catStep (sv, []) svs
+        return (final, accI)
     return (v, allInstrs ++ extraInstrs, [])
     where
-      foldM' acc _ [] = return (acc, [])
-      foldM' acc _ (sv : svs) = do
+      catStep (acc, accI) sv = do
         res <- freshVar
-        (finalV, rest) <- foldM' res [] svs
-        return (finalV, [AI (IStrConcat res acc sv)] ++ rest)
+        return (res, accI ++ [AI (IConcat res acc sv)])
 
 lowerArm ::
   GlobalEnv ->
@@ -788,7 +893,7 @@ lowerParBlock ::
   [(Text, VarId)] ->
   Block ->
   Lower (TaskId, [VarId])
-lowerParBlock ge env captures block = do
+lowerParBlock ge _env captures block = do
   let synName = T.pack ("__par_" ++ show (length captures))
   tid <- freshTaskId
   let captureVars = map snd captures
@@ -824,11 +929,11 @@ lowerTemplElem ge env = \case
 
 lowerBinOp :: BinOp -> VarId -> VarId -> VarId -> Instruction
 lowerBinOp op d l r = case op of
-  OpAdd -> IAddInt d l r -- simplified: always int
-  OpSub -> ISubInt d l r
-  OpMul -> IMulInt d l r
+  OpAdd -> IAdd d l r
+  OpSub -> ISub d l r
+  OpMul -> IMul d l r
   OpDiv -> IDiv d l r
-  OpConcat -> IStrConcat d l r -- or IArrConcat
+  OpConcat -> IConcat d l r
   OpLt -> ICmpLt d l r
   OpLe -> ICmpLe d l r
   OpGt -> ICmpGt d l r

@@ -349,7 +349,7 @@ collectBraced ::
 collectBraced fp cs ln col = do
   (inner, rest, l', c') <- goBraced fp cs ln col 0 []
   toks <- lexRaw fp inner ln col []
-  let toks' = filter ((/= TKEof) . tokKind) (reverse toks)
+  let toks' = reverse (filter ((/= TKEof) . tokKind) toks)
   return (toks', rest, l', c')
 
 goBraced ::

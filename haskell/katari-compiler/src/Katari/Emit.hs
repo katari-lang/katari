@@ -11,6 +11,15 @@ import Data.Text (Text)
 import Data.Text.Encoding qualified as TE
 import Data.Word (Word32, Word8)
 import Katari.IR
+  ( ConstVal (..),
+    IRHandleBlock (..),
+    IRModule (..),
+    IRRequestDef (..),
+    IRTask (..),
+    Instruction (..),
+    RequestId,
+    VarId,
+  )
 
 -- ---------------------------------------------------------------------------
 -- Entry point
@@ -159,21 +168,14 @@ emitInstr = \case
   IArrGet v a i -> op 0x21 <> leb128 v <> leb128 a <> leb128 i
   IArrLen v a -> op 0x22 <> leb128 v <> leb128 a
   IArrPush v a e -> op 0x23 <> leb128 v <> leb128 a <> leb128 e
-  IArrConcat v a b -> op 0x24 <> leb128 v <> leb128 a <> leb128 b
   IArrSlice v a i j -> op 0x25 <> leb128 v <> leb128 a <> leb128 i <> leb128 j
-  -- Int arithmetic
-  IAddInt v l r -> op 0x30 <> leb128 v <> leb128 l <> leb128 r
-  ISubInt v l r -> op 0x31 <> leb128 v <> leb128 l <> leb128 r
-  IMulInt v l r -> op 0x32 <> leb128 v <> leb128 l <> leb128 r
-  IModInt v l r -> op 0x33 <> leb128 v <> leb128 l <> leb128 r
-  INegInt v s -> op 0x34 <> leb128 v <> leb128 s
-  -- Float arithmetic
-  IAddFlt v l r -> op 0x40 <> leb128 v <> leb128 l <> leb128 r
-  ISubFlt v l r -> op 0x41 <> leb128 v <> leb128 l <> leb128 r
-  IMulFlt v l r -> op 0x42 <> leb128 v <> leb128 l <> leb128 r
-  IDivFlt v l r -> op 0x43 <> leb128 v <> leb128 l <> leb128 r
-  INegFlt v s -> op 0x44 <> leb128 v <> leb128 s
-  IDiv v l r -> op 0x45 <> leb128 v <> leb128 l <> leb128 r
+  -- Arithmetic (runtime dispatches on integer/number)
+  IAdd v l r -> op 0x30 <> leb128 v <> leb128 l <> leb128 r
+  ISub v l r -> op 0x31 <> leb128 v <> leb128 l <> leb128 r
+  IMul v l r -> op 0x32 <> leb128 v <> leb128 l <> leb128 r
+  IDiv v l r -> op 0x33 <> leb128 v <> leb128 l <> leb128 r
+  IMod v l r -> op 0x34 <> leb128 v <> leb128 l <> leb128 r
+  INeg v s -> op 0x35 <> leb128 v <> leb128 s
   -- Compare
   ICmpEq v l r -> op 0x50 <> leb128 v <> leb128 l <> leb128 r
   ICmpNe v l r -> op 0x51 <> leb128 v <> leb128 l <> leb128 r
@@ -185,10 +187,9 @@ emitInstr = \case
   IAnd v l r -> op 0x60 <> leb128 v <> leb128 l <> leb128 r
   IOr v l r -> op 0x61 <> leb128 v <> leb128 l <> leb128 r
   INot v s -> op 0x62 <> leb128 v <> leb128 s
-  -- String / conversion
-  IStrConcat v l r -> op 0x70 <> leb128 v <> leb128 l <> leb128 r
+  -- String/array concat (runtime dispatches on lhs type), conversion
+  IConcat v l r -> op 0x70 <> leb128 v <> leb128 l <> leb128 r
   IToString v s -> op 0x71 <> leb128 v <> leb128 s
-  IIntToFlt v s -> op 0x72 <> leb128 v <> leb128 s
   ITypeOf v s -> op 0x73 <> leb128 v <> leb128 s
   -- Control
   IJump t -> op 0x80 <> leb128 t

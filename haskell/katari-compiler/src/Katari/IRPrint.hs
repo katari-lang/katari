@@ -3,12 +3,19 @@ module Katari.IRPrint
   )
 where
 
-import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Word (Word32)
 import Katari.IR
+  ( ConstVal (..),
+    IRHandleBlock (..),
+    IRModule (..),
+    IRRequestDef (..),
+    IRTask (..),
+    Instruction (..),
+    NameTable (..),
+  )
 
 -- ---------------------------------------------------------------------------
 -- Entry point
@@ -37,7 +44,7 @@ printIRModule irm =
 printConsts :: [ConstVal] -> Text
 printConsts cs = T.unlines (zipWith go [0 :: Int ..] cs)
   where
-    go i cv = "  [" <> T.pack (show i) <> "] " <> showConst cv
+    go i c = "  [" <> T.pack (show i) <> "] " <> showConst c
 
 showConst :: ConstVal -> Text
 showConst = \case
@@ -75,7 +82,7 @@ printTask irm task =
       ++ printInstrs 4 irm (irTaskBody task)
       ++ if null (irTaskHandlers task)
         then []
-        else ["  handlers:"] ++ concatMap (printHandleBlock irm) (irTaskHandlers task)
+        else "  handlers:" : concatMap (printHandleBlock irm) (irTaskHandlers task)
   where
     nt = irmNameTable irm
 
@@ -106,13 +113,12 @@ printHandleBlock irm hb =
         : printInstrs 8 irm instrs
 
 printInstrs :: Int -> IRModule -> [Instruction] -> [Text]
-printInstrs indent irm instrs =
+printInstrs indent irm =
   zipWith
     ( \i instr ->
         T.replicate indent " " <> showId (fromIntegral (i :: Int)) <> ": " <> printInstr irm instr
     )
     [0 ..]
-    instrs
 
 -- ---------------------------------------------------------------------------
 -- Instructions
@@ -137,19 +143,13 @@ printI nt cs = \case
   IArrGet v a i -> vn nt v <> " = " <> vn nt a <> "[" <> vn nt i <> "]"
   IArrLen v a -> vn nt v <> " = len(" <> vn nt a <> ")"
   IArrPush v a e -> vn nt v <> " = push(" <> vn nt a <> ", " <> vn nt e <> ")"
-  IArrConcat v a b -> vn nt v <> " = concat(" <> vn nt a <> ", " <> vn nt b <> ")"
   IArrSlice v a s e -> vn nt v <> " = slice(" <> vn nt a <> ", " <> vn nt s <> ", " <> vn nt e <> ")"
-  IAddInt v a b -> vn nt v <> " = " <> vn nt a <> " +i " <> vn nt b
-  ISubInt v a b -> vn nt v <> " = " <> vn nt a <> " -i " <> vn nt b
-  IMulInt v a b -> vn nt v <> " = " <> vn nt a <> " *i " <> vn nt b
-  IModInt v a b -> vn nt v <> " = " <> vn nt a <> " %i " <> vn nt b
-  INegInt v a -> vn nt v <> " = -i" <> vn nt a
-  IAddFlt v a b -> vn nt v <> " = " <> vn nt a <> " +f " <> vn nt b
-  ISubFlt v a b -> vn nt v <> " = " <> vn nt a <> " -f " <> vn nt b
-  IMulFlt v a b -> vn nt v <> " = " <> vn nt a <> " *f " <> vn nt b
-  IDivFlt v a b -> vn nt v <> " = " <> vn nt a <> " /f " <> vn nt b
-  INegFlt v a -> vn nt v <> " = -f" <> vn nt a
+  IAdd v a b -> vn nt v <> " = " <> vn nt a <> " + " <> vn nt b
+  ISub v a b -> vn nt v <> " = " <> vn nt a <> " - " <> vn nt b
+  IMul v a b -> vn nt v <> " = " <> vn nt a <> " * " <> vn nt b
   IDiv v a b -> vn nt v <> " = " <> vn nt a <> " / " <> vn nt b
+  IMod v a b -> vn nt v <> " = " <> vn nt a <> " % " <> vn nt b
+  INeg v a -> vn nt v <> " = -" <> vn nt a
   ICmpEq v a b -> vn nt v <> " = " <> vn nt a <> " == " <> vn nt b
   ICmpNe v a b -> vn nt v <> " = " <> vn nt a <> " != " <> vn nt b
   ICmpLt v a b -> vn nt v <> " = " <> vn nt a <> " < " <> vn nt b
@@ -159,9 +159,8 @@ printI nt cs = \case
   IAnd v a b -> vn nt v <> " = " <> vn nt a <> " && " <> vn nt b
   IOr v a b -> vn nt v <> " = " <> vn nt a <> " || " <> vn nt b
   INot v a -> vn nt v <> " = !" <> vn nt a
-  IStrConcat v a b -> vn nt v <> " = " <> vn nt a <> " ++ " <> vn nt b
+  IConcat v a b -> vn nt v <> " = " <> vn nt a <> " ++ " <> vn nt b
   IToString v a -> vn nt v <> " = to_string(" <> vn nt a <> ")"
-  IIntToFlt v a -> vn nt v <> " = int_to_flt(" <> vn nt a <> ")"
   ITypeOf v a -> vn nt v <> " = typeof(" <> vn nt a <> ")"
   IJump lbl -> "jump " <> showId lbl
   IBranch c t f -> "branch " <> vn nt c <> " ? @" <> showId t <> " : @" <> showId f

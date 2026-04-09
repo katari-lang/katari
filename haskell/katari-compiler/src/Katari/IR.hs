@@ -49,22 +49,14 @@ data Instruction
   | IArrGet VarId VarId VarId
   | IArrLen VarId VarId
   | IArrPush VarId VarId VarId
-  | IArrConcat VarId VarId VarId
   | IArrSlice VarId VarId VarId VarId
-  | -- 整数演算
-    IAddInt VarId VarId VarId
-  | ISubInt VarId VarId VarId
-  | IMulInt VarId VarId VarId
-  | IModInt VarId VarId VarId
-  | INegInt VarId VarId
-  | -- Float 演算
-    IAddFlt VarId VarId VarId
-  | ISubFlt VarId VarId VarId
-  | IMulFlt VarId VarId VarId
-  | IDivFlt VarId VarId VarId
-  | INegFlt VarId VarId
-  | -- 除算（常に float）
-    IDiv VarId VarId VarId
+  | -- 算術演算 (動的型判定: ランタイムが integer/number を判定する)
+    IAdd VarId VarId VarId
+  | ISub VarId VarId VarId
+  | IMul VarId VarId VarId
+  | IDiv VarId VarId VarId
+  | IMod VarId VarId VarId
+  | INeg VarId VarId
   | -- 比較
     ICmpEq VarId VarId VarId
   | ICmpNe VarId VarId VarId
@@ -76,11 +68,10 @@ data Instruction
     IAnd VarId VarId VarId
   | IOr VarId VarId VarId
   | INot VarId VarId
-  | -- 文字列
-    IStrConcat VarId VarId VarId
+  | -- 文字列/配列結合 (ランタイムが lhs の型で分岐)
+    IConcat VarId VarId VarId
   | -- 型変換
     IToString VarId VarId
-  | IIntToFlt VarId VarId
   | ITypeOf VarId VarId
   | -- 制御フロー
     IJump Word32

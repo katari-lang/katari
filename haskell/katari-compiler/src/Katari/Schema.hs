@@ -1,0 +1,299 @@
+module Katari.Schema
+  ( SchemaKind (..),
+    SchemaOutput (..),
+    moduleSchemas,
+    taskSchema,
+    requestSchema,
+    typeAliasSchema,
+    typeToSchema,
+    normalizedToSchema,
+    encodeSchema,
+  )
+where
+
+import Data.Aeson
+  ( KeyValue (..),
+    Value (..),
+    encode,
+    object,
+  )
+import Data.Aeson.Key qualified as Key
+import Data.Aeson.KeyMap qualified as KM
+import Data.ByteString.Lazy (ByteString)
+import Data.Map.Strict qualified as Map
+import Data.Maybe (catMaybes, fromMaybe)
+import Data.Set qualified as Set
+import Data.Text (Text)
+import Data.Text qualified as T
+import Katari.Module
+  ( GlobalEnv (..),
+    RequestInfo (..),
+    TaskInfo (..),
+    TypeInfo,
+    aliasesFor,
+    primModuleName,
+  )
+import Katari.Syntax (ObjField (..), Type (..))
+import Katari.Types
+  ( BoolKind (..),
+    Discriminator (..),
+    FieldInfo (..),
+    IntPart (..),
+    NormalFields (..),
+    NormalizedType (..),
+    NumPart (..),
+    NumericKind (..),
+    ObjectFields (..),
+    StringKind (..),
+    normalize,
+  )
+
+-- ----------------------------------------------------------------------------
+-- Public API types
+-- ----------------------------------------------------------------------------
+
+data SchemaKind = SKTask | SKRequest | SKType
+  deriving (Show, Eq)
+
+data SchemaOutput = SchemaOutput
+  { soName :: Text,
+    soKind :: SchemaKind,
+    soSchema :: Value
+  }
+  deriving (Show)
+
+-- | Build schemas for every user-defined task, request and type in the
+--   global environment. prim module entries are filtered out.
+moduleSchemas :: GlobalEnv -> [SchemaOutput]
+moduleSchemas ge =
+  let tasks =
+        [ SchemaOutput qname SKTask (taskSchema ge qname ti)
+          | (qname, ti) <- Map.toList (geTasks ge),
+            not (isPrimQname qname)
+        ]
+      reqs =
+        [ SchemaOutput qname SKRequest (requestSchema ge qname ri)
+          | (qname, ri) <- Map.toList (geRequests ge),
+            not (isPrimQname qname)
+        ]
+      tys =
+        [ SchemaOutput qname SKType (typeAliasSchema ge qname ti)
+          | (qname, ti) <- Map.toList (geTypes ge),
+            not (isPrimQname qname)
+        ]
+   in tasks ++ reqs ++ tys
+
+isPrimQname :: Text -> Bool
+isPrimQname q =
+  q == primModuleName
+    || (primModuleName <> ".") `T.isPrefixOf` q
+
+-- | Encode a schema Value as a JSON bytestring.
+encodeSchema :: Value -> ByteString
+encodeSchema = encode
+
+-- ----------------------------------------------------------------------------
+-- Task / Request / Type schema generation
+-- ----------------------------------------------------------------------------
+
+taskSchema :: GlobalEnv -> Text -> TaskInfo -> Value
+taskSchema ge _qname ti =
+  let mname = tiHomeModule ti
+      inputSchema = paramsToInputSchema ge mname (tiParams ti)
+      outputSchema = typeToSchema ge mname (tiRet ti)
+      base =
+        object
+          [ "type" .= ("object" :: Text),
+            "properties"
+              .= object
+                [ "input" .= inputSchema,
+                  "output" .= outputSchema
+                ],
+            "required" .= (["input", "output"] :: [Text])
+          ]
+   in applyDescription (tiAnnot ti) base
+
+requestSchema :: GlobalEnv -> Text -> RequestInfo -> Value
+requestSchema ge _qname ri =
+  let mname = riHomeModule ri
+      inputSchema = paramsToInputSchema ge mname (riParams ri)
+      outputSchema = typeToSchema ge mname (riRet ri)
+      base =
+        object
+          [ "type" .= ("object" :: Text),
+            "properties"
+              .= object
+                [ "input" .= inputSchema,
+                  "output" .= outputSchema
+                ],
+            "required" .= (["input", "output"] :: [Text])
+          ]
+   in applyDescription (riAnnot ri) base
+
+typeAliasSchema :: GlobalEnv -> Text -> TypeInfo -> Value
+typeAliasSchema ge qname _ti =
+  case Map.lookup qname (geTypeEnv ge) of
+    Just nt -> normalizedToSchema nt
+    Nothing -> object []
+
+-- | Build the "input" object schema from a parameter list.
+paramsToInputSchema ::
+  GlobalEnv ->
+  Text ->
+  [(Text, Type, Maybe Text)] ->
+  Value
+paramsToInputSchema ge mname params =
+  let propPairs =
+        [ ( Key.fromText pname,
+            applyDescription pann (typeToSchema ge mname pty)
+          )
+          | (pname, pty, pann) <- params
+        ]
+   in object
+        [ "type" .= ("object" :: Text),
+          "properties" .= object propPairs,
+          "required" .= [pname | (pname, _, _) <- params]
+        ]
+
+-- | Convert a source-level 'Type' (possibly containing unqualified TAlias
+--   references) into a JSON Schema 'Value'. Aliases are resolved via the
+--   specified module's alias table.
+typeToSchema :: GlobalEnv -> Text -> Type -> Value
+typeToSchema ge mname ty =
+  let qty = qualifyType ge mname ty
+      nt = normalize qty (geTypeEnv ge)
+   in normalizedToSchema nt
+
+-- | Walk a 'Type' and rewrite each TAlias to its fully-qualified form using
+--   the given module's alias table.
+qualifyType :: GlobalEnv -> Text -> Type -> Type
+qualifyType ge mname = go
+  where
+    aliases = aliasesFor ge mname
+    go t = case t of
+      TNull -> t
+      TBoolean -> t
+      TInteger -> t
+      TNumber -> t
+      TString -> t
+      TNever -> t
+      TUnknown -> t
+      TLitBool _ -> t
+      TLitInt _ -> t
+      TLitNum _ -> t
+      TLitStr _ -> t
+      TArray inner -> TArray (go inner)
+      TUnion ts -> TUnion (map go ts)
+      TInter ts -> TInter (map go ts)
+      TAlias n -> TAlias (fromMaybe n (Map.lookup n aliases))
+      TObj flds -> TObj [f {ofType = go (ofType f)} | f <- flds]
+
+-- ----------------------------------------------------------------------------
+-- NormalizedType → JSON Schema Value
+-- ----------------------------------------------------------------------------
+
+normalizedToSchema :: NormalizedType -> Value
+normalizedToSchema = \case
+  NTUnknown -> object []
+  NTDISC d -> discSchema d
+  NTFields nf -> fieldsSchema nf
+
+discSchema :: Discriminator -> Value
+discSchema d =
+  let variants =
+        [ normalizedToSchema (NTFields nf)
+          | nf <- Map.elems (discMapping d)
+        ]
+   in object
+        [ "oneOf" .= variants,
+          "discriminator"
+            .= object ["propertyName" .= discField d]
+        ]
+
+fieldsSchema :: NormalFields -> Value
+fieldsSchema nf = case collectParts nf of
+  [] -> object ["not" .= object []]
+  [single] -> single
+  many -> object ["oneOf" .= many]
+
+collectParts :: NormalFields -> [Value]
+collectParts NormalFields {..} =
+  catMaybes
+    [ if nfNull then Just (typeKeyword "null") else Nothing,
+      boolSchema <$> nfBoolean,
+      numericSchema <$> nfNumeric,
+      stringSchema <$> nfString,
+      arraySchema <$> nfArray,
+      objectSchema <$> nfObject
+    ]
+
+typeKeyword :: Text -> Value
+typeKeyword t = object ["type" .= t]
+
+boolSchema :: BoolKind -> Value
+boolSchema BoolFull = typeKeyword "boolean"
+boolSchema (BoolLits s) = case Set.toList s of
+  [b] -> object ["const" .= b]
+  bs -> object ["oneOf" .= [object ["const" .= b] | b <- bs]]
+
+numericSchema :: NumericKind -> Value
+numericSchema (NumericKind IntFull NumFull) = typeKeyword "number"
+numericSchema (NumericKind IntAbsent NumFull) = typeKeyword "number"
+numericSchema (NumericKind IntFull NumAbsent) = typeKeyword "integer"
+numericSchema (NumericKind ip np) =
+  let intParts = case ip of
+        IntAbsent -> []
+        IntFull -> [typeKeyword "integer"]
+        IntLits s -> [object ["const" .= i] | i <- Set.toList s]
+      numParts = case np of
+        NumAbsent -> []
+        NumFull -> [typeKeyword "number"]
+        NumLits s -> [object ["const" .= n] | n <- Set.toList s]
+      parts = intParts ++ numParts
+   in case parts of
+        [] -> object ["not" .= object []]
+        [single] -> single
+        _ -> object ["oneOf" .= parts]
+
+stringSchema :: StringKind -> Value
+stringSchema StringFull = typeKeyword "string"
+stringSchema (StringLits s) = case Set.toList s of
+  [x] -> object ["const" .= x]
+  xs -> object ["oneOf" .= [object ["const" .= x] | x <- xs]]
+
+arraySchema :: NormalizedType -> Value
+arraySchema inner =
+  object
+    [ "type" .= ("array" :: Text),
+      "items" .= normalizedToSchema inner
+    ]
+
+objectSchema :: ObjectFields -> Value
+objectSchema (ObjectFields flds) =
+  let entries = Map.toList flds
+      propPairs =
+        [ (Key.fromText name, fieldSchema info)
+          | (name, info) <- entries
+        ]
+      requiredNames = [name | (name, info) <- entries, not (fiOptional info)]
+   in object
+        [ "type" .= ("object" :: Text),
+          "properties" .= object propPairs,
+          "required" .= requiredNames
+        ]
+
+fieldSchema :: FieldInfo -> Value
+fieldSchema fi =
+  applyDescription (fiAnnot fi) (normalizedToSchema (fiType fi))
+
+-- ----------------------------------------------------------------------------
+-- helpers
+-- ----------------------------------------------------------------------------
+
+-- | Inject a "description" field into an object schema. If the value is not
+--   an object (shouldn't happen in practice), it is returned unchanged.
+applyDescription :: Maybe Text -> Value -> Value
+applyDescription Nothing v = v
+applyDescription (Just desc) (Object o) =
+  Object (KM.insert (Key.fromText "description") (String desc) o)
+applyDescription (Just _) v = v

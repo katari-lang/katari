@@ -22,6 +22,7 @@ noSpan = SrcSpan "<unknown>" 0 0
 
 data Module = Module
   { modFile :: FilePath,
+    modName :: Text, -- e.g. "lib.cron" (dot-separated qualified name)
     modDecls :: [Decl]
   }
   deriving (Show)
@@ -53,7 +54,7 @@ data ValDecl = ValDecl
 data TaskDecl = TaskDecl
   { taskAnnot :: Maybe Text,
     taskName :: Text,
-    taskParams :: [(Text, Type)],
+    taskParams :: [(Text, Type, Maybe Text)], -- (name, type, annotation)
     taskRet :: Maybe Type,
     taskWith :: Maybe RequestEffect, -- Nothing = 推論
     taskBody :: Block
@@ -64,7 +65,7 @@ data TaskDecl = TaskDecl
 data RequestDecl = RequestDecl
   { reqAnnot :: Maybe Text,
     reqName :: Text,
-    reqParams :: [(Text, Type)],
+    reqParams :: [(Text, Type, Maybe Text)], -- (name, type, annotation)
     reqRet :: Type
   }
   deriving (Show)
@@ -88,7 +89,7 @@ data ImportDecl = ImportDecl
 data ExternalTaskDecl = ExternalTaskDecl
   { extTaskAnnot :: Maybe Text,
     extTaskName :: Text,
-    extTaskParams :: [(Text, Type)],
+    extTaskParams :: [(Text, Type, Maybe Text)],
     extTaskRet :: Maybe Type,
     extTaskWith :: Maybe RequestEffect,
     extTaskFrom :: Text -- "server:task_name"
@@ -99,7 +100,7 @@ data ExternalTaskDecl = ExternalTaskDecl
 data ExternalReqDecl = ExternalReqDecl
   { extReqAnnot :: Maybe Text,
     extReqName :: Text,
-    extReqParams :: [(Text, Type)],
+    extReqParams :: [(Text, Type, Maybe Text)],
     extReqRet :: Type,
     extReqFrom :: Text
   }
@@ -115,7 +116,7 @@ data RequestEffect
 -- Statements
 -- ---------------------------------------------------------------------------
 
-data Block = Block [Stmt]
+newtype Block = Block [Stmt]
   deriving (Show)
 
 data Stmt
@@ -166,7 +167,7 @@ data TemplElem
 -- ---------------------------------------------------------------------------
 
 data HandleStmt = HandleStmt
-  { hParams :: [(Text, Type, Expr)], -- (name, type, init_expr)
+  { hParams :: [(Text, Type, Maybe Text, Expr)], -- (name, type, annotation, init_expr)
     hReqCases :: [(Text, [Pat], Block)], -- (req_name, arg_pats, body)
     hReturnCase :: Maybe (Text, Block) -- return x => body
   }
@@ -227,7 +228,8 @@ data ObjField = ObjField
   { ofName :: Text,
     ofOptional :: Bool,
     ofUniq :: Bool,
-    ofType :: Type
+    ofType :: Type,
+    ofAnnot :: Maybe Text -- semantic annotation @"..." for schema description
   }
   deriving (Show, Eq)
 
