@@ -146,7 +146,7 @@ data Expr
   | EField SrcSpan Expr Text
   | EVar SrcSpan Text
   | ELit SrcSpan Lit
-  | EObj SrcSpan [(Text, Expr)] -- {foo = expr, ...}
+  | EObj SrcSpan [(Text, Bool, Expr)] -- {foo = expr, ...} (Bool = uniq)
   | EArr SrcSpan [Expr]
   | ETempl SrcSpan [TemplElem] -- f"..."
   deriving (Show)

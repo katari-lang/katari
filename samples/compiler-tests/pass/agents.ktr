@@ -1,0 +1,60 @@
+// agents.ktr -- agent declarations, parameters, return types, calling
+
+// simple agent with no params
+agent no_params() -> integer {
+  42
+}
+
+// agent with typed params
+agent add(a: integer, b: integer) -> integer {
+  a + b
+}
+
+// agent with multiple params of different types
+agent greet(name: string, times: integer) -> string {
+  f"Hello ${name}, count=${times}"
+}
+
+// agent calling another agent
+agent caller() -> integer {
+  let result = add(10, 20)
+  result
+}
+
+// agent with no explicit return type (defaults to null)
+agent inferred_return() {
+  let x = 42
+  null
+}
+
+// agent returning null
+agent void_agent() -> null {
+  null
+}
+
+// agent with annotation
+@"This is a documented agent"
+agent documented(x: integer @"input value") -> integer {
+  x * 2
+}
+
+// agent with complex return type
+agent complex_return() -> { name: string, scores: array[integer] } {
+  { name = "test", scores = [100, 95, 88] }
+}
+
+// agent with union return type
+agent nullable_return(x: integer) -> string | null {
+  if x > 0 {
+    "positive"
+  } else {
+    null
+  }
+}
+
+// chained agent calls
+agent chain() -> integer {
+  let a = add(1, 2)
+  let b = add(a, 3)
+  add(b, 4)
+}

@@ -1,0 +1,162 @@
+// edge.ktr -- edge cases
+
+// ── empty blocks ─────────────────────────────────────────────────
+
+// empty if branch produces null
+agent empty_if() -> null {
+  let x = 10
+  if x > 5 {
+  }
+  null
+}
+
+// empty else branch
+agent empty_else() -> integer | null {
+  let x = 10
+  if x > 5 {
+    42
+  } else {
+  }
+}
+
+// ── type alias chains ────────────────────────────────────────────
+
+type Level0 = integer
+type Level1 = Level0
+type Level2 = Level1
+type Level3 = Level2
+
+agent alias_chain() -> Level3 {
+  let x: Level3 = 42
+  x
+}
+
+// ── union simplification ─────────────────────────────────────────
+
+// integer | null
+agent nullable_int() -> integer | null {
+  let x: integer | null = null
+  x
+}
+
+// nested union
+type A = integer | string
+type B = A | null
+
+agent nested_union() -> B {
+  let x: B = null
+  x
+}
+
+// ── deeply nested objects ────────────────────────────────────────
+
+type Inner = { value: integer }
+type Middle = { inner: Inner, label: string }
+type Outer = { middle: Middle, id: integer }
+
+agent deep_object() -> integer {
+  let obj: Outer = {
+    middle = {
+      inner = { value = 42 },
+      label = "test"
+    },
+    id = 1
+  }
+  obj.middle.inner.value
+}
+
+// ── template with complex expression ─────────────────────────────
+
+agent template_complex() -> string {
+  let x = 10
+  let y = 20
+  f"sum=${x + y}, product=${x * y}"
+}
+
+// ── single-branch match ─────────────────────────────────────────
+
+agent match_single() -> string {
+  let x = 42
+  match x {
+    case _y => { "always matches" }
+  }
+}
+
+// ── object with optional field ───────────────────────────────────
+
+type Config = {
+  host: string,
+  port?: integer,
+  debug?: boolean
+}
+
+agent optional_fields() -> Config {
+  let c: Config = { host = "localhost" }
+  c
+}
+
+// ── boolean literal type ─────────────────────────────────────────
+
+agent bool_literal() -> true {
+  true
+}
+
+// ── integer literal type ─────────────────────────────────────────
+
+agent int_literal() -> 42 {
+  42
+}
+
+// ── string literal type ──────────────────────────────────────────
+
+agent str_literal() -> "hello" {
+  "hello"
+}
+
+// ── array of objects ─────────────────────────────────────────────
+
+type Item = { name: string, price: number }
+
+agent array_of_objects() -> array[Item] {
+  let items: array[Item] = [
+    { name = "apple", price = 1.5 },
+    { name = "banana", price = 0.75 }
+  ]
+  items
+}
+
+// ── empty array ──────────────────────────────────────────────────
+
+agent empty_array() -> array[integer] {
+  let xs: array[integer] = []
+  xs
+}
+
+// ── empty object ─────────────────────────────────────────────────
+
+agent empty_object() -> {} {
+  let obj: {} = {}
+  obj
+}
+
+// ── block as last expression ─────────────────────────────────────
+
+agent block_last() -> integer {
+  let x = 10
+  {
+    let y = 20
+    x + y
+  }
+}
+
+// ── nested block expressions ─────────────────────────────────────
+
+agent nested_blocks() -> integer {
+  {
+    {
+      {
+        42
+      }
+    }
+  }
+}

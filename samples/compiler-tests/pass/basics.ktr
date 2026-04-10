@@ -1,0 +1,103 @@
+// basics.ktr -- literals, variables, let bindings, operators, template strings
+
+// integer literals and arithmetic
+agent test_int_arithmetic() -> integer {
+  let x = 42
+  let y = 10
+  let sum = x + y
+  let diff = x - y
+  let prod = x * y
+  sum + diff + prod
+}
+
+// division returns number
+agent test_division() -> number {
+  let x = 42
+  let y = 10
+  x / y
+}
+
+// number (float) literals
+agent test_number() -> number {
+  let a = 3.14
+  let b = 2.0
+  a * b + 1.5
+}
+
+// boolean literals and logic
+agent test_bool() -> boolean {
+  let a = true
+  let b = false
+  let c = a && b
+  let d = a || b
+  let e = !a
+  d && !c
+}
+
+// string literals and concatenation
+agent test_string() -> string {
+  let s1 = "hello"
+  let s2 = "world"
+  s1 ++ " " ++ s2
+}
+
+// null literal
+agent test_null() -> null {
+  let x = null
+  x
+}
+
+// template strings
+agent test_template() -> string {
+  let name = "katari"
+  let version = 1
+  f"Hello, ${name}! Version ${version}"
+}
+
+// comparison operators
+agent test_comparison() -> boolean {
+  let a = 10
+  let b = 20
+  let lt = a < b
+  let le = a <= b
+  let gt = a > b
+  let ge = a >= b
+  let eq = a == b
+  let ne = a != b
+  lt && le && !gt && !ge && !eq && ne
+}
+
+// unary operators
+agent test_unary() -> integer {
+  let x = 42
+  let neg = -x
+  neg
+}
+
+// nested let bindings
+agent test_nested_let() -> integer {
+  let x = {
+    let a = 10
+    let b = 20
+    a + b
+  }
+  x * 2
+}
+
+// array literals
+agent test_array() -> array[integer] {
+  let arr = [1, 2, 3, 4, 5]
+  arr
+}
+
+// object literals
+agent test_object() -> { name: string, age: integer } {
+  let obj = { name = "Alice", age = 30 }
+  obj
+}
+
+// field access
+agent test_field_access() -> string {
+  let obj = { name = "Bob", age = 25 }
+  obj.name
+}

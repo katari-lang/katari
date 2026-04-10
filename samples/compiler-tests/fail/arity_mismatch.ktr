@@ -1,0 +1,10 @@
+// arity_mismatch.ktr -- ArityMismatch error expected
+// Calling an agent with wrong number of arguments
+
+agent add(a: integer, b: integer) -> integer {
+  a + b
+}
+
+agent main() -> integer {
+  add(1, 2, 3)
+}

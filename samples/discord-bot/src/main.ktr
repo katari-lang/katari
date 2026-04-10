@@ -1,0 +1,23 @@
+// main.ktr -- エントリポイント
+
+import types
+import ext
+import bot
+
+// ─── エントリ agent ─────────────────────────────────────────────
+
+@"Discord Botのメインエントリポイント"
+agent run_bot() -> null {
+  let channels = list_channels()
+
+  // 複数チャンネルを並行して監視
+  par [
+    {
+      watch_channel(channels, 0)
+    },
+    {
+      watch_channel(channels, 1)
+    }
+  ]
+  null
+}

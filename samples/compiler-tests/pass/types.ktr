@@ -1,0 +1,110 @@
+// types.ktr -- type annotations, aliases, unions, intersections, objects, arrays
+
+// basic type aliases
+type UserId = integer
+type Name = string
+type Score = number
+
+// object type alias
+type User = {
+  name: Name,
+  age: integer,
+  email?: string
+}
+
+// union type alias
+type StringOrInt = string | integer
+
+// literal type
+type Direction = "north" | "south" | "east" | "west"
+
+// discriminated union with uniq
+type Shape = { uniq kind: "circle", radius: number }
+           | { uniq kind: "rect", width: number, height: number }
+           | { uniq kind: "triangle", base: number, height: number }
+
+// nested object type
+type Address = {
+  street: string,
+  city: string,
+  zip: string
+}
+
+type UserWithAddress = {
+  name: string,
+  address: Address
+}
+
+// array type alias
+type IntList = array[integer]
+type UserList = array[User]
+
+// type alias chain
+type A = integer
+type B = A
+type C = B
+
+// using type annotations
+agent test_typed_let() -> null {
+  let id: UserId = 42
+  let name: Name = "Alice"
+  let score: Score = 98.5
+  let dir: Direction = "north"
+  null
+}
+
+// object construction with type
+agent test_typed_object() -> User {
+  let user: User = { name = "Bob", age = 30 }
+  user
+}
+
+// union type usage
+agent test_union() -> StringOrInt {
+  let x: StringOrInt = 42
+  x
+}
+
+// array type usage
+agent test_typed_array() -> IntList {
+  let xs: IntList = [1, 2, 3]
+  xs
+}
+
+// nullable type (union with null)
+type MaybeInt = integer | null
+
+agent test_nullable() -> MaybeInt {
+  let x: MaybeInt = null
+  x
+}
+
+// discriminated union construction
+agent test_disc_union() -> Shape {
+  let s: Shape = { kind = "circle", radius = 5.0 }
+  s
+}
+
+// nested type alias
+agent test_nested_type() -> UserWithAddress {
+  let u: UserWithAddress = {
+    name = "Charlie",
+    address = { street = "123 Main St", city = "Tokyo", zip = "100-0001" }
+  }
+  u
+}
+
+// DISC subtype: object literal union should be subtype of discriminated union
+// Regression test: { action: "a"|"b" } <: DISC(action)
+type Action = { uniq action: "reply" }
+            | { uniq action: "post" }
+            | { uniq action: "ignore" }
+
+agent test_disc_subtype() -> Action {
+  let x = "reply"
+  match x {
+    case "reply" => { { action = "reply" } }
+    case "post" => { { action = "post" } }
+    case _other => { { action = "ignore" } }
+  }
+}

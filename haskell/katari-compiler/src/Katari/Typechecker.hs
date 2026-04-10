@@ -4,7 +4,7 @@ module Katari.Typechecker
   )
 where
 
-import Control.Monad (forM, forM_, unless, void)
+import Control.Monad (forM_, unless, void)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe)
@@ -209,6 +209,7 @@ inferBlock env (Block stmts) = goStmts env stmts
 goStmts :: TypeEnv -> [Stmt] -> TC NormalizedType
 goStmts env = \case
   [] -> return ntNull
+  SHandle sp hs : rest -> inferHandle env sp hs rest
   [s] -> inferStmt env s
   s : ss -> do
     nt <- inferStmt env s
@@ -217,6 +218,45 @@ goStmts env = \case
       else do
         env' <- updateEnv env s
         goStmts env' ss
+
+-- | Handle statement: wraps remaining statements as the scope body.
+-- The result type is the then clause's result (if present) or the scope body's type.
+inferHandle :: TypeEnv -> SrcSpan -> HandleStmt -> [Stmt] -> TC NormalizedType
+inferHandle env sp hs rest = do
+  let ge = teGlobal env
+  -- Check state var init expressions and collect types
+  stateVarTypes <- mapM (\(name, ty, _, initExpr) -> do
+    let nt = normalizeIn env ty
+    initNT <- inferExpr env initExpr
+    unless (subtypeNT initNT nt) $
+      Left (TypeMismatch sp initNT nt)
+    return (name, nt)) (hParams hs)
+  let stateEnv = withVars stateVarTypes env
+  -- Check each request case body with teContinue set to the request's return type
+  forM_ (hReqCases hs) $ \(reqName, pats, body) -> do
+    let qreq = resolveLocal env reqName
+    case Map.lookup qreq (geRequests ge) of
+      Nothing -> Left (UndefinedName sp reqName)
+      Just ri -> do
+        let paramTypes = map (\(_, t, _) -> normalizeAs ge (riHomeModule ri) t) (riParams ri)
+        let continueType = normalizeAs ge (riHomeModule ri) (riRet ri)
+        let patEnv =
+              ( foldr
+                  (\(pat, nt) e -> bindPat pat nt e)
+                  stateEnv
+                  (zip pats paramTypes)
+              )
+                { teContinue = Just continueType
+                }
+        void (inferBlock patEnv body)
+  -- Process remaining statements as the handle scope body
+  scopeType <- goStmts stateEnv rest
+  -- Apply then clause: bind thenVar to scopeType, infer then body
+  case hThenClause hs of
+    Nothing -> return scopeType
+    Just (thenVar, body) -> do
+      let thenEnv = withVar thenVar scopeType stateEnv
+      inferBlock thenEnv body
 
 -- Check that the inferred type matches any type annotation in the pattern
 checkPatAnnot :: TypeEnv -> SrcSpan -> Pat -> NormalizedType -> TC ()
@@ -240,40 +280,7 @@ inferStmt env = \case
     nt <- inferExpr env e
     checkPatAnnot env sp pat nt
     return ntNull
-  SHandle sp hs -> do
-    let ge = teGlobal env
-    -- Check state var init expressions and collect types
-    stateVarTypes <- forM (hParams hs) $ \(name, ty, _, initExpr) -> do
-      let nt = normalizeIn env ty
-      _ <- inferExpr env initExpr
-      return (name, nt)
-    let stateEnv = withVars stateVarTypes env
-    -- Check each request case body with teContinue set to the request's return type
-    forM_ (hReqCases hs) $ \(reqName, pats, body) -> do
-      let qreq = resolveLocal env reqName
-      case Map.lookup qreq (geRequests ge) of
-        Nothing -> Left (UndefinedName sp reqName)
-        Just ri -> do
-          let paramTypes = map (\(_, t, _) -> normalizeIn env t) (riParams ri)
-          let continueType = normalizeIn env (riRet ri)
-          let patEnv =
-                ( foldr
-                    (\(pat, nt) e -> bindPat pat nt e)
-                    stateEnv
-                    (zip pats paramTypes)
-                )
-                  { teContinue = Just continueType
-                  }
-          _ <- inferBlock patEnv body
-          return ()
-    -- Check then clause body (state vars in scope, then var bound to Unknown)
-    case hThenClause hs of
-      Nothing -> return ()
-      Just (thenVar, body) -> do
-        let thenEnv = withVar thenVar NTUnknown stateEnv
-        _ <- inferBlock thenEnv body
-        return ()
-    return ntNull
+  SHandle _ _ -> error "SHandle must be handled by goStmts/inferHandle"
   SExpr _sp e -> inferExpr env e
   SReturn sp e -> do
     nt <- inferExpr env e
@@ -303,7 +310,7 @@ inferStmt env = \case
 bindPat :: Pat -> NormalizedType -> TypeEnv -> TypeEnv
 bindPat pat nt env = case pat of
   PVar n -> withVar n nt env
-  PTyped n _ -> withVar n nt env
+  PTyped n ty -> withVar n (normalizeIn env ty) env
   PTag _ n -> withVar n nt env
   PLit _ -> env
   PArr pats ->
@@ -487,20 +494,39 @@ collectForBreakExpr env = \case
   EFor _ _ -> return ntNever -- don't descend into nested for
   _ -> return ntNever
 
+-- | Qualify type aliases using a specific module's alias table (not the
+--   current module). Used when normalizing parameter/return types of agents
+--   and requests defined in other modules.
+qualifyTypeAs :: GlobalEnv -> Text -> Type -> Type
+qualifyTypeAs ge modName = go
+  where
+    resolve = resolveQualified ge modName
+    go t = case t of
+      TAlias n -> TAlias (resolve n)
+      TArray inner -> TArray (go inner)
+      TUnion ts -> TUnion (map go ts)
+      TInter ts -> TInter (map go ts)
+      TObj flds -> TObj (map goField flds)
+      _ -> t
+    goField f = f {ofType = go (ofType f)}
+
+-- | Normalize a Type using a specific module's alias context.
+normalizeAs :: GlobalEnv -> Text -> Type -> NormalizedType
+normalizeAs ge modName ty = normalize (qualifyTypeAs ge modName ty) (geTypeEnv ge)
+
 inferCall :: TypeEnv -> SrcSpan -> Text -> [Expr] -> TC NormalizedType
 inferCall env sp name args = do
   let ge = teGlobal env
-      typeEnv = geTypeEnv ge
       qname = resolveLocal env name
   case Map.lookup qname (geAgents ge) of
     Just ai -> do
-      checkArgs sp name (aiParams ai) args typeEnv
-      return (normalize (aiRet ai) typeEnv)
+      checkArgs sp name (aiParams ai) args (aiHomeModule ai)
+      return (normalizeAs ge (aiHomeModule ai) (aiRet ai))
     Nothing ->
       case Map.lookup qname (geRequests ge) of
         Just ri -> do
-          checkArgs sp name (riParams ri) args typeEnv
-          return (normalize (riRet ri) typeEnv)
+          checkArgs sp name (riParams ri) args (riHomeModule ri)
+          return (normalizeAs ge (riHomeModule ri) (riRet ri))
         Nothing ->
           case Map.lookup name (teVars env) of
             Just nt -> do
@@ -508,15 +534,16 @@ inferCall env sp name args = do
               return nt
             Nothing -> Left (UndefinedName sp name)
   where
-    checkArgs :: SrcSpan -> Text -> [(Text, Type, Maybe Text)] -> [Expr] -> Map Text NormalizedType -> TC ()
-    checkArgs callSp callName params callArgs typeEnv = do
-      let expected = length params
+    checkArgs :: SrcSpan -> Text -> [(Text, Type, Maybe Text)] -> [Expr] -> Text -> TC ()
+    checkArgs callSp callName params callArgs homeModule = do
+      let ge = teGlobal env
+          expected = length params
           actual = length callArgs
       unless (expected == actual) $
         Left (ArityMismatch callSp callName expected actual)
       forM_ (zip params callArgs) $ \((_pn, pty, _pa), argE) -> do
         argNT <- inferExpr env argE
-        let paramNT = normalize pty typeEnv
+        let paramNT = normalizeAs ge homeModule pty
         unless (subtypeNT argNT paramNT) $
           Left (TypeMismatch callSp argNT paramNT)
 

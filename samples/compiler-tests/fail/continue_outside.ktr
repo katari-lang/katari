@@ -1,0 +1,7 @@
+// continue_outside.ktr -- continue used outside request handler (InvalidOp)
+
+request get_value() -> integer
+
+agent main() -> integer {
+  continue 42
+}

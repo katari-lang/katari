@@ -1,0 +1,24 @@
+// types.ktr -- 共有型定義
+
+type ChannelId = string
+type MessageId = string
+
+type Message = {
+  id: MessageId,
+  channel_id: ChannelId,
+  author: string,
+  content: string,
+  is_bot: boolean
+}
+
+type Channel = {
+  id: ChannelId,
+  name: string
+}
+
+type SearchResult = { title: string, snippet: string, url: string }
+
+type Action = { uniq action: "reply" }
+            | { uniq action: "post" }
+            | { uniq action: "search_and_reply" }
+            | { uniq action: "ignore" }

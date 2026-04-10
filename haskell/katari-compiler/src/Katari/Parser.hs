@@ -15,6 +15,7 @@ import Data.Functor (($>))
 import Data.List.NonEmpty qualified as NE
 import Data.Maybe (fromMaybe, isJust)
 import Data.Text (Text)
+import Data.Text qualified as T
 import Data.Void (Void)
 import Katari.Lexer (FStrPart (..), TokKind (..), Token (..))
 import Katari.Syntax
@@ -383,10 +384,14 @@ pPrimaryType =
       pArrayType,
       pObjectType,
       between (tok_ TKLParen) (tok_ TKRParen) pType,
-      TAlias <$> ident
+      pQualifiedAlias
     ]
   where
     isBool t = case tokKind t of TKBool _ -> True; _ -> False
+    pQualifiedAlias = do
+      first <- ident
+      rest <- many (tok_ TKDot *> ident)
+      return $ TAlias (T.intercalate "." (first : rest))
 
 pNumLit :: Parser Type
 pNumLit = do

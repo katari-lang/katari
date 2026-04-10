@@ -1,0 +1,12 @@
+// non_exhaustive.ktr -- NonExhaustive error expected
+// Match expression that doesn't cover all cases
+
+type Shape = { uniq kind: "circle", r: number }
+           | { uniq kind: "rect", w: number, h: number }
+
+agent main() -> number {
+  let s: Shape = { kind = "circle", r = 5.0 }
+  match s {
+    case { uniq kind = "circle", r = r } => { 3.14 * r * r }
+  }
+}

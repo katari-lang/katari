@@ -1,0 +1,8 @@
+// cycle_type.ktr -- Cyclic type alias error expected
+
+type A = B
+type B = A
+
+agent main() -> A {
+  42
+}

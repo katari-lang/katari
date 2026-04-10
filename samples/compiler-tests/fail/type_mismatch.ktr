@@ -1,0 +1,7 @@
+// type_mismatch.ktr -- TypeMismatch error expected
+// Assigning a string to an integer-typed variable
+
+agent main() -> integer {
+  let x: integer = "hello"
+  x
+}

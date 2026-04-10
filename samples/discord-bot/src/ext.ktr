@@ -1,0 +1,42 @@
+// ext.ktr -- 外部サーバー宣言
+
+import types
+
+// ─── Discord サーバー ───────────────────────────────────────────
+
+@"チャンネル一覧を取得する"
+external agent list_channels() -> array[types.Channel] from "discord:list_channels"
+
+@"チャンネルの最新メッセージを取得する"
+external agent fetch_messages(
+  channel_id: types.ChannelId @"チャンネルID",
+  limit: integer @"取得件数"
+) -> array[types.Message] from "discord:fetch_messages"
+
+@"メッセージを送信する"
+external agent send_message(
+  channel_id: types.ChannelId @"送信先チャンネルID",
+  content: string @"メッセージ本文"
+) -> types.MessageId from "discord:send_message"
+
+@"メッセージに返信する"
+external agent reply_to(
+  channel_id: types.ChannelId @"チャンネルID",
+  message_id: types.MessageId @"返信先メッセージID",
+  content: string @"返信本文"
+) -> types.MessageId from "discord:reply_to"
+
+// ─── AI サーバー ────────────────────────────────────────────────
+
+@"AIにプロンプトを送信して応答を得る"
+external agent ask_ai(
+  prompt: string @"プロンプト",
+  context: string @"会話のコンテキスト"
+) -> string from "ai:ask"
+
+// ─── Web検索サーバー ────────────────────────────────────────────
+
+@"Webを検索して結果を取得する"
+external agent web_search(
+  query: string @"検索クエリ"
+) -> array[types.SearchResult] from "websearch:search"

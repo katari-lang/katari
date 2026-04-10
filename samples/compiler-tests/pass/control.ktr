@@ -1,0 +1,94 @@
+// control.ktr -- if/else, block expressions, match
+
+// basic if/else
+agent test_if_else() -> integer {
+  let x = 10
+  if x > 5 {
+    100
+  } else {
+    200
+  }
+}
+
+// if without else (returns null union)
+agent test_if_no_else() -> integer | null {
+  let x = 10
+  if x > 5 {
+    100
+  }
+}
+
+// nested if/else
+agent test_nested_if() -> string {
+  let x = 15
+  if x > 20 {
+    "big"
+  } else if x > 10 {
+    "medium"
+  } else {
+    "small"
+  }
+}
+
+// block expression
+agent test_block_expr() -> integer {
+  let x = {
+    let a = 10
+    let b = 20
+    a + b
+  }
+  x
+}
+
+// match expression with literals
+agent test_match_literal() -> string {
+  let x = 2
+  match x {
+    case 1 => { "one" }
+    case 2 => { "two" }
+    case 3 => { "three" }
+    case _y => { "other" }
+  }
+}
+
+// match with discriminated union
+type Animal = { uniq kind: "dog", name: string }
+            | { uniq kind: "cat", name: string, indoor: boolean }
+
+agent test_match_disc() -> string {
+  let a: Animal = { kind = "dog", name = "Rex" }
+  match a {
+    case { uniq kind = "dog", name = n } => { f"Dog: ${n}" }
+    case { uniq kind = "cat", name = n } => { f"Cat: ${n}" }
+  }
+}
+
+// match with primitive tags
+agent test_match_tag() -> string {
+  let x: integer | string = 42
+  match x {
+    case integer(n) => { f"int: ${n}" }
+    case string(s) => { s }
+  }
+}
+
+// match with object pattern
+agent test_match_obj() -> string {
+  let obj = { name = "Alice", age = 30 }
+  match obj {
+    case { name = n } => { n }
+  }
+}
+
+// if with boolean condition from comparison
+agent test_if_comparison() -> string {
+  let a = 10
+  let b = 20
+  if a == b {
+    "equal"
+  } else if a < b {
+    "less"
+  } else {
+    "greater"
+  }
+}

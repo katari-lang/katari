@@ -1,0 +1,65 @@
+// ai.ktr -- AI 判断ロジック: 応答判断と返信生成
+
+import types
+import ext
+import lib.util
+
+// ─── 応答判断 ───────────────────────────────────────────────────
+
+@"メッセージに対してどのアクションを取るか AI に判断させる"
+agent decide_action(
+  msg: Message,
+  history: array[Message]
+) -> Action {
+  let history_text = format_history(history)
+  let prompt = f"以下のメッセージに対して、あなたはDiscordボットとして以下のいずれかのアクションを選んでください。\n\n直近の会話:\n${history_text}\n\n新しいメッセージ:\n${msg.author}: ${msg.content}\n\nアクション: reply / post / search_and_reply / ignore\n一言で回答してください。"
+
+  let response = ask_ai(prompt, history_text)
+
+  match response {
+    case "reply" => { { action = "reply" } }
+    case "post" => { { action = "post" } }
+    case "search_and_reply" => { { action = "search_and_reply" } }
+    case _other => { { action = "ignore" } }
+  }
+}
+
+// ─── 返信生成 ───────────────────────────────────────────────────
+
+@"メッセージに対する返信テキストを AI で生成する"
+agent generate_reply(
+  msg: Message,
+  history: array[Message]
+) -> string {
+  let history_text = format_history(history)
+  let prompt = f"以下のDiscordの会話に対して、人間のように自然な返信を生成してください。\n\n直近の会話:\n${history_text}\n\n返信先:\n${msg.author}: ${msg.content}\n\n返信（100文字以内）:"
+
+  ask_ai(prompt, history_text)
+}
+
+// ─── コンテキスト付き返信生成 ────────────────────────────────────
+
+@"Web検索結果を参考にした返信テキストを生成する"
+agent generate_reply_with_context(
+  msg: Message,
+  history: array[Message],
+  search_context: string
+) -> string {
+  let history_text = format_history(history)
+  let prompt = f"以下のDiscordの会話に対して、Web検索結果を参考に返信してください。\n\n直近の会話:\n${history_text}\n\n返信先:\n${msg.author}: ${msg.content}\n\n参考情報:\n${search_context}\n\n返信（150文字以内）:"
+
+  ask_ai(prompt, history_text)
+}
+
+// ─── 新規投稿生成 ───────────────────────────────────────────────
+
+@"話題に関連する新規投稿テキストを AI で生成する"
+agent generate_post(
+  msg: Message,
+  history: array[Message]
+) -> string {
+  let history_text = format_history(history)
+  let prompt = f"以下のDiscordの会話の流れを見て、新しい話題を投稿してください。\n\n直近の会話:\n${history_text}\n\n投稿（80文字以内）:"
+
+  ask_ai(prompt, history_text)
+}

@@ -335,12 +335,34 @@ topoSort loaded = do
 -- | Wrapper that loads a project or dies with an error message.
 loadProjectOrDie :: FilePath -> IO [Module]
 loadProjectOrDie root = do
-  res <- loadProject root
-  case res of
-    Left err -> do
-      hPutStrLn stderr ("Load error: " ++ showLoadError err)
+  isFile <- doesFileExist root
+  if isFile && takeExtension root == ".ktr"
+    then loadSingleFile root
+    else do
+      res <- loadProject root
+      case res of
+        Left err -> do
+          hPutStrLn stderr ("Load error: " ++ showLoadError err)
+          exitFailure
+        Right modules -> return modules
+
+loadSingleFile :: FilePath -> IO [Module]
+loadSingleFile fp = do
+  src <- TIO.readFile fp
+  case lexFile fp src of
+    Left (LexError msg) -> do
+      hPutStrLn stderr ("Lex error: " ++ msg)
       exitFailure
-    Right modules -> return modules
+    Right toks -> do
+      let mname = T.pack $ dropExt (takeFileName fp)
+      case parseModule fp mname toks of
+        Left err -> do
+          hPutStrLn stderr ("Parse error: " ++ show err)
+          exitFailure
+        Right m -> return [m]
+  where
+    dropExt s = reverse (drop 1 (dropWhile (/= '.') (reverse s)))
+    takeFileName = reverse . takeWhile (\c -> c /= '/' && c /= '\\') . reverse
 
 showLoadError :: LoadError -> String
 showLoadError = \case

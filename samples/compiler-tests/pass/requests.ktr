@@ -1,0 +1,38 @@
+// requests.ktr -- request declarations, effect annotations
+
+// basic request declaration
+request get_input(prompt: string) -> string
+
+// request with no params
+request get_count() -> integer
+
+// request returning null
+request notify(msg: string) -> null
+
+// request with annotation
+@"Throws an error"
+request throw_error(message: string @"error message") -> never
+
+// agent using a request with explicit effect
+agent use_request(x: integer) -> string with get_input {
+  let s = get_input("Enter a value")
+  s
+}
+
+// agent using multiple requests
+agent multi_request() -> null with get_count | notify {
+  let c = get_count()
+  notify(f"Count is ${c}")
+  null
+}
+
+// agent with "with agent" (full effect forwarding)
+agent forwarding(x: integer) -> integer with agent {
+  x
+}
+
+// external agent declaration
+external agent call_ai(prompt: string) -> string from "ai:ask"
+
+// external request declaration
+external request fetch_data(url: string) -> string from "http:get"

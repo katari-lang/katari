@@ -1,0 +1,86 @@
+// handle.ktr -- handle blocks, state params, then clause, break/continue
+
+// basic request for testing
+request get_value() -> integer
+request set_value(v: integer) -> null
+
+// simple handle with break
+agent simple_handle() -> integer {
+  handle {
+    request get_value() => {
+      break 42
+    }
+  }
+  let v = get_value()
+  v
+}
+
+// handle with state parameter
+request get_count() -> integer
+
+agent handle_with_state() -> integer {
+  handle (counter: integer = 0) {
+    request get_count() => {
+      continue counter with { counter = counter + 1 }
+    }
+  }
+  let c1 = get_count()
+  let c2 = get_count()
+  let c3 = get_count()
+  c3
+}
+
+// handle with then clause
+agent handle_with_then() -> string {
+  handle {
+    request get_value() => {
+      break 100
+    }
+  } then (result) {
+    f"Result: ${result}"
+  }
+  let v = get_value()
+  v
+}
+
+// handle with state and then clause
+agent handle_state_and_then() -> string {
+  handle (total: integer = 0) {
+    request set_value(v) => {
+      continue null with { total = total + v }
+    }
+  } then (result) {
+    f"Total: ${total}, Result: ${result}"
+  }
+  set_value(10)
+  set_value(20)
+  30
+}
+
+// handle with continue (value + state update)
+request report(v: integer) -> null
+
+agent handle_continue() -> null {
+  handle (sum: integer = 0) {
+    request report(v) => {
+      continue null with { sum = sum + v }
+    }
+  }
+  report(10)
+  report(20)
+  null
+}
+
+// break from handle body
+agent handle_break_body() -> integer {
+  handle {
+    request get_value() => {
+      continue 0
+    }
+  }
+  let x = get_value()
+  if x == 0 {
+    break 999
+  }
+  x
+}

@@ -1,0 +1,7 @@
+// undefined_name.ktr -- UndefinedName error expected
+// Referencing an undefined variable
+
+agent main() -> integer {
+  let x = 10
+  x + y
+}
