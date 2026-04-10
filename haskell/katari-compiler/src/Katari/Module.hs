@@ -1,6 +1,6 @@
 module Katari.Module
   ( GlobalEnv (..),
-    TaskInfo (..),
+    AgentInfo (..),
     RequestInfo (..),
     ValInfo (..),
     TypeInfo (..),
@@ -13,54 +13,45 @@ module Katari.Module
   )
 where
 
+import Control.Monad (forM_, unless)
+import Data.List (partition)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe)
+import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
 import Katari.Syntax
   ( Decl (..),
     ExternalReqDecl (..),
-    ExternalTaskDecl (..),
+    ExternalAgentDecl (..),
     ImportDecl (..),
     Module (..),
     ObjField (..),
     RequestDecl (..),
     RequestEffect (..),
-    TaskDecl (..),
+    AgentDecl (..),
     Type (..),
     TypeAliasDecl (..),
     ValDecl (..),
   )
 import Katari.Types
-  ( FieldInfo (..),
-    NormalFields (..),
-    NormalizedType (..),
-    ObjectFields (..),
-    intersectNT,
-    isNeverNT,
+  ( NormalizedType,
     normalize,
-    ntBool,
-    ntInteger,
     ntNever,
-    ntNull,
-    ntNumber,
-    ntString,
-    tryMakeDISC,
-    unionNT,
   )
 
 -- ---------------------------------------------------------------------------
 -- Global environment
 -- ---------------------------------------------------------------------------
 
-data TaskInfo = TaskInfo
-  { tiParams :: [(Text, Type, Maybe Text)], -- (name, type, annotation)
-    tiRet :: Type,
-    tiWith :: Maybe RequestEffect,
-    tiExtFrom :: Maybe Text, -- for external tasks
-    tiAnnot :: Maybe Text, -- @"..." description for schema
-    tiHomeModule :: Text -- defining module (for TAlias resolution in Type)
+data AgentInfo = AgentInfo
+  { aiParams :: [(Text, Type, Maybe Text)], -- (name, type, annotation)
+    aiRet :: Type,
+    aiWith :: Maybe RequestEffect,
+    aiExtFrom :: Maybe Text, -- for external agents
+    aiAnnot :: Maybe Text, -- @"..." description for schema
+    aiHomeModule :: Text -- defining module (for TAlias resolution in Type)
   }
   deriving (Show)
 
@@ -79,8 +70,9 @@ data ValInfo = ValInfo
   }
   deriving (Show)
 
-newtype TypeInfo = TypeInfo
-  { tyAlias :: Type
+data TypeInfo = TypeInfo
+  { tyAlias :: Type,
+    tyHomeModule :: Text
   }
   deriving (Show)
 
@@ -90,7 +82,7 @@ newtype TypeInfo = TypeInfo
 --   names (those brought into scope by declarations or import statements) to
 --   their fully-qualified names.
 data GlobalEnv = GlobalEnv
-  { geTasks :: Map Text TaskInfo,
+  { geAgents :: Map Text AgentInfo,
     geRequests :: Map Text RequestInfo,
     geVals :: Map Text ValInfo,
     geTypes :: Map Text TypeInfo,
@@ -102,7 +94,7 @@ data GlobalEnv = GlobalEnv
 emptyEnv :: GlobalEnv
 emptyEnv =
   GlobalEnv
-    { geTasks = Map.empty,
+    { geAgents = Map.empty,
       geRequests = Map.empty,
       geVals = Map.empty,
       geTypes = Map.empty,
@@ -110,7 +102,7 @@ emptyEnv =
       geAliases = Map.empty
     }
 
--- | Virtual module name under which primitive tasks/requests live.
+-- | Virtual module name under which primitive agents/requests live.
 primModuleName :: Text
 primModuleName = "prim"
 
@@ -170,176 +162,172 @@ primRequests =
       )
     ]
 
--- prim built-in tasks. すべて qualified name (prim.<name>) で登録する。
+-- prim built-in agents. すべて qualified name (prim.<name>) で登録する。
 -- 短縮名エイリアスは一切提供しない。ユーザコードは `import prim { ... }`
 -- や `import prim.log { ... }` を明示的に書くことで参照する。
-primTasks :: Map Text TaskInfo
-primTasks =
+primAgents :: Map Text AgentInfo
+primAgents =
   Map.fromList
     [ -- to_string :: integer | number | boolean | string | null -> string (純粋)
       ( "prim.to_string",
-        TaskInfo
-          { tiParams = [("v", TUnion [TInteger, TNumber, TBoolean, TString, TNull], Nothing)],
-            tiRet = TString,
-            tiWith = Just (RENames []),
-            tiExtFrom = Nothing,
-            tiAnnot = Nothing,
-            tiHomeModule = primModuleName
+        AgentInfo
+          { aiParams = [("v", TUnion [TInteger, TNumber, TBoolean, TString, TNull], Nothing)],
+            aiRet = TString,
+            aiWith = Just (RENames []),
+            aiExtFrom = Nothing,
+            aiAnnot = Nothing,
+            aiHomeModule = primModuleName
           }
       ),
       -- div :: (integer | number, integer | number) -> integer (floor division)
       ( "prim.div",
-        TaskInfo
-          { tiParams =
+        AgentInfo
+          { aiParams =
               [ ("a", TUnion [TInteger, TNumber], Nothing),
                 ("b", TUnion [TInteger, TNumber], Nothing)
               ],
-            tiRet = TInteger,
-            tiWith = Just (RENames []),
-            tiExtFrom = Nothing,
-            tiAnnot = Nothing,
-            tiHomeModule = primModuleName
+            aiRet = TInteger,
+            aiWith = Just (RENames []),
+            aiExtFrom = Nothing,
+            aiAnnot = Nothing,
+            aiHomeModule = primModuleName
           }
       ),
       -- mod :: (integer | number, integer | number) -> number
       ( "prim.mod",
-        TaskInfo
-          { tiParams =
+        AgentInfo
+          { aiParams =
               [ ("a", TUnion [TInteger, TNumber], Nothing),
                 ("b", TUnion [TInteger, TNumber], Nothing)
               ],
-            tiRet = TNumber,
-            tiWith = Just (RENames []),
-            tiExtFrom = Nothing,
-            tiAnnot = Nothing,
-            tiHomeModule = primModuleName
+            aiRet = TNumber,
+            aiWith = Just (RENames []),
+            aiExtFrom = Nothing,
+            aiAnnot = Nothing,
+            aiHomeModule = primModuleName
           }
       ),
       -- parse_integer :: string -> integer with parse_error
       ( "prim.parse_integer",
-        TaskInfo
-          { tiParams = [("s", TString, Nothing)],
-            tiRet = TInteger,
-            tiWith = Just (RENames ["prim.parse_error"]),
-            tiExtFrom = Nothing,
-            tiAnnot = Nothing,
-            tiHomeModule = primModuleName
+        AgentInfo
+          { aiParams = [("s", TString, Nothing)],
+            aiRet = TInteger,
+            aiWith = Just (RENames ["prim.parse_error"]),
+            aiExtFrom = Nothing,
+            aiAnnot = Nothing,
+            aiHomeModule = primModuleName
           }
       ),
       -- parse_number :: string -> number with parse_error
       ( "prim.parse_number",
-        TaskInfo
-          { tiParams = [("s", TString, Nothing)],
-            tiRet = TNumber,
-            tiWith = Just (RENames ["prim.parse_error"]),
-            tiExtFrom = Nothing,
-            tiAnnot = Nothing,
-            tiHomeModule = primModuleName
+        AgentInfo
+          { aiParams = [("s", TString, Nothing)],
+            aiRet = TNumber,
+            aiWith = Just (RENames ["prim.parse_error"]),
+            aiExtFrom = Nothing,
+            aiAnnot = Nothing,
+            aiHomeModule = primModuleName
           }
       ),
       -- parse_boolean :: string -> boolean with parse_error
       ( "prim.parse_boolean",
-        TaskInfo
-          { tiParams = [("s", TString, Nothing)],
-            tiRet = TBoolean,
-            tiWith = Just (RENames ["prim.parse_error"]),
-            tiExtFrom = Nothing,
-            tiAnnot = Nothing,
-            tiHomeModule = primModuleName
+        AgentInfo
+          { aiParams = [("s", TString, Nothing)],
+            aiRet = TBoolean,
+            aiWith = Just (RENames ["prim.parse_error"]),
+            aiExtFrom = Nothing,
+            aiAnnot = Nothing,
+            aiHomeModule = primModuleName
           }
       ),
       -- log.info / log.warn / log.error :: string -> null (純粋)
       ( "prim.log.info",
-        TaskInfo
-          { tiParams = [("msg", TString, Nothing)],
-            tiRet = TNull,
-            tiWith = Just (RENames []),
-            tiExtFrom = Nothing,
-            tiAnnot = Nothing,
-            tiHomeModule = primModuleName
+        AgentInfo
+          { aiParams = [("msg", TString, Nothing)],
+            aiRet = TNull,
+            aiWith = Just (RENames []),
+            aiExtFrom = Nothing,
+            aiAnnot = Nothing,
+            aiHomeModule = primModuleName
           }
       ),
       ( "prim.log.warn",
-        TaskInfo
-          { tiParams = [("msg", TString, Nothing)],
-            tiRet = TNull,
-            tiWith = Just (RENames []),
-            tiExtFrom = Nothing,
-            tiAnnot = Nothing,
-            tiHomeModule = primModuleName
+        AgentInfo
+          { aiParams = [("msg", TString, Nothing)],
+            aiRet = TNull,
+            aiWith = Just (RENames []),
+            aiExtFrom = Nothing,
+            aiAnnot = Nothing,
+            aiHomeModule = primModuleName
           }
       ),
       ( "prim.log.error",
-        TaskInfo
-          { tiParams = [("msg", TString, Nothing)],
-            tiRet = TNull,
-            tiWith = Just (RENames []),
-            tiExtFrom = Nothing,
-            tiAnnot = Nothing,
-            tiHomeModule = primModuleName
+        AgentInfo
+          { aiParams = [("msg", TString, Nothing)],
+            aiRet = TNull,
+            aiWith = Just (RENames []),
+            aiExtFrom = Nothing,
+            aiAnnot = Nothing,
+            aiHomeModule = primModuleName
           }
       )
     ]
 
 -- ---------------------------------------------------------------------------
--- Build global environment (2 passes)
+-- Build global environment (4 steps)
 -- ---------------------------------------------------------------------------
 
 -- | Build a 'GlobalEnv' from a list of parsed modules.
 --
--- Pass 1: register every declaration under its fully-qualified name
--- (modName <> "." <> localName) and set up the module's own alias table so
--- that declarations defined in the same module are visible by their
--- unqualified name.
---
--- Pass 2: resolve import statements by copying entries from the target
--- module's alias table into the importing module's alias table.
+-- Step 1: Register all declarations under qualified names + set up
+--         per-module alias tables. Val types are left as placeholders;
+--         type aliases are stored raw (not yet resolved).
+-- Step 2: Resolve import statements (copy aliases across modules).
+-- Step 3: Resolve all type aliases in dependency order → 'geTypeEnv'.
+-- Step 4: Normalize val types using the now-complete 'geTypeEnv'.
 buildGlobalEnv :: [Module] -> Either ModuleError GlobalEnv
 buildGlobalEnv modules = do
-  -- Seed with prim module entries. The prim module alias table starts empty;
-  -- prim.* qualified names are always resolvable because that's their key.
   let env0 =
         emptyEnv
-          { geTasks = primTasks,
+          { geAgents = primAgents,
             geRequests = primRequests,
             geAliases = Map.singleton primModuleName primLocalAliases
           }
-  -- Pass 1: register all declarations in all modules.
-  env1 <- foldMEither registerModule env0 modules
-  -- Pass 2: resolve imports.
-  foldMEither resolveImportsModule env1 modules
+  env1 <- foldMEither registerModuleDecls env0 modules
+  env2 <- foldMEither resolveImportsModule env1 modules
+  env3 <- resolveAllTypes env2
+  normalizeAllVals env3 modules
 
--- | Local aliases inside the virtual prim module itself. These let
--- `prim.*` qualified names also appear under their short form when a
--- prim-internal file references them. The prim module is not user-authored
--- right now, so these mostly exist for consistency.
 primLocalAliases :: Map Text Text
 primLocalAliases =
   Map.fromList $
-    [(stripPrefix qn, qn) | qn <- Map.keys primTasks]
+    [(stripPrefix qn, qn) | qn <- Map.keys primAgents]
       ++ [(stripPrefix qn, qn) | qn <- Map.keys primRequests]
   where
     stripPrefix t = fromMaybe t (T.stripPrefix (primModuleName <> ".") t)
 
 foldMEither :: (a -> b -> Either e a) -> a -> [b] -> Either e a
-foldMEither f acc xs = case xs of
+foldMEither f acc = \case
   [] -> Right acc
   x : rest -> f acc x >>= \acc' -> foldMEither f acc' rest
 
--- Pass 1: register declarations under qualified names.
-registerModule :: GlobalEnv -> Module -> Either ModuleError GlobalEnv
-registerModule env (Module _fp mname decls) =
+-- ---------------------------------------------------------------------------
+-- Step 1: Register declarations (no type resolution, no val normalization)
+-- ---------------------------------------------------------------------------
+
+registerModuleDecls :: GlobalEnv -> Module -> Either ModuleError GlobalEnv
+registerModuleDecls env (Module _fp mname decls) =
   foldMEither (registerDecl mname) env decls
 
 registerDecl :: Text -> GlobalEnv -> Decl -> Either ModuleError GlobalEnv
-registerDecl mname env decl = case decl of
-  DeclTask _ td -> do
-    let local = taskName td
+registerDecl mname env = \case
+  DeclAgent _ td -> do
+    let local = agentName td
         qname = qualify mname local
     checkUniqueName env qname
     Right $
       addAlias mname local qname $
-        env {geTasks = Map.insert qname (taskInfo mname td) (geTasks env)}
+        env {geAgents = Map.insert qname (agentInfo mname td) (geAgents env)}
   DeclRequest _ rd -> do
     let local = reqName rd
         qname = qualify mname local
@@ -351,29 +339,25 @@ registerDecl mname env decl = case decl of
     let local = valName vd
         qname = qualify mname local
     checkUniqueName env qname
-    let nt = normalize (valType vd) (geTypeEnv env)
+    -- Placeholder; will be normalized in Step 4
     Right $
       addAlias mname local qname $
-        env {geVals = Map.insert qname (ValInfo nt mname) (geVals env)}
+        env {geVals = Map.insert qname (ValInfo ntNever mname) (geVals env)}
   DeclType _ td -> do
     let local = tyaName td
-        qname = qualify mname local
-    let envWithType =
-          env {geTypes = Map.insert qname (TypeInfo (tyaType td)) (geTypes env)}
-    resolved <- resolveTypeAlias qname (tyaType td) envWithType [qname]
-    Right $
-      addAlias mname local qname $
-        envWithType
-          { geTypeEnv = Map.insert qname resolved (geTypeEnv envWithType)
-          }
-  DeclImport _ _ -> Right env -- handled in pass 2
-  DeclExtTask _ etd -> do
-    let local = extTaskName etd
         qname = qualify mname local
     checkUniqueName env qname
     Right $
       addAlias mname local qname $
-        env {geTasks = Map.insert qname (extTaskInfo mname etd) (geTasks env)}
+        env {geTypes = Map.insert qname (TypeInfo (tyaType td) mname) (geTypes env)}
+  DeclImport _ _ -> Right env
+  DeclExtAgent _ etd -> do
+    let local = extAgentName etd
+        qname = qualify mname local
+    checkUniqueName env qname
+    Right $
+      addAlias mname local qname $
+        env {geAgents = Map.insert qname (extAgentInfo mname etd) (geAgents env)}
   DeclExtReq _ erd -> do
     let local = extReqName erd
         qname = qualify mname local
@@ -385,32 +369,26 @@ registerDecl mname env decl = case decl of
 qualify :: Text -> Text -> Text
 qualify mname local = mname <> "." <> local
 
--- | Insert a single alias (local name → qualified name) into a module's
--- alias table.
 addAlias :: Text -> Text -> Text -> GlobalEnv -> GlobalEnv
 addAlias mname local qname env =
   let tbl = fromMaybe Map.empty (Map.lookup mname (geAliases env))
       tbl' = Map.insert local qname tbl
    in env {geAliases = Map.insert mname tbl' (geAliases env)}
 
--- Pass 2: resolve imports.
+-- ---------------------------------------------------------------------------
+-- Step 2: Resolve imports
+-- ---------------------------------------------------------------------------
+
 resolveImportsModule :: GlobalEnv -> Module -> Either ModuleError GlobalEnv
 resolveImportsModule env (Module _fp mname decls) =
   foldMEither (resolveImportDecl mname) env [i | DeclImport _ i <- decls]
 
-resolveImportDecl ::
-  Text ->
-  GlobalEnv ->
-  ImportDecl ->
-  Either ModuleError GlobalEnv
+resolveImportDecl :: Text -> GlobalEnv -> ImportDecl -> Either ModuleError GlobalEnv
 resolveImportDecl mname env imp = do
   let targetMod = T.intercalate "." (impPath imp)
-  -- The target module must have been registered (either by registerModule
-  -- or by being the built-in prim module).
   targetAliases <- case Map.lookup targetMod (geAliases env) of
     Just aliases -> Right aliases
     Nothing -> Left (UnknownImport targetMod)
-  -- Select which names to bring in.
   selected <- case impNames imp of
     Nothing -> Right (Map.toList targetAliases)
     Just ns ->
@@ -420,103 +398,124 @@ resolveImportDecl mname env imp = do
             Nothing -> Left (UnknownImportName targetMod n)
         )
         ns
-  -- Apply alias prefix if present.
   let prefixed = case impAlias imp of
         Nothing -> selected
         Just a -> [(a <> "." <> n, q) | (n, q) <- selected]
-  -- Merge into the importing module's alias table.
   Right $
     foldr
       (\(local, qname) e -> addAlias mname local qname e)
       env
       prefixed
 
+-- ---------------------------------------------------------------------------
+-- Step 3: Resolve all type aliases → geTypeEnv
+-- ---------------------------------------------------------------------------
+
+-- | Resolve every type alias in dependency order. Detects cycles and
+-- unknown alias references.
+resolveAllTypes :: GlobalEnv -> Either ModuleError GlobalEnv
+resolveAllTypes env = do
+  -- Check for unknown alias references
+  forM_ (Map.toList (geTypes env)) $ \(_qname, TypeInfo ty mname) -> do
+    let modAliases = aliasesFor env mname
+    forM_ (typeAliasRefs ty) $ \ref -> do
+      let qualified = qualifyName modAliases ref
+      unless (Map.member qualified (geTypes env)) $
+        Left (UnknownTypeAlias ref)
+  -- Iterative resolution in dependency order
+  go (Map.toList (geTypes env)) env Set.empty
+  where
+    go [] e _ = Right e
+    go remaining e resolved =
+      let (ready, notReady) = partition (depsResolved e resolved) remaining
+       in if null ready
+            then Left (RecursiveTypeAlias (map fst notReady))
+            else do
+              e' <- foldMEither resolveOne e ready
+              go notReady e' (resolved <> Set.fromList (map fst ready))
+
+    depsResolved e resolved (_, TypeInfo ty mname) =
+      let modAliases = aliasesFor e mname
+          deps = [qualifyName modAliases n | n <- typeAliasRefs ty]
+       in all (`Set.member` resolved) deps
+
+    resolveOne e (qname, TypeInfo ty mname) =
+      let modAliases = aliasesFor e mname
+          qualifiedTy = qualifyTypeWith modAliases ty
+          nt = normalize qualifiedTy (geTypeEnv e)
+       in Right $ e {geTypeEnv = Map.insert qname nt (geTypeEnv e)}
+
+-- | Collect all TAlias references from a Type.
+typeAliasRefs :: Type -> [Text]
+typeAliasRefs = \case
+  TAlias name -> [name]
+  TArray t -> typeAliasRefs t
+  TUnion ts -> concatMap typeAliasRefs ts
+  TInter ts -> concatMap typeAliasRefs ts
+  TObj fs -> concatMap (typeAliasRefs . ofType) fs
+  _ -> []
+
+-- | Qualify all TAlias names in a Type using a module's alias table.
+qualifyTypeWith :: Map Text Text -> Type -> Type
+qualifyTypeWith aliases = go
+  where
+    go = \case
+      TAlias n -> TAlias (qualifyName aliases n)
+      TArray t -> TArray (go t)
+      TUnion ts -> TUnion (map go ts)
+      TInter ts -> TInter (map go ts)
+      TObj fs -> TObj [f {ofType = go (ofType f)} | f <- fs]
+      t -> t
+
+qualifyName :: Map Text Text -> Text -> Text
+qualifyName aliases name = fromMaybe name (Map.lookup name aliases)
+
+-- ---------------------------------------------------------------------------
+-- Step 4: Normalize val types with complete geTypeEnv
+-- ---------------------------------------------------------------------------
+
+normalizeAllVals :: GlobalEnv -> [Module] -> Either ModuleError GlobalEnv
+normalizeAllVals = foldMEither normalizeModuleVals
+
+normalizeModuleVals :: GlobalEnv -> Module -> Either ModuleError GlobalEnv
+normalizeModuleVals env (Module _fp mname decls) =
+  foldMEither (normalizeValDecl mname) env decls
+
+normalizeValDecl :: Text -> GlobalEnv -> Decl -> Either ModuleError GlobalEnv
+normalizeValDecl mname env = \case
+  DeclVal _ vd ->
+    let qname = qualify mname (valName vd)
+        modAliases = aliasesFor env mname
+        qualifiedTy = qualifyTypeWith modAliases (valType vd)
+        nt = normalize qualifiedTy (geTypeEnv env)
+     in Right $ env {geVals = Map.insert qname (ValInfo nt mname) (geVals env)}
+  _ -> Right env
+
+-- ---------------------------------------------------------------------------
+-- Helpers
+-- ---------------------------------------------------------------------------
+
 checkUniqueName :: GlobalEnv -> Text -> Either ModuleError ()
 checkUniqueName env name
-  | Map.member name (geTasks env) = Left (DuplicateName name)
+  | Map.member name (geAgents env) = Left (DuplicateName name)
   | Map.member name (geRequests env) = Left (DuplicateName name)
   | Map.member name (geVals env) = Left (DuplicateName name)
   | Map.member name (geTypes env) = Left (DuplicateName name)
   | otherwise = Right ()
 
--- Resolve a type alias (detect cycles)
-resolveTypeAlias ::
-  Text ->
-  Type ->
-  GlobalEnv ->
-  [Text] ->
-  Either ModuleError NormalizedType
-resolveTypeAlias _rootName ty env visited = resolveType ty
-  where
-    resolveType t = case t of
-      TNull -> Right ntNull
-      TBoolean -> Right ntBool
-      TInteger -> Right ntInteger
-      TNumber -> Right ntNumber
-      TString -> Right ntString
-      TNever -> Right ntNever
-      TUnknown -> Right NTUnknown
-      TLitBool b -> Right (normalize (TLitBool b) Map.empty)
-      TLitInt i -> Right (normalize (TLitInt i) Map.empty)
-      TLitNum n -> Right (normalize (TLitNum n) Map.empty)
-      TLitStr s -> Right (normalize (TLitStr s) Map.empty)
-      TArray inner -> do
-        nt <- resolveType inner
-        return (NTFields emptyFields {nfArray = Just nt})
-      TUnion ts -> do
-        nts <- mapM resolveType ts
-        return (foldr unionNT ntNever nts)
-      TInter ts -> do
-        nts <- mapM resolveType ts
-        return (foldr intersectNT NTUnknown nts)
-      TAlias name
-        | name `elem` visited -> Left (RecursiveTypeAlias visited)
-        | otherwise -> case Map.lookup name (geTypeEnv env) of
-            Just nt -> Right nt
-            Nothing -> case Map.lookup name (geTypes env) of
-              Just (TypeInfo ty') ->
-                resolveTypeAlias name ty' env (name : visited)
-              Nothing -> Right ntNever -- unknown alias
-      TObj flds -> do
-        resolved <- mapM (resolveType . ofType) flds
-        let ofields =
-              Map.fromList
-                [ ( ofName f,
-                    FieldInfo
-                      { fiType = nt,
-                        fiOptional = ofOptional f,
-                        fiAnnot = ofAnnot f
-                      }
-                  )
-                  | (f, nt) <- zip flds resolved
-                ]
-            neverPropagated =
-              any
-                (\fi -> not (fiOptional fi) && isNeverNT (fiType fi))
-                (Map.elems ofields)
-        if neverPropagated
-          then return ntNever
-          else case tryMakeDISC flds ofields (geTypeEnv env) of
-            Just disc -> return (NTDISC disc)
-            Nothing ->
-              return (NTFields emptyFields {nfObject = Just (ObjectFields ofields)})
-
-emptyFields :: NormalFields
-emptyFields = NormalFields False Nothing Nothing Nothing Nothing Nothing
-
 -- ---------------------------------------------------------------------------
 -- Info extractors
 -- ---------------------------------------------------------------------------
 
-taskInfo :: Text -> TaskDecl -> TaskInfo
-taskInfo mname td =
-  TaskInfo
-    { tiParams = taskParams td,
-      tiRet = fromMaybe TNull (taskRet td),
-      tiWith = taskWith td,
-      tiExtFrom = Nothing,
-      tiAnnot = taskAnnot td,
-      tiHomeModule = mname
+agentInfo :: Text -> AgentDecl -> AgentInfo
+agentInfo mname td =
+  AgentInfo
+    { aiParams = agentParams td,
+      aiRet = fromMaybe TNull (agentRet td),
+      aiWith = agentWith td,
+      aiExtFrom = Nothing,
+      aiAnnot = agentAnnot td,
+      aiHomeModule = mname
     }
 
 requestInfo :: Text -> RequestDecl -> RequestInfo
@@ -529,15 +528,15 @@ requestInfo mname rd =
       riHomeModule = mname
     }
 
-extTaskInfo :: Text -> ExternalTaskDecl -> TaskInfo
-extTaskInfo mname etd =
-  TaskInfo
-    { tiParams = extTaskParams etd,
-      tiRet = fromMaybe TNull (extTaskRet etd),
-      tiWith = extTaskWith etd,
-      tiExtFrom = Just (extTaskFrom etd),
-      tiAnnot = extTaskAnnot etd,
-      tiHomeModule = mname
+extAgentInfo :: Text -> ExternalAgentDecl -> AgentInfo
+extAgentInfo mname etd =
+  AgentInfo
+    { aiParams = extAgentParams etd,
+      aiRet = fromMaybe TNull (extAgentRet etd),
+      aiWith = extAgentWith etd,
+      aiExtFrom = Just (extAgentFrom etd),
+      aiAnnot = extAgentAnnot etd,
+      aiHomeModule = mname
     }
 
 extRequestInfo :: Text -> ExternalReqDecl -> RequestInfo

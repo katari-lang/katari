@@ -14,7 +14,7 @@ import Data.Text (Text)
 import Katari.Module
   ( GlobalEnv (..),
     RequestInfo (..),
-    TaskInfo (..),
+    AgentInfo (..),
     ValInfo (..),
     resolveQualified,
   )
@@ -33,7 +33,7 @@ import Katari.Syntax
     RequestEffect (..),
     SrcSpan,
     Stmt (..),
-    TaskDecl (..),
+    AgentDecl (..),
     TemplElem (..),
     Type (..),
     UnOp (..),
@@ -89,7 +89,7 @@ data TypeEnv = TypeEnv
     teModuleName :: Text,
     teEffects :: Maybe (Set Text),
     teReturn :: Maybe NormalizedType,
-    teReply :: Maybe NormalizedType -- expected type for SReply (current request's riRet)
+    teContinue :: Maybe NormalizedType -- expected type for SContinue (current request's riRet)
   }
 
 emptyTEnv :: GlobalEnv -> Text -> TypeEnv
@@ -100,7 +100,7 @@ emptyTEnv ge mname =
       teModuleName = mname,
       teEffects = Nothing,
       teReturn = Nothing,
-      teReply = Nothing
+      teContinue = Nothing
     }
 
 -- | Resolve a local (possibly dotted) name to a fully-qualified name
@@ -153,27 +153,27 @@ typecheck ge = mapM_ checkMod
 
 checkDecl :: GlobalEnv -> Text -> Decl -> TC ()
 checkDecl ge mname = \case
-  DeclTask sp td -> checkTask ge mname sp td
+  DeclAgent sp td -> checkAgent ge mname sp td
   DeclVal sp vd -> checkVal ge mname sp vd
   _ -> return ()
 
-checkTask :: GlobalEnv -> Text -> SrcSpan -> TaskDecl -> TC ()
-checkTask ge mname sp td = do
+checkAgent :: GlobalEnv -> Text -> SrcSpan -> AgentDecl -> TC ()
+checkAgent ge mname sp td = do
   let env0 = emptyTEnv ge mname
-      paramVars = map (\(n, t, _) -> (n, normalizeIn env0 t)) (taskParams td)
+      paramVars = map (\(n, t, _) -> (n, normalizeIn env0 t)) (agentParams td)
       env1 = withVars paramVars env0
-      retType = normalizeIn env0 (fromMaybe TNull (taskRet td))
+      retType = normalizeIn env0 (fromMaybe TNull (agentRet td))
       env2 = env1 {teReturn = Just retType}
-  bodyType <- inferBlock env2 (taskBody td)
+  bodyType <- inferBlock env2 (agentBody td)
   unless (subtypeNT bodyType retType) $ Left (TypeMismatch sp bodyType retType)
   -- Effect checking (only when with annotation is explicit)
-  case taskWith td of
+  case agentWith td of
     Nothing -> return () -- inferred: skip check
     Just eff -> do
-      reqs <- collectRequestsBlock env2 (taskBody td)
+      reqs <- collectRequestsBlock env2 (agentBody td)
       let nonThrow = Set.delete "prim.throw" reqs
       case eff of
-        RETask ->
+        REAgent ->
           unless (Set.null nonThrow) $
             Left (EffectMismatch sp (Set.toList nonThrow) [])
         RENames ns -> do
@@ -207,23 +207,16 @@ inferBlock :: TypeEnv -> Block -> TC NormalizedType
 inferBlock env (Block stmts) = goStmts env stmts
 
 goStmts :: TypeEnv -> [Stmt] -> TC NormalizedType
-goStmts env stmts = case stmts of
+goStmts env = \case
   [] -> return ntNull
   [s] -> inferStmt env s
   s : ss -> do
-    checkStmt env s
-    env' <- updateEnv env s
-    goStmts env' ss
-
--- Side-effect checking for non-final statements
-checkStmt :: TypeEnv -> Stmt -> TC ()
-checkStmt env = \case
-  SHandle sp hs -> void (inferStmt env (SHandle sp hs))
-  SExpr _sp e -> void (inferExpr env e)
-  SLet sp pat e -> do
-    nt <- inferExpr env e
-    checkPatAnnot env sp pat nt
-  _ -> return ()
+    nt <- inferStmt env s
+    if isNeverNT nt
+      then return ntNever -- unreachable code after control statement
+      else do
+        env' <- updateEnv env s
+        goStmts env' ss
 
 -- Check that the inferred type matches any type annotation in the pattern
 checkPatAnnot :: TypeEnv -> SrcSpan -> Pat -> NormalizedType -> TC ()
@@ -255,52 +248,56 @@ inferStmt env = \case
       _ <- inferExpr env initExpr
       return (name, nt)
     let stateEnv = withVars stateVarTypes env
-    -- Check each request case body with teReply set to the request's return type
+    -- Check each request case body with teContinue set to the request's return type
     forM_ (hReqCases hs) $ \(reqName, pats, body) -> do
       let qreq = resolveLocal env reqName
       case Map.lookup qreq (geRequests ge) of
         Nothing -> Left (UndefinedName sp reqName)
         Just ri -> do
           let paramTypes = map (\(_, t, _) -> normalizeIn env t) (riParams ri)
-          let replyType = normalizeIn env (riRet ri)
+          let continueType = normalizeIn env (riRet ri)
           let patEnv =
                 ( foldr
                     (\(pat, nt) e -> bindPat pat nt e)
                     stateEnv
                     (zip pats paramTypes)
                 )
-                  { teReply = Just replyType
+                  { teContinue = Just continueType
                   }
           _ <- inferBlock patEnv body
           return ()
-    -- Check return case body (state vars in scope, return var bound to Unknown)
-    case hReturnCase hs of
+    -- Check then clause body (state vars in scope, then var bound to Unknown)
+    case hThenClause hs of
       Nothing -> return ()
-      Just (retVar, body) -> do
-        let retEnv = withVar retVar NTUnknown stateEnv
-        _ <- inferBlock retEnv body
+      Just (thenVar, body) -> do
+        let thenEnv = withVar thenVar NTUnknown stateEnv
+        _ <- inferBlock thenEnv body
         return ()
     return ntNull
   SExpr _sp e -> inferExpr env e
   SReturn sp e -> do
     nt <- inferExpr env e
     case teReturn env of
-      Nothing -> return ntNull
+      Nothing -> Left (InvalidOp sp "return outside agent body")
       Just ret -> do
         unless (subtypeNT nt ret) $
           Left (TypeMismatch sp nt ret)
-        return nt
-  SReply sp e _upd -> do
+        return ntNever
+  SContinue sp e _upd -> do
     nt <- inferExpr env e
-    case teReply env of
-      Nothing -> return ntNull
+    case teContinue env of
+      Nothing -> Left (InvalidOp sp "continue outside request handler")
       Just expected -> do
         unless (subtypeNT nt expected) $
           Left (TypeMismatch sp nt expected)
-        return ntNull
-  SNext _sp _upd -> return ntNull
-  SBreak _sp e -> inferExpr env e >> return ntNull
-  SForBreak _sp e -> inferExpr env e >> return ntNull
+        return ntNever
+  SForContinue _sp _upd -> return ntNever
+  SBreak _sp e -> do
+    void (inferExpr env e)
+    return ntNever
+  SForBreak _sp e -> do
+    void (inferExpr env e)
+    return ntNever
 
 -- Bind pattern to type in environment
 bindPat :: Pat -> NormalizedType -> TypeEnv -> TypeEnv
@@ -446,10 +443,10 @@ inferFor env fe = do
   let env' = withVars (letBindTypes ++ varBindTypes) env
   _ <- inferBlock env' (fBody fe)
   breakNT <- collectForBreakNT env' (fBody fe)
-  finalNT <- case fFinally fe of
+  thenNT <- case fThen fe of
     Nothing -> return ntNull
     Just fb -> inferBlock env' fb
-  return (unionNT finalNT breakNT)
+  return (unionNT thenNT breakNT)
 
 -- Collect the union of all for_break expression types in a block,
 -- NOT descending into nested for expressions.
@@ -469,13 +466,13 @@ collectForBreakStmt env = \case
   SForBreak _ e -> inferExpr env e
   SLet _ _ e -> collectForBreakExpr env e
   SExpr _ e -> collectForBreakExpr env e
-  SReturn _ e -> collectForBreakExpr env e
-  SReply _ e _ -> collectForBreakExpr env e
-  SBreak _ e -> collectForBreakExpr env e
+  SReturn _ _ -> return ntNever
+  SContinue {} -> return ntNever
+  SBreak _ _ -> return ntNever
   SHandle _ hs -> do
     reqNTs <- mapM (\(_, _, b) -> collectForBreakNT env b) (hReqCases hs)
-    retNT <- maybe (return ntNever) (\(_, b) -> collectForBreakNT env b) (hReturnCase hs)
-    return (foldl unionNT retNT reqNTs)
+    thenNT <- maybe (return ntNever) (\(_, b) -> collectForBreakNT env b) (hThenClause hs)
+    return (foldl unionNT thenNT reqNTs)
   _ -> return ntNever
 
 collectForBreakExpr :: TypeEnv -> Expr -> TC NormalizedType
@@ -495,10 +492,10 @@ inferCall env sp name args = do
   let ge = teGlobal env
       typeEnv = geTypeEnv ge
       qname = resolveLocal env name
-  case Map.lookup qname (geTasks ge) of
-    Just ti -> do
-      checkArgs sp name (tiParams ti) args typeEnv
-      return (normalize (tiRet ti) typeEnv)
+  case Map.lookup qname (geAgents ge) of
+    Just ai -> do
+      checkArgs sp name (aiParams ai) args typeEnv
+      return (normalize (aiRet ai) typeEnv)
     Nothing ->
       case Map.lookup qname (geRequests ge) of
         Just ri -> do
@@ -624,13 +621,13 @@ collectRequestsStmts env stmts = case stmts of
     caseReqs <- mapM (\(_, _, b) -> collectRequestsBlock env b) (hReqCases hs)
     -- Add requests from handle param init exprs
     initReqs <- mapM (\(_, _, _, e) -> collectRequestsExpr env e) (hParams hs)
-    -- Add requests from return case body
-    retReqs <-
+    -- Add requests from then clause body
+    thenReqs <-
       maybe
         (return Set.empty)
         (\(_, b) -> collectRequestsBlock env b)
-        (hReturnCase hs)
-    return $ Set.unions (scopeReqs : retReqs : caseReqs ++ initReqs)
+        (hThenClause hs)
+    return $ Set.unions (scopeReqs : thenReqs : caseReqs ++ initReqs)
   s : rest -> do
     a <- collectRequestsStmt env s
     b <- collectRequestsStmts env rest
@@ -641,7 +638,7 @@ collectRequestsStmt env = \case
   SLet _ _ e -> collectRequestsExpr env e
   SExpr _ e -> collectRequestsExpr env e
   SReturn _ e -> collectRequestsExpr env e
-  SReply _ e _ -> collectRequestsExpr env e
+  SContinue _ e _ -> collectRequestsExpr env e
   SBreak _ e -> collectRequestsExpr env e
   SForBreak _ e -> collectRequestsExpr env e
   _ -> return Set.empty
@@ -655,8 +652,8 @@ collectRequestsExpr env = \case
     let direct = case Map.lookup qname (geRequests ge) of
           Just _ -> Set.singleton qname
           Nothing -> Set.empty
-    let transitive = case Map.lookup qname (geTasks ge) of
-          Just ti -> taskEffectSet env ti
+    let transitive = case Map.lookup qname (geAgents ge) of
+          Just ai -> agentEffectSet env ai
           Nothing -> Set.empty
     return (Set.unions [direct, transitive, argReqs])
   ECall _ callee args -> do
@@ -676,7 +673,7 @@ collectRequestsExpr env = \case
     ls <- mapM (\(_, e) -> collectRequestsExpr env e) (fLetBinds fe)
     vs <- mapM (\(_, _, e) -> collectRequestsExpr env e) (fVarBinds fe)
     b <- collectRequestsBlock env (fBody fe)
-    f <- maybe (return Set.empty) (collectRequestsBlock env) (fFinally fe)
+    f <- maybe (return Set.empty) (collectRequestsBlock env) (fThen fe)
     return (Set.unions (ls ++ vs ++ [b, f]))
   EPar _ blocks ->
     Set.unions <$> mapM (collectRequestsBlock env) blocks
@@ -697,17 +694,17 @@ collectRequestsExpr env = \case
     Set.unions <$> mapM (\(_, e) -> collectRequestsExpr env e) fields
   _ -> return Set.empty
 
--- Extract the declared effect set from a task's with annotation.
--- Tasks with no annotation (inferred) are treated as having no known effects.
+-- Extract the declared effect set from an agent's with annotation.
+-- Agents with no annotation (inferred) are treated as having no known effects.
 -- The names declared in `with` may be unqualified local references in the
--- task's home module, so we resolve them via the alias table of the module
+-- agent's home module, so we resolve them via the alias table of the module
 -- they were declared in. We don't track that module here, so we instead use
 -- the *caller's* module context. Since `with` names are eventually compared
 -- against fully-qualified request names from the callee site, the caller-
 -- module alias table is what matters for comparison purposes. Any name that
 -- fails to resolve is passed through unchanged.
-taskEffectSet :: TypeEnv -> TaskInfo -> Set Text
-taskEffectSet env ti = case tiWith ti of
-  Just RETask -> Set.empty
+agentEffectSet :: TypeEnv -> AgentInfo -> Set Text
+agentEffectSet env ai = case aiWith ai of
+  Just REAgent -> Set.empty
   Just (RENames ns) -> Set.fromList (map (resolveLocal env) ns)
   Nothing -> Set.empty

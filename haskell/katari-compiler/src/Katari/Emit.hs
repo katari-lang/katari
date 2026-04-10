@@ -11,11 +11,13 @@ import Data.Text (Text)
 import Data.Text.Encoding qualified as TE
 import Data.Word (Word32, Word8)
 import Katari.IR
-  ( ConstVal (..),
-    IRHandleBlock (..),
+  ( AgentKind (..),
+    ConstVal (..),
+    IRForScope (..),
+    IRHandleScope (..),
     IRModule (..),
     IRRequestDef (..),
-    IRTask (..),
+    IRAgent (..),
     Instruction (..),
     RequestId,
     VarId,
@@ -34,7 +36,7 @@ emitModule m = BS.toStrict (BB.toLazyByteString builder)
           emitText (irmName m),
           emitVec emitConst (irmConsts m),
           emitVec emitRequestDef (irmRequests m),
-          emitVec emitTask (irmTasks m)
+          emitVec emitAgent (irmAgents m)
         ]
 
 -- ---------------------------------------------------------------------------
@@ -119,32 +121,45 @@ emitRequestDef rd =
       Just f -> BB.word8 1 <> emitText f
 
 -- ---------------------------------------------------------------------------
--- Task
+-- Agent
 -- ---------------------------------------------------------------------------
 
-emitTask :: IRTask -> BB.Builder
-emitTask t =
-  leb128 (irTaskId t)
-    <> emitText (irTaskName t)
-    <> emitVec leb128 (irTaskParams t)
-    <> emitVec emitInstr (irTaskBody t)
-    <> emitVec emitHandleBlock (irTaskHandlers t)
+emitAgent :: IRAgent -> BB.Builder
+emitAgent t =
+  leb128 (iraId t)
+    <> BB.word8 (case iraKind t of UserDefined -> 0; ParBranch -> 1)
+    <> emitText (iraName t)
+    <> emitVec leb128 (iraParams t)
+    <> emitVec emitInstr (iraBody t)
+    <> emitVec emitHandleScope (iraHandlers t)
+    <> emitVec emitForScope (iraForScopes t)
 
 -- ---------------------------------------------------------------------------
--- Handle block
+-- Handle scope
 -- ---------------------------------------------------------------------------
 
-emitHandleBlock :: IRHandleBlock -> BB.Builder
-emitHandleBlock hb =
+emitHandleScope :: IRHandleScope -> BB.Builder
+emitHandleScope hb =
   leb128 (irhId hb)
     <> emitVec leb128 (irhStateVars hb)
     <> emitVec emitReqCase (irhReqCases hb)
-    <> case irhReturnCase hb of
+    <> case irhThenClause hb of
       Nothing -> BB.word8 0
       Just (inputV, instrs) -> BB.word8 1 <> leb128 inputV <> emitVec emitInstr instrs
 
 emitReqCase :: (RequestId, [VarId], [Instruction]) -> BB.Builder
 emitReqCase (rid, argVars, instrs) = leb128 rid <> emitVec leb128 argVars <> emitVec emitInstr instrs
+
+-- ---------------------------------------------------------------------------
+-- For scope
+-- ---------------------------------------------------------------------------
+
+emitForScope :: IRForScope -> BB.Builder
+emitForScope fs =
+  leb128 (irfsId fs)
+    <> case irfsThen fs of
+      Nothing -> BB.word8 0
+      Just instrs -> BB.word8 1 <> emitVec emitInstr instrs
 
 -- ---------------------------------------------------------------------------
 -- Instructions with opcodes
@@ -210,17 +225,20 @@ emitInstr = \case
   -- Handle
   IHandleBegin hid -> op 0xa0 <> leb128 hid
   IHandleEnd dst src hid -> op 0xa1 <> leb128 dst <> leb128 src <> leb128 hid
-  IReply v hid upds ->
+  IContinue v hid upds ->
     op 0xa2
       <> leb128 v
       <> leb128 hid
       <> emitVec (\(si, sv) -> leb128 si <> leb128 sv) upds
-  IBreak v hid -> op 0xa3 <> leb128 v <> leb128 hid
+  IHandleBreak v hid -> op 0xa3 <> leb128 v <> leb128 hid
   -- For
-  INext upds ->
+  IForBegin fid -> op 0xb2 <> leb128 fid
+  IForEnd dst src fid -> op 0xb3 <> leb128 dst <> leb128 src <> leb128 fid
+  IForContinue fid upds ->
     op 0xb0
+      <> leb128 fid
       <> emitVec (\(si, sv) -> leb128 si <> leb128 sv) upds
-  IForBreak v -> op 0xb1 <> leb128 v
+  IForBreak v fid -> op 0xb1 <> leb128 v <> leb128 fid
 
 op :: Word8 -> BB.Builder
 op = BB.word8

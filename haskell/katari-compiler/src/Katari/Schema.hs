@@ -2,7 +2,7 @@ module Katari.Schema
   ( SchemaKind (..),
     SchemaOutput (..),
     moduleSchemas,
-    taskSchema,
+    agentSchema,
     requestSchema,
     typeAliasSchema,
     typeToSchema,
@@ -28,7 +28,7 @@ import Data.Text qualified as T
 import Katari.Module
   ( GlobalEnv (..),
     RequestInfo (..),
-    TaskInfo (..),
+    AgentInfo (..),
     TypeInfo,
     aliasesFor,
     primModuleName,
@@ -36,6 +36,7 @@ import Katari.Module
 import Katari.Syntax (ObjField (..), Type (..))
 import Katari.Types
   ( BoolKind (..),
+    boolFull,
     Discriminator (..),
     FieldInfo (..),
     IntPart (..),
@@ -52,7 +53,7 @@ import Katari.Types
 -- Public API types
 -- ----------------------------------------------------------------------------
 
-data SchemaKind = SKTask | SKRequest | SKType
+data SchemaKind = SKAgent | SKRequest | SKType
   deriving (Show, Eq)
 
 data SchemaOutput = SchemaOutput
@@ -62,17 +63,17 @@ data SchemaOutput = SchemaOutput
   }
   deriving (Show)
 
--- | Build schemas for every user-defined task, request and type in the
+-- | Build schemas for every user-defined agent, request and type in the
 --   global environment. prim module entries are filtered out.
 moduleSchemas :: GlobalEnv -> [SchemaOutput]
 moduleSchemas ge =
-  let tasks =
-        [ SchemaOutput qname SKTask (taskSchema ge qname ti)
-          | (qname, ti) <- Map.toList (geTasks ge),
+  let agents =
+        [ SchemaOutput qname SKAgent (agentSchema ge ai)
+          | (qname, ai) <- Map.toList (geAgents ge),
             not (isPrimQname qname)
         ]
       reqs =
-        [ SchemaOutput qname SKRequest (requestSchema ge qname ri)
+        [ SchemaOutput qname SKRequest (requestSchema ge ri)
           | (qname, ri) <- Map.toList (geRequests ge),
             not (isPrimQname qname)
         ]
@@ -81,7 +82,7 @@ moduleSchemas ge =
           | (qname, ti) <- Map.toList (geTypes ge),
             not (isPrimQname qname)
         ]
-   in tasks ++ reqs ++ tys
+   in agents ++ reqs ++ tys
 
 isPrimQname :: Text -> Bool
 isPrimQname q =
@@ -93,14 +94,14 @@ encodeSchema :: Value -> ByteString
 encodeSchema = encode
 
 -- ----------------------------------------------------------------------------
--- Task / Request / Type schema generation
+-- Agent / Request / Type schema generation
 -- ----------------------------------------------------------------------------
 
-taskSchema :: GlobalEnv -> Text -> TaskInfo -> Value
-taskSchema ge _qname ti =
-  let mname = tiHomeModule ti
-      inputSchema = paramsToInputSchema ge mname (tiParams ti)
-      outputSchema = typeToSchema ge mname (tiRet ti)
+agentSchema :: GlobalEnv -> AgentInfo -> Value
+agentSchema ge ai =
+  let mname = aiHomeModule ai
+      inputSchema = paramsToInputSchema ge mname (aiParams ai)
+      outputSchema = typeToSchema ge mname (aiRet ai)
       base =
         object
           [ "type" .= ("object" :: Text),
@@ -111,10 +112,10 @@ taskSchema ge _qname ti =
                 ],
             "required" .= (["input", "output"] :: [Text])
           ]
-   in applyDescription (tiAnnot ti) base
+   in applyDescription (aiAnnot ai) base
 
-requestSchema :: GlobalEnv -> Text -> RequestInfo -> Value
-requestSchema ge _qname ri =
+requestSchema :: GlobalEnv -> RequestInfo -> Value
+requestSchema ge ri =
   let mname = riHomeModule ri
       inputSchema = paramsToInputSchema ge mname (riParams ri)
       outputSchema = typeToSchema ge mname (riRet ri)
@@ -231,10 +232,11 @@ typeKeyword :: Text -> Value
 typeKeyword t = object ["type" .= t]
 
 boolSchema :: BoolKind -> Value
-boolSchema BoolFull = typeKeyword "boolean"
-boolSchema (BoolLits s) = case Set.toList s of
-  [b] -> object ["const" .= b]
-  bs -> object ["oneOf" .= [object ["const" .= b] | b <- bs]]
+boolSchema (BoolLits s)
+  | s == boolFull = typeKeyword "boolean"
+  | otherwise = case Set.toList s of
+      [b] -> object ["const" .= b]
+      bs -> object ["oneOf" .= [object ["const" .= b] | b <- bs]]
 
 numericSchema :: NumericKind -> Value
 numericSchema (NumericKind IntFull NumFull) = typeKeyword "number"

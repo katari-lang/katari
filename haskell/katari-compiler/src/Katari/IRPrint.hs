@@ -8,11 +8,13 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Word (Word32)
 import Katari.IR
-  ( ConstVal (..),
-    IRHandleBlock (..),
+  ( AgentKind (..),
+    ConstVal (..),
+    IRForScope (..),
+    IRHandleScope (..),
     IRModule (..),
     IRRequestDef (..),
-    IRTask (..),
+    IRAgent (..),
     Instruction (..),
     NameTable (..),
   )
@@ -33,8 +35,8 @@ printIRModule irm =
       "=== requests ===",
       printRequests (irmRequests irm),
       "",
-      "=== tasks ===",
-      T.intercalate "\n" (map (printTask irm) (irmTasks irm))
+      "=== agents ===",
+      T.intercalate "\n" (map (printAgent irm) (irmAgents irm))
     ]
 
 -- ---------------------------------------------------------------------------
@@ -69,25 +71,34 @@ printRequests rs = T.unlines (map go rs)
         <> maybe "" (\f -> " (from: " <> f <> ")") (irReqFrom r)
 
 -- ---------------------------------------------------------------------------
--- Task
+-- Agent
 -- ---------------------------------------------------------------------------
 
-printTask :: IRModule -> IRTask -> Text
-printTask irm task =
+printAgent :: IRModule -> IRAgent -> Text
+printAgent irm agent =
   T.unlines $
-    [ "task " <> irTaskName task <> " [id=" <> showId (irTaskId task) <> "]",
-      "  params: " <> commaSep (map (vn nt) (irTaskParams task)),
+    [ "agent "
+        <> iraName agent
+        <> " [id="
+        <> showId (iraId agent)
+        <> ", kind="
+        <> (case iraKind agent of UserDefined -> "user"; ParBranch -> "par")
+        <> "]",
+      "  params: " <> commaSep (map (vn nt) (iraParams agent)),
       "  body:"
     ]
-      ++ printInstrs 4 irm (irTaskBody task)
-      ++ if null (irTaskHandlers task)
+      ++ printInstrs 4 irm (iraBody agent)
+      ++ (if null (iraHandlers agent)
         then []
-        else "  handlers:" : concatMap (printHandleBlock irm) (irTaskHandlers task)
+        else "  handlers:" : concatMap (printHandleScope irm) (iraHandlers agent))
+      ++ (if null (iraForScopes agent)
+        then []
+        else "  for_scopes:" : concatMap (printForScope irm) (iraForScopes agent))
   where
     nt = irmNameTable irm
 
-printHandleBlock :: IRModule -> IRHandleBlock -> [Text]
-printHandleBlock irm hb =
+printHandleScope :: IRModule -> IRHandleScope -> [Text]
+printHandleScope irm hb =
   [ "    handle["
       <> showId (irhId hb)
       <> "] states=["
@@ -95,10 +106,10 @@ printHandleBlock irm hb =
       <> "]"
   ]
     ++ concatMap printReqCase (irhReqCases hb)
-    ++ case irhReturnCase hb of
+    ++ case irhThenClause hb of
       Nothing -> []
       Just (inputV, instrs) ->
-        ("      return(" <> vn nt inputV <> "):") : printInstrs 8 irm instrs
+        ("      then(" <> vn nt inputV <> "):") : printInstrs 8 irm instrs
   where
     nt = irmNameTable irm
     printReqCase (rid, argVs, instrs) =
@@ -111,6 +122,14 @@ printHandleBlock irm hb =
           <> "):"
       )
         : printInstrs 8 irm instrs
+
+printForScope :: IRModule -> IRForScope -> [Text]
+printForScope irm fs =
+  ("    for[" <> showId (irfsId fs) <> "]")
+    : case irfsThen fs of
+      Nothing -> []
+      Just instrs ->
+        "      then:" : printInstrs 8 irm instrs
 
 printInstrs :: Int -> IRModule -> [Instruction] -> [Text]
 printInstrs indent irm =
@@ -176,14 +195,14 @@ printI nt cs = \case
   ICall v tid args ->
     vn nt v
       <> " = call "
-      <> tn nt tid
+      <> an nt tid
       <> "("
       <> commaSep (map (vn nt) args)
       <> ")"
-  IPar v tasks ->
+  IPar v agents ->
     vn nt v
       <> " = par ["
-      <> commaSep [tn nt tid <> "(" <> commaSep (map (vn nt) args) <> ")" | (tid, args) <- tasks]
+      <> commaSep [an nt tid <> "(" <> commaSep (map (vn nt) args) <> ")" | (tid, args) <- agents]
       <> "]"
   IRequest v rid args ->
     vn nt v
@@ -195,16 +214,19 @@ printI nt cs = \case
   IHandleBegin hid -> "handle_begin hnd" <> showId hid
   IHandleEnd dst src hid ->
     vn nt dst <> " = handle_end hnd" <> showId hid <> "(" <> vn nt src <> ")"
-  IReply v hid upds ->
-    "reply "
+  IContinue v hid upds ->
+    "continue "
       <> vn nt v
       <> " hnd"
       <> showId hid
       <> (if null upds then "" else " {" <> commaSep ["[" <> showId i <> "] := " <> vn nt fv | (i, fv) <- upds] <> "}")
-  IBreak v hid -> "break " <> vn nt v <> " hnd" <> showId hid
-  INext upds ->
-    "next {" <> commaSep ["[" <> showId i <> "] := " <> vn nt fv | (i, fv) <- upds] <> "}"
-  IForBreak v -> "for_break " <> vn nt v
+  IHandleBreak v hid -> "handle_break " <> vn nt v <> " hnd" <> showId hid
+  IForBegin fid -> "for_begin for" <> showId fid
+  IForEnd dst src fid ->
+    vn nt dst <> " = for_end for" <> showId fid <> "(" <> vn nt src <> ")"
+  IForContinue fid upds ->
+    "for_continue for" <> showId fid <> " {" <> commaSep ["[" <> showId i <> "] := " <> vn nt fv | (i, fv) <- upds] <> "}"
+  IForBreak v fid -> "for_break " <> vn nt v <> " for" <> showId fid
 
 -- ---------------------------------------------------------------------------
 -- Helpers
@@ -216,11 +238,11 @@ vn nt vid = case Map.lookup vid (ntVars nt) of
   Just n -> n <> "%" <> T.pack (show vid)
   Nothing -> "v" <> T.pack (show vid)
 
--- Resolve a TaskId to a name
-tn :: NameTable -> Word32 -> Text
-tn nt tid = case Map.lookup tid (ntTasks nt) of
+-- Resolve an AgentId to a name
+an :: NameTable -> Word32 -> Text
+an nt aid = case Map.lookup aid (ntAgents nt) of
   Just n -> n
-  Nothing -> "task" <> T.pack (show tid)
+  Nothing -> "agent" <> T.pack (show aid)
 
 -- Resolve a RequestId to a name
 rn :: NameTable -> Word32 -> Text

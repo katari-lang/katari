@@ -33,11 +33,11 @@ data Module = Module
 
 data Decl
   = DeclVal SrcSpan ValDecl
-  | DeclTask SrcSpan TaskDecl
+  | DeclAgent SrcSpan AgentDecl
   | DeclRequest SrcSpan RequestDecl
   | DeclType SrcSpan TypeAliasDecl
   | DeclImport SrcSpan ImportDecl
-  | DeclExtTask SrcSpan ExternalTaskDecl
+  | DeclExtAgent SrcSpan ExternalAgentDecl
   | DeclExtReq SrcSpan ExternalReqDecl
   deriving (Show)
 
@@ -50,14 +50,14 @@ data ValDecl = ValDecl
   }
   deriving (Show)
 
--- task name(params) -> RetType with Effect { body }
-data TaskDecl = TaskDecl
-  { taskAnnot :: Maybe Text,
-    taskName :: Text,
-    taskParams :: [(Text, Type, Maybe Text)], -- (name, type, annotation)
-    taskRet :: Maybe Type,
-    taskWith :: Maybe RequestEffect, -- Nothing = 推論
-    taskBody :: Block
+-- agent name(params) -> RetType with Effect { body }
+data AgentDecl = AgentDecl
+  { agentAnnot :: Maybe Text,
+    agentName :: Text,
+    agentParams :: [(Text, Type, Maybe Text)], -- (name, type, annotation)
+    agentRet :: Maybe Type,
+    agentWith :: Maybe RequestEffect, -- Nothing = 推論
+    agentBody :: Block
   }
   deriving (Show)
 
@@ -85,14 +85,14 @@ data ImportDecl = ImportDecl
   }
   deriving (Show)
 
--- external task name(...) -> T from "server:task"
-data ExternalTaskDecl = ExternalTaskDecl
-  { extTaskAnnot :: Maybe Text,
-    extTaskName :: Text,
-    extTaskParams :: [(Text, Type, Maybe Text)],
-    extTaskRet :: Maybe Type,
-    extTaskWith :: Maybe RequestEffect,
-    extTaskFrom :: Text -- "server:task_name"
+-- external agent name(...) -> T from "server:agent"
+data ExternalAgentDecl = ExternalAgentDecl
+  { extAgentAnnot :: Maybe Text,
+    extAgentName :: Text,
+    extAgentParams :: [(Text, Type, Maybe Text)],
+    extAgentRet :: Maybe Type,
+    extAgentWith :: Maybe RequestEffect,
+    extAgentFrom :: Text -- "server:agent_name"
   }
   deriving (Show)
 
@@ -109,7 +109,7 @@ data ExternalReqDecl = ExternalReqDecl
 -- with 節
 data RequestEffect
   = RENames [Text] -- with req1 | req2 | ...
-  | RETask -- with task
+  | REAgent -- with agent
   deriving (Show, Eq)
 
 -- ---------------------------------------------------------------------------
@@ -124,8 +124,8 @@ data Stmt
   | SHandle SrcSpan HandleStmt
   | SExpr SrcSpan Expr
   | SReturn SrcSpan Expr
-  | SReply SrcSpan Expr (Maybe [(Text, Expr)]) -- reply val [with {x=e}]
-  | SNext SrcSpan (Maybe [(Text, Expr)]) -- next [with {x=e}]
+  | SContinue SrcSpan Expr (Maybe [(Text, Expr)]) -- continue val [with {x=e}]
+  | SForContinue SrcSpan (Maybe [(Text, Expr)]) -- continue [with {x=e}] (for loop)
   | SBreak SrcSpan Expr -- break val (handle用)
   | SForBreak SrcSpan Expr -- break val (for用)
   deriving (Show)
@@ -169,7 +169,7 @@ data TemplElem
 data HandleStmt = HandleStmt
   { hParams :: [(Text, Type, Maybe Text, Expr)], -- (name, type, annotation, init_expr)
     hReqCases :: [(Text, [Pat], Block)], -- (req_name, arg_pats, body)
-    hReturnCase :: Maybe (Text, Block) -- return x => body
+    hThenClause :: Maybe (Text, Block) -- then (var) { body }
   }
   deriving (Show)
 
@@ -181,7 +181,7 @@ data ForExpr = ForExpr
   { fLetBinds :: [(Text, Expr)], -- let x of array_expr
     fVarBinds :: [(Text, Type, Expr)], -- var acc: T = init
     fBody :: Block,
-    fFinally :: Maybe Block
+    fThen :: Maybe Block
   }
   deriving (Show)
 

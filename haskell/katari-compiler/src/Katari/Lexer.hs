@@ -8,6 +8,8 @@ module Katari.Lexer
 where
 
 import Data.Char (isAlpha, isAlphaNum, isDigit)
+import Data.Set (Set)
+import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
 
@@ -35,14 +37,13 @@ data TokKind
   | -- Keywords
     TKVal
   | TKLet
-  | TKTask
+  | TKAgent
   | TKIf
   | TKElse
   | TKMatch
   | TKCase
   | TKReturn
-  | TKReply
-  | TKNext
+  | TKContinue
   | TKBreak
   | TKRequest
   | TKType
@@ -51,7 +52,7 @@ data TokKind
   | TKWith
   | TKFrom
   | TKFor
-  | TKFinally
+  | TKThen
   | TKOf
   | TKVar
   | TKHandle
@@ -133,7 +134,7 @@ lexFile fp src = do
 lexRaw :: FilePath -> String -> Int -> Int -> [Token] -> Either LexError [Token]
 lexRaw fp src ln col acc = case src of
   [] -> Right (Token TKEof ln 0 : acc)
-  -- Newlines (tracked but whitespace)
+  -- Whitespace / newlines
   '\r' : '\n' : cs -> lexRaw fp cs (ln + 1) 1 acc
   '\r' : cs -> lexRaw fp cs (ln + 1) 1 acc
   '\n' : cs -> lexRaw fp cs (ln + 1) 1 acc
@@ -141,28 +142,28 @@ lexRaw fp src ln col acc = case src of
   '\t' : cs -> lexRaw fp cs ln (col + 4) acc
   -- Line comments
   '/' : '/' : cs ->
-    let rest = dropWhile (/= '\n') cs
-     in lexRaw fp rest ln (col + 2 + length (takeWhile (/= '\n') cs)) acc
+    let (comment, rest) = span (/= '\n') cs
+     in lexRaw fp rest ln (col + 2 + length comment) acc
   -- Block comments
-  '/' : '*' : cs -> case skipBlockComment cs ln (col + 2) of
-    Left e -> Left e
-    Right (r, l', c') -> lexRaw fp r l' c' acc
+  '/' : '*' : cs -> do
+    (r, l', c') <- skipBlockComment cs ln (col + 2)
+    lexRaw fp r l' c' acc
   -- Multiline string
-  '"' : '"' : '"' : cs -> case lexMultiStr fp cs ln (col + 3) of
-    Left e -> Left e
-    Right (s, r, l', c') -> lexRaw fp r l' c' (Token (TKStr s) ln col : acc)
+  '"' : '"' : '"' : cs -> do
+    (s, r, l', c') <- lexMultiStr fp cs ln (col + 3)
+    lexRaw fp r l' c' (Token (TKStr s) ln col : acc)
   -- Template literal (multiline)
-  'f' : '"' : '"' : '"' : cs -> case lexFStrMulti fp cs ln (col + 4) of
-    Left e -> Left e
-    Right (ps, r, l', c') -> lexRaw fp r l' c' (Token (TKFStr ps) ln col : acc)
+  'f' : '"' : '"' : '"' : cs -> do
+    (ps, r, l', c') <- lexFStrMulti fp cs ln (col + 4)
+    lexRaw fp r l' c' (Token (TKFStr ps) ln col : acc)
   -- Template literal (single line)
-  'f' : '"' : cs -> case lexFStr fp cs ln (col + 2) False of
-    Left e -> Left e
-    Right (ps, r, l', c') -> lexRaw fp r l' c' (Token (TKFStr ps) ln col : acc)
+  'f' : '"' : cs -> do
+    (ps, r, l', c') <- lexFStr fp cs ln (col + 2) False
+    lexRaw fp r l' c' (Token (TKFStr ps) ln col : acc)
   -- Regular string
-  '"' : cs -> case lexStr fp cs ln (col + 1) [] of
-    Left e -> Left e
-    Right (s, r, c') -> lexRaw fp r ln c' (Token (TKStr s) ln col : acc)
+  '"' : cs -> do
+    (s, r, c') <- lexStr fp cs ln (col + 1) []
+    lexRaw fp r ln c' (Token (TKStr s) ln col : acc)
   -- Multi-char operators
   '=' : '>' : cs -> lexRaw fp cs ln (col + 2) (Token TKFatArrow ln col : acc)
   '=' : '=' : cs -> lexRaw fp cs ln (col + 2) (Token TKEqEq ln col : acc)
@@ -178,9 +179,8 @@ lexRaw fp src ln col acc = case src of
     | isAlpha c || c == '_' ->
         let (rest0, after) = span (\x -> isAlphaNum x || x == '_') cs
             word = c : rest0
-            len = length word
-         in lexRaw fp after ln (col + len) (Token (keywordOrIdent word) ln col : acc)
-    -- Number literals (check float before int)
+         in lexRaw fp after ln (col + length word) (Token (keywordOrIdent word) ln col : acc)
+    -- Number literals
     | isDigit c ->
         let (digits, after) = span isDigit cs
             allDigits = c : digits
@@ -189,16 +189,10 @@ lexRaw fp src ln col acc = case src of
                 | isDigit d ->
                     let (frac, after3) = span isDigit after2
                         numStr = allDigits ++ "." ++ (d : frac)
-                        n = read numStr :: Double
-                     in lexRaw fp after3 ln (col + length numStr) (Token (TKNum n) ln col : acc)
+                     in lexRaw fp after3 ln (col + length numStr) (Token (TKNum (read numStr)) ln col : acc)
               _ ->
-                lexRaw
-                  fp
-                  after
-                  ln
-                  (col + length allDigits)
-                  (Token (TKInt (read allDigits)) ln col : acc)
-    -- Single-char operators
+                lexRaw fp after ln (col + length allDigits) (Token (TKInt (read allDigits)) ln col : acc)
+    -- Single-char operators / delimiters
     | otherwise -> case singleCharTok c of
         Just tk -> lexRaw fp cs ln (col + 1) (Token tk ln col : acc)
         Nothing ->
@@ -377,14 +371,13 @@ keywordOrIdent :: String -> TokKind
 keywordOrIdent = \case
   "val" -> TKVal
   "let" -> TKLet
-  "task" -> TKTask
+  "agent" -> TKAgent
   "if" -> TKIf
   "else" -> TKElse
   "match" -> TKMatch
   "case" -> TKCase
   "return" -> TKReturn
-  "reply" -> TKReply
-  "next" -> TKNext
+  "continue" -> TKContinue
   "break" -> TKBreak
   "request" -> TKRequest
   "type" -> TKType
@@ -393,7 +386,7 @@ keywordOrIdent = \case
   "with" -> TKWith
   "from" -> TKFrom
   "for" -> TKFor
-  "finally" -> TKFinally
+  "then" -> TKThen
   "of" -> TKOf
   "var" -> TKVar
   "handle" -> TKHandle
@@ -410,50 +403,30 @@ keywordOrIdent = \case
 
 -- Tokens that suppress semicolon when at end of line
 noSemiAfter :: TokKind -> Bool
-noSemiAfter tk =
-  tk
-    `elem` [ TKLBrace,
-             TKLParen,
-             TKLBracket,
-             TKComma,
-             TKPlus,
-             TKMinus,
-             TKStar,
-             TKSlash,
-             TKEqEq,
-             TKNeq,
-             TKLt,
-             TKGt,
-             TKLe,
-             TKGe,
-             TKAmpAmp,
-             TKPipePipe,
-             TKPlusPlus,
-             TKEq,
-             TKArrow,
-             TKFatArrow,
-             TKColon,
-             TKWith,
-             TKOf,
-             TKAt,
-             TKDot
-           ]
+noSemiAfter = (`Set.member` noSemiAfterSet)
+
+noSemiAfterSet :: Set TokKind
+noSemiAfterSet =
+  Set.fromList
+    [ TKLBrace, TKLParen, TKLBracket, TKComma,
+      TKPlus, TKMinus, TKStar, TKSlash,
+      TKEqEq, TKNeq, TKLt, TKGt, TKLe, TKGe,
+      TKAmpAmp, TKPipePipe, TKPlusPlus,
+      TKEq, TKArrow, TKFatArrow,
+      TKColon, TKWith, TKOf, TKAt, TKDot
+    ]
 
 -- Tokens that suppress semicolon when at start of next line
 noSemiBefore :: TokKind -> Bool
-noSemiBefore tk =
-  tk
-    `elem` [ TKDot,
-             TKRParen,
-             TKRBracket,
-             TKRBrace,
-             TKCase,
-             TKElse,
-             TKFinally,
-             TKOf,
-             TKPipe,
-             TKAmp -- allow multi-line type unions/intersections
-           ]
+noSemiBefore = (`Set.member` noSemiBeforeSet)
+
+noSemiBeforeSet :: Set TokKind
+noSemiBeforeSet =
+  Set.fromList
+    [ TKDot, TKRParen, TKRBracket, TKRBrace,
+      TKCase, TKElse, TKThen, TKOf,
+      TKPipe, TKAmp
+    ]
 
 insertSemicolons :: [Token] -> [Token]
 insertSemicolons = \case

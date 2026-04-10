@@ -10,13 +10,15 @@ import Data.Word (Word32)
 
 type VarId = Word32
 
-type TaskId = Word32
+type AgentId = Word32
 
 type RequestId = Word32
 
 type ConstId = Word32
 
 type HandlerId = Word32
+
+type ForId = Word32
 
 -- ---------------------------------------------------------------------------
 -- Constant pool values
@@ -79,42 +81,60 @@ data Instruction
   | ISwitch VarId [(ConstId, Word32)] Word32
   | IReturn VarId
   | -- Agent 操作
-    ICall VarId TaskId [VarId]
-  | IPar VarId [(TaskId, [VarId])]
+    ICall VarId AgentId [VarId]
+  | IPar VarId [(AgentId, [VarId])]
   | IRequest VarId RequestId [VarId]
   | -- Handle ライフサイクル
     IHandleBegin HandlerId
   | IHandleEnd VarId VarId HandlerId -- dst, scope_result, handler
   -- Handler 内命令
-  | IReply VarId HandlerId [(Word32, VarId)] -- val, handler, state_updates
-  | IBreak VarId HandlerId
+  | IContinue VarId HandlerId [(Word32, VarId)] -- val, handler, state_updates
+  | IHandleBreak VarId HandlerId
+  | -- For スコープ
+    IForBegin ForId
+  | IForEnd VarId VarId ForId -- dst, normal_result, for_id
   | -- For ループ内命令
-    INext [(Word32, VarId)]
-  | IForBreak VarId
+    IForContinue ForId [(Word32, VarId)]
+  | IForBreak VarId ForId
   deriving (Show, Eq)
 
 -- ---------------------------------------------------------------------------
--- Handle block
+-- Handle scope
 -- ---------------------------------------------------------------------------
 
-data IRHandleBlock = IRHandleBlock
+data IRHandleScope = IRHandleScope
   { irhId :: HandlerId,
     irhStateVars :: [VarId], -- 状態変数 VarId リスト
     irhReqCases :: [(RequestId, [VarId], [Instruction])], -- (req, arg_vars, instructions)
-    irhReturnCase :: Maybe (VarId, [Instruction]) -- (input_var, return 節命令列)
+    irhThenClause :: Maybe (VarId, [Instruction]) -- (input_var, then 節命令列)
   }
   deriving (Show)
 
 -- ---------------------------------------------------------------------------
--- Task
+-- For scope
 -- ---------------------------------------------------------------------------
 
-data IRTask = IRTask
-  { irTaskId :: TaskId,
-    irTaskName :: Text, -- デバッグ用
-    irTaskParams :: [VarId],
-    irTaskBody :: [Instruction],
-    irTaskHandlers :: [IRHandleBlock]
+data IRForScope = IRForScope
+  { irfsId :: ForId,
+    irfsThen :: Maybe [Instruction] -- for の then ブロック（値を取らない）
+  }
+  deriving (Show)
+
+-- ---------------------------------------------------------------------------
+-- Agent
+-- ---------------------------------------------------------------------------
+
+data AgentKind = UserDefined | ParBranch
+  deriving (Show, Eq)
+
+data IRAgent = IRAgent
+  { iraId :: AgentId,
+    iraKind :: AgentKind,
+    iraName :: Text, -- デバッグ用
+    iraParams :: [VarId],
+    iraBody :: [Instruction],
+    iraHandlers :: [IRHandleScope],
+    iraForScopes :: [IRForScope]
   }
   deriving (Show)
 
@@ -135,7 +155,7 @@ data IRRequestDef = IRRequestDef
 
 data NameTable = NameTable
   { ntVars :: Map VarId Text,
-    ntTasks :: Map TaskId Text,
+    ntAgents :: Map AgentId Text,
     ntRequests :: Map RequestId Text
   }
   deriving (Show)
@@ -152,6 +172,6 @@ data IRModule = IRModule
     irmNameTable :: NameTable,
     irmConsts :: [ConstVal],
     irmRequests :: [IRRequestDef],
-    irmTasks :: [IRTask]
+    irmAgents :: [IRAgent]
   }
   deriving (Show)

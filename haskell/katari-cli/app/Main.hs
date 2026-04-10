@@ -58,7 +58,7 @@ data SchemaOpts = SchemaOpts
   { scRoot :: Maybe FilePath,
     scOutput :: Maybe FilePath,
     scModule :: Maybe Text,
-    scTask :: Maybe Text,
+    scAgent :: Maybe Text,
     scRequest :: Maybe Text
   }
   deriving (Show)
@@ -68,7 +68,7 @@ cliParser =
   subparser
     ( command "compile" (info compileParser (progDesc "Compile a Katari project to .ktri binary"))
         <> command "dump" (info dumpParser (progDesc "Dump IR of a Katari project as text"))
-        <> command "schema" (info schemaParser (progDesc "Generate JSON Schema for tasks/requests/types"))
+        <> command "schema" (info schemaParser (progDesc "Generate JSON Schema for agents/requests/types"))
     )
 
 compileParser :: Parser Command
@@ -91,7 +91,7 @@ schemaParser =
       <$> optional (argument str (metavar "ROOT" <> help "Project root directory (default: cwd)"))
       <*> optional (option str (short 'o' <> long "output" <> metavar "OUT" <> help "Output JSON file (default: stdout)"))
       <*> optional (option str (long "module" <> metavar "MOD" <> help "Restrict to the given module"))
-      <*> optional (option str (long "task" <> metavar "NAME" <> help "Restrict to the given task (local name)"))
+      <*> optional (option str (long "agent" <> metavar "NAME" <> help "Restrict to the given agent (local name)"))
       <*> optional (option str (long "request" <> metavar "NAME" <> help "Restrict to the given request (local name)"))
 
 -- ---------------------------------------------------------------------------
@@ -165,7 +165,7 @@ buildOrDie modules = do
 -- Schema helpers
 -- ---------------------------------------------------------------------------
 
--- | Apply --module / --task / --request filters to a list of schema outputs.
+-- | Apply --module / --agent / --request filters to a list of schema outputs.
 filterSchemas :: SchemaOpts -> [SchemaOutput] -> [SchemaOutput]
 filterSchemas opts = filter keep
   where
@@ -175,9 +175,9 @@ filterSchemas opts = filter keep
     moduleMatches qname = case scModule opts of
       Nothing -> True
       Just m -> m == qname || (m <> ".") `T.isPrefixOf` qname
-    kindMatches so = case (scTask opts, scRequest opts, soKind so) of
+    kindMatches so = case (scAgent opts, scRequest opts, soKind so) of
       (Nothing, Nothing, _) -> True
-      (Just t, _, SKTask) -> localNameEquals t (soName so)
+      (Just t, _, SKAgent) -> localNameEquals t (soName so)
       (_, Just r, SKRequest) -> localNameEquals r (soName so)
       _ -> False
     localNameEquals local qname =
@@ -199,7 +199,7 @@ schemasToValue outs =
 
 kindText :: SchemaKind -> Text
 kindText = \case
-  SKTask -> "task"
+  SKAgent -> "agent"
   SKRequest -> "request"
   SKType -> "type"
 

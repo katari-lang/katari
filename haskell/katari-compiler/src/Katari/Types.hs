@@ -11,6 +11,9 @@ module Katari.Types
     Discriminator (..),
     LitVal (..),
 
+    -- * Helpers
+    boolFull,
+
     -- * Smart constructors
     ntNever,
     ntNull,
@@ -65,7 +68,7 @@ data NormalFields = NormalFields
   }
   deriving (Show, Eq)
 
-data BoolKind = BoolFull | BoolLits (Set Bool)
+newtype BoolKind = BoolLits (Set Bool)
   deriving (Show, Eq)
 
 data NumericKind = NumericKind
@@ -131,8 +134,11 @@ ntNever = NTFields emptyFields
 ntNull :: NormalizedType
 ntNull = NTFields emptyFields {nfNull = True}
 
+boolFull :: Set Bool
+boolFull = Set.fromList [True, False]
+
 ntBool :: NormalizedType
-ntBool = NTFields emptyFields {nfBoolean = Just BoolFull}
+ntBool = NTFields emptyFields {nfBoolean = Just (BoolLits boolFull)}
 
 ntInteger :: NormalizedType
 ntInteger = NTFields emptyFields {nfNumeric = Just (NumericKind IntFull NumAbsent)}
@@ -290,11 +296,7 @@ unionBool :: Maybe BoolKind -> Maybe BoolKind -> Maybe BoolKind
 unionBool a b = case (a, b) of
   (Nothing, x) -> x
   (x, Nothing) -> x
-  (Just BoolFull, _) -> Just BoolFull
-  (_, Just BoolFull) -> Just BoolFull
-  (Just (BoolLits s1), Just (BoolLits s2)) ->
-    let s = Set.union s1 s2
-     in if s == Set.fromList [True, False] then Just BoolFull else Just (BoolLits s)
+  (Just (BoolLits s1), Just (BoolLits s2)) -> Just (BoolLits (Set.union s1 s2))
 
 unionNumeric :: Maybe NumericKind -> Maybe NumericKind -> Maybe NumericKind
 unionNumeric a b = case (a, b) of
@@ -391,8 +393,6 @@ intersectBool :: Maybe BoolKind -> Maybe BoolKind -> Maybe BoolKind
 intersectBool a b = case (a, b) of
   (Nothing, _) -> Nothing
   (_, Nothing) -> Nothing
-  (Just BoolFull, x) -> x
-  (x, Just BoolFull) -> x
   (Just (BoolLits s1), Just (BoolLits s2)) ->
     let s = Set.intersection s1 s2
      in if Set.null s then Nothing else Just (BoolLits s)
@@ -508,9 +508,6 @@ subtypeBool :: Maybe BoolKind -> Maybe BoolKind -> Bool
 subtypeBool a b = case (a, b) of
   (Nothing, _) -> True -- never <: anything
   (_, Nothing) -> False
-  (Just BoolFull, Just BoolFull) -> True
-  (Just BoolFull, _) -> False
-  (Just (BoolLits _), Just BoolFull) -> True
   (Just (BoolLits s1), Just (BoolLits s2)) -> Set.isSubsetOf s1 s2
 
 subtypeNum :: Maybe NumericKind -> Maybe NumericKind -> Bool
@@ -613,11 +610,6 @@ subtractBool :: Maybe BoolKind -> Maybe BoolKind -> Maybe BoolKind
 subtractBool a b = case (a, b) of
   (Nothing, _) -> Nothing
   (x, Nothing) -> x
-  (Just BoolFull, Just BoolFull) -> Nothing
-  (Just BoolFull, Just (BoolLits s)) ->
-    let remaining = Set.difference (Set.fromList [True, False]) s
-     in if Set.null remaining then Nothing else Just (BoolLits remaining)
-  (Just (BoolLits _), Just BoolFull) -> Nothing
   (Just (BoolLits s1), Just (BoolLits s2)) ->
     let s = Set.difference s1 s2
      in if Set.null s then Nothing else Just (BoolLits s)
@@ -671,7 +663,9 @@ subtractArrField :: Maybe NormalizedType -> Maybe NormalizedType -> Maybe Normal
 subtractArrField a b = case (a, b) of
   (Nothing, _) -> Nothing
   (x, Nothing) -> x
-  _ -> Nothing -- conservative: array patterns consume all arrays
+  (Just elem1, Just elem2) ->
+    let diff = subtractNT elem1 elem2
+     in if isNeverNT diff then Nothing else Just elem1 -- conservative: keep original element type
 
 -- Object subtraction
 subtractObjField :: Maybe ObjectFields -> Maybe ObjectFields -> Maybe ObjectFields
