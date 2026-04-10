@@ -115,7 +115,15 @@ data LitVal
 -- ---------------------------------------------------------------------------
 
 emptyFields :: NormalFields
-emptyFields = NormalFields False Nothing Nothing Nothing Nothing Nothing
+emptyFields =
+  NormalFields
+    { nfNull = False,
+      nfBoolean = Nothing,
+      nfNumeric = Nothing,
+      nfString = Nothing,
+      nfArray = Nothing,
+      nfObject = Nothing
+    }
 
 ntNever :: NormalizedType
 ntNever = NTFields emptyFields
@@ -145,13 +153,21 @@ isNeverNT = \case
   _ -> False
 
 isNeverFields :: NormalFields -> Bool
-isNeverFields NormalFields {..} =
-  not nfNull
-    && null nfBoolean
-    && null nfNumeric
-    && null nfString
-    && null nfArray
-    && null nfObject
+isNeverFields
+  NormalFields
+    { nfNull,
+      nfBoolean,
+      nfNumeric,
+      nfString,
+      nfArray,
+      nfObject
+    } =
+    not nfNull
+      && null nfBoolean
+      && null nfNumeric
+      && null nfString
+      && null nfArray
+      && null nfObject
 
 isNeverNumeric :: NumericKind -> Bool
 isNeverNumeric = \case
@@ -172,8 +188,8 @@ normalize ty env = case ty of
   TNever -> ntNever
   TUnknown -> NTUnknown
   TLitBool b -> NTFields emptyFields {nfBoolean = Just (BoolLits (Set.singleton b))}
-  TLitInt i -> NTFields emptyFields {nfNumeric = Just (NumericKind (IntLits (Set.singleton i)) NumAbsent)}
-  TLitNum n -> NTFields emptyFields {nfNumeric = Just (NumericKind IntAbsent (NumLits (Set.singleton n)))}
+  TLitInt i -> NTFields emptyFields {nfNumeric = Just (NumericKind {nkInt = IntLits (Set.singleton i), nkNum = NumAbsent})}
+  TLitNum n -> NTFields emptyFields {nfNumeric = Just (NumericKind {nkInt = IntAbsent, nkNum = NumLits (Set.singleton n)})}
   TLitStr s -> NTFields emptyFields {nfString = Just (StringLits (Set.singleton s))}
   TArray t -> NTFields emptyFields {nfArray = Just (normalize t env)}
   TUnion ts -> foldr (unionNT . (`normalize` env)) ntNever ts
@@ -200,7 +216,7 @@ normalize ty env = case ty of
           then ntNever
           else case tryMakeDISC fields ofields env of
             Just disc -> NTDISC disc
-            Nothing -> NTFields emptyFields {nfObject = Just (ObjectFields ofields)}
+            Nothing -> NTFields emptyFields {nfObject = Just (ObjectFields {ofFields = ofields})}
 
 -- Try to build a DISC from object fields
 -- Requires exactly one 'uniq' field with a literal type
@@ -214,7 +230,7 @@ tryMakeDISC fields ofields _env = case filter ofUniq fields of
               nfNumeric = Nothing,
               nfString = Nothing,
               nfArray = Nothing,
-              nfObject = Just (ObjectFields ofields)
+              nfObject = Just (ObjectFields {ofFields = ofields})
             }
         mkDisc lv =
           Just $
@@ -328,7 +344,7 @@ unionObj a b = case (a, b) of
   (Just o1, Just o2) ->
     -- keep only common fields, with union types (widening).
     let common = Map.intersectionWith mergeField (ofFields o1) (ofFields o2)
-     in Just (ObjectFields common)
+     in Just (ObjectFields {ofFields = common})
   where
     mergeField fi1 fi2 =
       FieldInfo
