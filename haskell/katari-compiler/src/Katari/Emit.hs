@@ -11,16 +11,15 @@ import Data.Text (Text)
 import Data.Text.Encoding qualified as TE
 import Data.Word (Word32, Word8)
 import Katari.IR
-  ( AgentKind (..),
-    ConstVal (..),
-    IRForScope (..),
-    IRHandleScope (..),
+  ( ConstVal (..),
+    IRAgentDef (..),
+    IRForDef (..),
+    IRHandleDef (..),
     IRModule (..),
     IRRequestDef (..),
-    IRAgent (..),
+    IRThread (..),
     Instruction (..),
-    RequestId,
-    VarId,
+    ThreadKind (..),
   )
 
 -- ---------------------------------------------------------------------------
@@ -36,17 +35,18 @@ emitModule m = BS.toStrict (BB.toLazyByteString builder)
           emitText (irmName m),
           emitVec emitConst (irmConsts m),
           emitVec emitRequestDef (irmRequests m),
-          emitVec emitAgent (irmAgents m)
+          emitVec emitThread (irmThreads m),
+          emitVec emitHandleDef (irmHandles m),
+          emitVec emitForDef (irmFors m),
+          emitVec emitAgentDef (irmAgents m)
         ]
 
 -- ---------------------------------------------------------------------------
--- Header: "KTRI" + version 0x00 0x01
+-- Header: "KTRI" + version 0x00 0x02
 -- ---------------------------------------------------------------------------
 
 header :: BB.Builder
-header = BB.byteString (BS.pack [0x4b, 0x54, 0x52, 0x49, 0x00, 0x01])
-
--- "KTRI" = 0x4b 0x54 0x52 0x49
+header = BB.byteString (BS.pack [0x4b, 0x54, 0x52, 0x49, 0x00, 0x02])
 
 -- ---------------------------------------------------------------------------
 -- LEB128 unsigned
@@ -121,45 +121,73 @@ emitRequestDef rd =
       Just f -> BB.word8 1 <> emitText f
 
 -- ---------------------------------------------------------------------------
--- Agent
+-- Thread
 -- ---------------------------------------------------------------------------
 
-emitAgent :: IRAgent -> BB.Builder
-emitAgent t =
-  leb128 (iraId t)
-    <> BB.word8 (case iraKind t of UserDefined -> 0; ParBranch -> 1)
-    <> emitText (iraName t)
-    <> emitVec leb128 (iraParams t)
-    <> emitVec emitInstr (iraBody t)
-    <> emitVec emitHandleScope (iraHandlers t)
-    <> emitVec emitForScope (iraForScopes t)
+emitThread :: IRThread -> BB.Builder
+emitThread t =
+  leb128 (itId t)
+    <> BB.word8 (emitThreadKind (itKind t))
+    <> emitVec leb128 (itParams t)
+    <> emitVec emitInstr (itBody t)
+
+emitThreadKind :: ThreadKind -> Word8
+emitThreadKind = \case
+  TkFnBody -> 0
+  TkBlock -> 1
+  TkHandlerTarget -> 2
+  TkRequestHandler -> 3
+  TkHandleThen -> 4
+  TkForBody -> 5
+  TkForThen -> 6
 
 -- ---------------------------------------------------------------------------
--- Handle scope
+-- Handle definition
 -- ---------------------------------------------------------------------------
 
-emitHandleScope :: IRHandleScope -> BB.Builder
-emitHandleScope hb =
-  leb128 (irhId hb)
-    <> emitVec leb128 (irhStateVars hb)
-    <> emitVec emitReqCase (irhReqCases hb)
-    <> case irhThenClause hb of
-      Nothing -> BB.word8 0
-      Just (inputV, instrs) -> BB.word8 1 <> leb128 inputV <> emitVec emitInstr instrs
+emitHandleDef :: IRHandleDef -> BB.Builder
+emitHandleDef hd =
+  leb128 (ihdId hd)
+    <> emitVec leb128 (ihdStateVars hd)
+    <> emitVec leb128 (ihdStateInits hd)
+    <> leb128 (ihdBody hd)
+    <> emitVec emitReqCase (ihdReqCases hd)
+    <> emitMaybe leb128 (ihdThen hd)
 
-emitReqCase :: (RequestId, [VarId], [Instruction]) -> BB.Builder
-emitReqCase (rid, argVars, instrs) = leb128 rid <> emitVec leb128 argVars <> emitVec emitInstr instrs
+emitReqCase :: (Word32, Word32) -> BB.Builder
+emitReqCase (rid, tid) = leb128 rid <> leb128 tid
 
 -- ---------------------------------------------------------------------------
--- For scope
+-- For definition
 -- ---------------------------------------------------------------------------
 
-emitForScope :: IRForScope -> BB.Builder
-emitForScope fs =
-  leb128 (irfsId fs)
-    <> case irfsThen fs of
-      Nothing -> BB.word8 0
-      Just instrs -> BB.word8 1 <> emitVec emitInstr instrs
+emitForDef :: IRForDef -> BB.Builder
+emitForDef fd =
+  leb128 (ifdId fd)
+    <> emitVec leb128 (ifdIterVars fd)
+    <> emitVec leb128 (ifdArrays fd)
+    <> emitVec leb128 (ifdStateVars fd)
+    <> emitVec leb128 (ifdStateInits fd)
+    <> leb128 (ifdBody fd)
+    <> emitMaybe leb128 (ifdThen fd)
+
+-- ---------------------------------------------------------------------------
+-- Agent definition
+-- ---------------------------------------------------------------------------
+
+emitAgentDef :: IRAgentDef -> BB.Builder
+emitAgentDef ad =
+  leb128 (iadId ad)
+    <> emitText (iadName ad)
+    <> leb128 (iadEntry ad)
+
+-- ---------------------------------------------------------------------------
+-- Maybe encoding: 0 = Nothing, 1 + value = Just
+-- ---------------------------------------------------------------------------
+
+emitMaybe :: (a -> BB.Builder) -> Maybe a -> BB.Builder
+emitMaybe _ Nothing = BB.word8 0
+emitMaybe f (Just x) = BB.word8 1 <> f x
 
 -- ---------------------------------------------------------------------------
 -- Instructions with opcodes
@@ -184,7 +212,7 @@ emitInstr = \case
   IArrLen v a -> op 0x22 <> leb128 v <> leb128 a
   IArrPush v a e -> op 0x23 <> leb128 v <> leb128 a <> leb128 e
   IArrSlice v a i j -> op 0x25 <> leb128 v <> leb128 a <> leb128 i <> leb128 j
-  -- Arithmetic (runtime dispatches on integer/number)
+  -- Arithmetic
   IAdd v l r -> op 0x30 <> leb128 v <> leb128 l <> leb128 r
   ISub v l r -> op 0x31 <> leb128 v <> leb128 l <> leb128 r
   IMul v l r -> op 0x32 <> leb128 v <> leb128 l <> leb128 r
@@ -202,7 +230,7 @@ emitInstr = \case
   IAnd v l r -> op 0x60 <> leb128 v <> leb128 l <> leb128 r
   IOr v l r -> op 0x61 <> leb128 v <> leb128 l <> leb128 r
   INot v s -> op 0x62 <> leb128 v <> leb128 s
-  -- String/array concat (runtime dispatches on lhs type), conversion
+  -- String/array concat, conversion
   IConcat v l r -> op 0x70 <> leb128 v <> leb128 l <> leb128 r
   IToString v s -> op 0x71 <> leb128 v <> leb128 s
   ITypeOf v s -> op 0x73 <> leb128 v <> leb128 s
@@ -214,31 +242,25 @@ emitInstr = \case
       <> leb128 v
       <> emitVec (\(c, t) -> leb128 c <> leb128 t) cases
       <> leb128 def
+  IComplete v -> op 0x84 <> leb128 v
   IReturn v -> op 0x83 <> leb128 v
   -- Agent
   ICall v tid args -> op 0x90 <> leb128 v <> leb128 tid <> emitVec leb128 args
-  IPar v branches ->
-    op 0x91
-      <> leb128 v
-      <> emitVec (\(tid, args) -> leb128 tid <> emitVec leb128 args) branches
+  IPar v tids -> op 0x91 <> leb128 v <> emitVec leb128 tids
   IRequest v rid args -> op 0x92 <> leb128 v <> leb128 rid <> emitVec leb128 args
   -- Handle
-  IHandleBegin hid -> op 0xa0 <> leb128 hid
-  IHandleEnd dst src hid -> op 0xa1 <> leb128 dst <> leb128 src <> leb128 hid
-  IContinue v hid upds ->
+  IHandle v hid -> op 0xa0 <> leb128 v <> leb128 hid
+  IContinue v upds ->
     op 0xa2
       <> leb128 v
-      <> leb128 hid
-      <> emitVec (\(si, sv) -> leb128 si <> leb128 sv) upds
-  IHandleBreak v hid -> op 0xa3 <> leb128 v <> leb128 hid
+      <> emitVec (\(sv, nv) -> leb128 sv <> leb128 nv) upds
+  IHandleBreak v -> op 0xa3 <> leb128 v
   -- For
-  IForBegin fid -> op 0xb2 <> leb128 fid
-  IForEnd dst src fid -> op 0xb3 <> leb128 dst <> leb128 src <> leb128 fid
-  IForContinue fid upds ->
+  IFor v fid -> op 0xb2 <> leb128 v <> leb128 fid
+  IForContinue upds ->
     op 0xb0
-      <> leb128 fid
-      <> emitVec (\(si, sv) -> leb128 si <> leb128 sv) upds
-  IForBreak v fid -> op 0xb1 <> leb128 v <> leb128 fid
+      <> emitVec (\(sv, nv) -> leb128 sv <> leb128 nv) upds
+  IForBreak v -> op 0xb1 <> leb128 v
 
 op :: Word8 -> BB.Builder
 op = BB.word8

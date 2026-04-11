@@ -8,16 +8,6 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Word (Word32)
 import Katari.IR
-  ( AgentKind (..),
-    ConstVal (..),
-    IRForScope (..),
-    IRHandleScope (..),
-    IRModule (..),
-    IRRequestDef (..),
-    IRAgent (..),
-    Instruction (..),
-    NameTable (..),
-  )
 
 -- ---------------------------------------------------------------------------
 -- Entry point
@@ -35,8 +25,17 @@ printIRModule irm =
       "=== requests ===",
       printRequests (irmRequests irm),
       "",
+      "=== threads ===",
+      T.intercalate "\n" (map (printThread irm) (irmThreads irm)),
+      "",
+      "=== handles ===",
+      T.intercalate "\n" (map (printHandleDef irm) (irmHandles irm)),
+      "",
+      "=== for_loops ===",
+      T.intercalate "\n" (map (printForDef irm) (irmFors irm)),
+      "",
       "=== agents ===",
-      T.intercalate "\n" (map (printAgent irm) (irmAgents irm))
+      T.intercalate "\n" (map printAgentDef (irmAgents irm))
     ]
 
 -- ---------------------------------------------------------------------------
@@ -71,65 +70,104 @@ printRequests rs = T.unlines (map go rs)
         <> maybe "" (\f -> " (from: " <> f <> ")") (irReqFrom r)
 
 -- ---------------------------------------------------------------------------
--- Agent
+-- Threads
 -- ---------------------------------------------------------------------------
 
-printAgent :: IRModule -> IRAgent -> Text
-printAgent irm agent =
+printThread :: IRModule -> IRThread -> Text
+printThread irm t =
   T.unlines $
-    [ "agent "
-        <> iraName agent
-        <> " [id="
-        <> showId (iraId agent)
-        <> ", kind="
-        <> (case iraKind agent of UserDefined -> "user"; ParBranch -> "par")
-        <> "]",
-      "  params: " <> commaSep (map (vn nt) (iraParams agent)),
-      "  body:"
+    [ "thread["
+        <> showId (itId t)
+        <> "] "
+        <> showKind (itKind t)
+        <> " params=("
+        <> commaSep (map (vn nt) (itParams t))
+        <> ")"
     ]
-      ++ printInstrs 4 irm (iraBody agent)
-      ++ (if null (iraHandlers agent)
-        then []
-        else "  handlers:" : concatMap (printHandleScope irm) (iraHandlers agent))
-      ++ (if null (iraForScopes agent)
-        then []
-        else "  for_scopes:" : concatMap (printForScope irm) (iraForScopes agent))
+      ++ printInstrs 4 irm (itBody t)
   where
     nt = irmNameTable irm
 
-printHandleScope :: IRModule -> IRHandleScope -> [Text]
-printHandleScope irm hb =
-  [ "    handle["
-      <> showId (irhId hb)
-      <> "] states=["
-      <> commaSep (map (vn nt) (irhStateVars hb))
-      <> "]"
-  ]
-    ++ concatMap printReqCase (irhReqCases hb)
-    ++ case irhThenClause hb of
-      Nothing -> []
-      Just (inputV, instrs) ->
-        ("      then(" <> vn nt inputV <> "):") : printInstrs 8 irm instrs
+showKind :: ThreadKind -> Text
+showKind = \case
+  TkFnBody -> "FN_BODY"
+  TkBlock -> "BLOCK"
+  TkHandlerTarget -> "HANDLER_TARGET"
+  TkRequestHandler -> "REQUEST_HANDLER"
+  TkHandleThen -> "HANDLE_THEN"
+  TkForBody -> "FOR_BODY"
+  TkForThen -> "FOR_THEN"
+
+-- ---------------------------------------------------------------------------
+-- Handle definitions
+-- ---------------------------------------------------------------------------
+
+printHandleDef :: IRModule -> IRHandleDef -> Text
+printHandleDef irm hd =
+  T.unlines $
+    [ "handle["
+        <> showId (ihdId hd)
+        <> "] states=["
+        <> commaSep (map (vn nt) (ihdStateVars hd))
+        <> "] inits=["
+        <> commaSep (map (vn nt) (ihdStateInits hd))
+        <> "] body=thread["
+        <> showId (ihdBody hd)
+        <> "]"
+        <> maybe "" (\tid -> " then=thread[" <> showId tid <> "]") (ihdThen hd)
+    ]
+      ++ map printReqCase (ihdReqCases hd)
   where
     nt = irmNameTable irm
-    printReqCase (rid, argVs, instrs) =
-      ( "      request["
-          <> showId rid
-          <> "] "
-          <> rn nt rid
-          <> "("
-          <> commaSep (map (vn nt) argVs)
-          <> "):"
-      )
-        : printInstrs 8 irm instrs
+    printReqCase (rid, tid) =
+      "  req["
+        <> showId rid
+        <> "] "
+        <> rn nt rid
+        <> ": thread["
+        <> showId tid
+        <> "]"
 
-printForScope :: IRModule -> IRForScope -> [Text]
-printForScope irm fs =
-  ("    for[" <> showId (irfsId fs) <> "]")
-    : case irfsThen fs of
-      Nothing -> []
-      Just instrs ->
-        "      then:" : printInstrs 8 irm instrs
+-- ---------------------------------------------------------------------------
+-- For definitions
+-- ---------------------------------------------------------------------------
+
+printForDef :: IRModule -> IRForDef -> Text
+printForDef irm fd =
+  "for["
+    <> showId (ifdId fd)
+    <> "] iters=["
+    <> commaSep (map (vn nt) (ifdIterVars fd))
+    <> "] arrays=["
+    <> commaSep (map (vn nt) (ifdArrays fd))
+    <> "] states=["
+    <> commaSep (map (vn nt) (ifdStateVars fd))
+    <> "] inits=["
+    <> commaSep (map (vn nt) (ifdStateInits fd))
+    <> "] body=thread["
+    <> showId (ifdBody fd)
+    <> "]"
+    <> maybe "" (\tid -> " then=thread[" <> showId tid <> "]") (ifdThen fd)
+  where
+    nt = irmNameTable irm
+
+-- ---------------------------------------------------------------------------
+-- Agent definitions
+-- ---------------------------------------------------------------------------
+
+printAgentDef :: IRAgentDef -> Text
+printAgentDef ad =
+  "agent["
+    <> showId (iadId ad)
+    <> "] "
+    <> iadName ad
+    <> " entry=thread["
+    <> showId (iadEntry ad)
+    <> "]"
+
+-- ---------------------------------------------------------------------------
+-- Instructions
+-- ---------------------------------------------------------------------------
 
 printInstrs :: Int -> IRModule -> [Instruction] -> [Text]
 printInstrs indent irm =
@@ -138,10 +176,6 @@ printInstrs indent irm =
         T.replicate indent " " <> showId (fromIntegral (i :: Int)) <> ": " <> printInstr irm instr
     )
     [0 ..]
-
--- ---------------------------------------------------------------------------
--- Instructions
--- ---------------------------------------------------------------------------
 
 printInstr :: IRModule -> Instruction -> Text
 printInstr irm instr =
@@ -181,7 +215,7 @@ printI nt cs = \case
   IConcat v a b -> vn nt v <> " = " <> vn nt a <> " ++ " <> vn nt b
   IToString v a -> vn nt v <> " = to_string(" <> vn nt a <> ")"
   ITypeOf v a -> vn nt v <> " = typeof(" <> vn nt a <> ")"
-  IJump lbl -> "jump " <> showId lbl
+  IJump lbl -> "jump @" <> showId lbl
   IBranch c t f -> "branch " <> vn nt c <> " ? @" <> showId t <> " : @" <> showId f
   ISwitch v cases def ->
     "switch "
@@ -191,66 +225,46 @@ printI nt cs = \case
       <> ", default => @"
       <> showId def
       <> "}"
+  IComplete v -> "complete " <> vn nt v
   IReturn v -> "return " <> vn nt v
   ICall v tid args ->
-    vn nt v
-      <> " = call "
-      <> an nt tid
-      <> "("
-      <> commaSep (map (vn nt) args)
-      <> ")"
-  IPar v agents ->
-    vn nt v
-      <> " = par ["
-      <> commaSep [an nt tid <> "(" <> commaSep (map (vn nt) args) <> ")" | (tid, args) <- agents]
-      <> "]"
+    vn nt v <> " = call " <> an nt tid <> "(" <> commaSep (map (vn nt) args) <> ")"
+  IPar v tids ->
+    vn nt v <> " = par [" <> commaSep (map (\tid -> "thread[" <> showId tid <> "]") tids) <> "]"
   IRequest v rid args ->
-    vn nt v
-      <> " = request "
-      <> rn nt rid
-      <> "("
-      <> commaSep (map (vn nt) args)
-      <> ")"
-  IHandleBegin hid -> "handle_begin hnd" <> showId hid
-  IHandleEnd dst src hid ->
-    vn nt dst <> " = handle_end hnd" <> showId hid <> "(" <> vn nt src <> ")"
-  IContinue v hid upds ->
-    "continue "
-      <> vn nt v
-      <> " hnd"
-      <> showId hid
-      <> (if null upds then "" else " {" <> commaSep ["[" <> showId i <> "] := " <> vn nt fv | (i, fv) <- upds] <> "}")
-  IHandleBreak v hid -> "handle_break " <> vn nt v <> " hnd" <> showId hid
-  IForBegin fid -> "for_begin for" <> showId fid
-  IForEnd dst src fid ->
-    vn nt dst <> " = for_end for" <> showId fid <> "(" <> vn nt src <> ")"
-  IForContinue fid upds ->
-    "for_continue for" <> showId fid <> " {" <> commaSep ["[" <> showId i <> "] := " <> vn nt fv | (i, fv) <- upds] <> "}"
-  IForBreak v fid -> "for_break " <> vn nt v <> " for" <> showId fid
+    vn nt v <> " = request " <> rn nt rid <> "(" <> commaSep (map (vn nt) args) <> ")"
+  IHandle v hid ->
+    vn nt v <> " = handle hnd" <> showId hid
+  IContinue v upds ->
+    "continue " <> vn nt v
+      <> (if null upds then "" else " {" <> commaSep [vn nt sv <> " := " <> vn nt nv | (sv, nv) <- upds] <> "}")
+  IHandleBreak v -> "handle_break " <> vn nt v
+  IFor v fid ->
+    vn nt v <> " = for for" <> showId fid
+  IForContinue upds ->
+    "for_continue"
+      <> (if null upds then "" else " {" <> commaSep [vn nt sv <> " := " <> vn nt nv | (sv, nv) <- upds] <> "}")
+  IForBreak v -> "for_break " <> vn nt v
 
 -- ---------------------------------------------------------------------------
 -- Helpers
 -- ---------------------------------------------------------------------------
 
--- Resolve a VarId to a human-readable name
 vn :: NameTable -> Word32 -> Text
 vn nt vid = case Map.lookup vid (ntVars nt) of
   Just n -> n <> "%" <> T.pack (show vid)
   Nothing -> "v" <> T.pack (show vid)
 
--- Resolve an AgentId to a name
 an :: NameTable -> Word32 -> Text
 an nt aid = case Map.lookup aid (ntAgents nt) of
   Just n -> n
   Nothing -> "agent" <> T.pack (show aid)
 
--- Resolve a RequestId to a name
 rn :: NameTable -> Word32 -> Text
 rn nt rid = case Map.lookup rid (ntRequests nt) of
   Just n -> n
   Nothing -> "req" <> T.pack (show rid)
 
--- Show a const value inline (from const pool by index)
 cv :: [ConstVal] -> Word32 -> Text
 cv cs i
   | fromIntegral i < length cs = showConst (cs !! fromIntegral i)

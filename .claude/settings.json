@@ -5,7 +5,7 @@
       "Bash(/home/yukikurage/.cargo/bin/just build-rust:*)",
       "Bash(stack build:*)",
       "Bash(stack test:*)",
-      "Bash(stack exec katari:*)"
+      "Bash(stack exec:*)"
     ],
     "additionalDirectories": [
       "/home/yukikurage/projects/katari/doc"

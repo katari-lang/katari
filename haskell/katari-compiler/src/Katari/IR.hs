@@ -20,6 +20,8 @@ type HandlerId = Word32
 
 type ForId = Word32
 
+type ThreadId = Word32
+
 -- ---------------------------------------------------------------------------
 -- Constant pool values
 -- ---------------------------------------------------------------------------
@@ -79,62 +81,81 @@ data Instruction
     IJump Word32
   | IBranch VarId Word32 Word32
   | ISwitch VarId [(ConstId, Word32)] Word32
-  | IReturn VarId
+  | IComplete VarId -- thread 正常完了 (Normal signal)
+  | IReturn VarId -- ソースの return 文 (FnReturn signal → FN_BODY まで巻き上げ)
   | -- Agent 操作
     ICall VarId AgentId [VarId]
-  | IPar VarId [(AgentId, [VarId])]
+  | IPar VarId [ThreadId]
   | IRequest VarId RequestId [VarId]
-  | -- Handle ライフサイクル
-    IHandleBegin HandlerId
-  | IHandleEnd VarId VarId HandlerId -- dst, scope_result, handler
-  -- Handler 内命令
-  | IContinue VarId HandlerId [(Word32, VarId)] -- val, handler, state_updates
-  | IHandleBreak VarId HandlerId
-  | -- For スコープ
-    IForBegin ForId
-  | IForEnd VarId VarId ForId -- dst, normal_result, for_id
-  | -- For ループ内命令
-    IForContinue ForId [(Word32, VarId)]
-  | IForBreak VarId ForId
+  | -- Handle
+    IHandle VarId HandlerId -- dst, handle_def_id
+  | IContinue VarId [(VarId, VarId)] -- val, [(state_var, new_val_var)]
+  | IHandleBreak VarId -- HandleBreak signal
+  | -- For
+    IFor VarId ForId -- dst, for_def_id
+  | IForContinue [(VarId, VarId)] -- [(state_var, new_val_var)]
+  | IForBreak VarId -- ForBreak signal
   deriving (Show, Eq)
 
 -- ---------------------------------------------------------------------------
--- Handle scope
+-- Thread
 -- ---------------------------------------------------------------------------
 
-data IRHandleScope = IRHandleScope
-  { irhId :: HandlerId,
-    irhStateVars :: [VarId], -- 状態変数 VarId リスト
-    irhReqCases :: [(RequestId, [VarId], [Instruction])], -- (req, arg_vars, instructions)
-    irhThenClause :: Maybe (VarId, [Instruction]) -- (input_var, then 節命令列)
+data ThreadKind
+  = TkFnBody -- agent エントリポイント
+  | TkBlock -- par branch / block 式
+  | TkHandlerTarget -- handle body (残り文)
+  | TkRequestHandler -- request case handler
+  | TkHandleThen -- handle then 節
+  | TkForBody -- for loop body
+  | TkForThen -- for then 節
+  deriving (Show, Eq)
+
+data IRThread = IRThread
+  { itId :: ThreadId,
+    itKind :: ThreadKind,
+    itParams :: [VarId],
+    itBody :: [Instruction]
   }
   deriving (Show)
 
 -- ---------------------------------------------------------------------------
--- For scope
+-- Handle definition
 -- ---------------------------------------------------------------------------
 
-data IRForScope = IRForScope
-  { irfsId :: ForId,
-    irfsThen :: Maybe [Instruction] -- for の then ブロック（値を取らない）
+data IRHandleDef = IRHandleDef
+  { ihdId :: HandlerId,
+    ihdStateVars :: [VarId], -- state variable VarIds
+    ihdStateInits :: [VarId], -- vars holding initial values
+    ihdBody :: ThreadId, -- HANDLER_TARGET thread
+    ihdReqCases :: [(RequestId, ThreadId)], -- (req_id, REQUEST_HANDLER thread)
+    ihdThen :: Maybe ThreadId -- HANDLE_THEN thread
   }
   deriving (Show)
 
 -- ---------------------------------------------------------------------------
--- Agent
+-- For definition
 -- ---------------------------------------------------------------------------
 
-data AgentKind = UserDefined | ParBranch
-  deriving (Show, Eq)
+data IRForDef = IRForDef
+  { ifdId :: ForId,
+    ifdIterVars :: [VarId], -- element vars (let x of arr)
+    ifdArrays :: [VarId], -- array vars
+    ifdStateVars :: [VarId], -- state variable VarIds
+    ifdStateInits :: [VarId], -- vars holding initial values
+    ifdBody :: ThreadId, -- FOR_BODY thread
+    ifdThen :: Maybe ThreadId -- FOR_THEN thread
+  }
+  deriving (Show)
 
-data IRAgent = IRAgent
-  { iraId :: AgentId,
-    iraKind :: AgentKind,
-    iraName :: Text, -- デバッグ用
-    iraParams :: [VarId],
-    iraBody :: [Instruction],
-    iraHandlers :: [IRHandleScope],
-    iraForScopes :: [IRForScope]
+-- ---------------------------------------------------------------------------
+-- Agent definition
+-- ---------------------------------------------------------------------------
+
+data IRAgentDef = IRAgentDef
+  { iadId :: AgentId,
+    iadName :: Text,
+    iadEntry :: ThreadId -- FN_BODY thread
   }
   deriving (Show)
 
@@ -172,6 +193,9 @@ data IRModule = IRModule
     irmNameTable :: NameTable,
     irmConsts :: [ConstVal],
     irmRequests :: [IRRequestDef],
-    irmAgents :: [IRAgent]
+    irmThreads :: [IRThread],
+    irmHandles :: [IRHandleDef],
+    irmFors :: [IRForDef],
+    irmAgents :: [IRAgentDef]
   }
   deriving (Show)
