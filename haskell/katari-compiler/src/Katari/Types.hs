@@ -31,6 +31,7 @@ module Katari.Types
     subtractNT,
     patternTypeNT,
     tryMakeDISC,
+    ntToLitVal,
   )
 where
 
@@ -249,6 +250,23 @@ tryMakeDISC fields ofields _env = case filter ofUniq fields of
           TLitInt i -> mkDisc (LVInt i)
           TLitStr s -> mkDisc (LVStr s)
           _ -> Nothing
+  _ -> Nothing
+
+-- | Extract a singleton literal value from a NormalizedType, if it contains
+--   exactly one literal (string, bool, or int).
+ntToLitVal :: NormalizedType -> Maybe LitVal
+ntToLitVal = \case
+  NTFields f
+    | not (nfNull f), Nothing <- nfBoolean f, Nothing <- nfNumeric f, Nothing <- nfArray f, Nothing <- nfObject f,
+      Just (StringLits s) <- nfString f, Set.size s == 1 ->
+        Just (LVStr (Set.findMin s))
+    | not (nfNull f), Nothing <- nfString f, Nothing <- nfNumeric f, Nothing <- nfArray f, Nothing <- nfObject f,
+      Just (BoolLits b) <- nfBoolean f, Set.size b == 1 ->
+        Just (LVBool (Set.findMin b))
+    | not (nfNull f), Nothing <- nfString f, Nothing <- nfBoolean f, Nothing <- nfArray f, Nothing <- nfObject f,
+      Just (NumericKind (IntLits i) NumAbsent) <- nfNumeric f, Set.size i == 1 ->
+        Just (LVInt (Set.findMin i))
+    | otherwise -> Nothing
   _ -> Nothing
 
 -- ---------------------------------------------------------------------------

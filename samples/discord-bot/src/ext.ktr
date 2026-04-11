@@ -5,38 +5,57 @@ import types
 // ─── Discord サーバー ───────────────────────────────────────────
 
 @"チャンネル一覧を取得する"
-external agent list_channels() -> array[types.Channel] from "discord:list_channels"
+external agent list_channels() -> array[Channel] from "discord:list_channels"
 
-@"チャンネルの最新メッセージを取得する"
-external agent fetch_messages(
-  channel_id: types.ChannelId @"チャンネルID",
-  limit: integer @"取得件数"
-) -> array[types.Message] from "discord:fetch_messages"
+@"チャンネルを監視し、メッセージ受信ごとに on_message request を発火する"
+external agent watch_channel(channel_id: ChannelId) -> null with on_message from "discord:watch_channel"
+
+@"メッセージ受信イベント"
+external request on_message(msg: Message) -> null from "discord:on_message"
 
 @"メッセージを送信する"
 external agent send_message(
-  channel_id: types.ChannelId @"送信先チャンネルID",
+  channel_id: ChannelId @"送信先チャンネルID",
   content: string @"メッセージ本文"
-) -> types.MessageId from "discord:send_message"
+) -> MessageId from "discord:send_message"
 
 @"メッセージに返信する"
 external agent reply_to(
-  channel_id: types.ChannelId @"チャンネルID",
-  message_id: types.MessageId @"返信先メッセージID",
+  channel_id: ChannelId @"チャンネルID",
+  message_id: MessageId @"返信先メッセージID",
   content: string @"返信本文"
-) -> types.MessageId from "discord:reply_to"
+) -> MessageId from "discord:reply_to"
+
+@"チャンネルの最新メッセージを取得する"
+external agent fetch_messages(
+  channel_id: ChannelId @"チャンネルID",
+  limit: integer @"取得件数"
+) -> array[Message] from "discord:fetch_messages"
 
 // ─── AI サーバー ────────────────────────────────────────────────
 
-@"AIにプロンプトを送信して応答を得る"
-external agent ask_ai(
+@"AIセッションを作成する"
+external agent create_session() -> string from "ai:create_session"
+
+@"AIにプロンプトを送信し、ツール呼び出し付きで応答を得る"
+external agent ask_ai_with_tools(
+  session_id: string @"セッションID",
+  system: string @"システムプロンプト",
   prompt: string @"プロンプト",
-  context: string @"会話のコンテキスト"
-) -> string from "ai:ask"
+  tools: array[string] @"使用可能なツール名の配列"
+) -> string from "ai:ask_with_tools"
+
+// ─── Cron サーバー ──────────────────────────────────────────────
+
+@"Cron式に基づき定期的にnotify requestを発火する"
+external agent schedule(cron_expr: string @"Cron式") -> null with notify from "cron:schedule"
+
+@"定期実行トリガー"
+external request notify(time: string @"現在時刻") -> null from "cron:notify"
 
 // ─── Web検索サーバー ────────────────────────────────────────────
 
 @"Webを検索して結果を取得する"
 external agent web_search(
   query: string @"検索クエリ"
-) -> array[types.SearchResult] from "websearch:search"
+) -> array[SearchResult] from "websearch:search"

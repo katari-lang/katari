@@ -94,17 +94,16 @@ agent test_nested_type() -> UserWithAddress {
   u
 }
 
-// DISC subtype: object literal union should be subtype of discriminated union
-// Regression test: { action: "a"|"b" } <: DISC(action)
+// DISC construction: object literal with uniq produces NTDISC
 type Action = { uniq action: "reply" }
             | { uniq action: "post" }
             | { uniq action: "ignore" }
 
-agent test_disc_subtype() -> Action {
+agent test_disc_construct() -> Action {
   let x = "reply"
   match x {
-    case "reply" => { { action = "reply" } }
-    case "post" => { { action = "post" } }
-    case _other => { { action = "ignore" } }
+    case "reply" => { {uniq action = "reply"} }
+    case "post" => { {uniq action = "post"} }
+    case _other => { {uniq action = "ignore"} }
   }
 }

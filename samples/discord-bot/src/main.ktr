@@ -2,22 +2,71 @@
 
 import types
 import ext
-import bot
+
+// ─── 統一イベント request ───────────────────────────────────────
+
+request on_trigger(info: string) -> null
 
 // ─── エントリ agent ─────────────────────────────────────────────
 
 @"Discord Botのメインエントリポイント"
-agent run_bot() -> null {
-  let channels = list_channels()
+agent run_bot(channel_ids: array[ChannelId]) -> null {
+  let session_id = create_session()
 
-  // 複数チャンネルを並行して監視
-  par [
-    {
-      watch_channel(channels, 0)
-    },
-    {
-      watch_channel(channels, 1)
+  let channels_text = for (let cid of channel_ids, var acc: string = "") {
+    continue with { acc = acc ++ cid ++ ", " }
+  } then {
+    acc
+  }
+
+  let system = f"あなたはDiscordボットです。\n監視チャンネル: ${channels_text}\nメッセージが届いたり定期トリガーが発火したら適切に対応してください。"
+  let tools = [
+    "ext.send_message",
+    "ext.reply_to",
+    "ext.fetch_messages",
+    "ext.web_search"
+  ]
+
+  // 全イベントを AI に委譲
+  handle {
+    request on_trigger(info) => {
+      ask_ai_with_tools(session_id, system, info, tools)
+      continue null
     }
+  }
+
+  par [
+    { watch_and_trigger(channel_ids[0]) },
+    { watch_and_trigger(channel_ids[1]) },
+    { cron_trigger() }
   ]
   null
+}
+
+// ─── Discord メッセージ → 統一トリガー ──────────────────────────
+
+@"チャンネルのメッセージを監視し、統一トリガーに変換する"
+agent watch_and_trigger(channel_id: ChannelId) -> null with on_trigger {
+  handle {
+    request on_message(msg) => {
+      if !msg.is_bot {
+        on_trigger(f"Discord message in ${channel_id} from ${msg.author}: ${msg.content}")
+      }
+      continue null
+    }
+  }
+  watch_channel(channel_id)
+}
+
+// ─── 定期実行 → 統一トリガー ────────────────────────────────────
+
+@"定期実行トリガーを統一トリガーに変換する"
+agent cron_trigger() -> null with on_trigger {
+  handle {
+    request notify(time) => {
+      on_trigger(f"Scheduled trigger at ${time}")
+      continue null
+    }
+  }
+  schedule("0 */6 * * *")
 }

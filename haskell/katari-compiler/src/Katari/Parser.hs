@@ -786,7 +786,7 @@ pBlockExpr ctx = do
 
 isObjectLiteral :: Parser Bool
 isObjectLiteral = do
-  -- Look ahead: { } → obj, { ident '=' → obj, else → block
+  -- Look ahead: { } → obj, { ident '=' → obj, { uniq ident '=' → obj, else → block
   mTokens <- optional $ lookAhead $ do
     tok_ TKLBrace
     mt <- optional (satisfy (const True))
@@ -795,11 +795,23 @@ isObjectLiteral = do
       Just t2 ->
         case tokKind t2 of
           TKRBrace -> return True -- {} → empty object
-          TKIdent _ -> do
-            mt3 <- optional (satisfy (const True))
-            case mt3 of
-              Just t3 -> return (tokKind t3 == TKEq)
-              Nothing -> return False
+          TKIdent name
+            | name == "uniq" -> do
+                -- { uniq ident = ... → object
+                mt3 <- optional (satisfy (const True))
+                case mt3 of
+                  Just t3 -> case tokKind t3 of
+                    TKIdent _ -> do
+                      mt4 <- optional (satisfy (const True))
+                      return (maybe False (\t4 -> tokKind t4 == TKEq) mt4)
+                    _ -> return False
+                  Nothing -> return False
+            | otherwise -> do
+                -- { ident = ... → object
+                mt3 <- optional (satisfy (const True))
+                case mt3 of
+                  Just t3 -> return (tokKind t3 == TKEq)
+                  Nothing -> return False
           _ -> return False
   return (fromMaybe False mTokens)
 
@@ -814,12 +826,13 @@ pObjLitExpr sp ctx = do
       tok_ TKRBrace
       return (EObj sp fields)
 
-pObjField :: ControlCtx -> Parser (Text, Expr)
+pObjField :: ControlCtx -> Parser (Text, Bool, Expr)
 pObjField ctx = do
+  isUniq <- isJust <$> optional uniqKw
   name <- ident
   tok_ TKEq
   e <- pExpr ctx
-  return (name, e)
+  return (name, isUniq, e)
 
 pLitExpr :: SrcSpan -> Parser Expr
 pLitExpr sp = do

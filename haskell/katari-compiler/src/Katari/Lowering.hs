@@ -504,7 +504,7 @@ lowerExpr ge env = \case
   EObj _sp fields -> do
     results <-
       mapM
-        ( \(name, e) -> do
+        ( \(name, _isUniq, e) -> do
             cid <- addConst (CVStr name)
             (v, instrs, handlers) <- lowerExpr ge env e
             return (cid, v, instrs, handlers)

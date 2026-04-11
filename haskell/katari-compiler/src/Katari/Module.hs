@@ -270,6 +270,32 @@ primAgents =
             aiAnnot = Nothing,
             aiHomeModule = primModuleName
           }
+      ),
+      -- length :: array[unknown] -> integer
+      ( "prim.length",
+        AgentInfo
+          { aiParams = [("arr", TArray TUnknown, Nothing)],
+            aiRet = TInteger,
+            aiWith = Just (RENames []),
+            aiExtFrom = Nothing,
+            aiAnnot = Nothing,
+            aiHomeModule = primModuleName
+          }
+      ),
+      -- slice :: (array[unknown], integer, integer) -> array[unknown]
+      ( "prim.slice",
+        AgentInfo
+          { aiParams =
+              [ ("arr", TArray TUnknown, Nothing),
+                ("from", TInteger, Nothing),
+                ("to", TInteger, Nothing)
+              ],
+            aiRet = TArray TUnknown,
+            aiWith = Just (RENames []),
+            aiExtFrom = Nothing,
+            aiAnnot = Nothing,
+            aiHomeModule = primModuleName
+          }
       )
     ]
 
@@ -380,8 +406,15 @@ addAlias mname local qname env =
 -- ---------------------------------------------------------------------------
 
 resolveImportsModule :: GlobalEnv -> Module -> Either ModuleError GlobalEnv
-resolveImportsModule env (Module _fp mname decls) =
-  foldMEither (resolveImportDecl mname) env [i | DeclImport _ i <- decls]
+resolveImportsModule env (Module _fp mname decls) = do
+  -- prim を暗黙インポート（prim モジュール自身は除く）
+  let env' =
+        if mname == primModuleName
+          then env
+          else
+            let primAls = fromMaybe Map.empty (Map.lookup primModuleName (geAliases env))
+             in foldr (\(local, qname) e -> addAlias mname local qname e) env (Map.toList primAls)
+  foldMEither (resolveImportDecl mname) env' [i | DeclImport _ i <- decls]
 
 resolveImportDecl :: Text -> GlobalEnv -> ImportDecl -> Either ModuleError GlobalEnv
 resolveImportDecl mname env imp = do

@@ -63,6 +63,7 @@ import Katari.Types
     subtractNT,
     subtypeNT,
     unionNT,
+    ntToLitVal,
   )
 
 -- ---------------------------------------------------------------------------
@@ -353,12 +354,18 @@ inferExpr env = \case
   EObj _sp fields -> do
     fieldNTs <-
       mapM
-        ( \(n, e) -> do
+        ( \(n, _isUniq, e) -> do
             nt <- inferExpr env e
             return (n, FieldInfo nt False Nothing)
         )
         fields
-    return (NTFields emptyNF {nfObject = Just (ObjectFields (Map.fromList fieldNTs))})
+    let objFields = ObjectFields (Map.fromList fieldNTs)
+        nf = emptyNF {nfObject = Just objFields}
+    -- If exactly one field is marked uniq and has a singleton literal type, produce NTDISC
+    case [(name, fiType fi) | (name, True, _) <- fields, Just fi <- [Map.lookup name (Map.fromList fieldNTs)]] of
+      [(discName, discType)] | Just lv <- ntToLitVal discType ->
+        return $ NTDISC (Discriminator discName (Map.singleton lv nf))
+      _ -> return (NTFields nf)
   ECall sp callee args -> case callee of
     EVar _ name -> inferCall env sp name args
     EField _sp2 obj fname
@@ -718,7 +725,7 @@ collectRequestsExpr env = \case
   EArr _ elems ->
     Set.unions <$> mapM (collectRequestsExpr env) elems
   EObj _ fields ->
-    Set.unions <$> mapM (\(_, e) -> collectRequestsExpr env e) fields
+    Set.unions <$> mapM (\(_, _, e) -> collectRequestsExpr env e) fields
   _ -> return Set.empty
 
 -- Extract the declared effect set from an agent's with annotation.

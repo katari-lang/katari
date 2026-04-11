@@ -17,8 +17,3 @@ type Channel = {
 }
 
 type SearchResult = { title: string, snippet: string, url: string }
-
-type Action = { uniq action: "reply" }
-            | { uniq action: "post" }
-            | { uniq action: "search_and_reply" }
-            | { uniq action: "ignore" }

@@ -12,7 +12,7 @@ It is intended as the contract between `qatali-compiler` (Haskell) and `qatali-r
 | **Persistence**              | Every call/perform terminates a block. The runtime can snapshot `(FuncId, BlockId, vars, handler_stack)` to PostgreSQL at any block boundary.          |
 | **Hot-swap**                 | `NameTable.ntFuncs` maps `FuncId -> QualifiedName`. The runtime resolves names to IDs at apply-time, allowing function replacement without restarting. |
 | **Server-to-server effects** | `TPerform` + `THandle` encode algebraic effects. A runtime can forward `TPerform` across the network to a remote handler.                              |
-| **Compact binary**           | All identifiers are small integers. Explicit opcode tags for instructions and terminators ensure forward/backward binary compatibility.                  |
+| **Compact binary**           | All identifiers are small integers. Explicit opcode tags for instructions and terminators ensure forward/backward binary compatibility.                |
 
 ---
 
@@ -20,14 +20,14 @@ It is intended as the contract between `qatali-compiler` (Haskell) and `qatali-r
 
 All identifiers are **unsigned integers**.
 
-| Type       | Rust type | Width   | Scope                | Description                                                       |
-| ---------- | --------- | ------- | -------------------- | ----------------------------------------------------------------- |
-| `VarId`    | `u32`     | 4 bytes | **function-local**   | Variable register. Starts from 0 in each function.                |
-| `BlockId`  | `u16`     | 2 bytes | **function-local**   | Basic block index within a function. Block 0 is always the entry. |
-| `FuncId`   | `u32`     | 4 bytes | **program-global**   | Function identifier.                                              |
-| `TypeId`   | `u32`     | 4 bytes | **program-global**   | Nominal type tag (for `data` declarations).                       |
-| `EffectId` | `u32`     | 4 bytes | **program-global**   | Effect identifier (for `effect` declarations).                    |
-| `ConstId`  | `u32`     | 4 bytes | **module-local**     | Index into the module's constant pool (0-based).                  |
+| Type       | Rust type | Width   | Scope              | Description                                                       |
+| ---------- | --------- | ------- | ------------------ | ----------------------------------------------------------------- |
+| `VarId`    | `u32`     | 4 bytes | **function-local** | Variable register. Starts from 0 in each function.                |
+| `BlockId`  | `u16`     | 2 bytes | **function-local** | Basic block index within a function. Block 0 is always the entry. |
+| `FuncId`   | `u32`     | 4 bytes | **program-global** | Function identifier.                                              |
+| `TypeId`   | `u32`     | 4 bytes | **program-global** | Nominal type tag (for `data` declarations).                       |
+| `EffectId` | `u32`     | 4 bytes | **program-global** | Effect identifier (for `effect` declarations).                    |
+| `ConstId`  | `u32`     | 4 bytes | **module-local**   | Index into the module's constant pool (0-based).                  |
 
 **VarId scoping**: Each function has its own VarId space starting from 0. The runtime allocates a `Vec<Value>` per frame sized to the function's maximum VarId. This avoids global ID space waste and enables compact serialization.
 
@@ -225,14 +225,14 @@ All comparisons produce a `Bool` value. They are polymorphic (work on any value 
 
 Arrays are **immutable**. Mutation operations produce new arrays.
 
-| Opcode       | Operands                                             | Semantics                                        |
-| ------------ | ---------------------------------------------------- | ------------------------------------------------ |
-| `INewArray`  | `dst: VarId, elems: [VarId]`                         | `dst = [elems...]`                               |
-| `IArrGet`    | `dst: VarId, arr: VarId, idx: VarId`                 | `dst = arr[idx]` (idx is an Int value)            |
-| `IArrLen`    | `dst: VarId, arr: VarId`                             | `dst = length(arr)` (Int)                         |
-| `IArrPush`   | `dst: VarId, arr: VarId, elem: VarId`                | `dst = arr ++ [elem]` (new array)                 |
-| `IArrConcat` | `dst: VarId, arr1: VarId, arr2: VarId`               | `dst = arr1 ++ arr2` (new array)                  |
-| `IArrSlice`  | `dst: VarId, arr: VarId, from: VarId, to: VarId`     | `dst = arr[from..to]` (from inclusive, to exclusive) |
+| Opcode       | Operands                                         | Semantics                                            |
+| ------------ | ------------------------------------------------ | ---------------------------------------------------- |
+| `INewArray`  | `dst: VarId, elems: [VarId]`                     | `dst = [elems...]`                                   |
+| `IArrGet`    | `dst: VarId, arr: VarId, idx: VarId`             | `dst = arr[idx]` (idx is an Int value)               |
+| `IArrLen`    | `dst: VarId, arr: VarId`                         | `dst = length(arr)` (Int)                            |
+| `IArrPush`   | `dst: VarId, arr: VarId, elem: VarId`            | `dst = arr ++ [elem]` (new array)                    |
+| `IArrConcat` | `dst: VarId, arr1: VarId, arr2: VarId`           | `dst = arr1 ++ arr2` (new array)                     |
+| `IArrSlice`  | `dst: VarId, arr: VarId, from: VarId, to: VarId` | `dst = arr[from..to]` (from inclusive, to exclusive) |
 
 ### 5.9 Closure Operations
 
