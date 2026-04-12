@@ -4,7 +4,7 @@ use std::sync::Arc;
 use crate::ir::{IRModule, VarId};
 use crate::value::Value;
 
-use super::thread::{HandlePhase, SuspendReason, ThreadState, ThreadStatus};
+use super::thread::{PendingRequest, ThreadState};
 
 /// Top-level agent lifecycle status.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,6 +43,11 @@ pub struct AgentState {
 
     /// Agent lifecycle status.
     pub status: AgentStatus,
+
+    /// Outgoing requests collected during thread execution.
+    /// Drained by the event loop's harvest phase.
+    /// Each entry is (source_thread_id, PendingRequest).
+    pub outgoing_requests: Vec<(u32, PendingRequest)>,
 }
 
 impl AgentState {
@@ -67,44 +72,8 @@ impl AgentState {
             children: HashMap::new(),
             parent_available_requests,
             status: AgentStatus::Running,
+            outgoing_requests: Vec::new(),
         }
-    }
-
-    /// Find a thread that is Running.
-    pub fn find_running_thread(&self) -> Option<u32> {
-        self.threads
-            .values()
-            .find(|t| t.is_running())
-            .map(|t| t.thread_id)
-    }
-
-    /// Check if any thread has completed (needs signal dispatch).
-    pub fn has_completed_thread(&self) -> bool {
-        self.threads
-            .values()
-            .any(|t| matches!(t.status, ThreadStatus::Completed(_)))
-    }
-
-    /// Check if any handle scope has a processable request queue.
-    pub fn has_processable_request_queue(&self) -> bool {
-        self.threads.values().any(|t| {
-            matches!(
-                &t.status,
-                ThreadStatus::Suspended(SuspendReason::Handle {
-                    phase: HandlePhase::RunningBody { .. },
-                    request_queue,
-                    ..
-                }) if !request_queue.is_empty()
-            )
-        })
-    }
-
-    /// Check if this agent can make progress in the event loop.
-    pub fn can_make_progress(&self) -> bool {
-        self.status == AgentStatus::Running
-            && (self.find_running_thread().is_some()
-                || self.has_completed_thread()
-                || self.has_processable_request_queue())
     }
 
     /// Get variable value (cloned).

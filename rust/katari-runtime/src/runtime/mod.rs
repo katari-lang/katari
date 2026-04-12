@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod event;
 pub mod for_loop;
 pub mod handle;
 pub mod par;
@@ -7,7 +8,7 @@ pub mod request;
 pub mod signal;
 pub mod thread;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use crate::ir::instruction::Instruction;
@@ -15,11 +16,12 @@ use crate::ir::{ConstVal, IRModule, ThreadKind};
 use crate::value::{self, Value};
 
 use self::agent::{AgentState, AgentStatus};
+use self::event::{Event, EventKind};
 use self::signal::Signal;
-use self::thread::{HandlePhase, SuspendReason, ThreadState, ThreadStatus};
+use self::thread::{SuspendReason, ThreadState, ThreadStatus};
 
 // ---------------------------------------------------------------------------
-// Runtime — manages modules and agents
+// Runtime — manages modules, agents, and the global event queue
 // ---------------------------------------------------------------------------
 
 /// Result of an agent's event loop iteration.
@@ -42,6 +44,9 @@ pub struct Runtime {
     pub agent_name_map: HashMap<String, u32>,
     pub schemas: HashMap<String, serde_json::Value>,
     pub self_base_url: String,
+
+    /// Global event queue. Events have fully resolved targets.
+    pub event_queue: VecDeque<Event>,
 }
 
 impl Runtime {
@@ -52,6 +57,7 @@ impl Runtime {
             agent_name_map: HashMap::new(),
             schemas: HashMap::new(),
             self_base_url: base_url,
+            event_queue: VecDeque::new(),
         }
     }
 
@@ -113,64 +119,249 @@ impl Runtime {
 
         self.agents.insert(agent_id.clone(), agent_state);
 
-        // Run the global event loop (all agents that can make progress)
+        // Push Start event for the root thread
+        self.event_queue.push_back(Event {
+            agent_id: agent_id.clone(),
+            thread_id: entry_tid,
+            kind: EventKind::Start,
+        });
+
+        // Run the global event loop
         self.run_event_loop();
 
         Ok(agent_id)
     }
 
     // -----------------------------------------------------------------------
-    // Global flat event loop
+    // Global event-driven loop
     // -----------------------------------------------------------------------
 
-    /// Run the global event loop until no agent can make progress.
-    /// Processes ALL agents, not just one.
+    /// Run the global event loop until no applicable events remain
+    /// and no agent can make internal progress.
     pub fn run_event_loop(&mut self) {
         for _ in 0..100_000 {
             let mut progress = false;
-            progress |= self.step_all_agents();
+
+            // Phase 1: Process the first applicable event
+            progress |= self.process_one_event();
+
+            // Phase 2: Spawn pending children (ICall suspensions)
             progress |= self.spawn_pending_children();
+
+            // Phase 3: Collect completed children → push events
             progress |= self.collect_completed_children();
+
             if !progress {
                 break;
             }
         }
     }
 
-    /// Run one round of the cooperative loop for every agent that can make progress.
-    fn step_all_agents(&mut self) -> bool {
-        let agent_ids: Vec<String> = self
-            .agents
+    /// Scan the event queue for the first applicable event, apply it,
+    /// then harvest effects (new events from state changes).
+    fn process_one_event(&mut self) -> bool {
+        // Find first applicable event
+        let idx = self
+            .event_queue
             .iter()
-            .filter(|(_, a)| a.can_make_progress())
-            .map(|(id, _)| id.clone())
-            .collect();
+            .position(|e| event::is_applicable(e, &self.agents));
 
-        let mut any_progress = false;
+        let event = match idx {
+            Some(i) => self.event_queue.remove(i).unwrap(),
+            None => return false,
+        };
 
-        for agent_id in agent_ids {
-            let module = match self.agents.get(&agent_id) {
-                Some(a) if a.status == AgentStatus::Running => Arc::clone(&a.module),
-                _ => continue,
-            };
+        self.apply_event(event);
+        true
+    }
 
-            let agent = match self.agents.get_mut(&agent_id) {
-                Some(a) => a,
-                None => continue,
-            };
+    /// Apply a single event and harvest resulting effects.
+    fn apply_event(&mut self, event: Event) {
+        let agent_id = event.agent_id.clone();
+        let thread_id = event.thread_id;
 
-            let result = run_agent_loop(agent, &module);
+        match event.kind {
+            EventKind::Start => {
+                // Execute the thread until next async point
+                let module = match self.agents.get(&agent_id) {
+                    Some(a) => Arc::clone(&a.module),
+                    None => return,
+                };
+                if let Some(agent) = self.agents.get_mut(&agent_id) {
+                    execute_thread(agent, &module, thread_id);
+                }
+            }
 
-            match result {
-                RunResult::Completed(_) | RunResult::Returned(_) => {
+            EventKind::ChildThreadCompleted {
+                child_thread_id,
+                child_kind,
+                signal,
+            } => {
+                let module = match self.agents.get(&agent_id) {
+                    Some(a) => Arc::clone(&a.module),
+                    None => return,
+                };
+                if let Some(agent) = self.agents.get_mut(&agent_id) {
+                    dispatch_child_signal(agent, &module, thread_id, child_thread_id, child_kind, signal);
+                }
+            }
+
+            EventKind::ChildAgentCompleted {
+                child_agent_id,
+                result,
+            } => {
+                if let Some(agent) = self.agents.get_mut(&agent_id) {
+                    // Resume the Call suspension
+                    let dst = match agent.threads.get(&thread_id).map(|t| &t.status) {
+                        Some(ThreadStatus::Suspended(SuspendReason::Call { dst, .. })) => *dst,
+                        _ => return,
+                    };
+                    agent.set_var(dst, result);
+                    if let Some(t) = agent.threads.get_mut(&thread_id) {
+                        t.status = ThreadStatus::Running;
+                    }
+                    agent.children.remove(&child_agent_id);
+                }
+            }
+
+            EventKind::Reply { request_id: _, value } => {
+                if let Some(agent) = self.agents.get_mut(&agent_id) {
+                    let dst = match agent.threads.get(&thread_id).map(|t| &t.status) {
+                        Some(ThreadStatus::Suspended(SuspendReason::Request { dst, .. })) => *dst,
+                        _ => return,
+                    };
+                    agent.set_var(dst, value);
+                    if let Some(t) = agent.threads.get_mut(&thread_id) {
+                        t.status = ThreadStatus::Running;
+                    }
+                }
+            }
+
+            EventKind::IncomingRequest {
+                request,
+                handler_def_tid,
+            } => {
+                let module = match self.agents.get(&agent_id) {
+                    Some(a) => Arc::clone(&a.module),
+                    None => return,
+                };
+                if let Some(agent) = self.agents.get_mut(&agent_id) {
+                    handle::handle_request_in_scope(
+                        agent,
+                        &module,
+                        thread_id,
+                        handler_def_tid,
+                        request,
+                    );
+                }
+            }
+
+            EventKind::Terminate => {
+                if let Some(agent) = self.agents.get_mut(&agent_id) {
                     agent.status = AgentStatus::Completed;
                 }
-                RunResult::Blocked => {}
             }
-            any_progress = true;
         }
 
-        any_progress
+        // Harvest effects from the agent
+        self.harvest_agent_effects(&agent_id);
+    }
+
+    /// Harvest new events from an agent's state changes.
+    fn harvest_agent_effects(&mut self, agent_id: &str) {
+        let mut new_events: Vec<Event> = Vec::new();
+
+        let agent = match self.agents.get_mut(agent_id) {
+            Some(a) => a,
+            None => return,
+        };
+
+        // 1. Harvest outgoing requests
+        let outgoing = std::mem::take(&mut agent.outgoing_requests);
+        let aid = agent.agent_id.clone();
+        let module = Arc::clone(&agent.module);
+
+        for (source_tid, req) in outgoing {
+            // Route through thread tree to find matching handle
+            match event::route_request_to_handle(agent, &module, source_tid, req.req_def_id) {
+                Some((handle_owner_tid, handler_def_tid)) => {
+                    new_events.push(Event {
+                        agent_id: aid.clone(),
+                        thread_id: handle_owner_tid,
+                        kind: EventKind::IncomingRequest {
+                            request: req,
+                            handler_def_tid,
+                        },
+                    });
+                }
+                None => {
+                    // No local handle found — forward to parent agent
+                    tracing::warn!(
+                        agent_id = %aid,
+                        request_id = %req.request_id,
+                        "forwarding request to parent agent (not yet implemented)"
+                    );
+                }
+            }
+        }
+
+        // 2. Harvest completed threads → push ChildThreadCompleted events
+        let completed: Vec<(u32, Signal, ThreadKind, Option<u32>)> = agent
+            .threads
+            .iter()
+            .filter(|(tid, t)| {
+                matches!(t.status, ThreadStatus::Completed(_)) && **tid != agent.root_thread
+            })
+            .map(|(tid, t)| {
+                let signal = match &t.status {
+                    ThreadStatus::Completed(s) => s.clone(),
+                    _ => unreachable!(),
+                };
+                (*tid, signal, t.kind, t.parent)
+            })
+            .collect();
+
+        for (child_tid, signal, kind, parent_id) in completed {
+            if let Some(parent_id) = parent_id {
+                new_events.push(Event {
+                    agent_id: aid.clone(),
+                    thread_id: parent_id,
+                    kind: EventKind::ChildThreadCompleted {
+                        child_thread_id: child_tid,
+                        child_kind: kind,
+                        signal,
+                    },
+                });
+            }
+        }
+
+        // 3. Harvest Running threads → push Start events
+        let running: Vec<u32> = agent
+            .threads
+            .iter()
+            .filter(|(_, t)| t.is_running())
+            .map(|(tid, _)| *tid)
+            .collect();
+
+        for tid in running {
+            new_events.push(Event {
+                agent_id: aid.clone(),
+                thread_id: tid,
+                kind: EventKind::Start,
+            });
+        }
+
+        // 4. Check if root thread is completed → mark agent as Completed
+        if let Some(root) = agent.threads.get(&agent.root_thread) {
+            if matches!(root.status, ThreadStatus::Completed(_)) {
+                agent.status = AgentStatus::Completed;
+            }
+        }
+
+        // Push all new events
+        for e in new_events {
+            self.event_queue.push_back(e);
+        }
     }
 
     /// Find agents with pending ICall suspensions and spawn child agents.
@@ -241,15 +432,22 @@ impl Runtime {
             let root_thread = ThreadState::new(spawn.entry_tid, ThreadKind::FnBody, None);
             child.threads.insert(spawn.entry_tid, root_thread);
 
+            // Push Start event for the child's root thread
+            self.event_queue.push_back(Event {
+                agent_id: spawn.child_agent_id.clone(),
+                thread_id: spawn.entry_tid,
+                kind: EventKind::Start,
+            });
+
             self.agents.insert(spawn.child_agent_id, child);
         }
 
         any_spawned
     }
 
-    /// Collect results from completed child agents and resume parent threads.
+    /// Collect results from completed child agents → push ChildAgentCompleted events.
     fn collect_completed_children(&mut self) -> bool {
-        let mut completions: Vec<(String, String, Value)> = Vec::new();
+        let mut completions: Vec<(String, String, u32, Value)> = Vec::new();
 
         for (agent_id, agent) in &self.agents {
             if agent.status != AgentStatus::Completed {
@@ -257,19 +455,29 @@ impl Runtime {
             }
             let parent_id = &agent.parent_agent_id;
             if let Some(parent) = self.agents.get(parent_id) {
-                if parent.children.contains_key(agent_id) {
+                if let Some(&spawning_tid) = parent.children.get(agent_id) {
                     let result = get_agent_result(agent);
-                    completions.push((agent_id.clone(), parent_id.clone(), result));
+                    completions.push((
+                        agent_id.clone(),
+                        parent_id.clone(),
+                        spawning_tid,
+                        result,
+                    ));
                 }
             }
         }
 
         let any_collected = !completions.is_empty();
 
-        for (child_id, parent_id, result) in completions {
-            if let Some(parent) = self.agents.get_mut(&parent_id) {
-                request::on_child_return(parent, &child_id, result);
-            }
+        for (child_id, parent_id, spawning_tid, result) in completions {
+            self.event_queue.push_back(Event {
+                agent_id: parent_id,
+                thread_id: spawning_tid,
+                kind: EventKind::ChildAgentCompleted {
+                    child_agent_id: child_id.clone(),
+                    result,
+                },
+            });
             self.agents.remove(&child_id);
         }
 
@@ -301,6 +509,11 @@ impl Runtime {
             _ => Some(("running", None)),
         }
     }
+
+    /// Push an external event into the queue (for server protocol handlers).
+    pub fn push_event(&mut self, event: Event) {
+        self.event_queue.push_back(event);
+    }
 }
 
 struct PendingSpawn {
@@ -325,184 +538,66 @@ fn get_agent_result(agent: &AgentState) -> Value {
 }
 
 // ---------------------------------------------------------------------------
-// Per-agent cooperative event loop
+// Signal dispatch
 // ---------------------------------------------------------------------------
 
-/// Run an agent's cooperative event loop until no more internal progress can be made.
-pub fn run_agent_loop(agent: &mut AgentState, module: &IRModule) -> RunResult {
-    loop {
-        // 1. Process completed threads
-        if let Some(tid) = find_completed_thread(agent) {
-            let is_root = tid == agent.root_thread;
-            process_thread_completion(agent, module, tid);
-
-            if is_root || is_root_completed(agent) {
-                return match agent.threads.get(&agent.root_thread) {
-                    Some(t) => match &t.status {
-                        ThreadStatus::Completed(Signal::Normal(v)) => {
-                            RunResult::Completed(v.clone())
+/// Dispatch a child thread's completion signal to its parent.
+fn dispatch_child_signal(
+    agent: &mut AgentState,
+    module: &IRModule,
+    parent_thread_id: u32,
+    child_thread_id: u32,
+    child_kind: ThreadKind,
+    signal: Signal,
+) {
+    match child_kind {
+        ThreadKind::Block => {
+            par::process_par_branch_signal(agent, parent_thread_id, child_thread_id, signal);
+        }
+        ThreadKind::HandlerTarget => {
+            handle::process_body_signal(agent, module, parent_thread_id, signal);
+        }
+        ThreadKind::RequestHandler => {
+            let reply_info =
+                handle::process_handler_signal(agent, module, parent_thread_id, signal);
+            // If handler produced a reply, route it
+            if let Some((requester, value)) = reply_info {
+                if requester.from_agent_id == agent.agent_id {
+                    // Internal request — find the waiting thread and resume it
+                    if let Some(waiting_tid) =
+                        event::find_request_thread(agent, &requester.request_id)
+                    {
+                        let dst = match agent.threads.get(&waiting_tid).map(|t| &t.status) {
+                            Some(ThreadStatus::Suspended(SuspendReason::Request {
+                                dst, ..
+                            })) => *dst,
+                            _ => return,
+                        };
+                        agent.set_var(dst, value);
+                        if let Some(t) = agent.threads.get_mut(&waiting_tid) {
+                            t.status = ThreadStatus::Running;
                         }
-                        ThreadStatus::Completed(Signal::FnReturn(v)) => {
-                            RunResult::Returned(v.clone())
-                        }
-                        _ => RunResult::Blocked,
-                    },
-                    None => RunResult::Blocked,
-                };
-            }
-            continue;
-        }
-
-        // 2. Execute a Running thread
-        if let Some(tid) = agent.find_running_thread() {
-            execute_thread(agent, module, tid);
-            continue;
-        }
-
-        // 3. Process pending requests in handle scope queues
-        if process_pending_request_queues(agent, module) {
-            continue;
-        }
-
-        // 4. Check if root is completed
-        if is_root_completed(agent) {
-            return match agent.threads.get(&agent.root_thread) {
-                Some(t) => match &t.status {
-                    ThreadStatus::Completed(Signal::Normal(v)) => {
-                        RunResult::Completed(v.clone())
                     }
-                    ThreadStatus::Completed(Signal::FnReturn(v)) => {
-                        RunResult::Returned(v.clone())
-                    }
-                    _ => RunResult::Blocked,
-                },
-                None => RunResult::Blocked,
-            };
-        }
-
-        // 5. No more work — agent is blocked
-        return RunResult::Blocked;
-    }
-}
-
-fn is_root_completed(agent: &AgentState) -> bool {
-    agent
-        .threads
-        .get(&agent.root_thread)
-        .is_some_and(|t| matches!(t.status, ThreadStatus::Completed(_)))
-}
-
-fn find_completed_thread(agent: &AgentState) -> Option<u32> {
-    agent
-        .threads
-        .iter()
-        .find(|(tid, t)| {
-            matches!(t.status, ThreadStatus::Completed(_)) && **tid != agent.root_thread
-        })
-        .or_else(|| {
-            agent
-                .threads
-                .iter()
-                .find(|(_, t)| matches!(t.status, ThreadStatus::Completed(_)))
-        })
-        .map(|(id, _)| *id)
-}
-
-/// Process a completed thread's signal by dispatching to its parent.
-fn process_thread_completion(agent: &mut AgentState, module: &IRModule, thread_id: u32) {
-    let (signal, kind, parent_id) = {
-        let t = match agent.threads.get(&thread_id) {
-            Some(t) => t,
-            None => return,
-        };
-        let signal = match &t.status {
-            ThreadStatus::Completed(s) => s.clone(),
-            _ => return,
-        };
-        (signal, t.kind, t.parent)
-    };
-
-    match parent_id {
-        None => {}
-        Some(parent_id) => match kind {
-            ThreadKind::Block => {
-                par::process_par_branch_signal(agent, parent_id, thread_id, signal);
-            }
-            ThreadKind::HandlerTarget => {
-                handle::process_body_signal(agent, module, parent_id, signal);
-            }
-            ThreadKind::RequestHandler => {
-                handle::process_handler_signal(agent, module, parent_id, signal);
-            }
-            ThreadKind::HandleThen => {
-                handle::process_then_signal(agent, parent_id, thread_id, signal);
-            }
-            ThreadKind::ForBody => {
-                for_loop::process_for_body_signal(agent, module, parent_id, signal);
-            }
-            ThreadKind::ForThen => {
-                for_loop::process_for_then_signal(agent, parent_id, thread_id, signal);
-            }
-            ThreadKind::FnBody => {}
-        },
-    }
-}
-
-/// Process pending request queues in handle scopes.
-fn process_pending_request_queues(agent: &mut AgentState, module: &IRModule) -> bool {
-    let pending: Option<(u32, thread::PendingRequest)> = agent
-        .threads
-        .iter()
-        .find_map(|(tid, t)| {
-            if let ThreadStatus::Suspended(SuspendReason::Handle {
-                phase: HandlePhase::RunningBody { .. },
-                request_queue,
-                ..
-            }) = &t.status
-            {
-                request_queue.front().map(|req| (*tid, req.clone()))
-            } else {
-                None
-            }
-        });
-
-    if let Some((tid, req)) = pending {
-        // Pop from queue
-        if let Some(t) = agent.threads.get_mut(&tid) {
-            if let ThreadStatus::Suspended(SuspendReason::Handle { request_queue, .. }) =
-                &mut t.status
-            {
-                request_queue.pop_front();
+                } else {
+                    // External request — TODO: HTTP POST reply
+                    tracing::warn!(
+                        "reply to external requester {} not yet implemented",
+                        requester.from_agent_id
+                    );
+                }
             }
         }
-
-        // Find matching handler
-        let handler_tid = {
-            let t = agent.threads.get(&tid);
-            t.and_then(|t| match &t.status {
-                ThreadStatus::Suspended(SuspendReason::Handle {
-                    handle_def_id, ..
-                }) => module
-                    .handles
-                    .iter()
-                    .find(|h| h.id == *handle_def_id)
-                    .and_then(|hd| {
-                        hd.req_cases
-                            .iter()
-                            .find(|(rid, _)| *rid == req.req_def_id)
-                            .map(|(_, tid)| *tid)
-                    }),
-                _ => None,
-            })
-        };
-
-        if let Some(handler_tid) = handler_tid {
-            handle::handle_request_in_scope(agent, module, tid, handler_tid, req);
-            return true;
+        ThreadKind::HandleThen => {
+            handle::process_then_signal(agent, parent_thread_id, child_thread_id, signal);
         }
+        ThreadKind::ForBody => {
+            for_loop::process_for_body_signal(agent, module, parent_thread_id, signal);
+        }
+        ThreadKind::ForThen => {
+            for_loop::process_for_then_signal(agent, parent_thread_id, child_thread_id, signal);
+        }
+        ThreadKind::FnBody => {}
     }
-
-    false
 }
 
 // ---------------------------------------------------------------------------

@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 
 use crate::ir::IRModule;
 use crate::value::Value;
@@ -52,7 +52,6 @@ pub fn handle_ihandle(
                 body_thread: body_tid,
             },
             state_vars,
-            request_queue: VecDeque::new(),
         });
     }
 
@@ -60,6 +59,7 @@ pub fn handle_ihandle(
 }
 
 /// Handle a request that was routed to this thread's handle scope.
+/// Only called when the handle is in RunningBody phase (checked by applicability).
 pub fn handle_request_in_scope(
     agent: &mut AgentState,
     module: &IRModule,
@@ -72,88 +72,66 @@ pub fn handle_request_in_scope(
         .get(&thread_id)
         .expect("owner thread must exist");
 
-    let phase = match &t.status {
-        ThreadStatus::Suspended(SuspendReason::Handle { phase, .. }) => phase.clone(),
-        _ => return,
+    let body_thread = match &t.status {
+        ThreadStatus::Suspended(SuspendReason::Handle {
+            phase: HandlePhase::RunningBody { body_thread },
+            ..
+        }) => *body_thread,
+        _ => return, // Not in RunningBody — event should not have been dispatched
     };
 
-    match phase {
-        HandlePhase::RunningBody { body_thread } => {
-            let _hid = match &t.status {
-                ThreadStatus::Suspended(SuspendReason::Handle {
-                    handle_def_id, ..
-                }) => *handle_def_id,
-                _ => unreachable!(),
-            };
-
-            // 1. Copy state vars to agent.vars
-            if let ThreadStatus::Suspended(SuspendReason::Handle { state_vars, .. }) = &t.status {
-                for (sv, val) in state_vars {
-                    agent.vars.insert(*sv, val.clone());
-                }
-            }
-
-            // 2. Bind request args to handler params
-            let handler_ir = module
-                .threads
-                .iter()
-                .find(|t| t.id == handler_tid)
-                .expect("handler thread not found");
-            for (param, arg) in handler_ir.params.iter().zip(request.args.iter()) {
-                agent.vars.insert(*param, arg.clone());
-            }
-
-            // 3. Create handler thread
-            let handler_thread = ThreadState::new(
-                handler_tid,
-                crate::ir::ThreadKind::RequestHandler,
-                Some(thread_id),
-            );
-            agent.threads.insert(handler_tid, handler_thread);
-
-            // 4. Update phase to RunningHandler
-            if let Some(t) = agent.threads.get_mut(&thread_id) {
-                if let ThreadStatus::Suspended(SuspendReason::Handle { phase, .. }) = &mut t.status
-                {
-                    *phase = HandlePhase::RunningHandler {
-                        body_thread,
-                        handler_thread: handler_tid,
-                        requester: RequestOrigin {
-                            from_agent_id: request.from_agent_id,
-                            from_agent_where: request.from_agent_where,
-                            request_id: request.request_id,
-                        },
-                    };
-                }
-            }
-
-            // Handler thread is now Running — the event loop will pick it up.
-        }
-        HandlePhase::RunningHandler { .. } => {
-            // Non-reentrant: queue the request
-            if let Some(t) = agent.threads.get_mut(&thread_id) {
-                if let ThreadStatus::Suspended(SuspendReason::Handle {
-                    request_queue, ..
-                }) = &mut t.status
-                {
-                    request_queue.push_back(request);
-                }
-            }
-        }
-        HandlePhase::RunningThen { .. } => {
-            // Then clause running — handle scope is effectively inactive.
-            // Request should continue ascending (caller handles this).
+    // 1. Copy state vars to agent.vars
+    if let ThreadStatus::Suspended(SuspendReason::Handle { state_vars, .. }) = &t.status {
+        for (sv, val) in state_vars {
+            agent.vars.insert(*sv, val.clone());
         }
     }
+
+    // 2. Bind request args to handler params
+    let handler_ir = module
+        .threads
+        .iter()
+        .find(|t| t.id == handler_tid)
+        .expect("handler thread not found");
+    for (param, arg) in handler_ir.params.iter().zip(request.args.iter()) {
+        agent.vars.insert(*param, arg.clone());
+    }
+
+    // 3. Create handler thread
+    let handler_thread = ThreadState::new(
+        handler_tid,
+        crate::ir::ThreadKind::RequestHandler,
+        Some(thread_id),
+    );
+    agent.threads.insert(handler_tid, handler_thread);
+
+    // 4. Update phase to RunningHandler
+    if let Some(t) = agent.threads.get_mut(&thread_id) {
+        if let ThreadStatus::Suspended(SuspendReason::Handle { phase, .. }) = &mut t.status {
+            *phase = HandlePhase::RunningHandler {
+                body_thread,
+                handler_thread: handler_tid,
+                requester: RequestOrigin {
+                    from_agent_id: request.from_agent_id,
+                    from_agent_where: request.from_agent_where,
+                    request_id: request.request_id,
+                },
+            };
+        }
+    }
+
+    // Handler thread is now Running — the event loop will pick it up.
 }
 
 /// Process signal from a completed REQUEST_HANDLER thread.
+/// Returns `Some((requester, reply_value))` if a reply needs to be routed,
+/// or `None` if no reply is needed (e.g. HandleBreak, FnReturn).
 pub fn process_handler_signal(
     agent: &mut AgentState,
-    module: &IRModule,
+    _module: &IRModule,
     owner_thread_id: u32,
     signal: Signal,
-) {
+) -> Option<(RequestOrigin, Value)> {
     let (_hid, dst, phase) = {
         let t = agent
             .threads
@@ -166,11 +144,15 @@ pub fn process_handler_signal(
                 phase,
                 ..
             }) => (*handle_def_id, *dst, phase.clone()),
-            _ => return,
+            _ => return None,
         }
     };
 
     match signal {
+        Signal::Normal(value) => {
+            // Treat as Continue(value, [])
+            process_handler_signal(agent, _module, owner_thread_id, Signal::Continue(value, vec![]))
+        }
         Signal::Continue(value, mutations) => {
             // 1. Apply mutations to handle state
             if let Some(t) = agent.threads.get_mut(&owner_thread_id) {
@@ -184,28 +166,20 @@ pub fn process_handler_signal(
                 }
             }
 
-            // 2. Reply to requester
+            let mut reply_info = None;
+
             if let HandlePhase::RunningHandler {
                 body_thread,
                 handler_thread,
                 ref requester,
             } = phase
             {
-                // Reply: if internal request, resume the suspended thread
-                if requester.from_agent_id == agent.agent_id {
-                    super::request::on_reply(agent, &requester.request_id, value);
-                } else {
-                    // External request — TODO: send HTTP POST /agent/reply
-                    tracing::warn!(
-                        "reply to external requester {} not yet implemented",
-                        requester.from_agent_id
-                    );
-                }
+                reply_info = Some((requester.clone(), value));
 
-                // 3. Remove handler thread
+                // 2. Remove handler thread
                 agent.threads.remove(&handler_thread);
 
-                // 4. Set phase back to RunningBody
+                // 3. Set phase back to RunningBody
                 if let Some(t) = agent.threads.get_mut(&owner_thread_id) {
                     if let ThreadStatus::Suspended(SuspendReason::Handle { phase, .. }) =
                         &mut t.status
@@ -215,7 +189,7 @@ pub fn process_handler_signal(
                 }
             }
 
-            // 5. Queued requests are processed by the main event loop.
+            reply_info
         }
         Signal::HandleBreak(value) => {
             // 1. Terminate body thread and handler thread
@@ -234,6 +208,7 @@ pub fn process_handler_signal(
             if let Some(t) = agent.threads.get_mut(&owner_thread_id) {
                 t.status = ThreadStatus::Running;
             }
+            None
         }
         Signal::FnReturn(value) => {
             // Cleanup and propagate
@@ -249,17 +224,9 @@ pub fn process_handler_signal(
             if let Some(t) = agent.threads.get_mut(&owner_thread_id) {
                 t.status = ThreadStatus::Completed(Signal::FnReturn(value));
             }
+            None
         }
-        Signal::Normal(value) => {
-            // Treat as Continue(value, [])
-            process_handler_signal(
-                agent,
-                module,
-                owner_thread_id,
-                Signal::Continue(value, vec![]),
-            );
-        }
-        _ => {}
+        _ => None,
     }
 }
 

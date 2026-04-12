@@ -2,7 +2,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::Json;
 
-use crate::runtime::request;
+use crate::runtime::event::{self, Event, EventKind};
 use crate::runtime::thread::PendingRequest;
 
 use super::state::AppState;
@@ -12,15 +12,14 @@ use super::types::{
 
 /// POST /katari/reply
 ///
-/// Delivers a reply value for a pending request in an agent. After delivering
-/// the reply, the agent is re-executed so it can make progress.
+/// Delivers a reply value for a pending request in an agent.
 pub async fn reply(
     State(state): State<AppState>,
     Json(body): Json<ReplyRequest>,
 ) -> (StatusCode, Json<ReplyResponse>) {
     let mut rt = state.runtime.lock().await;
 
-    let agent = match rt.agents.get_mut(&body.agent_id) {
+    let agent = match rt.agents.get(&body.agent_id) {
         Some(a) => a,
         None => {
             return (
@@ -33,10 +32,33 @@ pub async fn reply(
         }
     };
 
-    request::on_reply(agent, &body.request_id, body.value);
+    // Find the thread waiting for this request_id
+    let thread_id = match event::find_request_thread(agent, &body.request_id) {
+        Some(tid) => tid,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ReplyResponse {
+                    ok: false,
+                    error: Some(format!(
+                        "no thread waiting for request '{}'",
+                        body.request_id
+                    )),
+                }),
+            );
+        }
+    };
 
-    // Run the global event loop so all agents can make progress
-    let _ = agent; // release mutable borrow on agents map entry
+    // Push Reply event
+    rt.push_event(Event {
+        agent_id: body.agent_id.clone(),
+        thread_id,
+        kind: EventKind::Reply {
+            request_id: body.request_id.clone(),
+            value: body.value,
+        },
+    });
+
     rt.run_event_loop();
 
     tracing::info!(
@@ -72,7 +94,7 @@ pub async fn external_request(
         from_agent_where: body.from_agent_where,
     };
 
-    let agent = match rt.agents.get_mut(&body.agent_id) {
+    let agent = match rt.agents.get(&body.agent_id) {
         Some(a) => a,
         None => {
             return (
@@ -85,11 +107,45 @@ pub async fn external_request(
         }
     };
 
-    let module = std::sync::Arc::clone(&agent.module);
-    request::on_external_request(agent, &module, pending);
+    // Find the spawning thread for the child agent that forwarded this request
+    let source_thread_id = match agent.children.get(&pending.from_agent_id) {
+        Some(&tid) => tid,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ExternalRequestResponse {
+                    ok: false,
+                    error: Some(format!(
+                        "unknown child agent: {}",
+                        pending.from_agent_id
+                    )),
+                }),
+            );
+        }
+    };
 
-    // Run the global event loop so all agents can make progress
-    let _ = agent;
+    let module = std::sync::Arc::clone(&agent.module);
+
+    // Route request to find the matching handle scope
+    match event::route_request_to_handle(agent, &module, source_thread_id, pending.req_def_id) {
+        Some((handle_owner_tid, handler_def_tid)) => {
+            rt.push_event(Event {
+                agent_id: body.agent_id.clone(),
+                thread_id: handle_owner_tid,
+                kind: EventKind::IncomingRequest {
+                    request: pending,
+                    handler_def_tid,
+                },
+            });
+        }
+        None => {
+            tracing::warn!(
+                agent_id = %body.agent_id,
+                "no handle scope found for external request, forwarding to parent (not yet implemented)"
+            );
+        }
+    }
+
     rt.run_event_loop();
 
     tracing::info!(

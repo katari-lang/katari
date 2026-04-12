@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 
 use crate::ir::{HandlerId, ThreadKind, VarId};
 use crate::value::Value;
@@ -54,7 +54,6 @@ pub enum SuspendReason {
         dst: VarId,
         phase: HandlePhase,
         state_vars: HashMap<VarId, Value>,
-        request_queue: VecDeque<PendingRequest>,
     },
     /// Iterating a for loop.
     For {
