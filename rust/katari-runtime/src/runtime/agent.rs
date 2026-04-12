@@ -4,13 +4,14 @@ use std::sync::Arc;
 use crate::ir::{IRModule, VarId};
 use crate::value::Value;
 
-use super::thread::{PendingRequest, ThreadState};
+use super::thread::ThreadState;
 
-/// Top-level agent lifecycle status.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Agent lifecycle status. Carries the result value on completion.
+#[derive(Debug, Clone)]
 pub enum AgentStatus {
     Running,
-    Completed,
+    Completed(Value),
+    Error,
 }
 
 /// Agent state — container for the thread tree.
@@ -18,36 +19,15 @@ pub enum AgentStatus {
 pub struct AgentState {
     pub agent_id: String,
     pub agent_def_id: u32,
-
-    /// The IR module this agent was created with (versioned via Arc).
     pub module: Arc<IRModule>,
-
-    /// Shared variable map (all threads within this agent share this).
     pub vars: HashMap<VarId, Value>,
-
-    /// All active threads (flat map, tree via parent references).
     pub threads: HashMap<u32, ThreadState>,
-
-    /// Root thread ID (FN_BODY).
     pub root_thread: u32,
-
-    /// Parent agent info.
     pub parent_agent_id: String,
     pub parent_agent_where: String,
-
-    /// child_agent_id → spawning thread ID.
     pub children: HashMap<String, u32>,
-
-    /// Available requests inherited from parent agent.
     pub parent_available_requests: HashSet<u32>,
-
-    /// Agent lifecycle status.
     pub status: AgentStatus,
-
-    /// Outgoing requests collected during thread execution.
-    /// Drained by the event loop's harvest phase.
-    /// Each entry is (source_thread_id, PendingRequest).
-    pub outgoing_requests: Vec<(u32, PendingRequest)>,
 }
 
 impl AgentState {
@@ -72,18 +52,14 @@ impl AgentState {
             children: HashMap::new(),
             parent_available_requests,
             status: AgentStatus::Running,
-            outgoing_requests: Vec::new(),
         }
     }
 
-    /// Get variable value (cloned).
     pub fn get_var(&self, var_id: VarId) -> Value {
         self.vars.get(&var_id).cloned().unwrap_or(Value::Null)
     }
 
-    /// Set variable value.
     pub fn set_var(&mut self, var_id: VarId, value: Value) {
         self.vars.insert(var_id, value);
     }
-
 }

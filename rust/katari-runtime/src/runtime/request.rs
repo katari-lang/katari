@@ -2,39 +2,57 @@ use crate::ir::IRModule;
 use crate::value::Value;
 
 use super::agent::AgentState;
-use super::thread::{SuspendReason, ThreadStatus};
+use super::event::{self, Event, EventKind};
+use super::thread::{PendingRequest, SuspendReason, ThreadStatus};
 
 /// Execute IRequest instruction.
-/// Suspends the thread and records the request — routing is handled by the event loop.
+/// Suspends the thread and routes the request inline.
 pub fn handle_irequest(
     agent: &mut AgentState,
-    _module: &IRModule,
+    module: &IRModule,
     thread_id: u32,
     dst: u32,
     rid: u32,
     args: &[u32],
+    events: &mut Vec<Event>,
 ) {
     let arg_values: Vec<Value> = args.iter().map(|v| agent.get_var(*v)).collect();
     let request_id = uuid::Uuid::new_v4().to_string();
 
-    // Record outgoing request for harvest
-    agent.outgoing_requests.push((
-        thread_id,
-        super::thread::PendingRequest {
-            request_id: request_id.clone(),
-            req_def_id: rid,
-            args: arg_values,
-            from_agent_id: agent.agent_id.clone(),
-            from_agent_where: String::new(),
-        },
-    ));
-
-    // Suspend the requesting thread (will be resumed on Reply event)
+    // Suspend the requesting thread
     if let Some(t) = agent.threads.get_mut(&thread_id) {
         t.status = ThreadStatus::Suspended(SuspendReason::Request {
-            request_id,
+            request_id: request_id.clone(),
             dst,
         });
+    }
+
+    // Inline routing
+    let pending = PendingRequest {
+        request_id,
+        req_def_id: rid,
+        args: arg_values,
+        from_agent_id: agent.agent_id.clone(),
+        from_agent_where: String::new(),
+    };
+
+    match event::route_request_to_handle(agent, module, thread_id, rid) {
+        Some((handle_owner_tid, handler_def_tid)) => {
+            events.push(Event {
+                agent_id: agent.agent_id.clone(),
+                kind: EventKind::IncomingRequest {
+                    owner_thread_id: handle_owner_tid,
+                    request: pending,
+                    handler_def_tid,
+                },
+            });
+        }
+        None => {
+            tracing::warn!(
+                agent_id = %agent.agent_id,
+                "no handle scope found for request, forwarding to parent (not yet implemented)"
+            );
+        }
     }
 }
 
@@ -46,6 +64,7 @@ pub fn handle_icall(
     dst: u32,
     agent_def_id: u32,
     args: &[u32],
+    events: &mut Vec<Event>,
 ) {
     let agent_def = module.agents.iter().find(|a| a.id == agent_def_id);
 
@@ -58,8 +77,10 @@ pub fn handle_icall(
                     agent.set_var(dst, value);
                     return;
                 }
-                super::primitive::PrimitiveResult::RaiseRequest { req_name, args } => {
-                    // Look up request def by name
+                super::primitive::PrimitiveResult::RaiseRequest {
+                    req_name,
+                    args: req_args,
+                } => {
                     let rid = module
                         .requests
                         .iter()
@@ -67,21 +88,35 @@ pub fn handle_icall(
                         .map(|r| r.id);
                     if let Some(rid) = rid {
                         let request_id = uuid::Uuid::new_v4().to_string();
-                        agent.outgoing_requests.push((
-                            thread_id,
-                            super::thread::PendingRequest {
-                                request_id: request_id.clone(),
-                                req_def_id: rid,
-                                args,
-                                from_agent_id: agent.agent_id.clone(),
-                                from_agent_where: String::new(),
-                            },
-                        ));
                         if let Some(t) = agent.threads.get_mut(&thread_id) {
                             t.status = ThreadStatus::Suspended(SuspendReason::Request {
-                                request_id,
+                                request_id: request_id.clone(),
                                 dst,
                             });
+                        }
+                        let pending = PendingRequest {
+                            request_id,
+                            req_def_id: rid,
+                            args: req_args,
+                            from_agent_id: agent.agent_id.clone(),
+                            from_agent_where: String::new(),
+                        };
+                        match event::route_request_to_handle(agent, module, thread_id, rid) {
+                            Some((handle_owner_tid, handler_def_tid)) => {
+                                events.push(Event {
+                                    agent_id: agent.agent_id.clone(),
+                                    kind: EventKind::IncomingRequest {
+                                        owner_thread_id: handle_owner_tid,
+                                        request: pending,
+                                        handler_def_tid,
+                                    },
+                                });
+                            }
+                            None => {
+                                tracing::warn!(
+                                    "primitive raised request with no handle scope"
+                                );
+                            }
                         }
                     } else {
                         tracing::warn!("primitive raised unknown request: {}", req_name);
@@ -93,18 +128,25 @@ pub fn handle_icall(
         }
     }
 
-    // Non-primitive: suspend thread, Runtime will handle spawning
+    // Non-primitive: suspend thread, push SpawnChildAgent event
     let arg_values: Vec<Value> = args.iter().map(|v| agent.get_var(*v)).collect();
     let child_agent_id = format!("agent-{}", uuid::Uuid::new_v4());
 
     if let Some(t) = agent.threads.get_mut(&thread_id) {
         t.status = ThreadStatus::Suspended(SuspendReason::Call {
             child_agent_id: child_agent_id.clone(),
-            agent_def_id,
-            args: arg_values,
             dst,
         });
     }
 
-    agent.children.insert(child_agent_id, thread_id);
+    agent.children.insert(child_agent_id.clone(), thread_id);
+
+    events.push(Event {
+        agent_id: agent.agent_id.clone(),
+        kind: EventKind::SpawnChildAgent {
+            child_agent_id,
+            agent_def_id,
+            args: arg_values,
+        },
+    });
 }

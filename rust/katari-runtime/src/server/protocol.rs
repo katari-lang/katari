@@ -54,8 +54,8 @@ pub async fn reply(
         // Push Reply event
         rt.push_event(Event {
             agent_id: body.agent_id.clone(),
-            thread_id,
             kind: EventKind::Reply {
+                thread_id,
                 request_id: body.request_id.clone(),
                 value: body.value,
             },
@@ -146,8 +146,8 @@ pub async fn external_request(
             Some((handle_owner_tid, handler_def_tid)) => {
                 rt.push_event(Event {
                     agent_id: body.agent_id.clone(),
-                    thread_id: handle_owner_tid,
                     kind: EventKind::IncomingRequest {
+                        owner_thread_id: handle_owner_tid,
                         request: pending,
                         handler_def_tid,
                     },

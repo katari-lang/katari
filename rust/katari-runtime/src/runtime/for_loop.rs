@@ -2,16 +2,19 @@ use crate::ir::IRModule;
 use crate::value::Value;
 
 use super::agent::AgentState;
+use super::event::Event;
+use super::execute::{finish_thread, resume_thread, spawn_child_thread};
 use super::signal::Signal;
-use super::thread::{SuspendReason, ThreadState, ThreadStatus};
+use super::thread::{SuspendReason, ThreadStatus};
 
-/// Execute IFor instruction.
-pub fn handle_ifor(
+/// Execute For instruction: init state, suspend parent, start first iteration.
+pub fn setup(
     agent: &mut AgentState,
     module: &IRModule,
     thread_id: u32,
     dst: u32,
     fid: u32,
+    events: &mut Vec<Event>,
 ) {
     let for_def = module
         .fors
@@ -19,7 +22,7 @@ pub fn handle_ifor(
         .find(|f| f.id == fid)
         .expect("for def not found");
 
-    // 1. Initialize state variables
+    // Initialize state variables
     for (sv, iv) in for_def
         .state_vars
         .iter()
@@ -29,7 +32,7 @@ pub fn handle_ifor(
         agent.set_var(*sv, val);
     }
 
-    // 2. Calculate min array length
+    // Calculate min array length
     let min_len = for_def
         .arrays
         .iter()
@@ -43,7 +46,7 @@ pub fn handle_ifor(
         .min()
         .unwrap_or(0) as u32;
 
-    // 3. Suspend parent
+    // Suspend parent
     if let Some(t) = agent.threads.get_mut(&thread_id) {
         t.status = ThreadStatus::Suspended(SuspendReason::For {
             for_def_id: fid,
@@ -53,21 +56,21 @@ pub fn handle_ifor(
         });
     }
 
-    // 4. Start first iteration or finish
     if min_len > 0 {
-        start_for_iteration(agent, module, thread_id, fid, 0);
+        start_iteration(agent, module, thread_id, fid, 0, events);
     } else {
-        finish_for(agent, module, thread_id, fid, dst);
+        finish_loop(agent, module, thread_id, fid, dst, events);
     }
 }
 
 /// Start a single iteration of the for loop.
-pub fn start_for_iteration(
+fn start_iteration(
     agent: &mut AgentState,
     module: &IRModule,
     parent_thread_id: u32,
     fid: u32,
     index: u32,
+    events: &mut Vec<Event>,
 ) {
     let for_def = module
         .fors
@@ -84,32 +87,25 @@ pub fn start_for_iteration(
         }
     }
 
-    // Create FOR_BODY child thread
-    let body_tid = for_def.body;
-    let body_thread = ThreadState::new(
-        body_tid,
+    spawn_child_thread(
+        agent,
+        for_def.body,
         crate::ir::ThreadKind::ForBody,
-        Some(parent_thread_id),
+        parent_thread_id,
+        events,
     );
-    agent.threads.insert(body_tid, body_thread);
-
-    // Body is now Running — the event loop will pick it up.
 }
 
-/// Process signal from FOR_BODY.
-pub fn process_for_body_signal(
+/// Process signal from a completed ForBody thread.
+pub fn process_body_signal(
     agent: &mut AgentState,
     module: &IRModule,
     owner_thread_id: u32,
     signal: Signal,
+    events: &mut Vec<Event>,
 ) {
-    // Defensive: owner may have been cancelled/removed already
-    let (fid, current_index, min_length, dst) = {
-        let t = match agent.threads.get(&owner_thread_id) {
-            Some(t) => t,
-            None => return,
-        };
-        match &t.status {
+    let (fid, current_index, min_length, dst) = match agent.threads.get(&owner_thread_id) {
+        Some(t) => match &t.status {
             ThreadStatus::Suspended(SuspendReason::For {
                 for_def_id,
                 current_index,
@@ -117,25 +113,17 @@ pub fn process_for_body_signal(
                 dst,
             }) => (*for_def_id, *current_index, *min_length, *dst),
             _ => return,
-        }
-    };
-
-    let for_def = match module.fors.iter().find(|f| f.id == fid) {
-        Some(f) => f,
+        },
         None => return,
     };
 
-    // Note: body thread removal is handled by harvest
-    let _ = for_def.body;
-
     match signal {
         Signal::ForContinue(mutations) => {
-            // Apply mutations
             for (sv, nv) in &mutations {
                 let val = agent.get_var(*nv);
                 agent.set_var(*sv, val);
             }
-            advance_for(
+            advance(
                 agent,
                 module,
                 owner_thread_id,
@@ -143,11 +131,12 @@ pub fn process_for_body_signal(
                 current_index,
                 min_length,
                 dst,
+                events,
             );
         }
         Signal::Normal(_) => {
             // Treat as ForContinue([]) — no mutations
-            advance_for(
+            advance(
                 agent,
                 module,
                 owner_thread_id,
@@ -155,30 +144,30 @@ pub fn process_for_body_signal(
                 current_index,
                 min_length,
                 dst,
+                events,
             );
         }
         Signal::ForBreak(value) => {
             agent.set_var(dst, value);
-            if let Some(t) = agent.threads.get_mut(&owner_thread_id) {
-                t.status = ThreadStatus::Running;
-            }
+            resume_thread(agent, owner_thread_id, events);
         }
         Signal::FnReturn(value) => {
-            if let Some(t) = agent.threads.get_mut(&owner_thread_id) {
-                t.status = ThreadStatus::Completed(Signal::FnReturn(value));
-            }
+            finish_thread(agent, owner_thread_id, Signal::FnReturn(value), events);
         }
         Signal::HandleBreak(value) => {
-            if let Some(t) = agent.threads.get_mut(&owner_thread_id) {
-                t.status = ThreadStatus::Completed(Signal::HandleBreak(value));
-            }
+            finish_thread(
+                agent,
+                owner_thread_id,
+                Signal::HandleBreak(value),
+                events,
+            );
         }
         _ => {}
     }
 }
 
-/// Advance to the next for iteration or finish.
-fn advance_for(
+/// Advance to the next iteration or finish.
+fn advance(
     agent: &mut AgentState,
     module: &IRModule,
     owner_thread_id: u32,
@@ -186,10 +175,10 @@ fn advance_for(
     current_index: u32,
     min_length: u32,
     dst: u32,
+    events: &mut Vec<Event>,
 ) {
     let next_index = current_index + 1;
     if next_index < min_length {
-        // Update index in suspend reason
         if let Some(t) = agent.threads.get_mut(&owner_thread_id) {
             t.status = ThreadStatus::Suspended(SuspendReason::For {
                 for_def_id: fid,
@@ -198,19 +187,20 @@ fn advance_for(
                 dst,
             });
         }
-        start_for_iteration(agent, module, owner_thread_id, fid, next_index);
+        start_iteration(agent, module, owner_thread_id, fid, next_index, events);
     } else {
-        finish_for(agent, module, owner_thread_id, fid, dst);
+        finish_loop(agent, module, owner_thread_id, fid, dst, events);
     }
 }
 
 /// Finish for loop (all iterations done or empty array).
-fn finish_for(
+fn finish_loop(
     agent: &mut AgentState,
     module: &IRModule,
     owner_thread_id: u32,
     fid: u32,
     dst: u32,
+    events: &mut Vec<Event>,
 ) {
     let for_def = module
         .fors
@@ -219,51 +209,41 @@ fn finish_for(
         .expect("for def not found");
 
     if let Some(then_tid) = for_def.then {
-        // Create FOR_THEN child thread
-        let then_thread = ThreadState::new(
+        spawn_child_thread(
+            agent,
             then_tid,
             crate::ir::ThreadKind::ForThen,
-            Some(owner_thread_id),
+            owner_thread_id,
+            events,
         );
-        agent.threads.insert(then_tid, then_thread);
-        // Then thread is Running — event loop will pick it up.
     } else {
         agent.set_var(dst, Value::Null);
-        if let Some(t) = agent.threads.get_mut(&owner_thread_id) {
-            t.status = ThreadStatus::Running;
-        }
+        resume_thread(agent, owner_thread_id, events);
     }
 }
 
-/// Process signal from FOR_THEN.
-pub fn process_for_then_signal(
+/// Process signal from a completed ForThen thread.
+pub fn process_then_signal(
     agent: &mut AgentState,
     owner_thread_id: u32,
-    _then_tid: u32,
     signal: Signal,
+    events: &mut Vec<Event>,
 ) {
-    let dst = {
-        let t = match agent.threads.get(&owner_thread_id) {
-            Some(t) => t,
-            None => return,
-        };
-        match &t.status {
+    let dst = match agent.threads.get(&owner_thread_id) {
+        Some(t) => match &t.status {
             ThreadStatus::Suspended(SuspendReason::For { dst, .. }) => *dst,
             _ => return,
-        }
+        },
+        None => return,
     };
 
     match signal {
         Signal::Normal(value) => {
             agent.set_var(dst, value);
-            if let Some(t) = agent.threads.get_mut(&owner_thread_id) {
-                t.status = ThreadStatus::Running;
-            }
+            resume_thread(agent, owner_thread_id, events);
         }
         Signal::FnReturn(value) => {
-            if let Some(t) = agent.threads.get_mut(&owner_thread_id) {
-                t.status = ThreadStatus::Completed(Signal::FnReturn(value));
-            }
+            finish_thread(agent, owner_thread_id, Signal::FnReturn(value), events);
         }
         _ => {}
     }

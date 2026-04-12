@@ -4,18 +4,22 @@ use crate::ir::IRModule;
 use crate::value::Value;
 
 use super::agent::AgentState;
+use super::event::{self, Event, EventKind};
+use super::execute::{finish_thread, resume_thread, spawn_child_thread};
 use super::signal::Signal;
 use super::thread::{
-    HandlePhase, PendingRequest, RequestOrigin, SuspendReason, ThreadState, ThreadStatus,
+    HandlePhase, PendingRequest, RequestOrigin, SuspendReason, ThreadStatus,
 };
+use super::OutgoingReply;
 
-/// Execute IHandle instruction.
-pub fn handle_ihandle(
+/// Execute Handle instruction: suspend parent, spawn body thread.
+pub fn setup(
     agent: &mut AgentState,
     module: &IRModule,
     thread_id: u32,
     dst: u32,
     hid: u32,
+    events: &mut Vec<Event>,
 ) {
     let handle_def = module
         .handles
@@ -23,7 +27,7 @@ pub fn handle_ihandle(
         .find(|h| h.id == hid)
         .expect("handle def not found");
 
-    // 1. Initialize state variables
+    // Initialize state variables
     let mut state_vars = HashMap::new();
     for (sv, iv) in handle_def
         .state_vars
@@ -34,16 +38,9 @@ pub fn handle_ihandle(
         state_vars.insert(*sv, val);
     }
 
-    // 2. Create HANDLER_TARGET child thread
     let body_tid = handle_def.body;
-    let body_thread = ThreadState::new(
-        body_tid,
-        crate::ir::ThreadKind::HandlerTarget,
-        Some(thread_id),
-    );
-    agent.threads.insert(body_tid, body_thread);
 
-    // 3. Suspend parent with all handle state in SuspendReason
+    // Suspend parent
     if let Some(parent) = agent.threads.get_mut(&thread_id) {
         parent.status = ThreadStatus::Suspended(SuspendReason::Handle {
             handle_def_id: hid,
@@ -55,39 +52,46 @@ pub fn handle_ihandle(
         });
     }
 
-    // Body thread is now Running — the event loop will pick it up.
+    // Spawn body thread
+    spawn_child_thread(
+        agent,
+        body_tid,
+        crate::ir::ThreadKind::HandlerTarget,
+        thread_id,
+        events,
+    );
 }
 
-/// Handle a request that was routed to this thread's handle scope.
-/// Only called when the handle is in RunningBody phase (checked by applicability).
-pub fn handle_request_in_scope(
+/// Handle an incoming request routed to this handle scope.
+pub fn dispatch_request(
     agent: &mut AgentState,
     module: &IRModule,
     thread_id: u32,
     handler_tid: u32,
     request: PendingRequest,
+    events: &mut Vec<Event>,
 ) {
-    let t = agent
-        .threads
-        .get(&thread_id)
-        .expect("owner thread must exist");
-
-    let body_thread = match &t.status {
-        ThreadStatus::Suspended(SuspendReason::Handle {
-            phase: HandlePhase::RunningBody { body_thread },
-            ..
-        }) => *body_thread,
-        _ => return, // Not in RunningBody — event should not have been dispatched
+    let body_thread = match agent.threads.get(&thread_id) {
+        Some(t) => match &t.status {
+            ThreadStatus::Suspended(SuspendReason::Handle {
+                phase: HandlePhase::RunningBody { body_thread },
+                ..
+            }) => *body_thread,
+            _ => return,
+        },
+        None => return,
     };
 
-    // 1. Copy state vars to agent.vars
-    if let ThreadStatus::Suspended(SuspendReason::Handle { state_vars, .. }) = &t.status {
-        for (sv, val) in state_vars {
-            agent.vars.insert(*sv, val.clone());
+    // Copy state vars to agent.vars
+    if let Some(t) = agent.threads.get(&thread_id) {
+        if let ThreadStatus::Suspended(SuspendReason::Handle { state_vars, .. }) = &t.status {
+            for (sv, val) in state_vars {
+                agent.vars.insert(*sv, val.clone());
+            }
         }
     }
 
-    // 2. Bind request args to handler params
+    // Bind request args to handler params
     let handler_ir = module
         .threads
         .iter()
@@ -97,15 +101,7 @@ pub fn handle_request_in_scope(
         agent.vars.insert(*param, arg.clone());
     }
 
-    // 3. Create handler thread
-    let handler_thread = ThreadState::new(
-        handler_tid,
-        crate::ir::ThreadKind::RequestHandler,
-        Some(thread_id),
-    );
-    agent.threads.insert(handler_tid, handler_thread);
-
-    // 4. Update phase to RunningHandler
+    // Update phase to RunningHandler
     if let Some(t) = agent.threads.get_mut(&thread_id) {
         if let ThreadStatus::Suspended(SuspendReason::Handle { phase, .. }) = &mut t.status {
             *phase = HandlePhase::RunningHandler {
@@ -120,33 +116,33 @@ pub fn handle_request_in_scope(
         }
     }
 
-    // Handler thread is now Running — the event loop will pick it up.
+    // Spawn handler thread
+    spawn_child_thread(
+        agent,
+        handler_tid,
+        crate::ir::ThreadKind::RequestHandler,
+        thread_id,
+        events,
+    );
 }
 
-/// Process signal from a completed REQUEST_HANDLER thread.
-/// Returns `(reply_info, cancel_list)`:
-/// - `reply_info`: Some if a reply needs to be routed to the requester.
-/// - `cancel_list`: Thread IDs that should receive CancelThread events.
+/// Process signal from a completed RequestHandler thread.
 pub fn process_handler_signal(
     agent: &mut AgentState,
     _module: &IRModule,
     owner_thread_id: u32,
     signal: Signal,
-) -> (Option<(RequestOrigin, Value)>, Vec<u32>) {
-    let (_hid, dst, phase) = {
-        let t = match agent.threads.get(&owner_thread_id) {
-            Some(t) => t,
-            None => return (None, vec![]),
-        };
-        match &t.status {
-            ThreadStatus::Suspended(SuspendReason::Handle {
-                handle_def_id,
-                dst,
-                phase,
-                ..
-            }) => (*handle_def_id, *dst, phase.clone()),
-            _ => return (None, vec![]),
-        }
+    events: &mut Vec<Event>,
+    replies: &mut Vec<OutgoingReply>,
+) {
+    let (dst, phase) = match agent.threads.get(&owner_thread_id) {
+        Some(t) => match &t.status {
+            ThreadStatus::Suspended(SuspendReason::Handle { dst, phase, .. }) => {
+                (*dst, phase.clone())
+            }
+            _ => return,
+        },
+        None => return,
     };
 
     match signal {
@@ -157,10 +153,12 @@ pub fn process_handler_signal(
                 _module,
                 owner_thread_id,
                 Signal::Continue(value, vec![]),
-            )
+                events,
+                replies,
+            );
         }
         Signal::Continue(value, mutations) => {
-            // 1. Apply mutations to handle state
+            // Apply mutations to handle state
             if let Some(t) = agent.threads.get_mut(&owner_thread_id) {
                 if let ThreadStatus::Suspended(SuspendReason::Handle { state_vars, .. }) =
                     &mut t.status
@@ -172,18 +170,16 @@ pub fn process_handler_signal(
                 }
             }
 
-            let mut reply_info = None;
-
             if let HandlePhase::RunningHandler {
                 body_thread,
                 ref requester,
                 ..
             } = phase
             {
-                reply_info = Some((requester.clone(), value));
+                // Route reply to requester
+                route_reply(agent, requester, value, events, replies);
 
-                // Handler thread is already Completed — harvest removes it.
-                // Set phase back to RunningBody.
+                // Set phase back to RunningBody
                 if let Some(t) = agent.threads.get_mut(&owner_thread_id) {
                     if let ThreadStatus::Suspended(SuspendReason::Handle { phase, .. }) =
                         &mut t.status
@@ -192,59 +188,50 @@ pub fn process_handler_signal(
                     }
                 }
             }
-
-            (reply_info, vec![])
         }
         Signal::HandleBreak(value) => {
-            // Cancel body thread (handler is already Completed/removed by harvest)
-            let cancels = match &phase {
-                HandlePhase::RunningHandler { body_thread, .. } => vec![*body_thread],
-                _ => vec![],
-            };
-
-            agent.set_var(dst, value);
-            if let Some(t) = agent.threads.get_mut(&owner_thread_id) {
-                t.status = ThreadStatus::Running;
+            // Cancel body thread
+            if let HandlePhase::RunningHandler { body_thread, .. } = &phase {
+                events.push(Event {
+                    agent_id: agent.agent_id.clone(),
+                    kind: EventKind::CancelThread(*body_thread),
+                });
             }
-            (None, cancels)
+            agent.set_var(dst, value);
+            resume_thread(agent, owner_thread_id, events);
         }
         Signal::FnReturn(value) => {
             // Cancel body thread and propagate FnReturn
-            let cancels = match &phase {
-                HandlePhase::RunningHandler { body_thread, .. } => vec![*body_thread],
-                _ => vec![],
-            };
-
-            if let Some(t) = agent.threads.get_mut(&owner_thread_id) {
-                t.status = ThreadStatus::Completed(Signal::FnReturn(value));
+            if let HandlePhase::RunningHandler { body_thread, .. } = &phase {
+                events.push(Event {
+                    agent_id: agent.agent_id.clone(),
+                    kind: EventKind::CancelThread(*body_thread),
+                });
             }
-            (None, cancels)
+            finish_thread(agent, owner_thread_id, Signal::FnReturn(value), events);
         }
-        // Cancelled or other — silently absorbed
-        _ => (None, vec![]),
+        _ => {}
     }
 }
 
-/// Process signal from a completed HANDLER_TARGET (body) thread.
+/// Process signal from a completed HandlerTarget (body) thread.
 pub fn process_body_signal(
     agent: &mut AgentState,
     module: &IRModule,
     owner_thread_id: u32,
     signal: Signal,
+    events: &mut Vec<Event>,
 ) {
-    let (hid, dst) = {
-        let t = match agent.threads.get(&owner_thread_id) {
-            Some(t) => t,
-            None => return, // owner already removed (cancelled)
-        };
-        match &t.status {
+    let (hid, dst) = match agent.threads.get(&owner_thread_id) {
+        Some(t) => match &t.status {
             ThreadStatus::Suspended(SuspendReason::Handle {
                 handle_def_id,
                 dst,
                 ..
             }) => (*handle_def_id, *dst),
             _ => return,
-        }
+        },
+        None => return,
     };
 
     let handle_def = module
@@ -255,25 +242,17 @@ pub fn process_body_signal(
 
     match signal {
         Signal::Normal(value) => {
-            // Body completed normally
             if let Some(then_tid) = handle_def.then {
-                // Run then clause
+                // Bind body result to then's param
                 let ir_thread = module
                     .threads
                     .iter()
                     .find(|t| t.id == then_tid)
                     .expect("then thread not found");
-                // Bind body result to then's param
                 if let Some(param) = ir_thread.params.first() {
                     agent.set_var(*param, value);
                 }
-                let then_thread = ThreadState::new(
-                    then_tid,
-                    crate::ir::ThreadKind::HandleThen,
-                    Some(owner_thread_id),
-                );
-                agent.threads.insert(then_tid, then_thread);
-
+                // Update phase
                 if let Some(t) = agent.threads.get_mut(&owner_thread_id) {
                     if let ThreadStatus::Suspended(SuspendReason::Handle { phase, .. }) =
                         &mut t.status
@@ -283,53 +262,79 @@ pub fn process_body_signal(
                         };
                     }
                 }
+                spawn_child_thread(
+                    agent,
+                    then_tid,
+                    crate::ir::ThreadKind::HandleThen,
+                    owner_thread_id,
+                    events,
+                );
             } else {
                 // No then clause — set dst and resume parent
                 agent.set_var(dst, value);
-                if let Some(t) = agent.threads.get_mut(&owner_thread_id) {
-                    t.status = ThreadStatus::Running;
-                }
+                resume_thread(agent, owner_thread_id, events);
             }
         }
         Signal::FnReturn(value) => {
-            if let Some(t) = agent.threads.get_mut(&owner_thread_id) {
-                t.status = ThreadStatus::Completed(Signal::FnReturn(value));
-            }
+            finish_thread(agent, owner_thread_id, Signal::FnReturn(value), events);
         }
         _ => {}
     }
 }
 
-/// Process signal from a completed HANDLE_THEN thread.
+/// Process signal from a completed HandleThen thread.
 pub fn process_then_signal(
     agent: &mut AgentState,
     owner_thread_id: u32,
-    _then_tid: u32,
     signal: Signal,
+    events: &mut Vec<Event>,
 ) {
-    let dst = {
-        let t = match agent.threads.get(&owner_thread_id) {
-            Some(t) => t,
-            None => return, // owner already removed (cancelled)
-        };
-        match &t.status {
+    let dst = match agent.threads.get(&owner_thread_id) {
+        Some(t) => match &t.status {
             ThreadStatus::Suspended(SuspendReason::Handle { dst, .. }) => *dst,
             _ => return,
-        }
+        },
+        None => return,
     };
 
     match signal {
         Signal::Normal(value) => {
             agent.set_var(dst, value);
-            if let Some(t) = agent.threads.get_mut(&owner_thread_id) {
-                t.status = ThreadStatus::Running;
-            }
+            resume_thread(agent, owner_thread_id, events);
         }
         Signal::FnReturn(value) => {
-            if let Some(t) = agent.threads.get_mut(&owner_thread_id) {
-                t.status = ThreadStatus::Completed(Signal::FnReturn(value));
-            }
+            finish_thread(agent, owner_thread_id, Signal::FnReturn(value), events);
         }
         _ => {}
+    }
+}
+
+/// Route a reply to the requester (internal → direct resume, external → OutgoingReply).
+fn route_reply(
+    agent: &mut AgentState,
+    requester: &RequestOrigin,
+    value: Value,
+    events: &mut Vec<Event>,
+    replies: &mut Vec<OutgoingReply>,
+) {
+    if requester.from_agent_id == agent.agent_id {
+        // Internal: find waiting thread and resume directly
+        if let Some(waiting_tid) = event::find_request_thread(agent, &requester.request_id) {
+            if let Some(ThreadStatus::Suspended(SuspendReason::Request { dst, .. })) =
+                agent.threads.get(&waiting_tid).map(|t| &t.status)
+            {
+                let dst = *dst;
+                agent.set_var(dst, value);
+                resume_thread(agent, waiting_tid, events);
+            }
+        }
+    } else {
+        // External: push outgoing reply
+        replies.push(OutgoingReply {
+            to_agent_id: requester.from_agent_id.clone(),
+            to_agent_where: requester.from_agent_where.clone(),
+            request_id: requester.request_id.clone(),
+            value,
+        });
     }
 }

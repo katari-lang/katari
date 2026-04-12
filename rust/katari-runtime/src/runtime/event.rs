@@ -7,51 +7,59 @@ use super::agent::AgentState;
 use super::signal::Signal;
 use super::thread::{HandlePhase, PendingRequest, SuspendReason, ThreadStatus};
 
-/// Event in the global event queue.
-/// Every event has a fully resolved target (agent + thread).
+/// Event in the global event queue. Target thread is inside each EventKind variant.
 #[derive(Debug, Clone)]
 pub struct Event {
     pub agent_id: String,
-    pub thread_id: u32,
     pub kind: EventKind,
 }
 
 #[derive(Debug, Clone)]
 pub enum EventKind {
-    /// Execute thread from current PC to next async point.
-    Start,
+    /// Execute thread from current PC to next suspension point.
+    Execute(u32),
 
-    /// A child thread completed with a signal.
-    ChildThreadCompleted {
-        child_thread_id: u32,
+    /// A child thread completed (already removed). Dispatch signal to parent.
+    ThreadCompleted {
+        parent_id: u32,
+        child_id: u32,
         child_kind: ThreadKind,
         signal: Signal,
     },
 
-    /// Child agent completed → resume Call suspension.
-    ChildAgentCompleted {
-        child_agent_id: String,
-        result: Value,
-    },
-
-    /// Reply to a pending Request suspension.
-    Reply {
-        request_id: String,
-        value: Value,
-    },
+    /// Cancel a thread and all descendants.
+    CancelThread(u32),
 
     /// Incoming request routed to a handle scope.
     IncomingRequest {
+        owner_thread_id: u32,
         request: PendingRequest,
         handler_def_tid: u32,
     },
 
-    /// Cancel a specific thread. Propagates downward: pushes CancelThread
-    /// for direct children, detaches child agents, then removes the thread.
-    CancelThread,
+    /// Reply to a pending Request suspension.
+    Reply {
+        thread_id: u32,
+        request_id: String,
+        value: Value,
+    },
 
-    /// Terminate the agent.
-    Terminate,
+    /// Spawn a child agent (from ICall).
+    SpawnChildAgent {
+        child_agent_id: String,
+        agent_def_id: u32,
+        args: Vec<Value>,
+    },
+
+    /// Agent completed (root thread finished). Notifies parent, removes self.
+    AgentCompleted,
+
+    /// Child agent completed → resume Call suspension.
+    ChildAgentCompleted {
+        thread_id: u32,
+        child_agent_id: String,
+        result: Value,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -66,68 +74,60 @@ pub fn is_applicable(event: &Event, agents: &HashMap<String, AgentState>) -> boo
     };
 
     match &event.kind {
-        EventKind::Start => {
-            // Thread must exist and be Running
+        EventKind::Execute(tid) => {
             agent
                 .threads
-                .get(&event.thread_id)
+                .get(tid)
                 .is_some_and(|t| t.is_running())
-                && !is_held_by_handler(agent, event.thread_id)
+                && !is_held_by_handler(agent, *tid)
         }
 
-        EventKind::ChildThreadCompleted {
-            child_thread_id, ..
+        EventKind::ThreadCompleted {
+            parent_id,
+            child_id,
+            ..
         } => {
-            // Target thread must exist
-            let t = match agent.threads.get(&event.thread_id) {
+            let t = match agent.threads.get(parent_id) {
                 Some(t) => t,
                 None => return false,
             };
-            // Special: if target is a handle in RunningHandler, only handler
-            // completion is applicable (this is what unblocks the handle).
             if let ThreadStatus::Suspended(SuspendReason::Handle {
                 phase: HandlePhase::RunningHandler { handler_thread, .. },
                 ..
             }) = &t.status
             {
-                return *child_thread_id == *handler_thread;
+                return *child_id == *handler_thread;
             }
-            !is_held_by_handler(agent, event.thread_id)
+            !is_held_by_handler(agent, *parent_id)
         }
 
-        EventKind::IncomingRequest { .. } => {
-            // Only applicable if handle is in RunningBody and not held by outer handler.
-            if let Some(t) = agent.threads.get(&event.thread_id) {
+        EventKind::CancelThread(tid) => agent.threads.contains_key(tid),
+
+        EventKind::IncomingRequest {
+            owner_thread_id, ..
+        } => {
+            if let Some(t) = agent.threads.get(owner_thread_id) {
                 if let ThreadStatus::Suspended(SuspendReason::Handle {
                     phase: HandlePhase::RunningBody { .. },
                     ..
                 }) = &t.status
                 {
-                    return !is_held_by_handler(agent, event.thread_id);
+                    return !is_held_by_handler(agent, *owner_thread_id);
                 }
             }
             false
         }
 
-        EventKind::ChildAgentCompleted { .. } | EventKind::Reply { .. } => {
-            // Target thread must exist
-            if !agent.threads.contains_key(&event.thread_id) {
-                return false;
-            }
-            !is_held_by_handler(agent, event.thread_id)
+        EventKind::Reply { thread_id, .. } | EventKind::ChildAgentCompleted { thread_id, .. } => {
+            agent.threads.contains_key(thread_id)
+                && !is_held_by_handler(agent, *thread_id)
         }
 
-        // CancelThread is always applicable if the thread exists
-        EventKind::CancelThread => agent.threads.contains_key(&event.thread_id),
-
-        EventKind::Terminate => true,
+        EventKind::SpawnChildAgent { .. } | EventKind::AgentCompleted => true,
     }
 }
 
 /// Check if a thread is in the body subtree of a RunningHandler handle.
-///
-/// Walk up the parent chain. If we encounter a handle in RunningHandler
-/// and we came from its body_thread side, the thread is "held" (frozen).
 pub fn is_held_by_handler(agent: &AgentState, thread_id: u32) -> bool {
     let mut current = thread_id;
     loop {
@@ -154,9 +154,7 @@ pub fn is_held_by_handler(agent: &AgentState, thread_id: u32) -> bool {
 // Routing
 // ---------------------------------------------------------------------------
 
-/// Route an incoming request through the thread tree to find the matching
-/// handle scope. Returns `Some((handle_owner_tid, handler_def_tid))` or
-/// `None` if no match was found (should forward to parent agent).
+/// Route a request through the thread tree to find the matching handle scope.
 pub fn route_request_to_handle(
     agent: &AgentState,
     module: &IRModule,
@@ -177,8 +175,7 @@ pub fn route_request_to_handle(
             }) = &t.status
             {
                 if !matches!(phase, HandlePhase::RunningThen { .. }) {
-                    let hd = module.handles.iter().find(|h| h.id == *handle_def_id);
-                    if let Some(hd) = hd {
+                    if let Some(hd) = module.handles.iter().find(|h| h.id == *handle_def_id) {
                         if let Some((_, tid)) = hd
                             .req_cases
                             .iter()
