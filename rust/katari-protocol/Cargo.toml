@@ -1,0 +1,14 @@
+[package]
+name = "katari-protocol"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+axum.workspace = true
+reqwest.workspace = true

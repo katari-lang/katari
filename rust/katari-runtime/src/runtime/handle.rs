@@ -10,7 +10,7 @@ use super::signal::Signal;
 use super::thread::{
     HandlePhase, PendingRequest, RequestOrigin, SuspendReason, ThreadStatus,
 };
-use super::OutgoingReply;
+use katari_protocol::{AgentReplyBody, OutgoingKind, OutgoingMessage};
 
 /// Execute Handle instruction: suspend parent, spawn body thread.
 pub fn setup(
@@ -133,7 +133,7 @@ pub fn process_handler_signal(
     owner_thread_id: u32,
     signal: Signal,
     events: &mut Vec<Event>,
-    replies: &mut Vec<OutgoingReply>,
+    messages: &mut Vec<OutgoingMessage>,
 ) {
     let (dst, phase) = match agent.threads.get(&owner_thread_id) {
         Some(t) => match &t.status {
@@ -154,7 +154,7 @@ pub fn process_handler_signal(
                 owner_thread_id,
                 Signal::Continue(value, vec![]),
                 events,
-                replies,
+                messages,
             );
         }
         Signal::Continue(value, mutations) => {
@@ -177,7 +177,7 @@ pub fn process_handler_signal(
             } = phase
             {
                 // Route reply to requester
-                route_reply(agent, requester, value, events, replies);
+                route_reply(agent, requester, value, events, messages);
 
                 // Set phase back to RunningBody
                 if let Some(t) = agent.threads.get_mut(&owner_thread_id) {
@@ -309,13 +309,13 @@ pub fn process_then_signal(
     }
 }
 
-/// Route a reply to the requester (internal → direct resume, external → OutgoingReply).
+/// Route a reply to the requester (internal → direct resume, external → OutgoingMessage).
 fn route_reply(
     agent: &mut AgentState,
     requester: &RequestOrigin,
     value: Value,
     events: &mut Vec<Event>,
-    replies: &mut Vec<OutgoingReply>,
+    messages: &mut Vec<OutgoingMessage>,
 ) {
     if requester.from_agent_id == agent.agent_id {
         // Internal: find waiting thread and resume directly
@@ -330,11 +330,15 @@ fn route_reply(
         }
     } else {
         // External: push outgoing reply
-        replies.push(OutgoingReply {
-            to_agent_id: requester.from_agent_id.clone(),
-            to_agent_where: requester.from_agent_where.clone(),
-            request_id: requester.request_id.clone(),
-            value,
+        messages.push(OutgoingMessage {
+            to_url: requester.from_agent_where.clone(),
+            kind: OutgoingKind::Reply(AgentReplyBody {
+                request_id: requester.request_id.clone(),
+                result: serde_json::to_value(&value).unwrap_or(serde_json::Value::Null),
+                from_agent_id: agent.agent_id.clone(),
+                from_agent_where: agent.self_where.clone(),
+                agent_id: requester.from_agent_id.clone(),
+            }),
         });
     }
 }

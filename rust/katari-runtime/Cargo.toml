@@ -10,6 +10,7 @@ name = "katari-runtime"
 path = "src/main.rs"
 
 [dependencies]
+katari-protocol = { path = "../katari-protocol" }
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true

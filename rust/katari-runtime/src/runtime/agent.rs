@@ -27,6 +27,7 @@ pub struct AgentState {
     pub parent_agent_where: String,
     pub children: HashMap<String, u32>,
     pub parent_available_requests: HashSet<u32>,
+    pub self_where: String,
     pub status: AgentStatus,
 }
 
@@ -39,6 +40,7 @@ impl AgentState {
         parent_agent_where: String,
         parent_available_requests: HashSet<u32>,
         module: Arc<IRModule>,
+        self_where: String,
     ) -> Self {
         Self {
             agent_id,
@@ -51,6 +53,7 @@ impl AgentState {
             parent_agent_where,
             children: HashMap::new(),
             parent_available_requests,
+            self_where,
             status: AgentStatus::Running,
         }
     }

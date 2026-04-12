@@ -16,7 +16,7 @@ pub async fn run_agent(
     State(state): State<AppState>,
     Json(body): Json<RunRequest>,
 ) -> (StatusCode, Json<RunResponse>) {
-    let (response, pending_replies) = {
+    let (response, pending_messages) = {
         let mut rt = state.runtime.lock().await;
 
         let response = match rt.run_agent(&body.agent_name, body.args) {
@@ -65,12 +65,12 @@ pub async fn run_agent(
             }
         };
 
-        let replies = std::mem::take(&mut rt.outgoing_replies);
-        (response, replies)
+        let messages = std::mem::take(&mut rt.outgoing_messages);
+        (response, messages)
     };
 
-    // Send outgoing replies outside of mutex
-    super::protocol::send_outgoing_replies_ext(&state, pending_replies).await;
+    // Send outgoing messages outside of mutex
+    katari_protocol::send_outgoing_messages(&state.http_client, pending_messages).await;
 
     response
 }

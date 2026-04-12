@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["katari-runtime"]
+members = ["katari-protocol", "katari-runtime"]
 
 [workspace.package]
 version = "0.1.0"

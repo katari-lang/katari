@@ -18,7 +18,9 @@ use crate::value::Value;
 use self::agent::{AgentState, AgentStatus};
 use self::event::{Event, EventKind};
 use self::signal::Signal;
-use self::thread::{SuspendReason, ThreadState, ThreadStatus};
+use self::thread::{PendingRequest, SuspendReason, ThreadState, ThreadStatus};
+
+use katari_protocol::OutgoingMessage;
 
 // ---------------------------------------------------------------------------
 // Runtime — manages modules, agents, and the global event queue
@@ -32,16 +34,7 @@ pub struct Runtime {
     pub schemas: HashMap<String, serde_json::Value>,
     pub self_base_url: String,
     pub event_queue: VecDeque<Event>,
-    pub outgoing_replies: Vec<OutgoingReply>,
-}
-
-/// A reply that needs to be sent to an external agent via HTTP.
-#[derive(Debug, Clone)]
-pub struct OutgoingReply {
-    pub to_agent_id: String,
-    pub to_agent_where: String,
-    pub request_id: String,
-    pub value: Value,
+    pub outgoing_messages: Vec<OutgoingMessage>,
 }
 
 impl Runtime {
@@ -53,7 +46,7 @@ impl Runtime {
             schemas: HashMap::new(),
             self_base_url: base_url,
             event_queue: VecDeque::new(),
-            outgoing_replies: Vec::new(),
+            outgoing_messages: Vec::new(),
         }
     }
 
@@ -97,6 +90,7 @@ impl Runtime {
             String::new(),
             HashSet::new(),
             Arc::clone(&module),
+            self.self_base_url.clone(),
         );
 
         // Bind args to entry thread params
@@ -150,7 +144,7 @@ impl Runtime {
     /// Apply a single event.
     fn apply_event(&mut self, event: Event) {
         let mut events = Vec::new();
-        let mut replies = Vec::new();
+        let mut messages = Vec::new();
         let agent_id = event.agent_id.clone();
 
         match event.kind {
@@ -183,7 +177,7 @@ impl Runtime {
                         child_kind,
                         signal,
                         &mut events,
-                        &mut replies,
+                        &mut messages,
                     );
                 }
             }
@@ -277,6 +271,7 @@ impl Runtime {
                     self.self_base_url.clone(),
                     parent_available,
                     Arc::clone(&module),
+                    self.self_base_url.clone(),
                 );
 
                 if let Some(ir_t) = module.threads.iter().find(|t| t.id == entry_tid) {
@@ -343,11 +338,11 @@ impl Runtime {
             }
         }
 
-        // Drain events and replies
+        // Drain events and messages
         for e in events {
             self.event_queue.push_back(e);
         }
-        self.outgoing_replies.extend(replies);
+        self.outgoing_messages.extend(messages);
     }
 
     // -----------------------------------------------------------------------
@@ -394,7 +389,7 @@ fn dispatch_signal(
     child_kind: ThreadKind,
     signal: Signal,
     events: &mut Vec<Event>,
-    replies: &mut Vec<OutgoingReply>,
+    messages: &mut Vec<OutgoingMessage>,
 ) {
     match child_kind {
         ThreadKind::Block => {
@@ -404,7 +399,7 @@ fn dispatch_signal(
             handle::process_body_signal(agent, module, parent_id, signal, events);
         }
         ThreadKind::RequestHandler => {
-            handle::process_handler_signal(agent, module, parent_id, signal, events, replies);
+            handle::process_handler_signal(agent, module, parent_id, signal, events, messages);
         }
         ThreadKind::HandleThen => {
             handle::process_then_signal(agent, parent_id, signal, events);
@@ -416,5 +411,343 @@ fn dispatch_signal(
             for_loop::process_then_signal(agent, parent_id, signal, events);
         }
         ThreadKind::FnBody => {}
+    }
+}
+
+// ---------------------------------------------------------------------------
+// KatariProtocol implementation
+// ---------------------------------------------------------------------------
+
+impl katari_protocol::KatariProtocol for Runtime {
+    fn list_requests(&self, _module_name: Option<&str>) -> Vec<katari_protocol::RequestInfo> {
+        let module = match &self.module {
+            Some(m) => m,
+            None => return vec![],
+        };
+        module
+            .requests
+            .iter()
+            .map(|r| katari_protocol::RequestInfo {
+                request_id: r.id.to_string(),
+                request_where: self.self_base_url.clone(),
+                name: r.name.clone(),
+                description: String::new(),
+                arg_types: vec![],
+                return_type: serde_json::Value::Null,
+            })
+            .collect()
+    }
+
+    fn list_agent_defs(&self, _module_name: Option<&str>) -> Vec<katari_protocol::AgentDefInfo> {
+        let module = match &self.module {
+            Some(m) => m,
+            None => return vec![],
+        };
+        module
+            .agents
+            .iter()
+            .map(|a| katari_protocol::AgentDefInfo {
+                agent_def_id: a.id.to_string(),
+                agent_def_where: self.self_base_url.clone(),
+                name: a.name.clone(),
+                description: String::new(),
+                arg_types: vec![],
+                return_type: serde_json::Value::Null,
+                with_effects: vec![],
+            })
+            .collect()
+    }
+
+    fn list_agents(&self) -> Vec<katari_protocol::AgentSummary> {
+        self.agents
+            .iter()
+            .map(|(id, a)| katari_protocol::AgentSummary {
+                agent_id: id.clone(),
+                agent_where: a.self_where.clone(),
+                agent_def_id: a.agent_def_id.to_string(),
+                args: vec![],
+            })
+            .collect()
+    }
+
+    fn get_agent(
+        &self,
+        agent_id: &str,
+    ) -> Result<katari_protocol::AgentDetail, katari_protocol::ProtocolError> {
+        let agent = self
+            .agents
+            .get(agent_id)
+            .ok_or_else(|| katari_protocol::ProtocolError::AgentNotFound(agent_id.to_string()))?;
+
+        let module = &agent.module;
+        let with_effects: Vec<String> = agent
+            .parent_available_requests
+            .iter()
+            .filter_map(|rid| module.requests.iter().find(|r| r.id == *rid))
+            .map(|r| r.name.clone())
+            .collect();
+
+        let child_agents: Vec<katari_protocol::ChildAgentRef> = agent
+            .children
+            .keys()
+            .map(|cid| {
+                let child_where = self
+                    .agents
+                    .get(cid)
+                    .map(|c| c.self_where.clone())
+                    .unwrap_or_default();
+                katari_protocol::ChildAgentRef {
+                    agent_id: cid.clone(),
+                    agent_where: child_where,
+                }
+            })
+            .collect();
+
+        Ok(katari_protocol::AgentDetail {
+            agent_id: agent_id.to_string(),
+            agent_where: agent.self_where.clone(),
+            agent_def_id: agent.agent_def_id.to_string(),
+            args: vec![],
+            parent_agent_id: agent.parent_agent_id.clone(),
+            parent_agent_where: agent.parent_agent_where.clone(),
+            with_effects,
+            child_agents,
+        })
+    }
+
+    fn spawn_agent(
+        &mut self,
+        req: &katari_protocol::SpawnAgentRequest,
+    ) -> Result<
+        (
+            katari_protocol::SpawnAgentResponse,
+            Vec<OutgoingMessage>,
+        ),
+        katari_protocol::ProtocolError,
+    > {
+        let module = self
+            .module
+            .clone()
+            .ok_or_else(|| katari_protocol::ProtocolError::Internal("no module loaded".into()))?;
+
+        let agent_def_id: u32 = req
+            .agent_def_id
+            .parse()
+            .map_err(|_| katari_protocol::ProtocolError::AgentNotFound(req.agent_def_id.clone()))?;
+
+        let agent_def = module
+            .agents
+            .iter()
+            .find(|a| a.id == agent_def_id)
+            .ok_or_else(|| {
+                katari_protocol::ProtocolError::AgentNotFound(req.agent_def_id.clone())
+            })?;
+
+        let entry_tid = agent_def.entry;
+        let agent_id = format!("agent-{}", uuid::Uuid::new_v4());
+
+        let args: Vec<Value> = req
+            .args
+            .iter()
+            .map(|v| serde_json::from_value(v.clone()).unwrap_or(Value::Null))
+            .collect();
+
+        let with_effects: HashSet<u32> = req
+            .with_effects
+            .iter()
+            .filter_map(|name| module.requests.iter().find(|r| r.name == *name).map(|r| r.id))
+            .collect();
+
+        let mut agent_state = AgentState::new(
+            agent_id.clone(),
+            agent_def_id,
+            entry_tid,
+            req.parent_agent_id.clone(),
+            req.parent_agent_where.clone(),
+            with_effects,
+            Arc::clone(&module),
+            self.self_base_url.clone(),
+        );
+
+        if let Some(ir_t) = module.threads.iter().find(|t| t.id == entry_tid) {
+            for (param, arg) in ir_t.params.iter().zip(args.iter()) {
+                agent_state.set_var(*param, arg.clone());
+            }
+        }
+
+        let root_thread = ThreadState::new(entry_tid, ThreadKind::FnBody, None);
+        agent_state.threads.insert(entry_tid, root_thread);
+        self.agents.insert(agent_id.clone(), agent_state);
+
+        self.event_queue.push_back(Event {
+            agent_id: agent_id.clone(),
+            kind: EventKind::Execute(entry_tid),
+        });
+        self.run_event_loop();
+
+        let response = katari_protocol::SpawnAgentResponse {
+            agent_id: agent_id.clone(),
+            agent_where: self.self_base_url.clone(),
+        };
+        Ok((response, std::mem::take(&mut self.outgoing_messages)))
+    }
+
+    fn deliver_request(
+        &mut self,
+        req: &katari_protocol::AgentRequestBody,
+    ) -> Result<Vec<OutgoingMessage>, katari_protocol::ProtocolError> {
+        // Find the parent agent that has from_agent_id as a child
+        let (agent_id, source_thread_id) = self
+            .agents
+            .iter()
+            .find_map(|(aid, a)| {
+                a.children
+                    .get(&req.from_agent_id)
+                    .map(|&tid| (aid.clone(), tid))
+            })
+            .ok_or_else(|| {
+                katari_protocol::ProtocolError::ChildNotFound(req.from_agent_id.clone())
+            })?;
+
+        let module = Arc::clone(
+            &self
+                .agents
+                .get(&agent_id)
+                .expect("agent must exist")
+                .module,
+        );
+
+        // Resolve request_name → req_def_id
+        let req_def_id = module
+            .requests
+            .iter()
+            .find(|r| r.name == req.request_name)
+            .map(|r| r.id)
+            .ok_or_else(|| {
+                katari_protocol::ProtocolError::RequestNotFound(req.request_name.clone())
+            })?;
+
+        let args: Vec<Value> = req
+            .args
+            .iter()
+            .map(|v| serde_json::from_value(v.clone()).unwrap_or(Value::Null))
+            .collect();
+
+        let pending = PendingRequest {
+            request_id: req.request_id.clone(),
+            req_def_id,
+            args,
+            from_agent_id: req.from_agent_id.clone(),
+            from_agent_where: req.from_agent_where.clone(),
+        };
+
+        let agent = self.agents.get(&agent_id).expect("agent must exist");
+        match event::route_request_to_handle(agent, &module, source_thread_id, req_def_id) {
+            Some((owner_tid, handler_tid)) => {
+                self.push_event(Event {
+                    agent_id: agent_id.clone(),
+                    kind: EventKind::IncomingRequest {
+                        owner_thread_id: owner_tid,
+                        request: pending,
+                        handler_def_tid: handler_tid,
+                    },
+                });
+            }
+            None => {
+                tracing::warn!(
+                    request_name = %req.request_name,
+                    "no handle scope for external request"
+                );
+            }
+        }
+
+        self.run_event_loop();
+        Ok(std::mem::take(&mut self.outgoing_messages))
+    }
+
+    fn deliver_reply(
+        &mut self,
+        req: &katari_protocol::AgentReplyBody,
+    ) -> Result<Vec<OutgoingMessage>, katari_protocol::ProtocolError> {
+        let agent = self
+            .agents
+            .get(&req.agent_id)
+            .ok_or_else(|| katari_protocol::ProtocolError::AgentNotFound(req.agent_id.clone()))?;
+
+        let thread_id =
+            event::find_request_thread(agent, &req.request_id).ok_or_else(|| {
+                katari_protocol::ProtocolError::RequestNotFound(req.request_id.clone())
+            })?;
+
+        let value: Value = serde_json::from_value(req.result.clone()).unwrap_or(Value::Null);
+
+        self.push_event(Event {
+            agent_id: req.agent_id.clone(),
+            kind: EventKind::Reply {
+                thread_id,
+                request_id: req.request_id.clone(),
+                value,
+            },
+        });
+
+        self.run_event_loop();
+        Ok(std::mem::take(&mut self.outgoing_messages))
+    }
+
+    fn terminate_agent(
+        &mut self,
+        _req: &katari_protocol::TerminateBody,
+    ) -> Result<Vec<OutgoingMessage>, katari_protocol::ProtocolError> {
+        Err(katari_protocol::ProtocolError::NotImplemented(
+            "terminate not yet implemented".into(),
+        ))
+    }
+
+    fn deliver_return(
+        &mut self,
+        req: &katari_protocol::AgentReturnBody,
+    ) -> Result<Vec<OutgoingMessage>, katari_protocol::ProtocolError> {
+        // agent_id = parent agent (on this server)
+        // from_agent_id = completed child agent
+        let agent = self
+            .agents
+            .get(&req.agent_id)
+            .ok_or_else(|| katari_protocol::ProtocolError::AgentNotFound(req.agent_id.clone()))?;
+
+        let spawning_tid = agent
+            .children
+            .get(&req.from_agent_id)
+            .copied()
+            .ok_or_else(|| {
+                katari_protocol::ProtocolError::ChildNotFound(req.from_agent_id.clone())
+            })?;
+
+        let result: Value = serde_json::from_value(req.result.clone()).unwrap_or(Value::Null);
+
+        self.push_event(Event {
+            agent_id: req.agent_id.clone(),
+            kind: EventKind::ChildAgentCompleted {
+                thread_id: spawning_tid,
+                child_agent_id: req.from_agent_id.clone(),
+                result,
+            },
+        });
+
+        // Remove child tracking
+        if let Some(agent) = self.agents.get_mut(&req.agent_id) {
+            agent.children.remove(&req.from_agent_id);
+        }
+
+        self.run_event_loop();
+        Ok(std::mem::take(&mut self.outgoing_messages))
+    }
+
+    fn deliver_terminate_ack(
+        &mut self,
+        _req: &katari_protocol::TerminateAckBody,
+    ) -> Result<Vec<OutgoingMessage>, katari_protocol::ProtocolError> {
+        Err(katari_protocol::ProtocolError::NotImplemented(
+            "terminate_ack not yet implemented".into(),
+        ))
     }
 }
