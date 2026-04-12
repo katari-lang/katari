@@ -1,0 +1,9 @@
+@"名前を受け取って挨拶を返す"
+agent greet(name: string) -> string {
+  f"Hello, ${name}!"
+}
+
+@"二つの整数を足す"
+agent add(a: integer, b: integer) -> integer {
+  a + b
+}

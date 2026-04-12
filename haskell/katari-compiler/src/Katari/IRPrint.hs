@@ -236,7 +236,8 @@ printI nt cs = \case
   IHandle v hid ->
     vn nt v <> " = handle hnd" <> showId hid
   IContinue v upds ->
-    "continue " <> vn nt v
+    "continue "
+      <> vn nt v
       <> (if null upds then "" else " {" <> commaSep [vn nt sv <> " := " <> vn nt nv | (sv, nv) <- upds] <> "}")
   IHandleBreak v -> "handle_break " <> vn nt v
   IFor v fid ->

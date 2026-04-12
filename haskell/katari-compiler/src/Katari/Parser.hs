@@ -19,13 +19,14 @@ import Data.Text qualified as T
 import Data.Void (Void)
 import Katari.Lexer (FStrPart (..), TokKind (..), Token (..))
 import Katari.Syntax
-  ( BinOp (..),
+  ( AgentDecl (..),
+    BinOp (..),
     Block (..),
     CaseArm (..),
     Decl (..),
     Expr (..),
-    ExternalReqDecl (..),
     ExternalAgentDecl (..),
+    ExternalReqDecl (..),
     ForExpr (..),
     HandleStmt (..),
     ImportDecl (..),
@@ -38,7 +39,6 @@ import Katari.Syntax
     RequestEffect (..),
     SrcSpan (..),
     Stmt (..),
-    AgentDecl (..),
     TemplElem (..),
     Type (..),
     TypeAliasDecl (..),

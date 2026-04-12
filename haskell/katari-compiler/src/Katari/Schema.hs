@@ -2,8 +2,6 @@ module Katari.Schema
   ( SchemaKind (..),
     SchemaOutput (..),
     moduleSchemas,
-    agentSchema,
-    requestSchema,
     typeAliasSchema,
     typeToSchema,
     normalizedToSchema,
@@ -26,17 +24,16 @@ import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
 import Katari.Module
-  ( GlobalEnv (..),
+  ( AgentInfo (..),
+    GlobalEnv (..),
     RequestInfo (..),
-    AgentInfo (..),
     TypeInfo,
     aliasesFor,
     primModuleName,
   )
-import Katari.Syntax (ObjField (..), Type (..))
+import Katari.Syntax (ObjField (..), RequestEffect (..), Type (..))
 import Katari.Types
   ( BoolKind (..),
-    boolFull,
     Discriminator (..),
     FieldInfo (..),
     IntPart (..),
@@ -46,6 +43,7 @@ import Katari.Types
     NumericKind (..),
     ObjectFields (..),
     StringKind (..),
+    boolFull,
     normalize,
   )
 
@@ -59,7 +57,10 @@ data SchemaKind = SKAgent | SKRequest | SKType
 data SchemaOutput = SchemaOutput
   { soName :: Text,
     soKind :: SchemaKind,
-    soSchema :: Value
+    soDescription :: Maybe Text,
+    soArgType :: Value,
+    soReturnType :: Value,
+    soWithEffects :: [Text]
   }
   deriving (Show)
 
@@ -68,21 +69,50 @@ data SchemaOutput = SchemaOutput
 moduleSchemas :: GlobalEnv -> [SchemaOutput]
 moduleSchemas ge =
   let agents =
-        [ SchemaOutput qname SKAgent (agentSchema ge ai)
+        [ SchemaOutput
+            { soName = qname,
+              soKind = SKAgent,
+              soDescription = aiAnnot ai,
+              soArgType = paramsToInputSchema ge (aiHomeModule ai) (aiParams ai),
+              soReturnType = typeToSchema ge (aiHomeModule ai) (aiRet ai),
+              soWithEffects = effectNames ge ai
+            }
           | (qname, ai) <- Map.toList (geAgents ge),
             not (isPrimQname qname)
         ]
       reqs =
-        [ SchemaOutput qname SKRequest (requestSchema ge ri)
+        [ SchemaOutput
+            { soName = qname,
+              soKind = SKRequest,
+              soDescription = riAnnot ri,
+              soArgType = paramsToInputSchema ge (riHomeModule ri) (riParams ri),
+              soReturnType = typeToSchema ge (riHomeModule ri) (riRet ri),
+              soWithEffects = []
+            }
           | (qname, ri) <- Map.toList (geRequests ge),
             not (isPrimQname qname)
         ]
       tys =
-        [ SchemaOutput qname SKType (typeAliasSchema ge qname ti)
+        [ SchemaOutput
+            { soName = qname,
+              soKind = SKType,
+              soDescription = Nothing,
+              soArgType = typeAliasSchema ge qname ti,
+              soReturnType = Null,
+              soWithEffects = []
+            }
           | (qname, ti) <- Map.toList (geTypes ge),
             not (isPrimQname qname)
         ]
    in agents ++ reqs ++ tys
+
+-- | Extract qualified request names from an agent's with clause.
+effectNames :: GlobalEnv -> AgentInfo -> [Text]
+effectNames ge ai = case aiWith ai of
+  Just (RENames ns) ->
+    let modAliases = aliasesFor ge (aiHomeModule ai)
+     in map (\n -> fromMaybe n (Map.lookup n modAliases)) ns
+  _ -> []
 
 isPrimQname :: Text -> Bool
 isPrimQname q =
@@ -94,42 +124,8 @@ encodeSchema :: Value -> ByteString
 encodeSchema = encode
 
 -- ----------------------------------------------------------------------------
--- Agent / Request / Type schema generation
+-- Type schema generation
 -- ----------------------------------------------------------------------------
-
-agentSchema :: GlobalEnv -> AgentInfo -> Value
-agentSchema ge ai =
-  let mname = aiHomeModule ai
-      inputSchema = paramsToInputSchema ge mname (aiParams ai)
-      outputSchema = typeToSchema ge mname (aiRet ai)
-      base =
-        object
-          [ "type" .= ("object" :: Text),
-            "properties"
-              .= object
-                [ "input" .= inputSchema,
-                  "output" .= outputSchema
-                ],
-            "required" .= (["input", "output"] :: [Text])
-          ]
-   in applyDescription (aiAnnot ai) base
-
-requestSchema :: GlobalEnv -> RequestInfo -> Value
-requestSchema ge ri =
-  let mname = riHomeModule ri
-      inputSchema = paramsToInputSchema ge mname (riParams ri)
-      outputSchema = typeToSchema ge mname (riRet ri)
-      base =
-        object
-          [ "type" .= ("object" :: Text),
-            "properties"
-              .= object
-                [ "input" .= inputSchema,
-                  "output" .= outputSchema
-                ],
-            "required" .= (["input", "output"] :: [Text])
-          ]
-   in applyDescription (riAnnot ri) base
 
 typeAliasSchema :: GlobalEnv -> Text -> TypeInfo -> Value
 typeAliasSchema ge qname _ti =

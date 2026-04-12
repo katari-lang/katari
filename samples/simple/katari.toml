@@ -1,0 +1,6 @@
+[project]
+name = "simple"
+version = "0.1.0"
+
+[runtime]
+url = "http://localhost:8000"

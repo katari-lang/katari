@@ -408,12 +408,31 @@ noSemiAfter = (`Set.member` noSemiAfterSet)
 noSemiAfterSet :: Set TokKind
 noSemiAfterSet =
   Set.fromList
-    [ TKLBrace, TKLParen, TKLBracket, TKComma,
-      TKPlus, TKMinus, TKStar, TKSlash,
-      TKEqEq, TKNeq, TKLt, TKGt, TKLe, TKGe,
-      TKAmpAmp, TKPipePipe, TKPlusPlus,
-      TKEq, TKArrow, TKFatArrow,
-      TKColon, TKWith, TKOf, TKAt, TKDot
+    [ TKLBrace,
+      TKLParen,
+      TKLBracket,
+      TKComma,
+      TKPlus,
+      TKMinus,
+      TKStar,
+      TKSlash,
+      TKEqEq,
+      TKNeq,
+      TKLt,
+      TKGt,
+      TKLe,
+      TKGe,
+      TKAmpAmp,
+      TKPipePipe,
+      TKPlusPlus,
+      TKEq,
+      TKArrow,
+      TKFatArrow,
+      TKColon,
+      TKWith,
+      TKOf,
+      TKAt,
+      TKDot
     ]
 
 -- Tokens that suppress semicolon when at start of next line
@@ -423,9 +442,16 @@ noSemiBefore = (`Set.member` noSemiBeforeSet)
 noSemiBeforeSet :: Set TokKind
 noSemiBeforeSet =
   Set.fromList
-    [ TKDot, TKRParen, TKRBracket, TKRBrace,
-      TKCase, TKElse, TKThen, TKOf,
-      TKPipe, TKAmp
+    [ TKDot,
+      TKRParen,
+      TKRBracket,
+      TKRBrace,
+      TKCase,
+      TKElse,
+      TKThen,
+      TKOf,
+      TKPipe,
+      TKAmp
     ]
 
 insertSemicolons :: [Token] -> [Token]

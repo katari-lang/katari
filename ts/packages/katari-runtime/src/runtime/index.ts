@@ -58,6 +58,12 @@ export class Runtime implements KatariProtocol {
   servers = new Map<string, string>();
   externalAgents = new Map<number, string>();
 
+  // Toplevel agent tracking
+  toplevelAgents = new Set<string>();
+  toplevelResults = new Map<string, { status: string; result?: Value }>();
+  onAgentCompleted?: (agentId: string, result: Value) => void;
+  onAgentError?: (agentId: string) => void;
+
   private execCb: ExecuteCallbacks;
 
   constructor(baseUrl: string) {
@@ -126,6 +132,7 @@ export class Runtime implements KatariProtocol {
     }
 
     this.agents.set(agentId, agent);
+    this.toplevelAgents.add(agentId);
     this.eventQueue.push({ agentId, kind: { tag: "Execute", threadId: entryTid } });
     this.runEventLoop();
     return agentId;
@@ -325,6 +332,21 @@ export class Runtime implements KatariProtocol {
         if (!agent) break;
 
         const result = agent.status.tag === "Completed" ? agent.status.value : null;
+
+        // Toplevel agent completed — cache result, fire callback, remove from memory
+        if (this.toplevelAgents.has(agentId)) {
+          if (agent.status.tag === "Completed") {
+            this.toplevelResults.set(agentId, { status: "completed", result });
+            this.onAgentCompleted?.(agentId, result);
+          } else {
+            this.toplevelResults.set(agentId, { status: "error" });
+            this.onAgentError?.(agentId);
+          }
+          this.toplevelAgents.delete(agentId);
+          this.agents.delete(agentId);
+          break;
+        }
+
         const parentAgent = this.agents.get(agent.parentAgentId);
 
         if (parentAgent && parentAgent.children.has(agentId)) {
@@ -392,6 +414,13 @@ export class Runtime implements KatariProtocol {
         agent.status = { tag: "Error" };
         agent.threads.clear();
 
+        // Toplevel agent terminated — cache result, fire callback
+        if (this.toplevelAgents.has(targetAgentId)) {
+          this.toplevelResults.set(targetAgentId, { status: "stopped" });
+          this.onAgentError?.(targetAgentId);
+          this.toplevelAgents.delete(targetAgentId);
+        }
+
         if (fromAgentWhere) {
           newMessages.push({
             toUrl: fromAgentWhere,
@@ -458,12 +487,15 @@ export class Runtime implements KatariProtocol {
 
   getAgentStatus(agentId: string): { status: string; result?: Value } | null {
     const agent = this.agents.get(agentId);
-    if (!agent) return null;
-    switch (agent.status.tag) {
-      case "Running": return { status: "running" };
-      case "Completed": return { status: "completed", result: agent.status.value };
-      case "Error": return { status: "error" };
+    if (agent) {
+      switch (agent.status.tag) {
+        case "Running": return { status: "running" };
+        case "Completed": return { status: "completed", result: agent.status.value };
+        case "Error": return { status: "error" };
+      }
     }
+    // Fallback to cached toplevel results
+    return this.toplevelResults.get(agentId) ?? null;
   }
 
   // =========================================================================

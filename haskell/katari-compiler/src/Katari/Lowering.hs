@@ -42,7 +42,8 @@ import Katari.Module
     resolveQualified,
   )
 import Katari.Syntax
-  ( BinOp (..),
+  ( AgentDecl (..),
+    BinOp (..),
     Block (..),
     CaseArm (..),
     Decl (..),
@@ -57,7 +58,6 @@ import Katari.Syntax
     PrimTag (..),
     RequestDecl (..),
     Stmt (..),
-    AgentDecl (..),
     TemplElem (..),
     Type,
     UnOp (..),

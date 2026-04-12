@@ -24,7 +24,12 @@ agent run_bot(channel_ids: array[ChannelId]) -> null {
     "ext.send_message",
     "ext.reply_to",
     "ext.fetch_messages",
-    "ext.web_search"
+    "ext.web_search",
+    "ext.create_sandbox",
+    "ext.exec_in_sandbox",
+    "ext.write_file_in_sandbox",
+    "ext.read_file_from_sandbox",
+    "ext.destroy_sandbox"
   ]
 
   // 全イベントを AI に委譲

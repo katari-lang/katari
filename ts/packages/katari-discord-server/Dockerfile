@@ -1,0 +1,8 @@
+FROM node:22-alpine
+WORKDIR /app
+COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
+COPY packages/ packages/
+RUN corepack enable && pnpm install --frozen-lockfile
+RUN pnpm -r build
+WORKDIR /app/packages/katari-discord-server
+CMD ["node", "dist/index.js"]

@@ -22,15 +22,15 @@ import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
 import Katari.Syntax
-  ( Decl (..),
-    ExternalReqDecl (..),
+  ( AgentDecl (..),
+    Decl (..),
     ExternalAgentDecl (..),
+    ExternalReqDecl (..),
     ImportDecl (..),
     Module (..),
     ObjField (..),
     RequestDecl (..),
     RequestEffect (..),
-    AgentDecl (..),
     Type (..),
     TypeAliasDecl (..),
     ValDecl (..),

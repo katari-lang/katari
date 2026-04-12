@@ -1,0 +1,91 @@
+services:
+  runtime:
+    build:
+      context: ./ts
+      dockerfile: packages/katari-runtime/Dockerfile
+    ports:
+      - "${KATARI_PORT:-8000}:8000"
+    environment:
+      - PORT=8000
+      - DATABASE_URL=postgresql://katari:katari@db:5432/katari
+      - KATARI_BASE_URL=http://runtime:8000/katari
+    depends_on:
+      db:
+        condition: service_healthy
+
+  db:
+    image: postgres:17-alpine
+    environment:
+      - POSTGRES_USER=katari
+      - POSTGRES_PASSWORD=katari
+      - POSTGRES_DB=katari
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "${KATARI_DB_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U katari"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  discord:
+    build:
+      context: ./ts
+      dockerfile: packages/katari-discord-server/Dockerfile
+    ports:
+      - "${KATARI_DISCORD_PORT:-8001}:8001"
+    environment:
+      - PORT=8001
+      - SELF_BASE_URL=http://discord:8001/katari
+      - DISCORD_TOKEN=${DISCORD_TOKEN}
+
+  ai:
+    build:
+      context: ./ts
+      dockerfile: packages/katari-ai-server/Dockerfile
+    ports:
+      - "${KATARI_AI_PORT:-8002}:8002"
+    environment:
+      - PORT=8002
+      - SELF_BASE_URL=http://ai:8002/katari
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - AI_PROVIDER=${AI_PROVIDER:-gemini}
+      - TOOL_ROUTES=${TOOL_ROUTES}
+
+  cron:
+    build:
+      context: ./ts
+      dockerfile: packages/katari-cron-server/Dockerfile
+    ports:
+      - "${KATARI_CRON_PORT:-8003}:8003"
+    environment:
+      - PORT=8003
+      - SELF_BASE_URL=http://cron:8003/katari
+
+  websearch:
+    build:
+      context: ./ts
+      dockerfile: packages/katari-websearch-server/Dockerfile
+    ports:
+      - "${KATARI_WEBSEARCH_PORT:-8004}:8004"
+    environment:
+      - PORT=8004
+      - SELF_BASE_URL=http://websearch:8004/katari
+      - SEARCH_API_KEY=${SEARCH_API_KEY}
+      - SEARCH_ENGINE_ID=${SEARCH_ENGINE_ID}
+
+  sandbox:
+    build:
+      context: ./ts
+      dockerfile: packages/katari-sandbox-server/Dockerfile
+    ports:
+      - "${KATARI_SANDBOX_PORT:-8005}:8005"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - PORT=8005
+      - SELF_BASE_URL=http://sandbox:8005/katari
+
+volumes:
+  pgdata:

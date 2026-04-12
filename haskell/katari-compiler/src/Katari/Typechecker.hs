@@ -12,14 +12,15 @@ import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Katari.Module
-  ( GlobalEnv (..),
+  ( AgentInfo (..),
+    GlobalEnv (..),
     RequestInfo (..),
-    AgentInfo (..),
     ValInfo (..),
     resolveQualified,
   )
 import Katari.Syntax
-  ( BinOp (..),
+  ( AgentDecl (..),
+    BinOp (..),
     Block (..),
     CaseArm (..),
     Decl (..),
@@ -33,7 +34,6 @@ import Katari.Syntax
     RequestEffect (..),
     SrcSpan,
     Stmt (..),
-    AgentDecl (..),
     TemplElem (..),
     Type (..),
     UnOp (..),
@@ -59,11 +59,11 @@ import Katari.Types
     ntNull,
     ntNumber,
     ntString,
+    ntToLitVal,
     patternTypeNT,
     subtractNT,
     subtypeNT,
     unionNT,
-    ntToLitVal,
   )
 
 -- ---------------------------------------------------------------------------
@@ -226,12 +226,16 @@ inferHandle :: TypeEnv -> SrcSpan -> HandleStmt -> [Stmt] -> TC NormalizedType
 inferHandle env sp hs rest = do
   let ge = teGlobal env
   -- Check state var init expressions and collect types
-  stateVarTypes <- mapM (\(name, ty, _, initExpr) -> do
-    let nt = normalizeIn env ty
-    initNT <- inferExpr env initExpr
-    unless (subtypeNT initNT nt) $
-      Left (TypeMismatch sp initNT nt)
-    return (name, nt)) (hParams hs)
+  stateVarTypes <-
+    mapM
+      ( \(name, ty, _, initExpr) -> do
+          let nt = normalizeIn env ty
+          initNT <- inferExpr env initExpr
+          unless (subtypeNT initNT nt) $
+            Left (TypeMismatch sp initNT nt)
+          return (name, nt)
+      )
+      (hParams hs)
   let stateEnv = withVars stateVarTypes env
   -- Check each request case body with teContinue set to the request's return type
   forM_ (hReqCases hs) $ \(reqName, pats, body) -> do
@@ -363,8 +367,9 @@ inferExpr env = \case
         nf = emptyNF {nfObject = Just objFields}
     -- If exactly one field is marked uniq and has a singleton literal type, produce NTDISC
     case [(name, fiType fi) | (name, True, _) <- fields, Just fi <- [Map.lookup name (Map.fromList fieldNTs)]] of
-      [(discName, discType)] | Just lv <- ntToLitVal discType ->
-        return $ NTDISC (Discriminator discName (Map.singleton lv nf))
+      [(discName, discType)]
+        | Just lv <- ntToLitVal discType ->
+            return $ NTDISC (Discriminator discName (Map.singleton lv nf))
       _ -> return (NTFields nf)
   ECall sp callee args -> case callee of
     EVar _ name -> inferCall env sp name args

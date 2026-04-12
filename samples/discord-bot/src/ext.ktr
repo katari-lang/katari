@@ -56,3 +56,32 @@ external request notify(time: string @"現在時刻") -> null from "cron:notify"
 external agent web_search(
   query: string @"検索クエリ"
 ) -> array[SearchResult] from "websearch:search"
+
+// ─── Sandbox サーバー ────────────────────────────────────────────
+
+@"Docker sandbox を作成する"
+external agent create_sandbox() -> string from "sandbox:create"
+
+@"sandbox でコマンドを実行する"
+external agent exec_in_sandbox(
+  sandbox_id: string @"サンドボックスID",
+  command: string @"実行するコマンド"
+) -> string from "sandbox:exec"
+
+@"sandbox にファイルを書き込む"
+external agent write_file_in_sandbox(
+  sandbox_id: string @"サンドボックスID",
+  path: string @"ファイルパス",
+  content: string @"ファイル内容"
+) -> null from "sandbox:write_file"
+
+@"sandbox からファイルを読み込む"
+external agent read_file_from_sandbox(
+  sandbox_id: string @"サンドボックスID",
+  path: string @"ファイルパス"
+) -> string from "sandbox:read_file"
+
+@"sandbox を破棄する"
+external agent destroy_sandbox(
+  sandbox_id: string @"サンドボックスID"
+) -> null from "sandbox:destroy"

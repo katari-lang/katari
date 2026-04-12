@@ -9,7 +9,7 @@ import { decodeModule } from "./ir.js";
 import { Db } from "./db.js";
 
 // ===========================================================================
-// Request/Response types for /apply and /run
+// Request/Response types
 // ===========================================================================
 
 interface ApplyRequest {
@@ -17,7 +17,7 @@ interface ApplyRequest {
   agents: Record<string, number>;
   schemas?: Record<string, unknown>;
   servers?: Record<string, string>;
-  external_agents?: Record<string, string>; // agent_def_id → "server:name"
+  external_agents?: Record<string, string>;
 }
 
 interface ApplyResponse {
@@ -26,19 +26,6 @@ interface ApplyResponse {
   module_name?: string;
   agents?: { id: number; name: string }[];
   requests?: { id: number; name: string }[];
-}
-
-interface RunRequest {
-  agent_name: string;
-  args: JsonValue[];
-}
-
-interface RunResponse {
-  ok: boolean;
-  agent_id?: string;
-  status: string;
-  result?: JsonValue;
-  error?: string;
 }
 
 // ===========================================================================
@@ -65,7 +52,10 @@ export function buildApp(runtime: Runtime, db: Db): Hono {
     }
   };
 
+  // ==========================================================================
   // POST /apply
+  // ==========================================================================
+
   app.post("/apply", async (c) => {
     const body = (await c.req.json()) as ApplyRequest;
 
@@ -85,7 +75,7 @@ export function buildApp(runtime: Runtime, db: Db): Hono {
       runtime.applyModule(module, nameMap, schemas, servers, externalAgents);
 
       // Save to DB
-      db.saveModule(
+      await db.saveModule(
         module.name,
         binary,
         body.agents,
@@ -109,61 +99,141 @@ export function buildApp(runtime: Runtime, db: Db): Hono {
     }
   });
 
-  // POST /run
-  app.post("/run", async (c) => {
-    const body = (await c.req.json()) as RunRequest;
+  // ==========================================================================
+  // GET /schema/agents — agent defs with schemas (for CLI run selection)
+  // ==========================================================================
+
+  app.get("/schema/agents", (c) => {
+    const module = runtime.module;
+    if (!module) return c.json({ agents: [] });
+
+    const agents = module.agents.map((a) => ({
+      id: a.id,
+      name: a.name,
+      schema: runtime.schemas.get(a.name) ?? null,
+    }));
+    return c.json({ agents });
+  });
+
+  // ==========================================================================
+  // /agents — toplevel agent management (sub-router to avoid Hono type depth)
+  // ==========================================================================
+
+  const agentsRouter = new Hono();
+
+  // GET /agents
+  agentsRouter.get("/", async (c) => {
+    const rows = await db.listToplevelAgents();
+    return c.json({ agents: rows });
+  });
+
+  // POST /agents
+  agentsRouter.post("/", async (c) => {
+    const body = (await c.req.json()) as { agent_name: string; args?: JsonValue[] };
 
     try {
-      const agentId = runtime.runAgent(body.agent_name, body.args as Value[]);
-      const status = runtime.getAgentStatus(agentId);
+      const agentId = runtime.runAgent(body.agent_name, (body.args ?? []) as Value[]);
+
+      const agentDefId = runtime.agentNameMap.get(body.agent_name);
+      await db.saveToplevelAgent(
+        agentId,
+        agentDefId ?? 0,
+        body.agent_name,
+        body.args ?? null
+      );
 
       const msgs = runtime.drainMessages();
       handleMessages(msgs);
 
-      const response: RunResponse = {
+      const status = runtime.getAgentStatus(agentId);
+      return c.json({
+        ok: true,
+        agent_id: agentId,
+        status: status?.status ?? "running",
+        result: (status?.result as JsonValue) ?? null,
+      });
+    } catch (e) {
+      return c.json({ ok: false, error: String(e) }, 400);
+    }
+  });
+
+  // GET /agents/:id
+  // @ts-expect-error Hono deep type instantiation with /:id + /:id/stop
+  agentsRouter.get("/:id", async (c) => {
+    const id = c.req.param("id") as string;
+
+    const memStatus = runtime.getAgentStatus(id);
+    if (memStatus) {
+      return c.json({
+        id,
+        status: memStatus.status,
+        result: (memStatus.result as JsonValue) ?? null,
+      });
+    }
+
+    const row = await db.getToplevelAgent(id);
+    if (!row) return c.json({ error: "not found" }, 404);
+    return c.json(row);
+  });
+
+  // POST /agents/:id/stop
+  agentsRouter.post("/:id/stop", async (c) => {
+    const id = c.req.param("id");
+    const agent = runtime.agents.get(id);
+    if (!agent) return c.json({ error: "agent not running" }, 404);
+
+    runtime.eventQueue.push({
+      agentId: id,
+      kind: {
+        tag: "TerminateAgent",
+        agentId: id,
+        fromAgentId: "cli",
+        fromAgentWhere: "",
+      },
+    });
+    runtime.runEventLoop();
+    const msgs = runtime.drainMessages();
+    handleMessages(msgs);
+
+    await db.updateToplevelAgent(id, "stopped", null);
+    return c.json({ ok: true });
+  });
+
+  app.route("/agents", agentsRouter);
+
+  // ==========================================================================
+  // Legacy /run endpoints (deprecated)
+  // ==========================================================================
+
+  app.post("/run", async (c) => {
+    c.header("X-Deprecated", "Use POST /agents instead");
+    const body = (await c.req.json()) as { agent_name: string; args: JsonValue[] };
+    try {
+      const agentId = runtime.runAgent(body.agent_name, body.args as Value[]);
+      const status = runtime.getAgentStatus(agentId);
+      const msgs = runtime.drainMessages();
+      handleMessages(msgs);
+      return c.json({
         ok: true,
         agent_id: agentId,
         status: status?.status ?? "running",
         result: status?.result as JsonValue,
-      };
-      return c.json(response);
+      });
     } catch (e) {
-      return c.json(
-        {
-          ok: false,
-          status: "error",
-          error: String(e),
-        } satisfies RunResponse,
-        400
-      );
+      return c.json({ ok: false, status: "error", error: String(e) }, 400);
     }
   });
 
-  // GET /run/:agentId
   app.get("/run/:agentId", (c) => {
+    c.header("X-Deprecated", "Use GET /agents/:id instead");
     const agentId = c.req.param("agentId");
     const status = runtime.getAgentStatus(agentId);
-
-    if (!status) {
-      return c.json(
-        {
-          agent_id: agentId,
-          status: "not_found",
-          error: "agent not found",
-        },
-        404
-      );
-    }
-
-    return c.json({
-      agent_id: agentId,
-      status: status.status,
-      result: status.result as JsonValue,
-    });
+    if (!status) return c.json({ agent_id: agentId, status: "not_found", error: "agent not found" }, 404);
+    return c.json({ agent_id: agentId, status: status.status, result: status.result as JsonValue });
   });
 
-  // GET /run
   app.get("/run", (c) => {
+    c.header("X-Deprecated", "Use GET /agents and GET /schema/agents instead");
     const module = runtime.module;
     return c.json({
       agent_defs: module?.agents.map((a) => ({ id: a.id, name: a.name })) ?? [],
@@ -176,7 +246,10 @@ export function buildApp(runtime: Runtime, db: Db): Hono {
     });
   });
 
+  // ==========================================================================
   // Katari Protocol routes
+  // ==========================================================================
+
   const katariRouter = buildKatariRouter(
     () => runtime,
     (msgs) => handleMessages(msgs)

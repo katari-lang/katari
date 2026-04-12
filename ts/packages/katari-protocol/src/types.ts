@@ -9,7 +9,7 @@ export interface RequestInfo {
   request_where: string;
   name: string;
   description: string;
-  arg_types: JsonValue[];
+  arg_type: JsonValue;
   return_type: JsonValue;
 }
 
@@ -17,14 +17,19 @@ export interface RequestInfo {
 // GET /agent_def
 // ===========================================================================
 
+export interface EffectRef {
+  request_id: string;
+  request_where: string;
+}
+
 export interface AgentDefInfo {
   agent_def_id: string;
   agent_def_where: string;
   name: string;
   description: string;
-  arg_types: JsonValue[];
+  arg_type: JsonValue;
   return_type: JsonValue;
-  with_effects: string[];
+  with_effects: EffectRef[];
 }
 
 // ===========================================================================
@@ -64,6 +69,7 @@ export interface ChildAgentRef {
 
 export interface SpawnAgentRequest {
   agent_def_id: string;
+  agent_def_where: string;
   args: JsonValue[];
   parent_agent_id: string;
   parent_agent_where: string;

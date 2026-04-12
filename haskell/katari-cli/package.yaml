@@ -3,26 +3,51 @@ version: 0.1.0.0
 author: yukikurage
 license: MIT
 
+language: GHC2021
+
+default-extensions:
+  - OverloadedStrings
+  - LambdaCase
+  - RecordWildCards
+
+library:
+  source-dirs: src
+  exposed-modules:
+    - Katari.CLI.Types
+    - Katari.CLI.Parser
+    - Katari.CLI.Project
+    - Katari.CLI.Config
+    - Katari.CLI.Compiler
+    - Katari.CLI.Api
+    - Katari.CLI.Interactive
+    - Katari.CLI.Build
+    - Katari.CLI.Apply
+    - Katari.CLI.Run
+    - Katari.CLI.Stop
+    - Katari.CLI.Status
+    - Katari.CLI.Result
+    - Katari.CLI.Dump
+  dependencies:
+    - base >= 4.18 && < 5
+    - katari-compiler
+    - optparse-applicative
+    - text
+    - bytestring
+    - containers
+    - directory
+    - filepath
+    - aeson
+    - http-client
+    - http-client-tls
+    - http-types
+    - base64-bytestring
+    - ansi-terminal
+
 executables:
   katari:
     main: Main.hs
     source-dirs: app
     dependencies:
       - base >= 4.18 && < 5
-      - katari-compiler
+      - katari-cli
       - optparse-applicative
-      - text
-      - bytestring
-      - containers
-      - directory
-      - filepath
-      - aeson
-      - http-client
-      - http-client-tls
-      - http-types
-      - base64-bytestring
-
-default-extensions:
-  - GHC2021
-  - OverloadedStrings
-  - LambdaCase

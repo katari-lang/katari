@@ -14,7 +14,7 @@
     "clean:hs": "stack clean",
     "clean:ts": "pnpm -C ts -r exec -- rm -rf dist",
     "fmt": "npm run fmt:hs",
-    "fmt:hs": "find haskell -name '*.hs' -not -path '*/.stack-work/*' -exec stylish-haskell -i {} \\;",
+    "fmt:hs": "find haskell -name '*.hs' -not -path '*/.stack-work/*' -print0 | xargs -0 -r stack exec --package ormolu -- ormolu --mode inplace",
     "lint:hs": "hlint haskell",
     "watch:hs": "stack build --file-watch",
     "cli": "stack run katari --",
