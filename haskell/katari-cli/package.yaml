@@ -17,6 +17,10 @@ executables:
       - directory
       - filepath
       - aeson
+      - http-client
+      - http-client-tls
+      - http-types
+      - base64-bytestring
 
 default-extensions:
   - GHC2021

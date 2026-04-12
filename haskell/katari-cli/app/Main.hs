@@ -2,9 +2,11 @@ module Main where
 
 import Control.Exception (SomeException, catch)
 import Control.Monad (foldM)
+import Data.List (foldl')
 import Data.Aeson (Value, object, (.=))
 import Data.Aeson qualified as Aeson
 import Data.ByteString qualified as BS
+import Data.ByteString.Base64 qualified as B64
 import Data.ByteString.Lazy qualified as BL
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
@@ -12,10 +14,24 @@ import Data.Maybe (fromMaybe)
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Text.Encoding qualified as TE
 import Data.Text.IO qualified as TIO
 import Katari.Emit (emitModule)
-import Katari.IR (IRModule)
+import Katari.IR (IRAgentDef (..), IRModule (..))
 import Katari.IRPrint (printIRModule)
+import Network.HTTP.Client
+  ( RequestBody (..),
+    httpLbs,
+    method,
+    newManager,
+    parseRequest,
+    requestBody,
+    requestHeaders,
+    responseBody,
+    responseStatus,
+  )
+import Network.HTTP.Client.TLS (tlsManagerSettings)
+import Network.HTTP.Types.Status (statusCode)
 import Katari.Lexer (LexError (..), lexFile)
 import Katari.Lowering (LowerError (..), lowerModules)
 import Katari.Module (GlobalEnv, buildGlobalEnv)
@@ -41,6 +57,7 @@ data Command
   = Compile CompileOpts
   | Dump DumpOpts
   | Schema SchemaOpts
+  | Apply ApplyOpts
   deriving (Show)
 
 data CompileOpts = CompileOpts
@@ -63,12 +80,19 @@ data SchemaOpts = SchemaOpts
   }
   deriving (Show)
 
+data ApplyOpts = ApplyOpts
+  { aoRoot :: Maybe FilePath,
+    aoRuntimeUrl :: Maybe String
+  }
+  deriving (Show)
+
 cliParser :: Parser Command
 cliParser =
   subparser
     ( command "compile" (info compileParser (progDesc "Compile a Katari project to .ktri binary"))
         <> command "dump" (info dumpParser (progDesc "Dump IR of a Katari project as text"))
         <> command "schema" (info schemaParser (progDesc "Generate JSON Schema for agents/requests/types"))
+        <> command "apply" (info applyParser (progDesc "Compile and deploy to a running runtime server"))
     )
 
 compileParser :: Parser Command
@@ -94,6 +118,13 @@ schemaParser =
       <*> optional (option str (long "agent" <> metavar "NAME" <> help "Restrict to the given agent (local name)"))
       <*> optional (option str (long "request" <> metavar "NAME" <> help "Restrict to the given request (local name)"))
 
+applyParser :: Parser Command
+applyParser =
+  fmap Apply $
+    ApplyOpts
+      <$> optional (argument str (metavar "ROOT" <> help "Project root directory (default: cwd)"))
+      <*> optional (option str (long "runtime" <> metavar "URL" <> help "Runtime server URL (overrides katari.toml)"))
+
 -- ---------------------------------------------------------------------------
 -- Main
 -- ---------------------------------------------------------------------------
@@ -105,6 +136,7 @@ main = do
     Compile opts -> runCompile opts
     Dump opts -> runDump opts
     Schema opts -> runSchema opts
+    Apply opts -> runApply opts
 
 runCompile :: CompileOpts -> IO ()
 runCompile opts = do
@@ -160,6 +192,88 @@ buildOrDie modules = do
       hPutStrLn stderr ("Lowering error: " ++ msg)
       exitFailure
     Right ir -> return ir
+
+runApply :: ApplyOpts -> IO ()
+runApply opts = do
+  let root = fromMaybe "." (aoRoot opts)
+  -- Parse katari.toml
+  tomlContent <- TIO.readFile (root </> "katari.toml")
+  let config = parseToml tomlContent
+      servers = fromMaybe Map.empty (Map.lookup "servers" config)
+      runtimeUrl = case aoRuntimeUrl opts of
+        Just url -> T.pack url
+        Nothing -> case Map.lookup "url" =<< Map.lookup "runtime" config of
+          Just url -> url
+          Nothing -> "http://localhost:8000"
+  -- Compile
+  modules <- loadProjectOrDie root
+  irModule <- buildOrDie modules
+  let binary = emitModule irModule
+  -- Build maps
+  let agentMap :: Map Text Int
+      agentMap = Map.fromList
+        [(iadName a, fromIntegral (iadId a)) | a <- irmAgents irModule]
+      extAgents = buildExternalAgents (irmAgents irModule) servers
+      bodyJson = object
+        [ "ir_binary" .= TE.decodeUtf8 (B64.encode binary),
+          "agents" .= agentMap,
+          "schemas" .= object [],
+          "servers" .= servers,
+          "external_agents" .= extAgents
+        ]
+  -- POST to runtime
+  manager <- newManager tlsManagerSettings
+  req <- parseRequest (T.unpack runtimeUrl <> "/apply")
+  let req' =
+        req
+          { method = "POST",
+            requestBody = RequestBodyLBS (Aeson.encode bodyJson),
+            requestHeaders = [("Content-Type", "application/json")]
+          }
+  resp <- httpLbs req' manager
+  let status = statusCode (responseStatus resp)
+  if status == 200
+    then putStrLn ("Applied to " ++ T.unpack runtimeUrl)
+    else do
+      hPutStrLn stderr ("Apply failed (status " ++ show status ++ "): " ++ show (responseBody resp))
+      exitFailure
+
+-- | Build the external_agents map: agent_def_id → "server:localName"
+-- An agent is external if the first dot-separated component of its name
+-- matches a key in the servers config.
+buildExternalAgents :: [IRAgentDef] -> Map Text Text -> Map Text Text
+buildExternalAgents agents servers =
+  Map.fromList
+    [ (T.pack (show (iadId a)), serverName <> ":" <> T.drop 1 rest)
+      | a <- agents,
+        let (prefix, rest) = T.breakOn "." (iadName a),
+        not (T.null rest),
+        Map.member prefix servers,
+        let serverName = prefix
+    ]
+
+-- ---------------------------------------------------------------------------
+-- Simple TOML parser (sections with string key-value pairs)
+-- ---------------------------------------------------------------------------
+
+parseToml :: Text -> Map Text (Map Text Text)
+parseToml content = snd $ foldl' parseLine ("", Map.empty) (T.lines content)
+  where
+    parseLine (section, m) rawLine =
+      let line = T.strip rawLine
+       in if T.null line || T.isPrefixOf "#" line
+            then (section, m)
+            else
+              if T.isPrefixOf "[" line
+                then (T.strip (T.takeWhile (/= ']') (T.drop 1 line)), m)
+                else case T.breakOn "=" line of
+                  (_, rest) | T.null rest -> (section, m)
+                  (key, rest) ->
+                    let val = unquote (T.strip (T.drop 1 rest))
+                     in (section, Map.insertWith Map.union section (Map.singleton (T.strip key) val) m)
+    unquote t
+      | T.length t >= 2, T.head t == '"', T.last t == '"' = T.init (T.tail t)
+      | otherwise = t
 
 -- ---------------------------------------------------------------------------
 -- Schema helpers
