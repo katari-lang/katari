@@ -46,6 +46,10 @@ pub enum EventKind {
         handler_def_tid: u32,
     },
 
+    /// Cancel a specific thread. Propagates downward: pushes CancelThread
+    /// for direct children, detaches child agents, then removes the thread.
+    CancelThread,
+
     /// Terminate the agent.
     Terminate,
 }
@@ -62,21 +66,31 @@ pub fn is_applicable(event: &Event, agents: &HashMap<String, AgentState>) -> boo
     };
 
     match &event.kind {
-        EventKind::Start => !is_held_by_handler(agent, event.thread_id),
+        EventKind::Start => {
+            // Thread must exist and be Running
+            agent
+                .threads
+                .get(&event.thread_id)
+                .is_some_and(|t| t.is_running())
+                && !is_held_by_handler(agent, event.thread_id)
+        }
 
         EventKind::ChildThreadCompleted {
             child_thread_id, ..
         } => {
+            // Target thread must exist
+            let t = match agent.threads.get(&event.thread_id) {
+                Some(t) => t,
+                None => return false,
+            };
             // Special: if target is a handle in RunningHandler, only handler
             // completion is applicable (this is what unblocks the handle).
-            if let Some(t) = agent.threads.get(&event.thread_id) {
-                if let ThreadStatus::Suspended(SuspendReason::Handle {
-                    phase: HandlePhase::RunningHandler { handler_thread, .. },
-                    ..
-                }) = &t.status
-                {
-                    return *child_thread_id == *handler_thread;
-                }
+            if let ThreadStatus::Suspended(SuspendReason::Handle {
+                phase: HandlePhase::RunningHandler { handler_thread, .. },
+                ..
+            }) = &t.status
+            {
+                return *child_thread_id == *handler_thread;
             }
             !is_held_by_handler(agent, event.thread_id)
         }
@@ -96,8 +110,15 @@ pub fn is_applicable(event: &Event, agents: &HashMap<String, AgentState>) -> boo
         }
 
         EventKind::ChildAgentCompleted { .. } | EventKind::Reply { .. } => {
+            // Target thread must exist
+            if !agent.threads.contains_key(&event.thread_id) {
+                return false;
+            }
             !is_held_by_handler(agent, event.thread_id)
         }
+
+        // CancelThread is always applicable if the thread exists
+        EventKind::CancelThread => agent.threads.contains_key(&event.thread_id),
 
         EventKind::Terminate => true,
     }

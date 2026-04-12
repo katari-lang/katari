@@ -16,4 +16,7 @@ pub enum Signal {
     ForBreak(Value),
     /// IForContinue — for body → next iteration
     ForContinue(Vec<(VarId, VarId)>),
+    /// Thread was cancelled (e.g. by par early exit or handle break).
+    /// Propagates through the normal ChildThreadCompleted flow.
+    Cancelled,
 }

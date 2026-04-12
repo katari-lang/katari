@@ -53,9 +53,43 @@ pub fn handle_icall(
     if let Some(def) = agent_def {
         if def.name.starts_with("prim.") {
             let arg_values: Vec<Value> = args.iter().map(|v| agent.get_var(*v)).collect();
-            let result = super::primitive::call_primitive(&def.name, &arg_values);
-            agent.set_var(dst, result);
-            return; // No suspension — thread continues
+            match super::primitive::call_primitive(&def.name, &arg_values) {
+                super::primitive::PrimitiveResult::Ok(value) => {
+                    agent.set_var(dst, value);
+                    return;
+                }
+                super::primitive::PrimitiveResult::RaiseRequest { req_name, args } => {
+                    // Look up request def by name
+                    let rid = module
+                        .requests
+                        .iter()
+                        .find(|r| r.name == req_name)
+                        .map(|r| r.id);
+                    if let Some(rid) = rid {
+                        let request_id = uuid::Uuid::new_v4().to_string();
+                        agent.outgoing_requests.push((
+                            thread_id,
+                            super::thread::PendingRequest {
+                                request_id: request_id.clone(),
+                                req_def_id: rid,
+                                args,
+                                from_agent_id: agent.agent_id.clone(),
+                                from_agent_where: String::new(),
+                            },
+                        ));
+                        if let Some(t) = agent.threads.get_mut(&thread_id) {
+                            t.status = ThreadStatus::Suspended(SuspendReason::Request {
+                                request_id,
+                                dst,
+                            });
+                        }
+                    } else {
+                        tracing::warn!("primitive raised unknown request: {}", req_name);
+                        agent.set_var(dst, Value::Null);
+                    }
+                    return;
+                }
+            }
         }
     }
 

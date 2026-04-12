@@ -124,19 +124,20 @@ pub fn handle_request_in_scope(
 }
 
 /// Process signal from a completed REQUEST_HANDLER thread.
-/// Returns `Some((requester, reply_value))` if a reply needs to be routed,
-/// or `None` if no reply is needed (e.g. HandleBreak, FnReturn).
+/// Returns `(reply_info, cancel_list)`:
+/// - `reply_info`: Some if a reply needs to be routed to the requester.
+/// - `cancel_list`: Thread IDs that should receive CancelThread events.
 pub fn process_handler_signal(
     agent: &mut AgentState,
     _module: &IRModule,
     owner_thread_id: u32,
     signal: Signal,
-) -> Option<(RequestOrigin, Value)> {
+) -> (Option<(RequestOrigin, Value)>, Vec<u32>) {
     let (_hid, dst, phase) = {
-        let t = agent
-            .threads
-            .get(&owner_thread_id)
-            .expect("owner thread must exist");
+        let t = match agent.threads.get(&owner_thread_id) {
+            Some(t) => t,
+            None => return (None, vec![]),
+        };
         match &t.status {
             ThreadStatus::Suspended(SuspendReason::Handle {
                 handle_def_id,
@@ -144,14 +145,19 @@ pub fn process_handler_signal(
                 phase,
                 ..
             }) => (*handle_def_id, *dst, phase.clone()),
-            _ => return None,
+            _ => return (None, vec![]),
         }
     };
 
     match signal {
         Signal::Normal(value) => {
             // Treat as Continue(value, [])
-            process_handler_signal(agent, _module, owner_thread_id, Signal::Continue(value, vec![]))
+            process_handler_signal(
+                agent,
+                _module,
+                owner_thread_id,
+                Signal::Continue(value, vec![]),
+            )
         }
         Signal::Continue(value, mutations) => {
             // 1. Apply mutations to handle state
@@ -170,16 +176,14 @@ pub fn process_handler_signal(
 
             if let HandlePhase::RunningHandler {
                 body_thread,
-                handler_thread,
                 ref requester,
+                ..
             } = phase
             {
                 reply_info = Some((requester.clone(), value));
 
-                // 2. Remove handler thread
-                agent.threads.remove(&handler_thread);
-
-                // 3. Set phase back to RunningBody
+                // Handler thread is already Completed — harvest removes it.
+                // Set phase back to RunningBody.
                 if let Some(t) = agent.threads.get_mut(&owner_thread_id) {
                     if let ThreadStatus::Suspended(SuspendReason::Handle { phase, .. }) =
                         &mut t.status
@@ -189,44 +193,35 @@ pub fn process_handler_signal(
                 }
             }
 
-            reply_info
+            (reply_info, vec![])
         }
         Signal::HandleBreak(value) => {
-            // 1. Terminate body thread and handler thread
-            if let HandlePhase::RunningHandler {
-                body_thread,
-                handler_thread,
-                ..
-            } = &phase
-            {
-                agent.threads.remove(handler_thread);
-                agent.threads.remove(body_thread);
-            }
+            // Cancel body thread (handler is already Completed/removed by harvest)
+            let cancels = match &phase {
+                HandlePhase::RunningHandler { body_thread, .. } => vec![*body_thread],
+                _ => vec![],
+            };
 
-            // 2. Set dst and resume parent
             agent.set_var(dst, value);
             if let Some(t) = agent.threads.get_mut(&owner_thread_id) {
                 t.status = ThreadStatus::Running;
             }
-            None
+            (None, cancels)
         }
         Signal::FnReturn(value) => {
-            // Cleanup and propagate
-            if let HandlePhase::RunningHandler {
-                body_thread,
-                handler_thread,
-                ..
-            } = &phase
-            {
-                agent.threads.remove(handler_thread);
-                agent.threads.remove(body_thread);
-            }
+            // Cancel body thread and propagate FnReturn
+            let cancels = match &phase {
+                HandlePhase::RunningHandler { body_thread, .. } => vec![*body_thread],
+                _ => vec![],
+            };
+
             if let Some(t) = agent.threads.get_mut(&owner_thread_id) {
                 t.status = ThreadStatus::Completed(Signal::FnReturn(value));
             }
-            None
+            (None, cancels)
         }
-        _ => None,
+        // Cancelled or other — silently absorbed
+        _ => (None, vec![]),
     }
 }
 
@@ -237,18 +232,17 @@ pub fn process_body_signal(
     owner_thread_id: u32,
     signal: Signal,
 ) {
-    let (hid, dst, phase) = {
-        let t = agent
-            .threads
-            .get(&owner_thread_id)
-            .expect("owner thread must exist");
+    let (hid, dst) = {
+        let t = match agent.threads.get(&owner_thread_id) {
+            Some(t) => t,
+            None => return, // owner already removed (cancelled)
+        };
         match &t.status {
             ThreadStatus::Suspended(SuspendReason::Handle {
                 handle_def_id,
                 dst,
-                phase,
                 ..
-            }) => (*handle_def_id, *dst, phase.clone()),
+            }) => (*handle_def_id, *dst),
             _ => return,
         }
     };
@@ -258,11 +252,6 @@ pub fn process_body_signal(
         .iter()
         .find(|h| h.id == hid)
         .expect("handle def not found");
-
-    // Remove body thread
-    if let HandlePhase::RunningBody { body_thread } = &phase {
-        agent.threads.remove(body_thread);
-    }
 
     match signal {
         Signal::Normal(value) => {
@@ -315,16 +304,14 @@ pub fn process_body_signal(
 pub fn process_then_signal(
     agent: &mut AgentState,
     owner_thread_id: u32,
-    then_tid: u32,
+    _then_tid: u32,
     signal: Signal,
 ) {
-    agent.threads.remove(&then_tid);
-
     let dst = {
-        let t = agent
-            .threads
-            .get(&owner_thread_id)
-            .expect("owner thread must exist");
+        let t = match agent.threads.get(&owner_thread_id) {
+            Some(t) => t,
+            None => return, // owner already removed (cancelled)
+        };
         match &t.status {
             ThreadStatus::Suspended(SuspendReason::Handle { dst, .. }) => *dst,
             _ => return,

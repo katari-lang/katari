@@ -85,4 +85,5 @@ impl AgentState {
     pub fn set_var(&mut self, var_id: VarId, value: Value) {
         self.vars.insert(var_id, value);
     }
+
 }

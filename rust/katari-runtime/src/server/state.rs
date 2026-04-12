@@ -10,6 +10,7 @@ use crate::runtime::Runtime;
 pub struct AppState {
     pub runtime: Arc<Mutex<Runtime>>,
     pub db: Arc<Db>,
+    pub http_client: reqwest::Client,
 }
 
 impl AppState {
@@ -17,6 +18,7 @@ impl AppState {
         Self {
             runtime: Arc::new(Mutex::new(runtime)),
             db: Arc::new(db),
+            http_client: reqwest::Client::new(),
         }
     }
 }

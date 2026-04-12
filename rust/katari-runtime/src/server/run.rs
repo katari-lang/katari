@@ -16,54 +16,63 @@ pub async fn run_agent(
     State(state): State<AppState>,
     Json(body): Json<RunRequest>,
 ) -> (StatusCode, Json<RunResponse>) {
-    let mut rt = state.runtime.lock().await;
+    let (response, pending_replies) = {
+        let mut rt = state.runtime.lock().await;
 
-    match rt.run_agent(&body.agent_name, body.args) {
-        Ok(agent_id) => {
-            // Check immediate status after execution
-            let (status, result, error) = match rt.get_agent_status(&agent_id) {
-                Some(("completed", val)) => ("completed".to_string(), val, None),
-                Some(("error", _)) => (
-                    "error".to_string(),
-                    None,
-                    Some("agent completed with error signal".to_string()),
-                ),
-                Some((s, _)) => (s.to_string(), None, None),
-                None => ("running".to_string(), None, None),
-            };
+        let response = match rt.run_agent(&body.agent_name, body.args) {
+            Ok(agent_id) => {
+                let (status, result, error) = match rt.get_agent_status(&agent_id) {
+                    Some(("completed", val)) => ("completed".to_string(), val, None),
+                    Some(("error", _)) => (
+                        "error".to_string(),
+                        None,
+                        Some("agent completed with error signal".to_string()),
+                    ),
+                    Some((s, _)) => (s.to_string(), None, None),
+                    None => ("running".to_string(), None, None),
+                };
 
-            tracing::info!(
-                agent_id = %agent_id,
-                agent_name = %body.agent_name,
-                status = %status,
-                "agent spawned"
-            );
+                tracing::info!(
+                    agent_id = %agent_id,
+                    agent_name = %body.agent_name,
+                    status = %status,
+                    "agent spawned"
+                );
 
-            (
-                StatusCode::OK,
-                Json(RunResponse {
-                    ok: true,
-                    agent_id: Some(agent_id),
-                    status,
-                    result,
-                    error,
-                }),
-            )
-        }
-        Err(e) => {
-            tracing::warn!(agent_name = %body.agent_name, error = %e, "failed to run agent");
-            (
-                StatusCode::BAD_REQUEST,
-                Json(RunResponse {
-                    ok: false,
-                    agent_id: None,
-                    status: "error".to_string(),
-                    result: None,
-                    error: Some(e),
-                }),
-            )
-        }
-    }
+                (
+                    StatusCode::OK,
+                    Json(RunResponse {
+                        ok: true,
+                        agent_id: Some(agent_id),
+                        status,
+                        result,
+                        error,
+                    }),
+                )
+            }
+            Err(e) => {
+                tracing::warn!(agent_name = %body.agent_name, error = %e, "failed to run agent");
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(RunResponse {
+                        ok: false,
+                        agent_id: None,
+                        status: "error".to_string(),
+                        result: None,
+                        error: Some(e),
+                    }),
+                )
+            }
+        };
+
+        let replies = std::mem::take(&mut rt.outgoing_replies);
+        (response, replies)
+    };
+
+    // Send outgoing replies outside of mutex
+    super::protocol::send_outgoing_replies_ext(&state, pending_replies).await;
+
+    response
 }
 
 /// GET /run/:agent_id

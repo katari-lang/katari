@@ -35,17 +35,35 @@ pub fn handle_ipar(
 }
 
 /// Process signal from a completed BLOCK (par branch) thread.
+/// Returns a list of thread IDs that should receive CancelThread events.
 pub fn process_par_branch_signal(
     agent: &mut AgentState,
     owner_thread_id: u32,
     branch_tid: u32,
     signal: Signal,
-) {
+) -> Vec<u32> {
+    // Defensive: owner may have been cancelled/removed already
+    let owner = match agent.threads.get(&owner_thread_id) {
+        Some(t) => t,
+        None => return vec![],
+    };
+
+    // If the owner is no longer in Par suspension, drop the signal
+    if !matches!(
+        owner.status,
+        ThreadStatus::Suspended(SuspendReason::Par { .. })
+    ) {
+        return vec![];
+    }
+
     match signal {
         Signal::Normal(value) => {
             // Find branch index and store result
             let all_done = {
-                let t = agent.threads.get_mut(&owner_thread_id).expect("owner must exist");
+                let t = agent
+                    .threads
+                    .get_mut(&owner_thread_id)
+                    .expect("owner checked above");
                 if let ThreadStatus::Suspended(SuspendReason::Par {
                     branch_threads,
                     results,
@@ -61,13 +79,13 @@ pub fn process_par_branch_signal(
                 }
             };
 
-            // Remove completed branch thread
-            agent.threads.remove(&branch_tid);
-
             if all_done {
                 // All branches complete — collect results
                 let (dst, results) = {
-                    let t = agent.threads.get_mut(&owner_thread_id).expect("owner must exist");
+                    let t = agent
+                        .threads
+                        .get_mut(&owner_thread_id)
+                        .expect("owner checked above");
                     if let ThreadStatus::Suspended(SuspendReason::Par { dst, results, .. }) =
                         &mut t.status
                     {
@@ -84,47 +102,40 @@ pub fn process_par_branch_signal(
                     t.status = ThreadStatus::Running;
                 }
             }
+            vec![]
         }
         Signal::FnReturn(value) => {
-            // Terminate other branches
-            terminate_other_branches(agent, owner_thread_id, branch_tid);
-            agent.threads.remove(&branch_tid);
-
+            let cancels = other_branch_tids(agent, owner_thread_id, branch_tid);
             if let Some(t) = agent.threads.get_mut(&owner_thread_id) {
                 t.status = ThreadStatus::Completed(Signal::FnReturn(value));
             }
+            cancels
         }
         Signal::HandleBreak(value) => {
-            terminate_other_branches(agent, owner_thread_id, branch_tid);
-            agent.threads.remove(&branch_tid);
-
+            let cancels = other_branch_tids(agent, owner_thread_id, branch_tid);
             if let Some(t) = agent.threads.get_mut(&owner_thread_id) {
                 t.status = ThreadStatus::Completed(Signal::HandleBreak(value));
             }
+            cancels
         }
-        _ => {
-            agent.threads.remove(&branch_tid);
-        }
+        // Cancelled or other signals — silently absorbed
+        _ => vec![],
     }
 }
 
-/// Terminate all par branches except the one that produced the signal.
-fn terminate_other_branches(agent: &mut AgentState, owner_thread_id: u32, except_tid: u32) {
-    let branch_tids: Vec<u32> = {
-        let t = agent.threads.get(&owner_thread_id).expect("owner must exist");
-        if let ThreadStatus::Suspended(SuspendReason::Par { branch_threads, .. }) = &t.status {
-            branch_threads
-                .iter()
-                .filter(|&&tid| tid != except_tid)
-                .copied()
-                .collect()
-        } else {
-            vec![]
-        }
+/// Collect thread IDs of all par branches except `except_tid`.
+fn other_branch_tids(agent: &AgentState, owner_thread_id: u32, except_tid: u32) -> Vec<u32> {
+    let t = match agent.threads.get(&owner_thread_id) {
+        Some(t) => t,
+        None => return vec![],
     };
-
-    for tid in branch_tids {
-        // TODO: recursively terminate child threads and child agents
-        agent.threads.remove(&tid);
+    if let ThreadStatus::Suspended(SuspendReason::Par { branch_threads, .. }) = &t.status {
+        branch_threads
+            .iter()
+            .filter(|&&tid| tid != except_tid)
+            .copied()
+            .collect()
+    } else {
+        vec![]
     }
 }

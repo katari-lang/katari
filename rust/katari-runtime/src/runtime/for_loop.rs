@@ -103,12 +103,12 @@ pub fn process_for_body_signal(
     owner_thread_id: u32,
     signal: Signal,
 ) {
-    // Get current for state
+    // Defensive: owner may have been cancelled/removed already
     let (fid, current_index, min_length, dst) = {
-        let t = agent
-            .threads
-            .get(&owner_thread_id)
-            .expect("owner thread must exist");
+        let t = match agent.threads.get(&owner_thread_id) {
+            Some(t) => t,
+            None => return,
+        };
         match &t.status {
             ThreadStatus::Suspended(SuspendReason::For {
                 for_def_id,
@@ -116,18 +116,17 @@ pub fn process_for_body_signal(
                 min_length,
                 dst,
             }) => (*for_def_id, *current_index, *min_length, *dst),
-            _ => panic!("owner thread must be suspended for For"),
+            _ => return,
         }
     };
 
-    let for_def = module
-        .fors
-        .iter()
-        .find(|f| f.id == fid)
-        .expect("for def not found");
+    let for_def = match module.fors.iter().find(|f| f.id == fid) {
+        Some(f) => f,
+        None => return,
+    };
 
-    // Remove body thread
-    agent.threads.remove(&for_def.body);
+    // Note: body thread removal is handled by harvest
+    let _ = for_def.body;
 
     match signal {
         Signal::ForContinue(mutations) => {
@@ -240,19 +239,17 @@ fn finish_for(
 pub fn process_for_then_signal(
     agent: &mut AgentState,
     owner_thread_id: u32,
-    then_tid: u32,
+    _then_tid: u32,
     signal: Signal,
 ) {
-    agent.threads.remove(&then_tid);
-
     let dst = {
-        let t = agent
-            .threads
-            .get(&owner_thread_id)
-            .expect("owner thread must exist");
+        let t = match agent.threads.get(&owner_thread_id) {
+            Some(t) => t,
+            None => return,
+        };
         match &t.status {
             ThreadStatus::Suspended(SuspendReason::For { dst, .. }) => *dst,
-            _ => panic!("owner thread must be suspended for For"),
+            _ => return,
         }
     };
 

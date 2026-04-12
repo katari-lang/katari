@@ -47,6 +47,19 @@ pub struct Runtime {
 
     /// Global event queue. Events have fully resolved targets.
     pub event_queue: VecDeque<Event>,
+
+    /// Outgoing replies to external agents, collected during event processing.
+    /// Server protocol layer drains this after run_event_loop().
+    pub outgoing_replies: Vec<OutgoingReply>,
+}
+
+/// A reply that needs to be sent to an external agent via HTTP.
+#[derive(Debug, Clone)]
+pub struct OutgoingReply {
+    pub to_agent_id: String,
+    pub to_agent_where: String,
+    pub request_id: String,
+    pub value: Value,
 }
 
 impl Runtime {
@@ -58,6 +71,7 @@ impl Runtime {
             schemas: HashMap::new(),
             self_base_url: base_url,
             event_queue: VecDeque::new(),
+            outgoing_replies: Vec::new(),
         }
     }
 
@@ -151,10 +165,23 @@ impl Runtime {
             // Phase 3: Collect completed children → push events
             progress |= self.collect_completed_children();
 
+            // Phase 4: Remove orphaned agents (parent no longer tracks them)
+            progress |= self.remove_orphaned_agents();
+
             if !progress {
                 break;
             }
         }
+
+        // Purge stale events targeting non-existent agents or threads
+        self.event_queue.retain(|e| {
+            if let Some(agent) = self.agents.get(&e.agent_id) {
+                // Keep Terminate events even if thread doesn't exist
+                matches!(e.kind, EventKind::Terminate) || agent.threads.contains_key(&e.thread_id)
+            } else {
+                false
+            }
+        });
     }
 
     /// Scan the event queue for the first applicable event, apply it,
@@ -202,7 +229,24 @@ impl Runtime {
                     None => return,
                 };
                 if let Some(agent) = self.agents.get_mut(&agent_id) {
-                    dispatch_child_signal(agent, &module, thread_id, child_thread_id, child_kind, signal);
+                    let (reply, cancels) = dispatch_child_signal(
+                        agent,
+                        &module,
+                        thread_id,
+                        child_thread_id,
+                        child_kind,
+                        signal,
+                    );
+                    if let Some(reply) = reply {
+                        self.outgoing_replies.push(reply);
+                    }
+                    for tid in cancels {
+                        self.event_queue.push_back(Event {
+                            agent_id: agent_id.clone(),
+                            thread_id: tid,
+                            kind: EventKind::CancelThread,
+                        });
+                    }
                 }
             }
 
@@ -256,6 +300,41 @@ impl Runtime {
                 }
             }
 
+            EventKind::CancelThread => {
+                if let Some(agent) = self.agents.get_mut(&agent_id) {
+                    // Push CancelThread for direct children (propagation)
+                    let children: Vec<u32> = agent
+                        .threads
+                        .iter()
+                        .filter(|(_, t)| t.parent == Some(thread_id))
+                        .map(|(tid, _)| *tid)
+                        .collect();
+                    for child_tid in children {
+                        self.event_queue.push_back(Event {
+                            agent_id: agent_id.clone(),
+                            thread_id: child_tid,
+                            kind: EventKind::CancelThread,
+                        });
+                    }
+
+                    // Detach child agent if Call-suspended
+                    if let Some(t) = agent.threads.get(&thread_id) {
+                        if let ThreadStatus::Suspended(SuspendReason::Call {
+                            child_agent_id, ..
+                        }) = &t.status
+                        {
+                            let cid = child_agent_id.clone();
+                            agent.children.remove(&cid);
+                        }
+                    }
+
+                    // Remove the thread
+                    agent.threads.remove(&thread_id);
+                }
+                // CancelThread is self-propagating — no harvest needed
+                return;
+            }
+
             EventKind::Terminate => {
                 if let Some(agent) = self.agents.get_mut(&agent_id) {
                     agent.status = AgentStatus::Completed;
@@ -305,7 +384,9 @@ impl Runtime {
             }
         }
 
-        // 2. Harvest completed threads → push ChildThreadCompleted events
+        // 2. Harvest completed threads → push ChildThreadCompleted events.
+        //    After generating events, remove them from the thread map to prevent
+        //    duplicate event generation on subsequent harvest calls.
         let completed: Vec<(u32, Signal, ThreadKind, Option<u32>)> = agent
             .threads
             .iter()
@@ -321,18 +402,23 @@ impl Runtime {
             })
             .collect();
 
-        for (child_tid, signal, kind, parent_id) in completed {
+        for (child_tid, signal, kind, parent_id) in &completed {
             if let Some(parent_id) = parent_id {
                 new_events.push(Event {
                     agent_id: aid.clone(),
-                    thread_id: parent_id,
+                    thread_id: *parent_id,
                     kind: EventKind::ChildThreadCompleted {
-                        child_thread_id: child_tid,
-                        child_kind: kind,
-                        signal,
+                        child_thread_id: *child_tid,
+                        child_kind: *kind,
+                        signal: signal.clone(),
                     },
                 });
             }
+        }
+
+        // Remove harvested completed threads
+        for (child_tid, _, _, _) in &completed {
+            agent.threads.remove(child_tid);
         }
 
         // 3. Harvest Running threads → push Start events
@@ -484,6 +570,41 @@ impl Runtime {
         any_collected
     }
 
+    /// Remove agents whose parent no longer tracks them (orphaned by terminate_thread_tree).
+    /// Also purges any events targeting those agents from the queue.
+    fn remove_orphaned_agents(&mut self) -> bool {
+        let orphans: Vec<String> = self
+            .agents
+            .iter()
+            .filter(|(agent_id, agent)| {
+                // An agent is orphaned if:
+                // 1. It has a parent in the runtime
+                // 2. But the parent's children map no longer contains it
+                if let Some(parent) = self.agents.get(&agent.parent_agent_id) {
+                    !parent.children.contains_key(agent_id.as_str())
+                        && agent.parent_agent_id != **agent_id
+                } else {
+                    false
+                }
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+
+        if orphans.is_empty() {
+            return false;
+        }
+
+        for orphan_id in &orphans {
+            self.agents.remove(orphan_id);
+        }
+
+        // Purge events targeting removed agents
+        self.event_queue
+            .retain(|e| !orphans.contains(&e.agent_id));
+
+        true
+    }
+
     // -----------------------------------------------------------------------
     // Agent status queries
     // -----------------------------------------------------------------------
@@ -542,6 +663,8 @@ fn get_agent_result(agent: &AgentState) -> Value {
 // ---------------------------------------------------------------------------
 
 /// Dispatch a child thread's completion signal to its parent.
+/// Returns `(outgoing_reply, cancel_list)` where cancel_list contains
+/// thread IDs that should receive CancelThread events.
 fn dispatch_child_signal(
     agent: &mut AgentState,
     module: &IRModule,
@@ -549,54 +672,64 @@ fn dispatch_child_signal(
     child_thread_id: u32,
     child_kind: ThreadKind,
     signal: Signal,
-) {
+) -> (Option<OutgoingReply>, Vec<u32>) {
     match child_kind {
         ThreadKind::Block => {
-            par::process_par_branch_signal(agent, parent_thread_id, child_thread_id, signal);
+            let cancels =
+                par::process_par_branch_signal(agent, parent_thread_id, child_thread_id, signal);
+            (None, cancels)
         }
         ThreadKind::HandlerTarget => {
             handle::process_body_signal(agent, module, parent_thread_id, signal);
+            (None, vec![])
         }
         ThreadKind::RequestHandler => {
-            let reply_info =
+            let (reply_info, cancels) =
                 handle::process_handler_signal(agent, module, parent_thread_id, signal);
-            // If handler produced a reply, route it
-            if let Some((requester, value)) = reply_info {
+            let outgoing = if let Some((requester, value)) = reply_info {
                 if requester.from_agent_id == agent.agent_id {
                     // Internal request — find the waiting thread and resume it
                     if let Some(waiting_tid) =
                         event::find_request_thread(agent, &requester.request_id)
                     {
-                        let dst = match agent.threads.get(&waiting_tid).map(|t| &t.status) {
-                            Some(ThreadStatus::Suspended(SuspendReason::Request {
-                                dst, ..
-                            })) => *dst,
-                            _ => return,
-                        };
-                        agent.set_var(dst, value);
-                        if let Some(t) = agent.threads.get_mut(&waiting_tid) {
-                            t.status = ThreadStatus::Running;
+                        if let Some(ThreadStatus::Suspended(SuspendReason::Request {
+                            dst, ..
+                        })) = agent.threads.get(&waiting_tid).map(|t| &t.status)
+                        {
+                            let dst = *dst;
+                            agent.set_var(dst, value);
+                            if let Some(t) = agent.threads.get_mut(&waiting_tid) {
+                                t.status = ThreadStatus::Running;
+                            }
                         }
                     }
+                    None
                 } else {
-                    // External request — TODO: HTTP POST reply
-                    tracing::warn!(
-                        "reply to external requester {} not yet implemented",
-                        requester.from_agent_id
-                    );
+                    Some(OutgoingReply {
+                        to_agent_id: requester.from_agent_id,
+                        to_agent_where: requester.from_agent_where,
+                        request_id: requester.request_id,
+                        value,
+                    })
                 }
-            }
+            } else {
+                None
+            };
+            (outgoing, cancels)
         }
         ThreadKind::HandleThen => {
             handle::process_then_signal(agent, parent_thread_id, child_thread_id, signal);
+            (None, vec![])
         }
         ThreadKind::ForBody => {
             for_loop::process_for_body_signal(agent, module, parent_thread_id, signal);
+            (None, vec![])
         }
         ThreadKind::ForThen => {
             for_loop::process_for_then_signal(agent, parent_thread_id, child_thread_id, signal);
+            (None, vec![])
         }
-        ThreadKind::FnBody => {}
+        ThreadKind::FnBody => (None, vec![]),
     }
 }
 
