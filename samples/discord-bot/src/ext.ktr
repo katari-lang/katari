@@ -4,9 +4,6 @@ import types
 
 // ─── Discord サーバー ───────────────────────────────────────────
 
-@"チャンネル一覧を取得する"
-external agent list_channels() -> array[Channel] from "discord:list_channels"
-
 @"チャンネルを監視し、メッセージ受信ごとに on_message request を発火する"
 external agent watch_channel(channel_id: ChannelId) -> null with on_message from "discord:watch_channel"
 
