@@ -8,40 +8,46 @@ interface SearchResult {
 }
 
 const search: AgentHandlerFn = async (args) => {
-  const query = args[0] as string;
+  const query = args.query as string;
 
-  const apiKey = process.env.SEARCH_API_KEY;
-  const engineId = process.env.SEARCH_ENGINE_ID;
-
-  if (!apiKey || !engineId) {
-    throw new Error("SEARCH_API_KEY and SEARCH_ENGINE_ID must be set");
+  const apiKey = process.env.TAVILY_API_KEY;
+  if (!apiKey) {
+    throw new Error("TAVILY_API_KEY must be set");
   }
 
-  const url = new URL("https://www.googleapis.com/customsearch/v1");
-  url.searchParams.set("key", apiKey);
-  url.searchParams.set("cx", engineId);
-  url.searchParams.set("q", query);
-  url.searchParams.set("num", "5");
+  const res = await fetch("https://api.tavily.com/search", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      query,
+      max_results: 5,
+      search_depth: "basic",
+    }),
+  });
 
-  const res = await fetch(url.toString());
   if (!res.ok) {
-    throw new Error(`Search API error: ${res.status} ${await res.text()}`);
+    throw new Error(`Tavily API error: ${res.status} ${await res.text()}`);
   }
 
-  const data = await res.json();
-  const items = (data as { items?: { title: string; snippet: string; link: string }[] }).items ?? [];
+  const data = (await res.json()) as {
+    results?: { title: string; content: string; url: string }[];
+  };
 
-  const results: SearchResult[] = items.map((item) => ({
+  const results: SearchResult[] = (data.results ?? []).map((item) => ({
     title: item.title,
-    snippet: item.snippet,
-    url: item.link,
+    snippet: item.content,
+    url: item.url,
   }));
 
   return results as unknown as JsonValue;
 };
 
 const port = parseInt(process.env.PORT ?? "8004", 10);
-const selfBaseUrl = process.env.KATARI_BASE_URL ?? `http://localhost:${port}/katari`;
+const selfBaseUrl =
+  process.env.KATARI_BASE_URL ?? `http://localhost:${port}/katari`;
 
 startServer({
   port,

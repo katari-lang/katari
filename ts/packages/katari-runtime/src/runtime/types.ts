@@ -80,7 +80,7 @@ export interface RequestOrigin {
 export interface PendingRequest {
   requestId: string;
   reqDefId: number;
-  args: Value[];
+  args: Record<string, Value>;
   fromAgentId: string;
   fromAgentWhere: string;
 }
@@ -128,7 +128,7 @@ export type EventKind =
       tag: "SpawnChildAgent";
       childAgentId: string;
       agentDefId: number;
-      args: Value[];
+      args: Record<string, Value>;
     }
   | { tag: "AgentCompleted" }
   | {

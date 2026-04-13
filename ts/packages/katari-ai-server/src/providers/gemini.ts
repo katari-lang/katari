@@ -11,7 +11,7 @@ export class GeminiProvider implements AIProvider {
   private genAI: GoogleGenerativeAI;
   private modelName: string;
 
-  constructor(apiKey: string, modelName = "gemini-2.0-flash") {
+  constructor(apiKey: string, modelName = "gemini-3-flash-preview") {
     this.genAI = new GoogleGenerativeAI(apiKey);
     this.modelName = modelName;
   }
@@ -62,7 +62,9 @@ export class GeminiProvider implements AIProvider {
       return { content: "", toolCalls: [] };
     }
 
-    const toolCalls = candidate.content.parts
+    const rawParts = candidate.content.parts;
+
+    const toolCalls = rawParts
       .filter((p) => p.functionCall)
       .map((p, i) => ({
         id: `call_${i}`,
@@ -70,10 +72,15 @@ export class GeminiProvider implements AIProvider {
         arguments: (p.functionCall!.args ?? {}) as Record<string, JsonValue>,
       }));
 
-    const textParts = candidate.content.parts.filter((p) => p.text);
+    const textParts = rawParts.filter((p) => p.text);
     const content = textParts.map((p) => p.text).join("") || null;
 
-    return { content, toolCalls };
+    // Preserve raw parts so thought_signature etc. survive round-trips
+    return {
+      content,
+      toolCalls,
+      _rawModelParts: toolCalls.length > 0 ? (rawParts as unknown[]) : undefined,
+    };
   }
 }
 
@@ -94,6 +101,13 @@ function messagesToContents(messages: ChatMessage[]): Content[] {
     }
 
     if (m.toolCalls && m.toolCalls.length > 0) {
+      // Use raw parts if available (preserves thought_signature for Gemini 3+)
+      if (m._rawModelParts) {
+        return {
+          role: "model" as const,
+          parts: m._rawModelParts as Content["parts"],
+        };
+      }
       return {
         role: "model",
         parts: m.toolCalls.map((tc) => ({

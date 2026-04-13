@@ -72,8 +72,7 @@ services:
     environment:
       - PORT=8004
       - KATARI_BASE_URL=http://websearch:8004/katari
-      - SEARCH_API_KEY=${SEARCH_API_KEY}
-      - SEARCH_ENGINE_ID=${SEARCH_ENGINE_ID}
+      - TAVILY_API_KEY=${TAVILY_API_KEY}
 
   sandbox:
     build:

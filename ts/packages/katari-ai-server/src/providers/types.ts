@@ -5,6 +5,8 @@ export interface ChatMessage {
   content: string;
   toolCallId?: string;
   toolCalls?: ToolCall[];
+  /** Provider-specific raw model response parts (e.g. Gemini thought_signature) */
+  _rawModelParts?: unknown[];
 }
 
 export interface ToolDef {
@@ -27,6 +29,8 @@ export interface ToolCall {
 export interface AIResponse {
   content: string | null;
   toolCalls: ToolCall[];
+  /** Provider-specific raw model response parts (e.g. Gemini thought_signature) */
+  _rawModelParts?: unknown[];
 }
 
 export interface AIProvider {

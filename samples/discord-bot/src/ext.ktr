@@ -39,7 +39,7 @@ external agent ask_ai_with_tools(
   session_id: string @"セッションID",
   system: string @"システムプロンプト",
   prompt: string @"プロンプト",
-  tools: array[string] @"使用可能なツール名の配列"
+  tools: array[AgentRef] @"使用可能なツールの配列"
 ) -> string from "ai:ask_with_tools"
 
 // ─── Cron サーバー ──────────────────────────────────────────────

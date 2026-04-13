@@ -42,8 +42,8 @@ const create: AgentHandlerFn = async () => {
 };
 
 const exec: AgentHandlerFn = async (args) => {
-  const sandboxId = args[0] as string;
-  const command = args[1] as string;
+  const sandboxId = args.sandbox_id as string;
+  const command = args.command as string;
 
   const sandbox = sandboxes.get(sandboxId);
   if (!sandbox) throw new Error(`Sandbox ${sandboxId} not found`);
@@ -61,9 +61,9 @@ const exec: AgentHandlerFn = async (args) => {
 };
 
 const writeFile: AgentHandlerFn = async (args) => {
-  const sandboxId = args[0] as string;
-  const filePath = args[1] as string;
-  const content = args[2] as string;
+  const sandboxId = args.sandbox_id as string;
+  const filePath = args.path as string;
+  const content = args.content as string;
 
   const sandbox = sandboxes.get(sandboxId);
   if (!sandbox) throw new Error(`Sandbox ${sandboxId} not found`);
@@ -86,8 +86,8 @@ const writeFile: AgentHandlerFn = async (args) => {
 };
 
 const readFile: AgentHandlerFn = async (args) => {
-  const sandboxId = args[0] as string;
-  const filePath = args[1] as string;
+  const sandboxId = args.sandbox_id as string;
+  const filePath = args.path as string;
 
   const sandbox = sandboxes.get(sandboxId);
   if (!sandbox) throw new Error(`Sandbox ${sandboxId} not found`);
@@ -104,7 +104,7 @@ const readFile: AgentHandlerFn = async (args) => {
 };
 
 const destroy: AgentHandlerFn = async (args) => {
-  const sandboxId = args[0] as string;
+  const sandboxId = args.sandbox_id as string;
 
   const sandbox = sandboxes.get(sandboxId);
   if (!sandbox) throw new Error(`Sandbox ${sandboxId} not found`);

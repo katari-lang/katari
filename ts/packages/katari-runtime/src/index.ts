@@ -15,6 +15,12 @@ async function main() {
   const db = new Db(DATABASE_URL);
   await db.initialize();
 
+  // Mark stale "running" agents from previous session as "stopped"
+  const cleaned = await db.cleanupStaleAgents();
+  if (cleaned > 0) {
+    console.log(`Cleaned up ${cleaned} stale agent(s) from previous session`);
+  }
+
   const runtime = new Runtime(KATARI_BASE_URL);
 
   // Wire toplevel agent lifecycle callbacks
@@ -40,7 +46,8 @@ async function main() {
           v,
         ])
       );
-      runtime.applyModule(module, nameMap, schemas, externalAgents);
+      const servers = new Map(Object.entries(saved.servers));
+      runtime.applyModule(module, nameMap, schemas, externalAgents, servers);
       console.log(`Restored module: ${module.name}`);
     } catch (e) {
       console.warn("Failed to restore module:", e);

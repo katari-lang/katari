@@ -3,7 +3,7 @@ import type { AgentHandlerFn } from "katari-protocol";
 import cron from "node-cron";
 
 const schedule: AgentHandlerFn = async (args, ctx) => {
-  const cronExpr = args[0] as string;
+  const cronExpr = args.cron_expr as string;
 
   if (!cron.validate(cronExpr)) {
     throw new Error(`Invalid cron expression: ${cronExpr}`);
@@ -13,7 +13,7 @@ const schedule: AgentHandlerFn = async (args, ctx) => {
     // Long-running: never resolves (agent stays alive)
     cron.schedule(cronExpr, () => {
       const now = new Date().toISOString();
-      ctx.sendRequest("notify", [now]);
+      ctx.sendRequest("notify", { time: now });
     });
   });
 };

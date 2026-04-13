@@ -28,8 +28,8 @@ export interface ExecuteCallbacks {
   setupHandle(agent: AgentState, threadId: number, dst: number, hid: number, events: Event[]): void;
   setupFor(agent: AgentState, threadId: number, dst: number, fid: number, events: Event[]): void;
   setupPar(agent: AgentState, threadId: number, dst: number, tids: number[], events: Event[]): void;
-  handleICall(agent: AgentState, threadId: number, dst: number, agentDefId: number, argVars: number[], events: Event[], messages: OutgoingMessage[]): void;
-  handleIRequest(agent: AgentState, threadId: number, dst: number, reqDefId: number, argVars: number[], events: Event[], messages: OutgoingMessage[]): void;
+  handleICall(agent: AgentState, threadId: number, dst: number, agentDefId: number, namedArgs: [string, number][], events: Event[], messages: OutgoingMessage[]): void;
+  handleIRequest(agent: AgentState, threadId: number, dst: number, reqDefId: number, namedArgs: [string, number][], events: Event[], messages: OutgoingMessage[]): void;
 }
 
 // ===========================================================================

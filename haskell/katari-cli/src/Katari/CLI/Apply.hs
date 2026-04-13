@@ -15,7 +15,7 @@ import Katari.CLI.Config (loadConfig, resolveRuntimeUrl)
 import Katari.CLI.Project (loadProjectOrDie)
 import Katari.CLI.Types (ApplyOpts (..), ProjectConfig (..))
 import Katari.Emit (emitModule)
-import Katari.IR (IRAgentDef (..), IRModule (..))
+import Katari.IR (IRModule (..), NameTable (..))
 import Katari.Schema (moduleSchemas)
 import System.Exit (exitFailure)
 import System.IO (hPutStrLn, stderr)
@@ -30,15 +30,16 @@ runApply ApplyOpts {..} = do
   let binary = emitModule irModule
       agentMap =
         Map.fromList
-          [(iadName a, fromIntegral @_ @Int (iadId a)) | a <- irmAgents irModule]
+          [(name, fromIntegral @_ @Int aid) | (aid, name) <- Map.toList (ntAgents (irmNameTable irModule))]
       schemas = schemasToValue (moduleSchemas ge)
-      extAgents = buildExternalAgents (irmAgents irModule) (pcServers config)
+      extAgents = buildExternalAgents ge irModule (pcServers config)
       bodyJson =
         object
           [ "ir_binary" .= TE.decodeUtf8 (B64.encode binary),
             "agents" .= agentMap,
             "schemas" .= schemas,
-            "external_agents" .= extAgents
+            "external_agents" .= extAgents,
+            "servers" .= pcServers config
           ]
   result <- postApply runtimeUrl bodyJson
   case result of

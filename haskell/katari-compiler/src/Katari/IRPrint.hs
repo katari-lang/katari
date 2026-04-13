@@ -228,11 +228,11 @@ printI nt cs = \case
   IComplete v -> "complete " <> vn nt v
   IReturn v -> "return " <> vn nt v
   ICall v tid args ->
-    vn nt v <> " = call " <> an nt tid <> "(" <> commaSep (map (vn nt) args) <> ")"
+    vn nt v <> " = call " <> an nt tid <> "(" <> commaSep (map (\(n, vi) -> n <> "=" <> vn nt vi) args) <> ")"
   IPar v tids ->
     vn nt v <> " = par [" <> commaSep (map (\tid -> "thread[" <> showId tid <> "]") tids) <> "]"
   IRequest v rid args ->
-    vn nt v <> " = request " <> rn nt rid <> "(" <> commaSep (map (vn nt) args) <> ")"
+    vn nt v <> " = request " <> rn nt rid <> "(" <> commaSep (map (\(n, vi) -> n <> "=" <> vn nt vi) args) <> ")"
   IHandle v hid ->
     vn nt v <> " = handle hnd" <> showId hid
   IContinue v upds ->

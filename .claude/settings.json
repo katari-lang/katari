@@ -7,6 +7,9 @@
       "Bash(stack test:*)",
       "Bash(stack exec:*)"
     ],
+    "deny": [
+      "Read(./.env)"
+    ],
     "additionalDirectories": [
       "/home/yukikurage/projects/katari/doc"
     ]

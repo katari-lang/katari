@@ -17,6 +17,7 @@ export interface ModuleRow {
   agentNameMap: Record<string, number>;
   schemas: Record<string, unknown>;
   externalAgents: Record<string, ExternalAgentEntry>;
+  servers: Record<string, string>;
 }
 
 export interface ToplevelAgentRow {
@@ -77,16 +78,18 @@ export class Db {
     ktriBinary: Buffer,
     agentNameMap: Record<string, number>,
     schemas: Record<string, unknown>,
-    externalAgents: Record<string, ExternalAgentEntry> = {}
+    externalAgents: Record<string, ExternalAgentEntry> = {},
+    servers: Record<string, string> = {}
   ): Promise<number> {
     const [row] = await this.sql`
-      INSERT INTO modules (name, ktri_binary, agent_name_map, schemas, external_agents)
+      INSERT INTO modules (name, ktri_binary, agent_name_map, schemas, external_agents, servers)
       VALUES (
         ${name},
         ${ktriBinary},
         ${this.sql.json(agentNameMap as Record<string, number>)},
         ${this.sql.json(schemas as unknown as postgres.JSONValue)},
-        ${this.sql.json(externalAgents as unknown as postgres.JSONValue)}
+        ${this.sql.json(externalAgents as unknown as postgres.JSONValue)},
+        ${this.sql.json(servers as unknown as postgres.JSONValue)}
       )
       RETURNING version
     `;
@@ -95,7 +98,7 @@ export class Db {
 
   async loadLatestModule(): Promise<ModuleRow | null> {
     const rows = await this.sql`
-      SELECT version, name, ktri_binary, agent_name_map, schemas, external_agents
+      SELECT version, name, ktri_binary, agent_name_map, schemas, external_agents, servers
       FROM modules
       ORDER BY version DESC
       LIMIT 1
@@ -111,6 +114,7 @@ export class Db {
       agentNameMap: row.agent_name_map as Record<string, number>,
       schemas: row.schemas as Record<string, unknown>,
       externalAgents: row.external_agents as Record<string, ExternalAgentEntry>,
+      servers: (row.servers as Record<string, string>) ?? {},
     };
   }
 
@@ -142,6 +146,16 @@ export class Db {
           finished_at = NOW()
       WHERE id = ${id}
     `;
+  }
+
+  /** Mark all "running" agents as "stopped" (stale from previous runtime session) */
+  async cleanupStaleAgents(): Promise<number> {
+    const result = await this.sql`
+      UPDATE toplevel_agents
+      SET status = 'stopped', finished_at = NOW()
+      WHERE status = 'running'
+    `;
+    return result.count;
   }
 
   async listToplevelAgents(): Promise<ToplevelAgentRow[]> {

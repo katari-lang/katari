@@ -72,8 +72,10 @@ export function buildKatariRouter(
   // POST /agent (spawn)
   app.post("/agent", async (c) => {
     const body = (await c.req.json()) as SpawnAgentRequest;
+    console.log(`[katari] spawn agent_def_id=${body.agent_def_id} parent=${body.parent_agent_id}`);
     const result = getProtocol().spawnAgent(body);
     if (typeof result === "string") {
+      console.error(`[katari] spawn error: ${result}`);
       return c.json({ error: result } satisfies ErrorResponse, 400);
     }
     afterMessages(result.messages);
@@ -83,8 +85,10 @@ export function buildKatariRouter(
   // POST /agent/request
   app.post("/agent/request", async (c) => {
     const body = (await c.req.json()) as AgentRequestBody;
+    console.log(`[katari] request def_id=${body.request_def_id} from=${body.from_agent_id}`);
     const result = getProtocol().deliverRequest(body);
     if (typeof result === "string") {
+      console.error(`[katari] request error: ${result}`);
       return c.json({ error: result } satisfies ErrorResponse, 400);
     }
     afterMessages(result);
@@ -94,8 +98,10 @@ export function buildKatariRouter(
   // POST /agent/reply
   app.post("/agent/reply", async (c) => {
     const body = (await c.req.json()) as AgentReplyBody;
+    console.log(`[katari] reply request_id=${body.request_id} agent=${body.agent_id}`);
     const result = getProtocol().deliverReply(body);
     if (typeof result === "string") {
+      console.error(`[katari] reply error: ${result}`);
       return c.json({ error: result } satisfies ErrorResponse, 400);
     }
     afterMessages(result);
@@ -105,8 +111,10 @@ export function buildKatariRouter(
   // POST /agent/return
   app.post("/agent/return", async (c) => {
     const body = (await c.req.json()) as AgentReturnBody;
+    console.log(`[katari] return from=${body.from_agent_id} to=${body.agent_id}`);
     const result = getProtocol().deliverReturn(body);
     if (typeof result === "string") {
+      console.error(`[katari] return error: ${result}`);
       return c.json({ error: result } satisfies ErrorResponse, 400);
     }
     afterMessages(result);
@@ -116,8 +124,10 @@ export function buildKatariRouter(
   // POST /agent/terminate
   app.post("/agent/terminate", async (c) => {
     const body = (await c.req.json()) as TerminateBody;
+    console.log(`[katari] terminate agent=${body.agent_id} from=${body.from_agent_id}`);
     const result = getProtocol().terminateAgent(body);
     if (typeof result === "string") {
+      console.error(`[katari] terminate error: ${result}`);
       return c.json({ error: result } satisfies ErrorResponse, 400);
     }
     afterMessages(result);
@@ -127,8 +137,10 @@ export function buildKatariRouter(
   // POST /agent/terminate_ack
   app.post("/agent/terminate_ack", async (c) => {
     const body = (await c.req.json()) as TerminateAckBody;
+    console.log(`[katari] terminate_ack from=${body.from_agent_id} to=${body.agent_id}`);
     const result = getProtocol().deliverTerminateAck(body);
     if (typeof result === "string") {
+      console.error(`[katari] terminate_ack error: ${result}`);
       return c.json({ error: result } satisfies ErrorResponse, 400);
     }
     afterMessages(result);

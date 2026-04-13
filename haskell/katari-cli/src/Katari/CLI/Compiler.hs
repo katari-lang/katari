@@ -14,9 +14,9 @@ import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 import Data.Text qualified as T
-import Katari.IR (IRAgentDef (..), IRModule)
+import Katari.IR (IRModule (..), NameTable (..))
 import Katari.Lowering (LowerError (..), lowerModules)
-import Katari.Module (GlobalEnv, buildGlobalEnv)
+import Katari.Module (AgentInfo (..), GlobalEnv (..), buildGlobalEnv)
 import Katari.Schema (SchemaKind (..), SchemaOutput (..))
 import Katari.Syntax (Module)
 import Katari.Typechecker (typecheck)
@@ -52,23 +52,27 @@ buildAllOrDie modules = do
     Right ir -> return (ge, ir)
 
 -- | Build the external_agents map:
---   agent_def_id (numeric string) -> { "agent_def_id": localName, "agent_def_where": serverUrl }
+--   IR agent_id (numeric string) -> { "agent_def_id": remoteName, "agent_def_where": serverUrl }
 --
--- An agent is external if the first dot-separated component of its name
--- matches a key in the servers config.
-buildExternalAgents :: [IRAgentDef] -> Map Text Text -> Map Text Value
-buildExternalAgents agents servers =
+-- Iterates all agents in the name table (which includes external agents),
+-- uses the 'aiExtFrom' field ("server_key:remote_name") from GlobalEnv to
+-- resolve the server URL via the [servers] config.
+buildExternalAgents :: GlobalEnv -> IRModule -> Map Text Text -> Map Text Value
+buildExternalAgents ge irMod servers =
   Map.fromList
-    [ ( T.pack (show (iadId a)),
+    [ ( T.pack (show aid),
         object
-          [ "agent_def_id" .= T.drop 1 rest,
+          [ "agent_def_id" .= remoteName,
             "agent_def_where" .= serverUrl
           ]
       )
-      | a <- agents,
-        let (prefix, rest) = T.breakOn "." (iadName a),
+      | (aid, name) <- Map.toList (ntAgents (irmNameTable irMod)),
+        Just ai <- [Map.lookup name (geAgents ge)],
+        Just fromStr <- [aiExtFrom ai],
+        let (serverKey, rest) = T.breakOn ":" fromStr,
         not (T.null rest),
-        Just serverUrl <- [Map.lookup prefix servers]
+        let remoteName = T.drop 1 rest,
+        Just serverUrl <- [Map.lookup serverKey servers]
     ]
 
 -- | Convert schema outputs to a JSON map:

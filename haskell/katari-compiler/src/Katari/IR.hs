@@ -84,9 +84,9 @@ data Instruction
   | IComplete VarId -- thread 正常完了 (Normal signal)
   | IReturn VarId -- ソースの return 文 (FnReturn signal → FN_BODY まで巻き上げ)
   | -- Agent 操作
-    ICall VarId AgentId [VarId]
+    ICall VarId AgentId [(Text, VarId)]
   | IPar VarId [ThreadId]
-  | IRequest VarId RequestId [VarId]
+  | IRequest VarId RequestId [(Text, VarId)]
   | -- Handle
     IHandle VarId HandlerId -- dst, handle_def_id
   | IContinue VarId [(VarId, VarId)] -- val, [(state_var, new_val_var)]
@@ -155,7 +155,8 @@ data IRForDef = IRForDef
 data IRAgentDef = IRAgentDef
   { iadId :: AgentId,
     iadName :: Text,
-    iadEntry :: ThreadId -- FN_BODY thread
+    iadEntry :: ThreadId, -- FN_BODY thread
+    iadParamNames :: [Text] -- parameter names in declaration order
   }
   deriving (Show)
 
@@ -166,7 +167,8 @@ data IRAgentDef = IRAgentDef
 data IRRequestDef = IRRequestDef
   { irReqId :: RequestId,
     irReqName :: Text,
-    irReqFrom :: Maybe Text -- external の場合 "server:name"
+    irReqFrom :: Maybe Text, -- external の場合 "server:name"
+    irReqParamNames :: [Text] -- parameter names in declaration order
   }
   deriving (Show)
 

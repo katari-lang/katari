@@ -21,15 +21,15 @@ agent run_bot(channel_ids: array[ChannelId]) -> null {
 
   let system = f"あなたはDiscordボットです。\n監視チャンネル: ${channels_text}\nメッセージが届いたり定期トリガーが発火したら適切に対応してください。"
   let tools = [
-    "ext.send_message",
-    "ext.reply_to",
-    "ext.fetch_messages",
-    "ext.web_search",
-    "ext.create_sandbox",
-    "ext.exec_in_sandbox",
-    "ext.write_file_in_sandbox",
-    "ext.read_file_from_sandbox",
-    "ext.destroy_sandbox"
+    ref_agent("ext.send_message"),
+    ref_agent("ext.reply_to"),
+    ref_agent("ext.fetch_messages"),
+    ref_agent("ext.web_search"),
+    ref_agent("ext.create_sandbox"),
+    ref_agent("ext.exec_in_sandbox"),
+    ref_agent("ext.write_file_in_sandbox"),
+    ref_agent("ext.read_file_from_sandbox"),
+    ref_agent("ext.destroy_sandbox")
   ]
 
   // 全イベントを AI に委譲

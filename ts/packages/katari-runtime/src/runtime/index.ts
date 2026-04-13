@@ -57,6 +57,8 @@ export class Runtime implements KatariProtocol {
 
   // External routing
   externalAgents = new Map<number, ExternalAgentRef>();
+  servers = new Map<string, string>(); // serverName → URL
+  externalRequestMap = new Map<string, number>(); // "localName|serverURL" → internal request ID
 
   // Toplevel agent tracking
   toplevelAgents = new Set<string>();
@@ -83,6 +85,10 @@ export class Runtime implements KatariProtocol {
     return {
       selfBaseUrl: this.selfBaseUrl,
       externalAgents: this.externalAgents,
+      module: this.module,
+      servers: this.servers,
+      agentNameMap: this.agentNameMap,
+      schemas: this.schemas,
     };
   }
 
@@ -90,19 +96,40 @@ export class Runtime implements KatariProtocol {
     module: IRModule,
     nameMap: Map<string, number>,
     schemas: Map<string, JsonValue>,
-    externalAgents?: Map<number, ExternalAgentRef>
+    externalAgents?: Map<number, ExternalAgentRef>,
+    servers?: Map<string, string>
   ): void {
     this.module = module;
     this.agentNameMap = nameMap;
     this.schemas = schemas;
     if (externalAgents) this.externalAgents = externalAgents;
+    if (servers) this.servers = servers;
+    this.buildExternalRequestMap();
+  }
+
+  /** Build "localName|serverURL" → internal request ID mapping for external requests */
+  private buildExternalRequestMap(): void {
+    this.externalRequestMap.clear();
+    if (!this.module) return;
+    for (const req of this.module.requests) {
+      if (!req.from) continue;
+      // req.from = "discord:on_message" → server="discord", local="on_message"
+      const colonIdx = req.from.indexOf(":");
+      if (colonIdx === -1) continue;
+      const serverKey = req.from.substring(0, colonIdx);
+      const localName = req.from.substring(colonIdx + 1);
+      const serverUrl = this.servers.get(serverKey);
+      if (serverUrl) {
+        this.externalRequestMap.set(`${localName}|${serverUrl}`, req.id);
+      }
+    }
   }
 
   // =========================================================================
   // POST /run entry point
   // =========================================================================
 
-  runAgent(agentName: string, args: Value[]): string {
+  runAgent(agentName: string, namedArgs: Record<string, Value>): string {
     const module = this.module;
     if (!module) throw new Error("no module loaded");
 
@@ -121,18 +148,29 @@ export class Runtime implements KatariProtocol {
       agentId, agentDefId, entryTid, rootAgentId, "", new Set(), module
     );
 
-    const irThread = findThread(module, entryTid);
-    if (irThread) {
-      for (let i = 0; i < irThread.params.length && i < args.length; i++) {
-        setVar(agent, irThread.params[i]!, args[i]!);
-      }
-    }
+    this.setNamedArgs(agent, module, entryTid, agentDef.paramNames, namedArgs);
 
     this.agents.set(agentId, agent);
     this.toplevelAgents.add(agentId);
     this.eventQueue.push({ agentId, kind: { tag: "Execute", threadId: entryTid } });
     this.runEventLoop();
     return agentId;
+  }
+
+  /** Map named args to positional thread params using paramNames */
+  private setNamedArgs(
+    agent: AgentState,
+    module: IRModule,
+    entryTid: number,
+    paramNames: string[],
+    namedArgs: Record<string, Value>
+  ): void {
+    const irThread = findThread(module, entryTid);
+    if (!irThread) return;
+    for (let i = 0; i < irThread.params.length && i < paramNames.length; i++) {
+      const val = namedArgs[paramNames[i]!];
+      if (val !== undefined) setVar(agent, irThread.params[i]!, val);
+    }
   }
 
   private createAgent(
@@ -309,12 +347,7 @@ export class Runtime implements KatariProtocol {
           new Set(parentAgent.parentAvailableRequests), module
         );
 
-        const irThread = findThread(module, entryTid);
-        if (irThread) {
-          for (let i = 0; i < irThread.params.length && i < args.length; i++) {
-            setVar(child, irThread.params[i]!, args[i]!);
-          }
-        }
+        this.setNamedArgs(child, module, entryTid, agentDef.paramNames, args);
 
         this.agents.set(childAgentId, child);
         newEvents.push({
@@ -580,7 +613,7 @@ export class Runtime implements KatariProtocol {
       agent_id: id,
       agent_where: a.selfWhere,
       agent_def_id: String(a.agentDefId),
-      args: [],
+      args: {},
     }));
   }
 
@@ -599,7 +632,7 @@ export class Runtime implements KatariProtocol {
       agent_id: agentId,
       agent_where: agent.selfWhere,
       agent_def_id: String(agent.agentDefId),
-      args: [],
+      args: {},
       parent_agent_id: agent.parentAgentId,
       parent_agent_where: agent.parentAgentWhere,
       with_effects: [],
@@ -623,7 +656,12 @@ export class Runtime implements KatariProtocol {
 
     const withEffects = new Set(
       (req.with_effects ?? [])
-        .map((name) => this.module!.requests.find((r) => r.name === name)?.id)
+        .map((eff) => {
+          const asNum = parseInt(eff.request_id, 10);
+          if (!isNaN(asNum)) return asNum;
+          const key = `${eff.request_id}|${eff.request_where}`;
+          return this.externalRequestMap.get(key);
+        })
         .filter((id): id is number => id !== undefined)
     );
 
@@ -632,12 +670,7 @@ export class Runtime implements KatariProtocol {
       req.parent_agent_where, withEffects, this.module
     );
 
-    const irThread = findThread(this.module, entryTid);
-    if (irThread) {
-      for (let i = 0; i < irThread.params.length && i < req.args.length; i++) {
-        setVar(agent, irThread.params[i]!, req.args[i] as Value);
-      }
-    }
+    this.setNamedArgs(agent, this.module, entryTid, agentDef.paramNames, req.args as unknown as Record<string, Value>);
 
     this.agents.set(agentId, agent);
     this.eventQueue.push({ agentId, kind: { tag: "Execute", threadId: entryTid } });
@@ -668,14 +701,21 @@ export class Runtime implements KatariProtocol {
 
     const agent = this.agents.get(agentId)!;
 
-    const reqDefId = parseInt(req.request_def_id, 10);
-    if (isNaN(reqDefId)) return `invalid request_def_id: ${req.request_def_id}`;
+    let reqDefId = parseInt(req.request_def_id, 10);
+    if (isNaN(reqDefId)) {
+      // External servers send local request name + their URL — resolve via externalRequestMap
+      const key = `${req.request_def_id}|${req.request_def_where}`;
+      const mapped = this.externalRequestMap.get(key);
+      if (mapped === undefined) {
+        return `unknown external request: ${req.request_def_id} from ${req.request_def_where}`;
+      }
+      reqDefId = mapped;
+    }
 
-    const args = req.args as Value[];
     const pending: PendingRequest = {
       requestId: req.request_id,
       reqDefId,
-      args,
+      args: req.args as unknown as Record<string, Value>,
       fromAgentId: req.from_agent_id,
       fromAgentWhere: req.from_agent_where,
     };

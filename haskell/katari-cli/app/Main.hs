@@ -2,7 +2,9 @@ module Main where
 
 import Katari.CLI.Apply (runApply)
 import Katari.CLI.Build (runBuild)
+import Katari.CLI.Check (runCheck)
 import Katari.CLI.Dump (runDump)
+import Katari.CLI.List (runList)
 import Katari.CLI.Parser (cliParser)
 import Katari.CLI.Result (runResult)
 import Katari.CLI.Run (runRun)
@@ -16,9 +18,11 @@ main = do
   cmd <- execParser (info (cliParser <**> helper) (fullDesc <> progDesc "Katari CLI"))
   case cmd of
     CmdBuild opts -> runBuild opts
+    CmdCheck opts -> runCheck opts
     CmdApply opts -> runApply opts
     CmdRun opts -> runRun opts
     CmdStop opts -> runStop opts
     CmdStatus opts -> runStatus opts
     CmdResult opts -> runResult opts
+    CmdList opts -> runList opts
     CmdDump opts -> runDump opts

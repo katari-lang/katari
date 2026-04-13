@@ -56,12 +56,14 @@ export interface IRAgentDef {
   id: number;
   name: string;
   entry: ThreadDefId;
+  paramNames: string[];
 }
 
 export interface IRRequestDef {
   id: number;
   name: string;
   from: string | null;
+  paramNames: string[];
 }
 
 export interface IRModule {
@@ -124,9 +126,9 @@ export type Instruction =
   | { op: "Complete"; val: VarId }
   | { op: "Return"; val: VarId }
   // Agent operations
-  | { op: "Call"; dst: VarId; agentDefId: AgentDefId; args: VarId[] }
+  | { op: "Call"; dst: VarId; agentDefId: AgentDefId; args: [string, VarId][] }
   | { op: "Par"; dst: VarId; threads: ThreadDefId[] }
-  | { op: "Request"; dst: VarId; reqDefId: RequestDefId; args: VarId[] }
+  | { op: "Request"; dst: VarId; reqDefId: RequestDefId; args: [string, VarId][] }
   // Handle
   | { op: "Handle"; dst: VarId; handleId: HandleDefId }
   | { op: "Continue"; val: VarId; mutations: [VarId, VarId][] }
@@ -141,7 +143,7 @@ export type Instruction =
 // ===========================================================================
 
 const MAGIC = [0x4b, 0x54, 0x52, 0x49]; // "KTRI"
-const VERSION = [0x00, 0x02];
+const VERSION = [0x00, 0x03];
 
 class ByteReader {
   private pos = 0;
@@ -257,7 +259,7 @@ function readConst(r: ByteReader): ConstVal {
 }
 
 function readRequestDef(r: ByteReader): IRRequestDef {
-  return { id: r.readU32(), name: r.readText(), from: r.readMaybe(() => r.readText()) };
+  return { id: r.readU32(), name: r.readText(), from: r.readMaybe(() => r.readText()), paramNames: r.readVec(() => r.readText()) };
 }
 
 function readThread(r: ByteReader): IRThread {
@@ -299,7 +301,7 @@ function readForDef(r: ByteReader): IRForDef {
 }
 
 function readAgentDef(r: ByteReader): IRAgentDef {
-  return { id: r.readU32(), name: r.readText(), entry: r.readU32() };
+  return { id: r.readU32(), name: r.readText(), entry: r.readU32(), paramNames: r.readVec(() => r.readText()) };
 }
 
 function readInstruction(r: ByteReader): Instruction {
@@ -348,9 +350,9 @@ function readInstruction(r: ByteReader): Instruction {
     case 0x83: return { op: "Return", val: r.readU32() };
     case 0x84: return { op: "Complete", val: r.readU32() };
 
-    case 0x90: return { op: "Call", dst: r.readU32(), agentDefId: r.readU32(), args: r.readVec(() => r.readU32()) };
+    case 0x90: return { op: "Call", dst: r.readU32(), agentDefId: r.readU32(), args: r.readVec((): [string, number] => [r.readText(), r.readU32()]) };
     case 0x91: return { op: "Par", dst: r.readU32(), threads: r.readVec(() => r.readU32()) };
-    case 0x92: return { op: "Request", dst: r.readU32(), reqDefId: r.readU32(), args: r.readVec(() => r.readU32()) };
+    case 0x92: return { op: "Request", dst: r.readU32(), reqDefId: r.readU32(), args: r.readVec((): [string, number] => [r.readText(), r.readU32()]) };
 
     case 0xa0: return { op: "Handle", dst: r.readU32(), handleId: r.readU32() };
     case 0xa2: return { op: "Continue", val: r.readU32(), mutations: r.readVec(() => [r.readU32(), r.readU32()]) };

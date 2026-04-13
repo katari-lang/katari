@@ -6,6 +6,8 @@ module Katari.CLI.Types
     StopOpts (..),
     StatusOpts (..),
     ResultOpts (..),
+    ListOpts (..),
+    CheckOpts (..),
     DumpOpts (..),
     ProjectConfig (..),
   )
@@ -21,6 +23,8 @@ data Command
   | CmdStop StopOpts
   | CmdStatus StatusOpts
   | CmdResult ResultOpts
+  | CmdList ListOpts
+  | CmdCheck CheckOpts
   | CmdDump DumpOpts
 
 newtype BuildOpts = BuildOpts
@@ -50,6 +54,14 @@ newtype StatusOpts = StatusOpts
 data ResultOpts = ResultOpts
   { reAgentId :: Maybe String,
     reRuntimeUrl :: Maybe String
+  }
+
+newtype ListOpts = ListOpts
+  { liRuntimeUrl :: Maybe String
+  }
+
+newtype CheckOpts = CheckOpts
+  { chPath :: Maybe FilePath
   }
 
 newtype DumpOpts = DumpOpts

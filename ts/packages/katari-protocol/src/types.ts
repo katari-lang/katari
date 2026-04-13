@@ -40,7 +40,7 @@ export interface AgentSummary {
   agent_id: string;
   agent_where: string;
   agent_def_id: string;
-  args: JsonValue[];
+  args: Record<string, JsonValue>;
 }
 
 // ===========================================================================
@@ -51,10 +51,10 @@ export interface AgentDetail {
   agent_id: string;
   agent_where: string;
   agent_def_id: string;
-  args: JsonValue[];
+  args: Record<string, JsonValue>;
   parent_agent_id: string;
   parent_agent_where: string;
-  with_effects: string[];
+  with_effects: EffectRef[];
   child_agents: ChildAgentRef[];
 }
 
@@ -70,10 +70,10 @@ export interface ChildAgentRef {
 export interface SpawnAgentRequest {
   agent_def_id: string;
   agent_def_where: string;
-  args: JsonValue[];
+  args: Record<string, JsonValue>;
   parent_agent_id: string;
   parent_agent_where: string;
-  with_effects?: string[];
+  with_effects?: EffectRef[];
   call_stack?: CallStackEntry[];
 }
 
@@ -96,7 +96,7 @@ export interface AgentRequestBody {
   request_id: string;
   request_def_id: string;
   request_def_where: string;
-  args: JsonValue[];
+  args: Record<string, JsonValue>;
   from_agent_id: string;
   from_agent_where: string;
 }

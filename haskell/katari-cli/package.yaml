@@ -26,6 +26,8 @@ library:
     - Katari.CLI.Stop
     - Katari.CLI.Status
     - Katari.CLI.Result
+    - Katari.CLI.List
+    - Katari.CLI.Check
     - Katari.CLI.Dump
   dependencies:
     - base >= 4.18 && < 5

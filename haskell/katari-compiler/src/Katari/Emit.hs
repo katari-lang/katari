@@ -46,7 +46,7 @@ emitModule m = BS.toStrict (BB.toLazyByteString builder)
 -- ---------------------------------------------------------------------------
 
 header :: BB.Builder
-header = BB.byteString (BS.pack [0x4b, 0x54, 0x52, 0x49, 0x00, 0x02])
+header = BB.byteString (BS.pack [0x4b, 0x54, 0x52, 0x49, 0x00, 0x03])
 
 -- ---------------------------------------------------------------------------
 -- LEB128 unsigned
@@ -119,6 +119,7 @@ emitRequestDef rd =
     <> case irReqFrom rd of
       Nothing -> BB.word8 0
       Just f -> BB.word8 1 <> emitText f
+    <> emitVec emitText (irReqParamNames rd)
 
 -- ---------------------------------------------------------------------------
 -- Thread
@@ -180,6 +181,7 @@ emitAgentDef ad =
   leb128 (iadId ad)
     <> emitText (iadName ad)
     <> leb128 (iadEntry ad)
+    <> emitVec emitText (iadParamNames ad)
 
 -- ---------------------------------------------------------------------------
 -- Maybe encoding: 0 = Nothing, 1 + value = Just
@@ -188,6 +190,9 @@ emitAgentDef ad =
 emitMaybe :: (a -> BB.Builder) -> Maybe a -> BB.Builder
 emitMaybe _ Nothing = BB.word8 0
 emitMaybe f (Just x) = BB.word8 1 <> f x
+
+emitNamedArg :: (Text, Word32) -> BB.Builder
+emitNamedArg (name, vid) = emitText name <> leb128 vid
 
 -- ---------------------------------------------------------------------------
 -- Instructions with opcodes
@@ -245,9 +250,9 @@ emitInstr = \case
   IComplete v -> op 0x84 <> leb128 v
   IReturn v -> op 0x83 <> leb128 v
   -- Agent
-  ICall v tid args -> op 0x90 <> leb128 v <> leb128 tid <> emitVec leb128 args
+  ICall v tid args -> op 0x90 <> leb128 v <> leb128 tid <> emitVec emitNamedArg args
   IPar v tids -> op 0x91 <> leb128 v <> emitVec leb128 tids
-  IRequest v rid args -> op 0x92 <> leb128 v <> leb128 rid <> emitVec leb128 args
+  IRequest v rid args -> op 0x92 <> leb128 v <> leb128 rid <> emitVec emitNamedArg args
   -- Handle
   IHandle v hid -> op 0xa0 <> leb128 v <> leb128 hid
   IContinue v upds ->

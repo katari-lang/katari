@@ -7,10 +7,22 @@ export interface SpawnResult {
   actualAgentWhere: string;
 }
 
+export interface SpawnFailure {
+  parentAgentId: string;
+  provisionalChildId: string;
+  error: string;
+}
+
+export interface SendResult {
+  spawns: SpawnResult[];
+  failures: SpawnFailure[];
+}
+
 export async function sendOutgoingMessages(
   messages: OutgoingMessage[]
-): Promise<SpawnResult[]> {
-  const spawnResults: SpawnResult[] = [];
+): Promise<SendResult> {
+  const spawns: SpawnResult[] = [];
+  const failures: SpawnFailure[] = [];
   const fireAndForget: Promise<void>[] = [];
 
   for (const msg of messages) {
@@ -25,19 +37,28 @@ export async function sendOutgoingMessages(
         });
         if (res.ok) {
           const data = (await res.json()) as SpawnAgentResponse;
-          spawnResults.push({
+          spawns.push({
             parentAgentId: kind.parentAgentId,
             provisionalChildId: kind.provisionalChildId,
             actualAgentId: data.agent_id,
             actualAgentWhere: data.agent_where,
           });
         } else {
-          console.error(
-            `Spawn failed: ${res.status} ${await res.text()}`
-          );
+          const text = await res.text();
+          console.error(`Spawn failed: ${res.status} ${text}`);
+          failures.push({
+            parentAgentId: kind.parentAgentId,
+            provisionalChildId: kind.provisionalChildId,
+            error: `Spawn failed: ${res.status} ${text}`,
+          });
         }
       } catch (e) {
         console.error(`Spawn request failed:`, e);
+        failures.push({
+          parentAgentId: kind.parentAgentId,
+          provisionalChildId: kind.provisionalChildId,
+          error: `Spawn request failed: ${e}`,
+        });
       }
     } else {
       // Fire-and-forget for all other message types
@@ -65,5 +86,5 @@ export async function sendOutgoingMessages(
   }
 
   await Promise.allSettled(fireAndForget);
-  return spawnResults;
+  return { spawns, failures };
 }

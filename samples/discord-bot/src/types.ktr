@@ -17,3 +17,10 @@ type Channel = {
 }
 
 type SearchResult = { title: string, snippet: string, url: string }
+
+type AgentRef = {
+  url: string,
+  agent_def_id: string,
+  name: string,
+  description: string
+}

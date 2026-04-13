@@ -38,7 +38,9 @@ import Katari.IR
     emptyNameTable,
   )
 import Katari.Module
-  ( GlobalEnv (..),
+  ( AgentInfo (..),
+    GlobalEnv (..),
+    RequestInfo (..),
     resolveQualified,
   )
 import Katari.Syntax
@@ -160,21 +162,25 @@ preregisterModule ge m = do
   mapM_ (preregisterDecl ge (modName m)) (modDecls m)
 
 preregisterDecl :: GlobalEnv -> Text -> Decl -> Lower ()
-preregisterDecl _ge mname = \case
+preregisterDecl ge mname = \case
   DeclAgent _ td -> do
     _aid <- allocAgent (qualify mname (agentName td))
     return ()
   DeclRequest _ rd -> do
     let qname = qualify mname (reqName rd)
+        paramNames = [pn | (pn, _, _) <- reqParams rd]
     rid <- allocRequest qname
-    addRequestDef (IRRequestDef rid qname Nothing)
+    addRequestDef (IRRequestDef rid qname Nothing paramNames)
   DeclExtAgent _ etd -> do
     _aid <- allocAgent (qualify mname (extAgentName etd))
     return ()
   DeclExtReq _ erd -> do
     let qname = qualify mname (extReqName erd)
+        paramNames = case Map.lookup qname (geRequests ge) of
+          Just ri -> [pn | (pn, _, _) <- riParams ri]
+          Nothing -> [pn | (pn, _, _) <- extReqParams erd]
     rid <- allocRequest qname
-    addRequestDef (IRRequestDef rid qname (Just (extReqFrom erd)))
+    addRequestDef (IRRequestDef rid qname (Just (extReqFrom erd)) paramNames)
   _ -> return ()
 
 qualify :: Text -> Text -> Text
@@ -212,7 +218,8 @@ lowerAgentDecl ge mname td = do
   -- Create FN_BODY thread
   tid <- emitThread TkFnBody allParams allInstrs
   -- Register agent def
-  addAgentDef (IRAgentDef aid qname tid)
+  let paramNames = [n | (n, _, _) <- agentParams td]
+  addAgentDef (IRAgentDef aid qname tid paramNames)
 
 -- ---------------------------------------------------------------------------
 -- Block lowering: returns (result VarId, [AInstr])
@@ -562,14 +569,16 @@ lowerExpr ge env = \case
         mname <- gets lsCurrentModule
         let qname = resolveLocal ge mname name
         case Map.lookup qname (geAgents ge) of
-          Just _ai -> do
+          Just ai -> do
             aid <- lookupOrAllocAgent qname
-            return (dst, argInstrs ++ [AI (ICall dst aid argVars)])
+            let namedArgs = zip [pn | (pn, _, _) <- aiParams ai] argVars
+            return (dst, argInstrs ++ [AI (ICall dst aid namedArgs)])
           Nothing ->
             case Map.lookup qname (geRequests ge) of
-              Just _ri -> do
+              Just ri -> do
                 rid <- lookupOrAllocRequest qname
-                return (dst, argInstrs ++ [AI (IRequest dst rid argVars)])
+                let namedArgs = zip [pn | (pn, _, _) <- riParams ri] argVars
+                return (dst, argInstrs ++ [AI (IRequest dst rid namedArgs)])
               Nothing ->
                 return (dst, argInstrs ++ [AI (ILoadNull dst)])
       EField _sp2 obj "__index__" -> do

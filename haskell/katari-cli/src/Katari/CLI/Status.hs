@@ -47,9 +47,9 @@ printAgentTable val = case parseEither parseRows val of
     parseAgent = withObject "agent" $ \o ->
       AgentRow
         <$> o .: "id"
-        <*> o .: "agent_def_name"
+        <*> o .: "agentDefName"
         <*> o .: "status"
-        <*> (fromMaybe "-" <$> o .:? "started_at")
+        <*> (fromMaybe "-" <$> o .:? "startedAt")
     printRow AgentRow {..} =
       putStrLn $
         padR 38 (T.unpack arId)

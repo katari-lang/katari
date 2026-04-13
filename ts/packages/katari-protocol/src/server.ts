@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
+import { logger } from "hono/logger";
 import { serve } from "@hono/node-server";
 import { randomUUID } from "node:crypto";
 import type { JsonValue } from "./json.js";
@@ -16,6 +17,7 @@ import type {
   AgentDefInfo,
   AgentSummary,
   AgentDetail,
+  EffectRef,
 } from "./types.js";
 import type { KatariProtocol } from "./router.js";
 import { buildKatariRouter } from "./router.js";
@@ -31,12 +33,12 @@ export interface AgentContext {
   parentAgentWhere: string;
   selfBaseUrl: string;
   /** Send a request to the parent (e.g. on_message, notify) */
-  sendRequest(requestDefId: string, args: JsonValue[]): void;
+  sendRequest(requestDefId: string, args: Record<string, JsonValue>): void;
   /** Spawn a child agent on another server and wait for its return */
   spawnAndWait(
     serverUrl: string,
     agentDefId: string,
-    args: JsonValue[]
+    args: Record<string, JsonValue>
   ): Promise<JsonValue>;
 }
 
@@ -45,7 +47,7 @@ export interface AgentContext {
 // ===========================================================================
 
 export type AgentHandlerFn = (
-  args: JsonValue[],
+  args: Record<string, JsonValue>,
   ctx: AgentContext
 ) => Promise<JsonValue>;
 
@@ -58,7 +60,8 @@ interface AgentState {
   agentDefId: string;
   parentAgentId: string;
   parentAgentWhere: string;
-  args: JsonValue[];
+  args: Record<string, JsonValue>;
+  withEffects: EffectRef[];
 }
 
 // ===========================================================================
@@ -137,6 +140,7 @@ export class ExternalServer implements KatariProtocol {
       parentAgentId: req.parent_agent_id,
       parentAgentWhere: req.parent_agent_where,
       args: req.args,
+      withEffects: req.with_effects ?? [],
     };
     this.agents.set(agentId, state);
 
@@ -241,7 +245,7 @@ export class ExternalServer implements KatariProtocol {
       parentAgentWhere,
       selfBaseUrl: this.selfBaseUrl,
 
-      sendRequest: (requestDefId: string, args: JsonValue[]) => {
+      sendRequest: (requestDefId: string, args: Record<string, JsonValue>) => {
         sendOutgoingMessages([
           {
             toUrl: parentAgentWhere,
@@ -265,10 +269,10 @@ export class ExternalServer implements KatariProtocol {
       spawnAndWait: async (
         serverUrl: string,
         agentDefId: string,
-        args: JsonValue[]
+        args: Record<string, JsonValue>
       ): Promise<JsonValue> => {
         const provisionalChildId = `child-${randomUUID()}`;
-        const results = await sendOutgoingMessages([
+        const { spawns, failures } = await sendOutgoingMessages([
           {
             toUrl: serverUrl,
             kind: {
@@ -286,11 +290,14 @@ export class ExternalServer implements KatariProtocol {
           },
         ]);
 
-        if (results.length === 0) {
+        if (failures.length > 0) {
+          throw new Error(failures[0]!.error);
+        }
+        if (spawns.length === 0) {
           throw new Error(`Spawn failed for ${agentDefId} on ${serverUrl}`);
         }
 
-        const childId = results[0].actualAgentId;
+        const childId = spawns[0]!.actualAgentId;
         return new Promise<JsonValue>((resolve) => {
           this.pendingReturns.set(childId, { resolve });
         });
@@ -315,6 +322,7 @@ export function startServer(opts: {
 
   const app = new Hono();
   app.use("*", cors());
+  app.use("*", logger());
 
   const katariRouter = buildKatariRouter(
     () => server,

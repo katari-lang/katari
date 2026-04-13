@@ -60,7 +60,7 @@ parseAgentRows statusFilter val = case parseEither parser val of
       return [r | Just r <- rows]
     parseRow = withObject "agent" $ \o -> do
       aid <- o .: "id" :: Parser Text
-      name <- o .: "agent_def_name" :: Parser Text
+      name <- o .: "agentDefName" :: Parser Text
       status <- o .: "status" :: Parser Text
       if status == statusFilter
         then return (Just (aid <> " (" <> name <> ")", aid))

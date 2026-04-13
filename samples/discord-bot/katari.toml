@@ -6,8 +6,8 @@ version = "0.1.0"
 url = "http://localhost:8000"
 
 [servers]
-discord = "http://localhost:8001/katari"
-ai = "http://localhost:8002/katari"
-cron = "http://localhost:8003/katari"
-websearch = "http://localhost:8004/katari"
-sandbox = "http://localhost:8005/katari"
+discord = "http://discord:8001/katari"
+ai = "http://ai:8002/katari"
+cron = "http://cron:8003/katari"
+websearch = "http://websearch:8004/katari"
+sandbox = "http://sandbox:8005/katari"

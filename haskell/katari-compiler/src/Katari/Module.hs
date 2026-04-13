@@ -296,6 +296,24 @@ primAgents =
             aiAnnot = Nothing,
             aiHomeModule = primModuleName
           }
+      ),
+      -- ref_agent :: string -> { url, agent_def_id, name, description, arg_type }
+      ( "prim.ref_agent",
+        AgentInfo
+          { aiParams = [("name", TString, Nothing)],
+            aiRet =
+              TObj
+                [ ObjField "url" False False TString Nothing,
+                  ObjField "agent_def_id" False False TString Nothing,
+                  ObjField "name" False False TString Nothing,
+                  ObjField "description" False False TString Nothing,
+                  ObjField "arg_type" False False TUnknown Nothing
+                ],
+            aiWith = Just (RENames []),
+            aiExtFrom = Nothing,
+            aiAnnot = Just "外部エージェントの参照情報を返す",
+            aiHomeModule = primModuleName
+          }
       )
     ]
 

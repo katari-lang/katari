@@ -3,14 +3,14 @@ import { toDisplayString } from "./value.js";
 
 export type PrimitiveResult =
   | { tag: "Ok"; value: Value }
-  | { tag: "RaiseRequest"; reqName: string; args: Value[] };
+  | { tag: "RaiseRequest"; reqName: string; args: Record<string, Value> };
 
 function ok(value: Value): PrimitiveResult {
   return { tag: "Ok", value };
 }
 
 function parseError(msg: string): PrimitiveResult {
-  return { tag: "RaiseRequest", reqName: "prim.parse_error", args: [msg] };
+  return { tag: "RaiseRequest", reqName: "prim.parse_error", args: { message: msg } };
 }
 
 export function callPrimitive(name: string, args: Value[]): PrimitiveResult {

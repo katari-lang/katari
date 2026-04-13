@@ -44,14 +44,33 @@ export function buildApp(runtime: Runtime, db: Db): Hono {
 
   const handleMessages = (msgs: OutgoingMessage[]) => {
     if (msgs.length > 0) {
-      sendOutgoingMessages(msgs).then((spawnResults) => {
-        for (const r of spawnResults) {
+      sendOutgoingMessages(msgs).then(({ spawns, failures }) => {
+        for (const r of spawns) {
           runtime.registerRemoteChild(
             r.parentAgentId,
             r.provisionalChildId,
             r.actualAgentId,
             r.actualAgentWhere
           );
+        }
+        for (const f of failures) {
+          // Spawn failed — terminate the parent agent
+          console.error(`Spawn failed for parent ${f.parentAgentId}: ${f.error}`);
+          runtime.eventQueue.push({
+            agentId: f.parentAgentId,
+            kind: {
+              tag: "TerminateAgent",
+              agentId: f.parentAgentId,
+              fromAgentId: "system",
+              fromAgentWhere: "",
+            },
+          });
+          runtime.runEventLoop();
+          const followUp = runtime.drainMessages();
+          if (followUp.length > 0) handleMessages(followUp);
+
+          // Update DB status
+          db.updateToplevelAgent(f.parentAgentId, "error", f.error as JsonValue);
         }
       });
     }
@@ -75,8 +94,11 @@ export function buildApp(runtime: Runtime, db: Db): Hono {
             Object.entries(body.external_agents).map(([k, v]) => [parseInt(k, 10), v])
           )
         : undefined;
+      const servers = body.servers
+        ? new Map(Object.entries(body.servers))
+        : undefined;
 
-      runtime.applyModule(module, nameMap, schemas, externalAgents);
+      runtime.applyModule(module, nameMap, schemas, externalAgents, servers);
 
       // Save to DB
       await db.saveModule(
@@ -84,7 +106,8 @@ export function buildApp(runtime: Runtime, db: Db): Hono {
         binary,
         body.agents,
         body.schemas ?? {},
-        body.external_agents ?? {}
+        body.external_agents ?? {},
+        body.servers ?? {}
       );
 
       const response: ApplyResponse = {
@@ -116,10 +139,10 @@ export function buildApp(runtime: Runtime, db: Db): Hono {
 
   // POST /agents
   agentsRouter.post("/", async (c) => {
-    const body = (await c.req.json()) as { agent_name: string; args?: JsonValue[] };
+    const body = (await c.req.json()) as { agent_name: string; args?: Record<string, JsonValue> };
 
     try {
-      const agentId = runtime.runAgent(body.agent_name, (body.args ?? []) as Value[]);
+      const agentId = runtime.runAgent(body.agent_name, (body.args ?? {}) as Record<string, Value>);
 
       const agentDefId = runtime.agentNameMap.get(body.agent_name);
       await db.saveToplevelAgent(
@@ -167,23 +190,36 @@ export function buildApp(runtime: Runtime, db: Db): Hono {
   agentsRouter.post("/:id/stop", async (c) => {
     const id = c.req.param("id");
     const agent = runtime.agents.get(id);
-    if (!agent) return c.json({ error: "agent not running" }, 404);
 
-    runtime.eventQueue.push({
-      agentId: id,
-      kind: {
-        tag: "TerminateAgent",
+    if (agent) {
+      // Agent is in runtime memory — terminate it
+      runtime.eventQueue.push({
         agentId: id,
-        fromAgentId: "cli",
-        fromAgentWhere: "",
-      },
-    });
-    runtime.runEventLoop();
-    const msgs = runtime.drainMessages();
-    handleMessages(msgs);
+        kind: {
+          tag: "TerminateAgent",
+          agentId: id,
+          fromAgentId: "cli",
+          fromAgentWhere: "",
+        },
+      });
+      runtime.runEventLoop();
+      const msgs = runtime.drainMessages();
+      handleMessages(msgs);
+      await db.updateToplevelAgent(id, "stopped", null);
+      return c.json({ ok: true });
+    }
 
-    await db.updateToplevelAgent(id, "stopped", null);
-    return c.json({ ok: true });
+    // Agent not in runtime memory — check DB (stale from previous runtime session)
+    const row = await db.getToplevelAgent(id);
+    if (!row) return c.json({ error: "agent not found" }, 404);
+
+    if (row.status === "running") {
+      // Stale "running" entry — mark as stopped
+      await db.updateToplevelAgent(id, "stopped", null);
+      return c.json({ ok: true, note: "agent was stale (not in runtime memory)" });
+    }
+
+    return c.json({ error: `agent already ${row.status}` }, 400);
   });
 
   app.route("/agents", agentsRouter);
@@ -194,9 +230,9 @@ export function buildApp(runtime: Runtime, db: Db): Hono {
 
   app.post("/run", async (c) => {
     c.header("X-Deprecated", "Use POST /agents instead");
-    const body = (await c.req.json()) as { agent_name: string; args: JsonValue[] };
+    const body = (await c.req.json()) as { agent_name: string; args: Record<string, JsonValue> };
     try {
-      const agentId = runtime.runAgent(body.agent_name, body.args as Value[]);
+      const agentId = runtime.runAgent(body.agent_name, body.args as Record<string, Value>);
       const status = runtime.getAgentStatus(agentId);
       const msgs = runtime.drainMessages();
       handleMessages(msgs);

@@ -62,13 +62,13 @@ function formatMessage(msg: DiscordMessage): JsonValue {
 // ===========================================================================
 
 const watchChannel: AgentHandlerFn = async (args, ctx) => {
-  const channelId = args[0] as string;
+  const channelId = args.channel_id as string;
   await readyPromise;
 
   // Long-running: listen for messages and fire on_message requests
   const listener = (msg: DiscordMessage) => {
     if (msg.channelId === channelId) {
-      ctx.sendRequest("on_message", [formatMessage(msg)]);
+      ctx.sendRequest("on_message", { msg: formatMessage(msg) });
     }
   };
 
@@ -79,8 +79,8 @@ const watchChannel: AgentHandlerFn = async (args, ctx) => {
 };
 
 const sendMessage: AgentHandlerFn = async (args) => {
-  const channelId = args[0] as string;
-  const content = args[1] as string;
+  const channelId = args.channel_id as string;
+  const content = args.content as string;
 
   const channel = await getTextChannel(channelId);
   const msg = await channel.send(content);
@@ -88,9 +88,9 @@ const sendMessage: AgentHandlerFn = async (args) => {
 };
 
 const replyTo: AgentHandlerFn = async (args) => {
-  const channelId = args[0] as string;
-  const messageId = args[1] as string;
-  const content = args[2] as string;
+  const channelId = args.channel_id as string;
+  const messageId = args.message_id as string;
+  const content = args.content as string;
 
   const channel = await getTextChannel(channelId);
   const targetMsg = await channel.messages.fetch(messageId);
@@ -99,8 +99,8 @@ const replyTo: AgentHandlerFn = async (args) => {
 };
 
 const fetchMessages: AgentHandlerFn = async (args) => {
-  const channelId = args[0] as string;
-  const limit = args[1] as number;
+  const channelId = args.channel_id as string;
+  const limit = args.limit as number;
 
   const channel = await getTextChannel(channelId);
   const messages = await channel.messages.fetch({ limit });

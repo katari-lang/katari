@@ -70,10 +70,14 @@ export function dispatchRequest(
     setVar(agent, sv, val);
   }
 
-  // Bind request args to handler params
+  // Bind request args to handler params using request def's param names
   const handlerIr = findThread(agent.module, handlerTid)!;
-  for (let i = 0; i < handlerIr.params.length && i < request.args.length; i++) {
-    setVar(agent, handlerIr.params[i]!, request.args[i]!);
+  const reqDef = agent.module.requests.find((r) => r.id === request.reqDefId);
+  if (reqDef) {
+    for (let i = 0; i < reqDef.paramNames.length && i < handlerIr.params.length; i++) {
+      const val = request.args[reqDef.paramNames[i]!];
+      if (val !== undefined) setVar(agent, handlerIr.params[i]!, val);
+    }
   }
 
   // Update phase
