@@ -5,14 +5,18 @@ import type { JsonValue } from "katari-protocol";
 // Row types
 // ===========================================================================
 
+export interface ExternalAgentEntry {
+  agent_def_id: string;
+  agent_def_where: string;
+}
+
 export interface ModuleRow {
   version: number;
   name: string;
   ktriBinary: Buffer;
   agentNameMap: Record<string, number>;
   schemas: Record<string, unknown>;
-  servers: Record<string, string>;
-  externalAgents: Record<string, string>;
+  externalAgents: Record<string, ExternalAgentEntry>;
 }
 
 export interface ToplevelAgentRow {
@@ -73,18 +77,16 @@ export class Db {
     ktriBinary: Buffer,
     agentNameMap: Record<string, number>,
     schemas: Record<string, unknown>,
-    servers: Record<string, string> = {},
-    externalAgents: Record<string, string> = {}
+    externalAgents: Record<string, ExternalAgentEntry> = {}
   ): Promise<number> {
     const [row] = await this.sql`
-      INSERT INTO modules (name, ktri_binary, agent_name_map, schemas, servers, external_agents)
+      INSERT INTO modules (name, ktri_binary, agent_name_map, schemas, external_agents)
       VALUES (
         ${name},
         ${ktriBinary},
         ${this.sql.json(agentNameMap as Record<string, number>)},
         ${this.sql.json(schemas as unknown as postgres.JSONValue)},
-        ${this.sql.json(servers as Record<string, string>)},
-        ${this.sql.json(externalAgents as Record<string, string>)}
+        ${this.sql.json(externalAgents as unknown as postgres.JSONValue)}
       )
       RETURNING version
     `;
@@ -93,7 +95,7 @@ export class Db {
 
   async loadLatestModule(): Promise<ModuleRow | null> {
     const rows = await this.sql`
-      SELECT version, name, ktri_binary, agent_name_map, schemas, servers, external_agents
+      SELECT version, name, ktri_binary, agent_name_map, schemas, external_agents
       FROM modules
       ORDER BY version DESC
       LIMIT 1
@@ -108,8 +110,7 @@ export class Db {
       ktriBinary: row.ktri_binary as Buffer,
       agentNameMap: row.agent_name_map as Record<string, number>,
       schemas: row.schemas as Record<string, unknown>,
-      servers: row.servers as Record<string, string>,
-      externalAgents: row.external_agents as Record<string, string>,
+      externalAgents: row.external_agents as Record<string, ExternalAgentEntry>,
     };
   }
 

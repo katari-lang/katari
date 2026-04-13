@@ -7,7 +7,6 @@ import Data.Aeson (Value (..), object, (.=))
 import Data.Aeson qualified as Aeson
 import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KM
-import Data.Aeson.Types (Parser, parseEither, withObject, (.:))
 import Data.ByteString.Lazy.Char8 qualified as BLC
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -61,13 +60,11 @@ selectAgent runtimeUrl = do
             Just name -> return name
 
 parseAgentNames :: Value -> [Text]
-parseAgentNames val = case parseEither parser val of
-  Left _ -> []
-  Right ns -> ns
+parseAgentNames val = case val of
+  Array arr -> [n | Object o <- toList arr, String n <- maybe [] pure (KM.lookup "name" o)]
+  _ -> []
   where
-    parser = withObject "root" $ \o -> do
-      agents <- o .: "agents" :: Parser [Value]
-      mapM (withObject "agent" (.: "name")) agents
+    toList = foldr (:) []
 
 showField :: Text -> Value -> String
 showField key val = case val of

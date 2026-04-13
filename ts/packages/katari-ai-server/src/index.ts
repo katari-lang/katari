@@ -1,5 +1,6 @@
 import { startServer } from "katari-protocol";
 import type { AgentHandlerFn, AgentContext, JsonValue } from "katari-protocol";
+import type { AgentDefInfo } from "katari-protocol";
 import { GeminiProvider } from "./providers/gemini.js";
 import type { AIProvider, ChatMessage, ToolDef, ToolCall } from "./providers/types.js";
 
@@ -7,16 +8,7 @@ import type { AIProvider, ChatMessage, ToolDef, ToolCall } from "./providers/typ
 // Configuration
 // ===========================================================================
 
-interface ToolRoute {
-  url: string;
-  def: string;
-  description: string;
-  params: { name: string; type: string; description?: string }[];
-}
-
-const toolRoutes: Record<string, ToolRoute> = JSON.parse(
-  process.env.TOOL_ROUTES ?? "{}"
-);
+const RUNTIME_KATARI_URL = process.env.RUNTIME_KATARI_URL ?? "http://localhost:8000/katari";
 
 // ===========================================================================
 // AI Provider
@@ -40,6 +32,74 @@ function createProvider(): AIProvider {
 }
 
 const ai = createProvider();
+
+// ===========================================================================
+// Tool definition cache (fetched from runtime)
+// ===========================================================================
+
+interface CachedToolDef {
+  agentDefId: string;
+  name: string;
+  description: string;
+  argType: JsonValue; // JSON Schema object
+  paramOrder: string[]; // ordered param names from "required"
+}
+
+let cachedTools: CachedToolDef[] = [];
+let toolsFetched = false;
+
+async function fetchToolDefs(): Promise<void> {
+  try {
+    const resp = await fetch(`${RUNTIME_KATARI_URL}/agent_def`);
+    if (!resp.ok) {
+      console.error(`Failed to fetch agent_defs: ${resp.status}`);
+      return;
+    }
+    const defs = (await resp.json()) as AgentDefInfo[];
+    cachedTools = defs.map((d) => {
+      const argType = d.arg_type as Record<string, JsonValue> | null;
+      const paramOrder = (argType?.required as string[]) ?? [];
+      return {
+        agentDefId: d.agent_def_id,
+        name: d.name,
+        description: d.description ?? "",
+        argType: d.arg_type,
+        paramOrder,
+      };
+    });
+    toolsFetched = true;
+    console.log(`Fetched ${cachedTools.length} tool definitions from runtime`);
+  } catch (e) {
+    console.error(`Failed to fetch tool defs:`, e);
+  }
+}
+
+function buildToolDefs(toolNames: string[]): ToolDef[] {
+  return toolNames
+    .map((name) => {
+      const cached = cachedTools.find((t) => t.name === name);
+      if (!cached) return null;
+      const argType = cached.argType as Record<string, JsonValue> | null;
+      const properties = (argType?.properties ?? {}) as Record<
+        string,
+        Record<string, JsonValue>
+      >;
+      return {
+        name: cached.name,
+        description: cached.description,
+        parameters: Object.fromEntries(
+          Object.entries(properties).map(([k, v]) => [
+            k,
+            {
+              type: (v.type as string) ?? "string",
+              description: (v.description as string) ?? k,
+            },
+          ])
+        ),
+      } satisfies ToolDef;
+    })
+    .filter((t): t is ToolDef => t !== null);
+}
 
 // ===========================================================================
 // Session management
@@ -67,29 +127,18 @@ const askWithTools: AgentHandlerFn = async (args, ctx) => {
   const prompt = args[2] as string;
   const toolNames = args[3] as string[];
 
+  // Fetch tool defs if not yet cached
+  if (!toolsFetched) {
+    await fetchToolDefs();
+  }
+
   let session = sessions.get(sessionId);
   if (!session) {
     session = { messages: [] };
     sessions.set(sessionId, session);
   }
 
-  // Build tool definitions from TOOL_ROUTES
-  const tools: ToolDef[] = toolNames
-    .map((name) => {
-      const route = toolRoutes[name];
-      if (!route) return null;
-      return {
-        name,
-        description: route.description,
-        parameters: Object.fromEntries(
-          route.params.map((p) => [
-            p.name,
-            { type: p.type, description: p.description ?? p.name },
-          ])
-        ),
-      };
-    })
-    .filter((t): t is ToolDef => t !== null);
+  const tools = buildToolDefs(toolNames);
 
   // Add user message
   session.messages.push({ role: "user", content: prompt });
@@ -147,18 +196,22 @@ async function executeToolCall(
   tc: ToolCall,
   ctx: AgentContext
 ): Promise<JsonValue> {
-  const route = toolRoutes[tc.name];
-  if (!route) {
+  const cached = cachedTools.find((t) => t.name === tc.name);
+  if (!cached) {
     return `Unknown tool: ${tc.name}`;
   }
 
-  // Build args array in the order defined by params
-  const args: JsonValue[] = route.params.map(
-    (p) => (tc.arguments[p.name] as JsonValue) ?? null
+  // Build args array in the parameter order from schema
+  const args: JsonValue[] = cached.paramOrder.map(
+    (p) => (tc.arguments[p] as JsonValue) ?? null
   );
 
   try {
-    const result = await ctx.spawnAndWait(route.url, route.def, args);
+    const result = await ctx.spawnAndWait(
+      RUNTIME_KATARI_URL,
+      cached.agentDefId,
+      args
+    );
     return result;
   } catch (e) {
     return `Tool execution failed: ${e}`;
@@ -171,7 +224,7 @@ async function executeToolCall(
 
 const port = parseInt(process.env.PORT ?? "8002", 10);
 const selfBaseUrl =
-  process.env.SELF_BASE_URL ?? `http://localhost:${port}/katari`;
+  process.env.KATARI_BASE_URL ?? `http://localhost:${port}/katari`;
 
 startServer({
   port,

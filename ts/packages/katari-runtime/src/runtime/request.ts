@@ -9,10 +9,14 @@ import { callPrimitive } from "../primitive.js";
 // Config for external routing
 // ===========================================================================
 
+export interface ExternalAgentRef {
+  agent_def_id: string;
+  agent_def_where: string;
+}
+
 export interface RequestConfig {
   selfBaseUrl: string;
-  servers: Map<string, string>;
-  externalAgents: Map<number, string>;
+  externalAgents: Map<number, ExternalAgentRef>;
 }
 
 // ===========================================================================
@@ -70,34 +74,29 @@ export function handleICall(
   }
 
   // External agent?
-  const externalFrom = config.externalAgents.get(agentDefId);
-  if (externalFrom) {
+  const externalRef = config.externalAgents.get(agentDefId);
+  if (externalRef) {
     const argValues = argVars.map((v) => getVar(agent, v));
     const childAgentId = `agent-${uuidv4()}`;
     const t = agent.threads.get(threadId)!;
     t.status = { tag: "Suspended", reason: { tag: "Call", childAgentId, dst } };
     agent.children.set(childAgentId, threadId);
 
-    // Parse "server:name" → server URL
-    const colonIdx = externalFrom.indexOf(":");
-    const serverName = externalFrom.substring(0, colonIdx);
-    const targetUrl = config.servers.get(serverName);
-    if (targetUrl) {
-      messages.push({
-        toUrl: targetUrl,
-        kind: {
-          type: "Spawn",
-          body: {
-            agent_def_id: externalFrom.substring(colonIdx + 1),
-            args: argValues as JsonValue[],
-            parent_agent_id: agent.agentId,
-            parent_agent_where: config.selfBaseUrl,
-          },
-          parentAgentId: agent.agentId,
-          provisionalChildId: childAgentId,
+    messages.push({
+      toUrl: externalRef.agent_def_where,
+      kind: {
+        type: "Spawn",
+        body: {
+          agent_def_id: externalRef.agent_def_id,
+          agent_def_where: externalRef.agent_def_where,
+          args: argValues as JsonValue[],
+          parent_agent_id: agent.agentId,
+          parent_agent_where: config.selfBaseUrl,
         },
-      });
-    }
+        parentAgentId: agent.agentId,
+        provisionalChildId: childAgentId,
+      },
+    });
     return;
   }
 

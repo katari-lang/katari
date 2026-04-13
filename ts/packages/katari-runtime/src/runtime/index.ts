@@ -4,6 +4,7 @@ import type {
   OutgoingMessage,
   RequestInfo,
   AgentDefInfo,
+  EffectRef,
   AgentSummary,
   AgentDetail,
   SpawnAgentRequest,
@@ -38,7 +39,7 @@ import { executeThread } from "./execute.js";
 import { setupHandle, dispatchRequest, processHandlerSignal, processHandleBodySignal, processHandleThenSignal } from "./handle.js";
 import { setupFor, processForBodySignal, processForThenSignal } from "./for-loop.js";
 import { setupPar, processParBranchSignal } from "./par.js";
-import type { RequestConfig } from "./request.js";
+import type { RequestConfig, ExternalAgentRef } from "./request.js";
 import { handleICall, handleIRequest } from "./request.js";
 
 // ===========================================================================
@@ -55,8 +56,7 @@ export class Runtime implements KatariProtocol {
   outgoingMessages: OutgoingMessage[] = [];
 
   // External routing
-  servers = new Map<string, string>();
-  externalAgents = new Map<number, string>();
+  externalAgents = new Map<number, ExternalAgentRef>();
 
   // Toplevel agent tracking
   toplevelAgents = new Set<string>();
@@ -82,7 +82,6 @@ export class Runtime implements KatariProtocol {
   private get requestConfig(): RequestConfig {
     return {
       selfBaseUrl: this.selfBaseUrl,
-      servers: this.servers,
       externalAgents: this.externalAgents,
     };
   }
@@ -91,13 +90,11 @@ export class Runtime implements KatariProtocol {
     module: IRModule,
     nameMap: Map<string, number>,
     schemas: Map<string, JsonValue>,
-    servers?: Map<string, string>,
-    externalAgents?: Map<number, string>
+    externalAgents?: Map<number, ExternalAgentRef>
   ): void {
     this.module = module;
     this.agentNameMap = nameMap;
     this.schemas = schemas;
-    if (servers) this.servers = servers;
     if (externalAgents) this.externalAgents = externalAgents;
   }
 
@@ -541,27 +538,41 @@ export class Runtime implements KatariProtocol {
     if (!this.module) return [];
     return this.module.requests
       .filter((r) => !r.from)
-      .map((r) => ({
-        request_id: String(r.id),
-        request_where: this.selfBaseUrl,
-        name: r.name,
-        description: "",
-        arg_types: [],
-        return_type: null,
-      }));
+      .map((r) => {
+        const s = this.schemas.get(r.name) as Record<string, JsonValue> | undefined;
+        return {
+          request_id: String(r.id),
+          request_where: this.selfBaseUrl,
+          name: r.name,
+          description: (s?.description as string) ?? "",
+          arg_type: s?.arg_type ?? null,
+          return_type: s?.return_type ?? null,
+        };
+      });
   }
 
   listAgentDefs(_moduleName?: string): AgentDefInfo[] {
     if (!this.module) return [];
-    return this.module.agents.map((a) => ({
-      agent_def_id: String(a.id),
-      agent_def_where: this.selfBaseUrl,
-      name: a.name,
-      description: "",
-      arg_types: [],
-      return_type: null,
-      with_effects: [],
-    }));
+    return this.module.agents.map((a) => {
+      const s = this.schemas.get(a.name) as Record<string, JsonValue> | undefined;
+      const effectNames = (s?.with_effects as string[] | undefined) ?? [];
+      const effects: EffectRef[] = effectNames
+        .map((name) => {
+          const req = this.module!.requests.find((r) => r.name === name);
+          if (!req) return null;
+          return { request_id: String(req.id), request_where: this.selfBaseUrl };
+        })
+        .filter((e): e is EffectRef => e !== null);
+      return {
+        agent_def_id: String(a.id),
+        agent_def_where: this.selfBaseUrl,
+        name: a.name,
+        description: (s?.description as string) ?? "",
+        arg_type: s?.arg_type ?? null,
+        return_type: s?.return_type ?? null,
+        with_effects: effects,
+      };
+    });
   }
 
   listAgents(): AgentSummary[] {
@@ -657,15 +668,8 @@ export class Runtime implements KatariProtocol {
 
     const agent = this.agents.get(agentId)!;
 
-    let reqDefId: number;
-    const parsed = parseInt(req.request_def_id, 10);
-    if (!isNaN(parsed)) {
-      reqDefId = parsed;
-    } else {
-      const found = agent.module.requests.find((r) => r.name === req.request_def_id)?.id;
-      if (found === undefined) return `request ${req.request_def_id} not found`;
-      reqDefId = found;
-    }
+    const reqDefId = parseInt(req.request_def_id, 10);
+    if (isNaN(reqDefId)) return `invalid request_def_id: ${req.request_def_id}`;
 
     const args = req.args as Value[];
     const pending: PendingRequest = {

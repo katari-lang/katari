@@ -19,7 +19,7 @@ const schedule: AgentHandlerFn = async (args, ctx) => {
 };
 
 const port = parseInt(process.env.PORT ?? "8003", 10);
-const selfBaseUrl = process.env.SELF_BASE_URL ?? `http://localhost:${port}/katari`;
+const selfBaseUrl = process.env.KATARI_BASE_URL ?? `http://localhost:${port}/katari`;
 
 startServer({
   port,

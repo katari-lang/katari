@@ -12,12 +12,17 @@ import { Db } from "./db.js";
 // Request/Response types
 // ===========================================================================
 
+interface ExternalAgentEntry {
+  agent_def_id: string;
+  agent_def_where: string;
+}
+
 interface ApplyRequest {
   ir_binary: string; // base64
   agents: Record<string, number>;
   schemas?: Record<string, unknown>;
   servers?: Record<string, string>;
-  external_agents?: Record<string, string>;
+  external_agents?: Record<string, ExternalAgentEntry>;
 }
 
 interface ApplyResponse {
@@ -65,14 +70,13 @@ export function buildApp(runtime: Runtime, db: Db): Hono {
 
       const nameMap = new Map(Object.entries(body.agents));
       const schemas = new Map(Object.entries(body.schemas ?? {})) as Map<string, JsonValue>;
-      const servers = body.servers ? new Map(Object.entries(body.servers)) : undefined;
       const externalAgents = body.external_agents
         ? new Map(
             Object.entries(body.external_agents).map(([k, v]) => [parseInt(k, 10), v])
           )
         : undefined;
 
-      runtime.applyModule(module, nameMap, schemas, servers, externalAgents);
+      runtime.applyModule(module, nameMap, schemas, externalAgents);
 
       // Save to DB
       await db.saveModule(
@@ -80,7 +84,6 @@ export function buildApp(runtime: Runtime, db: Db): Hono {
         binary,
         body.agents,
         body.schemas ?? {},
-        body.servers ?? {},
         body.external_agents ?? {}
       );
 
@@ -97,22 +100,6 @@ export function buildApp(runtime: Runtime, db: Db): Hono {
         400
       );
     }
-  });
-
-  // ==========================================================================
-  // GET /schema/agents — agent defs with schemas (for CLI run selection)
-  // ==========================================================================
-
-  app.get("/schema/agents", (c) => {
-    const module = runtime.module;
-    if (!module) return c.json({ agents: [] });
-
-    const agents = module.agents.map((a) => ({
-      id: a.id,
-      name: a.name,
-      schema: runtime.schemas.get(a.name) ?? null,
-    }));
-    return c.json({ agents });
   });
 
   // ==========================================================================

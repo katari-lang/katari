@@ -4,7 +4,6 @@ module Katari.CLI.Compiler
     buildAllOrDie,
     buildExternalAgents,
     schemasToValue,
-    agentSchemasObject,
   )
 where
 
@@ -52,29 +51,43 @@ buildAllOrDie modules = do
       exitFailure
     Right ir -> return (ge, ir)
 
--- | Build the external_agents map: agent_def_id -> "server:localName".
+-- | Build the external_agents map:
+--   agent_def_id (numeric string) -> { "agent_def_id": localName, "agent_def_where": serverUrl }
+--
 -- An agent is external if the first dot-separated component of its name
 -- matches a key in the servers config.
-buildExternalAgents :: [IRAgentDef] -> Map Text Text -> Map Text Text
+buildExternalAgents :: [IRAgentDef] -> Map Text Text -> Map Text Value
 buildExternalAgents agents servers =
   Map.fromList
-    [ (T.pack (show (iadId a)), serverName <> ":" <> T.drop 1 rest)
+    [ ( T.pack (show (iadId a)),
+        object
+          [ "agent_def_id" .= T.drop 1 rest,
+            "agent_def_where" .= serverUrl
+          ]
+      )
       | a <- agents,
         let (prefix, rest) = T.breakOn "." (iadName a),
         not (T.null rest),
-        Map.member prefix servers,
-        let serverName = prefix
+        Just serverUrl <- [Map.lookup prefix servers]
     ]
 
--- | Convert schema outputs to a JSON value (array of objects).
+-- | Convert schema outputs to a JSON map:
+--   { "module.name": { "kind": "agent"|"request"|"type", "description": "...",
+--                       "arg_type": {...}, "return_type": {...}, "with_effects": [...] } }
 schemasToValue :: [SchemaOutput] -> Value
 schemasToValue outs =
-  Aeson.toJSON
-    [ object
-        [ "name" .= soName o,
-          "kind" .= kindText (soKind o),
-          "schema" .= soSchema o
-        ]
+  Aeson.object
+    [ Key.fromText (soName o)
+        .= object
+          ( [ "kind" .= kindText (soKind o),
+              "arg_type" .= soArgType o,
+              "return_type" .= soReturnType o
+            ]
+              ++ maybe [] (\d -> ["description" .= d]) (soDescription o)
+              ++ if null (soWithEffects o)
+                then []
+                else ["with_effects" .= soWithEffects o]
+          )
       | o <- outs
     ]
 
@@ -83,12 +96,3 @@ kindText = \case
   SKAgent -> "agent"
   SKRequest -> "request"
   SKType -> "type"
-
--- | Build a JSON object mapping agent names to their schemas (for POST /apply).
-agentSchemasObject :: [SchemaOutput] -> Value
-agentSchemasObject outs =
-  Aeson.object
-    [ Key.fromText (soName o) .= soSchema o
-      | o <- outs,
-        soKind o == SKAgent
-    ]

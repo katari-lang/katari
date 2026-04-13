@@ -37,7 +37,7 @@ services:
       - "${KATARI_DISCORD_PORT:-8001}:8001"
     environment:
       - PORT=8001
-      - SELF_BASE_URL=http://discord:8001/katari
+      - KATARI_BASE_URL=http://discord:8001/katari
       - DISCORD_TOKEN=${DISCORD_TOKEN}
 
   ai:
@@ -48,10 +48,10 @@ services:
       - "${KATARI_AI_PORT:-8002}:8002"
     environment:
       - PORT=8002
-      - SELF_BASE_URL=http://ai:8002/katari
+      - KATARI_BASE_URL=http://ai:8002/katari
+      - RUNTIME_KATARI_URL=http://runtime:8000/katari
       - GEMINI_API_KEY=${GEMINI_API_KEY}
       - AI_PROVIDER=${AI_PROVIDER:-gemini}
-      - TOOL_ROUTES=${TOOL_ROUTES}
 
   cron:
     build:
@@ -61,7 +61,7 @@ services:
       - "${KATARI_CRON_PORT:-8003}:8003"
     environment:
       - PORT=8003
-      - SELF_BASE_URL=http://cron:8003/katari
+      - KATARI_BASE_URL=http://cron:8003/katari
 
   websearch:
     build:
@@ -71,7 +71,7 @@ services:
       - "${KATARI_WEBSEARCH_PORT:-8004}:8004"
     environment:
       - PORT=8004
-      - SELF_BASE_URL=http://websearch:8004/katari
+      - KATARI_BASE_URL=http://websearch:8004/katari
       - SEARCH_API_KEY=${SEARCH_API_KEY}
       - SEARCH_ENGINE_ID=${SEARCH_ENGINE_ID}
 
@@ -85,7 +85,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
       - PORT=8005
-      - SELF_BASE_URL=http://sandbox:8005/katari
+      - KATARI_BASE_URL=http://sandbox:8005/katari
 
 volumes:
   pgdata:

@@ -34,14 +34,13 @@ async function main() {
       const schemas = new Map(
         Object.entries(saved.schemas)
       ) as Map<string, JsonValue>;
-      const servers = new Map(Object.entries(saved.servers));
       const externalAgents = new Map(
         Object.entries(saved.externalAgents).map(([k, v]) => [
           parseInt(k, 10),
           v,
         ])
       );
-      runtime.applyModule(module, nameMap, schemas, servers, externalAgents);
+      runtime.applyModule(module, nameMap, schemas, externalAgents);
       console.log(`Restored module: ${module.name}`);
     } catch (e) {
       console.warn("Failed to restore module:", e);
