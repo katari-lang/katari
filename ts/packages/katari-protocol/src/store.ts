@@ -18,6 +18,7 @@ export interface KatariStore {
   // Agent Definition
   listAgentDefinitions(): Promise<AgentDefinition[]>;
   getAgentDefinition(id: string): Promise<AgentDefinition | null>;
+  getAgentDefinitionByName(name: string): Promise<AgentDefinition | null>;
   createAgentDefinition(def: AgentDefinition): Promise<void>;
   deleteAgentDefinition(id: string): Promise<void>;
 
@@ -37,6 +38,7 @@ export interface KatariStore {
   // Template
   listTemplates(): Promise<Template[]>;
   getTemplate(id: string): Promise<Template | null>;
+  getTemplateByName(name: string): Promise<Template | null>;
   createTemplate(template: Template): Promise<void>;
   deleteTemplate(id: string): Promise<void>;
 
@@ -72,6 +74,12 @@ export class InMemoryKatariStore implements KatariStore {
   }
   async getAgentDefinition(id: string): Promise<AgentDefinition | null> {
     return this.agentDefinitions.get(id) ?? null;
+  }
+  async getAgentDefinitionByName(name: string): Promise<AgentDefinition | null> {
+    for (const d of this.agentDefinitions.values()) {
+      if (d.name === name) return d;
+    }
+    return null;
   }
   async createAgentDefinition(def: AgentDefinition): Promise<void> {
     this.agentDefinitions.set(def.id, def);
@@ -118,6 +126,12 @@ export class InMemoryKatariStore implements KatariStore {
   }
   async getTemplate(id: string): Promise<Template | null> {
     return this.templates.get(id) ?? null;
+  }
+  async getTemplateByName(name: string): Promise<Template | null> {
+    for (const t of this.templates.values()) {
+      if (t.name === name) return t;
+    }
+    return null;
   }
   async createTemplate(template: Template): Promise<void> {
     this.templates.set(template.id, template);
@@ -252,6 +266,13 @@ export class PostgresKatariStore implements KatariStore {
     );
     return rows.length > 0 ? rowToAgentDef(rows[0]!) : null;
   }
+  async getAgentDefinitionByName(name: string): Promise<AgentDefinition | null> {
+    const rows = await this.sql.query(
+      `SELECT * FROM katari_agent_definitions WHERE name = $1 LIMIT 1`,
+      [name],
+    );
+    return rows.length > 0 ? rowToAgentDef(rows[0]!) : null;
+  }
   async createAgentDefinition(def: AgentDefinition): Promise<void> {
     await this.sql.query(
       `INSERT INTO katari_agent_definitions (id, endpoint, name, description, input_schema, output_schema, template_refs)
@@ -353,10 +374,20 @@ export class PostgresKatariStore implements KatariStore {
     );
     return rows.length > 0 ? rowToTemplate(rows[0]!) : null;
   }
+  async getTemplateByName(name: string): Promise<Template | null> {
+    const rows = await this.sql.query(
+      `SELECT * FROM katari_templates WHERE name = $1 LIMIT 1`,
+      [name],
+    );
+    return rows.length > 0 ? rowToTemplate(rows[0]!) : null;
+  }
   async createTemplate(template: Template): Promise<void> {
     await this.sql.query(
       `INSERT INTO katari_templates (id, endpoint, name, description, input_schema, output_schema)
-       VALUES ($1, $2, $3, $4, $5, $6)`,
+       VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT (id) DO UPDATE SET endpoint=EXCLUDED.endpoint, name=EXCLUDED.name,
+         description=EXCLUDED.description, input_schema=EXCLUDED.input_schema,
+         output_schema=EXCLUDED.output_schema`,
       [
         template.id,
         template.endpoint,

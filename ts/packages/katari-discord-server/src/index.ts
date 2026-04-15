@@ -77,6 +77,11 @@ const watchChannel: AgentHandlerFn = async (args, ctx) => {
 
   client.on("messageCreate", listener);
 
+  // Clean up listener when agent is terminated
+  ctx.signal.addEventListener("abort", () => {
+    client.off("messageCreate", listener);
+  });
+
   // Never resolves — agent stays alive
   return new Promise(() => {});
 };
@@ -142,6 +147,11 @@ startServer({
     fetch_messages: {
       handler: fetchMessages,
       description: "Fetch recent messages from a Discord channel",
+    },
+  },
+  templateDefs: {
+    on_message: {
+      description: "Fired when a new message is received in a watched channel",
     },
   },
 });

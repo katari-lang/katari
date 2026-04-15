@@ -21,12 +21,15 @@ function emptyModule(): IRModule {
 }
 
 async function runAndGet(module: IRModule, agentName: string, args: Value[]): Promise<Value> {
-  const nameMap = new Map<string, number>();
-  for (const a of module.agents) {
-    nameMap.set(a.name, a.id);
-  }
   const rt = new Runtime("http://test");
-  rt.applyModule(module, nameMap, new Map());
+  // Build primBlockIds from module.agents for test convenience
+  const primBlockIds = new Map<number, string>();
+  for (const a of module.agents) {
+    if (a.name.startsWith("prim.")) {
+      primBlockIds.set(a.id, a.name);
+    }
+  }
+  rt.applyModule(module, new Map(), undefined, undefined, primBlockIds);
   const namedArgs: Record<string, Value> = {};
   const agentDef = module.agents.find(a => a.name === agentName);
   if (agentDef) {

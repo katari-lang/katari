@@ -400,6 +400,8 @@ export interface AgentContext {
   endpoint: string;
   delegationRef: { id: string; endpoint: string } | null;
   capabilityRefs: CapabilityRef[];
+  /** Signal that fires when the agent is terminated */
+  signal: AbortSignal;
 
   /** Escalate to a capability */
   escalate(capabilityRef: CapabilityRef, input: JsonValue): void;
@@ -426,10 +428,16 @@ export async function startServer(opts: {
   port: number;
   endpoint: string;
   agentDefs: Record<string, { handler: AgentHandlerFn; description?: string }>;
+  templateDefs?: Record<string, { description?: string; input_schema?: JsonValue; output_schema?: JsonValue }>;
   databaseUrl?: string;
   logger?: KatariLogger;
 }): Promise<void> {
   const log = opts.logger ?? new ConsoleKatariLogger();
+
+  // Mount path is derived from opts.endpoint's pathname.
+  // e.g. "http://ai:8002/katari" → mount at "/katari"
+  const endpointUrl = new URL(opts.endpoint);
+  const katariMountPath = endpointUrl.pathname.replace(/\/+$/, "") || "/";
 
   let store: KatariStore;
   if (opts.databaseUrl) {
@@ -448,10 +456,19 @@ export async function startServer(opts: {
     { resolve: (v: JsonValue) => void }
   >();
 
-  // Register agent definitions
+  // Running handler tracking: agentId → AbortController
+  const runningHandlers = new Map<string, AbortController>();
+
+  // UUID → handler name mapping (for onDelegate lookup)
+  const agentDefIdToName = new Map<string, string>();
+
+  // Register agent definitions (find-or-create: reuse existing UUID on restart)
   for (const [name, def] of Object.entries(opts.agentDefs)) {
+    const existing = await store.getAgentDefinitionByName(name);
+    const id = existing?.id ?? randomUUID();
+    agentDefIdToName.set(id, name);
     await store.createAgentDefinition({
-      id: name,
+      id,
       endpoint: opts.endpoint,
       name,
       description: def.description ?? "",
@@ -460,70 +477,115 @@ export async function startServer(opts: {
     });
   }
 
+  // Register templates (find-or-create: reuse existing UUID on restart)
+  for (const [name, def] of Object.entries(opts.templateDefs ?? {})) {
+    const existing = await store.getTemplateByName(name);
+    const id = existing?.id ?? randomUUID();
+    await store.createTemplate({
+      id,
+      endpoint: opts.endpoint,
+      name,
+      description: def.description,
+      input_schema: def.input_schema ?? null,
+      output_schema: def.output_schema ?? null,
+    });
+  }
+
+  // KatariServer is declared here so runAgentHandler can reference it;
+  // assigned after hooks are defined.
+  let katariServer: KatariServer;
+
+  /** Shared logic: build AgentContext and run the handler for an agent */
+  function runAgentHandler(
+    agentId: string,
+    defId: string,
+    input: JsonValue,
+    delegationRef: { id: string; endpoint: string } | null,
+    capabilityRefs: CapabilityRef[],
+  ): void {
+    // defId is a UUID; resolve to handler name via the UUID→name map
+    const handlerName = agentDefIdToName.get(defId) ?? defId;
+    const handlerEntry = opts.agentDefs[handlerName];
+    if (!handlerEntry) {
+      log.log("warn", `No handler for definition '${defId}' (name: '${handlerName}')`);
+      return;
+    }
+
+    const ac = new AbortController();
+    runningHandlers.set(agentId, ac);
+
+    const ctx: AgentContext = {
+      agentId,
+      endpoint: opts.endpoint,
+      delegationRef,
+      capabilityRefs,
+      signal: ac.signal,
+
+      escalate(capabilityRef, capInput) {
+        if (ac.signal.aborted) return;
+        katariServer
+          .sendEscalate(capabilityRef, capInput)
+          .then(({ message }) => {
+            sendOutgoingMessages([message], log).catch((e) =>
+              log.log("error", `escalate send failed: ${e}`),
+            );
+          });
+      },
+
+      async delegateAndWait(targetEndpoint, agentDefId, delegateInput, capRefs) {
+        const { delegationId, message } = await katariServer.delegate(
+          targetEndpoint,
+          agentDefId,
+          delegateInput,
+          capRefs ?? [],
+        );
+        sendOutgoingMessages([message], log).catch((e) =>
+          log.log("error", `delegate send failed: ${e}`),
+        );
+        return new Promise<JsonValue>((resolve) => {
+          pendingDelegateAcks.set(delegationId, { resolve });
+        });
+      },
+    };
+
+    handlerEntry
+      .handler(input, ctx)
+      .then(async (result) => {
+        runningHandlers.delete(agentId);
+        if (ac.signal.aborted) return;
+        const msg = await katariServer.sendDelegateAck(
+          { id: agentId, endpoint: opts.endpoint },
+          result,
+        );
+        if (msg) {
+          sendOutgoingMessages([msg], log).catch((e) =>
+            log.log("error", `delegate_ack send failed: ${e}`),
+          );
+        }
+      })
+      .catch(async (err) => {
+        runningHandlers.delete(agentId);
+        if (ac.signal.aborted) return;
+        log.log("error", `Handler error for ${defId}: ${err}`);
+        const msg = await katariServer.sendDelegateAck(
+          { id: agentId, endpoint: opts.endpoint },
+          null,
+        );
+        if (msg) {
+          sendOutgoingMessages([msg], log).catch(() => {});
+        }
+      });
+  }
+
   const hooks: KatariServerHooks = {
     async onDelegate(agent, req) {
-      const handlerEntry = opts.agentDefs[agent.definition_ref.id];
-      if (!handlerEntry) return;
-
-      const ctx: AgentContext = {
-        agentId: agent.id,
-        endpoint: opts.endpoint,
-        delegationRef: agent.delegation_ref,
-        capabilityRefs: req.capability_refs,
-
-        escalate(capabilityRef, input) {
-          katariServer
-            .sendEscalate(capabilityRef, input)
-            .then(({ message }) => {
-              sendOutgoingMessages([message], log).catch((e) =>
-                log.log("error", `escalate send failed: ${e}`),
-              );
-            });
-        },
-
-        async delegateAndWait(targetEndpoint, agentDefId, input, capRefs) {
-          const { delegationId, message } = await katariServer.delegate(
-            targetEndpoint,
-            agentDefId,
-            input,
-            capRefs ?? [],
-          );
-          sendOutgoingMessages([message], log).catch((e) =>
-            log.log("error", `delegate send failed: ${e}`),
-          );
-          return new Promise<JsonValue>((resolve) => {
-            pendingDelegateAcks.set(delegationId, { resolve });
-          });
-        },
-      };
-
-      // Run handler asynchronously
-      handlerEntry
-        .handler(agent.input, ctx)
-        .then(async (result) => {
-          const msg = await katariServer.sendDelegateAck(
-            { id: agent.id, endpoint: opts.endpoint },
-            result,
-          );
-          if (msg) {
-            sendOutgoingMessages([msg], log).catch((e) =>
-              log.log("error", `delegate_ack send failed: ${e}`),
-            );
-          }
-        })
-        .catch(async (err) => {
-          log.log(
-            "error",
-            `Handler error for ${agent.definition_ref.id}: ${err}`,
-          );
-          const msg = await katariServer.sendDelegateAck(
-            { id: agent.id, endpoint: opts.endpoint },
-            null,
-          );
-          if (msg) {
-            sendOutgoingMessages([msg], log).catch(() => {});
-          }
-        });
+      runAgentHandler(
+        agent.id,
+        agent.definition_ref.id,
+        agent.input,
+        agent.delegation_ref,
+        req.capability_refs,
+      );
     },
 
     async onDelegateAck(delegation, output) {
@@ -535,10 +597,15 @@ export async function startServer(opts: {
     },
 
     async onTerminate(delegation) {
-      // Find and delete the agent
+      // Find and abort the running handler
       const agents = await store.listAgents();
       const agent = agents.find((a) => a.delegation_ref?.id === delegation.id);
       if (agent) {
+        const ac = runningHandlers.get(agent.id);
+        if (ac) {
+          ac.abort();
+          runningHandlers.delete(agent.id);
+        }
         await store.deleteCapabilitiesByAgent({
           id: agent.id,
           endpoint: opts.endpoint,
@@ -562,7 +629,44 @@ export async function startServer(opts: {
     },
   };
 
-  const katariServer = new KatariServer(opts.endpoint, store, hooks);
+  katariServer = new KatariServer(opts.endpoint, store, hooks);
+
+  // =========================================================================
+  // Restore running agents from protocol store
+  // =========================================================================
+
+  const existingAgents = await store.listAgents();
+  const ownAgents = existingAgents.filter(
+    (a) => a.endpoint === opts.endpoint && a.status === "RUNNING",
+  );
+
+  for (const agent of ownAgents) {
+    // Get capability_refs from the delegation (stored on the runtime side
+    // in the shared protocol DB).
+    let capabilityRefs: CapabilityRef[] = [];
+    if (agent.delegation_ref) {
+      const delegation = await store.getDelegation(agent.delegation_ref.id);
+      if (delegation) {
+        capabilityRefs = delegation.capability_refs;
+      }
+    }
+
+    runAgentHandler(
+      agent.id,
+      agent.definition_ref.id,
+      agent.input,
+      agent.delegation_ref,
+      capabilityRefs,
+    );
+    log.log(
+      "info",
+      `Restored agent ${agent.id} (${agent.definition_ref.id})`,
+    );
+  }
+
+  // =========================================================================
+  // HTTP server
+  // =========================================================================
 
   const app = new Hono();
   app.use("*", cors());
@@ -578,7 +682,7 @@ export async function startServer(opts: {
     },
     log,
   );
-  app.route("/katari", katariRouter);
+  app.route(katariMountPath, katariRouter);
 
   app.get("/health", (c) => c.json({ ok: true }));
 

@@ -12,12 +12,17 @@ const schedule: AgentHandlerFn = async (args, ctx) => {
 
   return new Promise(() => {
     // Long-running: never resolves (agent stays alive)
-    cron.schedule(cronExpr, () => {
+    const task = cron.schedule(cronExpr, () => {
       const now = new Date().toISOString();
       // Escalate to first capability (notify handler in parent)
       if (ctx.capabilityRefs.length > 0) {
         ctx.escalate(ctx.capabilityRefs[0]!, { time: now });
       }
+    });
+
+    // Clean up cron job when agent is terminated
+    ctx.signal.addEventListener("abort", () => {
+      task.stop();
     });
   });
 };
@@ -34,6 +39,11 @@ startServer({
     schedule: {
       handler: schedule,
       description: "Schedule a cron job that escalates on each tick",
+    },
+  },
+  templateDefs: {
+    notify: {
+      description: "Fired on each cron tick",
     },
   },
 });

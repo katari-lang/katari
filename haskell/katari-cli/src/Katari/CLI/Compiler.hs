@@ -15,7 +15,7 @@ import Data.Aeson.Key qualified as Key
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
-import Katari.IR (IRAgentDef (..), IRModule (..), NameTable (..))
+import Katari.IR (IRModule (..), NameTable (..))
 import Katari.Lowering (LowerError (..), lowerModules)
 import Katari.Module (AgentInfo (..), GlobalEnv (..), RequestInfo (..), buildGlobalEnv, primModuleName)
 import Katari.Schema (SchemaKind (..), SchemaOutput (..))
@@ -54,32 +54,41 @@ buildAllOrDie modules = do
 
 -- | Build agent metadata: list of { name, block_id, kind, alias? }
 --
--- Uses DEFINED agent set (irmAgents), not referenced/called set (ntAgents).
--- Only user-defined internal agents are exported.
+-- Uses the name table (ntAgents) which contains ALL agent block_ids:
+-- internal (user-defined), external (from other servers), and prim (built-in).
 buildAgentMetadata :: GlobalEnv -> IRModule -> [Value]
 buildAgentMetadata ge irMod =
-  [ case Map.lookup name (geAgents ge) >>= aiExtFrom of
+  [ classify aid name
+    | (aid, name) <- Map.toList (ntAgents (irmNameTable irMod))
+  ]
+  where
+    classify aid name = case Map.lookup name (geAgents ge) of
+      Just ai
+        | aiHomeModule ai == primModuleName ->
+            object
+              [ "name" .= name,
+                "block_id" .= aid,
+                "kind" .= ("prim" :: Text)
+              ]
+        | Just fromStr <- aiExtFrom ai ->
+            object
+              [ "name" .= name,
+                "block_id" .= aid,
+                "kind" .= ("external" :: Text),
+                "alias" .= fromStr
+              ]
+        | otherwise ->
+            object
+              [ "name" .= name,
+                "block_id" .= aid,
+                "kind" .= ("internal" :: Text)
+              ]
       Nothing ->
         object
           [ "name" .= name,
             "block_id" .= aid,
             "kind" .= ("internal" :: Text)
           ]
-      Just fromStr ->
-        object
-          [ "name" .= name,
-            "block_id" .= aid,
-            "kind" .= ("external" :: Text),
-            "alias" .= fromStr
-          ]
-    | IRAgentDef {iadId = aid, iadName = name} <- irmAgents irMod,
-      isPublicInternal name
-  ]
-  where
-    isPublicInternal qname =
-      case Map.lookup qname (geAgents ge) of
-        Just ai -> aiExtFrom ai == Nothing && aiHomeModule ai /= primModuleName
-        Nothing -> False
 
 -- | Build request metadata: list of { name, request_id, kind, alias? }
 buildRequestMetadata :: GlobalEnv -> IRModule -> [Value]

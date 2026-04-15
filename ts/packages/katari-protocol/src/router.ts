@@ -144,6 +144,11 @@ export function buildKatariRouter(
   // =========================================================================
 
   app.get("/agent_definitions", async (c) => {
+    const name = c.req.query("name");
+    if (name) {
+      const def = await getServer().getStore().getAgentDefinitionByName(name);
+      return c.json(def ? [def] : []);
+    }
     const defs = await getServer().listAgentDefinitions();
     return c.json(defs);
   });
@@ -159,6 +164,11 @@ export function buildKatariRouter(
   });
 
   app.get("/templates", async (c) => {
+    const name = c.req.query("name");
+    if (name) {
+      const tmpl = await getServer().getStore().getTemplateByName(name);
+      return c.json(tmpl ? [tmpl] : []);
+    }
     const templates = await getServer().listTemplates();
     return c.json(templates);
   });

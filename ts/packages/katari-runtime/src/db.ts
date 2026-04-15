@@ -8,7 +8,7 @@ import type { SerializedAgentState } from "./runtime/serialize.js";
 export interface AgentMetadataEntry {
   name: string;
   block_id: number;
-  kind: "internal" | "external";
+  kind: "internal" | "external" | "prim";
   alias?: string;
 }
 
@@ -27,6 +27,12 @@ export interface ModuleRow {
   schemas: Record<string, unknown>;
   requests: RequestMetadataEntry[];
   aliasEndpoints: Record<string, string>;
+  /** agent_def_id (UUID) → block_id mapping, generated at apply time */
+  protocolDefMap: Record<string, number>;
+  /** template_id → { request_id, endpoint } mapping, generated at apply time */
+  protocolTemplateMap: Record<string, { request_id: number; endpoint: string }>;
+  /** block_id → { agent_def_id (UUID), agent_def_where } for external agents */
+  resolvedExternalAgents: Record<number, { agent_def_id: string; agent_def_where: string }>;
 }
 
 export interface AgentRow {
@@ -82,6 +88,9 @@ export class Db {
         schemas JSONB NOT NULL DEFAULT '{}',
         servers JSONB NOT NULL DEFAULT '{}',
         external_agents JSONB NOT NULL DEFAULT '{}',
+        protocol_def_map JSONB NOT NULL DEFAULT '{}',
+        protocol_template_map JSONB NOT NULL DEFAULT '{}',
+        resolved_external_agents JSONB NOT NULL DEFAULT '{}',
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )
     `);
@@ -121,21 +130,26 @@ export class Db {
     agents: unknown,
     schemas: Record<string, unknown>,
     requests: unknown,
-    aliasEndpoints: Record<string, string>
+    aliasEndpoints: Record<string, string>,
+    protocolDefMap: Record<string, number>,
+    protocolTemplateMap: Record<string, { request_id: number; endpoint: string }>,
+    resolvedExternalAgents: Record<number, { agent_def_id: string; agent_def_where: string }>,
   ): Promise<number> {
     const rows = await this.sql.query(
-      `INSERT INTO modules (name, ktri_binary, agent_name_map, schemas, external_agents, servers)
-       VALUES ($1, $2, $3, $4, $5, $6)
+      `INSERT INTO modules (name, ktri_binary, agent_name_map, schemas, external_agents, servers, protocol_def_map, protocol_template_map, resolved_external_agents)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        RETURNING version`,
       [name, ktriBinary, JSON.stringify(agents), JSON.stringify(schemas),
-       JSON.stringify(requests), JSON.stringify(aliasEndpoints)]
+       JSON.stringify(requests), JSON.stringify(aliasEndpoints),
+       JSON.stringify(protocolDefMap), JSON.stringify(protocolTemplateMap),
+       JSON.stringify(resolvedExternalAgents)]
     );
     return rows[0]!.version as number;
   }
 
   async loadLatestModule(): Promise<ModuleRow | null> {
     const rows = await this.sql.query(
-      `SELECT version, name, ktri_binary, agent_name_map, schemas, external_agents, servers
+      `SELECT version, name, ktri_binary, agent_name_map, schemas, external_agents, servers, protocol_def_map, protocol_template_map, resolved_external_agents
        FROM modules ORDER BY version DESC LIMIT 1`
     );
     if (rows.length === 0) return null;
@@ -148,6 +162,9 @@ export class Db {
       schemas: toJson(row.schemas) as Record<string, unknown>,
       requests: (toJson(row.external_agents) as RequestMetadataEntry[]) ?? [],
       aliasEndpoints: (toJson(row.servers) as Record<string, string>) ?? {},
+      protocolDefMap: (toJson(row.protocol_def_map) as Record<string, number>) ?? {},
+      protocolTemplateMap: (toJson(row.protocol_template_map) as Record<string, { request_id: number; endpoint: string }>) ?? {},
+      resolvedExternalAgents: (toJson(row.resolved_external_agents) as Record<number, { agent_def_id: string; agent_def_where: string }>) ?? {},
     };
   }
 

@@ -18,9 +18,11 @@ export interface AgentState {
   agentId: string;
   agentDefId: number;
   module: IRModule;
-  vars: Map<number, Value>;
+  scopes: Map<number, Map<number, Value>>; // scopeId → (varId → value)
+  nextScopeId: number;
   threads: Map<number, ThreadState>;
   rootThreadId: number;
+  nextThreadId: number; // runtime thread ID counter
   // Protocol-level info
   delegationEndpoint: string | null; // parent's endpoint (for delegate_ack)
   delegationId: string | null; // parent's delegation id
@@ -37,6 +39,7 @@ export interface ThreadState {
   blockId: number; // IR block (thread def) being executed
   pc: number;
   parent: number | null;
+  scopeId: number; // variable scope this thread operates in
   status: ThreadStatus;
 }
 
@@ -97,7 +100,8 @@ export interface BlockCallingKind {
 
 export interface AgentCallingKind {
   tag: "AGENT";
-  childAgentId: string;
+  childThreadId: number;
+  childScopeId: number;
   dst: number;
 }
 
@@ -203,6 +207,13 @@ export type RuntimeEvent =
 // Outgoing Actions — result of synchronous event processing
 // ===========================================================================
 
+/** Capability to create in protocol store before delegating */
+export interface CapabilityToCreate {
+  id: string;
+  templateRef: { id: string; endpoint: string };
+  agentRef: { id: string; endpoint: string };
+}
+
 /** Protocol-level outbound actions — processed via KatariServer */
 export type ProtocolAction =
   | {
@@ -212,6 +223,8 @@ export type ProtocolAction =
       input: JsonValue;
       capabilityRefs: CapabilityRef[];
       delegationId: string;
+      /** Capabilities to create in store before sending delegate */
+      capabilitiesToCreate: CapabilityToCreate[];
     }
   | {
       tag: "ProtocolEscalate";
@@ -231,6 +244,12 @@ export type ProtocolAction =
       delegationEndpoint: string;
       delegationId: string;
       message: string;
+    }
+  | {
+      tag: "ProtocolTerminate";
+      targetEndpoint: string;
+      delegationId: string;
+      parentEndpoint: string;
     };
 
 export type OutgoingAction =
@@ -287,12 +306,17 @@ export interface DispatchContext {
 // Helper functions
 // ===========================================================================
 
-export function getVar(agent: AgentState, v: number): Value {
-  return agent.vars.get(v) ?? null;
+export function getVar(agent: AgentState, scopeId: number, v: number): Value {
+  return agent.scopes.get(scopeId)?.get(v) ?? null;
 }
 
-export function setVar(agent: AgentState, v: number, val: Value): void {
-  agent.vars.set(v, val);
+export function setVar(agent: AgentState, scopeId: number, v: number, val: Value): void {
+  let scope = agent.scopes.get(scopeId);
+  if (!scope) {
+    scope = new Map();
+    agent.scopes.set(scopeId, scope);
+  }
+  scope.set(v, val);
 }
 
 export function findThread(
@@ -322,24 +346,26 @@ export function constAsString(consts: ConstVal[], cid: number): string {
 // Thread lifecycle helpers
 // ===========================================================================
 
-/** Create a new child thread and return it */
+/** Create a new child thread and return it. Inherits parent's scopeId by default. */
 export function createThread(
   agent: AgentState,
   blockId: number,
   parent: number | null,
 ): ThreadState {
+  const tid = agent.nextThreadId++;
+  const parentThread = parent !== null ? agent.threads.get(parent) : undefined;
   const thread: ThreadState = {
-    threadId: blockId, // Thread ID = Block ID for now
+    threadId: tid,
     blockId,
     pc: 0,
     parent,
+    scopeId: parentThread?.scopeId ?? 0,
     status: {
       tag: "CALLING",
       kind: { tag: "BLOCK", childThreadId: -1, dst: -1 },
     },
   };
-  // Set initial status to a simple running state (caller will adjust)
-  agent.threads.set(blockId, thread);
+  agent.threads.set(tid, thread);
   return thread;
 }
 

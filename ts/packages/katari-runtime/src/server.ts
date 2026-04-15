@@ -20,7 +20,7 @@ import { Db } from "./db.js";
 interface AgentMetadataEntry {
   name: string;
   block_id: number;
-  kind: "internal" | "external";
+  kind: "internal" | "external" | "prim";
   alias?: string; // "server_key:remote_name" for external
 }
 
@@ -102,31 +102,124 @@ export function buildApp(
         JsonValue
       >;
 
-      const { nameMap, externalAgents } = resolveMetadata(
+      const externalAgents = resolveExternalAgents(
         body.agents,
         aliasEndpoints,
       );
 
+      // Resolve external agent def UUIDs from external servers
+      // (resolveExternalAgents sets agent_def_id to the remote name; replace with actual UUID)
+      for (const [, extRef] of externalAgents) {
+        const name = extRef.agent_def_id;
+        let res: Response;
+        try {
+          res = await fetch(
+            `${extRef.agent_def_where}/agent_definitions?name=${encodeURIComponent(name)}`,
+          );
+        } catch (e) {
+          throw new Error(`Failed to reach external server '${extRef.agent_def_where}' while resolving agent '${name}': ${e}`);
+        }
+        if (!res.ok) {
+          throw new Error(`External server '${extRef.agent_def_where}' returned ${res.status} while resolving agent '${name}'`);
+        }
+        const defs = (await res.json()) as { id: string; endpoint: string }[];
+        if (defs.length === 0) {
+          throw new Error(`External agent '${name}' not found at '${extRef.agent_def_where}'. Is the external server running and up to date?`);
+        }
+        log.log("info", `Resolved external agent '${name}' → ${defs[0]!.id} at ${extRef.agent_def_where}`);
+        extRef.agent_def_id = defs[0]!.id;
+      }
+
+      // Generate UUID agent_def_ids for each internal agent — completely
+      // uncorrelated with compiler block_ids.
+      const protocolDefIdToBlockId = new Map<string, number>();
+      const primBlockIds = new Map<number, string>();
+      for (const entry of body.agents) {
+        if (entry.kind === "internal") {
+          const agentDefId = crypto.randomUUID();
+          // Store bidirectional mapping for this apply session
+          protocolDefIdToBlockId.set(agentDefId, entry.block_id);
+          // Attach the generated UUID to the entry for later use
+          (entry as any)._protocolDefId = agentDefId;
+        } else if (entry.kind === "prim") {
+          primBlockIds.set(entry.block_id, entry.name);
+        }
+      }
+
+      const nameToAgentRef = buildNameToAgentRef(
+        body.agents,
+        externalAgents,
+        protocolDefIdToBlockId,
+        schemas,
+        runtime.getEndpoint(),
+      );
       runtime.applyModule(
         module,
-        nameMap,
-        schemas,
+        protocolDefIdToBlockId,
         externalAgents,
         aliasEndpoints,
+        primBlockIds,
+        nameToAgentRef,
       );
 
       // Drop old runtime-owned protocol resources to avoid stale entries
       await clearRuntimeProtocolResources(protocolStore, runtime.getEndpoint());
 
-      // Register templates (requests) in protocol store
+      // Generate UUID template_ids for internal requests.
+      // External requests get their TemplateRef from the external server.
+      const protocolTemplateIdToRequestId = new Map<string, number>();
+      const templateEndpoints = new Map<string, string>();
       const requests = body.requests ?? [];
+
       for (const req of requests) {
         if (req.kind === "internal") {
+          const templateId = crypto.randomUUID();
+          protocolTemplateIdToRequestId.set(templateId, req.request_id);
+          templateEndpoints.set(templateId, runtime.getEndpoint());
+          (req as any)._protocolTemplateId = templateId;
+        } else if (req.kind === "external" && req.alias) {
+          // Resolve external template from the external server
+          const colonIdx = req.alias.indexOf(":");
+          if (colonIdx > 0) {
+            const serverKey = req.alias.slice(0, colonIdx);
+            const remoteName = req.alias.slice(colonIdx + 1);
+            const serverUrl = aliasEndpoints.get(serverKey);
+            if (!serverUrl) {
+              throw new Error(`No endpoint configured for server key '${serverKey}' (needed to resolve template '${remoteName}')`);
+            }
+            let res: Response;
+            try {
+              res = await fetch(`${serverUrl}/templates?name=${encodeURIComponent(remoteName)}`);
+            } catch (e) {
+              throw new Error(`Failed to reach external server '${serverUrl}' while resolving template '${remoteName}': ${e}`);
+            }
+            if (!res.ok) {
+              throw new Error(`External server '${serverUrl}' returned ${res.status} while resolving template '${remoteName}'`);
+            }
+            const templates = (await res.json()) as { id: string; endpoint: string }[];
+            if (templates.length === 0) {
+              throw new Error(`External template '${remoteName}' not found at '${serverUrl}'. Is the external server running and up to date?`);
+            }
+            const tmpl = templates[0]!;
+            protocolTemplateIdToRequestId.set(tmpl.id, req.request_id);
+            templateEndpoints.set(tmpl.id, tmpl.endpoint);
+            (req as any)._protocolTemplateId = tmpl.id;
+            log.log("info", `Resolved external template '${remoteName}' → ${tmpl.id} at ${tmpl.endpoint}`);
+          }
+        }
+      }
+
+      runtime.setProtocolTemplateMap(protocolTemplateIdToRequestId, templateEndpoints);
+
+      // Register internal templates in protocol store
+      for (const req of requests) {
+        if (req.kind === "internal") {
+          const templateId = (req as any)._protocolTemplateId as string;
           const reqSchema = schemas.get(req.name) as
             | Record<string, JsonValue>
             | undefined;
           await protocolStore.createTemplate({
-            id: String(req.request_id),
+            id: templateId,
             endpoint: runtime.getEndpoint(),
             name: req.name,
             description: (reqSchema?.description as string) ?? undefined,
@@ -136,25 +229,31 @@ export function buildApp(
         }
       }
 
-      // Build a lookup from request name to TemplateRef
+      // Build a lookup from request name to TemplateRef (using generated UUIDs)
       const templateRefsByName = new Map<
         string,
         { id: string; endpoint: string }
       >();
       for (const req of requests) {
-        templateRefsByName.set(req.name, {
-          id: String(req.request_id),
-          endpoint:
-            req.kind === "internal"
-              ? runtime.getEndpoint()
-              : (aliasEndpoints.get(req.alias?.split(":")[0] ?? "") ??
-                runtime.getEndpoint()),
-        });
+        if (req.kind === "internal") {
+          templateRefsByName.set(req.name, {
+            id: (req as any)._protocolTemplateId as string,
+            endpoint: runtime.getEndpoint(),
+          });
+        } else if (req.alias) {
+          templateRefsByName.set(req.name, {
+            id: String(req.request_id),
+            endpoint:
+              aliasEndpoints.get(req.alias.split(":")[0] ?? "") ??
+              runtime.getEndpoint(),
+          });
+        }
       }
 
-      // Register agent definitions in protocol store
+      // Register agent definitions in protocol store using generated UUIDs
       for (const entry of body.agents) {
         if (entry.kind === "internal") {
+          const agentDefId = (entry as any)._protocolDefId as string;
           const schema = schemas.get(entry.name) as
             | Record<string, JsonValue>
             | undefined;
@@ -166,7 +265,7 @@ export function buildApp(
               (ref): ref is { id: string; endpoint: string } => ref != null,
             );
           await protocolStore.createAgentDefinition({
-            id: String(entry.block_id),
+            id: agentDefId,
             endpoint: runtime.getEndpoint(),
             name: entry.name,
             description: (schema?.description as string) ?? "",
@@ -177,7 +276,23 @@ export function buildApp(
         }
       }
 
-      // Save to DB
+      // Save to DB (include protocol maps for restore)
+      const protocolDefMapObj: Record<string, number> = {};
+      for (const [defId, blockId] of protocolDefIdToBlockId) {
+        protocolDefMapObj[defId] = blockId;
+      }
+      const protocolTemplateMapObj: Record<string, { request_id: number; endpoint: string }> = {};
+      for (const [templateId, requestId] of protocolTemplateIdToRequestId) {
+        protocolTemplateMapObj[templateId] = {
+          request_id: requestId,
+          endpoint: templateEndpoints.get(templateId) ?? runtime.getEndpoint(),
+        };
+      }
+      // Serialize resolved external agents for restore
+      const resolvedExternalAgentsObj: Record<number, { agent_def_id: string; agent_def_where: string }> = {};
+      for (const [blockId, extRef] of externalAgents) {
+        resolvedExternalAgentsObj[blockId] = extRef;
+      }
       await db.saveModule(
         module.name,
         binary,
@@ -185,6 +300,9 @@ export function buildApp(
         body.schemas ?? {},
         body.requests ?? {},
         body.alias_endpoints ?? {},
+        protocolDefMapObj,
+        protocolTemplateMapObj,
+        resolvedExternalAgentsObj,
       );
 
       const response: ApplyResponse = {
@@ -335,24 +453,16 @@ async function clearRuntimeProtocolResources(
   ]);
 }
 
-/** Convert new metadata format to the maps the runtime expects */
-export function resolveMetadata(
+/** Extract external agent refs from metadata */
+export function resolveExternalAgents(
   agents: { name: string; block_id: number; kind: string; alias?: string }[],
   aliasEndpoints: Map<string, string>,
-): {
-  nameMap: Map<string, number>;
-  externalAgents: Map<
-    number,
-    { agent_def_id: string; agent_def_where: string }
-  >;
-} {
-  const nameMap = new Map<string, number>();
+): Map<number, { agent_def_id: string; agent_def_where: string }> {
   const externalAgents = new Map<
     number,
     { agent_def_id: string; agent_def_where: string }
   >();
   for (const entry of agents) {
-    nameMap.set(entry.name, entry.block_id);
     if (entry.kind === "external" && entry.alias) {
       const colonIdx = entry.alias.indexOf(":");
       if (colonIdx > 0) {
@@ -368,7 +478,48 @@ export function resolveMetadata(
       }
     }
   }
-  return { nameMap, externalAgents };
+  return externalAgents;
+}
+
+/** Build name → AgentRef map for ref_agent primitive (internal + external agents) */
+export function buildNameToAgentRef(
+  agents: { name: string; block_id: number; kind: string }[],
+  externalAgents: Map<number, { agent_def_id: string; agent_def_where: string }>,
+  protocolDefIdToBlockId: Map<string, number>,
+  schemas: Map<string, JsonValue>,
+  selfEndpoint: string,
+): Map<string, { url: string; agent_def_id: string; name: string; arg_type: JsonValue }> {
+  const blockIdToDefId = new Map<number, string>();
+  for (const [defId, blockId] of protocolDefIdToBlockId) {
+    blockIdToDefId.set(blockId, defId);
+  }
+  const result = new Map<string, { url: string; agent_def_id: string; name: string; arg_type: JsonValue }>();
+  for (const entry of agents) {
+    const schema = schemas.get(entry.name) as Record<string, JsonValue> | undefined;
+    const argType = schema?.arg_type ?? null;
+    if (entry.kind === "external") {
+      const extRef = externalAgents.get(entry.block_id);
+      if (extRef) {
+        result.set(entry.name, {
+          url: extRef.agent_def_where,
+          agent_def_id: extRef.agent_def_id,
+          name: entry.name,
+          arg_type: argType,
+        });
+      }
+    } else if (entry.kind === "internal") {
+      const defId = blockIdToDefId.get(entry.block_id);
+      if (defId) {
+        result.set(entry.name, {
+          url: selfEndpoint,
+          agent_def_id: defId,
+          name: entry.name,
+          arg_type: argType,
+        });
+      }
+    }
+  }
+  return result;
 }
 
 function base64ToUint8Array(b64: string): Uint8Array {

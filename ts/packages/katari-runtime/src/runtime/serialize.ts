@@ -13,9 +13,11 @@ import type { IRModule } from "../ir.js";
 export interface SerializedAgentState {
   agentId: string;
   agentDefId: number;
-  vars: [number, Value][];
+  scopes: [number, [number, Value][]][];
+  nextScopeId: number;
   threads: [number, SerializedThreadState][];
   rootThreadId: number;
+  nextThreadId: number;
   delegationEndpoint: string | null;
   delegationId: string | null;
   selfEndpoint: string;
@@ -27,6 +29,7 @@ export interface SerializedThreadState {
   blockId: number;
   pc: number;
   parent: number | null;
+  scopeId: number;
   status: SerializedThreadStatus;
 }
 
@@ -38,7 +41,7 @@ type SerializedThreadStatus =
 
 type SerializedCallingKind =
   | { tag: "BLOCK"; childThreadId: number; dst: number }
-  | { tag: "AGENT"; childAgentId: string; dst: number }
+  | { tag: "AGENT"; childThreadId: number; childScopeId: number; dst: number }
   | { tag: "HANDLE_TARGET"; handleDefId: number; childThreadId: number; dst: number; stateVars: [number, Value][] }
   | { tag: "HANDLE_BODY"; handleDefId: number; targetThreadId: number; handlerThreadId: number; dst: number; stateVars: [number, Value][]; requesterInfo: RequesterInfo }
   | { tag: "HANDLE_THEN"; handleDefId: number; thenThreadId: number; dst: number; stateVars: [number, Value][]; nextAction: RuntimeEvent }
@@ -55,11 +58,15 @@ export function serializeAgentState(agent: AgentState): SerializedAgentState {
   return {
     agentId: agent.agentId,
     agentDefId: agent.agentDefId,
-    vars: Array.from(agent.vars.entries()),
+    scopes: Array.from(agent.scopes.entries()).map(
+      ([sid, vars]) => [sid, Array.from(vars.entries())]
+    ),
+    nextScopeId: agent.nextScopeId,
     threads: Array.from(agent.threads.entries()).map(
       ([id, t]) => [id, serializeThread(t)]
     ),
     rootThreadId: agent.rootThreadId,
+    nextThreadId: agent.nextThreadId,
     delegationEndpoint: agent.delegationEndpoint,
     delegationId: agent.delegationId,
     selfEndpoint: agent.selfEndpoint,
@@ -73,6 +80,7 @@ function serializeThread(t: ThreadState): SerializedThreadState {
     blockId: t.blockId,
     pc: t.pc,
     parent: t.parent,
+    scopeId: t.scopeId,
     status: serializeStatus(t.status),
   };
 }
@@ -129,9 +137,13 @@ export function deserializeAgentState(
     agentId: s.agentId,
     agentDefId: s.agentDefId,
     module,
-    vars: new Map(s.vars),
+    scopes: new Map(
+      s.scopes.map(([sid, vars]) => [sid, new Map(vars)])
+    ),
+    nextScopeId: s.nextScopeId ?? 1,
     threads: new Map(s.threads.map(([id, t]) => [id, deserializeThread(t)])),
     rootThreadId: s.rootThreadId,
+    nextThreadId: s.nextThreadId ?? 0,
     delegationEndpoint: s.delegationEndpoint,
     delegationId: s.delegationId,
     selfEndpoint: s.selfEndpoint,
@@ -145,6 +157,7 @@ function deserializeThread(s: SerializedThreadState): ThreadState {
     blockId: s.blockId,
     pc: s.pc,
     parent: s.parent,
+    scopeId: s.scopeId ?? 0,
     status: deserializeStatus(s.status),
   };
 }

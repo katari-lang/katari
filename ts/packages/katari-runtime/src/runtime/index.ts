@@ -7,6 +7,7 @@ import type {
   Delegation,
   Escalation,
   Capability,
+  CapabilityRef,
   DelegateRequest,
 } from "katari-protocol";
 import type { IRModule } from "../ir.js";
@@ -15,11 +16,12 @@ import type {
   AgentState,
   OutgoingAction,
   ProtocolAction,
+  CapabilityToCreate,
   DispatchContext,
   RuntimeEvent,
   ExternalAgentRef,
 } from "./types.js";
-import { setVar, findThread, createThread } from "./types.js";
+import { setVar, findThread, findHandle, createThread } from "./types.js";
 import { fireEvent, deliverEvent, executeFromThread } from "./dispatch.js";
 import { callPrimitive } from "../primitive.js";
 import { serializeAgentState, deserializeAgentState } from "./serialize.js";
@@ -37,19 +39,13 @@ export class Runtime {
   private selfEndpoint: string;
   private db: Db | null;
 
-  // Agent name/routing config (set via applyModule)
-  private agentNameMap = new Map<string, number>();
-  private defIdToName = new Map<number, string>();
+  // Agent routing config (set via applyModule)
+  private protocolDefIdToBlockId = new Map<string, number>(); // agent_def_id (UUID) → block_id
+  private protocolTemplateIdToRequestId = new Map<string, number>(); // template_id → request_id
+  private requestIdToTemplateRef = new Map<number, { id: string; endpoint: string }>(); // request_id → TemplateRef
+  private primBlockIds = new Map<number, string>(); // block_id → prim function name
   private externalAgents = new Map<number, ExternalAgentRef>();
   private servers = new Map<string, string>();
-  private schemas = new Map<string, JsonValue>();
-
-  // Parent tracking: childAgentId → { parentAgentId, parentThreadId }
-  private parentMap = new Map<
-    string,
-    { parentAgentId: string; parentThreadId: number }
-  >();
-
   // Delegation tracking: delegationId → { agentId, threadId }
   private delegationMap = new Map<
     string,
@@ -61,6 +57,15 @@ export class Runtime {
     string,
     { agentId: string; threadId: number }
   >();
+
+  // Capabilities created per delegation — for cleanup
+  private delegationCapabilityIds = new Map<string, string[]>();
+
+  // External delegation endpoint tracking: delegationId → target endpoint
+  private delegationEndpointMap = new Map<string, string>();
+
+  // Name → AgentRef (for ref_agent primitive, covers both internal and external)
+  private nameToAgentRef = new Map<string, { url: string; agent_def_id: string; name: string; arg_type: JsonValue }>();
 
   // Toplevel agent tracking
   private toplevelAgents = new Set<string>();
@@ -111,28 +116,38 @@ export class Runtime {
     this.protocolServer = server;
   }
 
+  setProtocolTemplateMap(
+    map: Map<string, number>,
+    templateEndpoints: Map<string, string>,
+  ): void {
+    this.protocolTemplateIdToRequestId = map;
+    this.requestIdToTemplateRef.clear();
+    for (const [templateId, requestId] of map) {
+      const endpoint = templateEndpoints.get(templateId) ?? this.selfEndpoint;
+      this.requestIdToTemplateRef.set(requestId, { id: templateId, endpoint });
+    }
+  }
+
   // =========================================================================
   // Module management
   // =========================================================================
 
   applyModule(
     module: IRModule,
-    nameMap: Map<string, number>,
-    schemas: Map<string, JsonValue>,
+    protocolDefIdToBlockId: Map<string, number>,
     externalAgents?: Map<number, ExternalAgentRef>,
     servers?: Map<string, string>,
+    primBlockIds?: Map<number, string>,
+    nameToAgentRef?: Map<string, { url: string; agent_def_id: string; name: string; arg_type: JsonValue }>,
   ): void {
     this.module = module;
-    this.agentNameMap = nameMap;
-    this.schemas = schemas;
+    this.protocolDefIdToBlockId = protocolDefIdToBlockId;
     if (externalAgents) this.externalAgents = externalAgents;
     if (servers) this.servers = servers;
+    if (nameToAgentRef) this.nameToAgentRef = nameToAgentRef;
 
-    // Build reverse name map
-    this.defIdToName.clear();
-    for (const [name, id] of nameMap) {
-      this.defIdToName.set(id, name);
-    }
+    // Set prim block_id → name map (provided by /apply from CLI metadata)
+    this.primBlockIds = primBlockIds ?? new Map();
   }
 
   // =========================================================================
@@ -151,6 +166,17 @@ export class Runtime {
       switch (action.tag) {
         case "ProtocolDelegate": {
           if (server) {
+            // Create capabilities in protocol store before sending delegate
+            const store = server.getStore();
+            for (const cap of action.capabilitiesToCreate) {
+              await store.createCapability({
+                id: cap.id,
+                endpoint: this.selfEndpoint,
+                template_ref: cap.templateRef,
+                agent_ref: cap.agentRef,
+              });
+            }
+
             const { message } = await server.delegate(
               action.targetEndpoint,
               action.agentDefId,
@@ -211,6 +237,21 @@ export class Runtime {
           });
           break;
         }
+        case "ProtocolTerminate": {
+          this.pendingMessages.push({
+            toEndpoint: action.targetEndpoint,
+            kind: {
+              type: "Terminate",
+              body: {
+                delegation_ref: {
+                  id: action.delegationId,
+                  endpoint: action.parentEndpoint,
+                },
+              },
+            },
+          });
+          break;
+        }
       }
     }
   }
@@ -232,17 +273,16 @@ export class Runtime {
       const agent = this.agents.get(agentId);
       if (!agent) continue;
 
-      const parentInfo = this.parentMap.get(agentId);
       const isToplevel = this.toplevelAgents.has(agentId);
-      const name = this.defIdToName.get(agent.agentDefId) ?? null;
+      const name = this.module?.agents.find(a => a.id === agent.agentDefId)?.name ?? null;
 
       promises.push(
         this.db.saveAgent(
           agentId,
           agent.agentDefId,
           serializeAgentState(agent),
-          parentInfo?.parentAgentId ?? null,
-          parentInfo?.parentThreadId ?? null,
+          null,
+          null,
           isToplevel,
           name,
           null,
@@ -262,12 +302,6 @@ export class Runtime {
     for (const row of rows) {
       const agent = deserializeAgentState(row.state, this.module);
       this.agents.set(row.id, agent);
-      if (row.parentAgentId && row.parentThreadId !== null) {
-        this.parentMap.set(row.id, {
-          parentAgentId: row.parentAgentId,
-          parentThreadId: row.parentThreadId,
-        });
-      }
       if (row.isToplevel) {
         this.toplevelAgents.add(row.id);
       }
@@ -300,12 +334,6 @@ export class Runtime {
     const agent = deserializeAgentState(row.state, this.module);
     this.agents.set(agentId, agent);
 
-    if (row.parentAgentId && row.parentThreadId !== null) {
-      this.parentMap.set(agentId, {
-        parentAgentId: row.parentAgentId,
-        parentThreadId: row.parentThreadId,
-      });
-    }
     if (row.isToplevel) {
       this.toplevelAgents.add(agentId);
     }
@@ -341,11 +369,21 @@ export class Runtime {
   ): Promise<void> {
     if (!this.module) return;
 
-    const agentDefId = parseInt(protocolAgent.definition_ref.id, 10);
-    if (isNaN(agentDefId)) return;
+    // Resolve protocol agent_def_id (UUID) → compiler block_id
+    const blockId = this.protocolDefIdToBlockId.get(
+      protocolAgent.definition_ref.id,
+    );
+    if (blockId === undefined) {
+      this.logger.log(
+        "warn",
+        `onDelegate: unknown agent_def_id=${protocolAgent.definition_ref.id}`,
+      );
+      return;
+    }
 
-    const agentDef = this.module.agents.find((a) => a.id === agentDefId);
+    const agentDef = this.module.agents.find((a) => a.id === blockId);
     if (!agentDef) return;
+    const agentDefId = blockId;
 
     const agentId = protocolAgent.id;
     const entryTid = agentDef.entry;
@@ -355,9 +393,10 @@ export class Runtime {
     agent.delegationId = req.delegation_ref?.id ?? null;
     agent.capabilityRefs = req.capability_refs;
 
-    // Set named args
+    // Set named args (root thread uses scope 0)
     this.setNamedArgs(
       agent,
+      0,
       entryTid,
       agentDef.paramNames,
       req.input as Record<string, Value>,
@@ -368,7 +407,7 @@ export class Runtime {
 
     // Execute from entry thread
     const actions: OutgoingAction[] = [];
-    executeFromThread(this.ctx, agent, entryTid, actions);
+    executeFromThread(this.ctx, agent, agent.rootThreadId, actions);
     this.processActions(actions);
 
     await this.persistState();
@@ -386,7 +425,11 @@ export class Runtime {
     if (!entry) return;
 
     this.delegationMap.delete(delegation.id);
+    this.delegationEndpointMap.delete(delegation.id);
     if (this.db) await this.db.deleteRef(delegation.id);
+
+    // Clean up capabilities created for this delegation
+    await this.cleanupDelegationCapabilities(delegation.id);
 
     const agent =
       this.agents.get(entry.agentId) ??
@@ -424,32 +467,29 @@ export class Runtime {
       return;
     }
 
-    // The escalation carries input that maps to a request event
-    // Route it to the delegating thread for this child
-    // Find the thread that's in DELEGATING state for this child
-    for (const [_tid, thread] of agent.threads) {
-      if (
-        thread.status.tag === "CALLING" &&
-        thread.status.kind.tag === "DELEGATING"
-      ) {
-        const actions: OutgoingAction[] = [];
-        const reqDefId = this.findRequestDefByCapability(capability);
+    // Route escalation to the thread that's delegating to this child.
+    // The thread may be CALLING(DELEGATING) or REQUESTING(previousState=DELEGATING)
+    // if a prior escalation already transitioned it.
+    const reqDefId = this.findRequestDefByCapability(capability);
+    const event: RuntimeEvent = {
+      tag: "requested",
+      reqDefId: reqDefId ?? 0,
+      args: escalation.input as Record<string, Value>,
+      requestId: escalation.id,
+      fromThreadId: null,
+      escalationRef: { id: escalation.id, endpoint: escalation.endpoint },
+      escalationEndpoint: escalation.endpoint,
+    };
 
-        deliverEvent(
-          this.ctx,
-          agent,
-          thread.threadId,
-          {
-            tag: "requested",
-            reqDefId: reqDefId ?? 0,
-            args: escalation.input as Record<string, Value>,
-            requestId: escalation.id,
-            fromThreadId: null,
-            escalationRef: { id: escalation.id, endpoint: escalation.endpoint },
-            escalationEndpoint: escalation.endpoint,
-          },
-          actions,
-        );
+    for (const [_tid, thread] of agent.threads) {
+      const isDelegating =
+        (thread.status.tag === "CALLING" &&
+          thread.status.kind.tag === "DELEGATING") ||
+        (thread.status.tag === "REQUESTING" &&
+          thread.status.previousState.tag === "DELEGATING");
+      if (isDelegating) {
+        const actions: OutgoingAction[] = [];
+        deliverEvent(this.ctx, agent, thread.threadId, event, actions);
         this.markDirty(agentId);
         this.processActions(actions);
 
@@ -555,7 +595,11 @@ export class Runtime {
     if (!entry) return;
 
     this.delegationMap.delete(delegation.id);
+    this.delegationEndpointMap.delete(delegation.id);
     if (this.db) await this.db.deleteRef(delegation.id);
+
+    // Clean up capabilities created for this delegation
+    await this.cleanupDelegationCapabilities(delegation.id);
 
     const agent =
       this.agents.get(entry.agentId) ??
@@ -592,6 +636,7 @@ export class Runtime {
 
     // Clean up the delegation ref
     this.delegationMap.delete(delegation.id);
+    this.delegationEndpointMap.delete(delegation.id);
     if (this.db) await this.db.deleteRef(delegation.id);
 
     // For now, treat throw as an error that propagates up.
@@ -650,25 +695,22 @@ export class Runtime {
     const module = this.module;
     if (!module) throw new Error("no module loaded");
 
-    const agentDefId = this.agentNameMap.get(agentName);
-    if (agentDefId === undefined)
-      throw new Error(`agent '${agentName}' not found`);
-
-    const agentDef = module.agents.find((a) => a.id === agentDefId);
-    if (!agentDef) throw new Error(`agent def ${agentDefId} not found`);
+    const agentDef = module.agents.find((a) => a.name === agentName);
+    if (!agentDef) throw new Error(`agent '${agentName}' not found`);
+    const agentDefId = agentDef.id;
 
     const agentId = `agent-${crypto.randomUUID()}`;
     const entryTid = agentDef.entry;
 
     const agent = this.createAgentState(agentId, agentDefId, entryTid);
-    this.setNamedArgs(agent, entryTid, agentDef.paramNames, namedArgs);
+    this.setNamedArgs(agent, 0, entryTid, agentDef.paramNames, namedArgs);
     this.agents.set(agentId, agent);
     this.toplevelAgents.add(agentId);
     this.markDirty(agentId);
 
     // Execute from entry thread
     const actions: OutgoingAction[] = [];
-    executeFromThread(this.ctx, agent, entryTid, actions);
+    executeFromThread(this.ctx, agent, agent.rootThreadId, actions);
     this.processActions(actions);
 
     await this.persistState();
@@ -687,21 +729,23 @@ export class Runtime {
     args: Record<string, Value>,
     actions: OutgoingAction[],
   ): boolean {
-    const name = this.defIdToName.get(agentDefId);
+    const callerThread = agent.threads.get(threadId);
+    const callerScope = callerThread?.scopeId ?? 0;
 
     // --- Primitive agents ---
-    if (name?.startsWith("prim.")) {
-      if (name === "prim.ref_agent") {
+    const primName = this.primBlockIds.get(agentDefId);
+    if (primName) {
+      if (primName === "prim.ref_agent") {
         const agentName = Object.values(args)[0] as string;
-        setVar(agent, dst, this.resolveAgentRef(agentName));
+        setVar(agent, callerScope, dst, this.resolveAgentRef(agentName));
         return true;
       }
 
       const argValues = Object.values(args);
-      const result = callPrimitive(name, argValues);
+      const result = callPrimitive(primName, argValues);
 
       if (result.tag === "Ok") {
-        setVar(agent, dst, result.value);
+        setVar(agent, callerScope, dst, result.value);
         return true;
       }
 
@@ -746,48 +790,41 @@ export class Runtime {
         return false;
       }
 
-      setVar(agent, dst, null);
+      setVar(agent, callerScope, dst, null);
       return true;
     }
 
-    // --- Internal agent ---
+    // --- Internal agent (same agent, new scope + thread) ---
     const agentDef = this.module?.agents.find((a) => a.id === agentDefId);
     if (agentDef) {
-      const childAgentId = `agent-${crypto.randomUUID()}`;
       const entryTid = agentDef.entry;
 
-      const childAgent = this.createAgentState(
-        childAgentId,
-        agentDefId,
-        entryTid,
-      );
-      this.setNamedArgs(childAgent, entryTid, agentDef.paramNames, args);
-      this.agents.set(childAgentId, childAgent);
+      // Create a new variable scope for the ICall boundary
+      const childScopeId = agent.nextScopeId++;
+      agent.scopes.set(childScopeId, new Map());
 
-      // Track parent-child relationship
-      this.parentMap.set(childAgentId, {
-        parentAgentId: agent.agentId,
-        parentThreadId: threadId,
-      });
+      // Create child thread in the same agent
+      const childThread = createThread(agent, entryTid, threadId);
+      childThread.scopeId = childScopeId;
+      this.logger.runtimeEvent(agent.agentId, childThread.threadId, "thread:created",
+        { parent: threadId, blockId: entryTid, reason: "icall", agentDefId });
+
+      // Set named args into child scope
+      this.setNamedArgs(agent, childScopeId, entryTid, agentDef.paramNames, args);
 
       // Set parent thread to AGENT calling kind
       const thread = agent.threads.get(threadId);
       if (thread) {
         thread.status = {
           tag: "CALLING",
-          kind: { tag: "AGENT", childAgentId, dst },
+          kind: { tag: "AGENT", childThreadId: childThread.threadId, childScopeId, dst },
         };
       }
 
-      this.markDirty(childAgentId);
       this.markDirty(agent.agentId);
 
-      // Execute child agent synchronously
-      const childActions: OutgoingAction[] = [];
-      executeFromThread(this.ctx, childAgent, entryTid, childActions);
-
-      // Process child actions inline
-      this.processActions(childActions);
+      // Execute child thread in the same agent
+      executeFromThread(this.ctx, agent, childThread.threadId, actions);
 
       return false;
     }
@@ -809,6 +846,7 @@ export class Runtime {
         agentId: agent.agentId,
         threadId,
       });
+      this.delegationEndpointMap.set(delegationId, extRef.agent_def_where);
       this.markDirty(agent.agentId);
 
       // Save ref to DB
@@ -818,21 +856,34 @@ export class Runtime {
           .catch(() => {});
       }
 
+      // Collect capabilities from ancestor handle blocks + parent's protocol caps
+      const { capabilitiesToCreate, capabilityRefs } =
+        this.collectCapabilitiesForDelegation(agent, threadId);
+
+      // Track for cleanup when delegation resolves
+      if (capabilitiesToCreate.length > 0) {
+        this.delegationCapabilityIds.set(
+          delegationId,
+          capabilitiesToCreate.map((c) => c.id),
+        );
+      }
+
       actions.push({
         tag: "ProtocolDelegate",
         targetEndpoint: extRef.agent_def_where,
         agentDefId: extRef.agent_def_id,
         input: args as JsonValue,
-        capabilityRefs: agent.capabilityRefs,
+        capabilityRefs,
         delegationId,
+        capabilitiesToCreate,
       });
 
       return false;
     }
 
     // Unknown agent — return null
-    this.logger.log("warn", `Unknown agent def ${agentDefId} (${name ?? "?"})`);
-    setVar(agent, dst, null);
+    this.logger.log("warn", `Unknown agent def block_id=${agentDefId}`);
+    setVar(agent, callerScope, dst, null);
     return true;
   }
 
@@ -877,11 +928,15 @@ export class Runtime {
         "warn",
         `Request ${reqDef.name}: no capabilities available, cannot escalate`,
       );
+      // Unblock the REQUESTING chain with null
+      fireEvent(this.ctx, agent, _threadId, { tag: "continue", value: null }, actions);
     } else {
       this.logger.log(
         "warn",
         `Unhandled request ${reqDef.name} at root — no parent to escalate to`,
       );
+      // Unblock the REQUESTING chain with null
+      fireEvent(this.ctx, agent, _threadId, { tag: "continue", value: null }, actions);
     }
   }
 
@@ -913,33 +968,6 @@ export class Runtime {
   }
 
   private onAgentComplete(agentId: string, value: Value): void {
-    // Check if this is a child of another agent
-    const parentInfo = this.parentMap.get(agentId);
-    if (parentInfo) {
-      this.parentMap.delete(agentId);
-      this.agents.delete(agentId);
-      this.deletedAgents.add(agentId);
-
-      const parentAgent = this.agents.get(
-        agentId === parentInfo.parentAgentId
-          ? agentId
-          : parentInfo.parentAgentId,
-      );
-      if (parentAgent) {
-        const actions: OutgoingAction[] = [];
-        deliverEvent(
-          this.ctx,
-          parentAgent,
-          parentInfo.parentThreadId,
-          { tag: "completed", value },
-          actions,
-        );
-        this.markDirty(parentInfo.parentAgentId);
-        this.processActions(actions);
-      }
-      return;
-    }
-
     // Toplevel agent
     if (this.toplevelAgents.has(agentId)) {
       this.toplevelResults.set(agentId, { status: "completed", result: value });
@@ -981,7 +1009,6 @@ export class Runtime {
       this.onAgentError?.(agentId);
       this.toplevelAgents.delete(agentId);
     }
-    this.parentMap.delete(agentId);
     this.agents.delete(agentId);
     this.deletedAgents.add(agentId);
 
@@ -991,18 +1018,15 @@ export class Runtime {
   }
 
   private terminateChild(childAgentId: string): void {
-    const childAgent = this.agents.get(childAgentId);
-    if (childAgent) {
-      const actions: OutgoingAction[] = [];
-      fireEvent(
-        this.ctx,
-        childAgent,
-        childAgent.rootThreadId,
-        { tag: "cancel" },
-        actions,
-      );
-      this.markDirty(childAgentId);
-      this.processActions(actions);
+    // External delegation — send /terminate to remote server
+    const delegationEndpoint = this.delegationEndpointMap.get(childAgentId);
+    if (delegationEndpoint) {
+      this.pendingProtocolActions.push({
+        tag: "ProtocolTerminate",
+        targetEndpoint: delegationEndpoint,
+        delegationId: childAgentId,
+        parentEndpoint: this.selfEndpoint,
+      });
     }
   }
 
@@ -1021,21 +1045,27 @@ export class Runtime {
       agentId,
       agentDefId,
       module: this.module,
-      vars: new Map(),
+      scopes: new Map([[0, new Map()]]),
+      nextScopeId: 1,
       threads: new Map(),
-      rootThreadId: entryTid,
+      rootThreadId: 0, // will be set after createThread
+      nextThreadId: 0,
       delegationEndpoint: null,
       delegationId: null,
       selfEndpoint: this.selfEndpoint,
       capabilityRefs: [],
     };
 
-    createThread(agent, entryTid, null);
+    const rootThread = createThread(agent, entryTid, null);
+    agent.rootThreadId = rootThread.threadId;
+    this.logger.runtimeEvent(agent.agentId, rootThread.threadId, "thread:created",
+      { parent: null, blockId: entryTid, reason: "root" });
     return agent;
   }
 
   private setNamedArgs(
     agent: AgentState,
+    scopeId: number,
     entryTid: number,
     paramNames: string[],
     namedArgs: Record<string, Value>,
@@ -1044,7 +1074,7 @@ export class Runtime {
     if (!irThread) return;
     for (let i = 0; i < irThread.params.length && i < paramNames.length; i++) {
       const val = namedArgs[paramNames[i]!];
-      if (val !== undefined) setVar(agent, irThread.params[i]!, val);
+      if (val !== undefined) setVar(agent, scopeId, irThread.params[i]!, val);
     }
   }
 
@@ -1070,10 +1100,12 @@ export class Runtime {
     fireEvent(this.ctx, agent, agent.rootThreadId, { tag: "cancel" }, actions);
     this.processActions(actions);
 
+    // Flush protocol actions (e.g. ProtocolTerminate for external delegations)
+    await this.persistState();
+
     // Clean up
     this.toplevelAgents.delete(agentId);
     this.agents.delete(agentId);
-    this.parentMap.delete(agentId);
     this.deletedAgents.add(agentId);
 
     if (this.db) {
@@ -1098,7 +1130,7 @@ export class Runtime {
   }
 
   getAgentDefId(name: string): number | undefined {
-    return this.agentNameMap.get(name);
+    return this.module?.agents.find((a) => a.name === name)?.id;
   }
 
   getEndpoint(): string {
@@ -1141,30 +1173,102 @@ export class Runtime {
     return null;
   }
 
-  private findRequestDefByCapability(_capability: Capability): number | null {
-    // TODO: proper template-to-requestDef mapping once compiler provides template info
-    if (this.module?.requests.length) {
-      return this.module.requests[0]!.id;
+  /** Delete capabilities that were created for a specific delegation */
+  private async cleanupDelegationCapabilities(
+    delegationId: string,
+  ): Promise<void> {
+    const capIds = this.delegationCapabilityIds.get(delegationId);
+    if (!capIds || capIds.length === 0) return;
+
+    this.delegationCapabilityIds.delete(delegationId);
+
+    if (this.protocolServer) {
+      const store = this.protocolServer.getStore();
+      for (const capId of capIds) {
+        await store.deleteCapability(capId);
+      }
     }
+  }
+
+  private findRequestDefByCapability(capability: Capability): number | null {
+    const requestId = this.protocolTemplateIdToRequestId.get(
+      capability.template_ref.id,
+    );
+    if (requestId !== undefined) return requestId;
     return null;
   }
 
+  /**
+   * Walk up the thread ancestor chain from `threadId`, collecting handle
+   * request cases that would intercept a `requested` event. Produces
+   * CapabilityToCreate entries (with pre-generated UUIDs) and the final
+   * merged CapabilityRef list (local caps + parent's protocol caps, deduped
+   * by template — leaf wins).
+   */
+  private collectCapabilitiesForDelegation(
+    agent: AgentState,
+    threadId: number,
+  ): { capabilitiesToCreate: CapabilityToCreate[]; capabilityRefs: CapabilityRef[] } {
+    // Collect template_id → CapabilityToCreate, leaf-first (first encountered wins)
+    const seenTemplateIds = new Set<string>();
+    const capsToCreate: CapabilityToCreate[] = [];
+
+    let currentId: number | null = threadId;
+    while (currentId !== null) {
+      const thread = agent.threads.get(currentId);
+      if (!thread || thread.parent === null) break;
+
+      const parent = agent.threads.get(thread.parent);
+      if (!parent || parent.status.tag !== "CALLING") {
+        currentId = thread.parent;
+        continue;
+      }
+
+      const kind = parent.status.kind;
+      // HANDLE_TARGET and HANDLE_BODY both belong to a handle scope whose
+      // request cases can intercept escalations.
+      if (kind.tag === "HANDLE_TARGET" || kind.tag === "HANDLE_BODY") {
+        const hdef = findHandle(agent.module, kind.handleDefId);
+        if (hdef) {
+          for (const [reqId] of hdef.reqCases) {
+            const templateRef = this.requestIdToTemplateRef.get(reqId);
+            if (templateRef && !seenTemplateIds.has(templateRef.id)) {
+              seenTemplateIds.add(templateRef.id);
+              capsToCreate.push({
+                id: crypto.randomUUID(),
+                templateRef,
+                agentRef: { id: agent.agentId, endpoint: this.selfEndpoint },
+              });
+            }
+          }
+        }
+      }
+
+      currentId = thread.parent;
+    }
+
+    // Merge: local capabilities first (already in capsToCreate), then
+    // parent's protocol capabilities for templates not already covered.
+    const capabilityRefs: CapabilityRef[] = capsToCreate.map((c) => ({
+      id: c.id,
+      endpoint: this.selfEndpoint,
+    }));
+
+    for (const parentCap of agent.capabilityRefs) {
+      // Parent caps only included if their template isn't shadowed by a
+      // local handle.  We can't easily inspect the template of a foreign
+      // CapabilityRef without a store lookup, so we include all of them —
+      // the protocol routing will naturally pick the first matching
+      // capability the child tries.  For same-endpoint caps we can dedup.
+      capabilityRefs.push(parentCap);
+    }
+
+    return { capabilitiesToCreate: capsToCreate, capabilityRefs };
+  }
+
   private resolveAgentRef(agentName: string): Value {
-    const numId = this.agentNameMap.get(agentName);
-    if (numId === undefined) return null;
-
-    const extRef = this.externalAgents.get(numId);
-    if (!extRef) return null;
-
-    const schema = this.schemas.get(agentName) as
-      | Record<string, JsonValue>
-      | undefined;
-    return {
-      url: extRef.agent_def_where,
-      agent_def_id: extRef.agent_def_id,
-      name: agentName,
-      description: (schema?.description as string) ?? "",
-      arg_type: schema?.arg_type ?? null,
-    };
+    const ref = this.nameToAgentRef.get(agentName);
+    if (!ref) return null;
+    return ref;
   }
 }
