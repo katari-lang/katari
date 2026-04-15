@@ -1,96 +1,96 @@
-import { v4 as uuidv4 } from "uuid";
 import type {
-  KatariProtocol,
-  OutgoingMessage,
-  RequestInfo,
-  AgentDefInfo,
-  EffectRef,
-  AgentSummary,
-  AgentDetail,
-  SpawnAgentRequest,
-  SpawnAgentResponse,
-  AgentRequestBody,
-  AgentReplyBody,
-  AgentReturnBody,
-  TerminateBody,
-  TerminateAckBody,
-  ChildAgentRef,
   JsonValue,
+  OutgoingMessage,
+  KatariServerHooks,
+  Agent,
+  Delegation,
+  Escalation,
+  Capability,
+  DelegateRequest,
+  CapabilityRef,
 } from "katari-protocol";
 import type { IRModule } from "../ir.js";
 import type { Value } from "../value.js";
 import type {
   AgentState,
-  Event,
-  PendingRequest,
-  Signal,
+  OutgoingAction,
+  DispatchContext,
+  RuntimeEvent,
+  ExternalAgentRef,
 } from "./types.js";
-import {
-  setVar,
-  isRunning,
-  findThread,
-  findRequestThread,
-  isHeldByHandler,
-  resumeThread,
-  routeRequestToHandle,
-} from "./types.js";
-import type { ExecuteCallbacks } from "./execute.js";
-import { executeThread } from "./execute.js";
-import { setupHandle, dispatchRequest, processHandlerSignal, processHandleBodySignal, processHandleThenSignal } from "./handle.js";
-import { setupFor, processForBodySignal, processForThenSignal } from "./for-loop.js";
-import { setupPar, processParBranchSignal } from "./par.js";
-import type { RequestConfig, ExternalAgentRef } from "./request.js";
-import { handleICall, handleIRequest } from "./request.js";
+import { setVar, findThread, createThread } from "./types.js";
+import { fireEvent, deliverEvent, executeFromThread } from "./dispatch.js";
+import { callPrimitive } from "../primitive.js";
+import { serializeAgentState, deserializeAgentState } from "./serialize.js";
+import type { Db } from "../db.js";
+import type { RuntimeLogger } from "../logger.js";
+import { NullRuntimeLogger } from "../logger.js";
 
 // ===========================================================================
-// Runtime
+// Runtime — orchestrates agent execution via KatariServerHooks
 // ===========================================================================
 
-export class Runtime implements KatariProtocol {
-  module: IRModule | null = null;
-  agents = new Map<string, AgentState>();
-  agentNameMap = new Map<string, number>();
-  schemas = new Map<string, JsonValue>();
-  selfBaseUrl: string;
-  eventQueue: Event[] = [];
-  outgoingMessages: OutgoingMessage[] = [];
+export class Runtime {
+  private module: IRModule | null = null;
+  private agents = new Map<string, AgentState>();
+  private selfEndpoint: string;
+  private db: Db | null;
 
-  // External routing
-  externalAgents = new Map<number, ExternalAgentRef>();
-  servers = new Map<string, string>(); // serverName → URL
-  externalRequestMap = new Map<string, number>(); // "localName|serverURL" → internal request ID
+  // Agent name/routing config (set via applyModule)
+  private agentNameMap = new Map<string, number>();
+  private defIdToName = new Map<number, string>();
+  private externalAgents = new Map<number, ExternalAgentRef>();
+  private servers = new Map<string, string>();
+  private schemas = new Map<string, JsonValue>();
+
+  // Parent tracking: childAgentId → { parentAgentId, parentThreadId }
+  private parentMap = new Map<string, { parentAgentId: string; parentThreadId: number }>();
+
+  // Delegation tracking: delegationId → { agentId, threadId }
+  private delegationMap = new Map<string, { agentId: string; threadId: number }>();
+
+  // Escalation tracking: escalationId → { agentId, threadId }
+  private escalationMap = new Map<string, { agentId: string; threadId: number }>();
 
   // Toplevel agent tracking
-  toplevelAgents = new Set<string>();
-  toplevelResults = new Map<string, { status: string; result?: Value }>();
+  private toplevelAgents = new Set<string>();
+  private toplevelResults = new Map<string, { status: string; result?: Value }>();
   onAgentCompleted?: (agentId: string, result: Value) => void;
   onAgentError?: (agentId: string) => void;
 
-  private execCb: ExecuteCallbacks;
+  // Dispatch context — shared by all agents
+  private ctx: DispatchContext;
 
-  constructor(baseUrl: string) {
-    this.selfBaseUrl = baseUrl;
-    this.execCb = {
-      setupHandle,
-      setupFor,
-      setupPar,
-      handleICall: (agent, tid, dst, adid, args, events, msgs) =>
-        handleICall(agent, tid, dst, adid, args, events, msgs, this.requestConfig),
-      handleIRequest: (agent, tid, dst, rdid, args, events, msgs) =>
-        handleIRequest(agent, tid, dst, rdid, args, events, msgs, this.requestConfig),
+  // Outgoing messages from last operation
+  private pendingMessages: OutgoingMessage[] = [];
+
+  // Track which agents were modified during current operation
+  private dirtyAgents = new Set<string>();
+  private deletedAgents = new Set<string>();
+
+  private logger: RuntimeLogger;
+
+  constructor(endpoint: string, db?: Db, logger?: RuntimeLogger) {
+    this.selfEndpoint = endpoint;
+    this.db = db ?? null;
+    this.logger = logger ?? new NullRuntimeLogger();
+
+    this.ctx = {
+      callHandler: (agent, threadId, dst, agentDefId, args, actions) =>
+        this.handleCall(agent, threadId, dst, agentDefId, args, actions),
+      rootRequestHandler: (agent, threadId, event, actions) =>
+        this.handleRootRequest(agent, threadId, event, actions),
+      logger: this.logger,
     };
   }
 
-  private get requestConfig(): RequestConfig {
-    return {
-      selfBaseUrl: this.selfBaseUrl,
-      externalAgents: this.externalAgents,
-      module: this.module,
-      servers: this.servers,
-      agentNameMap: this.agentNameMap,
-      schemas: this.schemas,
-    };
+  getLogger(): RuntimeLogger {
+    return this.logger;
   }
+
+  // =========================================================================
+  // Module management
+  // =========================================================================
 
   applyModule(
     module: IRModule,
@@ -104,68 +104,707 @@ export class Runtime implements KatariProtocol {
     this.schemas = schemas;
     if (externalAgents) this.externalAgents = externalAgents;
     if (servers) this.servers = servers;
-    this.buildExternalRequestMap();
+
+    // Build reverse name map
+    this.defIdToName.clear();
+    for (const [name, id] of nameMap) {
+      this.defIdToName.set(id, name);
+    }
   }
 
-  /** Build "localName|serverURL" → internal request ID mapping for external requests */
-  private buildExternalRequestMap(): void {
-    this.externalRequestMap.clear();
+  // =========================================================================
+  // DB persistence — save/load state
+  // =========================================================================
+
+  /** Save all modified agent states and ref maps to DB */
+  async persistState(): Promise<void> {
+    if (!this.db) return;
+
+    const promises: Promise<void>[] = [];
+
+    for (const agentId of this.deletedAgents) {
+      promises.push(this.db.deleteAgent(agentId));
+    }
+    this.deletedAgents.clear();
+
+    for (const agentId of this.dirtyAgents) {
+      const agent = this.agents.get(agentId);
+      if (!agent) continue;
+
+      const parentInfo = this.parentMap.get(agentId);
+      const isToplevel = this.toplevelAgents.has(agentId);
+      const name = this.defIdToName.get(agent.agentDefId) ?? null;
+
+      promises.push(
+        this.db.saveAgent(
+          agentId,
+          agent.agentDefId,
+          serializeAgentState(agent),
+          parentInfo?.parentAgentId ?? null,
+          parentInfo?.parentThreadId ?? null,
+          isToplevel,
+          name,
+          null,
+        )
+      );
+    }
+    this.dirtyAgents.clear();
+
+    await Promise.all(promises);
+  }
+
+  /** Restore all running agents from DB (used on startup for non-serverless) */
+  async restoreAgentsFromDb(): Promise<void> {
+    if (!this.db || !this.module) return;
+
+    const rows = await this.db.loadRunningAgents();
+    for (const row of rows) {
+      const agent = deserializeAgentState(row.state, this.module);
+      this.agents.set(row.id, agent);
+      if (row.parentAgentId && row.parentThreadId !== null) {
+        this.parentMap.set(row.id, {
+          parentAgentId: row.parentAgentId,
+          parentThreadId: row.parentThreadId,
+        });
+      }
+      if (row.isToplevel) {
+        this.toplevelAgents.add(row.id);
+      }
+
+      // Restore ref maps
+      const refs = await this.db.loadRefsByAgent(row.id);
+      for (const ref of refs) {
+        if (ref.kind === "delegation") {
+          this.delegationMap.set(ref.id, { agentId: ref.agentId, threadId: ref.threadId });
+        } else {
+          this.escalationMap.set(ref.id, { agentId: ref.agentId, threadId: ref.threadId });
+        }
+      }
+    }
+  }
+
+  /** Load a single agent from DB on demand (for serverless) */
+  private async loadAgentFromDb(agentId: string): Promise<AgentState | null> {
+    if (!this.db || !this.module) return null;
+
+    const row = await this.db.loadAgent(agentId);
+    if (!row || row.status !== "running") return null;
+
+    const agent = deserializeAgentState(row.state, this.module);
+    this.agents.set(agentId, agent);
+
+    if (row.parentAgentId && row.parentThreadId !== null) {
+      this.parentMap.set(agentId, {
+        parentAgentId: row.parentAgentId,
+        parentThreadId: row.parentThreadId,
+      });
+    }
+    if (row.isToplevel) {
+      this.toplevelAgents.add(agentId);
+    }
+    return agent;
+  }
+
+  // =========================================================================
+  // KatariServerHooks — provided to KatariServer
+  // =========================================================================
+
+  createHooks(): KatariServerHooks {
+    return {
+      onDelegate: (agent, req) => this.onDelegate(agent, req),
+      onDelegateAck: (delegation, output) => this.onDelegateAck(delegation, output),
+      onEscalate: (escalation, capability) => this.onEscalate(escalation, capability),
+      onEscalateAck: (escalation, output) => this.onEscalateAck(escalation, output),
+      onTerminate: (delegation) => this.onTerminate(delegation),
+      onTerminateAck: (delegation) => this.onTerminateAck(delegation),
+      onThrow: (delegation, message) => this.onThrow(delegation, message),
+    };
+  }
+
+  // =========================================================================
+  // Hook: onDelegate — create agent, start execution
+  // =========================================================================
+
+  private async onDelegate(protocolAgent: Agent, req: DelegateRequest): Promise<void> {
     if (!this.module) return;
-    for (const req of this.module.requests) {
-      if (!req.from) continue;
-      // req.from = "discord:on_message" → server="discord", local="on_message"
-      const colonIdx = req.from.indexOf(":");
-      if (colonIdx === -1) continue;
-      const serverKey = req.from.substring(0, colonIdx);
-      const localName = req.from.substring(colonIdx + 1);
-      const serverUrl = this.servers.get(serverKey);
-      if (serverUrl) {
-        this.externalRequestMap.set(`${localName}|${serverUrl}`, req.id);
+
+    const agentDefId = parseInt(protocolAgent.definition_ref.id, 10);
+    if (isNaN(agentDefId)) return;
+
+    const agentDef = this.module.agents.find((a) => a.id === agentDefId);
+    if (!agentDef) return;
+
+    const agentId = protocolAgent.id;
+    const entryTid = agentDef.entry;
+
+    const agent = this.createAgentState(agentId, agentDefId, entryTid);
+    agent.delegationEndpoint = req.delegation_ref?.endpoint ?? null;
+    agent.delegationId = req.delegation_ref?.id ?? null;
+    agent.capabilityRefs = req.capability_refs;
+
+    // Set named args
+    this.setNamedArgs(agent, entryTid, agentDef.paramNames, req.input as Record<string, Value>);
+
+    this.agents.set(agentId, agent);
+    this.markDirty(agentId);
+
+    // Execute from entry thread
+    const actions: OutgoingAction[] = [];
+    executeFromThread(this.ctx, agent, entryTid, actions);
+    this.processActions(actions);
+
+    await this.persistState();
+  }
+
+  // =========================================================================
+  // Hook: onDelegateAck — child agent completed
+  // =========================================================================
+
+  private async onDelegateAck(delegation: Delegation, output: JsonValue): Promise<void> {
+    const entry = await this.resolveRef("delegation", delegation.id);
+    if (!entry) return;
+
+    this.delegationMap.delete(delegation.id);
+    if (this.db) await this.db.deleteRef(delegation.id);
+
+    const agent = this.agents.get(entry.agentId) ?? await this.loadAgentFromDb(entry.agentId);
+    if (!agent) return;
+
+    const actions: OutgoingAction[] = [];
+    deliverEvent(this.ctx, agent, entry.threadId, { tag: "completed", value: output as Value }, actions);
+    this.markDirty(entry.agentId);
+    this.processActions(actions);
+
+    await this.persistState();
+  }
+
+  // =========================================================================
+  // Hook: onEscalate — child's request routed to our capability
+  // =========================================================================
+
+  private async onEscalate(escalation: Escalation, capability: Capability): Promise<void> {
+    // Find the agent that owns this capability
+    const agentId = capability.agent_ref.id;
+    const agent = this.agents.get(agentId) ?? await this.loadAgentFromDb(agentId);
+    if (!agent) {
+      this.logger.log("warn", `onEscalate: agent ${agentId} not found`);
+      return;
+    }
+
+    // The escalation carries input that maps to a request event
+    // Route it to the delegating thread for this child
+    // Find the thread that's in DELEGATING state for this child
+    for (const [_tid, thread] of agent.threads) {
+      if (thread.status.tag === "CALLING" && thread.status.kind.tag === "DELEGATING") {
+        const actions: OutgoingAction[] = [];
+        const reqDefId = this.findRequestDefByCapability(capability);
+
+        deliverEvent(this.ctx, agent, thread.threadId, {
+          tag: "requested",
+          reqDefId: reqDefId ?? 0,
+          args: escalation.input as Record<string, Value>,
+          requestId: escalation.id,
+          fromThreadId: null,
+          escalationRef: { id: escalation.id, endpoint: escalation.endpoint },
+          escalationEndpoint: escalation.endpoint,
+        }, actions);
+        this.markDirty(agentId);
+        this.processActions(actions);
+
+        await this.persistState();
+        return;
+      }
+    }
+
+    this.logger.log("warn", `onEscalate: no DELEGATING thread found for capability ${capability.id}`);
+  }
+
+  // =========================================================================
+  // Hook: onEscalateAck — request response from capability holder
+  // =========================================================================
+
+  private async onEscalateAck(escalation: Escalation, output: JsonValue): Promise<void> {
+    const entry = await this.resolveRef("escalation", escalation.id);
+    if (!entry) return;
+
+    this.escalationMap.delete(escalation.id);
+    if (this.db) await this.db.deleteRef(escalation.id);
+
+    const agent = this.agents.get(entry.agentId) ?? await this.loadAgentFromDb(entry.agentId);
+    if (!agent) return;
+
+    const actions: OutgoingAction[] = [];
+    fireEvent(this.ctx, agent, entry.threadId, { tag: "continue", value: output as Value }, actions);
+    this.markDirty(entry.agentId);
+    this.processActions(actions);
+
+    await this.persistState();
+  }
+
+  // =========================================================================
+  // Hook: onTerminate — parent tells us to stop
+  // =========================================================================
+
+  private async onTerminate(delegation: Delegation): Promise<void> {
+    for (const [agentId, agent] of this.agents) {
+      if (agent.delegationId === delegation.id) {
+        const actions: OutgoingAction[] = [];
+        fireEvent(this.ctx, agent, agent.rootThreadId, { tag: "cancel" }, actions);
+        this.markDirty(agentId);
+        this.processActions(actions);
+
+        await this.persistState();
+        break;
+      }
+    }
+
+    // If not found in memory, try DB
+    if (this.db) {
+      const rows = await this.db.loadRunningAgents();
+      for (const row of rows) {
+        if (row.state.delegationId === delegation.id) {
+          const agent = await this.loadAgentFromDb(row.id);
+          if (!agent) continue;
+
+          const actions: OutgoingAction[] = [];
+          fireEvent(this.ctx, agent, agent.rootThreadId, { tag: "cancel" }, actions);
+          this.markDirty(row.id);
+          this.processActions(actions);
+
+          await this.persistState();
+          break;
+        }
       }
     }
   }
 
   // =========================================================================
-  // POST /run entry point
+  // Hook: onTerminateAck — child confirmed termination
   // =========================================================================
 
-  runAgent(agentName: string, namedArgs: Record<string, Value>): string {
+  private async onTerminateAck(delegation: Delegation): Promise<void> {
+    const entry = await this.resolveRef("delegation", delegation.id);
+    if (!entry) return;
+
+    this.delegationMap.delete(delegation.id);
+    if (this.db) await this.db.deleteRef(delegation.id);
+
+    const agent = this.agents.get(entry.agentId) ?? await this.loadAgentFromDb(entry.agentId);
+    if (!agent) return;
+
+    const actions: OutgoingAction[] = [];
+    deliverEvent(this.ctx, agent, entry.threadId, { tag: "canceled" }, actions);
+    this.markDirty(entry.agentId);
+    this.processActions(actions);
+
+    await this.persistState();
+  }
+
+  // =========================================================================
+  // Hook: onThrow — child reports an error
+  // =========================================================================
+
+  private async onThrow(delegation: Delegation, message: string): Promise<void> {
+    // Find the agent whose delegation matches
+    const entry = await this.resolveRef("delegation", delegation.id);
+    if (!entry) {
+      this.logger.log("warn", `onThrow: delegation ${delegation.id} not found`);
+      return;
+    }
+
+    const agent = this.agents.get(entry.agentId) ?? await this.loadAgentFromDb(entry.agentId);
+    if (!agent) return;
+
+    // Clean up the delegation ref
+    this.delegationMap.delete(delegation.id);
+    if (this.db) await this.db.deleteRef(delegation.id);
+
+    // For now, treat throw as an error that propagates up.
+    // If this agent has a parent (delegation), forward the throw.
+    if (agent.delegationEndpoint && agent.delegationId) {
+      // First cancel the delegating thread
+      const actions: OutgoingAction[] = [];
+      deliverEvent(this.ctx, agent, entry.threadId, { tag: "canceled" }, actions);
+      this.markDirty(entry.agentId);
+
+      // Forward throw to parent
+      actions.push({
+        toEndpoint: agent.delegationEndpoint,
+        kind: {
+          type: "Throw",
+          body: {
+            delegation_ref: { id: agent.delegationId, endpoint: agent.delegationEndpoint },
+            message,
+          },
+        },
+      });
+
+      this.processActions(actions);
+    } else {
+      // Toplevel agent — mark as error
+      const actions: OutgoingAction[] = [];
+      deliverEvent(this.ctx, agent, entry.threadId, { tag: "canceled" }, actions);
+      this.markDirty(entry.agentId);
+      actions.push({ tag: "AgentError", agentId: agent.agentId });
+      this.processActions(actions);
+      this.logger.log("error", `Agent ${agent.agentId}: unhandled throw — ${message}`);
+    }
+
+    await this.persistState();
+  }
+
+  // =========================================================================
+  // Local agent execution (for /agents endpoint)
+  // =========================================================================
+
+  async runAgent(agentName: string, namedArgs: Record<string, Value>): Promise<string> {
     const module = this.module;
     if (!module) throw new Error("no module loaded");
 
     const agentDefId = this.agentNameMap.get(agentName);
-    if (agentDefId === undefined)
-      throw new Error(`agent '${agentName}' not found`);
+    if (agentDefId === undefined) throw new Error(`agent '${agentName}' not found`);
 
     const agentDef = module.agents.find((a) => a.id === agentDefId);
     if (!agentDef) throw new Error(`agent def ${agentDefId} not found`);
 
+    const agentId = `agent-${crypto.randomUUID()}`;
     const entryTid = agentDef.entry;
-    const agentId = `agent-${uuidv4()}`;
-    const rootAgentId = `root-${uuidv4()}`;
 
-    const agent = this.createAgent(
-      agentId, agentDefId, entryTid, rootAgentId, "", new Set(), module
-    );
-
-    this.setNamedArgs(agent, module, entryTid, agentDef.paramNames, namedArgs);
-
+    const agent = this.createAgentState(agentId, agentDefId, entryTid);
+    this.setNamedArgs(agent, entryTid, agentDef.paramNames, namedArgs);
     this.agents.set(agentId, agent);
     this.toplevelAgents.add(agentId);
-    this.eventQueue.push({ agentId, kind: { tag: "Execute", threadId: entryTid } });
-    this.runEventLoop();
+    this.markDirty(agentId);
+
+    // Execute from entry thread
+    const actions: OutgoingAction[] = [];
+    executeFromThread(this.ctx, agent, entryTid, actions);
+    this.processActions(actions);
+
+    await this.persistState();
     return agentId;
   }
 
-  /** Map named args to positional thread params using paramNames */
-  private setNamedArgs(
+  // =========================================================================
+  // Call handler — resolves ICall to primitive/internal/external
+  // =========================================================================
+
+  private handleCall(
     agent: AgentState,
-    module: IRModule,
-    entryTid: number,
-    paramNames: string[],
-    namedArgs: Record<string, Value>
+    threadId: number,
+    dst: number,
+    agentDefId: number,
+    args: Record<string, Value>,
+    actions: OutgoingAction[]
+  ): boolean {
+    const name = this.defIdToName.get(agentDefId);
+
+    // --- Primitive agents ---
+    if (name?.startsWith("prim.")) {
+      if (name === "prim.ref_agent") {
+        const agentName = Object.values(args)[0] as string;
+        setVar(agent, dst, this.resolveAgentRef(agentName));
+        return true;
+      }
+
+      const argValues = Object.values(args);
+      const result = callPrimitive(name, argValues);
+
+      if (result.tag === "Ok") {
+        setVar(agent, dst, result.value);
+        return true;
+      }
+
+      if (result.tag === "RaiseRequest") {
+        const rid = this.module?.requests.find((r) => r.name === result.reqName)?.id;
+        if (rid !== undefined) {
+          const requestId = crypto.randomUUID();
+          const thread = agent.threads.get(threadId);
+          if (!thread) return true;
+
+          const currentKind = thread.status.tag === "CALLING"
+            ? thread.status.kind
+            : { tag: "BLOCK" as const, childThreadId: -1, dst: -1 };
+
+          thread.status = {
+            tag: "REQUESTING",
+            fromThread: null,
+            previousState: currentKind,
+            eventQueue: [],
+            escalationRef: null,
+          };
+
+          fireEvent(this.ctx, agent, threadId, {
+            tag: "requested",
+            reqDefId: rid,
+            args: result.args,
+            requestId,
+            fromThreadId: null,
+            escalationRef: null,
+            escalationEndpoint: null,
+          }, actions);
+        }
+        return false;
+      }
+
+      setVar(agent, dst, null);
+      return true;
+    }
+
+    // --- Internal agent ---
+    const agentDef = this.module?.agents.find((a) => a.id === agentDefId);
+    if (agentDef) {
+      const childAgentId = `agent-${crypto.randomUUID()}`;
+      const entryTid = agentDef.entry;
+
+      const childAgent = this.createAgentState(childAgentId, agentDefId, entryTid);
+      this.setNamedArgs(childAgent, entryTid, agentDef.paramNames, args);
+      this.agents.set(childAgentId, childAgent);
+
+      // Track parent-child relationship
+      this.parentMap.set(childAgentId, {
+        parentAgentId: agent.agentId,
+        parentThreadId: threadId,
+      });
+
+      // Set parent thread to AGENT calling kind
+      const thread = agent.threads.get(threadId);
+      if (thread) {
+        thread.status = {
+          tag: "CALLING",
+          kind: { tag: "AGENT", childAgentId, dst },
+        };
+      }
+
+      this.markDirty(childAgentId);
+      this.markDirty(agent.agentId);
+
+      // Execute child agent synchronously
+      const childActions: OutgoingAction[] = [];
+      executeFromThread(this.ctx, childAgent, entryTid, childActions);
+
+      // Process child actions inline
+      this.processActions(childActions);
+
+      return false;
+    }
+
+    // --- External agent (delegation) ---
+    const extRef = this.externalAgents.get(agentDefId);
+    if (extRef) {
+      const delegationId = crypto.randomUUID();
+
+      const thread = agent.threads.get(threadId);
+      if (thread) {
+        thread.status = {
+          tag: "CALLING",
+          kind: { tag: "DELEGATING", delegationId, dst },
+        };
+      }
+
+      this.delegationMap.set(delegationId, { agentId: agent.agentId, threadId });
+      this.markDirty(agent.agentId);
+
+      // Save ref to DB
+      if (this.db) {
+        this.db.saveRef(delegationId, "delegation", agent.agentId, threadId).catch(() => {});
+      }
+
+      actions.push({
+        toEndpoint: extRef.agent_def_where,
+        kind: {
+          type: "Delegate",
+          body: {
+            agent_def_ref: { id: extRef.agent_def_id, endpoint: extRef.agent_def_where },
+            input: args as JsonValue,
+            delegation_ref: { id: delegationId, endpoint: this.selfEndpoint },
+            capability_refs: agent.capabilityRefs,
+          },
+          delegationId,
+        },
+      });
+
+      return false;
+    }
+
+    // Unknown agent — return null
+    this.logger.log("warn", `Unknown agent def ${agentDefId} (${name ?? "?"})`);
+    setVar(agent, dst, null);
+    return true;
+  }
+
+  // =========================================================================
+  // Root request handler — escalates unhandled requests
+  // =========================================================================
+
+  private handleRootRequest(
+    agent: AgentState,
+    _threadId: number,
+    event: RuntimeEvent & { tag: "requested" },
+    actions: OutgoingAction[]
   ): void {
-    const irThread = findThread(module, entryTid);
+    const reqDef = agent.module.requests.find((r) => r.id === event.reqDefId);
+    if (!reqDef) return;
+
+    // Look for a matching capability in the agent's capability refs
+    if (agent.capabilityRefs.length > 0) {
+      const capRef = agent.capabilityRefs[0]!;
+      const escalationId = crypto.randomUUID();
+
+      this.escalationMap.set(escalationId, {
+        agentId: agent.agentId,
+        threadId: _threadId,
+      });
+
+      // Save ref to DB
+      if (this.db) {
+        this.db.saveRef(escalationId, "escalation", agent.agentId, _threadId).catch(() => {});
+      }
+
+      actions.push({
+        toEndpoint: capRef.endpoint,
+        kind: {
+          type: "Escalate",
+          body: {
+            escalation_ref: { id: escalationId, endpoint: this.selfEndpoint },
+            capability_ref: capRef,
+            input: event.args as JsonValue,
+          },
+        },
+      });
+    } else if (agent.delegationEndpoint) {
+      this.logger.log("warn", `Request ${reqDef.name}: no capabilities available, cannot escalate`);
+    } else {
+      this.logger.log("warn", `Unhandled request ${reqDef.name} at root — no parent to escalate to`);
+    }
+  }
+
+  // =========================================================================
+  // Process outgoing actions
+  // =========================================================================
+
+  private processActions(actions: OutgoingAction[]): void {
+    for (const action of actions) {
+      if ("toEndpoint" in action) {
+        this.pendingMessages.push(action as OutgoingMessage);
+      } else if (action.tag === "AgentCompleted") {
+        this.onAgentComplete(action.agentId, action.value);
+      } else if (action.tag === "AgentError") {
+        this.onAgentFail(action.agentId);
+      } else if (action.tag === "TerminateAgent") {
+        this.terminateChild(action.childAgentId);
+      }
+    }
+  }
+
+  private onAgentComplete(agentId: string, value: Value): void {
+    // Check if this is a child of another agent
+    const parentInfo = this.parentMap.get(agentId);
+    if (parentInfo) {
+      this.parentMap.delete(agentId);
+      this.agents.delete(agentId);
+      this.deletedAgents.add(agentId);
+
+      const parentAgent = this.agents.get(agentId === parentInfo.parentAgentId ? agentId : parentInfo.parentAgentId);
+      if (parentAgent) {
+        const actions: OutgoingAction[] = [];
+        deliverEvent(this.ctx, parentAgent, parentInfo.parentThreadId, { tag: "completed", value }, actions);
+        this.markDirty(parentInfo.parentAgentId);
+        this.processActions(actions);
+      }
+      return;
+    }
+
+    // Toplevel agent
+    if (this.toplevelAgents.has(agentId)) {
+      this.toplevelResults.set(agentId, { status: "completed", result: value });
+      this.onAgentCompleted?.(agentId, value);
+      this.toplevelAgents.delete(agentId);
+      this.agents.delete(agentId);
+
+      // Update DB status
+      if (this.db) {
+        this.db.updateAgentStatus(agentId, "completed", value as JsonValue).catch(() => {});
+      }
+      return;
+    }
+
+    // Protocol agent — send delegate_ack
+    const agent = this.agents.get(agentId);
+    if (agent?.delegationEndpoint && agent.delegationId) {
+      this.pendingMessages.push({
+        toEndpoint: agent.delegationEndpoint,
+        kind: {
+          type: "DelegateAck",
+          body: {
+            delegation_ref: { id: agent.delegationId, endpoint: agent.delegationEndpoint },
+            output: value as JsonValue,
+          },
+        },
+      });
+      this.agents.delete(agentId);
+      this.deletedAgents.add(agentId);
+
+      if (this.db) {
+        this.db.updateAgentStatus(agentId, "completed", value as JsonValue).catch(() => {});
+      }
+    }
+  }
+
+  private onAgentFail(agentId: string): void {
+    if (this.toplevelAgents.has(agentId)) {
+      this.toplevelResults.set(agentId, { status: "error" });
+      this.onAgentError?.(agentId);
+      this.toplevelAgents.delete(agentId);
+    }
+    this.parentMap.delete(agentId);
+    this.agents.delete(agentId);
+    this.deletedAgents.add(agentId);
+
+    if (this.db) {
+      this.db.updateAgentStatus(agentId, "error", null).catch(() => {});
+    }
+  }
+
+  private terminateChild(childAgentId: string): void {
+    const childAgent = this.agents.get(childAgentId);
+    if (childAgent) {
+      const actions: OutgoingAction[] = [];
+      fireEvent(this.ctx, childAgent, childAgent.rootThreadId, { tag: "cancel" }, actions);
+      this.markDirty(childAgentId);
+      this.processActions(actions);
+    }
+  }
+
+  // =========================================================================
+  // Agent lifecycle
+  // =========================================================================
+
+  private createAgentState(agentId: string, agentDefId: number, entryTid: number): AgentState {
+    if (!this.module) throw new Error("no module loaded");
+
+    const agent: AgentState = {
+      agentId,
+      agentDefId,
+      module: this.module,
+      vars: new Map(),
+      threads: new Map(),
+      rootThreadId: entryTid,
+      delegationEndpoint: null,
+      delegationId: null,
+      selfEndpoint: this.selfEndpoint,
+      capabilityRefs: [],
+    };
+
+    createThread(agent, entryTid, null);
+    return agent;
+  }
+
+  private setNamedArgs(
+    agent: AgentState, entryTid: number,
+    paramNames: string[], namedArgs: Record<string, Value>
+  ): void {
+    const irThread = findThread(agent.module, entryTid);
     if (!irThread) return;
     for (let i = 0; i < irThread.params.length && i < paramNames.length; i++) {
       const val = namedArgs[paramNames[i]!];
@@ -173,384 +812,60 @@ export class Runtime implements KatariProtocol {
     }
   }
 
-  private createAgent(
-    agentId: string,
-    agentDefId: number,
-    entryTid: number,
-    parentAgentId: string,
-    parentAgentWhere: string,
-    parentAvailableRequests: Set<number>,
-    module: IRModule
-  ): AgentState {
-    const agent: AgentState = {
-      agentId,
-      agentDefId,
-      module,
-      vars: new Map(),
-      threads: new Map(),
-      rootThread: entryTid,
-      parentAgentId,
-      parentAgentWhere,
-      children: new Map(),
-      parentAvailableRequests,
-      selfWhere: this.selfBaseUrl,
-      status: { tag: "Running" },
-    };
-    agent.threads.set(entryTid, {
-      threadId: entryTid,
-      kind: "FnBody",
-      pc: 0,
-      status: { tag: "Running" },
-      parent: null,
-    });
-    return agent;
-  }
-
   // =========================================================================
-  // Event loop
-  // =========================================================================
-
-  runEventLoop(): void {
-    for (let i = 0; i < 100_000; i++) {
-      const idx = this.eventQueue.findIndex((e) => this.isApplicable(e));
-      if (idx === -1) break;
-      const event = this.eventQueue.splice(idx, 1)[0]!;
-      this.applyEvent(event);
-    }
-    this.eventQueue = this.eventQueue.filter((e) => this.agents.has(e.agentId));
-  }
-
-  private isApplicable(event: Event): boolean {
-    const agent = this.agents.get(event.agentId);
-    if (!agent) return false;
-
-    const kind = event.kind;
-    switch (kind.tag) {
-      case "Execute": {
-        const t = agent.threads.get(kind.threadId);
-        return !!t && isRunning(t) && !isHeldByHandler(agent, kind.threadId);
-      }
-      case "ThreadCompleted": {
-        const t = agent.threads.get(kind.parentId);
-        if (!t) return false;
-        if (
-          t.status.tag === "Suspended" &&
-          t.status.reason.tag === "Handle" &&
-          t.status.reason.phase.tag === "RunningHandler"
-        ) {
-          return kind.childId === t.status.reason.phase.handlerThread;
-        }
-        return !isHeldByHandler(agent, kind.parentId);
-      }
-      case "Terminate":
-        return agent.threads.has(kind.threadId);
-      case "IncomingRequest": {
-        const t = agent.threads.get(kind.ownerThreadId);
-        if (!t) return false;
-        if (
-          t.status.tag === "Suspended" &&
-          t.status.reason.tag === "Handle" &&
-          t.status.reason.phase.tag === "RunningBody"
-        ) {
-          return !isHeldByHandler(agent, kind.ownerThreadId);
-        }
-        return false;
-      }
-      case "Reply":
-      case "ChildAgentCompleted":
-        return (
-          agent.threads.has(kind.threadId) &&
-          !isHeldByHandler(agent, kind.threadId)
-        );
-      case "SpawnChildAgent":
-      case "AgentCompleted":
-      case "TerminateAgent":
-        return true;
-    }
-  }
-
-  // =========================================================================
-  // Event dispatch
-  // =========================================================================
-
-  private applyEvent(event: Event): void {
-    const newEvents: Event[] = [];
-    const newMessages: OutgoingMessage[] = [];
-    const agentId = event.agentId;
-
-    switch (event.kind.tag) {
-      case "Execute": {
-        const agent = this.agents.get(agentId);
-        if (agent)
-          executeThread(agent, event.kind.threadId, newEvents, newMessages, this.execCb);
-        break;
-      }
-
-      case "ThreadCompleted": {
-        const { parentId, childId, childKind, signal } = event.kind;
-        const agent = this.agents.get(agentId);
-        if (agent)
-          this.dispatchSignal(agent, parentId, childId, childKind, signal, newEvents, newMessages);
-        break;
-      }
-
-      case "Terminate": {
-        const agent = this.agents.get(agentId);
-        if (agent) {
-          const tid = event.kind.threadId;
-          for (const [id, t] of agent.threads) {
-            if (t.parent === tid) {
-              newEvents.push({ agentId, kind: { tag: "Terminate", threadId: id } });
-            }
-          }
-          const t = agent.threads.get(tid);
-          if (t?.status.tag === "Suspended" && t.status.reason.tag === "Call") {
-            agent.children.delete(t.status.reason.childAgentId);
-          }
-          agent.threads.delete(tid);
-        }
-        break;
-      }
-
-      case "IncomingRequest": {
-        const { ownerThreadId, request, handlerDefTid } = event.kind;
-        const agent = this.agents.get(agentId);
-        if (agent)
-          dispatchRequest(agent, ownerThreadId, handlerDefTid, request, newEvents);
-        break;
-      }
-
-      case "Reply": {
-        const agent = this.agents.get(agentId);
-        if (agent) {
-          const t = agent.threads.get(event.kind.threadId);
-          if (t?.status.tag === "Suspended" && t.status.reason.tag === "Request") {
-            setVar(agent, t.status.reason.dst, event.kind.value);
-            resumeThread(agent, event.kind.threadId, newEvents);
-          }
-        }
-        break;
-      }
-
-      case "SpawnChildAgent": {
-        const { childAgentId, agentDefId, args } = event.kind;
-        const parentAgent = this.agents.get(agentId);
-        if (!parentAgent) break;
-
-        const module = parentAgent.module;
-        const agentDef = module.agents.find((a) => a.id === agentDefId);
-        if (!agentDef) break;
-
-        const entryTid = agentDef.entry;
-        const child = this.createAgent(
-          childAgentId, agentDefId, entryTid, agentId, this.selfBaseUrl,
-          new Set(parentAgent.parentAvailableRequests), module
-        );
-
-        this.setNamedArgs(child, module, entryTid, agentDef.paramNames, args);
-
-        this.agents.set(childAgentId, child);
-        newEvents.push({
-          agentId: childAgentId,
-          kind: { tag: "Execute", threadId: entryTid },
-        });
-        break;
-      }
-
-      case "AgentCompleted": {
-        const agent = this.agents.get(agentId);
-        if (!agent) break;
-
-        const result = agent.status.tag === "Completed" ? agent.status.value : null;
-
-        // Toplevel agent completed — cache result, fire callback, remove from memory
-        if (this.toplevelAgents.has(agentId)) {
-          if (agent.status.tag === "Completed") {
-            this.toplevelResults.set(agentId, { status: "completed", result });
-            this.onAgentCompleted?.(agentId, result);
-          } else {
-            this.toplevelResults.set(agentId, { status: "error" });
-            this.onAgentError?.(agentId);
-          }
-          this.toplevelAgents.delete(agentId);
-          this.agents.delete(agentId);
-          break;
-        }
-
-        const parentAgent = this.agents.get(agent.parentAgentId);
-
-        if (parentAgent && parentAgent.children.has(agentId)) {
-          const spawningTid = parentAgent.children.get(agentId)!;
-          newEvents.push({
-            agentId: agent.parentAgentId,
-            kind: {
-              tag: "ChildAgentCompleted",
-              threadId: spawningTid,
-              childAgentId: agentId,
-              result,
-            },
-          });
-          this.agents.delete(agentId);
-        } else if (parentAgent && !parentAgent.children.has(agentId)) {
-          newMessages.push({
-            toUrl: agent.parentAgentWhere,
-            kind: {
-              type: "Return",
-              body: {
-                result: result as JsonValue,
-                from_agent_id: agentId,
-                from_agent_where: this.selfBaseUrl,
-                agent_id: agent.parentAgentId,
-              },
-            },
-          });
-          this.agents.delete(agentId);
-        }
-        break;
-      }
-
-      case "ChildAgentCompleted": {
-        const agent = this.agents.get(agentId);
-        if (!agent) break;
-        const t = agent.threads.get(event.kind.threadId);
-        if (t?.status.tag === "Suspended" && t.status.reason.tag === "Call") {
-          setVar(agent, t.status.reason.dst, event.kind.result);
-          agent.children.delete(event.kind.childAgentId);
-          resumeThread(agent, event.kind.threadId, newEvents);
-        }
-        break;
-      }
-
-      case "TerminateAgent": {
-        const { agentId: targetAgentId, fromAgentId, fromAgentWhere } = event.kind;
-        const agent = this.agents.get(targetAgentId);
-        if (!agent) break;
-
-        for (const [childId] of agent.children) {
-          const child = this.agents.get(childId);
-          if (child) {
-            newEvents.push({
-              agentId: childId,
-              kind: {
-                tag: "TerminateAgent",
-                agentId: childId,
-                fromAgentId: targetAgentId,
-                fromAgentWhere: this.selfBaseUrl,
-              },
-            });
-          }
-        }
-
-        agent.status = { tag: "Error" };
-        agent.threads.clear();
-
-        // Toplevel agent terminated — cache result, fire callback
-        if (this.toplevelAgents.has(targetAgentId)) {
-          this.toplevelResults.set(targetAgentId, { status: "stopped" });
-          this.onAgentError?.(targetAgentId);
-          this.toplevelAgents.delete(targetAgentId);
-        }
-
-        if (fromAgentWhere) {
-          newMessages.push({
-            toUrl: fromAgentWhere,
-            kind: {
-              type: "TerminateAck",
-              body: {
-                from_agent_id: targetAgentId,
-                from_agent_where: this.selfBaseUrl,
-                agent_id: fromAgentId,
-              },
-            },
-          });
-        }
-
-        this.agents.delete(targetAgentId);
-        break;
-      }
-    }
-
-    for (const e of newEvents) this.eventQueue.push(e);
-    this.outgoingMessages.push(...newMessages);
-  }
-
-  // =========================================================================
-  // Signal dispatch
-  // =========================================================================
-
-  private dispatchSignal(
-    agent: AgentState,
-    parentId: number,
-    childId: number,
-    childKind: string,
-    signal: Signal,
-    events: Event[],
-    messages: OutgoingMessage[]
-  ): void {
-    switch (childKind) {
-      case "Block":
-        processParBranchSignal(agent, parentId, childId, signal, events);
-        break;
-      case "HandlerTarget":
-        processHandleBodySignal(agent, parentId, signal, events);
-        break;
-      case "RequestHandler":
-        processHandlerSignal(agent, parentId, signal, events, messages);
-        break;
-      case "HandleThen":
-        processHandleThenSignal(agent, parentId, signal, events);
-        break;
-      case "ForBody":
-        processForBodySignal(agent, parentId, signal, events);
-        break;
-      case "ForThen":
-        processForThenSignal(agent, parentId, signal, events);
-        break;
-      case "FnBody":
-        break;
-    }
-  }
-
-  // =========================================================================
-  // Agent status
+  // Agent status & management
   // =========================================================================
 
   getAgentStatus(agentId: string): { status: string; result?: Value } | null {
     const agent = this.agents.get(agentId);
     if (agent) {
-      switch (agent.status.tag) {
-        case "Running": return { status: "running" };
-        case "Completed": return { status: "completed", result: agent.status.value };
-        case "Error": return { status: "error" };
-      }
+      if (agent.threads.size === 0) return { status: "completed" };
+      return { status: "running" };
     }
-    // Fallback to cached toplevel results
     return this.toplevelResults.get(agentId) ?? null;
   }
 
-  // =========================================================================
-  // Remote child registration
-  // =========================================================================
-
-  registerRemoteChild(
-    parentAgentId: string,
-    provisionalId: string,
-    actualId: string,
-    _actualWhere: string
-  ): void {
-    const agent = this.agents.get(parentAgentId);
+  async stopAgent(agentId: string): Promise<void> {
+    const agent = this.agents.get(agentId) ?? await this.loadAgentFromDb(agentId);
     if (!agent) return;
 
-    const spawningTid = agent.children.get(provisionalId);
-    if (spawningTid === undefined) return;
+    const actions: OutgoingAction[] = [];
+    fireEvent(this.ctx, agent, agent.rootThreadId, { tag: "cancel" }, actions);
+    this.processActions(actions);
 
-    agent.children.delete(provisionalId);
-    agent.children.set(actualId, spawningTid);
+    // Clean up
+    this.toplevelAgents.delete(agentId);
+    this.agents.delete(agentId);
+    this.parentMap.delete(agentId);
+    this.deletedAgents.add(agentId);
 
-    const t = agent.threads.get(spawningTid);
-    if (t?.status.tag === "Suspended" && t.status.reason.tag === "Call") {
-      t.status.reason.childAgentId = actualId;
+    if (this.db) {
+      await this.db.updateAgentStatus(agentId, "stopped", null);
     }
+  }
+
+  hasAgent(agentId: string): boolean {
+    return this.agents.has(agentId);
+  }
+
+  // =========================================================================
+  // Module info (for HTTP API)
+  // =========================================================================
+
+  getModuleAgents(): { id: number; name: string }[] {
+    return this.module?.agents.map((a) => ({ id: a.id, name: a.name })) ?? [];
+  }
+
+  getModuleRequests(): { id: number; name: string }[] {
+    return this.module?.requests.map((r) => ({ id: r.id, name: r.name })) ?? [];
+  }
+
+  getAgentDefId(name: string): number | undefined {
+    return this.agentNameMap.get(name);
+  }
+
+  getEndpoint(): string {
+    return this.selfEndpoint;
   }
 
   // =========================================================================
@@ -558,252 +873,55 @@ export class Runtime implements KatariProtocol {
   // =========================================================================
 
   drainMessages(): OutgoingMessage[] {
-    const msgs = [...this.outgoingMessages];
-    this.outgoingMessages = [];
+    const msgs = [...this.pendingMessages];
+    this.pendingMessages = [];
     return msgs;
   }
 
   // =========================================================================
-  // KatariProtocol implementation
+  // Helpers
   // =========================================================================
 
-  listRequests(_moduleName?: string): RequestInfo[] {
-    if (!this.module) return [];
-    return this.module.requests
-      .filter((r) => !r.from)
-      .map((r) => {
-        const s = this.schemas.get(r.name) as Record<string, JsonValue> | undefined;
-        return {
-          request_id: String(r.id),
-          request_where: this.selfBaseUrl,
-          name: r.name,
-          description: (s?.description as string) ?? "",
-          arg_type: s?.arg_type ?? null,
-          return_type: s?.return_type ?? null,
-        };
-      });
+  private markDirty(agentId: string): void {
+    this.dirtyAgents.add(agentId);
+    this.deletedAgents.delete(agentId);
   }
 
-  listAgentDefs(_moduleName?: string): AgentDefInfo[] {
-    if (!this.module) return [];
-    return this.module.agents.map((a) => {
-      const s = this.schemas.get(a.name) as Record<string, JsonValue> | undefined;
-      const effectNames = (s?.with_effects as string[] | undefined) ?? [];
-      const effects: EffectRef[] = effectNames
-        .map((name) => {
-          const req = this.module!.requests.find((r) => r.name === name);
-          if (!req) return null;
-          return { request_id: String(req.id), request_where: this.selfBaseUrl };
-        })
-        .filter((e): e is EffectRef => e !== null);
-      return {
-        agent_def_id: String(a.id),
-        agent_def_where: this.selfBaseUrl,
-        name: a.name,
-        description: (s?.description as string) ?? "",
-        arg_type: s?.arg_type ?? null,
-        return_type: s?.return_type ?? null,
-        with_effects: effects,
-      };
-    });
+  private async resolveRef(kind: "delegation" | "escalation", refId: string): Promise<{ agentId: string; threadId: number } | null> {
+    const map = kind === "delegation" ? this.delegationMap : this.escalationMap;
+    const entry = map.get(refId);
+    if (entry) return entry;
+
+    // Fallback to DB
+    if (this.db) {
+      const row = await this.db.loadRef(refId);
+      if (row && row.kind === kind) return { agentId: row.agentId, threadId: row.threadId };
+    }
+    return null;
   }
 
-  listAgents(): AgentSummary[] {
-    return Array.from(this.agents.entries()).map(([id, a]) => ({
-      agent_id: id,
-      agent_where: a.selfWhere,
-      agent_def_id: String(a.agentDefId),
-      args: {},
-    }));
+  private findRequestDefByCapability(_capability: Capability): number | null {
+    // TODO: proper template-to-requestDef mapping once compiler provides template info
+    if (this.module?.requests.length) {
+      return this.module.requests[0]!.id;
+    }
+    return null;
   }
 
-  getAgent(agentId: string): AgentDetail | null {
-    const agent = this.agents.get(agentId);
-    if (!agent) return null;
+  private resolveAgentRef(agentName: string): Value {
+    const numId = this.agentNameMap.get(agentName);
+    if (numId === undefined) return null;
 
-    const childAgents: ChildAgentRef[] = Array.from(agent.children.keys()).map(
-      (cid) => ({
-        agent_id: cid,
-        agent_where: this.agents.get(cid)?.selfWhere ?? "",
-      })
-    );
+    const extRef = this.externalAgents.get(numId);
+    if (!extRef) return null;
 
+    const schema = this.schemas.get(agentName) as Record<string, JsonValue> | undefined;
     return {
-      agent_id: agentId,
-      agent_where: agent.selfWhere,
-      agent_def_id: String(agent.agentDefId),
-      args: {},
-      parent_agent_id: agent.parentAgentId,
-      parent_agent_where: agent.parentAgentWhere,
-      with_effects: [],
-      child_agents: childAgents,
+      url: extRef.agent_def_where,
+      agent_def_id: extRef.agent_def_id,
+      name: agentName,
+      description: (schema?.description as string) ?? "",
+      arg_type: schema?.arg_type ?? null,
     };
-  }
-
-  spawnAgent(
-    req: SpawnAgentRequest
-  ): { response: SpawnAgentResponse; messages: OutgoingMessage[] } | string {
-    if (!this.module) return "no module loaded";
-
-    const agentDefId = parseInt(req.agent_def_id, 10);
-    if (isNaN(agentDefId)) return `invalid agent_def_id: ${req.agent_def_id}`;
-
-    const agentDef = this.module.agents.find((a) => a.id === agentDefId);
-    if (!agentDef) return `agent def ${req.agent_def_id} not found`;
-
-    const entryTid = agentDef.entry;
-    const agentId = `agent-${uuidv4()}`;
-
-    const withEffects = new Set(
-      (req.with_effects ?? [])
-        .map((eff) => {
-          const asNum = parseInt(eff.request_id, 10);
-          if (!isNaN(asNum)) return asNum;
-          const key = `${eff.request_id}|${eff.request_where}`;
-          return this.externalRequestMap.get(key);
-        })
-        .filter((id): id is number => id !== undefined)
-    );
-
-    const agent = this.createAgent(
-      agentId, agentDefId, entryTid, req.parent_agent_id,
-      req.parent_agent_where, withEffects, this.module
-    );
-
-    this.setNamedArgs(agent, this.module, entryTid, agentDef.paramNames, req.args as unknown as Record<string, Value>);
-
-    this.agents.set(agentId, agent);
-    this.eventQueue.push({ agentId, kind: { tag: "Execute", threadId: entryTid } });
-    this.runEventLoop();
-
-    return {
-      response: { agent_id: agentId, agent_where: this.selfBaseUrl },
-      messages: this.drainMessages(),
-    };
-  }
-
-  deliverRequest(req: AgentRequestBody): OutgoingMessage[] | string {
-    let agentId: string | null = null;
-    let sourceThreadId: number | null = null;
-
-    for (const [aid, a] of this.agents) {
-      const tid = a.children.get(req.from_agent_id);
-      if (tid !== undefined) {
-        agentId = aid;
-        sourceThreadId = tid;
-        break;
-      }
-    }
-
-    if (!agentId || sourceThreadId === null) {
-      return `child agent ${req.from_agent_id} not found`;
-    }
-
-    const agent = this.agents.get(agentId)!;
-
-    let reqDefId = parseInt(req.request_def_id, 10);
-    if (isNaN(reqDefId)) {
-      // External servers send local request name + their URL — resolve via externalRequestMap
-      const key = `${req.request_def_id}|${req.request_def_where}`;
-      const mapped = this.externalRequestMap.get(key);
-      if (mapped === undefined) {
-        return `unknown external request: ${req.request_def_id} from ${req.request_def_where}`;
-      }
-      reqDefId = mapped;
-    }
-
-    const pending: PendingRequest = {
-      requestId: req.request_id,
-      reqDefId,
-      args: req.args as unknown as Record<string, Value>,
-      fromAgentId: req.from_agent_id,
-      fromAgentWhere: req.from_agent_where,
-    };
-
-    const route = routeRequestToHandle(agent, sourceThreadId, reqDefId);
-    if (route) {
-      this.eventQueue.push({
-        agentId,
-        kind: {
-          tag: "IncomingRequest",
-          ownerThreadId: route[0],
-          request: pending,
-          handlerDefTid: route[1],
-        },
-      });
-    } else {
-      console.warn(`no handle scope for external request ${req.request_def_id}`);
-    }
-
-    this.runEventLoop();
-    return this.drainMessages();
-  }
-
-  deliverReply(req: AgentReplyBody): OutgoingMessage[] | string {
-    const agent = this.agents.get(req.agent_id);
-    if (!agent) return `agent ${req.agent_id} not found`;
-
-    const threadId = findRequestThread(agent, req.request_id);
-    if (threadId === null) return `request ${req.request_id} not found`;
-
-    this.eventQueue.push({
-      agentId: req.agent_id,
-      kind: {
-        tag: "Reply",
-        threadId,
-        requestId: req.request_id,
-        value: req.result as Value,
-      },
-    });
-
-    this.runEventLoop();
-    return this.drainMessages();
-  }
-
-  deliverReturn(req: AgentReturnBody): OutgoingMessage[] | string {
-    const agent = this.agents.get(req.agent_id);
-    if (!agent) return `agent ${req.agent_id} not found`;
-
-    const spawningTid = agent.children.get(req.from_agent_id);
-    if (spawningTid === undefined) return `child ${req.from_agent_id} not found`;
-
-    this.eventQueue.push({
-      agentId: req.agent_id,
-      kind: {
-        tag: "ChildAgentCompleted",
-        threadId: spawningTid,
-        childAgentId: req.from_agent_id,
-        result: req.result as Value,
-      },
-    });
-
-    agent.children.delete(req.from_agent_id);
-    this.runEventLoop();
-    return this.drainMessages();
-  }
-
-  terminateAgent(req: TerminateBody): OutgoingMessage[] | string {
-    const agent = this.agents.get(req.agent_id);
-    if (!agent) return `agent ${req.agent_id} not found`;
-
-    this.eventQueue.push({
-      agentId: req.agent_id,
-      kind: {
-        tag: "TerminateAgent",
-        agentId: req.agent_id,
-        fromAgentId: req.from_agent_id,
-        fromAgentWhere: req.from_agent_where,
-      },
-    });
-
-    this.runEventLoop();
-    return this.drainMessages();
-  }
-
-  deliverTerminateAck(req: TerminateAckBody): OutgoingMessage[] | string {
-    const agent = this.agents.get(req.agent_id);
-    if (!agent) return `agent ${req.agent_id} not found`;
-    agent.children.delete(req.from_agent_id);
-    return [];
   }
 }

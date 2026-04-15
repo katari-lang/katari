@@ -62,13 +62,16 @@ function formatMessage(msg: DiscordMessage): JsonValue {
 // ===========================================================================
 
 const watchChannel: AgentHandlerFn = async (args, ctx) => {
-  const channelId = args.channel_id as string;
+  const channelId = (args as Record<string, JsonValue>).channel_id as string;
   await readyPromise;
 
-  // Long-running: listen for messages and fire on_message requests
+  // Long-running: listen for messages and escalate to capability
   const listener = (msg: DiscordMessage) => {
     if (msg.channelId === channelId) {
-      ctx.sendRequest("on_message", { msg: formatMessage(msg) });
+      // Escalate to the first capability (on_message handler in parent)
+      if (ctx.capabilityRefs.length > 0) {
+        ctx.escalate(ctx.capabilityRefs[0]!, { msg: formatMessage(msg) });
+      }
     }
   };
 
@@ -79,8 +82,9 @@ const watchChannel: AgentHandlerFn = async (args, ctx) => {
 };
 
 const sendMessage: AgentHandlerFn = async (args) => {
-  const channelId = args.channel_id as string;
-  const content = args.content as string;
+  const a = args as Record<string, JsonValue>;
+  const channelId = a.channel_id as string;
+  const content = a.content as string;
 
   const channel = await getTextChannel(channelId);
   const msg = await channel.send(content);
@@ -88,9 +92,10 @@ const sendMessage: AgentHandlerFn = async (args) => {
 };
 
 const replyTo: AgentHandlerFn = async (args) => {
-  const channelId = args.channel_id as string;
-  const messageId = args.message_id as string;
-  const content = args.content as string;
+  const a = args as Record<string, JsonValue>;
+  const channelId = a.channel_id as string;
+  const messageId = a.message_id as string;
+  const content = a.content as string;
 
   const channel = await getTextChannel(channelId);
   const targetMsg = await channel.messages.fetch(messageId);
@@ -99,8 +104,9 @@ const replyTo: AgentHandlerFn = async (args) => {
 };
 
 const fetchMessages: AgentHandlerFn = async (args) => {
-  const channelId = args.channel_id as string;
-  const limit = args.limit as number;
+  const a = args as Record<string, JsonValue>;
+  const channelId = a.channel_id as string;
+  const limit = a.limit as number;
 
   const channel = await getTextChannel(channelId);
   const messages = await channel.messages.fetch({ limit });
@@ -113,15 +119,17 @@ const fetchMessages: AgentHandlerFn = async (args) => {
 // ===========================================================================
 
 const port = parseInt(process.env.PORT ?? "8001", 10);
-const selfBaseUrl = process.env.KATARI_BASE_URL ?? `http://localhost:${port}/katari`;
+const endpoint = process.env.KATARI_BASE_URL ?? `http://localhost:${port}`;
+const databaseUrl = process.env.DATABASE_URL;
 
 startServer({
   port,
-  selfBaseUrl,
-  handlers: {
-    watch_channel: watchChannel,
-    send_message: sendMessage,
-    reply_to: replyTo,
-    fetch_messages: fetchMessages,
+  endpoint,
+  databaseUrl,
+  agentDefs: {
+    watch_channel: { handler: watchChannel, description: "Watch a Discord channel for new messages" },
+    send_message: { handler: sendMessage, description: "Send a message to a Discord channel" },
+    reply_to: { handler: replyTo, description: "Reply to a specific Discord message" },
+    fetch_messages: { handler: fetchMessages, description: "Fetch recent messages from a Discord channel" },
   },
 });

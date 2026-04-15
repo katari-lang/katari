@@ -1,5 +1,6 @@
 {
   "private": true,
+  "packageManager": "pnpm@9.15.9",
   "scripts": {
     "build": "npm run build:hs && npm run build:ts",
     "build:hs": "stack build",

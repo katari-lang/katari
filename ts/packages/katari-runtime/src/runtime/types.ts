@@ -1,14 +1,11 @@
 import type { IRModule, IRThread, IRHandleDef, IRForDef, ConstVal, ThreadKind } from "../ir.js";
 import type { Value } from "../value.js";
+import type { OutgoingMessage, CapabilityRef, EscalationRef } from "katari-protocol";
+import type { RuntimeLogger } from "../logger.js";
 
 // ===========================================================================
-// Agent / Thread State
+// Agent State
 // ===========================================================================
-
-export type AgentStatus =
-  | { tag: "Running" }
-  | { tag: "Completed"; value: Value }
-  | { tag: "Error" };
 
 export interface AgentState {
   agentId: string;
@@ -16,136 +13,229 @@ export interface AgentState {
   module: IRModule;
   vars: Map<number, Value>;
   threads: Map<number, ThreadState>;
-  rootThread: number;
-  parentAgentId: string;
-  parentAgentWhere: string;
-  children: Map<string, number>; // childAgentId → spawning thread
-  parentAvailableRequests: Set<number>;
-  selfWhere: string;
-  status: AgentStatus;
+  rootThreadId: number;
+  // Protocol-level info
+  delegationEndpoint: string | null; // parent's endpoint (for delegate_ack)
+  delegationId: string | null;       // parent's delegation id
+  selfEndpoint: string;
+  capabilityRefs: CapabilityRef[];   // capabilities available to this agent's children
 }
+
+// ===========================================================================
+// Thread State
+// ===========================================================================
 
 export interface ThreadState {
   threadId: number;
-  kind: ThreadKind;
+  blockId: number;         // IR block (thread def) being executed
   pc: number;
-  status: ThreadStatus;
   parent: number | null;
+  status: ThreadStatus;
 }
+
+// ===========================================================================
+// Thread Status
+// ===========================================================================
 
 export type ThreadStatus =
-  | { tag: "Running" }
-  | { tag: "Suspended"; reason: SuspendReason };
+  | CallingStatus
+  | RequestingStatus
+  | CancelingStatus;
 
-export type SuspendReason =
-  | {
-      tag: "Handle";
-      handleDefId: number;
-      dst: number;
-      phase: HandlePhase;
-      stateVars: Map<number, Value>;
-    }
-  | {
-      tag: "For";
-      forDefId: number;
-      currentIndex: number;
-      minLength: number;
-      dst: number;
-    }
-  | {
-      tag: "Par";
-      branchThreads: number[];
-      results: (Value | undefined)[];
-      dst: number;
-    }
-  | { tag: "Call"; childAgentId: string; dst: number }
-  | { tag: "Request"; requestId: string; dst: number };
-
-export type HandlePhase =
-  | { tag: "RunningBody"; bodyThread: number }
-  | {
-      tag: "RunningHandler";
-      bodyThread: number;
-      handlerThread: number;
-      requester: RequestOrigin;
-    }
-  | { tag: "RunningThen"; thenThread: number };
-
-export interface RequestOrigin {
-  fromAgentId: string;
-  fromAgentWhere: string;
-  requestId: string;
+/** Thread is actively executing or waiting for a child */
+export interface CallingStatus {
+  tag: "CALLING";
+  kind: CallingKind;
 }
 
-export interface PendingRequest {
-  requestId: string;
-  reqDefId: number;
-  args: Record<string, Value>;
-  fromAgentId: string;
-  fromAgentWhere: string;
+/** Thread is waiting for a request (escalation) response */
+export interface RequestingStatus {
+  tag: "REQUESTING";
+  /** Which thread the request came from (null = this thread issued IRequest) */
+  fromThread: number | null;
+  /** The calling kind before entering REQUESTING state */
+  previousState: CallingKind;
+  /** Queued events that arrived while in REQUESTING state */
+  eventQueue: RuntimeEvent[];
+  /** Escalation tracking */
+  escalationRef: EscalationRef | null;
+}
+
+/** Thread is being canceled — waiting for children to finish canceling */
+export interface CancelingStatus {
+  tag: "CANCELING";
+  /** Event to fire after cancellation completes */
+  nextAction: RuntimeEvent | null;
+  /** Number of children we're waiting for canceled events from */
+  pendingCancelCount: number;
 }
 
 // ===========================================================================
-// Signals
+// Calling Kind — what kind of child call this thread is doing
 // ===========================================================================
 
-export type Signal =
-  | { tag: "Normal"; value: Value }
-  | { tag: "FnReturn"; value: Value }
-  | { tag: "HandleBreak"; value: Value }
-  | { tag: "Continue"; value: Value; mutations: [number, number][] }
-  | { tag: "ForBreak"; value: Value }
-  | { tag: "ForContinue"; mutations: [number, number][] }
-  | { tag: "Cancelled" };
+export type CallingKind =
+  | BlockCallingKind
+  | AgentCallingKind
+  | HandleTargetCallingKind
+  | HandleBodyCallingKind
+  | HandleThenCallingKind
+  | ForBodyCallingKind
+  | ForThenCallingKind
+  | ParallelCallingKind
+  | DelegatingCallingKind;
 
-// ===========================================================================
-// Events
-// ===========================================================================
-
-export interface Event {
-  agentId: string;
-  kind: EventKind;
+export interface BlockCallingKind {
+  tag: "BLOCK";
+  childThreadId: number;
+  dst: number;
 }
 
-export type EventKind =
-  | { tag: "Execute"; threadId: number }
-  | {
-      tag: "ThreadCompleted";
-      parentId: number;
-      childId: number;
-      childKind: ThreadKind;
-      signal: Signal;
-    }
-  | { tag: "Terminate"; threadId: number }
-  | {
-      tag: "IncomingRequest";
-      ownerThreadId: number;
-      request: PendingRequest;
-      handlerDefTid: number;
-    }
-  | { tag: "Reply"; threadId: number; requestId: string; value: Value }
-  | {
-      tag: "SpawnChildAgent";
-      childAgentId: string;
-      agentDefId: number;
-      args: Record<string, Value>;
-    }
-  | { tag: "AgentCompleted" }
-  | {
-      tag: "ChildAgentCompleted";
-      threadId: number;
-      childAgentId: string;
-      result: Value;
-    }
-  | {
-      tag: "TerminateAgent";
-      agentId: string;
-      fromAgentId: string;
-      fromAgentWhere: string;
-    };
+export interface AgentCallingKind {
+  tag: "AGENT";
+  childAgentId: string;
+  dst: number;
+}
+
+export interface HandleTargetCallingKind {
+  tag: "HANDLE_TARGET";
+  handleDefId: number;
+  childThreadId: number;
+  dst: number;
+  stateVars: Map<number, Value>;
+}
+
+export interface HandleBodyCallingKind {
+  tag: "HANDLE_BODY";
+  handleDefId: number;
+  targetThreadId: number;
+  handlerThreadId: number;
+  dst: number;
+  stateVars: Map<number, Value>;
+  /** Who issued the request that triggered this handler */
+  requesterInfo: RequesterInfo;
+}
+
+export interface HandleThenCallingKind {
+  tag: "HANDLE_THEN";
+  handleDefId: number;
+  thenThreadId: number;
+  dst: number;
+  stateVars: Map<number, Value>;
+  /** Event to fire after then clause completes */
+  nextAction: RuntimeEvent;
+}
+
+export interface ForBodyCallingKind {
+  tag: "FOR_BODY";
+  forDefId: number;
+  childThreadId: number;
+  currentIndex: number;
+  minLength: number;
+  dst: number;
+}
+
+export interface ForThenCallingKind {
+  tag: "FOR_THEN";
+  forDefId: number;
+  thenThreadId: number;
+  dst: number;
+}
+
+export interface ParallelCallingKind {
+  tag: "PARALLEL";
+  branchThreadIds: number[];
+  results: (Value | undefined)[];
+  dst: number;
+}
+
+export interface DelegatingCallingKind {
+  tag: "DELEGATING";
+  delegationId: string;
+  dst: number;
+}
 
 // ===========================================================================
-// Helpers
+// Requester Info — tracks who issued the escalation being handled
+// ===========================================================================
+
+export interface RequesterInfo {
+  /** The escalation ref (for sending escalate_ack) */
+  escalationRef: EscalationRef | null;
+  /** The escalation endpoint (for sending escalate_ack) */
+  escalationEndpoint: string | null;
+  /** Internal thread that issued IRequest (for internal routing) */
+  internalThreadId: number | null;
+  /** Internal request ID (for matching) */
+  internalRequestId: string | null;
+}
+
+// ===========================================================================
+// Runtime Events — internal events between parent/child threads
+// ===========================================================================
+
+export type RuntimeEvent =
+  | { tag: "call"; blockId: number }
+  | { tag: "cancel" }
+  | { tag: "completed"; value: Value }
+  | { tag: "returned"; value: Value }
+  | { tag: "continue"; value: Value }
+  | { tag: "continued"; value: Value; mutations: [number, number][] }
+  | { tag: "broken"; value: Value }
+  | { tag: "for_continued"; mutations: [number, number][] }
+  | { tag: "for_broken"; value: Value }
+  | { tag: "requested"; reqDefId: number; args: Record<string, Value>; requestId: string; fromThreadId: number | null; escalationRef: EscalationRef | null; escalationEndpoint: string | null }
+  | { tag: "canceled" };
+
+// ===========================================================================
+// Outgoing Actions — result of synchronous event processing
+// ===========================================================================
+
+export type OutgoingAction =
+  | OutgoingMessage
+  | { tag: "AgentCompleted"; agentId: string; value: Value }
+  | { tag: "AgentError"; agentId: string }
+  | { tag: "SpawnAgent"; parentAgentId: string; parentThreadId: number; agentDefId: number; args: Record<string, Value>; dst: number }
+  | { tag: "TerminateAgent"; childAgentId: string };
+
+// ===========================================================================
+// Dispatch Context — injected by Runtime to handle Call/Request resolution
+// ===========================================================================
+
+/**
+ * Handles ICall instructions: resolves primitives, internal agents, external
+ * delegation. Returns true if the call was handled synchronously (primitive),
+ * false if the thread is now suspended.
+ */
+export type CallHandler = (
+  agent: AgentState,
+  threadId: number,
+  dst: number,
+  agentDefId: number,
+  args: Record<string, Value>,
+  actions: OutgoingAction[]
+) => boolean;
+
+/**
+ * Handles requests that reach the root thread (no parent).
+ * Typically escalates via the protocol.
+ */
+export type RootRequestHandler = (
+  agent: AgentState,
+  threadId: number,
+  event: RuntimeEvent & { tag: "requested" },
+  actions: OutgoingAction[]
+) => void;
+
+/** Context for dispatch operations — provided by Runtime */
+export interface DispatchContext {
+  callHandler: CallHandler;
+  rootRequestHandler: RootRequestHandler;
+  logger: RuntimeLogger;
+}
+
+// ===========================================================================
+// Helper functions
 // ===========================================================================
 
 export function getVar(agent: AgentState, v: number): Value {
@@ -154,15 +244,6 @@ export function getVar(agent: AgentState, v: number): Value {
 
 export function setVar(agent: AgentState, v: number, val: Value): void {
   agent.vars.set(v, val);
-}
-
-export function isRunning(t: ThreadState): boolean {
-  return t.status.tag === "Running";
-}
-
-export function constAsString(consts: ConstVal[], cid: number): string {
-  const c = consts[cid];
-  return c?.tag === "Str" ? c.value : "";
 }
 
 export function findThread(module: IRModule, tid: number): IRThread | undefined {
@@ -177,143 +258,52 @@ export function findFor(module: IRModule, fid: number): IRForDef | undefined {
   return module.fors.find((f) => f.id === fid);
 }
 
-// ===========================================================================
-// Thread lifecycle
-// ===========================================================================
-
-export function finishThread(
-  agent: AgentState,
-  threadId: number,
-  signal: Signal,
-  events: Event[]
-): void {
-  if (threadId === agent.rootThread) {
-    if (signal.tag === "Normal" || signal.tag === "FnReturn") {
-      agent.status = { tag: "Completed", value: signal.value };
-    } else {
-      agent.status = { tag: "Error" };
-    }
-    agent.threads.delete(threadId);
-    events.push({ agentId: agent.agentId, kind: { tag: "AgentCompleted" } });
-  } else {
-    const t = agent.threads.get(threadId);
-    if (!t) return;
-    const kind = t.kind;
-    const parent = t.parent;
-    agent.threads.delete(threadId);
-    if (parent !== null) {
-      events.push({
-        agentId: agent.agentId,
-        kind: {
-          tag: "ThreadCompleted",
-          parentId: parent,
-          childId: threadId,
-          childKind: kind,
-          signal,
-        },
-      });
-    }
-  }
+export function constAsString(consts: ConstVal[], cid: number): string {
+  const c = consts[cid];
+  return c?.tag === "Str" ? c.value : "";
 }
 
-export function resumeThread(
-  agent: AgentState,
-  threadId: number,
-  events: Event[]
-): void {
-  const t = agent.threads.get(threadId);
-  if (t) t.status = { tag: "Running" };
-  events.push({
-    agentId: agent.agentId,
-    kind: { tag: "Execute", threadId },
-  });
-}
+// ===========================================================================
+// Thread lifecycle helpers
+// ===========================================================================
 
-export function spawnChildThread(
+/** Create a new child thread and return it */
+export function createThread(
   agent: AgentState,
-  tid: number,
-  kind: ThreadKind,
-  parent: number,
-  events: Event[]
-): void {
-  agent.threads.set(tid, {
-    threadId: tid,
-    kind,
+  blockId: number,
+  parent: number | null
+): ThreadState {
+  const thread: ThreadState = {
+    threadId: blockId, // Thread ID = Block ID for now
+    blockId,
     pc: 0,
-    status: { tag: "Running" },
     parent,
-  });
-  events.push({
-    agentId: agent.agentId,
-    kind: { tag: "Execute", threadId: tid },
-  });
+    status: { tag: "CALLING", kind: { tag: "BLOCK", childThreadId: -1, dst: -1 } },
+  };
+  // Set initial status to a simple running state (caller will adjust)
+  agent.threads.set(blockId, thread);
+  return thread;
 }
 
-// ===========================================================================
-// Request routing utilities
-// ===========================================================================
-
-export function routeRequestToHandle(
-  agent: AgentState,
-  sourceThreadId: number,
-  reqDefId: number
-): [number, number] | null {
-  let current = sourceThreadId;
-  for (;;) {
-    const t = agent.threads.get(current);
-    if (!t || t.parent === null) return null;
-    const parentId = t.parent;
-    const parent = agent.threads.get(parentId);
-    if (
-      parent?.status.tag === "Suspended" &&
-      parent.status.reason.tag === "Handle" &&
-      parent.status.reason.phase.tag !== "RunningThen"
-    ) {
-      const hdef = findHandle(agent.module, parent.status.reason.handleDefId);
-      if (hdef) {
-        const match = hdef.reqCases.find(([rid]) => rid === reqDefId);
-        if (match) return [parentId, match[1]];
-      }
-    }
-    current = parentId;
-  }
+/** Remove a thread from the agent */
+export function deleteThread(agent: AgentState, threadId: number): void {
+  agent.threads.delete(threadId);
 }
 
-export function findRequestThread(
-  agent: AgentState,
-  requestId: string
-): number | null {
+/** Get all child thread IDs of a given thread */
+export function getChildThreadIds(agent: AgentState, parentId: number): number[] {
+  const children: number[] = [];
   for (const [id, t] of agent.threads) {
-    if (
-      t.status.tag === "Suspended" &&
-      t.status.reason.tag === "Request" &&
-      t.status.reason.requestId === requestId
-    ) {
-      return id;
-    }
+    if (t.parent === parentId) children.push(id);
   }
-  return null;
+  return children;
 }
 
-export function isHeldByHandler(
-  agent: AgentState,
-  threadId: number
-): boolean {
-  let current = threadId;
-  for (;;) {
-    const t = agent.threads.get(current);
-    if (!t || t.parent === null) return false;
-    const parentId = t.parent;
-    const parent = agent.threads.get(parentId);
-    if (
-      parent &&
-      parent.status.tag === "Suspended" &&
-      parent.status.reason.tag === "Handle" &&
-      parent.status.reason.phase.tag === "RunningHandler" &&
-      current === parent.status.reason.phase.bodyThread
-    ) {
-      return true;
-    }
-    current = parentId;
-  }
+// ===========================================================================
+// External agent routing
+// ===========================================================================
+
+export interface ExternalAgentRef {
+  agent_def_id: string;
+  agent_def_where: string;
 }

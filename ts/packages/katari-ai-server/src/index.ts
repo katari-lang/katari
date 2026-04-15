@@ -84,10 +84,11 @@ const createSession: AgentHandlerFn = async () => {
 };
 
 const askWithTools: AgentHandlerFn = async (args, ctx) => {
-  const sessionId = args.session_id as string;
-  const system = args.system as string;
-  const prompt = args.prompt as string;
-  const agentRefs = args.tools as unknown as AgentRef[];
+  const a = args as Record<string, JsonValue>;
+  const sessionId = a.session_id as string;
+  const system = a.system as string;
+  const prompt = a.prompt as string;
+  const agentRefs = a.tools as unknown as AgentRef[];
 
   let session = sessions.get(sessionId);
   if (!session) {
@@ -118,7 +119,7 @@ const askWithTools: AgentHandlerFn = async (args, ctx) => {
       return text as JsonValue;
     }
 
-    // Record model's tool call in history (preserve raw parts for thought_signature)
+    // Record model's tool call in history
     const modelMsg: ChatMessage = {
       role: "model",
       content: "",
@@ -158,7 +159,7 @@ async function executeToolCall(
   }
 
   try {
-    return await ctx.spawnAndWait(
+    return await ctx.delegateAndWait(
       ref.url,
       ref.agent_def_id,
       tc.arguments as Record<string, JsonValue>
@@ -173,14 +174,15 @@ async function executeToolCall(
 // ===========================================================================
 
 const port = parseInt(process.env.PORT ?? "8002", 10);
-const selfBaseUrl =
-  process.env.KATARI_BASE_URL ?? `http://localhost:${port}/katari`;
+const endpoint = process.env.KATARI_BASE_URL ?? `http://localhost:${port}`;
+const databaseUrl = process.env.DATABASE_URL;
 
 startServer({
   port,
-  selfBaseUrl,
-  handlers: {
-    create_session: createSession,
-    ask_with_tools: askWithTools,
+  endpoint,
+  databaseUrl,
+  agentDefs: {
+    create_session: { handler: createSession, description: "Create a new AI chat session" },
+    ask_with_tools: { handler: askWithTools, description: "Send a prompt with tool-use to the AI" },
   },
 });

@@ -1,147 +1,149 @@
 import type { JsonValue } from "./json.js";
 
 // ===========================================================================
-// GET /request
+// Ref — (endpoint, id) pair identifying a resource across servers
 // ===========================================================================
 
-export interface RequestInfo {
-  request_id: string;
-  request_where: string;
+export interface Ref {
+  id: string;
+  endpoint: string;
+}
+
+export type AgentDefRef = Ref;
+export type AgentRef = Ref;
+export type DelegationRef = Ref;
+export type TemplateRef = Ref;
+export type CapabilityRef = Ref;
+export type EscalationRef = Ref;
+
+// ===========================================================================
+// Resources
+// ===========================================================================
+
+export type AgentStatus = "RUNNING" | "TERMINATING";
+
+/** Agent Definition — immutable definition of an agent type */
+export interface AgentDefinition {
+  id: string;
+  endpoint: string;
   name: string;
-  description: string;
-  arg_type: JsonValue;
-  return_type: JsonValue;
+  description?: string;
+  input_schema: JsonValue;
+  output_schema: JsonValue;
+  template_refs?: TemplateRef[];
 }
 
-// ===========================================================================
-// GET /agent_def
-// ===========================================================================
-
-export interface EffectRef {
-  request_id: string;
-  request_where: string;
+/** Agent — a running instance of an AgentDefinition */
+export interface Agent {
+  id: string;
+  endpoint: string;
+  input: JsonValue;
+  definition_ref: AgentDefRef;
+  delegation_ref: DelegationRef | null;
+  status: AgentStatus;
 }
 
-export interface AgentDefInfo {
-  agent_def_id: string;
-  agent_def_where: string;
+/** Delegation — proof that a parent agent spawned a child. Managed by parent's server. */
+export interface Delegation {
+  id: string;
+  endpoint: string;
+  agent_def_ref: AgentDefRef;
+  input: JsonValue;
+  capability_refs: CapabilityRef[];
+}
+
+/** Template — effect definition (like algebraic effects). Describes an escalation shape. */
+export interface Template {
+  id: string;
+  endpoint: string;
   name: string;
-  description: string;
-  arg_type: JsonValue;
-  return_type: JsonValue;
-  with_effects: EffectRef[];
+  description?: string;
+  input_schema: JsonValue;
+  output_schema: JsonValue;
+}
+
+/** Capability — an agent's ability to handle escalations for a specific template */
+export interface Capability {
+  id: string;
+  endpoint: string;
+  template_ref: TemplateRef;
+  agent_ref: AgentRef;
+}
+
+/** Escalation — a child's request to a specific capability. Managed by child's server. */
+export interface Escalation {
+  id: string;
+  endpoint: string;
+  capability_ref: CapabilityRef;
+  input: JsonValue;
 }
 
 // ===========================================================================
-// GET /agent
+// POST /delegate
 // ===========================================================================
 
-export interface AgentSummary {
-  agent_id: string;
-  agent_where: string;
-  agent_def_id: string;
-  args: Record<string, JsonValue>;
+export interface DelegateRequest {
+  agent_def_ref: AgentDefRef;
+  input: JsonValue;
+  delegation_ref: DelegationRef | null;
+  capability_refs: CapabilityRef[];
+}
+
+export interface DelegateResponse {
+  agent_ref: AgentRef;
 }
 
 // ===========================================================================
-// GET /agent/:agent_id
+// POST /delegate_ack
 // ===========================================================================
 
-export interface AgentDetail {
-  agent_id: string;
-  agent_where: string;
-  agent_def_id: string;
-  args: Record<string, JsonValue>;
-  parent_agent_id: string;
-  parent_agent_where: string;
-  with_effects: EffectRef[];
-  child_agents: ChildAgentRef[];
-}
-
-export interface ChildAgentRef {
-  agent_id: string;
-  agent_where: string;
+export interface DelegateAckRequest {
+  delegation_ref: DelegationRef;
+  output: JsonValue;
 }
 
 // ===========================================================================
-// POST /agent (spawn)
+// POST /escalate
 // ===========================================================================
 
-export interface SpawnAgentRequest {
-  agent_def_id: string;
-  agent_def_where: string;
-  args: Record<string, JsonValue>;
-  parent_agent_id: string;
-  parent_agent_where: string;
-  with_effects?: EffectRef[];
-  call_stack?: CallStackEntry[];
-}
-
-export interface CallStackEntry {
-  agent_def_id: string;
-  agent_def_where: string;
-  agent_def_name: string;
-}
-
-export interface SpawnAgentResponse {
-  agent_id: string;
-  agent_where: string;
+export interface EscalateRequest {
+  escalation_ref: EscalationRef;
+  capability_ref: CapabilityRef;
+  input: JsonValue;
 }
 
 // ===========================================================================
-// POST /agent/request
+// POST /escalate_ack
 // ===========================================================================
 
-export interface AgentRequestBody {
-  request_id: string;
-  request_def_id: string;
-  request_def_where: string;
-  args: Record<string, JsonValue>;
-  from_agent_id: string;
-  from_agent_where: string;
+export interface EscalateAckRequest {
+  escalation_ref: EscalationRef;
+  output: JsonValue;
 }
 
 // ===========================================================================
-// POST /agent/reply
+// POST /terminate
 // ===========================================================================
 
-export interface AgentReplyBody {
-  request_id: string;
-  result: JsonValue;
-  from_agent_id: string;
-  from_agent_where: string;
-  agent_id: string;
+export interface TerminateRequest {
+  delegation_ref: DelegationRef;
 }
 
 // ===========================================================================
-// POST /agent/return
+// POST /terminate_ack
 // ===========================================================================
 
-export interface AgentReturnBody {
-  result: JsonValue;
-  from_agent_id: string;
-  from_agent_where: string;
-  agent_id: string;
+export interface TerminateAckRequest {
+  delegation_ref: DelegationRef;
 }
 
 // ===========================================================================
-// POST /agent/terminate
+// POST /throw
 // ===========================================================================
 
-export interface TerminateBody {
-  agent_id: string;
-  from_agent_id: string;
-  from_agent_where: string;
-}
-
-// ===========================================================================
-// POST /agent/terminate_ack
-// ===========================================================================
-
-export interface TerminateAckBody {
-  from_agent_id: string;
-  from_agent_where: string;
-  agent_id: string;
+export interface ThrowRequest {
+  delegation_ref: DelegationRef;
+  message: string;
 }
 
 // ===========================================================================
@@ -157,23 +159,19 @@ export interface ErrorResponse {
 }
 
 // ===========================================================================
-// Outgoing messages
+// Outgoing messages — actions that a server needs to send to other servers
 // ===========================================================================
 
 export interface OutgoingMessage {
-  toUrl: string;
+  toEndpoint: string;
   kind: OutgoingKind;
 }
 
 export type OutgoingKind =
-  | { type: "Reply"; body: AgentReplyBody }
-  | { type: "Request"; body: AgentRequestBody }
-  | { type: "Return"; body: AgentReturnBody }
-  | { type: "Terminate"; body: TerminateBody }
-  | { type: "TerminateAck"; body: TerminateAckBody }
-  | {
-      type: "Spawn";
-      body: SpawnAgentRequest;
-      parentAgentId: string;
-      provisionalChildId: string;
-    };
+  | { type: "Delegate"; body: DelegateRequest; delegationId: string }
+  | { type: "DelegateAck"; body: DelegateAckRequest }
+  | { type: "Escalate"; body: EscalateRequest }
+  | { type: "EscalateAck"; body: EscalateAckRequest }
+  | { type: "Terminate"; body: TerminateRequest }
+  | { type: "TerminateAck"; body: TerminateAckRequest }
+  | { type: "Throw"; body: ThrowRequest };

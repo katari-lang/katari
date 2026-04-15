@@ -10,6 +10,10 @@ dist-newstyle/
 # Rust / Cargo
 rust/target/
 
+# Node / TypeScript
+node_modules/
+dist/
+
 # Editor / OS
 .DS_Store
 .env

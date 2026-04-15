@@ -1,90 +1,93 @@
-import type { OutgoingMessage, SpawnAgentResponse } from "./types.js";
+import type { OutgoingMessage, DelegateResponse } from "./types.js";
+import type { KatariLogger } from "./logger.js";
 
-export interface SpawnResult {
-  parentAgentId: string;
-  provisionalChildId: string;
-  actualAgentId: string;
-  actualAgentWhere: string;
-}
+// ===========================================================================
+// Result types
+// ===========================================================================
 
-export interface SpawnFailure {
-  parentAgentId: string;
-  provisionalChildId: string;
-  error: string;
+export interface DelegateResult {
+  delegationId: string;
+  agentRef: { id: string; endpoint: string };
 }
 
 export interface SendResult {
-  spawns: SpawnResult[];
-  failures: SpawnFailure[];
+  delegateResults: DelegateResult[];
+  failures: SendFailure[];
 }
 
+export interface SendFailure {
+  message: OutgoingMessage;
+  error: string;
+}
+
+// ===========================================================================
+// Send outgoing messages
+// ===========================================================================
+
 export async function sendOutgoingMessages(
-  messages: OutgoingMessage[]
+  messages: OutgoingMessage[],
+  logger?: KatariLogger
 ): Promise<SendResult> {
-  const spawns: SpawnResult[] = [];
-  const failures: SpawnFailure[] = [];
+  const delegateResults: DelegateResult[] = [];
+  const failures: SendFailure[] = [];
   const fireAndForget: Promise<void>[] = [];
 
   for (const msg of messages) {
-    if (msg.kind.type === "Spawn") {
-      // Spawn must be awaited to get the actual agent ID
-      const kind = msg.kind;
+    const kind = msg.kind;
+
+    if (kind.type === "Delegate") {
+      // Delegate must be awaited to get the agent ref
+      logger?.protocolSend("delegate", msg.toEndpoint, {
+        agent_def: kind.body.agent_def_ref.id,
+        delegation: kind.delegationId,
+      });
       try {
-        const res = await fetch(`${msg.toUrl}/agent`, {
+        const res = await fetch(`${msg.toEndpoint}/delegate`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(kind.body),
         });
         if (res.ok) {
-          const data = (await res.json()) as SpawnAgentResponse;
-          spawns.push({
-            parentAgentId: kind.parentAgentId,
-            provisionalChildId: kind.provisionalChildId,
-            actualAgentId: data.agent_id,
-            actualAgentWhere: data.agent_where,
+          const data = (await res.json()) as DelegateResponse;
+          delegateResults.push({
+            delegationId: kind.delegationId,
+            agentRef: data.agent_ref,
           });
         } else {
           const text = await res.text();
-          console.error(`Spawn failed: ${res.status} ${text}`);
-          failures.push({
-            parentAgentId: kind.parentAgentId,
-            provisionalChildId: kind.provisionalChildId,
-            error: `Spawn failed: ${res.status} ${text}`,
-          });
+          const err = `Delegate failed: ${res.status} ${text}`;
+          logger?.log("error", err);
+          failures.push({ message: msg, error: err });
         }
       } catch (e) {
-        console.error(`Spawn request failed:`, e);
-        failures.push({
-          parentAgentId: kind.parentAgentId,
-          provisionalChildId: kind.provisionalChildId,
-          error: `Spawn request failed: ${e}`,
-        });
+        const err = `Delegate request failed: ${e}`;
+        logger?.log("error", err);
+        failures.push({ message: msg, error: err });
       }
     } else {
-      // Fire-and-forget for all other message types
+      // All other message types are fire-and-forget
       const path =
-        msg.kind.type === "Reply"
-          ? "/agent/reply"
-          : msg.kind.type === "Request"
-            ? "/agent/request"
-            : msg.kind.type === "Return"
-              ? "/agent/return"
-              : msg.kind.type === "Terminate"
-                ? "/agent/terminate"
-                : "/agent/terminate_ack";
+        kind.type === "DelegateAck" ? "/delegate_ack"
+        : kind.type === "Escalate" ? "/escalate"
+        : kind.type === "EscalateAck" ? "/escalate_ack"
+        : kind.type === "Terminate" ? "/terminate"
+        : kind.type === "TerminateAck" ? "/terminate_ack"
+        : "/throw";
+
+      logger?.protocolSend(kind.type, msg.toEndpoint);
 
       fireAndForget.push(
-        fetch(`${msg.toUrl}${path}`, {
+        fetch(`${msg.toEndpoint}${path}`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(msg.kind.body),
+          body: JSON.stringify(kind.body),
         })
           .then(() => {})
-          .catch((e) => console.error(`Outgoing ${msg.kind.type} failed:`, e))
+          .catch((e) => logger?.log("error", `Outgoing ${kind.type} failed: ${e}`))
       );
     }
   }
 
   await Promise.allSettled(fireAndForget);
-  return { spawns, failures };
+  return { delegateResults, failures };
 }

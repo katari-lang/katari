@@ -1,146 +1,100 @@
 import { startServer } from "katari-protocol";
 import type { AgentHandlerFn, JsonValue } from "katari-protocol";
-import Docker from "dockerode";
-import { Readable } from "node:stream";
+import { Sandbox } from "@e2b/code-interpreter";
 
-const docker = new Docker();
-const sandboxes = new Map<string, { containerId: string }>();
+// ===========================================================================
+// Sandbox management
+// ===========================================================================
 
-const SANDBOX_IMAGE = process.env.SANDBOX_IMAGE ?? "node:22-alpine";
+const sandboxes = new Map<string, Sandbox>();
 
-async function ensureImage(): Promise<void> {
-  try {
-    await docker.getImage(SANDBOX_IMAGE).inspect();
-  } catch {
-    console.log(`Pulling image ${SANDBOX_IMAGE}...`);
-    const stream = await docker.pull(SANDBOX_IMAGE);
-    await new Promise<void>((resolve, reject) => {
-      docker.modem.followProgress(stream, (err: Error | null) =>
-        err ? reject(err) : resolve()
-      );
-    });
-  }
-}
+const E2B_TEMPLATE = process.env.E2B_TEMPLATE ?? undefined;
+
+// ===========================================================================
+// Handlers
+// ===========================================================================
 
 const create: AgentHandlerFn = async () => {
-  await ensureImage();
-  const container = await docker.createContainer({
-    Image: SANDBOX_IMAGE,
-    Cmd: ["sleep", "infinity"],
-    NetworkDisabled: true,
-    HostConfig: {
-      Memory: 256 * 1024 * 1024,
-      CpuPeriod: 100000,
-      CpuQuota: 50000,
-    },
+  const sandbox = await Sandbox.create(E2B_TEMPLATE ?? "base", {
+    timeoutMs: 5 * 60 * 1000, // 5 minutes
   });
-  await container.start();
-  const sandboxId = container.id.slice(0, 12);
-  sandboxes.set(sandboxId, { containerId: container.id });
+  const sandboxId = sandbox.sandboxId;
+  sandboxes.set(sandboxId, sandbox);
   console.log(`Sandbox created: ${sandboxId}`);
   return sandboxId as JsonValue;
 };
 
 const exec: AgentHandlerFn = async (args) => {
-  const sandboxId = args.sandbox_id as string;
-  const command = args.command as string;
+  const a = args as Record<string, JsonValue>;
+  const sandboxId = a.sandbox_id as string;
+  const command = a.command as string;
 
   const sandbox = sandboxes.get(sandboxId);
   if (!sandbox) throw new Error(`Sandbox ${sandboxId} not found`);
 
-  const container = docker.getContainer(sandbox.containerId);
-  const execution = await container.exec({
-    Cmd: ["sh", "-c", command],
-    AttachStdout: true,
-    AttachStderr: true,
-  });
-  const stream = await execution.start({ Detach: false, Tty: false });
-
-  const output = await streamToString(stream);
-  return output as JsonValue;
+  const result = await sandbox.commands.run(command);
+  return {
+    stdout: result.stdout,
+    stderr: result.stderr,
+    exitCode: result.exitCode,
+  } as unknown as JsonValue;
 };
 
 const writeFile: AgentHandlerFn = async (args) => {
-  const sandboxId = args.sandbox_id as string;
-  const filePath = args.path as string;
-  const content = args.content as string;
+  const a = args as Record<string, JsonValue>;
+  const sandboxId = a.sandbox_id as string;
+  const filePath = a.path as string;
+  const content = a.content as string;
 
   const sandbox = sandboxes.get(sandboxId);
   if (!sandbox) throw new Error(`Sandbox ${sandboxId} not found`);
 
-  const container = docker.getContainer(sandbox.containerId);
-
-  // Use exec to write file via sh
-  const execution = await container.exec({
-    Cmd: ["sh", "-c", `mkdir -p "$(dirname '${filePath}')" && cat > '${filePath}'`],
-    AttachStdin: true,
-    AttachStdout: true,
-    AttachStderr: true,
-  });
-  const stream = await execution.start({ hijack: true, stdin: true });
-  stream.write(content);
-  stream.end();
-  await new Promise<void>((resolve) => stream.on("end", resolve));
-
+  await sandbox.files.write(filePath, content);
   return null;
 };
 
 const readFile: AgentHandlerFn = async (args) => {
-  const sandboxId = args.sandbox_id as string;
-  const filePath = args.path as string;
+  const a = args as Record<string, JsonValue>;
+  const sandboxId = a.sandbox_id as string;
+  const filePath = a.path as string;
 
   const sandbox = sandboxes.get(sandboxId);
   if (!sandbox) throw new Error(`Sandbox ${sandboxId} not found`);
 
-  const container = docker.getContainer(sandbox.containerId);
-  const execution = await container.exec({
-    Cmd: ["cat", filePath],
-    AttachStdout: true,
-    AttachStderr: true,
-  });
-  const stream = await execution.start({ Detach: false, Tty: false });
-  const content = await streamToString(stream);
+  const content = await sandbox.files.read(filePath);
   return content as JsonValue;
 };
 
 const destroy: AgentHandlerFn = async (args) => {
-  const sandboxId = args.sandbox_id as string;
+  const a = args as Record<string, JsonValue>;
+  const sandboxId = a.sandbox_id as string;
 
   const sandbox = sandboxes.get(sandboxId);
   if (!sandbox) throw new Error(`Sandbox ${sandboxId} not found`);
 
-  const container = docker.getContainer(sandbox.containerId);
-  try {
-    await container.stop({ t: 1 });
-  } catch {
-    // Already stopped
-  }
-  await container.remove({ force: true });
+  await sandbox.kill();
   sandboxes.delete(sandboxId);
   console.log(`Sandbox destroyed: ${sandboxId}`);
   return null;
 };
 
-function streamToString(stream: NodeJS.ReadableStream): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = [];
-    stream.on("data", (chunk: Buffer) => chunks.push(chunk));
-    stream.on("end", () => resolve(Buffer.concat(chunks).toString("utf-8")));
-    stream.on("error", reject);
-  });
-}
+// ===========================================================================
+// Start
+// ===========================================================================
 
 const port = parseInt(process.env.PORT ?? "8005", 10);
-const selfBaseUrl = process.env.KATARI_BASE_URL ?? `http://localhost:${port}/katari`;
+const endpoint = process.env.KATARI_BASE_URL ?? `http://localhost:${port}`;
+const databaseUrl = process.env.DATABASE_URL;
 
 startServer({
   port,
-  selfBaseUrl,
-  handlers: {
-    create,
-    exec,
-    write_file: writeFile,
-    read_file: readFile,
-    destroy,
+  endpoint,
+  databaseUrl,
+  agentDefs: {
+    create: { handler: create, description: "Create a cloud sandbox" },
+    exec: { handler: exec, description: "Execute a command in a sandbox" },
+    write_file: { handler: writeFile, description: "Write a file in a sandbox" },
+    read_file: { handler: readFile, description: "Read a file from a sandbox" },
+    destroy: { handler: destroy, description: "Destroy a sandbox" },
   },
 });

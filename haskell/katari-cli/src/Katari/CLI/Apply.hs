@@ -5,17 +5,15 @@ where
 
 import Data.Aeson (object, (.=))
 import Data.ByteString.Base64 qualified as B64
-import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Katari.CLI.Api (postApply)
-import Katari.CLI.Compiler (buildAllOrDie, buildExternalAgents, schemasToValue)
+import Katari.CLI.Compiler (buildAllOrDie, buildAgentMetadata, buildRequestMetadata, buildAliasEndpoints, schemasToValue)
 import Katari.CLI.Config (loadConfig, resolveRuntimeUrl)
 import Katari.CLI.Project (loadProjectOrDie)
 import Katari.CLI.Types (ApplyOpts (..), ProjectConfig (..))
 import Katari.Emit (emitModule)
-import Katari.IR (IRModule (..), NameTable (..))
 import Katari.Schema (moduleSchemas)
 import System.Exit (exitFailure)
 import System.IO (hPutStrLn, stderr)
@@ -28,18 +26,17 @@ runApply ApplyOpts {..} = do
   modules <- loadProjectOrDie root
   (ge, irModule) <- buildAllOrDie modules
   let binary = emitModule irModule
-      agentMap =
-        Map.fromList
-          [(name, fromIntegral @_ @Int aid) | (aid, name) <- Map.toList (ntAgents (irmNameTable irModule))]
+      agents = buildAgentMetadata ge irModule
+      requests = buildRequestMetadata ge irModule
+      aliasEndpoints = buildAliasEndpoints (pcServers config)
       schemas = schemasToValue (moduleSchemas ge)
-      extAgents = buildExternalAgents ge irModule (pcServers config)
       bodyJson =
         object
           [ "ir_binary" .= TE.decodeUtf8 (B64.encode binary),
-            "agents" .= agentMap,
-            "schemas" .= schemas,
-            "external_agents" .= extAgents,
-            "servers" .= pcServers config
+            "agents" .= agents,
+            "requests" .= requests,
+            "alias_endpoints" .= aliasEndpoints,
+            "schemas" .= schemas
           ]
   result <- postApply runtimeUrl bodyJson
   case result of

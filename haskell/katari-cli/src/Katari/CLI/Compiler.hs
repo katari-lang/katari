@@ -2,7 +2,9 @@ module Katari.CLI.Compiler
   ( buildGeOrDie,
     buildOrDie,
     buildAllOrDie,
-    buildExternalAgents,
+    buildAgentMetadata,
+    buildRequestMetadata,
+    buildAliasEndpoints,
     schemasToValue,
   )
 where
@@ -13,10 +15,9 @@ import Data.Aeson.Key qualified as Key
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
-import Data.Text qualified as T
 import Katari.IR (IRModule (..), NameTable (..))
 import Katari.Lowering (LowerError (..), lowerModules)
-import Katari.Module (AgentInfo (..), GlobalEnv (..), buildGlobalEnv)
+import Katari.Module (AgentInfo (..), RequestInfo (..), GlobalEnv (..), buildGlobalEnv)
 import Katari.Schema (SchemaKind (..), SchemaOutput (..))
 import Katari.Syntax (Module)
 import Katari.Typechecker (typecheck)
@@ -51,29 +52,53 @@ buildAllOrDie modules = do
       exitFailure
     Right ir -> return (ge, ir)
 
--- | Build the external_agents map:
---   IR agent_id (numeric string) -> { "agent_def_id": remoteName, "agent_def_where": serverUrl }
+-- | Build agent metadata: list of { name, block_id, kind, alias? }
 --
--- Iterates all agents in the name table (which includes external agents),
--- uses the 'aiExtFrom' field ("server_key:remote_name") from GlobalEnv to
--- resolve the server URL via the [servers] config.
-buildExternalAgents :: GlobalEnv -> IRModule -> Map Text Text -> Map Text Value
-buildExternalAgents ge irMod servers =
-  Map.fromList
-    [ ( T.pack (show aid),
+-- Each agent (internal or external) gets an entry.
+-- Internal agents have kind="internal", external agents have kind="external" + alias.
+buildAgentMetadata :: GlobalEnv -> IRModule -> [Value]
+buildAgentMetadata ge irMod =
+  [ case Map.lookup name (geAgents ge) >>= aiExtFrom of
+      Nothing ->
         object
-          [ "agent_def_id" .= remoteName,
-            "agent_def_where" .= serverUrl
+          [ "name" .= name,
+            "block_id" .= aid,
+            "kind" .= ("internal" :: Text)
           ]
-      )
-      | (aid, name) <- Map.toList (ntAgents (irmNameTable irMod)),
-        Just ai <- [Map.lookup name (geAgents ge)],
-        Just fromStr <- [aiExtFrom ai],
-        let (serverKey, rest) = T.breakOn ":" fromStr,
-        not (T.null rest),
-        let remoteName = T.drop 1 rest,
-        Just serverUrl <- [Map.lookup serverKey servers]
-    ]
+      Just fromStr ->
+        object
+          [ "name" .= name,
+            "block_id" .= aid,
+            "kind" .= ("external" :: Text),
+            "alias" .= fromStr
+          ]
+    | (aid, name) <- Map.toList (ntAgents (irmNameTable irMod))
+  ]
+
+-- | Build request metadata: list of { name, request_id, kind, alias? }
+buildRequestMetadata :: GlobalEnv -> IRModule -> [Value]
+buildRequestMetadata ge irMod =
+  [ case Map.lookup name (geRequests ge) >>= riExtFrom of
+      Nothing ->
+        object
+          [ "name" .= name,
+            "request_id" .= rid,
+            "kind" .= ("internal" :: Text)
+          ]
+      Just fromStr ->
+        object
+          [ "name" .= name,
+            "request_id" .= rid,
+            "kind" .= ("external" :: Text),
+            "alias" .= fromStr
+          ]
+    | (rid, name) <- Map.toList (ntRequests (irmNameTable irMod))
+  ]
+
+-- | Build alias_endpoints: alias -> endpoint URL from [servers] config
+buildAliasEndpoints :: Map Text Text -> Value
+buildAliasEndpoints servers =
+  Aeson.object [Key.fromText k .= v | (k, v) <- Map.toList servers]
 
 -- | Convert schema outputs to a JSON map:
 --   { "module.name": { "kind": "agent"|"request"|"type", "description": "...",

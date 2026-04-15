@@ -9,26 +9,45 @@ haskell/
   katari-compiler/   # コンパイラライブラリ（library）
   katari-cli/        # CLI ツール（executable: katari）
   katari-lsp/        # LSP サーバー
-rust/                # Katari ランタイム（Rust）
+ts/                  # TypeScript 実装（pnpm workspace）
+  packages/
+    katari-protocol/       # Katari Protocol ライブラリ (型, Store, Server, Router)
+    katari-runtime/        # ランタイム (IR 実行, イベントディスパッチ, DB 永続化)
+    katari-discord-server/ # Discord 外部サーバー
+    katari-ai-server/      # AI (Gemini) 外部サーバー
+    katari-cron-server/    # Cron 外部サーバー
+    katari-websearch-server/ # Web 検索外部サーバー
+    katari-sandbox-server/ # Docker サンドボックス外部サーバー
 doc/spec/            # 言語仕様書（00〜10）
 ```
 
 ## ビルド・実行
 
 ```sh
-# ビルド
-just build-hs              # 全 Haskell パッケージ
-just build-compiler        # コンパイラのみ
-just build-cli             # CLI のみ
-
-# CLI 実行
+# Haskell コンパイラ
+stack build                # 全 Haskell パッケージ
 stack exec katari -- compile <file.ktr> -o <file.ktri>
 stack exec katari -- dump <file.ktr>   # IR をテキストダンプ
+stack exec katari -- apply             # ランタイムにデプロイ
 
-# Rust ランタイム
-just build-rust
-just run-runtime <args>
+# TypeScript (pnpm v9 を使用)
+cd ts && pnpm install && pnpm -r run build
+
+# ランタイム起動 (Node.js)
+cd ts/packages/katari-runtime && pnpm start
+
+# ランタイム (Cloudflare Workers)
+cd ts/packages/katari-runtime && pnpm dev:worker
+cd ts/packages/katari-runtime && pnpm deploy
+
+# テスト
+cd ts/packages/katari-runtime && pnpm test
 ```
+
+### pnpm バージョン
+
+pnpm v10 にワークスペース検出のバグがあるため、pnpm v9 を使用。
+`package.json` の `packageManager` フィールドで `pnpm@9.15.9` を指定済み。
 
 ## コンパイラパイプライン
 
@@ -72,18 +91,21 @@ Lowering では `SHandle` 以降の残り文を先読みして `IHandleBegin →
 
 `breakType` は `collectForBreakNT` で本体を走査して収集（内側の for には潜らない）。
 
-### IRHandleBlock
+### IRHandleDef
 
 ```haskell
-data IRHandleBlock = IRHandleBlock
-  { irhId         :: HandlerId
-  , irhStateVars  :: [VarId]
-  , irhReqCases   :: [(RequestId, [VarId], [Instruction])]  -- arg_vars を含む
-  , irhReturnCase :: Maybe (VarId, [Instruction])            -- input_var を含む
+data IRHandleDef = IRHandleDef
+  { ihdId         :: HandlerId
+  , ihdStateVars  :: [VarId]
+  , ihdStateInits :: [VarId]
+  , ihdBody       :: ThreadId          -- HANDLER_TARGET thread
+  , ihdReqCases   :: [(RequestId, ThreadId)]  -- REQUEST_HANDLER threads
+  , ihdThen       :: Maybe ThreadId    -- HANDLE_THEN thread
   }
 ```
 
-return case の命令列は `IBreak retV hid` で終わる（`IReturn` ではない）。
+Handle のスコープ（残り文）は HANDLER_TARGET thread に、
+request case は REQUEST_HANDLER thread に、then 節は HANDLE_THEN thread に分離される。
 
 ### for ループ state 変数の更新
 
@@ -98,10 +120,36 @@ return case の命令列は `IBreak retV hid` で終わる（`IReturn` ではな
 
 ## バイナリフォーマット（KTRI）
 
-- ヘッダ: `4b 54 52 49 00 01`（"KTRI" + version）
+- ヘッダ: `4b 54 52 49 00 03`（"KTRI" + version 0x03）
 - 整数は LEB128 unsigned
 - 文字列: LEB128(length) + UTF-8
 - 命令: opcode (u8) + 引数
+
+## Katari Protocol
+
+エージェント間通信プロトコル。主要エンドポイント:
+
+- `POST /delegate` — 子エージェントの起動 (AgentDefinition → Agent 作成)
+- `POST /delegate_ack` — 子完了通知 (output 返却)
+- `POST /escalate` — Capability への要求 (handle block で処理)
+- `POST /escalate_ack` — Escalation 応答
+- `POST /terminate` / `/terminate_ack` — 子エージェント停止
+- `POST /throw` — エラー伝搬
+
+主要概念: Agent, Delegation, Template, Capability, Escalation
+
+## ランタイムイベントモデル
+
+ThreadStatus: `CALLING(kind)` | `REQUESTING` | `CANCELING`
+
+CallingKind: `BLOCK` | `AGENT` | `HANDLE_TARGET` | `HANDLE_BODY` | `HANDLE_THEN` | `FOR_BODY` | `FOR_THEN` | `PARALLEL` | `DELEGATING`
+
+RuntimeEvent: `call` | `cancel` | `completed` | `returned` | `continue` | `continued` | `broken` | `for_continued` | `for_broken` | `requested` | `canceled`
+
+Protocol → Runtime マッピング:
+- `delegate` → `call`, `delegate_ack` → `completed`
+- `escalate` → `requested`, `escalate_ack` → `continue`
+- `terminate` → `cancel`, `terminate_ack` → `canceled`
 
 ## 仕様書
 

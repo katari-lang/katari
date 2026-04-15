@@ -1,8 +1,13 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
-import { logger } from "hono/logger";
-import { buildKatariRouter, sendOutgoingMessages } from "katari-protocol";
-import type { OutgoingMessage, JsonValue } from "katari-protocol";
+import {
+  KatariServer,
+  InMemoryKatariStore,
+  buildKatariRouter,
+  sendOutgoingMessages,
+} from "katari-protocol";
+import type { OutgoingMessage, JsonValue, KatariLogger } from "katari-protocol";
+import { NullKatariLogger } from "katari-protocol";
 import type { Value } from "./value.js";
 import { Runtime } from "./runtime/index.js";
 import { decodeModule } from "./ir.js";
@@ -12,17 +17,26 @@ import { Db } from "./db.js";
 // Request/Response types
 // ===========================================================================
 
-interface ExternalAgentEntry {
-  agent_def_id: string;
-  agent_def_where: string;
+interface AgentMetadataEntry {
+  name: string;
+  block_id: number;
+  kind: "internal" | "external";
+  alias?: string; // "server_key:remote_name" for external
+}
+
+interface RequestMetadataEntry {
+  name: string;
+  request_id: number;
+  kind: "internal" | "external";
+  alias?: string;
 }
 
 interface ApplyRequest {
   ir_binary: string; // base64
-  agents: Record<string, number>;
+  agents: AgentMetadataEntry[];
+  requests?: RequestMetadataEntry[];
+  alias_endpoints?: Record<string, string>;
   schemas?: Record<string, unknown>;
-  servers?: Record<string, string>;
-  external_agents?: Record<string, ExternalAgentEntry>;
 }
 
 interface ApplyResponse {
@@ -37,41 +51,27 @@ interface ApplyResponse {
 // Build server app
 // ===========================================================================
 
-export function buildApp(runtime: Runtime, db: Db): Hono {
+export function buildApp(runtime: Runtime, db: Db, logger?: KatariLogger): Hono {
+  const log = logger ?? new NullKatariLogger();
   const app = new Hono();
   app.use("*", cors());
-  app.use("*", logger());
+
+  // Create protocol server with Runtime's hooks
+  const protocolStore = new InMemoryKatariStore();
+  const katariServer = new KatariServer(
+    runtime.getEndpoint(),
+    protocolStore,
+    runtime.createHooks()
+  );
 
   const handleMessages = (msgs: OutgoingMessage[]) => {
     if (msgs.length > 0) {
-      sendOutgoingMessages(msgs).then(({ spawns, failures }) => {
-        for (const r of spawns) {
-          runtime.registerRemoteChild(
-            r.parentAgentId,
-            r.provisionalChildId,
-            r.actualAgentId,
-            r.actualAgentWhere
-          );
-        }
+      sendOutgoingMessages(msgs, log).then(({ failures }) => {
         for (const f of failures) {
-          // Spawn failed — terminate the parent agent
-          console.error(`Spawn failed for parent ${f.parentAgentId}: ${f.error}`);
-          runtime.eventQueue.push({
-            agentId: f.parentAgentId,
-            kind: {
-              tag: "TerminateAgent",
-              agentId: f.parentAgentId,
-              fromAgentId: "system",
-              fromAgentWhere: "",
-            },
-          });
-          runtime.runEventLoop();
-          const followUp = runtime.drainMessages();
-          if (followUp.length > 0) handleMessages(followUp);
-
-          // Update DB status
-          db.updateToplevelAgent(f.parentAgentId, "error", f.error as JsonValue);
+          log.log("error", `Outgoing message failed: ${f.error}`);
         }
+      }).catch((e) => {
+        log.log("error", `sendOutgoingMessages failed: ${e}`);
       });
     }
   };
@@ -84,37 +84,45 @@ export function buildApp(runtime: Runtime, db: Db): Hono {
     const body = (await c.req.json()) as ApplyRequest;
 
     try {
-      const binary = Buffer.from(body.ir_binary, "base64");
+      const binary = base64ToUint8Array(body.ir_binary);
       const module = decodeModule(binary);
 
-      const nameMap = new Map(Object.entries(body.agents));
+      const aliasEndpoints = new Map(Object.entries(body.alias_endpoints ?? {}));
       const schemas = new Map(Object.entries(body.schemas ?? {})) as Map<string, JsonValue>;
-      const externalAgents = body.external_agents
-        ? new Map(
-            Object.entries(body.external_agents).map(([k, v]) => [parseInt(k, 10), v])
-          )
-        : undefined;
-      const servers = body.servers
-        ? new Map(Object.entries(body.servers))
-        : undefined;
 
-      runtime.applyModule(module, nameMap, schemas, externalAgents, servers);
+      const { nameMap, externalAgents } = resolveMetadata(body.agents, aliasEndpoints);
+
+      runtime.applyModule(module, nameMap, schemas, externalAgents, aliasEndpoints);
+
+      // Register agent definitions in protocol store
+      for (const entry of body.agents) {
+        if (entry.kind === "internal") {
+          await protocolStore.createAgentDefinition({
+            id: String(entry.block_id),
+            endpoint: runtime.getEndpoint(),
+            name: entry.name,
+            description: "",
+            input_schema: null,
+            output_schema: null,
+          });
+        }
+      }
 
       // Save to DB
       await db.saveModule(
         module.name,
         binary,
-        body.agents,
+        body.agents as unknown as Record<string, unknown>,
         body.schemas ?? {},
-        body.external_agents ?? {},
-        body.servers ?? {}
+        body.requests ?? {},
+        body.alias_endpoints ?? {}
       );
 
       const response: ApplyResponse = {
         ok: true,
         module_name: module.name,
-        agents: module.agents.map((a) => ({ id: a.id, name: a.name })),
-        requests: module.requests.map((r) => ({ id: r.id, name: r.name })),
+        agents: runtime.getModuleAgents(),
+        requests: runtime.getModuleRequests(),
       };
       return c.json(response);
     } catch (e) {
@@ -126,7 +134,7 @@ export function buildApp(runtime: Runtime, db: Db): Hono {
   });
 
   // ==========================================================================
-  // /agents — toplevel agent management (sub-router to avoid Hono type depth)
+  // /agents — toplevel agent management
   // ==========================================================================
 
   const agentsRouter = new Hono();
@@ -142,15 +150,7 @@ export function buildApp(runtime: Runtime, db: Db): Hono {
     const body = (await c.req.json()) as { agent_name: string; args?: Record<string, JsonValue> };
 
     try {
-      const agentId = runtime.runAgent(body.agent_name, (body.args ?? {}) as Record<string, Value>);
-
-      const agentDefId = runtime.agentNameMap.get(body.agent_name);
-      await db.saveToplevelAgent(
-        agentId,
-        agentDefId ?? 0,
-        body.agent_name,
-        body.args ?? null
-      );
+      const agentId = await runtime.runAgent(body.agent_name, (body.args ?? {}) as Record<string, Value>);
 
       const msgs = runtime.drainMessages();
       handleMessages(msgs);
@@ -181,41 +181,31 @@ export function buildApp(runtime: Runtime, db: Db): Hono {
       });
     }
 
-    const row = await db.getToplevelAgent(id);
+    const row = await db.loadAgent(id);
     if (!row) return c.json({ error: "not found" }, 404);
-    return c.json(row);
+    return c.json({
+      id: row.id,
+      status: row.status,
+      result: row.result,
+    });
   });
 
   // POST /agents/:id/stop
   agentsRouter.post("/:id/stop", async (c) => {
     const id = c.req.param("id");
-    const agent = runtime.agents.get(id);
 
-    if (agent) {
-      // Agent is in runtime memory — terminate it
-      runtime.eventQueue.push({
-        agentId: id,
-        kind: {
-          tag: "TerminateAgent",
-          agentId: id,
-          fromAgentId: "cli",
-          fromAgentWhere: "",
-        },
-      });
-      runtime.runEventLoop();
+    if (runtime.hasAgent(id)) {
+      await runtime.stopAgent(id);
       const msgs = runtime.drainMessages();
       handleMessages(msgs);
-      await db.updateToplevelAgent(id, "stopped", null);
       return c.json({ ok: true });
     }
 
-    // Agent not in runtime memory — check DB (stale from previous runtime session)
-    const row = await db.getToplevelAgent(id);
+    const row = await db.loadAgent(id);
     if (!row) return c.json({ error: "agent not found" }, 404);
 
     if (row.status === "running") {
-      // Stale "running" entry — mark as stopped
-      await db.updateToplevelAgent(id, "stopped", null);
+      await db.updateAgentStatus(id, "stopped", null);
       return c.json({ ok: true, note: "agent was stale (not in runtime memory)" });
     }
 
@@ -225,59 +215,64 @@ export function buildApp(runtime: Runtime, db: Db): Hono {
   app.route("/agents", agentsRouter);
 
   // ==========================================================================
-  // Legacy /run endpoints (deprecated)
-  // ==========================================================================
-
-  app.post("/run", async (c) => {
-    c.header("X-Deprecated", "Use POST /agents instead");
-    const body = (await c.req.json()) as { agent_name: string; args: Record<string, JsonValue> };
-    try {
-      const agentId = runtime.runAgent(body.agent_name, body.args as Record<string, Value>);
-      const status = runtime.getAgentStatus(agentId);
-      const msgs = runtime.drainMessages();
-      handleMessages(msgs);
-      return c.json({
-        ok: true,
-        agent_id: agentId,
-        status: status?.status ?? "running",
-        result: status?.result as JsonValue,
-      });
-    } catch (e) {
-      return c.json({ ok: false, status: "error", error: String(e) }, 400);
-    }
-  });
-
-  app.get("/run/:agentId", (c) => {
-    c.header("X-Deprecated", "Use GET /agents/:id instead");
-    const agentId = c.req.param("agentId");
-    const status = runtime.getAgentStatus(agentId);
-    if (!status) return c.json({ agent_id: agentId, status: "not_found", error: "agent not found" }, 404);
-    return c.json({ agent_id: agentId, status: status.status, result: status.result as JsonValue });
-  });
-
-  app.get("/run", (c) => {
-    c.header("X-Deprecated", "Use GET /agents and GET /schema/agents instead");
-    const module = runtime.module;
-    return c.json({
-      agent_defs: module?.agents.map((a) => ({ id: a.id, name: a.name })) ?? [],
-      requests: module?.requests.map((r) => ({ id: r.id, name: r.name })) ?? [],
-      running_agents: Array.from(runtime.agents.entries()).map(([id, a]) => ({
-        agent_id: id,
-        agent_def_id: a.agentDefId,
-        status: runtime.getAgentStatus(id)?.status ?? "unknown",
-      })),
-    });
-  });
-
-  // ==========================================================================
   // Katari Protocol routes
   // ==========================================================================
 
   const katariRouter = buildKatariRouter(
-    () => runtime,
-    (msgs) => handleMessages(msgs)
+    () => katariServer,
+    (msgs) => {
+      const runtimeMsgs = runtime.drainMessages();
+      handleMessages([...msgs, ...runtimeMsgs]);
+    },
+    log
   );
   app.route("/katari", katariRouter);
 
+  // ==========================================================================
+  // Health check
+  // ==========================================================================
+
+  app.get("/health", (c) => c.json({ ok: true }));
+
   return app;
+}
+
+/** Convert new metadata format to the maps the runtime expects */
+export function resolveMetadata(
+  agents: { name: string; block_id: number; kind: string; alias?: string }[],
+  aliasEndpoints: Map<string, string>
+): {
+  nameMap: Map<string, number>;
+  externalAgents: Map<number, { agent_def_id: string; agent_def_where: string }>;
+} {
+  const nameMap = new Map<string, number>();
+  const externalAgents = new Map<number, { agent_def_id: string; agent_def_where: string }>();
+  for (const entry of agents) {
+    nameMap.set(entry.name, entry.block_id);
+    if (entry.kind === "external" && entry.alias) {
+      const colonIdx = entry.alias.indexOf(":");
+      if (colonIdx > 0) {
+        const serverKey = entry.alias.slice(0, colonIdx);
+        const remoteName = entry.alias.slice(colonIdx + 1);
+        const serverUrl = aliasEndpoints.get(serverKey);
+        if (serverUrl) {
+          externalAgents.set(entry.block_id, {
+            agent_def_id: remoteName,
+            agent_def_where: serverUrl,
+          });
+        }
+      }
+    }
+  }
+  return { nameMap, externalAgents };
+}
+
+function base64ToUint8Array(b64: string): Uint8Array {
+  if (typeof Buffer !== "undefined") {
+    return Buffer.from(b64, "base64");
+  }
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
 }

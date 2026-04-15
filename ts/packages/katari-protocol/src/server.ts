@@ -1,344 +1,577 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
-import { logger } from "hono/logger";
 import { serve } from "@hono/node-server";
 import { randomUUID } from "node:crypto";
 import type { JsonValue } from "./json.js";
 import type {
-  SpawnAgentRequest,
-  SpawnAgentResponse,
-  AgentRequestBody,
-  AgentReplyBody,
-  AgentReturnBody,
-  TerminateBody,
-  TerminateAckBody,
+  Agent,
+  AgentDefinition,
+  Capability,
+  Delegation,
+  Escalation,
+  Template,
+  DelegateRequest,
+  DelegateResponse,
+  DelegateAckRequest,
+  EscalateRequest,
+  EscalateAckRequest,
+  TerminateRequest,
+  TerminateAckRequest,
+  ThrowRequest,
   OutgoingMessage,
-  RequestInfo,
-  AgentDefInfo,
-  AgentSummary,
-  AgentDetail,
-  EffectRef,
+  AgentRef,
+  CapabilityRef,
 } from "./types.js";
-import type { KatariProtocol } from "./router.js";
+import type { KatariStore } from "./store.js";
+import { InMemoryKatariStore, PostgresKatariStore, createPostgresAdapter } from "./store.js";
 import { buildKatariRouter } from "./router.js";
 import { sendOutgoingMessages } from "./client.js";
+import type { KatariLogger } from "./logger.js";
+import { ConsoleKatariLogger } from "./logger.js";
 
 // ===========================================================================
-// AgentContext — passed to each handler
+// Server hooks — server-specific behavior on protocol events
+// ===========================================================================
+
+export interface KatariServerHooks {
+  onDelegate?(agent: Agent, delegationRef: DelegateRequest): Promise<void>;
+  onDelegateAck?(delegation: Delegation, output: JsonValue): Promise<void>;
+  onEscalate?(escalation: Escalation, capability: Capability): Promise<void>;
+  onEscalateAck?(escalation: Escalation, output: JsonValue): Promise<void>;
+  onTerminate?(delegation: Delegation): Promise<void>;
+  onTerminateAck?(delegation: Delegation): Promise<void>;
+  onThrow?(delegation: Delegation, message: string): Promise<void>;
+}
+
+// ===========================================================================
+// Result type for handlers
+// ===========================================================================
+
+type HandlerResult<T = void> =
+  | { response: T; messages: OutgoingMessage[] }
+  | string;
+
+// ===========================================================================
+// KatariServer — protocol resource lifecycle + hooks
+// ===========================================================================
+
+export class KatariServer {
+  private store: KatariStore;
+  private hooks: KatariServerHooks;
+  private endpoint: string;
+  private pendingMessages: OutgoingMessage[] = [];
+
+  constructor(endpoint: string, store: KatariStore, hooks: KatariServerHooks = {}) {
+    this.endpoint = endpoint;
+    this.store = store;
+    this.hooks = hooks;
+  }
+
+  // =========================================================================
+  // POST /delegate — create Agent from AgentDefinition
+  // =========================================================================
+
+  async handleDelegate(
+    req: DelegateRequest
+  ): Promise<HandlerResult<DelegateResponse>> {
+    const agentDef = await this.store.getAgentDefinition(req.agent_def_ref.id);
+    if (!agentDef) return `agent definition ${req.agent_def_ref.id} not found`;
+
+    const agentId = randomUUID();
+    const agent: Agent = {
+      id: agentId,
+      endpoint: this.endpoint,
+      input: req.input,
+      definition_ref: req.agent_def_ref,
+      delegation_ref: req.delegation_ref,
+      status: "RUNNING",
+    };
+
+    await this.store.createAgent(agent);
+
+    this.pendingMessages = [];
+    await this.hooks.onDelegate?.(agent, req);
+    const messages = this.drainPendingMessages();
+
+    return {
+      response: { agent_ref: { id: agentId, endpoint: this.endpoint } },
+      messages,
+    };
+  }
+
+  // =========================================================================
+  // POST /delegate_ack — child completed, parent receives result
+  // =========================================================================
+
+  async handleDelegateAck(
+    req: DelegateAckRequest
+  ): Promise<HandlerResult> {
+    const delegation = await this.store.getDelegation(req.delegation_ref.id);
+    if (!delegation) return `delegation ${req.delegation_ref.id} not found`;
+
+    // Delete the delegation (child agent + capabilities already cleaned up by sender)
+    await this.store.deleteDelegation(delegation.id);
+
+    this.pendingMessages = [];
+    await this.hooks.onDelegateAck?.(delegation, req.output);
+    const messages = this.drainPendingMessages();
+
+    return { response: undefined, messages };
+  }
+
+  // =========================================================================
+  // POST /escalate — child escalates to a capability on THIS server
+  // =========================================================================
+
+  async handleEscalate(
+    req: EscalateRequest
+  ): Promise<HandlerResult> {
+    const capability = await this.store.getCapability(req.capability_ref.id);
+    if (!capability) return `capability ${req.capability_ref.id} not found`;
+
+    // Create escalation record (managed by the escalating server, but we
+    // receive the ref; the actual Escalation object lives on the child's server)
+    this.pendingMessages = [];
+    await this.hooks.onEscalate?.(
+      {
+        id: req.escalation_ref.id,
+        endpoint: req.escalation_ref.endpoint,
+        capability_ref: req.capability_ref,
+        input: req.input,
+      },
+      capability
+    );
+    const messages = this.drainPendingMessages();
+
+    return { response: undefined, messages };
+  }
+
+  // =========================================================================
+  // POST /escalate_ack — capability handler completed, child receives result
+  // =========================================================================
+
+  async handleEscalateAck(
+    req: EscalateAckRequest
+  ): Promise<HandlerResult> {
+    const escalation = await this.store.getEscalation(req.escalation_ref.id);
+    if (!escalation) return `escalation ${req.escalation_ref.id} not found`;
+
+    // Delete the escalation
+    await this.store.deleteEscalation(escalation.id);
+
+    this.pendingMessages = [];
+    await this.hooks.onEscalateAck?.(escalation, req.output);
+    const messages = this.drainPendingMessages();
+
+    return { response: undefined, messages };
+  }
+
+  // =========================================================================
+  // POST /terminate — parent tells child to stop
+  // =========================================================================
+
+  async handleTerminate(
+    req: TerminateRequest
+  ): Promise<HandlerResult> {
+    const delegation = await this.store.getDelegation(req.delegation_ref.id);
+    if (!delegation) return `delegation ${req.delegation_ref.id} not found`;
+
+    // Find agent by delegation
+    const agents = await this.store.listAgents();
+    const agent = agents.find(
+      (a) => a.delegation_ref?.id === delegation.id &&
+             a.delegation_ref?.endpoint === delegation.endpoint
+    );
+    if (agent) {
+      await this.store.updateAgentStatus(agent.id, "TERMINATING");
+    }
+
+    this.pendingMessages = [];
+    await this.hooks.onTerminate?.(delegation);
+    const messages = this.drainPendingMessages();
+
+    return { response: undefined, messages };
+  }
+
+  // =========================================================================
+  // POST /terminate_ack — child confirms termination complete
+  // =========================================================================
+
+  async handleTerminateAck(
+    req: TerminateAckRequest
+  ): Promise<HandlerResult> {
+    const delegation = await this.store.getDelegation(req.delegation_ref.id);
+    if (!delegation) return `delegation ${req.delegation_ref.id} not found`;
+
+    // Clean up delegation
+    await this.store.deleteDelegation(delegation.id);
+
+    this.pendingMessages = [];
+    await this.hooks.onTerminateAck?.(delegation);
+    const messages = this.drainPendingMessages();
+
+    return { response: undefined, messages };
+  }
+
+  // =========================================================================
+  // POST /throw — child reports error
+  // =========================================================================
+
+  async handleThrow(
+    req: ThrowRequest
+  ): Promise<HandlerResult> {
+    const delegation = await this.store.getDelegation(req.delegation_ref.id);
+    if (!delegation) return `delegation ${req.delegation_ref.id} not found`;
+
+    this.pendingMessages = [];
+    await this.hooks.onThrow?.(delegation, req.message);
+    const messages = this.drainPendingMessages();
+
+    return { response: undefined, messages };
+  }
+
+  // =========================================================================
+  // GET endpoints — resource queries
+  // =========================================================================
+
+  async listAgentDefinitions(): Promise<AgentDefinition[]> {
+    return this.store.listAgentDefinitions();
+  }
+
+  async listAgents(): Promise<Agent[]> {
+    return this.store.listAgents();
+  }
+
+  async listDelegations(): Promise<Delegation[]> {
+    return this.store.listDelegations();
+  }
+
+  async listTemplates(): Promise<Template[]> {
+    return this.store.listTemplates();
+  }
+
+  async listCapabilities(): Promise<Capability[]> {
+    return this.store.listCapabilities();
+  }
+
+  async listEscalations(): Promise<Escalation[]> {
+    return this.store.listEscalations();
+  }
+
+  // =========================================================================
+  // Outgoing message helpers — used by hooks to enqueue messages
+  // =========================================================================
+
+  /** Enqueue an outgoing message (called from hooks) */
+  enqueueMessage(msg: OutgoingMessage): void {
+    this.pendingMessages.push(msg);
+  }
+
+  private drainPendingMessages(): OutgoingMessage[] {
+    const msgs = this.pendingMessages;
+    this.pendingMessages = [];
+    return msgs;
+  }
+
+  // =========================================================================
+  // Convenience: delegate to another server
+  // =========================================================================
+
+  /** Create a delegation and send /delegate to the target server */
+  async delegate(
+    targetEndpoint: string,
+    agentDefId: string,
+    input: JsonValue,
+    capabilityRefs: CapabilityRef[]
+  ): Promise<{ delegationId: string; message: OutgoingMessage }> {
+    const delegationId = randomUUID();
+    const delegation: Delegation = {
+      id: delegationId,
+      endpoint: this.endpoint,
+      agent_def_ref: { id: agentDefId, endpoint: targetEndpoint },
+      input,
+      capability_refs: capabilityRefs,
+    };
+    await this.store.createDelegation(delegation);
+
+    const message: OutgoingMessage = {
+      toEndpoint: targetEndpoint,
+      kind: {
+        type: "Delegate",
+        body: {
+          agent_def_ref: { id: agentDefId, endpoint: targetEndpoint },
+          input,
+          delegation_ref: { id: delegationId, endpoint: this.endpoint },
+          capability_refs: capabilityRefs,
+        },
+        delegationId,
+      },
+    };
+
+    return { delegationId, message };
+  }
+
+  /** Send delegate_ack to parent (cleans up local agent + capabilities first) */
+  async sendDelegateAck(
+    agentRef: AgentRef,
+    output: JsonValue
+  ): Promise<OutgoingMessage | null> {
+    const agent = await this.store.getAgent(agentRef.id);
+    if (!agent || !agent.delegation_ref) return null;
+
+    // Cascade delete: capabilities belonging to this agent
+    await this.store.deleteCapabilitiesByAgent(agentRef);
+    // Delete the agent
+    await this.store.deleteAgent(agent.id);
+
+    return {
+      toEndpoint: agent.delegation_ref.endpoint,
+      kind: {
+        type: "DelegateAck",
+        body: {
+          delegation_ref: agent.delegation_ref,
+          output,
+        },
+      },
+    };
+  }
+
+  /** Send escalation to a capability's endpoint */
+  async sendEscalate(
+    capabilityRef: CapabilityRef,
+    input: JsonValue
+  ): Promise<{ escalationId: string; message: OutgoingMessage }> {
+    const escalationId = randomUUID();
+    const escalation: Escalation = {
+      id: escalationId,
+      endpoint: this.endpoint,
+      capability_ref: capabilityRef,
+      input,
+    };
+    await this.store.createEscalation(escalation);
+
+    const message: OutgoingMessage = {
+      toEndpoint: capabilityRef.endpoint,
+      kind: {
+        type: "Escalate",
+        body: {
+          escalation_ref: { id: escalationId, endpoint: this.endpoint },
+          capability_ref: capabilityRef,
+          input,
+        },
+      },
+    };
+
+    return { escalationId, message };
+  }
+
+  /** Send escalate_ack back to the escalating server */
+  async sendEscalateAck(
+    escalationEndpoint: string,
+    escalationId: string,
+    output: JsonValue
+  ): Promise<OutgoingMessage> {
+    return {
+      toEndpoint: escalationEndpoint,
+      kind: {
+        type: "EscalateAck",
+        body: {
+          escalation_ref: { id: escalationId, endpoint: escalationEndpoint },
+          output,
+        },
+      },
+    };
+  }
+
+  // =========================================================================
+  // Store access (for hooks)
+  // =========================================================================
+
+  getStore(): KatariStore {
+    return this.store;
+  }
+
+  getEndpoint(): string {
+    return this.endpoint;
+  }
+}
+
+// ===========================================================================
+// AgentContext — passed to external server handler functions
 // ===========================================================================
 
 export interface AgentContext {
   agentId: string;
-  parentAgentId: string;
-  parentAgentWhere: string;
-  selfBaseUrl: string;
-  /** Send a request to the parent (e.g. on_message, notify) */
-  sendRequest(requestDefId: string, args: Record<string, JsonValue>): void;
-  /** Spawn a child agent on another server and wait for its return */
-  spawnAndWait(
-    serverUrl: string,
+  endpoint: string;
+  delegationRef: { id: string; endpoint: string } | null;
+  capabilityRefs: CapabilityRef[];
+
+  /** Escalate to a capability */
+  escalate(capabilityRef: CapabilityRef, input: JsonValue): void;
+
+  /** Delegate to another server's agent and wait for result */
+  delegateAndWait(
+    targetEndpoint: string,
     agentDefId: string,
-    args: Record<string, JsonValue>
+    input: JsonValue,
+    capabilityRefs?: CapabilityRef[]
   ): Promise<JsonValue>;
 }
 
 // ===========================================================================
-// Handler type
+// ExternalAgentServer — convenience for building external servers
 // ===========================================================================
 
 export type AgentHandlerFn = (
-  args: Record<string, JsonValue>,
+  args: JsonValue,
   ctx: AgentContext
 ) => Promise<JsonValue>;
 
-// ===========================================================================
-// Internal agent state
-// ===========================================================================
+export async function startServer(opts: {
+  port: number;
+  endpoint: string;
+  agentDefs: Record<string, { handler: AgentHandlerFn; description?: string }>;
+  databaseUrl?: string;
+  logger?: KatariLogger;
+}): Promise<void> {
+  const log = opts.logger ?? new ConsoleKatariLogger();
 
-interface AgentState {
-  agentId: string;
-  agentDefId: string;
-  parentAgentId: string;
-  parentAgentWhere: string;
-  args: Record<string, JsonValue>;
-  withEffects: EffectRef[];
-}
-
-// ===========================================================================
-// ExternalServer — KatariProtocol impl for external servers
-// ===========================================================================
-
-export class ExternalServer implements KatariProtocol {
-  private handlers = new Map<string, AgentHandlerFn>();
-  private agents = new Map<string, AgentState>();
-  private pendingReturns = new Map<
-    string,
-    { resolve: (v: JsonValue) => void }
-  >();
-  private selfBaseUrl: string;
-
-  constructor(selfBaseUrl: string) {
-    this.selfBaseUrl = selfBaseUrl;
+  let store: KatariStore;
+  if (opts.databaseUrl) {
+    const adapter = await createPostgresAdapter(opts.databaseUrl);
+    const pgStore = new PostgresKatariStore(adapter);
+    await pgStore.initialize();
+    store = pgStore;
+    log.log("info", "Using PostgreSQL store for protocol resources");
+  } else {
+    store = new InMemoryKatariStore();
+    log.log("info", "Using in-memory store for protocol resources");
   }
+  const pendingDelegateAcks = new Map<string, { resolve: (v: JsonValue) => void }>();
 
-  registerHandler(agentDefId: string, handler: AgentHandlerFn): void {
-    this.handlers.set(agentDefId, handler);
-  }
-
-  // -- KatariProtocol methods -----------------------------------------------
-
-  listRequests(): RequestInfo[] {
-    return [];
-  }
-
-  listAgentDefs(): AgentDefInfo[] {
-    return Array.from(this.handlers.keys()).map((name) => ({
-      agent_def_id: name,
-      agent_def_where: this.selfBaseUrl,
+  // Register agent definitions
+  for (const [name, def] of Object.entries(opts.agentDefs)) {
+    await store.createAgentDefinition({
+      id: name,
+      endpoint: opts.endpoint,
       name,
-      description: "",
-      arg_type: null as JsonValue,
-      return_type: null as JsonValue,
-      with_effects: [],
-    }));
+      description: def.description ?? "",
+      input_schema: null,
+      output_schema: null,
+    });
   }
 
-  listAgents(): AgentSummary[] {
-    return Array.from(this.agents.values()).map((a) => ({
-      agent_id: a.agentId,
-      agent_where: this.selfBaseUrl,
-      agent_def_id: a.agentDefId,
-      args: a.args,
-    }));
-  }
+  const hooks: KatariServerHooks = {
+    async onDelegate(agent, req) {
+      const handlerEntry = opts.agentDefs[agent.definition_ref.id];
+      if (!handlerEntry) return;
 
-  getAgent(agentId: string): AgentDetail | null {
-    const a = this.agents.get(agentId);
-    if (!a) return null;
-    return {
-      agent_id: a.agentId,
-      agent_where: this.selfBaseUrl,
-      agent_def_id: a.agentDefId,
-      args: a.args,
-      parent_agent_id: a.parentAgentId,
-      parent_agent_where: a.parentAgentWhere,
-      with_effects: [],
-      child_agents: [],
-    };
-  }
+      const ctx: AgentContext = {
+        agentId: agent.id,
+        endpoint: opts.endpoint,
+        delegationRef: agent.delegation_ref,
+        capabilityRefs: req.capability_refs,
 
-  spawnAgent(
-    req: SpawnAgentRequest
-  ): { response: SpawnAgentResponse; messages: OutgoingMessage[] } | string {
-    const handler = this.handlers.get(req.agent_def_id);
-    if (!handler) return `unknown agent_def_id: ${req.agent_def_id}`;
+        escalate(capabilityRef, input) {
+          katariServer.sendEscalate(capabilityRef, input).then(({ message }) => {
+            sendOutgoingMessages([message], log).catch((e) =>
+              log.log("error", `escalate send failed: ${e}`)
+            );
+          });
+        },
 
-    const agentId = `agent-${randomUUID()}`;
-    const state: AgentState = {
-      agentId,
-      agentDefId: req.agent_def_id,
-      parentAgentId: req.parent_agent_id,
-      parentAgentWhere: req.parent_agent_where,
-      args: req.args,
-      withEffects: req.with_effects ?? [],
-    };
-    this.agents.set(agentId, state);
+        async delegateAndWait(targetEndpoint, agentDefId, input, capRefs) {
+          const { delegationId, message } = await katariServer.delegate(
+            targetEndpoint,
+            agentDefId,
+            input,
+            capRefs ?? []
+          );
+          sendOutgoingMessages([message], log).catch((e) =>
+            log.log("error", `delegate send failed: ${e}`)
+          );
+          return new Promise<JsonValue>((resolve) => {
+            pendingDelegateAcks.set(delegationId, { resolve });
+          });
+        },
+      };
 
-    const ctx = this.makeContext(agentId, req.parent_agent_id, req.parent_agent_where);
+      // Run handler asynchronously
+      handlerEntry.handler(agent.input, ctx)
+        .then(async (result) => {
+          const msg = await katariServer.sendDelegateAck(
+            { id: agent.id, endpoint: opts.endpoint },
+            result
+          );
+          if (msg) {
+            sendOutgoingMessages([msg], log).catch((e) =>
+              log.log("error", `delegate_ack send failed: ${e}`)
+            );
+          }
+        })
+        .catch(async (err) => {
+          log.log("error", `Handler error for ${agent.definition_ref.id}: ${err}`);
+          const msg = await katariServer.sendDelegateAck(
+            { id: agent.id, endpoint: opts.endpoint },
+            null
+          );
+          if (msg) {
+            sendOutgoingMessages([msg], log).catch(() => {});
+          }
+        });
+    },
 
-    // Run handler asynchronously
-    handler(req.args, ctx)
-      .then((result) => {
-        this.agents.delete(agentId);
-        sendOutgoingMessages([
-          {
-            toUrl: req.parent_agent_where,
-            kind: {
-              type: "Return",
-              body: {
-                result,
-                from_agent_id: agentId,
-                from_agent_where: this.selfBaseUrl,
-                agent_id: req.parent_agent_id,
-              },
-            },
-          },
-        ]).catch((e) => console.error(`Return send failed:`, e));
-      })
-      .catch((err) => {
-        console.error(`Handler error for ${req.agent_def_id}:`, err);
-        this.agents.delete(agentId);
-        // Send null result on error
-        sendOutgoingMessages([
-          {
-            toUrl: req.parent_agent_where,
-            kind: {
-              type: "Return",
-              body: {
-                result: null,
-                from_agent_id: agentId,
-                from_agent_where: this.selfBaseUrl,
-                agent_id: req.parent_agent_id,
-              },
-            },
-          },
-        ]).catch(() => {});
-      });
+    async onDelegateAck(delegation, output) {
+      const pending = pendingDelegateAcks.get(delegation.id);
+      if (pending) {
+        pending.resolve(output);
+        pendingDelegateAcks.delete(delegation.id);
+      }
+    },
 
-    return {
-      response: { agent_id: agentId, agent_where: this.selfBaseUrl },
-      messages: [],
-    };
-  }
+    async onTerminate(delegation) {
+      // Find and delete the agent
+      const agents = await store.listAgents();
+      const agent = agents.find(
+        (a) => a.delegation_ref?.id === delegation.id
+      );
+      if (agent) {
+        await store.deleteCapabilitiesByAgent({ id: agent.id, endpoint: opts.endpoint });
+        await store.deleteAgent(agent.id);
+      }
 
-  deliverRequest(req: AgentRequestBody): OutgoingMessage[] | string {
-    return `external server does not handle incoming requests`;
-  }
-
-  deliverReply(req: AgentReplyBody): OutgoingMessage[] | string {
-    return `external server does not handle incoming replies`;
-  }
-
-  deliverReturn(req: AgentReturnBody): OutgoingMessage[] | string {
-    const pending = this.pendingReturns.get(req.from_agent_id);
-    if (pending) {
-      pending.resolve(req.result);
-      this.pendingReturns.delete(req.from_agent_id);
-      return [];
-    }
-    return `no pending return for agent ${req.from_agent_id}`;
-  }
-
-  terminateAgent(req: TerminateBody): OutgoingMessage[] | string {
-    const agent = this.agents.get(req.agent_id);
-    if (!agent) return `agent ${req.agent_id} not found`;
-    this.agents.delete(req.agent_id);
-    return [
-      {
-        toUrl: agent.parentAgentWhere,
+      // Send terminate_ack back
+      katariServer.enqueueMessage({
+        toEndpoint: delegation.endpoint,
         kind: {
           type: "TerminateAck",
-          body: {
-            from_agent_id: req.agent_id,
-            from_agent_where: this.selfBaseUrl,
-            agent_id: agent.parentAgentId,
-          },
+          body: { delegation_ref: { id: delegation.id, endpoint: delegation.endpoint } },
         },
-      },
-    ];
-  }
+      });
+    },
+  };
 
-  deliverTerminateAck(req: TerminateAckBody): OutgoingMessage[] | string {
-    return [];
-  }
-
-  // -- Internal helpers -----------------------------------------------------
-
-  private makeContext(
-    agentId: string,
-    parentAgentId: string,
-    parentAgentWhere: string
-  ): AgentContext {
-    return {
-      agentId,
-      parentAgentId,
-      parentAgentWhere,
-      selfBaseUrl: this.selfBaseUrl,
-
-      sendRequest: (requestDefId: string, args: Record<string, JsonValue>) => {
-        sendOutgoingMessages([
-          {
-            toUrl: parentAgentWhere,
-            kind: {
-              type: "Request",
-              body: {
-                request_id: `req-${randomUUID()}`,
-                request_def_id: requestDefId,
-                request_def_where: this.selfBaseUrl,
-                args,
-                from_agent_id: agentId,
-                from_agent_where: this.selfBaseUrl,
-              },
-            },
-          },
-        ]).catch((e) =>
-          console.error(`sendRequest(${requestDefId}) failed:`, e)
-        );
-      },
-
-      spawnAndWait: async (
-        serverUrl: string,
-        agentDefId: string,
-        args: Record<string, JsonValue>
-      ): Promise<JsonValue> => {
-        const provisionalChildId = `child-${randomUUID()}`;
-        const { spawns, failures } = await sendOutgoingMessages([
-          {
-            toUrl: serverUrl,
-            kind: {
-              type: "Spawn",
-              body: {
-                agent_def_id: agentDefId,
-                agent_def_where: serverUrl,
-                args,
-                parent_agent_id: agentId,
-                parent_agent_where: this.selfBaseUrl,
-              },
-              parentAgentId: agentId,
-              provisionalChildId,
-            },
-          },
-        ]);
-
-        if (failures.length > 0) {
-          throw new Error(failures[0]!.error);
-        }
-        if (spawns.length === 0) {
-          throw new Error(`Spawn failed for ${agentDefId} on ${serverUrl}`);
-        }
-
-        const childId = spawns[0]!.actualAgentId;
-        return new Promise<JsonValue>((resolve) => {
-          this.pendingReturns.set(childId, { resolve });
-        });
-      },
-    };
-  }
-}
-
-// ===========================================================================
-// startServer — one-liner to boot an external server
-// ===========================================================================
-
-export function startServer(opts: {
-  port: number;
-  selfBaseUrl: string;
-  handlers: Record<string, AgentHandlerFn>;
-}): void {
-  const server = new ExternalServer(opts.selfBaseUrl);
-  for (const [name, handler] of Object.entries(opts.handlers)) {
-    server.registerHandler(name, handler);
-  }
+  const katariServer = new KatariServer(opts.endpoint, store, hooks);
 
   const app = new Hono();
   app.use("*", cors());
-  app.use("*", logger());
 
   const katariRouter = buildKatariRouter(
-    () => server,
+    () => katariServer,
     (msgs) => {
       if (msgs.length > 0) {
-        sendOutgoingMessages(msgs).catch((e) =>
-          console.error("outgoing messages failed:", e)
+        sendOutgoingMessages(msgs, log).catch((e) =>
+          log.log("error", `outgoing messages failed: ${e}`)
         );
       }
-    }
+    },
+    log
   );
-  app.route("/katari", katariRouter);
+  app.route("/", katariRouter);
 
   app.get("/health", (c) => c.json({ ok: true }));
 
-  console.log(`External server starting on port ${opts.port}`);
-  console.log(`Katari protocol at ${opts.selfBaseUrl}`);
+  log.log("info", `External server starting on port ${opts.port}`);
+  log.log("info", `Katari protocol at ${opts.endpoint}`);
   serve({ fetch: app.fetch, port: opts.port });
 }

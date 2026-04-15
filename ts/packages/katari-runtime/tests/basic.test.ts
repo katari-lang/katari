@@ -20,14 +20,21 @@ function emptyModule(): IRModule {
   };
 }
 
-function runAndGet(module: IRModule, agentName: string, args: Value[]): Value {
+async function runAndGet(module: IRModule, agentName: string, args: Value[]): Promise<Value> {
   const nameMap = new Map<string, number>();
   for (const a of module.agents) {
     nameMap.set(a.name, a.id);
   }
   const rt = new Runtime("http://test");
   rt.applyModule(module, nameMap, new Map());
-  const agentId = rt.runAgent(agentName, args);
+  const namedArgs: Record<string, Value> = {};
+  const agentDef = module.agents.find(a => a.name === agentName);
+  if (agentDef) {
+    for (let i = 0; i < agentDef.paramNames.length && i < args.length; i++) {
+      namedArgs[agentDef.paramNames[i]!] = args[i]!;
+    }
+  }
+  const agentId = await rt.runAgent(agentName, namedArgs);
   const status = rt.getAgentStatus(agentId);
   return status?.result ?? null;
 }
@@ -38,7 +45,7 @@ function runAndGet(module: IRModule, agentName: string, args: Value[]): Value {
 
 describe("Runtime basic tests", () => {
   // Test 1: Simple arithmetic (1 + 2 = 3)
-  it("simple add", () => {
+  it("simple add", async () => {
     const m = emptyModule();
     m.consts = [{ tag: "Int", value: 1 }, { tag: "Int", value: 2 }];
     m.threads = [{
@@ -50,13 +57,13 @@ describe("Runtime basic tests", () => {
         { op: "Complete", val: 2 },
       ],
     }];
-    m.agents = [{ id: 0, name: "test.add", entry: 0 }];
+    m.agents = [{ id: 0, name: "test.add", entry: 0, paramNames: [] }];
 
-    expect(runAndGet(m, "test.add", [])).toBe(3);
+    expect(await runAndGet(m, "test.add", [])).toBe(3);
   });
 
   // Test 2: Agent with parameters
-  it("agent with params", () => {
+  it("agent with params", async () => {
     const m = emptyModule();
     m.threads = [{
       id: 0, kind: "FnBody", params: [0, 1],
@@ -65,13 +72,13 @@ describe("Runtime basic tests", () => {
         { op: "Complete", val: 2 },
       ],
     }];
-    m.agents = [{ id: 0, name: "test.add_params", entry: 0 }];
+    m.agents = [{ id: 0, name: "test.add_params", entry: 0, paramNames: ["a", "b"] }];
 
-    expect(runAndGet(m, "test.add_params", [10, 20])).toBe(30);
+    expect(await runAndGet(m, "test.add_params", [10, 20])).toBe(30);
   });
 
   // Test 3: Branch (if/else)
-  it("branch true", () => {
+  it("branch true", async () => {
     const m = emptyModule();
     m.consts = [{ tag: "Int", value: 42 }, { tag: "Int", value: 99 }];
     m.threads = [{
@@ -85,14 +92,14 @@ describe("Runtime basic tests", () => {
         /* 5 */ { op: "Complete", val: 1 } as Instruction,
       ],
     }];
-    m.agents = [{ id: 0, name: "test.branch", entry: 0 }];
+    m.agents = [{ id: 0, name: "test.branch", entry: 0, paramNames: ["cond"] }];
 
-    expect(runAndGet(m, "test.branch", [true])).toBe(42);
-    expect(runAndGet(m, "test.branch", [false])).toBe(99);
+    expect(await runAndGet(m, "test.branch", [true])).toBe(42);
+    expect(await runAndGet(m, "test.branch", [false])).toBe(99);
   });
 
   // Test 4: Object creation and field access
-  it("object operations", () => {
+  it("object operations", async () => {
     const m = emptyModule();
     m.consts = [
       { tag: "Str", value: "x" },
@@ -110,33 +117,33 @@ describe("Runtime basic tests", () => {
         { op: "Complete", val: 3 },
       ],
     }];
-    m.agents = [{ id: 0, name: "test.obj", entry: 0 }];
+    m.agents = [{ id: 0, name: "test.obj", entry: 0, paramNames: [] }];
 
-    expect(runAndGet(m, "test.obj", [])).toBe(10);
+    expect(await runAndGet(m, "test.obj", [])).toBe(10);
   });
 
   // Test 5: Primitive agent call (prim.to_string)
-  it("prim to_string", () => {
+  it("prim to_string", async () => {
     const m = emptyModule();
     m.consts = [{ tag: "Int", value: 42 }];
     m.agents = [
-      { id: 0, name: "prim.to_string", entry: 100 },
-      { id: 1, name: "test.main", entry: 0 },
+      { id: 0, name: "prim.to_string", entry: 100, paramNames: ["v"] },
+      { id: 1, name: "test.main", entry: 0, paramNames: [] },
     ];
     m.threads = [{
       id: 0, kind: "FnBody", params: [],
       body: [
         { op: "LoadConst", dst: 0, cid: 0 },
-        { op: "Call", dst: 1, agentDefId: 0, args: [0] },
+        { op: "Call", dst: 1, agentDefId: 0, args: [["v", 0]] },
         { op: "Complete", val: 1 },
       ],
     }];
 
-    expect(runAndGet(m, "test.main", [])).toBe("42");
+    expect(await runAndGet(m, "test.main", [])).toBe("42");
   });
 
   // Test 6: For loop (sum of array)
-  it("for loop sum", () => {
+  it("for loop sum", async () => {
     const m = emptyModule();
     m.consts = [
       { tag: "Int", value: 1 },
@@ -186,20 +193,20 @@ describe("Runtime basic tests", () => {
       then: 2,
     }];
 
-    m.agents = [{ id: 0, name: "test.sum", entry: 0 }];
+    m.agents = [{ id: 0, name: "test.sum", entry: 0, paramNames: [] }];
 
-    expect(runAndGet(m, "test.sum", [])).toBe(6);
+    expect(await runAndGet(m, "test.sum", [])).toBe(6);
   });
 
   // Test 7: Handle with internal request
-  it("handle with request", () => {
+  it("handle with request", async () => {
     const m = emptyModule();
     m.consts = [
       { tag: "Int", value: 0 },
       { tag: "Int", value: 1 },
     ];
 
-    m.requests = [{ id: 0, name: "inc", from: null }];
+    m.requests = [{ id: 0, name: "inc", from: null, paramNames: [] }];
 
     // Thread 0 (FnBody): main
     m.threads.push({
@@ -247,13 +254,13 @@ describe("Runtime basic tests", () => {
       then: 3,
     }];
 
-    m.agents = [{ id: 0, name: "test.handle", entry: 0 }];
+    m.agents = [{ id: 0, name: "test.handle", entry: 0, paramNames: [] }];
 
-    expect(runAndGet(m, "test.handle", [])).toBe(1);
+    expect(await runAndGet(m, "test.handle", [])).toBe(1);
   });
 
   // Test 8: Par (parallel branches)
-  it("par", () => {
+  it("par", async () => {
     const m = emptyModule();
     m.consts = [{ tag: "Int", value: 10 }, { tag: "Int", value: 20 }];
 
@@ -281,13 +288,13 @@ describe("Runtime basic tests", () => {
       ],
     });
 
-    m.agents = [{ id: 0, name: "test.par", entry: 0 }];
+    m.agents = [{ id: 0, name: "test.par", entry: 0, paramNames: [] }];
 
-    expect(runAndGet(m, "test.par", [])).toEqual([10, 20]);
+    expect(await runAndGet(m, "test.par", [])).toEqual([10, 20]);
   });
 
   // Test 9: Local agent call (non-primitive ICall)
-  it("local agent call", () => {
+  it("local agent call", async () => {
     const m = emptyModule();
     m.consts = [{ tag: "Int", value: 5 }, { tag: "Int", value: 3 }];
 
@@ -305,7 +312,7 @@ describe("Runtime basic tests", () => {
       id: 0, kind: "FnBody", params: [],
       body: [
         { op: "LoadConst", dst: 100, cid: 0 },
-        { op: "Call", dst: 101, agentDefId: 0, args: [100] },
+        { op: "Call", dst: 101, agentDefId: 0, args: [["x", 100]] },
         { op: "LoadConst", dst: 102, cid: 1 },
         { op: "Add", dst: 103, lhs: 101, rhs: 102 },
         { op: "Complete", val: 103 },
@@ -313,15 +320,15 @@ describe("Runtime basic tests", () => {
     });
 
     m.agents = [
-      { id: 0, name: "test.double", entry: 10 },
-      { id: 1, name: "test.main", entry: 0 },
+      { id: 0, name: "test.double", entry: 10, paramNames: ["x"] },
+      { id: 1, name: "test.main", entry: 0, paramNames: [] },
     ];
 
-    expect(runAndGet(m, "test.main", [])).toBe(13);
+    expect(await runAndGet(m, "test.main", [])).toBe(13);
   });
 
   // Test 10: String concat
-  it("string operations", () => {
+  it("string operations", async () => {
     const m = emptyModule();
     m.consts = [
       { tag: "Str", value: "hello " },
@@ -336,8 +343,8 @@ describe("Runtime basic tests", () => {
         { op: "Complete", val: 2 },
       ],
     }];
-    m.agents = [{ id: 0, name: "test.str", entry: 0 }];
+    m.agents = [{ id: 0, name: "test.str", entry: 0, paramNames: [] }];
 
-    expect(runAndGet(m, "test.str", [])).toBe("hello world");
+    expect(await runAndGet(m, "test.str", [])).toBe("hello world");
   });
 });

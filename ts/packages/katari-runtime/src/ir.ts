@@ -147,14 +147,17 @@ const VERSION = [0x00, 0x03];
 
 class ByteReader {
   private pos = 0;
-  constructor(private buf: Buffer) {}
+  private view: DataView;
+  constructor(private buf: Uint8Array) {
+    this.view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+  }
 
   readByte(): number {
     if (this.pos >= this.buf.length) throw new Error("unexpected EOF");
     return this.buf[this.pos++]!;
   }
 
-  readBytes(n: number): Buffer {
+  readBytes(n: number): Uint8Array {
     if (this.pos + n > this.buf.length) throw new Error("unexpected EOF");
     const slice = this.buf.subarray(this.pos, this.pos + n);
     this.pos += n;
@@ -191,13 +194,16 @@ class ByteReader {
   }
 
   readF64(): number {
-    const bytes = this.readBytes(8);
-    return bytes.readDoubleLE(0);
+    const offset = this.pos;
+    this.pos += 8;
+    if (this.pos > this.buf.length) throw new Error("unexpected EOF");
+    return this.view.getFloat64(offset, true); // little-endian
   }
 
   readText(): string {
     const len = this.readU32();
-    return this.readBytes(len).toString("utf8");
+    const bytes = this.readBytes(len);
+    return new TextDecoder().decode(bytes);
   }
 
   readVec<T>(readItem: () => T): T[] {
@@ -215,7 +221,7 @@ class ByteReader {
   }
 }
 
-export function decodeModule(data: Buffer): IRModule {
+export function decodeModule(data: Uint8Array): IRModule {
   const r = new ByteReader(data);
 
   // Header

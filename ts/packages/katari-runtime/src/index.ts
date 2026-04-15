@@ -1,9 +1,10 @@
 import { serve } from "@hono/node-server";
 import { Runtime } from "./runtime/index.js";
-import { buildApp } from "./server.js";
-import { Db } from "./db.js";
+import { buildApp, resolveMetadata } from "./server.js";
+import { Db, createPostgresAdapter } from "./db.js";
 import { decodeModule } from "./ir.js";
 import type { JsonValue } from "katari-protocol";
+import { ConsoleRuntimeLogger } from "./logger.js";
 
 const PORT = parseInt(process.env["PORT"] ?? "8000", 10);
 const KATARI_BASE_URL = process.env["KATARI_BASE_URL"] ?? `http://localhost:${PORT}/katari`;
@@ -12,23 +13,26 @@ const DATABASE_URL =
   "postgresql://katari:katari@localhost:5432/katari";
 
 async function main() {
-  const db = new Db(DATABASE_URL);
+  const logger = new ConsoleRuntimeLogger({ prefix: "runtime" });
+
+  const adapter = await createPostgresAdapter(DATABASE_URL);
+  const db = new Db(adapter);
   await db.initialize();
 
   // Mark stale "running" agents from previous session as "stopped"
   const cleaned = await db.cleanupStaleAgents();
   if (cleaned > 0) {
-    console.log(`Cleaned up ${cleaned} stale agent(s) from previous session`);
+    logger.log("info", `Cleaned up ${cleaned} stale agent(s) from previous session`);
   }
 
-  const runtime = new Runtime(KATARI_BASE_URL);
+  const runtime = new Runtime(KATARI_BASE_URL, db, logger);
 
   // Wire toplevel agent lifecycle callbacks
   runtime.onAgentCompleted = async (agentId, result) => {
-    await db.updateToplevelAgent(agentId, "completed", result as JsonValue);
+    await db.updateAgentStatus(agentId, "completed", result as JsonValue);
   };
   runtime.onAgentError = async (agentId) => {
-    await db.updateToplevelAgent(agentId, "error", null);
+    await db.updateAgentStatus(agentId, "error", null);
   };
 
   // Restore latest module from DB
@@ -36,27 +40,24 @@ async function main() {
   if (saved) {
     try {
       const module = decodeModule(saved.ktriBinary);
-      const nameMap = new Map(Object.entries(saved.agentNameMap));
+      const aliasEndpoints = new Map(Object.entries(saved.aliasEndpoints));
       const schemas = new Map(
         Object.entries(saved.schemas)
       ) as Map<string, JsonValue>;
-      const externalAgents = new Map(
-        Object.entries(saved.externalAgents).map(([k, v]) => [
-          parseInt(k, 10),
-          v,
-        ])
-      );
-      const servers = new Map(Object.entries(saved.servers));
-      runtime.applyModule(module, nameMap, schemas, externalAgents, servers);
-      console.log(`Restored module: ${module.name}`);
+      const { nameMap, externalAgents } = resolveMetadata(saved.agents, aliasEndpoints);
+      runtime.applyModule(module, nameMap, schemas, externalAgents, aliasEndpoints);
+      logger.log("info", `Restored module: ${module.name}`);
+
+      // Restore running agents from DB
+      await runtime.restoreAgentsFromDb();
     } catch (e) {
-      console.warn("Failed to restore module:", e);
+      logger.log("warn", `Failed to restore module: ${e}`);
     }
   }
 
-  const app = buildApp(runtime, db);
+  const app = buildApp(runtime, db, logger);
 
-  console.log(`Katari Runtime listening on http://localhost:${PORT}`);
+  logger.log("info", `Katari Runtime listening on http://localhost:${PORT}`);
   serve({ fetch: app.fetch, port: PORT });
 }
 

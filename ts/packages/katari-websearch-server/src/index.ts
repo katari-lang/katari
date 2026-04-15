@@ -8,7 +8,8 @@ interface SearchResult {
 }
 
 const search: AgentHandlerFn = async (args) => {
-  const query = args.query as string;
+  const a = args as Record<string, JsonValue>;
+  const query = a.query as string;
 
   const apiKey = process.env.TAVILY_API_KEY;
   if (!apiKey) {
@@ -46,11 +47,14 @@ const search: AgentHandlerFn = async (args) => {
 };
 
 const port = parseInt(process.env.PORT ?? "8004", 10);
-const selfBaseUrl =
-  process.env.KATARI_BASE_URL ?? `http://localhost:${port}/katari`;
+const endpoint = process.env.KATARI_BASE_URL ?? `http://localhost:${port}`;
+const databaseUrl = process.env.DATABASE_URL;
 
 startServer({
   port,
-  selfBaseUrl,
-  handlers: { search },
+  endpoint,
+  databaseUrl,
+  agentDefs: {
+    search: { handler: search, description: "Search the web using Tavily" },
+  },
 });

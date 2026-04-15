@@ -37,8 +37,12 @@ services:
       - "${KATARI_DISCORD_PORT:-8001}:8001"
     environment:
       - PORT=8001
-      - KATARI_BASE_URL=http://discord:8001/katari
+      - KATARI_BASE_URL=http://discord:8001
+      - DATABASE_URL=postgresql://katari:katari@db:5432/katari
       - DISCORD_TOKEN=${DISCORD_TOKEN}
+    depends_on:
+      db:
+        condition: service_healthy
 
   ai:
     build:
@@ -48,10 +52,13 @@ services:
       - "${KATARI_AI_PORT:-8002}:8002"
     environment:
       - PORT=8002
-      - KATARI_BASE_URL=http://ai:8002/katari
-      - RUNTIME_KATARI_URL=http://runtime:8000/katari
+      - KATARI_BASE_URL=http://ai:8002
+      - DATABASE_URL=postgresql://katari:katari@db:5432/katari
       - GEMINI_API_KEY=${GEMINI_API_KEY}
       - AI_PROVIDER=${AI_PROVIDER:-gemini}
+    depends_on:
+      db:
+        condition: service_healthy
 
   cron:
     build:
@@ -61,7 +68,11 @@ services:
       - "${KATARI_CRON_PORT:-8003}:8003"
     environment:
       - PORT=8003
-      - KATARI_BASE_URL=http://cron:8003/katari
+      - KATARI_BASE_URL=http://cron:8003
+      - DATABASE_URL=postgresql://katari:katari@db:5432/katari
+    depends_on:
+      db:
+        condition: service_healthy
 
   websearch:
     build:
@@ -71,8 +82,12 @@ services:
       - "${KATARI_WEBSEARCH_PORT:-8004}:8004"
     environment:
       - PORT=8004
-      - KATARI_BASE_URL=http://websearch:8004/katari
+      - KATARI_BASE_URL=http://websearch:8004
+      - DATABASE_URL=postgresql://katari:katari@db:5432/katari
       - TAVILY_API_KEY=${TAVILY_API_KEY}
+    depends_on:
+      db:
+        condition: service_healthy
 
   sandbox:
     build:
@@ -80,11 +95,14 @@ services:
       dockerfile: packages/katari-sandbox-server/Dockerfile
     ports:
       - "${KATARI_SANDBOX_PORT:-8005}:8005"
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
     environment:
       - PORT=8005
-      - KATARI_BASE_URL=http://sandbox:8005/katari
+      - KATARI_BASE_URL=http://sandbox:8005
+      - DATABASE_URL=postgresql://katari:katari@db:5432/katari
+      - E2B_API_KEY=${E2B_API_KEY}
+    depends_on:
+      db:
+        condition: service_healthy
 
 volumes:
   pgdata:
