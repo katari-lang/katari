@@ -76,7 +76,7 @@ postApply :: Text -> Value -> IO (Either ApiError Value)
 postApply baseUrl = postJson (baseUrl <> "/apply")
 
 getSchemaAgents :: Text -> IO (Either ApiError Value)
-getSchemaAgents baseUrl = getJson (baseUrl <> "/katari/agent_def")
+getSchemaAgents baseUrl = getJson (baseUrl <> "/katari/agent_definitions")
 
 listAgents :: Text -> IO (Either ApiError Value)
 listAgents baseUrl = getJson (baseUrl <> "/agents")

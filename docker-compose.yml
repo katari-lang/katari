@@ -7,7 +7,7 @@ services:
       - "${KATARI_PORT:-8000}:8000"
     environment:
       - PORT=8000
-      - DATABASE_URL=postgresql://katari:katari@db:5432/katari
+      - DATABASE_URL=postgresql://katari:katari@db:5432/katari_runtime
       - KATARI_BASE_URL=http://runtime:8000/katari
     depends_on:
       db:
@@ -18,13 +18,14 @@ services:
     environment:
       - POSTGRES_USER=katari
       - POSTGRES_PASSWORD=katari
-      - POSTGRES_DB=katari
+      - POSTGRES_DB=postgres
     volumes:
       - pgdata:/var/lib/postgresql/data
+      - ./docker/postgres-init:/docker-entrypoint-initdb.d:ro
     ports:
       - "${KATARI_DB_PORT:-5432}:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U katari"]
+      test: ["CMD-SHELL", "pg_isready -U katari -d postgres"]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -38,7 +39,7 @@ services:
     environment:
       - PORT=8001
       - KATARI_BASE_URL=http://discord:8001
-      - DATABASE_URL=postgresql://katari:katari@db:5432/katari
+      - DATABASE_URL=postgresql://katari:katari@db:5432/katari_discord
       - DISCORD_TOKEN=${DISCORD_TOKEN}
     depends_on:
       db:
@@ -53,7 +54,7 @@ services:
     environment:
       - PORT=8002
       - KATARI_BASE_URL=http://ai:8002
-      - DATABASE_URL=postgresql://katari:katari@db:5432/katari
+      - DATABASE_URL=postgresql://katari:katari@db:5432/katari_ai
       - GEMINI_API_KEY=${GEMINI_API_KEY}
       - AI_PROVIDER=${AI_PROVIDER:-gemini}
     depends_on:
@@ -69,7 +70,7 @@ services:
     environment:
       - PORT=8003
       - KATARI_BASE_URL=http://cron:8003
-      - DATABASE_URL=postgresql://katari:katari@db:5432/katari
+      - DATABASE_URL=postgresql://katari:katari@db:5432/katari_cron
     depends_on:
       db:
         condition: service_healthy
@@ -83,7 +84,7 @@ services:
     environment:
       - PORT=8004
       - KATARI_BASE_URL=http://websearch:8004
-      - DATABASE_URL=postgresql://katari:katari@db:5432/katari
+      - DATABASE_URL=postgresql://katari:katari@db:5432/katari_websearch
       - TAVILY_API_KEY=${TAVILY_API_KEY}
     depends_on:
       db:
@@ -98,7 +99,7 @@ services:
     environment:
       - PORT=8005
       - KATARI_BASE_URL=http://sandbox:8005
-      - DATABASE_URL=postgresql://katari:katari@db:5432/katari
+      - DATABASE_URL=postgresql://katari:katari@db:5432/katari_sandbox
       - E2B_API_KEY=${E2B_API_KEY}
     depends_on:
       db:

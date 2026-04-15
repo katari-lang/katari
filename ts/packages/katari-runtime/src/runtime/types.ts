@@ -1,6 +1,6 @@
 import type { IRModule, IRThread, IRHandleDef, IRForDef, ConstVal, ThreadKind } from "../ir.js";
 import type { Value } from "../value.js";
-import type { OutgoingMessage, CapabilityRef, EscalationRef } from "katari-protocol";
+import type { CapabilityRef, EscalationRef, JsonValue } from "katari-protocol";
 import type { RuntimeLogger } from "../logger.js";
 
 // ===========================================================================
@@ -191,8 +191,16 @@ export type RuntimeEvent =
 // Outgoing Actions — result of synchronous event processing
 // ===========================================================================
 
+/** Protocol-level outbound actions — processed via KatariServer */
+export type ProtocolAction =
+  | { tag: "ProtocolDelegate"; targetEndpoint: string; agentDefId: string; input: JsonValue; capabilityRefs: CapabilityRef[]; delegationId: string }
+  | { tag: "ProtocolEscalate"; capabilityRef: CapabilityRef; input: JsonValue; escalationId: string }
+  | { tag: "ProtocolDelegateAck"; agentId: string; output: JsonValue }
+  | { tag: "ProtocolEscalateAck"; escalationRef: EscalationRef; escalationEndpoint: string; output: JsonValue }
+  | { tag: "ProtocolThrow"; delegationEndpoint: string; delegationId: string; message: string };
+
 export type OutgoingAction =
-  | OutgoingMessage
+  | ProtocolAction
   | { tag: "AgentCompleted"; agentId: string; value: Value }
   | { tag: "AgentError"; agentId: string }
   | { tag: "SpawnAgent"; parentAgentId: string; parentThreadId: number; agentDefId: number; args: Record<string, Value>; dst: number }

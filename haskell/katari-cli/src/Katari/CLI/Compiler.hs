@@ -15,9 +15,9 @@ import Data.Aeson.Key qualified as Key
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
-import Katari.IR (IRModule (..), NameTable (..))
+import Katari.IR (IRAgentDef (..), IRModule (..), NameTable (..))
 import Katari.Lowering (LowerError (..), lowerModules)
-import Katari.Module (AgentInfo (..), RequestInfo (..), GlobalEnv (..), buildGlobalEnv)
+import Katari.Module (AgentInfo (..), GlobalEnv (..), RequestInfo (..), buildGlobalEnv, primModuleName)
 import Katari.Schema (SchemaKind (..), SchemaOutput (..))
 import Katari.Syntax (Module)
 import Katari.Typechecker (typecheck)
@@ -54,8 +54,8 @@ buildAllOrDie modules = do
 
 -- | Build agent metadata: list of { name, block_id, kind, alias? }
 --
--- Each agent (internal or external) gets an entry.
--- Internal agents have kind="internal", external agents have kind="external" + alias.
+-- Uses DEFINED agent set (irmAgents), not referenced/called set (ntAgents).
+-- Only user-defined internal agents are exported.
 buildAgentMetadata :: GlobalEnv -> IRModule -> [Value]
 buildAgentMetadata ge irMod =
   [ case Map.lookup name (geAgents ge) >>= aiExtFrom of
@@ -72,8 +72,14 @@ buildAgentMetadata ge irMod =
             "kind" .= ("external" :: Text),
             "alias" .= fromStr
           ]
-    | (aid, name) <- Map.toList (ntAgents (irmNameTable irMod))
+    | IRAgentDef {iadId = aid, iadName = name} <- irmAgents irMod,
+      isPublicInternal name
   ]
+  where
+    isPublicInternal qname =
+      case Map.lookup qname (geAgents ge) of
+        Just ai -> aiExtFrom ai == Nothing && aiHomeModule ai /= primModuleName
+        Nothing -> False
 
 -- | Build request metadata: list of { name, request_id, kind, alias? }
 buildRequestMetadata :: GlobalEnv -> IRModule -> [Value]

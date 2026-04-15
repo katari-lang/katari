@@ -23,7 +23,7 @@ import type {
   CapabilityRef,
 } from "./types.js";
 import type { KatariStore } from "./store.js";
-import { InMemoryKatariStore, PostgresKatariStore, createPostgresAdapter } from "./store.js";
+import { PostgresKatariStore, createPostgresAdapter } from "./store.js";
 import { buildKatariRouter } from "./router.js";
 import { sendOutgoingMessages } from "./client.js";
 import type { KatariLogger } from "./logger.js";
@@ -61,7 +61,11 @@ export class KatariServer {
   private endpoint: string;
   private pendingMessages: OutgoingMessage[] = [];
 
-  constructor(endpoint: string, store: KatariStore, hooks: KatariServerHooks = {}) {
+  constructor(
+    endpoint: string,
+    store: KatariStore,
+    hooks: KatariServerHooks = {},
+  ) {
     this.endpoint = endpoint;
     this.store = store;
     this.hooks = hooks;
@@ -72,7 +76,7 @@ export class KatariServer {
   // =========================================================================
 
   async handleDelegate(
-    req: DelegateRequest
+    req: DelegateRequest,
   ): Promise<HandlerResult<DelegateResponse>> {
     const agentDef = await this.store.getAgentDefinition(req.agent_def_ref.id);
     if (!agentDef) return `agent definition ${req.agent_def_ref.id} not found`;
@@ -103,9 +107,7 @@ export class KatariServer {
   // POST /delegate_ack — child completed, parent receives result
   // =========================================================================
 
-  async handleDelegateAck(
-    req: DelegateAckRequest
-  ): Promise<HandlerResult> {
+  async handleDelegateAck(req: DelegateAckRequest): Promise<HandlerResult> {
     const delegation = await this.store.getDelegation(req.delegation_ref.id);
     if (!delegation) return `delegation ${req.delegation_ref.id} not found`;
 
@@ -123,9 +125,7 @@ export class KatariServer {
   // POST /escalate — child escalates to a capability on THIS server
   // =========================================================================
 
-  async handleEscalate(
-    req: EscalateRequest
-  ): Promise<HandlerResult> {
+  async handleEscalate(req: EscalateRequest): Promise<HandlerResult> {
     const capability = await this.store.getCapability(req.capability_ref.id);
     if (!capability) return `capability ${req.capability_ref.id} not found`;
 
@@ -139,7 +139,7 @@ export class KatariServer {
         capability_ref: req.capability_ref,
         input: req.input,
       },
-      capability
+      capability,
     );
     const messages = this.drainPendingMessages();
 
@@ -150,9 +150,7 @@ export class KatariServer {
   // POST /escalate_ack — capability handler completed, child receives result
   // =========================================================================
 
-  async handleEscalateAck(
-    req: EscalateAckRequest
-  ): Promise<HandlerResult> {
+  async handleEscalateAck(req: EscalateAckRequest): Promise<HandlerResult> {
     const escalation = await this.store.getEscalation(req.escalation_ref.id);
     if (!escalation) return `escalation ${req.escalation_ref.id} not found`;
 
@@ -170,17 +168,16 @@ export class KatariServer {
   // POST /terminate — parent tells child to stop
   // =========================================================================
 
-  async handleTerminate(
-    req: TerminateRequest
-  ): Promise<HandlerResult> {
+  async handleTerminate(req: TerminateRequest): Promise<HandlerResult> {
     const delegation = await this.store.getDelegation(req.delegation_ref.id);
     if (!delegation) return `delegation ${req.delegation_ref.id} not found`;
 
     // Find agent by delegation
     const agents = await this.store.listAgents();
     const agent = agents.find(
-      (a) => a.delegation_ref?.id === delegation.id &&
-             a.delegation_ref?.endpoint === delegation.endpoint
+      (a) =>
+        a.delegation_ref?.id === delegation.id &&
+        a.delegation_ref?.endpoint === delegation.endpoint,
     );
     if (agent) {
       await this.store.updateAgentStatus(agent.id, "TERMINATING");
@@ -197,9 +194,7 @@ export class KatariServer {
   // POST /terminate_ack — child confirms termination complete
   // =========================================================================
 
-  async handleTerminateAck(
-    req: TerminateAckRequest
-  ): Promise<HandlerResult> {
+  async handleTerminateAck(req: TerminateAckRequest): Promise<HandlerResult> {
     const delegation = await this.store.getDelegation(req.delegation_ref.id);
     if (!delegation) return `delegation ${req.delegation_ref.id} not found`;
 
@@ -217,9 +212,7 @@ export class KatariServer {
   // POST /throw — child reports error
   // =========================================================================
 
-  async handleThrow(
-    req: ThrowRequest
-  ): Promise<HandlerResult> {
+  async handleThrow(req: ThrowRequest): Promise<HandlerResult> {
     const delegation = await this.store.getDelegation(req.delegation_ref.id);
     if (!delegation) return `delegation ${req.delegation_ref.id} not found`;
 
@@ -282,9 +275,10 @@ export class KatariServer {
     targetEndpoint: string,
     agentDefId: string,
     input: JsonValue,
-    capabilityRefs: CapabilityRef[]
+    capabilityRefs: CapabilityRef[],
+    delegationId?: string,
   ): Promise<{ delegationId: string; message: OutgoingMessage }> {
-    const delegationId = randomUUID();
+    delegationId = delegationId ?? randomUUID();
     const delegation: Delegation = {
       id: delegationId,
       endpoint: this.endpoint,
@@ -314,7 +308,7 @@ export class KatariServer {
   /** Send delegate_ack to parent (cleans up local agent + capabilities first) */
   async sendDelegateAck(
     agentRef: AgentRef,
-    output: JsonValue
+    output: JsonValue,
   ): Promise<OutgoingMessage | null> {
     const agent = await this.store.getAgent(agentRef.id);
     if (!agent || !agent.delegation_ref) return null;
@@ -339,9 +333,10 @@ export class KatariServer {
   /** Send escalation to a capability's endpoint */
   async sendEscalate(
     capabilityRef: CapabilityRef,
-    input: JsonValue
+    input: JsonValue,
+    escalationId?: string,
   ): Promise<{ escalationId: string; message: OutgoingMessage }> {
-    const escalationId = randomUUID();
+    escalationId = escalationId ?? randomUUID();
     const escalation: Escalation = {
       id: escalationId,
       endpoint: this.endpoint,
@@ -369,7 +364,7 @@ export class KatariServer {
   async sendEscalateAck(
     escalationEndpoint: string,
     escalationId: string,
-    output: JsonValue
+    output: JsonValue,
   ): Promise<OutgoingMessage> {
     return {
       toEndpoint: escalationEndpoint,
@@ -414,7 +409,7 @@ export interface AgentContext {
     targetEndpoint: string,
     agentDefId: string,
     input: JsonValue,
-    capabilityRefs?: CapabilityRef[]
+    capabilityRefs?: CapabilityRef[],
   ): Promise<JsonValue>;
 }
 
@@ -424,7 +419,7 @@ export interface AgentContext {
 
 export type AgentHandlerFn = (
   args: JsonValue,
-  ctx: AgentContext
+  ctx: AgentContext,
 ) => Promise<JsonValue>;
 
 export async function startServer(opts: {
@@ -444,10 +439,14 @@ export async function startServer(opts: {
     store = pgStore;
     log.log("info", "Using PostgreSQL store for protocol resources");
   } else {
-    store = new InMemoryKatariStore();
-    log.log("info", "Using in-memory store for protocol resources");
+    throw new Error(
+      "databaseUrl is required. Refusing to start without persistent protocol store.",
+    );
   }
-  const pendingDelegateAcks = new Map<string, { resolve: (v: JsonValue) => void }>();
+  const pendingDelegateAcks = new Map<
+    string,
+    { resolve: (v: JsonValue) => void }
+  >();
 
   // Register agent definitions
   for (const [name, def] of Object.entries(opts.agentDefs)) {
@@ -473,11 +472,13 @@ export async function startServer(opts: {
         capabilityRefs: req.capability_refs,
 
         escalate(capabilityRef, input) {
-          katariServer.sendEscalate(capabilityRef, input).then(({ message }) => {
-            sendOutgoingMessages([message], log).catch((e) =>
-              log.log("error", `escalate send failed: ${e}`)
-            );
-          });
+          katariServer
+            .sendEscalate(capabilityRef, input)
+            .then(({ message }) => {
+              sendOutgoingMessages([message], log).catch((e) =>
+                log.log("error", `escalate send failed: ${e}`),
+              );
+            });
         },
 
         async delegateAndWait(targetEndpoint, agentDefId, input, capRefs) {
@@ -485,10 +486,10 @@ export async function startServer(opts: {
             targetEndpoint,
             agentDefId,
             input,
-            capRefs ?? []
+            capRefs ?? [],
           );
           sendOutgoingMessages([message], log).catch((e) =>
-            log.log("error", `delegate send failed: ${e}`)
+            log.log("error", `delegate send failed: ${e}`),
           );
           return new Promise<JsonValue>((resolve) => {
             pendingDelegateAcks.set(delegationId, { resolve });
@@ -497,23 +498,27 @@ export async function startServer(opts: {
       };
 
       // Run handler asynchronously
-      handlerEntry.handler(agent.input, ctx)
+      handlerEntry
+        .handler(agent.input, ctx)
         .then(async (result) => {
           const msg = await katariServer.sendDelegateAck(
             { id: agent.id, endpoint: opts.endpoint },
-            result
+            result,
           );
           if (msg) {
             sendOutgoingMessages([msg], log).catch((e) =>
-              log.log("error", `delegate_ack send failed: ${e}`)
+              log.log("error", `delegate_ack send failed: ${e}`),
             );
           }
         })
         .catch(async (err) => {
-          log.log("error", `Handler error for ${agent.definition_ref.id}: ${err}`);
+          log.log(
+            "error",
+            `Handler error for ${agent.definition_ref.id}: ${err}`,
+          );
           const msg = await katariServer.sendDelegateAck(
             { id: agent.id, endpoint: opts.endpoint },
-            null
+            null,
           );
           if (msg) {
             sendOutgoingMessages([msg], log).catch(() => {});
@@ -532,11 +537,12 @@ export async function startServer(opts: {
     async onTerminate(delegation) {
       // Find and delete the agent
       const agents = await store.listAgents();
-      const agent = agents.find(
-        (a) => a.delegation_ref?.id === delegation.id
-      );
+      const agent = agents.find((a) => a.delegation_ref?.id === delegation.id);
       if (agent) {
-        await store.deleteCapabilitiesByAgent({ id: agent.id, endpoint: opts.endpoint });
+        await store.deleteCapabilitiesByAgent({
+          id: agent.id,
+          endpoint: opts.endpoint,
+        });
         await store.deleteAgent(agent.id);
       }
 
@@ -545,7 +551,12 @@ export async function startServer(opts: {
         toEndpoint: delegation.endpoint,
         kind: {
           type: "TerminateAck",
-          body: { delegation_ref: { id: delegation.id, endpoint: delegation.endpoint } },
+          body: {
+            delegation_ref: {
+              id: delegation.id,
+              endpoint: delegation.endpoint,
+            },
+          },
         },
       });
     },
@@ -561,13 +572,13 @@ export async function startServer(opts: {
     (msgs) => {
       if (msgs.length > 0) {
         sendOutgoingMessages(msgs, log).catch((e) =>
-          log.log("error", `outgoing messages failed: ${e}`)
+          log.log("error", `outgoing messages failed: ${e}`),
         );
       }
     },
-    log
+    log,
   );
-  app.route("/", katariRouter);
+  app.route("/katari", katariRouter);
 
   app.get("/health", (c) => c.json({ ok: true }));
 

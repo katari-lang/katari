@@ -1092,14 +1092,10 @@ function sendReply(
 ): void {
   if (requester.escalationRef && requester.escalationEndpoint) {
     actions.push({
-      toEndpoint: requester.escalationEndpoint,
-      kind: {
-        type: "EscalateAck",
-        body: {
-          escalation_ref: requester.escalationRef,
-          output: value as JsonValue,
-        },
-      },
+      tag: "ProtocolEscalateAck",
+      escalationRef: requester.escalationRef,
+      escalationEndpoint: requester.escalationEndpoint,
+      output: value as JsonValue,
     });
   }
   // Internal requester will be resumed via continue event on the target thread

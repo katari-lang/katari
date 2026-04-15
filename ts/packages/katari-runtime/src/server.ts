@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import {
   KatariServer,
-  InMemoryKatariStore,
+  type KatariStore,
   buildKatariRouter,
   sendOutgoingMessages,
 } from "katari-protocol";
@@ -51,28 +51,35 @@ interface ApplyResponse {
 // Build server app
 // ===========================================================================
 
-export function buildApp(runtime: Runtime, db: Db, logger?: KatariLogger): Hono {
+export function buildApp(
+  runtime: Runtime,
+  db: Db,
+  protocolStore: KatariStore,
+  logger?: KatariLogger,
+): Hono {
   const log = logger ?? new NullKatariLogger();
   const app = new Hono();
   app.use("*", cors());
 
   // Create protocol server with Runtime's hooks
-  const protocolStore = new InMemoryKatariStore();
   const katariServer = new KatariServer(
     runtime.getEndpoint(),
     protocolStore,
-    runtime.createHooks()
+    runtime.createHooks(),
   );
+  runtime.setProtocolServer(katariServer);
 
   const handleMessages = (msgs: OutgoingMessage[]) => {
     if (msgs.length > 0) {
-      sendOutgoingMessages(msgs, log).then(({ failures }) => {
-        for (const f of failures) {
-          log.log("error", `Outgoing message failed: ${f.error}`);
-        }
-      }).catch((e) => {
-        log.log("error", `sendOutgoingMessages failed: ${e}`);
-      });
+      sendOutgoingMessages(msgs, log)
+        .then(({ failures }) => {
+          for (const f of failures) {
+            log.log("error", `Outgoing message failed: ${f.error}`);
+          }
+        })
+        .catch((e) => {
+          log.log("error", `sendOutgoingMessages failed: ${e}`);
+        });
     }
   };
 
@@ -87,23 +94,85 @@ export function buildApp(runtime: Runtime, db: Db, logger?: KatariLogger): Hono 
       const binary = base64ToUint8Array(body.ir_binary);
       const module = decodeModule(binary);
 
-      const aliasEndpoints = new Map(Object.entries(body.alias_endpoints ?? {}));
-      const schemas = new Map(Object.entries(body.schemas ?? {})) as Map<string, JsonValue>;
+      const aliasEndpoints = new Map(
+        Object.entries(body.alias_endpoints ?? {}),
+      );
+      const schemas = new Map(Object.entries(body.schemas ?? {})) as Map<
+        string,
+        JsonValue
+      >;
 
-      const { nameMap, externalAgents } = resolveMetadata(body.agents, aliasEndpoints);
+      const { nameMap, externalAgents } = resolveMetadata(
+        body.agents,
+        aliasEndpoints,
+      );
 
-      runtime.applyModule(module, nameMap, schemas, externalAgents, aliasEndpoints);
+      runtime.applyModule(
+        module,
+        nameMap,
+        schemas,
+        externalAgents,
+        aliasEndpoints,
+      );
+
+      // Drop old runtime-owned protocol resources to avoid stale entries
+      await clearRuntimeProtocolResources(protocolStore, runtime.getEndpoint());
+
+      // Register templates (requests) in protocol store
+      const requests = body.requests ?? [];
+      for (const req of requests) {
+        if (req.kind === "internal") {
+          const reqSchema = schemas.get(req.name) as
+            | Record<string, JsonValue>
+            | undefined;
+          await protocolStore.createTemplate({
+            id: String(req.request_id),
+            endpoint: runtime.getEndpoint(),
+            name: req.name,
+            description: (reqSchema?.description as string) ?? undefined,
+            input_schema: reqSchema?.arg_type ?? null,
+            output_schema: reqSchema?.return_type ?? null,
+          });
+        }
+      }
+
+      // Build a lookup from request name to TemplateRef
+      const templateRefsByName = new Map<
+        string,
+        { id: string; endpoint: string }
+      >();
+      for (const req of requests) {
+        templateRefsByName.set(req.name, {
+          id: String(req.request_id),
+          endpoint:
+            req.kind === "internal"
+              ? runtime.getEndpoint()
+              : (aliasEndpoints.get(req.alias?.split(":")[0] ?? "") ??
+                runtime.getEndpoint()),
+        });
+      }
 
       // Register agent definitions in protocol store
       for (const entry of body.agents) {
         if (entry.kind === "internal") {
+          const schema = schemas.get(entry.name) as
+            | Record<string, JsonValue>
+            | undefined;
+          const withEffects =
+            (schema?.with_effects as string[] | undefined) ?? [];
+          const templateRefs = withEffects
+            .map((name) => templateRefsByName.get(name))
+            .filter(
+              (ref): ref is { id: string; endpoint: string } => ref != null,
+            );
           await protocolStore.createAgentDefinition({
             id: String(entry.block_id),
             endpoint: runtime.getEndpoint(),
             name: entry.name,
-            description: "",
-            input_schema: null,
-            output_schema: null,
+            description: (schema?.description as string) ?? "",
+            input_schema: schema?.arg_type ?? null,
+            output_schema: schema?.return_type ?? null,
+            template_refs: templateRefs.length > 0 ? templateRefs : undefined,
           });
         }
       }
@@ -115,7 +184,7 @@ export function buildApp(runtime: Runtime, db: Db, logger?: KatariLogger): Hono 
         body.agents as unknown as Record<string, unknown>,
         body.schemas ?? {},
         body.requests ?? {},
-        body.alias_endpoints ?? {}
+        body.alias_endpoints ?? {},
       );
 
       const response: ApplyResponse = {
@@ -128,7 +197,7 @@ export function buildApp(runtime: Runtime, db: Db, logger?: KatariLogger): Hono 
     } catch (e) {
       return c.json(
         { ok: false, error: String(e) } satisfies ApplyResponse,
-        400
+        400,
       );
     }
   });
@@ -147,10 +216,16 @@ export function buildApp(runtime: Runtime, db: Db, logger?: KatariLogger): Hono 
 
   // POST /agents
   agentsRouter.post("/", async (c) => {
-    const body = (await c.req.json()) as { agent_name: string; args?: Record<string, JsonValue> };
+    const body = (await c.req.json()) as {
+      agent_name: string;
+      args?: Record<string, JsonValue>;
+    };
 
     try {
-      const agentId = await runtime.runAgent(body.agent_name, (body.args ?? {}) as Record<string, Value>);
+      const agentId = await runtime.runAgent(
+        body.agent_name,
+        (body.args ?? {}) as Record<string, Value>,
+      );
 
       const msgs = runtime.drainMessages();
       handleMessages(msgs);
@@ -206,7 +281,10 @@ export function buildApp(runtime: Runtime, db: Db, logger?: KatariLogger): Hono 
 
     if (row.status === "running") {
       await db.updateAgentStatus(id, "stopped", null);
-      return c.json({ ok: true, note: "agent was stale (not in runtime memory)" });
+      return c.json({
+        ok: true,
+        note: "agent was stale (not in runtime memory)",
+      });
     }
 
     return c.json({ error: `agent already ${row.status}` }, 400);
@@ -224,8 +302,9 @@ export function buildApp(runtime: Runtime, db: Db, logger?: KatariLogger): Hono 
       const runtimeMsgs = runtime.drainMessages();
       handleMessages([...msgs, ...runtimeMsgs]);
     },
-    log
+    log,
   );
+
   app.route("/katari", katariRouter);
 
   // ==========================================================================
@@ -237,16 +316,41 @@ export function buildApp(runtime: Runtime, db: Db, logger?: KatariLogger): Hono 
   return app;
 }
 
+async function clearRuntimeProtocolResources(
+  store: KatariStore,
+  endpoint: string,
+): Promise<void> {
+  const [defs, templates] = await Promise.all([
+    store.listAgentDefinitions(),
+    store.listTemplates(),
+  ]);
+
+  await Promise.all([
+    ...defs
+      .filter((d) => d.endpoint === endpoint)
+      .map((d) => store.deleteAgentDefinition(d.id)),
+    ...templates
+      .filter((t) => t.endpoint === endpoint)
+      .map((t) => store.deleteTemplate(t.id)),
+  ]);
+}
+
 /** Convert new metadata format to the maps the runtime expects */
 export function resolveMetadata(
   agents: { name: string; block_id: number; kind: string; alias?: string }[],
-  aliasEndpoints: Map<string, string>
+  aliasEndpoints: Map<string, string>,
 ): {
   nameMap: Map<string, number>;
-  externalAgents: Map<number, { agent_def_id: string; agent_def_where: string }>;
+  externalAgents: Map<
+    number,
+    { agent_def_id: string; agent_def_where: string }
+  >;
 } {
   const nameMap = new Map<string, number>();
-  const externalAgents = new Map<number, { agent_def_id: string; agent_def_where: string }>();
+  const externalAgents = new Map<
+    number,
+    { agent_def_id: string; agent_def_where: string }
+  >();
   for (const entry of agents) {
     nameMap.set(entry.name, entry.block_id);
     if (entry.kind === "external" && entry.alias) {

@@ -127,9 +127,21 @@ startServer({
   endpoint,
   databaseUrl,
   agentDefs: {
-    watch_channel: { handler: watchChannel, description: "Watch a Discord channel for new messages" },
-    send_message: { handler: sendMessage, description: "Send a message to a Discord channel" },
-    reply_to: { handler: replyTo, description: "Reply to a specific Discord message" },
-    fetch_messages: { handler: fetchMessages, description: "Fetch recent messages from a Discord channel" },
+    watch_channel: {
+      handler: watchChannel,
+      description: "Watch a Discord channel for new messages",
+    },
+    send_message: {
+      handler: sendMessage,
+      description: "Send a message to a Discord channel",
+    },
+    reply_to: {
+      handler: replyTo,
+      description: "Reply to a specific Discord message",
+    },
+    fetch_messages: {
+      handler: fetchMessages,
+      description: "Fetch recent messages from a Discord channel",
+    },
   },
 });

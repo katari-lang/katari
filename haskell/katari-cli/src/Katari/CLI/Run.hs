@@ -88,7 +88,7 @@ parseAgentDefs = \case
     parseOne = \case
       Object o -> do
         String name <- KM.lookup "name" o
-        let argType = maybe Null id (KM.lookup "arg_type" o)
+        let argType = maybe Null id (KM.lookup "input_schema" o)
         Just (AgentDef name argType)
       _ -> Nothing
 

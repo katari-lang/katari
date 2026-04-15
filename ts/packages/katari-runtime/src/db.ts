@@ -228,14 +228,6 @@ export class Db {
     return rows.map((r) => this.toAgentRow(r));
   }
 
-  async cleanupStaleAgents(): Promise<number> {
-    await this.sql.query(
-      `UPDATE agents SET status = 'stopped', finished_at = NOW()
-       WHERE status = 'running'`
-    );
-    return this.sql.lastCount;
-  }
-
   private toAgentRow(r: Record<string, unknown>): AgentRow {
     return {
       id: r.id as string,

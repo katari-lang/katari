@@ -31,6 +31,9 @@ startServer({
   endpoint,
   databaseUrl,
   agentDefs: {
-    schedule: { handler: schedule, description: "Schedule a cron job that escalates on each tick" },
+    schedule: {
+      handler: schedule,
+      description: "Schedule a cron job that escalates on each tick",
+    },
   },
 });

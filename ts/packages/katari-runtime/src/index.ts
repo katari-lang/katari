@@ -3,11 +3,12 @@ import { Runtime } from "./runtime/index.js";
 import { buildApp, resolveMetadata } from "./server.js";
 import { Db, createPostgresAdapter } from "./db.js";
 import { decodeModule } from "./ir.js";
-import type { JsonValue } from "katari-protocol";
+import { PostgresKatariStore, type JsonValue } from "katari-protocol";
 import { ConsoleRuntimeLogger } from "./logger.js";
 
 const PORT = parseInt(process.env["PORT"] ?? "8000", 10);
-const KATARI_BASE_URL = process.env["KATARI_BASE_URL"] ?? `http://localhost:${PORT}/katari`;
+const KATARI_BASE_URL =
+  process.env["KATARI_BASE_URL"] ?? `http://localhost:${PORT}/katari`;
 const DATABASE_URL =
   process.env["DATABASE_URL"] ??
   "postgresql://katari:katari@localhost:5432/katari";
@@ -19,11 +20,8 @@ async function main() {
   const db = new Db(adapter);
   await db.initialize();
 
-  // Mark stale "running" agents from previous session as "stopped"
-  const cleaned = await db.cleanupStaleAgents();
-  if (cleaned > 0) {
-    logger.log("info", `Cleaned up ${cleaned} stale agent(s) from previous session`);
-  }
+  const protocolStore = new PostgresKatariStore(adapter);
+  await protocolStore.initialize();
 
   const runtime = new Runtime(KATARI_BASE_URL, db, logger);
 
@@ -41,11 +39,21 @@ async function main() {
     try {
       const module = decodeModule(saved.ktriBinary);
       const aliasEndpoints = new Map(Object.entries(saved.aliasEndpoints));
-      const schemas = new Map(
-        Object.entries(saved.schemas)
-      ) as Map<string, JsonValue>;
-      const { nameMap, externalAgents } = resolveMetadata(saved.agents, aliasEndpoints);
-      runtime.applyModule(module, nameMap, schemas, externalAgents, aliasEndpoints);
+      const schemas = new Map(Object.entries(saved.schemas)) as Map<
+        string,
+        JsonValue
+      >;
+      const { nameMap, externalAgents } = resolveMetadata(
+        saved.agents,
+        aliasEndpoints,
+      );
+      runtime.applyModule(
+        module,
+        nameMap,
+        schemas,
+        externalAgents,
+        aliasEndpoints,
+      );
       logger.log("info", `Restored module: ${module.name}`);
 
       // Restore running agents from DB
@@ -55,7 +63,7 @@ async function main() {
     }
   }
 
-  const app = buildApp(runtime, db, logger);
+  const app = buildApp(runtime, db, protocolStore, logger);
 
   logger.log("info", `Katari Runtime listening on http://localhost:${PORT}`);
   serve({ fetch: app.fetch, port: PORT });

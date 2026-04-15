@@ -141,7 +141,10 @@ export class InMemoryKatariStore implements KatariStore {
   }
   async deleteCapabilitiesByAgent(agentRef: AgentRef): Promise<void> {
     for (const [id, cap] of this.capabilities) {
-      if (cap.agent_ref.id === agentRef.id && cap.agent_ref.endpoint === agentRef.endpoint) {
+      if (
+        cap.agent_ref.id === agentRef.id &&
+        cap.agent_ref.endpoint === agentRef.endpoint
+      ) {
         this.capabilities.delete(id);
       }
     }
@@ -243,7 +246,10 @@ export class PostgresKatariStore implements KatariStore {
     return rows.map(rowToAgentDef);
   }
   async getAgentDefinition(id: string): Promise<AgentDefinition | null> {
-    const rows = await this.sql.query(`SELECT * FROM katari_agent_definitions WHERE id = $1`, [id]);
+    const rows = await this.sql.query(
+      `SELECT * FROM katari_agent_definitions WHERE id = $1`,
+      [id],
+    );
     return rows.length > 0 ? rowToAgentDef(rows[0]!) : null;
   }
   async createAgentDefinition(def: AgentDefinition): Promise<void> {
@@ -253,13 +259,21 @@ export class PostgresKatariStore implements KatariStore {
        ON CONFLICT (id) DO UPDATE SET endpoint=EXCLUDED.endpoint, name=EXCLUDED.name,
          description=EXCLUDED.description, input_schema=EXCLUDED.input_schema,
          output_schema=EXCLUDED.output_schema, template_refs=EXCLUDED.template_refs`,
-      [def.id, def.endpoint, def.name, def.description ?? null,
-       JSON.stringify(def.input_schema), JSON.stringify(def.output_schema),
-       JSON.stringify(def.template_refs ?? null)]
+      [
+        def.id,
+        def.endpoint,
+        def.name,
+        def.description ?? null,
+        JSON.stringify(def.input_schema),
+        JSON.stringify(def.output_schema),
+        JSON.stringify(def.template_refs ?? null),
+      ],
     );
   }
   async deleteAgentDefinition(id: string): Promise<void> {
-    await this.sql.query(`DELETE FROM katari_agent_definitions WHERE id = $1`, [id]);
+    await this.sql.query(`DELETE FROM katari_agent_definitions WHERE id = $1`, [
+      id,
+    ]);
   }
 
   // Agent
@@ -268,20 +282,31 @@ export class PostgresKatariStore implements KatariStore {
     return rows.map(rowToAgent);
   }
   async getAgent(id: string): Promise<Agent | null> {
-    const rows = await this.sql.query(`SELECT * FROM katari_agents WHERE id = $1`, [id]);
+    const rows = await this.sql.query(
+      `SELECT * FROM katari_agents WHERE id = $1`,
+      [id],
+    );
     return rows.length > 0 ? rowToAgent(rows[0]!) : null;
   }
   async createAgent(agent: Agent): Promise<void> {
     await this.sql.query(
       `INSERT INTO katari_agents (id, endpoint, input, definition_ref, delegation_ref, status)
        VALUES ($1, $2, $3, $4, $5, $6)`,
-      [agent.id, agent.endpoint, JSON.stringify(agent.input),
-       JSON.stringify(agent.definition_ref), JSON.stringify(agent.delegation_ref),
-       agent.status]
+      [
+        agent.id,
+        agent.endpoint,
+        JSON.stringify(agent.input),
+        JSON.stringify(agent.definition_ref),
+        JSON.stringify(agent.delegation_ref),
+        agent.status,
+      ],
     );
   }
   async updateAgentStatus(id: string, status: AgentStatus): Promise<void> {
-    await this.sql.query(`UPDATE katari_agents SET status = $1 WHERE id = $2`, [status, id]);
+    await this.sql.query(`UPDATE katari_agents SET status = $1 WHERE id = $2`, [
+      status,
+      id,
+    ]);
   }
   async deleteAgent(id: string): Promise<void> {
     await this.sql.query(`DELETE FROM katari_agents WHERE id = $1`, [id]);
@@ -293,15 +318,23 @@ export class PostgresKatariStore implements KatariStore {
     return rows.map(rowToDelegation);
   }
   async getDelegation(id: string): Promise<Delegation | null> {
-    const rows = await this.sql.query(`SELECT * FROM katari_delegations WHERE id = $1`, [id]);
+    const rows = await this.sql.query(
+      `SELECT * FROM katari_delegations WHERE id = $1`,
+      [id],
+    );
     return rows.length > 0 ? rowToDelegation(rows[0]!) : null;
   }
   async createDelegation(delegation: Delegation): Promise<void> {
     await this.sql.query(
       `INSERT INTO katari_delegations (id, endpoint, agent_def_ref, input, capability_refs)
        VALUES ($1, $2, $3, $4, $5)`,
-      [delegation.id, delegation.endpoint, JSON.stringify(delegation.agent_def_ref),
-       JSON.stringify(delegation.input), JSON.stringify(delegation.capability_refs)]
+      [
+        delegation.id,
+        delegation.endpoint,
+        JSON.stringify(delegation.agent_def_ref),
+        JSON.stringify(delegation.input),
+        JSON.stringify(delegation.capability_refs),
+      ],
     );
   }
   async deleteDelegation(id: string): Promise<void> {
@@ -314,15 +347,24 @@ export class PostgresKatariStore implements KatariStore {
     return rows.map(rowToTemplate);
   }
   async getTemplate(id: string): Promise<Template | null> {
-    const rows = await this.sql.query(`SELECT * FROM katari_templates WHERE id = $1`, [id]);
+    const rows = await this.sql.query(
+      `SELECT * FROM katari_templates WHERE id = $1`,
+      [id],
+    );
     return rows.length > 0 ? rowToTemplate(rows[0]!) : null;
   }
   async createTemplate(template: Template): Promise<void> {
     await this.sql.query(
       `INSERT INTO katari_templates (id, endpoint, name, description, input_schema, output_schema)
        VALUES ($1, $2, $3, $4, $5, $6)`,
-      [template.id, template.endpoint, template.name, template.description ?? null,
-       JSON.stringify(template.input_schema), JSON.stringify(template.output_schema)]
+      [
+        template.id,
+        template.endpoint,
+        template.name,
+        template.description ?? null,
+        JSON.stringify(template.input_schema),
+        JSON.stringify(template.output_schema),
+      ],
     );
   }
   async deleteTemplate(id: string): Promise<void> {
@@ -335,15 +377,22 @@ export class PostgresKatariStore implements KatariStore {
     return rows.map(rowToCapability);
   }
   async getCapability(id: string): Promise<Capability | null> {
-    const rows = await this.sql.query(`SELECT * FROM katari_capabilities WHERE id = $1`, [id]);
+    const rows = await this.sql.query(
+      `SELECT * FROM katari_capabilities WHERE id = $1`,
+      [id],
+    );
     return rows.length > 0 ? rowToCapability(rows[0]!) : null;
   }
   async createCapability(capability: Capability): Promise<void> {
     await this.sql.query(
       `INSERT INTO katari_capabilities (id, endpoint, template_ref, agent_ref)
        VALUES ($1, $2, $3, $4)`,
-      [capability.id, capability.endpoint, JSON.stringify(capability.template_ref),
-       JSON.stringify(capability.agent_ref)]
+      [
+        capability.id,
+        capability.endpoint,
+        JSON.stringify(capability.template_ref),
+        JSON.stringify(capability.agent_ref),
+      ],
     );
   }
   async deleteCapability(id: string): Promise<void> {
@@ -352,7 +401,7 @@ export class PostgresKatariStore implements KatariStore {
   async deleteCapabilitiesByAgent(agentRef: AgentRef): Promise<void> {
     await this.sql.query(
       `DELETE FROM katari_capabilities WHERE agent_ref->>'id' = $1 AND agent_ref->>'endpoint' = $2`,
-      [agentRef.id, agentRef.endpoint]
+      [agentRef.id, agentRef.endpoint],
     );
   }
 
@@ -362,15 +411,22 @@ export class PostgresKatariStore implements KatariStore {
     return rows.map(rowToEscalation);
   }
   async getEscalation(id: string): Promise<Escalation | null> {
-    const rows = await this.sql.query(`SELECT * FROM katari_escalations WHERE id = $1`, [id]);
+    const rows = await this.sql.query(
+      `SELECT * FROM katari_escalations WHERE id = $1`,
+      [id],
+    );
     return rows.length > 0 ? rowToEscalation(rows[0]!) : null;
   }
   async createEscalation(escalation: Escalation): Promise<void> {
     await this.sql.query(
       `INSERT INTO katari_escalations (id, endpoint, capability_ref, input)
        VALUES ($1, $2, $3, $4)`,
-      [escalation.id, escalation.endpoint, JSON.stringify(escalation.capability_ref),
-       JSON.stringify(escalation.input)]
+      [
+        escalation.id,
+        escalation.endpoint,
+        JSON.stringify(escalation.capability_ref),
+        JSON.stringify(escalation.input),
+      ],
     );
   }
   async deleteEscalation(id: string): Promise<void> {
@@ -391,20 +447,31 @@ function toJson(val: unknown): unknown {
 // createPostgresAdapter — Node.js postgres driver adapter
 // ===========================================================================
 
-export async function createPostgresAdapter(databaseUrl: string): Promise<SqlAdapter> {
-  const pg = (await import("postgres")).default as unknown as (url: string) => any;
+export async function createPostgresAdapter(
+  databaseUrl: string,
+): Promise<SqlAdapter> {
+  const pg = (await import("postgres")).default as unknown as (
+    url: string,
+  ) => any;
   const sql = pg(databaseUrl);
   let lastCount = 0;
   return {
-    async query(text: string, params?: unknown[]): Promise<Record<string, unknown>[]> {
+    async query(
+      text: string,
+      params?: unknown[],
+    ): Promise<Record<string, unknown>[]> {
       const result = params?.length
         ? await sql.unsafe(text, params as any[])
         : await sql.unsafe(text);
       lastCount = result.count ?? 0;
       return result as unknown as Record<string, unknown>[];
     },
-    get lastCount() { return lastCount; },
-    set lastCount(v) { lastCount = v; },
+    get lastCount() {
+      return lastCount;
+    },
+    set lastCount(v) {
+      lastCount = v;
+    },
   };
 }
 
@@ -420,7 +487,9 @@ function rowToAgentDef(row: Record<string, unknown>): AgentDefinition {
     description: row.description as string | undefined,
     input_schema: toJson(row.input_schema) as JsonValue,
     output_schema: toJson(row.output_schema) as JsonValue,
-    template_refs: toJson(row.template_refs) as AgentDefinition["template_refs"],
+    template_refs: toJson(
+      row.template_refs,
+    ) as AgentDefinition["template_refs"],
   };
 }
 
@@ -441,7 +510,9 @@ function rowToDelegation(row: Record<string, unknown>): Delegation {
     endpoint: row.endpoint as string,
     agent_def_ref: toJson(row.agent_def_ref) as Delegation["agent_def_ref"],
     input: toJson(row.input) as JsonValue,
-    capability_refs: toJson(row.capability_refs) as Delegation["capability_refs"],
+    capability_refs: toJson(
+      row.capability_refs,
+    ) as Delegation["capability_refs"],
   };
 }
 

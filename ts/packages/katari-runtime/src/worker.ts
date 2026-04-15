@@ -9,7 +9,7 @@ import { buildApp, resolveMetadata } from "./server.js";
 import { Db } from "./db.js";
 import { createNeonAdapter } from "./neon-adapter.js";
 import { decodeModule } from "./ir.js";
-import type { JsonValue } from "katari-protocol";
+import { PostgresKatariStore, type JsonValue } from "katari-protocol";
 import { ConsoleRuntimeLogger } from "./logger.js";
 
 export interface Env {
@@ -20,7 +20,12 @@ export interface Env {
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const logger = new ConsoleRuntimeLogger({ prefix: "runtime" });
-    const db = new Db(createNeonAdapter(env.DATABASE_URL));
+    const adapter = createNeonAdapter(env.DATABASE_URL);
+    const db = new Db(adapter);
+    await db.initialize();
+
+    const protocolStore = new PostgresKatariStore(adapter);
+    await protocolStore.initialize();
 
     const runtime = new Runtime(env.KATARI_BASE_URL, db, logger);
 
@@ -38,17 +43,27 @@ export default {
       try {
         const module = decodeModule(saved.ktriBinary);
         const aliasEndpoints = new Map(Object.entries(saved.aliasEndpoints));
-        const schemas = new Map(
-          Object.entries(saved.schemas)
-        ) as Map<string, JsonValue>;
-        const { nameMap, externalAgents } = resolveMetadata(saved.agents, aliasEndpoints);
-        runtime.applyModule(module, nameMap, schemas, externalAgents, aliasEndpoints);
+        const schemas = new Map(Object.entries(saved.schemas)) as Map<
+          string,
+          JsonValue
+        >;
+        const { nameMap, externalAgents } = resolveMetadata(
+          saved.agents,
+          aliasEndpoints,
+        );
+        runtime.applyModule(
+          module,
+          nameMap,
+          schemas,
+          externalAgents,
+          aliasEndpoints,
+        );
       } catch (e) {
         logger.log("warn", `Failed to restore module: ${e}`);
       }
     }
 
-    const app = buildApp(runtime, db, logger);
+    const app = buildApp(runtime, db, protocolStore, logger);
     return app.fetch(request);
   },
 };

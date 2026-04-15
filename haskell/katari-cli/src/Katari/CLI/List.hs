@@ -43,7 +43,7 @@ printAgentDefs val = case val of
   where
     parseRow o =
       AgentDefRow
-        { adId = textField "agent_def_id" o,
+        { adId = textField "id" o,
           adName = textField "name" o,
           adDesc = textField "description" o
         }

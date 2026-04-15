@@ -1,7 +1,12 @@
 import { startServer } from "katari-protocol";
 import type { AgentHandlerFn, AgentContext, JsonValue } from "katari-protocol";
 import { GeminiProvider } from "./providers/gemini.js";
-import type { AIProvider, ChatMessage, ToolDef, ToolCall } from "./providers/types.js";
+import type {
+  AIProvider,
+  ChatMessage,
+  ToolDef,
+  ToolCall,
+} from "./providers/types.js";
 
 // ===========================================================================
 // AgentRef — resolved reference from prim.ref_agent
@@ -58,7 +63,7 @@ function buildToolDefFromRef(ref: AgentRef): ToolDef {
           type: (v.type as string) ?? "string",
           description: (v.description as string) ?? k,
         },
-      ])
+      ]),
     ),
   };
 }
@@ -151,7 +156,7 @@ const askWithTools: AgentHandlerFn = async (args, ctx) => {
 async function executeToolCall(
   tc: ToolCall,
   ctx: AgentContext,
-  refs: AgentRef[]
+  refs: AgentRef[],
 ): Promise<JsonValue> {
   const ref = refs.find((r) => r.name === tc.name);
   if (!ref) {
@@ -162,7 +167,7 @@ async function executeToolCall(
     return await ctx.delegateAndWait(
       ref.url,
       ref.agent_def_id,
-      tc.arguments as Record<string, JsonValue>
+      tc.arguments as Record<string, JsonValue>,
     );
   } catch (e) {
     return `Tool execution failed: ${e}`;
@@ -182,7 +187,13 @@ startServer({
   endpoint,
   databaseUrl,
   agentDefs: {
-    create_session: { handler: createSession, description: "Create a new AI chat session" },
-    ask_with_tools: { handler: askWithTools, description: "Send a prompt with tool-use to the AI" },
+    create_session: {
+      handler: createSession,
+      description: "Create a new AI chat session",
+    },
+    ask_with_tools: {
+      handler: askWithTools,
+      description: "Send a prompt with tool-use to the AI",
+    },
   },
 });

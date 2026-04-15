@@ -93,7 +93,10 @@ startServer({
   agentDefs: {
     create: { handler: create, description: "Create a cloud sandbox" },
     exec: { handler: exec, description: "Execute a command in a sandbox" },
-    write_file: { handler: writeFile, description: "Write a file in a sandbox" },
+    write_file: {
+      handler: writeFile,
+      description: "Write a file in a sandbox",
+    },
     read_file: { handler: readFile, description: "Read a file from a sandbox" },
     destroy: { handler: destroy, description: "Destroy a sandbox" },
   },

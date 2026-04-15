@@ -2,18 +2,19 @@ import type {
   JsonValue,
   OutgoingMessage,
   KatariServerHooks,
+  KatariServer,
   Agent,
   Delegation,
   Escalation,
   Capability,
   DelegateRequest,
-  CapabilityRef,
 } from "katari-protocol";
 import type { IRModule } from "../ir.js";
 import type { Value } from "../value.js";
 import type {
   AgentState,
   OutgoingAction,
+  ProtocolAction,
   DispatchContext,
   RuntimeEvent,
   ExternalAgentRef,
@@ -61,8 +62,14 @@ export class Runtime {
   // Dispatch context — shared by all agents
   private ctx: DispatchContext;
 
+  // Protocol server — handles outbound protocol operations (store + message construction)
+  private protocolServer: KatariServer | null = null;
+
   // Outgoing messages from last operation
   private pendingMessages: OutgoingMessage[] = [];
+
+  // Protocol actions collected during synchronous dispatch, flushed in persistState
+  private pendingProtocolActions: ProtocolAction[] = [];
 
   // Track which agents were modified during current operation
   private dirtyAgents = new Set<string>();
@@ -86,6 +93,10 @@ export class Runtime {
 
   getLogger(): RuntimeLogger {
     return this.logger;
+  }
+
+  setProtocolServer(server: KatariServer): void {
+    this.protocolServer = server;
   }
 
   // =========================================================================
@@ -116,8 +127,76 @@ export class Runtime {
   // DB persistence — save/load state
   // =========================================================================
 
+  /** Flush pending protocol actions via KatariServer → OutgoingMessages */
+  private async flushProtocolActions(): Promise<void> {
+    const actions = this.pendingProtocolActions;
+    this.pendingProtocolActions = [];
+    if (actions.length === 0) return;
+
+    const server = this.protocolServer;
+
+    for (const action of actions) {
+      switch (action.tag) {
+        case "ProtocolDelegate": {
+          if (server) {
+            const { message } = await server.delegate(
+              action.targetEndpoint, action.agentDefId,
+              action.input, action.capabilityRefs, action.delegationId
+            );
+            this.pendingMessages.push(message);
+          }
+          break;
+        }
+        case "ProtocolEscalate": {
+          if (server) {
+            const { message } = await server.sendEscalate(
+              action.capabilityRef, action.input, action.escalationId
+            );
+            this.pendingMessages.push(message);
+          }
+          break;
+        }
+        case "ProtocolDelegateAck": {
+          if (server) {
+            const msg = await server.sendDelegateAck(
+              { id: action.agentId, endpoint: this.selfEndpoint },
+              action.output
+            );
+            if (msg) this.pendingMessages.push(msg);
+          }
+          break;
+        }
+        case "ProtocolEscalateAck": {
+          if (server) {
+            const msg = await server.sendEscalateAck(
+              action.escalationEndpoint, action.escalationRef.id, action.output
+            );
+            this.pendingMessages.push(msg);
+          }
+          break;
+        }
+        case "ProtocolThrow": {
+          // Throw doesn't have a KatariServer convenience method yet — construct directly
+          this.pendingMessages.push({
+            toEndpoint: action.delegationEndpoint,
+            kind: {
+              type: "Throw",
+              body: {
+                delegation_ref: { id: action.delegationId, endpoint: action.delegationEndpoint },
+                message: action.message,
+              },
+            },
+          });
+          break;
+        }
+      }
+    }
+  }
+
   /** Save all modified agent states and ref maps to DB */
   async persistState(): Promise<void> {
+    await this.flushProtocolActions();
+
     if (!this.db) return;
 
     const promises: Promise<void>[] = [];
@@ -429,14 +508,10 @@ export class Runtime {
 
       // Forward throw to parent
       actions.push({
-        toEndpoint: agent.delegationEndpoint,
-        kind: {
-          type: "Throw",
-          body: {
-            delegation_ref: { id: agent.delegationId, endpoint: agent.delegationEndpoint },
-            message,
-          },
-        },
+        tag: "ProtocolThrow",
+        delegationEndpoint: agent.delegationEndpoint,
+        delegationId: agent.delegationId,
+        message,
       });
 
       this.processActions(actions);
@@ -611,17 +686,12 @@ export class Runtime {
       }
 
       actions.push({
-        toEndpoint: extRef.agent_def_where,
-        kind: {
-          type: "Delegate",
-          body: {
-            agent_def_ref: { id: extRef.agent_def_id, endpoint: extRef.agent_def_where },
-            input: args as JsonValue,
-            delegation_ref: { id: delegationId, endpoint: this.selfEndpoint },
-            capability_refs: agent.capabilityRefs,
-          },
-          delegationId,
-        },
+        tag: "ProtocolDelegate",
+        targetEndpoint: extRef.agent_def_where,
+        agentDefId: extRef.agent_def_id,
+        input: args as JsonValue,
+        capabilityRefs: agent.capabilityRefs,
+        delegationId,
       });
 
       return false;
@@ -662,15 +732,10 @@ export class Runtime {
       }
 
       actions.push({
-        toEndpoint: capRef.endpoint,
-        kind: {
-          type: "Escalate",
-          body: {
-            escalation_ref: { id: escalationId, endpoint: this.selfEndpoint },
-            capability_ref: capRef,
-            input: event.args as JsonValue,
-          },
-        },
+        tag: "ProtocolEscalate",
+        capabilityRef: capRef,
+        input: event.args as JsonValue,
+        escalationId,
       });
     } else if (agent.delegationEndpoint) {
       this.logger.log("warn", `Request ${reqDef.name}: no capabilities available, cannot escalate`);
@@ -685,14 +750,23 @@ export class Runtime {
 
   private processActions(actions: OutgoingAction[]): void {
     for (const action of actions) {
-      if ("toEndpoint" in action) {
-        this.pendingMessages.push(action as OutgoingMessage);
-      } else if (action.tag === "AgentCompleted") {
-        this.onAgentComplete(action.agentId, action.value);
-      } else if (action.tag === "AgentError") {
-        this.onAgentFail(action.agentId);
-      } else if (action.tag === "TerminateAgent") {
-        this.terminateChild(action.childAgentId);
+      switch (action.tag) {
+        case "ProtocolDelegate":
+        case "ProtocolEscalate":
+        case "ProtocolDelegateAck":
+        case "ProtocolEscalateAck":
+        case "ProtocolThrow":
+          this.pendingProtocolActions.push(action);
+          break;
+        case "AgentCompleted":
+          this.onAgentComplete(action.agentId, action.value);
+          break;
+        case "AgentError":
+          this.onAgentFail(action.agentId);
+          break;
+        case "TerminateAgent":
+          this.terminateChild(action.childAgentId);
+          break;
       }
     }
   }
@@ -732,15 +806,10 @@ export class Runtime {
     // Protocol agent — send delegate_ack
     const agent = this.agents.get(agentId);
     if (agent?.delegationEndpoint && agent.delegationId) {
-      this.pendingMessages.push({
-        toEndpoint: agent.delegationEndpoint,
-        kind: {
-          type: "DelegateAck",
-          body: {
-            delegation_ref: { id: agent.delegationId, endpoint: agent.delegationEndpoint },
-            output: value as JsonValue,
-          },
-        },
+      this.pendingProtocolActions.push({
+        tag: "ProtocolDelegateAck",
+        agentId,
+        output: value as JsonValue,
       });
       this.agents.delete(agentId);
       this.deletedAgents.add(agentId);
