@@ -1,4 +1,11 @@
-import type { IRModule, IRThread, IRHandleDef, IRForDef, ConstVal, ThreadKind } from "../ir.js";
+import type {
+  IRModule,
+  IRThread,
+  IRHandleDef,
+  IRForDef,
+  ConstVal,
+  ThreadKind,
+} from "../ir.js";
 import type { Value } from "../value.js";
 import type { CapabilityRef, EscalationRef, JsonValue } from "katari-protocol";
 import type { RuntimeLogger } from "../logger.js";
@@ -16,9 +23,9 @@ export interface AgentState {
   rootThreadId: number;
   // Protocol-level info
   delegationEndpoint: string | null; // parent's endpoint (for delegate_ack)
-  delegationId: string | null;       // parent's delegation id
+  delegationId: string | null; // parent's delegation id
   selfEndpoint: string;
-  capabilityRefs: CapabilityRef[];   // capabilities available to this agent's children
+  capabilityRefs: CapabilityRef[]; // capabilities available to this agent's children
 }
 
 // ===========================================================================
@@ -27,7 +34,7 @@ export interface AgentState {
 
 export interface ThreadState {
   threadId: number;
-  blockId: number;         // IR block (thread def) being executed
+  blockId: number; // IR block (thread def) being executed
   pc: number;
   parent: number | null;
   status: ThreadStatus;
@@ -37,10 +44,7 @@ export interface ThreadState {
 // Thread Status
 // ===========================================================================
 
-export type ThreadStatus =
-  | CallingStatus
-  | RequestingStatus
-  | CancelingStatus;
+export type ThreadStatus = CallingStatus | RequestingStatus | CancelingStatus;
 
 /** Thread is actively executing or waiting for a child */
 export interface CallingStatus {
@@ -184,7 +188,15 @@ export type RuntimeEvent =
   | { tag: "broken"; value: Value }
   | { tag: "for_continued"; mutations: [number, number][] }
   | { tag: "for_broken"; value: Value }
-  | { tag: "requested"; reqDefId: number; args: Record<string, Value>; requestId: string; fromThreadId: number | null; escalationRef: EscalationRef | null; escalationEndpoint: string | null }
+  | {
+      tag: "requested";
+      reqDefId: number;
+      args: Record<string, Value>;
+      requestId: string;
+      fromThreadId: number | null;
+      escalationRef: EscalationRef | null;
+      escalationEndpoint: string | null;
+    }
   | { tag: "canceled" };
 
 // ===========================================================================
@@ -193,17 +205,46 @@ export type RuntimeEvent =
 
 /** Protocol-level outbound actions — processed via KatariServer */
 export type ProtocolAction =
-  | { tag: "ProtocolDelegate"; targetEndpoint: string; agentDefId: string; input: JsonValue; capabilityRefs: CapabilityRef[]; delegationId: string }
-  | { tag: "ProtocolEscalate"; capabilityRef: CapabilityRef; input: JsonValue; escalationId: string }
+  | {
+      tag: "ProtocolDelegate";
+      targetEndpoint: string;
+      agentDefId: string;
+      input: JsonValue;
+      capabilityRefs: CapabilityRef[];
+      delegationId: string;
+    }
+  | {
+      tag: "ProtocolEscalate";
+      capabilityRef: CapabilityRef;
+      input: JsonValue;
+      escalationId: string;
+    }
   | { tag: "ProtocolDelegateAck"; agentId: string; output: JsonValue }
-  | { tag: "ProtocolEscalateAck"; escalationRef: EscalationRef; escalationEndpoint: string; output: JsonValue }
-  | { tag: "ProtocolThrow"; delegationEndpoint: string; delegationId: string; message: string };
+  | {
+      tag: "ProtocolEscalateAck";
+      escalationRef: EscalationRef;
+      escalationEndpoint: string;
+      output: JsonValue;
+    }
+  | {
+      tag: "ProtocolThrow";
+      delegationEndpoint: string;
+      delegationId: string;
+      message: string;
+    };
 
 export type OutgoingAction =
   | ProtocolAction
   | { tag: "AgentCompleted"; agentId: string; value: Value }
   | { tag: "AgentError"; agentId: string }
-  | { tag: "SpawnAgent"; parentAgentId: string; parentThreadId: number; agentDefId: number; args: Record<string, Value>; dst: number }
+  | {
+      tag: "SpawnAgent";
+      parentAgentId: string;
+      parentThreadId: number;
+      agentDefId: number;
+      args: Record<string, Value>;
+      dst: number;
+    }
   | { tag: "TerminateAgent"; childAgentId: string };
 
 // ===========================================================================
@@ -221,7 +262,7 @@ export type CallHandler = (
   dst: number,
   agentDefId: number,
   args: Record<string, Value>,
-  actions: OutgoingAction[]
+  actions: OutgoingAction[],
 ) => boolean;
 
 /**
@@ -232,7 +273,7 @@ export type RootRequestHandler = (
   agent: AgentState,
   threadId: number,
   event: RuntimeEvent & { tag: "requested" },
-  actions: OutgoingAction[]
+  actions: OutgoingAction[],
 ) => void;
 
 /** Context for dispatch operations — provided by Runtime */
@@ -254,11 +295,17 @@ export function setVar(agent: AgentState, v: number, val: Value): void {
   agent.vars.set(v, val);
 }
 
-export function findThread(module: IRModule, tid: number): IRThread | undefined {
+export function findThread(
+  module: IRModule,
+  tid: number,
+): IRThread | undefined {
   return module.threads.find((t) => t.id === tid);
 }
 
-export function findHandle(module: IRModule, hid: number): IRHandleDef | undefined {
+export function findHandle(
+  module: IRModule,
+  hid: number,
+): IRHandleDef | undefined {
   return module.handles.find((h) => h.id === hid);
 }
 
@@ -279,14 +326,17 @@ export function constAsString(consts: ConstVal[], cid: number): string {
 export function createThread(
   agent: AgentState,
   blockId: number,
-  parent: number | null
+  parent: number | null,
 ): ThreadState {
   const thread: ThreadState = {
     threadId: blockId, // Thread ID = Block ID for now
     blockId,
     pc: 0,
     parent,
-    status: { tag: "CALLING", kind: { tag: "BLOCK", childThreadId: -1, dst: -1 } },
+    status: {
+      tag: "CALLING",
+      kind: { tag: "BLOCK", childThreadId: -1, dst: -1 },
+    },
   };
   // Set initial status to a simple running state (caller will adjust)
   agent.threads.set(blockId, thread);
@@ -299,7 +349,10 @@ export function deleteThread(agent: AgentState, threadId: number): void {
 }
 
 /** Get all child thread IDs of a given thread */
-export function getChildThreadIds(agent: AgentState, parentId: number): number[] {
+export function getChildThreadIds(
+  agent: AgentState,
+  parentId: number,
+): number[] {
   const children: number[] = [];
   for (const [id, t] of agent.threads) {
     if (t.parent === parentId) children.push(id);
