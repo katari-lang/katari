@@ -30,9 +30,10 @@ external agent fetch_messages(
 ) -> array[Message] from "discord:fetch_messages"
 
 // ─── AI サーバー ────────────────────────────────────────────────
-
 @"AIセッションを作成する"
-external agent create_session() -> string from "ai:create_session"
+external agent create_session(
+  summary_threshold: integer | null @ "要約トリガーの文字数閾値 (null の場合 50000)"
+) -> string from "ai:create_session"
 
 @"AIにプロンプトを送信し、ツール呼び出し付きで応答を得る"
 external agent ask_ai_with_tools(

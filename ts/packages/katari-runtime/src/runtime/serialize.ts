@@ -36,11 +36,10 @@ export interface SerializedThreadState {
 // ThreadStatus is already a tagged union — serialize as-is but convert Value Maps
 type SerializedThreadStatus =
   | { tag: "CALLING"; kind: SerializedCallingKind }
-  | { tag: "REQUESTING"; fromThread: number | null; previousState: SerializedCallingKind; eventQueue: RuntimeEvent[]; escalationRef: EscalationRef | null }
+  | { tag: "REQUESTING"; fromThread: number | null; previousState: SerializedCallingKind | null; eventQueue: RuntimeEvent[]; escalationRef: EscalationRef | null }
   | { tag: "CANCELING"; nextAction: RuntimeEvent | null; pendingCancelCount: number };
 
 type SerializedCallingKind =
-  | { tag: "BLOCK"; childThreadId: number; dst: number }
   | { tag: "AGENT"; childThreadId: number; childScopeId: number; dst: number }
   | { tag: "HANDLE_TARGET"; handleDefId: number; childThreadId: number; dst: number; stateVars: [number, Value][] }
   | { tag: "HANDLE_BODY"; handleDefId: number; targetThreadId: number; handlerThreadId: number; dst: number; stateVars: [number, Value][]; requesterInfo: RequesterInfo }
@@ -75,6 +74,7 @@ export function serializeAgentState(agent: AgentState): SerializedAgentState {
 }
 
 function serializeThread(t: ThreadState): SerializedThreadState {
+  if (!t.status) throw new Error("Cannot serialize thread with null status");
   return {
     threadId: t.threadId,
     blockId: t.blockId,
@@ -93,7 +93,7 @@ function serializeStatus(s: ThreadStatus): SerializedThreadStatus {
       return {
         tag: "REQUESTING",
         fromThread: s.fromThread,
-        previousState: serializeCallingKind(s.previousState),
+        previousState: s.previousState ? serializeCallingKind(s.previousState) : null,
         eventQueue: s.eventQueue,
         escalationRef: s.escalationRef,
       };
@@ -108,7 +108,6 @@ function serializeStatus(s: ThreadStatus): SerializedThreadStatus {
 
 function serializeCallingKind(k: CallingKind): SerializedCallingKind {
   switch (k.tag) {
-    case "BLOCK":
     case "AGENT":
     case "FOR_THEN":
     case "DELEGATING":
@@ -170,7 +169,7 @@ function deserializeStatus(s: SerializedThreadStatus): ThreadStatus {
       return {
         tag: "REQUESTING",
         fromThread: s.fromThread,
-        previousState: deserializeCallingKind(s.previousState),
+        previousState: s.previousState ? deserializeCallingKind(s.previousState) : null,
         eventQueue: s.eventQueue,
         escalationRef: s.escalationRef,
       };
@@ -185,7 +184,6 @@ function deserializeStatus(s: SerializedThreadStatus): ThreadStatus {
 
 function deserializeCallingKind(s: SerializedCallingKind): CallingKind {
   switch (s.tag) {
-    case "BLOCK":
     case "AGENT":
     case "FOR_BODY":
     case "FOR_THEN":

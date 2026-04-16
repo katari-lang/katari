@@ -21,6 +21,7 @@ import type {
   OutgoingMessage,
   AgentRef,
   CapabilityRef,
+  DelegationRef,
 } from "./types.js";
 import type { KatariStore } from "./store.js";
 import { PostgresKatariStore, createPostgresAdapter } from "./store.js";
@@ -33,14 +34,19 @@ import { ConsoleKatariLogger } from "./logger.js";
 // Server hooks — server-specific behavior on protocol events
 // ===========================================================================
 
+/** Collects outgoing messages produced by a single handler invocation. */
+export interface MessageCollector {
+  enqueue(msg: OutgoingMessage): void;
+}
+
 export interface KatariServerHooks {
-  onDelegate?(agent: Agent, delegationRef: DelegateRequest): Promise<void>;
-  onDelegateAck?(delegation: Delegation, output: JsonValue): Promise<void>;
-  onEscalate?(escalation: Escalation, capability: Capability): Promise<void>;
-  onEscalateAck?(escalation: Escalation, output: JsonValue): Promise<void>;
-  onTerminate?(delegation: Delegation): Promise<void>;
-  onTerminateAck?(delegation: Delegation): Promise<void>;
-  onThrow?(delegation: Delegation, message: string): Promise<void>;
+  onDelegate?(agent: Agent, req: DelegateRequest, collector: MessageCollector): Promise<void>;
+  onDelegateAck?(delegation: Delegation, output: JsonValue, collector: MessageCollector): Promise<void>;
+  onEscalate?(escalation: Escalation, capability: Capability, collector: MessageCollector): Promise<void>;
+  onEscalateAck?(escalation: Escalation, output: JsonValue, collector: MessageCollector): Promise<void>;
+  onTerminate?(delegationRef: DelegationRef, collector: MessageCollector): Promise<void>;
+  onTerminateAck?(delegation: Delegation, collector: MessageCollector): Promise<void>;
+  onThrow?(delegation: Delegation, message: string, collector: MessageCollector): Promise<void>;
 }
 
 // ===========================================================================
@@ -59,7 +65,6 @@ export class KatariServer {
   private store: KatariStore;
   private hooks: KatariServerHooks;
   private endpoint: string;
-  private pendingMessages: OutgoingMessage[] = [];
 
   constructor(
     endpoint: string,
@@ -69,6 +74,14 @@ export class KatariServer {
     this.endpoint = endpoint;
     this.store = store;
     this.hooks = hooks;
+  }
+
+  private createCollector(): { collector: MessageCollector; drain(): OutgoingMessage[] } {
+    const messages: OutgoingMessage[] = [];
+    return {
+      collector: { enqueue: (msg) => messages.push(msg) },
+      drain: () => messages,
+    };
   }
 
   // =========================================================================
@@ -93,13 +106,12 @@ export class KatariServer {
 
     await this.store.createAgent(agent);
 
-    this.pendingMessages = [];
-    await this.hooks.onDelegate?.(agent, req);
-    const messages = this.drainPendingMessages();
+    const { collector, drain } = this.createCollector();
+    await this.hooks.onDelegate?.(agent, req, collector);
 
     return {
       response: { agent_ref: { id: agentId, endpoint: this.endpoint } },
-      messages,
+      messages: drain(),
     };
   }
 
@@ -114,11 +126,10 @@ export class KatariServer {
     // Delete the delegation (child agent + capabilities already cleaned up by sender)
     await this.store.deleteDelegation(delegation.id);
 
-    this.pendingMessages = [];
-    await this.hooks.onDelegateAck?.(delegation, req.output);
-    const messages = this.drainPendingMessages();
+    const { collector, drain } = this.createCollector();
+    await this.hooks.onDelegateAck?.(delegation, req.output, collector);
 
-    return { response: undefined, messages };
+    return { response: undefined, messages: drain() };
   }
 
   // =========================================================================
@@ -131,7 +142,7 @@ export class KatariServer {
 
     // Create escalation record (managed by the escalating server, but we
     // receive the ref; the actual Escalation object lives on the child's server)
-    this.pendingMessages = [];
+    const { collector, drain } = this.createCollector();
     await this.hooks.onEscalate?.(
       {
         id: req.escalation_ref.id,
@@ -140,10 +151,10 @@ export class KatariServer {
         input: req.input,
       },
       capability,
+      collector,
     );
-    const messages = this.drainPendingMessages();
 
-    return { response: undefined, messages };
+    return { response: undefined, messages: drain() };
   }
 
   // =========================================================================
@@ -157,11 +168,10 @@ export class KatariServer {
     // Delete the escalation
     await this.store.deleteEscalation(escalation.id);
 
-    this.pendingMessages = [];
-    await this.hooks.onEscalateAck?.(escalation, req.output);
-    const messages = this.drainPendingMessages();
+    const { collector, drain } = this.createCollector();
+    await this.hooks.onEscalateAck?.(escalation, req.output, collector);
 
-    return { response: undefined, messages };
+    return { response: undefined, messages: drain() };
   }
 
   // =========================================================================
@@ -169,25 +179,15 @@ export class KatariServer {
   // =========================================================================
 
   async handleTerminate(req: TerminateRequest): Promise<HandlerResult> {
-    const delegation = await this.store.getDelegation(req.delegation_ref.id);
-    if (!delegation) return `delegation ${req.delegation_ref.id} not found`;
-
-    // Find agent by delegation
-    const agents = await this.store.listAgents();
-    const agent = agents.find(
-      (a) =>
-        a.delegation_ref?.id === delegation.id &&
-        a.delegation_ref?.endpoint === delegation.endpoint,
-    );
+    const agent = await this.store.getAgentByDelegation(req.delegation_ref.id);
     if (agent) {
       await this.store.updateAgentStatus(agent.id, "TERMINATING");
     }
 
-    this.pendingMessages = [];
-    await this.hooks.onTerminate?.(delegation);
-    const messages = this.drainPendingMessages();
+    const { collector, drain } = this.createCollector();
+    await this.hooks.onTerminate?.(req.delegation_ref, collector);
 
-    return { response: undefined, messages };
+    return { response: undefined, messages: drain() };
   }
 
   // =========================================================================
@@ -201,11 +201,10 @@ export class KatariServer {
     // Clean up delegation
     await this.store.deleteDelegation(delegation.id);
 
-    this.pendingMessages = [];
-    await this.hooks.onTerminateAck?.(delegation);
-    const messages = this.drainPendingMessages();
+    const { collector, drain } = this.createCollector();
+    await this.hooks.onTerminateAck?.(delegation, collector);
 
-    return { response: undefined, messages };
+    return { response: undefined, messages: drain() };
   }
 
   // =========================================================================
@@ -216,11 +215,10 @@ export class KatariServer {
     const delegation = await this.store.getDelegation(req.delegation_ref.id);
     if (!delegation) return `delegation ${req.delegation_ref.id} not found`;
 
-    this.pendingMessages = [];
-    await this.hooks.onThrow?.(delegation, req.message);
-    const messages = this.drainPendingMessages();
+    const { collector, drain } = this.createCollector();
+    await this.hooks.onThrow?.(delegation, req.message, collector);
 
-    return { response: undefined, messages };
+    return { response: undefined, messages: drain() };
   }
 
   // =========================================================================
@@ -251,20 +249,6 @@ export class KatariServer {
     return this.store.listEscalations();
   }
 
-  // =========================================================================
-  // Outgoing message helpers — used by hooks to enqueue messages
-  // =========================================================================
-
-  /** Enqueue an outgoing message (called from hooks) */
-  enqueueMessage(msg: OutgoingMessage): void {
-    this.pendingMessages.push(msg);
-  }
-
-  private drainPendingMessages(): OutgoingMessage[] {
-    const msgs = this.pendingMessages;
-    this.pendingMessages = [];
-    return msgs;
-  }
 
   // =========================================================================
   // Convenience: delegate to another server
@@ -596,10 +580,9 @@ export async function startServer(opts: {
       }
     },
 
-    async onTerminate(delegation) {
+    async onTerminate(delegation, collector) {
       // Find and abort the running handler
-      const agents = await store.listAgents();
-      const agent = agents.find((a) => a.delegation_ref?.id === delegation.id);
+      const agent = await store.getAgentByDelegation(delegation.id);
       if (agent) {
         const ac = runningHandlers.get(agent.id);
         if (ac) {
@@ -614,7 +597,7 @@ export async function startServer(opts: {
       }
 
       // Send terminate_ack back
-      katariServer.enqueueMessage({
+      collector.enqueue({
         toEndpoint: delegation.endpoint,
         kind: {
           type: "TerminateAck",

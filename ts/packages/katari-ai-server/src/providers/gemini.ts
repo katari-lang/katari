@@ -62,7 +62,7 @@ export class GeminiProvider implements AIProvider {
       return { content: "", toolCalls: [] };
     }
 
-    const rawParts = candidate.content.parts;
+    const rawParts = candidate.content?.parts ?? [];
 
     const toolCalls = rawParts
       .filter((p) => p.functionCall)

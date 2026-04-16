@@ -1,10 +1,6 @@
 import type {
   IRModule,
-  IRThread,
-  IRHandleDef,
-  IRForDef,
   ConstVal,
-  ThreadKind,
 } from "../ir.js";
 import type { Value } from "../value.js";
 import type { CapabilityRef, EscalationRef, JsonValue } from "katari-protocol";
@@ -40,7 +36,7 @@ export interface ThreadState {
   pc: number;
   parent: number | null;
   scopeId: number; // variable scope this thread operates in
-  status: ThreadStatus;
+  status: ThreadStatus | null; // null = unstarted/executing (never persisted)
 }
 
 // ===========================================================================
@@ -60,8 +56,8 @@ export interface RequestingStatus {
   tag: "REQUESTING";
   /** Which thread the request came from (null = this thread issued IRequest) */
   fromThread: number | null;
-  /** The calling kind before entering REQUESTING state */
-  previousState: CallingKind;
+  /** The calling kind before entering REQUESTING state (null = self-issued IRequest/RaiseRequest) */
+  previousState: CallingKind | null;
   /** Queued events that arrived while in REQUESTING state */
   eventQueue: RuntimeEvent[];
   /** Escalation tracking */
@@ -82,7 +78,6 @@ export interface CancelingStatus {
 // ===========================================================================
 
 export type CallingKind =
-  | BlockCallingKind
   | AgentCallingKind
   | HandleTargetCallingKind
   | HandleBodyCallingKind
@@ -91,12 +86,6 @@ export type CallingKind =
   | ForThenCallingKind
   | ParallelCallingKind
   | DelegatingCallingKind;
-
-export interface BlockCallingKind {
-  tag: "BLOCK";
-  childThreadId: number;
-  dst: number;
-}
 
 export interface AgentCallingKind {
   tag: "AGENT";
@@ -256,14 +245,6 @@ export type OutgoingAction =
   | ProtocolAction
   | { tag: "AgentCompleted"; agentId: string; value: Value }
   | { tag: "AgentError"; agentId: string }
-  | {
-      tag: "SpawnAgent";
-      parentAgentId: string;
-      parentThreadId: number;
-      agentDefId: number;
-      args: Record<string, Value>;
-      dst: number;
-    }
   | { tag: "TerminateAgent"; childAgentId: string };
 
 // ===========================================================================
@@ -319,24 +300,6 @@ export function setVar(agent: AgentState, scopeId: number, v: number, val: Value
   scope.set(v, val);
 }
 
-export function findThread(
-  module: IRModule,
-  tid: number,
-): IRThread | undefined {
-  return module.threads.find((t) => t.id === tid);
-}
-
-export function findHandle(
-  module: IRModule,
-  hid: number,
-): IRHandleDef | undefined {
-  return module.handles.find((h) => h.id === hid);
-}
-
-export function findFor(module: IRModule, fid: number): IRForDef | undefined {
-  return module.fors.find((f) => f.id === fid);
-}
-
 export function constAsString(consts: ConstVal[], cid: number): string {
   const c = consts[cid];
   return c?.tag === "Str" ? c.value : "";
@@ -360,10 +323,7 @@ export function createThread(
     pc: 0,
     parent,
     scopeId: parentThread?.scopeId ?? 0,
-    status: {
-      tag: "CALLING",
-      kind: { tag: "BLOCK", childThreadId: -1, dst: -1 },
-    },
+    status: null,
   };
   agent.threads.set(tid, thread);
   return thread;

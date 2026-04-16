@@ -1,5 +1,5 @@
 import type { AgentState } from "./types.js";
-import { getVar, setVar, constAsString, findThread } from "./types.js";
+import { getVar, setVar, constAsString } from "./types.js";
 import type { Value } from "../value.js";
 import {
   constToValue,
@@ -50,7 +50,7 @@ export function executeThread(
   const thread = agent.threads.get(threadId);
   if (!thread) return null;
 
-  const irThread = findThread(agent.module, thread.blockId);
+  const irThread = agent.module.threads.get(thread.blockId);
   if (!irThread) return { tag: "completed", value: null };
 
   const s = thread.scopeId;

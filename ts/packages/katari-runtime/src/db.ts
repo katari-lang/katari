@@ -1,4 +1,5 @@
-import type { JsonValue } from "katari-protocol";
+import type { JsonValue, SqlAdapter } from "katari-protocol";
+export { type SqlAdapter, createPostgresAdapter } from "katari-protocol";
 import type { SerializedAgentState } from "./runtime/serialize.js";
 
 // ===========================================================================
@@ -55,16 +56,6 @@ export interface RefRow {
   kind: "delegation" | "escalation";
   agentId: string;
   threadId: number;
-}
-
-// ===========================================================================
-// SQL adapter interface — abstracts postgres / neon differences
-// ===========================================================================
-
-export interface SqlAdapter {
-  query(text: string, params?: unknown[]): Promise<Record<string, unknown>[]>;
-  /** Number of affected rows from last mutating query */
-  lastCount: number;
 }
 
 // ===========================================================================
@@ -306,28 +297,6 @@ export class Db {
       threadId: r.thread_id as number,
     }));
   }
-}
-
-// ===========================================================================
-// Adapter: postgres (Node.js)
-// ===========================================================================
-
-export async function createPostgresAdapter(databaseUrl: string): Promise<SqlAdapter> {
-  const pg = (await import("postgres")).default as unknown as (url: string) => any;
-  const sql = pg(databaseUrl);
-  let lastCount = 0;
-  return {
-    async query(text: string, params?: unknown[]): Promise<Record<string, unknown>[]> {
-      // postgres.js uses $1, $2, ... syntax natively
-      const result = params?.length
-        ? await sql.unsafe(text, params as any[])
-        : await sql.unsafe(text);
-      lastCount = result.count ?? 0;
-      return result as unknown as Record<string, unknown>[];
-    },
-    get lastCount() { return lastCount; },
-    set lastCount(v) { lastCount = v; },
-  };
 }
 
 // ===========================================================================

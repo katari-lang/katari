@@ -62,32 +62,21 @@ export function deepClone(v: Value): Value {
 // Arithmetic (Integer preservation: int op int → int, otherwise → number)
 // ===========================================================================
 
-function bothInt(a: Value, b: Value): boolean {
-  return typeof a === "number" && typeof b === "number" &&
-    Number.isInteger(a) && Number.isInteger(b);
-}
-
 function toNum(v: Value): number {
   if (typeof v === "number") return v;
   return 0;
 }
 
 export function valueAdd(a: Value, b: Value): Value {
-  const na = toNum(a), nb = toNum(b);
-  const result = na + nb;
-  return bothInt(a, b) && Number.isInteger(result) ? result : result;
+  return toNum(a) + toNum(b);
 }
 
 export function valueSub(a: Value, b: Value): Value {
-  const na = toNum(a), nb = toNum(b);
-  const result = na - nb;
-  return bothInt(a, b) && Number.isInteger(result) ? result : result;
+  return toNum(a) - toNum(b);
 }
 
 export function valueMul(a: Value, b: Value): Value {
-  const na = toNum(a), nb = toNum(b);
-  const result = na * nb;
-  return bothInt(a, b) && Number.isInteger(result) ? result : result;
+  return toNum(a) * toNum(b);
 }
 
 export function valueDiv(a: Value, b: Value): Value {
@@ -97,13 +86,11 @@ export function valueDiv(a: Value, b: Value): Value {
 export function valueMod(a: Value, b: Value): Value {
   const na = toNum(a), nb = toNum(b);
   if (nb === 0) return NaN;
-  const result = ((na % nb) + nb) % nb; // Euclidean modulo
-  return bothInt(a, b) ? result : result;
+  return ((na % nb) + nb) % nb; // Euclidean modulo
 }
 
 export function valueNeg(v: Value): Value {
-  const n = toNum(v);
-  return typeof v === "number" && Number.isInteger(v) ? -n : -n;
+  return -toNum(v);
 }
 
 // ===========================================================================

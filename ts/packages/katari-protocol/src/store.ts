@@ -25,6 +25,7 @@ export interface KatariStore {
   // Agent
   listAgents(): Promise<Agent[]>;
   getAgent(id: string): Promise<Agent | null>;
+  getAgentByDelegation(delegationId: string): Promise<Agent | null>;
   createAgent(agent: Agent): Promise<void>;
   updateAgentStatus(id: string, status: AgentStatus): Promise<void>;
   deleteAgent(id: string): Promise<void>;
@@ -94,6 +95,12 @@ export class InMemoryKatariStore implements KatariStore {
   }
   async getAgent(id: string): Promise<Agent | null> {
     return this.agents.get(id) ?? null;
+  }
+  async getAgentByDelegation(delegationId: string): Promise<Agent | null> {
+    for (const a of this.agents.values()) {
+      if (a.delegation_ref?.id === delegationId) return a;
+    }
+    return null;
   }
   async createAgent(agent: Agent): Promise<void> {
     this.agents.set(agent.id, agent);
@@ -252,6 +259,10 @@ export class PostgresKatariStore implements KatariStore {
         input JSONB
       )
     `);
+    await this.sql.query(`
+      CREATE INDEX IF NOT EXISTS katari_agents_delegation_ref_id
+        ON katari_agents ((delegation_ref->>'id'))
+    `);
   }
 
   // Agent Definition
@@ -306,6 +317,13 @@ export class PostgresKatariStore implements KatariStore {
     const rows = await this.sql.query(
       `SELECT * FROM katari_agents WHERE id = $1`,
       [id],
+    );
+    return rows.length > 0 ? rowToAgent(rows[0]!) : null;
+  }
+  async getAgentByDelegation(delegationId: string): Promise<Agent | null> {
+    const rows = await this.sql.query(
+      `SELECT * FROM katari_agents WHERE delegation_ref->>'id' = $1`,
+      [delegationId],
     );
     return rows.length > 0 ? rowToAgent(rows[0]!) : null;
   }

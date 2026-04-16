@@ -5,6 +5,7 @@ import type {
   KatariServer,
   Agent,
   Delegation,
+  DelegationRef,
   Escalation,
   Capability,
   CapabilityRef,
@@ -21,7 +22,7 @@ import type {
   RuntimeEvent,
   ExternalAgentRef,
 } from "./types.js";
-import { setVar, findThread, findHandle, createThread } from "./types.js";
+import { setVar, createThread } from "./types.js";
 import { fireEvent, deliverEvent, executeFromThread } from "./dispatch.js";
 import { callPrimitive } from "../primitive.js";
 import { serializeAgentState, deserializeAgentState } from "./serialize.js";
@@ -274,7 +275,7 @@ export class Runtime {
       if (!agent) continue;
 
       const isToplevel = this.toplevelAgents.has(agentId);
-      const name = this.module?.agents.find(a => a.id === agent.agentDefId)?.name ?? null;
+      const name = this.module?.agents.get(agent.agentDefId)?.name ?? null;
 
       promises.push(
         this.db.saveAgent(
@@ -346,16 +347,16 @@ export class Runtime {
 
   createHooks(): KatariServerHooks {
     return {
-      onDelegate: (agent, req) => this.onDelegate(agent, req),
-      onDelegateAck: (delegation, output) =>
+      onDelegate: (agent, req, _c) => this.onDelegate(agent, req),
+      onDelegateAck: (delegation, output, _c) =>
         this.onDelegateAck(delegation, output),
-      onEscalate: (escalation, capability) =>
+      onEscalate: (escalation, capability, _c) =>
         this.onEscalate(escalation, capability),
-      onEscalateAck: (escalation, output) =>
+      onEscalateAck: (escalation, output, _c) =>
         this.onEscalateAck(escalation, output),
-      onTerminate: (delegation) => this.onTerminate(delegation),
-      onTerminateAck: (delegation) => this.onTerminateAck(delegation),
-      onThrow: (delegation, message) => this.onThrow(delegation, message),
+      onTerminate: (delegation, _c) => this.onTerminate(delegation),
+      onTerminateAck: (delegation, _c) => this.onTerminateAck(delegation),
+      onThrow: (delegation, message, _c) => this.onThrow(delegation, message),
     };
   }
 
@@ -381,7 +382,7 @@ export class Runtime {
       return;
     }
 
-    const agentDef = this.module.agents.find((a) => a.id === blockId);
+    const agentDef = this.module.agents.get(blockId);
     if (!agentDef) return;
     const agentDefId = blockId;
 
@@ -483,10 +484,10 @@ export class Runtime {
 
     for (const [_tid, thread] of agent.threads) {
       const isDelegating =
-        (thread.status.tag === "CALLING" &&
+        (thread.status?.tag === "CALLING" &&
           thread.status.kind.tag === "DELEGATING") ||
-        (thread.status.tag === "REQUESTING" &&
-          thread.status.previousState.tag === "DELEGATING");
+        (thread.status?.tag === "REQUESTING" &&
+          thread.status.previousState?.tag === "DELEGATING");
       if (isDelegating) {
         const actions: OutgoingAction[] = [];
         deliverEvent(this.ctx, agent, thread.threadId, event, actions);
@@ -541,7 +542,7 @@ export class Runtime {
   // Hook: onTerminate — parent tells us to stop
   // =========================================================================
 
-  private async onTerminate(delegation: Delegation): Promise<void> {
+  private async onTerminate(delegation: DelegationRef): Promise<void> {
     for (const [agentId, agent] of this.agents) {
       if (agent.delegationId === delegation.id) {
         const actions: OutgoingAction[] = [];
@@ -695,7 +696,7 @@ export class Runtime {
     const module = this.module;
     if (!module) throw new Error("no module loaded");
 
-    const agentDef = module.agents.find((a) => a.name === agentName);
+    const agentDef = module.agentsByName.get(agentName);
     if (!agentDef) throw new Error(`agent '${agentName}' not found`);
     const agentDefId = agentDef.id;
 
@@ -750,23 +751,19 @@ export class Runtime {
       }
 
       if (result.tag === "RaiseRequest") {
-        const rid = this.module?.requests.find(
-          (r) => r.name === result.reqName,
-        )?.id;
+        const rid = this.module?.requestsByName.get(result.reqName)?.id;
         if (rid !== undefined) {
           const requestId = crypto.randomUUID();
           const thread = agent.threads.get(threadId);
           if (!thread) return true;
 
-          const currentKind =
-            thread.status.tag === "CALLING"
-              ? thread.status.kind
-              : { tag: "BLOCK" as const, childThreadId: -1, dst: -1 };
+          const previousState =
+            thread.status?.tag === "CALLING" ? thread.status.kind : null;
 
           thread.status = {
             tag: "REQUESTING",
             fromThread: null,
-            previousState: currentKind,
+            previousState,
             eventQueue: [],
             escalationRef: null,
           };
@@ -795,7 +792,7 @@ export class Runtime {
     }
 
     // --- Internal agent (same agent, new scope + thread) ---
-    const agentDef = this.module?.agents.find((a) => a.id === agentDefId);
+    const agentDef = this.module?.agents.get(agentDefId);
     if (agentDef) {
       const entryTid = agentDef.entry;
 
@@ -897,7 +894,7 @@ export class Runtime {
     event: RuntimeEvent & { tag: "requested" },
     actions: OutgoingAction[],
   ): void {
-    const reqDef = agent.module.requests.find((r) => r.id === event.reqDefId);
+    const reqDef = agent.module.requests.get(event.reqDefId);
     if (!reqDef) return;
 
     // Look for a matching capability in the agent's capability refs
@@ -1070,7 +1067,7 @@ export class Runtime {
     paramNames: string[],
     namedArgs: Record<string, Value>,
   ): void {
-    const irThread = findThread(agent.module, entryTid);
+    const irThread = agent.module.threads.get(entryTid);
     if (!irThread) return;
     for (let i = 0; i < irThread.params.length && i < paramNames.length; i++) {
       const val = namedArgs[paramNames[i]!];
@@ -1122,15 +1119,17 @@ export class Runtime {
   // =========================================================================
 
   getModuleAgents(): { id: number; name: string }[] {
-    return this.module?.agents.map((a) => ({ id: a.id, name: a.name })) ?? [];
+    if (!this.module) return [];
+    return Array.from(this.module.agents.values()).map((a) => ({ id: a.id, name: a.name }));
   }
 
   getModuleRequests(): { id: number; name: string }[] {
-    return this.module?.requests.map((r) => ({ id: r.id, name: r.name })) ?? [];
+    if (!this.module) return [];
+    return Array.from(this.module.requests.values()).map((r) => ({ id: r.id, name: r.name }));
   }
 
   getAgentDefId(name: string): number | undefined {
-    return this.module?.agents.find((a) => a.name === name)?.id;
+    return this.module?.agentsByName.get(name)?.id;
   }
 
   getEndpoint(): string {
@@ -1219,7 +1218,7 @@ export class Runtime {
       if (!thread || thread.parent === null) break;
 
       const parent = agent.threads.get(thread.parent);
-      if (!parent || parent.status.tag !== "CALLING") {
+      if (!parent || parent.status?.tag !== "CALLING") {
         currentId = thread.parent;
         continue;
       }
@@ -1228,7 +1227,7 @@ export class Runtime {
       // HANDLE_TARGET and HANDLE_BODY both belong to a handle scope whose
       // request cases can intercept escalations.
       if (kind.tag === "HANDLE_TARGET" || kind.tag === "HANDLE_BODY") {
-        const hdef = findHandle(agent.module, kind.handleDefId);
+        const hdef = agent.module.handles.get(kind.handleDefId);
         if (hdef) {
           for (const [reqId] of hdef.reqCases) {
             const templateRef = this.requestIdToTemplateRef.get(reqId);

@@ -33,7 +33,8 @@ function createProvider(): AIProvider {
         console.error("GEMINI_API_KEY is required");
         process.exit(1);
       }
-      return new GeminiProvider(apiKey);
+      const model = process.env.GEMINI_MODEL ?? "gemini-2.5-pro";
+      return new GeminiProvider(apiKey, model);
     }
     default:
       console.error(`Unknown AI_PROVIDER: ${provider}`);
@@ -72,19 +73,50 @@ function buildToolDefFromRef(ref: AgentRef): ToolDef {
 // Session management
 // ===========================================================================
 
+const DEFAULT_SUMMARY_THRESHOLD = parseInt(process.env.SUMMARY_THRESHOLD ?? "50000", 10);
+
 interface ChatSession {
   messages: ChatMessage[];
+  summaryThreshold: number;
 }
 
 const sessions = new Map<string, ChatSession>();
+
+/** Compress session history via summarization when it grows too long. */
+async function maybeSummarize(session: ChatSession, system: string): Promise<void> {
+  const totalChars = session.messages.reduce((n, m) => n + m.content.length, 0);
+  if (totalChars < session.summaryThreshold) return;
+
+  const summaryMessages: ChatMessage[] = [
+    { role: "system", content: system },
+    ...session.messages,
+    {
+      role: "user",
+      content:
+        "これまでの会話を、重要な事実・決定・文脈をすべて保持したまま簡潔に要約してください。要約のみを出力してください。",
+    },
+  ];
+
+  const response = await ai.chat(summaryMessages);
+  const summary = response.content ?? "(要約失敗)";
+
+  session.messages = [
+    { role: "user", content: `【過去の会話要約】\n${summary}` },
+    { role: "model", content: "了解しました。" },
+  ];
+}
 
 // ===========================================================================
 // Handlers
 // ===========================================================================
 
-const createSession: AgentHandlerFn = async () => {
+const createSession: AgentHandlerFn = async (args) => {
+  const a = args as Record<string, JsonValue>;
+  const summaryThreshold = typeof a.summary_threshold === "number"
+    ? a.summary_threshold
+    : DEFAULT_SUMMARY_THRESHOLD;
   const sessionId = crypto.randomUUID();
-  sessions.set(sessionId, { messages: [] });
+  sessions.set(sessionId, { messages: [], summaryThreshold });
   return sessionId as JsonValue;
 };
 
@@ -95,11 +127,10 @@ const askWithTools: AgentHandlerFn = async (args, ctx) => {
   const prompt = a.prompt as string;
   const agentRefs = a.tools as unknown as AgentRef[];
 
-  let session = sessions.get(sessionId);
-  if (!session) {
-    session = { messages: [] };
-    sessions.set(sessionId, session);
-  }
+  const session = sessions.get(sessionId);
+  if (!session) return "Session not found" as JsonValue;
+
+  await maybeSummarize(session, system);
 
   const tools = agentRefs.map(buildToolDefFromRef);
 

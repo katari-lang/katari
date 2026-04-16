@@ -5,11 +5,10 @@ import type {
   CallingKind,
   RuntimeEvent,
   OutgoingAction,
+  AgentCallingKind,
   HandleTargetCallingKind,
   HandleBodyCallingKind,
-  HandleThenCallingKind,
   ForBodyCallingKind,
-  ForThenCallingKind,
   ParallelCallingKind,
   RequesterInfo,
   DispatchContext,
@@ -17,9 +16,6 @@ import type {
 import {
   setVar,
   getVar,
-  findHandle,
-  findFor,
-  findThread,
   deleteThread,
   getChildThreadIds,
   createThread,
@@ -67,7 +63,7 @@ export function fireEvent(
   }
 
   const parent = agent.threads.get(thread.parent);
-  if (!parent) return;
+  if (!parent || !parent.status) return;
 
   // If parent is CANCELING, only handle 'canceled'
   if (parent.status.tag === "CANCELING") {
@@ -108,7 +104,7 @@ export function deliverEvent(
   actions: OutgoingAction[],
 ): void {
   const thread = agent.threads.get(threadId);
-  if (!thread) return;
+  if (!thread || !thread.status) return;
 
   ctx.logger.runtimeEvent(
     agent.agentId,
@@ -161,36 +157,24 @@ function dispatchOnCallingKind(
       onCompleted(ctx, agent, parent, kind, event.value, childId, actions);
       break;
     case "returned":
-      onReturned(ctx, agent, parent, kind, event.value, childId, actions);
+      propagateGlobalExit(ctx, agent, parent, kind, childId,
+        event, "AGENT", handleReturnedAtTarget, actions);
       break;
     case "continued":
-      onContinued(
-        ctx,
-        agent,
-        parent,
-        kind,
-        event.value,
-        event.mutations,
-        childId,
-        actions,
-      );
+      propagateGlobalExit(ctx, agent, parent, kind, childId,
+        event, "HANDLE_BODY", handleContinuedAtTarget, actions);
       break;
     case "broken":
-      onBroken(ctx, agent, parent, kind, event.value, childId, actions);
+      propagateGlobalExit(ctx, agent, parent, kind, childId,
+        event, "HANDLE_BODY", handleBrokenAtTarget, actions);
       break;
     case "for_continued":
-      onForContinued(
-        ctx,
-        agent,
-        parent,
-        kind,
-        event.mutations,
-        childId,
-        actions,
-      );
+      propagateGlobalExit(ctx, agent, parent, kind, childId,
+        event, "FOR_BODY", handleForContinuedAtTarget, actions);
       break;
     case "for_broken":
-      onForBroken(ctx, agent, parent, kind, event.value, childId, actions);
+      propagateGlobalExit(ctx, agent, parent, kind, childId,
+        event, "FOR_BODY", handleForBrokenAtTarget, actions);
       break;
     case "requested":
       onRequested(ctx, agent, parent, kind, event, childId, actions);
@@ -201,7 +185,7 @@ function dispatchOnCallingKind(
 }
 
 // ===========================================================================
-// completed
+// completed — NOT a global exit; each CallingKind has unique logic
 // ===========================================================================
 
 function onCompleted(
@@ -214,7 +198,6 @@ function onCompleted(
   actions: OutgoingAction[],
 ): void {
   switch (kind.tag) {
-    case "BLOCK":
     case "DELEGATING":
       deleteThread(agent, childId);
       setVar(agent, parent.scopeId, kind.dst, value);
@@ -222,7 +205,6 @@ function onCompleted(
       break;
 
     case "AGENT":
-      // ICall child thread completed — delete thread, clean up scope, store result
       deleteThread(agent, childId);
       agent.scopes.delete(kind.childScopeId);
       setVar(agent, parent.scopeId, kind.dst, value);
@@ -232,13 +214,8 @@ function onCompleted(
     case "HANDLE_TARGET":
       deleteThread(agent, childId);
       transitionToHandleThen(
-        ctx,
-        agent,
-        parent,
-        kind,
-        { tag: "completed", value },
-        value,
-        actions,
+        ctx, agent, parent, kind,
+        { tag: "completed", value }, value, actions,
       );
       break;
 
@@ -256,13 +233,7 @@ function onCompleted(
           stateVars: kind.stateVars,
         },
       };
-      fireEvent(
-        ctx,
-        agent,
-        kind.targetThreadId,
-        { tag: "continue", value },
-        actions,
-      );
+      fireEvent(ctx, agent, kind.targetThreadId, { tag: "continue", value }, actions);
       break;
 
     case "HANDLE_THEN": {
@@ -302,399 +273,143 @@ function onCompleted(
 }
 
 // ===========================================================================
-// returned — propagates up until AGENT boundary
+// Unified Global Exit — returned, continued, broken, for_continued, for_broken
+//
+// All share the same propagation structure: propagate up through intermediate
+// CallingKinds until reaching the target, then execute target-specific logic.
+// Intermediate layer handling is identical for ALL events (no branching).
 // ===========================================================================
 
-function onReturned(
+type GlobalExitTargetHandler = (
   ctx: DispatchContext,
   agent: AgentState,
   parent: ThreadState,
   kind: CallingKind,
-  value: Value,
+  event: RuntimeEvent,
+  actions: OutgoingAction[],
+) => void;
+
+function propagateGlobalExit(
+  ctx: DispatchContext,
+  agent: AgentState,
+  parent: ThreadState,
+  kind: CallingKind,
   childId: number,
+  event: RuntimeEvent,
+  targetKind: CallingKind["tag"],
+  handleAtTarget: GlobalExitTargetHandler,
   actions: OutgoingAction[],
 ): void {
+  deleteThread(agent, childId);
+
+  if (kind.tag === targetKind) {
+    handleAtTarget(ctx, agent, parent, kind, event, actions);
+    return;
+  }
+
+  // Intermediate layer — uniform for all events
   switch (kind.tag) {
-    case "AGENT":
-      // Return boundary — ICall boundary, same as completed
-      deleteThread(agent, childId);
-      agent.scopes.delete(kind.childScopeId);
-      setVar(agent, parent.scopeId, kind.dst, value);
-      resumeExecution(ctx, agent, parent, actions);
-      break;
-
     case "HANDLE_TARGET":
-      deleteThread(agent, childId);
       transitionToHandleThen(
-        ctx,
-        agent,
-        parent,
-        kind,
-        { tag: "returned", value },
-        value,
-        actions,
+        ctx, agent, parent, kind, event,
+        thenInputValue(event), actions,
       );
       break;
-
     case "HANDLE_BODY":
-      deleteThread(agent, childId);
-      cancelAndPropagate(
-        ctx,
-        agent,
-        parent,
-        kind.targetThreadId,
-        { tag: "returned", value },
-        actions,
-      );
+      cancelAndPropagate(ctx, agent, parent, kind.targetThreadId, event, actions);
       break;
-
     case "HANDLE_THEN":
-      deleteThread(agent, childId);
       propagateUp(ctx, agent, parent, kind.nextAction, actions);
       break;
-
     case "PARALLEL":
-      deleteThread(agent, childId);
-      cancelOtherBranches(
-        ctx,
-        agent,
-        parent,
-        kind,
-        childId,
-        { tag: "returned", value },
-        actions,
-      );
+      cancelOtherBranches(ctx, agent, parent, kind, childId, event, actions);
       break;
-
+    case "AGENT":
     case "DELEGATING":
-      ctx.logger.log("warn", "returned from DELEGATING — ignoring");
+      ctx.logger.log("warn", `${event.tag} in ${kind.tag} — ignoring`);
       break;
-
-    default:
-      // BLOCK, FOR_BODY, FOR_THEN — pass through upward
-      deleteThread(agent, childId);
-      propagateUp(ctx, agent, parent, { tag: "returned", value }, actions);
+    default: // FOR_BODY, FOR_THEN
+      propagateUp(ctx, agent, parent, event, actions);
       break;
   }
 }
 
-// ===========================================================================
-// continued — propagates up until HANDLE_BODY boundary
-// ===========================================================================
-
-function onContinued(
-  ctx: DispatchContext,
-  agent: AgentState,
-  parent: ThreadState,
-  kind: CallingKind,
-  value: Value,
-  mutations: [number, number][],
-  childId: number,
-  actions: OutgoingAction[],
-): void {
-  switch (kind.tag) {
-    case "HANDLE_BODY":
-      // This is the boundary — apply mutations, send reply, resume target
-      deleteThread(agent, childId);
-      for (const [sv, nv] of mutations) {
-        kind.stateVars.set(sv, getVar(agent, parent.scopeId, nv));
-      }
-      sendReply(kind.requesterInfo, value, actions);
-      parent.status = {
-        tag: "CALLING",
-        kind: {
-          tag: "HANDLE_TARGET",
-          handleDefId: kind.handleDefId,
-          childThreadId: kind.targetThreadId,
-          dst: kind.dst,
-          stateVars: kind.stateVars,
-        },
-      };
-      fireEvent(
-        ctx,
-        agent,
-        kind.targetThreadId,
-        { tag: "continue", value },
-        actions,
-      );
-      break;
-
-    case "HANDLE_TARGET":
-      deleteThread(agent, childId);
-      transitionToHandleThen(
-        ctx,
-        agent,
-        parent,
-        kind,
-        { tag: "continued", value, mutations },
-        value,
-        actions,
-      );
-      break;
-
-    case "HANDLE_THEN":
-      deleteThread(agent, childId);
-      propagateUp(ctx, agent, parent, kind.nextAction, actions);
-      break;
-
-    case "PARALLEL":
-      deleteThread(agent, childId);
-      cancelOtherBranches(
-        ctx,
-        agent,
-        parent,
-        kind,
-        childId,
-        { tag: "continued", value, mutations },
-        actions,
-      );
-      break;
-
-    case "AGENT":
-    case "DELEGATING":
-      ctx.logger.log("warn", `continued in ${kind.tag} — ignoring`);
-      break;
-
+/** Extract the then-clause input value from a global exit event */
+function thenInputValue(event: RuntimeEvent): Value {
+  switch (event.tag) {
+    case "returned":
+    case "broken":
+    case "for_broken":
+      return event.value;
     default:
-      // BLOCK, FOR_BODY, FOR_THEN — pass through
-      deleteThread(agent, childId);
-      propagateUp(
-        ctx,
-        agent,
-        parent,
-        { tag: "continued", value, mutations },
-        actions,
-      );
-      break;
+      return null;
   }
 }
 
-// ===========================================================================
-// broken — propagates up until HANDLE_TARGET boundary
-// ===========================================================================
+// --- Target handlers ---
 
-function onBroken(
-  ctx: DispatchContext,
-  agent: AgentState,
-  parent: ThreadState,
-  kind: CallingKind,
-  value: Value,
-  childId: number,
-  actions: OutgoingAction[],
+function handleReturnedAtTarget(
+  ctx: DispatchContext, agent: AgentState, parent: ThreadState,
+  kind: CallingKind, event: RuntimeEvent, actions: OutgoingAction[],
 ): void {
-  switch (kind.tag) {
-    case "HANDLE_BODY":
-      // Break from handler → cancel target, complete handle with break value
-      deleteThread(agent, childId);
-      setVar(agent, parent.scopeId, kind.dst, value);
-      cancelAndPropagate(
-        ctx,
-        agent,
-        parent,
-        kind.targetThreadId,
-        { tag: "completed", value },
-        actions,
-      );
-      break;
-
-    case "HANDLE_TARGET":
-      deleteThread(agent, childId);
-      transitionToHandleThen(
-        ctx,
-        agent,
-        parent,
-        kind,
-        { tag: "broken", value },
-        value,
-        actions,
-      );
-      break;
-
-    case "HANDLE_THEN":
-      deleteThread(agent, childId);
-      propagateUp(ctx, agent, parent, kind.nextAction, actions);
-      break;
-
-    case "PARALLEL":
-      deleteThread(agent, childId);
-      cancelOtherBranches(
-        ctx,
-        agent,
-        parent,
-        kind,
-        childId,
-        { tag: "broken", value },
-        actions,
-      );
-      break;
-
-    case "AGENT":
-    case "DELEGATING":
-      ctx.logger.log("warn", `broken in ${kind.tag} — ignoring`);
-      break;
-
-    default:
-      // BLOCK, FOR_BODY, FOR_THEN — pass through
-      deleteThread(agent, childId);
-      propagateUp(ctx, agent, parent, { tag: "broken", value }, actions);
-      break;
-  }
+  const k = kind as AgentCallingKind;
+  agent.scopes.delete(k.childScopeId);
+  setVar(agent, parent.scopeId, k.dst, (event as { value: Value }).value);
+  resumeExecution(ctx, agent, parent, actions);
 }
 
-// ===========================================================================
-// for_continued
-// ===========================================================================
-
-function onForContinued(
-  ctx: DispatchContext,
-  agent: AgentState,
-  parent: ThreadState,
-  kind: CallingKind,
-  mutations: [number, number][],
-  childId: number,
-  actions: OutgoingAction[],
+function handleContinuedAtTarget(
+  ctx: DispatchContext, agent: AgentState, parent: ThreadState,
+  kind: CallingKind, event: RuntimeEvent, actions: OutgoingAction[],
 ): void {
-  switch (kind.tag) {
-    case "FOR_BODY":
-      deleteThread(agent, childId);
-      for (const [sv, nv] of mutations) setVar(agent, parent.scopeId, sv, getVar(agent, parent.scopeId, nv));
-      advanceFor(ctx, agent, parent, kind, actions);
-      break;
-
-    case "HANDLE_TARGET":
-      deleteThread(agent, childId);
-      transitionToHandleThen(
-        ctx,
-        agent,
-        parent,
-        kind,
-        { tag: "for_continued", mutations },
-        null,
-        actions,
-      );
-      break;
-
-    case "HANDLE_BODY":
-      deleteThread(agent, childId);
-      cancelAndPropagate(
-        ctx,
-        agent,
-        parent,
-        kind.targetThreadId,
-        { tag: "for_continued", mutations },
-        actions,
-      );
-      break;
-
-    case "HANDLE_THEN":
-      deleteThread(agent, childId);
-      propagateUp(ctx, agent, parent, kind.nextAction, actions);
-      break;
-
-    case "PARALLEL":
-      deleteThread(agent, childId);
-      cancelOtherBranches(
-        ctx,
-        agent,
-        parent,
-        kind,
-        childId,
-        { tag: "for_continued", mutations },
-        actions,
-      );
-      break;
-
-    case "AGENT":
-    case "DELEGATING":
-      ctx.logger.log("warn", `for_continued in ${kind.tag} — ignoring`);
-      break;
-
-    default:
-      deleteThread(agent, childId);
-      propagateUp(
-        ctx,
-        agent,
-        parent,
-        { tag: "for_continued", mutations },
-        actions,
-      );
-      break;
+  const k = kind as HandleBodyCallingKind;
+  const ev = event as { tag: "continued"; value: Value; mutations: [number, number][] };
+  for (const [sv, nv] of ev.mutations) {
+    k.stateVars.set(sv, getVar(agent, parent.scopeId, nv));
   }
+  sendReply(k.requesterInfo, ev.value, actions);
+  parent.status = {
+    tag: "CALLING",
+    kind: {
+      tag: "HANDLE_TARGET",
+      handleDefId: k.handleDefId,
+      childThreadId: k.targetThreadId,
+      dst: k.dst,
+      stateVars: k.stateVars,
+    },
+  };
+  fireEvent(ctx, agent, k.targetThreadId, { tag: "continue", value: ev.value }, actions);
 }
 
-// ===========================================================================
-// for_broken
-// ===========================================================================
-
-function onForBroken(
-  ctx: DispatchContext,
-  agent: AgentState,
-  parent: ThreadState,
-  kind: CallingKind,
-  value: Value,
-  childId: number,
-  actions: OutgoingAction[],
+function handleBrokenAtTarget(
+  ctx: DispatchContext, agent: AgentState, parent: ThreadState,
+  kind: CallingKind, event: RuntimeEvent, actions: OutgoingAction[],
 ): void {
-  switch (kind.tag) {
-    case "FOR_BODY":
-      deleteThread(agent, childId);
-      setVar(agent, parent.scopeId, kind.dst, value);
-      resumeExecution(ctx, agent, parent, actions);
-      break;
+  const k = kind as HandleBodyCallingKind;
+  const value = (event as { value: Value }).value;
+  setVar(agent, parent.scopeId, k.dst, value);
+  cancelAndPropagate(ctx, agent, parent, k.targetThreadId, { tag: "completed", value }, actions);
+}
 
-    case "HANDLE_TARGET":
-      deleteThread(agent, childId);
-      transitionToHandleThen(
-        ctx,
-        agent,
-        parent,
-        kind,
-        { tag: "for_broken", value },
-        value,
-        actions,
-      );
-      break;
-
-    case "HANDLE_BODY":
-      deleteThread(agent, childId);
-      cancelAndPropagate(
-        ctx,
-        agent,
-        parent,
-        kind.targetThreadId,
-        { tag: "for_broken", value },
-        actions,
-      );
-      break;
-
-    case "HANDLE_THEN":
-      deleteThread(agent, childId);
-      propagateUp(ctx, agent, parent, kind.nextAction, actions);
-      break;
-
-    case "PARALLEL":
-      deleteThread(agent, childId);
-      cancelOtherBranches(
-        ctx,
-        agent,
-        parent,
-        kind,
-        childId,
-        { tag: "for_broken", value },
-        actions,
-      );
-      break;
-
-    case "AGENT":
-    case "DELEGATING":
-      ctx.logger.log("warn", `for_broken in ${kind.tag} — ignoring`);
-      break;
-
-    default:
-      deleteThread(agent, childId);
-      propagateUp(ctx, agent, parent, { tag: "for_broken", value }, actions);
-      break;
+function handleForContinuedAtTarget(
+  ctx: DispatchContext, agent: AgentState, parent: ThreadState,
+  kind: CallingKind, event: RuntimeEvent, actions: OutgoingAction[],
+): void {
+  const k = kind as ForBodyCallingKind;
+  const ev = event as { tag: "for_continued"; mutations: [number, number][] };
+  for (const [sv, nv] of ev.mutations) {
+    setVar(agent, parent.scopeId, sv, getVar(agent, parent.scopeId, nv));
   }
+  advanceFor(ctx, agent, parent, k, actions);
+}
+
+function handleForBrokenAtTarget(
+  ctx: DispatchContext, agent: AgentState, parent: ThreadState,
+  kind: CallingKind, event: RuntimeEvent, actions: OutgoingAction[],
+): void {
+  const k = kind as ForBodyCallingKind;
+  setVar(agent, parent.scopeId, k.dst, (event as { value: Value }).value);
+  resumeExecution(ctx, agent, parent, actions);
 }
 
 // ===========================================================================
@@ -710,113 +425,71 @@ function onRequested(
   childId: number,
   actions: OutgoingAction[],
 ): void {
-  switch (kind.tag) {
-    case "HANDLE_TARGET": {
-      // Check if this handle has a handler for this request
-      const hdef = findHandle(agent.module, kind.handleDefId);
-      if (hdef) {
-        const match = hdef.reqCases.find(([rid]) => rid === event.reqDefId);
-        if (match) {
-          // Found handler — transition to HANDLE_BODY
-          const handlerTid = match[1];
+  if (kind.tag === "HANDLE_TARGET") {
+    // Check if this handle has a handler for this request
+    const hdef = agent.module.handles.get(kind.handleDefId);
+    if (hdef) {
+      const match = hdef.reqCases.find(([rid]) => rid === event.reqDefId);
+      if (match) {
+        // Found handler — transition to HANDLE_BODY
+        const handlerTid = match[1];
 
-          // Copy state vars to parent's scope for handler access
-          for (const [sv, val] of kind.stateVars) {
-            setVar(agent, parent.scopeId, sv, val);
-          }
-
-          // Bind request args to handler params
-          const handlerIr = findThread(agent.module, handlerTid);
-          const reqDef = agent.module.requests.find(
-            (r) => r.id === event.reqDefId,
-          );
-          if (handlerIr && reqDef) {
-            for (
-              let i = 0;
-              i < reqDef.paramNames.length && i < handlerIr.params.length;
-              i++
-            ) {
-              const val = event.args[reqDef.paramNames[i]!];
-              if (val !== undefined) setVar(agent, parent.scopeId, handlerIr.params[i]!, val);
-            }
-          }
-
-          const requesterInfo: RequesterInfo = {
-            escalationRef: event.escalationRef,
-            escalationEndpoint: event.escalationEndpoint,
-            internalThreadId: event.fromThreadId,
-            internalRequestId: event.requestId,
-          };
-
-          parent.status = {
-            tag: "CALLING",
-            kind: {
-              tag: "HANDLE_BODY",
-              handleDefId: kind.handleDefId,
-              targetThreadId: kind.childThreadId,
-              handlerThreadId: handlerTid,
-              dst: kind.dst,
-              stateVars: kind.stateVars,
-              requesterInfo,
-            },
-          };
-
-          // Create and run handler thread
-          const handlerThread = createThread(
-            agent,
-            handlerTid,
-            parent.threadId,
-          );
-          handlerThread.status = {
-            tag: "CALLING",
-            kind: { tag: "BLOCK", childThreadId: -1, dst: -1 },
-          };
-          ctx.logger.runtimeEvent(agent.agentId, handlerThread.threadId, "thread:created",
-            { parent: parent.threadId, blockId: handlerTid, reason: "handler_body", reqDefId: event.reqDefId });
-          executeFromThread(ctx, agent, handlerThread.threadId, actions);
-          return;
+        // Copy state vars to parent's scope for handler access
+        for (const [sv, val] of kind.stateVars) {
+          setVar(agent, parent.scopeId, sv, val);
         }
-      }
-      // No handler found — enter REQUESTING, pass upward
-      parent.status = {
-        tag: "REQUESTING",
-        fromThread: childId,
-        previousState: kind,
-        eventQueue: [],
-        escalationRef: null,
-      };
-      ctx.logger.runtimeEvent(agent.agentId, parent.threadId, "→REQUESTING",
-        { fromThread: childId, reqDefId: event.reqDefId, prevKind: kind.tag });
-      // Use fireEvent on parent itself so its OWN parent's kind (e.g. an
-      // outer HANDLE_TARGET) gets a chance to intercept — propagateUp would
-      // skip one level too many.
-      fireEvent(ctx, agent, parent.threadId, event, actions);
-      break;
-    }
 
-    case "HANDLE_BODY":
-    case "HANDLE_THEN":
-    case "FOR_BODY":
-    case "FOR_THEN":
-    case "BLOCK":
-    case "AGENT":
-    case "PARALLEL":
-    case "DELEGATING":
-      // Pass through — become REQUESTING.
-      // Use fireEvent on parent itself (not propagateUp) so that the parent's
-      // own parent's CallingKind (e.g. HANDLE_TARGET) can intercept.
-      parent.status = {
-        tag: "REQUESTING",
-        fromThread: childId,
-        previousState: kind,
-        eventQueue: [],
-        escalationRef: null,
-      };
-      ctx.logger.runtimeEvent(agent.agentId, parent.threadId, "→REQUESTING",
-        { fromThread: childId, reqDefId: event.reqDefId, prevKind: kind.tag });
-      fireEvent(ctx, agent, parent.threadId, event, actions);
-      break;
+        // Bind request args to handler params
+        const handlerIr = agent.module.threads.get(handlerTid);
+        const reqDef = agent.module.requests.get(event.reqDefId);
+        if (handlerIr && reqDef) {
+          for (let i = 0; i < reqDef.paramNames.length && i < handlerIr.params.length; i++) {
+            const val = event.args[reqDef.paramNames[i]!];
+            if (val !== undefined) setVar(agent, parent.scopeId, handlerIr.params[i]!, val);
+          }
+        }
+
+        const requesterInfo: RequesterInfo = {
+          escalationRef: event.escalationRef,
+          escalationEndpoint: event.escalationEndpoint,
+          internalThreadId: event.fromThreadId,
+          internalRequestId: event.requestId,
+        };
+
+        parent.status = {
+          tag: "CALLING",
+          kind: {
+            tag: "HANDLE_BODY",
+            handleDefId: kind.handleDefId,
+            targetThreadId: kind.childThreadId,
+            handlerThreadId: handlerTid,
+            dst: kind.dst,
+            stateVars: kind.stateVars,
+            requesterInfo,
+          },
+        };
+
+        // Create and run handler thread
+        const handlerThread = createThread(agent, handlerTid, parent.threadId);
+        ctx.logger.runtimeEvent(agent.agentId, handlerThread.threadId, "thread:created",
+          { parent: parent.threadId, blockId: handlerTid, reason: "handler_body", reqDefId: event.reqDefId });
+        executeFromThread(ctx, agent, handlerThread.threadId, actions);
+        return;
+      }
+    }
   }
+
+  // No handler found (or not HANDLE_TARGET) — enter REQUESTING, pass upward
+  parent.status = {
+    tag: "REQUESTING",
+    fromThread: childId,
+    previousState: kind,
+    eventQueue: [],
+    escalationRef: null,
+  };
+  ctx.logger.runtimeEvent(agent.agentId, parent.threadId, "→REQUESTING",
+    { fromThread: childId, reqDefId: event.reqDefId, prevKind: kind.tag });
+  fireEvent(ctx, agent, parent.threadId, event, actions);
 }
 
 // ===========================================================================
@@ -829,13 +502,18 @@ function doCancel(
   thread: ThreadState,
   actions: OutgoingAction[],
 ): void {
-  // Collect info BEFORE changing status
+  // Null status means unstarted (e.g. parallel branch not yet executed)
+  if (!thread.status) {
+    deleteThread(agent, thread.threadId);
+    if (thread.parent !== null) {
+      fireEvent(ctx, agent, thread.parent, { tag: "canceled" }, actions);
+    }
+    return;
+  }
+
   const status = thread.status;
 
   // Check for cross-agent children that need external termination.
-  // Also handle REQUESTING state: the thread may have been CALLING(DELEGATING)
-  // or CALLING(AGENT) before it transitioned to REQUESTING (to handle a
-  // request event), so we must inspect previousState too.
   const callingKind =
     status.tag === "CALLING"
       ? status.kind
@@ -853,7 +531,6 @@ function doCancel(
 
   const children = getChildThreadIds(agent, thread.threadId);
 
-  // Count pending: local children + external children (DELEGATING only)
   let externalCount = 0;
   if (callingKind?.tag === "DELEGATING") {
     externalCount = 1;
@@ -861,7 +538,6 @@ function doCancel(
   const totalPending = children.length + externalCount;
 
   if (totalPending === 0) {
-    // No children — immediately canceled
     deleteThread(agent, thread.threadId);
     if (thread.parent !== null) {
       fireEvent(ctx, agent, thread.parent, { tag: "canceled" }, actions);
@@ -869,14 +545,12 @@ function doCancel(
     return;
   }
 
-  // Enter CANCELING state
   thread.status = {
     tag: "CANCELING",
     nextAction: null,
     pendingCancelCount: totalPending,
   };
 
-  // Propagate cancel to all local children
   for (const childId of children) {
     fireEvent(ctx, agent, childId, { tag: "cancel" }, actions);
   }
@@ -888,7 +562,7 @@ function doCanceled(
   thread: ThreadState,
   actions: OutgoingAction[],
 ): void {
-  if (thread.status.tag !== "CANCELING") return;
+  if (!thread.status || thread.status.tag !== "CANCELING") return;
 
   thread.status.pendingCancelCount--;
 
@@ -919,7 +593,7 @@ function doContinueResponse(
   event: { tag: "continue"; value: Value },
   actions: OutgoingAction[],
 ): void {
-  if (thread.status.tag !== "REQUESTING") {
+  if (!thread.status || thread.status.tag !== "REQUESTING") {
     ctx.logger.log("warn", "continue on non-REQUESTING thread");
     return;
   }
@@ -927,25 +601,24 @@ function doContinueResponse(
   const { fromThread, previousState, eventQueue } = thread.status;
 
   if (fromThread === null) {
-    // This thread itself issued IRequest — resume execution
-    const irThread = findThread(agent.module, thread.blockId);
+    // This thread itself issued IRequest or ICall(RaiseRequest) — store value and resume
+    const irThread = agent.module.threads.get(thread.blockId);
     if (irThread) {
       const prevInstr = irThread.body[thread.pc - 1];
-      if (prevInstr && prevInstr.op === "Request") {
+      if (prevInstr && (prevInstr.op === "Request" || prevInstr.op === "Call")) {
         setVar(agent, thread.scopeId, prevInstr.dst, event.value);
       }
     }
-    thread.status = { tag: "CALLING", kind: previousState };
+    thread.status = previousState ? { tag: "CALLING", kind: previousState } : null;
     resumeExecution(ctx, agent, thread, actions);
   } else {
-    // Request came from a child thread in the same agent — forward continue to it
+    // Request came from a child thread — forward continue to it
     fireEvent(ctx, agent, fromThread, event, actions);
 
     // Drain event queue
     if (eventQueue.length > 0) {
       const next = eventQueue.shift()!;
       if (next.tag === "requested") {
-        // Another request arrived — stay in REQUESTING
         thread.status = {
           tag: "REQUESTING",
           fromThread: next.fromThreadId ?? fromThread,
@@ -962,21 +635,15 @@ function doContinueResponse(
         next.tag === "for_continued" ||
         next.tag === "for_broken"
       ) {
-        thread.status = { tag: "CALLING", kind: previousState };
-        dispatchOnCallingKind(
-          ctx,
-          agent,
-          thread,
-          previousState,
-          fromThread,
-          next,
-          actions,
-        );
+        if (previousState) {
+          thread.status = { tag: "CALLING", kind: previousState };
+          dispatchOnCallingKind(ctx, agent, thread, previousState, fromThread, next, actions);
+        }
       } else {
-        thread.status = { tag: "CALLING", kind: previousState };
+        thread.status = previousState ? { tag: "CALLING", kind: previousState } : null;
       }
     } else {
-      thread.status = { tag: "CALLING", kind: previousState };
+      thread.status = previousState ? { tag: "CALLING", kind: previousState } : null;
     }
   }
 }
@@ -1005,62 +672,23 @@ export function executeFromThread(
     switch (result.tag) {
       // --- Terminal events: fire on this thread ---
       case "completed":
-        fireEvent(
-          ctx,
-          agent,
-          threadId,
-          { tag: "completed", value: result.value },
-          actions,
-        );
+        fireEvent(ctx, agent, threadId, { tag: "completed", value: result.value }, actions);
         return;
       case "returned":
-        fireEvent(
-          ctx,
-          agent,
-          threadId,
-          { tag: "returned", value: result.value },
-          actions,
-        );
+        fireEvent(ctx, agent, threadId, { tag: "returned", value: result.value }, actions);
         return;
       case "broken":
-        fireEvent(
-          ctx,
-          agent,
-          threadId,
-          { tag: "broken", value: result.value },
-          actions,
-        );
+        fireEvent(ctx, agent, threadId, { tag: "broken", value: result.value }, actions);
         return;
       case "continued":
-        fireEvent(
-          ctx,
-          agent,
-          threadId,
-          {
-            tag: "continued",
-            value: result.value,
-            mutations: result.mutations,
-          },
-          actions,
-        );
+        fireEvent(ctx, agent, threadId,
+          { tag: "continued", value: result.value, mutations: result.mutations }, actions);
         return;
       case "for_broken":
-        fireEvent(
-          ctx,
-          agent,
-          threadId,
-          { tag: "for_broken", value: result.value },
-          actions,
-        );
+        fireEvent(ctx, agent, threadId, { tag: "for_broken", value: result.value }, actions);
         return;
       case "for_continued":
-        fireEvent(
-          ctx,
-          agent,
-          threadId,
-          { tag: "for_continued", mutations: result.mutations },
-          actions,
-        );
+        fireEvent(ctx, agent, threadId, { tag: "for_continued", mutations: result.mutations }, actions);
         return;
 
       // --- Suspension: Handle ---
@@ -1081,12 +709,7 @@ export function executeFromThread(
       // --- Suspension: Call ---
       case "call": {
         const handled = ctx.callHandler(
-          agent,
-          threadId,
-          result.dst,
-          result.agentDefId,
-          result.args,
-          actions,
+          agent, threadId, result.dst, result.agentDefId, result.args, actions,
         );
         if (handled) {
           // Primitive — result stored, continue execution (loop again)
@@ -1098,15 +721,7 @@ export function executeFromThread(
 
       // --- Suspension: Request ---
       case "request":
-        setupRequest(
-          ctx,
-          agent,
-          threadId,
-          result.dst,
-          result.reqDefId,
-          result.args,
-          actions,
-        );
+        setupRequest(ctx, agent, threadId, result.dst, result.reqDefId, result.args, actions);
         return;
     }
   }
@@ -1119,10 +734,6 @@ function resumeExecution(
   thread: ThreadState,
   actions: OutgoingAction[],
 ): void {
-  thread.status = {
-    tag: "CALLING",
-    kind: { tag: "BLOCK", childThreadId: -1, dst: -1 },
-  };
   executeFromThread(ctx, agent, thread.threadId, actions);
 }
 
@@ -1138,7 +749,7 @@ function setupHandle(
   handleId: number,
   actions: OutgoingAction[],
 ): void {
-  const hdef = findHandle(agent.module, handleId);
+  const hdef = agent.module.handles.get(handleId);
   if (!hdef) return;
 
   const thread = agent.threads.get(threadId);
@@ -1151,10 +762,6 @@ function setupHandle(
   }
 
   const bodyThread = createThread(agent, hdef.body, threadId);
-  bodyThread.status = {
-    tag: "CALLING",
-    kind: { tag: "BLOCK", childThreadId: -1, dst: -1 },
-  };
   ctx.logger.runtimeEvent(agent.agentId, bodyThread.threadId, "thread:created",
     { parent: threadId, blockId: hdef.body, reason: "handle_scope", handleId });
 
@@ -1180,7 +787,7 @@ function setupFor(
   forId: number,
   actions: OutgoingAction[],
 ): void {
-  const fdef = findFor(agent.module, forId);
+  const fdef = agent.module.fors.get(forId);
   if (!fdef) return;
 
   const thread = agent.threads.get(threadId);
@@ -1208,10 +815,6 @@ function setupFor(
     }
 
     const bodyThread = createThread(agent, fdef.body, threadId);
-    bodyThread.status = {
-      tag: "CALLING",
-      kind: { tag: "BLOCK", childThreadId: -1, dst: -1 },
-    };
     ctx.logger.runtimeEvent(agent.agentId, bodyThread.threadId, "thread:created",
       { parent: threadId, blockId: fdef.body, reason: "for_body", forId });
 
@@ -1232,10 +835,6 @@ function setupFor(
     // Empty loop — run then clause or set null
     if (fdef.then !== null) {
       const thenThread = createThread(agent, fdef.then, threadId);
-      thenThread.status = {
-        tag: "CALLING",
-        kind: { tag: "BLOCK", childThreadId: -1, dst: -1 },
-      };
 
       thread.status = {
         tag: "CALLING",
@@ -1270,10 +869,6 @@ function setupPar(
   const branches: ThreadState[] = [];
   for (const tid of tids) {
     const branchThread = createThread(agent, tid, threadId);
-    branchThread.status = {
-      tag: "CALLING",
-      kind: { tag: "BLOCK", childThreadId: -1, dst: -1 },
-    };
     ctx.logger.runtimeEvent(agent.agentId, branchThread.threadId, "thread:created",
       { parent: threadId, blockId: tid, reason: "par_branch" });
     branchThreadIds.push(branchThread.threadId);
@@ -1308,38 +903,30 @@ function setupRequest(
   if (!thread) return;
 
   const requestId = crypto.randomUUID();
-  const currentKind =
-    thread.status.tag === "CALLING"
-      ? thread.status.kind
-      : { tag: "BLOCK" as const, childThreadId: -1, dst: -1 };
+  const previousState =
+    thread.status?.tag === "CALLING" ? thread.status.kind : null;
 
   // Enter REQUESTING state
   thread.status = {
     tag: "REQUESTING",
     fromThread: null,
-    previousState: currentKind,
+    previousState,
     eventQueue: [],
     escalationRef: null,
   };
   ctx.logger.runtimeEvent(agent.agentId, threadId, "request:issue",
-    { reqDefId, requestId, prevKind: currentKind.tag });
+    { reqDefId, requestId, prevKind: previousState?.tag ?? null });
 
   // Fire requested event (propagates up to find a handler)
-  fireEvent(
-    ctx,
-    agent,
-    threadId,
-    {
-      tag: "requested",
-      reqDefId,
-      args,
-      requestId,
-      fromThreadId: null,
-      escalationRef: null,
-      escalationEndpoint: null,
-    },
-    actions,
-  );
+  fireEvent(ctx, agent, threadId, {
+    tag: "requested",
+    reqDefId,
+    args,
+    requestId,
+    fromThreadId: null,
+    escalationRef: null,
+    escalationEndpoint: null,
+  }, actions);
 }
 
 // ===========================================================================
@@ -1396,21 +983,17 @@ function transitionToHandleThen(
   parent: ThreadState,
   kind: HandleTargetCallingKind,
   nextAction: RuntimeEvent,
-  thenInputValue: Value | null,
+  thenInput: Value | null,
   actions: OutgoingAction[],
 ): void {
-  const hdef = findHandle(agent.module, kind.handleDefId);
+  const hdef = agent.module.handles.get(kind.handleDefId);
   if (hdef && hdef.then !== null) {
-    const thenIr = findThread(agent.module, hdef.then);
-    if (thenIr && thenIr.params.length > 0 && thenInputValue !== null) {
-      setVar(agent, parent.scopeId, thenIr.params[0]!, thenInputValue);
+    const thenIr = agent.module.threads.get(hdef.then);
+    if (thenIr && thenIr.params.length > 0 && thenInput !== null) {
+      setVar(agent, parent.scopeId, thenIr.params[0]!, thenInput);
     }
 
     const thenThread = createThread(agent, hdef.then, parent.threadId);
-    thenThread.status = {
-      tag: "CALLING",
-      kind: { tag: "BLOCK", childThreadId: -1, dst: -1 },
-    };
 
     parent.status = {
       tag: "CALLING",
@@ -1429,9 +1012,7 @@ function transitionToHandleThen(
     // No then clause — execute nextAction directly
     if (nextAction.tag === "completed") {
       setVar(
-        agent,
-        parent.scopeId,
-        kind.dst,
+        agent, parent.scopeId, kind.dst,
         (nextAction as { tag: "completed"; value: Value }).value,
       );
       resumeExecution(ctx, agent, parent, actions);
@@ -1452,7 +1033,7 @@ function advanceFor(
   const nextIndex = kind.currentIndex + 1;
   const ps = parent.scopeId;
   if (nextIndex < kind.minLength) {
-    const fdef = findFor(agent.module, kind.forDefId);
+    const fdef = agent.module.fors.get(kind.forDefId);
     if (fdef) {
       for (let i = 0; i < fdef.iterVars.length; i++) {
         const arr = getVar(agent, ps, fdef.arrays[i]!);
@@ -1462,10 +1043,6 @@ function advanceFor(
       }
 
       const bodyThread = createThread(agent, fdef.body, parent.threadId);
-      bodyThread.status = {
-        tag: "CALLING",
-        kind: { tag: "BLOCK", childThreadId: -1, dst: -1 },
-      };
 
       parent.status = {
         tag: "CALLING",
@@ -1475,13 +1052,9 @@ function advanceFor(
       executeFromThread(ctx, agent, bodyThread.threadId, actions);
     }
   } else {
-    const fdef = findFor(agent.module, kind.forDefId);
+    const fdef = agent.module.fors.get(kind.forDefId);
     if (fdef && fdef.then !== null) {
       const thenThread = createThread(agent, fdef.then, parent.threadId);
-      thenThread.status = {
-        tag: "CALLING",
-        kind: { tag: "BLOCK", childThreadId: -1, dst: -1 },
-      };
 
       parent.status = {
         tag: "CALLING",
@@ -1562,7 +1135,6 @@ function sendReply(
       output: value as JsonValue,
     });
   }
-  // Internal requester will be resumed via continue event on the target thread
 }
 
 // ===========================================================================

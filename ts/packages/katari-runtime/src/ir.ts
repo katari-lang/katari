@@ -70,11 +70,14 @@ export interface IRModule {
   name: string;
   nameTable: Map<string, number>;
   consts: ConstVal[];
-  requests: IRRequestDef[];
-  threads: IRThread[];
-  handles: IRHandleDef[];
-  fors: IRForDef[];
-  agents: IRAgentDef[];
+  requests: Map<number, IRRequestDef>;
+  threads: Map<number, IRThread>;
+  handles: Map<number, IRHandleDef>;
+  fors: Map<number, IRForDef>;
+  agents: Map<number, IRAgentDef>;
+  // Secondary indexes
+  agentsByName: Map<string, IRAgentDef>;
+  requestsByName: Map<string, IRRequestDef>;
 }
 
 // ===========================================================================
@@ -234,21 +237,23 @@ export function decodeModule(data: Uint8Array): IRModule {
 
   const name = r.readText();
   const consts = r.readVec(() => readConst(r));
-  const requests = r.readVec(() => readRequestDef(r));
-  const threads = r.readVec(() => readThread(r));
-  const handles = r.readVec(() => readHandleDef(r));
-  const fors = r.readVec(() => readForDef(r));
-  const agents = r.readVec(() => readAgentDef(r));
+  const requestsArr = r.readVec(() => readRequestDef(r));
+  const threadsArr = r.readVec(() => readThread(r));
+  const handlesArr = r.readVec(() => readHandleDef(r));
+  const forsArr = r.readVec(() => readForDef(r));
+  const agentsArr = r.readVec(() => readAgentDef(r));
 
   return {
     name,
     nameTable: new Map(),
     consts,
-    requests,
-    threads,
-    handles,
-    fors,
-    agents,
+    requests: new Map(requestsArr.map(r => [r.id, r])),
+    threads: new Map(threadsArr.map(t => [t.id, t])),
+    handles: new Map(handlesArr.map(h => [h.id, h])),
+    fors: new Map(forsArr.map(f => [f.id, f])),
+    agents: new Map(agentsArr.map(a => [a.id, a])),
+    agentsByName: new Map(agentsArr.map(a => [a.name, a])),
+    requestsByName: new Map(requestsArr.map(r => [r.name, r])),
   };
 }
 

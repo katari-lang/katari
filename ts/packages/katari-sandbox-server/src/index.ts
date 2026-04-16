@@ -16,6 +16,7 @@ const E2B_TEMPLATE = process.env.E2B_TEMPLATE ?? undefined;
 
 const create: AgentHandlerFn = async () => {
   const sandbox = await Sandbox.create(E2B_TEMPLATE ?? "base", {
+    allowInternetAccess: false,
     timeoutMs: 5 * 60 * 1000, // 5 minutes
   });
   const sandboxId = sandbox.sandboxId;
