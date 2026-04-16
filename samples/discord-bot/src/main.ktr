@@ -141,9 +141,7 @@ ${recent_messages_format}
   }
 
   par [
-    { watch_and_trigger(channel_id) },
-    { cron_trigger() },
-    { daily_trigger() }
+    { watch_and_trigger(channel_id) }
   ]
   null
 }
@@ -180,7 +178,7 @@ agent daily_trigger() -> null with on_trigger {
 agent cron_trigger() -> null with on_trigger {
   handle {
     request notify(time) => {
-      on_trigger(f"Scheduled: 日報を報告してください。")
+      on_trigger(f"Scheduled: 定期トリガーです。最新メッセージを送るので、反応してもしなくてもよいです。")
       continue null
     }
   }
