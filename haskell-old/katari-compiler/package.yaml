@@ -7,6 +7,17 @@ library:
   source-dirs: src
   exposed-modules:
     - Katari
+    - Katari.Syntax
+    - Katari.Lexer
+    - Katari.Parser
+    - Katari.Types
+    - Katari.Module
+    - Katari.Typechecker
+    - Katari.IR
+    - Katari.IRPrint
+    - Katari.Lowering
+    - Katari.Emit
+    - Katari.Schema
 
 dependencies:
   - base >= 4.18 && < 5
@@ -23,6 +34,8 @@ dependencies:
 
 default-extensions:
   - GHC2021
-  - DataKinds
   - OverloadedStrings
   - LambdaCase
+  - TupleSections
+  - RecordWildCards
+  - StrictData
