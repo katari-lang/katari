@@ -7,6 +7,22 @@ library:
   source-dirs: src
   exposed-modules:
     - Katari
+    - Katari.AST
+    - Katari.Lexer
+    - Katari.Parser
+    - Katari.Typechecker
+    - Katari.Typechecker.Identifier
+    - Katari.Typechecker.ConstraintGenerator
+    - Katari.Typechecker.Solver
+
+tests:
+  katari-compiler-test:
+    main: Spec.hs
+    source-dirs: test
+    dependencies:
+      - katari-compiler
+      - hspec
+      - megaparsec
 
 dependencies:
   - base >= 4.18 && < 5
@@ -26,3 +42,30 @@ default-extensions:
   - DataKinds
   - OverloadedStrings
   - LambdaCase
+  - OverloadedLabels
+  - DuplicateRecordFields
+  - NoFieldSelectors
+  - RecordWildCards
+  - OverloadedRecordDot
+  - OverloadedRecordUpdate
+  - FlexibleContexts
+  - FlexibleInstances
+  - MultiParamTypeClasses
+  - TypeFamilies
+  - GeneralizedNewtypeDeriving
+  - DeriveGeneric
+  - DeriveAnyClass
+  - StandaloneDeriving
+  - UndecidableInstances
+  - TemplateHaskell
+  - ScopedTypeVariables
+  - TypeApplications
+  - AllowAmbiguousTypes
+  - RankNTypes
+  - GADTs
+  - KindSignatures
+  - DataKinds
+  - TypeOperators
+  - TypeInType
+  - PolyKinds
+  - QuantifiedConstraints

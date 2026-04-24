@@ -53,8 +53,8 @@ pnpm v10 にワークスペース検出のバグがあるため、pnpm v9 を使
 
 ```
 .ktr ファイル
-  → Lexer.hs       トークン化（セミコロン自動挿入）
-  → Parser.hs      AST 生成（megaparsec）
+  → Katari.Lexer   Char stream → [WithPos Token]、仮想セミコロン挿入
+  → Katari.Parser  Token stream → AST (megaparsec カスタムストリーム)
   → Module.hs      モジュールロード・名前解決
   → Typechecker.hs 型チェック・エフェクト検証
   → Lowering.hs    AST → IR
@@ -63,11 +63,24 @@ pnpm v10 にワークスペース検出のバグがあるため、pnpm v9 を使
 
 ## 重要な実装詳細
 
-### セミコロン自動挿入（Lexer.hs）
+### セミコロン自動挿入（Katari.Lexer）
 
-行末トークンが識別子・リテラル・`}`・`)`・`]`・`break`・`return`・`reply`・`next` 等のとき、
-次行先頭が `.`・`)`・`]`・`}`・`case`・`else`・`finally`・`of` でなければ改行にセミコロンを挿入。
-→ `noSemiBefore` と `noSemiAfter` のリストで制御している。
+レキサーは空白・コメントを破棄し、`\n` のみ中間トークン `TNewline` として残す。
+`insertVirtualSemis` が各 `TNewline` について直前トークンが以下のいずれかなら `TSemi` に置換、そうでなければ破棄する:
+
+- 識別子 (`TIdent`)
+- 数値・文字列リテラル (`TIntLit`, `TFloatLit`, `TStringLit`, `TTemplateClose`)
+- `break`, `return`, `next`, `null`, `true`, `false`, 型キーワード (`integer`, `boolean`, `number`, `string`)
+- `)`, `]`, `}`
+
+括弧深度は追跡しない（Go 流儀）。言語規約で担保:
+
+- 複数行リスト（引数・配列・enum コンストラクタ等）は **末尾カンマ必須**
+- `else` / `then` / `where` は直前の `}` と同じ行
+- 演算子での改行は **演算子を行末**に置く
+
+テンプレリテラル `f"..."` / `f"""..."""` はレキサーがスタック (`[LexerCtx]`) で「文字列モード ↔ 式モード」を管理し、
+`TTemplateOpen` / `TTemplateStr` / `TTemplateExprOpen` / `TTemplateExprClose` / `TTemplateClose` トークンを発行する。
 
 ### Handle スコープ（Lowering.hs）
 
@@ -76,13 +89,25 @@ Lowering では `SHandle` 以降の残り文を先読みして `IHandleBegin →
 
 `IHandleEnd dst scopeVar hid` — ランタイムが scopeVar の値を return case に渡し、結果を dst に入れる。
 
-### break の文脈判別
+### break / next の文脈判別
 
-- `for` ブロック内の `break` → `SForBreak` → `IForBreak`（for ループ脱出）
-- `handle` スコープ内の `break` → `SBreak` → `IBreak`（handle スコープ脱出）
+`BreakCtx` (`TopCtx` | `BreakForCtx` | `BreakHandleCtx`) を `ReaderT` でパーサーに引き回す。
 
-`BreakCtx` (`BreakForCtx` | `BreakHandleCtx`) をパーサーに引き回して判別。
+| コンテキスト                        | 許可される文                           |
+| ----------------------------------- | -------------------------------------- |
+| `TopCtx` (agent 本体)               | `break` / `next` 両方禁止 (構文エラー) |
+| `BreakForCtx` (for 本体)            | `ForNext` (引数なし) / `ForBreak`      |
+| `BreakHandleCtx` (req handler 本体) | `Next` (引数あり) / `Break`            |
+
+- `for` ブロック内の `break` → `StatementForBreak` → `IForBreak`（for ループ脱出）
+- `handle` スコープ内の `break` → `StatementBreak` → `IBreak`（handle スコープ脱出）
+
 `for_break` キーワードは廃止済み（`break` に統一）。
+
+### 型注釈の方針
+
+`ParamBinding.pattern` は `Pattern` 型（旧 `TypedPattern` は廃止）。HM 型推論で補える場合は型注釈省略可能。
+`WildcardPattern` にも `typeAnnotation :: Maybe SyntacticType` があり `_: integer` の形で使用できる。
 
 ### for 式の型
 
@@ -147,14 +172,10 @@ CallingKind: `BLOCK` | `AGENT` | `HANDLE_TARGET` | `HANDLE_BODY` | `HANDLE_THEN`
 RuntimeEvent: `call` | `cancel` | `completed` | `returned` | `continue` | `continued` | `broken` | `for_continued` | `for_broken` | `requested` | `canceled`
 
 Protocol → Runtime マッピング:
+
 - `delegate` → `call`, `delegate_ack` → `completed`
 - `escalate` → `requested`, `escalate_ack` → `continue`
 - `terminate` → `cancel`, `terminate_ack` → `canceled`
-
-## 仕様書
-
-`doc/spec/` に仕様書がある。型システムは `02-type-system.md`・`03-discriminated-unions.md`、
-リクエスト・handle セマンティクスは `04-request-system.md`、IR は `08-ir.md` を参照。
 
 ## Haskell コーディング規約
 
@@ -209,3 +230,31 @@ unionNT a b = case (a, b) of
 `data` / `newtype` 宣言は規約の対象外。型クラスインスタンスも、メソッドが
 本質的に複数等式である場合 (例: `compare` の対称分岐) は無理に統合しない。
 パーサーコンビネータのように `do` 記法中心の関数も自然な形を維持する。
+
+### 4. 命名規則
+
+**型名・コンストラクタ名**: フルワードを使う。略語禁止。コンストラクタ名には
+型名をプレフィックスとして付ける (例: `TokenIdentifier`, `KeywordFor`,
+`PunctuationLeftBrace`, `BinaryOperatorAdd`, `ExpressionLiteral`)。`AST.hs` を参照。
+
+**直和型**: GADTs 構文 (`data T where ...`) を使う。
+
+**レコードフィールド**: `NoFieldSelectors` 有効のためプレフィックス不要。
+フィールド名はフルワード (例: `sourcePosition`, `tokenLength`, `parameters`)。
+省略形は使わない (`params` ✗, `args` ✗, `op` ✗, `ins` ✗)。
+
+**Parser を返す関数**: 全て `parse` プレフィックス
+(例: `parseImport`, `parseKeyword`, `parseCurrentPosition`)。
+**Lexer 内の関数**: `lex` プレフィックス
+(例: `lexIdentifierOrKeyword`, `lexTemplateBodyToken`)。
+
+**ローカル変数**: 抽象的なコードのみ一文字可 (例: 純粋に汎用な型クラスメソッド内)。
+具体的なドメイン値はフルネームを使う
+(例: `filePath` ○, `fp` ✗; `expression` ○, `ex` ✗; `startPosition` ○, `s` ✗)。
+
+**汎用コンビネータの束縛変数**: 具体名がある場合は略語を避ける
+(例: `(element : remaining)` ○, `(x : xs)` ✗)。
+
+**型パラメータ**: なるべく一文字を避ける。意味のある名前を付ける
+(例: `class HasSourceSpan node`, `data WithPosition wrapped`)。
+ただし真に汎用な場合 (Functor / Monad のメソッド等) は短縮可。
