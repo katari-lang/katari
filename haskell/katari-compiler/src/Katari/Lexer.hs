@@ -3,7 +3,7 @@ module Katari.Lexer
     Keyword (..),
     Punctuation (..),
     Operator (..),
-    WithPosition (..),
+    WithSourceSpan (..),
     TokenStream (..),
     runLexer,
     insertVirtualSemicolons,
@@ -19,9 +19,11 @@ import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Void (Void)
-import Numeric (readHex)
+import Katari.AST (Position (..), SourceSpan (..))
+import Numeric (readHex, showHex)
 import Text.Megaparsec hiding (Token, Tokens)
 import Text.Megaparsec qualified as MP
+import Katari.Prelude
 import Text.Megaparsec.Char
 import Text.Megaparsec.Char.Lexer qualified as L
 
@@ -50,8 +52,10 @@ data Token where
   TokenTemplateExpressionClose :: Token
   TokenPunctuation :: Punctuation -> Token
   TokenOperator :: Operator -> Token
-  -- | Explicit ; or virtual (from insertVirtualSemicolons).
-  TokenSemicolon :: Token
+  -- | Explicit @;@ in source.
+  TokenSemicolonExplicit :: Token
+  -- | Virtual semicolon inserted by 'insertVirtualSemicolons'.
+  TokenSemicolonVirtual :: Token
   -- | Raw \n — intermediate token, eliminated by insertVirtualSemicolons.
   TokenNewline :: Token
   deriving (Eq, Ord, Show)
@@ -79,13 +83,13 @@ data Keyword where
   KeywordNull :: Keyword
   KeywordTrue :: Keyword
   KeywordFalse :: Keyword
-  KeywordEnum :: Keyword
+  KeywordData :: Keyword
   KeywordIn :: Keyword
   KeywordInteger :: Keyword
   KeywordBoolean :: Keyword
   KeywordNumber :: Keyword
   KeywordString :: Keyword
-  KeywordBy :: Keyword
+  KeywordType :: Keyword
   deriving (Eq, Ord, Show)
 
 data Punctuation where
@@ -102,6 +106,7 @@ data Punctuation where
   PunctuationEquals :: Punctuation
   PunctuationArrow :: Punctuation
   PunctuationFatArrow :: Punctuation
+  PunctuationPipe :: Punctuation
   deriving (Eq, Ord, Show)
 
 data Operator where
@@ -121,9 +126,11 @@ data Operator where
   OperatorNot :: Operator
   deriving (Eq, Ord, Show)
 
-data WithPosition wrapped = WithPosition
-  { sourcePosition :: SourcePos,
-    tokenLength :: Int,
+-- | Token wrapped with the @SourceSpan@ that covers it. Replaces the older
+-- (sourcePosition + tokenLength) representation, which produced incorrect
+-- end positions for multi-line tokens (template/string literals).
+data WithSourceSpan wrapped = WithSourceSpan
+  { sourceSpan :: SourceSpan,
     value :: wrapped
   }
   deriving (Eq, Ord, Show)
@@ -132,10 +139,10 @@ data WithPosition wrapped = WithPosition
 -- Lexer
 -- ===========================================================================
 
--- | Context stack entry; top of stack selects tokenization mode.
+-- | Lexer mode that overrides default tokenization. Plain top-level code is
+-- represented by an empty context stack, so this type only enumerates the
+-- mode-altering states.
 data LexerContext where
-  -- | Normal code.
-  LexerContextTop :: LexerContext
   -- | Inside single-line template string part (f"...").
   LexerContextTemplate :: LexerContext
   -- | Inside multi-line template string part (f"""...""").
@@ -144,28 +151,37 @@ data LexerContext where
   LexerContextTemplateExpression :: !Int -> LexerContext
   deriving (Eq, Show)
 
--- | Lexer monad : Parsec with a stack of LexerContext for mode-sensitive lexing.
+-- | Lexer monad : Parsec with a stack of LexerContext for mode-sensitive
+-- lexing. Empty stack = top-level (normal code).
 type Lexer = StateT [LexerContext] (Parsec Void Text)
 
-getTopContext :: Lexer LexerContext
+-- | Topmost context, or @Nothing@ if the stack is empty (= top-level code).
+getTopContext :: Lexer (Maybe LexerContext)
 getTopContext = do
   contexts <- get
   pure $ case contexts of
-    topmost : _ -> topmost
-    [] -> LexerContextTop
+    topmost : _ -> Just topmost
+    [] -> Nothing
 
 pushContext :: LexerContext -> Lexer ()
 pushContext context = modify (context :)
 
 popContext :: Lexer ()
-popContext = modify (drop 1)
+popContext = modify $ \case
+  (_ : remaining) -> remaining
+  -- Pop without matching push is a bug. Fail loudly.
+  [] -> error "Katari.Lexer.popContext: empty context stack"
 
--- | Run the lexer on input. Returns raw tokens (with TokenNewline; no virtual semis yet).
-runLexer :: FilePath -> Text -> Either (ParseErrorBundle Text Void) [WithPosition Token]
-runLexer = runParser (evalStateT lexAllTokens [LexerContextTop])
+-- | Run the lexer on input. Returns raw tokens (with TokenNewline; no virtual
+-- semis yet). The input is normalized by replacing @\\r\\n@ with @\\n@ first
+-- (CRLF support). The context stack starts empty, representing top-level code.
+runLexer :: FilePath -> Text -> Either (ParseErrorBundle Text Void) [WithSourceSpan Token]
+runLexer fp = runParser (evalStateT (lexAllTokens fp) []) fp . normalizeNewlines
+  where
+    normalizeNewlines = T.replace "\r\n" "\n"
 
-lexAllTokens :: Lexer [WithPosition Token]
-lexAllTokens = do
+lexAllTokens :: FilePath -> Lexer [WithSourceSpan Token]
+lexAllTokens fp = do
   skipInterTokenSpace
   loop
   where
@@ -174,20 +190,21 @@ lexAllTokens = do
       if done
         then return []
         else do
-          nextToken <- lexToken
+          nextToken <- lexToken fp
           skipInterTokenSpace
           (nextToken :) <$> loop
 
--- | Skip whitespace and comments between tokens — but only in LexerContextTop /
--- LexerContextTemplateExpression. Inside template string contexts we don't skip
--- (everything is string content). Newlines are NOT skipped here: they emerge as
--- TokenNewline tokens in lexNormalToken.
+-- | Skip whitespace and comments between tokens — but only at top-level or in
+-- a template-expression context. Inside template string contexts (single- or
+-- multi-line) we don't skip, because every character is string content.
+-- Newlines are NOT skipped here: they emerge as TokenNewline tokens in
+-- lexNormalToken.
 skipInterTokenSpace :: Lexer ()
 skipInterTokenSpace = do
   context <- getTopContext
   case context of
-    LexerContextTemplate -> return ()
-    LexerContextTemplateMultiLine -> return ()
+    Just LexerContextTemplate -> return ()
+    Just LexerContextTemplateMultiLine -> return ()
     _ -> lift skipHorizontal
   where
     skipHorizontal =
@@ -200,17 +217,36 @@ skipInterTokenSpace = do
 -- Token dispatch
 -- ---------------------------------------------------------------------------
 
-lexToken :: Lexer (WithPosition Token)
-lexToken = do
+-- | Build a @SourceSpan@ from a megaparsec @SourcePos@ pair.
+makeSourceSpan :: FilePath -> SourcePos -> SourcePos -> SourceSpan
+makeSourceSpan fp startPos endPos =
+  SrcSpan
+    { filePath = fp,
+      start = positionFromSourcePos startPos,
+      end = positionFromSourcePos endPos
+    }
+
+positionFromSourcePos :: SourcePos -> Position
+positionFromSourcePos sp =
+  Position
+    { line = unPos (sourceLine sp),
+      column = unPos (sourceColumn sp)
+    }
+
+lexToken :: FilePath -> Lexer (WithSourceSpan Token)
+lexToken fp = do
   startSourcePos <- lift getSourcePos
-  startOffset <- lift getOffset
   context <- getTopContext
   parsedToken <- case context of
-    LexerContextTemplate -> lexTemplateBodyToken False
-    LexerContextTemplateMultiLine -> lexTemplateBodyToken True
+    Just LexerContextTemplate -> lexTemplateBodyToken False
+    Just LexerContextTemplateMultiLine -> lexTemplateBodyToken True
     _ -> lexNormalToken
-  endOffset <- lift getOffset
-  return (WithPosition {sourcePosition = startSourcePos, tokenLength = endOffset - startOffset, value = parsedToken})
+  endSourcePos <- lift getSourcePos
+  return
+    WithSourceSpan
+      { sourceSpan = makeSourceSpan fp startSourcePos endSourcePos,
+        value = parsedToken
+      }
 
 -- ---------------------------------------------------------------------------
 -- Normal (top-level / inside ${...}) token parsing
@@ -253,25 +289,25 @@ lexBrace = do
     lexLeftBrace context = do
       _ <- lift (char '{')
       case context of
-        LexerContextTemplateExpression depth -> do
+        Just (LexerContextTemplateExpression depth) -> do
           modifyTopContext (\_ -> LexerContextTemplateExpression (depth + 1))
           pure (TokenPunctuation PunctuationLeftBrace)
         _ -> pure (TokenPunctuation PunctuationLeftBrace)
     lexRightBrace context = do
       _ <- lift (char '}')
       case context of
-        LexerContextTemplateExpression 0 ->
+        Just (LexerContextTemplateExpression 0) ->
           popContext >> pure TokenTemplateExpressionClose
-        LexerContextTemplateExpression depth -> do
+        Just (LexerContextTemplateExpression depth) -> do
           modifyTopContext (\_ -> LexerContextTemplateExpression (depth - 1))
           pure (TokenPunctuation PunctuationRightBrace)
         _ -> pure (TokenPunctuation PunctuationRightBrace)
 
+-- | Replace the topmost context. Errors if the stack is empty (= top-level)
+-- because callers only invoke this from within a known mode.
 modifyTopContext :: (LexerContext -> LexerContext) -> Lexer ()
 modifyTopContext modifier = modify $ \case
   (topmost : remaining) -> modifier topmost : remaining
-  -- runLexer initialises the context stack with [LexerContextTop], so this
-  -- branch is unreachable. Error out rather than silently seed a fresh stack.
   [] -> error "Katari.Lexer.modifyTopContext: empty context stack"
 
 -- | Start of a template literal: `f"""` or `f"`.
@@ -324,13 +360,13 @@ keywordOf = \case
   "null" -> Just KeywordNull
   "true" -> Just KeywordTrue
   "false" -> Just KeywordFalse
-  "enum" -> Just KeywordEnum
+  "data" -> Just KeywordData
   "in" -> Just KeywordIn
   "integer" -> Just KeywordInteger
   "boolean" -> Just KeywordBoolean
   "number" -> Just KeywordNumber
   "string" -> Just KeywordString
-  "by" -> Just KeywordBy
+  "type" -> Just KeywordType
   _ -> Nothing
 
 -- | Punctuation or operator (excluding `{` and `}` which are handled in
@@ -357,7 +393,8 @@ lexPunctuationOrOperator =
         TokenPunctuation PunctuationDot <$ char '.',
         TokenPunctuation PunctuationAt <$ char '@',
         TokenPunctuation PunctuationEquals <$ char '=',
-        TokenSemicolon <$ char ';',
+        TokenPunctuation PunctuationPipe <$ char '|',
+        TokenSemicolonExplicit <$ char ';',
         TokenOperator OperatorAdd <$ char '+',
         TokenOperator OperatorSubtract <$ char '-',
         TokenOperator OperatorMultiply <$ char '*',
@@ -476,8 +513,11 @@ escapeCharacter =
           case classifySurrogate cp2 of
             SurrogateLow ->
               pure (chr (0x10000 + ((cp1 - 0xD800) * 0x400) + (cp2 - 0xDC00)))
-            _ -> fail "invalid \\u escape: expected low surrogate after high surrogate"
-        SurrogateLow -> fail "invalid \\u escape: unpaired low surrogate"
+            _ -> fail $
+              "invalid \\u escape: high surrogate U+" <> showHex cp1 "" <>
+              " must be followed by low surrogate U+DC00..U+DFFF, got U+" <> showHex cp2 ""
+        SurrogateLow -> fail $
+          "invalid \\u escape: unpaired low surrogate U+" <> showHex cp1 ""
 
     readFourHex = do
       hex1 <- hexDigitChar
@@ -500,12 +540,16 @@ classifySurrogate codePoint
 -- Virtual Semicolon Insertion
 -- ===========================================================================
 
--- | Token kinds after which a TokenNewline should be replaced with a virtual
--- TokenSemicolon. Go-style rule: insert after identifier / literal / ) / ] /
--- } / break / return / next / null / true / false / template-close / type keyword.
+-- | Expression を終端しうるトークン。これらの後に改行があった場合、
+-- 'insertVirtualSemicolons' が改行を仮想セミコロンに変換する。
 --
--- TokenUnderscore is intentionally excluded: a wildcard as the last token before
--- a newline is very rare and likely a type-annotation head (_: integer).
+-- 採用基準: 「ここで expression の構文要素が完結しているとみなして良い」トークン。
+-- 識別子・各種リテラル・閉じ括弧・特定キーワード (break / return / next /
+-- null / true / false / 型名キーワード) が該当する。
+--
+-- TokenUnderscore は意図的に除外: 式位置で `_` 単独はエラー (式にならない)、
+-- かつ `_: integer` 型注釈の頭になり得る。よって行末に来た場合に挿入しても
+-- 良いケースがほぼ無い。
 semicolonInsertingTokens :: Set.Set Token
 semicolonInsertingTokens =
   Set.fromList
@@ -526,25 +570,26 @@ semicolonInsertingTokens =
     ]
 
 -- | Transform a raw token list (with TokenNewline tokens) into a token list
--- with TokenSemicolon inserted at appropriate newlines and TokenNewline tokens removed.
-insertVirtualSemicolons :: [WithPosition Token] -> [WithPosition Token]
+-- with TokenSemicolonVirtual inserted at appropriate newlines and TokenNewline
+-- tokens removed.
+insertVirtualSemicolons :: [WithSourceSpan Token] -> [WithSourceSpan Token]
 insertVirtualSemicolons = go Nothing
   where
     go _ [] = []
-    go previous (current@(WithPosition _ _ currentToken) : remaining)
+    go previous (current@(WithSourceSpan _ currentToken) : remaining)
       | currentToken == TokenNewline =
           if canInsertAfter previous
             then virtualSemicolon previous : go Nothing remaining
             else go Nothing remaining
       | otherwise = current : go (Just current) remaining
 
-    virtualSemicolon :: Maybe (WithPosition Token) -> WithPosition Token
-    virtualSemicolon (Just (WithPosition sourcePos tokenLength _)) = WithPosition sourcePos tokenLength TokenSemicolon
+    virtualSemicolon :: Maybe (WithSourceSpan Token) -> WithSourceSpan Token
+    virtualSemicolon (Just (WithSourceSpan span_ _)) = WithSourceSpan span_ TokenSemicolonVirtual
     virtualSemicolon Nothing = error "insertVirtualSemicolons: canInsertAfter Nothing should be False"
 
-    canInsertAfter :: Maybe (WithPosition Token) -> Bool
+    canInsertAfter :: Maybe (WithSourceSpan Token) -> Bool
     canInsertAfter Nothing = False
-    canInsertAfter (Just (WithPosition _ _ previousToken)) = case previousToken of
+    canInsertAfter (Just (WithSourceSpan _ previousToken)) = case previousToken of
       TokenIdentifier _ -> True
       TokenIntegerLiteral _ -> True
       TokenFloatLiteral _ -> True
@@ -557,13 +602,13 @@ insertVirtualSemicolons = go Nothing
 
 data TokenStream = TokenStream
   { input :: Text,
-    tokens :: [WithPosition Token]
+    tokens :: [WithSourceSpan Token]
   }
   deriving (Eq, Show)
 
 instance MP.Stream TokenStream where
-  type Token TokenStream = WithPosition Token
-  type Tokens TokenStream = [WithPosition Token]
+  type Token TokenStream = WithSourceSpan Token
+  type Tokens TokenStream = [WithSourceSpan Token]
 
   tokensToChunk Proxy = id
   chunkToTokens Proxy = id
@@ -590,7 +635,7 @@ instance VisualStream TokenStream where
     concat
       . NE.toList
       . NE.intersperse " "
-      . fmap (\(WithPosition _ _ wrappedToken) -> showToken wrappedToken)
+      . fmap (\(WithSourceSpan _ wrappedToken) -> showToken wrappedToken)
     where
       showToken = \case
         TokenIdentifier text -> T.unpack text
@@ -606,10 +651,16 @@ instance VisualStream TokenStream where
         TokenTemplateExpressionClose -> "}"
         TokenPunctuation punctuation -> showPunctuation punctuation
         TokenOperator operator -> showOperator operator
-        TokenSemicolon -> ";"
+        TokenSemicolonExplicit -> ";"
+        TokenSemicolonVirtual -> ";"
         TokenNewline -> "\\n"
 
-  tokensLength Proxy = sum . fmap (\(WithPosition _ tokenLength _) -> tokenLength) . NE.toList
+  tokensLength Proxy = sum . fmap tokenLengthFromSpan . NE.toList
+    where
+      tokenLengthFromSpan (WithSourceSpan span_ _) =
+        if span_.start.line == span_.end.line
+          then max 1 (span_.end.column - span_.start.column)
+          else 1
 
 instance TraversableStream TokenStream where
   reachOffset targetOffset PosState {..} =
@@ -617,11 +668,11 @@ instance TraversableStream TokenStream where
         sourceText = pstateInput.input
         remaining = drop (targetOffset - pstateOffset) allTokens
         newSourcePos = case remaining of
-          (WithPosition sourcePos _ _ : _) -> sourcePos
+          (WithSourceSpan span_ _ : _) ->
+            mkSourcePos span_.filePath span_.start
           [] -> case reverse allTokens of
-            (WithPosition sourcePos tokenLength _ : _) ->
-              -- End of last token: move column forward by tokenLength.
-              SourcePos (sourceName sourcePos) (sourceLine sourcePos) (mkPos (unPos (sourceColumn sourcePos) + tokenLength))
+            (WithSourceSpan span_ _ : _) ->
+              mkSourcePos span_.filePath span_.end
             [] -> pstateSourcePos
         linePrefix = linePrefixFor sourceText newSourcePos
         remainingInput = TokenStream sourceText remaining
@@ -634,6 +685,9 @@ instance TraversableStream TokenStream where
               pstateLinePrefix = pstateLinePrefix <> T.unpack linePrefix
             }
         )
+
+mkSourcePos :: FilePath -> Position -> SourcePos
+mkSourcePos fp p = SourcePos fp (mkPos p.line) (mkPos p.column)
 
 -- | Extract the source line prefix up to (but not including) the column of
 -- the given SourcePos. Used to feed megaparsec's error message formatter so
@@ -671,13 +725,13 @@ showKeyword = \case
   KeywordNull -> "null"
   KeywordTrue -> "true"
   KeywordFalse -> "false"
-  KeywordEnum -> "enum"
+  KeywordData -> "data"
   KeywordIn -> "in"
   KeywordInteger -> "integer"
   KeywordBoolean -> "boolean"
   KeywordNumber -> "number"
   KeywordString -> "string"
-  KeywordBy -> "by"
+  KeywordType -> "type"
 
 showPunctuation :: Punctuation -> String
 showPunctuation = \case
@@ -694,6 +748,7 @@ showPunctuation = \case
   PunctuationEquals -> "="
   PunctuationArrow -> "->"
   PunctuationFatArrow -> "=>"
+  PunctuationPipe -> "|"
 
 showOperator :: Operator -> String
 showOperator = \case

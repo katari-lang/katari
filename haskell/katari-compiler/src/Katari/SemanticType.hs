@@ -1,6 +1,7 @@
 module Katari.SemanticType where
 
 import Data.Text (Text)
+import Prelude ()
 
 data SemanticType where
   SemanticTypeNull :: SemanticType

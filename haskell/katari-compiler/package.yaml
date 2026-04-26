@@ -10,6 +10,7 @@ library:
     - Katari.AST
     - Katari.Lexer
     - Katari.Parser
+    - Katari.Prelude
     - Katari.Typechecker
     - Katari.Typechecker.Identifier
     - Katari.Typechecker.ConstraintGenerator
@@ -19,6 +20,9 @@ tests:
   katari-compiler-test:
     main: Spec.hs
     source-dirs: test
+    other-modules:
+      - Katari.ParserSpec
+      - Katari.IdentifierSpec
     dependencies:
       - katari-compiler
       - hspec
@@ -47,7 +51,7 @@ default-extensions:
   - NoFieldSelectors
   - RecordWildCards
   - OverloadedRecordDot
-  - OverloadedRecordUpdate
+  - RebindableSyntax
   - FlexibleContexts
   - FlexibleInstances
   - MultiParamTypeClasses

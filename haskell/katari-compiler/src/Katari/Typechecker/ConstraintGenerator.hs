@@ -3,3 +3,5 @@
 -- Input : AST with unique identifiers attached to definitions (output of phase 1)
 -- Output : AST with metadata of unsolved type variables, list of constraints for type variables
 module Katari.Typechecker.ConstraintGenerator where
+
+import Prelude ()

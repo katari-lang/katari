@@ -7,6 +7,7 @@ import Data.Text qualified as T
 import Katari.AST
 import Katari.Parser (Parsed (..), parseModule)
 import Test.Hspec
+import Katari.Prelude
 
 -- ---------------------------------------------------------------------------
 -- Helpers
@@ -91,6 +92,10 @@ spec = do
     declarationsNegative
     numberLiterals
     edgeCases
+    multilineTokenSpans
+    crlfHandling
+    qualifiedConstructorPatterns
+    thenClausePattern
 
 -- ---------------------------------------------------------------------------
 -- Literals
@@ -563,7 +568,7 @@ letStatement = describe "let statement" $ do
       DeclarationAgent a ->
         case a.body.statements of
           [StatementLet s] ->
-            case s.name of
+            case s.pattern of
               PatternVariable v -> nameText v.name `shouldBe` "x"
               _ -> expectationFailure "expected var pattern"
           _ -> expectationFailure "expected one let statement"
@@ -576,7 +581,7 @@ letStatement = describe "let statement" $ do
       (DeclarationAgent a1, DeclarationAgent a2) ->
         case (a1.body.statements, a2.body.statements) of
           ([StatementLet s1], [StatementLet s2]) ->
-            case (s1.name, s2.name) of
+            case (s1.pattern, s2.pattern) of
               (PatternWildcard _, PatternVariable v) -> nameText v.name `shouldBe` "_x"
               _ -> expectationFailure "expected wildcard then var"
           _ -> expectationFailure "expected one let each"
@@ -789,37 +794,82 @@ declarations = describe "declarations" $ do
     _ <- shouldSucceed "@\"external ai\" ext agent ask(prompt: string) -> string with ai_req"
     pure ()
 
-  it "parses enum" $ do
-    _ <- shouldSucceed "enum shape { circle(radius: number), rect(w: number, h: number) }"
+  it "parses data with no parameters" $ do
+    _ <- shouldSucceed "data foo()"
     pure ()
 
-  it "parses enum with discriminator" $ do
-    _ <- shouldSucceed "enum foo by \"type\" { bar() }"
+  it "parses data with one parameter" $ do
+    _ <- shouldSucceed "data circle(radius: number)"
     pure ()
 
-  it "parses enum with annotation" $ do
-    _ <-
-      shouldSucceed $
-        mconcat
-          [ "enum color {",
-            "  @\"red variant\" red(),",
-            "  blue(),",
-            "  green()",
-            "}"
-          ]
+  it "parses data with multiple parameters" $ do
+    _ <- shouldSucceed "data rect(w: number, h: number)"
     pure ()
 
-  it "distinguishes enum `bar` (no parens) from `bar()`" $ do
-    m1 <- shouldSucceed "enum foo { bar }"
-    m2 <- shouldSucceed "enum foo { bar() }"
-    case (head (decls m1), head (decls m2)) of
-      (DeclarationEnum e1, DeclarationEnum e2) ->
-        case (e1.constructors, e2.constructors) of
-          ([c1], [c2]) -> do
-            isNothing c1.parameters `shouldBe` True
-            isJust c2.parameters `shouldBe` True
-          _ -> expectationFailure "expected one ctor each"
-      _ -> expectationFailure "expected enums"
+  it "parses data with trailing comma" $ do
+    _ <- shouldSucceed "data foo(x: integer,)"
+    pure ()
+
+  it "parses data with annotation" $ do
+    _ <- shouldSucceed "@\"json doc\" data circle(radius: number)"
+    pure ()
+
+  it "rejects data without parens" $ do
+    shouldFail "data foo"
+
+  it "parses type synonym (single type)" $ do
+    _ <- shouldSucceed "type t = integer"
+    pure ()
+
+  it "parses type synonym union" $ do
+    m <- shouldSucceed "type maybe_int = nothing | just"
+    case head (decls m) of
+      DeclarationTypeSynonym ts -> do
+        nameText ts.name `shouldBe` "maybe_int"
+        case ts.rhs of
+          TypeUnion u -> length u.branches `shouldBe` 2
+          _ -> expectationFailure "expected union rhs"
+      _ -> expectationFailure "expected type synonym"
+
+  it "parses type synonym with literal types" $ do
+    m <- shouldSucceed "type status = \"ok\" | \"err\" | null"
+    case head (decls m) of
+      DeclarationTypeSynonym ts -> case ts.rhs of
+        TypeUnion u -> length u.branches `shouldBe` 3
+        _ -> expectationFailure "expected union rhs"
+      _ -> expectationFailure "expected type synonym"
+
+  it "parses type synonym with integer/boolean literals" $ do
+    _ <- shouldSucceed "type t = 200 | 404 | true | false"
+    pure ()
+
+  it "type synonym allows trailing pipe" $ do
+    _ <- shouldSucceed "type t = a | b |"
+    pure ()
+
+  it "rejects type synonym with leading pipe" $ do
+    shouldFail "type t = | a | b"
+
+  it "union has lower precedence than function (parses as (a|b) -> c)" $ do
+    -- function 構文は parser:parseFunctionType で `(...) -> ret` の形なので、
+    -- bare `T -> T` は識別子1つの function 形を試みるが括弧必須でエラーする。
+    -- ここでは function を含む union が外側で union として括れることを確認する。
+    m <- shouldSucceed "type t = integer | (x: integer) -> integer"
+    case head (decls m) of
+      DeclarationTypeSynonym ts -> case ts.rhs of
+        TypeUnion u -> length u.branches `shouldBe` 2
+        _ -> expectationFailure "expected union rhs"
+      _ -> expectationFailure "expected type synonym"
+
+  it "union inside array (array of union, not union of arrays)" $ do
+    m <- shouldSucceed "type t = array[integer | string]"
+    case head (decls m) of
+      DeclarationTypeSynonym ts -> case ts.rhs of
+        TypeArray a -> case a.elementType of
+          TypeUnion _ -> pure ()
+          _ -> expectationFailure "expected union as array element"
+        _ -> expectationFailure "expected array type"
+      _ -> expectationFailure "expected type synonym"
 
   it "parses import" $ do
     m <- shouldSucceed "import lib.math"
@@ -845,8 +895,20 @@ declarations = describe "declarations" $ do
     m <- shouldSucceed "import { sqrt, abs } from lib.math"
     case head (decls m) of
       DeclarationImport i -> case i.kind of
-        ImportNames ns mn -> do
-          ns `shouldBe` ["sqrt", "abs"]
+        ImportNames its mn -> do
+          fmap (.name) its `shouldBe` ["sqrt", "abs"]
+          fmap (.kind) its `shouldBe` [ImportItemValue, ImportItemValue]
+          mn `shouldBe` "lib.math"
+        _ -> expectationFailure "expected ImportNames"
+      _ -> expectationFailure "expected import"
+
+  it "parses import with type-prefixed names" $ do
+    m <- shouldSucceed "import { type Foo, bar, type Baz } from lib.math"
+    case head (decls m) of
+      DeclarationImport i -> case i.kind of
+        ImportNames its mn -> do
+          fmap (.name) its `shouldBe` ["Foo", "bar", "Baz"]
+          fmap (.kind) its `shouldBe` [ImportItemType, ImportItemValue, ImportItemType]
           mn `shouldBe` "lib.math"
         _ -> expectationFailure "expected ImportNames"
       _ -> expectationFailure "expected import"
@@ -859,9 +921,6 @@ declarations = describe "declarations" $ do
         isJust a.body.returnExpression `shouldBe` True
       _ -> expectationFailure "expected agent"
 
-  it "parses empty enum" $ do
-    _ <- shouldSucceed "enum empty {}"
-    pure ()
 
   it "rejects missing -> in req declaration" $ do
     shouldFail "req foo(x: integer) integer"
@@ -921,6 +980,46 @@ whereBlock = describe "where block" $ do
             "}"
           ]
     pure ()
+
+  it "parses where with qualified handler (req module.name)" $ do
+    m <-
+      shouldSucceed $
+        mconcat
+          [ "agent main() {",
+            "  result",
+            "} where {",
+            "  req io.read() { 42 }",
+            "}"
+          ]
+    case head (decls m) of
+      DeclarationAgent a -> case a.body.whereBlock of
+        Just wb -> case wb.handlers of
+          [h] -> do
+            fmap nameText h.moduleQualifier `shouldBe` Just "io"
+            nameText h.name `shouldBe` "read"
+          _ -> expectationFailure "expected one handler"
+        _ -> expectationFailure "expected where block"
+      _ -> expectationFailure "expected agent"
+
+  it "parses where with bare handler keeps moduleQualifier as Nothing" $ do
+    m <-
+      shouldSucceed $
+        mconcat
+          [ "agent main() {",
+            "  result",
+            "} where {",
+            "  req get() { 42 }",
+            "}"
+          ]
+    case head (decls m) of
+      DeclarationAgent a -> case a.body.whereBlock of
+        Just wb -> case wb.handlers of
+          [h] -> do
+            isNothing h.moduleQualifier `shouldBe` True
+            nameText h.name `shouldBe` "get"
+          _ -> expectationFailure "expected one handler"
+        _ -> expectationFailure "expected where block"
+      _ -> expectationFailure "expected agent"
 
   it "parses where with state vars" $ do
     _ <-
@@ -1676,12 +1775,6 @@ declarationsNegative = describe "declaration negative cases" $ do
   it "rejects ext agent without 'with'" $ do
     shouldFail "ext agent ask(prompt: string) -> string"
 
-  it "rejects enum 'by' without string literal" $ do
-    shouldFail "enum foo by { bar }"
-
-  it "rejects enum 'by' followed by identifier" $ do
-    shouldFail "enum foo by kind { bar }"
-
 -- ---------------------------------------------------------------------------
 -- Number literal edge cases
 -- ---------------------------------------------------------------------------
@@ -1724,3 +1817,159 @@ edgeCases = describe "edge cases" $ do
   it "parses template with nested braces (if/else) on one line" $ do
     _ <- shouldSucceed "agent main() { f\"result ${if (a) { 1 } else { 2 }}\" }"
     pure ()
+
+-- ---------------------------------------------------------------------------
+-- Multi-line token source spans
+-- ---------------------------------------------------------------------------
+
+multilineTokenSpans :: Spec
+multilineTokenSpans = describe "multi-line token source spans" $ do
+  it "multiline string literal span covers multiple lines" $ do
+    e <- parseExpr "\"\"\"\nhello\nworld\n\"\"\""
+    case e of
+      ExpressionLiteral le -> do
+        let s = sourceSpanOf le
+        s.end.line `shouldSatisfy` (> s.start.line)
+      _ -> expectationFailure "expected literal"
+
+  it "multiline template literal span covers multiple lines" $ do
+    e <- parseExpr "f\"\"\"\nhello\nworld\n\"\"\""
+    case e of
+      ExpressionTemplate te -> do
+        let s = sourceSpanOf te
+        s.end.line `shouldSatisfy` (> s.start.line)
+      _ -> expectationFailure "expected template"
+
+-- ---------------------------------------------------------------------------
+-- CRLF handling
+-- ---------------------------------------------------------------------------
+
+crlfHandling :: Spec
+crlfHandling = describe "CRLF line endings" $ do
+  it "parses a CRLF source identical to LF source" $ do
+    _ <- shouldSucceed "agent main() {\r\n  let x = 1\r\n  x\r\n}"
+    pure ()
+
+  it "auto-inserts semicolons across CRLF newlines" $ do
+    -- LF \302\247 CRLF \343\201\247 \345\220\214\343\201\230 AST \343\201\253\343\201\252\343\202\213\343\201\223\343\201\250\343\202\222確認。`x + y\\n` の末尾に仮想 semi が入るため、
+    -- statements = [let x; let y; x+y] (3 個)、returnExpression = Nothingとなる。
+    m <- shouldSucceed "agent main() {\r\n  let x = 1\r\n  let y = 2\r\n  x + y\r\n}"
+    mLf <- shouldSucceed "agent main() {\n  let x = 1\n  let y = 2\n  x + y\n}"
+    case (head (decls m), head (decls mLf)) of
+      (DeclarationAgent a, DeclarationAgent aLf) -> do
+        length a.body.statements `shouldBe` length aLf.body.statements
+      _ -> expectationFailure "expected agent"
+
+-- ---------------------------------------------------------------------------
+-- Qualified constructor patterns (#9)
+-- ---------------------------------------------------------------------------
+
+qualifiedConstructorPatterns :: Spec
+qualifiedConstructorPatterns = describe "qualified constructor patterns" $ do
+  it "bare ctor(field = pat) parses as constructor pattern" $ do
+    m <-
+      shouldSucceed $
+        mconcat
+          [ "agent main() {",
+            "  match (s) { case circle(r = r) => { r } }",
+            "}"
+          ]
+    case head (decls m) of
+      DeclarationAgent a -> case a.body.returnExpression of
+        Just (ExpressionMatch me) -> case me.cases of
+          [arm] -> case arm.pattern of
+            PatternQualifiedConstructor qc -> do
+              isNothing qc.moduleQualifier `shouldBe` True
+              nameText qc.constructorName `shouldBe` "circle"
+              length qc.parameters `shouldBe` 1
+            _ -> expectationFailure "expected qualified constructor pattern"
+          _ -> expectationFailure "expected one case"
+        _ -> expectationFailure "expected match"
+      _ -> expectationFailure "expected agent"
+
+  it "module.ctor(...) parses with module qualifier" $ do
+    m <-
+      shouldSucceed $
+        mconcat
+          [ "agent main() {",
+            "  match (s) { case lib.circle(r) => { r } }",
+            "}"
+          ]
+    case head (decls m) of
+      DeclarationAgent a -> case a.body.returnExpression of
+        Just (ExpressionMatch me) -> case me.cases of
+          [arm] -> case arm.pattern of
+            PatternQualifiedConstructor qc -> do
+              fmap nameText qc.moduleQualifier `shouldBe` Just "lib"
+              nameText qc.constructorName `shouldBe` "circle"
+            _ -> expectationFailure "expected qualified constructor pattern"
+          _ -> expectationFailure "expected one case"
+        _ -> expectationFailure "expected match"
+      _ -> expectationFailure "expected agent"
+
+  it "bare variable pattern (no parens) still works" $ do
+    m <-
+      shouldSucceed $
+        mconcat
+          [ "agent main() {",
+            "  match (s) { case x => { x } }",
+            "}"
+          ]
+    case head (decls m) of
+      DeclarationAgent a -> case a.body.returnExpression of
+        Just (ExpressionMatch me) -> case me.cases of
+          [arm] -> case arm.pattern of
+            PatternVariable v -> nameText v.name `shouldBe` "x"
+            _ -> expectationFailure "expected variable pattern"
+          _ -> expectationFailure "expected one case"
+        _ -> expectationFailure "expected match"
+      _ -> expectationFailure "expected agent"
+
+-- ---------------------------------------------------------------------------
+-- then-clause pattern (Maybe) (#4)
+-- ---------------------------------------------------------------------------
+
+thenClausePattern :: Spec
+thenClausePattern = describe "then clause pattern" $ do
+  it "then { ... } records pattern as Nothing" $ do
+    m <-
+      shouldSucceed $
+        mconcat
+          [ "agent main() {",
+            "  result",
+            "} where {",
+            "  req get() { 1 }",
+            "} then {",
+            "  null",
+            "}"
+          ]
+    case head (decls m) of
+      DeclarationAgent a -> case a.body.whereBlock of
+        Just wb -> case wb.thenClause of
+          Just (Nothing, _) -> pure ()
+          Just (Just _, _) -> expectationFailure "expected then without pattern"
+          Nothing -> expectationFailure "expected then clause"
+        Nothing -> expectationFailure "expected where block"
+      _ -> expectationFailure "expected agent"
+
+  it "then(pat) { ... } records pattern as Just" $ do
+    m <-
+      shouldSucceed $
+        mconcat
+          [ "agent main() {",
+            "  result",
+            "} where {",
+            "  req get() { 1 }",
+            "} then(v) {",
+            "  v",
+            "}"
+          ]
+    case head (decls m) of
+      DeclarationAgent a -> case a.body.whereBlock of
+        Just wb -> case wb.thenClause of
+          Just (Just (PatternVariable v), _) -> nameText v.name `shouldBe` "v"
+          Just (Just _, _) -> expectationFailure "expected variable pattern"
+          Just (Nothing, _) -> expectationFailure "expected then with pattern"
+          Nothing -> expectationFailure "expected then clause"
+        Nothing -> expectationFailure "expected where block"
+      _ -> expectationFailure "expected agent"

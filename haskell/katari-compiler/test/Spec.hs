@@ -1,5 +1,9 @@
-import Katari.ParserSpec (spec)
+import Katari.IdentifierSpec qualified as IdentifierSpec
+import Katari.ParserSpec qualified as ParserSpec
 import Test.Hspec
+import Katari.Prelude
 
 main :: IO ()
-main = hspec spec
+main = hspec $ do
+  ParserSpec.spec
+  IdentifierSpec.spec
