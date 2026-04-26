@@ -41,7 +41,7 @@ import Control.Monad.State.Strict
 import Data.Foldable (foldl')
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (isJust)
+import Data.Maybe (catMaybes, isJust)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Katari.AST
@@ -361,8 +361,8 @@ bindLocalVariable :: NameRef Parsed 'VariableRef -> Identifier (NameRef Identifi
 bindLocalVariable nameRef = do
   ctx <- gets (.resolveContext)
   let name = nameRef.text
-  when (chainHasModule name ctx.scopeStack) $
-    emitError (ErrorShadowNonVariable nameRef.sourceSpan name)
+  when (chainHasModule name ctx.scopeStack)
+    $ emitError (ErrorShadowNonVariable nameRef.sourceSpan name)
   vid <- freshVariableId VariableData {variableName = name, variableSourceSpan = nameRef.sourceSpan}
   modifyResolveContext $ \c -> c {scopeStack = insertInnermost name vid c.scopeStack}
   pure (identifiedNameRef (IdentifiedVariable vid) nameRef)
@@ -422,11 +422,11 @@ lookupModule = lookupSlot (.moduleSymbol)
 
 -- | Look up the variable slot of @name@ in the export table of @mid@.
 lookupModuleExportVariable :: ModuleId -> Text -> Identifier (Maybe VariableId)
-lookupModuleExportVariable mid name = lookupModuleExportSlot (.variableSymbol) mid name
+lookupModuleExportVariable = lookupModuleExportSlot (.variableSymbol)
 
 -- | Look up the type slot of @name@ in the export table of @mid@.
 lookupModuleExportType :: ModuleId -> Text -> Identifier (Maybe TypeId)
-lookupModuleExportType mid name = lookupModuleExportSlot (.typeSymbol) mid name
+lookupModuleExportType = lookupModuleExportSlot (.typeSymbol)
 
 lookupModuleExportSlot ::
   (SymbolEntry -> Maybe a) ->
@@ -642,7 +642,7 @@ resolveModule topLevels moduleNameToId exports moduleMap = do
           ]
   -- Build (ModuleId, Module Identified) pairs and assemble a Map at the end.
   pairs <- mapM (resolveOne exportsById) (Map.toList moduleMap)
-  pure (Map.fromList [pair | Just pair <- pairs])
+  pure (Map.fromList (catMaybes pairs))
   where
     resolveOne exportsById (modName, parsedModule) = do
       let topLevelFrame = Map.findWithDefault Map.empty modName topLevels
