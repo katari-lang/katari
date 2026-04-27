@@ -3,6 +3,8 @@ version: 0.1.0.0
 author: yukikurage
 license: MIT
 
+language: GHC2021
+
 library:
   source-dirs: src
   exposed-modules:
@@ -10,9 +12,10 @@ library:
     - Katari.AST
     - Katari.Lexer
     - Katari.Parser
-    - Katari.Prelude
     - Katari.Typechecker
     - Katari.Typechecker.Identifier
+    - Katari.Typechecker.SemanticType
+    - Katari.Typechecker.NormalizedType
     - Katari.Typechecker.ConstraintGenerator
     - Katari.Typechecker.Solver
 
@@ -42,34 +45,14 @@ dependencies:
   - vector
 
 default-extensions:
-  - GHC2021
   - DataKinds
-  - OverloadedStrings
   - LambdaCase
-  - OverloadedLabels
+  - OverloadedStrings
   - DuplicateRecordFields
   - NoFieldSelectors
   - RecordWildCards
   - OverloadedRecordDot
-  - RebindableSyntax
-  - FlexibleContexts
-  - FlexibleInstances
-  - MultiParamTypeClasses
   - TypeFamilies
-  - GeneralizedNewtypeDeriving
-  - DeriveGeneric
-  - DeriveAnyClass
-  - StandaloneDeriving
-  - UndecidableInstances
-  - TemplateHaskell
-  - ScopedTypeVariables
-  - TypeApplications
-  - AllowAmbiguousTypes
-  - RankNTypes
   - GADTs
-  - KindSignatures
-  - DataKinds
-  - TypeOperators
-  - TypeInType
-  - PolyKinds
   - QuantifiedConstraints
+  - UndecidableInstances

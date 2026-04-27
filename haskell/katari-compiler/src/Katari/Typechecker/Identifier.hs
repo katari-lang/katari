@@ -37,7 +37,7 @@ module Katari.Typechecker.Identifier
 where
 
 import Control.Monad (foldM, when)
-import Control.Monad.State.Strict
+import Control.Monad.State.Strict (State, get, gets, modify, put, runState)
 import Data.Foldable (foldl')
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
@@ -46,7 +46,6 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Katari.AST
 import Katari.Parser (Parsed (..))
-import Katari.Prelude
 
 -- ---------------------------------------------------------------------------
 -- ID newtypes & Identified GADT
@@ -115,13 +114,13 @@ emptySymbolEntry :: SymbolEntry
 emptySymbolEntry = SymbolEntry {variableSymbol = Nothing, typeSymbol = Nothing, moduleSymbol = Nothing}
 
 singletonVariable :: VariableId -> SymbolEntry
-singletonVariable vid = SymbolEntry {variableSymbol = Just vid, typeSymbol = Nothing, moduleSymbol = Nothing}
+singletonVariable variableId = SymbolEntry {variableSymbol = Just variableId, typeSymbol = Nothing, moduleSymbol = Nothing}
 
 singletonType :: TypeId -> SymbolEntry
-singletonType tid = SymbolEntry {variableSymbol = Nothing, typeSymbol = Just tid, moduleSymbol = Nothing}
+singletonType typeId = SymbolEntry {variableSymbol = Nothing, typeSymbol = Just typeId, moduleSymbol = Nothing}
 
 singletonModule :: ModuleId -> SymbolEntry
-singletonModule mid = SymbolEntry {variableSymbol = Nothing, typeSymbol = Nothing, moduleSymbol = Just mid}
+singletonModule moduleId = SymbolEntry {variableSymbol = Nothing, typeSymbol = Nothing, moduleSymbol = Just moduleId}
 
 -- ---------------------------------------------------------------------------
 -- Result tables
@@ -141,7 +140,12 @@ data VariableData = VariableData
 
 data TypeData = TypeData
   { typeName :: Text,
-    typeSourceSpan :: SourceSpan
+    typeSourceSpan :: SourceSpan,
+    -- | For type synonyms, the resolved RHS expression. @Nothing@ for
+    -- @data@ declarations. Populated in Phase D after the synonym body
+    -- has been resolved; the constraint generator's elaboration phase
+    -- expands synonyms by looking up this field.
+    typeSynonymRhs :: Maybe (SyntacticType Identified)
   }
   deriving (Eq, Show)
 
@@ -183,6 +187,17 @@ data IdentifierError where
 deriving instance Show IdentifierError
 
 deriving instance Eq IdentifierError
+
+instance HasSourceSpan IdentifierError where
+  sourceSpanOf = \case
+    ErrorDuplicateName sp _ _ -> sp
+    ErrorShadowNonVariable sp _ -> sp
+    ErrorUndefinedName sp _ -> sp
+    ErrorUndefinedQualified sp _ _ -> sp
+    ErrorNotAType sp _ -> sp
+    ErrorNotAModule sp _ -> sp
+    ErrorImportNameNotFound sp _ _ -> sp
+    ErrorImportModuleNotFound sp _ -> sp
 
 -- ---------------------------------------------------------------------------
 -- Identifier monad
@@ -245,28 +260,28 @@ runIdentifier action = runState action initialState
 -- ---------------------------------------------------------------------------
 
 freshVariableId :: VariableData -> Identifier VariableId
-freshVariableId vdata = do
-  st <- get
-  let vid = VariableId st.nextVariableId
-  put st {nextVariableId = st.nextVariableId + 1, variables = Map.insert vid vdata st.variables}
-  pure vid
+freshVariableId variableData = do
+  state <- get
+  let variableId = VariableId state.nextVariableId
+  put state {nextVariableId = state.nextVariableId + 1, variables = Map.insert variableId variableData state.variables}
+  pure variableId
 
 freshTypeId :: TypeData -> Identifier TypeId
-freshTypeId tdata = do
-  st <- get
-  let tid = TypeId st.nextTypeId
-  put st {nextTypeId = st.nextTypeId + 1, types = Map.insert tid tdata st.types}
-  pure tid
+freshTypeId typeData = do
+  state <- get
+  let typeId = TypeId state.nextTypeId
+  put state {nextTypeId = state.nextTypeId + 1, types = Map.insert typeId typeData state.types}
+  pure typeId
 
 freshModuleId :: ModuleData -> Identifier ModuleId
-freshModuleId mdata = do
-  st <- get
-  let mid = ModuleId st.nextModuleId
-  put st {nextModuleId = st.nextModuleId + 1, modules = Map.insert mid mdata st.modules}
-  pure mid
+freshModuleId moduleData = do
+  state <- get
+  let moduleId = ModuleId state.nextModuleId
+  put state {nextModuleId = state.nextModuleId + 1, modules = Map.insert moduleId moduleData state.modules}
+  pure moduleId
 
 emitError :: IdentifierError -> Identifier ()
-emitError err = modify $ \st -> st {errors = err : st.errors}
+emitError newError = modify $ \state -> state {errors = newError : state.errors}
 
 -- ---------------------------------------------------------------------------
 -- SymbolEntry merge
@@ -288,44 +303,44 @@ mergeSymbol ::
 mergeSymbol newPos name existing incoming = do
   -- Forbid variable + module coexistence in either direction.
   case (incoming.variableSymbol, existing.moduleSymbol) of
-    (Just _, Just oldMid) -> reportFromModule oldMid
+    (Just _, Just existingModuleId) -> reportFromModule existingModuleId
     _ -> pure ()
   case (incoming.moduleSymbol, existing.variableSymbol) of
-    (Just _, Just oldVid) -> reportFromVariable oldVid
+    (Just _, Just existingVariableId) -> reportFromVariable existingVariableId
     _ -> pure ()
   -- Per-slot duplicate.
-  variable' <- mergeVariableSlot existing.variableSymbol incoming.variableSymbol
-  type' <- mergeTypeSlot existing.typeSymbol incoming.typeSymbol
-  module' <- mergeModuleSlot existing.moduleSymbol incoming.moduleSymbol
-  pure SymbolEntry {variableSymbol = variable', typeSymbol = type', moduleSymbol = module'}
+  mergedVariable <- mergeVariableSlot existing.variableSymbol incoming.variableSymbol
+  mergedType <- mergeTypeSlot existing.typeSymbol incoming.typeSymbol
+  mergedModule <- mergeModuleSlot existing.moduleSymbol incoming.moduleSymbol
+  pure SymbolEntry {variableSymbol = mergedVariable, typeSymbol = mergedType, moduleSymbol = mergedModule}
   where
-    reportFromVariable vid = do
-      mPos <- gets (fmap (.variableSourceSpan) . Map.lookup vid . (.variables))
-      maybe (pure ()) (emitError . ErrorDuplicateName newPos name) mPos
-    reportFromType tid = do
-      mPos <- gets (fmap (.typeSourceSpan) . Map.lookup tid . (.types))
-      maybe (pure ()) (emitError . ErrorDuplicateName newPos name) mPos
-    reportFromModule mid = do
-      mPos <- gets (fmap (.moduleSourceSpan) . Map.lookup mid . (.modules))
-      maybe (pure ()) (emitError . ErrorDuplicateName newPos name) mPos
+    reportFromVariable variableId = do
+      maybeSpan <- gets (fmap (.variableSourceSpan) . Map.lookup variableId . (.variables))
+      maybe (pure ()) (emitError . ErrorDuplicateName newPos name) maybeSpan
+    reportFromType typeId = do
+      maybeSpan <- gets (fmap (.typeSourceSpan) . Map.lookup typeId . (.types))
+      maybe (pure ()) (emitError . ErrorDuplicateName newPos name) maybeSpan
+    reportFromModule moduleId = do
+      maybeSpan <- gets (fmap (.moduleSourceSpan) . Map.lookup moduleId . (.modules))
+      maybe (pure ()) (emitError . ErrorDuplicateName newPos name) maybeSpan
 
     mergeVariableSlot existingSlot Nothing = pure existingSlot
     mergeVariableSlot Nothing newSlot = pure newSlot
-    mergeVariableSlot (Just oldId) (Just _) = do
-      reportFromVariable oldId
-      pure (Just oldId)
+    mergeVariableSlot (Just existingId) (Just _) = do
+      reportFromVariable existingId
+      pure (Just existingId)
 
     mergeTypeSlot existingSlot Nothing = pure existingSlot
     mergeTypeSlot Nothing newSlot = pure newSlot
-    mergeTypeSlot (Just oldId) (Just _) = do
-      reportFromType oldId
-      pure (Just oldId)
+    mergeTypeSlot (Just existingId) (Just _) = do
+      reportFromType existingId
+      pure (Just existingId)
 
     mergeModuleSlot existingSlot Nothing = pure existingSlot
     mergeModuleSlot Nothing newSlot = pure newSlot
-    mergeModuleSlot (Just oldId) (Just _) = do
-      reportFromModule oldId
-      pure (Just oldId)
+    mergeModuleSlot (Just existingId) (Just _) = do
+      reportFromModule existingId
+      pure (Just existingId)
 
 -- | Merge @incoming@ into the existing entry for @name@ in @table@ (if any),
 -- then @Map.insert@ the result.
@@ -359,39 +374,40 @@ insertSymbolEntry pos name incoming table = do
 --     access on a local variable.
 bindLocalVariable :: NameRef Parsed 'VariableRef -> Identifier (NameRef Identified 'VariableRef)
 bindLocalVariable nameRef = do
-  ctx <- gets (.resolveContext)
+  context <- gets (.resolveContext)
   let name = nameRef.text
-  when (chainHasModule name ctx.scopeStack)
+  when (chainHasModule name context.scopeStack)
     $ emitError (ErrorShadowNonVariable nameRef.sourceSpan name)
-  vid <- freshVariableId VariableData {variableName = name, variableSourceSpan = nameRef.sourceSpan}
-  modifyResolveContext $ \c -> c {scopeStack = insertInnermost name vid c.scopeStack}
-  pure (identifiedNameRef (IdentifiedVariable vid) nameRef)
+  variableId <- freshVariableId VariableData {variableName = name, variableSourceSpan = nameRef.sourceSpan}
+  modifyResolveContext $ \currentContext ->
+    currentContext {scopeStack = insertInnermost name variableId currentContext.scopeStack}
+  pure (identifiedNameRef (IdentifiedVariable variableId) nameRef)
   where
-    chainHasModule n = any (\frame -> isJust (Map.lookup n frame >>= (.moduleSymbol)))
-    insertInnermost n vid = \case
-      [] -> [Map.singleton n (singletonVariable vid)]
-      (top : rest) -> Map.insert n (singletonVariable vid) top : rest
+    chainHasModule searchName = any (\frame -> isJust (Map.lookup searchName frame >>= (.moduleSymbol)))
+    insertInnermost insertName variableId = \case
+      [] -> [Map.singleton insertName (singletonVariable variableId)]
+      (innermost : remaining) -> Map.insert insertName (singletonVariable variableId) innermost : remaining
 
 -- | Push a fresh empty frame, run the action, then pop the frame.
 withScopeFrame :: Identifier a -> Identifier a
 withScopeFrame action = do
-  modifyResolveContext $ \c -> c {scopeStack = Map.empty : c.scopeStack}
+  modifyResolveContext $ \context -> context {scopeStack = Map.empty : context.scopeStack}
   result <- action
-  modifyResolveContext $ \c -> c {scopeStack = drop 1 c.scopeStack}
+  modifyResolveContext $ \context -> context {scopeStack = drop 1 context.scopeStack}
   pure result
 
 -- | Replace the resolve context for the duration of an action (used to switch
 -- between modules in Phase D).
 withResolveContext :: ResolveContext -> Identifier a -> Identifier a
-withResolveContext newCtx action = do
-  oldCtx <- gets (.resolveContext)
-  modify $ \st -> st {resolveContext = newCtx}
+withResolveContext newContext action = do
+  oldContext <- gets (.resolveContext)
+  modify $ \state -> state {resolveContext = newContext}
   result <- action
-  modify $ \st -> st {resolveContext = oldCtx}
+  modify $ \state -> state {resolveContext = oldContext}
   pure result
 
 modifyResolveContext :: (ResolveContext -> ResolveContext) -> Identifier ()
-modifyResolveContext f = modify $ \st -> st {resolveContext = f st.resolveContext}
+modifyResolveContext update = modify $ \state -> state {resolveContext = update state.resolveContext}
 
 -- ---------------------------------------------------------------------------
 -- Lookup helpers
@@ -403,13 +419,13 @@ modifyResolveContext f = modify $ \st -> st {resolveContext = f st.resolveContex
 -- name (they coexist).
 lookupSlot :: (SymbolEntry -> Maybe a) -> Text -> Identifier (Maybe a)
 lookupSlot getSlot name = do
-  ctx <- gets (.resolveContext)
-  pure (walk ctx.scopeStack)
+  context <- gets (.resolveContext)
+  pure (walk context.scopeStack)
   where
     walk [] = Nothing
-    walk (frame : rest) = case Map.lookup name frame of
-      Just entry | Just x <- getSlot entry -> Just x
-      _ -> walk rest
+    walk (frame : remaining) = case Map.lookup name frame of
+      Just entry | Just slot <- getSlot entry -> Just slot
+      _ -> walk remaining
 
 lookupVariable :: Text -> Identifier (Maybe VariableId)
 lookupVariable = lookupSlot (.variableSymbol)
@@ -420,11 +436,11 @@ lookupType = lookupSlot (.typeSymbol)
 lookupModule :: Text -> Identifier (Maybe ModuleId)
 lookupModule = lookupSlot (.moduleSymbol)
 
--- | Look up the variable slot of @name@ in the export table of @mid@.
+-- | Look up the variable slot of @name@ in the export table of @moduleId@.
 lookupModuleExportVariable :: ModuleId -> Text -> Identifier (Maybe VariableId)
 lookupModuleExportVariable = lookupModuleExportSlot (.variableSymbol)
 
--- | Look up the type slot of @name@ in the export table of @mid@.
+-- | Look up the type slot of @name@ in the export table of @moduleId@.
 lookupModuleExportType :: ModuleId -> Text -> Identifier (Maybe TypeId)
 lookupModuleExportType = lookupModuleExportSlot (.typeSymbol)
 
@@ -433,10 +449,10 @@ lookupModuleExportSlot ::
   ModuleId ->
   Text ->
   Identifier (Maybe a)
-lookupModuleExportSlot getSlot mid name = do
-  ctx <- gets (.resolveContext)
+lookupModuleExportSlot getSlot moduleId name = do
+  context <- gets (.resolveContext)
   pure $ do
-    table <- Map.lookup mid ctx.moduleExports
+    table <- Map.lookup moduleId context.moduleExports
     entry <- Map.lookup name table
     getSlot entry
 
@@ -449,7 +465,8 @@ identifiedNameRef ::
   Identified symbol ->
   NameRef Parsed symbol ->
   NameRef Identified symbol
-identifiedNameRef meta ref = NameRef {text = ref.text, sourceSpan = ref.sourceSpan, metadata = meta}
+identifiedNameRef metadata nameRef =
+  NameRef {text = nameRef.text, sourceSpan = nameRef.sourceSpan, metadata = metadata}
 
 labelRef :: NameRef Parsed 'LabelRef -> NameRef Identified 'LabelRef
 labelRef = identifiedNameRef IdentifiedLabel
@@ -465,14 +482,14 @@ assignModuleIds :: Map Text (Module Parsed) -> Identifier (Map Text ModuleId)
 assignModuleIds moduleMap =
   Map.fromList <$> mapM allocate (Map.toList moduleMap)
   where
-    allocate (modName, parsedModule) = do
-      mid <-
+    allocate (moduleName, parsedModule) = do
+      moduleId <-
         freshModuleId
           ModuleData
-            { moduleName = modName,
+            { moduleName = moduleName,
               moduleSourceSpan = parsedModule.sourceSpan
             }
-      pure (modName, mid)
+      pure (moduleName, moduleId)
 
 -- ---------------------------------------------------------------------------
 -- Phase B: build per-module export tables
@@ -486,42 +503,53 @@ buildExports :: Map Text (Module Parsed) -> Identifier (Map Text (Map Text Symbo
 buildExports moduleMap =
   Map.fromList <$> mapM buildOne (Map.toList moduleMap)
   where
-    buildOne (modName, parsedModule) = do
+    buildOne (moduleName, parsedModule) = do
       table <- foldM addDeclaration Map.empty parsedModule.declarations
-      pure (modName, table)
+      pure (moduleName, table)
 
     addDeclaration table = \case
-      DeclarationAgent decl -> registerVariable table decl.name
-      DeclarationRequest decl -> registerVariable table decl.name
-      DeclarationExternalAgent decl -> registerVariable table decl.name
+      DeclarationAgent declaration -> registerVariable table declaration.name
+      DeclarationRequest declaration -> registerVariable table declaration.name
+      DeclarationExternalAgent declaration -> registerVariable table declaration.name
       -- A data declaration occupies both the variable slot (constructor
       -- function) and the type slot under the same name.
-      DeclarationData decl -> registerData table decl.name
-      DeclarationTypeSynonym decl -> registerTypeOnly table decl.name
+      DeclarationData declaration -> registerData table declaration.name
+      DeclarationTypeSynonym declaration -> registerTypeOnly table declaration.name
       DeclarationImport _ -> pure table -- handled in Phase C
+      -- Recovery sentinel: do not occupy any slot. References that would have
+      -- pointed here will fall through to ErrorUndefinedName.
+      DeclarationError _ -> pure table
     registerVariable table name = do
-      vid <-
+      variableId <-
         freshVariableId
           VariableData {variableName = name.text, variableSourceSpan = name.sourceSpan}
-      insertSymbolEntry name.sourceSpan name.text (singletonVariable vid) table
+      insertSymbolEntry name.sourceSpan name.text (singletonVariable variableId) table
 
     registerTypeOnly table name = do
-      tid <-
+      typeId <-
         freshTypeId
-          TypeData {typeName = name.text, typeSourceSpan = name.sourceSpan}
-      insertSymbolEntry name.sourceSpan name.text (singletonType tid) table
+          TypeData
+            { typeName = name.text,
+              typeSourceSpan = name.sourceSpan,
+              typeSynonymRhs = Nothing
+            }
+      insertSymbolEntry name.sourceSpan name.text (singletonType typeId) table
 
     registerData table name = do
-      vid <-
+      variableId <-
         freshVariableId
           VariableData {variableName = name.text, variableSourceSpan = name.sourceSpan}
-      tid <-
+      typeId <-
         freshTypeId
-          TypeData {typeName = name.text, typeSourceSpan = name.sourceSpan}
+          TypeData
+            { typeName = name.text,
+              typeSourceSpan = name.sourceSpan,
+              typeSynonymRhs = Nothing
+            }
       let entry =
             SymbolEntry
-              { variableSymbol = Just vid,
-                typeSymbol = Just tid,
+              { variableSymbol = Just variableId,
+                typeSymbol = Just typeId,
                 moduleSymbol = Nothing
               }
       insertSymbolEntry name.sourceSpan name.text entry table
@@ -541,46 +569,46 @@ buildTopLevels ::
 buildTopLevels moduleNameToId exports moduleMap =
   Map.fromList <$> mapM buildOne (Map.toList moduleMap)
   where
-    buildOne (modName, parsedModule) = do
-      let ownExports = Map.findWithDefault Map.empty modName exports
-      table <- foldM (addImport modName) ownExports parsedModule.declarations
-      pure (modName, table)
+    buildOne (currentModuleName, parsedModule) = do
+      let ownExports = Map.findWithDefault Map.empty currentModuleName exports
+      table <- foldM addImport ownExports parsedModule.declarations
+      pure (currentModuleName, table)
 
-    addImport _ table = \case
-      DeclarationImport importDecl -> resolveImport table importDecl
+    addImport table = \case
+      DeclarationImport importDeclaration -> resolveImport table importDeclaration
       _ -> pure table
 
-    resolveImport table importDecl =
-      case importDecl.kind of
+    resolveImport table importDeclaration =
+      case importDeclaration.kind of
         ImportModule {moduleName, alias} ->
-          resolveImportModule importDecl.sourceSpan moduleName alias table
+          resolveImportModule importDeclaration.sourceSpan moduleName alias table
         ImportNames {items, moduleName} ->
-          resolveImportNames importDecl.sourceSpan moduleName items table
+          resolveImportNames importDeclaration.sourceSpan moduleName items table
 
-    resolveImportModule importPos modName aliasMaybe table =
-      case Map.lookup modName moduleNameToId of
+    resolveImportModule importPos targetModuleName maybeAlias table =
+      case Map.lookup targetModuleName moduleNameToId of
         Nothing -> do
-          emitError (ErrorImportModuleNotFound importPos modName)
+          emitError (ErrorImportModuleNotFound importPos targetModuleName)
           pure table
-        Just mid -> do
-          let bindName = case aliasMaybe of
-                Just a -> a
-                Nothing -> modulePostfix modName
-          insertSymbolEntry importPos bindName (singletonModule mid) table
+        Just targetModuleId -> do
+          let bindName = case maybeAlias of
+                Just aliasName -> aliasName
+                Nothing -> moduleNameTail targetModuleName
+          insertSymbolEntry importPos bindName (singletonModule targetModuleId) table
 
-    resolveImportNames importPos modName items table =
-      case Map.lookup modName moduleNameToId of
+    resolveImportNames importPos targetModuleName items table =
+      case Map.lookup targetModuleName moduleNameToId of
         Nothing -> do
-          emitError (ErrorImportModuleNotFound importPos modName)
+          emitError (ErrorImportModuleNotFound importPos targetModuleName)
           pure table
-        Just mid -> do
-          let modExports = Map.findWithDefault Map.empty modName exports
-          foldM (addImportItem importPos mid modName modExports) table items
+        Just _ -> do
+          let targetModuleExports = Map.findWithDefault Map.empty targetModuleName exports
+          foldM (addImportItem importPos targetModuleName targetModuleExports) table items
 
-    addImportItem importPos _ modName modExports table item =
-      case Map.lookup item.name modExports of
+    addImportItem importPos targetModuleName targetModuleExports table item =
+      case Map.lookup item.name targetModuleExports of
         Nothing -> do
-          emitError (ErrorImportNameNotFound importPos item.name modName)
+          emitError (ErrorImportNameNotFound importPos item.name targetModuleName)
           pure table
         Just entry ->
           case item.kind of
@@ -600,24 +628,24 @@ buildTopLevels moduleNameToId exports moduleMap =
                       }
                     table
               | otherwise -> do
-                  emitError (ErrorImportNameNotFound importPos item.name modName)
+                  emitError (ErrorImportNameNotFound importPos item.name targetModuleName)
                   pure table
             -- @import { type foo }@ — pulls in only the type slot.
             ImportItemType -> case entry.typeSymbol of
               Nothing -> do
-                emitError (ErrorImportNameNotFound importPos item.name modName)
+                emitError (ErrorImportNameNotFound importPos item.name targetModuleName)
                 pure table
-              Just tid ->
-                insertSymbolEntry importPos item.name (singletonType tid) table
+              Just typeId ->
+                insertSymbolEntry importPos item.name (singletonType typeId) table
 
 -- | Extract @"module"@ from @"path.to.module"@. Returns the empty string if
 -- given an empty input (the parser should never produce one, but this guards
 -- against it anyway).
-modulePostfix :: Text -> Text
-modulePostfix path =
+moduleNameTail :: Text -> Text
+moduleNameTail path =
   case reverse (T.splitOn "." path) of
     [] -> path
-    (last' : _) -> last'
+    (lastSegment : _) -> lastSegment
 
 -- ---------------------------------------------------------------------------
 -- Phase D: convert each module body into an Identified AST
@@ -637,27 +665,27 @@ resolveModule topLevels moduleNameToId exports moduleMap = do
   -- Re-key moduleExports by ModuleId for convenient qualified lookup.
   let exportsById =
         Map.fromList
-          [ (mid, Map.findWithDefault Map.empty modName exports)
-            | (modName, mid) <- Map.toList moduleNameToId
+          [ (moduleId, Map.findWithDefault Map.empty moduleName exports)
+            | (moduleName, moduleId) <- Map.toList moduleNameToId
           ]
   -- Build (ModuleId, Module Identified) pairs and assemble a Map at the end.
   pairs <- mapM (resolveOne exportsById) (Map.toList moduleMap)
   pure (Map.fromList (catMaybes pairs))
   where
-    resolveOne exportsById (modName, parsedModule) = do
-      let topLevelFrame = Map.findWithDefault Map.empty modName topLevels
-          ctx =
+    resolveOne exportsById (currentModuleName, parsedModule) = do
+      let topLevelFrame = Map.findWithDefault Map.empty currentModuleName topLevels
+          context =
             ResolveContext
               { scopeStack = [topLevelFrame],
                 moduleExports = exportsById
               }
-      identifiedModule <- withResolveContext ctx (resolveModuleAST parsedModule)
-      pure (fmap (,identifiedModule) (Map.lookup modName moduleNameToId))
+      identifiedModule <- withResolveContext context (resolveModuleAST parsedModule)
+      pure (fmap (,identifiedModule) (Map.lookup currentModuleName moduleNameToId))
 
 resolveModuleAST :: Module Parsed -> Identifier (Module Identified)
-resolveModuleAST mod' = do
-  decls <- mapM resolveDeclaration mod'.declarations
-  pure Module {declarations = decls, sourceSpan = mod'.sourceSpan}
+resolveModuleAST parsedModule = do
+  declarations <- mapM resolveDeclaration parsedModule.declarations
+  pure Module {declarations = declarations, sourceSpan = parsedModule.sourceSpan}
 
 -- ---------------------------------------------------------------------------
 -- Declaration
@@ -665,12 +693,16 @@ resolveModuleAST mod' = do
 
 resolveDeclaration :: Declaration Parsed -> Identifier (Declaration Identified)
 resolveDeclaration = \case
-  DeclarationAgent decl -> DeclarationAgent <$> resolveAgent decl
-  DeclarationRequest decl -> DeclarationRequest <$> resolveRequest decl
-  DeclarationExternalAgent decl -> DeclarationExternalAgent <$> resolveExternalAgent decl
-  DeclarationData decl -> DeclarationData <$> resolveData decl
-  DeclarationTypeSynonym decl -> DeclarationTypeSynonym <$> resolveTypeSynonym decl
-  DeclarationImport decl -> pure (DeclarationImport (resolveImportDecl decl))
+  DeclarationAgent declaration -> DeclarationAgent <$> resolveAgent declaration
+  DeclarationRequest declaration -> DeclarationRequest <$> resolveRequest declaration
+  DeclarationExternalAgent declaration -> DeclarationExternalAgent <$> resolveExternalAgent declaration
+  DeclarationData declaration -> DeclarationData <$> resolveData declaration
+  DeclarationTypeSynonym declaration -> DeclarationTypeSynonym <$> resolveTypeSynonym declaration
+  DeclarationImport declaration -> pure (DeclarationImport (resolveImportDecl declaration))
+  -- Parser-recovery sentinel: passthrough unchanged. The parallel
+  -- @[ParseError]@ list keeps the structured error detail; this phase has
+  -- nothing to resolve here.
+  DeclarationError sp -> pure (DeclarationError sp)
 
 resolveImportDecl :: ImportDeclaration Parsed -> ImportDeclaration Identified
 resolveImportDecl ImportDeclaration {kind, sourceSpan} =
@@ -682,39 +714,49 @@ resolveImportDecl ImportDeclaration {kind, sourceSpan} =
 -- emitted a duplicate-name error), record an unresolved marker rather than
 -- inventing a sentinel id.
 liftSignatureVariable :: NameRef Parsed 'VariableRef -> Identifier (NameRef Identified 'VariableRef)
-liftSignatureVariable ref = do
-  result <- lookupVariable ref.text
+liftSignatureVariable nameRef = do
+  result <- lookupVariable nameRef.text
   pure $ case result of
-    Just vid -> identifiedNameRef (IdentifiedVariable vid) ref
-    Nothing -> identifiedNameRef IdentifiedUnresolvedVariable ref
+    Just variableId -> identifiedNameRef (IdentifiedVariable variableId) nameRef
+    Nothing -> identifiedNameRef IdentifiedUnresolvedVariable nameRef
 
 -- | Counterpart of 'liftSignatureVariable' for type signatures (enum / data
 -- type role / type synonym name).
 liftSignatureType :: NameRef Parsed 'TypeRef -> Identifier (NameRef Identified 'TypeRef)
-liftSignatureType ref = do
-  result <- lookupType ref.text
+liftSignatureType nameRef = do
+  result <- lookupType nameRef.text
   pure $ case result of
-    Just tid -> identifiedNameRef (IdentifiedType tid) ref
-    Nothing -> identifiedNameRef IdentifiedUnresolvedType ref
+    Just typeId -> identifiedNameRef (IdentifiedType typeId) nameRef
+    Nothing -> identifiedNameRef IdentifiedUnresolvedType nameRef
 
-resolveAgent :: AgentDeclaration Parsed -> Identifier (AgentDeclaration Identified)
-resolveAgent AgentDeclaration {..} = do
-  name' <- liftSignatureVariable name
+resolveSignatureBody
+  :: [ParameterBinding Parsed]
+  -> Maybe (SyntacticType Parsed)
+  -> Maybe [SyntacticRequest Parsed]
+  -> Block Parsed
+  -> Identifier ([ParameterBinding Identified], Maybe (SyntacticType Identified), Maybe [SyntacticRequest Identified], Block Identified)
+resolveSignatureBody parameters returnType withEffects body =
   withScopeFrame $ do
     parameters' <- mapM resolveParameter parameters
     returnType' <- traverse resolveType returnType
     withEffects' <- traverse (mapM resolveSyntacticRequest) withEffects
     body' <- resolveBlock body
-    pure
-      AgentDeclaration
-        { annotation = annotation,
-          name = name',
-          parameters = parameters',
-          returnType = returnType',
-          withEffects = withEffects',
-          body = body',
-          sourceSpan = sourceSpan
-        }
+    pure (parameters', returnType', withEffects', body')
+
+resolveAgent :: AgentDeclaration Parsed -> Identifier (AgentDeclaration Identified)
+resolveAgent AgentDeclaration {..} = do
+  name' <- liftSignatureVariable name
+  (parameters', returnType', withEffects', body') <- resolveSignatureBody parameters returnType withEffects body
+  pure
+    AgentDeclaration
+      { annotation = annotation,
+        name = name',
+        parameters = parameters',
+        returnType = returnType',
+        withEffects = withEffects',
+        body = body',
+        sourceSpan = sourceSpan
+      }
 
 resolveRequest :: RequestDeclaration Parsed -> Identifier (RequestDeclaration Identified)
 resolveRequest RequestDeclaration {..} = do
@@ -776,19 +818,36 @@ resolveDataParameter DataParameter {..} = do
       }
 
 -- | Resolve a @type T = ...@ synonym. The name (TypeRef) was issued in Phase
--- B; here we only need to resolve the rhs type expression.
+-- B; here we resolve the rhs and stash it back into 'TypeData' so later
+-- phases can expand the synonym transparently.
 resolveTypeSynonym ::
   TypeSynonymDeclaration Parsed ->
   Identifier (TypeSynonymDeclaration Identified)
 resolveTypeSynonym TypeSynonymDeclaration {..} = do
   name' <- liftSignatureType name
   rhs' <- resolveType rhs
+  case name'.metadata of
+    IdentifiedType typeId -> updateTypeSynonymRhs typeId rhs'
+    IdentifiedUnresolvedType -> pure ()
   pure
     TypeSynonymDeclaration
       { name = name',
         rhs = rhs',
         sourceSpan = sourceSpan
       }
+
+-- | Patch the @typeSynonymRhs@ field of an existing 'TypeData' entry. Phase B
+-- creates the entry with @Nothing@; Phase D fills in the resolved RHS once the
+-- type expression has been processed.
+updateTypeSynonymRhs :: TypeId -> SyntacticType Identified -> Identifier ()
+updateTypeSynonymRhs typeId rhs = modify $ \state ->
+  state
+    { types =
+        Map.adjust
+          (\typeData -> typeData {typeSynonymRhs = Just rhs})
+          typeId
+          state.types
+    }
 
 -- ---------------------------------------------------------------------------
 -- Parameter / Pattern
@@ -811,11 +870,11 @@ resolveParameter ParameterBinding {..} = do
 -- 'QualifiedConstructorPattern' instead.
 resolvePattern :: Pattern Parsed -> Identifier (Pattern Identified)
 resolvePattern = \case
-  PatternVariable p -> PatternVariable <$> resolveVariablePattern p
-  PatternQualifiedConstructor p -> PatternQualifiedConstructor <$> resolveConstructorPattern p
-  PatternTuple p -> PatternTuple <$> resolveTuplePattern p
-  PatternWildcard p -> PatternWildcard <$> resolveWildcardPattern p
-  PatternLiteral p -> PatternLiteral <$> resolveLiteralPattern p
+  PatternVariable parsedPattern -> PatternVariable <$> resolveVariablePattern parsedPattern
+  PatternQualifiedConstructor parsedPattern -> PatternQualifiedConstructor <$> resolveConstructorPattern parsedPattern
+  PatternTuple parsedPattern -> PatternTuple <$> resolveTuplePattern parsedPattern
+  PatternWildcard parsedPattern -> PatternWildcard <$> resolveWildcardPattern parsedPattern
+  PatternLiteral parsedPattern -> PatternLiteral <$> resolveLiteralPattern parsedPattern
 
 resolveVariablePattern :: VariablePattern Parsed -> Identifier (VariablePattern Identified)
 resolveVariablePattern VariablePattern {..} = do
@@ -837,7 +896,7 @@ resolveConstructorPattern QualifiedConstructorPattern {..} = do
     resolveQualifiedVariableRef moduleQualifier constructorName
   parameters' <-
     mapM
-      (\(lbl, pat) -> (labelRef lbl,) <$> resolvePattern pat)
+      (\(label, fieldPattern) -> (labelRef label,) <$> resolvePattern fieldPattern)
       parameters
   pure
     QualifiedConstructorPattern
@@ -889,32 +948,32 @@ resolveQualifiedVariableRef ::
   Identifier (Maybe (NameRef Identified 'ModuleRef), NameRef Identified 'VariableRef)
 resolveQualifiedVariableRef = \cases
   Nothing nameRef -> do
-    varMeta <- resolveBareVariable nameRef
-    pure (Nothing, identifiedNameRef varMeta nameRef)
-  (Just modRef) nameRef -> do
-    modMeta <- resolveModuleRef modRef
-    varMeta <- case modMeta of
-      IdentifiedModule mid -> resolveQualifiedVariable mid modRef.text nameRef
+    variableMetadata <- resolveBareVariable nameRef
+    pure (Nothing, identifiedNameRef variableMetadata nameRef)
+  (Just moduleRef) nameRef -> do
+    moduleMetadata <- resolveModuleRef moduleRef
+    variableMetadata <- case moduleMetadata of
+      IdentifiedModule moduleId -> resolveQualifiedVariable moduleId moduleRef.text nameRef
       IdentifiedUnresolvedModule -> pure IdentifiedUnresolvedVariable
     pure
-      ( Just (identifiedNameRef modMeta modRef),
-        identifiedNameRef varMeta nameRef
+      ( Just (identifiedNameRef moduleMetadata moduleRef),
+        identifiedNameRef variableMetadata nameRef
       )
 
 resolveBareVariable :: NameRef Parsed 'VariableRef -> Identifier (Identified 'VariableRef)
-resolveBareVariable ref =
-  lookupVariable ref.text >>= \case
-    Just vid -> pure (IdentifiedVariable vid)
+resolveBareVariable nameRef =
+  lookupVariable nameRef.text >>= \case
+    Just variableId -> pure (IdentifiedVariable variableId)
     Nothing -> do
-      emitError (ErrorUndefinedName ref.sourceSpan ref.text)
+      emitError (ErrorUndefinedName nameRef.sourceSpan nameRef.text)
       pure IdentifiedUnresolvedVariable
 
 resolveModuleRef :: NameRef Parsed 'ModuleRef -> Identifier (Identified 'ModuleRef)
-resolveModuleRef ref =
-  lookupModule ref.text >>= \case
-    Just mid -> pure (IdentifiedModule mid)
+resolveModuleRef nameRef =
+  lookupModule nameRef.text >>= \case
+    Just moduleId -> pure (IdentifiedModule moduleId)
     Nothing -> do
-      emitError (ErrorNotAModule ref.sourceSpan ref.text)
+      emitError (ErrorNotAModule nameRef.sourceSpan nameRef.text)
       pure IdentifiedUnresolvedModule
 
 resolveQualifiedVariable ::
@@ -922,11 +981,11 @@ resolveQualifiedVariable ::
   Text ->
   NameRef Parsed 'VariableRef ->
   Identifier (Identified 'VariableRef)
-resolveQualifiedVariable mid modName ref =
-  lookupModuleExportVariable mid ref.text >>= \case
-    Just vid -> pure (IdentifiedVariable vid)
+resolveQualifiedVariable moduleId qualifierName nameRef =
+  lookupModuleExportVariable moduleId nameRef.text >>= \case
+    Just variableId -> pure (IdentifiedVariable variableId)
     Nothing -> do
-      emitError (ErrorUndefinedQualified ref.sourceSpan modName ref.text)
+      emitError (ErrorUndefinedQualified nameRef.sourceSpan qualifierName nameRef.text)
       pure IdentifiedUnresolvedVariable
 
 -- ---------------------------------------------------------------------------
@@ -935,57 +994,62 @@ resolveQualifiedVariable mid modName ref =
 
 resolveType :: SyntacticType Parsed -> Identifier (SyntacticType Identified)
 resolveType = \case
-  TypePrimitive p -> pure (TypePrimitive (rebuildPrimitive p))
-  TypeName p -> TypeName <$> resolveTypeName p
-  TypeFunction p -> TypeFunction <$> resolveFunctionType p
-  TypeArray p -> TypeArray <$> resolveArrayType p
-  TypeTuple p -> TypeTuple <$> resolveTupleType p
-  TypeQualified p -> TypeQualified <$> resolveQualifiedType p
+  TypePrimitive node -> pure (TypePrimitive (rebuildPrimitive node))
+  TypeName node -> TypeName <$> resolveTypeName node
+  TypeFunction node -> TypeFunction <$> resolveFunctionType node
+  TypeArray node -> TypeArray <$> resolveArrayType node
+  TypeTuple node -> TypeTuple <$> resolveTupleType node
+  TypeQualified node -> TypeQualified <$> resolveQualifiedType node
   -- Literal types have nothing to resolve (the LiteralValue is phase-agnostic).
-  TypeLiteral n -> pure (TypeLiteral n)
+  TypeLiteral node -> pure (TypeLiteral node)
   -- Union: recurse into each branch.
   TypeUnion TypeUnionNode {branches, sourceSpan} -> do
     branches' <- mapM resolveType branches
     pure (TypeUnion TypeUnionNode {branches = branches', sourceSpan = sourceSpan})
+  -- never / unknown carry only a sourceSpan; phase change is mechanical.
+  TypeNever NeverTypeNode {sourceSpan} ->
+    pure (TypeNever NeverTypeNode {sourceSpan = sourceSpan})
+  TypeUnknown UnknownTypeNode {sourceSpan} ->
+    pure (TypeUnknown UnknownTypeNode {sourceSpan = sourceSpan})
   where
     rebuildPrimitive PrimitiveTypeNode {kind, sourceSpan} =
       PrimitiveTypeNode {kind = kind, sourceSpan = sourceSpan}
 
 resolveTypeName :: TypeNameNode Parsed -> Identifier (TypeNameNode Identified)
 resolveTypeName TypeNameNode {name, sourceSpan} = do
-  meta <-
+  metadata <-
     lookupType name.text >>= \case
-      Just tid -> pure (IdentifiedType tid)
+      Just typeId -> pure (IdentifiedType typeId)
       Nothing -> do
         emitError (ErrorNotAType name.sourceSpan name.text)
         pure IdentifiedUnresolvedType
   pure
     TypeNameNode
-      { name = identifiedNameRef meta name,
+      { name = identifiedNameRef metadata name,
         sourceSpan = sourceSpan
       }
 
 resolveQualifiedType :: QualifiedTypeNode Parsed -> Identifier (QualifiedTypeNode Identified)
 resolveQualifiedType QualifiedTypeNode {qualifier, target, sourceSpan} = do
-  modMeta <- resolveModuleRef qualifier
-  typeMeta <- case modMeta of
-    IdentifiedModule mid ->
-      lookupModuleExportType mid target.text >>= \case
-        Just tid -> pure (IdentifiedType tid)
+  moduleMetadata <- resolveModuleRef qualifier
+  typeMetadata <- case moduleMetadata of
+    IdentifiedModule moduleId ->
+      lookupModuleExportType moduleId target.text >>= \case
+        Just typeId -> pure (IdentifiedType typeId)
         Nothing -> do
           emitError (ErrorUndefinedQualified target.sourceSpan qualifier.text target.text)
           pure IdentifiedUnresolvedType
     IdentifiedUnresolvedModule -> pure IdentifiedUnresolvedType
   pure
     QualifiedTypeNode
-      { qualifier = identifiedNameRef modMeta qualifier,
-        target = identifiedNameRef typeMeta target,
+      { qualifier = identifiedNameRef moduleMetadata qualifier,
+        target = identifiedNameRef typeMetadata target,
         sourceSpan = sourceSpan
       }
 
 resolveFunctionType :: FunctionTypeNode Parsed -> Identifier (FunctionTypeNode Identified)
 resolveFunctionType FunctionTypeNode {parameterTypes, returnType, withEffects, sourceSpan} = do
-  parameterTypes' <- mapM (\(lbl, ty) -> (lbl,) <$> resolveType ty) parameterTypes
+  parameterTypes' <- mapM (\(label, parameterType) -> (label,) <$> resolveType parameterType) parameterTypes
   returnType' <- resolveType returnType
   withEffects' <- mapM resolveSyntacticRequest withEffects
   pure
@@ -1008,10 +1072,10 @@ resolveTupleType TupleTypeNode {elementTypes, sourceSpan} = do
 
 resolveSyntacticRequest :: SyntacticRequest Parsed -> Identifier (SyntacticRequest Identified)
 resolveSyntacticRequest SyntacticRequest {name, sourceSpan} = do
-  meta <- resolveBareVariable name
+  metadata <- resolveBareVariable name
   pure
     SyntacticRequest
-      { name = identifiedNameRef meta name,
+      { name = identifiedNameRef metadata name,
         sourceSpan = sourceSpan
       }
 
@@ -1053,10 +1117,10 @@ resolveWhereBlock WhereBlock {stateVariables, handlers, thenClause, sourceSpan} 
   handlers' <- mapM resolveRequestHandler handlers
   thenClause' <-
     traverse
-      ( \(maybePat, block) -> withScopeFrame $ do
-          maybePat' <- traverse resolvePattern maybePat
+      ( \(maybePattern, block) -> withScopeFrame $ do
+          maybePattern' <- traverse resolvePattern maybePattern
           block' <- resolveBlock block
-          pure (maybePat', block')
+          pure (maybePattern', block')
       )
       thenClause
   pure
@@ -1086,24 +1150,22 @@ resolveStateVariable StateVariableBinding {name, typeAnnotation, initial, source
 
 -- | Request handler. @name@ is NOT a new binding; it is a reference to an
 -- existing req declaration (resolved like an ordinary variable name).
+-- Handlers do not carry their own @with@ clause: effects raised inside the
+-- handler bind to the surrounding agent, so handler-level effect annotation
+-- is not part of the syntax.
 resolveRequestHandler :: RequestHandler Parsed -> Identifier (RequestHandler Identified)
-resolveRequestHandler RequestHandler {moduleQualifier, name, parameters, returnType, withEffects, body, sourceSpan} = do
+resolveRequestHandler RequestHandler {moduleQualifier, name, parameters, returnType, body, sourceSpan} = do
   (moduleQualifier', name') <- resolveQualifiedVariableRef moduleQualifier name
-  withScopeFrame $ do
-    parameters' <- mapM resolveParameter parameters
-    returnType' <- traverse resolveType returnType
-    withEffects' <- traverse (mapM resolveSyntacticRequest) withEffects
-    body' <- resolveBlock body
-    pure
-      RequestHandler
-        { moduleQualifier = moduleQualifier',
-          name = name',
-          parameters = parameters',
-          returnType = returnType',
-          withEffects = withEffects',
-          body = body',
-          sourceSpan = sourceSpan
-        }
+  (parameters', returnType', _noEffects, body') <- resolveSignatureBody parameters returnType Nothing body
+  pure
+    RequestHandler
+      { moduleQualifier = moduleQualifier',
+        name = name',
+        parameters = parameters',
+        returnType = returnType',
+        body = body',
+        sourceSpan = sourceSpan
+      }
 
 -- ---------------------------------------------------------------------------
 -- Statement
@@ -1111,14 +1173,15 @@ resolveRequestHandler RequestHandler {moduleQualifier, name, parameters, returnT
 
 resolveStatement :: Statement Parsed -> Identifier (Statement Identified)
 resolveStatement = \case
-  StatementLet s -> StatementLet <$> resolveLet s
-  StatementAgent s -> StatementAgent <$> resolveAgentStatement s
-  StatementReturn s -> StatementReturn <$> resolveReturn s
-  StatementExpression e -> StatementExpression <$> resolveExpression e
-  StatementNext s -> StatementNext <$> resolveNext s
-  StatementBreak s -> StatementBreak <$> resolveBreak s
-  StatementForNext s -> StatementForNext <$> resolveForNext s
-  StatementForBreak s -> StatementForBreak <$> resolveForBreak s
+  StatementLet statement -> StatementLet <$> resolveLet statement
+  StatementAgent statement -> StatementAgent <$> resolveAgentStatement statement
+  StatementReturn statement -> StatementReturn <$> resolveReturn statement
+  StatementExpression expression -> StatementExpression <$> resolveExpression expression
+  StatementNext statement -> StatementNext <$> resolveNext statement
+  StatementBreak statement -> StatementBreak <$> resolveBreak statement
+  StatementForNext statement -> StatementForNext <$> resolveForNext statement
+  StatementForBreak statement -> StatementForBreak <$> resolveForBreak statement
+  StatementError sp -> pure (StatementError sp)
 
 resolveLet :: LetStatement Parsed -> Identifier (LetStatement Identified)
 resolveLet LetStatement {pattern, value, sourceSpan} = do
@@ -1133,20 +1196,16 @@ resolveLet LetStatement {pattern, value, sourceSpan} = do
 resolveAgentStatement :: AgentStatement Parsed -> Identifier (AgentStatement Identified)
 resolveAgentStatement AgentStatement {name, parameters, returnType, withEffects, body, sourceSpan} = do
   name' <- bindLocalVariable name
-  withScopeFrame $ do
-    parameters' <- mapM resolveParameter parameters
-    returnType' <- traverse resolveType returnType
-    withEffects' <- traverse (mapM resolveSyntacticRequest) withEffects
-    body' <- resolveBlock body
-    pure
-      AgentStatement
-        { name = name',
-          parameters = parameters',
-          returnType = returnType',
-          withEffects = withEffects',
-          body = body',
-          sourceSpan = sourceSpan
-        }
+  (parameters', returnType', withEffects', body') <- resolveSignatureBody parameters returnType withEffects body
+  pure
+    AgentStatement
+      { name = name',
+        parameters = parameters',
+        returnType = returnType',
+        withEffects = withEffects',
+        body = body',
+        sourceSpan = sourceSpan
+      }
 
 resolveReturn :: ReturnStatement Parsed -> Identifier (ReturnStatement Identified)
 resolveReturn ReturnStatement {value, sourceSpan} = do
@@ -1177,11 +1236,11 @@ resolveForBreak ForBreakStatement {value, sourceSpan} = do
 -- | A modifier name refers back to a state variable or for-var binding.
 resolveModifier :: Modifier Parsed -> Identifier (Modifier Identified)
 resolveModifier Modifier {name, value, sourceSpan} = do
-  meta <- resolveBareVariable name
+  metadata <- resolveBareVariable name
   value' <- resolveExpression value
   pure
     Modifier
-      { name = identifiedNameRef meta name,
+      { name = identifiedNameRef metadata name,
         value = value',
         sourceSpan = sourceSpan
       }
@@ -1192,20 +1251,20 @@ resolveModifier Modifier {name, value, sourceSpan} = do
 
 resolveExpression :: Expression Parsed -> Identifier (Expression Identified)
 resolveExpression = \case
-  ExpressionLiteral e -> ExpressionLiteral <$> resolveLiteralExpr e
-  ExpressionVariable e -> resolveVariableExpr e
-  ExpressionTuple e -> ExpressionTuple <$> resolveTupleExpr e
-  ExpressionArray e -> ExpressionArray <$> resolveArrayExpr e
-  ExpressionCall e -> ExpressionCall <$> resolveCallExpr e
-  ExpressionBinaryOperator e -> ExpressionBinaryOperator <$> resolveBinaryExpr e
-  ExpressionUnaryOperator e -> ExpressionUnaryOperator <$> resolveUnaryExpr e
-  ExpressionIf e -> ExpressionIf <$> resolveIfExpr e
-  ExpressionMatch e -> ExpressionMatch <$> resolveMatchExpr e
-  ExpressionFor e -> ExpressionFor <$> resolveForExpr e
-  ExpressionBlock e -> ExpressionBlock <$> resolveBlockExpr e
-  ExpressionFieldAccess e -> resolveFieldAccess e
-  ExpressionIndexAccess e -> ExpressionIndexAccess <$> resolveIndexExpr e
-  ExpressionTemplate e -> ExpressionTemplate <$> resolveTemplateExpr e
+  ExpressionLiteral expression -> ExpressionLiteral <$> resolveLiteralExpr expression
+  ExpressionVariable expression -> resolveVariableExpr expression
+  ExpressionTuple expression -> ExpressionTuple <$> resolveTupleExpr expression
+  ExpressionArray expression -> ExpressionArray <$> resolveArrayExpr expression
+  ExpressionCall expression -> ExpressionCall <$> resolveCallExpr expression
+  ExpressionBinaryOperator expression -> ExpressionBinaryOperator <$> resolveBinaryExpr expression
+  ExpressionUnaryOperator expression -> ExpressionUnaryOperator <$> resolveUnaryExpr expression
+  ExpressionIf expression -> ExpressionIf <$> resolveIfExpr expression
+  ExpressionMatch expression -> ExpressionMatch <$> resolveMatchExpr expression
+  ExpressionFor expression -> ExpressionFor <$> resolveForExpr expression
+  ExpressionBlock expression -> ExpressionBlock <$> resolveBlockExpr expression
+  ExpressionFieldAccess expression -> resolveFieldAccess expression
+  ExpressionIndexAccess expression -> ExpressionIndexAccess <$> resolveIndexExpr expression
+  ExpressionTemplate expression -> ExpressionTemplate <$> resolveTemplateExpr expression
   ExpressionQualifiedReference _ ->
     -- The parser never produces this constructor on a Parsed AST. Treat it
     -- as an internal invariant violation and crash loudly.
@@ -1224,11 +1283,11 @@ resolveLiteralExpr LiteralExpression {value, sourceSpan} =
 -- req, parameter, or local let binding.
 resolveVariableExpr :: VariableExpression Parsed -> Identifier (Expression Identified)
 resolveVariableExpr VariableExpression {name, sourceSpan} = do
-  meta <- resolveBareVariable name
+  metadata <- resolveBareVariable name
   pure
     ( ExpressionVariable
         VariableExpression
-          { name = identifiedNameRef meta name,
+          { name = identifiedNameRef metadata name,
             sourceSpan = sourceSpan,
             metadata = IdentifiedExpression
           }
@@ -1342,18 +1401,18 @@ resolveForExpr ForExpression {inBindings, varBindings, body, thenBlock, sourceSp
   -- Resolve source expressions in the outer scope.
   inBindingsResolvedSources <-
     mapM
-      ( \ForInBinding {pattern, source, sourceSpan = bSpan} -> do
+      ( \ForInBinding {pattern, source, sourceSpan = bindingSourceSpan} -> do
           source' <- resolveExpression source
-          pure (pattern, source', bSpan)
+          pure (pattern, source', bindingSourceSpan)
       )
       inBindings
   withScopeFrame $ do
     -- Bind patterns and var-bindings in the fresh frame.
     inBindings' <-
       mapM
-        ( \(pat, src, bSpan) -> do
-            pat' <- resolvePattern pat
-            pure ForInBinding {pattern = pat', source = src, sourceSpan = bSpan}
+        ( \(parsedPattern, source, bindingSourceSpan) -> do
+            pattern' <- resolvePattern parsedPattern
+            pure ForInBinding {pattern = pattern', source = source, sourceSpan = bindingSourceSpan}
         )
         inBindingsResolvedSources
     varBindings' <- mapM resolveForVarBinding varBindings
@@ -1456,18 +1515,16 @@ data ChainHead
 peelFieldChain ::
   Expression Parsed ->
   (ChainHead, [NameRef Parsed 'LabelRef], SourceSpan)
-peelFieldChain expr0 =
-  let (head', labels, totalSpan) = go expr0 []
-   in (head', labels, totalSpan)
+peelFieldChain entryExpression =
+  let (chainHead, labels, totalSpan) = go entryExpression []
+   in (chainHead, labels, totalSpan)
   where
-    go expr accLabels = case expr of
-      ExpressionFieldAccess fa ->
-        go fa.object (fa.fieldName : accLabels)
-      ExpressionVariable v ->
-        (VariableHead v.name, accLabels, expressionSpanOuter expr0)
-      _ -> (OtherHead expr, accLabels, expressionSpanOuter expr0)
-
-    expressionSpanOuter = sourceSpanOf
+    go currentExpression accumulatedLabels = case currentExpression of
+      ExpressionFieldAccess fieldAccess ->
+        go fieldAccess.object (fieldAccess.fieldName : accumulatedLabels)
+      ExpressionVariable variableExpression ->
+        (VariableHead variableExpression.name, accumulatedLabels, sourceSpanOf entryExpression)
+      _ -> (OtherHead currentExpression, accumulatedLabels, sourceSpanOf entryExpression)
 
 -- | Rebuild a left-folding chain of 'FieldAccess' expressions on top of an
 -- inner expression.
@@ -1477,18 +1534,18 @@ rebuildFieldAccessChain ::
   Expression Identified
 rebuildFieldAccessChain = foldl' step
   where
-    step inner lbl =
-      let span' =
+    step inner label =
+      let mergedSpan =
             SrcSpan
               { filePath = (sourceSpanOf inner).filePath,
                 start = (sourceSpanOf inner).start,
-                end = lbl.sourceSpan.end
+                end = label.sourceSpan.end
               }
        in ExpressionFieldAccess
             FieldAccessExpression
               { object = inner,
-                fieldName = labelRef lbl,
-                sourceSpan = span',
+                fieldName = labelRef label,
+                sourceSpan = mergedSpan,
                 metadata = IdentifiedExpression
               }
 
@@ -1503,25 +1560,25 @@ resolveFieldChainHead ::
   SourceSpan ->
   Identifier (Expression Identified)
 resolveFieldChainHead headRef labels totalSpan = do
-  mvid <- lookupVariable headRef.text
-  case mvid of
-    Just vid ->
+  maybeVariableId <- lookupVariable headRef.text
+  case maybeVariableId of
+    Just variableId ->
       -- Head is a variable: keep the whole chain as field access.
-      pure (rebuildFieldAccessChain (varExpr (IdentifiedVariable vid)) labels)
+      pure (rebuildFieldAccessChain (varExpr (IdentifiedVariable variableId)) labels)
     Nothing -> do
-      mmid <- lookupModule headRef.text
-      case mmid of
-        Just mid -> resolveModuleQualifiedChain mid headRef labels totalSpan
+      maybeModuleId <- lookupModule headRef.text
+      case maybeModuleId of
+        Just moduleId -> resolveModuleQualifiedChain moduleId headRef labels totalSpan
         Nothing -> do
           -- Undefined: emit error and tag the head as Unresolved so downstream
           -- phases can see that resolution failed.
           emitError (ErrorUndefinedName headRef.sourceSpan headRef.text)
           pure (rebuildFieldAccessChain (varExpr IdentifiedUnresolvedVariable) labels)
   where
-    varExpr meta =
+    varExpr metadata =
       ExpressionVariable
         VariableExpression
-          { name = identifiedNameRef meta headRef,
+          { name = identifiedNameRef metadata headRef,
             sourceSpan = headRef.sourceSpan,
             metadata = IdentifiedExpression
           }
@@ -1534,76 +1591,74 @@ resolveModuleQualifiedChain ::
   [NameRef Parsed 'LabelRef] ->
   SourceSpan ->
   Identifier (Expression Identified)
-resolveModuleQualifiedChain mid moduleRef labels totalSpan =
+resolveModuleQualifiedChain moduleId moduleRef labels totalSpan =
   case labels of
-    [] -> do
-      -- A bare module reference is not a valid expression.
-      emitError (ErrorUndefinedName moduleRef.sourceSpan moduleRef.text)
-      pure
-        ( ExpressionVariable
-            VariableExpression
-              { name = identifiedNameRef IdentifiedUnresolvedVariable moduleRef,
-                sourceSpan = moduleRef.sourceSpan,
-                metadata = IdentifiedExpression
-              }
-        )
-    (target : rest) -> do
-      mvid <- lookupModuleExportVariable mid target.text
-      varMeta <- case mvid of
-        Just v -> pure (IdentifiedVariable v)
+    -- The only call site is 'resolveFieldChainHead', which itself is only
+    -- reached via 'resolveFieldAccess' on an 'ExpressionFieldAccess' — that
+    -- guarantees at least one label was peeled. A bare 'ExpressionVariable'
+    -- never enters this code path.
+    [] -> error "resolveModuleQualifiedChain: labels must be non-empty"
+    (target : remainingLabels) -> do
+      maybeVariableId <- lookupModuleExportVariable moduleId target.text
+      variableMetadata <- case maybeVariableId of
+        Just variableId -> pure (IdentifiedVariable variableId)
         Nothing -> do
           emitError (ErrorUndefinedQualified target.sourceSpan moduleRef.text target.text)
           pure IdentifiedUnresolvedVariable
-      let qrefSpan =
+      let qualifiedReferenceSpan =
             SrcSpan
               { filePath = totalSpan.filePath,
                 start = moduleRef.sourceSpan.start,
                 end = target.sourceSpan.end
               }
           -- Re-tag the LabelRef as a VariableRef while preserving text/span.
-          targetVarRef =
+          targetVariableRef =
             NameRef
               { text = target.text,
                 sourceSpan = target.sourceSpan,
-                metadata = varMeta
+                metadata = variableMetadata
               }
           moduleNameRef =
             NameRef
               { text = moduleRef.text,
                 sourceSpan = moduleRef.sourceSpan,
-                metadata = IdentifiedModule mid
+                metadata = IdentifiedModule moduleId
               }
-          qref =
+          qualifiedReference =
             ExpressionQualifiedReference
               QualifiedReferenceExpression
                 { moduleQualifier = moduleNameRef,
-                  target = targetVarRef,
-                  sourceSpan = qrefSpan,
+                  target = targetVariableRef,
+                  sourceSpan = qualifiedReferenceSpan,
                   metadata = IdentifiedExpression
                 }
-      pure (rebuildFieldAccessChain qref rest)
+      pure (rebuildFieldAccessChain qualifiedReference remainingLabels)
 
 -- ---------------------------------------------------------------------------
 -- Entry point
 -- ---------------------------------------------------------------------------
 
--- | Entry point. Runs the four phases over a set of modules and produces an
--- 'IdentifierResult' on success, or the list of errors on failure.
-identify :: Map Text (Module Parsed) -> Either [IdentifierError] IdentifierResult
+-- | Entry point. Runs the four phases over a set of modules and returns
+-- both a (possibly partial) 'IdentifierResult' and any accumulated errors.
+--
+-- The result is *always* produced — unresolved references show up as
+-- @IdentifiedUnresolved*@ markers in the AST, allowing downstream phases
+-- (e.g. type inference) to continue with a fresh type variable instead of
+-- aborting on the first name-resolution failure. Callers that want the
+-- old fail-fast behaviour can branch on @null errors@.
+identify :: Map Text (Module Parsed) -> (IdentifierResult, [IdentifierError])
 identify moduleMap =
-  let (asts, st) =
+  let (asts, finalState) =
         runIdentifier $ do
           moduleNameToId <- assignModuleIds moduleMap
           exports <- buildExports moduleMap
           topLevels <- buildTopLevels moduleNameToId exports moduleMap
           resolveModule topLevels moduleNameToId exports moduleMap
-   in case reverse st.errors of
-        [] ->
-          Right
-            IdentifierResult
-              { identifiedModules = st.modules,
-                identifiedVariables = st.variables,
-                identifiedTypes = st.types,
-                moduleASTs = asts
-              }
-        errs -> Left errs
+      result =
+        IdentifierResult
+          { identifiedModules = finalState.modules,
+            identifiedVariables = finalState.variables,
+            identifiedTypes = finalState.types,
+            moduleASTs = asts
+          }
+   in (result, reverse finalState.errors)

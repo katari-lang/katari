@@ -5,9 +5,9 @@ import Data.Maybe (isJust, isNothing)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Katari.AST
-import Katari.Parser (Parsed (..), parseModule)
+import Katari.Lexer (LexerError (..))
+import Katari.Parser (ParseError (..), ParseErrorReason (..), Parsed (..), parseModuleStrict)
 import Test.Hspec
-import Katari.Prelude
 
 -- ---------------------------------------------------------------------------
 -- Helpers
@@ -19,13 +19,32 @@ import Katari.Prelude
 nameText :: NameRef Parsed symbol -> Text
 nameText ref = ref.text
 
-parse :: Text -> Either String (Module Parsed)
-parse = parseModule "<test>"
+parse :: Text -> Either [ParseError] (Module Parsed)
+parse = parseModuleStrict "<test>"
+
+-- | Flatten all structured errors into a single string for substring matching.
+-- Only used inside 'shouldFailWith'; do not use this for new tests.
+renderParseErrors :: [ParseError] -> String
+renderParseErrors = unlines . map renderOne
+  where
+    renderOne (ParseErrorLex le) = renderLexError le
+    renderOne (ParseErrorAtDeclaration _ r) = renderReason r
+    renderOne (ParseErrorAtStatement _ r) = renderReason r
+    renderLexError = \case
+      LexerErrorUnterminatedTemplate _ -> "unterminated template literal"
+      LexerErrorUnterminatedString _ -> "unterminated string literal"
+      LexerErrorInvalidUnicodeEscape _ seq_ -> "invalid unicode escape: " ++ T.unpack seq_
+      LexerErrorUnrecognizedCharacter _ c -> "unrecognized character: " ++ [c]
+    renderReason r =
+      maybe "" T.unpack r.unexpected
+        ++ if null r.expected then "" else " expected: " ++ unwords (map T.unpack r.expected)
 
 shouldSucceed :: Text -> IO (Module Parsed)
 shouldSucceed src = case parse src of
   Right m -> pure m
-  Left e -> expectationFailure ("Parse failed:\n" <> e) >> error "unreachable: expectationFailure escaped"
+  Left errors ->
+    expectationFailure ("Parse failed:\n" <> renderParseErrors errors)
+      >> error "unreachable: expectationFailure escaped"
 
 shouldFail :: Text -> IO ()
 shouldFail src = case parse src of
@@ -37,10 +56,11 @@ shouldFail src = case parse src of
 shouldFailWith :: Text -> String -> IO ()
 shouldFailWith src needle = case parse src of
   Right _ -> expectationFailure "Expected parse failure but succeeded"
-  Left err ->
-    if needle `isInfixOf` err
-      then pure ()
-      else expectationFailure ("Expected error to contain " <> show needle <> " but got:\n" <> err)
+  Left errors ->
+    let rendered = renderParseErrors errors
+     in if needle `isInfixOf` rendered
+          then pure ()
+          else expectationFailure ("Expected error to contain " <> show needle <> " but got:\n" <> rendered)
 
 -- | Parse an expression from the body of an agent.
 parseExpr :: Text -> IO (Expression Parsed)
@@ -1154,9 +1174,21 @@ whereBlock = describe "where block" $ do
           ]
     pure ()
 
-  it "parses where handler with return type and effects" $ do
+  it "parses where handler with return type" $ do
     _ <-
       shouldSucceed $
+        mconcat
+          [ "agent main() {",
+            "  result",
+            "} where {",
+            "  req get() -> string { \"hello\" }",
+            "}"
+          ]
+    pure ()
+
+  it "rejects where handler with effect annotation (with clause not allowed on handler)" $ do
+    _ <-
+      shouldFail $
         mconcat
           [ "agent main() {",
             "  result",
@@ -1286,6 +1318,30 @@ types = describe "types" $ do
     _ <-
       shouldSucceed
         "agent main(f: (x: integer) -> integer with req1, req2) { f(x = 1) }"
+    pure ()
+
+  it "parses never type as return type" $ do
+    _ <- shouldSucceed "agent main() -> never { main() }"
+    pure ()
+
+  it "parses unknown type as parameter type" $ do
+    _ <- shouldSucceed "agent main(x: unknown) { null }"
+    pure ()
+
+  it "parses never inside union" $ do
+    _ <- shouldSucceed "agent main(x: string | never) { null }"
+    pure ()
+
+  it "parses unknown inside union" $ do
+    _ <- shouldSucceed "agent main(x: integer | unknown) { null }"
+    pure ()
+
+  it "parses never as function-parameter type in function-type position" $ do
+    _ <- shouldSucceed "agent main(f: (x: never) -> integer) { null }"
+    pure ()
+
+  it "parses unknown as array element" $ do
+    _ <- shouldSucceed "agent main(xs: array[unknown]) { null }"
     pure ()
 
 -- ---------------------------------------------------------------------------

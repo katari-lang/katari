@@ -16,7 +16,6 @@ module Katari.AST where
 
 import Data.Kind (Type)
 import Data.Text (Text)
-import Katari.Prelude
 
 data Position = Position
   { line :: Int,
@@ -104,6 +103,11 @@ data Declaration (metadata :: SymbolKind -> Type) where
   DeclarationExternalAgent :: ExternalAgentDeclaration metadata -> Declaration metadata
   DeclarationData :: DataDeclaration metadata -> Declaration metadata
   DeclarationTypeSynonym :: TypeSynonymDeclaration metadata -> Declaration metadata
+  -- | Structural sentinel left behind when parser recovery skipped over a
+  -- broken declaration. Carries only the source span; the structured error
+  -- detail lives in the parallel @[ParseError]@ list returned alongside the
+  -- module. Lookup by 'sourceSpan' (1:1 with the corresponding 'ParseError').
+  DeclarationError :: SourceSpan -> Declaration metadata
 
 instance HasSourceSpan (Declaration metadata) where
   sourceSpanOf = \case
@@ -113,6 +117,7 @@ instance HasSourceSpan (Declaration metadata) where
     DeclarationExternalAgent declaration -> declaration.sourceSpan
     DeclarationData declaration -> declaration.sourceSpan
     DeclarationTypeSynonym declaration -> declaration.sourceSpan
+    DeclarationError sourceSpan -> sourceSpan
 
 data AgentDeclaration (metadata :: SymbolKind -> Type) = AgentDeclaration
   { annotation :: Maybe Text,
@@ -268,6 +273,10 @@ data Statement (metadata :: SymbolKind -> Type) where
   StatementBreak :: BreakStatement metadata -> Statement metadata
   StatementForNext :: ForNextStatement metadata -> Statement metadata
   StatementForBreak :: ForBreakStatement metadata -> Statement metadata
+  -- | Structural sentinel left by parser statement-level recovery. Same
+  -- pattern as 'DeclarationError': span only, error detail in the parallel
+  -- @[ParseError]@ list.
+  StatementError :: SourceSpan -> Statement metadata
 
 instance HasSourceSpan (Statement metadata) where
   sourceSpanOf = \case
@@ -279,6 +288,7 @@ instance HasSourceSpan (Statement metadata) where
     StatementBreak statement -> statement.sourceSpan
     StatementForNext statement -> statement.sourceSpan
     StatementForBreak statement -> statement.sourceSpan
+    StatementError sourceSpan -> sourceSpan
 
 data LetStatement (metadata :: SymbolKind -> Type) = LetStatement
   { pattern :: Pattern metadata,
@@ -354,12 +364,13 @@ instance HasSourceSpan (Modifier metadata) where
 -- | @req name(...) { body }@ または @req module.name(...) { body }@。
 -- @name@ は新規 binding ではなく既存の req 宣言への参照。@moduleQualifier@ が
 -- @Just@ の場合は他モジュールの req を実装する形。
+-- | req handler は自身の effect 集合を持たない (handler 内の effect は
+-- 囲む agent に bind されるため)。よって @with@ 節は構文上も AST 上も無い。
 data RequestHandler (metadata :: SymbolKind -> Type) = RequestHandler
   { moduleQualifier :: Maybe (NameRef metadata 'ModuleRef),
     name :: NameRef metadata 'VariableRef,
     parameters :: [ParameterBinding metadata],
     returnType :: Maybe (SyntacticType metadata),
-    withEffects :: Maybe [SyntacticRequest metadata],
     body :: Block metadata,
     sourceSpan :: SourceSpan
   }
@@ -481,6 +492,12 @@ data SyntacticType (metadata :: SymbolKind -> Type) where
   -- | @T1 | T2 | ...@ union type。precedence は最低 (function/array より弱い)。
   -- 2 個以上の branch を持つ。順序保持。
   TypeUnion :: TypeUnionNode metadata -> SyntacticType metadata
+  -- | @never@ — lattice の bottom 型。値を持たない。@agent f() -> never@ 等で
+  -- 「絶対に return しない」を明示する用途。
+  TypeNever :: NeverTypeNode metadata -> SyntacticType metadata
+  -- | @unknown@ — lattice の top 型。任意の値を許容するが、利用側で必ず
+  -- narrow する必要がある (TypeScript の @unknown@ と同じ思想)。
+  TypeUnknown :: UnknownTypeNode metadata -> SyntacticType metadata
 
 instance HasSourceSpan (SyntacticType metadata) where
   sourceSpanOf = \case
@@ -492,6 +509,8 @@ instance HasSourceSpan (SyntacticType metadata) where
     TypeQualified node -> node.sourceSpan
     TypeLiteral node -> node.sourceSpan
     TypeUnion node -> node.sourceSpan
+    TypeNever node -> node.sourceSpan
+    TypeUnknown node -> node.sourceSpan
 
 data PrimitiveTypeKind where
   PrimitiveTypeKindNull :: PrimitiveTypeKind
@@ -507,6 +526,24 @@ data PrimitiveTypeNode (metadata :: SymbolKind -> Type) = PrimitiveTypeNode
   }
 
 instance HasSourceSpan (PrimitiveTypeNode metadata) where
+  sourceSpanOf node = node.sourceSpan
+
+-- | @never@ 型の AST ノード。lattice の bottom (値を持たない型) で、
+-- primitive (concrete data) ではないため別ノードに分けている。
+data NeverTypeNode (metadata :: SymbolKind -> Type) = NeverTypeNode
+  { sourceSpan :: SourceSpan
+  }
+
+instance HasSourceSpan (NeverTypeNode metadata) where
+  sourceSpanOf node = node.sourceSpan
+
+-- | @unknown@ 型の AST ノード。lattice の top (任意の値) で、利用側で
+-- narrow が必要。primitive ではないため別ノードに分けている。
+data UnknownTypeNode (metadata :: SymbolKind -> Type) = UnknownTypeNode
+  { sourceSpan :: SourceSpan
+  }
+
+instance HasSourceSpan (UnknownTypeNode metadata) where
   sourceSpanOf node = node.sourceSpan
 
 data TypeNameNode (metadata :: SymbolKind -> Type) = TypeNameNode
@@ -936,6 +973,10 @@ deriving instance (ShowMetadata metadata) => Show (SyntacticType metadata)
 
 deriving instance (ShowMetadata metadata) => Show (PrimitiveTypeNode metadata)
 
+deriving instance (ShowMetadata metadata) => Show (NeverTypeNode metadata)
+
+deriving instance (ShowMetadata metadata) => Show (UnknownTypeNode metadata)
+
 deriving instance (ShowMetadata metadata) => Show (TypeNameNode metadata)
 
 deriving instance (ShowMetadata metadata) => Show (FunctionTypeNode metadata)
@@ -1059,6 +1100,10 @@ deriving instance (EqMetadata metadata) => Eq (LiteralPattern metadata)
 deriving instance (EqMetadata metadata) => Eq (SyntacticType metadata)
 
 deriving instance (EqMetadata metadata) => Eq (PrimitiveTypeNode metadata)
+
+deriving instance (EqMetadata metadata) => Eq (NeverTypeNode metadata)
+
+deriving instance (EqMetadata metadata) => Eq (UnknownTypeNode metadata)
 
 deriving instance (EqMetadata metadata) => Eq (TypeNameNode metadata)
 

@@ -7,10 +7,9 @@ import Data.Map.Strict qualified as Map
 import Data.Maybe (isJust, isNothing)
 import Data.Text (Text)
 import Katari.AST
-import Katari.Parser (Parsed, parseModule)
+import Katari.Parser (ParseError, Parsed, parseModuleStrict)
 import Katari.Typechecker.Identifier
 import Test.Hspec
-import Katari.Prelude
 
 -- ---------------------------------------------------------------------------
 -- Test helpers
@@ -18,27 +17,35 @@ import Katari.Prelude
 
 -- | Parse a single-module program, fail the spec if it doesn't parse.
 parseOne :: Text -> IO (Module Parsed)
-parseOne src = case parseModule "<test>" src of
-  Left err -> fail ("parse failure: " ++ err)
+parseOne src = case parseModuleStrict "<test>" src of
+  Left errs -> fail ("parse failure: " ++ show (map show errs))
   Right m -> pure m
 
 -- | Run identify on a single module named "main".
+--
+-- Adapter: 'identify' now returns @(result, errors)@ unconditionally so the
+-- typechecker can continue past name-resolution failures. Tests still want the
+-- "all-or-nothing" Either shape, so we collapse the pair: errors → Left.
 identifyOne :: Text -> IO (Either [IdentifierError] IdentifierResult)
 identifyOne src = do
   m <- parseOne src
-  pure (identify (Map.singleton "main" m))
+  pure $ case identify (Map.singleton "main" m) of
+    (r, []) -> Right r
+    (_, es) -> Left es
 
 -- | Run identify on multiple named modules.
 identifyMany :: [(Text, Text)] -> IO (Either [IdentifierError] IdentifierResult)
 identifyMany sources = do
   parsedList <-
     mapM
-      ( \(name, src) -> case parseModule "<test>" src of
-          Left err -> fail ("parse failure for " ++ show name ++ ": " ++ err)
+      ( \(name, src) -> case parseModuleStrict "<test>" src of
+          Left errs -> fail ("parse failure for " ++ show name ++ ": " ++ show (map show errs))
           Right m -> pure (name, m)
       )
       sources
-  pure (identify (Map.fromList parsedList))
+  pure $ case identify (Map.fromList parsedList) of
+    (r, []) -> Right r
+    (_, es) -> Left es
 
 shouldIdentify :: Text -> IO IdentifierResult
 shouldIdentify src = do
@@ -64,6 +71,20 @@ hasError :: (IdentifierError -> Bool) -> Either [IdentifierError] a -> Bool
 hasError predicate = \case
   Left errs -> any predicate errs
   Right _ -> False
+
+-- | Look up a type's 'TypeData' by its source-level name. Returns the first
+-- match (Identifier currently does not allow duplicate type names per module).
+lookupTypeByName :: Text -> IdentifierResult -> Maybe TypeData
+lookupTypeByName name res =
+  fmap snd
+    . find (\(_, typeData) -> typeData.typeName == name)
+    $ Map.toList res.identifiedTypes
+
+-- | Accessor for the (phase-parameterised) synonym RHS field. Wrapping the
+-- access in a fixed-result function avoids the @metadata0@ ambiguity that
+-- @typeData.typeSynonymRhs@ alone produces under @OverloadedRecordDot@.
+synonymRhsOf :: TypeData -> Maybe (SyntacticType Identified)
+synonymRhsOf td = td.typeSynonymRhs
 
 -- Error predicates as top-level values.
 isUndefName :: IdentifierError -> Bool
@@ -130,7 +151,7 @@ basicResolution = describe "basic resolution" $ do
     pure ()
 
   it "rejects unknown variable reference" $ do
-    shouldFailIdentifyWith isUndefName "agent main() { unknown }"
+    shouldFailIdentifyWith isUndefName "agent main() { undef_var }"
 
   it "rejects unknown type reference" $ do
     shouldFailIdentifyWith isNotAType "agent main(x: nope) { 0 }"
@@ -143,19 +164,18 @@ dataDeclarations :: Spec
 dataDeclarations = describe "data declarations" $ do
   it "data introduces both variable (ctor function) and type with same name" $ do
     res <-
-      shouldIdentify $
-        mconcat
+      shouldIdentify
+        $ mconcat
           [ "data circle(r: integer)\n",
             "agent main() { circle(r = 1) }"
           ]
     -- variable と type それぞれに id が発行されている
     Map.size res.identifiedVariables `shouldSatisfy` (>= 2) -- circle (ctor) + main (agent)
     Map.size res.identifiedTypes `shouldSatisfy` (>= 1) -- circle (type)
-
   it "data type usable in type annotation" $ do
     _ <-
-      shouldIdentify $
-        mconcat
+      shouldIdentify
+        $ mconcat
           [ "data point(x: integer, y: integer)\n",
             "agent main(p: point) -> point { p }"
           ]
@@ -163,24 +183,24 @@ dataDeclarations = describe "data declarations" $ do
 
   it "data with no parameters" $ do
     _ <-
-      shouldIdentify $
-        mconcat
+      shouldIdentify
+        $ mconcat
           [ "data marker()\n",
             "agent main() { marker() }"
           ]
     pure ()
 
   it "data + same-name agent → duplicate" $ do
-    shouldFailIdentifyWith isDup $
-      mconcat
+    shouldFailIdentifyWith isDup
+      $ mconcat
         [ "data foo(x: integer)\n",
           "agent foo() { 0 }"
         ]
 
   it "constructor pattern matching on data" $ do
     _ <-
-      shouldIdentify $
-        mconcat
+      shouldIdentify
+        $ mconcat
           [ "data circle(r: integer)\n",
             "agent main(x: circle) { match (x) { case circle(r = v) => { v } } }"
           ]
@@ -194,8 +214,8 @@ typeSynonymAndUnion :: Spec
 typeSynonymAndUnion = describe "type synonym and union" $ do
   it "type synonym with named types in union" $ do
     _ <-
-      shouldIdentify $
-        mconcat
+      shouldIdentify
+        $ mconcat
           [ "data nothing()\n",
             "data just(value: integer)\n",
             "type maybe_int = nothing | just\n",
@@ -205,8 +225,8 @@ typeSynonymAndUnion = describe "type synonym and union" $ do
 
   it "type synonym with literal types" $ do
     _ <-
-      shouldIdentify $
-        mconcat
+      shouldIdentify
+        $ mconcat
           [ "type status = \"ok\" | \"err\" | null\n",
             "agent main(s: status) { 0 }"
           ]
@@ -214,25 +234,61 @@ typeSynonymAndUnion = describe "type synonym and union" $ do
 
   it "type synonym with mixed literal kinds" $ do
     _ <-
-      shouldIdentify $
-        mconcat
+      shouldIdentify
+        $ mconcat
           [ "type t = 200 | 404 | true | false\n",
             "agent main(x: t) { 0 }"
           ]
     pure ()
 
   it "type synonym referencing undefined type fails" $ do
-    shouldFailIdentifyWith isNotAType $
-      mconcat
-        [ "type t = unknown\n"
+    shouldFailIdentifyWith isNotAType
+      $ mconcat
+        [ "type t = undef_type\n"
         ]
 
   it "type synonym + same-name data is duplicate" $ do
-    shouldFailIdentifyWith isDup $
-      mconcat
+    shouldFailIdentifyWith isDup
+      $ mconcat
         [ "data foo()\n",
           "type foo = integer"
         ]
+
+  it "type synonym RHS is recorded in TypeData" $ do
+    res <- shouldIdentify "type t = string"
+    case lookupTypeByName "t" res of
+      Nothing -> expectationFailure "expected TypeData entry for 't'"
+      Just td -> case synonymRhsOf td of
+        Just (TypePrimitive PrimitiveTypeNode {kind}) ->
+          kind `shouldBe` PrimitiveTypeKindString
+        Just _ ->
+          expectationFailure "expected primitive string RHS for 't'"
+        Nothing ->
+          expectationFailure "typeSynonymRhs not populated for synonym"
+
+  it "every synonym in a chain has its RHS recorded" $ do
+    res <-
+      shouldIdentify
+        $ mconcat
+          [ "type a = string\n",
+            "type b = a\n"
+          ]
+    -- a -> string (primitive)
+    case lookupTypeByName "a" res >>= synonymRhsOf of
+      Just (TypePrimitive PrimitiveTypeNode {kind}) ->
+        kind `shouldBe` PrimitiveTypeKindString
+      _ -> expectationFailure "a: expected primitive string RHS"
+    -- b -> a (named type)
+    case lookupTypeByName "b" res >>= synonymRhsOf of
+      Just (TypeName _) -> pure ()
+      _ -> expectationFailure "b: expected TypeName RHS"
+
+  it "data declaration leaves typeSynonymRhs as Nothing" $ do
+    res <- shouldIdentify "data foo(x: integer)"
+    case lookupTypeByName "foo" res of
+      Nothing -> expectationFailure "expected TypeData entry for 'foo'"
+      Just td ->
+        synonymRhsOf td `shouldSatisfy` isNothing
 
 -- ---------------------------------------------------------------------------
 -- Import handling
@@ -312,8 +368,8 @@ importHandling = describe "imports" $ do
 duplicateNameErrors :: Spec
 duplicateNameErrors = describe "duplicate names" $ do
   it "two agents with same name in same module" $ do
-    shouldFailIdentifyWith isDup $
-      mconcat
+    shouldFailIdentifyWith isDup
+      $ mconcat
         [ "agent foo() { 0 }\n",
           "agent foo() { 1 }"
         ]
@@ -365,8 +421,8 @@ shadowingRules :: Spec
 shadowingRules = describe "shadowing" $ do
   it "local let shadows top-level variable" $ do
     _ <-
-      shouldIdentify $
-        mconcat
+      shouldIdentify
+        $ mconcat
           [ "agent helper() { 0 }\n",
             "agent main() { let helper = 1; helper }"
           ]
@@ -389,8 +445,8 @@ shadowingRules = describe "shadowing" $ do
     -- Local variable bindings may shadow names that exist only in the type
     -- slot at top level — variable and type lookups walk independently.
     _ <-
-      shouldIdentify $
-        mconcat
+      shouldIdentify
+        $ mconcat
           [ "type status = \"ok\"\n",
             "agent main() { let status = 1; status }"
           ]
@@ -398,8 +454,8 @@ shadowingRules = describe "shadowing" $ do
 
   it "data ctor (variable) can be shadowed by local let" $ do
     _ <-
-      shouldIdentify $
-        mconcat
+      shouldIdentify
+        $ mconcat
           [ "data marker()\n",
             "agent main() { let marker = 1; marker }"
           ]
@@ -414,8 +470,8 @@ shadowingRules = describe "shadowing" $ do
     -- `let marker = 1` shadows the variable slot; the type slot survives,
     -- so `marker` in a type-annotation position still resolves to the data type.
     _ <-
-      shouldIdentify $
-        mconcat
+      shouldIdentify
+        $ mconcat
           [ "data marker()\n",
             "agent main(p: marker) { let marker = 1; marker }"
           ]
@@ -469,8 +525,8 @@ qualifiedRequestHandler :: Spec
 qualifiedRequestHandler = describe "request handlers" $ do
   it "bare req handler resolves to existing req" $ do
     _ <-
-      shouldIdentify $
-        mconcat
+      shouldIdentify
+        $ mconcat
           [ "req get() -> integer\n",
             "agent main() { 0 } where {\n",
             "  req get() { 0 }\n",
@@ -509,8 +565,8 @@ qualifiedRequestHandler = describe "request handlers" $ do
     res `shouldSatisfy` hasError isUndefQual
 
   it "bare req handler with unknown name fails" $ do
-    shouldFailIdentifyWith isUndefName $
-      mconcat
+    shouldFailIdentifyWith isUndefName
+      $ mconcat
         [ "agent main() { 0 } where {\n",
           "  req nonexistent() { 0 }\n",
           "}"
@@ -523,8 +579,8 @@ qualifiedRequestHandler = describe "request handlers" $ do
 scopeIsolation :: Spec
 scopeIsolation = describe "scope isolation" $ do
   it "where state vars not visible in body" $ do
-    shouldFailIdentifyWith isUndefName $
-      mconcat
+    shouldFailIdentifyWith isUndefName
+      $ mconcat
         [ "agent main() {\n",
           "  count\n",
           "} where (var count = 0) {\n",
@@ -532,8 +588,8 @@ scopeIsolation = describe "scope isolation" $ do
         ]
 
   it "body let not visible in where state var initializer" $ do
-    shouldFailIdentifyWith isUndefName $
-      mconcat
+    shouldFailIdentifyWith isUndefName
+      $ mconcat
         [ "agent main() {\n",
           "  let x = 0;\n",
           "  x\n",
@@ -543,8 +599,8 @@ scopeIsolation = describe "scope isolation" $ do
 
   it "later state var sees earlier (ML let order)" $ do
     res <-
-      identifyOne $
-        mconcat
+      identifyOne
+        $ mconcat
           [ "req inc() -> integer\n",
             "agent main() { 0 } where (var a = 1, var b = a) {\n",
             "  req inc() { 0 }\n",
@@ -553,8 +609,8 @@ scopeIsolation = describe "scope isolation" $ do
     res `shouldSatisfy` isRight
 
   it "earlier state var does NOT see later" $ do
-    shouldFailIdentifyWith isUndefName $
-      mconcat
+    shouldFailIdentifyWith isUndefName
+      $ mconcat
         [ "req inc() -> integer\n",
           "agent main() { 0 } where (var a = b, var b = 1) {\n",
           "  req inc() { 0 }\n",
@@ -568,7 +624,7 @@ scopeIsolation = describe "scope isolation" $ do
 unresolvedMetadata :: Spec
 unresolvedMetadata = describe "unresolved metadata" $ do
   it "undefined variable reference yields IdentifiedUnresolvedVariable" $ do
-    res <- identifyOne "agent main() { unknown }"
+    res <- identifyOne "agent main() { undef_var }"
     case res of
       Right _ -> expectationFailure "expected error"
       Left errs -> do

@@ -1,19 +1,27 @@
-module Katari.Parser (Parsed (..), parseModule) where
+module Katari.Parser
+  ( Parsed (..),
+    ParseError (..),
+    ParseErrorReason (..),
+    parseModule,
+    parseModuleStrict,
+  )
+where
 
 import Control.Monad (void)
 import Control.Monad.Combinators.Expr (makeExprParser)
 import Control.Monad.Combinators.Expr qualified as Expr
-import Control.Monad.Reader (ReaderT, asks, local, runReaderT)
-import Control.Monad.State.Strict (StateT, evalStateT, get, put)
-import Control.Monad.Trans (lift)
+import Control.Monad.Reader (Reader, asks, local, runReader)
+import Control.Monad.State.Strict (StateT, get, modify', runStateT)
 import Data.Foldable (foldl')
+import Data.List.NonEmpty qualified as NE
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
-import Data.Void (Void)
+import Data.Void (Void, absurd)
 import Katari.AST
 import Katari.Lexer
   ( Keyword (..),
+    LexerError (..),
     Operator (..),
     Punctuation (..),
     Token (..),
@@ -21,10 +29,12 @@ import Katari.Lexer
     WithSourceSpan (..),
     insertVirtualSemicolons,
     runLexer,
+    showKeyword,
+    showOperator,
+    showPunctuation,
   )
-import Text.Megaparsec hiding (Token, Tokens)
+import Text.Megaparsec hiding (ParseError, Token, Tokens)
 import Text.Megaparsec qualified as MP
-import Katari.Prelude
 
 -- ===========================================================================
 -- Types
@@ -34,6 +44,40 @@ import Katari.Prelude
 -- information yet; later compiler phases replace this with richer markers
 -- (e.g. @Identified@, @Typed@) that live in their own modules.
 data Parsed (symbol :: SymbolKind) = Parsed
+  deriving (Eq, Show)
+
+-- | Structured parse error. Mirrors the design of 'IdentifierError': rich
+-- variants, no embedded text — rendering belongs to 'Katari.Diagnostics'.
+--
+-- 'ParseErrorLex' wraps a lexer-level failure so callers see a single
+-- merged error stream out of 'parseModule'.
+data ParseError where
+  -- | Lexer-level diagnostic, surfaced unchanged through the parser API.
+  ParseErrorLex :: LexerError -> ParseError
+  -- | Declaration-level recovery point. The span covers the skipped tokens
+  -- between the failure and the next sync point.
+  ParseErrorAtDeclaration :: SourceSpan -> ParseErrorReason -> ParseError
+  -- | Statement-level recovery point inside a block.
+  ParseErrorAtStatement :: SourceSpan -> ParseErrorReason -> ParseError
+
+deriving instance Eq ParseError
+
+deriving instance Show ParseError
+
+instance HasSourceSpan ParseError where
+  sourceSpanOf = \case
+    ParseErrorLex le -> sourceSpanOf le
+    ParseErrorAtDeclaration sp _ -> sp
+    ParseErrorAtStatement sp _ -> sp
+
+-- | Reason for a parser-level failure, projected from megaparsec's internal
+-- 'MP.ParseError'. Keeps the structured @expected@ token set and (when
+-- available) what was actually found, so consumers can render or analyse
+-- without re-parsing strings.
+data ParseErrorReason = ParseErrorReason
+  { expected :: [Text],
+    unexpected :: Maybe Text
+  }
   deriving (Eq, Show)
 
 -- | Parser context: determines which break/next statements are valid.
@@ -51,10 +95,15 @@ data ParserEnv = ParserEnv
     breakContext :: BreakContext
   }
 
--- | The inner StateT holds the end position of the most recently consumed
--- token, so span-end can be recovered accurately (getSourcePos only sees the
--- start of the next unconsumed token).
-type Parser = ReaderT ParserEnv (StateT (Maybe Position) (Parsec Void TokenStream))
+-- | Mutable parser state. Holds the end position of the last consumed token
+-- (for accurate span ends) and the error accumulator (built up by recovery).
+-- Errors are stored in reverse order and reversed once at the end.
+data ParserState = ParserState
+  { previousEndPosition :: Maybe Position,
+    parseErrors :: [ParseError]
+  }
+
+type Parser = ParsecT Void TokenStream (StateT ParserState (Reader ParserEnv))
 
 askFilePath :: Parser FilePath
 askFilePath = asks (.filePath)
@@ -68,23 +117,36 @@ withBreakContext context = local (\env -> env {breakContext = context})
 -- | Build a @SourceSpan@ using the current file path held in the environment.
 makeSpan :: Position -> Position -> Parser SourceSpan
 makeSpan startPosition endPosition = do
-  fp <- askFilePath
-  pure (SrcSpan fp startPosition endPosition)
+  currentFilePath <- askFilePath
+  pure (SrcSpan currentFilePath startPosition endPosition)
 
 -- ===========================================================================
 -- Public API
 -- ===========================================================================
 
-parseModule :: FilePath -> Text -> Either String (Module Parsed)
-parseModule filePath input = case runLexer filePath input of
-  Left err -> Left (errorBundlePretty err)
-  Right rawTokens ->
-    let stream = TokenStream input (insertVirtualSemicolons rawTokens)
-        env = ParserEnv {filePath = filePath, breakContext = BreakContextTop}
-        action = evalStateT (runReaderT (parseModuleBody <* eof) env) Nothing
-     in case runParser action filePath stream of
-          Left err -> Left (errorBundlePretty err)
-          Right parsed -> Right parsed
+parseModule :: FilePath -> Text -> (Module Parsed, [ParseError])
+parseModule filePath input =
+  let (rawTokens, lexerErrors) = runLexer filePath input
+      stream = TokenStream input (insertVirtualSemicolons rawTokens)
+      env = ParserEnv {filePath = filePath, breakContext = BreakContextTop}
+      initialState =
+        ParserState
+          { previousEndPosition = Nothing,
+            parseErrors = map ParseErrorLex lexerErrors
+          }
+      action = runParserT (parseModuleBody <* eof) filePath stream
+      (eRes, finalState) = runReader (runStateT action initialState) env
+   in case eRes of
+        Left _ ->
+          let fallbackSpan = SrcSpan filePath (Position 1 1) (Position 1 1)
+           in (Module {declarations = [], sourceSpan = fallbackSpan}, map ParseErrorLex lexerErrors)
+        Right parsedModule ->
+          (parsedModule, reverse finalState.parseErrors)
+
+parseModuleStrict :: FilePath -> Text -> Either [ParseError] (Module Parsed)
+parseModuleStrict filePath input = case parseModule filePath input of
+  (_, errors@(_ : _)) -> Left errors
+  (parsedModule, []) -> Right parsedModule
 
 -- ===========================================================================
 -- Token primitives
@@ -97,7 +159,7 @@ parseModule filePath input = case runLexer filePath input of
 parseTokenWith :: (Token -> Maybe value) -> Parser value
 parseTokenWith predicate = do
   (result, endPos) <- MP.token testToken Set.empty
-  lift (put (Just endPos))
+  modify' (\s -> s {previousEndPosition = Just endPos})
   pure result
   where
     testToken (WithSourceSpan span_ inputToken) = do
@@ -106,20 +168,21 @@ parseTokenWith predicate = do
 
 -- | Consume an exact token (using equality on the Token type).
 parseExactToken :: Token -> Parser ()
-parseExactToken expected = void $ parseTokenWith (\actual -> if actual == expected then Just () else Nothing)
+parseExactToken expected = parseTokenWith (\actual -> if actual == expected then Just () else Nothing)
 
 parseKeyword :: Keyword -> Parser ()
-parseKeyword keyword = parseExactToken (TokenKeyword keyword)
+parseKeyword keyword = label ("'" <> showKeyword keyword <> "'") $ parseExactToken (TokenKeyword keyword)
 
 parsePunctuation :: Punctuation -> Parser ()
-parsePunctuation punctuation = parseExactToken (TokenPunctuation punctuation)
+parsePunctuation punctuation =
+  label ("'" <> showPunctuation punctuation <> "'") $ parseExactToken (TokenPunctuation punctuation)
 
 parseOperator :: Operator -> Parser ()
-parseOperator operator = parseExactToken (TokenOperator operator)
+parseOperator operator = label ("'" <> showOperator operator <> "'") $ parseExactToken (TokenOperator operator)
 
 -- | Consume any semicolon (explicit or virtual).
 parseSemicolon :: Parser ()
-parseSemicolon = parseTokenWith $ \case
+parseSemicolon = label "';' or newline" $ parseTokenWith $ \case
   TokenSemicolonExplicit -> Just ()
   TokenSemicolonVirtual -> Just ()
   _ -> Nothing
@@ -129,7 +192,7 @@ parseComma = parsePunctuation PunctuationComma
 
 -- | Identifier token (bare `_` is a separate token, not TokenIdentifier).
 parseIdentifier :: Parser Text
-parseIdentifier = parseTokenWith $ \case
+parseIdentifier = label "identifier" $ parseTokenWith $ \case
   TokenIdentifier text -> Just text
   _ -> Nothing
 
@@ -138,17 +201,17 @@ parseUnderscore :: Parser ()
 parseUnderscore = parseExactToken TokenUnderscore
 
 parseIntegerLiteral :: Parser Integer
-parseIntegerLiteral = parseTokenWith $ \case
+parseIntegerLiteral = label "integer literal" $ parseTokenWith $ \case
   TokenIntegerLiteral integer -> Just integer
   _ -> Nothing
 
 parseFloatLiteral :: Parser Double
-parseFloatLiteral = parseTokenWith $ \case
+parseFloatLiteral = label "float literal" $ parseTokenWith $ \case
   TokenFloatLiteral double -> Just double
   _ -> Nothing
 
 parseStringLiteral :: Parser Text
-parseStringLiteral = parseTokenWith $ \case
+parseStringLiteral = label "string literal" $ parseTokenWith $ \case
   TokenStringLiteral text -> Just text
   _ -> Nothing
 
@@ -166,24 +229,214 @@ parseCurrentPosition = do
 -- parseCurrentPosition when no token has been consumed yet in this parse.
 parsePreviousEndPosition :: Parser Position
 parsePreviousEndPosition = do
-  maybeLastEndPosition <- lift get
-  maybe parseCurrentPosition pure maybeLastEndPosition
+  state_ <- get
+  maybe parseCurrentPosition pure state_.previousEndPosition
+
+-- | Run @body@ and pass it the source span covering everything @body@ consumed.
+-- Removes the @startPosition <- parseCurrentPosition / endPosition <- ... /
+-- makeSpan@ boilerplate at every parser entry point.
+withSpan :: Parser (SourceSpan -> a) -> Parser a
+withSpan body = do
+  startPosition <- parseCurrentPosition
+  build <- body
+  endPosition <- parsePreviousEndPosition
+  build <$> makeSpan startPosition endPosition
+
+-- ===========================================================================
+-- Error recovery helpers
+-- ===========================================================================
+
+recordParseError :: ParseError -> Parser ()
+recordParseError err = modify' (\s -> s {parseErrors = err : s.parseErrors})
+
+-- | Project a megaparsec parse error into our structured 'ParseErrorReason'.
+-- Used inside 'withRecovery' handlers at the declaration and statement levels.
+extractReason :: MP.ParseError TokenStream Void -> ParseErrorReason
+extractReason = \case
+  MP.TrivialError _ maybeUnexpected expectedSet ->
+    ParseErrorReason
+      { unexpected = fmap itemToText maybeUnexpected,
+        expected = map itemToText (Set.toList expectedSet)
+      }
+  MP.FancyError _ fancySet ->
+    ParseErrorReason
+      { unexpected = Just (T.intercalate "; " (map fancyToText (Set.toList fancySet))),
+        expected = []
+      }
+  where
+    itemToText = \case
+      MP.Tokens toks ->
+        T.intercalate ", " (NE.toList (fmap (T.pack . tokenLabel . (.value)) toks))
+      MP.Label chars -> T.pack (NE.toList chars)
+      MP.EndOfInput -> "end of input"
+    fancyToText = \case
+      MP.ErrorFail message -> T.pack message
+      MP.ErrorIndentation {} -> "incorrect indentation"
+      MP.ErrorCustom void_ -> absurd void_
+    tokenLabel = \case
+      TokenIdentifier text -> T.unpack text
+      TokenUnderscore -> "_"
+      TokenKeyword keyword -> showKeyword keyword
+      TokenPunctuation punc -> showPunctuation punc
+      TokenOperator operator -> showOperator operator
+      TokenIntegerLiteral integer -> show integer
+      TokenFloatLiteral double -> show double
+      TokenStringLiteral text -> show text
+      TokenTemplateOpen -> "f\""
+      TokenTemplateClose -> "\""
+      TokenTemplateString text -> T.unpack text
+      TokenTemplateExpressionOpen -> "${"
+      TokenTemplateExpressionClose -> "}"
+      TokenSemicolonExplicit -> ";"
+      TokenSemicolonVirtual -> ";"
+      TokenNewline -> "\\n"
+
+-- | Wrap @p@ with error recovery. On failure, consume one token, run
+-- @skipSync@, then record the error and return the sentinel value.
+withErrorRecoveryAt
+  :: (SourceSpan -> ParseErrorReason -> ParseError)
+  -> (SourceSpan -> a)
+  -> Parser ()
+  -> Parser a
+  -> Parser a
+withErrorRecoveryAt mkError mkSentinel skipSync p = do
+  startPosition <- parseCurrentPosition
+  withRecovery (\mpError -> do
+    let reason = extractReason mpError
+    failPosition <- parseCurrentPosition
+    consumeOneToken
+    failEndPosition <- parsePreviousEndPosition
+    errorSpan <- makeSpan failPosition failEndPosition
+    skipSync
+    recoveryEndPosition <- parsePreviousEndPosition
+    sentinelSpan <- makeSpan startPosition recoveryEndPosition
+    recordParseError (mkError errorSpan reason)
+    pure (mkSentinel sentinelSpan)
+    ) p
+
+-- ===========================================================================
+-- List combinator helpers
+-- ===========================================================================
+
+parenthesizedList :: Parser a -> Parser [a]
+parenthesizedList p =
+  between
+    (parsePunctuation PunctuationLeftParenthesis)
+    (parsePunctuation PunctuationRightParenthesis)
+    (p `sepEndBy` parseComma)
+
+bracedList :: Parser a -> Parser [a]
+bracedList p =
+  between
+    (parsePunctuation PunctuationLeftBrace)
+    (parsePunctuation PunctuationRightBrace)
+    (p `sepEndBy` parseComma)
+
+bracketedList :: Parser a -> Parser [a]
+bracketedList p =
+  between
+    (parsePunctuation PunctuationLeftBracket)
+    (parsePunctuation PunctuationRightBracket)
+    (p `sepEndBy` parseComma)
+
+-- | Peek at the next token without consuming it or updating parser state.
+peekNextToken :: Parser (Maybe Token)
+peekNextToken = optional (MP.lookAhead (MP.token (\(WithSourceSpan _ tok) -> Just tok) Set.empty))
+
+-- | Consume one token, recording its end position. No-op at EOF.
+consumeOneToken :: Parser ()
+consumeOneToken = void (optional (parseTokenWith Just))
+
+-- | Skip tokens until the next declaration-level sync point or EOF.
+-- Sync tokens: declaration-start keywords and '@'.
+skipUntilDeclarationSync :: Parser ()
+skipUntilDeclarationSync = do
+  next <- peekNextToken
+  case next of
+    Nothing -> pure ()
+    Just tok ->
+      if isDeclarationSyncToken tok
+        then pure ()
+        else consumeOneToken *> skipUntilDeclarationSync
+  where
+    isDeclarationSyncToken = \case
+      TokenKeyword KeywordImport -> True
+      TokenKeyword KeywordType -> True
+      TokenKeyword KeywordAgent -> True
+      TokenKeyword KeywordReq -> True
+      TokenKeyword KeywordExt -> True
+      TokenKeyword KeywordData -> True
+      TokenPunctuation PunctuationAt -> True
+      _ -> False
+
+-- | Skip tokens until the next statement-level sync point, respecting brace
+-- depth so we don't escape the enclosing block.
+-- Sync tokens (at depth 0): @;@, @}@, statement-start keywords.
+skipUntilStatementSync :: Parser ()
+skipUntilStatementSync = go (0 :: Int)
+  where
+    go depth = do
+      next <- peekNextToken
+      case next of
+        Nothing -> pure ()
+        Just tok ->
+          if isSyncToken tok depth
+            then pure ()
+            else do
+              consumeOneToken
+              let newDepth = case tok of
+                    TokenPunctuation PunctuationLeftBrace -> depth + 1
+                    TokenPunctuation PunctuationRightBrace | depth > 0 -> depth - 1
+                    _ -> depth
+              go newDepth
+    isSyncToken tok depth = case tok of
+      TokenSemicolonExplicit -> True
+      TokenSemicolonVirtual -> True
+      TokenPunctuation PunctuationRightBrace | depth == 0 -> True
+      TokenKeyword keyword | depth == 0 -> isStatementStartKeyword keyword
+      _ -> False
+    isStatementStartKeyword = \case
+      KeywordLet -> True
+      KeywordAgent -> True
+      KeywordReturn -> True
+      KeywordBreak -> True
+      KeywordNext -> True
+      _ -> False
+
+-- ===========================================================================
+-- NameRef helpers
+-- ===========================================================================
 
 -- | Parse an identifier and wrap it into a @NameRef Parsed symbol@.
 -- The symbol is determined by the type at the call site.
 parseNameRef :: Parser (NameRef Parsed symbol)
-parseNameRef = do
-  startPosition <- parseCurrentPosition
+parseNameRef = withSpan $ do
   text <- parseIdentifier
-  endPosition <- parsePreviousEndPosition
-  sourceSpan <- makeSpan startPosition endPosition
-  pure NameRef {text = text, sourceSpan = sourceSpan, metadata = Parsed}
+  pure $ \sourceSpan -> NameRef {text = text, sourceSpan = sourceSpan, metadata = Parsed}
 
--- | Repurpose a parsed @NameRef@ under a different symbol. Used at sugar
--- desugaring sites (e.g. @foo(x)@ → @foo(x = x)@) where the same identifier
--- plays two roles (label + variable).
-coerceNameRefSymbol :: NameRef Parsed anySymbol -> NameRef Parsed otherSymbol
-coerceNameRefSymbol nameRef =
+-- | Re-tag a 'VariableRef' name as a 'ModuleRef'. Used when a leading
+-- identifier is being committed to as a module qualifier (e.g. the @M@ in
+-- @M.foo(...)@).
+moduleRefOfVariable :: NameRef Parsed 'VariableRef -> NameRef Parsed 'ModuleRef
+moduleRefOfVariable = retagNameRef
+
+-- | Re-tag a 'VariableRef' name as a 'TypeRef'. Used in type position when an
+-- identifier may be either a bare type name or a module qualifier; the
+-- decision is made after lookahead.
+typeRefOfVariable :: NameRef Parsed 'VariableRef -> NameRef Parsed 'TypeRef
+typeRefOfVariable = retagNameRef
+
+-- | Re-tag a 'VariableRef' name as a 'LabelRef'. Used in sugar desugaring
+-- sites (e.g. @foo(x)@ → @foo(x = x)@) where the same identifier plays two
+-- roles (label + variable).
+labelRefOfVariable :: NameRef Parsed 'VariableRef -> NameRef Parsed 'LabelRef
+labelRefOfVariable = retagNameRef
+
+-- | Internal: replace the symbol-kind tag of a parsed 'NameRef'. Safe because
+-- the @Parsed@ phase carries no per-kind metadata, but exposed only through
+-- the directional helpers above so that call sites document intent.
+retagNameRef :: NameRef Parsed source -> NameRef Parsed target
+retagNameRef nameRef =
   NameRef {text = nameRef.text, sourceSpan = nameRef.sourceSpan, metadata = Parsed}
 
 -- ===========================================================================
@@ -191,17 +444,26 @@ coerceNameRefSymbol nameRef =
 -- ===========================================================================
 
 parseModuleBody :: Parser (Module Parsed)
-parseModuleBody = do
-  startPosition <- parseCurrentPosition
-  skipMany parseSemicolon
-  declarations <- parseDeclaration `sepEndBy` some parseSemicolon
-  endPosition <- parsePreviousEndPosition
-  sourceSpan <- makeSpan startPosition endPosition
-  pure
-    Module
-      { declarations = declarations,
-        sourceSpan = sourceSpan
-      }
+parseModuleBody = withSpan $ do
+  declarations <- parseDeclarationsWithRecovery
+  pure $ \sourceSpan -> Module {declarations = declarations, sourceSpan = sourceSpan}
+
+parseDeclarationsWithRecovery :: Parser [Declaration Parsed]
+parseDeclarationsWithRecovery = loop []
+  where
+    loop reversedDeclarations = do
+      skipMany parseSemicolon
+      atEof <- True <$ MP.lookAhead eof <|> pure False
+      if atEof
+        then pure (reverse reversedDeclarations)
+        else do
+          declaration <-
+            withErrorRecoveryAt
+              ParseErrorAtDeclaration
+              DeclarationError
+              skipUntilDeclarationSync
+              parseDeclaration
+          loop (declaration : reversedDeclarations)
 
 -- | Top-level declaration. Split into two helpers to make the difference
 -- between annotation-bearing and annotation-free declarations explicit:
@@ -214,11 +476,12 @@ parseModuleBody = do
 --     / data) which all may carry an annotation.
 parseDeclaration :: Parser (Declaration Parsed)
 parseDeclaration =
-  choice
-    [ DeclarationImport <$> parseImport,
-      DeclarationTypeSynonym <$> parseTypeSynonym,
-      parseAnnotatedDeclaration
-    ]
+  label "declaration" $
+    choice
+      [ DeclarationImport <$> parseImport,
+        DeclarationTypeSynonym <$> parseTypeSynonym,
+        parseAnnotatedDeclaration
+      ]
 
 -- | Parse a declaration that can carry an optional @\@\"...\"@ annotation.
 -- The annotation is consumed once and then threaded into each candidate
@@ -241,17 +504,14 @@ parseAnnotation = optional $ parsePunctuation PunctuationAt *> parseStringLitera
 -- ---------------------------------------------------------------------------
 
 parseAgent :: Maybe Text -> Parser (AgentDeclaration Parsed)
-parseAgent annotation = do
-  startPosition <- parseCurrentPosition
+parseAgent annotation = withSpan $ do
   parseKeyword KeywordAgent
   name <- parseNameRef
   parameters <- parseParameterList
   returnType <- optional (parsePunctuation PunctuationArrow *> parseType)
   effects <- optional (parseKeyword KeywordWith *> parseEffects)
   body <- withBreakContext BreakContextTop parseBlock
-  endPosition <- parsePreviousEndPosition
-  sourceSpan <- makeSpan startPosition endPosition
-  pure
+  pure $ \sourceSpan ->
     AgentDeclaration
       { annotation = annotation,
         name = name,
@@ -267,16 +527,13 @@ parseAgent annotation = do
 -- ---------------------------------------------------------------------------
 
 parseRequest :: Maybe Text -> Parser (RequestDeclaration Parsed)
-parseRequest annotation = do
-  startPosition <- parseCurrentPosition
+parseRequest annotation = withSpan $ do
   parseKeyword KeywordReq
   name <- parseNameRef
   parameters <- parseParameterList
   parsePunctuation PunctuationArrow
   returnType <- parseType
-  endPosition <- parsePreviousEndPosition
-  sourceSpan <- makeSpan startPosition endPosition
-  pure
+  pure $ \sourceSpan ->
     RequestDeclaration
       { annotation = annotation,
         name = name,
@@ -290,8 +547,7 @@ parseRequest annotation = do
 -- ---------------------------------------------------------------------------
 
 parseExternalAgent :: Maybe Text -> Parser (ExternalAgentDeclaration Parsed)
-parseExternalAgent annotation = do
-  startPosition <- parseCurrentPosition
+parseExternalAgent annotation = withSpan $ do
   parseKeyword KeywordExt
   parseKeyword KeywordAgent
   name <- parseNameRef
@@ -300,9 +556,7 @@ parseExternalAgent annotation = do
   returnType <- parseType
   parseKeyword KeywordWith
   effects <- parseEffects
-  endPosition <- parsePreviousEndPosition
-  sourceSpan <- makeSpan startPosition endPosition
-  pure
+  pure $ \sourceSpan ->
     ExternalAgentDeclaration
       { annotation = annotation,
         name = name,
@@ -322,18 +576,11 @@ parseExternalAgent annotation = do
 -- value namespace (the constructor function) and the type namespace (the
 -- data type). The Identifier pass populates both slots.
 parseData :: Maybe Text -> Parser (DataDeclaration Parsed)
-parseData annotation = do
-  startPosition <- parseCurrentPosition
+parseData annotation = withSpan $ do
   parseKeyword KeywordData
   name <- parseNameRef
-  parameters <-
-    between
-      (parsePunctuation PunctuationLeftParenthesis)
-      (parsePunctuation PunctuationRightParenthesis)
-      (parseDataParameter `sepEndBy` parseComma)
-  endPosition <- parsePreviousEndPosition
-  sourceSpan <- makeSpan startPosition endPosition
-  pure
+  parameters <- parenthesizedList parseDataParameter
+  pure $ \sourceSpan ->
     DataDeclaration
       { annotation = annotation,
         name = name,
@@ -342,15 +589,12 @@ parseData annotation = do
       }
 
 parseDataParameter :: Parser (DataParameter Parsed)
-parseDataParameter = do
-  startPosition <- parseCurrentPosition
+parseDataParameter = withSpan $ do
   annotation <- parseAnnotation
   name <- parseIdentifier
   parsePunctuation PunctuationColon
   parameterType <- parseType
-  endPosition <- parsePreviousEndPosition
-  sourceSpan <- makeSpan startPosition endPosition
-  pure
+  pure $ \sourceSpan ->
     DataParameter
       { annotation = annotation,
         name = name,
@@ -364,15 +608,12 @@ parseDataParameter = do
 
 -- | @type T = ...@. No @\@\"...\"@ annotation. Top-level only.
 parseTypeSynonym :: Parser (TypeSynonymDeclaration Parsed)
-parseTypeSynonym = do
-  startPosition <- parseCurrentPosition
+parseTypeSynonym = withSpan $ do
   parseKeyword KeywordType
   name <- parseNameRef
   parsePunctuation PunctuationEquals
   rhs <- parseType
-  endPosition <- parsePreviousEndPosition
-  sourceSpan <- makeSpan startPosition endPosition
-  pure
+  pure $ \sourceSpan ->
     TypeSynonymDeclaration
       { name = name,
         rhs = rhs,
@@ -384,17 +625,12 @@ parseTypeSynonym = do
 -- ---------------------------------------------------------------------------
 
 parseImport :: Parser (ImportDeclaration Parsed)
-parseImport = do
-  startPosition <- parseCurrentPosition
+parseImport = withSpan $ do
   parseKeyword KeywordImport
   importKind <-
     choice
       [ do
-          items <-
-            between
-              (parsePunctuation PunctuationLeftBrace)
-              (parsePunctuation PunctuationRightBrace)
-              (parseImportItem `sepEndBy` parseComma)
+          items <- bracedList parseImportItem
           parseKeyword KeywordFrom
           moduleName <- parseModulePath
           pure ImportNames {items = items, moduleName = moduleName},
@@ -403,13 +639,7 @@ parseImport = do
           alias <- optional (parseKeyword KeywordAs *> parseIdentifier)
           pure ImportModule {moduleName = moduleName, alias = alias}
       ]
-  endPosition <- parsePreviousEndPosition
-  sourceSpan <- makeSpan startPosition endPosition
-  pure
-    ImportDeclaration
-      { kind = importKind,
-        sourceSpan = sourceSpan
-      }
+  pure $ \sourceSpan -> ImportDeclaration {kind = importKind, sourceSpan = sourceSpan}
 
 -- | One import name, optionally tagged with a @type@ prefix to bring the
 -- name into the type namespace.
@@ -433,17 +663,14 @@ parseModulePath = do
 -- ===========================================================================
 
 parseBlock :: Parser (Block Parsed)
-parseBlock = do
-  startPosition <- parseCurrentPosition
+parseBlock = label "block" $ withSpan $ do
   parsePunctuation PunctuationLeftBrace
   skipMany parseSemicolon
-  (statements, returnExpression) <- parseBlockBody
+  (statements, returnExpression) <- parseBlockBodyWithRecovery
   parsePunctuation PunctuationRightBrace
   detectSameLineKeywordViolation
   whereBlock <- optional parseWhereBlock
-  endPosition <- parsePreviousEndPosition
-  sourceSpan <- makeSpan startPosition endPosition
-  pure
+  pure $ \sourceSpan ->
     Block
       { statements = statements,
         returnExpression = returnExpression,
@@ -473,27 +700,41 @@ detectSameLineKeywordViolation = do
     Just keyword -> fail $ "'" <> keyword <> "' must be on the same line as the preceding '}'"
     Nothing -> pure ()
 
--- | One-pass block body: parse statements in order; the last expression
--- without a trailing `;` becomes the return expression.
-parseBlockBody :: Parser ([Statement Parsed], Maybe (Expression Parsed))
-parseBlockBody = loop []
+data BlockStep
+  = BlockStepStatement (Statement Parsed)
+  | BlockStepReturn (Maybe (Expression Parsed))
+
+-- | One-pass block body with statement-level error recovery. On parse failure
+-- inside a step, up to the next sync token is skipped and a 'StatementError'
+-- sentinel is inserted in place of the bad statement.
+parseBlockBodyWithRecovery :: Parser ([Statement Parsed], Maybe (Expression Parsed))
+parseBlockBodyWithRecovery = loop []
   where
     loop reversedStatements = do
-      -- First try non-expression statements (let/agent/return/break/next).
-      maybeNonExpression <- optional parseNonExpressionStatement
-      case maybeNonExpression of
-        Just statement -> loop (statement : reversedStatements)
-        Nothing -> do
-          -- Then try an expression; if followed by `;` it's a statement,
-          -- otherwise it's the trailing return expression.
-          maybeExpression <- optional parseExpression
-          case maybeExpression of
-            Nothing -> pure (reverse reversedStatements, Nothing)
-            Just expression -> do
-              hasSemicolon <- optional (some parseSemicolon)
-              case hasSemicolon of
-                Just _ -> loop (StatementExpression expression : reversedStatements)
-                Nothing -> pure (reverse reversedStatements, Just expression)
+      step <-
+        withErrorRecoveryAt
+          ParseErrorAtStatement
+          (BlockStepStatement . StatementError)
+          skipUntilStatementSync
+          parseOneStep
+      case step of
+        BlockStepReturn maybeExpression -> pure (reverse reversedStatements, maybeExpression)
+        BlockStepStatement statement -> loop (statement : reversedStatements)
+    parseOneStep = do
+      skipMany parseSemicolon
+      choice
+        [ BlockStepReturn Nothing
+            <$ MP.lookAhead (parsePunctuation PunctuationRightBrace),
+          BlockStepReturn Nothing
+            <$ MP.lookAhead eof,
+          BlockStepStatement <$> parseNonExpressionStatement,
+          do
+            expression <- parseExpression
+            hasSemicolon <- optional (some parseSemicolon)
+            pure $ case hasSemicolon of
+              Just _ -> BlockStepStatement (StatementExpression expression)
+              Nothing -> BlockStepReturn (Just expression)
+        ]
 
 parseNonExpressionStatement :: Parser (Statement Parsed)
 parseNonExpressionStatement =
@@ -507,24 +748,16 @@ parseNonExpressionStatement =
     trailingSemicolons = void (some parseSemicolon)
 
 parseWhereBlock :: Parser (WhereBlock Parsed)
-parseWhereBlock = do
-  startPosition <- parseCurrentPosition
+parseWhereBlock = withSpan $ do
   parseKeyword KeywordWhere
-  stateVariables <-
-    option [] . try $
-      between
-        (parsePunctuation PunctuationLeftParenthesis)
-        (parsePunctuation PunctuationRightParenthesis)
-        (parseStateVariable `sepEndBy` parseComma)
+  stateVariables <- option [] . try $ parenthesizedList parseStateVariable
   parsePunctuation PunctuationLeftBrace
   skipMany parseSemicolon
   handlers <- many (parseRequestHandler <* skipMany parseSemicolon)
   parsePunctuation PunctuationRightBrace
   detectSameLineKeywordViolation
   thenClause <- optional parseThenClause
-  endPosition <- parsePreviousEndPosition
-  sourceSpan <- makeSpan startPosition endPosition
-  pure
+  pure $ \sourceSpan ->
     WhereBlock
       { stateVariables = stateVariables,
         handlers = handlers,
@@ -533,16 +766,13 @@ parseWhereBlock = do
       }
 
 parseStateVariable :: Parser (StateVariableBinding Parsed)
-parseStateVariable = do
-  startPosition <- parseCurrentPosition
+parseStateVariable = withSpan $ do
   parseKeyword KeywordVar
   name <- parseNameRef
   typeAnnotation <- optional (parsePunctuation PunctuationColon *> parseType)
   parsePunctuation PunctuationEquals
   expression <- parseExpression
-  endPosition <- parsePreviousEndPosition
-  sourceSpan <- makeSpan startPosition endPosition
-  pure
+  pure $ \sourceSpan ->
     StateVariableBinding
       { name = name,
         typeAnnotation = typeAnnotation,
@@ -566,46 +796,41 @@ parseThenClause = do
   body <- parseBlock
   pure (parsedPattern, body)
 
+-- | req handler は @with@ 節を持たない。handler 内で発火する effect は handler
+-- ではなく囲む agent に bind されるため、handler 自身に effect 注釈を付けるのは
+-- 意味論的に invalid。Lexer / parser とも @with@ を受け付けない。
 parseRequestHandler :: Parser (RequestHandler Parsed)
-parseRequestHandler = do
-  startPosition <- parseCurrentPosition
+parseRequestHandler = withSpan $ do
   parseKeyword KeywordReq
   -- Either @req name(...)@ or @req module.name(...)@: if a @.@ follows the
   -- first identifier, treat it as a qualified handler; otherwise bare.
   first <- parseNameRef
   (moduleQualifier, name) <-
     optional (parsePunctuation PunctuationDot *> parseNameRef) >>= \case
-      Just second -> pure (Just (coerceNameRefSymbol first), second)
+      Just second -> pure (Just (moduleRefOfVariable first), second)
       Nothing -> pure (Nothing, first)
   parameters <- parseParameterList
   returnType <- optional (parsePunctuation PunctuationArrow *> parseType)
-  effects <- optional (parseKeyword KeywordWith *> parseEffects)
   body <- withBreakContext BreakContextHandler parseBlock
-  endPosition <- parsePreviousEndPosition
-  sourceSpan <- makeSpan startPosition endPosition
-  pure
+  pure $ \sourceSpan ->
     RequestHandler
       { moduleQualifier = moduleQualifier,
         name = name,
         parameters = parameters,
         returnType = returnType,
-        withEffects = effects,
         body = body,
         sourceSpan = sourceSpan
       }
 
 parseAgentStatement :: Parser (AgentStatement Parsed)
-parseAgentStatement = do
-  startPosition <- parseCurrentPosition
+parseAgentStatement = withSpan $ do
   parseKeyword KeywordAgent
   name <- parseNameRef
   parameters <- parseParameterList
   returnType <- optional (parsePunctuation PunctuationArrow *> parseType)
   effects <- optional (parseKeyword KeywordWith *> parseEffects)
   body <- withBreakContext BreakContextTop parseBlock
-  endPosition <- parsePreviousEndPosition
-  sourceSpan <- makeSpan startPosition endPosition
-  pure
+  pure $ \sourceSpan ->
     AgentStatement
       { name = name,
         parameters = parameters,
@@ -640,28 +865,18 @@ parseBreakOrNextStatement = do
         ]
 
 parseForBreak :: Parser (ForBreakStatement Parsed)
-parseForBreak = do
-  startPosition <- parseCurrentPosition
+parseForBreak = withSpan $ do
   parseKeyword KeywordBreak
   expression <- parseExpression
-  endPosition <- parsePreviousEndPosition
-  sourceSpan <- makeSpan startPosition endPosition
-  pure
-    ForBreakStatement
-      { value = expression,
-        sourceSpan = sourceSpan
-      }
+  pure $ \sourceSpan -> ForBreakStatement {value = expression, sourceSpan = sourceSpan}
 
 parseLet :: Parser (LetStatement Parsed)
-parseLet = do
-  startPosition <- parseCurrentPosition
+parseLet = withSpan $ do
   parseKeyword KeywordLet
   parsedPattern <- parsePattern
   parsePunctuation PunctuationEquals
   expression <- parseExpression
-  endPosition <- parsePreviousEndPosition
-  sourceSpan <- makeSpan startPosition endPosition
-  pure
+  pure $ \sourceSpan ->
     LetStatement
       { pattern = parsedPattern,
         value = expression,
@@ -669,27 +884,17 @@ parseLet = do
       }
 
 parseReturn :: Parser (ReturnStatement Parsed)
-parseReturn = do
-  startPosition <- parseCurrentPosition
+parseReturn = withSpan $ do
   parseKeyword KeywordReturn
   expression <- parseExpression
-  endPosition <- parsePreviousEndPosition
-  sourceSpan <- makeSpan startPosition endPosition
-  pure
-    ReturnStatement
-      { value = expression,
-        sourceSpan = sourceSpan
-      }
+  pure $ \sourceSpan -> ReturnStatement {value = expression, sourceSpan = sourceSpan}
 
 parseNext :: Parser (NextStatement Parsed)
-parseNext = do
-  startPosition <- parseCurrentPosition
+parseNext = withSpan $ do
   parseKeyword KeywordNext
   expression <- parseExpression
   modifiers <- option [] (parseKeyword KeywordWith *> parseModifiers)
-  endPosition <- parsePreviousEndPosition
-  sourceSpan <- makeSpan startPosition endPosition
-  pure
+  pure $ \sourceSpan ->
     NextStatement
       { value = expression,
         modifiers = modifiers,
@@ -697,47 +902,26 @@ parseNext = do
       }
 
 parseForNext :: Parser (ForNextStatement Parsed)
-parseForNext = do
-  startPosition <- parseCurrentPosition
+parseForNext = withSpan $ do
   parseKeyword KeywordNext
   modifiers <- option [] (parseKeyword KeywordWith *> parseModifiers)
-  endPosition <- parsePreviousEndPosition
-  sourceSpan <- makeSpan startPosition endPosition
-  pure
-    ForNextStatement
-      { modifiers = modifiers,
-        sourceSpan = sourceSpan
-      }
+  pure $ \sourceSpan -> ForNextStatement {modifiers = modifiers, sourceSpan = sourceSpan}
 
 parseBreak :: Parser (BreakStatement Parsed)
-parseBreak = do
-  startPosition <- parseCurrentPosition
+parseBreak = withSpan $ do
   parseKeyword KeywordBreak
   expression <- parseExpression
-  endPosition <- parsePreviousEndPosition
-  sourceSpan <- makeSpan startPosition endPosition
-  pure
-    BreakStatement
-      { value = expression,
-        sourceSpan = sourceSpan
-      }
+  pure $ \sourceSpan -> BreakStatement {value = expression, sourceSpan = sourceSpan}
 
 parseModifiers :: Parser [Modifier Parsed]
-parseModifiers =
-  between
-    (parsePunctuation PunctuationLeftBrace)
-    (parsePunctuation PunctuationRightBrace)
-    (parseModifier `sepEndBy` parseComma)
+parseModifiers = bracedList parseModifier
 
 parseModifier :: Parser (Modifier Parsed)
-parseModifier = do
-  startPosition <- parseCurrentPosition
+parseModifier = withSpan $ do
   name <- parseNameRef
   parsePunctuation PunctuationEquals
   expression <- parseExpression
-  endPosition <- parsePreviousEndPosition
-  sourceSpan <- makeSpan startPosition endPosition
-  pure
+  pure $ \sourceSpan ->
     Modifier
       { name = name,
         value = expression,
@@ -749,7 +933,7 @@ parseModifier = do
 -- ===========================================================================
 
 parseExpression :: Parser (Expression Parsed)
-parseExpression = makeExprParser parsePostfixExpression expressionOperatorTable
+parseExpression = label "expression" $ makeExprParser parsePostfixExpression expressionOperatorTable
 
 expressionOperatorTable :: [[Expr.Operator Parser (Expression Parsed)]]
 expressionOperatorTable =
@@ -776,39 +960,39 @@ expressionOperatorTable =
   ]
 
 makeBinaryOperatorExpression :: FilePath -> BinaryOperator -> Expression Parsed -> Expression Parsed -> Expression Parsed
-makeBinaryOperatorExpression fp binaryOperator left right =
+makeBinaryOperatorExpression currentFilePath binaryOperator left right =
   ExpressionBinaryOperator
     BinaryOperatorExpression
       { operator = binaryOperator,
         left = left,
         right = right,
-        sourceSpan = SrcSpan fp (sourceSpanOf left).start (sourceSpanOf right).end,
+        sourceSpan = SrcSpan currentFilePath (sourceSpanOf left).start (sourceSpanOf right).end,
         metadata = Parsed
       }
 
 leftAssociativeBinaryOperator :: Parser () -> BinaryOperator -> Expr.Operator Parser (Expression Parsed)
 leftAssociativeBinaryOperator parserAction binaryOperator = Expr.InfixL $ do
   parserAction
-  fp <- askFilePath
-  pure (makeBinaryOperatorExpression fp binaryOperator)
+  currentFilePath <- askFilePath
+  pure (makeBinaryOperatorExpression currentFilePath binaryOperator)
 
 nonAssociativeBinaryOperator :: Parser () -> BinaryOperator -> Expr.Operator Parser (Expression Parsed)
 nonAssociativeBinaryOperator parserAction binaryOperator = Expr.InfixN $ do
   parserAction
-  fp <- askFilePath
-  pure (makeBinaryOperatorExpression fp binaryOperator)
+  currentFilePath <- askFilePath
+  pure (makeBinaryOperatorExpression currentFilePath binaryOperator)
 
 prefixOperator :: Parser () -> UnaryOperator -> Expr.Operator Parser (Expression Parsed)
 prefixOperator parserAction unaryOperator = Expr.Prefix $ do
   startPosition <- parseCurrentPosition
   parserAction
-  fp <- askFilePath
+  currentFilePath <- askFilePath
   pure $ \operand ->
     ExpressionUnaryOperator
       UnaryOperatorExpression
         { operator = unaryOperator,
           operand = operand,
-          sourceSpan = SrcSpan fp startPosition (sourceSpanOf operand).end,
+          sourceSpan = SrcSpan currentFilePath startPosition (sourceSpanOf operand).end,
           metadata = Parsed
         }
 
@@ -816,17 +1000,19 @@ prefixOperator parserAction unaryOperator = Expr.Prefix $ do
 -- Postfix expressions
 -- ---------------------------------------------------------------------------
 
+-- | A single postfix operator (call, field access, or index) with its own
+-- source span covering just the operator syntax. Final node spans are built by
+-- 'applyPostfixOperation' as @primary.start ↦ postfix.end@.
 data Postfix where
-  PostfixCall :: [CallArgument Parsed] -> Position -> Postfix
-  PostfixField :: NameRef Parsed 'LabelRef -> Position -> Postfix
-  PostfixIndex :: Expression Parsed -> Position -> Postfix
+  PostfixCall :: [CallArgument Parsed] -> SourceSpan -> Postfix
+  PostfixField :: NameRef Parsed 'LabelRef -> SourceSpan -> Postfix
+  PostfixIndex :: Expression Parsed -> SourceSpan -> Postfix
 
 parsePostfixExpression :: Parser (Expression Parsed)
 parsePostfixExpression = do
-  fp <- askFilePath
   primary <- parsePrimaryExpression
   postfixOperations <- many parsePostfix
-  pure (foldl' (applyPostfixOperation fp) primary postfixOperations)
+  pure (foldl' applyPostfixOperation primary postfixOperations)
 
 parsePostfix :: Parser Postfix
 parsePostfix =
@@ -837,78 +1023,76 @@ parsePostfix =
     ]
 
 parseCallPostfix :: Parser Postfix
-parseCallPostfix = do
-  arguments <-
-    between
-      (parsePunctuation PunctuationLeftParenthesis)
-      (parsePunctuation PunctuationRightParenthesis)
-      (parseCallArgument `sepEndBy` parseComma)
-  PostfixCall arguments <$> parsePreviousEndPosition
+parseCallPostfix = withSpan $ do
+  arguments <- parenthesizedList parseCallArgument
+  pure (PostfixCall arguments)
 
 parseFieldPostfix :: Parser Postfix
-parseFieldPostfix = do
+parseFieldPostfix = withSpan $ do
   parsePunctuation PunctuationDot
   name <- parseNameRef
-  PostfixField name <$> parsePreviousEndPosition
+  pure (PostfixField name)
 
 parseIndexPostfix :: Parser Postfix
-parseIndexPostfix = do
+parseIndexPostfix = withSpan $ do
   parsePunctuation PunctuationLeftBracket
   indexExpression <- parseExpression
   parsePunctuation PunctuationRightBracket
-  PostfixIndex indexExpression <$> parsePreviousEndPosition
+  pure (PostfixIndex indexExpression)
 
-applyPostfixOperation :: FilePath -> Expression Parsed -> Postfix -> Expression Parsed
-applyPostfixOperation fp expression = \case
-  PostfixCall arguments endPosition ->
+applyPostfixOperation :: Expression Parsed -> Postfix -> Expression Parsed
+applyPostfixOperation expression = \case
+  PostfixCall arguments postfixSpan ->
     ExpressionCall
       CallExpression
         { callee = expression,
           arguments = arguments,
-          sourceSpan = SrcSpan fp (sourceSpanOf expression).start endPosition,
+          sourceSpan = mergePostfixSpan expression postfixSpan,
           metadata = Parsed
         }
-  PostfixField fieldName endPosition ->
+  PostfixField fieldName postfixSpan ->
     ExpressionFieldAccess
       FieldAccessExpression
         { object = expression,
           fieldName = fieldName,
-          sourceSpan = SrcSpan fp (sourceSpanOf expression).start endPosition,
+          sourceSpan = mergePostfixSpan expression postfixSpan,
           metadata = Parsed
         }
-  PostfixIndex indexExpression endPosition ->
+  PostfixIndex indexExpression postfixSpan ->
     ExpressionIndexAccess
       IndexAccessExpression
         { array = expression,
           index = indexExpression,
-          sourceSpan = SrcSpan fp (sourceSpanOf expression).start endPosition,
+          sourceSpan = mergePostfixSpan expression postfixSpan,
           metadata = Parsed
         }
+  where
+    mergePostfixSpan expr postfix =
+      let exprSpan = sourceSpanOf expr
+       in SrcSpan
+            { filePath = exprSpan.filePath,
+              start = exprSpan.start,
+              end = postfix.end
+            }
 
 parseCallArgument :: Parser (CallArgument Parsed)
 parseCallArgument = labeledArgument <|> sugarArgument
   where
-    labeledArgument = try $ do
-      startPosition <- parseCurrentPosition
+    labeledArgument = withSpan . try $ do
       argumentLabel <- parseNameRef
       parsePunctuation PunctuationEquals
       expression <- parseExpression
-      endPosition <- parsePreviousEndPosition
-      sourceSpan <- makeSpan startPosition endPosition
-      pure
+      pure $ \sourceSpan ->
         CallArgument
           { label = argumentLabel,
             value = expression,
             sourceSpan = sourceSpan
           }
-    sugarArgument = do
-      startPosition <- parseCurrentPosition
+    sugarArgument = withSpan $ do
       name <- parseNameRef
-      endPosition <- parsePreviousEndPosition
-      sourceSpan <- makeSpan startPosition endPosition
-      pure
+      pure $ \sourceSpan ->
         CallArgument
-          { label = coerceNameRefSymbol name,
+          { label = labelRefOfVariable name,
             value =
               ExpressionVariable
                 VariableExpression
@@ -925,25 +1109,23 @@ parseCallArgument = labeledArgument <|> sugarArgument
 
 parsePrimaryExpression :: Parser (Expression Parsed)
 parsePrimaryExpression =
-  choice
-    [ parseIfExpression,
-      parseMatchExpression,
-      parseForExpression,
-      parseTemplateLiteral,
-      parseLiteralExpression,
-      parseArrayExpression,
-      parseTupleOrGroupedExpression,
-      parseBlockExpression,
-      parseVariableExpression
-    ]
+  label "expression" $
+    choice
+      [ parseIfExpression,
+        parseMatchExpression,
+        parseForExpression,
+        parseTemplateLiteral,
+        parseLiteralExpression,
+        parseArrayExpression,
+        parseTupleOrGroupedExpression,
+        parseBlockExpression,
+        parseVariableExpression
+      ]
 
 parseLiteralExpression :: Parser (Expression Parsed)
-parseLiteralExpression = do
-  startPosition <- parseCurrentPosition
+parseLiteralExpression = withSpan $ do
   literal <- parseLiteralValue
-  endPosition <- parsePreviousEndPosition
-  sourceSpan <- makeSpan startPosition endPosition
-  pure $
+  pure $ \sourceSpan ->
     ExpressionLiteral
       LiteralExpression
         { value = literal,
@@ -963,12 +1145,9 @@ parseLiteralValue =
     ]
 
 parseVariableExpression :: Parser (Expression Parsed)
-parseVariableExpression = do
-  startPosition <- parseCurrentPosition
+parseVariableExpression = withSpan $ do
   name <- parseNameRef
-  endPosition <- parsePreviousEndPosition
-  sourceSpan <- makeSpan startPosition endPosition
-  pure $
+  pure $ \sourceSpan ->
     ExpressionVariable
       VariableExpression
         { name = name,
@@ -977,16 +1156,9 @@ parseVariableExpression = do
         }
 
 parseArrayExpression :: Parser (Expression Parsed)
-parseArrayExpression = do
-  startPosition <- parseCurrentPosition
-  elements <-
-    between
-      (parsePunctuation PunctuationLeftBracket)
-      (parsePunctuation PunctuationRightBracket)
-      (parseExpression `sepEndBy` parseComma)
-  endPosition <- parsePreviousEndPosition
-  sourceSpan <- makeSpan startPosition endPosition
-  pure $
+parseArrayExpression = withSpan $ do
+  elements <- bracketedList parseExpression
+  pure $ \sourceSpan ->
     ExpressionArray
       ArrayExpression
         { elements = elements,
@@ -994,6 +1166,8 @@ parseArrayExpression = do
           metadata = Parsed
         }
 
+-- | @(e)@ collapses to @e@ (grouped expression). @(e1, e2, ...)@ is a tuple.
+-- A grouped expression keeps its inner span, so we cannot use 'withSpan' here.
 parseTupleOrGroupedExpression :: Parser (Expression Parsed)
 parseTupleOrGroupedExpression = do
   startPosition <- parseCurrentPosition
@@ -1014,12 +1188,9 @@ parseTupleOrGroupedExpression = do
             }
 
 parseBlockExpression :: Parser (Expression Parsed)
-parseBlockExpression = do
-  startPosition <- parseCurrentPosition
+parseBlockExpression = withSpan $ do
   block <- parseBlock
-  endPosition <- parsePreviousEndPosition
-  sourceSpan <- makeSpan startPosition endPosition
-  pure $
+  pure $ \sourceSpan ->
     ExpressionBlock
       BlockExpression
         { block = block,
@@ -1028,8 +1199,7 @@ parseBlockExpression = do
         }
 
 parseIfExpression :: Parser (Expression Parsed)
-parseIfExpression = do
-  startPosition <- parseCurrentPosition
+parseIfExpression = withSpan $ do
   parseKeyword KeywordIf
   condition <-
     between
@@ -1038,9 +1208,7 @@ parseIfExpression = do
       parseExpression
   thenBlock <- parseBlock
   elseBlock <- optional (parseKeyword KeywordElse *> parseBlock)
-  endPosition <- parsePreviousEndPosition
-  sourceSpan <- makeSpan startPosition endPosition
-  pure $
+  pure $ \sourceSpan ->
     ExpressionIf
       IfExpression
         { condition = condition,
@@ -1051,8 +1219,7 @@ parseIfExpression = do
         }
 
 parseMatchExpression :: Parser (Expression Parsed)
-parseMatchExpression = do
-  startPosition <- parseCurrentPosition
+parseMatchExpression = withSpan $ do
   parseKeyword KeywordMatch
   subject <-
     between
@@ -1064,9 +1231,7 @@ parseMatchExpression = do
       (parsePunctuation PunctuationLeftBrace)
       (parsePunctuation PunctuationRightBrace)
       (many parseCaseArm)
-  endPosition <- parsePreviousEndPosition
-  sourceSpan <- makeSpan startPosition endPosition
-  pure $
+  pure $ \sourceSpan ->
     ExpressionMatch
       MatchExpression
         { subject = subject,
@@ -1076,15 +1241,12 @@ parseMatchExpression = do
         }
 
 parseCaseArm :: Parser (CaseArm Parsed)
-parseCaseArm = do
-  startPosition <- parseCurrentPosition
+parseCaseArm = withSpan $ do
   parseKeyword KeywordCase
   parsedPattern <- parsePattern
   parsePunctuation PunctuationFatArrow
   body <- parseBlock
-  endPosition <- parsePreviousEndPosition
-  sourceSpan <- makeSpan startPosition endPosition
-  pure
+  pure $ \sourceSpan ->
     CaseArm
       { pattern = parsedPattern,
         body = body,
@@ -1092,8 +1254,7 @@ parseCaseArm = do
       }
 
 parseForExpression :: Parser (Expression Parsed)
-parseForExpression = do
-  startPosition <- parseCurrentPosition
+parseForExpression = withSpan $ do
   parseKeyword KeywordFor
   (inBindings, varBindings) <-
     between
@@ -1102,9 +1263,7 @@ parseForExpression = do
       parseForBindings
   body <- withBreakContext BreakContextFor parseBlock
   thenBlock <- optional (parseKeyword KeywordThen *> parseBlock)
-  endPosition <- parsePreviousEndPosition
-  sourceSpan <- makeSpan startPosition endPosition
-  pure $
+  pure $ \sourceSpan ->
     ExpressionFor
       ForExpression
         { inBindings = inBindings,
@@ -1131,17 +1290,14 @@ parseForBindings = do
     Nothing -> pure (inBindings, varBindings)
 
 parseForInBinding :: Parser (ForInBinding Parsed)
-parseForInBinding = do
-  startPosition <- parseCurrentPosition
+parseForInBinding = withSpan $ do
   -- Decide-and-commit: try the "pattern in" prefix, then commit to the RHS.
   parsedPattern <- try $ do
-    pat <- parsePattern
+    parsedPattern <- parsePattern
     parseKeyword KeywordIn
-    pure pat
+    pure parsedPattern
   expression <- parseExpression
-  endPosition <- parsePreviousEndPosition
-  sourceSpan <- makeSpan startPosition endPosition
-  pure
+  pure $ \sourceSpan ->
     ForInBinding
       { pattern = parsedPattern,
         source = expression,
@@ -1149,16 +1305,13 @@ parseForInBinding = do
       }
 
 parseForVarBinding :: Parser (ForVarBinding Parsed)
-parseForVarBinding = do
-  startPosition <- parseCurrentPosition
+parseForVarBinding = withSpan $ do
   parseKeyword KeywordVar
   name <- parseNameRef
   typeAnnotation <- optional (parsePunctuation PunctuationColon *> parseType)
   parsePunctuation PunctuationEquals
   expression <- parseExpression
-  endPosition <- parsePreviousEndPosition
-  sourceSpan <- makeSpan startPosition endPosition
-  pure
+  pure $ \sourceSpan ->
     ForVarBinding
       { name = name,
         typeAnnotation = typeAnnotation,
@@ -1171,14 +1324,11 @@ parseForVarBinding = do
 -- ---------------------------------------------------------------------------
 
 parseTemplateLiteral :: Parser (Expression Parsed)
-parseTemplateLiteral = do
-  startPosition <- parseCurrentPosition
+parseTemplateLiteral = withSpan $ do
   parseExactToken TokenTemplateOpen
   parts <- many parseTemplateElement
   parseExactToken TokenTemplateClose
-  endPosition <- parsePreviousEndPosition
-  sourceSpan <- makeSpan startPosition endPosition
-  pure $
+  pure $ \sourceSpan ->
     ExpressionTemplate
       TemplateExpression
         { elements = parts,
@@ -1189,25 +1339,19 @@ parseTemplateLiteral = do
 parseTemplateElement :: Parser (TemplateElement Parsed)
 parseTemplateElement =
   choice
-    [ do
-        startPosition <- parseCurrentPosition
+    [ withSpan $ do
         text <- parseTemplateStringToken
-        endPosition <- parsePreviousEndPosition
-        sourceSpan <- makeSpan startPosition endPosition
-        pure $
+        pure $ \sourceSpan ->
           TemplateElementString
             TemplateStringElement
               { value = text,
                 sourceSpan = sourceSpan
               },
-      do
-        startPosition <- parseCurrentPosition
+      withSpan $ do
         parseExactToken TokenTemplateExpressionOpen
         expression <- parseExpression
         parseExactToken TokenTemplateExpressionClose
-        endPosition <- parsePreviousEndPosition
-        sourceSpan <- makeSpan startPosition endPosition
-        pure $
+        pure $ \sourceSpan ->
           TemplateElementExpression
             TemplateExpressionElement
               { value = expression,
@@ -1228,51 +1372,48 @@ parseTemplateElement =
 -- identifiers are always variable patterns.
 parsePattern :: Parser (Pattern Parsed)
 parsePattern =
-  choice
-    [ try parseQualifiedConstructorPattern,
-      parseVariablePattern,
-      parseWildcardPattern,
-      parseTupleOrGroupedPattern,
-      parseLiteralPattern
-    ]
+  label "pattern" $
+    choice
+      [ try parseQualifiedConstructorPattern,
+        parseVariablePattern,
+        parseWildcardPattern,
+        parseTupleOrGroupedPattern,
+        parseLiteralPattern
+      ]
 
 -- | @ctor(...)@ or @module.ctor(...)@. Use @try@ to peek the prefix
 -- (@Ident [.Ident]?@) plus the opening paren before committing; that way a
 -- bare @ident@ without parens falls through to 'parseVariablePattern'.
 parseQualifiedConstructorPattern :: Parser (Pattern Parsed)
-parseQualifiedConstructorPattern = do
-  startPosition <- parseCurrentPosition
-  (mModule, ctorName) <- try $ do
-    first <- parseNameRef
+parseQualifiedConstructorPattern = withSpan $ do
+  (maybeModule, constructorName) <- try $ do
+    -- Parse the leading identifier as a variable; it may later be retagged as
+    -- a module qualifier if a @.@ follows.
+    first <- parseNameRef :: Parser (NameRef Parsed 'VariableRef)
     second <- optional (parsePunctuation PunctuationDot *> parseNameRef)
     -- Only commit to a constructor pattern once we see the opening paren.
     void $ MP.lookAhead (parsePunctuation PunctuationLeftParenthesis)
     pure $ case second of
-      Nothing -> (Nothing, coerceNameRefSymbol first)
-      Just s -> (Just (coerceNameRefSymbol first), coerceNameRefSymbol s)
+      Nothing -> (Nothing, first)
+      Just secondNameRef -> (Just (moduleRefOfVariable first), secondNameRef)
   parsePunctuation PunctuationLeftParenthesis
   fields <- parsePatternField `sepEndBy` parseComma
   parsePunctuation PunctuationRightParenthesis
-  endPosition <- parsePreviousEndPosition
-  sourceSpan <- makeSpan startPosition endPosition
-  pure $
+  pure $ \sourceSpan ->
     PatternQualifiedConstructor
       QualifiedConstructorPattern
-        { moduleQualifier = mModule,
-          constructorName = ctorName,
+        { moduleQualifier = maybeModule,
+          constructorName = constructorName,
           parameters = fields,
           sourceSpan = sourceSpan,
           metadata = Parsed
         }
 
 parseWildcardPattern :: Parser (Pattern Parsed)
-parseWildcardPattern = do
-  startPosition <- parseCurrentPosition
+parseWildcardPattern = withSpan $ do
   parseUnderscore
   typeAnnotation <- optional (parsePunctuation PunctuationColon *> parseType)
-  endPosition <- parsePreviousEndPosition
-  sourceSpan <- makeSpan startPosition endPosition
-  pure $
+  pure $ \sourceSpan ->
     PatternWildcard
       WildcardPattern
         { typeAnnotation = typeAnnotation,
@@ -1281,13 +1422,10 @@ parseWildcardPattern = do
         }
 
 parseVariablePattern :: Parser (Pattern Parsed)
-parseVariablePattern = do
-  startPosition <- parseCurrentPosition
+parseVariablePattern = withSpan $ do
   name <- parseNameRef
   typeAnnotation <- optional (parsePunctuation PunctuationColon *> parseType)
-  endPosition <- parsePreviousEndPosition
-  sourceSpan <- makeSpan startPosition endPosition
-  pure $
+  pure $ \sourceSpan ->
     PatternVariable
       VariablePattern
         { name = name,
@@ -1304,14 +1442,11 @@ parsePatternField = labeled <|> sugar
       parsePunctuation PunctuationEquals
       parsedPattern <- parsePattern
       pure (fieldLabel, parsedPattern)
-    sugar = do
-      startPosition <- parseCurrentPosition
+    sugar = withSpan $ do
       name <- parseNameRef
       typeAnnotation <- optional (parsePunctuation PunctuationColon *> parseType)
-      endPosition <- parsePreviousEndPosition
-      sourceSpan <- makeSpan startPosition endPosition
-      pure
-        ( coerceNameRefSymbol name,
+      pure $ \sourceSpan ->
+        ( labelRefOfVariable name,
           PatternVariable
             VariablePattern
               { name = name,
@@ -1322,6 +1457,7 @@ parsePatternField = labeled <|> sugar
         )
 
 -- | @(p)@ collapses to @p@ (grouped pattern). @(p, q, ...)@ is a tuple.
+-- A grouped pattern keeps its inner span, so we cannot use 'withSpan' here.
 parseTupleOrGroupedPattern :: Parser (Pattern Parsed)
 parseTupleOrGroupedPattern = do
   startPosition <- parseCurrentPosition
@@ -1342,12 +1478,9 @@ parseTupleOrGroupedPattern = do
             }
 
 parseLiteralPattern :: Parser (Pattern Parsed)
-parseLiteralPattern = do
-  startPosition <- parseCurrentPosition
+parseLiteralPattern = withSpan $ do
   literal <- parseLiteralValue
-  endPosition <- parsePreviousEndPosition
-  sourceSpan <- makeSpan startPosition endPosition
-  pure $
+  pure $ \sourceSpan ->
     PatternLiteral
       LiteralPattern
         { value = literal,
@@ -1362,7 +1495,7 @@ parseLiteralPattern = do
 -- | Top-level entry point for a type expression. Unions live at the outermost
 -- layer so they have the lowest precedence.
 parseType :: Parser (SyntacticType Parsed)
-parseType = parseUnionType
+parseType = label "type" parseUnionType
 
 -- | Read @T1 | T2 | ...@ as a sequence of atomic types separated by @|@.
 -- If there is only one branch, return the atomic type as-is; otherwise wrap
@@ -1370,6 +1503,9 @@ parseType = parseUnionType
 -- (because @parseAtomicType@ does not consume @|@ — the input fails
 -- naturally). A single trailing pipe (@T |@) is allowed for convenience in
 -- multi-line declarations.
+--
+-- A single-branch union returns the inner atomic type unchanged (preserving
+-- its own span), so 'withSpan' is not used here.
 parseUnionType :: Parser (SyntacticType Parsed)
 parseUnionType = do
   startPosition <- parseCurrentPosition
@@ -1380,10 +1516,11 @@ parseUnionType = do
   -- something it shouldn't.
   _ <- optional (try (parsePunctuation PunctuationPipe))
   endPosition <- parsePreviousEndPosition
-  sourceSpan <- makeSpan startPosition endPosition
   case rest of
     [] -> pure first
-    _ -> pure (TypeUnion TypeUnionNode {branches = first : rest, sourceSpan = sourceSpan})
+    _ -> do
+      sourceSpan <- makeSpan startPosition endPosition
+      pure (TypeUnion TypeUnionNode {branches = first : rest, sourceSpan = sourceSpan})
 
 -- | The branches of a union (i.e. everything that was previously @parseType@).
 parseAtomicType :: Parser (SyntacticType Parsed)
@@ -1394,6 +1531,8 @@ parseAtomicType =
       parsePrimitiveType PrimitiveTypeKindNumber KeywordNumber,
       parsePrimitiveType PrimitiveTypeKindString KeywordString,
       parsePrimitiveType PrimitiveTypeKindBoolean KeywordBoolean,
+      parseNeverType,
+      parseUnknownType,
       parseLiteralType,
       try parseArrayType,
       try parseFunctionType,
@@ -1401,12 +1540,23 @@ parseAtomicType =
       parseNamedOrQualifiedType
     ]
 
+-- | @never@ — lattice の bottom 型。
+parseNeverType :: Parser (SyntacticType Parsed)
+parseNeverType = withSpan $ do
+  parseKeyword KeywordNever
+  pure $ \sourceSpan -> TypeNever NeverTypeNode {sourceSpan = sourceSpan}
+
+-- | @unknown@ — lattice の top 型。
+parseUnknownType :: Parser (SyntacticType Parsed)
+parseUnknownType = withSpan $ do
+  parseKeyword KeywordUnknown
+  pure $ \sourceSpan -> TypeUnknown UnknownTypeNode {sourceSpan = sourceSpan}
+
 -- | Literal type: @"a"@, @42@, @true@, or @false@.
 -- @null@ is intentionally omitted: 'parsePrimitiveType' already handles the
 -- @null@ keyword as 'PrimitiveTypeKindNull', and the semantics are equivalent.
 parseLiteralType :: Parser (SyntacticType Parsed)
-parseLiteralType = do
-  startPosition <- parseCurrentPosition
+parseLiteralType = withSpan $ do
   value <-
     choice
       [ LiteralValueString <$> parseStringLiteral,
@@ -1414,62 +1564,48 @@ parseLiteralType = do
         LiteralValueBoolean True <$ parseKeyword KeywordTrue,
         LiteralValueBoolean False <$ parseKeyword KeywordFalse
       ]
-  endPosition <- parsePreviousEndPosition
-  sourceSpan <- makeSpan startPosition endPosition
-  pure (TypeLiteral TypeLiteralNode {value = value, sourceSpan = sourceSpan})
+  pure $ \sourceSpan -> TypeLiteral TypeLiteralNode {value = value, sourceSpan = sourceSpan}
 
 parsePrimitiveType :: PrimitiveTypeKind -> Keyword -> Parser (SyntacticType Parsed)
-parsePrimitiveType primitiveKind keyword = do
-  startPosition <- parseCurrentPosition
+parsePrimitiveType primitiveKind keyword = withSpan $ do
   parseKeyword keyword
-  endPosition <- parsePreviousEndPosition
-  sourceSpan <- makeSpan startPosition endPosition
-  pure $
+  pure $ \sourceSpan ->
     TypePrimitive
       PrimitiveTypeNode
         { kind = primitiveKind,
           sourceSpan = sourceSpan
         }
 
--- | @Name@ or @module.TypeName@.
+-- | @Name@ or @module.TypeName@. The leading identifier is tentatively
+-- parsed as a 'VariableRef' (the polymorphic 'parseNameRef' can produce any
+-- symbol kind, but fixing it here gives the case branches a single source
+-- type to retag from).
 parseNamedOrQualifiedType :: Parser (SyntacticType Parsed)
-parseNamedOrQualifiedType = do
-  startPosition <- parseCurrentPosition
-  first <- parseNameRef -- tentative: either a type-ref (bare) or a module-ref (qualified)
+parseNamedOrQualifiedType = withSpan $ do
+  first <- parseNameRef :: Parser (NameRef Parsed 'VariableRef)
   maybeSecond <- optional (parsePunctuation PunctuationDot *> parseNameRef)
-  endPosition <- parsePreviousEndPosition
-  sourceSpan <- makeSpan startPosition endPosition
-  case maybeSecond of
+  pure $ \sourceSpan -> case maybeSecond of
     Nothing ->
-      pure $
-        TypeName
-          TypeNameNode
-            { name = coerceNameRefSymbol first,
-              sourceSpan = sourceSpan
-            }
+      TypeName
+        TypeNameNode
+          { name = typeRefOfVariable first,
+            sourceSpan = sourceSpan
+          }
     Just second ->
-      pure $
-        TypeQualified
-          QualifiedTypeNode
-            { qualifier = first,
-              target = coerceNameRefSymbol second,
-              sourceSpan = sourceSpan
-            }
+      TypeQualified
+        QualifiedTypeNode
+          { qualifier = moduleRefOfVariable first,
+            target = second,
+            sourceSpan = sourceSpan
+          }
 
 parseFunctionType :: Parser (SyntacticType Parsed)
-parseFunctionType = do
-  startPosition <- parseCurrentPosition
-  parameterTypes <-
-    between
-      (parsePunctuation PunctuationLeftParenthesis)
-      (parsePunctuation PunctuationRightParenthesis)
-      (parseFunctionTypeParameter `sepEndBy` parseComma)
+parseFunctionType = withSpan $ do
+  parameterTypes <- parenthesizedList parseFunctionTypeParameter
   parsePunctuation PunctuationArrow
   returnType <- parseType
   effects <- option [] (parseKeyword KeywordWith *> parseEffects)
-  endPosition <- parsePreviousEndPosition
-  sourceSpan <- makeSpan startPosition endPosition
-  pure $
+  pure $ \sourceSpan ->
     TypeFunction
       FunctionTypeNode
         { parameterTypes = parameterTypes,
@@ -1488,17 +1624,14 @@ parseFunctionTypeParameter = do
 -- | @array[T]@. The token @array@ is a regular identifier, not a keyword,
 -- so we match it by string and rely on the surrounding @[...]@ to confirm.
 parseArrayType :: Parser (SyntacticType Parsed)
-parseArrayType = do
-  startPosition <- parseCurrentPosition
+parseArrayType = withSpan $ do
   void $ parseTokenWith $ \case
     TokenIdentifier "array" -> Just ()
     _ -> Nothing
   parsePunctuation PunctuationLeftBracket
   elementType <- parseType
   parsePunctuation PunctuationRightBracket
-  endPosition <- parsePreviousEndPosition
-  sourceSpan <- makeSpan startPosition endPosition
-  pure $
+  pure $ \sourceSpan ->
     TypeArray
       ArrayTypeNode
         { elementType = elementType,
@@ -1506,7 +1639,8 @@ parseArrayType = do
         }
 
 -- | @(T)@ collapses to @T@ (grouped type). @(A, B, ...)@ is a tuple.
--- @()@ is the empty tuple type.
+-- @()@ is the empty tuple type. A single-element grouping keeps its inner
+-- span, so we cannot use 'withSpan' here.
 parseTupleOrGroupedType :: Parser (SyntacticType Parsed)
 parseTupleOrGroupedType = do
   startPosition <- parseCurrentPosition
@@ -1533,32 +1667,19 @@ parseEffects :: Parser [SyntacticRequest Parsed]
 parseEffects = parseEffect `sepBy1` parseComma
 
 parseEffect :: Parser (SyntacticRequest Parsed)
-parseEffect = do
-  startPosition <- parseCurrentPosition
+parseEffect = withSpan $ do
   name <- parseNameRef
-  endPosition <- parsePreviousEndPosition
-  sourceSpan <- makeSpan startPosition endPosition
-  pure
-    SyntacticRequest
-      { name = name,
-        sourceSpan = sourceSpan
-      }
+  pure $ \sourceSpan -> SyntacticRequest {name = name, sourceSpan = sourceSpan}
 
 parseParameterList :: Parser [ParameterBinding Parsed]
 parseParameterList =
-  between
-    (parsePunctuation PunctuationLeftParenthesis)
-    (parsePunctuation PunctuationRightParenthesis)
-    (parseParameterBinding `sepEndBy` parseComma)
+  label "parameter list" $ parenthesizedList parseParameterBinding
 
 parseParameterBinding :: Parser (ParameterBinding Parsed)
-parseParameterBinding = do
-  startPosition <- parseCurrentPosition
+parseParameterBinding = withSpan $ do
   annotation <- parseAnnotation
   (parameterLabel, parsedPattern) <- labeledParameter <|> sugarParameter
-  endPosition <- parsePreviousEndPosition
-  sourceSpan <- makeSpan startPosition endPosition
-  pure
+  pure $ \sourceSpan ->
     ParameterBinding
       { annotation = annotation,
         label = parameterLabel,
@@ -1571,19 +1692,16 @@ parseParameterBinding = do
       parsePunctuation PunctuationEquals
       parsedPattern <- parsePattern
       pure (parameterLabel, parsedPattern)
-    sugarParameter = do
-      sugarStartPosition <- parseCurrentPosition
+    sugarParameter = withSpan $ do
       name <- parseNameRef
       typeAnnotation <- optional (parsePunctuation PunctuationColon *> parseType)
-      sugarEndPosition <- parsePreviousEndPosition
-      sugarSpan <- makeSpan sugarStartPosition sugarEndPosition
-      pure
+      pure $ \patternSpan ->
         ( name.text,
           PatternVariable
             VariablePattern
               { name = name,
                 typeAnnotation = typeAnnotation,
-                sourceSpan = sugarSpan,
+                sourceSpan = patternSpan,
                 metadata = Parsed
               }
         )

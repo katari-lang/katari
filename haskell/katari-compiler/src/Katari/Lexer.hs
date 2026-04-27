@@ -5,12 +5,16 @@ module Katari.Lexer
     Operator (..),
     WithSourceSpan (..),
     TokenStream (..),
+    LexerError (..),
     runLexer,
     insertVirtualSemicolons,
+    showKeyword,
+    showPunctuation,
+    showOperator,
   )
 where
 
-import Control.Monad (void)
+import Control.Monad (void, when)
 import Control.Monad.State.Strict
 import Data.Char (chr)
 import Data.List.NonEmpty qualified as NE
@@ -19,11 +23,10 @@ import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Void (Void)
-import Katari.AST (Position (..), SourceSpan (..))
+import Katari.AST (HasSourceSpan (..), Position (..), SourceSpan (..))
 import Numeric (readHex, showHex)
-import Text.Megaparsec hiding (Token, Tokens)
+import Text.Megaparsec hiding (State, Token, Tokens)
 import Text.Megaparsec qualified as MP
-import Katari.Prelude
 import Text.Megaparsec.Char
 import Text.Megaparsec.Char.Lexer qualified as L
 
@@ -90,6 +93,8 @@ data Keyword where
   KeywordNumber :: Keyword
   KeywordString :: Keyword
   KeywordType :: Keyword
+  KeywordNever :: Keyword
+  KeywordUnknown :: Keyword
   deriving (Eq, Ord, Show)
 
 data Punctuation where
@@ -151,48 +156,118 @@ data LexerContext where
   LexerContextTemplateExpression :: !Int -> LexerContext
   deriving (Eq, Show)
 
--- | Lexer monad : Parsec with a stack of LexerContext for mode-sensitive
--- lexing. Empty stack = top-level (normal code).
-type Lexer = StateT [LexerContext] (Parsec Void Text)
+-- | Structured lexer error. The compiler core emits these without rendering
+-- to text; rendering belongs to 'Katari.Diagnostics'. Each variant is rich
+-- enough that LSP can offer code actions or i18n alternative wordings without
+-- re-parsing strings.
+data LexerError where
+  -- | An @f"..."@ or @f"""...\"\"\"@ literal hit EOF before the closing
+  -- quote / triple-quote was seen. The span covers the start of the literal
+  -- (or the recovery point) to the synthesized close.
+  LexerErrorUnterminatedTemplate :: SourceSpan -> LexerError
+  -- | A normal @"..."@ literal was not closed before EOF or an embedded
+  -- newline. Recovery synthesizes a close at the discovery point.
+  LexerErrorUnterminatedString :: SourceSpan -> LexerError
+  -- | A @\\uXXXX@ escape (or a high/low surrogate pair) was malformed. The
+  -- 'Text' is the offending raw fragment for diagnostics; recovery substitutes
+  -- the Unicode replacement character (U+FFFD).
+  LexerErrorInvalidUnicodeEscape :: SourceSpan -> Text -> LexerError
+  -- | A character that doesn't start any known token. Recovery skips the
+  -- single character and continues.
+  LexerErrorUnrecognizedCharacter :: SourceSpan -> Char -> LexerError
+
+deriving instance Eq LexerError
+
+deriving instance Show LexerError
+
+instance HasSourceSpan LexerError where
+  sourceSpanOf = \case
+    LexerErrorUnterminatedTemplate sp -> sp
+    LexerErrorUnterminatedString sp -> sp
+    LexerErrorInvalidUnicodeEscape sp _ -> sp
+    LexerErrorUnrecognizedCharacter sp _ -> sp
+
+-- | Mutable lexer state: the template-context stack plus an accumulator of
+-- errors discovered through @withRecovery@. Errors are kept in reverse order
+-- of discovery and reversed once at the end.
+data LexerState = LexerState
+  { contextStack :: [LexerContext],
+    accumulatedErrors :: [LexerError]
+  }
+
+initialLexerState :: LexerState
+initialLexerState = LexerState {contextStack = [], accumulatedErrors = []}
+
+-- | Lexer monad : ParsecT layered over a State monad carrying the
+-- mode-sensitive context stack and the rolling list of recovered errors.
+-- Idiomatic megaparsec ordering (ParsecT outermost) so character primitives
+-- and 'withRecovery' are usable without explicit lifts.
+type Lexer = ParsecT Void Text (State LexerState)
 
 -- | Topmost context, or @Nothing@ if the stack is empty (= top-level code).
 getTopContext :: Lexer (Maybe LexerContext)
 getTopContext = do
-  contexts <- get
-  pure $ case contexts of
+  state_ <- get
+  pure $ case state_.contextStack of
     topmost : _ -> Just topmost
     [] -> Nothing
 
 pushContext :: LexerContext -> Lexer ()
-pushContext context = modify (context :)
+pushContext context = modify' $ \LexerState {..} ->
+  LexerState {contextStack = context : contextStack, ..}
 
+-- | Pop the topmost context. Empty-stack pops are *silently ignored* rather
+-- than panicking — they only happen when recovery synthesizes a close for an
+-- already-popped (or never-pushed) context, and treating that as a hard error
+-- would defeat the point of recovery. The resulting incoherence is bounded:
+-- subsequent token lexing simply runs in @Nothing@ context (= top-level).
 popContext :: Lexer ()
-popContext = modify $ \case
-  (_ : remaining) -> remaining
-  -- Pop without matching push is a bug. Fail loudly.
-  [] -> error "Katari.Lexer.popContext: empty context stack"
+popContext = modify' $ \state_ -> case state_.contextStack of
+  (_ : remaining) -> state_ {contextStack = remaining}
+  [] -> state_
 
--- | Run the lexer on input. Returns raw tokens (with TokenNewline; no virtual
--- semis yet). The input is normalized by replacing @\\r\\n@ with @\\n@ first
--- (CRLF support). The context stack starts empty, representing top-level code.
-runLexer :: FilePath -> Text -> Either (ParseErrorBundle Text Void) [WithSourceSpan Token]
-runLexer fp = runParser (evalStateT (lexAllTokens fp) []) fp . normalizeNewlines
-  where
-    normalizeNewlines = T.replace "\r\n" "\n"
+-- | Append a recovered error to the accumulator (kept in reverse order).
+recordLexerError :: LexerError -> Lexer ()
+recordLexerError err = modify' $ \LexerState {..} ->
+  LexerState {accumulatedErrors = err : accumulatedErrors, ..}
+
+-- | Run the lexer on input. Returns the (possibly partial) token list and
+-- any errors recovered via @withRecovery@.
+--
+-- The lexer no longer hard-fails on malformed input: unterminated literals
+-- get synthesized closing tokens, invalid escape sequences become U+FFFD,
+-- and unrecognized characters are skipped one-at-a-time. The input is
+-- normalized by replacing @\\r\\n@ with @\\n@ first (CRLF support).
+--
+-- The 'Either' from megaparsec's @runParser@ is collapsed: a hard failure
+-- (which the recovery design tries hard to avoid) yields an empty token
+-- list. Any errors accumulated up to that point are still returned.
+runLexer :: FilePath -> Text -> ([WithSourceSpan Token], [LexerError])
+runLexer filePath input =
+  let normalized = T.replace "\r\n" "\n" input
+      (eRes, finalState) =
+        runState
+          (runParserT (lexAllTokens filePath) filePath normalized)
+          initialLexerState
+   in case eRes of
+        Right tokens_ -> (tokens_, reverse finalState.accumulatedErrors)
+        Left _ -> ([], reverse finalState.accumulatedErrors)
 
 lexAllTokens :: FilePath -> Lexer [WithSourceSpan Token]
-lexAllTokens fp = do
+lexAllTokens filePath = do
   skipInterTokenSpace
   loop
   where
     loop = do
-      done <- lift atEnd
+      done <- atEnd
       if done
         then return []
         else do
-          nextToken <- lexToken fp
+          maybeToken <- lexToken filePath
           skipInterTokenSpace
-          (nextToken :) <$> loop
+          case maybeToken of
+            Nothing -> loop
+            Just tok -> (tok :) <$> loop
 
 -- | Skip whitespace and comments between tokens — but only at top-level or in
 -- a template-expression context. Inside template string contexts (single- or
@@ -205,7 +280,7 @@ skipInterTokenSpace = do
   case context of
     Just LexerContextTemplate -> return ()
     Just LexerContextTemplateMultiLine -> return ()
-    _ -> lift skipHorizontal
+    _ -> skipHorizontal
   where
     skipHorizontal =
       L.space
@@ -219,56 +294,68 @@ skipInterTokenSpace = do
 
 -- | Build a @SourceSpan@ from a megaparsec @SourcePos@ pair.
 makeSourceSpan :: FilePath -> SourcePos -> SourcePos -> SourceSpan
-makeSourceSpan fp startPos endPos =
+makeSourceSpan filePath startPos endPos =
   SrcSpan
-    { filePath = fp,
+    { filePath = filePath,
       start = positionFromSourcePos startPos,
       end = positionFromSourcePos endPos
     }
 
 positionFromSourcePos :: SourcePos -> Position
-positionFromSourcePos sp =
+positionFromSourcePos sourcePos =
   Position
-    { line = unPos (sourceLine sp),
-      column = unPos (sourceColumn sp)
+    { line = unPos (sourceLine sourcePos),
+      column = unPos (sourceColumn sourcePos)
     }
 
-lexToken :: FilePath -> Lexer (WithSourceSpan Token)
-lexToken fp = do
-  startSourcePos <- lift getSourcePos
+-- | Lex a single token. Returns 'Nothing' when recovery skipped a malformed
+-- character without producing any token (the outer loop in 'lexAllTokens'
+-- continues from there).
+lexToken :: FilePath -> Lexer (Maybe (WithSourceSpan Token))
+lexToken filePath = do
+  startSourcePos <- getSourcePos
   context <- getTopContext
   parsedToken <- case context of
-    Just LexerContextTemplate -> lexTemplateBodyToken False
-    Just LexerContextTemplateMultiLine -> lexTemplateBodyToken True
-    _ -> lexNormalToken
-  endSourcePos <- lift getSourcePos
-  return
-    WithSourceSpan
-      { sourceSpan = makeSourceSpan fp startSourcePos endSourcePos,
-        value = parsedToken
-      }
+    Just LexerContextTemplate -> Just <$> lexTemplateBodyToken False
+    Just LexerContextTemplateMultiLine -> Just <$> lexTemplateBodyToken True
+    _ -> lexNormalToken filePath startSourcePos
+  endSourcePos <- getSourcePos
+  pure $
+    fmap
+      ( \tok ->
+          WithSourceSpan
+            { sourceSpan = makeSourceSpan filePath startSourcePos endSourcePos,
+              value = tok
+            }
+      )
+      parsedToken
 
 -- ---------------------------------------------------------------------------
 -- Normal (top-level / inside ${...}) token parsing
 -- ---------------------------------------------------------------------------
 
-lexNormalToken :: Lexer Token
-lexNormalToken =
+-- | Try every recognised top-level token producer; if none match, fall back
+-- to 'lexUnrecognizedCharacter' which records an error and returns
+-- 'Nothing'. This guarantees forward progress: the outer loop never spins
+-- on a malformed character.
+lexNormalToken :: FilePath -> SourcePos -> Lexer (Maybe Token)
+lexNormalToken filePath startSourcePos =
   choice
-    [ lexNewline,
-      lexBrace,
-      lexTemplateStart,
-      TokenStringLiteral <$> lift (try lexMultilineStringLiteral),
-      TokenStringLiteral <$> lift lexStringLiteral,
-      lexNumber,
-      lexIdentifierOrKeyword,
-      lexPunctuationOrOperator
+    [ Just <$> lexNewline,
+      Just <$> lexBrace,
+      Just <$> lexTemplateStart,
+      Just . TokenStringLiteral <$> try lexMultilineStringLiteral,
+      Just . TokenStringLiteral <$> recoverableStringLiteral filePath startSourcePos,
+      Just <$> lexNumber,
+      Just <$> lexIdentifierOrKeyword,
+      Just <$> lexPunctuationOrOperator,
+      lexUnrecognizedCharacter filePath startSourcePos
     ]
 
 -- | Emit TokenNewline and consume the \n. Doesn't apply inside template strings
 -- (those are handled by lexTemplateBodyToken).
 lexNewline :: Lexer Token
-lexNewline = TokenNewline <$ lift (char '\n')
+lexNewline = TokenNewline <$ char '\n'
 
 -- | Unified handling of `{` and `}` in the normal-token context.
 --
@@ -287,14 +374,14 @@ lexBrace = do
   lexLeftBrace context <|> lexRightBrace context
   where
     lexLeftBrace context = do
-      _ <- lift (char '{')
+      _ <- char '{'
       case context of
         Just (LexerContextTemplateExpression depth) -> do
           modifyTopContext (\_ -> LexerContextTemplateExpression (depth + 1))
           pure (TokenPunctuation PunctuationLeftBrace)
         _ -> pure (TokenPunctuation PunctuationLeftBrace)
     lexRightBrace context = do
-      _ <- lift (char '}')
+      _ <- char '}'
       case context of
         Just (LexerContextTemplateExpression 0) ->
           popContext >> pure TokenTemplateExpressionClose
@@ -303,31 +390,61 @@ lexBrace = do
           pure (TokenPunctuation PunctuationRightBrace)
         _ -> pure (TokenPunctuation PunctuationRightBrace)
 
--- | Replace the topmost context. Errors if the stack is empty (= top-level)
--- because callers only invoke this from within a known mode.
+-- | Replace the topmost context. Empty-stack updates are silently ignored
+-- (the only caller paths reach this from a known mode; if recovery removed
+-- the context already we'd rather no-op than panic).
 modifyTopContext :: (LexerContext -> LexerContext) -> Lexer ()
-modifyTopContext modifier = modify $ \case
-  (topmost : remaining) -> modifier topmost : remaining
-  [] -> error "Katari.Lexer.modifyTopContext: empty context stack"
+modifyTopContext modifier = modify' $ \state_ -> case state_.contextStack of
+  (topmost : remaining) -> state_ {contextStack = modifier topmost : remaining}
+  [] -> state_
 
 -- | Start of a template literal: `f"""` or `f"`.
+--
+-- For multi-line `f"""`, a newline must immediately follow. Missing newline
+-- is recovered by recording a 'LexerErrorUnterminatedTemplate' and pushing
+-- the context anyway — body lexing then proceeds as if the newline had
+-- been there.
 lexTemplateStart :: Lexer Token
 lexTemplateStart = do
-  isMultiLine <- lift $ try ((True <$ string "f\"\"\"") <* char '\n') <|> (False <$ string "f\"")
+  startSourcePos <- getSourcePos
+  isMultiLine <-
+    choice
+      [ True <$ try (string "f\"\"\""),
+        False <$ string "f\""
+      ]
+  when isMultiLine $ do
+    consumed <- optional (char '\n')
+    case consumed of
+      Just _ -> pure ()
+      Nothing -> do
+        endSourcePos <- getSourcePos
+        recordLexerError
+          (LexerErrorUnterminatedTemplate (spanBetween startSourcePos endSourcePos))
   pushContext (if isMultiLine then LexerContextTemplateMultiLine else LexerContextTemplate)
-  return TokenTemplateOpen
+  pure TokenTemplateOpen
+
+-- | Fallback for 'lexNormalToken': if no other producer matched, consume one
+-- character, record a 'LexerErrorUnrecognizedCharacter', and return
+-- 'Nothing' so the outer loop continues without emitting a token.
+lexUnrecognizedCharacter :: FilePath -> SourcePos -> Lexer (Maybe Token)
+lexUnrecognizedCharacter _filePath startSourcePos = do
+  c <- anySingle
+  endSourcePos <- getSourcePos
+  recordLexerError
+    (LexerErrorUnrecognizedCharacter (spanBetween startSourcePos endSourcePos) c)
+  pure Nothing
 
 -- | Numeric literal: prefer float if `.` or `e/E` is present, else integer.
 lexNumber :: Lexer Token
 lexNumber =
-  lift $
-    try (TokenFloatLiteral <$> L.float)
-      <|> (TokenIntegerLiteral <$> L.decimal)
+  label
+    "numeric literal"
+    (try (TokenFloatLiteral <$> L.float) <|> TokenIntegerLiteral <$> L.decimal)
 
 -- | Identifier, keyword, or bare underscore. Bare `_` gets its own token so
 -- the parser can distinguish wildcard patterns without string comparison.
 lexIdentifierOrKeyword :: Lexer Token
-lexIdentifierOrKeyword = lift $ do
+lexIdentifierOrKeyword = label "identifier or keyword" $ do
   firstChar <- letterChar <|> char '_'
   remainingChars <- many (alphaNumChar <|> char '_')
   let text = T.pack (firstChar : remainingChars)
@@ -367,166 +484,249 @@ keywordOf = \case
   "number" -> Just KeywordNumber
   "string" -> Just KeywordString
   "type" -> Just KeywordType
+  "never" -> Just KeywordNever
+  "unknown" -> Just KeywordUnknown
   _ -> Nothing
 
 -- | Punctuation or operator (excluding `{` and `}` which are handled in
 -- lexBrace). Multi-char tokens are tried before their shorter prefixes.
 lexPunctuationOrOperator :: Lexer Token
 lexPunctuationOrOperator =
-  lift $
-    choice
-      [ TokenPunctuation PunctuationArrow <$ string "->",
-        TokenPunctuation PunctuationFatArrow <$ string "=>",
-        TokenOperator OperatorEqual <$ string "==",
-        TokenOperator OperatorNotEqual <$ string "!=",
-        TokenOperator OperatorLessOrEqual <$ string "<=",
-        TokenOperator OperatorGreaterOrEqual <$ string ">=",
-        TokenOperator OperatorAnd <$ string "&&",
-        TokenOperator OperatorOr <$ string "||",
-        TokenOperator OperatorConcat <$ string "++",
-        TokenPunctuation PunctuationLeftParenthesis <$ char '(',
-        TokenPunctuation PunctuationRightParenthesis <$ char ')',
-        TokenPunctuation PunctuationLeftBracket <$ char '[',
-        TokenPunctuation PunctuationRightBracket <$ char ']',
-        TokenPunctuation PunctuationComma <$ char ',',
-        TokenPunctuation PunctuationColon <$ char ':',
-        TokenPunctuation PunctuationDot <$ char '.',
-        TokenPunctuation PunctuationAt <$ char '@',
-        TokenPunctuation PunctuationEquals <$ char '=',
-        TokenPunctuation PunctuationPipe <$ char '|',
-        TokenSemicolonExplicit <$ char ';',
-        TokenOperator OperatorAdd <$ char '+',
-        TokenOperator OperatorSubtract <$ char '-',
-        TokenOperator OperatorMultiply <$ char '*',
-        TokenOperator OperatorDivide <$ char '/',
-        TokenOperator OperatorLessThan <$ char '<',
-        TokenOperator OperatorGreaterThan <$ char '>',
-        TokenOperator OperatorNot <$ char '!'
-      ]
+  choice
+    [ TokenPunctuation PunctuationArrow <$ string "->",
+      TokenPunctuation PunctuationFatArrow <$ string "=>",
+      TokenOperator OperatorEqual <$ string "==",
+      TokenOperator OperatorNotEqual <$ string "!=",
+      TokenOperator OperatorLessOrEqual <$ string "<=",
+      TokenOperator OperatorGreaterOrEqual <$ string ">=",
+      TokenOperator OperatorAnd <$ string "&&",
+      TokenOperator OperatorOr <$ string "||",
+      TokenOperator OperatorConcat <$ string "++",
+      TokenPunctuation PunctuationLeftParenthesis <$ char '(',
+      TokenPunctuation PunctuationRightParenthesis <$ char ')',
+      TokenPunctuation PunctuationLeftBracket <$ char '[',
+      TokenPunctuation PunctuationRightBracket <$ char ']',
+      TokenPunctuation PunctuationComma <$ char ',',
+      TokenPunctuation PunctuationColon <$ char ':',
+      TokenPunctuation PunctuationDot <$ char '.',
+      TokenPunctuation PunctuationAt <$ char '@',
+      TokenPunctuation PunctuationEquals <$ char '=',
+      TokenPunctuation PunctuationPipe <$ char '|',
+      TokenSemicolonExplicit <$ char ';',
+      TokenOperator OperatorAdd <$ char '+',
+      TokenOperator OperatorSubtract <$ char '-',
+      TokenOperator OperatorMultiply <$ char '*',
+      TokenOperator OperatorDivide <$ char '/',
+      TokenOperator OperatorLessThan <$ char '<',
+      TokenOperator OperatorGreaterThan <$ char '>',
+      TokenOperator OperatorNot <$ char '!'
+    ]
 
 -- ---------------------------------------------------------------------------
 -- Template body tokens (inside f"..." or f"""...""")
 -- ---------------------------------------------------------------------------
 
 -- | Parse one token within a template string context.
--- We emit either:
---   - TokenTemplateExpressionOpen on ${ (and push LexerContextTemplateExpression 0)
---   - TokenTemplateClose on the closing quote (and pop)
---   - TokenTemplateString Text for a run of string content
+--
+-- Recovery: if none of the three branches match (the only realistic case is
+-- EOF before the closing quote was seen), record an
+-- 'LexerErrorUnterminatedTemplate' and synthesise a 'TokenTemplateClose' so
+-- the outer parse keeps a coherent template-token sequence. The popped
+-- context lets subsequent tokens lex as normal code.
 lexTemplateBodyToken :: Bool -> Lexer Token
-lexTemplateBodyToken isMultiLine =
-  choice
-    [ lexExpressionOpen,
-      lexClose,
-      lexStringRun
-    ]
+lexTemplateBodyToken isMultiLine = do
+  startSourcePos <- getSourcePos
+  withRecovery (handler startSourcePos) $
+    choice
+      [ lexExpressionOpen,
+        lexClose,
+        lexStringRun
+      ]
   where
     lexExpressionOpen = do
-      _ <- lift (string "${")
+      _ <- string "${"
       pushContext (LexerContextTemplateExpression 0)
-      return TokenTemplateExpressionOpen
+      pure TokenTemplateExpressionOpen
 
     lexClose
       | isMultiLine = do
-          _ <- lift (try (string "\n\"\"\""))
+          _ <- try (string "\n\"\"\"")
           popContext
-          return TokenTemplateClose
+          pure TokenTemplateClose
       | otherwise = do
-          _ <- lift (char '"')
+          _ <- char '"'
           popContext
-          return TokenTemplateClose
+          pure TokenTemplateClose
 
     lexStringRun = do
-      chars <- lift (some stringChar)
-      return (TokenTemplateString (T.pack chars))
+      chars <- some stringChar
+      pure (TokenTemplateString (T.pack chars))
 
     stringChar
       | isMultiLine = templateStringCharacterMulti
       | otherwise = templateStringCharacterSingle
 
+    handler startSourcePos _err = do
+      endSourcePos <- getSourcePos
+      recordLexerError
+        (LexerErrorUnterminatedTemplate (spanBetween startSourcePos endSourcePos))
+      popContext
+      pure TokenTemplateClose
+
 -- | One character of a single-line template string (no literal newlines).
 -- Stops if it sees `${` or `"` (those are separate tokens).
-templateStringCharacterSingle :: Parsec Void Text Char
+templateStringCharacterSingle :: Lexer Char
 templateStringCharacterSingle =
-  notFollowedBy (string "${" <|> string "\"") *> (escapeCharacter <|> noneOf ['\n', '\r'])
+  notFollowedBy (string "${" <|> string "\"")
+    *> (escapeCharacter <|> noneOf ['\n', '\r'])
 
 -- | One character of a multiline template string (literal newlines allowed).
 -- Stops at `${` or the `\n"""` terminator.
-templateStringCharacterMulti :: Parsec Void Text Char
+templateStringCharacterMulti :: Lexer Char
 templateStringCharacterMulti =
-  notFollowedBy (string "${" <|> try (string "\n\"\"\"")) *> (escapeCharacter <|> anySingle)
+  notFollowedBy (string "${" <|> try (string "\n\"\"\""))
+    *> (escapeCharacter <|> anySingle)
 
 -- ---------------------------------------------------------------------------
--- String literals
+-- String literals (Lexer monadic so escape recovery can record errors)
 -- ---------------------------------------------------------------------------
 
-lexStringLiteral :: Parsec Void Text Text
-lexStringLiteral = do
+-- | Helper: build a 'SourceSpan' from two megaparsec source positions. The
+-- file path is recovered from 'sourceName' so we don't have to thread
+-- 'FilePath' through every internal helper.
+spanBetween :: SourcePos -> SourcePos -> SourceSpan
+spanBetween start_ end_ =
+  SrcSpan
+    { filePath = sourceName start_,
+      start = positionFromSourcePos start_,
+      end = positionFromSourcePos end_
+    }
+
+-- | Recoverable string literal parser.
+--
+-- The opening @"@ must be consumed BEFORE @withRecovery@ engages — otherwise
+-- the recovery handler would succeed on any input that doesn't start with a
+-- quote, returning an empty string without consuming anything. That breaks
+-- forward progress in 'lexNormalToken'\'s 'choice'. So we commit to the
+-- string-literal path first, then wrap only the body+closing-quote in
+-- recovery.
+recoverableStringLiteral :: FilePath -> SourcePos -> Lexer Text
+recoverableStringLiteral _filePath startSourcePos = do
   _ <- char '"'
-  content <- many stringChar
-  _ <- char '"'
-  return (T.pack content)
+  withRecovery handler stringBody
   where
+    stringBody = do
+      content <- many stringChar
+      _ <- char '"'
+      pure (T.pack content)
     stringChar = escapeCharacter <|> noneOf ['"', '\\', '\n', '\r']
+    handler _ = do
+      endSourcePos <- getSourcePos
+      recordLexerError
+        (LexerErrorUnterminatedString (spanBetween startSourcePos endSourcePos))
+      pure T.empty
 
-lexMultilineStringLiteral :: Parsec Void Text Text
+lexMultilineStringLiteral :: Lexer Text
 lexMultilineStringLiteral = do
   _ <- string "\"\"\""
   _ <- char '\n'
   content <- manyTill anySingle (try (char '\n' *> string "\"\"\""))
-  return (T.pack content)
+  pure (T.pack content)
 
 -- | JSON-compatible escape sequences plus `\$` for template interpolation.
 --
 -- Supported: \" \\ \/ \b \f \n \r \t \$ \uXXXX (with surrogate-pair synthesis)
-escapeCharacter :: Parsec Void Text Char
-escapeCharacter =
-  char '\\'
-    *> choice
-      [ '"' <$ char '"',
-        '\\' <$ char '\\',
-        '/' <$ char '/',
-        '\b' <$ char 'b',
-        '\f' <$ char 'f',
-        '\n' <$ char 'n',
-        '\r' <$ char 'r',
-        '\t' <$ char 't',
-        '$' <$ char '$',
-        unicodeEscape
-      ]
+--
+-- This lives in 'Lexer' (rather than pure 'Parsec') so invalid escape paths
+-- can record a 'LexerErrorInvalidUnicodeEscape' and recover with U+FFFD
+-- instead of failing the surrounding string parse.
+escapeCharacter :: Lexer Char
+escapeCharacter = do
+  _ <- char '\\'
+  choice
+    [ '"' <$ char '"',
+      '\\' <$ char '\\',
+      '/' <$ char '/',
+      '\b' <$ char 'b',
+      '\f' <$ char 'f',
+      '\n' <$ char 'n',
+      '\r' <$ char 'r',
+      '\t' <$ char 't',
+      '$' <$ char '$',
+      unicodeEscape
+    ]
   where
     -- \| JSON-style \\uXXXX with surrogate-pair synthesis:
     --
     --   * BMP code point (outside surrogate range) → that Char directly.
     --   * High surrogate (U+D800..U+DBFF) → MUST be immediately followed by
     --     \\uXXXX low surrogate (U+DC00..U+DFFF); combines to U+10000..U+10FFFF.
-    --   * Unpaired surrogates are rejected.
+    --   * Unpaired surrogates are rejected — recovery records the error and
+    --     substitutes the Unicode replacement character (U+FFFD).
     unicodeEscape = do
+      startSourcePos <- getSourcePos
       _ <- char 'u'
-      cp1 <- readFourHex
-      case classifySurrogate cp1 of
-        SurrogateNone -> pure (chr cp1)
+      firstCodePoint <- readFourHex startSourcePos
+      case classifySurrogate firstCodePoint of
+        SurrogateNone -> pure (chr firstCodePoint)
         SurrogateHigh -> do
-          _ <- char '\\'
-          _ <- char 'u'
-          cp2 <- readFourHex
-          case classifySurrogate cp2 of
-            SurrogateLow ->
-              pure (chr (0x10000 + ((cp1 - 0xD800) * 0x400) + (cp2 - 0xDC00)))
-            _ -> fail $
-              "invalid \\u escape: high surrogate U+" <> showHex cp1 "" <>
-              " must be followed by low surrogate U+DC00..U+DFFF, got U+" <> showHex cp2 ""
-        SurrogateLow -> fail $
-          "invalid \\u escape: unpaired low surrogate U+" <> showHex cp1 ""
+          followedByLow <-
+            optional . try $ do
+              _ <- char '\\'
+              _ <- char 'u'
+              hex1 <- hexDigitChar
+              hex2 <- hexDigitChar
+              hex3 <- hexDigitChar
+              hex4 <- hexDigitChar
+              case readHex [hex1, hex2, hex3, hex4] of
+                [(codePoint, "")] -> pure codePoint
+                _ -> empty
+          endSourcePos <- getSourcePos
+          case followedByLow of
+            Just secondCodePoint
+              | SurrogateLow <- classifySurrogate secondCodePoint ->
+                  pure
+                    ( chr
+                        ( 0x10000
+                            + (firstCodePoint - 0xD800) * 0x400
+                            + (secondCodePoint - 0xDC00)
+                        )
+                    )
+            _ -> do
+              recordLexerError
+                ( LexerErrorInvalidUnicodeEscape
+                    (spanBetween startSourcePos endSourcePos)
+                    (T.pack ("\\u" <> showHex firstCodePoint ""))
+                )
+              pure '\xFFFD'
+        SurrogateLow -> do
+          endSourcePos <- getSourcePos
+          recordLexerError
+            ( LexerErrorInvalidUnicodeEscape
+                (spanBetween startSourcePos endSourcePos)
+                (T.pack ("\\u" <> showHex firstCodePoint ""))
+            )
+          pure '\xFFFD'
 
-    readFourHex = do
-      hex1 <- hexDigitChar
-      hex2 <- hexDigitChar
-      hex3 <- hexDigitChar
-      hex4 <- hexDigitChar
-      case readHex [hex1, hex2, hex3, hex4] of
-        [(codePoint, "")] -> pure codePoint
-        _ -> fail "invalid \\u escape"
+    readFourHex startSourcePos = do
+      maybeHex <-
+        optional . try $ do
+          hex1 <- hexDigitChar
+          hex2 <- hexDigitChar
+          hex3 <- hexDigitChar
+          hex4 <- hexDigitChar
+          pure [hex1, hex2, hex3, hex4]
+      case maybeHex of
+        Just hex
+          | [(codePoint, "")] <- readHex hex -> pure codePoint
+        _ -> do
+          endSourcePos <- getSourcePos
+          recordLexerError
+            ( LexerErrorInvalidUnicodeEscape
+                (spanBetween startSourcePos endSourcePos)
+                (T.pack "\\u????")
+            )
+          pure 0xFFFD
 
 data SurrogateClass = SurrogateNone | SurrogateHigh | SurrogateLow
 
@@ -664,30 +864,42 @@ instance VisualStream TokenStream where
 
 instance TraversableStream TokenStream where
   reachOffset targetOffset PosState {..} =
-    let allTokens = pstateInput.tokens
-        sourceText = pstateInput.input
-        remaining = drop (targetOffset - pstateOffset) allTokens
-        newSourcePos = case remaining of
-          (WithSourceSpan span_ _ : _) ->
-            mkSourcePos span_.filePath span_.start
-          [] -> case reverse allTokens of
-            (WithSourceSpan span_ _ : _) ->
-              mkSourcePos span_.filePath span_.end
-            [] -> pstateSourcePos
-        linePrefix = linePrefixFor sourceText newSourcePos
-        remainingInput = TokenStream sourceText remaining
-     in ( Just (T.unpack linePrefix),
-          PosState
-            { pstateInput = remainingInput,
-              pstateOffset = max pstateOffset targetOffset,
-              pstateSourcePos = newSourcePos,
-              pstateTabWidth = pstateTabWidth,
-              pstateLinePrefix = pstateLinePrefix <> T.unpack linePrefix
-            }
-        )
+    ( Just finalPrefix,
+      PosState
+        { pstateInput = TokenStream sourceText remainingTokens,
+          pstateOffset = max pstateOffset targetOffset,
+          pstateSourcePos = newSourcePos,
+          pstateTabWidth = pstateTabWidth,
+          pstateLinePrefix = finalPrefix
+        }
+    )
+    where
+      sourceText = pstateInput.input
+      remainingTokens = drop (targetOffset - pstateOffset) pstateInput.tokens
+      newSourcePos = nextSourcePos remainingTokens pstateInput.tokens pstateSourcePos
+      newLinePrefix = T.unpack (linePrefixFor sourceText newSourcePos)
+      -- megaparsec's standard rule: when staying on the same line, append the
+      -- prefix to the previously accumulated prefix; when moving to a new line,
+      -- reset to just the new line's prefix. The previous implementation always
+      -- appended, which inflated error caret positions across reachOffset calls.
+      finalPrefix
+        | sourceLine newSourcePos == sourceLine pstateSourcePos =
+            pstateLinePrefix <> newLinePrefix
+        | otherwise = newLinePrefix
+
+-- | Pick the source position to advance to. Prefer the head of the remaining
+-- token stream; if the offset has run past the last token, anchor to the end
+-- of the last consumed token; if the input was empty to begin with, keep the
+-- current position.
+nextSourcePos :: [WithSourceSpan Token] -> [WithSourceSpan Token] -> SourcePos -> SourcePos
+nextSourcePos remainingTokens allTokens fallback = case remainingTokens of
+  WithSourceSpan span_ _ : _ -> mkSourcePos span_.filePath span_.start
+  [] -> case allTokens of
+    [] -> fallback
+    _ -> let WithSourceSpan span_ _ = last allTokens in mkSourcePos span_.filePath span_.end
 
 mkSourcePos :: FilePath -> Position -> SourcePos
-mkSourcePos fp p = SourcePos fp (mkPos p.line) (mkPos p.column)
+mkSourcePos filePath position = SourcePos filePath (mkPos position.line) (mkPos position.column)
 
 -- | Extract the source line prefix up to (but not including) the column of
 -- the given SourcePos. Used to feed megaparsec's error message formatter so
@@ -732,6 +944,8 @@ showKeyword = \case
   KeywordNumber -> "number"
   KeywordString -> "string"
   KeywordType -> "type"
+  KeywordNever -> "never"
+  KeywordUnknown -> "unknown"
 
 showPunctuation :: Punctuation -> String
 showPunctuation = \case
