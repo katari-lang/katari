@@ -26,6 +26,7 @@ tests:
     other-modules:
       - Katari.ParserSpec
       - Katari.IdentifierSpec
+      - Katari.ConstraintGeneratorSpec
     dependencies:
       - katari-compiler
       - hspec
