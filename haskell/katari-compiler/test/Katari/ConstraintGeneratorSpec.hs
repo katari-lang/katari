@@ -254,6 +254,106 @@ whereBlocks = describe "where blocks" $ do
       Left _ -> pure ()  -- parse error expected
       Right _ -> expectationFailure "expected parse failure for handler with-clause"
 
+  it "handler break value flows to a type variable (handle-result)" $ do
+    cg <-
+      runOne $
+        mconcat
+          [ "req fetch() -> string\n",
+            "agent main() -> string {\n",
+            "  fetch()\n",
+            "} where {\n",
+            "  req fetch() -> string {\n",
+            "    break \"boom\"\n",
+            "  }\n",
+            "}\n"
+          ]
+    cg.errors `shouldBe` []
+    -- break "boom" should emit a constraint with lhs = literal "boom"
+    -- targeting some type variable (the handle-result tv).
+    cg `shouldSatisfy` hasTypeConstraint
+      ( \l r -> l == SemanticTypeLiteralString "boom" && case r of
+          SemanticTypeVariable _ -> True
+          _ -> False
+      )
+
+  it "handler next value flows to a type variable (handler return / next-tv)" $ do
+    cg <-
+      runOne $
+        mconcat
+          [ "req fetch() -> string\n",
+            "agent main() -> string {\n",
+            "  fetch()\n",
+            "} where {\n",
+            "  req fetch() -> string {\n",
+            "    next \"resumed\"\n",
+            "  }\n",
+            "}\n"
+          ]
+    cg.errors `shouldBe` []
+    cg `shouldSatisfy` hasTypeConstraint
+      ( \l r -> l == SemanticTypeLiteralString "resumed" && case r of
+          SemanticTypeVariable _ -> True
+          _ -> False
+      )
+
+  it "where without then: body tail value flows into the handle-result tv" $ do
+    -- A where block with no then clause means the body's tail value is the
+    -- whole expression's value. The body has a tail expression "hello" (no
+    -- separating newline before '}', so it stays a returnExpression rather
+    -- than becoming a StatementExpression).
+    cg <-
+      runOne $
+        mconcat
+          [ "req fetch() -> string\n",
+            "agent main() -> string { \"hello\" } where {\n",
+            "  req fetch() -> string {\n",
+            "    next \"x\"\n",
+            "  }\n",
+            "}\n"
+          ]
+    cg.errors `shouldBe` []
+    cg `shouldSatisfy` hasTypeConstraint
+      ( \l r -> l == SemanticTypeLiteralString "hello" && case r of
+          SemanticTypeVariable _ -> True
+          _ -> False
+      )
+
+  it "where with then: body tail value flows into the then-pattern annotation" $ do
+    -- Body tail "hi" : string. Then-pattern annotated 'integer'. CG should
+    -- emit a constraint linking the body's literal type to integer.
+    cg <-
+      runOne $
+        mconcat
+          [ "req fetch() -> string\n",
+            "agent main() { \"hi\" } where {\n",
+            "  req fetch() -> string {\n",
+            "    next \"x\"\n",
+            "  }\n",
+            "} then(x: integer) { 0 }\n"
+          ]
+    cg.errors `shouldBe` []
+    cg `shouldSatisfy` hasTypeConstraint
+      ( \l r -> l == SemanticTypeLiteralString "hi" && r == SemanticTypeInteger
+      )
+
+  it "where with then: then block's tail flows into the handle-result tv" $ do
+    cg <-
+      runOne $
+        mconcat
+          [ "req fetch() -> string\n",
+            "agent main() -> integer { \"hi\" } where {\n",
+            "  req fetch() -> string {\n",
+            "    next \"x\"\n",
+            "  }\n",
+            "} then(x: string) { 0 }\n"
+          ]
+    cg.errors `shouldBe` []
+    cg `shouldSatisfy` hasTypeConstraint
+      ( \l r -> l == SemanticTypeLiteralInteger 0 && case r of
+          SemanticTypeVariable _ -> True
+          _ -> False
+      )
+
 -- ---------------------------------------------------------------------------
 -- Type synonym cycle detection
 -- ---------------------------------------------------------------------------
