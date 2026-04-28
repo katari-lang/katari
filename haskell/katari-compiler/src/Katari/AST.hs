@@ -189,11 +189,17 @@ instance HasSourceSpan (ExternalAgentDeclaration metadata) where
 
 -- | @data ctor_name(field: type, ...)@ — 1 declaration につき 1 constructor。
 -- 同じ名前で値空間 (constructor 関数) と型空間 (data 型) の両方を導入する。
--- AST 上は variable role の name のみ持つ。Identifier フェーズで同名を typeSymbol
--- slot にも登録する。
+--
+-- AST 上は両 role を別 'NameRef' として保持する: @name@ が値空間 (constructor
+-- 関数) を、@typeName@ が型空間 (data 型) を指す。Parser は同一の identifier
+-- token から両者を生成し (text と sourceSpan は共有)、Identifier フェーズが
+-- 各々を独立に解決して metadata に固有の id (VariableId / TypeId) を埋める。
+-- 後段 (ConstraintGenerator 以降) は AST から直接 TypeId を読めるので、
+-- 名前テキストによる横断検索は不要。
 data DataDeclaration (metadata :: SymbolKind -> Type) = DataDeclaration
   { annotation :: Maybe Text,
     name :: NameRef metadata 'VariableRef,
+    typeName :: NameRef metadata 'TypeRef,
     parameters :: [DataParameter metadata],
     sourceSpan :: SourceSpan
   }

@@ -119,6 +119,10 @@ data ConstraintReason
   | ReasonRequestHandlerSignature SourceSpan
   | ReasonReturnTypeAnnotation SourceSpan
   | ReasonReturnStatement SourceSpan
+  | -- | Body の暗黙 fall-through return (明示 @return@ 文ではなく block の
+    -- 末尾式で関数を抜けるケース)。'ReasonReturnStatement' とは診断メッセージ
+    -- を分けたいので別 reason。
+    ReasonImplicitReturn SourceSpan
   | ReasonEffectBound SourceSpan
   | ReasonHandleEffectDischarge SourceSpan
   | ReasonHandlerEffectBound SourceSpan
@@ -497,7 +501,7 @@ processAgentLike sourceSpan name parameters returnType withEffects body = do
   retTvId <- freshReturnTypeVar retSemantic
   (body', bodyType) <-
     withReturn retTvId . withEnclosingEffects bodyEffectVarId $ walkBlock body
-  addTypeConstraint bodyType (SemanticTypeVariable retTvId) (ReasonReturnStatement sourceSpan)
+  addTypeConstraint bodyType (SemanticTypeVariable retTvId) (ReasonImplicitReturn sourceSpan)
   addReturnAnnotationEq retTvId retSemantic sourceSpan
   addEffectConstraint
     (effectFromVar bodyEffectVarId)
@@ -547,10 +551,13 @@ walkExternalAgentDecl ExternalAgentDeclaration {annotation, name, parameters, re
       }
 
 walkDataDecl :: DataDeclaration Identified -> CG (DataDeclaration Constrained)
-walkDataDecl DataDeclaration {annotation, name, parameters, sourceSpan} = do
+walkDataDecl DataDeclaration {annotation, name, typeName, parameters, sourceSpan} = do
   tCtor <- variableTypeFromName name
-  -- data の TypeId は同名の type slot に登録されている。Identifier 出力経由で取得。
-  tid <- typeIdForDataName name
+  -- data の TypeId は AST が直接保持する。@Unresolved@ 側 (parse / identify
+  -- エラー時) のみ @Nothing@ になり、@SemanticTypeUnknown@ にフォールバックする。
+  let tid = case typeName.metadata of
+        IdentifiedType t -> Just t
+        IdentifiedUnresolvedType -> Nothing
   fields <- mapM elaborateDataParameter parameters
   let signature =
         SemanticTypeFunction
@@ -563,6 +570,7 @@ walkDataDecl DataDeclaration {annotation, name, parameters, sourceSpan} = do
     DataDeclaration
       { annotation = annotation,
         name = passThroughVariableName name,
+        typeName = passThroughTypeName typeName,
         parameters = parameters',
         sourceSpan = sourceSpan
       }
@@ -1515,21 +1523,6 @@ variableIdOfName :: NameRef Identified 'VariableRef -> Maybe VariableId
 variableIdOfName nameRef = case nameRef.metadata of
   IdentifiedVariable vid -> Just vid
   IdentifiedUnresolvedVariable -> Nothing
-
-typeIdForDataName :: NameRef Identified 'VariableRef -> CG (Maybe TypeId)
-typeIdForDataName nameRef = do
-  -- Data constructors share their name with the type they construct. The
-  -- Identifier pass registers the type id under the same text label, so
-  -- we look it up in @identifiedTypes@ keyed by name text.
-  types <- asks (.contextIdentifiedTypes)
-  let matches =
-        [ tid
-          | (tid, td) <- Map.toList types,
-            td.typeName == nameRef.text
-        ]
-  pure $ case matches of
-    [tid] -> Just tid
-    _ -> Nothing
 
 -- | If the optional type annotation is present, elaborate it; otherwise
 -- allocate a fresh type variable so the solver can infer it.

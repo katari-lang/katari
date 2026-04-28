@@ -32,6 +32,7 @@ import Katari.Lexer
     showKeyword,
     showOperator,
     showPunctuation,
+    showToken,
   )
 import Text.Megaparsec hiding (ParseError, Token, Tokens)
 import Text.Megaparsec qualified as MP
@@ -266,30 +267,13 @@ extractReason = \case
   where
     itemToText = \case
       MP.Tokens toks ->
-        T.intercalate ", " (NE.toList (fmap (T.pack . tokenLabel . (.value)) toks))
+        T.intercalate ", " (NE.toList (fmap (T.pack . showToken . (.value)) toks))
       MP.Label chars -> T.pack (NE.toList chars)
       MP.EndOfInput -> "end of input"
     fancyToText = \case
       MP.ErrorFail message -> T.pack message
       MP.ErrorIndentation {} -> "incorrect indentation"
       MP.ErrorCustom void_ -> absurd void_
-    tokenLabel = \case
-      TokenIdentifier text -> T.unpack text
-      TokenUnderscore -> "_"
-      TokenKeyword keyword -> showKeyword keyword
-      TokenPunctuation punc -> showPunctuation punc
-      TokenOperator operator -> showOperator operator
-      TokenIntegerLiteral integer -> show integer
-      TokenFloatLiteral double -> show double
-      TokenStringLiteral text -> show text
-      TokenTemplateOpen -> "f\""
-      TokenTemplateClose -> "\""
-      TokenTemplateString text -> T.unpack text
-      TokenTemplateExpressionOpen -> "${"
-      TokenTemplateExpressionClose -> "}"
-      TokenSemicolonExplicit -> ";"
-      TokenSemicolonVirtual -> ";"
-      TokenNewline -> "\\n"
 
 -- | Wrap @p@ with error recovery. On failure, consume one token, run
 -- @skipSync@, then record the error and return the sentinel value.
@@ -579,11 +563,16 @@ parseData :: Maybe Text -> Parser (DataDeclaration Parsed)
 parseData annotation = withSpan $ do
   parseKeyword KeywordData
   name <- parseNameRef
+  -- Same identifier serves both the value (constructor function) and type
+  -- (data type) namespaces. Re-tag is a no-op at the @Parsed@ phase; the
+  -- Identifier pass fills in distinct ids for each role.
+  let typeName = typeRefOfVariable name
   parameters <- parenthesizedList parseDataParameter
   pure $ \sourceSpan ->
     DataDeclaration
       { annotation = annotation,
         name = name,
+        typeName = typeName,
         parameters = parameters,
         sourceSpan = sourceSpan
       }

@@ -8,6 +8,8 @@ import Katari.Parser (parseModuleStrict)
 import Katari.Typechecker.ConstraintGenerator
 import Katari.Typechecker.Identifier
   ( IdentifierResult (..),
+    TypeData (..),
+    TypeId,
     VariableData (..),
     VariableId,
     identify,
@@ -97,6 +99,8 @@ spec = do
   exitStatementBlocks
   typeSynonymCycle
   constraintContents
+  dataNameClash
+  implicitReturnReason
 
 -- ---------------------------------------------------------------------------
 -- Basic agent
@@ -618,3 +622,80 @@ constraintContents = describe "constraint contents" $ do
     cg `shouldSatisfy` hasTypeConstraint
       ( \l r -> l == SemanticTypeLiteralString "world" && r == SemanticTypeString
       )
+
+-- ---------------------------------------------------------------------------
+-- Cross-module same-named `data` declarations should produce distinct TypeIds
+-- on each constructor signature. Pre-refactor, ConstraintGenerator's text-based
+-- TypeId lookup collided across modules and silently fell back to
+-- SemanticTypeUnknown for both.
+-- ---------------------------------------------------------------------------
+
+dataNameClash :: Spec
+dataNameClash = describe "cross-module data name clash" $ do
+  it "two modules each declaring `data foo` produce distinct SemanticTypeData TypeIds" $ do
+    let modA = "data foo(x: integer)\nagent runA() { foo(x = 1) }"
+        modB = "data foo(y: string)\nagent runB() { foo(y = \"a\") }"
+    case (,)
+      <$> parseModuleStrict "<test>" modA
+      <*> parseModuleStrict "<test>" modB of
+      Left errs -> expectationFailure ("parse: " ++ show errs)
+      Right (parsedA, parsedB) ->
+        case identify (Map.fromList [("a", parsedA), ("b", parsedB)]) of
+          (_, e : es) -> expectationFailure ("identify errors: " ++ show (e : es))
+          (result, []) -> do
+            let cg = generateConstraints result
+            cg.errors `shouldBe` []
+            -- 各モジュールの "foo" type に発行された TypeId を集める。
+            let fooTypeIds =
+                  [ tid
+                    | (tid, td) <- Map.toList result.identifiedTypes,
+                      typeNameOf td == "foo"
+                  ]
+            length fooTypeIds `shouldBe` 2
+            -- どちらの TypeId も SemanticTypeData として制約に出現するはず。
+            -- (リファクタ前は両方が SemanticTypeUnknown に degrade していた)
+            let usedTids = Set.fromList (concatMap (collectDataTids . snd) (typeConstraints cg))
+            (head fooTypeIds `Set.member` usedTids) `shouldBe` True
+            (fooTypeIds !! 1 `Set.member` usedTids) `shouldBe` True
+  where
+    -- Disambiguates @td.typeName@ which collides with DataDeclaration.typeName
+    -- under OverloadedRecordDot.
+    typeNameOf :: TypeData -> Text
+    typeNameOf td = td.typeName
+    collectDataTids :: SemanticType Unresolved -> [TypeId]
+    collectDataTids = \case
+      SemanticTypeData tid -> [tid]
+      SemanticTypeFunction params returnType _ ->
+        concatMap (collectDataTids . snd) params <> collectDataTids returnType
+      SemanticTypeArray elementType -> collectDataTids elementType
+      SemanticTypeTuple elementTypes -> concatMap collectDataTids elementTypes
+      SemanticTypeUnion branches -> concatMap collectDataTids branches
+      SemanticTypeObject fields -> concatMap collectDataTids (Map.elems fields)
+      _ -> []
+
+-- ---------------------------------------------------------------------------
+-- Implicit-return constraint reason: agent body fall-through (no explicit
+-- 'return') uses ReasonImplicitReturn, while explicit 'return e' uses
+-- ReasonReturnStatement.
+-- ---------------------------------------------------------------------------
+
+implicitReturnReason :: Spec
+implicitReturnReason = describe "ReasonImplicitReturn vs ReasonReturnStatement" $ do
+  it "agent body fall-through tags constraint with ReasonImplicitReturn" $ do
+    cg <- runOne "agent foo() -> integer { 1 }"
+    cg.errors `shouldBe` []
+    let reasons = [r | TypeConstraint {reason = r} <- cg.constraints]
+    any isImplicitReturn reasons `shouldBe` True
+
+  it "explicit return statement tags constraint with ReasonReturnStatement" $ do
+    cg <- runOne "agent foo() -> integer { return 1; }"
+    cg.errors `shouldBe` []
+    let reasons = [r | TypeConstraint {reason = r} <- cg.constraints]
+    any isReturnStatement reasons `shouldBe` True
+  where
+    isImplicitReturn = \case
+      ReasonImplicitReturn _ -> True
+      _ -> False
+    isReturnStatement = \case
+      ReasonReturnStatement _ -> True
+      _ -> False

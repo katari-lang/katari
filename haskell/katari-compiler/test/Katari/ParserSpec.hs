@@ -115,6 +115,7 @@ spec = do
     multilineTokenSpans
     crlfHandling
     qualifiedConstructorPatterns
+    multilineStringRecovery
 
 -- ---------------------------------------------------------------------------
 -- Literals
@@ -1938,3 +1939,26 @@ qualifiedConstructorPatterns = describe "qualified constructor patterns" $ do
         _ -> expectationFailure "expected match"
       _ -> expectationFailure "expected agent"
 
+
+
+-- ---------------------------------------------------------------------------
+-- Multi-line string recovery
+-- ---------------------------------------------------------------------------
+
+multilineStringRecovery :: Spec
+multilineStringRecovery = describe "multiline string recovery" $ do
+  it "unterminated multiline string surfaces LexerErrorUnterminatedString without hard-failing the lexer" $ do
+    -- @"""\nabc@ followed by EOF (no closing @"""@). Pre-refactor this
+    -- caused 'lexMultilineStringLiteral' to hard-fail because @manyTill@
+    -- propagated the EOF failure. With recovery added the lexer
+    -- synthesises an empty body and records 'LexerErrorUnterminatedString'.
+    let src = "agent main() { \"\"\"\nabc }"
+    case parse src of
+      Right _ ->
+        expectationFailure "expected lexer recovery error to surface, but parse succeeded"
+      Left errors ->
+        any isUnterminated errors `shouldBe` True
+  where
+    isUnterminated = \case
+      ParseErrorLex (LexerErrorUnterminatedString _) -> True
+      _ -> False

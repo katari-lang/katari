@@ -11,6 +11,7 @@ module Katari.Lexer
     showKeyword,
     showPunctuation,
     showOperator,
+    showToken,
   )
 where
 
@@ -19,7 +20,6 @@ import Control.Monad.State.Strict
 import Data.Char (chr)
 import Data.List.NonEmpty qualified as NE
 import Data.Proxy (Proxy (..))
-import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Void (Void)
@@ -626,12 +626,30 @@ recoverableStringLiteral _filePath startSourcePos = do
         (LexerErrorUnterminatedString (spanBetween startSourcePos endSourcePos))
       pure T.empty
 
+-- | Recoverable multi-line string literal (@"""...\n...\n"""@).
+--
+-- The opener (@"""@ + @\n@) is consumed BEFORE @withRecovery@ engages, for
+-- the same reason as 'recoverableStringLiteral': a recovery handler that
+-- runs without first consuming a unique prefix would let any input pretend
+-- to be an empty multi-line string and break forward progress in
+-- 'lexNormalToken''s 'choice'. The caller's outer @try@ handles the case
+-- where the opener doesn't match (e.g. the input was actually a single-line
+-- @"..."@ string).
 lexMultilineStringLiteral :: Lexer Text
 lexMultilineStringLiteral = do
+  startSourcePos <- getSourcePos
   _ <- string "\"\"\""
   _ <- char '\n'
-  content <- manyTill anySingle (try (char '\n' *> string "\"\"\""))
-  pure (T.pack content)
+  withRecovery (handler startSourcePos) body
+  where
+    body = do
+      content <- manyTill anySingle (try (char '\n' *> string "\"\"\""))
+      pure (T.pack content)
+    handler startSourcePos _ = do
+      endSourcePos <- getSourcePos
+      recordLexerError
+        (LexerErrorUnterminatedString (spanBetween startSourcePos endSourcePos))
+      pure T.empty
 
 -- | JSON-compatible escape sequences plus `\$` for template interpolation.
 --
@@ -740,61 +758,51 @@ classifySurrogate codePoint
 -- Virtual Semicolon Insertion
 -- ===========================================================================
 
--- | Expression を終端しうるトークン。これらの後に改行があった場合、
--- 'insertVirtualSemicolons' が改行を仮想セミコロンに変換する。
+-- | Transform a raw token list (with TokenNewline tokens) into a token list
+-- with TokenSemicolonVirtual inserted at appropriate newlines and TokenNewline
+-- tokens removed.
 --
--- 採用基準: 「ここで expression の構文要素が完結しているとみなして良い」トークン。
--- 識別子・各種リテラル・閉じ括弧・特定キーワード (break / return / next /
--- null / true / false / 型名キーワード) が該当する。
+-- 採用基準: 「ここで expression の構文要素が完結しているとみなして良い」トークン
+-- の直後の改行のみ仮想セミコロンに変換する。識別子・各種リテラル・閉じ括弧・
+-- 特定キーワード (break / return / next / null / true / false / 型名キーワード)
+-- が該当。
 --
 -- TokenUnderscore は意図的に除外: 式位置で `_` 単独はエラー (式にならない)、
 -- かつ `_: integer` 型注釈の頭になり得る。よって行末に来た場合に挿入しても
 -- 良いケースがほぼ無い。
-semicolonInsertingTokens :: Set.Set Token
-semicolonInsertingTokens =
-  Set.fromList
-    [ TokenTemplateClose,
-      TokenKeyword KeywordBreak,
-      TokenKeyword KeywordReturn,
-      TokenKeyword KeywordNext,
-      TokenKeyword KeywordNull,
-      TokenKeyword KeywordTrue,
-      TokenKeyword KeywordFalse,
-      TokenKeyword KeywordInteger,
-      TokenKeyword KeywordBoolean,
-      TokenKeyword KeywordNumber,
-      TokenKeyword KeywordString,
-      TokenPunctuation PunctuationRightParenthesis,
-      TokenPunctuation PunctuationRightBracket,
-      TokenPunctuation PunctuationRightBrace
-    ]
-
--- | Transform a raw token list (with TokenNewline tokens) into a token list
--- with TokenSemicolonVirtual inserted at appropriate newlines and TokenNewline
--- tokens removed.
 insertVirtualSemicolons :: [WithSourceSpan Token] -> [WithSourceSpan Token]
 insertVirtualSemicolons = go Nothing
   where
     go _ [] = []
     go previous (current@(WithSourceSpan _ currentToken) : remaining)
-      | currentToken == TokenNewline =
-          if canInsertAfter previous
-            then virtualSemicolon previous : go Nothing remaining
-            else go Nothing remaining
+      | currentToken == TokenNewline = case previous of
+          Just (WithSourceSpan span_ previousToken)
+            | canInsertAfter previousToken ->
+                WithSourceSpan span_ TokenSemicolonVirtual : go Nothing remaining
+          _ -> go Nothing remaining
       | otherwise = current : go (Just current) remaining
 
-    virtualSemicolon :: Maybe (WithSourceSpan Token) -> WithSourceSpan Token
-    virtualSemicolon (Just (WithSourceSpan span_ _)) = WithSourceSpan span_ TokenSemicolonVirtual
-    virtualSemicolon Nothing = error "insertVirtualSemicolons: canInsertAfter Nothing should be False"
-
-    canInsertAfter :: Maybe (WithSourceSpan Token) -> Bool
-    canInsertAfter Nothing = False
-    canInsertAfter (Just (WithSourceSpan _ previousToken)) = case previousToken of
+    canInsertAfter :: Token -> Bool
+    canInsertAfter = \case
       TokenIdentifier _ -> True
       TokenIntegerLiteral _ -> True
       TokenFloatLiteral _ -> True
       TokenStringLiteral _ -> True
-      _ -> Set.member previousToken semicolonInsertingTokens
+      TokenTemplateClose -> True
+      TokenKeyword KeywordBreak -> True
+      TokenKeyword KeywordReturn -> True
+      TokenKeyword KeywordNext -> True
+      TokenKeyword KeywordNull -> True
+      TokenKeyword KeywordTrue -> True
+      TokenKeyword KeywordFalse -> True
+      TokenKeyword KeywordInteger -> True
+      TokenKeyword KeywordBoolean -> True
+      TokenKeyword KeywordNumber -> True
+      TokenKeyword KeywordString -> True
+      TokenPunctuation PunctuationRightParenthesis -> True
+      TokenPunctuation PunctuationRightBracket -> True
+      TokenPunctuation PunctuationRightBrace -> True
+      _ -> False
 
 -- ===========================================================================
 -- Custom megaparsec Stream instance
@@ -836,24 +844,6 @@ instance VisualStream TokenStream where
       . NE.toList
       . NE.intersperse " "
       . fmap (\(WithSourceSpan _ wrappedToken) -> showToken wrappedToken)
-    where
-      showToken = \case
-        TokenIdentifier text -> T.unpack text
-        TokenUnderscore -> "_"
-        TokenKeyword keyword -> showKeyword keyword
-        TokenIntegerLiteral integer -> show integer
-        TokenFloatLiteral double -> show double
-        TokenStringLiteral text -> show text
-        TokenTemplateOpen -> "f\""
-        TokenTemplateClose -> "\""
-        TokenTemplateString text -> T.unpack text
-        TokenTemplateExpressionOpen -> "${"
-        TokenTemplateExpressionClose -> "}"
-        TokenPunctuation punctuation -> showPunctuation punctuation
-        TokenOperator operator -> showOperator operator
-        TokenSemicolonExplicit -> ";"
-        TokenSemicolonVirtual -> ";"
-        TokenNewline -> "\\n"
 
   tokensLength Proxy = sum . fmap tokenLengthFromSpan . NE.toList
     where
@@ -980,3 +970,24 @@ showOperator = \case
   OperatorOr -> "||"
   OperatorConcat -> "++"
   OperatorNot -> "!"
+
+-- | Render a 'Token' for diagnostics. Reused by the Parser to format
+-- "expected X, got Y" error messages without redefining its own table.
+showToken :: Token -> String
+showToken = \case
+  TokenIdentifier text -> T.unpack text
+  TokenUnderscore -> "_"
+  TokenKeyword keyword -> showKeyword keyword
+  TokenIntegerLiteral integer -> show integer
+  TokenFloatLiteral double -> show double
+  TokenStringLiteral text -> show text
+  TokenTemplateOpen -> "f\""
+  TokenTemplateClose -> "\""
+  TokenTemplateString text -> T.unpack text
+  TokenTemplateExpressionOpen -> "${"
+  TokenTemplateExpressionClose -> "}"
+  TokenPunctuation punctuation -> showPunctuation punctuation
+  TokenOperator operator -> showOperator operator
+  TokenSemicolonExplicit -> ";"
+  TokenSemicolonVirtual -> ";"
+  TokenNewline -> "\\n"

@@ -797,11 +797,13 @@ resolveExternalAgent ExternalAgentDeclaration {..} = do
 resolveData :: DataDeclaration Parsed -> Identifier (DataDeclaration Identified)
 resolveData DataDeclaration {..} = do
   name' <- liftSignatureVariable name
+  typeName' <- liftSignatureType typeName
   parameters' <- mapM resolveDataParameter parameters
   pure
     DataDeclaration
       { annotation = annotation,
         name = name',
+        typeName = typeName',
         parameters = parameters',
         sourceSpan = sourceSpan
       }

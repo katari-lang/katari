@@ -86,6 +86,14 @@ lookupTypeByName name res =
 synonymRhsOf :: TypeData -> Maybe (SyntacticType Identified)
 synonymRhsOf td = td.typeSynonymRhs
 
+-- | Pull the @typeName.metadata@ tag out of every @data@ declaration in a
+-- resolved module. Used by tests that assert AST-side TypeId carriage.
+collectDataTypeNameMetadata :: Module Identified -> [Identified 'TypeRef]
+collectDataTypeNameMetadata m =
+  [ ref.metadata
+    | DeclarationData DataDeclaration {typeName = ref} <- m.declarations
+  ]
+
 -- Error predicates as top-level values.
 isUndefName :: IdentifierError -> Bool
 isUndefName (ErrorUndefinedName _ _) = True
@@ -205,6 +213,46 @@ dataDeclarations = describe "data declarations" $ do
             "agent main(x: circle) { match (x) { case circle(r = v) => { v } } }"
           ]
     pure ()
+
+  it "data declaration's typeName carries the same TypeId registered in identifiedTypes" $ do
+    res <-
+      shouldIdentify
+        $ mconcat
+          [ "data widget(w: integer)\n",
+            "agent main() { widget(w = 1) }"
+          ]
+    -- AST 上の typeName.metadata と identifiedTypes 側の TypeId が一致することを確認。
+    let mainModule = head (Map.elems res.moduleASTs)
+        typeNameMeta = head (collectDataTypeNameMetadata mainModule)
+        widgetTypeId =
+          head
+            [ tid
+              | (tid, td) <- Map.toList res.identifiedTypes,
+                td.typeName == "widget"
+            ]
+    case typeNameMeta of
+      IdentifiedType tid -> tid `shouldBe` widgetTypeId
+      IdentifiedUnresolvedType ->
+        expectationFailure "data declaration typeName resolved as Unresolved"
+
+  it "two modules with same-named data have distinct TypeIds on AST typeName" $ do
+    -- リファクタ前は ConstraintGenerator 側の text 検索が衝突して TypeId を取れず
+    -- Nothing にフォールバックしていた。AST に TypeId が乗るので回帰しない。
+    let modA = "data foo(x: integer)\nagent run() { foo(x = 1) }"
+        modB = "data foo(y: string)\nagent run() { foo(y = \"a\") }"
+    eitherRes <- identifyMany [("a", modA), ("b", modB)]
+    case eitherRes of
+      Left errs -> expectationFailure ("identify failed: " ++ show errs)
+      Right res -> do
+        let asts = Map.elems res.moduleASTs
+            typeIds =
+              [ tid
+                | m <- asts,
+                  metadata <- collectDataTypeNameMetadata m,
+                  IdentifiedType tid <- [metadata]
+              ]
+        length typeIds `shouldBe` 2
+        (head typeIds == typeIds !! 1) `shouldBe` False
 
 -- ---------------------------------------------------------------------------
 -- Type synonyms / literal types / union types

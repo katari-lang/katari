@@ -18,6 +18,7 @@ library:
     - Katari.Typechecker.NormalizedType
     - Katari.Typechecker.ConstraintGenerator
     - Katari.Typechecker.Solver
+    - Katari.Typechecker.Zonker
 
 tests:
   katari-compiler-test:
