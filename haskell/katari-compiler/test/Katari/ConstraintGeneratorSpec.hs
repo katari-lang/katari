@@ -296,11 +296,9 @@ whereBlocks = describe "where blocks" $ do
           _ -> False
       )
 
-  it "where without then: body tail value flows into the handle-result tv" $ do
-    -- A where block with no then clause means the body's tail value is the
-    -- whole expression's value. The body has a tail expression "hello" (no
-    -- separating newline before '}', so it stays a returnExpression rather
-    -- than becoming a StatementExpression).
+  it "where: body tail value flows into the handle-result tv" $ do
+    -- The body's tail expression "hello" flows into the where-block's
+    -- whole-result type variable.
     cg <-
       runOne $
         mconcat
@@ -318,41 +316,57 @@ whereBlocks = describe "where blocks" $ do
           _ -> False
       )
 
-  it "where with then: body tail value flows into the then-pattern annotation" $ do
-    -- Body tail "hi" : string. Then-pattern annotated 'integer'. CG should
-    -- emit a constraint linking the body's literal type to integer.
+  it "handler implicit completion: body tail flows to retTvId (next-tv)" $ do
+    -- A handler body that falls through without 'next' / 'break' has its
+    -- tail value implicitly treated as the resume value of an implicit
+    -- 'next'. CG must emit a constraint from the tail's literal type to
+    -- some type variable (the handler's retTvId / next-tv).
     cg <-
       runOne $
         mconcat
           [ "req fetch() -> string\n",
-            "agent main() { \"hi\" } where {\n",
-            "  req fetch() -> string {\n",
-            "    next \"x\"\n",
-            "  }\n",
-            "} then(x: integer) { 0 }\n"
+            "agent main() -> string { fetch() } where {\n",
+            "  req fetch() -> string { \"implicit\" }\n",
+            "}\n"
           ]
     cg.errors `shouldBe` []
     cg `shouldSatisfy` hasTypeConstraint
-      ( \l r -> l == SemanticTypeLiteralString "hi" && r == SemanticTypeInteger
-      )
-
-  it "where with then: then block's tail flows into the handle-result tv" $ do
-    cg <-
-      runOne $
-        mconcat
-          [ "req fetch() -> string\n",
-            "agent main() -> integer { \"hi\" } where {\n",
-            "  req fetch() -> string {\n",
-            "    next \"x\"\n",
-            "  }\n",
-            "} then(x: string) { 0 }\n"
-          ]
-    cg.errors `shouldBe` []
-    cg `shouldSatisfy` hasTypeConstraint
-      ( \l r -> l == SemanticTypeLiteralInteger 0 && case r of
+      ( \l r -> l == SemanticTypeLiteralString "implicit" && case r of
           SemanticTypeVariable _ -> True
           _ -> False
       )
+
+  it "where block emits a handler-effect-bound constraint (e4 <: e1)" $ do
+    -- In addition to the discharge constraint (e3 <: e1 ∪ e2), a where
+    -- block emits an effect-var <: effect-var constraint bounding handler
+    -- bodies' effect by the outer effect (e4 <: e1). Both lhs and rhs
+    -- must have only effectVars populated and effectReqs empty.
+    cg <-
+      runOne $
+        mconcat
+          [ "req fetch() -> string\n",
+            "agent main() -> string { fetch() } where {\n",
+            "  req fetch() -> string {\n",
+            "    next \"x\"\n",
+            "  }\n",
+            "}\n"
+          ]
+    cg.errors `shouldBe` []
+    cg `shouldSatisfy` hasEffectConstraint
+      ( \lhs rhs ->
+          Set.null lhs.effectReqs
+            && Set.null rhs.effectReqs
+            && not (Set.null lhs.effectVars)
+            && not (Set.null rhs.effectVars)
+      )
+
+  it "block without where emits no effect constraints from the block itself" $ do
+    -- A plain block (no where) should not introduce extra effect
+    -- constraints. The agent itself emits one (bodyEff <: declared); we
+    -- check the total effect-constraint count is exactly 1.
+    cg <- runOne "agent main() -> string { \"hi\" }\n"
+    cg.errors `shouldBe` []
+    countEffectConstraints cg `shouldBe` 1
 
 -- ---------------------------------------------------------------------------
 -- Type synonym cycle detection

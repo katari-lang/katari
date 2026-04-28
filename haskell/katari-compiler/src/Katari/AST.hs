@@ -242,12 +242,6 @@ instance HasSourceSpan (Block metadata) where
 data WhereBlock (metadata :: SymbolKind -> Type) = WhereBlock
   { stateVariables :: [StateVariableBinding metadata],
     handlers :: [RequestHandler metadata],
-    -- | @then@ 節の構造:
-    --
-    --   * @Nothing@                          : @then@ 節そのものが無い
-    --   * @Just (Nothing,        block)@     : @then { ... }@ (pattern 省略)
-    --   * @Just (Just pattern,   block)@     : @then(pat) { ... }@
-    thenClause :: Maybe (Maybe (Pattern metadata), Block metadata),
     sourceSpan :: SourceSpan
   }
 

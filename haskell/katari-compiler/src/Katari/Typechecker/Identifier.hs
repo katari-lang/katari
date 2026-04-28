@@ -1109,25 +1109,16 @@ resolveBlock Block {statements, returnExpression, whereBlock, sourceSpan} = do
 --      semantics, not @let rec@).
 --   2. Handler names are NOT new bindings; they are references to existing
 --      req declarations.
---   3. Handler bodies and the @then@ block are resolved in a frame where all
---      state vars are already bound.
+--   3. Handler bodies are resolved in a frame where all state vars are
+--      already bound.
 resolveWhereBlock :: WhereBlock Parsed -> Identifier (WhereBlock Identified)
-resolveWhereBlock WhereBlock {stateVariables, handlers, thenClause, sourceSpan} = withScopeFrame $ do
+resolveWhereBlock WhereBlock {stateVariables, handlers, sourceSpan} = withScopeFrame $ do
   stateVariables' <- mapM resolveStateVariable stateVariables
   handlers' <- mapM resolveRequestHandler handlers
-  thenClause' <-
-    traverse
-      ( \(maybePattern, block) -> withScopeFrame $ do
-          maybePattern' <- traverse resolvePattern maybePattern
-          block' <- resolveBlock block
-          pure (maybePattern', block')
-      )
-      thenClause
   pure
     WhereBlock
       { stateVariables = stateVariables',
         handlers = handlers',
-        thenClause = thenClause',
         sourceSpan = sourceSpan
       }
 

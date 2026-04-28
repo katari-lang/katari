@@ -115,7 +115,6 @@ spec = do
     multilineTokenSpans
     crlfHandling
     qualifiedConstructorPatterns
-    thenClausePattern
 
 -- ---------------------------------------------------------------------------
 -- Literals
@@ -1078,48 +1077,6 @@ whereBlock = describe "where block" $ do
           ]
     pure ()
 
-  it "parses where state vars accessed in then clause" $ do
-    _ <-
-      shouldSucceed $
-        mconcat
-          [ "agent main() {",
-            "  result",
-            "} where (var total = 0) {",
-            "  req add(n: integer) { next null with { total = total + n }; }",
-            "} then {",
-            "  total",
-            "}"
-          ]
-    pure ()
-
-  it "parses where with then clause" $ do
-    _ <-
-      shouldSucceed $
-        mconcat
-          [ "agent main() {",
-            "  result",
-            "} where {",
-            "  req get() { 1 }",
-            "} then (v) {",
-            "  v",
-            "}"
-          ]
-    pure ()
-
-  it "parses where with anonymous then" $ do
-    _ <-
-      shouldSucceed $
-        mconcat
-          [ "agent main() {",
-            "  result",
-            "} where {",
-            "  req get() { 1 }",
-            "} then {",
-            "  null",
-            "}"
-          ]
-    pure ()
-
   it "parses where on nested block expression (let binding)" $ do
     _ <-
       shouldSucceed $
@@ -1981,51 +1938,3 @@ qualifiedConstructorPatterns = describe "qualified constructor patterns" $ do
         _ -> expectationFailure "expected match"
       _ -> expectationFailure "expected agent"
 
--- ---------------------------------------------------------------------------
--- then-clause pattern (Maybe) (#4)
--- ---------------------------------------------------------------------------
-
-thenClausePattern :: Spec
-thenClausePattern = describe "then clause pattern" $ do
-  it "then { ... } records pattern as Nothing" $ do
-    m <-
-      shouldSucceed $
-        mconcat
-          [ "agent main() {",
-            "  result",
-            "} where {",
-            "  req get() { 1 }",
-            "} then {",
-            "  null",
-            "}"
-          ]
-    case head (decls m) of
-      DeclarationAgent a -> case a.body.whereBlock of
-        Just wb -> case wb.thenClause of
-          Just (Nothing, _) -> pure ()
-          Just (Just _, _) -> expectationFailure "expected then without pattern"
-          Nothing -> expectationFailure "expected then clause"
-        Nothing -> expectationFailure "expected where block"
-      _ -> expectationFailure "expected agent"
-
-  it "then(pat) { ... } records pattern as Just" $ do
-    m <-
-      shouldSucceed $
-        mconcat
-          [ "agent main() {",
-            "  result",
-            "} where {",
-            "  req get() { 1 }",
-            "} then(v) {",
-            "  v",
-            "}"
-          ]
-    case head (decls m) of
-      DeclarationAgent a -> case a.body.whereBlock of
-        Just wb -> case wb.thenClause of
-          Just (Just (PatternVariable v), _) -> nameText v.name `shouldBe` "v"
-          Just (Just _, _) -> expectationFailure "expected variable pattern"
-          Just (Nothing, _) -> expectationFailure "expected then with pattern"
-          Nothing -> expectationFailure "expected then clause"
-        Nothing -> expectationFailure "expected where block"
-      _ -> expectationFailure "expected agent"

@@ -121,10 +121,10 @@ data ConstraintReason
   | ReasonReturnStatement SourceSpan
   | ReasonEffectBound SourceSpan
   | ReasonHandleEffectDischarge SourceSpan
+  | ReasonHandlerEffectBound SourceSpan
   | ReasonHandleNext SourceSpan
   | ReasonHandleBreak SourceSpan
-  | ReasonHandleResult SourceSpan
-  | ReasonHandleThenPattern SourceSpan
+  | ReasonHandleResultBody SourceSpan
   | ReasonForBreak SourceSpan
   | ReasonForIn SourceSpan
   | ReasonModifierUpdate SourceSpan
@@ -705,17 +705,24 @@ expressionMetadata = \case
 -- | Walk a block, returning the rebuilt @Constrained@ block and the
 -- 'SemanticType' of the block as a whole.
 --
--- For a plain block (no @where@), the type is the tail-expression type, or
--- 'SemanticTypeNull' if the block has no tail expression.
+-- For a plain block (no @where@), the type is the tail-expression type
+-- (or 'SemanticTypeNull' if the block has no tail expression), and no
+-- fresh effect variables are allocated — the body walks under the
+-- enclosing effect context directly.
 --
--- For a block with a @where@ clause, the result type is a fresh handle-result
--- type variable. The body's tail value, every @break e@ inside any handler,
--- and the @then@ block's tail (if a @then@ clause is present) all flow into
--- this variable. When there is no @then@ clause, the body's tail flows into
--- it directly. When there is a @then@ clause, the body's tail flows into the
--- @then@ pattern instead, and the @then@ block's tail flows into the
--- handle-result variable. @break@ skips the @then@ clause, so handler-break
--- values always target the handle-result variable.
+-- For a block with a @where@ clause, two fresh effect variables are
+-- introduced: e3 for the body and e4 for handler bodies. The constraints
+--
+-- @
+--   e3 \<: e1 ∪ e2     (ReasonHandleEffectDischarge)
+--   e4 \<: e1          (ReasonHandlerEffectBound)
+-- @
+--
+-- ensure body effects are either discharged by the handlers or propagated
+-- to the outer context, while handler bodies can only raise outer effects
+-- (a handler cannot dispatch its own request to itself). The block's
+-- whole-result type is a fresh type variable that receives both the body's
+-- tail value and every @break e@ inside any handler.
 walkBlock :: Block Identified -> CG (Block Constrained, SemanticType Unresolved)
 walkBlock Block {statements, returnExpression, whereBlock, sourceSpan} = case whereBlock of
   Nothing -> do
@@ -731,16 +738,20 @@ walkBlock Block {statements, returnExpression, whereBlock, sourceSpan} = case wh
         bodyTy
       )
   Just wb -> do
-    outerEff <- asks (.contextEnclosingEffects)
-    innerEffId <- freshEffectVarId
+    e1 <- asks (.contextEnclosingEffects)
+    e3Id <- freshEffectVarId
+    e4Id <- freshEffectVarId
     -- The body covered by where is *not* under the handle scope: break /
     -- next are valid only inside the handler bodies of @wb@.
     (statements', returnExpression') <-
-      withEnclosingEffects innerEffId (walkBlockBody statements returnExpression)
+      withEnclosingEffects e3Id (walkBlockBody statements returnExpression)
     let bodyTy = blockBodyTailType returnExpression'
     tWholeBlockId <- freshTypeVarId
     let tWholeBlock = SemanticTypeVariable tWholeBlockId
-    whereBlock' <- walkWhereBlock outerEff innerEffId tWholeBlockId bodyTy wb
+    -- Body's tail value flows into the whole-block type. break inside any
+    -- handler also flows here (wired via 'withHandleScope' in the handler).
+    addTypeConstraint bodyTy tWholeBlock (ReasonHandleResultBody sourceSpan)
+    whereBlock' <- walkWhereBlock e1 e3Id e4Id tWholeBlockId wb
     pure
       ( Block
           { statements = statements',
@@ -768,37 +779,33 @@ walkBlockBody statements returnExpression = do
 walkWhereBlock ::
   Maybe EffectVarId ->
   EffectVarId ->
+  EffectVarId ->
   TypeVarId ->
-  SemanticType Unresolved ->
   WhereBlock Identified ->
   CG (WhereBlock Constrained)
-walkWhereBlock outerEff innerEffId tWholeBlockId bodyTy WhereBlock {stateVariables, handlers, thenClause, sourceSpan} = do
+walkWhereBlock e1 e3Id e4Id tWholeBlockId WhereBlock {stateVariables, handlers, sourceSpan} = do
   stateVariables' <- mapM walkStateVariable stateVariables
-  handlers' <- mapM (walkRequestHandler outerEff tWholeBlockId) handlers
-  thenClause' <- case thenClause of
-    Just clause -> Just <$> walkThenClause bodyTy tWholeBlockId clause
-    Nothing -> do
-      -- No 'then': the body's tail value is the entire expression's value
-      -- (modulo break, which is wired through tWholeBlockId in handlers).
-      addTypeConstraint bodyTy (SemanticTypeVariable tWholeBlockId) (ReasonHandleResult sourceSpan)
-      pure Nothing
+  handlers' <- mapM (walkRequestHandler e4Id tWholeBlockId) handlers
   let handledIds =
         Set.fromList
           [ vid
             | RequestHandler {name} <- handlers,
               IdentifiedVariable vid <- [name.metadata]
           ]
-  let outerEffPart = maybe emptyEffect effectFromVar outerEff
-      handledPart = SemanticEffect Set.empty handledIds
+  let e1Eff = maybe emptyEffect effectFromVar e1
+      e2Eff = SemanticEffect Set.empty handledIds
   addEffectConstraint
-    (effectFromVar innerEffId)
-    (unionEffects outerEffPart handledPart)
+    (effectFromVar e3Id)
+    (unionEffects e1Eff e2Eff)
     (ReasonHandleEffectDischarge sourceSpan)
+  addEffectConstraint
+    (effectFromVar e4Id)
+    e1Eff
+    (ReasonHandlerEffectBound sourceSpan)
   pure
     WhereBlock
       { stateVariables = stateVariables',
         handlers = handlers',
-        thenClause = thenClause',
         sourceSpan = sourceSpan
       }
 
@@ -822,30 +829,31 @@ walkStateVariable StateVariableBinding {name, typeAnnotation, initial, sourceSpa
       }
 
 walkRequestHandler ::
-  Maybe EffectVarId ->
+  EffectVarId ->
   TypeVarId ->
   RequestHandler Identified ->
   CG (RequestHandler Constrained)
-walkRequestHandler outerEff tWholeBlockId RequestHandler {moduleQualifier, name, parameters, returnType, body, sourceSpan} = do
-  -- Handler body has no fresh effect var of its own: effects raised inside
-  -- bind to the surrounding agent (= outer effect var).
-  let walkUnderEffects = maybe id withEnclosingEffects outerEff
+walkRequestHandler e4Id tWholeBlockId RequestHandler {moduleQualifier, name, parameters, returnType, body, sourceSpan} = do
   tHandled <- variableTypeFromName name
   reqVarId <- variableIdOfName name
   (parameters', paramSig) <- walkParameterListForSignature parameters
   retSemantic <- elaborateOrFresh returnType
   retTvId <- freshReturnTypeVar retSemantic
-  -- Handler body 'next e' resumes the original request call; 'e' becomes
-  -- the value the body site sees, i.e. constrained against the handler's
-  -- declared return type. Reusing retTvId as the next-tv keeps the chain:
-  -- next-value <: retTvId == retSemantic, and via handlerSignature <: t_req
-  -- the value transitively flows to the request's declared return.
+  -- Handler body walks under e4 (the dedicated handler-effect var) and the
+  -- handle scope. 'next e' resumes the original request call, so 'e' is
+  -- constrained against retTvId (= the next-tv); 'break e' targets
+  -- tWholeBlock (handle-scope result). 'return' inside a handler body
+  -- targets the enclosing scope (typically the outer agent's return), not
+  -- the handler — we do not override 'withReturn' here.
   --
-  -- 'return' inside a handler body targets the enclosing scope (typically
-  -- the outer agent's return), not the handler — we do not override
-  -- 'withReturn' here.
-  (body', _bodyTy) <-
-    walkUnderEffects . withHandleScope tWholeBlockId retTvId $ walkBlock body
+  -- Implicit completion: if the body falls through without 'next' or
+  -- 'break', the tail value is taken as the value passed to an implicit
+  -- 'next' (= resume value). This is the opposite of Koka-style handlers
+  -- where body fall-through is the handler's overall result. Katari treats
+  -- the handler body more like a function definition.
+  (body', bodyTy) <-
+    withEnclosingEffects e4Id . withHandleScope tWholeBlockId retTvId $ walkBlock body
+  addTypeConstraint bodyTy (SemanticTypeVariable retTvId) (ReasonHandleNext sourceSpan)
   addEqTypeConstraint (SemanticTypeVariable retTvId) retSemantic (ReasonReturnTypeAnnotation sourceSpan)
   let handlerSignature =
         SemanticTypeFunction
@@ -863,25 +871,6 @@ walkRequestHandler outerEff tWholeBlockId RequestHandler {moduleQualifier, name,
         body = body',
         sourceSpan = sourceSpan
       }
-
--- | Walk a @then@ clause. The body's tail value is matched against the
--- @then@-pattern (if any), and the @then@ block's own tail flows into the
--- enclosing handle-result type variable.
-walkThenClause ::
-  SemanticType Unresolved ->
-  TypeVarId ->
-  (Maybe (Pattern Identified), Block Identified) ->
-  CG (Maybe (Pattern Constrained), Block Constrained)
-walkThenClause bodyTy tWholeBlockId (maybePattern, block) = do
-  maybePattern' <- case maybePattern of
-    Just pat -> do
-      (pat', patternType) <- walkPattern pat
-      addTypeConstraint bodyTy patternType (ReasonHandleThenPattern (sourceSpanOf pat))
-      pure (Just pat')
-    Nothing -> pure Nothing
-  (block', thenTy) <- walkBlock block
-  addTypeConstraint thenTy (SemanticTypeVariable tWholeBlockId) (ReasonHandleResult (sourceSpanOf block))
-  pure (maybePattern', block')
 
 -- ---------------------------------------------------------------------------
 -- Statements

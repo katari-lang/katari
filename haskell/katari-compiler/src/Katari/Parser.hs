@@ -755,13 +755,10 @@ parseWhereBlock = withSpan $ do
   skipMany parseSemicolon
   handlers <- many (parseRequestHandler <* skipMany parseSemicolon)
   parsePunctuation PunctuationRightBrace
-  detectSameLineKeywordViolation
-  thenClause <- optional parseThenClause
   pure $ \sourceSpan ->
     WhereBlock
       { stateVariables = stateVariables,
         handlers = handlers,
-        thenClause = thenClause,
         sourceSpan = sourceSpan
       }
 
@@ -779,22 +776,6 @@ parseStateVariable = withSpan $ do
         initial = expression,
         sourceSpan = sourceSpan
       }
-
--- | @then@ 節:
---
---   * @then(pat) { ... }@ → @(Just pat, block)@
---   * @then       { ... }@ → @(Nothing,  block)@
-parseThenClause :: Parser (Maybe (Pattern Parsed), Block Parsed)
-parseThenClause = do
-  parseKeyword KeywordThen
-  parsedPattern <-
-    optional $
-      between
-        (parsePunctuation PunctuationLeftParenthesis)
-        (parsePunctuation PunctuationRightParenthesis)
-        parsePattern
-  body <- parseBlock
-  pure (parsedPattern, body)
 
 -- | req handler は @with@ 節を持たない。handler 内で発火する effect は handler
 -- ではなく囲む agent に bind されるため、handler 自身に effect 注釈を付けるのは
