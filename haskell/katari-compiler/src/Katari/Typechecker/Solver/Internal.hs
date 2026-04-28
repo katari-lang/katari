@@ -139,10 +139,7 @@ semanticToConcrete = \case
   SemanticTypeObject fields ->
     SemanticTypeObject <$> traverse semanticToConcrete fields
   SemanticTypeFunction parameterTypes returnType effects -> do
-    parameterTypesConcrete <-
-      traverse
-        (\(label, parameterType) -> (,) label <$> semanticToConcrete parameterType)
-        parameterTypes
+    parameterTypesConcrete <- traverse semanticToConcrete parameterTypes
     returnTypeConcrete <- semanticToConcrete returnType
     effectsConcrete <-
       if Set.null effects.effectVars
@@ -172,7 +169,7 @@ typeVarsIn = \case
   SemanticTypeFunction parameterTypes returnType _ ->
     Set.unions
       ( typeVarsIn returnType
-          : (typeVarsIn . snd <$> parameterTypes)
+          : (typeVarsIn <$> Map.elems parameterTypes)
       )
   SemanticTypeArray element -> typeVarsIn element
   SemanticTypeTuple elements -> Set.unions (typeVarsIn <$> elements)
@@ -186,7 +183,7 @@ effectVarsIn = \case
     Set.unions
       ( effects.effectVars
           : effectVarsIn returnType
-          : (effectVarsIn . snd <$> parameterTypes)
+          : (effectVarsIn <$> Map.elems parameterTypes)
       )
   SemanticTypeArray element -> effectVarsIn element
   SemanticTypeTuple elements -> Set.unions (effectVarsIn <$> elements)

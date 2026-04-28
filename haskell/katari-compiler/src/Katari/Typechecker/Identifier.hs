@@ -1088,6 +1088,11 @@ resolveSyntacticRequest SyntacticRequest {name, sourceSpan} = do
 -- | A block's body and its @where@ clause are **independent scopes**: a
 -- @let@ in the body is invisible from the where clause and vice versa, while
 -- both inherit the surrounding outer scope.
+-- | A block's body and its @where@ clause are **independent scopes**: a
+-- @let@ in the body is invisible from the where clause and vice versa, while
+-- both inherit the surrounding outer scope. State variables declared in
+-- @where@ are visible to handlers (and the @then@ clause once revived) but
+-- NOT to the body.
 resolveBlock :: Block Parsed -> Identifier (Block Identified)
 resolveBlock Block {statements, returnExpression, whereBlock, sourceSpan} = do
   -- Body: push a fresh frame.
@@ -1095,7 +1100,7 @@ resolveBlock Block {statements, returnExpression, whereBlock, sourceSpan} = do
     ss <- mapM resolveStatement statements
     re <- traverse resolveExpression returnExpression
     pure (ss, re)
-  -- Where: resolved in its own fresh frame.
+  -- Where: resolved in its own fresh frame (sibling to the body's frame).
   whereBlock' <- traverse resolveWhereBlock whereBlock
   pure
     Block
@@ -1114,13 +1119,25 @@ resolveBlock Block {statements, returnExpression, whereBlock, sourceSpan} = do
 --   3. Handler bodies are resolved in a frame where all state vars are
 --      already bound.
 resolveWhereBlock :: WhereBlock Parsed -> Identifier (WhereBlock Identified)
-resolveWhereBlock WhereBlock {stateVariables, handlers, sourceSpan} = withScopeFrame $ do
+resolveWhereBlock WhereBlock {stateVariables, handlers, thenClause, sourceSpan} = withScopeFrame $ do
   stateVariables' <- mapM resolveStateVariable stateVariables
   handlers' <- mapM resolveRequestHandler handlers
+  -- The @then@ clause shares the where's frame, so it sees state vars but
+  -- not body @let@ bindings. Its own pattern + block introduce a nested
+  -- frame for the destructured pattern bindings.
+  thenClause' <-
+    traverse
+      ( \(maybePattern, block) -> withScopeFrame $ do
+          maybePattern' <- traverse resolvePattern maybePattern
+          block' <- resolveBlock block
+          pure (maybePattern', block')
+      )
+      thenClause
   pure
     WhereBlock
       { stateVariables = stateVariables',
         handlers = handlers',
+        thenClause = thenClause',
         sourceSpan = sourceSpan
       }
 

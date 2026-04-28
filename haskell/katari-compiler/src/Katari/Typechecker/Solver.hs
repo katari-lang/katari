@@ -54,7 +54,6 @@ where
 
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (fromMaybe)
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Katari.AST (Position (..), SourceSpan (..))
@@ -66,12 +65,11 @@ import Katari.Typechecker.ConstraintGenerator
 import Katari.Typechecker.Identifier (VariableId)
 import Katari.Typechecker.NormalizedType
   ( NormalizedType (..),
-    emptyLayered,
     normaliseSemantic,
+    subtypeNT,
   )
 import Katari.Typechecker.SemanticType
   ( EffectVarId (..),
-    SemanticType (..),
     TypeVarId (..),
   )
 import Katari.Typechecker.Solver.Branch qualified as Branch
@@ -90,7 +88,7 @@ solve cgResult =
       typeConstraints = filter isTypeConstraint allConstraints
       effectConstraints = filter isEffectConstraint allConstraints
       (typeSubstitution_, typeErrors) =
-        solveTypeWorklist cgResult.nextTypeVarId typeConstraints
+        solveTypeWorklist cgResult.nextTypeVarId cgResult.nextEffectVarId typeConstraints
       (effectSubstitution_, effectErrors) =
         solveEffectWorklist cgResult.nextEffectVarId effectConstraints
       normalizedTypeSubstitution = substToNormalizedSafe typeSubstitution_
@@ -111,15 +109,21 @@ solve cgResult =
 -- the caller will fall back to NTUnknown for any unsolved variables.
 solveTypeWorklist ::
   Int ->
+  Int ->
   [Constraint] ->
   (Substitution, [SolverError])
-solveTypeWorklist startNextTypeVarId initialConstraints =
-  case go startNextTypeVarId initialConstraints Map.empty of
+solveTypeWorklist startNextTypeVarId startNextEffectVarId initialConstraints =
+  case go startNextTypeVarId startNextEffectVarId initialConstraints Map.empty of
     Right substitution -> (substitution, [])
     Left err -> (Map.empty, [err])
   where
-    go :: Int -> [Constraint] -> Substitution -> Either SolverError Substitution
-    go nextTypeVarId constraints accumulatedSubstitution = do
+    go ::
+      Int ->
+      Int ->
+      [Constraint] ->
+      Substitution ->
+      Either SolverError Substitution
+    go nextTypeVarId nextEffectVarId constraints accumulatedSubstitution = do
       let substituted =
             fmap (Substitution.applySubstConstraint accumulatedSubstitution) constraints
       decomposed <- Decompose.decomposeConstraintsAll substituted
@@ -129,11 +133,11 @@ solveTypeWorklist startNextTypeVarId initialConstraints =
       case pinnable of
         ((typeVarId, pinnedType) : _) ->
           let newSubstitution = Map.insert typeVarId pinnedType accumulatedSubstitution
-           in go nextTypeVarId decomposed newSubstitution
+           in go nextTypeVarId nextEffectVarId decomposed newSubstitution
         [] ->
-          case Branch.branchConstraints nextTypeVarId decomposed of
+          case Branch.branchConstraints nextTypeVarId nextEffectVarId decomposed of
             Just branches ->
-              tryBranches nextTypeVarId accumulatedSubstitution branches
+              tryBranches nextTypeVarId nextEffectVarId accumulatedSubstitution branches
             Nothing -> do
               let propagated = Substitution.calculatePropagationAll decomposed
                   collected = Substitution.collectFinalSubstitutions propagated
@@ -144,19 +148,29 @@ solveTypeWorklist startNextTypeVarId initialConstraints =
 
     tryBranches ::
       Int ->
+      Int ->
       Substitution ->
-      [(Substitution, [Constraint], Int)] ->
+      [(Substitution, [Constraint], Int, Int)] ->
       Either SolverError Substitution
-    tryBranches _ _ [] =
-      Left (SolverErrorStructuralMismatch placeholderReason "all branches failed")
-    tryBranches _ accumulatedSubstitution [(branchSubstitution, branchConstraints, nextTypeVarIdAfter)] = do
+    tryBranches _ _ _ [] =
+      Left
+        ( SolverErrorStructuralMismatch
+            (synthesisedReason initialConstraints)
+            "all branches failed"
+        )
+    tryBranches _ _ accumulatedSubstitution [(branchSubstitution, branchConstraints, nextTypeVarIdAfter, nextEffectVarIdAfter)] = do
       let combinedSubstitution = Map.union branchSubstitution accumulatedSubstitution
-      go nextTypeVarIdAfter branchConstraints combinedSubstitution
-    tryBranches nextTypeVarId accumulatedSubstitution ((branchSubstitution, branchConstraints, nextTypeVarIdAfter) : remainingBranches) =
+      go nextTypeVarIdAfter nextEffectVarIdAfter branchConstraints combinedSubstitution
+    tryBranches nextTypeVarId nextEffectVarId accumulatedSubstitution ((branchSubstitution, branchConstraints, nextTypeVarIdAfter, nextEffectVarIdAfter) : remainingBranches) =
       let combinedSubstitution = Map.union branchSubstitution accumulatedSubstitution
-       in case go nextTypeVarIdAfter branchConstraints combinedSubstitution of
+       in case go nextTypeVarIdAfter nextEffectVarIdAfter branchConstraints combinedSubstitution of
             Right successSubstitution -> Right successSubstitution
-            Left _ -> tryBranches nextTypeVarId accumulatedSubstitution remainingBranches
+            Left _ ->
+              tryBranches
+                nextTypeVarId
+                nextEffectVarId
+                accumulatedSubstitution
+                remainingBranches
 
 -- | Detect concrete-vs-concrete contradictions in remaining constraints
 -- after propagation.
@@ -164,18 +178,22 @@ checkContradictions :: [Constraint] -> [SolverError]
 checkContradictions = foldr collect []
   where
     collect (TypeConstraint leftType rightType reason) accumulator
-      | containsNoTypeVars leftType
-          && containsNoTypeVars rightType
-          && not (isSubtypeConcrete leftType rightType) =
-          SolverErrorContradiction
-            reason
-            (fromMaybe SemanticTypeUnknown (semanticToConcrete leftType))
-            (fromMaybe SemanticTypeUnknown (semanticToConcrete rightType))
-            : accumulator
+      | Just leftConcrete <- semanticToConcrete leftType,
+        Just rightConcrete <- semanticToConcrete rightType,
+        not (subtypeNT (normaliseSemantic leftConcrete) (normaliseSemantic rightConcrete)) =
+          SolverErrorContradiction reason leftConcrete rightConcrete : accumulator
     collect _ accumulator = accumulator
 
-placeholderReason :: ConstraintReason
-placeholderReason = ReasonAgentSignature dummySpan
+-- | Pick a 'ConstraintReason' to attach to a synthesised solver error
+-- ("all branches failed"): use the reason of the first constraint that
+-- still mentions a type variable (most likely the syntactic origin of
+-- the unresolvable constraint), falling back to a dummy span if no such
+-- constraint exists.
+synthesisedReason :: [Constraint] -> ConstraintReason
+synthesisedReason constraints =
+  case [reason | TypeConstraint _ _ reason <- constraints] of
+    (firstReason : _) -> ReasonSolverInternal (extractSpan firstReason)
+    [] -> ReasonSolverInternal dummySpan
   where
     dummySpan =
       SrcSpan
@@ -184,12 +202,59 @@ placeholderReason = ReasonAgentSignature dummySpan
           end = Position {line = 0, column = 0}
         }
 
+extractSpan :: ConstraintReason -> SourceSpan
+extractSpan = \case
+  ReasonAgentSignature s -> s
+  ReasonRequestSignature s -> s
+  ReasonExternalAgentSignature s -> s
+  ReasonDataConstructorSignature s -> s
+  ReasonRequestHandlerSignature s -> s
+  ReasonReturnTypeAnnotation s -> s
+  ReasonReturnStatement s -> s
+  ReasonImplicitReturn s -> s
+  ReasonEffectBound s -> s
+  ReasonHandleEffectDischarge s -> s
+  ReasonHandlerEffectBound s -> s
+  ReasonHandleNext s -> s
+  ReasonHandleImplicitBreak s -> s
+  ReasonHandleBreak s -> s
+  ReasonHandleResultBody s -> s
+  ReasonThenPattern s -> s
+  ReasonThenBodyToOuter s -> s
+  ReasonThenBodyToWhole s -> s
+  ReasonForBreak s -> s
+  ReasonForIn s -> s
+  ReasonModifierUpdate s -> s
+  ReasonLetPattern s -> s
+  ReasonStateVarAnnotation s -> s
+  ReasonForVarAnnotation s -> s
+  ReasonVariablePatternAnnotation s -> s
+  ReasonCallArgument s -> s
+  ReasonBinaryOperator s -> s
+  ReasonUnaryOperator s -> s
+  ReasonIfCondition s -> s
+  ReasonIfBranch s -> s
+  ReasonMatchSubject s -> s
+  ReasonMatchArm s -> s
+  ReasonFieldAccess s -> s
+  ReasonIndexAccessArray s -> s
+  ReasonIndexAccessIndex s -> s
+  ReasonTemplateInterpolation s -> s
+  ReasonArrayElement s -> s
+  ReasonConstructorPattern s -> s
+  ReasonSolverInternal s -> s
+
+-- | Convert each pinned 'SemanticType' 'Unresolved' to the public
+-- 'NormalizedType' form. Variables that are still unresolved post-solve
+-- (defensive case — should not normally happen) fall back to 'NTUnknown',
+-- the lattice top, so that downstream phases treat them as "any" rather
+-- than "never".
 substToNormalizedSafe :: Substitution -> Map TypeVarId NormalizedType
 substToNormalizedSafe = Map.map convert
   where
     convert pinnedType = case semanticToConcrete pinnedType of
       Just resolved -> normaliseSemantic resolved
-      Nothing -> NTLayered emptyLayered
+      Nothing -> NTUnknown
 
 -- ---------------------------------------------------------------------------
 -- Effect worklist (delegated to 'Solver.Effect')
@@ -205,10 +270,14 @@ solveEffectWorklist _ = Effect.solveEffectConstraints
 -- Total contract: fill missing entries
 -- ---------------------------------------------------------------------------
 
+-- | Ensure every 'TypeVarId' allocated by the constraint generator has an
+-- entry. Missing entries (vars that the solver could not pin) fall back to
+-- 'NTUnknown' (the lattice top) so that downstream phases see "any" rather
+-- than "never".
 totaliseTypes :: Int -> Map TypeVarId NormalizedType -> Map TypeVarId NormalizedType
 totaliseTypes upperLimit given =
   Map.union given $
-    Map.fromList [(TypeVarId i, NTLayered emptyLayered) | i <- [0 .. upperLimit - 1]]
+    Map.fromList [(TypeVarId i, NTUnknown) | i <- [0 .. upperLimit - 1]]
 
 totaliseEffects ::
   Int ->

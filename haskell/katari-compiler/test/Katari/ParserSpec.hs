@@ -1132,6 +1132,59 @@ whereBlock = describe "where block" $ do
           ]
     pure ()
 
+  it "parses where with then clause (no pattern)" $ do
+    m <-
+      shouldSucceed $
+        mconcat
+          [ "agent main() {\n",
+            "  result\n",
+            "} where {\n",
+            "  req get() { 1 }\n",
+            "} then { 0 }\n"
+          ]
+    case head (decls m) of
+      DeclarationAgent a ->
+        case a.body.whereBlock of
+          Just (WhereBlock {thenClause = Just (Nothing, _)}) -> pure ()
+          Just (WhereBlock {thenClause = Just (Just _, _)}) ->
+            expectationFailure "expected pattern absent"
+          Just (WhereBlock {thenClause = Nothing}) ->
+            expectationFailure "expected then clause"
+          Nothing -> expectationFailure "expected where block"
+      _ -> expectationFailure "expected agent"
+
+  it "parses where with then clause (with pattern)" $ do
+    m <-
+      shouldSucceed $
+        mconcat
+          [ "agent main() {\n",
+            "  result\n",
+            "} where {\n",
+            "  req get() { 1 }\n",
+            "} then(p) { p }\n"
+          ]
+    case head (decls m) of
+      DeclarationAgent a ->
+        case a.body.whereBlock of
+          Just (WhereBlock {thenClause = Just (Just _, _)}) -> pure ()
+          Just (WhereBlock {thenClause = Just (Nothing, _)}) ->
+            expectationFailure "expected pattern present"
+          Just (WhereBlock {thenClause = Nothing}) ->
+            expectationFailure "expected then clause"
+          Nothing -> expectationFailure "expected where block"
+      _ -> expectationFailure "expected agent"
+
+  it "rejects then on different line from preceding `}`" $ do
+    shouldFail $
+      mconcat
+        [ "agent main() {\n",
+          "  result\n",
+          "} where {\n",
+          "  req get() { 1 }\n",
+          "}\n",
+          "then(p) { p }\n"
+        ]
+
   it "parses where handler with return type" $ do
     _ <-
       shouldSucceed $

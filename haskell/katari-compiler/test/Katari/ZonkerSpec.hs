@@ -20,7 +20,7 @@ import Katari.Typechecker.Identifier
 import Katari.Typechecker.NormalizedType
   ( ArraySlot (..),
     FunctionShape (..),
-    FunctionSignature (..),
+    FunctionSlot (..),
     LayeredType (..),
     NormalizedType (..),
     NumberSlot (..),
@@ -254,17 +254,19 @@ denormaliseUnit = describe "denormalise" $ do
       ( NTLayered
           emptyLayered
             { functionLayer =
-                Map.singleton
-                  (FunctionSignature ["x"])
+                FunctionOf
                   FunctionShape
-                    { parameterTypes = [NTLayered emptyLayered {numberLayer = NumberInteger}],
+                    { parameters =
+                        Map.singleton
+                          "x"
+                          (NTLayered emptyLayered {numberLayer = NumberInteger}),
                       returnType = NTLayered emptyLayered {stringLayer = StringAny},
                       effects = Set.empty
                     }
             }
       )
       `shouldBe` SemanticTypeFunction
-        [("x", SemanticTypeInteger)]
+        (Map.singleton "x" SemanticTypeInteger)
         SemanticTypeString
         (SemanticEffect Set.empty Set.empty)
 
@@ -350,10 +352,9 @@ effectSubstitutionSpec = describe "effect substitution" $ do
           NTLayered
             emptyLayered
               { functionLayer =
-                  Map.singleton
-                    (FunctionSignature [])
+                  FunctionOf
                     FunctionShape
-                      { parameterTypes = [],
+                      { parameters = Map.empty,
                         returnType =
                           NTLayered
                             emptyLayered {numberLayer = NumberLiterals (Set.singleton 0)},

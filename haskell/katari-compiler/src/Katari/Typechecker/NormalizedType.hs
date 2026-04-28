@@ -30,7 +30,7 @@ module Katari.Typechecker.NormalizedType
     StringSlot (..),
     ArraySlot (..),
     ObjectSlot (..),
-    FunctionSignature (..),
+    FunctionSlot (..),
     FunctionShape (..),
 
     -- * Helpers
@@ -159,16 +159,23 @@ data ObjectSlot
   | ObjectOf !(Map Text NormalizedType)
   deriving (Eq, Show)
 
--- | Function signature key. Parameters are identified by their labels in
--- declaration order; two functions with different label sequences are
--- considered different shapes.
-newtype FunctionSignature = FunctionSignature [Text]
-  deriving (Eq, Ord, Show)
+-- | Function layer.
+--
+--   * 'FunctionAbsent' — no function values inhabit this type.
+--   * @'FunctionOf' shape@ — function values matching @shape@.
+--
+-- Multiple function shapes in a union are collapsed into a single shape via
+-- the product-normalisation rule (label-set union with per-common-label
+-- intersection of types).
+data FunctionSlot
+  = FunctionAbsent
+  | FunctionOf !FunctionShape
+  deriving (Eq, Show)
 
--- | Concrete function shape. The 'parameterTypes' list aligns positionally
--- with the labels of the corresponding 'FunctionSignature'.
+-- | Concrete function shape. Parameters are keyed by their label (order is
+-- not represented at this level).
 data FunctionShape = FunctionShape
-  { parameterTypes :: ![NormalizedType],
+  { parameters :: !(Map Text NormalizedType),
     returnType :: !NormalizedType,
     effects :: !(Set VariableId)
   }
@@ -187,7 +194,7 @@ emptyLayered =
       stringLayer = StringLiterals Set.empty,
       booleanLayer = Set.empty,
       nullLayer = False,
-      functionLayer = Map.empty,
+      functionLayer = FunctionAbsent,
       arrayLayer = ArrayAbsent,
       tupleLayer = Map.empty,
       dataLayer = Set.empty,
@@ -248,16 +255,16 @@ nullBranches :: Bool -> [SemanticType Resolved]
 nullBranches True = [SemanticTypeNull]
 nullBranches False = []
 
-functionBranches :: Map FunctionSignature FunctionShape -> [SemanticType Resolved]
-functionBranches = fmap (uncurry makeFunction) . Map.toList
+functionBranches :: FunctionSlot -> [SemanticType Resolved]
+functionBranches = \case
+  FunctionAbsent -> []
+  FunctionOf shape -> [makeFunction shape]
   where
-    makeFunction
-      (FunctionSignature labels)
-      FunctionShape {parameterTypes, returnType, effects} =
-        SemanticTypeFunction
-          (zip labels (denormalise <$> parameterTypes))
-          (denormalise returnType)
-          (SemanticEffect Set.empty effects)
+    makeFunction FunctionShape {parameters, returnType, effects} =
+      SemanticTypeFunction
+        (Map.map denormalise parameters)
+        (denormalise returnType)
+        (SemanticEffect Set.empty effects)
 
 arrayBranches :: ArraySlot -> [SemanticType Resolved]
 arrayBranches = \case
@@ -297,7 +304,7 @@ isEmptyLayered LayeredType {..} =
     && isEmptyString stringLayer
     && Set.null booleanLayer
     && not nullLayer
-    && Map.null functionLayer
+    && isEmptyFunction functionLayer
     && isEmptyArray arrayLayer
     && Map.null tupleLayer
     && Set.null dataLayer
@@ -316,6 +323,11 @@ isEmptyString = \case
 isEmptyArray :: ArraySlot -> Bool
 isEmptyArray = \case
   ArrayAbsent -> True
+  _ -> False
+
+isEmptyFunction :: FunctionSlot -> Bool
+isEmptyFunction = \case
+  FunctionAbsent -> True
   _ -> False
 
 isEmptyObject :: ObjectSlot -> Bool
@@ -365,19 +377,14 @@ normaliseSemantic = \case
         { objectLayer = ObjectOf (Map.map normaliseSemantic fields)
         }
   SemanticTypeFunction parameterTypes returnType effects ->
-    let parameterLabels = fst <$> parameterTypes
-        normalizedParameterTypes = normaliseSemantic . snd <$> parameterTypes
-        shape =
+    let shape =
           FunctionShape
-            { parameterTypes = normalizedParameterTypes,
+            { parameters = Map.map normaliseSemantic parameterTypes,
               returnType = normaliseSemantic returnType,
               effects = effects.effectReqs
               -- effectVars must be empty in Resolved phase by Zonker invariant.
             }
-     in NTLayered
-          emptyLayered
-            { functionLayer = Map.singleton (FunctionSignature parameterLabels) shape
-            }
+     in NTLayered emptyLayered {functionLayer = FunctionOf shape}
   SemanticTypeUnion branches ->
     foldr (unionNT . normaliseSemantic) (NTLayered emptyLayered) branches
 
@@ -431,18 +438,25 @@ unionArraySlot leftSlot rightSlot = case (leftSlot, rightSlot) of
   (ArrayOf leftElement, ArrayOf rightElement) ->
     ArrayOf (unionNT leftElement rightElement)
 
-unionFunctionLayer ::
-  Map FunctionSignature FunctionShape ->
-  Map FunctionSignature FunctionShape ->
-  Map FunctionSignature FunctionShape
-unionFunctionLayer = Map.unionWith unionFunctionShape
+-- | Union of function slots.
+--
+-- Per the user-specified rule: take the **union** of label sets, with each
+-- common label's type **intersected** (contravariant in args). Labels only
+-- in one side are kept as-is. Effects are unioned.
+unionFunctionLayer :: FunctionSlot -> FunctionSlot -> FunctionSlot
+unionFunctionLayer leftSlot rightSlot = case (leftSlot, rightSlot) of
+  (FunctionAbsent, other) -> other
+  (other, FunctionAbsent) -> other
+  (FunctionOf leftShape, FunctionOf rightShape) ->
+    FunctionOf (unionFunctionShape leftShape rightShape)
 
 unionFunctionShape :: FunctionShape -> FunctionShape -> FunctionShape
 unionFunctionShape leftShape rightShape =
   FunctionShape
-    { parameterTypes =
-        zipWith intersectNT leftShape.parameterTypes rightShape.parameterTypes,
-      -- contravariant in args: union shrinks param domain
+    { -- contravariant in args: union of function types intersects per-label
+      -- types, and uses the union of label sets.
+      parameters =
+        Map.unionWith intersectNT leftShape.parameters rightShape.parameters,
       returnType = unionNT leftShape.returnType rightShape.returnType,
       effects = Set.union leftShape.effects rightShape.effects
     }
@@ -510,20 +524,27 @@ intersectArraySlot leftSlot rightSlot = case (leftSlot, rightSlot) of
   (ArrayOf leftElement, ArrayOf rightElement) ->
     ArrayOf (intersectNT leftElement rightElement)
 
-intersectFunctionLayer ::
-  Map FunctionSignature FunctionShape ->
-  Map FunctionSignature FunctionShape ->
-  Map FunctionSignature FunctionShape
-intersectFunctionLayer = Map.intersectionWith intersectFunctionShape
+-- | Intersection of function slots.
+--
+-- Per the user-specified rule: take the **intersection** of label sets,
+-- with each common label's type **unioned** (contravariant in args).
+-- Effects are unioned (合併) per the spec.
+intersectFunctionLayer :: FunctionSlot -> FunctionSlot -> FunctionSlot
+intersectFunctionLayer leftSlot rightSlot = case (leftSlot, rightSlot) of
+  (FunctionAbsent, _) -> FunctionAbsent
+  (_, FunctionAbsent) -> FunctionAbsent
+  (FunctionOf leftShape, FunctionOf rightShape) ->
+    FunctionOf (intersectFunctionShape leftShape rightShape)
 
 intersectFunctionShape :: FunctionShape -> FunctionShape -> FunctionShape
 intersectFunctionShape leftShape rightShape =
   FunctionShape
-    { parameterTypes =
-        zipWith unionNT leftShape.parameterTypes rightShape.parameterTypes,
-      -- contravariant in args: intersection widens param domain
+    { -- contravariant in args: intersection of function types unions per-label
+      -- types, and uses the intersection of label sets.
+      parameters =
+        Map.intersectionWith unionNT leftShape.parameters rightShape.parameters,
       returnType = intersectNT leftShape.returnType rightShape.returnType,
-      effects = Set.intersection leftShape.effects rightShape.effects
+      effects = Set.union leftShape.effects rightShape.effects
     }
 
 intersectTupleLayer ::
@@ -595,25 +616,35 @@ subtypeArraySlot leftSlot rightSlot = case (leftSlot, rightSlot) of
   (ArrayOf leftElement, ArrayOf rightElement) ->
     subtypeNT leftElement rightElement -- covariant
 
-subtypeFunctionLayer ::
-  Map FunctionSignature FunctionShape ->
-  Map FunctionSignature FunctionShape ->
-  Bool
-subtypeFunctionLayer leftShapes rightShapes =
-  -- Every shape in left must have a compatible shape in right with same signature.
-  all checkShape (Map.toList leftShapes)
-  where
-    checkShape (signature, leftShape) = case Map.lookup signature rightShapes of
-      Just rightShape -> subtypeFunctionShape leftShape rightShape
-      Nothing -> False
+subtypeFunctionLayer :: FunctionSlot -> FunctionSlot -> Bool
+subtypeFunctionLayer leftSlot rightSlot = case (leftSlot, rightSlot) of
+  (FunctionAbsent, _) -> True
+  (_, FunctionAbsent) -> False
+  (FunctionOf leftShape, FunctionOf rightShape) ->
+    subtypeFunctionShape leftShape rightShape
 
+-- | @subtypeFunctionShape leftShape rightShape@ holds when every value of
+-- @leftShape@ is also a value of @rightShape@.
+--
+-- Rule (matching the union/intersection semantics specified by Katari):
+--
+--   * Label set: @leftShape@'s labels must be a subset of @rightShape@'s.
+--     (A function with fewer labels is "more general".)
+--   * For each label common to both sides, the parameter type is
+--     contravariant: @rightShape@'s parameter type must be a subtype of
+--     @leftShape@'s.
+--   * Return type is covariant.
+--   * Effect set is covariant (subset).
 subtypeFunctionShape :: FunctionShape -> FunctionShape -> Bool
 subtypeFunctionShape leftShape rightShape =
-  -- contravariant in args, covariant in return, covariant in effects (subset).
-  length leftShape.parameterTypes == length rightShape.parameterTypes
-    && and (zipWith subtypeNT rightShape.parameterTypes leftShape.parameterTypes)
+  Map.keysSet leftShape.parameters `Set.isSubsetOf` Map.keysSet rightShape.parameters
+    && all checkParameter (Map.toList leftShape.parameters)
     && subtypeNT leftShape.returnType rightShape.returnType
     && Set.isSubsetOf leftShape.effects rightShape.effects
+  where
+    checkParameter (label, leftType) = case Map.lookup label rightShape.parameters of
+      Just rightType -> subtypeNT rightType leftType  -- contravariant
+      Nothing -> True  -- guarded by keysSet subset above
 
 subtypeTupleLayer ::
   Map Int [NormalizedType] ->

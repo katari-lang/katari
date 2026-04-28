@@ -26,6 +26,9 @@ module Katari.Typechecker.SemanticType
     -- * Semantic types
     SemanticType (..),
 
+    -- * Smart constructors
+    unionSemantic,
+
     -- * Effects
     SemanticEffect (..),
     emptyEffect,
@@ -93,9 +96,12 @@ data SemanticType phase where
   SemanticTypeLiteralInteger :: Integer -> SemanticType phase
   SemanticTypeLiteralString :: Text -> SemanticType phase
   SemanticTypeLiteralBoolean :: Bool -> SemanticType phase
-  -- Composite types.
+  -- Composite types. Function parameters are keyed by label; their order is
+  -- not significant (named-parameter calling convention). Two functions with
+  -- the same label set and pointwise-equal types are equal regardless of
+  -- the order in which the user wrote them.
   SemanticTypeFunction
-    :: [(Text, SemanticType phase)]
+    :: Map Text (SemanticType phase)
     -> SemanticType phase
     -> SemanticEffect phase
     -> SemanticType phase
@@ -116,6 +122,18 @@ data SemanticType phase where
 deriving instance Show (SemanticType phase)
 
 deriving instance Eq (SemanticType phase)
+
+-- | Smart constructor for 'SemanticTypeUnion'. The convention is that a
+-- union always has 0 or 2+ branches; a singleton list is flattened to its
+-- contained type, and an empty list collapses to 'SemanticTypeNever' (the
+-- bottom of the lattice). Always prefer this helper over the raw
+-- 'SemanticTypeUnion' constructor when the branch count is computed
+-- dynamically (e.g. after @nub@ or filtering).
+unionSemantic :: [SemanticType phase] -> SemanticType phase
+unionSemantic = \case
+  [] -> SemanticTypeNever
+  [single] -> single
+  branches -> SemanticTypeUnion branches
 
 -- ---------------------------------------------------------------------------
 -- Effects

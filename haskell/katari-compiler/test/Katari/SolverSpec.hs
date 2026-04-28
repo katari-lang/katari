@@ -91,6 +91,13 @@ spec = describe "Katari.Typechecker.Solver" $ do
   matchUnion
   contradictions
   endToEndZonk
+  whereHandlerBlocks
+  matchExpressions
+  forLoops
+  localAgents
+  nestedBlocks
+  dataAndCompositeTypes
+  higherOrderFunctions
 
 -- ---------------------------------------------------------------------------
 -- Basic literal inference
@@ -217,3 +224,349 @@ endToEndZonk = describe "end-to-end pipeline (Solver -> Zonker)" $ do
           ]
     let zonkResult = zonk idResult cgResult solverResult
     zonkResult.zonkErrors `shouldBe` []
+
+-- ---------------------------------------------------------------------------
+-- where / handler blocks
+-- ---------------------------------------------------------------------------
+
+whereHandlerBlocks :: Spec
+whereHandlerBlocks = describe "where blocks and request handlers" $ do
+  it "where with state variable: solver succeeds" $ do
+    -- State variables are visible to handlers / then, NOT to the body.
+    -- The body returns a literal; @n@ is just declared.
+    (_, _, solverResult) <-
+      runSolve "agent counter() -> integer { 0 } where (var n: integer = 0) {}"
+    solverResult.solverErrors `shouldBe` []
+
+  it "where with request handler: req is discharged, agent has empty effect" $ do
+    (_, _, solverResult) <-
+      runSolve $
+        mconcat
+          [ "req fetch() -> integer\n",
+            "agent app() { fetch() } where {\n",
+            "  req fetch() { 42 }\n",
+            "}"
+          ]
+    solverResult.solverErrors `shouldBe` []
+
+  it "where with state var + handler combining state mutation via next" $ do
+    (_, _, solverResult) <-
+      runSolve $
+        mconcat
+          [ "req inc() -> integer\n",
+            "agent counter() -> integer { inc(); inc(); inc() } where (var n: integer = 0) {\n",
+            "  req inc() {\n",
+            "    next n with { n = n + 1 }\n",
+            "  }\n",
+            "}"
+          ]
+    solverResult.solverErrors `shouldBe` []
+
+  it "explicit next with wrong type → records solver error" $ do
+    -- Implicit completion is treated as break (Koka-style), so the declared
+    -- @-> integer@ on req only constrains explicit @next@ statements. Use
+    -- @next@ here to surface the type mismatch.
+    (_, _, solverResult) <-
+      runSolve $
+        mconcat
+          [ "req fetch() -> integer\n",
+            "agent app() -> integer { fetch() } where {\n",
+            "  req fetch() {\n",
+            "    next \"bad\"\n",
+            "  }\n",
+            "}"
+          ]
+    null solverResult.solverErrors `shouldBe` False
+
+  it "then clause: body tail flows through pattern, then body type is whole block" $ do
+    (_, _, solverResult) <-
+      runSolve $
+        mconcat
+          [ "agent foo() -> integer {\n",
+            "  return { 42 } where {} then(p) { p + 1 }\n",
+            "}"
+          ]
+    solverResult.solverErrors `shouldBe` []
+
+  it "then clause with state var: state var visible in then" $ do
+    (_, _, solverResult) <-
+      runSolve $
+        mconcat
+          [ "req inc() -> integer\n",
+            "agent counter() -> integer {\n",
+            "  inc(); inc(); inc()\n",
+            "} where (var n: integer = 0) {\n",
+            "  req inc() {\n",
+            "    next n with { n = n + 1 }\n",
+            "  }\n",
+            "} then(_) { n }\n"
+          ]
+    solverResult.solverErrors `shouldBe` []
+
+  it "handler implicit completion flows to whole-block (not declared next type)" $ do
+    -- @req fetch() -> integer@: declared return only constrains @next@.
+    -- Handler body fall-through (literal "ok") is treated as break and flows
+    -- to the where-block whole type — independent of the declared @integer@
+    -- return. Without a stricter agent annotation, no contradiction arises.
+    (_, _, solverResult) <-
+      runSolve $
+        mconcat
+          [ "req fetch() -> integer\n",
+            "agent app() { fetch() } where {\n",
+            "  req fetch() { \"ok\" }\n",
+            "}"
+          ]
+    solverResult.solverErrors `shouldBe` []
+
+  it "return inside body of block-with-then routes through then" $ do
+    -- Inner @return 5@ : 5 <: pattern p (number) → then body @p + 1@ :
+    -- number <: agent return integer. Should pass.
+    (_, _, solverResult) <-
+      runSolve $
+        mconcat
+          [ "agent foo() -> integer {\n",
+            "  return {\n",
+            "    return 5\n",
+            "  } where {} then(p) { p + 1 }\n",
+            "}"
+          ]
+    solverResult.solverErrors `shouldBe` []
+
+-- ---------------------------------------------------------------------------
+-- match expressions
+-- ---------------------------------------------------------------------------
+
+matchExpressions :: Spec
+matchExpressions = describe "match expressions" $ do
+  it "match on union with two literal arms" $ do
+    (_, _, solverResult) <-
+      runSolve $
+        mconcat
+          [ "agent label(n: integer) -> string {\n",
+            "  return match (n) {\n",
+            "    case 0 => { \"zero\" }\n",
+            "    case other => { \"other\" }\n",
+            "  }\n",
+            "}"
+          ]
+    solverResult.solverErrors `shouldBe` []
+
+  it "match on data constructor pattern" $ do
+    (_, _, solverResult) <-
+      runSolve $
+        mconcat
+          [ "data circle(r: integer)\n",
+            "agent area(c: circle) -> integer {\n",
+            "  return match (c) { case circle(r = v) => { v } }\n",
+            "}"
+          ]
+    solverResult.solverErrors `shouldBe` []
+
+  it "match arm bodies with mismatched types union into result" $ do
+    (_, _, solverResult) <-
+      runSolve $
+        mconcat
+          [ "agent describe(b: boolean) {\n",
+            "  return match (b) {\n",
+            "    case true => { 1 }\n",
+            "    case false => { \"false\" }\n",
+            "  }\n",
+            "}"
+          ]
+    solverResult.solverErrors `shouldBe` []
+
+-- ---------------------------------------------------------------------------
+-- for loops with var bindings, next/break (modifiers)
+-- ---------------------------------------------------------------------------
+
+forLoops :: Spec
+forLoops = describe "for loops" $ do
+  it "for ... in over an array" $ do
+    (_, _, solverResult) <-
+      runSolve $
+        mconcat
+          [ "agent run(xs: array[integer]) {\n",
+            "  for (x in xs) { x }\n",
+            "}"
+          ]
+    solverResult.solverErrors `shouldBe` []
+
+  it "for with var binding and next-with-modifier" $ do
+    (_, _, solverResult) <-
+      runSolve $
+        mconcat
+          [ "agent sum(xs: array[integer]) -> integer {\n",
+            "  return for (x in xs, var acc = 0) {\n",
+            "    next with { acc = acc + x }\n",
+            "  } then { acc }\n",
+            "}"
+          ]
+    solverResult.solverErrors `shouldBe` []
+
+  it "for with break terminating early" $ do
+    (_, _, solverResult) <-
+      runSolve $
+        mconcat
+          [ "agent firstPositive(xs: array[integer]) -> integer | null {\n",
+            "  return for (x in xs) {\n",
+            "    if (x > 0) { break x; } else { null }\n",
+            "  } then { null }\n",
+            "}"
+          ]
+    solverResult.solverErrors `shouldBe` []
+
+-- ---------------------------------------------------------------------------
+-- local agent statements
+-- ---------------------------------------------------------------------------
+
+localAgents :: Spec
+localAgents = describe "local agent statements" $ do
+  it "local agent declared inside another agent's body" $ do
+    (_, _, solverResult) <-
+      runSolve $
+        mconcat
+          [ "agent outer() -> integer {\n",
+            "  agent inner() -> integer { 42 };\n",
+            "  return inner()\n",
+            "}"
+          ]
+    solverResult.solverErrors `shouldBe` []
+
+  it "local agent capturing outer parameter" $ do
+    (_, _, solverResult) <-
+      runSolve $
+        mconcat
+          [ "agent outer(x: integer) -> integer {\n",
+            "  agent inner() -> integer { x + 1 };\n",
+            "  return inner()\n",
+            "}"
+          ]
+    solverResult.solverErrors `shouldBe` []
+
+-- ---------------------------------------------------------------------------
+-- nested blocks and let bindings
+-- ---------------------------------------------------------------------------
+
+nestedBlocks :: Spec
+nestedBlocks = describe "nested blocks and let" $ do
+  it "let inside if branch" $ do
+    (_, _, solverResult) <-
+      runSolve $
+        mconcat
+          [ "agent f(c: boolean) -> integer {\n",
+            "  return if (c) { let y = 10; y } else { 0 }\n",
+            "}"
+          ]
+    solverResult.solverErrors `shouldBe` []
+
+  it "deeply nested if expressions" $ do
+    (_, _, solverResult) <-
+      runSolve $
+        mconcat
+          [ "agent f(a: boolean, b: boolean) -> integer {\n",
+            "  return if (a) { if (b) { 1 } else { 2 } } else { if (b) { 3 } else { 4 } }\n",
+            "}"
+          ]
+    solverResult.solverErrors `shouldBe` []
+
+  it "multi-line block: trailing expression before close-brace is the return value" $ do
+    -- Regression test for the virtual-';' / block-return UX: when an
+    -- expression is followed by a newline and then a '}', the expression is
+    -- the block's return value (not a statement). Without this fix, the
+    -- inner @if (b) { 1 } else { 2 }@ would become a statement and the
+    -- block would return null.
+    (_, _, solverResult) <-
+      runSolve $
+        mconcat
+          [ "agent f(a: boolean, b: boolean) -> integer {\n",
+            "  return if (a) {\n",
+            "    if (b) { 1 } else { 2 }\n",
+            "  } else {\n",
+            "    if (b) { 3 } else { 4 }\n",
+            "  }\n",
+            "}"
+          ]
+    solverResult.solverErrors `shouldBe` []
+
+  it "block expression with return statement inside" $ do
+    (_, _, solverResult) <-
+      runSolve $
+        mconcat
+          [ "agent early(c: boolean) -> integer {\n",
+            "  if (c) { return 1; }\n",
+            "  return 2\n",
+            "}"
+          ]
+    solverResult.solverErrors `shouldBe` []
+
+-- ---------------------------------------------------------------------------
+-- data declarations + tuple/array/object inference
+-- ---------------------------------------------------------------------------
+
+dataAndCompositeTypes :: Spec
+dataAndCompositeTypes = describe "data and composite types" $ do
+  it "data constructor returns its data type" $ do
+    (_, _, solverResult) <-
+      runSolve $
+        mconcat
+          [ "data point(x: integer, y: integer)\n",
+            "agent origin() -> point { point(x = 0, y = 0) }"
+          ]
+    solverResult.solverErrors `shouldBe` []
+
+  it "array of integers" $ do
+    (_, _, solverResult) <-
+      runSolve $
+        mconcat
+          [ "agent ones() -> array[integer] {\n",
+            "  return [1, 2, 3]\n",
+            "}"
+          ]
+    solverResult.solverErrors `shouldBe` []
+
+  it "tuple inference" $ do
+    (_, _, solverResult) <-
+      runSolve $
+        mconcat
+          [ "agent pair() -> (integer, string) {\n",
+            "  return (42, \"hi\")\n",
+            "}"
+          ]
+    solverResult.solverErrors `shouldBe` []
+
+  it "data field access through pattern match" $ do
+    (_, _, solverResult) <-
+      runSolve $
+        mconcat
+          [ "data box(value: integer)\n",
+            "agent unbox(b: box) -> integer {\n",
+            "  return match (b) { case box(value = v) => { v } }\n",
+            "}"
+          ]
+    solverResult.solverErrors `shouldBe` []
+
+-- ---------------------------------------------------------------------------
+-- Higher-order: passing one agent as another's argument
+-- ---------------------------------------------------------------------------
+
+higherOrderFunctions :: Spec
+higherOrderFunctions = describe "higher-order agents" $ do
+  it "agent receives a function and calls it" $ do
+    (_, _, solverResult) <-
+      runSolve $
+        mconcat
+          [ "agent caller(callback: (x: integer) -> integer) -> integer {\n",
+            "  return callback(x = 1)\n",
+            "}"
+          ]
+    solverResult.solverErrors `shouldBe` []
+
+  it "function-typed parameter unified across call site" $ do
+    (_, _, solverResult) <-
+      runSolve $
+        mconcat
+          [ "agent identity(n: integer) -> integer { n }\n",
+            "agent caller(cb: (n: integer) -> integer) -> integer { cb(n = 1) }\n",
+            "agent run() -> integer { caller(cb = identity) }"
+          ]
+    solverResult.solverErrors `shouldBe` []

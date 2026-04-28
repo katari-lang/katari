@@ -321,11 +321,11 @@ whereBlocks = describe "where blocks" $ do
           _ -> False
       )
 
-  it "handler implicit completion: body tail flows to retTvId (next-tv)" $ do
-    -- A handler body that falls through without 'next' / 'break' has its
-    -- tail value implicitly treated as the resume value of an implicit
-    -- 'next'. CG must emit a constraint from the tail's literal type to
-    -- some type variable (the handler's retTvId / next-tv).
+  it "handler implicit completion: body tail flows to whole-block tv (implicit break)" $ do
+    -- A handler body that falls through without explicit 'next' / 'break'
+    -- is treated as an implicit 'break' (Koka-style algebraic effects). Its
+    -- tail value flows to the where-containing block's whole type, NOT to
+    -- the handler's declared return type.
     cg <-
       runOne $
         mconcat
@@ -503,8 +503,7 @@ constraintContents = describe "constraint contents" $ do
         cg `shouldSatisfy` hasTypeConstraint
           ( \l r -> case l of
               SemanticTypeFunction params ret _ ->
-                length params == 1
-                  && fst (head params) == "x"
+                Map.keys params == ["x"]
                   && ret == SemanticTypeString
                   && r == tFoo
               _ -> False
@@ -605,15 +604,19 @@ constraintContents = describe "constraint contents" $ do
           _ -> False
       )
 
-  it "binary `+` constrains both operands to number and yields number" $ do
+  it "binary `+` constrains both operands to a shared result var bounded by number" $ do
     cg <- runOne "agent foo() { 1 + 2 }"
-    -- 両辺が number に subtype される (literal int も subtype 関係で number に行く)
-    -- 具体的には 1 <: number と 2 <: number が出る
+    -- 新実装: 両辺は fresh 型変数 t に subtype され、t <: number が追加される
+    -- 1 <: t, 2 <: t, t <: number
+    let isTypeVar = \case { SemanticTypeVariable _ -> True; _ -> False }
     cg `shouldSatisfy` hasTypeConstraint
-      ( \l r -> l == SemanticTypeLiteralInteger 1 && r == SemanticTypeNumber
+      ( \l r -> l == SemanticTypeLiteralInteger 1 && isTypeVar r
       )
     cg `shouldSatisfy` hasTypeConstraint
-      ( \l r -> l == SemanticTypeLiteralInteger 2 && r == SemanticTypeNumber
+      ( \l r -> l == SemanticTypeLiteralInteger 2 && isTypeVar r
+      )
+    cg `shouldSatisfy` hasTypeConstraint
+      ( \l r -> isTypeVar l && r == SemanticTypeNumber
       )
 
   it "template literal interpolation requires string subtype" $ do
@@ -666,7 +669,7 @@ dataNameClash = describe "cross-module data name clash" $ do
     collectDataTids = \case
       SemanticTypeData tid -> [tid]
       SemanticTypeFunction params returnType _ ->
-        concatMap (collectDataTids . snd) params <> collectDataTids returnType
+        concatMap collectDataTids (Map.elems params) <> collectDataTids returnType
       SemanticTypeArray elementType -> collectDataTids elementType
       SemanticTypeTuple elementTypes -> concatMap collectDataTids elementTypes
       SemanticTypeUnion branches -> concatMap collectDataTids branches

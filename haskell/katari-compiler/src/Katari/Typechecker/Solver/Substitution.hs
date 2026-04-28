@@ -43,15 +43,18 @@ import Data.Set qualified as Set
 import Katari.Typechecker.ConstraintGenerator (Constraint (..))
 import Katari.Typechecker.NormalizedType
   ( NormalizedType (..),
-    emptyLayered,
+    denormalise,
+    intersectNT,
     normaliseSemantic,
     subtypeNT,
   )
 import Katari.Typechecker.SemanticType
-  ( SemanticEffect (..),
+  ( Resolved,
+    SemanticEffect (..),
     SemanticType (..),
     TypeVarId,
     Unresolved,
+    unionSemantic,
   )
 import Katari.Typechecker.Solver.Internal
   ( BoundedType (..),
@@ -69,21 +72,20 @@ import Katari.Typechecker.Solver.Internal
 
 -- | Substitute every 'SemanticTypeVariable' that has an entry in the
 -- substitution map. Variables without entries pass through unchanged.
-applySubstType :: Substitution -> SemanticType phase -> SemanticType phase
+--
+-- The substitution maps to 'SemanticType' 'Unresolved' values, so this
+-- function is naturally Unresolved-typed: variables that the substitution
+-- itself still contains (transitive references) are left in place to be
+-- substituted on a subsequent pass.
+applySubstType :: Substitution -> SemanticType Unresolved -> SemanticType Unresolved
 applySubstType substitution = \case
   SemanticTypeVariable typeVarId ->
     case Map.lookup typeVarId substitution of
-      -- The map stores SemanticType Unresolved, but the value is
-      -- variable-free at the point of substitution (or is itself a
-      -- variable that we couldn't pin). Coerce safely via the structural
-      -- rebuild below.
-      Just bound -> coerceUnresolved bound
+      Just bound -> bound
       Nothing -> SemanticTypeVariable typeVarId
   SemanticTypeFunction parameterTypes returnType effects ->
     SemanticTypeFunction
-      [ (label, applySubstType substitution parameterType)
-        | (label, parameterType) <- parameterTypes
-      ]
+      (Map.map (applySubstType substitution) parameterTypes)
       (applySubstType substitution returnType)
       effects
   SemanticTypeArray element -> SemanticTypeArray (applySubstType substitution element)
@@ -105,42 +107,6 @@ applySubstType substitution = \case
   SemanticTypeLiteralString value -> SemanticTypeLiteralString value
   SemanticTypeLiteralBoolean value -> SemanticTypeLiteralBoolean value
   SemanticTypeData typeId -> SemanticTypeData typeId
-
--- | Phase coercion: SemanticType Unresolved → SemanticType phase by
--- structural rebuilding. Used only inside 'applySubstType' where the
--- substitution result is plugged back into a possibly-different phase.
--- Since 'SemanticTypeVariable' only inhabits the @Unresolved@ phase, this
--- is safe **only** when the substitution value has been fully resolved
--- (no SemanticTypeVariable inside). Applied to live substitution maps,
--- this invariant may not hold yet — but the result still typechecks
--- because we propagate variables through.
-coerceUnresolved :: SemanticType source -> SemanticType target
-coerceUnresolved = \case
-  SemanticTypeVariable _ ->
-    -- Reaching here means we'd substitute a var with a var. We preserve
-    -- structure by emitting Never as a defensive default; live solver flow
-    -- never reaches this when the value is itself a leaf var.
-    SemanticTypeNever
-  SemanticTypeNever -> SemanticTypeNever
-  SemanticTypeUnknown -> SemanticTypeUnknown
-  SemanticTypeNull -> SemanticTypeNull
-  SemanticTypeInteger -> SemanticTypeInteger
-  SemanticTypeNumber -> SemanticTypeNumber
-  SemanticTypeString -> SemanticTypeString
-  SemanticTypeBoolean -> SemanticTypeBoolean
-  SemanticTypeLiteralInteger value -> SemanticTypeLiteralInteger value
-  SemanticTypeLiteralString value -> SemanticTypeLiteralString value
-  SemanticTypeLiteralBoolean value -> SemanticTypeLiteralBoolean value
-  SemanticTypeData typeId -> SemanticTypeData typeId
-  SemanticTypeArray element -> SemanticTypeArray (coerceUnresolved element)
-  SemanticTypeTuple elements -> SemanticTypeTuple (coerceUnresolved <$> elements)
-  SemanticTypeUnion branches -> SemanticTypeUnion (coerceUnresolved <$> branches)
-  SemanticTypeObject fields -> SemanticTypeObject (Map.map coerceUnresolved fields)
-  SemanticTypeFunction parameterTypes returnType effects ->
-    SemanticTypeFunction
-      [(label, coerceUnresolved parameterType) | (label, parameterType) <- parameterTypes]
-      (coerceUnresolved returnType)
-      (SemanticEffect effects.effectVars effects.effectReqs)
 
 applySubstEffect :: Substitution -> SemanticEffect phase -> SemanticEffect phase
 applySubstEffect _ effect = effect -- effect vars are handled by the effect solver
@@ -289,17 +255,62 @@ collectFinalSubstitutions constraints =
    in Map.mapMaybe pickFromBounds bounds
   where
     pickFromBounds (Bounds lowers uppers) =
-      let solvedLowers =
-            filter containsNoTypeVars ((.boundType) <$> lowers)
-          solvedUppers =
-            filter containsNoTypeVars ((.boundType) <$> uppers)
+      let solvedLowers = nub (filter containsNoTypeVars ((.boundType) <$> lowers))
+          solvedUppers = nub (filter containsNoTypeVars ((.boundType) <$> uppers))
        in case solvedLowers of
+            -- No concrete lower bound: pin to the principal upper bound
+            -- (intersection of all known upper bounds) if any. With a
+            -- single upper bound the intersection is that bound itself.
             [] -> case solvedUppers of
               [] -> Nothing
               [single] -> Just single
-              many -> Just (SemanticTypeUnion (nub many))
-            [single] -> Just single
-            many -> Just (SemanticTypeUnion (nub many))
+              manyUppers -> Just (intersectUpperBoundsViaNT manyUppers)
+            -- One or more concrete lower bounds: pin to their union (the
+            -- least upper bound), which is the most precise type that
+            -- subsumes every flow into α.
+            lowersOnly -> Just (unionSemantic lowersOnly)
+
+-- | Take the intersection of multiple upper bounds. SemanticType has no
+-- intersection constructor, so we go through 'NormalizedType' which does:
+-- normalise each bound, intersect at the lattice level, then denormalise
+-- back. The result is sound (still a subtype of every upper bound) but
+-- may lose fidelity (e.g. cross-component correlation in tuple unions).
+intersectUpperBoundsViaNT :: [SemanticType Unresolved] -> SemanticType Unresolved
+intersectUpperBoundsViaNT items = case traverse semanticToConcrete items of
+  Just concretes ->
+    case fmap normaliseSemantic concretes of
+      [] -> SemanticTypeUnknown
+      (firstNT : restNT) ->
+        resolvedToUnresolved (denormalise (foldr intersectNT firstNT restNT))
+  -- Defensive: caller filters via containsNoTypeVars so this branch is
+  -- unreachable. Fall back to 'never' (sound: never <: any T).
+  Nothing -> SemanticTypeNever
+
+-- | Phase coercion: 'SemanticType' 'Resolved' has no 'SemanticTypeVariable'
+-- inhabitants, so structural rebuild is total. Used to lift the result of
+-- 'denormalise' back into the 'Unresolved' phase the substitution expects.
+resolvedToUnresolved :: SemanticType Resolved -> SemanticType Unresolved
+resolvedToUnresolved = \case
+  SemanticTypeNever -> SemanticTypeNever
+  SemanticTypeUnknown -> SemanticTypeUnknown
+  SemanticTypeNull -> SemanticTypeNull
+  SemanticTypeInteger -> SemanticTypeInteger
+  SemanticTypeNumber -> SemanticTypeNumber
+  SemanticTypeString -> SemanticTypeString
+  SemanticTypeBoolean -> SemanticTypeBoolean
+  SemanticTypeLiteralInteger value -> SemanticTypeLiteralInteger value
+  SemanticTypeLiteralString value -> SemanticTypeLiteralString value
+  SemanticTypeLiteralBoolean value -> SemanticTypeLiteralBoolean value
+  SemanticTypeData typeId -> SemanticTypeData typeId
+  SemanticTypeArray element -> SemanticTypeArray (resolvedToUnresolved element)
+  SemanticTypeTuple elements -> SemanticTypeTuple (resolvedToUnresolved <$> elements)
+  SemanticTypeUnion branches -> unionSemantic (resolvedToUnresolved <$> branches)
+  SemanticTypeObject fields -> SemanticTypeObject (Map.map resolvedToUnresolved fields)
+  SemanticTypeFunction parameterTypes returnType effects ->
+    SemanticTypeFunction
+      (Map.map resolvedToUnresolved parameterTypes)
+      (resolvedToUnresolved returnType)
+      (SemanticEffect effects.effectVars effects.effectReqs)
 
 -- ===========================================================================
 -- Bounds consistency check
@@ -337,4 +348,4 @@ substToNormalized = Map.map convert
   where
     convert pinned = case semanticToConcrete pinned of
       Just resolved -> normaliseSemantic resolved
-      Nothing -> NTLayered emptyLayered  -- bottom: unresolved post-solve
+      Nothing -> NTUnknown

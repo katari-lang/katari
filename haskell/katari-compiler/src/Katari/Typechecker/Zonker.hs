@@ -133,7 +133,7 @@ zonkType sp = \case
   SemanticTypeLiteralString s -> pure (SemanticTypeLiteralString s)
   SemanticTypeLiteralBoolean b -> pure (SemanticTypeLiteralBoolean b)
   SemanticTypeFunction params returnType effects -> do
-    params' <- traverse (\(label, t) -> (,) label <$> zonkType sp t) params
+    params' <- traverse (zonkType sp) params
     returnType' <- zonkType sp returnType
     effects' <- zonkEffect sp effects
     pure (SemanticTypeFunction params' returnType' effects')
@@ -428,13 +428,22 @@ walkBlock Block {statements, returnExpression, whereBlock, sourceSpan} = do
       }
 
 walkWhereBlock :: WhereBlock Constrained -> Zonk (WhereBlock Zonked)
-walkWhereBlock WhereBlock {stateVariables, handlers, sourceSpan} = do
+walkWhereBlock WhereBlock {stateVariables, handlers, thenClause, sourceSpan} = do
   stateVariables' <- mapM walkStateVariable stateVariables
   handlers' <- mapM walkRequestHandler handlers
+  thenClause' <-
+    traverse
+      ( \(maybePattern, block) -> do
+          maybePattern' <- traverse walkPattern maybePattern
+          block' <- walkBlock block
+          pure (maybePattern', block')
+      )
+      thenClause
   pure
     WhereBlock
       { stateVariables = stateVariables',
         handlers = handlers',
+        thenClause = thenClause',
         sourceSpan = sourceSpan
       }
 

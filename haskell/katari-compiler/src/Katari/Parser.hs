@@ -188,6 +188,19 @@ parseSemicolon = label "';' or newline" $ parseTokenWith $ \case
   TokenSemicolonVirtual -> Just ()
   _ -> Nothing
 
+-- | Consume only an explicit ';' (user-written). Virtual semicolons inserted
+-- by the lexer at line ends are NOT accepted.
+parseExplicitSemicolon :: Parser ()
+parseExplicitSemicolon = label "';'" $ parseTokenWith $ \case
+  TokenSemicolonExplicit -> Just ()
+  _ -> Nothing
+
+-- | Consume only a virtual semicolon (lexer-inserted at a line end).
+parseVirtualSemicolon :: Parser ()
+parseVirtualSemicolon = parseTokenWith $ \case
+  TokenSemicolonVirtual -> Just ()
+  _ -> Nothing
+
 parseComma :: Parser ()
 parseComma = parsePunctuation PunctuationComma
 
@@ -719,22 +732,37 @@ parseBlockBodyWithRecovery = loop []
           BlockStepStatement <$> parseNonExpressionStatement,
           do
             expression <- parseExpression
-            hasSemicolon <- optional (some parseSemicolon)
-            pure $ case hasSemicolon of
-              Just _ -> BlockStepStatement (StatementExpression expression)
-              Nothing -> BlockStepReturn (Just expression)
+            -- Distinguish: an explicit ';' makes the expression a statement.
+            -- A bare lexer-inserted virtual ';' immediately followed by '}'
+            -- (block end) is treated as the block's return expression — the
+            -- "trailing newline before close-brace" UX. Any other ';' (incl.
+            -- virtual followed by another statement) makes it a statement.
+            choice
+              [ -- explicit ';' → statement; consume all subsequent ';'.
+                BlockStepStatement (StatementExpression expression)
+                  <$ (parseExplicitSemicolon *> skipMany parseSemicolon),
+                -- virtual ';' then '}' → return expression.
+                BlockStepReturn (Just expression)
+                  <$ MP.try
+                    ( parseVirtualSemicolon
+                        *> MP.lookAhead (parsePunctuation PunctuationRightBrace)
+                    ),
+                -- virtual ';' followed by anything else → statement.
+                BlockStepStatement (StatementExpression expression)
+                  <$ (parseVirtualSemicolon *> skipMany parseSemicolon),
+                -- no ';' at all → return expression.
+                pure (BlockStepReturn (Just expression))
+              ]
         ]
 
 parseNonExpressionStatement :: Parser (Statement Parsed)
 parseNonExpressionStatement =
   choice
-    [ StatementLet <$> parseLet <* trailingSemicolons,
-      StatementAgent <$> parseAgentStatement <* trailingSemicolons,
-      StatementReturn <$> parseReturn <* trailingSemicolons,
-      parseBreakOrNextStatement <* trailingSemicolons
+    [ StatementLet <$> parseLet <* void (some parseSemicolon),
+      StatementAgent <$> parseAgentStatement <* void (some parseSemicolon),
+      StatementReturn <$> parseReturn <* void (some parseSemicolon),
+      parseBreakOrNextStatement <* void (some parseSemicolon)
     ]
-  where
-    trailingSemicolons = void (some parseSemicolon)
 
 parseWhereBlock :: Parser (WhereBlock Parsed)
 parseWhereBlock = withSpan $ do
@@ -744,12 +772,29 @@ parseWhereBlock = withSpan $ do
   skipMany parseSemicolon
   handlers <- many (parseRequestHandler <* skipMany parseSemicolon)
   parsePunctuation PunctuationRightBrace
+  detectSameLineKeywordViolation
+  thenClause <- optional parseThenClause
   pure $ \sourceSpan ->
     WhereBlock
       { stateVariables = stateVariables,
         handlers = handlers,
+        thenClause = thenClause,
         sourceSpan = sourceSpan
       }
+
+-- | Parse a @then@ clause: @then@ keyword, optional pattern in parens, then a
+-- block. Used as the optional finalizer of a @where@ clause.
+parseThenClause :: Parser (Maybe (Pattern Parsed), Block Parsed)
+parseThenClause = do
+  parseKeyword KeywordThen
+  parsedPattern <-
+    optional $
+      between
+        (parsePunctuation PunctuationLeftParenthesis)
+        (parsePunctuation PunctuationRightParenthesis)
+        parsePattern
+  body <- parseBlock
+  pure (parsedPattern, body)
 
 parseStateVariable :: Parser (StateVariableBinding Parsed)
 parseStateVariable = withSpan $ do
@@ -1200,7 +1245,7 @@ parseMatchExpression = withSpan $ do
     between
       (parsePunctuation PunctuationLeftBrace)
       (parsePunctuation PunctuationRightBrace)
-      (many parseCaseArm)
+      (skipMany parseSemicolon *> many (parseCaseArm <* skipMany parseSemicolon))
   pure $ \sourceSpan ->
     ExpressionMatch
       MatchExpression

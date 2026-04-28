@@ -245,9 +245,25 @@ data Block (metadata :: SymbolKind -> Type) = Block
 instance HasSourceSpan (Block metadata) where
   sourceSpanOf block = block.sourceSpan
 
+-- | A @where@ clause optionally followed by a @then@ clause.
+--
+-- The @then@ clause runs after the body terminates (whether by normal
+-- completion, @break@, or @return@). When the body's tail value is
+-- destructured by a pattern, that pattern is the @Just@ payload of
+-- @thenClause@'s outer @Maybe@. The pattern itself can be omitted
+-- (@then { ... }@), in which case the body's value is discarded.
+--
+-- Layout:
+--
+-- @
+-- thenClause :: Maybe (Maybe (Pattern metadata), Block metadata)
+--               ^ outer Maybe : the @then@ clause itself is absent
+--                 ^ inner Maybe : pattern within the @then@ may be absent
+-- @
 data WhereBlock (metadata :: SymbolKind -> Type) = WhereBlock
   { stateVariables :: [StateVariableBinding metadata],
     handlers :: [RequestHandler metadata],
+    thenClause :: Maybe (Maybe (Pattern metadata), Block metadata),
     sourceSpan :: SourceSpan
   }
 

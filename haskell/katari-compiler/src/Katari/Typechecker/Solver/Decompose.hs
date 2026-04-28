@@ -23,14 +23,16 @@ import Katari.Typechecker.ConstraintGenerator
     ConstraintReason,
   )
 import Katari.Typechecker.SemanticType
-  ( SemanticEffect (..),
-    SemanticType (..),
+  ( SemanticType (..),
     Unresolved,
+  )
+import Katari.Typechecker.NormalizedType
+  ( normaliseSemantic,
+    subtypeNT,
   )
 import Katari.Typechecker.Solver.Internal
   ( SolverError (..),
     containsNoTypeVars,
-    isSubtypeConcrete,
     semanticToConcrete,
   )
 
@@ -75,18 +77,16 @@ decomposeType original leftType rightType reason = case (leftType, rightType) of
   -- LHS or RHS is a type variable: leave for branching / bound aggregation.
   (SemanticTypeVariable _, _) -> remain
   (_, SemanticTypeVariable _) -> remain
-  -- Both concrete (no vars): direct subtype check via NormalizedType.
+  -- Both fully concrete (no type vars AND no effect vars): direct subtype
+  -- check via NormalizedType. We use 'semanticToConcrete' as the gate so
+  -- that function types with unresolved effect variables fall through to
+  -- the structural decomposition cases below instead of being rejected here.
   _
-    | containsNoTypeVars leftType && containsNoTypeVars rightType ->
-        if isSubtypeConcrete leftType rightType
+    | Just leftConcrete <- semanticToConcrete leftType,
+      Just rightConcrete <- semanticToConcrete rightType ->
+        if subtypeNT (normaliseSemantic leftConcrete) (normaliseSemantic rightConcrete)
           then settled
-          else
-            Left
-              ( SolverErrorContradiction
-                  reason
-                  (resolvedOr SemanticTypeUnknown leftType)
-                  (resolvedOr SemanticTypeUnknown rightType)
-              )
+          else Left (SolverErrorContradiction reason leftConcrete rightConcrete)
   -- Structural decomposition.
   (SemanticTypeUnion branches, _) ->
     -- (A | B) <: C  →  A <: C  AND  B <: C
@@ -97,14 +97,14 @@ decomposeType original leftType rightType reason = case (leftType, rightType) of
   ( SemanticTypeFunction leftParameters leftReturn leftEffects,
     SemanticTypeFunction rightParameters rightReturn rightEffects
     )
-      | matchSignature leftParameters rightParameters ->
+      | Map.keysSet leftParameters == Map.keysSet rightParameters ->
           -- Args contravariant; return covariant; effect covariant (subset).
+          -- Parameters are matched by label (named-parameter calling
+          -- convention): for each label L, derive @rightParameter \<: leftParameter@.
           let parameterConstraints =
                 [ TypeConstraint rightParameter leftParameter reason
-                  | ( (_, leftParameter),
-                      (_, rightParameter)
-                      ) <-
-                      zip leftParameters rightParameters
+                  | (label, leftParameter) <- Map.toList leftParameters,
+                    Just rightParameter <- [Map.lookup label rightParameters]
                 ]
               returnConstraint = TypeConstraint leftReturn rightReturn reason
               effectConstraint = EffectConstraint leftEffects rightEffects reason
@@ -158,19 +158,9 @@ decomposeType original leftType rightType reason = case (leftType, rightType) of
     remain = Right ([], [original])
     yieldNew newConstraints = Right ([], newConstraints)
 
-matchSignature ::
-  [(Text, SemanticType phase)] ->
-  [(Text, SemanticType phase)] ->
-  Bool
-matchSignature leftParameters rightParameters =
-  length leftParameters == length rightParameters
-    && and (zipWith sameLabel leftParameters rightParameters)
-  where
-    sameLabel (leftLabel, _) (rightLabel, _) = leftLabel == rightLabel
-
-showLabels :: [(Text, SemanticType phase)] -> Text
+showLabels :: Map.Map Text (SemanticType phase) -> Text
 showLabels parameters =
-  "(" <> T.intercalate ", " (fst <$> parameters) <> ")"
+  "{" <> T.intercalate ", " (Map.keys parameters) <> "}"
 
 decomposeObject ::
   Map.Map Text (SemanticType Unresolved) ->
@@ -196,42 +186,6 @@ decomposeObject leftFields rightFields reason =
                 ]
            in Right ([], derivedConstraints)
 
-resolvedOr ::
-  SemanticType targetPhase ->
-  SemanticType Unresolved ->
-  SemanticType targetPhase
-resolvedOr fallback semanticType = case semanticToConcrete semanticType of
-  Just resolved -> coerceToPhase resolved
-  Nothing -> fallback
-  where
-    coerceToPhase :: SemanticType source -> SemanticType target
-    coerceToPhase = \case
-      SemanticTypeVariable _ ->
-        -- SemanticTypeVariable only inhabits Unresolved; semanticToConcrete
-        -- already filtered it out. Defensive: treat as Never.
-        SemanticTypeNever
-      SemanticTypeNever -> SemanticTypeNever
-      SemanticTypeUnknown -> SemanticTypeUnknown
-      SemanticTypeNull -> SemanticTypeNull
-      SemanticTypeInteger -> SemanticTypeInteger
-      SemanticTypeNumber -> SemanticTypeNumber
-      SemanticTypeString -> SemanticTypeString
-      SemanticTypeBoolean -> SemanticTypeBoolean
-      SemanticTypeLiteralInteger value -> SemanticTypeLiteralInteger value
-      SemanticTypeLiteralString value -> SemanticTypeLiteralString value
-      SemanticTypeLiteralBoolean value -> SemanticTypeLiteralBoolean value
-      SemanticTypeData typeId -> SemanticTypeData typeId
-      SemanticTypeArray element -> SemanticTypeArray (coerceToPhase element)
-      SemanticTypeTuple elements -> SemanticTypeTuple (coerceToPhase <$> elements)
-      SemanticTypeUnion branches -> SemanticTypeUnion (coerceToPhase <$> branches)
-      SemanticTypeObject fields -> SemanticTypeObject (Map.map coerceToPhase fields)
-      SemanticTypeFunction parameterTypes returnType effects ->
-        SemanticTypeFunction
-          [ (label, coerceToPhase parameterType)
-            | (label, parameterType) <- parameterTypes
-          ]
-          (coerceToPhase returnType)
-          (SemanticEffect effects.effectVars effects.effectReqs)
 
 tshow :: (Show a) => a -> Text
 tshow = T.pack . show
