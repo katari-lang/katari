@@ -42,7 +42,7 @@ module Katari.Typechecker.ConstraintGenerator
   )
 where
 
-import Control.Monad (foldM)
+import Control.Monad (unless)
 import Control.Monad.Reader (ReaderT, asks, local, runReaderT)
 import Control.Monad.State.Strict (State, gets, modify, runState)
 import Control.Monad.Trans (lift)
@@ -123,6 +123,7 @@ data ConstraintReason
   | ReasonHandleEffectDischarge SourceSpan
   | ReasonHandlerEffectBound SourceSpan
   | ReasonHandleNext SourceSpan
+  | ReasonHandleImplicitNext SourceSpan
   | ReasonHandleBreak SourceSpan
   | ReasonHandleResultBody SourceSpan
   | ReasonForBreak SourceSpan
@@ -130,6 +131,7 @@ data ConstraintReason
   | ReasonModifierUpdate SourceSpan
   | ReasonLetPattern SourceSpan
   | ReasonStateVarAnnotation SourceSpan
+  | ReasonForVarAnnotation SourceSpan
   | ReasonVariablePatternAnnotation SourceSpan
   | ReasonCallArgument SourceSpan
   | ReasonBinaryOperator SourceSpan
@@ -285,6 +287,19 @@ addEffectConstraint ::
   CG ()
 addEffectConstraint lhs rhs r = lift . modify $ \s ->
   s {stateConstraints = EffectConstraint lhs rhs r : s.stateConstraints}
+
+-- | Tie a return-type variable to the (possibly fresh) declared return
+-- type. Skip the eq when both sides denote the same type variable —
+-- 'freshReturnTypeVar' deliberately reuses the inner var when the declared
+-- return type already is one, so emitting eq there would just produce two
+-- @tv = tv@ no-ops.
+addReturnAnnotationEq :: TypeVarId -> SemanticType Unresolved -> SourceSpan -> CG ()
+addReturnAnnotationEq retTvId retSemantic sourceSpan =
+  unless (SemanticTypeVariable retTvId == retSemantic) $
+    addEqTypeConstraint
+      (SemanticTypeVariable retTvId)
+      retSemantic
+      (ReasonReturnTypeAnnotation sourceSpan)
 
 emitError :: ConstraintError -> CG ()
 emitError err = lift . modify $ \s -> s {stateErrors = err : s.stateErrors}
@@ -449,26 +464,7 @@ passThroughImport ImportDeclaration {kind, sourceSpan} =
 
 walkAgentDecl :: AgentDeclaration Identified -> CG (AgentDeclaration Constrained)
 walkAgentDecl AgentDeclaration {annotation, name, parameters, returnType, withEffects, body, sourceSpan} = do
-  tFoo <- variableTypeFromName name
-  (parameters', paramSig) <- walkParameterListForSignature parameters
-  retSemantic <- elaborateOrFresh returnType
-  effDeclared <- maybe (effectFromVar <$> freshEffectVarId) pure =<< elaborateOptionalEffects withEffects
-  bodyEffectVarId <- freshEffectVarId
-  retTvId <- freshReturnTypeVar retSemantic
-  (body', bodyType) <-
-    withReturn retTvId . withEnclosingEffects bodyEffectVarId $ walkBlock body
-  -- body の return / 末尾値は ret_t に流す
-  addTypeConstraint bodyType (SemanticTypeVariable retTvId) (ReasonReturnStatement sourceSpan)
-  -- ret_t と annotated return 型 (annotation か fresh var) は eq
-  addEqTypeConstraint (SemanticTypeVariable retTvId) retSemantic (ReasonReturnTypeAnnotation sourceSpan)
-  -- body の effect var は declared effect (annotation か fresh var) に bound
-  addEffectConstraint
-    (effectFromVar bodyEffectVarId)
-    effDeclared
-    (ReasonEffectBound sourceSpan)
-  -- signature 全体と t_foo は eq
-  let signature = SemanticTypeFunction paramSig retSemantic effDeclared
-  addEqTypeConstraint signature tFoo (ReasonAgentSignature sourceSpan)
+  (parameters', body') <- processAgentLike sourceSpan name parameters returnType withEffects body
   pure
     AgentDeclaration
       { annotation = annotation,
@@ -480,13 +476,44 @@ walkAgentDecl AgentDeclaration {annotation, name, parameters, returnType, withEf
         sourceSpan = sourceSpan
       }
 
+-- | Shared body for @agent@ declarations and statements. Allocates the
+-- declared / body effect variables, walks the body under the appropriate
+-- @return@ context, and emits the signature-equality and effect-bound
+-- constraints. Returns the rebuilt parameter list and body block.
+processAgentLike ::
+  SourceSpan ->
+  NameRef Identified 'VariableRef ->
+  [ParameterBinding Identified] ->
+  Maybe (SyntacticType Identified) ->
+  Maybe [SyntacticRequest Identified] ->
+  Block Identified ->
+  CG ([ParameterBinding Constrained], Block Constrained)
+processAgentLike sourceSpan name parameters returnType withEffects body = do
+  tFoo <- variableTypeFromName name
+  (parameters', paramSig) <- walkParameterListForSignature parameters
+  retSemantic <- elaborateOrFresh returnType
+  effDeclared <- maybe (effectFromVar <$> freshEffectVarId) pure =<< elaborateOptionalEffects withEffects
+  bodyEffectVarId <- freshEffectVarId
+  retTvId <- freshReturnTypeVar retSemantic
+  (body', bodyType) <-
+    withReturn retTvId . withEnclosingEffects bodyEffectVarId $ walkBlock body
+  addTypeConstraint bodyType (SemanticTypeVariable retTvId) (ReasonReturnStatement sourceSpan)
+  addReturnAnnotationEq retTvId retSemantic sourceSpan
+  addEffectConstraint
+    (effectFromVar bodyEffectVarId)
+    effDeclared
+    (ReasonEffectBound sourceSpan)
+  let signature = SemanticTypeFunction paramSig retSemantic effDeclared
+  addEqTypeConstraint signature tFoo (ReasonAgentSignature sourceSpan)
+  pure (parameters', body')
+
 walkRequestDecl :: RequestDeclaration Identified -> CG (RequestDeclaration Constrained)
 walkRequestDecl RequestDeclaration {annotation, name, parameters, returnType, sourceSpan} = do
   tReq <- variableTypeFromName name
-  reqVarId <- variableIdOfName name
   (parameters', paramSig) <- walkParameterListForSignature parameters
   retSemantic <- elaborateType returnType
-  let signature =
+  let reqVarId = variableIdOfName name
+      signature =
         SemanticTypeFunction
           paramSig
           retSemantic
@@ -727,7 +754,7 @@ walkBlock :: Block Identified -> CG (Block Constrained, SemanticType Unresolved)
 walkBlock Block {statements, returnExpression, whereBlock, sourceSpan} = case whereBlock of
   Nothing -> do
     (statements', returnExpression') <- walkBlockBody statements returnExpression
-    let bodyTy = blockBodyTailType returnExpression'
+    let bodyTy = blockTailType statements returnExpression'
     pure
       ( Block
           { statements = statements',
@@ -745,7 +772,7 @@ walkBlock Block {statements, returnExpression, whereBlock, sourceSpan} = case wh
     -- next are valid only inside the handler bodies of @wb@.
     (statements', returnExpression') <-
       withEnclosingEffects e3Id (walkBlockBody statements returnExpression)
-    let bodyTy = blockBodyTailType returnExpression'
+    let bodyTy = blockTailType statements returnExpression'
     tWholeBlockId <- freshTypeVarId
     let tWholeBlock = SemanticTypeVariable tWholeBlockId
     -- Body's tail value flows into the whole-block type. break inside any
@@ -762,10 +789,31 @@ walkBlock Block {statements, returnExpression, whereBlock, sourceSpan} = case wh
         tWholeBlock
       )
 
-blockBodyTailType :: Maybe (Expression Constrained) -> SemanticType Unresolved
-blockBodyTailType = \case
-  Just expression -> constrainedExpressionType expression
-  Nothing -> SemanticTypeNull
+-- | A block's overall type. If any statement is a global-exit
+-- (@return@ / @next@ / @break@ / @for_break@ / @for_next@), control never
+-- reaches the tail expression, so the block's type is 'SemanticTypeNever'.
+-- Otherwise, the type is the tail expression's type, or 'SemanticTypeNull'
+-- when there is no tail expression.
+blockTailType ::
+  [Statement Identified] ->
+  Maybe (Expression Constrained) ->
+  SemanticType Unresolved
+blockTailType statements returnExpression
+  | any isExitStatement statements = SemanticTypeNever
+  | otherwise = case returnExpression of
+      Just expression -> constrainedExpressionType expression
+      Nothing -> SemanticTypeNull
+
+-- | True for statements that transfer control out of the enclosing block,
+-- so anything sequenced after them is unreachable.
+isExitStatement :: Statement phase -> Bool
+isExitStatement = \case
+  StatementReturn _ -> True
+  StatementNext _ -> True
+  StatementBreak _ -> True
+  StatementForNext _ -> True
+  StatementForBreak _ -> True
+  _ -> False
 
 walkBlockBody ::
   [Statement Identified] ->
@@ -811,15 +859,7 @@ walkWhereBlock e1 e3Id e4Id tWholeBlockId WhereBlock {stateVariables, handlers, 
 
 walkStateVariable :: StateVariableBinding Identified -> CG (StateVariableBinding Constrained)
 walkStateVariable StateVariableBinding {name, typeAnnotation, initial, sourceSpan} = do
-  tVar <- variableTypeFromName name
-  case typeAnnotation of
-    Just t -> do
-      annotated <- elaborateType t
-      addEqTypeConstraint tVar annotated (ReasonStateVarAnnotation sourceSpan)
-    Nothing -> pure ()
-  initial' <- walkExpression initial
-  let initialType = constrainedExpressionType initial'
-  addTypeConstraint initialType tVar (ReasonStateVarAnnotation sourceSpan)
+  initial' <- emitInitializerConstraints (ReasonStateVarAnnotation sourceSpan) name typeAnnotation initial
   pure
     StateVariableBinding
       { name = passThroughVariableName name,
@@ -828,6 +868,28 @@ walkStateVariable StateVariableBinding {name, typeAnnotation, initial, sourceSpa
         sourceSpan = sourceSpan
       }
 
+-- | Shared logic for variable bindings that have an optional type annotation
+-- and a required initializer expression: equate the variable's type with
+-- the annotation (if present), and constrain the initializer's type to be
+-- a subtype of the variable's type. Used by both 'walkStateVariable' and
+-- 'walkForVarBinding' — they pick a context-specific 'ConstraintReason'.
+emitInitializerConstraints ::
+  ConstraintReason ->
+  NameRef Identified 'VariableRef ->
+  Maybe (SyntacticType Identified) ->
+  Expression Identified ->
+  CG (Expression Constrained)
+emitInitializerConstraints r name typeAnnotation initial = do
+  tVar <- variableTypeFromName name
+  case typeAnnotation of
+    Just t -> do
+      annotated <- elaborateType t
+      addEqTypeConstraint tVar annotated r
+    Nothing -> pure ()
+  initial' <- walkExpression initial
+  addTypeConstraint (constrainedExpressionType initial') tVar r
+  pure initial'
+
 walkRequestHandler ::
   EffectVarId ->
   TypeVarId ->
@@ -835,10 +897,10 @@ walkRequestHandler ::
   CG (RequestHandler Constrained)
 walkRequestHandler e4Id tWholeBlockId RequestHandler {moduleQualifier, name, parameters, returnType, body, sourceSpan} = do
   tHandled <- variableTypeFromName name
-  reqVarId <- variableIdOfName name
   (parameters', paramSig) <- walkParameterListForSignature parameters
   retSemantic <- elaborateOrFresh returnType
   retTvId <- freshReturnTypeVar retSemantic
+  let reqVarId = variableIdOfName name
   -- Handler body walks under e4 (the dedicated handler-effect var) and the
   -- handle scope. 'next e' resumes the original request call, so 'e' is
   -- constrained against retTvId (= the next-tv); 'break e' targets
@@ -853,8 +915,8 @@ walkRequestHandler e4Id tWholeBlockId RequestHandler {moduleQualifier, name, par
   -- the handler body more like a function definition.
   (body', bodyTy) <-
     withEnclosingEffects e4Id . withHandleScope tWholeBlockId retTvId $ walkBlock body
-  addTypeConstraint bodyTy (SemanticTypeVariable retTvId) (ReasonHandleNext sourceSpan)
-  addEqTypeConstraint (SemanticTypeVariable retTvId) retSemantic (ReasonReturnTypeAnnotation sourceSpan)
+  addTypeConstraint bodyTy (SemanticTypeVariable retTvId) (ReasonHandleImplicitNext sourceSpan)
+  addReturnAnnotationEq retTvId retSemantic sourceSpan
   let handlerSignature =
         SemanticTypeFunction
           paramSig
@@ -898,22 +960,7 @@ walkLet LetStatement {pattern, value, sourceSpan} = do
 
 walkAgentStatement :: AgentStatement Identified -> CG (AgentStatement Constrained)
 walkAgentStatement AgentStatement {name, parameters, returnType, withEffects, body, sourceSpan} = do
-  tFoo <- variableTypeFromName name
-  (parameters', paramSig) <- walkParameterListForSignature parameters
-  retSemantic <- elaborateOrFresh returnType
-  effDeclared <- maybe (effectFromVar <$> freshEffectVarId) pure =<< elaborateOptionalEffects withEffects
-  bodyEffectVarId <- freshEffectVarId
-  retTvId <- freshReturnTypeVar retSemantic
-  (body', bodyType) <-
-    withReturn retTvId . withEnclosingEffects bodyEffectVarId $ walkBlock body
-  addTypeConstraint bodyType (SemanticTypeVariable retTvId) (ReasonReturnStatement sourceSpan)
-  addEqTypeConstraint (SemanticTypeVariable retTvId) retSemantic (ReasonReturnTypeAnnotation sourceSpan)
-  addEffectConstraint
-    (effectFromVar bodyEffectVarId)
-    effDeclared
-    (ReasonEffectBound sourceSpan)
-  let signature = SemanticTypeFunction paramSig retSemantic effDeclared
-  addEqTypeConstraint signature tFoo (ReasonAgentSignature sourceSpan)
+  (parameters', body') <- processAgentLike sourceSpan name parameters returnType withEffects body
   pure
     AgentStatement
       { name = passThroughVariableName name,
@@ -1203,15 +1250,9 @@ walkMatchExpr MatchExpression {subject, cases, sourceSpan} = do
   subject' <- walkExpression subject
   let subjectType = constrainedExpressionType subject'
   tMatch <- freshTypeVar
-  (cases', patternTypes) <-
-    foldM
-      ( \(accCases, accPats) caseArm -> do
-          (caseArm', patType) <- walkCaseArm tMatch caseArm
-          pure (accCases ++ [caseArm'], accPats ++ [patType])
-      )
-      ([], [])
-      cases
-  let patternUnion = case patternTypes of
+  pairs <- mapM (walkCaseArm tMatch) cases
+  let (cases', patternTypes) = unzip pairs
+      patternUnion = case patternTypes of
         [] -> SemanticTypeNever
         [single] -> single
         many -> SemanticTypeUnion many
@@ -1283,15 +1324,7 @@ walkForInBinding ForInBinding {pattern, source, sourceSpan} = do
 
 walkForVarBinding :: ForVarBinding Identified -> CG (ForVarBinding Constrained)
 walkForVarBinding ForVarBinding {name, typeAnnotation, initial, sourceSpan} = do
-  tVar <- variableTypeFromName name
-  case typeAnnotation of
-    Just t -> do
-      annotated <- elaborateType t
-      addEqTypeConstraint tVar annotated (ReasonStateVarAnnotation sourceSpan)
-    Nothing -> pure ()
-  initial' <- walkExpression initial
-  let initialType = constrainedExpressionType initial'
-  addTypeConstraint initialType tVar (ReasonStateVarAnnotation sourceSpan)
+  initial' <- emitInitializerConstraints (ReasonForVarAnnotation sourceSpan) name typeAnnotation initial
   pure
     ForVarBinding
       { name = passThroughVariableName name,
@@ -1478,8 +1511,8 @@ variableTypeFromName nameRef = case nameRef.metadata of
   IdentifiedVariable vid -> lookupVariable vid
   IdentifiedUnresolvedVariable -> freshTypeVar
 
-variableIdOfName :: NameRef Identified 'VariableRef -> CG (Maybe VariableId)
-variableIdOfName nameRef = pure $ case nameRef.metadata of
+variableIdOfName :: NameRef Identified 'VariableRef -> Maybe VariableId
+variableIdOfName nameRef = case nameRef.metadata of
   IdentifiedVariable vid -> Just vid
   IdentifiedUnresolvedVariable -> Nothing
 

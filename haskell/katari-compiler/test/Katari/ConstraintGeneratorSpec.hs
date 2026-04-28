@@ -94,6 +94,7 @@ spec = do
   callExpressions
   constructorPatterns
   whereBlocks
+  exitStatementBlocks
   typeSynonymCycle
   constraintContents
 
@@ -360,13 +361,89 @@ whereBlocks = describe "where blocks" $ do
             && not (Set.null rhs.effectVars)
       )
 
-  it "block without where emits no effect constraints from the block itself" $ do
+  it "block without where emits only the agent's bodyEff <: declared constraint" $ do
     -- A plain block (no where) should not introduce extra effect
-    -- constraints. The agent itself emits one (bodyEff <: declared); we
-    -- check the total effect-constraint count is exactly 1.
+    -- constraints of its own. The only effect constraint the agent should
+    -- produce is bodyEff <: declared, with both sides effect-vars only
+    -- (no req-id sets) since neither has a 'with' clause.
     cg <- runOne "agent main() -> string { \"hi\" }\n"
     cg.errors `shouldBe` []
-    countEffectConstraints cg `shouldBe` 1
+    let effs = effectConstraints cg
+    length effs `shouldBe` 1
+    case effs of
+      [(lhs, rhs)] -> do
+        Set.null lhs.effectReqs `shouldBe` True
+        Set.null rhs.effectReqs `shouldBe` True
+        Set.size lhs.effectVars `shouldBe` 1
+        Set.size rhs.effectVars `shouldBe` 1
+      _ -> expectationFailure "expected exactly one effect constraint"
+
+-- ---------------------------------------------------------------------------
+-- Blocks containing global-exit statements (return / next / break / ...)
+-- have type 'never', so the implicit fall-through value never produces a
+-- spurious null-flow constraint.
+-- ---------------------------------------------------------------------------
+
+exitStatementBlocks :: Spec
+exitStatementBlocks = describe "exit-statement blocks" $ do
+  it "handler body that always exits via 'next' yields no spurious null flow" $ do
+    -- Before the never-typing fix, the handler's implicit completion would
+    -- emit (null <: retTvId) because 'next \"x\"' is a statement and the
+    -- block has no tail expression, leaving bodyTy = null. With the fix,
+    -- bodyTy = never instead, so no such constraint should appear.
+    cg <-
+      runOne $
+        mconcat
+          [ "req fetch() -> string\n",
+            "agent main() -> string { fetch() } where {\n",
+            "  req fetch() -> string {\n",
+            "    next \"x\"\n",
+            "  }\n",
+            "}\n"
+          ]
+    cg.errors `shouldBe` []
+    cg
+      `shouldSatisfy` not
+      . hasTypeConstraint
+        ( \l r -> l == SemanticTypeNull && case r of
+            SemanticTypeVariable _ -> True
+            _ -> False
+        )
+
+  it "if-then branch ending with 'return' contributes type never to the if result" $ do
+    -- The then-branch is just 'return \"a\"', so walkBlock yields
+    -- bodyTy = never for that branch, and walkIfExpr then emits
+    -- (never <: tResult). The else branch contributes string. Together the
+    -- if's result type stays string (never is bottom) — but we should see
+    -- never as the lhs of some constraint.
+    cg <-
+      runOne $
+        mconcat
+          [ "agent main() -> string {\n",
+            "  if (true) {\n",
+            "    return \"a\"\n",
+            "  } else {\n",
+            "    \"b\"\n",
+            "  }\n",
+            "}\n"
+          ]
+    cg.errors `shouldBe` []
+    cg `shouldSatisfy` hasTypeConstraintLhs SemanticTypeNever
+
+  it "agent body whose only statement is 'return' types as never" $ do
+    -- Body has a single 'return \"x\"' statement — no tail expression. With
+    -- the never-typing fix, walkBlock returns SemanticTypeNever rather
+    -- than SemanticTypeNull, so processAgentLike's
+    -- (bodyType <: retTvId) constraint becomes never <: retTvId.
+    cg <-
+      runOne $
+        mconcat
+          [ "agent main() -> string {\n",
+            "  return \"x\"\n",
+            "}\n"
+          ]
+    cg.errors `shouldBe` []
+    cg `shouldSatisfy` hasTypeConstraintLhs SemanticTypeNever
 
 -- ---------------------------------------------------------------------------
 -- Type synonym cycle detection
