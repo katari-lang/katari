@@ -18,6 +18,11 @@ library:
     - Katari.Typechecker.NormalizedType
     - Katari.Typechecker.ConstraintGenerator
     - Katari.Typechecker.Solver
+    - Katari.Typechecker.Solver.Branch
+    - Katari.Typechecker.Solver.Decompose
+    - Katari.Typechecker.Solver.Effect
+    - Katari.Typechecker.Solver.Internal
+    - Katari.Typechecker.Solver.Substitution
     - Katari.Typechecker.Zonker
 
 tests:
@@ -28,6 +33,8 @@ tests:
       - Katari.ParserSpec
       - Katari.IdentifierSpec
       - Katari.ConstraintGeneratorSpec
+      - Katari.ZonkerSpec
+      - Katari.SolverSpec
     dependencies:
       - katari-compiler
       - hspec

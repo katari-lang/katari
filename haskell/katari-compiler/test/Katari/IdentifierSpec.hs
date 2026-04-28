@@ -7,7 +7,7 @@ import Data.Map.Strict qualified as Map
 import Data.Maybe (isJust, isNothing)
 import Data.Text (Text)
 import Katari.AST
-import Katari.Parser (ParseError, Parsed, parseModuleStrict)
+import Katari.Parser (Parsed, parseModuleStrict)
 import Katari.Typechecker.Identifier
 import Test.Hspec
 
@@ -172,8 +172,8 @@ dataDeclarations :: Spec
 dataDeclarations = describe "data declarations" $ do
   it "data introduces both variable (ctor function) and type with same name" $ do
     res <-
-      shouldIdentify
-        $ mconcat
+      shouldIdentify $
+        mconcat
           [ "data circle(r: integer)\n",
             "agent main() { circle(r = 1) }"
           ]
@@ -182,8 +182,8 @@ dataDeclarations = describe "data declarations" $ do
     Map.size res.identifiedTypes `shouldSatisfy` (>= 1) -- circle (type)
   it "data type usable in type annotation" $ do
     _ <-
-      shouldIdentify
-        $ mconcat
+      shouldIdentify $
+        mconcat
           [ "data point(x: integer, y: integer)\n",
             "agent main(p: point) -> point { p }"
           ]
@@ -191,24 +191,24 @@ dataDeclarations = describe "data declarations" $ do
 
   it "data with no parameters" $ do
     _ <-
-      shouldIdentify
-        $ mconcat
+      shouldIdentify $
+        mconcat
           [ "data marker()\n",
             "agent main() { marker() }"
           ]
     pure ()
 
   it "data + same-name agent → duplicate" $ do
-    shouldFailIdentifyWith isDup
-      $ mconcat
+    shouldFailIdentifyWith isDup $
+      mconcat
         [ "data foo(x: integer)\n",
           "agent foo() { 0 }"
         ]
 
   it "constructor pattern matching on data" $ do
     _ <-
-      shouldIdentify
-        $ mconcat
+      shouldIdentify $
+        mconcat
           [ "data circle(r: integer)\n",
             "agent main(x: circle) { match (x) { case circle(r = v) => { v } } }"
           ]
@@ -216,8 +216,8 @@ dataDeclarations = describe "data declarations" $ do
 
   it "data declaration's typeName carries the same TypeId registered in identifiedTypes" $ do
     res <-
-      shouldIdentify
-        $ mconcat
+      shouldIdentify $
+        mconcat
           [ "data widget(w: integer)\n",
             "agent main() { widget(w = 1) }"
           ]
@@ -262,8 +262,8 @@ typeSynonymAndUnion :: Spec
 typeSynonymAndUnion = describe "type synonym and union" $ do
   it "type synonym with named types in union" $ do
     _ <-
-      shouldIdentify
-        $ mconcat
+      shouldIdentify $
+        mconcat
           [ "data nothing()\n",
             "data just(value: integer)\n",
             "type maybe_int = nothing | just\n",
@@ -273,8 +273,8 @@ typeSynonymAndUnion = describe "type synonym and union" $ do
 
   it "type synonym with literal types" $ do
     _ <-
-      shouldIdentify
-        $ mconcat
+      shouldIdentify $
+        mconcat
           [ "type status = \"ok\" | \"err\" | null\n",
             "agent main(s: status) { 0 }"
           ]
@@ -282,22 +282,22 @@ typeSynonymAndUnion = describe "type synonym and union" $ do
 
   it "type synonym with mixed literal kinds" $ do
     _ <-
-      shouldIdentify
-        $ mconcat
+      shouldIdentify $
+        mconcat
           [ "type t = 200 | 404 | true | false\n",
             "agent main(x: t) { 0 }"
           ]
     pure ()
 
   it "type synonym referencing undefined type fails" $ do
-    shouldFailIdentifyWith isNotAType
-      $ mconcat
+    shouldFailIdentifyWith isNotAType $
+      mconcat
         [ "type t = undef_type\n"
         ]
 
   it "type synonym + same-name data is duplicate" $ do
-    shouldFailIdentifyWith isDup
-      $ mconcat
+    shouldFailIdentifyWith isDup $
+      mconcat
         [ "data foo()\n",
           "type foo = integer"
         ]
@@ -316,8 +316,8 @@ typeSynonymAndUnion = describe "type synonym and union" $ do
 
   it "every synonym in a chain has its RHS recorded" $ do
     res <-
-      shouldIdentify
-        $ mconcat
+      shouldIdentify $
+        mconcat
           [ "type a = string\n",
             "type b = a\n"
           ]
@@ -416,8 +416,8 @@ importHandling = describe "imports" $ do
 duplicateNameErrors :: Spec
 duplicateNameErrors = describe "duplicate names" $ do
   it "two agents with same name in same module" $ do
-    shouldFailIdentifyWith isDup
-      $ mconcat
+    shouldFailIdentifyWith isDup $
+      mconcat
         [ "agent foo() { 0 }\n",
           "agent foo() { 1 }"
         ]
@@ -469,8 +469,8 @@ shadowingRules :: Spec
 shadowingRules = describe "shadowing" $ do
   it "local let shadows top-level variable" $ do
     _ <-
-      shouldIdentify
-        $ mconcat
+      shouldIdentify $
+        mconcat
           [ "agent helper() { 0 }\n",
             "agent main() { let helper = 1; helper }"
           ]
@@ -493,8 +493,8 @@ shadowingRules = describe "shadowing" $ do
     -- Local variable bindings may shadow names that exist only in the type
     -- slot at top level — variable and type lookups walk independently.
     _ <-
-      shouldIdentify
-        $ mconcat
+      shouldIdentify $
+        mconcat
           [ "type status = \"ok\"\n",
             "agent main() { let status = 1; status }"
           ]
@@ -502,8 +502,8 @@ shadowingRules = describe "shadowing" $ do
 
   it "data ctor (variable) can be shadowed by local let" $ do
     _ <-
-      shouldIdentify
-        $ mconcat
+      shouldIdentify $
+        mconcat
           [ "data marker()\n",
             "agent main() { let marker = 1; marker }"
           ]
@@ -518,8 +518,8 @@ shadowingRules = describe "shadowing" $ do
     -- `let marker = 1` shadows the variable slot; the type slot survives,
     -- so `marker` in a type-annotation position still resolves to the data type.
     _ <-
-      shouldIdentify
-        $ mconcat
+      shouldIdentify $
+        mconcat
           [ "data marker()\n",
             "agent main(p: marker) { let marker = 1; marker }"
           ]
@@ -573,8 +573,8 @@ qualifiedRequestHandler :: Spec
 qualifiedRequestHandler = describe "request handlers" $ do
   it "bare req handler resolves to existing req" $ do
     _ <-
-      shouldIdentify
-        $ mconcat
+      shouldIdentify $
+        mconcat
           [ "req get() -> integer\n",
             "agent main() { 0 } where {\n",
             "  req get() { 0 }\n",
@@ -613,8 +613,8 @@ qualifiedRequestHandler = describe "request handlers" $ do
     res `shouldSatisfy` hasError isUndefQual
 
   it "bare req handler with unknown name fails" $ do
-    shouldFailIdentifyWith isUndefName
-      $ mconcat
+    shouldFailIdentifyWith isUndefName $
+      mconcat
         [ "agent main() { 0 } where {\n",
           "  req nonexistent() { 0 }\n",
           "}"
@@ -627,8 +627,8 @@ qualifiedRequestHandler = describe "request handlers" $ do
 scopeIsolation :: Spec
 scopeIsolation = describe "scope isolation" $ do
   it "where state vars not visible in body" $ do
-    shouldFailIdentifyWith isUndefName
-      $ mconcat
+    shouldFailIdentifyWith isUndefName $
+      mconcat
         [ "agent main() {\n",
           "  count\n",
           "} where (var count = 0) {\n",
@@ -636,8 +636,8 @@ scopeIsolation = describe "scope isolation" $ do
         ]
 
   it "body let not visible in where state var initializer" $ do
-    shouldFailIdentifyWith isUndefName
-      $ mconcat
+    shouldFailIdentifyWith isUndefName $
+      mconcat
         [ "agent main() {\n",
           "  let x = 0;\n",
           "  x\n",
@@ -647,8 +647,8 @@ scopeIsolation = describe "scope isolation" $ do
 
   it "later state var sees earlier (ML let order)" $ do
     res <-
-      identifyOne
-        $ mconcat
+      identifyOne $
+        mconcat
           [ "req inc() -> integer\n",
             "agent main() { 0 } where (var a = 1, var b = a) {\n",
             "  req inc() { 0 }\n",
@@ -657,8 +657,8 @@ scopeIsolation = describe "scope isolation" $ do
     res `shouldSatisfy` isRight
 
   it "earlier state var does NOT see later" $ do
-    shouldFailIdentifyWith isUndefName
-      $ mconcat
+    shouldFailIdentifyWith isUndefName $
+      mconcat
         [ "req inc() -> integer\n",
           "agent main() { 0 } where (var a = b, var b = 1) {\n",
           "  req inc() { 0 }\n",
