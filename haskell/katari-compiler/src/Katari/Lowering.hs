@@ -225,34 +225,27 @@ emit :: Statement -> StmtBuf -> StmtBuf
 emit s buf = buf ++ [s]
 
 -- ===========================================================================
--- UserBlock / BlockProps defaults
+-- UserBlock default template
 -- ===========================================================================
 
--- | All-False 'BlockProps'. Override individual fields via record update at
--- the construction site.
-defaultBlockProps :: BlockProps
-defaultBlockProps =
-  BlockProps
-    { catchesReturn = False,
-      catchesBreak = False,
-      inheritScope = False
-    }
-
--- | Empty 'UserBlock' template. The 8 different roles a block plays
+-- | Empty 'UserBlock' template. The 5 different roles a block plays
 -- (agent entry / agent-with-handlers / handle scope / handler body / inline
--- block / for body / match-arm body / then block) used to inline 13 lines of
--- record syntax each; now they record-update only the fields they care
--- about. The 'BlockKind' sum (Phase 12) will eventually replace 'BlockProps'.
+-- block) used to inline 13 lines of record syntax each; now they record-
+-- update only the fields they care about.
+--
+-- The default @kind@ is 'BlockInline' (the most common role: inline blocks /
+-- match-arm bodies / for bodies / then-clauses inherit the parent scope).
+-- Sites with a different role override 'kind' explicitly.
 defaultUserBlock :: UserBlock
 defaultUserBlock =
   UserBlock
-    { params = [],
+    { kind = BlockInline,
+      params = [],
       stateVars = [],
       statements = [],
       trailing = Nothing,
       thenBlock = Nothing,
-      handlers = [],
-      props = defaultBlockProps
+      handlers = []
     }
 
 -- ===========================================================================
@@ -421,10 +414,10 @@ lowerSimpleAgent blockId name paramVars blk = do
   (statements, trailing) <- lowerBlockBody blk
   let userBlock =
         defaultUserBlock
-          { params = paramVars,
+          { kind = BlockAgentEntry,
+            params = paramVars,
             statements = statements,
-            trailing = trailing,
-            props = defaultBlockProps {catchesReturn = True}
+            trailing = trailing
           }
   recordBlock blockId (BlockUser {body = userBlock}) (Just name)
 
@@ -446,12 +439,12 @@ lowerAgentWithHandlers blockId name paramVars blk wb = do
   thenBlockId <- lowerThenClause wb.thenClause
   let userBlock =
         defaultUserBlock
-          { params = paramVars,
+          { kind = BlockAgentEntryWithHandlers,
+            params = paramVars,
             statements = statements,
             trailing = trailing,
             thenBlock = thenBlockId,
-            handlers = handlers,
-            props = defaultBlockProps {catchesReturn = True, catchesBreak = True}
+            handlers = handlers
           }
   recordBlock blockId (BlockUser {body = userBlock}) (Just name)
 
@@ -488,10 +481,10 @@ lowerAgentWithStateVars outerId name paramVars blk wb = do
       outerStatements = bufAfterInits ++ [callInner]
       outerBlock =
         defaultUserBlock
-          { params = paramVars,
+          { kind = BlockAgentEntry,
+            params = paramVars,
             statements = outerStatements,
-            trailing = Just innerOut,
-            props = defaultBlockProps {catchesReturn = True}
+            trailing = Just innerOut
           }
   recordBlock outerId (BlockUser {body = outerBlock}) (Just name)
 
@@ -530,12 +523,12 @@ buildInnerBlockWithState parentName wb blk = do
     thenBlockId <- lowerThenClause wb.thenClause
     let userBlock =
           defaultUserBlock
-            { stateVars = stateParams,
+            { kind = BlockHandleScope,
+              stateVars = stateParams,
               statements = statements,
               trailing = trailing,
               thenBlock = thenBlockId,
-              handlers = handlers,
-              props = defaultBlockProps {catchesBreak = True, inheritScope = True}
+              handlers = handlers
             }
     recordBlock innerBlockId (BlockUser {body = userBlock}) (Just (parentName <> ":inner"))
   pure innerBlockId
@@ -589,7 +582,8 @@ lowerHandler stateParams hr = do
           Nothing -> statements
         userBlock =
           defaultUserBlock
-            { params = reqParamVars ++ stateParams,
+            { kind = BlockHandlerBody,
+              params = reqParamVars ++ stateParams,
               statements = finalStatements
             }
     recordBlock bodyBlockId (BlockUser {body = userBlock}) (Just hr.name.text)
@@ -617,8 +611,7 @@ lowerThenClause = \case
             defaultUserBlock
               { params = [Param {label = "value", var = paramVar}],
                 statements = statements,
-                trailing = trailing,
-                props = defaultBlockProps {inheritScope = True}
+                trailing = trailing
               }
       recordBlock bid (BlockUser {body = userBlock}) Nothing
     pure (Just bid)
@@ -1083,8 +1076,7 @@ buildInlineBlock blk = do
   let userBlock =
         defaultUserBlock
           { statements = statements,
-            trailing = trailing,
-            props = defaultBlockProps {inheritScope = True}
+            trailing = trailing
           }
   recordBlock blockId (BlockUser {body = userBlock}) Nothing
   pure blockId
@@ -1209,8 +1201,7 @@ buildArmBody locals blk = do
     let userBlock =
           defaultUserBlock
             { statements = statements,
-              trailing = trailing,
-              props = defaultBlockProps {inheritScope = True}
+              trailing = trailing
             }
     recordBlock blockId (BlockUser {body = userBlock}) Nothing
   pure blockId
@@ -1308,8 +1299,7 @@ buildForBody _iterPairs stateLocals body = do
     let userBlock =
           defaultUserBlock
             { statements = statements,
-              trailing = trailing,
-              props = defaultBlockProps {inheritScope = True}
+              trailing = trailing
             }
     recordBlock blockId (BlockUser {body = userBlock}) Nothing
   pure blockId

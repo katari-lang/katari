@@ -104,8 +104,7 @@ stage1Spec = describe "Stage 1 — literals / arithmetic" $ do
         ub.trailing `shouldBe` Nothing
         ub.handlers `shouldBe` []
         ub.params `shouldBe` []
-        ub.props.catchesReturn `shouldBe` True
-        ub.props.catchesBreak `shouldBe` False
+        ub.kind `shouldBe` BlockAgentEntry
 
   it "lowers an integer literal as SLoadLiteral with the integer value" $ do
     (irMod, errs) <- lowerSource "agent main() { 42 }"
@@ -252,11 +251,11 @@ stage2Spec = describe "Stage 2 \8212 control flow" $ do
       [m] -> do
         let [arm] = m.arms
         case userBlockOf arm.body irMod of
-          Just child -> child.props.inheritScope `shouldBe` True
+          Just child -> child.kind `shouldBe` BlockInline
           Nothing -> expectationFailure "then-branch block not found"
         case m.defaultArm of
           Just defId -> case userBlockOf defId irMod of
-            Just child -> child.props.inheritScope `shouldBe` True
+            Just child -> child.kind `shouldBe` BlockInline
             Nothing -> expectationFailure "else-branch block not found"
           Nothing -> expectationFailure "expected default branch"
       _ -> expectationFailure "expected 1 SMatch"
@@ -339,7 +338,7 @@ stage3Spec = describe "Stage 3 \8212 block / let / scope" $ do
     case childCalls of
       (c : _) -> case c.target of
         CTBlock {block} -> case userBlockOf block irMod of
-          Just child -> child.props.inheritScope `shouldBe` True
+          Just child -> child.kind `shouldBe` BlockInline
           Nothing -> expectationFailure "child block not found"
         _ -> expectationFailure "child call must target a block"
       _ -> pure ()
@@ -359,7 +358,7 @@ stage3Spec = describe "Stage 3 \8212 block / let / scope" $ do
 isChildBlockCall :: CallData -> IRModule -> Bool
 isChildBlockCall c irMod = case c.target of
   CTBlock {block} -> case Map.lookup block irMod.blocks of
-    Just (BlockUser {body}) -> body.props.inheritScope
+    Just (BlockUser {body}) -> body.kind == BlockInline
     _ -> False
   _ -> False
 
@@ -520,8 +519,7 @@ stage6Spec = describe "Stage 6 \8212 handle scope / where / state vars" $ do
           ]
     errs `shouldBe` []
     let Just ub = agentBody "main" irMod
-    ub.props.catchesReturn `shouldBe` True
-    ub.props.catchesBreak `shouldBe` True
+    ub.kind `shouldBe` BlockAgentEntryWithHandlers
     length ub.handlers `shouldBe` 1
 
   it "handler body's trailing becomes implicit SExit ExitBreak" $ do
@@ -556,9 +554,9 @@ stage6Spec = describe "Stage 6 \8212 handle scope / where / state vars" $ do
           ]
     errs `shouldBe` []
     let Just outer = agentBody "counter" irMod
-    -- Outer has catchesReturn=True, no break-catch, no handlers.
-    outer.props.catchesReturn `shouldBe` True
-    outer.props.catchesBreak `shouldBe` False
+    -- Outer is a plain agent entry with no handlers (the where-with-state-var
+    -- form delegates handlers to the inner handle-scope block).
+    outer.kind `shouldBe` BlockAgentEntry
     outer.handlers `shouldBe` []
     -- Outer's last call must be to the inner block.
     case [d | SCall d <- outer.statements] of
@@ -568,9 +566,8 @@ stage6Spec = describe "Stage 6 \8212 handle scope / where / state vars" $ do
         case lastCall.target of
           CTBlock {block = innerId} -> case userBlockOf innerId irMod of
             Just inner -> do
-              -- Inner has catchesBreak, has stateVars and handlers.
-              inner.props.catchesBreak `shouldBe` True
-              inner.props.inheritScope `shouldBe` True
+              -- Inner is a handle scope: catches break and inherits scope.
+              inner.kind `shouldBe` BlockHandleScope
               map (.label) inner.stateVars `shouldBe` ["n"]
               length inner.handlers `shouldBe` 1
             Nothing -> expectationFailure "inner block not found"

@@ -12,9 +12,15 @@
 --     statement として残す。jump / label は使わない。
 --   * 大域脱出は 'SExit' (return / break / for_break) と 'SCont' (next /
 --     for_next) の 2 系統。経路上 then-block の適用ルールが異なる。
---   * Variable は 'VarId' のみ。scope は runtime 側で 'BlockProps.inheritScope'
+--   * Variable は 'VarId' のみ。scope は runtime 側で 'UserBlock.kind'
 --     を見て管理する。
 --   * 型情報は IR に含まれない。
+--
+-- JSON 表現は全て 'genericToJSON' / 'genericParseJSON' で導出する。
+-- Sum 型は @{"kind": tag, ...}@ の TaggedObject 形式: record 引数の
+-- constructor は flat (例: @{"kind":"prim","name":"add"}@)、
+-- 単一 non-record 引数の constructor は @"contents"@ にネスト
+-- (例: @{"kind":"call","contents":{"target":...,"args":...,"output":...}}@)。
 module Katari.IR
   ( -- * Identifiers
     BlockId (..),
@@ -28,7 +34,7 @@ module Katari.IR
     -- * Block
     Block (..),
     UserBlock (..),
-    BlockProps (..),
+    BlockKind (..),
     Param (..),
     Handler (..),
 
@@ -57,19 +63,10 @@ import Data.Aeson
     SumEncoding (..),
     ToJSON (..),
     ToJSONKey,
-    Value (..),
     defaultOptions,
     genericParseJSON,
     genericToJSON,
-    object,
-    withObject,
-    (.:),
-    (.:?),
-    (.=),
   )
-import Data.Aeson.Key qualified as Key
-import Data.Aeson.KeyMap qualified as KeyMap
-import Data.Aeson.Types (Parser, parseFail)
 import Data.Char (toLower)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
@@ -134,70 +131,92 @@ emptyNameTable = NameTable {varNames = Map.empty, blockNames = Map.empty}
 
 -- | All callable units. Special blocks (prim / req / ext / ctor) carry only
 -- metadata; user blocks own statements / handlers / then etc.
-data Block where
-  BlockUser ::
-    {body :: UserBlock} ->
-    Block
-  BlockPrim ::
-    {name :: Text} ->
-    Block
-  BlockRequest ::
-    {name :: Text} ->
-    Block
-  -- | External agent stub. Identified by @(moduleName, name)@: the runtime
-  -- looks up the function in a JS sidecar bundle keyed by these. The
-  -- @\@"..."@ annotation on the declaration is purely documentation and
-  -- does not appear in the IR.
-  BlockExternal ::
-    {moduleName :: Text, name :: Text} ->
-    Block
-  BlockCtor ::
-    {name :: Text} ->
-    Block
-
-deriving instance Eq Block
-
-deriving instance Show Block
+data Block
+  = -- | Regular user-defined block. The body lives in a separate record so
+    -- the field set can grow independently of the sum tag.
+    BlockUser {body :: !UserBlock}
+  | -- | Built-in primitive. The runtime resolves @name@ against its prim
+    -- registry.
+    BlockPrim {name :: !Text}
+  | -- | Request declaration. Used as the static target of a @raise@ /
+    -- @perform@ call.
+    BlockRequest {name :: !Text}
+  | -- | External agent stub. Identified by @(moduleName, name)@: the runtime
+    -- looks up the function in a JS sidecar bundle keyed by these. The
+    -- @\@"..."@ annotation on the declaration is purely documentation and
+    -- does not appear in the IR.
+    BlockExternal {moduleName :: !Text, name :: !Text}
+  | -- | Data constructor. The runtime tags the resulting value with @name@.
+    BlockCtor {name :: !Text}
+  deriving (Eq, Show, Generic)
 
 instance ToJSON Block where
-  toJSON = \case
-    BlockUser {body} -> withTag "user" (toJSON body)
-    BlockPrim {name} -> object ["kind" .= ("prim" :: Text), "name" .= name]
-    BlockRequest {name} -> object ["kind" .= ("request" :: Text), "name" .= name]
-    BlockExternal {moduleName, name} ->
-      object ["kind" .= ("external" :: Text), "moduleName" .= moduleName, "name" .= name]
-    BlockCtor {name} -> object ["kind" .= ("ctor" :: Text), "name" .= name]
+  toJSON = genericToJSON (sumOptions stripBlockPrefix)
 
 instance FromJSON Block where
-  parseJSON = withObject "Block" $ \o -> do
-    kind <- o .: "kind" :: Parser Text
-    case kind of
-      "user" -> BlockUser <$> parseJSON (Object o)
-      "prim" -> BlockPrim <$> o .: "name"
-      "request" -> BlockRequest <$> o .: "name"
-      "external" -> BlockExternal <$> o .: "moduleName" <*> o .: "name"
-      "ctor" -> BlockCtor <$> o .: "name"
-      other -> parseFail ("Block: unknown kind " <> show other)
+  parseJSON = genericParseJSON (sumOptions stripBlockPrefix)
+
+-- | Static structural role of a 'UserBlock'. Replaces the older
+-- 'BlockProps' triple of booleans, making invalid combinations
+-- unrepresentable.
+--
+-- The 5 valid roles correspond to:
+--
+--   * 'BlockAgentEntry' — agent body without handlers; catches @return@ only.
+--   * 'BlockAgentEntryWithHandlers' — agent body with a where-clause that
+--     attaches handlers; catches both @return@ and @break@.
+--   * 'BlockHandleScope' — inner scope of a @where { state vars; handlers }@
+--     construct; catches @break@ and inherits the parent scope.
+--   * 'BlockInline' — an inline block / arm body / for-body / then-clause;
+--     inherits the parent scope, catches nothing.
+--   * 'BlockHandlerBody' — the body of a request handler; runs in its own
+--     scope and catches nothing.
+--
+-- Mapping to the runtime\'s old triple:
+--
+-- @
+--                                 catchesReturn  catchesBreak  inheritScope
+-- BlockAgentEntry                 True           False         False
+-- BlockAgentEntryWithHandlers     True           True          False
+-- BlockHandleScope                False          True          True
+-- BlockInline                     False          False         True
+-- BlockHandlerBody                False          False         False
+-- @
+data BlockKind
+  = BlockAgentEntry
+  | BlockAgentEntryWithHandlers
+  | BlockHandleScope
+  | BlockInline
+  | BlockHandlerBody
+  deriving (Eq, Show, Generic)
+
+instance ToJSON BlockKind where
+  toJSON = genericToJSON (enumOptions stripBlockPrefix)
+
+instance FromJSON BlockKind where
+  parseJSON = genericParseJSON (enumOptions stripBlockPrefix)
 
 -- | The body of a regular user-defined block.
 data UserBlock = UserBlock
-  { -- | Regular labeled parameters (call args bind by label).
-    params :: [Param],
+  { -- | Structural role of the block. Determines exit semantics and scope
+    -- inheritance at runtime.
+    kind :: !BlockKind,
+    -- | Regular labeled parameters (call args bind by label).
+    params :: ![Param],
     -- | Mutable state vars introduced by @where (var ...)@ or @for (var ...)@.
     -- Listed separately so the runtime can apply the parallel/versioning
     -- semantics for state mutation.
-    stateVars :: [Param],
-    statements :: [Statement],
+    stateVars :: ![Param],
+    statements :: ![Statement],
     -- | Tail value when the block completes normally (Rust-style trailing
     -- expression). 'Nothing' means the block has no value.
-    trailing :: Maybe VarId,
+    trailing :: !(Maybe VarId),
     -- | Optional then-block applied to the body's tail. Receives 1 param
     -- whose label is conventionally @"value"@ (set by Lowering).
-    thenBlock :: Maybe BlockId,
+    thenBlock :: !(Maybe BlockId),
     -- | Request handlers attached to this block. Only meaningful when
-    -- @props.catchesBreak@ is True (handle scope).
-    handlers :: [Handler],
-    props :: BlockProps
+    -- 'kind' is 'BlockAgentEntryWithHandlers' or 'BlockHandleScope'.
+    handlers :: ![Handler]
   }
   deriving (Eq, Show, Generic)
 
@@ -209,8 +228,8 @@ instance FromJSON UserBlock where
 
 -- | A label-bound param. The @label@ is what callers use in 'Arg'.
 data Param = Param
-  { label :: Text,
-    var :: VarId
+  { label :: !Text,
+    var :: !VarId
   }
   deriving (Eq, Show, Generic)
 
@@ -220,32 +239,13 @@ instance ToJSON Param where
 instance FromJSON Param where
   parseJSON = genericParseJSON irOptions
 
--- | Static properties that determine how exits / scope work.
-data BlockProps = BlockProps
-  { -- | Agent entry: 'SExit' 'ExitReturn' stops here.
-    catchesReturn :: Bool,
-    -- | Handle scope: 'SExit' 'ExitBreak' stops here, and 'SCont' 'ContNext'
-    -- targets this block for resume.
-    catchesBreak :: Bool,
-    -- | When True, child block calls share the parent scope (inline blocks,
-    -- branch arms, for-body, then-blocks, handlers reading state).
-    inheritScope :: Bool
-  }
-  deriving (Eq, Show, Generic)
-
-instance ToJSON BlockProps where
-  toJSON = genericToJSON irOptions
-
-instance FromJSON BlockProps where
-  parseJSON = genericParseJSON irOptions
-
 -- | A request handler attached to a handle-scope block.
 data Handler = Handler
   { -- | Target request id (a 'BlockRequest' in the block table).
-    request :: BlockId,
+    request :: !BlockId,
     -- | The handler body block. Its params are @[req args... , state vars...]@
     -- by label.
-    handlerBody :: BlockId
+    handlerBody :: !BlockId
   }
   deriving (Eq, Show, Generic)
 
@@ -261,61 +261,33 @@ instance FromJSON Handler where
 
 -- | All actions a block can take. Statement order is irrelevant: the runtime
 -- is dataflow-based and fires statements when their input vars are ready.
-data Statement where
-  -- | Call any block (static or via closure).
-  SCall :: !CallData -> Statement
-  -- | Materialize a closure value from a block id. Captures the current scope.
-  SMakeClosure :: !MakeClosureData -> Statement
-  -- | Load a constant literal into a fresh IR var. Literals are first-class
-  -- IR statements (rather than calls to a load_xxx prim) so the value can be
-  -- carried directly without a separate constant pool.
-  SLoadLiteral :: !LoadLiteralData -> Statement
-  -- | Single-level pattern match. Nested patterns are decomposed by Lowering;
-  -- shared default arms are referenced via shared 'BlockId'.
-  SMatch :: !MatchData -> Statement
-  -- | For loop. Body is invoked iteratively; state vars threaded by label.
-  SFor :: !ForData -> Statement
-  -- | Non-local exit that traverses upward applying then-blocks until reaching
-  -- the matching boundary.
-  SExit :: !ExitData -> Statement
-  -- | Continuation signal that resumes the enclosing for-loop frame or paused
-  -- handler-scope body. Does not apply then-blocks; does not terminate the
-  -- block in the value-producing sense.
-  SCont :: !ContData -> Statement
-
-deriving instance Eq Statement
-
-deriving instance Show Statement
+--
+-- Each variant wraps a payload record (e.g. 'CallData') so that field-name
+-- conflicts (output \/ value across constructors with different field types)
+-- don't collide at the Haskell level. JSON-wise this nests the payload
+-- under a @"contents"@ key alongside the @"kind"@ tag.
+data Statement
+  = SCall !CallData
+  | SMakeClosure !MakeClosureData
+  | SLoadLiteral !LoadLiteralData
+  | SMatch !MatchData
+  | SFor !ForData
+  | SExit !ExitData
+  | SCont !ContData
+  deriving (Eq, Show, Generic)
 
 instance ToJSON Statement where
-  toJSON = \case
-    SCall d -> withTag "call" (toJSON d)
-    SMakeClosure d -> withTag "makeClosure" (toJSON d)
-    SLoadLiteral d -> withTag "loadLiteral" (toJSON d)
-    SMatch d -> withTag "match" (toJSON d)
-    SFor d -> withTag "for" (toJSON d)
-    SExit d -> withTag "exit" (toJSON d)
-    SCont d -> withTag "cont" (toJSON d)
+  toJSON = genericToJSON (sumOptions stripStmtPrefix)
 
 instance FromJSON Statement where
-  parseJSON = withObject "Statement" $ \o -> do
-    kind <- o .: "kind" :: Parser Text
-    let v = Object o
-    case kind of
-      "call" -> SCall <$> parseJSON v
-      "makeClosure" -> SMakeClosure <$> parseJSON v
-      "loadLiteral" -> SLoadLiteral <$> parseJSON v
-      "match" -> SMatch <$> parseJSON v
-      "for" -> SFor <$> parseJSON v
-      "exit" -> SExit <$> parseJSON v
-      "cont" -> SCont <$> parseJSON v
-      other -> parseFail ("Statement: unknown kind " <> show other)
+  parseJSON = genericParseJSON (sumOptions stripStmtPrefix)
 
+-- | Payload for 'SCall'.
 data CallData = CallData
-  { target :: CallTarget,
-    args :: [Arg],
+  { target :: !CallTarget,
+    args :: ![Arg],
     -- | Output var receives the callee's trailing value. 'Nothing' = drop.
-    output :: Maybe VarId
+    output :: !(Maybe VarId)
   }
   deriving (Eq, Show, Generic)
 
@@ -325,9 +297,10 @@ instance ToJSON CallData where
 instance FromJSON CallData where
   parseJSON = genericParseJSON irOptions
 
+-- | Payload for 'SMakeClosure'.
 data MakeClosureData = MakeClosureData
-  { output :: VarId,
-    block :: BlockId
+  { output :: !VarId,
+    block :: !BlockId
   }
   deriving (Eq, Show, Generic)
 
@@ -337,11 +310,12 @@ instance ToJSON MakeClosureData where
 instance FromJSON MakeClosureData where
   parseJSON = genericParseJSON irOptions
 
+-- | Payload for 'SMatch'.
 data MatchData = MatchData
-  { subject :: VarId,
-    arms :: [MatchArm],
-    defaultArm :: Maybe BlockId,
-    output :: Maybe VarId
+  { subject :: !VarId,
+    arms :: ![MatchArm],
+    defaultArm :: !(Maybe BlockId),
+    output :: !(Maybe VarId)
   }
   deriving (Eq, Show, Generic)
 
@@ -351,15 +325,16 @@ instance ToJSON MatchData where
 instance FromJSON MatchData where
   parseJSON = genericParseJSON irOptions
 
+-- | Payload for 'SFor'.
 data ForData = ForData
   { -- | (element var inside body's params, source array var in this scope)
-    iters :: [(VarId, VarId)],
+    iters :: ![(VarId, VarId)],
     -- | (state var label, init value var in this scope)
-    stateInits :: [(Text, VarId)],
-    bodyBlock :: BlockId,
+    stateInits :: ![(Text, VarId)],
+    bodyBlock :: !BlockId,
     -- | Optional then-block applied to the for's final value.
-    thenBlock :: Maybe BlockId,
-    output :: Maybe VarId
+    thenBlock :: !(Maybe BlockId),
+    output :: !(Maybe VarId)
   }
   deriving (Eq, Show, Generic)
 
@@ -369,9 +344,10 @@ instance ToJSON ForData where
 instance FromJSON ForData where
   parseJSON = genericParseJSON irOptions
 
+-- | Payload for 'SExit'.
 data ExitData = ExitData
-  { exitKind :: ExitKind,
-    value :: VarId
+  { exitKind :: !ExitKind,
+    value :: !VarId
   }
   deriving (Eq, Show, Generic)
 
@@ -381,11 +357,12 @@ instance ToJSON ExitData where
 instance FromJSON ExitData where
   parseJSON = genericParseJSON irOptions
 
+-- | Payload for 'SCont'.
 data ContData = ContData
-  { contKind :: ContKind,
-    value :: Maybe VarId,
+  { contKind :: !ContKind,
+    value :: !(Maybe VarId),
     -- | (state var label, new value var in this scope)
-    mods :: [(Text, VarId)]
+    mods :: ![(Text, VarId)]
   }
   deriving (Eq, Show, Generic)
 
@@ -395,11 +372,11 @@ instance ToJSON ContData where
 instance FromJSON ContData where
   parseJSON = genericParseJSON irOptions
 
--- | Constant literal load. Stored in IR directly (not via 'BlockPrim') so the
--- value can travel with the statement.
+-- | Payload for 'SLoadLiteral'. Kept inline (not via 'BlockPrim') so the
+-- value travels with the statement.
 data LoadLiteralData = LoadLiteralData
-  { output :: VarId,
-    value :: LiteralValue
+  { output :: !VarId,
+    value :: !LiteralValue
   }
   deriving (Eq, Show, Generic)
 
@@ -411,63 +388,37 @@ instance FromJSON LoadLiteralData where
 
 -- | IR-level literal values. Mirrors 'AST.LiteralValue' but lives in the IR
 -- namespace so the IR is self-contained (the runtime needs only IR types).
-data LiteralValue where
-  LVInteger :: !Integer -> LiteralValue
-  LVNumber :: !Double -> LiteralValue
-  LVString :: !Text -> LiteralValue
-  LVBoolean :: !Bool -> LiteralValue
-  LVNull :: LiteralValue
-
-deriving instance Eq LiteralValue
-
-deriving instance Show LiteralValue
+data LiteralValue
+  = LVInteger {integer :: !Integer}
+  | LVNumber {number :: !Double}
+  | LVString {string :: !Text}
+  | LVBoolean {boolean :: !Bool}
+  | LVNull
+  deriving (Eq, Show, Generic)
 
 instance ToJSON LiteralValue where
-  toJSON = \case
-    LVInteger n -> object ["kind" .= ("integer" :: Text), "value" .= n]
-    LVNumber n -> object ["kind" .= ("number" :: Text), "value" .= n]
-    LVString s -> object ["kind" .= ("string" :: Text), "value" .= s]
-    LVBoolean b -> object ["kind" .= ("boolean" :: Text), "value" .= b]
-    LVNull -> object ["kind" .= ("null" :: Text)]
+  toJSON = genericToJSON (sumOptions stripLVPrefix)
 
 instance FromJSON LiteralValue where
-  parseJSON = withObject "LiteralValue" $ \o -> do
-    kind <- o .: "kind" :: Parser Text
-    case kind of
-      "integer" -> LVInteger <$> o .: "value"
-      "number" -> LVNumber <$> o .: "value"
-      "string" -> LVString <$> o .: "value"
-      "boolean" -> LVBoolean <$> o .: "value"
-      "null" -> pure LVNull
-      other -> parseFail ("LiteralValue: unknown kind " <> show other)
+  parseJSON = genericParseJSON (sumOptions stripLVPrefix)
 
 -- | Resolution of an 'SCall' target.
-data CallTarget where
-  -- | Statically known target (top-level agent / req / ext / ctor / prim).
-  CTBlock :: {block :: BlockId} -> CallTarget
-  -- | Dynamic target via a closure value.
-  CTValue :: {var :: VarId} -> CallTarget
-
-deriving instance Eq CallTarget
-
-deriving instance Show CallTarget
+data CallTarget
+  = -- | Statically known target (top-level agent / req / ext / ctor / prim).
+    CTBlock {block :: !BlockId}
+  | -- | Dynamic target via a closure value.
+    CTValue {var :: !VarId}
+  deriving (Eq, Show, Generic)
 
 instance ToJSON CallTarget where
-  toJSON = \case
-    CTBlock {block} -> object ["kind" .= ("block" :: Text), "block" .= block]
-    CTValue {var} -> object ["kind" .= ("value" :: Text), "var" .= var]
+  toJSON = genericToJSON (sumOptions stripCTPrefix)
 
 instance FromJSON CallTarget where
-  parseJSON = withObject "CallTarget" $ \o -> do
-    kind <- o .: "kind" :: Parser Text
-    case kind of
-      "block" -> CTBlock <$> o .: "block"
-      "value" -> CTValue <$> o .: "var"
-      other -> parseFail ("CallTarget: unknown kind " <> show other)
+  parseJSON = genericParseJSON (sumOptions stripCTPrefix)
 
 data Arg = Arg
-  { label :: Text,
-    var :: VarId
+  { label :: !Text,
+    var :: !VarId
   }
   deriving (Eq, Show, Generic)
 
@@ -483,10 +434,10 @@ instance FromJSON Arg where
 data MatchArm = MatchArm
   { -- | Constructor tag to match. 'Nothing' matches any tag (used for tuple
     -- destructuring or trivial bind-only patterns).
-    tag :: Maybe Text,
+    tag :: !(Maybe Text),
     -- | (field/index label, IR var the arm body uses to receive that value).
-    bindings :: [(Text, VarId)],
-    body :: BlockId
+    bindings :: ![(Text, VarId)],
+    body :: !BlockId
   }
   deriving (Eq, Show, Generic)
 
@@ -523,11 +474,23 @@ instance FromJSON ContKind where
 -- Aeson option helpers
 -- ===========================================================================
 
--- | Common record options: camelCase fields, omit @Nothing@ from output.
+-- | Common record options: camelCase fields (already in source), omit
+-- @Nothing@ from output.
 irOptions :: Options
 irOptions =
   defaultOptions
-    { fieldLabelModifier = id, -- record fields are already camelCase in source
+    { fieldLabelModifier = id,
+      omitNothingFields = True
+    }
+
+-- | TaggedObject options for record-style sums. Constructor tags are
+-- transformed by the supplied modifier.
+sumOptions :: (String -> String) -> Options
+sumOptions tagMod =
+  defaultOptions
+    { sumEncoding = TaggedObject "kind" "contents",
+      constructorTagModifier = tagMod,
+      fieldLabelModifier = id,
       omitNothingFields = True
     }
 
@@ -540,6 +503,18 @@ enumOptions tagMod =
       allNullaryToStringTag = True
     }
 
+stripBlockPrefix :: String -> String
+stripBlockPrefix = lowerHead . drop (length ("Block" :: String))
+
+stripStmtPrefix :: String -> String
+stripStmtPrefix = lowerHead . drop (length ("S" :: String))
+
+stripLVPrefix :: String -> String
+stripLVPrefix = lowerHead . drop (length ("LV" :: String))
+
+stripCTPrefix :: String -> String
+stripCTPrefix = lowerHead . drop (length ("CT" :: String))
+
 stripExitPrefix :: String -> String
 stripExitPrefix = lowerHead . drop (length ("Exit" :: String))
 
@@ -550,10 +525,3 @@ lowerHead :: String -> String
 lowerHead = \case
   [] -> []
   c : rest -> toLower c : rest
-
--- | Insert @{"kind": tag}@ into an existing JSON object (must be an object).
--- Used to flatten record-payload sum constructors.
-withTag :: Text -> Value -> Value
-withTag tag = \case
-  Object o -> Object (KeyMap.insert (Key.fromText "kind") (String tag) o)
-  v -> object ["kind" .= tag, "value" .= v]

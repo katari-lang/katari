@@ -4,7 +4,7 @@
 -- ことを確認する。Lowering の出力品質は別 spec で検証する。
 module Katari.IRSpec (spec) where
 
-import Data.Aeson (Value, decode, encode, object, (.=))
+import Data.Aeson (Value, object, (.=))
 import Data.Aeson qualified as Aeson
 import Data.Map.Strict qualified as Map
 import Katari.IR
@@ -35,6 +35,7 @@ shouldEncodeAs value expected = Aeson.toJSON value `shouldBe` expected
 spec :: Spec
 spec = describe "Katari.IR" $ do
   blockSpec
+  blockKindSpec
   statementSpec
   callTargetSpec
   exitContSpec
@@ -43,26 +44,29 @@ spec = describe "Katari.IR" $ do
 
 blockSpec :: Spec
 blockSpec = describe "Block (sum)" $ do
-  it "BlockUser flattens UserBlock fields next to kind" $ do
+  it "BlockUser nests UserBlock under 'body'" $ do
     let userBlock =
           UserBlock
-            { params = [Param {label = "x", var = VarId 0}],
+            { kind = BlockAgentEntry,
+              params = [Param {label = "x", var = VarId 0}],
               stateVars = [],
               statements = [],
               trailing = Just (VarId 1),
               thenBlock = Nothing,
-              handlers = [],
-              props = BlockProps {catchesReturn = True, catchesBreak = False, inheritScope = False}
+              handlers = []
             }
     BlockUser {body = userBlock}
       `shouldEncodeAs` object
         [ "kind" .= ("user" :: String),
-          "params" .= [object ["label" .= ("x" :: String), "var" .= (0 :: Int)]],
-          "stateVars" .= ([] :: [Value]),
-          "statements" .= ([] :: [Value]),
-          "trailing" .= (1 :: Int),
-          "handlers" .= ([] :: [Value]),
-          "props" .= object ["catchesReturn" .= True, "catchesBreak" .= False, "inheritScope" .= False]
+          "body"
+            .= object
+              [ "kind" .= ("agentEntry" :: String),
+                "params" .= [object ["label" .= ("x" :: String), "var" .= (0 :: Int)]],
+                "stateVars" .= ([] :: [Value]),
+                "statements" .= ([] :: [Value]),
+                "trailing" .= (1 :: Int),
+                "handlers" .= ([] :: [Value])
+              ]
         ]
 
   it "BlockPrim has only kind + name" $ do
@@ -88,13 +92,13 @@ blockSpec = describe "Block (sum)" $ do
   it "round-trips all variants" $ do
     let userBody =
           UserBlock
-            { params = [],
+            { kind = BlockInline,
+              params = [],
               stateVars = [],
               statements = [],
               trailing = Nothing,
               thenBlock = Nothing,
-              handlers = [],
-              props = BlockProps {catchesReturn = False, catchesBreak = False, inheritScope = True}
+              handlers = []
             }
     roundTrip BlockUser {body = userBody}
     roundTrip BlockPrim {name = "add"}
@@ -102,9 +106,28 @@ blockSpec = describe "Block (sum)" $ do
     roundTrip (BlockExternal "discord" "send")
     roundTrip BlockCtor {name = "Foo"}
 
+blockKindSpec :: Spec
+blockKindSpec = describe "BlockKind" $ do
+  it "serializes each variant as a bare camelCase string" $ do
+    Aeson.toJSON BlockAgentEntry `shouldBe` Aeson.String "agentEntry"
+    Aeson.toJSON BlockAgentEntryWithHandlers `shouldBe` Aeson.String "agentEntryWithHandlers"
+    Aeson.toJSON BlockHandleScope `shouldBe` Aeson.String "handleScope"
+    Aeson.toJSON BlockInline `shouldBe` Aeson.String "inline"
+    Aeson.toJSON BlockHandlerBody `shouldBe` Aeson.String "handlerBody"
+
+  it "round-trips all variants" $ do
+    mapM_
+      roundTrip
+      [ BlockAgentEntry,
+        BlockAgentEntryWithHandlers,
+        BlockHandleScope,
+        BlockInline,
+        BlockHandlerBody
+      ]
+
 statementSpec :: Spec
 statementSpec = describe "Statement (sum)" $ do
-  it "SCall encodes with kind=call" $ do
+  it "SCall nests CallData under 'contents'" $ do
     SCall
       CallData
         { target = CTBlock {block = BlockId 7},
@@ -113,25 +136,34 @@ statementSpec = describe "Statement (sum)" $ do
         }
       `shouldEncodeAs` object
         [ "kind" .= ("call" :: String),
-          "target" .= object ["kind" .= ("block" :: String), "block" .= (7 :: Int)],
-          "args" .= [object ["label" .= ("x" :: String), "var" .= (1 :: Int)]],
-          "output" .= (2 :: Int)
+          "contents"
+            .= object
+              [ "target" .= object ["kind" .= ("block" :: String), "block" .= (7 :: Int)],
+                "args" .= [object ["label" .= ("x" :: String), "var" .= (1 :: Int)]],
+                "output" .= (2 :: Int)
+              ]
         ]
 
-  it "SMakeClosure encodes with kind=makeClosure" $ do
+  it "SMakeClosure nests MakeClosureData under 'contents'" $ do
     SMakeClosure MakeClosureData {output = VarId 3, block = BlockId 12}
       `shouldEncodeAs` object
         [ "kind" .= ("makeClosure" :: String),
-          "output" .= (3 :: Int),
-          "block" .= (12 :: Int)
+          "contents"
+            .= object
+              [ "output" .= (3 :: Int),
+                "block" .= (12 :: Int)
+              ]
         ]
 
-  it "SExit encodes with kind=exit and exitKind enum" $ do
+  it "SExit nests ExitData under 'contents' (with exitKind enum)" $ do
     SExit ExitData {exitKind = ExitReturn, value = VarId 4}
       `shouldEncodeAs` object
         [ "kind" .= ("exit" :: String),
-          "exitKind" .= ("return" :: String),
-          "value" .= (4 :: Int)
+          "contents"
+            .= object
+              [ "exitKind" .= ("return" :: String),
+                "value" .= (4 :: Int)
+              ]
         ]
 
   it "SCont (forNext) omits value when Nothing" $ do
@@ -143,8 +175,11 @@ statementSpec = describe "Statement (sum)" $ do
         }
       `shouldEncodeAs` object
         [ "kind" .= ("cont" :: String),
-          "contKind" .= ("forNext" :: String),
-          "mods" .= [["acc" :: Aeson.Value, Aeson.Number 5]]
+          "contents"
+            .= object
+              [ "contKind" .= ("forNext" :: String),
+                "mods" .= [["acc" :: Aeson.Value, Aeson.Number 5]]
+              ]
         ]
 
   it "SMatch round-trips" $ do
@@ -174,12 +209,15 @@ statementSpec = describe "Statement (sum)" $ do
             output = Just (VarId 6)
           }
 
-  it "SLoadLiteral encodes with kind=loadLiteral and an inner value object" $ do
+  it "SLoadLiteral nests an inner literal value object" $ do
     SLoadLiteral LoadLiteralData {output = VarId 5, value = LVInteger 42}
       `shouldEncodeAs` object
         [ "kind" .= ("loadLiteral" :: String),
-          "output" .= (5 :: Int),
-          "value" .= object ["kind" .= ("integer" :: String), "value" .= (42 :: Int)]
+          "contents"
+            .= object
+              [ "output" .= (5 :: Int),
+                "value" .= object ["kind" .= ("integer" :: String), "integer" .= (42 :: Int)]
+              ]
         ]
 
   it "round-trips all 7 statement variants" $ do
@@ -276,18 +314,13 @@ moduleSpec = describe "IRModule" $ do
           BlockUser
             { body =
                 UserBlock
-                  { params = [],
+                  { kind = BlockAgentEntry,
+                    params = [],
                     stateVars = [],
                     statements = [SExit ExitData {exitKind = ExitReturn, value = VarId 0}],
                     trailing = Nothing,
                     thenBlock = Nothing,
-                    handlers = [],
-                    props =
-                      BlockProps
-                        { catchesReturn = True,
-                          catchesBreak = False,
-                          inheritScope = False
-                        }
+                    handlers = []
                   }
             }
     roundTrip
