@@ -2,6 +2,7 @@ module Katari.Parser
   ( Parsed (..),
     ParseError (..),
     ParseErrorReason (..),
+    toDiagnostic,
     parseModule,
     parseModuleStrict,
   )
@@ -23,6 +24,7 @@ import Data.Void (Void, absurd)
 -- 'Katari.Parser' / 'Katari.Typechecker.Identifier' etc. Hide the colliding
 -- ones until the legacy GADTs are removed in the final migration step.
 import Katari.AST hiding (Parsed)
+import Katari.Diagnostic (Diagnostic, diagnosticError)
 import Katari.Lexer
   ( Keyword (..),
     LexerError (..),
@@ -38,6 +40,7 @@ import Katari.Lexer
     showPunctuation,
     showToken,
   )
+import Katari.Lexer qualified as Lexer
 import Text.Megaparsec hiding (ParseError, Token, Tokens)
 import Text.Megaparsec qualified as MP
 
@@ -74,6 +77,27 @@ instance HasSourceSpan ParseError where
     ParseErrorLex le -> sourceSpanOf le
     ParseErrorAtDeclaration sp _ -> sp
     ParseErrorAtStatement sp _ -> sp
+
+-- | Convert a 'ParseError' to a unified 'Diagnostic'. Codes K0020-K0099
+-- are reserved for the parser; lexer errors are surfaced via
+-- 'Lexer.toDiagnostic'.
+toDiagnostic :: ParseError -> Diagnostic
+toDiagnostic = \case
+  ParseErrorLex le -> Lexer.toDiagnostic le
+  ParseErrorAtDeclaration sp reason ->
+    diagnosticError "K0020" (renderReason "declaration" reason) sp
+  ParseErrorAtStatement sp reason ->
+    diagnosticError "K0021" (renderReason "statement" reason) sp
+  where
+    renderReason :: Text -> ParseErrorReason -> Text
+    renderReason ctx reason =
+      let unexpectedPart = case reason.unexpected of
+            Just tok -> "unexpected " <> tok
+            Nothing -> "unexpected end of input"
+          expectedPart = case reason.expected of
+            [] -> ""
+            xs -> "; expected " <> T.intercalate ", " xs
+       in "parse error in " <> ctx <> ": " <> unexpectedPart <> expectedPart
 
 -- | Reason for a parser-level failure, projected from megaparsec's internal
 -- 'MP.ParseError'. Keeps the structured @expected@ token set and (when

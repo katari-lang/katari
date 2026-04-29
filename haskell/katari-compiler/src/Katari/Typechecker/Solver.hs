@@ -46,6 +46,9 @@ module Katari.Typechecker.Solver
     isTypeConstraint,
     isEffectConstraint,
 
+    -- * Diagnostics
+    toDiagnostic,
+
     -- * Entry
     solve,
   )
@@ -55,7 +58,10 @@ import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Set (Set)
 import Data.Set qualified as Set
-import Katari.AST (Position (..), SourceSpan (..))
+import Data.Text (Text)
+import Data.Text qualified as T
+import Katari.AST (HasSourceSpan (..), Position (..), SourceSpan (..))
+import Katari.Diagnostic (Diagnostic, diagnosticError)
 import Katari.Typechecker.ConstraintGenerator
   ( Constraint (..),
     ConstraintGenResult (..),
@@ -284,3 +290,53 @@ totaliseEffects ::
 totaliseEffects upperLimit given =
   Map.union given $
     Map.fromList [(EffectVarId i, Set.empty) | i <- [0 .. upperLimit - 1]]
+
+-- ===========================================================================
+-- Diagnostics
+-- ===========================================================================
+
+-- | Convert a 'SolverError' to a unified 'Diagnostic'. Codes K0220-K0249
+-- are reserved for the solver. Type rendering is shallow (uses 'Show')
+-- because solver diagnostics carry both sides for tools to render
+-- structurally.
+toDiagnostic :: SolverError -> Diagnostic
+toDiagnostic = \case
+  SolverErrorContradiction reason expected found ->
+    diagnosticError
+      "K0220"
+      ( "type contradiction at "
+          <> renderReason reason
+          <> ": expected `"
+          <> tShow expected
+          <> "`, found `"
+          <> tShow found
+          <> "`"
+      )
+      (sourceSpanOf reason)
+  SolverErrorBoundsConflict (TypeVarId tv) lowerReason lower upperReason upper ->
+    diagnosticError
+      "K0221"
+      ( "type-variable bounds conflict for α"
+          <> tShow tv
+          <> ": lower bound `"
+          <> tShow lower
+          <> "` ("
+          <> renderReason lowerReason
+          <> ") incompatible with upper bound `"
+          <> tShow upper
+          <> "` ("
+          <> renderReason upperReason
+          <> ")"
+      )
+      (sourceSpanOf lowerReason)
+  SolverErrorStructuralMismatch reason msg ->
+    diagnosticError
+      "K0222"
+      ("structural type mismatch: " <> msg)
+      (sourceSpanOf reason)
+  where
+    tShow :: (Show a) => a -> Text
+    tShow = T.pack . show
+
+    renderReason :: ConstraintReason -> Text
+    renderReason r = tShow r.kind

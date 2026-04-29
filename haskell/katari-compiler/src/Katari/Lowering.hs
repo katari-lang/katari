@@ -11,6 +11,7 @@
 module Katari.Lowering
   ( lowerProgram,
     LoweringError (..),
+    toDiagnostic,
   )
 where
 
@@ -23,6 +24,7 @@ import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Word (Word32)
 import Katari.AST qualified as AST
+import Katari.Diagnostic (Diagnostic, diagnosticError)
 import Katari.IR
 import Katari.Typechecker.Identifier (VariableId)
 import Katari.Typechecker.Zonker (ZonkResult (..), Zonked (..))
@@ -42,6 +44,26 @@ data LoweringError
     -- without server annotation, qualified ref out of scope, etc.).
     LowerErrorUnsupported AST.SourceSpan Text
   deriving (Eq, Show)
+
+-- | Convert a 'LoweringError' to a unified 'Diagnostic'. Codes K0300-K0399
+-- are reserved for the lowering pass.
+toDiagnostic :: LoweringError -> Diagnostic
+toDiagnostic = \case
+  LowerErrorUnresolvedVariable sp name ->
+    diagnosticError
+      "K0300"
+      ("unresolved variable in lowering: '" <> name <> "'")
+      sp
+  LowerErrorParseSentinel sp ->
+    diagnosticError
+      "K0301"
+      "parser/identifier sentinel reached lowering (likely a recovery artifact)"
+      sp
+  LowerErrorUnsupported sp detail ->
+    diagnosticError
+      "K0302"
+      ("unsupported construct in lowering: " <> detail)
+      sp
 
 -- ===========================================================================
 -- Primitive table

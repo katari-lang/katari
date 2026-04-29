@@ -6,6 +6,7 @@ module Katari.Lexer
     WithSourceSpan (..),
     TokenStream (..),
     LexerError (..),
+    toDiagnostic,
     runLexer,
     insertVirtualSemicolons,
     showKeyword,
@@ -24,6 +25,7 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Void (Void)
 import Katari.AST (HasSourceSpan (..), Position (..), SourceSpan (..))
+import Katari.Diagnostic (Diagnostic, diagnosticError)
 import Numeric (readHex, showHex)
 import Text.Megaparsec hiding (State, Token, Tokens)
 import Text.Megaparsec qualified as MP
@@ -186,6 +188,25 @@ instance HasSourceSpan LexerError where
     LexerErrorUnterminatedString sp -> sp
     LexerErrorInvalidUnicodeEscape sp _ -> sp
     LexerErrorUnrecognizedCharacter sp _ -> sp
+
+-- | Convert a 'LexerError' to a unified 'Diagnostic'. Codes K0001-K0019
+-- are reserved for the lexer.
+toDiagnostic :: LexerError -> Diagnostic
+toDiagnostic = \case
+  LexerErrorUnterminatedTemplate sp ->
+    diagnosticError "K0001" "unterminated template literal" sp
+  LexerErrorUnterminatedString sp ->
+    diagnosticError "K0002" "unterminated string literal" sp
+  LexerErrorInvalidUnicodeEscape sp raw ->
+    diagnosticError
+      "K0003"
+      ("invalid unicode escape sequence: " <> raw)
+      sp
+  LexerErrorUnrecognizedCharacter sp ch ->
+    diagnosticError
+      "K0004"
+      ("unrecognized character: " <> T.singleton ch)
+      sp
 
 -- | Mutable lexer state: the template-context stack plus an accumulator of
 -- errors discovered through @withRecovery@. Errors are kept in reverse order

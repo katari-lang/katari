@@ -38,6 +38,9 @@ module Katari.Typechecker.ConstraintGenerator
     ConstraintGenResult (..),
     TypeEnvironment,
 
+    -- * Diagnostics
+    toDiagnostic,
+
     -- * Entry point
     generateConstraints,
   )
@@ -52,15 +55,17 @@ import Data.Map.Strict qualified as Map
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
+import Data.Text qualified as T
 -- See note in 'Katari.Parser' regarding 'AST.Phase' constructor name
 -- collisions with the legacy phase-marker GADTs.
 import Katari.AST hiding (Constrained, Identified, Parsed)
+import Katari.Diagnostic (Diagnostic, diagnosticError)
 import Katari.Typechecker.Identifier
   ( Identified (..),
     IdentifierResult (..),
     ModuleId,
     TypeData (..),
-    TypeId,
+    TypeId (..),
     VariableId,
   )
 import Katari.Typechecker.SemanticType
@@ -190,6 +195,16 @@ data ReasonKind
 data ConstraintError
   = ErrorTypeSynonymCycle SourceSpan TypeId
   deriving (Eq, Show)
+
+-- | Convert a 'ConstraintError' to a unified 'Diagnostic'. Codes
+-- K0200-K0219 are reserved for the constraint generator.
+toDiagnostic :: ConstraintError -> Diagnostic
+toDiagnostic = \case
+  ErrorTypeSynonymCycle sp (TypeId tid) ->
+    diagnosticError
+      "K0200"
+      ("cyclic type synonym (TypeId " <> T.pack (show tid) <> ")")
+      sp
 
 -- ===========================================================================
 -- Result

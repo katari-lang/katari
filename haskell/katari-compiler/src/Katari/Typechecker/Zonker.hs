@@ -25,6 +25,9 @@ module Katari.Typechecker.Zonker
     ZonkResult (..),
     ZonkError (..),
 
+    -- * Diagnostics
+    toDiagnostic,
+
     -- * Entry
     zonk,
   )
@@ -38,9 +41,11 @@ import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.Text (Text)
+import Data.Text qualified as Text
 -- See note in 'Katari.Parser' regarding 'AST.Phase' constructor name
 -- collisions with the legacy phase-marker GADTs.
 import Katari.AST hiding (Constrained, Identified, Parsed, Zonked)
+import Katari.Diagnostic (Diagnostic, diagnosticError)
 import Katari.Typechecker.ConstraintGenerator
   ( Constrained (..),
     ConstraintGenResult (..),
@@ -55,11 +60,11 @@ import Katari.Typechecker.Identifier
   )
 import Katari.Typechecker.NormalizedType (denormalise)
 import Katari.Typechecker.SemanticType
-  ( EffectVarId,
+  ( EffectVarId (..),
     Resolved,
     SemanticEffect (..),
     SemanticType (..),
-    TypeVarId,
+    TypeVarId (..),
     Unresolved,
     traverseSemanticChildren,
   )
@@ -108,6 +113,27 @@ data ZonkError where
 deriving instance Eq ZonkError
 
 deriving instance Show ZonkError
+
+-- | Convert a 'ZonkError' to a unified 'Diagnostic'. Codes K0250-K0279
+-- are reserved for the zonker. These errors indicate a Solver-contract
+-- violation (the substitution should be total) and should be
+-- treated as internal compiler errors.
+toDiagnostic :: ZonkError -> Diagnostic
+toDiagnostic = \case
+  ZonkErrorMissingTypeVar sp (TypeVarId tv) ->
+    diagnosticError
+      "K0250"
+      ( "internal: solver substitution missing for type variable α"
+          <> Text.pack (show tv)
+      )
+      sp
+  ZonkErrorMissingEffectVar sp (EffectVarId ev) ->
+    diagnosticError
+      "K0251"
+      ( "internal: solver substitution missing for effect variable ε"
+          <> Text.pack (show ev)
+      )
+      sp
 
 -- ===========================================================================
 -- Zonker monad

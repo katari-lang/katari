@@ -31,6 +31,9 @@ module Katari.Typechecker.Identifier
     IdentifierResult (..),
     IdentifierError (..),
 
+    -- * Diagnostics
+    toDiagnostic,
+
     -- * Entry point
     identify,
   )
@@ -48,6 +51,7 @@ import Data.Text qualified as T
 -- collisions with the legacy phase-marker GADTs.
 import Katari.AST hiding (Identified, Parsed)
 import Katari.AST.Identifiers (ModuleId (..), TypeId (..), VariableId (..))
+import Katari.Diagnostic (Diagnostic (..), DiagnosticNote (..), diagnosticError)
 import Katari.Parser (Parsed (..))
 
 -- ---------------------------------------------------------------------------
@@ -193,6 +197,53 @@ instance HasSourceSpan IdentifierError where
     ErrorNotAModule sp _ -> sp
     ErrorImportNameNotFound sp _ _ -> sp
     ErrorImportModuleNotFound sp _ -> sp
+
+-- | Convert an 'IdentifierError' to a unified 'Diagnostic'. Codes
+-- K0100-K0199 are reserved for the identifier pass.
+toDiagnostic :: IdentifierError -> Diagnostic
+toDiagnostic = \case
+  ErrorDuplicateName sp name otherSp ->
+    let base = diagnosticError "K0100" ("duplicate definition of '" <> name <> "'") sp
+     in base
+          { notes =
+              [ DiagnosticNote
+                  { span = otherSp,
+                    message = "first defined here"
+                  }
+              ]
+          }
+  ErrorShadowNonVariable sp name ->
+    diagnosticError
+      "K0101"
+      ("'" <> name <> "' shadows a non-variable binding (modules/types cannot be shadowed)")
+      sp
+  ErrorUndefinedName sp name ->
+    diagnosticError "K0102" ("undefined name '" <> name <> "'") sp
+  ErrorUndefinedQualified sp moduleName memberName ->
+    diagnosticError
+      "K0103"
+      ("module '" <> moduleName <> "' does not export '" <> memberName <> "'")
+      sp
+  ErrorNotAType sp name ->
+    diagnosticError
+      "K0104"
+      ("'" <> name <> "' is not a type")
+      sp
+  ErrorNotAModule sp name ->
+    diagnosticError
+      "K0105"
+      ("'" <> name <> "' is not a module")
+      sp
+  ErrorImportNameNotFound sp moduleName memberName ->
+    diagnosticError
+      "K0106"
+      ("import: '" <> memberName <> "' is not exported by module '" <> moduleName <> "'")
+      sp
+  ErrorImportModuleNotFound sp moduleName ->
+    diagnosticError
+      "K0107"
+      ("import: module '" <> moduleName <> "' not found")
+      sp
 
 -- ---------------------------------------------------------------------------
 -- Identifier monad
