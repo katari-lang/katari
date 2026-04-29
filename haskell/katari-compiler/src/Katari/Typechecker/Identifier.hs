@@ -44,26 +44,21 @@ import Data.Map.Strict qualified as Map
 import Data.Maybe (catMaybes, isJust)
 import Data.Text (Text)
 import Data.Text qualified as T
-import Katari.AST
+-- See note in 'Katari.Parser' regarding 'AST.Phase' constructor name
+-- collisions with the legacy phase-marker GADTs.
+import Katari.AST hiding (Identified, Parsed)
+import Katari.AST.Identifiers (ModuleId (..), TypeId (..), VariableId (..))
 import Katari.Parser (Parsed (..))
 
 -- ---------------------------------------------------------------------------
--- ID newtypes & Identified GADT
+-- Identified GADT
+--
+-- Stable identifier types ('VariableId' / 'TypeId' / 'ModuleId') live in
+-- 'Katari.AST.Identifiers' so that 'Katari.AST' and
+-- 'Katari.Typechecker.SemanticType' can both depend on them without circular
+-- imports. They are re-exported below for backward compatibility with
+-- existing call sites.
 -- ---------------------------------------------------------------------------
-
--- | Unique id in the value namespace. Shared by agent / req / ext-agent /
--- constructor function / local variable.
-newtype VariableId = VariableId Int
-  deriving (Eq, Ord, Show)
-
--- | Unique id in the type namespace. Issued for data declarations and type
--- synonyms.
-newtype TypeId = TypeId Int
-  deriving (Eq, Ord, Show)
-
--- | Unique id in the module namespace.
-newtype ModuleId = ModuleId Int
-  deriving (Eq, Ord, Show)
 
 -- | Metadata carried by the AST after the Identifier pass.
 --

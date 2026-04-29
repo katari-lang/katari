@@ -37,7 +37,9 @@ import Control.Monad.Trans (lift)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
-import Katari.AST
+-- See note in 'Katari.Parser' regarding 'AST.Phase' constructor name
+-- collisions with the legacy phase-marker GADTs.
+import Katari.AST hiding (Constrained, Identified, Parsed, Zonked)
 import Katari.Typechecker.ConstraintGenerator
   ( Constrained (..),
     ConstraintGenResult (..),

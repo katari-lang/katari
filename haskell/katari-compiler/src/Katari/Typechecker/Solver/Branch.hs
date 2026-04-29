@@ -164,7 +164,7 @@ emitContravariantType ::
 emitContravariantType side = emitCovariantType (flipSide side)
 
 -- | Effect-constraint counterpart of 'emitCovariantType'.
-emitCovariantEffect ::
+emitCovariantEffect ::/l
   BranchSide ->
   SemanticEffect Unresolved ->
   SemanticEffect Unresolved ->

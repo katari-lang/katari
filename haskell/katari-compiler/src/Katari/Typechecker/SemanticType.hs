@@ -42,7 +42,8 @@ import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Map.Strict (Map)
 import Data.Text (Text)
-import Katari.Typechecker.Identifier (TypeId, VariableId)
+import Katari.AST (ExprType, PatType, Phase (..))
+import Katari.AST.Identifiers (TypeId, VariableId)
 
 -- ---------------------------------------------------------------------------
 -- Phase markers
@@ -173,3 +174,20 @@ effectFromVar effectVarId = SemanticEffect (Set.singleton effectVarId) Set.empty
 unionEffects :: SemanticEffect phase -> SemanticEffect phase -> SemanticEffect phase
 unionEffects (SemanticEffect leftVars leftReqs) (SemanticEffect rightVars rightReqs) =
   SemanticEffect (Set.union leftVars rightVars) (Set.union leftReqs rightReqs)
+
+-- ---------------------------------------------------------------------------
+-- ExprType / PatType instances for the typed phases (Trees-that-Grow)
+--
+-- These complete the open type families declared in 'Katari.AST'. The
+-- 'Parsed' / 'Identified' phases (no type info yet) supply '()' there; the
+-- 'Constrained' / 'Zonked' phases plug in the actual semantic type carrier
+-- here.
+-- ---------------------------------------------------------------------------
+
+type instance ExprType Constrained = SemanticType Unresolved
+
+type instance ExprType Zonked = SemanticType Resolved
+
+type instance PatType Constrained = SemanticType Unresolved
+
+type instance PatType Zonked = SemanticType Resolved

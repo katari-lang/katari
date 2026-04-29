@@ -52,7 +52,9 @@ import Data.Map.Strict qualified as Map
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
-import Katari.AST
+-- See note in 'Katari.Parser' regarding 'AST.Phase' constructor name
+-- collisions with the legacy phase-marker GADTs.
+import Katari.AST hiding (Constrained, Identified, Parsed)
 import Katari.Typechecker.Identifier
   ( Identified (..),
     IdentifierResult (..),

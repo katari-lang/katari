@@ -5,7 +5,7 @@ import Data.Map.Strict qualified as Map
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
-import Katari.AST
+import Katari.AST hiding (Constrained, Identified, Parsed, Zonked)
 import Katari.Parser (parseModuleStrict)
 import Katari.Typechecker.ConstraintGenerator
   ( ConstraintGenResult (..),

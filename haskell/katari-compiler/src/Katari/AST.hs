@@ -16,6 +16,7 @@ module Katari.AST where
 
 import Data.Kind (Type)
 import Data.Text (Text)
+import Katari.AST.Identifiers (ModuleId, TypeId, VariableId)
 
 data Position = Position
   { line :: Int,
@@ -50,8 +51,11 @@ data SymbolKind
   | -- | フィールド・引数ラベル (型指向で後段が解決)。
     LabelRef
   | -- | Expression ノードに付ける placeholder 用シンボル。
+    -- TODO(phase-1): remove once the Trees-that-Grow migration completes —
+    -- expression metadata moves to the dedicated 'ExprType' family below.
     Expression
   | -- | Pattern ノードに付ける placeholder 用シンボル。
+    -- TODO(phase-1): same as 'Expression' — remove after migration.
     Pattern
   deriving (Eq, Show)
 
@@ -65,6 +69,71 @@ data SymbolKind
 type ShowMetadata m = forall sym. Show (m sym)
 
 type EqMetadata m = forall sym. Eq (m sym)
+
+-- ---------------------------------------------------------------------------
+-- Phase markers and per-phase metadata type families (Trees-that-Grow style)
+--
+-- The legacy @data Identified | Constrained | Zonked where ...@ GADTs are
+-- being phased out in favour of these type families. Each phase tag selects
+-- the carrier type for 'NameRef' resolution metadata as well as for the
+-- type information attached to expressions / patterns.
+--
+-- Why type families instead of GADTs:
+--   * The resolution metadata for 'Identified' / 'Constrained' / 'Zonked'
+--     is identical (a 'Maybe' identifier per symbol kind), so all three
+--     phases share the same instances — eliminating the @passThroughX@ /
+--     @mapNameRefMetadata@ boilerplate that the GADT design forced.
+--   * The expression / pattern type carriers ('ExprType' / 'PatType') are
+--     phase-dependent but live in a separate family, so name resolution
+--     and type elaboration evolve independently.
+-- ---------------------------------------------------------------------------
+
+-- | Compiler phase tag. Defined with the GHC 9.6 'TypeData' extension so
+-- that the constructors live exclusively at the type level — there are no
+-- term-level @Parsed :: Phase@ constructors to collide with the legacy
+-- 'Katari.Parser.Parsed' GADT (which still exists during the
+-- Trees-that-Grow migration). After Phase 1 finishes, the legacy GADT goes
+-- away and 'Phase' could be demoted back to a regular @data@ if desired.
+--
+-- The AST is parametrised by 'Phase' from the Identifier pass onward; the
+-- metadata fields of each node vary per phase via the 'NameMeta',
+-- 'ExprType', and 'PatType' type families below.
+type data Phase = Parsed | Identified | Constrained | Zonked
+
+-- | NameRef metadata for a given phase + symbol kind. After Identifier the
+-- shape stabilises ('Maybe' + identifier), and 'Constrained' / 'Zonked' keep
+-- the same resolution metadata as 'Identified'. The 'Parsed' phase carries
+-- no resolution information yet.
+--
+-- Wildcard cases for 'Expression' / 'Pattern' symbol kinds are unused (those
+-- 'SymbolKind' constructors will be removed once migration completes).
+type family NameMeta (p :: Phase) (s :: SymbolKind) :: Type where
+  NameMeta Parsed _ = ()
+  NameMeta _ 'VariableRef = Maybe VariableId
+  NameMeta _ 'TypeRef = Maybe TypeId
+  NameMeta _ 'ModuleRef = Maybe ModuleId
+  NameMeta _ 'LabelRef = ()
+  -- Legacy SymbolKind cases (will disappear after migration).
+  NameMeta _ 'Expression = ()
+  NameMeta _ 'Pattern = ()
+
+-- | Expression node type metadata. Open family because 'Constrained' /
+-- 'Zonked' instances live in 'Katari.Typechecker.SemanticType' (which
+-- depends on this module).
+type family ExprType (p :: Phase) :: Type
+
+type instance ExprType Parsed = ()
+
+type instance ExprType Identified = ()
+
+-- | Pattern node type metadata. Same shape as 'ExprType'; the two are kept
+-- as separate families so future divergence (e.g. pattern-only annotations)
+-- doesn't require revisiting both call sites.
+type family PatType (p :: Phase) :: Type
+
+type instance PatType Parsed = ()
+
+type instance PatType Identified = ()
 
 -- ---------------------------------------------------------------------------
 -- NameRef: a name with phase-dependent resolution metadata attached.

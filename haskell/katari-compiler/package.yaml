@@ -10,6 +10,7 @@ library:
   exposed-modules:
     - Katari
     - Katari.AST
+    - Katari.AST.Identifiers
     - Katari.Lexer
     - Katari.Parser
     - Katari.Typechecker
@@ -72,3 +73,4 @@ default-extensions:
   - QuantifiedConstraints
   - UndecidableInstances
   - DerivingStrategies
+  - TypeData

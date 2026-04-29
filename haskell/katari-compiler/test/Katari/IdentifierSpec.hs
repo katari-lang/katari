@@ -6,7 +6,7 @@ import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (isJust, isNothing)
 import Data.Text (Text)
-import Katari.AST
+import Katari.AST hiding (Identified, Parsed)
 import Katari.Parser (Parsed, parseModuleStrict)
 import Katari.Typechecker.Identifier
 import Test.Hspec

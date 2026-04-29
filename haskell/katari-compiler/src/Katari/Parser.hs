@@ -18,7 +18,11 @@ import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Void (Void, absurd)
-import Katari.AST
+-- During the Trees-that-Grow migration the AST module exposes a 'Phase' tag
+-- whose constructors share names with the legacy phase-marker GADTs in
+-- 'Katari.Parser' / 'Katari.Typechecker.Identifier' etc. Hide the colliding
+-- ones until the legacy GADTs are removed in the final migration step.
+import Katari.AST hiding (Parsed)
 import Katari.Lexer
   ( Keyword (..),
     LexerError (..),
