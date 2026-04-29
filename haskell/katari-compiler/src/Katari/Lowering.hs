@@ -16,6 +16,7 @@ module Katari.Lowering
 where
 
 import Control.Monad (foldM)
+import Control.Monad.Reader (ReaderT, asks, local, runReaderT)
 import Control.Monad.State.Strict (State, gets, modify, runState)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
@@ -24,10 +25,10 @@ import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Word (Word32)
 import Katari.AST qualified as AST
+import Katari.AST (Phase (Zonked))
 import Katari.Diagnostic (Diagnostic, diagnosticError)
 import Katari.IR
 import Katari.Typechecker.Identifier (VariableId)
-import Katari.AST (Phase (Zonked))
 import Katari.Typechecker.Zonker (ZonkResult (..))
 
 -- ===========================================================================
@@ -129,7 +130,26 @@ unaryOpPrim = \case
 
 -- ===========================================================================
 -- Lowering monad
+--
+-- 'Lower' は @ReaderT LowerEnv (State LowerState)@。
+--
+--   * 'LowerEnv' は scope-local な情報のみ。@local@ で透過的に save/restore
+--     できるため、@bindLocal@ + 手書き restorer が不要になる。
+--   * 'LowerState' は累積的な情報 (allocator counters / 既出 block 表 /
+--     errors) と「現在 build 中の block の statements」(@lsCurrentEmitted@)。
+--     Statements は逆順で蓄積し、block を確定させる時 (@runWithFreshBuffer@)
+--     に一度だけ reverse して O(n) で取り出す。
 -- ===========================================================================
+
+newtype LowerEnv = LowerEnv
+  { -- | 局所束縛: @let@ / 関数 param / pattern によって導入された
+    -- @VariableId → IRの VarId@。トップレベルの callable 解決は別途
+    -- 'lsVarBlockIds' を見る。
+    localVars :: Map VariableId VarId
+  }
+
+emptyLowerEnv :: LowerEnv
+emptyLowerEnv = LowerEnv {localVars = Map.empty}
 
 data LowerState = LowerState
   { lsNextBlockId :: !Word32,
@@ -139,11 +159,12 @@ data LowerState = LowerState
     lsBlockNames :: !(Map BlockId Text),
     -- | Top-level @VariableId@ → its callable @BlockId@. Used at call /
     -- closure sites to resolve agent / req / ext-agent / data-ctor names.
-    -- Local bindings (let / param / pattern) are *not* in this map; they
-    -- live in 'lsLocalVars' instead, and the call sites consult locals first.
     lsVarBlockIds :: !(Map VariableId BlockId),
-    lsLocalVars :: !(Map VariableId VarId),
     lsPrimBlockIds :: !(Map Text BlockId),
+    -- | Statements for the block currently being lowered, stored in
+    -- reverse order. 'emit' prepends; 'runWithFreshBuffer' saves/restores
+    -- and reverses at the end.
+    lsCurrentEmitted :: ![Statement],
     lsErrors :: ![LoweringError]
   }
 
@@ -156,12 +177,12 @@ initialLowerState =
       lsVarNames = Map.empty,
       lsBlockNames = Map.empty,
       lsVarBlockIds = Map.empty,
-      lsLocalVars = Map.empty,
       lsPrimBlockIds = Map.empty,
+      lsCurrentEmitted = [],
       lsErrors = []
     }
 
-type Lower = State LowerState
+type Lower = ReaderT LowerEnv (State LowerState)
 
 freshBlockId :: Lower BlockId
 freshBlockId = do
@@ -208,25 +229,15 @@ reserveBlockId name = do
 recordError :: LoweringError -> Lower ()
 recordError err = modify (\s -> s {lsErrors = err : s.lsErrors})
 
--- | Bind a local variable id mapping; return a "restore" action so the binding
--- can be undone after a scope exits.
-bindLocal :: VariableId -> VarId -> Lower (Lower ())
-bindLocal variableId irVar = do
-  prev <- gets (Map.lookup variableId . (.lsLocalVars))
-  modify (\s -> s {lsLocalVars = Map.insert variableId irVar s.lsLocalVars})
-  pure $ modify $ \s ->
-    s
-      { lsLocalVars = case prev of
-          Just v -> Map.insert variableId v s.lsLocalVars
-          Nothing -> Map.delete variableId s.lsLocalVars
-      }
-
+-- | Run an action with additional local variable bindings in scope. Uses
+-- 'ReaderT' 'local' so cleanup is automatic — no manual restorer chain.
 withLocals :: [(VariableId, VarId)] -> Lower a -> Lower a
-withLocals binds action = do
-  restorers <- mapM (uncurry bindLocal) binds
-  result <- action
-  sequence_ (reverse restorers)
-  pure result
+withLocals binds = local $ \env ->
+  env {localVars = Map.union (Map.fromList binds) env.localVars}
+
+-- | Look up a local variable id in the current scope.
+lookupLocal :: VariableId -> Lower (Maybe VarId)
+lookupLocal vid = asks (Map.lookup vid . (.localVars))
 
 primBlockId :: Text -> Lower BlockId
 primBlockId name = do
@@ -236,16 +247,28 @@ primBlockId name = do
     Nothing -> error ("primBlockId: unknown primitive " <> Text.unpack name)
 
 -- ===========================================================================
--- Statement-builder context
+-- Statement buffer (implicit via 'lsCurrentEmitted')
 -- ===========================================================================
 
--- | Statements emitted while lowering a block body. We collect into a snoc
--- list-like structure to keep ordering simple (statements are appended).
-type StmtBuf = [Statement]
+-- | Append a statement to the current block's emit buffer. Statements are
+-- stored in reverse order in 'lsCurrentEmitted' for O(1) prepend; the
+-- final list is reversed once when the block boundary is reached
+-- ('runWithFreshBuffer').
+emit :: Statement -> Lower ()
+emit s = modify (\st -> st {lsCurrentEmitted = s : st.lsCurrentEmitted})
 
--- | Append a statement to the buffer.
-emit :: Statement -> StmtBuf -> StmtBuf
-emit s buf = buf ++ [s]
+-- | Run an action with a fresh empty emit buffer; on completion, restore
+-- the parent's buffer and return both the action's result and the
+-- forward-ordered list of statements emitted during the action. Used at
+-- block boundaries (e.g. when lowering an inline block / arm body).
+runWithFreshBuffer :: Lower a -> Lower (a, [Statement])
+runWithFreshBuffer action = do
+  prev <- gets (.lsCurrentEmitted)
+  modify (\st -> st {lsCurrentEmitted = []})
+  result <- action
+  emitted <- gets (.lsCurrentEmitted)
+  modify (\st -> st {lsCurrentEmitted = prev})
+  pure (result, reverse emitted)
 
 -- ===========================================================================
 -- UserBlock default template
@@ -280,7 +303,8 @@ defaultUserBlock =
 -- the resulting IR may be partial.
 lowerProgram :: Text -> ZonkResult -> (IRModule, [LoweringError])
 lowerProgram moduleName zonkResult =
-  let (irModule, finalState) = runState (lowerProgramM moduleName zonkResult) initialLowerState
+  let (irModule, finalState) =
+        runState (runReaderT (lowerProgramM moduleName zonkResult) emptyLowerEnv) initialLowerState
    in (irModule, reverse finalState.lsErrors)
 
 lowerProgramM :: Text -> ZonkResult -> Lower IRModule
@@ -480,29 +504,25 @@ lowerAgentWithStateVars ::
   AST.WhereBlock Zonked ->
   Lower ()
 lowerAgentWithStateVars outerId name paramVars blk wb = do
-  -- 1. Outer: compute state init expressions; call inner with state values.
-  --    statements = [init computation...; SCall inner_block_id stateInits]
-  --    trailing = inner block's output var
-  let initialBuf = [] :: StmtBuf
-  (stateInitVars, bufAfterInits) <- lowerStateInits initialBuf wb.stateVariables
+  -- 1. Outer: compute state init expressions inside a fresh buffer, then
+  --    append a call to the inner block. The captured statements become
+  --    the outer block's body.
+  --
   -- 2. Inner block: state vars as stateVars, body lowered with state-var
   --    locals visible.
   innerBlockId <- buildInnerBlockWithState name wb blk
-  -- 3. Outer calls inner with state init args by label.
   innerOut <- freshVarId Nothing
-  let innerArgs =
-        [ Arg {label = lbl, var = v}
-          | (lbl, v) <- stateInitVars
-        ]
-      callInner =
-        SCall
-          CallData
-            { target = CTBlock {block = innerBlockId},
-              args = innerArgs,
-              output = Just innerOut
-            }
-      outerStatements = bufAfterInits ++ [callInner]
-      outerBlock =
+  (_, outerStatements) <- runWithFreshBuffer $ do
+    stateInitVars <- lowerStateInits wb.stateVariables
+    let innerArgs = [Arg {label = lbl, var = v} | (lbl, v) <- stateInitVars]
+    emit $
+      SCall
+        CallData
+          { target = CTBlock {block = innerBlockId},
+            args = innerArgs,
+            output = Just innerOut
+          }
+  let outerBlock =
         defaultUserBlock
           { kind = BlockAgentEntry,
             params = paramVars,
@@ -511,19 +531,15 @@ lowerAgentWithStateVars outerId name paramVars blk wb = do
           }
   recordBlock outerId (BlockUser {body = outerBlock}) (Just name)
 
--- | Lower the @stateVariables@ of a 'WhereBlock' in the parent's scope; the
--- init expressions emit calls into the buffer. Returns the @(label, varId)@
--- pairs and the updated buffer.
+-- | Lower the @stateVariables@ of a 'WhereBlock' in the parent's scope.
+-- Init expression statements are emitted into the current buffer; returns
+-- only the @(label, initVar)@ pairs.
 lowerStateInits ::
-  StmtBuf ->
   [AST.StateVariableBinding Zonked] ->
-  Lower ([(Text, VarId)], StmtBuf)
-lowerStateInits = go []
-  where
-    go acc currentBuf [] = pure (reverse acc, currentBuf)
-    go acc currentBuf (svb : rest) = do
-      (initVar, currentBuf') <- lowerExpr currentBuf svb.initial
-      go ((svb.name.text, initVar) : acc) currentBuf' rest
+  Lower [(Text, VarId)]
+lowerStateInits = mapM $ \svb -> do
+  initVar <- lowerExpr svb.initial
+  pure (svb.name.text, initVar)
 
 -- | Build the inner handle-scope block (with state vars, handlers, and the
 -- agent body). The block expects state vars as labeled params; its body runs
@@ -686,114 +702,110 @@ bindPatternToFreshVar pat hint = case pat of
 -- Block body
 -- ===========================================================================
 
--- | Lower a 'AST.Block' (statements + returnExpression). Returns the emitted
--- statements and the optional trailing var.
+-- | Lower a 'AST.Block' (statements + returnExpression) into a fresh
+-- buffer. Returns the emitted statements and the optional trailing var
+-- (the value of the block's tail expression, if any).
 --
--- whereBlock handling (state vars / handlers / then) is added in Stage 6.
+-- @let@ statements need to bring their bindings into scope for the
+-- statements that follow. We thread that via 'withLocals' here rather
+-- than letting 'lowerStmt' mutate the environment, which keeps the
+-- 'ReaderT' contract intact (no @local-then-throw-away@ tricks).
 lowerBlockBody :: AST.Block Zonked -> Lower ([Statement], Maybe VarId)
 lowerBlockBody blk = do
-  -- Stage 1 ignores whereBlock; future stages will lower it.
-  let initial = [] :: StmtBuf
-  (afterStmts, _) <- foldM step (initial, False) blk.statements
-  case blk.returnExpression of
-    Nothing -> pure (afterStmts, Nothing)
-    Just expr -> do
-      (var, finalBuf) <- lowerExpr afterStmts expr
-      pure (finalBuf, Just var)
+  (trailing, statements) <- runWithFreshBuffer (go blk.statements)
+  pure (statements, trailing)
   where
-    step (buf, exited) stmt
-      | exited = pure (buf, exited)
-      | otherwise = lowerStmt buf stmt
+    go [] = traverse lowerExpr blk.returnExpression
+    go (AST.StatementLet ls : rest) = do
+      v <- lowerExpr ls.value
+      locals <- bindPatternLocals v ls.pattern
+      withLocals locals (go rest)
+    go (stmt : rest) = do
+      exited <- lowerStmt stmt
+      if exited then pure Nothing else go rest
 
 -- ===========================================================================
 -- Statements
 -- ===========================================================================
 
--- | Lower one 'AST.Statement', appending IR statements to the buffer. The
--- second element of the result is 'True' if this statement causes a non-local
--- exit (return/break/etc.) — Stage 7 will use this for unreachable-code
--- detection; for now ignored.
-lowerStmt :: StmtBuf -> AST.Statement Zonked -> Lower (StmtBuf, Bool)
-lowerStmt buf = \case
-  AST.StatementLet stmt -> do
-    (var, buf') <- lowerExpr buf stmt.value
-    binds <- bindPattern var stmt.pattern
-    -- bindPattern modifies state for downstream statements; no extra IR.
-    sequence_ binds
-    pure (buf', False)
+-- | Lower one 'AST.Statement'. Statements are emitted into the current
+-- buffer. Returns 'True' if this statement causes a non-local exit
+-- (return/break/etc.) so the caller can stop emitting further code.
+--
+-- @let@ in particular returns 'False' but its 'bindPattern' side-effect
+-- — extending the local-variable Reader for downstream statements — is
+-- handled by the caller via 'withLocalsCont'-style threading. We keep a
+-- simpler design: 'bindPattern' returns the locals to add and the caller
+-- (here, 'lowerBlockBody' / 'foldM step') is responsible for continuing
+-- under those locals.
+--
+-- For now 'bindPattern' is a no-op for non-variable patterns; the locals
+-- propagate via the @MonadReader@ extension below.
+-- | Lower one non-let 'AST.Statement'. Statements are emitted into the
+-- current buffer. Returns 'True' if this statement causes a non-local
+-- exit (return/break/etc.) so the caller can stop emitting further code.
+--
+-- 'StatementLet' is handled specially by 'lowerBlockBody.go' (which
+-- peels it off so the introduced bindings can extend the Reader scope
+-- for subsequent statements) and therefore does not appear in this
+-- dispatch.
+lowerStmt :: AST.Statement Zonked -> Lower Bool
+lowerStmt = \case
+  AST.StatementLet ls -> do
+    -- Defensive fall-through: 'lowerBlockBody.go' should have peeled
+    -- this case off already. If we get here it means a 'let' was used
+    -- in a context that does not thread Reader-scope bindings — bring
+    -- it through as a no-effect emit and continue.
+    var <- lowerExpr ls.value
+    _ <- bindPatternLocals var ls.pattern
+    pure False
   AST.StatementReturn stmt -> do
-    (var, buf') <- lowerExpr buf stmt.value
-    pure (emit (SExit ExitData {exitKind = ExitReturn, value = var}) buf', True)
+    var <- lowerExpr stmt.value
+    emit (SExit ExitData {exitKind = ExitReturn, value = var})
+    pure True
   AST.StatementBreak stmt -> do
-    (var, buf') <- lowerExpr buf stmt.value
-    pure (emit (SExit ExitData {exitKind = ExitBreak, value = var}) buf', True)
+    var <- lowerExpr stmt.value
+    emit (SExit ExitData {exitKind = ExitBreak, value = var})
+    pure True
   AST.StatementForBreak stmt -> do
-    (var, buf') <- lowerExpr buf stmt.value
-    pure (emit (SExit ExitData {exitKind = ExitForBreak, value = var}) buf', True)
+    var <- lowerExpr stmt.value
+    emit (SExit ExitData {exitKind = ExitForBreak, value = var})
+    pure True
   AST.StatementNext stmt -> do
-    (var, buf') <- lowerExpr buf stmt.value
-    mods <- mapM (lowerModifier buf') stmt.modifiers
-    let (modPairs, bufAfterMods) = unrollMods buf' mods
-    pure
-      ( emit
-          (SCont ContData {contKind = ContNext, value = Just var, mods = modPairs})
-          bufAfterMods,
-        True
-      )
+    var <- lowerExpr stmt.value
+    modPairs <- mapM lowerModifier stmt.modifiers
+    emit (SCont ContData {contKind = ContNext, value = Just var, mods = modPairs})
+    pure True
   AST.StatementForNext stmt -> do
-    mods <- mapM (lowerModifier buf) stmt.modifiers
-    let (modPairs, bufAfterMods) = unrollMods buf mods
-    pure
-      ( emit
-          (SCont ContData {contKind = ContForNext, value = Nothing, mods = modPairs})
-          bufAfterMods,
-        True
-      )
+    modPairs <- mapM lowerModifier stmt.modifiers
+    emit (SCont ContData {contKind = ContForNext, value = Nothing, mods = modPairs})
+    pure True
   AST.StatementExpression expr -> do
-    (_, buf') <- lowerExpr buf expr
-    pure (buf', False)
+    _ <- lowerExpr expr
+    pure False
   AST.StatementAgent _ -> do
     -- Stage 4 implements local agent (MakeClosure into local var).
-    pure (buf, False)
+    pure False
   AST.StatementError sp -> do
     recordError (LowerErrorParseSentinel sp)
-    pure (buf, False)
+    pure False
 
 -- | Lower one 'AST.Modifier' producing @(label, value-bearing IR var)@. The
--- expression for the new value may emit statements into the shared buffer;
--- the caller is responsible for threading the buffer through.
-lowerModifier ::
-  StmtBuf ->
-  AST.Modifier Zonked ->
-  Lower ((Text, VarId), StmtBuf)
-lowerModifier buf m = do
-  (var, buf') <- lowerExpr buf m.value
-  pure ((m.name.text, var), buf')
+-- expression for the new value emits statements into the current buffer.
+lowerModifier :: AST.Modifier Zonked -> Lower (Text, VarId)
+lowerModifier m = do
+  var <- lowerExpr m.value
+  pure (m.name.text, var)
 
--- | Helper to thread the buffer through a list of modifier-lowering results.
--- Each entry is @((label, var), updatedBuf)@; we want the final buffer plus
--- the list of (label, var) pairs.
-unrollMods ::
-  StmtBuf ->
-  [((Text, VarId), StmtBuf)] ->
-  ([(Text, VarId)], StmtBuf)
-unrollMods initial = \case
-  [] -> ([], initial)
-  xs ->
-    let pairs = map fst xs
-        finalBuf = snd (last xs)
-     in (pairs, finalBuf)
-
--- | Bind a pattern against a known IR var; for variable / wildcard patterns
--- this just records a local mapping. Returns a list of effects that already
--- run (modifying the lower-state). Tuple / constructor / literal destructuring
--- is added later (Stage 2+ for match-style, Stage 3 for let).
-bindPattern :: VarId -> AST.Pattern Zonked -> Lower [Lower ()]
-bindPattern incoming = \case
+-- | Compute the @(VariableId, VarId)@ pairs introduced by binding a
+-- pattern against an incoming IR var. The caller is responsible for
+-- bringing the result into scope via 'withLocals'. Tuple / constructor /
+-- literal destructuring is added in Phase 4 (currently records an
+-- 'LowerErrorUnsupported' for non-trivial patterns).
+bindPatternLocals :: VarId -> AST.Pattern Zonked -> Lower [(VariableId, VarId)]
+bindPatternLocals incoming = \case
   AST.PatternVariable vp -> case vp.name.resolution of
-    Just variableId -> do
-      modify (\s -> s {lsLocalVars = Map.insert variableId incoming s.lsLocalVars})
-      pure []
+    Just variableId -> pure [(variableId, incoming)]
     Nothing -> do
       recordError (LowerErrorUnresolvedVariable vp.sourceSpan vp.name.text)
       pure []
@@ -809,126 +821,113 @@ bindPattern incoming = \case
 -- Expressions
 -- ===========================================================================
 
--- | Lower an 'AST.Expression'. Returns the IR var holding the value and the
--- updated statement buffer. The fresh var is allocated regardless (callers
--- can drop it via @SCall { output = Nothing }@-style emissions later).
-lowerExpr :: StmtBuf -> AST.Expression Zonked -> Lower (VarId, StmtBuf)
-lowerExpr buf = \case
-  AST.ExpressionLiteral lit -> lowerLiteral buf lit
-  AST.ExpressionVariable ve -> lowerVariable buf ve
+-- | Lower an 'AST.Expression'. Returns the IR var holding the value;
+-- statements are emitted into the current buffer.
+lowerExpr :: AST.Expression Zonked -> Lower VarId
+lowerExpr = \case
+  AST.ExpressionLiteral lit -> lowerLiteral lit
+  AST.ExpressionVariable ve -> lowerVariable ve
   AST.ExpressionBinaryOperator be -> do
-    (lhs, buf1) <- lowerExpr buf be.left
-    (rhs, buf2) <- lowerExpr buf1 be.right
+    lhs <- lowerExpr be.left
+    rhs <- lowerExpr be.right
     out <- freshVarId Nothing
     blockId <- primBlockId (binaryOpPrim be.operator)
-    let stmt =
-          SCall
-            CallData
-              { target = CTBlock {block = blockId},
-                args = [Arg "lhs" lhs, Arg "rhs" rhs],
-                output = Just out
-              }
-    pure (out, emit stmt buf2)
+    emit $
+      SCall
+        CallData
+          { target = CTBlock {block = blockId},
+            args = [Arg "lhs" lhs, Arg "rhs" rhs],
+            output = Just out
+          }
+    pure out
   AST.ExpressionUnaryOperator ue -> do
-    (operand, buf1) <- lowerExpr buf ue.operand
+    operand <- lowerExpr ue.operand
     out <- freshVarId Nothing
     blockId <- primBlockId (unaryOpPrim ue.operator)
-    let stmt =
-          SCall
-            CallData
-              { target = CTBlock {block = blockId},
-                args = [Arg "operand" operand],
-                output = Just out
-              }
-    pure (out, emit stmt buf1)
-  AST.ExpressionCall ce -> lowerCall buf ce
+    emit $
+      SCall
+        CallData
+          { target = CTBlock {block = blockId},
+            args = [Arg "operand" operand],
+            output = Just out
+          }
+    pure out
+  AST.ExpressionCall ce -> lowerCall ce
   AST.ExpressionTuple te -> do
-    (elements, buf') <- lowerExprList buf te.elements
+    elements <- mapM lowerExpr te.elements
     out <- freshVarId Nothing
     blockId <- primBlockId "make_tuple"
-    let args = zipWith mkIndexedArg [0 ..] elements
-        stmt =
-          SCall
-            CallData
-              { target = CTBlock {block = blockId},
-                args = args,
-                output = Just out
-              }
-    pure (out, emit stmt buf')
+    emit $
+      SCall
+        CallData
+          { target = CTBlock {block = blockId},
+            args = zipWith mkIndexedArg [0 ..] elements,
+            output = Just out
+          }
+    pure out
   AST.ExpressionArray ae -> do
-    (elements, buf') <- lowerExprList buf ae.elements
+    elements <- mapM lowerExpr ae.elements
     out <- freshVarId Nothing
     blockId <- primBlockId "make_array"
-    let args = zipWith mkIndexedArg [0 ..] elements
-        stmt =
-          SCall
-            CallData
-              { target = CTBlock {block = blockId},
-                args = args,
-                output = Just out
-              }
-    pure (out, emit stmt buf')
+    emit $
+      SCall
+        CallData
+          { target = CTBlock {block = blockId},
+            args = zipWith mkIndexedArg [0 ..] elements,
+            output = Just out
+          }
+    pure out
   AST.ExpressionFieldAccess fa -> do
-    (object, buf') <- lowerExpr buf fa.object
-    -- Field name is loaded as a string literal; get_field consumes (object, field).
-    (fieldVar, buf1) <- emitLoadLiteral buf' (LVString fa.fieldName.text)
+    object <- lowerExpr fa.object
+    -- Field name is loaded as a string literal; get_field consumes
+    -- (object, field).
+    fieldVar <- emitLoadLiteral (LVString fa.fieldName.text)
     out <- freshVarId Nothing
     blockId <- primBlockId "get_field"
-    let getFieldCall =
-          SCall
-            CallData
-              { target = CTBlock {block = blockId},
-                args = [Arg "object" object, Arg "field" fieldVar],
-                output = Just out
-              }
-    pure (out, emit getFieldCall buf1)
+    emit $
+      SCall
+        CallData
+          { target = CTBlock {block = blockId},
+            args = [Arg "object" object, Arg "field" fieldVar],
+            output = Just out
+          }
+    pure out
   AST.ExpressionIndexAccess ia -> do
-    (array, buf1) <- lowerExpr buf ia.array
-    (index, buf2) <- lowerExpr buf1 ia.index
+    array <- lowerExpr ia.array
+    index <- lowerExpr ia.index
     out <- freshVarId Nothing
     blockId <- primBlockId "array_get"
-    let stmt =
-          SCall
-            CallData
-              { target = CTBlock {block = blockId},
-                args = [Arg "array" array, Arg "index" index],
-                output = Just out
-              }
-    pure (out, emit stmt buf2)
-  AST.ExpressionTemplate te -> lowerTemplate buf te
-  AST.ExpressionBlock be -> lowerBlockExpr buf be
-  AST.ExpressionIf ie -> lowerIfExpr buf ie
-  AST.ExpressionMatch me -> lowerMatchExpr buf me
-  AST.ExpressionFor fe -> lowerForExpr buf fe
-  AST.ExpressionQualifiedReference qe -> do
-    -- A resolved qualified reference (module.target). target.resolution holds
-    -- the resolved VariableId; treat it like a bare variable expression.
+    emit $
+      SCall
+        CallData
+          { target = CTBlock {block = blockId},
+            args = [Arg "array" array, Arg "index" index],
+            output = Just out
+          }
+    pure out
+  AST.ExpressionTemplate te -> lowerTemplate te
+  AST.ExpressionBlock be -> lowerBlockExpr be
+  AST.ExpressionIf ie -> lowerIfExpr ie
+  AST.ExpressionMatch me -> lowerMatchExpr me
+  AST.ExpressionFor fe -> lowerForExpr fe
+  AST.ExpressionQualifiedReference qe ->
+    -- A resolved qualified reference (module.target). target.resolution
+    -- holds the resolved VariableId; treat it like a bare variable
+    -- expression. Qualified references never bind locally.
     case qe.target.resolution of
       Just variableId -> do
         mBlockId <- gets (Map.lookup variableId . (.lsVarBlockIds))
         case mBlockId of
-          Just bid -> closureRef qe.target.text bid
+          Just bid -> do
+            v <- freshVarId (Just qe.target.text)
+            emit (SMakeClosure MakeClosureData {output = v, block = bid})
+            pure v
           Nothing -> do
             recordError (LowerErrorUnresolvedVariable qe.sourceSpan qe.target.text)
-            v <- freshVarId Nothing
-            pure (v, buf)
+            freshVarId Nothing
       Nothing -> do
         recordError (LowerErrorUnresolvedVariable qe.sourceSpan qe.target.text)
-        v <- freshVarId Nothing
-        pure (v, buf)
-    where
-      closureRef hintName bid = do
-        v <- freshVarId (Just hintName)
-        pure (v, emit (SMakeClosure MakeClosureData {output = v, block = bid}) buf)
-
--- | Lower a list of expressions, threading the buffer.
-lowerExprList :: StmtBuf -> [AST.Expression Zonked] -> Lower ([VarId], StmtBuf)
-lowerExprList = go []
-  where
-    go acc buf [] = pure (reverse acc, buf)
-    go acc buf (e : es) = do
-      (var, buf') <- lowerExpr buf e
-      go (var : acc) buf' es
+        freshVarId Nothing
 
 -- | Make an Arg with an indexed label like @"_0"@, @"_1"@, … for tuple /
 -- array literal construction.
@@ -938,156 +937,121 @@ mkIndexedArg i var = Arg {label = "_" <> Text.pack (show i), var = var}
 -- | Lower a function call. Decides whether to emit a static 'CTBlock' call
 -- (when the callee resolves to a top-level decl / ctor / prim) or a closure
 -- 'CTValue' call (when the callee is a local variable holding a function).
-lowerCall :: StmtBuf -> AST.CallExpression Zonked -> Lower (VarId, StmtBuf)
-lowerCall buf ce = do
-  -- Lower argument values first.
-  (argVars, bufArgs) <- lowerExprList buf (map (.value) ce.arguments)
-  let argLabels = map (.label.text) ce.arguments
-      args = zipWith Arg argLabels argVars
-  -- Resolve the callee.
-  (target, bufFinal) <- resolveCallee bufArgs ce.callee
+lowerCall :: AST.CallExpression Zonked -> Lower VarId
+lowerCall ce = do
+  argVars <- mapM (lowerExpr . (.value)) ce.arguments
+  let args = zipWith Arg (map (.label.text) ce.arguments) argVars
+  target <- resolveCallee ce.callee
   out <- freshVarId Nothing
-  let stmt =
-        SCall
-          CallData
-            { target = target,
-              args = args,
-              output = Just out
-            }
-  pure (out, emit stmt bufFinal)
+  emit (SCall CallData {target = target, args = args, output = Just out})
+  pure out
 
--- | Resolve an expression that's used in the callee position. Returns the
--- 'CallTarget' and the (possibly extended) statement buffer.
-resolveCallee ::
-  StmtBuf ->
-  AST.Expression Zonked ->
-  Lower (CallTarget, StmtBuf)
-resolveCallee buf = \case
+-- | Resolve an expression that's used in the callee position.
+resolveCallee :: AST.Expression Zonked -> Lower CallTarget
+resolveCallee = \case
   AST.ExpressionVariable ve ->
-    resolveCalleeName
-      buf
-      ve.name.resolution
-      ve.sourceSpan
-      ve.name.text
-      (\variableId -> gets (Map.lookup variableId . (.lsLocalVars)))
+    resolveCalleeName ve.name.resolution ve.sourceSpan ve.name.text True
   AST.ExpressionQualifiedReference qe ->
-    -- Qualified references never bind locally — only consult the top-level
-    -- block id table.
-    resolveCalleeName buf qe.target.resolution qe.sourceSpan qe.target.text (const (pure Nothing))
-  -- For any other callee shape (a higher-order computation), lower it to a
-  -- closure value first.
+    -- Qualified references never bind locally — only consult the
+    -- top-level block id table.
+    resolveCalleeName qe.target.resolution qe.sourceSpan qe.target.text False
+  -- For any other callee shape (a higher-order computation), lower it to
+  -- a closure value first.
   other -> do
-    (var, buf') <- lowerExpr buf other
-    pure (CTValue {var = var}, buf')
+    var <- lowerExpr other
+    pure (CTValue {var = var})
 
--- | Shared callee-name resolution: try the local map first (if applicable),
--- then fall back to the top-level @VariableId → BlockId@ table. Failures
--- yield a 'CTValue' on a fresh placeholder var with an error recorded.
+-- | Shared callee-name resolution: try the local Reader scope first (if
+-- the callee may be a local), then fall back to the top-level
+-- @VariableId → BlockId@ table. Failures yield a 'CTValue' on a fresh
+-- placeholder var with an error recorded.
 resolveCalleeName ::
-  StmtBuf ->
   AST.NameMeta Zonked 'AST.VariableRef ->
   AST.SourceSpan ->
   Text ->
-  (VariableId -> Lower (Maybe VarId)) ->
-  Lower (CallTarget, StmtBuf)
-resolveCalleeName buf metadata sp nameText lookupLocal = case metadata of
+  Bool ->
+  Lower CallTarget
+resolveCalleeName resolution sp nameText canBeLocal = case resolution of
   Just variableId -> do
-    mLocal <- lookupLocal variableId
+    mLocal <-
+      if canBeLocal
+        then lookupLocal variableId
+        else pure Nothing
     case mLocal of
-      Just irVar -> pure (CTValue {var = irVar}, buf)
+      Just irVar -> pure (CTValue {var = irVar})
       Nothing -> do
         mBlockId <- gets (Map.lookup variableId . (.lsVarBlockIds))
         case mBlockId of
-          Just bid -> pure (CTBlock {block = bid}, buf)
-          Nothing -> do
-            recordError (LowerErrorUnresolvedVariable sp nameText)
-            v <- freshVarId Nothing
-            pure (CTValue {var = v}, buf)
-  Nothing -> do
-    recordError (LowerErrorUnresolvedVariable sp nameText)
-    v <- freshVarId Nothing
-    pure (CTValue {var = v}, buf)
-
--- | Lower an 'AST.TemplateExpression' as a left-fold of @concat@ prim calls.
-lowerTemplate ::
-  StmtBuf ->
-  AST.TemplateExpression Zonked ->
-  Lower (VarId, StmtBuf)
-lowerTemplate buf te = do
-  (vars, buf') <- foldElements [] buf te.elements
-  case vars of
-    [] ->
-      -- empty template => empty string literal
-      emitLoadLiteral buf' (LVString "")
-    [single] ->
-      -- single piece: just stringify and pass through
-      stringify buf' single
-    (first : rest) -> do
-      (initVar, bufInit) <- ensureString buf' first
-      foldM (concatStep) (initVar, bufInit) rest
+          Just bid -> pure (CTBlock {block = bid})
+          Nothing -> failTarget
+  Nothing -> failTarget
   where
-    foldElements acc b [] = pure (reverse acc, b)
-    foldElements acc b (e : es) = do
-      (v, b') <- lowerTemplateElement b e
-      foldElements (v : acc) b' es
+    failTarget = do
+      recordError (LowerErrorUnresolvedVariable sp nameText)
+      v <- freshVarId Nothing
+      pure (CTValue {var = v})
 
-    stringify b v = do
+-- | Lower an 'AST.TemplateExpression' as a left-fold of @concat@ prim
+-- calls.
+lowerTemplate :: AST.TemplateExpression Zonked -> Lower VarId
+lowerTemplate te = do
+  vars <- mapM lowerTemplateElement te.elements
+  case vars of
+    [] -> emitLoadLiteral (LVString "")
+    [single] -> stringify single
+    (first : rest) -> do
+      initVar <- stringify first
+      foldM concatStep initVar rest
+  where
+    stringify v = do
       blockId <- primBlockId "to_string"
       out <- freshVarId Nothing
-      let stmt =
-            SCall
-              CallData
-                { target = CTBlock {block = blockId},
-                  args = [Arg "value" v],
-                  output = Just out
-                }
-      pure (out, emit stmt b)
+      emit $
+        SCall
+          CallData
+            { target = CTBlock {block = blockId},
+              args = [Arg "value" v],
+              output = Just out
+            }
+      pure out
 
-    ensureString b v = stringify b v
-
-    concatStep (lhs, b) rhsRaw = do
-      (rhs, b1) <- ensureString b rhsRaw
+    concatStep lhs rhsRaw = do
+      rhs <- stringify rhsRaw
       blockId <- primBlockId "concat"
       out <- freshVarId Nothing
-      let stmt =
-            SCall
-              CallData
-                { target = CTBlock {block = blockId},
-                  args = [Arg "lhs" lhs, Arg "rhs" rhs],
-                  output = Just out
-                }
-      pure (out, emit stmt b1)
+      emit $
+        SCall
+          CallData
+            { target = CTBlock {block = blockId},
+              args = [Arg "lhs" lhs, Arg "rhs" rhs],
+              output = Just out
+            }
+      pure out
 
-lowerTemplateElement ::
-  StmtBuf ->
-  AST.TemplateElement Zonked ->
-  Lower (VarId, StmtBuf)
-lowerTemplateElement buf = \case
-  AST.TemplateElementString tse -> emitLoadLiteral buf (LVString tse.value)
-  AST.TemplateElementExpression tee -> lowerExpr buf tee.value
+lowerTemplateElement :: AST.TemplateElement Zonked -> Lower VarId
+lowerTemplateElement = \case
+  AST.TemplateElementString tse -> emitLoadLiteral (LVString tse.value)
+  AST.TemplateElementExpression tee -> lowerExpr tee.value
 
 -- ===========================================================================
 -- Inline block / control-flow expressions
 -- ===========================================================================
 
 -- | Lower an inline block expression @{ stmts; tail }@. We create a child
--- 'UserBlock' with @inheritScope=True@ (so it shares the parent's scope) and
+-- 'UserBlock' (kind = 'BlockInline', so it shares the parent's scope) and
 -- emit a static call to it.
-lowerBlockExpr ::
-  StmtBuf ->
-  AST.BlockExpression Zonked ->
-  Lower (VarId, StmtBuf)
-lowerBlockExpr buf be = do
+lowerBlockExpr :: AST.BlockExpression Zonked -> Lower VarId
+lowerBlockExpr be = do
   childBlockId <- buildInlineBlock be.block
   out <- freshVarId Nothing
-  let stmt =
-        SCall
-          CallData
-            { target = CTBlock {block = childBlockId},
-              args = [],
-              output = Just out
-            }
-  pure (out, emit stmt buf)
+  emit $
+    SCall
+      CallData
+        { target = CTBlock {block = childBlockId},
+          args = [],
+          output = Just out
+        }
+  pure out
 
 -- | Build an inline block (inheritScope=True, no boundary catches) and return
 -- its newly minted BlockId.
@@ -1104,34 +1068,29 @@ buildInlineBlock blk = do
   pure blockId
 
 -- | Lower an if expression as 'SMatch' on a boolean subject. The "true"
--- branch is matched by tag @"true"@; the else branch (or implicit null block)
--- is the default.
-lowerIfExpr ::
-  StmtBuf ->
-  AST.IfExpression Zonked ->
-  Lower (VarId, StmtBuf)
-lowerIfExpr buf ie = do
-  (cond, buf1) <- lowerExpr buf ie.condition
+-- branch is matched by tag @"true"@; the else branch (or implicit null
+-- block) is the default.
+lowerIfExpr :: AST.IfExpression Zonked -> Lower VarId
+lowerIfExpr ie = do
+  cond <- lowerExpr ie.condition
   thenBlockId <- buildInlineBlock ie.thenBlock
-  defaultBlockId <- case ie.elseBlock of
-    Just elseBlk -> Just <$> buildInlineBlock elseBlk
-    Nothing -> pure Nothing
+  defaultBlockId <- traverse buildInlineBlock ie.elseBlock
   out <- freshVarId Nothing
-  let stmt =
-        SMatch
-          MatchData
-            { subject = cond,
-              arms =
-                [ MatchArm
-                    { tag = Just "true",
-                      bindings = [],
-                      body = thenBlockId
-                    }
-                ],
-              defaultArm = defaultBlockId,
-              output = Just out
-            }
-  pure (out, emit stmt buf1)
+  emit $
+    SMatch
+      MatchData
+        { subject = cond,
+          arms =
+            [ MatchArm
+                { tag = Just "true",
+                  bindings = [],
+                  body = thenBlockId
+                }
+            ],
+          defaultArm = defaultBlockId,
+          output = Just out
+        }
+  pure out
 
 -- | Lower a match expression. Stage 2 supports flat patterns (variable /
 -- wildcard / tuple / one-level constructor). Nested constructor patterns are
@@ -1146,23 +1105,20 @@ lowerIfExpr buf ie = do
 --   * QualifiedConstructorPattern - tag=Just ctor, bindings via field labels
 --     (only one level of nesting; nested patterns inside fields fall back to
 --     wildcard)
-lowerMatchExpr ::
-  StmtBuf ->
-  AST.MatchExpression Zonked ->
-  Lower (VarId, StmtBuf)
-lowerMatchExpr buf me = do
-  (subject, buf1) <- lowerExpr buf me.subject
+lowerMatchExpr :: AST.MatchExpression Zonked -> Lower VarId
+lowerMatchExpr me = do
+  subject <- lowerExpr me.subject
   arms <- mapM (lowerMatchArm subject) me.cases
   out <- freshVarId Nothing
-  let stmt =
-        SMatch
-          MatchData
-            { subject = subject,
-              arms = arms,
-              defaultArm = Nothing,
-              output = Just out
-            }
-  pure (out, emit stmt buf1)
+  emit $
+    SMatch
+      MatchData
+        { subject = subject,
+          arms = arms,
+          defaultArm = Nothing,
+          output = Just out
+        }
+  pure out
 
 lowerMatchArm :: VarId -> AST.CaseArm Zonked -> Lower MatchArm
 lowerMatchArm subject arm = do
@@ -1228,95 +1184,68 @@ buildArmBody locals blk = do
     recordBlock blockId (BlockUser {body = userBlock}) Nothing
   pure blockId
 
--- | Lower a for expression. For now supports a single 'in' binding, no var
--- (state) bindings, and an optional then-block. Stage 5 extends with state
--- vars and multiple in-bindings.
-lowerForExpr ::
-  StmtBuf ->
-  AST.ForExpression Zonked ->
-  Lower (VarId, StmtBuf)
-lowerForExpr buf fe = do
-  -- Lower source arrays and gather (element_var, source_var) pairs + locals.
-  (iterPairs, iterLocals, buf1) <- lowerForIters buf fe.inBindings
-  -- Lower state var inits and gather (label, init_var) pairs.
-  (stateInits, stateLocals, buf2) <- lowerForStates buf1 fe.varBindings
-  -- Build body block with both iter vars and state vars in scope.
-  bodyBlockId <- buildForBody iterPairs (iterLocals ++ stateLocals) fe.body
-  thenBlockId <- case fe.thenBlock of
-    Just thenBlk -> Just <$> buildInlineBlock thenBlk
-    Nothing -> pure Nothing
+-- | Lower a for expression. Supports zero or more 'in' bindings, zero or
+-- more 'var' (state) bindings, and an optional then-block.
+lowerForExpr :: AST.ForExpression Zonked -> Lower VarId
+lowerForExpr fe = do
+  (iterPairs, iterLocals) <- lowerForIters fe.inBindings
+  (stateInits, stateLocals) <- lowerForStates fe.varBindings
+  bodyBlockId <- buildForBody (iterLocals ++ stateLocals) fe.body
+  thenBlockId <- traverse buildInlineBlock fe.thenBlock
   out <- freshVarId Nothing
-  let stmt =
-        SFor
-          ForData
-            { iters = iterPairs,
-              stateInits = stateInits,
-              bodyBlock = bodyBlockId,
-              thenBlock = thenBlockId,
-              output = Just out
-            }
-  pure (out, emit stmt buf2)
+  emit $
+    SFor
+      ForData
+        { iters = iterPairs,
+          stateInits = stateInits,
+          bodyBlock = bodyBlockId,
+          thenBlock = thenBlockId,
+          output = Just out
+        }
+  pure out
 
--- | Lower @for(p in arr) ...@ bindings. Each element-pattern variable receives
--- a fresh IR var; the source array is lowered to a var. Returns
--- @[(elementVar, sourceVar)]@, the locals to add to the body's scope, and the
--- updated buffer.
+-- | Lower @for(p in arr) ...@ bindings. Each element-pattern variable
+-- receives a fresh IR var; the source array is lowered to a var.
+-- Returns @[(elementVar, sourceVar)]@ and the locals to add to the body
+-- scope.
 lowerForIters ::
-  StmtBuf ->
   [AST.ForInBinding Zonked] ->
-  Lower ([(VarId, VarId)], [(VariableId, VarId)], StmtBuf)
-lowerForIters = go [] []
+  Lower ([(VarId, VarId)], [(VariableId, VarId)])
+lowerForIters bs = do
+  results <- mapM one bs
+  pure (map fst results, concatMap snd results)
   where
-    go pairsAcc localsAcc currentBuf [] =
-      pure (reverse pairsAcc, reverse localsAcc, currentBuf)
-    go pairsAcc localsAcc currentBuf (b : bs) = do
-      (sourceVar, currentBuf') <- lowerExpr currentBuf b.source
+    one b = do
+      sourceVar <- lowerExpr b.source
       (elementVar, locals) <- bindPatternToFreshVar b.pattern Nothing
-      go ((elementVar, sourceVar) : pairsAcc) (locals ++ localsAcc) currentBuf' bs
+      pure ((elementVar, sourceVar), locals)
 
 -- | Lower @for(... )(var s = init) ...@ state bindings. Returns
--- @(stateInits, stateLocals, updatedBuf)@. The element body needs the state
--- vars as fresh IR vars (one per state var), exposed through the local map.
+-- @(stateInits, stateLocals)@; the element body needs the state vars as
+-- fresh IR vars (one per state var), exposed through the local map.
 lowerForStates ::
-  StmtBuf ->
   [AST.ForVarBinding Zonked] ->
-  Lower ([(Text, VarId)], [(VariableId, VarId)], StmtBuf)
-lowerForStates buf bindings = go ([], []) buf bindings
+  Lower ([(Text, VarId)], [(VariableId, VarId)])
+lowerForStates bindings = do
+  results <- mapM one bindings
+  pure (map fst (catMaybes results), concatMap snd (catMaybes results))
   where
-    go ::
-      ([(Text, VarId)], [(VariableId, VarId)]) ->
-      StmtBuf ->
-      [AST.ForVarBinding Zonked] ->
-      Lower ([(Text, VarId)], [(VariableId, VarId)], StmtBuf)
-    go (initsAcc, localsAcc) currentBuf [] =
-      pure (reverse initsAcc, reverse localsAcc, currentBuf)
-    go (initsAcc, localsAcc) currentBuf (binding : rest) = do
+    one binding = do
       let nameRef = binding.name
           labelText = nameRef.text
-          spanInfo = binding.sourceSpan
-          initialExpr = binding.initial
-      (initVar, currentBuf') <- lowerExpr currentBuf initialExpr
+      initVar <- lowerExpr binding.initial
       case nameRef.resolution of
         Just variableId -> do
           bodyVar <- freshVarId (Just labelText)
-          go
-            ( (labelText, initVar) : initsAcc,
-              (variableId, bodyVar) : localsAcc
-            )
-            currentBuf'
-            rest
+          pure (Just ((labelText, initVar), [(variableId, bodyVar)]))
         Nothing -> do
-          recordError (LowerErrorUnresolvedVariable spanInfo labelText)
-          go (initsAcc, localsAcc) currentBuf' rest
+          recordError (LowerErrorUnresolvedVariable binding.sourceSpan labelText)
+          pure Nothing
 
-buildForBody ::
-  [(VarId, VarId)] ->
-  [(VariableId, VarId)] ->
-  AST.Block Zonked ->
-  Lower BlockId
-buildForBody _iterPairs stateLocals body = do
+buildForBody :: [(VariableId, VarId)] -> AST.Block Zonked -> Lower BlockId
+buildForBody locals body = do
   blockId <- freshBlockId
-  withLocals stateLocals $ do
+  withLocals locals $ do
     (statements, trailing) <- lowerBlockBody body
     let userBlock =
           defaultUserBlock
@@ -1336,38 +1265,35 @@ astLiteralToIR = \case
   AST.LiteralValueNull -> LVNull
 
 -- | Emit a fresh load-literal statement and return the resulting var.
-emitLoadLiteral :: StmtBuf -> LiteralValue -> Lower (VarId, StmtBuf)
-emitLoadLiteral buf lv = do
+emitLoadLiteral :: LiteralValue -> Lower VarId
+emitLoadLiteral lv = do
   out <- freshVarId Nothing
-  let stmt = SLoadLiteral LoadLiteralData {output = out, value = lv}
-  pure (out, emit stmt buf)
+  emit (SLoadLiteral LoadLiteralData {output = out, value = lv})
+  pure out
 
 -- | Lower an 'AST.LiteralExpression' as an 'SLoadLiteral'.
-lowerLiteral :: StmtBuf -> AST.LiteralExpression Zonked -> Lower (VarId, StmtBuf)
-lowerLiteral buf lit = emitLoadLiteral buf (astLiteralToIR lit.value)
+lowerLiteral :: AST.LiteralExpression Zonked -> Lower VarId
+lowerLiteral lit = emitLoadLiteral (astLiteralToIR lit.value)
 
 -- | Lower an 'AST.VariableExpression'. Result depends on whether the
--- referenced 'VariableId' is a local binding (just return its IR var) or a
--- top-level decl (allocate a closure value via 'SMakeClosure').
-lowerVariable :: StmtBuf -> AST.VariableExpression Zonked -> Lower (VarId, StmtBuf)
-lowerVariable buf ve = case ve.name.resolution of
+-- referenced 'VariableId' is a local binding (just return its IR var) or
+-- a top-level decl (allocate a closure value via 'SMakeClosure').
+lowerVariable :: AST.VariableExpression Zonked -> Lower VarId
+lowerVariable ve = case ve.name.resolution of
   Nothing -> do
     recordError (LowerErrorUnresolvedVariable ve.sourceSpan ve.name.text)
-    var <- freshVarId Nothing
-    pure (var, buf)
+    freshVarId Nothing
   Just variableId -> do
-    locals <- gets (.lsLocalVars)
-    case Map.lookup variableId locals of
-      Just irVar -> pure (irVar, buf)
+    mLocal <- lookupLocal variableId
+    case mLocal of
+      Just irVar -> pure irVar
       Nothing -> do
         mBlockId <- gets (Map.lookup variableId . (.lsVarBlockIds))
         case mBlockId of
-          Just bid -> closureValue buf bid
+          Just bid -> do
+            v <- freshVarId (Just ve.name.text)
+            emit (SMakeClosure MakeClosureData {output = v, block = bid})
+            pure v
           Nothing -> do
             recordError (LowerErrorUnresolvedVariable ve.sourceSpan ve.name.text)
-            v <- freshVarId Nothing
-            pure (v, buf)
-  where
-    closureValue b blockId = do
-      v <- freshVarId (Just ve.name.text)
-      pure (v, emit (SMakeClosure MakeClosureData {output = v, block = blockId}) b)
+            freshVarId Nothing
