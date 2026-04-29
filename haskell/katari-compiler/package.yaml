@@ -24,6 +24,8 @@ library:
     - Katari.Typechecker.Solver.Internal
     - Katari.Typechecker.Solver.Substitution
     - Katari.Typechecker.Zonker
+    - Katari.IR
+    - Katari.Lowering
 
 tests:
   katari-compiler-test:
@@ -35,10 +37,14 @@ tests:
       - Katari.ConstraintGeneratorSpec
       - Katari.ZonkerSpec
       - Katari.SolverSpec
+      - Katari.IRSpec
+      - Katari.LoweringSpec
     dependencies:
       - katari-compiler
       - hspec
       - megaparsec
+      - directory
+      - filepath
 
 dependencies:
   - base >= 4.18 && < 5
@@ -65,3 +71,4 @@ default-extensions:
   - GADTs
   - QuantifiedConstraints
   - UndecidableInstances
+  - DerivingStrategies
