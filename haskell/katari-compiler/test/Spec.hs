@@ -1,9 +1,11 @@
+import Katari.CompileSpec qualified as CompileSpec
 import Katari.ConstraintGeneratorSpec qualified as ConstraintGeneratorSpec
 import Katari.DiagnosticSpec qualified as DiagnosticSpec
 import Katari.IRSpec qualified as IRSpec
 import Katari.IdentifierSpec qualified as IdentifierSpec
 import Katari.LoweringSpec qualified as LoweringSpec
 import Katari.ParserSpec qualified as ParserSpec
+import Katari.SchemaSpec qualified as SchemaSpec
 import Katari.SolverSpec qualified as SolverSpec
 import Katari.ZonkerSpec qualified as ZonkerSpec
 import Test.Hspec
@@ -18,3 +20,5 @@ main = hspec $ do
   IRSpec.spec
   LoweringSpec.spec
   DiagnosticSpec.spec
+  SchemaSpec.spec
+  CompileSpec.spec
