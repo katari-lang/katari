@@ -8,6 +8,9 @@ module Katari.AST.Identifiers
   ( VariableId (..),
     TypeId (..),
     ModuleId (..),
+    unVariableId,
+    unTypeId,
+    unModuleId,
   )
 where
 
@@ -16,11 +19,20 @@ where
 newtype VariableId = VariableId Int
   deriving (Eq, Ord, Show)
 
+unVariableId :: VariableId -> Int
+unVariableId (VariableId n) = n
+
 -- | Unique id in the type namespace. Issued for data declarations and type
 -- synonyms.
 newtype TypeId = TypeId Int
   deriving (Eq, Ord, Show)
 
+unTypeId :: TypeId -> Int
+unTypeId (TypeId n) = n
+
 -- | Unique id in the module namespace.
 newtype ModuleId = ModuleId Int
   deriving (Eq, Ord, Show)
+
+unModuleId :: ModuleId -> Int
+unModuleId (ModuleId n) = n

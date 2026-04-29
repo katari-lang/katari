@@ -25,10 +25,7 @@
 --     information. Anything CG needs that isn't immediately visible at a
 --     node lives in 'IdentifierResult' and is read locally.
 module Katari.Typechecker.ConstraintGenerator
-  ( -- * Phase marker
-    Constrained (..),
-
-    -- * Constraint and reason
+  ( -- * Constraint and reason
     Constraint (..),
     ConstraintReason (..),
     ReasonKind (..),
@@ -56,13 +53,10 @@ import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
--- See note in 'Katari.Parser' regarding 'AST.Phase' constructor name
--- collisions with the legacy phase-marker GADTs.
-import Katari.AST hiding (Constrained, Identified, Parsed)
+import Katari.AST
 import Katari.Diagnostic (Diagnostic, diagnosticError)
 import Katari.Typechecker.Identifier
-  ( Identified (..),
-    IdentifierResult (..),
+  ( IdentifierResult (..),
     ModuleId,
     TypeData (..),
     TypeId (..),
@@ -70,30 +64,11 @@ import Katari.Typechecker.Identifier
   )
 import Katari.Typechecker.SemanticType
 
--- ===========================================================================
--- Constrained phase metadata
--- ===========================================================================
-
--- | Phase marker for the AST after constraint generation. Carries the
--- inferred (yet-unresolved) 'SemanticType' on each expression and pattern;
--- variable / type / module references inherit their @Identified@ ids
--- unchanged.
-data Constrained (s :: SymbolKind) where
-  ConstrainedVariable :: VariableId -> Constrained 'VariableRef
-  ConstrainedUnresolvedVariable :: Constrained 'VariableRef
-  ConstrainedType :: TypeId -> Constrained 'TypeRef
-  ConstrainedUnresolvedType :: Constrained 'TypeRef
-  ConstrainedModule :: ModuleId -> Constrained 'ModuleRef
-  ConstrainedUnresolvedModule :: Constrained 'ModuleRef
-  ConstrainedExpression :: SemanticType Unresolved -> Constrained 'Expression
-  ConstrainedPattern :: SemanticType Unresolved -> Constrained 'Pattern
-  -- | Labels are still resolved later (post-solving). The constraint
-  -- generation phase keeps them trivial.
-  ConstrainedLabel :: Constrained 'LabelRef
-
-deriving instance Show (Constrained s)
-
-deriving instance Eq (Constrained s)
+-- The 'Constrained' phase reuses the 'NameMeta Constrained s' family for
+-- name resolution (identical to 'Identified'), and stores the inferred
+-- @SemanticType Unresolved@ on each expression / pattern via the
+-- @ExprType Constrained@ / @PatType Constrained@ instances defined in
+-- 'Katari.Typechecker.SemanticType'.
 
 -- ===========================================================================
 -- Constraint and reason
@@ -476,8 +451,8 @@ literalValueToSemantic = \case
 -- | Resolve a 'TypeRef' name to its semantic counterpart, expanding
 -- synonyms on the fly with cycle detection.
 resolveTypeRef :: NameRef Identified 'TypeRef -> CG (SemanticType Unresolved)
-resolveTypeRef nameRef = case nameRef.metadata of
-  IdentifiedType tid -> do
+resolveTypeRef nameRef = case nameRef.resolution of
+  Just tid -> do
     types <- asks (.contextIdentifiedTypes)
     case Map.lookup tid types of
       Just TypeData {typeSynonymRhs = Just rhs} -> do
@@ -492,7 +467,7 @@ resolveTypeRef nameRef = case nameRef.metadata of
       Nothing ->
         -- Identifier should have populated all entries; fall back defensively.
         freshTypeVar
-  IdentifiedUnresolvedType -> freshTypeVar
+  Nothing -> freshTypeVar
 
 -- | Elaborate a list of @with@-clause request references into a single
 -- effect set (concrete VariableIds; effect type variables come into play
@@ -505,9 +480,9 @@ elaborateRequestList requests =
         effectReqs = Set.fromList (concatMap requestVarId requests)
       }
   where
-    requestVarId SyntacticRequest {name} = case name.metadata of
-      IdentifiedVariable vid -> [vid]
-      IdentifiedUnresolvedVariable -> []
+    requestVarId SyntacticRequest {name} = case name.resolution of
+      Just vid -> [vid]
+      Nothing -> []
 
 -- | Optional @with@ clause — present only on agent / req-handler type-context
 -- declarations. @Nothing@ means "no annotation"; the caller decides whether
@@ -649,9 +624,9 @@ walkDataDecl DataDeclaration {annotation, name, typeName, parameters, sourceSpan
   tCtor <- variableTypeFromName name
   -- data の TypeId は AST が直接保持する。@Unresolved@ 側 (parse / identify
   -- エラー時) のみ @Nothing@ になり、@SemanticTypeUnknown@ にフォールバックする。
-  let tid = case typeName.metadata of
-        IdentifiedType t -> Just t
-        IdentifiedUnresolvedType -> Nothing
+  let tid = case typeName.resolution of
+        Just t -> Just t
+        Nothing -> Nothing
   fields <- mapM elaborateDataParameter parameters
   let signature =
         SemanticTypeFunction
@@ -736,7 +711,7 @@ walkPattern = \case
             { name = passThroughVariableName name,
               typeAnnotation = fmap passThroughType typeAnnotation,
               sourceSpan = sourceSpan,
-              metadata = ConstrainedPattern patternType
+              typeOf =patternType
             },
         patternType
       )
@@ -747,7 +722,7 @@ walkPattern = \case
           WildcardPattern
             { typeAnnotation = fmap passThroughType typeAnnotation,
               sourceSpan = sourceSpan,
-              metadata = ConstrainedPattern patternType
+              typeOf =patternType
             },
         patternType
       )
@@ -758,7 +733,7 @@ walkPattern = \case
           LiteralPattern
             { value = value,
               sourceSpan = sourceSpan,
-              metadata = ConstrainedPattern patternType
+              typeOf =patternType
             },
         patternType
       )
@@ -770,7 +745,7 @@ walkPattern = \case
           TuplePattern
             { elements = map fst pairs,
               sourceSpan = sourceSpan,
-              metadata = ConstrainedPattern patternType
+              typeOf =patternType
             },
         patternType
       )
@@ -794,7 +769,7 @@ walkPattern = \case
               constructorName = passThroughVariableName constructorName,
               parameters = parameters',
               sourceSpan = sourceSpan,
-              metadata = ConstrainedPattern patternResult
+              typeOf =patternResult
             },
         patternResult
       )
@@ -807,30 +782,26 @@ walkPattern = \case
 -- Block walking (with where-block effect discharge)
 -- ---------------------------------------------------------------------------
 
--- | Read the inferred type out of a Constrained Expression metadata.
+-- | Read the inferred type out of a 'Constrained' expression. Reads the
+-- @typeOf@ field directly via the 'ExprType Constrained = SemanticType Unresolved'
+-- type-family equation.
 constrainedExpressionType :: Expression Constrained -> SemanticType Unresolved
-constrainedExpressionType expr = case expressionMetadata expr of
-  ConstrainedExpression t -> t
-
--- | Pull the metadata out of a Constrained Expression in a way that exposes
--- the carried 'SemanticType'.
-expressionMetadata :: Expression Constrained -> Constrained 'Expression
-expressionMetadata = \case
-  ExpressionLiteral LiteralExpression {metadata} -> metadata
-  ExpressionVariable VariableExpression {metadata} -> metadata
-  ExpressionTuple TupleExpression {metadata} -> metadata
-  ExpressionArray ArrayExpression {metadata} -> metadata
-  ExpressionCall CallExpression {metadata} -> metadata
-  ExpressionBinaryOperator BinaryOperatorExpression {metadata} -> metadata
-  ExpressionUnaryOperator UnaryOperatorExpression {metadata} -> metadata
-  ExpressionIf IfExpression {metadata} -> metadata
-  ExpressionMatch MatchExpression {metadata} -> metadata
-  ExpressionFor ForExpression {metadata} -> metadata
-  ExpressionBlock BlockExpression {metadata} -> metadata
-  ExpressionFieldAccess FieldAccessExpression {metadata} -> metadata
-  ExpressionIndexAccess IndexAccessExpression {metadata} -> metadata
-  ExpressionTemplate TemplateExpression {metadata} -> metadata
-  ExpressionQualifiedReference QualifiedReferenceExpression {metadata} -> metadata
+constrainedExpressionType = \case
+  ExpressionLiteral LiteralExpression {typeOf} -> typeOf
+  ExpressionVariable VariableExpression {typeOf} -> typeOf
+  ExpressionTuple TupleExpression {typeOf} -> typeOf
+  ExpressionArray ArrayExpression {typeOf} -> typeOf
+  ExpressionCall CallExpression {typeOf} -> typeOf
+  ExpressionBinaryOperator BinaryOperatorExpression {typeOf} -> typeOf
+  ExpressionUnaryOperator UnaryOperatorExpression {typeOf} -> typeOf
+  ExpressionIf IfExpression {typeOf} -> typeOf
+  ExpressionMatch MatchExpression {typeOf} -> typeOf
+  ExpressionFor ForExpression {typeOf} -> typeOf
+  ExpressionBlock BlockExpression {typeOf} -> typeOf
+  ExpressionFieldAccess FieldAccessExpression {typeOf} -> typeOf
+  ExpressionIndexAccess IndexAccessExpression {typeOf} -> typeOf
+  ExpressionTemplate TemplateExpression {typeOf} -> typeOf
+  ExpressionQualifiedReference QualifiedReferenceExpression {typeOf} -> typeOf
 
 -- | Walk a block, returning the rebuilt @Constrained@ block and the
 -- 'SemanticType' of the block as a whole.
@@ -947,7 +918,7 @@ walkBlockWithWhere statements returnExpression wb blockSpan = do
         Set.fromList
           [ vid
             | RequestHandler {name} <- handlers,
-              IdentifiedVariable vid <- [name.metadata]
+              Just vid <- [name.resolution]
           ]
   let e1Eff = maybe emptyEffect effectFromVar e1
       e2Eff = SemanticEffect Set.empty handledIds
@@ -1213,7 +1184,7 @@ walkLiteralExpr LiteralExpression {value, sourceSpan} = do
         LiteralExpression
           { value = value,
             sourceSpan = sourceSpan,
-            metadata = ConstrainedExpression semantic
+            typeOf =semantic
           }
     )
 
@@ -1225,7 +1196,7 @@ walkVariableExpr VariableExpression {name, sourceSpan} = do
         VariableExpression
           { name = passThroughVariableName name,
             sourceSpan = sourceSpan,
-            metadata = ConstrainedExpression semantic
+            typeOf =semantic
           }
     )
 
@@ -1238,7 +1209,7 @@ walkTupleExpr TupleExpression {elements, sourceSpan} = do
         TupleExpression
           { elements = elements',
             sourceSpan = sourceSpan,
-            metadata = ConstrainedExpression semantic
+            typeOf =semantic
           }
     )
 
@@ -1259,7 +1230,7 @@ walkArrayExpr ArrayExpression {elements, sourceSpan} = do
         ArrayExpression
           { elements = elements',
             sourceSpan = sourceSpan,
-            metadata = ConstrainedExpression (SemanticTypeArray tElem)
+            typeOf =(SemanticTypeArray tElem)
           }
     )
 
@@ -1284,7 +1255,7 @@ walkCallExpr CallExpression {callee, arguments, sourceSpan} = do
           { callee = callee',
             arguments = arguments',
             sourceSpan = sourceSpan,
-            metadata = ConstrainedExpression tResult
+            typeOf =tResult
           }
     )
 
@@ -1312,7 +1283,7 @@ walkBinaryExpr BinaryOperatorExpression {operator, left, right, sourceSpan} = do
             left = left',
             right = right',
             sourceSpan = sourceSpan,
-            metadata = ConstrainedExpression resultType
+            typeOf =resultType
           }
     )
 
@@ -1374,7 +1345,7 @@ walkUnaryExpr UnaryOperatorExpression {operator, operand, sourceSpan} = do
           { operator = operator,
             operand = operand',
             sourceSpan = sourceSpan,
-            metadata = ConstrainedExpression resultType
+            typeOf =resultType
           }
     )
 
@@ -1399,7 +1370,7 @@ walkIfExpr IfExpression {condition, thenBlock, elseBlock, sourceSpan} = do
             thenBlock = thenBlock',
             elseBlock = elseBlock',
             sourceSpan = sourceSpan,
-            metadata = ConstrainedExpression tResult
+            typeOf =tResult
           }
     )
 
@@ -1418,7 +1389,7 @@ walkMatchExpr MatchExpression {subject, cases, sourceSpan} = do
           { subject = subject',
             cases = cases',
             sourceSpan = sourceSpan,
-            metadata = ConstrainedExpression tMatch
+            typeOf =tMatch
           }
     )
 
@@ -1463,7 +1434,7 @@ walkForExpr ForExpression {inBindings, varBindings, body, thenBlock, sourceSpan}
             body = body',
             thenBlock = thenBlock',
             sourceSpan = sourceSpan,
-            metadata = ConstrainedExpression resultType
+            typeOf =resultType
           }
     )
 
@@ -1496,7 +1467,7 @@ walkBlockExpr BlockExpression {block, sourceSpan} = do
         BlockExpression
           { block = block',
             sourceSpan = sourceSpan,
-            metadata = ConstrainedExpression semantic
+            typeOf =semantic
           }
     )
 
@@ -1515,7 +1486,7 @@ walkFieldAccessExpr FieldAccessExpression {object, fieldName, sourceSpan} = do
           { object = object',
             fieldName = passThroughLabelName fieldName,
             sourceSpan = sourceSpan,
-            metadata = ConstrainedExpression tField
+            typeOf =tField
           }
     )
 
@@ -1534,7 +1505,7 @@ walkIndexAccessExpr IndexAccessExpression {array, index, sourceSpan} = do
           { array = array',
             index = index',
             sourceSpan = sourceSpan,
-            metadata = ConstrainedExpression tElem
+            typeOf =tElem
           }
     )
 
@@ -1546,7 +1517,7 @@ walkTemplateExpr TemplateExpression {elements, sourceSpan} = do
         TemplateExpression
           { elements = elements',
             sourceSpan = sourceSpan,
-            metadata = ConstrainedExpression SemanticTypeString
+            typeOf =SemanticTypeString
           }
     )
 
@@ -1571,51 +1542,37 @@ walkQualifiedReferenceExpr QualifiedReferenceExpression {moduleQualifier, target
           { moduleQualifier = passThroughModuleName moduleQualifier,
             target = passThroughVariableName target,
             sourceSpan = sourceSpan,
-            metadata = ConstrainedExpression semantic
+            typeOf =semantic
           }
     )
 
 -- ===========================================================================
 -- Pass-through helpers (Identified -> Constrained for ref-only nodes)
+--
+-- After the Trees-that-Grow migration, 'NameMeta Identified' and
+-- 'NameMeta Constrained' resolve to the same shape, so phase change is a
+-- value-level identity (just rebuild the wrapper). The helpers below
+-- delegate to 'retagNameRef' / 'retagSyntacticType' /
+-- 'retagSyntacticRequest' from 'Katari.AST'.
 -- ===========================================================================
 
 passThroughVariableName :: NameRef Identified 'VariableRef -> NameRef Constrained 'VariableRef
-passThroughVariableName = mapNameRefMetadata identifiedToConstrained
+passThroughVariableName = retagNameRef
 
 passThroughTypeName :: NameRef Identified 'TypeRef -> NameRef Constrained 'TypeRef
-passThroughTypeName = mapNameRefMetadata identifiedToConstrained
+passThroughTypeName = retagNameRef
 
 passThroughModuleName :: NameRef Identified 'ModuleRef -> NameRef Constrained 'ModuleRef
-passThroughModuleName = mapNameRefMetadata identifiedToConstrained
+passThroughModuleName = retagNameRef
 
 passThroughLabelName :: NameRef Identified 'LabelRef -> NameRef Constrained 'LabelRef
-passThroughLabelName = mapNameRefMetadata identifiedToConstrained
+passThroughLabelName = retagNameRef
 
 passThroughType :: SyntacticType Identified -> SyntacticType Constrained
-passThroughType = mapSyntacticTypeMetadata identifiedToConstrained
+passThroughType = retagSyntacticType
 
 passThroughRequest :: SyntacticRequest Identified -> SyntacticRequest Constrained
-passThroughRequest = mapSyntacticRequestMetadata identifiedToConstrained
-
--- | The metadata transformation for the trivial NameRef kinds (variables /
--- types / modules / labels). The 'IdentifiedExpression' and
--- 'IdentifiedPattern' cases are unreachable here: Expression / Pattern
--- metadata is filled in directly by the constraint walkers (with a
--- 'SemanticType Unresolved' inferred for the node) rather than passed
--- through generically.
-identifiedToConstrained :: Identified sym -> Constrained sym
-identifiedToConstrained = \case
-  IdentifiedVariable vid -> ConstrainedVariable vid
-  IdentifiedUnresolvedVariable -> ConstrainedUnresolvedVariable
-  IdentifiedType tid -> ConstrainedType tid
-  IdentifiedUnresolvedType -> ConstrainedUnresolvedType
-  IdentifiedModule mid -> ConstrainedModule mid
-  IdentifiedUnresolvedModule -> ConstrainedUnresolvedModule
-  IdentifiedLabel -> ConstrainedLabel
-  IdentifiedExpression ->
-    error "identifiedToConstrained: Expression metadata requires a SemanticType (use walk*Expr)"
-  IdentifiedPattern ->
-    error "identifiedToConstrained: Pattern metadata requires a SemanticType (use walkPattern)"
+passThroughRequest = retagSyntacticRequest
 
 -- ===========================================================================
 -- Small accessors and conveniences
@@ -1625,14 +1582,14 @@ identifiedToConstrained = \case
 -- Unresolved references get a fresh type variable (Identifier already
 -- reported the original error).
 variableTypeFromName :: NameRef Identified 'VariableRef -> CG (SemanticType Unresolved)
-variableTypeFromName nameRef = case nameRef.metadata of
-  IdentifiedVariable vid -> lookupVariable vid
-  IdentifiedUnresolvedVariable -> freshTypeVar
+variableTypeFromName nameRef = case nameRef.resolution of
+  Just vid -> lookupVariable vid
+  Nothing -> freshTypeVar
 
 variableIdOfName :: NameRef Identified 'VariableRef -> Maybe VariableId
-variableIdOfName nameRef = case nameRef.metadata of
-  IdentifiedVariable vid -> Just vid
-  IdentifiedUnresolvedVariable -> Nothing
+variableIdOfName nameRef = case nameRef.resolution of
+  Just vid -> Just vid
+  Nothing -> Nothing
 
 -- | If the optional type annotation is present, elaborate it; otherwise
 -- allocate a fresh type variable so the solver can infer it.

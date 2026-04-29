@@ -6,8 +6,8 @@ import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (isJust, isNothing)
 import Data.Text (Text)
-import Katari.AST hiding (Identified, Parsed)
-import Katari.Parser (Parsed, parseModuleStrict)
+import Katari.AST
+import Katari.Parser (parseModuleStrict)
 import Katari.Typechecker.Identifier
 import Test.Hspec
 
@@ -86,11 +86,11 @@ lookupTypeByName name res =
 synonymRhsOf :: TypeData -> Maybe (SyntacticType Identified)
 synonymRhsOf td = td.typeSynonymRhs
 
--- | Pull the @typeName.metadata@ tag out of every @data@ declaration in a
+-- | Pull the @typeName.resolution@ tag out of every @data@ declaration in a
 -- resolved module. Used by tests that assert AST-side TypeId carriage.
-collectDataTypeNameMetadata :: Module Identified -> [Identified 'TypeRef]
+collectDataTypeNameMetadata :: Module Identified -> [NameMeta Identified 'TypeRef]
 collectDataTypeNameMetadata m =
-  [ ref.metadata
+  [ ref.resolution
     | DeclarationData DataDeclaration {typeName = ref} <- m.declarations
   ]
 
@@ -231,8 +231,8 @@ dataDeclarations = describe "data declarations" $ do
                 td.typeName == "widget"
             ]
     case typeNameMeta of
-      IdentifiedType tid -> tid `shouldBe` widgetTypeId
-      IdentifiedUnresolvedType ->
+      Just tid -> tid `shouldBe` widgetTypeId
+      Nothing ->
         expectationFailure "data declaration typeName resolved as Unresolved"
 
   it "two modules with same-named data have distinct TypeIds on AST typeName" $ do
@@ -249,7 +249,7 @@ dataDeclarations = describe "data declarations" $ do
               [ tid
                 | m <- asts,
                   metadata <- collectDataTypeNameMetadata m,
-                  IdentifiedType tid <- [metadata]
+                  Just tid <- [metadata]
               ]
         length typeIds `shouldBe` 2
         (head typeIds == typeIds !! 1) `shouldBe` False

@@ -4,9 +4,9 @@ import Data.List (isInfixOf)
 import Data.Maybe (isJust, isNothing)
 import Data.Text (Text)
 import Data.Text qualified as T
-import Katari.AST hiding (Parsed)
+import Katari.AST
 import Katari.Lexer (LexerError (..))
-import Katari.Parser (ParseError (..), ParseErrorReason (..), Parsed (..), parseModuleStrict)
+import Katari.Parser (ParseError (..), ParseErrorReason (..), parseModuleStrict)
 import Test.Hspec
 
 -- ---------------------------------------------------------------------------

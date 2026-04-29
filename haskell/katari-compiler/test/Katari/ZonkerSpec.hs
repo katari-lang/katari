@@ -5,7 +5,7 @@ import Data.Map.Strict qualified as Map
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
-import Katari.AST hiding (Constrained, Identified, Parsed, Zonked)
+import Katari.AST
 import Katari.Parser (parseModuleStrict)
 import Katari.Typechecker.ConstraintGenerator
   ( ConstraintGenResult (..),
@@ -40,7 +40,6 @@ import Katari.Typechecker.Solver (SolverResult (..))
 import Katari.Typechecker.Zonker
   ( ZonkError (..),
     ZonkResult (..),
-    Zonked (..),
     zonk,
   )
 import Test.Hspec
@@ -153,25 +152,22 @@ expressionTypes m = concatMap declTypes m.declarations
         _ -> []
 
 typeOfExpression :: Expression Zonked -> SemanticType Resolved
-typeOfExpression e = case metadataOf e of
-  ZonkedExpression t -> t
-  where
-    metadataOf = \case
-      ExpressionLiteral x -> x.metadata
-      ExpressionVariable x -> x.metadata
-      ExpressionTuple x -> x.metadata
-      ExpressionArray x -> x.metadata
-      ExpressionCall x -> x.metadata
-      ExpressionBinaryOperator x -> x.metadata
-      ExpressionUnaryOperator x -> x.metadata
-      ExpressionIf x -> x.metadata
-      ExpressionMatch x -> x.metadata
-      ExpressionFor x -> x.metadata
-      ExpressionBlock x -> x.metadata
-      ExpressionFieldAccess x -> x.metadata
-      ExpressionIndexAccess x -> x.metadata
-      ExpressionTemplate x -> x.metadata
-      ExpressionQualifiedReference x -> x.metadata
+typeOfExpression = \case
+  ExpressionLiteral x -> x.typeOf
+  ExpressionVariable x -> x.typeOf
+  ExpressionTuple x -> x.typeOf
+  ExpressionArray x -> x.typeOf
+  ExpressionCall x -> x.typeOf
+  ExpressionBinaryOperator x -> x.typeOf
+  ExpressionUnaryOperator x -> x.typeOf
+  ExpressionIf x -> x.typeOf
+  ExpressionMatch x -> x.typeOf
+  ExpressionFor x -> x.typeOf
+  ExpressionBlock x -> x.typeOf
+  ExpressionFieldAccess x -> x.typeOf
+  ExpressionIndexAccess x -> x.typeOf
+  ExpressionTemplate x -> x.typeOf
+  ExpressionQualifiedReference x -> x.typeOf
 
 -- | Extract the head module from a 'ZonkResult' (single-module pipelines).
 soleModule :: ZonkResult -> Module Zonked
@@ -294,8 +290,8 @@ basicZonk = describe "basic zonk" $ do
         mainModule = soleModule zr
         Just fooVid = variableIdOf "foo" idResult
         names = [decl.name | DeclarationAgent decl <- mainModule.declarations]
-        fooMeta = head [ref.metadata | ref <- names, ref.text == "foo"]
-    fooMeta `shouldBe` ZonkedVariable fooVid
+        fooMeta = head [ref.resolution | ref <- names, ref.text == "foo"]
+    fooMeta `shouldBe` Just fooVid
 
 -- ---------------------------------------------------------------------------
 -- TypeVar substitution

@@ -27,14 +27,15 @@ import Katari.AST qualified as AST
 import Katari.Diagnostic (Diagnostic, diagnosticError)
 import Katari.IR
 import Katari.Typechecker.Identifier (VariableId)
-import Katari.Typechecker.Zonker (ZonkResult (..), Zonked (..))
+import Katari.AST (Phase (Zonked))
+import Katari.Typechecker.Zonker (ZonkResult (..))
 
 -- ===========================================================================
 -- Errors
 -- ===========================================================================
 
 data LoweringError
-  = -- | Encountered a 'IdentifiedUnresolvedVariable' / 'ZonkedUnresolvedVariable'
+  = -- | Encountered a 'IdentifiedUnresolvedVariable' / 'Nothing'
     -- (parser/identifier produced a sentinel; cannot lower).
     LowerErrorUnresolvedVariable AST.SourceSpan Text
   | -- | A 'StatementError' / 'DeclarationError' sentinel left by parser
@@ -317,15 +318,15 @@ recordVarBlockId variableId blockId =
 
 -- | Run @action@ with the resolved 'VariableId' from a top-level callable
 -- declaration name. If the name didn't resolve (parser/identifier left an
--- 'ZonkedUnresolvedVariable' marker), record a Lowering error and skip.
+-- 'Nothing' marker), record a Lowering error and skip.
 registerCallable ::
   AST.NameRef Zonked 'AST.VariableRef ->
   AST.SourceSpan ->
   (VariableId -> Lower ()) ->
   Lower ()
-registerCallable nameRef sp action = case nameRef.metadata of
-  ZonkedVariable variableId -> action variableId
-  ZonkedUnresolvedVariable -> recordError (LowerErrorUnresolvedVariable sp nameRef.text)
+registerCallable nameRef sp action = case nameRef.resolution of
+  Just variableId -> action variableId
+  Nothing -> recordError (LowerErrorUnresolvedVariable sp nameRef.text)
 
 -- | Walk all declarations, registering each top-level agent / req / ext /
 -- ctor's @VariableId → BlockId@ mapping. Bodies are filled in by
@@ -381,15 +382,15 @@ lowerAllDeclarations zonkResult = do
 
     lowerDeclaration :: AST.Declaration Zonked -> Lower (Maybe (Text, BlockId))
     lowerDeclaration = \case
-      AST.DeclarationAgent decl -> case decl.name.metadata of
-        ZonkedVariable variableId -> do
+      AST.DeclarationAgent decl -> case decl.name.resolution of
+        Just variableId -> do
           mBlockId <- gets (Map.lookup variableId . (.lsVarBlockIds))
           case mBlockId of
             Just blockId -> do
               lowerAgentDeclaration decl blockId
               pure (Just (decl.name.text, blockId))
             Nothing -> pure Nothing
-        ZonkedUnresolvedVariable -> pure Nothing
+        Nothing -> pure Nothing
       _ -> pure Nothing
 
 -- ===========================================================================
@@ -560,11 +561,11 @@ buildInnerBlockWithState parentName wb blk = do
       Lower (Maybe VariableId, Param, AST.StateVariableBinding Zonked)
     mkStateParam svb =
       let nameText = svb.name.text
-       in case svb.name.metadata of
-            ZonkedVariable variableId -> do
+       in case svb.name.resolution of
+            Just variableId -> do
               v <- freshVarId (Just nameText)
               pure (Just variableId, Param {label = nameText, var = v}, svb)
-            ZonkedUnresolvedVariable -> do
+            Nothing -> do
               recordError (LowerErrorUnresolvedVariable svb.sourceSpan nameText)
               v <- freshVarId Nothing
               pure (Nothing, Param {label = nameText, var = v}, svb)
@@ -579,15 +580,15 @@ lowerHandler stateParams hr = do
   -- map. Failure modes (unresolved name, or not actually a 'BlockRequest')
   -- record an error and fall back to a fresh placeholder so lowering can
   -- continue producing partial IR for diagnostics.
-  reqBlockId <- case hr.name.metadata of
-    ZonkedVariable variableId -> do
+  reqBlockId <- case hr.name.resolution of
+    Just variableId -> do
       mBlockId <- gets (Map.lookup variableId . (.lsVarBlockIds))
       case mBlockId of
         Just bid -> pure bid
         Nothing -> do
           recordError (LowerErrorUnsupported hr.sourceSpan "handler target is not a request")
           freshBlockId
-    ZonkedUnresolvedVariable -> do
+    Nothing -> do
       recordError (LowerErrorUnresolvedVariable hr.sourceSpan hr.name.text)
       freshBlockId
   -- Build the handler block.
@@ -663,9 +664,9 @@ bindPatternToFreshVar pat hint = case pat of
   AST.PatternVariable vp -> do
     let nameHint = Just vp.name.text
     var <- freshVarId nameHint
-    case vp.name.metadata of
-      ZonkedVariable variableId -> pure (var, [(variableId, var)])
-      ZonkedUnresolvedVariable -> do
+    case vp.name.resolution of
+      Just variableId -> pure (var, [(variableId, var)])
+      Nothing -> do
         recordError (LowerErrorUnresolvedVariable vp.sourceSpan vp.name.text)
         pure (var, [])
   AST.PatternWildcard _ -> do
@@ -776,13 +777,12 @@ unrollMods ::
   StmtBuf ->
   [((Text, VarId), StmtBuf)] ->
   ([(Text, VarId)], StmtBuf)
-unrollMods _ [] = ([], [])
-unrollMods initial xs =
-  let pairs = map fst xs
-      finalBuf = case xs of
-        [] -> initial
-        _ -> snd (last xs)
-   in (pairs, finalBuf)
+unrollMods initial = \case
+  [] -> ([], initial)
+  xs ->
+    let pairs = map fst xs
+        finalBuf = snd (last xs)
+     in (pairs, finalBuf)
 
 -- | Bind a pattern against a known IR var; for variable / wildcard patterns
 -- this just records a local mapping. Returns a list of effects that already
@@ -790,11 +790,11 @@ unrollMods initial xs =
 -- is added later (Stage 2+ for match-style, Stage 3 for let).
 bindPattern :: VarId -> AST.Pattern Zonked -> Lower [Lower ()]
 bindPattern incoming = \case
-  AST.PatternVariable vp -> case vp.name.metadata of
-    ZonkedVariable variableId -> do
+  AST.PatternVariable vp -> case vp.name.resolution of
+    Just variableId -> do
       modify (\s -> s {lsLocalVars = Map.insert variableId incoming s.lsLocalVars})
       pure []
-    ZonkedUnresolvedVariable -> do
+    Nothing -> do
       recordError (LowerErrorUnresolvedVariable vp.sourceSpan vp.name.text)
       pure []
   AST.PatternWildcard _ -> pure []
@@ -901,10 +901,10 @@ lowerExpr buf = \case
   AST.ExpressionMatch me -> lowerMatchExpr buf me
   AST.ExpressionFor fe -> lowerForExpr buf fe
   AST.ExpressionQualifiedReference qe -> do
-    -- A resolved qualified reference (module.target). target.metadata holds
+    -- A resolved qualified reference (module.target). target.resolution holds
     -- the resolved VariableId; treat it like a bare variable expression.
-    case qe.target.metadata of
-      ZonkedVariable variableId -> do
+    case qe.target.resolution of
+      Just variableId -> do
         mBlockId <- gets (Map.lookup variableId . (.lsVarBlockIds))
         case mBlockId of
           Just bid -> closureRef qe.target.text bid
@@ -912,7 +912,7 @@ lowerExpr buf = \case
             recordError (LowerErrorUnresolvedVariable qe.sourceSpan qe.target.text)
             v <- freshVarId Nothing
             pure (v, buf)
-      ZonkedUnresolvedVariable -> do
+      Nothing -> do
         recordError (LowerErrorUnresolvedVariable qe.sourceSpan qe.target.text)
         v <- freshVarId Nothing
         pure (v, buf)
@@ -966,14 +966,14 @@ resolveCallee buf = \case
   AST.ExpressionVariable ve ->
     resolveCalleeName
       buf
-      ve.name.metadata
+      ve.name.resolution
       ve.sourceSpan
       ve.name.text
       (\variableId -> gets (Map.lookup variableId . (.lsLocalVars)))
   AST.ExpressionQualifiedReference qe ->
     -- Qualified references never bind locally — only consult the top-level
     -- block id table.
-    resolveCalleeName buf qe.target.metadata qe.sourceSpan qe.target.text (const (pure Nothing))
+    resolveCalleeName buf qe.target.resolution qe.sourceSpan qe.target.text (const (pure Nothing))
   -- For any other callee shape (a higher-order computation), lower it to a
   -- closure value first.
   other -> do
@@ -985,13 +985,13 @@ resolveCallee buf = \case
 -- yield a 'CTValue' on a fresh placeholder var with an error recorded.
 resolveCalleeName ::
   StmtBuf ->
-  Zonked 'AST.VariableRef ->
+  AST.NameMeta Zonked 'AST.VariableRef ->
   AST.SourceSpan ->
   Text ->
   (VariableId -> Lower (Maybe VarId)) ->
   Lower (CallTarget, StmtBuf)
 resolveCalleeName buf metadata sp nameText lookupLocal = case metadata of
-  ZonkedVariable variableId -> do
+  Just variableId -> do
     mLocal <- lookupLocal variableId
     case mLocal of
       Just irVar -> pure (CTValue {var = irVar}, buf)
@@ -1003,7 +1003,7 @@ resolveCalleeName buf metadata sp nameText lookupLocal = case metadata of
             recordError (LowerErrorUnresolvedVariable sp nameText)
             v <- freshVarId Nothing
             pure (CTValue {var = v}, buf)
-  ZonkedUnresolvedVariable -> do
+  Nothing -> do
     recordError (LowerErrorUnresolvedVariable sp nameText)
     v <- freshVarId Nothing
     pure (CTValue {var = v}, buf)
@@ -1178,10 +1178,10 @@ patternToArm ::
   AST.Pattern Zonked ->
   Lower (Maybe Text, [(Text, VarId)], [(VariableId, VarId)])
 patternToArm subject = \case
-  AST.PatternVariable vp -> case vp.name.metadata of
-    ZonkedVariable variableId ->
+  AST.PatternVariable vp -> case vp.name.resolution of
+    Just variableId ->
       pure (Nothing, [], [(variableId, subject)])
-    ZonkedUnresolvedVariable -> do
+    Nothing -> do
       recordError (LowerErrorUnresolvedVariable vp.sourceSpan vp.name.text)
       pure (Nothing, [], [])
   AST.PatternWildcard _ -> pure (Nothing, [], [])
@@ -1296,8 +1296,8 @@ lowerForStates buf bindings = go ([], []) buf bindings
           spanInfo = binding.sourceSpan
           initialExpr = binding.initial
       (initVar, currentBuf') <- lowerExpr currentBuf initialExpr
-      case nameRef.metadata of
-        ZonkedVariable variableId -> do
+      case nameRef.resolution of
+        Just variableId -> do
           bodyVar <- freshVarId (Just labelText)
           go
             ( (labelText, initVar) : initsAcc,
@@ -1305,7 +1305,7 @@ lowerForStates buf bindings = go ([], []) buf bindings
             )
             currentBuf'
             rest
-        ZonkedUnresolvedVariable -> do
+        Nothing -> do
           recordError (LowerErrorUnresolvedVariable spanInfo labelText)
           go (initsAcc, localsAcc) currentBuf' rest
 
@@ -1350,12 +1350,12 @@ lowerLiteral buf lit = emitLoadLiteral buf (astLiteralToIR lit.value)
 -- referenced 'VariableId' is a local binding (just return its IR var) or a
 -- top-level decl (allocate a closure value via 'SMakeClosure').
 lowerVariable :: StmtBuf -> AST.VariableExpression Zonked -> Lower (VarId, StmtBuf)
-lowerVariable buf ve = case ve.name.metadata of
-  ZonkedUnresolvedVariable -> do
+lowerVariable buf ve = case ve.name.resolution of
+  Nothing -> do
     recordError (LowerErrorUnresolvedVariable ve.sourceSpan ve.name.text)
     var <- freshVarId Nothing
     pure (var, buf)
-  ZonkedVariable variableId -> do
+  Just variableId -> do
     locals <- gets (.lsLocalVars)
     case Map.lookup variableId locals of
       Just irVar -> pure (irVar, buf)

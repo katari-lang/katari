@@ -53,6 +53,7 @@ import Katari.AST
     ImportDeclaration (..),
     ImportKind (..),
     Module (..),
+    Phase (Parsed),
     Position (..),
     SourceSpan (..),
   )
@@ -60,7 +61,6 @@ import Katari.Diagnostic (Diagnostic, diagnosticError, hasErrors)
 import Katari.IR (IRModule)
 import Katari.Lowering (lowerProgram)
 import Katari.Lowering qualified as Lowering
-import Katari.Parser (Parsed)
 import Katari.Parser qualified as Parser
 import Katari.Schema (SchemaBundle, buildSchemas)
 import Katari.Typechecker.ConstraintGenerator (ConstraintGenResult (..), generateConstraints)

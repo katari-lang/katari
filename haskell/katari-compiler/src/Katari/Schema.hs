@@ -65,16 +65,17 @@ import Katari.AST
     Module (..),
     NameRef (..),
     ParameterBinding (..),
+    Phase (Zonked),
     RequestDeclaration (..),
     SymbolKind (..),
   )
-import Katari.AST.Identifiers (ModuleId, VariableId)
+import Katari.AST.Identifiers (ModuleId, VariableId, unVariableId)
 import Katari.Typechecker.SemanticType
   ( Resolved,
     SemanticEffect (..),
     SemanticType (..),
   )
-import Katari.Typechecker.Zonker (ZonkResult (..), Zonked (..))
+import Katari.Typechecker.Zonker (ZonkResult (..))
 
 -- ===========================================================================
 -- Schema data types
@@ -351,11 +352,11 @@ agentLike ::
   [ParameterBinding Zonked] ->
   Maybe AgentSchema
 agentLike zr description nameRef parameters =
-  case nameRef.metadata of
-    ZonkedVariable variableId ->
+  case nameRef.resolution of
+    Just variableId ->
       buildAgentSchema description parameters
         =<< Map.lookup variableId zr.zonkedTypeEnvironment
-    ZonkedUnresolvedVariable -> Nothing
+    Nothing -> Nothing
 
 requestLike :: ZonkResult -> RequestDeclaration Zonked -> Maybe AgentSchema
 requestLike zr rd = agentLike zr rd.annotation rd.name rd.parameters
@@ -406,10 +407,7 @@ renderEffects :: SemanticEffect Resolved -> [Text]
 renderEffects (SemanticEffect _ reqs) = map renderRequestId (Set.toList reqs)
   where
     renderRequestId :: VariableId -> Text
-    renderRequestId vid = "req" <> Text.pack (show (variableIdInt vid))
-
-variableIdInt :: VariableId -> Int
-variableIdInt = read . drop (length ("VariableId " :: String)) . show
+    renderRequestId vid = "req" <> Text.pack (show (unVariableId vid))
 
 -- ===========================================================================
 -- Data declaration -> $defs entry
@@ -426,8 +424,8 @@ insertDataSchema ::
   Map Text JsonSchema ->
   Map Text JsonSchema
 insertDataSchema zr modName dd m =
-  case dd.name.metadata of
-    ZonkedVariable ctorId ->
+  case dd.name.resolution of
+    Just ctorId ->
       let base = plain (dataObject (lookupCtorParams zr ctorId) dd.parameters)
           entry =
             JsonSchema
@@ -438,7 +436,7 @@ insertDataSchema zr modName dd m =
               }
           key = qualifiedDataKey modName dd.name.text
        in Map.insert key entry m
-    ZonkedUnresolvedVariable -> m
+    Nothing -> m
 
 lookupCtorParams ::
   ZonkResult ->

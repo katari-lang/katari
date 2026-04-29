@@ -23,7 +23,6 @@ module Katari.Typechecker.Identifier
     VariableId (..),
     TypeId (..),
     ModuleId (..),
-    Identified (..),
     SymbolEntry (..),
     ModuleData (..),
     VariableData (..),
@@ -47,12 +46,9 @@ import Data.Map.Strict qualified as Map
 import Data.Maybe (catMaybes, isJust)
 import Data.Text (Text)
 import Data.Text qualified as T
--- See note in 'Katari.Parser' regarding 'AST.Phase' constructor name
--- collisions with the legacy phase-marker GADTs.
-import Katari.AST hiding (Identified, Parsed)
+import Katari.AST
 import Katari.AST.Identifiers (ModuleId (..), TypeId (..), VariableId (..))
 import Katari.Diagnostic (Diagnostic (..), DiagnosticNote (..), diagnosticError)
-import Katari.Parser (Parsed (..))
 
 -- ---------------------------------------------------------------------------
 -- Identified GADT
@@ -74,22 +70,12 @@ import Katari.Parser (Parsed (..))
 -- failed name resolution does not invent a sentinel id: the corresponding error
 -- is recorded in 'IdentifierState.errors', and the AST node carries the
 -- @Unresolved@ marker so downstream phases can recognize it.
-data Identified (symbol :: SymbolKind) where
-  IdentifiedVariable :: VariableId -> Identified 'VariableRef
-  IdentifiedUnresolvedVariable :: Identified 'VariableRef
-  IdentifiedType :: TypeId -> Identified 'TypeRef
-  IdentifiedUnresolvedType :: Identified 'TypeRef
-  IdentifiedModule :: ModuleId -> Identified 'ModuleRef
-  IdentifiedUnresolvedModule :: Identified 'ModuleRef
-  IdentifiedExpression :: Identified 'Expression
-  IdentifiedPattern :: Identified 'Pattern
-  -- | Argument / field labels are type-directed; resolution is deferred to
-  -- the Typechecker.
-  IdentifiedLabel :: Identified 'LabelRef
-
-deriving instance Show (Identified symbol)
-
-deriving instance Eq (Identified symbol)
+-- The 'Identified' phase carries 'NameMeta Identified s' for name
+-- resolution, defined as a closed type family in 'Katari.AST'. Each
+-- 'NameRef' simply stores @Maybe Identifier@ (or @()@ for labels) in its
+-- @resolution@ field; the Identifier-pass produces @Just _@ on success
+-- and @Nothing@ when the name is not in scope (an error is also recorded
+-- via 'IdentifierError').
 
 -- ---------------------------------------------------------------------------
 -- Top-level scope: SymbolEntry (3 slots per name)
@@ -422,7 +408,7 @@ bindLocalVariable nameRef = do
   variableId <- freshVariableId VariableData {variableName = name, variableSourceSpan = nameRef.sourceSpan}
   modifyResolveContext $ \currentContext ->
     currentContext {scopeStack = insertInnermost name variableId currentContext.scopeStack}
-  pure (identifiedNameRef (IdentifiedVariable variableId) nameRef)
+  pure (identifiedNameRef (Just variableId) nameRef)
   where
     chainHasModule searchName = any (\frame -> isJust (Map.lookup searchName frame >>= (.moduleSymbol)))
     insertInnermost insertName variableId = \case
@@ -501,16 +487,16 @@ lookupModuleExportSlot getSlot moduleId name = do
 -- NameRef helpers
 -- ---------------------------------------------------------------------------
 
--- | Replace just the @metadata@ of a 'NameRef', keeping @text@ and @sourceSpan@.
+-- | Replace just the @resolution@ of a 'NameRef', keeping @text@ and @sourceSpan@.
 identifiedNameRef ::
-  Identified symbol ->
+  NameMeta Identified symbol ->
   NameRef Parsed symbol ->
   NameRef Identified symbol
-identifiedNameRef metadata nameRef =
-  NameRef {text = nameRef.text, sourceSpan = nameRef.sourceSpan, metadata = metadata}
+identifiedNameRef resolution nameRef =
+  NameRef {text = nameRef.text, sourceSpan = nameRef.sourceSpan, resolution = resolution}
 
 labelRef :: NameRef Parsed 'LabelRef -> NameRef Identified 'LabelRef
-labelRef = identifiedNameRef IdentifiedLabel
+labelRef = identifiedNameRef ()
 
 -- ---------------------------------------------------------------------------
 -- Phase A: assign ModuleIds
@@ -755,26 +741,24 @@ resolveImportDecl ImportDeclaration {kind, sourceSpan} =
 -- emitted a duplicate-name error), record an unresolved marker rather than
 -- inventing a sentinel id.
 liftSignatureVariable :: NameRef Parsed 'VariableRef -> Identifier (NameRef Identified 'VariableRef)
-liftSignatureVariable =
-  liftSignature lookupVariable (maybe IdentifiedUnresolvedVariable IdentifiedVariable)
+liftSignatureVariable = liftSignature lookupVariable
 
 -- | Counterpart of 'liftSignatureVariable' for type signatures (enum / data
 -- type role / type synonym name).
 liftSignatureType :: NameRef Parsed 'TypeRef -> Identifier (NameRef Identified 'TypeRef)
-liftSignatureType =
-  liftSignature lookupType (maybe IdentifiedUnresolvedType IdentifiedType)
+liftSignatureType = liftSignature lookupType
 
 -- | Shared lookup-and-wrap helper for signature-position 'NameRef's.
 -- Phase B has already issued the id; here we just look it up and tag the
--- node with either the resolved id or an @Unresolved@ marker.
+-- node with either the resolved id or 'Nothing' (lookup miss is recorded
+-- separately as an 'IdentifierError').
 liftSignature ::
-  (Text -> Identifier (Maybe a)) ->
-  (Maybe a -> Identified sym) ->
+  (Text -> Identifier (NameMeta Identified sym)) ->
   NameRef Parsed sym ->
   Identifier (NameRef Identified sym)
-liftSignature lookupBy wrap nameRef = do
+liftSignature lookupBy nameRef = do
   result <- lookupBy nameRef.text
-  pure (identifiedNameRef (wrap result) nameRef)
+  pure (identifiedNameRef result nameRef)
 
 resolveSignatureBody
   :: [ParameterBinding Parsed]
@@ -875,9 +859,9 @@ resolveTypeSynonym ::
 resolveTypeSynonym TypeSynonymDeclaration {..} = do
   name' <- liftSignatureType name
   rhs' <- resolveType rhs
-  case name'.metadata of
-    IdentifiedType typeId -> updateTypeSynonymRhs typeId rhs'
-    IdentifiedUnresolvedType -> pure ()
+  case name'.resolution of
+    Just typeId -> updateTypeSynonymRhs typeId rhs'
+    Nothing -> pure ()
   pure
     TypeSynonymDeclaration
       { name = name',
@@ -934,7 +918,7 @@ resolveVariablePattern VariablePattern {..} = do
       { name = name',
         typeAnnotation = typeAnnotation',
         sourceSpan = sourceSpan,
-        metadata = IdentifiedPattern
+        typeOf = ()
       }
 
 resolveConstructorPattern ::
@@ -953,7 +937,7 @@ resolveConstructorPattern QualifiedConstructorPattern {..} = do
         constructorName = constructorName',
         parameters = parameters',
         sourceSpan = sourceSpan,
-        metadata = IdentifiedPattern
+        typeOf = ()
       }
 
 resolveTuplePattern :: TuplePattern Parsed -> Identifier (TuplePattern Identified)
@@ -963,7 +947,7 @@ resolveTuplePattern TuplePattern {..} = do
     TuplePattern
       { elements = elements',
         sourceSpan = sourceSpan,
-        metadata = IdentifiedPattern
+        typeOf = ()
       }
 
 resolveWildcardPattern :: WildcardPattern Parsed -> Identifier (WildcardPattern Identified)
@@ -973,7 +957,7 @@ resolveWildcardPattern WildcardPattern {..} = do
     WildcardPattern
       { typeAnnotation = typeAnnotation',
         sourceSpan = sourceSpan,
-        metadata = IdentifiedPattern
+        typeOf = ()
       }
 
 resolveLiteralPattern :: LiteralPattern Parsed -> Identifier (LiteralPattern Identified)
@@ -982,7 +966,7 @@ resolveLiteralPattern LiteralPattern {..} =
     LiteralPattern
       { value = value,
         sourceSpan = sourceSpan,
-        metadata = IdentifiedPattern
+        typeOf = ()
       }
 
 -- | Resolve either a bare @name@ or a qualified @module.name@ as a variable
@@ -1002,40 +986,40 @@ resolveQualifiedVariableRef = \cases
   (Just moduleRef) nameRef -> do
     moduleMetadata <- resolveModuleRef moduleRef
     variableMetadata <- case moduleMetadata of
-      IdentifiedModule moduleId -> resolveQualifiedVariable moduleId moduleRef.text nameRef
-      IdentifiedUnresolvedModule -> pure IdentifiedUnresolvedVariable
+      Just moduleId -> resolveQualifiedVariable moduleId moduleRef.text nameRef
+      Nothing -> pure Nothing
     pure
       ( Just (identifiedNameRef moduleMetadata moduleRef),
         identifiedNameRef variableMetadata nameRef
       )
 
-resolveBareVariable :: NameRef Parsed 'VariableRef -> Identifier (Identified 'VariableRef)
+resolveBareVariable :: NameRef Parsed 'VariableRef -> Identifier (NameMeta Identified 'VariableRef)
 resolveBareVariable nameRef =
   lookupVariable nameRef.text >>= \case
-    Just variableId -> pure (IdentifiedVariable variableId)
+    Just variableId -> pure (Just variableId)
     Nothing -> do
       emitError (ErrorUndefinedName nameRef.sourceSpan nameRef.text)
-      pure IdentifiedUnresolvedVariable
+      pure Nothing
 
-resolveModuleRef :: NameRef Parsed 'ModuleRef -> Identifier (Identified 'ModuleRef)
+resolveModuleRef :: NameRef Parsed 'ModuleRef -> Identifier (NameMeta Identified 'ModuleRef)
 resolveModuleRef nameRef =
   lookupModule nameRef.text >>= \case
-    Just moduleId -> pure (IdentifiedModule moduleId)
+    Just moduleId -> pure (Just moduleId)
     Nothing -> do
       emitError (ErrorNotAModule nameRef.sourceSpan nameRef.text)
-      pure IdentifiedUnresolvedModule
+      pure Nothing
 
 resolveQualifiedVariable ::
   ModuleId ->
   Text ->
   NameRef Parsed 'VariableRef ->
-  Identifier (Identified 'VariableRef)
+  Identifier (NameMeta Identified 'VariableRef)
 resolveQualifiedVariable moduleId qualifierName nameRef =
   lookupModuleExportVariable moduleId nameRef.text >>= \case
-    Just variableId -> pure (IdentifiedVariable variableId)
+    Just variableId -> pure (Just variableId)
     Nothing -> do
       emitError (ErrorUndefinedQualified nameRef.sourceSpan qualifierName nameRef.text)
-      pure IdentifiedUnresolvedVariable
+      pure Nothing
 
 -- ---------------------------------------------------------------------------
 -- SyntacticType
@@ -1068,10 +1052,10 @@ resolveTypeName :: TypeNameNode Parsed -> Identifier (TypeNameNode Identified)
 resolveTypeName TypeNameNode {name, sourceSpan} = do
   metadata <-
     lookupType name.text >>= \case
-      Just typeId -> pure (IdentifiedType typeId)
+      Just typeId -> pure (Just typeId)
       Nothing -> do
         emitError (ErrorNotAType name.sourceSpan name.text)
-        pure IdentifiedUnresolvedType
+        pure Nothing
   pure
     TypeNameNode
       { name = identifiedNameRef metadata name,
@@ -1082,13 +1066,13 @@ resolveQualifiedType :: QualifiedTypeNode Parsed -> Identifier (QualifiedTypeNod
 resolveQualifiedType QualifiedTypeNode {qualifier, target, sourceSpan} = do
   moduleMetadata <- resolveModuleRef qualifier
   typeMetadata <- case moduleMetadata of
-    IdentifiedModule moduleId ->
+    Just moduleId ->
       lookupModuleExportType moduleId target.text >>= \case
-        Just typeId -> pure (IdentifiedType typeId)
+        Just typeId -> pure (Just typeId)
         Nothing -> do
           emitError (ErrorUndefinedQualified target.sourceSpan qualifier.text target.text)
-          pure IdentifiedUnresolvedType
-    IdentifiedUnresolvedModule -> pure IdentifiedUnresolvedType
+          pure Nothing
+    Nothing -> pure Nothing
   pure
     QualifiedTypeNode
       { qualifier = identifiedNameRef moduleMetadata qualifier,
@@ -1333,7 +1317,7 @@ resolveLiteralExpr LiteralExpression {value, sourceSpan} =
     LiteralExpression
       { value = value,
         sourceSpan = sourceSpan,
-        metadata = IdentifiedExpression
+        typeOf = ()
       }
 
 -- | A bare variable expression. May resolve to a constructor function, agent,
@@ -1346,7 +1330,7 @@ resolveVariableExpr VariableExpression {name, sourceSpan} = do
         VariableExpression
           { name = identifiedNameRef metadata name,
             sourceSpan = sourceSpan,
-            metadata = IdentifiedExpression
+            typeOf = ()
           }
     )
 
@@ -1357,7 +1341,7 @@ resolveTupleExpr TupleExpression {elements, sourceSpan} = do
     TupleExpression
       { elements = elements',
         sourceSpan = sourceSpan,
-        metadata = IdentifiedExpression
+        typeOf = ()
       }
 
 resolveArrayExpr :: ArrayExpression Parsed -> Identifier (ArrayExpression Identified)
@@ -1367,7 +1351,7 @@ resolveArrayExpr ArrayExpression {elements, sourceSpan} = do
     ArrayExpression
       { elements = elements',
         sourceSpan = sourceSpan,
-        metadata = IdentifiedExpression
+        typeOf = ()
       }
 
 resolveCallExpr :: CallExpression Parsed -> Identifier (CallExpression Identified)
@@ -1379,7 +1363,7 @@ resolveCallExpr CallExpression {callee, arguments, sourceSpan} = do
       { callee = callee',
         arguments = arguments',
         sourceSpan = sourceSpan,
-        metadata = IdentifiedExpression
+        typeOf = ()
       }
 
 resolveCallArgument :: CallArgument Parsed -> Identifier (CallArgument Identified)
@@ -1402,7 +1386,7 @@ resolveBinaryExpr BinaryOperatorExpression {operator, left, right, sourceSpan} =
         left = left',
         right = right',
         sourceSpan = sourceSpan,
-        metadata = IdentifiedExpression
+        typeOf = ()
       }
 
 resolveUnaryExpr :: UnaryOperatorExpression Parsed -> Identifier (UnaryOperatorExpression Identified)
@@ -1413,7 +1397,7 @@ resolveUnaryExpr UnaryOperatorExpression {operator, operand, sourceSpan} = do
       { operator = operator,
         operand = operand',
         sourceSpan = sourceSpan,
-        metadata = IdentifiedExpression
+        typeOf = ()
       }
 
 resolveIfExpr :: IfExpression Parsed -> Identifier (IfExpression Identified)
@@ -1427,7 +1411,7 @@ resolveIfExpr IfExpression {condition, thenBlock, elseBlock, sourceSpan} = do
         thenBlock = thenBlock',
         elseBlock = elseBlock',
         sourceSpan = sourceSpan,
-        metadata = IdentifiedExpression
+        typeOf = ()
       }
 
 resolveMatchExpr :: MatchExpression Parsed -> Identifier (MatchExpression Identified)
@@ -1439,7 +1423,7 @@ resolveMatchExpr MatchExpression {subject, cases, sourceSpan} = do
       { subject = subject',
         cases = cases',
         sourceSpan = sourceSpan,
-        metadata = IdentifiedExpression
+        typeOf = ()
       }
 
 -- | Case arm: pattern bindings are visible only inside the arm body, so we
@@ -1482,7 +1466,7 @@ resolveForExpr ForExpression {inBindings, varBindings, body, thenBlock, sourceSp
           body = body',
           thenBlock = thenBlock',
           sourceSpan = sourceSpan,
-          metadata = IdentifiedExpression
+          typeOf = ()
         }
 
 -- | For var binding follows ML-style let semantics: the initializer is
@@ -1507,7 +1491,7 @@ resolveBlockExpr BlockExpression {block, sourceSpan} = do
     BlockExpression
       { block = block',
         sourceSpan = sourceSpan,
-        metadata = IdentifiedExpression
+        typeOf = ()
       }
 
 -- | Core of field-access handling. Peel the @a.b.c@ chain; if the deepest
@@ -1535,7 +1519,7 @@ resolveIndexExpr IndexAccessExpression {array, index, sourceSpan} = do
       { array = array',
         index = index',
         sourceSpan = sourceSpan,
-        metadata = IdentifiedExpression
+        typeOf = ()
       }
 
 resolveTemplateExpr :: TemplateExpression Parsed -> Identifier (TemplateExpression Identified)
@@ -1545,7 +1529,7 @@ resolveTemplateExpr TemplateExpression {elements, sourceSpan} = do
     TemplateExpression
       { elements = elements',
         sourceSpan = sourceSpan,
-        metadata = IdentifiedExpression
+        typeOf = ()
       }
 
 resolveTemplateElement :: TemplateElement Parsed -> Identifier (TemplateElement Identified)
@@ -1603,7 +1587,7 @@ rebuildFieldAccessChain = foldl' step
               { object = inner,
                 fieldName = labelRef label,
                 sourceSpan = mergedSpan,
-                metadata = IdentifiedExpression
+                typeOf = ()
               }
 
 -- | Drive the resolution of a chain whose head is a bare variable name.
@@ -1621,7 +1605,7 @@ resolveFieldChainHead headRef labels totalSpan = do
   case maybeVariableId of
     Just variableId ->
       -- Head is a variable: keep the whole chain as field access.
-      pure (rebuildFieldAccessChain (varExpr (IdentifiedVariable variableId)) labels)
+      pure (rebuildFieldAccessChain (varExpr (Just variableId)) labels)
     Nothing -> do
       maybeModuleId <- lookupModule headRef.text
       case maybeModuleId of
@@ -1630,14 +1614,14 @@ resolveFieldChainHead headRef labels totalSpan = do
           -- Undefined: emit error and tag the head as Unresolved so downstream
           -- phases can see that resolution failed.
           emitError (ErrorUndefinedName headRef.sourceSpan headRef.text)
-          pure (rebuildFieldAccessChain (varExpr IdentifiedUnresolvedVariable) labels)
+          pure (rebuildFieldAccessChain (varExpr Nothing) labels)
   where
-    varExpr metadata =
+    varExpr resolution =
       ExpressionVariable
         VariableExpression
-          { name = identifiedNameRef metadata headRef,
+          { name = identifiedNameRef resolution headRef,
             sourceSpan = headRef.sourceSpan,
-            metadata = IdentifiedExpression
+            typeOf = ()
           }
 
 -- | A @module . ...@ chain. The first label is folded into a
@@ -1658,10 +1642,10 @@ resolveModuleQualifiedChain moduleId moduleRef labels totalSpan =
     (target : remainingLabels) -> do
       maybeVariableId <- lookupModuleExportVariable moduleId target.text
       variableMetadata <- case maybeVariableId of
-        Just variableId -> pure (IdentifiedVariable variableId)
+        Just variableId -> pure (Just variableId)
         Nothing -> do
           emitError (ErrorUndefinedQualified target.sourceSpan moduleRef.text target.text)
-          pure IdentifiedUnresolvedVariable
+          pure Nothing
       let qualifiedReferenceSpan =
             SrcSpan
               { filePath = totalSpan.filePath,
@@ -1673,13 +1657,13 @@ resolveModuleQualifiedChain moduleId moduleRef labels totalSpan =
             NameRef
               { text = target.text,
                 sourceSpan = target.sourceSpan,
-                metadata = variableMetadata
+                resolution = variableMetadata
               }
           moduleNameRef =
             NameRef
               { text = moduleRef.text,
                 sourceSpan = moduleRef.sourceSpan,
-                metadata = IdentifiedModule moduleId
+                resolution = Just moduleId
               }
           qualifiedReference =
             ExpressionQualifiedReference
@@ -1687,7 +1671,7 @@ resolveModuleQualifiedChain moduleId moduleRef labels totalSpan =
                 { moduleQualifier = moduleNameRef,
                   target = targetVariableRef,
                   sourceSpan = qualifiedReferenceSpan,
-                  metadata = IdentifiedExpression
+                  typeOf = ()
                 }
       pure (rebuildFieldAccessChain qualifiedReference remainingLabels)
 

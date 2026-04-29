@@ -33,7 +33,6 @@ import Katari.Typechecker.NormalizedType
   )
 import Katari.Typechecker.Solver.Internal
   ( SolverError (..),
-    containsNoTypeVars,
     semanticToConcrete,
   )
 

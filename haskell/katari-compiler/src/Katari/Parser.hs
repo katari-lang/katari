@@ -1,6 +1,5 @@
 module Katari.Parser
-  ( Parsed (..),
-    ParseError (..),
+  ( ParseError (..),
     ParseErrorReason (..),
     toDiagnostic,
     parseModule,
@@ -19,11 +18,7 @@ import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Void (Void, absurd)
--- During the Trees-that-Grow migration the AST module exposes a 'Phase' tag
--- whose constructors share names with the legacy phase-marker GADTs in
--- 'Katari.Parser' / 'Katari.Typechecker.Identifier' etc. Hide the colliding
--- ones until the legacy GADTs are removed in the final migration step.
-import Katari.AST hiding (Parsed)
+import Katari.AST
 import Katari.Diagnostic (Diagnostic, diagnosticError)
 import Katari.Lexer
   ( Keyword (..),
@@ -47,12 +42,6 @@ import Text.Megaparsec qualified as MP
 -- ===========================================================================
 -- Types
 -- ===========================================================================
-
--- | Metadata marker for the freshly parsed AST phase. Carries no semantic
--- information yet; later compiler phases replace this with richer markers
--- (e.g. @Identified@, @Typed@) that live in their own modules.
-data Parsed (symbol :: SymbolKind) = Parsed
-  deriving (Eq, Show)
 
 -- | Structured parse error. Mirrors the design of 'IdentifierError': rich
 -- variants, no embedded text — rendering belongs to 'Katari.Diagnostics'.
@@ -437,32 +426,33 @@ skipUntilStatementSync = go (0 :: Int)
 parseNameRef :: Parser (NameRef Parsed symbol)
 parseNameRef = withSpan $ do
   text <- parseIdentifier
-  pure $ \sourceSpan -> NameRef {text = text, sourceSpan = sourceSpan, metadata = Parsed}
+  pure $ \sourceSpan -> NameRef {text = text, sourceSpan = sourceSpan, resolution = ()}
 
 -- | Re-tag a 'VariableRef' name as a 'ModuleRef'. Used when a leading
 -- identifier is being committed to as a module qualifier (e.g. the @M@ in
 -- @M.foo(...)@).
 moduleRefOfVariable :: NameRef Parsed 'VariableRef -> NameRef Parsed 'ModuleRef
-moduleRefOfVariable = retagNameRef
+moduleRefOfVariable = parsedSymbolRetag
 
 -- | Re-tag a 'VariableRef' name as a 'TypeRef'. Used in type position when an
 -- identifier may be either a bare type name or a module qualifier; the
 -- decision is made after lookahead.
 typeRefOfVariable :: NameRef Parsed 'VariableRef -> NameRef Parsed 'TypeRef
-typeRefOfVariable = retagNameRef
+typeRefOfVariable = parsedSymbolRetag
 
 -- | Re-tag a 'VariableRef' name as a 'LabelRef'. Used in sugar desugaring
 -- sites (e.g. @foo(x)@ → @foo(x = x)@) where the same identifier plays two
 -- roles (label + variable).
 labelRefOfVariable :: NameRef Parsed 'VariableRef -> NameRef Parsed 'LabelRef
-labelRefOfVariable = retagNameRef
+labelRefOfVariable = parsedSymbolRetag
 
--- | Internal: replace the symbol-kind tag of a parsed 'NameRef'. Safe because
--- the @Parsed@ phase carries no per-kind metadata, but exposed only through
+-- | Internal: replace the 'SymbolKind' tag of a parsed 'NameRef'. Safe at
+-- the 'Parsed' phase because @NameMeta Parsed s = ()@ for every symbol
+-- kind, so re-tagging never has to invent payload. Exposed only through
 -- the directional helpers above so that call sites document intent.
-retagNameRef :: NameRef Parsed source -> NameRef Parsed target
-retagNameRef nameRef =
-  NameRef {text = nameRef.text, sourceSpan = nameRef.sourceSpan, metadata = Parsed}
+parsedSymbolRetag :: NameRef Parsed source -> NameRef Parsed target
+parsedSymbolRetag nameRef =
+  NameRef {text = nameRef.text, sourceSpan = nameRef.sourceSpan, resolution = ()}
 
 -- ===========================================================================
 -- Module
@@ -1010,7 +1000,7 @@ makeBinaryOperatorExpression currentFilePath binaryOperator left right =
         left = left,
         right = right,
         sourceSpan = SrcSpan currentFilePath (sourceSpanOf left).start (sourceSpanOf right).end,
-        metadata = Parsed
+        typeOf = ()
       }
 
 leftAssociativeBinaryOperator :: Parser () -> BinaryOperator -> Expr.Operator Parser (Expression Parsed)
@@ -1036,7 +1026,7 @@ prefixOperator parserAction unaryOperator = Expr.Prefix $ do
         { operator = unaryOperator,
           operand = operand,
           sourceSpan = SrcSpan currentFilePath startPosition (sourceSpanOf operand).end,
-          metadata = Parsed
+          typeOf = ()
         }
 
 -- ---------------------------------------------------------------------------
@@ -1091,7 +1081,7 @@ applyPostfixOperation expression = \case
         { callee = expression,
           arguments = arguments,
           sourceSpan = mergePostfixSpan expression postfixSpan,
-          metadata = Parsed
+          typeOf = ()
         }
   PostfixField fieldName postfixSpan ->
     ExpressionFieldAccess
@@ -1099,7 +1089,7 @@ applyPostfixOperation expression = \case
         { object = expression,
           fieldName = fieldName,
           sourceSpan = mergePostfixSpan expression postfixSpan,
-          metadata = Parsed
+          typeOf = ()
         }
   PostfixIndex indexExpression postfixSpan ->
     ExpressionIndexAccess
@@ -1107,7 +1097,7 @@ applyPostfixOperation expression = \case
         { array = expression,
           index = indexExpression,
           sourceSpan = mergePostfixSpan expression postfixSpan,
-          metadata = Parsed
+          typeOf = ()
         }
   where
     mergePostfixSpan expr postfix =
@@ -1141,7 +1131,7 @@ parseCallArgument = labeledArgument <|> sugarArgument
                 VariableExpression
                   { name = name,
                     sourceSpan = sourceSpan,
-                    metadata = Parsed
+                    typeOf = ()
                   },
             sourceSpan = sourceSpan
           }
@@ -1173,7 +1163,7 @@ parseLiteralExpression = withSpan $ do
       LiteralExpression
         { value = literal,
           sourceSpan = sourceSpan,
-          metadata = Parsed
+          typeOf = ()
         }
 
 parseLiteralValue :: Parser LiteralValue
@@ -1195,7 +1185,7 @@ parseVariableExpression = withSpan $ do
       VariableExpression
         { name = name,
           sourceSpan = sourceSpan,
-          metadata = Parsed
+          typeOf = ()
         }
 
 parseArrayExpression :: Parser (Expression Parsed)
@@ -1206,7 +1196,7 @@ parseArrayExpression = withSpan $ do
       ArrayExpression
         { elements = elements,
           sourceSpan = sourceSpan,
-          metadata = Parsed
+          typeOf = ()
         }
 
 -- | @(e)@ collapses to @e@ (grouped expression). @(e1, e2, ...)@ is a tuple.
@@ -1227,7 +1217,7 @@ parseTupleOrGroupedExpression = do
           TupleExpression
             { elements = expressions,
               sourceSpan = sourceSpan,
-              metadata = Parsed
+              typeOf = ()
             }
 
 parseBlockExpression :: Parser (Expression Parsed)
@@ -1238,7 +1228,7 @@ parseBlockExpression = withSpan $ do
       BlockExpression
         { block = block,
           sourceSpan = sourceSpan,
-          metadata = Parsed
+          typeOf = ()
         }
 
 parseIfExpression :: Parser (Expression Parsed)
@@ -1258,7 +1248,7 @@ parseIfExpression = withSpan $ do
           thenBlock = thenBlock,
           elseBlock = elseBlock,
           sourceSpan = sourceSpan,
-          metadata = Parsed
+          typeOf = ()
         }
 
 parseMatchExpression :: Parser (Expression Parsed)
@@ -1280,7 +1270,7 @@ parseMatchExpression = withSpan $ do
         { subject = subject,
           cases = cases,
           sourceSpan = sourceSpan,
-          metadata = Parsed
+          typeOf = ()
         }
 
 parseCaseArm :: Parser (CaseArm Parsed)
@@ -1314,7 +1304,7 @@ parseForExpression = withSpan $ do
           body = body,
           thenBlock = thenBlock,
           sourceSpan = sourceSpan,
-          metadata = Parsed
+          typeOf = ()
         }
 
 -- | For-binding list: all `pattern in expr` bindings come first, then all
@@ -1376,7 +1366,7 @@ parseTemplateLiteral = withSpan $ do
       TemplateExpression
         { elements = parts,
           sourceSpan = sourceSpan,
-          metadata = Parsed
+          typeOf = ()
         }
 
 parseTemplateElement :: Parser (TemplateElement Parsed)
@@ -1449,7 +1439,7 @@ parseQualifiedConstructorPattern = withSpan $ do
           constructorName = constructorName,
           parameters = fields,
           sourceSpan = sourceSpan,
-          metadata = Parsed
+          typeOf = ()
         }
 
 parseWildcardPattern :: Parser (Pattern Parsed)
@@ -1461,7 +1451,7 @@ parseWildcardPattern = withSpan $ do
       WildcardPattern
         { typeAnnotation = typeAnnotation,
           sourceSpan = sourceSpan,
-          metadata = Parsed
+          typeOf = ()
         }
 
 parseVariablePattern :: Parser (Pattern Parsed)
@@ -1474,7 +1464,7 @@ parseVariablePattern = withSpan $ do
         { name = name,
           typeAnnotation = typeAnnotation,
           sourceSpan = sourceSpan,
-          metadata = Parsed
+          typeOf = ()
         }
 
 parsePatternField :: Parser (NameRef Parsed 'LabelRef, Pattern Parsed)
@@ -1495,7 +1485,7 @@ parsePatternField = labeled <|> sugar
               { name = name,
                 typeAnnotation = typeAnnotation,
                 sourceSpan = sourceSpan,
-                metadata = Parsed
+                typeOf = ()
               }
         )
 
@@ -1517,7 +1507,7 @@ parseTupleOrGroupedPattern = do
           TuplePattern
             { elements = patterns,
               sourceSpan = sourceSpan,
-              metadata = Parsed
+              typeOf = ()
             }
 
 parseLiteralPattern :: Parser (Pattern Parsed)
@@ -1528,7 +1518,7 @@ parseLiteralPattern = withSpan $ do
       LiteralPattern
         { value = literal,
           sourceSpan = sourceSpan,
-          metadata = Parsed
+          typeOf = ()
         }
 
 -- ===========================================================================
@@ -1745,6 +1735,6 @@ parseParameterBinding = withSpan $ do
               { name = name,
                 typeAnnotation = typeAnnotation,
                 sourceSpan = patternSpan,
-                metadata = Parsed
+                typeOf = ()
               }
         )

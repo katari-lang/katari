@@ -18,10 +18,7 @@
 --     を直接保持する。'SemanticEffect' Resolved は @effectVars = Set.empty@ を
 --     構築側で強制する。
 module Katari.Typechecker.Zonker
-  ( -- * Phase marker
-    Zonked (..),
-
-    -- * Result
+  ( -- * Result
     ZonkResult (..),
     ZonkError (..),
 
@@ -42,19 +39,13 @@ import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as Text
--- See note in 'Katari.Parser' regarding 'AST.Phase' constructor name
--- collisions with the legacy phase-marker GADTs.
-import Katari.AST hiding (Constrained, Identified, Parsed, Zonked)
+import Katari.AST
 import Katari.Diagnostic (Diagnostic, diagnosticError)
-import Katari.Typechecker.ConstraintGenerator
-  ( Constrained (..),
-    ConstraintGenResult (..),
-  )
+import Katari.Typechecker.ConstraintGenerator (ConstraintGenResult (..))
 import Katari.Typechecker.Identifier
   ( IdentifierResult (..),
     ModuleData (..),
     ModuleId,
-    TypeId,
     VariableData (..),
     VariableId,
   )
@@ -70,24 +61,11 @@ import Katari.Typechecker.SemanticType
   )
 import Katari.Typechecker.Solver (SolverResult (..))
 
--- ===========================================================================
--- Zonked phase marker
--- ===========================================================================
-
-data Zonked (s :: SymbolKind) where
-  ZonkedVariable :: VariableId -> Zonked 'VariableRef
-  ZonkedUnresolvedVariable :: Zonked 'VariableRef
-  ZonkedType :: TypeId -> Zonked 'TypeRef
-  ZonkedUnresolvedType :: Zonked 'TypeRef
-  ZonkedModule :: ModuleId -> Zonked 'ModuleRef
-  ZonkedUnresolvedModule :: Zonked 'ModuleRef
-  ZonkedExpression :: SemanticType Resolved -> Zonked 'Expression
-  ZonkedPattern :: SemanticType Resolved -> Zonked 'Pattern
-  ZonkedLabel :: Zonked 'LabelRef
-
-deriving instance Show (Zonked s)
-
-deriving instance Eq (Zonked s)
+-- The 'Zonked' phase reuses the 'NameMeta Zonked s' family for name
+-- resolution (identical to 'Identified' / 'Constrained'), and stores the
+-- resolved @SemanticType Resolved@ on each expression / pattern via the
+-- @ExprType Zonked@ / @PatType Zonked@ instances defined in
+-- 'Katari.Typechecker.SemanticType'.
 
 -- ===========================================================================
 -- Result types
@@ -180,42 +158,27 @@ zonkEffect sp (SemanticEffect vars reqs) = do
 -- passThrough helpers (Constrained -> Zonked) for ref-only nodes
 -- ===========================================================================
 
+-- 'NameMeta Constrained' and 'NameMeta Zonked' resolve to the same shape,
+-- so phase change is value-level identity (just rebuild the wrapper).
+-- The helpers below delegate to 'retagNameRef' / 'retagSyntacticType' /
+-- 'retagSyntacticRequest' from 'Katari.AST'.
 passThroughVariableName :: NameRef Constrained 'VariableRef -> NameRef Zonked 'VariableRef
-passThroughVariableName = mapNameRefMetadata constrainedToZonked
+passThroughVariableName = retagNameRef
 
 passThroughTypeName :: NameRef Constrained 'TypeRef -> NameRef Zonked 'TypeRef
-passThroughTypeName = mapNameRefMetadata constrainedToZonked
+passThroughTypeName = retagNameRef
 
 passThroughModuleName :: NameRef Constrained 'ModuleRef -> NameRef Zonked 'ModuleRef
-passThroughModuleName = mapNameRefMetadata constrainedToZonked
+passThroughModuleName = retagNameRef
 
 passThroughLabelName :: NameRef Constrained 'LabelRef -> NameRef Zonked 'LabelRef
-passThroughLabelName = mapNameRefMetadata constrainedToZonked
+passThroughLabelName = retagNameRef
 
 passThroughType :: SyntacticType Constrained -> SyntacticType Zonked
-passThroughType = mapSyntacticTypeMetadata constrainedToZonked
+passThroughType = retagSyntacticType
 
 passThroughRequest :: SyntacticRequest Constrained -> SyntacticRequest Zonked
-passThroughRequest = mapSyntacticRequestMetadata constrainedToZonked
-
--- | The metadata transformation for the trivial NameRef kinds. The
--- 'ConstrainedExpression' / 'ConstrainedPattern' cases require a
--- 'SemanticType Resolved' resolved via 'zonkType' (which needs the solver
--- result and the AST node's source span), so they are handled by the
--- per-node walkers ('walk*Expr' / 'walkPattern') instead.
-constrainedToZonked :: Constrained sym -> Zonked sym
-constrainedToZonked = \case
-  ConstrainedVariable vid -> ZonkedVariable vid
-  ConstrainedUnresolvedVariable -> ZonkedUnresolvedVariable
-  ConstrainedType tid -> ZonkedType tid
-  ConstrainedUnresolvedType -> ZonkedUnresolvedType
-  ConstrainedModule mid -> ZonkedModule mid
-  ConstrainedUnresolvedModule -> ZonkedUnresolvedModule
-  ConstrainedLabel -> ZonkedLabel
-  ConstrainedExpression _ ->
-    error "constrainedToZonked: Expression metadata requires zonkType (use walk*Expr)"
-  ConstrainedPattern _ ->
-    error "constrainedToZonked: Pattern metadata requires zonkType (use walkPattern)"
+passThroughRequest = retagSyntacticRequest
 
 -- ===========================================================================
 -- AST walker
@@ -328,51 +291,51 @@ walkParameter ParameterBinding {annotation, label, pattern, sourceSpan} = do
 
 walkPattern :: Pattern Constrained -> Zonk (Pattern Zonked)
 walkPattern = \case
-  PatternVariable VariablePattern {name, typeAnnotation, sourceSpan, metadata} -> do
-    metadata' <- zonkPatternMetadata sourceSpan metadata
+  PatternVariable VariablePattern {name, typeAnnotation, sourceSpan, typeOf} -> do
+    typeOf' <- zonkPatternMetadata sourceSpan typeOf
     pure
       ( PatternVariable
           VariablePattern
             { name = passThroughVariableName name,
               typeAnnotation = fmap passThroughType typeAnnotation,
               sourceSpan = sourceSpan,
-              metadata = metadata'
+              typeOf = typeOf'
             }
       )
-  PatternWildcard WildcardPattern {typeAnnotation, sourceSpan, metadata} -> do
-    metadata' <- zonkPatternMetadata sourceSpan metadata
+  PatternWildcard WildcardPattern {typeAnnotation, sourceSpan, typeOf} -> do
+    typeOf' <- zonkPatternMetadata sourceSpan typeOf
     pure
       ( PatternWildcard
           WildcardPattern
             { typeAnnotation = fmap passThroughType typeAnnotation,
               sourceSpan = sourceSpan,
-              metadata = metadata'
+              typeOf = typeOf'
             }
       )
-  PatternLiteral LiteralPattern {value, sourceSpan, metadata} -> do
-    metadata' <- zonkPatternMetadata sourceSpan metadata
+  PatternLiteral LiteralPattern {value, sourceSpan, typeOf} -> do
+    typeOf' <- zonkPatternMetadata sourceSpan typeOf
     pure
       ( PatternLiteral
           LiteralPattern
             { value = value,
               sourceSpan = sourceSpan,
-              metadata = metadata'
+              typeOf = typeOf'
             }
       )
-  PatternTuple TuplePattern {elements, sourceSpan, metadata} -> do
+  PatternTuple TuplePattern {elements, sourceSpan, typeOf} -> do
     elements' <- mapM walkPattern elements
-    metadata' <- zonkPatternMetadata sourceSpan metadata
+    typeOf' <- zonkPatternMetadata sourceSpan typeOf
     pure
       ( PatternTuple
           TuplePattern
             { elements = elements',
               sourceSpan = sourceSpan,
-              metadata = metadata'
+              typeOf = typeOf'
             }
       )
-  PatternQualifiedConstructor QualifiedConstructorPattern {moduleQualifier, constructorName, parameters, sourceSpan, metadata} -> do
+  PatternQualifiedConstructor QualifiedConstructorPattern {moduleQualifier, constructorName, parameters, sourceSpan, typeOf} -> do
     parameters' <- traverse (\(label, sub) -> (,) (passThroughLabelName label) <$> walkPattern sub) parameters
-    metadata' <- zonkPatternMetadata sourceSpan metadata
+    typeOf' <- zonkPatternMetadata sourceSpan typeOf
     pure
       ( PatternQualifiedConstructor
           QualifiedConstructorPattern
@@ -380,17 +343,21 @@ walkPattern = \case
               constructorName = passThroughVariableName constructorName,
               parameters = parameters',
               sourceSpan = sourceSpan,
-              metadata = metadata'
+              typeOf = typeOf'
             }
       )
 
-zonkPatternMetadata :: SourceSpan -> Constrained 'Pattern -> Zonk (Zonked 'Pattern)
-zonkPatternMetadata sp = \case
-  ConstrainedPattern t -> ZonkedPattern <$> zonkType sp t
+-- | Resolve the @typeOf@ payload of a 'Constrained' pattern (a
+-- 'SemanticType Unresolved') to its 'Resolved' form for the 'Zonked'
+-- phase. Type-family equations make the input and output types align.
+zonkPatternMetadata :: SourceSpan -> SemanticType Unresolved -> Zonk (SemanticType Resolved)
+zonkPatternMetadata = zonkType
 
-zonkExpressionMetadata :: SourceSpan -> Constrained 'Expression -> Zonk (Zonked 'Expression)
-zonkExpressionMetadata sp = \case
-  ConstrainedExpression t -> ZonkedExpression <$> zonkType sp t
+-- | Same as 'zonkPatternMetadata' but for expression nodes; kept as a
+-- separate name so that future divergence (different propagation rules)
+-- doesn't ripple through call sites.
+zonkExpressionMetadata :: SourceSpan -> SemanticType Unresolved -> Zonk (SemanticType Resolved)
+zonkExpressionMetadata = zonkType
 
 -- ---------------------------------------------------------------------------
 -- Block / where / state vars / handlers
@@ -544,43 +511,43 @@ walkExpression = \case
   ExpressionQualifiedReference expr -> ExpressionQualifiedReference <$> walkQualifiedReferenceExpr expr
 
 walkLiteralExpr :: LiteralExpression Constrained -> Zonk (LiteralExpression Zonked)
-walkLiteralExpr LiteralExpression {value, sourceSpan, metadata} = do
-  metadata' <- zonkExpressionMetadata sourceSpan metadata
-  pure LiteralExpression {value = value, sourceSpan = sourceSpan, metadata = metadata'}
+walkLiteralExpr LiteralExpression {value, sourceSpan, typeOf} = do
+  typeOf' <- zonkExpressionMetadata sourceSpan typeOf
+  pure LiteralExpression {value = value, sourceSpan = sourceSpan, typeOf = typeOf'}
 
 walkVariableExpr :: VariableExpression Constrained -> Zonk (VariableExpression Zonked)
-walkVariableExpr VariableExpression {name, sourceSpan, metadata} = do
-  metadata' <- zonkExpressionMetadata sourceSpan metadata
+walkVariableExpr VariableExpression {name, sourceSpan, typeOf} = do
+  typeOf' <- zonkExpressionMetadata sourceSpan typeOf
   pure
     VariableExpression
       { name = passThroughVariableName name,
         sourceSpan = sourceSpan,
-        metadata = metadata'
+        typeOf = typeOf'
       }
 
 walkTupleExpr :: TupleExpression Constrained -> Zonk (TupleExpression Zonked)
-walkTupleExpr TupleExpression {elements, sourceSpan, metadata} = do
+walkTupleExpr TupleExpression {elements, sourceSpan, typeOf} = do
   elements' <- mapM walkExpression elements
-  metadata' <- zonkExpressionMetadata sourceSpan metadata
-  pure TupleExpression {elements = elements', sourceSpan = sourceSpan, metadata = metadata'}
+  typeOf' <- zonkExpressionMetadata sourceSpan typeOf
+  pure TupleExpression {elements = elements', sourceSpan = sourceSpan, typeOf = typeOf'}
 
 walkArrayExpr :: ArrayExpression Constrained -> Zonk (ArrayExpression Zonked)
-walkArrayExpr ArrayExpression {elements, sourceSpan, metadata} = do
+walkArrayExpr ArrayExpression {elements, sourceSpan, typeOf} = do
   elements' <- mapM walkExpression elements
-  metadata' <- zonkExpressionMetadata sourceSpan metadata
-  pure ArrayExpression {elements = elements', sourceSpan = sourceSpan, metadata = metadata'}
+  typeOf' <- zonkExpressionMetadata sourceSpan typeOf
+  pure ArrayExpression {elements = elements', sourceSpan = sourceSpan, typeOf = typeOf'}
 
 walkCallExpr :: CallExpression Constrained -> Zonk (CallExpression Zonked)
-walkCallExpr CallExpression {callee, arguments, sourceSpan, metadata} = do
+walkCallExpr CallExpression {callee, arguments, sourceSpan, typeOf} = do
   callee' <- walkExpression callee
   arguments' <- mapM walkCallArgument arguments
-  metadata' <- zonkExpressionMetadata sourceSpan metadata
+  typeOf' <- zonkExpressionMetadata sourceSpan typeOf
   pure
     CallExpression
       { callee = callee',
         arguments = arguments',
         sourceSpan = sourceSpan,
-        metadata = metadata'
+        typeOf = typeOf'
       }
 
 walkCallArgument :: CallArgument Constrained -> Zonk (CallArgument Zonked)
@@ -594,57 +561,57 @@ walkCallArgument CallArgument {label, value, sourceSpan} = do
       }
 
 walkBinaryExpr :: BinaryOperatorExpression Constrained -> Zonk (BinaryOperatorExpression Zonked)
-walkBinaryExpr BinaryOperatorExpression {operator, left, right, sourceSpan, metadata} = do
+walkBinaryExpr BinaryOperatorExpression {operator, left, right, sourceSpan, typeOf} = do
   left' <- walkExpression left
   right' <- walkExpression right
-  metadata' <- zonkExpressionMetadata sourceSpan metadata
+  typeOf' <- zonkExpressionMetadata sourceSpan typeOf
   pure
     BinaryOperatorExpression
       { operator = operator,
         left = left',
         right = right',
         sourceSpan = sourceSpan,
-        metadata = metadata'
+        typeOf = typeOf'
       }
 
 walkUnaryExpr :: UnaryOperatorExpression Constrained -> Zonk (UnaryOperatorExpression Zonked)
-walkUnaryExpr UnaryOperatorExpression {operator, operand, sourceSpan, metadata} = do
+walkUnaryExpr UnaryOperatorExpression {operator, operand, sourceSpan, typeOf} = do
   operand' <- walkExpression operand
-  metadata' <- zonkExpressionMetadata sourceSpan metadata
+  typeOf' <- zonkExpressionMetadata sourceSpan typeOf
   pure
     UnaryOperatorExpression
       { operator = operator,
         operand = operand',
         sourceSpan = sourceSpan,
-        metadata = metadata'
+        typeOf = typeOf'
       }
 
 walkIfExpr :: IfExpression Constrained -> Zonk (IfExpression Zonked)
-walkIfExpr IfExpression {condition, thenBlock, elseBlock, sourceSpan, metadata} = do
+walkIfExpr IfExpression {condition, thenBlock, elseBlock, sourceSpan, typeOf} = do
   condition' <- walkExpression condition
   thenBlock' <- walkBlock thenBlock
   elseBlock' <- traverse walkBlock elseBlock
-  metadata' <- zonkExpressionMetadata sourceSpan metadata
+  typeOf' <- zonkExpressionMetadata sourceSpan typeOf
   pure
     IfExpression
       { condition = condition',
         thenBlock = thenBlock',
         elseBlock = elseBlock',
         sourceSpan = sourceSpan,
-        metadata = metadata'
+        typeOf = typeOf'
       }
 
 walkMatchExpr :: MatchExpression Constrained -> Zonk (MatchExpression Zonked)
-walkMatchExpr MatchExpression {subject, cases, sourceSpan, metadata} = do
+walkMatchExpr MatchExpression {subject, cases, sourceSpan, typeOf} = do
   subject' <- walkExpression subject
   cases' <- mapM walkCaseArm cases
-  metadata' <- zonkExpressionMetadata sourceSpan metadata
+  typeOf' <- zonkExpressionMetadata sourceSpan typeOf
   pure
     MatchExpression
       { subject = subject',
         cases = cases',
         sourceSpan = sourceSpan,
-        metadata = metadata'
+        typeOf = typeOf'
       }
 
 walkCaseArm :: CaseArm Constrained -> Zonk (CaseArm Zonked)
@@ -654,12 +621,12 @@ walkCaseArm CaseArm {pattern, body, sourceSpan} = do
   pure CaseArm {pattern = pattern', body = body', sourceSpan = sourceSpan}
 
 walkForExpr :: ForExpression Constrained -> Zonk (ForExpression Zonked)
-walkForExpr ForExpression {inBindings, varBindings, body, thenBlock, sourceSpan, metadata} = do
+walkForExpr ForExpression {inBindings, varBindings, body, thenBlock, sourceSpan, typeOf} = do
   inBindings' <- mapM walkForInBinding inBindings
   varBindings' <- mapM walkForVarBinding varBindings
   body' <- walkBlock body
   thenBlock' <- traverse walkBlock thenBlock
-  metadata' <- zonkExpressionMetadata sourceSpan metadata
+  typeOf' <- zonkExpressionMetadata sourceSpan typeOf
   pure
     ForExpression
       { inBindings = inBindings',
@@ -667,7 +634,7 @@ walkForExpr ForExpression {inBindings, varBindings, body, thenBlock, sourceSpan,
         body = body',
         thenBlock = thenBlock',
         sourceSpan = sourceSpan,
-        metadata = metadata'
+        typeOf = typeOf'
       }
 
 walkForInBinding :: ForInBinding Constrained -> Zonk (ForInBinding Zonked)
@@ -688,45 +655,45 @@ walkForVarBinding ForVarBinding {name, typeAnnotation, initial, sourceSpan} = do
       }
 
 walkBlockExpr :: BlockExpression Constrained -> Zonk (BlockExpression Zonked)
-walkBlockExpr BlockExpression {block, sourceSpan, metadata} = do
+walkBlockExpr BlockExpression {block, sourceSpan, typeOf} = do
   block' <- walkBlock block
-  metadata' <- zonkExpressionMetadata sourceSpan metadata
-  pure BlockExpression {block = block', sourceSpan = sourceSpan, metadata = metadata'}
+  typeOf' <- zonkExpressionMetadata sourceSpan typeOf
+  pure BlockExpression {block = block', sourceSpan = sourceSpan, typeOf = typeOf'}
 
 walkFieldAccessExpr :: FieldAccessExpression Constrained -> Zonk (FieldAccessExpression Zonked)
-walkFieldAccessExpr FieldAccessExpression {object, fieldName, sourceSpan, metadata} = do
+walkFieldAccessExpr FieldAccessExpression {object, fieldName, sourceSpan, typeOf} = do
   object' <- walkExpression object
-  metadata' <- zonkExpressionMetadata sourceSpan metadata
+  typeOf' <- zonkExpressionMetadata sourceSpan typeOf
   pure
     FieldAccessExpression
       { object = object',
         fieldName = passThroughLabelName fieldName,
         sourceSpan = sourceSpan,
-        metadata = metadata'
+        typeOf = typeOf'
       }
 
 walkIndexAccessExpr :: IndexAccessExpression Constrained -> Zonk (IndexAccessExpression Zonked)
-walkIndexAccessExpr IndexAccessExpression {array, index, sourceSpan, metadata} = do
+walkIndexAccessExpr IndexAccessExpression {array, index, sourceSpan, typeOf} = do
   array' <- walkExpression array
   index' <- walkExpression index
-  metadata' <- zonkExpressionMetadata sourceSpan metadata
+  typeOf' <- zonkExpressionMetadata sourceSpan typeOf
   pure
     IndexAccessExpression
       { array = array',
         index = index',
         sourceSpan = sourceSpan,
-        metadata = metadata'
+        typeOf = typeOf'
       }
 
 walkTemplateExpr :: TemplateExpression Constrained -> Zonk (TemplateExpression Zonked)
-walkTemplateExpr TemplateExpression {elements, sourceSpan, metadata} = do
+walkTemplateExpr TemplateExpression {elements, sourceSpan, typeOf} = do
   elements' <- mapM walkTemplateElement elements
-  metadata' <- zonkExpressionMetadata sourceSpan metadata
+  typeOf' <- zonkExpressionMetadata sourceSpan typeOf
   pure
     TemplateExpression
       { elements = elements',
         sourceSpan = sourceSpan,
-        metadata = metadata'
+        typeOf = typeOf'
       }
 
 walkTemplateElement :: TemplateElement Constrained -> Zonk (TemplateElement Zonked)
@@ -738,14 +705,14 @@ walkTemplateElement = \case
     pure (TemplateElementExpression TemplateExpressionElement {value = value', sourceSpan = sourceSpan})
 
 walkQualifiedReferenceExpr :: QualifiedReferenceExpression Constrained -> Zonk (QualifiedReferenceExpression Zonked)
-walkQualifiedReferenceExpr QualifiedReferenceExpression {moduleQualifier, target, sourceSpan, metadata} = do
-  metadata' <- zonkExpressionMetadata sourceSpan metadata
+walkQualifiedReferenceExpr QualifiedReferenceExpression {moduleQualifier, target, sourceSpan, typeOf} = do
+  typeOf' <- zonkExpressionMetadata sourceSpan typeOf
   pure
     QualifiedReferenceExpression
       { moduleQualifier = passThroughModuleName moduleQualifier,
         target = passThroughVariableName target,
         sourceSpan = sourceSpan,
-        metadata = metadata'
+        typeOf = typeOf'
       }
 
 -- ===========================================================================
