@@ -34,7 +34,6 @@ import Control.Monad (foldM)
 import Control.Monad.Reader (ReaderT, ask, runReaderT)
 import Control.Monad.State.Strict (State, modify, runState)
 import Control.Monad.Trans (lift)
-import Data.Bifunctor (second)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
@@ -161,79 +160,41 @@ zonkEffect sp (SemanticEffect vars reqs) = do
 -- ===========================================================================
 
 passThroughVariableName :: NameRef Constrained 'VariableRef -> NameRef Zonked 'VariableRef
-passThroughVariableName ref =
-  NameRef
-    { text = ref.text,
-      sourceSpan = ref.sourceSpan,
-      metadata = case ref.metadata of
-        ConstrainedVariable vid -> ZonkedVariable vid
-        ConstrainedUnresolvedVariable -> ZonkedUnresolvedVariable
-    }
+passThroughVariableName = mapNameRefMetadata constrainedToZonked
 
 passThroughTypeName :: NameRef Constrained 'TypeRef -> NameRef Zonked 'TypeRef
-passThroughTypeName ref =
-  NameRef
-    { text = ref.text,
-      sourceSpan = ref.sourceSpan,
-      metadata = case ref.metadata of
-        ConstrainedType tid -> ZonkedType tid
-        ConstrainedUnresolvedType -> ZonkedUnresolvedType
-    }
+passThroughTypeName = mapNameRefMetadata constrainedToZonked
 
 passThroughModuleName :: NameRef Constrained 'ModuleRef -> NameRef Zonked 'ModuleRef
-passThroughModuleName ref =
-  NameRef
-    { text = ref.text,
-      sourceSpan = ref.sourceSpan,
-      metadata = case ref.metadata of
-        ConstrainedModule mid -> ZonkedModule mid
-        ConstrainedUnresolvedModule -> ZonkedUnresolvedModule
-    }
+passThroughModuleName = mapNameRefMetadata constrainedToZonked
 
 passThroughLabelName :: NameRef Constrained 'LabelRef -> NameRef Zonked 'LabelRef
-passThroughLabelName ref =
-  NameRef
-    { text = ref.text,
-      sourceSpan = ref.sourceSpan,
-      metadata = ZonkedLabel
-    }
+passThroughLabelName = mapNameRefMetadata constrainedToZonked
 
 passThroughType :: SyntacticType Constrained -> SyntacticType Zonked
-passThroughType = \case
-  TypePrimitive PrimitiveTypeNode {kind, sourceSpan} ->
-    TypePrimitive PrimitiveTypeNode {kind = kind, sourceSpan = sourceSpan}
-  TypeName TypeNameNode {name, sourceSpan} ->
-    TypeName TypeNameNode {name = passThroughTypeName name, sourceSpan = sourceSpan}
-  TypeFunction FunctionTypeNode {parameterTypes, returnType, withEffects, sourceSpan} ->
-    TypeFunction
-      FunctionTypeNode
-        { parameterTypes = map (second passThroughType) parameterTypes,
-          returnType = passThroughType returnType,
-          withEffects = map passThroughRequest withEffects,
-          sourceSpan = sourceSpan
-        }
-  TypeArray ArrayTypeNode {elementType, sourceSpan} ->
-    TypeArray ArrayTypeNode {elementType = passThroughType elementType, sourceSpan = sourceSpan}
-  TypeTuple TupleTypeNode {elementTypes, sourceSpan} ->
-    TypeTuple TupleTypeNode {elementTypes = map passThroughType elementTypes, sourceSpan = sourceSpan}
-  TypeQualified QualifiedTypeNode {qualifier, target, sourceSpan} ->
-    TypeQualified
-      QualifiedTypeNode
-        { qualifier = passThroughModuleName qualifier,
-          target = passThroughTypeName target,
-          sourceSpan = sourceSpan
-        }
-  TypeLiteral node -> TypeLiteral node
-  TypeUnion TypeUnionNode {branches, sourceSpan} ->
-    TypeUnion TypeUnionNode {branches = map passThroughType branches, sourceSpan = sourceSpan}
-  TypeNever NeverTypeNode {sourceSpan} ->
-    TypeNever NeverTypeNode {sourceSpan = sourceSpan}
-  TypeUnknown UnknownTypeNode {sourceSpan} ->
-    TypeUnknown UnknownTypeNode {sourceSpan = sourceSpan}
+passThroughType = mapSyntacticTypeMetadata constrainedToZonked
 
 passThroughRequest :: SyntacticRequest Constrained -> SyntacticRequest Zonked
-passThroughRequest SyntacticRequest {name, sourceSpan} =
-  SyntacticRequest {name = passThroughVariableName name, sourceSpan = sourceSpan}
+passThroughRequest = mapSyntacticRequestMetadata constrainedToZonked
+
+-- | The metadata transformation for the trivial NameRef kinds. The
+-- 'ConstrainedExpression' / 'ConstrainedPattern' cases require a
+-- 'SemanticType Resolved' resolved via 'zonkType' (which needs the solver
+-- result and the AST node's source span), so they are handled by the
+-- per-node walkers ('walk*Expr' / 'walkPattern') instead.
+constrainedToZonked :: Constrained sym -> Zonked sym
+constrainedToZonked = \case
+  ConstrainedVariable vid -> ZonkedVariable vid
+  ConstrainedUnresolvedVariable -> ZonkedUnresolvedVariable
+  ConstrainedType tid -> ZonkedType tid
+  ConstrainedUnresolvedType -> ZonkedUnresolvedType
+  ConstrainedModule mid -> ZonkedModule mid
+  ConstrainedUnresolvedModule -> ZonkedUnresolvedModule
+  ConstrainedLabel -> ZonkedLabel
+  ConstrainedExpression _ ->
+    error "constrainedToZonked: Expression metadata requires zonkType (use walk*Expr)"
+  ConstrainedPattern _ ->
+    error "constrainedToZonked: Pattern metadata requires zonkType (use walkPattern)"
 
 -- ===========================================================================
 -- AST walker

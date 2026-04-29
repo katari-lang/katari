@@ -95,7 +95,7 @@ data Keyword where
   KeywordType :: Keyword
   KeywordNever :: Keyword
   KeywordUnknown :: Keyword
-  deriving (Eq, Ord, Show)
+  deriving (Eq, Ord, Show, Bounded, Enum)
 
 data Punctuation where
   PunctuationLeftParenthesis :: Punctuation
@@ -453,40 +453,47 @@ lexIdentifierOrKeyword = label "identifier or keyword" $ do
     (_, Just keyword) -> TokenKeyword keyword
     (_, Nothing) -> TokenIdentifier text
 
+-- | Surface text of every keyword. Single source of truth shared by the
+-- lexer's identifier-or-keyword classifier ('keywordOf') and the diagnostic
+-- pretty-printer ('showKeyword').
+keywordText :: Keyword -> Text
+keywordText = \case
+  KeywordLet -> "let"
+  KeywordAgent -> "agent"
+  KeywordIf -> "if"
+  KeywordElse -> "else"
+  KeywordMatch -> "match"
+  KeywordCase -> "case"
+  KeywordReturn -> "return"
+  KeywordNext -> "next"
+  KeywordBreak -> "break"
+  KeywordReq -> "req"
+  KeywordImport -> "import"
+  KeywordAs -> "as"
+  KeywordWith -> "with"
+  KeywordFrom -> "from"
+  KeywordFor -> "for"
+  KeywordThen -> "then"
+  KeywordVar -> "var"
+  KeywordWhere -> "where"
+  KeywordExt -> "ext"
+  KeywordNull -> "null"
+  KeywordTrue -> "true"
+  KeywordFalse -> "false"
+  KeywordData -> "data"
+  KeywordIn -> "in"
+  KeywordInteger -> "integer"
+  KeywordBoolean -> "boolean"
+  KeywordNumber -> "number"
+  KeywordString -> "string"
+  KeywordType -> "type"
+  KeywordNever -> "never"
+  KeywordUnknown -> "unknown"
+
+-- | Reverse lookup: surface text → 'Keyword'. Built from 'keywordText' so
+-- adding a new keyword only requires extending the single table above.
 keywordOf :: Text -> Maybe Keyword
-keywordOf = \case
-  "let" -> Just KeywordLet
-  "agent" -> Just KeywordAgent
-  "if" -> Just KeywordIf
-  "else" -> Just KeywordElse
-  "match" -> Just KeywordMatch
-  "case" -> Just KeywordCase
-  "return" -> Just KeywordReturn
-  "next" -> Just KeywordNext
-  "break" -> Just KeywordBreak
-  "req" -> Just KeywordReq
-  "import" -> Just KeywordImport
-  "as" -> Just KeywordAs
-  "with" -> Just KeywordWith
-  "from" -> Just KeywordFrom
-  "for" -> Just KeywordFor
-  "then" -> Just KeywordThen
-  "var" -> Just KeywordVar
-  "where" -> Just KeywordWhere
-  "ext" -> Just KeywordExt
-  "null" -> Just KeywordNull
-  "true" -> Just KeywordTrue
-  "false" -> Just KeywordFalse
-  "data" -> Just KeywordData
-  "in" -> Just KeywordIn
-  "integer" -> Just KeywordInteger
-  "boolean" -> Just KeywordBoolean
-  "number" -> Just KeywordNumber
-  "string" -> Just KeywordString
-  "type" -> Just KeywordType
-  "never" -> Just KeywordNever
-  "unknown" -> Just KeywordUnknown
-  _ -> Nothing
+keywordOf name = lookup name [(keywordText kw, kw) | kw <- [minBound .. maxBound]]
 
 -- | Punctuation or operator (excluding `{` and `}` which are handled in
 -- lexBrace). Multi-char tokens are tried before their shorter prefixes.
@@ -904,38 +911,7 @@ linePrefixFor sourceText sourcePos =
         [] -> T.empty
 
 showKeyword :: Keyword -> String
-showKeyword = \case
-  KeywordLet -> "let"
-  KeywordAgent -> "agent"
-  KeywordIf -> "if"
-  KeywordElse -> "else"
-  KeywordMatch -> "match"
-  KeywordCase -> "case"
-  KeywordReturn -> "return"
-  KeywordNext -> "next"
-  KeywordBreak -> "break"
-  KeywordReq -> "req"
-  KeywordImport -> "import"
-  KeywordAs -> "as"
-  KeywordWith -> "with"
-  KeywordFrom -> "from"
-  KeywordFor -> "for"
-  KeywordThen -> "then"
-  KeywordVar -> "var"
-  KeywordWhere -> "where"
-  KeywordExt -> "ext"
-  KeywordNull -> "null"
-  KeywordTrue -> "true"
-  KeywordFalse -> "false"
-  KeywordData -> "data"
-  KeywordIn -> "in"
-  KeywordInteger -> "integer"
-  KeywordBoolean -> "boolean"
-  KeywordNumber -> "number"
-  KeywordString -> "string"
-  KeywordType -> "type"
-  KeywordNever -> "never"
-  KeywordUnknown -> "unknown"
+showKeyword = T.unpack . keywordText
 
 showPunctuation :: Punctuation -> String
 showPunctuation = \case

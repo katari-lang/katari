@@ -26,8 +26,8 @@ module Katari.Typechecker.Solver.Branch
 where
 
 import Data.Map.Strict qualified as Map
+import Data.Set (Set)
 import Data.Set qualified as Set
-import Data.Text (Text)
 import Katari.Typechecker.ConstraintGenerator
   ( Constraint (..),
     ConstraintReason,
@@ -44,6 +44,16 @@ import Katari.Typechecker.Solver.Internal
     typeVarsIn,
   )
 
+-- | Which side of a stuck @α \<: composite@ constraint α sits on. Drives the
+-- variance of every sub-constraint emitted by 'narrowShape': swapping the
+-- side flips both the @<:@ direction (covariant ↔ contravariant flip per
+-- position) and the fallback assignment ('Never' for left-α; 'Unknown' for
+-- right-α).
+data BranchSide where
+  LeftVar :: BranchSide
+  RightVar :: BranchSide
+  deriving (Eq, Show)
+
 -- ===========================================================================
 -- BranchAlt
 -- ===========================================================================
@@ -53,7 +63,7 @@ import Katari.Typechecker.Solver.Internal
 -- for fresh-var allocation (both type and effect).
 data BranchAlt = BranchAlt
   { branchSubst :: !Substitution,
-    branchNewConstraints :: ![Constraint],
+    branchNewConstraints :: !(Set Constraint),
     branchNextTypeVarId :: !Int,
     branchNextEffectVarId :: !Int
   }
@@ -93,7 +103,8 @@ branchType nextTypeVarId nextEffectVarId leftType rightType reason =
           Just
             [ BranchAlt
                 { branchSubst = Map.empty,
-                  branchNewConstraints = [TypeConstraint leftType branch reason],
+                  branchNewConstraints =
+                    Set.singleton (TypeConstraint leftType branch reason),
                   branchNextTypeVarId = nextTypeVarId,
                   branchNextEffectVarId = nextEffectVarId
                 }
@@ -125,7 +136,51 @@ isBranchableShape = \case
   _ -> False
 
 -- ---------------------------------------------------------------------------
--- α <: composite
+-- Variance-flipping helpers
+-- ---------------------------------------------------------------------------
+
+-- | Emit a constraint at a covariant position. \"Covariant\" means α-position
+-- and original-position align with the @<:@ direction set by 'side': for
+-- 'LeftVar' (α \<: F) the flow is @α-pos \<: F-pos@, and for 'RightVar' it
+-- reverses.
+emitCovariantType ::
+  BranchSide ->
+  SemanticType Unresolved ->
+  SemanticType Unresolved ->
+  ConstraintReason ->
+  Constraint
+emitCovariantType side variableSide originalSide reason = case side of
+  LeftVar -> TypeConstraint variableSide originalSide reason
+  RightVar -> TypeConstraint originalSide variableSide reason
+
+-- | Emit a constraint at a contravariant position (function parameters).
+-- Same as 'emitCovariantType' but with the side flipped.
+emitContravariantType ::
+  BranchSide ->
+  SemanticType Unresolved ->
+  SemanticType Unresolved ->
+  ConstraintReason ->
+  Constraint
+emitContravariantType side = emitCovariantType (flipSide side)
+
+-- | Effect-constraint counterpart of 'emitCovariantType'.
+emitCovariantEffect ::
+  BranchSide ->
+  SemanticEffect Unresolved ->
+  SemanticEffect Unresolved ->
+  ConstraintReason ->
+  Constraint
+emitCovariantEffect side variableSide originalSide reason = case side of
+  LeftVar -> EffectConstraint variableSide originalSide reason
+  RightVar -> EffectConstraint originalSide variableSide reason
+
+flipSide :: BranchSide -> BranchSide
+flipSide = \case
+  LeftVar -> RightVar
+  RightVar -> LeftVar
+
+-- ---------------------------------------------------------------------------
+-- branchVar : unified narrow + fallback for both α \<: F and F \<: α
 -- ---------------------------------------------------------------------------
 
 branchVarOnLeft ::
@@ -135,100 +190,7 @@ branchVarOnLeft ::
   SemanticType Unresolved ->
   ConstraintReason ->
   [BranchAlt]
-branchVarOnLeft nextTypeVarId nextEffectVarId typeVarId shape reason =
-  let (narrowedShape, freshConstraints, nextTypeVarIdAfter, nextEffectVarIdAfter) =
-        narrowAsLeft nextTypeVarId nextEffectVarId typeVarId shape reason
-   in [ -- Branch 1: α takes the structural shape with fresh sub-vars.
-        BranchAlt
-          { branchSubst = Map.singleton typeVarId narrowedShape,
-            branchNewConstraints = freshConstraints,
-            branchNextTypeVarId = nextTypeVarIdAfter,
-            branchNextEffectVarId = nextEffectVarIdAfter
-          },
-        -- Branch 2: α is never (vacuously satisfies α <: anything).
-        BranchAlt
-          { branchSubst = Map.singleton typeVarId SemanticTypeNever,
-            branchNewConstraints = [],
-            branchNextTypeVarId = nextTypeVarId,
-            branchNextEffectVarId = nextEffectVarId
-          }
-      ]
-
--- | Build a fresh-var "shape skeleton" for @α@ matching the right-hand
--- composite, plus the constraints that capture the variance:
--- contravariant for function args, covariant for return / array / tuple /
--- object fields. For function shapes, also allocate a fresh 'EffectVarId'.
-narrowAsLeft ::
-  Int ->
-  Int ->
-  TypeVarId ->
-  SemanticType Unresolved ->
-  ConstraintReason ->
-  (SemanticType Unresolved, [Constraint], Int, Int)
-narrowAsLeft nextTypeVarId nextEffectVarId _alpha shape reason = case shape of
-  SemanticTypeFunction parameters returnType effects ->
-    let parameterEntries = Map.toList parameters
-        (parameterVars, nextAfterParams) = freshVars nextTypeVarId (length parameterEntries)
-        (returnVar, nextAfterReturn) = freshVar nextAfterParams
-        (effectVar, nextEffectAfter) = freshEffectVar nextEffectVarId
-        narrowedParameters =
-          Map.fromList
-            [ (label, SemanticTypeVariable parameterVar)
-              | ((label, _), parameterVar) <- zip parameterEntries parameterVars
-            ]
-        narrowedShape =
-          SemanticTypeFunction
-            narrowedParameters
-            (SemanticTypeVariable returnVar)
-            (SemanticEffect (Set.singleton effectVar) Set.empty)
-        parameterConstraints =
-          -- contravariant: A <: t_arg
-          [ TypeConstraint originalParameter (SemanticTypeVariable parameterVar) reason
-            | ((_, originalParameter), parameterVar) <- zip parameterEntries parameterVars
-          ]
-        returnConstraint =
-          TypeConstraint (SemanticTypeVariable returnVar) returnType reason
-        effectConstraint =
-          EffectConstraint
-            (SemanticEffect (Set.singleton effectVar) Set.empty)
-            effects
-            reason
-     in ( narrowedShape,
-          effectConstraint : returnConstraint : parameterConstraints,
-          nextAfterReturn,
-          nextEffectAfter
-        )
-  SemanticTypeArray element ->
-    let (elementVar, nextAfterElement) = freshVar nextTypeVarId
-        narrowedShape = SemanticTypeArray (SemanticTypeVariable elementVar)
-        elementConstraint =
-          TypeConstraint (SemanticTypeVariable elementVar) element reason -- covariant
-     in (narrowedShape, [elementConstraint], nextAfterElement, nextEffectVarId)
-  SemanticTypeTuple elements ->
-    let (elementVars, nextAfterElements) = freshVars nextTypeVarId (length elements)
-        narrowedShape = SemanticTypeTuple (SemanticTypeVariable <$> elementVars)
-        elementConstraints =
-          [ TypeConstraint (SemanticTypeVariable elementVar) originalElement reason
-            | (elementVar, originalElement) <- zip elementVars elements
-          ]
-     in (narrowedShape, elementConstraints, nextAfterElements, nextEffectVarId)
-  SemanticTypeObject fields ->
-    let (fieldVars, nextAfterFields) = freshVars nextTypeVarId (Map.size fields)
-        fieldLabels = Map.keys fields
-        narrowedFields =
-          Map.fromList (zip fieldLabels (SemanticTypeVariable <$> fieldVars))
-        narrowedShape = SemanticTypeObject narrowedFields
-        fieldConstraints =
-          [ TypeConstraint (SemanticTypeVariable fieldVar) originalField reason
-            | (fieldVar, originalField) <- zip fieldVars (Map.elems fields)
-          ]
-     in (narrowedShape, fieldConstraints, nextAfterFields, nextEffectVarId)
-  _ -> (shape, [], nextTypeVarId, nextEffectVarId)
-  -- shouldn't happen given isBranchableShape guard
-
--- ---------------------------------------------------------------------------
--- composite <: α
--- ---------------------------------------------------------------------------
+branchVarOnLeft = branchVar LeftVar
 
 branchVarOnRight ::
   Int ->
@@ -237,33 +199,57 @@ branchVarOnRight ::
   TypeVarId ->
   ConstraintReason ->
   [BranchAlt]
-branchVarOnRight nextTypeVarId nextEffectVarId shape typeVarId reason =
-  let (narrowedShape, freshConstraints, nextTypeVarIdAfter, nextEffectVarIdAfter) =
-        narrowAsRight nextTypeVarId nextEffectVarId typeVarId shape reason
-   in [ -- Branch 1: α takes the structural shape with fresh sub-vars.
-        BranchAlt
-          { branchSubst = Map.singleton typeVarId narrowedShape,
-            branchNewConstraints = freshConstraints,
-            branchNextTypeVarId = nextTypeVarIdAfter,
-            branchNextEffectVarId = nextEffectVarIdAfter
-          },
-        -- Branch 2: α is unknown (vacuously satisfies anything <: α).
-        BranchAlt
-          { branchSubst = Map.singleton typeVarId SemanticTypeUnknown,
-            branchNewConstraints = [],
-            branchNextTypeVarId = nextTypeVarId,
-            branchNextEffectVarId = nextEffectVarId
-          }
-      ]
+branchVarOnRight nextTypeVarId nextEffectVarId shape typeVarId =
+  branchVar RightVar nextTypeVarId nextEffectVarId typeVarId shape
 
-narrowAsRight ::
+-- | Two alternatives for a stuck @α \<: F@ or @F \<: α@:
+--
+--   1. α takes the structural shape with fresh sub-vars (variance constraints
+--      are emitted via 'narrowShape').
+--   2. α := 'SemanticTypeNever' (for 'LeftVar', vacuously @α \<: anything@) or
+--      α := 'SemanticTypeUnknown' (for 'RightVar', vacuously @anything \<: α@).
+branchVar ::
+  BranchSide ->
   Int ->
   Int ->
   TypeVarId ->
   SemanticType Unresolved ->
   ConstraintReason ->
-  (SemanticType Unresolved, [Constraint], Int, Int)
-narrowAsRight nextTypeVarId nextEffectVarId _alpha shape reason = case shape of
+  [BranchAlt]
+branchVar side nextTypeVarId nextEffectVarId typeVarId shape reason =
+  let (narrowedShape, freshConstraints, nextTypeVarIdAfter, nextEffectVarIdAfter) =
+        narrowShape side nextTypeVarId nextEffectVarId shape reason
+      fallback = case side of
+        LeftVar -> SemanticTypeNever
+        RightVar -> SemanticTypeUnknown
+   in [ BranchAlt
+          { branchSubst = Map.singleton typeVarId narrowedShape,
+            branchNewConstraints = freshConstraints,
+            branchNextTypeVarId = nextTypeVarIdAfter,
+            branchNextEffectVarId = nextEffectVarIdAfter
+          },
+        BranchAlt
+          { branchSubst = Map.singleton typeVarId fallback,
+            branchNewConstraints = Set.empty,
+            branchNextTypeVarId = nextTypeVarId,
+            branchNextEffectVarId = nextEffectVarId
+          }
+      ]
+
+-- | Build a fresh-var \"shape skeleton\" for α matching @shape@, plus the
+-- variance-respecting sub-constraints. 'BranchSide' selects which side of
+-- @<:@ α sits on, which flips every emitted constraint's direction.
+--
+-- For 'SemanticTypeFunction', a fresh 'EffectVarId' is allocated and an
+-- effect constraint is added at the covariant position.
+narrowShape ::
+  BranchSide ->
+  Int ->
+  Int ->
+  SemanticType Unresolved ->
+  ConstraintReason ->
+  (SemanticType Unresolved, Set Constraint, Int, Int)
+narrowShape side nextTypeVarId nextEffectVarId shape reason = case shape of
   SemanticTypeFunction parameters returnType effects ->
     let parameterEntries = Map.toList parameters
         (parameterVars, nextAfterParams) = freshVars nextTypeVarId (length parameterEntries)
@@ -280,19 +266,19 @@ narrowAsRight nextTypeVarId nextEffectVarId _alpha shape reason = case shape of
             (SemanticTypeVariable returnVar)
             (SemanticEffect (Set.singleton effectVar) Set.empty)
         parameterConstraints =
-          -- contravariant: t_arg <: A
-          [ TypeConstraint (SemanticTypeVariable parameterVar) originalParameter reason
+          [ emitContravariantType side (SemanticTypeVariable parameterVar) originalParameter reason
             | ((_, originalParameter), parameterVar) <- zip parameterEntries parameterVars
           ]
         returnConstraint =
-          TypeConstraint returnType (SemanticTypeVariable returnVar) reason
+          emitCovariantType side (SemanticTypeVariable returnVar) returnType reason
         effectConstraint =
-          EffectConstraint
-            effects
+          emitCovariantEffect
+            side
             (SemanticEffect (Set.singleton effectVar) Set.empty)
+            effects
             reason
      in ( narrowedShape,
-          effectConstraint : returnConstraint : parameterConstraints,
+          Set.fromList (effectConstraint : returnConstraint : parameterConstraints),
           nextAfterReturn,
           nextEffectAfter
         )
@@ -300,16 +286,16 @@ narrowAsRight nextTypeVarId nextEffectVarId _alpha shape reason = case shape of
     let (elementVar, nextAfterElement) = freshVar nextTypeVarId
         narrowedShape = SemanticTypeArray (SemanticTypeVariable elementVar)
         elementConstraint =
-          TypeConstraint element (SemanticTypeVariable elementVar) reason -- covariant
-     in (narrowedShape, [elementConstraint], nextAfterElement, nextEffectVarId)
+          emitCovariantType side (SemanticTypeVariable elementVar) element reason
+     in (narrowedShape, Set.singleton elementConstraint, nextAfterElement, nextEffectVarId)
   SemanticTypeTuple elements ->
     let (elementVars, nextAfterElements) = freshVars nextTypeVarId (length elements)
         narrowedShape = SemanticTypeTuple (SemanticTypeVariable <$> elementVars)
         elementConstraints =
-          [ TypeConstraint originalElement (SemanticTypeVariable elementVar) reason
+          [ emitCovariantType side (SemanticTypeVariable elementVar) originalElement reason
             | (elementVar, originalElement) <- zip elementVars elements
           ]
-     in (narrowedShape, elementConstraints, nextAfterElements, nextEffectVarId)
+     in (narrowedShape, Set.fromList elementConstraints, nextAfterElements, nextEffectVarId)
   SemanticTypeObject fields ->
     let (fieldVars, nextAfterFields) = freshVars nextTypeVarId (Map.size fields)
         fieldLabels = Map.keys fields
@@ -317,11 +303,12 @@ narrowAsRight nextTypeVarId nextEffectVarId _alpha shape reason = case shape of
           Map.fromList (zip fieldLabels (SemanticTypeVariable <$> fieldVars))
         narrowedShape = SemanticTypeObject narrowedFields
         fieldConstraints =
-          [ TypeConstraint originalField (SemanticTypeVariable fieldVar) reason
+          [ emitCovariantType side (SemanticTypeVariable fieldVar) originalField reason
             | (fieldVar, originalField) <- zip fieldVars (Map.elems fields)
           ]
-     in (narrowedShape, fieldConstraints, nextAfterFields, nextEffectVarId)
-  _ -> (shape, [], nextTypeVarId, nextEffectVarId)
+     in (narrowedShape, Set.fromList fieldConstraints, nextAfterFields, nextEffectVarId)
+  -- Defensive: 'isBranchableShape' guards the call site so this is unreachable.
+  _ -> (shape, Set.empty, nextTypeVarId, nextEffectVarId)
 
 -- ---------------------------------------------------------------------------
 -- Fresh var allocation
@@ -354,35 +341,35 @@ freshVars nextTypeVarId count =
 branchConstraints ::
   Int ->
   Int ->
-  [Constraint] ->
-  Maybe [(Substitution, [Constraint], Int, Int)]
+  Set Constraint ->
+  Maybe [(Substitution, Set Constraint, Int, Int)]
 branchConstraints nextTypeVarId nextEffectVarId constraints =
-  case findFirstBranch nextTypeVarId nextEffectVarId constraints [] of
+  case findFirstBranch nextTypeVarId nextEffectVarId constraints of
     Nothing -> Nothing
-    Just (alternatives, untouched) ->
-      Just
-        [ ( alternative.branchSubst,
-            alternative.branchNewConstraints <> untouched,
-            alternative.branchNextTypeVarId,
-            alternative.branchNextEffectVarId
-          )
-          | alternative <- alternatives
-        ]
+    Just (chosen, alternatives) ->
+      let untouched = Set.delete chosen constraints
+       in Just
+            [ ( alternative.branchSubst,
+                Set.union alternative.branchNewConstraints untouched,
+                alternative.branchNextTypeVarId,
+                alternative.branchNextEffectVarId
+              )
+              | alternative <- alternatives
+            ]
 
+-- | Find the first 'Constraint' in the set that is branchable, returning it
+-- alongside its alternatives. Iteration order is the 'Ord'-defined ascending
+-- traversal of the set, which is deterministic across runs.
 findFirstBranch ::
   Int ->
   Int ->
-  [Constraint] ->
-  [Constraint] ->
-  Maybe ([BranchAlt], [Constraint])
-findFirstBranch _ _ [] _ = Nothing
-findFirstBranch nextTypeVarId nextEffectVarId (current : remaining) skipped =
-  case branchConstraint nextTypeVarId nextEffectVarId current of
-    Just alternatives ->
-      Just (alternatives, reverse skipped <> remaining)
-    Nothing ->
-      findFirstBranch nextTypeVarId nextEffectVarId remaining (current : skipped)
-
--- Avoid unused-import warning on Text.
-_typeText :: Text -> Text
-_typeText = id
+  Set Constraint ->
+  Maybe (Constraint, [BranchAlt])
+findFirstBranch nextTypeVarId nextEffectVarId constraints =
+  go (Set.toAscList constraints)
+  where
+    go [] = Nothing
+    go (current : remaining) =
+      case branchConstraint nextTypeVarId nextEffectVarId current of
+        Just alternatives -> Just (current, alternatives)
+        Nothing -> go remaining

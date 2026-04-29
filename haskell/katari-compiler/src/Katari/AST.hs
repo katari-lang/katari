@@ -921,6 +921,99 @@ instance HasSourceSpan (TemplateExpressionElement metadata) where
   sourceSpanOf element = element.sourceSpan
 
 -- ---------------------------------------------------------------------------
+-- Metadata transformation
+--
+-- Phase changes that only swap each NameRef's metadata payload (without
+-- touching shape, scope, or constraint emission) can be expressed as a
+-- single rank-N function over the metadata tag. Used by the
+-- ConstraintGenerator (Identified → Constrained) and Zonker
+-- (Constrained → Zonked) passes to drop the per-constructor `passThrough`
+-- boilerplate for syntactic types and request references.
+-- ---------------------------------------------------------------------------
+
+-- | Apply a metadata transformation to a single 'NameRef'.
+mapNameRefMetadata ::
+  (forall sym. m1 sym -> m2 sym) ->
+  NameRef m1 symbol ->
+  NameRef m2 symbol
+mapNameRefMetadata transform reference =
+  NameRef
+    { text = reference.text,
+      sourceSpan = reference.sourceSpan,
+      metadata = transform reference.metadata
+    }
+
+-- | Recursively apply a metadata transformation to a 'SyntacticType' tree.
+-- Every nested 'NameRef' (type names, qualifiers, request references) has
+-- its metadata replaced; the structural shape is preserved verbatim.
+mapSyntacticTypeMetadata ::
+  (forall sym. m1 sym -> m2 sym) ->
+  SyntacticType m1 ->
+  SyntacticType m2
+mapSyntacticTypeMetadata transform = \case
+  TypePrimitive PrimitiveTypeNode {kind, sourceSpan} ->
+    TypePrimitive PrimitiveTypeNode {kind = kind, sourceSpan = sourceSpan}
+  TypeName TypeNameNode {name, sourceSpan} ->
+    TypeName
+      TypeNameNode
+        { name = mapNameRefMetadata transform name,
+          sourceSpan = sourceSpan
+        }
+  TypeFunction FunctionTypeNode {parameterTypes, returnType, withEffects, sourceSpan} ->
+    TypeFunction
+      FunctionTypeNode
+        { parameterTypes =
+            [ (label, mapSyntacticTypeMetadata transform syntacticType)
+              | (label, syntacticType) <- parameterTypes
+            ],
+          returnType = mapSyntacticTypeMetadata transform returnType,
+          withEffects = mapSyntacticRequestMetadata transform <$> withEffects,
+          sourceSpan = sourceSpan
+        }
+  TypeArray ArrayTypeNode {elementType, sourceSpan} ->
+    TypeArray
+      ArrayTypeNode
+        { elementType = mapSyntacticTypeMetadata transform elementType,
+          sourceSpan = sourceSpan
+        }
+  TypeTuple TupleTypeNode {elementTypes, sourceSpan} ->
+    TypeTuple
+      TupleTypeNode
+        { elementTypes = mapSyntacticTypeMetadata transform <$> elementTypes,
+          sourceSpan = sourceSpan
+        }
+  TypeQualified QualifiedTypeNode {qualifier, target, sourceSpan} ->
+    TypeQualified
+      QualifiedTypeNode
+        { qualifier = mapNameRefMetadata transform qualifier,
+          target = mapNameRefMetadata transform target,
+          sourceSpan = sourceSpan
+        }
+  TypeLiteral node -> TypeLiteral node
+  TypeUnion TypeUnionNode {branches, sourceSpan} ->
+    TypeUnion
+      TypeUnionNode
+        { branches = mapSyntacticTypeMetadata transform <$> branches,
+          sourceSpan = sourceSpan
+        }
+  TypeNever NeverTypeNode {sourceSpan} ->
+    TypeNever NeverTypeNode {sourceSpan = sourceSpan}
+  TypeUnknown UnknownTypeNode {sourceSpan} ->
+    TypeUnknown UnknownTypeNode {sourceSpan = sourceSpan}
+
+-- | Apply a metadata transformation to a 'SyntacticRequest' (the variable
+-- reference that names an effect).
+mapSyntacticRequestMetadata ::
+  (forall sym. m1 sym -> m2 sym) ->
+  SyntacticRequest m1 ->
+  SyntacticRequest m2
+mapSyntacticRequestMetadata transform SyntacticRequest {name, sourceSpan} =
+  SyntacticRequest
+    { name = mapNameRefMetadata transform name,
+      sourceSpan = sourceSpan
+    }
+
+-- ---------------------------------------------------------------------------
 -- Show / Eq for any metadata phase that provides the respective instance
 -- for every SymbolKind tag.
 -- ---------------------------------------------------------------------------

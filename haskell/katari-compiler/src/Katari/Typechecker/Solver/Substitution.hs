@@ -24,6 +24,7 @@ module Katari.Typechecker.Solver.Substitution
     applySubstEffect,
     applySubstConstraint,
     applySubstSubst,
+    applyEffectSubstToType,
     calculateBounds,
     calculateAllBounds,
     calculateInstanceFromBounds,
@@ -48,8 +49,11 @@ import Katari.Typechecker.NormalizedType
     normaliseSemantic,
     subtypeNT,
   )
+import Data.Set (Set)
+import Katari.Typechecker.Identifier (VariableId)
 import Katari.Typechecker.SemanticType
-  ( Resolved,
+  ( EffectVarId,
+    Resolved,
     SemanticEffect (..),
     SemanticType (..),
     TypeVarId,
@@ -108,6 +112,40 @@ applySubstType substitution = \case
   SemanticTypeLiteralBoolean value -> SemanticTypeLiteralBoolean value
   SemanticTypeData typeId -> SemanticTypeData typeId
 
+-- | Resolve every 'EffectVarId' inside a 'SemanticType' against the effect
+-- substitution, replacing each var with the concrete 'VariableId' set the
+-- effect solver assigned to it. Type variables are left untouched — apply
+-- 'applySubstSubst' first if the value still contains them.
+--
+-- This is the missing half of "deep substitution composition": without it,
+-- a narrowed function shape like @α := (x: t_p) -> r_var, eff e_var@ keeps
+-- @e_var@ alive after type vars are pinned, and 'semanticToConcrete' rejects
+-- the value (forcing the downstream to fall back to NTUnknown).
+applyEffectSubstToType ::
+  Map EffectVarId (Set VariableId) ->
+  SemanticType Unresolved ->
+  SemanticType Unresolved
+applyEffectSubstToType effectSubstitution = go
+  where
+    go = \case
+      SemanticTypeFunction parameterTypes returnType effects ->
+        SemanticTypeFunction
+          (Map.map go parameterTypes)
+          (go returnType)
+          (resolveEffect effects)
+      SemanticTypeArray element -> SemanticTypeArray (go element)
+      SemanticTypeTuple elements -> SemanticTypeTuple (go <$> elements)
+      SemanticTypeUnion branches -> SemanticTypeUnion (go <$> branches)
+      SemanticTypeObject fields -> SemanticTypeObject (Map.map go fields)
+      atomic -> atomic
+    resolveEffect (SemanticEffect vars reqs) =
+      let expanded =
+            Set.unions
+              [ Map.findWithDefault Set.empty effectVarId effectSubstitution
+                | effectVarId <- Set.toList vars
+              ]
+       in SemanticEffect Set.empty (Set.union reqs expanded)
+
 applySubstEffect :: Substitution -> SemanticEffect phase -> SemanticEffect phase
 applySubstEffect _ effect = effect -- effect vars are handled by the effect solver
 
@@ -140,11 +178,11 @@ applySubstSubst outer inner =
 --
 -- Constraints where @α@ does not occur as the entire LHS / RHS are ignored
 -- (those will be decomposed structurally elsewhere).
-calculateBounds :: TypeVarId -> [Constraint] -> Bounds
+calculateBounds :: TypeVarId -> Set Constraint -> Bounds
 calculateBounds typeVarId constraints =
   Bounds
-    { lowerBounds = mapMaybe (asLower typeVarId) constraints,
-      upperBounds = mapMaybe (asUpper typeVarId) constraints
+    { lowerBounds = mapMaybe (asLower typeVarId) (Set.toList constraints),
+      upperBounds = mapMaybe (asUpper typeVarId) (Set.toList constraints)
     }
 
 asLower :: TypeVarId -> Constraint -> Maybe BoundedType
@@ -162,9 +200,9 @@ asUpper typeVarId = \case
   _ -> Nothing
 
 -- | Collect bounds for every type variable mentioned in the constraint set.
-calculateAllBounds :: [Constraint] -> Map TypeVarId Bounds
+calculateAllBounds :: Set Constraint -> Map TypeVarId Bounds
 calculateAllBounds constraints =
-  let typeVarIds = Set.unions (constraintTypeVars <$> constraints)
+  let typeVarIds = foldr (Set.union . constraintTypeVars) Set.empty constraints
    in Map.fromList
         [ (typeVarId, calculateBounds typeVarId constraints)
           | typeVarId <- Set.toList typeVarIds
@@ -215,26 +253,27 @@ isUnknownSemantic = \case
 
 -- | One step of propagation: produce all newly-derivable @t \<: u@ constraints
 -- from existing bounds. Returns 'Nothing' if no new constraint was derived.
-calculatePropagation :: [Constraint] -> Maybe [Constraint]
+calculatePropagation :: Set Constraint -> Maybe (Set Constraint)
 calculatePropagation constraints =
   let bounds = calculateAllBounds constraints
       derived =
-        [ TypeConstraint lower.boundType upper.boundType lower.boundReason
-          | (_, Bounds lowers uppers) <- Map.toList bounds,
-            lower <- lowers,
-            upper <- uppers
-        ]
-      novel = filter (`notElem` constraints) (nub derived)
-   in if null novel then Nothing else Just novel
+        Set.fromList
+          [ TypeConstraint lower.boundType upper.boundType lower.boundReason
+            | (_, Bounds lowers uppers) <- Map.toList bounds,
+              lower <- lowers,
+              upper <- uppers
+          ]
+      novel = derived `Set.difference` constraints
+   in if Set.null novel then Nothing else Just novel
 
 -- | Iterate 'calculatePropagation' to a fixpoint. The total set is finite
 -- (bounded by pairs of source bounds), so this terminates.
-calculatePropagationAll :: [Constraint] -> [Constraint]
+calculatePropagationAll :: Set Constraint -> Set Constraint
 calculatePropagationAll = go
   where
     go constraints = case calculatePropagation constraints of
       Nothing -> constraints
-      Just newConstraints -> go (constraints <> newConstraints)
+      Just newConstraints -> go (Set.union constraints newConstraints)
 
 -- ===========================================================================
 -- Final substitution collection
@@ -248,11 +287,16 @@ calculatePropagationAll = go
 --   * Filter its lower / upper bounds down to concrete (var-free) ones.
 --   * Prefer the union of concrete lower bounds (most specific known type).
 --   * Otherwise pick a concrete upper bound if available.
---   * Otherwise leave unbound (caller will fill 'NTUnknown' via totality).
-collectFinalSubstitutions :: [Constraint] -> Substitution
+--   * Otherwise pin to 'SemanticTypeUnknown' (lattice top) — there is no
+--     concrete information about α, so the safest assumption is "any value".
+--     This makes deep substitution composition self-contained: an indirect
+--     entry like @β := F(α)@ resolves to @β := F(unknown)@ rather than
+--     leaving α dangling for the totality pass to fill in (which would
+--     break composition by leaving 'SemanticTypeVariable' inside β's value).
+collectFinalSubstitutions :: Set Constraint -> Substitution
 collectFinalSubstitutions constraints =
   let bounds = calculateAllBounds constraints
-   in Map.mapMaybe pickFromBounds bounds
+   in Map.map pickFromBounds bounds
   where
     pickFromBounds (Bounds lowers uppers) =
       let solvedLowers = nub (filter containsNoTypeVars ((.boundType) <$> lowers))
@@ -262,13 +306,13 @@ collectFinalSubstitutions constraints =
             -- (intersection of all known upper bounds) if any. With a
             -- single upper bound the intersection is that bound itself.
             [] -> case solvedUppers of
-              [] -> Nothing
-              [single] -> Just single
-              manyUppers -> Just (intersectUpperBoundsViaNT manyUppers)
+              [] -> SemanticTypeUnknown
+              [single] -> single
+              manyUppers -> intersectUpperBoundsViaNT manyUppers
             -- One or more concrete lower bounds: pin to their union (the
             -- least upper bound), which is the most precise type that
             -- subsumes every flow into α.
-            lowersOnly -> Just (unionSemantic lowersOnly)
+            lowersOnly -> unionSemantic lowersOnly
 
 -- | Take the intersection of multiple upper bounds. SemanticType has no
 -- intersection constructor, so we go through 'NormalizedType' which does:

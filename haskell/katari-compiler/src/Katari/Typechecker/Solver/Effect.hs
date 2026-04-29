@@ -40,7 +40,7 @@ import Katari.Typechecker.Solver.Internal
 -- (currently empty — effects rarely produce conflicts under Katari's
 -- usage patterns).
 solveEffectConstraints ::
-  [Constraint] ->
+  Set Constraint ->
   (Map EffectVarId (Set VariableId), [SolverError])
 solveEffectConstraints constraints =
   let allEffectVars = collectEffectVars constraints
@@ -65,7 +65,7 @@ fixpoint step current =
 -- | Apply each constraint once: for every effect var on the RHS, update its
 -- accumulated value with the contributions inferred from the LHS.
 propagateOnce ::
-  [Constraint] ->
+  Set Constraint ->
   Map EffectVarId (Set VariableId) ->
   Map EffectVarId (Set VariableId)
 propagateOnce constraints initial = foldr (applyConstraint initial) initial constraints
@@ -109,7 +109,7 @@ propagateOnce constraints initial = foldr (applyConstraint initial) initial cons
 -- Helpers
 -- ===========================================================================
 
-collectEffectVars :: [Constraint] -> Set EffectVarId
+collectEffectVars :: Set Constraint -> Set EffectVarId
 collectEffectVars = foldr addFromConstraint Set.empty
   where
     addFromConstraint (EffectConstraint leftEffect rightEffect _) accumulator =

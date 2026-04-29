@@ -123,6 +123,8 @@ deriving instance Show (SemanticType phase)
 
 deriving instance Eq (SemanticType phase)
 
+deriving instance Ord (SemanticType phase)
+
 -- | Smart constructor for 'SemanticTypeUnion'. The convention is that a
 -- union always has 0 or 2+ branches; a singleton list is flattened to its
 -- contained type, and an empty list collapses to 'SemanticTypeNever' (the
@@ -153,7 +155,7 @@ data SemanticEffect phase = SemanticEffect
   { effectVars :: !(Set EffectVarId),
     effectReqs :: !(Set VariableId)
   }
-  deriving (Eq, Show)
+  deriving (Eq, Ord, Show)
 
 -- | The empty effect set (i.e. "pure"; no effects raised).
 emptyEffect :: SemanticEffect phase

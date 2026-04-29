@@ -37,21 +37,21 @@ runOneWithIdentifier src = case parseModuleStrict "<test>" src of
 
 countTypeConstraints :: ConstraintGenResult -> Int
 countTypeConstraints result =
-  length [() | TypeConstraint {} <- result.constraints]
+  length [() | TypeConstraint {} <- Set.toList result.constraints]
 
 countEffectConstraints :: ConstraintGenResult -> Int
 countEffectConstraints result =
-  length [() | EffectConstraint {} <- result.constraints]
+  length [() | EffectConstraint {} <- Set.toList result.constraints]
 
 typeConstraints :: ConstraintGenResult -> [(SemanticType Unresolved, SemanticType Unresolved)]
 typeConstraints result =
-  [(lhs, rhs) | TypeConstraint {typeLhs = lhs, typeRhs = rhs} <- result.constraints]
+  [(lhs, rhs) | TypeConstraint {typeLhs = lhs, typeRhs = rhs} <- Set.toList result.constraints]
 
 effectConstraints
   :: ConstraintGenResult
   -> [(SemanticEffect Unresolved, SemanticEffect Unresolved)]
 effectConstraints result =
-  [(lhs, rhs) | EffectConstraint {effectLhs = lhs, effectRhs = rhs} <- result.constraints]
+  [(lhs, rhs) | EffectConstraint {effectLhs = lhs, effectRhs = rhs} <- Set.toList result.constraints]
 
 -- | Find the VariableId for a given source name.
 variableIdOf :: Text -> IdentifierResult -> Maybe VariableId
@@ -687,18 +687,14 @@ implicitReturnReason = describe "ReasonImplicitReturn vs ReasonReturnStatement" 
   it "agent body fall-through tags constraint with ReasonImplicitReturn" $ do
     cg <- runOne "agent foo() -> integer { 1 }"
     cg.errors `shouldBe` []
-    let reasons = [r | TypeConstraint {reason = r} <- cg.constraints]
+    let reasons = [r | TypeConstraint {reason = r} <- Set.toList cg.constraints]
     any isImplicitReturn reasons `shouldBe` True
 
   it "explicit return statement tags constraint with ReasonReturnStatement" $ do
     cg <- runOne "agent foo() -> integer { return 1; }"
     cg.errors `shouldBe` []
-    let reasons = [r | TypeConstraint {reason = r} <- cg.constraints]
+    let reasons = [r | TypeConstraint {reason = r} <- Set.toList cg.constraints]
     any isReturnStatement reasons `shouldBe` True
   where
-    isImplicitReturn = \case
-      ReasonImplicitReturn _ -> True
-      _ -> False
-    isReturnStatement = \case
-      ReasonReturnStatement _ -> True
-      _ -> False
+    isImplicitReturn reason = reason.kind == ReasonImplicitReturn
+    isReturnStatement reason = reason.kind == ReasonReturnStatement

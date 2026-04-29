@@ -15,6 +15,7 @@ module Katari.Typechecker.Solver.Decompose
 where
 
 import Data.Map.Strict qualified as Map
+import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -40,26 +41,20 @@ import Katari.Typechecker.Solver.Internal
 -- decomposeConstraint
 -- ===========================================================================
 
--- | Single-step decomposition.
---
--- Returns @Right (settled, leftover)@:
---
---   * @settled@ — constraints discharged at this step (typically empty
---     when decomposition produced sub-constraints; the original is
---     "consumed").
---   * @leftover@ — constraints needing further processing: irreducible
---     leaves ("var vs anything") plus newly-generated sub-constraints
---     from structural decomposition.
+-- | Single-step decomposition. Returns the set of constraints that replace
+-- the input — either the original itself (when decomposition isn't
+-- applicable yet, e.g. a stuck @var \<: composite@) or the structural
+-- sub-constraints derived from the original. The caller iterates this until
+-- the constraint set stabilises.
 --
 -- Returns 'Left' on a hard contradiction (concrete-vs-concrete subtype
 -- failure or structural mismatch).
 decomposeConstraint ::
   Constraint ->
-  Either SolverError ([Constraint], [Constraint])
+  Either SolverError (Set Constraint)
 decomposeConstraint constraint = case constraint of
-  EffectConstraint {} ->
-    -- Effect constraints are handled separately; pass through.
-    Right ([], [constraint])
+  -- Effect constraints are handled separately; pass through.
+  EffectConstraint {} -> Right (Set.singleton constraint)
   TypeConstraint leftType rightType reason ->
     decomposeType constraint leftType rightType reason
 
@@ -68,15 +63,15 @@ decomposeType ::
   SemanticType Unresolved ->
   SemanticType Unresolved ->
   ConstraintReason ->
-  Either SolverError ([Constraint], [Constraint])
+  Either SolverError (Set Constraint)
 decomposeType original leftType rightType reason = case (leftType, rightType) of
   -- Trivial cases
   _ | leftType == rightType -> settled
   (SemanticTypeNever, _) -> settled
   (_, SemanticTypeUnknown) -> settled
   -- LHS or RHS is a type variable: leave for branching / bound aggregation.
-  (SemanticTypeVariable _, _) -> remain
-  (_, SemanticTypeVariable _) -> remain
+  (SemanticTypeVariable _, _) -> keep
+  (_, SemanticTypeVariable _) -> keep
   -- Both fully concrete (no type vars AND no effect vars): direct subtype
   -- check via NormalizedType. We use 'semanticToConcrete' as the gate so
   -- that function types with unresolved effect variables fall through to
@@ -90,10 +85,10 @@ decomposeType original leftType rightType reason = case (leftType, rightType) of
   -- Structural decomposition.
   (SemanticTypeUnion branches, _) ->
     -- (A | B) <: C  →  A <: C  AND  B <: C
-    yieldNew [TypeConstraint branch rightType reason | branch <- branches]
+    yield [TypeConstraint branch rightType reason | branch <- branches]
   (_, SemanticTypeUnion _) ->
     -- A <: (B | C): branching required (handled in Solver/Branch.hs).
-    remain
+    keep
   ( SemanticTypeFunction leftParameters leftReturn leftEffects,
     SemanticTypeFunction rightParameters rightReturn rightEffects
     )
@@ -108,7 +103,7 @@ decomposeType original leftType rightType reason = case (leftType, rightType) of
                 ]
               returnConstraint = TypeConstraint leftReturn rightReturn reason
               effectConstraint = EffectConstraint leftEffects rightEffects reason
-           in yieldNew (effectConstraint : returnConstraint : parameterConstraints)
+           in yield (effectConstraint : returnConstraint : parameterConstraints)
       | otherwise ->
           Left
             ( SolverErrorStructuralMismatch
@@ -120,10 +115,10 @@ decomposeType original leftType rightType reason = case (leftType, rightType) of
                 )
             )
   (SemanticTypeArray leftElement, SemanticTypeArray rightElement) ->
-    yieldNew [TypeConstraint leftElement rightElement reason] -- covariant
+    yield [TypeConstraint leftElement rightElement reason] -- covariant
   (SemanticTypeTuple leftElements, SemanticTypeTuple rightElements)
     | length leftElements == length rightElements ->
-        yieldNew
+        yield
           ( zipWith
               (\leftElement rightElement -> TypeConstraint leftElement rightElement reason)
               leftElements
@@ -152,11 +147,11 @@ decomposeType original leftType rightType reason = case (leftType, rightType) of
           )
   -- Other composites (e.g., function vs array) where one side might still
   -- contain a var: hand off to branching / bound aggregation.
-  _ -> remain
+  _ -> keep
   where
-    settled = Right ([original], [])
-    remain = Right ([], [original])
-    yieldNew newConstraints = Right ([], newConstraints)
+    settled = Right Set.empty
+    keep = Right (Set.singleton original)
+    yield newConstraints = Right (Set.fromList newConstraints)
 
 showLabels :: Map.Map Text (SemanticType phase) -> Text
 showLabels parameters =
@@ -166,7 +161,7 @@ decomposeObject ::
   Map.Map Text (SemanticType Unresolved) ->
   Map.Map Text (SemanticType Unresolved) ->
   ConstraintReason ->
-  Either SolverError ([Constraint], [Constraint])
+  Either SolverError (Set Constraint)
 decomposeObject leftFields rightFields reason =
   let missing = Map.keysSet rightFields `Set.difference` Map.keysSet leftFields
    in if not (Set.null missing)
@@ -179,12 +174,12 @@ decomposeObject leftFields rightFields reason =
                 )
             )
         else
-          let derivedConstraints =
-                [ TypeConstraint leftFieldType rightFieldType reason
-                  | (label, rightFieldType) <- Map.toList rightFields,
-                    Just leftFieldType <- [Map.lookup label leftFields]
-                ]
-           in Right ([], derivedConstraints)
+          Right $
+            Set.fromList
+              [ TypeConstraint leftFieldType rightFieldType reason
+                | (label, rightFieldType) <- Map.toList rightFields,
+                  Just leftFieldType <- [Map.lookup label leftFields]
+              ]
 
 
 tshow :: (Show a) => a -> Text
@@ -194,29 +189,19 @@ tshow = T.pack . show
 -- decomposeConstraintsAll
 -- ===========================================================================
 
--- | Iterate single-step decomposition until the leftover list stabilises.
--- Returns the union of all settled + leftover constraints (deduplicated by
--- equality). On any 'Left', short-circuit and propagate the error.
+-- | Iterate single-step decomposition until the constraint set stabilises.
+-- Each step replaces every constraint by its 'decomposeConstraint' result
+-- (the original itself if not yet decomposable, otherwise its structural
+-- sub-constraints), then re-runs until a fixpoint is reached. On any
+-- 'Left', short-circuit and propagate the error.
 decomposeConstraintsAll ::
-  [Constraint] ->
-  Either SolverError [Constraint]
+  Set Constraint ->
+  Either SolverError (Set Constraint)
 decomposeConstraintsAll = go
   where
     go constraints = do
-      stepped <- traverse decomposeConstraint constraints
-      let settled = concatMap fst stepped
-          leftover = concatMap snd stepped
-          combined = deduplicate (settled <> leftover)
-      if sameSet combined constraints
-        then pure combined
-        else go combined
-
-deduplicate :: (Eq a) => [a] -> [a]
-deduplicate =
-  foldr
-    (\element accumulator -> if element `elem` accumulator then accumulator else element : accumulator)
-    []
-
-sameSet :: (Eq a) => [a] -> [a] -> Bool
-sameSet leftSet rightSet =
-  all (`elem` rightSet) leftSet && all (`elem` leftSet) rightSet
+      stepped <- traverse decomposeConstraint (Set.toList constraints)
+      let next = Set.unions stepped
+      if next == constraints
+        then pure constraints
+        else go next

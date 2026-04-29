@@ -16,7 +16,14 @@ import Katari.Typechecker.Identifier
     identify,
   )
 import Katari.Typechecker.NormalizedType
-  ( NormalizedType (..),
+  ( ArraySlot (..),
+    FunctionShape (..),
+    FunctionSlot (..),
+    LayeredType (..),
+    NormalizedType (..),
+    NumberSlot (..),
+    ObjectSlot (..),
+    StringSlot (..),
   )
 import Katari.Typechecker.SemanticType
   ( SemanticType (..),
@@ -98,6 +105,7 @@ spec = describe "Katari.Typechecker.Solver" $ do
   nestedBlocks
   dataAndCompositeTypes
   higherOrderFunctions
+  narrowAndSubstitutionComposition
 
 -- ---------------------------------------------------------------------------
 -- Basic literal inference
@@ -570,3 +578,133 @@ higherOrderFunctions = describe "higher-order agents" $ do
             "agent run() -> integer { caller(cb = identity) }"
           ]
     solverResult.solverErrors `shouldBe` []
+
+-- ---------------------------------------------------------------------------
+-- narrow + substitution composition
+--
+-- These tests exercise the solver's "branch / narrow" path where a type
+-- variable α gets bound to a fresh-var skeleton (e.g. α := (x: t_p) -> t_r)
+-- and the sub-vars are pinned later. The final substitution must compose
+-- through these indirect entries, otherwise α's resolved type degenerates
+-- to NTUnknown.
+-- ---------------------------------------------------------------------------
+
+narrowAndSubstitutionComposition :: Spec
+narrowAndSubstitutionComposition = describe "narrow + substitution composition" $ do
+  it "(a) narrow on bare function param: g should resolve to a Function shape, not NTUnknown" $ do
+    -- `g` is unannotated; calling g(x = 1) emits t_g <: (x: 1) -> t_r,
+    -- which triggers narrow. After narrow, t_g := (x: p_var) -> r_var with
+    -- p_var, r_var fresh. Without final deep substitution composition,
+    -- t_g's value still references those vars and degenerates to NTUnknown.
+    (idResult, cgResult, solverResult) <-
+      runSolve $
+        mconcat
+          [ "agent apply(g) {\n",
+            "  return g(x = 1)\n",
+            "}"
+          ]
+    solverResult.solverErrors `shouldBe` []
+    let inferred = inferredTypeOf "g" idResult cgResult solverResult
+    inferred `shouldSatisfy` isFunctionShape
+
+  it "(b) transitive var-on-var: x flows through y to number" $ do
+    -- t_x <: t_y (let y = x), t_y <: number (via y + 1 arithmetic).
+    -- Propagation should derive t_x <: number (transitively), pinning t_x.
+    (idResult, cgResult, solverResult) <-
+      runSolve $
+        mconcat
+          [ "agent f(x) {\n",
+            "  let y = x\n",
+            "  return y + 1\n",
+            "}"
+          ]
+    solverResult.solverErrors `shouldBe` []
+    let inferred = inferredTypeOf "x" idResult cgResult solverResult
+    inferred `shouldSatisfy` isInhabited
+    inferred `shouldNotSatisfy` isNTUnknown
+
+  it "(c) β <: α only chain: x must inherit number through y annotation" $ do
+    -- t_x <: t_y, t_y == number (via wildcard-pattern annotation in let).
+    -- t_x's only direct lower bound is t_y (var) → propagation must derive
+    -- t_x <: number to avoid NTUnknown fallback.
+    (idResult, cgResult, solverResult) <-
+      runSolve $
+        mconcat
+          [ "agent f(x) {\n",
+            "  let y = x\n",
+            "  let _: number = y\n",
+            "}"
+          ]
+    solverResult.solverErrors `shouldBe` []
+    let inferred = inferredTypeOf "x" idResult cgResult solverResult
+    inferred `shouldSatisfy` isInhabited
+    inferred `shouldNotSatisfy` isNTUnknown
+
+  it "(d) function narrow with multi-chain: g resolved + α correct" $ do
+    -- Recreates the user's scenario:
+    --   (x: int) -> number <: γ            (doubler flows into g)
+    --   γ <: (x: int) -> β                 (g(x = 1) call site)
+    --   β <: α                             (let r = ...; α flow)
+    --   int <: α                           (separate int flow)
+    -- Both γ (= g) and α must be sensibly inferred. γ would degenerate to
+    -- NTUnknown without deep substitution composition.
+    (idResult, cgResult, solverResult) <-
+      runSolve $
+        mconcat
+          [ "agent doubler(x: integer) -> number { 1 }\n",
+            "agent test(extra: integer) {\n",
+            "  let g = doubler\n",
+            "  let r = g(x = 1)\n",
+            "  return if (true) { r } else { extra }\n",
+            "}"
+          ]
+    solverResult.solverErrors `shouldBe` []
+    let inferredG = inferredTypeOf "g" idResult cgResult solverResult
+    inferredG `shouldSatisfy` isFunctionShape
+
+-- ---------------------------------------------------------------------------
+-- Predicates over NormalizedType for narrow tests
+-- ---------------------------------------------------------------------------
+
+-- | True iff the resolved type has a 'FunctionOf' shape in its function layer.
+isFunctionShape :: Maybe NormalizedType -> Bool
+isFunctionShape = \case
+  Just (NTLayered LayeredType {functionLayer = FunctionOf _}) -> True
+  _ -> False
+
+-- | True iff the resolved type is exactly NTUnknown.
+isNTUnknown :: Maybe NormalizedType -> Bool
+isNTUnknown = \case
+  Just NTUnknown -> True
+  _ -> False
+
+-- | True iff the resolved type has at least one populated layer (i.e. some
+-- value can inhabit it). NTUnknown counts as inhabited (the lattice top).
+-- Layered with all-empty layers is the bottom (Never) and returns False.
+isInhabited :: Maybe NormalizedType -> Bool
+isInhabited = \case
+  Just NTUnknown -> True
+  Just (NTLayered layered) -> hasAnyLayer layered
+  Nothing -> False
+  where
+    hasAnyLayer LayeredType {..} =
+      hasNumber numberLayer
+        || hasString stringLayer
+        || not (null booleanLayer)
+        || nullLayer
+        || hasFunction functionLayer
+        || hasArray arrayLayer
+        || not (null tupleLayer)
+        || not (null dataLayer)
+        || hasObject objectLayer
+    hasNumber NumberInteger = True
+    hasNumber NumberNumber = True
+    hasNumber (NumberLiterals s) = not (null s)
+    hasString StringAny = True
+    hasString (StringLiterals s) = not (null s)
+    hasFunction FunctionAbsent = False
+    hasFunction (FunctionOf _) = True
+    hasArray ArrayAbsent = False
+    hasArray (ArrayOf _) = True
+    hasObject ObjectAbsent = False
+    hasObject (ObjectOf _) = True

@@ -31,6 +31,7 @@ module Katari.Typechecker.ConstraintGenerator
     -- * Constraint and reason
     Constraint (..),
     ConstraintReason (..),
+    ReasonKind (..),
     ConstraintError (..),
 
     -- * Result
@@ -46,7 +47,6 @@ import Control.Monad (unless)
 import Control.Monad.Reader (ReaderT, ask, asks, local, runReaderT)
 import Control.Monad.State.Strict (State, gets, modify, runState)
 import Control.Monad.Trans (lift)
-import Data.Bifunctor (second)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Set (Set)
@@ -106,69 +106,82 @@ data Constraint
         effectRhs :: !(SemanticEffect Unresolved),
         reason :: !ConstraintReason
       }
-  deriving (Eq, Show)
+  deriving (Eq, Ord, Show)
 
 -- | Where the constraint came from. Drives diagnostics; callers should pick
--- the most specific reason that applies. Each reason carries the source span
--- of the syntactic site that triggered it.
-data ConstraintReason
-  = ReasonAgentSignature SourceSpan
-  | ReasonRequestSignature SourceSpan
-  | ReasonExternalAgentSignature SourceSpan
-  | ReasonDataConstructorSignature SourceSpan
-  | ReasonRequestHandlerSignature SourceSpan
-  | ReasonReturnTypeAnnotation SourceSpan
-  | ReasonReturnStatement SourceSpan
+-- the most specific reason that applies. The 'sourceSpan' is the syntactic
+-- site that triggered the constraint — the 'kind' identifies the variety.
+data ConstraintReason = ConstraintReason
+  { kind :: !ReasonKind,
+    sourceSpan :: !SourceSpan
+  }
+  deriving (Eq, Ord, Show)
+
+instance HasSourceSpan ConstraintReason where
+  sourceSpanOf reason = reason.sourceSpan
+
+-- | Variety of a 'ConstraintReason'. Mirrors the previous tagged-union
+-- 'ConstraintReason' shape, but factored out so each constructor is a
+-- pure tag — the 'SourceSpan' lives once on the wrapper instead of being
+-- duplicated on every constructor.
+data ReasonKind
+  = ReasonAgentSignature
+  | ReasonRequestSignature
+  | ReasonExternalAgentSignature
+  | ReasonDataConstructorSignature
+  | ReasonRequestHandlerSignature
+  | ReasonReturnTypeAnnotation
+  | ReasonReturnStatement
   | -- | Body の暗黙 fall-through return (明示 @return@ 文ではなく block の
     -- 末尾式で関数を抜けるケース)。'ReasonReturnStatement' とは診断メッセージ
     -- を分けたいので別 reason。
-    ReasonImplicitReturn SourceSpan
-  | ReasonEffectBound SourceSpan
-  | ReasonHandleEffectDischarge SourceSpan
-  | ReasonHandlerEffectBound SourceSpan
-  | ReasonHandleNext SourceSpan
+    ReasonImplicitReturn
+  | ReasonEffectBound
+  | ReasonHandleEffectDischarge
+  | ReasonHandlerEffectBound
+  | ReasonHandleNext
   | -- | A request handler body that falls through without an explicit
     -- @next@ or @break@ is treated as if @break body-tail@: the value flows
     -- to the where-containing block's whole type, NOT through the where's
     -- @then@ clause (Koka-style algebraic-effect handlers).
-    ReasonHandleImplicitBreak SourceSpan
-  | ReasonHandleBreak SourceSpan
-  | ReasonHandleResultBody SourceSpan
+    ReasonHandleImplicitBreak
+  | ReasonHandleBreak
+  | ReasonHandleResultBody
   | -- | The body / break / return value of a block-with-then must match the
     -- @then@ clause's pattern type (@bodyTail <: patternType@).
-    ReasonThenPattern SourceSpan
+    ReasonThenPattern
   | -- | The @then@ body's tail value flows into the OUTER return / break /
     -- for-break context (one level up from this block-with-then).
-    ReasonThenBodyToOuter SourceSpan
+    ReasonThenBodyToOuter
   | -- | The @then@ body's tail value flows into the whole-block type
     -- (the "result of the entire block-with-where-and-then expression").
-    ReasonThenBodyToWhole SourceSpan
-  | ReasonForBreak SourceSpan
-  | ReasonForIn SourceSpan
-  | ReasonModifierUpdate SourceSpan
-  | ReasonLetPattern SourceSpan
-  | ReasonStateVarAnnotation SourceSpan
-  | ReasonForVarAnnotation SourceSpan
-  | ReasonVariablePatternAnnotation SourceSpan
-  | ReasonCallArgument SourceSpan
-  | ReasonBinaryOperator SourceSpan
-  | ReasonUnaryOperator SourceSpan
-  | ReasonIfCondition SourceSpan
-  | ReasonIfBranch SourceSpan
-  | ReasonMatchSubject SourceSpan
-  | ReasonMatchArm SourceSpan
-  | ReasonFieldAccess SourceSpan
-  | ReasonIndexAccessArray SourceSpan
-  | ReasonIndexAccessIndex SourceSpan
-  | ReasonTemplateInterpolation SourceSpan
-  | ReasonArrayElement SourceSpan
-  | ReasonConstructorPattern SourceSpan
+    ReasonThenBodyToWhole
+  | ReasonForBreak
+  | ReasonForIn
+  | ReasonModifierUpdate
+  | ReasonLetPattern
+  | ReasonStateVarAnnotation
+  | ReasonForVarAnnotation
+  | ReasonVariablePatternAnnotation
+  | ReasonCallArgument
+  | ReasonBinaryOperator
+  | ReasonUnaryOperator
+  | ReasonIfCondition
+  | ReasonIfBranch
+  | ReasonMatchSubject
+  | ReasonMatchArm
+  | ReasonFieldAccess
+  | ReasonIndexAccessArray
+  | ReasonIndexAccessIndex
+  | ReasonTemplateInterpolation
+  | ReasonArrayElement
+  | ReasonConstructorPattern
   | -- | Solver 内部で発生した「全 branch 失敗」など、syntactic な発生源を
     -- 特定できない構造的破綻のための marker。Diagnostics は何らかの span が
     -- 必要になるため、関連する第一の constraint の source span を載せる。
     -- 通常コードパスでは発生しない (発生した場合 user-visible なエラー)。
-    ReasonSolverInternal SourceSpan
-  deriving (Eq, Show)
+    ReasonSolverInternal
+  deriving (Eq, Ord, Show)
 
 -- | Errors emitted by the constraint generator itself (separate from solver
 -- errors). Currently the only failure mode is a cyclic type synonym.
@@ -188,7 +201,7 @@ type TypeEnvironment = Map VariableId (SemanticType Unresolved)
 data ConstraintGenResult = ConstraintGenResult
   { constrainedModules :: !(Map ModuleId (Module Constrained)),
     typeEnvironment :: !TypeEnvironment,
-    constraints :: ![Constraint],
+    constraints :: !(Set Constraint),
     nextTypeVarId :: !Int,
     nextEffectVarId :: !Int,
     errors :: ![ConstraintError]
@@ -203,7 +216,7 @@ data ConstraintState = ConstraintState
   { stateNextTypeVarId :: !Int,
     stateNextEffectVarId :: !Int,
     stateTypeEnvironment :: !TypeEnvironment,
-    stateConstraints :: ![Constraint],
+    stateConstraints :: !(Set Constraint),
     stateErrors :: ![ConstraintError]
   }
 
@@ -232,7 +245,7 @@ initialState =
     { stateNextTypeVarId = 0,
       stateNextEffectVarId = 0,
       stateTypeEnvironment = Map.empty,
-      stateConstraints = [],
+      stateConstraints = Set.empty,
       stateErrors = []
     }
 
@@ -290,7 +303,7 @@ addTypeConstraint ::
   ConstraintReason ->
   CG ()
 addTypeConstraint lhs rhs r = lift . modify $ \s ->
-  s {stateConstraints = TypeConstraint lhs rhs r : s.stateConstraints}
+  s {stateConstraints = Set.insert (TypeConstraint lhs rhs r) s.stateConstraints}
 
 -- | Equality is two subtype constraints in opposite directions.
 addEqTypeConstraint ::
@@ -308,7 +321,7 @@ addEffectConstraint ::
   ConstraintReason ->
   CG ()
 addEffectConstraint lhs rhs r = lift . modify $ \s ->
-  s {stateConstraints = EffectConstraint lhs rhs r : s.stateConstraints}
+  s {stateConstraints = Set.insert (EffectConstraint lhs rhs r) s.stateConstraints}
 
 -- | Tie a return-type variable to the (possibly fresh) declared return
 -- type. Skip the eq when both sides denote the same type variable —
@@ -321,7 +334,7 @@ addReturnAnnotationEq retTvId retSemantic sourceSpan =
     addEqTypeConstraint
       (SemanticTypeVariable retTvId)
       retSemantic
-      (ReasonReturnTypeAnnotation sourceSpan)
+      (ConstraintReason ReasonReturnTypeAnnotation sourceSpan)
 
 emitError :: ConstraintError -> CG ()
 emitError err = lift . modify $ \s -> s {stateErrors = err : s.stateErrors}
@@ -385,11 +398,11 @@ withThenModifiedContexts patternType thenBodyType span_ action = do
         addTypeConstraint
           (SemanticTypeVariable t1Id)
           patternType
-          (ReasonThenPattern span_)
+          (ConstraintReason ReasonThenPattern span_)
         addTypeConstraint
           thenBodyType
           (SemanticTypeVariable t0)
-          (ReasonThenBodyToOuter span_)
+          (ConstraintReason ReasonThenBodyToOuter span_)
         pure (Just t1Id)
 
 withSynonymVisit :: TypeId -> CG a -> CG a
@@ -565,14 +578,14 @@ processAgentLike sourceSpan name parameters returnType withEffects body = do
   retTvId <- freshReturnTypeVar retSemantic
   (body', bodyType) <-
     withReturn retTvId . withEnclosingEffects bodyEffectVarId $ walkBlock body
-  addTypeConstraint bodyType (SemanticTypeVariable retTvId) (ReasonImplicitReturn sourceSpan)
+  addTypeConstraint bodyType (SemanticTypeVariable retTvId) (ConstraintReason ReasonImplicitReturn sourceSpan)
   addReturnAnnotationEq retTvId retSemantic sourceSpan
   addEffectConstraint
     (effectFromVar bodyEffectVarId)
     effDeclared
-    (ReasonEffectBound sourceSpan)
+    (ConstraintReason ReasonEffectBound sourceSpan)
   let signature = SemanticTypeFunction paramSig retSemantic effDeclared
-  addEqTypeConstraint signature tFoo (ReasonAgentSignature sourceSpan)
+  addEqTypeConstraint signature tFoo (ConstraintReason ReasonAgentSignature sourceSpan)
   pure (parameters', body')
 
 walkRequestDecl :: RequestDeclaration Identified -> CG (RequestDeclaration Constrained)
@@ -586,7 +599,7 @@ walkRequestDecl RequestDeclaration {annotation, name, parameters, returnType, so
           paramSig
           retSemantic
           (maybe emptyEffect singletonEffect reqVarId)
-  addEqTypeConstraint signature tReq (ReasonRequestSignature sourceSpan)
+  addEqTypeConstraint signature tReq (ConstraintReason ReasonRequestSignature sourceSpan)
   pure
     RequestDeclaration
       { annotation = annotation,
@@ -603,7 +616,7 @@ walkExternalAgentDecl ExternalAgentDeclaration {annotation, name, parameters, re
   retSemantic <- elaborateType returnType
   effects <- elaborateRequestList withEffects
   let signature = SemanticTypeFunction paramSig retSemantic effects
-  addEqTypeConstraint signature tExt (ReasonExternalAgentSignature sourceSpan)
+  addEqTypeConstraint signature tExt (ConstraintReason ReasonExternalAgentSignature sourceSpan)
   pure
     ExternalAgentDeclaration
       { annotation = annotation,
@@ -628,7 +641,7 @@ walkDataDecl DataDeclaration {annotation, name, typeName, parameters, sourceSpan
           (Map.fromList fields)
           (maybe SemanticTypeUnknown SemanticTypeData tid)
           emptyEffect
-  addEqTypeConstraint signature tCtor (ReasonDataConstructorSignature sourceSpan)
+  addEqTypeConstraint signature tCtor (ConstraintReason ReasonDataConstructorSignature sourceSpan)
   parameters' <- mapM walkDataParameter parameters
   pure
     DataDeclaration
@@ -697,7 +710,7 @@ walkPattern = \case
     patternType <- case typeAnnotation of
       Just t -> do
         annotated <- elaborateType t
-        addEqTypeConstraint tx annotated (ReasonVariablePatternAnnotation sourceSpan)
+        addEqTypeConstraint tx annotated (ConstraintReason ReasonVariablePatternAnnotation sourceSpan)
         pure annotated
       Nothing -> pure tx
     pure
@@ -756,7 +769,7 @@ walkPattern = \case
     patternResult <- freshTypeVar
     let synthesised =
           SemanticTypeFunction argSig patternResult emptyEffect
-    addTypeConstraint synthesised tCtor (ReasonConstructorPattern sourceSpan)
+    addTypeConstraint synthesised tCtor (ConstraintReason ReasonConstructorPattern sourceSpan)
     pure
       ( PatternQualifiedConstructor
           QualifiedConstructorPattern
@@ -891,7 +904,7 @@ walkBlockWithWhere statements returnExpression wb blockSpan = do
           pure (Nothing, t)
       (thenBody', thenBodyType) <-
         withEnclosingEffects e4Id (walkBlock thenBody)
-      addTypeConstraint thenBodyType tWholeBlock (ReasonThenBodyToWhole wbSpan)
+      addTypeConstraint thenBodyType tWholeBlock (ConstraintReason ReasonThenBodyToWhole wbSpan)
       pure (Just (pattern', thenBody'), Just patternType, Just thenBodyType)
 
   -- (3) Body walk: under e3 effect, with contexts modified by then if any.
@@ -905,8 +918,8 @@ walkBlockWithWhere statements returnExpression wb blockSpan = do
   -- (4) Body normal completion → either through the pattern (if then) or
   --     directly into the whole-block type.
   case maybePatternType of
-    Just patTy -> addTypeConstraint bodyTy patTy (ReasonThenPattern blockSpan)
-    Nothing -> addTypeConstraint bodyTy tWholeBlock (ReasonHandleResultBody blockSpan)
+    Just patTy -> addTypeConstraint bodyTy patTy (ConstraintReason ReasonThenPattern blockSpan)
+    Nothing -> addTypeConstraint bodyTy tWholeBlock (ConstraintReason ReasonHandleResultBody blockSpan)
 
   -- (5) Handlers: OUTER contexts (not modified by then), e4 effect, plus
   --     withHandleScope so 'break' inside a handler body targets tWholeBlock.
@@ -924,11 +937,11 @@ walkBlockWithWhere statements returnExpression wb blockSpan = do
   addEffectConstraint
     (effectFromVar e3Id)
     (unionEffects e1Eff e2Eff)
-    (ReasonHandleEffectDischarge wbSpan)
+    (ConstraintReason ReasonHandleEffectDischarge wbSpan)
   addEffectConstraint
     (effectFromVar e4Id)
     e1Eff
-    (ReasonHandlerEffectBound wbSpan)
+    (ConstraintReason ReasonHandlerEffectBound wbSpan)
 
   pure
     ( Block
@@ -984,7 +997,7 @@ walkBlockBody statements returnExpression = do
 
 walkStateVariable :: StateVariableBinding Identified -> CG (StateVariableBinding Constrained)
 walkStateVariable StateVariableBinding {name, typeAnnotation, initial, sourceSpan} = do
-  initial' <- emitInitializerConstraints (ReasonStateVarAnnotation sourceSpan) name typeAnnotation initial
+  initial' <- emitInitializerConstraints (ConstraintReason ReasonStateVarAnnotation sourceSpan) name typeAnnotation initial
   pure
     StateVariableBinding
       { name = passThroughVariableName name,
@@ -1040,7 +1053,7 @@ walkRequestHandler e4Id tWholeBlockId RequestHandler {moduleQualifier, name, par
   -- constrains explicit @next@ statements.
   (body', bodyTy) <-
     withEnclosingEffects e4Id . withHandleScope tWholeBlockId retTvId $ walkBlock body
-  addTypeConstraint bodyTy (SemanticTypeVariable tWholeBlockId) (ReasonHandleImplicitBreak sourceSpan)
+  addTypeConstraint bodyTy (SemanticTypeVariable tWholeBlockId) (ConstraintReason ReasonHandleImplicitBreak sourceSpan)
   addReturnAnnotationEq retTvId retSemantic sourceSpan
   let handlerSignature =
         SemanticTypeFunction
@@ -1048,7 +1061,7 @@ walkRequestHandler e4Id tWholeBlockId RequestHandler {moduleQualifier, name, par
           retSemantic
           (maybe emptyEffect singletonEffect reqVarId)
   -- subtype only (handler is a re-assignment of the underlying req)
-  addTypeConstraint handlerSignature tHandled (ReasonRequestHandlerSignature sourceSpan)
+  addTypeConstraint handlerSignature tHandled (ConstraintReason ReasonRequestHandlerSignature sourceSpan)
   pure
     RequestHandler
       { moduleQualifier = fmap passThroughModuleName moduleQualifier,
@@ -1080,7 +1093,7 @@ walkLet LetStatement {pattern, value, sourceSpan} = do
   value' <- walkExpression value
   let valueType = constrainedExpressionType value'
   (pattern', patternType) <- walkPattern pattern
-  addTypeConstraint valueType patternType (ReasonLetPattern sourceSpan)
+  addTypeConstraint valueType patternType (ConstraintReason ReasonLetPattern sourceSpan)
   pure LetStatement {pattern = pattern', value = value', sourceSpan = sourceSpan}
 
 walkAgentStatement :: AgentStatement Identified -> CG (AgentStatement Constrained)
@@ -1102,7 +1115,7 @@ walkReturn ReturnStatement {value, sourceSpan} = do
   let valueType = constrainedExpressionType value'
   retContext <- asks (.contextEnclosingReturn)
   case retContext of
-    Just rt -> addTypeConstraint valueType (SemanticTypeVariable rt) (ReasonReturnStatement sourceSpan)
+    Just rt -> addTypeConstraint valueType (SemanticTypeVariable rt) (ConstraintReason ReasonReturnStatement sourceSpan)
     Nothing -> pure ()
   pure ReturnStatement {value = value', sourceSpan = sourceSpan}
 
@@ -1114,7 +1127,7 @@ walkNext NextStatement {value, modifiers, sourceSpan} = do
   -- Tie the resume value to the innermost enclosing handler's next-tv.
   nextContext <- asks (.contextEnclosingHandleNext)
   case nextContext of
-    Just tv -> addTypeConstraint valueType (SemanticTypeVariable tv) (ReasonHandleNext sourceSpan)
+    Just tv -> addTypeConstraint valueType (SemanticTypeVariable tv) (ConstraintReason ReasonHandleNext sourceSpan)
     Nothing -> pure () -- not inside a handler; identifier/parser already errored
   pure NextStatement {value = value', modifiers = modifiers', sourceSpan = sourceSpan}
 
@@ -1124,7 +1137,7 @@ walkBreak BreakStatement {value, sourceSpan} = do
   let valueType = constrainedExpressionType value'
   resultContext <- asks (.contextEnclosingHandleResult)
   case resultContext of
-    Just rt -> addTypeConstraint valueType (SemanticTypeVariable rt) (ReasonHandleBreak sourceSpan)
+    Just rt -> addTypeConstraint valueType (SemanticTypeVariable rt) (ConstraintReason ReasonHandleBreak sourceSpan)
     Nothing -> pure ()
   pure BreakStatement {value = value', sourceSpan = sourceSpan}
 
@@ -1141,7 +1154,7 @@ walkForBreak ForBreakStatement {value, sourceSpan} = do
   let valueType = constrainedExpressionType value'
   breakContext <- asks (.contextEnclosingForBreak)
   case breakContext of
-    Just bv -> addTypeConstraint valueType (SemanticTypeVariable bv) (ReasonForBreak sourceSpan)
+    Just bv -> addTypeConstraint valueType (SemanticTypeVariable bv) (ConstraintReason ReasonForBreak sourceSpan)
     Nothing -> pure ()
   pure ForBreakStatement {value = value', sourceSpan = sourceSpan}
 
@@ -1150,7 +1163,7 @@ walkModifier Modifier {name, value, sourceSpan} = do
   value' <- walkExpression value
   let valueType = constrainedExpressionType value'
   tVar <- variableTypeFromName name
-  addTypeConstraint valueType tVar (ReasonModifierUpdate sourceSpan)
+  addTypeConstraint valueType tVar (ConstraintReason ReasonModifierUpdate sourceSpan)
   pure Modifier {name = passThroughVariableName name, value = value', sourceSpan = sourceSpan}
 
 -- ---------------------------------------------------------------------------
@@ -1221,7 +1234,7 @@ walkArrayExpr ArrayExpression {elements, sourceSpan} = do
         addTypeConstraint
           (constrainedExpressionType e)
           tElem
-          (ReasonArrayElement sourceSpan)
+          (ConstraintReason ReasonArrayElement sourceSpan)
     )
     elements'
   pure
@@ -1247,7 +1260,7 @@ walkCallExpr CallExpression {callee, arguments, sourceSpan} = do
   enclosing <- asks (.contextEnclosingEffects)
   let calleeEff = maybe emptyEffect effectFromVar enclosing
       expected = SemanticTypeFunction argSig tResult calleeEff
-  addTypeConstraint calleeType expected (ReasonCallArgument sourceSpan)
+  addTypeConstraint calleeType expected (ConstraintReason ReasonCallArgument sourceSpan)
   pure
     ( ExpressionCall
         CallExpression
@@ -1309,22 +1322,22 @@ binaryOperatorConstraints operator lhs rhs sourceSpan = case operator of
   where
     arithmetic = do
       resultType <- freshTypeVar
-      addTypeConstraint lhs resultType (ReasonBinaryOperator sourceSpan)
-      addTypeConstraint rhs resultType (ReasonBinaryOperator sourceSpan)
-      addTypeConstraint resultType SemanticTypeNumber (ReasonBinaryOperator sourceSpan)
+      addTypeConstraint lhs resultType (ConstraintReason ReasonBinaryOperator sourceSpan)
+      addTypeConstraint rhs resultType (ConstraintReason ReasonBinaryOperator sourceSpan)
+      addTypeConstraint resultType SemanticTypeNumber (ConstraintReason ReasonBinaryOperator sourceSpan)
       pure resultType
     noConstraintBoolean = pure SemanticTypeBoolean
     compareNumeric = do
-      addTypeConstraint lhs SemanticTypeNumber (ReasonBinaryOperator sourceSpan)
-      addTypeConstraint rhs SemanticTypeNumber (ReasonBinaryOperator sourceSpan)
+      addTypeConstraint lhs SemanticTypeNumber (ConstraintReason ReasonBinaryOperator sourceSpan)
+      addTypeConstraint rhs SemanticTypeNumber (ConstraintReason ReasonBinaryOperator sourceSpan)
       pure SemanticTypeBoolean
     logical = do
-      addTypeConstraint lhs SemanticTypeBoolean (ReasonBinaryOperator sourceSpan)
-      addTypeConstraint rhs SemanticTypeBoolean (ReasonBinaryOperator sourceSpan)
+      addTypeConstraint lhs SemanticTypeBoolean (ConstraintReason ReasonBinaryOperator sourceSpan)
+      addTypeConstraint rhs SemanticTypeBoolean (ConstraintReason ReasonBinaryOperator sourceSpan)
       pure SemanticTypeBoolean
     concatString = do
-      addTypeConstraint lhs SemanticTypeString (ReasonBinaryOperator sourceSpan)
-      addTypeConstraint rhs SemanticTypeString (ReasonBinaryOperator sourceSpan)
+      addTypeConstraint lhs SemanticTypeString (ConstraintReason ReasonBinaryOperator sourceSpan)
+      addTypeConstraint rhs SemanticTypeString (ConstraintReason ReasonBinaryOperator sourceSpan)
       pure SemanticTypeString
 
 walkUnaryExpr :: UnaryOperatorExpression Identified -> CG (Expression Constrained)
@@ -1333,10 +1346,10 @@ walkUnaryExpr UnaryOperatorExpression {operator, operand, sourceSpan} = do
   let ot = constrainedExpressionType operand'
   resultType <- case operator of
     UnaryOperatorNegate -> do
-      addTypeConstraint ot SemanticTypeNumber (ReasonUnaryOperator sourceSpan)
+      addTypeConstraint ot SemanticTypeNumber (ConstraintReason ReasonUnaryOperator sourceSpan)
       pure SemanticTypeNumber
     UnaryOperatorNot -> do
-      addTypeConstraint ot SemanticTypeBoolean (ReasonUnaryOperator sourceSpan)
+      addTypeConstraint ot SemanticTypeBoolean (ConstraintReason ReasonUnaryOperator sourceSpan)
       pure SemanticTypeBoolean
   pure
     ( ExpressionUnaryOperator
@@ -1352,7 +1365,7 @@ walkIfExpr :: IfExpression Identified -> CG (Expression Constrained)
 walkIfExpr IfExpression {condition, thenBlock, elseBlock, sourceSpan} = do
   condition' <- walkExpression condition
   let condType = constrainedExpressionType condition'
-  addTypeConstraint condType SemanticTypeBoolean (ReasonIfCondition sourceSpan)
+  addTypeConstraint condType SemanticTypeBoolean (ConstraintReason ReasonIfCondition sourceSpan)
   (thenBlock', thenType) <- walkBlock thenBlock
   (elseBlock', elseType) <- case elseBlock of
     Just b -> do
@@ -1360,8 +1373,8 @@ walkIfExpr IfExpression {condition, thenBlock, elseBlock, sourceSpan} = do
       pure (Just b', ty)
     Nothing -> pure (Nothing, SemanticTypeNull)
   tResult <- freshTypeVar
-  addTypeConstraint thenType tResult (ReasonIfBranch sourceSpan)
-  addTypeConstraint elseType tResult (ReasonIfBranch sourceSpan)
+  addTypeConstraint thenType tResult (ConstraintReason ReasonIfBranch sourceSpan)
+  addTypeConstraint elseType tResult (ConstraintReason ReasonIfBranch sourceSpan)
   pure
     ( ExpressionIf
         IfExpression
@@ -1381,7 +1394,7 @@ walkMatchExpr MatchExpression {subject, cases, sourceSpan} = do
   pairs <- mapM (walkCaseArm tMatch) cases
   let (cases', patternTypes) = unzip pairs
       patternUnion = unionSemantic patternTypes
-  addTypeConstraint subjectType patternUnion (ReasonMatchSubject sourceSpan)
+  addTypeConstraint subjectType patternUnion (ConstraintReason ReasonMatchSubject sourceSpan)
   pure
     ( ExpressionMatch
         MatchExpression
@@ -1399,7 +1412,7 @@ walkCaseArm ::
 walkCaseArm tMatch CaseArm {pattern, body, sourceSpan} = do
   (pattern', patternType) <- walkPattern pattern
   (body', bodyTy) <- walkBlock body
-  addTypeConstraint bodyTy tMatch (ReasonMatchArm sourceSpan)
+  addTypeConstraint bodyTy tMatch (ConstraintReason ReasonMatchArm sourceSpan)
   pure
     ( CaseArm
         { pattern = pattern',
@@ -1442,14 +1455,14 @@ walkForInBinding ForInBinding {pattern, source, sourceSpan} = do
   source' <- walkExpression source
   let sourceType = constrainedExpressionType source'
   tElem <- freshTypeVar
-  addTypeConstraint sourceType (SemanticTypeArray tElem) (ReasonForIn sourceSpan)
+  addTypeConstraint sourceType (SemanticTypeArray tElem) (ConstraintReason ReasonForIn sourceSpan)
   (pattern', patternType) <- walkPattern pattern
-  addTypeConstraint tElem patternType (ReasonForIn sourceSpan)
+  addTypeConstraint tElem patternType (ConstraintReason ReasonForIn sourceSpan)
   pure ForInBinding {pattern = pattern', source = source', sourceSpan = sourceSpan}
 
 walkForVarBinding :: ForVarBinding Identified -> CG (ForVarBinding Constrained)
 walkForVarBinding ForVarBinding {name, typeAnnotation, initial, sourceSpan} = do
-  initial' <- emitInitializerConstraints (ReasonForVarAnnotation sourceSpan) name typeAnnotation initial
+  initial' <- emitInitializerConstraints (ConstraintReason ReasonForVarAnnotation sourceSpan) name typeAnnotation initial
   pure
     ForVarBinding
       { name = passThroughVariableName name,
@@ -1478,7 +1491,7 @@ walkFieldAccessExpr FieldAccessExpression {object, fieldName, sourceSpan} = do
   addTypeConstraint
     objectType
     (SemanticTypeObject (Map.singleton fieldName.text tField))
-    (ReasonFieldAccess sourceSpan)
+    (ConstraintReason ReasonFieldAccess sourceSpan)
   pure
     ( ExpressionFieldAccess
         FieldAccessExpression
@@ -1496,8 +1509,8 @@ walkIndexAccessExpr IndexAccessExpression {array, index, sourceSpan} = do
   index' <- walkExpression index
   let indexType = constrainedExpressionType index'
   tElem <- freshTypeVar
-  addTypeConstraint arrayType (SemanticTypeArray tElem) (ReasonIndexAccessArray sourceSpan)
-  addTypeConstraint indexType SemanticTypeInteger (ReasonIndexAccessIndex sourceSpan)
+  addTypeConstraint arrayType (SemanticTypeArray tElem) (ConstraintReason ReasonIndexAccessArray sourceSpan)
+  addTypeConstraint indexType SemanticTypeInteger (ConstraintReason ReasonIndexAccessIndex sourceSpan)
   pure
     ( ExpressionIndexAccess
         IndexAccessExpression
@@ -1527,7 +1540,7 @@ walkTemplateElement = \case
   TemplateElementExpression TemplateExpressionElement {value, sourceSpan} -> do
     value' <- walkExpression value
     let valueType = constrainedExpressionType value'
-    addTypeConstraint valueType SemanticTypeString (ReasonTemplateInterpolation sourceSpan)
+    addTypeConstraint valueType SemanticTypeString (ConstraintReason ReasonTemplateInterpolation sourceSpan)
     pure (TemplateElementExpression TemplateExpressionElement {value = value', sourceSpan = sourceSpan})
 
 walkQualifiedReferenceExpr ::
@@ -1550,79 +1563,42 @@ walkQualifiedReferenceExpr QualifiedReferenceExpression {moduleQualifier, target
 -- ===========================================================================
 
 passThroughVariableName :: NameRef Identified 'VariableRef -> NameRef Constrained 'VariableRef
-passThroughVariableName ref =
-  NameRef
-    { text = ref.text,
-      sourceSpan = ref.sourceSpan,
-      metadata = case ref.metadata of
-        IdentifiedVariable vid -> ConstrainedVariable vid
-        IdentifiedUnresolvedVariable -> ConstrainedUnresolvedVariable
-    }
+passThroughVariableName = mapNameRefMetadata identifiedToConstrained
 
 passThroughTypeName :: NameRef Identified 'TypeRef -> NameRef Constrained 'TypeRef
-passThroughTypeName ref =
-  NameRef
-    { text = ref.text,
-      sourceSpan = ref.sourceSpan,
-      metadata = case ref.metadata of
-        IdentifiedType tid -> ConstrainedType tid
-        IdentifiedUnresolvedType -> ConstrainedUnresolvedType
-    }
+passThroughTypeName = mapNameRefMetadata identifiedToConstrained
 
 passThroughModuleName :: NameRef Identified 'ModuleRef -> NameRef Constrained 'ModuleRef
-passThroughModuleName ref =
-  NameRef
-    { text = ref.text,
-      sourceSpan = ref.sourceSpan,
-      metadata = case ref.metadata of
-        IdentifiedModule mid -> ConstrainedModule mid
-        IdentifiedUnresolvedModule -> ConstrainedUnresolvedModule
-    }
+passThroughModuleName = mapNameRefMetadata identifiedToConstrained
 
 passThroughLabelName :: NameRef Identified 'LabelRef -> NameRef Constrained 'LabelRef
-passThroughLabelName ref =
-  NameRef
-    { text = ref.text,
-      sourceSpan = ref.sourceSpan,
-      metadata = ConstrainedLabel
-    }
+passThroughLabelName = mapNameRefMetadata identifiedToConstrained
 
 passThroughType :: SyntacticType Identified -> SyntacticType Constrained
-passThroughType = \case
-  TypePrimitive PrimitiveTypeNode {kind, sourceSpan} ->
-    TypePrimitive PrimitiveTypeNode {kind = kind, sourceSpan = sourceSpan}
-  TypeName TypeNameNode {name, sourceSpan} ->
-    TypeName TypeNameNode {name = passThroughTypeName name, sourceSpan = sourceSpan}
-  TypeFunction FunctionTypeNode {parameterTypes, returnType, withEffects, sourceSpan} ->
-    TypeFunction
-      FunctionTypeNode
-        { parameterTypes = map (second passThroughType) parameterTypes,
-          returnType = passThroughType returnType,
-          withEffects = map passThroughRequest withEffects,
-          sourceSpan = sourceSpan
-        }
-  TypeArray ArrayTypeNode {elementType, sourceSpan} ->
-    TypeArray ArrayTypeNode {elementType = passThroughType elementType, sourceSpan = sourceSpan}
-  TypeTuple TupleTypeNode {elementTypes, sourceSpan} ->
-    TypeTuple TupleTypeNode {elementTypes = map passThroughType elementTypes, sourceSpan = sourceSpan}
-  TypeQualified QualifiedTypeNode {qualifier, target, sourceSpan} ->
-    TypeQualified
-      QualifiedTypeNode
-        { qualifier = passThroughModuleName qualifier,
-          target = passThroughTypeName target,
-          sourceSpan = sourceSpan
-        }
-  TypeLiteral node -> TypeLiteral node
-  TypeUnion TypeUnionNode {branches, sourceSpan} ->
-    TypeUnion TypeUnionNode {branches = map passThroughType branches, sourceSpan = sourceSpan}
-  TypeNever NeverTypeNode {sourceSpan} ->
-    TypeNever NeverTypeNode {sourceSpan = sourceSpan}
-  TypeUnknown UnknownTypeNode {sourceSpan} ->
-    TypeUnknown UnknownTypeNode {sourceSpan = sourceSpan}
+passThroughType = mapSyntacticTypeMetadata identifiedToConstrained
 
 passThroughRequest :: SyntacticRequest Identified -> SyntacticRequest Constrained
-passThroughRequest SyntacticRequest {name, sourceSpan} =
-  SyntacticRequest {name = passThroughVariableName name, sourceSpan = sourceSpan}
+passThroughRequest = mapSyntacticRequestMetadata identifiedToConstrained
+
+-- | The metadata transformation for the trivial NameRef kinds (variables /
+-- types / modules / labels). The 'IdentifiedExpression' and
+-- 'IdentifiedPattern' cases are unreachable here: Expression / Pattern
+-- metadata is filled in directly by the constraint walkers (with a
+-- 'SemanticType Unresolved' inferred for the node) rather than passed
+-- through generically.
+identifiedToConstrained :: Identified sym -> Constrained sym
+identifiedToConstrained = \case
+  IdentifiedVariable vid -> ConstrainedVariable vid
+  IdentifiedUnresolvedVariable -> ConstrainedUnresolvedVariable
+  IdentifiedType tid -> ConstrainedType tid
+  IdentifiedUnresolvedType -> ConstrainedUnresolvedType
+  IdentifiedModule mid -> ConstrainedModule mid
+  IdentifiedUnresolvedModule -> ConstrainedUnresolvedModule
+  IdentifiedLabel -> ConstrainedLabel
+  IdentifiedExpression ->
+    error "identifiedToConstrained: Expression metadata requires a SemanticType (use walk*Expr)"
+  IdentifiedPattern ->
+    error "identifiedToConstrained: Pattern metadata requires a SemanticType (use walkPattern)"
 
 -- ===========================================================================
 -- Small accessors and conveniences
@@ -1672,7 +1648,7 @@ generateConstraints result = case runState (runReaderT action ctx) initialState 
     ConstraintGenResult
       { constrainedModules = Map.fromList modulesPair,
         typeEnvironment = finalState.stateTypeEnvironment,
-        constraints = reverse finalState.stateConstraints,
+        constraints = finalState.stateConstraints,
         nextTypeVarId = finalState.stateNextTypeVarId,
         nextEffectVarId = finalState.stateNextEffectVarId,
         errors = reverse finalState.stateErrors
