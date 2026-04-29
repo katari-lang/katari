@@ -1,0 +1,102 @@
+# katari-compiler
+
+KATARI 言語の純粋関数コンパイラ。Source text の `Map ModuleName Text` を入力に、
+JSON 化可能な IR と JSON Schema, 統一 Diagnostic を出力する。File IO は呼び出し側
+(別パッケージ予定の `katari-project` / CLI / LSP / playground) の責任。
+
+## 統一エントリ
+
+```haskell
+import Katari.Compile (compile, CompileInput (..), CompileResult (..))
+
+compile :: CompileInput -> CompileResult
+```
+
+`CompileResult` は `irModule`, `schemaBundle`, `diagnostics`, `solverResult`,
+`zonkResult` を含む。`Severity == Error` の diagnostic が一つでもあれば
+`irModule` / `schemaBundle` は `Nothing` になる (defensive)。
+
+## モジュール構造
+
+```
+Katari.Compile               -- 統一エントリ. 全 phase を直列に呼び出し、
+                                Diagnostic / IR / Schema をまとめて返す.
+
+Katari.Lexer                 -- Char stream → [WithPos Token]. 仮想セミコロン挿入,
+                                テンプレリテラル状態管理.
+Katari.Parser                -- Token stream → Module Parsed. megaparsec カスタム
+                                ストリーム. break/next 文脈を ReaderT で透過.
+
+Katari.AST                   -- Trees-that-Grow phase 化 AST. Phase = Parsed |
+                                Identified | Constrained | Zonked. NameMeta /
+                                ExprType / PatType の type family で phase 別 metadata.
+Katari.AST.Identifiers       -- VariableId / TypeId / ModuleId. Identifier pass で発行.
+
+Katari.Typechecker.Identifier      -- 名前解決 (variable / type / module / label).
+                                      未解決名は IdentifierError を produce.
+Katari.Typechecker.SemanticType    -- 型表現 (SemanticType, SemanticEffect).
+                                      Unresolved / Resolved の 2 phase. uniplate で walk.
+Katari.Typechecker.NormalizedType  -- 正規化型 (lattice 演算 unionNT / intersectNT,
+                                      subtype 判定).
+Katari.Typechecker.ConstraintGenerator -- AST Identified → AST Constrained + 制約集合
+                                          (subtype / effect).
+Katari.Typechecker.Solver          -- 制約解決. Decompose / Branch / Substitution /
+                                      Effect の sub-module で構造分解 → 分岐 →
+                                      代入決定 → effect 集約.
+Katari.Typechecker.Zonker          -- 解決済み代入を Constrained AST に焼き付け
+                                      Zonked AST へ (型情報を確定).
+
+Katari.Lowering              -- AST Zonked → IRModule. ReaderT (LowerEnv) State
+                                (LowerState). Pattern destructuring を tuple_get /
+                                get_field prim で再帰的に展開.
+Katari.IR                    -- IR データ型 + JSON serialization. Block GADT は
+                                BlockUser / Prim / Request / External / Ctor.
+                                BlockKind enum で UserBlock の役割を表現.
+                                ToJSON / FromJSON は genericToJSON で自動.
+Katari.Schema                -- ZonkResult → SchemaBundle. AI tool calling 用 JSON
+                                Schema (Draft 2020-12 サブセット). Annotation を
+                                description として埋め込む.
+
+Katari.Diagnostic            -- 統一 Diagnostic 型 (severity, code "K####", span,
+                                message, notes, hints). 各 phase の error 型から
+                                toDiagnostic で変換.
+```
+
+## パイプライン
+
+```
+Map ModuleName Text
+  → parse              [Diagnostic] (Lexer / Parser エラー K0001-K0099)
+  → identify           [Diagnostic] (Identifier エラー K0100-K0199)
+  → constraint-gen
+  → solve              [Diagnostic] (Solver / 型エラー K0200-K0299)
+  → zonk
+  → ┬ lower            [Diagnostic] (Lowering エラー K0300-K0399) → IRModule
+    └ buildSchemas → SchemaBundle
+```
+
+Lowering と Schema は `ZonkResult` を共有する独立並列 stage (Schema は IR に依存しない)。
+
+## ビルド・テスト
+
+```sh
+stack build katari-compiler
+stack test katari-compiler
+stack haddock katari-compiler --no-haddock-deps
+```
+
+## 設計上の方針
+
+- **Pure**: file IO / katari.toml 解析は別パッケージ (`katari-project` 予定) の責任。
+  本パッケージは LSP の unsaved buffer や playground 等から `Map ModuleName Text` を
+  直接受け取って動く。
+- **Trees-that-Grow**: phase 推移は payload を素通しする identity 変換になり
+  `passThroughX` 系 boilerplate を排除。
+- **JSON IR**: binary serialization は採用せず、IR は JSON のまま runtime に渡す。
+  ToJSON / FromJSON は `genericToJSON` で自動生成。
+- **Annotation は AST 側に温存**: `SemanticType` には annotation を入れない
+  (subtyping / normalization のノイズになるため)。Schema 生成時に AST を walk して
+  zip で組み合わせる。
+- **統一 Diagnostic**: 各 phase が独自エラー型を返す現状維持に加え、`toDiagnostic`
+  converter で `Diagnostic` (code, severity, span, message, notes, hints) に集約。
+  CLI / LSP / 新 TS runtime の結合点で扱いやすい。

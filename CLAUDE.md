@@ -6,42 +6,34 @@ KATARI 言語のコンパイラ・ランタイム・LSP の実装リポジトリ
 
 ```
 haskell/
-  katari-compiler/   # コンパイラライブラリ（library）
-  katari-cli/        # CLI ツール（executable: katari）
-  katari-lsp/        # LSP サーバー
-ts/                  # TypeScript 実装（pnpm workspace）
+  katari-compiler/   # コンパイラライブラリ (pure / IO なし)
+  katari-cli/        # CLI ツール (executable: katari) — 現在再設計中
+  katari-lsp/        # LSP サーバー — 現在再設計中
+ts/                  # TypeScript 実装 (pnpm workspace)
   packages/
-    katari-protocol/       # Katari Protocol ライブラリ (型, Store, Server, Router)
-    katari-runtime/        # ランタイム (IR 実行, イベントディスパッチ, DB 永続化)
-    katari-discord-server/ # Discord 外部サーバー
-    katari-ai-server/      # AI (Gemini) 外部サーバー
-    katari-cron-server/    # Cron 外部サーバー
+    katari-protocol/         # Katari Protocol ライブラリ (型, Store, Server, Router)
+    katari-runtime/          # ランタイム — 現在再設計中 (新 IR JSON に合わせ作り直し予定)
+    katari-discord-server/   # Discord 外部サーバー
+    katari-ai-server/        # AI (Gemini) 外部サーバー
+    katari-cron-server/      # Cron 外部サーバー
     katari-websearch-server/ # Web 検索外部サーバー
-    katari-sandbox-server/ # Docker サンドボックス外部サーバー
-doc/spec/            # 言語仕様書（00〜10）
+    katari-sandbox-server/   # Docker サンドボックス外部サーバー
+haskell-old/         # 旧実装 (参考用)
+samples/             # haskell-old の旧 syntax を使う未対応サンプル群 (compiler の参照対象外)
 ```
 
 ## ビルド・実行
 
 ```sh
-# Haskell コンパイラ
-stack build                # 全 Haskell パッケージ
-stack exec katari -- compile <file.ktr> -o <file.ktri>
-stack exec katari -- dump <file.ktr>   # IR をテキストダンプ
-stack exec katari -- apply             # ランタイムにデプロイ
+# Haskell コンパイラのビルドと test
+stack build
+stack test
+
+# Haddock
+stack haddock katari-compiler --no-haddock-deps
 
 # TypeScript (pnpm v9 を使用)
 cd ts && pnpm install && pnpm -r run build
-
-# ランタイム起動 (Node.js)
-cd ts/packages/katari-runtime && pnpm start
-
-# ランタイム (Cloudflare Workers)
-cd ts/packages/katari-runtime && pnpm dev:worker
-cd ts/packages/katari-runtime && pnpm deploy
-
-# テスト
-cd ts/packages/katari-runtime && pnpm test
 ```
 
 ### pnpm バージョン
@@ -51,131 +43,145 @@ pnpm v10 にワークスペース検出のバグがあるため、pnpm v9 を使
 
 ## コンパイラパイプライン
 
+`katari-compiler` は **完全に pure** (file IO なし)。`Map ModuleName Text` を入力にとり、
+diagnostic と IR (JSON 化可能) と Schema を出力する。
+
 ```
-.ktr ファイル
-  → Katari.Lexer   Char stream → [WithPos Token]、仮想セミコロン挿入
-  → Katari.Parser  Token stream → AST (megaparsec カスタムストリーム)
-  → Module.hs      モジュールロード・名前解決
-  → Typechecker.hs 型チェック・エフェクト検証
-  → Lowering.hs    AST → IR
-  → Emit.hs        IR → KTRI バイナリ
+.ktr ソース (Map ModuleName Text)
+  → Katari.Lexer                   Char stream → [WithPos Token], 仮想セミコロン挿入
+  → Katari.Parser                  Token stream → Module Parsed (megaparsec カスタムストリーム)
+  → Katari.Typechecker.Identifier  名前解決, VariableId / TypeId / ModuleId 発行
+  → Katari.Typechecker.ConstraintGenerator  制約生成
+  → Katari.Typechecker.Solver      制約解決 (subtype, effect)
+  → Katari.Typechecker.Zonker      Resolved 型に確定
+  → Katari.Lowering                AST Zonked → IRModule (JSON 化可能)
+  ┖ Katari.Schema                  ZonkResult → SchemaBundle (AI tool calling 用 JSON Schema)
 ```
+
+統一エントリは [Katari.Compile](haskell/katari-compiler/src/Katari/Compile.hs):
+
+```haskell
+compile :: CompileInput -> CompileResult
+```
+
+各 phase は独自エラー型を返すが、最終的に [Katari.Diagnostic](haskell/katari-compiler/src/Katari/Diagnostic.hs)
+の統一 `Diagnostic` (severity, code, span, message, ...) に変換される。
+
+## AST: Trees-that-Grow
+
+AST ノードは `(p :: Phase)` でパラメータ化:
+
+```haskell
+type data Phase = Parsed | Identified | Constrained | Zonked
+```
+
+- `NameRef p s` の `resolution :: NameMeta p s` フィールドに phase 別の名前解決情報
+  (`Identified` 以降は `Maybe VariableId` / `Maybe TypeId` / `Maybe ModuleId`)。
+- `Expression p` / `Pattern p` の `typeOf :: ExprType p` / `PatType p` に推論型
+  (`Constrained` で `SemanticType Unresolved`、`Zonked` で `SemanticType Resolved`)。
+- phase 推移は payload を素通しする identity 変換になり、`passThroughX` 系の boilerplate は不要。
+
+## IR
+
+IR は **JSON 形式** (binary でない)。runtime は JSON を直接読む。
+
+- `Block` は GADT (`BlockUser` / `BlockPrim` / `BlockRequest` / `BlockExternal` / `BlockCtor`)
+- `BlockKind` enum で `UserBlock` の役割を表現:
+  - `BlockAgentEntry` — agent 本体 (catchesReturn)
+  - `BlockAgentEntryWithHandlers` — `where { handlers }` 付き agent
+  - `BlockHandleScope` — `where (var s = init) ...` の内側 scope (catchesBreak + inheritScope)
+  - `BlockInline` — inline block / arm body / for body / then block
+  - `BlockHandlerBody` — request handler 本体
+- `Statement` は GADT (`SCall` / `SMakeClosure` / `SLoadLiteral` / `SMatch` / `SFor` / `SExit` / `SCont`)
+- ToJSON / FromJSON は `genericToJSON` で自動生成 (`TaggedObject` sumEncoding)
 
 ## 重要な実装詳細
 
-### セミコロン自動挿入（Katari.Lexer）
+### セミコロン自動挿入 (Katari.Lexer)
 
-レキサーは空白・コメントを破棄し、`\n` のみ中間トークン `TNewline` として残す。
-`insertVirtualSemis` が各 `TNewline` について直前トークンが以下のいずれかなら `TSemi` に置換、そうでなければ破棄する:
+レキサーは空白・コメントを破棄し、`\n` のみ中間トークン `TokenNewline` として残す。
+`insertVirtualSemis` が各 `TokenNewline` について直前トークンが以下のいずれかなら `TokenSemicolon` に置換、そうでなければ破棄する:
 
-- 識別子 (`TIdent`)
-- 数値・文字列リテラル (`TIntLit`, `TFloatLit`, `TStringLit`, `TTemplateClose`)
+- 識別子, 数値・文字列リテラル, テンプレリテラル閉じ
 - `break`, `return`, `next`, `null`, `true`, `false`, 型キーワード (`integer`, `boolean`, `number`, `string`)
 - `)`, `]`, `}`
 
-括弧深度は追跡しない（Go 流儀）。言語規約で担保:
+括弧深度は追跡しない (Go 流儀)。言語規約で担保:
 
-- 複数行リスト（引数・配列・enum コンストラクタ等）は **末尾カンマ必須**
+- 複数行リスト (引数・配列・enum コンストラクタ等) は **末尾カンマ必須**
 - `else` / `then` / `where` は直前の `}` と同じ行
 - 演算子での改行は **演算子を行末**に置く
 
-テンプレリテラル `f"..."` / `f"""..."""` はレキサーがスタック (`[LexerCtx]`) で「文字列モード ↔ 式モード」を管理し、
-`TTemplateOpen` / `TTemplateStr` / `TTemplateExprOpen` / `TTemplateExprClose` / `TTemplateClose` トークンを発行する。
+テンプレリテラル `f"..."` / `f"""..."""` はレキサーがスタック で「文字列モード ↔ 式モード」を管理し、
+`TemplateOpen` / `TemplateString` / `TemplateExpressionOpen` / `TemplateExpressionClose` / `TemplateClose` トークンを発行する。
 
-### Handle スコープ（Lowering.hs）
+### break / next の文脈判別 (Parser)
 
-`handle` 文は「文」でその位置から囲むブロック末尾までがスコープ。
-Lowering では `SHandle` 以降の残り文を先読みして `IHandleBegin → scope body → IHandleEnd` を生成する。
+`BreakContext` (`TopContext` | `BreakForContext` | `BreakHandleContext`) を `ReaderT` でパーサーに引き回す。
 
-`IHandleEnd dst scopeVar hid` — ランタイムが scopeVar の値を return case に渡し、結果を dst に入れる。
+| コンテキスト                              | 許可される文                           |
+| ----------------------------------------- | -------------------------------------- |
+| `TopContext` (agent 本体)                 | `break` / `next` 両方禁止 (構文エラー) |
+| `BreakForContext` (for 本体)              | `ForNext` (引数なし) / `ForBreak`      |
+| `BreakHandleContext` (req handler 本体)   | `Next` (引数あり) / `Break`            |
 
-### break / next の文脈判別
+- `for` ブロック内の `break` → `StatementForBreak` → `SExit ExitForBreak` (for ループ脱出)
+- `where { handlers }` 内の `break` → `StatementBreak` → `SExit ExitBreak` (handle スコープ脱出)
 
-`BreakCtx` (`TopCtx` | `BreakForCtx` | `BreakHandleCtx`) を `ReaderT` でパーサーに引き回す。
+### Annotation 構文
 
-| コンテキスト                        | 許可される文                           |
-| ----------------------------------- | -------------------------------------- |
-| `TopCtx` (agent 本体)               | `break` / `next` 両方禁止 (構文エラー) |
-| `BreakForCtx` (for 本体)            | `ForNext` (引数なし) / `ForBreak`      |
-| `BreakHandleCtx` (req handler 本体) | `Next` (引数あり) / `Break`            |
+各宣言は `@"..."` 形式の文字列 annotation を持てる ([Parser.hs `parseAnnotation`](haskell/katari-compiler/src/Katari/Parser.hs)):
 
-- `for` ブロック内の `break` → `StatementForBreak` → `IForBreak`（for ループ脱出）
-- `handle` スコープ内の `break` → `StatementBreak` → `IBreak`（handle スコープ脱出）
-
-`for_break` キーワードは廃止済み（`break` に統一）。
-
-### 型注釈の方針
-
-`ParamBinding.pattern` は `Pattern` 型（旧 `TypedPattern` は廃止）。HM 型推論で補える場合は型注釈省略可能。
-`WildcardPattern` にも `typeAnnotation :: Maybe SyntacticType` があり `_: integer` の形で使用できる。
-
-### for 式の型
-
-`for(...) { body } finally { fin }` の型 = `finType ∪ breakType`
-`for(...) { body }` の型 = `null ∪ breakType`
-
-`breakType` は `collectForBreakNT` で本体を走査して収集（内側の for には潜らない）。
-
-### IRHandleDef
-
-```haskell
-data IRHandleDef = IRHandleDef
-  { ihdId         :: HandlerId
-  , ihdStateVars  :: [VarId]
-  , ihdStateInits :: [VarId]
-  , ihdBody       :: ThreadId          -- HANDLER_TARGET thread
-  , ihdReqCases   :: [(RequestId, ThreadId)]  -- REQUEST_HANDLER threads
-  , ihdThen       :: Maybe ThreadId    -- HANDLE_THEN thread
-  }
+```katari
+@"Greets a user by name."
+agent greet(name = name: string) -> string { ... }
 ```
 
-Handle のスコープ（残り文）は HANDLER_TARGET thread に、
-request case は REQUEST_HANDLER thread に、then 節は HANDLE_THEN thread に分離される。
+Annotation は AST に `annotation :: Maybe Text` として保持され、Schema 生成時に
+JSON Schema の `description` に埋め込まれる (AI tool calling 用)。SemanticType には
+入らない (subtyping 等のノイズになるため)。
 
-### for ループ state 変数の更新
+### Lowering (Writer/Reader 化済み)
 
-`next with { acc = acc + x }` は `IMove targetV newV` に直接変換される（スロットインデックスは使わない）。
+`Lower = ReaderT LowerEnv (State LowerState)`
+
+- `LowerEnv.localVars :: Map VariableId VarId` — 局所束縛 (Reader 化、`local`-restorer 不要)
+- `LowerState.lsCurrentEmitted :: [Statement]` — 現在 build 中の block の statements (逆順)
+- `emit` で蓄積、`runWithFreshBuffer` で save/restore、reverse して取り出し
+
+Pattern destructuring: `bindPatternLocals` / `bindPatternToFreshVar` 共通の
+`destructurePattern` が tuple/constructor を `tuple_get` / `get_field` prim 呼び出しで再帰的に分解。
+
+Local agent (`StatementAgent`): 親 scope に新しい BlockId を allocate し
+`lsVarBlockIds` に登録、body は empty Reader で lower (closure capture は未対応)。
 
 ### 型チェック
 
-- `let x: T = e` — 推論型が `T` のサブタイプか検証（`PTyped` パターン）
-- task の return 型 — ボディ型が宣言 return 型のサブタイプか検証
-- `SHandle` — state var 初期値・request case・return case を全て型チェック
-- 未定義変数 — `UndefinedName` エラー（`NTUnknown` フォールバックなし）
+- `let x: T = e` — 推論型が `T` のサブタイプか検証
+- agent / req の return 型 — ボディ型が宣言 return 型のサブタイプか検証
+- 未定義変数 — `IdentifierError` (`NTUnknown` フォールバックなし)
+- effect — `WhereBlock` の `req` handler が agent body の effect 集合をカバーするか検証
 
-## バイナリフォーマット（KTRI）
+### for 式の型
 
-- ヘッダ: `4b 54 52 49 00 03`（"KTRI" + version 0x03）
-- 整数は LEB128 unsigned
-- 文字列: LEB128(length) + UTF-8
-- 命令: opcode (u8) + 引数
+- `for(...) { body } then { fin }` の型 = `finType ∪ breakType`
+- `for(...) { body }` の型 = `null ∪ breakType`
 
-## Katari Protocol
+`breakType` は本体を走査して収集する (内側の for には潜らない)。
+
+## Katari Protocol (TS Runtime 側 — 再設計予定)
 
 エージェント間通信プロトコル。主要エンドポイント:
 
-- `POST /delegate` — 子エージェントの起動 (AgentDefinition → Agent 作成)
+- `POST /delegate` — 子エージェントの起動
 - `POST /delegate_ack` — 子完了通知 (output 返却)
 - `POST /escalate` — Capability への要求 (handle block で処理)
 - `POST /escalate_ack` — Escalation 応答
 - `POST /terminate` / `/terminate_ack` — 子エージェント停止
 - `POST /throw` — エラー伝搬
 
-主要概念: Agent, Delegation, Template, Capability, Escalation
-
-## ランタイムイベントモデル
-
-ThreadStatus: `CALLING(kind)` | `REQUESTING` | `CANCELING`
-
-CallingKind: `BLOCK` | `AGENT` | `HANDLE_TARGET` | `HANDLE_BODY` | `HANDLE_THEN` | `FOR_BODY` | `FOR_THEN` | `PARALLEL` | `DELEGATING`
-
-RuntimeEvent: `call` | `cancel` | `completed` | `returned` | `continue` | `continued` | `broken` | `for_continued` | `for_broken` | `requested` | `canceled`
-
-Protocol → Runtime マッピング:
-
-- `delegate` → `call`, `delegate_ack` → `completed`
-- `escalate` → `requested`, `escalate_ack` → `continue`
-- `terminate` → `cancel`, `terminate_ack` → `canceled`
+主要概念: Agent, Delegation, Template, Capability, Escalation。
+新 IR JSON に合わせて TS runtime は作り直す予定。
 
 ## Haskell コーディング規約
 

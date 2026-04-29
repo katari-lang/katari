@@ -283,6 +283,39 @@ stage2Spec = describe "Stage 2 \8212 control flow" $ do
           _ -> expectationFailure "expected 1 arm"
       _ -> expectationFailure "expected 1 SMatch"
 
+  it "destructures nested constructor patterns inside match arms via get_field" $ do
+    (irMod, errs) <-
+      lowerSource $
+        Text.unlines
+          [ "data Pair(left: integer, right: integer)",
+            "data Outer(inner: Pair)",
+            "agent main() {",
+            "  let v = Outer(inner = Pair(left = 1, right = 2))",
+            "  match (v) {",
+            "    case Outer(inner = Pair(left = a, right = b)) => { a + b }",
+            "  }",
+            "}"
+          ]
+    errs `shouldBe` []
+    let Just ub = agentBody "main" irMod
+    case matches ub of
+      [m] -> case m.arms of
+        [arm] -> do
+          arm.tag `shouldBe` Just "Outer"
+          map fst arm.bindings `shouldMatchList` ["inner"]
+          case userBlockOf arm.body irMod of
+            Just armBody -> do
+              -- The arm body should emit get_field calls for left and right.
+              let getFieldCalls =
+                    [ c | SCall c <- armBody.statements,
+                          CTBlock {block = bid} <- [c.target],
+                          Just (BlockPrim {name = "get_field"}) <- [Map.lookup bid irMod.blocks]
+                    ]
+              length getFieldCalls `shouldBe` 2
+            Nothing -> expectationFailure "arm body not found"
+        _ -> expectationFailure "expected 1 arm"
+      _ -> expectationFailure "expected 1 SMatch"
+
   it "lowers a simple for loop with one in-binding" $ do
     (irMod, errs) <-
       lowerSource
@@ -354,6 +387,82 @@ stage3Spec = describe "Stage 3 \8212 block / let / scope" $ do
       _ -> expectationFailure "expected exactly two SLoadLiteral outputs"
     -- The trailing var should be the second load's output (the inner x).
     Just (last (map (.output) loads)) `shouldBe` ub.trailing
+
+  it "let with tuple pattern emits tuple_get projections" $ do
+    (irMod, errs) <-
+      lowerSource $
+        Text.unlines
+          [ "agent main() {",
+            "  let (a, b) = (1, 2)",
+            "  a + b",
+            "}"
+          ]
+    errs `shouldBe` []
+    let Just ub = agentBody "main" irMod
+        tupleGetCalls =
+          [ c | SCall c <- ub.statements,
+                CTBlock {block = bid} <- [c.target],
+                Just (BlockPrim {name = "tuple_get"}) <- [Map.lookup bid irMod.blocks]
+          ]
+    length tupleGetCalls `shouldBe` 2
+
+  it "let with nested constructor pattern emits get_field projections" $ do
+    (irMod, errs) <-
+      lowerSource $
+        Text.unlines
+          [ "data Pair(left: integer, right: integer)",
+            "agent main() {",
+            "  let Pair(left = a, right = b) = Pair(left = 1, right = 2)",
+            "  a + b",
+            "}"
+          ]
+    errs `shouldBe` []
+    let Just ub = agentBody "main" irMod
+        getFieldCalls =
+          [ c | SCall c <- ub.statements,
+                CTBlock {block = bid} <- [c.target],
+                Just (BlockPrim {name = "get_field"}) <- [Map.lookup bid irMod.blocks]
+          ]
+    length getFieldCalls `shouldBe` 2
+
+  it "local agent statement registers a fresh BlockUser and is callable" $ do
+    (irMod, errs) <-
+      lowerSource $
+        Text.unlines
+          [ "agent main() -> integer {",
+            "  agent helper(x: integer) -> integer { x + 1 }",
+            "  helper(x = 41)",
+            "}"
+          ]
+    errs `shouldBe` []
+    let Just ub = agentBody "main" irMod
+    -- The main body should issue exactly one SCall whose target is a
+    -- BlockUser (the local helper agent).
+    let userCalls =
+          [ c | SCall c <- ub.statements,
+                CTBlock {block = bid} <- [c.target],
+                Just (BlockUser _) <- [Map.lookup bid irMod.blocks]
+          ]
+    length userCalls `shouldBe` 1
+
+  it "function parameter with tuple pattern destructures via tuple_get" $ do
+    (irMod, errs) <-
+      lowerSource $
+        Text.unlines
+          [ "agent helper(pair = (a, b)) -> integer { a + b }",
+            "agent main() -> integer { helper(pair = (1, 2)) }"
+          ]
+    errs `shouldBe` []
+    -- The helper agent's user block should contain tuple_get projections.
+    case agentBody "helper" irMod of
+      Just helperBody -> do
+        let tupleGetCalls =
+              [ c | SCall c <- helperBody.statements,
+                    CTBlock {block = bid} <- [c.target],
+                    Just (BlockPrim {name = "tuple_get"}) <- [Map.lookup bid irMod.blocks]
+              ]
+        length tupleGetCalls `shouldBe` 2
+      Nothing -> expectationFailure "helper agent body not found"
 
 isChildBlockCall :: CallData -> IRModule -> Bool
 isChildBlockCall c irMod = case c.target of

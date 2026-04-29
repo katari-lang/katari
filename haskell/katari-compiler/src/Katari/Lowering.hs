@@ -99,6 +99,7 @@ primitiveNames =
     "make_tuple",
     "array_get",
     "array_length",
+    "tuple_get",
     "get_field",
     -- type
     "type_of",
@@ -434,31 +435,46 @@ lowerAllDeclarations zonkResult = do
 --   (@catchesBreak=True@, inheritScope=True), receives @s@ as a state var,
 --   has handlers attached and runs the body.
 lowerAgentDeclaration :: AST.AgentDeclaration Zonked -> BlockId -> Lower ()
-lowerAgentDeclaration decl blockId = do
-  paramBindings <- mapM bindParam decl.parameters
-  let paramVars = map fst paramBindings
-      localBinds = concatMap snd paramBindings
-  withLocals localBinds $ do
-    let body = decl.body
-    case body.whereBlock of
-      Nothing ->
-        -- Plain agent body: just lower as a return-bearing block.
-        lowerSimpleAgent blockId decl.name.text paramVars body
-      Just wb
-        | null wb.stateVariables ->
-            lowerAgentWithHandlers blockId decl.name.text paramVars body wb
-        | otherwise ->
-            lowerAgentWithStateVars blockId decl.name.text paramVars body wb
+lowerAgentDeclaration decl =
+  lowerAgentLike decl.name.text decl.parameters decl.body
 
--- | Plain agent (no @where@): single block, @catchesReturn=True@.
+-- | Shared lowering shape for any \"agent-like\" callable: a top-level
+-- 'AgentDeclaration', or a local 'AgentStatement'. Allocates the param
+-- slots, threads param destructuring as a buffer prelude, and dispatches
+-- on the body's optional 'WhereBlock' to choose the user-block layout.
+lowerAgentLike ::
+  Text ->
+  [AST.ParameterBinding Zonked] ->
+  AST.Block Zonked ->
+  BlockId ->
+  Lower ()
+lowerAgentLike name parameters body blockId = do
+  paramBindings <- mapM bindParam parameters
+  let paramVars = map fst paramBindings
+      paramPrelude = combineParamPreludes (map snd paramBindings)
+  case body.whereBlock of
+    Nothing ->
+      lowerSimpleAgent blockId name paramVars paramPrelude body
+    Just wb
+      | null wb.stateVariables ->
+          lowerAgentWithHandlers blockId name paramVars paramPrelude body wb
+      | otherwise ->
+          lowerAgentWithStateVars blockId name paramVars paramPrelude body wb
+
+-- | Plain agent (no @where@): single block, @catchesReturn=True@. The
+-- @prelude@ runs inside the block's buffer so any parameter destructuring
+-- is emitted before the body proper.
 lowerSimpleAgent ::
   BlockId ->
   Text ->
   [Param] ->
+  Lower [(VariableId, VarId)] ->
   AST.Block Zonked ->
   Lower ()
-lowerSimpleAgent blockId name paramVars blk = do
-  (statements, trailing) <- lowerBlockBody blk
+lowerSimpleAgent blockId name paramVars prelude blk = do
+  (trailing, statements) <- runWithFreshBuffer $ do
+    locals <- prelude
+    withLocals locals (lowerBlockInto blk)
   let userBlock =
         defaultUserBlock
           { kind = BlockAgentEntry,
@@ -469,21 +485,25 @@ lowerSimpleAgent blockId name paramVars blk = do
   recordBlock blockId (BlockUser {body = userBlock}) (Just name)
 
 -- | Agent with @where { handlers... }@ (no state vars): single block that
--- catches both Return and Break.
+-- catches both Return and Break. The @prelude@ runs inside this block's
+-- buffer; handler / then bodies see the destructured locals via Reader.
 lowerAgentWithHandlers ::
   BlockId ->
   Text ->
   [Param] ->
+  Lower [(VariableId, VarId)] ->
   AST.Block Zonked ->
   AST.WhereBlock Zonked ->
   Lower ()
-lowerAgentWithHandlers blockId name paramVars blk wb = do
-  -- Lower the body's statements + trailing in this same block's scope.
-  (statements, trailing) <- lowerBlockBody (stripWhereBlock blk)
-  -- Lower handlers (each becomes its own UserBlock).
-  handlers <- mapM (lowerHandler []) wb.handlers
-  -- Lower then clause if present.
-  thenBlockId <- lowerThenClause wb.thenClause
+lowerAgentWithHandlers blockId name paramVars prelude blk wb = do
+  ((paramLocals, trailing), statements) <- runWithFreshBuffer $ do
+    locals <- prelude
+    t <- withLocals locals (lowerBlockInto (stripWhereBlock blk))
+    pure (locals, t)
+  (handlers, thenBlockId) <- withLocals paramLocals $ do
+    hs <- mapM (lowerHandler []) wb.handlers
+    tb <- lowerThenClause wb.thenClause
+    pure (hs, tb)
   let userBlock =
         defaultUserBlock
           { kind = BlockAgentEntryWithHandlers,
@@ -495,33 +515,34 @@ lowerAgentWithHandlers blockId name paramVars blk wb = do
           }
   recordBlock blockId (BlockUser {body = userBlock}) (Just name)
 
--- | Agent with @where (var s = init) ...@: outer/inner split.
+-- | Agent with @where (var s = init) ...@: outer/inner split. The
+-- @prelude@ runs inside the *outer* block (where the runtime delivers the
+-- params), and the destructured locals are visible to the inner block via
+-- the Reader env (the inner is 'BlockHandleScope' which inherits the
+-- outer scope at runtime).
 lowerAgentWithStateVars ::
   BlockId ->
   Text ->
   [Param] ->
+  Lower [(VariableId, VarId)] ->
   AST.Block Zonked ->
   AST.WhereBlock Zonked ->
   Lower ()
-lowerAgentWithStateVars outerId name paramVars blk wb = do
-  -- 1. Outer: compute state init expressions inside a fresh buffer, then
-  --    append a call to the inner block. The captured statements become
-  --    the outer block's body.
-  --
-  -- 2. Inner block: state vars as stateVars, body lowered with state-var
-  --    locals visible.
-  innerBlockId <- buildInnerBlockWithState name wb blk
+lowerAgentWithStateVars outerId name paramVars prelude blk wb = do
   innerOut <- freshVarId Nothing
   (_, outerStatements) <- runWithFreshBuffer $ do
-    stateInitVars <- lowerStateInits wb.stateVariables
-    let innerArgs = [Arg {label = lbl, var = v} | (lbl, v) <- stateInitVars]
-    emit $
-      SCall
-        CallData
-          { target = CTBlock {block = innerBlockId},
-            args = innerArgs,
-            output = Just innerOut
-          }
+    paramLocals <- prelude
+    withLocals paramLocals $ do
+      innerBlockId <- buildInnerBlockWithState name wb blk
+      stateInitVars <- lowerStateInits wb.stateVariables
+      let innerArgs = [Arg {label = lbl, var = v} | (lbl, v) <- stateInitVars]
+      emit $
+        SCall
+          CallData
+            { target = CTBlock {block = innerBlockId},
+              args = innerArgs,
+              output = Just innerOut
+            }
   let outerBlock =
         defaultUserBlock
           { kind = BlockAgentEntry,
@@ -607,25 +628,27 @@ lowerHandler stateParams hr = do
     Nothing -> do
       recordError (LowerErrorUnresolvedVariable hr.sourceSpan hr.name.text)
       freshBlockId
-  -- Build the handler block.
+  -- Build the handler block. Param destructuring (if any) runs inside
+  -- the handler body's buffer so projection statements live alongside
+  -- the body proper.
   bodyBlockId <- freshBlockId
   paramBindings <- mapM bindParam hr.parameters
   let reqParamVars = map fst paramBindings
-      paramLocals = concatMap snd paramBindings
-  withLocals paramLocals $ do
-    (statements, trailing) <- lowerBlockBody hr.body
-    -- Implicit break on normal completion.
-    let finalStatements = case trailing of
-          Just t ->
-            statements ++ [SExit ExitData {exitKind = ExitBreak, value = t}]
-          Nothing -> statements
-        userBlock =
-          defaultUserBlock
-            { kind = BlockHandlerBody,
-              params = reqParamVars ++ stateParams,
-              statements = finalStatements
-            }
-    recordBlock bodyBlockId (BlockUser {body = userBlock}) (Just hr.name.text)
+      paramPrelude = combineParamPreludes (map snd paramBindings)
+  (trailing, statements) <- runWithFreshBuffer $ do
+    locals <- paramPrelude
+    withLocals locals (lowerBlockInto hr.body)
+  let finalStatements = case trailing of
+        Just t ->
+          statements ++ [SExit ExitData {exitKind = ExitBreak, value = t}]
+        Nothing -> statements
+      userBlock =
+        defaultUserBlock
+          { kind = BlockHandlerBody,
+            params = reqParamVars ++ stateParams,
+            statements = finalStatements
+          }
+  recordBlock bodyBlockId (BlockUser {body = userBlock}) (Just hr.name.text)
   pure Handler {request = reqBlockId, handlerBody = bodyBlockId}
 
 -- | Lower the optional then-clause of a 'WhereBlock' to its own block.
@@ -660,43 +683,105 @@ lowerThenClause = \case
 stripWhereBlock :: AST.Block Zonked -> AST.Block Zonked
 stripWhereBlock blk = blk {AST.whereBlock = Nothing}
 
--- | Bind a function parameter: produce a 'Param' (label + IR var) and the
--- @[(VariableId, VarId)]@ pairs that should be added to the local map for the
--- body. For variable patterns this is a single binding; other pattern shapes
--- will be supported in later stages.
-bindParam :: AST.ParameterBinding Zonked -> Lower (Param, [(VariableId, VarId)])
-bindParam pb = do
-  (var, locals) <- bindPatternToFreshVar pb.pattern (Just pb.label)
-  pure (Param {label = pb.label, var = var}, locals)
-
--- | Allocate a fresh IR var and bind it to a pattern. Returns the fresh
--- 'VarId' (= where the runtime delivers the incoming value) plus the list of
--- @(VariableId, VarId)@ pairs that should be added to the local map.
+-- | Bind a function parameter: allocate the param's IR var (the slot the
+-- runtime populates) and return a deferred destructuring action.
 --
--- Stage 1 only supports 'PatternVariable' / 'PatternWildcard' (no destructuring
--- in params). Stage 2+ extends.
+-- The 'Param' is allocated immediately so callers can install the agent /
+-- handler signature before the body runs. The 'Lower' action — to be run
+-- inside the body's statement buffer — emits any 'tuple_get' / 'get_field'
+-- projections needed for non-variable patterns and returns the
+-- @(VariableId, VarId)@ pairs introduced.
+bindParam :: AST.ParameterBinding Zonked -> Lower (Param, Lower [(VariableId, VarId)])
+bindParam pb = do
+  let nameHint = case pb.pattern of
+        AST.PatternVariable vp -> Just vp.name.text
+        _ -> Just pb.label
+  var <- freshVarId nameHint
+  pure (Param {label = pb.label, var = var}, destructurePattern var pb.pattern)
+
+-- | Compose multiple parameter destructuring actions into a single
+-- prelude that can be threaded into a body buffer.
+combineParamPreludes :: [Lower [(VariableId, VarId)]] -> Lower [(VariableId, VarId)]
+combineParamPreludes acts = concat <$> sequence acts
+
+-- | Allocate a fresh IR var (where the runtime delivers the incoming value)
+-- and destructure it according to the given pattern. Returns the fresh
+-- 'VarId' plus the @(VariableId, VarId)@ pairs to add to the local map.
+--
+-- Refutable patterns (literals) are rejected with 'LowerErrorUnsupported':
+-- 'let' / function parameters demand irrefutable patterns.
 bindPatternToFreshVar :: AST.Pattern Zonked -> Maybe Text -> Lower (VarId, [(VariableId, VarId)])
-bindPatternToFreshVar pat hint = case pat of
-  AST.PatternVariable vp -> do
-    let nameHint = Just vp.name.text
-    var <- freshVarId nameHint
-    case vp.name.resolution of
-      Just variableId -> pure (var, [(variableId, var)])
-      Nothing -> do
-        recordError (LowerErrorUnresolvedVariable vp.sourceSpan vp.name.text)
-        pure (var, [])
-  AST.PatternWildcard _ -> do
-    var <- freshVarId hint
-    pure (var, [])
-  other -> do
-    -- Stage 2+ will properly destructure tuples / constructors / literals
-    -- inside parameters; for now record an error and allocate a placeholder.
-    var <- freshVarId hint
+bindPatternToFreshVar pat hint = do
+  let nameHint = case pat of
+        AST.PatternVariable vp -> Just vp.name.text
+        _ -> hint
+  var <- freshVarId nameHint
+  locals <- destructurePattern var pat
+  pure (var, locals)
+
+-- | Recursively destructure an incoming IR var according to the given
+-- pattern, emitting projection calls ('tuple_get' / 'get_field') as needed.
+-- Returns the @(VariableId, VarId)@ pairs introduced by every variable
+-- sub-pattern.
+--
+-- Refutable patterns (literals) are rejected: callers use this for
+-- irrefutable contexts ('let' / function parameter / known-tag match arm).
+destructurePattern :: VarId -> AST.Pattern Zonked -> Lower [(VariableId, VarId)]
+destructurePattern incoming = \case
+  AST.PatternVariable vp -> case vp.name.resolution of
+    Just variableId -> pure [(variableId, incoming)]
+    Nothing -> do
+      recordError (LowerErrorUnresolvedVariable vp.sourceSpan vp.name.text)
+      pure []
+  AST.PatternWildcard _ -> pure []
+  AST.PatternTuple tp -> do
+    pairs <- mapM (extractTupleElement incoming) (zip [0 ..] tp.elements)
+    pure (concat pairs)
+  AST.PatternQualifiedConstructor qp -> do
+    pairs <- mapM (extractField incoming) qp.parameters
+    pure (concat pairs)
+  AST.PatternLiteral lp -> do
     recordError $
       LowerErrorUnsupported
-        (AST.sourceSpanOf other)
-        "parameter pattern shape not yet supported"
-    pure (var, [])
+        lp.sourceSpan
+        "literal pattern is refutable; only allowed in match arms"
+    pure []
+
+-- | Extract @incoming._idx@ via the @tuple_get@ primitive and recurse.
+extractTupleElement ::
+  VarId ->
+  (Int, AST.Pattern Zonked) ->
+  Lower [(VariableId, VarId)]
+extractTupleElement tupleVar (idx, sub) = do
+  indexVar <- emitLoadLiteral (LVInteger (fromIntegral idx))
+  out <- freshVarId (Just (Text.pack ("_" <> show idx)))
+  blockId <- primBlockId "tuple_get"
+  emit $
+    SCall
+      CallData
+        { target = CTBlock {block = blockId},
+          args = [Arg "tuple" tupleVar, Arg "index" indexVar],
+          output = Just out
+        }
+  destructurePattern out sub
+
+-- | Extract @incoming.label@ via the @get_field@ primitive and recurse.
+extractField ::
+  VarId ->
+  (AST.NameRef Zonked 'AST.LabelRef, AST.Pattern Zonked) ->
+  Lower [(VariableId, VarId)]
+extractField objectVar (labelRef, sub) = do
+  labelVar <- emitLoadLiteral (LVString labelRef.text)
+  out <- freshVarId (Just labelRef.text)
+  blockId <- primBlockId "get_field"
+  emit $
+    SCall
+      CallData
+        { target = CTBlock {block = blockId},
+          args = [Arg "object" objectVar, Arg "field" labelVar],
+          output = Just out
+        }
+  destructurePattern out sub
 
 -- ===========================================================================
 -- Block body
@@ -712,8 +797,16 @@ bindPatternToFreshVar pat hint = case pat of
 -- 'ReaderT' contract intact (no @local-then-throw-away@ tricks).
 lowerBlockBody :: AST.Block Zonked -> Lower ([Statement], Maybe VarId)
 lowerBlockBody blk = do
-  (trailing, statements) <- runWithFreshBuffer (go blk.statements)
+  (trailing, statements) <- runWithFreshBuffer (lowerBlockInto blk)
   pure (statements, trailing)
+
+-- | Lower a 'AST.Block''s contents into the *current* statement buffer.
+-- Unlike 'lowerBlockBody' this does not allocate a fresh buffer — the
+-- caller is responsible for the surrounding 'runWithFreshBuffer' (and
+-- any 'withLocals') so prelude statements (e.g. match-arm destructuring)
+-- can be emitted into the same buffer first.
+lowerBlockInto :: AST.Block Zonked -> Lower (Maybe VarId)
+lowerBlockInto blk = go blk.statements
   where
     go [] = traverse lowerExpr blk.returnExpression
     go (AST.StatementLet ls : rest) = do
@@ -783,8 +876,28 @@ lowerStmt = \case
   AST.StatementExpression expr -> do
     _ <- lowerExpr expr
     pure False
-  AST.StatementAgent _ -> do
-    -- Stage 4 implements local agent (MakeClosure into local var).
+  AST.StatementAgent stmt -> do
+    -- Local agent declared inside another agent's body. Allocate a fresh
+    -- BlockId, register it in the @VariableId → BlockId@ map (so calls
+    -- and 'SMakeClosure' on the agent name resolve to 'CTBlock' /
+    -- 'BlockUser'), then lower its body using the shared agent layout.
+    --
+    -- The body is lowered with an *empty* Reader env (local 'localVars' =
+    -- {}) so outer locals are not accidentally captured: closure capture
+    -- for local agents is not yet implemented at the IR level, and a
+    -- silent capture would produce a runtime undefined-var error. With a
+    -- fresh env, references to outer locals fail at compile time with
+    -- 'LowerErrorUnresolvedVariable' instead.
+    case stmt.name.resolution of
+      Just variableId -> do
+        bid <- freshBlockId
+        modify $ \s ->
+          s {lsVarBlockIds = Map.insert variableId bid s.lsVarBlockIds}
+        local (const emptyLowerEnv) $
+          lowerAgentLike stmt.name.text stmt.parameters stmt.body bid
+      Nothing ->
+        recordError
+          (LowerErrorUnresolvedVariable stmt.sourceSpan stmt.name.text)
     pure False
   AST.StatementError sp -> do
     recordError (LowerErrorParseSentinel sp)
@@ -798,24 +911,12 @@ lowerModifier m = do
   pure (m.name.text, var)
 
 -- | Compute the @(VariableId, VarId)@ pairs introduced by binding a
--- pattern against an incoming IR var. The caller is responsible for
--- bringing the result into scope via 'withLocals'. Tuple / constructor /
--- literal destructuring is added in Phase 4 (currently records an
--- 'LowerErrorUnsupported' for non-trivial patterns).
+-- pattern against an incoming IR var. Emits projection calls
+-- ('tuple_get' / 'get_field') for tuple / constructor sub-patterns. The
+-- caller is responsible for bringing the result into scope via
+-- 'withLocals'.
 bindPatternLocals :: VarId -> AST.Pattern Zonked -> Lower [(VariableId, VarId)]
-bindPatternLocals incoming = \case
-  AST.PatternVariable vp -> case vp.name.resolution of
-    Just variableId -> pure [(variableId, incoming)]
-    Nothing -> do
-      recordError (LowerErrorUnresolvedVariable vp.sourceSpan vp.name.text)
-      pure []
-  AST.PatternWildcard _ -> pure []
-  other -> do
-    recordError $
-      LowerErrorUnsupported
-        (AST.sourceSpanOf other)
-        "let-pattern destructuring not yet supported"
-    pure []
+bindPatternLocals = destructurePattern
 
 -- ===========================================================================
 -- Expressions
@@ -1092,19 +1193,20 @@ lowerIfExpr ie = do
         }
   pure out
 
--- | Lower a match expression. Stage 2 supports flat patterns (variable /
--- wildcard / tuple / one-level constructor). Nested constructor patterns are
--- decomposed: each arm whose pattern contains a nested constructor is rewritten
--- internally to a chain of single-level SMatch with shared default block.
+-- | Lower a match expression. The top-level pattern of each arm
+-- determines the runtime tag and the field bindings the runtime populates;
+-- any nested *irrefutable* sub-pattern (variable / wildcard / tuple /
+-- constructor) is decomposed inside the arm body via 'tuple_get' /
+-- 'get_field' projections. Nested *refutable* sub-patterns (literals)
+-- produce 'LowerErrorUnsupported' — they would require a chained
+-- 'SMatch' with a shared default block which is not yet implemented.
 --
--- For now we support:
---   * VariablePattern - tag=Nothing, binds the subject to a fresh var
---   * WildcardPattern - tag=Nothing
---   * LiteralPattern  - tag=Just (literal as text), no bindings
+-- Top-level patterns supported:
+--   * VariablePattern - tag=Nothing, binds the subject to the named local.
+--   * WildcardPattern - tag=Nothing.
+--   * LiteralPattern  - tag=Just (literal as text), no bindings.
 --   * TuplePattern    - tag=Nothing, bindings via "_0", "_1", ...
---   * QualifiedConstructorPattern - tag=Just ctor, bindings via field labels
---     (only one level of nesting; nested patterns inside fields fall back to
---     wildcard)
+--   * QualifiedConstructorPattern - tag=Just ctor, bindings via field labels.
 lowerMatchExpr :: AST.MatchExpression Zonked -> Lower VarId
 lowerMatchExpr me = do
   subject <- lowerExpr me.subject
@@ -1122,25 +1224,34 @@ lowerMatchExpr me = do
 
 lowerMatchArm :: VarId -> AST.CaseArm Zonked -> Lower MatchArm
 lowerMatchArm subject arm = do
-  (tag, bindings, localBinds) <- patternToArm subject arm.pattern
-  body <- buildArmBody localBinds arm.body
+  (tag, bindings, prelude) <- patternToArm subject arm.pattern
+  body <- buildArmBody prelude arm.body
   pure MatchArm {tag = tag, bindings = bindings, body = body}
 
--- | Translate a pattern into the arm's @(tag, bindings, locals)@ tuple. The
--- @locals@ list is added to the lowering's local map while the arm body is
--- being lowered.
+-- | Translate a top-level arm pattern into @(tag, bindings, prelude)@:
+--
+--   * @tag@ — the runtime tag the arm matches against (or 'Nothing' for
+--     unconditional patterns).
+--   * @bindings@ — the @(label, IRVar)@ pairs that the runtime
+--     pre-populates when the arm matches. Sub-fields use field labels for
+--     constructors and @\"_0\"@ / @\"_1\"@ / … for tuples.
+--   * @prelude@ — a 'Lower' action, run inside the arm body's buffer, that
+--     emits any further destructuring statements for nested sub-patterns
+--     and returns the @(VariableId, IRVar)@ pairs introduced. The action
+--     is deferred so its statements land in the arm body, not the outer
+--     buffer that holds the surrounding 'SMatch'.
 patternToArm ::
   VarId ->
   AST.Pattern Zonked ->
-  Lower (Maybe Text, [(Text, VarId)], [(VariableId, VarId)])
+  Lower (Maybe Text, [(Text, VarId)], Lower [(VariableId, VarId)])
 patternToArm subject = \case
   AST.PatternVariable vp -> case vp.name.resolution of
     Just variableId ->
-      pure (Nothing, [], [(variableId, subject)])
+      pure (Nothing, [], pure [(variableId, subject)])
     Nothing -> do
       recordError (LowerErrorUnresolvedVariable vp.sourceSpan vp.name.text)
-      pure (Nothing, [], [])
-  AST.PatternWildcard _ -> pure (Nothing, [], [])
+      pure (Nothing, [], pure [])
+  AST.PatternWildcard _ -> pure (Nothing, [], pure [])
   AST.PatternLiteral lp -> do
     let tagText = case lp.value of
           AST.LiteralValueBoolean True -> "true"
@@ -1149,39 +1260,47 @@ patternToArm subject = \case
           AST.LiteralValueInteger n -> Text.pack (show n)
           AST.LiteralValueNumber n -> Text.pack (show n)
           AST.LiteralValueString s -> s
-    pure (Just tagText, [], [])
+    pure (Just tagText, [], pure [])
   AST.PatternTuple tp -> do
-    binds <- mapM bindIndexed (zip [0 :: Int ..] tp.elements)
-    let bindings = [(label, var) | (label, var, _) <- binds]
-        locals = concatMap (\(_, _, ls) -> ls) binds
-    pure (Nothing, bindings, locals)
+    fields <- mapM allocTupleField (zip [0 :: Int ..] tp.elements)
+    let bindings = [(label, var) | (label, var, _) <- fields]
+        prelude =
+          concat
+            <$> mapM (\(_, var, sub) -> destructurePattern var sub) fields
+    pure (Nothing, bindings, prelude)
   AST.PatternQualifiedConstructor qp -> do
-    binds <- mapM bindField qp.parameters
-    let bindings = [(label, var) | (label, var, _) <- binds]
-        locals = concatMap (\(_, _, ls) -> ls) binds
-    pure (Just qp.constructorName.text, bindings, locals)
+    fields <- mapM allocConstructorField qp.parameters
+    let bindings = [(label, var) | (label, var, _) <- fields]
+        prelude =
+          concat
+            <$> mapM (\(_, var, sub) -> destructurePattern var sub) fields
+    pure (Just qp.constructorName.text, bindings, prelude)
   where
-    bindIndexed (idx, p) = do
-      (var, locals) <- bindPatternToFreshVar p (Just (Text.pack ("_" <> show idx)))
-      pure (Text.pack ("_" <> show idx), var, locals)
+    allocTupleField (idx, sub) = do
+      let label = Text.pack ("_" <> show idx)
+      var <- freshVarId (Just label)
+      pure (label, var, sub)
 
-    bindField (labelRef, pat) = do
-      (var, locals) <- bindPatternToFreshVar pat (Just labelRef.text)
-      pure (labelRef.text, var, locals)
+    allocConstructorField (labelRef, sub) = do
+      var <- freshVarId (Just labelRef.text)
+      pure (labelRef.text, var, sub)
 
--- | Build a child block for a match arm body, with the arm's local bindings
--- in scope.
-buildArmBody :: [(VariableId, VarId)] -> AST.Block Zonked -> Lower BlockId
-buildArmBody locals blk = do
+-- | Build a child block for a match arm body. The @prelude@ action runs
+-- first inside the arm body's fresh statement buffer, emitting any
+-- nested-pattern destructuring; its returned locals are then in scope
+-- when the user-written body is lowered.
+buildArmBody :: Lower [(VariableId, VarId)] -> AST.Block Zonked -> Lower BlockId
+buildArmBody prelude blk = do
   blockId <- freshBlockId
-  withLocals locals $ do
-    (statements, trailing) <- lowerBlockBody blk
-    let userBlock =
-          defaultUserBlock
-            { statements = statements,
-              trailing = trailing
-            }
-    recordBlock blockId (BlockUser {body = userBlock}) Nothing
+  (trailing, statements) <- runWithFreshBuffer $ do
+    locals <- prelude
+    withLocals locals (lowerBlockInto blk)
+  let userBlock =
+        defaultUserBlock
+          { statements = statements,
+            trailing = trailing
+          }
+  recordBlock blockId (BlockUser {body = userBlock}) Nothing
   pure blockId
 
 -- | Lower a for expression. Supports zero or more 'in' bindings, zero or
