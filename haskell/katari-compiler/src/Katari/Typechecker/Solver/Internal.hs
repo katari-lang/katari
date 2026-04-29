@@ -22,14 +22,12 @@ module Katari.Typechecker.Solver.Internal
     constraintTypeVars,
     typeVarsIn,
     effectVarsIn,
-    partitionConstraints,
     isTypeConstraint,
     isEffectConstraint,
   )
 where
 
 import Data.Map.Strict (Map)
-import Data.Map.Strict qualified as Map
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
@@ -50,6 +48,8 @@ import Katari.Typechecker.SemanticType
     SemanticType (..),
     TypeVarId,
     Unresolved,
+    foldSemantic,
+    traverseSemanticChildren,
   )
 
 -- ===========================================================================
@@ -117,35 +117,18 @@ emptyBounds = Bounds {lowerBounds = [], upperBounds = []}
 -- ===========================================================================
 
 -- | 'SemanticType' 'Unresolved' (no vars) -> 'SemanticType' 'Resolved'.
+-- Returns 'Nothing' iff the input contains any 'SemanticTypeVariable' or any
+-- function effect set with unresolved 'EffectVarId's. The structural recursion
+-- is delegated to 'traverseSemanticChildren'; this body only handles the
+-- two phase-changing concerns (variable elimination, effect concreteness).
 semanticToConcrete :: SemanticType Unresolved -> Maybe (SemanticType Resolved)
 semanticToConcrete = \case
   SemanticTypeVariable _ -> Nothing
-  SemanticTypeNever -> Just SemanticTypeNever
-  SemanticTypeUnknown -> Just SemanticTypeUnknown
-  SemanticTypeNull -> Just SemanticTypeNull
-  SemanticTypeInteger -> Just SemanticTypeInteger
-  SemanticTypeNumber -> Just SemanticTypeNumber
-  SemanticTypeString -> Just SemanticTypeString
-  SemanticTypeBoolean -> Just SemanticTypeBoolean
-  SemanticTypeLiteralInteger n -> Just (SemanticTypeLiteralInteger n)
-  SemanticTypeLiteralString s -> Just (SemanticTypeLiteralString s)
-  SemanticTypeLiteralBoolean b -> Just (SemanticTypeLiteralBoolean b)
-  SemanticTypeData typeId -> Just (SemanticTypeData typeId)
-  SemanticTypeArray element -> SemanticTypeArray <$> semanticToConcrete element
-  SemanticTypeTuple elements ->
-    SemanticTypeTuple <$> traverse semanticToConcrete elements
-  SemanticTypeUnion branches ->
-    SemanticTypeUnion <$> traverse semanticToConcrete branches
-  SemanticTypeObject fields ->
-    SemanticTypeObject <$> traverse semanticToConcrete fields
-  SemanticTypeFunction parameterTypes returnType effects -> do
-    parameterTypesConcrete <- traverse semanticToConcrete parameterTypes
-    returnTypeConcrete <- semanticToConcrete returnType
-    effectsConcrete <-
-      if Set.null effects.effectVars
-        then Just (SemanticEffect Set.empty effects.effectReqs)
-        else Nothing
-    pure (SemanticTypeFunction parameterTypesConcrete returnTypeConcrete effectsConcrete)
+  t -> traverseSemanticChildren semanticToConcrete concretiseEffect t
+  where
+    concretiseEffect (SemanticEffect vars reqs)
+      | Set.null vars = Just (SemanticEffect Set.empty reqs)
+      | otherwise = Nothing
 
 -- | Subtype check between two var-free 'SemanticType' values via
 -- 'NormalizedType.subtypeNT'. Caller MUST 'containsNoTypeVars' both sides.
@@ -163,33 +146,18 @@ isSubtypeConcrete leftType rightType =
 containsNoTypeVars :: SemanticType Unresolved -> Bool
 containsNoTypeVars = Set.null . typeVarsIn
 
+-- | Free 'TypeVarId's appearing anywhere in the type. Variable case is
+-- handled directly; everything else delegates to 'foldSemantic'.
 typeVarsIn :: SemanticType Unresolved -> Set TypeVarId
 typeVarsIn = \case
   SemanticTypeVariable typeVarId -> Set.singleton typeVarId
-  SemanticTypeFunction parameterTypes returnType _ ->
-    Set.unions
-      ( typeVarsIn returnType
-          : (typeVarsIn <$> Map.elems parameterTypes)
-      )
-  SemanticTypeArray element -> typeVarsIn element
-  SemanticTypeTuple elements -> Set.unions (typeVarsIn <$> elements)
-  SemanticTypeUnion branches -> Set.unions (typeVarsIn <$> branches)
-  SemanticTypeObject fields -> Set.unions (typeVarsIn <$> Map.elems fields)
-  _ -> Set.empty
+  t -> foldSemantic typeVarsIn (const Set.empty) t
 
+-- | Free 'EffectVarId's appearing anywhere in the type. Function nodes are
+-- the only constructors that carry effects; 'foldSemantic' delivers each
+-- 'SemanticEffect' to the second argument.
 effectVarsIn :: SemanticType Unresolved -> Set EffectVarId
-effectVarsIn = \case
-  SemanticTypeFunction parameterTypes returnType effects ->
-    Set.unions
-      ( effects.effectVars
-          : effectVarsIn returnType
-          : (effectVarsIn <$> Map.elems parameterTypes)
-      )
-  SemanticTypeArray element -> effectVarsIn element
-  SemanticTypeTuple elements -> Set.unions (effectVarsIn <$> elements)
-  SemanticTypeUnion branches -> Set.unions (effectVarsIn <$> branches)
-  SemanticTypeObject fields -> Set.unions (effectVarsIn <$> Map.elems fields)
-  _ -> Set.empty
+effectVarsIn = foldSemantic effectVarsIn (.effectVars)
 
 constraintTypeVars :: Constraint -> Set TypeVarId
 constraintTypeVars = \case
@@ -211,6 +179,3 @@ isEffectConstraint = \case
   EffectConstraint {} -> True
   _ -> False
 
-partitionConstraints :: [Constraint] -> ([Constraint], [Constraint])
-partitionConstraints constraints =
-  (filter isTypeConstraint constraints, filter isEffectConstraint constraints)

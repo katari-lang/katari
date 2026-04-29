@@ -37,6 +37,7 @@ import Control.Monad.Trans (lift)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
+import Data.Text (Text)
 -- See note in 'Katari.Parser' regarding 'AST.Phase' constructor name
 -- collisions with the legacy phase-marker GADTs.
 import Katari.AST hiding (Constrained, Identified, Parsed, Zonked)
@@ -46,6 +47,7 @@ import Katari.Typechecker.ConstraintGenerator
   )
 import Katari.Typechecker.Identifier
   ( IdentifierResult (..),
+    ModuleData (..),
     ModuleId,
     TypeId,
     VariableData (..),
@@ -59,6 +61,7 @@ import Katari.Typechecker.SemanticType
     SemanticType (..),
     TypeVarId,
     Unresolved,
+    traverseSemanticChildren,
   )
 import Katari.Typechecker.Solver (SolverResult (..))
 
@@ -88,6 +91,11 @@ deriving instance Eq (Zonked s)
 data ZonkResult = ZonkResult
   { zonkedModules :: !(Map ModuleId (Module Zonked)),
     zonkedTypeEnvironment :: !(Map VariableId (SemanticType Resolved)),
+    -- | @ModuleId@ → human-readable module name. Carried through from
+    -- 'IdentifierResult.identifiedModules' so that downstream phases
+    -- (Lowering, Schema) can stamp module identity onto IR / Schema
+    -- entries without re-threading 'IdentifierResult'.
+    zonkedModuleNames :: !(Map ModuleId Text),
     -- | Solver 契約逸脱 (lookup miss) 検知用。通常 path では空のはず。
     zonkErrors :: ![ZonkError]
   }
@@ -114,6 +122,10 @@ recordZonkError err = lift (modify (err :))
 -- Type / effect substitution
 -- ===========================================================================
 
+-- | Zonk a 'SemanticType Unresolved' to 'SemanticType Resolved'. Variables
+-- are looked up in the solver's type substitution; structural recursion is
+-- delegated to 'traverseSemanticChildren' (the bulk of what used to be a
+-- 14-case @\\case@).
 zonkType :: SourceSpan -> SemanticType Unresolved -> Zonk (SemanticType Resolved)
 zonkType sp = \case
   SemanticTypeVariable tv -> do
@@ -123,26 +135,7 @@ zonkType sp = \case
       Nothing -> do
         recordZonkError (ZonkErrorMissingTypeVar sp tv)
         pure SemanticTypeUnknown
-  SemanticTypeNever -> pure SemanticTypeNever
-  SemanticTypeUnknown -> pure SemanticTypeUnknown
-  SemanticTypeNull -> pure SemanticTypeNull
-  SemanticTypeInteger -> pure SemanticTypeInteger
-  SemanticTypeNumber -> pure SemanticTypeNumber
-  SemanticTypeString -> pure SemanticTypeString
-  SemanticTypeBoolean -> pure SemanticTypeBoolean
-  SemanticTypeLiteralInteger n -> pure (SemanticTypeLiteralInteger n)
-  SemanticTypeLiteralString s -> pure (SemanticTypeLiteralString s)
-  SemanticTypeLiteralBoolean b -> pure (SemanticTypeLiteralBoolean b)
-  SemanticTypeFunction params returnType effects -> do
-    params' <- traverse (zonkType sp) params
-    returnType' <- zonkType sp returnType
-    effects' <- zonkEffect sp effects
-    pure (SemanticTypeFunction params' returnType' effects')
-  SemanticTypeArray elementType -> SemanticTypeArray <$> zonkType sp elementType
-  SemanticTypeTuple elementTypes -> SemanticTypeTuple <$> traverse (zonkType sp) elementTypes
-  SemanticTypeUnion branches -> SemanticTypeUnion <$> traverse (zonkType sp) branches
-  SemanticTypeData tid -> pure (SemanticTypeData tid)
-  SemanticTypeObject fields -> SemanticTypeObject <$> traverse (zonkType sp) fields
+  t -> traverseSemanticChildren (zonkType sp) (zonkEffect sp) t
 
 zonkEffect :: SourceSpan -> SemanticEffect Unresolved -> Zonk (SemanticEffect Resolved)
 zonkEffect sp (SemanticEffect vars reqs) = do
@@ -743,6 +736,8 @@ zonk idResult cgResult solverResult =
    in ZonkResult
         { zonkedModules = modulesResult,
           zonkedTypeEnvironment = envResult,
+          zonkedModuleNames =
+            Map.map (\ModuleData {moduleName} -> moduleName) idResult.identifiedModules,
           zonkErrors = reverse errs
         }
   where

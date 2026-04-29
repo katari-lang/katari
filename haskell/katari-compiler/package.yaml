@@ -11,9 +11,9 @@ library:
     - Katari
     - Katari.AST
     - Katari.AST.Identifiers
+    - Katari.Diagnostic
     - Katari.Lexer
     - Katari.Parser
-    - Katari.Typechecker
     - Katari.Typechecker.Identifier
     - Katari.Typechecker.SemanticType
     - Katari.Typechecker.NormalizedType

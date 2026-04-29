@@ -18,7 +18,7 @@ import Control.Monad (foldM)
 import Control.Monad.State.Strict (State, gets, modify, runState)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (catMaybes, fromMaybe)
+import Data.Maybe (catMaybes)
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Word (Word32)
@@ -41,22 +41,6 @@ data LoweringError
   | -- | A construct the lowering does not yet support (ext agent in module
     -- without server annotation, qualified ref out of scope, etc.).
     LowerErrorUnsupported AST.SourceSpan Text
-  deriving (Eq, Show)
-
--- ===========================================================================
--- VarKind: how a top-level VariableId maps to the IR
--- ===========================================================================
-
--- | Classification used by Lowering to decide whether a variable reference
--- becomes a static 'CTBlock', a 'SMakeClosure' + 'CTValue', or a direct local
--- 'VarId' lookup.
-data VarKind
-  = VKAgent BlockId
-  | VKRequest BlockId
-  | VKExternal BlockId
-  | VKCtor BlockId
-  | -- | Local binding (let / param / pattern). Lowering's local map answers.
-    VKLocal
   deriving (Eq, Show)
 
 -- ===========================================================================
@@ -130,7 +114,11 @@ data LowerState = LowerState
     lsBlocks :: !(Map BlockId Block),
     lsVarNames :: !(Map VarId Text),
     lsBlockNames :: !(Map BlockId Text),
-    lsVarKinds :: !(Map VariableId VarKind),
+    -- | Top-level @VariableId@ → its callable @BlockId@. Used at call /
+    -- closure sites to resolve agent / req / ext-agent / data-ctor names.
+    -- Local bindings (let / param / pattern) are *not* in this map; they
+    -- live in 'lsLocalVars' instead, and the call sites consult locals first.
+    lsVarBlockIds :: !(Map VariableId BlockId),
     lsLocalVars :: !(Map VariableId VarId),
     lsPrimBlockIds :: !(Map Text BlockId),
     lsErrors :: ![LoweringError]
@@ -144,7 +132,7 @@ initialLowerState =
       lsBlocks = Map.empty,
       lsVarNames = Map.empty,
       lsBlockNames = Map.empty,
-      lsVarKinds = Map.empty,
+      lsVarBlockIds = Map.empty,
       lsLocalVars = Map.empty,
       lsPrimBlockIds = Map.empty,
       lsErrors = []
@@ -237,6 +225,37 @@ emit :: Statement -> StmtBuf -> StmtBuf
 emit s buf = buf ++ [s]
 
 -- ===========================================================================
+-- UserBlock / BlockProps defaults
+-- ===========================================================================
+
+-- | All-False 'BlockProps'. Override individual fields via record update at
+-- the construction site.
+defaultBlockProps :: BlockProps
+defaultBlockProps =
+  BlockProps
+    { catchesReturn = False,
+      catchesBreak = False,
+      inheritScope = False
+    }
+
+-- | Empty 'UserBlock' template. The 8 different roles a block plays
+-- (agent entry / agent-with-handlers / handle scope / handler body / inline
+-- block / for body / match-arm body / then block) used to inline 13 lines of
+-- record syntax each; now they record-update only the fields they care
+-- about. The 'BlockKind' sum (Phase 12) will eventually replace 'BlockProps'.
+defaultUserBlock :: UserBlock
+defaultUserBlock =
+  UserBlock
+    { params = [],
+      stateVars = [],
+      statements = [],
+      trailing = Nothing,
+      thenBlock = Nothing,
+      handlers = [],
+      props = defaultBlockProps
+    }
+
+-- ===========================================================================
 -- Entry
 -- ===========================================================================
 
@@ -276,43 +295,64 @@ registerPrimitives = mapM_ go primitiveNames
       recordBlock blockId (BlockPrim {name = primName}) (Just ("prim:" <> primName))
       modify (\s -> s {lsPrimBlockIds = Map.insert primName blockId s.lsPrimBlockIds})
 
+-- | Bind a top-level @VariableId@ to its callable @BlockId@.
+recordVarBlockId :: VariableId -> BlockId -> Lower ()
+recordVarBlockId variableId blockId =
+  modify (\s -> s {lsVarBlockIds = Map.insert variableId blockId s.lsVarBlockIds})
+
+-- | Run @action@ with the resolved 'VariableId' from a top-level callable
+-- declaration name. If the name didn't resolve (parser/identifier left an
+-- 'ZonkedUnresolvedVariable' marker), record a Lowering error and skip.
+registerCallable ::
+  AST.NameRef Zonked 'AST.VariableRef ->
+  AST.SourceSpan ->
+  (VariableId -> Lower ()) ->
+  Lower ()
+registerCallable nameRef sp action = case nameRef.metadata of
+  ZonkedVariable variableId -> action variableId
+  ZonkedUnresolvedVariable -> recordError (LowerErrorUnresolvedVariable sp nameRef.text)
+
 -- | Walk all declarations, registering each top-level agent / req / ext /
--- ctor's BlockId and VarKind. Stage 1+ implementations fill bodies later.
+-- ctor's @VariableId → BlockId@ mapping. Bodies are filled in by
+-- 'lowerAllDeclarations'.
+--
+-- The current module's name is threaded through so that 'BlockExternal'
+-- entries can be stamped with @(moduleName, name)@ — that pair is how the
+-- runtime sidecar will look up the JS implementation. The @\@"..."@
+-- annotation on the declaration is documentation only and is dropped here
+-- (it surfaces in the Schema layer instead, Phase 11).
 registerDeclarationKinds :: ZonkResult -> Lower ()
 registerDeclarationKinds zonkResult =
   mapM_ registerModule (Map.toList zonkResult.zonkedModules)
   where
-    registerModule (_, m) = mapM_ registerDecl m.declarations
+    registerModule (mid, m) = do
+      let moduleName = Map.findWithDefault "" mid zonkResult.zonkedModuleNames
+      mapM_ (registerDecl moduleName) m.declarations
 
-    registerDecl :: AST.Declaration Zonked -> Lower ()
-    registerDecl = \case
-      AST.DeclarationAgent decl -> case decl.name.metadata of
-        ZonkedVariable variableId -> do
+    registerDecl :: Text -> AST.Declaration Zonked -> Lower ()
+    registerDecl moduleName = \case
+      AST.DeclarationAgent decl ->
+        registerCallable decl.name decl.sourceSpan $ \variableId -> do
           blockId <- reserveBlockId (Just decl.name.text)
-          modify (\s -> s {lsVarKinds = Map.insert variableId (VKAgent blockId) s.lsVarKinds})
-        ZonkedUnresolvedVariable -> recordError (LowerErrorUnresolvedVariable decl.sourceSpan decl.name.text)
-      AST.DeclarationRequest decl -> case decl.name.metadata of
-        ZonkedVariable variableId -> do
+          recordVarBlockId variableId blockId
+      AST.DeclarationRequest decl ->
+        registerCallable decl.name decl.sourceSpan $ \variableId -> do
           blockId <- freshBlockId
           recordBlock blockId (BlockRequest {name = decl.name.text}) (Just decl.name.text)
-          modify (\s -> s {lsVarKinds = Map.insert variableId (VKRequest blockId) s.lsVarKinds})
-        ZonkedUnresolvedVariable -> recordError (LowerErrorUnresolvedVariable decl.sourceSpan decl.name.text)
-      AST.DeclarationExternalAgent decl -> case decl.name.metadata of
-        ZonkedVariable variableId -> do
+          recordVarBlockId variableId blockId
+      AST.DeclarationExternalAgent decl ->
+        registerCallable decl.name decl.sourceSpan $ \variableId -> do
           blockId <- freshBlockId
-          let serverName = fromMaybe "" decl.annotation
           recordBlock
             blockId
-            BlockExternal {server = serverName, name = decl.name.text}
+            BlockExternal {moduleName = moduleName, name = decl.name.text}
             (Just decl.name.text)
-          modify (\s -> s {lsVarKinds = Map.insert variableId (VKExternal blockId) s.lsVarKinds})
-        ZonkedUnresolvedVariable -> recordError (LowerErrorUnresolvedVariable decl.sourceSpan decl.name.text)
-      AST.DeclarationData decl -> case decl.name.metadata of
-        ZonkedVariable variableId -> do
+          recordVarBlockId variableId blockId
+      AST.DeclarationData decl ->
+        registerCallable decl.name decl.sourceSpan $ \variableId -> do
           blockId <- freshBlockId
           recordBlock blockId (BlockCtor {name = decl.name.text}) (Just decl.name.text)
-          modify (\s -> s {lsVarKinds = Map.insert variableId (VKCtor blockId) s.lsVarKinds})
-        ZonkedUnresolvedVariable -> recordError (LowerErrorUnresolvedVariable decl.sourceSpan decl.name.text)
+          recordVarBlockId variableId blockId
       AST.DeclarationImport _ -> pure ()
       AST.DeclarationTypeSynonym _ -> pure ()
       AST.DeclarationError sp -> recordError (LowerErrorParseSentinel sp)
@@ -328,12 +368,12 @@ lowerAllDeclarations zonkResult = do
     lowerDeclaration = \case
       AST.DeclarationAgent decl -> case decl.name.metadata of
         ZonkedVariable variableId -> do
-          kinds <- gets (.lsVarKinds)
-          case Map.lookup variableId kinds of
-            Just (VKAgent blockId) -> do
+          mBlockId <- gets (Map.lookup variableId . (.lsVarBlockIds))
+          case mBlockId of
+            Just blockId -> do
               lowerAgentDeclaration decl blockId
               pure (Just (decl.name.text, blockId))
-            _ -> pure Nothing
+            Nothing -> pure Nothing
         ZonkedUnresolvedVariable -> pure Nothing
       _ -> pure Nothing
 
@@ -380,19 +420,11 @@ lowerSimpleAgent ::
 lowerSimpleAgent blockId name paramVars blk = do
   (statements, trailing) <- lowerBlockBody blk
   let userBlock =
-        UserBlock
+        defaultUserBlock
           { params = paramVars,
-            stateVars = [],
             statements = statements,
             trailing = trailing,
-            thenBlock = Nothing,
-            handlers = [],
-            props =
-              BlockProps
-                { catchesReturn = True,
-                  catchesBreak = False,
-                  inheritScope = False
-                }
+            props = defaultBlockProps {catchesReturn = True}
           }
   recordBlock blockId (BlockUser {body = userBlock}) (Just name)
 
@@ -413,19 +445,13 @@ lowerAgentWithHandlers blockId name paramVars blk wb = do
   -- Lower then clause if present.
   thenBlockId <- lowerThenClause wb.thenClause
   let userBlock =
-        UserBlock
+        defaultUserBlock
           { params = paramVars,
-            stateVars = [],
             statements = statements,
             trailing = trailing,
             thenBlock = thenBlockId,
             handlers = handlers,
-            props =
-              BlockProps
-                { catchesReturn = True,
-                  catchesBreak = True,
-                  inheritScope = False
-                }
+            props = defaultBlockProps {catchesReturn = True, catchesBreak = True}
           }
   recordBlock blockId (BlockUser {body = userBlock}) (Just name)
 
@@ -461,19 +487,11 @@ lowerAgentWithStateVars outerId name paramVars blk wb = do
             }
       outerStatements = bufAfterInits ++ [callInner]
       outerBlock =
-        UserBlock
+        defaultUserBlock
           { params = paramVars,
-            stateVars = [],
             statements = outerStatements,
             trailing = Just innerOut,
-            thenBlock = Nothing,
-            handlers = [],
-            props =
-              BlockProps
-                { catchesReturn = True,
-                  catchesBreak = False,
-                  inheritScope = False
-                }
+            props = defaultBlockProps {catchesReturn = True}
           }
   recordBlock outerId (BlockUser {body = outerBlock}) (Just name)
 
@@ -511,19 +529,13 @@ buildInnerBlockWithState parentName wb blk = do
     handlers <- mapM (lowerHandler stateParams) wb.handlers
     thenBlockId <- lowerThenClause wb.thenClause
     let userBlock =
-          UserBlock
-            { params = [], -- state vars are the only inputs
-              stateVars = stateParams,
+          defaultUserBlock
+            { stateVars = stateParams,
               statements = statements,
               trailing = trailing,
               thenBlock = thenBlockId,
               handlers = handlers,
-              props =
-                BlockProps
-                  { catchesReturn = False,
-                    catchesBreak = True,
-                    inheritScope = True
-                  }
+              props = defaultBlockProps {catchesBreak = True, inheritScope = True}
             }
     recordBlock innerBlockId (BlockUser {body = userBlock}) (Just (parentName <> ":inner"))
   pure innerBlockId
@@ -548,13 +560,16 @@ buildInnerBlockWithState parentName wb blk = do
 -- 'SExit ExitBreak' if the body completes normally.
 lowerHandler :: [Param] -> AST.RequestHandler Zonked -> Lower Handler
 lowerHandler stateParams hr = do
-  -- Resolve the request's BlockId by VariableId in the kind table.
+  -- Resolve the request's BlockId via the top-level VariableId → BlockId
+  -- map. Failure modes (unresolved name, or not actually a 'BlockRequest')
+  -- record an error and fall back to a fresh placeholder so lowering can
+  -- continue producing partial IR for diagnostics.
   reqBlockId <- case hr.name.metadata of
     ZonkedVariable variableId -> do
-      kinds <- gets (.lsVarKinds)
-      case Map.lookup variableId kinds of
-        Just (VKRequest bid) -> pure bid
-        _ -> do
+      mBlockId <- gets (Map.lookup variableId . (.lsVarBlockIds))
+      case mBlockId of
+        Just bid -> pure bid
+        Nothing -> do
           recordError (LowerErrorUnsupported hr.sourceSpan "handler target is not a request")
           freshBlockId
     ZonkedUnresolvedVariable -> do
@@ -573,19 +588,9 @@ lowerHandler stateParams hr = do
             statements ++ [SExit ExitData {exitKind = ExitBreak, value = t}]
           Nothing -> statements
         userBlock =
-          UserBlock
+          defaultUserBlock
             { params = reqParamVars ++ stateParams,
-              stateVars = [],
-              statements = finalStatements,
-              trailing = Nothing,
-              thenBlock = Nothing,
-              handlers = [],
-              props =
-                BlockProps
-                  { catchesReturn = False,
-                    catchesBreak = False,
-                    inheritScope = False
-                  }
+              statements = finalStatements
             }
     recordBlock bodyBlockId (BlockUser {body = userBlock}) (Just hr.name.text)
   pure Handler {request = reqBlockId, handlerBody = bodyBlockId}
@@ -609,19 +614,11 @@ lowerThenClause = \case
     withLocals paramLocals $ do
       (statements, trailing) <- lowerBlockBody blk
       let userBlock =
-            UserBlock
+            defaultUserBlock
               { params = [Param {label = "value", var = paramVar}],
-                stateVars = [],
                 statements = statements,
                 trailing = trailing,
-                thenBlock = Nothing,
-                handlers = [],
-                props =
-                  BlockProps
-                    { catchesReturn = False,
-                      catchesBreak = False,
-                      inheritScope = True
-                    }
+                props = defaultBlockProps {inheritScope = True}
               }
       recordBlock bid (BlockUser {body = userBlock}) Nothing
     pure (Just bid)
@@ -893,13 +890,10 @@ lowerExpr buf = \case
     -- the resolved VariableId; treat it like a bare variable expression.
     case qe.target.metadata of
       ZonkedVariable variableId -> do
-        kinds <- gets (.lsVarKinds)
-        case Map.lookup variableId kinds of
-          Just (VKAgent bid) -> closureRef qe.target.text bid
-          Just (VKRequest bid) -> closureRef qe.target.text bid
-          Just (VKExternal bid) -> closureRef qe.target.text bid
-          Just (VKCtor bid) -> closureRef qe.target.text bid
-          _ -> do
+        mBlockId <- gets (Map.lookup variableId . (.lsVarBlockIds))
+        case mBlockId of
+          Just bid -> closureRef qe.target.text bid
+          Nothing -> do
             recordError (LowerErrorUnresolvedVariable qe.sourceSpan qe.target.text)
             v <- freshVarId Nothing
             pure (v, buf)
@@ -954,47 +948,50 @@ resolveCallee ::
   AST.Expression Zonked ->
   Lower (CallTarget, StmtBuf)
 resolveCallee buf = \case
-  AST.ExpressionVariable ve -> case ve.name.metadata of
-    ZonkedVariable variableId -> do
-      locals <- gets (.lsLocalVars)
-      case Map.lookup variableId locals of
-        Just irVar -> pure (CTValue {var = irVar}, buf)
-        Nothing -> do
-          kinds <- gets (.lsVarKinds)
-          case Map.lookup variableId kinds of
-            Just (VKAgent bid) -> pure (CTBlock {block = bid}, buf)
-            Just (VKRequest bid) -> pure (CTBlock {block = bid}, buf)
-            Just (VKExternal bid) -> pure (CTBlock {block = bid}, buf)
-            Just (VKCtor bid) -> pure (CTBlock {block = bid}, buf)
-            _ -> do
-              recordError (LowerErrorUnresolvedVariable ve.sourceSpan ve.name.text)
-              v <- freshVarId Nothing
-              pure (CTValue {var = v}, buf)
-    ZonkedUnresolvedVariable -> do
-      recordError (LowerErrorUnresolvedVariable ve.sourceSpan ve.name.text)
-      v <- freshVarId Nothing
-      pure (CTValue {var = v}, buf)
-  AST.ExpressionQualifiedReference qe -> case qe.target.metadata of
-    ZonkedVariable variableId -> do
-      kinds <- gets (.lsVarKinds)
-      case Map.lookup variableId kinds of
-        Just (VKAgent bid) -> pure (CTBlock {block = bid}, buf)
-        Just (VKRequest bid) -> pure (CTBlock {block = bid}, buf)
-        Just (VKExternal bid) -> pure (CTBlock {block = bid}, buf)
-        Just (VKCtor bid) -> pure (CTBlock {block = bid}, buf)
-        _ -> do
-          recordError (LowerErrorUnresolvedVariable qe.sourceSpan qe.target.text)
-          v <- freshVarId Nothing
-          pure (CTValue {var = v}, buf)
-    ZonkedUnresolvedVariable -> do
-      recordError (LowerErrorUnresolvedVariable qe.sourceSpan qe.target.text)
-      v <- freshVarId Nothing
-      pure (CTValue {var = v}, buf)
+  AST.ExpressionVariable ve ->
+    resolveCalleeName
+      buf
+      ve.name.metadata
+      ve.sourceSpan
+      ve.name.text
+      (\variableId -> gets (Map.lookup variableId . (.lsLocalVars)))
+  AST.ExpressionQualifiedReference qe ->
+    -- Qualified references never bind locally — only consult the top-level
+    -- block id table.
+    resolveCalleeName buf qe.target.metadata qe.sourceSpan qe.target.text (const (pure Nothing))
   -- For any other callee shape (a higher-order computation), lower it to a
   -- closure value first.
   other -> do
     (var, buf') <- lowerExpr buf other
     pure (CTValue {var = var}, buf')
+
+-- | Shared callee-name resolution: try the local map first (if applicable),
+-- then fall back to the top-level @VariableId → BlockId@ table. Failures
+-- yield a 'CTValue' on a fresh placeholder var with an error recorded.
+resolveCalleeName ::
+  StmtBuf ->
+  Zonked 'AST.VariableRef ->
+  AST.SourceSpan ->
+  Text ->
+  (VariableId -> Lower (Maybe VarId)) ->
+  Lower (CallTarget, StmtBuf)
+resolveCalleeName buf metadata sp nameText lookupLocal = case metadata of
+  ZonkedVariable variableId -> do
+    mLocal <- lookupLocal variableId
+    case mLocal of
+      Just irVar -> pure (CTValue {var = irVar}, buf)
+      Nothing -> do
+        mBlockId <- gets (Map.lookup variableId . (.lsVarBlockIds))
+        case mBlockId of
+          Just bid -> pure (CTBlock {block = bid}, buf)
+          Nothing -> do
+            recordError (LowerErrorUnresolvedVariable sp nameText)
+            v <- freshVarId Nothing
+            pure (CTValue {var = v}, buf)
+  ZonkedUnresolvedVariable -> do
+    recordError (LowerErrorUnresolvedVariable sp nameText)
+    v <- freshVarId Nothing
+    pure (CTValue {var = v}, buf)
 
 -- | Lower an 'AST.TemplateExpression' as a left-fold of @concat@ prim calls.
 lowerTemplate ::
@@ -1084,19 +1081,10 @@ buildInlineBlock blk = do
   blockId <- freshBlockId
   (statements, trailing) <- lowerBlockBody blk
   let userBlock =
-        UserBlock
-          { params = [],
-            stateVars = [],
-            statements = statements,
+        defaultUserBlock
+          { statements = statements,
             trailing = trailing,
-            thenBlock = Nothing,
-            handlers = [],
-            props =
-              BlockProps
-                { catchesReturn = False,
-                  catchesBreak = False,
-                  inheritScope = True
-                }
+            props = defaultBlockProps {inheritScope = True}
           }
   recordBlock blockId (BlockUser {body = userBlock}) Nothing
   pure blockId
@@ -1219,19 +1207,10 @@ buildArmBody locals blk = do
   withLocals locals $ do
     (statements, trailing) <- lowerBlockBody blk
     let userBlock =
-          UserBlock
-            { params = [],
-              stateVars = [],
-              statements = statements,
+          defaultUserBlock
+            { statements = statements,
               trailing = trailing,
-              thenBlock = Nothing,
-              handlers = [],
-              props =
-                BlockProps
-                  { catchesReturn = False,
-                    catchesBreak = False,
-                    inheritScope = True
-                  }
+              props = defaultBlockProps {inheritScope = True}
             }
     recordBlock blockId (BlockUser {body = userBlock}) Nothing
   pure blockId
@@ -1327,19 +1306,10 @@ buildForBody _iterPairs stateLocals body = do
   withLocals stateLocals $ do
     (statements, trailing) <- lowerBlockBody body
     let userBlock =
-          UserBlock
-            { params = [],
-              stateVars = [],
-              statements = statements,
+          defaultUserBlock
+            { statements = statements,
               trailing = trailing,
-              thenBlock = Nothing,
-              handlers = [],
-              props =
-                BlockProps
-                  { catchesReturn = False,
-                    catchesBreak = False,
-                    inheritScope = True
-                  }
+              props = defaultBlockProps {inheritScope = True}
             }
     recordBlock blockId (BlockUser {body = userBlock}) Nothing
   pure blockId
@@ -1378,16 +1348,9 @@ lowerVariable buf ve = case ve.name.metadata of
     case Map.lookup variableId locals of
       Just irVar -> pure (irVar, buf)
       Nothing -> do
-        kinds <- gets (.lsVarKinds)
-        case Map.lookup variableId kinds of
-          Just (VKAgent bid) -> closureValue buf bid
-          Just (VKRequest bid) -> closureValue buf bid
-          Just (VKExternal bid) -> closureValue buf bid
-          Just (VKCtor bid) -> closureValue buf bid
-          Just VKLocal -> do
-            recordError (LowerErrorUnsupported ve.sourceSpan "VKLocal without local binding")
-            v <- freshVarId Nothing
-            pure (v, buf)
+        mBlockId <- gets (Map.lookup variableId . (.lsVarBlockIds))
+        case mBlockId of
+          Just bid -> closureValue buf bid
           Nothing -> do
             recordError (LowerErrorUnresolvedVariable ve.sourceSpan ve.name.text)
             v <- freshVarId Nothing

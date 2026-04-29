@@ -43,7 +43,6 @@ module Katari.Typechecker.Solver
     constraintTypeVars,
     typeVarsIn,
     effectVarsIn,
-    partitionConstraints,
     isTypeConstraint,
     isEffectConstraint,
 

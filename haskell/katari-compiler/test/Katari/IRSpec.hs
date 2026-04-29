@@ -73,11 +73,11 @@ blockSpec = describe "Block (sum)" $ do
     BlockRequest {name = "Ask"}
       `shouldEncodeAs` object ["kind" .= ("request" :: String), "name" .= ("Ask" :: String)]
 
-  it "BlockExternal has kind + server + name" $ do
-    BlockExternal {server = "discord", name = "send_message"}
+  it "BlockExternal has kind + moduleName + name" $ do
+    BlockExternal "discord" "send_message"
       `shouldEncodeAs` object
         [ "kind" .= ("external" :: String),
-          "server" .= ("discord" :: String),
+          "moduleName" .= ("discord" :: String),
           "name" .= ("send_message" :: String)
         ]
 
@@ -99,7 +99,7 @@ blockSpec = describe "Block (sum)" $ do
     roundTrip BlockUser {body = userBody}
     roundTrip BlockPrim {name = "add"}
     roundTrip BlockRequest {name = "Ask"}
-    roundTrip BlockExternal {server = "discord", name = "send"}
+    roundTrip (BlockExternal "discord" "send")
     roundTrip BlockCtor {name = "Foo"}
 
 statementSpec :: Spec

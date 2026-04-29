@@ -1,3 +1,17 @@
-module Katari where
-
-import Prelude ()
+-- | Public façade placeholder.
+--
+-- Downstream consumers should import the dedicated modules directly:
+--
+--   * 'Katari.AST' / 'Katari.AST.Identifiers' — phase-parametric AST types
+--   * 'Katari.IR' — lowered IR (JSON-serialisable)
+--   * 'Katari.Lexer' / 'Katari.Parser' — front-end
+--   * 'Katari.Typechecker.Identifier' / 'Katari.Typechecker.ConstraintGenerator'
+--     / 'Katari.Typechecker.Solver' / 'Katari.Typechecker.Zonker' — phases
+--   * 'Katari.Lowering' — AST → IR
+--
+-- Once Phase 11 adds 'Katari.Compile' (the unified pure entry) and
+-- 'Katari.Diagnostic' / 'Katari.Schema', this module will re-export them as
+-- the recommended public surface. AST and IR types share several names
+-- ('Block' / 'Statement' / 'LiteralValue') so a wholesale re-export of both
+-- is impossible — we'll re-export only the high-level entry types here.
+module Katari () where

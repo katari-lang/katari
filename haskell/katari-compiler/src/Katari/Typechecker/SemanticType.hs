@@ -35,9 +35,15 @@ module Katari.Typechecker.SemanticType
     singletonEffect,
     effectFromVar,
     unionEffects,
+
+    -- * Traversal
+    traverseSemantic,
+    foldSemantic,
+    traverseSemanticChildren,
   )
 where
 
+import Data.Functor.Const (Const (..))
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Map.Strict (Map)
@@ -191,3 +197,131 @@ type instance ExprType Zonked = SemanticType Resolved
 type instance PatType Constrained = SemanticType Unresolved
 
 type instance PatType Zonked = SemanticType Resolved
+
+-- ---------------------------------------------------------------------------
+-- Generic traversal (uniplate-style)
+--
+-- A single recursion skeleton for 'SemanticType' — the same shape that used
+-- to be re-implemented by hand in:
+--
+--   * Solver.Internal.typeVarsIn / effectVarsIn / semanticToConcrete
+--   * Solver.Substitution.applySubstType / applyEffectSubstToType /
+--     resolvedToUnresolved
+--   * Zonker.zonkType (the bulk of its body)
+--
+-- Each of those used to do its own 14-case @\\case@ over every composite /
+-- leaf constructor. Funnelling the recursion through 'traverseSemantic' lets
+-- callers focus on the cases that are actually special for their own logic
+-- (typically just 'SemanticTypeVariable') and delegate the rest. The
+-- pattern-match fan-out shrinks from ~14 lines per walker to ~3.
+--
+-- Phase-preserving by design: every leaf constructor that exists at multiple
+-- phases is reconstructed unchanged so that 'p' on input matches 'p' on
+-- output. The 'SemanticTypeVariable' constructor is GADT-restricted to
+-- @SemanticType Unresolved@; we 'pure' it through verbatim, which type-checks
+-- because pattern-matching on 'SemanticTypeVariable' refines @p ~ Unresolved@.
+--
+-- Callers that *change* phase (e.g. 'semanticToConcrete' going Unresolved →
+-- Resolved by rejecting variables) handle the 'SemanticTypeVariable' case
+-- themselves before delegating composites to 'traverseSemantic'. Those uses
+-- happen to be in the same phase on both sides; cross-phase callers should
+-- intercept the variable case first.
+-- ---------------------------------------------------------------------------
+
+-- | Generic traversal over the children of a 'SemanticType' node. Composite
+-- constructors recurse via 'onType' / 'onEffect'; leaf constructors are
+-- reconstructed verbatim.
+traverseSemantic ::
+  (Applicative f) =>
+  (SemanticType p -> f (SemanticType p)) ->
+  (SemanticEffect p -> f (SemanticEffect p)) ->
+  SemanticType p ->
+  f (SemanticType p)
+traverseSemantic onType onEffect = \case
+  -- Composites: recurse on children.
+  SemanticTypeFunction parameters returnType effects ->
+    SemanticTypeFunction
+      <$> traverse onType parameters
+      <*> onType returnType
+      <*> onEffect effects
+  SemanticTypeArray element -> SemanticTypeArray <$> onType element
+  SemanticTypeTuple elements -> SemanticTypeTuple <$> traverse onType elements
+  SemanticTypeUnion branches -> SemanticTypeUnion <$> traverse onType branches
+  SemanticTypeObject fields -> SemanticTypeObject <$> traverse onType fields
+  -- Leaves: pass through. Pattern-matching the GADT 'SemanticTypeVariable'
+  -- refines @p ~ Unresolved@ in this branch, so 'pure' returns the right
+  -- output type.
+  SemanticTypeVariable typeVarId -> pure (SemanticTypeVariable typeVarId)
+  SemanticTypeNever -> pure SemanticTypeNever
+  SemanticTypeUnknown -> pure SemanticTypeUnknown
+  SemanticTypeNull -> pure SemanticTypeNull
+  SemanticTypeInteger -> pure SemanticTypeInteger
+  SemanticTypeNumber -> pure SemanticTypeNumber
+  SemanticTypeString -> pure SemanticTypeString
+  SemanticTypeBoolean -> pure SemanticTypeBoolean
+  SemanticTypeLiteralInteger value -> pure (SemanticTypeLiteralInteger value)
+  SemanticTypeLiteralString value -> pure (SemanticTypeLiteralString value)
+  SemanticTypeLiteralBoolean value -> pure (SemanticTypeLiteralBoolean value)
+  SemanticTypeData typeId -> pure (SemanticTypeData typeId)
+
+-- | Monoidal fold over the immediate children. Convenience wrapper around
+-- @'traverseSemantic'@ specialised to @'Const' m@. Use this for "collect all
+-- 'TypeVarId's" / "collect all 'EffectVarId's" style queries — the
+-- 'SemanticTypeVariable' case is *not* special-cased here; it contributes
+-- 'mempty', so callers that want to extract the variable should pre-empt
+-- the variable branch themselves.
+foldSemantic ::
+  (Monoid m) =>
+  (SemanticType p -> m) ->
+  (SemanticEffect p -> m) ->
+  SemanticType p ->
+  m
+foldSemantic onType onEffect t =
+  getConst (traverseSemantic (Const . onType) (Const . onEffect) t)
+
+-- | Phase-changing variant of 'traverseSemantic'. The leaf constructors are
+-- phase-polymorphic (every leaf except 'SemanticTypeVariable') so they can
+-- be reconstructed at the target phase without information loss; the
+-- 'SemanticTypeVariable' case must be intercepted by the caller before
+-- dispatching to this helper.
+--
+-- Used by 'semanticToConcrete' (Unresolved → Resolved, Variable → Nothing),
+-- 'resolvedToUnresolved' (Resolved → Unresolved, no Variable case to worry
+-- about), and 'zonkType' (Unresolved → Resolved, Variable resolved via
+-- substitution map).
+--
+-- Calling this on a value whose head is 'SemanticTypeVariable' is a
+-- programmer error and aborts with a clear message.
+traverseSemanticChildren ::
+  (Applicative f) =>
+  (SemanticType p -> f (SemanticType q)) ->
+  (SemanticEffect p -> f (SemanticEffect q)) ->
+  SemanticType p ->
+  f (SemanticType q)
+traverseSemanticChildren onType onEffect = \case
+  -- Variable: caller's responsibility.
+  SemanticTypeVariable _ ->
+    error "traverseSemanticChildren: SemanticTypeVariable must be handled by caller before recursing"
+  -- Composites: recurse on children.
+  SemanticTypeFunction parameters returnType effects ->
+    SemanticTypeFunction
+      <$> traverse onType parameters
+      <*> onType returnType
+      <*> onEffect effects
+  SemanticTypeArray element -> SemanticTypeArray <$> onType element
+  SemanticTypeTuple elements -> SemanticTypeTuple <$> traverse onType elements
+  SemanticTypeUnion branches -> SemanticTypeUnion <$> traverse onType branches
+  SemanticTypeObject fields -> SemanticTypeObject <$> traverse onType fields
+  -- Leaves: rebuild at the target phase. All of these constructors are
+  -- phase-polymorphic so this is well-typed for any 'q'.
+  SemanticTypeNever -> pure SemanticTypeNever
+  SemanticTypeUnknown -> pure SemanticTypeUnknown
+  SemanticTypeNull -> pure SemanticTypeNull
+  SemanticTypeInteger -> pure SemanticTypeInteger
+  SemanticTypeNumber -> pure SemanticTypeNumber
+  SemanticTypeString -> pure SemanticTypeString
+  SemanticTypeBoolean -> pure SemanticTypeBoolean
+  SemanticTypeLiteralInteger value -> pure (SemanticTypeLiteralInteger value)
+  SemanticTypeLiteralString value -> pure (SemanticTypeLiteralString value)
+  SemanticTypeLiteralBoolean value -> pure (SemanticTypeLiteralBoolean value)
+  SemanticTypeData typeId -> pure (SemanticTypeData typeId)

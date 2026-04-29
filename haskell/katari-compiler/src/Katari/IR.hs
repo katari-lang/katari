@@ -144,8 +144,12 @@ data Block where
   BlockRequest ::
     {name :: Text} ->
     Block
+  -- | External agent stub. Identified by @(moduleName, name)@: the runtime
+  -- looks up the function in a JS sidecar bundle keyed by these. The
+  -- @\@"..."@ annotation on the declaration is purely documentation and
+  -- does not appear in the IR.
   BlockExternal ::
-    {server :: Text, name :: Text} ->
+    {moduleName :: Text, name :: Text} ->
     Block
   BlockCtor ::
     {name :: Text} ->
@@ -160,8 +164,8 @@ instance ToJSON Block where
     BlockUser {body} -> withTag "user" (toJSON body)
     BlockPrim {name} -> object ["kind" .= ("prim" :: Text), "name" .= name]
     BlockRequest {name} -> object ["kind" .= ("request" :: Text), "name" .= name]
-    BlockExternal {server, name} ->
-      object ["kind" .= ("external" :: Text), "server" .= server, "name" .= name]
+    BlockExternal {moduleName, name} ->
+      object ["kind" .= ("external" :: Text), "moduleName" .= moduleName, "name" .= name]
     BlockCtor {name} -> object ["kind" .= ("ctor" :: Text), "name" .= name]
 
 instance FromJSON Block where
@@ -171,7 +175,7 @@ instance FromJSON Block where
       "user" -> BlockUser <$> parseJSON (Object o)
       "prim" -> BlockPrim <$> o .: "name"
       "request" -> BlockRequest <$> o .: "name"
-      "external" -> BlockExternal <$> o .: "server" <*> o .: "name"
+      "external" -> BlockExternal <$> o .: "moduleName" <*> o .: "name"
       "ctor" -> BlockCtor <$> o .: "name"
       other -> parseFail ("Block: unknown kind " <> show other)
 

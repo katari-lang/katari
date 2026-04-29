@@ -36,6 +36,7 @@ module Katari.Typechecker.Solver.Substitution
   )
 where
 
+import Data.Functor.Identity (Identity (..))
 import Data.List (nub)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
@@ -58,6 +59,8 @@ import Katari.Typechecker.SemanticType
     SemanticType (..),
     TypeVarId,
     Unresolved,
+    traverseSemantic,
+    traverseSemanticChildren,
     unionSemantic,
   )
 import Katari.Typechecker.Solver.Internal
@@ -82,35 +85,12 @@ import Katari.Typechecker.Solver.Internal
 -- itself still contains (transitive references) are left in place to be
 -- substituted on a subsequent pass.
 applySubstType :: Substitution -> SemanticType Unresolved -> SemanticType Unresolved
-applySubstType substitution = \case
-  SemanticTypeVariable typeVarId ->
-    case Map.lookup typeVarId substitution of
-      Just bound -> bound
-      Nothing -> SemanticTypeVariable typeVarId
-  SemanticTypeFunction parameterTypes returnType effects ->
-    SemanticTypeFunction
-      (Map.map (applySubstType substitution) parameterTypes)
-      (applySubstType substitution returnType)
-      effects
-  SemanticTypeArray element -> SemanticTypeArray (applySubstType substitution element)
-  SemanticTypeTuple elements ->
-    SemanticTypeTuple (applySubstType substitution <$> elements)
-  SemanticTypeUnion branches ->
-    SemanticTypeUnion (applySubstType substitution <$> branches)
-  SemanticTypeObject fields ->
-    SemanticTypeObject (Map.map (applySubstType substitution) fields)
-  -- Atomic / leaf types pass through.
-  SemanticTypeNever -> SemanticTypeNever
-  SemanticTypeUnknown -> SemanticTypeUnknown
-  SemanticTypeNull -> SemanticTypeNull
-  SemanticTypeInteger -> SemanticTypeInteger
-  SemanticTypeNumber -> SemanticTypeNumber
-  SemanticTypeString -> SemanticTypeString
-  SemanticTypeBoolean -> SemanticTypeBoolean
-  SemanticTypeLiteralInteger value -> SemanticTypeLiteralInteger value
-  SemanticTypeLiteralString value -> SemanticTypeLiteralString value
-  SemanticTypeLiteralBoolean value -> SemanticTypeLiteralBoolean value
-  SemanticTypeData typeId -> SemanticTypeData typeId
+applySubstType substitution = go
+  where
+    go = \case
+      SemanticTypeVariable typeVarId ->
+        Map.findWithDefault (SemanticTypeVariable typeVarId) typeVarId substitution
+      t -> runIdentity (traverseSemantic (Identity . go) Identity t)
 
 -- | Resolve every 'EffectVarId' inside a 'SemanticType' against the effect
 -- substitution, replacing each var with the concrete 'VariableId' set the
@@ -127,17 +107,7 @@ applyEffectSubstToType ::
   SemanticType Unresolved
 applyEffectSubstToType effectSubstitution = go
   where
-    go = \case
-      SemanticTypeFunction parameterTypes returnType effects ->
-        SemanticTypeFunction
-          (Map.map go parameterTypes)
-          (go returnType)
-          (resolveEffect effects)
-      SemanticTypeArray element -> SemanticTypeArray (go element)
-      SemanticTypeTuple elements -> SemanticTypeTuple (go <$> elements)
-      SemanticTypeUnion branches -> SemanticTypeUnion (go <$> branches)
-      SemanticTypeObject fields -> SemanticTypeObject (Map.map go fields)
-      atomic -> atomic
+    go t = runIdentity (traverseSemantic (Identity . go) (Identity . resolveEffect) t)
     resolveEffect (SemanticEffect vars reqs) =
       let expanded =
             Set.unions
@@ -331,30 +301,14 @@ intersectUpperBoundsViaNT items = case traverse semanticToConcrete items of
   Nothing -> SemanticTypeNever
 
 -- | Phase coercion: 'SemanticType' 'Resolved' has no 'SemanticTypeVariable'
--- inhabitants, so structural rebuild is total. Used to lift the result of
+-- inhabitants, so the structural rebuild is total. Used to lift the result of
 -- 'denormalise' back into the 'Unresolved' phase the substitution expects.
+-- Delegates to 'traverseSemanticChildren' for the structural recursion.
 resolvedToUnresolved :: SemanticType Resolved -> SemanticType Unresolved
-resolvedToUnresolved = \case
-  SemanticTypeNever -> SemanticTypeNever
-  SemanticTypeUnknown -> SemanticTypeUnknown
-  SemanticTypeNull -> SemanticTypeNull
-  SemanticTypeInteger -> SemanticTypeInteger
-  SemanticTypeNumber -> SemanticTypeNumber
-  SemanticTypeString -> SemanticTypeString
-  SemanticTypeBoolean -> SemanticTypeBoolean
-  SemanticTypeLiteralInteger value -> SemanticTypeLiteralInteger value
-  SemanticTypeLiteralString value -> SemanticTypeLiteralString value
-  SemanticTypeLiteralBoolean value -> SemanticTypeLiteralBoolean value
-  SemanticTypeData typeId -> SemanticTypeData typeId
-  SemanticTypeArray element -> SemanticTypeArray (resolvedToUnresolved element)
-  SemanticTypeTuple elements -> SemanticTypeTuple (resolvedToUnresolved <$> elements)
-  SemanticTypeUnion branches -> unionSemantic (resolvedToUnresolved <$> branches)
-  SemanticTypeObject fields -> SemanticTypeObject (Map.map resolvedToUnresolved fields)
-  SemanticTypeFunction parameterTypes returnType effects ->
-    SemanticTypeFunction
-      (Map.map resolvedToUnresolved parameterTypes)
-      (resolvedToUnresolved returnType)
-      (SemanticEffect effects.effectVars effects.effectReqs)
+resolvedToUnresolved =
+  runIdentity . traverseSemanticChildren (Identity . resolvedToUnresolved) (Identity . coerceEffect)
+  where
+    coerceEffect (SemanticEffect vars reqs) = SemanticEffect vars reqs
 
 -- ===========================================================================
 -- Bounds consistency check

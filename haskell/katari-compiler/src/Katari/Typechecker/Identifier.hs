@@ -304,9 +304,9 @@ mergeSymbol newPos name existing incoming = do
     (Just _, Just existingVariableId) -> reportFromVariable existingVariableId
     _ -> pure ()
   -- Per-slot duplicate.
-  mergedVariable <- mergeVariableSlot existing.variableSymbol incoming.variableSymbol
-  mergedType <- mergeTypeSlot existing.typeSymbol incoming.typeSymbol
-  mergedModule <- mergeModuleSlot existing.moduleSymbol incoming.moduleSymbol
+  mergedVariable <- mergeSlot reportFromVariable existing.variableSymbol incoming.variableSymbol
+  mergedType <- mergeSlot reportFromType existing.typeSymbol incoming.typeSymbol
+  mergedModule <- mergeSlot reportFromModule existing.moduleSymbol incoming.moduleSymbol
   pure SymbolEntry {variableSymbol = mergedVariable, typeSymbol = mergedType, moduleSymbol = mergedModule}
   where
     reportFromVariable variableId = do
@@ -319,23 +319,18 @@ mergeSymbol newPos name existing incoming = do
       maybeSpan <- gets (fmap (.moduleSourceSpan) . Map.lookup moduleId . (.modules))
       maybe (pure ()) (emitError . ErrorDuplicateName newPos name) maybeSpan
 
-    mergeVariableSlot existingSlot Nothing = pure existingSlot
-    mergeVariableSlot Nothing newSlot = pure newSlot
-    mergeVariableSlot (Just existingId) (Just _) = do
-      reportFromVariable existingId
-      pure (Just existingId)
-
-    mergeTypeSlot existingSlot Nothing = pure existingSlot
-    mergeTypeSlot Nothing newSlot = pure newSlot
-    mergeTypeSlot (Just existingId) (Just _) = do
-      reportFromType existingId
-      pure (Just existingId)
-
-    mergeModuleSlot existingSlot Nothing = pure existingSlot
-    mergeModuleSlot Nothing newSlot = pure newSlot
-    mergeModuleSlot (Just existingId) (Just _) = do
-      reportFromModule existingId
-      pure (Just existingId)
+-- | Generic per-slot merge. The first existing id wins on conflict; the
+-- caller's @reportConflict@ records the duplicate-name error against it.
+mergeSlot ::
+  (a -> Identifier ()) ->
+  Maybe a ->
+  Maybe a ->
+  Identifier (Maybe a)
+mergeSlot _ existing Nothing = pure existing
+mergeSlot _ Nothing newSlot = pure newSlot
+mergeSlot reportConflict (Just existingId) (Just _) = do
+  reportConflict existingId
+  pure (Just existingId)
 
 -- | Merge @incoming@ into the existing entry for @name@ in @table@ (if any),
 -- then @Map.insert@ the result.
@@ -709,20 +704,26 @@ resolveImportDecl ImportDeclaration {kind, sourceSpan} =
 -- emitted a duplicate-name error), record an unresolved marker rather than
 -- inventing a sentinel id.
 liftSignatureVariable :: NameRef Parsed 'VariableRef -> Identifier (NameRef Identified 'VariableRef)
-liftSignatureVariable nameRef = do
-  result <- lookupVariable nameRef.text
-  pure $ case result of
-    Just variableId -> identifiedNameRef (IdentifiedVariable variableId) nameRef
-    Nothing -> identifiedNameRef IdentifiedUnresolvedVariable nameRef
+liftSignatureVariable =
+  liftSignature lookupVariable (maybe IdentifiedUnresolvedVariable IdentifiedVariable)
 
 -- | Counterpart of 'liftSignatureVariable' for type signatures (enum / data
 -- type role / type synonym name).
 liftSignatureType :: NameRef Parsed 'TypeRef -> Identifier (NameRef Identified 'TypeRef)
-liftSignatureType nameRef = do
-  result <- lookupType nameRef.text
-  pure $ case result of
-    Just typeId -> identifiedNameRef (IdentifiedType typeId) nameRef
-    Nothing -> identifiedNameRef IdentifiedUnresolvedType nameRef
+liftSignatureType =
+  liftSignature lookupType (maybe IdentifiedUnresolvedType IdentifiedType)
+
+-- | Shared lookup-and-wrap helper for signature-position 'NameRef's.
+-- Phase B has already issued the id; here we just look it up and tag the
+-- node with either the resolved id or an @Unresolved@ marker.
+liftSignature ::
+  (Text -> Identifier (Maybe a)) ->
+  (Maybe a -> Identified sym) ->
+  NameRef Parsed sym ->
+  Identifier (NameRef Identified sym)
+liftSignature lookupBy wrap nameRef = do
+  result <- lookupBy nameRef.text
+  pure (identifiedNameRef (wrap result) nameRef)
 
 resolveSignatureBody
   :: [ParameterBinding Parsed]
