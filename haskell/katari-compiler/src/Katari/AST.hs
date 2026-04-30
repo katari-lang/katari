@@ -593,7 +593,7 @@ instance HasSourceSpan (PrimitiveTypeNode p) where
 
 -- | @never@ 型の AST ノード。lattice の bottom (値を持たない型) で、
 -- primitive (concrete data) ではないため別ノードに分けている。
-data NeverTypeNode (p :: Phase) = NeverTypeNode
+newtype NeverTypeNode (p :: Phase) = NeverTypeNode
   { sourceSpan :: SourceSpan
   }
 
@@ -602,7 +602,7 @@ instance HasSourceSpan (NeverTypeNode p) where
 
 -- | @unknown@ 型の AST ノード。lattice の top (任意の値) で、利用側で
 -- narrow が必要。primitive ではないため別ノードに分けている。
-data UnknownTypeNode (p :: Phase) = UnknownTypeNode
+newtype UnknownTypeNode (p :: Phase) = UnknownTypeNode
   { sourceSpan :: SourceSpan
   }
 

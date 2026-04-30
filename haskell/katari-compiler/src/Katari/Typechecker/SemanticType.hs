@@ -44,9 +44,9 @@ module Katari.Typechecker.SemanticType
 where
 
 import Data.Functor.Const (Const (..))
+import Data.Map.Strict (Map)
 import Data.Set (Set)
 import Data.Set qualified as Set
-import Data.Map.Strict (Map)
 import Data.Text (Text)
 import Katari.AST (ExprType, PatType, Phase (..))
 import Katari.AST.Identifiers (TypeId, VariableId)
@@ -107,11 +107,11 @@ data SemanticType phase where
   -- not significant (named-parameter calling convention). Two functions with
   -- the same label set and pointwise-equal types are equal regardless of
   -- the order in which the user wrote them.
-  SemanticTypeFunction
-    :: Map Text (SemanticType phase)
-    -> SemanticType phase
-    -> SemanticEffect phase
-    -> SemanticType phase
+  SemanticTypeFunction ::
+    Map Text (SemanticType phase) ->
+    SemanticType phase ->
+    SemanticEffect phase ->
+    SemanticType phase
   SemanticTypeArray :: SemanticType phase -> SemanticType phase
   SemanticTypeTuple :: [SemanticType phase] -> SemanticType phase
   -- | Union of types. Convention: 0 or 2+ branches.

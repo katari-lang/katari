@@ -24,8 +24,8 @@ import Data.Maybe (catMaybes)
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Word (Word32)
-import Katari.AST qualified as AST
 import Katari.AST (Phase (Zonked))
+import Katari.AST qualified as AST
 import Katari.Diagnostic (Diagnostic, diagnosticError)
 import Katari.IR
 import Katari.Typechecker.Identifier (VariableId)

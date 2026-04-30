@@ -23,13 +23,13 @@ import Katari.Typechecker.ConstraintGenerator
   ( Constraint (..),
     ConstraintReason,
   )
-import Katari.Typechecker.SemanticType
-  ( SemanticType (..),
-    Unresolved,
-  )
 import Katari.Typechecker.NormalizedType
   ( normaliseSemantic,
     subtypeNT,
+  )
+import Katari.Typechecker.SemanticType
+  ( SemanticType (..),
+    Unresolved,
   )
 import Katari.Typechecker.Solver.Internal
   ( SolverError (..),
@@ -179,7 +179,6 @@ decomposeObject leftFields rightFields reason =
                 | (label, rightFieldType) <- Map.toList rightFields,
                   Just leftFieldType <- [Map.lookup label leftFields]
               ]
-
 
 tshow :: (Show a) => a -> Text
 tshow = T.pack . show

@@ -99,8 +99,7 @@ propagateOnce constraints initial = foldr (applyConstraint initial) initial cons
             then assignment
             else
               foldr
-                ( \rightEffectVarId nextAssignment ->
-                    Map.adjust (Set.union contribution) rightEffectVarId nextAssignment
+                ( Map.adjust (Set.union contribution)
                 )
                 assignment
                 (Set.toList rightEffectVars)

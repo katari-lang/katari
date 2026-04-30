@@ -307,26 +307,28 @@ extractReason = \case
 
 -- | Wrap @p@ with error recovery. On failure, consume one token, run
 -- @skipSync@, then record the error and return the sentinel value.
-withErrorRecoveryAt
-  :: (SourceSpan -> ParseErrorReason -> ParseError)
-  -> (SourceSpan -> a)
-  -> Parser ()
-  -> Parser a
-  -> Parser a
+withErrorRecoveryAt ::
+  (SourceSpan -> ParseErrorReason -> ParseError) ->
+  (SourceSpan -> a) ->
+  Parser () ->
+  Parser a ->
+  Parser a
 withErrorRecoveryAt mkError mkSentinel skipSync p = do
   startPosition <- parseCurrentPosition
-  withRecovery (\mpError -> do
-    let reason = extractReason mpError
-    failPosition <- parseCurrentPosition
-    consumeOneToken
-    failEndPosition <- parsePreviousEndPosition
-    errorSpan <- makeSpan failPosition failEndPosition
-    skipSync
-    recoveryEndPosition <- parsePreviousEndPosition
-    sentinelSpan <- makeSpan startPosition recoveryEndPosition
-    recordParseError (mkError errorSpan reason)
-    pure (mkSentinel sentinelSpan)
-    ) p
+  withRecovery
+    ( \mpError -> do
+        let reason = extractReason mpError
+        failPosition <- parseCurrentPosition
+        consumeOneToken
+        failEndPosition <- parsePreviousEndPosition
+        errorSpan <- makeSpan failPosition failEndPosition
+        skipSync
+        recoveryEndPosition <- parsePreviousEndPosition
+        sentinelSpan <- makeSpan startPosition recoveryEndPosition
+        recordParseError (mkError errorSpan reason)
+        pure (mkSentinel sentinelSpan)
+    )
+    p
 
 -- ===========================================================================
 -- List combinator helpers
@@ -1067,8 +1069,7 @@ parseCallPostfix = withSpan $ do
 parseFieldPostfix :: Parser Postfix
 parseFieldPostfix = withSpan $ do
   parsePunctuation PunctuationDot
-  name <- parseNameRef
-  pure (PostfixField name)
+  PostfixField <$> parseNameRef
 
 parseIndexPostfix :: Parser Postfix
 parseIndexPostfix = withSpan $ do

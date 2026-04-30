@@ -643,8 +643,8 @@ subtypeFunctionShape leftShape rightShape =
     && Set.isSubsetOf leftShape.effects rightShape.effects
   where
     checkParameter (label, leftType) = case Map.lookup label rightShape.parameters of
-      Just rightType -> subtypeNT rightType leftType  -- contravariant
-      Nothing -> True  -- guarded by keysSet subset above
+      Just rightType -> subtypeNT rightType leftType -- contravariant
+      Nothing -> True -- guarded by keysSet subset above
 
 subtypeTupleLayer ::
   Map Int [NormalizedType] ->

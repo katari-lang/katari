@@ -178,4 +178,3 @@ isEffectConstraint :: Constraint -> Bool
 isEffectConstraint = \case
   EffectConstraint {} -> True
   _ -> False
-

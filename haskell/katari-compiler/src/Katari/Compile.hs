@@ -303,4 +303,3 @@ dummySpan =
       start = Position {line = 1, column = 1},
       end = Position {line = 1, column = 1}
     }
-

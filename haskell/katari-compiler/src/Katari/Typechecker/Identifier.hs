@@ -403,8 +403,8 @@ bindLocalVariable :: NameRef Parsed 'VariableRef -> Identifier (NameRef Identifi
 bindLocalVariable nameRef = do
   context <- gets (.resolveContext)
   let name = nameRef.text
-  when (chainHasModule name context.scopeStack)
-    $ emitError (ErrorShadowNonVariable nameRef.sourceSpan name)
+  when (chainHasModule name context.scopeStack) $
+    emitError (ErrorShadowNonVariable nameRef.sourceSpan name)
   variableId <- freshVariableId VariableData {variableName = name, variableSourceSpan = nameRef.sourceSpan}
   modifyResolveContext $ \currentContext ->
     currentContext {scopeStack = insertInnermost name variableId currentContext.scopeStack}
@@ -760,12 +760,12 @@ liftSignature lookupBy nameRef = do
   result <- lookupBy nameRef.text
   pure (identifiedNameRef result nameRef)
 
-resolveSignatureBody
-  :: [ParameterBinding Parsed]
-  -> Maybe (SyntacticType Parsed)
-  -> Maybe [SyntacticRequest Parsed]
-  -> Block Parsed
-  -> Identifier ([ParameterBinding Identified], Maybe (SyntacticType Identified), Maybe [SyntacticRequest Identified], Block Identified)
+resolveSignatureBody ::
+  [ParameterBinding Parsed] ->
+  Maybe (SyntacticType Parsed) ->
+  Maybe [SyntacticRequest Parsed] ->
+  Block Parsed ->
+  Identifier ([ParameterBinding Identified], Maybe (SyntacticType Identified), Maybe [SyntacticRequest Identified], Block Identified)
 resolveSignatureBody parameters returnType withEffects body =
   withScopeFrame $ do
     parameters' <- mapM resolveParameter parameters

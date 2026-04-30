@@ -17,7 +17,6 @@ import Katari.Typechecker.Identifier
   )
 import Katari.Typechecker.NormalizedType
   ( ArraySlot (..),
-    FunctionShape (..),
     FunctionSlot (..),
     LayeredType (..),
     NormalizedType (..),

@@ -21,8 +21,8 @@ import Katari.Typechecker.NormalizedType (NormalizedType (..))
 import Katari.Typechecker.SemanticType (EffectVarId (..), TypeVarId (..))
 import Katari.Typechecker.Solver (SolverResult (..))
 import Katari.Typechecker.Zonker (zonk)
-import System.FilePath ((</>))
 import System.Directory (listDirectory)
+import System.FilePath ((</>))
 import Test.Hspec
 
 -- ===========================================================================
@@ -307,9 +307,7 @@ stage2Spec = describe "Stage 2 \8212 control flow" $ do
             Just armBody -> do
               -- The arm body should emit get_field calls for left and right.
               let getFieldCalls =
-                    [ c | SCall c <- armBody.statements,
-                          CTBlock {block = bid} <- [c.target],
-                          Just (BlockPrim {name = "get_field"}) <- [Map.lookup bid irMod.blocks]
+                    [ c | SCall c <- armBody.statements, CTBlock {block = bid} <- [c.target], Just (BlockPrim {name = "get_field"}) <- [Map.lookup bid irMod.blocks]
                     ]
               length getFieldCalls `shouldBe` 2
             Nothing -> expectationFailure "arm body not found"
@@ -400,9 +398,7 @@ stage3Spec = describe "Stage 3 \8212 block / let / scope" $ do
     errs `shouldBe` []
     let Just ub = agentBody "main" irMod
         tupleGetCalls =
-          [ c | SCall c <- ub.statements,
-                CTBlock {block = bid} <- [c.target],
-                Just (BlockPrim {name = "tuple_get"}) <- [Map.lookup bid irMod.blocks]
+          [ c | SCall c <- ub.statements, CTBlock {block = bid} <- [c.target], Just (BlockPrim {name = "tuple_get"}) <- [Map.lookup bid irMod.blocks]
           ]
     length tupleGetCalls `shouldBe` 2
 
@@ -419,9 +415,7 @@ stage3Spec = describe "Stage 3 \8212 block / let / scope" $ do
     errs `shouldBe` []
     let Just ub = agentBody "main" irMod
         getFieldCalls =
-          [ c | SCall c <- ub.statements,
-                CTBlock {block = bid} <- [c.target],
-                Just (BlockPrim {name = "get_field"}) <- [Map.lookup bid irMod.blocks]
+          [ c | SCall c <- ub.statements, CTBlock {block = bid} <- [c.target], Just (BlockPrim {name = "get_field"}) <- [Map.lookup bid irMod.blocks]
           ]
     length getFieldCalls `shouldBe` 2
 
@@ -439,9 +433,7 @@ stage3Spec = describe "Stage 3 \8212 block / let / scope" $ do
     -- The main body should issue exactly one SCall whose target is a
     -- BlockUser (the local helper agent).
     let userCalls =
-          [ c | SCall c <- ub.statements,
-                CTBlock {block = bid} <- [c.target],
-                Just (BlockUser _) <- [Map.lookup bid irMod.blocks]
+          [ c | SCall c <- ub.statements, CTBlock {block = bid} <- [c.target], Just (BlockUser _) <- [Map.lookup bid irMod.blocks]
           ]
     length userCalls `shouldBe` 1
 
@@ -457,9 +449,7 @@ stage3Spec = describe "Stage 3 \8212 block / let / scope" $ do
     case agentBody "helper" irMod of
       Just helperBody -> do
         let tupleGetCalls =
-              [ c | SCall c <- helperBody.statements,
-                    CTBlock {block = bid} <- [c.target],
-                    Just (BlockPrim {name = "tuple_get"}) <- [Map.lookup bid irMod.blocks]
+              [ c | SCall c <- helperBody.statements, CTBlock {block = bid} <- [c.target], Just (BlockPrim {name = "tuple_get"}) <- [Map.lookup bid irMod.blocks]
               ]
         length tupleGetCalls `shouldBe` 2
       Nothing -> expectationFailure "helper agent body not found"
@@ -812,7 +802,6 @@ stage8Spec = describe "Stage 8 \8212 edge cases" $ do
         userBlocks = [u | BlockUser {body = u} <- allBlocks]
         matchCount = sum [length (matches u) | u <- userBlocks]
     matchCount `shouldBe` 2 -- outer + nested
-
   it "shadowing in nested let does not collide var ids" $ do
     (irMod, errs) <-
       lowerSource $

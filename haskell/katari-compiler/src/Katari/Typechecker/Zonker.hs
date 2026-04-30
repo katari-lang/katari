@@ -722,9 +722,10 @@ walkQualifiedReferenceExpr QualifiedReferenceExpression {moduleQualifier, target
 -- | Run zonking over the constrained AST and the type environment.
 zonk :: IdentifierResult -> ConstraintGenResult -> SolverResult -> ZonkResult
 zonk idResult cgResult solverResult =
-  let action = (,)
-        <$> traverse walkModule cgResult.constrainedModules
-        <*> Map.traverseWithKey (zonkEnvEntry idResult) cgResult.typeEnvironment
+  let action =
+        (,)
+          <$> traverse walkModule cgResult.constrainedModules
+          <*> Map.traverseWithKey (zonkEnvEntry idResult) cgResult.typeEnvironment
       ((modulesResult, envResult), errs) = runState (runReaderT action solverResult) []
    in ZonkResult
         { zonkedModules = modulesResult,

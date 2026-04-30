@@ -22,7 +22,6 @@ import Katari.Parser qualified as Parser
 import Katari.Typechecker.ConstraintGenerator qualified as CG
 import Katari.Typechecker.Identifier qualified as Identifier
 import Katari.Typechecker.SemanticType (EffectVarId (..), TypeVarId (..))
-import Katari.Typechecker.Solver qualified as Solver
 import Katari.Typechecker.Zonker qualified as Zonker
 import Test.Hspec
 

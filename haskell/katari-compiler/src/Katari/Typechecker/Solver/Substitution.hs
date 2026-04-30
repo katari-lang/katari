@@ -41,8 +41,10 @@ import Data.List (nub)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (mapMaybe)
+import Data.Set (Set)
 import Data.Set qualified as Set
 import Katari.Typechecker.ConstraintGenerator (Constraint (..))
+import Katari.Typechecker.Identifier (VariableId)
 import Katari.Typechecker.NormalizedType
   ( NormalizedType (..),
     denormalise,
@@ -50,8 +52,6 @@ import Katari.Typechecker.NormalizedType
     normaliseSemantic,
     subtypeNT,
   )
-import Data.Set (Set)
-import Katari.Typechecker.Identifier (VariableId)
 import Katari.Typechecker.SemanticType
   ( EffectVarId,
     Resolved,
@@ -344,6 +344,4 @@ checkBoundsConsistency boundsMap =
 substToNormalized :: Substitution -> Map TypeVarId NormalizedType
 substToNormalized = Map.map convert
   where
-    convert pinned = case semanticToConcrete pinned of
-      Just resolved -> normaliseSemantic resolved
-      Nothing -> NTUnknown
+    convert pinned = maybe NTUnknown normaliseSemantic (semanticToConcrete pinned)

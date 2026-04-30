@@ -624,9 +624,7 @@ walkDataDecl DataDeclaration {annotation, name, typeName, parameters, sourceSpan
   tCtor <- variableTypeFromName name
   -- data の TypeId は AST が直接保持する。@Unresolved@ 側 (parse / identify
   -- エラー時) のみ @Nothing@ になり、@SemanticTypeUnknown@ にフォールバックする。
-  let tid = case typeName.resolution of
-        Just t -> Just t
-        Nothing -> Nothing
+  let tid = maybe Nothing Just typeName.resolution
   fields <- mapM elaborateDataParameter parameters
   let signature =
         SemanticTypeFunction
@@ -711,7 +709,7 @@ walkPattern = \case
             { name = passThroughVariableName name,
               typeAnnotation = fmap passThroughType typeAnnotation,
               sourceSpan = sourceSpan,
-              typeOf =patternType
+              typeOf = patternType
             },
         patternType
       )
@@ -722,7 +720,7 @@ walkPattern = \case
           WildcardPattern
             { typeAnnotation = fmap passThroughType typeAnnotation,
               sourceSpan = sourceSpan,
-              typeOf =patternType
+              typeOf = patternType
             },
         patternType
       )
@@ -733,7 +731,7 @@ walkPattern = \case
           LiteralPattern
             { value = value,
               sourceSpan = sourceSpan,
-              typeOf =patternType
+              typeOf = patternType
             },
         patternType
       )
@@ -745,7 +743,7 @@ walkPattern = \case
           TuplePattern
             { elements = map fst pairs,
               sourceSpan = sourceSpan,
-              typeOf =patternType
+              typeOf = patternType
             },
         patternType
       )
@@ -769,7 +767,7 @@ walkPattern = \case
               constructorName = passThroughVariableName constructorName,
               parameters = parameters',
               sourceSpan = sourceSpan,
-              typeOf =patternResult
+              typeOf = patternResult
             },
         patternResult
       )
@@ -959,9 +957,7 @@ blockTailType ::
   SemanticType Unresolved
 blockTailType statements returnExpression
   | any isExitStatement statements = SemanticTypeNever
-  | otherwise = case returnExpression of
-      Just expression -> constrainedExpressionType expression
-      Nothing -> SemanticTypeNull
+  | otherwise = maybe SemanticTypeNull constrainedExpressionType returnExpression
 
 -- | True for statements that transfer control out of the enclosing block,
 -- so anything sequenced after them is unreachable.
@@ -1184,7 +1180,7 @@ walkLiteralExpr LiteralExpression {value, sourceSpan} = do
         LiteralExpression
           { value = value,
             sourceSpan = sourceSpan,
-            typeOf =semantic
+            typeOf = semantic
           }
     )
 
@@ -1196,7 +1192,7 @@ walkVariableExpr VariableExpression {name, sourceSpan} = do
         VariableExpression
           { name = passThroughVariableName name,
             sourceSpan = sourceSpan,
-            typeOf =semantic
+            typeOf = semantic
           }
     )
 
@@ -1209,7 +1205,7 @@ walkTupleExpr TupleExpression {elements, sourceSpan} = do
         TupleExpression
           { elements = elements',
             sourceSpan = sourceSpan,
-            typeOf =semantic
+            typeOf = semantic
           }
     )
 
@@ -1230,7 +1226,7 @@ walkArrayExpr ArrayExpression {elements, sourceSpan} = do
         ArrayExpression
           { elements = elements',
             sourceSpan = sourceSpan,
-            typeOf =(SemanticTypeArray tElem)
+            typeOf = SemanticTypeArray tElem
           }
     )
 
@@ -1255,7 +1251,7 @@ walkCallExpr CallExpression {callee, arguments, sourceSpan} = do
           { callee = callee',
             arguments = arguments',
             sourceSpan = sourceSpan,
-            typeOf =tResult
+            typeOf = tResult
           }
     )
 
@@ -1283,7 +1279,7 @@ walkBinaryExpr BinaryOperatorExpression {operator, left, right, sourceSpan} = do
             left = left',
             right = right',
             sourceSpan = sourceSpan,
-            typeOf =resultType
+            typeOf = resultType
           }
     )
 
@@ -1345,7 +1341,7 @@ walkUnaryExpr UnaryOperatorExpression {operator, operand, sourceSpan} = do
           { operator = operator,
             operand = operand',
             sourceSpan = sourceSpan,
-            typeOf =resultType
+            typeOf = resultType
           }
     )
 
@@ -1370,7 +1366,7 @@ walkIfExpr IfExpression {condition, thenBlock, elseBlock, sourceSpan} = do
             thenBlock = thenBlock',
             elseBlock = elseBlock',
             sourceSpan = sourceSpan,
-            typeOf =tResult
+            typeOf = tResult
           }
     )
 
@@ -1389,7 +1385,7 @@ walkMatchExpr MatchExpression {subject, cases, sourceSpan} = do
           { subject = subject',
             cases = cases',
             sourceSpan = sourceSpan,
-            typeOf =tMatch
+            typeOf = tMatch
           }
     )
 
@@ -1434,7 +1430,7 @@ walkForExpr ForExpression {inBindings, varBindings, body, thenBlock, sourceSpan}
             body = body',
             thenBlock = thenBlock',
             sourceSpan = sourceSpan,
-            typeOf =resultType
+            typeOf = resultType
           }
     )
 
@@ -1467,7 +1463,7 @@ walkBlockExpr BlockExpression {block, sourceSpan} = do
         BlockExpression
           { block = block',
             sourceSpan = sourceSpan,
-            typeOf =semantic
+            typeOf = semantic
           }
     )
 
@@ -1486,7 +1482,7 @@ walkFieldAccessExpr FieldAccessExpression {object, fieldName, sourceSpan} = do
           { object = object',
             fieldName = passThroughLabelName fieldName,
             sourceSpan = sourceSpan,
-            typeOf =tField
+            typeOf = tField
           }
     )
 
@@ -1505,7 +1501,7 @@ walkIndexAccessExpr IndexAccessExpression {array, index, sourceSpan} = do
           { array = array',
             index = index',
             sourceSpan = sourceSpan,
-            typeOf =tElem
+            typeOf = tElem
           }
     )
 
@@ -1517,7 +1513,7 @@ walkTemplateExpr TemplateExpression {elements, sourceSpan} = do
         TemplateExpression
           { elements = elements',
             sourceSpan = sourceSpan,
-            typeOf =SemanticTypeString
+            typeOf = SemanticTypeString
           }
     )
 
@@ -1542,7 +1538,7 @@ walkQualifiedReferenceExpr QualifiedReferenceExpression {moduleQualifier, target
           { moduleQualifier = passThroughModuleName moduleQualifier,
             target = passThroughVariableName target,
             sourceSpan = sourceSpan,
-            typeOf =semantic
+            typeOf = semantic
           }
     )
 
@@ -1582,14 +1578,10 @@ passThroughRequest = retagSyntacticRequest
 -- Unresolved references get a fresh type variable (Identifier already
 -- reported the original error).
 variableTypeFromName :: NameRef Identified 'VariableRef -> CG (SemanticType Unresolved)
-variableTypeFromName nameRef = case nameRef.resolution of
-  Just vid -> lookupVariable vid
-  Nothing -> freshTypeVar
+variableTypeFromName nameRef = maybe freshTypeVar lookupVariable nameRef.resolution
 
 variableIdOfName :: NameRef Identified 'VariableRef -> Maybe VariableId
-variableIdOfName nameRef = case nameRef.resolution of
-  Just vid -> Just vid
-  Nothing -> Nothing
+variableIdOfName nameRef = nameRef.resolution
 
 -- | If the optional type annotation is present, elaborate it; otherwise
 -- allocate a fresh type variable so the solver can infer it.

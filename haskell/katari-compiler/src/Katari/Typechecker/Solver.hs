@@ -158,7 +158,7 @@ solveTypeWorklist startNextTypeVarId startNextEffectVarId initialConstraints =
                 [] -> pure finalSubstitution
                 (firstError : _) -> Left firstError
 
-    -- | Try each branch alternative in order; on the first 'Right' return
+    -- \| Try each branch alternative in order; on the first 'Right' return
     -- it, otherwise fall through to the next. Each branch carries its own
     -- partial substitution which is unioned into the inherited one before
     -- recursing into 'go'.
@@ -256,9 +256,7 @@ synthesisedReason constraints =
 substToNormalizedSafe :: Substitution -> Map TypeVarId NormalizedType
 substToNormalizedSafe = Map.map convert
   where
-    convert pinnedType = case semanticToConcrete pinnedType of
-      Just resolved -> normaliseSemantic resolved
-      Nothing -> NTUnknown
+    convert pinnedType = maybe NTUnknown normaliseSemantic (semanticToConcrete pinnedType)
 
 -- ---------------------------------------------------------------------------
 -- Effect worklist (delegated to 'Solver.Effect')
