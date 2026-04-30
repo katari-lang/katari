@@ -12,6 +12,7 @@ library:
     - Katari.AST
     - Katari.AST.Identifiers
     - Katari.Diagnostic
+    - Katari.Internal
     - Katari.Lexer
     - Katari.Parser
     - Katari.Typechecker.Identifier
@@ -25,6 +26,7 @@ library:
     - Katari.Typechecker.Solver.Internal
     - Katari.Typechecker.Solver.Substitution
     - Katari.Typechecker.Zonker
+    - Katari.Typechecker.Exhaustive
     - Katari.IR
     - Katari.Lowering
     - Katari.Schema

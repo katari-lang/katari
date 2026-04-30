@@ -69,6 +69,8 @@ import Katari.Typechecker.Identifier (identify)
 import Katari.Typechecker.Identifier qualified as Identifier
 import Katari.Typechecker.Solver (SolverResult (..), solve)
 import Katari.Typechecker.Solver qualified as Solver
+import Katari.Typechecker.Exhaustive (checkExhaustive)
+import Katari.Typechecker.Exhaustive qualified as Exhaustive
 import Katari.Typechecker.Zonker (ZonkResult (..), zonk)
 import Katari.Typechecker.Zonker qualified as Zonker
 
@@ -131,6 +133,7 @@ compile input =
       solverDiags = map Solver.toDiagnostic solverResult_.solverErrors
       zonkResult_ = zonk idResult cgResult solverResult_
       zonkDiags = map Zonker.toDiagnostic zonkResult_.zonkErrors
+      exhaustiveDiags = map Exhaustive.toDiagnostic (checkExhaustive zonkResult_)
       preLowerDiags =
         parseDiags
           <> cycleDiags
@@ -139,6 +142,7 @@ compile input =
           <> cgDiags
           <> solverDiags
           <> zonkDiags
+          <> exhaustiveDiags
       shouldLower = not (hasErrors preLowerDiags)
       (loweredIR, loweringDiags)
         | shouldLower =

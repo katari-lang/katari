@@ -483,6 +483,9 @@ dataConstructorSchema zr modName dd =
                 description = dd.annotation,
                 examples = []
               }
+          -- SCRef without description: the declaration site ($defs) is the
+          -- single source of truth for description. Consumers that want
+          -- inline descriptions can resolve $ref after loading the bundle.
           outputSchema = plain (SCRef ("#/$defs/" <> qkey modName dd.name.text))
        in Just
             AgentSchema

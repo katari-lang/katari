@@ -6,6 +6,9 @@ import Data.Aeson (Value (..))
 import Data.Aeson qualified as Aeson
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
+import Data.Text (Text)
+import Katari.Compile (CompileInput (..), CompileResult (..), compile)
+import Katari.Diagnostic (Diagnostic (..))
 import Katari.Schema
 import Katari.Typechecker.SemanticType
   ( Resolved,
@@ -37,6 +40,7 @@ spec = describe "Katari.Schema" $ do
   unionCompactionSpec
   jsonRoundTripSpec
   bundleShapeSpec
+  descriptionEndToEndSpec
 
 toJsonSchemaSpec :: Spec
 toJsonSchemaSpec = describe "toJsonSchema (SemanticType -> JsonSchema)" $ do
@@ -211,3 +215,58 @@ bundleShapeSpec = describe "SchemaBundle shape (Phase 15-H)" $ do
       Just _ -> True
       Nothing -> False
       )
+
+-- ===========================================================================
+-- Phase 17: annotation → description end-to-end
+-- ===========================================================================
+
+descriptionEndToEndSpec :: Spec
+descriptionEndToEndSpec = describe "annotation → description (end-to-end)" $ do
+  let src =
+        "@\"a 2D point\"\n\
+        \data Point(@\"horizontal coordinate\" x: number, @\"vertical coordinate\" y: number)\n\
+        \\n\
+        \@\"format a point\"\n\
+        \agent show(@\"the point\" p: Point) -> string {\n\
+        \  \"\"\n\
+        \}"
+      result = compile CompileInput {sources = Map.singleton "main" src, rootModule = "main"}
+      bundle :: SchemaBundle
+      bundle = case result.schemaBundle of
+        Just b -> b
+        Nothing -> error ("compile failed: " <> show (map (.code) result.diagnostics))
+
+  it "agent description comes from @-annotation" $ do
+    (Map.lookup "main.show" bundle.agentSchemas >>= (.description))
+      `shouldBe` (Just "format a point" :: Maybe Text)
+
+  it "agent input property description comes from parameter @-annotation" $ do
+    let prop :: Maybe Text
+        prop = do
+          agent <- Map.lookup "main.show" bundle.agentSchemas
+          props <- case agent.input.core of
+            SCObject {properties = p} -> Just p
+            _ -> Nothing
+          paramSchema <- Map.lookup "p" props
+          paramSchema.description
+    prop `shouldBe` Just "the point"
+
+  it "dataDefs description comes from data @-annotation" $ do
+    (Map.lookup "main.Point" bundle.dataDefs >>= (.description))
+      `shouldBe` (Just "a 2D point" :: Maybe Text)
+
+  it "dataDefs field descriptions come from field @-annotations" $ do
+    let fieldDesc :: Text -> Maybe Text
+        fieldDesc label = do
+          def <- Map.lookup "main.Point" bundle.dataDefs
+          props <- case def.core of
+            SCObject {properties = p} -> Just p
+            _ -> Nothing
+          field <- Map.lookup label props
+          field.description
+    fieldDesc "x" `shouldBe` Just "horizontal coordinate"
+    fieldDesc "y" `shouldBe` Just "vertical coordinate"
+
+  it "dataSchemas (callable) description comes from data @-annotation" $ do
+    (Map.lookup "main.Point" bundle.dataSchemas >>= (.description))
+      `shouldBe` (Just "a 2D point" :: Maybe Text)

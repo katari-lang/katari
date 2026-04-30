@@ -63,6 +63,7 @@ import Katari.AST.Identifiers
     renderQualifiedName,
   )
 import Katari.Diagnostic (Diagnostic (..), DiagnosticNote (..), diagnosticError)
+import Katari.Internal qualified as Internal
 
 -- ---------------------------------------------------------------------------
 -- Identified GADT
@@ -249,6 +250,11 @@ data IdentifierError where
   -- | A name appears in match-pattern constructor position but does not name
   -- a @data@ declaration (or names nothing at all).
   ErrorNotAConstructor :: SourceSpan -> Text -> IdentifierError
+  -- | An @ext agent@ declaration has no @\@\"...\"@ annotation (which serves as
+  -- the server identifier).
+  ErrorMissingExternalAgentAnnotation :: SourceSpan -> Text -> IdentifierError
+  -- | An @ext agent@ declaration's @\@\"...\"@ annotation is empty or whitespace.
+  ErrorEmptyExternalAgentAnnotation :: SourceSpan -> Text -> IdentifierError
 
 deriving instance Show IdentifierError
 
@@ -266,6 +272,8 @@ instance HasSourceSpan IdentifierError where
     ErrorImportModuleNotFound sp _ -> sp
     ErrorNotARequest sp _ -> sp
     ErrorNotAConstructor sp _ -> sp
+    ErrorMissingExternalAgentAnnotation sp _ -> sp
+    ErrorEmptyExternalAgentAnnotation sp _ -> sp
 
 -- | Convert an 'IdentifierError' to a unified 'Diagnostic'. Codes
 -- K0100-K0199 are reserved for the identifier pass.
@@ -322,6 +330,16 @@ toDiagnostic = \case
     diagnosticError
       "K0109"
       ("'" <> name <> "' is not a data constructor")
+      sp
+  ErrorMissingExternalAgentAnnotation sp name ->
+    diagnosticError
+      "K0150"
+      ("external agent '" <> name <> "' requires a @\"server\" annotation (server identifier)")
+      sp
+  ErrorEmptyExternalAgentAnnotation sp name ->
+    diagnosticError
+      "K0151"
+      ("external agent '" <> name <> "' has an empty @\"\" annotation (server identifier must not be blank)")
       sp
 
 -- ---------------------------------------------------------------------------
@@ -1057,6 +1075,10 @@ resolveRequest RequestDeclaration {..} = do
 resolveExternalAgent :: ExternalAgentDeclaration Parsed -> Identifier (ExternalAgentDeclaration Identified)
 resolveExternalAgent ExternalAgentDeclaration {..} = do
   name' <- liftSignatureVariable name
+  case annotation of
+    Nothing -> emitError (ErrorMissingExternalAgentAnnotation sourceSpan name.text)
+    Just t | T.null (T.strip t) -> emitError (ErrorEmptyExternalAgentAnnotation sourceSpan name.text)
+    _ -> pure ()
   withScopeFrame $ do
     parameters' <- mapM resolveParameter parameters
     returnType' <- resolveType returnType
@@ -1623,10 +1645,12 @@ resolveExpression = \case
   ExpressionFieldAccess expression -> resolveFieldAccess expression
   ExpressionIndexAccess expression -> ExpressionIndexAccess <$> resolveIndexExpr expression
   ExpressionTemplate expression -> ExpressionTemplate <$> resolveTemplateExpr expression
-  ExpressionQualifiedReference _ ->
+  ExpressionQualifiedReference qref ->
     -- The parser never produces this constructor on a Parsed AST. Treat it
     -- as an internal invariant violation and crash loudly.
-    error "Identifier: ExpressionQualifiedReference encountered in Parsed AST"
+    Internal.internalError
+      qref.sourceSpan
+      "Identifier: ExpressionQualifiedReference encountered in Parsed AST (parser invariant violation)"
 
 resolveLiteralExpr :: LiteralExpression Parsed -> Identifier (LiteralExpression Identified)
 resolveLiteralExpr LiteralExpression {value, sourceSpan} =
@@ -1955,7 +1979,10 @@ resolveModuleQualifiedChain moduleId moduleRef labels totalSpan =
     -- reached via 'resolveFieldAccess' on an 'ExpressionFieldAccess' — that
     -- guarantees at least one label was peeled. A bare 'ExpressionVariable'
     -- never enters this code path.
-    [] -> error "resolveModuleQualifiedChain: labels must be non-empty"
+    [] ->
+      Internal.internalError
+        totalSpan
+        "resolveModuleQualifiedChain: labels must be non-empty (caller invariant violation)"
     (target : remainingLabels) -> do
       maybeVariableId <- lookupModuleExportVariable moduleId target.text
       variableMetadata <- case maybeVariableId of

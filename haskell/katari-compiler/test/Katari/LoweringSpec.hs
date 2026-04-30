@@ -7,6 +7,7 @@ module Katari.LoweringSpec (spec) where
 
 import Control.Exception (SomeException, try)
 import Data.List (find)
+import Data.Maybe (isJust, listToMaybe)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.Text (Text)
@@ -399,14 +400,17 @@ stage3Spec = describe "Stage 3 \8212 block / let / scope" $ do
     errs `shouldBe` []
     let Just ub = agentBody "main" irMod
         loads = literalLoads ub
+        -- With SBindPattern each let emits a pattern var distinct from the load var.
+        bindVars = [v | SBindPattern d <- ub.statements, MPVariable v <- [d.pattern]]
     length loads `shouldBe` 2
-    case map (.output) loads of
-      [o1, o2] -> o1 `shouldNotBe` o2
-      _ -> expectationFailure "expected exactly two SLoadLiteral outputs"
-    -- The trailing var should be the second load's output (the inner x).
-    Just (last (map (.output) loads)) `shouldBe` ub.trailing
+    -- Each SBindPattern introduces a fresh var; the two must be different.
+    case bindVars of
+      [v1, v2] -> v1 `shouldNotBe` v2
+      _ -> expectationFailure "expected exactly two SBindPattern variable outputs"
+    -- The trailing var is the second binding's pattern var (the inner x).
+    fmap (last bindVars ==) ub.trailing `shouldBe` Just True
 
-  it "let with tuple pattern emits tuple_get projections" $ do
+  it "let with tuple pattern emits SBindPattern with MPTuple" $ do
     (irMod, errs) <-
       lowerSource $
         Text.unlines
@@ -417,12 +421,16 @@ stage3Spec = describe "Stage 3 \8212 block / let / scope" $ do
           ]
     errs `shouldBe` []
     let Just ub = agentBody "main" irMod
-        tupleGetCalls =
-          [ c | SCall c <- ub.statements, CTBlock {block = bid} <- [c.target], Just (BlockPrim {name = "tuple_get"}) <- [Map.lookup bid irMod.blocks]
-          ]
-    length tupleGetCalls `shouldBe` 2
+        bindPats = [d | SBindPattern d <- ub.statements]
+    -- Exactly one SBindPattern for the tuple destructure.
+    length bindPats `shouldBe` 1
+    case bindPats of
+      [d] -> case d.pattern of
+        MPTuple subs -> length subs `shouldBe` 2
+        _ -> expectationFailure "expected MPTuple pattern"
+      _ -> expectationFailure "expected exactly one SBindPattern"
 
-  it "let with nested constructor pattern emits get_field projections" $ do
+  it "let with nested constructor pattern emits SBindPattern with MPConstructor" $ do
     (irMod, errs) <-
       lowerSource $
         Text.unlines
@@ -434,10 +442,14 @@ stage3Spec = describe "Stage 3 \8212 block / let / scope" $ do
           ]
     errs `shouldBe` []
     let Just ub = agentBody "main" irMod
-        getFieldCalls =
-          [ c | SCall c <- ub.statements, CTBlock {block = bid} <- [c.target], Just (BlockPrim {name = "get_field"}) <- [Map.lookup bid irMod.blocks]
-          ]
-    length getFieldCalls `shouldBe` 2
+        bindPats = [d | SBindPattern d <- ub.statements]
+    -- Exactly one SBindPattern for the constructor destructure.
+    length bindPats `shouldBe` 1
+    case bindPats of
+      [d] -> case d.pattern of
+        MPConstructor _ fields -> length fields `shouldBe` 2
+        _ -> expectationFailure "expected MPConstructor pattern"
+      _ -> expectationFailure "expected exactly one SBindPattern"
 
   it "local agent statement registers a fresh BlockUser and is callable" $ do
     (irMod, errs) <-
@@ -457,7 +469,7 @@ stage3Spec = describe "Stage 3 \8212 block / let / scope" $ do
           ]
     length userCalls `shouldBe` 1
 
-  it "function parameter with tuple pattern destructures via tuple_get" $ do
+  it "function parameter with tuple pattern destructures via SBindPattern" $ do
     (irMod, errs) <-
       lowerSource $
         Text.unlines
@@ -465,13 +477,17 @@ stage3Spec = describe "Stage 3 \8212 block / let / scope" $ do
             "agent main() -> integer { helper(pair = (1, 2)) }"
           ]
     errs `shouldBe` []
-    -- The helper agent's user block should contain tuple_get projections.
+    -- The helper agent's user block should contain exactly one SBindPattern for
+    -- the tuple parameter destructure (the runtime handles the field splitting).
     case agentBody "helper" irMod of
       Just helperBody -> do
-        let tupleGetCalls =
-              [ c | SCall c <- helperBody.statements, CTBlock {block = bid} <- [c.target], Just (BlockPrim {name = "tuple_get"}) <- [Map.lookup bid irMod.blocks]
-              ]
-        length tupleGetCalls `shouldBe` 2
+        let bindPats = [d | SBindPattern d <- helperBody.statements]
+        length bindPats `shouldBe` 1
+        case bindPats of
+          [d] -> case d.pattern of
+            MPTuple subs -> length subs `shouldBe` 2
+            _ -> expectationFailure "expected MPTuple pattern"
+          _ -> pure ()
       Nothing -> expectationFailure "helper agent body not found"
 
 isChildBlockCall :: CallData -> IRModule -> Bool
@@ -516,12 +532,21 @@ stage4Spec = describe "Stage 4 \8212 agent calls / closure" $ do
     let Just ub = agentBody "main" irMod
         closures = [d | SMakeClosure d <- ub.statements]
     closures `shouldNotBe` []
-    -- The closure value should be referenced by a CTValue call later.
+    -- With SBindPattern, the closure var is routed through a pattern binding.
+    -- The call should use CTValue on the pattern-bound var, not the closure var.
     case closures of
       (d : _) -> do
-        let valueCalls =
-              [c | c <- calls ub, c.target == CTValue {var = d.output}]
-        valueCalls `shouldNotBe` []
+        -- The SBindPattern that follows should source from the closure output.
+        let bindPat = listToMaybe [bp | SBindPattern bp <- ub.statements, bp.source == d.output]
+        bindPat `shouldSatisfy` isJust
+        -- The var used in the CTValue call is the pattern var (not d.output).
+        case bindPat of
+          Just bp -> case bp.pattern of
+            MPVariable patVar -> do
+              let valueCalls = [c | c <- calls ub, c.target == CTValue {var = patVar}]
+              valueCalls `shouldNotBe` []
+            _ -> expectationFailure "expected MPVariable pattern for simple let binding"
+          Nothing -> pure ()
       _ -> pure ()
 
 -- ===========================================================================
@@ -929,18 +954,8 @@ sampleTest dir file = it ("lowers samples/" <> file) $ do
     Left e ->
       pendingWith ("upstream parser/identifier failure: " <> show e)
     Right (irMod, errs) -> do
-      -- Refutable patterns in irrefutable contexts (let / params) are
-      -- the only "user-visible" not-yet-supported case left in
-      -- Lowering. Pending samples that hit them surface here.
-      let refutables =
-            [ ()
-              | LowerErrorRefutablePatternInIrrefutableContext _ <- errs
-            ]
-      if not (null refutables)
-        then pendingWith ("refutable pattern in irrefutable context")
-        else do
-          errs `shouldBe` []
-          -- Sanity: at least one user block exists.
-          let userBlockCount =
-                length [u | BlockUser u <- Map.elems irMod.blocks]
-          userBlockCount `shouldSatisfy` (> 0)
+      errs `shouldBe` []
+      -- Sanity: at least one user block exists.
+      let userBlockCount =
+            length [u | BlockUser u <- Map.elems irMod.blocks]
+      userBlockCount `shouldSatisfy` (> 0)

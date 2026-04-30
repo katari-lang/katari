@@ -47,11 +47,6 @@ data LoweringError
   | -- | A 'StatementError' / 'DeclarationError' sentinel left by parser
     -- recovery survived to Lowering.
     LowerErrorParseSentinel AST.SourceSpan
-  | -- | A literal pattern appeared in an irrefutable context
-    -- (@let@ binding or function parameter), where only patterns that
-    -- always match are allowed. Refutable patterns belong in match
-    -- arms.
-    LowerErrorRefutablePatternInIrrefutableContext AST.SourceSpan
   deriving (Eq, Show)
 
 -- | Convert a 'LoweringError' to a unified 'Diagnostic'. Codes K0300-K0399
@@ -67,11 +62,6 @@ toDiagnostic = \case
     diagnosticError
       "K0301"
       "parser/identifier sentinel reached lowering (likely a recovery artifact)"
-      sp
-  LowerErrorRefutablePatternInIrrefutableContext sp ->
-    diagnosticError
-      "K0303"
-      "literal pattern is refutable; only allowed in match arms (let / parameter destructuring requires irrefutable patterns)"
       sp
 
 -- ===========================================================================
@@ -106,7 +96,6 @@ primitiveNames =
     "make_tuple",
     "array_get",
     "array_length",
-    "tuple_get",
     "get_field",
     -- type
     "type_of",
@@ -833,12 +822,12 @@ bindParam pb = do
 combineParamPreludes :: [Lower [(VariableId, VarId)]] -> Lower [(VariableId, VarId)]
 combineParamPreludes acts = concat <$> sequence acts
 
--- | Allocate a fresh IR var (where the runtime delivers the incoming value)
--- and destructure it according to the given pattern. Returns the fresh
--- 'VarId' plus the @(VariableId, VarId)@ pairs to add to the local map.
+-- | Allocate a fresh IR var for an incoming value and destructure it by
+-- emitting a single 'SBindPattern'. Returns the fresh 'VarId' and the
+-- '(VariableId, VarId)' pairs to add to the local scope.
 --
--- Refutable patterns (literals) are rejected with 'LowerErrorUnsupported':
--- 'let' / function parameters demand irrefutable patterns.
+-- Irrefutability is guaranteed upstream by the Maranget exhaustiveness
+-- checker (K0291); callers do not need to guard against refutable patterns.
 bindPatternToFreshVar :: AST.Pattern Zonked -> Maybe Text -> Lower (VarId, [(VariableId, VarId)])
 bindPatternToFreshVar pat hint = do
   let nameHint = case pat of
@@ -848,66 +837,17 @@ bindPatternToFreshVar pat hint = do
   locals <- destructurePattern var pat
   pure (var, locals)
 
--- | Recursively destructure an incoming IR var according to the given
--- pattern, emitting projection calls ('tuple_get' / 'get_field') as needed.
--- Returns the @(VariableId, VarId)@ pairs introduced by every variable
--- sub-pattern.
+-- | Emit a 'SBindPattern' that destructures @incoming@ according to the
+-- given AST pattern. Returns the '(VariableId, VarId)' pairs for all
+-- variable sub-patterns; the runtime walks the pattern tree at execution time.
 --
--- Refutable patterns (literals) are rejected: callers use this for
--- irrefutable contexts ('let' / function parameter / known-tag match arm).
+-- Irrefutability (no unguarded literal patterns) is guaranteed by the
+-- Maranget exhaustiveness checker (K0291) before lowering runs.
 destructurePattern :: VarId -> AST.Pattern Zonked -> Lower [(VariableId, VarId)]
-destructurePattern incoming = \case
-  AST.PatternVariable vp -> case vp.name.resolution of
-    Just variableId -> pure [(variableId, incoming)]
-    Nothing -> do
-      recordError (LowerErrorUnresolvedVariable vp.sourceSpan vp.name.text)
-      pure []
-  AST.PatternWildcard _ -> pure []
-  AST.PatternTuple tp -> do
-    pairs <- mapM (extractTupleElement incoming) (zip [0 ..] tp.elements)
-    pure (concat pairs)
-  AST.PatternQualifiedConstructor qp -> do
-    pairs <- mapM (extractField incoming) qp.parameters
-    pure (concat pairs)
-  AST.PatternLiteral lp -> do
-    recordError (LowerErrorRefutablePatternInIrrefutableContext lp.sourceSpan)
-    pure []
-
--- | Extract @incoming._idx@ via the @tuple_get@ primitive and recurse.
-extractTupleElement ::
-  VarId ->
-  (Int, AST.Pattern Zonked) ->
-  Lower [(VariableId, VarId)]
-extractTupleElement tupleVar (idx, sub) = do
-  indexVar <- emitLoadLiteral (LVInteger (fromIntegral idx))
-  out <- freshVarId (Just (Text.pack ("_" <> show idx)))
-  blockId <- primBlockId "tuple_get"
-  emit $
-    SCall
-      CallData
-        { target = CTBlock {block = blockId},
-          args = [Arg "tuple" tupleVar, Arg "index" indexVar],
-          output = Just out
-        }
-  destructurePattern out sub
-
--- | Extract @incoming.label@ via the @get_field@ primitive and recurse.
-extractField ::
-  VarId ->
-  (AST.NameRef Zonked 'AST.LabelRef, AST.Pattern Zonked) ->
-  Lower [(VariableId, VarId)]
-extractField objectVar (labelRef, sub) = do
-  labelVar <- emitLoadLiteral (LVString labelRef.text)
-  out <- freshVarId (Just labelRef.text)
-  blockId <- primBlockId "get_field"
-  emit $
-    SCall
-      CallData
-        { target = CTBlock {block = blockId},
-          args = [Arg "object" objectVar, Arg "field" labelVar],
-          output = Just out
-        }
-  destructurePattern out sub
+destructurePattern incoming pat = do
+  (mp, locals) <- lowerPattern pat
+  emit (SBindPattern BindPatternData {source = incoming, pattern = mp})
+  pure locals
 
 -- ===========================================================================
 -- Block body
@@ -947,19 +887,6 @@ lowerBlockInto blk = go blk.statements
 -- Statements
 -- ===========================================================================
 
--- | Lower one 'AST.Statement'. Statements are emitted into the current
--- buffer. Returns 'True' if this statement causes a non-local exit
--- (return/break/etc.) so the caller can stop emitting further code.
---
--- @let@ in particular returns 'False' but its 'bindPattern' side-effect
--- — extending the local-variable Reader for downstream statements — is
--- handled by the caller via 'withLocalsCont'-style threading. We keep a
--- simpler design: 'bindPattern' returns the locals to add and the caller
--- (here, 'lowerBlockBody' / 'foldM step') is responsible for continuing
--- under those locals.
---
--- For now 'bindPattern' is a no-op for non-variable patterns; the locals
--- propagate via the @MonadReader@ extension below.
 -- | Lower one non-let 'AST.Statement'. Statements are emitted into the
 -- current buffer. Returns 'True' if this statement causes a non-local
 -- exit (return/break/etc.) so the caller can stop emitting further code.
@@ -1035,11 +962,8 @@ lowerModifier m = do
   var <- lowerExpr m.value
   pure (m.name.text, var)
 
--- | Compute the @(VariableId, VarId)@ pairs introduced by binding a
--- pattern against an incoming IR var. Emits projection calls
--- ('tuple_get' / 'get_field') for tuple / constructor sub-patterns. The
--- caller is responsible for bringing the result into scope via
--- 'withLocals'.
+-- | Emit a 'SBindPattern' for an incoming IR var and return the
+-- '(VariableId, VarId)' pairs to bring into scope via 'withLocals'.
 bindPatternLocals :: VarId -> AST.Pattern Zonked -> Lower [(VariableId, VarId)]
 bindPatternLocals = destructurePattern
 

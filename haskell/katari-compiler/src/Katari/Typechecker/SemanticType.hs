@@ -50,6 +50,7 @@ import Data.Set qualified as Set
 import Data.Text (Text)
 import Katari.AST (ExprType, PatType, Phase (..))
 import Katari.AST.Identifiers (RequestId, TypeId)
+import Katari.Internal qualified as Internal
 
 -- ---------------------------------------------------------------------------
 -- Phase markers
@@ -301,7 +302,8 @@ traverseSemanticChildren ::
 traverseSemanticChildren onType onEffect = \case
   -- Variable: caller's responsibility.
   SemanticTypeVariable _ ->
-    error "traverseSemanticChildren: SemanticTypeVariable must be handled by caller before recursing"
+    Internal.internalErrorNoSpan
+      "traverseSemanticChildren: SemanticTypeVariable must be handled by caller before recursing"
   -- Composites: recurse on children.
   SemanticTypeFunction parameters returnType effects ->
     SemanticTypeFunction

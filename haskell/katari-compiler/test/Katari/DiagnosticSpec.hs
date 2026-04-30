@@ -108,7 +108,9 @@ perPhaseConverterSpec = describe "per-phase toDiagnostic" $ do
               Identifier.ErrorNotAType dummySpan "x",
               Identifier.ErrorNotAModule dummySpan "x",
               Identifier.ErrorImportNameNotFound dummySpan "m" "x",
-              Identifier.ErrorImportModuleNotFound dummySpan "m"
+              Identifier.ErrorImportModuleNotFound dummySpan "m",
+              Identifier.ErrorMissingExternalAgentAnnotation dummySpan "foo",
+              Identifier.ErrorEmptyExternalAgentAnnotation dummySpan "foo"
             ]
     mapM_ (\d -> d.severity `shouldBe` Error) diags
     mapM_ (\d -> isReservedCode "K0100" "K0199" d.code `shouldBe` True) diags
@@ -133,8 +135,7 @@ perPhaseConverterSpec = describe "per-phase toDiagnostic" $ do
           map
             Lowering.toDiagnostic
             [ Lowering.LowerErrorUnresolvedVariable dummySpan "x",
-              Lowering.LowerErrorParseSentinel dummySpan,
-              Lowering.LowerErrorRefutablePatternInIrrefutableContext dummySpan
+              Lowering.LowerErrorParseSentinel dummySpan
             ]
     mapM_ (\d -> d.severity `shouldBe` Error) diags
     mapM_ (\d -> isReservedCode "K0300" "K0399" d.code `shouldBe` True) diags

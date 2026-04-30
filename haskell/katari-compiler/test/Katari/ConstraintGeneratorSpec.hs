@@ -207,7 +207,7 @@ declarations = describe "declarations" $ do
     countTypeConstraints cg `shouldSatisfy` (>= 2)  -- eq = 2 subtype
 
   it "ext-agent emits eq constraint (effects from with clause)" $ do
-    cg <- runOne "req bar(x: integer) -> string\next agent foo() -> integer with bar"
+    cg <- runOne "req bar(x: integer) -> string\n@\"svc\"\next agent foo() -> integer with bar"
     cg.errors `shouldBe` []
     countTypeConstraints cg `shouldSatisfy` (>= 2)
 

@@ -57,6 +57,7 @@ module Katari.IR
     Arg (..),
     MatchArm (..),
     MatchPattern (..),
+    BindPatternData (..),
     ExitKind (..),
     ContKind (..),
   )
@@ -353,6 +354,12 @@ data Statement
   | SFor !ForData
   | SExit !ExitData
   | SCont !ContData
+  | -- | Bind the value of @source@ by walking @pattern@ recursively. The
+    -- runtime walks @pattern@ exactly like the arm-pattern walker of
+    -- 'SMatch', binding each 'MPVariable' position. Unlike 'SMatch' there
+    -- is no @defaultArm@; the pattern is irrefutable (guaranteed by the
+    -- exhaustiveness checker — K0291 / Phase 16).
+    SBindPattern !BindPatternData
   deriving (Eq, Show, Generic)
 
 instance ToJSON Statement where
@@ -467,6 +474,21 @@ instance ToJSON LoadLiteralData where
   toJSON = genericToJSON irOptions
 
 instance FromJSON LoadLiteralData where
+  parseJSON = genericParseJSON irOptions
+
+-- | Payload for 'SBindPattern'. The runtime walks @pattern@ against
+-- @source@, binding each 'MPVariable' position. The pattern is guaranteed
+-- irrefutable (K0291); runtime may treat a mismatch as an internal error.
+data BindPatternData = BindPatternData
+  { source :: !VarId,
+    pattern :: !MatchPattern
+  }
+  deriving (Eq, Show, Generic)
+
+instance ToJSON BindPatternData where
+  toJSON = genericToJSON irOptions
+
+instance FromJSON BindPatternData where
   parseJSON = genericParseJSON irOptions
 
 -- | IR-level literal values. Mirrors 'AST.LiteralValue' but lives in the IR
