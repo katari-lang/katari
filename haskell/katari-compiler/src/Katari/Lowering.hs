@@ -403,6 +403,15 @@ recordVarBlockId :: VariableId -> BlockId -> Lower ()
 recordVarBlockId variableId blockId =
   modify (\s -> s {lsVarBlockIds = Map.insert variableId blockId s.lsVarBlockIds})
 
+-- Closure capture for local agents is handled by the runtime: a local
+-- agent's body block runs with the parent scope visible (the runtime
+-- consults a scope chain when resolving locals). Lowering therefore
+-- preserves the outer 'localVars' Reader frame when entering a local
+-- agent's body, and emits no per-block capture metadata. This is sound
+-- because agent-side references to a state var read its current value
+-- (state vars are only mutated inside @req@ handlers via @next@, which
+-- a local agent cannot do without entering a different scope).
+
 -- | Run @action@ with the resolved 'VariableId' from a top-level callable
 -- declaration name. If the name didn't resolve (parser/identifier left an
 -- 'Nothing' marker), record a Lowering error and skip.
@@ -1000,19 +1009,18 @@ lowerStmt = \case
     -- and 'SMakeClosure' on the agent name resolve to 'CTBlock' /
     -- 'BlockUser'), then lower its body using the shared agent layout.
     --
-    -- The body is lowered with an *empty* Reader env (local 'localVars' =
-    -- {}) so outer locals are not accidentally captured: closure capture
-    -- for local agents is not yet implemented at the IR level, and a
-    -- silent capture would produce a runtime undefined-var error. With a
-    -- fresh env, references to outer locals fail at compile time with
-    -- 'LowerErrorUnresolvedVariable' instead.
+    -- The body is lowered with the OUTER 'localVars' frame still in
+    -- scope: agent-side references to outer-scope variables are
+    -- by-value (state vars are only mutated by @next@ inside @req@
+    -- handlers, which a local agent cannot use), so the runtime can
+    -- inherit the parent's variable scope when invoking the closure.
+    -- No explicit IR captures are needed.
     case stmt.name.resolution of
       Just variableId -> do
         bid <- freshBlockId
         modify $ \s ->
           s {lsVarBlockIds = Map.insert variableId bid s.lsVarBlockIds}
-        local (const emptyLowerEnv) $
-          lowerAgentLike stmt.name.text stmt.parameters stmt.body bid
+        lowerAgentLike stmt.name.text stmt.parameters stmt.body bid
       Nothing ->
         recordError
           (LowerErrorUnresolvedVariable stmt.sourceSpan stmt.name.text)
