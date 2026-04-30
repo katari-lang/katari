@@ -28,7 +28,13 @@ import Katari.AST (Phase (Zonked))
 import Katari.AST qualified as AST
 import Katari.Diagnostic (Diagnostic, diagnosticError)
 import Katari.IR
-import Katari.Typechecker.Identifier (VariableId)
+import Katari.Typechecker.Identifier
+  ( ConstructorData (..),
+    ConstructorId,
+    RequestData (..),
+    RequestId,
+    VariableId,
+  )
 import Katari.Typechecker.Zonker (ZonkResult (..))
 
 -- ===========================================================================
@@ -161,6 +167,14 @@ data LowerState = LowerState
     -- | Top-level @VariableId@ → its callable @BlockId@. Used at call /
     -- closure sites to resolve agent / req / ext-agent / data-ctor names.
     lsVarBlockIds :: !(Map VariableId BlockId),
+    -- | Cross-link: 'RequestId' → corresponding call-side 'VariableId',
+    -- populated from 'ZonkResult.zonkedRequests' at the start of lowering.
+    -- Used by 'lowerHandler' to resolve a handler target by request id.
+    lsRequestVarIds :: !(Map RequestId VariableId),
+    -- | Cross-link: 'ConstructorId' → corresponding call-side 'VariableId',
+    -- populated from 'ZonkResult.zonkedConstructors'. Used by
+    -- 'patternToArm' to resolve a constructor pattern target.
+    lsConstructorVarIds :: !(Map ConstructorId VariableId),
     lsPrimBlockIds :: !(Map Text BlockId),
     -- | Statements for the block currently being lowered, stored in
     -- reverse order. 'emit' prepends; 'runWithFreshBuffer' saves/restores
@@ -178,6 +192,8 @@ initialLowerState =
       lsVarNames = Map.empty,
       lsBlockNames = Map.empty,
       lsVarBlockIds = Map.empty,
+      lsRequestVarIds = Map.empty,
+      lsConstructorVarIds = Map.empty,
       lsPrimBlockIds = Map.empty,
       lsCurrentEmitted = [],
       lsErrors = []
@@ -311,6 +327,19 @@ lowerProgram moduleName zonkResult =
 lowerProgramM :: Text -> ZonkResult -> Lower IRModule
 lowerProgramM moduleName zonkResult = do
   registerPrimitives
+  -- Cache 'RequestId' / 'ConstructorId' → 'VariableId' from the
+  -- ZonkResult passthrough so handler / constructor-pattern resolution
+  -- can chain through to 'lsVarBlockIds' without revisiting the
+  -- IdentifierResult.
+  modify $ \s ->
+    s
+      { lsRequestVarIds =
+          Map.map (\RequestData {requestVariableId} -> requestVariableId) zonkResult.zonkedRequests,
+        lsConstructorVarIds =
+          Map.map
+            (\ConstructorData {constructorVariableId} -> constructorVariableId)
+            zonkResult.zonkedConstructors
+      }
   registerDeclarationKinds zonkResult
   entries <- lowerAllDeclarations zonkResult
   state <- gets id
@@ -617,13 +646,24 @@ lowerHandler stateParams hr = do
   -- map. Failure modes (unresolved name, or not actually a 'BlockRequest')
   -- record an error and fall back to a fresh placeholder so lowering can
   -- continue producing partial IR for diagnostics.
+  -- Identifier resolved the handler's @name@ to a 'RequestId' (the
+  -- 'RequestRef' slot guarantees this is a @req@ declaration). Each
+  -- 'RequestId' carries a cross-link to the call-side 'VariableId', and
+  -- Lowering registered every top-level callable's BlockId under that
+  -- VariableId during 'registerDeclarationKinds'.
   reqBlockId <- case hr.name.resolution of
-    Just variableId -> do
-      mBlockId <- gets (Map.lookup variableId . (.lsVarBlockIds))
-      case mBlockId of
-        Just bid -> pure bid
+    Just rid -> do
+      mVid <- gets (Map.lookup rid . (.lsRequestVarIds))
+      case mVid of
+        Just vid -> do
+          mBlockId <- gets (Map.lookup vid . (.lsVarBlockIds))
+          case mBlockId of
+            Just bid -> pure bid
+            Nothing -> do
+              recordError (LowerErrorUnresolvedVariable hr.sourceSpan hr.name.text)
+              freshBlockId
         Nothing -> do
-          recordError (LowerErrorUnsupported hr.sourceSpan "handler target is not a request")
+          recordError (LowerErrorUnresolvedVariable hr.sourceSpan hr.name.text)
           freshBlockId
     Nothing -> do
       recordError (LowerErrorUnresolvedVariable hr.sourceSpan hr.name.text)

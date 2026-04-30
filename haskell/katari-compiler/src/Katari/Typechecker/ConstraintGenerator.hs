@@ -43,12 +43,13 @@ module Katari.Typechecker.ConstraintGenerator
   )
 where
 
-import Control.Monad (unless)
+import Control.Monad (forM, unless)
 import Control.Monad.Reader (ReaderT, ask, asks, local, runReaderT)
 import Control.Monad.State.Strict (State, gets, modify, runState)
 import Control.Monad.Trans (lift)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
+import Data.Maybe (maybeToList)
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
@@ -56,8 +57,12 @@ import Data.Text qualified as T
 import Katari.AST
 import Katari.Diagnostic (Diagnostic, diagnosticError)
 import Katari.Typechecker.Identifier
-  ( IdentifierResult (..),
+  ( ConstructorData (..),
+    ConstructorId,
+    IdentifierResult (..),
     ModuleId,
+    RequestData (..),
+    RequestId,
     TypeData (..),
     TypeId (..),
     VariableId,
@@ -214,6 +219,12 @@ data ConstraintState = ConstraintState
 
 data ConstraintContext = ConstraintContext
   { contextIdentifiedTypes :: !(Map TypeId TypeData),
+    -- | Reverse map for the 'RequestId' / 'ConstructorId' namespaces:
+    -- given a request or constructor id, find the call-side 'VariableId'
+    -- whose type lives in 'stateTypeEnvironment'. Populated from
+    -- 'IdentifierResult.identifiedRequests' / 'identifiedConstructors'.
+    contextIdentifiedRequests :: !(Map RequestId RequestData),
+    contextIdentifiedConstructors :: !(Map ConstructorId ConstructorData),
     contextSynonymVisited :: !(Set TypeId),
     contextEnclosingReturn :: !(Maybe TypeVarId),
     contextEnclosingEffects :: !(Maybe EffectVarId),
@@ -241,10 +252,16 @@ initialState =
       stateErrors = []
     }
 
-initialContext :: Map TypeId TypeData -> ConstraintContext
-initialContext types =
+initialContext ::
+  Map TypeId TypeData ->
+  Map RequestId RequestData ->
+  Map ConstructorId ConstructorData ->
+  ConstraintContext
+initialContext types requests constructors =
   ConstraintContext
     { contextIdentifiedTypes = types,
+      contextIdentifiedRequests = requests,
+      contextIdentifiedConstructors = constructors,
       contextSynonymVisited = Set.empty,
       contextEnclosingReturn = Nothing,
       contextEnclosingEffects = Nothing,
@@ -752,7 +769,7 @@ walkPattern = \case
     -- and constrain the synthesised function type to be a subtype of the
     -- ctor's known function type. Field-typed sub-patterns flow into place
     -- via the function-subtype rule (parameter-contravariant).
-    tCtor <- variableTypeFromName constructorName
+    tCtor <- constructorTypeFromName constructorName
     paramPairs <- mapM walkPatternField parameters
     let argSig = Map.fromList (map snd paramPairs)
         parameters' = map fst paramPairs
@@ -764,7 +781,7 @@ walkPattern = \case
       ( PatternQualifiedConstructor
           QualifiedConstructorPattern
             { moduleQualifier = fmap passThroughModuleName moduleQualifier,
-              constructorName = passThroughVariableName constructorName,
+              constructorName = passThroughConstructorName constructorName,
               parameters = parameters',
               sourceSpan = sourceSpan,
               typeOf = patternResult
@@ -912,14 +929,16 @@ walkBlockWithWhere statements returnExpression wb blockSpan = do
   handlers' <- mapM (walkRequestHandler e4Id tWholeBlockId) handlers
 
   -- (6) Effect constraints: e3 ⊆ e1 ∪ {handled requests}, e4 ⊆ e1.
-  let handledIds =
-        Set.fromList
-          [ vid
-            | RequestHandler {name} <- handlers,
-              Just vid <- [name.resolution]
-          ]
+  -- Each handler's @name@ is a 'RequestRef'; look up the corresponding
+  -- call-side 'VariableId' (@requestVariableId@) to populate the effect set
+  -- (which is keyed by 'VariableId' in the current 'SemanticEffect' shape).
+  handledVarIds <-
+    fmap (Set.fromList . concat) $
+      forM handlers $ \RequestHandler {name} -> do
+        mvid <- requestVariableIdOfName name
+        pure (maybeToList mvid)
   let e1Eff = maybe emptyEffect effectFromVar e1
-      e2Eff = SemanticEffect Set.empty handledIds
+      e2Eff = SemanticEffect Set.empty handledVarIds
   addEffectConstraint
     (effectFromVar e3Id)
     (unionEffects e1Eff e2Eff)
@@ -1018,11 +1037,11 @@ walkRequestHandler ::
   RequestHandler Identified ->
   CG (RequestHandler Constrained)
 walkRequestHandler e4Id tWholeBlockId RequestHandler {moduleQualifier, name, parameters, returnType, body, sourceSpan} = do
-  tHandled <- variableTypeFromName name
+  tHandled <- requestTypeFromName name
   (parameters', paramSig) <- walkParameterListForSignature parameters
   retSemantic <- elaborateOrFresh returnType
   retTvId <- freshReturnTypeVar retSemantic
-  let reqVarId = variableIdOfName name
+  reqVarId <- requestVariableIdOfName name
   -- Handler body walks under e4 (the dedicated handler-effect var) and the
   -- handle scope. 'next e' resumes the original request call, so 'e' is
   -- constrained against retTvId (= the next-tv); 'break e' targets
@@ -1049,7 +1068,7 @@ walkRequestHandler e4Id tWholeBlockId RequestHandler {moduleQualifier, name, par
   pure
     RequestHandler
       { moduleQualifier = fmap passThroughModuleName moduleQualifier,
-        name = passThroughVariableName name,
+        name = passThroughRequestName name,
         parameters = parameters',
         returnType = fmap passThroughType returnType,
         body = body',
@@ -1564,6 +1583,12 @@ passThroughModuleName = retagNameRef
 passThroughLabelName :: NameRef Identified 'LabelRef -> NameRef Constrained 'LabelRef
 passThroughLabelName = retagNameRef
 
+passThroughRequestName :: NameRef Identified 'RequestRef -> NameRef Constrained 'RequestRef
+passThroughRequestName = retagNameRef
+
+passThroughConstructorName :: NameRef Identified 'ConstructorRef -> NameRef Constrained 'ConstructorRef
+passThroughConstructorName = retagNameRef
+
 passThroughType :: SyntacticType Identified -> SyntacticType Constrained
 passThroughType = retagSyntacticType
 
@@ -1582,6 +1607,43 @@ variableTypeFromName nameRef = maybe freshTypeVar lookupVariable nameRef.resolut
 
 variableIdOfName :: NameRef Identified 'VariableRef -> Maybe VariableId
 variableIdOfName nameRef = nameRef.resolution
+
+-- | Type of a 'req' declaration's call-side, looked up via the request id.
+-- Each 'RequestId' has a known corresponding 'VariableId'
+-- ('requestVariableId'); we read the type out of 'stateTypeEnvironment'
+-- through that. Unresolved request references fall back to a fresh type
+-- variable (Identifier already reported the failure).
+requestTypeFromName :: NameRef Identified 'RequestRef -> CG (SemanticType Unresolved)
+requestTypeFromName nameRef = case nameRef.resolution of
+  Nothing -> freshTypeVar
+  Just rid -> do
+    requestData <- asks (Map.lookup rid . (.contextIdentifiedRequests))
+    case requestData of
+      Just rd -> lookupVariable rd.requestVariableId
+      Nothing -> freshTypeVar
+
+-- | The 'VariableId' corresponding to a request reference (via the
+-- 'requestVariableId' cross-link). Used for effect-set membership where the
+-- effect is parametrised by the underlying VariableId.
+requestVariableIdOfName :: NameRef Identified 'RequestRef -> CG (Maybe VariableId)
+requestVariableIdOfName nameRef = case nameRef.resolution of
+  Nothing -> pure Nothing
+  Just rid -> do
+    requestData <- asks (Map.lookup rid . (.contextIdentifiedRequests))
+    pure (fmap (.requestVariableId) requestData)
+
+-- | Type of a 'data' declaration's constructor-function side, looked up
+-- via the constructor id. Same plumbing as 'requestTypeFromName'.
+constructorTypeFromName ::
+  NameRef Identified 'ConstructorRef ->
+  CG (SemanticType Unresolved)
+constructorTypeFromName nameRef = case nameRef.resolution of
+  Nothing -> freshTypeVar
+  Just cid -> do
+    ctorData <- asks (Map.lookup cid . (.contextIdentifiedConstructors))
+    case ctorData of
+      Just cd -> lookupVariable cd.constructorVariableId
+      Nothing -> freshTypeVar
 
 -- | If the optional type annotation is present, elaborate it; otherwise
 -- allocate a fresh type variable so the solver can infer it.
@@ -1620,7 +1682,7 @@ generateConstraints result = case runState (runReaderT action ctx) initialState 
         errors = reverse finalState.stateErrors
       }
   where
-    ctx = initialContext result.identifiedTypes
+    ctx = initialContext result.identifiedTypes result.identifiedRequests result.identifiedConstructors
     action = do
       allocateAllVariables result
       mapM walkOne (Map.toList result.moduleASTs)

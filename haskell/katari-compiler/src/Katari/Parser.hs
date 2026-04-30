@@ -448,6 +448,17 @@ typeRefOfVariable = parsedSymbolRetag
 labelRefOfVariable :: NameRef Parsed 'VariableRef -> NameRef Parsed 'LabelRef
 labelRefOfVariable = parsedSymbolRetag
 
+-- | Re-tag a parsed name as a 'RequestRef'. Used in @req@ handler position
+-- where an identifier names a request declaration; resolution still happens
+-- in the Identifier pass.
+requestRefOfVariable :: NameRef Parsed 'VariableRef -> NameRef Parsed 'RequestRef
+requestRefOfVariable = parsedSymbolRetag
+
+-- | Re-tag a parsed name as a 'ConstructorRef'. Used in match-pattern
+-- constructor position; resolution happens in the Identifier pass.
+constructorRefOfVariable :: NameRef Parsed 'VariableRef -> NameRef Parsed 'ConstructorRef
+constructorRefOfVariable = parsedSymbolRetag
+
 -- | Internal: replace the 'SymbolKind' tag of a parsed 'NameRef'. Safe at
 -- the 'Parsed' phase because @NameMeta Parsed s = ()@ for every symbol
 -- kind, so re-tagging never has to invent payload. Exposed only through
@@ -843,11 +854,13 @@ parseRequestHandler = withSpan $ do
   parseKeyword KeywordReq
   -- Either @req name(...)@ or @req module.name(...)@: if a @.@ follows the
   -- first identifier, treat it as a qualified handler; otherwise bare.
+  -- The handler's @name@ field is a 'RequestRef' (resolution will require it
+  -- to name a @req@ declaration); we re-tag the parsed identifier here.
   first <- parseNameRef
   (moduleQualifier, name) <-
     optional (parsePunctuation PunctuationDot *> parseNameRef) >>= \case
-      Just second -> pure (Just (moduleRefOfVariable first), second)
-      Nothing -> pure (Nothing, first)
+      Just second -> pure (Just (moduleRefOfVariable first), requestRefOfVariable second)
+      Nothing -> pure (Nothing, requestRefOfVariable first)
   parameters <- parseParameterList
   returnType <- optional (parsePunctuation PunctuationArrow *> parseType)
   body <- withBreakContext BreakContextHandler parseBlock
@@ -1431,9 +1444,12 @@ parseQualifiedConstructorPattern = withSpan $ do
     second <- optional (parsePunctuation PunctuationDot *> parseNameRef)
     -- Only commit to a constructor pattern once we see the opening paren.
     void $ MP.lookAhead (parsePunctuation PunctuationLeftParenthesis)
+    -- The constructor name is a 'ConstructorRef'; resolution will require it
+    -- to name a @data@ declaration.
     pure $ case second of
-      Nothing -> (Nothing, first)
-      Just secondNameRef -> (Just (moduleRefOfVariable first), secondNameRef)
+      Nothing -> (Nothing, constructorRefOfVariable first)
+      Just secondNameRef ->
+        (Just (moduleRefOfVariable first), constructorRefOfVariable secondNameRef)
   parsePunctuation PunctuationLeftParenthesis
   fields <- parsePatternField `sepEndBy` parseComma
   parsePunctuation PunctuationRightParenthesis

@@ -173,20 +173,28 @@ data TypeData = TypeData
   deriving (Eq, Show)
 
 -- | A 'RequestId' identifies a @req@ declaration. Always top-level.
+-- 'requestVariableId' points back to the call-side 'VariableId' issued for
+-- the same declaration so that downstream phases (constraint generator,
+-- lowering) can read the request's signature type via the shared type
+-- environment without re-resolving by name.
 data RequestData = RequestData
   { requestQualifiedName :: QualifiedName,
-    requestSourceSpan :: SourceSpan
+    requestSourceSpan :: SourceSpan,
+    requestVariableId :: VariableId
   }
   deriving (Eq, Show)
 
 -- | A 'ConstructorId' identifies the constructor side of a @data@ declaration.
 -- Always top-level. 'constructorTypeId' points back to the corresponding
 -- 'TypeId' so that downstream phases can recover the type that this
--- constructor builds without re-walking the AST.
+-- constructor builds without re-walking the AST. 'constructorVariableId'
+-- points to the call-side 'VariableId' (the @Foo(...)@ usage), giving access
+-- to the constructor function's signature type.
 data ConstructorData = ConstructorData
   { constructorQualifiedName :: QualifiedName,
     constructorSourceSpan :: SourceSpan,
-    constructorTypeId :: TypeId
+    constructorTypeId :: TypeId,
+    constructorVariableId :: VariableId
   }
   deriving (Eq, Show)
 
@@ -235,6 +243,12 @@ data IdentifierError where
   ErrorImportNameNotFound :: SourceSpan -> Text -> Text -> IdentifierError
   -- | The module referenced by @ImportModule@ / @ImportNames@ does not exist.
   ErrorImportModuleNotFound :: SourceSpan -> Text -> IdentifierError
+  -- | A name appears in @req@ handler position but does not name a @req@
+  -- declaration (or names nothing at all).
+  ErrorNotARequest :: SourceSpan -> Text -> IdentifierError
+  -- | A name appears in match-pattern constructor position but does not name
+  -- a @data@ declaration (or names nothing at all).
+  ErrorNotAConstructor :: SourceSpan -> Text -> IdentifierError
 
 deriving instance Show IdentifierError
 
@@ -250,6 +264,8 @@ instance HasSourceSpan IdentifierError where
     ErrorNotAModule sp _ -> sp
     ErrorImportNameNotFound sp _ _ -> sp
     ErrorImportModuleNotFound sp _ -> sp
+    ErrorNotARequest sp _ -> sp
+    ErrorNotAConstructor sp _ -> sp
 
 -- | Convert an 'IdentifierError' to a unified 'Diagnostic'. Codes
 -- K0100-K0199 are reserved for the identifier pass.
@@ -296,6 +312,16 @@ toDiagnostic = \case
     diagnosticError
       "K0107"
       ("import: module '" <> moduleName <> "' not found")
+      sp
+  ErrorNotARequest sp name ->
+    diagnosticError
+      "K0108"
+      ("'" <> name <> "' is not a request (only @req@ declarations can be handled)")
+      sp
+  ErrorNotAConstructor sp name ->
+    diagnosticError
+      "K0109"
+      ("'" <> name <> "' is not a data constructor")
       sp
 
 -- ---------------------------------------------------------------------------
@@ -608,6 +634,12 @@ lookupType = lookupSlot (.typeSymbol)
 lookupModule :: Text -> Identifier (Maybe ModuleId)
 lookupModule = lookupSlot (.moduleSymbol)
 
+lookupRequest :: Text -> Identifier (Maybe RequestId)
+lookupRequest = lookupSlot (.requestSymbol)
+
+lookupConstructor :: Text -> Identifier (Maybe ConstructorId)
+lookupConstructor = lookupSlot (.constructorSymbol)
+
 -- | Look up the variable slot of @name@ in the export table of @moduleId@.
 lookupModuleExportVariable :: ModuleId -> Text -> Identifier (Maybe VariableId)
 lookupModuleExportVariable = lookupModuleExportSlot (.variableSymbol)
@@ -615,6 +647,12 @@ lookupModuleExportVariable = lookupModuleExportSlot (.variableSymbol)
 -- | Look up the type slot of @name@ in the export table of @moduleId@.
 lookupModuleExportType :: ModuleId -> Text -> Identifier (Maybe TypeId)
 lookupModuleExportType = lookupModuleExportSlot (.typeSymbol)
+
+lookupModuleExportRequest :: ModuleId -> Text -> Identifier (Maybe RequestId)
+lookupModuleExportRequest = lookupModuleExportSlot (.requestSymbol)
+
+lookupModuleExportConstructor :: ModuleId -> Text -> Identifier (Maybe ConstructorId)
+lookupModuleExportConstructor = lookupModuleExportSlot (.constructorSymbol)
 
 lookupModuleExportSlot ::
   (SymbolEntry -> Maybe a) ->
@@ -723,7 +761,8 @@ buildExports moduleMap =
         freshRequestId
           RequestData
             { requestQualifiedName = qn,
-              requestSourceSpan = name.sourceSpan
+              requestSourceSpan = name.sourceSpan,
+              requestVariableId = variableId
             }
       recordVariableQName qn variableId
       recordRequestQName qn requestId
@@ -770,7 +809,8 @@ buildExports moduleMap =
           ConstructorData
             { constructorQualifiedName = qn,
               constructorSourceSpan = name.sourceSpan,
-              constructorTypeId = typeId
+              constructorTypeId = typeId,
+              constructorVariableId = variableId
             }
       recordVariableQName qn variableId
       recordTypeQName qn typeId
@@ -1136,7 +1176,7 @@ resolveConstructorPattern ::
   Identifier (QualifiedConstructorPattern Identified)
 resolveConstructorPattern QualifiedConstructorPattern {..} = do
   (moduleQualifier', constructorName') <-
-    resolveQualifiedVariableRef moduleQualifier constructorName
+    resolveQualifiedConstructorRef moduleQualifier constructorName
   parameters' <-
     mapM
       (\(label, fieldPattern) -> (labelRef label,) <$> resolvePattern fieldPattern)
@@ -1185,24 +1225,6 @@ resolveLiteralPattern LiteralPattern {..} =
 -- All sub-resolvers return an 'Identified' marker (resolved id or the
 -- corresponding @Unresolved@) so that the AST always carries a faithful trace
 -- of the resolution outcome instead of a fabricated id.
-resolveQualifiedVariableRef ::
-  Maybe (NameRef Parsed 'ModuleRef) ->
-  NameRef Parsed 'VariableRef ->
-  Identifier (Maybe (NameRef Identified 'ModuleRef), NameRef Identified 'VariableRef)
-resolveQualifiedVariableRef = \cases
-  Nothing nameRef -> do
-    variableMetadata <- resolveBareVariable nameRef
-    pure (Nothing, identifiedNameRef variableMetadata nameRef)
-  (Just moduleRef) nameRef -> do
-    moduleMetadata <- resolveModuleRef moduleRef
-    variableMetadata <- case moduleMetadata of
-      Just moduleId -> resolveQualifiedVariable moduleId moduleRef.text nameRef
-      Nothing -> pure Nothing
-    pure
-      ( Just (identifiedNameRef moduleMetadata moduleRef),
-        identifiedNameRef variableMetadata nameRef
-      )
-
 resolveBareVariable :: NameRef Parsed 'VariableRef -> Identifier (NameMeta Identified 'VariableRef)
 resolveBareVariable nameRef =
   lookupVariable nameRef.text >>= \case
@@ -1219,14 +1241,99 @@ resolveModuleRef nameRef =
       emitError (ErrorNotAModule nameRef.sourceSpan nameRef.text)
       pure Nothing
 
-resolveQualifiedVariable ::
+-- | Resolve @[module.]name@ as a request reference (handler position). The
+-- bare name must occupy the request slot of an in-scope binding; otherwise
+-- 'ErrorNotARequest' (or 'ErrorUndefinedName' if the name is unknown
+-- entirely) is recorded.
+resolveQualifiedRequestRef ::
+  Maybe (NameRef Parsed 'ModuleRef) ->
+  NameRef Parsed 'RequestRef ->
+  Identifier (Maybe (NameRef Identified 'ModuleRef), NameRef Identified 'RequestRef)
+resolveQualifiedRequestRef = \cases
+  Nothing nameRef -> do
+    metadata <- resolveBareRequest nameRef
+    pure (Nothing, identifiedNameRef metadata nameRef)
+  (Just moduleRef) nameRef -> do
+    moduleMetadata <- resolveModuleRef moduleRef
+    metadata <- case moduleMetadata of
+      Just moduleId -> resolveQualifiedRequest moduleId moduleRef.text nameRef
+      Nothing -> pure Nothing
+    pure
+      ( Just (identifiedNameRef moduleMetadata moduleRef),
+        identifiedNameRef metadata nameRef
+      )
+
+resolveBareRequest :: NameRef Parsed 'RequestRef -> Identifier (NameMeta Identified 'RequestRef)
+resolveBareRequest nameRef =
+  lookupRequest nameRef.text >>= \case
+    Just rid -> pure (Just rid)
+    Nothing -> do
+      -- Distinguish "name does not exist" from "name exists but is not a
+      -- request". The former is a generic K0102, the latter K0108.
+      emitNotARequestOrUndefined nameRef
+      pure Nothing
+  where
+    emitNotARequestOrUndefined ref =
+      lookupVariable ref.text >>= \case
+        Just _ -> emitError (ErrorNotARequest ref.sourceSpan ref.text)
+        Nothing -> emitError (ErrorUndefinedName ref.sourceSpan ref.text)
+
+resolveQualifiedRequest ::
   ModuleId ->
   Text ->
-  NameRef Parsed 'VariableRef ->
-  Identifier (NameMeta Identified 'VariableRef)
-resolveQualifiedVariable moduleId qualifierName nameRef =
-  lookupModuleExportVariable moduleId nameRef.text >>= \case
-    Just variableId -> pure (Just variableId)
+  NameRef Parsed 'RequestRef ->
+  Identifier (NameMeta Identified 'RequestRef)
+resolveQualifiedRequest moduleId qualifierName nameRef =
+  lookupModuleExportRequest moduleId nameRef.text >>= \case
+    Just rid -> pure (Just rid)
+    Nothing -> do
+      emitError (ErrorUndefinedQualified nameRef.sourceSpan qualifierName nameRef.text)
+      pure Nothing
+
+-- | Resolve @[module.]name@ as a constructor reference (match-pattern
+-- position). The bare name must occupy the constructor slot of an in-scope
+-- binding.
+resolveQualifiedConstructorRef ::
+  Maybe (NameRef Parsed 'ModuleRef) ->
+  NameRef Parsed 'ConstructorRef ->
+  Identifier (Maybe (NameRef Identified 'ModuleRef), NameRef Identified 'ConstructorRef)
+resolveQualifiedConstructorRef = \cases
+  Nothing nameRef -> do
+    metadata <- resolveBareConstructor nameRef
+    pure (Nothing, identifiedNameRef metadata nameRef)
+  (Just moduleRef) nameRef -> do
+    moduleMetadata <- resolveModuleRef moduleRef
+    metadata <- case moduleMetadata of
+      Just moduleId -> resolveQualifiedConstructor moduleId moduleRef.text nameRef
+      Nothing -> pure Nothing
+    pure
+      ( Just (identifiedNameRef moduleMetadata moduleRef),
+        identifiedNameRef metadata nameRef
+      )
+
+resolveBareConstructor ::
+  NameRef Parsed 'ConstructorRef ->
+  Identifier (NameMeta Identified 'ConstructorRef)
+resolveBareConstructor nameRef =
+  lookupConstructor nameRef.text >>= \case
+    Just cid -> pure (Just cid)
+    Nothing -> do
+      emitNotAConstructorOrUndefined nameRef
+      pure Nothing
+  where
+    emitNotAConstructorOrUndefined ref =
+      lookupVariable ref.text >>= \case
+        Just _ -> emitError (ErrorNotAConstructor ref.sourceSpan ref.text)
+        Nothing -> emitError (ErrorUndefinedName ref.sourceSpan ref.text)
+
+resolveQualifiedConstructor ::
+  ModuleId ->
+  Text ->
+  NameRef Parsed 'ConstructorRef ->
+  Identifier (NameMeta Identified 'ConstructorRef)
+resolveQualifiedConstructor moduleId qualifierName nameRef =
+  lookupModuleExportConstructor moduleId nameRef.text >>= \case
+    Just cid -> pure (Just cid)
     Nothing -> do
       emitError (ErrorUndefinedQualified nameRef.sourceSpan qualifierName nameRef.text)
       pure Nothing
@@ -1406,7 +1513,7 @@ resolveStateVariable StateVariableBinding {name, typeAnnotation, initial, source
 -- is not part of the syntax.
 resolveRequestHandler :: RequestHandler Parsed -> Identifier (RequestHandler Identified)
 resolveRequestHandler RequestHandler {moduleQualifier, name, parameters, returnType, body, sourceSpan} = do
-  (moduleQualifier', name') <- resolveQualifiedVariableRef moduleQualifier name
+  (moduleQualifier', name') <- resolveQualifiedRequestRef moduleQualifier name
   (parameters', returnType', _noEffects, body') <- resolveSignatureBody parameters returnType Nothing body
   pure
     RequestHandler

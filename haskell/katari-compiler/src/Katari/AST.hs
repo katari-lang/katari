@@ -25,7 +25,13 @@ import Data.Aeson (FromJSON, ToJSON)
 import Data.Kind (Type)
 import Data.Text (Text)
 import GHC.Generics (Generic)
-import Katari.AST.Identifiers (ModuleId, TypeId, VariableId)
+import Katari.AST.Identifiers
+  ( ConstructorId,
+    ModuleId,
+    RequestId,
+    TypeId,
+    VariableId,
+  )
 
 data Position = Position
   { line :: Int,
@@ -59,7 +65,7 @@ class HasSourceSpan node where
 
 data SymbolKind
   = -- | 値空間の名前参照 (agent / req / ext agent / constructor / local var)。
-    -- Constructor は値空間に住む (関数として提供される) ため、専用 kind は設けない。
+    -- 値として呼べる名前はすべてここを通る。
     VariableRef
   | -- | 型空間の名前参照 (enum 名、TypeName)。
     TypeRef
@@ -67,6 +73,12 @@ data SymbolKind
     ModuleRef
   | -- | フィールド・引数ラベル (型指向で後段が解決)。
     LabelRef
+  | -- | req handler の対象。@req@ 宣言以外の名前を handler として書くと
+    -- Identifier 段階で reject される (型レベルでスロットを分離している)。
+    RequestRef
+  | -- | match パターンの constructor。@data@ 宣言以外の名前を constructor
+    -- パターンとして書くと Identifier 段階で reject される。
+    ConstructorRef
   deriving (Eq, Show)
 
 -- ---------------------------------------------------------------------------
@@ -101,6 +113,8 @@ type family NameMeta (p :: Phase) (s :: SymbolKind) :: Type where
   NameMeta _ 'TypeRef = Maybe TypeId
   NameMeta _ 'ModuleRef = Maybe ModuleId
   NameMeta _ 'LabelRef = ()
+  NameMeta _ 'RequestRef = Maybe RequestId
+  NameMeta _ 'ConstructorRef = Maybe ConstructorId
 
 -- | Expression node type metadata. Open family because 'Constrained' /
 -- 'Zonked' instances live in 'Katari.Typechecker.SemanticType' (which
@@ -431,7 +445,11 @@ instance HasSourceSpan (Modifier p) where
 -- 囲む agent に bind されるため)。よって @with@ 節は構文上も AST 上も無い。
 data RequestHandler (p :: Phase) = RequestHandler
   { moduleQualifier :: Maybe (NameRef p 'ModuleRef),
-    name :: NameRef p 'VariableRef,
+    -- | The request being handled. Resolved against the request namespace
+    -- ('RequestRef'); a name that does not name a @req@ declaration is
+    -- rejected at the Identifier phase rather than passed through as a
+    -- regular variable reference.
+    name :: NameRef p 'RequestRef,
     parameters :: [ParameterBinding p],
     returnType :: Maybe (SyntacticType p),
     body :: Block p,
@@ -509,8 +527,11 @@ instance HasSourceSpan (ParameterBinding p) where
 data QualifiedConstructorPattern (p :: Phase) = QualifiedConstructorPattern
   { -- | Optional module qualifier (left-most segment).
     moduleQualifier :: Maybe (NameRef p 'ModuleRef),
-    -- | Constructor name (lives in the value namespace).
-    constructorName :: NameRef p 'VariableRef,
+    -- | Constructor name. Resolved against the constructor namespace
+    -- ('ConstructorRef'); a name that does not name a @data@ declaration is
+    -- rejected at the Identifier phase rather than passed through as a
+    -- regular variable reference.
+    constructorName :: NameRef p 'ConstructorRef,
     -- | Field labels and their patterns. Label resolution is type-directed.
     parameters :: [(NameRef p 'LabelRef, Pattern p)],
     sourceSpan :: SourceSpan,
@@ -1086,6 +1107,8 @@ class
     Eq (NameMeta p 'TypeRef),
     Eq (NameMeta p 'ModuleRef),
     Eq (NameMeta p 'LabelRef),
+    Eq (NameMeta p 'RequestRef),
+    Eq (NameMeta p 'ConstructorRef),
     Eq (ExprType p),
     Eq (PatType p)
   ) =>
@@ -1096,6 +1119,8 @@ instance
     Eq (NameMeta p 'TypeRef),
     Eq (NameMeta p 'ModuleRef),
     Eq (NameMeta p 'LabelRef),
+    Eq (NameMeta p 'RequestRef),
+    Eq (NameMeta p 'ConstructorRef),
     Eq (ExprType p),
     Eq (PatType p)
   ) =>
@@ -1106,6 +1131,8 @@ class
     Show (NameMeta p 'TypeRef),
     Show (NameMeta p 'ModuleRef),
     Show (NameMeta p 'LabelRef),
+    Show (NameMeta p 'RequestRef),
+    Show (NameMeta p 'ConstructorRef),
     Show (ExprType p),
     Show (PatType p)
   ) =>
@@ -1116,6 +1143,8 @@ instance
     Show (NameMeta p 'TypeRef),
     Show (NameMeta p 'ModuleRef),
     Show (NameMeta p 'LabelRef),
+    Show (NameMeta p 'RequestRef),
+    Show (NameMeta p 'ConstructorRef),
     Show (ExprType p),
     Show (PatType p)
   ) =>

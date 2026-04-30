@@ -43,9 +43,15 @@ import Katari.AST
 import Katari.Diagnostic (Diagnostic, diagnosticError)
 import Katari.Typechecker.ConstraintGenerator (ConstraintGenResult (..))
 import Katari.Typechecker.Identifier
-  ( IdentifierResult (..),
+  ( ConstructorData (..),
+    ConstructorId,
+    IdentifierResult (..),
     ModuleData (..),
     ModuleId,
+    RequestData (..),
+    RequestId,
+    TypeData (..),
+    TypeId,
     VariableData (..),
     VariableId,
   )
@@ -78,7 +84,20 @@ data ZonkResult = ZonkResult
     -- 'IdentifierResult.identifiedModules' so that downstream phases
     -- (Lowering, Schema) can stamp module identity onto IR / Schema
     -- entries without re-threading 'IdentifierResult'.
+    --
+    -- Note: the per-declaration qualified name now lives on each
+    -- 'VariableData' / 'TypeData' / 'RequestData' / 'ConstructorData' so
+    -- this map is mostly redundant; kept for the few sites that still want
+    -- @ModuleId → name@ without going through a specific declaration.
     zonkedModuleNames :: !(Map ModuleId Text),
+    -- | Passthroughs from 'IdentifierResult' so 'Katari.Lowering' and
+    -- 'Katari.Schema' can resolve qualified names and look up
+    -- 'RequestId' / 'ConstructorId' → 'VariableId' cross-references
+    -- without re-threading 'IdentifierResult' alongside 'ZonkResult'.
+    zonkedVariables :: !(Map VariableId VariableData),
+    zonkedTypes :: !(Map TypeId TypeData),
+    zonkedRequests :: !(Map RequestId RequestData),
+    zonkedConstructors :: !(Map ConstructorId ConstructorData),
     -- | Solver 契約逸脱 (lookup miss) 検知用。通常 path では空のはず。
     zonkErrors :: ![ZonkError]
   }
@@ -173,6 +192,12 @@ passThroughModuleName = retagNameRef
 
 passThroughLabelName :: NameRef Constrained 'LabelRef -> NameRef Zonked 'LabelRef
 passThroughLabelName = retagNameRef
+
+passThroughRequestName :: NameRef Constrained 'RequestRef -> NameRef Zonked 'RequestRef
+passThroughRequestName = retagNameRef
+
+passThroughConstructorName :: NameRef Constrained 'ConstructorRef -> NameRef Zonked 'ConstructorRef
+passThroughConstructorName = retagNameRef
 
 passThroughType :: SyntacticType Constrained -> SyntacticType Zonked
 passThroughType = retagSyntacticType
@@ -340,7 +365,7 @@ walkPattern = \case
       ( PatternQualifiedConstructor
           QualifiedConstructorPattern
             { moduleQualifier = fmap passThroughModuleName moduleQualifier,
-              constructorName = passThroughVariableName constructorName,
+              constructorName = passThroughConstructorName constructorName,
               parameters = parameters',
               sourceSpan = sourceSpan,
               typeOf = typeOf'
@@ -414,7 +439,7 @@ walkRequestHandler RequestHandler {moduleQualifier, name, parameters, returnType
   pure
     RequestHandler
       { moduleQualifier = fmap passThroughModuleName moduleQualifier,
-        name = passThroughVariableName name,
+        name = passThroughRequestName name,
         parameters = parameters',
         returnType = fmap passThroughType returnType,
         body = body',
@@ -732,6 +757,10 @@ zonk idResult cgResult solverResult =
           zonkedTypeEnvironment = envResult,
           zonkedModuleNames =
             Map.map (\ModuleData {moduleName} -> moduleName) idResult.identifiedModules,
+          zonkedVariables = idResult.identifiedVariables,
+          zonkedTypes = idResult.identifiedTypes,
+          zonkedRequests = idResult.identifiedRequests,
+          zonkedConstructors = idResult.identifiedConstructors,
           zonkErrors = reverse errs
         }
   where
