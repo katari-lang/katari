@@ -192,8 +192,7 @@ statementSpec = describe "Statement (sum)" $ do
           { subject = VarId 1,
             arms =
               [ MatchArm
-                  { tag = MatchTagConstructor (CtorId 7),
-                    bindings = [("x", VarId 2)],
+                  { pattern = MPConstructor (CtorId 7) [("x", MPVariable (VarId 2))],
                     body = BlockId 3
                   }
               ],
@@ -286,19 +285,20 @@ exitContSpec = describe "ExitKind / ContKind" $ do
 
 matchArmSpec :: Spec
 matchArmSpec = describe "MatchArm" $ do
-  it "encodes a MatchTagAny tag" $ do
-    MatchArm {tag = MatchTagAny, bindings = [], body = BlockId 0}
+  it "encodes an MPAny pattern" $ do
+    MatchArm {pattern = MPAny, body = BlockId 0}
       `shouldEncodeAs` object
-        [ "tag" .= object ["kind" .= ("any" :: String)],
-          "bindings" .= ([] :: [Value]),
+        [ "pattern" .= object ["kind" .= ("any" :: String)],
           "body" .= (0 :: Int)
         ]
 
-  it "round-trips with constructor tag and bindings" $ do
+  it "round-trips a constructor pattern with bound fields" $ do
     roundTrip
       MatchArm
-        { tag = MatchTagConstructor (CtorId 5),
-          bindings = [("head", VarId 1), ("tail", VarId 2)],
+        { pattern =
+            MPConstructor
+              (CtorId 5)
+              [("head", MPVariable (VarId 1)), ("tail", MPVariable (VarId 2))],
           body = BlockId 3
         }
 

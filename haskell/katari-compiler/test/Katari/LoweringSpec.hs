@@ -242,8 +242,7 @@ stage2Spec = describe "Stage 2 \8212 control flow" $ do
       [m] -> do
         length m.arms `shouldBe` 1
         let [arm] = m.arms
-        arm.tag `shouldBe` MatchTagLiteral LVBoolean {boolean = True}
-        arm.bindings `shouldBe` []
+        arm.pattern `shouldBe` MPLiteral LVBoolean {boolean = True}
         m.defaultArm `shouldNotBe` Nothing
       other -> expectationFailure ("expected 1 SMatch, got " <> show (length other))
 
@@ -289,11 +288,13 @@ stage2Spec = describe "Stage 2 \8212 control flow" $ do
     case matches ub of
       [m] -> do
         case m.arms of
-          [arm] -> do
-            case ctorIdOf "Point" irMod of
-              Just cid -> arm.tag `shouldBe` MatchTagConstructor cid
-              Nothing -> expectationFailure "Point ctor not in IR entries"
-            map fst arm.bindings `shouldMatchList` ["x", "y"]
+          [arm] -> case arm.pattern of
+            MPConstructor cid fields -> do
+              case ctorIdOf "Point" irMod of
+                Just expected -> cid `shouldBe` expected
+                Nothing -> expectationFailure "Point ctor not in IR entries"
+              map fst fields `shouldMatchList` ["x", "y"]
+            other -> expectationFailure ("expected MPConstructor, got " <> show other)
           _ -> expectationFailure "expected 1 arm"
       _ -> expectationFailure "expected 1 SMatch"
 
@@ -314,19 +315,22 @@ stage2Spec = describe "Stage 2 \8212 control flow" $ do
     let Just ub = agentBody "main" irMod
     case matches ub of
       [m] -> case m.arms of
-        [arm] -> do
-          case ctorIdOf "Outer" irMod of
-            Just cid -> arm.tag `shouldBe` MatchTagConstructor cid
-            Nothing -> expectationFailure "Outer ctor not in IR entries"
-          map fst arm.bindings `shouldMatchList` ["inner"]
-          case userBlockOf arm.body irMod of
-            Just armBody -> do
-              -- The arm body should emit get_field calls for left and right.
-              let getFieldCalls =
-                    [ c | SCall c <- armBody.statements, CTBlock {block = bid} <- [c.target], Just (BlockPrim {name = "get_field"}) <- [Map.lookup bid irMod.blocks]
-                    ]
-              length getFieldCalls `shouldBe` 2
-            Nothing -> expectationFailure "arm body not found"
+        [arm] -> case arm.pattern of
+          MPConstructor outerCid [(outerLabel, innerPat)] -> do
+            case ctorIdOf "Outer" irMod of
+              Just expected -> outerCid `shouldBe` expected
+              Nothing -> expectationFailure "Outer ctor not in IR entries"
+            outerLabel `shouldBe` "inner"
+            -- The nested Pair pattern is preserved structurally as a
+            -- sub-MPConstructor; runtime walks the tree to bind a / b.
+            case innerPat of
+              MPConstructor pairCid pairFields -> do
+                case ctorIdOf "Pair" irMod of
+                  Just expected -> pairCid `shouldBe` expected
+                  Nothing -> expectationFailure "Pair ctor not in IR entries"
+                map fst pairFields `shouldMatchList` ["left", "right"]
+              other -> expectationFailure ("expected nested MPConstructor, got " <> show other)
+          other -> expectationFailure ("expected MPConstructor at top level, got " <> show other)
         _ -> expectationFailure "expected 1 arm"
       _ -> expectationFailure "expected 1 SMatch"
 

@@ -56,7 +56,7 @@ module Katari.IR
     CallTarget (..),
     Arg (..),
     MatchArm (..),
-    MatchTag (..),
+    MatchPattern (..),
     ExitKind (..),
     ContKind (..),
   )
@@ -511,31 +511,40 @@ instance ToJSON Arg where
 instance FromJSON Arg where
   parseJSON = genericParseJSON irOptions
 
--- | What an 'SMatch' arm matches against. A successor of @Maybe Text@:
--- the previous \"@Nothing@ for unconditional / strings for both ctors and
--- literals\" representation collapsed two semantically distinct
--- dispatches; the sum below makes them explicit.
-data MatchTag
-  = -- | Always matches (variable / wildcard / tuple bind-only).
-    MatchTagAny
-  | -- | Match if the subject is a tagged value with this constructor id.
-    MatchTagConstructor !CtorId
+-- | What an 'SMatch' arm matches against. The runtime walks the
+-- pattern tree against the subject, binding matched sub-values to the
+-- 'VarId's introduced by 'MPVariable' along the way; on success it
+-- jumps into the arm's 'body' with those bindings in scope.
+--
+-- Carrying the full nested pattern in the IR (rather than compiling
+-- it down to a cascade of single-tag SMatchs) keeps a 1:1 shape with
+-- the source @match@ and pushes the search-and-bind logic to the
+-- runtime — which it has to do anyway for tagged-value introspection.
+data MatchPattern
+  = -- | Wildcard / unconditional match. No binding.
+    MPAny
+  | -- | Bind the matched subject to this 'VarId'. Always matches.
+    MPVariable !VarId
   | -- | Match if the subject equals this literal value.
-    MatchTagLiteral !LiteralValue
+    MPLiteral !LiteralValue
+  | -- | Match if the subject is a tagged value with this constructor
+    -- id; recursively match each named field's sub-pattern.
+    MPConstructor !CtorId ![(Text, MatchPattern)]
+  | -- | Match a tuple positionally; recurse into each element.
+    MPTuple ![MatchPattern]
   deriving (Eq, Show, Generic)
 
-instance ToJSON MatchTag where
-  toJSON = genericToJSON (sumOptions stripMatchTagPrefix)
+instance ToJSON MatchPattern where
+  toJSON = genericToJSON (sumOptions stripMPPrefix)
 
-instance FromJSON MatchTag where
-  parseJSON = genericParseJSON (sumOptions stripMatchTagPrefix)
+instance FromJSON MatchPattern where
+  parseJSON = genericParseJSON (sumOptions stripMPPrefix)
 
--- | One arm of an 'SMatch'. The runtime evaluates 'tag' first; on a
--- match it pre-populates 'bindings' (field/index label → IR var the
--- arm body reads) and jumps into 'body'.
+-- | One arm of an 'SMatch'. The runtime evaluates 'pattern' against the
+-- subject; on a successful match it enters 'body' with whatever
+-- bindings the pattern's 'MPVariable' positions introduced.
 data MatchArm = MatchArm
-  { tag :: !MatchTag,
-    bindings :: ![(Text, VarId)],
+  { pattern :: !MatchPattern,
     body :: !BlockId
   }
   deriving (Eq, Show, Generic)
@@ -614,8 +623,8 @@ stripLVPrefix = lowerHead . drop (length ("LV" :: String))
 stripCTPrefix :: String -> String
 stripCTPrefix = lowerHead . drop (length ("CT" :: String))
 
-stripMatchTagPrefix :: String -> String
-stripMatchTagPrefix = lowerHead . drop (length ("MatchTag" :: String))
+stripMPPrefix :: String -> String
+stripMPPrefix = lowerHead . drop (length ("MP" :: String))
 
 stripExitPrefix :: String -> String
 stripExitPrefix = lowerHead . drop (length ("Exit" :: String))

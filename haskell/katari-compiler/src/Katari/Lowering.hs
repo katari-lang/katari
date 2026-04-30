@@ -15,7 +15,7 @@ module Katari.Lowering
   )
 where
 
-import Control.Monad (foldM, forM, zipWithM)
+import Control.Monad (foldM, forM)
 import Control.Monad.Reader (ReaderT, asks, local, runReaderT)
 import Control.Monad.State.Strict (State, gets, modify, runState)
 import Data.Map.Strict (Map)
@@ -1309,8 +1309,7 @@ lowerIfExpr ie = do
         { subject = cond,
           arms =
             [ MatchArm
-                { tag = MatchTagLiteral LVBoolean {boolean = True},
-                  bindings = [],
+                { pattern = MPLiteral LVBoolean {boolean = True},
                   body = thenBlockId
                 }
             ],
@@ -1319,200 +1318,81 @@ lowerIfExpr ie = do
         }
   pure out
 
--- | Lower a match expression. Each source arm becomes one outer
--- 'MatchArm' (so multiple arms with the same top-level constructor stay
--- separate, even though the runtime might want to merge them into a
--- single dispatch — see Phase 15-G note below).
+-- | Lower a match expression. Each source arm becomes one IR
+-- 'MatchArm' carrying the full nested 'MatchPattern' tree; the runtime
+-- walks that tree against the subject, binds matched sub-values to the
+-- 'VarId's introduced by 'MPVariable', and jumps into the arm's body
+-- on success. Falling through (no arm matches) hits 'defaultArm' if
+-- the match has an unconditional arm, else the runtime errors.
 --
--- Nested refutable sub-patterns inside an arm (e.g. @Some(0)@,
--- @Pair(left=true, right=y)@) are handled by chaining inner 'SMatch'
--- statements inside the arm body. Each inner 'SMatch' uses the
--- outermost wildcard/catch-all arm's body as its 'defaultArm', so a
--- failed inner refutable check falls through to the catch-all rather
--- than to the next sibling source arm. This matches the user-confirmed
--- design described in CLAUDE.md: \"3 段階 nest で 2 段階目に shared
--- default がある\" works because each inner cascade carries the same
--- shared default to the bottom.
---
--- Limitation: source arms that overlap on their top-level tag (e.g.
--- @Some(0) -> a; Some(n) -> b@) are not merged. Each source arm
--- compiles to a separate IR arm; if @Some(0)@'s inner check fails,
--- control jumps to the shared default (the outermost @_@), bypassing
--- the next @Some(n)@ arm. Tests should avoid this overlap pattern, or
--- a future revision can add same-tag grouping.
---
--- Top-level patterns supported:
---   * VariablePattern - tag=MatchTagAny, binds subject to the named local.
---   * WildcardPattern - tag=MatchTagAny.
---   * LiteralPattern  - tag=MatchTagLiteral, no bindings.
---   * TuplePattern    - tag=MatchTagAny, bindings via "_0", "_1", ...
---   * QualifiedConstructorPattern - tag=MatchTagConstructor, bindings via
---     field labels. Inner refutable sub-patterns chain via inner SMatch.
+-- Compared to compiling each nested refutable position into a separate
+-- inner 'SMatch', this design keeps the IR 1:1 with the source
+-- @match@: all dispatch / binding logic lives in one place at the
+-- runtime, and arbitrary nesting / overlap-on-tag arms work naturally
+-- (the runtime tries arms in source order).
 lowerMatchExpr :: AST.MatchExpression Zonked -> Lower VarId
 lowerMatchExpr me = do
   subject <- lowerExpr me.subject
   out <- freshVarId Nothing
-  -- Pre-allocate the shared default block id. Inner refutable cascades
-  -- emitted while lowering arms reference this id; we fill it after
-  -- regular arm lowering.
-  sharedDefault <- freshBlockId
-  -- Split the source arms into regular (refutable / specific) and
-  -- unconditional (variable / wildcard). The LAST unconditional arm's
-  -- body becomes the shared default so the wildcard branch is emitted
-  -- exactly once. Subsequent arms after that wildcard are unreachable
-  -- — we still lower them (their errors deserve to surface) but mark
-  -- them as such by skipping the IR arm emission.
-  let (regular, defaultBody) = splitOnLastUnconditional me.cases
-  arms <- mapM (lowerMatchArm sharedDefault subject) regular
-  case defaultBody of
-    Just blk ->
-      -- Lower the wildcard arm's body INTO the pre-allocated
-      -- sharedDefault block id. We bypass 'buildArmBody' here because
-      -- it would allocate a fresh id; instead inline the same logic
-      -- with the existing id.
-      lowerArmBodyInto sharedDefault blk
-    Nothing ->
-      -- No wildcard: shared default is a panic placeholder.
-      recordBlock sharedDefault (BlockUser {body = defaultUserBlock}) Nothing
+  arms <- mapM lowerMatchArm me.cases
   emit $
     SMatch
       MatchData
         { subject = subject,
           arms = arms,
-          defaultArm = Just sharedDefault,
+          defaultArm = Nothing,
           output = Just out
         }
   pure out
 
--- | Partition arms: take everything strictly *before* the last
--- unconditional arm (variable / wildcard) as \"regular\", and return
--- that arm's body separately. Anything after the last unconditional
--- arm in source order is unreachable; we drop it from the regular
--- arms list. (This matches the @match@ runtime semantics: the
--- defaultArm catches anything not handled by a regular arm.)
-splitOnLastUnconditional ::
-  [AST.CaseArm Zonked] ->
-  ([AST.CaseArm Zonked], Maybe (AST.Block Zonked))
-splitOnLastUnconditional cases =
-  case findLastUnconditionalIndex cases of
-    Just idx -> (take idx cases, Just (cases !! idx).body)
-    Nothing -> (cases, Nothing)
-  where
-    findLastUnconditionalIndex =
-      fst
-        . foldr
-          ( \(idx, arm) (acc, found) ->
-              if not found && isUnconditional arm
-                then (Just idx, True)
-                else (acc, found)
-          )
-          (Nothing, False)
-        . zip [0 :: Int ..]
-    isUnconditional arm = case arm.pattern of
-      AST.PatternVariable _ -> True
-      AST.PatternWildcard _ -> True
-      _ -> False
+-- | Lower one source arm. Translate the AST pattern to an IR
+-- 'MatchPattern' and collect every binding (Identifier 'VariableId' →
+-- IR 'VarId') the pattern introduces, so the arm body block can read
+-- them as locals.
+lowerMatchArm :: AST.CaseArm Zonked -> Lower MatchArm
+lowerMatchArm arm = do
+  (irPat, locals) <- lowerPattern arm.pattern
+  body <- buildArmBodyWithLocals locals arm.body
+  pure MatchArm {pattern = irPat, body = body}
 
--- | Lower an arm body block into the given pre-allocated 'BlockId'.
--- Used for the shared default so the wildcard arm's body lives at
--- exactly one BlockId.
-lowerArmBodyInto :: BlockId -> AST.Block Zonked -> Lower ()
-lowerArmBodyInto bid blk = do
-  (trailing, statements) <- runWithFreshBuffer (lowerBlockInto blk)
-  let userBlock =
-        defaultUserBlock
-          { statements = statements,
-            trailing = trailing
-          }
-  recordBlock bid (BlockUser {body = userBlock}) Nothing
-
-lowerMatchArm :: BlockId -> VarId -> AST.CaseArm Zonked -> Lower MatchArm
-lowerMatchArm sharedDefault subject arm = do
-  (tag, bindings, refutables, prelude) <- patternToArm subject arm.pattern
-  body <- buildArmBodyWithRefutables sharedDefault refutables prelude arm.body
-  pure MatchArm {tag = tag, bindings = bindings, body = body}
-
--- | One layer of refutable nested matching that needs an inner 'SMatch'
--- in the arm body. Each step matches @stepSubject@ against the
--- pattern's tag with the indicated @stepBindings@; on success the next
--- inner step (or the user's arm body) runs, on failure control falls
--- through to the surrounding @sharedDefault@.
-data RefutableStep = RefutableStep
-  { stepSubject :: !VarId,
-    stepTag :: !MatchTag,
-    stepBindings :: ![(Text, VarId)],
-    -- | Irrefutable destructuring (tuple_get / get_field) that should
-    -- run inside this step's matched arm body, before the next inner
-    -- step or the user body. Returns the new locals introduced.
-    stepPrelude :: !(Lower [(VariableId, VarId)])
-  }
-
--- | Translate a top-level arm pattern into @(tag, bindings, refutables,
--- prelude)@:
---
---   * @tag@ — the runtime tag the OUTER 'SMatch' arm matches against.
---   * @bindings@ — the @(label, IRVar)@ pairs the outer arm pre-populates.
---   * @refutables@ — list of 'RefutableStep's to chain in the arm body
---     for any nested refutable sub-patterns (literal / constructor
---     pattern below the top level). Empty when the pattern has only
---     irrefutable nested parts. Steps are in *outermost-first* source
---     order; 'buildArmBodyWithRefutables' folds them innermost-out.
---   * @prelude@ — a 'Lower' action, run inside the OUTER arm body's
---     buffer (before any inner SMatch), that emits irrefutable
---     destructuring for the top-level pattern and returns its locals.
-patternToArm ::
-  VarId ->
-  AST.Pattern Zonked ->
-  Lower (MatchTag, [(Text, VarId)], [RefutableStep], Lower [(VariableId, VarId)])
-patternToArm subject = \case
+-- | Translate an AST 'Pattern' to an IR 'MatchPattern'. Each variable
+-- pattern allocates a fresh 'VarId' (the runtime will bind the matched
+-- sub-value into it) and records an Identifier→IR mapping so the arm
+-- body's lowering can resolve user-side variable references.
+lowerPattern :: AST.Pattern Zonked -> Lower (MatchPattern, [(VariableId, VarId)])
+lowerPattern = \case
   AST.PatternVariable vp -> case vp.name.resolution of
-    Just variableId ->
-      pure (MatchTagAny, [], [], pure [(variableId, subject)])
+    Just variableId -> do
+      var <- freshVarId (Just vp.name.text)
+      pure (MPVariable var, [(variableId, var)])
     Nothing -> do
       recordError (LowerErrorUnresolvedVariable vp.sourceSpan vp.name.text)
-      pure (MatchTagAny, [], [], pure [])
-  AST.PatternWildcard _ -> pure (MatchTagAny, [], [], pure [])
-  AST.PatternLiteral lp -> do
-    let lit = literalValueToIR lp.value
-    pure (MatchTagLiteral lit, [], [], pure [])
+      pure (MPAny, [])
+  AST.PatternWildcard _ -> pure (MPAny, [])
+  AST.PatternLiteral lp -> pure (MPLiteral (literalValueToIR lp.value), [])
   AST.PatternTuple tp -> do
-    fields <- mapM allocTupleField (zip [0 :: Int ..] tp.elements)
-    let bindings = [(label, var) | (label, var, _) <- fields]
-    refutables <- concat <$> mapM (\(_, var, sub) -> nestedRefutables var sub) fields
-    let prelude =
-          concat
-            <$> mapM (\(_, var, sub) -> destructurePattern var sub) fields
-    pure (MatchTagAny, bindings, refutables, prelude)
+    (subs, localss) <- unzip <$> mapM lowerPattern tp.elements
+    pure (MPTuple subs, concat localss)
   AST.PatternQualifiedConstructor qp -> do
-    cid <- resolveCtorId qp
-    fields <- mapM allocConstructorField qp.parameters
-    let bindings = [(label, var) | (label, var, _) <- fields]
-    refutables <- concat <$> mapM (\(_, var, sub) -> nestedRefutables var sub) fields
-    let prelude =
-          concat
-            <$> mapM (\(_, var, sub) -> destructurePattern var sub) fields
-    pure (MatchTagConstructor cid, bindings, refutables, prelude)
-  where
-    allocTupleField (idx, sub) = do
-      let label = Text.pack ("_" <> show idx)
-      var <- freshVarId (Just label)
-      pure (label, var, sub)
-
-    allocConstructorField (labelRef, sub) = do
-      var <- freshVarId (Just labelRef.text)
-      pure (labelRef.text, var, sub)
-
-    resolveCtorId qp = case qp.constructorName.resolution of
+    cid <- case qp.constructorName.resolution of
       Just identCid -> do
         mapped <- gets (Map.lookup identCid . (.lsCtorIds))
         case mapped of
           Just irCid -> pure irCid
           Nothing -> do
-            recordError (LowerErrorUnresolvedVariable qp.sourceSpan qp.constructorName.text)
+            recordError
+              (LowerErrorUnresolvedVariable qp.sourceSpan qp.constructorName.text)
             freshCtorId
       Nothing -> do
-        recordError (LowerErrorUnresolvedVariable qp.sourceSpan qp.constructorName.text)
+        recordError
+          (LowerErrorUnresolvedVariable qp.sourceSpan qp.constructorName.text)
         freshCtorId
+    pairs <- forM qp.parameters $ \(labelRef, sub) -> do
+      (subPat, subLocals) <- lowerPattern sub
+      pure ((labelRef.text, subPat), subLocals)
+    let fields = map fst pairs
+        locals = concatMap snd pairs
+    pure (MPConstructor cid fields, locals)
 
 literalValueToIR :: AST.LiteralValue -> LiteralValue
 literalValueToIR = \case
@@ -1522,169 +1402,19 @@ literalValueToIR = \case
   AST.LiteralValueNumber n -> LVNumber {number = n}
   AST.LiteralValueString s -> LVString {string = s}
 
--- | Collect 'RefutableStep's for any nested LITERAL sub-patterns below
--- @subject@'s pattern. Nested constructor / tuple sub-patterns are NOT
--- treated as refutable — Katari's semantics for @match@ allow nested
--- constructor patterns to act as irrefutable destructuring (matching
--- the original 'destructurePattern' behaviour). Only nested literal
--- patterns require an inner SMatch.
-nestedRefutables :: VarId -> AST.Pattern Zonked -> Lower [RefutableStep]
-nestedRefutables subject = \case
-  AST.PatternVariable _ -> pure []
-  AST.PatternWildcard _ -> pure []
-  AST.PatternLiteral lp ->
-    pure
-      [ RefutableStep
-          { stepSubject = subject,
-            stepTag = MatchTagLiteral (literalValueToIR lp.value),
-            stepBindings = [],
-            stepPrelude = pure []
-          }
-      ]
-  AST.PatternTuple tp -> do
-    let allocField idx _ = freshVarId (Just (Text.pack ("_" <> show idx)))
-    fieldVars <- zipWithM allocField [0 :: Int ..] tp.elements
-    concat <$> zipWithM nestedRefutables fieldVars tp.elements
-  AST.PatternQualifiedConstructor qp -> do
-    -- Allocate field vars for each parameter and recurse to find any
-    -- nested LITERAL refutables. The constructor itself isn't a
-    -- refutable step; its destructuring is part of the irrefutable
-    -- prelude built by 'destructurePattern'.
-    fieldVarsAndSubs <- forM qp.parameters $ \(labelRef, sub) -> do
-      var <- freshVarId (Just labelRef.text)
-      pure (labelRef.text, var, sub)
-    concat <$> mapM (\(_, var, sub) -> nestedRefutables var sub) fieldVarsAndSubs
-
--- | Build a child block for a match arm body. The @prelude@ action runs
--- first inside the arm body's fresh statement buffer, emitting any
--- nested-pattern destructuring; its returned locals are then in scope
--- when the user-written body is lowered.
-buildArmBody :: Lower [(VariableId, VarId)] -> AST.Block Zonked -> Lower BlockId
-buildArmBody prelude blk = do
+-- | Build a child block for a match arm body. The given locals (from
+-- pattern bindings) are added to the Reader scope before lowering the
+-- body, so user-side variable references resolve to the right
+-- 'VarId's.
+buildArmBodyWithLocals :: [(VariableId, VarId)] -> AST.Block Zonked -> Lower BlockId
+buildArmBodyWithLocals locals blk = do
   blockId <- freshBlockId
-  (trailing, statements) <- runWithFreshBuffer $ do
-    locals <- prelude
-    withLocals locals (lowerBlockInto blk)
+  (trailing, statements) <-
+    runWithFreshBuffer (withLocals locals (lowerBlockInto blk))
   let userBlock =
         defaultUserBlock
           { statements = statements,
             trailing = trailing
-          }
-  recordBlock blockId (BlockUser {body = userBlock}) Nothing
-  pure blockId
-
--- | Build a match arm body that may contain inner refutable cascades.
--- 'refutables' is the list of nested 'RefutableStep's produced by
--- 'patternToArm'; we fold them innermost-out so each step's 'SMatch'
--- wraps the previous \"leaf\" block, and the deepest leaf runs the
--- prelude + user body.
-buildArmBodyWithRefutables ::
-  BlockId {- shared default -} ->
-  [RefutableStep] ->
-  Lower [(VariableId, VarId)] {- top-level prelude -} ->
-  AST.Block Zonked {- user-written arm body -} ->
-  Lower BlockId
-buildArmBodyWithRefutables sharedDefault refutables topPrelude blk = do
-  -- Innermost block: the user's body wrapped together with the
-  -- innermost refutable's prelude. We apply the *top-level* prelude
-  -- here only when there are no inner refutables; otherwise the
-  -- top-level prelude already ran in the OUTER SMatch arm body (see
-  -- 'wrapWithStep' below).
-  case refutables of
-    [] ->
-      -- No nested refutable: classic prelude + body block.
-      buildArmBody topPrelude blk
-    (firstStep : restSteps) -> do
-      leaf <- buildArmBody (combineLastPrelude restSteps) blk
-      -- Wrap from innermost-out: each step's SMatch lives in a block
-      -- that becomes the previous step's arm body. The outermost step
-      -- is wrapped in a block that ALSO runs the top-level prelude.
-      wrappedInner <- foldNestedSteps sharedDefault leaf (reverse restSteps)
-      wrapOutermost sharedDefault topPrelude firstStep wrappedInner
-  where
-    -- The innermost step's prelude is what runs alongside the user's body.
-    combineLastPrelude steps = case lastMay steps of
-      Just step -> step.stepPrelude
-      Nothing -> pure []
-
-    lastMay [] = Nothing
-    lastMay xs = Just (last xs)
-
--- | Fold a list of refutable steps innermost-out. Each step wraps the
--- previous \"leaf\" block in an SMatch (with @sharedDefault@ as the
--- fall-through). 'innerSteps' is reversed so we process bottom-up.
-foldNestedSteps :: BlockId -> BlockId -> [RefutableStep] -> Lower BlockId
-foldNestedSteps _ leaf [] = pure leaf
-foldNestedSteps sharedDefault leaf (step : moreInnerToOuter) = do
-  -- This step's arm body is the previous leaf. Build an SMatch block
-  -- whose only matching arm jumps to that leaf.
-  matchBlock <- buildSMatchWrapper sharedDefault step leaf
-  foldNestedSteps sharedDefault matchBlock moreInnerToOuter
-
--- | The OUTERMOST step also needs to run the top-level prelude
--- (irrefutable destructuring of the outer SMatch arm's bindings) before
--- emitting the inner SMatch.
-wrapOutermost ::
-  BlockId ->
-  Lower [(VariableId, VarId)] ->
-  RefutableStep ->
-  BlockId {- inner-wrapped block to jump into on match -} ->
-  Lower BlockId
-wrapOutermost sharedDefault topPrelude step innerBlock = do
-  blockId <- freshBlockId
-  (_, statements) <- runWithFreshBuffer $ do
-    topLocals <- topPrelude
-    withLocals topLocals $ do
-      stepLocals <- step.stepPrelude
-      withLocals stepLocals $ do
-        emit $
-          SMatch
-            MatchData
-              { subject = step.stepSubject,
-                arms =
-                  [ MatchArm
-                      { tag = step.stepTag,
-                        bindings = step.stepBindings,
-                        body = innerBlock
-                      }
-                  ],
-                defaultArm = Just sharedDefault,
-                output = Nothing
-              }
-  let userBlock =
-        defaultUserBlock
-          { statements = statements,
-            trailing = Nothing
-          }
-  recordBlock blockId (BlockUser {body = userBlock}) Nothing
-  pure blockId
-
--- | Build the wrapper block for a non-outermost step: just emits the
--- inner SMatch (no top-level prelude — that already ran higher up).
-buildSMatchWrapper :: BlockId -> RefutableStep -> BlockId -> Lower BlockId
-buildSMatchWrapper sharedDefault step innerBlock = do
-  blockId <- freshBlockId
-  (_, statements) <- runWithFreshBuffer $ do
-    stepLocals <- step.stepPrelude
-    withLocals stepLocals $
-      emit $
-        SMatch
-          MatchData
-            { subject = step.stepSubject,
-              arms =
-                [ MatchArm
-                    { tag = step.stepTag,
-                      bindings = step.stepBindings,
-                      body = innerBlock
-                    }
-                ],
-              defaultArm = Just sharedDefault,
-              output = Nothing
-            }
-  let userBlock =
-        defaultUserBlock
-          { statements = statements,
-            trailing = Nothing
           }
   recordBlock blockId (BlockUser {body = userBlock}) Nothing
   pure blockId
