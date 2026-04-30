@@ -7,6 +7,7 @@ import Data.Map.Strict qualified as Map
 import Data.Maybe (isJust, isNothing)
 import Data.Text (Text)
 import Katari.AST
+import Katari.AST.Identifiers (QualifiedName)
 import Katari.Parser (parseModuleStrict)
 import Katari.Typechecker.Identifier
 import Test.Hspec
@@ -77,8 +78,14 @@ hasError predicate = \case
 lookupTypeByName :: Text -> IdentifierResult -> Maybe TypeData
 lookupTypeByName name res =
   fmap snd
-    . find (\(_, typeData) -> typeData.typeName == name)
+    . find (\(_, typeData) -> typeBareName typeData == name)
     $ Map.toList res.identifiedTypes
+  where
+    typeBareName :: TypeData -> Text
+    typeBareName td = bareNameOfQualified td.typeQualifiedName
+
+    bareNameOfQualified :: QualifiedName -> Text
+    bareNameOfQualified qn = qn.name
 
 -- | Accessor for the (phase-parameterised) synonym RHS field. Wrapping the
 -- access in a fixed-result function avoids the @metadata0@ ambiguity that
@@ -228,8 +235,10 @@ dataDeclarations = describe "data declarations" $ do
           head
             [ tid
               | (tid, td) <- Map.toList res.identifiedTypes,
-                td.typeName == "widget"
+                bareNameOf td.typeQualifiedName == "widget"
             ]
+        bareNameOf :: QualifiedName -> Text
+        bareNameOf qn = qn.name
     case typeNameMeta of
       Just tid -> tid `shouldBe` widgetTypeId
       Nothing ->

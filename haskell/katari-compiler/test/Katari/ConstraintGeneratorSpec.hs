@@ -4,6 +4,7 @@ import Data.List (find)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.Text (Text)
+import Katari.AST.Identifiers (QualifiedName (QualifiedName))
 import Katari.Parser (parseModuleStrict)
 import Katari.Typechecker.ConstraintGenerator
 import Katari.Typechecker.Identifier
@@ -661,10 +662,11 @@ dataNameClash = describe "cross-module data name clash" $ do
             (head fooTypeIds `Set.member` usedTids) `shouldBe` True
             (fooTypeIds !! 1 `Set.member` usedTids) `shouldBe` True
   where
-    -- Disambiguates @td.typeName@ which collides with DataDeclaration.typeName
-    -- under OverloadedRecordDot.
+    -- Bare name extracted from the qualified name (TypeData no longer
+    -- carries a separate @typeName@ field).
     typeNameOf :: TypeData -> Text
-    typeNameOf td = td.typeName
+    typeNameOf td = case td.typeQualifiedName of
+      QualifiedName _ n -> n
     collectDataTids :: SemanticType Unresolved -> [TypeId]
     collectDataTids = \case
       SemanticTypeData tid -> [tid]

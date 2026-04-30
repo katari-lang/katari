@@ -23,10 +23,16 @@ module Katari.Typechecker.Identifier
     VariableId (..),
     TypeId (..),
     ModuleId (..),
+    RequestId (..),
+    ConstructorId (..),
+    QualifiedName (..),
+    renderQualifiedName,
     SymbolEntry (..),
     ModuleData (..),
     VariableData (..),
     TypeData (..),
+    RequestData (..),
+    ConstructorData (..),
     IdentifierResult (..),
     IdentifierError (..),
 
@@ -47,7 +53,15 @@ import Data.Maybe (catMaybes, isJust)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Katari.AST
-import Katari.AST.Identifiers (ModuleId (..), TypeId (..), VariableId (..))
+import Katari.AST.Identifiers
+  ( ConstructorId (..),
+    ModuleId (..),
+    QualifiedName (..),
+    RequestId (..),
+    TypeId (..),
+    VariableId (..),
+    renderQualifiedName,
+  )
 import Katari.Diagnostic (Diagnostic (..), DiagnosticNote (..), diagnosticError)
 
 -- ---------------------------------------------------------------------------
@@ -81,31 +95,49 @@ import Katari.Diagnostic (Diagnostic (..), DiagnosticNote (..), diagnosticError)
 -- Top-level scope: SymbolEntry (3 slots per name)
 -- ---------------------------------------------------------------------------
 
--- | The three slots a single name may simultaneously occupy. Invariants:
+-- | The slots a single name may simultaneously occupy. Invariants:
 --
 --   * A second registration into the same slot for the same name is an
 --     'ErrorDuplicateName'.
 --   * variable + module coexistence is forbidden (it would silently change the
 --     meaning of @name.foo@ from qualified module access to field access).
---   * variable + type and type + module are allowed.
+--   * Other combinations are allowed: a @data Foo()@ declaration occupies
+--     three slots simultaneously (variable / type / constructor).
+--
+-- The @requestSymbol@ slot is populated by @req@ declarations alongside their
+-- @variableSymbol@. The @constructorSymbol@ slot is populated by @data@
+-- declarations alongside their @variableSymbol@ and @typeSymbol@. These extra
+-- slots let the Identifier pass dispatch resolution by reference kind:
+-- @match@ patterns look up @constructorSymbol@; @req@ handlers look up
+-- @requestSymbol@; both reject names that resolve only to a regular
+-- @variableSymbol@.
 data SymbolEntry = SymbolEntry
   { variableSymbol :: Maybe VariableId,
     typeSymbol :: Maybe TypeId,
-    moduleSymbol :: Maybe ModuleId
+    moduleSymbol :: Maybe ModuleId,
+    requestSymbol :: Maybe RequestId,
+    constructorSymbol :: Maybe ConstructorId
   }
   deriving (Eq, Show)
 
 emptySymbolEntry :: SymbolEntry
-emptySymbolEntry = SymbolEntry {variableSymbol = Nothing, typeSymbol = Nothing, moduleSymbol = Nothing}
+emptySymbolEntry =
+  SymbolEntry
+    { variableSymbol = Nothing,
+      typeSymbol = Nothing,
+      moduleSymbol = Nothing,
+      requestSymbol = Nothing,
+      constructorSymbol = Nothing
+    }
 
 singletonVariable :: VariableId -> SymbolEntry
-singletonVariable variableId = SymbolEntry {variableSymbol = Just variableId, typeSymbol = Nothing, moduleSymbol = Nothing}
+singletonVariable variableId = emptySymbolEntry {variableSymbol = Just variableId}
 
 singletonType :: TypeId -> SymbolEntry
-singletonType typeId = SymbolEntry {variableSymbol = Nothing, typeSymbol = Just typeId, moduleSymbol = Nothing}
+singletonType typeId = emptySymbolEntry {typeSymbol = Just typeId}
 
 singletonModule :: ModuleId -> SymbolEntry
-singletonModule moduleId = SymbolEntry {variableSymbol = Nothing, typeSymbol = Nothing, moduleSymbol = Just moduleId}
+singletonModule moduleId = emptySymbolEntry {moduleSymbol = Just moduleId}
 
 -- ---------------------------------------------------------------------------
 -- Result tables
@@ -117,14 +149,20 @@ data ModuleData = ModuleData
   }
   deriving (Eq, Show)
 
+-- | A 'VariableId' covers both top-level callables (agent / req / ext / ctor's
+-- value side) and local variables (let / pattern bind / param). Top-level
+-- bindings carry @Just@ a 'QualifiedName'; locals carry @Nothing@.
 data VariableData = VariableData
   { variableName :: Text,
+    variableQualifiedName :: Maybe QualifiedName,
     variableSourceSpan :: SourceSpan
   }
   deriving (Eq, Show)
 
+-- | A 'TypeId' is always issued for a top-level declaration (data / type
+-- synonym), so the qualified name is always present.
 data TypeData = TypeData
-  { typeName :: Text,
+  { typeQualifiedName :: QualifiedName,
     typeSourceSpan :: SourceSpan,
     -- | For type synonyms, the resolved RHS expression. @Nothing@ for
     -- @data@ declarations. Populated in Phase D after the synonym body
@@ -134,14 +172,43 @@ data TypeData = TypeData
   }
   deriving (Eq, Show)
 
+-- | A 'RequestId' identifies a @req@ declaration. Always top-level.
+data RequestData = RequestData
+  { requestQualifiedName :: QualifiedName,
+    requestSourceSpan :: SourceSpan
+  }
+  deriving (Eq, Show)
+
+-- | A 'ConstructorId' identifies the constructor side of a @data@ declaration.
+-- Always top-level. 'constructorTypeId' points back to the corresponding
+-- 'TypeId' so that downstream phases can recover the type that this
+-- constructor builds without re-walking the AST.
+data ConstructorData = ConstructorData
+  { constructorQualifiedName :: QualifiedName,
+    constructorSourceSpan :: SourceSpan,
+    constructorTypeId :: TypeId
+  }
+  deriving (Eq, Show)
+
 -- | Result of a successful Identifier pass. The Identified ASTs live in
 -- 'moduleASTs' rather than nested inside 'ModuleData' so the State monad never
 -- has to hold a placeholder AST that gets overwritten later.
+--
+-- The reverse maps (@*ByQName@) let downstream phases look up an id by its
+-- qualified name without scanning the full forward map. They cover top-level
+-- bindings only — local variables are not addressable by qualified name.
 data IdentifierResult = IdentifierResult
   { identifiedModules :: Map ModuleId ModuleData,
     identifiedVariables :: Map VariableId VariableData,
     identifiedTypes :: Map TypeId TypeData,
-    moduleASTs :: Map ModuleId (Module Identified)
+    identifiedRequests :: Map RequestId RequestData,
+    identifiedConstructors :: Map ConstructorId ConstructorData,
+    moduleASTs :: Map ModuleId (Module Identified),
+    -- Reverse maps (qualified name → id) for top-level lookups.
+    topLevelVariablesByQName :: Map QualifiedName VariableId,
+    typesByQName :: Map QualifiedName TypeId,
+    requestsByQName :: Map QualifiedName RequestId,
+    constructorsByQName :: Map QualifiedName ConstructorId
   }
   deriving (Show)
 
@@ -235,17 +302,29 @@ toDiagnostic = \case
 -- Identifier monad
 -- ---------------------------------------------------------------------------
 
--- | Identifier-pass state: counters for the three id namespaces, the
--- materialized id → original-data maps, the accumulated error list, and the
--- per-module resolve context (only meaningful during Phase D; populated with a
--- dummy in earlier phases).
+-- | Identifier-pass state: counters for the five id namespaces, the
+-- materialized id → original-data maps, qualified-name reverse maps, the
+-- accumulated error list, and the per-module resolve context (only meaningful
+-- during Phase D; populated with a dummy in earlier phases).
 data IdentifierState = IdentifierState
   { nextVariableId :: Int,
     nextTypeId :: Int,
     nextModuleId :: Int,
+    nextRequestId :: Int,
+    nextConstructorId :: Int,
     variables :: Map VariableId VariableData,
     types :: Map TypeId TypeData,
     modules :: Map ModuleId ModuleData,
+    requests :: Map RequestId RequestData,
+    constructors :: Map ConstructorId ConstructorData,
+    -- Reverse maps for top-level qualified-name lookup. Populated as
+    -- Phase B walks declarations; surface in 'IdentifierResult'.
+    -- Field names use the @*QNames@ suffix to avoid clashing with the
+    -- public @*ByQName@ names on 'IdentifierResult'.
+    variableQNames :: Map QualifiedName VariableId,
+    typeQNames :: Map QualifiedName TypeId,
+    requestQNames :: Map QualifiedName RequestId,
+    constructorQNames :: Map QualifiedName ConstructorId,
     errors :: [IdentifierError],
     resolveContext :: ResolveContext
   }
@@ -280,9 +359,17 @@ runIdentifier action = runState action initialState
         { nextVariableId = 0,
           nextTypeId = 0,
           nextModuleId = 0,
+          nextRequestId = 0,
+          nextConstructorId = 0,
           variables = Map.empty,
           types = Map.empty,
           modules = Map.empty,
+          requests = Map.empty,
+          constructors = Map.empty,
+          variableQNames = Map.empty,
+          typeQNames = Map.empty,
+          requestQNames = Map.empty,
+          constructorQNames = Map.empty,
           errors = [],
           resolveContext = emptyResolveContext
         }
@@ -311,6 +398,43 @@ freshModuleId moduleData = do
   let moduleId = ModuleId state.nextModuleId
   put state {nextModuleId = state.nextModuleId + 1, modules = Map.insert moduleId moduleData state.modules}
   pure moduleId
+
+freshRequestId :: RequestData -> Identifier RequestId
+freshRequestId requestData = do
+  state <- get
+  let requestId = RequestId state.nextRequestId
+  put state {nextRequestId = state.nextRequestId + 1, requests = Map.insert requestId requestData state.requests}
+  pure requestId
+
+freshConstructorId :: ConstructorData -> Identifier ConstructorId
+freshConstructorId constructorData = do
+  state <- get
+  let constructorId = ConstructorId state.nextConstructorId
+  put
+    state
+      { nextConstructorId = state.nextConstructorId + 1,
+        constructors = Map.insert constructorId constructorData state.constructors
+      }
+  pure constructorId
+
+-- | Record a top-level @qualifiedName -> id@ mapping in the appropriate
+-- reverse map. Idempotent on duplicates (last write wins; duplicates are
+-- caught earlier by 'mergeSymbol').
+recordVariableQName :: QualifiedName -> VariableId -> Identifier ()
+recordVariableQName qn variableId =
+  modify $ \state -> state {variableQNames = Map.insert qn variableId state.variableQNames}
+
+recordTypeQName :: QualifiedName -> TypeId -> Identifier ()
+recordTypeQName qn typeId =
+  modify $ \state -> state {typeQNames = Map.insert qn typeId state.typeQNames}
+
+recordRequestQName :: QualifiedName -> RequestId -> Identifier ()
+recordRequestQName qn requestId =
+  modify $ \state -> state {requestQNames = Map.insert qn requestId state.requestQNames}
+
+recordConstructorQName :: QualifiedName -> ConstructorId -> Identifier ()
+recordConstructorQName qn constructorId =
+  modify $ \state -> state {constructorQNames = Map.insert qn constructorId state.constructorQNames}
 
 emitError :: IdentifierError -> Identifier ()
 emitError newError = modify $ \state -> state {errors = newError : state.errors}
@@ -344,7 +468,16 @@ mergeSymbol newPos name existing incoming = do
   mergedVariable <- mergeSlot reportFromVariable existing.variableSymbol incoming.variableSymbol
   mergedType <- mergeSlot reportFromType existing.typeSymbol incoming.typeSymbol
   mergedModule <- mergeSlot reportFromModule existing.moduleSymbol incoming.moduleSymbol
-  pure SymbolEntry {variableSymbol = mergedVariable, typeSymbol = mergedType, moduleSymbol = mergedModule}
+  mergedRequest <- mergeSlot reportFromRequest existing.requestSymbol incoming.requestSymbol
+  mergedConstructor <- mergeSlot reportFromConstructor existing.constructorSymbol incoming.constructorSymbol
+  pure
+    SymbolEntry
+      { variableSymbol = mergedVariable,
+        typeSymbol = mergedType,
+        moduleSymbol = mergedModule,
+        requestSymbol = mergedRequest,
+        constructorSymbol = mergedConstructor
+      }
   where
     reportFromVariable variableId = do
       maybeSpan <- gets (fmap (.variableSourceSpan) . Map.lookup variableId . (.variables))
@@ -354,6 +487,12 @@ mergeSymbol newPos name existing incoming = do
       maybe (pure ()) (emitError . ErrorDuplicateName newPos name) maybeSpan
     reportFromModule moduleId = do
       maybeSpan <- gets (fmap (.moduleSourceSpan) . Map.lookup moduleId . (.modules))
+      maybe (pure ()) (emitError . ErrorDuplicateName newPos name) maybeSpan
+    reportFromRequest requestId = do
+      maybeSpan <- gets (fmap (.requestSourceSpan) . Map.lookup requestId . (.requests))
+      maybe (pure ()) (emitError . ErrorDuplicateName newPos name) maybeSpan
+    reportFromConstructor constructorId = do
+      maybeSpan <- gets (fmap (.constructorSourceSpan) . Map.lookup constructorId . (.constructors))
       maybe (pure ()) (emitError . ErrorDuplicateName newPos name) maybeSpan
 
 -- | Generic per-slot merge. The first existing id wins on conflict; the
@@ -405,7 +544,13 @@ bindLocalVariable nameRef = do
   let name = nameRef.text
   when (chainHasModule name context.scopeStack) $
     emitError (ErrorShadowNonVariable nameRef.sourceSpan name)
-  variableId <- freshVariableId VariableData {variableName = name, variableSourceSpan = nameRef.sourceSpan}
+  variableId <-
+    freshVariableId
+      VariableData
+        { variableName = name,
+          variableQualifiedName = Nothing,
+          variableSourceSpan = nameRef.sourceSpan
+        }
   modifyResolveContext $ \currentContext ->
     currentContext {scopeStack = insertInnermost name variableId currentContext.scopeStack}
   pure (identifiedNameRef (Just variableId) nameRef)
@@ -531,53 +676,110 @@ buildExports moduleMap =
   Map.fromList <$> mapM buildOne (Map.toList moduleMap)
   where
     buildOne (moduleName, parsedModule) = do
-      table <- foldM addDeclaration Map.empty parsedModule.declarations
+      table <- foldM (addDeclaration moduleName) Map.empty parsedModule.declarations
       pure (moduleName, table)
 
-    addDeclaration table = \case
-      DeclarationAgent declaration -> registerVariable table declaration.name
-      DeclarationRequest declaration -> registerVariable table declaration.name
-      DeclarationExternalAgent declaration -> registerVariable table declaration.name
-      -- A data declaration occupies both the variable slot (constructor
-      -- function) and the type slot under the same name.
-      DeclarationData declaration -> registerData table declaration.name
-      DeclarationTypeSynonym declaration -> registerTypeOnly table declaration.name
+    addDeclaration moduleName table = \case
+      DeclarationAgent declaration -> registerVariable moduleName table declaration.name
+      DeclarationRequest declaration -> registerRequest moduleName table declaration.name
+      DeclarationExternalAgent declaration -> registerVariable moduleName table declaration.name
+      -- A data declaration occupies the variable slot (constructor function),
+      -- the type slot (the data type), AND the constructor slot (the
+      -- constructor identity used by match patterns). All three live under
+      -- the same name and are issued together.
+      DeclarationData declaration -> registerData moduleName table declaration.name
+      DeclarationTypeSynonym declaration -> registerTypeOnly moduleName table declaration.name
       DeclarationImport _ -> pure table -- handled in Phase C
       -- Recovery sentinel: do not occupy any slot. References that would have
       -- pointed here will fall through to ErrorUndefinedName.
       DeclarationError _ -> pure table
-    registerVariable table name = do
+
+    qnameOf moduleName name = QualifiedName {module_ = moduleName, name = name.text}
+
+    registerVariable moduleName table name = do
+      let qn = qnameOf moduleName name
       variableId <-
         freshVariableId
-          VariableData {variableName = name.text, variableSourceSpan = name.sourceSpan}
+          VariableData
+            { variableName = name.text,
+              variableQualifiedName = Just qn,
+              variableSourceSpan = name.sourceSpan
+            }
+      recordVariableQName qn variableId
       insertSymbolEntry name.sourceSpan name.text (singletonVariable variableId) table
 
-    registerTypeOnly table name = do
-      typeId <-
-        freshTypeId
-          TypeData
-            { typeName = name.text,
-              typeSourceSpan = name.sourceSpan,
-              typeSynonymRhs = Nothing
-            }
-      insertSymbolEntry name.sourceSpan name.text (singletonType typeId) table
-
-    registerData table name = do
+    -- @req foo@ issues both a 'VariableId' (callable side: @foo(...)@) and a
+    -- 'RequestId' (handler-target / effect-set side).
+    registerRequest moduleName table name = do
+      let qn = qnameOf moduleName name
       variableId <-
         freshVariableId
-          VariableData {variableName = name.text, variableSourceSpan = name.sourceSpan}
+          VariableData
+            { variableName = name.text,
+              variableQualifiedName = Just qn,
+              variableSourceSpan = name.sourceSpan
+            }
+      requestId <-
+        freshRequestId
+          RequestData
+            { requestQualifiedName = qn,
+              requestSourceSpan = name.sourceSpan
+            }
+      recordVariableQName qn variableId
+      recordRequestQName qn requestId
+      let entry =
+            emptySymbolEntry
+              { variableSymbol = Just variableId,
+                requestSymbol = Just requestId
+              }
+      insertSymbolEntry name.sourceSpan name.text entry table
+
+    registerTypeOnly moduleName table name = do
+      let qn = qnameOf moduleName name
       typeId <-
         freshTypeId
           TypeData
-            { typeName = name.text,
+            { typeQualifiedName = qn,
               typeSourceSpan = name.sourceSpan,
               typeSynonymRhs = Nothing
             }
+      recordTypeQName qn typeId
+      insertSymbolEntry name.sourceSpan name.text (singletonType typeId) table
+
+    -- @data Foo(...)@ issues 'VariableId' (constructor function), 'TypeId'
+    -- (the data type), and 'ConstructorId' (the constructor identity used by
+    -- match patterns).
+    registerData moduleName table name = do
+      let qn = qnameOf moduleName name
+      variableId <-
+        freshVariableId
+          VariableData
+            { variableName = name.text,
+              variableQualifiedName = Just qn,
+              variableSourceSpan = name.sourceSpan
+            }
+      typeId <-
+        freshTypeId
+          TypeData
+            { typeQualifiedName = qn,
+              typeSourceSpan = name.sourceSpan,
+              typeSynonymRhs = Nothing
+            }
+      constructorId <-
+        freshConstructorId
+          ConstructorData
+            { constructorQualifiedName = qn,
+              constructorSourceSpan = name.sourceSpan,
+              constructorTypeId = typeId
+            }
+      recordVariableQName qn variableId
+      recordTypeQName qn typeId
+      recordConstructorQName qn constructorId
       let entry =
-            SymbolEntry
+            emptySymbolEntry
               { variableSymbol = Just variableId,
                 typeSymbol = Just typeId,
-                moduleSymbol = Nothing
+                constructorSymbol = Just constructorId
               }
       insertSymbolEntry name.sourceSpan name.text entry table
 
@@ -643,15 +845,23 @@ buildTopLevels moduleNameToId exports moduleMap =
             -- under the source name. Lets a data-shaped name (variable + type
             -- under one identifier) be imported in one go. At least one slot
             -- must exist on the source side.
+            -- Bring in every value-side slot under the source name.
+            -- @data Foo()@ exports variable + type + constructor; @req foo@
+            -- exports variable + request; agent / ext exports variable only.
             ImportItemValue
-              | isJust entry.variableSymbol || isJust entry.typeSymbol ->
+              | isJust entry.variableSymbol
+                  || isJust entry.typeSymbol
+                  || isJust entry.requestSymbol
+                  || isJust entry.constructorSymbol ->
                   insertSymbolEntry
                     importPos
                     item.name
                     SymbolEntry
                       { variableSymbol = entry.variableSymbol,
                         typeSymbol = entry.typeSymbol,
-                        moduleSymbol = Nothing
+                        moduleSymbol = Nothing,
+                        requestSymbol = entry.requestSymbol,
+                        constructorSymbol = entry.constructorSymbol
                       }
                     table
               | otherwise -> do
@@ -1700,6 +1910,12 @@ identify moduleMap =
           { identifiedModules = finalState.modules,
             identifiedVariables = finalState.variables,
             identifiedTypes = finalState.types,
-            moduleASTs = asts
+            identifiedRequests = finalState.requests,
+            identifiedConstructors = finalState.constructors,
+            moduleASTs = asts,
+            topLevelVariablesByQName = finalState.variableQNames,
+            typesByQName = finalState.typeQNames,
+            requestsByQName = finalState.requestQNames,
+            constructorsByQName = finalState.constructorQNames
           }
    in (result, reverse finalState.errors)
