@@ -50,7 +50,7 @@ diagnostic と IR (JSON 化可能) と Schema を出力する。
 .ktr ソース (Map ModuleName Text)
   → Katari.Lexer                   Char stream → [WithPos Token], 仮想セミコロン挿入
   → Katari.Parser                  Token stream → Module Parsed (megaparsec カスタムストリーム)
-  → Katari.Typechecker.Identifier  名前解決, VariableId / TypeId / ModuleId 発行
+  → Katari.Typechecker.Identifier  名前解決, 5 id 名前空間 (VariableId / TypeId / ModuleId / RequestId / ConstructorId) 発行
   → Katari.Typechecker.ConstraintGenerator  制約生成
   → Katari.Typechecker.Solver      制約解決 (subtype, effect)
   → Katari.Typechecker.Zonker      Resolved 型に確定
@@ -75,24 +75,83 @@ AST ノードは `(p :: Phase)` でパラメータ化:
 type data Phase = Parsed | Identified | Constrained | Zonked
 ```
 
-- `NameRef p s` の `resolution :: NameMeta p s` フィールドに phase 別の名前解決情報
-  (`Identified` 以降は `Maybe VariableId` / `Maybe TypeId` / `Maybe ModuleId`)。
+- `NameRef p s` の `resolution :: NameMeta p s` フィールドに phase 別の名前解決情報。
+  `s :: SymbolKind` で「変数 / 型 / モジュール / ラベル / req / data ctor」を分離:
+  - `'VariableRef` → `Maybe VariableId` (agent / req / ext / ctor の callable 側 / 局所変数)
+  - `'TypeRef` → `Maybe TypeId`
+  - `'ModuleRef` → `Maybe ModuleId`
+  - `'LabelRef` → `()` (型指向で typechecker が解決)
+  - `'RequestRef` → `Maybe RequestId` (req handler の target、`req foo` 宣言のみ占有)
+  - `'ConstructorRef` → `Maybe ConstructorId` (match constructor pattern の target、`data Foo` のみ占有)
 - `Expression p` / `Pattern p` の `typeOf :: ExprType p` / `PatType p` に推論型
   (`Constrained` で `SemanticType Unresolved`、`Zonked` で `SemanticType Resolved`)。
 - phase 推移は payload を素通しする identity 変換になり、`passThroughX` 系の boilerplate は不要。
+
+`'RequestRef` / `'ConstructorRef` を slot 分離した結果、「handler target が req でない」「match
+pattern が data ctor でない」は Identifier 段階で型レベルに reject される
+(`ErrorNotARequest` K0108 / `ErrorNotAConstructor` K0109)。Lowering まで届くことはない。
 
 ## IR
 
 IR は **JSON 形式** (binary でない)。runtime は JSON を直接読む。
 
-- `Block` は GADT (`BlockUser` / `BlockPrim` / `BlockRequest` / `BlockExternal` / `BlockCtor`)
-- `BlockKind` enum で `UserBlock` の役割を表現:
-  - `BlockAgentEntry` — agent 本体 (catchesReturn)
-  - `BlockAgentEntryWithHandlers` — `where { handlers }` 付き agent
-  - `BlockHandleScope` — `where (var s = init) ...` の内側 scope (catchesBreak + inheritScope)
-  - `BlockInline` — inline block / arm body / for body / then block
-  - `BlockHandlerBody` — request handler 本体
-- `Statement` は GADT (`SCall` / `SMakeClosure` / `SLoadLiteral` / `SMatch` / `SFor` / `SExit` / `SCont`)
+### ID 空間と公開名
+
+IR 内部の dispatch は専用 id 型で行い、外部公開 (FFI / JS) は `QualifiedName` で行う
+二層構造:
+
+- `BlockId` — IR の callable 識別 (`SCall` / `SMakeClosure` の target、`Map BlockId Block` のキー)
+- `VarId` — IR の値スロット (Lowering が per-occurrence で発行)
+- `ReqId` — `BlockRequest` 内部の dispatch id (`Handler.request` と同値比較)
+- `CtorId` — `BlockCtor` 内部の dispatch id (tagged value の `__ctor` と同値比較)
+- `QualifiedName` (`{ module_, name }`) — FFI 境界の公開名
+
+`IRModule.entries :: Map QualifiedName BlockId` のみが FFI 名前解決の SSoT。逆引きや
+ReqId / CtorId → QualifiedName 変換は runtime が `entries` + `blocks` を load 時に
+1 周走査して構築する (IR には含めない)。
+
+### Block
+
+`Block` は 5 variant の sum:
+- `BlockUser { body :: UserBlock }` — 通常のユーザ定義
+- `BlockPrim { name :: Text }` — prim (system 提供、module 帰属なし)
+- `BlockRequest { reqId :: ReqId }` — req 宣言 (qualified name は `entries` 経由)
+- `BlockExternal { externalName :: ExternalName }` — JS sidecar 呼び出し対象
+- `BlockCtor { ctorId :: CtorId }` — data constructor
+
+`UserBlock.kind :: BlockKind` (5 valid roles, invalid 組合せは型レベルで排除):
+- `BlockAgentEntry` — agent 本体 (catchesReturn)
+- `BlockAgentEntryWithHandlers` — `where { handlers }` 付き agent
+- `BlockHandleScope` — `where (var s = init) ...` の内側 scope (catchesBreak + inheritScope)
+- `BlockInline` — inline block / arm body / for body / then block
+- `BlockHandlerBody` — request handler 本体
+
+### Match
+
+`MatchArm` は構造的な pattern tree を保持し、runtime が値と pattern を walk して match:
+
+```haskell
+data MatchPattern
+  = MPAny
+  | MPVariable VarId
+  | MPLiteral LiteralValue
+  | MPConstructor CtorId [(Text, MatchPattern)]
+  | MPTuple [MatchPattern]
+```
+
+source の 1 arm = IR の 1 arm。任意深度ネスト・同 tag arm overlap も自動対応 (runtime が arm を
+順次試行)。Lowering は AST pattern を MatchPattern に直訳するだけ (~30 行)。
+
+### Closure capture
+
+local agent (`StatementAgent`) の closure capture は **runtime の lexical scope inheritance に委譲**。
+`UserBlock.captures` / `MakeClosureData.captures` は予約フィールドだが現状空。Katari の意味論では
+state var が agent から見て immutable (next で更新できるのは req handler のみ) なので by-value
+snapshot と by-reference scope inheritance は観測等価。
+
+### Statement / JSON
+
+- `Statement` は data + sumEncoding (`SCall` / `SMakeClosure` / `SLoadLiteral` / `SMatch` / `SFor` / `SExit` / `SCont`)
 - ToJSON / FromJSON は `genericToJSON` で自動生成 (`TaggedObject` sumEncoding)
 
 ## 重要な実装詳細
@@ -148,12 +207,19 @@ JSON Schema の `description` に埋め込まれる (AI tool calling 用)。Sema
 - `LowerEnv.localVars :: Map VariableId VarId` — 局所束縛 (Reader 化、`local`-restorer 不要)
 - `LowerState.lsCurrentEmitted :: [Statement]` — 現在 build 中の block の statements (逆順)
 - `emit` で蓄積、`runWithFreshBuffer` で save/restore、reverse して取り出し
+- `LowerState.lsReqIds :: Map Identifier.RequestId IR.ReqId` / `lsCtorIds :: Map Identifier.ConstructorId IR.CtorId`
+  — Identifier id → IR 内部 id への翻訳 (Lowering が re-index)
+- `LowerState.lsEntries :: Map QualifiedName BlockId` — FFI translation (IRModule.entries の素材)
 
-Pattern destructuring: `bindPatternLocals` / `bindPatternToFreshVar` 共通の
-`destructurePattern` が tuple/constructor を `tuple_get` / `get_field` prim 呼び出しで再帰的に分解。
+Pattern destructuring (let / param): `destructurePattern` が tuple / constructor を再帰的に分解
+(`tuple_get` / `get_field` prim 呼び出し)。refutable pattern (literal) は
+`LowerErrorRefutablePatternInIrrefutableContext` (K0303) で reject。
 
-Local agent (`StatementAgent`): 親 scope に新しい BlockId を allocate し
-`lsVarBlockIds` に登録、body は empty Reader で lower (closure capture は未対応)。
+Match: `lowerPattern` が AST.Pattern を IR.MatchPattern に直訳するだけ。inner refutable / nested
+constructor / overlap は IR には現れず runtime が解決。
+
+Local agent (`StatementAgent`): 親 scope の `localVars` をそのまま inherit して body を lower。
+runtime が closure 値の lexical scope を構成する。
 
 ### 型チェック
 
