@@ -512,7 +512,11 @@ parseAnnotatedDeclaration = do
     ]
 
 parseAnnotation :: Parser (Maybe Text)
-parseAnnotation = optional $ parsePunctuation PunctuationAt *> parseStringLiteral
+parseAnnotation = optional $ do
+  _ <- parsePunctuation PunctuationAt
+  text <- parseStringLiteral
+  _ <- optional parseVirtualSemicolon
+  pure text
 
 -- ---------------------------------------------------------------------------
 -- Agent

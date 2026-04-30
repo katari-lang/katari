@@ -784,6 +784,24 @@ declarations = describe "declarations" $ do
     _ <- shouldSucceed "@\"does something\" agent foo() { 1 }"
     pure ()
 
+  it "parses agent with multiline annotation" $ do
+    _ <-
+      shouldSucceed
+        "@\"\"\"\ndoes something\n\"\"\" agent foo() { 1 }"
+    pure ()
+
+  it "parses agent with annotation on separate line from declaration" $ do
+    _ <-
+      shouldSucceed
+        "@\"does something\"\nagent foo() { 1 }"
+    pure ()
+
+  it "parses agent with multiline annotation on separate lines from declaration" $ do
+    _ <-
+      shouldSucceed
+        "@\"\"\"\ndoes something\n\"\"\"\nagent foo() { 1 }"
+    pure ()
+
   it "parses agent param with annotation" $ do
     _ <-
       shouldSucceed
