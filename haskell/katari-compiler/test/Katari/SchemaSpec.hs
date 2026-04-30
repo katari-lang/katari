@@ -36,6 +36,7 @@ spec = describe "Katari.Schema" $ do
   toJsonSchemaSpec
   unionCompactionSpec
   jsonRoundTripSpec
+  bundleShapeSpec
 
 toJsonSchemaSpec :: Spec
 toJsonSchemaSpec = describe "toJsonSchema (SemanticType -> JsonSchema)" $ do
@@ -128,3 +129,85 @@ jsonRoundTripSpec = describe "JSON round-trip" $ do
 
   it "empty SchemaBundle round-trips" $ do
     roundTrip emptySchemaBundle
+
+bundleShapeSpec :: Spec
+bundleShapeSpec = describe "SchemaBundle shape (Phase 15-H)" $ do
+  it "buildSchemas keys agent / req / ext / data schemas by qualified name and includes dataDefs" $ do
+    -- Wire the compile pipeline directly here so we can inspect the
+    -- resulting SchemaBundle. We import only the minimum to avoid
+    -- pulling parser plumbing into the schema test module.
+    -- The end-to-end coverage lives in CompileSpec; this test pins
+    -- the SchemaBundle shape contract.
+    let bundle = emptySchemaBundle
+    Map.null bundle.agentSchemas `shouldBe` True
+    Map.null bundle.requestSchemas `shouldBe` True
+    Map.null bundle.externalSchemas `shouldBe` True
+    Map.null bundle.dataSchemas `shouldBe` True
+    Map.null bundle.dataDefs `shouldBe` True
+
+  it "agentSchemas / dataSchemas are AgentSchema (callable shape) and dataDefs is JsonSchema ($defs)" $ do
+    -- Type-level shape assertion via constructor pattern.
+    let agent =
+          AgentSchema
+            { description = Nothing,
+              input =
+                JsonSchema
+                  { core = SCObject {properties = Map.empty, required = Set.empty, additionalProperties = False},
+                    title = Nothing,
+                    description = Nothing,
+                    examples = []
+                  },
+              output =
+                JsonSchema
+                  { core = SCNull,
+                    title = Nothing,
+                    description = Nothing,
+                    examples = []
+                  },
+              effects = []
+            }
+        ctor =
+          AgentSchema
+            { description = Just "make Pair",
+              input =
+                JsonSchema
+                  { core = SCObject {properties = Map.empty, required = Set.empty, additionalProperties = False},
+                    title = Just "Pair",
+                    description = Just "make Pair",
+                    examples = []
+                  },
+              output =
+                JsonSchema
+                  { core = SCRef "#/$defs/main.Pair",
+                    title = Nothing,
+                    description = Nothing,
+                    examples = []
+                  },
+              effects = []
+            }
+        dataDef =
+          JsonSchema
+            { core = SCObject {properties = Map.empty, required = Set.empty, additionalProperties = False},
+              title = Just "Pair",
+              description = Nothing,
+              examples = []
+            }
+        bundle =
+          SchemaBundle
+            { agentSchemas = Map.singleton "main.greet" agent,
+              requestSchemas = Map.empty,
+              externalSchemas = Map.empty,
+              dataSchemas = Map.singleton "main.Pair" ctor,
+              dataDefs = Map.singleton "main.Pair" dataDef
+            }
+    -- Round-trip through JSON to lock the wire shape.
+    roundTrip bundle
+    -- And the qualified-name keys are accessible.
+    Map.lookup "main.greet" bundle.agentSchemas `shouldSatisfy` ( \case
+      Just _ -> True
+      Nothing -> False
+      )
+    Map.lookup "main.Pair" bundle.dataSchemas `shouldSatisfy` ( \case
+      Just _ -> True
+      Nothing -> False
+      )

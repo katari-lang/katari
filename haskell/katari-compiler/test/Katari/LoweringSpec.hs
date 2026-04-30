@@ -860,6 +860,52 @@ stage8Spec = describe "Stage 8 \8212 edge cases" $ do
       [c] -> map (.label) c.args `shouldMatchList` ["x", "y"]
       _ -> pure ()
 
+  it "nested literal pattern lowers to MPConstructor with MPLiteral inner" $ do
+    (irMod, errs) <-
+      lowerSource $
+        Text.unlines
+          [ "data Some(value: integer)",
+            "agent main() {",
+            "  let v = Some(value = 0)",
+            "  match (v) {",
+            "    case Some(value = 0) => { 1 }",
+            "    case Some(value = n) => { 2 }",
+            "  }",
+            "}"
+          ]
+    errs `shouldBe` []
+    let Just ub = agentBody "main" irMod
+    case matches ub of
+      [m] -> case m.arms of
+        [arm0, arm1] -> do
+          -- First arm: Some(value = 0) — literal nested under ctor
+          case arm0.pattern of
+            MPConstructor _ [(label, MPLiteral (LVInteger n))] -> do
+              label `shouldBe` "value"
+              n `shouldBe` 0
+            other -> expectationFailure ("expected MPConstructor with literal inner, got " <> show other)
+          -- Second arm: Some(value = n) — variable binding
+          case arm1.pattern of
+            MPConstructor _ [(label, MPVariable _)] -> label `shouldBe` "value"
+            other -> expectationFailure ("expected MPConstructor with variable inner, got " <> show other)
+        other -> expectationFailure ("expected 2 arms, got " <> show (length other))
+      other -> expectationFailure ("expected 1 SMatch, got " <> show (length other))
+
+  it "local agent body can reference outer locals (runtime scope inheritance)" $ do
+    (_, errs) <-
+      lowerSource $
+        Text.unlines
+          [ "agent main() {",
+            "  let x = 1",
+            "  agent inner() -> integer { x }",
+            "  inner()",
+            "}"
+          ]
+    -- Previously this produced LowerErrorUnresolvedVariable for @x@; under
+    -- runtime scope inheritance the outer locals stay visible at lower
+    -- time and the runtime bridges them at call time.
+    errs `shouldBe` []
+
 -- ===========================================================================
 -- Stage 9 — samples/ regression
 -- ===========================================================================

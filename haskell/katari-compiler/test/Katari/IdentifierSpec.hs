@@ -122,6 +122,14 @@ isShadow :: IdentifierError -> Bool
 isShadow (ErrorShadowNonVariable _ _) = True
 isShadow _ = False
 
+isNotARequest :: IdentifierError -> Bool
+isNotARequest (ErrorNotARequest _ _) = True
+isNotARequest _ = False
+
+isNotAConstructor :: IdentifierError -> Bool
+isNotAConstructor (ErrorNotAConstructor _ _) = True
+isNotAConstructor _ = False
+
 isMissingMod :: IdentifierError -> Bool
 isMissingMod (ErrorImportModuleNotFound _ _) = True
 isMissingMod _ = False
@@ -626,6 +634,37 @@ qualifiedRequestHandler = describe "request handlers" $ do
       mconcat
         [ "agent main() { 0 } where {\n",
           "  req nonexistent() { 0 }\n",
+          "}"
+        ]
+
+  it "req handler whose target is an agent (not a req) fails with K0108" $ do
+    shouldFailIdentifyWith isNotARequest $
+      mconcat
+        [ "agent helper() -> integer { 0 }\n",
+          "agent main() { 0 } where {\n",
+          "  req helper() { 0 }\n",
+          "}"
+        ]
+
+  it "match pattern using a req as constructor fails with K0109" $ do
+    shouldFailIdentifyWith isNotAConstructor $
+      mconcat
+        [ "req fetch() -> integer\n",
+          "agent main() {\n",
+          "  match (0) {\n",
+          "    case fetch() => { 1 }\n",
+          "  }\n",
+          "}"
+        ]
+
+  it "match pattern using an agent as constructor fails with K0109" $ do
+    shouldFailIdentifyWith isNotAConstructor $
+      mconcat
+        [ "agent helper() -> integer { 0 }\n",
+          "agent main() {\n",
+          "  match (0) {\n",
+          "    case helper() => { 1 }\n",
+          "  }\n",
           "}"
         ]
 
