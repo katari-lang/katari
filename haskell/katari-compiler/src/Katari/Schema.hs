@@ -69,12 +69,13 @@ import Katari.AST
     RequestDeclaration (..),
     SymbolKind (..),
   )
-import Katari.AST.Identifiers (ModuleId, RequestId, VariableId, unRequestId)
+import Katari.AST.Identifiers (ModuleId, VariableId, renderQualifiedName)
 import Katari.Typechecker.SemanticType
   ( Resolved,
     SemanticEffect (..),
     SemanticType (..),
   )
+import Katari.Typechecker.Identifier (RequestData (..))
 import Katari.Typechecker.Zonker (ZonkResult (..))
 
 -- ===========================================================================
@@ -150,15 +151,27 @@ instance ToJSON AgentSchema where
 instance FromJSON AgentSchema where
   parseJSON = genericParseJSON schemaOptions
 
--- | Aggregated schemas for a compiled program. Top-level maps are keyed
--- by module name; inner maps by declaration name.
+-- | Aggregated schemas for a compiled program. All maps are flat at
+-- the top level: keys are dotted qualified names (\"<modPath>.<bare>\")
+-- so consumers (AI tool calling, runtime validators, FFI sidecars) can
+-- look up a callable by its public name without re-threading module
+-- structure.
+--
+-- @dataSchemas@ describes data constructors as callables (so
+-- @Pair(left=1, right=2)@ has a JSON-Schema input shape just like an
+-- agent does). @dataDefs@ holds the corresponding @\$defs@ entry —
+-- the data type as a JSON object schema — that other schemas reference
+-- via @SCRef \"#/$defs/<qualified>\"@.
 data SchemaBundle = SchemaBundle
-  { agentSchemas :: !(Map Text (Map Text AgentSchema)),
-    requestSchemas :: !(Map Text (Map Text AgentSchema)),
-    externalSchemas :: !(Map Text (Map Text AgentSchema)),
-    -- | @data@ definitions live in @\$defs@ keyed by a stable name
-    -- (currently @\"<module>.<typeName>\"@).
-    dataSchemas :: !(Map Text JsonSchema)
+  { agentSchemas :: !(Map Text AgentSchema),
+    requestSchemas :: !(Map Text AgentSchema),
+    externalSchemas :: !(Map Text AgentSchema),
+    -- | Data constructor invocation schemas (constructor as a function).
+    dataSchemas :: !(Map Text AgentSchema),
+    -- | Data type schemas (object shape for the constructed values),
+    -- intended as the @\$defs@ section of a top-level JSON Schema
+    -- document.
+    dataDefs :: !(Map Text JsonSchema)
   }
   deriving (Eq, Show, Generic)
 
@@ -174,7 +187,8 @@ emptySchemaBundle =
     { agentSchemas = Map.empty,
       requestSchemas = Map.empty,
       externalSchemas = Map.empty,
-      dataSchemas = Map.empty
+      dataSchemas = Map.empty,
+      dataDefs = Map.empty
     }
 
 -- ===========================================================================
@@ -306,40 +320,46 @@ collectDeclaration ::
   SchemaBundle ->
   SchemaBundle
 collectDeclaration zr modName decl bundle = case decl of
-  DeclarationAgent ad -> insertAgentLike modName ad.name.text agentField (agentLike zr ad.annotation ad.name ad.parameters) bundle
-    where
-      agentField b s = b {agentSchemas = insertNested modName ad.name.text s b.agentSchemas}
-  DeclarationRequest rd -> insertAgentLike modName rd.name.text requestField (requestLike zr rd) bundle
-    where
-      requestField b s = b {requestSchemas = insertNested modName rd.name.text s b.requestSchemas}
-  DeclarationExternalAgent ed -> insertAgentLike modName ed.name.text externalField (externalLike zr ed) bundle
-    where
-      externalField b s = b {externalSchemas = insertNested modName ed.name.text s b.externalSchemas}
+  DeclarationAgent ad ->
+    case agentLike zr ad.annotation ad.name ad.parameters of
+      Just s ->
+        bundle {agentSchemas = Map.insert (qkey modName ad.name.text) s bundle.agentSchemas}
+      Nothing -> bundle
+  DeclarationRequest rd ->
+    case requestLike zr rd of
+      Just s ->
+        bundle {requestSchemas = Map.insert (qkey modName rd.name.text) s bundle.requestSchemas}
+      Nothing -> bundle
+  DeclarationExternalAgent ed ->
+    case externalLike zr ed of
+      Just s ->
+        bundle {externalSchemas = Map.insert (qkey modName ed.name.text) s bundle.externalSchemas}
+      Nothing -> bundle
   DeclarationData dd ->
-    bundle {dataSchemas = insertDataSchema zr modName dd bundle.dataSchemas}
+    let bundleWithDef =
+          bundle {dataDefs = insertDataDef zr modName dd bundle.dataDefs}
+     in case dataConstructorSchema zr modName dd of
+          Just s ->
+            bundleWithDef
+              { dataSchemas =
+                  Map.insert
+                    (qkey modName dd.name.text)
+                    s
+                    bundleWithDef.dataSchemas
+              }
+          Nothing -> bundleWithDef
   -- Imports / type synonyms / parser sentinels don't surface in the schema.
   DeclarationImport {} -> bundle
   DeclarationTypeSynonym {} -> bundle
   DeclarationError {} -> bundle
 
-insertAgentLike ::
-  Text ->
-  Text ->
-  (SchemaBundle -> AgentSchema -> SchemaBundle) ->
-  Maybe AgentSchema ->
-  SchemaBundle ->
-  SchemaBundle
-insertAgentLike _ _ _ Nothing bundle = bundle
-insertAgentLike _ _ merge (Just s) bundle = merge bundle s
-
-insertNested ::
-  Text ->
-  Text ->
-  AgentSchema ->
-  Map Text (Map Text AgentSchema) ->
-  Map Text (Map Text AgentSchema)
-insertNested modName declName s =
-  Map.insertWith Map.union modName (Map.singleton declName s)
+-- | Join @\<modName\>.\<declName\>@ as the public schema-bundle key.
+-- Empty module path falls back to the bare name (test fixtures may
+-- have no path).
+qkey :: Text -> Text -> Text
+qkey modName declName
+  | Text.null modName = declName
+  | otherwise = modName <> "." <> declName
 
 -- | Build an 'AgentSchema' from an agent's annotation, name, and parameter
 -- bindings. The agent's full type is read from
@@ -354,7 +374,7 @@ agentLike ::
 agentLike zr description nameRef parameters =
   case nameRef.resolution of
     Just variableId ->
-      buildAgentSchema description parameters
+      buildAgentSchema zr description parameters
         =<< Map.lookup variableId zr.zonkedTypeEnvironment
     Nothing -> Nothing
 
@@ -365,11 +385,12 @@ externalLike :: ZonkResult -> ExternalAgentDeclaration Zonked -> Maybe AgentSche
 externalLike zr ed = agentLike zr ed.annotation ed.name ed.parameters
 
 buildAgentSchema ::
+  ZonkResult ->
   Maybe Text ->
   [ParameterBinding Zonked] ->
   SemanticType Resolved ->
   Maybe AgentSchema
-buildAgentSchema description parameters = \case
+buildAgentSchema zr description parameters = \case
   SemanticTypeFunction params ret eff ->
     let inputSchema = withDesc description (plain (paramObject params parameters))
      in Just
@@ -377,7 +398,7 @@ buildAgentSchema description parameters = \case
             { description = description,
               input = inputSchema,
               output = toJsonSchema ret,
-              effects = renderEffects eff
+              effects = renderEffects zr eff
             }
   -- A non-function semantic type for an agent / request / external
   -- declaration would indicate a constraint-generation bug; skip
@@ -401,15 +422,17 @@ paramObject paramTypes parameters =
           additionalProperties = False
         }
 
--- | Render an effect set as @\"req\<n\>\"@ identifiers. Effect variables
--- are empty at 'Resolved' phase by Solver contract.
---
--- TODO (Phase 15-H): switch to qualified-name strings via 'zonkedRequests'.
-renderEffects :: SemanticEffect Resolved -> [Text]
-renderEffects (SemanticEffect _ reqs) = map renderRequestId (Set.toList reqs)
-  where
-    renderRequestId :: RequestId -> Text
-    renderRequestId rid = "req" <> Text.pack (show (unRequestId rid))
+-- | Render an effect set as a list of qualified-name strings. Each
+-- 'RequestId' is looked up in 'zonkedRequests' to recover its
+-- declaration's 'QualifiedName'; missing ids (a Solver-contract
+-- violation) are dropped silently. Effect variables are always empty
+-- at 'Resolved' phase per Solver contract, so they're ignored.
+renderEffects :: ZonkResult -> SemanticEffect Resolved -> [Text]
+renderEffects zr (SemanticEffect _ reqs) =
+  [ renderQualifiedName qn
+    | rid <- Set.toList reqs,
+      Just (RequestData {requestQualifiedName = qn}) <- [Map.lookup rid zr.zonkedRequests]
+  ]
 
 -- ===========================================================================
 -- Data declaration -> $defs entry
@@ -419,13 +442,13 @@ renderEffects (SemanticEffect _ reqs) = map renderRequestId (Set.toList reqs)
 -- variable's type in the environment is a function from labelled fields
 -- to the data type; we use that map for field types and the AST
 -- declaration for @description@ (per-field and per-data).
-insertDataSchema ::
+insertDataDef ::
   ZonkResult ->
   Text ->
   DataDeclaration Zonked ->
   Map Text JsonSchema ->
   Map Text JsonSchema
-insertDataSchema zr modName dd m =
+insertDataDef zr modName dd m =
   case dd.name.resolution of
     Just ctorId ->
       let base = plain (dataObject (lookupCtorParams zr ctorId) dd.parameters)
@@ -436,9 +459,39 @@ insertDataSchema zr modName dd m =
                 description = dd.annotation,
                 examples = base.examples
               }
-          key = qualifiedDataKey modName dd.name.text
-       in Map.insert key entry m
+       in Map.insert (qkey modName dd.name.text) entry m
     Nothing -> m
+
+-- | Build the constructor-as-callable schema for a @data@ declaration.
+-- Mirrors 'agentLike' but for constructors: input is the named-field
+-- object, output references the corresponding @\$defs@ entry. effects
+-- are always empty (constructors are pure).
+dataConstructorSchema ::
+  ZonkResult ->
+  Text ->
+  DataDeclaration Zonked ->
+  Maybe AgentSchema
+dataConstructorSchema zr modName dd =
+  case dd.name.resolution of
+    Just ctorId ->
+      let fieldTypes = lookupCtorParams zr ctorId
+          inputCore = dataObject fieldTypes dd.parameters
+          inputSchema =
+            JsonSchema
+              { core = inputCore,
+                title = Just dd.name.text,
+                description = dd.annotation,
+                examples = []
+              }
+          outputSchema = plain (SCRef ("#/$defs/" <> qkey modName dd.name.text))
+       in Just
+            AgentSchema
+              { description = dd.annotation,
+                input = inputSchema,
+                output = outputSchema,
+                effects = []
+              }
+    Nothing -> Nothing
 
 lookupCtorParams ::
   ZonkResult ->
@@ -448,11 +501,6 @@ lookupCtorParams zr ctorId =
   case Map.lookup ctorId zr.zonkedTypeEnvironment of
     Just (SemanticTypeFunction params _ _) -> params
     _ -> Map.empty
-
-qualifiedDataKey :: Text -> Text -> Text
-qualifiedDataKey modName declName
-  | Text.null modName = declName
-  | otherwise = modName <> "." <> declName
 
 dataObject :: Map Text (SemanticType Resolved) -> [DataParameter Zonked] -> SchemaCore
 dataObject fieldTypes params =
