@@ -48,6 +48,7 @@ blockSpec = describe "Block (sum)" $ do
     let userBlock =
           UserBlock
             { kind = BlockAgentEntry,
+              captures = [],
               params = [Param {label = "x", var = VarId 0}],
               stateVars = [],
               statements = [],
@@ -61,6 +62,7 @@ blockSpec = describe "Block (sum)" $ do
           "body"
             .= object
               [ "kind" .= ("agentEntry" :: String),
+                "captures" .= ([] :: [Value]),
                 "params" .= [object ["label" .= ("x" :: String), "var" .= (0 :: Int)]],
                 "stateVars" .= ([] :: [Value]),
                 "statements" .= ([] :: [Value]),
@@ -73,26 +75,26 @@ blockSpec = describe "Block (sum)" $ do
     BlockPrim {name = "add"}
       `shouldEncodeAs` object ["kind" .= ("prim" :: String), "name" .= ("add" :: String)]
 
-  it "BlockRequest has only kind + name" $ do
-    BlockRequest {name = "Ask"}
-      `shouldEncodeAs` object ["kind" .= ("request" :: String), "name" .= ("Ask" :: String)]
+  it "BlockRequest carries kind + reqId" $ do
+    BlockRequest {reqId = ReqId 7}
+      `shouldEncodeAs` object ["kind" .= ("request" :: String), "reqId" .= (7 :: Int)]
 
-  it "BlockExternal has kind + moduleName + name" $ do
-    BlockExternal "discord" "send_message"
+  it "BlockExternal carries kind + externalName" $ do
+    BlockExternal {externalName = ExternalName (QualifiedName "discord" "send_message")}
       `shouldEncodeAs` object
         [ "kind" .= ("external" :: String),
-          "moduleName" .= ("discord" :: String),
-          "name" .= ("send_message" :: String)
+          "externalName" .= object ["module_" .= ("discord" :: String), "name" .= ("send_message" :: String)]
         ]
 
-  it "BlockCtor has only kind + name" $ do
-    BlockCtor {name = "Foo"}
-      `shouldEncodeAs` object ["kind" .= ("ctor" :: String), "name" .= ("Foo" :: String)]
+  it "BlockCtor carries kind + ctorId" $ do
+    BlockCtor {ctorId = CtorId 3}
+      `shouldEncodeAs` object ["kind" .= ("ctor" :: String), "ctorId" .= (3 :: Int)]
 
   it "round-trips all variants" $ do
     let userBody =
           UserBlock
             { kind = BlockInline,
+              captures = [],
               params = [],
               stateVars = [],
               statements = [],
@@ -102,9 +104,9 @@ blockSpec = describe "Block (sum)" $ do
             }
     roundTrip BlockUser {body = userBody}
     roundTrip BlockPrim {name = "add"}
-    roundTrip BlockRequest {name = "Ask"}
-    roundTrip (BlockExternal "discord" "send")
-    roundTrip BlockCtor {name = "Foo"}
+    roundTrip BlockRequest {reqId = ReqId 7}
+    roundTrip (BlockExternal (ExternalName (QualifiedName "discord" "send")))
+    roundTrip BlockCtor {ctorId = CtorId 3}
 
 blockKindSpec :: Spec
 blockKindSpec = describe "BlockKind" $ do
@@ -145,13 +147,14 @@ statementSpec = describe "Statement (sum)" $ do
         ]
 
   it "SMakeClosure nests MakeClosureData under 'contents'" $ do
-    SMakeClosure MakeClosureData {output = VarId 3, block = BlockId 12}
+    SMakeClosure MakeClosureData {output = VarId 3, block = BlockId 12, captures = []}
       `shouldEncodeAs` object
         [ "kind" .= ("makeClosure" :: String),
           "contents"
             .= object
               [ "output" .= (3 :: Int),
-                "block" .= (12 :: Int)
+                "block" .= (12 :: Int),
+                "captures" .= ([] :: [()])
               ]
         ]
 
@@ -189,7 +192,7 @@ statementSpec = describe "Statement (sum)" $ do
           { subject = VarId 1,
             arms =
               [ MatchArm
-                  { tag = Just "Foo",
+                  { tag = MatchTagConstructor (CtorId 7),
                     bindings = [("x", VarId 2)],
                     body = BlockId 3
                   }
@@ -228,7 +231,7 @@ statementSpec = describe "Statement (sum)" $ do
             args = [],
             output = Nothing
           }
-    roundTrip $ SMakeClosure MakeClosureData {output = VarId 0, block = BlockId 0}
+    roundTrip $ SMakeClosure MakeClosureData {output = VarId 0, block = BlockId 0, captures = []}
     roundTrip $
       SLoadLiteral LoadLiteralData {output = VarId 0, value = LVInteger 0}
     roundTrip $
@@ -283,17 +286,18 @@ exitContSpec = describe "ExitKind / ContKind" $ do
 
 matchArmSpec :: Spec
 matchArmSpec = describe "MatchArm" $ do
-  it "omits null tag" $ do
-    MatchArm {tag = Nothing, bindings = [], body = BlockId 0}
+  it "encodes a MatchTagAny tag" $ do
+    MatchArm {tag = MatchTagAny, bindings = [], body = BlockId 0}
       `shouldEncodeAs` object
-        [ "bindings" .= ([] :: [Value]),
+        [ "tag" .= object ["kind" .= ("any" :: String)],
+          "bindings" .= ([] :: [Value]),
           "body" .= (0 :: Int)
         ]
 
-  it "round-trips with bindings" $ do
+  it "round-trips with constructor tag and bindings" $ do
     roundTrip
       MatchArm
-        { tag = Just "Cons",
+        { tag = MatchTagConstructor (CtorId 5),
           bindings = [("head", VarId 1), ("tail", VarId 2)],
           body = BlockId 3
         }
@@ -315,6 +319,7 @@ moduleSpec = describe "IRModule" $ do
             { body =
                 UserBlock
                   { kind = BlockAgentEntry,
+                    captures = [],
                     params = [],
                     stateVars = [],
                     statements = [SExit ExitData {exitKind = ExitReturn, value = VarId 0}],
@@ -327,7 +332,7 @@ moduleSpec = describe "IRModule" $ do
       IRModule
         { name = "main",
           blocks = Map.singleton (BlockId 0) block,
-          entries = Map.singleton "main" (BlockId 0),
+          entries = Map.singleton (QualifiedName "" "main") (BlockId 0),
           nameTable =
             NameTable
               { varNames = Map.singleton (VarId 0) "x",

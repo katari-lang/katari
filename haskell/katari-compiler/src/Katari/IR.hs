@@ -25,6 +25,11 @@ module Katari.IR
   ( -- * Identifiers
     BlockId (..),
     VarId (..),
+    ReqId (..),
+    CtorId (..),
+    QualifiedName (..),
+    renderQualifiedName,
+    ExternalName (..),
 
     -- * Module
     IRModule (..),
@@ -51,6 +56,7 @@ module Katari.IR
     CallTarget (..),
     Arg (..),
     MatchArm (..),
+    MatchTag (..),
     ExitKind (..),
     ContKind (..),
   )
@@ -71,6 +77,7 @@ import Data.Char (toLower)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
+import Data.Text qualified as T
 import Data.Word (Word32)
 import GHC.Generics (Generic)
 
@@ -78,7 +85,8 @@ import GHC.Generics (Generic)
 -- Identifiers
 -- ===========================================================================
 
--- | Block identifier. Globally unique within an 'IRModule'.
+-- | Block identifier. Globally unique within an 'IRModule'. Used as the
+-- target of 'SCall' / 'SMakeClosure' and as the key of 'IRModule.blocks'.
 newtype BlockId = BlockId Word32
   deriving stock (Eq, Ord, Show)
   deriving newtype (ToJSON, FromJSON, ToJSONKey, FromJSONKey)
@@ -89,6 +97,58 @@ newtype VarId = VarId Word32
   deriving stock (Eq, Ord, Show)
   deriving newtype (ToJSON, FromJSON, ToJSONKey, FromJSONKey)
 
+-- | IR-level request identifier carried by a 'BlockRequest'. Independent
+-- of the Identifier-pass 'RequestId' (Lowering re-allocates these so the
+-- IR can be re-indexed without touching upstream phases). Currently 1:1
+-- with the corresponding 'BlockRequest'\'s 'BlockId', but kept as a
+-- separate id space to preserve flexibility (the runtime dispatches
+-- handlers by 'ReqId' equality, which is faster than walking the block
+-- table).
+newtype ReqId = ReqId Word32
+  deriving stock (Eq, Ord, Show)
+  deriving newtype (ToJSON, FromJSON, ToJSONKey, FromJSONKey)
+
+-- | IR-level constructor identifier carried by a 'BlockCtor' and stored
+-- inside every tagged value the runtime constructs. Independent of the
+-- Identifier-pass 'ConstructorId' for the same reason as 'ReqId'.
+newtype CtorId = CtorId Word32
+  deriving stock (Eq, Ord, Show)
+  deriving newtype (ToJSON, FromJSON, ToJSONKey, FromJSONKey)
+
+-- | A top-level declaration's qualified name (@\<modulePath\>.\<bareName\>@
+-- as the canonical pair). Used as the FFI-boundary identifier in
+-- 'IRModule.entries' so that JS / external callers can address a
+-- callable without depending on the IR's internal 'BlockId' /
+-- 'ReqId' / 'CtorId' allocation.
+data QualifiedName = QualifiedName
+  { module_ :: !Text,
+    name :: !Text
+  }
+  deriving (Eq, Ord, Show, Generic)
+
+instance ToJSON QualifiedName where
+  toJSON = genericToJSON irOptions
+
+instance FromJSON QualifiedName where
+  parseJSON = genericParseJSON irOptions
+
+instance ToJSONKey QualifiedName
+
+instance FromJSONKey QualifiedName
+
+renderQualifiedName :: QualifiedName -> Text
+renderQualifiedName q
+  | T.null q.module_ = q.name
+  | otherwise = q.module_ <> "." <> q.name
+
+-- | Identifier of an external (sidecar) callable. Wraps a 'QualifiedName'
+-- under a distinct type so the runtime layer can evolve its lookup
+-- protocol independently (e.g. switching to per-sidecar namespaces)
+-- without churning every 'BlockExternal' use site.
+newtype ExternalName = ExternalName QualifiedName
+  deriving stock (Eq, Ord, Show)
+  deriving newtype (ToJSON, FromJSON)
+
 -- ===========================================================================
 -- Top-level module
 -- ===========================================================================
@@ -96,8 +156,14 @@ newtype VarId = VarId Word32
 data IRModule = IRModule
   { name :: Text,
     blocks :: Map BlockId Block,
-    -- | Top-level agent name → entry block.
-    entries :: Map Text BlockId,
+    -- | FFI inbound name resolution: @\<modulePath\>.\<bareName\>@ →
+    -- 'BlockId'. Covers every top-level callable (agent / req / ext /
+    -- ctor) so external callers (JS sidecars, LSP, tooling) can address
+    -- them by name. The IR's internal id allocations ('BlockId',
+    -- 'ReqId', 'CtorId') are intentionally not exposed; the runtime
+    -- derives any inverse maps it needs by walking 'blocks' once at
+    -- load time.
+    entries :: Map QualifiedName BlockId,
     -- | Debug-only var/block names. Runtime ignores; pretty printer / dev
     -- tools consume.
     nameTable :: NameTable
@@ -130,24 +196,29 @@ emptyNameTable = NameTable {varNames = Map.empty, blockNames = Map.empty}
 -- ===========================================================================
 
 -- | All callable units. Special blocks (prim / req / ext / ctor) carry only
--- metadata; user blocks own statements / handlers / then etc.
+-- the metadata the runtime needs to dispatch them; the public,
+-- FFI-visible name lives at the 'IRModule' level instead, so each block
+-- variant only stores its dispatch-axis identifier.
 data Block
   = -- | Regular user-defined block. The body lives in a separate record so
     -- the field set can grow independently of the sum tag.
     BlockUser {body :: !UserBlock}
   | -- | Built-in primitive. The runtime resolves @name@ against its prim
-    -- registry.
+    -- registry. Prims are system-provided and have no module of origin,
+    -- so they keep a plain 'Text' identifier (and never appear in
+    -- 'IRModule.entries').
     BlockPrim {name :: !Text}
-  | -- | Request declaration. Used as the static target of a @raise@ /
-    -- @perform@ call.
-    BlockRequest {name :: !Text}
-  | -- | External agent stub. Identified by @(moduleName, name)@: the runtime
-    -- looks up the function in a JS sidecar bundle keyed by these. The
-    -- @\@"..."@ annotation on the declaration is purely documentation and
-    -- does not appear in the IR.
-    BlockExternal {moduleName :: !Text, name :: !Text}
-  | -- | Data constructor. The runtime tags the resulting value with @name@.
-    BlockCtor {name :: !Text}
+  | -- | Request declaration. The 'reqId' is what handlers match against
+    -- ('Handler.request') when a request is raised via 'SCall'. The
+    -- public qualified name lives in 'IRModule.entries'.
+    BlockRequest {reqId :: !ReqId}
+  | -- | External agent stub. The runtime looks up @externalName@ in a
+    -- JS sidecar bundle.
+    BlockExternal {externalName :: !ExternalName}
+  | -- | Data constructor. The 'ctorId' is what 'MatchTagConstructor'
+    -- compares against in match arms; values built by this block carry
+    -- @{__ctor: <ctorId>, ...}@ at runtime.
+    BlockCtor {ctorId :: !CtorId}
   deriving (Eq, Show, Generic)
 
 instance ToJSON Block where
@@ -201,6 +272,12 @@ data UserBlock = UserBlock
   { -- | Structural role of the block. Determines exit semantics and scope
     -- inheritance at runtime.
     kind :: !BlockKind,
+    -- | Closure-captured parameters. Empty for top-level callables; for
+    -- closures produced by 'SMakeClosure', these are the values trapped
+    -- from the enclosing scope at closure-build time. The runtime
+    -- supplies them automatically when the closure is invoked, on top
+    -- of the call-time 'params'.
+    captures :: ![Param],
     -- | Regular labeled parameters (call args bind by label).
     params :: ![Param],
     -- | Mutable state vars introduced by @where (var ...)@ or @for (var ...)@.
@@ -239,10 +316,12 @@ instance ToJSON Param where
 instance FromJSON Param where
   parseJSON = genericParseJSON irOptions
 
--- | A request handler attached to a handle-scope block.
+-- | A request handler attached to a handle-scope block. Handler dispatch
+-- compares the raised request's 'ReqId' against this 'request' field;
+-- on equality the runtime invokes 'handlerBody'.
 data Handler = Handler
-  { -- | Target request id (a 'BlockRequest' in the block table).
-    request :: !BlockId,
+  { -- | The 'ReqId' of the 'BlockRequest' being handled.
+    request :: !ReqId,
     -- | The handler body block. Its params are @[req args... , state vars...]@
     -- by label.
     handlerBody :: !BlockId
@@ -297,10 +376,14 @@ instance ToJSON CallData where
 instance FromJSON CallData where
   parseJSON = genericParseJSON irOptions
 
--- | Payload for 'SMakeClosure'.
+-- | Payload for 'SMakeClosure'. The 'captures' list pairs each capture
+-- param's label (which must match a 'Param' in the target block's
+-- @captures@ field) with the outer-scope 'VarId' whose value the
+-- closure should trap.
 data MakeClosureData = MakeClosureData
   { output :: !VarId,
-    block :: !BlockId
+    block :: !BlockId,
+    captures :: ![Arg]
   }
   deriving (Eq, Show, Generic)
 
@@ -428,14 +511,30 @@ instance ToJSON Arg where
 instance FromJSON Arg where
   parseJSON = genericParseJSON irOptions
 
--- | One arm of an 'SMatch'. Matches on the subject's tag (or wildcards if
--- 'tag' is 'Nothing') and binds field labels into the arm's body block via
--- 'bindings'.
+-- | What an 'SMatch' arm matches against. A successor of @Maybe Text@:
+-- the previous \"@Nothing@ for unconditional / strings for both ctors and
+-- literals\" representation collapsed two semantically distinct
+-- dispatches; the sum below makes them explicit.
+data MatchTag
+  = -- | Always matches (variable / wildcard / tuple bind-only).
+    MatchTagAny
+  | -- | Match if the subject is a tagged value with this constructor id.
+    MatchTagConstructor !CtorId
+  | -- | Match if the subject equals this literal value.
+    MatchTagLiteral !LiteralValue
+  deriving (Eq, Show, Generic)
+
+instance ToJSON MatchTag where
+  toJSON = genericToJSON (sumOptions stripMatchTagPrefix)
+
+instance FromJSON MatchTag where
+  parseJSON = genericParseJSON (sumOptions stripMatchTagPrefix)
+
+-- | One arm of an 'SMatch'. The runtime evaluates 'tag' first; on a
+-- match it pre-populates 'bindings' (field/index label → IR var the
+-- arm body reads) and jumps into 'body'.
 data MatchArm = MatchArm
-  { -- | Constructor tag to match. 'Nothing' matches any tag (used for tuple
-    -- destructuring or trivial bind-only patterns).
-    tag :: !(Maybe Text),
-    -- | (field/index label, IR var the arm body uses to receive that value).
+  { tag :: !MatchTag,
     bindings :: ![(Text, VarId)],
     body :: !BlockId
   }
@@ -514,6 +613,9 @@ stripLVPrefix = lowerHead . drop (length ("LV" :: String))
 
 stripCTPrefix :: String -> String
 stripCTPrefix = lowerHead . drop (length ("CT" :: String))
+
+stripMatchTagPrefix :: String -> String
+stripMatchTagPrefix = lowerHead . drop (length ("MatchTag" :: String))
 
 stripExitPrefix :: String -> String
 stripExitPrefix = lowerHead . drop (length ("Exit" :: String))

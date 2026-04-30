@@ -53,13 +53,25 @@ lowerSource src = case parseModuleStrict "<test>" src of
 -- Spec
 -- ===========================================================================
 
--- | Look up the user-block body of a top-level agent by name.
+-- | Look up the user-block body of a top-level agent by bare name.
+-- Test fixtures load every source under module name @"main"@, so the
+-- qualified name we look up is @QualifiedName "main" agentName@.
 agentBody :: Text -> IRModule -> Maybe UserBlock
 agentBody agentName irMod = do
-  entryId <- Map.lookup agentName irMod.entries
+  entryId <- Map.lookup (QualifiedName "main" agentName) irMod.entries
   block <- Map.lookup entryId irMod.blocks
   case block of
     BlockUser {body} -> Just body
+    _ -> Nothing
+
+-- | Resolve a constructor's bare name (in module @"main"@) to its IR
+-- 'CtorId' so 'MatchTag' assertions can compare against the
+-- declaration-side identifier rather than a string.
+ctorIdOf :: Text -> IRModule -> Maybe CtorId
+ctorIdOf ctorName irMod = do
+  bid <- Map.lookup (QualifiedName "main" ctorName) irMod.entries
+  case Map.lookup bid irMod.blocks of
+    Just BlockCtor {ctorId} -> Just ctorId
     _ -> Nothing
 
 -- | Look up the BlockId for a primitive by name.
@@ -96,7 +108,7 @@ stage1Spec = describe "Stage 1 — literals / arithmetic" $ do
   it "lowers a trivial empty agent" $ do
     (irMod, errs) <- lowerSource "agent main() {}"
     errs `shouldBe` []
-    Map.keys irMod.entries `shouldBe` ["main"]
+    Map.keys irMod.entries `shouldBe` [QualifiedName "main" "main"]
     case agentBody "main" irMod of
       Nothing -> expectationFailure "main agent not found in IR"
       Just ub -> do
@@ -230,7 +242,7 @@ stage2Spec = describe "Stage 2 \8212 control flow" $ do
       [m] -> do
         length m.arms `shouldBe` 1
         let [arm] = m.arms
-        arm.tag `shouldBe` Just "true"
+        arm.tag `shouldBe` MatchTagLiteral LVBoolean {boolean = True}
         arm.bindings `shouldBe` []
         m.defaultArm `shouldNotBe` Nothing
       other -> expectationFailure ("expected 1 SMatch, got " <> show (length other))
@@ -278,7 +290,9 @@ stage2Spec = describe "Stage 2 \8212 control flow" $ do
       [m] -> do
         case m.arms of
           [arm] -> do
-            arm.tag `shouldBe` Just "Point"
+            case ctorIdOf "Point" irMod of
+              Just cid -> arm.tag `shouldBe` MatchTagConstructor cid
+              Nothing -> expectationFailure "Point ctor not in IR entries"
             map fst arm.bindings `shouldMatchList` ["x", "y"]
           _ -> expectationFailure "expected 1 arm"
       _ -> expectationFailure "expected 1 SMatch"
@@ -301,7 +315,9 @@ stage2Spec = describe "Stage 2 \8212 control flow" $ do
     case matches ub of
       [m] -> case m.arms of
         [arm] -> do
-          arm.tag `shouldBe` Just "Outer"
+          case ctorIdOf "Outer" irMod of
+            Just cid -> arm.tag `shouldBe` MatchTagConstructor cid
+            Nothing -> expectationFailure "Outer ctor not in IR entries"
           map fst arm.bindings `shouldMatchList` ["inner"]
           case userBlockOf arm.body irMod of
             Just armBody -> do
