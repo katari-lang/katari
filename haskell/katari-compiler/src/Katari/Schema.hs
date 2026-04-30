@@ -15,12 +15,12 @@
 --
 -- 'JsonSchema' は JSON Schema Draft 2020-12 のサブセットを構造的に表す。
 -- @description@ / @title@ / @examples@ は任意の位置に乗せられる。
--- 'SCRef' は @\$ref@ 形式で @data@ 宣言を参照する (\@\"#/$defs/<name>\"\)。
+-- 'SchemaCoreRef' は @\$ref@ 形式で @data@ 宣言を参照する (\@\"#/$defs/<name>\"\)。
 --
 -- ## 制限
 --
 --   * 関数引数 / 戻り値の関数型 ('SemanticTypeFunction') は JSON で
---     serialize 不可なので 'SCUnknown' にフォールバックする。
+--     serialize 不可なので 'SchemaCoreUnknown' にフォールバックする。
 --   * Generic は無いので @data@ 宣言の参照は単純な名前だけ。
 module Katari.Schema
   ( -- * Schema types
@@ -70,6 +70,7 @@ import Katari.AST
     SymbolKind (..),
   )
 import Katari.AST.Identifiers (ModuleId, VariableId, renderQualifiedName)
+import Katari.Internal (internalErrorNoSpan)
 import Katari.Typechecker.SemanticType
   ( Resolved,
     SemanticEffect (..),
@@ -99,29 +100,29 @@ instance FromJSON JsonSchema where
 
 -- | The structural part of a 'JsonSchema'. Mirrors JSON Schema Draft
 -- 2020-12 keywords.
-data SchemaCore
-  = SCNull
-  | SCBoolean
-  | SCInteger
-      { minimum :: !(Maybe Integer),
-        maximum :: !(Maybe Integer)
-      }
-  | SCNumber
-  | SCString
-      { schemaEnum :: ![Text]
-      }
-  | SCConst {value :: !Value}
-  | SCArray {items :: !JsonSchema}
-  | SCTuple {prefixItems :: ![JsonSchema]}
-  | SCObject
-      { properties :: !(Map Text JsonSchema),
-        required :: !(Set Text),
-        additionalProperties :: !Bool
-      }
-  | SCUnion {anyOf :: ![JsonSchema]}
-  | SCRef {ref :: !Text}
-  | SCUnknown
-  | SCNever
+data SchemaCore where
+  SchemaCoreNull :: SchemaCore
+  SchemaCoreBoolean :: SchemaCore
+  SchemaCoreInteger ::
+    { minimum :: !(Maybe Integer),
+      maximum :: !(Maybe Integer)
+    } ->
+    SchemaCore
+  SchemaCoreNumber :: SchemaCore
+  SchemaCoreString :: {schemaEnum :: ![Text]} -> SchemaCore
+  SchemaCoreConst :: {value :: !Value} -> SchemaCore
+  SchemaCoreArray :: {items :: !JsonSchema} -> SchemaCore
+  SchemaCoreTuple :: {prefixItems :: ![JsonSchema]} -> SchemaCore
+  SchemaCoreObject ::
+    { properties :: !(Map Text JsonSchema),
+      required :: !(Set Text),
+      additionalProperties :: !Bool
+    } ->
+    SchemaCore
+  SchemaCoreUnion :: {anyOf :: ![JsonSchema]} -> SchemaCore
+  SchemaCoreRef :: {ref :: !Text} -> SchemaCore
+  SchemaCoreUnknown :: SchemaCore
+  SchemaCoreNever :: SchemaCore
   deriving (Eq, Show, Generic)
 
 instance ToJSON SchemaCore where
@@ -135,7 +136,7 @@ instance FromJSON SchemaCore where
 data AgentSchema = AgentSchema
   { -- | The @\@\"...\"@ annotation on the declaration, if any.
     description :: !(Maybe Text),
-    -- | Always an 'SCObject' whose @properties@ are the named parameters.
+    -- | Always an 'SchemaCoreObject' whose @properties@ are the named parameters.
     input :: !JsonSchema,
     output :: !JsonSchema,
     -- | Internal request VariableIds this agent may raise. Rendered as
@@ -161,7 +162,7 @@ instance FromJSON AgentSchema where
 -- @Pair(left=1, right=2)@ has a JSON-Schema input shape just like an
 -- agent does). @dataDefs@ holds the corresponding @\$defs@ entry —
 -- the data type as a JSON object schema — that other schemas reference
--- via @SCRef \"#/$defs/<qualified>\"@.
+-- via @SchemaCoreRef \"#/$defs/<qualified>\"@.
 data SchemaBundle = SchemaBundle
   { agentSchemas :: !(Map Text AgentSchema),
     requestSchemas :: !(Map Text AgentSchema),
@@ -202,19 +203,23 @@ schemaOptions =
       omitNothingFields = True
     }
 
--- | TaggedObject sum encoding for 'SchemaCore' so each variant carries its
--- @\"kind\"@ tag (lowercased, 'SC' prefix stripped).
+-- | TaggedObject sum encoding for 'SchemaCore'. Each variant's JSON tag is
+-- the (camelCased) constructor name, e.g. @"schemaCoreNull"@ /
+-- @"schemaCoreObject"@.
 schemaCoreOptions :: Options
 schemaCoreOptions =
   defaultOptions
     { sumEncoding = TaggedObject "kind" "contents",
-      constructorTagModifier = stripSCPrefix,
+      constructorTagModifier = lowerHead,
       fieldLabelModifier = id,
       omitNothingFields = True
     }
 
-stripSCPrefix :: String -> String
-stripSCPrefix s = case drop (length ("SC" :: String)) s of
+-- | Lowercase the first character of a constructor name to produce its
+-- JSON tag. Combined with the type-name prefix on each constructor it
+-- yields stable camelCase tags such as @"schemaCoreNull"@.
+lowerHead :: String -> String
+lowerHead = \case
   [] -> []
   c : rest -> toLower c : rest
 
@@ -257,38 +262,38 @@ toJsonSchema = plain . toCore
 
 toCore :: SemanticType Resolved -> SchemaCore
 toCore = \case
-  SemanticTypeNever -> SCNever
-  SemanticTypeUnknown -> SCUnknown
-  SemanticTypeNull -> SCNull
-  SemanticTypeBoolean -> SCBoolean
-  SemanticTypeInteger -> SCInteger {minimum = Nothing, maximum = Nothing}
-  SemanticTypeNumber -> SCNumber
-  SemanticTypeString -> SCString {schemaEnum = []}
-  SemanticTypeLiteralInteger n -> SCConst {value = toJSON n}
-  SemanticTypeLiteralString s -> SCConst {value = toJSON s}
-  SemanticTypeLiteralBoolean b -> SCConst {value = toJSON b}
-  SemanticTypeArray element -> SCArray {items = toJsonSchema element}
-  SemanticTypeTuple elements -> SCTuple {prefixItems = map toJsonSchema elements}
+  SemanticTypeNever -> SchemaCoreNever
+  SemanticTypeUnknown -> SchemaCoreUnknown
+  SemanticTypeNull -> SchemaCoreNull
+  SemanticTypeBoolean -> SchemaCoreBoolean
+  SemanticTypeInteger -> SchemaCoreInteger {minimum = Nothing, maximum = Nothing}
+  SemanticTypeNumber -> SchemaCoreNumber
+  SemanticTypeString -> SchemaCoreString {schemaEnum = []}
+  SemanticTypeLiteralInteger n -> SchemaCoreConst {value = toJSON n}
+  SemanticTypeLiteralString s -> SchemaCoreConst {value = toJSON s}
+  SemanticTypeLiteralBoolean b -> SchemaCoreConst {value = toJSON b}
+  SemanticTypeArray element -> SchemaCoreArray {items = toJsonSchema element}
+  SemanticTypeTuple elements -> SchemaCoreTuple {prefixItems = map toJsonSchema elements}
   SemanticTypeObject fields ->
-    SCObject
+    SchemaCoreObject
       { properties = Map.map toJsonSchema fields,
         required = Map.keysSet fields,
         additionalProperties = False
       }
   SemanticTypeUnion branches -> compactUnion (map toCore branches)
-  SemanticTypeData _ -> SCUnknown
+  SemanticTypeData _ -> SchemaCoreUnknown
   -- Functions can't be serialized to JSON; surface as "any".
-  SemanticTypeFunction {} -> SCUnknown
+  SemanticTypeFunction {} -> SchemaCoreUnknown
 
 -- | Compact a union of string-literal types into a single string-enum
 -- where possible. Mixed unions fall back to @anyOf@.
 compactUnion :: [SchemaCore] -> SchemaCore
 compactUnion cores =
-  let stringEnums = [s | SCConst {value = String s} <- cores]
+  let stringEnums = [s | SchemaCoreConst {value = String s} <- cores]
       allStringConst = not (null cores) && length stringEnums == length cores
    in if allStringConst
-        then SCString {schemaEnum = stringEnums}
-        else SCUnion {anyOf = map plain cores}
+        then SchemaCoreString {schemaEnum = stringEnums}
+        else SchemaCoreUnion {anyOf = map plain cores}
 
 -- ===========================================================================
 -- Top-level builder
@@ -375,7 +380,7 @@ agentLike zr description nameRef parameters =
   case nameRef.resolution of
     Just variableId ->
       buildAgentSchema zr description parameters
-        =<< Map.lookup variableId zr.zonkedTypeEnvironment
+        <$> Map.lookup variableId zr.zonkedTypeEnvironment
     Nothing -> Nothing
 
 requestLike :: ZonkResult -> RequestDeclaration Zonked -> Maybe AgentSchema
@@ -384,26 +389,32 @@ requestLike zr rd = agentLike zr rd.annotation rd.name rd.parameters
 externalLike :: ZonkResult -> ExternalAgentDeclaration Zonked -> Maybe AgentSchema
 externalLike zr ed = agentLike zr ed.annotation ed.name ed.parameters
 
+-- | Build an 'AgentSchema' from the resolved type. After Solver / Zonker
+-- the type of an agent / request / external-agent declaration is
+-- guaranteed to be a 'SemanticTypeFunction'; any other shape indicates a
+-- constraint-generation bug and is reported as an internal error so the
+-- problem surfaces immediately instead of silently dropping bundle entries.
 buildAgentSchema ::
   ZonkResult ->
   Maybe Text ->
   [ParameterBinding Zonked] ->
   SemanticType Resolved ->
-  Maybe AgentSchema
+  AgentSchema
 buildAgentSchema zr description parameters = \case
   SemanticTypeFunction params ret eff ->
     let inputSchema = withDesc description (plain (paramObject params parameters))
-     in Just
-          AgentSchema
-            { description = description,
-              input = inputSchema,
-              output = toJsonSchema ret,
-              effects = renderEffects zr eff
-            }
-  -- A non-function semantic type for an agent / request / external
-  -- declaration would indicate a constraint-generation bug; skip
-  -- gracefully so we still emit the rest of the bundle.
-  _ -> Nothing
+     in AgentSchema
+          { description = description,
+            input = inputSchema,
+            output = toJsonSchema ret,
+            effects = renderEffects zr eff
+          }
+  other ->
+    internalErrorNoSpan
+      ( "Schema.buildAgentSchema: agent / request / external declaration's "
+          <> "resolved type is not a function: "
+          <> Text.pack (show other)
+      )
 
 paramObject ::
   Map Text (SemanticType Resolved) ->
@@ -416,7 +427,7 @@ paramObject paramTypes parameters =
             | pb <- parameters,
               Just t <- [Map.lookup pb.label paramTypes]
           ]
-   in SCObject
+   in SchemaCoreObject
         { properties = properties,
           required = Map.keysSet paramTypes,
           additionalProperties = False
@@ -483,10 +494,10 @@ dataConstructorSchema zr modName dd =
                 description = dd.annotation,
                 examples = []
               }
-          -- SCRef without description: the declaration site ($defs) is the
+          -- SchemaCoreRef without description: the declaration site ($defs) is the
           -- single source of truth for description. Consumers that want
           -- inline descriptions can resolve $ref after loading the bundle.
-          outputSchema = plain (SCRef ("#/$defs/" <> qkey modName dd.name.text))
+          outputSchema = plain (SchemaCoreRef ("#/$defs/" <> qkey modName dd.name.text))
        in Just
             AgentSchema
               { description = dd.annotation,
@@ -513,7 +524,7 @@ dataObject fieldTypes params =
             | dp <- params,
               Just fieldType <- [Map.lookup dp.name fieldTypes]
           ]
-   in SCObject
+   in SchemaCoreObject
         { properties = properties,
           required = Map.keysSet properties,
           additionalProperties = False

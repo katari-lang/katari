@@ -59,7 +59,7 @@ import Katari.Typechecker.SemanticType
 -- | Constraint solver の最終出力。'typeSubstitution' / 'effectSubstitution'
 -- は ConstraintGenerator が allocate した全 ID をカバーする (Zonker plan で
 -- 確定済 total 契約)。解決不能な制約は 'solverErrors' に記録され、対応する
--- var は NTUnknown / 空 set にフォールバック。
+-- var は NormalizedTypeUnknown / 空 set にフォールバック。
 data SolverResult = SolverResult
   { typeSubstitution :: !(Map TypeVarId NormalizedType),
     effectSubstitution :: !(Map EffectVarId (Set RequestId)),

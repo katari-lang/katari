@@ -56,10 +56,10 @@ spec = describe "Katari.Diagnostic" $ do
 
 severitySpec :: Spec
 severitySpec = describe "Severity" $ do
-  it "ordering: Hint < Info < Warning < Error" $ do
-    compare Hint Info `shouldBe` LT
-    compare Info Warning `shouldBe` LT
-    compare Warning Error `shouldBe` LT
+  it "ordering: SeveritySeverityHint < SeverityInfo < SeverityWarning < SeverityError" $ do
+    compare SeverityHint SeverityInfo `shouldBe` LT
+    compare SeverityInfo SeverityWarning `shouldBe` LT
+    compare SeverityWarning SeverityError `shouldBe` LT
 
   it "hasErrors detects an Error in a mixed list" $ do
     let mixed =
@@ -83,7 +83,7 @@ perPhaseConverterSpec = describe "per-phase toDiagnostic" $ do
               Lexer.LexerErrorInvalidUnicodeEscape dummySpan "\\uXYZW",
               Lexer.LexerErrorUnrecognizedCharacter dummySpan '`'
             ]
-    mapM_ (\d -> d.severity `shouldBe` Error) diags
+    mapM_ (\d -> d.severity `shouldBe` SeverityError) diags
     mapM_ (\d -> isReservedCode "K0001" "K0099" d.code `shouldBe` True) diags
 
   it "Parser codes fall in K0001-K0099" $ do
@@ -94,7 +94,7 @@ perPhaseConverterSpec = describe "per-phase toDiagnostic" $ do
             [ Parser.ParseErrorAtDeclaration dummySpan parseReason,
               Parser.ParseErrorAtStatement dummySpan parseReason
             ]
-    mapM_ (\d -> d.severity `shouldBe` Error) diags
+    mapM_ (\d -> d.severity `shouldBe` SeverityError) diags
     mapM_ (\d -> isReservedCode "K0001" "K0099" d.code `shouldBe` True) diags
 
   it "Identifier codes fall in K0100-K0199" $ do
@@ -112,12 +112,12 @@ perPhaseConverterSpec = describe "per-phase toDiagnostic" $ do
               Identifier.ErrorMissingExternalAgentAnnotation dummySpan "foo",
               Identifier.ErrorEmptyExternalAgentAnnotation dummySpan "foo"
             ]
-    mapM_ (\d -> d.severity `shouldBe` Error) diags
+    mapM_ (\d -> d.severity `shouldBe` SeverityError) diags
     mapM_ (\d -> isReservedCode "K0100" "K0199" d.code `shouldBe` True) diags
 
   it "ConstraintGenerator codes fall in K0200-K0299" $ do
-    let diag = CG.toDiagnostic (CG.ErrorTypeSynonymCycle dummySpan (Identifier.TypeId 0))
-    diag.severity `shouldBe` Error
+    let diag = CG.toDiagnostic (CG.ConstraintErrorTypeSynonymCycle dummySpan (Identifier.TypeId 0))
+    diag.severity `shouldBe` SeverityError
     isReservedCode "K0200" "K0299" diag.code `shouldBe` True
 
   it "Zonker codes fall in K0200-K0299" $ do
@@ -127,17 +127,17 @@ perPhaseConverterSpec = describe "per-phase toDiagnostic" $ do
             [ Zonker.ZonkErrorMissingTypeVar dummySpan (TypeVarId 0),
               Zonker.ZonkErrorMissingEffectVar dummySpan (EffectVarId 0)
             ]
-    mapM_ (\d -> d.severity `shouldBe` Error) diags
+    mapM_ (\d -> d.severity `shouldBe` SeverityError) diags
     mapM_ (\d -> isReservedCode "K0200" "K0299" d.code `shouldBe` True) diags
 
   it "Lowering codes fall in K0300-K0399" $ do
     let diags =
           map
             Lowering.toDiagnostic
-            [ Lowering.LowerErrorUnresolvedVariable dummySpan "x",
-              Lowering.LowerErrorParseSentinel dummySpan
+            [ Lowering.LoweringErrorUnresolvedVariable dummySpan "x",
+              Lowering.LoweringErrorParseSentinel dummySpan
             ]
-    mapM_ (\d -> d.severity `shouldBe` Error) diags
+    mapM_ (\d -> d.severity `shouldBe` SeverityError) diags
     mapM_ (\d -> isReservedCode "K0300" "K0399" d.code `shouldBe` True) diags
 
 jsonRoundTripSpec :: Spec
@@ -145,7 +145,7 @@ jsonRoundTripSpec = describe "JSON round-trip" $ do
   it "Diagnostic with notes/hints round-trips" $ do
     let diag =
           Diagnostic
-            { severity = Error,
+            { severity = SeverityError,
               code = "K0042",
               message = "test message",
               span = dummySpan,
@@ -166,4 +166,4 @@ jsonRoundTripSpec = describe "JSON round-trip" $ do
     let roundTrip s = case Aeson.fromJSON (Aeson.toJSON s) of
           Aeson.Success s' -> s' `shouldBe` s
           Aeson.Error msg -> expectationFailure ("decode failed: " <> msg)
-    mapM_ roundTrip [Hint, Info, Warning, Error]
+    mapM_ roundTrip [SeverityHint, SeverityInfo, SeverityWarning, SeverityError]

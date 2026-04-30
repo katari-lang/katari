@@ -474,10 +474,10 @@ typeSynonymCycle :: Spec
 typeSynonymCycle = describe "type synonym cycle" $ do
   it "type T = T is detected as a cycle" $ do
     cg <- runOne "type T = T\nagent main(x: T) { 0 }"
-    -- One ErrorTypeSynonymCycle expected (or more if T is referenced again).
+    -- One ConstraintErrorTypeSynonymCycle expected (or more if T is referenced again).
     cg.errors `shouldSatisfy` any isCycleError
     where
-      isCycleError ErrorTypeSynonymCycle {} = True
+      isCycleError ConstraintErrorTypeSynonymCycle {} = True
 
 -- ---------------------------------------------------------------------------
 -- Constraint contents (verify shape, not just count)
@@ -696,23 +696,23 @@ dataNameClash = describe "cross-module data name clash" $ do
 
 -- ---------------------------------------------------------------------------
 -- Implicit-return constraint reason: agent body fall-through (no explicit
--- 'return') uses ReasonImplicitReturn, while explicit 'return e' uses
--- ReasonReturnStatement.
+-- 'return') uses ReasonKindImplicitReturn, while explicit 'return e' uses
+-- ReasonKindReturnStatement.
 -- ---------------------------------------------------------------------------
 
 implicitReturnReason :: Spec
-implicitReturnReason = describe "ReasonImplicitReturn vs ReasonReturnStatement" $ do
-  it "agent body fall-through tags constraint with ReasonImplicitReturn" $ do
+implicitReturnReason = describe "ReasonKindImplicitReturn vs ReasonKindReturnStatement" $ do
+  it "agent body fall-through tags constraint with ReasonKindImplicitReturn" $ do
     cg <- runOne "agent foo() -> integer { 1 }"
     cg.errors `shouldBe` []
     let reasons = [r | TypeConstraint {reason = r} <- Set.toList cg.constraints]
     any isImplicitReturn reasons `shouldBe` True
 
-  it "explicit return statement tags constraint with ReasonReturnStatement" $ do
+  it "explicit return statement tags constraint with ReasonKindReturnStatement" $ do
     cg <- runOne "agent foo() -> integer { return 1; }"
     cg.errors `shouldBe` []
     let reasons = [r | TypeConstraint {reason = r} <- Set.toList cg.constraints]
     any isReturnStatement reasons `shouldBe` True
   where
-    isImplicitReturn reason = reason.kind == ReasonImplicitReturn
-    isReturnStatement reason = reason.kind == ReasonReturnStatement
+    isImplicitReturn reason = reason.kind == ReasonKindImplicitReturn
+    isReturnStatement reason = reason.kind == ReasonKindReturnStatement

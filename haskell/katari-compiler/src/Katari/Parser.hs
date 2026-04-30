@@ -737,9 +737,9 @@ detectSameLineKeywordViolation = do
     Just keyword -> fail $ "'" <> keyword <> "' must be on the same line as the preceding '}'"
     Nothing -> pure ()
 
-data BlockStep
-  = BlockStepStatement (Statement Parsed)
-  | BlockStepReturn (Maybe (Expression Parsed))
+data BlockStep where
+  BlockStepStatement :: Statement Parsed -> BlockStep
+  BlockStepReturn :: Maybe (Expression Parsed) -> BlockStep
 
 -- | One-pass block body with statement-level error recovery. On parse failure
 -- inside a step, up to the next sync token is skipped and a 'StatementError'

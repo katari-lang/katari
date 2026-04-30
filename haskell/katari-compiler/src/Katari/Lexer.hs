@@ -714,8 +714,8 @@ escapeCharacter = do
       _ <- char 'u'
       firstCodePoint <- readFourHex startSourcePos
       case classifySurrogate firstCodePoint of
-        SurrogateNone -> pure (chr firstCodePoint)
-        SurrogateHigh -> do
+        SurrogateClassNone -> pure (chr firstCodePoint)
+        SurrogateClassHigh -> do
           followedByLow <-
             optional . try $ do
               _ <- char '\\'
@@ -730,7 +730,7 @@ escapeCharacter = do
           endSourcePos <- getSourcePos
           case followedByLow of
             Just secondCodePoint
-              | SurrogateLow <- classifySurrogate secondCodePoint ->
+              | SurrogateClassLow <- classifySurrogate secondCodePoint ->
                   pure
                     ( chr
                         ( 0x10000
@@ -745,7 +745,7 @@ escapeCharacter = do
                     (T.pack ("\\u" <> showHex firstCodePoint ""))
                 )
               pure '\xFFFD'
-        SurrogateLow -> do
+        SurrogateClassLow -> do
           endSourcePos <- getSourcePos
           recordLexerError
             ( LexerErrorInvalidUnicodeEscape
@@ -774,13 +774,16 @@ escapeCharacter = do
             )
           pure 0xFFFD
 
-data SurrogateClass = SurrogateNone | SurrogateHigh | SurrogateLow
+data SurrogateClass where
+  SurrogateClassNone :: SurrogateClass
+  SurrogateClassHigh :: SurrogateClass
+  SurrogateClassLow :: SurrogateClass
 
 classifySurrogate :: Int -> SurrogateClass
 classifySurrogate codePoint
-  | codePoint >= 0xD800 && codePoint <= 0xDBFF = SurrogateHigh
-  | codePoint >= 0xDC00 && codePoint <= 0xDFFF = SurrogateLow
-  | otherwise = SurrogateNone
+  | codePoint >= 0xD800 && codePoint <= 0xDBFF = SurrogateClassHigh
+  | codePoint >= 0xDC00 && codePoint <= 0xDFFF = SurrogateClassLow
+  | otherwise = SurrogateClassNone
 
 -- ===========================================================================
 -- Virtual Semicolon Insertion

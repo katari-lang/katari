@@ -63,22 +63,22 @@ class HasSourceSpan node where
 -- SymbolKind: 'NameRef' が指す名前空間の種別。
 -- ---------------------------------------------------------------------------
 
-data SymbolKind
-  = -- | 値空間の名前参照 (agent / req / ext agent / constructor / local var)。
-    -- 値として呼べる名前はすべてここを通る。
-    VariableRef
-  | -- | 型空間の名前参照 (enum 名、TypeName)。
-    TypeRef
-  | -- | モジュール空間の名前参照 (import alias、qualified の左辺)。
-    ModuleRef
-  | -- | フィールド・引数ラベル (型指向で後段が解決)。
-    LabelRef
-  | -- | req handler の対象。@req@ 宣言以外の名前を handler として書くと
-    -- Identifier 段階で reject される (型レベルでスロットを分離している)。
-    RequestRef
-  | -- | match パターンの constructor。@data@ 宣言以外の名前を constructor
-    -- パターンとして書くと Identifier 段階で reject される。
-    ConstructorRef
+data SymbolKind where
+  -- | 値空間の名前参照 (agent / req / ext agent / constructor / local var)。
+  -- 値として呼べる名前はすべてここを通る。
+  VariableRef :: SymbolKind
+  -- | 型空間の名前参照 (enum 名、TypeName)。
+  TypeRef :: SymbolKind
+  -- | モジュール空間の名前参照 (import alias、qualified の左辺)。
+  ModuleRef :: SymbolKind
+  -- | フィールド・引数ラベル (型指向で後段が解決)。
+  LabelRef :: SymbolKind
+  -- | req handler の対象。@req@ 宣言以外の名前を handler として書くと
+  -- Identifier 段階で reject される (型レベルでスロットを分離している)。
+  RequestRef :: SymbolKind
+  -- | match パターンの constructor。@data@ 宣言以外の名前を constructor
+  -- パターンとして書くと Identifier 段階で reject される。
+  ConstructorRef :: SymbolKind
   deriving (Eq, Show)
 
 -- ---------------------------------------------------------------------------

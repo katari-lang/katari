@@ -12,13 +12,13 @@
 --   * Unions never appear as a constructor here — they are decomposed into
 --     contributions to each layer.
 --   * @NTNever@ is *not* a separate constructor: the canonical empty type is
---     'NTLayered' 'emptyLayered' (every layer empty). Avoiding redundant
+--     'NormalizedTypeLayered' 'emptyLayered' (every layer empty). Avoiding redundant
 --     representations keeps equality decidable by structural comparison.
 --   * Each layer uses an empty 'Set' / 'Map' / dedicated @Absent@
 --     constructor to express "no values here", rather than wrapping in
 --     'Maybe'. This too is for canonicality.
 --
--- @'NTUnknown'@ is the lattice top. Although it could in principle be
+-- @'NormalizedTypeUnknown'@ is the lattice top. Although it could in principle be
 -- expressed as a layered value populating every layer with its widest slot,
 -- doing so would lose the polymorphism (e.g. @unknown@ accommodates @data@
 -- types not yet in scope), so it is kept as a dedicated constructor.
@@ -65,16 +65,16 @@ import Katari.Typechecker.SemanticType (Resolved, SemanticEffect (..), SemanticT
 
 -- | The canonical normal form of a Katari type. Equality is structural.
 --
--- @NTLayered 'emptyLayered'@ is the canonical "never" / bottom type.
-data NormalizedType
-  = NTUnknown
-  | NTLayered !LayeredType
+-- @NormalizedTypeLayered 'emptyLayered'@ is the canonical "never" / bottom type.
+data NormalizedType where
+  NormalizedTypeUnknown :: NormalizedType
+  NormalizedTypeLayered :: !LayeredType -> NormalizedType
   deriving (Eq, Show)
 
 -- | One slot per "type family". A @NormalizedType@ is the sum (union) of
 -- the contributions from every populated layer.
 data LayeredType = LayeredType
-  { -- | Numeric layer. Empty 'NumberLiterals' if no number values inhabit
+  { -- | Numeric layer. Empty 'NumberSlotLiterals' if no number values inhabit
     -- this type.
     numberLayer :: !NumberSlot,
     -- | String layer.
@@ -86,15 +86,15 @@ data LayeredType = LayeredType
     booleanLayer :: !(Set Bool),
     -- | Whether @null@ is inhabited.
     nullLayer :: !Bool,
-    -- | Function layer. 'FunctionAbsent' means no function values inhabit
-    -- this type; 'FunctionOf' carries a single function shape (with named
+    -- | Function layer. 'FunctionSlotAbsent' means no function values inhabit
+    -- this type; 'FunctionSlotOf' carries a single function shape (with named
     -- parameters). Per Katari's product-normalisation rule, multiple
     -- function shapes in a union collapse into one shape: union → label
     -- union with each common label's type intersected; intersection →
     -- label intersection with each common label's type unioned.
     functionLayer :: !FunctionSlot,
-    -- | Array layer. 'ArrayAbsent' distinguishes "no array values" from
-    -- @ArrayOf (NTLayered emptyLayered)@ (which permits the empty-array
+    -- | Array layer. 'ArraySlotAbsent' distinguishes "no array values" from
+    -- @ArraySlotOf (NormalizedTypeLayered emptyLayered)@ (which permits the empty-array
     -- value @[]@).
     arrayLayer :: !ArraySlot,
     -- | Tuple layer keyed by arity. Absence from the map means no tuples
@@ -104,7 +104,7 @@ data LayeredType = LayeredType
     -- | Set of @data@ type ids that inhabit this type. Empty means no
     -- @data@ values.
     dataLayer :: !(Set TypeId),
-    -- | Structural object layer. 'ObjectAbsent' means "no object values"
+    -- | Structural object layer. 'ObjectSlotAbsent' means "no object values"
     -- (distinguishable from "object with all-empty fields"). Per Katari's
     -- product-normalisation rule, all object shapes in a union collapse
     -- into a single shape: union → common fields, each field type unioned;
@@ -115,61 +115,61 @@ data LayeredType = LayeredType
 
 -- | Numeric slot. Canonical invariants:
 --
---   * 'NumberLiterals' may be empty (= no number values) or may hold any
+--   * 'NumberSlotLiterals' may be empty (= no number values) or may hold any
 --     finite set of integer literals. It is never used to represent the
---     full 'integer' type — that is 'NumberInteger'.
---   * 'NumberInteger' is the entire @integer@ primitive (all integers).
---   * 'NumberNumber' is the entire @number@ primitive (subsumes
---     'NumberInteger' and floats / non-integer numbers).
-data NumberSlot
-  = NumberLiterals !(Set Integer)
-  | NumberInteger
-  | NumberNumber
+--     full 'integer' type — that is 'NumberSlotInteger'.
+--   * 'NumberSlotInteger' is the entire @integer@ primitive (all integers).
+--   * 'NumberSlotNumber' is the entire @number@ primitive (subsumes
+--     'NumberSlotInteger' and floats / non-integer numbers).
+data NumberSlot where
+  NumberSlotLiterals :: !(Set Integer) -> NumberSlot
+  NumberSlotInteger :: NumberSlot
+  NumberSlotNumber :: NumberSlot
   deriving (Eq, Show)
 
 -- | String slot.
 --
---   * @'StringLiterals' s@ — exactly the strings in @s@; @s@ may be empty
+--   * @'StringSlotLiterals' s@ — exactly the strings in @s@; @s@ may be empty
 --     to indicate "no string values".
---   * 'StringAny' — the full 'string' primitive.
-data StringSlot
-  = StringLiterals !(Set Text)
-  | StringAny
+--   * 'StringSlotAny' — the full 'string' primitive.
+data StringSlot where
+  StringSlotLiterals :: !(Set Text) -> StringSlot
+  StringSlotAny :: StringSlot
   deriving (Eq, Show)
 
 -- | Array slot.
 --
---   * 'ArrayAbsent' — no array values inhabit this type.
---   * @'ArrayOf' t@ — arrays whose element type is @t@. Note that
---     @'ArrayOf' (NTLayered emptyLayered)@ is *not* equivalent to
---     'ArrayAbsent': it admits the empty array value @[]@.
-data ArraySlot
-  = ArrayAbsent
-  | ArrayOf !NormalizedType
+--   * 'ArraySlotAbsent' — no array values inhabit this type.
+--   * @'ArraySlotOf' t@ — arrays whose element type is @t@. Note that
+--     @'ArraySlotOf' (NormalizedTypeLayered emptyLayered)@ is *not* equivalent to
+--     'ArraySlotAbsent': it admits the empty array value @[]@.
+data ArraySlot where
+  ArraySlotAbsent :: ArraySlot
+  ArraySlotOf :: !NormalizedType -> ArraySlot
   deriving (Eq, Show)
 
 -- | Object slot.
 --
---   * 'ObjectAbsent' — no object values inhabit this type.
---   * @'ObjectOf' fs@ — values that have at least the fields in @fs@.
---     Unspecified fields are conceptually filled with 'NTUnknown', so
---     'ObjectAbsent' is *not* the same as @'ObjectOf' Map.empty@.
-data ObjectSlot
-  = ObjectAbsent
-  | ObjectOf !(Map Text NormalizedType)
+--   * 'ObjectSlotAbsent' — no object values inhabit this type.
+--   * @'ObjectSlotOf' fs@ — values that have at least the fields in @fs@.
+--     Unspecified fields are conceptually filled with 'NormalizedTypeUnknown', so
+--     'ObjectSlotAbsent' is *not* the same as @'ObjectSlotOf' Map.empty@.
+data ObjectSlot where
+  ObjectSlotAbsent :: ObjectSlot
+  ObjectSlotOf :: !(Map Text NormalizedType) -> ObjectSlot
   deriving (Eq, Show)
 
 -- | Function layer.
 --
---   * 'FunctionAbsent' — no function values inhabit this type.
---   * @'FunctionOf' shape@ — function values matching @shape@.
+--   * 'FunctionSlotAbsent' — no function values inhabit this type.
+--   * @'FunctionSlotOf' shape@ — function values matching @shape@.
 --
 -- Multiple function shapes in a union are collapsed into a single shape via
 -- the product-normalisation rule (label-set union with per-common-label
 -- intersection of types).
-data FunctionSlot
-  = FunctionAbsent
-  | FunctionOf !FunctionShape
+data FunctionSlot where
+  FunctionSlotAbsent :: FunctionSlot
+  FunctionSlotOf :: !FunctionShape -> FunctionSlot
   deriving (Eq, Show)
 
 -- | Concrete function shape. Parameters are keyed by their label (order is
@@ -185,20 +185,20 @@ data FunctionShape = FunctionShape
 -- Helpers
 -- ---------------------------------------------------------------------------
 
--- | The "all empty" 'LayeredType'. @'NTLayered' 'emptyLayered'@ is the
+-- | The "all empty" 'LayeredType'. @'NormalizedTypeLayered' 'emptyLayered'@ is the
 -- canonical bottom (never) type.
 emptyLayered :: LayeredType
 emptyLayered =
   LayeredType
-    { numberLayer = NumberLiterals Set.empty,
-      stringLayer = StringLiterals Set.empty,
+    { numberLayer = NumberSlotLiterals Set.empty,
+      stringLayer = StringSlotLiterals Set.empty,
       booleanLayer = Set.empty,
       nullLayer = False,
-      functionLayer = FunctionAbsent,
-      arrayLayer = ArrayAbsent,
+      functionLayer = FunctionSlotAbsent,
+      arrayLayer = ArraySlotAbsent,
       tupleLayer = Map.empty,
       dataLayer = Set.empty,
-      objectLayer = ObjectAbsent
+      objectLayer = ObjectSlotAbsent
     }
 
 -- ---------------------------------------------------------------------------
@@ -215,8 +215,8 @@ emptyLayered =
 -- 'SemanticTypeUnion'.
 denormalise :: NormalizedType -> SemanticType Resolved
 denormalise = \case
-  NTUnknown -> SemanticTypeUnknown
-  NTLayered layered -> case denormaliseBranches layered of
+  NormalizedTypeUnknown -> SemanticTypeUnknown
+  NormalizedTypeLayered layered -> case denormaliseBranches layered of
     [] -> SemanticTypeNever
     [single] -> single
     branches -> SemanticTypeUnion branches
@@ -237,14 +237,14 @@ denormaliseBranches LayeredType {..} =
 
 numberBranches :: NumberSlot -> [SemanticType Resolved]
 numberBranches = \case
-  NumberLiterals literals -> SemanticTypeLiteralInteger <$> Set.toList literals
-  NumberInteger -> [SemanticTypeInteger]
-  NumberNumber -> [SemanticTypeNumber]
+  NumberSlotLiterals literals -> SemanticTypeLiteralInteger <$> Set.toList literals
+  NumberSlotInteger -> [SemanticTypeInteger]
+  NumberSlotNumber -> [SemanticTypeNumber]
 
 stringBranches :: StringSlot -> [SemanticType Resolved]
 stringBranches = \case
-  StringLiterals literals -> SemanticTypeLiteralString <$> Set.toList literals
-  StringAny -> [SemanticTypeString]
+  StringSlotLiterals literals -> SemanticTypeLiteralString <$> Set.toList literals
+  StringSlotAny -> [SemanticTypeString]
 
 booleanBranches :: Set Bool -> [SemanticType Resolved]
 booleanBranches values
@@ -257,8 +257,8 @@ nullBranches False = []
 
 functionBranches :: FunctionSlot -> [SemanticType Resolved]
 functionBranches = \case
-  FunctionAbsent -> []
-  FunctionOf shape -> [makeFunction shape]
+  FunctionSlotAbsent -> []
+  FunctionSlotOf shape -> [makeFunction shape]
   where
     makeFunction FunctionShape {parameters, returnType, effects} =
       SemanticTypeFunction
@@ -268,8 +268,8 @@ functionBranches = \case
 
 arrayBranches :: ArraySlot -> [SemanticType Resolved]
 arrayBranches = \case
-  ArrayAbsent -> []
-  ArrayOf elementType -> [SemanticTypeArray (denormalise elementType)]
+  ArraySlotAbsent -> []
+  ArraySlotOf elementType -> [SemanticTypeArray (denormalise elementType)]
 
 tupleBranches :: Map Int [NormalizedType] -> [SemanticType Resolved]
 tupleBranches = fmap (SemanticTypeTuple . fmap denormalise . snd) . Map.toList
@@ -279,23 +279,23 @@ dataBranches = fmap SemanticTypeData . Set.toList
 
 objectBranches :: ObjectSlot -> [SemanticType Resolved]
 objectBranches = \case
-  ObjectAbsent -> []
-  ObjectOf fields -> [SemanticTypeObject (Map.map denormalise fields)]
+  ObjectSlotAbsent -> []
+  ObjectSlotOf fields -> [SemanticTypeObject (Map.map denormalise fields)]
 
 -- ---------------------------------------------------------------------------
 -- isNeverNT / isUnknownNT
 -- ---------------------------------------------------------------------------
 
--- | Is this the bottom type? Equivalent to @NTLayered emptyLayered@.
+-- | Is this the bottom type? Equivalent to @NormalizedTypeLayered emptyLayered@.
 isNeverNT :: NormalizedType -> Bool
 isNeverNT = \case
-  NTLayered layered -> isEmptyLayered layered
+  NormalizedTypeLayered layered -> isEmptyLayered layered
   _ -> False
 
 -- | Is this the top type?
 isUnknownNT :: NormalizedType -> Bool
 isUnknownNT = \case
-  NTUnknown -> True
+  NormalizedTypeUnknown -> True
   _ -> False
 
 isEmptyLayered :: LayeredType -> Bool
@@ -312,27 +312,27 @@ isEmptyLayered LayeredType {..} =
 
 isEmptyNumber :: NumberSlot -> Bool
 isEmptyNumber = \case
-  NumberLiterals s -> Set.null s
+  NumberSlotLiterals s -> Set.null s
   _ -> False
 
 isEmptyString :: StringSlot -> Bool
 isEmptyString = \case
-  StringLiterals s -> Set.null s
+  StringSlotLiterals s -> Set.null s
   _ -> False
 
 isEmptyArray :: ArraySlot -> Bool
 isEmptyArray = \case
-  ArrayAbsent -> True
+  ArraySlotAbsent -> True
   _ -> False
 
 isEmptyFunction :: FunctionSlot -> Bool
 isEmptyFunction = \case
-  FunctionAbsent -> True
+  FunctionSlotAbsent -> True
   _ -> False
 
 isEmptyObject :: ObjectSlot -> Bool
 isEmptyObject = \case
-  ObjectAbsent -> True
+  ObjectSlotAbsent -> True
   _ -> False
 
 -- ---------------------------------------------------------------------------
@@ -345,36 +345,36 @@ isEmptyObject = \case
 -- collapses cross-component correlation in tuple unions).
 normaliseSemantic :: SemanticType Resolved -> NormalizedType
 normaliseSemantic = \case
-  SemanticTypeUnknown -> NTUnknown
-  SemanticTypeNever -> NTLayered emptyLayered
-  SemanticTypeNull -> NTLayered emptyLayered {nullLayer = True}
+  SemanticTypeUnknown -> NormalizedTypeUnknown
+  SemanticTypeNever -> NormalizedTypeLayered emptyLayered
+  SemanticTypeNull -> NormalizedTypeLayered emptyLayered {nullLayer = True}
   SemanticTypeBoolean ->
-    NTLayered emptyLayered {booleanLayer = Set.fromList [True, False]}
+    NormalizedTypeLayered emptyLayered {booleanLayer = Set.fromList [True, False]}
   SemanticTypeInteger ->
-    NTLayered emptyLayered {numberLayer = NumberInteger}
+    NormalizedTypeLayered emptyLayered {numberLayer = NumberSlotInteger}
   SemanticTypeNumber ->
-    NTLayered emptyLayered {numberLayer = NumberNumber}
+    NormalizedTypeLayered emptyLayered {numberLayer = NumberSlotNumber}
   SemanticTypeString ->
-    NTLayered emptyLayered {stringLayer = StringAny}
+    NormalizedTypeLayered emptyLayered {stringLayer = StringSlotAny}
   SemanticTypeLiteralInteger value ->
-    NTLayered emptyLayered {numberLayer = NumberLiterals (Set.singleton value)}
+    NormalizedTypeLayered emptyLayered {numberLayer = NumberSlotLiterals (Set.singleton value)}
   SemanticTypeLiteralString value ->
-    NTLayered emptyLayered {stringLayer = StringLiterals (Set.singleton value)}
+    NormalizedTypeLayered emptyLayered {stringLayer = StringSlotLiterals (Set.singleton value)}
   SemanticTypeLiteralBoolean value ->
-    NTLayered emptyLayered {booleanLayer = Set.singleton value}
+    NormalizedTypeLayered emptyLayered {booleanLayer = Set.singleton value}
   SemanticTypeArray element ->
-    NTLayered emptyLayered {arrayLayer = ArrayOf (normaliseSemantic element)}
+    NormalizedTypeLayered emptyLayered {arrayLayer = ArraySlotOf (normaliseSemantic element)}
   SemanticTypeTuple elements ->
-    NTLayered
+    NormalizedTypeLayered
       emptyLayered
         { tupleLayer = Map.singleton (length elements) (normaliseSemantic <$> elements)
         }
   SemanticTypeData typeId ->
-    NTLayered emptyLayered {dataLayer = Set.singleton typeId}
+    NormalizedTypeLayered emptyLayered {dataLayer = Set.singleton typeId}
   SemanticTypeObject fields ->
-    NTLayered
+    NormalizedTypeLayered
       emptyLayered
-        { objectLayer = ObjectOf (Map.map normaliseSemantic fields)
+        { objectLayer = ObjectSlotOf (Map.map normaliseSemantic fields)
         }
   SemanticTypeFunction parameterTypes returnType effects ->
     let shape =
@@ -384,9 +384,9 @@ normaliseSemantic = \case
               effects = effects.effectReqs
               -- effectVars must be empty in Resolved phase by Zonker invariant.
             }
-     in NTLayered emptyLayered {functionLayer = FunctionOf shape}
+     in NormalizedTypeLayered emptyLayered {functionLayer = FunctionSlotOf shape}
   SemanticTypeUnion branches ->
-    foldr (unionNT . normaliseSemantic) (NTLayered emptyLayered) branches
+    foldr (unionNT . normaliseSemantic) (NormalizedTypeLayered emptyLayered) branches
 
 -- ---------------------------------------------------------------------------
 -- Union (least upper bound)
@@ -395,10 +395,10 @@ normaliseSemantic = \case
 -- | Pointwise union of two normalized types.
 unionNT :: NormalizedType -> NormalizedType -> NormalizedType
 unionNT leftType rightType = case (leftType, rightType) of
-  (NTUnknown, _) -> NTUnknown
-  (_, NTUnknown) -> NTUnknown
-  (NTLayered leftLayered, NTLayered rightLayered) ->
-    NTLayered (unionLayered leftLayered rightLayered)
+  (NormalizedTypeUnknown, _) -> NormalizedTypeUnknown
+  (_, NormalizedTypeUnknown) -> NormalizedTypeUnknown
+  (NormalizedTypeLayered leftLayered, NormalizedTypeLayered rightLayered) ->
+    NormalizedTypeLayered (unionLayered leftLayered rightLayered)
 
 unionLayered :: LayeredType -> LayeredType -> LayeredType
 unionLayered leftLayered rightLayered =
@@ -416,27 +416,27 @@ unionLayered leftLayered rightLayered =
 
 unionNumberSlot :: NumberSlot -> NumberSlot -> NumberSlot
 unionNumberSlot leftSlot rightSlot = case (leftSlot, rightSlot) of
-  (NumberNumber, _) -> NumberNumber
-  (_, NumberNumber) -> NumberNumber
-  (NumberInteger, NumberInteger) -> NumberInteger
-  (NumberInteger, NumberLiterals _) -> NumberInteger
-  (NumberLiterals _, NumberInteger) -> NumberInteger
-  (NumberLiterals leftLiterals, NumberLiterals rightLiterals) ->
-    NumberLiterals (Set.union leftLiterals rightLiterals)
+  (NumberSlotNumber, _) -> NumberSlotNumber
+  (_, NumberSlotNumber) -> NumberSlotNumber
+  (NumberSlotInteger, NumberSlotInteger) -> NumberSlotInteger
+  (NumberSlotInteger, NumberSlotLiterals _) -> NumberSlotInteger
+  (NumberSlotLiterals _, NumberSlotInteger) -> NumberSlotInteger
+  (NumberSlotLiterals leftLiterals, NumberSlotLiterals rightLiterals) ->
+    NumberSlotLiterals (Set.union leftLiterals rightLiterals)
 
 unionStringSlot :: StringSlot -> StringSlot -> StringSlot
 unionStringSlot leftSlot rightSlot = case (leftSlot, rightSlot) of
-  (StringAny, _) -> StringAny
-  (_, StringAny) -> StringAny
-  (StringLiterals leftLiterals, StringLiterals rightLiterals) ->
-    StringLiterals (Set.union leftLiterals rightLiterals)
+  (StringSlotAny, _) -> StringSlotAny
+  (_, StringSlotAny) -> StringSlotAny
+  (StringSlotLiterals leftLiterals, StringSlotLiterals rightLiterals) ->
+    StringSlotLiterals (Set.union leftLiterals rightLiterals)
 
 unionArraySlot :: ArraySlot -> ArraySlot -> ArraySlot
 unionArraySlot leftSlot rightSlot = case (leftSlot, rightSlot) of
-  (ArrayAbsent, other) -> other
-  (other, ArrayAbsent) -> other
-  (ArrayOf leftElement, ArrayOf rightElement) ->
-    ArrayOf (unionNT leftElement rightElement)
+  (ArraySlotAbsent, other) -> other
+  (other, ArraySlotAbsent) -> other
+  (ArraySlotOf leftElement, ArraySlotOf rightElement) ->
+    ArraySlotOf (unionNT leftElement rightElement)
 
 -- | Union of function slots.
 --
@@ -445,10 +445,10 @@ unionArraySlot leftSlot rightSlot = case (leftSlot, rightSlot) of
 -- in one side are kept as-is. Effects are unioned.
 unionFunctionLayer :: FunctionSlot -> FunctionSlot -> FunctionSlot
 unionFunctionLayer leftSlot rightSlot = case (leftSlot, rightSlot) of
-  (FunctionAbsent, other) -> other
-  (other, FunctionAbsent) -> other
-  (FunctionOf leftShape, FunctionOf rightShape) ->
-    FunctionOf (unionFunctionShape leftShape rightShape)
+  (FunctionSlotAbsent, other) -> other
+  (other, FunctionSlotAbsent) -> other
+  (FunctionSlotOf leftShape, FunctionSlotOf rightShape) ->
+    FunctionSlotOf (unionFunctionShape leftShape rightShape)
 
 unionFunctionShape :: FunctionShape -> FunctionShape -> FunctionShape
 unionFunctionShape leftShape rightShape =
@@ -469,11 +469,11 @@ unionTupleLayer = Map.unionWith (zipWith unionNT)
 
 unionObjectSlot :: ObjectSlot -> ObjectSlot -> ObjectSlot
 unionObjectSlot leftSlot rightSlot = case (leftSlot, rightSlot) of
-  (ObjectAbsent, other) -> other
-  (other, ObjectAbsent) -> other
-  (ObjectOf leftFields, ObjectOf rightFields) ->
+  (ObjectSlotAbsent, other) -> other
+  (other, ObjectSlotAbsent) -> other
+  (ObjectSlotOf leftFields, ObjectSlotOf rightFields) ->
     -- Width subtyping: union keeps only common fields with widened types.
-    ObjectOf (Map.intersectionWith unionNT leftFields rightFields)
+    ObjectSlotOf (Map.intersectionWith unionNT leftFields rightFields)
 
 -- ---------------------------------------------------------------------------
 -- Intersection (greatest lower bound)
@@ -482,10 +482,10 @@ unionObjectSlot leftSlot rightSlot = case (leftSlot, rightSlot) of
 -- | Pointwise intersection of two normalized types.
 intersectNT :: NormalizedType -> NormalizedType -> NormalizedType
 intersectNT leftType rightType = case (leftType, rightType) of
-  (NTUnknown, other) -> other
-  (other, NTUnknown) -> other
-  (NTLayered leftLayered, NTLayered rightLayered) ->
-    NTLayered (intersectLayered leftLayered rightLayered)
+  (NormalizedTypeUnknown, other) -> other
+  (other, NormalizedTypeUnknown) -> other
+  (NormalizedTypeLayered leftLayered, NormalizedTypeLayered rightLayered) ->
+    NormalizedTypeLayered (intersectLayered leftLayered rightLayered)
 
 intersectLayered :: LayeredType -> LayeredType -> LayeredType
 intersectLayered leftLayered rightLayered =
@@ -503,26 +503,26 @@ intersectLayered leftLayered rightLayered =
 
 intersectNumberSlot :: NumberSlot -> NumberSlot -> NumberSlot
 intersectNumberSlot leftSlot rightSlot = case (leftSlot, rightSlot) of
-  (NumberNumber, other) -> other
-  (other, NumberNumber) -> other
-  (NumberInteger, other) -> other
-  (other, NumberInteger) -> other
-  (NumberLiterals leftLiterals, NumberLiterals rightLiterals) ->
-    NumberLiterals (Set.intersection leftLiterals rightLiterals)
+  (NumberSlotNumber, other) -> other
+  (other, NumberSlotNumber) -> other
+  (NumberSlotInteger, other) -> other
+  (other, NumberSlotInteger) -> other
+  (NumberSlotLiterals leftLiterals, NumberSlotLiterals rightLiterals) ->
+    NumberSlotLiterals (Set.intersection leftLiterals rightLiterals)
 
 intersectStringSlot :: StringSlot -> StringSlot -> StringSlot
 intersectStringSlot leftSlot rightSlot = case (leftSlot, rightSlot) of
-  (StringAny, other) -> other
-  (other, StringAny) -> other
-  (StringLiterals leftLiterals, StringLiterals rightLiterals) ->
-    StringLiterals (Set.intersection leftLiterals rightLiterals)
+  (StringSlotAny, other) -> other
+  (other, StringSlotAny) -> other
+  (StringSlotLiterals leftLiterals, StringSlotLiterals rightLiterals) ->
+    StringSlotLiterals (Set.intersection leftLiterals rightLiterals)
 
 intersectArraySlot :: ArraySlot -> ArraySlot -> ArraySlot
 intersectArraySlot leftSlot rightSlot = case (leftSlot, rightSlot) of
-  (ArrayAbsent, _) -> ArrayAbsent
-  (_, ArrayAbsent) -> ArrayAbsent
-  (ArrayOf leftElement, ArrayOf rightElement) ->
-    ArrayOf (intersectNT leftElement rightElement)
+  (ArraySlotAbsent, _) -> ArraySlotAbsent
+  (_, ArraySlotAbsent) -> ArraySlotAbsent
+  (ArraySlotOf leftElement, ArraySlotOf rightElement) ->
+    ArraySlotOf (intersectNT leftElement rightElement)
 
 -- | Intersection of function slots.
 --
@@ -531,10 +531,10 @@ intersectArraySlot leftSlot rightSlot = case (leftSlot, rightSlot) of
 -- Effects are unioned (合併) per the spec.
 intersectFunctionLayer :: FunctionSlot -> FunctionSlot -> FunctionSlot
 intersectFunctionLayer leftSlot rightSlot = case (leftSlot, rightSlot) of
-  (FunctionAbsent, _) -> FunctionAbsent
-  (_, FunctionAbsent) -> FunctionAbsent
-  (FunctionOf leftShape, FunctionOf rightShape) ->
-    FunctionOf (intersectFunctionShape leftShape rightShape)
+  (FunctionSlotAbsent, _) -> FunctionSlotAbsent
+  (_, FunctionSlotAbsent) -> FunctionSlotAbsent
+  (FunctionSlotOf leftShape, FunctionSlotOf rightShape) ->
+    FunctionSlotOf (intersectFunctionShape leftShape rightShape)
 
 intersectFunctionShape :: FunctionShape -> FunctionShape -> FunctionShape
 intersectFunctionShape leftShape rightShape =
@@ -555,14 +555,14 @@ intersectTupleLayer = Map.intersectionWith (zipWith intersectNT)
 
 intersectObjectSlot :: ObjectSlot -> ObjectSlot -> ObjectSlot
 intersectObjectSlot leftSlot rightSlot = case (leftSlot, rightSlot) of
-  (ObjectAbsent, _) -> ObjectAbsent
-  (_, ObjectAbsent) -> ObjectAbsent
-  (ObjectOf leftFields, ObjectOf rightFields) ->
+  (ObjectSlotAbsent, _) -> ObjectSlotAbsent
+  (_, ObjectSlotAbsent) -> ObjectSlotAbsent
+  (ObjectSlotOf leftFields, ObjectSlotOf rightFields) ->
     -- Intersection: all fields, common ones intersected.
     let commonFields = Map.intersectionWith intersectNT leftFields rightFields
         leftOnlyFields = Map.difference leftFields rightFields
         rightOnlyFields = Map.difference rightFields leftFields
-     in ObjectOf (Map.unions [commonFields, leftOnlyFields, rightOnlyFields])
+     in ObjectSlotOf (Map.unions [commonFields, leftOnlyFields, rightOnlyFields])
 
 -- ---------------------------------------------------------------------------
 -- Subtype check
@@ -573,9 +573,9 @@ intersectObjectSlot leftSlot rightSlot = case (leftSlot, rightSlot) of
 -- slot of the left must be a subtype of the corresponding slot of the right.
 subtypeNT :: NormalizedType -> NormalizedType -> Bool
 subtypeNT leftType rightType = case (leftType, rightType) of
-  (_, NTUnknown) -> True
-  (NTUnknown, _) -> False
-  (NTLayered leftLayered, NTLayered rightLayered) ->
+  (_, NormalizedTypeUnknown) -> True
+  (NormalizedTypeUnknown, _) -> False
+  (NormalizedTypeLayered leftLayered, NormalizedTypeLayered rightLayered) ->
     subtypeLayered leftLayered rightLayered
 
 subtypeLayered :: LayeredType -> LayeredType -> Bool
@@ -592,35 +592,35 @@ subtypeLayered leftLayered rightLayered =
 
 subtypeNumberSlot :: NumberSlot -> NumberSlot -> Bool
 subtypeNumberSlot leftSlot rightSlot = case (leftSlot, rightSlot) of
-  (NumberLiterals literals, _) | Set.null literals -> True
-  (_, NumberNumber) -> True
-  (NumberNumber, _) -> False
-  (NumberInteger, NumberInteger) -> True
-  (NumberInteger, _) -> False
-  (NumberLiterals _, NumberInteger) -> True
-  (NumberLiterals leftLiterals, NumberLiterals rightLiterals) ->
+  (NumberSlotLiterals literals, _) | Set.null literals -> True
+  (_, NumberSlotNumber) -> True
+  (NumberSlotNumber, _) -> False
+  (NumberSlotInteger, NumberSlotInteger) -> True
+  (NumberSlotInteger, _) -> False
+  (NumberSlotLiterals _, NumberSlotInteger) -> True
+  (NumberSlotLiterals leftLiterals, NumberSlotLiterals rightLiterals) ->
     Set.isSubsetOf leftLiterals rightLiterals
 
 subtypeStringSlot :: StringSlot -> StringSlot -> Bool
 subtypeStringSlot leftSlot rightSlot = case (leftSlot, rightSlot) of
-  (StringLiterals literals, _) | Set.null literals -> True
-  (_, StringAny) -> True
-  (StringAny, _) -> False
-  (StringLiterals leftLiterals, StringLiterals rightLiterals) ->
+  (StringSlotLiterals literals, _) | Set.null literals -> True
+  (_, StringSlotAny) -> True
+  (StringSlotAny, _) -> False
+  (StringSlotLiterals leftLiterals, StringSlotLiterals rightLiterals) ->
     Set.isSubsetOf leftLiterals rightLiterals
 
 subtypeArraySlot :: ArraySlot -> ArraySlot -> Bool
 subtypeArraySlot leftSlot rightSlot = case (leftSlot, rightSlot) of
-  (ArrayAbsent, _) -> True
-  (_, ArrayAbsent) -> False
-  (ArrayOf leftElement, ArrayOf rightElement) ->
+  (ArraySlotAbsent, _) -> True
+  (_, ArraySlotAbsent) -> False
+  (ArraySlotOf leftElement, ArraySlotOf rightElement) ->
     subtypeNT leftElement rightElement -- covariant
 
 subtypeFunctionLayer :: FunctionSlot -> FunctionSlot -> Bool
 subtypeFunctionLayer leftSlot rightSlot = case (leftSlot, rightSlot) of
-  (FunctionAbsent, _) -> True
-  (_, FunctionAbsent) -> False
-  (FunctionOf leftShape, FunctionOf rightShape) ->
+  (FunctionSlotAbsent, _) -> True
+  (_, FunctionSlotAbsent) -> False
+  (FunctionSlotOf leftShape, FunctionSlotOf rightShape) ->
     subtypeFunctionShape leftShape rightShape
 
 -- | @subtypeFunctionShape leftShape rightShape@ holds when every value of
@@ -660,9 +660,9 @@ subtypeTupleLayer leftShapes rightShapes = all checkArity (Map.toList leftShapes
 
 subtypeObjectSlot :: ObjectSlot -> ObjectSlot -> Bool
 subtypeObjectSlot leftSlot rightSlot = case (leftSlot, rightSlot) of
-  (ObjectAbsent, _) -> True
-  (_, ObjectAbsent) -> False
-  (ObjectOf leftFields, ObjectOf rightFields) ->
+  (ObjectSlotAbsent, _) -> True
+  (_, ObjectSlotAbsent) -> False
+  (ObjectSlotOf leftFields, ObjectSlotOf rightFields) ->
     -- left <: right: every required field of right is in left with compatible
     -- type. (Width subtyping: left may have extra fields.)
     all (checkField leftFields) (Map.toList rightFields)

@@ -47,11 +47,11 @@ import Katari.AST (SourceSpan)
 
 -- | Severity of a diagnostic. Ordered so 'Error' is the most severe;
 -- the 'Ord' instance is exploited by 'hasErrors'.
-data Severity
-  = Hint
-  | Info
-  | Warning
-  | Error
+data Severity where
+  SeverityHint :: Severity
+  SeverityInfo :: Severity
+  SeverityWarning :: Severity
+  SeverityError :: Severity
   deriving (Eq, Ord, Show, Generic)
 
 instance ToJSON Severity where
@@ -60,11 +60,16 @@ instance ToJSON Severity where
 instance FromJSON Severity where
   parseJSON = genericParseJSON severityOptions
 
+-- | Severity is JSON-encoded as a bare lowercase string ("hint" / "info" /
+-- "warning" / "error"). The full constructor name (e.g. "SeverityHint")
+-- carries the type-name prefix per CLAUDE.md naming conventions; the
+-- prefix is stripped at the JSON boundary so consumers see the
+-- conventional unadorned form.
 severityOptions :: Options
 severityOptions =
   defaultOptions
     { sumEncoding = UntaggedValue,
-      constructorTagModifier = map toLower,
+      constructorTagModifier = map toLower . drop (length ("Severity" :: String)),
       allNullaryToStringTag = True
     }
 
@@ -118,7 +123,7 @@ instance FromJSON DiagnosticNote where
 diagnosticError :: Text -> Text -> SourceSpan -> Diagnostic
 diagnosticError code_ message_ span_ =
   Diagnostic
-    { severity = Error,
+    { severity = SeverityError,
       code = code_,
       message = message_,
       span = span_,
@@ -130,7 +135,7 @@ diagnosticError code_ message_ span_ =
 diagnosticWarning :: Text -> Text -> SourceSpan -> Diagnostic
 diagnosticWarning code_ message_ span_ =
   Diagnostic
-    { severity = Warning,
+    { severity = SeverityWarning,
       code = code_,
       message = message_,
       span = span_,
@@ -142,4 +147,4 @@ diagnosticWarning code_ message_ span_ =
 -- Used by orchestrators (e.g. 'Katari.Compile') to decide whether to skip
 -- IR / schema emission.
 hasErrors :: [Diagnostic] -> Bool
-hasErrors = any ((== Error) . (.severity))
+hasErrors = any ((== SeverityError) . (.severity))

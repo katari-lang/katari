@@ -117,7 +117,7 @@ solve cgResult =
 
 -- | Top-level type-constraint solver loop. Returns the accumulated
 -- substitution and any errors encountered. Errors short-circuit the loop;
--- the caller will fall back to NTUnknown for any unsolved variables.
+-- the caller will fall back to NormalizedTypeUnknown for any unsolved variables.
 solveTypeWorklist ::
   Int ->
   Int ->
@@ -203,13 +203,13 @@ solveTypeWorklist startNextTypeVarId startNextEffectVarId initialConstraints =
 -- @t_p := Int@ has also been pinned. Without this step, the public output
 -- of the solver would carry transitive 'SemanticTypeVariable' references
 -- that 'semanticToConcrete' rejects, forcing the downstream to fall back
--- to 'NTUnknown'.
+-- to 'NormalizedTypeUnknown'.
 --
 -- Termination: each iteration is monotone (no entry gains new 'TypeVarId'
 -- references) and the substitution is finite. Self-referential cycles
 -- (@α := SemanticTypeVariable α@) reach the fixpoint immediately as
 -- 'applySubstSubst' folds them into themselves; downstream
--- 'semanticToConcrete' surfaces them as 'NTUnknown', the correct result
+-- 'semanticToConcrete' surfaces them as 'NormalizedTypeUnknown', the correct result
 -- for an unresolvable cyclic var.
 resolveDeepSubst :: Substitution -> Substitution
 resolveDeepSubst substitution =
@@ -235,7 +235,7 @@ checkContradictions = foldr collect []
 -- constraint exists.
 synthesisedReason :: Set Constraint -> ConstraintReason
 synthesisedReason constraints =
-  ConstraintReason ReasonSolverInternal originSpan
+  ConstraintReason ReasonKindSolverInternal originSpan
   where
     originSpan =
       case [reason.sourceSpan | TypeConstraint _ _ reason <- Set.toAscList constraints] of
@@ -250,13 +250,13 @@ synthesisedReason constraints =
 
 -- | Convert each pinned 'SemanticType' 'Unresolved' to the public
 -- 'NormalizedType' form. Variables that are still unresolved post-solve
--- (defensive case — should not normally happen) fall back to 'NTUnknown',
+-- (defensive case — should not normally happen) fall back to 'NormalizedTypeUnknown',
 -- the lattice top, so that downstream phases treat them as "any" rather
 -- than "never".
 substToNormalizedSafe :: Substitution -> Map TypeVarId NormalizedType
 substToNormalizedSafe = Map.map convert
   where
-    convert pinnedType = maybe NTUnknown normaliseSemantic (semanticToConcrete pinnedType)
+    convert pinnedType = maybe NormalizedTypeUnknown normaliseSemantic (semanticToConcrete pinnedType)
 
 -- ---------------------------------------------------------------------------
 -- Effect worklist (delegated to 'Solver.Effect')
@@ -274,12 +274,12 @@ solveEffectWorklist _ = Effect.solveEffectConstraints
 
 -- | Ensure every 'TypeVarId' allocated by the constraint generator has an
 -- entry. Missing entries (vars that the solver could not pin) fall back to
--- 'NTUnknown' (the lattice top) so that downstream phases see "any" rather
+-- 'NormalizedTypeUnknown' (the lattice top) so that downstream phases see "any" rather
 -- than "never".
 totaliseTypes :: Int -> Map TypeVarId NormalizedType -> Map TypeVarId NormalizedType
 totaliseTypes upperLimit given =
   Map.union given $
-    Map.fromList [(TypeVarId i, NTUnknown) | i <- [0 .. upperLimit - 1]]
+    Map.fromList [(TypeVarId i, NormalizedTypeUnknown) | i <- [0 .. upperLimit - 1]]
 
 totaliseEffects ::
   Int ->

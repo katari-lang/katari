@@ -91,19 +91,19 @@ toDiagnostic = \case
 -- ===========================================================================
 
 -- | Head constructor tag.
-data CtorTag
-  = CTData !ConstructorId
-  | CTLitInt !Integer
-  | CTLitStr !Text
-  | CTLitBool !Bool
-  | CTNull
-  | CTTupleN !Int
+data CtorTag where
+  CtorTagData :: !ConstructorId -> CtorTag
+  CtorTagLitInt :: !Integer -> CtorTag
+  CtorTagLitStr :: !Text -> CtorTag
+  CtorTagLitBool :: !Bool -> CtorTag
+  CtorTagNull :: CtorTag
+  CtorTagTupleN :: !Int -> CtorTag
   deriving (Eq, Ord, Show)
 
--- | Simplified pattern head. Variables and wildcards become 'PHWildcard'.
-data PatHead
-  = PHWildcard
-  | PHCtor !CtorTag ![PatHead]
+-- | Simplified pattern head. Variables and wildcards become 'PatHeadWildcard'.
+data PatHead where
+  PatHeadWildcard :: PatHead
+  PatHeadCtor :: !CtorTag -> ![PatHead] -> PatHead
   deriving (Eq, Show)
 
 -- | A row of the pattern matrix.
@@ -147,21 +147,21 @@ useful ctx matrix@(PatMatrix rows) testRow = case (rows, testRow) of
   -- Base: empty query — useful only if matrix is empty (vacuous).
   (_, []) -> null rows
   -- Recursive: dispatch on head of query.
-  (_, PHWildcard : restPats) ->
+  (_, PatHeadWildcard : restPats) ->
     let colType = headColumnType ctx
         sigma = headsOf matrix
      in if isCompleteSig (map fst sigma) colType ctx.zonkResult
           then -- complete signature: recurse on each specialisation
             any
               ( \(tag, arity) ->
-                  let freshWilds = replicate arity PHWildcard
+                  let freshWilds = replicate arity PatHeadWildcard
                       newCtx = specializeCtx tag colType ctx
                    in useful newCtx (specialize tag arity matrix) (freshWilds ++ restPats)
               )
               sigma
           else -- incomplete: fall through to default matrix
             useful (defaultCtx ctx) (defaultMatrix matrix) restPats
-  (_, PHCtor tag subPats : restPats) ->
+  (_, PatHeadCtor tag subPats : restPats) ->
     let arity = length subPats
         colType = headColumnType ctx
         newCtx = specializeCtx tag colType ctx
@@ -172,7 +172,7 @@ useful ctx matrix@(PatMatrix rows) testRow = case (rows, testRow) of
 headsOf :: PatMatrix -> [(CtorTag, Int)]
 headsOf (PatMatrix rows) =
   nubBy (\a b -> fst a == fst b)
-    [(tag, length subs) | PatRow (PHCtor tag subs : _) _ <- rows]
+    [(tag, length subs) | PatRow (PatHeadCtor tag subs : _) _ <- rows]
 
 -- | Specialise the matrix for constructor @tag@ with @arity@ fields.
 -- Rows whose first column is @tag@ are expanded; wildcard-head rows gain
@@ -186,12 +186,12 @@ specializeRow tag arity PatRow {patRowPats, patRowSpan} =
   case patRowPats of
     [] -> Nothing
     (head_ : rest) -> case head_ of
-      PHCtor headTag subPats
+      PatHeadCtor headTag subPats
         | headTag == tag ->
             Just (PatRow (subPats <> rest) patRowSpan)
         | otherwise -> Nothing
-      PHWildcard ->
-        Just (PatRow (replicate arity PHWildcard <> rest) patRowSpan)
+      PatHeadWildcard ->
+        Just (PatRow (replicate arity PatHeadWildcard <> rest) patRowSpan)
 
 -- | Default matrix: keep rows whose first column is a wildcard, then drop
 -- that column.
@@ -203,8 +203,8 @@ defaultRow :: PatRow -> Maybe PatRow
 defaultRow PatRow {patRowPats, patRowSpan} =
   case patRowPats of
     [] -> Nothing
-    (PHWildcard : rest) -> Just (PatRow rest patRowSpan)
-    (PHCtor {} : _) -> Nothing
+    (PatHeadWildcard : rest) -> Just (PatRow rest patRowSpan)
+    (PatHeadCtor {} : _) -> Nothing
 
 -- | Update the column-type context when specialising on @tag@.
 -- The head column is replaced by the field types of @tag@.
@@ -222,7 +222,7 @@ defaultCtx ctx = ctx {columnTypes = drop 1 ctx.columnTypes}
 -- for literal / null tags (arity 0) and tuples (handled separately).
 getSubFieldTypes :: CtorTag -> SemanticType Resolved -> ZonkResult -> [SemanticType Resolved]
 getSubFieldTypes tag colType zr = case tag of
-  CTData cid ->
+  CtorTagData cid ->
     case Map.lookup cid zr.zonkedConstructors of
       Nothing -> []
       Just cd ->
@@ -230,7 +230,7 @@ getSubFieldTypes tag colType zr = case tag of
           Just (SemanticTypeFunction params _ _) ->
             map snd (Map.toAscList params)
           _ -> []
-  CTTupleN _ -> case colType of
+  CtorTagTupleN _ -> case colType of
     SemanticTypeTuple ts -> ts
     _ -> []
   _ -> []
@@ -245,20 +245,20 @@ getSubFieldTypes tag colType zr = case tag of
 isCompleteSig :: [CtorTag] -> SemanticType Resolved -> ZonkResult -> Bool
 isCompleteSig seen ty zr = case ty of
   SemanticTypeBoolean ->
-    CTLitBool True `elem` seen && CTLitBool False `elem` seen
+    CtorTagLitBool True `elem` seen && CtorTagLitBool False `elem` seen
   SemanticTypeNull ->
-    CTNull `elem` seen
+    CtorTagNull `elem` seen
   SemanticTypeLiteralBoolean b ->
-    CTLitBool b `elem` seen
+    CtorTagLitBool b `elem` seen
   SemanticTypeLiteralInteger n ->
-    CTLitInt n `elem` seen
+    CtorTagLitInt n `elem` seen
   SemanticTypeLiteralString s ->
-    CTLitStr s `elem` seen
+    CtorTagLitStr s `elem` seen
   SemanticTypeTuple ts ->
-    CTTupleN (length ts) `elem` seen
+    CtorTagTupleN (length ts) `elem` seen
   SemanticTypeData tid ->
     let ctorIds = [cid | (cid, _) <- ctorsOfType zr tid]
-        seenCtorIds = [cid | CTData cid <- seen]
+        seenCtorIds = [cid | CtorTagData cid <- seen]
      in null ctorIds -- vacuously complete (no constructors)
           || all (`elem` seenCtorIds) ctorIds
   SemanticTypeUnion branches ->
@@ -298,29 +298,29 @@ lookupCtorArity zr varId =
 -- column ordering across all rows.
 patternToHead :: AST.Pattern Zonked -> PatHead
 patternToHead = \case
-  AST.PatternVariable _ -> PHWildcard
-  AST.PatternWildcard _ -> PHWildcard
-  AST.PatternLiteral lp -> PHCtor (literalTag lp.value) []
+  AST.PatternVariable _ -> PatHeadWildcard
+  AST.PatternWildcard _ -> PatHeadWildcard
+  AST.PatternLiteral lp -> PatHeadCtor (literalTag lp.value) []
   AST.PatternTuple tp ->
-    PHCtor (CTTupleN (length tp.elements)) (map patternToHead tp.elements)
+    PatHeadCtor (CtorTagTupleN (length tp.elements)) (map patternToHead tp.elements)
   AST.PatternQualifiedConstructor qp ->
     case qp.constructorName.resolution of
       Nothing ->
         -- Unresolved ctor: treat as wildcard (Identifier error already emitted)
-        PHWildcard
+        PatHeadWildcard
       Just cid ->
         let sortedSubs =
               map (patternToHead . snd) $
                 sortBy (comparing ((.text) . fst)) qp.parameters
-         in PHCtor (CTData cid) sortedSubs
+         in PatHeadCtor (CtorTagData cid) sortedSubs
 
 literalTag :: AST.LiteralValue -> CtorTag
 literalTag = \case
-  AST.LiteralValueInteger n -> CTLitInt n
-  AST.LiteralValueString s -> CTLitStr s
-  AST.LiteralValueBoolean b -> CTLitBool b
-  AST.LiteralValueNull -> CTNull
-  AST.LiteralValueNumber _ -> CTLitStr "(number)"
+  AST.LiteralValueInteger n -> CtorTagLitInt n
+  AST.LiteralValueString s -> CtorTagLitStr s
+  AST.LiteralValueBoolean b -> CtorTagLitBool b
+  AST.LiteralValueNull -> CtorTagNull
+  AST.LiteralValueNumber _ -> CtorTagLitStr "(number)"
 
 -- | Extract the semantic type from any 'AST.Expression Zonked'.
 getExprType :: AST.Expression Zonked -> SemanticType Resolved
@@ -353,15 +353,15 @@ renderWitnesses witnesses = "`" <> Text.intercalate " | " witnesses <> "`"
 -- for K0290 / K0291 diagnostic messages.
 renderPatHead :: ZonkResult -> PatHead -> Text
 renderPatHead zr = \case
-  PHWildcard -> "_"
-  PHCtor (CTLitBool b) _ -> if b then "true" else "false"
-  PHCtor CTNull _ -> "null"
-  PHCtor (CTLitInt n) _ -> Text.pack (show n)
-  PHCtor (CTLitStr s) _ -> "\"" <> s <> "\""
-  PHCtor (CTTupleN n) subs ->
+  PatHeadWildcard -> "_"
+  PatHeadCtor (CtorTagLitBool b) _ -> if b then "true" else "false"
+  PatHeadCtor CtorTagNull _ -> "null"
+  PatHeadCtor (CtorTagLitInt n) _ -> Text.pack (show n)
+  PatHeadCtor (CtorTagLitStr s) _ -> "\"" <> s <> "\""
+  PatHeadCtor (CtorTagTupleN n) subs ->
     "(" <> Text.intercalate ", " (map (renderPatHead zr) subs) <> ")"
       <> if null subs then Text.pack (" {tuple/" <> show n <> "}") else ""
-  PHCtor (CTData cid) subs ->
+  PatHeadCtor (CtorTagData cid) subs ->
     let ctorName = case Map.lookup cid zr.zonkedConstructors of
           Just cd -> cd.constructorQualifiedName.name
           Nothing -> "?"
@@ -383,9 +383,9 @@ checkMatch zr me =
       matrix = PatMatrix armRows
       -- Non-exhaustiveness: is there a value not covered by any arm?
       nonExhaustiveErrors =
-        if useful ctx matrix [PHWildcard]
+        if useful ctx matrix [PatHeadWildcard]
           then
-            let witness = renderPatHead zr PHWildcard
+            let witness = renderPatHead zr PatHeadWildcard
              in [ExhaustiveErrorNonExhaustiveMatch me.sourceSpan [witness]]
           else []
       -- Reachability: is arm i already covered by prior arms?
@@ -409,9 +409,9 @@ checkIrrefutable zr pattern subjectType =
       ctx = TypeCtx {columnTypes = [subjectType], zonkResult = zr}
       sp = AST.sourceSpanOf pattern
       row = PatRow [headPat] sp
-   in if useful ctx (PatMatrix [row]) [PHWildcard]
+   in if useful ctx (PatMatrix [row]) [PatHeadWildcard]
         then
-          let witness = renderPatHead zr PHWildcard
+          let witness = renderPatHead zr PatHeadWildcard
            in [ExhaustiveErrorNonExhaustiveBinding sp [witness]]
         else []
 

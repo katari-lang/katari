@@ -45,33 +45,33 @@ spec = describe "Katari.Schema" $ do
 toJsonSchemaSpec :: Spec
 toJsonSchemaSpec = describe "toJsonSchema (SemanticType -> JsonSchema)" $ do
   it "primitives map to their JSON Schema counterparts" $ do
-    SemanticTypeNull `shouldHaveCore` SCNull
-    SemanticTypeBoolean `shouldHaveCore` SCBoolean
-    SemanticTypeNumber `shouldHaveCore` SCNumber
-    SemanticTypeInteger `shouldHaveCore` SCInteger {minimum = Nothing, maximum = Nothing}
-    SemanticTypeString `shouldHaveCore` SCString {schemaEnum = []}
-    SemanticTypeNever `shouldHaveCore` SCNever
-    SemanticTypeUnknown `shouldHaveCore` SCUnknown
+    SemanticTypeNull `shouldHaveCore` SchemaCoreNull
+    SemanticTypeBoolean `shouldHaveCore` SchemaCoreBoolean
+    SemanticTypeNumber `shouldHaveCore` SchemaCoreNumber
+    SemanticTypeInteger `shouldHaveCore` SchemaCoreInteger {minimum = Nothing, maximum = Nothing}
+    SemanticTypeString `shouldHaveCore` SchemaCoreString {schemaEnum = []}
+    SemanticTypeNever `shouldHaveCore` SchemaCoreNever
+    SemanticTypeUnknown `shouldHaveCore` SchemaCoreUnknown
 
-  it "literal types become SCConst" $ do
-    SemanticTypeLiteralInteger 42 `shouldHaveCore` SCConst {value = Aeson.Number 42}
-    SemanticTypeLiteralString "hi" `shouldHaveCore` SCConst {value = String "hi"}
-    SemanticTypeLiteralBoolean True `shouldHaveCore` SCConst {value = Bool True}
+  it "literal types become SchemaCoreConst" $ do
+    SemanticTypeLiteralInteger 42 `shouldHaveCore` SchemaCoreConst {value = Aeson.Number 42}
+    SemanticTypeLiteralString "hi" `shouldHaveCore` SchemaCoreConst {value = String "hi"}
+    SemanticTypeLiteralBoolean True `shouldHaveCore` SchemaCoreConst {value = Bool True}
 
   it "arrays nest the element schema under 'items'" $ do
     let core = (toJsonSchema (SemanticTypeArray SemanticTypeInteger)).core
     case core of
-      SCArray {items} -> items.core `shouldBe` SCInteger {minimum = Nothing, maximum = Nothing}
-      _ -> expectationFailure "expected SCArray"
+      SchemaCoreArray {items} -> items.core `shouldBe` SchemaCoreInteger {minimum = Nothing, maximum = Nothing}
+      _ -> expectationFailure "expected SchemaCoreArray"
 
-  it "tuples become SCTuple with prefixItems" $ do
+  it "tuples become SchemaCoreTuple with prefixItems" $ do
     let t = SemanticTypeTuple [SemanticTypeBoolean, SemanticTypeInteger]
         core = (toJsonSchema t).core
     case core of
-      SCTuple {prefixItems} -> map (.core) prefixItems `shouldBe` [SCBoolean, SCInteger {minimum = Nothing, maximum = Nothing}]
-      _ -> expectationFailure "expected SCTuple"
+      SchemaCoreTuple {prefixItems} -> map (.core) prefixItems `shouldBe` [SchemaCoreBoolean, SchemaCoreInteger {minimum = Nothing, maximum = Nothing}]
+      _ -> expectationFailure "expected SchemaCoreTuple"
 
-  it "objects become SCObject with required = all field labels" $ do
+  it "objects become SchemaCoreObject with required = all field labels" $ do
     let t =
           SemanticTypeObject $
             Map.fromList
@@ -79,19 +79,19 @@ toJsonSchemaSpec = describe "toJsonSchema (SemanticType -> JsonSchema)" $ do
                 ("age", SemanticTypeInteger)
               ]
     case (toJsonSchema t).core of
-      SCObject {properties, required, additionalProperties} -> do
+      SchemaCoreObject {properties, required, additionalProperties} -> do
         Map.keysSet properties `shouldBe` Set.fromList ["age", "name"]
         required `shouldBe` Set.fromList ["age", "name"]
         additionalProperties `shouldBe` False
-      _ -> expectationFailure "expected SCObject"
+      _ -> expectationFailure "expected SchemaCoreObject"
 
-  it "function types fall back to SCUnknown (not JSON-serialisable)" $ do
+  it "function types fall back to SchemaCoreUnknown (not JSON-serialisable)" $ do
     let t =
           SemanticTypeFunction
             Map.empty
             SemanticTypeNull
             (SemanticEffect Set.empty Set.empty)
-    t `shouldHaveCore` SCUnknown
+    t `shouldHaveCore` SchemaCoreUnknown
 
 unionCompactionSpec :: Spec
 unionCompactionSpec = describe "union compaction" $ do
@@ -103,8 +103,8 @@ unionCompactionSpec = describe "union compaction" $ do
               SemanticTypeLiteralString "blue"
             ]
     case (toJsonSchema t).core of
-      SCString {schemaEnum} -> schemaEnum `shouldBe` ["red", "green", "blue"]
-      other -> expectationFailure ("expected SCString enum, got: " <> show other)
+      SchemaCoreString {schemaEnum} -> schemaEnum `shouldBe` ["red", "green", "blue"]
+      other -> expectationFailure ("expected SchemaCoreString enum, got: " <> show other)
 
   it "mixed union falls back to anyOf" $ do
     let t =
@@ -113,8 +113,8 @@ unionCompactionSpec = describe "union compaction" $ do
               SemanticTypeNull
             ]
     case (toJsonSchema t).core of
-      SCUnion {anyOf} -> length anyOf `shouldBe` 2
-      other -> expectationFailure ("expected SCUnion, got: " <> show other)
+      SchemaCoreUnion {anyOf} -> length anyOf `shouldBe` 2
+      other -> expectationFailure ("expected SchemaCoreUnion, got: " <> show other)
 
 jsonRoundTripSpec :: Spec
 jsonRoundTripSpec = describe "JSON round-trip" $ do
@@ -156,14 +156,14 @@ bundleShapeSpec = describe "SchemaBundle shape (Phase 15-H)" $ do
             { description = Nothing,
               input =
                 JsonSchema
-                  { core = SCObject {properties = Map.empty, required = Set.empty, additionalProperties = False},
+                  { core = SchemaCoreObject {properties = Map.empty, required = Set.empty, additionalProperties = False},
                     title = Nothing,
                     description = Nothing,
                     examples = []
                   },
               output =
                 JsonSchema
-                  { core = SCNull,
+                  { core = SchemaCoreNull,
                     title = Nothing,
                     description = Nothing,
                     examples = []
@@ -175,14 +175,14 @@ bundleShapeSpec = describe "SchemaBundle shape (Phase 15-H)" $ do
             { description = Just "make Pair",
               input =
                 JsonSchema
-                  { core = SCObject {properties = Map.empty, required = Set.empty, additionalProperties = False},
+                  { core = SchemaCoreObject {properties = Map.empty, required = Set.empty, additionalProperties = False},
                     title = Just "Pair",
                     description = Just "make Pair",
                     examples = []
                   },
               output =
                 JsonSchema
-                  { core = SCRef "#/$defs/main.Pair",
+                  { core = SchemaCoreRef "#/$defs/main.Pair",
                     title = Nothing,
                     description = Nothing,
                     examples = []
@@ -191,7 +191,7 @@ bundleShapeSpec = describe "SchemaBundle shape (Phase 15-H)" $ do
             }
         dataDef =
           JsonSchema
-            { core = SCObject {properties = Map.empty, required = Set.empty, additionalProperties = False},
+            { core = SchemaCoreObject {properties = Map.empty, required = Set.empty, additionalProperties = False},
               title = Just "Pair",
               description = Nothing,
               examples = []
@@ -245,7 +245,7 @@ descriptionEndToEndSpec = describe "annotation → description (end-to-end)" $ d
         prop = do
           agent <- Map.lookup "main.show" bundle.agentSchemas
           props <- case agent.input.core of
-            SCObject {properties = p} -> Just p
+            SchemaCoreObject {properties = p} -> Just p
             _ -> Nothing
           paramSchema <- Map.lookup "p" props
           paramSchema.description
@@ -260,7 +260,7 @@ descriptionEndToEndSpec = describe "annotation → description (end-to-end)" $ d
         fieldDesc label = do
           def <- Map.lookup "main.Point" bundle.dataDefs
           props <- case def.core of
-            SCObject {properties = p} -> Just p
+            SchemaCoreObject {properties = p} -> Just p
             _ -> Nothing
           field <- Map.lookup label props
           field.description

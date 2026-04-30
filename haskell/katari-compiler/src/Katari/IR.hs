@@ -200,33 +200,33 @@ emptyNameTable = NameTable {varNames = Map.empty, blockNames = Map.empty}
 -- the metadata the runtime needs to dispatch them; the public,
 -- FFI-visible name lives at the 'IRModule' level instead, so each block
 -- variant only stores its dispatch-axis identifier.
-data Block
-  = -- | Regular user-defined block. The body lives in a separate record so
-    -- the field set can grow independently of the sum tag.
-    BlockUser {body :: !UserBlock}
-  | -- | Built-in primitive. The runtime resolves @name@ against its prim
-    -- registry. Prims are system-provided and have no module of origin,
-    -- so they keep a plain 'Text' identifier (and never appear in
-    -- 'IRModule.entries').
-    BlockPrim {name :: !Text}
-  | -- | Request declaration. The 'reqId' is what handlers match against
-    -- ('Handler.request') when a request is raised via 'SCall'. The
-    -- public qualified name lives in 'IRModule.entries'.
-    BlockRequest {reqId :: !ReqId}
-  | -- | External agent stub. The runtime looks up @externalName@ in a
-    -- JS sidecar bundle.
-    BlockExternal {externalName :: !ExternalName}
-  | -- | Data constructor. The 'ctorId' is what 'MatchTagConstructor'
-    -- compares against in match arms; values built by this block carry
-    -- @{__ctor: <ctorId>, ...}@ at runtime.
-    BlockCtor {ctorId :: !CtorId}
+data Block where
+  -- | Regular user-defined block. The body lives in a separate record so
+  -- the field set can grow independently of the sum tag.
+  BlockUser :: {body :: !UserBlock} -> Block
+  -- | Built-in primitive. The runtime resolves @name@ against its prim
+  -- registry. Prims are system-provided and have no module of origin,
+  -- so they keep a plain 'Text' identifier (and never appear in
+  -- 'IRModule.entries').
+  BlockPrim :: {name :: !Text} -> Block
+  -- | Request declaration. The 'reqId' is what handlers match against
+  -- ('Handler.request') when a request is raised via 'SCall'. The
+  -- public qualified name lives in 'IRModule.entries'.
+  BlockRequest :: {reqId :: !ReqId} -> Block
+  -- | External agent stub. The runtime looks up @externalName@ in a
+  -- JS sidecar bundle.
+  BlockExternal :: {externalName :: !ExternalName} -> Block
+  -- | Data constructor. The 'ctorId' is what 'MatchTagConstructor'
+  -- compares against in match arms; values built by this block carry
+  -- @{__ctor: <ctorId>, ...}@ at runtime.
+  BlockCtor :: {ctorId :: !CtorId} -> Block
   deriving (Eq, Show, Generic)
 
 instance ToJSON Block where
-  toJSON = genericToJSON (sumOptions stripBlockPrefix)
+  toJSON = genericToJSON (sumOptions lowerHead)
 
 instance FromJSON Block where
-  parseJSON = genericParseJSON (sumOptions stripBlockPrefix)
+  parseJSON = genericParseJSON (sumOptions lowerHead)
 
 -- | Static structural role of a 'UserBlock'. Replaces the older
 -- 'BlockProps' triple of booleans, making invalid combinations
@@ -254,19 +254,19 @@ instance FromJSON Block where
 -- BlockInline                     False          False         True
 -- BlockHandlerBody                False          False         False
 -- @
-data BlockKind
-  = BlockAgentEntry
-  | BlockAgentEntryWithHandlers
-  | BlockHandleScope
-  | BlockInline
-  | BlockHandlerBody
+data BlockKind where
+  BlockAgentEntry :: BlockKind
+  BlockAgentEntryWithHandlers :: BlockKind
+  BlockHandleScope :: BlockKind
+  BlockInline :: BlockKind
+  BlockHandlerBody :: BlockKind
   deriving (Eq, Show, Generic)
 
 instance ToJSON BlockKind where
-  toJSON = genericToJSON (enumOptions stripBlockPrefix)
+  toJSON = genericToJSON (enumOptions lowerHead)
 
 instance FromJSON BlockKind where
-  parseJSON = genericParseJSON (enumOptions stripBlockPrefix)
+  parseJSON = genericParseJSON (enumOptions lowerHead)
 
 -- | The body of a regular user-defined block.
 data UserBlock = UserBlock
@@ -346,27 +346,27 @@ instance FromJSON Handler where
 -- conflicts (output \/ value across constructors with different field types)
 -- don't collide at the Haskell level. JSON-wise this nests the payload
 -- under a @"contents"@ key alongside the @"kind"@ tag.
-data Statement
-  = SCall !CallData
-  | SMakeClosure !MakeClosureData
-  | SLoadLiteral !LoadLiteralData
-  | SMatch !MatchData
-  | SFor !ForData
-  | SExit !ExitData
-  | SCont !ContData
-  | -- | Bind the value of @source@ by walking @pattern@ recursively. The
-    -- runtime walks @pattern@ exactly like the arm-pattern walker of
-    -- 'SMatch', binding each 'MPVariable' position. Unlike 'SMatch' there
-    -- is no @defaultArm@; the pattern is irrefutable (guaranteed by the
-    -- exhaustiveness checker — K0291 / Phase 16).
-    SBindPattern !BindPatternData
+data Statement where
+  StatementCall :: !CallData -> Statement
+  StatementMakeClosure :: !MakeClosureData -> Statement
+  StatementLoadLiteral :: !LoadLiteralData -> Statement
+  StatementMatch :: !MatchData -> Statement
+  StatementFor :: !ForData -> Statement
+  StatementExit :: !ExitData -> Statement
+  StatementCont :: !ContData -> Statement
+  -- | Bind the value of @source@ by walking @pattern@ recursively. The
+  -- runtime walks @pattern@ exactly like the arm-pattern walker of
+  -- 'StatementMatch', binding each 'MatchPatternVariable' position. Unlike
+  -- 'StatementMatch' there is no @defaultArm@; the pattern is irrefutable
+  -- (guaranteed by the exhaustiveness checker — K0291 / Phase 16).
+  StatementBindPattern :: !BindPatternData -> Statement
   deriving (Eq, Show, Generic)
 
 instance ToJSON Statement where
-  toJSON = genericToJSON (sumOptions stripStmtPrefix)
+  toJSON = genericToJSON (sumOptions lowerHead)
 
 instance FromJSON Statement where
-  parseJSON = genericParseJSON (sumOptions stripStmtPrefix)
+  parseJSON = genericParseJSON (sumOptions lowerHead)
 
 -- | Payload for 'SCall'.
 data CallData = CallData
@@ -493,33 +493,33 @@ instance FromJSON BindPatternData where
 
 -- | IR-level literal values. Mirrors 'AST.LiteralValue' but lives in the IR
 -- namespace so the IR is self-contained (the runtime needs only IR types).
-data LiteralValue
-  = LVInteger {integer :: !Integer}
-  | LVNumber {number :: !Double}
-  | LVString {string :: !Text}
-  | LVBoolean {boolean :: !Bool}
-  | LVNull
+data LiteralValue where
+  LiteralValueInteger :: {integer :: !Integer} -> LiteralValue
+  LiteralValueNumber :: {number :: !Double} -> LiteralValue
+  LiteralValueString :: {string :: !Text} -> LiteralValue
+  LiteralValueBoolean :: {boolean :: !Bool} -> LiteralValue
+  LiteralValueNull :: LiteralValue
   deriving (Eq, Show, Generic)
 
 instance ToJSON LiteralValue where
-  toJSON = genericToJSON (sumOptions stripLVPrefix)
+  toJSON = genericToJSON (sumOptions lowerHead)
 
 instance FromJSON LiteralValue where
-  parseJSON = genericParseJSON (sumOptions stripLVPrefix)
+  parseJSON = genericParseJSON (sumOptions lowerHead)
 
 -- | Resolution of an 'SCall' target.
-data CallTarget
-  = -- | Statically known target (top-level agent / req / ext / ctor / prim).
-    CTBlock {block :: !BlockId}
-  | -- | Dynamic target via a closure value.
-    CTValue {var :: !VarId}
+data CallTarget where
+  -- | Statically known target (top-level agent / req / ext / ctor / prim).
+  CallTargetBlock :: {block :: !BlockId} -> CallTarget
+  -- | Dynamic target via a closure value.
+  CallTargetValue :: {var :: !VarId} -> CallTarget
   deriving (Eq, Show, Generic)
 
 instance ToJSON CallTarget where
-  toJSON = genericToJSON (sumOptions stripCTPrefix)
+  toJSON = genericToJSON (sumOptions lowerHead)
 
 instance FromJSON CallTarget where
-  parseJSON = genericParseJSON (sumOptions stripCTPrefix)
+  parseJSON = genericParseJSON (sumOptions lowerHead)
 
 data Arg = Arg
   { label :: !Text,
@@ -542,25 +542,25 @@ instance FromJSON Arg where
 -- it down to a cascade of single-tag SMatchs) keeps a 1:1 shape with
 -- the source @match@ and pushes the search-and-bind logic to the
 -- runtime — which it has to do anyway for tagged-value introspection.
-data MatchPattern
-  = -- | Wildcard / unconditional match. No binding.
-    MPAny
-  | -- | Bind the matched subject to this 'VarId'. Always matches.
-    MPVariable !VarId
-  | -- | Match if the subject equals this literal value.
-    MPLiteral !LiteralValue
-  | -- | Match if the subject is a tagged value with this constructor
-    -- id; recursively match each named field's sub-pattern.
-    MPConstructor !CtorId ![(Text, MatchPattern)]
-  | -- | Match a tuple positionally; recurse into each element.
-    MPTuple ![MatchPattern]
+data MatchPattern where
+  -- | Wildcard / unconditional match. No binding.
+  MatchPatternAny :: MatchPattern
+  -- | Bind the matched subject to this 'VarId'. Always matches.
+  MatchPatternVariable :: !VarId -> MatchPattern
+  -- | Match if the subject equals this literal value.
+  MatchPatternLiteral :: !LiteralValue -> MatchPattern
+  -- | Match if the subject is a tagged value with this constructor
+  -- id; recursively match each named field's sub-pattern.
+  MatchPatternConstructor :: !CtorId -> ![(Text, MatchPattern)] -> MatchPattern
+  -- | Match a tuple positionally; recurse into each element.
+  MatchPatternTuple :: ![MatchPattern] -> MatchPattern
   deriving (Eq, Show, Generic)
 
 instance ToJSON MatchPattern where
-  toJSON = genericToJSON (sumOptions stripMPPrefix)
+  toJSON = genericToJSON (sumOptions lowerHead)
 
 instance FromJSON MatchPattern where
-  parseJSON = genericParseJSON (sumOptions stripMPPrefix)
+  parseJSON = genericParseJSON (sumOptions lowerHead)
 
 -- | One arm of an 'SMatch'. The runtime evaluates 'pattern' against the
 -- subject; on a successful match it enters 'body' with whatever
@@ -577,28 +577,28 @@ instance ToJSON MatchArm where
 instance FromJSON MatchArm where
   parseJSON = genericParseJSON irOptions
 
-data ExitKind
-  = ExitReturn
-  | ExitBreak
-  | ExitForBreak
+data ExitKind where
+  ExitKindReturn :: ExitKind
+  ExitKindBreak :: ExitKind
+  ExitKindForBreak :: ExitKind
   deriving (Eq, Show, Generic)
 
 instance ToJSON ExitKind where
-  toJSON = genericToJSON (enumOptions stripExitPrefix)
+  toJSON = genericToJSON (enumOptions lowerHead)
 
 instance FromJSON ExitKind where
-  parseJSON = genericParseJSON (enumOptions stripExitPrefix)
+  parseJSON = genericParseJSON (enumOptions lowerHead)
 
-data ContKind
-  = ContNext
-  | ContForNext
+data ContKind where
+  ContKindNext :: ContKind
+  ContKindForNext :: ContKind
   deriving (Eq, Show, Generic)
 
 instance ToJSON ContKind where
-  toJSON = genericToJSON (enumOptions stripContPrefix)
+  toJSON = genericToJSON (enumOptions lowerHead)
 
 instance FromJSON ContKind where
-  parseJSON = genericParseJSON (enumOptions stripContPrefix)
+  parseJSON = genericParseJSON (enumOptions lowerHead)
 
 -- ===========================================================================
 -- Aeson option helpers
@@ -633,27 +633,11 @@ enumOptions tagMod =
       allNullaryToStringTag = True
     }
 
-stripBlockPrefix :: String -> String
-stripBlockPrefix = lowerHead . drop (length ("Block" :: String))
-
-stripStmtPrefix :: String -> String
-stripStmtPrefix = lowerHead . drop (length ("S" :: String))
-
-stripLVPrefix :: String -> String
-stripLVPrefix = lowerHead . drop (length ("LV" :: String))
-
-stripCTPrefix :: String -> String
-stripCTPrefix = lowerHead . drop (length ("CT" :: String))
-
-stripMPPrefix :: String -> String
-stripMPPrefix = lowerHead . drop (length ("MP" :: String))
-
-stripExitPrefix :: String -> String
-stripExitPrefix = lowerHead . drop (length ("Exit" :: String))
-
-stripContPrefix :: String -> String
-stripContPrefix = lowerHead . drop (length ("Cont" :: String))
-
+-- | Lowercase the first character of a constructor name to produce its
+-- JSON tag. This is the single shared modifier used for every sum-type
+-- in this module: combined with the type-name prefix on each constructor
+-- (CLAUDE.md naming convention) it yields stable camelCase tags such as
+-- @"statementCall"@ or @"literalValueInteger"@.
 lowerHead :: String -> String
 lowerHead = \case
   [] -> []

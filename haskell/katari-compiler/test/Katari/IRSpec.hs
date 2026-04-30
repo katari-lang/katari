@@ -58,10 +58,10 @@ blockSpec = describe "Block (sum)" $ do
             }
     BlockUser {body = userBlock}
       `shouldEncodeAs` object
-        [ "kind" .= ("user" :: String),
+        [ "kind" .= ("blockUser" :: String),
           "body"
             .= object
-              [ "kind" .= ("agentEntry" :: String),
+              [ "kind" .= ("blockAgentEntry" :: String),
                 "captures" .= ([] :: [Value]),
                 "params" .= [object ["label" .= ("x" :: String), "var" .= (0 :: Int)]],
                 "stateVars" .= ([] :: [Value]),
@@ -73,22 +73,22 @@ blockSpec = describe "Block (sum)" $ do
 
   it "BlockPrim has only kind + name" $ do
     BlockPrim {name = "add"}
-      `shouldEncodeAs` object ["kind" .= ("prim" :: String), "name" .= ("add" :: String)]
+      `shouldEncodeAs` object ["kind" .= ("blockPrim" :: String), "name" .= ("add" :: String)]
 
   it "BlockRequest carries kind + reqId" $ do
     BlockRequest {reqId = ReqId 7}
-      `shouldEncodeAs` object ["kind" .= ("request" :: String), "reqId" .= (7 :: Int)]
+      `shouldEncodeAs` object ["kind" .= ("blockRequest" :: String), "reqId" .= (7 :: Int)]
 
   it "BlockExternal carries kind + externalName" $ do
     BlockExternal {externalName = ExternalName (QualifiedName "discord" "send_message")}
       `shouldEncodeAs` object
-        [ "kind" .= ("external" :: String),
+        [ "kind" .= ("blockExternal" :: String),
           "externalName" .= object ["module_" .= ("discord" :: String), "name" .= ("send_message" :: String)]
         ]
 
   it "BlockCtor carries kind + ctorId" $ do
     BlockCtor {ctorId = CtorId 3}
-      `shouldEncodeAs` object ["kind" .= ("ctor" :: String), "ctorId" .= (3 :: Int)]
+      `shouldEncodeAs` object ["kind" .= ("blockCtor" :: String), "ctorId" .= (3 :: Int)]
 
   it "round-trips all variants" $ do
     let userBody =
@@ -111,11 +111,11 @@ blockSpec = describe "Block (sum)" $ do
 blockKindSpec :: Spec
 blockKindSpec = describe "BlockKind" $ do
   it "serializes each variant as a bare camelCase string" $ do
-    Aeson.toJSON BlockAgentEntry `shouldBe` Aeson.String "agentEntry"
-    Aeson.toJSON BlockAgentEntryWithHandlers `shouldBe` Aeson.String "agentEntryWithHandlers"
-    Aeson.toJSON BlockHandleScope `shouldBe` Aeson.String "handleScope"
-    Aeson.toJSON BlockInline `shouldBe` Aeson.String "inline"
-    Aeson.toJSON BlockHandlerBody `shouldBe` Aeson.String "handlerBody"
+    Aeson.toJSON BlockAgentEntry `shouldBe` Aeson.String "blockAgentEntry"
+    Aeson.toJSON BlockAgentEntryWithHandlers `shouldBe` Aeson.String "blockAgentEntryWithHandlers"
+    Aeson.toJSON BlockHandleScope `shouldBe` Aeson.String "blockHandleScope"
+    Aeson.toJSON BlockInline `shouldBe` Aeson.String "blockInline"
+    Aeson.toJSON BlockHandlerBody `shouldBe` Aeson.String "blockHandlerBody"
 
   it "round-trips all variants" $ do
     mapM_
@@ -129,27 +129,27 @@ blockKindSpec = describe "BlockKind" $ do
 
 statementSpec :: Spec
 statementSpec = describe "Statement (sum)" $ do
-  it "SCall nests CallData under 'contents'" $ do
-    SCall
+  it "StatementCall nests CallData under 'contents'" $ do
+    StatementCall
       CallData
-        { target = CTBlock {block = BlockId 7},
+        { target = CallTargetBlock {block = BlockId 7},
           args = [Arg {label = "x", var = VarId 1}],
           output = Just (VarId 2)
         }
       `shouldEncodeAs` object
-        [ "kind" .= ("call" :: String),
+        [ "kind" .= ("statementCall" :: String),
           "contents"
             .= object
-              [ "target" .= object ["kind" .= ("block" :: String), "block" .= (7 :: Int)],
+              [ "target" .= object ["kind" .= ("callTargetBlock" :: String), "block" .= (7 :: Int)],
                 "args" .= [object ["label" .= ("x" :: String), "var" .= (1 :: Int)]],
                 "output" .= (2 :: Int)
               ]
         ]
 
-  it "SMakeClosure nests MakeClosureData under 'contents'" $ do
-    SMakeClosure MakeClosureData {output = VarId 3, block = BlockId 12, captures = []}
+  it "StatementMakeClosure nests MakeClosureData under 'contents'" $ do
+    StatementMakeClosure MakeClosureData {output = VarId 3, block = BlockId 12, captures = []}
       `shouldEncodeAs` object
-        [ "kind" .= ("makeClosure" :: String),
+        [ "kind" .= ("statementMakeClosure" :: String),
           "contents"
             .= object
               [ "output" .= (3 :: Int),
@@ -158,41 +158,41 @@ statementSpec = describe "Statement (sum)" $ do
               ]
         ]
 
-  it "SExit nests ExitData under 'contents' (with exitKind enum)" $ do
-    SExit ExitData {exitKind = ExitReturn, value = VarId 4}
+  it "StatementExit nests ExitData under 'contents' (with exitKind enum)" $ do
+    StatementExit ExitData {exitKind = ExitKindReturn, value = VarId 4}
       `shouldEncodeAs` object
-        [ "kind" .= ("exit" :: String),
+        [ "kind" .= ("statementExit" :: String),
           "contents"
             .= object
-              [ "exitKind" .= ("return" :: String),
+              [ "exitKind" .= ("exitKindReturn" :: String),
                 "value" .= (4 :: Int)
               ]
         ]
 
-  it "SCont (forNext) omits value when Nothing" $ do
-    SCont
+  it "StatementCont (forNext) omits value when Nothing" $ do
+    StatementCont
       ContData
-        { contKind = ContForNext,
+        { contKind = ContKindForNext,
           value = Nothing,
           mods = [("acc", VarId 5)]
         }
       `shouldEncodeAs` object
-        [ "kind" .= ("cont" :: String),
+        [ "kind" .= ("statementCont" :: String),
           "contents"
             .= object
-              [ "contKind" .= ("forNext" :: String),
+              [ "contKind" .= ("contKindForNext" :: String),
                 "mods" .= [["acc" :: Aeson.Value, Aeson.Number 5]]
               ]
         ]
 
-  it "SMatch round-trips" $ do
+  it "StatementMatch round-trips" $ do
     roundTrip $
-      SMatch
+      StatementMatch
         MatchData
           { subject = VarId 1,
             arms =
               [ MatchArm
-                  { pattern = MPConstructor (CtorId 7) [("x", MPVariable (VarId 2))],
+                  { pattern = MatchPatternConstructor (CtorId 7) [("x", MatchPatternVariable (VarId 2))],
                     body = BlockId 3
                   }
               ],
@@ -200,9 +200,9 @@ statementSpec = describe "Statement (sum)" $ do
             output = Just (VarId 5)
           }
 
-  it "SFor round-trips" $ do
+  it "StatementFor round-trips" $ do
     roundTrip $
-      SFor
+      StatementFor
         ForData
           { iters = [(VarId 1, VarId 2)],
             stateInits = [("acc", VarId 3)],
@@ -211,32 +211,32 @@ statementSpec = describe "Statement (sum)" $ do
             output = Just (VarId 6)
           }
 
-  it "SLoadLiteral nests an inner literal value object" $ do
-    SLoadLiteral LoadLiteralData {output = VarId 5, value = LVInteger 42}
+  it "StatementLoadLiteral nests an inner literal value object" $ do
+    StatementLoadLiteral LoadLiteralData {output = VarId 5, value = LiteralValueInteger 42}
       `shouldEncodeAs` object
-        [ "kind" .= ("loadLiteral" :: String),
+        [ "kind" .= ("statementLoadLiteral" :: String),
           "contents"
             .= object
               [ "output" .= (5 :: Int),
-                "value" .= object ["kind" .= ("integer" :: String), "integer" .= (42 :: Int)]
+                "value" .= object ["kind" .= ("literalValueInteger" :: String), "integer" .= (42 :: Int)]
               ]
         ]
 
   it "round-trips all 7 statement variants" $ do
     roundTrip $
-      SCall
+      StatementCall
         CallData
-          { target = CTValue (VarId 0),
+          { target = CallTargetValue (VarId 0),
             args = [],
             output = Nothing
           }
-    roundTrip $ SMakeClosure MakeClosureData {output = VarId 0, block = BlockId 0, captures = []}
+    roundTrip $ StatementMakeClosure MakeClosureData {output = VarId 0, block = BlockId 0, captures = []}
     roundTrip $
-      SLoadLiteral LoadLiteralData {output = VarId 0, value = LVInteger 0}
+      StatementLoadLiteral LoadLiteralData {output = VarId 0, value = LiteralValueInteger 0}
     roundTrip $
-      SMatch MatchData {subject = VarId 0, arms = [], defaultArm = Nothing, output = Nothing}
+      StatementMatch MatchData {subject = VarId 0, arms = [], defaultArm = Nothing, output = Nothing}
     roundTrip $
-      SFor
+      StatementFor
         ForData
           { iters = [],
             stateInits = [],
@@ -244,51 +244,51 @@ statementSpec = describe "Statement (sum)" $ do
             thenBlock = Nothing,
             output = Nothing
           }
-    roundTrip $ SExit ExitData {exitKind = ExitBreak, value = VarId 0}
-    roundTrip $ SCont ContData {contKind = ContNext, value = Just (VarId 0), mods = []}
+    roundTrip $ StatementExit ExitData {exitKind = ExitKindBreak, value = VarId 0}
+    roundTrip $ StatementCont ContData {contKind = ContKindNext, value = Just (VarId 0), mods = []}
 
   it "round-trips all LiteralValue variants" $ do
-    roundTrip (LVInteger 42)
-    roundTrip (LVNumber 3.14)
-    roundTrip (LVString "hello")
-    roundTrip (LVBoolean True)
-    roundTrip LVNull
+    roundTrip (LiteralValueInteger 42)
+    roundTrip (LiteralValueNumber 3.14)
+    roundTrip (LiteralValueString "hello")
+    roundTrip (LiteralValueBoolean True)
+    roundTrip LiteralValueNull
 
 callTargetSpec :: Spec
 callTargetSpec = describe "CallTarget" $ do
-  it "CTBlock encodes as kind=block" $ do
-    CTBlock (BlockId 5)
-      `shouldEncodeAs` object ["kind" .= ("block" :: String), "block" .= (5 :: Int)]
+  it "CallTargetBlock encodes as kind=block" $ do
+    CallTargetBlock (BlockId 5)
+      `shouldEncodeAs` object ["kind" .= ("callTargetBlock" :: String), "block" .= (5 :: Int)]
 
-  it "CTValue encodes as kind=value" $ do
-    CTValue (VarId 7)
-      `shouldEncodeAs` object ["kind" .= ("value" :: String), "var" .= (7 :: Int)]
+  it "CallTargetValue encodes as kind=value" $ do
+    CallTargetValue (VarId 7)
+      `shouldEncodeAs` object ["kind" .= ("callTargetValue" :: String), "var" .= (7 :: Int)]
 
   it "round-trips both variants" $ do
-    roundTrip (CTBlock (BlockId 0))
-    roundTrip (CTValue (VarId 0))
+    roundTrip (CallTargetBlock (BlockId 0))
+    roundTrip (CallTargetValue (VarId 0))
 
 exitContSpec :: Spec
 exitContSpec = describe "ExitKind / ContKind" $ do
   it "ExitKind serializes as bare strings" $ do
-    Aeson.toJSON ExitReturn `shouldBe` Aeson.String "return"
-    Aeson.toJSON ExitBreak `shouldBe` Aeson.String "break"
-    Aeson.toJSON ExitForBreak `shouldBe` Aeson.String "forBreak"
+    Aeson.toJSON ExitKindReturn `shouldBe` Aeson.String "exitKindReturn"
+    Aeson.toJSON ExitKindBreak `shouldBe` Aeson.String "exitKindBreak"
+    Aeson.toJSON ExitKindForBreak `shouldBe` Aeson.String "exitKindForBreak"
 
   it "ContKind serializes as bare strings" $ do
-    Aeson.toJSON ContNext `shouldBe` Aeson.String "next"
-    Aeson.toJSON ContForNext `shouldBe` Aeson.String "forNext"
+    Aeson.toJSON ContKindNext `shouldBe` Aeson.String "contKindNext"
+    Aeson.toJSON ContKindForNext `shouldBe` Aeson.String "contKindForNext"
 
   it "round-trips all enum values" $ do
-    mapM_ roundTrip [ExitReturn, ExitBreak, ExitForBreak]
-    mapM_ roundTrip [ContNext, ContForNext]
+    mapM_ roundTrip [ExitKindReturn, ExitKindBreak, ExitKindForBreak]
+    mapM_ roundTrip [ContKindNext, ContKindForNext]
 
 matchArmSpec :: Spec
 matchArmSpec = describe "MatchArm" $ do
-  it "encodes an MPAny pattern" $ do
-    MatchArm {pattern = MPAny, body = BlockId 0}
+  it "encodes an MatchPatternAny pattern" $ do
+    MatchArm {pattern = MatchPatternAny, body = BlockId 0}
       `shouldEncodeAs` object
-        [ "pattern" .= object ["kind" .= ("any" :: String)],
+        [ "pattern" .= object ["kind" .= ("matchPatternAny" :: String)],
           "body" .= (0 :: Int)
         ]
 
@@ -296,9 +296,9 @@ matchArmSpec = describe "MatchArm" $ do
     roundTrip
       MatchArm
         { pattern =
-            MPConstructor
+            MatchPatternConstructor
               (CtorId 5)
-              [("head", MPVariable (VarId 1)), ("tail", MPVariable (VarId 2))],
+              [("head", MatchPatternVariable (VarId 1)), ("tail", MatchPatternVariable (VarId 2))],
           body = BlockId 3
         }
 
@@ -322,7 +322,7 @@ moduleSpec = describe "IRModule" $ do
                     captures = [],
                     params = [],
                     stateVars = [],
-                    statements = [SExit ExitData {exitKind = ExitReturn, value = VarId 0}],
+                    statements = [StatementExit ExitData {exitKind = ExitKindReturn, value = VarId 0}],
                     trailing = Nothing,
                     thenBlock = Nothing,
                     handlers = []

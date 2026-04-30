@@ -205,7 +205,7 @@ contradictions = describe "contradictions" $ do
 
   it "even with errors, substitution is still total" $ do
     (_, cgResult, solverResult) <- runSolve "agent foo() -> integer { \"bad\" }"
-    -- Errors mean the type substitution may be empty + filled with NTUnknown
+    -- Errors mean the type substitution may be empty + filled with NormalizedTypeUnknown
     -- by the totality layer, so all TypeVarIds still have entries.
     Map.size solverResult.typeSubstitution `shouldBe` cgResult.nextTypeVarId
 
@@ -585,16 +585,16 @@ higherOrderFunctions = describe "higher-order agents" $ do
 -- variable α gets bound to a fresh-var skeleton (e.g. α := (x: t_p) -> t_r)
 -- and the sub-vars are pinned later. The final substitution must compose
 -- through these indirect entries, otherwise α's resolved type degenerates
--- to NTUnknown.
+-- to NormalizedTypeUnknown.
 -- ---------------------------------------------------------------------------
 
 narrowAndSubstitutionComposition :: Spec
 narrowAndSubstitutionComposition = describe "narrow + substitution composition" $ do
-  it "(a) narrow on bare function param: g should resolve to a Function shape, not NTUnknown" $ do
+  it "(a) narrow on bare function param: g should resolve to a Function shape, not NormalizedTypeUnknown" $ do
     -- `g` is unannotated; calling g(x = 1) emits t_g <: (x: 1) -> t_r,
     -- which triggers narrow. After narrow, t_g := (x: p_var) -> r_var with
     -- p_var, r_var fresh. Without final deep substitution composition,
-    -- t_g's value still references those vars and degenerates to NTUnknown.
+    -- t_g's value still references those vars and degenerates to NormalizedTypeUnknown.
     (idResult, cgResult, solverResult) <-
       runSolve $
         mconcat
@@ -625,7 +625,7 @@ narrowAndSubstitutionComposition = describe "narrow + substitution composition" 
   it "(c) β <: α only chain: x must inherit number through y annotation" $ do
     -- t_x <: t_y, t_y == number (via wildcard-pattern annotation in let).
     -- t_x's only direct lower bound is t_y (var) → propagation must derive
-    -- t_x <: number to avoid NTUnknown fallback.
+    -- t_x <: number to avoid NormalizedTypeUnknown fallback.
     (idResult, cgResult, solverResult) <-
       runSolve $
         mconcat
@@ -646,7 +646,7 @@ narrowAndSubstitutionComposition = describe "narrow + substitution composition" 
     --   β <: α                             (let r = ...; α flow)
     --   int <: α                           (separate int flow)
     -- Both γ (= g) and α must be sensibly inferred. γ would degenerate to
-    -- NTUnknown without deep substitution composition.
+    -- NormalizedTypeUnknown without deep substitution composition.
     (idResult, cgResult, solverResult) <-
       runSolve $
         mconcat
@@ -665,25 +665,25 @@ narrowAndSubstitutionComposition = describe "narrow + substitution composition" 
 -- Predicates over NormalizedType for narrow tests
 -- ---------------------------------------------------------------------------
 
--- | True iff the resolved type has a 'FunctionOf' shape in its function layer.
+-- | True iff the resolved type has a 'FunctionSlotOf' shape in its function layer.
 isFunctionShape :: Maybe NormalizedType -> Bool
 isFunctionShape = \case
-  Just (NTLayered LayeredType {functionLayer = FunctionOf _}) -> True
+  Just (NormalizedTypeLayered LayeredType {functionLayer = FunctionSlotOf _}) -> True
   _ -> False
 
--- | True iff the resolved type is exactly NTUnknown.
+-- | True iff the resolved type is exactly NormalizedTypeUnknown.
 isNTUnknown :: Maybe NormalizedType -> Bool
 isNTUnknown = \case
-  Just NTUnknown -> True
+  Just NormalizedTypeUnknown -> True
   _ -> False
 
 -- | True iff the resolved type has at least one populated layer (i.e. some
--- value can inhabit it). NTUnknown counts as inhabited (the lattice top).
+-- value can inhabit it). NormalizedTypeUnknown counts as inhabited (the lattice top).
 -- Layered with all-empty layers is the bottom (Never) and returns False.
 isInhabited :: Maybe NormalizedType -> Bool
 isInhabited = \case
-  Just NTUnknown -> True
-  Just (NTLayered layered) -> hasAnyLayer layered
+  Just NormalizedTypeUnknown -> True
+  Just (NormalizedTypeLayered layered) -> hasAnyLayer layered
   Nothing -> False
   where
     hasAnyLayer LayeredType {..} =
@@ -696,14 +696,14 @@ isInhabited = \case
         || not (null tupleLayer)
         || not (null dataLayer)
         || hasObject objectLayer
-    hasNumber NumberInteger = True
-    hasNumber NumberNumber = True
-    hasNumber (NumberLiterals s) = not (null s)
-    hasString StringAny = True
-    hasString (StringLiterals s) = not (null s)
-    hasFunction FunctionAbsent = False
-    hasFunction (FunctionOf _) = True
-    hasArray ArrayAbsent = False
-    hasArray (ArrayOf _) = True
-    hasObject ObjectAbsent = False
-    hasObject (ObjectOf _) = True
+    hasNumber NumberSlotInteger = True
+    hasNumber NumberSlotNumber = True
+    hasNumber (NumberSlotLiterals s) = not (null s)
+    hasString StringSlotAny = True
+    hasString (StringSlotLiterals s) = not (null s)
+    hasFunction FunctionSlotAbsent = False
+    hasFunction (FunctionSlotOf _) = True
+    hasArray ArraySlotAbsent = False
+    hasArray (ArraySlotOf _) = True
+    hasObject ObjectSlotAbsent = False
+    hasObject (ObjectSlotOf _) = True

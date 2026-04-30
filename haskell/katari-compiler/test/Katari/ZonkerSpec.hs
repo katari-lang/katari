@@ -62,7 +62,7 @@ pipeline src = case parseModuleStrict "<test>" src of
 
 -- | Build a 'SolverResult' that satisfies the Solver totality contract for the
 -- given 'ConstraintGenResult'. Every TypeVarId / EffectVarId allocated by
--- constraint generation receives a default (NTUnknown / empty req-set) entry,
+-- constraint generation receives a default (NormalizedTypeUnknown / empty req-set) entry,
 -- which can be overridden by the user-supplied lists.
 mkTotalSolverResult ::
   ConstraintGenResult ->
@@ -73,7 +73,7 @@ mkTotalSolverResult cg typeOverrides effectOverrides =
   SolverResult
     { typeSubstitution =
         Map.fromList typeOverrides
-          `Map.union` Map.fromList [(TypeVarId i, NTUnknown) | i <- [0 .. cg.nextTypeVarId - 1]],
+          `Map.union` Map.fromList [(TypeVarId i, NormalizedTypeUnknown) | i <- [0 .. cg.nextTypeVarId - 1]],
       effectSubstitution =
         Map.fromList effectOverrides
           `Map.union` Map.fromList [(EffectVarId i, Set.empty) | i <- [0 .. cg.nextEffectVarId - 1]],
@@ -197,52 +197,52 @@ spec = do
 
 denormaliseUnit :: Spec
 denormaliseUnit = describe "denormalise" $ do
-  it "NTUnknown → SemanticTypeUnknown" $
-    denormalise NTUnknown `shouldBe` SemanticTypeUnknown
+  it "NormalizedTypeUnknown → SemanticTypeUnknown" $
+    denormalise NormalizedTypeUnknown `shouldBe` SemanticTypeUnknown
 
-  it "NTLayered emptyLayered → SemanticTypeNever" $
-    denormalise (NTLayered emptyLayered) `shouldBe` SemanticTypeNever
+  it "NormalizedTypeLayered emptyLayered → SemanticTypeNever" $
+    denormalise (NormalizedTypeLayered emptyLayered) `shouldBe` SemanticTypeNever
 
   it "single-branch layered (integer) → SemanticTypeInteger" $
-    denormalise (NTLayered emptyLayered {numberLayer = NumberInteger})
+    denormalise (NormalizedTypeLayered emptyLayered {numberLayer = NumberSlotInteger})
       `shouldBe` SemanticTypeInteger
 
   it "single literal integer" $
-    denormalise (NTLayered emptyLayered {numberLayer = NumberLiterals (Set.singleton 42)})
+    denormalise (NormalizedTypeLayered emptyLayered {numberLayer = NumberSlotLiterals (Set.singleton 42)})
       `shouldBe` SemanticTypeLiteralInteger 42
 
   it "string any" $
-    denormalise (NTLayered emptyLayered {stringLayer = StringAny})
+    denormalise (NormalizedTypeLayered emptyLayered {stringLayer = StringSlotAny})
       `shouldBe` SemanticTypeString
 
   it "boolean both → SemanticTypeBoolean" $
-    denormalise (NTLayered emptyLayered {booleanLayer = Set.fromList [True, False]})
+    denormalise (NormalizedTypeLayered emptyLayered {booleanLayer = Set.fromList [True, False]})
       `shouldBe` SemanticTypeBoolean
 
   it "boolean single literal" $
-    denormalise (NTLayered emptyLayered {booleanLayer = Set.singleton True})
+    denormalise (NormalizedTypeLayered emptyLayered {booleanLayer = Set.singleton True})
       `shouldBe` SemanticTypeLiteralBoolean True
 
   it "null layer" $
-    denormalise (NTLayered emptyLayered {nullLayer = True}) `shouldBe` SemanticTypeNull
+    denormalise (NormalizedTypeLayered emptyLayered {nullLayer = True}) `shouldBe` SemanticTypeNull
 
   it "multi-layer union → SemanticTypeUnion" $
-    denormalise (NTLayered emptyLayered {numberLayer = NumberInteger, stringLayer = StringAny})
+    denormalise (NormalizedTypeLayered emptyLayered {numberLayer = NumberSlotInteger, stringLayer = StringSlotAny})
       `shouldBe` SemanticTypeUnion [SemanticTypeInteger, SemanticTypeString]
 
   it "array of integer" $
-    denormalise (NTLayered emptyLayered {arrayLayer = ArrayOf (NTLayered emptyLayered {numberLayer = NumberInteger})})
+    denormalise (NormalizedTypeLayered emptyLayered {arrayLayer = ArraySlotOf (NormalizedTypeLayered emptyLayered {numberLayer = NumberSlotInteger})})
       `shouldBe` SemanticTypeArray SemanticTypeInteger
 
   it "object with one field" $
     denormalise
-      ( NTLayered
+      ( NormalizedTypeLayered
           emptyLayered
             { objectLayer =
-                ObjectOf
+                ObjectSlotOf
                   ( Map.singleton
                       "x"
-                      (NTLayered emptyLayered {numberLayer = NumberInteger})
+                      (NormalizedTypeLayered emptyLayered {numberLayer = NumberSlotInteger})
                   )
             }
       )
@@ -250,16 +250,16 @@ denormaliseUnit = describe "denormalise" $ do
 
   it "function: integer -> string" $
     denormalise
-      ( NTLayered
+      ( NormalizedTypeLayered
           emptyLayered
             { functionLayer =
-                FunctionOf
+                FunctionSlotOf
                   FunctionShape
                     { parameters =
                         Map.singleton
                           "x"
-                          (NTLayered emptyLayered {numberLayer = NumberInteger}),
-                      returnType = NTLayered emptyLayered {stringLayer = StringAny},
+                          (NormalizedTypeLayered emptyLayered {numberLayer = NumberSlotInteger}),
+                      returnType = NormalizedTypeLayered emptyLayered {stringLayer = StringSlotAny},
                       effects = Set.empty
                     }
             }
@@ -304,11 +304,11 @@ typeVarSubstitution :: Spec
 typeVarSubstitution = describe "type var substitution" $ do
   it "agent body expression-level type var resolves to integer" $ do
     -- agent foo() { 0 } では body の return-flow に t_body 型変数があり、
-    -- それを NumberInteger に解決すると call expression の metadata も integer になる。
+    -- それを NumberSlotInteger に解決すると call expression の metadata も integer になる。
     (idResult, cg) <- pipeline "agent foo() { foo() }"
-    -- 全 TypeVar を NumberInteger に統一して埋める
+    -- 全 TypeVar を NumberSlotInteger に統一して埋める
     let allInt =
-          [ (TypeVarId i, NTLayered emptyLayered {numberLayer = NumberInteger})
+          [ (TypeVarId i, NormalizedTypeLayered emptyLayered {numberLayer = NumberSlotInteger})
             | i <- [0 .. cg.nextTypeVarId - 1]
           ]
         zr = zonk idResult cg (mkTotalSolverResult cg allInt [])
@@ -349,15 +349,15 @@ effectSubstitutionSpec = describe "effect substitution" $ do
         Just (SemanticTypeVariable tApp) = Map.lookup appVid cg.typeEnvironment
         fetchReqId = head [rid | (rid, rd) <- Map.toList idResult.identifiedRequests, rd.requestVariableId == fetchVid]
         appFnNT =
-          NTLayered
+          NormalizedTypeLayered
             emptyLayered
               { functionLayer =
-                  FunctionOf
+                  FunctionSlotOf
                     FunctionShape
                       { parameters = Map.empty,
                         returnType =
-                          NTLayered
-                            emptyLayered {numberLayer = NumberLiterals (Set.singleton 0)},
+                          NormalizedTypeLayered
+                            emptyLayered {numberLayer = NumberSlotLiterals (Set.singleton 0)},
                         effects = Set.singleton fetchReqId
                       }
               }

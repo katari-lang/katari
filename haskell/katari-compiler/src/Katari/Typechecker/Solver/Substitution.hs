@@ -100,7 +100,7 @@ applySubstType substitution = go
 -- This is the missing half of "deep substitution composition": without it,
 -- a narrowed function shape like @α := (x: t_p) -> r_var, eff e_var@ keeps
 -- @e_var@ alive after type vars are pinned, and 'semanticToConcrete' rejects
--- the value (forcing the downstream to fall back to NTUnknown).
+-- the value (forcing the downstream to fall back to NormalizedTypeUnknown).
 applyEffectSubstToType ::
   Map EffectVarId (Set RequestId) ->
   SemanticType Unresolved ->
@@ -339,9 +339,9 @@ checkBoundsConsistency boundsMap =
 
 -- | Convert each pinned 'SemanticType Unresolved' (assumed variable-free) to
 -- 'NormalizedType' for the public 'SolverResult'. Variables that still
--- contain unresolved 'SemanticTypeVariable' fall back to 'NTUnknown'
+-- contain unresolved 'SemanticTypeVariable' fall back to 'NormalizedTypeUnknown'
 -- (defensive; should not happen if Solver completed normally).
 substToNormalized :: Substitution -> Map TypeVarId NormalizedType
 substToNormalized = Map.map convert
   where
-    convert pinned = maybe NTUnknown normaliseSemantic (semanticToConcrete pinned)
+    convert pinned = maybe NormalizedTypeUnknown normaliseSemantic (semanticToConcrete pinned)
