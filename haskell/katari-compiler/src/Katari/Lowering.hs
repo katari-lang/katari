@@ -47,9 +47,11 @@ data LoweringError
   | -- | A 'StatementError' / 'DeclarationError' sentinel left by parser
     -- recovery survived to Lowering.
     LowerErrorParseSentinel AST.SourceSpan
-  | -- | A construct the lowering does not yet support (ext agent in module
-    -- without server annotation, qualified ref out of scope, etc.).
-    LowerErrorUnsupported AST.SourceSpan Text
+  | -- | A literal pattern appeared in an irrefutable context
+    -- (@let@ binding or function parameter), where only patterns that
+    -- always match are allowed. Refutable patterns belong in match
+    -- arms.
+    LowerErrorRefutablePatternInIrrefutableContext AST.SourceSpan
   deriving (Eq, Show)
 
 -- | Convert a 'LoweringError' to a unified 'Diagnostic'. Codes K0300-K0399
@@ -66,10 +68,10 @@ toDiagnostic = \case
       "K0301"
       "parser/identifier sentinel reached lowering (likely a recovery artifact)"
       sp
-  LowerErrorUnsupported sp detail ->
+  LowerErrorRefutablePatternInIrrefutableContext sp ->
     diagnosticError
-      "K0302"
-      ("unsupported construct in lowering: " <> detail)
+      "K0303"
+      "literal pattern is refutable; only allowed in match arms (let / parameter destructuring requires irrefutable patterns)"
       sp
 
 -- ===========================================================================
@@ -868,10 +870,7 @@ destructurePattern incoming = \case
     pairs <- mapM (extractField incoming) qp.parameters
     pure (concat pairs)
   AST.PatternLiteral lp -> do
-    recordError $
-      LowerErrorUnsupported
-        lp.sourceSpan
-        "literal pattern is refutable; only allowed in match arms"
+    recordError (LowerErrorRefutablePatternInIrrefutableContext lp.sourceSpan)
     pure []
 
 -- | Extract @incoming._idx@ via the @tuple_get@ primitive and recurse.

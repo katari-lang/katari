@@ -883,13 +883,15 @@ sampleTest dir file = it ("lowers samples/" <> file) $ do
     Left e ->
       pendingWith ("upstream parser/identifier failure: " <> show e)
     Right (irMod, errs) -> do
-      -- Lowering may surface "unsupported" errors for old-syntax patterns.
-      let unsupported =
-            [ s
-              | LowerErrorUnsupported _ s <- errs
+      -- Refutable patterns in irrefutable contexts (let / params) are
+      -- the only "user-visible" not-yet-supported case left in
+      -- Lowering. Pending samples that hit them surface here.
+      let refutables =
+            [ ()
+              | LowerErrorRefutablePatternInIrrefutableContext _ <- errs
             ]
-      if not (null unsupported)
-        then pendingWith ("unsupported AST shapes: " <> show unsupported)
+      if not (null refutables)
+        then pendingWith ("refutable pattern in irrefutable context")
         else do
           errs `shouldBe` []
           -- Sanity: at least one user block exists.

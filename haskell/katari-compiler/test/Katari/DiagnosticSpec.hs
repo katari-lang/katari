@@ -134,7 +134,7 @@ perPhaseConverterSpec = describe "per-phase toDiagnostic" $ do
             Lowering.toDiagnostic
             [ Lowering.LowerErrorUnresolvedVariable dummySpan "x",
               Lowering.LowerErrorParseSentinel dummySpan,
-              Lowering.LowerErrorUnsupported dummySpan "feature"
+              Lowering.LowerErrorRefutablePatternInIrrefutableContext dummySpan
             ]
     mapM_ (\d -> d.severity `shouldBe` Error) diags
     mapM_ (\d -> isReservedCode "K0300" "K0399" d.code `shouldBe` True) diags
