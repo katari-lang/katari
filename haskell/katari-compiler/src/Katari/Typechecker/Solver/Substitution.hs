@@ -44,7 +44,7 @@ import Data.Maybe (mapMaybe)
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Katari.Typechecker.ConstraintGenerator (Constraint (..))
-import Katari.Typechecker.Identifier (VariableId)
+import Katari.Typechecker.Identifier (RequestId)
 import Katari.Typechecker.NormalizedType
   ( NormalizedType (..),
     denormalise,
@@ -93,7 +93,7 @@ applySubstType substitution = go
       t -> runIdentity (traverseSemantic (Identity . go) Identity t)
 
 -- | Resolve every 'EffectVarId' inside a 'SemanticType' against the effect
--- substitution, replacing each var with the concrete 'VariableId' set the
+-- substitution, replacing each var with the concrete 'RequestId' set the
 -- effect solver assigned to it. Type variables are left untouched — apply
 -- 'applySubstSubst' first if the value still contains them.
 --
@@ -102,7 +102,7 @@ applySubstType substitution = go
 -- @e_var@ alive after type vars are pinned, and 'semanticToConcrete' rejects
 -- the value (forcing the downstream to fall back to NTUnknown).
 applyEffectSubstToType ::
-  Map EffectVarId (Set VariableId) ->
+  Map EffectVarId (Set RequestId) ->
   SemanticType Unresolved ->
   SemanticType Unresolved
 applyEffectSubstToType effectSubstitution = go

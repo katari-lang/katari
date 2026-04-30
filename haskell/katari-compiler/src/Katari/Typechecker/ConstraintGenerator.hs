@@ -43,13 +43,12 @@ module Katari.Typechecker.ConstraintGenerator
   )
 where
 
-import Control.Monad (forM, unless)
+import Control.Monad (unless)
 import Control.Monad.Reader (ReaderT, ask, asks, local, runReaderT)
 import Control.Monad.State.Strict (State, gets, modify, runState)
 import Control.Monad.Trans (lift)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (maybeToList)
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
@@ -225,6 +224,11 @@ data ConstraintContext = ConstraintContext
     -- 'IdentifierResult.identifiedRequests' / 'identifiedConstructors'.
     contextIdentifiedRequests :: !(Map RequestId RequestData),
     contextIdentifiedConstructors :: !(Map ConstructorId ConstructorData),
+    -- | Forward cross-link: 'VariableId' → 'RequestId'. Built from the
+    -- 'requestVariableId' fields of 'identifiedRequests' so the request
+    -- declaration walker can populate the singleton effect for @req foo@'s
+    -- own signature without re-walking the AST.
+    contextRequestOfVariable :: !(Map VariableId RequestId),
     contextSynonymVisited :: !(Set TypeId),
     contextEnclosingReturn :: !(Maybe TypeVarId),
     contextEnclosingEffects :: !(Maybe EffectVarId),
@@ -262,6 +266,11 @@ initialContext types requests constructors =
     { contextIdentifiedTypes = types,
       contextIdentifiedRequests = requests,
       contextIdentifiedConstructors = constructors,
+      contextRequestOfVariable =
+        Map.fromList
+          [ (rd.requestVariableId, rid)
+            | (rid, rd) <- Map.toList requests
+          ],
       contextSynonymVisited = Set.empty,
       contextEnclosingReturn = Nothing,
       contextEnclosingEffects = Nothing,
@@ -602,12 +611,17 @@ walkRequestDecl RequestDeclaration {annotation, name, parameters, returnType, so
   tReq <- variableTypeFromName name
   (parameters', paramSig) <- walkParameterListForSignature parameters
   retSemantic <- elaborateType returnType
-  let reqVarId = variableIdOfName name
-      signature =
+  -- The request's signature includes itself in its effect set (a @req foo@
+  -- raises @foo@). Identifier issued a 'RequestId' alongside the call-side
+  -- 'VariableId' for this declaration; we translate via 'contextRequestOfVariable'.
+  reqId <- case variableIdOfName name of
+    Nothing -> pure Nothing
+    Just vid -> asks (Map.lookup vid . (.contextRequestOfVariable))
+  let signature =
         SemanticTypeFunction
           paramSig
           retSemantic
-          (maybe emptyEffect singletonEffect reqVarId)
+          (maybe emptyEffect singletonEffect reqId)
   addEqTypeConstraint signature tReq (ConstraintReason ReasonRequestSignature sourceSpan)
   pure
     RequestDeclaration
@@ -929,16 +943,15 @@ walkBlockWithWhere statements returnExpression wb blockSpan = do
   handlers' <- mapM (walkRequestHandler e4Id tWholeBlockId) handlers
 
   -- (6) Effect constraints: e3 ⊆ e1 ∪ {handled requests}, e4 ⊆ e1.
-  -- Each handler's @name@ is a 'RequestRef'; look up the corresponding
-  -- call-side 'VariableId' (@requestVariableId@) to populate the effect set
-  -- (which is keyed by 'VariableId' in the current 'SemanticEffect' shape).
-  handledVarIds <-
-    fmap (Set.fromList . concat) $
-      forM handlers $ \RequestHandler {name} -> do
-        mvid <- requestVariableIdOfName name
-        pure (maybeToList mvid)
+  -- Each handler's @name@ is a 'RequestRef' resolved to a 'RequestId'.
+  let handledRequestIds =
+        Set.fromList
+          [ rid
+            | RequestHandler {name} <- handlers,
+              Just rid <- [name.resolution]
+          ]
   let e1Eff = maybe emptyEffect effectFromVar e1
-      e2Eff = SemanticEffect Set.empty handledVarIds
+      e2Eff = SemanticEffect Set.empty handledRequestIds
   addEffectConstraint
     (effectFromVar e3Id)
     (unionEffects e1Eff e2Eff)
@@ -1041,7 +1054,9 @@ walkRequestHandler e4Id tWholeBlockId RequestHandler {moduleQualifier, name, par
   (parameters', paramSig) <- walkParameterListForSignature parameters
   retSemantic <- elaborateOrFresh returnType
   retTvId <- freshReturnTypeVar retSemantic
-  reqVarId <- requestVariableIdOfName name
+  -- Handler's signature carries the handled request as its sole effect, so
+  -- the underlying req's signature is a supertype.
+  let handlerReqId = name.resolution
   -- Handler body walks under e4 (the dedicated handler-effect var) and the
   -- handle scope. 'next e' resumes the original request call, so 'e' is
   -- constrained against retTvId (= the next-tv); 'break e' targets
@@ -1062,7 +1077,7 @@ walkRequestHandler e4Id tWholeBlockId RequestHandler {moduleQualifier, name, par
         SemanticTypeFunction
           paramSig
           retSemantic
-          (maybe emptyEffect singletonEffect reqVarId)
+          (maybe emptyEffect singletonEffect handlerReqId)
   -- subtype only (handler is a re-assignment of the underlying req)
   addTypeConstraint handlerSignature tHandled (ConstraintReason ReasonRequestHandlerSignature sourceSpan)
   pure

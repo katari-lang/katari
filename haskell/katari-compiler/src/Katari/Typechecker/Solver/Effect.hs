@@ -1,14 +1,14 @@
 -- | Effect-constraint solver.
 --
 -- Effect constraints have the form @e1 \<: e2@ where each effect is a
--- 'SemanticEffect' = (Set EffectVarId, Set VariableId). The semantics:
+-- 'SemanticEffect' = (Set EffectVarId, Set RequestId). The semantics:
 --
 -- > contents(e) = effectsOf(e.effectVars) ∪ e.effectReqs
 -- > e1 <: e2  iff  contents(e1) ⊆ contents(e2)
 --
 -- Solving:
 --
---   * Each 'EffectVarId' has a current "value" (a 'Set VariableId') that
+--   * Each 'EffectVarId' has a current "value" (a 'Set RequestId') that
 --     accumulates the concrete requests it must include.
 --   * For each constraint @e1 \<: e2@, propagate any concrete request in
 --     @e1@ that does not appear in @e2@'s concrete part to @e2@'s effect
@@ -26,7 +26,7 @@ import Data.Map.Strict qualified as Map
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Katari.Typechecker.ConstraintGenerator (Constraint (..))
-import Katari.Typechecker.Identifier (VariableId)
+import Katari.Typechecker.Identifier (RequestId)
 import Katari.Typechecker.SemanticType
   ( EffectVarId,
     SemanticEffect (..),
@@ -36,12 +36,12 @@ import Katari.Typechecker.Solver.Internal
   )
 
 -- | Solve effect constraints by lower-bound accumulation. Returns the
--- per-effect-var set of concrete request 'VariableId's, plus any errors
+-- per-effect-var set of concrete request 'RequestId's, plus any errors
 -- (currently empty — effects rarely produce conflicts under Katari's
 -- usage patterns).
 solveEffectConstraints ::
   Set Constraint ->
-  (Map EffectVarId (Set VariableId), [SolverError])
+  (Map EffectVarId (Set RequestId), [SolverError])
 solveEffectConstraints constraints =
   let allEffectVars = collectEffectVars constraints
       initialAssignment =
@@ -66,8 +66,8 @@ fixpoint step current =
 -- accumulated value with the contributions inferred from the LHS.
 propagateOnce ::
   Set Constraint ->
-  Map EffectVarId (Set VariableId) ->
-  Map EffectVarId (Set VariableId)
+  Map EffectVarId (Set RequestId) ->
+  Map EffectVarId (Set RequestId)
 propagateOnce constraints initial = foldr (applyConstraint initial) initial constraints
   where
     applyConstraint _ constraint accumulator = case constraint of
@@ -77,8 +77,8 @@ propagateOnce constraints initial = foldr (applyConstraint initial) initial cons
     propagate ::
       SemanticEffect phase ->
       SemanticEffect phase ->
-      Map EffectVarId (Set VariableId) ->
-      Map EffectVarId (Set VariableId)
+      Map EffectVarId (Set RequestId) ->
+      Map EffectVarId (Set RequestId)
     propagate leftEffect rightEffect assignment =
       let leftConcreteReqs = leftEffect.effectReqs
           rightConcreteReqs = rightEffect.effectReqs

@@ -56,7 +56,7 @@ import Data.Map.Strict qualified as Map
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
-import Katari.Typechecker.Identifier (TypeId, VariableId)
+import Katari.Typechecker.Identifier (RequestId, TypeId)
 import Katari.Typechecker.SemanticType (Resolved, SemanticEffect (..), SemanticType (..))
 
 -- ---------------------------------------------------------------------------
@@ -177,7 +177,7 @@ data FunctionSlot
 data FunctionShape = FunctionShape
   { parameters :: !(Map Text NormalizedType),
     returnType :: !NormalizedType,
-    effects :: !(Set VariableId)
+    effects :: !(Set RequestId)
   }
   deriving (Eq, Show)
 

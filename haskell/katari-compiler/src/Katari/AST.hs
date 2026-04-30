@@ -694,7 +694,7 @@ instance HasSourceSpan (TypeUnionNode p) where
   sourceSpanOf node = node.sourceSpan
 
 data SyntacticRequest (p :: Phase) = SyntacticRequest
-  { name :: NameRef p 'VariableRef,
+  { name :: NameRef p 'RequestRef,
     sourceSpan :: SourceSpan
   }
 
@@ -1021,7 +1021,8 @@ retagNameRef ref =
 retagSyntacticType ::
   ( NameMeta p1 'TypeRef ~ NameMeta p2 'TypeRef,
     NameMeta p1 'ModuleRef ~ NameMeta p2 'ModuleRef,
-    NameMeta p1 'VariableRef ~ NameMeta p2 'VariableRef
+    NameMeta p1 'VariableRef ~ NameMeta p2 'VariableRef,
+    NameMeta p1 'RequestRef ~ NameMeta p2 'RequestRef
   ) =>
   SyntacticType p1 ->
   SyntacticType p2
@@ -1078,7 +1079,7 @@ retagSyntacticType = \case
 
 -- | Change the phase tag of a 'SyntacticRequest'.
 retagSyntacticRequest ::
-  (NameMeta p1 'VariableRef ~ NameMeta p2 'VariableRef) =>
+  (NameMeta p1 'RequestRef ~ NameMeta p2 'RequestRef) =>
   SyntacticRequest p1 ->
   SyntacticRequest p2
 retagSyntacticRequest req =

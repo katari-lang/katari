@@ -1422,7 +1422,7 @@ resolveTupleType TupleTypeNode {elementTypes, sourceSpan} = do
 
 resolveSyntacticRequest :: SyntacticRequest Parsed -> Identifier (SyntacticRequest Identified)
 resolveSyntacticRequest SyntacticRequest {name, sourceSpan} = do
-  metadata <- resolveBareVariable name
+  metadata <- resolveBareRequest name
   pure
     SyntacticRequest
       { name = identifiedNameRef metadata name,

@@ -68,7 +68,7 @@ import Katari.Typechecker.ConstraintGenerator
     ConstraintReason (..),
     ReasonKind (..),
   )
-import Katari.Typechecker.Identifier (VariableId)
+import Katari.Typechecker.Identifier (RequestId)
 import Katari.Typechecker.NormalizedType
   ( NormalizedType (..),
     normaliseSemantic,
@@ -265,7 +265,7 @@ substToNormalizedSafe = Map.map convert
 solveEffectWorklist ::
   Int ->
   Set Constraint ->
-  (Map EffectVarId (Set VariableId), [SolverError])
+  (Map EffectVarId (Set RequestId), [SolverError])
 solveEffectWorklist _ = Effect.solveEffectConstraints
 
 -- ---------------------------------------------------------------------------
@@ -283,8 +283,8 @@ totaliseTypes upperLimit given =
 
 totaliseEffects ::
   Int ->
-  Map EffectVarId (Set VariableId) ->
-  Map EffectVarId (Set VariableId)
+  Map EffectVarId (Set RequestId) ->
+  Map EffectVarId (Set RequestId)
 totaliseEffects upperLimit given =
   Map.union given $
     Map.fromList [(EffectVarId i, Set.empty) | i <- [0 .. upperLimit - 1]]

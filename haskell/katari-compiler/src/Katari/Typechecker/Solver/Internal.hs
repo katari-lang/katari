@@ -35,7 +35,7 @@ import Katari.Typechecker.ConstraintGenerator
   ( Constraint (..),
     ConstraintReason,
   )
-import Katari.Typechecker.Identifier (VariableId)
+import Katari.Typechecker.Identifier (RequestId)
 import Katari.Typechecker.NormalizedType
   ( NormalizedType,
     normaliseSemantic,
@@ -62,7 +62,7 @@ import Katari.Typechecker.SemanticType
 -- var は NTUnknown / 空 set にフォールバック。
 data SolverResult = SolverResult
   { typeSubstitution :: !(Map TypeVarId NormalizedType),
-    effectSubstitution :: !(Map EffectVarId (Set VariableId)),
+    effectSubstitution :: !(Map EffectVarId (Set RequestId)),
     solverErrors :: ![SolverError]
   }
   deriving (Show)

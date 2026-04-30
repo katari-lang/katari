@@ -9,6 +9,8 @@ import Katari.Parser (parseModuleStrict)
 import Katari.Typechecker.ConstraintGenerator
 import Katari.Typechecker.Identifier
   ( IdentifierResult (..),
+    RequestData (RequestData),
+    RequestId,
     TypeData (..),
     TypeId,
     VariableData (..),
@@ -58,6 +60,20 @@ effectConstraints result =
 variableIdOf :: Text -> IdentifierResult -> Maybe VariableId
 variableIdOf name result =
   fst <$> find ((== name) . (.variableName) . snd) (Map.toList result.identifiedVariables)
+
+-- | Look up the 'RequestId' that corresponds to a given call-side
+-- 'VariableId'. Used to populate effect-set assertions in tests where the
+-- effect lookup is keyed by request id.
+requestIdOfVariable :: VariableId -> IdentifierResult -> RequestId
+requestIdOfVariable vid result =
+  head
+    [ rid
+      | (rid, rd) <- Map.toList result.identifiedRequests,
+        requestVariableIdOf rd == vid
+    ]
+  where
+    requestVariableIdOf :: RequestData -> VariableId
+    requestVariableIdOf (RequestData _ _ v) = v
 
 -- | Lookup the type variable assigned to a named variable.
 typeVarOf :: Text -> ConstraintGenResult -> IdentifierResult -> Maybe (SemanticType Unresolved)
@@ -520,16 +536,15 @@ constraintContents = describe "constraint contents" $ do
     (cg, ir) <- runOneWithIdentifier "req fetch() -> string"
     case (variableIdOf "fetch" ir, typeVarOf "fetch" cg ir) of
       (Just fetchVid, Just tFetch) ->
-        -- signature: () -> string with {fetch}
-        -- これと t_fetch の eq
-        cg `shouldSatisfy` hasTypeConstraint
-          ( \l r -> case l of
-              SemanticTypeFunction _ ret eff ->
-                ret == SemanticTypeString
-                  && Set.member fetchVid eff.effectReqs
-                  && r == tFetch
-              _ -> False
-          )
+        let fetchReqId = requestIdOfVariable fetchVid ir
+         in cg `shouldSatisfy` hasTypeConstraint
+              ( \l r -> case l of
+                  SemanticTypeFunction _ ret eff ->
+                    ret == SemanticTypeString
+                      && Set.member fetchReqId eff.effectReqs
+                      && r == tFetch
+                  _ -> False
+              )
       _ -> expectationFailure "fetch not in identifier output / env"
 
   it "data ctor signature is pure (emptyEffect) and returns SemanticTypeData" $ do
@@ -574,9 +589,10 @@ constraintContents = describe "constraint contents" $ do
       Just fetchVid ->
         -- innerEff <: outerEff ∪ {fetch}
         -- rhs.effectReqs に fetch が含まれている effect constraint が存在
-        cg `shouldSatisfy` hasEffectConstraint
-          ( \_ rhs -> Set.member fetchVid rhs.effectReqs
-          )
+        let fetchReqId = requestIdOfVariable fetchVid ir
+         in cg `shouldSatisfy` hasEffectConstraint
+              ( \_ rhs -> Set.member fetchReqId rhs.effectReqs
+              )
 
   it "if branches both flow into the same result type var" $ do
     cg <- runOne "agent foo() { if (true) { 1 } else { 2 } }"

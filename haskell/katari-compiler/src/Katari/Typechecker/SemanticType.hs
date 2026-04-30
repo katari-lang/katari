@@ -49,7 +49,7 @@ import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Katari.AST (ExprType, PatType, Phase (..))
-import Katari.AST.Identifiers (TypeId, VariableId)
+import Katari.AST.Identifiers (RequestId, TypeId)
 
 -- ---------------------------------------------------------------------------
 -- Phase markers
@@ -160,7 +160,7 @@ unionSemantic = \case
 -- work without case splits.
 data SemanticEffect phase = SemanticEffect
   { effectVars :: !(Set EffectVarId),
-    effectReqs :: !(Set VariableId)
+    effectReqs :: !(Set RequestId)
   }
   deriving (Eq, Ord, Show)
 
@@ -169,7 +169,7 @@ emptyEffect :: SemanticEffect phase
 emptyEffect = SemanticEffect Set.empty Set.empty
 
 -- | Effect set containing exactly one concrete @req@.
-singletonEffect :: VariableId -> SemanticEffect phase
+singletonEffect :: RequestId -> SemanticEffect phase
 singletonEffect requestId = SemanticEffect Set.empty (Set.singleton requestId)
 
 -- | Effect set containing exactly one fresh effect variable.

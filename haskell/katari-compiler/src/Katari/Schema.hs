@@ -69,7 +69,7 @@ import Katari.AST
     RequestDeclaration (..),
     SymbolKind (..),
   )
-import Katari.AST.Identifiers (ModuleId, VariableId, unVariableId)
+import Katari.AST.Identifiers (ModuleId, RequestId, VariableId, unRequestId)
 import Katari.Typechecker.SemanticType
   ( Resolved,
     SemanticEffect (..),
@@ -403,11 +403,13 @@ paramObject paramTypes parameters =
 
 -- | Render an effect set as @\"req\<n\>\"@ identifiers. Effect variables
 -- are empty at 'Resolved' phase by Solver contract.
+--
+-- TODO (Phase 15-H): switch to qualified-name strings via 'zonkedRequests'.
 renderEffects :: SemanticEffect Resolved -> [Text]
 renderEffects (SemanticEffect _ reqs) = map renderRequestId (Set.toList reqs)
   where
-    renderRequestId :: VariableId -> Text
-    renderRequestId vid = "req" <> Text.pack (show (unVariableId vid))
+    renderRequestId :: RequestId -> Text
+    renderRequestId rid = "req" <> Text.pack (show (unRequestId rid))
 
 -- ===========================================================================
 -- Data declaration -> $defs entry

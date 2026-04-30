@@ -13,10 +13,13 @@ import Katari.Typechecker.ConstraintGenerator
   )
 import Katari.Typechecker.Identifier
   ( IdentifierResult (..),
+    RequestData,
+    RequestId,
     VariableData (..),
     VariableId,
     identify,
   )
+import Katari.Typechecker.Identifier qualified as Identifier
 import Katari.Typechecker.NormalizedType
   ( ArraySlot (..),
     FunctionShape (..),
@@ -64,7 +67,7 @@ pipeline src = case parseModuleStrict "<test>" src of
 mkTotalSolverResult ::
   ConstraintGenResult ->
   [(TypeVarId, NormalizedType)] ->
-  [(EffectVarId, Set VariableId)] ->
+  [(EffectVarId, Set RequestId)] ->
   SolverResult
 mkTotalSolverResult cg typeOverrides effectOverrides =
   SolverResult
@@ -81,7 +84,7 @@ mkTotalSolverResult cg typeOverrides effectOverrides =
 -- exercise the defensive Zonker fallback path.
 mkPartialSolverResult ::
   [(TypeVarId, NormalizedType)] ->
-  [(EffectVarId, Set VariableId)] ->
+  [(EffectVarId, Set RequestId)] ->
   SolverResult
 mkPartialSolverResult ts es =
   SolverResult
@@ -344,6 +347,7 @@ effectSubstitutionSpec = describe "effect substitution" $ do
     let Just fetchVid = variableIdOf "fetch" idResult
         Just appVid = variableIdOf "app" idResult
         Just (SemanticTypeVariable tApp) = Map.lookup appVid cg.typeEnvironment
+        fetchReqId = head [rid | (rid, rd) <- Map.toList idResult.identifiedRequests, rd.requestVariableId == fetchVid]
         appFnNT =
           NTLayered
             emptyLayered
@@ -354,14 +358,14 @@ effectSubstitutionSpec = describe "effect substitution" $ do
                         returnType =
                           NTLayered
                             emptyLayered {numberLayer = NumberLiterals (Set.singleton 0)},
-                        effects = Set.singleton fetchVid
+                        effects = Set.singleton fetchReqId
                       }
               }
         zr = zonk idResult cg (mkTotalSolverResult cg [(tApp, appFnNT)] [])
     case Map.lookup appVid zr.zonkedTypeEnvironment of
       Just (SemanticTypeFunction _ _ eff) -> do
         eff.effectVars `shouldBe` Set.empty
-        eff.effectReqs `shouldBe` Set.singleton fetchVid
+        eff.effectReqs `shouldBe` Set.singleton fetchReqId
       other -> expectationFailure ("app not bound to function type: " ++ show other)
     zr.zonkErrors `shouldBe` []
 
