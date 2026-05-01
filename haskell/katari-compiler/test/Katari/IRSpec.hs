@@ -49,7 +49,7 @@ blockSpec = describe "Block (sum)" $ do
           UserBlock
             { kind = BlockAgentEntry,
               captures = [],
-              params = [Param {label = "x", var = VarId 0}],
+              parameters = [Param {label = "x", var = VarId 0}],
               stateVars = [],
               statements = [],
               trailing = Just (VarId 1),
@@ -63,7 +63,7 @@ blockSpec = describe "Block (sum)" $ do
             .= object
               [ "kind" .= ("blockAgentEntry" :: String),
                 "captures" .= ([] :: [Value]),
-                "params" .= [object ["label" .= ("x" :: String), "var" .= (0 :: Int)]],
+                "parameters" .= [object ["label" .= ("x" :: String), "var" .= (0 :: Int)]],
                 "stateVars" .= ([] :: [Value]),
                 "statements" .= ([] :: [Value]),
                 "trailing" .= (1 :: Int),
@@ -95,7 +95,7 @@ blockSpec = describe "Block (sum)" $ do
           UserBlock
             { kind = BlockInline,
               captures = [],
-              params = [],
+              parameters = [],
               stateVars = [],
               statements = [],
               trailing = Nothing,
@@ -133,7 +133,7 @@ statementSpec = describe "Statement (sum)" $ do
     StatementCall
       CallData
         { target = CallTargetBlock {block = BlockId 7},
-          args = [Arg {label = "x", var = VarId 1}],
+          arguments = [Arg {label = "x", var = VarId 1}],
           output = Just (VarId 2)
         }
       `shouldEncodeAs` object
@@ -141,7 +141,7 @@ statementSpec = describe "Statement (sum)" $ do
           "contents"
             .= object
               [ "target" .= object ["kind" .= ("callTargetBlock" :: String), "block" .= (7 :: Int)],
-                "args" .= [object ["label" .= ("x" :: String), "var" .= (1 :: Int)]],
+                "arguments" .= [object ["label" .= ("x" :: String), "var" .= (1 :: Int)]],
                 "output" .= (2 :: Int)
               ]
         ]
@@ -174,14 +174,14 @@ statementSpec = describe "Statement (sum)" $ do
       ContData
         { contKind = ContKindForNext,
           value = Nothing,
-          mods = [("acc", VarId 5)]
+          modifiers = [("acc", VarId 5)]
         }
       `shouldEncodeAs` object
         [ "kind" .= ("statementCont" :: String),
           "contents"
             .= object
               [ "contKind" .= ("contKindForNext" :: String),
-                "mods" .= [["acc" :: Aeson.Value, Aeson.Number 5]]
+                "modifiers" .= [["acc" :: Aeson.Value, Aeson.Number 5]]
               ]
         ]
 
@@ -227,7 +227,7 @@ statementSpec = describe "Statement (sum)" $ do
       StatementCall
         CallData
           { target = CallTargetValue (VarId 0),
-            args = [],
+            arguments = [],
             output = Nothing
           }
     roundTrip $ StatementMakeClosure MakeClosureData {output = VarId 0, block = BlockId 0, captures = []}
@@ -245,7 +245,7 @@ statementSpec = describe "Statement (sum)" $ do
             output = Nothing
           }
     roundTrip $ StatementExit ExitData {exitKind = ExitKindBreak, value = VarId 0}
-    roundTrip $ StatementCont ContData {contKind = ContKindNext, value = Just (VarId 0), mods = []}
+    roundTrip $ StatementCont ContData {contKind = ContKindNext, value = Just (VarId 0), modifiers = []}
 
   it "round-trips all LiteralValue variants" $ do
     roundTrip (LiteralValueInteger 42)
@@ -320,7 +320,7 @@ moduleSpec = describe "IRModule" $ do
                 UserBlock
                   { kind = BlockAgentEntry,
                     captures = [],
-                    params = [],
+                    parameters = [],
                     stateVars = [],
                     statements = [StatementExit ExitData {exitKind = ExitKindReturn, value = VarId 0}],
                     trailing = Nothing,

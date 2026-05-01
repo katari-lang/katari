@@ -54,16 +54,16 @@ data LoweringError where
 -- are reserved for the lowering pass.
 toDiagnostic :: LoweringError -> Diagnostic
 toDiagnostic = \case
-  LoweringErrorUnresolvedVariable sp name ->
+  LoweringErrorUnresolvedVariable sourceSpan name ->
     diagnosticError
       "K0300"
       ("unresolved variable in lowering: '" <> name <> "'")
-      sp
-  LoweringErrorParseSentinel sp ->
+      sourceSpan
+  LoweringErrorParseSentinel sourceSpan ->
     diagnosticError
       "K0301"
       "parser/identifier sentinel reached lowering (likely a recovery artifact)"
-      sp
+      sourceSpan
 
 -- ===========================================================================
 -- Primitive table
@@ -242,13 +242,13 @@ freshCtorId = do
 -- tables in 'lsReqIds' / 'lsCtorIds'. Called once at the start of
 -- 'lowerProgramM' before declaration walking begins.
 allocateReqAndCtorIds :: ZonkResult -> Lower ()
-allocateReqAndCtorIds zr = do
-  reqIdPairs <- forM (Map.keys zr.zonkedRequests) $ \identRid -> do
-    rid <- freshReqId
-    pure (identRid, rid)
-  ctorIdPairs <- forM (Map.keys zr.zonkedConstructors) $ \identCid -> do
-    cid <- freshCtorId
-    pure (identCid, cid)
+allocateReqAndCtorIds zonkResult = do
+  reqIdPairs <- forM (Map.keys zonkResult.zonkedRequests) $ \identRid -> do
+    irReqId <- freshReqId
+    pure (identRid, irReqId)
+  ctorIdPairs <- forM (Map.keys zonkResult.zonkedConstructors) $ \identCid -> do
+    irCtorId <- freshCtorId
+    pure (identCid, irCtorId)
   modify $ \s ->
     s
       { lsReqIds = Map.fromList reqIdPairs,
@@ -286,7 +286,7 @@ withLocals binds = local $ \env ->
 
 -- | Look up a local variable id in the current scope.
 lookupLocal :: VariableId -> Lower (Maybe VarId)
-lookupLocal vid = asks (Map.lookup vid . (.localVars))
+lookupLocal variableId = asks (Map.lookup variableId . (.localVars))
 
 -- | Resolve a primitive name to its 'BlockId'. The map is populated by
 -- 'registerPrimitives' once at the start of lowering, so a missing entry
@@ -340,7 +340,7 @@ defaultUserBlock =
   UserBlock
     { kind = BlockInline,
       captures = [],
-      params = [],
+      parameters = [],
       stateVars = [],
       statements = [],
       trailing = Nothing,
@@ -416,9 +416,9 @@ registerCallable ::
   AST.SourceSpan ->
   (VariableId -> Lower ()) ->
   Lower ()
-registerCallable nameRef sp action = case nameRef.resolution of
+registerCallable nameRef sourceSpan action = case nameRef.resolution of
   Just variableId -> action variableId
-  Nothing -> recordError (LoweringErrorUnresolvedVariable sp nameRef.text)
+  Nothing -> recordError (LoweringErrorUnresolvedVariable sourceSpan nameRef.text)
 
 -- | Walk all declarations, registering each top-level agent / req / ext /
 -- ctor's @VariableId → BlockId@ mapping. Bodies are filled in by
@@ -451,30 +451,30 @@ registerDeclarationKinds zonkResult =
           -- (the request id slot of the @req@ name). Defensive fallback:
           -- allocate a fresh ReqId if missing (would indicate an upstream
           -- consistency bug).
-          rid <- requestIdForVariable variableId
-          recordBlock blockId (BlockRequest {reqId = rid}) (Just decl.name.text)
+          irReqId <- requestIdForVariable variableId
+          recordBlock blockId (BlockRequest {reqId = irReqId}) (Just decl.name.text)
           recordVarBlockId variableId blockId
           recordEntry moduleName decl.name.text blockId
       AST.DeclarationExternalAgent decl ->
         registerCallable decl.name decl.sourceSpan $ \variableId -> do
           blockId <- freshBlockId
-          let qn = QualifiedName {module_ = moduleName, name = decl.name.text}
+          let qualifiedName = QualifiedName {module_ = moduleName, name = decl.name.text}
           recordBlock
             blockId
-            BlockExternal {externalName = ExternalName qn}
+            BlockExternal {externalName = ExternalName qualifiedName}
             (Just decl.name.text)
           recordVarBlockId variableId blockId
           recordEntry moduleName decl.name.text blockId
       AST.DeclarationData decl ->
         registerCallable decl.name decl.sourceSpan $ \variableId -> do
           blockId <- freshBlockId
-          cid <- constructorIdForVariable variableId
-          recordBlock blockId (BlockCtor {ctorId = cid}) (Just decl.name.text)
+          irCtorId <- constructorIdForVariable variableId
+          recordBlock blockId (BlockCtor {ctorId = irCtorId}) (Just decl.name.text)
           recordVarBlockId variableId blockId
           recordEntry moduleName decl.name.text blockId
       AST.DeclarationImport _ -> pure ()
       AST.DeclarationTypeSynonym _ -> pure ()
-      AST.DeclarationError sp -> recordError (LoweringErrorParseSentinel sp)
+      AST.DeclarationError sourceSpan -> recordError (LoweringErrorParseSentinel sourceSpan)
 
     -- | The IR 'ReqId' assigned to a @req@ declaration's call-side
     -- 'VariableId'. The Identifier-pass 'RequestId' is found by scanning
@@ -482,30 +482,30 @@ registerDeclarationKinds zonkResult =
     -- then translates to the IR ReqId. Falls back to 'freshReqId' on
     -- a miss (which would indicate upstream inconsistency).
     requestIdForVariable :: VariableId -> Lower ReqId
-    requestIdForVariable vid = do
-      let identRid =
+    requestIdForVariable variableId = do
+      let identReqId =
             firstWhere
-              (\(_, rd) -> rd.requestVariableId == vid)
+              (\(_, requestData) -> requestData.requestVariableId == variableId)
               (Map.toList zonkResult.zonkedRequests)
-      case identRid of
-        Just (rid, _) -> do
-          mapped <- gets (Map.lookup rid . (.lsReqIds))
+      case identReqId of
+        Just (requestId, _) -> do
+          mapped <- gets (Map.lookup requestId . (.lsReqIds))
           case mapped of
-            Just irRid -> pure irRid
+            Just irReqId -> pure irReqId
             Nothing -> freshReqId
         Nothing -> freshReqId
 
     constructorIdForVariable :: VariableId -> Lower CtorId
-    constructorIdForVariable vid = do
-      let identCid =
+    constructorIdForVariable variableId = do
+      let identCtorId =
             firstWhere
-              (\(_, cd) -> cd.constructorVariableId == vid)
+              (\(_, constructorData) -> constructorData.constructorVariableId == variableId)
               (Map.toList zonkResult.zonkedConstructors)
-      case identCid of
-        Just (cid, _) -> do
-          mapped <- gets (Map.lookup cid . (.lsCtorIds))
+      case identCtorId of
+        Just (constructorId, _) -> do
+          mapped <- gets (Map.lookup constructorId . (.lsCtorIds))
           case mapped of
-            Just irCid -> pure irCid
+            Just irCtorId -> pure irCtorId
             Nothing -> freshCtorId
         Nothing -> freshCtorId
 
@@ -513,9 +513,9 @@ registerDeclarationKinds zonkResult =
     firstWhere predicate = foldr (\x acc -> if predicate x then Just x else acc) Nothing
 
     recordEntry :: Text -> Text -> BlockId -> Lower ()
-    recordEntry m n bid =
-      let qn = QualifiedName {module_ = m, name = n}
-       in modify (\s -> s {lsEntries = Map.insert qn bid s.lsEntries})
+    recordEntry moduleName_ declName blockId =
+      let qualifiedName = QualifiedName {module_ = moduleName_, name = declName}
+       in modify (\s -> s {lsEntries = Map.insert qualifiedName blockId s.lsEntries})
 
 lowerAllDeclarations :: ZonkResult -> Lower (Map Text BlockId)
 lowerAllDeclarations zonkResult = do
@@ -528,8 +528,8 @@ lowerAllDeclarations zonkResult = do
     lowerDeclaration = \case
       AST.DeclarationAgent decl -> case decl.name.resolution of
         Just variableId -> do
-          mBlockId <- gets (Map.lookup variableId . (.lsVarBlockIds))
-          case mBlockId of
+          maybeBlockId <- gets (Map.lookup variableId . (.lsVarBlockIds))
+          case maybeBlockId of
             Just blockId -> do
               lowerAgentDeclaration decl blockId
               pure (Just (decl.name.text, blockId))
@@ -597,7 +597,7 @@ lowerSimpleAgent blockId name paramVars prelude blk = do
   let userBlock =
         defaultUserBlock
           { kind = BlockAgentEntry,
-            params = paramVars,
+            parameters = paramVars,
             statements = statements,
             trailing = trailing
           }
@@ -626,7 +626,7 @@ lowerAgentWithHandlers blockId name paramVars prelude blk wb = do
   let userBlock =
         defaultUserBlock
           { kind = BlockAgentEntryWithHandlers,
-            params = paramVars,
+            parameters = paramVars,
             statements = statements,
             trailing = trailing,
             thenBlock = thenBlockId,
@@ -636,7 +636,7 @@ lowerAgentWithHandlers blockId name paramVars prelude blk wb = do
 
 -- | Agent with @where (var s = init) ...@: outer/inner split. The
 -- @prelude@ runs inside the *outer* block (where the runtime delivers the
--- params), and the destructured locals are visible to the inner block via
+-- parameters), and the destructured locals are visible to the inner block via
 -- the Reader env (the inner is 'BlockHandleScope' which inherits the
 -- outer scope at runtime).
 lowerAgentWithStateVars ::
@@ -659,13 +659,13 @@ lowerAgentWithStateVars outerId name paramVars prelude blk wb = do
         StatementCall
           CallData
             { target = CallTargetBlock {block = innerBlockId},
-              args = innerArgs,
+              arguments = innerArgs,
               output = Just innerOut
             }
   let outerBlock =
         defaultUserBlock
           { kind = BlockAgentEntry,
-            params = paramVars,
+            parameters = paramVars,
             statements = outerStatements,
             trailing = Just innerOut
           }
@@ -682,7 +682,7 @@ lowerStateInits = mapM $ \svb -> do
   pure (svb.name.text, initVar)
 
 -- | Build the inner handle-scope block (with state vars, handlers, and the
--- agent body). The block expects state vars as labeled params; its body runs
+-- agent body). The block expects state vars as labeled parameters; its body runs
 -- the original block's statements and may issue 'StatementExit ExitKindBreak' which the
 -- runtime catches at this block.
 buildInnerBlockWithState ::
@@ -695,7 +695,7 @@ buildInnerBlockWithState parentName wb blk = do
   -- Allocate fresh IR vars for state vars and bind their VariableIds.
   stateBinds <- mapM mkStateParam wb.stateVariables
   let stateParams = [p | (_, p, _) <- stateBinds]
-      stateLocals = [(vid, p.var) | (Just vid, p, _) <- stateBinds]
+      stateLocals = [(variableId, p.var) | (Just variableId, p, _) <- stateBinds]
   withLocals stateLocals $ do
     (statements, trailing) <- lowerBlockBody (stripWhereBlock blk)
     handlers <- mapM (lowerHandler stateParams) wb.handlers
@@ -726,8 +726,8 @@ buildInnerBlockWithState parentName wb blk = do
               v <- freshVarId Nothing
               pure (Nothing, Param {label = nameText, var = v}, svb)
 
--- | Lower a 'RequestHandler' to its own user block. Handler params are
--- @[req args ..., state vars (as labels) ...]@. The body's trailing value is
+-- | Lower a 'RequestHandler' to its own user block. Handler parameters are
+-- @[req arguments ..., state vars (as labels) ...]@. The body's trailing value is
 -- treated as an implicit @break@ (Koka-style); we append an explicit
 -- 'StatementExit ExitKindBreak' if the body completes normally.
 lowerHandler :: [Param] -> AST.RequestHandler Zonked -> Lower Handler
@@ -741,10 +741,10 @@ lowerHandler stateParams hr = do
   -- IR-level 'ReqId' allocated for that 'RequestId' lives in 'lsReqIds'
   -- and is what the runtime compares against when a request is raised.
   irReqId <- case hr.name.resolution of
-    Just identRid -> do
-      mapped <- gets (Map.lookup identRid . (.lsReqIds))
+    Just identRequestId -> do
+      mapped <- gets (Map.lookup identRequestId . (.lsReqIds))
       case mapped of
-        Just rid -> pure rid
+        Just foundReqId -> pure foundReqId
         Nothing -> do
           recordError (LoweringErrorUnresolvedVariable hr.sourceSpan hr.name.text)
           freshReqId
@@ -768,7 +768,7 @@ lowerHandler stateParams hr = do
       userBlock =
         defaultUserBlock
           { kind = BlockHandlerBody,
-            params = reqParamVars ++ stateParams,
+            parameters = reqParamVars ++ stateParams,
             statements = finalStatements
           }
   recordBlock bodyBlockId (BlockUser {body = userBlock}) (Just hr.name.text)
@@ -781,7 +781,7 @@ lowerThenClause ::
 lowerThenClause = \case
   Nothing -> pure Nothing
   Just (mpat, blk) -> do
-    bid <- freshBlockId
+    blockId <- freshBlockId
     -- The then block receives the body's tail as a single param. If the user
     -- wrote @then(p) { ... }@ we bind the pattern; otherwise we just use
     -- a wildcard.
@@ -794,12 +794,12 @@ lowerThenClause = \case
       (statements, trailing) <- lowerBlockBody blk
       let userBlock =
             defaultUserBlock
-              { params = [Param {label = "value", var = paramVar}],
+              { parameters = [Param {label = "value", var = paramVar}],
                 statements = statements,
                 trailing = trailing
               }
-      recordBlock bid (BlockUser {body = userBlock}) Nothing
-    pure (Just bid)
+      recordBlock blockId (BlockUser {body = userBlock}) Nothing
+    pure (Just blockId)
 
 -- | Strip a block's whereBlock, returning the statements / returnExpression
 -- portion only. Used so 'lowerBlockBody' doesn't try to re-process it.
@@ -925,11 +925,11 @@ lowerStmt = \case
   AST.StatementNext stmt -> do
     var <- lowerExpr stmt.value
     modPairs <- mapM lowerModifier stmt.modifiers
-    emit (StatementCont ContData {contKind = ContKindNext, value = Just var, mods = modPairs})
+    emit (StatementCont ContData {contKind = ContKindNext, value = Just var, modifiers = modPairs})
     pure True
   AST.StatementForNext stmt -> do
     modPairs <- mapM lowerModifier stmt.modifiers
-    emit (StatementCont ContData {contKind = ContKindForNext, value = Nothing, mods = modPairs})
+    emit (StatementCont ContData {contKind = ContKindForNext, value = Nothing, modifiers = modPairs})
     pure True
   AST.StatementExpression expr -> do
     _ <- lowerExpr expr
@@ -948,16 +948,16 @@ lowerStmt = \case
     -- No explicit IR captures are needed.
     case stmt.name.resolution of
       Just variableId -> do
-        bid <- freshBlockId
+        blockId <- freshBlockId
         modify $ \s ->
-          s {lsVarBlockIds = Map.insert variableId bid s.lsVarBlockIds}
-        lowerAgentLike stmt.name.text stmt.parameters stmt.body bid
+          s {lsVarBlockIds = Map.insert variableId blockId s.lsVarBlockIds}
+        lowerAgentLike stmt.name.text stmt.parameters stmt.body blockId
       Nothing ->
         recordError
           (LoweringErrorUnresolvedVariable stmt.sourceSpan stmt.name.text)
     pure False
-  AST.StatementError sp -> do
-    recordError (LoweringErrorParseSentinel sp)
+  AST.StatementError sourceSpan -> do
+    recordError (LoweringErrorParseSentinel sourceSpan)
     pure False
 
 -- | Lower one 'AST.Modifier' producing @(label, value-bearing IR var)@. The
@@ -982,106 +982,106 @@ lowerExpr :: AST.Expression Zonked -> Lower VarId
 lowerExpr = \case
   AST.ExpressionLiteral lit -> lowerLiteral lit
   AST.ExpressionVariable ve -> lowerVariable ve
-  AST.ExpressionBinaryOperator be -> do
-    lhs <- lowerExpr be.left
-    rhs <- lowerExpr be.right
+  AST.ExpressionBinaryOperator binaryExpr -> do
+    lhs <- lowerExpr binaryExpr.left
+    rhs <- lowerExpr binaryExpr.right
     out <- freshVarId Nothing
-    blockId <- primBlockId (binaryOpPrim be.operator)
+    blockId <- primBlockId (binaryOpPrim binaryExpr.operator)
     emit $
       StatementCall
         CallData
           { target = CallTargetBlock {block = blockId},
-            args = [Arg "lhs" lhs, Arg "rhs" rhs],
+            arguments = [Arg "lhs" lhs, Arg "rhs" rhs],
             output = Just out
           }
     pure out
-  AST.ExpressionUnaryOperator ue -> do
-    operand <- lowerExpr ue.operand
+  AST.ExpressionUnaryOperator unaryExpr -> do
+    operand <- lowerExpr unaryExpr.operand
     out <- freshVarId Nothing
-    blockId <- primBlockId (unaryOpPrim ue.operator)
+    blockId <- primBlockId (unaryOpPrim unaryExpr.operator)
     emit $
       StatementCall
         CallData
           { target = CallTargetBlock {block = blockId},
-            args = [Arg "operand" operand],
+            arguments = [Arg "operand" operand],
             output = Just out
           }
     pure out
-  AST.ExpressionCall ce -> lowerCall ce
-  AST.ExpressionTuple te -> do
-    elements <- mapM lowerExpr te.elements
+  AST.ExpressionCall callExpr -> lowerCall callExpr
+  AST.ExpressionTuple tupleExpr -> do
+    elements <- mapM lowerExpr tupleExpr.elements
     out <- freshVarId Nothing
     blockId <- primBlockId "make_tuple"
     emit $
       StatementCall
         CallData
           { target = CallTargetBlock {block = blockId},
-            args = zipWith mkIndexedArg [0 ..] elements,
+            arguments = zipWith mkIndexedArg [0 ..] elements,
             output = Just out
           }
     pure out
-  AST.ExpressionArray ae -> do
-    elements <- mapM lowerExpr ae.elements
+  AST.ExpressionArray arrayExpr -> do
+    elements <- mapM lowerExpr arrayExpr.elements
     out <- freshVarId Nothing
     blockId <- primBlockId "make_array"
     emit $
       StatementCall
         CallData
           { target = CallTargetBlock {block = blockId},
-            args = zipWith mkIndexedArg [0 ..] elements,
+            arguments = zipWith mkIndexedArg [0 ..] elements,
             output = Just out
           }
     pure out
-  AST.ExpressionFieldAccess fa -> do
-    object <- lowerExpr fa.object
+  AST.ExpressionFieldAccess fieldAccessExpr -> do
+    object <- lowerExpr fieldAccessExpr.object
     -- Field name is loaded as a string literal; get_field consumes
     -- (object, field).
-    fieldVar <- emitLoadLiteral (LiteralValueString fa.fieldName.text)
+    fieldVar <- emitLoadLiteral (LiteralValueString fieldAccessExpr.fieldName.text)
     out <- freshVarId Nothing
     blockId <- primBlockId "get_field"
     emit $
       StatementCall
         CallData
           { target = CallTargetBlock {block = blockId},
-            args = [Arg "object" object, Arg "field" fieldVar],
+            arguments = [Arg "object" object, Arg "field" fieldVar],
             output = Just out
           }
     pure out
-  AST.ExpressionIndexAccess ia -> do
-    array <- lowerExpr ia.array
-    index <- lowerExpr ia.index
+  AST.ExpressionIndexAccess indexAccessExpr -> do
+    array <- lowerExpr indexAccessExpr.array
+    index <- lowerExpr indexAccessExpr.index
     out <- freshVarId Nothing
     blockId <- primBlockId "array_get"
     emit $
       StatementCall
         CallData
           { target = CallTargetBlock {block = blockId},
-            args = [Arg "array" array, Arg "index" index],
+            arguments = [Arg "array" array, Arg "index" index],
             output = Just out
           }
     pure out
-  AST.ExpressionTemplate te -> lowerTemplate te
-  AST.ExpressionBlock be -> lowerBlockExpr be
-  AST.ExpressionIf ie -> lowerIfExpr ie
-  AST.ExpressionMatch me -> lowerMatchExpr me
-  AST.ExpressionFor fe -> lowerForExpr fe
-  AST.ExpressionQualifiedReference qe ->
+  AST.ExpressionTemplate templateExpr -> lowerTemplate templateExpr
+  AST.ExpressionBlock blockExpr -> lowerBlockExpr blockExpr
+  AST.ExpressionIf ifExpr -> lowerIfExpr ifExpr
+  AST.ExpressionMatch matchExpr -> lowerMatchExpr matchExpr
+  AST.ExpressionFor forExpr -> lowerForExpr forExpr
+  AST.ExpressionQualifiedReference qualifiedRefExpr ->
     -- A resolved qualified reference (module.target). target.resolution
     -- holds the resolved VariableId; treat it like a bare variable
     -- expression. Qualified references never bind locally.
-    case qe.target.resolution of
+    case qualifiedRefExpr.target.resolution of
       Just variableId -> do
-        mBlockId <- gets (Map.lookup variableId . (.lsVarBlockIds))
-        case mBlockId of
-          Just bid -> do
-            v <- freshVarId (Just qe.target.text)
-            emit (StatementMakeClosure MakeClosureData {output = v, block = bid, captures = []})
+        maybeBlockId <- gets (Map.lookup variableId . (.lsVarBlockIds))
+        case maybeBlockId of
+          Just blockId -> do
+            v <- freshVarId (Just qualifiedRefExpr.target.text)
+            emit (StatementMakeClosure MakeClosureData {output = v, block = blockId, captures = []})
             pure v
           Nothing -> do
-            recordError (LoweringErrorUnresolvedVariable qe.sourceSpan qe.target.text)
+            recordError (LoweringErrorUnresolvedVariable qualifiedRefExpr.sourceSpan qualifiedRefExpr.target.text)
             freshVarId Nothing
       Nothing -> do
-        recordError (LoweringErrorUnresolvedVariable qe.sourceSpan qe.target.text)
+        recordError (LoweringErrorUnresolvedVariable qualifiedRefExpr.sourceSpan qualifiedRefExpr.target.text)
         freshVarId Nothing
 
 -- | Make an Arg with an indexed label like @"_0"@, @"_1"@, … for tuple /
@@ -1093,12 +1093,12 @@ mkIndexedArg i var = Arg {label = "_" <> Text.pack (show i), var = var}
 -- (when the callee resolves to a top-level decl / ctor / prim) or a closure
 -- 'CallTargetValue' call (when the callee is a local variable holding a function).
 lowerCall :: AST.CallExpression Zonked -> Lower VarId
-lowerCall ce = do
-  argVars <- mapM (lowerExpr . (.value)) ce.arguments
-  let args = zipWith Arg (map (.label.text) ce.arguments) argVars
-  target <- resolveCallee ce.callee
+lowerCall callExpression = do
+  argVars <- mapM (lowerExpr . (.value)) callExpression.arguments
+  let callArgs = zipWith Arg (map (.label.text) callExpression.arguments) argVars
+  target <- resolveCallee callExpression.callee
   out <- freshVarId Nothing
-  emit (StatementCall CallData {target = target, args = args, output = Just out})
+  emit (StatementCall CallData {target = target, arguments = callArgs, output = Just out})
   pure out
 
 -- | Resolve an expression that's used in the callee position.
@@ -1106,10 +1106,10 @@ resolveCallee :: AST.Expression Zonked -> Lower CallTarget
 resolveCallee = \case
   AST.ExpressionVariable ve ->
     resolveCalleeName ve.name.resolution ve.sourceSpan ve.name.text True
-  AST.ExpressionQualifiedReference qe ->
+  AST.ExpressionQualifiedReference qualifiedRefExpr ->
     -- Qualified references never bind locally — only consult the
     -- top-level block id table.
-    resolveCalleeName qe.target.resolution qe.sourceSpan qe.target.text False
+    resolveCalleeName qualifiedRefExpr.target.resolution qualifiedRefExpr.sourceSpan qualifiedRefExpr.target.text False
   -- For any other callee shape (a higher-order computation), lower it to
   -- a closure value first.
   other -> do
@@ -1126,7 +1126,7 @@ resolveCalleeName ::
   Text ->
   Bool ->
   Lower CallTarget
-resolveCalleeName resolution sp nameText canBeLocal = case resolution of
+resolveCalleeName resolution sourceSpan nameText canBeLocal = case resolution of
   Just variableId -> do
     mLocal <-
       if canBeLocal
@@ -1135,22 +1135,22 @@ resolveCalleeName resolution sp nameText canBeLocal = case resolution of
     case mLocal of
       Just irVar -> pure (CallTargetValue {var = irVar})
       Nothing -> do
-        mBlockId <- gets (Map.lookup variableId . (.lsVarBlockIds))
-        case mBlockId of
-          Just bid -> pure (CallTargetBlock {block = bid})
+        maybeBlockId <- gets (Map.lookup variableId . (.lsVarBlockIds))
+        case maybeBlockId of
+          Just blockId -> pure (CallTargetBlock {block = blockId})
           Nothing -> failTarget
   Nothing -> failTarget
   where
     failTarget = do
-      recordError (LoweringErrorUnresolvedVariable sp nameText)
+      recordError (LoweringErrorUnresolvedVariable sourceSpan nameText)
       v <- freshVarId Nothing
       pure (CallTargetValue {var = v})
 
 -- | Lower an 'AST.TemplateExpression' as a left-fold of @concat@ prim
 -- calls.
 lowerTemplate :: AST.TemplateExpression Zonked -> Lower VarId
-lowerTemplate te = do
-  vars <- mapM lowerTemplateElement te.elements
+lowerTemplate templateExpression = do
+  vars <- mapM lowerTemplateElement templateExpression.elements
   case vars of
     [] -> emitLoadLiteral (LiteralValueString "")
     [single] -> stringify single
@@ -1165,7 +1165,7 @@ lowerTemplate te = do
         StatementCall
           CallData
             { target = CallTargetBlock {block = blockId},
-              args = [Arg "value" v],
+              arguments = [Arg "value" v],
               output = Just out
             }
       pure out
@@ -1178,7 +1178,7 @@ lowerTemplate te = do
         StatementCall
           CallData
             { target = CallTargetBlock {block = blockId},
-              args = [Arg "lhs" lhs, Arg "rhs" rhs],
+              arguments = [Arg "lhs" lhs, Arg "rhs" rhs],
               output = Just out
             }
       pure out
@@ -1196,14 +1196,14 @@ lowerTemplateElement = \case
 -- 'UserBlock' (kind = 'BlockInline', so it shares the parent's scope) and
 -- emit a static call to it.
 lowerBlockExpr :: AST.BlockExpression Zonked -> Lower VarId
-lowerBlockExpr be = do
-  childBlockId <- buildInlineBlock be.block
+lowerBlockExpr blockExpression = do
+  childBlockId <- buildInlineBlock blockExpression.block
   out <- freshVarId Nothing
   emit $
     StatementCall
       CallData
         { target = CallTargetBlock {block = childBlockId},
-          args = [],
+          arguments = [],
           output = Just out
         }
   pure out
@@ -1226,10 +1226,10 @@ buildInlineBlock blk = do
 -- branch is matched by tag @"true"@; the else branch (or implicit null
 -- block) is the default.
 lowerIfExpr :: AST.IfExpression Zonked -> Lower VarId
-lowerIfExpr ie = do
-  cond <- lowerExpr ie.condition
-  thenBlockId <- buildInlineBlock ie.thenBlock
-  defaultBlockId <- traverse buildInlineBlock ie.elseBlock
+lowerIfExpr ifExpression = do
+  cond <- lowerExpr ifExpression.condition
+  thenBlockId <- buildInlineBlock ifExpression.thenBlock
+  defaultBlockId <- traverse buildInlineBlock ifExpression.elseBlock
   out <- freshVarId Nothing
   emit $
     StatementMatch
@@ -1259,10 +1259,10 @@ lowerIfExpr ie = do
 -- runtime, and arbitrary nesting / overlap-on-tag arms work naturally
 -- (the runtime tries arms in source order).
 lowerMatchExpr :: AST.MatchExpression Zonked -> Lower VarId
-lowerMatchExpr me = do
-  subject <- lowerExpr me.subject
+lowerMatchExpr matchExpression = do
+  subject <- lowerExpr matchExpression.subject
   out <- freshVarId Nothing
-  arms <- mapM lowerMatchArm me.cases
+  arms <- mapM lowerMatchArm matchExpression.cases
   emit $
     StatementMatch
       MatchData
@@ -1302,11 +1302,11 @@ lowerPattern = \case
     (subs, localss) <- unzip <$> mapM lowerPattern tp.elements
     pure (MatchPatternTuple subs, concat localss)
   AST.PatternQualifiedConstructor qp -> do
-    cid <- case qp.constructorName.resolution of
-      Just identCid -> do
-        mapped <- gets (Map.lookup identCid . (.lsCtorIds))
+    irCtorId <- case qp.constructorName.resolution of
+      Just identCtorId -> do
+        mapped <- gets (Map.lookup identCtorId . (.lsCtorIds))
         case mapped of
-          Just irCid -> pure irCid
+          Just resolvedCtorId -> pure resolvedCtorId
           Nothing -> do
             recordError
               (LoweringErrorUnresolvedVariable qp.sourceSpan qp.constructorName.text)
@@ -1320,7 +1320,7 @@ lowerPattern = \case
       pure ((labelRef.text, subPat), subLocals)
     let fields = map fst pairs
         locals = concatMap snd pairs
-    pure (MatchPatternConstructor cid fields, locals)
+    pure (MatchPatternConstructor irCtorId fields, locals)
 
 literalValueToIR :: AST.LiteralValue -> LiteralValue
 literalValueToIR = \case
@@ -1350,11 +1350,11 @@ buildArmBodyWithLocals locals blk = do
 -- | Lower a for expression. Supports zero or more 'in' bindings, zero or
 -- more 'var' (state) bindings, and an optional then-block.
 lowerForExpr :: AST.ForExpression Zonked -> Lower VarId
-lowerForExpr fe = do
-  (iterPairs, iterLocals) <- lowerForIters fe.inBindings
-  (stateInits, stateLocals) <- lowerForStates fe.varBindings
-  bodyBlockId <- buildForBody (iterLocals ++ stateLocals) fe.body
-  thenBlockId <- traverse buildInlineBlock fe.thenBlock
+lowerForExpr forExpression = do
+  (iterPairs, iterLocals) <- lowerForIters forExpression.inBindings
+  (stateInits, stateLocals) <- lowerForStates forExpression.varBindings
+  bodyBlockId <- buildForBody (iterLocals ++ stateLocals) forExpression.body
+  thenBlockId <- traverse buildInlineBlock forExpression.thenBlock
   out <- freshVarId Nothing
   emit $
     StatementFor
@@ -1442,11 +1442,11 @@ lowerVariable ve = case ve.name.resolution of
     case mLocal of
       Just irVar -> pure irVar
       Nothing -> do
-        mBlockId <- gets (Map.lookup variableId . (.lsVarBlockIds))
-        case mBlockId of
-          Just bid -> do
+        maybeBlockId <- gets (Map.lookup variableId . (.lsVarBlockIds))
+        case maybeBlockId of
+          Just blockId -> do
             v <- freshVarId (Just ve.name.text)
-            emit (StatementMakeClosure MakeClosureData {output = v, block = bid, captures = []})
+            emit (StatementMakeClosure MakeClosureData {output = v, block = blockId, captures = []})
             pure v
           Nothing -> do
             recordError (LoweringErrorUnresolvedVariable ve.sourceSpan ve.name.text)

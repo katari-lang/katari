@@ -303,20 +303,20 @@ compactUnion cores =
 -- types from 'zonkedTypeEnvironment' and descriptions from each AST
 -- declaration's @annotation@ field.
 buildSchemas :: ZonkResult -> SchemaBundle
-buildSchemas zr =
+buildSchemas zonkResult =
   foldr
-    (mergeModuleBundle zr)
+    (mergeModuleBundle zonkResult)
     emptySchemaBundle
-    (Map.toList zr.zonkedModules)
+    (Map.toList zonkResult.zonkedModules)
 
 mergeModuleBundle ::
   ZonkResult ->
   (ModuleId, Module Zonked) ->
   SchemaBundle ->
   SchemaBundle
-mergeModuleBundle zr (modId, m) acc =
-  let modName = Map.findWithDefault "" modId zr.zonkedModuleNames
-   in foldr (collectDeclaration zr modName) acc m.declarations
+mergeModuleBundle zonkResult (modId, m) acc =
+  let modName = Map.findWithDefault "" modId zonkResult.zonkedModuleNames
+   in foldr (collectDeclaration zonkResult modName) acc m.declarations
 
 collectDeclaration ::
   ZonkResult ->
@@ -324,31 +324,31 @@ collectDeclaration ::
   Declaration Zonked ->
   SchemaBundle ->
   SchemaBundle
-collectDeclaration zr modName decl bundle = case decl of
-  DeclarationAgent ad ->
-    case agentLike zr ad.annotation ad.name ad.parameters of
+collectDeclaration zonkResult modName decl bundle = case decl of
+  DeclarationAgent agentDecl ->
+    case agentLike zonkResult agentDecl.annotation agentDecl.name agentDecl.parameters of
       Just s ->
-        bundle {agentSchemas = Map.insert (qkey modName ad.name.text) s bundle.agentSchemas}
+        bundle {agentSchemas = Map.insert (qkey modName agentDecl.name.text) s bundle.agentSchemas}
       Nothing -> bundle
-  DeclarationRequest rd ->
-    case requestLike zr rd of
+  DeclarationRequest requestDecl ->
+    case requestLike zonkResult requestDecl of
       Just s ->
-        bundle {requestSchemas = Map.insert (qkey modName rd.name.text) s bundle.requestSchemas}
+        bundle {requestSchemas = Map.insert (qkey modName requestDecl.name.text) s bundle.requestSchemas}
       Nothing -> bundle
-  DeclarationExternalAgent ed ->
-    case externalLike zr ed of
+  DeclarationExternalAgent externalDecl ->
+    case externalLike zonkResult externalDecl of
       Just s ->
-        bundle {externalSchemas = Map.insert (qkey modName ed.name.text) s bundle.externalSchemas}
+        bundle {externalSchemas = Map.insert (qkey modName externalDecl.name.text) s bundle.externalSchemas}
       Nothing -> bundle
-  DeclarationData dd ->
+  DeclarationData dataDecl ->
     let bundleWithDef =
-          bundle {dataDefs = insertDataDef zr modName dd bundle.dataDefs}
-     in case dataConstructorSchema zr modName dd of
+          bundle {dataDefs = insertDataDef zonkResult modName dataDecl bundle.dataDefs}
+     in case dataConstructorSchema zonkResult modName dataDecl of
           Just s ->
             bundleWithDef
               { dataSchemas =
                   Map.insert
-                    (qkey modName dd.name.text)
+                    (qkey modName dataDecl.name.text)
                     s
                     bundleWithDef.dataSchemas
               }
@@ -376,18 +376,18 @@ agentLike ::
   NameRef Zonked 'VariableRef ->
   [ParameterBinding Zonked] ->
   Maybe AgentSchema
-agentLike zr description nameRef parameters =
+agentLike zonkResult description nameRef parameters =
   case nameRef.resolution of
     Just variableId ->
-      buildAgentSchema zr description parameters
-        <$> Map.lookup variableId zr.zonkedTypeEnvironment
+      buildAgentSchema zonkResult description parameters
+        <$> Map.lookup variableId zonkResult.zonkedTypeEnvironment
     Nothing -> Nothing
 
 requestLike :: ZonkResult -> RequestDeclaration Zonked -> Maybe AgentSchema
-requestLike zr rd = agentLike zr rd.annotation rd.name rd.parameters
+requestLike zonkResult requestDecl = agentLike zonkResult requestDecl.annotation requestDecl.name requestDecl.parameters
 
 externalLike :: ZonkResult -> ExternalAgentDeclaration Zonked -> Maybe AgentSchema
-externalLike zr ed = agentLike zr ed.annotation ed.name ed.parameters
+externalLike zonkResult externalDecl = agentLike zonkResult externalDecl.annotation externalDecl.name externalDecl.parameters
 
 -- | Build an 'AgentSchema' from the resolved type. After Solver / Zonker
 -- the type of an agent / request / external-agent declaration is
@@ -400,14 +400,14 @@ buildAgentSchema ::
   [ParameterBinding Zonked] ->
   SemanticType Resolved ->
   AgentSchema
-buildAgentSchema zr description parameters = \case
-  SemanticTypeFunction params ret eff ->
-    let inputSchema = withDesc description (plain (paramObject params parameters))
+buildAgentSchema zonkResult description parameters = \case
+  SemanticTypeFunction paramTypes returnType effectSet ->
+    let inputSchema = withDesc description (plain (paramObject paramTypes parameters))
      in AgentSchema
           { description = description,
             input = inputSchema,
-            output = toJsonSchema ret,
-            effects = renderEffects zr eff
+            output = toJsonSchema returnType,
+            effects = renderEffects zonkResult effectSet
           }
   other ->
     internalErrorNoSpan
@@ -439,10 +439,10 @@ paramObject paramTypes parameters =
 -- violation) are dropped silently. Effect variables are always empty
 -- at 'Resolved' phase per Solver contract, so they're ignored.
 renderEffects :: ZonkResult -> SemanticEffect Resolved -> [Text]
-renderEffects zr (SemanticEffect _ reqs) =
-  [ renderQualifiedName qn
-    | rid <- Set.toList reqs,
-      Just (RequestData {requestQualifiedName = qn}) <- [Map.lookup rid zr.zonkedRequests]
+renderEffects zonkResult (SemanticEffect _ reqs) =
+  [ renderQualifiedName qualifiedName
+    | requestId <- Set.toList reqs,
+      Just (RequestData {requestQualifiedName = qualifiedName}) <- [Map.lookup requestId zonkResult.zonkedRequests]
   ]
 
 -- ===========================================================================
@@ -459,19 +459,19 @@ insertDataDef ::
   DataDeclaration Zonked ->
   Map Text JsonSchema ->
   Map Text JsonSchema
-insertDataDef zr modName dd m =
-  case dd.name.resolution of
+insertDataDef zonkResult modName dataDecl accum =
+  case dataDecl.name.resolution of
     Just ctorId ->
-      let base = plain (dataObject (lookupCtorParams zr ctorId) dd.parameters)
+      let base = plain (dataObject (lookupCtorParams zonkResult ctorId) dataDecl.parameters)
           entry =
             JsonSchema
               { core = base.core,
-                title = Just dd.name.text,
-                description = dd.annotation,
+                title = Just dataDecl.name.text,
+                description = dataDecl.annotation,
                 examples = base.examples
               }
-       in Map.insert (qkey modName dd.name.text) entry m
-    Nothing -> m
+       in Map.insert (qkey modName dataDecl.name.text) entry accum
+    Nothing -> accum
 
 -- | Build the constructor-as-callable schema for a @data@ declaration.
 -- Mirrors 'agentLike' but for constructors: input is the named-field
@@ -482,25 +482,25 @@ dataConstructorSchema ::
   Text ->
   DataDeclaration Zonked ->
   Maybe AgentSchema
-dataConstructorSchema zr modName dd =
-  case dd.name.resolution of
+dataConstructorSchema zonkResult modName dataDecl =
+  case dataDecl.name.resolution of
     Just ctorId ->
-      let fieldTypes = lookupCtorParams zr ctorId
-          inputCore = dataObject fieldTypes dd.parameters
+      let fieldTypes = lookupCtorParams zonkResult ctorId
+          inputCore = dataObject fieldTypes dataDecl.parameters
           inputSchema =
             JsonSchema
               { core = inputCore,
-                title = Just dd.name.text,
-                description = dd.annotation,
+                title = Just dataDecl.name.text,
+                description = dataDecl.annotation,
                 examples = []
               }
           -- SchemaCoreRef without description: the declaration site ($defs) is the
           -- single source of truth for description. Consumers that want
           -- inline descriptions can resolve $ref after loading the bundle.
-          outputSchema = plain (SchemaCoreRef ("#/$defs/" <> qkey modName dd.name.text))
+          outputSchema = plain (SchemaCoreRef ("#/$defs/" <> qkey modName dataDecl.name.text))
        in Just
             AgentSchema
-              { description = dd.annotation,
+              { description = dataDecl.annotation,
                 input = inputSchema,
                 output = outputSchema,
                 effects = []
@@ -511,9 +511,9 @@ lookupCtorParams ::
   ZonkResult ->
   VariableId ->
   Map Text (SemanticType Resolved)
-lookupCtorParams zr ctorId =
-  case Map.lookup ctorId zr.zonkedTypeEnvironment of
-    Just (SemanticTypeFunction params _ _) -> params
+lookupCtorParams zonkResult ctorId =
+  case Map.lookup ctorId zonkResult.zonkedTypeEnvironment of
+    Just (SemanticTypeFunction paramTypes _ _) -> paramTypes
     _ -> Map.empty
 
 dataObject :: Map Text (SemanticType Resolved) -> [DataParameter Zonked] -> SchemaCore

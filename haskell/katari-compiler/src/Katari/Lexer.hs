@@ -226,8 +226,8 @@ initialLexerState = LexerState {contextStack = [], accumulatedErrors = []}
 type Lexer = ParsecT Void Text (State LexerState)
 
 -- | Topmost context, or @Nothing@ if the stack is empty (= top-level code).
-getTopContext :: Lexer (Maybe LexerContext)
-getTopContext = do
+lexGetTopContext :: Lexer (Maybe LexerContext)
+lexGetTopContext = do
   state_ <- get
   pure $ case state_.contextStack of
     topmost : _ -> Just topmost
@@ -242,8 +242,8 @@ pushContext context = modify' $ \LexerState {..} ->
 -- already-popped (or never-pushed) context, and treating that as a hard error
 -- would defeat the point of recovery. The resulting incoherence is bounded:
 -- subsequent token lexing simply runs in @Nothing@ context (= top-level).
-popContext :: Lexer ()
-popContext = modify' $ \state_ -> case state_.contextStack of
+lexPopContext :: Lexer ()
+lexPopContext = modify' $ \state_ -> case state_.contextStack of
   (_ : remaining) -> state_ {contextStack = remaining}
   [] -> state_
 
@@ -276,7 +276,7 @@ runLexer filePath input =
 
 lexAllTokens :: FilePath -> Lexer [WithSourceSpan Token]
 lexAllTokens filePath = do
-  skipInterTokenSpace
+  lexSkipInterTokenSpace
   loop
   where
     loop = do
@@ -285,7 +285,7 @@ lexAllTokens filePath = do
         then return []
         else do
           maybeToken <- lexToken filePath
-          skipInterTokenSpace
+          lexSkipInterTokenSpace
           case maybeToken of
             Nothing -> loop
             Just tok -> (tok :) <$> loop
@@ -295,9 +295,9 @@ lexAllTokens filePath = do
 -- multi-line) we don't skip, because every character is string content.
 -- Newlines are NOT skipped here: they emerge as TokenNewline tokens in
 -- lexNormalToken.
-skipInterTokenSpace :: Lexer ()
-skipInterTokenSpace = do
-  context <- getTopContext
+lexSkipInterTokenSpace :: Lexer ()
+lexSkipInterTokenSpace = do
+  context <- lexGetTopContext
   case context of
     Just LexerContextTemplate -> return ()
     Just LexerContextTemplateMultiLine -> return ()
@@ -335,7 +335,7 @@ positionFromSourcePos sourcePos =
 lexToken :: FilePath -> Lexer (Maybe (WithSourceSpan Token))
 lexToken filePath = do
   startSourcePos <- getSourcePos
-  context <- getTopContext
+  context <- lexGetTopContext
   parsedToken <- case context of
     Just LexerContextTemplate -> Just <$> lexTemplateBodyToken False
     Just LexerContextTemplateMultiLine -> Just <$> lexTemplateBodyToken True
@@ -391,7 +391,7 @@ lexNewline = TokenNewline <$ char '\n'
 --   * Any other ctx : plain `{` / `}` → PunctuationLeftBrace / PunctuationRightBrace.
 lexBrace :: Lexer Token
 lexBrace = do
-  context <- getTopContext
+  context <- lexGetTopContext
   lexLeftBrace context <|> lexRightBrace context
   where
     lexLeftBrace context = do
@@ -405,7 +405,7 @@ lexBrace = do
       _ <- char '}'
       case context of
         Just (LexerContextTemplateExpression 0) ->
-          popContext >> pure TokenTemplateExpressionClose
+          lexPopContext >> pure TokenTemplateExpressionClose
         Just (LexerContextTemplateExpression depth) -> do
           modifyTopContext (\_ -> LexerContextTemplateExpression (depth - 1))
           pure (TokenPunctuation PunctuationRightBrace)
@@ -579,11 +579,11 @@ lexTemplateBodyToken isMultiLine = do
     lexClose
       | isMultiLine = do
           _ <- try (string "\n\"\"\"")
-          popContext
+          lexPopContext
           pure TokenTemplateClose
       | otherwise = do
           _ <- char '"'
-          popContext
+          lexPopContext
           pure TokenTemplateClose
 
     lexStringRun = do
@@ -591,29 +591,29 @@ lexTemplateBodyToken isMultiLine = do
       pure (TokenTemplateString (T.pack chars))
 
     stringChar
-      | isMultiLine = templateStringCharacterMulti
-      | otherwise = templateStringCharacterSingle
+      | isMultiLine = lexTemplateStringCharacterMulti
+      | otherwise = lexTemplateStringCharacterSingle
 
     handler startSourcePos _err = do
       endSourcePos <- getSourcePos
       recordLexerError
         (LexerErrorUnterminatedTemplate (spanBetween startSourcePos endSourcePos))
-      popContext
+      lexPopContext
       pure TokenTemplateClose
 
 -- | One character of a single-line template string (no literal newlines).
 -- Stops if it sees `${` or `"` (those are separate tokens).
-templateStringCharacterSingle :: Lexer Char
-templateStringCharacterSingle =
+lexTemplateStringCharacterSingle :: Lexer Char
+lexTemplateStringCharacterSingle =
   notFollowedBy (string "${" <|> string "\"")
-    *> (escapeCharacter <|> noneOf ['\n', '\r'])
+    *> (lexEscapeCharacter <|> noneOf ['\n', '\r'])
 
 -- | One character of a multiline template string (literal newlines allowed).
 -- Stops at `${` or the `\n"""` terminator.
-templateStringCharacterMulti :: Lexer Char
-templateStringCharacterMulti =
+lexTemplateStringCharacterMulti :: Lexer Char
+lexTemplateStringCharacterMulti =
   notFollowedBy (string "${" <|> try (string "\n\"\"\""))
-    *> (escapeCharacter <|> anySingle)
+    *> (lexEscapeCharacter <|> anySingle)
 
 -- ---------------------------------------------------------------------------
 -- String literals (Lexer monadic so escape recovery can record errors)
@@ -647,7 +647,7 @@ recoverableStringLiteral _filePath startSourcePos = do
       content <- many stringChar
       _ <- char '"'
       pure (T.pack content)
-    stringChar = escapeCharacter <|> noneOf ['"', '\\', '\n', '\r']
+    stringChar = lexEscapeCharacter <|> noneOf ['"', '\\', '\n', '\r']
     handler _ = do
       endSourcePos <- getSourcePos
       recordLexerError
@@ -686,8 +686,8 @@ lexMultilineStringLiteral = do
 -- This lives in 'Lexer' (rather than pure 'Parsec') so invalid escape paths
 -- can record a 'LexerErrorInvalidUnicodeEscape' and recover with U+FFFD
 -- instead of failing the surrounding string parse.
-escapeCharacter :: Lexer Char
-escapeCharacter = do
+lexEscapeCharacter :: Lexer Char
+lexEscapeCharacter = do
   _ <- char '\\'
   choice
     [ '"' <$ char '"',

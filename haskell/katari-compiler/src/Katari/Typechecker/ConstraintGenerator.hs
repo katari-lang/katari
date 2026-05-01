@@ -552,12 +552,8 @@ walkDeclaration = \case
   DeclarationExternalAgent decl -> DeclarationExternalAgent <$> walkExternalAgentDecl decl
   DeclarationData decl -> DeclarationData <$> walkDataDecl decl
   DeclarationTypeSynonym decl -> DeclarationTypeSynonym <$> walkTypeSynonymDecl decl
-  DeclarationImport decl -> pure (DeclarationImport (passThroughImport decl))
+  DeclarationImport decl -> pure (DeclarationImport (retagImportDeclaration decl))
   DeclarationError span_ -> pure (DeclarationError span_)
-
-passThroughImport :: ImportDeclaration Identified -> ImportDeclaration Constrained
-passThroughImport ImportDeclaration {kind, sourceSpan} =
-  ImportDeclaration {kind = kind, sourceSpan = sourceSpan}
 
 -- ---------------------------------------------------------------------------
 -- Agent declaration
@@ -569,10 +565,10 @@ walkAgentDecl AgentDeclaration {annotation, name, parameters, returnType, withEf
   pure
     AgentDeclaration
       { annotation = annotation,
-        name = passThroughVariableName name,
+        name = retagNameRef name,
         parameters = parameters',
-        returnType = fmap passThroughType returnType,
-        withEffects = fmap (fmap passThroughRequest) withEffects,
+        returnType = fmap retagSyntacticType returnType,
+        withEffects = fmap (fmap retagSyntacticRequest) withEffects,
         body = body',
         sourceSpan = sourceSpan
       }
@@ -628,9 +624,9 @@ walkRequestDecl RequestDeclaration {annotation, name, parameters, returnType, so
   pure
     RequestDeclaration
       { annotation = annotation,
-        name = passThroughVariableName name,
+        name = retagNameRef name,
         parameters = parameters',
-        returnType = passThroughType returnType,
+        returnType = retagSyntacticType returnType,
         sourceSpan = sourceSpan
       }
 
@@ -645,10 +641,10 @@ walkExternalAgentDecl ExternalAgentDeclaration {annotation, name, parameters, re
   pure
     ExternalAgentDeclaration
       { annotation = annotation,
-        name = passThroughVariableName name,
+        name = retagNameRef name,
         parameters = parameters',
-        returnType = passThroughType returnType,
-        withEffects = fmap passThroughRequest withEffects,
+        returnType = retagSyntacticType returnType,
+        withEffects = fmap retagSyntacticRequest withEffects,
         sourceSpan = sourceSpan
       }
 
@@ -669,8 +665,8 @@ walkDataDecl DataDeclaration {annotation, name, typeName, parameters, sourceSpan
   pure
     DataDeclaration
       { annotation = annotation,
-        name = passThroughVariableName name,
-        typeName = passThroughTypeName typeName,
+        name = retagNameRef name,
+        typeName = retagNameRef typeName,
         parameters = parameters',
         sourceSpan = sourceSpan
       }
@@ -679,8 +675,8 @@ walkTypeSynonymDecl :: TypeSynonymDeclaration Identified -> CG (TypeSynonymDecla
 walkTypeSynonymDecl TypeSynonymDeclaration {name, rhs, sourceSpan} =
   pure
     TypeSynonymDeclaration
-      { name = passThroughTypeName name,
-        rhs = passThroughType rhs,
+      { name = retagNameRef name,
+        rhs = retagSyntacticType rhs,
         sourceSpan = sourceSpan
       }
 
@@ -695,7 +691,7 @@ walkDataParameter DataParameter {annotation, name, parameterType, sourceSpan} =
     DataParameter
       { annotation = annotation,
         name = name,
-        parameterType = passThroughType parameterType,
+        parameterType = retagSyntacticType parameterType,
         sourceSpan = sourceSpan
       }
 
@@ -739,8 +735,8 @@ walkPattern = \case
     pure
       ( PatternVariable
           VariablePattern
-            { name = passThroughVariableName name,
-              typeAnnotation = fmap passThroughType typeAnnotation,
+            { name = retagNameRef name,
+              typeAnnotation = fmap retagSyntacticType typeAnnotation,
               sourceSpan = sourceSpan,
               typeOf = patternType
             },
@@ -751,7 +747,7 @@ walkPattern = \case
     pure
       ( PatternWildcard
           WildcardPattern
-            { typeAnnotation = fmap passThroughType typeAnnotation,
+            { typeAnnotation = fmap retagSyntacticType typeAnnotation,
               sourceSpan = sourceSpan,
               typeOf = patternType
             },
@@ -796,8 +792,8 @@ walkPattern = \case
     pure
       ( PatternQualifiedConstructor
           QualifiedConstructorPattern
-            { moduleQualifier = fmap passThroughModuleName moduleQualifier,
-              constructorName = passThroughConstructorName constructorName,
+            { moduleQualifier = fmap retagNameRef moduleQualifier,
+              constructorName = retagNameRef constructorName,
               parameters = parameters',
               sourceSpan = sourceSpan,
               typeOf = patternResult
@@ -807,7 +803,7 @@ walkPattern = \case
   where
     walkPatternField (label, sub) = do
       (sub', subType) <- walkPattern sub
-      pure ((passThroughLabelName label, sub'), (label.text, subType))
+      pure ((retagNameRef label, sub'), (label.text, subType))
 
 -- ---------------------------------------------------------------------------
 -- Block walking (with where-block effect discharge)
@@ -1018,8 +1014,8 @@ walkStateVariable StateVariableBinding {name, typeAnnotation, initial, sourceSpa
   initial' <- emitInitializerConstraints (ConstraintReason ReasonKindStateVarAnnotation sourceSpan) name typeAnnotation initial
   pure
     StateVariableBinding
-      { name = passThroughVariableName name,
-        typeAnnotation = fmap passThroughType typeAnnotation,
+      { name = retagNameRef name,
+        typeAnnotation = fmap retagSyntacticType typeAnnotation,
         initial = initial',
         sourceSpan = sourceSpan
       }
@@ -1084,10 +1080,10 @@ walkRequestHandler e4Id tWholeBlockId RequestHandler {moduleQualifier, name, par
   addTypeConstraint handlerSignature tHandled (ConstraintReason ReasonKindRequestHandlerSignature sourceSpan)
   pure
     RequestHandler
-      { moduleQualifier = fmap passThroughModuleName moduleQualifier,
-        name = passThroughRequestName name,
+      { moduleQualifier = fmap retagNameRef moduleQualifier,
+        name = retagNameRef name,
         parameters = parameters',
-        returnType = fmap passThroughType returnType,
+        returnType = fmap retagSyntacticType returnType,
         body = body',
         sourceSpan = sourceSpan
       }
@@ -1121,10 +1117,10 @@ walkAgentStatement AgentStatement {name, parameters, returnType, withEffects, bo
   (parameters', body') <- processAgentLike sourceSpan name parameters returnType withEffects body
   pure
     AgentStatement
-      { name = passThroughVariableName name,
+      { name = retagNameRef name,
         parameters = parameters',
-        returnType = fmap passThroughType returnType,
-        withEffects = fmap (fmap passThroughRequest) withEffects,
+        returnType = fmap retagSyntacticType returnType,
+        withEffects = fmap (fmap retagSyntacticRequest) withEffects,
         body = body',
         sourceSpan = sourceSpan
       }
@@ -1184,7 +1180,7 @@ walkModifier Modifier {name, value, sourceSpan} = do
   let valueType = constrainedExpressionType value'
   tVar <- variableTypeFromName name
   addTypeConstraint valueType tVar (ConstraintReason ReasonKindModifierUpdate sourceSpan)
-  pure Modifier {name = passThroughVariableName name, value = value', sourceSpan = sourceSpan}
+  pure Modifier {name = retagNameRef name, value = value', sourceSpan = sourceSpan}
 
 -- ---------------------------------------------------------------------------
 -- Expressions
@@ -1226,7 +1222,7 @@ walkVariableExpr VariableExpression {name, sourceSpan} = do
   pure
     ( ExpressionVariable
         VariableExpression
-          { name = passThroughVariableName name,
+          { name = retagNameRef name,
             sourceSpan = sourceSpan,
             typeOf = semantic
           }
@@ -1296,7 +1292,7 @@ walkCallArgument CallArgument {label, value, sourceSpan} = do
   value' <- walkExpression value
   pure
     CallArgument
-      { label = passThroughLabelName label,
+      { label = retagNameRef label,
         value = value',
         sourceSpan = sourceSpan
       }
@@ -1485,8 +1481,8 @@ walkForVarBinding ForVarBinding {name, typeAnnotation, initial, sourceSpan} = do
   initial' <- emitInitializerConstraints (ConstraintReason ReasonKindForVarAnnotation sourceSpan) name typeAnnotation initial
   pure
     ForVarBinding
-      { name = passThroughVariableName name,
-        typeAnnotation = fmap passThroughType typeAnnotation,
+      { name = retagNameRef name,
+        typeAnnotation = fmap retagSyntacticType typeAnnotation,
         initial = initial',
         sourceSpan = sourceSpan
       }
@@ -1516,7 +1512,7 @@ walkFieldAccessExpr FieldAccessExpression {object, fieldName, sourceSpan} = do
     ( ExpressionFieldAccess
         FieldAccessExpression
           { object = object',
-            fieldName = passThroughLabelName fieldName,
+            fieldName = retagNameRef fieldName,
             sourceSpan = sourceSpan,
             typeOf = tField
           }
@@ -1571,46 +1567,12 @@ walkQualifiedReferenceExpr QualifiedReferenceExpression {moduleQualifier, target
   pure
     ( ExpressionQualifiedReference
         QualifiedReferenceExpression
-          { moduleQualifier = passThroughModuleName moduleQualifier,
-            target = passThroughVariableName target,
+          { moduleQualifier = retagNameRef moduleQualifier,
+            target = retagNameRef target,
             sourceSpan = sourceSpan,
             typeOf = semantic
           }
     )
-
--- ===========================================================================
--- Pass-through helpers (Identified -> Constrained for ref-only nodes)
---
--- After the Trees-that-Grow migration, 'NameMeta Identified' and
--- 'NameMeta Constrained' resolve to the same shape, so phase change is a
--- value-level identity (just rebuild the wrapper). The helpers below
--- delegate to 'retagNameRef' / 'retagSyntacticType' /
--- 'retagSyntacticRequest' from 'Katari.AST'.
--- ===========================================================================
-
-passThroughVariableName :: NameRef Identified 'VariableRef -> NameRef Constrained 'VariableRef
-passThroughVariableName = retagNameRef
-
-passThroughTypeName :: NameRef Identified 'TypeRef -> NameRef Constrained 'TypeRef
-passThroughTypeName = retagNameRef
-
-passThroughModuleName :: NameRef Identified 'ModuleRef -> NameRef Constrained 'ModuleRef
-passThroughModuleName = retagNameRef
-
-passThroughLabelName :: NameRef Identified 'LabelRef -> NameRef Constrained 'LabelRef
-passThroughLabelName = retagNameRef
-
-passThroughRequestName :: NameRef Identified 'RequestRef -> NameRef Constrained 'RequestRef
-passThroughRequestName = retagNameRef
-
-passThroughConstructorName :: NameRef Identified 'ConstructorRef -> NameRef Constrained 'ConstructorRef
-passThroughConstructorName = retagNameRef
-
-passThroughType :: SyntacticType Identified -> SyntacticType Constrained
-passThroughType = retagSyntacticType
-
-passThroughRequest :: SyntacticRequest Identified -> SyntacticRequest Constrained
-passThroughRequest = retagSyntacticRequest
 
 -- ===========================================================================
 -- Small accessors and conveniences

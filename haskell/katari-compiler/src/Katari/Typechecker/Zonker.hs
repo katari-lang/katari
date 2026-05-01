@@ -117,20 +117,20 @@ deriving instance Show ZonkError
 -- treated as internal compiler errors.
 toDiagnostic :: ZonkError -> Diagnostic
 toDiagnostic = \case
-  ZonkErrorMissingTypeVar sp (TypeVarId tv) ->
+  ZonkErrorMissingTypeVar sourceSpan (TypeVarId typeVar) ->
     diagnosticError
       "K0250"
       ( "internal: solver substitution missing for type variable α"
-          <> Text.pack (show tv)
+          <> Text.pack (show typeVar)
       )
-      sp
-  ZonkErrorMissingEffectVar sp (EffectVarId ev) ->
+      sourceSpan
+  ZonkErrorMissingEffectVar sourceSpan (EffectVarId effectVar) ->
     diagnosticError
       "K0251"
       ( "internal: solver substitution missing for effect variable ε"
-          <> Text.pack (show ev)
+          <> Text.pack (show effectVar)
       )
-      sp
+      sourceSpan
 
 -- ===========================================================================
 -- Zonker monad
@@ -150,60 +150,28 @@ recordZonkError err = lift (modify (err :))
 -- delegated to 'traverseSemanticChildren' (the bulk of what used to be a
 -- 14-case @\\case@).
 zonkType :: SourceSpan -> SemanticType Unresolved -> Zonk (SemanticType Resolved)
-zonkType sp = \case
-  SemanticTypeVariable tv -> do
-    sr <- ask
-    case Map.lookup tv sr.typeSubstitution of
-      Just nt -> pure (denormalise nt)
+zonkType sourceSpan = \case
+  SemanticTypeVariable typeVar -> do
+    solverResult <- ask
+    case Map.lookup typeVar solverResult.typeSubstitution of
+      Just normalizedType -> pure (denormalise normalizedType)
       Nothing -> do
-        recordZonkError (ZonkErrorMissingTypeVar sp tv)
+        recordZonkError (ZonkErrorMissingTypeVar sourceSpan typeVar)
         pure SemanticTypeUnknown
-  t -> traverseSemanticChildren (zonkType sp) (zonkEffect sp) t
+  t -> traverseSemanticChildren (zonkType sourceSpan) (zonkEffect sourceSpan) t
 
 zonkEffect :: SourceSpan -> SemanticEffect Unresolved -> Zonk (SemanticEffect Resolved)
-zonkEffect sp (SemanticEffect vars reqs) = do
+zonkEffect sourceSpan (SemanticEffect vars reqs) = do
   expanded <- foldM addEffectVar reqs (Set.toList vars)
   pure (SemanticEffect Set.empty expanded)
   where
-    addEffectVar acc ev = do
-      sr <- ask
-      case Map.lookup ev sr.effectSubstitution of
-        Just rs -> pure (Set.union acc rs)
+    addEffectVar acc effectVar = do
+      solverResult <- ask
+      case Map.lookup effectVar solverResult.effectSubstitution of
+        Just resolvedReqs -> pure (Set.union acc resolvedReqs)
         Nothing -> do
-          recordZonkError (ZonkErrorMissingEffectVar sp ev)
+          recordZonkError (ZonkErrorMissingEffectVar sourceSpan effectVar)
           pure acc
-
--- ===========================================================================
--- passThrough helpers (Constrained -> Zonked) for ref-only nodes
--- ===========================================================================
-
--- 'NameMeta Constrained' and 'NameMeta Zonked' resolve to the same shape,
--- so phase change is value-level identity (just rebuild the wrapper).
--- The helpers below delegate to 'retagNameRef' / 'retagSyntacticType' /
--- 'retagSyntacticRequest' from 'Katari.AST'.
-passThroughVariableName :: NameRef Constrained 'VariableRef -> NameRef Zonked 'VariableRef
-passThroughVariableName = retagNameRef
-
-passThroughTypeName :: NameRef Constrained 'TypeRef -> NameRef Zonked 'TypeRef
-passThroughTypeName = retagNameRef
-
-passThroughModuleName :: NameRef Constrained 'ModuleRef -> NameRef Zonked 'ModuleRef
-passThroughModuleName = retagNameRef
-
-passThroughLabelName :: NameRef Constrained 'LabelRef -> NameRef Zonked 'LabelRef
-passThroughLabelName = retagNameRef
-
-passThroughRequestName :: NameRef Constrained 'RequestRef -> NameRef Zonked 'RequestRef
-passThroughRequestName = retagNameRef
-
-passThroughConstructorName :: NameRef Constrained 'ConstructorRef -> NameRef Zonked 'ConstructorRef
-passThroughConstructorName = retagNameRef
-
-passThroughType :: SyntacticType Constrained -> SyntacticType Zonked
-passThroughType = retagSyntacticType
-
-passThroughRequest :: SyntacticRequest Constrained -> SyntacticRequest Zonked
-passThroughRequest = retagSyntacticRequest
 
 -- ===========================================================================
 -- AST walker
@@ -221,12 +189,8 @@ walkDeclaration = \case
   DeclarationExternalAgent decl -> DeclarationExternalAgent <$> walkExternalAgentDecl decl
   DeclarationData decl -> DeclarationData <$> walkDataDecl decl
   DeclarationTypeSynonym decl -> DeclarationTypeSynonym <$> walkTypeSynonymDecl decl
-  DeclarationImport decl -> pure (DeclarationImport (passThroughImport decl))
+  DeclarationImport decl -> pure (DeclarationImport (retagImportDeclaration decl))
   DeclarationError span_ -> pure (DeclarationError span_)
-
-passThroughImport :: ImportDeclaration Constrained -> ImportDeclaration Zonked
-passThroughImport ImportDeclaration {kind, sourceSpan} =
-  ImportDeclaration {kind = kind, sourceSpan = sourceSpan}
 
 walkAgentDecl :: AgentDeclaration Constrained -> Zonk (AgentDeclaration Zonked)
 walkAgentDecl AgentDeclaration {annotation, name, parameters, returnType, withEffects, body, sourceSpan} = do
@@ -235,10 +199,10 @@ walkAgentDecl AgentDeclaration {annotation, name, parameters, returnType, withEf
   pure
     AgentDeclaration
       { annotation = annotation,
-        name = passThroughVariableName name,
+        name = retagNameRef name,
         parameters = parameters',
-        returnType = fmap passThroughType returnType,
-        withEffects = fmap (fmap passThroughRequest) withEffects,
+        returnType = fmap retagSyntacticType returnType,
+        withEffects = fmap (fmap retagSyntacticRequest) withEffects,
         body = body',
         sourceSpan = sourceSpan
       }
@@ -249,9 +213,9 @@ walkRequestDecl RequestDeclaration {annotation, name, parameters, returnType, so
   pure
     RequestDeclaration
       { annotation = annotation,
-        name = passThroughVariableName name,
+        name = retagNameRef name,
         parameters = parameters',
-        returnType = passThroughType returnType,
+        returnType = retagSyntacticType returnType,
         sourceSpan = sourceSpan
       }
 
@@ -261,10 +225,10 @@ walkExternalAgentDecl ExternalAgentDeclaration {annotation, name, parameters, re
   pure
     ExternalAgentDeclaration
       { annotation = annotation,
-        name = passThroughVariableName name,
+        name = retagNameRef name,
         parameters = parameters',
-        returnType = passThroughType returnType,
-        withEffects = map passThroughRequest withEffects,
+        returnType = retagSyntacticType returnType,
+        withEffects = map retagSyntacticRequest withEffects,
         sourceSpan = sourceSpan
       }
 
@@ -274,8 +238,8 @@ walkDataDecl DataDeclaration {annotation, name, typeName, parameters, sourceSpan
   pure
     DataDeclaration
       { annotation = annotation,
-        name = passThroughVariableName name,
-        typeName = passThroughTypeName typeName,
+        name = retagNameRef name,
+        typeName = retagNameRef typeName,
         parameters = parameters',
         sourceSpan = sourceSpan
       }
@@ -284,8 +248,8 @@ walkTypeSynonymDecl :: TypeSynonymDeclaration Constrained -> Zonk (TypeSynonymDe
 walkTypeSynonymDecl TypeSynonymDeclaration {name, rhs, sourceSpan} =
   pure
     TypeSynonymDeclaration
-      { name = passThroughTypeName name,
-        rhs = passThroughType rhs,
+      { name = retagNameRef name,
+        rhs = retagSyntacticType rhs,
         sourceSpan = sourceSpan
       }
 
@@ -295,7 +259,7 @@ walkDataParameter DataParameter {annotation, name, parameterType, sourceSpan} =
     DataParameter
       { annotation = annotation,
         name = name,
-        parameterType = passThroughType parameterType,
+        parameterType = retagSyntacticType parameterType,
         sourceSpan = sourceSpan
       }
 
@@ -321,8 +285,8 @@ walkPattern = \case
     pure
       ( PatternVariable
           VariablePattern
-            { name = passThroughVariableName name,
-              typeAnnotation = fmap passThroughType typeAnnotation,
+            { name = retagNameRef name,
+              typeAnnotation = fmap retagSyntacticType typeAnnotation,
               sourceSpan = sourceSpan,
               typeOf = typeOf'
             }
@@ -332,7 +296,7 @@ walkPattern = \case
     pure
       ( PatternWildcard
           WildcardPattern
-            { typeAnnotation = fmap passThroughType typeAnnotation,
+            { typeAnnotation = fmap retagSyntacticType typeAnnotation,
               sourceSpan = sourceSpan,
               typeOf = typeOf'
             }
@@ -359,13 +323,13 @@ walkPattern = \case
             }
       )
   PatternQualifiedConstructor QualifiedConstructorPattern {moduleQualifier, constructorName, parameters, sourceSpan, typeOf} -> do
-    parameters' <- traverse (\(label, sub) -> (,) (passThroughLabelName label) <$> walkPattern sub) parameters
+    parameters' <- traverse (\(label, sub) -> (,) (retagNameRef label) <$> walkPattern sub) parameters
     typeOf' <- zonkPatternMetadata sourceSpan typeOf
     pure
       ( PatternQualifiedConstructor
           QualifiedConstructorPattern
-            { moduleQualifier = fmap passThroughModuleName moduleQualifier,
-              constructorName = passThroughConstructorName constructorName,
+            { moduleQualifier = fmap retagNameRef moduleQualifier,
+              constructorName = retagNameRef constructorName,
               parameters = parameters',
               sourceSpan = sourceSpan,
               typeOf = typeOf'
@@ -426,8 +390,8 @@ walkStateVariable StateVariableBinding {name, typeAnnotation, initial, sourceSpa
   initial' <- walkExpression initial
   pure
     StateVariableBinding
-      { name = passThroughVariableName name,
-        typeAnnotation = fmap passThroughType typeAnnotation,
+      { name = retagNameRef name,
+        typeAnnotation = fmap retagSyntacticType typeAnnotation,
         initial = initial',
         sourceSpan = sourceSpan
       }
@@ -438,10 +402,10 @@ walkRequestHandler RequestHandler {moduleQualifier, name, parameters, returnType
   body' <- walkBlock body
   pure
     RequestHandler
-      { moduleQualifier = fmap passThroughModuleName moduleQualifier,
-        name = passThroughRequestName name,
+      { moduleQualifier = fmap retagNameRef moduleQualifier,
+        name = retagNameRef name,
         parameters = parameters',
-        returnType = fmap passThroughType returnType,
+        returnType = fmap retagSyntacticType returnType,
         body = body',
         sourceSpan = sourceSpan
       }
@@ -474,10 +438,10 @@ walkAgentStatement AgentStatement {name, parameters, returnType, withEffects, bo
   body' <- walkBlock body
   pure
     AgentStatement
-      { name = passThroughVariableName name,
+      { name = retagNameRef name,
         parameters = parameters',
-        returnType = fmap passThroughType returnType,
-        withEffects = fmap (fmap passThroughRequest) withEffects,
+        returnType = fmap retagSyntacticType returnType,
+        withEffects = fmap (fmap retagSyntacticRequest) withEffects,
         body = body',
         sourceSpan = sourceSpan
       }
@@ -511,7 +475,7 @@ walkForBreak ForBreakStatement {value, sourceSpan} = do
 walkModifier :: Modifier Constrained -> Zonk (Modifier Zonked)
 walkModifier Modifier {name, value, sourceSpan} = do
   value' <- walkExpression value
-  pure Modifier {name = passThroughVariableName name, value = value', sourceSpan = sourceSpan}
+  pure Modifier {name = retagNameRef name, value = value', sourceSpan = sourceSpan}
 
 -- ---------------------------------------------------------------------------
 -- Expressions
@@ -545,7 +509,7 @@ walkVariableExpr VariableExpression {name, sourceSpan, typeOf} = do
   typeOf' <- zonkExpressionMetadata sourceSpan typeOf
   pure
     VariableExpression
-      { name = passThroughVariableName name,
+      { name = retagNameRef name,
         sourceSpan = sourceSpan,
         typeOf = typeOf'
       }
@@ -580,7 +544,7 @@ walkCallArgument CallArgument {label, value, sourceSpan} = do
   value' <- walkExpression value
   pure
     CallArgument
-      { label = passThroughLabelName label,
+      { label = retagNameRef label,
         value = value',
         sourceSpan = sourceSpan
       }
@@ -673,8 +637,8 @@ walkForVarBinding ForVarBinding {name, typeAnnotation, initial, sourceSpan} = do
   initial' <- walkExpression initial
   pure
     ForVarBinding
-      { name = passThroughVariableName name,
-        typeAnnotation = fmap passThroughType typeAnnotation,
+      { name = retagNameRef name,
+        typeAnnotation = fmap retagSyntacticType typeAnnotation,
         initial = initial',
         sourceSpan = sourceSpan
       }
@@ -692,7 +656,7 @@ walkFieldAccessExpr FieldAccessExpression {object, fieldName, sourceSpan, typeOf
   pure
     FieldAccessExpression
       { object = object',
-        fieldName = passThroughLabelName fieldName,
+        fieldName = retagNameRef fieldName,
         sourceSpan = sourceSpan,
         typeOf = typeOf'
       }
@@ -734,8 +698,8 @@ walkQualifiedReferenceExpr QualifiedReferenceExpression {moduleQualifier, target
   typeOf' <- zonkExpressionMetadata sourceSpan typeOf
   pure
     QualifiedReferenceExpression
-      { moduleQualifier = passThroughModuleName moduleQualifier,
-        target = passThroughVariableName target,
+      { moduleQualifier = retagNameRef moduleQualifier,
+        target = retagNameRef target,
         sourceSpan = sourceSpan,
         typeOf = typeOf'
       }
@@ -765,10 +729,10 @@ zonk idResult cgResult solverResult =
         }
   where
     zonkEnvEntry idResult_ vid t =
-      let sp = case Map.lookup vid idResult_.identifiedVariables of
+      let sourceSpan = case Map.lookup vid idResult_.identifiedVariables of
             Just vd -> vd.variableSourceSpan
             Nothing -> placeholderSpan
-       in zonkType sp t
+       in zonkType sourceSpan t
     placeholderSpan =
       SrcSpan
         { filePath = "",

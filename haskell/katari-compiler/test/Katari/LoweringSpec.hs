@@ -116,7 +116,7 @@ stage1Spec = describe "Stage 1 — literals / arithmetic" $ do
         ub.statements `shouldBe` []
         ub.trailing `shouldBe` Nothing
         ub.handlers `shouldBe` []
-        ub.params `shouldBe` []
+        ub.parameters `shouldBe` []
         ub.kind `shouldBe` BlockAgentEntry
 
   it "lowers an integer literal as StatementLoadLiteral with the integer value" $ do
@@ -140,7 +140,7 @@ stage1Spec = describe "Stage 1 — literals / arithmetic" $ do
     case calls ub of
       [addCall] -> do
         addCall.target `shouldBe` CallTargetBlock {block = addId}
-        map (.label) addCall.args `shouldMatchList` ["lhs", "rhs"]
+        map (.label) addCall.arguments `shouldMatchList` ["lhs", "rhs"]
         addCall.output `shouldBe` ub.trailing
       _ -> expectationFailure "expected exactly one add call"
 
@@ -152,7 +152,7 @@ stage1Spec = describe "Stage 1 — literals / arithmetic" $ do
     case calls ub of
       [c] -> do
         c.target `shouldBe` CallTargetBlock {block = negId}
-        map (.label) c.args `shouldBe` ["operand"]
+        map (.label) c.arguments `shouldBe` ["operand"]
         c.output `shouldBe` ub.trailing
       _ -> expectationFailure "expected exactly one neg call"
     map (.value) (literalLoads ub) `shouldBe` [LiteralValueInteger 7]
@@ -578,7 +578,7 @@ stage5Spec = describe "Stage 5 \8212 for / state / next" $ do
             case conts of
               [c] -> do
                 c.contKind `shouldBe` ContKindForNext
-                map fst c.mods `shouldBe` ["acc"]
+                map fst c.modifiers `shouldBe` ["acc"]
               _ -> pure ()
           Nothing -> expectationFailure "for body block not found"
       _ -> expectationFailure "expected 1 StatementFor"
@@ -717,7 +717,7 @@ stage6Spec = describe "Stage 6 \8212 handle scope / where / state vars" $ do
             Nothing -> expectationFailure "inner block not found"
           _ -> expectationFailure "outer's call must target a block id"
 
-  it "next inside handler emits StatementCont with ContKindNext and mods" $ do
+  it "next inside handler emits StatementCont with ContKindNext and modifiers" $ do
     (irMod, errs) <-
       lowerSource $
         Text.unlines
@@ -736,7 +736,7 @@ stage6Spec = describe "Stage 6 \8212 handle scope / where / state vars" $ do
     case contStmts of
       (c : _) -> do
         c.contKind `shouldBe` ContKindNext
-        map fst c.mods `shouldBe` ["n"]
+        map fst c.modifiers `shouldBe` ["n"]
       _ -> expectationFailure "expected StatementCont in some handler"
 
 -- ===========================================================================
@@ -882,7 +882,7 @@ stage8Spec = describe "Stage 8 \8212 edge cases" $ do
           ]
     length ctorCalls `shouldBe` 1
     case ctorCalls of
-      [c] -> map (.label) c.args `shouldMatchList` ["x", "y"]
+      [c] -> map (.label) c.arguments `shouldMatchList` ["x", "y"]
       _ -> pure ()
 
   it "nested literal pattern lowers to MatchPatternConstructor with MatchPatternLiteral inner" $ do

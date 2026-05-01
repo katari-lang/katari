@@ -11,8 +11,7 @@
 --
 --   * @NameMeta@ は閉じた type family で、Identified / Constrained /
 --     Zonked の三相について同じ shape (@Maybe Identifier@) を返す。
---     これにより、phase 推移は payload を素通しする identity 変換に
---     なり、@passThrough@ 系の boilerplate が一切不要になる。
+--     phase 推移は 'retagNameRef' / 'retagSyntacticType' 等で素通しできる。
 --   * @ExprType@ / @PatType@ は別の open type family で、
 --     'Katari.Typechecker.SemanticType' に Constrained / Zonked instance
 --     が定義されている (型推論の方向に依存性が向く)。
@@ -1087,6 +1086,12 @@ retagSyntacticRequest req =
     { name = retagNameRef req.name,
       sourceSpan = req.sourceSpan
     }
+
+-- | Change the phase tag of an 'ImportDeclaration'. Safe for any pair of
+-- phases because 'ImportDeclaration' carries no phase-dependent fields.
+retagImportDeclaration :: ImportDeclaration p1 -> ImportDeclaration p2
+retagImportDeclaration ImportDeclaration {kind, sourceSpan} =
+  ImportDeclaration {kind = kind, sourceSpan = sourceSpan}
 
 -- ---------------------------------------------------------------------------
 -- Aggregate Eq / Show constraints

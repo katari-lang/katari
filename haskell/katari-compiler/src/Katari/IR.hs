@@ -277,10 +277,10 @@ data UserBlock = UserBlock
     -- closures produced by 'SMakeClosure', these are the values trapped
     -- from the enclosing scope at closure-build time. The runtime
     -- supplies them automatically when the closure is invoked, on top
-    -- of the call-time 'params'.
+    -- of the call-time 'parameters'.
     captures :: ![Param],
-    -- | Regular labeled parameters (call args bind by label).
-    params :: ![Param],
+    -- | Regular labeled parameters (call arguments bind by label).
+    parameters :: ![Param],
     -- | Mutable state vars introduced by @where (var ...)@ or @for (var ...)@.
     -- Listed separately so the runtime can apply the parallel/versioning
     -- semantics for state mutation.
@@ -371,7 +371,7 @@ instance FromJSON Statement where
 -- | Payload for 'SCall'.
 data CallData = CallData
   { target :: !CallTarget,
-    args :: ![Arg],
+    arguments :: ![Arg],
     -- | Output var receives the callee's trailing value. 'Nothing' = drop.
     output :: !(Maybe VarId)
   }
@@ -452,7 +452,7 @@ data ContData = ContData
   { contKind :: !ContKind,
     value :: !(Maybe VarId),
     -- | (state var label, new value var in this scope)
-    mods :: ![(Text, VarId)]
+    modifiers :: ![(Text, VarId)]
   }
   deriving (Eq, Show, Generic)
 
