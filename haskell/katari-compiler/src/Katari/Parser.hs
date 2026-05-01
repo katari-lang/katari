@@ -129,12 +129,12 @@ parseFilePath = asks (.filePath)
 parseBreakContext :: Parser BreakContext
 parseBreakContext = asks (.breakContext)
 
-withBreakContext :: BreakContext -> Parser a -> Parser a
-withBreakContext context = local (\env -> env {breakContext = context})
+parseWithBreakContext :: BreakContext -> Parser a -> Parser a
+parseWithBreakContext context = local (\env -> env {breakContext = context})
 
 -- | Build a @SourceSpan@ using the current file path held in the environment.
-makeSpan :: Position -> Position -> Parser SourceSpan
-makeSpan startPosition endPosition = do
+parseMakeSpan :: Position -> Position -> Parser SourceSpan
+parseMakeSpan startPosition endPosition = do
   currentFilePath <- parseFilePath
   pure (SrcSpan currentFilePath startPosition endPosition)
 
@@ -265,20 +265,20 @@ parsePreviousEndPosition = do
 
 -- | Run @body@ and pass it the source span covering everything @body@ consumed.
 -- Removes the @startPosition <- parseCurrentPosition / endPosition <- ... /
--- makeSpan@ boilerplate at every parser entry point.
+-- parseMakeSpan@ boilerplate at every parser entry point.
 parseWithSpan :: Parser (SourceSpan -> a) -> Parser a
 parseWithSpan body = do
   startPosition <- parseCurrentPosition
   build <- body
   endPosition <- parsePreviousEndPosition
-  build <$> makeSpan startPosition endPosition
+  build <$> parseMakeSpan startPosition endPosition
 
 -- ===========================================================================
 -- Error recovery helpers
 -- ===========================================================================
 
-recordParseError :: ParseError -> Parser ()
-recordParseError err = modify' (\s -> s {parseErrors = err : s.parseErrors})
+parseRecordError :: ParseError -> Parser ()
+parseRecordError err = modify' (\s -> s {parseErrors = err : s.parseErrors})
 
 -- | Project a megaparsec parse error into our structured 'ParseErrorReason'.
 -- Used inside 'withRecovery' handlers at the declaration and statement levels.
@@ -307,13 +307,13 @@ extractReason = \case
 
 -- | Wrap @p@ with error recovery. On failure, consume one token, run
 -- @skipSync@, then record the error and return the sentinel value.
-withErrorRecoveryAt ::
+parseWithErrorRecoveryAt ::
   (SourceSpan -> ParseErrorReason -> ParseError) ->
   (SourceSpan -> a) ->
   Parser () ->
   Parser a ->
   Parser a
-withErrorRecoveryAt mkError mkSentinel skipSync p = do
+parseWithErrorRecoveryAt mkError mkSentinel skipSync p = do
   startPosition <- parseCurrentPosition
   withRecovery
     ( \mpError -> do
@@ -321,11 +321,11 @@ withErrorRecoveryAt mkError mkSentinel skipSync p = do
         failPosition <- parseCurrentPosition
         parseConsumeOneToken
         failEndPosition <- parsePreviousEndPosition
-        errorSpan <- makeSpan failPosition failEndPosition
+        errorSpan <- parseMakeSpan failPosition failEndPosition
         skipSync
         recoveryEndPosition <- parsePreviousEndPosition
-        sentinelSpan <- makeSpan startPosition recoveryEndPosition
-        recordParseError (mkError errorSpan reason)
+        sentinelSpan <- parseMakeSpan startPosition recoveryEndPosition
+        parseRecordError (mkError errorSpan reason)
         pure (mkSentinel sentinelSpan)
     )
     p
@@ -486,7 +486,7 @@ parseDeclarationsWithRecovery = loop []
         then pure (reverse reversedDeclarations)
         else do
           declaration <-
-            withErrorRecoveryAt
+            parseWithErrorRecoveryAt
               ParseErrorAtDeclaration
               DeclarationError
               parseSkipUntilDeclarationSync
@@ -542,7 +542,7 @@ parseAgent annotation = parseWithSpan $ do
   parameters <- parseParameterList
   returnType <- optional (parsePunctuation PunctuationArrow *> parseType)
   effects <- optional (parseKeyword KeywordWith *> parseEffects)
-  body <- withBreakContext BreakContextTop parseBlock
+  body <- parseWithBreakContext BreakContextTop parseBlock
   pure $ \sourceSpan ->
     AgentDeclaration
       { annotation = annotation,
@@ -749,7 +749,7 @@ parseBlockBodyWithRecovery = loop []
   where
     loop reversedStatements = do
       step <-
-        withErrorRecoveryAt
+        parseWithErrorRecoveryAt
           ParseErrorAtStatement
           (BlockStepStatement . StatementError)
           parseSkipUntilStatementSync
@@ -863,7 +863,7 @@ parseRequestHandler = parseWithSpan $ do
       Nothing -> pure (Nothing, requestRefOfVariable first)
   parameters <- parseParameterList
   returnType <- optional (parsePunctuation PunctuationArrow *> parseType)
-  body <- withBreakContext BreakContextHandler parseBlock
+  body <- parseWithBreakContext BreakContextHandler parseBlock
   pure $ \sourceSpan ->
     RequestHandler
       { moduleQualifier = moduleQualifier,
@@ -881,7 +881,7 @@ parseAgentStatement = parseWithSpan $ do
   parameters <- parseParameterList
   returnType <- optional (parsePunctuation PunctuationArrow *> parseType)
   effects <- optional (parseKeyword KeywordWith *> parseEffects)
-  body <- withBreakContext BreakContextTop parseBlock
+  body <- parseWithBreakContext BreakContextTop parseBlock
   pure $ \sourceSpan ->
     AgentStatement
       { name = name,
@@ -1229,7 +1229,7 @@ parseTupleOrGroupedExpression = do
   case expressions of
     [onlyExpression] -> pure onlyExpression
     _ -> do
-      sourceSpan <- makeSpan startPosition endPosition
+      sourceSpan <- parseMakeSpan startPosition endPosition
       pure $
         ExpressionTuple
           TupleExpression
@@ -1312,7 +1312,7 @@ parseForExpression = parseWithSpan $ do
       (parsePunctuation PunctuationLeftParenthesis)
       (parsePunctuation PunctuationRightParenthesis)
       parseForBindings
-  body <- withBreakContext BreakContextFor parseBlock
+  body <- parseWithBreakContext BreakContextFor parseBlock
   thenBlock <- optional (parseKeyword KeywordThen *> parseBlock)
   pure $ \sourceSpan ->
     ExpressionFor
@@ -1522,7 +1522,7 @@ parseTupleOrGroupedPattern = do
   case patterns of
     [onlyPattern] -> pure onlyPattern
     _ -> do
-      sourceSpan <- makeSpan startPosition endPosition
+      sourceSpan <- parseMakeSpan startPosition endPosition
       pure $
         PatternTuple
           TuplePattern
@@ -1573,7 +1573,7 @@ parseUnionType = do
   case rest of
     [] -> pure first
     _ -> do
-      sourceSpan <- makeSpan startPosition endPosition
+      sourceSpan <- parseMakeSpan startPosition endPosition
       pure (TypeUnion TypeUnionNode {branches = first : rest, sourceSpan = sourceSpan})
 
 -- | The branches of a union (i.e. everything that was previously @parseType@).
@@ -1705,7 +1705,7 @@ parseTupleOrGroupedType = do
   case types of
     [onlyType] -> pure onlyType
     _ -> do
-      sourceSpan <- makeSpan startPosition endPosition
+      sourceSpan <- parseMakeSpan startPosition endPosition
       pure $
         TypeTuple
           TupleTypeNode

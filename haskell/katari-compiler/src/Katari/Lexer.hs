@@ -233,8 +233,8 @@ lexGetTopContext = do
     topmost : _ -> Just topmost
     [] -> Nothing
 
-pushContext :: LexerContext -> Lexer ()
-pushContext context = modify' $ \LexerState {..} ->
+lexPushContext :: LexerContext -> Lexer ()
+lexPushContext context = modify' $ \LexerState {..} ->
   LexerState {contextStack = context : contextStack, ..}
 
 -- | Pop the topmost context. Empty-stack pops are *silently ignored* rather
@@ -248,8 +248,8 @@ lexPopContext = modify' $ \state_ -> case state_.contextStack of
   [] -> state_
 
 -- | Append a recovered error to the accumulator (kept in reverse order).
-recordLexerError :: LexerError -> Lexer ()
-recordLexerError err = modify' $ \LexerState {..} ->
+lexRecordError :: LexerError -> Lexer ()
+lexRecordError err = modify' $ \LexerState {..} ->
   LexerState {accumulatedErrors = err : accumulatedErrors, ..}
 
 -- | Run the lexer on input. Returns the (possibly partial) token list and
@@ -398,7 +398,7 @@ lexBrace = do
       _ <- char '{'
       case context of
         Just (LexerContextTemplateExpression depth) -> do
-          modifyTopContext (\_ -> LexerContextTemplateExpression (depth + 1))
+          lexModifyTopContext (\_ -> LexerContextTemplateExpression (depth + 1))
           pure (TokenPunctuation PunctuationLeftBrace)
         _ -> pure (TokenPunctuation PunctuationLeftBrace)
     lexRightBrace context = do
@@ -407,15 +407,15 @@ lexBrace = do
         Just (LexerContextTemplateExpression 0) ->
           lexPopContext >> pure TokenTemplateExpressionClose
         Just (LexerContextTemplateExpression depth) -> do
-          modifyTopContext (\_ -> LexerContextTemplateExpression (depth - 1))
+          lexModifyTopContext (\_ -> LexerContextTemplateExpression (depth - 1))
           pure (TokenPunctuation PunctuationRightBrace)
         _ -> pure (TokenPunctuation PunctuationRightBrace)
 
 -- | Replace the topmost context. Empty-stack updates are silently ignored
 -- (the only caller paths reach this from a known mode; if recovery removed
 -- the context already we'd rather no-op than panic).
-modifyTopContext :: (LexerContext -> LexerContext) -> Lexer ()
-modifyTopContext modifier = modify' $ \state_ -> case state_.contextStack of
+lexModifyTopContext :: (LexerContext -> LexerContext) -> Lexer ()
+lexModifyTopContext modifier = modify' $ \state_ -> case state_.contextStack of
   (topmost : remaining) -> state_ {contextStack = modifier topmost : remaining}
   [] -> state_
 
@@ -439,9 +439,9 @@ lexTemplateStart = do
       Just _ -> pure ()
       Nothing -> do
         endSourcePos <- getSourcePos
-        recordLexerError
+        lexRecordError
           (LexerErrorUnterminatedTemplate (spanBetween startSourcePos endSourcePos))
-  pushContext (if isMultiLine then LexerContextTemplateMultiLine else LexerContextTemplate)
+  lexPushContext (if isMultiLine then LexerContextTemplateMultiLine else LexerContextTemplate)
   pure TokenTemplateOpen
 
 -- | Fallback for 'lexNormalToken': if no other producer matched, consume one
@@ -451,7 +451,7 @@ lexUnrecognizedCharacter :: FilePath -> SourcePos -> Lexer (Maybe Token)
 lexUnrecognizedCharacter _filePath startSourcePos = do
   c <- anySingle
   endSourcePos <- getSourcePos
-  recordLexerError
+  lexRecordError
     (LexerErrorUnrecognizedCharacter (spanBetween startSourcePos endSourcePos) c)
   pure Nothing
 
@@ -469,16 +469,16 @@ lexIdentifierOrKeyword = label "identifier or keyword" $ do
   firstChar <- letterChar <|> char '_'
   remainingChars <- many (alphaNumChar <|> char '_')
   let text = T.pack (firstChar : remainingChars)
-  pure $ case (text, keywordOf text) of
+  pure $ case (text, lexKeywordOf text) of
     ("_", _) -> TokenUnderscore
     (_, Just keyword) -> TokenKeyword keyword
     (_, Nothing) -> TokenIdentifier text
 
 -- | Surface text of every keyword. Single source of truth shared by the
--- lexer's identifier-or-keyword classifier ('keywordOf') and the diagnostic
+-- lexer's identifier-or-keyword classifier ('lexKeywordOf') and the diagnostic
 -- pretty-printer ('showKeyword').
-keywordText :: Keyword -> Text
-keywordText = \case
+lexKeywordText :: Keyword -> Text
+lexKeywordText = \case
   KeywordLet -> "let"
   KeywordAgent -> "agent"
   KeywordIf -> "if"
@@ -511,10 +511,10 @@ keywordText = \case
   KeywordNever -> "never"
   KeywordUnknown -> "unknown"
 
--- | Reverse lookup: surface text → 'Keyword'. Built from 'keywordText' so
+-- | Reverse lookup: surface text → 'Keyword'. Built from 'lexKeywordText' so
 -- adding a new keyword only requires extending the single table above.
-keywordOf :: Text -> Maybe Keyword
-keywordOf name = lookup name [(keywordText keyword, keyword) | keyword <- [minBound .. maxBound]]
+lexKeywordOf :: Text -> Maybe Keyword
+lexKeywordOf name = lookup name [(lexKeywordText keyword, keyword) | keyword <- [minBound .. maxBound]]
 
 -- | Punctuation or operator (excluding `{` and `}` which are handled in
 -- lexBrace). Multi-char tokens are tried before their shorter prefixes.
@@ -573,7 +573,7 @@ lexTemplateBodyToken isMultiLine = do
   where
     lexExpressionOpen = do
       _ <- string "${"
-      pushContext (LexerContextTemplateExpression 0)
+      lexPushContext (LexerContextTemplateExpression 0)
       pure TokenTemplateExpressionOpen
 
     lexClose
@@ -596,7 +596,7 @@ lexTemplateBodyToken isMultiLine = do
 
     handler startSourcePos _err = do
       endSourcePos <- getSourcePos
-      recordLexerError
+      lexRecordError
         (LexerErrorUnterminatedTemplate (spanBetween startSourcePos endSourcePos))
       lexPopContext
       pure TokenTemplateClose
@@ -650,7 +650,7 @@ recoverableStringLiteral _filePath startSourcePos = do
     stringChar = lexEscapeCharacter <|> noneOf ['"', '\\', '\n', '\r']
     handler _ = do
       endSourcePos <- getSourcePos
-      recordLexerError
+      lexRecordError
         (LexerErrorUnterminatedString (spanBetween startSourcePos endSourcePos))
       pure T.empty
 
@@ -675,7 +675,7 @@ lexMultilineStringLiteral = do
       pure (T.pack content)
     handler startSourcePos _ = do
       endSourcePos <- getSourcePos
-      recordLexerError
+      lexRecordError
         (LexerErrorUnterminatedString (spanBetween startSourcePos endSourcePos))
       pure T.empty
 
@@ -739,7 +739,7 @@ lexEscapeCharacter = do
                         )
                     )
             _ -> do
-              recordLexerError
+              lexRecordError
                 ( LexerErrorInvalidUnicodeEscape
                     (spanBetween startSourcePos endSourcePos)
                     (T.pack ("\\u" <> showHex firstCodePoint ""))
@@ -747,7 +747,7 @@ lexEscapeCharacter = do
               pure '\xFFFD'
         SurrogateClassLow -> do
           endSourcePos <- getSourcePos
-          recordLexerError
+          lexRecordError
             ( LexerErrorInvalidUnicodeEscape
                 (spanBetween startSourcePos endSourcePos)
                 (T.pack ("\\u" <> showHex firstCodePoint ""))
@@ -767,7 +767,7 @@ lexEscapeCharacter = do
           | [(codePoint, "")] <- readHex hex -> pure codePoint
         _ -> do
           endSourcePos <- getSourcePos
-          recordLexerError
+          lexRecordError
             ( LexerErrorInvalidUnicodeEscape
                 (spanBetween startSourcePos endSourcePos)
                 (T.pack "\\u????")
@@ -935,7 +935,7 @@ linePrefixFor sourceText sourcePos =
         [] -> T.empty
 
 showKeyword :: Keyword -> String
-showKeyword = T.unpack . keywordText
+showKeyword = T.unpack . lexKeywordText
 
 showPunctuation :: Punctuation -> String
 showPunctuation = \case
