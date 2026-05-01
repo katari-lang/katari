@@ -48,7 +48,6 @@ import Data.Aeson
     genericParseJSON,
     genericToJSON,
   )
-import Data.Char (toLower)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Set (Set)
@@ -204,24 +203,14 @@ schemaOptions =
     }
 
 -- | TaggedObject sum encoding for 'SchemaCore'. Each variant's JSON tag is
--- the (camelCased) constructor name, e.g. @"schemaCoreNull"@ /
--- @"schemaCoreObject"@.
+-- the constructor name verbatim, e.g. @"SchemaCoreNull"@, @"SchemaCoreObject"@.
 schemaCoreOptions :: Options
 schemaCoreOptions =
   defaultOptions
     { sumEncoding = TaggedObject "kind" "contents",
-      constructorTagModifier = lowerHead,
       fieldLabelModifier = id,
       omitNothingFields = True
     }
-
--- | Lowercase the first character of a constructor name to produce its
--- JSON tag. Combined with the type-name prefix on each constructor it
--- yields stable camelCase tags such as @"schemaCoreNull"@.
-lowerHead :: String -> String
-lowerHead = \case
-  [] -> []
-  c : rest -> toLower c : rest
 
 -- ===========================================================================
 -- Plain schema (no annotation)

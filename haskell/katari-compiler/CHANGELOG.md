@@ -7,35 +7,39 @@
 #### IR JSON shape
 
 Constructor names in the IR JSON now carry the full type-name prefix and are
-camelCase-encoded (via `lowerHead`). Runtime consumers must update tag names:
+serialized verbatim (PascalCase). Runtime consumers must update tag names:
 
-| Old tag              | New tag                   |
-| -------------------- | ------------------------- |
-| `SCall`              | `statementCall`           |
-| `SMakeClosure`       | `statementMakeClosure`    |
-| `SLoadLiteral`       | `statementLoadLiteral`    |
-| `SMatch`             | `statementMatch`          |
-| `SFor`               | `statementFor`            |
-| `SExit`              | `statementExit`           |
-| `SCont`              | `statementCont`           |
-| `SBindPattern`       | `statementBindPattern`    |
-| `MPAny`              | `matchPatternAny`         |
-| `MPVariable`         | `matchPatternVariable`    |
-| `MPLiteral`          | `matchPatternLiteral`     |
-| `MPConstructor`      | `matchPatternConstructor` |
-| `MPTuple`            | `matchPatternTuple`       |
-| `CTBlock`            | `callTargetBlock`         |
-| `CTValue`            | `callTargetValue`         |
-| `LVInteger`          | `literalValueInteger`     |
-| `LVNumber`           | `literalValueNumber`      |
-| `LVString`           | `literalValueString`      |
-| `LVBoolean`          | `literalValueBoolean`     |
-| `LVNull`             | `literalValueNull`        |
-| `ExitReturn`         | `exitKindReturn`          |
-| `ExitBreak`          | `exitKindBreak`           |
-| `ExitForBreak`       | `exitKindForBreak`        |
-| `ContNext`           | `contKindNext`            |
-| `ContForNext`        | `contKindForNext`         |
+| Old tag              | New tag                    |
+| -------------------- | -------------------------- |
+| `SCall`              | `StatementCall`            |
+| `SMakeClosure`       | `StatementMakeClosure`     |
+| `SLoadLiteral`       | `StatementLoadLiteral`     |
+| `SMatch`             | `StatementMatch`           |
+| `SFor`               | `StatementFor`             |
+| `SExit`              | `StatementExit`            |
+| `SCont`              | `StatementCont`            |
+| `SBindPattern`       | `StatementBindPattern`     |
+| `MPAny`              | `MatchPatternAny`          |
+| `MPVariable`         | `MatchPatternVariable`     |
+| `MPLiteral`          | `MatchPatternLiteral`      |
+| `MPConstructor`      | `MatchPatternConstructor`  |
+| `MPTuple`            | `MatchPatternTuple`        |
+| `CTBlock`            | `CallTargetBlock`          |
+| `CTValue`            | `CallTargetValue`          |
+| `LVInteger`          | `LiteralValueInteger`      |
+| `LVNumber`           | `LiteralValueNumber`       |
+| `LVString`           | `LiteralValueString`       |
+| `LVBoolean`          | `LiteralValueBoolean`      |
+| `LVNull`             | `LiteralValueNull`         |
+| `ExitReturn`         | `ExitKindReturn`           |
+| `ExitBreak`          | `ExitKindBreak`            |
+| `ExitForBreak`       | `ExitKindForBreak`         |
+| `ContNext`           | `ContKindNext`             |
+| `ContForNext`        | `ContKindForNext`          |
+
+PascalCase を使う理由: `foo` (変数) と `Foo` (コンストラクタ) は Katari 言語で
+意味が異なるため、JSON レベルでも大文字・小文字を区別する必要がある。
+`lowerHead` による camelCase 変換は行わない。
 
 Schema / Diagnostic / Constraint / NormalizedType のコンストラクタも同様にリネーム
 (内部型なので JSON 公開形式への影響は IRModule のみ)。

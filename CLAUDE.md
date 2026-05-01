@@ -158,7 +158,8 @@ snapshot と by-reference scope inheritance は観測等価。
   `MatchPatternConstructor` / `MatchPatternTuple`
 - `CallTarget` は `CallTargetBlock` / `CallTargetValue`
 - ToJSON / FromJSON は `genericToJSON` で自動生成 (`TaggedObject` sumEncoding)
-- JSON tag は型名プレフィックス付きコンストラクタ名を camelCase に変換 (`lowerHead` 適用)
+- JSON tag はコンストラクタ名をそのまま使う (PascalCase、例: `"StatementCall"` / `"MatchPatternAny"`)。
+  `lowerHead` 変換は**しない** — `foo` と `Foo` を runtime で区別できなくなるため
 
 ## 重要な実装詳細
 

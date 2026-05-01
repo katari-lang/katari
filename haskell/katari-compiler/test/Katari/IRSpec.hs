@@ -58,10 +58,10 @@ blockSpec = describe "Block (sum)" $ do
             }
     BlockUser {body = userBlock}
       `shouldEncodeAs` object
-        [ "kind" .= ("blockUser" :: String),
+        [ "kind" .= ("BlockUser" :: String),
           "body"
             .= object
-              [ "kind" .= ("blockAgentEntry" :: String),
+              [ "kind" .= ("BlockAgentEntry" :: String),
                 "captures" .= ([] :: [Value]),
                 "parameters" .= [object ["label" .= ("x" :: String), "var" .= (0 :: Int)]],
                 "stateVars" .= ([] :: [Value]),
@@ -73,22 +73,22 @@ blockSpec = describe "Block (sum)" $ do
 
   it "BlockPrim has only kind + name" $ do
     BlockPrim {name = "add"}
-      `shouldEncodeAs` object ["kind" .= ("blockPrim" :: String), "name" .= ("add" :: String)]
+      `shouldEncodeAs` object ["kind" .= ("BlockPrim" :: String), "name" .= ("add" :: String)]
 
   it "BlockRequest carries kind + reqId" $ do
     BlockRequest {reqId = ReqId 7}
-      `shouldEncodeAs` object ["kind" .= ("blockRequest" :: String), "reqId" .= (7 :: Int)]
+      `shouldEncodeAs` object ["kind" .= ("BlockRequest" :: String), "reqId" .= (7 :: Int)]
 
   it "BlockExternal carries kind + externalName" $ do
     BlockExternal {externalName = ExternalName (QualifiedName "discord" "send_message")}
       `shouldEncodeAs` object
-        [ "kind" .= ("blockExternal" :: String),
+        [ "kind" .= ("BlockExternal" :: String),
           "externalName" .= object ["module_" .= ("discord" :: String), "name" .= ("send_message" :: String)]
         ]
 
   it "BlockCtor carries kind + ctorId" $ do
     BlockCtor {ctorId = CtorId 3}
-      `shouldEncodeAs` object ["kind" .= ("blockCtor" :: String), "ctorId" .= (3 :: Int)]
+      `shouldEncodeAs` object ["kind" .= ("BlockCtor" :: String), "ctorId" .= (3 :: Int)]
 
   it "round-trips all variants" $ do
     let userBody =
@@ -110,12 +110,12 @@ blockSpec = describe "Block (sum)" $ do
 
 blockKindSpec :: Spec
 blockKindSpec = describe "BlockKind" $ do
-  it "serializes each variant as a bare camelCase string" $ do
-    Aeson.toJSON BlockAgentEntry `shouldBe` Aeson.String "blockAgentEntry"
-    Aeson.toJSON BlockAgentEntryWithHandlers `shouldBe` Aeson.String "blockAgentEntryWithHandlers"
-    Aeson.toJSON BlockHandleScope `shouldBe` Aeson.String "blockHandleScope"
-    Aeson.toJSON BlockInline `shouldBe` Aeson.String "blockInline"
-    Aeson.toJSON BlockHandlerBody `shouldBe` Aeson.String "blockHandlerBody"
+  it "serializes each variant as a bare PascalCase string" $ do
+    Aeson.toJSON BlockAgentEntry `shouldBe` Aeson.String "BlockAgentEntry"
+    Aeson.toJSON BlockAgentEntryWithHandlers `shouldBe` Aeson.String "BlockAgentEntryWithHandlers"
+    Aeson.toJSON BlockHandleScope `shouldBe` Aeson.String "BlockHandleScope"
+    Aeson.toJSON BlockInline `shouldBe` Aeson.String "BlockInline"
+    Aeson.toJSON BlockHandlerBody `shouldBe` Aeson.String "BlockHandlerBody"
 
   it "round-trips all variants" $ do
     mapM_
@@ -137,10 +137,10 @@ statementSpec = describe "Statement (sum)" $ do
           output = Just (VarId 2)
         }
       `shouldEncodeAs` object
-        [ "kind" .= ("statementCall" :: String),
+        [ "kind" .= ("StatementCall" :: String),
           "contents"
             .= object
-              [ "target" .= object ["kind" .= ("callTargetBlock" :: String), "block" .= (7 :: Int)],
+              [ "target" .= object ["kind" .= ("CallTargetBlock" :: String), "block" .= (7 :: Int)],
                 "arguments" .= [object ["label" .= ("x" :: String), "var" .= (1 :: Int)]],
                 "output" .= (2 :: Int)
               ]
@@ -149,7 +149,7 @@ statementSpec = describe "Statement (sum)" $ do
   it "StatementMakeClosure nests MakeClosureData under 'contents'" $ do
     StatementMakeClosure MakeClosureData {output = VarId 3, block = BlockId 12, captures = []}
       `shouldEncodeAs` object
-        [ "kind" .= ("statementMakeClosure" :: String),
+        [ "kind" .= ("StatementMakeClosure" :: String),
           "contents"
             .= object
               [ "output" .= (3 :: Int),
@@ -161,10 +161,10 @@ statementSpec = describe "Statement (sum)" $ do
   it "StatementExit nests ExitData under 'contents' (with exitKind enum)" $ do
     StatementExit ExitData {exitKind = ExitKindReturn, value = VarId 4}
       `shouldEncodeAs` object
-        [ "kind" .= ("statementExit" :: String),
+        [ "kind" .= ("StatementExit" :: String),
           "contents"
             .= object
-              [ "exitKind" .= ("exitKindReturn" :: String),
+              [ "exitKind" .= ("ExitKindReturn" :: String),
                 "value" .= (4 :: Int)
               ]
         ]
@@ -177,10 +177,10 @@ statementSpec = describe "Statement (sum)" $ do
           modifiers = [("acc", VarId 5)]
         }
       `shouldEncodeAs` object
-        [ "kind" .= ("statementCont" :: String),
+        [ "kind" .= ("StatementCont" :: String),
           "contents"
             .= object
-              [ "contKind" .= ("contKindForNext" :: String),
+              [ "contKind" .= ("ContKindForNext" :: String),
                 "modifiers" .= [["acc" :: Aeson.Value, Aeson.Number 5]]
               ]
         ]
@@ -214,11 +214,11 @@ statementSpec = describe "Statement (sum)" $ do
   it "StatementLoadLiteral nests an inner literal value object" $ do
     StatementLoadLiteral LoadLiteralData {output = VarId 5, value = LiteralValueInteger 42}
       `shouldEncodeAs` object
-        [ "kind" .= ("statementLoadLiteral" :: String),
+        [ "kind" .= ("StatementLoadLiteral" :: String),
           "contents"
             .= object
               [ "output" .= (5 :: Int),
-                "value" .= object ["kind" .= ("literalValueInteger" :: String), "integer" .= (42 :: Int)]
+                "value" .= object ["kind" .= ("LiteralValueInteger" :: String), "integer" .= (42 :: Int)]
               ]
         ]
 
@@ -258,11 +258,11 @@ callTargetSpec :: Spec
 callTargetSpec = describe "CallTarget" $ do
   it "CallTargetBlock encodes as kind=block" $ do
     CallTargetBlock (BlockId 5)
-      `shouldEncodeAs` object ["kind" .= ("callTargetBlock" :: String), "block" .= (5 :: Int)]
+      `shouldEncodeAs` object ["kind" .= ("CallTargetBlock" :: String), "block" .= (5 :: Int)]
 
   it "CallTargetValue encodes as kind=value" $ do
     CallTargetValue (VarId 7)
-      `shouldEncodeAs` object ["kind" .= ("callTargetValue" :: String), "var" .= (7 :: Int)]
+      `shouldEncodeAs` object ["kind" .= ("CallTargetValue" :: String), "var" .= (7 :: Int)]
 
   it "round-trips both variants" $ do
     roundTrip (CallTargetBlock (BlockId 0))
@@ -271,13 +271,13 @@ callTargetSpec = describe "CallTarget" $ do
 exitContSpec :: Spec
 exitContSpec = describe "ExitKind / ContKind" $ do
   it "ExitKind serializes as bare strings" $ do
-    Aeson.toJSON ExitKindReturn `shouldBe` Aeson.String "exitKindReturn"
-    Aeson.toJSON ExitKindBreak `shouldBe` Aeson.String "exitKindBreak"
-    Aeson.toJSON ExitKindForBreak `shouldBe` Aeson.String "exitKindForBreak"
+    Aeson.toJSON ExitKindReturn `shouldBe` Aeson.String "ExitKindReturn"
+    Aeson.toJSON ExitKindBreak `shouldBe` Aeson.String "ExitKindBreak"
+    Aeson.toJSON ExitKindForBreak `shouldBe` Aeson.String "ExitKindForBreak"
 
   it "ContKind serializes as bare strings" $ do
-    Aeson.toJSON ContKindNext `shouldBe` Aeson.String "contKindNext"
-    Aeson.toJSON ContKindForNext `shouldBe` Aeson.String "contKindForNext"
+    Aeson.toJSON ContKindNext `shouldBe` Aeson.String "ContKindNext"
+    Aeson.toJSON ContKindForNext `shouldBe` Aeson.String "ContKindForNext"
 
   it "round-trips all enum values" $ do
     mapM_ roundTrip [ExitKindReturn, ExitKindBreak, ExitKindForBreak]
@@ -288,7 +288,7 @@ matchArmSpec = describe "MatchArm" $ do
   it "encodes an MatchPatternAny pattern" $ do
     MatchArm {pattern = MatchPatternAny, body = BlockId 0}
       `shouldEncodeAs` object
-        [ "pattern" .= object ["kind" .= ("matchPatternAny" :: String)],
+        [ "pattern" .= object ["kind" .= ("MatchPatternAny" :: String)],
           "body" .= (0 :: Int)
         ]
 

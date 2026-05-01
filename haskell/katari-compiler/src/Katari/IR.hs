@@ -76,7 +76,6 @@ import Data.Aeson
     genericParseJSON,
     genericToJSON,
   )
-import Data.Char (toLower)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
@@ -243,10 +242,10 @@ data Block where
   deriving (Eq, Show, Generic)
 
 instance ToJSON Block where
-  toJSON = genericToJSON (sumOptions lowerHead)
+  toJSON = genericToJSON (sumOptions)
 
 instance FromJSON Block where
-  parseJSON = genericParseJSON (sumOptions lowerHead)
+  parseJSON = genericParseJSON (sumOptions)
 
 -- | Static structural role of a 'UserBlock'. Replaces the older
 -- 'BlockProps' triple of booleans, making invalid combinations
@@ -283,10 +282,10 @@ data BlockKind where
   deriving (Eq, Show, Generic)
 
 instance ToJSON BlockKind where
-  toJSON = genericToJSON (enumOptions lowerHead)
+  toJSON = genericToJSON (enumOptions)
 
 instance FromJSON BlockKind where
-  parseJSON = genericParseJSON (enumOptions lowerHead)
+  parseJSON = genericParseJSON (enumOptions)
 
 -- | The body of a regular user-defined block.
 data UserBlock = UserBlock
@@ -383,10 +382,10 @@ data Statement where
   deriving (Eq, Show, Generic)
 
 instance ToJSON Statement where
-  toJSON = genericToJSON (sumOptions lowerHead)
+  toJSON = genericToJSON (sumOptions)
 
 instance FromJSON Statement where
-  parseJSON = genericParseJSON (sumOptions lowerHead)
+  parseJSON = genericParseJSON (sumOptions)
 
 -- | Payload for 'SCall'.
 data CallData = CallData
@@ -522,10 +521,10 @@ data LiteralValue where
   deriving (Eq, Show, Generic)
 
 instance ToJSON LiteralValue where
-  toJSON = genericToJSON (sumOptions lowerHead)
+  toJSON = genericToJSON (sumOptions)
 
 instance FromJSON LiteralValue where
-  parseJSON = genericParseJSON (sumOptions lowerHead)
+  parseJSON = genericParseJSON (sumOptions)
 
 -- | Resolution of an 'SCall' target.
 data CallTarget where
@@ -536,10 +535,10 @@ data CallTarget where
   deriving (Eq, Show, Generic)
 
 instance ToJSON CallTarget where
-  toJSON = genericToJSON (sumOptions lowerHead)
+  toJSON = genericToJSON (sumOptions)
 
 instance FromJSON CallTarget where
-  parseJSON = genericParseJSON (sumOptions lowerHead)
+  parseJSON = genericParseJSON (sumOptions)
 
 data Arg = Arg
   { label :: !Text,
@@ -577,10 +576,10 @@ data MatchPattern where
   deriving (Eq, Show, Generic)
 
 instance ToJSON MatchPattern where
-  toJSON = genericToJSON (sumOptions lowerHead)
+  toJSON = genericToJSON (sumOptions)
 
 instance FromJSON MatchPattern where
-  parseJSON = genericParseJSON (sumOptions lowerHead)
+  parseJSON = genericParseJSON (sumOptions)
 
 -- | One arm of an 'SMatch'. The runtime evaluates 'pattern' against the
 -- subject; on a successful match it enters 'body' with whatever
@@ -604,10 +603,10 @@ data ExitKind where
   deriving (Eq, Show, Generic)
 
 instance ToJSON ExitKind where
-  toJSON = genericToJSON (enumOptions lowerHead)
+  toJSON = genericToJSON (enumOptions)
 
 instance FromJSON ExitKind where
-  parseJSON = genericParseJSON (enumOptions lowerHead)
+  parseJSON = genericParseJSON (enumOptions)
 
 data ContKind where
   ContKindNext :: ContKind
@@ -615,10 +614,10 @@ data ContKind where
   deriving (Eq, Show, Generic)
 
 instance ToJSON ContKind where
-  toJSON = genericToJSON (enumOptions lowerHead)
+  toJSON = genericToJSON (enumOptions)
 
 instance FromJSON ContKind where
-  parseJSON = genericParseJSON (enumOptions lowerHead)
+  parseJSON = genericParseJSON (enumOptions)
 
 -- ===========================================================================
 -- Aeson option helpers
@@ -633,32 +632,22 @@ irOptions =
       omitNothingFields = True
     }
 
--- | TaggedObject options for record-style sums. Constructor tags are
--- transformed by the supplied modifier.
-sumOptions :: (String -> String) -> Options
-sumOptions tagMod =
+-- | TaggedObject options for record-style sums. Constructor names (which
+-- carry the type-name prefix per CLAUDE.md convention) are used verbatim
+-- as JSON tags, e.g. @"StatementCall"@, @"MatchPatternAny"@.
+sumOptions :: Options
+sumOptions =
   defaultOptions
     { sumEncoding = TaggedObject "kind" "contents",
-      constructorTagModifier = tagMod,
       fieldLabelModifier = id,
       omitNothingFields = True
     }
 
--- | Enum (no fields) options: encode as bare strings.
-enumOptions :: (String -> String) -> Options
-enumOptions tagMod =
+-- | Enum (no fields) options: encode as bare strings using the constructor
+-- name verbatim, e.g. @"ExitKindReturn"@, @"ContKindNext"@.
+enumOptions :: Options
+enumOptions =
   defaultOptions
     { sumEncoding = UntaggedValue,
-      constructorTagModifier = tagMod,
       allNullaryToStringTag = True
     }
-
--- | Lowercase the first character of a constructor name to produce its
--- JSON tag. This is the single shared modifier used for every sum-type
--- in this module: combined with the type-name prefix on each constructor
--- (CLAUDE.md naming convention) it yields stable camelCase tags such as
--- @"statementCall"@ or @"literalValueInteger"@.
-lowerHead :: String -> String
-lowerHead = \case
-  [] -> []
-  c : rest -> toLower c : rest

@@ -139,8 +139,9 @@ stack haddock katari-compiler --no-haddock-deps
   converter で `Diagnostic` (code, severity, span, message, notes, hints) に集約。
   CLI / LSP / 新 TS runtime の結合点で扱いやすい。
 - **型名プレフィックス付きコンストラクタ**: 全直和型のコンストラクタに型名プレフィックスを付ける
-  (`StatementCall` / `MatchPatternAny` / `CallTargetBlock` 等)。JSON tag は `lowerHead`
-  で camelCase に変換 (`statementCall` / `matchPatternAny` 等)。`stripXXPrefix` は不使用。
+  (`StatementCall` / `MatchPatternAny` / `CallTargetBlock` 等)。JSON tag はコンストラクタ名を
+  そのまま使う (PascalCase: `"StatementCall"` / `"MatchPatternAny"` 等)。`lowerHead` / `stripXXPrefix`
+  は不使用 — camelCase 変換は `foo` と `Foo` を runtime で区別できなくなるため。
 - **GADTs 構文**: 全直和型は `data T where ...` 形式を使う。
 - **parse / lex プレフィックス**: `Parser a` を返す関数は `parse` プレフィックス、
   `Lexer a` を返す関数は `lex` プレフィックス必須。
