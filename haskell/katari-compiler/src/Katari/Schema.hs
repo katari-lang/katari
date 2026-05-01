@@ -63,19 +63,19 @@ import Katari.AST
     ExternalAgentDeclaration (..),
     Module (..),
     NameRef (..),
+    NameRefKind (..),
     ParameterBinding (..),
     Phase (Zonked),
     RequestDeclaration (..),
-    SymbolKind (..),
   )
 import Katari.AST.Identifiers (ModuleId, VariableId, renderQualifiedName)
 import Katari.Internal (internalErrorNoSpan)
+import Katari.Typechecker.Identifier (RequestData (..))
 import Katari.Typechecker.SemanticType
   ( Resolved,
     SemanticEffect (..),
     SemanticType (..),
   )
-import Katari.Typechecker.Identifier (RequestData (..))
 import Katari.Typechecker.Zonker (ZonkResult (..))
 
 -- ===========================================================================
@@ -351,7 +351,7 @@ qkey modName declName
 agentLike ::
   ZonkResult ->
   Maybe Text ->
-  NameRef Zonked 'VariableRef ->
+  NameRef Zonked VariableRef ->
   [ParameterBinding Zonked] ->
   Maybe AgentSchema
 agentLike zonkResult description nameRef parameters =

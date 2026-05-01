@@ -299,7 +299,7 @@ data ResolvedVar where
 -- scope first (if @canBeLocal@), then the top-level block id map.
 resolveVariable ::
   Bool ->
-  AST.NameMeta Zonked 'AST.VariableRef ->
+  AST.NameMeta Zonked AST.VariableRef ->
   AST.SourceSpan ->
   Text ->
   Lower ResolvedVar
@@ -323,7 +323,7 @@ resolveVariable canBeLocal resolution sourceSpan nameText = case resolution of
 -- top-level callables emit an implicit 'StatementMakeClosure'.
 resolveAsValue ::
   Bool ->
-  AST.NameMeta Zonked 'AST.VariableRef ->
+  AST.NameMeta Zonked AST.VariableRef ->
   AST.SourceSpan ->
   Text ->
   Maybe Text ->
@@ -342,7 +342,7 @@ resolveAsValue canBeLocal resolution sourceSpan nameText hint = do
 -- 'CallTargetValue', top-level callables yield 'CallTargetBlock'.
 resolveAsCallTarget ::
   Bool ->
-  AST.NameMeta Zonked 'AST.VariableRef ->
+  AST.NameMeta Zonked AST.VariableRef ->
   AST.SourceSpan ->
   Text ->
   Lower CallTarget
@@ -480,7 +480,7 @@ recordVarBlockId variableId blockId =
 -- declaration name. If the name didn't resolve (parser/identifier left an
 -- 'Nothing' marker), record a Lowering error and skip.
 registerCallable ::
-  AST.NameRef Zonked 'AST.VariableRef ->
+  AST.NameRef Zonked AST.VariableRef ->
   AST.SourceSpan ->
   (VariableId -> Lower ()) ->
   Lower ()
@@ -543,7 +543,7 @@ registerDeclarationKinds zonkResult =
       AST.DeclarationTypeSynonym _ -> pure ()
       AST.DeclarationError sourceSpan -> recordError (LoweringErrorParseSentinel sourceSpan)
 
-    -- | O(1) lookup of the IR 'ReqId' for a @req@ declaration's call-side
+    -- \| O(1) lookup of the IR 'ReqId' for a @req@ declaration's call-side
     -- 'VariableId', using the pre-built inverse map in 'ZonkResult'.
     requestIdForVariable :: VariableId -> Lower ReqId
     requestIdForVariable variableId =
@@ -790,7 +790,7 @@ lowerHandler stateParams hr = do
   -- record an error and fall back to a fresh placeholder so lowering can
   -- continue producing partial IR for diagnostics.
   -- Identifier resolved the handler's @name@ to a 'RequestId' (the
-  -- 'RequestRef' slot guarantees this is a @req@ declaration). The
+  -- RequestRef' slot guarantees this is a @req@ declaration). The
   -- IR-level 'ReqId' allocated for that 'RequestId' lives in 'lsReqIds'
   -- and is what the runtime compares against when a request is raised.
   irReqId <- case hr.name.resolution of

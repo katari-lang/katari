@@ -430,36 +430,36 @@ parseNameRef = parseWithSpan $ do
   text <- parseIdentifier
   pure $ \sourceSpan -> NameRef {text = text, sourceSpan = sourceSpan, resolution = ()}
 
--- | Re-tag a 'VariableRef' name as a 'ModuleRef'. Used when a leading
+-- | Re-tag a VariableRef' name as a ModuleRef'. Used when a leading
 -- identifier is being committed to as a module qualifier (e.g. the @M@ in
 -- @M.foo(...)@).
-moduleRefOfVariable :: NameRef Parsed 'VariableRef -> NameRef Parsed 'ModuleRef
+moduleRefOfVariable :: NameRef Parsed VariableRef -> NameRef Parsed ModuleRef
 moduleRefOfVariable = parsedSymbolRetag
 
--- | Re-tag a 'VariableRef' name as a 'TypeRef'. Used in type position when an
+-- | Re-tag a VariableRef' name as a TypeRef'. Used in type position when an
 -- identifier may be either a bare type name or a module qualifier; the
 -- decision is made after lookahead.
-typeRefOfVariable :: NameRef Parsed 'VariableRef -> NameRef Parsed 'TypeRef
+typeRefOfVariable :: NameRef Parsed VariableRef -> NameRef Parsed TypeRef
 typeRefOfVariable = parsedSymbolRetag
 
--- | Re-tag a 'VariableRef' name as a 'LabelRef'. Used in sugar desugaring
+-- | Re-tag a VariableRef' name as a LabelRef'. Used in sugar desugaring
 -- sites (e.g. @foo(x)@ → @foo(x = x)@) where the same identifier plays two
 -- roles (label + variable).
-labelRefOfVariable :: NameRef Parsed 'VariableRef -> NameRef Parsed 'LabelRef
+labelRefOfVariable :: NameRef Parsed VariableRef -> NameRef Parsed LabelRef
 labelRefOfVariable = parsedSymbolRetag
 
--- | Re-tag a parsed name as a 'RequestRef'. Used in @req@ handler position
+-- | Re-tag a parsed name as a RequestRef'. Used in @req@ handler position
 -- where an identifier names a request declaration; resolution still happens
 -- in the Identifier pass.
-requestRefOfVariable :: NameRef Parsed 'VariableRef -> NameRef Parsed 'RequestRef
+requestRefOfVariable :: NameRef Parsed VariableRef -> NameRef Parsed RequestRef
 requestRefOfVariable = parsedSymbolRetag
 
--- | Re-tag a parsed name as a 'ConstructorRef'. Used in match-pattern
+-- | Re-tag a parsed name as a ConstructorRef'. Used in match-pattern
 -- constructor position; resolution happens in the Identifier pass.
-constructorRefOfVariable :: NameRef Parsed 'VariableRef -> NameRef Parsed 'ConstructorRef
+constructorRefOfVariable :: NameRef Parsed VariableRef -> NameRef Parsed ConstructorRef
 constructorRefOfVariable = parsedSymbolRetag
 
--- | Internal: replace the 'SymbolKind' tag of a parsed 'NameRef'. Safe at
+-- | Internal: replace the 'NameRefKind' tag of a parsed 'NameRef'. Safe at
 -- the 'Parsed' phase because @NameMeta Parsed s = ()@ for every symbol
 -- kind, so re-tagging never has to invent payload. Exposed only through
 -- the directional helpers above so that call sites document intent.
@@ -854,7 +854,7 @@ parseRequestHandler = parseWithSpan $ do
   parseKeyword KeywordReq
   -- Either @req name(...)@ or @req module.name(...)@: if a @.@ follows the
   -- first identifier, treat it as a qualified handler; otherwise bare.
-  -- The handler's @name@ field is a 'RequestRef' (resolution will require it
+  -- The handler's @name@ field is a RequestRef' (resolution will require it
   -- to name a @req@ declaration); we re-tag the parsed identifier here.
   first <- parseNameRef
   (moduleQualifier, name) <-
@@ -1057,7 +1057,7 @@ parsePrefixOperator parserAction unaryOperator = Expr.Prefix $ do
 -- 'applyPostfixOperation' as @primary.start ↦ postfix.end@.
 data Postfix where
   PostfixCall :: [CallArgument Parsed] -> SourceSpan -> Postfix
-  PostfixField :: NameRef Parsed 'LabelRef -> SourceSpan -> Postfix
+  PostfixField :: NameRef Parsed LabelRef -> SourceSpan -> Postfix
   PostfixIndex :: Expression Parsed -> SourceSpan -> Postfix
 
 parsePostfixExpression :: Parser (Expression Parsed)
@@ -1440,11 +1440,11 @@ parseQualifiedConstructorPattern = parseWithSpan $ do
   (maybeModule, constructorName) <- try $ do
     -- Parse the leading identifier as a variable; it may later be retagged as
     -- a module qualifier if a @.@ follows.
-    first <- parseNameRef :: Parser (NameRef Parsed 'VariableRef)
+    first <- parseNameRef :: Parser (NameRef Parsed VariableRef)
     second <- optional (parsePunctuation PunctuationDot *> parseNameRef)
     -- Only commit to a constructor pattern once we see the opening paren.
     void $ MP.lookAhead (parsePunctuation PunctuationLeftParenthesis)
-    -- The constructor name is a 'ConstructorRef'; resolution will require it
+    -- The constructor name is a ConstructorRef'; resolution will require it
     -- to name a @data@ declaration.
     pure $ case second of
       Nothing -> (Nothing, constructorRefOfVariable first)
@@ -1488,7 +1488,7 @@ parseVariablePattern = parseWithSpan $ do
           typeOf = ()
         }
 
-parsePatternField :: Parser (NameRef Parsed 'LabelRef, Pattern Parsed)
+parsePatternField :: Parser (NameRef Parsed LabelRef, Pattern Parsed)
 parsePatternField = labeled <|> sugar
   where
     labeled = try $ do
@@ -1631,12 +1631,12 @@ parsePrimitiveType primitiveKind keyword = parseWithSpan $ do
         }
 
 -- | @Name@ or @module.TypeName@. The leading identifier is tentatively
--- parsed as a 'VariableRef' (the polymorphic 'parseNameRef' can produce any
+-- parsed as a VariableRef' (the polymorphic 'parseNameRef' can produce any
 -- symbol kind, but fixing it here gives the case branches a single source
 -- type to retag from).
 parseNamedOrQualifiedType :: Parser (SyntacticType Parsed)
 parseNamedOrQualifiedType = parseWithSpan $ do
-  first <- parseNameRef :: Parser (NameRef Parsed 'VariableRef)
+  first <- parseNameRef :: Parser (NameRef Parsed VariableRef)
   maybeSecond <- optional (parsePunctuation PunctuationDot *> parseNameRef)
   pure $ \sourceSpan -> case maybeSecond of
     Nothing ->

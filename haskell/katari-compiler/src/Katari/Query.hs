@@ -27,9 +27,11 @@ import Data.Maybe (listToMaybe, mapMaybe)
 import Data.Text (Text)
 import Katari.AST
   ( AgentDeclaration (..),
+    AgentStatement (..),
+    ArrayExpression (..),
+    BinaryOperatorExpression (..),
     Block (..),
     BlockExpression (..),
-    BinaryOperatorExpression (..),
     BreakStatement (..),
     CallArgument (..),
     CallExpression (..),
@@ -46,17 +48,15 @@ import Katari.AST
     MatchExpression (..),
     Module (..),
     NameRef (..),
+    NameRefKind (..),
     NextStatement (..),
-    AgentStatement (..),
-    ArrayExpression (..),
-    TupleExpression (..),
     Phase (Zonked),
     Position (..),
     RequestDeclaration (..),
     ReturnStatement (..),
     SourceSpan (..),
     Statement (..),
-    SymbolKind (..),
+    TupleExpression (..),
     UnaryOperatorExpression (..),
     VariableExpression (..),
   )
@@ -214,7 +214,7 @@ hoverFromDeclaration zonkResult position = \case
         hoverFromVariableRef zonkResult decl.name
   _ -> Nothing
 
-hoverFromVariableRef :: ZonkResult -> NameRef Zonked 'VariableRef -> Maybe HoverInfo
+hoverFromVariableRef :: ZonkResult -> NameRef Zonked VariableRef -> Maybe HoverInfo
 hoverFromVariableRef zonkResult nameRef = do
   variableId <- nameRef.resolution
   let semanticType = Map.lookup variableId zonkResult.zonkedTypeEnvironment
@@ -319,7 +319,7 @@ refFromDeclaration position = \case
         refFromVariableNameRef position decl.name
   _ -> Nothing
 
-refFromVariableNameRef :: Position -> NameRef Zonked 'VariableRef -> Maybe ResolvedReference
+refFromVariableNameRef :: Position -> NameRef Zonked VariableRef -> Maybe ResolvedReference
 refFromVariableNameRef position nameRef
   | spanContains nameRef.sourceSpan position =
       fmap ResolvedReferenceVariable nameRef.resolution
@@ -438,12 +438,15 @@ collectExpressionOccurrences expression index = case expression of
   ExpressionUnaryOperator ue ->
     collectExpressionOccurrences ue.operand index
   ExpressionIf ie ->
-    collectExpressionOccurrences ie.condition
-      ( collectBlockOccurrences ie.thenBlock
+    collectExpressionOccurrences
+      ie.condition
+      ( collectBlockOccurrences
+          ie.thenBlock
           (maybe index (flip collectBlockOccurrences index) ie.elseBlock)
       )
   ExpressionMatch me ->
-    collectExpressionOccurrences me.subject
+    collectExpressionOccurrences
+      me.subject
       (foldr (collectBlockOccurrences . (.body)) index me.cases)
   ExpressionFor fe ->
     foldr (collectExpressionOccurrences . (.source)) (collectBlockOccurrences fe.body index) fe.inBindings
@@ -455,7 +458,7 @@ collectExpressionOccurrences expression index = case expression of
     foldr collectExpressionOccurrences index ae.elements
   _ -> index
 
-addVariableOccurrence :: NameRef Zonked 'VariableRef -> OccurrenceIndex -> OccurrenceIndex
+addVariableOccurrence :: NameRef Zonked VariableRef -> OccurrenceIndex -> OccurrenceIndex
 addVariableOccurrence nameRef index = case nameRef.resolution of
   Nothing -> index
   Just variableId ->

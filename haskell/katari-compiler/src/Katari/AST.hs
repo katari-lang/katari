@@ -59,26 +59,25 @@ class HasSourceSpan node where
   sourceSpanOf :: node -> SourceSpan
 
 -- ---------------------------------------------------------------------------
--- SymbolKind: 'NameRef' が指す名前空間の種別。
+-- NameRefKind: 'NameRef' が指す名前空間の種別。
 -- ---------------------------------------------------------------------------
 
-data SymbolKind where
+type data NameRefKind where
   -- | 値空間の名前参照 (agent / req / ext agent / constructor / local var)。
   -- 値として呼べる名前はすべてここを通る。
-  VariableRef :: SymbolKind
+  VariableRef :: NameRefKind
   -- | 型空間の名前参照 (enum 名、TypeName)。
-  TypeRef :: SymbolKind
+  TypeRef :: NameRefKind
   -- | モジュール空間の名前参照 (import alias、qualified の左辺)。
-  ModuleRef :: SymbolKind
+  ModuleRef :: NameRefKind
   -- | フィールド・引数ラベル (型指向で後段が解決)。
-  LabelRef :: SymbolKind
+  LabelRef :: NameRefKind
   -- | req handler の対象。@req@ 宣言以外の名前を handler として書くと
   -- Identifier 段階で reject される (型レベルでスロットを分離している)。
-  RequestRef :: SymbolKind
+  RequestRef :: NameRefKind
   -- | match パターンの constructor。@data@ 宣言以外の名前を constructor
   -- パターンとして書くと Identifier 段階で reject される。
-  ConstructorRef :: SymbolKind
-  deriving (Eq, Show)
+  ConstructorRef :: NameRefKind
 
 -- ---------------------------------------------------------------------------
 -- Phase markers and per-phase metadata type families (Trees-that-Grow style)
@@ -100,20 +99,34 @@ data SymbolKind where
 -- live exclusively at the type level — there are no term-level
 -- constructors. The AST is parametrised by 'Phase' from the parser
 -- onward.
-type data Phase = Parsed | Identified | Constrained | Zonked
+type data Phase where
+  -- | Initial parse, no resolution information.
+  Parsed :: Phase
+  -- | Identifier resolution complete: 'NameRef' nodes carry 'Just' identifiers
+  -- for successfully resolved names and 'Nothing' for unresolved names.
+  Identified :: Phase
+  -- | Constraint generation complete: 'NameRef' nodes carry the same
+  -- resolution metadata as 'Identified', but expression / pattern nodes
+  -- also carry semantic type information (see 'ExprType' / 'PatType').
+  Constrained :: Phase
+  -- | Zoning complete: same shape as 'Constrained', but all identifiers are
+  -- replaced with their final IR ids (e.g. 'VariableId'), and all type
+  -- information is fully elaborated (no remaining references to AST-level
+  -- types).
+  Zonked :: Phase
 
 -- | NameRef resolution metadata for a given phase + symbol kind. After
 -- Identifier the shape stabilises (@Maybe@ + identifier), and
 -- 'Constrained' / 'Zonked' keep the same resolution metadata. The
 -- 'Parsed' phase carries no resolution information yet.
-type family NameMeta (p :: Phase) (s :: SymbolKind) :: Type where
+type family NameMeta (p :: Phase) (s :: NameRefKind) :: Type where
   NameMeta Parsed _ = ()
-  NameMeta _ 'VariableRef = Maybe VariableId
-  NameMeta _ 'TypeRef = Maybe TypeId
-  NameMeta _ 'ModuleRef = Maybe ModuleId
-  NameMeta _ 'LabelRef = ()
-  NameMeta _ 'RequestRef = Maybe RequestId
-  NameMeta _ 'ConstructorRef = Maybe ConstructorId
+  NameMeta _ VariableRef = Maybe VariableId
+  NameMeta _ TypeRef = Maybe TypeId
+  NameMeta _ ModuleRef = Maybe ModuleId
+  NameMeta _ LabelRef = ()
+  NameMeta _ RequestRef = Maybe RequestId
+  NameMeta _ ConstructorRef = Maybe ConstructorId
 
 -- | Expression node type metadata. Open family because 'Constrained' /
 -- 'Zonked' instances live in 'Katari.Typechecker.SemanticType' (which
@@ -137,7 +150,7 @@ type instance PatType Identified = ()
 -- NameRef: a name with phase-dependent resolution metadata attached.
 -- ---------------------------------------------------------------------------
 
-data NameRef (p :: Phase) (symbol :: SymbolKind) = NameRef
+data NameRef (p :: Phase) (symbol :: NameRefKind) = NameRef
   { text :: Text,
     sourceSpan :: SourceSpan,
     -- | Phase-specific resolution payload. 'Parsed': trivial. 'Identified'
@@ -190,7 +203,7 @@ instance HasSourceSpan (Declaration p) where
 
 data AgentDeclaration (p :: Phase) = AgentDeclaration
   { annotation :: Maybe Text,
-    name :: NameRef p 'VariableRef,
+    name :: NameRef p VariableRef,
     parameters :: [ParameterBinding p],
     returnType :: Maybe (SyntacticType p),
     withEffects :: Maybe [SyntacticRequest p],
@@ -203,7 +216,7 @@ instance HasSourceSpan (AgentDeclaration p) where
 
 data RequestDeclaration (p :: Phase) = RequestDeclaration
   { annotation :: Maybe Text,
-    name :: NameRef p 'VariableRef,
+    name :: NameRef p VariableRef,
     parameters :: [ParameterBinding p],
     returnType :: SyntacticType p,
     sourceSpan :: SourceSpan
@@ -246,7 +259,7 @@ data ImportItemKind where
 
 data ExternalAgentDeclaration (p :: Phase) = ExternalAgentDeclaration
   { annotation :: Maybe Text,
-    name :: NameRef p 'VariableRef,
+    name :: NameRef p VariableRef,
     parameters :: [ParameterBinding p],
     returnType :: SyntacticType p,
     withEffects :: [SyntacticRequest p],
@@ -267,8 +280,8 @@ instance HasSourceSpan (ExternalAgentDeclaration p) where
 -- 名前テキストによる横断検索は不要。
 data DataDeclaration (p :: Phase) = DataDeclaration
   { annotation :: Maybe Text,
-    name :: NameRef p 'VariableRef,
-    typeName :: NameRef p 'TypeRef,
+    name :: NameRef p VariableRef,
+    typeName :: NameRef p TypeRef,
     parameters :: [DataParameter p],
     sourceSpan :: SourceSpan
   }
@@ -290,7 +303,7 @@ instance HasSourceSpan (DataParameter p) where
 
 -- | @type T = ...@ — 型シノニム。annotation はなし、generics もなし。
 data TypeSynonymDeclaration (p :: Phase) = TypeSynonymDeclaration
-  { name :: NameRef p 'TypeRef,
+  { name :: NameRef p TypeRef,
     rhs :: SyntacticType p,
     sourceSpan :: SourceSpan
   }
@@ -332,7 +345,7 @@ instance HasSourceSpan (WhereBlock p) where
   sourceSpanOf whereBlock = whereBlock.sourceSpan
 
 data StateVariableBinding (p :: Phase) = StateVariableBinding
-  { name :: NameRef p 'VariableRef,
+  { name :: NameRef p VariableRef,
     typeAnnotation :: Maybe (SyntacticType p),
     initial :: Expression p,
     sourceSpan :: SourceSpan
@@ -377,7 +390,7 @@ instance HasSourceSpan (LetStatement p) where
   sourceSpanOf statement = statement.sourceSpan
 
 data AgentStatement (p :: Phase) = AgentStatement
-  { name :: NameRef p 'VariableRef,
+  { name :: NameRef p VariableRef,
     parameters :: [ParameterBinding p],
     returnType :: Maybe (SyntacticType p),
     withEffects :: Maybe [SyntacticRequest p],
@@ -430,7 +443,7 @@ instance HasSourceSpan (ForBreakStatement p) where
   sourceSpanOf statement = statement.sourceSpan
 
 data Modifier (p :: Phase) = Modifier
-  { name :: NameRef p 'VariableRef,
+  { name :: NameRef p VariableRef,
     value :: Expression p,
     sourceSpan :: SourceSpan
   }
@@ -444,12 +457,12 @@ instance HasSourceSpan (Modifier p) where
 -- | req handler は自身の effect 集合を持たない (handler 内の effect は
 -- 囲む agent に bind されるため)。よって @with@ 節は構文上も AST 上も無い。
 data RequestHandler (p :: Phase) = RequestHandler
-  { moduleQualifier :: Maybe (NameRef p 'ModuleRef),
+  { moduleQualifier :: Maybe (NameRef p ModuleRef),
     -- | The request being handled. Resolved against the request namespace
-    -- ('RequestRef'); a name that does not name a @req@ declaration is
+    -- (RequestRef'); a name that does not name a @req@ declaration is
     -- rejected at the Identifier phase rather than passed through as a
     -- regular variable reference.
-    name :: NameRef p 'RequestRef,
+    name :: NameRef p RequestRef,
     parameters :: [ParameterBinding p],
     returnType :: Maybe (SyntacticType p),
     body :: Block p,
@@ -497,7 +510,7 @@ instance HasSourceSpan (WildcardPattern p) where
   sourceSpanOf pattern' = pattern'.sourceSpan
 
 data VariablePattern (p :: Phase) = VariablePattern
-  { name :: NameRef p 'VariableRef,
+  { name :: NameRef p VariableRef,
     typeAnnotation :: Maybe (SyntacticType p),
     sourceSpan :: SourceSpan,
     typeOf :: PatType p
@@ -526,14 +539,14 @@ instance HasSourceSpan (ParameterBinding p) where
 -- 'VariablePattern' のまま。
 data QualifiedConstructorPattern (p :: Phase) = QualifiedConstructorPattern
   { -- | Optional module qualifier (left-most segment).
-    moduleQualifier :: Maybe (NameRef p 'ModuleRef),
+    moduleQualifier :: Maybe (NameRef p ModuleRef),
     -- | Constructor name. Resolved against the constructor namespace
-    -- ('ConstructorRef'); a name that does not name a @data@ declaration is
+    -- (ConstructorRef'); a name that does not name a @data@ declaration is
     -- rejected at the Identifier phase rather than passed through as a
     -- regular variable reference.
-    constructorName :: NameRef p 'ConstructorRef,
+    constructorName :: NameRef p ConstructorRef,
     -- | Field labels and their patterns. Label resolution is type-directed.
-    parameters :: [(NameRef p 'LabelRef, Pattern p)],
+    parameters :: [(NameRef p LabelRef, Pattern p)],
     sourceSpan :: SourceSpan,
     typeOf :: PatType p
   }
@@ -631,7 +644,7 @@ instance HasSourceSpan (UnknownTypeNode p) where
   sourceSpanOf node = node.sourceSpan
 
 data TypeNameNode (p :: Phase) = TypeNameNode
-  { name :: NameRef p 'TypeRef,
+  { name :: NameRef p TypeRef,
     sourceSpan :: SourceSpan
   }
 
@@ -666,8 +679,8 @@ instance HasSourceSpan (TupleTypeNode p) where
   sourceSpanOf node = node.sourceSpan
 
 data QualifiedTypeNode (p :: Phase) = QualifiedTypeNode
-  { qualifier :: NameRef p 'ModuleRef,
-    target :: NameRef p 'TypeRef,
+  { qualifier :: NameRef p ModuleRef,
+    target :: NameRef p TypeRef,
     sourceSpan :: SourceSpan
   }
 
@@ -694,7 +707,7 @@ instance HasSourceSpan (TypeUnionNode p) where
   sourceSpanOf node = node.sourceSpan
 
 data SyntacticRequest (p :: Phase) = SyntacticRequest
-  { name :: NameRef p 'RequestRef,
+  { name :: NameRef p RequestRef,
     sourceSpan :: SourceSpan
   }
 
@@ -753,7 +766,7 @@ instance HasSourceSpan (LiteralExpression p) where
   sourceSpanOf expression = expression.sourceSpan
 
 data VariableExpression (p :: Phase) = VariableExpression
-  { name :: NameRef p 'VariableRef,
+  { name :: NameRef p VariableRef,
     sourceSpan :: SourceSpan,
     typeOf :: ExprType p
   }
@@ -775,7 +788,7 @@ data CallArgument (p :: Phase) = CallArgument
   { -- | Argument label. Resolution is type-directed (depends on the callee's
     -- parameter list), so the LabelRef symbol is filled in by the
     -- Typechecker; Identifier pass leaves it trivial.
-    label :: NameRef p 'LabelRef,
+    label :: NameRef p LabelRef,
     value :: Expression p,
     sourceSpan :: SourceSpan
   }
@@ -886,7 +899,7 @@ instance HasSourceSpan (ForInBinding p) where
   sourceSpanOf binding = binding.sourceSpan
 
 data ForVarBinding (p :: Phase) = ForVarBinding
-  { name :: NameRef p 'VariableRef,
+  { name :: NameRef p VariableRef,
     typeAnnotation :: Maybe (SyntacticType p),
     initial :: Expression p,
     sourceSpan :: SourceSpan
@@ -909,7 +922,7 @@ data FieldAccessExpression (p :: Phase) = FieldAccessExpression
     -- | Field name. Resolution is type-directed (depends on the object's type),
     -- so the LabelRef symbol is filled in by the Typechecker; Identifier
     -- pass leaves it trivial.
-    fieldName :: NameRef p 'LabelRef,
+    fieldName :: NameRef p LabelRef,
     sourceSpan :: SourceSpan,
     typeOf :: ExprType p
   }
@@ -945,8 +958,8 @@ instance HasSourceSpan (TemplateExpression p) where
 -- Parser は生成せず、Identifier フェーズで FieldAccess チェーンの最左が module
 -- に解決された場合のみ合成する。
 data QualifiedReferenceExpression (p :: Phase) = QualifiedReferenceExpression
-  { moduleQualifier :: NameRef p 'ModuleRef,
-    target :: NameRef p 'VariableRef,
+  { moduleQualifier :: NameRef p ModuleRef,
+    target :: NameRef p VariableRef,
     sourceSpan :: SourceSpan,
     typeOf :: ExprType p
   }
@@ -1019,10 +1032,10 @@ retagNameRef nameRef =
 -- the same 'NameMeta' resolution. Recurses structurally; literal nodes
 -- carry no phase-dependent payload.
 retagSyntacticType ::
-  ( NameMeta p1 'TypeRef ~ NameMeta p2 'TypeRef,
-    NameMeta p1 'ModuleRef ~ NameMeta p2 'ModuleRef,
-    NameMeta p1 'VariableRef ~ NameMeta p2 'VariableRef,
-    NameMeta p1 'RequestRef ~ NameMeta p2 'RequestRef
+  ( NameMeta p1 TypeRef ~ NameMeta p2 TypeRef,
+    NameMeta p1 ModuleRef ~ NameMeta p2 ModuleRef,
+    NameMeta p1 VariableRef ~ NameMeta p2 VariableRef,
+    NameMeta p1 RequestRef ~ NameMeta p2 RequestRef
   ) =>
   SyntacticType p1 ->
   SyntacticType p2
@@ -1079,7 +1092,7 @@ retagSyntacticType = \case
 
 -- | Change the phase tag of a 'SyntacticRequest'.
 retagSyntacticRequest ::
-  (NameMeta p1 'RequestRef ~ NameMeta p2 'RequestRef) =>
+  (NameMeta p1 RequestRef ~ NameMeta p2 RequestRef) =>
   SyntacticRequest p1 ->
   SyntacticRequest p2
 retagSyntacticRequest req =
@@ -1107,51 +1120,51 @@ retagImportDeclaration ImportDeclaration {kind, sourceSpan} =
 -- | Phase-level Eq aggregate. Bundled as a class (rather than a type
 -- synonym) so it can be reused as a single constraint name. GHC forbids
 -- type-family applications inside quantified constraints, so we
--- enumerate each 'SymbolKind' explicitly — this is closed-kind, so the
+-- enumerate each 'NameRefKind' explicitly — this is closed-kind, so the
 -- four cases cover every 'NameMeta p s' use.
 class
-  ( Eq (NameMeta p 'VariableRef),
-    Eq (NameMeta p 'TypeRef),
-    Eq (NameMeta p 'ModuleRef),
-    Eq (NameMeta p 'LabelRef),
-    Eq (NameMeta p 'RequestRef),
-    Eq (NameMeta p 'ConstructorRef),
+  ( Eq (NameMeta p VariableRef),
+    Eq (NameMeta p TypeRef),
+    Eq (NameMeta p ModuleRef),
+    Eq (NameMeta p LabelRef),
+    Eq (NameMeta p RequestRef),
+    Eq (NameMeta p ConstructorRef),
     Eq (ExprType p),
     Eq (PatType p)
   ) =>
   EqPhase p
 
 instance
-  ( Eq (NameMeta p 'VariableRef),
-    Eq (NameMeta p 'TypeRef),
-    Eq (NameMeta p 'ModuleRef),
-    Eq (NameMeta p 'LabelRef),
-    Eq (NameMeta p 'RequestRef),
-    Eq (NameMeta p 'ConstructorRef),
+  ( Eq (NameMeta p VariableRef),
+    Eq (NameMeta p TypeRef),
+    Eq (NameMeta p ModuleRef),
+    Eq (NameMeta p LabelRef),
+    Eq (NameMeta p RequestRef),
+    Eq (NameMeta p ConstructorRef),
     Eq (ExprType p),
     Eq (PatType p)
   ) =>
   EqPhase p
 
 class
-  ( Show (NameMeta p 'VariableRef),
-    Show (NameMeta p 'TypeRef),
-    Show (NameMeta p 'ModuleRef),
-    Show (NameMeta p 'LabelRef),
-    Show (NameMeta p 'RequestRef),
-    Show (NameMeta p 'ConstructorRef),
+  ( Show (NameMeta p VariableRef),
+    Show (NameMeta p TypeRef),
+    Show (NameMeta p ModuleRef),
+    Show (NameMeta p LabelRef),
+    Show (NameMeta p RequestRef),
+    Show (NameMeta p ConstructorRef),
     Show (ExprType p),
     Show (PatType p)
   ) =>
   ShowPhase p
 
 instance
-  ( Show (NameMeta p 'VariableRef),
-    Show (NameMeta p 'TypeRef),
-    Show (NameMeta p 'ModuleRef),
-    Show (NameMeta p 'LabelRef),
-    Show (NameMeta p 'RequestRef),
-    Show (NameMeta p 'ConstructorRef),
+  ( Show (NameMeta p VariableRef),
+    Show (NameMeta p TypeRef),
+    Show (NameMeta p ModuleRef),
+    Show (NameMeta p LabelRef),
+    Show (NameMeta p RequestRef),
+    Show (NameMeta p ConstructorRef),
     Show (ExprType p),
     Show (PatType p)
   ) =>

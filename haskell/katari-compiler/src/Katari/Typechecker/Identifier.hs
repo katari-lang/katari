@@ -585,7 +585,7 @@ insertSymbolEntry pos name incoming table = do
 --     @moduleSymbol@ for this name. Allowing that would silently change the
 --     meaning of @name.foo@ from a qualified module reference to a field
 --     access on a local variable.
-bindLocalVariable :: NameRef Parsed 'VariableRef -> Identifier (NameRef Identified 'VariableRef)
+bindLocalVariable :: NameRef Parsed VariableRef -> Identifier (NameRef Identified VariableRef)
 bindLocalVariable nameRef = do
   context <- gets (.resolveContext)
   let name = nameRef.text
@@ -699,7 +699,7 @@ identifiedNameRef ::
 identifiedNameRef resolution nameRef =
   NameRef {text = nameRef.text, sourceSpan = nameRef.sourceSpan, resolution = resolution}
 
-labelRef :: NameRef Parsed 'LabelRef -> NameRef Identified 'LabelRef
+labelRef :: NameRef Parsed LabelRef -> NameRef Identified LabelRef
 labelRef = identifiedNameRef ()
 
 -- ---------------------------------------------------------------------------
@@ -1004,12 +1004,12 @@ resolveImportDecl ImportDeclaration {kind, sourceSpan} =
 -- the id; this just looks it up. If lookup fails (only possible when Phase B
 -- emitted a duplicate-name error), record an unresolved marker rather than
 -- inventing a sentinel id.
-liftSignatureVariable :: NameRef Parsed 'VariableRef -> Identifier (NameRef Identified 'VariableRef)
+liftSignatureVariable :: NameRef Parsed VariableRef -> Identifier (NameRef Identified VariableRef)
 liftSignatureVariable = liftSignature lookupVariable
 
 -- | Counterpart of 'liftSignatureVariable' for type signatures (enum / data
 -- type role / type synonym name).
-liftSignatureType :: NameRef Parsed 'TypeRef -> Identifier (NameRef Identified 'TypeRef)
+liftSignatureType :: NameRef Parsed TypeRef -> Identifier (NameRef Identified TypeRef)
 liftSignatureType = liftSignature lookupType
 
 -- | Shared lookup-and-wrap helper for signature-position 'NameRef's.
@@ -1243,7 +1243,7 @@ resolveLiteralPattern LiteralPattern {..} =
 -- All sub-resolvers return an 'Identified' marker (resolved id or the
 -- corresponding @Unresolved@) so that the AST always carries a faithful trace
 -- of the resolution outcome instead of a fabricated id.
-resolveBareVariable :: NameRef Parsed 'VariableRef -> Identifier (NameMeta Identified 'VariableRef)
+resolveBareVariable :: NameRef Parsed VariableRef -> Identifier (NameMeta Identified VariableRef)
 resolveBareVariable nameRef =
   lookupVariable nameRef.text >>= \case
     Just variableId -> pure (Just variableId)
@@ -1251,7 +1251,7 @@ resolveBareVariable nameRef =
       emitError (ErrorUndefinedName nameRef.sourceSpan nameRef.text)
       pure Nothing
 
-resolveModuleRef :: NameRef Parsed 'ModuleRef -> Identifier (NameMeta Identified 'ModuleRef)
+resolveModuleRef :: NameRef Parsed ModuleRef -> Identifier (NameMeta Identified ModuleRef)
 resolveModuleRef nameRef =
   lookupModule nameRef.text >>= \case
     Just moduleId -> pure (Just moduleId)
@@ -1264,9 +1264,9 @@ resolveModuleRef nameRef =
 -- 'ErrorNotARequest' (or 'ErrorUndefinedName' if the name is unknown
 -- entirely) is recorded.
 resolveQualifiedRequestRef ::
-  Maybe (NameRef Parsed 'ModuleRef) ->
-  NameRef Parsed 'RequestRef ->
-  Identifier (Maybe (NameRef Identified 'ModuleRef), NameRef Identified 'RequestRef)
+  Maybe (NameRef Parsed ModuleRef) ->
+  NameRef Parsed RequestRef ->
+  Identifier (Maybe (NameRef Identified ModuleRef), NameRef Identified RequestRef)
 resolveQualifiedRequestRef = \cases
   Nothing nameRef -> do
     metadata <- resolveBareRequest nameRef
@@ -1281,7 +1281,7 @@ resolveQualifiedRequestRef = \cases
         identifiedNameRef metadata nameRef
       )
 
-resolveBareRequest :: NameRef Parsed 'RequestRef -> Identifier (NameMeta Identified 'RequestRef)
+resolveBareRequest :: NameRef Parsed RequestRef -> Identifier (NameMeta Identified RequestRef)
 resolveBareRequest nameRef =
   lookupRequest nameRef.text >>= \case
     Just rid -> pure (Just rid)
@@ -1296,8 +1296,8 @@ resolveBareRequest nameRef =
 resolveQualifiedRequest ::
   ModuleId ->
   Text ->
-  NameRef Parsed 'RequestRef ->
-  Identifier (NameMeta Identified 'RequestRef)
+  NameRef Parsed RequestRef ->
+  Identifier (NameMeta Identified RequestRef)
 resolveQualifiedRequest moduleId qualifierName nameRef =
   lookupModuleExportRequest moduleId nameRef.text >>= \case
     Just rid -> pure (Just rid)
@@ -1309,9 +1309,9 @@ resolveQualifiedRequest moduleId qualifierName nameRef =
 -- position). The bare name must occupy the constructor slot of an in-scope
 -- binding.
 resolveQualifiedConstructorRef ::
-  Maybe (NameRef Parsed 'ModuleRef) ->
-  NameRef Parsed 'ConstructorRef ->
-  Identifier (Maybe (NameRef Identified 'ModuleRef), NameRef Identified 'ConstructorRef)
+  Maybe (NameRef Parsed ModuleRef) ->
+  NameRef Parsed ConstructorRef ->
+  Identifier (Maybe (NameRef Identified ModuleRef), NameRef Identified ConstructorRef)
 resolveQualifiedConstructorRef = \cases
   Nothing nameRef -> do
     metadata <- resolveBareConstructor nameRef
@@ -1327,8 +1327,8 @@ resolveQualifiedConstructorRef = \cases
       )
 
 resolveBareConstructor ::
-  NameRef Parsed 'ConstructorRef ->
-  Identifier (NameMeta Identified 'ConstructorRef)
+  NameRef Parsed ConstructorRef ->
+  Identifier (NameMeta Identified ConstructorRef)
 resolveBareConstructor nameRef =
   lookupConstructor nameRef.text >>= \case
     Just cid -> pure (Just cid)
@@ -1341,8 +1341,8 @@ resolveBareConstructor nameRef =
 resolveQualifiedConstructor ::
   ModuleId ->
   Text ->
-  NameRef Parsed 'ConstructorRef ->
-  Identifier (NameMeta Identified 'ConstructorRef)
+  NameRef Parsed ConstructorRef ->
+  Identifier (NameMeta Identified ConstructorRef)
 resolveQualifiedConstructor moduleId qualifierName nameRef =
   lookupModuleExportConstructor moduleId nameRef.text >>= \case
     Just cid -> pure (Just cid)
@@ -1877,7 +1877,7 @@ resolveTemplateElement = \case
 
 -- | Classification of the deepest segment of a peeled chain.
 data ChainHead
-  = VariableHead (NameRef Parsed 'VariableRef)
+  = VariableHead (NameRef Parsed VariableRef)
   | OtherHead (Expression Parsed)
 
 -- | Peel a left-associative field-access chain into its deepest expression
@@ -1886,7 +1886,7 @@ data ChainHead
 -- 'VariableExpression', otherwise 'OtherHead'.
 peelFieldChain ::
   Expression Parsed ->
-  (ChainHead, [NameRef Parsed 'LabelRef], SourceSpan)
+  (ChainHead, [NameRef Parsed LabelRef], SourceSpan)
 peelFieldChain entryExpression =
   let (chainHead, labels, totalSpan) = go entryExpression []
    in (chainHead, labels, totalSpan)
@@ -1902,7 +1902,7 @@ peelFieldChain entryExpression =
 -- inner expression.
 rebuildFieldAccessChain ::
   Expression Identified ->
-  [NameRef Parsed 'LabelRef] ->
+  [NameRef Parsed LabelRef] ->
   Expression Identified
 rebuildFieldAccessChain = foldl' step
   where
@@ -1927,8 +1927,8 @@ rebuildFieldAccessChain = foldl' step
 -- the first label is interpreted as a qualified reference and any remaining
 -- labels are kept as field accesses on top.
 resolveFieldChainHead ::
-  NameRef Parsed 'VariableRef ->
-  [NameRef Parsed 'LabelRef] ->
+  NameRef Parsed VariableRef ->
+  [NameRef Parsed LabelRef] ->
   SourceSpan ->
   Identifier (Expression Identified)
 resolveFieldChainHead headRef labels totalSpan = do
@@ -1959,8 +1959,8 @@ resolveFieldChainHead headRef labels totalSpan = do
 -- 'QualifiedReferenceExpression'; any remaining labels become field accesses.
 resolveModuleQualifiedChain ::
   ModuleId ->
-  NameRef Parsed 'VariableRef ->
-  [NameRef Parsed 'LabelRef] ->
+  NameRef Parsed VariableRef ->
+  [NameRef Parsed LabelRef] ->
   SourceSpan ->
   Identifier (Expression Identified)
 resolveModuleQualifiedChain moduleId moduleRef labels totalSpan =

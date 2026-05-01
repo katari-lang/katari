@@ -95,7 +95,7 @@ synonymRhsOf td = td.typeSynonymRhs
 
 -- | Pull the @typeName.resolution@ tag out of every @data@ declaration in a
 -- resolved module. Used by tests that assert AST-side TypeId carriage.
-collectDataTypeNameMetadata :: Module Identified -> [NameMeta Identified 'TypeRef]
+collectDataTypeNameMetadata :: Module Identified -> [NameMeta Identified TypeRef]
 collectDataTypeNameMetadata m =
   [ ref.resolution
     | DeclarationData DataDeclaration {typeName = ref} <- m.declarations

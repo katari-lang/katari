@@ -476,9 +476,9 @@ literalValueToSemantic = \case
   LiteralValueString s -> SemanticTypeLiteralString s
   LiteralValueBoolean b -> SemanticTypeLiteralBoolean b
 
--- | Resolve a 'TypeRef' name to its semantic counterpart, expanding
+-- | Resolve a TypeRef' name to its semantic counterpart, expanding
 -- synonyms on the fly with cycle detection.
-resolveTypeRef :: NameRef Identified 'TypeRef -> CG (SemanticType Unresolved)
+resolveTypeRef :: NameRef Identified TypeRef -> CG (SemanticType Unresolved)
 resolveTypeRef nameRef = case nameRef.resolution of
   Just tid -> do
     types <- asks (.contextIdentifiedTypes)
@@ -579,7 +579,7 @@ walkAgentDecl AgentDeclaration {annotation, name, parameters, returnType, withEf
 -- constraints. Returns the rebuilt parameter list and body block.
 processAgentLike ::
   SourceSpan ->
-  NameRef Identified 'VariableRef ->
+  NameRef Identified VariableRef ->
   [ParameterBinding Identified] ->
   Maybe (SyntacticType Identified) ->
   Maybe [SyntacticRequest Identified] ->
@@ -941,7 +941,7 @@ walkBlockWithWhere statements returnExpression wb blockSpan = do
   handlers' <- mapM (walkRequestHandler e4Id tWholeBlockId) handlers
 
   -- (6) Effect constraints: e3 ⊆ e1 ∪ {handled requests}, e4 ⊆ e1.
-  -- Each handler's @name@ is a 'RequestRef' resolved to a 'RequestId'.
+  -- Each handler's @name@ is a RequestRef' resolved to a 'RequestId'.
   let handledRequestIds =
         Set.fromList
           [ rid
@@ -1027,7 +1027,7 @@ walkStateVariable StateVariableBinding {name, typeAnnotation, initial, sourceSpa
 -- 'walkForVarBinding' — they pick a context-specific 'ConstraintReason'.
 emitInitializerConstraints ::
   ConstraintReason ->
-  NameRef Identified 'VariableRef ->
+  NameRef Identified VariableRef ->
   Maybe (SyntacticType Identified) ->
   Expression Identified ->
   CG (Expression Constrained)
@@ -1581,10 +1581,10 @@ walkQualifiedReferenceExpr QualifiedReferenceExpression {moduleQualifier, target
 -- | Look up a variable's type via the @Identified@ name reference.
 -- Unresolved references get a fresh type variable (Identifier already
 -- reported the original error).
-variableTypeFromName :: NameRef Identified 'VariableRef -> CG (SemanticType Unresolved)
+variableTypeFromName :: NameRef Identified VariableRef -> CG (SemanticType Unresolved)
 variableTypeFromName nameRef = maybe freshTypeVar lookupVariable nameRef.resolution
 
-variableIdOfName :: NameRef Identified 'VariableRef -> Maybe VariableId
+variableIdOfName :: NameRef Identified VariableRef -> Maybe VariableId
 variableIdOfName nameRef = nameRef.resolution
 
 -- | Type of a 'req' declaration's call-side, looked up via the request id.
@@ -1592,7 +1592,7 @@ variableIdOfName nameRef = nameRef.resolution
 -- ('requestVariableId'); we read the type out of 'stateTypeEnvironment'
 -- through that. Unresolved request references fall back to a fresh type
 -- variable (Identifier already reported the failure).
-requestTypeFromName :: NameRef Identified 'RequestRef -> CG (SemanticType Unresolved)
+requestTypeFromName :: NameRef Identified RequestRef -> CG (SemanticType Unresolved)
 requestTypeFromName nameRef = case nameRef.resolution of
   Nothing -> freshTypeVar
   Just rid -> do
@@ -1604,7 +1604,7 @@ requestTypeFromName nameRef = case nameRef.resolution of
 -- | Type of a 'data' declaration's constructor-function side, looked up
 -- via the constructor id. Same plumbing as 'requestTypeFromName'.
 constructorTypeFromName ::
-  NameRef Identified 'ConstructorRef ->
+  NameRef Identified ConstructorRef ->
   CG (SemanticType Unresolved)
 constructorTypeFromName nameRef = case nameRef.resolution of
   Nothing -> freshTypeVar

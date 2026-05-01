@@ -76,18 +76,18 @@ type data Phase = Parsed | Identified | Constrained | Zonked
 ```
 
 - `NameRef p s` の `resolution :: NameMeta p s` フィールドに phase 別の名前解決情報。
-  `s :: SymbolKind` で「変数 / 型 / モジュール / ラベル / req / data ctor」を分離:
-  - `'VariableRef` → `Maybe VariableId` (agent / req / ext / ctor の callable 側 / 局所変数)
-  - `'TypeRef` → `Maybe TypeId`
-  - `'ModuleRef` → `Maybe ModuleId`
-  - `'LabelRef` → `()` (型指向で typechecker が解決)
-  - `'RequestRef` → `Maybe RequestId` (req handler の target、`req foo` 宣言のみ占有)
-  - `'ConstructorRef` → `Maybe ConstructorId` (match constructor pattern の target、`data Foo` のみ占有)
+  `s :: NameRefKind` で「変数 / 型 / モジュール / ラベル / req / data ctor」を分離:
+  - `VariableRef` → `Maybe VariableId` (agent / req / ext / ctor の callable 側 / 局所変数)
+  - `TypeRef` → `Maybe TypeId`
+  - `ModuleRef` → `Maybe ModuleId`
+  - `LabelRef` → `()` (型指向で typechecker が解決)
+  - `RequestRef` → `Maybe RequestId` (req handler の target、`req foo` 宣言のみ占有)
+  - `ConstructorRef` → `Maybe ConstructorId` (match constructor pattern の target、`data Foo` のみ占有)
 - `Expression p` / `Pattern p` の `typeOf :: ExprType p` / `PatType p` に推論型
   (`Constrained` で `SemanticType Unresolved`、`Zonked` で `SemanticType Resolved`)。
 - phase 推移は payload を素通しする identity 変換になり、`passThroughX` 系の boilerplate は不要。
 
-`'RequestRef` / `'ConstructorRef` を slot 分離した結果、「handler target が req でない」「match
+`RequestRef` / `ConstructorRef` を slot 分離した結果、「handler target が req でない」「match
 pattern が data ctor でない」は Identifier 段階で型レベルに reject される
 (`ErrorNotARequest` K0108 / `ErrorNotAConstructor` K0109)。Lowering まで届くことはない。
 
@@ -113,6 +113,7 @@ ReqId / CtorId → QualifiedName 変換は runtime が `entries` + `blocks` を 
 ### Block
 
 `Block` は 5 variant の sum:
+
 - `BlockUser { body :: UserBlock }` — 通常のユーザ定義
 - `BlockPrim { name :: Text }` — prim (system 提供、module 帰属なし)
 - `BlockRequest { reqId :: ReqId }` — req 宣言 (qualified name は `entries` 経由)
@@ -120,6 +121,7 @@ ReqId / CtorId → QualifiedName 変換は runtime が `entries` + `blocks` を 
 - `BlockCtor { ctorId :: CtorId }` — data constructor
 
 `UserBlock.kind :: BlockKind` (5 valid roles, invalid 組合せは型レベルで排除):
+
 - `BlockAgentEntry` — agent 本体 (catchesReturn)
 - `BlockAgentEntryWithHandlers` — `where { handlers }` 付き agent
 - `BlockHandleScope` — `where (var s = init) ...` の内側 scope (catchesBreak + inheritScope)
@@ -185,11 +187,11 @@ snapshot と by-reference scope inheritance は観測等価。
 
 `BreakContext` (`TopContext` | `BreakForContext` | `BreakHandleContext`) を `ReaderT` でパーサーに引き回す。
 
-| コンテキスト                              | 許可される文                           |
-| ----------------------------------------- | -------------------------------------- |
-| `TopContext` (agent 本体)                 | `break` / `next` 両方禁止 (構文エラー) |
-| `BreakForContext` (for 本体)              | `ForNext` (引数なし) / `ForBreak`      |
-| `BreakHandleContext` (req handler 本体)   | `Next` (引数あり) / `Break`            |
+| コンテキスト                            | 許可される文                           |
+| --------------------------------------- | -------------------------------------- |
+| `TopContext` (agent 本体)               | `break` / `next` 両方禁止 (構文エラー) |
+| `BreakForContext` (for 本体)            | `ForNext` (引数なし) / `ForBreak`      |
+| `BreakHandleContext` (req handler 本体) | `Next` (引数あり) / `Break`            |
 
 - `for` ブロック内の `break` → `StatementForBreak` → `SExit ExitForBreak` (for ループ脱出)
 - `where { handlers }` 内の `break` → `StatementBreak` → `SExit ExitBreak` (handle スコープ脱出)
@@ -247,16 +249,16 @@ runtime が closure 値の lexical scope を構成する。
 
 `katari-compiler` の公開モジュール (semver 管理対象):
 
-| モジュール                    | 役割                                                          |
-| ----------------------------- | ------------------------------------------------------------- |
-| `Katari.Compile`              | 統一エントリ (`compile :: CompileInput -> CompileResult`)     |
-| `Katari.Diagnostic`           | 統一 Diagnostic 型 + helpers (`filterAtLeast` / `sortBySpan` / `groupByFilePath`) |
-| `Katari.Diagnostic.Render`    | CLI 向けレンダリング (`renderDiagnostic` / `renderDiagnosticPlain`) |
-| `Katari.IR`                   | IR データ型 + JSON シリアライゼーション                       |
-| `Katari.Schema`               | JSON Schema bundle (AI tool calling 用)                       |
-| `Katari.Query`                | LSP / CLI 向け query layer (position lookup / occurrence index) |
-| `Katari.AST`                  | AST 型 + phase-indexed metadata                               |
-| `Katari.AST.Identifiers`      | ID 型 (`VariableId`, `TypeId`, ...) + `QualifiedName`        |
+| モジュール                 | 役割                                                                              |
+| -------------------------- | --------------------------------------------------------------------------------- |
+| `Katari.Compile`           | 統一エントリ (`compile :: CompileInput -> CompileResult`)                         |
+| `Katari.Diagnostic`        | 統一 Diagnostic 型 + helpers (`filterAtLeast` / `sortBySpan` / `groupByFilePath`) |
+| `Katari.Diagnostic.Render` | CLI 向けレンダリング (`renderDiagnostic` / `renderDiagnosticPlain`)               |
+| `Katari.IR`                | IR データ型 + JSON シリアライゼーション                                           |
+| `Katari.Schema`            | JSON Schema bundle (AI tool calling 用)                                           |
+| `Katari.Query`             | LSP / CLI 向け query layer (position lookup / occurrence index)                   |
+| `Katari.AST`               | AST 型 + phase-indexed metadata                                                   |
+| `Katari.AST.Identifiers`   | ID 型 (`VariableId`, `TypeId`, ...) + `QualifiedName`                             |
 
 ### CompileResult
 

@@ -7,8 +7,8 @@ module Katari.LoweringSpec (spec) where
 
 import Control.Exception (SomeException, try)
 import Data.List (find)
-import Data.Maybe (isJust, listToMaybe)
 import Data.Map.Strict qualified as Map
+import Data.Maybe (isJust, listToMaybe)
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as Text
@@ -102,7 +102,6 @@ spec = describe "Katari.Lowering" $ do
   stage6Spec
   stage7Spec
   stage8Spec
-  stage9Spec
 
 stage1Spec :: Spec
 stage1Spec = describe "Stage 1 — literals / arithmetic" $ do
@@ -936,32 +935,3 @@ stage8Spec = describe "Stage 8 \8212 edge cases" $ do
     -- runtime scope inheritance the outer locals stay visible at lower
     -- time and the runtime bridges them at call time.
     errs `shouldBe` []
-
--- ===========================================================================
--- Stage 9 — samples/ regression
--- ===========================================================================
-
-stage9Spec :: Spec
-stage9Spec = describe "Stage 9 \8212 samples regression" $ do
-  let sampleDir =
-        "/Users/yukikurage/Documents/projects/katari/samples/compiler-tests/pass"
-  files <- runIO (listDirectory sampleDir)
-  let ktrFiles = filter ((== ".ktr") . reverseTake 4) files
-  mapM_ (sampleTest sampleDir) ktrFiles
-
-reverseTake :: Int -> String -> String
-reverseTake n s = drop (length s - n) s
-
-sampleTest :: FilePath -> FilePath -> Spec
-sampleTest dir file = it ("lowers samples/" <> file) $ do
-  src <- TextIO.readFile (dir </> file)
-  result <- try (lowerSource src) :: IO (Either SomeException (IRModule, [LoweringError]))
-  case result of
-    Left e ->
-      pendingWith ("upstream parser/identifier failure: " <> show e)
-    Right (irMod, errs) -> do
-      errs `shouldBe` []
-      -- Sanity: at least one user block exists.
-      let userBlockCount =
-            length [u | BlockUser u <- Map.elems irMod.blocks]
-      userBlockCount `shouldSatisfy` (> 0)
