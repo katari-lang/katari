@@ -547,41 +547,27 @@ registerDeclarationKinds zonkResult =
       AST.DeclarationTypeSynonym _ -> pure ()
       AST.DeclarationError sourceSpan -> recordError (LoweringErrorParseSentinel sourceSpan)
 
-    -- | The IR 'ReqId' assigned to a @req@ declaration's call-side
-    -- 'VariableId'. The Identifier-pass 'RequestId' is found by scanning
-    -- 'zonkedRequests' for a matching 'requestVariableId'; 'lsReqIds'
-    -- then translates to the IR ReqId. Falls back to 'freshReqId' on
-    -- a miss (which would indicate upstream inconsistency).
+    -- | O(1) lookup of the IR 'ReqId' for a @req@ declaration's call-side
+    -- 'VariableId', using the pre-built inverse map in 'ZonkResult'.
     requestIdForVariable :: VariableId -> Lower ReqId
-    requestIdForVariable variableId = do
-      let identReqId =
-            firstWhere
-              (\(_, requestData) -> requestData.requestVariableId == variableId)
-              (Map.toList zonkResult.zonkedRequests)
-      case identReqId of
-        Just (requestId, _) -> do
+    requestIdForVariable variableId =
+      case Map.lookup variableId zonkResult.zonkedRequestByVariable of
+        Just requestId -> do
           mapped <- gets (Map.lookup requestId . (.lsReqIds))
           case mapped of
             Just irReqId -> pure irReqId
-            Nothing -> freshReqId
-        Nothing -> freshReqId
+            Nothing -> internalErrorNoSpan "requestIdForVariable: ReqId not pre-allocated"
+        Nothing -> internalErrorNoSpan "requestIdForVariable: VariableId not in zonkedRequestByVariable"
 
     constructorIdForVariable :: VariableId -> Lower CtorId
-    constructorIdForVariable variableId = do
-      let identCtorId =
-            firstWhere
-              (\(_, constructorData) -> constructorData.constructorVariableId == variableId)
-              (Map.toList zonkResult.zonkedConstructors)
-      case identCtorId of
-        Just (constructorId, _) -> do
+    constructorIdForVariable variableId =
+      case Map.lookup variableId zonkResult.zonkedConstructorByVariable of
+        Just constructorId -> do
           mapped <- gets (Map.lookup constructorId . (.lsCtorIds))
           case mapped of
             Just irCtorId -> pure irCtorId
-            Nothing -> freshCtorId
-        Nothing -> freshCtorId
-
-    firstWhere :: (a -> Bool) -> [a] -> Maybe a
-    firstWhere predicate = foldr (\x acc -> if predicate x then Just x else acc) Nothing
+            Nothing -> internalErrorNoSpan "constructorIdForVariable: CtorId not pre-allocated"
+        Nothing -> internalErrorNoSpan "constructorIdForVariable: VariableId not in zonkedConstructorByVariable"
 
     recordEntry :: Text -> Text -> BlockId -> Lower ()
     recordEntry moduleName_ declName blockId =

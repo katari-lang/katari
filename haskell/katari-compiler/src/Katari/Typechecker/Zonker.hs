@@ -98,6 +98,11 @@ data ZonkResult = ZonkResult
     zonkedTypes :: !(Map TypeId TypeData),
     zonkedRequests :: !(Map RequestId RequestData),
     zonkedConstructors :: !(Map ConstructorId ConstructorData),
+    -- | Inverse maps built at ZonkResult construction time. Allow O(1)
+    -- lookup of RequestId / ConstructorId by the call-side VariableId
+    -- without O(n) scans through 'zonkedRequests' / 'zonkedConstructors'.
+    zonkedRequestByVariable :: !(Map VariableId RequestId),
+    zonkedConstructorByVariable :: !(Map VariableId ConstructorId),
     -- | Solver 契約逸脱 (lookup miss) 検知用。通常 path では空のはず。
     zonkErrors :: ![ZonkError]
   }
@@ -725,6 +730,16 @@ zonk idResult cgResult solverResult =
           zonkedTypes = idResult.identifiedTypes,
           zonkedRequests = idResult.identifiedRequests,
           zonkedConstructors = idResult.identifiedConstructors,
+          zonkedRequestByVariable =
+            Map.fromList
+              [ (requestData.requestVariableId, requestId)
+                | (requestId, requestData) <- Map.toList idResult.identifiedRequests
+              ],
+          zonkedConstructorByVariable =
+            Map.fromList
+              [ (constructorData.constructorVariableId, constructorId)
+                | (constructorId, constructorData) <- Map.toList idResult.identifiedConstructors
+              ],
           zonkErrors = reverse errs
         }
   where

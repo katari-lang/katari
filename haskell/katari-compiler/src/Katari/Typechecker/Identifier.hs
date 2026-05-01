@@ -34,6 +34,7 @@ module Katari.Typechecker.Identifier
     RequestData (..),
     ConstructorData (..),
     IdentifierResult (..),
+    mkIdentifierResult,
     IdentifierError (..),
 
     -- * Diagnostics
@@ -206,6 +207,7 @@ data ConstructorData = ConstructorData
 -- The reverse maps (@*ByQName@) let downstream phases look up an id by its
 -- qualified name without scanning the full forward map. They cover top-level
 -- bindings only — local variables are not addressable by qualified name.
+-- Use 'mkIdentifierResult' rather than constructing directly.
 data IdentifierResult = IdentifierResult
   { identifiedModules :: Map ModuleId ModuleData,
     identifiedVariables :: Map VariableId VariableData,
@@ -220,6 +222,38 @@ data IdentifierResult = IdentifierResult
     constructorsByQName :: Map QualifiedName ConstructorId
   }
   deriving (Show)
+
+-- | Smart constructor for 'IdentifierResult'. Builds all reverse maps
+-- automatically from the forward maps, ensuring consistency.
+mkIdentifierResult ::
+  Map ModuleId ModuleData ->
+  Map VariableId VariableData ->
+  Map TypeId TypeData ->
+  Map RequestId RequestData ->
+  Map ConstructorId ConstructorData ->
+  Map ModuleId (Module Identified) ->
+  IdentifierResult
+mkIdentifierResult modules variables types requests constructors asts =
+  IdentifierResult
+    { identifiedModules = modules,
+      identifiedVariables = variables,
+      identifiedTypes = types,
+      identifiedRequests = requests,
+      identifiedConstructors = constructors,
+      moduleASTs = asts,
+      topLevelVariablesByQName =
+        Map.fromList
+          [ (qn, vid)
+            | (vid, vd) <- Map.toList variables,
+              Just qn <- [vd.variableQualifiedName]
+          ],
+      typesByQName =
+        Map.fromList [(td.typeQualifiedName, tid) | (tid, td) <- Map.toList types],
+      requestsByQName =
+        Map.fromList [(rd.requestQualifiedName, rid) | (rid, rd) <- Map.toList requests],
+      constructorsByQName =
+        Map.fromList [(cd.constructorQualifiedName, cid) | (cid, cd) <- Map.toList constructors]
+    }
 
 -- ---------------------------------------------------------------------------
 -- Errors
@@ -361,14 +395,6 @@ data IdentifierState = IdentifierState
     modules :: Map ModuleId ModuleData,
     requests :: Map RequestId RequestData,
     constructors :: Map ConstructorId ConstructorData,
-    -- Reverse maps for top-level qualified-name lookup. Populated as
-    -- Phase B walks declarations; surface in 'IdentifierResult'.
-    -- Field names use the @*QNames@ suffix to avoid clashing with the
-    -- public @*ByQName@ names on 'IdentifierResult'.
-    variableQNames :: Map QualifiedName VariableId,
-    typeQNames :: Map QualifiedName TypeId,
-    requestQNames :: Map QualifiedName RequestId,
-    constructorQNames :: Map QualifiedName ConstructorId,
     errors :: [IdentifierError],
     resolveContext :: ResolveContext
   }
@@ -410,10 +436,6 @@ runIdentifier action = runState action initialState
           modules = Map.empty,
           requests = Map.empty,
           constructors = Map.empty,
-          variableQNames = Map.empty,
-          typeQNames = Map.empty,
-          requestQNames = Map.empty,
-          constructorQNames = Map.empty,
           errors = [],
           resolveContext = emptyResolveContext
         }
@@ -460,25 +482,6 @@ freshConstructorId constructorData = do
         constructors = Map.insert constructorId constructorData state.constructors
       }
   pure constructorId
-
--- | Record a top-level @qualifiedName -> id@ mapping in the appropriate
--- reverse map. Idempotent on duplicates (last write wins; duplicates are
--- caught earlier by 'mergeSymbol').
-recordVariableQName :: QualifiedName -> VariableId -> Identifier ()
-recordVariableQName qn variableId =
-  modify $ \state -> state {variableQNames = Map.insert qn variableId state.variableQNames}
-
-recordTypeQName :: QualifiedName -> TypeId -> Identifier ()
-recordTypeQName qn typeId =
-  modify $ \state -> state {typeQNames = Map.insert qn typeId state.typeQNames}
-
-recordRequestQName :: QualifiedName -> RequestId -> Identifier ()
-recordRequestQName qn requestId =
-  modify $ \state -> state {requestQNames = Map.insert qn requestId state.requestQNames}
-
-recordConstructorQName :: QualifiedName -> ConstructorId -> Identifier ()
-recordConstructorQName qn constructorId =
-  modify $ \state -> state {constructorQNames = Map.insert qn constructorId state.constructorQNames}
 
 emitError :: IdentifierError -> Identifier ()
 emitError newError = modify $ \state -> state {errors = newError : state.errors}
@@ -761,7 +764,6 @@ buildExports moduleMap =
               variableQualifiedName = Just qn,
               variableSourceSpan = name.sourceSpan
             }
-      recordVariableQName qn variableId
       insertSymbolEntry name.sourceSpan name.text (singletonVariable variableId) table
 
     -- @req foo@ issues both a 'VariableId' (callable side: @foo(...)@) and a
@@ -782,8 +784,6 @@ buildExports moduleMap =
               requestSourceSpan = name.sourceSpan,
               requestVariableId = variableId
             }
-      recordVariableQName qn variableId
-      recordRequestQName qn requestId
       let entry =
             emptySymbolEntry
               { variableSymbol = Just variableId,
@@ -800,7 +800,6 @@ buildExports moduleMap =
               typeSourceSpan = name.sourceSpan,
               typeSynonymRhs = Nothing
             }
-      recordTypeQName qn typeId
       insertSymbolEntry name.sourceSpan name.text (singletonType typeId) table
 
     -- @data Foo(...)@ issues 'VariableId' (constructor function), 'TypeId'
@@ -830,9 +829,6 @@ buildExports moduleMap =
               constructorTypeId = typeId,
               constructorVariableId = variableId
             }
-      recordVariableQName qn variableId
-      recordTypeQName qn typeId
-      recordConstructorQName qn constructorId
       let entry =
             emptySymbolEntry
               { variableSymbol = Just variableId,
@@ -2040,16 +2036,11 @@ identify moduleMap =
           topLevels <- buildTopLevels moduleNameToId exports moduleMap
           resolveModule topLevels moduleNameToId exports moduleMap
       result =
-        IdentifierResult
-          { identifiedModules = finalState.modules,
-            identifiedVariables = finalState.variables,
-            identifiedTypes = finalState.types,
-            identifiedRequests = finalState.requests,
-            identifiedConstructors = finalState.constructors,
-            moduleASTs = asts,
-            topLevelVariablesByQName = finalState.variableQNames,
-            typesByQName = finalState.typeQNames,
-            requestsByQName = finalState.requestQNames,
-            constructorsByQName = finalState.constructorQNames
-          }
+        mkIdentifierResult
+          finalState.modules
+          finalState.variables
+          finalState.types
+          finalState.requests
+          finalState.constructors
+          asts
    in (result, reverse finalState.errors)
