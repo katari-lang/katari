@@ -140,9 +140,9 @@ unaryOpPrim = \case
 -- ===========================================================================
 
 newtype LowerEnv = LowerEnv
-  { -- | 局所束縛: @let@ / 関数 param / pattern によって導入された
-    -- @VariableId → IRの VarId@。トップレベルの callable 解決は別途
-    -- 'lsVarBlockIds' を見る。
+  { -- | 局所束縛: @let@ / 関数 param / pattern / local agent によって
+    -- 導入された @VariableId → IRの VarId@。トップレベルの callable
+    -- 解決は別途 'lsTopLevelBlocks' を見る。
     localVars :: Map VariableId VarId
   }
 
@@ -159,7 +159,7 @@ data LowerState = LowerState
     lsBlockNames :: !(Map BlockId Text),
     -- | Top-level @VariableId@ → its callable @BlockId@. Used at call /
     -- closure sites to resolve agent / req / ext-agent / data-ctor names.
-    lsVarBlockIds :: !(Map VariableId BlockId),
+    lsTopLevelBlocks :: !(Map VariableId BlockId),
     -- | Identifier-pass 'RequestId' → IR-internal 'ReqId'. Allocated at
     -- the start of lowering (one IR ReqId per Identifier RequestId, 1:1
     -- currently). Used by 'lowerHandler' / 'patternToArm' to translate
@@ -190,7 +190,7 @@ initialLowerState =
       lsBlocks = Map.empty,
       lsVarNames = Map.empty,
       lsBlockNames = Map.empty,
-      lsVarBlockIds = Map.empty,
+      lsTopLevelBlocks = Map.empty,
       lsReqIds = Map.empty,
       lsCtorIds = Map.empty,
       lsEntries = Map.empty,
@@ -287,6 +287,77 @@ withLocals binds = local $ \env ->
 -- | Look up a local variable id in the current scope.
 lookupLocal :: VariableId -> Lower (Maybe VarId)
 lookupLocal variableId = asks (Map.lookup variableId . (.localVars))
+
+-- ===========================================================================
+-- Variable resolution
+-- ===========================================================================
+
+-- | Outcome of resolving a variable reference. An error has already been
+-- recorded via 'recordError' before 'ResolvedVarUnresolved' is returned.
+data ResolvedVar where
+  ResolvedVarLocal :: !VarId -> ResolvedVar
+  ResolvedVarTopLevel :: !BlockId -> ResolvedVar
+  ResolvedVarUnresolved :: ResolvedVar
+
+-- | Resolve a 'NameMeta' to a 'ResolvedVar'. Consults the local Reader
+-- scope first (if @canBeLocal@), then the top-level block id map.
+resolveVariable ::
+  Bool ->
+  AST.NameMeta Zonked 'AST.VariableRef ->
+  AST.SourceSpan ->
+  Text ->
+  Lower ResolvedVar
+resolveVariable canBeLocal resolution sourceSpan nameText = case resolution of
+  Nothing -> do
+    recordError (LoweringErrorUnresolvedVariable sourceSpan nameText)
+    pure ResolvedVarUnresolved
+  Just variableId -> do
+    mLocal <- if canBeLocal then lookupLocal variableId else pure Nothing
+    case mLocal of
+      Just irVar -> pure (ResolvedVarLocal irVar)
+      Nothing -> do
+        maybeBlockId <- gets (Map.lookup variableId . (.lsTopLevelBlocks))
+        case maybeBlockId of
+          Just blockId -> pure (ResolvedVarTopLevel blockId)
+          Nothing -> do
+            recordError (LoweringErrorUnresolvedVariable sourceSpan nameText)
+            pure ResolvedVarUnresolved
+
+-- | Resolve a variable reference in 'value' context: locals pass through,
+-- top-level callables emit an implicit 'StatementMakeClosure'.
+resolveAsValue ::
+  Bool ->
+  AST.NameMeta Zonked 'AST.VariableRef ->
+  AST.SourceSpan ->
+  Text ->
+  Maybe Text ->
+  Lower VarId
+resolveAsValue canBeLocal resolution sourceSpan nameText hint = do
+  resolved <- resolveVariable canBeLocal resolution sourceSpan nameText
+  case resolved of
+    ResolvedVarLocal irVar -> pure irVar
+    ResolvedVarTopLevel blockId -> do
+      v <- freshVarId hint
+      emit (StatementMakeClosure MakeClosureData {output = v, block = blockId, captures = []})
+      pure v
+    ResolvedVarUnresolved -> freshVarId Nothing
+
+-- | Resolve a variable reference in 'call-target' context: locals yield
+-- 'CallTargetValue', top-level callables yield 'CallTargetBlock'.
+resolveAsCallTarget ::
+  Bool ->
+  AST.NameMeta Zonked 'AST.VariableRef ->
+  AST.SourceSpan ->
+  Text ->
+  Lower CallTarget
+resolveAsCallTarget canBeLocal resolution sourceSpan nameText = do
+  resolved <- resolveVariable canBeLocal resolution sourceSpan nameText
+  case resolved of
+    ResolvedVarLocal irVar -> pure (CallTargetValue {var = irVar})
+    ResolvedVarTopLevel blockId -> pure (CallTargetBlock {block = blockId})
+    ResolvedVarUnresolved -> do
+      v <- freshVarId Nothing
+      pure (CallTargetValue {var = v})
 
 -- | Resolve a primitive name to its 'BlockId'. The map is populated by
 -- 'registerPrimitives' once at the start of lowering, so a missing entry
@@ -397,7 +468,7 @@ registerPrimitives = mapM_ go primitiveNames
 -- | Bind a top-level @VariableId@ to its callable @BlockId@.
 recordVarBlockId :: VariableId -> BlockId -> Lower ()
 recordVarBlockId variableId blockId =
-  modify (\s -> s {lsVarBlockIds = Map.insert variableId blockId s.lsVarBlockIds})
+  modify (\s -> s {lsTopLevelBlocks = Map.insert variableId blockId s.lsTopLevelBlocks})
 
 -- Closure capture for local agents is handled by the runtime: a local
 -- agent's body block runs with the parent scope visible (the runtime
@@ -528,7 +599,7 @@ lowerAllDeclarations zonkResult = do
     lowerDeclaration = \case
       AST.DeclarationAgent decl -> case decl.name.resolution of
         Just variableId -> do
-          maybeBlockId <- gets (Map.lookup variableId . (.lsVarBlockIds))
+          maybeBlockId <- gets (Map.lookup variableId . (.lsTopLevelBlocks))
           case maybeBlockId of
             Just blockId -> do
               lowerAgentDeclaration decl blockId
@@ -884,6 +955,17 @@ lowerBlockInto blk = go blk.statements
       v <- lowerExpr ls.value
       locals <- bindPatternLocals v ls.pattern
       withLocals locals (go rest)
+    go (AST.StatementAgent stmt : rest) = case stmt.name.resolution of
+      Nothing -> do
+        recordError (LoweringErrorUnresolvedVariable stmt.sourceSpan stmt.name.text)
+        go rest
+      Just variableId -> do
+        blockId <- freshBlockId
+        var <- freshVarId (Just stmt.name.text)
+        withLocals [(variableId, var)] $ do
+          lowerAgentLike stmt.name.text stmt.parameters stmt.body blockId
+          emit (StatementMakeClosure MakeClosureData {output = var, block = blockId, captures = []})
+          go rest
     go (stmt : rest) = do
       exited <- lowerStmt stmt
       if exited then pure Nothing else go rest
@@ -892,24 +974,18 @@ lowerBlockInto blk = go blk.statements
 -- Statements
 -- ===========================================================================
 
--- | Lower one non-let 'AST.Statement'. Statements are emitted into the
--- current buffer. Returns 'True' if this statement causes a non-local
--- exit (return/break/etc.) so the caller can stop emitting further code.
+-- | Lower one non-let, non-agent 'AST.Statement'. Statements are emitted
+-- into the current buffer. Returns 'True' if this statement causes a
+-- non-local exit (return/break/etc.) so the caller can stop emitting
+-- further code.
 --
--- 'StatementLet' is handled specially by 'lowerBlockBody.go' (which
--- peels it off so the introduced bindings can extend the Reader scope
--- for subsequent statements) and therefore does not appear in this
--- dispatch.
+-- 'StatementLet' and 'StatementAgent' are peeled off before reaching
+-- this dispatch by 'lowerBlockInto.go', so both arms here are
+-- 'internalError' guards.
 lowerStmt :: AST.Statement Zonked -> Lower Bool
 lowerStmt = \case
-  AST.StatementLet ls -> do
-    -- Defensive fall-through: 'lowerBlockBody.go' should have peeled
-    -- this case off already. If we get here it means a 'let' was used
-    -- in a context that does not thread Reader-scope bindings — bring
-    -- it through as a no-effect emit and continue.
-    var <- lowerExpr ls.value
-    _ <- bindPatternLocals var ls.pattern
-    pure False
+  AST.StatementLet _ ->
+    internalErrorNoSpan "lowerStmt: StatementLet must be peeled by lowerBlockInto"
   AST.StatementReturn stmt -> do
     var <- lowerExpr stmt.value
     emit (StatementExit ExitData {exitKind = ExitKindReturn, value = var})
@@ -934,28 +1010,8 @@ lowerStmt = \case
   AST.StatementExpression expr -> do
     _ <- lowerExpr expr
     pure False
-  AST.StatementAgent stmt -> do
-    -- Local agent declared inside another agent's body. Allocate a fresh
-    -- BlockId, register it in the @VariableId → BlockId@ map (so calls
-    -- and 'StatementMakeClosure' on the agent name resolve to 'CallTargetBlock' /
-    -- 'BlockUser'), then lower its body using the shared agent layout.
-    --
-    -- The body is lowered with the OUTER 'localVars' frame still in
-    -- scope: agent-side references to outer-scope variables are
-    -- by-value (state vars are only mutated by @next@ inside @req@
-    -- handlers, which a local agent cannot use), so the runtime can
-    -- inherit the parent's variable scope when invoking the closure.
-    -- No explicit IR captures are needed.
-    case stmt.name.resolution of
-      Just variableId -> do
-        blockId <- freshBlockId
-        modify $ \s ->
-          s {lsVarBlockIds = Map.insert variableId blockId s.lsVarBlockIds}
-        lowerAgentLike stmt.name.text stmt.parameters stmt.body blockId
-      Nothing ->
-        recordError
-          (LoweringErrorUnresolvedVariable stmt.sourceSpan stmt.name.text)
-    pure False
+  AST.StatementAgent _ ->
+    internalErrorNoSpan "lowerStmt: StatementAgent must be peeled by lowerBlockInto"
   AST.StatementError sourceSpan -> do
     recordError (LoweringErrorParseSentinel sourceSpan)
     pure False
@@ -1066,23 +1122,13 @@ lowerExpr = \case
   AST.ExpressionMatch matchExpr -> lowerMatchExpr matchExpr
   AST.ExpressionFor forExpr -> lowerForExpr forExpr
   AST.ExpressionQualifiedReference qualifiedRefExpr ->
-    -- A resolved qualified reference (module.target). target.resolution
-    -- holds the resolved VariableId; treat it like a bare variable
-    -- expression. Qualified references never bind locally.
-    case qualifiedRefExpr.target.resolution of
-      Just variableId -> do
-        maybeBlockId <- gets (Map.lookup variableId . (.lsVarBlockIds))
-        case maybeBlockId of
-          Just blockId -> do
-            v <- freshVarId (Just qualifiedRefExpr.target.text)
-            emit (StatementMakeClosure MakeClosureData {output = v, block = blockId, captures = []})
-            pure v
-          Nothing -> do
-            recordError (LoweringErrorUnresolvedVariable qualifiedRefExpr.sourceSpan qualifiedRefExpr.target.text)
-            freshVarId Nothing
-      Nothing -> do
-        recordError (LoweringErrorUnresolvedVariable qualifiedRefExpr.sourceSpan qualifiedRefExpr.target.text)
-        freshVarId Nothing
+    -- Qualified references never bind locally.
+    resolveAsValue
+      False
+      qualifiedRefExpr.target.resolution
+      qualifiedRefExpr.sourceSpan
+      qualifiedRefExpr.target.text
+      (Just qualifiedRefExpr.target.text)
 
 -- | Make an Arg with an indexed label like @"_0"@, @"_1"@, … for tuple /
 -- array literal construction.
@@ -1105,46 +1151,13 @@ lowerCall callExpression = do
 resolveCallee :: AST.Expression Zonked -> Lower CallTarget
 resolveCallee = \case
   AST.ExpressionVariable ve ->
-    resolveCalleeName ve.name.resolution ve.sourceSpan ve.name.text True
+    resolveAsCallTarget True ve.name.resolution ve.sourceSpan ve.name.text
   AST.ExpressionQualifiedReference qualifiedRefExpr ->
-    -- Qualified references never bind locally — only consult the
-    -- top-level block id table.
-    resolveCalleeName qualifiedRefExpr.target.resolution qualifiedRefExpr.sourceSpan qualifiedRefExpr.target.text False
-  -- For any other callee shape (a higher-order computation), lower it to
-  -- a closure value first.
+    -- Qualified references never bind locally.
+    resolveAsCallTarget False qualifiedRefExpr.target.resolution qualifiedRefExpr.sourceSpan qualifiedRefExpr.target.text
   other -> do
     var <- lowerExpr other
     pure (CallTargetValue {var = var})
-
--- | Shared callee-name resolution: try the local Reader scope first (if
--- the callee may be a local), then fall back to the top-level
--- @VariableId → BlockId@ table. Failures yield a 'CallTargetValue' on a fresh
--- placeholder var with an error recorded.
-resolveCalleeName ::
-  AST.NameMeta Zonked 'AST.VariableRef ->
-  AST.SourceSpan ->
-  Text ->
-  Bool ->
-  Lower CallTarget
-resolveCalleeName resolution sourceSpan nameText canBeLocal = case resolution of
-  Just variableId -> do
-    mLocal <-
-      if canBeLocal
-        then lookupLocal variableId
-        else pure Nothing
-    case mLocal of
-      Just irVar -> pure (CallTargetValue {var = irVar})
-      Nothing -> do
-        maybeBlockId <- gets (Map.lookup variableId . (.lsVarBlockIds))
-        case maybeBlockId of
-          Just blockId -> pure (CallTargetBlock {block = blockId})
-          Nothing -> failTarget
-  Nothing -> failTarget
-  where
-    failTarget = do
-      recordError (LoweringErrorUnresolvedVariable sourceSpan nameText)
-      v <- freshVarId Nothing
-      pure (CallTargetValue {var = v})
 
 -- | Lower an 'AST.TemplateExpression' as a left-fold of @concat@ prim
 -- calls.
@@ -1433,21 +1446,5 @@ lowerLiteral lit = emitLoadLiteral (literalValueToIR lit.value)
 -- referenced 'VariableId' is a local binding (just return its IR var) or
 -- a top-level decl (allocate a closure value via 'StatementMakeClosure').
 lowerVariable :: AST.VariableExpression Zonked -> Lower VarId
-lowerVariable ve = case ve.name.resolution of
-  Nothing -> do
-    recordError (LoweringErrorUnresolvedVariable ve.sourceSpan ve.name.text)
-    freshVarId Nothing
-  Just variableId -> do
-    mLocal <- lookupLocal variableId
-    case mLocal of
-      Just irVar -> pure irVar
-      Nothing -> do
-        maybeBlockId <- gets (Map.lookup variableId . (.lsVarBlockIds))
-        case maybeBlockId of
-          Just blockId -> do
-            v <- freshVarId (Just ve.name.text)
-            emit (StatementMakeClosure MakeClosureData {output = v, block = blockId, captures = []})
-            pure v
-          Nothing -> do
-            recordError (LoweringErrorUnresolvedVariable ve.sourceSpan ve.name.text)
-            freshVarId Nothing
+lowerVariable ve =
+  resolveAsValue True ve.name.resolution ve.sourceSpan ve.name.text (Just ve.name.text)

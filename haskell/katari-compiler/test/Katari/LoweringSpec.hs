@@ -462,12 +462,18 @@ stage3Spec = describe "Stage 3 \8212 block / let / scope" $ do
           ]
     errs `shouldBe` []
     let Just ub = agentBody "main" irMod
-    -- The main body should issue exactly one StatementCall whose target is a
-    -- BlockUser (the local helper agent).
-    let userCalls =
-          [ c | StatementCall c <- ub.statements, CallTargetBlock {block = bid} <- [c.target], Just (BlockUser _) <- [Map.lookup bid irMod.blocks]
+    -- The main body should issue a StatementMakeClosure whose block is a
+    -- BlockUser (the local helper agent), followed by a StatementCall via
+    -- CallTargetValue (the closure var).
+    let closures =
+          [ mc | StatementMakeClosure mc <- ub.statements, Just (BlockUser _) <- [Map.lookup mc.block irMod.blocks]
           ]
-    length userCalls `shouldBe` 1
+    length closures `shouldBe` 1
+    let helperVar = (head closures).output
+    let valueCalls =
+          [ c | StatementCall c <- ub.statements, CallTargetValue {var} <- [c.target], var == helperVar
+          ]
+    length valueCalls `shouldBe` 1
 
   it "function parameter with tuple pattern destructures via StatementBindPattern" $ do
     (irMod, errs) <-
