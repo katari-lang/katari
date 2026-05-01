@@ -151,8 +151,14 @@ snapshot と by-reference scope inheritance は観測等価。
 
 ### Statement / JSON
 
-- `Statement` は data + sumEncoding (`SCall` / `SMakeClosure` / `SLoadLiteral` / `SMatch` / `SFor` / `SExit` / `SCont`)
+- `Statement` は GADTs 構文 + sumEncoding:
+  `StatementCall` / `StatementMakeClosure` / `StatementLoadLiteral` / `StatementMatch` /
+  `StatementFor` / `StatementExit` / `StatementCont` / `StatementBindPattern`
+- `MatchPattern` は `MatchPatternAny` / `MatchPatternVariable` / `MatchPatternLiteral` /
+  `MatchPatternConstructor` / `MatchPatternTuple`
+- `CallTarget` は `CallTargetBlock` / `CallTargetValue`
 - ToJSON / FromJSON は `genericToJSON` で自動生成 (`TaggedObject` sumEncoding)
+- JSON tag は型名プレフィックス付きコンストラクタ名を camelCase に変換 (`lowerHead` 適用)
 
 ## 重要な実装詳細
 
@@ -207,6 +213,7 @@ JSON Schema の `description` に埋め込まれる (AI tool calling 用)。Sema
 - `LowerEnv.localVars :: Map VariableId VarId` — 局所束縛 (Reader 化、`local`-restorer 不要)
 - `LowerState.lsCurrentEmitted :: [Statement]` — 現在 build 中の block の statements (逆順)
 - `emit` で蓄積、`runWithFreshBuffer` で save/restore、reverse して取り出し
+- `LowerState.lsTopLevelBlocks :: Map VariableId BlockId` — top-level callable のみ (local agent は localVars に入る)
 - `LowerState.lsReqIds :: Map Identifier.RequestId IR.ReqId` / `lsCtorIds :: Map Identifier.ConstructorId IR.CtorId`
   — Identifier id → IR 内部 id への翻訳 (Lowering が re-index)
 - `LowerState.lsEntries :: Map QualifiedName BlockId` — FFI translation (IRModule.entries の素材)
@@ -234,6 +241,79 @@ runtime が closure 値の lexical scope を構成する。
 - `for(...) { body }` の型 = `null ∪ breakType`
 
 `breakType` は本体を走査して収集する (内側の for には潜らない)。
+
+## 公開 API サマリ
+
+`katari-compiler` の公開モジュール (semver 管理対象):
+
+| モジュール                    | 役割                                                          |
+| ----------------------------- | ------------------------------------------------------------- |
+| `Katari.Compile`              | 統一エントリ (`compile :: CompileInput -> CompileResult`)     |
+| `Katari.Diagnostic`           | 統一 Diagnostic 型 + helpers (`filterAtLeast` / `sortBySpan` / `groupByFilePath`) |
+| `Katari.Diagnostic.Render`    | CLI 向けレンダリング (`renderDiagnostic` / `renderDiagnosticPlain`) |
+| `Katari.IR`                   | IR データ型 + JSON シリアライゼーション                       |
+| `Katari.Schema`               | JSON Schema bundle (AI tool calling 用)                       |
+| `Katari.Query`                | LSP / CLI 向け query layer (position lookup / occurrence index) |
+| `Katari.AST`                  | AST 型 + phase-indexed metadata                               |
+| `Katari.AST.Identifiers`      | ID 型 (`VariableId`, `TypeId`, ...) + `QualifiedName`        |
+
+### CompileResult
+
+```haskell
+data CompileResult = CompileResult
+  { irModule         :: !(Maybe IRModule)         -- Error diagnostic があれば Nothing
+  , schemaBundle     :: !(Maybe SchemaBundle)      -- 同上
+  , diagnostics      :: ![Diagnostic]
+  , identifierResult :: !(Maybe IdentifierResult)  -- LSP / CLI agent listing 用
+  , solverResult     :: !(Maybe SolverResult)
+  , zonkResult       :: !(Maybe ZonkResult)         -- Query layer で使用
+  }
+```
+
+### IRModule.metadata
+
+```haskell
+data IRMetadata = IRMetadata
+  { schemaVersion :: !Int   -- 現在 = 1; runtime が version skew を検知
+  }
+
+data IRModule = IRModule
+  { metadata  :: !IRMetadata
+  , name      :: !Text           -- root module name
+  , blocks    :: !(Map BlockId Block)
+  , entries   :: !(Map QualifiedName BlockId)
+  , nameTable :: !NameTable
+  }
+```
+
+### Katari.Query
+
+```haskell
+-- Hover 情報: position → 最内ノードの型情報
+lookupAtPosition :: ZonkResult -> FilePath -> Position -> Maybe HoverInfo
+
+-- Occurrence index: 一度 build して繰り返し query
+buildOccurrenceIndex :: ZonkResult -> OccurrenceIndex
+
+-- find-references / go-to-definition
+identifyAtPosition :: ZonkResult -> FilePath -> Position -> Maybe ResolvedReference
+findReferences     :: OccurrenceIndex -> ResolvedReference -> [SourceSpan]
+findDefinition     :: ZonkResult -> FilePath -> Position -> Maybe SourceSpan
+```
+
+Position は **code-point 単位** (LSP layer が UTF-16 オフセットを変換してから渡す)。
+
+### Katari.Diagnostic.Render
+
+```haskell
+-- snippet 付き (source map あり)
+renderDiagnostic      :: Map FilePath Text -> Diagnostic -> Text
+
+-- snippet なし (source map なし)
+renderDiagnosticPlain :: Diagnostic -> Text
+```
+
+`Katari.Diagnostic` 本体に source text 依存を持ち込まないため別モジュールに分離。
 
 ## Katari Protocol (TS Runtime 側 — 再設計予定)
 

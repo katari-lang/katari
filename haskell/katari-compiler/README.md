@@ -12,9 +12,16 @@ import Katari.Compile (compile, CompileInput (..), CompileResult (..))
 compile :: CompileInput -> CompileResult
 ```
 
-`CompileResult` は `irModule`, `schemaBundle`, `diagnostics`, `solverResult`,
-`zonkResult` を含む。`Severity == Error` の diagnostic が一つでもあれば
-`irModule` / `schemaBundle` は `Nothing` になる (defensive)。
+`CompileResult` は以下のフィールドを持つ:
+
+| フィールド          | 型                          | 説明                                                |
+| ------------------- | --------------------------- | --------------------------------------------------- |
+| `irModule`          | `Maybe IRModule`            | error diagnostic があれば `Nothing`                 |
+| `schemaBundle`      | `Maybe SchemaBundle`        | 同上                                                |
+| `diagnostics`       | `[Diagnostic]`              | 全 phase のエラー・警告                             |
+| `identifierResult`  | `Maybe IdentifierResult`    | LSP / CLI 向け名前解決テーブル                      |
+| `solverResult`      | `Maybe SolverResult`        | 型制約解決結果                                      |
+| `zonkResult`        | `Maybe ZonkResult`          | `Katari.Query` の入力                               |
 
 ## モジュール構造
 
@@ -74,7 +81,17 @@ Katari.Schema                -- ZonkResult → SchemaBundle. AI tool calling 用
 
 Katari.Diagnostic            -- 統一 Diagnostic 型 (severity, code "K####", span,
                                 message, notes, hints). 各 phase の error 型から
-                                toDiagnostic で変換.
+                                toDiagnostic で変換. helpers: filterAtLeast /
+                                sortBySpan / groupByFilePath.
+Katari.Diagnostic.Render     -- CLI 向けレンダリング. renderDiagnostic (snippet 付き)
+                                / renderDiagnosticPlain. source text dependency を
+                                core diagnostic 型から分離.
+
+Katari.Query                 -- LSP / CLI 向け query layer. ZonkResult を入力に
+                                position-based lookup (lookupAtPosition) / occurrence
+                                index (buildOccurrenceIndex) / find-references /
+                                go-to-definition を提供. Position は code-point 単位
+                                (UTF-16 換算は LSP layer が担当).
 ```
 
 ## パイプライン
@@ -121,3 +138,12 @@ stack haddock katari-compiler --no-haddock-deps
 - **統一 Diagnostic**: 各 phase が独自エラー型を返す現状維持に加え、`toDiagnostic`
   converter で `Diagnostic` (code, severity, span, message, notes, hints) に集約。
   CLI / LSP / 新 TS runtime の結合点で扱いやすい。
+- **型名プレフィックス付きコンストラクタ**: 全直和型のコンストラクタに型名プレフィックスを付ける
+  (`StatementCall` / `MatchPatternAny` / `CallTargetBlock` 等)。JSON tag は `lowerHead`
+  で camelCase に変換 (`statementCall` / `matchPatternAny` 等)。`stripXXPrefix` は不使用。
+- **GADTs 構文**: 全直和型は `data T where ...` 形式を使う。
+- **parse / lex プレフィックス**: `Parser a` を返す関数は `parse` プレフィックス、
+  `Lexer a` を返す関数は `lex` プレフィックス必須。
+- **IRModule.metadata**: `schemaVersion :: Int` で runtime との version skew を検知。現行 = 1。
+- **LSP query layer は CompileResult 外**: `buildOccurrenceIndex` は `CompileResult` に含めず
+  LSP layer が明示的に呼ぶ (compile を軽量に保つ)。
