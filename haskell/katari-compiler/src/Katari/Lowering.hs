@@ -627,11 +627,11 @@ lowerAgentLike name parameters body blockId = do
   case body.whereBlock of
     Nothing ->
       lowerSimpleAgent blockId name paramVars paramPrelude body
-    Just wb
-      | null wb.stateVariables ->
-          lowerAgentWithHandlers blockId name paramVars paramPrelude body wb
+    Just agentWhereBlock
+      | null agentWhereBlock.stateVariables ->
+          lowerAgentWithHandlers blockId name paramVars paramPrelude body agentWhereBlock
       | otherwise ->
-          lowerAgentWithStateVars blockId name paramVars paramPrelude body wb
+          lowerAgentWithStateVars blockId name paramVars paramPrelude body agentWhereBlock
 
 -- | Plain agent (no @where@): single block, @catchesReturn=True@. The
 -- @prelude@ runs inside the block's buffer so any parameter destructuring
@@ -667,15 +667,15 @@ lowerAgentWithHandlers ::
   AST.Block Zonked ->
   AST.WhereBlock Zonked ->
   Lower ()
-lowerAgentWithHandlers blockId name paramVars prelude blk wb = do
+lowerAgentWithHandlers blockId name paramVars prelude blk agentWhereBlock = do
   ((paramLocals, trailing), statements) <- runWithFreshBuffer $ do
     locals <- prelude
     t <- withLocals locals (lowerBlockInto (stripWhereBlock blk))
     pure (locals, t)
   (handlers, thenBlockId) <- withLocals paramLocals $ do
-    hs <- mapM (lowerHandler []) wb.handlers
-    tb <- lowerThenClause wb.thenClause
-    pure (hs, tb)
+    handlerList <- mapM (lowerHandler []) agentWhereBlock.handlers
+    thenBlockMaybe <- lowerThenClause agentWhereBlock.thenClause
+    pure (handlerList, thenBlockMaybe)
   let userBlock =
         defaultUserBlock
           { kind = BlockAgentEntryWithHandlers,
@@ -700,13 +700,13 @@ lowerAgentWithStateVars ::
   AST.Block Zonked ->
   AST.WhereBlock Zonked ->
   Lower ()
-lowerAgentWithStateVars outerId name paramVars prelude blk wb = do
+lowerAgentWithStateVars outerId name paramVars prelude blk agentWhereBlock = do
   innerOut <- freshVarId Nothing
   (_, outerStatements) <- runWithFreshBuffer $ do
     paramLocals <- prelude
     withLocals paramLocals $ do
-      innerBlockId <- buildInnerBlockWithState name wb blk
-      stateInitVars <- lowerStateInits wb.stateVariables
+      innerBlockId <- buildInnerBlockWithState name agentWhereBlock blk
+      stateInitVars <- lowerStateInits agentWhereBlock.stateVariables
       let innerArgs = [Arg {label = lbl, var = v} | (lbl, v) <- stateInitVars]
       emit $
         StatementCall
@@ -743,16 +743,16 @@ buildInnerBlockWithState ::
   AST.WhereBlock Zonked ->
   AST.Block Zonked ->
   Lower BlockId
-buildInnerBlockWithState parentName wb blk = do
+buildInnerBlockWithState parentName agentWhereBlock blk = do
   innerBlockId <- freshBlockId
   -- Allocate fresh IR vars for state vars and bind their VariableIds.
-  stateBinds <- mapM mkStateParam wb.stateVariables
+  stateBinds <- mapM mkStateParam agentWhereBlock.stateVariables
   let stateParams = [p | (_, p, _) <- stateBinds]
       stateLocals = [(variableId, p.var) | (Just variableId, p, _) <- stateBinds]
   withLocals stateLocals $ do
     (statements, trailing) <- lowerBlockBody (stripWhereBlock blk)
-    handlers <- mapM (lowerHandler stateParams) wb.handlers
-    thenBlockId <- lowerThenClause wb.thenClause
+    handlers <- mapM (lowerHandler stateParams) agentWhereBlock.handlers
+    thenBlockId <- lowerThenClause agentWhereBlock.thenClause
     let userBlock =
           defaultUserBlock
             { kind = BlockHandleScope,
@@ -903,8 +903,8 @@ bindPatternToFreshVar pat hint = do
 -- Maranget exhaustiveness checker (K0291) before lowering runs.
 destructurePattern :: VarId -> AST.Pattern Zonked -> Lower [(VariableId, VarId)]
 destructurePattern incoming pat = do
-  (mp, locals) <- lowerPattern pat
-  emit (StatementBindPattern BindPatternData {source = incoming, pattern = mp})
+  (matchPattern, locals) <- lowerPattern pat
+  emit (StatementBindPattern BindPatternData {source = incoming, pattern = matchPattern})
   pure locals
 
 -- ===========================================================================
@@ -1019,7 +1019,7 @@ bindPatternLocals = destructurePattern
 lowerExpr :: AST.Expression Zonked -> Lower VarId
 lowerExpr = \case
   AST.ExpressionLiteral lit -> lowerLiteral lit
-  AST.ExpressionVariable ve -> lowerVariable ve
+  AST.ExpressionVariable variableExpression -> lowerVariable variableExpression
   AST.ExpressionBinaryOperator binaryExpr -> do
     lhs <- lowerExpr binaryExpr.left
     rhs <- lowerExpr binaryExpr.right
@@ -1132,8 +1132,8 @@ lowerCall callExpression = do
 -- | Resolve an expression that's used in the callee position.
 resolveCallee :: AST.Expression Zonked -> Lower CallTarget
 resolveCallee = \case
-  AST.ExpressionVariable ve ->
-    resolveAsCallTarget True ve.name.resolution ve.sourceSpan ve.name.text
+  AST.ExpressionVariable variableExpression ->
+    resolveAsCallTarget True variableExpression.name.resolution variableExpression.sourceSpan variableExpression.name.text
   AST.ExpressionQualifiedReference qualifiedRefExpr ->
     -- Qualified references never bind locally.
     resolveAsCallTarget False qualifiedRefExpr.target.resolution qualifiedRefExpr.sourceSpan qualifiedRefExpr.target.text
@@ -1369,8 +1369,8 @@ lowerForExpr forExpression = do
 lowerForIters ::
   [AST.ForInBinding Zonked] ->
   Lower ([(VarId, VarId)], [(VariableId, VarId)])
-lowerForIters bs = do
-  results <- mapM one bs
+lowerForIters bindings = do
+  results <- mapM one bindings
   pure (map fst results, concatMap snd results)
   where
     one b = do
@@ -1415,10 +1415,10 @@ buildForBody locals body = do
 
 -- | Emit a fresh load-literal statement and return the resulting var.
 emitLoadLiteral :: LiteralValue -> Lower VarId
-emitLoadLiteral lv = do
-  out <- freshVarId Nothing
-  emit (StatementLoadLiteral LoadLiteralData {output = out, value = lv})
-  pure out
+emitLoadLiteral literalValue = do
+  outputVar <- freshVarId Nothing
+  emit (StatementLoadLiteral LoadLiteralData {output = outputVar, value = literalValue})
+  pure outputVar
 
 -- | Lower an 'AST.LiteralExpression' as an 'StatementLoadLiteral'.
 lowerLiteral :: AST.LiteralExpression Zonked -> Lower VarId
@@ -1428,5 +1428,5 @@ lowerLiteral lit = emitLoadLiteral (literalValueToIR lit.value)
 -- referenced 'VariableId' is a local binding (just return its IR var) or
 -- a top-level decl (allocate a closure value via 'StatementMakeClosure').
 lowerVariable :: AST.VariableExpression Zonked -> Lower VarId
-lowerVariable ve =
-  resolveAsValue True ve.name.resolution ve.sourceSpan ve.name.text (Just ve.name.text)
+lowerVariable variableExpression =
+  resolveAsValue True variableExpression.name.resolution variableExpression.sourceSpan variableExpression.name.text (Just variableExpression.name.text)

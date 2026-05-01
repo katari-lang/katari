@@ -16,8 +16,8 @@ import Katari.AST (SourceSpan)
 
 -- | Panic with a span and a message describing the violated invariant.
 internalError :: (HasCallStack) => SourceSpan -> Text -> a
-internalError sp msg =
-  error ("internal compiler error at " <> show sp <> ": " <> Text.unpack msg)
+internalError sourceSpan msg =
+  error ("internal compiler error at " <> show sourceSpan <> ": " <> Text.unpack msg)
 
 -- | Panic without a span. Use only when the call site has no easy way to
 -- thread a 'SourceSpan'; the 'HasCallStack' constraint preserves location

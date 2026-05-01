@@ -68,23 +68,23 @@ deriving instance Show ExhaustiveError
 -- | Map an 'ExhaustiveError' to a 'Diagnostic'.
 toDiagnostic :: ExhaustiveError -> Diagnostic
 toDiagnostic = \case
-  ExhaustiveErrorNonExhaustiveMatch sp witnesses ->
+  ExhaustiveErrorNonExhaustiveMatch sourceSpan witnesses ->
     diagnosticError
       "K0290"
       ("non-exhaustive match: missing case " <> renderWitnesses witnesses)
-      sp
-  ExhaustiveErrorNonExhaustiveBinding sp witnesses ->
+      sourceSpan
+  ExhaustiveErrorNonExhaustiveBinding sourceSpan witnesses ->
     diagnosticError
       "K0291"
       ( "irrefutable pattern required here, but value could match "
           <> renderWitnesses witnesses
       )
-      sp
-  ExhaustiveErrorUnreachableArm sp ->
+      sourceSpan
+  ExhaustiveErrorUnreachableArm sourceSpan ->
     diagnosticWarning
       "K0292"
       "unreachable match arm: prior arms already cover this pattern"
-      sp
+      sourceSpan
 
 -- ===========================================================================
 -- Pattern representation (Maranget §2)
@@ -231,7 +231,7 @@ getSubFieldTypes tag colType zr = case tag of
             map snd (Map.toAscList params)
           _ -> []
   CtorTagTupleN _ -> case colType of
-    SemanticTypeTuple ts -> ts
+    SemanticTypeTuple tupleTypes -> tupleTypes
     _ -> []
   _ -> []
 
@@ -254,8 +254,8 @@ isCompleteSig seen ty zr = case ty of
     CtorTagLitInt n `elem` seen
   SemanticTypeLiteralString s ->
     CtorTagLitStr s `elem` seen
-  SemanticTypeTuple ts ->
-    CtorTagTupleN (length ts) `elem` seen
+  SemanticTypeTuple tupleTypes ->
+    CtorTagTupleN (length tupleTypes) `elem` seen
   SemanticTypeData tid ->
     let ctorIds = [cid | (cid, _) <- ctorsOfType zr tid]
         seenCtorIds = [cid | CtorTagData cid <- seen]
@@ -407,12 +407,12 @@ checkIrrefutable ::
 checkIrrefutable zr pattern subjectType =
   let headPat = patternToHead pattern
       ctx = TypeCtx {columnTypes = [subjectType], zonkResult = zr}
-      sp = AST.sourceSpanOf pattern
-      row = PatRow [headPat] sp
+      sourceSpan = AST.sourceSpanOf pattern
+      row = PatRow [headPat] sourceSpan
    in if useful ctx (PatMatrix [row]) [PatHeadWildcard]
         then
           let witness = renderPatHead zr PatHeadWildcard
-           in [ExhaustiveErrorNonExhaustiveBinding sp [witness]]
+           in [ExhaustiveErrorNonExhaustiveBinding sourceSpan [witness]]
         else []
 
 -- ===========================================================================

@@ -63,20 +63,20 @@ deriving instance Show ParseError
 
 instance HasSourceSpan ParseError where
   sourceSpanOf = \case
-    ParseErrorLex le -> sourceSpanOf le
-    ParseErrorAtDeclaration sp _ -> sp
-    ParseErrorAtStatement sp _ -> sp
+    ParseErrorLex lexerError -> sourceSpanOf lexerError
+    ParseErrorAtDeclaration sourceSpan _ -> sourceSpan
+    ParseErrorAtStatement sourceSpan _ -> sourceSpan
 
 -- | Convert a 'ParseError' to a unified 'Diagnostic'. Codes K0020-K0099
 -- are reserved for the parser; lexer errors are surfaced via
 -- 'Lexer.toDiagnostic'.
 toDiagnostic :: ParseError -> Diagnostic
 toDiagnostic = \case
-  ParseErrorLex le -> Lexer.toDiagnostic le
-  ParseErrorAtDeclaration sp reason ->
-    diagnosticError "K0020" (renderReason "declaration" reason) sp
-  ParseErrorAtStatement sp reason ->
-    diagnosticError "K0021" (renderReason "statement" reason) sp
+  ParseErrorLex lexerError -> Lexer.toDiagnostic lexerError
+  ParseErrorAtDeclaration sourceSpan reason ->
+    diagnosticError "K0020" (renderReason "declaration" reason) sourceSpan
+  ParseErrorAtStatement sourceSpan reason ->
+    diagnosticError "K0021" (renderReason "statement" reason) sourceSpan
   where
     renderReason :: Text -> ParseErrorReason -> Text
     renderReason ctx reason =

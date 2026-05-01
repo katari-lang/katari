@@ -243,16 +243,16 @@ mkIdentifierResult modules variables types requests constructors asts =
       moduleASTs = asts,
       topLevelVariablesByQName =
         Map.fromList
-          [ (qn, vid)
-            | (vid, vd) <- Map.toList variables,
-              Just qn <- [vd.variableQualifiedName]
+          [ (qualifiedName, variableId)
+            | (variableId, variableData) <- Map.toList variables,
+              Just qualifiedName <- [variableData.variableQualifiedName]
           ],
       typesByQName =
-        Map.fromList [(td.typeQualifiedName, tid) | (tid, td) <- Map.toList types],
+        Map.fromList [(typeData.typeQualifiedName, typeId) | (typeId, typeData) <- Map.toList types],
       requestsByQName =
-        Map.fromList [(rd.requestQualifiedName, rid) | (rid, rd) <- Map.toList requests],
+        Map.fromList [(requestData.requestQualifiedName, requestId) | (requestId, requestData) <- Map.toList requests],
       constructorsByQName =
-        Map.fromList [(cd.constructorQualifiedName, cid) | (cid, cd) <- Map.toList constructors]
+        Map.fromList [(constructorData.constructorQualifiedName, constructorId) | (constructorId, constructorData) <- Map.toList constructors]
     }
 
 -- ---------------------------------------------------------------------------
@@ -296,85 +296,85 @@ deriving instance Eq IdentifierError
 
 instance HasSourceSpan IdentifierError where
   sourceSpanOf = \case
-    ErrorDuplicateName sp _ _ -> sp
-    ErrorShadowNonVariable sp _ -> sp
-    ErrorUndefinedName sp _ -> sp
-    ErrorUndefinedQualified sp _ _ -> sp
-    ErrorNotAType sp _ -> sp
-    ErrorNotAModule sp _ -> sp
-    ErrorImportNameNotFound sp _ _ -> sp
-    ErrorImportModuleNotFound sp _ -> sp
-    ErrorNotARequest sp _ -> sp
-    ErrorNotAConstructor sp _ -> sp
-    ErrorMissingExternalAgentAnnotation sp _ -> sp
-    ErrorEmptyExternalAgentAnnotation sp _ -> sp
+    ErrorDuplicateName sourceSpan _ _ -> sourceSpan
+    ErrorShadowNonVariable sourceSpan _ -> sourceSpan
+    ErrorUndefinedName sourceSpan _ -> sourceSpan
+    ErrorUndefinedQualified sourceSpan _ _ -> sourceSpan
+    ErrorNotAType sourceSpan _ -> sourceSpan
+    ErrorNotAModule sourceSpan _ -> sourceSpan
+    ErrorImportNameNotFound sourceSpan _ _ -> sourceSpan
+    ErrorImportModuleNotFound sourceSpan _ -> sourceSpan
+    ErrorNotARequest sourceSpan _ -> sourceSpan
+    ErrorNotAConstructor sourceSpan _ -> sourceSpan
+    ErrorMissingExternalAgentAnnotation sourceSpan _ -> sourceSpan
+    ErrorEmptyExternalAgentAnnotation sourceSpan _ -> sourceSpan
 
 -- | Convert an 'IdentifierError' to a unified 'Diagnostic'. Codes
 -- K0100-K0199 are reserved for the identifier pass.
 toDiagnostic :: IdentifierError -> Diagnostic
 toDiagnostic = \case
-  ErrorDuplicateName sp name otherSp ->
-    let base = diagnosticError "K0100" ("duplicate definition of '" <> name <> "'") sp
+  ErrorDuplicateName sourceSpan name firstSourceSpan ->
+    let base = diagnosticError "K0100" ("duplicate definition of '" <> name <> "'") sourceSpan
      in base
           { notes =
               [ DiagnosticNote
-                  { span = otherSp,
+                  { span = firstSourceSpan,
                     message = "first defined here"
                   }
               ]
           }
-  ErrorShadowNonVariable sp name ->
+  ErrorShadowNonVariable sourceSpan name ->
     diagnosticError
       "K0101"
       ("'" <> name <> "' shadows a non-variable binding (modules/types cannot be shadowed)")
-      sp
-  ErrorUndefinedName sp name ->
-    diagnosticError "K0102" ("undefined name '" <> name <> "'") sp
-  ErrorUndefinedQualified sp moduleName memberName ->
+      sourceSpan
+  ErrorUndefinedName sourceSpan name ->
+    diagnosticError "K0102" ("undefined name '" <> name <> "'") sourceSpan
+  ErrorUndefinedQualified sourceSpan moduleName memberName ->
     diagnosticError
       "K0103"
       ("module '" <> moduleName <> "' does not export '" <> memberName <> "'")
-      sp
-  ErrorNotAType sp name ->
+      sourceSpan
+  ErrorNotAType sourceSpan name ->
     diagnosticError
       "K0104"
       ("'" <> name <> "' is not a type")
-      sp
-  ErrorNotAModule sp name ->
+      sourceSpan
+  ErrorNotAModule sourceSpan name ->
     diagnosticError
       "K0105"
       ("'" <> name <> "' is not a module")
-      sp
-  ErrorImportNameNotFound sp moduleName memberName ->
+      sourceSpan
+  ErrorImportNameNotFound sourceSpan moduleName memberName ->
     diagnosticError
       "K0106"
       ("import: '" <> memberName <> "' is not exported by module '" <> moduleName <> "'")
-      sp
-  ErrorImportModuleNotFound sp moduleName ->
+      sourceSpan
+  ErrorImportModuleNotFound sourceSpan moduleName ->
     diagnosticError
       "K0107"
       ("import: module '" <> moduleName <> "' not found")
-      sp
-  ErrorNotARequest sp name ->
+      sourceSpan
+  ErrorNotARequest sourceSpan name ->
     diagnosticError
       "K0108"
       ("'" <> name <> "' is not a request (only @req@ declarations can be handled)")
-      sp
-  ErrorNotAConstructor sp name ->
+      sourceSpan
+  ErrorNotAConstructor sourceSpan name ->
     diagnosticError
       "K0109"
       ("'" <> name <> "' is not a data constructor")
-      sp
-  ErrorMissingExternalAgentAnnotation sp name ->
+      sourceSpan
+  ErrorMissingExternalAgentAnnotation sourceSpan name ->
     diagnosticError
       "K0150"
       ("external agent '" <> name <> "' requires a @\"server\" annotation (server identifier)")
-      sp
-  ErrorEmptyExternalAgentAnnotation sp name ->
+      sourceSpan
+  ErrorEmptyExternalAgentAnnotation sourceSpan name ->
     diagnosticError
       "K0151"
       ("external agent '" <> name <> "' has an empty @\"\" annotation (server identifier must not be blank)")
-      sp
+      sourceSpan
 
 -- ---------------------------------------------------------------------------
 -- Identifier monad
@@ -756,12 +756,12 @@ buildExports moduleMap =
     qnameOf moduleName name = QualifiedName {module_ = moduleName, name = name.text}
 
     registerVariable moduleName table name = do
-      let qn = qnameOf moduleName name
+      let qualifiedName = qnameOf moduleName name
       variableId <-
         freshVariableId
           VariableData
             { variableName = name.text,
-              variableQualifiedName = Just qn,
+              variableQualifiedName = Just qualifiedName,
               variableSourceSpan = name.sourceSpan
             }
       insertSymbolEntry name.sourceSpan name.text (singletonVariable variableId) table
@@ -769,18 +769,18 @@ buildExports moduleMap =
     -- @req foo@ issues both a 'VariableId' (callable side: @foo(...)@) and a
     -- 'RequestId' (handler-target / effect-set side).
     registerRequest moduleName table name = do
-      let qn = qnameOf moduleName name
+      let qualifiedName = qnameOf moduleName name
       variableId <-
         freshVariableId
           VariableData
             { variableName = name.text,
-              variableQualifiedName = Just qn,
+              variableQualifiedName = Just qualifiedName,
               variableSourceSpan = name.sourceSpan
             }
       requestId <-
         freshRequestId
           RequestData
-            { requestQualifiedName = qn,
+            { requestQualifiedName = qualifiedName,
               requestSourceSpan = name.sourceSpan,
               requestVariableId = variableId
             }
@@ -792,11 +792,11 @@ buildExports moduleMap =
       insertSymbolEntry name.sourceSpan name.text entry table
 
     registerTypeOnly moduleName table name = do
-      let qn = qnameOf moduleName name
+      let qualifiedName = qnameOf moduleName name
       typeId <-
         freshTypeId
           TypeData
-            { typeQualifiedName = qn,
+            { typeQualifiedName = qualifiedName,
               typeSourceSpan = name.sourceSpan,
               typeSynonymRhs = Nothing
             }
@@ -806,25 +806,25 @@ buildExports moduleMap =
     -- (the data type), and 'ConstructorId' (the constructor identity used by
     -- match patterns).
     registerData moduleName table name = do
-      let qn = qnameOf moduleName name
+      let qualifiedName = qnameOf moduleName name
       variableId <-
         freshVariableId
           VariableData
             { variableName = name.text,
-              variableQualifiedName = Just qn,
+              variableQualifiedName = Just qualifiedName,
               variableSourceSpan = name.sourceSpan
             }
       typeId <-
         freshTypeId
           TypeData
-            { typeQualifiedName = qn,
+            { typeQualifiedName = qualifiedName,
               typeSourceSpan = name.sourceSpan,
               typeSynonymRhs = Nothing
             }
       constructorId <-
         freshConstructorId
           ConstructorData
-            { constructorQualifiedName = qn,
+            { constructorQualifiedName = qualifiedName,
               constructorSourceSpan = name.sourceSpan,
               constructorTypeId = typeId,
               constructorVariableId = variableId
@@ -993,7 +993,7 @@ resolveDeclaration = \case
   -- Parser-recovery sentinel: passthrough unchanged. The parallel
   -- @[ParseError]@ list keeps the structured error detail; this phase has
   -- nothing to resolve here.
-  DeclarationError sp -> pure (DeclarationError sp)
+  DeclarationError sourceSpan -> pure (DeclarationError sourceSpan)
 
 resolveImportDecl :: ImportDeclaration Parsed -> ImportDeclaration Identified
 resolveImportDecl ImportDeclaration {kind, sourceSpan} =
@@ -1288,13 +1288,10 @@ resolveBareRequest nameRef =
     Nothing -> do
       -- Distinguish "name does not exist" from "name exists but is not a
       -- request". The former is a generic K0102, the latter K0108.
-      emitNotARequestOrUndefined nameRef
+      lookupVariable nameRef.text >>= \case
+        Just _ -> emitError (ErrorNotARequest nameRef.sourceSpan nameRef.text)
+        Nothing -> emitError (ErrorUndefinedName nameRef.sourceSpan nameRef.text)
       pure Nothing
-  where
-    emitNotARequestOrUndefined ref =
-      lookupVariable ref.text >>= \case
-        Just _ -> emitError (ErrorNotARequest ref.sourceSpan ref.text)
-        Nothing -> emitError (ErrorUndefinedName ref.sourceSpan ref.text)
 
 resolveQualifiedRequest ::
   ModuleId ->
@@ -1336,13 +1333,10 @@ resolveBareConstructor nameRef =
   lookupConstructor nameRef.text >>= \case
     Just cid -> pure (Just cid)
     Nothing -> do
-      emitNotAConstructorOrUndefined nameRef
+      lookupVariable nameRef.text >>= \case
+        Just _ -> emitError (ErrorNotAConstructor nameRef.sourceSpan nameRef.text)
+        Nothing -> emitError (ErrorUndefinedName nameRef.sourceSpan nameRef.text)
       pure Nothing
-  where
-    emitNotAConstructorOrUndefined ref =
-      lookupVariable ref.text >>= \case
-        Just _ -> emitError (ErrorNotAConstructor ref.sourceSpan ref.text)
-        Nothing -> emitError (ErrorUndefinedName ref.sourceSpan ref.text)
 
 resolveQualifiedConstructor ::
   ModuleId ->
@@ -1463,9 +1457,9 @@ resolveBlock :: Block Parsed -> Identifier (Block Identified)
 resolveBlock Block {statements, returnExpression, whereBlock, sourceSpan} = do
   -- Body: push a fresh frame.
   (statements', returnExpression') <- withScopeFrame $ do
-    ss <- mapM resolveStatement statements
-    re <- traverse resolveExpression returnExpression
-    pure (ss, re)
+    resolvedStatements <- mapM resolveStatement statements
+    resolvedReturnExpression <- traverse resolveExpression returnExpression
+    pure (resolvedStatements, resolvedReturnExpression)
   -- Where: resolved in its own fresh frame (sibling to the body's frame).
   whereBlock' <- traverse resolveWhereBlock whereBlock
   pure
@@ -1557,7 +1551,7 @@ resolveStatement = \case
   StatementBreak statement -> StatementBreak <$> resolveBreak statement
   StatementForNext statement -> StatementForNext <$> resolveForNext statement
   StatementForBreak statement -> StatementForBreak <$> resolveForBreak statement
-  StatementError sp -> pure (StatementError sp)
+  StatementError sourceSpan -> pure (StatementError sourceSpan)
 
 resolveLet :: LetStatement Parsed -> Identifier (LetStatement Identified)
 resolveLet LetStatement {pattern, value, sourceSpan} = do

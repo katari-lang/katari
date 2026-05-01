@@ -184,29 +184,29 @@ deriving instance Show LexerError
 
 instance HasSourceSpan LexerError where
   sourceSpanOf = \case
-    LexerErrorUnterminatedTemplate sp -> sp
-    LexerErrorUnterminatedString sp -> sp
-    LexerErrorInvalidUnicodeEscape sp _ -> sp
-    LexerErrorUnrecognizedCharacter sp _ -> sp
+    LexerErrorUnterminatedTemplate sourceSpan -> sourceSpan
+    LexerErrorUnterminatedString sourceSpan -> sourceSpan
+    LexerErrorInvalidUnicodeEscape sourceSpan _ -> sourceSpan
+    LexerErrorUnrecognizedCharacter sourceSpan _ -> sourceSpan
 
 -- | Convert a 'LexerError' to a unified 'Diagnostic'. Codes K0001-K0019
 -- are reserved for the lexer.
 toDiagnostic :: LexerError -> Diagnostic
 toDiagnostic = \case
-  LexerErrorUnterminatedTemplate sp ->
-    diagnosticError "K0001" "unterminated template literal" sp
-  LexerErrorUnterminatedString sp ->
-    diagnosticError "K0002" "unterminated string literal" sp
-  LexerErrorInvalidUnicodeEscape sp raw ->
+  LexerErrorUnterminatedTemplate sourceSpan ->
+    diagnosticError "K0001" "unterminated template literal" sourceSpan
+  LexerErrorUnterminatedString sourceSpan ->
+    diagnosticError "K0002" "unterminated string literal" sourceSpan
+  LexerErrorInvalidUnicodeEscape sourceSpan raw ->
     diagnosticError
       "K0003"
       ("invalid unicode escape sequence: " <> raw)
-      sp
-  LexerErrorUnrecognizedCharacter sp ch ->
+      sourceSpan
+  LexerErrorUnrecognizedCharacter sourceSpan ch ->
     diagnosticError
       "K0004"
       ("unrecognized character: " <> T.singleton ch)
-      sp
+      sourceSpan
 
 -- | Mutable lexer state: the template-context stack plus an accumulator of
 -- errors discovered through @withRecovery@. Errors are kept in reverse order
@@ -514,7 +514,7 @@ keywordText = \case
 -- | Reverse lookup: surface text → 'Keyword'. Built from 'keywordText' so
 -- adding a new keyword only requires extending the single table above.
 keywordOf :: Text -> Maybe Keyword
-keywordOf name = lookup name [(keywordText kw, kw) | kw <- [minBound .. maxBound]]
+keywordOf name = lookup name [(keywordText keyword, keyword) | keyword <- [minBound .. maxBound]]
 
 -- | Punctuation or operator (excluding `{` and `}` which are handled in
 -- lexBrace). Multi-char tokens are tried before their shorter prefixes.

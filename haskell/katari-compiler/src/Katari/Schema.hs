@@ -237,18 +237,8 @@ plain c =
       examples = []
     }
 
--- | Set the @description@ field of a 'JsonSchema'. Building a fresh
--- record (rather than record-updating) sidesteps the
--- @-XDuplicateRecordFields@ ambiguity warning, which bites because
--- 'description' lives on both 'JsonSchema' and 'AgentSchema'.
 withDesc :: Maybe Text -> JsonSchema -> JsonSchema
-withDesc d s =
-  JsonSchema
-    { core = s.core,
-      title = s.title,
-      description = d,
-      examples = s.examples
-    }
+withDesc d s = JsonSchema {core = s.core, title = s.title, description = d, examples = s.examples}
 
 -- ===========================================================================
 -- SemanticType -> JsonSchema

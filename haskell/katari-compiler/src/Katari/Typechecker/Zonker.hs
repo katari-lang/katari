@@ -37,7 +37,6 @@ import Control.Monad.Trans (lift)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
-import Data.Text (Text)
 import Data.Text qualified as Text
 import Katari.AST
 import Katari.Diagnostic (Diagnostic, diagnosticError)
@@ -46,7 +45,6 @@ import Katari.Typechecker.Identifier
   ( ConstructorData (..),
     ConstructorId,
     IdentifierResult (..),
-    ModuleData (..),
     ModuleId,
     RequestData (..),
     RequestId,
@@ -731,8 +729,8 @@ zonk idResult cgResult solverResult =
           zonkErrors = reverse errs
         }
   where
-    zonkEnvEntry idResult_ vid t =
-      let sourceSpan = case Map.lookup vid idResult_.identifiedVariables of
+    zonkEnvEntry idResult_ variableId t =
+      let sourceSpan = case Map.lookup variableId idResult_.identifiedVariables of
             Just vd -> vd.variableSourceSpan
             Nothing -> placeholderSpan
        in zonkType sourceSpan t

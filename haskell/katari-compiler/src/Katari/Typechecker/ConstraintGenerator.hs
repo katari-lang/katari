@@ -181,11 +181,11 @@ data ConstraintError
 -- K0200-K0219 are reserved for the constraint generator.
 toDiagnostic :: ConstraintError -> Diagnostic
 toDiagnostic = \case
-  ConstraintErrorTypeSynonymCycle sp (TypeId tid) ->
+  ConstraintErrorTypeSynonymCycle sourceSpan (TypeId tid) ->
     diagnosticError
       "K0200"
       ("cyclic type synonym (TypeId " <> T.pack (show tid) <> ")")
-      sp
+      sourceSpan
 
 -- ===========================================================================
 -- Result

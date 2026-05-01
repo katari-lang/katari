@@ -274,11 +274,11 @@ cycleDiagnostic modules cycle_ =
   case cycle_ of
     [] -> []
     (m : _) ->
-      let sp = case Map.lookup m modules of
+      let sourceSpan = case Map.lookup m modules of
             Just module_ -> module_.sourceSpan
             Nothing -> dummySpan
           rendered = Text.intercalate " → " (cycle_ <> [m])
-       in [diagnosticError "K0110" ("import cycle: " <> rendered) sp]
+       in [diagnosticError "K0110" ("import cycle: " <> rendered) sourceSpan]
 
 -- ===========================================================================
 -- Missing-import detection

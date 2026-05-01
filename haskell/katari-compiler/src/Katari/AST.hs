@@ -146,7 +146,7 @@ data NameRef (p :: Phase) (symbol :: SymbolKind) = NameRef
   }
 
 instance HasSourceSpan (NameRef p symbol) where
-  sourceSpanOf ref = ref.sourceSpan
+  sourceSpanOf nameRef = nameRef.sourceSpan
 
 -- ---------------------------------------------------------------------------
 -- Module
@@ -1008,11 +1008,11 @@ retagNameRef ::
   (NameMeta p1 s ~ NameMeta p2 s) =>
   NameRef p1 s ->
   NameRef p2 s
-retagNameRef ref =
+retagNameRef nameRef =
   NameRef
-    { text = ref.text,
-      sourceSpan = ref.sourceSpan,
-      resolution = ref.resolution
+    { text = nameRef.text,
+      sourceSpan = nameRef.sourceSpan,
+      resolution = nameRef.resolution
     }
 
 -- | Change the phase tag of a 'SyntacticType' tree when both phases share

@@ -49,7 +49,6 @@ import Katari.AST
     NextStatement (..),
     AgentStatement (..),
     ArrayExpression (..),
-    ParameterBinding (..),
     TupleExpression (..),
     Phase (Zonked),
     Position (..),
@@ -64,7 +63,6 @@ import Katari.AST
 import Katari.AST.Identifiers
   ( ConstructorId,
     ModuleId,
-    QualifiedName (..),
     RequestId,
     TypeId,
     VariableId,
@@ -175,8 +173,8 @@ findReferences index = \case
 -- | Definition span of the symbol at a position, if it can be resolved.
 findDefinition :: ZonkResult -> FilePath -> Position -> Maybe SourceSpan
 findDefinition zonkResult filePath position = do
-  ref <- identifyAtPosition zonkResult filePath position
-  case ref of
+  resolvedRef <- identifyAtPosition zonkResult filePath position
+  case resolvedRef of
     ResolvedReferenceVariable variableId ->
       fmap (.variableSourceSpan) (Map.lookup variableId zonkResult.zonkedVariables)
     ResolvedReferenceType typeId ->
