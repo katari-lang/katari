@@ -49,13 +49,10 @@ import Data.Text (Text)
 import Data.Text qualified as Text
 import Katari.AST
   ( Declaration (..),
-    HasSourceSpan (..),
     ImportDeclaration (..),
     ImportKind (..),
     Module (..),
     Phase (Parsed),
-    Position (..),
-    SourceSpan (..),
   )
 import Katari.Diagnostic (Diagnostic, diagnosticError, hasErrors)
 import Katari.IR (IRModule)
@@ -63,14 +60,15 @@ import Katari.Lowering (lowerProgram)
 import Katari.Lowering qualified as Lowering
 import Katari.Parser qualified as Parser
 import Katari.Schema (SchemaBundle, buildSchemas)
+import Katari.SourceSpan (HasSourceSpan (..), Position (..), SourceSpan (..))
 import Katari.Typechecker.ConstraintGenerator (ConstraintGenResult (..), generateConstraints)
 import Katari.Typechecker.ConstraintGenerator qualified as CG
+import Katari.Typechecker.Exhaustive (checkExhaustive)
+import Katari.Typechecker.Exhaustive qualified as Exhaustive
 import Katari.Typechecker.Identifier (IdentifierResult, identify)
 import Katari.Typechecker.Identifier qualified as Identifier
 import Katari.Typechecker.Solver (SolverResult (..), solve)
 import Katari.Typechecker.Solver qualified as Solver
-import Katari.Typechecker.Exhaustive (checkExhaustive)
-import Katari.Typechecker.Exhaustive qualified as Exhaustive
 import Katari.Typechecker.Zonker (ZonkResult (..), zonk)
 import Katari.Typechecker.Zonker qualified as Zonker
 

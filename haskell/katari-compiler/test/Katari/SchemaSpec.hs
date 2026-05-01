@@ -10,9 +10,9 @@ import Data.Text (Text)
 import Katari.Compile (CompileInput (..), CompileResult (..), compile)
 import Katari.Diagnostic (Diagnostic (..))
 import Katari.Schema
-import Katari.Typechecker.SemanticType
+import Katari.SemanticType
   ( Resolved,
-    SemanticEffect (..),
+    SemanticRequest (..),
     SemanticType (..),
   )
 import Test.Hspec
@@ -90,7 +90,7 @@ toJsonSchemaSpec = describe "toJsonSchema (SemanticType -> JsonSchema)" $ do
           SemanticTypeFunction
             Map.empty
             SemanticTypeNull
-            (SemanticEffect Set.empty Set.empty)
+            (SemanticRequest Set.empty Set.empty)
     t `shouldHaveCore` SchemaCoreUnknown
 
 unionCompactionSpec :: Spec
@@ -168,7 +168,7 @@ bundleShapeSpec = describe "SchemaBundle shape (Phase 15-H)" $ do
                     description = Nothing,
                     examples = []
                   },
-              effects = []
+              requests = []
             }
         ctor =
           AgentSchema
@@ -187,7 +187,7 @@ bundleShapeSpec = describe "SchemaBundle shape (Phase 15-H)" $ do
                     description = Nothing,
                     examples = []
                   },
-              effects = []
+              requests = []
             }
         dataDef =
           JsonSchema
@@ -207,14 +207,16 @@ bundleShapeSpec = describe "SchemaBundle shape (Phase 15-H)" $ do
     -- Round-trip through JSON to lock the wire shape.
     roundTrip bundle
     -- And the qualified-name keys are accessible.
-    Map.lookup "main.greet" bundle.agentSchemas `shouldSatisfy` ( \case
-      Just _ -> True
-      Nothing -> False
-      )
-    Map.lookup "main.Pair" bundle.dataSchemas `shouldSatisfy` ( \case
-      Just _ -> True
-      Nothing -> False
-      )
+    Map.lookup "main.greet" bundle.agentSchemas
+      `shouldSatisfy` ( \case
+                          Just _ -> True
+                          Nothing -> False
+                      )
+    Map.lookup "main.Pair" bundle.dataSchemas
+      `shouldSatisfy` ( \case
+                          Just _ -> True
+                          Nothing -> False
+                      )
 
 -- ===========================================================================
 -- Phase 17: annotation → description end-to-end

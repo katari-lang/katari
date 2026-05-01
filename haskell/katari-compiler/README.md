@@ -35,26 +35,26 @@ Katari.Parser                -- Token stream → Module Parsed. megaparsec カ�
                                 ストリーム. break/next 文脈を ReaderT で透過.
 
 Katari.AST                   -- Trees-that-Grow phase 化 AST. Phase = Parsed |
-                                Identified | Constrained | Zonked. NameMeta /
-                                ExprType / PatType の type family で phase 別 metadata.
+                                Identified | Constrained | Zonked. NameRefResolution /
+                                ExpressionType / PatternType の type family で phase 別 metadata.
                                 NameRefKind に RequestRef / ConstructorRef を含む 6 slot
                                 (handler / match constructor pattern を型レベル分離).
-Katari.AST.Identifiers       -- VariableId / TypeId / ModuleId / RequestId /
+Katari.Id           -- VariableId / TypeId / ModuleId / RequestId /
                                 ConstructorId と QualifiedName. Identifier pass で発行.
+Katari.SemanticType          -- 型表現 (SemanticType, SemanticRequest).
+                                Unresolved / Resolved の 2 phase. uniplate で walk.
 
 Katari.Typechecker.Identifier      -- 名前解決 (5 namespace: variable / type / module
                                       / request / constructor + label). 未解決名や
                                       kind 不一致 (handler が agent / pattern が req
                                       など) を IdentifierError で reject.
-Katari.Typechecker.SemanticType    -- 型表現 (SemanticType, SemanticEffect).
-                                      Unresolved / Resolved の 2 phase. uniplate で walk.
 Katari.Typechecker.NormalizedType  -- 正規化型 (lattice 演算 unionNT / intersectNT,
                                       subtype 判定).
 Katari.Typechecker.ConstraintGenerator -- AST Identified → AST Constrained + 制約集合
-                                          (subtype / effect).
+                                          (subtype / request).
 Katari.Typechecker.Solver          -- 制約解決. Decompose / Branch / Substitution /
-                                      Effect の sub-module で構造分解 → 分岐 →
-                                      代入決定 → effect 集約.
+                                      Request の sub-module で構造分解 → 分岐 →
+                                      代入決定 → request 集約.
 Katari.Typechecker.Zonker          -- 解決済み代入を Constrained AST に焼き付け
                                       Zonked AST へ (型情報を確定).
 

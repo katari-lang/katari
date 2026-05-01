@@ -42,7 +42,6 @@ import Katari.AST
     ExternalAgentDeclaration (..),
     ForExpression (..),
     ForInBinding (..),
-    HasSourceSpan (..),
     IfExpression (..),
     LetStatement (..),
     MatchExpression (..),
@@ -51,16 +50,14 @@ import Katari.AST
     NameRefKind (..),
     NextStatement (..),
     Phase (Zonked),
-    Position (..),
     RequestDeclaration (..),
     ReturnStatement (..),
-    SourceSpan (..),
     Statement (..),
     TupleExpression (..),
     UnaryOperatorExpression (..),
     VariableExpression (..),
   )
-import Katari.AST.Identifiers
+import Katari.Id
   ( ConstructorId,
     ModuleId,
     RequestId,
@@ -68,13 +65,14 @@ import Katari.AST.Identifiers
     VariableId,
     renderQualifiedName,
   )
+import Katari.SemanticType (Resolved, SemanticType)
+import Katari.SourceSpan (HasSourceSpan (..), Position (..), SourceSpan (..))
 import Katari.Typechecker.Identifier
   ( ConstructorData (..),
     RequestData (..),
     TypeData (..),
     VariableData (..),
   )
-import Katari.Typechecker.SemanticType (Resolved, SemanticType)
 import Katari.Typechecker.Zonker (ZonkResult (..))
 
 -- ===========================================================================

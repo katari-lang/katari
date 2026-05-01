@@ -19,6 +19,10 @@ import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
+import Katari.SemanticType
+  ( SemanticType (..),
+    Unresolved,
+  )
 import Katari.Typechecker.ConstraintGenerator
   ( Constraint (..),
     ConstraintReason,
@@ -26,10 +30,6 @@ import Katari.Typechecker.ConstraintGenerator
 import Katari.Typechecker.NormalizedType
   ( normaliseSemantic,
     subtypeNT,
-  )
-import Katari.Typechecker.SemanticType
-  ( SemanticType (..),
-    Unresolved,
   )
 import Katari.Typechecker.Solver.Internal
   ( SolverError (..),
@@ -52,8 +52,8 @@ decomposeConstraint ::
   Constraint ->
   Either SolverError (Set Constraint)
 decomposeConstraint constraint = case constraint of
-  -- Effect constraints are handled separately; pass through.
-  EffectConstraint {} -> Right (Set.singleton constraint)
+  -- Request constraints are handled separately; pass through.
+  RequestConstraint {} -> Right (Set.singleton constraint)
   TypeConstraint leftType rightType reason ->
     decomposeType constraint leftType rightType reason
 
@@ -71,9 +71,9 @@ decomposeType original leftType rightType reason = case (leftType, rightType) of
   -- LHS or RHS is a type variable: leave for branching / bound aggregation.
   (SemanticTypeVariable _, _) -> keep
   (_, SemanticTypeVariable _) -> keep
-  -- Both fully concrete (no type vars AND no effect vars): direct subtype
+  -- Both fully concrete (no type vars AND no request vars): direct subtype
   -- check via NormalizedType. We use 'semanticToConcrete' as the gate so
-  -- that function types with unresolved effect variables fall through to
+  -- that function types with unresolved request variables fall through to
   -- the structural decomposition cases below instead of being rejected here.
   _
     | Just leftConcrete <- semanticToConcrete leftType,
@@ -88,11 +88,11 @@ decomposeType original leftType rightType reason = case (leftType, rightType) of
   (_, SemanticTypeUnion _) ->
     -- A <: (B | C): branching required (handled in Solver/Branch.hs).
     keep
-  ( SemanticTypeFunction leftParameters leftReturn leftEffects,
-    SemanticTypeFunction rightParameters rightReturn rightEffects
+  ( SemanticTypeFunction leftParameters leftReturn leftRequests,
+    SemanticTypeFunction rightParameters rightReturn rightRequests
     )
       | Map.keysSet leftParameters == Map.keysSet rightParameters ->
-          -- Args contravariant; return covariant; effect covariant (subset).
+          -- Args contravariant; return covariant; request covariant (subset).
           -- Parameters are matched by label (named-parameter calling
           -- convention): for each label L, derive @rightParameter \<: leftParameter@.
           let parameterConstraints =
@@ -101,8 +101,8 @@ decomposeType original leftType rightType reason = case (leftType, rightType) of
                     Just rightParameter <- [Map.lookup label rightParameters]
                 ]
               returnConstraint = TypeConstraint leftReturn rightReturn reason
-              effectConstraint = EffectConstraint leftEffects rightEffects reason
-           in yield (effectConstraint : returnConstraint : parameterConstraints)
+              requestConstraint = RequestConstraint leftRequests rightRequests reason
+           in yield (requestConstraint : returnConstraint : parameterConstraints)
       | otherwise ->
           Left
             ( SolverErrorStructuralMismatch

@@ -30,19 +30,20 @@ import Data.Maybe (catMaybes, mapMaybe)
 import Data.Ord (comparing)
 import Data.Text (Text)
 import Data.Text qualified as Text
-import Katari.AST (NameRef (..), SourceSpan, Zonked)
+import Katari.AST (NameRef (..), Zonked)
 import Katari.AST qualified as AST
 import Katari.Diagnostic (Diagnostic, diagnosticError, diagnosticWarning)
+import Katari.SemanticType
+  ( Resolved,
+    SemanticType (..),
+  )
+import Katari.SourceSpan (HasSourceSpan (..), SourceSpan)
 import Katari.Typechecker.Identifier
   ( ConstructorData (..),
     ConstructorId,
     QualifiedName (..),
     TypeId,
     VariableId,
-  )
-import Katari.Typechecker.SemanticType
-  ( Resolved,
-    SemanticType (..),
   )
 import Katari.Typechecker.Zonker (ZonkResult (..))
 
@@ -171,7 +172,8 @@ useful ctx matrix@(PatMatrix rows) testRow = case (rows, testRow) of
 -- (wildcards are not constructors). Returns @(tag, arity)@ pairs.
 headsOf :: PatMatrix -> [(CtorTag, Int)]
 headsOf (PatMatrix rows) =
-  nubBy (\a b -> fst a == fst b)
+  nubBy
+    (\a b -> fst a == fst b)
     [(tag, length subs) | PatRow (PatHeadCtor tag subs : _) _ <- rows]
 
 -- | Specialise the matrix for constructor @tag@ with @arity@ fields.
@@ -278,8 +280,8 @@ isCompleteSig seen ty zr = case ty of
 ctorsOfType :: ZonkResult -> TypeId -> [(ConstructorId, Int)]
 ctorsOfType zr typeId =
   [ (cid, lookupCtorArity zr cd.constructorVariableId)
-  | (cid, cd) <- Map.toList zr.zonkedConstructors
-  , cd.constructorTypeId == typeId
+    | (cid, cd) <- Map.toList zr.zonkedConstructors,
+      cd.constructorTypeId == typeId
   ]
 
 -- | Arity of a constructor from its function-type signature.
@@ -323,8 +325,8 @@ literalTag = \case
   AST.LiteralValueNumber _ -> CtorTagLitStr "(number)"
 
 -- | Extract the semantic type from any 'AST.Expression Zonked'.
-getExprType :: AST.Expression Zonked -> SemanticType Resolved
-getExprType = \case
+getExpressionType :: AST.Expression Zonked -> SemanticType Resolved
+getExpressionType = \case
   AST.ExpressionLiteral e -> e.typeOf
   AST.ExpressionVariable e -> e.typeOf
   AST.ExpressionTuple e -> e.typeOf
@@ -359,7 +361,9 @@ renderPatHead zr = \case
   PatHeadCtor (CtorTagLitInt n) _ -> Text.pack (show n)
   PatHeadCtor (CtorTagLitStr s) _ -> "\"" <> s <> "\""
   PatHeadCtor (CtorTagTupleN n) subs ->
-    "(" <> Text.intercalate ", " (map (renderPatHead zr) subs) <> ")"
+    "("
+      <> Text.intercalate ", " (map (renderPatHead zr) subs)
+      <> ")"
       <> if null subs then Text.pack (" {tuple/" <> show n <> "}") else ""
   PatHeadCtor (CtorTagData cid) subs ->
     let ctorName = case Map.lookup cid zr.zonkedConstructors of
@@ -375,7 +379,7 @@ renderPatHead zr = \case
 
 checkMatch :: ZonkResult -> AST.MatchExpression Zonked -> [ExhaustiveError]
 checkMatch zr me =
-  let subjectType = getExprType me.subject
+  let subjectType = getExpressionType me.subject
       ctx = TypeCtx {columnTypes = [subjectType], zonkResult = zr}
       arms = me.cases
       armHeads = map (\arm -> patternToHead arm.pattern) arms
@@ -389,12 +393,13 @@ checkMatch zr me =
              in [ExhaustiveErrorNonExhaustiveMatch me.sourceSpan [witness]]
           else []
       -- Reachability: is arm i already covered by prior arms?
-      unreachableErrors = catMaybes
-        [ if not (useful ctx (PatMatrix (take idx armRows)) [armHead])
-            then Just (ExhaustiveErrorUnreachableArm arm.sourceSpan)
-            else Nothing
-        | (idx, arm, armHead) <- zip3 [0 ..] arms armHeads
-        ]
+      unreachableErrors =
+        catMaybes
+          [ if not (useful ctx (PatMatrix (take idx armRows)) [armHead])
+              then Just (ExhaustiveErrorUnreachableArm arm.sourceSpan)
+              else Nothing
+            | (idx, arm, armHead) <- zip3 [0 ..] arms armHeads
+          ]
    in nonExhaustiveErrors ++ unreachableErrors
 
 -- | Check that @pattern@ is irrefutable (covers all values of @subjectType@).
@@ -407,7 +412,7 @@ checkIrrefutable ::
 checkIrrefutable zr pattern subjectType =
   let headPat = patternToHead pattern
       ctx = TypeCtx {columnTypes = [subjectType], zonkResult = zr}
-      sourceSpan = AST.sourceSpanOf pattern
+      sourceSpan = sourceSpanOf pattern
       row = PatRow [headPat] sourceSpan
    in if useful ctx (PatMatrix [row]) [PatHeadWildcard]
         then
@@ -498,7 +503,7 @@ walkStatement :: ZonkResult -> AST.Statement Zonked -> [ExhaustiveError]
 walkStatement zr = \case
   AST.StatementLet ls ->
     walkExpression zr ls.value
-      ++ checkIrrefutable zr ls.pattern (getExprType ls.value)
+      ++ checkIrrefutable zr ls.pattern (getExpressionType ls.value)
   AST.StatementAgent ls ->
     walkAgentBody zr ls.name.resolution ls.parameters ls.body
   AST.StatementReturn rs ->
@@ -556,7 +561,7 @@ walkExpression zr = \case
 walkForInBinding :: ZonkResult -> AST.ForInBinding Zonked -> [ExhaustiveError]
 walkForInBinding zr fib =
   walkExpression zr fib.source
-    ++ let elemType = case getExprType fib.source of
+    ++ let elemType = case getExpressionType fib.source of
              SemanticTypeArray t -> t
              _ -> SemanticTypeUnknown
         in checkIrrefutable zr fib.pattern elemType

@@ -7,7 +7,7 @@ import Data.Map.Strict qualified as Map
 import Data.Maybe (isJust, isNothing)
 import Data.Text (Text)
 import Katari.AST
-import Katari.AST.Identifiers (QualifiedName)
+import Katari.Id (QualifiedName)
 import Katari.Parser (parseModuleStrict)
 import Katari.Typechecker.Identifier
 import Test.Hspec
@@ -95,8 +95,8 @@ synonymRhsOf td = td.typeSynonymRhs
 
 -- | Pull the @typeName.resolution@ tag out of every @data@ declaration in a
 -- resolved module. Used by tests that assert AST-side TypeId carriage.
-collectDataTypeNameMetadata :: Module Identified -> [NameMeta Identified TypeRef]
-collectDataTypeNameMetadata m =
+collectDataTypeNameRefResolutiondata :: Module Identified -> [NameRefResolution Identified TypeRef]
+collectDataTypeNameRefResolutiondata m =
   [ ref.resolution
     | DeclarationData DataDeclaration {typeName = ref} <- m.declarations
   ]
@@ -238,7 +238,7 @@ dataDeclarations = describe "data declarations" $ do
           ]
     -- AST 上の typeName.metadata と identifiedTypes 側の TypeId が一致することを確認。
     let mainModule = head (Map.elems res.moduleASTs)
-        typeNameMeta = head (collectDataTypeNameMetadata mainModule)
+        typeNameRefResolution = head (collectDataTypeNameRefResolutiondata mainModule)
         widgetTypeId =
           head
             [ tid
@@ -247,7 +247,7 @@ dataDeclarations = describe "data declarations" $ do
             ]
         bareNameOf :: QualifiedName -> Text
         bareNameOf qn = qn.name
-    case typeNameMeta of
+    case typeNameRefResolution of
       Just tid -> tid `shouldBe` widgetTypeId
       Nothing ->
         expectationFailure "data declaration typeName resolved as Unresolved"
@@ -265,7 +265,7 @@ dataDeclarations = describe "data declarations" $ do
             typeIds =
               [ tid
                 | m <- asts,
-                  metadata <- collectDataTypeNameMetadata m,
+                  metadata <- collectDataTypeNameRefResolutiondata m,
                   Just tid <- [metadata]
               ]
         length typeIds `shouldBe` 2

@@ -4,8 +4,9 @@ import Data.List (find)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.Text (Text)
-import Katari.AST.Identifiers (QualifiedName (QualifiedName))
+import Katari.Id (QualifiedName (QualifiedName))
 import Katari.Parser (parseModuleStrict)
+import Katari.SemanticType
 import Katari.Typechecker.ConstraintGenerator
 import Katari.Typechecker.Identifier
   ( IdentifierResult (..),
@@ -17,7 +18,6 @@ import Katari.Typechecker.Identifier
     VariableId,
     identify,
   )
-import Katari.Typechecker.SemanticType
 import Test.Hspec
 
 -- ---------------------------------------------------------------------------
@@ -42,19 +42,19 @@ countTypeConstraints :: ConstraintGenResult -> Int
 countTypeConstraints result =
   length [() | TypeConstraint {} <- Set.toList result.constraints]
 
-countEffectConstraints :: ConstraintGenResult -> Int
-countEffectConstraints result =
-  length [() | EffectConstraint {} <- Set.toList result.constraints]
+countRequestConstraints :: ConstraintGenResult -> Int
+countRequestConstraints result =
+  length [() | RequestConstraint {} <- Set.toList result.constraints]
 
 typeConstraints :: ConstraintGenResult -> [(SemanticType Unresolved, SemanticType Unresolved)]
 typeConstraints result =
   [(lhs, rhs) | TypeConstraint {typeLhs = lhs, typeRhs = rhs} <- Set.toList result.constraints]
 
-effectConstraints
-  :: ConstraintGenResult
-  -> [(SemanticEffect Unresolved, SemanticEffect Unresolved)]
-effectConstraints result =
-  [(lhs, rhs) | EffectConstraint {effectLhs = lhs, effectRhs = rhs} <- Set.toList result.constraints]
+requestConstraints ::
+  ConstraintGenResult ->
+  [(SemanticRequest Unresolved, SemanticRequest Unresolved)]
+requestConstraints result =
+  [(lhs, rhs) | RequestConstraint {requestLhs = lhs, requestRhs = rhs} <- Set.toList result.constraints]
 
 -- | Find the VariableId for a given source name.
 variableIdOf :: Text -> IdentifierResult -> Maybe VariableId
@@ -62,8 +62,8 @@ variableIdOf name result =
   fst <$> find ((== name) . (.variableName) . snd) (Map.toList result.identifiedVariables)
 
 -- | Look up the 'RequestId' that corresponds to a given call-side
--- 'VariableId'. Used to populate effect-set assertions in tests where the
--- effect lookup is keyed by request id.
+-- 'VariableId'. Used to populate request-set assertions in tests where the
+-- request lookup is keyed by request id.
 requestIdOfVariable :: VariableId -> IdentifierResult -> RequestId
 requestIdOfVariable vid result =
   head
@@ -80,25 +80,25 @@ typeVarOf :: Text -> ConstraintGenResult -> IdentifierResult -> Maybe (SemanticT
 typeVarOf name cg ir = variableIdOf name ir >>= \vid -> Map.lookup vid cg.typeEnvironment
 
 -- | True if any type constraint has the given lhs.
-hasTypeConstraintLhs
-  :: SemanticType Unresolved
-  -> ConstraintGenResult
-  -> Bool
+hasTypeConstraintLhs ::
+  SemanticType Unresolved ->
+  ConstraintGenResult ->
+  Bool
 hasTypeConstraintLhs target cg = any (\(lhs, _) -> lhs == target) (typeConstraints cg)
 
 -- | True if some constraint matches the given (lhs, rhs) predicate.
-hasTypeConstraint
-  :: (SemanticType Unresolved -> SemanticType Unresolved -> Bool)
-  -> ConstraintGenResult
-  -> Bool
+hasTypeConstraint ::
+  (SemanticType Unresolved -> SemanticType Unresolved -> Bool) ->
+  ConstraintGenResult ->
+  Bool
 hasTypeConstraint p cg = any (uncurry p) (typeConstraints cg)
 
--- | True if some effect constraint matches the predicate.
-hasEffectConstraint
-  :: (SemanticEffect Unresolved -> SemanticEffect Unresolved -> Bool)
-  -> ConstraintGenResult
-  -> Bool
-hasEffectConstraint p cg = any (uncurry p) (effectConstraints cg)
+-- | True if some request constraint matches the predicate.
+hasRequestConstraint ::
+  (SemanticRequest Unresolved -> SemanticRequest Unresolved -> Bool) ->
+  ConstraintGenResult ->
+  Bool
+hasRequestConstraint p cg = any (uncurry p) (requestConstraints cg)
 
 -- ---------------------------------------------------------------------------
 -- Spec
@@ -136,7 +136,7 @@ basicAgent = describe "basic agent" $ do
     -- agent signature と t_foo の eq constraint (= subtype 2 本) が含まれる
     countTypeConstraints cg `shouldSatisfy` (>= 2)
 
-  it "agent with no return / no effects: both inferred (no errors)" $ do
+  it "agent with no return / no requests: both inferred (no errors)" $ do
     cg <- runOne "agent foo() { 0 }"
     cg.errors `shouldBe` []
 
@@ -178,7 +178,7 @@ variablePatterns = describe "variable patterns" $ do
     cg.errors `shouldBe` []
     -- Eq generates 2 subtype constraints. Plus the agent signature eq (2),
     -- the body return-flow constraint (1), the return-annotation eq (2),
-    -- and the effect bound. So we expect a healthy non-zero number.
+    -- and the request bound. So we expect a healthy non-zero number.
     countTypeConstraints cg `shouldSatisfy` (> 0)
 
   it "unannotated parameter does not create extra type constraint per pattern" $ do
@@ -194,7 +194,7 @@ variablePatterns = describe "variable patterns" $ do
 
 declarations :: Spec
 declarations = describe "declarations" $ do
-  it "data constructor signature is pure (no effects)" $ do
+  it "data constructor signature is pure (no requests)" $ do
     cg <- runOne "data foo(x: integer)\nagent main() { foo(x = 1) }"
     cg.errors `shouldBe` []
     -- We don't introspect specific constraints here; just check no errors and
@@ -204,15 +204,14 @@ declarations = describe "declarations" $ do
   it "req declaration emits eq constraint" $ do
     cg <- runOne "req foo(x: integer) -> string"
     cg.errors `shouldBe` []
-    countTypeConstraints cg `shouldSatisfy` (>= 2)  -- eq = 2 subtype
-
-  it "ext-agent emits eq constraint (effects from with clause)" $ do
+    countTypeConstraints cg `shouldSatisfy` (>= 2) -- eq = 2 subtype
+  it "ext-agent emits eq constraint (requests from with clause)" $ do
     cg <- runOne "req bar(x: integer) -> string\n@\"svc\"\next agent foo() -> integer with bar"
     cg.errors `shouldBe` []
     countTypeConstraints cg `shouldSatisfy` (>= 2)
 
 -- ---------------------------------------------------------------------------
--- Call expressions: effect constraint propagation
+-- Call expressions: request constraint propagation
 -- ---------------------------------------------------------------------------
 
 callExpressions :: Spec
@@ -220,8 +219,8 @@ callExpressions = describe "call expressions" $ do
   it "agent calling another agent generates a call constraint" $ do
     cg <- runOne "agent helper() { 0 }\nagent main() { helper() }"
     cg.errors `shouldBe` []
-    -- Effect constraint(s) for the body effect bound + call propagation
-    countEffectConstraints cg `shouldSatisfy` (> 0)
+    -- Request constraint(s) for the body request bound + call propagation
+    countRequestConstraints cg `shouldSatisfy` (> 0)
 
 -- ---------------------------------------------------------------------------
 -- Constructor pattern (reverse-call)
@@ -243,7 +242,7 @@ constructorPatterns = describe "constructor patterns" $ do
     cg.errors `shouldBe` []
 
 -- ---------------------------------------------------------------------------
--- Where blocks (effect discharge)
+-- Where blocks (request discharge)
 -- ---------------------------------------------------------------------------
 
 whereBlocks :: Spec
@@ -260,10 +259,10 @@ whereBlocks = describe "where blocks" $ do
             "}"
           ]
     cg.errors `shouldBe` []
-    -- Effect constraints include the discharge: inner_eff <: outer ∪ {fetch}
-    countEffectConstraints cg `shouldSatisfy` (> 0)
+    -- Request constraints include the discharge: inner_eff <: outer ∪ {fetch}
+    countRequestConstraints cg `shouldSatisfy` (> 0)
 
-  it "req handler with effect annotation is rejected by parser" $ do
+  it "req handler with request annotation is rejected by parser" $ do
     case parseModuleStrict "<test>" $
       mconcat
         [ "req fetch() -> string\n",
@@ -273,7 +272,7 @@ whereBlocks = describe "where blocks" $ do
           "  req fetch() -> string with bar { \"ok\" }",
           "}"
         ] of
-      Left _ -> pure ()  -- parse error expected
+      Left _ -> pure () -- parse error expected
       Right _ -> expectationFailure "expected parse failure for handler with-clause"
 
   it "handler break value flows to a type variable (handle-result)" $ do
@@ -292,11 +291,13 @@ whereBlocks = describe "where blocks" $ do
     cg.errors `shouldBe` []
     -- break "boom" should emit a constraint with lhs = literal "boom"
     -- targeting some type variable (the handle-result tv).
-    cg `shouldSatisfy` hasTypeConstraint
-      ( \l r -> l == SemanticTypeLiteralString "boom" && case r of
-          SemanticTypeVariable _ -> True
-          _ -> False
-      )
+    cg
+      `shouldSatisfy` hasTypeConstraint
+        ( \l r ->
+            l == SemanticTypeLiteralString "boom" && case r of
+              SemanticTypeVariable _ -> True
+              _ -> False
+        )
 
   it "handler next value flows to a type variable (handler return / next-tv)" $ do
     cg <-
@@ -312,11 +313,13 @@ whereBlocks = describe "where blocks" $ do
             "}\n"
           ]
     cg.errors `shouldBe` []
-    cg `shouldSatisfy` hasTypeConstraint
-      ( \l r -> l == SemanticTypeLiteralString "resumed" && case r of
-          SemanticTypeVariable _ -> True
-          _ -> False
-      )
+    cg
+      `shouldSatisfy` hasTypeConstraint
+        ( \l r ->
+            l == SemanticTypeLiteralString "resumed" && case r of
+              SemanticTypeVariable _ -> True
+              _ -> False
+        )
 
   it "where: body tail value flows into the handle-result tv" $ do
     -- The body's tail expression "hello" flows into the where-block's
@@ -332,15 +335,17 @@ whereBlocks = describe "where blocks" $ do
             "}\n"
           ]
     cg.errors `shouldBe` []
-    cg `shouldSatisfy` hasTypeConstraint
-      ( \l r -> l == SemanticTypeLiteralString "hello" && case r of
-          SemanticTypeVariable _ -> True
-          _ -> False
-      )
+    cg
+      `shouldSatisfy` hasTypeConstraint
+        ( \l r ->
+            l == SemanticTypeLiteralString "hello" && case r of
+              SemanticTypeVariable _ -> True
+              _ -> False
+        )
 
   it "handler implicit completion: body tail flows to whole-block tv (implicit break)" $ do
     -- A handler body that falls through without explicit 'next' / 'break'
-    -- is treated as an implicit 'break' (Koka-style algebraic effects). Its
+    -- is treated as an implicit 'break' (Koka-style algebraic requests). Its
     -- tail value flows to the where-containing block's whole type, NOT to
     -- the handler's declared return type.
     cg <-
@@ -352,17 +357,19 @@ whereBlocks = describe "where blocks" $ do
             "}\n"
           ]
     cg.errors `shouldBe` []
-    cg `shouldSatisfy` hasTypeConstraint
-      ( \l r -> l == SemanticTypeLiteralString "implicit" && case r of
-          SemanticTypeVariable _ -> True
-          _ -> False
-      )
+    cg
+      `shouldSatisfy` hasTypeConstraint
+        ( \l r ->
+            l == SemanticTypeLiteralString "implicit" && case r of
+              SemanticTypeVariable _ -> True
+              _ -> False
+        )
 
-  it "where block emits a handler-effect-bound constraint (e4 <: e1)" $ do
+  it "where block emits a handler-request-bound constraint (e4 <: e1)" $ do
     -- In addition to the discharge constraint (e3 <: e1 ∪ e2), a where
-    -- block emits an effect-var <: effect-var constraint bounding handler
-    -- bodies' effect by the outer effect (e4 <: e1). Both lhs and rhs
-    -- must have only effectVars populated and effectReqs empty.
+    -- block emits an request-var <: request-var constraint bounding handler
+    -- bodies' request by the outer request (e4 <: e1). Both lhs and rhs
+    -- must have only requestVars populated and requestReqs empty.
     cg <-
       runOne $
         mconcat
@@ -374,30 +381,31 @@ whereBlocks = describe "where blocks" $ do
             "}\n"
           ]
     cg.errors `shouldBe` []
-    cg `shouldSatisfy` hasEffectConstraint
-      ( \lhs rhs ->
-          Set.null lhs.effectReqs
-            && Set.null rhs.effectReqs
-            && not (Set.null lhs.effectVars)
-            && not (Set.null rhs.effectVars)
-      )
+    cg
+      `shouldSatisfy` hasRequestConstraint
+        ( \lhs rhs ->
+            Set.null lhs.requestReqs
+              && Set.null rhs.requestReqs
+              && not (Set.null lhs.requestVars)
+              && not (Set.null rhs.requestVars)
+        )
 
   it "block without where emits only the agent's bodyEff <: declared constraint" $ do
-    -- A plain block (no where) should not introduce extra effect
-    -- constraints of its own. The only effect constraint the agent should
-    -- produce is bodyEff <: declared, with both sides effect-vars only
+    -- A plain block (no where) should not introduce extra request
+    -- constraints of its own. The only request constraint the agent should
+    -- produce is bodyEff <: declared, with both sides request-vars only
     -- (no req-id sets) since neither has a 'with' clause.
     cg <- runOne "agent main() -> string { \"hi\" }\n"
     cg.errors `shouldBe` []
-    let effs = effectConstraints cg
+    let effs = requestConstraints cg
     length effs `shouldBe` 1
     case effs of
       [(lhs, rhs)] -> do
-        Set.null lhs.effectReqs `shouldBe` True
-        Set.null rhs.effectReqs `shouldBe` True
-        Set.size lhs.effectVars `shouldBe` 1
-        Set.size rhs.effectVars `shouldBe` 1
-      _ -> expectationFailure "expected exactly one effect constraint"
+        Set.null lhs.requestReqs `shouldBe` True
+        Set.null rhs.requestReqs `shouldBe` True
+        Set.size lhs.requestVars `shouldBe` 1
+        Set.size rhs.requestVars `shouldBe` 1
+      _ -> expectationFailure "expected exactly one request constraint"
 
 -- ---------------------------------------------------------------------------
 -- Blocks containing global-exit statements (return / next / break / ...)
@@ -425,11 +433,12 @@ exitStatementBlocks = describe "exit-statement blocks" $ do
     cg.errors `shouldBe` []
     cg
       `shouldSatisfy` not
-      . hasTypeConstraint
-        ( \l r -> l == SemanticTypeNull && case r of
-            SemanticTypeVariable _ -> True
-            _ -> False
-        )
+        . hasTypeConstraint
+          ( \l r ->
+              l == SemanticTypeNull && case r of
+                SemanticTypeVariable _ -> True
+                _ -> False
+          )
 
   it "if-then branch ending with 'return' contributes type never to the if result" $ do
     -- The then-branch is just 'return \"a\"', so walkBlock yields
@@ -476,8 +485,8 @@ typeSynonymCycle = describe "type synonym cycle" $ do
     cg <- runOne "type T = T\nagent main(x: T) { 0 }"
     -- One ConstraintErrorTypeSynonymCycle expected (or more if T is referenced again).
     cg.errors `shouldSatisfy` any isCycleError
-    where
-      isCycleError ConstraintErrorTypeSynonymCycle {} = True
+  where
+    isCycleError ConstraintErrorTypeSynonymCycle {} = True
 
 -- ---------------------------------------------------------------------------
 -- Constraint contents (verify shape, not just count)
@@ -517,49 +526,54 @@ constraintContents = describe "constraint contents" $ do
       Nothing -> expectationFailure "foo not in env"
       Just tFoo -> do
         -- 関数型 → t_foo の方向
-        cg `shouldSatisfy` hasTypeConstraint
-          ( \l r -> case l of
-              SemanticTypeFunction params ret _ ->
-                Map.keys params == ["x"]
-                  && ret == SemanticTypeString
-                  && r == tFoo
-              _ -> False
-          )
+        cg
+          `shouldSatisfy` hasTypeConstraint
+            ( \l r -> case l of
+                SemanticTypeFunction params ret _ ->
+                  Map.keys params == ["x"]
+                    && ret == SemanticTypeString
+                    && r == tFoo
+                _ -> False
+            )
         -- t_foo → 関数型 の方向 (eq の逆向き)
-        cg `shouldSatisfy` hasTypeConstraint
-          ( \l r -> l == tFoo && case r of
-              SemanticTypeFunction {} -> True
-              _ -> False
-          )
+        cg
+          `shouldSatisfy` hasTypeConstraint
+            ( \l r ->
+                l == tFoo && case r of
+                  SemanticTypeFunction {} -> True
+                  _ -> False
+            )
 
-  it "req declaration produces signature with self-effect" $ do
+  it "req declaration produces signature with self-request" $ do
     (cg, ir) <- runOneWithIdentifier "req fetch() -> string"
     case (variableIdOf "fetch" ir, typeVarOf "fetch" cg ir) of
       (Just fetchVid, Just tFetch) ->
         let fetchReqId = requestIdOfVariable fetchVid ir
-         in cg `shouldSatisfy` hasTypeConstraint
-              ( \l r -> case l of
-                  SemanticTypeFunction _ ret eff ->
-                    ret == SemanticTypeString
-                      && Set.member fetchReqId eff.effectReqs
-                      && r == tFetch
-                  _ -> False
-              )
+         in cg
+              `shouldSatisfy` hasTypeConstraint
+                ( \l r -> case l of
+                    SemanticTypeFunction _ ret eff ->
+                      ret == SemanticTypeString
+                        && Set.member fetchReqId eff.requestReqs
+                        && r == tFetch
+                    _ -> False
+                )
       _ -> expectationFailure "fetch not in identifier output / env"
 
-  it "data ctor signature is pure (emptyEffect) and returns SemanticTypeData" $ do
+  it "data ctor signature is pure (emptyRequest) and returns SemanticTypeData" $ do
     (cg, ir) <- runOneWithIdentifier "data point(x: integer)"
     case typeVarOf "point" cg ir of
       Nothing -> expectationFailure "point not in env"
       Just tCtor ->
-        cg `shouldSatisfy` hasTypeConstraint
-          ( \l r -> case l of
-              SemanticTypeFunction _ ret eff ->
-                eff == emptyEffect
-                  && (case ret of SemanticTypeData _ -> True; _ -> False)
-                  && r == tCtor
-              _ -> False
-          )
+        cg
+          `shouldSatisfy` hasTypeConstraint
+            ( \l r -> case l of
+                SemanticTypeFunction _ ret eff ->
+                  eff == emptyRequest
+                    && (case ret of SemanticTypeData _ -> True; _ -> False)
+                    && r == tCtor
+                _ -> False
+            )
 
   it "function call emits a SemanticTypeFunction expected-shape on the rhs" $ do
     (cg, ir) <- runOneWithIdentifier "agent helper() { 0 }\nagent main() { helper() }"
@@ -567,13 +581,15 @@ constraintContents = describe "constraint contents" $ do
       Nothing -> expectationFailure "helper not in env"
       Just tHelper ->
         -- t_helper <: SemanticTypeFunction [] t_result enclosing_eff
-        cg `shouldSatisfy` hasTypeConstraint
-          ( \l r -> l == tHelper && case r of
-              SemanticTypeFunction params _ _ -> null params
-              _ -> False
-          )
+        cg
+          `shouldSatisfy` hasTypeConstraint
+            ( \l r ->
+                l == tHelper && case r of
+                  SemanticTypeFunction params _ _ -> null params
+                  _ -> False
+            )
 
-  it "where block emits effect-discharge constraint" $ do
+  it "where block emits request-discharge constraint" $ do
     (cg, ir) <-
       runOneWithIdentifier $
         mconcat
@@ -588,11 +604,12 @@ constraintContents = describe "constraint contents" $ do
       Nothing -> expectationFailure "fetch not in identifier output"
       Just fetchVid ->
         -- innerEff <: outerEff ∪ {fetch}
-        -- rhs.effectReqs に fetch が含まれている effect constraint が存在
+        -- rhs.requestReqs に fetch が含まれている request constraint が存在
         let fetchReqId = requestIdOfVariable fetchVid ir
-         in cg `shouldSatisfy` hasEffectConstraint
-              ( \_ rhs -> Set.member fetchReqId rhs.effectReqs
-              )
+         in cg
+              `shouldSatisfy` hasRequestConstraint
+                ( \_ rhs -> Set.member fetchReqId rhs.requestReqs
+                )
 
   it "if branches both flow into the same result type var" $ do
     cg <- runOne "agent foo() { if (true) { 1 } else { 2 } }"
@@ -600,9 +617,9 @@ constraintContents = describe "constraint contents" $ do
     -- 1 と 2 を lhs に持つ constraint がそれぞれ存在し、rhs が同じ TypeVar である
     let lhsLits =
           [ rhs
-          | (lhs, rhs) <- typeConstraints cg,
-            lhs == SemanticTypeLiteralInteger 1
-              || lhs == SemanticTypeLiteralInteger 2
+            | (lhs, rhs) <- typeConstraints cg,
+              lhs == SemanticTypeLiteralInteger 1
+                || lhs == SemanticTypeLiteralInteger 2
           ]
     -- 少なくとも 2 本 (1 → t_result, 2 → t_result)
     length lhsLits `shouldSatisfy` (>= 2)
@@ -614,34 +631,39 @@ constraintContents = describe "constraint contents" $ do
           [ "data point(x: integer, y: integer)\n",
             "agent main(p: point) -> integer { p.x }"
           ]
-    cg `shouldSatisfy` hasTypeConstraint
-      ( \_ rhs -> case rhs of
-          SemanticTypeObject fields ->
-            Map.member "x" fields
-          _ -> False
-      )
+    cg
+      `shouldSatisfy` hasTypeConstraint
+        ( \_ rhs -> case rhs of
+            SemanticTypeObject fields ->
+              Map.member "x" fields
+            _ -> False
+        )
 
   it "binary `+` constrains both operands to a shared result var bounded by number" $ do
     cg <- runOne "agent foo() { 1 + 2 }"
     -- 新実装: 両辺は fresh 型変数 t に subtype され、t <: number が追加される
     -- 1 <: t, 2 <: t, t <: number
-    let isTypeVar = \case { SemanticTypeVariable _ -> True; _ -> False }
-    cg `shouldSatisfy` hasTypeConstraint
-      ( \l r -> l == SemanticTypeLiteralInteger 1 && isTypeVar r
-      )
-    cg `shouldSatisfy` hasTypeConstraint
-      ( \l r -> l == SemanticTypeLiteralInteger 2 && isTypeVar r
-      )
-    cg `shouldSatisfy` hasTypeConstraint
-      ( \l r -> isTypeVar l && r == SemanticTypeNumber
-      )
+    let isTypeVar = \case SemanticTypeVariable _ -> True; _ -> False
+    cg
+      `shouldSatisfy` hasTypeConstraint
+        ( \l r -> l == SemanticTypeLiteralInteger 1 && isTypeVar r
+        )
+    cg
+      `shouldSatisfy` hasTypeConstraint
+        ( \l r -> l == SemanticTypeLiteralInteger 2 && isTypeVar r
+        )
+    cg
+      `shouldSatisfy` hasTypeConstraint
+        ( \l r -> isTypeVar l && r == SemanticTypeNumber
+        )
 
   it "template literal interpolation requires string subtype" $ do
     cg <- runOne "agent foo() { f\"hello ${\"world\"}\" }"
     -- "world" interp → string の constraint
-    cg `shouldSatisfy` hasTypeConstraint
-      ( \l r -> l == SemanticTypeLiteralString "world" && r == SemanticTypeString
-      )
+    cg
+      `shouldSatisfy` hasTypeConstraint
+        ( \l r -> l == SemanticTypeLiteralString "world" && r == SemanticTypeString
+        )
 
 -- ---------------------------------------------------------------------------
 -- Cross-module same-named `data` declarations should produce distinct TypeIds

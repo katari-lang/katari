@@ -75,7 +75,7 @@ AST ノードは `(p :: Phase)` でパラメータ化:
 type data Phase = Parsed | Identified | Constrained | Zonked
 ```
 
-- `NameRef p s` の `resolution :: NameMeta p s` フィールドに phase 別の名前解決情報。
+- `NameRef p s` の `resolution :: NameRefMeta p s` フィールドに phase 別の名前解決情報。
   `s :: NameRefKind` で「変数 / 型 / モジュール / ラベル / req / data ctor」を分離:
   - `VariableRef` → `Maybe VariableId` (agent / req / ext / ctor の callable 側 / 局所変数)
   - `TypeRef` → `Maybe TypeId`
@@ -258,7 +258,8 @@ runtime が closure 値の lexical scope を構成する。
 | `Katari.Schema`            | JSON Schema bundle (AI tool calling 用)                                           |
 | `Katari.Query`             | LSP / CLI 向け query layer (position lookup / occurrence index)                   |
 | `Katari.AST`               | AST 型 + phase-indexed metadata                                                   |
-| `Katari.AST.Identifiers`   | ID 型 (`VariableId`, `TypeId`, ...) + `QualifiedName`                             |
+| `Katari.Identifiers`       | ID 型 (`VariableId`, `TypeId`, ...) + `QualifiedName`                             |
+| `Katari.SemanticType`      | 意味型 (`SemanticType`, `SemanticEffect`) + traversal                             |
 
 ### CompileResult
 

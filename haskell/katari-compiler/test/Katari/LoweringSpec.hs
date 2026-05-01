@@ -16,10 +16,10 @@ import Data.Text.IO qualified as TextIO
 import Katari.IR
 import Katari.Lowering (LoweringError (..), lowerProgram)
 import Katari.Parser (parseModuleStrict)
+import Katari.SemanticType (RequestVariableId (..), TypeVariableId (..))
 import Katari.Typechecker.ConstraintGenerator (ConstraintGenResult (..), generateConstraints)
 import Katari.Typechecker.Identifier (identify)
 import Katari.Typechecker.NormalizedType (NormalizedType (..))
-import Katari.Typechecker.SemanticType (EffectVarId (..), TypeVarId (..))
 import Katari.Typechecker.Solver (SolverResult (..))
 import Katari.Typechecker.Zonker (zonk)
 import System.Directory (listDirectory)
@@ -41,9 +41,9 @@ lowerSource src = case parseModuleStrict "<test>" src of
           solver =
             SolverResult
               { typeSubstitution =
-                  Map.fromList [(TypeVarId i, NormalizedTypeUnknown) | i <- [0 .. cg.nextTypeVarId - 1]],
-                effectSubstitution =
-                  Map.fromList [(EffectVarId i, Set.empty) | i <- [0 .. cg.nextEffectVarId - 1]],
+                  Map.fromList [(TypeVariableId i, NormalizedTypeUnknown) | i <- [0 .. cg.nextTypeVariableId - 1]],
+                requestSubstitution =
+                  Map.fromList [(RequestVariableId i, Set.empty) | i <- [0 .. cg.nextRequestVariableId - 1]],
                 solverErrors = []
               }
           zr = zonk idResult cg solver

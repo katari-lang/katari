@@ -7,6 +7,13 @@ import Data.Set qualified as Set
 import Data.Text (Text)
 import Katari.AST
 import Katari.Parser (parseModuleStrict)
+import Katari.SemanticType
+  ( RequestVariableId (..),
+    Resolved,
+    SemanticRequest (..),
+    SemanticType (..),
+    TypeVariableId (..),
+  )
 import Katari.Typechecker.ConstraintGenerator
   ( ConstraintGenResult (..),
     generateConstraints,
@@ -32,13 +39,6 @@ import Katari.Typechecker.NormalizedType
     denormalise,
     emptyLayered,
   )
-import Katari.Typechecker.SemanticType
-  ( EffectVarId (..),
-    Resolved,
-    SemanticEffect (..),
-    SemanticType (..),
-    TypeVarId (..),
-  )
 import Katari.Typechecker.Solver (SolverResult (..))
 import Katari.Typechecker.Zonker
   ( ZonkError (..),
@@ -61,35 +61,35 @@ pipeline src = case parseModuleStrict "<test>" src of
     (_, errs) -> fail ("identify failure: " ++ show errs)
 
 -- | Build a 'SolverResult' that satisfies the Solver totality contract for the
--- given 'ConstraintGenResult'. Every TypeVarId / EffectVarId allocated by
+-- given 'ConstraintGenResult'. Every TypeVariableId / RequestVariableId allocated by
 -- constraint generation receives a default (NormalizedTypeUnknown / empty req-set) entry,
 -- which can be overridden by the user-supplied lists.
 mkTotalSolverResult ::
   ConstraintGenResult ->
-  [(TypeVarId, NormalizedType)] ->
-  [(EffectVarId, Set RequestId)] ->
+  [(TypeVariableId, NormalizedType)] ->
+  [(RequestVariableId, Set RequestId)] ->
   SolverResult
-mkTotalSolverResult cg typeOverrides effectOverrides =
+mkTotalSolverResult cg typeOverrides requestOverrides =
   SolverResult
     { typeSubstitution =
         Map.fromList typeOverrides
-          `Map.union` Map.fromList [(TypeVarId i, NormalizedTypeUnknown) | i <- [0 .. cg.nextTypeVarId - 1]],
-      effectSubstitution =
-        Map.fromList effectOverrides
-          `Map.union` Map.fromList [(EffectVarId i, Set.empty) | i <- [0 .. cg.nextEffectVarId - 1]],
+          `Map.union` Map.fromList [(TypeVariableId i, NormalizedTypeUnknown) | i <- [0 .. cg.nextTypeVariableId - 1]],
+      requestSubstitution =
+        Map.fromList requestOverrides
+          `Map.union` Map.fromList [(RequestVariableId i, Set.empty) | i <- [0 .. cg.nextRequestVariableId - 1]],
       solverErrors = []
     }
 
 -- | Build a Solver result that *deliberately leaves entries missing*. Used to
 -- exercise the defensive Zonker fallback path.
 mkPartialSolverResult ::
-  [(TypeVarId, NormalizedType)] ->
-  [(EffectVarId, Set RequestId)] ->
+  [(TypeVariableId, NormalizedType)] ->
+  [(RequestVariableId, Set RequestId)] ->
   SolverResult
 mkPartialSolverResult ts es =
   SolverResult
     { typeSubstitution = Map.fromList ts,
-      effectSubstitution = Map.fromList es,
+      requestSubstitution = Map.fromList es,
       solverErrors = []
     }
 
@@ -115,43 +115,43 @@ expressionTypes m = concatMap declTypes m.declarations
 
     blockTypes blk =
       concatMap stmtTypes blk.statements
-        ++ maybe [] exprTypes blk.returnExpression
+        ++ maybe [] ExpressionTypes blk.returnExpression
         ++ maybe [] whereTypes blk.whereBlock
 
     whereTypes wb =
-      concatMap (exprTypes . (.initial)) wb.stateVariables
+      concatMap (ExpressionTypes . (.initial)) wb.stateVariables
         ++ concatMap (blockTypes . (.body)) wb.handlers
 
     stmtTypes = \case
-      StatementExpression e -> exprTypes e
-      StatementLet s -> exprTypes s.value
-      StatementReturn s -> exprTypes s.value
-      StatementBreak s -> exprTypes s.value
-      StatementNext s -> exprTypes s.value
+      StatementExpression e -> ExpressionTypes e
+      StatementLet s -> ExpressionTypes s.value
+      StatementReturn s -> ExpressionTypes s.value
+      StatementBreak s -> ExpressionTypes s.value
+      StatementNext s -> ExpressionTypes s.value
       _ -> []
 
-    exprTypes e =
+    ExpressionTypes e =
       typeOfExpression e : case e of
-        ExpressionTuple t -> concatMap exprTypes t.elements
-        ExpressionArray a -> concatMap exprTypes a.elements
-        ExpressionCall c -> exprTypes c.callee ++ concatMap (exprTypes . (.value)) c.arguments
-        ExpressionBinaryOperator b -> exprTypes b.left ++ exprTypes b.right
-        ExpressionUnaryOperator u -> exprTypes u.operand
+        ExpressionTuple t -> concatMap ExpressionTypes t.elements
+        ExpressionArray a -> concatMap ExpressionTypes a.elements
+        ExpressionCall c -> ExpressionTypes c.callee ++ concatMap (ExpressionTypes . (.value)) c.arguments
+        ExpressionBinaryOperator b -> ExpressionTypes b.left ++ ExpressionTypes b.right
+        ExpressionUnaryOperator u -> ExpressionTypes u.operand
         ExpressionIf i ->
-          exprTypes i.condition
+          ExpressionTypes i.condition
             ++ blockTypes i.thenBlock
             ++ maybe [] blockTypes i.elseBlock
         ExpressionMatch mexpr ->
-          exprTypes mexpr.subject
+          ExpressionTypes mexpr.subject
             ++ concatMap (blockTypes . (.body)) mexpr.cases
         ExpressionFor f ->
-          concatMap (exprTypes . (.source)) f.inBindings
-            ++ concatMap (exprTypes . (.initial)) f.varBindings
+          concatMap (ExpressionTypes . (.source)) f.inBindings
+            ++ concatMap (ExpressionTypes . (.initial)) f.varBindings
             ++ blockTypes f.body
             ++ maybe [] blockTypes f.thenBlock
         ExpressionBlock b -> blockTypes b.block
-        ExpressionFieldAccess fa -> exprTypes fa.object
-        ExpressionIndexAccess ix -> exprTypes ix.array ++ exprTypes ix.index
+        ExpressionFieldAccess fa -> ExpressionTypes fa.object
+        ExpressionIndexAccess ix -> ExpressionTypes ix.array ++ ExpressionTypes ix.index
         _ -> []
 
 typeOfExpression :: Expression Zonked -> SemanticType Resolved
@@ -186,7 +186,7 @@ spec = do
     denormaliseUnit
     basicZonk
     typeVarSubstitution
-    effectSubstitutionSpec
+    requestSubstitutionSpec
     typeEnvironmentZonk
     contractInvariant
     defensiveFallback
@@ -260,14 +260,14 @@ denormaliseUnit = describe "denormalise" $ do
                           "x"
                           (NormalizedTypeLayered emptyLayered {numberLayer = NumberSlotInteger}),
                       returnType = NormalizedTypeLayered emptyLayered {stringLayer = StringSlotAny},
-                      effects = Set.empty
+                      requests = Set.empty
                     }
             }
       )
       `shouldBe` SemanticTypeFunction
         (Map.singleton "x" SemanticTypeInteger)
         SemanticTypeString
-        (SemanticEffect Set.empty Set.empty)
+        (SemanticRequest Set.empty Set.empty)
 
 -- ---------------------------------------------------------------------------
 -- Basic zonk: literal expressions don't depend on substitution
@@ -308,8 +308,8 @@ typeVarSubstitution = describe "type var substitution" $ do
     (idResult, cg) <- pipeline "agent foo() { foo() }"
     -- 全 TypeVar を NumberSlotInteger に統一して埋める
     let allInt =
-          [ (TypeVarId i, NormalizedTypeLayered emptyLayered {numberLayer = NumberSlotInteger})
-            | i <- [0 .. cg.nextTypeVarId - 1]
+          [ (TypeVariableId i, NormalizedTypeLayered emptyLayered {numberLayer = NumberSlotInteger})
+            | i <- [0 .. cg.nextTypeVariableId - 1]
           ]
         zr = zonk idResult cg (mkTotalSolverResult cg allInt [])
         mod_ = soleModule zr
@@ -332,16 +332,16 @@ isLiteralOrConcrete = \case
   _ -> False
 
 -- ---------------------------------------------------------------------------
--- Effect substitution
+-- Request substitution
 -- ---------------------------------------------------------------------------
 
-effectSubstitutionSpec :: Spec
-effectSubstitutionSpec = describe "effect substitution" $ do
+requestSubstitutionSpec :: Spec
+requestSubstitutionSpec = describe "request substitution" $ do
   it "function NormalizedType denormalises into SemanticTypeFunction with concrete request set" $ do
     -- Solver の役割を手動でシミュレートする: app の TypeVar に
-    -- 「fetch を effect として持つ関数」を表す NormalizedType を当てる。
+    -- 「fetch を request として持つ関数」を表す NormalizedType を当てる。
     -- 結果として zonkedTypeEnvironment[app] が SemanticTypeFunction で、
-    -- effectVars = empty、effectReqs ⊇ {fetch} になることを確認。
+    -- requestVars = empty、requestReqs ⊇ {fetch} になることを確認。
     let src = "req fetch() -> string\nagent app() { 0 }"
     (idResult, cg) <- pipeline src
     let Just fetchVid = variableIdOf "fetch" idResult
@@ -358,14 +358,14 @@ effectSubstitutionSpec = describe "effect substitution" $ do
                         returnType =
                           NormalizedTypeLayered
                             emptyLayered {numberLayer = NumberSlotLiterals (Set.singleton 0)},
-                        effects = Set.singleton fetchReqId
+                        requests = Set.singleton fetchReqId
                       }
               }
         zr = zonk idResult cg (mkTotalSolverResult cg [(tApp, appFnNT)] [])
     case Map.lookup appVid zr.zonkedTypeEnvironment of
       Just (SemanticTypeFunction _ _ eff) -> do
-        eff.effectVars `shouldBe` Set.empty
-        eff.effectReqs `shouldBe` Set.singleton fetchReqId
+        eff.requestVars `shouldBe` Set.empty
+        eff.requestReqs `shouldBe` Set.singleton fetchReqId
       other -> expectationFailure ("app not bound to function type: " ++ show other)
     zr.zonkErrors `shouldBe` []
 

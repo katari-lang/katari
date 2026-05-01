@@ -2,7 +2,7 @@
 --
 -- This module supplies the bookkeeping for:
 --
---   * Applying a 'Substitution' (Map TypeVarId (SemanticType Unresolved)) to
+--   * Applying a 'Substitution' (Map TypeVariableId (SemanticType Unresolved)) to
 --     individual types and constraints.
 --   * Computing 'Bounds' (lower / upper) for each type variable from the
 --     current constraint set, **with origin tracking** — each entry of a
@@ -21,10 +21,10 @@
 -- which routes through 'NormalizedType.subtypeNT'.
 module Katari.Typechecker.Solver.Substitution
   ( applySubstType,
-    applySubstEffect,
+    applySubstRequest,
     applySubstConstraint,
     applySubstSubst,
-    applyEffectSubstToType,
+    applyRequestSubstToType,
     calculateBounds,
     calculateAllBounds,
     calculateInstanceFromBounds,
@@ -43,6 +43,17 @@ import Data.Map.Strict qualified as Map
 import Data.Maybe (mapMaybe)
 import Data.Set (Set)
 import Data.Set qualified as Set
+import Katari.SemanticType
+  ( RequestVariableId,
+    Resolved,
+    SemanticRequest (..),
+    SemanticType (..),
+    TypeVariableId,
+    Unresolved,
+    traverseSemantic,
+    traverseSemanticChildren,
+    unionSemantic,
+  )
 import Katari.Typechecker.ConstraintGenerator (Constraint (..))
 import Katari.Typechecker.Identifier (RequestId)
 import Katari.Typechecker.NormalizedType
@@ -51,17 +62,6 @@ import Katari.Typechecker.NormalizedType
     intersectNT,
     normaliseSemantic,
     subtypeNT,
-  )
-import Katari.Typechecker.SemanticType
-  ( EffectVarId,
-    Resolved,
-    SemanticEffect (..),
-    SemanticType (..),
-    TypeVarId,
-    Unresolved,
-    traverseSemantic,
-    traverseSemanticChildren,
-    unionSemantic,
   )
 import Katari.Typechecker.Solver.Internal
   ( BoundedType (..),
@@ -92,32 +92,32 @@ applySubstType substitution = go
         Map.findWithDefault (SemanticTypeVariable typeVarId) typeVarId substitution
       t -> runIdentity (traverseSemantic (Identity . go) Identity t)
 
--- | Resolve every 'EffectVarId' inside a 'SemanticType' against the effect
+-- | Resolve every 'RequestVariableId' inside a 'SemanticType' against the request
 -- substitution, replacing each var with the concrete 'RequestId' set the
--- effect solver assigned to it. Type variables are left untouched — apply
+-- request solver assigned to it. Type variables are left untouched — apply
 -- 'applySubstSubst' first if the value still contains them.
 --
 -- This is the missing half of "deep substitution composition": without it,
 -- a narrowed function shape like @α := (x: t_p) -> r_var, eff e_var@ keeps
 -- @e_var@ alive after type vars are pinned, and 'semanticToConcrete' rejects
 -- the value (forcing the downstream to fall back to NormalizedTypeUnknown).
-applyEffectSubstToType ::
-  Map EffectVarId (Set RequestId) ->
+applyRequestSubstToType ::
+  Map RequestVariableId (Set RequestId) ->
   SemanticType Unresolved ->
   SemanticType Unresolved
-applyEffectSubstToType effectSubstitution = go
+applyRequestSubstToType requestSubstitution = go
   where
-    go t = runIdentity (traverseSemantic (Identity . go) (Identity . resolveEffect) t)
-    resolveEffect (SemanticEffect vars reqs) =
+    go t = runIdentity (traverseSemantic (Identity . go) (Identity . resolveRequest) t)
+    resolveRequest (SemanticRequest vars reqs) =
       let expanded =
             Set.unions
-              [ Map.findWithDefault Set.empty effectVarId effectSubstitution
-                | effectVarId <- Set.toList vars
+              [ Map.findWithDefault Set.empty requestVarId requestSubstitution
+                | requestVarId <- Set.toList vars
               ]
-       in SemanticEffect Set.empty (Set.union reqs expanded)
+       in SemanticRequest Set.empty (Set.union reqs expanded)
 
-applySubstEffect :: Substitution -> SemanticEffect phase -> SemanticEffect phase
-applySubstEffect _ effect = effect -- effect vars are handled by the effect solver
+applySubstRequest :: Substitution -> SemanticRequest phase -> SemanticRequest phase
+applySubstRequest _ request = request -- request vars are handled by the request solver
 
 applySubstConstraint :: Substitution -> Constraint -> Constraint
 applySubstConstraint substitution = \case
@@ -126,10 +126,10 @@ applySubstConstraint substitution = \case
       (applySubstType substitution leftType)
       (applySubstType substitution rightType)
       reason
-  EffectConstraint leftEffect rightEffect reason ->
-    EffectConstraint
-      (applySubstEffect substitution leftEffect)
-      (applySubstEffect substitution rightEffect)
+  RequestConstraint leftRequest rightRequest reason ->
+    RequestConstraint
+      (applySubstRequest substitution leftRequest)
+      (applySubstRequest substitution rightRequest)
       reason
 
 -- | Apply @outer@ to every value in @inner@, then merge: @outer ∘ inner@.
@@ -141,36 +141,36 @@ applySubstSubst outer inner =
 -- Bounds calculation (with origin tracking)
 -- ===========================================================================
 
--- | For a given 'TypeVarId' @α@, scan the constraint set and collect:
+-- | For a given 'TypeVariableId' @α@, scan the constraint set and collect:
 --
 --   * For each @TypeConstraint t α r@: @t@ as a lower bound with origin @r@.
 --   * For each @TypeConstraint α t r@: @t@ as an upper bound with origin @r@.
 --
 -- Constraints where @α@ does not occur as the entire LHS / RHS are ignored
 -- (those will be decomposed structurally elsewhere).
-calculateBounds :: TypeVarId -> Set Constraint -> Bounds
+calculateBounds :: TypeVariableId -> Set Constraint -> Bounds
 calculateBounds typeVarId constraints =
   Bounds
     { lowerBounds = mapMaybe (asLower typeVarId) (Set.toList constraints),
       upperBounds = mapMaybe (asUpper typeVarId) (Set.toList constraints)
     }
 
-asLower :: TypeVarId -> Constraint -> Maybe BoundedType
+asLower :: TypeVariableId -> Constraint -> Maybe BoundedType
 asLower typeVarId = \case
-  TypeConstraint leftType (SemanticTypeVariable rightTypeVarId) reason
-    | rightTypeVarId == typeVarId && leftType /= SemanticTypeVariable typeVarId ->
+  TypeConstraint leftType (SemanticTypeVariable rightTypeVariableId) reason
+    | rightTypeVariableId == typeVarId && leftType /= SemanticTypeVariable typeVarId ->
         Just (BoundedType {boundType = leftType, boundReason = reason})
   _ -> Nothing
 
-asUpper :: TypeVarId -> Constraint -> Maybe BoundedType
+asUpper :: TypeVariableId -> Constraint -> Maybe BoundedType
 asUpper typeVarId = \case
-  TypeConstraint (SemanticTypeVariable leftTypeVarId) rightType reason
-    | leftTypeVarId == typeVarId && rightType /= SemanticTypeVariable typeVarId ->
+  TypeConstraint (SemanticTypeVariable leftTypeVariableId) rightType reason
+    | leftTypeVariableId == typeVarId && rightType /= SemanticTypeVariable typeVarId ->
         Just (BoundedType {boundType = rightType, boundReason = reason})
   _ -> Nothing
 
 -- | Collect bounds for every type variable mentioned in the constraint set.
-calculateAllBounds :: Set Constraint -> Map TypeVarId Bounds
+calculateAllBounds :: Set Constraint -> Map TypeVariableId Bounds
 calculateAllBounds constraints =
   let typeVarIds = foldr (Set.union . constraintTypeVars) Set.empty constraints
    in Map.fromList
@@ -306,9 +306,9 @@ intersectUpperBoundsViaNT items = case traverse semanticToConcrete items of
 -- Delegates to 'traverseSemanticChildren' for the structural recursion.
 resolvedToUnresolved :: SemanticType Resolved -> SemanticType Unresolved
 resolvedToUnresolved =
-  runIdentity . traverseSemanticChildren (Identity . resolvedToUnresolved) (Identity . coerceEffect)
+  runIdentity . traverseSemanticChildren (Identity . resolvedToUnresolved) (Identity . coerceRequest)
   where
-    coerceEffect (SemanticEffect vars reqs) = SemanticEffect vars reqs
+    coerceRequest (SemanticRequest vars reqs) = SemanticRequest vars reqs
 
 -- ===========================================================================
 -- Bounds consistency check
@@ -317,7 +317,7 @@ resolvedToUnresolved =
 -- | After final substitution, verify that for every variable, every concrete
 -- lower bound is a subtype of every concrete upper bound. If not, emit a
 -- 'SolverErrorBoundsConflict' carrying both reasons + their concrete types.
-checkBoundsConsistency :: Map TypeVarId Bounds -> [SolverError]
+checkBoundsConsistency :: Map TypeVariableId Bounds -> [SolverError]
 checkBoundsConsistency boundsMap =
   [ SolverErrorBoundsConflict
       typeVarId
@@ -341,7 +341,7 @@ checkBoundsConsistency boundsMap =
 -- 'NormalizedType' for the public 'SolverResult'. Variables that still
 -- contain unresolved 'SemanticTypeVariable' fall back to 'NormalizedTypeUnknown'
 -- (defensive; should not happen if Solver completed normally).
-substToNormalized :: Substitution -> Map TypeVarId NormalizedType
+substToNormalized :: Substitution -> Map TypeVariableId NormalizedType
 substToNormalized = Map.map convert
   where
     convert pinned = maybe NormalizedTypeUnknown normaliseSemantic (semanticToConcrete pinned)

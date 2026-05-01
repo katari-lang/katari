@@ -1,68 +1,86 @@
-module Katari.Lexer
-  ( Token (..),
-    Keyword (..),
-    Punctuation (..),
-    Operator (..),
-    WithSourceSpan (..),
-    TokenStream (..),
-    LexerError (..),
-    toDiagnostic,
-    runLexer,
-    insertVirtualSemicolons,
-    showKeyword,
-    showPunctuation,
-    showOperator,
-    showToken,
-  )
-where
+module Katari.Lexer where
 
 import Control.Monad (void, when)
 import Control.Monad.State.Strict
+  ( MonadState (get),
+    State,
+    modify',
+    runState,
+  )
 import Data.Char (chr)
 import Data.List.NonEmpty qualified as NE
 import Data.Proxy (Proxy (..))
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Void (Void)
-import Katari.AST (HasSourceSpan (..), Position (..), SourceSpan (..))
 import Katari.Diagnostic (Diagnostic, diagnosticError)
+import Katari.SourceSpan (HasSourceSpan (..), Position (..), SourceSpan (..))
 import Numeric (readHex, showHex)
-import Text.Megaparsec hiding (State, Token, Tokens)
+import Text.Megaparsec
+  ( MonadParsec (..),
+    ParsecT,
+    PosState (..),
+    SourcePos (..),
+    Stream (..),
+    TraversableStream (reachOffset),
+    VisualStream (..),
+    anySingle,
+    atEnd,
+    choice,
+    empty,
+    getSourcePos,
+    many,
+    manyTill,
+    mkPos,
+    noneOf,
+    oneOf,
+    optional,
+    runParserT,
+    some,
+    unPos,
+    (<|>),
+  )
 import Text.Megaparsec qualified as MP
 import Text.Megaparsec.Char
+  ( alphaNumChar,
+    char,
+    hexDigitChar,
+    letterChar,
+    string,
+  )
 import Text.Megaparsec.Char.Lexer qualified as L
 
 -- ===========================================================================
--- Token types
+-- KatariToken types
 -- ===========================================================================
 
-data Token where
-  TokenIdentifier :: Text -> Token
-  -- | Bare underscore; distinct from TokenIdentifier so the parser can treat
+data KatariToken where
+  KatariTokenIdentifier :: Text -> KatariToken
+  -- | Bare underscore; distinct from KatariTokenIdentifier so the parser can treat
   -- wildcards without string comparison.
-  TokenUnderscore :: Token
-  TokenKeyword :: Keyword -> Token
-  TokenIntegerLiteral :: Integer -> Token
-  TokenFloatLiteral :: Double -> Token
-  TokenStringLiteral :: Text -> Token
+  KatariTokenUnderscore :: KatariToken
+  KatariTokenKeyword :: Keyword -> KatariToken
+  KatariTokenIntegerLiteral :: Integer -> KatariToken
+  KatariTokenFloatLiteral :: Double -> KatariToken
+  KatariTokenStringLiteral :: Text -> KatariToken
   -- | f" or f"""
-  TokenTemplateOpen :: Token
-  -- | " or """ (closes the template started by TokenTemplateOpen)
-  TokenTemplateClose :: Token
+  KatariTokenTemplateOpen :: KatariToken
+  -- | " or """ (closes the template started by KatariTokenTemplateOpen)
+  KatariTokenTemplateClose :: KatariToken
   -- | String part of a template literal.
-  TokenTemplateString :: Text -> Token
+  KatariTokenTemplateString :: Text -> KatariToken
   -- | \${
-  TokenTemplateExpressionOpen :: Token
+  KatariTokenTemplateExpressionOpen :: KatariToken
   -- | } matching ${
-  TokenTemplateExpressionClose :: Token
-  TokenPunctuation :: Punctuation -> Token
-  TokenOperator :: Operator -> Token
+  KatariTokenTemplateExpressionClose :: KatariToken
+  KatariTokenPunctuation :: Punctuation -> KatariToken
+  KatariTokenOperator :: Operator -> KatariToken
   -- | Explicit @;@ in source.
-  TokenSemicolonExplicit :: Token
+  KatariTokenSemicolonExplicit :: KatariToken
   -- | Virtual semicolon inserted by 'insertVirtualSemicolons'.
-  TokenSemicolonVirtual :: Token
-  -- | Raw \n — intermediate token, eliminated by insertVirtualSemicolons.
-  TokenNewline :: Token
+  KatariTokenSemicolonVirtual :: KatariToken
+  -- | Raw \n — intermediate KatariToken, eliminated by insertVirtualSemicolons.
+  KatariTokenNewline :: KatariToken
   deriving (Eq, Ord, Show)
 
 data Keyword where
@@ -133,9 +151,9 @@ data Operator where
   OperatorNot :: Operator
   deriving (Eq, Ord, Show)
 
--- | Token wrapped with the @SourceSpan@ that covers it. Replaces the older
--- (sourcePosition + tokenLength) representation, which produced incorrect
--- end positions for multi-line tokens (template/string literals).
+-- | KatariToken wrapped with the @SourceSpan@ that covers it. Replaces the older
+-- (sourcePosition + KatariTokenLength) representation, which produced incorrect
+-- end positions for multi-line KatariTokens (template/string literals).
 data WithSourceSpan wrapped = WithSourceSpan
   { sourceSpan :: SourceSpan,
     value :: wrapped
@@ -146,7 +164,7 @@ data WithSourceSpan wrapped = WithSourceSpan
 -- Lexer
 -- ===========================================================================
 
--- | Lexer mode that overrides default tokenization. Plain top-level code is
+-- | Lexer mode that overrides default KatariTokenization. Plain top-level code is
 -- represented by an empty context stack, so this type only enumerates the
 -- mode-altering states.
 data LexerContext where
@@ -174,7 +192,7 @@ data LexerError where
   -- 'Text' is the offending raw fragment for diagnostics; recovery substitutes
   -- the Unicode replacement character (U+FFFD).
   LexerErrorInvalidUnicodeEscape :: SourceSpan -> Text -> LexerError
-  -- | A character that doesn't start any known token. Recovery skips the
+  -- | A character that doesn't start any known KatariToken. Recovery skips the
   -- single character and continues.
   LexerErrorUnrecognizedCharacter :: SourceSpan -> Char -> LexerError
 
@@ -234,14 +252,17 @@ lexGetTopContext = do
     [] -> Nothing
 
 lexPushContext :: LexerContext -> Lexer ()
-lexPushContext context = modify' $ \LexerState {..} ->
-  LexerState {contextStack = context : contextStack, ..}
+lexPushContext context = modify' $ \LexerState {contextStack, accumulatedErrors} ->
+  LexerState
+    { contextStack = context : contextStack,
+      accumulatedErrors
+    }
 
 -- | Pop the topmost context. Empty-stack pops are *silently ignored* rather
 -- than panicking — they only happen when recovery synthesizes a close for an
 -- already-popped (or never-pushed) context, and treating that as a hard error
 -- would defeat the point of recovery. The resulting incoherence is bounded:
--- subsequent token lexing simply runs in @Nothing@ context (= top-level).
+-- subsequent KatariToken lexing simply runs in @Nothing@ context (= top-level).
 lexPopContext :: Lexer ()
 lexPopContext = modify' $ \state_ -> case state_.contextStack of
   (_ : remaining) -> state_ {contextStack = remaining}
@@ -249,32 +270,33 @@ lexPopContext = modify' $ \state_ -> case state_.contextStack of
 
 -- | Append a recovered error to the accumulator (kept in reverse order).
 lexRecordError :: LexerError -> Lexer ()
-lexRecordError err = modify' $ \LexerState {..} ->
-  LexerState {accumulatedErrors = err : accumulatedErrors, ..}
+lexRecordError lexerError = modify' $ \LexerState {contextStack, accumulatedErrors} ->
+  LexerState
+    { accumulatedErrors = lexerError : accumulatedErrors,
+      contextStack = contextStack
+    }
 
--- | Run the lexer on input. Returns the (possibly partial) token list and
--- any errors recovered via @withRecovery@.
 --
 -- The lexer no longer hard-fails on malformed input: unterminated literals
--- get synthesized closing tokens, invalid escape sequences become U+FFFD,
+-- get synthesized closing KatariTokens, invalid escape sequences become U+FFFD,
 -- and unrecognized characters are skipped one-at-a-time. The input is
 -- normalized by replacing @\\r\\n@ with @\\n@ first (CRLF support).
 --
 -- The 'Either' from megaparsec's @runParser@ is collapsed: a hard failure
--- (which the recovery design tries hard to avoid) yields an empty token
+-- (which the recovery design tries hard to avoid) yields an empty KatariToken
 -- list. Any errors accumulated up to that point are still returned.
-runLexer :: FilePath -> Text -> ([WithSourceSpan Token], [LexerError])
+runLexer :: FilePath -> Text -> ([WithSourceSpan KatariToken], [LexerError])
 runLexer filePath input =
   let normalized = T.replace "\r\n" "\n" input
-      (eRes, finalState) =
+      (lexResult, finalState) =
         runState
           (runParserT (lexAllTokens filePath) filePath normalized)
           initialLexerState
-   in case eRes of
+   in case lexResult of
         Right tokens_ -> (tokens_, reverse finalState.accumulatedErrors)
         Left _ -> ([], reverse finalState.accumulatedErrors)
 
-lexAllTokens :: FilePath -> Lexer [WithSourceSpan Token]
+lexAllTokens :: FilePath -> Lexer [WithSourceSpan KatariToken]
 lexAllTokens filePath = do
   lexSkipInterTokenSpace
   loop
@@ -290,10 +312,10 @@ lexAllTokens filePath = do
             Nothing -> loop
             Just tok -> (tok :) <$> loop
 
--- | Skip whitespace and comments between tokens — but only at top-level or in
+-- | Skip whitespace and comments between KatariTokens — but only at top-level or in
 -- a template-expression context. Inside template string contexts (single- or
 -- multi-line) we don't skip, because every character is string content.
--- Newlines are NOT skipped here: they emerge as TokenNewline tokens in
+-- Newlines are NOT skipped here: they emerge as KatariTokenNewline KatariTokens in
 -- lexNormalToken.
 lexSkipInterTokenSpace :: Lexer ()
 lexSkipInterTokenSpace = do
@@ -310,7 +332,7 @@ lexSkipInterTokenSpace = do
         (L.skipBlockCommentNested "/*" "*/")
 
 -- ---------------------------------------------------------------------------
--- Token dispatch
+-- KatariToken dispatch
 -- ---------------------------------------------------------------------------
 
 -- | Build a @SourceSpan@ from a megaparsec @SourcePos@ pair.
@@ -329,10 +351,10 @@ positionFromSourcePos sourcePos =
       column = unPos (sourceColumn sourcePos)
     }
 
--- | Lex a single token. Returns 'Nothing' when recovery skipped a malformed
--- character without producing any token (the outer loop in 'lexAllTokens'
+-- | Lex a single KatariToken. Returns 'Nothing' when recovery skipped a malformed
+-- character without producing any KatariToken (the outer loop in 'lexAllTokens'
 -- continues from there).
-lexToken :: FilePath -> Lexer (Maybe (WithSourceSpan Token))
+lexToken :: FilePath -> Lexer (Maybe (WithSourceSpan KatariToken))
 lexToken filePath = do
   startSourcePos <- getSourcePos
   context <- lexGetTopContext
@@ -343,53 +365,53 @@ lexToken filePath = do
   endSourcePos <- getSourcePos
   pure $
     fmap
-      ( \tok ->
+      ( \lexedToken ->
           WithSourceSpan
             { sourceSpan = makeSourceSpan filePath startSourcePos endSourcePos,
-              value = tok
+              value = lexedToken
             }
       )
       parsedToken
 
 -- ---------------------------------------------------------------------------
--- Normal (top-level / inside ${...}) token parsing
+-- Normal (top-level / inside ${...}) KatariToken parsing
 -- ---------------------------------------------------------------------------
 
--- | Try every recognised top-level token producer; if none match, fall back
+-- | Try every recognised top-level KatariToken producer; if none match, fall back
 -- to 'lexUnrecognizedCharacter' which records an error and returns
 -- 'Nothing'. This guarantees forward progress: the outer loop never spins
 -- on a malformed character.
-lexNormalToken :: FilePath -> SourcePos -> Lexer (Maybe Token)
+lexNormalToken :: FilePath -> SourcePos -> Lexer (Maybe KatariToken)
 lexNormalToken filePath startSourcePos =
   choice
     [ Just <$> lexNewline,
       Just <$> lexBrace,
       Just <$> lexTemplateStart,
-      Just . TokenStringLiteral <$> try lexMultilineStringLiteral,
-      Just . TokenStringLiteral <$> recoverableStringLiteral filePath startSourcePos,
+      Just . KatariTokenStringLiteral <$> try lexMultilineStringLiteral,
+      Just . KatariTokenStringLiteral <$> recoverableStringLiteral filePath startSourcePos,
       Just <$> lexNumber,
       Just <$> lexIdentifierOrKeyword,
       Just <$> lexPunctuationOrOperator,
       lexUnrecognizedCharacter filePath startSourcePos
     ]
 
--- | Emit TokenNewline and consume the \n. Doesn't apply inside template strings
+-- | Emit KatariTokenNewline and consume the \n. Doesn't apply inside template strings
 -- (those are handled by lexTemplateBodyToken).
-lexNewline :: Lexer Token
-lexNewline = TokenNewline <$ char '\n'
+lexNewline :: Lexer KatariToken
+lexNewline = KatariTokenNewline <$ char '\n'
 
 -- | Unified handling of `{` and `}` in the normal-token context.
 --
 -- Behavior depends on the topmost lexer context:
 --
 --   * LexerContextTemplateExpression 0 + `}` : closes the template expression,
---     pops the context, and emits TokenTemplateExpressionClose.
+--     pops the context, and emits KatariTokenTemplateExpressionClose.
 --   * LexerContextTemplateExpression d + `{` : push depth d+1, emit
---     TokenPunctuation PunctuationLeftBrace.
+--     KatariTokenPunctuation PunctuationLeftBrace.
 --   * LexerContextTemplateExpression d + `}` (d > 0): pop depth to d-1,
---     emit TokenPunctuation PunctuationRightBrace.
+--     emit KatariTokenPunctuation PunctuationRightBrace.
 --   * Any other ctx : plain `{` / `}` → PunctuationLeftBrace / PunctuationRightBrace.
-lexBrace :: Lexer Token
+lexBrace :: Lexer KatariToken
 lexBrace = do
   context <- lexGetTopContext
   lexLeftBrace context <|> lexRightBrace context
@@ -399,17 +421,17 @@ lexBrace = do
       case context of
         Just (LexerContextTemplateExpression depth) -> do
           lexModifyTopContext (\_ -> LexerContextTemplateExpression (depth + 1))
-          pure (TokenPunctuation PunctuationLeftBrace)
-        _ -> pure (TokenPunctuation PunctuationLeftBrace)
+          pure (KatariTokenPunctuation PunctuationLeftBrace)
+        _ -> pure (KatariTokenPunctuation PunctuationLeftBrace)
     lexRightBrace context = do
       _ <- char '}'
       case context of
         Just (LexerContextTemplateExpression 0) ->
-          lexPopContext >> pure TokenTemplateExpressionClose
+          lexPopContext >> pure KatariTokenTemplateExpressionClose
         Just (LexerContextTemplateExpression depth) -> do
           lexModifyTopContext (\_ -> LexerContextTemplateExpression (depth - 1))
-          pure (TokenPunctuation PunctuationRightBrace)
-        _ -> pure (TokenPunctuation PunctuationRightBrace)
+          pure (KatariTokenPunctuation PunctuationRightBrace)
+        _ -> pure (KatariTokenPunctuation PunctuationRightBrace)
 
 -- | Replace the topmost context. Empty-stack updates are silently ignored
 -- (the only caller paths reach this from a known mode; if recovery removed
@@ -425,7 +447,7 @@ lexModifyTopContext modifier = modify' $ \state_ -> case state_.contextStack of
 -- is recovered by recording a 'LexerErrorUnterminatedTemplate' and pushing
 -- the context anyway — body lexing then proceeds as if the newline had
 -- been there.
-lexTemplateStart :: Lexer Token
+lexTemplateStart :: Lexer KatariToken
 lexTemplateStart = do
   startSourcePos <- getSourcePos
   isMultiLine <-
@@ -442,37 +464,37 @@ lexTemplateStart = do
         lexRecordError
           (LexerErrorUnterminatedTemplate (spanBetween startSourcePos endSourcePos))
   lexPushContext (if isMultiLine then LexerContextTemplateMultiLine else LexerContextTemplate)
-  pure TokenTemplateOpen
+  pure KatariTokenTemplateOpen
 
 -- | Fallback for 'lexNormalToken': if no other producer matched, consume one
 -- character, record a 'LexerErrorUnrecognizedCharacter', and return
--- 'Nothing' so the outer loop continues without emitting a token.
-lexUnrecognizedCharacter :: FilePath -> SourcePos -> Lexer (Maybe Token)
+-- 'Nothing' so the outer loop continues without emitting a KatariToken.
+lexUnrecognizedCharacter :: FilePath -> SourcePos -> Lexer (Maybe KatariToken)
 lexUnrecognizedCharacter _filePath startSourcePos = do
-  c <- anySingle
+  character <- anySingle
   endSourcePos <- getSourcePos
   lexRecordError
-    (LexerErrorUnrecognizedCharacter (spanBetween startSourcePos endSourcePos) c)
+    (LexerErrorUnrecognizedCharacter (spanBetween startSourcePos endSourcePos) character)
   pure Nothing
 
 -- | Numeric literal: prefer float if `.` or `e/E` is present, else integer.
-lexNumber :: Lexer Token
+lexNumber :: Lexer KatariToken
 lexNumber =
   label
     "numeric literal"
-    (try (TokenFloatLiteral <$> L.float) <|> TokenIntegerLiteral <$> L.decimal)
+    (try (KatariTokenFloatLiteral <$> L.float) <|> KatariTokenIntegerLiteral <$> L.decimal)
 
--- | Identifier, keyword, or bare underscore. Bare `_` gets its own token so
+-- | Identifier, keyword, or bare underscore. Bare `_` gets its own KatariToken so
 -- the parser can distinguish wildcard patterns without string comparison.
-lexIdentifierOrKeyword :: Lexer Token
+lexIdentifierOrKeyword :: Lexer KatariToken
 lexIdentifierOrKeyword = label "identifier or keyword" $ do
   firstChar <- letterChar <|> char '_'
   remainingChars <- many (alphaNumChar <|> char '_')
   let text = T.pack (firstChar : remainingChars)
   pure $ case (text, lexKeywordOf text) of
-    ("_", _) -> TokenUnderscore
-    (_, Just keyword) -> TokenKeyword keyword
-    (_, Nothing) -> TokenIdentifier text
+    ("_", _) -> KatariTokenUnderscore
+    (_, Just keyword) -> KatariTokenKeyword keyword
+    (_, Nothing) -> KatariTokenIdentifier text
 
 -- | Surface text of every keyword. Single source of truth shared by the
 -- lexer's identifier-or-keyword classifier ('lexKeywordOf') and the diagnostic
@@ -517,51 +539,51 @@ lexKeywordOf :: Text -> Maybe Keyword
 lexKeywordOf name = lookup name [(lexKeywordText keyword, keyword) | keyword <- [minBound .. maxBound]]
 
 -- | Punctuation or operator (excluding `{` and `}` which are handled in
--- lexBrace). Multi-char tokens are tried before their shorter prefixes.
-lexPunctuationOrOperator :: Lexer Token
+-- lexBrace). Multi-char KatariTokens are tried before their shorter prefixes.
+lexPunctuationOrOperator :: Lexer KatariToken
 lexPunctuationOrOperator =
   choice
-    [ TokenPunctuation PunctuationArrow <$ string "->",
-      TokenPunctuation PunctuationFatArrow <$ string "=>",
-      TokenOperator OperatorEqual <$ string "==",
-      TokenOperator OperatorNotEqual <$ string "!=",
-      TokenOperator OperatorLessOrEqual <$ string "<=",
-      TokenOperator OperatorGreaterOrEqual <$ string ">=",
-      TokenOperator OperatorAnd <$ string "&&",
-      TokenOperator OperatorOr <$ string "||",
-      TokenOperator OperatorConcat <$ string "++",
-      TokenPunctuation PunctuationLeftParenthesis <$ char '(',
-      TokenPunctuation PunctuationRightParenthesis <$ char ')',
-      TokenPunctuation PunctuationLeftBracket <$ char '[',
-      TokenPunctuation PunctuationRightBracket <$ char ']',
-      TokenPunctuation PunctuationComma <$ char ',',
-      TokenPunctuation PunctuationColon <$ char ':',
-      TokenPunctuation PunctuationDot <$ char '.',
-      TokenPunctuation PunctuationAt <$ char '@',
-      TokenPunctuation PunctuationEquals <$ char '=',
-      TokenPunctuation PunctuationPipe <$ char '|',
-      TokenSemicolonExplicit <$ char ';',
-      TokenOperator OperatorAdd <$ char '+',
-      TokenOperator OperatorSubtract <$ char '-',
-      TokenOperator OperatorMultiply <$ char '*',
-      TokenOperator OperatorDivide <$ char '/',
-      TokenOperator OperatorLessThan <$ char '<',
-      TokenOperator OperatorGreaterThan <$ char '>',
-      TokenOperator OperatorNot <$ char '!'
+    [ KatariTokenPunctuation PunctuationArrow <$ string "->",
+      KatariTokenPunctuation PunctuationFatArrow <$ string "=>",
+      KatariTokenOperator OperatorEqual <$ string "==",
+      KatariTokenOperator OperatorNotEqual <$ string "!=",
+      KatariTokenOperator OperatorLessOrEqual <$ string "<=",
+      KatariTokenOperator OperatorGreaterOrEqual <$ string ">=",
+      KatariTokenOperator OperatorAnd <$ string "&&",
+      KatariTokenOperator OperatorOr <$ string "||",
+      KatariTokenOperator OperatorConcat <$ string "++",
+      KatariTokenPunctuation PunctuationLeftParenthesis <$ char '(',
+      KatariTokenPunctuation PunctuationRightParenthesis <$ char ')',
+      KatariTokenPunctuation PunctuationLeftBracket <$ char '[',
+      KatariTokenPunctuation PunctuationRightBracket <$ char ']',
+      KatariTokenPunctuation PunctuationComma <$ char ',',
+      KatariTokenPunctuation PunctuationColon <$ char ':',
+      KatariTokenPunctuation PunctuationDot <$ char '.',
+      KatariTokenPunctuation PunctuationAt <$ char '@',
+      KatariTokenPunctuation PunctuationEquals <$ char '=',
+      KatariTokenPunctuation PunctuationPipe <$ char '|',
+      KatariTokenSemicolonExplicit <$ char ';',
+      KatariTokenOperator OperatorAdd <$ char '+',
+      KatariTokenOperator OperatorSubtract <$ char '-',
+      KatariTokenOperator OperatorMultiply <$ char '*',
+      KatariTokenOperator OperatorDivide <$ char '/',
+      KatariTokenOperator OperatorLessThan <$ char '<',
+      KatariTokenOperator OperatorGreaterThan <$ char '>',
+      KatariTokenOperator OperatorNot <$ char '!'
     ]
 
 -- ---------------------------------------------------------------------------
--- Template body tokens (inside f"..." or f"""...""")
+-- Template body KatariTokens (inside f"..." or f"""...""")
 -- ---------------------------------------------------------------------------
 
--- | Parse one token within a template string context.
+-- | Parse one KatariToken within a template string context.
 --
 -- Recovery: if none of the three branches match (the only realistic case is
 -- EOF before the closing quote was seen), record an
 -- 'LexerErrorUnterminatedTemplate' and synthesise a 'TokenTemplateClose' so
 -- the outer parse keeps a coherent template-token sequence. The popped
--- context lets subsequent tokens lex as normal code.
-lexTemplateBodyToken :: Bool -> Lexer Token
+-- context lets subsequent KatariTokens lex as normal code.
+lexTemplateBodyToken :: Bool -> Lexer KatariToken
 lexTemplateBodyToken isMultiLine = do
   startSourcePos <- getSourcePos
   withRecovery (handler startSourcePos) $
@@ -574,21 +596,21 @@ lexTemplateBodyToken isMultiLine = do
     lexExpressionOpen = do
       _ <- string "${"
       lexPushContext (LexerContextTemplateExpression 0)
-      pure TokenTemplateExpressionOpen
+      pure KatariTokenTemplateExpressionOpen
 
     lexClose
       | isMultiLine = do
           _ <- try (string "\n\"\"\"")
           lexPopContext
-          pure TokenTemplateClose
+          pure KatariTokenTemplateClose
       | otherwise = do
           _ <- char '"'
           lexPopContext
-          pure TokenTemplateClose
+          pure KatariTokenTemplateClose
 
     lexStringRun = do
       chars <- some stringChar
-      pure (TokenTemplateString (T.pack chars))
+      pure (KatariTokenTemplateString (T.pack chars))
 
     stringChar
       | isMultiLine = lexTemplateStringCharacterMulti
@@ -599,10 +621,10 @@ lexTemplateBodyToken isMultiLine = do
       lexRecordError
         (LexerErrorUnterminatedTemplate (spanBetween startSourcePos endSourcePos))
       lexPopContext
-      pure TokenTemplateClose
+      pure KatariTokenTemplateClose
 
 -- | One character of a single-line template string (no literal newlines).
--- Stops if it sees `${` or `"` (those are separate tokens).
+-- Stops if it sees `${` or `"` (those are separate KatariTokens).
 lexTemplateStringCharacterSingle :: Lexer Char
 lexTemplateStringCharacterSingle =
   notFollowedBy (string "${" <|> string "\"")
@@ -789,87 +811,87 @@ classifySurrogate codePoint
 -- Virtual Semicolon Insertion
 -- ===========================================================================
 
--- | Transform a raw token list (with TokenNewline tokens) into a token list
--- with TokenSemicolonVirtual inserted at appropriate newlines and TokenNewline
--- tokens removed.
+-- | Transform a raw KatariToken list (with KatariTokenNewline KatariTokens) into a KatariToken list
+-- with KatariTokenSemicolonVirtual inserted at appropriate newlines and KatariTokenNewline
+-- KatariTokens removed.
 --
 -- 採用基準: 「ここで expression の構文要素が完結しているとみなして良い」トークン
 -- の直後の改行のみ仮想セミコロンに変換する。識別子・各種リテラル・閉じ括弧・
 -- 特定キーワード (break / return / next / null / true / false / 型名キーワード)
 -- が該当。
 --
--- TokenUnderscore は意図的に除外: 式位置で `_` 単独はエラー (式にならない)、
+-- KatariTokenUnderscore は意図的に除外: 式位置で `_` 単独はエラー (式にならない)、
 -- かつ `_: integer` 型注釈の頭になり得る。よって行末に来た場合に挿入しても
 -- 良いケースがほぼ無い。
-insertVirtualSemicolons :: [WithSourceSpan Token] -> [WithSourceSpan Token]
+insertVirtualSemicolons :: [WithSourceSpan KatariToken] -> [WithSourceSpan KatariToken]
 insertVirtualSemicolons = go Nothing
   where
     go _ [] = []
     go previous (current@(WithSourceSpan _ currentToken) : remaining)
-      | currentToken == TokenNewline = case previous of
+      | currentToken == KatariTokenNewline = case previous of
           Just (WithSourceSpan span_ previousToken)
             | canInsertAfter previousToken ->
-                WithSourceSpan span_ TokenSemicolonVirtual : go Nothing remaining
+                WithSourceSpan span_ KatariTokenSemicolonVirtual : go Nothing remaining
           _ -> go Nothing remaining
       | otherwise = current : go (Just current) remaining
 
-    canInsertAfter :: Token -> Bool
+    canInsertAfter :: KatariToken -> Bool
     canInsertAfter = \case
-      TokenIdentifier _ -> True
-      TokenIntegerLiteral _ -> True
-      TokenFloatLiteral _ -> True
-      TokenStringLiteral _ -> True
-      TokenTemplateClose -> True
-      TokenKeyword KeywordBreak -> True
-      TokenKeyword KeywordReturn -> True
-      TokenKeyword KeywordNext -> True
-      TokenKeyword KeywordNull -> True
-      TokenKeyword KeywordTrue -> True
-      TokenKeyword KeywordFalse -> True
-      TokenKeyword KeywordInteger -> True
-      TokenKeyword KeywordBoolean -> True
-      TokenKeyword KeywordNumber -> True
-      TokenKeyword KeywordString -> True
-      TokenPunctuation PunctuationRightParenthesis -> True
-      TokenPunctuation PunctuationRightBracket -> True
-      TokenPunctuation PunctuationRightBrace -> True
+      KatariTokenIdentifier _ -> True
+      KatariTokenIntegerLiteral _ -> True
+      KatariTokenFloatLiteral _ -> True
+      KatariTokenStringLiteral _ -> True
+      KatariTokenTemplateClose -> True
+      KatariTokenKeyword KeywordBreak -> True
+      KatariTokenKeyword KeywordReturn -> True
+      KatariTokenKeyword KeywordNext -> True
+      KatariTokenKeyword KeywordNull -> True
+      KatariTokenKeyword KeywordTrue -> True
+      KatariTokenKeyword KeywordFalse -> True
+      KatariTokenKeyword KeywordInteger -> True
+      KatariTokenKeyword KeywordBoolean -> True
+      KatariTokenKeyword KeywordNumber -> True
+      KatariTokenKeyword KeywordString -> True
+      KatariTokenPunctuation PunctuationRightParenthesis -> True
+      KatariTokenPunctuation PunctuationRightBracket -> True
+      KatariTokenPunctuation PunctuationRightBrace -> True
       _ -> False
 
 -- ===========================================================================
 -- Custom megaparsec Stream instance
 -- ===========================================================================
 
-data TokenStream = TokenStream
+data KatariTokenStream = KatariTokenStream
   { input :: Text,
-    tokens :: [WithSourceSpan Token]
+    tokens :: [WithSourceSpan KatariToken]
   }
   deriving (Eq, Show)
 
-instance MP.Stream TokenStream where
-  type Token TokenStream = WithSourceSpan Token
-  type Tokens TokenStream = [WithSourceSpan Token]
+instance MP.Stream KatariTokenStream where
+  type Token KatariTokenStream = WithSourceSpan KatariToken
+  type Tokens KatariTokenStream = [WithSourceSpan KatariToken]
 
   tokensToChunk Proxy = id
   chunkToTokens Proxy = id
   chunkLength Proxy = length
   chunkEmpty Proxy = null
 
-  take1_ (TokenStream _ []) = Nothing
-  take1_ (TokenStream sourceText (firstToken : remainingTokens)) =
-    Just (firstToken, TokenStream sourceText remainingTokens)
+  take1_ (KatariTokenStream _ []) = Nothing
+  take1_ (KatariTokenStream sourceText (firstToken : remainingTokens)) =
+    Just (firstToken, KatariTokenStream sourceText remainingTokens)
 
-  takeN_ requestedCount stream@(TokenStream sourceText allTokens)
+  takeN_ requestedCount stream@(KatariTokenStream sourceText allTokens)
     | requestedCount <= 0 = Just ([], stream)
     | null allTokens = Nothing
     | otherwise =
         let (taken, remaining) = splitAt requestedCount allTokens
-         in Just (taken, TokenStream sourceText remaining)
+         in Just (taken, KatariTokenStream sourceText remaining)
 
-  takeWhile_ predicate (TokenStream sourceText allTokens) =
+  takeWhile_ predicate (KatariTokenStream sourceText allTokens) =
     let (taken, remaining) = span predicate allTokens
-     in (taken, TokenStream sourceText remaining)
+     in (taken, KatariTokenStream sourceText remaining)
 
-instance VisualStream TokenStream where
+instance VisualStream KatariTokenStream where
   showTokens Proxy =
     concat
       . NE.toList
@@ -883,11 +905,11 @@ instance VisualStream TokenStream where
           then max 1 (span_.end.column - span_.start.column)
           else 1
 
-instance TraversableStream TokenStream where
+instance TraversableStream KatariTokenStream where
   reachOffset targetOffset PosState {..} =
     ( Just finalPrefix,
       PosState
-        { pstateInput = TokenStream sourceText remainingTokens,
+        { pstateInput = KatariTokenStream sourceText remainingTokens,
           pstateOffset = max pstateOffset targetOffset,
           pstateSourcePos = newSourcePos,
           pstateTabWidth = pstateTabWidth,
@@ -909,10 +931,10 @@ instance TraversableStream TokenStream where
         | otherwise = newLinePrefix
 
 -- | Pick the source position to advance to. Prefer the head of the remaining
--- token stream; if the offset has run past the last token, anchor to the end
--- of the last consumed token; if the input was empty to begin with, keep the
+-- KatariToken stream; if the offset has run past the last KatariToken, anchor to the end
+-- of the last consumed KatariToken; if the input was empty to begin with, keep the
 -- current position.
-nextSourcePos :: [WithSourceSpan Token] -> [WithSourceSpan Token] -> SourcePos -> SourcePos
+nextSourcePos :: [WithSourceSpan KatariToken] -> [WithSourceSpan KatariToken] -> SourcePos -> SourcePos
 nextSourcePos remainingTokens allTokens fallback = case remainingTokens of
   WithSourceSpan span_ _ : _ -> mkSourcePos span_.filePath span_.start
   [] -> case allTokens of
@@ -924,7 +946,7 @@ mkSourcePos filePath position = SourcePos filePath (mkPos position.line) (mkPos 
 
 -- | Extract the source line prefix up to (but not including) the column of
 -- the given SourcePos. Used to feed megaparsec's error message formatter so
--- it can draw the caret under the offending token.
+-- it can draw the caret under the offending KatariToken.
 linePrefixFor :: Text -> SourcePos -> Text
 linePrefixFor sourceText sourcePos =
   let lineIndex = unPos (sourceLine sourcePos) - 1
@@ -973,21 +995,21 @@ showOperator = \case
 
 -- | Render a 'Token' for diagnostics. Reused by the Parser to format
 -- "expected X, got Y" error messages without redefining its own table.
-showToken :: Token -> String
+showToken :: KatariToken -> String
 showToken = \case
-  TokenIdentifier text -> T.unpack text
-  TokenUnderscore -> "_"
-  TokenKeyword keyword -> showKeyword keyword
-  TokenIntegerLiteral integer -> show integer
-  TokenFloatLiteral double -> show double
-  TokenStringLiteral text -> show text
-  TokenTemplateOpen -> "f\""
-  TokenTemplateClose -> "\""
-  TokenTemplateString text -> T.unpack text
-  TokenTemplateExpressionOpen -> "${"
-  TokenTemplateExpressionClose -> "}"
-  TokenPunctuation punctuation -> showPunctuation punctuation
-  TokenOperator operator -> showOperator operator
-  TokenSemicolonExplicit -> ";"
-  TokenSemicolonVirtual -> ";"
-  TokenNewline -> "\\n"
+  KatariTokenIdentifier text -> T.unpack text
+  KatariTokenUnderscore -> "_"
+  KatariTokenKeyword keyword -> showKeyword keyword
+  KatariTokenIntegerLiteral integer -> show integer
+  KatariTokenFloatLiteral double -> show double
+  KatariTokenStringLiteral text -> show text
+  KatariTokenTemplateOpen -> "f\""
+  KatariTokenTemplateClose -> "\""
+  KatariTokenTemplateString text -> T.unpack text
+  KatariTokenTemplateExpressionOpen -> "${"
+  KatariTokenTemplateExpressionClose -> "}"
+  KatariTokenPunctuation punctuation -> showPunctuation punctuation
+  KatariTokenOperator operator -> showOperator operator
+  KatariTokenSemicolonExplicit -> ";"
+  KatariTokenSemicolonVirtual -> ";"
+  KatariTokenNewline -> "\\n"

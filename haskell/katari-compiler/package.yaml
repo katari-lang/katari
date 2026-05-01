@@ -10,20 +10,20 @@ library:
   exposed-modules:
     - Katari
     - Katari.AST
-    - Katari.AST.Identifiers
+    - Katari.Id
     - Katari.Diagnostic
     - Katari.Diagnostic.Render
     - Katari.Internal
     - Katari.Lexer
     - Katari.Parser
     - Katari.Typechecker.Identifier
-    - Katari.Typechecker.SemanticType
+    - Katari.SemanticType
     - Katari.Typechecker.NormalizedType
     - Katari.Typechecker.ConstraintGenerator
     - Katari.Typechecker.Solver
     - Katari.Typechecker.Solver.Branch
     - Katari.Typechecker.Solver.Decompose
-    - Katari.Typechecker.Solver.Effect
+    - Katari.Typechecker.Solver.Request
     - Katari.Typechecker.Solver.Internal
     - Katari.Typechecker.Solver.Substitution
     - Katari.Typechecker.Zonker
@@ -33,6 +33,7 @@ library:
     - Katari.Schema
     - Katari.Compile
     - Katari.Query
+    - Katari.SourceSpan
 
 tests:
   katari-compiler-test:
@@ -83,3 +84,6 @@ default-extensions:
   - UndecidableInstances
   - DerivingStrategies
   - TypeData
+  - StrictData
+  - LiberalTypeSynonyms
+  - ImpredicativeTypes

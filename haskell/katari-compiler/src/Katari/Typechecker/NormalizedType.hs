@@ -56,8 +56,8 @@ import Data.Map.Strict qualified as Map
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
+import Katari.SemanticType (Resolved, SemanticRequest (..), SemanticType (..))
 import Katari.Typechecker.Identifier (RequestId, TypeId)
-import Katari.Typechecker.SemanticType (Resolved, SemanticEffect (..), SemanticType (..))
 
 -- ---------------------------------------------------------------------------
 -- NormalizedType
@@ -177,7 +177,7 @@ data FunctionSlot where
 data FunctionShape = FunctionShape
   { parameters :: !(Map Text NormalizedType),
     returnType :: !NormalizedType,
-    effects :: !(Set RequestId)
+    requests :: !(Set RequestId)
   }
   deriving (Eq, Show)
 
@@ -260,11 +260,11 @@ functionBranches = \case
   FunctionSlotAbsent -> []
   FunctionSlotOf shape -> [makeFunction shape]
   where
-    makeFunction FunctionShape {parameters, returnType, effects} =
+    makeFunction FunctionShape {parameters, returnType, requests} =
       SemanticTypeFunction
         (Map.map denormalise parameters)
         (denormalise returnType)
-        (SemanticEffect Set.empty effects)
+        (SemanticRequest Set.empty requests)
 
 arrayBranches :: ArraySlot -> [SemanticType Resolved]
 arrayBranches = \case
@@ -376,13 +376,13 @@ normaliseSemantic = \case
       emptyLayered
         { objectLayer = ObjectSlotOf (Map.map normaliseSemantic fields)
         }
-  SemanticTypeFunction parameterTypes returnType effects ->
+  SemanticTypeFunction parameterTypes returnType requests ->
     let shape =
           FunctionShape
             { parameters = Map.map normaliseSemantic parameterTypes,
               returnType = normaliseSemantic returnType,
-              effects = effects.effectReqs
-              -- effectVars must be empty in Resolved phase by Zonker invariant.
+              requests = requests.requestReqs
+              -- requestVars must be empty in Resolved phase by Zonker invariant.
             }
      in NormalizedTypeLayered emptyLayered {functionLayer = FunctionSlotOf shape}
   SemanticTypeUnion branches ->
@@ -442,7 +442,7 @@ unionArraySlot leftSlot rightSlot = case (leftSlot, rightSlot) of
 --
 -- Per the user-specified rule: take the **union** of label sets, with each
 -- common label's type **intersected** (contravariant in args). Labels only
--- in one side are kept as-is. Effects are unioned.
+-- in one side are kept as-is. Requests are unioned.
 unionFunctionLayer :: FunctionSlot -> FunctionSlot -> FunctionSlot
 unionFunctionLayer leftSlot rightSlot = case (leftSlot, rightSlot) of
   (FunctionSlotAbsent, other) -> other
@@ -458,7 +458,7 @@ unionFunctionShape leftShape rightShape =
       parameters =
         Map.unionWith intersectNT leftShape.parameters rightShape.parameters,
       returnType = unionNT leftShape.returnType rightShape.returnType,
-      effects = Set.union leftShape.effects rightShape.effects
+      requests = Set.union leftShape.requests rightShape.requests
     }
 
 unionTupleLayer ::
@@ -528,7 +528,7 @@ intersectArraySlot leftSlot rightSlot = case (leftSlot, rightSlot) of
 --
 -- Per the user-specified rule: take the **intersection** of label sets,
 -- with each common label's type **unioned** (contravariant in args).
--- Effects are unioned (合併) per the spec.
+-- Requests are unioned (合併) per the spec.
 intersectFunctionLayer :: FunctionSlot -> FunctionSlot -> FunctionSlot
 intersectFunctionLayer leftSlot rightSlot = case (leftSlot, rightSlot) of
   (FunctionSlotAbsent, _) -> FunctionSlotAbsent
@@ -544,7 +544,7 @@ intersectFunctionShape leftShape rightShape =
       parameters =
         Map.intersectionWith unionNT leftShape.parameters rightShape.parameters,
       returnType = intersectNT leftShape.returnType rightShape.returnType,
-      effects = Set.union leftShape.effects rightShape.effects
+      requests = Set.union leftShape.requests rightShape.requests
     }
 
 intersectTupleLayer ::
@@ -634,13 +634,13 @@ subtypeFunctionLayer leftSlot rightSlot = case (leftSlot, rightSlot) of
 --     contravariant: @rightShape@'s parameter type must be a subtype of
 --     @leftShape@'s.
 --   * Return type is covariant.
---   * Effect set is covariant (subset).
+--   * Request set is covariant (subset).
 subtypeFunctionShape :: FunctionShape -> FunctionShape -> Bool
 subtypeFunctionShape leftShape rightShape =
   Map.keysSet leftShape.parameters `Set.isSubsetOf` Map.keysSet rightShape.parameters
     && all checkParameter (Map.toList leftShape.parameters)
     && subtypeNT leftShape.returnType rightShape.returnType
-    && Set.isSubsetOf leftShape.effects rightShape.effects
+    && Set.isSubsetOf leftShape.requests rightShape.requests
   where
     checkParameter (label, leftType) = case Map.lookup label rightShape.parameters of
       Just rightType -> subtypeNT rightType leftType -- contravariant

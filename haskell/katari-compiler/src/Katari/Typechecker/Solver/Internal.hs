@@ -21,9 +21,9 @@ module Katari.Typechecker.Solver.Internal
     containsNoTypeVars,
     constraintTypeVars,
     typeVarsIn,
-    effectVarsIn,
+    requestVarsIn,
     isTypeConstraint,
-    isEffectConstraint,
+    isRequestConstraint,
   )
 where
 
@@ -31,6 +31,16 @@ import Data.Map.Strict (Map)
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
+import Katari.SemanticType
+  ( RequestVariableId,
+    Resolved,
+    SemanticRequest (..),
+    SemanticType (..),
+    TypeVariableId,
+    Unresolved,
+    foldSemantic,
+    traverseSemanticChildren,
+  )
 import Katari.Typechecker.ConstraintGenerator
   ( Constraint (..),
     ConstraintReason,
@@ -41,28 +51,18 @@ import Katari.Typechecker.NormalizedType
     normaliseSemantic,
     subtypeNT,
   )
-import Katari.Typechecker.SemanticType
-  ( EffectVarId,
-    Resolved,
-    SemanticEffect (..),
-    SemanticType (..),
-    TypeVarId,
-    Unresolved,
-    foldSemantic,
-    traverseSemanticChildren,
-  )
 
 -- ===========================================================================
 -- Result types
 -- ===========================================================================
 
--- | Constraint solver の最終出力。'typeSubstitution' / 'effectSubstitution'
+-- | Constraint solver の最終出力。'typeSubstitution' / 'requestSubstitution'
 -- は ConstraintGenerator が allocate した全 ID をカバーする (Zonker plan で
 -- 確定済 total 契約)。解決不能な制約は 'solverErrors' に記録され、対応する
 -- var は NormalizedTypeUnknown / 空 set にフォールバック。
 data SolverResult = SolverResult
-  { typeSubstitution :: !(Map TypeVarId NormalizedType),
-    effectSubstitution :: !(Map EffectVarId (Set RequestId)),
+  { typeSubstitution :: !(Map TypeVariableId NormalizedType),
+    requestSubstitution :: !(Map RequestVariableId (Set RequestId)),
     solverErrors :: ![SolverError]
   }
   deriving (Show)
@@ -76,7 +76,7 @@ data SolverError where
     SemanticType Resolved ->
     SolverError
   SolverErrorBoundsConflict ::
-    TypeVarId ->
+    TypeVariableId ->
     ConstraintReason ->
     SemanticType Resolved ->
     ConstraintReason ->
@@ -95,7 +95,7 @@ deriving instance Show SolverError
 -- Internal types
 -- ===========================================================================
 
-type Substitution = Map TypeVarId (SemanticType Unresolved)
+type Substitution = Map TypeVariableId (SemanticType Unresolved)
 
 data BoundedType = BoundedType
   { boundType :: !(SemanticType Unresolved),
@@ -118,16 +118,16 @@ emptyBounds = Bounds {lowerBounds = [], upperBounds = []}
 
 -- | 'SemanticType' 'Unresolved' (no vars) -> 'SemanticType' 'Resolved'.
 -- Returns 'Nothing' iff the input contains any 'SemanticTypeVariable' or any
--- function effect set with unresolved 'EffectVarId's. The structural recursion
+-- function request set with unresolved 'RequestVariableId's. The structural recursion
 -- is delegated to 'traverseSemanticChildren'; this body only handles the
--- two phase-changing concerns (variable elimination, effect concreteness).
+-- two phase-changing concerns (variable elimination, request concreteness).
 semanticToConcrete :: SemanticType Unresolved -> Maybe (SemanticType Resolved)
 semanticToConcrete = \case
   SemanticTypeVariable _ -> Nothing
-  t -> traverseSemanticChildren semanticToConcrete concretiseEffect t
+  t -> traverseSemanticChildren semanticToConcrete concretiseRequest t
   where
-    concretiseEffect (SemanticEffect vars reqs)
-      | Set.null vars = Just (SemanticEffect Set.empty reqs)
+    concretiseRequest (SemanticRequest vars reqs)
+      | Set.null vars = Just (SemanticRequest Set.empty reqs)
       | otherwise = Nothing
 
 -- | Subtype check between two var-free 'SemanticType' values via
@@ -146,24 +146,24 @@ isSubtypeConcrete leftType rightType =
 containsNoTypeVars :: SemanticType Unresolved -> Bool
 containsNoTypeVars = Set.null . typeVarsIn
 
--- | Free 'TypeVarId's appearing anywhere in the type. Variable case is
+-- | Free 'TypeVariableId's appearing anywhere in the type. Variable case is
 -- handled directly; everything else delegates to 'foldSemantic'.
-typeVarsIn :: SemanticType Unresolved -> Set TypeVarId
+typeVarsIn :: SemanticType Unresolved -> Set TypeVariableId
 typeVarsIn = \case
   SemanticTypeVariable typeVarId -> Set.singleton typeVarId
   t -> foldSemantic typeVarsIn (const Set.empty) t
 
--- | Free 'EffectVarId's appearing anywhere in the type. Function nodes are
--- the only constructors that carry effects; 'foldSemantic' delivers each
--- 'SemanticEffect' to the second argument.
-effectVarsIn :: SemanticType Unresolved -> Set EffectVarId
-effectVarsIn = foldSemantic effectVarsIn (.effectVars)
+-- | Free 'RequestVariableId's appearing anywhere in the type. Function nodes are
+-- the only constructors that carry requests; 'foldSemantic' delivers each
+-- 'SemanticRequest' to the second argument.
+requestVarsIn :: SemanticType Unresolved -> Set RequestVariableId
+requestVarsIn = foldSemantic requestVarsIn (.requestVars)
 
-constraintTypeVars :: Constraint -> Set TypeVarId
+constraintTypeVars :: Constraint -> Set TypeVariableId
 constraintTypeVars = \case
   TypeConstraint leftType rightType _ ->
     Set.union (typeVarsIn leftType) (typeVarsIn rightType)
-  EffectConstraint {} -> Set.empty
+  RequestConstraint {} -> Set.empty
 
 -- ===========================================================================
 -- Constraint partitioning
@@ -174,7 +174,7 @@ isTypeConstraint = \case
   TypeConstraint {} -> True
   _ -> False
 
-isEffectConstraint :: Constraint -> Bool
-isEffectConstraint = \case
-  EffectConstraint {} -> True
+isRequestConstraint :: Constraint -> Bool
+isRequestConstraint = \case
+  RequestConstraint {} -> True
   _ -> False

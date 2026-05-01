@@ -4,25 +4,10 @@
 -- 'Identified' phase onward. They are split into a dedicated module so that
 -- both 'Katari.AST' and 'Katari.Typechecker.SemanticType' can depend on them
 -- without circular imports.
-module Katari.AST.Identifiers
-  ( VariableId (..),
-    TypeId (..),
-    ModuleId (..),
-    RequestId (..),
-    ConstructorId (..),
-    QualifiedName (..),
-    renderQualifiedName,
-    unVariableId,
-    unTypeId,
-    unModuleId,
-    unRequestId,
-    unConstructorId,
-  )
-where
+module Katari.Id where
 
 import Data.Aeson (FromJSON, FromJSONKey, ToJSON, ToJSONKey)
 import Data.Text (Text)
-import Data.Text qualified as Text
 import GHC.Generics (Generic)
 
 -- | Unique id in the value namespace. Shared by agent / req / ext-agent /
@@ -31,33 +16,21 @@ import GHC.Generics (Generic)
 newtype VariableId = VariableId Int
   deriving (Eq, Ord, Show)
 
-unVariableId :: VariableId -> Int
-unVariableId (VariableId n) = n
-
 -- | Unique id in the type namespace. Issued for data declarations and type
 -- synonyms.
 newtype TypeId = TypeId Int
   deriving (Eq, Ord, Show)
 
-unTypeId :: TypeId -> Int
-unTypeId (TypeId n) = n
-
 -- | Unique id in the module namespace.
 newtype ModuleId = ModuleId Int
   deriving (Eq, Ord, Show)
 
-unModuleId :: ModuleId -> Int
-unModuleId (ModuleId n) = n
-
 -- | Unique id in the request namespace. Issued for @req@ declarations only.
--- Used to identify the target of @req@ handlers and the elements of effect
+-- Used to identify the target of @req@ handlers and the elements of request
 -- sets, separately from 'VariableId' which covers the call-as-a-function
 -- side of the same declaration.
 newtype RequestId = RequestId Int
   deriving (Eq, Ord, Show)
-
-unRequestId :: RequestId -> Int
-unRequestId (RequestId n) = n
 
 -- | Unique id in the data-constructor namespace. Issued for @data@
 -- declarations only. Used to identify the constructor of a @match@ arm
@@ -65,9 +38,6 @@ unRequestId (RequestId n) = n
 -- side) of the same declaration.
 newtype ConstructorId = ConstructorId Int
   deriving (Eq, Ord, Show)
-
-unConstructorId :: ConstructorId -> Int
-unConstructorId (ConstructorId n) = n
 
 -- | A top-level declaration's fully qualified name: the dotted module path
 -- plus the bare name. Local variables (let / pattern bind / param) do not
@@ -78,8 +48,8 @@ unConstructorId (ConstructorId n) = n
 -- queryable inside the compiler; render to dotted form via
 -- 'renderQualifiedName' at FFI / debug boundaries.
 data QualifiedName = QualifiedName
-  { module_ :: !Text,
-    name :: !Text
+  { module_ :: Text,
+    name :: Text
   }
   deriving (Eq, Ord, Show, Generic)
 
@@ -95,6 +65,4 @@ instance FromJSONKey QualifiedName
 -- Handles the empty-module-path edge case (which should not occur in
 -- well-formed sources) by emitting just the bare name.
 renderQualifiedName :: QualifiedName -> Text
-renderQualifiedName q
-  | Text.null q.module_ = q.name
-  | otherwise = q.module_ <> "." <> q.name
+renderQualifiedName q = q.module_ <> "." <> q.name

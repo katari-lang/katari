@@ -1,13 +1,13 @@
 -- | Typechecker phase 3: Solve constraints for type variables.
 --
 -- Input  : 'ConstraintGenResult' (the AST + constraints from phase 2).
--- Output : 'SolverResult' — substitutions for every type / effect variable
+-- Output : 'SolverResult' — substitutions for every type / request variable
 --          allocated in phase 2, plus a list of solver errors encountered
 --          during recovery.
 --
 -- Algorithm (mirrors @memento-compiler@'s approach):
 --
---   1. Partition constraints into type and effect.
+--   1. Partition constraints into type and request.
 --   2. Repeatedly substitute "instances" — variables whose lower / upper
 --      bound intersection pins them to a concrete type.
 --   3. Decompose structurally (function vs function, tuple vs tuple, ...).
@@ -17,7 +17,7 @@
 --   5. Propagate bounds (from @t \<: α@ and @α \<: u@ derive @t \<: u@).
 --   6. Collect final substitutions: each var = union of its lower bounds,
 --      or sole upper bound if no lower bound is concrete.
---   7. Effect constraints are solved separately by lower-bound accumulation.
+--   7. Request constraints are solved separately by lower-bound accumulation.
 --
 -- Subtype check is implemented **only** on 'NormalizedType'. Whenever we need
 -- to compare two types, both sides must be variable-free — we then convert
@@ -42,9 +42,9 @@ module Katari.Typechecker.Solver
     containsNoTypeVars,
     constraintTypeVars,
     typeVarsIn,
-    effectVarsIn,
+    requestVarsIn,
     isTypeConstraint,
-    isEffectConstraint,
+    isRequestConstraint,
 
     -- * Diagnostics
     toDiagnostic,
@@ -60,8 +60,12 @@ import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
-import Katari.AST (HasSourceSpan (..), Position (..), SourceSpan (..))
 import Katari.Diagnostic (Diagnostic, diagnosticError)
+import Katari.SemanticType
+  ( RequestVariableId (..),
+    TypeVariableId (..),
+  )
+import Katari.SourceSpan (HasSourceSpan (..), Position (..), SourceSpan (..))
 import Katari.Typechecker.ConstraintGenerator
   ( Constraint (..),
     ConstraintGenResult (..),
@@ -74,14 +78,10 @@ import Katari.Typechecker.NormalizedType
     normaliseSemantic,
     subtypeNT,
   )
-import Katari.Typechecker.SemanticType
-  ( EffectVarId (..),
-    TypeVarId (..),
-  )
 import Katari.Typechecker.Solver.Branch qualified as Branch
 import Katari.Typechecker.Solver.Decompose qualified as Decompose
-import Katari.Typechecker.Solver.Effect qualified as Effect
 import Katari.Typechecker.Solver.Internal
+import Katari.Typechecker.Solver.Request qualified as Request
 import Katari.Typechecker.Solver.Substitution qualified as Substitution
 
 -- ===========================================================================
@@ -92,23 +92,23 @@ solve :: ConstraintGenResult -> SolverResult
 solve cgResult =
   let allConstraints = cgResult.constraints
       typeConstraints = Set.filter isTypeConstraint allConstraints
-      effectConstraints = Set.filter isEffectConstraint allConstraints
+      requestConstraints = Set.filter isRequestConstraint allConstraints
       (typeSubstitution_, typeErrors) =
-        solveTypeWorklist cgResult.nextTypeVarId cgResult.nextEffectVarId typeConstraints
-      (effectSubstitution_, effectErrors) =
-        solveEffectWorklist cgResult.nextEffectVarId effectConstraints
-      -- Apply the effect substitution to the type sub's values so that
-      -- narrowed function shapes (which carry fresh effect vars) become
-      -- effect-concrete before 'substToNormalizedSafe' inspects them.
-      typeSubAfterEffect =
-        Map.map (Substitution.applyEffectSubstToType effectSubstitution_) typeSubstitution_
-      normalizedTypeSubstitution = substToNormalizedSafe typeSubAfterEffect
+        solveTypeWorklist cgResult.nextTypeVariableId cgResult.nextRequestVariableId typeConstraints
+      (requestSubstitution_, requestErrors) =
+        solveRequestWorklist cgResult.nextRequestVariableId requestConstraints
+      -- Apply the request substitution to the type sub's values so that
+      -- narrowed function shapes (which carry fresh request vars) become
+      -- request-concrete before 'substToNormalizedSafe' inspects them.
+      typeSubAfterRequest =
+        Map.map (Substitution.applyRequestSubstToType requestSubstitution_) typeSubstitution_
+      normalizedTypeSubstitution = substToNormalizedSafe typeSubAfterRequest
    in SolverResult
         { typeSubstitution =
-            totaliseTypes cgResult.nextTypeVarId normalizedTypeSubstitution,
-          effectSubstitution =
-            totaliseEffects cgResult.nextEffectVarId effectSubstitution_,
-          solverErrors = typeErrors <> effectErrors
+            totaliseTypes cgResult.nextTypeVariableId normalizedTypeSubstitution,
+          requestSubstitution =
+            totaliseRequests cgResult.nextRequestVariableId requestSubstitution_,
+          solverErrors = typeErrors <> requestErrors
         }
 
 -- ---------------------------------------------------------------------------
@@ -123,8 +123,8 @@ solveTypeWorklist ::
   Int ->
   Set Constraint ->
   (Substitution, [SolverError])
-solveTypeWorklist startNextTypeVarId startNextEffectVarId initialConstraints =
-  case go startNextTypeVarId startNextEffectVarId initialConstraints Map.empty of
+solveTypeWorklist startNextTypeVariableId startNextRequestVariableId initialConstraints =
+  case go startNextTypeVariableId startNextRequestVariableId initialConstraints Map.empty of
     Right substitution -> (substitution, [])
     Left err -> (Map.empty, [err])
   where
@@ -134,7 +134,7 @@ solveTypeWorklist startNextTypeVarId startNextEffectVarId initialConstraints =
       Set Constraint ->
       Substitution ->
       Either SolverError Substitution
-    go nextTypeVarId nextEffectVarId constraints accumulatedSubstitution = do
+    go nextTypeVariableId nextRequestVariableId constraints accumulatedSubstitution = do
       let substituted =
             Set.map (Substitution.applySubstConstraint accumulatedSubstitution) constraints
       decomposed <- Decompose.decomposeConstraintsAll substituted
@@ -144,11 +144,11 @@ solveTypeWorklist startNextTypeVarId startNextEffectVarId initialConstraints =
       case pinnable of
         ((typeVarId, pinnedType) : _) ->
           let newSubstitution = Map.insert typeVarId pinnedType accumulatedSubstitution
-           in go nextTypeVarId nextEffectVarId decomposed newSubstitution
+           in go nextTypeVariableId nextRequestVariableId decomposed newSubstitution
         [] ->
-          case Branch.branchConstraints nextTypeVarId nextEffectVarId decomposed of
+          case Branch.branchConstraints nextTypeVariableId nextRequestVariableId decomposed of
             Just branches ->
-              tryBranches nextTypeVarId nextEffectVarId accumulatedSubstitution branches
+              tryBranches nextTypeVariableId nextRequestVariableId accumulatedSubstitution branches
             Nothing -> do
               let propagated = Substitution.calculatePropagationAll decomposed
                   collected = Substitution.collectFinalSubstitutions propagated
@@ -179,13 +179,13 @@ solveTypeWorklist startNextTypeVarId startNextEffectVarId initialConstraints =
             (synthesisedReason initialConstraints)
             "all branches failed"
         )
-    tryBranches _ _ accumulatedSubstitution [(branchSubstitution, branchConstraints, nextTypeVarIdAfter, nextEffectVarIdAfter)] =
-      runBranch accumulatedSubstitution branchSubstitution branchConstraints nextTypeVarIdAfter nextEffectVarIdAfter
-    tryBranches nextTypeVarId nextEffectVarId accumulatedSubstitution ((branchSubstitution, branchConstraints, nextTypeVarIdAfter, nextEffectVarIdAfter) : remainingBranches) =
-      case runBranch accumulatedSubstitution branchSubstitution branchConstraints nextTypeVarIdAfter nextEffectVarIdAfter of
+    tryBranches _ _ accumulatedSubstitution [(branchSubstitution, branchConstraints, nextTypeVariableIdAfter, nextRequestVariableIdAfter)] =
+      runBranch accumulatedSubstitution branchSubstitution branchConstraints nextTypeVariableIdAfter nextRequestVariableIdAfter
+    tryBranches nextTypeVariableId nextRequestVariableId accumulatedSubstitution ((branchSubstitution, branchConstraints, nextTypeVariableIdAfter, nextRequestVariableIdAfter) : remainingBranches) =
+      case runBranch accumulatedSubstitution branchSubstitution branchConstraints nextTypeVariableIdAfter nextRequestVariableIdAfter of
         Right successSubstitution -> Right successSubstitution
         Left _ ->
-          tryBranches nextTypeVarId nextEffectVarId accumulatedSubstitution remainingBranches
+          tryBranches nextTypeVariableId nextRequestVariableId accumulatedSubstitution remainingBranches
 
     runBranch ::
       Substitution ->
@@ -194,9 +194,9 @@ solveTypeWorklist startNextTypeVarId startNextEffectVarId initialConstraints =
       Int ->
       Int ->
       Either SolverError Substitution
-    runBranch accumulatedSubstitution branchSubstitution branchConstraints nextTypeVarIdAfter nextEffectVarIdAfter =
+    runBranch accumulatedSubstitution branchSubstitution branchConstraints nextTypeVariableIdAfter nextRequestVariableIdAfter =
       let combinedSubstitution = Map.union branchSubstitution accumulatedSubstitution
-       in go nextTypeVarIdAfter nextEffectVarIdAfter branchConstraints combinedSubstitution
+       in go nextTypeVariableIdAfter nextRequestVariableIdAfter branchConstraints combinedSubstitution
 
 -- | Compose a substitution with itself until a fixpoint, so that an
 -- indirect entry like @α := F(t_p)@ collapses to @α := F(Int)@ once
@@ -205,7 +205,7 @@ solveTypeWorklist startNextTypeVarId startNextEffectVarId initialConstraints =
 -- that 'semanticToConcrete' rejects, forcing the downstream to fall back
 -- to 'NormalizedTypeUnknown'.
 --
--- Termination: each iteration is monotone (no entry gains new 'TypeVarId'
+-- Termination: each iteration is monotone (no entry gains new 'TypeVariableId'
 -- references) and the substitution is finite. Self-referential cycles
 -- (@α := SemanticTypeVariable α@) reach the fixpoint immediately as
 -- 'applySubstSubst' folds them into themselves; downstream
@@ -253,41 +253,41 @@ synthesisedReason constraints =
 -- (defensive case — should not normally happen) fall back to 'NormalizedTypeUnknown',
 -- the lattice top, so that downstream phases treat them as "any" rather
 -- than "never".
-substToNormalizedSafe :: Substitution -> Map TypeVarId NormalizedType
+substToNormalizedSafe :: Substitution -> Map TypeVariableId NormalizedType
 substToNormalizedSafe = Map.map convert
   where
     convert pinnedType = maybe NormalizedTypeUnknown normaliseSemantic (semanticToConcrete pinnedType)
 
 -- ---------------------------------------------------------------------------
--- Effect worklist (delegated to 'Solver.Effect')
+-- Request worklist (delegated to 'Solver.Request')
 -- ---------------------------------------------------------------------------
 
-solveEffectWorklist ::
+solveRequestWorklist ::
   Int ->
   Set Constraint ->
-  (Map EffectVarId (Set RequestId), [SolverError])
-solveEffectWorklist _ = Effect.solveEffectConstraints
+  (Map RequestVariableId (Set RequestId), [SolverError])
+solveRequestWorklist _ = Request.solveRequestConstraints
 
 -- ---------------------------------------------------------------------------
 -- Total contract: fill missing entries
 -- ---------------------------------------------------------------------------
 
--- | Ensure every 'TypeVarId' allocated by the constraint generator has an
+-- | Ensure every 'TypeVariableId' allocated by the constraint generator has an
 -- entry. Missing entries (vars that the solver could not pin) fall back to
 -- 'NormalizedTypeUnknown' (the lattice top) so that downstream phases see "any" rather
 -- than "never".
-totaliseTypes :: Int -> Map TypeVarId NormalizedType -> Map TypeVarId NormalizedType
+totaliseTypes :: Int -> Map TypeVariableId NormalizedType -> Map TypeVariableId NormalizedType
 totaliseTypes upperLimit given =
   Map.union given $
-    Map.fromList [(TypeVarId i, NormalizedTypeUnknown) | i <- [0 .. upperLimit - 1]]
+    Map.fromList [(TypeVariableId i, NormalizedTypeUnknown) | i <- [0 .. upperLimit - 1]]
 
-totaliseEffects ::
+totaliseRequests ::
   Int ->
-  Map EffectVarId (Set RequestId) ->
-  Map EffectVarId (Set RequestId)
-totaliseEffects upperLimit given =
+  Map RequestVariableId (Set RequestId) ->
+  Map RequestVariableId (Set RequestId)
+totaliseRequests upperLimit given =
   Map.union given $
-    Map.fromList [(EffectVarId i, Set.empty) | i <- [0 .. upperLimit - 1]]
+    Map.fromList [(RequestVariableId i, Set.empty) | i <- [0 .. upperLimit - 1]]
 
 -- ===========================================================================
 -- Diagnostics
@@ -311,7 +311,7 @@ toDiagnostic = \case
           <> "`"
       )
       (sourceSpanOf reason)
-  SolverErrorBoundsConflict (TypeVarId tv) lowerReason lower upperReason upper ->
+  SolverErrorBoundsConflict (TypeVariableId tv) lowerReason lower upperReason upper ->
     diagnosticError
       "K0221"
       ( "type-variable bounds conflict for α"

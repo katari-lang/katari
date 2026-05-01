@@ -5,6 +5,11 @@ import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Katari.Parser (parseModuleStrict)
+import Katari.SemanticType
+  ( SemanticType (..),
+    TypeVariableId (..),
+    Unresolved,
+  )
 import Katari.Typechecker.ConstraintGenerator
   ( ConstraintGenResult (..),
     generateConstraints,
@@ -23,11 +28,6 @@ import Katari.Typechecker.NormalizedType
     NumberSlot (..),
     ObjectSlot (..),
     StringSlot (..),
-  )
-import Katari.Typechecker.SemanticType
-  ( SemanticType (..),
-    TypeVarId (..),
-    Unresolved,
   )
 import Katari.Typechecker.Solver (SolverResult (..), solve)
 import Katari.Typechecker.Zonker (ZonkResult (..), zonk)
@@ -62,16 +62,16 @@ inferredTypeOf ::
 inferredTypeOf name idResult cgResult solverResult = do
   variableId <- variableIdOf name idResult
   semanticType <- Map.lookup variableId cgResult.typeEnvironment
-  case extractTypeVarId semanticType of
+  case extractTypeVariableId semanticType of
     Just typeVarId -> Map.lookup typeVarId solverResult.typeSubstitution
     Nothing -> Nothing
   where
-    extractTypeVarId :: SemanticType Unresolved -> Maybe TypeVarId
-    extractTypeVarId = \case
+    extractTypeVariableId :: SemanticType Unresolved -> Maybe TypeVariableId
+    extractTypeVariableId = \case
       SemanticTypeVariable typeVarId -> Just typeVarId
       _ -> Nothing
 
--- | Verify the Solver totality contract: every TypeVarId allocated by
+-- | Verify the Solver totality contract: every TypeVariableId allocated by
 -- ConstraintGenerator has an entry in the substitution. The substitution
 -- may contain additional entries for solver-internal fresh vars allocated
 -- during branching — those are harmless.
@@ -80,7 +80,7 @@ shouldHaveTotalSubstitution ::
   ConstraintGenResult ->
   Expectation
 shouldHaveTotalSubstitution solverResult cgResult = do
-  let required = Set.fromList [TypeVarId i | i <- [0 .. cgResult.nextTypeVarId - 1]]
+  let required = Set.fromList [TypeVariableId i | i <- [0 .. cgResult.nextTypeVariableId - 1]]
       actual = Map.keysSet solverResult.typeSubstitution
   Set.isSubsetOf required actual `shouldBe` True
 
@@ -130,7 +130,7 @@ basicLiterals = describe "basic literal inference" $ do
 
 totalContract :: Spec
 totalContract = describe "Solver totality contract" $ do
-  it "trivial agent: every TypeVarId has a substitution entry" $ do
+  it "trivial agent: every TypeVariableId has a substitution entry" $ do
     (_, cgResult, solverResult) <- runSolve "agent foo() { 42 }"
     solverResult `shouldHaveTotalSubstitution` cgResult
 
@@ -206,8 +206,8 @@ contradictions = describe "contradictions" $ do
   it "even with errors, substitution is still total" $ do
     (_, cgResult, solverResult) <- runSolve "agent foo() -> integer { \"bad\" }"
     -- Errors mean the type substitution may be empty + filled with NormalizedTypeUnknown
-    -- by the totality layer, so all TypeVarIds still have entries.
-    Map.size solverResult.typeSubstitution `shouldBe` cgResult.nextTypeVarId
+    -- by the totality layer, so all TypeVariableIds still have entries.
+    Map.size solverResult.typeSubstitution `shouldBe` cgResult.nextTypeVariableId
 
 -- ---------------------------------------------------------------------------
 -- End-to-end with Zonker
@@ -245,7 +245,7 @@ whereHandlerBlocks = describe "where blocks and request handlers" $ do
       runSolve "agent counter() -> integer { 0 } where (var n: integer = 0) {}"
     solverResult.solverErrors `shouldBe` []
 
-  it "where with request handler: req is discharged, agent has empty effect" $ do
+  it "where with request handler: req is discharged, agent has empty request" $ do
     (_, _, solverResult) <-
       runSolve $
         mconcat

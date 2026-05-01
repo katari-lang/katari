@@ -14,14 +14,14 @@ module Katari.DiagnosticSpec (spec) where
 import Data.Aeson qualified as Aeson
 import Data.Text (Text)
 import Data.Text qualified as T
-import Katari.AST (Position (..), SourceSpan (..))
 import Katari.Diagnostic
 import Katari.Lexer qualified as Lexer
 import Katari.Lowering qualified as Lowering
 import Katari.Parser qualified as Parser
+import Katari.SemanticType (RequestVariableId (..), TypeVariableId (..))
+import Katari.SourceSpan (Position (..), SourceSpan (..))
 import Katari.Typechecker.ConstraintGenerator qualified as CG
 import Katari.Typechecker.Identifier qualified as Identifier
-import Katari.Typechecker.SemanticType (EffectVarId (..), TypeVarId (..))
 import Katari.Typechecker.Zonker qualified as Zonker
 import Test.Hspec
 
@@ -124,8 +124,8 @@ perPhaseConverterSpec = describe "per-phase toDiagnostic" $ do
     let diags =
           map
             Zonker.toDiagnostic
-            [ Zonker.ZonkErrorMissingTypeVar dummySpan (TypeVarId 0),
-              Zonker.ZonkErrorMissingEffectVar dummySpan (EffectVarId 0)
+            [ Zonker.ZonkErrorMissingTypeVar dummySpan (TypeVariableId 0),
+              Zonker.ZonkErrorMissingRequestVar dummySpan (RequestVariableId 0)
             ]
     mapM_ (\d -> d.severity `shouldBe` SeverityError) diags
     mapM_ (\d -> isReservedCode "K0200" "K0299" d.code `shouldBe` True) diags

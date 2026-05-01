@@ -54,7 +54,8 @@ import Data.Maybe (catMaybes, isJust)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Katari.AST
-import Katari.AST.Identifiers
+import Katari.Diagnostic (Diagnostic (..), DiagnosticNote (..), diagnosticError)
+import Katari.Id
   ( ConstructorId (..),
     ModuleId (..),
     QualifiedName (..),
@@ -63,14 +64,14 @@ import Katari.AST.Identifiers
     VariableId (..),
     renderQualifiedName,
   )
-import Katari.Diagnostic (Diagnostic (..), DiagnosticNote (..), diagnosticError)
 import Katari.Internal qualified as Internal
+import Katari.SourceSpan (HasSourceSpan (..), SourceSpan (..))
 
 -- ---------------------------------------------------------------------------
 -- Identified GADT
 --
 -- Stable identifier types ('VariableId' / 'TypeId' / 'ModuleId') live in
--- 'Katari.AST.Identifiers' so that 'Katari.AST' and
+-- 'Katari.Id' so that 'Katari.AST' and
 -- 'Katari.Typechecker.SemanticType' can both depend on them without circular
 -- imports. They are re-exported below for backward compatibility with
 -- existing call sites.
@@ -86,7 +87,7 @@ import Katari.Internal qualified as Internal
 -- failed name resolution does not invent a sentinel id: the corresponding error
 -- is recorded in 'IdentifierState.errors', and the AST node carries the
 -- @Unresolved@ marker so downstream phases can recognize it.
--- The 'Identified' phase carries 'NameMeta Identified s' for name
+-- The 'Identified' phase carries 'NameRefResolution Identified s' for name
 -- resolution, defined as a closed type family in 'Katari.AST'. Each
 -- 'NameRef' simply stores @Maybe Identifier@ (or @()@ for labels) in its
 -- @resolution@ field; the Identifier-pass produces @Just _@ on success
@@ -578,7 +579,7 @@ insertSymbolEntry pos name incoming table = do
 --   * The new binding replaces any earlier binding for the same name in the
 --     innermost frame (so @let x = 1; let x = 2@ is fine).
 --   * Bindings in outer frames are not modified, but lookup honors the
---     innermost frame first, so they are effectively shadowed.
+--     innermost frame first, so they are requestively shadowed.
 --   * Each slot (variable / type / module) is independent: a local variable
 --     binding does not hide an outer frame's @typeSymbol@ for the same name.
 --   * The only forbidden shadow is when any frame in the chain has a
@@ -693,7 +694,7 @@ lookupModuleExportSlot getSlot moduleId name = do
 
 -- | Replace just the @resolution@ of a 'NameRef', keeping @text@ and @sourceSpan@.
 identifiedNameRef ::
-  NameMeta Identified symbol ->
+  NameRefResolution Identified symbol ->
   NameRef Parsed symbol ->
   NameRef Identified symbol
 identifiedNameRef resolution nameRef =
@@ -767,7 +768,7 @@ buildExports moduleMap =
       insertSymbolEntry name.sourceSpan name.text (singletonVariable variableId) table
 
     -- @req foo@ issues both a 'VariableId' (callable side: @foo(...)@) and a
-    -- 'RequestId' (handler-target / effect-set side).
+    -- 'RequestId' (handler-target / request-set side).
     registerRequest moduleName table name = do
       let qualifiedName = qnameOf moduleName name
       variableId <-
@@ -1017,7 +1018,7 @@ liftSignatureType = liftSignature lookupType
 -- node with either the resolved id or 'Nothing' (lookup miss is recorded
 -- separately as an 'IdentifierError').
 liftSignature ::
-  (Text -> Identifier (NameMeta Identified sym)) ->
+  (Text -> Identifier (NameRefResolution Identified sym)) ->
   NameRef Parsed sym ->
   Identifier (NameRef Identified sym)
 liftSignature lookupBy nameRef = do
@@ -1030,25 +1031,25 @@ resolveSignatureBody ::
   Maybe [SyntacticRequest Parsed] ->
   Block Parsed ->
   Identifier ([ParameterBinding Identified], Maybe (SyntacticType Identified), Maybe [SyntacticRequest Identified], Block Identified)
-resolveSignatureBody parameters returnType withEffects body =
+resolveSignatureBody parameters returnType withRequests body =
   withScopeFrame $ do
     parameters' <- mapM resolveParameter parameters
     returnType' <- traverse resolveType returnType
-    withEffects' <- traverse (mapM resolveSyntacticRequest) withEffects
+    withRequests' <- traverse (mapM resolveSyntacticRequest) withRequests
     body' <- resolveBlock body
-    pure (parameters', returnType', withEffects', body')
+    pure (parameters', returnType', withRequests', body')
 
 resolveAgent :: AgentDeclaration Parsed -> Identifier (AgentDeclaration Identified)
 resolveAgent AgentDeclaration {..} = do
   name' <- liftSignatureVariable name
-  (parameters', returnType', withEffects', body') <- resolveSignatureBody parameters returnType withEffects body
+  (parameters', returnType', withRequests', body') <- resolveSignatureBody parameters returnType withRequests body
   pure
     AgentDeclaration
       { annotation = annotation,
         name = name',
         parameters = parameters',
         returnType = returnType',
-        withEffects = withEffects',
+        withRequests = withRequests',
         body = body',
         sourceSpan = sourceSpan
       }
@@ -1078,14 +1079,14 @@ resolveExternalAgent ExternalAgentDeclaration {..} = do
   withScopeFrame $ do
     parameters' <- mapM resolveParameter parameters
     returnType' <- resolveType returnType
-    withEffects' <- mapM resolveSyntacticRequest withEffects
+    withRequests' <- mapM resolveSyntacticRequest withRequests
     pure
       ExternalAgentDeclaration
         { annotation = annotation,
           name = name',
           parameters = parameters',
           returnType = returnType',
-          withEffects = withEffects',
+          withRequests = withRequests',
           sourceSpan = sourceSpan
         }
 
@@ -1243,7 +1244,7 @@ resolveLiteralPattern LiteralPattern {..} =
 -- All sub-resolvers return an 'Identified' marker (resolved id or the
 -- corresponding @Unresolved@) so that the AST always carries a faithful trace
 -- of the resolution outcome instead of a fabricated id.
-resolveBareVariable :: NameRef Parsed VariableRef -> Identifier (NameMeta Identified VariableRef)
+resolveBareVariable :: NameRef Parsed VariableRef -> Identifier (NameRefResolution Identified VariableRef)
 resolveBareVariable nameRef =
   lookupVariable nameRef.text >>= \case
     Just variableId -> pure (Just variableId)
@@ -1251,7 +1252,7 @@ resolveBareVariable nameRef =
       emitError (ErrorUndefinedName nameRef.sourceSpan nameRef.text)
       pure Nothing
 
-resolveModuleRef :: NameRef Parsed ModuleRef -> Identifier (NameMeta Identified ModuleRef)
+resolveModuleRef :: NameRef Parsed ModuleRef -> Identifier (NameRefResolution Identified ModuleRef)
 resolveModuleRef nameRef =
   lookupModule nameRef.text >>= \case
     Just moduleId -> pure (Just moduleId)
@@ -1281,7 +1282,7 @@ resolveQualifiedRequestRef = \cases
         identifiedNameRef metadata nameRef
       )
 
-resolveBareRequest :: NameRef Parsed RequestRef -> Identifier (NameMeta Identified RequestRef)
+resolveBareRequest :: NameRef Parsed RequestRef -> Identifier (NameRefResolution Identified RequestRef)
 resolveBareRequest nameRef =
   lookupRequest nameRef.text >>= \case
     Just rid -> pure (Just rid)
@@ -1297,7 +1298,7 @@ resolveQualifiedRequest ::
   ModuleId ->
   Text ->
   NameRef Parsed RequestRef ->
-  Identifier (NameMeta Identified RequestRef)
+  Identifier (NameRefResolution Identified RequestRef)
 resolveQualifiedRequest moduleId qualifierName nameRef =
   lookupModuleExportRequest moduleId nameRef.text >>= \case
     Just rid -> pure (Just rid)
@@ -1328,7 +1329,7 @@ resolveQualifiedConstructorRef = \cases
 
 resolveBareConstructor ::
   NameRef Parsed ConstructorRef ->
-  Identifier (NameMeta Identified ConstructorRef)
+  Identifier (NameRefResolution Identified ConstructorRef)
 resolveBareConstructor nameRef =
   lookupConstructor nameRef.text >>= \case
     Just cid -> pure (Just cid)
@@ -1342,7 +1343,7 @@ resolveQualifiedConstructor ::
   ModuleId ->
   Text ->
   NameRef Parsed ConstructorRef ->
-  Identifier (NameMeta Identified ConstructorRef)
+  Identifier (NameRefResolution Identified ConstructorRef)
 resolveQualifiedConstructor moduleId qualifierName nameRef =
   lookupModuleExportConstructor moduleId nameRef.text >>= \case
     Just cid -> pure (Just cid)
@@ -1410,15 +1411,15 @@ resolveQualifiedType QualifiedTypeNode {qualifier, target, sourceSpan} = do
       }
 
 resolveFunctionType :: FunctionTypeNode Parsed -> Identifier (FunctionTypeNode Identified)
-resolveFunctionType FunctionTypeNode {parameterTypes, returnType, withEffects, sourceSpan} = do
+resolveFunctionType FunctionTypeNode {parameterTypes, returnType, withRequests, sourceSpan} = do
   parameterTypes' <- mapM (\(label, parameterType) -> (label,) <$> resolveType parameterType) parameterTypes
   returnType' <- resolveType returnType
-  withEffects' <- mapM resolveSyntacticRequest withEffects
+  withRequests' <- mapM resolveSyntacticRequest withRequests
   pure
     FunctionTypeNode
       { parameterTypes = parameterTypes',
         returnType = returnType',
-        withEffects = withEffects',
+        withRequests = withRequests',
         sourceSpan = sourceSpan
       }
 
@@ -1520,13 +1521,13 @@ resolveStateVariable StateVariableBinding {name, typeAnnotation, initial, source
 
 -- | Request handler. @name@ is NOT a new binding; it is a reference to an
 -- existing req declaration (resolved like an ordinary variable name).
--- Handlers do not carry their own @with@ clause: effects raised inside the
--- handler bind to the surrounding agent, so handler-level effect annotation
+-- Handlers do not carry their own @with@ clause: requests raised inside the
+-- handler bind to the surrounding agent, so handler-level request annotation
 -- is not part of the syntax.
 resolveRequestHandler :: RequestHandler Parsed -> Identifier (RequestHandler Identified)
 resolveRequestHandler RequestHandler {moduleQualifier, name, parameters, returnType, body, sourceSpan} = do
   (moduleQualifier', name') <- resolveQualifiedRequestRef moduleQualifier name
-  (parameters', returnType', _noEffects, body') <- resolveSignatureBody parameters returnType Nothing body
+  (parameters', returnType', _noRequests, body') <- resolveSignatureBody parameters returnType Nothing body
   pure
     RequestHandler
       { moduleQualifier = moduleQualifier',
@@ -1564,15 +1565,15 @@ resolveLet LetStatement {pattern, value, sourceSpan} = do
 -- rules) before resolving the body, so the agent may call itself recursively.
 -- The body is resolved in a fresh scope frame.
 resolveAgentStatement :: AgentStatement Parsed -> Identifier (AgentStatement Identified)
-resolveAgentStatement AgentStatement {name, parameters, returnType, withEffects, body, sourceSpan} = do
+resolveAgentStatement AgentStatement {name, parameters, returnType, withRequests, body, sourceSpan} = do
   name' <- bindLocalVariable name
-  (parameters', returnType', withEffects', body') <- resolveSignatureBody parameters returnType withEffects body
+  (parameters', returnType', withRequests', body') <- resolveSignatureBody parameters returnType withRequests body
   pure
     AgentStatement
       { name = name',
         parameters = parameters',
         returnType = returnType',
-        withEffects = withEffects',
+        withRequests = withRequests',
         body = body',
         sourceSpan = sourceSpan
       }

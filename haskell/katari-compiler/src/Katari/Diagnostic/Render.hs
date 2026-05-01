@@ -15,8 +15,8 @@ import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as Text
-import Katari.AST (Position (..), SourceSpan (..))
 import Katari.Diagnostic (Diagnostic (..), DiagnosticNote (..), Severity (..))
+import Katari.SourceSpan (Position (..), SourceSpan (..))
 
 -- | Render a diagnostic with an inline source snippet when the file is
 -- available in the source map. Falls back to 'renderDiagnosticPlain' if

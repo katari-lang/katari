@@ -12,12 +12,15 @@ where
 import Data.Text (Text)
 import Data.Text qualified as Text
 import GHC.Stack (HasCallStack)
-import Katari.AST (SourceSpan)
+import Katari.SourceSpan (SourceSpan)
 
--- | Panic with a span and a message describing the violated invariant.
+-- | Panic with a location and a message describing the violated invariant.
+-- The location is 'Show'-constrained so that callers can pass a 'SourceSpan'
+-- (or any other printable locator) without this module depending on
+-- 'Katari.AST'.
 internalError :: (HasCallStack) => SourceSpan -> Text -> a
-internalError sourceSpan msg =
-  error ("internal compiler error at " <> show sourceSpan <> ": " <> Text.unpack msg)
+internalError location msg =
+  error ("internal compiler error at " <> show location <> ": " <> Text.unpack msg)
 
 -- | Panic without a span. Use only when the call site has no easy way to
 -- thread a 'SourceSpan'; the 'HasCallStack' constraint preserves location

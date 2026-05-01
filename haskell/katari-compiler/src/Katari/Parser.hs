@@ -21,12 +21,12 @@ import Data.Void (Void, absurd)
 import Katari.AST
 import Katari.Diagnostic (Diagnostic, diagnosticError)
 import Katari.Lexer
-  ( Keyword (..),
+  ( KatariToken (..),
+    KatariTokenStream (..),
+    Keyword (..),
     LexerError (..),
     Operator (..),
     Punctuation (..),
-    Token (..),
-    TokenStream (..),
     WithSourceSpan (..),
     insertVirtualSemicolons,
     runLexer,
@@ -36,7 +36,8 @@ import Katari.Lexer
     showToken,
   )
 import Katari.Lexer qualified as Lexer
-import Text.Megaparsec hiding (ParseError, Token, Tokens)
+import Katari.SourceSpan (HasSourceSpan (..), Position (..), SourceSpan (..))
+import Text.Megaparsec hiding (ParseError)
 import Text.Megaparsec qualified as MP
 
 -- ===========================================================================
@@ -89,7 +90,7 @@ toDiagnostic = \case
        in "parse error in " <> ctx <> ": " <> unexpectedPart <> expectedPart
 
 -- | Reason for a parser-level failure, projected from megaparsec's internal
--- 'MP.ParseError'. Keeps the structured @expected@ token set and (when
+-- 'MP.ParseError'. Keeps the structured @expected@ Kataritoken set and (when
 -- available) what was actually found, so consumers can render or analyse
 -- without re-parsing strings.
 data ParseErrorReason = ParseErrorReason
@@ -121,7 +122,7 @@ data ParserState = ParserState
     parseErrors :: [ParseError]
   }
 
-type Parser = ParsecT Void TokenStream (StateT ParserState (Reader ParserEnv))
+type Parser = ParsecT Void KatariTokenStream (StateT ParserState (Reader ParserEnv))
 
 parseFilePath :: Parser FilePath
 parseFilePath = asks (.filePath)
@@ -144,8 +145,8 @@ parseMakeSpan startPosition endPosition = do
 
 parseModule :: FilePath -> Text -> (Module Parsed, [ParseError])
 parseModule filePath input =
-  let (rawTokens, lexerErrors) = runLexer filePath input
-      stream = TokenStream input (insertVirtualSemicolons rawTokens)
+  let (rawKatariTokens, lexerErrors) = runLexer filePath input
+      stream = KatariTokenStream {input = input, tokens = insertVirtualSemicolons rawKatariTokens}
       env = ParserEnv {filePath = filePath, breakContext = BreakContextTop}
       initialState =
         ParserState
@@ -167,83 +168,83 @@ parseModuleStrict filePath input = case parseModule filePath input of
   (parsedModule, []) -> Right parsedModule
 
 -- ===========================================================================
--- Token primitives
+-- KatariToken primitives
 -- ===========================================================================
 
--- | Consume any token matching a predicate, returning the unwrapped value.
--- Also records the end position of the consumed token in parser state so that
+-- | Consume any Kataritoken matching a predicate, returning the unwrapped value.
+-- Also records the end position of the consumed Kataritoken in parser state so that
 -- 'parsePreviousEndPosition' can recover the end of the most recently consumed
--- token (which is what we want for closing source spans).
-parseTokenWith :: (Token -> Maybe value) -> Parser value
-parseTokenWith predicate = do
-  (result, endPos) <- MP.token testToken Set.empty
+-- Kataritoken (which is what we want for closing source spans).
+parseKatariTokenWith :: (KatariToken -> Maybe value) -> Parser value
+parseKatariTokenWith predicate = do
+  (result, endPos) <- MP.token testKatariToken Set.empty
   modify' (\s -> s {previousEndPosition = Just endPos})
   pure result
   where
-    testToken (WithSourceSpan span_ inputToken) = do
-      result <- predicate inputToken
+    testKatariToken (WithSourceSpan span_ inputKatariToken) = do
+      result <- predicate inputKatariToken
       Just (result, span_.end)
 
--- | Consume an exact token (using equality on the Token type).
-parseExactToken :: Token -> Parser ()
-parseExactToken expected = parseTokenWith (\actual -> if actual == expected then Just () else Nothing)
+-- | Consume an exact Kataritoken (using equality on the KatariToken type).
+parseExactKatariToken :: KatariToken -> Parser ()
+parseExactKatariToken expected = parseKatariTokenWith (\actual -> if actual == expected then Just () else Nothing)
 
 parseKeyword :: Keyword -> Parser ()
-parseKeyword keyword = label ("'" <> showKeyword keyword <> "'") $ parseExactToken (TokenKeyword keyword)
+parseKeyword keyword = label ("'" <> showKeyword keyword <> "'") $ parseExactKatariToken (KatariTokenKeyword keyword)
 
 parsePunctuation :: Punctuation -> Parser ()
 parsePunctuation punctuation =
-  label ("'" <> showPunctuation punctuation <> "'") $ parseExactToken (TokenPunctuation punctuation)
+  label ("'" <> showPunctuation punctuation <> "'") $ parseExactKatariToken (KatariTokenPunctuation punctuation)
 
 parseOperator :: Operator -> Parser ()
-parseOperator operator = label ("'" <> showOperator operator <> "'") $ parseExactToken (TokenOperator operator)
+parseOperator operator = label ("'" <> showOperator operator <> "'") $ parseExactKatariToken (KatariTokenOperator operator)
 
 -- | Consume any semicolon (explicit or virtual).
 parseSemicolon :: Parser ()
-parseSemicolon = label "';' or newline" $ parseTokenWith $ \case
-  TokenSemicolonExplicit -> Just ()
-  TokenSemicolonVirtual -> Just ()
+parseSemicolon = label "';' or newline" $ parseKatariTokenWith $ \case
+  KatariTokenSemicolonExplicit -> Just ()
+  KatariTokenSemicolonVirtual -> Just ()
   _ -> Nothing
 
 -- | Consume only an explicit ';' (user-written). Virtual semicolons inserted
 -- by the lexer at line ends are NOT accepted.
 parseExplicitSemicolon :: Parser ()
-parseExplicitSemicolon = label "';'" $ parseTokenWith $ \case
-  TokenSemicolonExplicit -> Just ()
+parseExplicitSemicolon = label "';'" $ parseKatariTokenWith $ \case
+  KatariTokenSemicolonExplicit -> Just ()
   _ -> Nothing
 
 -- | Consume only a virtual semicolon (lexer-inserted at a line end).
 parseVirtualSemicolon :: Parser ()
-parseVirtualSemicolon = parseTokenWith $ \case
-  TokenSemicolonVirtual -> Just ()
+parseVirtualSemicolon = parseKatariTokenWith $ \case
+  KatariTokenSemicolonVirtual -> Just ()
   _ -> Nothing
 
 parseComma :: Parser ()
 parseComma = parsePunctuation PunctuationComma
 
--- | Identifier token (bare `_` is a separate token, not TokenIdentifier).
+-- | Identifier Kataritoken (bare `_` is a separate token, not KatariTokenIdentifier).
 parseIdentifier :: Parser Text
-parseIdentifier = label "identifier" $ parseTokenWith $ \case
-  TokenIdentifier text -> Just text
+parseIdentifier = label "identifier" $ parseKatariTokenWith $ \case
+  KatariTokenIdentifier text -> Just text
   _ -> Nothing
 
 -- | Bare underscore — only consumed when explicitly requested (wildcard pattern).
 parseUnderscore :: Parser ()
-parseUnderscore = parseExactToken TokenUnderscore
+parseUnderscore = parseExactKatariToken KatariTokenUnderscore
 
 parseIntegerLiteral :: Parser Integer
-parseIntegerLiteral = label "integer literal" $ parseTokenWith $ \case
-  TokenIntegerLiteral integer -> Just integer
+parseIntegerLiteral = label "integer literal" $ parseKatariTokenWith $ \case
+  KatariTokenIntegerLiteral integer -> Just integer
   _ -> Nothing
 
 parseFloatLiteral :: Parser Double
-parseFloatLiteral = label "float literal" $ parseTokenWith $ \case
-  TokenFloatLiteral double -> Just double
+parseFloatLiteral = label "float literal" $ parseKatariTokenWith $ \case
+  KatariTokenFloatLiteral double -> Just double
   _ -> Nothing
 
 parseStringLiteral :: Parser Text
-parseStringLiteral = label "string literal" $ parseTokenWith $ \case
-  TokenStringLiteral text -> Just text
+parseStringLiteral = label "string literal" $ parseKatariTokenWith $ \case
+  KatariTokenStringLiteral text -> Just text
   _ -> Nothing
 
 -- ===========================================================================
@@ -257,7 +258,7 @@ parseCurrentPosition = do
   pure Position {line = unPos (sourceLine sourcePos), column = unPos (sourceColumn sourcePos)}
 
 -- | End position of the most recently consumed token. Falls back to
--- parseCurrentPosition when no token has been consumed yet in this parse.
+-- parseCurrentPosition when no Kataritoken has been consumed yet in this parse.
 parsePreviousEndPosition :: Parser Position
 parsePreviousEndPosition = do
   state_ <- get
@@ -282,7 +283,7 @@ parseRecordError err = modify' (\s -> s {parseErrors = err : s.parseErrors})
 
 -- | Project a megaparsec parse error into our structured 'ParseErrorReason'.
 -- Used inside 'withRecovery' handlers at the declaration and statement levels.
-extractReason :: MP.ParseError TokenStream Void -> ParseErrorReason
+extractReason :: MP.ParseError KatariTokenStream Void -> ParseErrorReason
 extractReason = \case
   MP.TrivialError _ maybeUnexpected expectedSet ->
     ParseErrorReason
@@ -319,7 +320,7 @@ parseWithErrorRecoveryAt mkError mkSentinel skipSync p = do
     ( \mpError -> do
         let reason = extractReason mpError
         failPosition <- parseCurrentPosition
-        parseConsumeOneToken
+        parseConsumeOneKatariToken
         failEndPosition <- parsePreviousEndPosition
         errorSpan <- parseMakeSpan failPosition failEndPosition
         skipSync
@@ -355,34 +356,34 @@ parseBracketedList p =
     (parsePunctuation PunctuationRightBracket)
     (p `sepEndBy` parseComma)
 
--- | Peek at the next token without consuming it or updating parser state.
-parsePeekNextToken :: Parser (Maybe Token)
-parsePeekNextToken = optional (MP.lookAhead (MP.token (\(WithSourceSpan _ tok) -> Just tok) Set.empty))
+-- | Peek at the next Kataritoken without consuming it or updating parser state.
+parsePeekNextKatariToken :: Parser (Maybe KatariToken)
+parsePeekNextKatariToken = optional (MP.lookAhead (MP.token (\(WithSourceSpan _ tok) -> Just tok) Set.empty))
 
 -- | Consume one token, recording its end position. No-op at EOF.
-parseConsumeOneToken :: Parser ()
-parseConsumeOneToken = void (optional (parseTokenWith Just))
+parseConsumeOneKatariToken :: Parser ()
+parseConsumeOneKatariToken = void (optional (parseKatariTokenWith Just))
 
 -- | Skip tokens until the next declaration-level sync point or EOF.
 -- Sync tokens: declaration-start keywords and '@'.
 parseSkipUntilDeclarationSync :: Parser ()
 parseSkipUntilDeclarationSync = do
-  next <- parsePeekNextToken
+  next <- parsePeekNextKatariToken
   case next of
     Nothing -> pure ()
     Just tok ->
-      if isDeclarationSyncToken tok
+      if isDeclarationSyncKatariToken tok
         then pure ()
-        else parseConsumeOneToken *> parseSkipUntilDeclarationSync
+        else parseConsumeOneKatariToken *> parseSkipUntilDeclarationSync
   where
-    isDeclarationSyncToken = \case
-      TokenKeyword KeywordImport -> True
-      TokenKeyword KeywordType -> True
-      TokenKeyword KeywordAgent -> True
-      TokenKeyword KeywordReq -> True
-      TokenKeyword KeywordExt -> True
-      TokenKeyword KeywordData -> True
-      TokenPunctuation PunctuationAt -> True
+    isDeclarationSyncKatariToken = \case
+      KatariTokenKeyword KeywordImport -> True
+      KatariTokenKeyword KeywordType -> True
+      KatariTokenKeyword KeywordAgent -> True
+      KatariTokenKeyword KeywordReq -> True
+      KatariTokenKeyword KeywordExt -> True
+      KatariTokenKeyword KeywordData -> True
+      KatariTokenPunctuation PunctuationAt -> True
       _ -> False
 
 -- | Skip tokens until the next statement-level sync point, respecting brace
@@ -392,24 +393,24 @@ parseSkipUntilStatementSync :: Parser ()
 parseSkipUntilStatementSync = go (0 :: Int)
   where
     go depth = do
-      next <- parsePeekNextToken
+      next <- parsePeekNextKatariToken
       case next of
         Nothing -> pure ()
         Just tok ->
-          if isSyncToken tok depth
+          if isSyncKatariToken tok depth
             then pure ()
             else do
-              parseConsumeOneToken
+              parseConsumeOneKatariToken
               let newDepth = case tok of
-                    TokenPunctuation PunctuationLeftBrace -> depth + 1
-                    TokenPunctuation PunctuationRightBrace | depth > 0 -> depth - 1
+                    KatariTokenPunctuation PunctuationLeftBrace -> depth + 1
+                    KatariTokenPunctuation PunctuationRightBrace | depth > 0 -> depth - 1
                     _ -> depth
               go newDepth
-    isSyncToken tok depth = case tok of
-      TokenSemicolonExplicit -> True
-      TokenSemicolonVirtual -> True
-      TokenPunctuation PunctuationRightBrace | depth == 0 -> True
-      TokenKeyword keyword | depth == 0 -> isStatementStartKeyword keyword
+    isSyncKatariToken tok depth = case tok of
+      KatariTokenSemicolonExplicit -> True
+      KatariTokenSemicolonVirtual -> True
+      KatariTokenPunctuation PunctuationRightBrace | depth == 0 -> True
+      KatariTokenKeyword keyword | depth == 0 -> isStatementStartKeyword keyword
       _ -> False
     isStatementStartKeyword = \case
       KeywordLet -> True
@@ -430,41 +431,12 @@ parseNameRef = parseWithSpan $ do
   text <- parseIdentifier
   pure $ \sourceSpan -> NameRef {text = text, sourceSpan = sourceSpan, resolution = ()}
 
--- | Re-tag a VariableRef' name as a ModuleRef'. Used when a leading
--- identifier is being committed to as a module qualifier (e.g. the @M@ in
--- @M.foo(...)@).
-moduleRefOfVariable :: NameRef Parsed VariableRef -> NameRef Parsed ModuleRef
-moduleRefOfVariable = parsedSymbolRetag
-
--- | Re-tag a VariableRef' name as a TypeRef'. Used in type position when an
--- identifier may be either a bare type name or a module qualifier; the
--- decision is made after lookahead.
-typeRefOfVariable :: NameRef Parsed VariableRef -> NameRef Parsed TypeRef
-typeRefOfVariable = parsedSymbolRetag
-
--- | Re-tag a VariableRef' name as a LabelRef'. Used in sugar desugaring
--- sites (e.g. @foo(x)@ → @foo(x = x)@) where the same identifier plays two
--- roles (label + variable).
-labelRefOfVariable :: NameRef Parsed VariableRef -> NameRef Parsed LabelRef
-labelRefOfVariable = parsedSymbolRetag
-
--- | Re-tag a parsed name as a RequestRef'. Used in @req@ handler position
--- where an identifier names a request declaration; resolution still happens
--- in the Identifier pass.
-requestRefOfVariable :: NameRef Parsed VariableRef -> NameRef Parsed RequestRef
-requestRefOfVariable = parsedSymbolRetag
-
--- | Re-tag a parsed name as a ConstructorRef'. Used in match-pattern
--- constructor position; resolution happens in the Identifier pass.
-constructorRefOfVariable :: NameRef Parsed VariableRef -> NameRef Parsed ConstructorRef
-constructorRefOfVariable = parsedSymbolRetag
-
 -- | Internal: replace the 'NameRefKind' tag of a parsed 'NameRef'. Safe at
--- the 'Parsed' phase because @NameMeta Parsed s = ()@ for every symbol
+-- the 'Parsed' phase because @NameRefResolution Parsed s = ()@ for every symbol
 -- kind, so re-tagging never has to invent payload. Exposed only through
 -- the directional helpers above so that call sites document intent.
-parsedSymbolRetag :: NameRef Parsed source -> NameRef Parsed target
-parsedSymbolRetag nameRef =
+retagParsedNameRef :: NameRef Parsed source -> NameRef Parsed target
+retagParsedNameRef nameRef =
   NameRef {text = nameRef.text, sourceSpan = nameRef.sourceSpan, resolution = ()}
 
 -- ===========================================================================
@@ -518,10 +490,10 @@ parseAnnotatedDeclaration :: Parser (Declaration Parsed)
 parseAnnotatedDeclaration = do
   annotation <- parseAnnotation
   choice
-    [ DeclarationExternalAgent <$> parseExternalAgent annotation,
-      DeclarationAgent <$> parseAgent annotation,
-      DeclarationRequest <$> parseRequest annotation,
-      DeclarationData <$> parseData annotation
+    [ DeclarationExternalAgent <$> parseExternalAgentDeclaration annotation,
+      DeclarationAgent <$> parseAgentDeclaration annotation,
+      DeclarationRequest <$> parseRequestDeclaration annotation,
+      DeclarationData <$> parseDataDeclaration annotation
     ]
 
 parseAnnotation :: Parser (Maybe Text)
@@ -535,13 +507,13 @@ parseAnnotation = optional $ do
 -- Agent
 -- ---------------------------------------------------------------------------
 
-parseAgent :: Maybe Text -> Parser (AgentDeclaration Parsed)
-parseAgent annotation = parseWithSpan $ do
+parseAgentDeclaration :: Maybe Text -> Parser (AgentDeclaration Parsed)
+parseAgentDeclaration annotation = parseWithSpan $ do
   parseKeyword KeywordAgent
   name <- parseNameRef
   parameters <- parseParameterList
   returnType <- optional (parsePunctuation PunctuationArrow *> parseType)
-  effects <- optional (parseKeyword KeywordWith *> parseEffects)
+  requests <- optional (parseKeyword KeywordWith *> parseRequests)
   body <- parseWithBreakContext BreakContextTop parseBlock
   pure $ \sourceSpan ->
     AgentDeclaration
@@ -549,7 +521,7 @@ parseAgent annotation = parseWithSpan $ do
         name = name,
         parameters = parameters,
         returnType = returnType,
-        withEffects = effects,
+        withRequests = requests,
         body = body,
         sourceSpan = sourceSpan
       }
@@ -558,8 +530,8 @@ parseAgent annotation = parseWithSpan $ do
 -- Request
 -- ---------------------------------------------------------------------------
 
-parseRequest :: Maybe Text -> Parser (RequestDeclaration Parsed)
-parseRequest annotation = parseWithSpan $ do
+parseRequestDeclaration :: Maybe Text -> Parser (RequestDeclaration Parsed)
+parseRequestDeclaration annotation = parseWithSpan $ do
   parseKeyword KeywordReq
   name <- parseNameRef
   parameters <- parseParameterList
@@ -569,6 +541,7 @@ parseRequest annotation = parseWithSpan $ do
     RequestDeclaration
       { annotation = annotation,
         name = name,
+        requestName = retagParsedNameRef name,
         parameters = parameters,
         returnType = returnType,
         sourceSpan = sourceSpan
@@ -578,8 +551,8 @@ parseRequest annotation = parseWithSpan $ do
 -- External Agent
 -- ---------------------------------------------------------------------------
 
-parseExternalAgent :: Maybe Text -> Parser (ExternalAgentDeclaration Parsed)
-parseExternalAgent annotation = parseWithSpan $ do
+parseExternalAgentDeclaration :: Maybe Text -> Parser (ExternalAgentDeclaration Parsed)
+parseExternalAgentDeclaration annotation = parseWithSpan $ do
   parseKeyword KeywordExt
   parseKeyword KeywordAgent
   name <- parseNameRef
@@ -587,14 +560,14 @@ parseExternalAgent annotation = parseWithSpan $ do
   parsePunctuation PunctuationArrow
   returnType <- parseType
   parseKeyword KeywordWith
-  effects <- parseEffects
+  requests <- parseRequests
   pure $ \sourceSpan ->
     ExternalAgentDeclaration
       { annotation = annotation,
         name = name,
         parameters = parameters,
         returnType = returnType,
-        withEffects = effects,
+        withRequests = requests,
         sourceSpan = sourceSpan
       }
 
@@ -607,26 +580,23 @@ parseExternalAgent annotation = parseWithSpan $ do
 -- exactly one constructor, and the same identifier is bound in both the
 -- value namespace (the constructor function) and the type namespace (the
 -- data type). The Identifier pass populates both slots.
-parseData :: Maybe Text -> Parser (DataDeclaration Parsed)
-parseData annotation = parseWithSpan $ do
+parseDataDeclaration :: Maybe Text -> Parser (DataDeclaration Parsed)
+parseDataDeclaration annotation = parseWithSpan $ do
   parseKeyword KeywordData
   name <- parseNameRef
-  -- Same identifier serves both the value (constructor function) and type
-  -- (data type) namespaces. Re-tag is a no-op at the @Parsed@ phase; the
-  -- Identifier pass fills in distinct ids for each role.
-  let typeName = typeRefOfVariable name
-  parameters <- parseParenthesizedList parseDataParameter
+  parameters <- parseParenthesizedList parseDataDeclarationParameter
   pure $ \sourceSpan ->
     DataDeclaration
       { annotation = annotation,
         name = name,
-        typeName = typeName,
+        typeName = retagParsedNameRef name,
+        constructorName = retagParsedNameRef name,
         parameters = parameters,
         sourceSpan = sourceSpan
       }
 
-parseDataParameter :: Parser (DataParameter Parsed)
-parseDataParameter = parseWithSpan $ do
+parseDataDeclarationParameter :: Parser (DataParameter Parsed)
+parseDataDeclarationParameter = parseWithSpan $ do
   annotation <- parseAnnotation
   name <- parseIdentifier
   parsePunctuation PunctuationColon
@@ -716,7 +686,7 @@ parseBlock = label "block" $ parseWithSpan $ do
       }
 
 -- | After consuming a closing @}@, detect the pattern
--- @TokenSemicolonVirtual + (else|then|where)@ — a virtual semi sits there only
+-- @KatariTokenSemicolonVirtual + (else|then|where)@ — a virtual semi sits there only
 -- if the user put a newline between @}@ and the keyword. CLAUDE.md requires
 -- these keywords to be on the same line as the preceding @}@.
 --
@@ -725,13 +695,13 @@ parseBlock = label "block" $ parseWithSpan $ do
 parseDetectSameLineKeywordViolation :: Parser ()
 parseDetectSameLineKeywordViolation = do
   violation <- MP.lookAhead . optional . try $ do
-    parseTokenWith $ \case
-      TokenSemicolonVirtual -> Just ()
+    parseKatariTokenWith $ \case
+      KatariTokenSemicolonVirtual -> Just ()
       _ -> Nothing
-    parseTokenWith $ \case
-      TokenKeyword KeywordElse -> Just "else"
-      TokenKeyword KeywordThen -> Just "then"
-      TokenKeyword KeywordWhere -> Just "where"
+    parseKatariTokenWith $ \case
+      KatariTokenKeyword KeywordElse -> Just "else"
+      KatariTokenKeyword KeywordThen -> Just "then"
+      KatariTokenKeyword KeywordWhere -> Just "where"
       _ -> Nothing
   case violation of
     Just keyword -> fail $ "'" <> keyword <> "' must be on the same line as the preceding '}'"
@@ -742,7 +712,7 @@ data BlockStep where
   BlockStepReturn :: Maybe (Expression Parsed) -> BlockStep
 
 -- | One-pass block body with statement-level error recovery. On parse failure
--- inside a step, up to the next sync token is skipped and a 'StatementError'
+-- inside a step, up to the next sync Kataritoken is skipped and a 'StatementError'
 -- sentinel is inserted in place of the bad statement.
 parseBlockBodyWithRecovery :: Parser ([Statement Parsed], Maybe (Expression Parsed))
 parseBlockBodyWithRecovery = loop []
@@ -846,8 +816,8 @@ parseStateVariable = parseWithSpan $ do
         sourceSpan = sourceSpan
       }
 
--- | req handler は @with@ 節を持たない。handler 内で発火する effect は handler
--- ではなく囲む agent に bind されるため、handler 自身に effect 注釈を付けるのは
+-- | req handler は @with@ 節を持たない。handler 内で発火する request は handler
+-- ではなく囲む agent に bind されるため、handler 自身に request 注釈を付けるのは
 -- 意味論的に invalid。Lexer / parser とも @with@ を受け付けない。
 parseRequestHandler :: Parser (RequestHandler Parsed)
 parseRequestHandler = parseWithSpan $ do
@@ -859,8 +829,8 @@ parseRequestHandler = parseWithSpan $ do
   first <- parseNameRef
   (moduleQualifier, name) <-
     optional (parsePunctuation PunctuationDot *> parseNameRef) >>= \case
-      Just second -> pure (Just (moduleRefOfVariable first), requestRefOfVariable second)
-      Nothing -> pure (Nothing, requestRefOfVariable first)
+      Just second -> pure (Just (retagParsedNameRef first), retagParsedNameRef second)
+      Nothing -> pure (Nothing, retagParsedNameRef first)
   parameters <- parseParameterList
   returnType <- optional (parsePunctuation PunctuationArrow *> parseType)
   body <- parseWithBreakContext BreakContextHandler parseBlock
@@ -880,14 +850,14 @@ parseAgentStatement = parseWithSpan $ do
   name <- parseNameRef
   parameters <- parseParameterList
   returnType <- optional (parsePunctuation PunctuationArrow *> parseType)
-  effects <- optional (parseKeyword KeywordWith *> parseEffects)
+  requests <- optional (parseKeyword KeywordWith *> parseRequests)
   body <- parseWithBreakContext BreakContextTop parseBlock
   pure $ \sourceSpan ->
     AgentStatement
       { name = name,
         parameters = parameters,
         returnType = returnType,
-        withEffects = effects,
+        withRequests = requests,
         body = body,
         sourceSpan = sourceSpan
       }
@@ -1143,7 +1113,7 @@ parseCallArgument = labeledArgument <|> sugarArgument
       name <- parseNameRef
       pure $ \sourceSpan ->
         CallArgument
-          { label = labelRefOfVariable name,
+          { label = retagParsedNameRef name,
             value =
               ExpressionVariable
                 VariableExpression
@@ -1376,9 +1346,9 @@ parseForVarBinding = parseWithSpan $ do
 
 parseTemplateLiteral :: Parser (Expression Parsed)
 parseTemplateLiteral = parseWithSpan $ do
-  parseExactToken TokenTemplateOpen
+  parseExactKatariToken KatariTokenTemplateOpen
   parts <- many parseTemplateElement
-  parseExactToken TokenTemplateClose
+  parseExactKatariToken KatariTokenTemplateClose
   pure $ \sourceSpan ->
     ExpressionTemplate
       TemplateExpression
@@ -1391,7 +1361,7 @@ parseTemplateElement :: Parser (TemplateElement Parsed)
 parseTemplateElement =
   choice
     [ parseWithSpan $ do
-        text <- parseTemplateStringToken
+        text <- parseTemplateStringKatariToken
         pure $ \sourceSpan ->
           TemplateElementString
             TemplateStringElement
@@ -1399,9 +1369,9 @@ parseTemplateElement =
                 sourceSpan = sourceSpan
               },
       parseWithSpan $ do
-        parseExactToken TokenTemplateExpressionOpen
+        parseExactKatariToken KatariTokenTemplateExpressionOpen
         expression <- parseExpression
-        parseExactToken TokenTemplateExpressionClose
+        parseExactKatariToken KatariTokenTemplateExpressionClose
         pure $ \sourceSpan ->
           TemplateElementExpression
             TemplateExpressionElement
@@ -1410,8 +1380,8 @@ parseTemplateElement =
               }
     ]
   where
-    parseTemplateStringToken = parseTokenWith $ \case
-      TokenTemplateString text -> Just text
+    parseTemplateStringKatariToken = parseKatariTokenWith $ \case
+      KatariTokenTemplateString text -> Just text
       _ -> Nothing
 
 -- ===========================================================================
@@ -1447,9 +1417,9 @@ parseQualifiedConstructorPattern = parseWithSpan $ do
     -- The constructor name is a ConstructorRef'; resolution will require it
     -- to name a @data@ declaration.
     pure $ case second of
-      Nothing -> (Nothing, constructorRefOfVariable first)
+      Nothing -> (Nothing, retagParsedNameRef first)
       Just secondNameRef ->
-        (Just (moduleRefOfVariable first), constructorRefOfVariable secondNameRef)
+        (Just (retagParsedNameRef first), retagParsedNameRef secondNameRef)
   parsePunctuation PunctuationLeftParenthesis
   fields <- parsePatternField `sepEndBy` parseComma
   parsePunctuation PunctuationRightParenthesis
@@ -1500,7 +1470,7 @@ parsePatternField = labeled <|> sugar
       name <- parseNameRef
       typeAnnotation <- optional (parsePunctuation PunctuationColon *> parseType)
       pure $ \sourceSpan ->
-        ( labelRefOfVariable name,
+        ( retagParsedNameRef name,
           PatternVariable
             VariablePattern
               { name = name,
@@ -1642,13 +1612,13 @@ parseNamedOrQualifiedType = parseWithSpan $ do
     Nothing ->
       TypeName
         TypeNameNode
-          { name = typeRefOfVariable first,
+          { name = retagParsedNameRef first,
             sourceSpan = sourceSpan
           }
     Just second ->
       TypeQualified
         QualifiedTypeNode
-          { qualifier = moduleRefOfVariable first,
+          { qualifier = retagParsedNameRef first,
             target = second,
             sourceSpan = sourceSpan
           }
@@ -1658,13 +1628,13 @@ parseFunctionType = parseWithSpan $ do
   parameterTypes <- parseParenthesizedList parseFunctionTypeParameter
   parsePunctuation PunctuationArrow
   returnType <- parseType
-  effects <- option [] (parseKeyword KeywordWith *> parseEffects)
+  requests <- option [] (parseKeyword KeywordWith *> parseRequests)
   pure $ \sourceSpan ->
     TypeFunction
       FunctionTypeNode
         { parameterTypes = parameterTypes,
           returnType = returnType,
-          withEffects = effects,
+          withRequests = requests,
           sourceSpan = sourceSpan
         }
 
@@ -1675,12 +1645,12 @@ parseFunctionTypeParameter = do
   typeAnnotation <- parseType
   pure (name, typeAnnotation)
 
--- | @array[T]@. The token @array@ is a regular identifier, not a keyword,
+-- | @array[T]@. The Kataritoken @array@ is a regular identifier, not a keyword,
 -- so we match it by string and rely on the surrounding @[...]@ to confirm.
 parseArrayType :: Parser (SyntacticType Parsed)
 parseArrayType = parseWithSpan $ do
-  void $ parseTokenWith $ \case
-    TokenIdentifier "array" -> Just ()
+  void $ parseKatariTokenWith $ \case
+    KatariTokenIdentifier "array" -> Just ()
     _ -> Nothing
   parsePunctuation PunctuationLeftBracket
   elementType <- parseType
@@ -1714,14 +1684,14 @@ parseTupleOrGroupedType = do
             }
 
 -- ===========================================================================
--- Effects / parameters
+-- Requests / parameters
 -- ===========================================================================
 
-parseEffects :: Parser [SyntacticRequest Parsed]
-parseEffects = parseEffect `sepBy1` parseComma
+parseRequests :: Parser [SyntacticRequest Parsed]
+parseRequests = parseRequest `sepBy1` parseComma
 
-parseEffect :: Parser (SyntacticRequest Parsed)
-parseEffect = parseWithSpan $ do
+parseRequest :: Parser (SyntacticRequest Parsed)
+parseRequest = parseWithSpan $ do
   name <- parseNameRef
   pure $ \sourceSpan -> SyntacticRequest {name = name, sourceSpan = sourceSpan}
 

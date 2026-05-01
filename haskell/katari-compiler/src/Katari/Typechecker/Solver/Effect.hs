@@ -1,23 +1,23 @@
--- | Effect-constraint solver.
+-- | Request-constraint solver.
 --
--- Effect constraints have the form @e1 \<: e2@ where each effect is a
--- 'SemanticEffect' = (Set EffectVarId, Set RequestId). The semantics:
+-- Request constraints have the form @e1 \<: e2@ where each request is a
+-- 'SemanticRequest' = (Set RequestVariableId, Set RequestId). The semantics:
 --
--- > contents(e) = effectsOf(e.effectVars) ∪ e.effectReqs
+-- > contents(e) = requestsOf(e.requestVars) ∪ e.requestReqs
 -- > e1 <: e2  iff  contents(e1) ⊆ contents(e2)
 --
 -- Solving:
 --
---   * Each 'EffectVarId' has a current "value" (a 'Set RequestId') that
+--   * Each 'RequestVariableId' has a current "value" (a 'Set RequestId') that
 --     accumulates the concrete requests it must include.
 --   * For each constraint @e1 \<: e2@, propagate any concrete request in
---     @e1@ that does not appear in @e2@'s concrete part to @e2@'s effect
+--     @e1@ that does not appear in @e2@'s concrete part to @e2@'s request
 --     vars (as a lower bound).
---   * Effect vars in @e1@ propagate their current value (minus @e2@'s
---     concrete part) to @e2@'s effect vars.
+--   * Request vars in @e1@ propagate their current value (minus @e2@'s
+--     concrete part) to @e2@'s request vars.
 --   * Iterate to fixpoint.
-module Katari.Typechecker.Solver.Effect
-  ( solveEffectConstraints,
+module Katari.Typechecker.Solver.Request
+  ( solveRequestConstraints,
   )
 where
 
@@ -25,27 +25,27 @@ import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Set (Set)
 import Data.Set qualified as Set
+import Katari.SemanticType
+  ( RequestVariableId,
+    SemanticRequest (..),
+  )
 import Katari.Typechecker.ConstraintGenerator (Constraint (..))
 import Katari.Typechecker.Identifier (RequestId)
-import Katari.Typechecker.SemanticType
-  ( EffectVarId,
-    SemanticEffect (..),
-  )
 import Katari.Typechecker.Solver.Internal
   ( SolverError,
   )
 
--- | Solve effect constraints by lower-bound accumulation. Returns the
--- per-effect-var set of concrete request 'RequestId's, plus any errors
--- (currently empty — effects rarely produce conflicts under Katari's
+-- | Solve request constraints by lower-bound accumulation. Returns the
+-- per-request-var set of concrete request 'RequestId's, plus any errors
+-- (currently empty — requests rarely produce conflicts under Katari's
 -- usage patterns).
-solveEffectConstraints ::
+solveRequestConstraints ::
   Set Constraint ->
-  (Map EffectVarId (Set RequestId), [SolverError])
-solveEffectConstraints constraints =
-  let allEffectVars = collectEffectVars constraints
+  (Map RequestVariableId (Set RequestId), [SolverError])
+solveRequestConstraints constraints =
+  let allRequestVars = collectRequestVars constraints
       initialAssignment =
-        Map.fromList [(effectVarId, Set.empty) | effectVarId <- Set.toList allEffectVars]
+        Map.fromList [(requestVarId, Set.empty) | requestVarId <- Set.toList allRequestVars]
       finalAssignment = fixpoint (propagateOnce constraints) initialAssignment
    in (finalAssignment, [])
 
@@ -62,37 +62,37 @@ fixpoint step current =
 -- Single propagation step
 -- ===========================================================================
 
--- | Apply each constraint once: for every effect var on the RHS, update its
+-- | Apply each constraint once: for every request var on the RHS, update its
 -- accumulated value with the contributions inferred from the LHS.
 propagateOnce ::
   Set Constraint ->
-  Map EffectVarId (Set RequestId) ->
-  Map EffectVarId (Set RequestId)
+  Map RequestVariableId (Set RequestId) ->
+  Map RequestVariableId (Set RequestId)
 propagateOnce constraints initial = foldr (applyConstraint initial) initial constraints
   where
     applyConstraint _ constraint accumulator = case constraint of
-      EffectConstraint leftEffect rightEffect _ ->
-        propagate leftEffect rightEffect accumulator
+      RequestConstraint leftRequest rightRequest _ ->
+        propagate leftRequest rightRequest accumulator
       TypeConstraint {} -> accumulator
     propagate ::
-      SemanticEffect phase ->
-      SemanticEffect phase ->
-      Map EffectVarId (Set RequestId) ->
-      Map EffectVarId (Set RequestId)
-    propagate leftEffect rightEffect assignment =
-      let leftConcreteReqs = leftEffect.effectReqs
-          rightConcreteReqs = rightEffect.effectReqs
-          rightEffectVars = rightEffect.effectVars
+      SemanticRequest phase ->
+      SemanticRequest phase ->
+      Map RequestVariableId (Set RequestId) ->
+      Map RequestVariableId (Set RequestId)
+    propagate leftRequest rightRequest assignment =
+      let leftConcreteReqs = leftRequest.requestReqs
+          rightConcreteReqs = rightRequest.requestReqs
+          rightRequestVars = rightRequest.requestVars
           -- Concrete reqs in lhs that aren't already covered by rhs concrete
-          -- must be absorbed by rhs effect vars.
+          -- must be absorbed by rhs request vars.
           concreteContribution = leftConcreteReqs `Set.difference` rightConcreteReqs
-          -- Lhs effect vars contribute their current value (minus rhs
+          -- Lhs request vars contribute their current value (minus rhs
           -- concrete) to rhs vars.
           leftVarContribution =
             Set.unions
-              [ Map.findWithDefault Set.empty leftEffectVarId assignment
+              [ Map.findWithDefault Set.empty leftRequestVariableId assignment
                   `Set.difference` rightConcreteReqs
-                | leftEffectVarId <- Set.toList leftEffect.effectVars
+                | leftRequestVariableId <- Set.toList leftRequest.requestVars
               ]
           contribution = Set.union concreteContribution leftVarContribution
        in if Set.null contribution
@@ -102,15 +102,15 @@ propagateOnce constraints initial = foldr (applyConstraint initial) initial cons
                 ( Map.adjust (Set.union contribution)
                 )
                 assignment
-                (Set.toList rightEffectVars)
+                (Set.toList rightRequestVars)
 
 -- ===========================================================================
 -- Helpers
 -- ===========================================================================
 
-collectEffectVars :: Set Constraint -> Set EffectVarId
-collectEffectVars = foldr addFromConstraint Set.empty
+collectRequestVars :: Set Constraint -> Set RequestVariableId
+collectRequestVars = foldr addFromConstraint Set.empty
   where
-    addFromConstraint (EffectConstraint leftEffect rightEffect _) accumulator =
-      Set.unions [accumulator, leftEffect.effectVars, rightEffect.effectVars]
+    addFromConstraint (RequestConstraint leftRequest rightRequest _) accumulator =
+      Set.unions [accumulator, leftRequest.requestVars, rightRequest.requestVars]
     addFromConstraint TypeConstraint {} accumulator = accumulator

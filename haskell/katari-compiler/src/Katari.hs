@@ -2,7 +2,7 @@
 --
 -- Downstream consumers should import the dedicated modules directly:
 --
---   * 'Katari.AST' / 'Katari.AST.Identifiers' — phase-parametric AST types
+--   * 'Katari.AST' / 'Katari.Id' — phase-parametric AST types
 --   * 'Katari.IR' — lowered IR (JSON-serialisable)
 --   * 'Katari.Lexer' / 'Katari.Parser' — front-end
 --   * 'Katari.Typechecker.Identifier' / 'Katari.Typechecker.ConstraintGenerator'

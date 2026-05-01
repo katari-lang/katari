@@ -29,6 +29,7 @@ import Katari.AST qualified as AST
 import Katari.Diagnostic (Diagnostic, diagnosticError)
 import Katari.IR
 import Katari.Internal (internalErrorNoSpan)
+import Katari.SourceSpan (SourceSpan)
 import Katari.Typechecker.Identifier (VariableId)
 import Katari.Typechecker.Identifier qualified as Identifier
 import Katari.Typechecker.Zonker (ZonkResult (..))
@@ -40,10 +41,10 @@ import Katari.Typechecker.Zonker (ZonkResult (..))
 data LoweringError where
   -- | Encountered a 'IdentifiedUnresolvedVariable' / 'Nothing'
   -- (parser/identifier produced a sentinel; cannot lower).
-  LoweringErrorUnresolvedVariable :: AST.SourceSpan -> Text -> LoweringError
+  LoweringErrorUnresolvedVariable :: SourceSpan -> Text -> LoweringError
   -- | A 'StatementError' / 'DeclarationError' sentinel left by parser
   -- recovery survived to Lowering.
-  LoweringErrorParseSentinel :: AST.SourceSpan -> LoweringError
+  LoweringErrorParseSentinel :: SourceSpan -> LoweringError
   deriving (Eq, Show)
 
 -- | Convert a 'LoweringError' to a unified 'Diagnostic'. Codes K0300-K0399
@@ -295,12 +296,12 @@ data ResolvedVar where
   ResolvedVarTopLevel :: !BlockId -> ResolvedVar
   ResolvedVarUnresolved :: ResolvedVar
 
--- | Resolve a 'NameMeta' to a 'ResolvedVar'. Consults the local Reader
+-- | Resolve a 'NameRefResolution' to a 'ResolvedVar'. Consults the local Reader
 -- scope first (if @canBeLocal@), then the top-level block id map.
 resolveVariable ::
   Bool ->
-  AST.NameMeta Zonked AST.VariableRef ->
-  AST.SourceSpan ->
+  AST.NameRefResolution Zonked AST.VariableRef ->
+  SourceSpan ->
   Text ->
   Lower ResolvedVar
 resolveVariable canBeLocal resolution sourceSpan nameText = case resolution of
@@ -323,8 +324,8 @@ resolveVariable canBeLocal resolution sourceSpan nameText = case resolution of
 -- top-level callables emit an implicit 'StatementMakeClosure'.
 resolveAsValue ::
   Bool ->
-  AST.NameMeta Zonked AST.VariableRef ->
-  AST.SourceSpan ->
+  AST.NameRefResolution Zonked AST.VariableRef ->
+  SourceSpan ->
   Text ->
   Maybe Text ->
   Lower VarId
@@ -342,8 +343,8 @@ resolveAsValue canBeLocal resolution sourceSpan nameText hint = do
 -- 'CallTargetValue', top-level callables yield 'CallTargetBlock'.
 resolveAsCallTarget ::
   Bool ->
-  AST.NameMeta Zonked AST.VariableRef ->
-  AST.SourceSpan ->
+  AST.NameRefResolution Zonked AST.VariableRef ->
+  SourceSpan ->
   Text ->
   Lower CallTarget
 resolveAsCallTarget canBeLocal resolution sourceSpan nameText = do
@@ -481,7 +482,7 @@ recordVarBlockId variableId blockId =
 -- 'Nothing' marker), record a Lowering error and skip.
 registerCallable ::
   AST.NameRef Zonked AST.VariableRef ->
-  AST.SourceSpan ->
+  SourceSpan ->
   (VariableId -> Lower ()) ->
   Lower ()
 registerCallable nameRef sourceSpan action = case nameRef.resolution of

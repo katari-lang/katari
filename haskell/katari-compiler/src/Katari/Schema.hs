@@ -68,14 +68,14 @@ import Katari.AST
     Phase (Zonked),
     RequestDeclaration (..),
   )
-import Katari.AST.Identifiers (ModuleId, VariableId, renderQualifiedName)
+import Katari.Id (ModuleId, VariableId, renderQualifiedName)
 import Katari.Internal (internalErrorNoSpan)
-import Katari.Typechecker.Identifier (RequestData (..))
-import Katari.Typechecker.SemanticType
+import Katari.SemanticType
   ( Resolved,
-    SemanticEffect (..),
+    SemanticRequest (..),
     SemanticType (..),
   )
+import Katari.Typechecker.Identifier (RequestData (..))
 import Katari.Typechecker.Zonker (ZonkResult (..))
 
 -- ===========================================================================
@@ -131,7 +131,7 @@ instance FromJSON SchemaCore where
   parseJSON = genericParseJSON schemaCoreOptions
 
 -- | Schema for one agent / request / external-agent. Describes its input
--- (object), its output, and the request effects it may raise.
+-- (object), its output, and the request requests it may raise.
 data AgentSchema = AgentSchema
   { -- | The @\@\"...\"@ annotation on the declaration, if any.
     description :: !(Maybe Text),
@@ -141,7 +141,7 @@ data AgentSchema = AgentSchema
     -- | Internal request VariableIds this agent may raise. Rendered as
     -- @\"req\<n\>\"@: tooling that needs human names should consult the
     -- corresponding 'IRModule' name table.
-    effects :: ![Text]
+    requests :: ![Text]
   }
   deriving (Eq, Show, Generic)
 
@@ -347,7 +347,7 @@ qkey modName declName
 -- | Build an 'AgentSchema' from an agent's annotation, name, and parameter
 -- bindings. The agent's full type is read from
 -- 'zonkedTypeEnvironment'; its function shape gives us input properties /
--- output / effects.
+-- output / requests.
 agentLike ::
   ZonkResult ->
   Maybe Text ->
@@ -379,13 +379,13 @@ buildAgentSchema ::
   SemanticType Resolved ->
   AgentSchema
 buildAgentSchema zonkResult description parameters = \case
-  SemanticTypeFunction paramTypes returnType effectSet ->
+  SemanticTypeFunction paramTypes returnType requestSet ->
     let inputSchema = withDesc description (plain (paramObject paramTypes parameters))
      in AgentSchema
           { description = description,
             input = inputSchema,
             output = toJsonSchema returnType,
-            effects = renderEffects zonkResult effectSet
+            requests = renderRequests zonkResult requestSet
           }
   other ->
     internalErrorNoSpan
@@ -411,13 +411,13 @@ paramObject paramTypes parameters =
           additionalProperties = False
         }
 
--- | Render an effect set as a list of qualified-name strings. Each
+-- | Render an request set as a list of qualified-name strings. Each
 -- 'RequestId' is looked up in 'zonkedRequests' to recover its
 -- declaration's 'QualifiedName'; missing ids (a Solver-contract
--- violation) are dropped silently. Effect variables are always empty
+-- violation) are dropped silently. Request variables are always empty
 -- at 'Resolved' phase per Solver contract, so they're ignored.
-renderEffects :: ZonkResult -> SemanticEffect Resolved -> [Text]
-renderEffects zonkResult (SemanticEffect _ reqs) =
+renderRequests :: ZonkResult -> SemanticRequest Resolved -> [Text]
+renderRequests zonkResult (SemanticRequest _ reqs) =
   [ renderQualifiedName qualifiedName
     | requestId <- Set.toList reqs,
       Just (RequestData {requestQualifiedName = qualifiedName}) <- [Map.lookup requestId zonkResult.zonkedRequests]
@@ -453,7 +453,7 @@ insertDataDef zonkResult modName dataDecl accum =
 
 -- | Build the constructor-as-callable schema for a @data@ declaration.
 -- Mirrors 'agentLike' but for constructors: input is the named-field
--- object, output references the corresponding @\$defs@ entry. effects
+-- object, output references the corresponding @\$defs@ entry. requests
 -- are always empty (constructors are pure).
 dataConstructorSchema ::
   ZonkResult ->
@@ -481,7 +481,7 @@ dataConstructorSchema zonkResult modName dataDecl =
               { description = dataDecl.annotation,
                 input = inputSchema,
                 output = outputSchema,
-                effects = []
+                requests = []
               }
     Nothing -> Nothing
 

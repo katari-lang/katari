@@ -50,7 +50,7 @@ import Data.Map.Strict qualified as Map
 import Data.Ord (comparing)
 import Data.Text (Text)
 import GHC.Generics (Generic)
-import Katari.AST (Position (..), SourceSpan (..))
+import Katari.SourceSpan (Position (..), SourceSpan (..))
 
 -- | Severity of a diagnostic. Ordered so 'Error' is the most severe;
 -- the 'Ord' instance is exploited by 'hasErrors'.

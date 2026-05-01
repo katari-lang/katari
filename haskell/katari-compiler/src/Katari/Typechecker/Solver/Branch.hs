@@ -12,7 +12,7 @@
 -- the variable's shape, OR commit the variable to 'never' / 'unknown'.
 --
 -- 'branchConstraint' returns a list of alternative branches. Each branch is
--- a triple @(subst, newConstraints, nextTypeVarId)@: the variable
+-- a triple @(subst, newConstraints, nextTypeVariableId)@: the variable
 -- assignment, additional constraints to satisfy, and the updated TypeVar
 -- counter (since branching may allocate fresh vars).
 --
@@ -28,16 +28,16 @@ where
 import Data.Map.Strict qualified as Map
 import Data.Set (Set)
 import Data.Set qualified as Set
+import Katari.SemanticType
+  ( RequestVariableId (..),
+    SemanticRequest (..),
+    SemanticType (..),
+    TypeVariableId (..),
+    Unresolved,
+  )
 import Katari.Typechecker.ConstraintGenerator
   ( Constraint (..),
     ConstraintReason,
-  )
-import Katari.Typechecker.SemanticType
-  ( EffectVarId (..),
-    SemanticEffect (..),
-    SemanticType (..),
-    TypeVarId (..),
-    Unresolved,
   )
 import Katari.Typechecker.Solver.Internal
   ( Substitution,
@@ -60,12 +60,12 @@ data BranchSide where
 
 -- | One alternative produced by branching: the partial substitution to
 -- apply, the additional constraints to satisfy, and the updated counters
--- for fresh-var allocation (both type and effect).
+-- for fresh-var allocation (both type and request).
 data BranchAlt = BranchAlt
   { branchSubst :: !Substitution,
     branchNewConstraints :: !(Set Constraint),
-    branchNextTypeVarId :: !Int,
-    branchNextEffectVarId :: !Int
+    branchNextTypeVariableId :: !Int,
+    branchNextRequestVariableId :: !Int
   }
   deriving (Show)
 
@@ -77,14 +77,14 @@ data BranchAlt = BranchAlt
 -- 'Nothing' if the constraint is not branchable (the solver should
 -- continue with bound aggregation / final-substitution collection).
 --
--- The two 'Int' parameters are the next free TypeVarId / EffectVarId
+-- The two 'Int' parameters are the next free TypeVariableId / RequestVariableId
 -- counters; each branch may allocate fresh vars and updates them
 -- accordingly.
 branchConstraint :: Int -> Int -> Constraint -> Maybe [BranchAlt]
-branchConstraint nextTypeVarId nextEffectVarId = \case
+branchConstraint nextTypeVariableId nextRequestVariableId = \case
   TypeConstraint leftType rightType reason ->
-    branchType nextTypeVarId nextEffectVarId leftType rightType reason
-  EffectConstraint {} -> Nothing
+    branchType nextTypeVariableId nextRequestVariableId leftType rightType reason
+  RequestConstraint {} -> Nothing
 
 branchType ::
   Int ->
@@ -93,7 +93,7 @@ branchType ::
   SemanticType Unresolved ->
   ConstraintReason ->
   Maybe [BranchAlt]
-branchType nextTypeVarId nextEffectVarId leftType rightType reason =
+branchType nextTypeVariableId nextRequestVariableId leftType rightType reason =
   case (leftType, rightType) of
     -- α <: B | C : try α <: B OR α <: C.
     -- Only branch when LHS contains a type variable; if LHS is concrete the
@@ -105,8 +105,8 @@ branchType nextTypeVarId nextEffectVarId leftType rightType reason =
                 { branchSubst = Map.empty,
                   branchNewConstraints =
                     Set.singleton (TypeConstraint leftType branch reason),
-                  branchNextTypeVarId = nextTypeVarId,
-                  branchNextEffectVarId = nextEffectVarId
+                  branchNextTypeVariableId = nextTypeVariableId,
+                  branchNextRequestVariableId = nextRequestVariableId
                 }
               | branch <- branches
             ]
@@ -114,13 +114,13 @@ branchType nextTypeVarId nextEffectVarId leftType rightType reason =
     (SemanticTypeVariable typeVarId, _)
       | isBranchableShape rightType ->
           Just
-            ( branchVarOnLeft nextTypeVarId nextEffectVarId typeVarId rightType reason
+            ( branchVarOnLeft nextTypeVariableId nextRequestVariableId typeVarId rightType reason
             )
     -- composite <: α (RHS is var, LHS has structure).
     (_, SemanticTypeVariable typeVarId)
       | isBranchableShape leftType ->
           Just
-            ( branchVarOnRight nextTypeVarId nextEffectVarId leftType typeVarId reason
+            ( branchVarOnRight nextTypeVariableId nextRequestVariableId leftType typeVarId reason
             )
     _ -> Nothing
 
@@ -163,16 +163,16 @@ emitContravariantType ::
   Constraint
 emitContravariantType side = emitCovariantType (flipSide side)
 
--- | Effect-constraint counterpart of 'emitCovariantType'.
-emitCovariantEffect ::
+-- | Request-constraint counterpart of 'emitCovariantType'.
+emitCovariantRequest ::
   BranchSide ->
-  SemanticEffect Unresolved ->
-  SemanticEffect Unresolved ->
+  SemanticRequest Unresolved ->
+  SemanticRequest Unresolved ->
   ConstraintReason ->
   Constraint
-emitCovariantEffect side variableSide originalSide reason = case side of
-  LeftVar -> EffectConstraint variableSide originalSide reason
-  RightVar -> EffectConstraint originalSide variableSide reason
+emitCovariantRequest side variableSide originalSide reason = case side of
+  LeftVar -> RequestConstraint variableSide originalSide reason
+  RightVar -> RequestConstraint originalSide variableSide reason
 
 flipSide :: BranchSide -> BranchSide
 flipSide = \case
@@ -186,7 +186,7 @@ flipSide = \case
 branchVarOnLeft ::
   Int ->
   Int ->
-  TypeVarId ->
+  TypeVariableId ->
   SemanticType Unresolved ->
   ConstraintReason ->
   [BranchAlt]
@@ -196,11 +196,11 @@ branchVarOnRight ::
   Int ->
   Int ->
   SemanticType Unresolved ->
-  TypeVarId ->
+  TypeVariableId ->
   ConstraintReason ->
   [BranchAlt]
-branchVarOnRight nextTypeVarId nextEffectVarId shape typeVarId =
-  branchVar RightVar nextTypeVarId nextEffectVarId typeVarId shape
+branchVarOnRight nextTypeVariableId nextRequestVariableId shape typeVarId =
+  branchVar RightVar nextTypeVariableId nextRequestVariableId typeVarId shape
 
 -- | Two alternatives for a stuck @α \<: F@ or @F \<: α@:
 --
@@ -212,27 +212,27 @@ branchVar ::
   BranchSide ->
   Int ->
   Int ->
-  TypeVarId ->
+  TypeVariableId ->
   SemanticType Unresolved ->
   ConstraintReason ->
   [BranchAlt]
-branchVar side nextTypeVarId nextEffectVarId typeVarId shape reason =
-  let (narrowedShape, freshConstraints, nextTypeVarIdAfter, nextEffectVarIdAfter) =
-        narrowShape side nextTypeVarId nextEffectVarId shape reason
+branchVar side nextTypeVariableId nextRequestVariableId typeVarId shape reason =
+  let (narrowedShape, freshConstraints, nextTypeVariableIdAfter, nextRequestVariableIdAfter) =
+        narrowShape side nextTypeVariableId nextRequestVariableId shape reason
       fallback = case side of
         LeftVar -> SemanticTypeNever
         RightVar -> SemanticTypeUnknown
    in [ BranchAlt
           { branchSubst = Map.singleton typeVarId narrowedShape,
             branchNewConstraints = freshConstraints,
-            branchNextTypeVarId = nextTypeVarIdAfter,
-            branchNextEffectVarId = nextEffectVarIdAfter
+            branchNextTypeVariableId = nextTypeVariableIdAfter,
+            branchNextRequestVariableId = nextRequestVariableIdAfter
           },
         BranchAlt
           { branchSubst = Map.singleton typeVarId fallback,
             branchNewConstraints = Set.empty,
-            branchNextTypeVarId = nextTypeVarId,
-            branchNextEffectVarId = nextEffectVarId
+            branchNextTypeVariableId = nextTypeVariableId,
+            branchNextRequestVariableId = nextRequestVariableId
           }
       ]
 
@@ -240,8 +240,8 @@ branchVar side nextTypeVarId nextEffectVarId typeVarId shape reason =
 -- variance-respecting sub-constraints. 'BranchSide' selects which side of
 -- @<:@ α sits on, which flips every emitted constraint's direction.
 --
--- For 'SemanticTypeFunction', a fresh 'EffectVarId' is allocated and an
--- effect constraint is added at the covariant position.
+-- For 'SemanticTypeFunction', a fresh 'RequestVariableId' is allocated and an
+-- request constraint is added at the covariant position.
 narrowShape ::
   BranchSide ->
   Int ->
@@ -249,12 +249,12 @@ narrowShape ::
   SemanticType Unresolved ->
   ConstraintReason ->
   (SemanticType Unresolved, Set Constraint, Int, Int)
-narrowShape side nextTypeVarId nextEffectVarId shape reason = case shape of
-  SemanticTypeFunction parameters returnType effects ->
+narrowShape side nextTypeVariableId nextRequestVariableId shape reason = case shape of
+  SemanticTypeFunction parameters returnType requests ->
     let parameterEntries = Map.toList parameters
-        (parameterVars, nextAfterParams) = freshVars nextTypeVarId (length parameterEntries)
+        (parameterVars, nextAfterParams) = freshVars nextTypeVariableId (length parameterEntries)
         (returnVar, nextAfterReturn) = freshVar nextAfterParams
-        (effectVar, nextEffectAfter) = freshEffectVar nextEffectVarId
+        (requestVar, nextRequestAfter) = freshRequestVar nextRequestVariableId
         narrowedParameters =
           Map.fromList
             [ (label, SemanticTypeVariable parameterVar)
@@ -264,40 +264,40 @@ narrowShape side nextTypeVarId nextEffectVarId shape reason = case shape of
           SemanticTypeFunction
             narrowedParameters
             (SemanticTypeVariable returnVar)
-            (SemanticEffect (Set.singleton effectVar) Set.empty)
+            (SemanticRequest (Set.singleton requestVar) Set.empty)
         parameterConstraints =
           [ emitContravariantType side (SemanticTypeVariable parameterVar) originalParameter reason
             | ((_, originalParameter), parameterVar) <- zip parameterEntries parameterVars
           ]
         returnConstraint =
           emitCovariantType side (SemanticTypeVariable returnVar) returnType reason
-        effectConstraint =
-          emitCovariantEffect
+        requestConstraint =
+          emitCovariantRequest
             side
-            (SemanticEffect (Set.singleton effectVar) Set.empty)
-            effects
+            (SemanticRequest (Set.singleton requestVar) Set.empty)
+            requests
             reason
      in ( narrowedShape,
-          Set.fromList (effectConstraint : returnConstraint : parameterConstraints),
+          Set.fromList (requestConstraint : returnConstraint : parameterConstraints),
           nextAfterReturn,
-          nextEffectAfter
+          nextRequestAfter
         )
   SemanticTypeArray element ->
-    let (elementVar, nextAfterElement) = freshVar nextTypeVarId
+    let (elementVar, nextAfterElement) = freshVar nextTypeVariableId
         narrowedShape = SemanticTypeArray (SemanticTypeVariable elementVar)
         elementConstraint =
           emitCovariantType side (SemanticTypeVariable elementVar) element reason
-     in (narrowedShape, Set.singleton elementConstraint, nextAfterElement, nextEffectVarId)
+     in (narrowedShape, Set.singleton elementConstraint, nextAfterElement, nextRequestVariableId)
   SemanticTypeTuple elements ->
-    let (elementVars, nextAfterElements) = freshVars nextTypeVarId (length elements)
+    let (elementVars, nextAfterElements) = freshVars nextTypeVariableId (length elements)
         narrowedShape = SemanticTypeTuple (SemanticTypeVariable <$> elementVars)
         elementConstraints =
           [ emitCovariantType side (SemanticTypeVariable elementVar) originalElement reason
             | (elementVar, originalElement) <- zip elementVars elements
           ]
-     in (narrowedShape, Set.fromList elementConstraints, nextAfterElements, nextEffectVarId)
+     in (narrowedShape, Set.fromList elementConstraints, nextAfterElements, nextRequestVariableId)
   SemanticTypeObject fields ->
-    let (fieldVars, nextAfterFields) = freshVars nextTypeVarId (Map.size fields)
+    let (fieldVars, nextAfterFields) = freshVars nextTypeVariableId (Map.size fields)
         fieldLabels = Map.keys fields
         narrowedFields =
           Map.fromList (zip fieldLabels (SemanticTypeVariable <$> fieldVars))
@@ -306,24 +306,24 @@ narrowShape side nextTypeVarId nextEffectVarId shape reason = case shape of
           [ emitCovariantType side (SemanticTypeVariable fieldVar) originalField reason
             | (fieldVar, originalField) <- zip fieldVars (Map.elems fields)
           ]
-     in (narrowedShape, Set.fromList fieldConstraints, nextAfterFields, nextEffectVarId)
+     in (narrowedShape, Set.fromList fieldConstraints, nextAfterFields, nextRequestVariableId)
   -- Defensive: 'isBranchableShape' guards the call site so this is unreachable.
-  _ -> (shape, Set.empty, nextTypeVarId, nextEffectVarId)
+  _ -> (shape, Set.empty, nextTypeVariableId, nextRequestVariableId)
 
 -- ---------------------------------------------------------------------------
 -- Fresh var allocation
 -- ---------------------------------------------------------------------------
 
-freshVar :: Int -> (TypeVarId, Int)
-freshVar nextTypeVarId = (TypeVarId nextTypeVarId, nextTypeVarId + 1)
+freshVar :: Int -> (TypeVariableId, Int)
+freshVar nextTypeVariableId = (TypeVariableId nextTypeVariableId, nextTypeVariableId + 1)
 
-freshEffectVar :: Int -> (EffectVarId, Int)
-freshEffectVar nextEffectVarId = (EffectVarId nextEffectVarId, nextEffectVarId + 1)
+freshRequestVar :: Int -> (RequestVariableId, Int)
+freshRequestVar nextRequestVariableId = (RequestVariableId nextRequestVariableId, nextRequestVariableId + 1)
 
-freshVars :: Int -> Int -> ([TypeVarId], Int)
-freshVars nextTypeVarId 0 = ([], nextTypeVarId)
-freshVars nextTypeVarId count =
-  let (typeVarId, nextAfterFirst) = freshVar nextTypeVarId
+freshVars :: Int -> Int -> ([TypeVariableId], Int)
+freshVars nextTypeVariableId 0 = ([], nextTypeVariableId)
+freshVars nextTypeVariableId count =
+  let (typeVarId, nextAfterFirst) = freshVar nextTypeVariableId
       (remaining, nextAfterAll) = freshVars nextAfterFirst (count - 1)
    in (typeVarId : remaining, nextAfterAll)
 
@@ -334,7 +334,7 @@ freshVars nextTypeVarId count =
 -- | Find the first branchable constraint in the list and fan it out.
 -- Returns 'Nothing' if no constraint is branchable.
 --
--- Each result is @(subst, newConstraintList, nextTypeVarId, nextEffectVarId)@:
+-- Each result is @(subst, newConstraintList, nextTypeVariableId, nextRequestVariableId)@:
 -- the alt's substitution, the worklist after the branch (remaining
 -- constraints + new sub-constraints, with the substitution applied), and
 -- the updated counters.
@@ -343,16 +343,16 @@ branchConstraints ::
   Int ->
   Set Constraint ->
   Maybe [(Substitution, Set Constraint, Int, Int)]
-branchConstraints nextTypeVarId nextEffectVarId constraints =
-  case findFirstBranch nextTypeVarId nextEffectVarId constraints of
+branchConstraints nextTypeVariableId nextRequestVariableId constraints =
+  case findFirstBranch nextTypeVariableId nextRequestVariableId constraints of
     Nothing -> Nothing
     Just (chosen, alternatives) ->
       let untouched = Set.delete chosen constraints
        in Just
             [ ( alternative.branchSubst,
                 Set.union alternative.branchNewConstraints untouched,
-                alternative.branchNextTypeVarId,
-                alternative.branchNextEffectVarId
+                alternative.branchNextTypeVariableId,
+                alternative.branchNextRequestVariableId
               )
               | alternative <- alternatives
             ]
@@ -365,11 +365,11 @@ findFirstBranch ::
   Int ->
   Set Constraint ->
   Maybe (Constraint, [BranchAlt])
-findFirstBranch nextTypeVarId nextEffectVarId constraints =
+findFirstBranch nextTypeVariableId nextRequestVariableId constraints =
   go (Set.toAscList constraints)
   where
     go [] = Nothing
     go (current : remaining) =
-      case branchConstraint nextTypeVarId nextEffectVarId current of
+      case branchConstraint nextTypeVariableId nextRequestVariableId current of
         Just alternatives -> Just (current, alternatives)
         Nothing -> go remaining

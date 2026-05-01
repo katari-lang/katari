@@ -7,6 +7,7 @@ import Data.Text qualified as T
 import Katari.AST
 import Katari.Lexer (LexerError (..))
 import Katari.Parser (ParseError (..), ParseErrorReason (..), parseModuleStrict)
+import Katari.SourceSpan (HasSourceSpan (..), Position (..), SourceSpan (..))
 import Test.Hspec
 
 -- ---------------------------------------------------------------------------
@@ -776,7 +777,7 @@ declarations = describe "declarations" $ do
     _ <- shouldSucceed "agent foo(input = x: integer) -> integer { x }"
     pure ()
 
-  it "parses agent with effects" $ do
+  it "parses agent with requests" $ do
     _ <- shouldSucceed "agent foo() with req1, req2 { 1 }"
     pure ()
 
@@ -824,7 +825,7 @@ declarations = describe "declarations" $ do
     _ <- shouldSucceed "ext agent ask(prompt: string) -> string with ai_req"
     pure ()
 
-  it "parses ext agent with multiple effects" $ do
+  it "parses ext agent with multiple requests" $ do
     _ <- shouldSucceed "ext agent ask(prompt: string) -> string with ai_req, log_req"
     pure ()
 
@@ -958,7 +959,6 @@ declarations = describe "declarations" $ do
         nameText a.name `shouldBe` "foo"
         isJust a.body.returnExpression `shouldBe` True
       _ -> expectationFailure "expected agent"
-
 
   it "rejects missing -> in req declaration" $ do
     shouldFail "req foo(x: integer) integer"
@@ -1215,7 +1215,7 @@ whereBlock = describe "where block" $ do
           ]
     pure ()
 
-  it "rejects where handler with effect annotation (with clause not allowed on handler)" $ do
+  it "rejects where handler with request annotation (with clause not allowed on handler)" $ do
     _ <-
       shouldFail $
         mconcat
@@ -1337,13 +1337,13 @@ types = describe "types" $ do
     _ <- shouldSucceed "agent main(f: (x: integer) -> integer) { f(x = 1) }"
     pure ()
 
-  it "parses function type with effects" $ do
+  it "parses function type with requests" $ do
     _ <-
       shouldSucceed
         "agent main(f: (x: integer) -> integer with myreq) { f(x = 1) }"
     pure ()
 
-  it "parses function type with multiple effects" $ do
+  it "parses function type with multiple requests" $ do
     _ <-
       shouldSucceed
         "agent main(f: (x: integer) -> integer with req1, req2) { f(x = 1) }"
@@ -2009,8 +2009,6 @@ qualifiedConstructorPatterns = describe "qualified constructor patterns" $ do
           _ -> expectationFailure "expected one case"
         _ -> expectationFailure "expected match"
       _ -> expectationFailure "expected agent"
-
-
 
 -- ---------------------------------------------------------------------------
 -- Multi-line string recovery
