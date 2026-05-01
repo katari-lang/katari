@@ -307,7 +307,8 @@ moduleSpec = describe "IRModule" $ do
   it "round-trips an empty module" $ do
     roundTrip
       IRModule
-        { name = "main",
+        { metadata = currentIRMetadata,
+          name = "main",
           blocks = Map.empty,
           entries = Map.empty,
           nameTable = emptyNameTable
@@ -330,7 +331,8 @@ moduleSpec = describe "IRModule" $ do
             }
     roundTrip
       IRModule
-        { name = "main",
+        { metadata = currentIRMetadata,
+          name = "main",
           blocks = Map.singleton (BlockId 0) block,
           entries = Map.singleton (QualifiedName "" "main") (BlockId 0),
           nameTable =

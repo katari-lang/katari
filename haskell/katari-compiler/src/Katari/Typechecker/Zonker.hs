@@ -80,16 +80,6 @@ import Katari.Typechecker.Solver (SolverResult (..))
 data ZonkResult = ZonkResult
   { zonkedModules :: !(Map ModuleId (Module Zonked)),
     zonkedTypeEnvironment :: !(Map VariableId (SemanticType Resolved)),
-    -- | @ModuleId@ → human-readable module name. Carried through from
-    -- 'IdentifierResult.identifiedModules' so that downstream phases
-    -- (Lowering, Schema) can stamp module identity onto IR / Schema
-    -- entries without re-threading 'IdentifierResult'.
-    --
-    -- Note: the per-declaration qualified name now lives on each
-    -- 'VariableData' / 'TypeData' / 'RequestData' / 'ConstructorData' so
-    -- this map is mostly redundant; kept for the few sites that still want
-    -- @ModuleId → name@ without going through a specific declaration.
-    zonkedModuleNames :: !(Map ModuleId Text),
     -- | Passthroughs from 'IdentifierResult' so 'Katari.Lowering' and
     -- 'Katari.Schema' can resolve qualified names and look up
     -- 'RequestId' / 'ConstructorId' → 'VariableId' cross-references
@@ -183,9 +173,9 @@ zonkEffect sourceSpan (SemanticEffect vars reqs) = do
 -- ===========================================================================
 
 walkModule :: Module Constrained -> Zonk (Module Zonked)
-walkModule Module {declarations, sourceSpan} = do
+walkModule Module {moduleName, declarations, sourceSpan} = do
   declarations' <- mapM walkDeclaration declarations
-  pure Module {declarations = declarations', sourceSpan = sourceSpan}
+  pure Module {moduleName = moduleName, declarations = declarations', sourceSpan = sourceSpan}
 
 walkDeclaration :: Declaration Constrained -> Zonk (Declaration Zonked)
 walkDeclaration = \case
@@ -724,8 +714,6 @@ zonk idResult cgResult solverResult =
    in ZonkResult
         { zonkedModules = modulesResult,
           zonkedTypeEnvironment = envResult,
-          zonkedModuleNames =
-            Map.map (\ModuleData {moduleName} -> moduleName) idResult.identifiedModules,
           zonkedVariables = idResult.identifiedVariables,
           zonkedTypes = idResult.identifiedTypes,
           zonkedRequests = idResult.identifiedRequests,

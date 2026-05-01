@@ -12,6 +12,7 @@ library:
     - Katari.AST
     - Katari.AST.Identifiers
     - Katari.Diagnostic
+    - Katari.Diagnostic.Render
     - Katari.Internal
     - Katari.Lexer
     - Katari.Parser
@@ -31,6 +32,7 @@ library:
     - Katari.Lowering
     - Katari.Schema
     - Katari.Compile
+    - Katari.Query
 
 tests:
   katari-compiler-test:

@@ -477,11 +477,19 @@ walkWhereBlock zr wb =
   concatMap (walkHandler zr) wb.handlers
     ++ maybe
       []
-      ( \(_, thenBlock) ->
-          -- TODO (step 7): check then-clause pattern irrefutability
-          walkBlock zr thenBlock
+      ( \(maybePattern, thenBlock) ->
+          maybe [] checkThenPattern maybePattern
+            ++ walkBlock zr thenBlock
       )
       wb.thenClause
+  where
+    -- The then-clause pattern binds the break/return value of the scope body.
+    -- Its subject type is the union of all break-statement value types, which
+    -- we cannot reconstruct cheaply here. SemanticTypeUnknown is the most
+    -- conservative approximation: it still correctly rejects refutable patterns
+    -- (literal / constructor matches) since the algorithm treats Unknown as an
+    -- open type with no complete constructor signature.
+    checkThenPattern pat = checkIrrefutable zr pat SemanticTypeUnknown
 
 walkHandler :: ZonkResult -> AST.RequestHandler Zonked -> [ExhaustiveError]
 walkHandler zr rh = walkBlock zr rh.body

@@ -153,7 +153,8 @@ instance HasSourceSpan (NameRef p symbol) where
 -- ---------------------------------------------------------------------------
 
 data Module (p :: Phase) = Module
-  { declarations :: [Declaration p],
+  { moduleName :: !Text,
+    declarations :: [Declaration p],
     sourceSpan :: SourceSpan
   }
 

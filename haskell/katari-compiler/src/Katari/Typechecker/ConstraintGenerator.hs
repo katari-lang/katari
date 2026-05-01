@@ -541,9 +541,9 @@ allocateAllVariables result = mapM_ allocate (Map.keys result.identifiedVariable
 -- ---------------------------------------------------------------------------
 
 walkModule :: Module Identified -> CG (Module Constrained)
-walkModule Module {declarations, sourceSpan} = do
+walkModule Module {moduleName, declarations, sourceSpan} = do
   declarations' <- mapM walkDeclaration declarations
-  pure Module {declarations = declarations', sourceSpan = sourceSpan}
+  pure Module {moduleName = moduleName, declarations = declarations', sourceSpan = sourceSpan}
 
 walkDeclaration :: Declaration Identified -> CG (Declaration Constrained)
 walkDeclaration = \case
@@ -1600,16 +1600,6 @@ requestTypeFromName nameRef = case nameRef.resolution of
     case requestData of
       Just rd -> lookupVariable rd.requestVariableId
       Nothing -> freshTypeVar
-
--- | The 'VariableId' corresponding to a request reference (via the
--- 'requestVariableId' cross-link). Used for effect-set membership where the
--- effect is parametrised by the underlying VariableId.
-requestVariableIdOfName :: NameRef Identified 'RequestRef -> CG (Maybe VariableId)
-requestVariableIdOfName nameRef = case nameRef.resolution of
-  Nothing -> pure Nothing
-  Just rid -> do
-    requestData <- asks (Map.lookup rid . (.contextIdentifiedRequests))
-    pure (fmap (.requestVariableId) requestData)
 
 -- | Type of a 'data' declaration's constructor-function side, looked up
 -- via the constructor id. Same plumbing as 'requestTypeFromName'.

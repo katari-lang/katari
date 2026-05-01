@@ -29,11 +29,7 @@ import Katari.AST qualified as AST
 import Katari.Diagnostic (Diagnostic, diagnosticError)
 import Katari.IR
 import Katari.Internal (internalErrorNoSpan)
-import Katari.Typechecker.Identifier
-  ( ConstructorData (..),
-    RequestData (..),
-    VariableId,
-  )
+import Katari.Typechecker.Identifier (VariableId)
 import Katari.Typechecker.Identifier qualified as Identifier
 import Katari.Typechecker.Zonker (ZonkResult (..))
 
@@ -445,7 +441,8 @@ lowerProgramM moduleName zonkResult = do
   state <- gets id
   pure
     IRModule
-      { name = moduleName,
+      { metadata = currentIRMetadata,
+        name = moduleName,
         blocks = state.lsBlocks,
         entries = state.lsEntries,
         nameTable =
@@ -504,9 +501,8 @@ registerDeclarationKinds :: ZonkResult -> Lower ()
 registerDeclarationKinds zonkResult =
   mapM_ registerModule (Map.toList zonkResult.zonkedModules)
   where
-    registerModule (mid, m) = do
-      let moduleName = Map.findWithDefault "" mid zonkResult.zonkedModuleNames
-      mapM_ (registerDecl moduleName) m.declarations
+    registerModule (_, m) = do
+      mapM_ (registerDecl m.moduleName) m.declarations
 
     registerDecl :: Text -> AST.Declaration Zonked -> Lower ()
     registerDecl moduleName = \case

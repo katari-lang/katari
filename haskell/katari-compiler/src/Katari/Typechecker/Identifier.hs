@@ -970,13 +970,13 @@ resolveModule topLevels moduleNameToId exports moduleMap = do
               { scopeStack = [topLevelFrame],
                 moduleExports = exportsById
               }
-      identifiedModule <- withResolveContext context (resolveModuleAST parsedModule)
+      identifiedModule <- withResolveContext context (resolveModuleAST currentModuleName parsedModule)
       pure (fmap (,identifiedModule) (Map.lookup currentModuleName moduleNameToId))
 
-resolveModuleAST :: Module Parsed -> Identifier (Module Identified)
-resolveModuleAST parsedModule = do
+resolveModuleAST :: Text -> Module Parsed -> Identifier (Module Identified)
+resolveModuleAST name parsedModule = do
   declarations <- mapM resolveDeclaration parsedModule.declarations
-  pure Module {declarations = declarations, sourceSpan = parsedModule.sourceSpan}
+  pure Module {moduleName = name, declarations = declarations, sourceSpan = parsedModule.sourceSpan}
 
 -- ---------------------------------------------------------------------------
 -- Declaration

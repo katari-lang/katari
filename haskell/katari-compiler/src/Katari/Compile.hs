@@ -65,7 +65,7 @@ import Katari.Parser qualified as Parser
 import Katari.Schema (SchemaBundle, buildSchemas)
 import Katari.Typechecker.ConstraintGenerator (ConstraintGenResult (..), generateConstraints)
 import Katari.Typechecker.ConstraintGenerator qualified as CG
-import Katari.Typechecker.Identifier (identify)
+import Katari.Typechecker.Identifier (IdentifierResult, identify)
 import Katari.Typechecker.Identifier qualified as Identifier
 import Katari.Typechecker.Solver (SolverResult (..), solve)
 import Katari.Typechecker.Solver qualified as Solver
@@ -104,6 +104,10 @@ data CompileResult = CompileResult
     -- | Unified diagnostic stream, ordered roughly by phase
     -- (parse → identify → constrain → solve → zonk → lower).
     diagnostics :: ![Diagnostic],
+    -- | Name resolution result. Always returned so LSP / CLI can list
+    -- agents, detect unused declarations, and perform qualified-name
+    -- lookup without re-running the compiler.
+    identifierResult :: !(Maybe IdentifierResult),
     -- | Solver output for LSP type-on-hover. Always returned (even when
     -- diagnostics are present) so the editor can show partial results.
     solverResult :: !(Maybe SolverResult),
@@ -158,6 +162,7 @@ compile input =
         { irModule = finalIR,
           schemaBundle = schema,
           diagnostics = allDiags,
+          identifierResult = Just idResult,
           solverResult = Just solverResult_,
           zonkResult = Just zonkResult_
         }

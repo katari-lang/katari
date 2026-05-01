@@ -33,6 +33,8 @@ module Katari.IR
 
     -- * Module
     IRModule (..),
+    IRMetadata (..),
+    currentIRMetadata,
     NameTable (..),
     emptyNameTable,
 
@@ -154,8 +156,26 @@ newtype ExternalName = ExternalName QualifiedName
 -- Top-level module
 -- ===========================================================================
 
+-- | Version metadata for runtime / compiler skew detection.
+data IRMetadata = IRMetadata
+  { -- | IR shape version. Increment when the IR JSON schema changes in a
+    -- backwards-incompatible way so the runtime can detect mismatches.
+    schemaVersion :: !Int
+  }
+  deriving (Eq, Show, Generic)
+
+instance ToJSON IRMetadata where
+  toJSON = genericToJSON irOptions
+
+instance FromJSON IRMetadata where
+  parseJSON = genericParseJSON irOptions
+
+currentIRMetadata :: IRMetadata
+currentIRMetadata = IRMetadata {schemaVersion = 1}
+
 data IRModule = IRModule
-  { name :: Text,
+  { metadata :: !IRMetadata,
+    name :: Text,
     blocks :: Map BlockId Block,
     -- | FFI inbound name resolution: @\<modulePath\>.\<bareName\>@ →
     -- 'BlockId'. Covers every top-level callable (agent / req / ext /

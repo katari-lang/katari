@@ -157,7 +157,7 @@ parseModule filePath input =
    in case eRes of
         Left _ ->
           let fallbackSpan = SrcSpan filePath (Position 1 1) (Position 1 1)
-           in (Module {declarations = [], sourceSpan = fallbackSpan}, map ParseErrorLex lexerErrors)
+           in (Module {moduleName = "", declarations = [], sourceSpan = fallbackSpan}, map ParseErrorLex lexerErrors)
         Right parsedModule ->
           (parsedModule, reverse finalState.parseErrors)
 
@@ -474,7 +474,7 @@ parsedSymbolRetag nameRef =
 parseModuleBody :: Parser (Module Parsed)
 parseModuleBody = parseWithSpan $ do
   declarations <- parseDeclarationsWithRecovery
-  pure $ \sourceSpan -> Module {declarations = declarations, sourceSpan = sourceSpan}
+  pure $ \sourceSpan -> Module {moduleName = "", declarations = declarations, sourceSpan = sourceSpan}
 
 parseDeclarationsWithRecovery :: Parser [Declaration Parsed]
 parseDeclarationsWithRecovery = loop []

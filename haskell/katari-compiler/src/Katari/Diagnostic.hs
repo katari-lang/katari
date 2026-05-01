@@ -28,6 +28,9 @@ module Katari.Diagnostic
     diagnosticError,
     diagnosticWarning,
     hasErrors,
+    filterAtLeast,
+    sortBySpan,
+    groupByFilePath,
   )
 where
 
@@ -41,9 +44,13 @@ import Data.Aeson
     genericToJSON,
   )
 import Data.Char (toLower)
+import Data.List (sortBy)
+import Data.Map.Strict (Map)
+import Data.Map.Strict qualified as Map
+import Data.Ord (comparing)
 import Data.Text (Text)
 import GHC.Generics (Generic)
-import Katari.AST (SourceSpan)
+import Katari.AST (Position (..), SourceSpan (..))
 
 -- | Severity of a diagnostic. Ordered so 'Error' is the most severe;
 -- the 'Ord' instance is exploited by 'hasErrors'.
@@ -148,3 +155,29 @@ diagnosticWarning code_ message_ span_ =
 -- IR / schema emission.
 hasErrors :: [Diagnostic] -> Bool
 hasErrors = any ((== SeverityError) . (.severity))
+
+-- | Keep only diagnostics whose severity is at least as severe as the given
+-- threshold (using the 'Ord' instance: 'SeverityError' > 'SeverityWarning' > ...).
+filterAtLeast :: Severity -> [Diagnostic] -> [Diagnostic]
+filterAtLeast threshold = filter ((>= threshold) . (.severity))
+
+-- | Sort diagnostics by source span: file path first, then start line,
+-- then start column.
+sortBySpan :: [Diagnostic] -> [Diagnostic]
+sortBySpan =
+  sortBy
+    ( comparing
+        ( \d ->
+            ( d.span.filePath,
+              d.span.start.line,
+              d.span.start.column
+            )
+        )
+    )
+
+-- | Group diagnostics by the 'filePath' of their source span.
+groupByFilePath :: [Diagnostic] -> Map FilePath [Diagnostic]
+groupByFilePath =
+  foldr
+    (\d acc -> Map.insertWith (<>) d.span.filePath [d] acc)
+    Map.empty

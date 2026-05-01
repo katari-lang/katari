@@ -314,9 +314,8 @@ mergeModuleBundle ::
   (ModuleId, Module Zonked) ->
   SchemaBundle ->
   SchemaBundle
-mergeModuleBundle zonkResult (modId, m) acc =
-  let modName = Map.findWithDefault "" modId zonkResult.zonkedModuleNames
-   in foldr (collectDeclaration zonkResult modName) acc m.declarations
+mergeModuleBundle zonkResult (_, m) acc =
+  foldr (collectDeclaration zonkResult m.moduleName) acc m.declarations
 
 collectDeclaration ::
   ZonkResult ->
