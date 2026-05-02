@@ -1174,23 +1174,19 @@ parseArrayExpression = parseWithSpan $ do
 -- | @(e)@ collapses to @e@ (grouped expression). @(e1, e2, ...)@ is a tuple.
 -- A grouped expression keeps its inner span, so we cannot use 'parseWithSpan' here.
 parseTupleOrGroupedExpression :: Parser (Expression Parsed)
-parseTupleOrGroupedExpression = do
-  startPosition <- parseCurrentPosition
+parseTupleOrGroupedExpression = parseWithSpan $ do
   parsePunctuation PunctuationLeftParenthesis
   expressions <- parseExpression `sepEndBy` parseComma
   parsePunctuation PunctuationRightParenthesis
-  endPosition <- parsePreviousEndPosition
-  case expressions of
-    [onlyExpression] -> pure onlyExpression
-    _ -> do
-      sourceSpan <- parseMakeSpan startPosition endPosition
-      pure $
-        ExpressionTuple
-          TupleExpression
-            { elements = expressions,
-              sourceSpan = sourceSpan,
-              typeOf = ()
-            }
+  pure $ \sourceSpan -> case expressions of
+    [onlyExpression] -> onlyExpression
+    _ ->
+      ExpressionTuple
+        TupleExpression
+          { elements = expressions,
+            sourceSpan = sourceSpan,
+            typeOf = ()
+          }
 
 parseBlockExpression :: Parser (Expression Parsed)
 parseBlockExpression = parseWithSpan $ do
@@ -1467,23 +1463,19 @@ parsePatternField = labeled <|> sugar
 -- | @(p)@ collapses to @p@ (grouped pattern). @(p, q, ...)@ is a tuple.
 -- A grouped pattern keeps its inner span, so we cannot use 'parseWithSpan' here.
 parseTupleOrGroupedPattern :: Parser (Pattern Parsed)
-parseTupleOrGroupedPattern = do
-  startPosition <- parseCurrentPosition
+parseTupleOrGroupedPattern = parseWithSpan $ do
   parsePunctuation PunctuationLeftParenthesis
   patterns <- parsePattern `sepEndBy` parseComma
   parsePunctuation PunctuationRightParenthesis
-  endPosition <- parsePreviousEndPosition
-  case patterns of
-    [onlyPattern] -> pure onlyPattern
-    _ -> do
-      sourceSpan <- parseMakeSpan startPosition endPosition
-      pure $
-        PatternTuple
-          TuplePattern
-            { elements = patterns,
-              sourceSpan = sourceSpan,
-              typeOf = ()
-            }
+  pure $ \sourceSpan -> case patterns of
+    [onlyPattern] -> onlyPattern
+    _ ->
+      PatternTuple
+        TuplePattern
+          { elements = patterns,
+            sourceSpan = sourceSpan,
+            typeOf = ()
+          }
 
 parseLiteralPattern :: Parser (Pattern Parsed)
 parseLiteralPattern = parseWithSpan $ do
@@ -1515,20 +1507,16 @@ parseType = label "type" parseUnionType
 -- A single-branch union returns the inner atomic type unchanged (preserving
 -- its own span), so 'parseWithSpan' is not used here.
 parseUnionType :: Parser (SyntacticType Parsed)
-parseUnionType = do
-  startPosition <- parseCurrentPosition
+parseUnionType = parseWithSpan $ do
   first <- parseAtomicType
   rest <- many (try (parsePunctuation PunctuationPipe *> parseAtomicType))
   -- Allow a trailing pipe: a stray @|@ after the last branch is consumed if
   -- present. No type-position follower is @|@, so this never consumes
   -- something it shouldn't.
   _ <- optional (try (parsePunctuation PunctuationPipe))
-  endPosition <- parsePreviousEndPosition
-  case rest of
-    [] -> pure first
-    _ -> do
-      sourceSpan <- parseMakeSpan startPosition endPosition
-      pure (TypeUnion TypeUnionNode {branches = first : rest, sourceSpan = sourceSpan})
+  pure $ \sourceSpan -> case rest of
+    [] -> first
+    _ -> TypeUnion TypeUnionNode {branches = first : rest, sourceSpan = sourceSpan}
 
 -- | The branches of a union (i.e. everything that was previously @parseType@).
 parseAtomicType :: Parser (SyntacticType Parsed)
@@ -1650,22 +1638,18 @@ parseArrayType = parseWithSpan $ do
 -- @()@ is the empty tuple type. A single-element grouping keeps its inner
 -- span, so we cannot use 'parseWithSpan' here.
 parseTupleOrGroupedType :: Parser (SyntacticType Parsed)
-parseTupleOrGroupedType = do
-  startPosition <- parseCurrentPosition
+parseTupleOrGroupedType = parseWithSpan $ do
   parsePunctuation PunctuationLeftParenthesis
   types <- parseType `sepEndBy` parseComma
   parsePunctuation PunctuationRightParenthesis
-  endPosition <- parsePreviousEndPosition
-  case types of
-    [onlyType] -> pure onlyType
-    _ -> do
-      sourceSpan <- parseMakeSpan startPosition endPosition
-      pure $
-        TypeTuple
-          TupleTypeNode
-            { elementTypes = types,
-              sourceSpan = sourceSpan
-            }
+  pure $ \sourceSpan -> case types of
+    [onlyType] -> onlyType
+    _ ->
+      TypeTuple
+        TupleTypeNode
+          { elementTypes = types,
+            sourceSpan = sourceSpan
+          }
 
 -- ===========================================================================
 -- Requests / parameters

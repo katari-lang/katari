@@ -1,14 +1,14 @@
--- | Tests for 'Katari.Schema' — primarily the @SemanticType -> JsonSchema@
--- conversion and JSON round-trip stability.
+-- | Tests for 'Katari.Schema' — the SemanticType → JsonSchema conversion
+-- and the end-to-end schema generation pipeline.
 module Katari.SchemaSpec (spec) where
 
-import Data.Aeson (Value (..))
+import Data.Aeson (Value (..), object, (.=))
 import Data.Aeson qualified as Aeson
+import Data.List (find)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Katari.Compile (CompileInput (..), CompileResult (..), compile)
-import Katari.Diagnostic (Diagnostic (..))
 import Katari.Schema
 import Katari.SemanticType
   ( Resolved,
@@ -21,14 +21,16 @@ import Test.Hspec
 -- Helpers
 -- ===========================================================================
 
-shouldHaveCore :: SemanticType Resolved -> SchemaCore -> Expectation
-shouldHaveCore t expected = (toJsonSchema t).core `shouldBe` expected
+-- | Call 'toJsonSchema' without data-type expansion (suitable for tests
+-- that don't involve 'SemanticTypeData').
+simpleToJson :: SemanticType Resolved -> JsonSchema
+simpleToJson = toJsonSchema Map.empty Set.empty
 
-roundTrip :: (Aeson.ToJSON a, Aeson.FromJSON a, Eq a, Show a) => a -> Expectation
-roundTrip value =
-  case Aeson.fromJSON (Aeson.toJSON value) of
-    Aeson.Success decoded -> decoded `shouldBe` value
-    Aeson.Error msg -> expectationFailure ("decode failed: " <> msg)
+shouldHaveCore :: SemanticType Resolved -> SchemaCore -> Expectation
+shouldHaveCore t expected = (simpleToJson t).core `shouldBe` expected
+
+findEntry :: Text -> [SchemaEntry] -> Maybe SchemaEntry
+findEntry n = find (\e -> e.name == n)
 
 -- ===========================================================================
 -- Spec
@@ -38,8 +40,7 @@ spec :: Spec
 spec = describe "Katari.Schema" $ do
   toJsonSchemaSpec
   unionCompactionSpec
-  jsonRoundTripSpec
-  bundleShapeSpec
+  schemaCoreJsonSpec
   descriptionEndToEndSpec
 
 toJsonSchemaSpec :: Spec
@@ -59,16 +60,19 @@ toJsonSchemaSpec = describe "toJsonSchema (SemanticType -> JsonSchema)" $ do
     SemanticTypeLiteralBoolean True `shouldHaveCore` SchemaCoreConst {value = Bool True}
 
   it "arrays nest the element schema under 'items'" $ do
-    let core = (toJsonSchema (SemanticTypeArray SemanticTypeInteger)).core
+    let core = (simpleToJson (SemanticTypeArray SemanticTypeInteger)).core
     case core of
-      SchemaCoreArray {items} -> items.core `shouldBe` SchemaCoreInteger {minimum = Nothing, maximum = Nothing}
+      SchemaCoreArray {items} ->
+        items.core `shouldBe` SchemaCoreInteger {minimum = Nothing, maximum = Nothing}
       _ -> expectationFailure "expected SchemaCoreArray"
 
   it "tuples become SchemaCoreTuple with prefixItems" $ do
     let t = SemanticTypeTuple [SemanticTypeBoolean, SemanticTypeInteger]
-        core = (toJsonSchema t).core
+        core = (simpleToJson t).core
     case core of
-      SchemaCoreTuple {prefixItems} -> map (.core) prefixItems `shouldBe` [SchemaCoreBoolean, SchemaCoreInteger {minimum = Nothing, maximum = Nothing}]
+      SchemaCoreTuple {prefixItems} ->
+        map (.core) prefixItems
+          `shouldBe` [SchemaCoreBoolean, SchemaCoreInteger {minimum = Nothing, maximum = Nothing}]
       _ -> expectationFailure "expected SchemaCoreTuple"
 
   it "objects become SchemaCoreObject with required = all field labels" $ do
@@ -78,7 +82,7 @@ toJsonSchemaSpec = describe "toJsonSchema (SemanticType -> JsonSchema)" $ do
               [ ("name", SemanticTypeString),
                 ("age", SemanticTypeInteger)
               ]
-    case (toJsonSchema t).core of
+    case (simpleToJson t).core of
       SchemaCoreObject {properties, required, additionalProperties} -> do
         Map.keysSet properties `shouldBe` Set.fromList ["age", "name"]
         required `shouldBe` Set.fromList ["age", "name"]
@@ -90,7 +94,7 @@ toJsonSchemaSpec = describe "toJsonSchema (SemanticType -> JsonSchema)" $ do
           SemanticTypeFunction
             Map.empty
             SemanticTypeNull
-            (SemanticRequest Set.empty Set.empty)
+            (SemanticRequest Set.empty)
     t `shouldHaveCore` SchemaCoreUnknown
 
 unionCompactionSpec :: Spec
@@ -102,7 +106,7 @@ unionCompactionSpec = describe "union compaction" $ do
               SemanticTypeLiteralString "green",
               SemanticTypeLiteralString "blue"
             ]
-    case (toJsonSchema t).core of
+    case (simpleToJson t).core of
       SchemaCoreString {schemaEnum} -> schemaEnum `shouldBe` ["red", "green", "blue"]
       other -> expectationFailure ("expected SchemaCoreString enum, got: " <> show other)
 
@@ -112,111 +116,51 @@ unionCompactionSpec = describe "union compaction" $ do
             [ SemanticTypeLiteralString "ok",
               SemanticTypeNull
             ]
-    case (toJsonSchema t).core of
+    case (simpleToJson t).core of
       SchemaCoreUnion {anyOf} -> length anyOf `shouldBe` 2
       other -> expectationFailure ("expected SchemaCoreUnion, got: " <> show other)
 
-jsonRoundTripSpec :: Spec
-jsonRoundTripSpec = describe "JSON round-trip" $ do
-  it "JsonSchema round-trips" $ do
-    roundTrip (toJsonSchema (SemanticTypeArray SemanticTypeInteger))
-    roundTrip
-      ( toJsonSchema
-          ( SemanticTypeObject
-              ( Map.fromList
-                  [ ("x", SemanticTypeInteger),
-                    ("y", SemanticTypeNumber)
-                  ]
-              )
-          )
-      )
+-- | Pin the JSON wire format of 'SchemaCore' variants as valid JSON Schema.
+schemaCoreJsonSpec :: Spec
+schemaCoreJsonSpec = describe "SchemaCore JSON output (valid JSON Schema)" $ do
+  it "SchemaCoreNull → {\"type\":\"null\"}" $
+    Aeson.toJSON (simpleToJson SemanticTypeNull)
+      `shouldBe` object ["type" .= ("null" :: Text)]
 
-  it "empty SchemaBundle round-trips" $ do
-    roundTrip emptySchemaBundle
+  it "SchemaCoreBoolean → {\"type\":\"boolean\"}" $
+    Aeson.toJSON (simpleToJson SemanticTypeBoolean)
+      `shouldBe` object ["type" .= ("boolean" :: Text)]
 
-bundleShapeSpec :: Spec
-bundleShapeSpec = describe "SchemaBundle shape (Phase 15-H)" $ do
-  it "buildSchemas keys agent / req / ext / data schemas by qualified name and includes dataDefs" $ do
-    -- Wire the compile pipeline directly here so we can inspect the
-    -- resulting SchemaBundle. We import only the minimum to avoid
-    -- pulling parser plumbing into the schema test module.
-    -- The end-to-end coverage lives in CompileSpec; this test pins
-    -- the SchemaBundle shape contract.
-    let bundle = emptySchemaBundle
-    Map.null bundle.agentSchemas `shouldBe` True
-    Map.null bundle.requestSchemas `shouldBe` True
-    Map.null bundle.externalSchemas `shouldBe` True
-    Map.null bundle.dataSchemas `shouldBe` True
-    Map.null bundle.dataDefs `shouldBe` True
+  it "SchemaCoreInteger → {\"type\":\"integer\"}" $
+    Aeson.toJSON (simpleToJson SemanticTypeInteger)
+      `shouldBe` object ["type" .= ("integer" :: Text)]
 
-  it "agentSchemas / dataSchemas are AgentSchema (callable shape) and dataDefs is JsonSchema ($defs)" $ do
-    -- Type-level shape assertion via constructor pattern.
-    let agent =
-          AgentSchema
-            { description = Nothing,
-              input =
-                JsonSchema
-                  { core = SchemaCoreObject {properties = Map.empty, required = Set.empty, additionalProperties = False},
-                    title = Nothing,
-                    description = Nothing,
-                    examples = []
-                  },
-              output =
-                JsonSchema
-                  { core = SchemaCoreNull,
-                    title = Nothing,
-                    description = Nothing,
-                    examples = []
-                  },
-              requests = []
-            }
-        ctor =
-          AgentSchema
-            { description = Just "make Pair",
-              input =
-                JsonSchema
-                  { core = SchemaCoreObject {properties = Map.empty, required = Set.empty, additionalProperties = False},
-                    title = Just "Pair",
-                    description = Just "make Pair",
-                    examples = []
-                  },
-              output =
-                JsonSchema
-                  { core = SchemaCoreRef "#/$defs/main.Pair",
-                    title = Nothing,
-                    description = Nothing,
-                    examples = []
-                  },
-              requests = []
-            }
-        dataDef =
-          JsonSchema
-            { core = SchemaCoreObject {properties = Map.empty, required = Set.empty, additionalProperties = False},
-              title = Just "Pair",
-              description = Nothing,
-              examples = []
-            }
-        bundle =
-          SchemaBundle
-            { agentSchemas = Map.singleton "main.greet" agent,
-              requestSchemas = Map.empty,
-              externalSchemas = Map.empty,
-              dataSchemas = Map.singleton "main.Pair" ctor,
-              dataDefs = Map.singleton "main.Pair" dataDef
-            }
-    -- Round-trip through JSON to lock the wire shape.
-    roundTrip bundle
-    -- And the qualified-name keys are accessible.
-    Map.lookup "main.greet" bundle.agentSchemas
-      `shouldSatisfy` ( \case
-                          Just _ -> True
-                          Nothing -> False
-                      )
-    Map.lookup "main.Pair" bundle.dataSchemas
-      `shouldSatisfy` ( \case
-                          Just _ -> True
-                          Nothing -> False
-                      )
+  it "SchemaCoreNumber → {\"type\":\"number\"}" $
+    Aeson.toJSON (simpleToJson SemanticTypeNumber)
+      `shouldBe` object ["type" .= ("number" :: Text)]
+
+  it "SchemaCoreString → {\"type\":\"string\"}" $
+    Aeson.toJSON (simpleToJson SemanticTypeString)
+      `shouldBe` object ["type" .= ("string" :: Text)]
+
+  it "SchemaCoreUnknown → {}" $
+    Aeson.toJSON (simpleToJson SemanticTypeUnknown)
+      `shouldBe` object []
+
+  it "SchemaCoreNever → {\"not\":{}}" $
+    Aeson.toJSON (simpleToJson SemanticTypeNever)
+      `shouldBe` object ["not" .= object []]
+
+  it "string-literal union → {\"type\":\"string\",\"enum\":[...]}" $
+    Aeson.toJSON (simpleToJson (SemanticTypeUnion (map SemanticTypeLiteralString ["a", "b"])))
+      `shouldBe` object
+        [ "type" .= ("string" :: Text),
+          "enum" .= (["a", "b"] :: [Text])
+        ]
+
+  it "SchemaCoreConst → {\"const\":...}" $
+    Aeson.toJSON (simpleToJson (SemanticTypeLiteralInteger 42))
+      `shouldBe` object ["const" .= (42 :: Int)]
 
 -- ===========================================================================
 -- Phase 17: annotation → description end-to-end
@@ -233,35 +177,35 @@ descriptionEndToEndSpec = describe "annotation → description (end-to-end)" $ d
         \  \"\"\n\
         \}"
       result = compile CompileInput {sources = Map.singleton "main" src, rootModule = "main"}
-      bundle :: SchemaBundle
-      bundle = case result.schemaBundle of
-        Just b -> b
+      entries :: [SchemaEntry]
+      entries = case result.schemaEntries of
+        Just es -> es
         Nothing -> error ("compile failed: " <> show (map (.code) result.diagnostics))
 
-  it "agent description comes from @-annotation" $ do
-    (Map.lookup "main.show" bundle.agentSchemas >>= (.description))
+  it "agent description comes from @-annotation" $
+    (findEntry "main.show" entries >>= (.description))
       `shouldBe` (Just "format a point" :: Maybe Text)
 
   it "agent input property description comes from parameter @-annotation" $ do
     let prop :: Maybe Text
         prop = do
-          agent <- Map.lookup "main.show" bundle.agentSchemas
-          props <- case agent.input.core of
+          entry <- findEntry "main.show" entries
+          props <- case entry.input.core of
             SchemaCoreObject {properties = p} -> Just p
             _ -> Nothing
           paramSchema <- Map.lookup "p" props
           paramSchema.description
     prop `shouldBe` Just "the point"
 
-  it "dataDefs description comes from data @-annotation" $ do
-    (Map.lookup "main.Point" bundle.dataDefs >>= (.description))
+  it "data SchemaEntry description comes from data @-annotation" $
+    (findEntry "main.Point" entries >>= (.description))
       `shouldBe` (Just "a 2D point" :: Maybe Text)
 
-  it "dataDefs field descriptions come from field @-annotations" $ do
+  it "data output field descriptions come from field @-annotations" $ do
     let fieldDesc :: Text -> Maybe Text
         fieldDesc label = do
-          def <- Map.lookup "main.Point" bundle.dataDefs
-          props <- case def.core of
+          entry <- findEntry "main.Point" entries
+          props <- case entry.output.core of
             SchemaCoreObject {properties = p} -> Just p
             _ -> Nothing
           field <- Map.lookup label props
@@ -269,6 +213,14 @@ descriptionEndToEndSpec = describe "annotation → description (end-to-end)" $ d
     fieldDesc "x" `shouldBe` Just "horizontal coordinate"
     fieldDesc "y" `shouldBe` Just "vertical coordinate"
 
-  it "dataSchemas (callable) description comes from data @-annotation" $ do
-    (Map.lookup "main.Point" bundle.dataSchemas >>= (.description))
-      `shouldBe` (Just "a 2D point" :: Maybe Text)
+  it "data input field descriptions come from field @-annotations" $ do
+    let fieldDesc :: Text -> Maybe Text
+        fieldDesc label = do
+          entry <- findEntry "main.Point" entries
+          props <- case entry.input.core of
+            SchemaCoreObject {properties = p} -> Just p
+            _ -> Nothing
+          field <- Map.lookup label props
+          field.description
+    fieldDesc "x" `shouldBe` Just "horizontal coordinate"
+    fieldDesc "y" `shouldBe` Just "vertical coordinate"

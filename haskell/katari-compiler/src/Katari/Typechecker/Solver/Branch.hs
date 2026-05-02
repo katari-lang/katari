@@ -34,6 +34,7 @@ import Katari.SemanticType
     SemanticType (..),
     TypeVariableId (..),
     Unresolved,
+    singletonRequestVariable,
   )
 import Katari.Typechecker.ConstraintGenerator
   ( Constraint (..),
@@ -97,7 +98,7 @@ branchType nextTypeVariableId nextRequestVariableId leftType rightType reason =
   case (leftType, rightType) of
     -- α <: B | C : try α <: B OR α <: C.
     -- Only branch when LHS contains a type variable; if LHS is concrete the
-    -- decomposer already settled or rejected this constraint via subtypeNT.
+    -- decomposer already settled or rejected this constraint via subtypeNormalizedType.
     (_, SemanticTypeUnion branches)
       | not (Set.null (typeVarsIn leftType)) ->
           Just
@@ -264,7 +265,7 @@ narrowShape side nextTypeVariableId nextRequestVariableId shape reason = case sh
           SemanticTypeFunction
             narrowedParameters
             (SemanticTypeVariable returnVar)
-            (SemanticRequest (Set.singleton requestVar) Set.empty)
+            (singletonRequestVariable requestVar)
         parameterConstraints =
           [ emitContravariantType side (SemanticTypeVariable parameterVar) originalParameter reason
             | ((_, originalParameter), parameterVar) <- zip parameterEntries parameterVars
@@ -274,7 +275,7 @@ narrowShape side nextTypeVariableId nextRequestVariableId shape reason = case sh
         requestConstraint =
           emitCovariantRequest
             side
-            (SemanticRequest (Set.singleton requestVar) Set.empty)
+            (singletonRequestVariable requestVar)
             requests
             reason
      in ( narrowedShape,

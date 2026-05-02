@@ -30,7 +30,6 @@ module Katari.Typechecker.Zonker
   )
 where
 
-import Control.Monad (foldM)
 import Control.Monad.Reader (ReaderT, ask, runReaderT)
 import Control.Monad.State.Strict (State, modify, runState)
 import Control.Monad.Trans (lift)
@@ -44,10 +43,11 @@ import Katari.SemanticType
   ( RequestVariableId (..),
     Resolved,
     SemanticRequest (..),
+    SemanticRequestElement (..),
     SemanticType (..),
     TypeVariableId (..),
     Unresolved,
-    traverseSemanticChildren,
+    substituteVariable,
   )
 import Katari.SourceSpan (Position (..), SourceSpan (..))
 import Katari.Typechecker.ConstraintGenerator (ConstraintGenResult (..))
@@ -77,23 +77,23 @@ import Katari.Typechecker.Solver (SolverResult (..))
 -- ===========================================================================
 
 data ZonkResult = ZonkResult
-  { zonkedModules :: !(Map ModuleId (Module Zonked)),
-    zonkedTypeEnvironment :: !(Map VariableId (SemanticType Resolved)),
+  { zonkedModules :: Map ModuleId (Module Zonked),
+    zonkedTypeEnvironment :: Map VariableId (SemanticType Resolved),
     -- | Passthroughs from 'IdentifierResult' so 'Katari.Lowering' and
     -- 'Katari.Schema' can resolve qualified names and look up
     -- 'RequestId' / 'ConstructorId' → 'VariableId' cross-references
     -- without re-threading 'IdentifierResult' alongside 'ZonkResult'.
-    zonkedVariables :: !(Map VariableId VariableData),
-    zonkedTypes :: !(Map TypeId TypeData),
-    zonkedRequests :: !(Map RequestId RequestData),
-    zonkedConstructors :: !(Map ConstructorId ConstructorData),
+    zonkedVariables :: Map VariableId VariableData,
+    zonkedTypes :: Map TypeId TypeData,
+    zonkedRequests :: Map RequestId RequestData,
+    zonkedConstructors :: Map ConstructorId ConstructorData,
     -- | Inverse maps built at ZonkResult construction time. Allow O(1)
     -- lookup of RequestId / ConstructorId by the call-side VariableId
     -- without O(n) scans through 'zonkedRequests' / 'zonkedConstructors'.
-    zonkedRequestByVariable :: !(Map VariableId RequestId),
-    zonkedConstructorByVariable :: !(Map VariableId ConstructorId),
+    zonkedRequestByVariable :: Map VariableId RequestId,
+    zonkedConstructorByVariable :: Map VariableId ConstructorId,
     -- | Solver 契約逸脱 (lookup miss) 検知用。通常 path では空のはず。
-    zonkErrors :: ![ZonkError]
+    zonkErrors :: [ZonkError]
   }
   deriving (Show)
 
@@ -144,37 +144,44 @@ recordZonkError err = lift (modify (err :))
 -- delegated to 'traverseSemanticChildren' (the bulk of what used to be a
 -- 14-case @\\case@).
 zonkType :: SourceSpan -> SemanticType Unresolved -> Zonk (SemanticType Resolved)
-zonkType sourceSpan = \case
-  SemanticTypeVariable typeVar -> do
-    solverResult <- ask
-    case Map.lookup typeVar solverResult.typeSubstitution of
-      Just normalizedType -> pure (denormalise normalizedType)
-      Nothing -> do
-        recordZonkError (ZonkErrorMissingTypeVar sourceSpan typeVar)
-        pure SemanticTypeUnknown
-  t -> traverseSemanticChildren (zonkType sourceSpan) (zonkRequest sourceSpan) t
+-- zonkType sourceSpan = \case
+--   SemanticTypeVariable typeVar -> do
+--     solverResult <- ask
+--     case Map.lookup typeVar solverResult.typeSubstitution of
+--       Just normalizedType -> pure (denormalise normalizedType)
+--       Nothing -> do
+--         recordZonkError (ZonkErrorMissingTypeVar sourceSpan typeVar)
+--         pure SemanticTypeUnknown
+--   t -> traverseSemanticChildren (zonkType sourceSpan) (zonkRequest sourceSpan) t
+zonkType sourceSpan =
+  substituteVariable
+    ( \typeVar -> do
+        solverResult <- ask
+        case Map.lookup typeVar solverResult.typeSubstitution of
+          Just normalizedType -> pure (denormalise normalizedType)
+          Nothing -> do
+            recordZonkError (ZonkErrorMissingTypeVar sourceSpan typeVar)
+            pure SemanticTypeUnknown
+    )
+    (zonkRequestVariable sourceSpan)
 
-zonkRequest :: SourceSpan -> SemanticRequest Unresolved -> Zonk (SemanticRequest Resolved)
-zonkRequest sourceSpan (SemanticRequest vars reqs) = do
-  expanded <- foldM addRequestVar reqs (Set.toList vars)
-  pure (SemanticRequest Set.empty expanded)
-  where
-    addRequestVar acc requestVar = do
-      solverResult <- ask
-      case Map.lookup requestVar solverResult.requestSubstitution of
-        Just resolvedReqs -> pure (Set.union acc resolvedReqs)
-        Nothing -> do
-          recordZonkError (ZonkErrorMissingRequestVar sourceSpan requestVar)
-          pure acc
+zonkRequestVariable :: SourceSpan -> RequestVariableId -> Zonk (SemanticRequest Resolved)
+zonkRequestVariable sourceSpan requestVariableId = do
+  solverResult <- ask
+  case Map.lookup requestVariableId solverResult.requestSubstitution of
+    Just resolvedReqs -> pure $ SemanticRequest $ Set.map SemanticRequestElementConcrete resolvedReqs
+    Nothing -> do
+      recordZonkError (ZonkErrorMissingRequestVar sourceSpan requestVariableId)
+      pure $ SemanticRequest Set.empty
 
 -- ===========================================================================
 -- AST walker
 -- ===========================================================================
 
 walkModule :: Module Constrained -> Zonk (Module Zonked)
-walkModule Module {moduleName, declarations, sourceSpan} = do
+walkModule Module {declarations, sourceSpan} = do
   declarations' <- mapM walkDeclaration declarations
-  pure Module {moduleName = moduleName, declarations = declarations', sourceSpan = sourceSpan}
+  pure Module {declarations = declarations', sourceSpan = sourceSpan}
 
 walkDeclaration :: Declaration Constrained -> Zonk (Declaration Zonked)
 walkDeclaration = \case
@@ -202,12 +209,13 @@ walkAgentDecl AgentDeclaration {annotation, name, parameters, returnType, withRe
       }
 
 walkRequestDecl :: RequestDeclaration Constrained -> Zonk (RequestDeclaration Zonked)
-walkRequestDecl RequestDeclaration {annotation, name, parameters, returnType, sourceSpan} = do
+walkRequestDecl RequestDeclaration {annotation, name, requestName, parameters, returnType, sourceSpan} = do
   parameters' <- mapM walkParameter parameters
   pure
     RequestDeclaration
       { annotation = annotation,
         name = retagNameRef name,
+        requestName = retagNameRef requestName,
         parameters = parameters',
         returnType = retagSyntacticType returnType,
         sourceSpan = sourceSpan
@@ -227,12 +235,13 @@ walkExternalAgentDecl ExternalAgentDeclaration {annotation, name, parameters, re
       }
 
 walkDataDecl :: DataDeclaration Constrained -> Zonk (DataDeclaration Zonked)
-walkDataDecl DataDeclaration {annotation, name, typeName, parameters, sourceSpan} = do
+walkDataDecl DataDeclaration {annotation, name, constructorName, typeName, parameters, sourceSpan} = do
   parameters' <- mapM walkDataParameter parameters
   pure
     DataDeclaration
       { annotation = annotation,
         name = retagNameRef name,
+        constructorName = retagNameRef constructorName,
         typeName = retagNameRef typeName,
         parameters = parameters',
         sourceSpan = sourceSpan

@@ -183,7 +183,10 @@ data RequestData = RequestData
   { requestQualifiedName :: QualifiedName,
     requestSourceSpan :: SourceSpan,
     -- | Request Id -> Variable Id
-    requestVariableId :: VariableId
+    requestVariableId :: VariableId,
+    -- | Per-parameter annotation text, keyed by external call label.
+    -- Used by Schema generation to populate JSON Schema @description@ fields.
+    requestParameterAnnotations :: Map Text (Maybe Text)
   }
   deriving (Eq, Show)
 
@@ -751,7 +754,7 @@ buildExports moduleMap =
 
     addDeclaration moduleName table = \case
       DeclarationAgent declaration -> registerVariable moduleName table declaration.name
-      DeclarationRequest declaration -> registerRequest moduleName table declaration.name
+      DeclarationRequest declaration -> registerRequest moduleName table declaration.name declaration.parameters
       DeclarationExternalAgent declaration -> registerVariable moduleName table declaration.name
       -- A data declaration occupies the variable slot (constructor function),
       -- the type slot (the data type), AND the constructor slot (the
@@ -779,7 +782,7 @@ buildExports moduleMap =
 
     -- @req foo@ issues both a 'VariableId' (callable side: @foo(...)@) and a
     -- 'RequestId' (handler-target / request-set side).
-    registerRequest moduleName table name = do
+    registerRequest moduleName table name parameters = do
       let qualifiedName = qnameOf moduleName name
       variableId <-
         freshVariableId
@@ -793,7 +796,9 @@ buildExports moduleMap =
           RequestData
             { requestQualifiedName = qualifiedName,
               requestSourceSpan = name.sourceSpan,
-              requestVariableId = variableId
+              requestVariableId = variableId,
+              requestParameterAnnotations =
+                Map.fromList [(pb.label, pb.annotation) | pb <- parameters]
             }
       let entry =
             emptySymbolEntry

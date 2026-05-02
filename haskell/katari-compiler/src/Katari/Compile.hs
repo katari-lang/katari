@@ -2,7 +2,7 @@
 --
 -- Embedders (@katari-project@, @katari-lsp@, the playground, test
 -- harnesses) call 'compile' with an in-memory map of source texts and
--- receive an 'IRModule' + 'SchemaBundle' + a unified 'Diagnostic' stream.
+-- receive an 'IRModule' + @[SchemaEntry]@ + a unified 'Diagnostic' stream.
 -- This module performs **no** I\/O: all file system / @katari.toml@
 -- handling lives in @katari-project@.
 --
@@ -17,13 +17,13 @@
 --   → solve
 --   → zonk
 --   → lower            -- → IRModule (pure)
---   → buildSchemas     -- → SchemaBundle (independent of lower; reads ZonkResult)
+--   → buildSchemas     -- → [SchemaEntry] (independent of lower; reads ZonkResult)
 -- @
 --
 -- 'compile' never aborts on errors: each phase produces diagnostics that
 -- are merged into 'CompileResult.diagnostics'. If any error-severity
 -- diagnostic is present, downstream artefacts ('irModule',
--- 'schemaBundle') are returned as 'Nothing' to make the failure mode
+-- 'schemaEntries') are returned as 'Nothing' to make the failure mode
 -- explicit at the type level.
 module Katari.Compile
   ( -- * Inputs / outputs
@@ -59,7 +59,7 @@ import Katari.IR (IRModule)
 import Katari.Lowering (lowerProgram)
 import Katari.Lowering qualified as Lowering
 import Katari.Parser qualified as Parser
-import Katari.Schema (SchemaBundle, buildSchemas)
+import Katari.Schema (SchemaEntry, buildSchemas)
 import Katari.SourceSpan (HasSourceSpan (..), Position (..), SourceSpan (..))
 import Katari.Typechecker.ConstraintGenerator (ConstraintGenResult (..), generateConstraints)
 import Katari.Typechecker.ConstraintGenerator qualified as CG
@@ -96,9 +96,9 @@ data CompileResult = CompileResult
   { -- | The lowered IR. 'Nothing' if any error-severity diagnostic was
     -- raised before lowering succeeded.
     irModule :: !(Maybe IRModule),
-    -- | API-surface schema for AI tool calling and runtime validation.
+    -- | API-surface schema entries for AI tool calling and runtime validation.
     -- 'Nothing' under the same condition as 'irModule'.
-    schemaBundle :: !(Maybe SchemaBundle),
+    schemaEntries :: !(Maybe [SchemaEntry]),
     -- | Unified diagnostic stream, ordered roughly by phase
     -- (parse → identify → constrain → solve → zonk → lower).
     diagnostics :: ![Diagnostic],
@@ -158,7 +158,7 @@ compile input =
       allDiags = preLowerDiags <> loweringDiags
    in CompileResult
         { irModule = finalIR,
-          schemaBundle = schema,
+          schemaEntries = schema,
           diagnostics = allDiags,
           identifierResult = Just idResult,
           solverResult = Just solverResult_,

@@ -202,8 +202,7 @@ data ConstraintGenResult = ConstraintGenResult
     typeEnvironment :: TypeEnvironment,
     constraints :: Set Constraint,
     nextTypeVariableId :: Int,
-    nextRequestVariableId :: Int,
-    errors :: [ConstraintError]
+    nextRequestVariableId :: Int
   }
   deriving (Show)
 
@@ -240,7 +239,7 @@ data ConstraintContext = ConstraintContext
     -- | The type of the entire @block + where + then@ expression. @break e@
     -- inside a request handler flows into this variable (skipping the then
     -- clause).
-    contextEnclosingHandleResult :: Maybe TypeVariableId,
+    contextEnclosingHandleBreak :: Maybe TypeVariableId,
     -- | The "resume" type variable for the innermost enclosing request
     -- handler. @next e@ inside a handler body flows into this. There is at
     -- most one in scope: 'NextStatement' is a lexically-scoped construct and
@@ -279,7 +278,7 @@ initialContext types requests constructors =
       contextEnclosingReturn = Nothing,
       contextEnclosingRequests = Nothing,
       contextEnclosingForBreak = Nothing,
-      contextEnclosingHandleResult = Nothing,
+      contextEnclosingHandleBreak = Nothing,
       contextEnclosingHandleNext = Nothing
     }
 
@@ -379,7 +378,7 @@ withForLoop breakTv = local $ \c -> c {contextEnclosingForBreak = Just breakTv}
 -- "resume" type for the innermost handler (where 'next' flows).
 withHandleScope :: TypeVariableId -> TypeVariableId -> CG a -> CG a
 withHandleScope resultTv nextTv = local $ \c ->
-  c {contextEnclosingHandleResult = Just resultTv, contextEnclosingHandleNext = Just nextTv}
+  c {contextEnclosingHandleBreak = Just resultTv, contextEnclosingHandleNext = Just nextTv}
 
 -- | Set up "block-with-then" context modifications when walking the BODY of
 -- a block that has a @then@ clause. Each enclosing return / for-break /
@@ -402,13 +401,13 @@ withThenModifiedContexts patternType thenBodyType span_ action = do
   ctx <- ask
   ret' <- modifyOne ctx.contextEnclosingReturn
   forBr' <- modifyOne ctx.contextEnclosingForBreak
-  hndBr' <- modifyOne ctx.contextEnclosingHandleResult
+  hndBr' <- modifyOne ctx.contextEnclosingHandleBreak
   local
     ( \c ->
         c
           { contextEnclosingReturn = ret',
             contextEnclosingForBreak = forBr',
-            contextEnclosingHandleResult = hndBr'
+            contextEnclosingHandleBreak = hndBr'
           }
     )
     action
@@ -502,9 +501,16 @@ resolveTypeRef nameRef = case nameRef.resolution of
 -- | Elaborate a list of @with@-clause request references into a single
 -- request set (concrete VariableIds; request type variables come into play
 -- only for inference, not for explicit annotations).
-elaborateRequestList :: [SyntacticRequest Identified] -> CG (Set (SemanticRequest Unresolved))
-elaborateRequestList requests =
-  pure $ Set.fromList [requestFromVar vid | SyntacticRequest {name, sourceSpan} <- requests, Just vid <- [variableIdOfName name]]
+elaborateRequestList :: [SyntacticRequest Identified] -> CG (SemanticRequest Unresolved)
+elaborateRequestList requests = do
+  pure
+    ( SemanticRequest
+        ( Set.fromList
+            [ SemanticRequestElementConcrete requestId
+              | SyntacticRequest {name = NameRef {resolution = Just requestId}} <- requests
+            ]
+        )
+    )
 
 -- | Optional @with@ clause — present only on agent / req-handler type-context
 -- declarations. @Nothing@ means "no annotation"; the caller decides whether
@@ -583,7 +589,7 @@ processAgentLike sourceSpan name parameters returnType withRequests body = do
   tFoo <- variableTypeFromName name
   (parameters', paramSig) <- walkParameterListForSignature parameters
   retSemantic <- elaborateOrFresh returnType
-  effDeclared <- maybe (requestFromVar <$> freshRequestVariableId) pure =<< elaborateOptionalRequests withRequests
+  declaredRequest <- maybe (singletonRequestVariable <$> freshRequestVariableId) pure =<< elaborateOptionalRequests withRequests
   bodyRequestVariableId <- freshRequestVariableId
   retTvId <- freshReturnTypeVar retSemantic
   (body', bodyType) <-
@@ -591,10 +597,10 @@ processAgentLike sourceSpan name parameters returnType withRequests body = do
   addTypeConstraint bodyType (SemanticTypeVariable retTvId) (ConstraintReason ReasonKindImplicitReturn sourceSpan)
   addReturnAnnotationEq retTvId retSemantic sourceSpan
   addRequestConstraint
-    (requestFromVar bodyRequestVariableId)
-    effDeclared
+    (singletonRequestVariable bodyRequestVariableId)
+    declaredRequest
     (ConstraintReason ReasonKindRequestBound sourceSpan)
-  let signature = SemanticTypeFunction paramSig retSemantic effDeclared
+  let signature = SemanticTypeFunction paramSig retSemantic declaredRequest
   addEqTypeConstraint signature tFoo (ConstraintReason ReasonKindAgentSignature sourceSpan)
   pure (parameters', body')
 
@@ -619,7 +625,7 @@ walkRequestDecl RequestDeclaration {annotation, name, requestName, parameters, r
     RequestDeclaration
       { annotation = annotation,
         name = retagNameRef name,
-        requestName = retagnameRef requestName,
+        requestName = retagNameRef requestName,
         parameters = parameters',
         returnType = retagSyntacticType returnType,
         sourceSpan = sourceSpan
@@ -644,11 +650,11 @@ walkExternalAgentDecl ExternalAgentDeclaration {annotation, name, parameters, re
       }
 
 walkDataDecl :: DataDeclaration Identified -> CG (DataDeclaration Constrained)
-walkDataDecl DataDeclaration {annotation, name, typeName, parameters, sourceSpan} = do
+walkDataDecl DataDeclaration {annotation, name, typeName, constructorName, parameters, sourceSpan} = do
   tCtor <- variableTypeFromName name
   -- data の TypeId は AST が直接保持する。@Unresolved@ 側 (parse / identify
   -- エラー時) のみ @Nothing@ になり、@SemanticTypeUnknown@ にフォールバックする。
-  let tid = typeName.resolution Control.Applicative.<|> Nothing
+  let tid = typeName.resolution
   fields <- mapM elaborateDataParameter parameters
   let signature =
         SemanticTypeFunction
@@ -662,7 +668,7 @@ walkDataDecl DataDeclaration {annotation, name, typeName, parameters, sourceSpan
       { annotation = annotation,
         name = retagNameRef name,
         typeName = retagNameRef typeName,
-        constructorName = retagNameRef name,
+        constructorName = retagNameRef constructorName,
         parameters = parameters',
         sourceSpan = sourceSpan
       }
@@ -838,8 +844,8 @@ constrainedExpressionType = \case
 -- introduced: e3 for the body and e4 for handler bodies. The constraints
 --
 -- @
---   e3 \<: e1 ∪ e2     (ReasonKindHandleRequestDischarge)
---   e4 \<: e1          (ReasonKindHandlerRequestBound)
+--   e3 \<: enclosingRequestVariable ∪ e2     (ReasonKindHandleRequestDischarge)
+--   e4 \<: enclosingRequestVariable          (ReasonKindHandlerRequestBound)
 -- @
 --
 -- ensure body requests are either discharged by the handlers or propagated
@@ -866,7 +872,7 @@ walkBlock Block {statements, returnExpression, whereBlock, sourceSpan} = case wh
 -- | Walk a block-with-where (and possibly a @then@ clause). The orchestration
 -- mirrors the new semantics:
 --
---   1. Allocate @tWholeBlock@ (the whole expression's type) and request vars.
+--   1. Allocate @wholeBlockTypeVariable@ (the whole expression's type) and request vars.
 --   2. Walk state variables (their initializer constraints land here).
 --   3. Walk the @then@ clause first (if present): its body uses the OUTER
 --      contexts and request @e4@, so a @return@ inside @then@ targets the
@@ -880,7 +886,7 @@ walkBlock Block {statements, returnExpression, whereBlock, sourceSpan} = case wh
 --      (if present) or directly into the whole-block type.
 --   6. Walk handlers with OUTER contexts (NOT modified by then) +
 --      'withHandleScope' so that @break@ inside a handler body flows to
---      @tWholeBlock@ (bypassing the where's own @then@).
+--      @wholeBlockTypeVariable@ (bypassing the where's own @then@).
 --   7. Emit the request-discharge / handler-request constraints.
 walkBlockWithWhere ::
   [Statement Identified] ->
@@ -890,11 +896,11 @@ walkBlockWithWhere ::
   CG (Block Constrained, SemanticType Unresolved)
 walkBlockWithWhere statements returnExpression wb blockSpan = do
   let WhereBlock {stateVariables, handlers, thenClause, sourceSpan = wbSpan} = wb
-  e1 <- asks (.contextEnclosingRequests)
-  e3Id <- freshRequestVariableId
-  e4Id <- freshRequestVariableId
-  tWholeBlockId <- freshTypeVariableId
-  let tWholeBlock = SemanticTypeVariable tWholeBlockId
+  enclosingRequestVariable <- asks (.contextEnclosingRequests)
+  targetBodyRequestVariable <- freshRequestVariableId
+  handlerBodyRequestVariable <- freshRequestVariableId
+  wholeBlockId <- freshTypeVariableId
+  let wholeBlockTypeVariable = SemanticTypeVariable wholeBlockId
 
   -- (1) State variables: their initializer constraints are emitted in the
   -- where's own scope frame (already enforced by Identifier).
@@ -914,12 +920,12 @@ walkBlockWithWhere statements returnExpression wb blockSpan = do
           t <- freshTypeVar
           pure (Nothing, t)
       (thenBody', thenBodyType) <-
-        withEnclosingRequests e4Id (walkBlock thenBody)
-      addTypeConstraint thenBodyType tWholeBlock (ConstraintReason ReasonKindThenBodyToWhole wbSpan)
+        withEnclosingRequests handlerBodyRequestVariable (walkBlock thenBody)
+      addTypeConstraint thenBodyType wholeBlockTypeVariable (ConstraintReason ReasonKindThenBodyToWhole wbSpan)
       pure (Just (pattern', thenBody'), Just patternType, Just thenBodyType)
 
   -- (3) Body walk: under e3 request, with contexts modified by then if any.
-  let runBody = withEnclosingRequests e3Id (walkBlockBody statements returnExpression)
+  let runBody = withEnclosingRequests targetBodyRequestVariable (walkBlockBody statements returnExpression)
   (statements', returnExpression') <- case (maybePatternType, maybeThenBodyType) of
     (Just patTy, Just thenTy) ->
       withThenModifiedContexts patTy thenTy wbSpan runBody
@@ -930,29 +936,28 @@ walkBlockWithWhere statements returnExpression wb blockSpan = do
   --     directly into the whole-block type.
   case maybePatternType of
     Just patTy -> addTypeConstraint bodyTy patTy (ConstraintReason ReasonKindThenPattern blockSpan)
-    Nothing -> addTypeConstraint bodyTy tWholeBlock (ConstraintReason ReasonKindHandleResultBody blockSpan)
+    Nothing -> addTypeConstraint bodyTy wholeBlockTypeVariable (ConstraintReason ReasonKindHandleResultBody blockSpan)
 
   -- (5) Handlers: OUTER contexts (not modified by then), e4 request, plus
-  --     withHandleScope so 'break' inside a handler body targets tWholeBlock.
-  handlers' <- mapM (walkRequestHandler e4Id tWholeBlockId) handlers
+  --     withHandleScope so 'break' inside a handler body targets wholeBlockTypeVariable.
+  handlers' <- mapM (walkRequestHandler handlerBodyRequestVariable wholeBlockId) handlers
 
-  -- (6) Request constraints: e3 ⊆ e1 ∪ {handled requests}, e4 ⊆ e1.
+  -- (6) Request constraints: e3 ⊆ enclosingRequestVariable ∪ {handled requests}, e4 ⊆ enclosingRequestVariable.
   -- Each handler's @name@ is a RequestRef' resolved to a 'RequestId'.
   let handledRequestIds =
         Set.fromList
-          [ rid
-            | RequestHandler {name} <- handlers,
-              Just rid <- [name.resolution]
+          [ SemanticRequestElementConcrete requestId
+            | RequestHandler {name = NameRef {resolution = Just requestId}} <- handlers
           ]
-  let e1Eff = maybe emptyRequest requestFromVar e1
-      e2Eff = Set.map RequestVariableId handledRequestIds
+  let enclosingRequest = maybe emptyRequest singletonRequestVariable enclosingRequestVariable
+      hadnledRequest = SemanticRequest handledRequestIds
   addRequestConstraint
-    (requestFromVar e3Id)
-    (unionRequests e1Eff e2Eff)
+    (singletonRequestVariable targetBodyRequestVariable)
+    (unionRequests enclosingRequest hadnledRequest)
     (ConstraintReason ReasonKindHandleRequestDischarge wbSpan)
   addRequestConstraint
-    (requestFromVar e4Id)
-    e1Eff
+    (singletonRequestVariable handlerBodyRequestVariable)
+    enclosingRequest
     (ConstraintReason ReasonKindHandlerRequestBound wbSpan)
 
   pure
@@ -969,7 +974,7 @@ walkBlockWithWhere statements returnExpression wb blockSpan = do
                 },
           sourceSpan = blockSpan
         },
-      tWholeBlock
+      wholeBlockTypeVariable
     )
 
 -- | A block's overall type. If any statement is a global-exit
@@ -977,6 +982,11 @@ walkBlockWithWhere statements returnExpression wb blockSpan = do
 -- reaches the tail expression, so the block's type is 'SemanticTypeNever'.
 -- Otherwise, the type is the tail expression's type, or 'SemanticTypeNull'
 -- when there is no tail expression.
+--
+-- Note: @statements@ is the /pre-walk/ @Identified@ list. This is intentional
+-- — 'isExitStatement' only inspects the constructor tag and is phase-agnostic,
+-- so the walked @Constrained@ list would give the same result. Passing the
+-- original avoids threading @statements'@ through every caller.
 blockTailType ::
   [Statement Identified] ->
   Maybe (Expression Constrained) ->
@@ -1043,7 +1053,7 @@ walkRequestHandler ::
   TypeVariableId ->
   RequestHandler Identified ->
   CG (RequestHandler Constrained)
-walkRequestHandler e4Id tWholeBlockId RequestHandler {moduleQualifier, name, parameters, returnType, body, sourceSpan} = do
+walkRequestHandler handlerBodyRequestVariable wholeBlockId RequestHandler {moduleQualifier, name, parameters, returnType, body, sourceSpan} = do
   tHandled <- requestTypeFromName name
   (parameters', paramSig) <- walkParameterListForSignature parameters
   retSemantic <- elaborateOrFresh returnType
@@ -1054,7 +1064,7 @@ walkRequestHandler e4Id tWholeBlockId RequestHandler {moduleQualifier, name, par
   -- Handler body walks under e4 (the dedicated handler-request var) and the
   -- handle scope. 'next e' resumes the original request call, so 'e' is
   -- constrained against retTvId (= the next-tv); 'break e' targets
-  -- tWholeBlock (handle-scope result). 'return' inside a handler body
+  -- wholeBlockTypeVariable (handle-scope result). 'return' inside a handler body
   -- targets the enclosing scope (typically the outer agent's return), not
   -- the handler — we do not override 'withReturn' here.
   --
@@ -1064,8 +1074,8 @@ walkRequestHandler e4Id tWholeBlockId RequestHandler {moduleQualifier, name, par
   -- the where's own @then@ clause. The declared @return@ type only
   -- constrains explicit @next@ statements.
   (body', bodyTy) <-
-    withEnclosingRequests e4Id . withHandleScope tWholeBlockId retTvId $ walkBlock body
-  addTypeConstraint bodyTy (SemanticTypeVariable tWholeBlockId) (ConstraintReason ReasonKindHandleImplicitBreak sourceSpan)
+    withEnclosingRequests handlerBodyRequestVariable . withHandleScope wholeBlockId retTvId $ walkBlock body
+  addTypeConstraint bodyTy (SemanticTypeVariable wholeBlockId) (ConstraintReason ReasonKindHandleImplicitBreak sourceSpan)
   addReturnAnnotationEq retTvId retSemantic sourceSpan
   let handlerSignature =
         SemanticTypeFunction
@@ -1128,7 +1138,7 @@ walkReturn ReturnStatement {value, sourceSpan} = do
   retContext <- asks (.contextEnclosingReturn)
   case retContext of
     Just rt -> addTypeConstraint valueType (SemanticTypeVariable rt) (ConstraintReason ReasonKindReturnStatement sourceSpan)
-    Nothing -> pure ()
+    Nothing -> pure () -- not inside an agent; parser/identifier already errored
   pure ReturnStatement {value = value', sourceSpan = sourceSpan}
 
 walkNext :: NextStatement Identified -> CG (NextStatement Constrained)
@@ -1147,10 +1157,10 @@ walkBreak :: BreakStatement Identified -> CG (BreakStatement Constrained)
 walkBreak BreakStatement {value, sourceSpan} = do
   value' <- walkExpression value
   let valueType = constrainedExpressionType value'
-  resultContext <- asks (.contextEnclosingHandleResult)
+  resultContext <- asks (.contextEnclosingHandleBreak)
   case resultContext of
     Just rt -> addTypeConstraint valueType (SemanticTypeVariable rt) (ConstraintReason ReasonKindHandleBreak sourceSpan)
-    Nothing -> pure ()
+    Nothing -> pure () -- not inside a where block; parser/identifier already errored
   pure BreakStatement {value = value', sourceSpan = sourceSpan}
 
 walkForNext :: ForNextStatement Identified -> CG (ForNextStatement Constrained)
@@ -1167,7 +1177,7 @@ walkForBreak ForBreakStatement {value, sourceSpan} = do
   breakContext <- asks (.contextEnclosingForBreak)
   case breakContext of
     Just bv -> addTypeConstraint valueType (SemanticTypeVariable bv) (ConstraintReason ReasonKindForBreak sourceSpan)
-    Nothing -> pure ()
+    Nothing -> pure () -- not inside a for loop; parser/identifier already errored
   pure ForBreakStatement {value = value', sourceSpan = sourceSpan}
 
 walkModifier :: Modifier Identified -> CG (Modifier Constrained)
@@ -1270,7 +1280,7 @@ walkCallExpr CallExpression {callee, arguments, sourceSpan} = do
           ]
   tResult <- freshTypeVar
   enclosing <- asks (.contextEnclosingRequests)
-  let calleeEff = maybe emptyRequest requestFromVar enclosing
+  let calleeEff = maybe emptyRequest singletonRequestVariable enclosing
       expected = SemanticTypeFunction argSig tResult calleeEff
   addTypeConstraint calleeType expected (ConstraintReason ReasonKindCallArgument sourceSpan)
   pure
@@ -1318,10 +1328,10 @@ binaryOperatorConstraints ::
   SourceSpan ->
   CG (SemanticType Unresolved)
 binaryOperatorConstraints operator lhs rhs sourceSpan = case operator of
-  BinaryOperatorAdd -> arithmetic
-  BinaryOperatorSubtract -> arithmetic
-  BinaryOperatorMultiply -> arithmetic
-  BinaryOperatorDivide -> arithmetic
+  BinaryOperatorAdd -> addSubMul
+  BinaryOperatorSubtract -> addSubMul
+  BinaryOperatorMultiply -> addSubMul
+  BinaryOperatorDivide -> divide
   BinaryOperatorEqual -> noConstraintBoolean
   BinaryOperatorNotEqual -> noConstraintBoolean
   BinaryOperatorLessThan -> compareNumeric
@@ -1332,11 +1342,27 @@ binaryOperatorConstraints operator lhs rhs sourceSpan = case operator of
   BinaryOperatorOr -> logical
   BinaryOperatorConcat -> concatString
   where
-    arithmetic = do
+    -- +, -, * : both operands must be numeric; result is at least the union
+    -- of the operand types floored at Integer.  No upper bound is imposed —
+    -- the call-site context will constrain further if needed.
+    --   integer + integer  →  tv = integer
+    --   number  + integer  →  tv = number
+    --   number  + number   →  tv = number
+    addSubMul = do
       resultType <- freshTypeVar
+      addTypeConstraint lhs SemanticTypeNumber (ConstraintReason ReasonKindBinaryOperator sourceSpan)
+      addTypeConstraint rhs SemanticTypeNumber (ConstraintReason ReasonKindBinaryOperator sourceSpan)
       addTypeConstraint lhs resultType (ConstraintReason ReasonKindBinaryOperator sourceSpan)
       addTypeConstraint rhs resultType (ConstraintReason ReasonKindBinaryOperator sourceSpan)
-      addTypeConstraint resultType SemanticTypeNumber (ConstraintReason ReasonKindBinaryOperator sourceSpan)
+      addTypeConstraint SemanticTypeInteger resultType (ConstraintReason ReasonKindBinaryOperator sourceSpan)
+      pure resultType
+    -- / : result is always at least Number because division can produce
+    -- non-integer values (e.g. 1 / 3 = 0.333…).
+    divide = do
+      resultType <- freshTypeVar
+      addTypeConstraint lhs SemanticTypeNumber (ConstraintReason ReasonKindBinaryOperator sourceSpan)
+      addTypeConstraint rhs SemanticTypeNumber (ConstraintReason ReasonKindBinaryOperator sourceSpan)
+      addTypeConstraint SemanticTypeNumber resultType (ConstraintReason ReasonKindBinaryOperator sourceSpan)
       pure resultType
     noConstraintBoolean = pure SemanticTypeBoolean
     compareNumeric = do
@@ -1449,7 +1475,7 @@ walkForExpr ForExpression {inBindings, varBindings, body, thenBlock, sourceSpan}
       pure (Just b', ty)
     Nothing -> pure (Nothing, SemanticTypeNull)
   let resultType =
-        SemanticTypeUnion [thenType, SemanticTypeVariable tForBreakId]
+        unionSemantic [thenType, SemanticTypeVariable tForBreakId]
   pure
     ( ExpressionFor
         ForExpression
@@ -1635,17 +1661,18 @@ freshReturnTypeVar = \case
 -- multiple modules). All variables across all modules are allocated a type
 -- variable in Phase A, then declarations are walked in Phase B to emit
 -- constraints and produce the @Constrained@-phase ASTs.
-generateConstraints :: IdentifierResult -> ConstraintGenResult
+generateConstraints :: IdentifierResult -> (ConstraintGenResult, [ConstraintError])
 generateConstraints result = case runState (runReaderT action ctx) initialState of
   (modulesPair, finalState) ->
-    ConstraintGenResult
-      { constrainedModules = Map.fromList modulesPair,
-        typeEnvironment = finalState.stateTypeEnvironment,
-        constraints = finalState.stateConstraints,
-        nextTypeVariableId = finalState.stateNextTypeVariableId,
-        nextRequestVariableId = finalState.stateNextRequestVariableId,
-        errors = reverse finalState.stateErrors
-      }
+    ( ConstraintGenResult
+        { constrainedModules = Map.fromList modulesPair,
+          typeEnvironment = finalState.stateTypeEnvironment,
+          constraints = finalState.stateConstraints,
+          nextTypeVariableId = finalState.stateNextTypeVariableId,
+          nextRequestVariableId = finalState.stateNextRequestVariableId
+        },
+      finalState.stateErrors
+    )
   where
     ctx = initialContext result.identifiedTypes result.identifiedRequests result.identifiedConstructors
     action = do

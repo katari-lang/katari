@@ -29,7 +29,7 @@ import Katari.Typechecker.ConstraintGenerator
   )
 import Katari.Typechecker.NormalizedType
   ( normaliseSemantic,
-    subtypeNT,
+    subtypeNormalizedType,
   )
 import Katari.Typechecker.Solver.Internal
   ( SolverError (..),
@@ -78,7 +78,7 @@ decomposeType original leftType rightType reason = case (leftType, rightType) of
   _
     | Just leftConcrete <- semanticToConcrete leftType,
       Just rightConcrete <- semanticToConcrete rightType ->
-        if subtypeNT (normaliseSemantic leftConcrete) (normaliseSemantic rightConcrete)
+        if subtypeNormalizedType (normaliseSemantic leftConcrete) (normaliseSemantic rightConcrete)
           then settled
           else Left (SolverErrorContradiction reason leftConcrete rightConcrete)
   -- Structural decomposition.

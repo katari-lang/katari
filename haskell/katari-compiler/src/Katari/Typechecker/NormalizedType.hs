@@ -47,7 +47,7 @@ module Katari.Typechecker.NormalizedType
     -- * Lattice operations
     unionNT,
     intersectNT,
-    subtypeNT,
+    subtypeNormalizedType,
   )
 where
 
@@ -56,7 +56,7 @@ import Data.Map.Strict qualified as Map
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
-import Katari.SemanticType (Resolved, SemanticRequest (..), SemanticType (..))
+import Katari.SemanticType (Resolved, SemanticRequest (..), SemanticRequestElement (..), SemanticType (..))
 import Katari.Typechecker.Identifier (RequestId, TypeId)
 
 -- ---------------------------------------------------------------------------
@@ -264,7 +264,7 @@ functionBranches = \case
       SemanticTypeFunction
         (Map.map denormalise parameters)
         (denormalise returnType)
-        (SemanticRequest Set.empty requests)
+        (SemanticRequest $ Set.map SemanticRequestElementConcrete requests)
 
 arrayBranches :: ArraySlot -> [SemanticType Resolved]
 arrayBranches = \case
@@ -376,13 +376,16 @@ normaliseSemantic = \case
       emptyLayered
         { objectLayer = ObjectSlotOf (Map.map normaliseSemantic fields)
         }
-  SemanticTypeFunction parameterTypes returnType requests ->
+  SemanticTypeFunction parameterTypes returnType (SemanticRequest requests) ->
     let shape =
           FunctionShape
             { parameters = Map.map normaliseSemantic parameterTypes,
               returnType = normaliseSemantic returnType,
-              requests = requests.requestReqs
-              -- requestVars must be empty in Resolved phase by Zonker invariant.
+              requests =
+                Set.map
+                  ( \(SemanticRequestElementConcrete requestId) -> requestId
+                  )
+                  requests
             }
      in NormalizedTypeLayered emptyLayered {functionLayer = FunctionSlotOf shape}
   SemanticTypeUnion branches ->
@@ -568,11 +571,11 @@ intersectObjectSlot leftSlot rightSlot = case (leftSlot, rightSlot) of
 -- Subtype check
 -- ---------------------------------------------------------------------------
 
--- | @subtypeNT leftType rightType@ holds when every value of @leftType@ is
+-- | @subtypeNormalizedType leftType rightType@ holds when every value of @leftType@ is
 -- also a value of @rightType@. Implemented as a per-layer check: each layer
 -- slot of the left must be a subtype of the corresponding slot of the right.
-subtypeNT :: NormalizedType -> NormalizedType -> Bool
-subtypeNT leftType rightType = case (leftType, rightType) of
+subtypeNormalizedType :: NormalizedType -> NormalizedType -> Bool
+subtypeNormalizedType leftType rightType = case (leftType, rightType) of
   (_, NormalizedTypeUnknown) -> True
   (NormalizedTypeUnknown, _) -> False
   (NormalizedTypeLayered leftLayered, NormalizedTypeLayered rightLayered) ->
@@ -614,7 +617,7 @@ subtypeArraySlot leftSlot rightSlot = case (leftSlot, rightSlot) of
   (ArraySlotAbsent, _) -> True
   (_, ArraySlotAbsent) -> False
   (ArraySlotOf leftElement, ArraySlotOf rightElement) ->
-    subtypeNT leftElement rightElement -- covariant
+    subtypeNormalizedType leftElement rightElement -- covariant
 
 subtypeFunctionLayer :: FunctionSlot -> FunctionSlot -> Bool
 subtypeFunctionLayer leftSlot rightSlot = case (leftSlot, rightSlot) of
@@ -639,11 +642,11 @@ subtypeFunctionShape :: FunctionShape -> FunctionShape -> Bool
 subtypeFunctionShape leftShape rightShape =
   Map.keysSet leftShape.parameters `Set.isSubsetOf` Map.keysSet rightShape.parameters
     && all checkParameter (Map.toList leftShape.parameters)
-    && subtypeNT leftShape.returnType rightShape.returnType
+    && subtypeNormalizedType leftShape.returnType rightShape.returnType
     && Set.isSubsetOf leftShape.requests rightShape.requests
   where
     checkParameter (label, leftType) = case Map.lookup label rightShape.parameters of
-      Just rightType -> subtypeNT rightType leftType -- contravariant
+      Just rightType -> subtypeNormalizedType rightType leftType -- contravariant
       Nothing -> True -- guarded by keysSet subset above
 
 subtypeTupleLayer ::
@@ -655,7 +658,7 @@ subtypeTupleLayer leftShapes rightShapes = all checkArity (Map.toList leftShapes
     checkArity (arity, leftElements) = case Map.lookup arity rightShapes of
       Just rightElements ->
         length leftElements == length rightElements
-          && and (zipWith subtypeNT leftElements rightElements)
+          && and (zipWith subtypeNormalizedType leftElements rightElements)
       Nothing -> False
 
 subtypeObjectSlot :: ObjectSlot -> ObjectSlot -> Bool
@@ -669,5 +672,5 @@ subtypeObjectSlot leftSlot rightSlot = case (leftSlot, rightSlot) of
   where
     checkField leftFields (fieldName, rightFieldType) =
       case Map.lookup fieldName leftFields of
-        Just leftFieldType -> subtypeNT leftFieldType rightFieldType
+        Just leftFieldType -> subtypeNormalizedType leftFieldType rightFieldType
         Nothing -> False

@@ -1,59 +1,47 @@
 -- | JSON Schema generation for the public API surface (agents, requests,
--- external agents, and data types).
+-- external agents, and data constructors).
 --
--- Schema は AI tool calling と runtime validation の両方を駆動する。各
--- agent / request / external-agent につき @input@ / @output@ schema を
--- 生成し、@data@ 宣言は @\$defs@ に置く。Description は AST の
--- @\@\"...\"@ annotation から拾う ([Katari.AST.AgentDeclaration] 等の
--- @annotation@ field)。
+-- 出力は flat な '[SchemaEntry]' 配列 — top-level callable につき 1 エントリ。
+-- @input@ / @output@ フィールドは valid JSON Schema Draft 2020-12 (subset) を
+-- 直接保持する。@data@ 宣言の型参照 ('SemanticTypeData') は 'DataDefs' を使って
+-- inline 展開する (@$defs@ / @$ref@ なし)。
+-- Description テキストは AST の @\@\"...\"@ annotation から拾う。
 --
--- 入力は 'ZonkResult' のみ ('IRModule' は不要): 型情報は
--- @zonkedTypeEnvironment@、annotation は @zonkedModules@ の AST 上に乗って
--- いるため、両者を AST walk で zip する。
---
--- ## Schema 表現
---
--- 'JsonSchema' は JSON Schema Draft 2020-12 のサブセットを構造的に表す。
--- @description@ / @title@ / @examples@ は任意の位置に乗せられる。
--- 'SchemaCoreRef' は @\$ref@ 形式で @data@ 宣言を参照する (\@\"#/$defs/<name>\"\)。
---
--- ## 制限
---
---   * 関数引数 / 戻り値の関数型 ('SemanticTypeFunction') は JSON で
---     serialize 不可なので 'SchemaCoreUnknown' にフォールバックする。
---   * Generic は無いので @data@ 宣言の参照は単純な名前だけ。
+-- 入力は 'ZonkResult' のみ ('IRModule' は不要)。
 module Katari.Schema
-  ( -- * Schema types
+  ( -- * Output types
+    SchemaEntry (..),
+    RequestSchemaRef (..),
     JsonSchema (..),
     SchemaCore (..),
-    AgentSchema (..),
-    SchemaBundle (..),
 
-    -- * Conversion
+    -- * Internal helpers (exposed for testing)
+    DataDefs,
+    buildDataDefs,
     toJsonSchema,
 
     -- * Top-level builder
     buildSchemas,
-    emptySchemaBundle,
   )
 where
 
+import Control.Monad (join)
 import Data.Aeson
-  ( FromJSON (..),
-    Options (..),
-    SumEncoding (..),
+  ( Options (..),
     ToJSON (..),
     Value (..),
     defaultOptions,
-    genericParseJSON,
     genericToJSON,
+    object,
+    (.=),
   )
+import Data.Aeson.KeyMap qualified as KeyMap
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
+import Data.Maybe (catMaybes, mapMaybe)
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
-import Data.Text qualified as Text
 import GHC.Generics (Generic)
 import Katari.AST
   ( AgentDeclaration (..),
@@ -68,21 +56,63 @@ import Katari.AST
     Phase (Zonked),
     RequestDeclaration (..),
   )
-import Katari.Id (ModuleId, VariableId, renderQualifiedName)
-import Katari.Internal (internalErrorNoSpan)
+import Katari.Id
+  ( ModuleId,
+    RequestId,
+    TypeId,
+    renderQualifiedName,
+  )
 import Katari.SemanticType
   ( Resolved,
     SemanticRequest (..),
+    SemanticRequestElement (..),
     SemanticType (..),
   )
-import Katari.Typechecker.Identifier (RequestData (..))
+import Katari.Typechecker.Identifier
+  ( ConstructorData (..),
+    RequestData (..),
+    VariableData (..),
+  )
 import Katari.Typechecker.Zonker (ZonkResult (..))
 
 -- ===========================================================================
--- Schema data types
+-- Output types
+-- ===========================================================================
+
+-- | Schema for one top-level callable (agent / request / external-agent /
+-- data constructor). @input@ is always an object schema whose properties are
+-- the named parameters. @output@ is the return-type schema, inline-expanded.
+-- @requests@ lists the request schemas this callable may raise.
+data SchemaEntry = SchemaEntry
+  { name :: !Text,
+    description :: !(Maybe Text),
+    input :: !JsonSchema,
+    output :: !JsonSchema,
+    requests :: ![RequestSchemaRef]
+  }
+  deriving (Eq, Show, Generic)
+
+instance ToJSON SchemaEntry where
+  toJSON = genericToJSON schemaOptions
+
+-- | Schema for a single request type that an agent may raise.
+data RequestSchemaRef = RequestSchemaRef
+  { name :: !Text,
+    input :: !JsonSchema,
+    output :: !JsonSchema
+  }
+  deriving (Eq, Show, Generic)
+
+instance ToJSON RequestSchemaRef where
+  toJSON = genericToJSON schemaOptions
+
+-- ===========================================================================
+-- JsonSchema types
 -- ===========================================================================
 
 -- | A JSON Schema fragment with optional description / title / examples.
+-- Serialises as a flat JSON object: 'core' keywords are merged with the
+-- metadata fields at the top level (no nesting).
 data JsonSchema = JsonSchema
   { core :: !SchemaCore,
     title :: !(Maybe Text),
@@ -91,14 +121,24 @@ data JsonSchema = JsonSchema
   }
   deriving (Eq, Show, Generic)
 
+-- | Merge 'core' fields with metadata fields into a flat JSON object.
 instance ToJSON JsonSchema where
-  toJSON = genericToJSON schemaOptions
+  toJSON JsonSchema {core, title, description, examples} =
+    case toJSON core of
+      Object coreMap ->
+        let extras =
+              KeyMap.fromList $
+                catMaybes
+                  [ ("title",) . toJSON <$> title,
+                    ("description",) . toJSON <$> description
+                  ]
+                  ++ [("examples", toJSON examples) | not (null examples)]
+         in Object (coreMap <> extras)
+      -- SchemaCore always serialises to Object; this branch is unreachable.
+      other -> other
 
-instance FromJSON JsonSchema where
-  parseJSON = genericParseJSON schemaOptions
-
--- | The structural part of a 'JsonSchema'. Mirrors JSON Schema Draft
--- 2020-12 keywords.
+-- | The structural part of a 'JsonSchema'. Serialises to valid JSON Schema
+-- Draft 2020-12 keywords (e.g. @{"type":"integer"}@, @{"anyOf":[...]}@).
 data SchemaCore where
   SchemaCoreNull :: SchemaCore
   SchemaCoreBoolean :: SchemaCore
@@ -119,77 +159,40 @@ data SchemaCore where
     } ->
     SchemaCore
   SchemaCoreUnion :: {anyOf :: ![JsonSchema]} -> SchemaCore
-  SchemaCoreRef :: {ref :: !Text} -> SchemaCore
   SchemaCoreUnknown :: SchemaCore
   SchemaCoreNever :: SchemaCore
   deriving (Eq, Show, Generic)
 
 instance ToJSON SchemaCore where
-  toJSON = genericToJSON schemaCoreOptions
-
-instance FromJSON SchemaCore where
-  parseJSON = genericParseJSON schemaCoreOptions
-
--- | Schema for one agent / request / external-agent. Describes its input
--- (object), its output, and the request requests it may raise.
-data AgentSchema = AgentSchema
-  { -- | The @\@\"...\"@ annotation on the declaration, if any.
-    description :: !(Maybe Text),
-    -- | Always an 'SchemaCoreObject' whose @properties@ are the named parameters.
-    input :: !JsonSchema,
-    output :: !JsonSchema,
-    -- | Internal request VariableIds this agent may raise. Rendered as
-    -- @\"req\<n\>\"@: tooling that needs human names should consult the
-    -- corresponding 'IRModule' name table.
-    requests :: ![Text]
-  }
-  deriving (Eq, Show, Generic)
-
-instance ToJSON AgentSchema where
-  toJSON = genericToJSON schemaOptions
-
-instance FromJSON AgentSchema where
-  parseJSON = genericParseJSON schemaOptions
-
--- | Aggregated schemas for a compiled program. All maps are flat at
--- the top level: keys are dotted qualified names (\"<modPath>.<bare>\")
--- so consumers (AI tool calling, runtime validators, FFI sidecars) can
--- look up a callable by its public name without re-threading module
--- structure.
---
--- @dataSchemas@ describes data constructors as callables (so
--- @Pair(left=1, right=2)@ has a JSON-Schema input shape just like an
--- agent does). @dataDefs@ holds the corresponding @\$defs@ entry —
--- the data type as a JSON object schema — that other schemas reference
--- via @SchemaCoreRef \"#/$defs/<qualified>\"@.
-data SchemaBundle = SchemaBundle
-  { agentSchemas :: !(Map Text AgentSchema),
-    requestSchemas :: !(Map Text AgentSchema),
-    externalSchemas :: !(Map Text AgentSchema),
-    -- | Data constructor invocation schemas (constructor as a function).
-    dataSchemas :: !(Map Text AgentSchema),
-    -- | Data type schemas (object shape for the constructed values),
-    -- intended as the @\$defs@ section of a top-level JSON Schema
-    -- document.
-    dataDefs :: !(Map Text JsonSchema)
-  }
-  deriving (Eq, Show, Generic)
-
-instance ToJSON SchemaBundle where
-  toJSON = genericToJSON schemaOptions
-
-instance FromJSON SchemaBundle where
-  parseJSON = genericParseJSON schemaOptions
-
-emptySchemaBundle :: SchemaBundle
-emptySchemaBundle =
-  SchemaBundle
-    { agentSchemas = Map.empty,
-      requestSchemas = Map.empty,
-      externalSchemas = Map.empty,
-      dataSchemas = Map.empty,
-      dataDefs = Map.empty
-    }
+  toJSON = \case
+    SchemaCoreNull -> object ["type" .= ("null" :: Text)]
+    SchemaCoreBoolean -> object ["type" .= ("boolean" :: Text)]
+    SchemaCoreInteger {minimum = lowerBound, maximum = upperBound} ->
+      object $
+        ("type" .= ("integer" :: Text))
+          : catMaybes
+            [ ("minimum" .=) <$> lowerBound,
+              ("maximum" .=) <$> upperBound
+            ]
+    SchemaCoreNumber -> object ["type" .= ("number" :: Text)]
+    SchemaCoreString {schemaEnum = []} -> object ["type" .= ("string" :: Text)]
+    SchemaCoreString {schemaEnum = xs} ->
+      object ["type" .= ("string" :: Text), "enum" .= xs]
+    SchemaCoreConst {value} -> object ["const" .= value]
+    SchemaCoreArray {items} ->
+      object ["type" .= ("array" :: Text), "items" .= items]
+    SchemaCoreTuple {prefixItems} ->
+      object ["type" .= ("array" :: Text), "prefixItems" .= prefixItems]
+    SchemaCoreObject {properties, required, additionalProperties} ->
+      object
+        [ "type" .= ("object" :: Text),
+          "properties" .= properties,
+          "required" .= Set.toAscList required,
+          "additionalProperties" .= additionalProperties
+        ]
+    SchemaCoreUnion {anyOf} -> object ["anyOf" .= anyOf]
+    SchemaCoreUnknown -> Object KeyMap.empty
+    SchemaCoreNever -> object ["not" .= Object KeyMap.empty]
 
 -- ===========================================================================
 -- Aeson option helpers
@@ -202,45 +205,52 @@ schemaOptions =
       omitNothingFields = True
     }
 
--- | TaggedObject sum encoding for 'SchemaCore'. Each variant's JSON tag is
--- the constructor name verbatim, e.g. @"SchemaCoreNull"@, @"SchemaCoreObject"@.
-schemaCoreOptions :: Options
-schemaCoreOptions =
-  defaultOptions
-    { sumEncoding = TaggedObject "kind" "contents",
-      fieldLabelModifier = id,
-      omitNothingFields = True
-    }
-
 -- ===========================================================================
--- Plain schema (no annotation)
+-- Plain schema helpers
 -- ===========================================================================
 
 -- | Wrap a 'SchemaCore' in a 'JsonSchema' with no extra metadata.
 plain :: SchemaCore -> JsonSchema
-plain c =
-  JsonSchema
-    { core = c,
-      title = Nothing,
-      description = Nothing,
-      examples = []
-    }
+plain c = JsonSchema {core = c, title = Nothing, description = Nothing, examples = []}
 
+-- | Attach an optional description to a 'JsonSchema'.
 withDesc :: Maybe Text -> JsonSchema -> JsonSchema
-withDesc d s = JsonSchema {core = s.core, title = s.title, description = d, examples = s.examples}
+withDesc d JsonSchema {core, title, examples} =
+  JsonSchema {core, title, description = d, examples}
+
+-- ===========================================================================
+-- DataDefs: pre-built map for inline data-type expansion
+-- ===========================================================================
+
+-- | Maps each data type's 'TypeId' to its field-name → 'SemanticType' map.
+-- Built once from 'ZonkResult' and threaded through schema generation to
+-- enable inline expansion of 'SemanticTypeData' references without @$defs@.
+type DataDefs = Map TypeId (Map Text (SemanticType Resolved))
+
+-- | Build 'DataDefs' from the Zonked output. Each @data@ declaration
+-- contributes one entry: its 'TypeId' maps to the field types taken from
+-- the constructor function's signature in 'zonkedTypeEnvironment'.
+buildDataDefs :: ZonkResult -> DataDefs
+buildDataDefs zonkResult =
+  Map.fromList
+    [ (cd.constructorTypeId, fieldTypes)
+      | (_, cd) <- Map.toList zonkResult.zonkedConstructors,
+        Just (SemanticTypeFunction fieldTypes _ _) <-
+          [Map.lookup cd.constructorVariableId zonkResult.zonkedTypeEnvironment]
+    ]
 
 -- ===========================================================================
 -- SemanticType -> JsonSchema
 -- ===========================================================================
 
--- | Convert a 'SemanticType' 'Resolved' to a 'JsonSchema'. The metadata
--- (description / title / examples) is set by the caller; this function
--- only computes the structural 'core'.
-toJsonSchema :: SemanticType Resolved -> JsonSchema
-toJsonSchema = plain . toCore
+-- | Convert a 'SemanticType' 'Resolved' to a 'JsonSchema'. 'SemanticTypeData'
+-- references are inline-expanded using 'DataDefs'; 'visited' guards against
+-- circular references (passes 'SchemaCoreUnknown' on re-entry).
+toJsonSchema :: DataDefs -> Set TypeId -> SemanticType Resolved -> JsonSchema
+toJsonSchema dataDefs visited = plain . toCore dataDefs visited
 
-toCore :: SemanticType Resolved -> SchemaCore
-toCore = \case
+toCore :: DataDefs -> Set TypeId -> SemanticType Resolved -> SchemaCore
+toCore dataDefs visited = \case
   SemanticTypeNever -> SchemaCoreNever
   SemanticTypeUnknown -> SchemaCoreUnknown
   SemanticTypeNull -> SchemaCoreNull
@@ -251,17 +261,31 @@ toCore = \case
   SemanticTypeLiteralInteger n -> SchemaCoreConst {value = toJSON n}
   SemanticTypeLiteralString s -> SchemaCoreConst {value = toJSON s}
   SemanticTypeLiteralBoolean b -> SchemaCoreConst {value = toJSON b}
-  SemanticTypeArray element -> SchemaCoreArray {items = toJsonSchema element}
-  SemanticTypeTuple elements -> SchemaCoreTuple {prefixItems = map toJsonSchema elements}
+  SemanticTypeArray element ->
+    SchemaCoreArray {items = toJsonSchema dataDefs visited element}
+  SemanticTypeTuple elements ->
+    SchemaCoreTuple {prefixItems = map (toJsonSchema dataDefs visited) elements}
   SemanticTypeObject fields ->
     SchemaCoreObject
-      { properties = Map.map toJsonSchema fields,
+      { properties = Map.map (toJsonSchema dataDefs visited) fields,
         required = Map.keysSet fields,
         additionalProperties = False
       }
-  SemanticTypeUnion branches -> compactUnion (map toCore branches)
-  SemanticTypeData _ -> SchemaCoreUnknown
-  -- Functions can't be serialized to JSON; surface as "any".
+  SemanticTypeUnion branches ->
+    compactUnion (map (toCore dataDefs visited) branches)
+  SemanticTypeData typeId
+    | Set.member typeId visited ->
+        -- Circular reference: break the cycle with an open schema.
+        SchemaCoreUnknown
+    | Just fields <- Map.lookup typeId dataDefs ->
+        let visited' = Set.insert typeId visited
+         in SchemaCoreObject
+              { properties = Map.map (toJsonSchema dataDefs visited') fields,
+                required = Map.keysSet fields,
+                additionalProperties = False
+              }
+    | otherwise -> SchemaCoreUnknown
+  -- Functions cannot be serialised to JSON.
   SemanticTypeFunction {} -> SchemaCoreUnknown
 
 -- | Compact a union of string-literal types into a single string-enum
@@ -278,130 +302,95 @@ compactUnion cores =
 -- Top-level builder
 -- ===========================================================================
 
--- | Walk every module's declarations and build the schema bundle. Pulls
--- types from 'zonkedTypeEnvironment' and descriptions from each AST
--- declaration's @annotation@ field.
-buildSchemas :: ZonkResult -> SchemaBundle
+-- | Build schema entries for a compiled program. Walks every module's
+-- declarations and emits one 'SchemaEntry' per top-level callable.
+buildSchemas :: ZonkResult -> [SchemaEntry]
 buildSchemas zonkResult =
-  foldr
-    (mergeModuleBundle zonkResult)
-    emptySchemaBundle
-    (Map.toList zonkResult.zonkedModules)
+  let dataDefs = buildDataDefs zonkResult
+   in concatMap
+        (buildModuleEntries dataDefs zonkResult)
+        (Map.toList zonkResult.zonkedModules)
 
-mergeModuleBundle ::
+buildModuleEntries ::
+  DataDefs ->
   ZonkResult ->
   (ModuleId, Module Zonked) ->
-  SchemaBundle ->
-  SchemaBundle
-mergeModuleBundle zonkResult (_, m) acc =
-  foldr (collectDeclaration zonkResult m.moduleName) acc m.declarations
+  [SchemaEntry]
+buildModuleEntries dataDefs zonkResult (_, m) =
+  mapMaybe (buildDeclarationEntry dataDefs zonkResult) m.declarations
 
-collectDeclaration ::
+buildDeclarationEntry ::
+  DataDefs ->
   ZonkResult ->
-  Text ->
   Declaration Zonked ->
-  SchemaBundle ->
-  SchemaBundle
-collectDeclaration zonkResult modName decl bundle = case decl of
+  Maybe SchemaEntry
+buildDeclarationEntry dataDefs zonkResult = \case
   DeclarationAgent agentDecl ->
-    case agentLike zonkResult agentDecl.annotation agentDecl.name agentDecl.parameters of
-      Just s ->
-        bundle {agentSchemas = Map.insert (qkey modName agentDecl.name.text) s bundle.agentSchemas}
-      Nothing -> bundle
+    buildAgentLike
+      dataDefs
+      zonkResult
+      agentDecl.annotation
+      agentDecl.name
+      agentDecl.parameters
   DeclarationRequest requestDecl ->
-    case requestLike zonkResult requestDecl of
-      Just s ->
-        bundle {requestSchemas = Map.insert (qkey modName requestDecl.name.text) s bundle.requestSchemas}
-      Nothing -> bundle
+    buildAgentLike
+      dataDefs
+      zonkResult
+      requestDecl.annotation
+      requestDecl.name
+      requestDecl.parameters
   DeclarationExternalAgent externalDecl ->
-    case externalLike zonkResult externalDecl of
-      Just s ->
-        bundle {externalSchemas = Map.insert (qkey modName externalDecl.name.text) s bundle.externalSchemas}
-      Nothing -> bundle
+    buildAgentLike
+      dataDefs
+      zonkResult
+      externalDecl.annotation
+      externalDecl.name
+      externalDecl.parameters
   DeclarationData dataDecl ->
-    let bundleWithDef =
-          bundle {dataDefs = insertDataDef zonkResult modName dataDecl bundle.dataDefs}
-     in case dataConstructorSchema zonkResult modName dataDecl of
-          Just s ->
-            bundleWithDef
-              { dataSchemas =
-                  Map.insert
-                    (qkey modName dataDecl.name.text)
-                    s
-                    bundleWithDef.dataSchemas
-              }
-          Nothing -> bundleWithDef
-  -- Imports / type synonyms / parser sentinels don't surface in the schema.
-  DeclarationImport {} -> bundle
-  DeclarationTypeSynonym {} -> bundle
-  DeclarationError {} -> bundle
+    buildDataEntry dataDefs zonkResult dataDecl
+  DeclarationImport {} -> Nothing
+  DeclarationTypeSynonym {} -> Nothing
+  DeclarationError {} -> Nothing
 
--- | Join @\<modName\>.\<declName\>@ as the public schema-bundle key.
--- Empty module path falls back to the bare name (test fixtures may
--- have no path).
-qkey :: Text -> Text -> Text
-qkey modName declName
-  | Text.null modName = declName
-  | otherwise = modName <> "." <> declName
-
--- | Build an 'AgentSchema' from an agent's annotation, name, and parameter
--- bindings. The agent's full type is read from
--- 'zonkedTypeEnvironment'; its function shape gives us input properties /
--- output / requests.
-agentLike ::
+-- | Build a 'SchemaEntry' for an agent / request / external-agent.
+-- The qualified name is recovered from 'zonkedVariables'; the type from
+-- 'zonkedTypeEnvironment'. Returns 'Nothing' if either lookup fails (a
+-- Solver-contract violation that was already reported as a diagnostic).
+buildAgentLike ::
+  DataDefs ->
   ZonkResult ->
   Maybe Text ->
   NameRef Zonked VariableRef ->
   [ParameterBinding Zonked] ->
-  Maybe AgentSchema
-agentLike zonkResult description nameRef parameters =
-  case nameRef.resolution of
-    Just variableId ->
-      buildAgentSchema zonkResult description parameters
-        <$> Map.lookup variableId zonkResult.zonkedTypeEnvironment
-    Nothing -> Nothing
+  Maybe SchemaEntry
+buildAgentLike dataDefs zonkResult annotation nameRef parameters = do
+  variableId <- nameRef.resolution
+  variableData <- Map.lookup variableId zonkResult.zonkedVariables
+  qualifiedName <- variableData.variableQualifiedName
+  SemanticTypeFunction paramTypes returnType requestSet <-
+    Map.lookup variableId zonkResult.zonkedTypeEnvironment
+  let inputCore = paramObject dataDefs paramTypes parameters
+      requestRefs = buildRequestRefs dataDefs zonkResult requestSet
+  pure
+    SchemaEntry
+      { name = renderQualifiedName qualifiedName,
+        description = annotation,
+        input = plain inputCore,
+        output = toJsonSchema dataDefs Set.empty returnType,
+        requests = requestRefs
+      }
 
-requestLike :: ZonkResult -> RequestDeclaration Zonked -> Maybe AgentSchema
-requestLike zonkResult requestDecl = agentLike zonkResult requestDecl.annotation requestDecl.name requestDecl.parameters
-
-externalLike :: ZonkResult -> ExternalAgentDeclaration Zonked -> Maybe AgentSchema
-externalLike zonkResult externalDecl = agentLike zonkResult externalDecl.annotation externalDecl.name externalDecl.parameters
-
--- | Build an 'AgentSchema' from the resolved type. After Solver / Zonker
--- the type of an agent / request / external-agent declaration is
--- guaranteed to be a 'SemanticTypeFunction'; any other shape indicates a
--- constraint-generation bug and is reported as an internal error so the
--- problem surfaces immediately instead of silently dropping bundle entries.
-buildAgentSchema ::
-  ZonkResult ->
-  Maybe Text ->
-  [ParameterBinding Zonked] ->
-  SemanticType Resolved ->
-  AgentSchema
-buildAgentSchema zonkResult description parameters = \case
-  SemanticTypeFunction paramTypes returnType requestSet ->
-    let inputSchema = withDesc description (plain (paramObject paramTypes parameters))
-     in AgentSchema
-          { description = description,
-            input = inputSchema,
-            output = toJsonSchema returnType,
-            requests = renderRequests zonkResult requestSet
-          }
-  other ->
-    internalErrorNoSpan
-      ( "Schema.buildAgentSchema: agent / request / external declaration's "
-          <> "resolved type is not a function: "
-          <> Text.pack (show other)
-      )
-
+-- | Build the input @properties@ object, attaching per-parameter annotation
+-- as JSON Schema @description@.
 paramObject ::
+  DataDefs ->
   Map Text (SemanticType Resolved) ->
   [ParameterBinding Zonked] ->
   SchemaCore
-paramObject paramTypes parameters =
+paramObject dataDefs paramTypes parameters =
   let properties =
         Map.fromList
-          [ (pb.label, withDesc pb.annotation (toJsonSchema t))
+          [ (pb.label, withDesc pb.annotation (toJsonSchema dataDefs Set.empty t))
             | pb <- parameters,
               Just t <- [Map.lookup pb.label paramTypes]
           ]
@@ -411,94 +400,52 @@ paramObject paramTypes parameters =
           additionalProperties = False
         }
 
--- | Render an request set as a list of qualified-name strings. Each
--- 'RequestId' is looked up in 'zonkedRequests' to recover its
--- declaration's 'QualifiedName'; missing ids (a Solver-contract
--- violation) are dropped silently. Request variables are always empty
--- at 'Resolved' phase per Solver contract, so they're ignored.
-renderRequests :: ZonkResult -> SemanticRequest Resolved -> [Text]
-renderRequests zonkResult (SemanticRequest _ reqs) =
-  [ renderQualifiedName qualifiedName
-    | requestId <- Set.toList reqs,
-      Just (RequestData {requestQualifiedName = qualifiedName}) <- [Map.lookup requestId zonkResult.zonkedRequests]
-  ]
-
--- ===========================================================================
--- Data declaration -> $defs entry
--- ===========================================================================
-
--- | Build a @\$defs@ entry for a 'DataDeclaration'. The constructor
--- variable's type in the environment is a function from labelled fields
--- to the data type; we use that map for field types and the AST
--- declaration for @description@ (per-field and per-data).
-insertDataDef ::
+-- | Build a 'SchemaEntry' for a @data@ constructor. The output schema is the
+-- inline-expanded object shape of the constructed value.
+buildDataEntry ::
+  DataDefs ->
   ZonkResult ->
-  Text ->
   DataDeclaration Zonked ->
-  Map Text JsonSchema ->
-  Map Text JsonSchema
-insertDataDef zonkResult modName dataDecl accum =
-  case dataDecl.name.resolution of
-    Just ctorId ->
-      let base = plain (dataObject (lookupCtorParams zonkResult ctorId) dataDecl.parameters)
-          entry =
-            JsonSchema
-              { core = base.core,
-                title = Just dataDecl.name.text,
-                description = dataDecl.annotation,
-                examples = base.examples
-              }
-       in Map.insert (qkey modName dataDecl.name.text) entry accum
-    Nothing -> accum
+  Maybe SchemaEntry
+buildDataEntry dataDefs zonkResult dataDecl = do
+  variableId <- dataDecl.name.resolution
+  variableData <- Map.lookup variableId zonkResult.zonkedVariables
+  qualifiedName <- variableData.variableQualifiedName
+  let fieldTypes = case Map.lookup variableId zonkResult.zonkedTypeEnvironment of
+        Just (SemanticTypeFunction paramTypes _ _) -> paramTypes
+        _ -> Map.empty
+      inputCore = dataParamObject dataDefs fieldTypes dataDecl.parameters
+      inputSchema =
+        JsonSchema
+          { core = inputCore,
+            title = Just dataDecl.name.text,
+            description = dataDecl.annotation,
+            examples = []
+          }
+      -- Output mirrors the input shape (same fields, same per-field
+      -- annotations). The data constructor's constructed value has the
+      -- same structure as its parameter list.
+      outputCore = dataParamObject dataDefs fieldTypes dataDecl.parameters
+  pure
+    SchemaEntry
+      { name = renderQualifiedName qualifiedName,
+        description = dataDecl.annotation,
+        input = inputSchema,
+        output = plain outputCore,
+        requests = []
+      }
 
--- | Build the constructor-as-callable schema for a @data@ declaration.
--- Mirrors 'agentLike' but for constructors: input is the named-field
--- object, output references the corresponding @\$defs@ entry. requests
--- are always empty (constructors are pure).
-dataConstructorSchema ::
-  ZonkResult ->
-  Text ->
-  DataDeclaration Zonked ->
-  Maybe AgentSchema
-dataConstructorSchema zonkResult modName dataDecl =
-  case dataDecl.name.resolution of
-    Just ctorId ->
-      let fieldTypes = lookupCtorParams zonkResult ctorId
-          inputCore = dataObject fieldTypes dataDecl.parameters
-          inputSchema =
-            JsonSchema
-              { core = inputCore,
-                title = Just dataDecl.name.text,
-                description = dataDecl.annotation,
-                examples = []
-              }
-          -- SchemaCoreRef without description: the declaration site ($defs) is the
-          -- single source of truth for description. Consumers that want
-          -- inline descriptions can resolve $ref after loading the bundle.
-          outputSchema = plain (SchemaCoreRef ("#/$defs/" <> qkey modName dataDecl.name.text))
-       in Just
-            AgentSchema
-              { description = dataDecl.annotation,
-                input = inputSchema,
-                output = outputSchema,
-                requests = []
-              }
-    Nothing -> Nothing
-
-lookupCtorParams ::
-  ZonkResult ->
-  VariableId ->
-  Map Text (SemanticType Resolved)
-lookupCtorParams zonkResult ctorId =
-  case Map.lookup ctorId zonkResult.zonkedTypeEnvironment of
-    Just (SemanticTypeFunction paramTypes _ _) -> paramTypes
-    _ -> Map.empty
-
-dataObject :: Map Text (SemanticType Resolved) -> [DataParameter Zonked] -> SchemaCore
-dataObject fieldTypes params =
+-- | Build the @data@ parameter object, attaching per-field annotation as
+-- JSON Schema @description@.
+dataParamObject ::
+  DataDefs ->
+  Map Text (SemanticType Resolved) ->
+  [DataParameter Zonked] ->
+  SchemaCore
+dataParamObject dataDefs fieldTypes params =
   let properties =
         Map.fromList
-          [ (dp.name, withDesc dp.annotation (toJsonSchema fieldType))
+          [ (dp.name, withDesc dp.annotation (toJsonSchema dataDefs Set.empty fieldType))
             | dp <- params,
               Just fieldType <- [Map.lookup dp.name fieldTypes]
           ]
@@ -507,3 +454,38 @@ dataObject fieldTypes params =
           required = Map.keysSet properties,
           additionalProperties = False
         }
+
+-- ===========================================================================
+-- Request schema expansion
+-- ===========================================================================
+
+buildRequestRefs :: DataDefs -> ZonkResult -> SemanticRequest Resolved -> [RequestSchemaRef]
+buildRequestRefs dataDefs zonkResult (SemanticRequest elements) =
+  mapMaybe buildRef (Set.toList elements)
+  where
+    buildRef (SemanticRequestElementConcrete requestId) =
+      buildRequestRef dataDefs zonkResult requestId
+
+buildRequestRef :: DataDefs -> ZonkResult -> RequestId -> Maybe RequestSchemaRef
+buildRequestRef dataDefs zonkResult requestId = do
+  rd <- Map.lookup requestId zonkResult.zonkedRequests
+  SemanticTypeFunction paramTypes returnType _ <-
+    Map.lookup rd.requestVariableId zonkResult.zonkedTypeEnvironment
+  let inputCore =
+        SchemaCoreObject
+          { properties =
+              Map.mapWithKey
+                ( \label t ->
+                    let annotation = join (Map.lookup label rd.requestParameterAnnotations)
+                     in withDesc annotation (toJsonSchema dataDefs Set.empty t)
+                )
+                paramTypes,
+            required = Map.keysSet paramTypes,
+            additionalProperties = False
+          }
+  pure
+    RequestSchemaRef
+      { name = renderQualifiedName rd.requestQualifiedName,
+        input = plain inputCore,
+        output = toJsonSchema dataDefs Set.empty returnType
+      }

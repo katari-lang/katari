@@ -21,7 +21,7 @@
 --
 -- Subtype check is implemented **only** on 'NormalizedType'. Whenever we need
 -- to compare two types, both sides must be variable-free — we then convert
--- via 'normaliseSemantic' and call 'subtypeNT'.
+-- via 'normaliseSemantic' and call 'subtypeNormalizedType'.
 --
 -- All metadata ('SourceSpan' / 'ConstraintReason') is propagated through
 -- decomposition so error reports can point to the originating site.
@@ -76,7 +76,7 @@ import Katari.Typechecker.Identifier (RequestId)
 import Katari.Typechecker.NormalizedType
   ( NormalizedType (..),
     normaliseSemantic,
-    subtypeNT,
+    subtypeNormalizedType,
   )
 import Katari.Typechecker.Solver.Branch qualified as Branch
 import Katari.Typechecker.Solver.Decompose qualified as Decompose
@@ -224,7 +224,7 @@ checkContradictions = foldr collect []
     collect (TypeConstraint leftType rightType reason) accumulator
       | Just leftConcrete <- semanticToConcrete leftType,
         Just rightConcrete <- semanticToConcrete rightType,
-        not (subtypeNT (normaliseSemantic leftConcrete) (normaliseSemantic rightConcrete)) =
+        not (subtypeNormalizedType (normaliseSemantic leftConcrete) (normaliseSemantic rightConcrete)) =
           SolverErrorContradiction reason leftConcrete rightConcrete : accumulator
     collect _ accumulator = accumulator
 

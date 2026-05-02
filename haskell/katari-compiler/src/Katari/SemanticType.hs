@@ -85,7 +85,7 @@ data SemanticType phase where
   SemanticTypeFunction ::
     Map Text (SemanticType phase) ->
     SemanticType phase ->
-    Set (SemanticRequest phase) ->
+    SemanticRequest phase ->
     SemanticType phase
   SemanticTypeArray :: SemanticType phase -> SemanticType phase
   SemanticTypeTuple :: [SemanticType phase] -> SemanticType phase
@@ -134,14 +134,36 @@ unionSemantic = \case
 -- representation across phases lets the same operations (union, equality)
 -- work without case splits.
 data SemanticRequest phase where
-  SemanticRequestVariable :: RequestVariableId -> SemanticRequest Unresolved
-  SemanticRequestConcrete :: RequestId -> SemanticRequest phase
+  SemanticRequest :: Set (SemanticRequestElement phase) -> SemanticRequest phase
 
 deriving instance Show (SemanticRequest phase)
 
 deriving instance Eq (SemanticRequest phase)
 
 deriving instance Ord (SemanticRequest phase)
+
+data SemanticRequestElement phase where
+  SemanticRequestElementVariable :: RequestVariableId -> SemanticRequestElement Unresolved
+  SemanticRequestElementConcrete :: RequestId -> SemanticRequestElement phase
+
+deriving instance Show (SemanticRequestElement phase)
+
+deriving instance Eq (SemanticRequestElement phase)
+
+deriving instance Ord (SemanticRequestElement phase)
+
+emptyRequest :: SemanticRequest phase
+emptyRequest = SemanticRequest Set.empty
+
+singletonRequest :: RequestId -> SemanticRequest phase
+singletonRequest requestId = SemanticRequest (Set.singleton (SemanticRequestElementConcrete requestId))
+
+singletonRequestVariable :: RequestVariableId -> SemanticRequest Unresolved
+singletonRequestVariable varId = SemanticRequest (Set.singleton (SemanticRequestElementVariable varId))
+
+unionRequests :: SemanticRequest phase -> SemanticRequest phase -> SemanticRequest phase
+unionRequests (SemanticRequest elements1) (SemanticRequest elements2) =
+  SemanticRequest (Set.union elements1 elements2)
 
 substituteVariable ::
   (Applicative f) =>
@@ -155,7 +177,7 @@ substituteVariable onVariable onRequest = \case
     SemanticTypeFunction
       <$> traverse (substituteVariable onVariable onRequest) parameters
       <*> substituteVariable onVariable onRequest returnType
-      <*> (Set.fromList <$> traverse substituteRequest (Set.toList requests))
+      <*> substituteRequestVariable requests
   SemanticTypeArray element -> SemanticTypeArray <$> substituteVariable onVariable onRequest element
   SemanticTypeTuple elements -> SemanticTypeTuple <$> traverse (substituteVariable onVariable onRequest) elements
   SemanticTypeUnion branches -> SemanticTypeUnion <$> traverse (substituteVariable onVariable onRequest) branches
@@ -172,9 +194,13 @@ substituteVariable onVariable onRequest = \case
   SemanticTypeLiteralBoolean value -> pure (SemanticTypeLiteralBoolean value)
   SemanticTypeData typeId -> pure (SemanticTypeData typeId)
   where
-    substituteRequest = \case
-      SemanticRequestVariable reqVarId -> onRequest reqVarId
-      SemanticRequestConcrete reqId -> pure (SemanticRequestConcrete reqId)
+    substituteRequestVariable (SemanticRequest elements) =
+      foldr unionRequests emptyRequest
+        <$> traverse substituteElement (Set.toList elements)
+      where
+        substituteElement = \case
+          SemanticRequestElementVariable variableId -> onRequest variableId
+          SemanticRequestElementConcrete requestId -> pure (singletonRequest requestId)
 
 foldVariable ::
   (Monoid m) =>

@@ -18,7 +18,7 @@
 --     'SolverErrorBoundsConflict'.
 --
 -- Subtype check happens **only** through 'isSubtypeConcrete' (Solver.hs),
--- which routes through 'NormalizedType.subtypeNT'.
+-- which routes through 'NormalizedType.subtypeNormalizedType'.
 module Katari.Typechecker.Solver.Substitution
   ( applySubstType,
     applySubstRequest,
@@ -47,11 +47,12 @@ import Katari.SemanticType
   ( RequestVariableId,
     Resolved,
     SemanticRequest (..),
+    SemanticRequestElement (SemanticRequestElementConcrete),
     SemanticType (..),
     TypeVariableId,
     Unresolved,
-    traverseSemantic,
-    traverseSemanticChildren,
+    singletonRequestVariable,
+    substituteVariable,
     unionSemantic,
   )
 import Katari.Typechecker.ConstraintGenerator (Constraint (..))
@@ -61,7 +62,7 @@ import Katari.Typechecker.NormalizedType
     denormalise,
     intersectNT,
     normaliseSemantic,
-    subtypeNT,
+    subtypeNormalizedType,
   )
 import Katari.Typechecker.Solver.Internal
   ( BoundedType (..),
@@ -85,12 +86,11 @@ import Katari.Typechecker.Solver.Internal
 -- itself still contains (transitive references) are left in place to be
 -- substituted on a subsequent pass.
 applySubstType :: Substitution -> SemanticType Unresolved -> SemanticType Unresolved
-applySubstType substitution = go
-  where
-    go = \case
-      SemanticTypeVariable typeVarId ->
-        Map.findWithDefault (SemanticTypeVariable typeVarId) typeVarId substitution
-      t -> runIdentity (traverseSemantic (Identity . go) Identity t)
+applySubstType substitution =
+  runIdentity
+    . substituteVariable
+      (\typeVariableId -> Identity $ Map.findWithDefault (SemanticTypeVariable typeVariableId) typeVariableId substitution)
+      (Identity . singletonRequestVariable)
 
 -- | Resolve every 'RequestVariableId' inside a 'SemanticType' against the request
 -- substitution, replacing each var with the concrete 'RequestId' set the
@@ -105,16 +105,13 @@ applyRequestSubstToType ::
   Map RequestVariableId (Set RequestId) ->
   SemanticType Unresolved ->
   SemanticType Unresolved
-applyRequestSubstToType requestSubstitution = go
-  where
-    go t = runIdentity (traverseSemantic (Identity . go) (Identity . resolveRequest) t)
-    resolveRequest (SemanticRequest vars reqs) =
-      let expanded =
-            Set.unions
-              [ Map.findWithDefault Set.empty requestVarId requestSubstitution
-                | requestVarId <- Set.toList vars
-              ]
-       in SemanticRequest Set.empty (Set.union reqs expanded)
+applyRequestSubstToType requestSubstitution =
+  runIdentity
+    . substituteVariable
+      (Identity . SemanticTypeVariable)
+      ( \requestVariableId ->
+          Identity $ SemanticRequest $ Set.map SemanticRequestElementConcrete $ Map.findWithDefault Set.empty requestVariableId requestSubstitution
+      )
 
 applySubstRequest :: Substitution -> SemanticRequest phase -> SemanticRequest phase
 applySubstRequest _ request = request -- request vars are handled by the request solver
@@ -306,9 +303,10 @@ intersectUpperBoundsViaNT items = case traverse semanticToConcrete items of
 -- Delegates to 'traverseSemanticChildren' for the structural recursion.
 resolvedToUnresolved :: SemanticType Resolved -> SemanticType Unresolved
 resolvedToUnresolved =
-  runIdentity . traverseSemanticChildren (Identity . resolvedToUnresolved) (Identity . coerceRequest)
-  where
-    coerceRequest (SemanticRequest vars reqs) = SemanticRequest vars reqs
+  runIdentity
+    . substituteVariable
+      (Identity . SemanticTypeVariable)
+      (Identity . singletonRequestVariable)
 
 -- ===========================================================================
 -- Bounds consistency check
@@ -330,7 +328,7 @@ checkBoundsConsistency boundsMap =
       upper <- uppers,
       Just resolvedLower <- [semanticToConcrete lower.boundType],
       Just resolvedUpper <- [semanticToConcrete upper.boundType],
-      not (subtypeNT (normaliseSemantic resolvedLower) (normaliseSemantic resolvedUpper))
+      not (subtypeNormalizedType (normaliseSemantic resolvedLower) (normaliseSemantic resolvedUpper))
   ]
 
 -- ===========================================================================

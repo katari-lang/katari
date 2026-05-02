@@ -1,5 +1,5 @@
 -- | End-to-end tests for 'Katari.Compile.compile' — verifies that the
--- pure orchestration entry point produces an 'IRModule' / 'SchemaBundle'
+-- pure orchestration entry point produces an 'IRModule' / @[SchemaEntry]@
 -- for well-formed input and a populated 'diagnostics' stream for
 -- ill-formed input.
 module Katari.CompileSpec (spec) where
@@ -45,11 +45,11 @@ spec = describe "Katari.Compile" $ do
 
 happyPathSpec :: Spec
 happyPathSpec = describe "well-formed single-module input" $ do
-  it "produces an IRModule and SchemaBundle for a trivial agent" $ do
+  it "produces an IRModule and schema entries for a trivial agent" $ do
     let result = compile (singleSourceInput "agent main() { 42 }")
     hasErrors result.diagnostics `shouldBe` False
     isJust result.irModule `shouldBe` True
-    isJust result.schemaBundle `shouldBe` True
+    isJust result.schemaEntries `shouldBe` True
     isJust result.solverResult `shouldBe` True
     isJust result.zonkResult `shouldBe` True
 
@@ -64,7 +64,7 @@ errorPathSpec = describe "ill-formed input" $ do
     let result = compile (singleSourceInput "agent main() {")
     hasErrors result.diagnostics `shouldBe` True
     isNothing result.irModule `shouldBe` True
-    isNothing result.schemaBundle `shouldBe` True
+    isNothing result.schemaEntries `shouldBe` True
 
   it "carries each diagnostic's code in the K#### range" $ do
     let result = compile (singleSourceInput "agent main() {")

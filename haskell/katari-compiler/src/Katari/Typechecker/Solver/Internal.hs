@@ -34,12 +34,11 @@ import Data.Text (Text)
 import Katari.SemanticType
   ( RequestVariableId,
     Resolved,
-    SemanticRequest (..),
     SemanticType (..),
     TypeVariableId,
     Unresolved,
-    foldSemantic,
-    traverseSemanticChildren,
+    foldVariable,
+    substituteVariable,
   )
 import Katari.Typechecker.ConstraintGenerator
   ( Constraint (..),
@@ -49,7 +48,7 @@ import Katari.Typechecker.Identifier (RequestId)
 import Katari.Typechecker.NormalizedType
   ( NormalizedType,
     normaliseSemantic,
-    subtypeNT,
+    subtypeNormalizedType,
   )
 
 -- ===========================================================================
@@ -122,21 +121,18 @@ emptyBounds = Bounds {lowerBounds = [], upperBounds = []}
 -- is delegated to 'traverseSemanticChildren'; this body only handles the
 -- two phase-changing concerns (variable elimination, request concreteness).
 semanticToConcrete :: SemanticType Unresolved -> Maybe (SemanticType Resolved)
-semanticToConcrete = \case
-  SemanticTypeVariable _ -> Nothing
-  t -> traverseSemanticChildren semanticToConcrete concretiseRequest t
-  where
-    concretiseRequest (SemanticRequest vars reqs)
-      | Set.null vars = Just (SemanticRequest Set.empty reqs)
-      | otherwise = Nothing
+semanticToConcrete =
+  substituteVariable
+    (const Nothing)
+    (const Nothing)
 
 -- | Subtype check between two var-free 'SemanticType' values via
--- 'NormalizedType.subtypeNT'. Caller MUST 'containsNoTypeVars' both sides.
+-- 'NormalizedType.subtypeNormalizedType'. Caller MUST 'containsNoTypeVars' both sides.
 isSubtypeConcrete :: SemanticType Unresolved -> SemanticType Unresolved -> Bool
 isSubtypeConcrete leftType rightType =
   case (semanticToConcrete leftType, semanticToConcrete rightType) of
     (Just leftConcrete, Just rightConcrete) ->
-      subtypeNT (normaliseSemantic leftConcrete) (normaliseSemantic rightConcrete)
+      subtypeNormalizedType (normaliseSemantic leftConcrete) (normaliseSemantic rightConcrete)
     _ -> False
 
 -- ===========================================================================
@@ -149,15 +145,19 @@ containsNoTypeVars = Set.null . typeVarsIn
 -- | Free 'TypeVariableId's appearing anywhere in the type. Variable case is
 -- handled directly; everything else delegates to 'foldSemantic'.
 typeVarsIn :: SemanticType Unresolved -> Set TypeVariableId
-typeVarsIn = \case
-  SemanticTypeVariable typeVarId -> Set.singleton typeVarId
-  t -> foldSemantic typeVarsIn (const Set.empty) t
+typeVarsIn =
+  foldVariable
+    Set.singleton
+    (const Set.empty)
 
 -- | Free 'RequestVariableId's appearing anywhere in the type. Function nodes are
 -- the only constructors that carry requests; 'foldSemantic' delivers each
 -- 'SemanticRequest' to the second argument.
 requestVarsIn :: SemanticType Unresolved -> Set RequestVariableId
-requestVarsIn = foldSemantic requestVarsIn (.requestVars)
+requestVarsIn =
+  foldVariable
+    (const Set.empty)
+    Set.singleton
 
 constraintTypeVars :: Constraint -> Set TypeVariableId
 constraintTypeVars = \case
