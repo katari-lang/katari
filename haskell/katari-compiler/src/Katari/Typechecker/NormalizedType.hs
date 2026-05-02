@@ -68,7 +68,7 @@ import Katari.Typechecker.Identifier (RequestId, TypeId)
 -- @NormalizedTypeLayered 'emptyLayered'@ is the canonical "never" / bottom type.
 data NormalizedType where
   NormalizedTypeUnknown :: NormalizedType
-  NormalizedTypeLayered :: !LayeredType -> NormalizedType
+  NormalizedTypeLayered :: LayeredType -> NormalizedType
   deriving (Eq, Show)
 
 -- | One slot per "type family". A @NormalizedType@ is the sum (union) of
@@ -76,40 +76,40 @@ data NormalizedType where
 data LayeredType = LayeredType
   { -- | Numeric layer. Empty 'NumberSlotLiterals' if no number values inhabit
     -- this type.
-    numberLayer :: !NumberSlot,
+    numberLayer :: NumberSlot,
     -- | String layer.
-    stringLayer :: !StringSlot,
+    stringLayer :: StringSlot,
     -- | Boolean layer. Possible canonical states: @{}@, @{True}@, @{False}@,
     -- @{True, False}@. Note that @{True, False}@ is the same set as the
     -- full 'boolean' primitive — there is intentionally no separate
     -- @BooleanAny@ representation.
-    booleanLayer :: !(Set Bool),
+    booleanLayer :: Set Bool,
     -- | Whether @null@ is inhabited.
-    nullLayer :: !Bool,
+    nullLayer :: Bool,
     -- | Function layer. 'FunctionSlotAbsent' means no function values inhabit
     -- this type; 'FunctionSlotOf' carries a single function shape (with named
     -- parameters). Per Katari's product-normalisation rule, multiple
     -- function shapes in a union collapse into one shape: union → label
     -- union with each common label's type intersected; intersection →
     -- label intersection with each common label's type unioned.
-    functionLayer :: !FunctionSlot,
+    functionLayer :: FunctionSlot,
     -- | Array layer. 'ArraySlotAbsent' distinguishes "no array values" from
     -- @ArraySlotOf (NormalizedTypeLayered emptyLayered)@ (which permits the empty-array
     -- value @[]@).
-    arrayLayer :: !ArraySlot,
+    arrayLayer :: ArraySlot,
     -- | Tuple layer keyed by arity. Absence from the map means no tuples
     -- of that arity inhabit this type. Per arity the per-position types
     -- are stored as a list.
-    tupleLayer :: !(Map Int [NormalizedType]),
+    tupleLayer :: Map Int [NormalizedType],
     -- | Set of @data@ type ids that inhabit this type. Empty means no
     -- @data@ values.
-    dataLayer :: !(Set TypeId),
+    dataLayer :: Set TypeId,
     -- | Structural object layer. 'ObjectSlotAbsent' means "no object values"
     -- (distinguishable from "object with all-empty fields"). Per Katari's
     -- product-normalisation rule, all object shapes in a union collapse
     -- into a single shape: union → common fields, each field type unioned;
     -- intersection → all fields, common field types intersected.
-    objectLayer :: !ObjectSlot
+    objectLayer :: ObjectSlot
   }
   deriving (Eq, Show)
 
@@ -122,7 +122,7 @@ data LayeredType = LayeredType
 --   * 'NumberSlotNumber' is the entire @number@ primitive (subsumes
 --     'NumberSlotInteger' and floats / non-integer numbers).
 data NumberSlot where
-  NumberSlotLiterals :: !(Set Integer) -> NumberSlot
+  NumberSlotLiterals :: (Set Integer) -> NumberSlot
   NumberSlotInteger :: NumberSlot
   NumberSlotNumber :: NumberSlot
   deriving (Eq, Show)
@@ -133,7 +133,7 @@ data NumberSlot where
 --     to indicate "no string values".
 --   * 'StringSlotAny' — the full 'string' primitive.
 data StringSlot where
-  StringSlotLiterals :: !(Set Text) -> StringSlot
+  StringSlotLiterals :: (Set Text) -> StringSlot
   StringSlotAny :: StringSlot
   deriving (Eq, Show)
 
@@ -145,7 +145,7 @@ data StringSlot where
 --     'ArraySlotAbsent': it admits the empty array value @[]@.
 data ArraySlot where
   ArraySlotAbsent :: ArraySlot
-  ArraySlotOf :: !NormalizedType -> ArraySlot
+  ArraySlotOf :: NormalizedType -> ArraySlot
   deriving (Eq, Show)
 
 -- | Object slot.
@@ -156,7 +156,7 @@ data ArraySlot where
 --     'ObjectSlotAbsent' is *not* the same as @'ObjectSlotOf' Map.empty@.
 data ObjectSlot where
   ObjectSlotAbsent :: ObjectSlot
-  ObjectSlotOf :: !(Map Text NormalizedType) -> ObjectSlot
+  ObjectSlotOf :: (Map Text NormalizedType) -> ObjectSlot
   deriving (Eq, Show)
 
 -- | Function layer.
@@ -169,15 +169,15 @@ data ObjectSlot where
 -- intersection of types).
 data FunctionSlot where
   FunctionSlotAbsent :: FunctionSlot
-  FunctionSlotOf :: !FunctionShape -> FunctionSlot
+  FunctionSlotOf :: FunctionShape -> FunctionSlot
   deriving (Eq, Show)
 
 -- | Concrete function shape. Parameters are keyed by their label (order is
 -- not represented at this level).
 data FunctionShape = FunctionShape
-  { parameters :: !(Map Text NormalizedType),
-    returnType :: !NormalizedType,
-    requests :: !(Set RequestId)
+  { parameters :: Map Text NormalizedType,
+    returnType :: NormalizedType,
+    requests :: Set RequestId
   }
   deriving (Eq, Show)
 

@@ -15,7 +15,8 @@ import Data.Text qualified as Text
 import Data.Text.IO qualified as TextIO
 import Katari.IR
 import Katari.Lowering (LoweringError (..), lowerProgram)
-import Katari.Parser (parseModuleStrict)
+import Katari.Lexer qualified as Lexer
+import Katari.Parser qualified as Parser
 import Katari.SemanticType (RequestVariableId (..), TypeVariableId (..))
 import Katari.Typechecker.ConstraintGenerator (ConstraintGenResult (..), generateConstraints)
 import Katari.Typechecker.Identifier (identify)
@@ -33,22 +34,25 @@ import Test.Hspec
 -- | Run parser → identify → constraint-gen → totalised solver → zonk → lower.
 -- Aborts the spec if upstream phases fail.
 lowerSource :: Text -> IO (IRModule, [LoweringError])
-lowerSource src = case parseModuleStrict "<test>" src of
-  Left errs -> fail ("parse failure: " ++ show errs)
-  Right parsed -> case identify (Map.singleton "main" parsed) of
-    (idResult, []) -> do
-      let cg = generateConstraints idResult
-          solver =
-            SolverResult
-              { typeSubstitution =
-                  Map.fromList [(TypeVariableId i, NormalizedTypeUnknown) | i <- [0 .. cg.nextTypeVariableId - 1]],
-                requestSubstitution =
-                  Map.fromList [(RequestVariableId i, Set.empty) | i <- [0 .. cg.nextRequestVariableId - 1]],
-                solverErrors = []
-              }
-          zr = zonk idResult cg solver
-      pure (lowerProgram "main" zr)
-    (_, errs) -> fail ("identify failure: " ++ show errs)
+lowerSource src =
+  let (stream, _) = Lexer.lex "<test>" src
+      (parsed, parseErrors) = Parser.parse "<test>" stream
+  in case parseErrors of
+    (_:_) -> fail ("parse failure: " ++ show parseErrors)
+    [] -> case identify (Map.singleton "main" parsed) of
+      (idResult, []) -> do
+        let (cg, _) = generateConstraints idResult
+            solver =
+              SolverResult
+                { typeSubstitution =
+                    Map.fromList [(TypeVariableId i, NormalizedTypeUnknown) | i <- [0 .. cg.nextTypeVariableId - 1]],
+                  requestSubstitution =
+                    Map.fromList [(RequestVariableId i, Set.empty) | i <- [0 .. cg.nextRequestVariableId - 1]],
+                  solverErrors = []
+                }
+            zr = zonk idResult cg solver
+        pure (lowerProgram "main" zr)
+      (_, errs) -> fail ("identify failure: " ++ show errs)
 
 -- ===========================================================================
 -- Spec

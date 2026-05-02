@@ -93,24 +93,24 @@ toDiagnostic = \case
 
 -- | Head constructor tag.
 data CtorTag where
-  CtorTagData :: !ConstructorId -> CtorTag
-  CtorTagLitInt :: !Integer -> CtorTag
-  CtorTagLitStr :: !Text -> CtorTag
-  CtorTagLitBool :: !Bool -> CtorTag
+  CtorTagData :: ConstructorId -> CtorTag
+  CtorTagLitInt :: Integer -> CtorTag
+  CtorTagLitStr :: Text -> CtorTag
+  CtorTagLitBool :: Bool -> CtorTag
   CtorTagNull :: CtorTag
-  CtorTagTupleN :: !Int -> CtorTag
+  CtorTagTupleN :: Int -> CtorTag
   deriving (Eq, Ord, Show)
 
 -- | Simplified pattern head. Variables and wildcards become 'PatHeadWildcard'.
 data PatHead where
   PatHeadWildcard :: PatHead
-  PatHeadCtor :: !CtorTag -> ![PatHead] -> PatHead
+  PatHeadCtor :: CtorTag -> [PatHead] -> PatHead
   deriving (Eq, Show)
 
 -- | A row of the pattern matrix.
 data PatRow = PatRow
-  { patRowPats :: ![PatHead],
-    patRowSpan :: !SourceSpan
+  { patRowPats :: [PatHead],
+    patRowSpan :: SourceSpan
   }
   deriving (Show)
 
@@ -125,8 +125,8 @@ newtype PatMatrix = PatMatrix [PatRow]
 -- | Threading context for the algorithm. Carries the subject column type
 -- for each column (left-to-right) and the ZonkResult for ctor lookups.
 data TypeCtx = TypeCtx
-  { columnTypes :: ![SemanticType Resolved],
-    zonkResult :: !ZonkResult
+  { columnTypes :: [SemanticType Resolved],
+    zonkResult :: ZonkResult
   }
 
 headColumnType :: TypeCtx -> SemanticType Resolved

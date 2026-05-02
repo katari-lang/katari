@@ -91,12 +91,12 @@ severityOptions =
 --     defined here") for richer error UX.
 --   * 'hints' — actionable suggestions (free-form text).
 data Diagnostic = Diagnostic
-  { severity :: !Severity,
-    code :: !Text,
-    message :: !Text,
-    span :: !SourceSpan,
-    notes :: ![DiagnosticNote],
-    hints :: ![Text]
+  { severity :: Severity,
+    code :: Text,
+    message :: Text,
+    span :: SourceSpan,
+    notes :: [DiagnosticNote],
+    hints :: [Text]
   }
   deriving (Eq, Show, Generic)
 
@@ -104,8 +104,8 @@ data Diagnostic = Diagnostic
 -- to the conflicting prior definition / declaration, or any other spot
 -- the reader should also look at.
 data DiagnosticNote = DiagnosticNote
-  { span :: !SourceSpan,
-    message :: !Text
+  { span :: SourceSpan,
+    message :: Text
   }
   deriving (Eq, Show, Generic)
 

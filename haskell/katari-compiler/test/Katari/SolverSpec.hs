@@ -4,7 +4,8 @@ import Data.List (find)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.Text (Text)
-import Katari.Parser (parseModuleStrict)
+import Katari.Lexer qualified as Lexer
+import Katari.Parser qualified as Parser
 import Katari.SemanticType
   ( SemanticType (..),
     TypeVariableId (..),
@@ -38,14 +39,17 @@ import Test.Hspec
 -- ---------------------------------------------------------------------------
 
 runSolve :: Text -> IO (IdentifierResult, ConstraintGenResult, SolverResult)
-runSolve source = case parseModuleStrict "<test>" source of
-  Left errors -> fail ("parse failure: " ++ show (map show errors))
-  Right parsed -> case identify (Map.singleton "main" parsed) of
-    (idResult, []) ->
-      let cgResult = generateConstraints idResult
-          solverResult = solve cgResult
-       in pure (idResult, cgResult, solverResult)
-    (_, errors) -> fail ("identify failure: " ++ show errors)
+runSolve source =
+  let (stream, _) = Lexer.lex "<test>" source
+      (parsed, parseErrors) = Parser.parse "<test>" stream
+  in case parseErrors of
+    (_:_) -> fail ("parse failure: " ++ show parseErrors)
+    [] -> case identify (Map.singleton "main" parsed) of
+      (idResult, []) ->
+        let (cgResult, _) = generateConstraints idResult
+            solverResult = solve cgResult
+         in pure (idResult, cgResult, solverResult)
+      (_, errors) -> fail ("identify failure: " ++ show errors)
 
 variableIdOf :: Text -> IdentifierResult -> Maybe VariableId
 variableIdOf name result =

@@ -7,7 +7,7 @@ module Katari.CompileSpec (spec) where
 import Data.Aeson qualified as Aeson
 import Data.Map.Strict qualified as Map
 import Data.Maybe (isJust, isNothing)
-import Data.Text (Text)
+import Data.Text (Text, unpack)
 import Katari.Compile
 import Katari.Diagnostic (Diagnostic (..), hasErrors)
 import Test.Hspec
@@ -19,14 +19,14 @@ import Test.Hspec
 singleSourceInput :: Text -> CompileInput
 singleSourceInput src =
   CompileInput
-    { sources = Map.singleton "main" src,
+    { sources = Map.singleton "main" SourceEntry {filePath = "main", sourceText = src},
       rootModule = "main"
     }
 
 multiSourceInput :: [(Text, Text)] -> Text -> CompileInput
 multiSourceInput pairs root =
   CompileInput
-    { sources = Map.fromList pairs,
+    { sources = Map.fromList [(modName, SourceEntry {filePath = unpack modName, sourceText = src}) | (modName, src) <- pairs],
       rootModule = root
     }
 

@@ -28,6 +28,7 @@ import Data.Set qualified as Set
 import Katari.SemanticType
   ( RequestVariableId,
     SemanticRequest (..),
+    SemanticRequestElement (..),
   )
 import Katari.Typechecker.ConstraintGenerator (Constraint (..))
 import Katari.Typechecker.Identifier (RequestId)
@@ -79,20 +80,49 @@ propagateOnce constraints initial = foldr (applyConstraint initial) initial cons
       SemanticRequest phase ->
       Map RequestVariableId (Set RequestId) ->
       Map RequestVariableId (Set RequestId)
-    propagate leftRequest rightRequest assignment =
-      let leftConcreteReqs = leftRequest.requestReqs
-          rightConcreteReqs = rightRequest.requestReqs
-          rightRequestVars = rightRequest.requestVars
+    propagate (SemanticRequest leftRequestElements) (SemanticRequest rightRequestElements) assignment =
+      let leftConcreteRequestIds =
+            Set.unions $
+              fmap
+                ( \case
+                    SemanticRequestElementConcrete requestId -> Set.singleton requestId
+                    SemanticRequestElementVariable _ -> Set.empty
+                )
+                (Set.toList leftRequestElements)
+          rightConcreteRequestIds =
+            Set.unions $
+              fmap
+                ( \case
+                    SemanticRequestElementConcrete requestId -> Set.singleton requestId
+                    SemanticRequestElementVariable _ -> Set.empty
+                )
+                (Set.toList rightRequestElements)
+          rightRequestVariableIds =
+            Set.unions $
+              fmap
+                ( \case
+                    SemanticRequestElementVariable requestVarId -> Set.singleton requestVarId
+                    SemanticRequestElementConcrete _ -> Set.empty
+                )
+                (Set.toList rightRequestElements)
+          leftRequestVariableIds =
+            Set.unions $
+              fmap
+                ( \case
+                    SemanticRequestElementVariable requestVarId -> Set.singleton requestVarId
+                    SemanticRequestElementConcrete _ -> Set.empty
+                )
+                (Set.toList leftRequestElements)
           -- Concrete reqs in lhs that aren't already covered by rhs concrete
           -- must be absorbed by rhs request vars.
-          concreteContribution = leftConcreteReqs `Set.difference` rightConcreteReqs
+          concreteContribution = leftConcreteRequestIds `Set.difference` rightConcreteRequestIds
           -- Lhs request vars contribute their current value (minus rhs
           -- concrete) to rhs vars.
           leftVarContribution =
             Set.unions
               [ Map.findWithDefault Set.empty leftRequestVariableId assignment
-                  `Set.difference` rightConcreteReqs
-                | leftRequestVariableId <- Set.toList leftRequest.requestVars
+                  `Set.difference` rightConcreteRequestIds
+                | leftRequestVariableId <- Set.toList leftRequestVariableIds
               ]
           contribution = Set.union concreteContribution leftVarContribution
        in if Set.null contribution
@@ -102,7 +132,7 @@ propagateOnce constraints initial = foldr (applyConstraint initial) initial cons
                 ( Map.adjust (Set.union contribution)
                 )
                 assignment
-                (Set.toList rightRequestVars)
+                (Set.toList rightRequestVariableIds)
 
 -- ===========================================================================
 -- Helpers
@@ -112,5 +142,14 @@ collectRequestVars :: Set Constraint -> Set RequestVariableId
 collectRequestVars = foldr addFromConstraint Set.empty
   where
     addFromConstraint (RequestConstraint leftRequest rightRequest _) accumulator =
-      Set.unions [accumulator, leftRequest.requestVars, rightRequest.requestVars]
+      let extractVars :: SemanticRequest phase -> Set RequestVariableId
+          extractVars (SemanticRequest elements) =
+            Set.unions $
+              fmap
+                ( \case
+                    SemanticRequestElementVariable requestVarId -> Set.singleton requestVarId
+                    SemanticRequestElementConcrete _ -> Set.empty
+                )
+                (Set.toList elements)
+       in Set.union (extractVars leftRequest) (Set.union (extractVars rightRequest) accumulator)
     addFromConstraint TypeConstraint {} accumulator = accumulator

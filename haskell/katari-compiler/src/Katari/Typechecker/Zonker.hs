@@ -36,6 +36,7 @@ import Control.Monad.Trans (lift)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
+import Data.Text (Text)
 import Data.Text qualified as Text
 import Katari.AST
 import Katari.Diagnostic (Diagnostic, diagnosticError)
@@ -55,6 +56,7 @@ import Katari.Typechecker.Identifier
   ( ConstructorData (..),
     ConstructorId,
     IdentifierResult (..),
+    ModuleData (..),
     ModuleId,
     RequestData (..),
     RequestId,
@@ -78,6 +80,9 @@ import Katari.Typechecker.Solver (SolverResult (..))
 
 data ZonkResult = ZonkResult
   { zonkedModules :: Map ModuleId (Module Zonked),
+    -- | 'ModuleId' → モジュール名 (dotted text)。'Katari.Lowering' が
+    -- 'QualifiedName.module_' を付与する際に参照する。
+    zonkedModuleNames :: Map ModuleId Text,
     zonkedTypeEnvironment :: Map VariableId (SemanticType Resolved),
     -- | Passthroughs from 'IdentifierResult' so 'Katari.Lowering' and
     -- 'Katari.Schema' can resolve qualified names and look up
@@ -721,6 +726,7 @@ zonk idResult cgResult solverResult =
       ((modulesResult, envResult), errs) = runState (runReaderT action solverResult) []
    in ZonkResult
         { zonkedModules = modulesResult,
+          zonkedModuleNames = Map.map (.moduleName) idResult.identifiedModules,
           zonkedTypeEnvironment = envResult,
           zonkedVariables = idResult.identifiedVariables,
           zonkedTypes = idResult.identifiedTypes,

@@ -84,11 +84,11 @@ import Katari.Typechecker.Zonker (ZonkResult (..))
 -- the named parameters. @output@ is the return-type schema, inline-expanded.
 -- @requests@ lists the request schemas this callable may raise.
 data SchemaEntry = SchemaEntry
-  { name :: !Text,
-    description :: !(Maybe Text),
-    input :: !JsonSchema,
-    output :: !JsonSchema,
-    requests :: ![RequestSchemaRef]
+  { name :: Text,
+    description :: Maybe Text,
+    input :: JsonSchema,
+    output :: JsonSchema,
+    requests :: [RequestSchemaRef]
   }
   deriving (Eq, Show, Generic)
 
@@ -97,9 +97,9 @@ instance ToJSON SchemaEntry where
 
 -- | Schema for a single request type that an agent may raise.
 data RequestSchemaRef = RequestSchemaRef
-  { name :: !Text,
-    input :: !JsonSchema,
-    output :: !JsonSchema
+  { name :: Text,
+    input :: JsonSchema,
+    output :: JsonSchema
   }
   deriving (Eq, Show, Generic)
 
@@ -114,10 +114,10 @@ instance ToJSON RequestSchemaRef where
 -- Serialises as a flat JSON object: 'core' keywords are merged with the
 -- metadata fields at the top level (no nesting).
 data JsonSchema = JsonSchema
-  { core :: !SchemaCore,
-    title :: !(Maybe Text),
-    description :: !(Maybe Text),
-    examples :: ![Value]
+  { core :: SchemaCore,
+    title :: Maybe Text,
+    description :: Maybe Text,
+    examples :: [Value]
   }
   deriving (Eq, Show, Generic)
 
@@ -143,22 +143,22 @@ data SchemaCore where
   SchemaCoreNull :: SchemaCore
   SchemaCoreBoolean :: SchemaCore
   SchemaCoreInteger ::
-    { minimum :: !(Maybe Integer),
-      maximum :: !(Maybe Integer)
+    { minimum :: Maybe Integer,
+      maximum :: Maybe Integer
     } ->
     SchemaCore
   SchemaCoreNumber :: SchemaCore
-  SchemaCoreString :: {schemaEnum :: ![Text]} -> SchemaCore
-  SchemaCoreConst :: {value :: !Value} -> SchemaCore
-  SchemaCoreArray :: {items :: !JsonSchema} -> SchemaCore
-  SchemaCoreTuple :: {prefixItems :: ![JsonSchema]} -> SchemaCore
+  SchemaCoreString :: {schemaEnum :: [Text]} -> SchemaCore
+  SchemaCoreConst :: {value :: Value} -> SchemaCore
+  SchemaCoreArray :: {items :: JsonSchema} -> SchemaCore
+  SchemaCoreTuple :: {prefixItems :: [JsonSchema]} -> SchemaCore
   SchemaCoreObject ::
-    { properties :: !(Map Text JsonSchema),
-      required :: !(Set Text),
-      additionalProperties :: !Bool
+    { properties :: Map Text JsonSchema,
+      required :: Set Text,
+      additionalProperties :: Bool
     } ->
     SchemaCore
-  SchemaCoreUnion :: {anyOf :: ![JsonSchema]} -> SchemaCore
+  SchemaCoreUnion :: {anyOf :: [JsonSchema]} -> SchemaCore
   SchemaCoreUnknown :: SchemaCore
   SchemaCoreNever :: SchemaCore
   deriving (Eq, Show, Generic)

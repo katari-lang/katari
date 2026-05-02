@@ -5,7 +5,8 @@ import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Katari.Id (QualifiedName (QualifiedName))
-import Katari.Parser (parseModuleStrict)
+import Katari.Lexer qualified as Lexer
+import Katari.Parser qualified as Parser
 import Katari.SemanticType
 import Katari.Typechecker.ConstraintGenerator
 import Katari.Typechecker.Identifier
@@ -26,17 +27,23 @@ import Test.Hspec
 
 -- | Parse, identify, and run constraint generation on a single module named
 -- "main". Aborts the spec if parse or identify fails.
-runOne :: Text -> IO ConstraintGenResult
-runOne src = fmap fst (runOneWithIdentifier src)
+-- Returns (ConstraintGenResult, [ConstraintError]).
+runOne :: Text -> IO (ConstraintGenResult, [ConstraintError])
+runOne src = (\(cg, errs, _) -> (cg, errs)) <$> runOneWithIdentifier src
 
 -- | Same as 'runOne' but also returns the underlying 'IdentifierResult' so
 -- tests can look up VariableIds by source name.
-runOneWithIdentifier :: Text -> IO (ConstraintGenResult, IdentifierResult)
-runOneWithIdentifier src = case parseModuleStrict "<test>" src of
-  Left errs -> fail ("parse failure: " ++ show (map show errs))
-  Right parsed -> case identify (Map.singleton "main" parsed) of
-    (result, []) -> pure (generateConstraints result, result)
-    (_, errs) -> fail ("identify failure: " ++ show errs)
+runOneWithIdentifier :: Text -> IO (ConstraintGenResult, [ConstraintError], IdentifierResult)
+runOneWithIdentifier src =
+  let (stream, _) = Lexer.lex "<test>" src
+      (parsed, parseErrors) = Parser.parse "<test>" stream
+  in case parseErrors of
+    (_:_) -> fail ("parse failure: " ++ show parseErrors)
+    [] -> case identify (Map.singleton "main" parsed) of
+      (result, []) ->
+        let (cg, errs) = generateConstraints result
+         in pure (cg, errs, result)
+      (_, errs) -> fail ("identify failure: " ++ show errs)
 
 countTypeConstraints :: ConstraintGenResult -> Int
 countTypeConstraints result =
@@ -73,7 +80,7 @@ requestIdOfVariable vid result =
     ]
   where
     requestVariableIdOf :: RequestData -> VariableId
-    requestVariableIdOf (RequestData _ _ v) = v
+    requestVariableIdOf (RequestData _ _ v _) = v
 
 -- | Lookup the type variable assigned to a named variable.
 typeVarOf :: Text -> ConstraintGenResult -> IdentifierResult -> Maybe (SemanticType Unresolved)
@@ -99,6 +106,16 @@ hasRequestConstraint ::
   ConstraintGenResult ->
   Bool
 hasRequestConstraint p cg = any (uncurry p) (requestConstraints cg)
+
+-- | Extract concrete RequestId elements from a SemanticRequest.
+concreteRequests :: SemanticRequest phase -> Set.Set RequestId
+concreteRequests (SemanticRequest elements) =
+  Set.fromList [r | SemanticRequestElementConcrete r <- Set.toList elements]
+
+-- | Extract RequestVariableId elements from an Unresolved SemanticRequest.
+variableRequests :: SemanticRequest Unresolved -> Set.Set RequestVariableId
+variableRequests (SemanticRequest elements) =
+  Set.fromList [v | SemanticRequestElementVariable v <- Set.toList elements]
 
 -- ---------------------------------------------------------------------------
 -- Spec
@@ -126,19 +143,19 @@ spec = do
 basicAgent :: Spec
 basicAgent = describe "basic agent" $ do
   it "agent foo() { 0 } produces some constraints and no errors" $ do
-    cg <- runOne "agent foo() { 0 }"
-    cg.errors `shouldBe` []
+    (cg, errors) <- runOne "agent foo() { 0 }"
+    errors `shouldBe` []
     countTypeConstraints cg `shouldSatisfy` (> 0)
 
   it "agent with annotated return type generates eq constraint" $ do
-    cg <- runOne "agent foo() -> integer { 0 }"
-    cg.errors `shouldBe` []
+    (cg, errors) <- runOne "agent foo() -> integer { 0 }"
+    errors `shouldBe` []
     -- agent signature と t_foo の eq constraint (= subtype 2 本) が含まれる
     countTypeConstraints cg `shouldSatisfy` (>= 2)
 
   it "agent with no return / no requests: both inferred (no errors)" $ do
-    cg <- runOne "agent foo() { 0 }"
-    cg.errors `shouldBe` []
+    (_, errors) <- runOne "agent foo() { 0 }"
+    errors `shouldBe` []
 
 -- ---------------------------------------------------------------------------
 -- Multiple modules: same VariableId → same TypeVar
@@ -149,13 +166,17 @@ multipleModules = describe "multiple modules" $ do
   it "imported variable shares the type var of its origin" $ do
     let lib = "agent helper() { 0 }"
         main_ = "import { helper } from lib\nagent run() { helper() }"
-    case (,) <$> parseModuleStrict "<test>" lib <*> parseModuleStrict "<test>" main_ of
-      Left errs -> expectationFailure ("parse: " ++ show errs)
-      Right (libMod, mainMod) -> case identify (Map.fromList [("lib", libMod), ("main", mainMod)]) of
+        (libStream, _) = Lexer.lex "<test>" lib
+        (libMod, libErrors) = Parser.parse "<test>" libStream
+        (mainStream, _) = Lexer.lex "<test>" main_
+        (mainMod, mainErrors) = Parser.parse "<test>" mainStream
+    case libErrors ++ mainErrors of
+      (_:_) -> expectationFailure ("parse: " ++ show (libErrors ++ mainErrors))
+      [] -> case identify (Map.fromList [("lib", libMod), ("main", mainMod)]) of
         (_, e : es) -> expectationFailure ("identify errors: " ++ show (e : es))
         (result, []) -> do
-          let cg = generateConstraints result
-          cg.errors `shouldBe` []
+          let (cg, cgErrors) = generateConstraints result
+          cgErrors `shouldBe` []
           -- 同じ helper VariableId に対して typeEnvironment に entry が一つだけ
           -- (= 同一 type var が両 module で参照されている)
           let helperVid =
@@ -174,16 +195,16 @@ multipleModules = describe "multiple modules" $ do
 variablePatterns :: Spec
 variablePatterns = describe "variable patterns" $ do
   it "annotated parameter generates an eq constraint between var type and annotation" $ do
-    cg <- runOne "agent foo(x: integer) { 0 }"
-    cg.errors `shouldBe` []
+    (cg, errors) <- runOne "agent foo(x: integer) { 0 }"
+    errors `shouldBe` []
     -- Eq generates 2 subtype constraints. Plus the agent signature eq (2),
     -- the body return-flow constraint (1), the return-annotation eq (2),
     -- and the request bound. So we expect a healthy non-zero number.
     countTypeConstraints cg `shouldSatisfy` (> 0)
 
   it "unannotated parameter does not create extra type constraint per pattern" $ do
-    cg1 <- runOne "agent foo(x: integer) { 0 }"
-    cg2 <- runOne "agent foo(x) { 0 }"
+    (cg1, _) <- runOne "agent foo(x: integer) { 0 }"
+    (cg2, _) <- runOne "agent foo(x) { 0 }"
     -- The annotated one should have at least 2 more type constraints (the
     -- extra eq introduced by the pattern annotation).
     countTypeConstraints cg1 `shouldSatisfy` (>= countTypeConstraints cg2 + 2)
@@ -195,19 +216,19 @@ variablePatterns = describe "variable patterns" $ do
 declarations :: Spec
 declarations = describe "declarations" $ do
   it "data constructor signature is pure (no requests)" $ do
-    cg <- runOne "data foo(x: integer)\nagent main() { foo(x = 1) }"
-    cg.errors `shouldBe` []
+    (cg, errors) <- runOne "data foo(x: integer)\nagent main() { foo(x = 1) }"
+    errors `shouldBe` []
     -- We don't introspect specific constraints here; just check no errors and
     -- some constraints emitted.
     countTypeConstraints cg `shouldSatisfy` (> 0)
 
   it "req declaration emits eq constraint" $ do
-    cg <- runOne "req foo(x: integer) -> string"
-    cg.errors `shouldBe` []
+    (cg, errors) <- runOne "req foo(x: integer) -> string"
+    errors `shouldBe` []
     countTypeConstraints cg `shouldSatisfy` (>= 2) -- eq = 2 subtype
   it "ext-agent emits eq constraint (requests from with clause)" $ do
-    cg <- runOne "req bar(x: integer) -> string\n@\"svc\"\next agent foo() -> integer with bar"
-    cg.errors `shouldBe` []
+    (cg, errors) <- runOne "req bar(x: integer) -> string\n@\"svc\"\next agent foo() -> integer with bar"
+    errors `shouldBe` []
     countTypeConstraints cg `shouldSatisfy` (>= 2)
 
 -- ---------------------------------------------------------------------------
@@ -217,8 +238,8 @@ declarations = describe "declarations" $ do
 callExpressions :: Spec
 callExpressions = describe "call expressions" $ do
   it "agent calling another agent generates a call constraint" $ do
-    cg <- runOne "agent helper() { 0 }\nagent main() { helper() }"
-    cg.errors `shouldBe` []
+    (cg, errors) <- runOne "agent helper() { 0 }\nagent main() { helper() }"
+    errors `shouldBe` []
     -- Request constraint(s) for the body request bound + call propagation
     countRequestConstraints cg `shouldSatisfy` (> 0)
 
@@ -229,7 +250,7 @@ callExpressions = describe "call expressions" $ do
 constructorPatterns :: Spec
 constructorPatterns = describe "constructor patterns" $ do
   it "match on data ctor pattern emits constraint without TypeData lookup" $ do
-    cg <-
+    (_, errors) <-
       runOne $
         mconcat
           [ "data circle(r: integer)\n",
@@ -239,7 +260,7 @@ constructorPatterns = describe "constructor patterns" $ do
             "  }",
             "}"
           ]
-    cg.errors `shouldBe` []
+    errors `shouldBe` []
 
 -- ---------------------------------------------------------------------------
 -- Where blocks (request discharge)
@@ -248,7 +269,7 @@ constructorPatterns = describe "constructor patterns" $ do
 whereBlocks :: Spec
 whereBlocks = describe "where blocks" $ do
   it "where block discharges its handled reqs" $ do
-    cg <-
+    (cg, errors) <-
       runOne $
         mconcat
           [ "req fetch() -> string\n",
@@ -258,25 +279,27 @@ whereBlocks = describe "where blocks" $ do
             "  req fetch() -> string { \"ok\" }",
             "}"
           ]
-    cg.errors `shouldBe` []
+    errors `shouldBe` []
     -- Request constraints include the discharge: inner_eff <: outer ∪ {fetch}
     countRequestConstraints cg `shouldSatisfy` (> 0)
 
   it "req handler with request annotation is rejected by parser" $ do
-    case parseModuleStrict "<test>" $
-      mconcat
-        [ "req fetch() -> string\n",
-          "agent main() -> string {",
-          "  fetch()",
-          "} where {",
-          "  req fetch() -> string with bar { \"ok\" }",
-          "}"
-        ] of
-      Left _ -> pure () -- parse error expected
-      Right _ -> expectationFailure "expected parse failure for handler with-clause"
+    let (stream, _) = Lexer.lex "<test>" $
+          mconcat
+            [ "req fetch() -> string\n",
+              "agent main() -> string {",
+              "  fetch()",
+              "} where {",
+              "  req fetch() -> string with bar { \"ok\" }",
+              "}"
+            ]
+        (_, parseErrors) = Parser.parse "<test>" stream
+    case parseErrors of
+      (_:_) -> pure () -- parse error expected
+      [] -> expectationFailure "expected parse failure for handler with-clause"
 
   it "handler break value flows to a type variable (handle-result)" $ do
-    cg <-
+    (cg, errors) <-
       runOne $
         mconcat
           [ "req fetch() -> string\n",
@@ -288,7 +311,7 @@ whereBlocks = describe "where blocks" $ do
             "  }\n",
             "}\n"
           ]
-    cg.errors `shouldBe` []
+    errors `shouldBe` []
     -- break "boom" should emit a constraint with lhs = literal "boom"
     -- targeting some type variable (the handle-result tv).
     cg
@@ -300,7 +323,7 @@ whereBlocks = describe "where blocks" $ do
         )
 
   it "handler next value flows to a type variable (handler return / next-tv)" $ do
-    cg <-
+    (cg, errors) <-
       runOne $
         mconcat
           [ "req fetch() -> string\n",
@@ -312,7 +335,7 @@ whereBlocks = describe "where blocks" $ do
             "  }\n",
             "}\n"
           ]
-    cg.errors `shouldBe` []
+    errors `shouldBe` []
     cg
       `shouldSatisfy` hasTypeConstraint
         ( \l r ->
@@ -324,7 +347,7 @@ whereBlocks = describe "where blocks" $ do
   it "where: body tail value flows into the handle-result tv" $ do
     -- The body's tail expression "hello" flows into the where-block's
     -- whole-result type variable.
-    cg <-
+    (cg, errors) <-
       runOne $
         mconcat
           [ "req fetch() -> string\n",
@@ -334,7 +357,7 @@ whereBlocks = describe "where blocks" $ do
             "  }\n",
             "}\n"
           ]
-    cg.errors `shouldBe` []
+    errors `shouldBe` []
     cg
       `shouldSatisfy` hasTypeConstraint
         ( \l r ->
@@ -348,7 +371,7 @@ whereBlocks = describe "where blocks" $ do
     -- is treated as an implicit 'break' (Koka-style algebraic requests). Its
     -- tail value flows to the where-containing block's whole type, NOT to
     -- the handler's declared return type.
-    cg <-
+    (cg, errors) <-
       runOne $
         mconcat
           [ "req fetch() -> string\n",
@@ -356,7 +379,7 @@ whereBlocks = describe "where blocks" $ do
             "  req fetch() -> string { \"implicit\" }\n",
             "}\n"
           ]
-    cg.errors `shouldBe` []
+    errors `shouldBe` []
     cg
       `shouldSatisfy` hasTypeConstraint
         ( \l r ->
@@ -370,7 +393,7 @@ whereBlocks = describe "where blocks" $ do
     -- block emits an request-var <: request-var constraint bounding handler
     -- bodies' request by the outer request (e4 <: e1). Both lhs and rhs
     -- must have only requestVars populated and requestReqs empty.
-    cg <-
+    (cg, errors) <-
       runOne $
         mconcat
           [ "req fetch() -> string\n",
@@ -380,14 +403,14 @@ whereBlocks = describe "where blocks" $ do
             "  }\n",
             "}\n"
           ]
-    cg.errors `shouldBe` []
+    errors `shouldBe` []
     cg
       `shouldSatisfy` hasRequestConstraint
         ( \lhs rhs ->
-            Set.null lhs.requestReqs
-              && Set.null rhs.requestReqs
-              && not (Set.null lhs.requestVars)
-              && not (Set.null rhs.requestVars)
+            Set.null (concreteRequests lhs)
+              && Set.null (concreteRequests rhs)
+              && not (Set.null (variableRequests lhs))
+              && not (Set.null (variableRequests rhs))
         )
 
   it "block without where emits only the agent's bodyEff <: declared constraint" $ do
@@ -395,16 +418,16 @@ whereBlocks = describe "where blocks" $ do
     -- constraints of its own. The only request constraint the agent should
     -- produce is bodyEff <: declared, with both sides request-vars only
     -- (no req-id sets) since neither has a 'with' clause.
-    cg <- runOne "agent main() -> string { \"hi\" }\n"
-    cg.errors `shouldBe` []
+    (cg, errors) <- runOne "agent main() -> string { \"hi\" }\n"
+    errors `shouldBe` []
     let effs = requestConstraints cg
     length effs `shouldBe` 1
     case effs of
       [(lhs, rhs)] -> do
-        Set.null lhs.requestReqs `shouldBe` True
-        Set.null rhs.requestReqs `shouldBe` True
-        Set.size lhs.requestVars `shouldBe` 1
-        Set.size rhs.requestVars `shouldBe` 1
+        Set.null (concreteRequests lhs) `shouldBe` True
+        Set.null (concreteRequests rhs) `shouldBe` True
+        Set.size (variableRequests lhs) `shouldBe` 1
+        Set.size (variableRequests rhs) `shouldBe` 1
       _ -> expectationFailure "expected exactly one request constraint"
 
 -- ---------------------------------------------------------------------------
@@ -420,7 +443,7 @@ exitStatementBlocks = describe "exit-statement blocks" $ do
     -- emit (null <: retTvId) because 'next \"x\"' is a statement and the
     -- block has no tail expression, leaving bodyTy = null. With the fix,
     -- bodyTy = never instead, so no such constraint should appear.
-    cg <-
+    (cg, errors) <-
       runOne $
         mconcat
           [ "req fetch() -> string\n",
@@ -430,7 +453,7 @@ exitStatementBlocks = describe "exit-statement blocks" $ do
             "  }\n",
             "}\n"
           ]
-    cg.errors `shouldBe` []
+    errors `shouldBe` []
     cg
       `shouldSatisfy` not
         . hasTypeConstraint
@@ -446,7 +469,7 @@ exitStatementBlocks = describe "exit-statement blocks" $ do
     -- (never <: tResult). The else branch contributes string. Together the
     -- if's result type stays string (never is bottom) — but we should see
     -- never as the lhs of some constraint.
-    cg <-
+    (cg, errors) <-
       runOne $
         mconcat
           [ "agent main() -> string {\n",
@@ -457,7 +480,7 @@ exitStatementBlocks = describe "exit-statement blocks" $ do
             "  }\n",
             "}\n"
           ]
-    cg.errors `shouldBe` []
+    errors `shouldBe` []
     cg `shouldSatisfy` hasTypeConstraintLhs SemanticTypeNever
 
   it "agent body whose only statement is 'return' types as never" $ do
@@ -465,14 +488,14 @@ exitStatementBlocks = describe "exit-statement blocks" $ do
     -- the never-typing fix, walkBlock returns SemanticTypeNever rather
     -- than SemanticTypeNull, so processAgentLike's
     -- (bodyType <: retTvId) constraint becomes never <: retTvId.
-    cg <-
+    (cg, errors) <-
       runOne $
         mconcat
           [ "agent main() -> string {\n",
             "  return \"x\"\n",
             "}\n"
           ]
-    cg.errors `shouldBe` []
+    errors `shouldBe` []
     cg `shouldSatisfy` hasTypeConstraintLhs SemanticTypeNever
 
 -- ---------------------------------------------------------------------------
@@ -482,9 +505,9 @@ exitStatementBlocks = describe "exit-statement blocks" $ do
 typeSynonymCycle :: Spec
 typeSynonymCycle = describe "type synonym cycle" $ do
   it "type T = T is detected as a cycle" $ do
-    cg <- runOne "type T = T\nagent main(x: T) { 0 }"
+    (_, errors) <- runOne "type T = T\nagent main(x: T) { 0 }"
     -- One ConstraintErrorTypeSynonymCycle expected (or more if T is referenced again).
-    cg.errors `shouldSatisfy` any isCycleError
+    errors `shouldSatisfy` any isCycleError
   where
     isCycleError ConstraintErrorTypeSynonymCycle {} = True
 
@@ -495,24 +518,24 @@ typeSynonymCycle = describe "type synonym cycle" $ do
 constraintContents :: Spec
 constraintContents = describe "constraint contents" $ do
   it "literal int expression flows as SemanticTypeLiteralInteger" $ do
-    cg <- runOne "agent foo() { 42 }"
+    (cg, _) <- runOne "agent foo() { 42 }"
     -- body の return statement constraint で lhs = SemanticTypeLiteralInteger 42
     cg `shouldSatisfy` hasTypeConstraintLhs (SemanticTypeLiteralInteger 42)
 
   it "literal string expression flows as SemanticTypeLiteralString" $ do
-    cg <- runOne "agent foo() { \"hello\" }"
+    (cg, _) <- runOne "agent foo() { \"hello\" }"
     cg `shouldSatisfy` hasTypeConstraintLhs (SemanticTypeLiteralString "hello")
 
   it "literal boolean expression flows as SemanticTypeLiteralBoolean" $ do
-    cg <- runOne "agent foo() { true }"
+    (cg, _) <- runOne "agent foo() { true }"
     cg `shouldSatisfy` hasTypeConstraintLhs (SemanticTypeLiteralBoolean True)
 
   it "null expression flows as SemanticTypeNull" $ do
-    cg <- runOne "agent foo() { null }"
+    (cg, _) <- runOne "agent foo() { null }"
     cg `shouldSatisfy` hasTypeConstraintLhs SemanticTypeNull
 
   it "annotated parameter emits both directions of eq with SemanticTypeInteger" $ do
-    (cg, ir) <- runOneWithIdentifier "agent foo(x: integer) { 0 }"
+    (cg, _, ir) <- runOneWithIdentifier "agent foo(x: integer) { 0 }"
     case typeVarOf "x" cg ir of
       Nothing -> expectationFailure "x not in env"
       Just tx -> do
@@ -521,7 +544,7 @@ constraintContents = describe "constraint contents" $ do
         cg `shouldSatisfy` hasTypeConstraint (\l r -> l == SemanticTypeInteger && r == tx)
 
   it "agent signature eq emits a SemanticTypeFunction on one side, t_foo on the other" $ do
-    (cg, ir) <- runOneWithIdentifier "agent foo(x: integer) -> string { \"hi\" }"
+    (cg, _, ir) <- runOneWithIdentifier "agent foo(x: integer) -> string { \"hi\" }"
     case typeVarOf "foo" cg ir of
       Nothing -> expectationFailure "foo not in env"
       Just tFoo -> do
@@ -545,7 +568,7 @@ constraintContents = describe "constraint contents" $ do
             )
 
   it "req declaration produces signature with self-request" $ do
-    (cg, ir) <- runOneWithIdentifier "req fetch() -> string"
+    (cg, _, ir) <- runOneWithIdentifier "req fetch() -> string"
     case (variableIdOf "fetch" ir, typeVarOf "fetch" cg ir) of
       (Just fetchVid, Just tFetch) ->
         let fetchReqId = requestIdOfVariable fetchVid ir
@@ -554,14 +577,14 @@ constraintContents = describe "constraint contents" $ do
                 ( \l r -> case l of
                     SemanticTypeFunction _ ret eff ->
                       ret == SemanticTypeString
-                        && Set.member fetchReqId eff.requestReqs
+                        && Set.member fetchReqId (concreteRequests eff)
                         && r == tFetch
                     _ -> False
                 )
       _ -> expectationFailure "fetch not in identifier output / env"
 
   it "data ctor signature is pure (emptyRequest) and returns SemanticTypeData" $ do
-    (cg, ir) <- runOneWithIdentifier "data point(x: integer)"
+    (cg, _, ir) <- runOneWithIdentifier "data point(x: integer)"
     case typeVarOf "point" cg ir of
       Nothing -> expectationFailure "point not in env"
       Just tCtor ->
@@ -576,7 +599,7 @@ constraintContents = describe "constraint contents" $ do
             )
 
   it "function call emits a SemanticTypeFunction expected-shape on the rhs" $ do
-    (cg, ir) <- runOneWithIdentifier "agent helper() { 0 }\nagent main() { helper() }"
+    (cg, _, ir) <- runOneWithIdentifier "agent helper() { 0 }\nagent main() { helper() }"
     case typeVarOf "helper" cg ir of
       Nothing -> expectationFailure "helper not in env"
       Just tHelper ->
@@ -590,7 +613,7 @@ constraintContents = describe "constraint contents" $ do
             )
 
   it "where block emits request-discharge constraint" $ do
-    (cg, ir) <-
+    (cg, _, ir) <-
       runOneWithIdentifier $
         mconcat
           [ "req fetch() -> string\n",
@@ -608,11 +631,11 @@ constraintContents = describe "constraint contents" $ do
         let fetchReqId = requestIdOfVariable fetchVid ir
          in cg
               `shouldSatisfy` hasRequestConstraint
-                ( \_ rhs -> Set.member fetchReqId rhs.requestReqs
+                ( \_ rhs -> Set.member fetchReqId (concreteRequests rhs)
                 )
 
   it "if branches both flow into the same result type var" $ do
-    cg <- runOne "agent foo() { if (true) { 1 } else { 2 } }"
+    (cg, _) <- runOne "agent foo() { if (true) { 1 } else { 2 } }"
     -- 両 branch の literal が同じ type var の subtype
     -- 1 と 2 を lhs に持つ constraint がそれぞれ存在し、rhs が同じ TypeVar である
     let lhsLits =
@@ -625,7 +648,7 @@ constraintContents = describe "constraint contents" $ do
     length lhsLits `shouldSatisfy` (>= 2)
 
   it "field access emits T <: SemanticTypeObject {label: t_field}" $ do
-    cg <-
+    (cg, _) <-
       runOne $
         mconcat
           [ "data point(x: integer, y: integer)\n",
@@ -639,26 +662,21 @@ constraintContents = describe "constraint contents" $ do
             _ -> False
         )
 
-  it "binary `+` constrains both operands to a shared result var bounded by number" $ do
-    cg <- runOne "agent foo() { 1 + 2 }"
-    -- 新実装: 両辺は fresh 型変数 t に subtype され、t <: number が追加される
-    -- 1 <: t, 2 <: t, t <: number
-    let isTypeVar = \case SemanticTypeVariable _ -> True; _ -> False
+  it "binary `+` constrains both operands to number" $ do
+    (cg, _) <- runOne "agent foo() { 1 + 2 }"
+    -- 両オペランドは直接 number にサブタイプされる
+    -- 1 <: number, 2 <: number
     cg
       `shouldSatisfy` hasTypeConstraint
-        ( \l r -> l == SemanticTypeLiteralInteger 1 && isTypeVar r
+        ( \l r -> l == SemanticTypeLiteralInteger 1 && r == SemanticTypeNumber
         )
     cg
       `shouldSatisfy` hasTypeConstraint
-        ( \l r -> l == SemanticTypeLiteralInteger 2 && isTypeVar r
-        )
-    cg
-      `shouldSatisfy` hasTypeConstraint
-        ( \l r -> isTypeVar l && r == SemanticTypeNumber
+        ( \l r -> l == SemanticTypeLiteralInteger 2 && r == SemanticTypeNumber
         )
 
   it "template literal interpolation requires string subtype" $ do
-    cg <- runOne "agent foo() { f\"hello ${\"world\"}\" }"
+    (cg, _) <- runOne "agent foo() { f\"hello ${\"world\"}\" }"
     -- "world" interp → string の constraint
     cg
       `shouldSatisfy` hasTypeConstraint
@@ -677,16 +695,18 @@ dataNameClash = describe "cross-module data name clash" $ do
   it "two modules each declaring `data foo` produce distinct SemanticTypeData TypeIds" $ do
     let modA = "data foo(x: integer)\nagent runA() { foo(x = 1) }"
         modB = "data foo(y: string)\nagent runB() { foo(y = \"a\") }"
-    case (,)
-      <$> parseModuleStrict "<test>" modA
-      <*> parseModuleStrict "<test>" modB of
-      Left errs -> expectationFailure ("parse: " ++ show errs)
-      Right (parsedA, parsedB) ->
+        (streamA, _) = Lexer.lex "<test>" modA
+        (parsedA, errorsA) = Parser.parse "<test>" streamA
+        (streamB, _) = Lexer.lex "<test>" modB
+        (parsedB, errorsB) = Parser.parse "<test>" streamB
+    case errorsA ++ errorsB of
+      (_:_) -> expectationFailure ("parse: " ++ show (errorsA ++ errorsB))
+      [] ->
         case identify (Map.fromList [("a", parsedA), ("b", parsedB)]) of
           (_, e : es) -> expectationFailure ("identify errors: " ++ show (e : es))
           (result, []) -> do
-            let cg = generateConstraints result
-            cg.errors `shouldBe` []
+            let (cg, cgErrors) = generateConstraints result
+            cgErrors `shouldBe` []
             -- 各モジュールの "foo" type に発行された TypeId を集める。
             let fooTypeIds =
                   [ tid
@@ -725,14 +745,14 @@ dataNameClash = describe "cross-module data name clash" $ do
 implicitReturnReason :: Spec
 implicitReturnReason = describe "ReasonKindImplicitReturn vs ReasonKindReturnStatement" $ do
   it "agent body fall-through tags constraint with ReasonKindImplicitReturn" $ do
-    cg <- runOne "agent foo() -> integer { 1 }"
-    cg.errors `shouldBe` []
+    (cg, errors) <- runOne "agent foo() -> integer { 1 }"
+    errors `shouldBe` []
     let reasons = [r | TypeConstraint {reason = r} <- Set.toList cg.constraints]
     any isImplicitReturn reasons `shouldBe` True
 
   it "explicit return statement tags constraint with ReasonKindReturnStatement" $ do
-    cg <- runOne "agent foo() -> integer { return 1; }"
-    cg.errors `shouldBe` []
+    (cg, errors) <- runOne "agent foo() -> integer { return 1; }"
+    errors `shouldBe` []
     let reasons = [r | TypeConstraint {reason = r} <- Set.toList cg.constraints]
     any isReturnStatement reasons `shouldBe` True
   where

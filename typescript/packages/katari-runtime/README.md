@@ -67,23 +67,31 @@ DB Layer         正規化 DB への永続化 (postgres)
 - **同期的**: State Machine 自体はシングルスレッドの同期ループ
 - **非同期点は 2 つのみ**: 外部 API 入力 / Sidecar 完了通知
 - **仮想並列**: 実行可能な全 Thread を一斉に step し、quiescence まで回す
+- **純粋関数**: State Machine 実行中は DB に触らない。`applyEvent` は純粋な計算として `(MachineState, Event) → (MachineState, DbDiff, Log[])` を返す。DB 書き込みは API 層が差分を受け取って行う (Functional Core / Imperative Shell)。
 
 ### イベント
 
 ```
-ApiInvoke(qualifiedName, args)   # agent 起動
-SidecarComplete(threadId, value) # ext call 完了
-ApiCancel(sessionId)             # ユーザーキャンセル
+Invoke(irModuleId, qualifiedName, args)  # agent 起動 (globalThread を親にして Thread 作成)
+FillValue(threadId, value)               # ext call 完了 / 外部入力
+CancelThread(threadId)                   # Thread ツリーをキャンセル
+LoadIrModule(ir)                         # IR apply (将来は global thread も起動)
 ```
+
+Session (誰が何を頼んだか) は API 層が管理する。State Machine はイベントを受けて Thread を操作するだけ。
 
 ### 静的概念 (IR から決まる)
 
 | 概念 | 説明 |
 |---|---|
-| BlockId | IR の callable 識別子 |
+| IrModuleId | 適用済み IR module の識別子 (apply 時に割り当て) |
+| BlockId | IR 内の callable 識別子 (module 内でユニーク) |
+| **BlockRef** | `(IrModuleId, BlockId)` — runtime 全体でユニークな block 参照 |
 | VarId | IR の値スロット識別子 (per-occurrence) |
 | ReqId | Request handler 識別子 |
 | CtorId | Data constructor 識別子 |
+
+`BlockId` は IR module 内でしかユニークでないため、Thread・HandlerEntry・Closure が block を参照する場合は常に `BlockRef` を使う。
 
 ### 動的概念 (実行時に生成)
 
@@ -93,25 +101,43 @@ Block の実体化。以下を保持する。
 
 ```
 ThreadId → Thread
-  blockId     : BlockId
-  scopeId     : ScopeId
-  parentId    : ThreadId?          # 親 Thread
-  handlers    : Map<ReqId, BlockId> # 継承された handler チェーン
-  pc          : Int                 # 実行済み statement の個数
-  status      : Running
-             | WaitingFor(Set<MemoryKey>)
-             | Done
-             | Cancelled
+  block           : BlockRef   # 実行中の block
+  scopeId         : ScopeId    # 字句的 scope (変数参照の起点)
+  parentThreadId  : ThreadId?  # 実行ツリー上の親 (動的)
+  sessionId       : SessionId  # 所属 session
+  handlers        : Map<ReqId, HandlerEntry>
+  pc              : Int         # 実行済み statement の個数
+  status          : Running
+                 | WaitingFor(Set<MemoryKey>)
+                 | Done
+                 | Cancelled
 ```
+
+`scopeId` と `parentThreadId` は通常一致するが、**クロージャ呼び出し時は乖離する**。
+クロージャ body の Thread の `parentThreadId` は呼び出し元だが、`scopeId` の親は
+closure が作られた時点の scope (= `Closure.capturedScopeId` を親とした新 scope)。
+
+#### HandlerEntry
+
+handler は実行時に **登録した `where` block の scope** で動く必要がある (`var s` がその scope に属するため)。
+
+```
+HandlerEntry
+  block   : BlockRef
+  scopeId : ScopeId  # handler を登録した where-block の scope
+```
+
+Thread 作成時に親の `handlers` map を引き継ぎ、自身のブロックが持つ handler を上書き merge する。
+各 HandlerEntry は登録元の `scopeId` を保持したまま伝播するため、
+inner handler が outer handler を shadow しても outer の `scopeId` は失われない。
 
 #### Scope
 
-変数の束縛環境。親子チェーンを持つ。
+変数の束縛環境を表す薄い概念。実際の値は MemoryCell が保持する。
 
 ```
 ScopeId → Scope
   parentId : ScopeId?
-  cells    : Set<MemoryKey>   # この scope に属する cell の一覧
 ```
 
 #### MemoryCell
@@ -129,13 +155,16 @@ MemoryCell
 
 #### Closure
 
-`MakeClosure` で生成。Block + Scope の組。
+`MakeClosure` で生成。Block + 捕捉 Scope の組。
 
 ```
 ClosureId → Closure
-  blockId : BlockId
-  scopeId : ScopeId
+  block           : BlockRef
+  capturedScopeId : ScopeId  # closure 作成時点の字句的 scope
 ```
+
+closure body の Thread を作る際は、`capturedScopeId` を親とした新しい Scope を作成し、
+それをその Thread の `scopeId` とする。
 
 ### Version の意味
 
@@ -160,17 +189,44 @@ Value =
   | { kind: "closure", closureId: ClosureId }
 ```
 
-### 実行ループ (scheduler)
+### MachineState
 
 ```
-event が来る
-  → イベントを適用 (Thread 作成 / MemoryCell fill など)
-  → runUntilQuiescence:
-       runnable な Thread を全て step
-       fill が発生したら待機 Thread を起こして再度 step
-       変化がなくなったら終了
-  → DB に差分を永続化
+MachineState
+  irModules     : Map<IrModuleId, IRModule>   # read-only (apply 時に追加)
+  globalThreads : Map<IrModuleId, ThreadId>   # IR version ごとの global thread (現在は常に空)
+  threads       : Map<ThreadId, Thread>
+  scopes        : Map<ScopeId, Scope>
+  cells         : Map<MemoryKey, MemoryCell>
+  closures      : Map<ClosureId, Closure>
 ```
+
+#### Global Thread (将来の拡張)
+
+Katari のトップレベルに `req` handler / `var` を書けるようにする拡張のフック。
+IR version ごとに 1 つの **global thread** を自動起動し、全 agent の Thread はその子として生まれる。
+これにより global な `var` 状態・handler が全 agent に自動継承される。
+
+現在は `globalThreads` は空 Map で、`Invoke` は親なし Thread を作る。
+将来は `Invoke` が `globalThreads[irModuleId]` を親に指定するだけで拡張が完了する。
+
+global thread 自体は `BlockAgentEntryWithHandlers` 相当で body は空 (handler 登録のみ)。
+Done にならず `GlobalWaiting` 状態で待機し続ける (`ThreadStatus` の将来追加 variant)。
+
+### applyEvent (pure)
+
+```
+applyEvent(state, event) → { nextState, dbDiff, logs }
+
+  1. event を適用 (Thread 作成 / MemoryCell fill など)
+  2. runUntilQuiescence:
+       runnable な Thread を全て step
+       fill が発生したら waitingFor Thread を起こして再度 step
+       変化がなくなったら終了
+  3. nextState / dbDiff / logs を返す  ← DB アクセスなし
+```
+
+API 層が `dbDiff` を受け取って DB に書き込む。
 
 ---
 
@@ -237,20 +293,20 @@ sessions (
 )
 
 threads (
-  id         UUID PRIMARY KEY,
-  session_id UUID REFERENCES sessions,
-  parent_id  UUID REFERENCES threads,
-  block_id   TEXT NOT NULL,
-  scope_id   UUID REFERENCES scopes,
-  pc         INT NOT NULL DEFAULT 0,
-  status     TEXT NOT NULL,  -- 'running' | 'waiting' | 'done' | 'cancelled'
-  handlers   JSONB NOT NULL DEFAULT '{}'
+  id               UUID PRIMARY KEY,
+  session_id       UUID REFERENCES sessions,
+  parent_thread_id UUID REFERENCES threads,   -- 実行ツリー上の親 (動的)
+  block_id         TEXT NOT NULL,
+  scope_id         UUID REFERENCES scopes,    -- 字句的 scope (変数参照の起点)
+  pc               INT NOT NULL DEFAULT 0,
+  status           TEXT NOT NULL,  -- 'running' | 'waiting' | 'done' | 'cancelled'
+  handlers         JSONB NOT NULL DEFAULT '{}'
+  -- handlers の要素は { blockId: string, scopeId: string } の map
 )
 
 scopes (
-  id           UUID PRIMARY KEY,
-  parent_id    UUID REFERENCES scopes,
-  ir_module_id INT REFERENCES ir_modules
+  id        UUID PRIMARY KEY,
+  parent_id UUID REFERENCES scopes
 )
 
 memory_cells (
@@ -263,9 +319,9 @@ memory_cells (
 )
 
 closures (
-  id        UUID PRIMARY KEY,
-  block_id  TEXT NOT NULL,
-  scope_id  UUID REFERENCES scopes
+  id                UUID PRIMARY KEY,
+  block_id          TEXT NOT NULL,
+  captured_scope_id UUID REFERENCES scopes  -- closure 作成時点の字句的 scope
 )
 ```
 

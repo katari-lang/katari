@@ -60,9 +60,9 @@ import Katari.Typechecker.NormalizedType
 -- 確定済 total 契約)。解決不能な制約は 'solverErrors' に記録され、対応する
 -- var は NormalizedTypeUnknown / 空 set にフォールバック。
 data SolverResult = SolverResult
-  { typeSubstitution :: !(Map TypeVariableId NormalizedType),
-    requestSubstitution :: !(Map RequestVariableId (Set RequestId)),
-    solverErrors :: ![SolverError]
+  { typeSubstitution :: Map TypeVariableId NormalizedType,
+    requestSubstitution :: Map RequestVariableId (Set RequestId),
+    solverErrors :: [SolverError]
   }
   deriving (Show)
 
@@ -97,14 +97,14 @@ deriving instance Show SolverError
 type Substitution = Map TypeVariableId (SemanticType Unresolved)
 
 data BoundedType = BoundedType
-  { boundType :: !(SemanticType Unresolved),
-    boundReason :: !ConstraintReason
+  { boundType :: SemanticType Unresolved,
+    boundReason :: ConstraintReason
   }
   deriving (Eq, Show)
 
 data Bounds = Bounds
-  { lowerBounds :: ![BoundedType],
-    upperBounds :: ![BoundedType]
+  { lowerBounds :: [BoundedType],
+    upperBounds :: [BoundedType]
   }
   deriving (Eq, Show)
 

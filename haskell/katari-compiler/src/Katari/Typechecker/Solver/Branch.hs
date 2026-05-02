@@ -1,3 +1,5 @@
+{- HLINT ignore "Redundant bracket" -}
+
 -- | Constraint branching for the Solver.
 --
 -- When the decomposer is stuck on a constraint of the form
@@ -63,10 +65,10 @@ data BranchSide where
 -- apply, the additional constraints to satisfy, and the updated counters
 -- for fresh-var allocation (both type and request).
 data BranchAlt = BranchAlt
-  { branchSubst :: !Substitution,
-    branchNewConstraints :: !(Set Constraint),
-    branchNextTypeVariableId :: !Int,
-    branchNextRequestVariableId :: !Int
+  { branchSubst :: Substitution,
+    branchNewConstraints :: (Set Constraint),
+    branchNextTypeVariableId :: Int,
+    branchNextRequestVariableId :: Int
   }
   deriving (Show)
 

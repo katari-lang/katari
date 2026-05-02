@@ -8,7 +8,8 @@ import Data.List (find)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.Text (Text)
-import Katari.Compile (CompileInput (..), CompileResult (..), compile)
+import Katari.Compile (CompileInput (..), CompileResult (..), SourceEntry (..), compile)
+import Katari.Diagnostic (Diagnostic (..))
 import Katari.Schema
 import Katari.SemanticType
   ( Resolved,
@@ -176,7 +177,7 @@ descriptionEndToEndSpec = describe "annotation → description (end-to-end)" $ d
         \agent show(@\"the point\" p: Point) -> string {\n\
         \  \"\"\n\
         \}"
-      result = compile CompileInput {sources = Map.singleton "main" src, rootModule = "main"}
+      result = compile CompileInput {sources = Map.singleton "main" SourceEntry {filePath = "main", sourceText = src}, rootModule = "main"}
       entries :: [SchemaEntry]
       entries = case result.schemaEntries of
         Just es -> es

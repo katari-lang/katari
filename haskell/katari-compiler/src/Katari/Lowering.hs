@@ -15,7 +15,7 @@ module Katari.Lowering
   )
 where
 
-import Control.Monad (foldM, forM)
+import Control.Monad (foldM, forM, mapAndUnzipM)
 import Control.Monad.Reader (ReaderT, asks, local, runReaderT)
 import Control.Monad.State.Strict (State, gets, modify, runState)
 import Data.Map.Strict (Map)
@@ -147,34 +147,34 @@ emptyLowerEnv :: LowerEnv
 emptyLowerEnv = LowerEnv {localVars = Map.empty}
 
 data LowerState = LowerState
-  { lsNextBlockId :: !Word32,
-    lsNextVarId :: !Word32,
-    lsNextReqId :: !Word32,
-    lsNextCtorId :: !Word32,
-    lsBlocks :: !(Map BlockId Block),
-    lsVarNames :: !(Map VarId Text),
-    lsBlockNames :: !(Map BlockId Text),
+  { lsNextBlockId :: Word32,
+    lsNextVarId :: Word32,
+    lsNextReqId :: Word32,
+    lsNextCtorId :: Word32,
+    lsBlocks :: Map BlockId Block,
+    lsVarNames :: Map VarId Text,
+    lsBlockNames :: Map BlockId Text,
     -- | Top-level @VariableId@ → its callable @BlockId@. Used at call /
     -- closure sites to resolve agent / req / ext-agent / data-ctor names.
-    lsTopLevelBlocks :: !(Map VariableId BlockId),
+    lsTopLevelBlocks :: Map VariableId BlockId,
     -- | Identifier-pass 'RequestId' → IR-internal 'ReqId'. Allocated at
     -- the start of lowering (one IR ReqId per Identifier RequestId, 1:1
     -- currently). Used by 'lowerHandler' / 'patternToArm' to translate
     -- Identifier resolution into the IR's runtime-dispatch id space.
-    lsReqIds :: !(Map Identifier.RequestId ReqId),
+    lsReqIds :: Map Identifier.RequestId ReqId,
     -- | Identifier-pass 'ConstructorId' → IR-internal 'CtorId'. Same
     -- pattern as 'lsReqIds'.
-    lsCtorIds :: !(Map Identifier.ConstructorId CtorId),
+    lsCtorIds :: Map Identifier.ConstructorId CtorId,
     -- | FFI translation table: qualified name → BlockId. Populated as
     -- top-level callables are registered; surfaces in
     -- 'IRModule.entries'.
-    lsEntries :: !(Map QualifiedName BlockId),
-    lsPrimBlockIds :: !(Map Text BlockId),
+    lsEntries :: Map QualifiedName BlockId,
+    lsPrimBlockIds :: Map Text BlockId,
     -- | Statements for the block currently being lowered, stored in
     -- reverse order. 'emit' prepends; 'runWithFreshBuffer' saves/restores
     -- and reverses at the end.
-    lsCurrentEmitted :: ![Statement],
-    lsErrors :: ![LoweringError]
+    lsCurrentEmitted :: [Statement],
+    lsErrors :: [LoweringError]
   }
 
 initialLowerState :: LowerState
@@ -292,8 +292,8 @@ lookupLocal variableId = asks (Map.lookup variableId . (.localVars))
 -- | Outcome of resolving a variable reference. An error has already been
 -- recorded via 'recordError' before 'ResolvedVarUnresolved' is returned.
 data ResolvedVar where
-  ResolvedVarLocal :: !VarId -> ResolvedVar
-  ResolvedVarTopLevel :: !BlockId -> ResolvedVar
+  ResolvedVarLocal :: VarId -> ResolvedVar
+  ResolvedVarTopLevel :: BlockId -> ResolvedVar
   ResolvedVarUnresolved :: ResolvedVar
 
 -- | Resolve a 'NameRefResolution' to a 'ResolvedVar'. Consults the local Reader
@@ -502,8 +502,11 @@ registerDeclarationKinds :: ZonkResult -> Lower ()
 registerDeclarationKinds zonkResult =
   mapM_ registerModule (Map.toList zonkResult.zonkedModules)
   where
-    registerModule (_, m) = do
-      mapM_ (registerDecl m.moduleName) m.declarations
+    registerModule (moduleId, m) = do
+      let moduleName = case Map.lookup moduleId zonkResult.zonkedModuleNames of
+            Just name -> name
+            Nothing -> error "registerDeclarationKinds: ModuleId not in zonkedModuleNames (internal invariant violated)"
+      mapM_ (registerDecl moduleName) m.declarations
 
     registerDecl :: Text -> AST.Declaration Zonked -> Lower ()
     registerDecl moduleName = \case
@@ -1295,7 +1298,7 @@ lowerPattern = \case
   AST.PatternWildcard _ -> pure (MatchPatternAny, [])
   AST.PatternLiteral lp -> pure (MatchPatternLiteral (literalValueToIR lp.value), [])
   AST.PatternTuple tp -> do
-    (subs, localss) <- unzip <$> mapM lowerPattern tp.elements
+    (subs, localss) <- mapAndUnzipM lowerPattern tp.elements
     pure (MatchPatternTuple subs, concat localss)
   AST.PatternQualifiedConstructor qp -> do
     irCtorId <- case qp.constructorName.resolution of

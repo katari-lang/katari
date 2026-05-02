@@ -5,8 +5,9 @@ import Data.Maybe (isJust, isNothing)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Katari.AST
-import Katari.Lexer (LexerError (..))
-import Katari.Parser (ParseError (..), ParseErrorReason (..), parseModuleStrict)
+import Katari.Diagnostic (Diagnostic (..))
+import Katari.Lexer qualified as Lexer
+import Katari.Parser qualified as Parser
 import Katari.SourceSpan (HasSourceSpan (..), Position (..), SourceSpan (..))
 import Test.Hspec
 
@@ -20,25 +21,19 @@ import Test.Hspec
 nameText :: NameRef Parsed symbol -> Text
 nameText ref = ref.text
 
-parse :: Text -> Either [ParseError] (Module Parsed)
-parse = parseModuleStrict "<test>"
+parse :: Text -> Either [Diagnostic] (Module Parsed)
+parse src =
+  let (stream, lexErrors) = Lexer.lex "<test>" src
+      (parsed, parseErrors) = Parser.parse "<test>" stream
+      allDiags = map Lexer.toDiagnostic lexErrors <> map Parser.toDiagnostic parseErrors
+  in case allDiags of
+       [] -> Right parsed
+       errs -> Left errs
 
--- | Flatten all structured errors into a single string for substring matching.
+-- | Flatten diagnostics into a string for substring matching.
 -- Only used inside 'shouldFailWith'; do not use this for new tests.
-renderParseErrors :: [ParseError] -> String
-renderParseErrors = unlines . map renderOne
-  where
-    renderOne (ParseErrorLex le) = renderLexError le
-    renderOne (ParseErrorAtDeclaration _ r) = renderReason r
-    renderOne (ParseErrorAtStatement _ r) = renderReason r
-    renderLexError = \case
-      LexerErrorUnterminatedTemplate _ -> "unterminated template literal"
-      LexerErrorUnterminatedString _ -> "unterminated string literal"
-      LexerErrorInvalidUnicodeEscape _ seq_ -> "invalid unicode escape: " ++ T.unpack seq_
-      LexerErrorUnrecognizedCharacter _ c -> "unrecognized character: " ++ [c]
-    renderReason r =
-      maybe "" T.unpack r.unexpected
-        ++ if null r.expected then "" else " expected: " ++ unwords (map T.unpack r.expected)
+renderParseErrors :: [Diagnostic] -> String
+renderParseErrors = T.unpack . T.unlines . map (.message)
 
 shouldSucceed :: Text -> IO (Module Parsed)
 shouldSucceed src = case parse src of
@@ -2028,6 +2023,4 @@ multilineStringRecovery = describe "multiline string recovery" $ do
       Left errors ->
         any isUnterminated errors `shouldBe` True
   where
-    isUnterminated = \case
-      ParseErrorLex (LexerErrorUnterminatedString _) -> True
-      _ -> False
+    isUnterminated d = d.code == "K0002"

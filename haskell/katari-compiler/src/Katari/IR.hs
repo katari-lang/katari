@@ -76,7 +76,6 @@ import Data.Aeson
     genericParseJSON,
     genericToJSON,
   )
-import Data.Char (toLower)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
@@ -624,13 +623,7 @@ instance FromJSON ContKind where
 -- Aeson option helpers
 -- ===========================================================================
 
--- | Lowercase the first character of a string. Used to convert
--- PascalCase constructor names to camelCase JSON tags.
-lowerHead :: String -> String
-lowerHead [] = []
-lowerHead (c : cs) = toLower c : cs
-
--- | Common record options: camelCase fields (already in source), omit
+-- | Common record options: fields as-is, omit
 -- @Nothing@ from output.
 irOptions :: Options
 irOptions =
@@ -640,23 +633,22 @@ irOptions =
     }
 
 -- | TaggedObject options for record-style sums. Constructor names are
--- lowercased at the first character to produce camelCase tags,
--- e.g. @"statementCall"@, @"matchPatternAny"@.
+-- kept as-is (PascalCase), e.g. @"StatementCall"@, @"MatchPatternAny"@.
 sumOptions :: Options
 sumOptions =
   defaultOptions
     { sumEncoding = TaggedObject "kind" "contents",
       fieldLabelModifier = id,
-      constructorTagModifier = lowerHead,
+      constructorTagModifier = id,
       omitNothingFields = True
     }
 
--- | Enum (no fields) options: encode as bare camelCase strings,
--- e.g. @"exitKindReturn"@, @"contKindNext"@.
+-- | Enum (no fields) options: encode as bare PascalCase strings,
+-- e.g. @"ExitKindReturn"@, @"ContKindNext"@.
 enumOptions :: Options
 enumOptions =
   defaultOptions
     { sumEncoding = UntaggedValue,
       allNullaryToStringTag = True,
-      constructorTagModifier = lowerHead
+      constructorTagModifier = id
     }

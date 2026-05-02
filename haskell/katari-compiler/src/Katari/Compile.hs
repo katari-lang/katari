@@ -28,6 +28,7 @@
 module Katari.Compile
   ( -- * Inputs / outputs
     ModuleName,
+    SourceEntry (..),
     CompileInput (..),
     CompileResult (..),
 
@@ -56,12 +57,13 @@ import Katari.AST
   )
 import Katari.Diagnostic (Diagnostic, diagnosticError, hasErrors)
 import Katari.IR (IRModule)
+import Katari.Lexer as Lexer
 import Katari.Lowering (lowerProgram)
 import Katari.Lowering qualified as Lowering
 import Katari.Parser qualified as Parser
 import Katari.Schema (SchemaEntry, buildSchemas)
 import Katari.SourceSpan (HasSourceSpan (..), Position (..), SourceSpan (..))
-import Katari.Typechecker.ConstraintGenerator (ConstraintGenResult (..), generateConstraints)
+import Katari.Typechecker.ConstraintGenerator (generateConstraints)
 import Katari.Typechecker.ConstraintGenerator qualified as CG
 import Katari.Typechecker.Exhaustive (checkExhaustive)
 import Katari.Typechecker.Exhaustive qualified as Exhaustive
@@ -81,36 +83,45 @@ import Katari.Typechecker.Zonker qualified as Zonker
 -- responsibility.
 type ModuleName = Text
 
+-- | 1 ソースファイル分のエントリ。
+-- コンパイラは 'filePath' と 'moduleName' の間に一切の関係を仮定しない。
+-- 'filePath' は診断スパン・Query 層で使用される実ファイルパスを表す。
+data SourceEntry = SourceEntry
+  { filePath :: FilePath,
+    sourceText :: Text
+  }
+  deriving (Show)
+
 data CompileInput = CompileInput
-  { -- | Module name → source text. The map is treated as the complete
+  { -- | Module name → source entry. The map is treated as the complete
     -- world: any module not present here is "missing" from the
     -- compiler's point of view.
-    sources :: !(Map ModuleName Text),
+    sources :: Map ModuleName SourceEntry,
     -- | The module that drives the build. Used as the IR module name and
     -- as the root for missing-import detection.
-    rootModule :: !ModuleName
+    rootModule :: ModuleName
   }
   deriving (Show)
 
 data CompileResult = CompileResult
   { -- | The lowered IR. 'Nothing' if any error-severity diagnostic was
     -- raised before lowering succeeded.
-    irModule :: !(Maybe IRModule),
+    irModule :: Maybe IRModule,
     -- | API-surface schema entries for AI tool calling and runtime validation.
     -- 'Nothing' under the same condition as 'irModule'.
-    schemaEntries :: !(Maybe [SchemaEntry]),
+    schemaEntries :: Maybe [SchemaEntry],
     -- | Unified diagnostic stream, ordered roughly by phase
     -- (parse → identify → constrain → solve → zonk → lower).
-    diagnostics :: ![Diagnostic],
+    diagnostics :: [Diagnostic],
     -- | Name resolution result. Always returned so LSP / CLI can list
     -- agents, detect unused declarations, and perform qualified-name
     -- lookup without re-running the compiler.
-    identifierResult :: !(Maybe IdentifierResult),
+    identifierResult :: Maybe IdentifierResult,
     -- | Solver output for LSP type-on-hover. Always returned (even when
     -- diagnostics are present) so the editor can show partial results.
-    solverResult :: !(Maybe SolverResult),
+    solverResult :: Maybe SolverResult,
     -- | Zonker output for LSP type-on-hover. Always returned.
-    zonkResult :: !(Maybe ZonkResult)
+    zonkResult :: Maybe ZonkResult
   }
 
 -- ===========================================================================
@@ -129,8 +140,8 @@ compile input =
       missingDiags = detectMissingImports parsed
       (idResult, idErrors) = identify parsed
       idDiags = map Identifier.toDiagnostic idErrors
-      cgResult = generateConstraints idResult
-      cgDiags = map CG.toDiagnostic cgResult.errors
+      (cgResult, cgErrors) = generateConstraints idResult
+      cgDiags = map CG.toDiagnostic cgErrors
       solverResult_ = solve cgResult
       solverDiags = map Solver.toDiagnostic solverResult_.solverErrors
       zonkResult_ = zonk idResult cgResult solverResult_
@@ -169,24 +180,20 @@ compile input =
 -- Parse helper
 -- ===========================================================================
 
--- | Parse every source in the input map, threading the 'ModuleName' as
--- the @filePath@ field used by error spans (the compiler is otherwise
--- file-system-agnostic).
-parseSources :: Map ModuleName Text -> (Map ModuleName (Module Parsed), [Diagnostic])
+-- | Parse every source in the input map. Each 'SourceEntry' carries the
+-- real 'FilePath' that is embedded into error spans; the compiler makes
+-- no assumption about the relationship between a 'ModuleName' and its
+-- 'FilePath'.
+parseSources :: Map ModuleName SourceEntry -> (Map ModuleName (Module Parsed), [Diagnostic])
 parseSources sources =
-  let parseEntry (modName, src) =
-        let (m, errs) = Parser.parseModule (renderFilePath modName) src
-         in ((modName, m), map Parser.toDiagnostic errs)
+  let parseEntry (modName, entry) =
+        let (stream, lexErrors) = Lexer.lex entry.filePath entry.sourceText
+            (m, errs) = Parser.parse entry.filePath stream
+         in ((modName, m), map Parser.toDiagnostic errs <> map Lexer.toDiagnostic lexErrors)
       parsedEntries = map parseEntry (Map.toList sources)
       modules = Map.fromList (map fst parsedEntries)
       diags = concatMap snd parsedEntries
    in (modules, diags)
-
--- | Render a 'ModuleName' as the synthetic file path used for parse
--- diagnostics. Embedders that have a real path can re-rewrite the
--- diagnostic spans afterward.
-renderFilePath :: ModuleName -> FilePath
-renderFilePath modName = "module:" <> Text.unpack modName
 
 -- ===========================================================================
 -- Import-cycle detection

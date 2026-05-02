@@ -6,11 +6,13 @@ import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Katari.AST
-import Katari.Parser (parseModuleStrict)
+import Katari.Lexer qualified as Lexer
+import Katari.Parser qualified as Parser
 import Katari.SemanticType
   ( RequestVariableId (..),
     Resolved,
     SemanticRequest (..),
+    SemanticRequestElement (..),
     SemanticType (..),
     TypeVariableId (..),
   )
@@ -54,11 +56,14 @@ import Test.Hspec
 -- | Run parser → identify → constraint-gen on a single-module program.
 -- Aborts the spec if parse / identify fails.
 pipeline :: Text -> IO (IdentifierResult, ConstraintGenResult)
-pipeline src = case parseModuleStrict "<test>" src of
-  Left errs -> fail ("parse failure: " ++ show (map show errs))
-  Right parsed -> case identify (Map.singleton "main" parsed) of
-    (idResult, []) -> pure (idResult, generateConstraints idResult)
-    (_, errs) -> fail ("identify failure: " ++ show errs)
+pipeline src =
+  let (stream, _) = Lexer.lex "<test>" src
+      (parsed, parseErrors) = Parser.parse "<test>" stream
+  in case parseErrors of
+    (_:_) -> fail ("parse failure: " ++ show parseErrors)
+    [] -> case identify (Map.singleton "main" parsed) of
+      (idResult, []) -> let (cg, _) = generateConstraints idResult in pure (idResult, cg)
+      (_, errs) -> fail ("identify failure: " ++ show errs)
 
 -- | Build a 'SolverResult' that satisfies the Solver totality contract for the
 -- given 'ConstraintGenResult'. Every TypeVariableId / RequestVariableId allocated by
@@ -115,43 +120,43 @@ expressionTypes m = concatMap declTypes m.declarations
 
     blockTypes blk =
       concatMap stmtTypes blk.statements
-        ++ maybe [] ExpressionTypes blk.returnExpression
+        ++ maybe [] exprTypes blk.returnExpression
         ++ maybe [] whereTypes blk.whereBlock
 
     whereTypes wb =
-      concatMap (ExpressionTypes . (.initial)) wb.stateVariables
+      concatMap (exprTypes . (.initial)) wb.stateVariables
         ++ concatMap (blockTypes . (.body)) wb.handlers
 
     stmtTypes = \case
-      StatementExpression e -> ExpressionTypes e
-      StatementLet s -> ExpressionTypes s.value
-      StatementReturn s -> ExpressionTypes s.value
-      StatementBreak s -> ExpressionTypes s.value
-      StatementNext s -> ExpressionTypes s.value
+      StatementExpression e -> exprTypes e
+      StatementLet s -> exprTypes s.value
+      StatementReturn s -> exprTypes s.value
+      StatementBreak s -> exprTypes s.value
+      StatementNext s -> exprTypes s.value
       _ -> []
 
-    ExpressionTypes e =
+    exprTypes e =
       typeOfExpression e : case e of
-        ExpressionTuple t -> concatMap ExpressionTypes t.elements
-        ExpressionArray a -> concatMap ExpressionTypes a.elements
-        ExpressionCall c -> ExpressionTypes c.callee ++ concatMap (ExpressionTypes . (.value)) c.arguments
-        ExpressionBinaryOperator b -> ExpressionTypes b.left ++ ExpressionTypes b.right
-        ExpressionUnaryOperator u -> ExpressionTypes u.operand
+        ExpressionTuple t -> concatMap exprTypes t.elements
+        ExpressionArray a -> concatMap exprTypes a.elements
+        ExpressionCall c -> exprTypes c.callee ++ concatMap (exprTypes . (.value)) c.arguments
+        ExpressionBinaryOperator b -> exprTypes b.left ++ exprTypes b.right
+        ExpressionUnaryOperator u -> exprTypes u.operand
         ExpressionIf i ->
-          ExpressionTypes i.condition
+          exprTypes i.condition
             ++ blockTypes i.thenBlock
             ++ maybe [] blockTypes i.elseBlock
         ExpressionMatch mexpr ->
-          ExpressionTypes mexpr.subject
+          exprTypes mexpr.subject
             ++ concatMap (blockTypes . (.body)) mexpr.cases
         ExpressionFor f ->
-          concatMap (ExpressionTypes . (.source)) f.inBindings
-            ++ concatMap (ExpressionTypes . (.initial)) f.varBindings
+          concatMap (exprTypes . (.source)) f.inBindings
+            ++ concatMap (exprTypes . (.initial)) f.varBindings
             ++ blockTypes f.body
             ++ maybe [] blockTypes f.thenBlock
         ExpressionBlock b -> blockTypes b.block
-        ExpressionFieldAccess fa -> ExpressionTypes fa.object
-        ExpressionIndexAccess ix -> ExpressionTypes ix.array ++ ExpressionTypes ix.index
+        ExpressionFieldAccess fa -> exprTypes fa.object
+        ExpressionIndexAccess ix -> exprTypes ix.array ++ exprTypes ix.index
         _ -> []
 
 typeOfExpression :: Expression Zonked -> SemanticType Resolved
@@ -267,7 +272,7 @@ denormaliseUnit = describe "denormalise" $ do
       `shouldBe` SemanticTypeFunction
         (Map.singleton "x" SemanticTypeInteger)
         SemanticTypeString
-        (SemanticRequest Set.empty Set.empty)
+        (SemanticRequest Set.empty)
 
 -- ---------------------------------------------------------------------------
 -- Basic zonk: literal expressions don't depend on substitution
@@ -363,9 +368,8 @@ requestSubstitutionSpec = describe "request substitution" $ do
               }
         zr = zonk idResult cg (mkTotalSolverResult cg [(tApp, appFnNT)] [])
     case Map.lookup appVid zr.zonkedTypeEnvironment of
-      Just (SemanticTypeFunction _ _ eff) -> do
-        eff.requestVars `shouldBe` Set.empty
-        eff.requestReqs `shouldBe` Set.singleton fetchReqId
+      Just (SemanticTypeFunction _ _ eff) ->
+        eff `shouldBe` SemanticRequest (Set.singleton (SemanticRequestElementConcrete fetchReqId))
       other -> expectationFailure ("app not bound to function type: " ++ show other)
     zr.zonkErrors `shouldBe` []
 

@@ -8,7 +8,8 @@ import Data.Maybe (isJust, isNothing)
 import Data.Text (Text)
 import Katari.AST
 import Katari.Id (QualifiedName)
-import Katari.Parser (parseModuleStrict)
+import Katari.Lexer qualified as Lexer
+import Katari.Parser qualified as Parser
 import Katari.Typechecker.Identifier
 import Test.Hspec
 
@@ -18,9 +19,12 @@ import Test.Hspec
 
 -- | Parse a single-module program, fail the spec if it doesn't parse.
 parseOne :: Text -> IO (Module Parsed)
-parseOne src = case parseModuleStrict "<test>" src of
-  Left errs -> fail ("parse failure: " ++ show (map show errs))
-  Right m -> pure m
+parseOne src =
+  let (stream, _) = Lexer.lex "<test>" src
+      (parsed, parseErrors) = Parser.parse "<test>" stream
+  in case parseErrors of
+    (_:_) -> fail ("parse failure: " ++ show parseErrors)
+    [] -> pure parsed
 
 -- | Run identify on a single module named "main".
 --
@@ -39,9 +43,12 @@ identifyMany :: [(Text, Text)] -> IO (Either [IdentifierError] IdentifierResult)
 identifyMany sources = do
   parsedList <-
     mapM
-      ( \(name, src) -> case parseModuleStrict "<test>" src of
-          Left errs -> fail ("parse failure for " ++ show name ++ ": " ++ show (map show errs))
-          Right m -> pure (name, m)
+      ( \(name, src) ->
+          let (stream, _) = Lexer.lex "<test>" src
+              (parsed, parseErrors) = Parser.parse "<test>" stream
+          in case parseErrors of
+            (_:_) -> fail ("parse failure for " ++ show name ++ ": " ++ show parseErrors)
+            [] -> pure (name, parsed)
       )
       sources
   pure $ case identify (Map.fromList parsedList) of

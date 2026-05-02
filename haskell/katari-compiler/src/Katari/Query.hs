@@ -82,13 +82,13 @@ import Katari.Typechecker.Zonker (ZonkResult (..))
 -- | Information surfaced on hover over a source position.
 data HoverInfo = HoverInfo
   { -- | Inferred type of the innermost expression at the position.
-    hoverType :: !(Maybe (SemanticType Resolved)),
+    hoverType :: Maybe (SemanticType Resolved),
     -- | The smallest span that contains the queried position.
-    hoverNameSpan :: !SourceSpan,
+    hoverNameSpan :: SourceSpan,
     -- | Source span of the definition this reference points to.
-    hoverDefinitionSpan :: !(Maybe SourceSpan),
+    hoverDefinitionSpan :: Maybe SourceSpan,
     -- | Fully qualified name of the symbol, if it is a top-level declaration.
-    hoverQualifiedName :: !(Maybe Text)
+    hoverQualifiedName :: Maybe Text
   }
   deriving (Show)
 
@@ -107,11 +107,11 @@ lookupAtPosition zonkResult filePath position = do
 -- | Pre-built index of every name-reference occurrence in all modules.
 -- Build once after compilation, then query cheaply with 'findReferences'.
 data OccurrenceIndex = OccurrenceIndex
-  { variableOccurrences :: !(Map VariableId [SourceSpan]),
-    typeOccurrences :: !(Map TypeId [SourceSpan]),
-    moduleOccurrences :: !(Map ModuleId [SourceSpan]),
-    requestOccurrences :: !(Map RequestId [SourceSpan]),
-    constructorOccurrences :: !(Map ConstructorId [SourceSpan])
+  { variableOccurrences :: Map VariableId [SourceSpan],
+    typeOccurrences :: Map TypeId [SourceSpan],
+    moduleOccurrences :: Map ModuleId [SourceSpan],
+    requestOccurrences :: Map RequestId [SourceSpan],
+    constructorOccurrences :: Map ConstructorId [SourceSpan]
   }
   deriving (Show)
 
@@ -141,11 +141,11 @@ collectModuleOccurrences moduleData index =
 
 -- | Which resolved identifier sits at a source position.
 data ResolvedReference where
-  ResolvedReferenceVariable :: !VariableId -> ResolvedReference
-  ResolvedReferenceType :: !TypeId -> ResolvedReference
-  ResolvedReferenceModule :: !ModuleId -> ResolvedReference
-  ResolvedReferenceRequest :: !RequestId -> ResolvedReference
-  ResolvedReferenceConstructor :: !ConstructorId -> ResolvedReference
+  ResolvedReferenceVariable :: VariableId -> ResolvedReference
+  ResolvedReferenceType :: TypeId -> ResolvedReference
+  ResolvedReferenceModule :: ModuleId -> ResolvedReference
+  ResolvedReferenceRequest :: RequestId -> ResolvedReference
+  ResolvedReferenceConstructor :: ConstructorId -> ResolvedReference
   deriving (Eq, Show)
 
 -- | Identify which resolved identifier (if any) sits at a source position.
@@ -268,7 +268,7 @@ hoverFromExpression zonkResult position expression
                   hoverNameSpan = ve.name.sourceSpan,
                   hoverDefinitionSpan = fmap (.variableSourceSpan) variableData,
                   hoverQualifiedName =
-                    variableData >>= (.variableQualifiedName) >>= (Just . renderQualifiedName)
+                    variableData >>= (.variableQualifiedName) >>= Just . renderQualifiedName
                 }
       ExpressionCall ce ->
         hoverFromExpression zonkResult position ce.callee
@@ -404,7 +404,7 @@ collectDeclarationOccurrences declaration index = case declaration of
 collectBlockOccurrences :: Block Zonked -> OccurrenceIndex -> OccurrenceIndex
 collectBlockOccurrences block index =
   let withStatements = foldr collectStatementOccurrences index block.statements
-   in maybe withStatements (flip collectExpressionOccurrences withStatements) block.returnExpression
+   in maybe withStatements (`collectExpressionOccurrences` withStatements) block.returnExpression
 
 collectStatementOccurrences :: Statement Zonked -> OccurrenceIndex -> OccurrenceIndex
 collectStatementOccurrences statement index = case statement of
@@ -440,7 +440,7 @@ collectExpressionOccurrences expression index = case expression of
       ie.condition
       ( collectBlockOccurrences
           ie.thenBlock
-          (maybe index (flip collectBlockOccurrences index) ie.elseBlock)
+          (maybe index (`collectBlockOccurrences` index) ie.elseBlock)
       )
   ExpressionMatch me ->
     collectExpressionOccurrences
@@ -472,10 +472,10 @@ addVariableOccurrence nameRef index = case nameRef.resolution of
 spanContains :: SourceSpan -> Position -> Bool
 spanContains sourceSpan position =
   ( sourceSpan.start.line < position.line
-      || (sourceSpan.start.line == position.line && sourceSpan.start.column <= position.column)
+      || sourceSpan.start.line == position.line && sourceSpan.start.column <= position.column
   )
     && ( position.line < sourceSpan.end.line
-           || (position.line == sourceSpan.end.line && position.column <= sourceSpan.end.column)
+           || position.line == sourceSpan.end.line && position.column <= sourceSpan.end.column
        )
 
 orElse :: Maybe a -> Maybe a -> Maybe a
