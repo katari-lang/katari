@@ -16,6 +16,7 @@ import Data.Void (Void)
 import Katari.Diagnostic (Diagnostic, diagnosticError)
 import Katari.SourceSpan (HasSourceSpan (..), Position (..), SourceSpan (..))
 import Numeric (readHex, showHex)
+import Safe (headMay)
 import Text.Megaparsec
   ( MonadParsec (..),
     ParsecT,
@@ -27,7 +28,6 @@ import Text.Megaparsec
     anySingle,
     atEnd,
     choice,
-    empty,
     getSourcePos,
     many,
     manyTill,
@@ -246,10 +246,8 @@ type Lexer = ParsecT Void Text (State LexerState)
 -- | Topmost context, or @Nothing@ if the stack is empty (= top-level code).
 lexGetTopContext :: Lexer (Maybe LexerContext)
 lexGetTopContext = do
-  state_ <- get
-  pure $ case state_.contextStack of
-    topmost : _ -> Just topmost
-    [] -> Nothing
+  state <- get
+  pure $ headMay state.contextStack
 
 lexPushContext :: LexerContext -> Lexer ()
 lexPushContext context = modify' $ \LexerState {contextStack, accumulatedErrors} ->
@@ -258,15 +256,23 @@ lexPushContext context = modify' $ \LexerState {contextStack, accumulatedErrors}
       accumulatedErrors
     }
 
+-- | Replace the topmost context. Empty-stack updates are silently ignored
+-- (the only caller paths reach this from a known mode; if recovery removed
+-- the context already we'd rather no-op than panic).
+lexModifyTopContext :: (LexerContext -> LexerContext) -> Lexer ()
+lexModifyTopContext modifier = modify' $ \state -> case state.contextStack of
+  (topmost : remaining) -> state {contextStack = modifier topmost : remaining}
+  [] -> state
+
 -- | Pop the topmost context. Empty-stack pops are *silently ignored* rather
 -- than panicking — they only happen when recovery synthesizes a close for an
 -- already-popped (or never-pushed) context, and treating that as a hard error
 -- would defeat the point of recovery. The resulting incoherence is bounded:
 -- subsequent KatariToken lexing simply runs in @Nothing@ context (= top-level).
 lexPopContext :: Lexer ()
-lexPopContext = modify' $ \state_ -> case state_.contextStack of
-  (_ : remaining) -> state_ {contextStack = remaining}
-  [] -> state_
+lexPopContext = modify' $ \state -> case state.contextStack of
+  (_ : remaining) -> state {contextStack = remaining}
+  [] -> state
 
 -- | Append a recovered error to the accumulator (kept in reverse order).
 lexRecordError :: LexerError -> Lexer ()
@@ -285,16 +291,20 @@ lexRecordError lexerError = modify' $ \LexerState {contextStack, accumulatedErro
 -- The 'Either' from megaparsec's @runParser@ is collapsed: a hard failure
 -- (which the recovery design tries hard to avoid) yields an empty KatariToken
 -- list. Any errors accumulated up to that point are still returned.
-runLexer :: FilePath -> Text -> ([WithSourceSpan KatariToken], [LexerError])
-runLexer filePath input =
+lex :: FilePath -> Text -> (KatariTokenStream, [LexerError])
+lex filePath input =
   let normalized = T.replace "\r\n" "\n" input
       (lexResult, finalState) =
         runState
           (runParserT (lexAllTokens filePath) filePath normalized)
           initialLexerState
    in case lexResult of
-        Right tokens_ -> (tokens_, reverse finalState.accumulatedErrors)
-        Left _ -> ([], reverse finalState.accumulatedErrors)
+        Right tokens_ ->
+          let stream = KatariTokenStream {input = normalized, tokens = insertVirtualSemicolons tokens_}
+           in (stream, reverse finalState.accumulatedErrors)
+        Left _ ->
+          let stream = KatariTokenStream {input = normalized, tokens = []}
+           in (stream, reverse finalState.accumulatedErrors)
 
 lexAllTokens :: FilePath -> Lexer [WithSourceSpan KatariToken]
 lexAllTokens filePath = do
@@ -310,7 +320,7 @@ lexAllTokens filePath = do
           lexSkipInterTokenSpace
           case maybeToken of
             Nothing -> loop
-            Just tok -> (tok :) <$> loop
+            Just token_ -> (token_ :) <$> loop
 
 -- | Skip whitespace and comments between KatariTokens — but only at top-level or in
 -- a template-expression context. Inside template string contexts (single- or
@@ -388,7 +398,7 @@ lexNormalToken filePath startSourcePos =
       Just <$> lexBrace,
       Just <$> lexTemplateStart,
       Just . KatariTokenStringLiteral <$> try lexMultilineStringLiteral,
-      Just . KatariTokenStringLiteral <$> recoverableStringLiteral filePath startSourcePos,
+      Just . KatariTokenStringLiteral <$> lexStringLiteral filePath startSourcePos,
       Just <$> lexNumber,
       Just <$> lexIdentifierOrKeyword,
       Just <$> lexPunctuationOrOperator,
@@ -432,14 +442,6 @@ lexBrace = do
           lexModifyTopContext (\_ -> LexerContextTemplateExpression (depth - 1))
           pure (KatariTokenPunctuation PunctuationRightBrace)
         _ -> pure (KatariTokenPunctuation PunctuationRightBrace)
-
--- | Replace the topmost context. Empty-stack updates are silently ignored
--- (the only caller paths reach this from a known mode; if recovery removed
--- the context already we'd rather no-op than panic).
-lexModifyTopContext :: (LexerContext -> LexerContext) -> Lexer ()
-lexModifyTopContext modifier = modify' $ \state_ -> case state_.contextStack of
-  (topmost : remaining) -> state_ {contextStack = modifier topmost : remaining}
-  [] -> state_
 
 -- | Start of a template literal: `f"""` or `f"`.
 --
@@ -660,8 +662,8 @@ spanBetween start_ end_ =
 -- forward progress in 'lexNormalToken'\'s 'choice'. So we commit to the
 -- string-literal path first, then wrap only the body+closing-quote in
 -- recovery.
-recoverableStringLiteral :: FilePath -> SourcePos -> Lexer Text
-recoverableStringLiteral _filePath startSourcePos = do
+lexStringLiteral :: FilePath -> SourcePos -> Lexer Text
+lexStringLiteral _filePath startSourcePos = do
   _ <- char '"'
   withRecovery handler stringBody
   where
@@ -679,7 +681,7 @@ recoverableStringLiteral _filePath startSourcePos = do
 -- | Recoverable multi-line string literal (@"""...\n...\n"""@).
 --
 -- The opener (@"""@ + @\n@) is consumed BEFORE @withRecovery@ engages, for
--- the same reason as 'recoverableStringLiteral': a recovery handler that
+-- the same reason as 'lexStringLiteral': a recovery handler that
 -- runs without first consuming a unique prefix would let any input pretend
 -- to be an empty multi-line string and break forward progress in
 -- 'lexNormalToken''s 'choice'. The caller's outer @try@ handles the case
@@ -738,19 +740,9 @@ lexEscapeCharacter = do
       case classifySurrogate firstCodePoint of
         SurrogateClassNone -> pure (chr firstCodePoint)
         SurrogateClassHigh -> do
-          followedByLow <-
-            optional . try $ do
-              _ <- char '\\'
-              _ <- char 'u'
-              hex1 <- hexDigitChar
-              hex2 <- hexDigitChar
-              hex3 <- hexDigitChar
-              hex4 <- hexDigitChar
-              case readHex [hex1, hex2, hex3, hex4] of
-                [(codePoint, "")] -> pure codePoint
-                _ -> empty
+          maybeSecond <- optional . try $ char '\\' *> char 'u' *> fourHexRaw
           endSourcePos <- getSourcePos
-          case followedByLow of
+          case maybeSecond of
             Just secondCodePoint
               | SurrogateClassLow <- classifySurrogate secondCodePoint ->
                   pure
@@ -760,34 +752,23 @@ lexEscapeCharacter = do
                             + (secondCodePoint - 0xDC00)
                         )
                     )
-            _ -> do
-              lexRecordError
-                ( LexerErrorInvalidUnicodeEscape
-                    (spanBetween startSourcePos endSourcePos)
-                    (T.pack ("\\u" <> showHex firstCodePoint ""))
-                )
-              pure '\xFFFD'
+            _ -> invalidSurrogate startSourcePos endSourcePos firstCodePoint
         SurrogateClassLow -> do
           endSourcePos <- getSourcePos
-          lexRecordError
-            ( LexerErrorInvalidUnicodeEscape
-                (spanBetween startSourcePos endSourcePos)
-                (T.pack ("\\u" <> showHex firstCodePoint ""))
-            )
-          pure '\xFFFD'
+          invalidSurrogate startSourcePos endSourcePos firstCodePoint
+
+    fourHexRaw = do
+      hex1 <- hexDigitChar
+      hex2 <- hexDigitChar
+      hex3 <- hexDigitChar
+      hex4 <- hexDigitChar
+      pure . fst . head $ readHex [hex1, hex2, hex3, hex4]
 
     readFourHex startSourcePos = do
-      maybeHex <-
-        optional . try $ do
-          hex1 <- hexDigitChar
-          hex2 <- hexDigitChar
-          hex3 <- hexDigitChar
-          hex4 <- hexDigitChar
-          pure [hex1, hex2, hex3, hex4]
-      case maybeHex of
-        Just hex
-          | [(codePoint, "")] <- readHex hex -> pure codePoint
-        _ -> do
+      result <- optional (try fourHexRaw)
+      case result of
+        Just codePoint -> pure codePoint
+        Nothing -> do
           endSourcePos <- getSourcePos
           lexRecordError
             ( LexerErrorInvalidUnicodeEscape
@@ -795,6 +776,14 @@ lexEscapeCharacter = do
                 (T.pack "\\u????")
             )
           pure 0xFFFD
+
+    invalidSurrogate startSourcePos endSourcePos codePoint = do
+      lexRecordError
+        ( LexerErrorInvalidUnicodeEscape
+            (spanBetween startSourcePos endSourcePos)
+            (T.pack ("\\u" <> showHex codePoint ""))
+        )
+      pure '\xFFFD'
 
 data SurrogateClass where
   SurrogateClassNone :: SurrogateClass
@@ -942,7 +931,7 @@ nextSourcePos remainingTokens allTokens fallback = case remainingTokens of
     _ -> let WithSourceSpan span_ _ = last allTokens in mkSourcePos span_.filePath span_.end
 
 mkSourcePos :: FilePath -> Position -> SourcePos
-mkSourcePos filePath position = SourcePos filePath (mkPos position.line) (mkPos position.column)
+mkSourcePos filePath position = SourcePos {sourceName = filePath, sourceLine = mkPos position.line, sourceColumn = mkPos position.column}
 
 -- | Extract the source line prefix up to (but not including) the column of
 -- the given SourcePos. Used to feed megaparsec's error message formatter so

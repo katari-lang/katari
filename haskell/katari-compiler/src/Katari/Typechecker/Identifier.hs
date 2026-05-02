@@ -34,7 +34,6 @@ module Katari.Typechecker.Identifier
     RequestData (..),
     ConstructorData (..),
     IdentifierResult (..),
-    mkIdentifierResult,
     IdentifierError (..),
 
     -- * Diagnostics
@@ -101,7 +100,7 @@ import Katari.SourceSpan (HasSourceSpan (..), SourceSpan (..))
 -- | The slots a single name may simultaneously occupy. Invariants:
 --
 --   * A second registration into the same slot for the same name is an
---     'ErrorDuplicateName'.
+--     'ErrorDuplicateName'. (exeptions: shadwing)
 --   * variable + module coexistence is forbidden (it would silently change the
 --     meaning of @name.foo@ from qualified module access to field access).
 --   * Other combinations are allowed: a @data Foo()@ declaration occupies
@@ -183,6 +182,7 @@ data TypeData = TypeData
 data RequestData = RequestData
   { requestQualifiedName :: QualifiedName,
     requestSourceSpan :: SourceSpan,
+    -- | Request Id -> Variable Id
     requestVariableId :: VariableId
   }
   deriving (Eq, Show)
@@ -527,21 +527,20 @@ mergeSymbol newPos name existing incoming = do
         constructorSymbol = mergedConstructor
       }
   where
-    reportFromVariable variableId = do
-      maybeSpan <- gets (fmap (.variableSourceSpan) . Map.lookup variableId . (.variables))
+    reportFrom ::
+      Ord k =>
+      (IdentifierState -> Map k v) ->
+      (v -> SourceSpan) ->
+      k ->
+      Identifier ()
+    reportFrom getMap getSpan xId = do
+      maybeSpan <- gets (fmap getSpan . Map.lookup xId . getMap)
       maybe (pure ()) (emitError . ErrorDuplicateName newPos name) maybeSpan
-    reportFromType typeId = do
-      maybeSpan <- gets (fmap (.typeSourceSpan) . Map.lookup typeId . (.types))
-      maybe (pure ()) (emitError . ErrorDuplicateName newPos name) maybeSpan
-    reportFromModule moduleId = do
-      maybeSpan <- gets (fmap (.moduleSourceSpan) . Map.lookup moduleId . (.modules))
-      maybe (pure ()) (emitError . ErrorDuplicateName newPos name) maybeSpan
-    reportFromRequest requestId = do
-      maybeSpan <- gets (fmap (.requestSourceSpan) . Map.lookup requestId . (.requests))
-      maybe (pure ()) (emitError . ErrorDuplicateName newPos name) maybeSpan
-    reportFromConstructor constructorId = do
-      maybeSpan <- gets (fmap (.constructorSourceSpan) . Map.lookup constructorId . (.constructors))
-      maybe (pure ()) (emitError . ErrorDuplicateName newPos name) maybeSpan
+    reportFromVariable    = reportFrom (.variables)    (.variableSourceSpan)
+    reportFromType        = reportFrom (.types)        (.typeSourceSpan)
+    reportFromModule      = reportFrom (.modules)      (.moduleSourceSpan)
+    reportFromRequest     = reportFrom (.requests)     (.requestSourceSpan)
+    reportFromConstructor = reportFrom (.constructors) (.constructorSourceSpan)
 
 -- | Generic per-slot merge. The first existing id wins on conflict; the
 -- caller's @reportConflict@ records the duplicate-name error against it.
@@ -603,7 +602,13 @@ bindLocalVariable nameRef = do
     currentContext {scopeStack = insertInnermost name variableId currentContext.scopeStack}
   pure (identifiedNameRef (Just variableId) nameRef)
   where
+    -- Module bindings only ever appear in the top-level frame (imports are
+    -- top-level only), but we walk the full stack defensively so that the
+    -- check remains correct if that invariant ever changes.
     chainHasModule searchName = any (\frame -> isJust (Map.lookup searchName frame >>= (.moduleSymbol)))
+    -- Local scope frames contain only variable bindings (type and module
+    -- declarations are top-level only), so overwriting the entire SymbolEntry
+    -- with singletonVariable is safe and does not discard other slots.
     insertInnermost insertName variableId = \case
       [] -> [Map.singleton insertName (singletonVariable variableId)]
       (innermost : remaining) -> Map.insert insertName (singletonVariable variableId) innermost : remaining
@@ -613,7 +618,12 @@ withScopeFrame :: Identifier a -> Identifier a
 withScopeFrame action = do
   modifyResolveContext $ \context -> context {scopeStack = Map.empty : context.scopeStack}
   result <- action
-  modifyResolveContext $ \context -> context {scopeStack = drop 1 context.scopeStack}
+  modifyResolveContext $ \context ->
+    context
+      { scopeStack = case context.scopeStack of
+          (_ : rest) -> rest
+          [] -> error "withScopeFrame: scope stack underflow (compiler bug)"
+      }
   pure result
 
 -- | Replace the resolve context for the duration of an action (used to switch
@@ -971,13 +981,13 @@ resolveModule topLevels moduleNameToId exports moduleMap = do
               { scopeStack = [topLevelFrame],
                 moduleExports = exportsById
               }
-      identifiedModule <- withResolveContext context (resolveModuleAST currentModuleName parsedModule)
+      identifiedModule <- withResolveContext context (resolveModuleAST parsedModule)
       pure (fmap (,identifiedModule) (Map.lookup currentModuleName moduleNameToId))
 
-resolveModuleAST :: Text -> Module Parsed -> Identifier (Module Identified)
-resolveModuleAST name parsedModule = do
+resolveModuleAST :: Module Parsed -> Identifier (Module Identified)
+resolveModuleAST parsedModule = do
   declarations <- mapM resolveDeclaration parsedModule.declarations
-  pure Module {moduleName = name, declarations = declarations, sourceSpan = parsedModule.sourceSpan}
+  pure Module {declarations = declarations, sourceSpan = parsedModule.sourceSpan}
 
 -- ---------------------------------------------------------------------------
 -- Declaration
@@ -1012,6 +1022,12 @@ liftSignatureVariable = liftSignature lookupVariable
 -- type role / type synonym name).
 liftSignatureType :: NameRef Parsed TypeRef -> Identifier (NameRef Identified TypeRef)
 liftSignatureType = liftSignature lookupType
+
+liftSignatureRequest :: NameRef Parsed RequestRef -> Identifier (NameRef Identified RequestRef)
+liftSignatureRequest = liftSignature lookupRequest
+
+liftSignatureConstructor :: NameRef Parsed ConstructorRef -> Identifier (NameRef Identified ConstructorRef)
+liftSignatureConstructor = liftSignature lookupConstructor
 
 -- | Shared lookup-and-wrap helper for signature-position 'NameRef's.
 -- Phase B has already issued the id; here we just look it up and tag the
@@ -1057,6 +1073,7 @@ resolveAgent AgentDeclaration {..} = do
 resolveRequest :: RequestDeclaration Parsed -> Identifier (RequestDeclaration Identified)
 resolveRequest RequestDeclaration {..} = do
   name' <- liftSignatureVariable name
+  reqestName' <- liftSignatureRequest requestName
   withScopeFrame $ do
     parameters' <- mapM resolveParameter parameters
     returnType' <- resolveType returnType
@@ -1064,6 +1081,7 @@ resolveRequest RequestDeclaration {..} = do
       RequestDeclaration
         { annotation = annotation,
           name = name',
+          requestName = reqestName',
           parameters = parameters',
           returnType = returnType',
           sourceSpan = sourceSpan
@@ -1098,11 +1116,13 @@ resolveData :: DataDeclaration Parsed -> Identifier (DataDeclaration Identified)
 resolveData DataDeclaration {..} = do
   name' <- liftSignatureVariable name
   typeName' <- liftSignatureType typeName
+  constructorName' <- liftSignatureConstructor constructorName
   parameters' <- mapM resolveDataParameter parameters
   pure
     DataDeclaration
       { annotation = annotation,
         name = name',
+        constructorName = constructorName',
         typeName = typeName',
         parameters = parameters',
         sourceSpan = sourceSpan

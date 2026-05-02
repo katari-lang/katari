@@ -69,6 +69,7 @@ dependencies:
   - aeson
   - scientific
   - vector
+  - safe
 
 default-extensions:
   - DataKinds

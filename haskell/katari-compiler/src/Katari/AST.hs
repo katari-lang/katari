@@ -122,8 +122,7 @@ instance HasSourceSpan (NameRef phase nameRefKind) where
 -- ---------------------------------------------------------------------------
 
 data Module (phase :: Phase) = Module
-  { moduleName :: !Text,
-    declarations :: [Declaration phase],
+  { declarations :: [Declaration phase],
     sourceSpan :: SourceSpan
   }
 

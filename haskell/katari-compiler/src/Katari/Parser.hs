@@ -2,8 +2,7 @@ module Katari.Parser
   ( ParseError (..),
     ParseErrorReason (..),
     toDiagnostic,
-    parseModule,
-    parseModuleStrict,
+    parse,
   )
 where
 
@@ -24,20 +23,16 @@ import Katari.Lexer
   ( KatariToken (..),
     KatariTokenStream (..),
     Keyword (..),
-    LexerError (..),
     Operator (..),
     Punctuation (..),
     WithSourceSpan (..),
-    insertVirtualSemicolons,
-    runLexer,
     showKeyword,
     showOperator,
     showPunctuation,
     showToken,
   )
-import Katari.Lexer qualified as Lexer
 import Katari.SourceSpan (HasSourceSpan (..), Position (..), SourceSpan (..))
-import Text.Megaparsec hiding (ParseError)
+import Text.Megaparsec hiding (ParseError, parse)
 import Text.Megaparsec qualified as MP
 
 -- ===========================================================================
@@ -50,8 +45,6 @@ import Text.Megaparsec qualified as MP
 -- 'ParseErrorLex' wraps a lexer-level failure so callers see a single
 -- merged error stream out of 'parseModule'.
 data ParseError where
-  -- | Lexer-level diagnostic, surfaced unchanged through the parser API.
-  ParseErrorLex :: LexerError -> ParseError
   -- | Declaration-level recovery point. The span covers the skipped tokens
   -- between the failure and the next sync point.
   ParseErrorAtDeclaration :: SourceSpan -> ParseErrorReason -> ParseError
@@ -64,7 +57,6 @@ deriving instance Show ParseError
 
 instance HasSourceSpan ParseError where
   sourceSpanOf = \case
-    ParseErrorLex lexerError -> sourceSpanOf lexerError
     ParseErrorAtDeclaration sourceSpan _ -> sourceSpan
     ParseErrorAtStatement sourceSpan _ -> sourceSpan
 
@@ -73,21 +65,20 @@ instance HasSourceSpan ParseError where
 -- 'Lexer.toDiagnostic'.
 toDiagnostic :: ParseError -> Diagnostic
 toDiagnostic = \case
-  ParseErrorLex lexerError -> Lexer.toDiagnostic lexerError
   ParseErrorAtDeclaration sourceSpan reason ->
     diagnosticError "K0020" (renderReason "declaration" reason) sourceSpan
   ParseErrorAtStatement sourceSpan reason ->
     diagnosticError "K0021" (renderReason "statement" reason) sourceSpan
   where
     renderReason :: Text -> ParseErrorReason -> Text
-    renderReason ctx reason =
+    renderReason context reason =
       let unexpectedPart = case reason.unexpected of
-            Just tok -> "unexpected " <> tok
+            Just token_ -> "unexpected " <> token_
             Nothing -> "unexpected end of input"
           expectedPart = case reason.expected of
             [] -> ""
             xs -> "; expected " <> T.intercalate ", " xs
-       in "parse error in " <> ctx <> ": " <> unexpectedPart <> expectedPart
+       in "parse error in " <> context <> ": " <> unexpectedPart <> expectedPart
 
 -- | Reason for a parser-level failure, projected from megaparsec's internal
 -- 'MP.ParseError'. Keeps the structured @expected@ Kataritoken set and (when
@@ -143,29 +134,22 @@ parseMakeSpan startPosition endPosition = do
 -- Public API
 -- ===========================================================================
 
-parseModule :: FilePath -> Text -> (Module Parsed, [ParseError])
-parseModule filePath input =
-  let (rawKatariTokens, lexerErrors) = runLexer filePath input
-      stream = KatariTokenStream {input = input, tokens = insertVirtualSemicolons rawKatariTokens}
-      env = ParserEnv {filePath = filePath, breakContext = BreakContextTop}
+parse :: FilePath -> KatariTokenStream -> (Module Parsed, [ParseError])
+parse filePath stream =
+  let env = ParserEnv {filePath = filePath, breakContext = BreakContextTop}
       initialState =
         ParserState
           { previousEndPosition = Nothing,
-            parseErrors = map ParseErrorLex lexerErrors
+            parseErrors = []
           }
       action = runParserT (parseModuleBody <* eof) filePath stream
-      (eRes, finalState) = runReader (runStateT action initialState) env
-   in case eRes of
+      (parseResult, finalState) = runReader (runStateT action initialState) env
+   in case parseResult of
         Left _ ->
-          let fallbackSpan = SrcSpan filePath (Position 1 1) (Position 1 1)
-           in (Module {moduleName = "", declarations = [], sourceSpan = fallbackSpan}, map ParseErrorLex lexerErrors)
+          let fallbackSpan = SrcSpan {filePath = filePath, start = Position 1 1, end = Position 1 1}
+           in (Module {declarations = [], sourceSpan = fallbackSpan}, finalState.parseErrors)
         Right parsedModule ->
           (parsedModule, reverse finalState.parseErrors)
-
-parseModuleStrict :: FilePath -> Text -> Either [ParseError] (Module Parsed)
-parseModuleStrict filePath input = case parseModule filePath input of
-  (_, errors@(_ : _)) -> Left errors
-  (parsedModule, []) -> Right parsedModule
 
 -- ===========================================================================
 -- KatariToken primitives
@@ -297,8 +281,8 @@ extractReason = \case
       }
   where
     itemToText = \case
-      MP.Tokens toks ->
-        T.intercalate ", " (NE.toList (fmap (T.pack . showToken . (.value)) toks))
+      MP.Tokens tokens_ ->
+        T.intercalate ", " (NE.toList (fmap (T.pack . showToken . (.value)) tokens_))
       MP.Label chars -> T.pack (NE.toList chars)
       MP.EndOfInput -> "end of input"
     fancyToText = \case
@@ -314,7 +298,7 @@ parseWithErrorRecoveryAt ::
   Parser () ->
   Parser a ->
   Parser a
-parseWithErrorRecoveryAt mkError mkSentinel skipSync p = do
+parseWithErrorRecoveryAt buildError buildSentinel skipSync innerParser = do
   startPosition <- parseCurrentPosition
   withRecovery
     ( \mpError -> do
@@ -326,10 +310,10 @@ parseWithErrorRecoveryAt mkError mkSentinel skipSync p = do
         skipSync
         recoveryEndPosition <- parsePreviousEndPosition
         sentinelSpan <- parseMakeSpan startPosition recoveryEndPosition
-        parseRecordError (mkError errorSpan reason)
-        pure (mkSentinel sentinelSpan)
+        parseRecordError (buildError errorSpan reason)
+        pure (buildSentinel sentinelSpan)
     )
-    p
+    innerParser
 
 -- ===========================================================================
 -- List combinator helpers
@@ -446,7 +430,7 @@ retagParsedNameRef nameRef =
 parseModuleBody :: Parser (Module Parsed)
 parseModuleBody = parseWithSpan $ do
   declarations <- parseDeclarationsWithRecovery
-  pure $ \sourceSpan -> Module {moduleName = "", declarations = declarations, sourceSpan = sourceSpan}
+  pure $ \sourceSpan -> Module {declarations = declarations, sourceSpan = sourceSpan}
 
 parseDeclarationsWithRecovery :: Parser [Declaration Parsed]
 parseDeclarationsWithRecovery = loop []

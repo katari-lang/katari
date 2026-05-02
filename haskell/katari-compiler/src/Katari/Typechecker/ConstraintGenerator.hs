@@ -84,15 +84,15 @@ import Katari.Typechecker.Identifier
 -- opposite directions.
 data Constraint where
   TypeConstraint ::
-    { typeLhs :: !(SemanticType Unresolved),
-      typeRhs :: !(SemanticType Unresolved),
-      reason :: !ConstraintReason
+    { typeLhs :: SemanticType Unresolved,
+      typeRhs :: SemanticType Unresolved,
+      reason :: ConstraintReason
     } ->
     Constraint
   RequestConstraint ::
-    { requestLhs :: !(SemanticRequest Unresolved),
-      requestRhs :: !(SemanticRequest Unresolved),
-      reason :: !ConstraintReason
+    { requestLhs :: SemanticRequest Unresolved,
+      requestRhs :: SemanticRequest Unresolved,
+      reason :: ConstraintReason
     } ->
     Constraint
   deriving (Eq, Ord, Show)
@@ -101,8 +101,8 @@ data Constraint where
 -- the most specific reason that applies. The 'sourceSpan' is the syntactic
 -- site that triggered the constraint — the 'kind' identifies the variety.
 data ConstraintReason = ConstraintReason
-  { kind :: !ReasonKind,
-    sourceSpan :: !SourceSpan
+  { kind :: ReasonKind,
+    sourceSpan :: SourceSpan
   }
   deriving (Eq, Ord, Show)
 
@@ -198,12 +198,12 @@ toDiagnostic = \case
 type TypeEnvironment = Map VariableId (SemanticType Unresolved)
 
 data ConstraintGenResult = ConstraintGenResult
-  { constrainedModules :: !(Map ModuleId (Module Constrained)),
-    typeEnvironment :: !TypeEnvironment,
-    constraints :: !(Set Constraint),
-    nextTypeVariableId :: !Int,
-    nextRequestVariableId :: !Int,
-    errors :: ![ConstraintError]
+  { constrainedModules :: Map ModuleId (Module Constrained),
+    typeEnvironment :: TypeEnvironment,
+    constraints :: Set Constraint,
+    nextTypeVariableId :: Int,
+    nextRequestVariableId :: Int,
+    errors :: [ConstraintError]
   }
   deriving (Show)
 
@@ -212,39 +212,40 @@ data ConstraintGenResult = ConstraintGenResult
 -- ===========================================================================
 
 data ConstraintState = ConstraintState
-  { stateNextTypeVariableId :: !Int,
-    stateNextRequestVariableId :: !Int,
-    stateTypeEnvironment :: !TypeEnvironment,
-    stateConstraints :: !(Set Constraint),
-    stateErrors :: ![ConstraintError]
+  { stateNextTypeVariableId :: Int,
+    stateNextRequestVariableId :: Int,
+    stateTypeEnvironment :: TypeEnvironment,
+    stateConstraints :: Set Constraint,
+    stateErrors :: [ConstraintError]
   }
 
 data ConstraintContext = ConstraintContext
-  { contextIdentifiedTypes :: !(Map TypeId TypeData),
+  { contextIdentifiedTypes :: Map TypeId TypeData,
     -- | Reverse map for the 'RequestId' / 'ConstructorId' namespaces:
     -- given a request or constructor id, find the call-side 'VariableId'
     -- whose type lives in 'stateTypeEnvironment'. Populated from
     -- 'IdentifierResult.identifiedRequests' / 'identifiedConstructors'.
-    contextIdentifiedRequests :: !(Map RequestId RequestData),
-    contextIdentifiedConstructors :: !(Map ConstructorId ConstructorData),
+    contextIdentifiedRequests :: Map RequestId RequestData,
+    contextIdentifiedConstructors :: Map ConstructorId ConstructorData,
     -- | Forward cross-link: 'VariableId' → 'RequestId'. Built from the
     -- 'requestVariableId' fields of 'identifiedRequests' so the request
     -- declaration walker can populate the singleton request for @req foo@'s
     -- own signature without re-walking the AST.
-    contextRequestOfVariable :: !(Map VariableId RequestId),
-    contextSynonymVisited :: !(Set TypeId),
-    contextEnclosingReturn :: !(Maybe TypeVariableId),
-    contextEnclosingRequests :: !(Maybe RequestVariableId),
-    contextEnclosingForBreak :: !(Maybe TypeVariableId),
+    contextRequestOfVariable :: Map VariableId RequestId,
+    -- | For cycle detection
+    contextSynonymVisited :: Set TypeId,
+    contextEnclosingReturn :: Maybe TypeVariableId,
+    contextEnclosingRequests :: Maybe RequestVariableId,
+    contextEnclosingForBreak :: Maybe TypeVariableId,
     -- | The type of the entire @block + where + then@ expression. @break e@
     -- inside a request handler flows into this variable (skipping the then
     -- clause).
-    contextEnclosingHandleResult :: !(Maybe TypeVariableId),
+    contextEnclosingHandleResult :: Maybe TypeVariableId,
     -- | The "resume" type variable for the innermost enclosing request
     -- handler. @next e@ inside a handler body flows into this. There is at
     -- most one in scope: 'NextStatement' is a lexically-scoped construct and
     -- always refers to the innermost handler.
-    contextEnclosingHandleNext :: !(Maybe TypeVariableId)
+    contextEnclosingHandleNext :: Maybe TypeVariableId
   }
 
 type CG = ReaderT ConstraintContext (State ConstraintState)
@@ -501,17 +502,9 @@ resolveTypeRef nameRef = case nameRef.resolution of
 -- | Elaborate a list of @with@-clause request references into a single
 -- request set (concrete VariableIds; request type variables come into play
 -- only for inference, not for explicit annotations).
-elaborateRequestList :: [SyntacticRequest Identified] -> CG (SemanticRequest Unresolved)
+elaborateRequestList :: [SyntacticRequest Identified] -> CG (Set (SemanticRequest Unresolved))
 elaborateRequestList requests =
-  pure $
-    SemanticRequest
-      { requestVars = Set.empty,
-        requestReqs = Set.fromList (concatMap requestVarId requests)
-      }
-  where
-    requestVarId SyntacticRequest {name} = case name.resolution of
-      Just vid -> [vid]
-      Nothing -> []
+  pure $ Set.fromList [requestFromVar vid | SyntacticRequest {name, sourceSpan} <- requests, Just vid <- [variableIdOfName name]]
 
 -- | Optional @with@ clause — present only on agent / req-handler type-context
 -- declarations. @Nothing@ means "no annotation"; the caller decides whether
@@ -542,9 +535,9 @@ allocateAllVariables result = mapM_ allocate (Map.keys result.identifiedVariable
 -- ---------------------------------------------------------------------------
 
 walkModule :: Module Identified -> CG (Module Constrained)
-walkModule Module {moduleName, declarations, sourceSpan} = do
+walkModule Module {declarations, sourceSpan} = do
   declarations' <- mapM walkDeclaration declarations
-  pure Module {moduleName = moduleName, declarations = declarations', sourceSpan = sourceSpan}
+  pure Module {declarations = declarations', sourceSpan = sourceSpan}
 
 walkDeclaration :: Declaration Identified -> CG (Declaration Constrained)
 walkDeclaration = \case
@@ -606,7 +599,7 @@ processAgentLike sourceSpan name parameters returnType withRequests body = do
   pure (parameters', body')
 
 walkRequestDecl :: RequestDeclaration Identified -> CG (RequestDeclaration Constrained)
-walkRequestDecl RequestDeclaration {annotation, name, parameters, returnType, sourceSpan} = do
+walkRequestDecl RequestDeclaration {annotation, name, requestName, parameters, returnType, sourceSpan} = do
   tReq <- variableTypeFromName name
   (parameters', paramSig) <- walkParameterListForSignature parameters
   retSemantic <- elaborateType returnType
@@ -626,6 +619,7 @@ walkRequestDecl RequestDeclaration {annotation, name, parameters, returnType, so
     RequestDeclaration
       { annotation = annotation,
         name = retagNameRef name,
+        requestName = retagnameRef requestName,
         parameters = parameters',
         returnType = retagSyntacticType returnType,
         sourceSpan = sourceSpan
@@ -654,7 +648,7 @@ walkDataDecl DataDeclaration {annotation, name, typeName, parameters, sourceSpan
   tCtor <- variableTypeFromName name
   -- data の TypeId は AST が直接保持する。@Unresolved@ 側 (parse / identify
   -- エラー時) のみ @Nothing@ になり、@SemanticTypeUnknown@ にフォールバックする。
-  let tid = maybe Nothing Just typeName.resolution
+  let tid = typeName.resolution Control.Applicative.<|> Nothing
   fields <- mapM elaborateDataParameter parameters
   let signature =
         SemanticTypeFunction
@@ -668,6 +662,7 @@ walkDataDecl DataDeclaration {annotation, name, typeName, parameters, sourceSpan
       { annotation = annotation,
         name = retagNameRef name,
         typeName = retagNameRef typeName,
+        constructorName = retagNameRef name,
         parameters = parameters',
         sourceSpan = sourceSpan
       }
@@ -950,7 +945,7 @@ walkBlockWithWhere statements returnExpression wb blockSpan = do
               Just rid <- [name.resolution]
           ]
   let e1Eff = maybe emptyRequest requestFromVar e1
-      e2Eff = SemanticRequest Set.empty handledRequestIds
+      e2Eff = Set.map RequestVariableId handledRequestIds
   addRequestConstraint
     (requestFromVar e3Id)
     (unionRequests e1Eff e2Eff)
