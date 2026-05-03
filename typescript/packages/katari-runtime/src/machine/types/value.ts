@@ -1,4 +1,5 @@
-import type { CtorId } from "../ir/types.js";
+import type { BlockId, CtorId } from "../../ir/types.js";
+import { ScopeId } from "./id.js";
 
 export type ClosureId = string;
 
@@ -10,4 +11,4 @@ export type Value =
   | { kind: "null" }
   | { kind: "tuple"; elements: Value[] }
   | { kind: "tagged"; ctorId: CtorId; fields: Record<string, Value> }
-  | { kind: "closure"; closureId: ClosureId };
+  | { kind: "closure"; blockId: BlockId; scopeId: ScopeId };

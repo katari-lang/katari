@@ -12,8 +12,8 @@
 --     statement として残す。jump / label は使わない。
 --   * 大域脱出は 'SExit' (return / break / for_break) と 'SCont' (next /
 --     for_next) の 2 系統。経路上 then-block の適用ルールが異なる。
---   * Variable は 'VarId' のみ。scope は runtime 側で 'UserBlock.kind'
---     を見て管理する。
+--   * Variable は 'VarId' のみ。scope は runtime 側で 'UserBlock.kind' /
+--     'BlockHandler' を見て管理する。
 --   * 型情報は IR に含まれない。
 --
 -- JSON 表現は全て 'genericToJSON' / 'genericParseJSON' で導出する。
@@ -42,23 +42,24 @@ module Katari.IR
     Block (..),
     UserBlock (..),
     BlockKind (..),
+    MatchBlock (..),
+    ForBlock (..),
+    HandleBlock (..),
     Param (..),
     Handler (..),
+    MatchArm (..),
+    MatchPattern (..),
 
     -- * Statement
     Statement (..),
     CallData (..),
     MakeClosureData (..),
-    MatchData (..),
-    ForData (..),
     ExitData (..),
     ContData (..),
     LoadLiteralData (..),
     LiteralValue (..),
     CallTarget (..),
     Arg (..),
-    MatchArm (..),
-    MatchPattern (..),
     BindPatternData (..),
     ExitKind (..),
     ContKind (..),
@@ -76,6 +77,7 @@ import Data.Aeson
     genericParseJSON,
     genericToJSON,
   )
+import Data.Char (toLower)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
@@ -239,6 +241,20 @@ data Block where
   -- compares against in match arms; values built by this block carry
   -- @{__ctor: <ctorId>, ...}@ at runtime.
   BlockCtor :: {ctorId :: CtorId} -> Block
+  -- | Match block. The runtime creates a management thread, evaluates
+  -- 'subject' from the inherited parent scope, walks arms in order, and
+  -- executes the first matching arm's body. Called via 'StatementCall'.
+  BlockMatch :: {matchBlock :: MatchBlock} -> Block
+  -- | For-loop block. The runtime creates a management thread, reads
+  -- source arrays and init values from the inherited parent scope,
+  -- manages iteration / state-var updates, and runs the body per element.
+  -- Called via 'StatementCall'.
+  BlockFor :: {forBlock :: ForBlock} -> Block
+  -- | Handle (where-clause) block. The runtime creates a management
+  -- thread, initialises state vars from the inherited parent scope,
+  -- runs the body, and dispatches requests to handlers.
+  -- Called via 'StatementCall'.
+  BlockHandle :: {handleBlock :: HandleBlock} -> Block
   deriving (Eq, Show, Generic)
 
 instance ToJSON Block where
@@ -247,38 +263,25 @@ instance ToJSON Block where
 instance FromJSON Block where
   parseJSON = genericParseJSON sumOptions
 
--- | Static structural role of a 'UserBlock'. Replaces the older
--- 'BlockProps' triple of booleans, making invalid combinations
--- unrepresentable.
---
--- The 5 valid roles correspond to:
---
---   * 'BlockAgentEntry' — agent body without handlers; catches @return@ only.
---   * 'BlockAgentEntryWithHandlers' — agent body with a where-clause that
---     attaches handlers; catches both @return@ and @break@.
---   * 'BlockHandleScope' — inner scope of a @where { state vars; handlers }@
---     construct; catches @break@ and inherits the parent scope.
---   * 'BlockInline' — an inline block / arm body / for-body / then-clause;
---     inherits the parent scope, catches nothing.
---   * 'BlockHandlerBody' — the body of a request handler; runs in its own
---     scope and catches nothing.
---
--- Mapping to the runtime\'s old triple:
+-- | Structural role of a 'UserBlock'. Determines scope inheritance and
+-- exit-capture semantics at runtime.
 --
 -- @
---                                 catchesReturn  catchesBreak  inheritScope
--- BlockAgentEntry                 True           False         False
--- BlockAgentEntryWithHandlers     True           True          False
--- BlockHandleScope                False          True          True
--- BlockInline                     False          False         True
--- BlockHandlerBody                False          False         False
+--                  catchesReturn  inheritScope
+-- BlockKindAgent   True           False
+-- BlockKindInline  False          True
 -- @
+--
+-- Break is never caught by 'UserBlock' — it propagates upward until it
+-- reaches a 'BlockHandler', which is the only construct that catches it.
 data BlockKind where
-  BlockAgentEntry :: BlockKind
-  BlockAgentEntryWithHandlers :: BlockKind
-  BlockHandleScope :: BlockKind
-  BlockInline :: BlockKind
-  BlockHandlerBody :: BlockKind
+  -- | Agent / handler body: creates a fresh scope, catches @return@.
+  -- Replaces the old 'BlockAgentEntry' / 'BlockAgentEntryWithHandlers' /
+  -- 'BlockHandlerBody'.
+  BlockKindAgent :: BlockKind
+  -- | Inline block / arm body / for-body: inherits the parent scope,
+  -- catches nothing. Replaces the old 'BlockHandleScope' / 'BlockInline'.
+  BlockKindInline :: BlockKind
   deriving (Eq, Show, Generic)
 
 instance ToJSON BlockKind where
@@ -289,31 +292,17 @@ instance FromJSON BlockKind where
 
 -- | The body of a regular user-defined block.
 data UserBlock = UserBlock
-  { -- | Structural role of the block. Determines exit semantics and scope
-    -- inheritance at runtime.
+  { -- | Structural role: 'BlockKindAgent' (new scope, catches return) or
+    -- 'BlockKindInline' (inherits scope, catches nothing).
     kind :: BlockKind,
-    -- | Closure-captured parameters. Empty for top-level callables; for
-    -- closures produced by 'SMakeClosure', these are the values trapped
-    -- from the enclosing scope at closure-build time. The runtime
-    -- supplies them automatically when the closure is invoked, on top
-    -- of the call-time 'parameters'.
-    captures :: [Param],
-    -- | Regular labeled parameters (call arguments bind by label).
+    -- | Labeled parameters. Only meaningful for 'BlockKindAgent' blocks
+    -- (new scope: caller binds arguments here) and for 'BlockKindInline'
+    -- handler / then-clause blocks (req args / break value).
     parameters :: [Param],
-    -- | Mutable state vars introduced by @where (var ...)@ or @for (var ...)@.
-    -- Listed separately so the runtime can apply the parallel/versioning
-    -- semantics for state mutation.
-    stateVars :: [Param],
     statements :: [Statement],
     -- | Tail value when the block completes normally (Rust-style trailing
     -- expression). 'Nothing' means the block has no value.
-    trailing :: Maybe VarId,
-    -- | Optional then-block applied to the body's tail. Receives 1 param
-    -- whose label is conventionally @"value"@ (set by Lowering).
-    thenBlock :: Maybe BlockId,
-    -- | Request handlers attached to this block. Only meaningful when
-    -- 'kind' is 'BlockAgentEntryWithHandlers' or 'BlockHandleScope'.
-    handlers :: [Handler]
+    trailing :: Maybe VarId
   }
   deriving (Eq, Show, Generic)
 
@@ -336,14 +325,14 @@ instance ToJSON Param where
 instance FromJSON Param where
   parseJSON = genericParseJSON irOptions
 
--- | A request handler attached to a handle-scope block. Handler dispatch
--- compares the raised request's 'ReqId' against this 'request' field;
--- on equality the runtime invokes 'handlerBody'.
+-- | A request handler inside a 'HandleData'. Handler dispatch compares the
+-- raised request's 'ReqId' against this 'request' field; on equality the
+-- runtime invokes 'handlerBody'.
 data Handler = Handler
   { -- | The 'ReqId' of the 'BlockRequest' being handled.
     request :: ReqId,
-    -- | The handler body block. Its params are @[req args... , state vars...]@
-    -- by label.
+    -- | The handler body block ('BlockKindInline'). Inherits the handle scope
+    -- (state vars are directly accessible). Its 'parameters' carry the req args.
     handlerBody :: BlockId
   }
   deriving (Eq, Show, Generic)
@@ -369,14 +358,12 @@ data Statement where
   StatementCall :: CallData -> Statement
   StatementMakeClosure :: MakeClosureData -> Statement
   StatementLoadLiteral :: LoadLiteralData -> Statement
-  StatementMatch :: MatchData -> Statement
-  StatementFor :: ForData -> Statement
   StatementExit :: ExitData -> Statement
   StatementCont :: ContData -> Statement
   -- | Bind the value of @source@ by walking @pattern@ recursively. The
   -- runtime walks @pattern@ exactly like the arm-pattern walker of
-  -- 'StatementMatch', binding each 'MatchPatternVariable' position. Unlike
-  -- 'StatementMatch' there is no @defaultArm@; the pattern is irrefutable
+  -- 'BlockMatch', binding each 'MatchPatternVariable' position. Unlike
+  -- 'BlockMatch' there is no @defaultArm@; the pattern is irrefutable
   -- (guaranteed by the exhaustiveness checker — K0291 / Phase 16).
   StatementBindPattern :: BindPatternData -> Statement
   deriving (Eq, Show, Generic)
@@ -402,14 +389,12 @@ instance ToJSON CallData where
 instance FromJSON CallData where
   parseJSON = genericParseJSON irOptions
 
--- | Payload for 'SMakeClosure'. The 'captures' list pairs each capture
--- param's label (which must match a 'Param' in the target block's
--- @captures@ field) with the outer-scope 'VarId' whose value the
--- closure should trap.
+-- | Payload for 'SMakeClosure'. The closure captures its lexical scope at
+-- creation time; the runtime supplies the captured scope automatically when
+-- the closure is invoked.
 data MakeClosureData = MakeClosureData
   { output :: VarId,
-    block :: BlockId,
-    captures :: [Arg]
+    block :: BlockId
   }
   deriving (Eq, Show, Generic)
 
@@ -419,38 +404,63 @@ instance ToJSON MakeClosureData where
 instance FromJSON MakeClosureData where
   parseJSON = genericParseJSON irOptions
 
--- | Payload for 'SMatch'.
-data MatchData = MatchData
+-- | Payload for 'BlockMatch'. The runtime creates a management thread,
+-- reads 'subject' from the inherited parent scope, walks arms in order,
+-- and executes the first matching arm's body. Called via 'StatementCall'.
+data MatchBlock = MatchBlock
   { subject :: VarId,
     arms :: [MatchArm],
-    defaultArm :: Maybe BlockId,
-    output :: Maybe VarId
+    defaultArm :: Maybe BlockId
   }
   deriving (Eq, Show, Generic)
 
-instance ToJSON MatchData where
+instance ToJSON MatchBlock where
   toJSON = genericToJSON irOptions
 
-instance FromJSON MatchData where
+instance FromJSON MatchBlock where
   parseJSON = genericParseJSON irOptions
 
--- | Payload for 'SFor'.
-data ForData = ForData
-  { -- | (element var inside body's params, source array var in this scope)
+-- | Payload for 'BlockFor'. The runtime creates a management thread,
+-- reads source arrays and init values from the inherited parent scope,
+-- manages iteration / state-var updates, and runs the body per element.
+-- Called via 'StatementCall'.
+data ForBlock = ForBlock
+  { -- | (element var inside body, source array var in this scope)
     iters :: [(VarId, VarId)],
-    -- | (state var label, init value var in this scope)
-    stateInits :: [(Text, VarId)],
+    -- | (bodyVar in for scope, init value var in this scope)
+    stateInits :: [(VarId, VarId)],
     bodyBlock :: BlockId,
-    -- | Optional then-block applied to the for's final value.
-    thenBlock :: Maybe BlockId,
-    output :: Maybe VarId
+    -- | Optional then-block (BlockKindInline) run on normal completion.
+    thenBlock :: Maybe BlockId
   }
   deriving (Eq, Show, Generic)
 
-instance ToJSON ForData where
+instance ToJSON ForBlock where
   toJSON = genericToJSON irOptions
 
-instance FromJSON ForData where
+instance FromJSON ForBlock where
+  parseJSON = genericParseJSON irOptions
+
+-- | Payload for 'BlockHandle'. The runtime creates a management thread,
+-- initialises state vars from the inherited parent scope, runs the body,
+-- and dispatches requests to handlers. Called via 'StatementCall'.
+data HandleBlock = HandleBlock
+  { -- | (bodyVar allocated in handle scope, initVar computed in caller)
+    stateInits :: [(VarId, VarId)],
+    -- | Body block ('BlockKindInline'). Inherits the handle scope.
+    body :: BlockId,
+    -- | Request handlers dispatched by 'ReqId'.
+    handlers :: [Handler],
+    -- | Optional then-block ('BlockKindInline') run when @break@ is received.
+    -- Its single parameter (label @\"value\"@) receives the break value.
+    thenBlock :: Maybe BlockId
+  }
+  deriving (Eq, Show, Generic)
+
+instance ToJSON HandleBlock where
+  toJSON = genericToJSON irOptions
+
+instance FromJSON HandleBlock where
   parseJSON = genericParseJSON irOptions
 
 -- | Payload for 'SExit'.
@@ -466,12 +476,12 @@ instance ToJSON ExitData where
 instance FromJSON ExitData where
   parseJSON = genericParseJSON irOptions
 
--- | Payload for 'SCont'.
+-- | Payload for 'StatementCont'.
 data ContData = ContData
   { contKind :: ContKind,
     value :: Maybe VarId,
-    -- | (state var label, new value var in this scope)
-    modifiers :: [(Text, VarId)]
+    -- | (targetVar in loop/handle scope, new value var in this scope)
+    modifiers :: [(VarId, VarId)]
   }
   deriving (Eq, Show, Generic)
 
@@ -632,23 +642,28 @@ irOptions =
       omitNothingFields = True
     }
 
+-- | Lower the first character of a string (PascalCase → camelCase).
+lowerHead :: String -> String
+lowerHead [] = []
+lowerHead (c : cs) = toLower c : cs
+
 -- | TaggedObject options for record-style sums. Constructor names are
--- kept as-is (PascalCase), e.g. @"StatementCall"@, @"MatchPatternAny"@.
+-- lowercased at the head (camelCase), e.g. @"statementCall"@, @"matchPatternAny"@.
 sumOptions :: Options
 sumOptions =
   defaultOptions
     { sumEncoding = TaggedObject "kind" "contents",
       fieldLabelModifier = id,
-      constructorTagModifier = id,
+      constructorTagModifier = lowerHead,
       omitNothingFields = True
     }
 
--- | Enum (no fields) options: encode as bare PascalCase strings,
--- e.g. @"ExitKindReturn"@, @"ContKindNext"@.
+-- | Enum (no fields) options: encode as bare camelCase strings,
+-- e.g. @"exitKindReturn"@, @"contKindNext"@.
 enumOptions :: Options
 enumOptions =
   defaultOptions
     { sumEncoding = UntaggedValue,
       allNullaryToStringTag = True,
-      constructorTagModifier = id
+      constructorTagModifier = lowerHead
     }

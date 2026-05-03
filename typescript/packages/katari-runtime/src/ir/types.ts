@@ -2,10 +2,10 @@
 //
 // JSON encoding follows IR.hs Aeson options:
 //   irOptions  : record fields as-is, omit Nothing (→ optional fields)
-//   sumOptions : TaggedObject { "kind": tag, ...rest } with lowerHead tag
+//   sumOptions : TaggedObject { "kind": tag, ...rest } — tag = lowerHead(constructor) = camelCase
 //     - GADT record constructors  → fields merged flat into object
 //     - GADT positional ctors     → single "contents" key
-//   enumOptions: bare camelCase string (UntaggedValue + lowerHead)
+//   enumOptions: bare camelCase string (UntaggedValue, constructorTagModifier = lowerHead)
 
 // ─── Identifiers ─────────────────────────────────────────────────────────────
 
@@ -62,18 +62,18 @@ export type NameTable = {
 // ─── BlockKind (enumOptions → bare camelCase string) ─────────────────────────
 
 export type BlockKind =
-  | "blockAgentEntry"
-  | "blockAgentEntryWithHandlers"
-  | "blockHandleScope"
-  | "blockInline"
-  | "blockHandlerBody";
+  /** New scope, catches return. */
+  | "blockKindAgent"
+  /**
+   * Inherits parent scope, catches nothing.
+   * Used for inline blocks, match arms, for bodies, handle bodies,
+   * req handler bodies, and then-clauses.
+   */
+  | "blockKindInline";
 
 // ─── ExitKind / ContKind (enumOptions) ───────────────────────────────────────
 
-export type ExitKind =
-  | "exitKindReturn"
-  | "exitKindBreak"
-  | "exitKindForBreak";
+export type ExitKind = "exitKindReturn" | "exitKindBreak" | "exitKindForBreak";
 
 export type ContKind = "contKindNext" | "contKindForNext";
 
@@ -84,6 +84,11 @@ export type Param = {
   var: VarId;
 };
 
+/**
+ * A request handler inside a HandleData.
+ * The handlerBody block is BlockKindInline and inherits the handle scope.
+ * Its parameters carry the req args; state vars are accessible directly.
+ */
 export type Handler = {
   request: ReqId;
   handlerBody: BlockId;
@@ -93,13 +98,13 @@ export type Handler = {
 
 export type UserBlock = {
   kind: BlockKind;
-  captures: Param[];
+  /**
+   * Labeled parameters. Meaningful for BlockKindAgent blocks (new scope)
+   * and for BlockKindInline handler/then-clause blocks (req args / break value).
+   */
   parameters: Param[];
-  stateVars: Param[];
   statements: Statement[];
   trailing?: VarId;
-  thenBlock?: BlockId;
-  handlers: Handler[];
 };
 
 // ─── Block (sumOptions, GADT record ctors → flat) ────────────────────────────
@@ -109,7 +114,10 @@ export type Block =
   | { kind: "blockPrim"; name: string }
   | { kind: "blockRequest"; reqId: ReqId }
   | { kind: "blockExternal"; externalName: ExternalName }
-  | { kind: "blockCtor"; ctorId: CtorId };
+  | { kind: "blockCtor"; ctorId: CtorId }
+  | { kind: "blockMatch"; matchBlock: MatchBlock }
+  | { kind: "blockFor"; forBlock: ForBlock }
+  | { kind: "blockHandle"; handleBlock: HandleBlock };
 
 // ─── Arg (irOptions → flat record) ───────────────────────────────────────────
 
@@ -139,7 +147,10 @@ export type MatchPattern =
   | { kind: "matchPatternAny" }
   | { kind: "matchPatternVariable"; contents: VarId }
   | { kind: "matchPatternLiteral"; contents: LiteralValue }
-  | { kind: "matchPatternConstructor"; contents: [CtorId, [string, MatchPattern][]] }
+  | {
+      kind: "matchPatternConstructor";
+      contents: [CtorId, [string, MatchPattern][]];
+    }
   | { kind: "matchPatternTuple"; contents: MatchPattern[] };
 
 // ─── MatchArm (irOptions → flat record) ──────────────────────────────────────
@@ -160,7 +171,6 @@ export type CallData = {
 export type MakeClosureData = {
   output: VarId;
   block: BlockId;
-  captures: Arg[];
 };
 
 export type LoadLiteralData = {
@@ -168,21 +178,41 @@ export type LoadLiteralData = {
   value: LiteralValue;
 };
 
-export type MatchData = {
+// ─── Block payload types (irOptions → flat record) ──────────────────────────
+
+/** Payload for blockMatch. */
+export type MatchBlock = {
   subject: VarId;
   arms: MatchArm[];
   defaultArm?: BlockId;
-  output?: VarId;
 };
 
-export type ForData = {
+/** Payload for blockFor. */
+export type ForBlock = {
   /** [element var inside body, source array var in this scope] */
   iters: [VarId, VarId][];
-  /** [state var label, init value var in this scope] */
-  stateInits: [string, VarId][];
+  /** [bodyVar in for scope, init value var in this scope] */
+  stateInits: [VarId, VarId][];
   bodyBlock: BlockId;
   thenBlock?: BlockId;
-  output?: VarId;
+};
+
+/**
+ * Payload for blockHandle.
+ * The outer BlockKindAgent block evaluates the init expressions,
+ * then calls this block via StatementCall.
+ */
+export type HandleBlock = {
+  /** [bodyVar allocated in handle scope, initVar computed in caller] */
+  stateInits: [VarId, VarId][];
+  /** Body block (blockKindInline). Inherits the handle scope. */
+  body: BlockId;
+  handlers: Handler[];
+  /**
+   * Optional then-block (blockKindInline) run when break is received.
+   * Its single parameter (label "value") receives the break value.
+   */
+  thenBlock?: BlockId;
 };
 
 export type ExitData = {
@@ -193,8 +223,8 @@ export type ExitData = {
 export type ContData = {
   contKind: ContKind;
   value?: VarId;
-  /** [state var label, new value var in this scope] */
-  modifiers: [string, VarId][];
+  /** [targetVar in loop/handle scope, new value var in this scope] */
+  modifiers: [VarId, VarId][];
 };
 
 export type BindPatternData = {
@@ -208,8 +238,6 @@ export type Statement =
   | { kind: "statementCall"; contents: CallData }
   | { kind: "statementMakeClosure"; contents: MakeClosureData }
   | { kind: "statementLoadLiteral"; contents: LoadLiteralData }
-  | { kind: "statementMatch"; contents: MatchData }
-  | { kind: "statementFor"; contents: ForData }
   | { kind: "statementExit"; contents: ExitData }
   | { kind: "statementCont"; contents: ContData }
   | { kind: "statementBindPattern"; contents: BindPatternData };
