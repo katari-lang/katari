@@ -341,6 +341,9 @@ getExpressionType = \case
   AST.ExpressionFieldAccess e -> e.typeOf
   AST.ExpressionIndexAccess e -> e.typeOf
   AST.ExpressionTemplate e -> e.typeOf
+  AST.ExpressionHandle e -> e.typeOf
+  AST.ExpressionParTuple e -> e.typeOf
+  AST.ExpressionParArray e -> e.typeOf
   AST.ExpressionQualifiedReference e -> e.typeOf
 
 -- ===========================================================================
@@ -475,26 +478,6 @@ walkBlock :: ZonkResult -> AST.Block Zonked -> [ExhaustiveError]
 walkBlock zr block =
   concatMap (walkStatement zr) block.statements
     ++ maybe [] (walkExpression zr) block.returnExpression
-    ++ maybe [] (walkWhereBlock zr) block.whereBlock
-
-walkWhereBlock :: ZonkResult -> AST.WhereBlock Zonked -> [ExhaustiveError]
-walkWhereBlock zr wb =
-  concatMap (walkHandler zr) wb.handlers
-    ++ maybe
-      []
-      ( \(maybePattern, thenBlock) ->
-          maybe [] checkThenPattern maybePattern
-            ++ walkBlock zr thenBlock
-      )
-      wb.thenClause
-  where
-    -- The then-clause pattern binds the break/return value of the scope body.
-    -- Its subject type is the union of all break-statement value types, which
-    -- we cannot reconstruct cheaply here. SemanticTypeUnknown is the most
-    -- conservative approximation: it still correctly rejects refutable patterns
-    -- (literal / constructor matches) since the algorithm treats Unknown as an
-    -- open type with no complete constructor signature.
-    checkThenPattern pat = checkIrrefutable zr pat SemanticTypeUnknown
 
 walkHandler :: ZonkResult -> AST.RequestHandler Zonked -> [ExhaustiveError]
 walkHandler zr rh = walkBlock zr rh.body
@@ -554,6 +537,20 @@ walkExpression zr = \case
     walkExpression zr ia.array ++ walkExpression zr ia.index
   AST.ExpressionTemplate te ->
     concatMap (walkTemplateElement zr) te.elements
+  AST.ExpressionHandle he ->
+    concatMap (walkHandler zr) he.handlers
+      ++ maybe
+        []
+        ( \(maybePattern, thenBlock) ->
+            maybe [] (\pat -> checkIrrefutable zr pat SemanticTypeUnknown) maybePattern
+              ++ walkBlock zr thenBlock
+        )
+        he.thenClause
+      ++ walkBlock zr he.body
+  AST.ExpressionParTuple pte ->
+    concatMap (walkExpression zr) pte.elements
+  AST.ExpressionParArray pae ->
+    concatMap (walkExpression zr) pae.elements
   AST.ExpressionLiteral _ -> []
   AST.ExpressionVariable _ -> []
   AST.ExpressionQualifiedReference _ -> []

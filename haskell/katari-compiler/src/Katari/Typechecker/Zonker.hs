@@ -361,35 +361,13 @@ zonkExpressionTypedata = zonkType
 -- ---------------------------------------------------------------------------
 
 walkBlock :: Block Constrained -> Zonk (Block Zonked)
-walkBlock Block {statements, returnExpression, whereBlock, sourceSpan} = do
+walkBlock Block {statements, returnExpression, sourceSpan} = do
   statements' <- mapM walkStatement statements
   returnExpression' <- traverse walkExpression returnExpression
-  whereBlock' <- traverse walkWhereBlock whereBlock
   pure
     Block
       { statements = statements',
         returnExpression = returnExpression',
-        whereBlock = whereBlock',
-        sourceSpan = sourceSpan
-      }
-
-walkWhereBlock :: WhereBlock Constrained -> Zonk (WhereBlock Zonked)
-walkWhereBlock WhereBlock {stateVariables, handlers, thenClause, sourceSpan} = do
-  stateVariables' <- mapM walkStateVariable stateVariables
-  handlers' <- mapM walkRequestHandler handlers
-  thenClause' <-
-    traverse
-      ( \(maybePattern, block) -> do
-          maybePattern' <- traverse walkPattern maybePattern
-          block' <- walkBlock block
-          pure (maybePattern', block')
-      )
-      thenClause
-  pure
-    WhereBlock
-      { stateVariables = stateVariables',
-        handlers = handlers',
-        thenClause = thenClause',
         sourceSpan = sourceSpan
       }
 
@@ -505,6 +483,9 @@ walkExpression = \case
   ExpressionFieldAccess expr -> ExpressionFieldAccess <$> walkFieldAccessExpr expr
   ExpressionIndexAccess expr -> ExpressionIndexAccess <$> walkIndexAccessExpr expr
   ExpressionTemplate expr -> ExpressionTemplate <$> walkTemplateExpr expr
+  ExpressionHandle expr -> ExpressionHandle <$> walkHandleExpr expr
+  ExpressionParTuple expr -> ExpressionParTuple <$> walkParTupleExpr expr
+  ExpressionParArray expr -> ExpressionParArray <$> walkParArrayExpr expr
   ExpressionQualifiedReference expr -> ExpressionQualifiedReference <$> walkQualifiedReferenceExpr expr
 
 walkLiteralExpr :: LiteralExpression Constrained -> Zonk (LiteralExpression Zonked)
@@ -618,7 +599,7 @@ walkCaseArm CaseArm {pattern, body, sourceSpan} = do
   pure CaseArm {pattern = pattern', body = body', sourceSpan = sourceSpan}
 
 walkForExpr :: ForExpression Constrained -> Zonk (ForExpression Zonked)
-walkForExpr ForExpression {inBindings, varBindings, body, thenBlock, sourceSpan, typeOf} = do
+walkForExpr ForExpression {parallel, inBindings, varBindings, body, thenBlock, sourceSpan, typeOf} = do
   inBindings' <- mapM walkForInBinding inBindings
   varBindings' <- mapM walkForVarBinding varBindings
   body' <- walkBlock body
@@ -626,7 +607,8 @@ walkForExpr ForExpression {inBindings, varBindings, body, thenBlock, sourceSpan,
   typeOf' <- zonkExpressionTypedata sourceSpan typeOf
   pure
     ForExpression
-      { inBindings = inBindings',
+      { parallel = parallel,
+        inBindings = inBindings',
         varBindings = varBindings',
         body = body',
         thenBlock = thenBlock',
@@ -711,6 +693,43 @@ walkQualifiedReferenceExpr QualifiedReferenceExpression {moduleQualifier, target
         sourceSpan = sourceSpan,
         typeOf = typeOf'
       }
+
+walkHandleExpr :: HandleExpression Constrained -> Zonk (HandleExpression Zonked)
+walkHandleExpr HandleExpression {parallel, stateVariables, handlers, thenClause, body, sourceSpan, typeOf} = do
+  stateVariables' <- mapM walkStateVariable stateVariables
+  handlers' <- mapM walkRequestHandler handlers
+  thenClause' <-
+    traverse
+      ( \(maybePattern, block) -> do
+          maybePattern' <- traverse walkPattern maybePattern
+          block' <- walkBlock block
+          pure (maybePattern', block')
+      )
+      thenClause
+  body' <- walkBlock body
+  typeOf' <- zonkExpressionTypedata sourceSpan typeOf
+  pure
+    HandleExpression
+      { parallel = parallel,
+        stateVariables = stateVariables',
+        handlers = handlers',
+        thenClause = thenClause',
+        body = body',
+        sourceSpan = sourceSpan,
+        typeOf = typeOf'
+      }
+
+walkParTupleExpr :: ParTupleExpression Constrained -> Zonk (ParTupleExpression Zonked)
+walkParTupleExpr ParTupleExpression {elements, sourceSpan, typeOf} = do
+  elements' <- mapM walkExpression elements
+  typeOf' <- zonkExpressionTypedata sourceSpan typeOf
+  pure ParTupleExpression {elements = elements', sourceSpan = sourceSpan, typeOf = typeOf'}
+
+walkParArrayExpr :: ParArrayExpression Constrained -> Zonk (ParArrayExpression Zonked)
+walkParArrayExpr ParArrayExpression {elements, sourceSpan, typeOf} = do
+  elements' <- mapM walkExpression elements
+  typeOf' <- zonkExpressionTypedata sourceSpan typeOf
+  pure ParArrayExpression {elements = elements', sourceSpan = sourceSpan, typeOf = typeOf'}
 
 -- ===========================================================================
 -- Entry point

@@ -117,7 +117,9 @@ export type Block =
   | { kind: "blockCtor"; ctorId: CtorId }
   | { kind: "blockMatch"; matchBlock: MatchBlock }
   | { kind: "blockFor"; forBlock: ForBlock }
-  | { kind: "blockHandle"; handleBlock: HandleBlock };
+  | { kind: "blockHandle"; handleBlock: HandleBlock }
+  | { kind: "blockTuple"; tupleBlock: TupleBlock }
+  | { kind: "blockArray"; arrayBlock: ArrayBlock };
 
 // ─── Arg (irOptions → flat record) ───────────────────────────────────────────
 
@@ -189,6 +191,7 @@ export type MatchBlock = {
 
 /** Payload for blockFor. */
 export type ForBlock = {
+  parallel: boolean;
   /** [element var inside body, source array var in this scope] */
   iters: [VarId, VarId][];
   /** [bodyVar in for scope, init value var in this scope] */
@@ -203,6 +206,7 @@ export type ForBlock = {
  * then calls this block via StatementCall.
  */
 export type HandleBlock = {
+  parallel: boolean;
   /** [bodyVar allocated in handle scope, initVar computed in caller] */
   stateInits: [VarId, VarId][];
   /** Body block (blockKindInline). Inherits the handle scope. */
@@ -213,6 +217,20 @@ export type HandleBlock = {
    * Its single parameter (label "value") receives the break value.
    */
   thenBlock?: BlockId;
+};
+
+/** Payload for blockTuple. */
+export type TupleBlock = {
+  parallel: boolean;
+  /** Each element is an inline block computing one value. */
+  elements: BlockId[];
+};
+
+/** Payload for blockArray. */
+export type ArrayBlock = {
+  parallel: boolean;
+  /** Each element is an inline block computing one value. */
+  elements: BlockId[];
 };
 
 export type ExitData = {

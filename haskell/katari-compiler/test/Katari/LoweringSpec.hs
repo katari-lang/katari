@@ -96,6 +96,51 @@ calls ub = [d | StatementCall d <- ub.statements]
 literalLoads :: UserBlock -> [LoadLiteralData]
 literalLoads ub = [d | StatementLoadLiteral d <- ub.statements]
 
+-- | Extract MatchBlock from a block in the IR module (for BlockMatch blocks).
+matchBlockOf :: BlockId -> IRModule -> Maybe MatchBlock
+matchBlockOf bid irMod = case Map.lookup bid irMod.blocks of
+  Just (BlockMatch {matchBlock}) -> Just matchBlock
+  _ -> Nothing
+
+-- | Extract ForBlock from a block in the IR module (for BlockFor blocks).
+forBlockOf :: BlockId -> IRModule -> Maybe ForBlock
+forBlockOf bid irMod = case Map.lookup bid irMod.blocks of
+  Just (BlockFor {forBlock}) -> Just forBlock
+  _ -> Nothing
+
+-- | Extract HandleBlock from a block in the IR module (for BlockHandle blocks).
+handleBlockOf :: BlockId -> IRModule -> Maybe HandleBlock
+handleBlockOf bid irMod = case Map.lookup bid irMod.blocks of
+  Just (BlockHandle {handleBlock}) -> Just handleBlock
+  _ -> Nothing
+
+-- | Find all BlockMatch blocks that are called from a UserBlock.
+calledMatchBlocks :: UserBlock -> IRModule -> [MatchBlock]
+calledMatchBlocks ub irMod =
+  [ mb
+    | StatementCall c <- ub.statements,
+      CallTargetBlock {block} <- [c.target],
+      Just mb <- [matchBlockOf block irMod]
+  ]
+
+-- | Find all BlockFor blocks that are called from a UserBlock.
+calledForBlocks :: UserBlock -> IRModule -> [ForBlock]
+calledForBlocks ub irMod =
+  [ fb
+    | StatementCall c <- ub.statements,
+      CallTargetBlock {block} <- [c.target],
+      Just fb <- [forBlockOf block irMod]
+  ]
+
+-- | Find all BlockHandle blocks that are called from a UserBlock.
+calledHandleBlocks :: UserBlock -> IRModule -> [HandleBlock]
+calledHandleBlocks ub irMod =
+  [ hb
+    | StatementCall c <- ub.statements,
+      CallTargetBlock {block} <- [c.target],
+      Just hb <- [handleBlockOf block irMod]
+  ]
+
 spec :: Spec
 spec = describe "Katari.Lowering" $ do
   stage1Spec
@@ -118,9 +163,8 @@ stage1Spec = describe "Stage 1 — literals / arithmetic" $ do
       Just ub -> do
         ub.statements `shouldBe` []
         ub.trailing `shouldBe` Nothing
-        ub.handlers `shouldBe` []
         ub.parameters `shouldBe` []
-        ub.kind `shouldBe` BlockAgentEntry
+        ub.kind `shouldBe` BlockKindAgent
 
   it "lowers an integer literal as StatementLoadLiteral with the integer value" $ do
     (irMod, errs) <- lowerSource "agent main() { 42 }"
@@ -218,14 +262,6 @@ callTargetBlockMaybe c = case c.target of
   CallTargetBlock {block} -> Just block
   _ -> Nothing
 
--- | Extract StatementMatch statements from a UserBlock.
-matches :: UserBlock -> [MatchData]
-matches ub = [d | StatementMatch d <- ub.statements]
-
--- | Extract StatementFor statements from a UserBlock.
-fors :: UserBlock -> [ForData]
-fors ub = [d | StatementFor d <- ub.statements]
-
 -- | Look up a UserBlock by id.
 userBlockOf :: BlockId -> IRModule -> Maybe UserBlock
 userBlockOf bid irMod = case Map.lookup bid irMod.blocks of
@@ -238,42 +274,42 @@ userBlockOf bid irMod = case Map.lookup bid irMod.blocks of
 
 stage2Spec :: Spec
 stage2Spec = describe "Stage 2 \8212 control flow" $ do
-  it "lowers if-else as StatementMatch with true arm and default" $ do
+  it "lowers if-else as BlockMatch with true arm and default" $ do
     (irMod, errs) <- lowerSource "agent main() { if (true) { 1 } else { 2 } }"
     errs `shouldBe` []
     let Just ub = agentBody "main" irMod
-    case matches ub of
+    case calledMatchBlocks ub irMod of
       [m] -> do
         length m.arms `shouldBe` 1
         let [arm] = m.arms
         arm.pattern `shouldBe` MatchPatternLiteral LiteralValueBoolean {boolean = True}
         m.defaultArm `shouldNotBe` Nothing
-      other -> expectationFailure ("expected 1 StatementMatch, got " <> show (length other))
+      other -> expectationFailure ("expected 1 BlockMatch call, got " <> show (length other))
 
   it "lowers if without else (defaultArm Nothing)" $ do
     (irMod, errs) <- lowerSource "agent main() { if (true) { 1 }; 0 }"
     errs `shouldBe` []
     let Just ub = agentBody "main" irMod
-    case matches ub of
+    case calledMatchBlocks ub irMod of
       [m] -> m.defaultArm `shouldBe` Nothing
-      _ -> expectationFailure "expected 1 StatementMatch"
+      _ -> expectationFailure "expected 1 BlockMatch call"
 
-  it "if branches lowered to inheritScope blocks" $ do
+  it "if branches lowered to inline blocks" $ do
     (irMod, errs) <- lowerSource "agent main() { if (true) { 1 } else { 2 } }"
     errs `shouldBe` []
     let Just ub = agentBody "main" irMod
-    case matches ub of
+    case calledMatchBlocks ub irMod of
       [m] -> do
         let [arm] = m.arms
         case userBlockOf arm.body irMod of
-          Just child -> child.kind `shouldBe` BlockInline
+          Just child -> child.kind `shouldBe` BlockKindInline
           Nothing -> expectationFailure "then-branch block not found"
         case m.defaultArm of
           Just defId -> case userBlockOf defId irMod of
-            Just child -> child.kind `shouldBe` BlockInline
+            Just child -> child.kind `shouldBe` BlockKindInline
             Nothing -> expectationFailure "else-branch block not found"
           Nothing -> expectationFailure "expected default branch"
-      _ -> expectationFailure "expected 1 StatementMatch"
+      _ -> expectationFailure "expected 1 BlockMatch call"
 
   it "lowers data constructor match arm with field bindings" $ do
     (irMod, errs) <-
@@ -289,7 +325,8 @@ stage2Spec = describe "Stage 2 \8212 control flow" $ do
           ]
     errs `shouldBe` []
     let Just ub = agentBody "main" irMod
-    case matches ub of
+        allMatchBlocks = findAllMatchBlocks irMod
+    case allMatchBlocks of
       [m] -> do
         case m.arms of
           [arm] -> case arm.pattern of
@@ -300,9 +337,9 @@ stage2Spec = describe "Stage 2 \8212 control flow" $ do
               map fst fields `shouldMatchList` ["x", "y"]
             other -> expectationFailure ("expected MatchPatternConstructor, got " <> show other)
           _ -> expectationFailure "expected 1 arm"
-      _ -> expectationFailure "expected 1 StatementMatch"
+      _ -> expectationFailure ("expected 1 BlockMatch, got " <> show (length allMatchBlocks))
 
-  it "destructures nested constructor patterns inside match arms via get_field" $ do
+  it "destructures nested constructor patterns inside match arms via pattern tree" $ do
     (irMod, errs) <-
       lowerSource $
         Text.unlines
@@ -316,8 +353,8 @@ stage2Spec = describe "Stage 2 \8212 control flow" $ do
             "}"
           ]
     errs `shouldBe` []
-    let Just ub = agentBody "main" irMod
-    case matches ub of
+    let allMatchBlocks = findAllMatchBlocks irMod
+    case allMatchBlocks of
       [m] -> case m.arms of
         [arm] -> case arm.pattern of
           MatchPatternConstructor outerCid [(outerLabel, innerPat)] -> do
@@ -336,20 +373,20 @@ stage2Spec = describe "Stage 2 \8212 control flow" $ do
               other -> expectationFailure ("expected nested MatchPatternConstructor, got " <> show other)
           other -> expectationFailure ("expected MatchPatternConstructor at top level, got " <> show other)
         _ -> expectationFailure "expected 1 arm"
-      _ -> expectationFailure "expected 1 StatementMatch"
+      _ -> expectationFailure ("expected 1 BlockMatch, got " <> show (length allMatchBlocks))
 
   it "lowers a simple for loop with one in-binding" $ do
     (irMod, errs) <-
       lowerSource
         "agent main() { let arr = [1, 2, 3]; for (x in arr) { x } }"
     errs `shouldBe` []
-    let Just ub = agentBody "main" irMod
-    case fors ub of
+    let allForBlocks = findAllForBlocks irMod
+    case allForBlocks of
       [f] -> do
         length f.iters `shouldBe` 1
         f.stateInits `shouldBe` []
         f.thenBlock `shouldBe` Nothing
-      other -> expectationFailure ("expected 1 StatementFor, got " <> show (length other))
+      other -> expectationFailure ("expected 1 BlockFor, got " <> show (length other))
 
   it "lowers a for with then clause" $ do
     (irMod, errs) <-
@@ -361,10 +398,25 @@ stage2Spec = describe "Stage 2 \8212 control flow" $ do
             "}"
           ]
     errs `shouldBe` []
-    let Just ub = agentBody "main" irMod
-    case fors ub of
+    let allForBlocks = findAllForBlocks irMod
+    case allForBlocks of
       [f] -> f.thenBlock `shouldNotBe` Nothing
-      _ -> expectationFailure "expected 1 StatementFor"
+      _ -> expectationFailure "expected 1 BlockFor"
+
+-- | Find all MatchBlock payloads in the module.
+findAllMatchBlocks :: IRModule -> [MatchBlock]
+findAllMatchBlocks irMod =
+  [mb | BlockMatch {matchBlock = mb} <- Map.elems irMod.blocks]
+
+-- | Find all ForBlock payloads in the module.
+findAllForBlocks :: IRModule -> [ForBlock]
+findAllForBlocks irMod =
+  [fb | BlockFor {forBlock = fb} <- Map.elems irMod.blocks]
+
+-- | Find all HandleBlock payloads in the module.
+findAllHandleBlocks :: IRModule -> [HandleBlock]
+findAllHandleBlocks irMod =
+  [hb | BlockHandle {handleBlock = hb} <- Map.elems irMod.blocks]
 
 -- ===========================================================================
 -- Stage 3 — block / let / scope
@@ -383,7 +435,7 @@ stage3Spec = describe "Stage 3 \8212 block / let / scope" $ do
     let lastCall = last (calls ub)
     lastCall.output `shouldBe` ub.trailing
 
-  it "inline block creates a child block with inheritScope=True" $ do
+  it "inline block creates a child block with BlockKindInline" $ do
     (irMod, errs) <- lowerSource "agent main() { let x = { let a = 1; a + 1 }; x }"
     errs `shouldBe` []
     let Just ub = agentBody "main" irMod
@@ -393,7 +445,7 @@ stage3Spec = describe "Stage 3 \8212 block / let / scope" $ do
     case childCalls of
       (c : _) -> case c.target of
         CallTargetBlock {block} -> case userBlockOf block irMod of
-          Just child -> child.kind `shouldBe` BlockInline
+          Just child -> child.kind `shouldBe` BlockKindInline
           Nothing -> expectationFailure "child block not found"
         _ -> expectationFailure "child call must target a block"
       _ -> pure ()
@@ -502,7 +554,7 @@ stage3Spec = describe "Stage 3 \8212 block / let / scope" $ do
 isChildBlockCall :: CallData -> IRModule -> Bool
 isChildBlockCall c irMod = case c.target of
   CallTargetBlock {block} -> case Map.lookup block irMod.blocks of
-    Just (BlockUser {body}) -> body.kind == BlockInline
+    Just (BlockUser {body}) -> body.kind == BlockKindInline
     _ -> False
   _ -> False
 
@@ -564,7 +616,7 @@ stage4Spec = describe "Stage 4 \8212 agent calls / closure" $ do
 
 stage5Spec :: Spec
 stage5Spec = describe "Stage 5 \8212 for / state / next" $ do
-  it "for with state var emits StatementFor.stateInits and body uses state-var local" $ do
+  it "for with state var emits ForBlock.stateInits and body uses state-var local" $ do
     (irMod, errs) <-
       lowerSource $
         Text.unlines
@@ -575,10 +627,10 @@ stage5Spec = describe "Stage 5 \8212 for / state / next" $ do
             "}"
           ]
     errs `shouldBe` []
-    let Just ub = agentBody "main" irMod
-    case fors ub of
+    let allForBlocks = findAllForBlocks irMod
+    case allForBlocks of
       [f] -> do
-        map fst f.stateInits `shouldBe` ["acc"]
+        length f.stateInits `shouldBe` 1
         case userBlockOf f.bodyBlock irMod of
           Just body -> do
             -- The body should contain at least one StatementCont with kind=ForNext
@@ -587,10 +639,10 @@ stage5Spec = describe "Stage 5 \8212 for / state / next" $ do
             case conts of
               [c] -> do
                 c.contKind `shouldBe` ContKindForNext
-                map fst c.modifiers `shouldBe` ["acc"]
+                length c.modifiers `shouldBe` 1
               _ -> pure ()
           Nothing -> expectationFailure "for body block not found"
-      _ -> expectationFailure "expected 1 StatementFor"
+      _ -> expectationFailure "expected 1 BlockFor"
 
   it "for_break inside for emits StatementExit ExitKindForBreak" $ do
     (irMod, errs) <-
@@ -605,15 +657,15 @@ stage5Spec = describe "Stage 5 \8212 for / state / next" $ do
             "}"
           ]
     errs `shouldBe` []
-    let Just ub = agentBody "main" irMod
-    case fors ub of
+    let allForBlocks = findAllForBlocks irMod
+    case allForBlocks of
       [f] -> case userBlockOf f.bodyBlock irMod of
         Just body -> do
           -- find a nested StatementExit ExitKindForBreak in any descendant block
           let allExits = collectAllExits body irMod
           any (\e -> e.exitKind == ExitKindForBreak) allExits `shouldBe` True
         Nothing -> expectationFailure "for body not found"
-      _ -> expectationFailure "expected 1 StatementFor"
+      _ -> expectationFailure "expected 1 BlockFor"
 
 -- | Collect all StatementExit datas reachable through inline / branch / for /
 -- handler / then sub-blocks.
@@ -626,27 +678,33 @@ collectAllExits ub irMod = directExits ++ indirectExits
         [body' | StatementCall c <- ub.statements, Just body' <- [callTargetUser c]]
           ++ matchBodies
           ++ forBodies
-          ++ handlerBodies
-          ++ thenBodies
+          ++ handleBodies
     callTargetUser c = case c.target of
       CallTargetBlock {block} -> userBlockOf block irMod
       _ -> Nothing
     matchBodies =
       concat
-        [ ub' : maybeToList (m.defaultArm >>= flip userBlockOf irMod)
-          | StatementMatch m <- ub.statements,
-            arm <- m.arms,
+        [ ub' : maybeToList (mb.defaultArm >>= flip userBlockOf irMod)
+          | StatementCall c <- ub.statements,
+            CallTargetBlock {block} <- [c.target],
+            Just mb <- [matchBlockOf block irMod],
+            arm <- mb.arms,
             Just ub' <- [userBlockOf arm.body irMod]
         ]
     forBodies =
       concat
-        [ catMaybes [userBlockOf f.bodyBlock irMod, f.thenBlock >>= flip userBlockOf irMod]
-          | StatementFor f <- ub.statements
+        [ catMaybes [userBlockOf fb.bodyBlock irMod, fb.thenBlock >>= flip userBlockOf irMod]
+          | StatementCall c <- ub.statements,
+            CallTargetBlock {block} <- [c.target],
+            Just fb <- [forBlockOf block irMod]
         ]
-    handlerBodies = [hb | h <- ub.handlers, Just hb <- [userBlockOf h.handlerBody irMod]]
-    thenBodies = case ub.thenBlock of
-      Just tid -> case userBlockOf tid irMod of Just t -> [t]; _ -> []
-      Nothing -> []
+    handleBodies =
+      concat
+        [ catMaybes [userBlockOf hb.body irMod] ++ [hBody | h <- hb.handlers, Just hBody <- [userBlockOf h.handlerBody irMod]]
+          | StatementCall c <- ub.statements,
+            CallTargetBlock {block} <- [c.target],
+            Just hb <- [handleBlockOf block irMod]
+        ]
     recurse child = collectAllExits child irMod
 
 maybeToList :: Maybe a -> [a]
@@ -661,80 +719,82 @@ catMaybes = foldr (\x acc -> case x of Just v -> v : acc; Nothing -> acc) []
 
 stage6Spec :: Spec
 stage6Spec = describe "Stage 6 \8212 handle scope / where / state vars" $ do
-  it "where with handlers (no state vars) keeps single block + catchesBreak" $ do
+  it "where with handlers produces a BlockHandle with handlers" $ do
     (irMod, errs) <-
       lowerSource $
         Text.unlines
           [ "req fetch() -> integer",
-            "agent main() -> integer { fetch() } where {",
-            "  req fetch() { 42 }",
+            "agent main() -> integer {",
+            "  handle {",
+            "    req fetch() { 42 }",
+            "  }",
+            "  fetch()",
             "}"
           ]
     errs `shouldBe` []
-    let Just ub = agentBody "main" irMod
-    ub.kind `shouldBe` BlockAgentEntryWithHandlers
-    length ub.handlers `shouldBe` 1
+    let allHandleBlocks = findAllHandleBlocks irMod
+    case allHandleBlocks of
+      [hb] -> length hb.handlers `shouldBe` 1
+      _ -> expectationFailure ("expected 1 BlockHandle, got " <> show (length allHandleBlocks))
 
   it "handler body's trailing becomes implicit StatementExit ExitKindBreak" $ do
     (irMod, errs) <-
       lowerSource $
         Text.unlines
           [ "req fetch() -> integer",
-            "agent main() -> integer { fetch() } where {",
-            "  req fetch() { 42 }",
+            "agent main() -> integer {",
+            "  handle {",
+            "    req fetch() { 42 }",
+            "  }",
+            "  fetch()",
             "}"
           ]
     errs `shouldBe` []
-    let Just ub = agentBody "main" irMod
-    case ub.handlers of
-      [h] -> case userBlockOf h.handlerBody irMod of
-        Just hb -> do
-          let exits = [d | StatementExit d <- hb.statements]
-          any (\e -> e.exitKind == ExitKindBreak) exits `shouldBe` True
-        Nothing -> expectationFailure "handler body block not found"
-      _ -> expectationFailure "expected 1 handler"
+    let allHandleBlocks = findAllHandleBlocks irMod
+    case allHandleBlocks of
+      [hb] -> case hb.handlers of
+        [h] -> case userBlockOf h.handlerBody irMod of
+          Just handlerBody -> do
+            let exits = [d | StatementExit d <- handlerBody.statements]
+            any (\e -> e.exitKind == ExitKindBreak) exits `shouldBe` True
+          Nothing -> expectationFailure "handler body block not found"
+        _ -> expectationFailure "expected 1 handler"
+      _ -> expectationFailure "expected 1 BlockHandle"
 
-  it "where with state var splits into outer/inner blocks" $ do
+  it "where with state var produces BlockHandle with stateInits" $ do
     (irMod, errs) <-
       lowerSource $
         Text.unlines
           [ "req inc() -> integer",
-            "agent counter() -> integer { inc() } where (var n: integer = 0) {",
-            "  req inc() {",
-            "    next n with { n = n + 1 }",
+            "agent counter() -> integer {",
+            "  handle (var n: integer = 0) {",
+            "    req inc() {",
+            "      next n with { n = n + 1 }",
+            "    }",
             "  }",
+            "  inc()",
             "}"
           ]
     errs `shouldBe` []
-    let Just outer = agentBody "counter" irMod
-    -- Outer is a plain agent entry with no handlers (the where-with-state-var
-    -- form delegates handlers to the inner handle-scope block).
-    outer.kind `shouldBe` BlockAgentEntry
-    outer.handlers `shouldBe` []
-    -- Outer's last call must be to the inner block.
-    case [d | StatementCall d <- outer.statements] of
-      [] -> expectationFailure "outer has no StatementCall to inner"
-      callsList -> do
-        let lastCall = last callsList
-        case lastCall.target of
-          CallTargetBlock {block = innerId} -> case userBlockOf innerId irMod of
-            Just inner -> do
-              -- Inner is a handle scope: catches break and inherits scope.
-              inner.kind `shouldBe` BlockHandleScope
-              map (.label) inner.stateVars `shouldBe` ["n"]
-              length inner.handlers `shouldBe` 1
-            Nothing -> expectationFailure "inner block not found"
-          _ -> expectationFailure "outer's call must target a block id"
+    let allHandleBlocks = findAllHandleBlocks irMod
+    case allHandleBlocks of
+      [hb] -> do
+        length hb.stateInits `shouldBe` 1
+        length hb.handlers `shouldBe` 1
+      _ -> expectationFailure ("expected 1 BlockHandle, got " <> show (length allHandleBlocks))
 
   it "next inside handler emits StatementCont with ContKindNext and modifiers" $ do
     (irMod, errs) <-
       lowerSource $
         Text.unlines
           [ "req inc() -> integer",
-            "agent counter() -> integer { inc() } where (var n: integer = 0) {",
-            "  req inc() {",
-            "    next n with { n = n + 1 }",
+            "agent counter() -> integer {",
+            "  handle (var n: integer = 0) {",
+            "    req inc() {",
+            "      next n with { n = n + 1 }",
+            "    }",
             "  }",
+            "  inc()",
             "}"
           ]
     errs `shouldBe` []
@@ -745,7 +805,7 @@ stage6Spec = describe "Stage 6 \8212 handle scope / where / state vars" $ do
     case contStmts of
       (c : _) -> do
         c.contKind `shouldBe` ContKindNext
-        map fst c.modifiers `shouldBe` ["n"]
+        length c.modifiers `shouldBe` 1
       _ -> expectationFailure "expected StatementCont in some handler"
 
 -- ===========================================================================
@@ -778,10 +838,13 @@ stage7Spec = describe "Stage 7 \8212 non-local exit semantics" $ do
       lowerSource $
         Text.unlines
           [ "req fetch() -> integer",
-            "agent main() -> integer { fetch() } where {",
-            "  req fetch() {",
-            "    break 0",
+            "agent main() -> integer {",
+            "  handle {",
+            "    req fetch() {",
+            "      break 0",
+            "    }",
             "  }",
+            "  fetch()",
             "}"
           ]
     errs `shouldBe` []
@@ -795,15 +858,15 @@ stage7Spec = describe "Stage 7 \8212 non-local exit semantics" $ do
         Text.unlines
           [ "req fetch() -> integer",
             "agent main() -> integer {",
+            "  handle { req fetch() { 1 } } then(v) { v }",
             "  fetch()",
-            "} where { req fetch() { 1 } } then(v) { v }"
+            "}"
           ]
-    -- This program may not parse depending on syntax; record result either way
-    case errs of
-      [] -> do
-        let Just ub = agentBody "main" irMod
-        ub.thenBlock `shouldNotBe` Nothing
-      _ -> pendingWith "then-clause syntax not in current parser shape"
+    errs `shouldBe` []
+    let allHandleBlocks = findAllHandleBlocks irMod
+    case allHandleBlocks of
+      [hb] -> hb.thenBlock `shouldNotBe` Nothing
+      _ -> expectationFailure ("expected 1 BlockHandle, got " <> show (length allHandleBlocks))
 
 -- ===========================================================================
 -- Stage 8 — edge cases / fail-mode tests
@@ -839,7 +902,7 @@ stage8Spec = describe "Stage 8 \8212 edge cases" $ do
     let returns = filter (\e -> e.exitKind == ExitKindReturn) allExits
     length returns `shouldBe` 2
 
-  it "deeply nested if expressions all wire to StatementMatch" $ do
+  it "deeply nested if expressions all wire to BlockMatch" $ do
     (irMod, errs) <-
       lowerSource $
         Text.unlines
@@ -852,9 +915,7 @@ stage8Spec = describe "Stage 8 \8212 edge cases" $ do
             "}"
           ]
     errs `shouldBe` []
-    let allBlocks = Map.elems irMod.blocks
-        userBlocks = [u | BlockUser {body = u} <- allBlocks]
-        matchCount = sum [length (matches u) | u <- userBlocks]
+    let matchCount = length (findAllMatchBlocks irMod)
     matchCount `shouldBe` 2 -- outer + nested
   it "shadowing in nested let does not collide var ids" $ do
     (irMod, errs) <-
@@ -908,8 +969,8 @@ stage8Spec = describe "Stage 8 \8212 edge cases" $ do
             "}"
           ]
     errs `shouldBe` []
-    let Just ub = agentBody "main" irMod
-    case matches ub of
+    let allMatchBlocks = findAllMatchBlocks irMod
+    case allMatchBlocks of
       [m] -> case m.arms of
         [arm0, arm1] -> do
           -- First arm: Some(value = 0) — literal nested under ctor
@@ -923,7 +984,7 @@ stage8Spec = describe "Stage 8 \8212 edge cases" $ do
             MatchPatternConstructor _ [(label, MatchPatternVariable _)] -> label `shouldBe` "value"
             other -> expectationFailure ("expected MatchPatternConstructor with variable inner, got " <> show other)
         other -> expectationFailure ("expected 2 arms, got " <> show (length other))
-      other -> expectationFailure ("expected 1 StatementMatch, got " <> show (length other))
+      other -> expectationFailure ("expected 1 BlockMatch, got " <> show (length other))
 
   it "local agent body can reference outer locals (runtime scope inheritance)" $ do
     (_, errs) <-

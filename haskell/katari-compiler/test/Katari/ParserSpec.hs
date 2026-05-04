@@ -94,7 +94,7 @@ spec = do
     returnStatement
     nextAndBreak
     declarations
-    whereBlock
+    handleExpression
     patterns
     types
     arrayAndTupleTypes
@@ -629,8 +629,11 @@ nextAndBreak = describe "next and break" $ do
     _ <-
       shouldSucceed $
         mconcat
-          [ "agent main() { result } where {",
-            "  req get() { next 42; }",
+          [ "agent main() {\n",
+            "  handle {\n",
+            "    req get() { next 42; }\n",
+            "  }\n",
+            "  result\n",
             "}"
           ]
     pure ()
@@ -639,8 +642,11 @@ nextAndBreak = describe "next and break" $ do
     _ <-
       shouldSucceed $
         mconcat
-          [ "agent main() { result } where {",
-            "  req get() { next 42 with { count = count + 1 }; }",
+          [ "agent main() {\n",
+            "  handle {\n",
+            "    req get() { next 42 with { count = count + 1 }; }\n",
+            "  }\n",
+            "  result\n",
             "}"
           ]
     pure ()
@@ -649,8 +655,11 @@ nextAndBreak = describe "next and break" $ do
     _ <-
       shouldSucceed $
         mconcat
-          [ "agent main() { result } where {",
-            "  req get() { break 0; }",
+          [ "agent main() {\n",
+            "  handle {\n",
+            "    req get() { break 0; }\n",
+            "  }\n",
+            "  result\n",
             "}"
           ]
     pure ()
@@ -678,8 +687,11 @@ nextAndBreak = describe "next and break" $ do
   it "rejects bare next inside req handler (HandleCtx)" $ do
     shouldFail $
       mconcat
-        [ "agent main() { result } where {",
-          "  req get() { next; }",
+        [ "agent main() {\n",
+          "  handle {\n",
+          "    req get() { next; }\n",
+          "  }\n",
+          "  result\n",
           "}"
         ]
 
@@ -712,42 +724,48 @@ nextAndBreak = describe "next and break" $ do
     m <-
       shouldSucceed $
         mconcat
-          [ "agent main() { result } where {",
-            "  req get() { next 42; }",
+          [ "agent main() {\n",
+            "  handle {\n",
+            "    req get() { next 42; }\n",
+            "  }\n",
+            "  result\n",
             "}"
           ]
     case head (decls m) of
       DeclarationAgent a ->
-        case a.body.whereBlock of
-          Just wb ->
-            case wb.handlers of
+        case a.body.returnExpression of
+          Just (ExpressionHandle he) ->
+            case he.handlers of
               [rh] ->
                 case rh.body.statements of
                   [StatementNext _] -> pure ()
                   _ -> expectationFailure "expected StatementNext"
               _ -> expectationFailure "expected one handler"
-          Nothing -> expectationFailure "expected where block"
+          _ -> expectationFailure "expected handle expression"
       _ -> expectationFailure "expected agent"
 
   it "break in req handler is StatementBreak" $ do
     m <-
       shouldSucceed $
         mconcat
-          [ "agent main() { result } where {",
-            "  req get() { break 0; }",
+          [ "agent main() {\n",
+            "  handle {\n",
+            "    req get() { break 0; }\n",
+            "  }\n",
+            "  result\n",
             "}"
           ]
     case head (decls m) of
       DeclarationAgent a ->
-        case a.body.whereBlock of
-          Just wb ->
-            case wb.handlers of
+        case a.body.returnExpression of
+          Just (ExpressionHandle he) ->
+            case he.handlers of
               [rh] ->
                 case rh.body.statements of
                   [StatementBreak _] -> pure ()
                   _ -> expectationFailure "expected StatementBreak"
               _ -> expectationFailure "expected one handler"
-          Nothing -> expectationFailure "expected where block"
+          _ -> expectationFailure "expected handle expression"
       _ -> expectationFailure "expected agent"
 
 -- ---------------------------------------------------------------------------
@@ -997,227 +1015,171 @@ declarations = describe "declarations" $ do
     length (decls m) `shouldBe` 2
 
 -- ---------------------------------------------------------------------------
--- Where block
+-- Handle expression
 -- ---------------------------------------------------------------------------
 
-whereBlock :: Spec
-whereBlock = describe "where block" $ do
-  it "parses where with handler" $ do
+handleExpression :: Spec
+handleExpression = describe "handle expression" $ do
+  it "parses basic handle with handler" $ do
     _ <-
       shouldSucceed $
         mconcat
-          [ "agent main() {",
-            "  result",
-            "} where {",
-            "  req get() { 42 }",
+          [ "agent main() {\n",
+            "  handle {\n",
+            "    req get() { break 1; }\n",
+            "  }\n",
+            "  result\n",
             "}"
           ]
     pure ()
 
-  it "parses where with qualified handler (req module.name)" $ do
+  it "parses handle with qualified handler (req module.name)" $ do
     m <-
       shouldSucceed $
         mconcat
-          [ "agent main() {",
-            "  result",
-            "} where {",
-            "  req io.read() { 42 }",
+          [ "agent main() {\n",
+            "  handle {\n",
+            "    req io.read() { break 42; }\n",
+            "  }\n",
+            "  result\n",
             "}"
           ]
     case head (decls m) of
-      DeclarationAgent a -> case a.body.whereBlock of
-        Just wb -> case wb.handlers of
+      DeclarationAgent a -> case a.body.returnExpression of
+        Just (ExpressionHandle he) -> case he.handlers of
           [h] -> do
             fmap nameText h.moduleQualifier `shouldBe` Just "io"
             nameText h.name `shouldBe` "read"
           _ -> expectationFailure "expected one handler"
-        _ -> expectationFailure "expected where block"
+        _ -> expectationFailure "expected handle expression"
       _ -> expectationFailure "expected agent"
 
-  it "parses where with bare handler keeps moduleQualifier as Nothing" $ do
+  it "parses handle with bare handler keeps moduleQualifier as Nothing" $ do
     m <-
       shouldSucceed $
         mconcat
-          [ "agent main() {",
-            "  result",
-            "} where {",
-            "  req get() { 42 }",
+          [ "agent main() {\n",
+            "  handle {\n",
+            "    req get() { break 42; }\n",
+            "  }\n",
+            "  result\n",
             "}"
           ]
     case head (decls m) of
-      DeclarationAgent a -> case a.body.whereBlock of
-        Just wb -> case wb.handlers of
+      DeclarationAgent a -> case a.body.returnExpression of
+        Just (ExpressionHandle he) -> case he.handlers of
           [h] -> do
             isNothing h.moduleQualifier `shouldBe` True
             nameText h.name `shouldBe` "get"
           _ -> expectationFailure "expected one handler"
-        _ -> expectationFailure "expected where block"
+        _ -> expectationFailure "expected handle expression"
       _ -> expectationFailure "expected agent"
 
-  it "parses where with state vars" $ do
+  it "parses handle with state variables" $ do
     _ <-
       shouldSucceed $
         mconcat
-          [ "agent main() {",
-            "  result",
-            "} where (var count = 0) {",
-            "  req inc() { next null with { count = count + 1 }; }",
+          [ "agent main() {\n",
+            "  handle (var count: integer = 0) {\n",
+            "    req inc() { next null with { count = count + 1 }; }\n",
+            "  }\n",
+            "  result\n",
             "}"
           ]
     pure ()
 
-  it "parses where with typed state var" $ do
+  it "parses handle with multiple state variables" $ do
     _ <-
       shouldSucceed $
         mconcat
-          [ "agent main() {",
-            "  result",
-            "} where (var count: integer = 0) {",
-            "  req inc() { next null with { count = count + 1 }; }",
+          [ "agent main() {\n",
+            "  handle (var x = 0, var y = 0) {\n",
+            "    req addX() { next null with { x = x + 1 }; }\n",
+            "    req addY() { next null with { y = y + 1 }; }\n",
+            "  }\n",
+            "  result\n",
             "}"
           ]
     pure ()
 
-  it "parses where with multiple state vars" $ do
-    _ <-
-      shouldSucceed $
-        mconcat
-          [ "agent main() {",
-            "  result",
-            "} where (var x = 0, var y = 0) {",
-            "  req addX() { next null with { x = x + 1 }; }",
-            "  req addY() { next null with { y = y + 1 }; }",
-            "}"
-          ]
-    pure ()
-
-  it "parses where on nested block expression (let binding)" $ do
-    _ <-
-      shouldSucceed $
-        mconcat
-          [ "agent main() {",
-            "  let x = { 42 } where { req get() { 1 } };",
-            "  x",
-            "}"
-          ]
-    pure ()
-
-  it "parses where on nested block with trailing expr" $ do
-    _ <-
-      shouldSucceed $
-        mconcat
-          [ "agent main() {",
-            "  let x = { 42 } where { req get() { 1 } };",
-            "  x",
-            "}"
-          ]
-    pure ()
-
-  it "parses where on if-then block" $ do
-    _ <-
-      shouldSucceed $
-        mconcat
-          [ "agent main() {",
-            "  if (cond) { result } where { req get() { 1 } } else { 0 }",
-            "}"
-          ]
-    pure ()
-
-  it "parses where on match arm body" $ do
-    _ <-
-      shouldSucceed $
-        mconcat
-          [ "agent main() {",
-            "  match (x) {",
-            "    case 1 => { foo() } where { req get() { 1 } }",
-            "  }",
-            "}"
-          ]
-    pure ()
-
-  it "parses where on for body" $ do
-    _ <-
-      shouldSucceed $
-        mconcat
-          [ "agent main() {",
-            "  for (x in xs) { x } where { req get() { 1 } }",
-            "}"
-          ]
-    pure ()
-
-  it "parses where with then clause (no pattern)" $ do
+  it "parses handle with then clause (no pattern)" $ do
     m <-
       shouldSucceed $
         mconcat
           [ "agent main() {\n",
+            "  handle {\n",
+            "    req get() { break 1; }\n",
+            "  } then { 0 }\n",
             "  result\n",
-            "} where {\n",
-            "  req get() { 1 }\n",
-            "} then { 0 }\n"
+            "}"
           ]
     case head (decls m) of
       DeclarationAgent a ->
-        case a.body.whereBlock of
-          Just (WhereBlock {thenClause = Just (Nothing, _)}) -> pure ()
-          Just (WhereBlock {thenClause = Just (Just _, _)}) ->
-            expectationFailure "expected pattern absent"
-          Just (WhereBlock {thenClause = Nothing}) ->
-            expectationFailure "expected then clause"
-          Nothing -> expectationFailure "expected where block"
+        case a.body.returnExpression of
+          Just (ExpressionHandle he) ->
+            case he.thenClause of
+              Just (Nothing, _) -> pure ()
+              Just (Just _, _) -> expectationFailure "expected pattern absent"
+              Nothing -> expectationFailure "expected then clause"
+          _ -> expectationFailure "expected handle expression"
       _ -> expectationFailure "expected agent"
 
-  it "parses where with then clause (with pattern)" $ do
+  it "parses handle with then clause (with pattern)" $ do
     m <-
       shouldSucceed $
         mconcat
           [ "agent main() {\n",
+            "  handle {\n",
+            "    req get() { break 1; }\n",
+            "  } then(p) { p }\n",
             "  result\n",
-            "} where {\n",
-            "  req get() { 1 }\n",
-            "} then(p) { p }\n"
+            "}"
           ]
     case head (decls m) of
       DeclarationAgent a ->
-        case a.body.whereBlock of
-          Just (WhereBlock {thenClause = Just (Just _, _)}) -> pure ()
-          Just (WhereBlock {thenClause = Just (Nothing, _)}) ->
-            expectationFailure "expected pattern present"
-          Just (WhereBlock {thenClause = Nothing}) ->
-            expectationFailure "expected then clause"
-          Nothing -> expectationFailure "expected where block"
+        case a.body.returnExpression of
+          Just (ExpressionHandle he) ->
+            case he.thenClause of
+              Just (Just _, _) -> pure ()
+              Just (Nothing, _) -> expectationFailure "expected pattern present"
+              Nothing -> expectationFailure "expected then clause"
+          _ -> expectationFailure "expected handle expression"
       _ -> expectationFailure "expected agent"
 
   it "rejects then on different line from preceding `}`" $ do
     shouldFail $
       mconcat
         [ "agent main() {\n",
+          "  handle {\n",
+          "    req get() { break 1; }\n",
+          "  }\n",
+          "  then(p) { p }\n",
           "  result\n",
-          "} where {\n",
-          "  req get() { 1 }\n",
-          "}\n",
-          "then(p) { p }\n"
+          "}"
         ]
 
-  it "parses where handler with return type" $ do
+  it "parses handle handler with return type" $ do
     _ <-
       shouldSucceed $
         mconcat
-          [ "agent main() {",
-            "  result",
-            "} where {",
-            "  req get() -> string { \"hello\" }",
+          [ "agent main() {\n",
+            "  handle {\n",
+            "    req get() -> string { break \"hello\"; }\n",
+            "  }\n",
+            "  result\n",
             "}"
           ]
     pure ()
 
-  it "rejects where handler with request annotation (with clause not allowed on handler)" $ do
+  it "parses par handle" $ do
     _ <-
-      shouldFail $
+      shouldSucceed $
         mconcat
-          [ "agent main() {",
-            "  result",
-            "} where {",
-            "  req get() -> string with ai_req { \"hello\" }",
+          [ "agent main() {\n",
+            "  par handle {\n",
+            "    req get() { break 1; }\n",
+            "  }\n",
+            "  result\n",
             "}"
           ]
     pure ()
@@ -1449,14 +1411,17 @@ autoSemicolon = describe "auto-inserted semicolons" $ do
     _ <- shouldSucceed "agent main() {\n  for (x in xs) {\n    x\n  } then {\n    null\n  }\n}"
     pure ()
 
-  it "where on same line as closing brace" $ do
+  it "then on same line as closing brace (handle)" $ do
     _ <-
       shouldSucceed $
         mconcat
           [ "agent main() {\n",
+            "  handle {\n",
+            "    req get() { next 1; }\n",
+            "  } then (x) {\n",
+            "    x\n",
+            "  }\n",
             "  result\n",
-            "} where {\n",
-            "  req get() { 1 }\n",
             "}"
           ]
     pure ()
@@ -1601,7 +1566,7 @@ sourceSpans = describe "source spans" $ do
       _ -> expectationFailure "expected for"
 
 -- ---------------------------------------------------------------------------
--- `} newline else/then/where` is a syntax error
+-- `} newline else/then` is a syntax error
 -- ---------------------------------------------------------------------------
 
 sameLineBlockKeyword :: Spec
@@ -1616,9 +1581,19 @@ sameLineBlockKeyword = describe "same-line block keyword rule" $ do
       "agent main() { for (x in xs) { x }\nthen { null } }"
       "must be on the same line as the preceding '}'"
 
-  it "rejects where on the line after }" $ do
+  it "rejects then (handle) on the line after }" $ do
     shouldFailWith
-      (mconcat ["agent main() {\n  result\n}\nwhere {\n  req get() { 1 }\n}"])
+      (mconcat
+        [ "agent main() {\n",
+          "  handle {\n",
+          "    req get() { next 1; }\n",
+          "  }\n",
+          "  then (x) {\n",
+          "    x\n",
+          "  }\n",
+          "  result\n",
+          "}"
+        ])
       "must be on the same line as the preceding '}'"
 
   it "accepts else on the same line as }" $ do
@@ -1629,14 +1604,17 @@ sameLineBlockKeyword = describe "same-line block keyword rule" $ do
     _ <- shouldSucceed "agent main() { for (x in xs) { x } then { null } }"
     pure ()
 
-  it "accepts where on the same line as }" $ do
+  it "accepts then (handle) on the same line as }" $ do
     _ <-
       shouldSucceed $
         mconcat
           [ "agent main() {\n",
+            "  handle {\n",
+            "    req get() { next 1; }\n",
+            "  } then (x) {\n",
+            "    x\n",
+            "  }\n",
             "  result\n",
-            "} where {\n",
-            "  req get() { 1 }\n",
             "}"
           ]
     pure ()

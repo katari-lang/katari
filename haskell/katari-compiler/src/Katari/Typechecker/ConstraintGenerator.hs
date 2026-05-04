@@ -827,6 +827,9 @@ constrainedExpressionType = \case
   ExpressionMatch MatchExpression {typeOf} -> typeOf
   ExpressionFor ForExpression {typeOf} -> typeOf
   ExpressionBlock BlockExpression {typeOf} -> typeOf
+  ExpressionHandle HandleExpression {typeOf} -> typeOf
+  ExpressionParTuple ParTupleExpression {typeOf} -> typeOf
+  ExpressionParArray ParArrayExpression {typeOf} -> typeOf
   ExpressionFieldAccess FieldAccessExpression {typeOf} -> typeOf
   ExpressionIndexAccess IndexAccessExpression {typeOf} -> typeOf
   ExpressionTemplate TemplateExpression {typeOf} -> typeOf
@@ -835,146 +838,20 @@ constrainedExpressionType = \case
 -- | Walk a block, returning the rebuilt @Constrained@ block and the
 -- 'SemanticType' of the block as a whole.
 --
--- For a plain block (no @where@), the type is the tail-expression type
--- (or 'SemanticTypeNull' if the block has no tail expression), and no
--- fresh request variables are allocated — the body walks under the
--- enclosing request context directly.
---
--- For a block with a @where@ clause, two fresh request variables are
--- introduced: e3 for the body and e4 for handler bodies. The constraints
---
--- @
---   e3 \<: enclosingRequestVariable ∪ e2     (ReasonKindHandleRequestDischarge)
---   e4 \<: enclosingRequestVariable          (ReasonKindHandlerRequestBound)
--- @
---
--- ensure body requests are either discharged by the handlers or propagated
--- to the outer context, while handler bodies can only raise outer requests
--- (a handler cannot dispatch its own request to itself). The block's
--- whole-result type is a fresh type variable that receives both the body's
--- tail value and every @break e@ inside any handler.
+-- The type is the tail-expression type (or 'SemanticTypeNull' if the block
+-- has no tail expression). No fresh request variables are allocated — the
+-- body walks under the enclosing request context directly.
 walkBlock :: Block Identified -> CG (Block Constrained, SemanticType Unresolved)
-walkBlock Block {statements, returnExpression, whereBlock, sourceSpan} = case whereBlock of
-  Nothing -> do
-    (statements', returnExpression') <- walkBlockBody statements returnExpression
-    let bodyTy = blockTailType statements returnExpression'
-    pure
-      ( Block
-          { statements = statements',
-            returnExpression = returnExpression',
-            whereBlock = Nothing,
-            sourceSpan = sourceSpan
-          },
-        bodyTy
-      )
-  Just wb -> walkBlockWithWhere statements returnExpression wb sourceSpan
-
--- | Walk a block-with-where (and possibly a @then@ clause). The orchestration
--- mirrors the new semantics:
---
---   1. Allocate @wholeBlockTypeVariable@ (the whole expression's type) and request vars.
---   2. Walk state variables (their initializer constraints land here).
---   3. Walk the @then@ clause first (if present): its body uses the OUTER
---      contexts and request @e4@, so a @return@ inside @then@ targets the
---      enclosing agent directly. The @then@ body's type flows into the
---      whole-block type.
---   4. Walk the body with possibly-modified contexts. If a @then@ exists,
---      'withThenModifiedContexts' replaces every enclosing return / break
---      target with a fresh sub-target that must match the pattern, and
---      routes the @then@ body's value back to the original target.
---   5. Connect the body's tail value into either the @then@ pattern type
---      (if present) or directly into the whole-block type.
---   6. Walk handlers with OUTER contexts (NOT modified by then) +
---      'withHandleScope' so that @break@ inside a handler body flows to
---      @wholeBlockTypeVariable@ (bypassing the where's own @then@).
---   7. Emit the request-discharge / handler-request constraints.
-walkBlockWithWhere ::
-  [Statement Identified] ->
-  Maybe (Expression Identified) ->
-  WhereBlock Identified ->
-  SourceSpan ->
-  CG (Block Constrained, SemanticType Unresolved)
-walkBlockWithWhere statements returnExpression wb blockSpan = do
-  let WhereBlock {stateVariables, handlers, thenClause, sourceSpan = wbSpan} = wb
-  enclosingRequestVariable <- asks (.contextEnclosingRequests)
-  targetBodyRequestVariable <- freshRequestVariableId
-  handlerBodyRequestVariable <- freshRequestVariableId
-  wholeBlockId <- freshTypeVariableId
-  let wholeBlockTypeVariable = SemanticTypeVariable wholeBlockId
-
-  -- (1) State variables: their initializer constraints are emitted in the
-  -- where's own scope frame (already enforced by Identifier).
-  stateVariables' <- mapM walkStateVariable stateVariables
-
-  -- (2) Then clause first: walk pattern + body with OUTER contexts and
-  -- request e4. Yield (constructed clause, pattern type, then-body type).
-  (thenClause', maybePatternType, maybeThenBodyType) <- case thenClause of
-    Nothing -> pure (Nothing, Nothing, Nothing)
-    Just (maybePattern, thenBody) -> do
-      (pattern', patternType) <- case maybePattern of
-        Just p -> do
-          (p', t) <- walkPattern p
-          pure (Just p', t)
-        Nothing -> do
-          -- Pattern omitted: any value passes through; allocate a fresh tv.
-          t <- freshTypeVar
-          pure (Nothing, t)
-      (thenBody', thenBodyType) <-
-        withEnclosingRequests handlerBodyRequestVariable (walkBlock thenBody)
-      addTypeConstraint thenBodyType wholeBlockTypeVariable (ConstraintReason ReasonKindThenBodyToWhole wbSpan)
-      pure (Just (pattern', thenBody'), Just patternType, Just thenBodyType)
-
-  -- (3) Body walk: under e3 request, with contexts modified by then if any.
-  let runBody = withEnclosingRequests targetBodyRequestVariable (walkBlockBody statements returnExpression)
-  (statements', returnExpression') <- case (maybePatternType, maybeThenBodyType) of
-    (Just patTy, Just thenTy) ->
-      withThenModifiedContexts patTy thenTy wbSpan runBody
-    _ -> runBody
+walkBlock Block {statements, returnExpression, sourceSpan} = do
+  (statements', returnExpression') <- walkBlockBody statements returnExpression
   let bodyTy = blockTailType statements returnExpression'
-
-  -- (4) Body normal completion → either through the pattern (if then) or
-  --     directly into the whole-block type.
-  case maybePatternType of
-    Just patTy -> addTypeConstraint bodyTy patTy (ConstraintReason ReasonKindThenPattern blockSpan)
-    Nothing -> addTypeConstraint bodyTy wholeBlockTypeVariable (ConstraintReason ReasonKindHandleResultBody blockSpan)
-
-  -- (5) Handlers: OUTER contexts (not modified by then), e4 request, plus
-  --     withHandleScope so 'break' inside a handler body targets wholeBlockTypeVariable.
-  handlers' <- mapM (walkRequestHandler handlerBodyRequestVariable wholeBlockId) handlers
-
-  -- (6) Request constraints: e3 ⊆ enclosingRequestVariable ∪ {handled requests}, e4 ⊆ enclosingRequestVariable.
-  -- Each handler's @name@ is a RequestRef' resolved to a 'RequestId'.
-  let handledRequestIds =
-        Set.fromList
-          [ SemanticRequestElementConcrete requestId
-            | RequestHandler {name = NameRef {resolution = Just requestId}} <- handlers
-          ]
-  let enclosingRequest = maybe emptyRequest singletonRequestVariable enclosingRequestVariable
-      hadnledRequest = SemanticRequest handledRequestIds
-  addRequestConstraint
-    (singletonRequestVariable targetBodyRequestVariable)
-    (unionRequests enclosingRequest hadnledRequest)
-    (ConstraintReason ReasonKindHandleRequestDischarge wbSpan)
-  addRequestConstraint
-    (singletonRequestVariable handlerBodyRequestVariable)
-    enclosingRequest
-    (ConstraintReason ReasonKindHandlerRequestBound wbSpan)
-
   pure
     ( Block
         { statements = statements',
           returnExpression = returnExpression',
-          whereBlock =
-            Just
-              WhereBlock
-                { stateVariables = stateVariables',
-                  handlers = handlers',
-                  thenClause = thenClause',
-                  sourceSpan = wbSpan
-                },
-          sourceSpan = blockSpan
+          sourceSpan = sourceSpan
         },
-      wholeBlockTypeVariable
+      bodyTy
     )
 
 -- | A block's overall type. If any statement is a global-exit
@@ -1205,6 +1082,9 @@ walkExpression = \case
   ExpressionMatch expr -> walkMatchExpr expr
   ExpressionFor expr -> walkForExpr expr
   ExpressionBlock expr -> walkBlockExpr expr
+  ExpressionHandle expr -> walkHandleExpr expr
+  ExpressionParTuple expr -> walkParTupleExpr expr
+  ExpressionParArray expr -> walkParArrayExpr expr
   ExpressionFieldAccess expr -> walkFieldAccessExpr expr
   ExpressionIndexAccess expr -> walkIndexAccessExpr expr
   ExpressionTemplate expr -> walkTemplateExpr expr
@@ -1461,7 +1341,7 @@ walkCaseArm tMatch CaseArm {pattern, body, sourceSpan} = do
     )
 
 walkForExpr :: ForExpression Identified -> CG (Expression Constrained)
-walkForExpr ForExpression {inBindings, varBindings, body, thenBlock, sourceSpan} = do
+walkForExpr ForExpression {parallel, inBindings, varBindings, body, thenBlock, sourceSpan} = do
   -- in-bindings: source は外側 scope で walk
   inBindings' <- mapM walkForInBinding inBindings
   varBindings' <- mapM walkForVarBinding varBindings
@@ -1479,7 +1359,8 @@ walkForExpr ForExpression {inBindings, varBindings, body, thenBlock, sourceSpan}
   pure
     ( ExpressionFor
         ForExpression
-          { inBindings = inBindings',
+          { parallel = parallel,
+            inBindings = inBindings',
             varBindings = varBindings',
             body = body',
             thenBlock = thenBlock',
@@ -1518,6 +1399,112 @@ walkBlockExpr BlockExpression {block, sourceSpan} = do
           { block = block',
             sourceSpan = sourceSpan,
             typeOf = semantic
+          }
+    )
+
+walkHandleExpr :: HandleExpression Identified -> CG (Expression Constrained)
+walkHandleExpr HandleExpression {parallel, stateVariables, handlers, thenClause, body, sourceSpan} = do
+  enclosingRequestVariable <- asks (.contextEnclosingRequests)
+  targetBodyRequestVariable <- freshRequestVariableId
+  handlerBodyRequestVariable <- freshRequestVariableId
+  wholeBlockId <- freshTypeVariableId
+  let wholeBlockTypeVariable = SemanticTypeVariable wholeBlockId
+
+  -- State variables
+  stateVariables' <- mapM walkStateVariable stateVariables
+
+  -- Then clause
+  (thenClause', maybePatternType, maybeThenBodyType) <- case thenClause of
+    Nothing -> pure (Nothing, Nothing, Nothing)
+    Just (maybePattern, thenBody) -> do
+      (pattern', patternType) <- case maybePattern of
+        Just p -> do
+          (p', t) <- walkPattern p
+          pure (Just p', t)
+        Nothing -> do
+          t <- freshTypeVar
+          pure (Nothing, t)
+      (thenBody', thenBodyType) <-
+        withEnclosingRequests handlerBodyRequestVariable (walkBlock thenBody)
+      addTypeConstraint thenBodyType wholeBlockTypeVariable (ConstraintReason ReasonKindThenBodyToWhole sourceSpan)
+      pure (Just (pattern', thenBody'), Just patternType, Just thenBodyType)
+
+  -- Body walk (the continuation)
+  let runBody = withEnclosingRequests targetBodyRequestVariable (walkBlock body)
+  (body', bodyTy) <- case (maybePatternType, maybeThenBodyType) of
+    (Just patTy, Just thenTy) ->
+      withThenModifiedContexts patTy thenTy sourceSpan runBody
+    _ -> runBody
+
+  -- Body normal completion
+  case maybePatternType of
+    Just patTy -> addTypeConstraint bodyTy patTy (ConstraintReason ReasonKindThenPattern sourceSpan)
+    Nothing -> addTypeConstraint bodyTy wholeBlockTypeVariable (ConstraintReason ReasonKindHandleResultBody sourceSpan)
+
+  -- Handlers
+  handlers' <- mapM (walkRequestHandler handlerBodyRequestVariable wholeBlockId) handlers
+
+  -- Request constraints
+  let handledRequestIds =
+        Set.fromList
+          [ SemanticRequestElementConcrete requestId
+            | RequestHandler {name = NameRef {resolution = Just requestId}} <- handlers
+          ]
+  let enclosingRequest = maybe emptyRequest singletonRequestVariable enclosingRequestVariable
+      handledRequest = SemanticRequest handledRequestIds
+  addRequestConstraint
+    (singletonRequestVariable targetBodyRequestVariable)
+    (unionRequests enclosingRequest handledRequest)
+    (ConstraintReason ReasonKindHandleRequestDischarge sourceSpan)
+  addRequestConstraint
+    (singletonRequestVariable handlerBodyRequestVariable)
+    enclosingRequest
+    (ConstraintReason ReasonKindHandlerRequestBound sourceSpan)
+
+  pure
+    ( ExpressionHandle
+        HandleExpression
+          { parallel = parallel,
+            stateVariables = stateVariables',
+            handlers = handlers',
+            thenClause = thenClause',
+            body = body',
+            sourceSpan = sourceSpan,
+            typeOf = wholeBlockTypeVariable
+          }
+    )
+
+walkParTupleExpr :: ParTupleExpression Identified -> CG (Expression Constrained)
+walkParTupleExpr ParTupleExpression {elements, sourceSpan} = do
+  elements' <- mapM walkExpression elements
+  let semantic = SemanticTypeTuple (map constrainedExpressionType elements')
+  pure
+    ( ExpressionParTuple
+        ParTupleExpression
+          { elements = elements',
+            sourceSpan = sourceSpan,
+            typeOf = semantic
+          }
+    )
+
+walkParArrayExpr :: ParArrayExpression Identified -> CG (Expression Constrained)
+walkParArrayExpr ParArrayExpression {elements, sourceSpan} = do
+  elements' <- mapM walkExpression elements
+  tElem <- freshTypeVar
+  mapM_
+    ( \e ->
+        addTypeConstraint
+          (constrainedExpressionType e)
+          tElem
+          (ConstraintReason ReasonKindArrayElement sourceSpan)
+    )
+    elements'
+  pure
+    ( ExpressionParArray
+        ParArrayExpression
+          { elements = elements',
+            sourceSpan = sourceSpan,
+            typeOf = SemanticTypeArray tElem
           }
     )
 

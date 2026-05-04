@@ -6,7 +6,7 @@ module Katari.Parser
   )
 where
 
-import Control.Monad (void)
+import Control.Monad (void, when)
 import Control.Monad.Combinators.Expr (makeExprParser)
 import Control.Monad.Combinators.Expr qualified as Expr
 import Control.Monad.Reader (Reader, asks, local, runReader)
@@ -660,12 +660,10 @@ parseBlock = label "block" $ parseWithSpan $ do
   (statements, returnExpression) <- parseBlockBodyWithRecovery
   parsePunctuation PunctuationRightBrace
   parseDetectSameLineKeywordViolation
-  whereBlock <- optional parseWhereBlock
   pure $ \sourceSpan ->
     Block
       { statements = statements,
         returnExpression = returnExpression,
-        whereBlock = whereBlock,
         sourceSpan = sourceSpan
       }
 
@@ -685,7 +683,6 @@ parseDetectSameLineKeywordViolation = do
     parseKatariTokenWith $ \case
       KatariTokenKeyword KeywordElse -> Just "else"
       KatariTokenKeyword KeywordThen -> Just "then"
-      KatariTokenKeyword KeywordWhere -> Just "where"
       _ -> Nothing
   case violation of
     Just keyword -> fail $ "'" <> keyword <> "' must be on the same line as the preceding '}'"
@@ -719,6 +716,12 @@ parseBlockBodyWithRecovery = loop []
           BlockStepReturn Nothing
             <$ MP.lookAhead eof,
           BlockStepStatement <$> parseNonExpressionStatement,
+          -- Koka-style handle: captures the rest of this block as its body.
+          parseHandleStep False,
+          -- par handle: also captures the rest.
+          try $ do
+            _ <- MP.lookAhead (parseKeyword KeywordPar *> parseKeyword KeywordHandle)
+            parseHandleStep True,
           do
             expression <- parseExpression
             -- Distinguish: an explicit ';' makes the expression a statement.
@@ -743,6 +746,10 @@ parseBlockBodyWithRecovery = loop []
                 pure (BlockStepReturn (Just expression))
               ]
         ]
+    -- Parse a handle expression that captures the rest of this block as body.
+    parseHandleStep parallel = do
+      handleExpr <- parseHandleExpression parallel
+      pure (BlockStepReturn (Just handleExpr))
 
 parseNonExpressionStatement :: Parser (Statement Parsed)
 parseNonExpressionStatement =
@@ -753,9 +760,23 @@ parseNonExpressionStatement =
       parseBreakOrNextStatement <* void (some parseSemicolon)
     ]
 
-parseWhereBlock :: Parser (WhereBlock Parsed)
-parseWhereBlock = parseWithSpan $ do
-  parseKeyword KeywordWhere
+-- | Koka-style handle expression. Parses the handle clause and then
+-- captures the remaining block contents as the body (continuation).
+--
+-- @
+-- (par) handle (var s = init, ...) {
+--   req name(params) -> T { body }
+--   ...
+-- } then (pat) { ... }
+-- continuation_statements; trailing_expr
+-- @
+--
+-- Called from 'parseBlockBodyWithRecovery' when @handle@ or @par handle@
+-- is encountered at statement position.
+parseHandleExpression :: Bool -> Parser (Expression Parsed)
+parseHandleExpression parallel = parseWithSpan $ do
+  when parallel (void $ parseKeyword KeywordPar)
+  parseKeyword KeywordHandle
   stateVariables <- option [] . try $ parseParenthesizedList parseStateVariable
   parsePunctuation PunctuationLeftBrace
   skipMany parseSemicolon
@@ -763,16 +784,33 @@ parseWhereBlock = parseWithSpan $ do
   parsePunctuation PunctuationRightBrace
   parseDetectSameLineKeywordViolation
   thenClause <- optional parseThenClause
+  -- Consume optional semicolons between handle clause and continuation.
+  skipMany parseSemicolon
+  -- Continuation: the rest of the enclosing block becomes the handle body.
+  bodyStart <- parseCurrentPosition
+  (bodyStatements, bodyReturn) <- parseBlockBodyWithRecovery
+  bodyEnd <- parsePreviousEndPosition
+  bodySpan <- parseMakeSpan bodyStart bodyEnd
+  let body =
+        Block
+          { statements = bodyStatements,
+            returnExpression = bodyReturn,
+            sourceSpan = bodySpan
+          }
   pure $ \sourceSpan ->
-    WhereBlock
-      { stateVariables = stateVariables,
-        handlers = handlers,
-        thenClause = thenClause,
-        sourceSpan = sourceSpan
-      }
+    ExpressionHandle
+      HandleExpression
+        { parallel = parallel,
+          stateVariables = stateVariables,
+          handlers = handlers,
+          thenClause = thenClause,
+          body = body,
+          sourceSpan = sourceSpan,
+          typeOf = ()
+        }
 
 -- | Parse a @then@ clause: @then@ keyword, optional pattern in parens, then a
--- block. Used as the optional finalizer of a @where@ clause.
+-- block. Used as the optional finalizer of a handle or for clause.
 parseThenClause :: Parser (Maybe (Pattern Parsed), Block Parsed)
 parseThenClause = do
   parseKeyword KeywordThen
@@ -1118,7 +1156,8 @@ parsePrimaryExpression =
     choice
       [ parseIfExpression,
         parseMatchExpression,
-        parseForExpression,
+        parseForExpression False,
+        parseParExpression,
         parseTemplateLiteral,
         parseLiteralExpression,
         parseArrayExpression,
@@ -1126,6 +1165,51 @@ parsePrimaryExpression =
         parseBlockExpression,
         parseVariableExpression
       ]
+
+-- | @par for (...)@ / @par (e, e)@ / @par [e, e]@ — parallel modifier.
+-- Dispatches based on the token following @par@.
+parseParExpression :: Parser (Expression Parsed)
+parseParExpression = do
+  _ <- MP.lookAhead (parseKeyword KeywordPar)
+  choice
+    [ -- par for (...) { ... }
+      parseForExpression True,
+      -- par (e1, e2, ...) — parallel tuple
+      parseParTupleExpression,
+      -- par [e1, e2, ...] — parallel array
+      parseParArrayExpression
+    ]
+
+-- | @par (e1, e2, ...)@ — parallel tuple construction.
+parseParTupleExpression :: Parser (Expression Parsed)
+parseParTupleExpression = parseWithSpan $ do
+  parseKeyword KeywordPar
+  parsePunctuation PunctuationLeftParenthesis
+  elements <- parseExpression `sepBy1` parsePunctuation PunctuationComma
+  parsePunctuation PunctuationRightParenthesis
+  pure $ \sourceSpan ->
+    ExpressionParTuple
+      ParTupleExpression
+        { elements = elements,
+          sourceSpan = sourceSpan,
+          typeOf = ()
+        }
+
+-- | @par [e1, e2, ...]@ — parallel array construction.
+parseParArrayExpression :: Parser (Expression Parsed)
+parseParArrayExpression = parseWithSpan $ do
+  parseKeyword KeywordPar
+  parsePunctuation PunctuationLeftBracket
+  elements <- parseExpression `sepBy` parsePunctuation PunctuationComma
+  _ <- optional (parsePunctuation PunctuationComma)
+  parsePunctuation PunctuationRightBracket
+  pure $ \sourceSpan ->
+    ExpressionParArray
+      ParArrayExpression
+        { elements = elements,
+          sourceSpan = sourceSpan,
+          typeOf = ()
+        }
 
 parseLiteralExpression :: Parser (Expression Parsed)
 parseLiteralExpression = parseWithSpan $ do
@@ -1254,8 +1338,9 @@ parseCaseArm = parseWithSpan $ do
         sourceSpan = sourceSpan
       }
 
-parseForExpression :: Parser (Expression Parsed)
-parseForExpression = parseWithSpan $ do
+parseForExpression :: Bool -> Parser (Expression Parsed)
+parseForExpression parallel = parseWithSpan $ do
+  when parallel (void $ parseKeyword KeywordPar)
   parseKeyword KeywordFor
   (inBindings, varBindings) <-
     between
@@ -1267,7 +1352,8 @@ parseForExpression = parseWithSpan $ do
   pure $ \sourceSpan ->
     ExpressionFor
       ForExpression
-        { inBindings = inBindings,
+        { parallel = parallel,
+          inBindings = inBindings,
           varBindings = varBindings,
           body = body,
           thenBlock = thenBlock,

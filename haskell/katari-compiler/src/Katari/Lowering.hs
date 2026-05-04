@@ -22,7 +22,6 @@ import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (catMaybes)
 import Data.Text (Text)
-import Data.Text qualified as Text
 import Data.Word (Word32)
 import Katari.AST (Phase (Zonked))
 import Katari.AST qualified as AST
@@ -90,8 +89,6 @@ primitiveNames =
     "not",
     "concat",
     -- aggregate construction / access
-    "make_array",
-    "make_tuple",
     "array_get",
     "array_length",
     "get_field",
@@ -595,25 +592,15 @@ lowerAllDeclarations zonkResult = do
 -- ===========================================================================
 
 -- | Lower a top-level 'AgentDeclaration' into the reserved BlockId.
---
--- Layouts produced:
---
--- * No @where@ clause: single block with @catchesReturn=True@.
--- * @where { handlers... }@ (no state vars): single block with both
---   @catchesReturn=True@ and @catchesBreak=True@; handlers attached.
--- * @where (var s = init) { handlers... }@: outer/inner split. Outer is the
---   agent entry (@catchesReturn=True@, fresh scope), computes init expressions,
---   then calls the inner block. Inner is the handle scope
---   (@catchesBreak=True@, inheritScope=True), receives @s@ as a state var,
---   has handlers attached and runs the body.
+-- Produces a single 'BlockKindAgent' block that catches @return@.
 lowerAgentDeclaration :: AST.AgentDeclaration Zonked -> BlockId -> Lower ()
 lowerAgentDeclaration decl =
   lowerAgentLike decl.name.text decl.parameters decl.body
 
 -- | Shared lowering shape for any \"agent-like\" callable: a top-level
--- 'AgentDeclaration', or a local 'AgentStatement'. Allocates the param
--- slots, threads param destructuring as a buffer prelude, and dispatches
--- on the body's optional 'WhereBlock' to choose the user-block layout.
+-- 'AgentDeclaration', or a local 'AgentStatement'. Allocates param
+-- slots, threads param destructuring as a prelude, and builds the
+-- agent block.
 lowerAgentLike ::
   Text ->
   [AST.ParameterBinding Zonked] ->
@@ -624,14 +611,7 @@ lowerAgentLike name parameters body blockId = do
   paramBindings <- mapM bindParam parameters
   let paramVars = map fst paramBindings
       paramPrelude = combineParamPreludes (map snd paramBindings)
-  case body.whereBlock of
-    Nothing ->
-      lowerSimpleAgent blockId name paramVars paramPrelude body
-    Just agentWhereBlock
-      | null agentWhereBlock.stateVariables ->
-          lowerAgentWithHandlers blockId name paramVars paramPrelude body agentWhereBlock
-      | otherwise ->
-          lowerAgentWithStateVars blockId name paramVars paramPrelude body agentWhereBlock
+  lowerSimpleAgent blockId name paramVars paramPrelude body
 
 -- | Plain agent (no @where@): single block, @catchesReturn=True@. The
 -- @prelude@ runs inside the block's buffer so any parameter destructuring
@@ -656,140 +636,6 @@ lowerSimpleAgent blockId name paramVars prelude blk = do
           }
   recordBlock blockId (BlockUser {body = userBlock}) (Just name)
 
--- | Agent with @where { handlers... }@ (no state vars): outer agent block
--- emits a 'StatementHandle' with empty 'stateInits'.
-lowerAgentWithHandlers ::
-  BlockId ->
-  Text ->
-  [Param] ->
-  Lower [(VariableId, VarId)] ->
-  AST.Block Zonked ->
-  AST.WhereBlock Zonked ->
-  Lower ()
-lowerAgentWithHandlers blockId name paramVars prelude blk agentWhereBlock = do
-  bodyBlockId <- freshBlockId
-  handleOut <- freshVarId Nothing
-  (_, outerStatements) <- runWithFreshBuffer $ do
-    paramLocals <- prelude
-    withLocals paramLocals $ do
-      -- Build body block (BlockKindInline).
-      (bodyTrailing, bodyStatements) <- runWithFreshBuffer (lowerBlockInto (stripWhereBlock blk))
-      recordBlock bodyBlockId
-        (BlockUser {body = defaultUserBlock {kind = BlockKindInline, statements = bodyStatements, trailing = bodyTrailing}})
-        (Just (name <> ":body"))
-      -- Build handlers and then clause.
-      handlerList <- mapM (lowerHandler []) agentWhereBlock.handlers
-      thenBlockId <- lowerThenClause agentWhereBlock.thenClause
-      -- Record BlockHandle (no state vars) and call it.
-      handleBlockId <- freshBlockId
-      recordBlock handleBlockId
-        (BlockHandle
-          { handleBlock = HandleBlock
-              { stateInits = [],
-                body = bodyBlockId,
-                handlers = handlerList,
-                thenBlock = thenBlockId
-              }
-          })
-        Nothing
-      emit $
-        StatementCall
-          CallData
-            { target = CallTargetBlock {block = handleBlockId},
-              arguments = [],
-              output = Just handleOut
-            }
-  let outerBlock =
-        defaultUserBlock
-          { kind = BlockKindAgent,
-            parameters = paramVars,
-            statements = outerStatements,
-            trailing = Just handleOut
-          }
-  recordBlock blockId (BlockUser {body = outerBlock}) (Just name)
-
--- | Agent with @where (var s = init) ...@: outer block (BlockKindAgent)
--- evaluates the state-var init expressions and emits 'StatementHandle'.
-lowerAgentWithStateVars ::
-  BlockId ->
-  Text ->
-  [Param] ->
-  Lower [(VariableId, VarId)] ->
-  AST.Block Zonked ->
-  AST.WhereBlock Zonked ->
-  Lower ()
-lowerAgentWithStateVars outerId name paramVars prelude blk agentWhereBlock = do
-  handleOut <- freshVarId Nothing
-  (_, outerStatements) <- runWithFreshBuffer $ do
-    paramLocals <- prelude
-    withLocals paramLocals $
-      buildHandleStatement name agentWhereBlock blk handleOut
-  let outerBlock =
-        defaultUserBlock
-          { kind = BlockKindAgent,
-            parameters = paramVars,
-            statements = outerStatements,
-            trailing = Just handleOut
-          }
-  recordBlock outerId (BlockUser {body = outerBlock}) (Just name)
-
--- | Evaluate state-var init expressions, allocate bodyVars in handle scope,
--- build the body/handler/then blocks, and emit a 'StatementHandle'.
--- Called from within the outer block's statement buffer.
-buildHandleStatement ::
-  Text ->
-  AST.WhereBlock Zonked ->
-  AST.Block Zonked ->
-  VarId ->
-  Lower ()
-buildHandleStatement parentName agentWhereBlock blk handleOut = do
-  bodyBlockId <- freshBlockId
-  -- Evaluate init expressions (in outer scope) and allocate bodyVars.
-  stateBinds <- mapM mkStateInit agentWhereBlock.stateVariables
-  let stateInits_ = [(bodyVar, initVar) | (_, bodyVar, initVar) <- stateBinds]
-      stateLocals = [(variableId, bodyVar) | (Just variableId, bodyVar, _) <- stateBinds]
-  withLocals stateLocals $ do
-    -- Body block (BlockKindInline): inherits handle scope.
-    (bodyTrailing, bodyStatements) <- runWithFreshBuffer (lowerBlockInto (stripWhereBlock blk))
-    recordBlock bodyBlockId
-      (BlockUser {body = defaultUserBlock {kind = BlockKindInline, statements = bodyStatements, trailing = bodyTrailing}})
-      (Just (parentName <> ":body"))
-    -- Handlers and then clause (built in state var scope).
-    handlerList <- mapM (lowerHandler stateLocals) agentWhereBlock.handlers
-    thenBlockId <- lowerThenClause agentWhereBlock.thenClause
-    -- Record BlockHandle and call it.
-    handleBlockId <- freshBlockId
-    recordBlock handleBlockId
-      (BlockHandle
-        { handleBlock = HandleBlock
-            { stateInits = stateInits_,
-              body = bodyBlockId,
-              handlers = handlerList,
-              thenBlock = thenBlockId
-            }
-        })
-      Nothing
-    emit $
-      StatementCall
-        CallData
-          { target = CallTargetBlock {block = handleBlockId},
-            arguments = [],
-            output = Just handleOut
-          }
-  where
-    mkStateInit ::
-      AST.StateVariableBinding Zonked ->
-      Lower (Maybe VariableId, VarId, VarId)
-    mkStateInit svb = do
-      initVar <- lowerExpr svb.initial
-      case svb.name.resolution of
-        Just variableId -> do
-          bodyVar <- freshVarId (Just svb.name.text)
-          pure (Just variableId, bodyVar, initVar)
-        Nothing -> do
-          recordError (LoweringErrorUnresolvedVariable svb.sourceSpan svb.name.text)
-          bodyVar <- freshVarId Nothing
-          pure (Nothing, bodyVar, initVar)
 
 -- | Lower a 'RequestHandler' to a 'BlockKindInline' user block.
 -- The handler body inherits the handle scope (state vars are directly
@@ -832,7 +678,7 @@ lowerHandler _stateLocals hr = do
   recordBlock bodyBlockId (BlockUser {body = userBlock}) (Just hr.name.text)
   pure Handler {request = irReqId, handlerBody = bodyBlockId}
 
--- | Lower the optional then-clause of a 'WhereBlock' to its own block.
+-- | Lower the optional then-clause to its own block.
 lowerThenClause ::
   Maybe (Maybe (AST.Pattern Zonked), AST.Block Zonked) ->
   Lower (Maybe BlockId)
@@ -858,11 +704,6 @@ lowerThenClause = \case
               }
       recordBlock blockId (BlockUser {body = userBlock}) Nothing
     pure (Just blockId)
-
--- | Strip a block's whereBlock, returning the statements / returnExpression
--- portion only. Used so 'lowerBlockBody' doesn't try to re-process it.
-stripWhereBlock :: AST.Block Zonked -> AST.Block Zonked
-stripWhereBlock blk = blk {AST.whereBlock = Nothing}
 
 -- | Bind a function parameter: allocate the param's IR var (the slot the
 -- runtime populates) and return a deferred destructuring action.
@@ -1063,30 +904,8 @@ lowerExpr = \case
           }
     pure out
   AST.ExpressionCall callExpr -> lowerCall callExpr
-  AST.ExpressionTuple tupleExpr -> do
-    elements <- mapM lowerExpr tupleExpr.elements
-    out <- freshVarId Nothing
-    blockId <- primBlockId "make_tuple"
-    emit $
-      StatementCall
-        CallData
-          { target = CallTargetBlock {block = blockId},
-            arguments = zipWith mkIndexedArg [0 ..] elements,
-            output = Just out
-          }
-    pure out
-  AST.ExpressionArray arrayExpr -> do
-    elements <- mapM lowerExpr arrayExpr.elements
-    out <- freshVarId Nothing
-    blockId <- primBlockId "make_array"
-    emit $
-      StatementCall
-        CallData
-          { target = CallTargetBlock {block = blockId},
-            arguments = zipWith mkIndexedArg [0 ..] elements,
-            output = Just out
-          }
-    pure out
+  AST.ExpressionTuple tupleExpr -> lowerTupleExpr False tupleExpr.elements
+  AST.ExpressionArray arrayExpr -> lowerArrayExpr False arrayExpr.elements
   AST.ExpressionFieldAccess fieldAccessExpr -> do
     object <- lowerExpr fieldAccessExpr.object
     -- Field name is loaded as a string literal; get_field consumes
@@ -1120,6 +939,9 @@ lowerExpr = \case
   AST.ExpressionIf ifExpr -> lowerIfExpr ifExpr
   AST.ExpressionMatch matchExpr -> lowerMatchExpr matchExpr
   AST.ExpressionFor forExpr -> lowerForExpr forExpr
+  AST.ExpressionHandle handleExpr -> lowerHandleExpr handleExpr
+  AST.ExpressionParTuple parTupleExpr -> lowerTupleExpr True parTupleExpr.elements
+  AST.ExpressionParArray parArrayExpr -> lowerArrayExpr True parArrayExpr.elements
   AST.ExpressionQualifiedReference qualifiedRefExpr ->
     -- Qualified references never bind locally.
     resolveAsValue
@@ -1128,11 +950,6 @@ lowerExpr = \case
       qualifiedRefExpr.sourceSpan
       qualifiedRefExpr.target.text
       (Just qualifiedRefExpr.target.text)
-
--- | Make an Arg with an indexed label like @"_0"@, @"_1"@, … for tuple /
--- array literal construction.
-mkIndexedArg :: Int -> VarId -> Arg
-mkIndexedArg i var = Arg {label = "_" <> Text.pack (show i), var = var}
 
 -- | Lower a function call. Decides whether to emit a static 'CallTargetBlock' call
 -- (when the callee resolves to a top-level decl / ctor / prim) or a closure
@@ -1389,7 +1206,8 @@ lowerForExpr forExpression = do
   recordBlock forBlockId
     (BlockFor
       { forBlock = ForBlock
-          { iters = iterPairs,
+          { parallel = forExpression.parallel,
+            iters = iterPairs,
             stateInits = stateInits,
             bodyBlock = bodyBlockId,
             thenBlock = thenBlockId
@@ -1456,6 +1274,129 @@ buildForBody locals body = do
             }
     recordBlock blockId (BlockUser {body = userBlock}) Nothing
   pure blockId
+
+-- ===========================================================================
+-- Tuple / Array / Handle expression lowering
+-- ===========================================================================
+
+-- | Lower a tuple expression (sequential or parallel) to a 'BlockTuple'.
+-- Each element is lowered into its own inline block.
+lowerTupleExpr :: Bool -> [AST.Expression Zonked] -> Lower VarId
+lowerTupleExpr isParallel elements = do
+  elementBlockIds <- mapM buildElementBlock elements
+  tupleBlockId <- freshBlockId
+  recordBlock tupleBlockId
+    (BlockTuple
+      { tupleBlock = TupleBlock
+          { parallel = isParallel,
+            elements = elementBlockIds
+          }
+      })
+    Nothing
+  out <- freshVarId Nothing
+  emit $
+    StatementCall
+      CallData
+        { target = CallTargetBlock {block = tupleBlockId},
+          arguments = [],
+          output = Just out
+        }
+  pure out
+
+-- | Lower an array expression (sequential or parallel) to a 'BlockArray'.
+-- Each element is lowered into its own inline block.
+lowerArrayExpr :: Bool -> [AST.Expression Zonked] -> Lower VarId
+lowerArrayExpr isParallel elements = do
+  elementBlockIds <- mapM buildElementBlock elements
+  arrayBlockId <- freshBlockId
+  recordBlock arrayBlockId
+    (BlockArray
+      { arrayBlock = ArrayBlock
+          { parallel = isParallel,
+            elements = elementBlockIds
+          }
+      })
+    Nothing
+  out <- freshVarId Nothing
+  emit $
+    StatementCall
+      CallData
+        { target = CallTargetBlock {block = arrayBlockId},
+          arguments = [],
+          output = Just out
+        }
+  pure out
+
+-- | Lower a single expression into its own inline block (used for
+-- tuple/array element blocks).
+buildElementBlock :: AST.Expression Zonked -> Lower BlockId
+buildElementBlock expr = do
+  blockId <- freshBlockId
+  (trailing, statements) <- runWithFreshBuffer (Just <$> lowerExpr expr)
+  let userBlock =
+        defaultUserBlock
+          { statements = statements,
+            trailing = trailing
+          }
+  recordBlock blockId (BlockUser {body = userBlock}) Nothing
+  pure blockId
+
+-- | Lower a handle expression (Koka-style). State vars are evaluated in
+-- the current scope; the body (continuation) and handlers are built as
+-- child blocks, then a 'BlockHandle' is constructed and called.
+lowerHandleExpr :: AST.HandleExpression Zonked -> Lower VarId
+lowerHandleExpr handleExpr = do
+  bodyBlockId <- freshBlockId
+  -- Evaluate state var inits in outer scope.
+  stateBinds <- mapM mkHandleStateInit handleExpr.stateVariables
+  let stateInits_ = [(bodyVar, initVar) | (_, bodyVar, initVar) <- stateBinds]
+      stateLocals = [(variableId, bodyVar) | (Just variableId, bodyVar, _) <- stateBinds]
+  withLocals stateLocals $ do
+    -- Body block (the continuation).
+    (bodyTrailing, bodyStatements) <- runWithFreshBuffer (lowerBlockInto handleExpr.body)
+    recordBlock bodyBlockId
+      (BlockUser {body = defaultUserBlock {kind = BlockKindInline, statements = bodyStatements, trailing = bodyTrailing}})
+      Nothing
+    -- Handlers.
+    handlerList <- mapM (lowerHandler stateLocals) handleExpr.handlers
+    -- Then clause.
+    thenBlockId <- lowerThenClause handleExpr.thenClause
+    -- Record BlockHandle and call it.
+    handleBlockId <- freshBlockId
+    recordBlock handleBlockId
+      (BlockHandle
+        { handleBlock = HandleBlock
+            { parallel = handleExpr.parallel,
+              stateInits = stateInits_,
+              body = bodyBlockId,
+              handlers = handlerList,
+              thenBlock = thenBlockId
+            }
+        })
+      Nothing
+    out <- freshVarId Nothing
+    emit $
+      StatementCall
+        CallData
+          { target = CallTargetBlock {block = handleBlockId},
+            arguments = [],
+            output = Just out
+          }
+    pure out
+  where
+    mkHandleStateInit ::
+      AST.StateVariableBinding Zonked ->
+      Lower (Maybe VariableId, VarId, VarId)
+    mkHandleStateInit svb = do
+      initVar <- lowerExpr svb.initial
+      case svb.name.resolution of
+        Just variableId -> do
+          bodyVar <- freshVarId (Just svb.name.text)
+          pure (Just variableId, bodyVar, initVar)
+        Nothing -> do
+          recordError (LoweringErrorUnresolvedVariable svb.sourceSpan svb.name.text)
+          bodyVar <- freshVarId Nothing
+          pure (Nothing, bodyVar, initVar)
 
 -- | Emit a fresh load-literal statement and return the resulting var.
 emitLoadLiteral :: LiteralValue -> Lower VarId

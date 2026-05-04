@@ -267,16 +267,17 @@ constructorPatterns = describe "constructor patterns" $ do
 -- ---------------------------------------------------------------------------
 
 whereBlocks :: Spec
-whereBlocks = describe "where blocks" $ do
-  it "where block discharges its handled reqs" $ do
+whereBlocks = describe "handle blocks" $ do
+  it "handle block discharges its handled reqs" $ do
     (cg, errors) <-
       runOne $
         mconcat
           [ "req fetch() -> string\n",
-            "agent main() -> string {",
-            "  fetch()",
-            "} where {",
-            "  req fetch() -> string { \"ok\" }",
+            "agent main() -> string {\n",
+            "  handle {\n",
+            "    req fetch() -> string { \"ok\" }\n",
+            "  }\n",
+            "  fetch()\n",
             "}"
           ]
     errors `shouldBe` []
@@ -287,10 +288,11 @@ whereBlocks = describe "where blocks" $ do
     let (stream, _) = Lexer.lex "<test>" $
           mconcat
             [ "req fetch() -> string\n",
-              "agent main() -> string {",
-              "  fetch()",
-              "} where {",
-              "  req fetch() -> string with bar { \"ok\" }",
+              "agent main() -> string {\n",
+              "  handle {\n",
+              "    req fetch() -> string with bar { \"ok\" }\n",
+              "  }\n",
+              "  fetch()\n",
               "}"
             ]
         (_, parseErrors) = Parser.parse "<test>" stream
@@ -304,11 +306,12 @@ whereBlocks = describe "where blocks" $ do
         mconcat
           [ "req fetch() -> string\n",
             "agent main() -> string {\n",
-            "  fetch()\n",
-            "} where {\n",
-            "  req fetch() -> string {\n",
-            "    break \"boom\"\n",
+            "  handle {\n",
+            "    req fetch() -> string {\n",
+            "      break \"boom\"\n",
+            "    }\n",
             "  }\n",
+            "  fetch()\n",
             "}\n"
           ]
     errors `shouldBe` []
@@ -328,11 +331,12 @@ whereBlocks = describe "where blocks" $ do
         mconcat
           [ "req fetch() -> string\n",
             "agent main() -> string {\n",
-            "  fetch()\n",
-            "} where {\n",
-            "  req fetch() -> string {\n",
-            "    next \"resumed\"\n",
+            "  handle {\n",
+            "    req fetch() -> string {\n",
+            "      next \"resumed\"\n",
+            "    }\n",
             "  }\n",
+            "  fetch()\n",
             "}\n"
           ]
     errors `shouldBe` []
@@ -344,17 +348,20 @@ whereBlocks = describe "where blocks" $ do
               _ -> False
         )
 
-  it "where: body tail value flows into the handle-result tv" $ do
-    -- The body's tail expression "hello" flows into the where-block's
+  it "handle: body tail value flows into the handle-result tv" $ do
+    -- The body's tail expression "hello" flows into the handle-block's
     -- whole-result type variable.
     (cg, errors) <-
       runOne $
         mconcat
           [ "req fetch() -> string\n",
-            "agent main() -> string { \"hello\" } where {\n",
-            "  req fetch() -> string {\n",
-            "    next \"x\"\n",
+            "agent main() -> string {\n",
+            "  handle {\n",
+            "    req fetch() -> string {\n",
+            "      next \"x\"\n",
+            "    }\n",
             "  }\n",
+            "  \"hello\"\n",
             "}\n"
           ]
     errors `shouldBe` []
@@ -369,14 +376,17 @@ whereBlocks = describe "where blocks" $ do
   it "handler implicit completion: body tail flows to whole-block tv (implicit break)" $ do
     -- A handler body that falls through without explicit 'next' / 'break'
     -- is treated as an implicit 'break' (Koka-style algebraic requests). Its
-    -- tail value flows to the where-containing block's whole type, NOT to
+    -- tail value flows to the handle-containing block's whole type, NOT to
     -- the handler's declared return type.
     (cg, errors) <-
       runOne $
         mconcat
           [ "req fetch() -> string\n",
-            "agent main() -> string { fetch() } where {\n",
-            "  req fetch() -> string { \"implicit\" }\n",
+            "agent main() -> string {\n",
+            "  handle {\n",
+            "    req fetch() -> string { \"implicit\" }\n",
+            "  }\n",
+            "  fetch()\n",
             "}\n"
           ]
     errors `shouldBe` []
@@ -388,8 +398,8 @@ whereBlocks = describe "where blocks" $ do
               _ -> False
         )
 
-  it "where block emits a handler-request-bound constraint (e4 <: e1)" $ do
-    -- In addition to the discharge constraint (e3 <: e1 ∪ e2), a where
+  it "handle block emits a handler-request-bound constraint (e4 <: e1)" $ do
+    -- In addition to the discharge constraint (e3 <: e1 ∪ e2), a handle
     -- block emits an request-var <: request-var constraint bounding handler
     -- bodies' request by the outer request (e4 <: e1). Both lhs and rhs
     -- must have only requestVars populated and requestReqs empty.
@@ -397,10 +407,13 @@ whereBlocks = describe "where blocks" $ do
       runOne $
         mconcat
           [ "req fetch() -> string\n",
-            "agent main() -> string { fetch() } where {\n",
-            "  req fetch() -> string {\n",
-            "    next \"x\"\n",
+            "agent main() -> string {\n",
+            "  handle {\n",
+            "    req fetch() -> string {\n",
+            "      next \"x\"\n",
+            "    }\n",
             "  }\n",
+            "  fetch()\n",
             "}\n"
           ]
     errors `shouldBe` []
@@ -447,10 +460,13 @@ exitStatementBlocks = describe "exit-statement blocks" $ do
       runOne $
         mconcat
           [ "req fetch() -> string\n",
-            "agent main() -> string { fetch() } where {\n",
-            "  req fetch() -> string {\n",
-            "    next \"x\"\n",
+            "agent main() -> string {\n",
+            "  handle {\n",
+            "    req fetch() -> string {\n",
+            "      next \"x\"\n",
+            "    }\n",
             "  }\n",
+            "  fetch()\n",
             "}\n"
           ]
     errors `shouldBe` []
@@ -612,15 +628,16 @@ constraintContents = describe "constraint contents" $ do
                   _ -> False
             )
 
-  it "where block emits request-discharge constraint" $ do
+  it "handle block emits request-discharge constraint" $ do
     (cg, _, ir) <-
       runOneWithIdentifier $
         mconcat
           [ "req fetch() -> string\n",
-            "agent main() -> string {",
-            "  fetch()",
-            "} where {",
-            "  req fetch() -> string { \"ok\" }",
+            "agent main() -> string {\n",
+            "  handle {\n",
+            "    req fetch() -> string { \"ok\" }\n",
+            "  }\n",
+            "  fetch()\n",
             "}"
           ]
     case variableIdOf "fetch" ir of

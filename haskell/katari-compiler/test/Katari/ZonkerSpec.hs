@@ -121,11 +121,6 @@ expressionTypes m = concatMap declTypes m.declarations
     blockTypes blk =
       concatMap stmtTypes blk.statements
         ++ maybe [] exprTypes blk.returnExpression
-        ++ maybe [] whereTypes blk.whereBlock
-
-    whereTypes wb =
-      concatMap (exprTypes . (.initial)) wb.stateVariables
-        ++ concatMap (blockTypes . (.body)) wb.handlers
 
     stmtTypes = \case
       StatementExpression e -> exprTypes e
@@ -175,6 +170,9 @@ typeOfExpression = \case
   ExpressionFieldAccess x -> x.typeOf
   ExpressionIndexAccess x -> x.typeOf
   ExpressionTemplate x -> x.typeOf
+  ExpressionHandle x -> x.typeOf
+  ExpressionParTuple x -> x.typeOf
+  ExpressionParArray x -> x.typeOf
   ExpressionQualifiedReference x -> x.typeOf
 
 -- | Extract the head module from a 'ZonkResult' (single-module pipelines).
@@ -403,15 +401,16 @@ contractInvariant = describe "Solver totality invariant" $ do
     zr <- runZonkTotal "agent foo() { 42 }"
     zr.zonkErrors `shouldBe` []
 
-  it "totalised Solver result yields empty zonkErrors (handler / where)" $ do
+  it "totalised Solver result yields empty zonkErrors (handler / handle)" $ do
     zr <-
       runZonkTotal $
         mconcat
           [ "req ping() -> integer\n",
             "agent app() {\n",
+            "  handle {\n",
+            "    req ping() { 1 }\n",
+            "  }\n",
             "  ping()\n",
-            "} where {\n",
-            "  req ping() { 1 }\n",
             "}"
           ]
     zr.zonkErrors `shouldBe` []

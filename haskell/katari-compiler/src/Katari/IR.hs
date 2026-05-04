@@ -45,6 +45,8 @@ module Katari.IR
     MatchBlock (..),
     ForBlock (..),
     HandleBlock (..),
+    TupleBlock (..),
+    ArrayBlock (..),
     Param (..),
     Handler (..),
     MatchArm (..),
@@ -250,11 +252,18 @@ data Block where
   -- manages iteration / state-var updates, and runs the body per element.
   -- Called via 'StatementCall'.
   BlockFor :: {forBlock :: ForBlock} -> Block
-  -- | Handle (where-clause) block. The runtime creates a management
-  -- thread, initialises state vars from the inherited parent scope,
-  -- runs the body, and dispatches requests to handlers.
-  -- Called via 'StatementCall'.
+  -- | Handle block. The runtime creates a management thread, initialises
+  -- state vars from the inherited parent scope, runs the body, and
+  -- dispatches requests to handlers. Called via 'StatementCall'.
   BlockHandle :: {handleBlock :: HandleBlock} -> Block
+  -- | Tuple construction. Each element is an independent block whose
+  -- trailing value becomes one component of the resulting tuple.
+  -- When @parallel = True@, element blocks run concurrently.
+  BlockTuple :: {tupleBlock :: TupleBlock} -> Block
+  -- | Array construction. Each element is an independent block whose
+  -- trailing value becomes one item in the resulting array.
+  -- When @parallel = True@, element blocks run concurrently.
+  BlockArray :: {arrayBlock :: ArrayBlock} -> Block
   deriving (Eq, Show, Generic)
 
 instance ToJSON Block where
@@ -424,10 +433,16 @@ instance FromJSON MatchBlock where
 -- reads source arrays and init values from the inherited parent scope,
 -- manages iteration / state-var updates, and runs the body per element.
 -- Called via 'StatementCall'.
+--
+-- When @parallel = True@, all iterations run concurrently; @stateInits@
+-- must be empty (enforced by the typechecker). The first @for_break@
+-- cancels all sibling iterations.
 data ForBlock = ForBlock
-  { -- | (element var inside body, source array var in this scope)
+  { -- | Whether iterations run in parallel.
+    parallel :: !Bool,
+    -- | (element var inside body, source array var in this scope)
     iters :: [(VarId, VarId)],
-    -- | (bodyVar in for scope, init value var in this scope)
+    -- | (bodyVar in for scope, init value var in this scope). Empty if parallel.
     stateInits :: [(VarId, VarId)],
     bodyBlock :: BlockId,
     -- | Optional then-block (BlockKindInline) run on normal completion.
@@ -444,15 +459,21 @@ instance FromJSON ForBlock where
 -- | Payload for 'BlockHandle'. The runtime creates a management thread,
 -- initialises state vars from the inherited parent scope, runs the body,
 -- and dispatches requests to handlers. Called via 'StatementCall'.
+--
+-- When @parallel = True@, handlers run concurrently; @stateInits@ must be
+-- empty (enforced by the typechecker). The first @break@ cancels all
+-- sibling handlers.
 data HandleBlock = HandleBlock
-  { -- | (bodyVar allocated in handle scope, initVar computed in caller)
+  { -- | Whether handlers run in parallel.
+    parallel :: !Bool,
+    -- | (bodyVar allocated in handle scope, initVar computed in caller)
     stateInits :: [(VarId, VarId)],
     -- | Body block ('BlockKindInline'). Inherits the handle scope.
     body :: BlockId,
     -- | Request handlers dispatched by 'ReqId'.
     handlers :: [Handler],
-    -- | Optional then-block ('BlockKindInline') run when @break@ is received.
-    -- Its single parameter (label @\"value\"@) receives the break value.
+    -- | Optional then-block ('BlockKindInline') run when body completes.
+    -- Its single parameter (label @\"value\"@) receives the body's trailing value.
     thenBlock :: Maybe BlockId
   }
   deriving (Eq, Show, Generic)
@@ -461,6 +482,36 @@ instance ToJSON HandleBlock where
   toJSON = genericToJSON irOptions
 
 instance FromJSON HandleBlock where
+  parseJSON = genericParseJSON irOptions
+
+-- | Payload for 'BlockTuple'. Each element is a 'BlockId' whose trailing
+-- value becomes one component of the tuple. When @parallel = True@,
+-- element blocks are evaluated concurrently; results are collected in order.
+data TupleBlock = TupleBlock
+  { parallel :: !Bool,
+    elements :: [BlockId]
+  }
+  deriving (Eq, Show, Generic)
+
+instance ToJSON TupleBlock where
+  toJSON = genericToJSON irOptions
+
+instance FromJSON TupleBlock where
+  parseJSON = genericParseJSON irOptions
+
+-- | Payload for 'BlockArray'. Each element is a 'BlockId' whose trailing
+-- value becomes one item in the array. When @parallel = True@,
+-- element blocks are evaluated concurrently; results are collected in order.
+data ArrayBlock = ArrayBlock
+  { parallel :: !Bool,
+    elements :: [BlockId]
+  }
+  deriving (Eq, Show, Generic)
+
+instance ToJSON ArrayBlock where
+  toJSON = genericToJSON irOptions
+
+instance FromJSON ArrayBlock where
   parseJSON = genericParseJSON irOptions
 
 -- | Payload for 'SExit'.

@@ -1471,60 +1471,54 @@ resolveSyntacticRequest SyntacticRequest {name, sourceSpan} = do
 -- Block / Statement
 -- ---------------------------------------------------------------------------
 
--- | A block's body and its @where@ clause are **independent scopes**: a
--- @let@ in the body is invisible from the where clause and vice versa, while
--- both inherit the surrounding outer scope.
--- | A block's body and its @where@ clause are **independent scopes**: a
--- @let@ in the body is invisible from the where clause and vice versa, while
--- both inherit the surrounding outer scope. State variables declared in
--- @where@ are visible to handlers (and the @then@ clause once revived) but
--- NOT to the body.
+-- | A block introduces a fresh scope frame for its statements and return
+-- expression. Bindings declared in the block are not visible outside it.
 resolveBlock :: Block Parsed -> Identifier (Block Identified)
-resolveBlock Block {statements, returnExpression, whereBlock, sourceSpan} = do
-  -- Body: push a fresh frame.
+resolveBlock Block {statements, returnExpression, sourceSpan} = do
   (statements', returnExpression') <- withScopeFrame $ do
     resolvedStatements <- mapM resolveStatement statements
     resolvedReturnExpression <- traverse resolveExpression returnExpression
     pure (resolvedStatements, resolvedReturnExpression)
-  -- Where: resolved in its own fresh frame (sibling to the body's frame).
-  whereBlock' <- traverse resolveWhereBlock whereBlock
   pure
     Block
       { statements = statements',
         returnExpression = returnExpression',
-        whereBlock = whereBlock',
         sourceSpan = sourceSpan
       }
 
--- | Scope construction for a @where@ clause:
---
---   1. State vars are bound sequentially in declaration order (ML @let@
---      semantics, not @let rec@).
---   2. Handler names are NOT new bindings; they are references to existing
---      req declarations.
---   3. Handler bodies are resolved in a frame where all state vars are
---      already bound.
-resolveWhereBlock :: WhereBlock Parsed -> Identifier (WhereBlock Identified)
-resolveWhereBlock WhereBlock {stateVariables, handlers, thenClause, sourceSpan} = withScopeFrame $ do
-  stateVariables' <- mapM resolveStateVariable stateVariables
-  handlers' <- mapM resolveRequestHandler handlers
-  -- The @then@ clause shares the where's frame, so it sees state vars but
-  -- not body @let@ bindings. Its own pattern + block introduce a nested
-  -- frame for the destructured pattern bindings.
-  thenClause' <-
-    traverse
-      ( \(maybePattern, block) -> withScopeFrame $ do
-          maybePattern' <- traverse resolvePattern maybePattern
-          block' <- resolveBlock block
-          pure (maybePattern', block')
-      )
-      thenClause
+-- | Resolve a handle expression. The body (continuation) is resolved in the
+-- current scope. State variables, handlers, and the then clause are resolved
+-- in their own sub-frame (state vars visible to handlers and then, but not
+-- to the body).
+resolveHandleExpr :: HandleExpression Parsed -> Identifier (HandleExpression Identified)
+resolveHandleExpr HandleExpression {parallel, stateVariables, handlers, thenClause, body, sourceSpan} = do
+  -- Body resolves in the OUTER scope (before handle's internal frame).
+  body' <- resolveBlock body
+  -- Handle internals in their own frame (state vars visible to handlers/then, not body).
+  (stateVariables', handlers', thenClause') <- withScopeFrame $ do
+    stateVariables' <- mapM resolveStateVariable stateVariables
+    handlers' <- mapM resolveRequestHandler handlers
+    -- The @then@ clause shares the handle's frame, so it sees state vars.
+    -- Its own pattern + block introduce a nested frame for the destructured
+    -- pattern bindings.
+    thenClause' <-
+      traverse
+        ( \(maybePattern, block) -> withScopeFrame $ do
+            maybePattern' <- traverse resolvePattern maybePattern
+            block' <- resolveBlock block
+            pure (maybePattern', block')
+        )
+        thenClause
+    pure (stateVariables', handlers', thenClause')
   pure
-    WhereBlock
-      { stateVariables = stateVariables',
+    HandleExpression
+      { parallel = parallel,
+        stateVariables = stateVariables',
         handlers = handlers',
         thenClause = thenClause',
-        sourceSpan = sourceSpan
+        body = body',
+        sourceSpan = sourceSpan,
+        typeOf = ()
       }
 
 -- | A state variable's initializer is resolved in the scope as it stands
@@ -1661,6 +1655,9 @@ resolveExpression = \case
   ExpressionFieldAccess expression -> resolveFieldAccess expression
   ExpressionIndexAccess expression -> ExpressionIndexAccess <$> resolveIndexExpr expression
   ExpressionTemplate expression -> ExpressionTemplate <$> resolveTemplateExpr expression
+  ExpressionHandle expression -> ExpressionHandle <$> resolveHandleExpr expression
+  ExpressionParTuple expression -> ExpressionParTuple <$> resolveParTupleExpr expression
+  ExpressionParArray expression -> ExpressionParArray <$> resolveParArrayExpr expression
   ExpressionQualifiedReference qref ->
     -- The parser never produces this constructor on a Parsed AST. Treat it
     -- as an internal invariant violation and crash loudly.
@@ -1706,6 +1703,26 @@ resolveArrayExpr ArrayExpression {elements, sourceSpan} = do
   elements' <- mapM resolveExpression elements
   pure
     ArrayExpression
+      { elements = elements',
+        sourceSpan = sourceSpan,
+        typeOf = ()
+      }
+
+resolveParTupleExpr :: ParTupleExpression Parsed -> Identifier (ParTupleExpression Identified)
+resolveParTupleExpr ParTupleExpression {elements, sourceSpan} = do
+  elements' <- mapM resolveExpression elements
+  pure
+    ParTupleExpression
+      { elements = elements',
+        sourceSpan = sourceSpan,
+        typeOf = ()
+      }
+
+resolveParArrayExpr :: ParArrayExpression Parsed -> Identifier (ParArrayExpression Identified)
+resolveParArrayExpr ParArrayExpression {elements, sourceSpan} = do
+  elements' <- mapM resolveExpression elements
+  pure
+    ParArrayExpression
       { elements = elements',
         sourceSpan = sourceSpan,
         typeOf = ()
@@ -1795,7 +1812,7 @@ resolveCaseArm CaseArm {pattern, body, sourceSpan} = withScopeFrame $ do
 -- outer scope; the patterns and var-bindings introduce a fresh frame in which
 -- the body and then-block are resolved.
 resolveForExpr :: ForExpression Parsed -> Identifier (ForExpression Identified)
-resolveForExpr ForExpression {inBindings, varBindings, body, thenBlock, sourceSpan} = do
+resolveForExpr ForExpression {parallel, inBindings, varBindings, body, thenBlock, sourceSpan} = do
   -- Resolve source expressions in the outer scope.
   inBindingsResolvedSources <-
     mapM
@@ -1818,7 +1835,8 @@ resolveForExpr ForExpression {inBindings, varBindings, body, thenBlock, sourceSp
     thenBlock' <- traverse resolveBlock thenBlock
     pure
       ForExpression
-        { inBindings = inBindings',
+        { parallel = parallel,
+          inBindings = inBindings',
           varBindings = varBindings',
           body = body',
           thenBlock = thenBlock',

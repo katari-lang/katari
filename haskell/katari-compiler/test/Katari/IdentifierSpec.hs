@@ -600,8 +600,11 @@ qualifiedRequestHandler = describe "request handlers" $ do
       shouldIdentify $
         mconcat
           [ "req get() -> integer\n",
-            "agent main() { 0 } where {\n",
-            "  req get() { 0 }\n",
+            "agent main() {\n",
+            "  handle {\n",
+            "    req get() { break 0; }\n",
+            "  }\n",
+            "  0\n",
             "}"
           ]
     pure ()
@@ -613,8 +616,11 @@ qualifiedRequestHandler = describe "request handlers" $ do
           ( "main",
             mconcat
               [ "import io\n",
-                "agent main() { 0 } where {\n",
-                "  req io.read() { 0 }\n",
+                "agent main() {\n",
+                "  handle {\n",
+                "    req io.read() { break 0; }\n",
+                "  }\n",
+                "  0\n",
                 "}"
               ]
           )
@@ -628,8 +634,11 @@ qualifiedRequestHandler = describe "request handlers" $ do
           ( "main",
             mconcat
               [ "import io\n",
-                "agent main() { 0 } where {\n",
-                "  req io.absent() { 0 }\n",
+                "agent main() {\n",
+                "  handle {\n",
+                "    req io.absent() { break 0; }\n",
+                "  }\n",
+                "  0\n",
                 "}"
               ]
           )
@@ -639,8 +648,11 @@ qualifiedRequestHandler = describe "request handlers" $ do
   it "bare req handler with unknown name fails" $ do
     shouldFailIdentifyWith isUndefName $
       mconcat
-        [ "agent main() { 0 } where {\n",
-          "  req nonexistent() { 0 }\n",
+        [ "agent main() {\n",
+          "  handle {\n",
+          "    req nonexistent() { break 0; }\n",
+          "  }\n",
+          "  0\n",
           "}"
         ]
 
@@ -648,8 +660,11 @@ qualifiedRequestHandler = describe "request handlers" $ do
     shouldFailIdentifyWith isNotARequest $
       mconcat
         [ "agent helper() -> integer { 0 }\n",
-          "agent main() { 0 } where {\n",
-          "  req helper() { 0 }\n",
+          "agent main() {\n",
+          "  handle {\n",
+          "    req helper() { break 0; }\n",
+          "  }\n",
+          "  0\n",
           "}"
         ]
 
@@ -676,27 +691,33 @@ qualifiedRequestHandler = describe "request handlers" $ do
         ]
 
 -- ---------------------------------------------------------------------------
--- Block / where scope independence
+-- Block / handle scope independence
 -- ---------------------------------------------------------------------------
 
 scopeIsolation :: Spec
 scopeIsolation = describe "scope isolation" $ do
-  it "where state vars not visible in body" $ do
+  it "handle state vars not visible in body" $ do
     shouldFailIdentifyWith isUndefName $
       mconcat
-        [ "agent main() {\n",
+        [ "req get() -> integer\n",
+          "agent main() {\n",
+          "  handle (var count = 0) {\n",
+          "    req get() { break 0; }\n",
+          "  }\n",
           "  count\n",
-          "} where (var count = 0) {\n",
           "}"
         ]
 
-  it "body let not visible in where state var initializer" $ do
+  it "body let not visible in handle state var initializer" $ do
     shouldFailIdentifyWith isUndefName $
       mconcat
-        [ "agent main() {\n",
+        [ "req get() -> integer\n",
+          "agent main() {\n",
+          "  handle (var y = x) {\n",
+          "    req get() { break 0; }\n",
+          "  }\n",
           "  let x = 0;\n",
           "  x\n",
-          "} where (var y = x) {\n",
           "}"
         ]
 
@@ -705,8 +726,11 @@ scopeIsolation = describe "scope isolation" $ do
       identifyOne $
         mconcat
           [ "req inc() -> integer\n",
-            "agent main() { 0 } where (var a = 1, var b = a) {\n",
-            "  req inc() { 0 }\n",
+            "agent main() {\n",
+            "  handle (var a = 1, var b = a) {\n",
+            "    req inc() { break 0; }\n",
+            "  }\n",
+            "  0\n",
             "}"
           ]
     res `shouldSatisfy` isRight
@@ -715,8 +739,11 @@ scopeIsolation = describe "scope isolation" $ do
     shouldFailIdentifyWith isUndefName $
       mconcat
         [ "req inc() -> integer\n",
-          "agent main() { 0 } where (var a = b, var b = 1) {\n",
-          "  req inc() { 0 }\n",
+          "agent main() {\n",
+          "  handle (var a = b, var b = 1) {\n",
+          "    req inc() { break 0; }\n",
+          "  }\n",
+          "  0\n",
           "}"
         ]
 

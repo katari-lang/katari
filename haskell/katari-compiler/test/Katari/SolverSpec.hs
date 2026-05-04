@@ -241,34 +241,48 @@ endToEndZonk = describe "end-to-end pipeline (Solver -> Zonker)" $ do
 -- ---------------------------------------------------------------------------
 
 whereHandlerBlocks :: Spec
-whereHandlerBlocks = describe "where blocks and request handlers" $ do
-  it "where with state variable: solver succeeds" $ do
+whereHandlerBlocks = describe "handle blocks and request handlers" $ do
+  it "handle with state variable: solver succeeds" $ do
     -- State variables are visible to handlers / then, NOT to the body.
     -- The body returns a literal; @n@ is just declared.
     (_, _, solverResult) <-
-      runSolve "agent counter() -> integer { 0 } where (var n: integer = 0) {}"
-    solverResult.solverErrors `shouldBe` []
-
-  it "where with request handler: req is discharged, agent has empty request" $ do
-    (_, _, solverResult) <-
       runSolve $
         mconcat
-          [ "req fetch() -> integer\n",
-            "agent app() { fetch() } where {\n",
-            "  req fetch() { 42 }\n",
+          [ "agent counter() -> integer {\n",
+            "  handle (var n: integer = 0) {}\n",
+            "  0\n",
             "}"
           ]
     solverResult.solverErrors `shouldBe` []
 
-  it "where with state var + handler combining state mutation via next" $ do
+  it "handle with request handler: req is discharged, agent has empty request" $ do
+    (_, _, solverResult) <-
+      runSolve $
+        mconcat
+          [ "req fetch() -> integer\n",
+            "agent app() {\n",
+            "  handle {\n",
+            "    req fetch() { 42 }\n",
+            "  }\n",
+            "  fetch()\n",
+            "}"
+          ]
+    solverResult.solverErrors `shouldBe` []
+
+  it "handle with state var + handler combining state mutation via next" $ do
     (_, _, solverResult) <-
       runSolve $
         mconcat
           [ "req inc() -> integer\n",
-            "agent counter() -> integer { inc(); inc(); inc() } where (var n: integer = 0) {\n",
-            "  req inc() {\n",
-            "    next n with { n = n + 1 }\n",
+            "agent counter() -> integer {\n",
+            "  handle (var n: integer = 0) {\n",
+            "    req inc() {\n",
+            "      next n with { n = n + 1 }\n",
+            "    }\n",
             "  }\n",
+            "  inc();\n",
+            "  inc();\n",
+            "  inc()\n",
             "}"
           ]
     solverResult.solverErrors `shouldBe` []
@@ -281,10 +295,13 @@ whereHandlerBlocks = describe "where blocks and request handlers" $ do
       runSolve $
         mconcat
           [ "req fetch() -> integer\n",
-            "agent app() -> integer { fetch() } where {\n",
-            "  req fetch() {\n",
-            "    next \"bad\"\n",
+            "agent app() -> integer {\n",
+            "  handle {\n",
+            "    req fetch() {\n",
+            "      next \"bad\"\n",
+            "    }\n",
             "  }\n",
+            "  fetch()\n",
             "}"
           ]
     null solverResult.solverErrors `shouldBe` False
@@ -294,7 +311,8 @@ whereHandlerBlocks = describe "where blocks and request handlers" $ do
       runSolve $
         mconcat
           [ "agent foo() -> integer {\n",
-            "  return { 42 } where {} then(p) { p + 1 }\n",
+            "  handle {} then(p) { p + 1 }\n",
+            "  42\n",
             "}"
           ]
     solverResult.solverErrors `shouldBe` []
@@ -305,40 +323,48 @@ whereHandlerBlocks = describe "where blocks and request handlers" $ do
         mconcat
           [ "req inc() -> integer\n",
             "agent counter() -> integer {\n",
-            "  inc(); inc(); inc()\n",
-            "} where (var n: integer = 0) {\n",
-            "  req inc() {\n",
-            "    next n with { n = n + 1 }\n",
-            "  }\n",
-            "} then(_) { n }\n"
+            "  handle (var n: integer = 0) {\n",
+            "    req inc() {\n",
+            "      next n with { n = n + 1 }\n",
+            "    }\n",
+            "  } then(_) { n }\n",
+            "  inc();\n",
+            "  inc();\n",
+            "  inc()\n",
+            "}"
           ]
     solverResult.solverErrors `shouldBe` []
 
   it "handler implicit completion flows to whole-block (not declared next type)" $ do
     -- @req fetch() -> integer@: declared return only constrains @next@.
     -- Handler body fall-through (literal "ok") is treated as break and flows
-    -- to the where-block whole type — independent of the declared @integer@
+    -- to the handle-block whole type — independent of the declared @integer@
     -- return. Without a stricter agent annotation, no contradiction arises.
     (_, _, solverResult) <-
       runSolve $
         mconcat
           [ "req fetch() -> integer\n",
-            "agent app() { fetch() } where {\n",
-            "  req fetch() { \"ok\" }\n",
+            "agent app() {\n",
+            "  handle {\n",
+            "    req fetch() { \"ok\" }\n",
+            "  }\n",
+            "  fetch()\n",
             "}"
           ]
     solverResult.solverErrors `shouldBe` []
 
-  it "return inside body of block-with-then routes through then" $ do
-    -- Inner @return 5@ : 5 <: pattern p (number) → then body @p + 1@ :
+  it "break inside handler body of block-with-then routes through then" $ do
+    -- Handler @break 5@ : 5 <: pattern p (number) → then body @p + 1@ :
     -- number <: agent return integer. Should pass.
     (_, _, solverResult) <-
       runSolve $
         mconcat
-          [ "agent foo() -> integer {\n",
-            "  return {\n",
-            "    return 5\n",
-            "  } where {} then(p) { p + 1 }\n",
+          [ "req dummy() -> integer\n",
+            "agent foo() -> integer {\n",
+            "  handle {\n",
+            "    req dummy() -> integer { break 5; }\n",
+            "  } then(p) { p + 1 }\n",
+            "  dummy()\n",
             "}"
           ]
     solverResult.solverErrors `shouldBe` []

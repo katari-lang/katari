@@ -279,30 +279,38 @@ data Block (phase :: Phase) = Block
   { statements :: [Statement phase],
     -- | Trailing expression without semicolon (Rust-style return value).
     returnExpression :: Maybe (Expression phase),
-    -- | where (...) { ... } then(pat) { ... }
-    whereBlock :: Maybe (WhereBlock phase),
     sourceSpan :: SourceSpan
   }
 
 instance HasSourceSpan (Block phase) where
   sourceSpanOf block = block.sourceSpan
 
--- | A @where@ clause optionally followed by a @then@ clause.
+-- | Koka-style handle expression. Installs request handlers for its
+-- continuation body. The body (continuation after @handle@) runs under
+-- the installed handlers.
 --
--- The @then@ clause runs after the body terminates (whether by normal
--- completion, @break@, or @return@). When the body's tail value is
--- destructured by a pattern, that pattern is the @Just@ payload of
--- @thenClause@'s outer @Maybe@. The pattern itself can be omitted
--- (@then { ... }@), in which case the body's value is discarded.
-data WhereBlock (phase :: Phase) = WhereBlock
-  { stateVariables :: [StateVariableBinding phase],
+-- @
+-- handle (var s = init) {
+--   req foo() -> T { next v; s = new }
+-- } then (pat) { finalizer }
+-- continuation_body
+-- @
+--
+-- When @parallel = True@, handlers run concurrently and @stateVariables@
+-- must be empty (enforced by the typechecker).
+data HandleExpression (phase :: Phase) = HandleExpression
+  { parallel :: !Bool,
+    stateVariables :: [StateVariableBinding phase],
     handlers :: [RequestHandler phase],
     thenClause :: Maybe (Maybe (Pattern phase), Block phase),
-    sourceSpan :: SourceSpan
+    -- | Continuation body that runs under the installed handlers.
+    body :: Block phase,
+    sourceSpan :: SourceSpan,
+    typeOf :: ExpressionType phase
   }
 
-instance HasSourceSpan (WhereBlock phase) where
-  sourceSpanOf whereBlock = whereBlock.sourceSpan
+instance HasSourceSpan (HandleExpression phase) where
+  sourceSpanOf expression = expression.sourceSpan
 
 data StateVariableBinding (phase :: Phase) = StateVariableBinding
   { name :: NameRef phase VariableRef,
@@ -693,6 +701,12 @@ data Expression (phase :: Phase) where
   ExpressionFieldAccess :: FieldAccessExpression phase -> Expression phase
   ExpressionIndexAccess :: IndexAccessExpression phase -> Expression phase
   ExpressionTemplate :: TemplateExpression phase -> Expression phase
+  -- | Koka-style handle expression. Captures the continuation as its body.
+  ExpressionHandle :: HandleExpression phase -> Expression phase
+  -- | Parallel tuple construction: @par (e1, e2, ...)@.
+  ExpressionParTuple :: ParTupleExpression phase -> Expression phase
+  -- | Parallel array construction: @par [e1, e2, ...]@.
+  ExpressionParArray :: ParArrayExpression phase -> Expression phase
   -- | Synthesised by the Identifier pass from a @FieldAccess@ chain whose
   -- left-most segment resolves to a module. 詳細は 'QualifiedReferenceExpression'
   -- のコメント参照。Parser never produces this directly.
@@ -714,6 +728,9 @@ instance HasSourceSpan (Expression phase) where
     ExpressionFieldAccess expression -> expression.sourceSpan
     ExpressionIndexAccess expression -> expression.sourceSpan
     ExpressionTemplate expression -> expression.sourceSpan
+    ExpressionHandle expression -> expression.sourceSpan
+    ExpressionParTuple expression -> expression.sourceSpan
+    ExpressionParArray expression -> expression.sourceSpan
     ExpressionQualifiedReference expression -> expression.sourceSpan
 
 data LiteralExpression (phase :: Phase) = LiteralExpression
@@ -816,6 +833,28 @@ data ArrayExpression (phase :: Phase) = ArrayExpression
 instance HasSourceSpan (ArrayExpression phase) where
   sourceSpanOf expression = expression.sourceSpan
 
+-- | Parallel tuple construction: @par (e1, e2, ...)@.
+-- Each element is evaluated concurrently; results collected in order.
+data ParTupleExpression (phase :: Phase) = ParTupleExpression
+  { elements :: [Expression phase],
+    sourceSpan :: SourceSpan,
+    typeOf :: ExpressionType phase
+  }
+
+instance HasSourceSpan (ParTupleExpression phase) where
+  sourceSpanOf expression = expression.sourceSpan
+
+-- | Parallel array construction: @par [e1, e2, ...]@.
+-- Each element is evaluated concurrently; results collected in order.
+data ParArrayExpression (phase :: Phase) = ParArrayExpression
+  { elements :: [Expression phase],
+    sourceSpan :: SourceSpan,
+    typeOf :: ExpressionType phase
+  }
+
+instance HasSourceSpan (ParArrayExpression phase) where
+  sourceSpanOf expression = expression.sourceSpan
+
 data IfExpression (phase :: Phase) = IfExpression
   { condition :: Expression phase,
     thenBlock :: Block phase,
@@ -838,7 +877,8 @@ instance HasSourceSpan (MatchExpression phase) where
   sourceSpanOf expression = expression.sourceSpan
 
 data ForExpression (phase :: Phase) = ForExpression
-  { inBindings :: [ForInBinding phase],
+  { parallel :: !Bool,
+    inBindings :: [ForInBinding phase],
     varBindings :: [ForVarBinding phase],
     body :: Block phase,
     thenBlock :: Maybe (Block phase),
@@ -1175,9 +1215,9 @@ deriving instance (EqPhase p) => Eq (Block p)
 
 deriving instance (ShowPhase p) => Show (Block p)
 
-deriving instance (EqPhase p) => Eq (WhereBlock p)
+deriving instance (EqPhase p) => Eq (HandleExpression p)
 
-deriving instance (ShowPhase p) => Show (WhereBlock p)
+deriving instance (ShowPhase p) => Show (HandleExpression p)
 
 deriving instance (EqPhase p) => Eq (StateVariableBinding p)
 
@@ -1330,6 +1370,14 @@ deriving instance (ShowPhase p) => Show (TupleExpression p)
 deriving instance (EqPhase p) => Eq (ArrayExpression p)
 
 deriving instance (ShowPhase p) => Show (ArrayExpression p)
+
+deriving instance (EqPhase p) => Eq (ParTupleExpression p)
+
+deriving instance (ShowPhase p) => Show (ParTupleExpression p)
+
+deriving instance (EqPhase p) => Eq (ParArrayExpression p)
+
+deriving instance (ShowPhase p) => Show (ParArrayExpression p)
 
 deriving instance (EqPhase p) => Eq (IfExpression p)
 
