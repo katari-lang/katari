@@ -1,22 +1,33 @@
 import type { ReqId } from "../../ir/types.js";
-import type { ThreadId } from "../id.js";
+import type { MachineState } from "../machine.js";
 import type { Value } from "../value.js";
-import type { ThreadBase } from "./types.js";
+import type { CreateThreadInit, ThreadBase } from "./types.js";
 
 /**
  * Executes a BlockRequest (handler lookup + dispatch).
- *
- * Searches inheritedHandlers for the matching reqId, creates a handler body
- * thread as a child, and relays the handler's result (done/next/break) to parent.
- *
- * Future: if no handler is found, escalation to external agent.
+ * Placeholder — not implemented.
  */
 export type RequestThread = ThreadBase & {
   kind: "request";
   reqId: ReqId;
-  /** Labeled arguments resolved at call site. */
-  arguments: Map<string, Value>;
-  phase:
-    | { kind: "dispatching" }
-    | { kind: "awaitingHandler"; handlerThreadId: ThreadId };
+  args: Map<string, Value>;
 };
+
+export function createRequestThread(
+  machine: MachineState,
+  init: CreateThreadInit,
+  reqId: ReqId,
+  args: Map<string, Value>,
+): RequestThread {
+  const thread: RequestThread = {
+    ...init,
+    kind: "request",
+    scopeId: init.scopeId,
+    children: new Map(),
+    status: "running",
+    reqId,
+    args,
+  };
+  machine.threads.set(thread.id, thread);
+  return thread;
+}

@@ -1,4 +1,10 @@
-export type { ThreadBase, ThreadStatus, HandlerEntry, Thread } from "./types.js";
+export type {
+  ThreadBase,
+  Thread,
+  CallId,
+  QueueEvent,
+  CreateThreadInit,
+} from "./types.js";
 export type { APIThread } from "./api.js";
 export type { UserThread } from "./user.js";
 export type { PrimThread } from "./prim.js";

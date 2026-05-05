@@ -1,4 +1,4 @@
-import type { BlockId, ReqId } from "../../ir/types.js";
+import type { BlockId, ExitKind, ReqId } from "../../ir/types.js";
 import type { ScopeId, ThreadId } from "../id.js";
 import type { Value } from "../value.js";
 
@@ -14,36 +14,33 @@ import type { HandleThread } from "./handle.js";
 import type { TupleThread } from "./tuple.js";
 import type { ArrayThread } from "./array.js";
 
+// ─── CallId ─────────────────────────────────────────────────────────────────
+
+/**
+ * Identifies a specific child call within a parent thread.
+ * Each thread variant uses natural indices (element index, pc, etc.).
+ */
+export type CallId = number;
+
 // ─── ThreadBase ─────────────────────────────────────────────────────────────
 
 /** Common fields shared by all thread variants. */
 export type ThreadBase = {
   id: ThreadId;
   scopeId: ScopeId;
-  parentThreadId: ThreadId | null;
-  childThreadIds: Set<ThreadId>;
-  /** Handler map inherited from parent at thread creation time. */
-  inheritedHandlers: Map<ReqId, HandlerEntry>;
-  status: ThreadStatus;
-};
-
-// ─── ThreadStatus ───────────────────────────────────────────────────────────
-
-export type ThreadStatus =
-  | { kind: "running" }
-  | { kind: "waiting" }
-  | { kind: "done"; value: Value }
-  | { kind: "cancelled" };
-
-// ─── HandlerEntry ───────────────────────────────────────────────────────────
-
-export type HandlerEntry = {
-  /** BlockId of the handler body block. */
-  handlerBlockId: BlockId;
-  /** Scope of the HandleThread that registered this handler (state vars live here). */
-  handleScopeId: ScopeId;
-  /** HandleThread's inheritedHandlers — passed to handler body to prevent recursion. */
-  outerHandlers: Map<ReqId, HandlerEntry>;
+  parent: Thread | null;
+  /** Key in parent's children map. null for root (APIThread). */
+  parentCallId: CallId | null;
+  /** Handler map inherited from parent at creation time. */
+  handlers: Map<ReqId, ThreadId>;
+  /** Active (running or suspended) child threads. */
+  children: Map<CallId, Thread>;
+  /** Execution status. "cancelling" means waiting for all children to ack. */
+  status: "running" | "cancelling";
+  /** Return value stored while cancelling children (from return event). */
+  pendingReturn?: Value;
+  /** ExitKind for return propagation. undefined = at boundary (emit done). */
+  pendingExitKind?: ExitKind;
 };
 
 // ─── Thread (discriminated union) ───────────────────────────────────────────
@@ -60,3 +57,58 @@ export type Thread =
   | HandleThread
   | TupleThread
   | ArrayThread;
+
+// ─── QueueEvent ─────────────────────────────────────────────────────────────
+
+/**
+ * Events processed by the main loop (processQueue).
+ * - call: parent requests creation and execution of a child thread.
+ * - done: child notifies parent of completion with a value.
+ * - cancel: parent requests termination of a child thread (recursive).
+ * - cancelAck: child notifies parent that cancellation is complete.
+ * - return: child notifies parent of non-local exit (propagates to boundary).
+ */
+export type QueueEvent =
+  | {
+      kind: "call";
+      parent: Thread;
+      callId: CallId;
+      blockId: BlockId;
+      args: Map<string, Value>;
+      scopeId: ScopeId;
+    }
+  | {
+      kind: "done";
+      parent: Thread;
+      callId: CallId;
+      value: Value;
+    }
+  | {
+      kind: "cancel";
+      target: Thread;
+    }
+  | {
+      kind: "cancelAck";
+      parent: Thread;
+      callId: CallId;
+    }
+  | {
+      kind: "return";
+      parent: Thread;
+      callId: CallId;
+      value: Value;
+      exitKind: ExitKind;
+    };
+
+// ─── CreateThreadInit ───────────────────────────────────────────────────────
+
+/**
+ * Common initialization data passed by the runner to each thread's create function.
+ */
+export type CreateThreadInit = {
+  id: ThreadId;
+  parent: Thread;
+  parentCallId: CallId;
+  handlers: Map<ReqId, ThreadId>;
+  scopeId: ScopeId;
+};

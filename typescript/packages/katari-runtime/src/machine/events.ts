@@ -1,86 +1,69 @@
-import type { ExitKind, ContKind, ExternalName, IRModule, ReqId, VarId } from "../ir/types.js";
-import type { DelegationId, ThreadId } from "./id.js";
+import type { ContKind, ExitKind, ReqId, VarId } from "../ir/types.js";
+import type { DelegationId, EscalationId, ThreadId } from "./id.js";
 import type { Value } from "./value.js";
 
-// ─── Inbound (外部 → machine) ───────────────────────────────────────────────
+// ─── Endpoint ───────────────────────────────────────────────────────────────
 
-export type InboundEvent =
+/** One of the three communication endpoints. One side is always CORE. */
+export type Endpoint = "API" | "CORE" | "FFI";
+
+// ─── MachineEvent (unified, directional) ────────────────────────────────────
+
+/**
+ * Payload variants for machine events.
+ *
+ * Current:
+ *   delegate       API→CORE  (user starts agent)
+ *   delegateAck    CORE→API  (core returns result)
+ *   terminate       API→CORE  (user terminates agent)
+ *   terminateAck    CORE→API  (core acknowledges terminate)
+ *   delegate       CORE→FFI  (external function call)
+ *   delegateAck    FFI→CORE  (external function result)
+ *   terminate       CORE→FFI  (terminate external call)
+ *   terminateAck    FFI→CORE  (external terminate acknowledged)
+ *
+ * Future:
+ *   escalate     FFI→CORE  (FFI sends request to core)
+ *   escalateAck  CORE→FFI  (core responds to FFI request)
+ *   delegate       FFI→CORE  (FFI calls core function)
+ *   delegateAck    CORE→FFI  (core returns to FFI)
+ *   escalate     CORE→API  (core sends request to user)
+ *   escalateAck  API→CORE  (user responds to request)
+ */
+export type MachineEventPayload =
   | {
-      kind: "invoke";
+      kind: "delegate";
       qualifiedName: string;
       args: Map<string, Value>;
       delegationId: DelegationId;
     }
   | {
-      kind: "invokeAck";
+      kind: "delegateAck";
       delegationId: DelegationId;
       value: Value;
     }
   | {
-      kind: "cancel";
+      kind: "terminate";
       delegationId: DelegationId;
     }
   | {
-      kind: "load";
-      irModule: IRModule;
-    };
-
-// ─── Outbound (machine → 外部) ──────────────────────────────────────────────
-
-export type OutboundEvent =
+      kind: "terminateAck";
+      delegationId: DelegationId;
+    }
   | {
-      kind: "callExternal";
-      externalName: ExternalName;
+      kind: "escalate";
+      qualifiedName: string;
       args: Map<string, Value>;
-      delegationId: DelegationId;
+      escalationId: EscalationId;
     }
   | {
-      kind: "cancelExternal";
-      delegationId: DelegationId;
-    }
-  | {
-      kind: "invokeDone";
-      delegationId: DelegationId;
+      kind: "escalateAck";
+      escalationId: EscalationId;
       value: Value;
-    }
-  | {
-      kind: "invokeCancelled";
-      delegationId: DelegationId;
     };
 
-// ─── Internal (machine 内部 event queue) ────────────────────────────────────
-
-export type InternalEvent =
-  | {
-      kind: "evalThread";
-      threadId: ThreadId;
-    }
-  | {
-      kind: "threadDone";
-      threadId: ThreadId;
-      value: Value;
-    }
-  | {
-      kind: "threadExited";
-      threadId: ThreadId;
-      exitKind: ExitKind;
-      value: Value;
-    }
-  | {
-      kind: "threadCont";
-      threadId: ThreadId;
-      contKind: ContKind;
-      value: Value | null;
-      modifiers: [VarId, Value][];
-    }
-  | {
-      kind: "threadRequest";
-      threadId: ThreadId;
-      reqId: ReqId;
-      args: Map<string, Value>;
-      outputVarId: VarId;
-    }
-  | {
-      kind: "threadCancelled";
-      threadId: ThreadId;
-    };
+/** A machine event with direction (from → to). One side is always CORE. */
+export type MachineEvent = MachineEventPayload & {
+  from: Endpoint;
+  to: Endpoint;
+};
