@@ -213,8 +213,11 @@ export type HandleBlock = {
   body: BlockId;
   handlers: Handler[];
   /**
-   * Optional then-block (blockKindInline) run when break is received.
-   * Its single parameter (label "value") receives the break value.
+   * Optional then-block (blockKindInline) run when the body completes
+   * normally (= the body's last statement returns a trailing value, no
+   * `break`). Its single parameter (label "value") receives the body's
+   * trailing value. `break` bypasses then-block and propagates the break
+   * value as the handle's result directly.
    */
   thenBlock?: BlockId;
 };

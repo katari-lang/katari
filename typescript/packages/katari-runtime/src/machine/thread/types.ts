@@ -1,5 +1,5 @@
-import type { BlockId, ContKind, ExitKind, ReqId } from "../../ir/types.js";
-import type { ScopeId, ThreadId } from "../id.js";
+import type { BlockId, ContKind, ExitKind, ReqId, VarId } from "../../ir/types.js";
+import type { AskId, ScopeId, ThreadId } from "../id.js";
 import type { Value } from "../value.js";
 
 import type { APIThread } from "./api.js";
@@ -64,8 +64,15 @@ export type BoundaryKey = ExitKind | ContKind;
 type CommonThreadFields = {
   id: ThreadId;
   scopeId: ScopeId;
-  /** Handler map inherited from parent at creation time. */
-  handlers: Map<ReqId, ThreadId>;
+  /**
+   * Handler-owning thread for each registered request. Inherited from
+   * parent at creation (typically by-reference copy via `new Map(...)`),
+   * augmented when a HandleThread spawns its main target with its own
+   * declared handlers. handler-body / thenClause spawns do NOT add their
+   * own handle's overrides — they see the outer handlers (algebraic
+   * effect semantic).
+   */
+  handlers: Map<ReqId, Thread>;
   /** Active (running or suspended) child threads. */
   children: Map<CallId, Thread>;
   /** Execution status. "cancelling" means waiting for all children to ack. */
@@ -135,22 +142,30 @@ export type QueueEvent =
       parent: Thread;
       callId: CallId;
       blockId: BlockId;
-      args: Map<string, Value>;
+      args: Record<string, Value>;
     }
   | {
       kind: "callInline";
       parent: Thread;
       callId: CallId;
       blockId: BlockId;
-      args: Map<string, Value>;
+      args: Record<string, Value>;
       scopeId: ScopeId;
+      /**
+       * Optional explicit handlers map for the new child. If omitted, the
+       * runner copies `parent.handlers` by value. HandleThread uses this
+       * to spawn its main target with augmented handlers (parent + this
+       * handle's own overrides) while still spawning handler-body /
+       * thenClause without those overrides.
+       */
+      handlersOverride?: Map<ReqId, Thread>;
     }
   | {
       kind: "callValue";
       parent: Thread;
       callId: CallId;
       blockId: BlockId;
-      args: Map<string, Value>;
+      args: Record<string, Value>;
       capturedScopeId: ScopeId;
     }
   | {
@@ -179,6 +194,60 @@ export type QueueEvent =
       target: Thread;
       value: Value;
       exitKind: ExitKind;
+    }
+  | {
+      /**
+       * `request foo(args)` from a RequestThread. Direct-delivered to the
+       * handler-owning thread (HandleThread) registered in the asker's
+       * `handlers` map for `reqId`. The boundary spawns the corresponding
+       * handler body as ITS child (not the asker's child) and remembers
+       * `(asker, askId)` so it can later route the resume value back.
+       */
+      kind: "ask";
+      target: Thread;
+      asker: Thread;
+      askId: AskId;
+      reqId: ReqId;
+      args: Record<string, Value>;
+    }
+  | {
+      /**
+       * Reply to a previously-issued `ask`. Sent by HandleThread back to
+       * the asker (RequestThread) after a handler resumed via `next`.
+       * The asker matches askId and emits `done` to its parent with
+       * `value`.
+       */
+      kind: "askComplete";
+      target: Thread;
+      askId: AskId;
+      value: Value;
+    }
+  | {
+      /**
+       * `next` / `for_next` (statementCont) delivered directly to its
+       * boundary thread. Like `return`, the source thread looks up the
+       * boundary via `boundaries[contKind]`. Modifiers are pre-evaluated
+       * by the source: each `(targetVar, Value)` writes `Value` into the
+       * boundary's scope.
+       *
+       * For for_next: the boundary (ForThread) cancels the current body
+       * iteration, applies modifiers to its state vars, advances the
+       * iteration index.
+       *
+       * For next (in a request handler): the boundary (HandleThread)
+       * cancels the handler body, applies modifiers, then emits an
+       * `askComplete` to resume the asker.
+       *
+       * `source` is the emitting thread (a descendant of `target`); the
+       * boundary uses it to identify which immediate child of itself
+       * corresponds to the handler body / iteration body to cancel.
+       */
+      kind: "cont";
+      target: Thread;
+      source: Thread;
+      contKind: ContKind;
+      value: Value;
+      modifiers: Map<VarId, Value>;
     };
 
 // ─── CreateThreadInit ───────────────────────────────────────────────────────
@@ -192,7 +261,7 @@ export type CreateThreadInit = {
   id: ThreadId;
   parent: Thread;
   parentCallId: CallId;
-  handlers: Map<ReqId, ThreadId>;
+  handlers: Map<ReqId, Thread>;
   scopeId: ScopeId;
   /**
    * Inherited (by reference) from the parent. The runner overwrites the

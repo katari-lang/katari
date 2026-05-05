@@ -814,17 +814,39 @@ classifySurrogate codePoint
 -- KatariTokenUnderscore は意図的に除外: 式位置で `_` 単独はエラー (式にならない)、
 -- かつ `_: integer` 型注釈の頭になり得る。よって行末に来た場合に挿入しても
 -- 良いケースがほぼ無い。
+--
+-- Bracket-context 抑制: @(@ と @[@ の中では仮想セミコロンを挿入しない。
+-- これにより複数行の引数リスト・配列リテラルで末尾カンマを書かなくて済む:
+--
+-- @
+-- [
+--   1,
+--   2,
+--   3
+-- ]
+-- @
+--
+-- @{ ... }@ は block 区切りでもあるため抑制対象外 (block 内では従来通り
+-- 改行が文区切りとして機能する必要がある)。
 insertVirtualSemicolons :: [WithSourceSpan KatariToken] -> [WithSourceSpan KatariToken]
-insertVirtualSemicolons = go Nothing
+insertVirtualSemicolons = go (0 :: Int) Nothing
   where
-    go _ [] = []
-    go previous (current@(WithSourceSpan _ currentToken) : remaining)
+    -- @bracketDepth@ counts the nesting of @(@ / @[@ only (NOT @{@).
+    go _bracketDepth _ [] = []
+    go bracketDepth previous (current@(WithSourceSpan _ currentToken) : remaining)
       | currentToken == KatariTokenNewline = case previous of
           Just (WithSourceSpan span_ previousToken)
-            | canInsertAfter previousToken ->
-                WithSourceSpan span_ KatariTokenSemicolonVirtual : go Nothing remaining
-          _ -> go Nothing remaining
-      | otherwise = current : go (Just current) remaining
+            | bracketDepth == 0 && canInsertAfter previousToken ->
+                WithSourceSpan span_ KatariTokenSemicolonVirtual : go bracketDepth Nothing remaining
+          _ -> go bracketDepth Nothing remaining
+      | otherwise =
+          let nextDepth = case currentToken of
+                KatariTokenPunctuation PunctuationLeftParenthesis -> bracketDepth + 1
+                KatariTokenPunctuation PunctuationLeftBracket -> bracketDepth + 1
+                KatariTokenPunctuation PunctuationRightParenthesis -> max 0 (bracketDepth - 1)
+                KatariTokenPunctuation PunctuationRightBracket -> max 0 (bracketDepth - 1)
+                _ -> bracketDepth
+           in current : go nextDepth (Just current) remaining
 
     canInsertAfter :: KatariToken -> Bool
     canInsertAfter = \case

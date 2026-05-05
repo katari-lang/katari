@@ -1,8 +1,8 @@
-import type { BlockId, ForBlock } from "../../ir/types.js";
+import type { BlockId, ContKind, ForBlock, VarId } from "../../ir/types.js";
 import type { MachineState } from "../machine.js";
 import { getValueFromScope, setValueInScope } from "../scope.js";
 import { NULL_VALUE, type Value } from "../value.js";
-import type { CallId, ChildThreadBase, CreateThreadInit } from "./types.js";
+import type { CallId, ChildThreadBase, CreateThreadInit, Thread } from "./types.js";
 
 /**
  * Executes a BlockFor (for-loop).
@@ -10,13 +10,20 @@ import type { CallId, ChildThreadBase, CreateThreadInit } from "./types.js";
  * Sequential: evaluates body once per element.
  * CallId = iteration index (0, 1, ...).
  * Then block CallId = -1.
+ *
+ * `postCancelActions` records "what to do after this child finishes
+ * cancelling" for targeted cancels (currently only `for_next`-driven
+ * iteration advance).
  */
 export type ForThread = ChildThreadBase & {
   kind: "for";
   block: ForBlock;
   /** Next iteration index to dispatch. */
   currentIndex: number;
+  postCancelActions: Map<CallId, ForPostCancelAction>;
 };
+
+export type ForPostCancelAction = { kind: "advance" };
 
 export function createForThread(
   machine: MachineState,
@@ -37,6 +44,7 @@ export function createForThread(
     status: "running",
     block,
     currentIndex: 0,
+    postCancelActions: new Map(),
   };
   machine.threads.set(thread.id, thread);
   return thread;
@@ -97,7 +105,7 @@ function pushInlineCall(
     parent: thread,
     callId,
     blockId,
-    args: new Map(),
+    args: {},
     scopeId: thread.scopeId,
   });
 }
@@ -143,4 +151,83 @@ function bindElementVars(machine: MachineState, thread: ForThread, iterables: Va
     }
     setValueInScope(machine, thread.scopeId, iter[0], elem);
   }
+}
+
+// ─── for_next (cont) ────────────────────────────────────────────────────────
+
+/**
+ * Handle a `cont` event with contKind === "contKindForNext".
+ *
+ * Apply modifiers to the for-thread's state vars, then cancel the body
+ * thread of the current iteration so we can advance. The advance itself
+ * runs in `onChildCancelAckFor` once the cancelled body has acked.
+ *
+ * `source` is the thread inside the body that emitted the cont; it might
+ * be a deep descendant. We use it to find which iteration body (the
+ * immediate child of `thread`) to cancel.
+ */
+export function onContFor(
+  machine: MachineState,
+  thread: ForThread,
+  source: Thread,
+  contKind: ContKind,
+  modifiers: Map<VarId, Value>,
+): void {
+  if (contKind !== "contKindForNext") {
+    throw new Error(
+      `onContFor: expected contKindForNext, got ${contKind}`,
+    );
+  }
+  // Apply modifiers to state vars.
+  for (const [targetVar, newValue] of modifiers) {
+    setValueInScope(machine, thread.scopeId, targetVar, newValue);
+  }
+  // Find the body child to cancel.
+  const childCallId = findImmediateChildCallId(thread, source);
+  thread.postCancelActions.set(childCallId, { kind: "advance" });
+  const childThread = thread.children.get(childCallId);
+  if (childThread === undefined) {
+    throw new Error(`onContFor: no live child at callId ${childCallId}`);
+  }
+  machine.queue.push({ kind: "cancel", target: childThread });
+}
+
+export function onChildCancelAckFor(
+  machine: MachineState,
+  thread: ForThread,
+  callId: CallId,
+): void {
+  const action = thread.postCancelActions.get(callId);
+  if (action === undefined) {
+    throw new Error(
+      `onChildCancelAckFor: no postCancelAction for callId ${callId}`,
+    );
+  }
+  thread.postCancelActions.delete(callId);
+  switch (action.kind) {
+    case "advance":
+      thread.currentIndex++;
+      const iterables = resolveIterables(machine, thread);
+      const length = getIterableLength(iterables);
+      if (thread.currentIndex >= length) {
+        emitForDone(machine, thread);
+        return;
+      }
+      bindElementVars(machine, thread, iterables, thread.currentIndex);
+      pushBodyCall(machine, thread, thread.currentIndex);
+      return;
+  }
+}
+
+function findImmediateChildCallId(forT: ForThread, source: Thread): CallId {
+  let cur: Thread | null = source;
+  while (cur !== null) {
+    if (cur.parent === forT && cur.parentCallId !== null) {
+      return cur.parentCallId;
+    }
+    cur = cur.parent;
+  }
+  throw new Error(
+    "findImmediateChildCallId: source is not a descendant of for-thread",
+  );
 }

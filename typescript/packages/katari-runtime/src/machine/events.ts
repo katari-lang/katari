@@ -34,7 +34,7 @@ export type MachineEventPayload =
   | {
       kind: "delegate";
       qualifiedName: string;
-      args: Map<string, Value>;
+      args: Record<string, Value>;
       delegationId: DelegationId;
     }
   | {
@@ -53,7 +53,7 @@ export type MachineEventPayload =
   | {
       kind: "escalate";
       qualifiedName: string;
-      args: Map<string, Value>;
+      args: Record<string, Value>;
       escalationId: EscalationId;
     }
   | {

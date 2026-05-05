@@ -89,7 +89,7 @@ function pushElementCall(
     parent: thread,
     callId: index,
     blockId,
-    args: new Map(),
+    args: {},
     scopeId: thread.scopeId,
   });
 }

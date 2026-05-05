@@ -71,7 +71,7 @@ function pushArmCall(machine: MachineState, thread: MatchThread, blockId: BlockI
     parent: thread,
     callId: 0,
     blockId,
-    args: new Map(),
+    args: {},
     scopeId: thread.scopeId,
   });
 }

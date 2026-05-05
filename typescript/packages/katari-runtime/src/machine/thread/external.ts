@@ -16,7 +16,7 @@ import type { ChildThreadBase, CreateThreadInit } from "./types.js";
 export type ExternalThread = ChildThreadBase & {
   kind: "external";
   externalName: ExternalName;
-  args: Map<string, Value>;
+  args: Record<string, Value>;
   delegationId: DelegationId;
 };
 
@@ -24,7 +24,7 @@ export function createExternalThread(
   machine: MachineState,
   init: CreateThreadInit,
   externalName: ExternalName,
-  args: Map<string, Value>,
+  args: Record<string, Value>,
 ): ExternalThread {
   const delegationId = createDelegationId();
   const thread: ExternalThread = {

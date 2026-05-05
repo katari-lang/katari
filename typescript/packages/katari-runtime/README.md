@@ -26,12 +26,14 @@ FFI 機構。`.ktr` ファイルと同名の `.ts` / `.js` に書いた関数を
 - State Machine 本体 ([`src/machine/`](src/machine/))
   - 全 Thread 種別の create / onCall / onChildDone
   - Cancellation 伝播 (cancel / cancelAck / return / done)
+  - 5 種類の global exit/cont: `return` / `for_break` / `break` / `for_next` / `next` を boundary thread に直送
+  - handle / req / handler 系の dispatch (sequential / parallel)、`next` による resume + state-var 更新、`break` / then-block
   - FFI delegate の往復 (CORE↔FFI)
   - API delegate の往復 (API↔CORE)
-  - Lexical scope GC
-- prim 一通り (算術 / 比較 / 論理 / `tuple_get` / `get_field` / `to_string` / `concat`)
+  - Lexical scope GC (mark-and-sweep, closure / tuple / array / tagged を trace)
+- prim 一通り (算術 / 比較 / 論理 / `tuple_get` / `get_field` / `to_string` / `concat`)。`eq` / `neq` は tuple / array / tagged を構造的に再帰比較、closure は常に `false`。
 
-**未実装**: handle / req / handler 系の dispatch、`statementCont` (= `next`)、`statementBindPattern` (let 分解)、API/HTTP レイヤー、永続化 (DB)、sidecar bundling。HTTP API レイヤと DB は別タスクで追加予定。
+**未実装**: `statementBindPattern` (let 分解)、API/HTTP レイヤー、永続化 (DB)、sidecar bundling。HTTP API レイヤと DB は別タスクで追加予定。
 
 ---
 
@@ -62,10 +64,10 @@ src/
       external.ts                  ExternalThread (BlockExternal; FFI delegation)
       match.ts                     MatchThread (BlockMatch)
       for.ts                       ForThread (BlockFor)
-      handle.ts                    HandleThread (BlockHandle; placeholder)
+      handle.ts                    HandleThread (BlockHandle; ask / next / break / then-block)
       tuple.ts                     TupleThread (BlockTuple)
       array.ts                     ArrayThread (BlockArray)
-      request.ts                   RequestThread (BlockRequest; placeholder)
+      request.ts                   RequestThread (BlockRequest; ask 発行 + askComplete 受信)
 ```
 
 ---
@@ -110,6 +112,9 @@ src/
 | `return` | 大域脱出 (`return` / `break` / `for_break`) を**境界 thread に直接届ける** (target 指定)。境界が子をキャンセルし `done` に変換 |
 | `cancel` | 子の停止要求 (再帰伝播) |
 | `cancelAck` | 子からの停止完了通知 |
+| `ask` | request 発行: RequestThread → handler-owning HandleThread に直送。`asker` / `askId` が往復で resume 値を結びつける |
+| `askComplete` | resume: HandleThread → RequestThread に値を返す。RequestThread は親に `done` を上げる |
+| `cont` | `next` / `for_next` を**境界 thread に直接届ける**。modifiers を境界の scope に書き込み、handler body / iter body 1 つだけを cancel して resume / advance |
 
 3 種類の call イベントは「新 scope の親」だけが違う。**全 thread が自分の scope を必ず 1 つ作る**ので、block の種類を見て scope の作り方を変える分岐は runtime に存在しない。
 
@@ -131,8 +136,8 @@ type Thread = APIThread | UserThread | PrimThread | CtorThread | ExternalThread
 | `CtorThread` | `BlockCtor`。onCall で `tagged` 値を作って即 done。 |
 | `ExternalThread` | `BlockExternal`。onCall で `delegate` を FFI に outbound。`delegateAck` 受信で done。 |
 | `MatchThread` | `BlockMatch`。subject を評価し pattern bind を thread の scope に書き、armBody を `callInline`。 |
-| `ForThread` | `BlockFor`。stateInits を scope に置き、要素ごとに body を `callInline`。`for_break` の境界 (`boundaries.exitKindForBreak`)。 |
-| `HandleThread` | `BlockHandle`。`break` / `next` の境界 (`boundaries.exitKindBreak` / `contKindNext`)。dispatch は **未実装**。 |
+| `ForThread` | `BlockFor`。stateInits を scope に置き、要素ごとに body を `callInline`。`for_break` / `for_next` の境界 (`boundaries.exitKindForBreak` / `contKindForNext`)。`for_next` は `cont` event を受けて modifiers を state vars に書き込み、現 body を targeted cancel → cancelAck で次イテレーションを spawn。 |
+| `HandleThread` | `BlockHandle`。`break` / `next` の境界 (`boundaries.exitKindBreak` / `contKindNext`)。`ask` を受けて handler body を spawn (sequential mode は `pendingActions` queue 経由)。`next` で modifiers を state vars に書き、handler body を targeted cancel → cancelAck で `askComplete` を asker に発火。 |
 | `TupleThread` / `ArrayThread` | 各要素 block を `callInline`。並列 / 逐次を block 側 flag で切替。 |
 | `RequestThread` | `BlockRequest`。**未実装**。 |
 
@@ -171,6 +176,40 @@ type Boundaries = {
 - 自身が root (APIThread) なら `terminateAck` を CORE→API に発信。
 
 親の `return` event の `target` が **既に `cancelling`** だった場合 (親からのキャンセルが先行した race)、`return` は破棄される (値はロスト)。これは「親に取り消されている境界に脱出値を返しても親は受け取らない」ためで、最終的には `cancelAck` が親に出る。
+
+### Handler / Request system
+
+algebraic-effect 型の `req` / `handle` を runtime で dispatch する仕組み。
+
+**handlers field (`Map<ReqId, Thread>`)**: 全 thread が持ち、reqId → handler-owning thread (現状は HandleThread のみ) の対応を保持。boundaries と同様、子は親の handlers を **コピーで継承** する (mutation はしない)。HandleThread が main target を spawn するときだけ、`callInline` event の `handlersOverride` を使って自身の `block.handlers` を載せた augmented map を渡す:
+
+- main target → augmented (parent.handlers + this handle's handlers)
+- handler body / thenClause → 継承のみ (this handle's handlers を含めない)
+
+これにより handler body 内から発行された request は **outer の handler が捕まえる** (algebraic effect の標準セマンティクス)。
+
+**ask の流れ**:
+
+1. caller が `request foo()` を実行 → IR の `callTargetBlock` で `BlockRequest` を呼ぶ → RequestThread が caller の子として spawn される。
+2. RequestThread.onCall: `handlers.get(reqId)` で handler-owning HandleThread を取得し、`askId` を allocate して `ask` event を発火 (target: HandleThread, asker: self)。
+3. HandleThread.onAsk: sequential mode で busy なら `pendingActions` queue に enqueue、idle なら handler body を `callInline` で spawn (callId を allocate)。`childRoles[callId] = { kind: "handlerBody", reqId, askId, asker }` を記録。
+4. handler body は handle scope を読み書きしながら走り、最終的に `next v with { ... }` か `break v` を実行する。
+
+**next による resume**:
+
+1. handler body 内 (= HandleThread の子孫) で `statementCont contKindNext` 実行 → `cont` event を境界 (= HandleThread) に直送。modifiers は source thread の scope で **事前評価** され `Map<VarId, Value>` として event に積まれる。
+2. HandleThread.onCont: modifiers を自身の scope に書き込む → handler body の callId を source の親チェーンから特定 → `postCancelActions[callId] = { askComplete, asker, askId, value }` を登録 → `cancel` event を handler body に発火。
+3. handler body の cancelAck が cleanup を経て届く。HandleThread は `running` のままなので `dispatchOnChildCancelAck` 経由で `onChildCancelAckHandle` が呼ばれる。
+4. postCancelAction を実行: `askComplete` event を asker に発火、`busy = false` にして pendingActions から次を pop / dispatch。
+5. RequestThread.onAskComplete: 受け取った値で `done` を親 (= 元の caller) に発火し終了。
+
+**break による脱出**: `statementExit exitKindBreak` は boundaries[exitKindBreak] = HandleThread に `return` event を直送。既存の return mechanism がそのまま走り、HandleThread の子全てに cancel をカスケードして finishCancelling で done を親に上げる。
+
+**then-clause**: main target の done が来ると `pendingActions` に thenClause を enqueue (sequential 時)、idle なら即 dispatch。thenClause が done すると、残った子を全 cancel しつつ `pendingReturn = thenResult` で finishCancelling 経路に乗せる。
+
+**parallel mode**: `block.parallel === true` のときは `pendingActions` を bypass、ask 受信で即 spawn。state vars の同時書き込みは event 順 (last-write-wins)。
+
+**FOR_NEXT**: 同じ `cont` event 機構を ForThread が受ける。modifiers を state vars に書き → 現 iteration の body を targeted cancel → cancelAck で `currentIndex++` & 次の body を spawn。
 
 ### Closure と scope
 
@@ -228,6 +267,8 @@ Haskell 側 IR の roundtrip は `stack test katari-compiler` でカバー (`Kat
 - 関数: `createMachine`, `applyEvent`, `processQueue`, `collectGarbage`
 - 型: `MachineState`, `Thread` ファミリー, `Value`, `Scope`, `MachineEvent` 系, `ThreadId` / `ScopeId` / `DelegationId` / `EscalationId`
 
+`MachineEvent` の `args` フィールドは `Record<string, Value>` (JSON 直シリアライズ可能)。内部の `QueueEvent.args` も同形式。
+
 ---
 
 ## 未決事項
@@ -235,5 +276,4 @@ Haskell 側 IR の roundtrip は `stack test katari-compiler` でカバー (`Kat
 - DB 永続化のタイミング (event ごと / quiescence 後一括)
 - sidecar bundle のストレージ (DB blob / FS)
 - prim 名の Haskell / TS 同期方法 (共有 const か検出テストか)
-- handle / req / handler の dispatch 設計 (effect handler セマンティクスを含めて別タスク)
 - `return` / `break` / `next` を言語レベルで残すかどうか — 構文と合わせて議論中

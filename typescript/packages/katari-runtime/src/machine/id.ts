@@ -13,6 +13,22 @@ export type DelegationId = string & { readonly __brand: "DelegationId" };
  */
 export type EscalationId = string & { readonly __brand: "EscalationId" };
 
+/**
+ * AskId identifies a single in-flight `request` from one asker thread.
+ *
+ * Symmetric to {@link CallId}: while CallId is the parent's slot for
+ * tracking a child call, AskId is the asker's slot for tracking one
+ * in-flight ask. The **asker** allocates the AskId; the boundary
+ * (HandleThread) tracks it as part of `(asker, askId)` and echoes both
+ * back in `askComplete` so the asker can match the response.
+ *
+ * Per-asker counter (not global), so the (asker, askId) pair is unique.
+ * RequestThread can only ask once in its lifetime so it just uses 0.
+ * Future askers that may issue multiple asks (e.g., an external agent
+ * with its own connection) will allocate per-instance.
+ */
+export type AskId = number & { readonly __brand: "AskId" };
+
 export function createThreadId(): ThreadId {
   return crypto.randomUUID() as ThreadId;
 }

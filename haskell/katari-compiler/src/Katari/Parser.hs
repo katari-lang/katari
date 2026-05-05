@@ -911,7 +911,7 @@ parseBreakOrNextStatement = do
 parseForBreak :: Parser (ForBreakStatement Parsed)
 parseForBreak = parseWithSpan $ do
   parseKeyword KeywordBreak
-  expression <- parseExpression
+  expression <- parseOptionalExitValue
   pure $ \sourceSpan -> ForBreakStatement {value = expression, sourceSpan = sourceSpan}
 
 parseLet :: Parser (LetStatement Parsed)
@@ -930,13 +930,13 @@ parseLet = parseWithSpan $ do
 parseReturn :: Parser (ReturnStatement Parsed)
 parseReturn = parseWithSpan $ do
   parseKeyword KeywordReturn
-  expression <- parseExpression
+  expression <- parseOptionalExitValue
   pure $ \sourceSpan -> ReturnStatement {value = expression, sourceSpan = sourceSpan}
 
 parseNext :: Parser (NextStatement Parsed)
 parseNext = parseWithSpan $ do
   parseKeyword KeywordNext
-  expression <- parseExpression
+  expression <- parseOptionalExitValue
   modifiers <- option [] (parseKeyword KeywordWith *> parseModifiers)
   pure $ \sourceSpan ->
     NextStatement
@@ -954,8 +954,33 @@ parseForNext = parseWithSpan $ do
 parseBreak :: Parser (BreakStatement Parsed)
 parseBreak = parseWithSpan $ do
   parseKeyword KeywordBreak
-  expression <- parseExpression
+  expression <- parseOptionalExitValue
   pure $ \sourceSpan -> BreakStatement {value = expression, sourceSpan = sourceSpan}
+
+-- | Parse an optional exit value for @break@ / @return@ / @next@. If the
+-- next token is a statement separator or block close (i.e. there is no
+-- expression to consume), default the value to a synthesized @null@
+-- literal (with a zero-width span at the current position).
+--
+-- @break@ alone is shorthand for @break null@; same for @return@ and
+-- @next@. The synthesized null carries an empty span — diagnostics that
+-- refer to the value will point at the keyword's span instead via the
+-- enclosing statement.
+parseOptionalExitValue :: Parser (Expression Parsed)
+parseOptionalExitValue = do
+  pos <- parseCurrentPosition
+  span_ <- parseMakeSpan pos pos
+  let nullExpr =
+        ExpressionLiteral
+          LiteralExpression
+            { value = LiteralValueNull,
+              sourceSpan = span_,
+              typeOf = ()
+            }
+  -- If the lookahead is anything that terminates this statement we yield
+  -- the null literal without consuming. Otherwise an expression must be
+  -- present and we parse it normally.
+  option nullExpr (try parseExpression)
 
 parseModifiers :: Parser [Modifier Parsed]
 parseModifiers = parseBracedList parseModifier

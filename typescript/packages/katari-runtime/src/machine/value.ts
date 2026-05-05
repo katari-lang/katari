@@ -28,4 +28,8 @@ export function literalToValue(literal: LiteralValue): Value {
   }
 }
 
-export const NULL_VALUE: Value = { kind: "null" };
+/**
+ * Singleton null value. Frozen so accidental mutation by any consumer
+ * cannot corrupt every other null reference in the system.
+ */
+export const NULL_VALUE: Value = Object.freeze({ kind: "null" }) as Value;

@@ -10,14 +10,14 @@ import type { ChildThreadBase, CreateThreadInit } from "./types.js";
 export type CtorThread = ChildThreadBase & {
   kind: "ctor";
   ctorId: CtorId;
-  args: Map<string, Value>;
+  args: Record<string, Value>;
 };
 
 export function createCtorThread(
   machine: MachineState,
   init: CreateThreadInit,
   ctorId: CtorId,
-  args: Map<string, Value>,
+  args: Record<string, Value>,
 ): CtorThread {
   const thread: CtorThread = {
     ...init,
@@ -39,7 +39,7 @@ export function onCallCtor(machine: MachineState, thread: CtorThread): void {
     value: {
       kind: "tagged",
       ctorId: thread.ctorId,
-      fields: Object.fromEntries(thread.args),
+      fields: { ...thread.args },
     },
   });
 }

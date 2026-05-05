@@ -1,4 +1,3 @@
-import type { BlockId } from "../../ir/types.js";
 import type { DelegationId } from "../id.js";
 import { createThreadId } from "../id.js";
 import type { MachineState } from "../machine.js";
@@ -14,6 +13,11 @@ import { EMPTY_BOUNDARIES, type CallId, type RootThreadBase } from "./types.js";
  * 1. Created by handleDelegateFromAPI (one per inbound delegate event)
  * 2. Pushes a call event for the target agent block
  * 3. On child completion: emits delegateAck (CORE→API), terminates self
+ *
+ * Root cancellation is handled here (handleTerminateFromAPI +
+ * finishCancellingAPI) rather than in the runner's generic
+ * finishCancelling, since the api-specific cleanup (terminateAck,
+ * apiDelegations.delete) is unique to APIThread.
  */
 export type APIThread = RootThreadBase & {
   kind: "api";
@@ -36,16 +40,33 @@ export function onChildDoneAPI(machine: MachineState, thread: APIThread, _callId
 }
 
 /**
+ * Final cleanup for a cancelled APIThread root: emit terminateAck and
+ * remove from machine state. Called by the runner when all children
+ * have cancelAck'd (status="cancelling" + children.size === 0), and by
+ * handleTerminateFromAPI for the no-children case.
+ */
+export function finishCancellingAPI(machine: MachineState, thread: APIThread): void {
+  machine.pendingOutEvents.push({
+    from: "CORE",
+    to: "API",
+    kind: "terminateAck",
+    delegationId: thread.delegationId,
+  });
+  machine.apiDelegations.delete(thread.delegationId);
+  machine.threads.delete(thread.id);
+}
+
+/**
  * Handle an inbound delegate event from API.
  * Creates a per-delegation APIThread and pushes a callBlock event for the target agent.
  */
 export function handleDelegateFromAPI(
   state: MachineState,
   qualifiedName: string,
-  args: Map<string, Value>,
+  args: Record<string, Value>,
   delegationId: DelegationId,
 ): void {
-  const blockId = findBlockByQualifiedName(state, qualifiedName);
+  const blockId = state.irModule.entries[qualifiedName];
   if (blockId === undefined) {
     throw new Error(
       `handleDelegateFromAPI: block ${qualifiedName} not found in IR module`,
@@ -93,27 +114,10 @@ export function handleTerminateFromAPI(
 
   apiThread.status = "cancelling";
   if (apiThread.children.size === 0) {
-    // No children — finish immediately (import avoidance: inline terminateAck emit)
-    state.pendingOutEvents.push({
-      from: "CORE",
-      to: "API",
-      kind: "terminateAck",
-      delegationId: apiThread.delegationId,
-    });
-    state.apiDelegations.delete(apiThread.delegationId);
-    state.threads.delete(apiThread.id);
+    finishCancellingAPI(state, apiThread);
   } else {
     for (const child of apiThread.children.values()) {
       state.queue.push({ kind: "cancel", target: child });
     }
   }
-}
-
-function findBlockByQualifiedName(
-  state: MachineState,
-  qualifiedName: string,
-): BlockId | undefined {
-  const blockId = state.irModule.entries[qualifiedName];
-  if (blockId !== undefined) return blockId;
-  return undefined;
 }

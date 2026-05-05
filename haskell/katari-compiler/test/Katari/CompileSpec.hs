@@ -58,6 +58,83 @@ happyPathSpec = describe "well-formed single-module input" $ do
     isJust result.solverResult `shouldBe` True
     isJust result.zonkResult `shouldBe` True
 
+  it "multi-line array literal does NOT require trailing comma" $ do
+    let src =
+          mconcat
+            [ "agent main() -> integer {\n",
+              "  let xs = [\n",
+              "    1,\n",
+              "    2,\n",
+              "    3\n",
+              "  ]\n",
+              "  xs[0]\n",
+              "}\n"
+            ]
+    let result = compile (singleSourceInput src)
+    hasErrors result.diagnostics `shouldBe` False
+    isJust result.irModule `shouldBe` True
+
+  it "multi-line call argument list does NOT require trailing comma" $ do
+    let src =
+          mconcat
+            [ "agent add(a = a: integer, b = b: integer) -> integer { a + b }\n",
+              "agent main() -> integer {\n",
+              "  add(\n",
+              "    a = 1,\n",
+              "    b = 2\n",
+              "  )\n",
+              "}\n"
+            ]
+    let result = compile (singleSourceInput src)
+    hasErrors result.diagnostics `shouldBe` False
+    isJust result.irModule `shouldBe` True
+
+  it "bare break inside for-loop defaults to break null" $ do
+    let src =
+          mconcat
+            [ "agent main() -> null {\n",
+              "  for(x in [1, 2, 3]) {\n",
+              "    break\n",
+              "  } then { null }\n",
+              "}\n"
+            ]
+    let result = compile (singleSourceInput src)
+    hasErrors result.diagnostics `shouldBe` False
+    isJust result.irModule `shouldBe` True
+
+  it "bare return defaults to return null" $ do
+    let src =
+          mconcat
+            [ "agent main() -> null {\n",
+              "  return\n",
+              "}\n"
+            ]
+    let result = compile (singleSourceInput src)
+    hasErrors result.diagnostics `shouldBe` False
+    isJust result.irModule `shouldBe` True
+
+  it "match arms across newlines need no explicit separator" $ do
+    -- Each arm is `case PATTERN => { body }`. After the closing `}` of an
+    -- arm body, a newline inserts a virtual semicolon (since `}` is in
+    -- the auto-semi trigger list), which separates arms cleanly. No
+    -- comma or explicit `;` needed.
+    let src =
+          mconcat
+            [ "data Red()\n",
+              "data Green()\n",
+              "data Blue()\n",
+              "agent name(c = c: Red | Green | Blue) -> string {\n",
+              "  match (c) {\n",
+              "    case Red => { \"red\" }\n",
+              "    case Green => { \"green\" }\n",
+              "    case Blue => { \"blue\" }\n",
+              "  }\n",
+              "}\n"
+            ]
+    let result = compile (singleSourceInput src)
+    hasErrors result.diagnostics `shouldBe` False
+    isJust result.irModule `shouldBe` True
+
   it "break with a block-expression argument compiles end-to-end" $ do
     -- The break value is itself a block expression that uses an inner
     -- handle/then. Inner break / return / next from this block would

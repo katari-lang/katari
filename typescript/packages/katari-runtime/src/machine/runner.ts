@@ -31,15 +31,32 @@ import {
   onCallMatch,
   onChildDoneMatch,
 } from "./thread/match.js";
-import { createForThread, onCallFor, onChildDoneFor } from "./thread/for.js";
+import {
+  createForThread,
+  onCallFor,
+  onChildCancelAckFor,
+  onChildDoneFor,
+  onContFor,
+} from "./thread/for.js";
 import {
   createUserThread,
   onCallUser,
   onChildDoneUser,
 } from "./thread/user.js";
-import { createHandleThread } from "./thread/handle.js";
-import { createRequestThread } from "./thread/request.js";
-import { onChildDoneAPI } from "./thread/api.js";
+import {
+  createHandleThread,
+  onAskHandle,
+  onCallHandle,
+  onChildCancelAckHandle,
+  onChildDoneHandle,
+  onContHandle,
+} from "./thread/handle.js";
+import {
+  createRequestThread,
+  onAskCompleteRequest,
+  onCallRequest,
+} from "./thread/request.js";
+import { finishCancellingAPI, onChildDoneAPI } from "./thread/api.js";
 
 // ─── Main Loop ──────────────────────────────────────────────────────────────
 
@@ -56,7 +73,8 @@ export function processQueue(machine: MachineState): void {
       case "callBlock": {
         // Top-level callable. Allocate a fresh isolated scope (parent = null).
         const newScopeId = createScope(machine, null).id;
-        spawnChild(machine, event.parent, event.callId, event.blockId, event.args, newScopeId);
+        const handlers = new Map(event.parent.handlers);
+        spawnChild(machine, event.parent, event.callId, event.blockId, event.args, newScopeId, handlers);
         break;
       }
 
@@ -64,15 +82,19 @@ export function processQueue(machine: MachineState): void {
         // Inline child of a structural block. Allocate a new scope under
         // the caller's current scope so that the inline body's `let`s do
         // not leak outward.
+        // handlers: an explicit override (for HandleThread main-target spawn)
+        // or a fresh copy of the parent's handlers (default inheritance).
         const newScopeId = createScope(machine, event.scopeId).id;
-        spawnChild(machine, event.parent, event.callId, event.blockId, event.args, newScopeId);
+        const handlers = event.handlersOverride ?? new Map(event.parent.handlers);
+        spawnChild(machine, event.parent, event.callId, event.blockId, event.args, newScopeId, handlers);
         break;
       }
 
       case "callValue": {
         // Closure call. New scope with parent = closure's captured scope.
         const newScopeId = createScope(machine, event.capturedScopeId).id;
-        spawnChild(machine, event.parent, event.callId, event.blockId, event.args, newScopeId);
+        const handlers = new Map(event.parent.handlers);
+        spawnChild(machine, event.parent, event.callId, event.blockId, event.args, newScopeId, handlers);
         break;
       }
 
@@ -121,7 +143,71 @@ export function processQueue(machine: MachineState): void {
         if (!child) break; // stale
         parent.children.delete(event.callId);
         machine.threads.delete(child.id);
-        checkAllChildrenDone(machine, parent);
+        if (parent.status === "cancelling") {
+          checkAllChildrenDone(machine, parent);
+        } else {
+          // Targeted cancel completed while the parent itself is still
+          // running (e.g., HandleThread cancelled one handler body for
+          // a `next` resume). Dispatch to a per-kind hook that knows
+          // what followup to perform.
+          dispatchOnChildCancelAck(machine, parent, event.callId);
+        }
+        break;
+      }
+
+      case "ask": {
+        const target = event.target;
+        if (!machine.threads.has(target.id)) break; // stale
+        if (target.kind !== "handle") {
+          throw new Error(
+            `processQueue.ask: target ${target.kind} not supported (only HandleThread)`,
+          );
+        }
+        onAskHandle(
+          machine,
+          target,
+          event.asker,
+          event.askId,
+          event.reqId,
+          event.args,
+        );
+        break;
+      }
+
+      case "askComplete": {
+        const target = event.target;
+        if (!machine.threads.has(target.id)) break; // stale
+        if (target.kind !== "request") {
+          throw new Error(
+            `processQueue.askComplete: target ${target.kind} is not a RequestThread`,
+          );
+        }
+        onAskCompleteRequest(machine, target, event.askId, event.value);
+        break;
+      }
+
+      case "cont": {
+        const target = event.target;
+        if (!machine.threads.has(target.id)) break; // stale
+        // Race with parent cancel: if the boundary is already cancelling
+        // (e.g., outer `break` reached this HandleThread before this
+        // `next` did), the targeted children may already be gone. The
+        // source thread will be cancelled via the boundary's cascade,
+        // so we just drop the cont. Symmetric with the `return` race
+        // handler above.
+        if (target.status === "cancelling") break;
+        switch (target.kind) {
+          case "handle":
+            onContHandle(machine, target, event.source, event.value, event.modifiers);
+            break;
+          case "for":
+            onContFor(machine, target, event.source, event.contKind, event.modifiers);
+            break;
+          default:
+            throw new Error(
+              `processQueue.cont: target ${target.kind} cannot receive cont`,
+            );
+        }
         break;
       }
     }
@@ -129,17 +215,19 @@ export function processQueue(machine: MachineState): void {
 }
 
 /**
- * Create a child thread with a pre-allocated scope and dispatch its onCall.
+ * Create a child thread with a pre-allocated scope + handlers map and
+ * dispatch its onCall.
  */
 function spawnChild(
   machine: MachineState,
   parent: Thread,
   callId: CallId,
   blockId: BlockId,
-  args: Map<string, Value>,
+  args: Record<string, Value>,
   scopeId: ScopeId,
+  handlers: Map<import("../ir/types.js").ReqId, Thread>,
 ): void {
-  const child = createThread(machine, blockId, parent, callId, args, scopeId);
+  const child = createThread(machine, blockId, parent, callId, args, scopeId, handlers);
   parent.children.set(callId, child);
   dispatchOnCall(machine, child);
 }
@@ -189,34 +277,39 @@ function handleCancelReceived(machine: MachineState, target: Thread): void {
 
 /**
  * Check if all children are gone and finish cancelling if so.
+ *
+ * Roots (APIThread) take an api-specific finalisation path
+ * (`finishCancellingAPI`); non-root threads use the generic
+ * `finishCancelling` to emit done / cancelAck back up the tree.
  */
 function checkAllChildrenDone(machine: MachineState, thread: Thread): void {
   if (thread.status !== "cancelling") return;
   if (thread.children.size > 0) return;
+  if (thread.parent === null) {
+    // APIThread is currently the only root thread kind. The discriminated
+    // Thread union narrows to APIThread here.
+    finishCancellingAPI(machine, thread);
+    return;
+  }
   finishCancelling(machine, thread);
 }
 
 /**
- * Called when a cancelling thread has no more children.
- * - Root (APIThread): emit terminateAck and clean up.
- * - Non-root with `pendingReturn` (= boundary that received a return event):
- *   emit done with the stored value.
- * - Non-root without `pendingReturn` (= cancelled by parent's cascade):
- *   emit cancelAck to parent.
+ * Final step for a cancelled NON-ROOT thread.
+ * - With `pendingReturn` (= boundary that received a return event):
+ *   emit done with the stored value to the parent.
+ * - Without `pendingReturn` (= cancelled by parent's cascade):
+ *   emit cancelAck to the parent.
+ *
+ * Root cancellation (APIThread) is handled by `finishCancellingAPI` in
+ * `thread/api.ts` — its api-specific cleanup (terminateAck out-event,
+ * apiDelegations bookkeeping) is unique to APIThread and lives there.
  */
 export function finishCancelling(machine: MachineState, thread: Thread): void {
   if (thread.parent === null) {
-    if (thread.kind === "api") {
-      machine.pendingOutEvents.push({
-        from: "CORE",
-        to: "API",
-        kind: "terminateAck",
-        delegationId: thread.delegationId,
-      });
-      machine.apiDelegations.delete(thread.delegationId);
-    }
-    machine.threads.delete(thread.id);
-    return;
+    throw new Error(
+      "finishCancelling: root thread should be finalised via its kind-specific path (e.g. finishCancellingAPI)",
+    );
   }
 
   if (thread.pendingReturn !== undefined) {
@@ -258,9 +351,9 @@ function dispatchOnCall(machine: MachineState, thread: Thread): void {
         "dispatchOnCall: APIThread is a root and must not be dispatched via call event",
       );
     case "handle":
-      throw new Error("dispatchOnCall: handle not implemented");
+      return onCallHandle(machine, thread);
     case "request":
-      throw new Error("dispatchOnCall: request not implemented");
+      return onCallRequest(machine, thread);
     case "external":
       return onCallExternal(machine, thread);
   }
@@ -292,9 +385,37 @@ function dispatchOnChildDone(
     case "external":
       throw new Error("dispatchOnChildDone: external has no children");
     case "handle":
-      throw new Error("dispatchOnChildDone: handle not implemented");
+      return onChildDoneHandle(machine, parent, callId, value);
     case "request":
-      throw new Error("dispatchOnChildDone: request not implemented");
+      throw new Error(
+        "dispatchOnChildDone: RequestThread has no statement-level children",
+      );
+  }
+}
+
+/**
+ * Hook called when a child of `parent` cancelAck'd while `parent` is
+ * still in `running` state — typically because `parent` initiated a
+ * targeted cancel (e.g., HandleThread cancelling one handler body for
+ * a `next` resume; ForThread cancelling the body for `for_next`).
+ *
+ * Standard cancelAck handling (parent in `cancelling` state) is in
+ * `processQueue.cancelAck` and goes through `checkAllChildrenDone`.
+ */
+function dispatchOnChildCancelAck(
+  machine: MachineState,
+  parent: Thread,
+  callId: CallId,
+): void {
+  switch (parent.kind) {
+    case "handle":
+      return onChildCancelAckHandle(machine, parent, callId);
+    case "for":
+      return onChildCancelAckFor(machine, parent, callId);
+    default:
+      throw new Error(
+        `dispatchOnChildCancelAck: unexpected cancelAck on ${parent.kind} thread while running`,
+      );
   }
 }
 
@@ -314,8 +435,9 @@ export function createThread(
   blockId: BlockId,
   parent: Thread,
   callId: CallId,
-  args: Map<string, Value>,
+  args: Record<string, Value>,
   scopeId: ScopeId,
+  handlers: Map<import("../ir/types.js").ReqId, Thread>,
 ): Thread {
   const block = machine.irModule.blocks[blockId];
   if (!block) {
@@ -326,9 +448,9 @@ export function createThread(
     id: createThreadId(),
     parent,
     parentCallId: callId,
-    // Copy parent's handlers so child mutations (handle implementation) do
-    // not leak back to the parent's map.
-    handlers: new Map(parent.handlers),
+    // Caller (processQueue) is responsible for copying / augmenting the
+    // handlers map; we just store the reference it gave us.
+    handlers,
     scopeId,
     // Share parent's boundaries by reference. Override below if needed.
     boundaries: parent.boundaries,
@@ -348,7 +470,7 @@ function dispatchCreate(
   machine: MachineState,
   init: CreateThreadInit,
   block: import("../ir/types.js").Block,
-  args: Map<string, Value>,
+  args: Record<string, Value>,
 ): Thread {
   switch (block.kind) {
     case "blockUser":

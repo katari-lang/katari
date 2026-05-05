@@ -1,4 +1,4 @@
-import type { CallData, UserBlock } from "../../ir/types.js";
+import type { CallData, UserBlock, VarId } from "../../ir/types.js";
 import type { ScopeId } from "../id.js";
 import type { MachineState } from "../machine.js";
 import { getScope, getValueFromScope, setValueInScope } from "../scope.js";
@@ -22,12 +22,12 @@ export function createUserThread(
   machine: MachineState,
   init: CreateThreadInit,
   block: UserBlock,
-  args: Map<string, Value>,
+  args: Record<string, Value>,
 ): UserThread {
   // Bind parameters into the freshly-allocated scope (allocated by the runner).
   const scope = getScope(machine, init.scopeId);
   for (const param of block.parameters) {
-    const argValue = args.get(param.label);
+    const argValue = args[param.label];
     if (argValue !== undefined) {
       scope.values.set(param.var, argValue);
     }
@@ -122,8 +122,40 @@ function runStatements(machine: MachineState, thread: UserThread): void {
         return; // Thread stays alive; will be cancelled by the boundary's cascade.
       }
 
-      case "statementCont":
-        throw new Error("runStatements: statementCont not implemented");
+      case "statementCont": {
+        // `next` (handler resume) / `for_next` (loop continuation).
+        // Direct delivery to the boundary thread; bypasses any
+        // intermediate `then` blocks. Modifiers are pre-evaluated here
+        // (Option A) so the boundary doesn't need to read the source's
+        // scope to apply them.
+        const { contKind, value, modifiers } = stmt.contents;
+        const target = thread.boundaries[contKind];
+        if (target === null) {
+          throw new Error(
+            `statementCont: no boundary registered for ${contKind}`,
+          );
+        }
+        const valueResolved: Value =
+          value !== undefined
+            ? getValueFromScope(machine, thread.scopeId, value)
+            : NULL_VALUE;
+        const modifiersResolved = new Map<VarId, Value>();
+        for (const [targetVar, newValueVar] of modifiers) {
+          modifiersResolved.set(
+            targetVar,
+            getValueFromScope(machine, thread.scopeId, newValueVar),
+          );
+        }
+        machine.queue.push({
+          kind: "cont",
+          target,
+          source: thread,
+          contKind,
+          value: valueResolved,
+          modifiers: modifiersResolved,
+        });
+        return; // Thread stays alive; will be cancelled by the boundary's cascade.
+      }
     }
   }
 
@@ -141,26 +173,54 @@ function runStatements(machine: MachineState, thread: UserThread): void {
 
 /**
  * Dispatch a statementCall to the appropriate call queue variant.
- * - callTargetBlock → callBlock (top-level callable; new isolated scope)
- * - callTargetValue → callValue (closure; new scope under captured scope)
+ *
+ * - `callTargetValue` (closure) → callValue (new scope under captured scope).
+ * - `callTargetBlock` to a BlockUser/blockKindAgent → callBlock (new
+ *   isolated scope; agent encapsulation).
+ * - `callTargetBlock` to a structural block (BlockHandle / BlockFor /
+ *   BlockMatch / BlockTuple / BlockArray) → callInline (new scope under
+ *   caller's scope so the block can read its `stateInits` / `subject` /
+ *   `iters` etc. from the caller's scope).
+ * - `callTargetBlock` to a non-user callable (BlockPrim / BlockCtor /
+ *   BlockExternal / BlockRequest) → callBlock (these don't read scope;
+ *   isolated keeps things tidy). Handlers are still inherited from
+ *   parent — both call kinds copy them.
  */
 function pushCallEvent(
   machine: MachineState,
   thread: UserThread,
   callId: CallId,
   call: CallData,
-  args: Map<string, Value>,
+  args: Record<string, Value>,
 ): void {
   switch (call.target.kind) {
-    case "callTargetBlock":
-      machine.queue.push({
-        kind: "callBlock",
-        parent: thread,
-        callId,
-        blockId: call.target.block,
-        args,
-      });
+    case "callTargetBlock": {
+      const block = machine.irModule.blocks[call.target.block];
+      if (block === undefined) {
+        throw new Error(
+          `pushCallEvent: blockId ${call.target.block} not found in IR`,
+        );
+      }
+      if (isStructuralBlock(block.kind)) {
+        machine.queue.push({
+          kind: "callInline",
+          parent: thread,
+          callId,
+          blockId: call.target.block,
+          args,
+          scopeId: thread.scopeId,
+        });
+      } else {
+        machine.queue.push({
+          kind: "callBlock",
+          parent: thread,
+          callId,
+          blockId: call.target.block,
+          args,
+        });
+      }
       return;
+    }
     case "callTargetValue": {
       const value = getValueFromScope(machine, thread.scopeId, call.target.var);
       if (value.kind !== "closure") {
@@ -179,11 +239,30 @@ function pushCallEvent(
   }
 }
 
-function resolveArgs(machine: MachineState, scopeId: ScopeId, call: CallData): Map<string, Value> {
-  const args = new Map<string, Value>();
+/**
+ * "Structural" blocks read VarIds from the caller's scope (state inits,
+ * subject, iter sources, ...). They must be invoked via callInline so
+ * those VarIds are reachable through the new scope's parent chain.
+ */
+function isStructuralBlock(
+  kind: import("../../ir/types.js").Block["kind"],
+): boolean {
+  switch (kind) {
+    case "blockHandle":
+    case "blockFor":
+    case "blockMatch":
+    case "blockTuple":
+    case "blockArray":
+      return true;
+    default:
+      return false;
+  }
+}
+
+function resolveArgs(machine: MachineState, scopeId: ScopeId, call: CallData): Record<string, Value> {
+  const args: Record<string, Value> = {};
   for (const arg of call.arguments) {
-    const value = getValueFromScope(machine, scopeId, arg.var);
-    args.set(arg.label, value);
+    args[arg.label] = getValueFromScope(machine, scopeId, arg.var);
   }
   return args;
 }

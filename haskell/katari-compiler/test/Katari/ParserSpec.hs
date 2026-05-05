@@ -684,16 +684,41 @@ nextAndBreak = describe "next and break" $ do
   it "rejects next-with-value inside for (ForCtx)" $ do
     shouldFail "agent main() { for (x in xs) { next 42; } }"
 
-  it "rejects bare next inside req handler (HandleCtx)" $ do
-    shouldFail $
-      mconcat
-        [ "agent main() {\n",
-          "  handle {\n",
-          "    req get() { next; }\n",
-          "  }\n",
-          "  result\n",
-          "}"
-        ]
+  it "accepts bare next inside req handler (defaults to next null)" $ do
+    -- Bare `next` is shorthand for `next null` (the requestor is resumed
+    -- with null). Same convention as bare `break` / bare `return`.
+    _ <-
+      shouldSucceed $
+        mconcat
+          [ "agent main() {\n",
+            "  handle {\n",
+            "    req get() { next; }\n",
+            "  }\n",
+            "  result\n",
+            "}"
+          ]
+    pure ()
+
+  it "accepts bare break inside req handler (defaults to break null)" $ do
+    _ <-
+      shouldSucceed $
+        mconcat
+          [ "agent main() {\n",
+            "  handle {\n",
+            "    req get() { break; }\n",
+            "  }\n",
+            "  result\n",
+            "}"
+          ]
+    pure ()
+
+  it "accepts bare break inside for (defaults to break null)" $ do
+    _ <- shouldSucceed "agent main() { for (x in xs) { break; } }"
+    pure ()
+
+  it "accepts bare return inside agent body (defaults to return null)" $ do
+    _ <- shouldSucceed "agent main() { return; }"
+    pure ()
 
   -- Context-aware AST checks
   it "for-next inside for is StatementForNext" $ do
