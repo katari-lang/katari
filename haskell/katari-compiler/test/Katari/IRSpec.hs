@@ -302,3 +302,24 @@ moduleSpec = describe "IRModule" $ do
                 blockNames = Map.singleton (BlockId 0) "main"
               }
         }
+
+  it "encodes IRModule.entries as a JSON object keyed by 'module.name'" $ do
+    -- Pin the textual key format. The TS runtime indexes entries with the
+    -- string returned by `renderQualifiedName`; the default Aeson encoding
+    -- (array of [key,value] pairs) would not work.
+    let entries =
+          Map.fromList
+            [ (QualifiedName "" "main", BlockId 0),
+              (QualifiedName "foo" "bar", BlockId 1)
+            ]
+    Aeson.toJSON entries
+      `shouldBe` object
+        [ "main" .= (0 :: Int),
+          "foo.bar" .= (1 :: Int)
+        ]
+
+  it "round-trips a QualifiedName key with an empty module" $
+    roundTrip (Map.singleton (QualifiedName "" "main") (BlockId 0))
+
+  it "round-trips a QualifiedName key with a module path" $
+    roundTrip (Map.singleton (QualifiedName "foo.bar" "baz") (BlockId 1))

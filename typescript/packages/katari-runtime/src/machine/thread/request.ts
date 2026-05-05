@@ -1,13 +1,13 @@
 import type { ReqId } from "../../ir/types.js";
 import type { MachineState } from "../machine.js";
 import type { Value } from "../value.js";
-import type { CreateThreadInit, ThreadBase } from "./types.js";
+import type { ChildThreadBase, CreateThreadInit } from "./types.js";
 
 /**
  * Executes a BlockRequest (handler lookup + dispatch).
  * Placeholder — not implemented.
  */
-export type RequestThread = ThreadBase & {
+export type RequestThread = ChildThreadBase & {
   kind: "request";
   reqId: ReqId;
   args: Map<string, Value>;
@@ -22,7 +22,6 @@ export function createRequestThread(
   const thread: RequestThread = {
     ...init,
     kind: "request",
-    scopeId: init.scopeId,
     children: new Map(),
     status: "running",
     reqId,

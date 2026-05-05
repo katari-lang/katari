@@ -1,12 +1,12 @@
 import type { MachineState } from "../machine.js";
 import type { Value } from "../value.js";
-import type { CreateThreadInit, ThreadBase } from "./types.js";
+import type { ChildThreadBase, CreateThreadInit } from "./types.js";
 
 /**
  * Executes a BlockPrim (pure primitive computation).
  * Completes immediately in onCall — no children.
  */
-export type PrimThread = ThreadBase & {
+export type PrimThread = ChildThreadBase & {
   kind: "prim";
   primName: string;
   args: Map<string, Value>;
@@ -21,7 +21,6 @@ export function createPrimThread(
   const thread: PrimThread = {
     ...init,
     kind: "prim",
-    scopeId: init.parent.scopeId,
     children: new Map(),
     status: "running",
     primName,
@@ -35,8 +34,8 @@ export function onCallPrim(machine: MachineState, thread: PrimThread): void {
   const value = executePrim(thread.primName, thread.args);
   machine.queue.push({
     kind: "done",
-    parent: thread.parent!,
-    callId: thread.parentCallId!,
+    parent: thread.parent,
+    callId: thread.parentCallId,
     value,
   });
 }

@@ -58,6 +58,28 @@ happyPathSpec = describe "well-formed single-module input" $ do
     isJust result.solverResult `shouldBe` True
     isJust result.zonkResult `shouldBe` True
 
+  it "break with a block-expression argument compiles end-to-end" $ do
+    -- The break value is itself a block expression that uses an inner
+    -- handle/then. Inner break / return / next from this block would
+    -- target their outer boundaries directly, but here the block has
+    -- only normal completion (tail value 7), so the outer for-loop's
+    -- break receives 7. Confirms parser, type checker (no
+    -- withThenModifiedContexts), and lowering all accept this shape.
+    let src =
+          mconcat
+            [ "agent main() -> integer {\n",
+              "  for(x in [1, 2, 3]) {\n",
+              "    break {\n",
+              "      handle {} then(_) { 0 }\n",
+              "      7\n",
+              "    };\n",
+              "  } then { 0 }\n",
+              "}"
+            ]
+    let result = compile (singleSourceInput src)
+    hasErrors result.diagnostics `shouldBe` False
+    isJust result.irModule `shouldBe` True
+
 errorPathSpec :: Spec
 errorPathSpec = describe "ill-formed input" $ do
   it "returns parse-error diagnostics and no IR for a syntax error" $ do

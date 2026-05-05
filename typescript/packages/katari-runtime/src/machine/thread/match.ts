@@ -1,8 +1,8 @@
-import type { LiteralValue, MatchBlock, MatchPattern, VarId } from "../../ir/types.js";
+import type { BlockId, LiteralValue, MatchBlock, MatchPattern, VarId } from "../../ir/types.js";
 import type { MachineState } from "../machine.js";
 import { getValueFromScope, setValueInScope } from "../scope.js";
 import type { Value } from "../value.js";
-import type { CallId, CreateThreadInit, ThreadBase } from "./types.js";
+import type { CallId, ChildThreadBase, CreateThreadInit } from "./types.js";
 
 /**
  * Executes a BlockMatch (pattern matching).
@@ -11,7 +11,7 @@ import type { CallId, CreateThreadInit, ThreadBase } from "./types.js";
  * onChildDone: propagates arm result as own result.
  * CallId = 0 (only one child: the matched arm body).
  */
-export type MatchThread = ThreadBase & {
+export type MatchThread = ChildThreadBase & {
   kind: "match";
   matchBlock: MatchBlock;
 };
@@ -24,7 +24,6 @@ export function createMatchThread(
   const thread: MatchThread = {
     ...init,
     kind: "match",
-    scopeId: init.scopeId,
     children: new Map(),
     status: "running",
     matchBlock,
@@ -43,28 +42,14 @@ export function onCallMatch(machine: MachineState, thread: MatchThread): void {
       for (const [varId, value] of bindings) {
         setValueInScope(machine, thread.scopeId, varId, value);
       }
-      machine.queue.push({
-        kind: "call",
-        parent: thread,
-        callId: 0,
-        blockId: arm.body,
-        args: new Map(),
-        scopeId: thread.scopeId,
-      });
+      pushArmCall(machine, thread, arm.body);
       return;
     }
   }
 
   // Default arm
   if (thread.matchBlock.defaultArm !== undefined) {
-    machine.queue.push({
-      kind: "call",
-      parent: thread,
-      callId: 0,
-      blockId: thread.matchBlock.defaultArm,
-      args: new Map(),
-      scopeId: thread.scopeId,
-    });
+    pushArmCall(machine, thread, thread.matchBlock.defaultArm);
     return;
   }
 
@@ -74,9 +59,20 @@ export function onCallMatch(machine: MachineState, thread: MatchThread): void {
 export function onChildDoneMatch(machine: MachineState, thread: MatchThread, _callId: CallId, value: Value): void {
   machine.queue.push({
     kind: "done",
-    parent: thread.parent!,
-    callId: thread.parentCallId!,
+    parent: thread.parent,
+    callId: thread.parentCallId,
     value,
+  });
+}
+
+function pushArmCall(machine: MachineState, thread: MatchThread, blockId: BlockId): void {
+  machine.queue.push({
+    kind: "callInline",
+    parent: thread,
+    callId: 0,
+    blockId,
+    args: new Map(),
+    scopeId: thread.scopeId,
   });
 }
 
@@ -116,7 +112,10 @@ function tryMatch(pattern: MatchPattern, value: Value): Map<VarId, Value> | null
       if (value.elements.length !== pattern.contents.length) return null;
       const bindings = new Map<VarId, Value>();
       for (let i = 0; i < pattern.contents.length; i++) {
-        const subBindings = tryMatch(pattern.contents[i], value.elements[i]);
+        const subPattern = pattern.contents[i];
+        const subValue = value.elements[i];
+        if (subPattern === undefined || subValue === undefined) return null;
+        const subBindings = tryMatch(subPattern, subValue);
         if (subBindings === null) return null;
         for (const [k, v] of subBindings) bindings.set(k, v);
       }

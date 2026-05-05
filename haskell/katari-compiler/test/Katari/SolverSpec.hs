@@ -262,7 +262,7 @@ whereHandlerBlocks = describe "handle blocks and request handlers" $ do
           [ "req fetch() -> integer\n",
             "agent app() {\n",
             "  handle {\n",
-            "    req fetch() { 42 }\n",
+            "    req fetch() { break 42; }\n",
             "  }\n",
             "  fetch()\n",
             "}"
@@ -288,9 +288,8 @@ whereHandlerBlocks = describe "handle blocks and request handlers" $ do
     solverResult.solverErrors `shouldBe` []
 
   it "explicit next with wrong type → records solver error" $ do
-    -- Implicit completion is treated as break (Koka-style), so the declared
-    -- @-> integer@ on req only constrains explicit @next@ statements. Use
-    -- @next@ here to surface the type mismatch.
+    -- The declared @-> integer@ on req constrains explicit @next@. Use
+    -- @next \"bad\"@ to surface the type mismatch.
     (_, _, solverResult) <-
       runSolve $
         mconcat
@@ -305,6 +304,39 @@ whereHandlerBlocks = describe "handle blocks and request handlers" $ do
             "}"
           ]
     null solverResult.solverErrors `shouldBe` False
+
+  it "request handler body must be never: falling through with a value is a type error" $ do
+    -- Replaces the prior implicit-break behavior. A handler body that
+    -- ends with a value (no break / no next) violates the never-typing
+    -- constraint and is rejected by the solver.
+    (_, _, solverResult) <-
+      runSolve $
+        mconcat
+          [ "req fetch() -> integer\n",
+            "agent app() {\n",
+            "  handle {\n",
+            "    req fetch() { 42 }\n",
+            "  }\n",
+            "  fetch()\n",
+            "}"
+          ]
+    null solverResult.solverErrors `shouldBe` False
+
+  it "request handler body of type never (explicit break) passes" $ do
+    -- An explicit `break v` makes the handler body inferable as `never`,
+    -- satisfying the new constraint.
+    (_, _, solverResult) <-
+      runSolve $
+        mconcat
+          [ "req fetch() -> integer\n",
+            "agent app() {\n",
+            "  handle {\n",
+            "    req fetch() { break 42; }\n",
+            "  }\n",
+            "  fetch()\n",
+            "}"
+          ]
+    solverResult.solverErrors `shouldBe` []
 
   it "then clause: body tail flows through pattern, then body type is whole block" $ do
     (_, _, solverResult) <-
@@ -335,18 +367,18 @@ whereHandlerBlocks = describe "handle blocks and request handlers" $ do
           ]
     solverResult.solverErrors `shouldBe` []
 
-  it "handler implicit completion flows to whole-block (not declared next type)" $ do
+  it "explicit break in handler routes value to whole-block (not declared next type)" $ do
     -- @req fetch() -> integer@: declared return only constrains @next@.
-    -- Handler body fall-through (literal "ok") is treated as break and flows
-    -- to the handle-block whole type — independent of the declared @integer@
-    -- return. Without a stricter agent annotation, no contradiction arises.
+    -- An explicit @break "ok"@ flows to the handle-block whole type —
+    -- independent of the declared @integer@ next return. Without a
+    -- stricter agent annotation, no contradiction arises.
     (_, _, solverResult) <-
       runSolve $
         mconcat
           [ "req fetch() -> integer\n",
             "agent app() {\n",
             "  handle {\n",
-            "    req fetch() { \"ok\" }\n",
+            "    req fetch() { break \"ok\"; }\n",
             "  }\n",
             "  fetch()\n",
             "}"

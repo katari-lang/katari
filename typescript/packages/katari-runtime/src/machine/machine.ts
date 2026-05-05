@@ -10,8 +10,7 @@ import {
   handleTerminateAckFromFFI,
 } from "./thread/external.js";
 import type { APIThread } from "./thread/api.js";
-import { handleDelegateFromAPI } from "./thread/api.js";
-import { finishCancelling } from "./runner.js";
+import { handleDelegateFromAPI, handleTerminateFromAPI } from "./thread/api.js";
 
 // ─── MachineState ───────────────────────────────────────────────────────────
 
@@ -29,8 +28,17 @@ export type MachineState = {
   delegations: Map<DelegationId, ExternalThread>;
   /** API delegation routing (APIThread registers here). */
   apiDelegations: Map<DelegationId, APIThread>;
-  /** Outbound events produced during current processing. */
-  outEvents: MachineEvent[];
+  /**
+   * Outbound events produced during the current `applyEvent` invocation.
+   *
+   * Transient buffer: cleared at the start of every `applyEvent` and
+   * returned at the end. Thread modules push directly into it during
+   * `processQueue`. Not part of the persistent machine state — it is
+   * stored on `MachineState` only because thread code needs a stable
+   * place to write to without threading a context object through every
+   * call site.
+   */
+  pendingOutEvents: MachineEvent[];
   /** Event queue for the main loop. */
   queue: QueueEvent[];
 };
@@ -47,7 +55,7 @@ export function createMachine(irModule: IRModule): MachineState {
     scopes: new Map(),
     delegations: new Map(),
     apiDelegations: new Map(),
-    outEvents: [],
+    pendingOutEvents: [],
     queue: [],
   };
 }
@@ -61,7 +69,7 @@ export function applyEvent(
   state: MachineState,
   event: MachineEvent,
 ): MachineEvent[] {
-  state.outEvents = [];
+  state.pendingOutEvents = [];
 
   switch (event.kind) {
     case "delegate": {
@@ -85,16 +93,7 @@ export function applyEvent(
 
     case "terminate": {
       if (event.from === "API" && event.to === "CORE") {
-        const apiThread = state.apiDelegations.get(event.delegationId);
-        if (!apiThread || apiThread.status === "cancelling") break;
-        apiThread.status = "cancelling";
-        if (apiThread.children.size === 0) {
-          finishCancelling(state, apiThread);
-        } else {
-          for (const child of apiThread.children.values()) {
-            state.queue.push({ kind: "cancel", target: child });
-          }
-        }
+        handleTerminateFromAPI(state, event.delegationId);
       }
       break;
     }
@@ -118,5 +117,5 @@ export function applyEvent(
   // Run GC after processing
   collectGarbage(state);
 
-  return state.outEvents;
+  return state.pendingOutEvents;
 }

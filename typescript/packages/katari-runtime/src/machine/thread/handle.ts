@@ -1,12 +1,12 @@
 import type { HandleBlock } from "../../ir/types.js";
 import type { MachineState } from "../machine.js";
-import type { CreateThreadInit, ThreadBase } from "./types.js";
+import type { ChildThreadBase, CreateThreadInit } from "./types.js";
 
 /**
  * Executes a BlockHandle (effect handler scope).
  * Placeholder — not implemented.
  */
-export type HandleThread = ThreadBase & {
+export type HandleThread = ChildThreadBase & {
   kind: "handle";
   block: HandleBlock;
 };
@@ -19,7 +19,6 @@ export function createHandleThread(
   const thread: HandleThread = {
     ...init,
     kind: "handle",
-    scopeId: init.scopeId,
     children: new Map(),
     status: "running",
     block,

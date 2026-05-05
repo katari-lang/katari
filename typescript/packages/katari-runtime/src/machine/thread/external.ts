@@ -2,7 +2,7 @@ import type { ExternalName } from "../../ir/types.js";
 import { createDelegationId, type DelegationId } from "../id.js";
 import type { MachineState } from "../machine.js";
 import type { Value } from "../value.js";
-import type { CreateThreadInit, ThreadBase } from "./types.js";
+import type { ChildThreadBase, CreateThreadInit } from "./types.js";
 
 /**
  * Represents an FFI sidecar call.
@@ -13,7 +13,7 @@ import type { CreateThreadInit, ThreadBase } from "./types.js";
  * 2. At creation: registers delegation, emits delegate outEvent (CORE→FFI)
  * 3. On delegateAck: handleDelegateAckFromFFI pushes done event for parent, terminates self
  */
-export type ExternalThread = ThreadBase & {
+export type ExternalThread = ChildThreadBase & {
   kind: "external";
   externalName: ExternalName;
   args: Map<string, Value>;
@@ -30,7 +30,6 @@ export function createExternalThread(
   const thread: ExternalThread = {
     ...init,
     kind: "external",
-    scopeId: init.parent.scopeId,
     children: new Map(),
     status: "running",
     externalName,
@@ -43,7 +42,7 @@ export function createExternalThread(
 
 export function onCallExternal(machine: MachineState, thread: ExternalThread): void {
   machine.delegations.set(thread.delegationId, thread);
-  machine.outEvents.push({
+  machine.pendingOutEvents.push({
     from: "CORE",
     to: "FFI",
     kind: "delegate",
@@ -57,6 +56,12 @@ export function onCallExternal(machine: MachineState, thread: ExternalThread): v
  * Handle an inbound delegateAck event from FFI.
  * Pushes a done event for the external thread's parent.
  * Cleanup (children.delete, threads.delete) is handled by processQueue's done processing.
+ *
+ * If the external thread is already cancelling, the result is dropped and
+ * the event is treated as a cancelAck. This relaxes the FFI contract: a
+ * sidecar may respond with delegateAck even after receiving terminate; the
+ * runtime absorbs it. A subsequent terminateAck (if any) becomes a no-op
+ * because the delegation entry has already been removed.
  */
 export function handleDelegateAckFromFFI(
   state: MachineState,
@@ -70,17 +75,21 @@ export function handleDelegateAckFromFFI(
     );
   }
 
+  state.delegations.delete(delegationId);
+
   if (ext.status === "cancelling") {
-    // Cancelling — ignore result, wait for terminateAck instead.
+    state.queue.push({
+      kind: "cancelAck",
+      parent: ext.parent,
+      callId: ext.parentCallId,
+    });
     return;
   }
 
-  state.delegations.delete(delegationId);
-
   state.queue.push({
     kind: "done",
-    parent: ext.parent!,
-    callId: ext.parentCallId!,
+    parent: ext.parent,
+    callId: ext.parentCallId,
     value,
   });
 }
@@ -94,13 +103,13 @@ export function handleTerminateAckFromFFI(
   delegationId: DelegationId,
 ): void {
   const ext = state.delegations.get(delegationId);
-  if (!ext) return; // already cleaned up
+  if (!ext) return; // already cleaned up (e.g. delegateAck arrived first)
 
   state.delegations.delete(delegationId);
 
   state.queue.push({
     kind: "cancelAck",
-    parent: ext.parent!,
-    callId: ext.parentCallId!,
+    parent: ext.parent,
+    callId: ext.parentCallId,
   });
 }

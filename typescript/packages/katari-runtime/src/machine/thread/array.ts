@@ -1,7 +1,7 @@
-import type { ArrayBlock } from "../../ir/types.js";
+import type { ArrayBlock, BlockId } from "../../ir/types.js";
 import type { MachineState } from "../machine.js";
 import type { Value } from "../value.js";
-import type { CallId, CreateThreadInit, ThreadBase } from "./types.js";
+import type { CallId, ChildThreadBase, CreateThreadInit } from "./types.js";
 
 /**
  * Executes a BlockArray (array construction).
@@ -11,7 +11,7 @@ import type { CallId, CreateThreadInit, ThreadBase } from "./types.js";
  *
  * CallId = element index (0, 1, 2, ...).
  */
-export type ArrayThread = ThreadBase & {
+export type ArrayThread = ChildThreadBase & {
   kind: "array";
   block: ArrayBlock;
   /** Collected results from children. */
@@ -28,7 +28,6 @@ export function createArrayThread(
   const thread: ArrayThread = {
     ...init,
     kind: "array",
-    scopeId: init.scopeId,
     children: new Map(),
     status: "running",
     collected: new Map(),
@@ -45,8 +44,8 @@ export function onCallArray(machine: MachineState, thread: ArrayThread): void {
   if (elements.length === 0) {
     machine.queue.push({
       kind: "done",
-      parent: thread.parent!,
-      callId: thread.parentCallId!,
+      parent: thread.parent,
+      callId: thread.parentCallId,
       value: { kind: "array", elements: [] },
     });
     return;
@@ -54,24 +53,10 @@ export function onCallArray(machine: MachineState, thread: ArrayThread): void {
 
   if (thread.block.parallel) {
     for (let i = 0; i < elements.length; i++) {
-      machine.queue.push({
-        kind: "call",
-        parent: thread,
-        callId: i,
-        blockId: elements[i],
-        args: new Map(),
-        scopeId: thread.scopeId,
-      });
+      pushElementCall(machine, thread, i, elementAt(elements, i));
     }
   } else {
-    machine.queue.push({
-      kind: "call",
-      parent: thread,
-      callId: 0,
-      blockId: elements[0],
-      args: new Map(),
-      scopeId: thread.scopeId,
-    });
+    pushElementCall(machine, thread, 0, elementAt(elements, 0));
   }
 }
 
@@ -81,33 +66,54 @@ export function onChildDoneArray(machine: MachineState, thread: ArrayThread, cal
 
   if (thread.block.parallel) {
     if (thread.collected.size >= elements.length) {
-      const values = elements.map((_, i) => thread.collected.get(i)!);
-      machine.queue.push({
-        kind: "done",
-        parent: thread.parent!,
-        callId: thread.parentCallId!,
-        value: { kind: "array", elements: values },
-      });
+      emitDone(machine, thread, elements);
     }
   } else {
     thread.nextIndex++;
     if (thread.nextIndex >= elements.length) {
-      const values = elements.map((_, i) => thread.collected.get(i)!);
-      machine.queue.push({
-        kind: "done",
-        parent: thread.parent!,
-        callId: thread.parentCallId!,
-        value: { kind: "array", elements: values },
-      });
+      emitDone(machine, thread, elements);
     } else {
-      machine.queue.push({
-        kind: "call",
-        parent: thread,
-        callId: thread.nextIndex,
-        blockId: elements[thread.nextIndex],
-        args: new Map(),
-        scopeId: thread.scopeId,
-      });
+      pushElementCall(machine, thread, thread.nextIndex, elementAt(elements, thread.nextIndex));
     }
   }
+}
+
+function pushElementCall(
+  machine: MachineState,
+  thread: ArrayThread,
+  index: number,
+  blockId: BlockId,
+): void {
+  machine.queue.push({
+    kind: "callInline",
+    parent: thread,
+    callId: index,
+    blockId,
+    args: new Map(),
+    scopeId: thread.scopeId,
+  });
+}
+
+function emitDone(machine: MachineState, thread: ArrayThread, elements: BlockId[]): void {
+  const values = elements.map((_, i) => {
+    const v = thread.collected.get(i);
+    if (v === undefined) {
+      throw new Error(`ArrayThread.emitDone: missing element ${i}`);
+    }
+    return v;
+  });
+  machine.queue.push({
+    kind: "done",
+    parent: thread.parent,
+    callId: thread.parentCallId,
+    value: { kind: "array", elements: values },
+  });
+}
+
+function elementAt(elements: BlockId[], index: number): BlockId {
+  const blockId = elements[index];
+  if (blockId === undefined) {
+    throw new Error(`ArrayThread: element ${index} out of bounds`);
+  }
+  return blockId;
 }

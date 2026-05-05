@@ -1,9 +1,9 @@
-import type { BlockId, CallData, ExitKind, UserBlock } from "../../ir/types.js";
+import type { CallData, UserBlock } from "../../ir/types.js";
 import type { ScopeId } from "../id.js";
 import type { MachineState } from "../machine.js";
-import { createScope, getValueFromScope, setValueInScope } from "../scope.js";
+import { getScope, getValueFromScope, setValueInScope } from "../scope.js";
 import { literalToValue, NULL_VALUE, type Value } from "../value.js";
-import type { CallId, CreateThreadInit, ThreadBase } from "./types.js";
+import type { CallId, ChildThreadBase, CreateThreadInit } from "./types.js";
 
 /**
  * Executes a BlockUser (agent or inline).
@@ -11,7 +11,7 @@ import type { CallId, CreateThreadInit, ThreadBase } from "./types.js";
  *
  * CallId = pc value at the time the call was issued.
  */
-export type UserThread = ThreadBase & {
+export type UserThread = ChildThreadBase & {
   kind: "user";
   block: UserBlock;
   /** Index of the next statement to execute. */
@@ -24,14 +24,8 @@ export function createUserThread(
   block: UserBlock,
   args: Map<string, Value>,
 ): UserThread {
-  // Agent blocks get fresh scope (parent = null for isolation), inline blocks use provided scopeId
-  const scopeId =
-    block.kind === "blockKindAgent"
-      ? createScope(machine, null).id
-      : init.scopeId;
-
-  // Bind parameters into scope
-  const scope = machine.scopes.get(scopeId)!;
+  // Bind parameters into the freshly-allocated scope (allocated by the runner).
+  const scope = getScope(machine, init.scopeId);
   for (const param of block.parameters) {
     const argValue = args.get(param.label);
     if (argValue !== undefined) {
@@ -42,7 +36,6 @@ export function createUserThread(
   const thread: UserThread = {
     ...init,
     kind: "user",
-    scopeId,
     children: new Map(),
     status: "running",
     block,
@@ -59,6 +52,9 @@ export function onCallUser(machine: MachineState, thread: UserThread): void {
 export function onChildDoneUser(machine: MachineState, thread: UserThread, callId: CallId, value: Value): void {
   // callId = statement index (pc at call time)
   const stmt = thread.block.statements[callId];
+  if (stmt === undefined) {
+    throw new Error(`onChildDoneUser: no statement at callId ${callId}`);
+  }
   if (stmt.kind === "statementCall" && stmt.contents.output !== undefined) {
     setValueInScope(machine, thread.scopeId, stmt.contents.output, value);
   }
@@ -71,21 +67,16 @@ function runStatements(machine: MachineState, thread: UserThread): void {
 
   while (thread.pc < statements.length) {
     const stmt = statements[thread.pc];
+    if (stmt === undefined) {
+      throw new Error(`runStatements: no statement at pc ${thread.pc}`);
+    }
 
     switch (stmt.kind) {
       case "statementCall": {
         const callId = thread.pc;
         thread.pc++;
-        const { blockId, scopeId } = resolveCallTarget(machine, thread.scopeId, stmt.contents);
         const args = resolveArgs(machine, thread.scopeId, stmt.contents);
-        machine.queue.push({
-          kind: "call",
-          parent: thread,
-          callId,
-          blockId,
-          args,
-          scopeId,
-        });
+        pushCallEvent(machine, thread, callId, stmt.contents, args);
         return; // wait for child completion
       }
 
@@ -113,25 +104,22 @@ function runStatements(machine: MachineState, thread: UserThread): void {
       case "statementExit": {
         const exitValue = getValueFromScope(machine, thread.scopeId, stmt.contents.value);
         const exitKind = stmt.contents.exitKind;
-        if (isBoundaryForUser(thread, exitKind)) {
-          // This thread IS the boundary — emit done directly
-          machine.queue.push({
-            kind: "done",
-            parent: thread.parent!,
-            callId: thread.parentCallId!,
-            value: exitValue,
-          });
-        } else {
-          // Propagate return upward
-          machine.queue.push({
-            kind: "return",
-            parent: thread.parent!,
-            callId: thread.parentCallId!,
-            value: exitValue,
-            exitKind,
-          });
+        // Direct delivery to the registered boundary. The boundary cancels
+        // its remaining children and emits done with `exitValue`. Bypasses
+        // any intermediate `then` blocks.
+        const target = thread.boundaries[exitKind];
+        if (target === null) {
+          throw new Error(
+            `statementExit: no boundary registered for ${exitKind}`,
+          );
         }
-        return; // Thread stays alive, will be cancelled by parent
+        machine.queue.push({
+          kind: "return",
+          target,
+          value: exitValue,
+          exitKind,
+        });
+        return; // Thread stays alive; will be cancelled by the boundary's cascade.
       }
 
       case "statementCont":
@@ -145,33 +133,48 @@ function runStatements(machine: MachineState, thread: UserThread): void {
     : NULL_VALUE;
   machine.queue.push({
     kind: "done",
-    parent: thread.parent!,
-    callId: thread.parentCallId!,
+    parent: thread.parent,
+    callId: thread.parentCallId,
     value,
   });
 }
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
-function isBoundaryForUser(thread: UserThread, exitKind: ExitKind): boolean {
-  return exitKind === "exitKindReturn" && thread.block.kind === "blockKindAgent";
-}
-
-function resolveCallTarget(
+/**
+ * Dispatch a statementCall to the appropriate call queue variant.
+ * - callTargetBlock → callBlock (top-level callable; new isolated scope)
+ * - callTargetValue → callValue (closure; new scope under captured scope)
+ */
+function pushCallEvent(
   machine: MachineState,
-  scopeId: ScopeId,
+  thread: UserThread,
+  callId: CallId,
   call: CallData,
-): { blockId: BlockId; scopeId: ScopeId } {
-  const target = call.target;
-  switch (target.kind) {
+  args: Map<string, Value>,
+): void {
+  switch (call.target.kind) {
     case "callTargetBlock":
-      return { blockId: target.block, scopeId };
+      machine.queue.push({
+        kind: "callBlock",
+        parent: thread,
+        callId,
+        blockId: call.target.block,
+        args,
+      });
+      return;
     case "callTargetValue": {
-      const value = getValueFromScope(machine, scopeId, target.var);
+      const value = getValueFromScope(machine, thread.scopeId, call.target.var);
       if (value.kind !== "closure") {
-        throw new Error(`resolveCallTarget: expected closure, got ${value.kind}`);
+        throw new Error(`pushCallEvent: expected closure, got ${value.kind}`);
       }
-      return { blockId: value.blockId, scopeId: value.scopeId };
+      machine.queue.push({
+        kind: "callValue",
+        parent: thread,
+        callId,
+        blockId: value.blockId,
+        args,
+        capturedScopeId: value.scopeId,
+      });
+      return;
     }
   }
 }

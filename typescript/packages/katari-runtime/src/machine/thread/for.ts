@@ -1,8 +1,8 @@
-import type { ForBlock } from "../../ir/types.js";
+import type { BlockId, ForBlock } from "../../ir/types.js";
 import type { MachineState } from "../machine.js";
-import { createScope, getValueFromScope, setValueInScope } from "../scope.js";
+import { getValueFromScope, setValueInScope } from "../scope.js";
 import { NULL_VALUE, type Value } from "../value.js";
-import type { CallId, CreateThreadInit, ThreadBase } from "./types.js";
+import type { CallId, ChildThreadBase, CreateThreadInit } from "./types.js";
 
 /**
  * Executes a BlockFor (for-loop).
@@ -11,7 +11,7 @@ import type { CallId, CreateThreadInit, ThreadBase } from "./types.js";
  * CallId = iteration index (0, 1, ...).
  * Then block CallId = -1.
  */
-export type ForThread = ThreadBase & {
+export type ForThread = ChildThreadBase & {
   kind: "for";
   block: ForBlock;
   /** Next iteration index to dispatch. */
@@ -23,19 +23,16 @@ export function createForThread(
   init: CreateThreadInit,
   block: ForBlock,
 ): ForThread {
-  // Create a new scope for the for-loop (state vars + element vars)
-  const forScope = createScope(machine, init.scopeId);
-
-  // Initialize state variables from parent scope
+  // Initialize state variables in the freshly-allocated scope.
+  // The scope is provided by the runner with the caller's scope as parent.
   for (const [bodyVar, initVar] of block.stateInits) {
     const initValue = getValueFromScope(machine, init.scopeId, initVar);
-    forScope.values.set(bodyVar, initValue);
+    setValueInScope(machine, init.scopeId, bodyVar, initValue);
   }
 
   const thread: ForThread = {
     ...init,
     kind: "for",
-    scopeId: forScope.id,
     children: new Map(),
     status: "running",
     block,
@@ -55,14 +52,7 @@ export function onCallFor(machine: MachineState, thread: ForThread): void {
   }
 
   bindElementVars(machine, thread, iterables, 0);
-  machine.queue.push({
-    kind: "call",
-    parent: thread,
-    callId: 0,
-    blockId: thread.block.bodyBlock,
-    args: new Map(),
-    scopeId: thread.scopeId,
-  });
+  pushBodyCall(machine, thread, 0);
 }
 
 export function onChildDoneFor(machine: MachineState, thread: ForThread, callId: CallId, value: Value): void {
@@ -70,8 +60,8 @@ export function onChildDoneFor(machine: MachineState, thread: ForThread, callId:
     // then block completed
     machine.queue.push({
       kind: "done",
-      parent: thread.parent!,
-      callId: thread.parentCallId!,
+      parent: thread.parent,
+      callId: thread.parentCallId,
       value,
     });
     return;
@@ -87,33 +77,39 @@ export function onChildDoneFor(machine: MachineState, thread: ForThread, callId:
   }
 
   bindElementVars(machine, thread, iterables, thread.currentIndex);
+  pushBodyCall(machine, thread, thread.currentIndex);
+}
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+function pushBodyCall(machine: MachineState, thread: ForThread, index: number): void {
+  pushInlineCall(machine, thread, index, thread.block.bodyBlock);
+}
+
+function pushInlineCall(
+  machine: MachineState,
+  thread: ForThread,
+  callId: CallId,
+  blockId: BlockId,
+): void {
   machine.queue.push({
-    kind: "call",
+    kind: "callInline",
     parent: thread,
-    callId: thread.currentIndex,
-    blockId: thread.block.bodyBlock,
+    callId,
+    blockId,
     args: new Map(),
     scopeId: thread.scopeId,
   });
 }
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
-
 function emitForDone(machine: MachineState, thread: ForThread): void {
   if (thread.block.thenBlock !== undefined) {
-    machine.queue.push({
-      kind: "call",
-      parent: thread,
-      callId: -1,
-      blockId: thread.block.thenBlock,
-      args: new Map(),
-      scopeId: thread.scopeId,
-    });
+    pushInlineCall(machine, thread, -1, thread.block.thenBlock);
   } else {
     machine.queue.push({
       kind: "done",
-      parent: thread.parent!,
-      callId: thread.parentCallId!,
+      parent: thread.parent,
+      callId: thread.parentCallId,
       value: NULL_VALUE,
     });
   }
@@ -128,15 +124,23 @@ function resolveIterables(machine: MachineState, thread: ForThread): Value[] {
 function getIterableLength(iterables: Value[]): number {
   if (iterables.length === 0) return 0;
   const first = iterables[0];
-  if (first.kind !== "array") throw new Error("ForThread: iter source is not an array");
+  if (first === undefined || first.kind !== "array") {
+    throw new Error("ForThread: iter source is not an array");
+  }
   return first.elements.length;
 }
 
 function bindElementVars(machine: MachineState, thread: ForThread, iterables: Value[], index: number): void {
   for (let i = 0; i < thread.block.iters.length; i++) {
-    const [elemVar] = thread.block.iters[i];
+    const iter = thread.block.iters[i];
     const array = iterables[i];
-    if (array.kind !== "array") throw new Error("ForThread: iter source is not an array");
-    setValueInScope(machine, thread.scopeId, elemVar, array.elements[index]);
+    if (iter === undefined || array === undefined || array.kind !== "array") {
+      throw new Error("ForThread: iter source is not an array");
+    }
+    const elem = array.elements[index];
+    if (elem === undefined) {
+      throw new Error(`ForThread: element at index ${index} missing`);
+    }
+    setValueInScope(machine, thread.scopeId, iter[0], elem);
   }
 }

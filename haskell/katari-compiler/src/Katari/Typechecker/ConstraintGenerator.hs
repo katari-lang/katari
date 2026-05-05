@@ -44,7 +44,7 @@ module Katari.Typechecker.ConstraintGenerator
 where
 
 import Control.Monad (unless)
-import Control.Monad.Reader (ReaderT, ask, asks, local, runReaderT)
+import Control.Monad.Reader (ReaderT, asks, local, runReaderT)
 import Control.Monad.State.Strict (State, gets, modify, runState)
 import Control.Monad.Trans (lift)
 import Data.Map.Strict (Map)
@@ -129,19 +129,19 @@ data ReasonKind where
   ReasonKindHandleRequestDischarge :: ReasonKind
   ReasonKindHandlerRequestBound :: ReasonKind
   ReasonKindHandleNext :: ReasonKind
-  -- | A request handler body that falls through without an explicit
-  -- @next@ or @break@ is treated as if @break body-tail@: the value flows
-  -- to the where-containing block's whole type, NOT through the where's
-  -- @then@ clause (Koka-style algebraic-request handlers).
-  ReasonKindHandleImplicitBreak :: ReasonKind
+  -- | A request handler body must terminate with @break@ or @next@ — i.e.
+  -- the body's inferred type must be 'SemanticTypeNever'. Falling through
+  -- to a value would mean the body returned past the request handler
+  -- frame with nothing to do with the value, which is now a type error
+  -- (replaces the prior implicit-break behavior).
+  ReasonKindRequestHandlerNever :: ReasonKind
   ReasonKindHandleBreak :: ReasonKind
   ReasonKindHandleResultBody :: ReasonKind
-  -- | The body / break / return value of a block-with-then must match the
-  -- @then@ clause's pattern type (@bodyTail <: patternType@).
+  -- | The body's normal-completion (tail) value of a block-with-then
+  -- must match the @then@ clause's pattern type (@bodyTail <: patternType@).
+  -- break / return / next from inside the body do NOT pass through this
+  -- pattern — they target their outer boundaries directly.
   ReasonKindThenPattern :: ReasonKind
-  -- | The @then@ body's tail value flows into the OUTER return / break /
-  -- for-break context (one level up from this block-with-then).
-  ReasonKindThenBodyToOuter :: ReasonKind
   -- | The @then@ body's tail value flows into the whole-block type
   -- (the "result of the entire block-with-where-and-then expression").
   ReasonKindThenBodyToWhole :: ReasonKind
@@ -379,52 +379,6 @@ withForLoop breakTv = local $ \c -> c {contextEnclosingForBreak = Just breakTv}
 withHandleScope :: TypeVariableId -> TypeVariableId -> CG a -> CG a
 withHandleScope resultTv nextTv = local $ \c ->
   c {contextEnclosingHandleBreak = Just resultTv, contextEnclosingHandleNext = Just nextTv}
-
--- | Set up "block-with-then" context modifications when walking the BODY of
--- a block that has a @then@ clause. Each enclosing return / for-break /
--- handle-break gets a fresh sub-target whose value must match the @then@
--- pattern; the @then@ body's type then flows back into the original outer
--- target. The handle-next target is left unchanged ('next' does not pass
--- through @then@). Targets that are 'Nothing' (no enclosing scope of that
--- kind) stay 'Nothing'.
---
--- This is *only* applied around the body walk — not around the @then@ body
--- itself or the request-handler bodies, since those execute "outside" the
--- where (their @return@ targets the outer agent directly).
-withThenModifiedContexts ::
-  SemanticType Unresolved ->
-  SemanticType Unresolved ->
-  SourceSpan ->
-  CG a ->
-  CG a
-withThenModifiedContexts patternType thenBodyType span_ action = do
-  ctx <- ask
-  ret' <- modifyOne ctx.contextEnclosingReturn
-  forBr' <- modifyOne ctx.contextEnclosingForBreak
-  hndBr' <- modifyOne ctx.contextEnclosingHandleBreak
-  local
-    ( \c ->
-        c
-          { contextEnclosingReturn = ret',
-            contextEnclosingForBreak = forBr',
-            contextEnclosingHandleBreak = hndBr'
-          }
-    )
-    action
-  where
-    modifyOne = \case
-      Nothing -> pure Nothing
-      Just t0 -> do
-        t1Id <- freshTypeVariableId
-        addTypeConstraint
-          (SemanticTypeVariable t1Id)
-          patternType
-          (ConstraintReason ReasonKindThenPattern span_)
-        addTypeConstraint
-          thenBodyType
-          (SemanticTypeVariable t0)
-          (ConstraintReason ReasonKindThenBodyToOuter span_)
-        pure (Just t1Id)
 
 withSynonymVisit :: TypeId -> CG a -> CG a
 withSynonymVisit tid = local $ \c ->
@@ -945,14 +899,14 @@ walkRequestHandler handlerBodyRequestVariable wholeBlockId RequestHandler {modul
   -- targets the enclosing scope (typically the outer agent's return), not
   -- the handler — we do not override 'withReturn' here.
   --
-  -- Implicit completion (Koka-style): if the body falls through without
-  -- 'next' or 'break', the tail value is treated as an implicit 'break'
-  -- — flowing into the where-containing block's whole type and bypassing
-  -- the where's own @then@ clause. The declared @return@ type only
-  -- constrains explicit @next@ statements.
+  -- A request handler body must end with @break@ or @next@: its inferred
+  -- type is constrained to be 'SemanticTypeNever'. Falling through to a
+  -- value is a type error (used to be an implicit-break). Explicit @next@
+  -- statements are still constrained by the declared @return@ type via
+  -- 'withHandleScope'.
   (body', bodyTy) <-
     withEnclosingRequests handlerBodyRequestVariable . withHandleScope wholeBlockId retTvId $ walkBlock body
-  addTypeConstraint bodyTy (SemanticTypeVariable wholeBlockId) (ConstraintReason ReasonKindHandleImplicitBreak sourceSpan)
+  addTypeConstraint bodyTy SemanticTypeNever (ConstraintReason ReasonKindRequestHandlerNever sourceSpan)
   addReturnAnnotationEq retTvId retSemantic sourceSpan
   let handlerSignature =
         SemanticTypeFunction
@@ -1413,9 +1367,13 @@ walkHandleExpr HandleExpression {parallel, stateVariables, handlers, thenClause,
   -- State variables
   stateVariables' <- mapM walkStateVariable stateVariables
 
-  -- Then clause
-  (thenClause', maybePatternType, maybeThenBodyType) <- case thenClause of
-    Nothing -> pure (Nothing, Nothing, Nothing)
+  -- Then clause. Its body type flows into the whole expression's type,
+  -- joining `break` values (see "Body normal completion" below). Note:
+  -- break / return / next from inside the body bypass the @then@ entirely
+  -- — they target their outer boundaries directly — so we do NOT route
+  -- those exit targets through the @then@ pattern.
+  (thenClause', maybePatternType) <- case thenClause of
+    Nothing -> pure (Nothing, Nothing)
     Just (maybePattern, thenBody) -> do
       (pattern', patternType) <- case maybePattern of
         Just p -> do
@@ -1427,14 +1385,10 @@ walkHandleExpr HandleExpression {parallel, stateVariables, handlers, thenClause,
       (thenBody', thenBodyType) <-
         withEnclosingRequests handlerBodyRequestVariable (walkBlock thenBody)
       addTypeConstraint thenBodyType wholeBlockTypeVariable (ConstraintReason ReasonKindThenBodyToWhole sourceSpan)
-      pure (Just (pattern', thenBody'), Just patternType, Just thenBodyType)
+      pure (Just (pattern', thenBody'), Just patternType)
 
-  -- Body walk (the continuation)
-  let runBody = withEnclosingRequests targetBodyRequestVariable (walkBlock body)
-  (body', bodyTy) <- case (maybePatternType, maybeThenBodyType) of
-    (Just patTy, Just thenTy) ->
-      withThenModifiedContexts patTy thenTy sourceSpan runBody
-    _ -> runBody
+  -- Body walk (the continuation).
+  (body', bodyTy) <- withEnclosingRequests targetBodyRequestVariable (walkBlock body)
 
   -- Body normal completion
   case maybePatternType of

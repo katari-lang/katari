@@ -1,9 +1,15 @@
-import type { BlockId, ExitKind } from "../ir/types.js";
+import type { BlockId } from "../ir/types.js";
 import { createThreadId, type ScopeId } from "./id.js";
 import type { MachineState } from "./machine.js";
+import { createScope } from "./scope.js";
 import type { Value } from "./value.js";
 
-import type { CallId, CreateThreadInit, Thread } from "./thread/types.js";
+import type {
+  Boundaries,
+  CallId,
+  CreateThreadInit,
+  Thread,
+} from "./thread/types.js";
 import { createPrimThread, onCallPrim } from "./thread/prim.js";
 import { createCtorThread, onCallCtor } from "./thread/ctor.js";
 import {
@@ -33,7 +39,7 @@ import {
 } from "./thread/user.js";
 import { createHandleThread } from "./thread/handle.js";
 import { createRequestThread } from "./thread/request.js";
-import { onCallAPI, onChildDoneAPI } from "./thread/api.js";
+import { onChildDoneAPI } from "./thread/api.js";
 
 // ─── Main Loop ──────────────────────────────────────────────────────────────
 
@@ -43,20 +49,30 @@ import { onCallAPI, onChildDoneAPI } from "./thread/api.js";
  */
 export function processQueue(machine: MachineState): void {
   while (machine.queue.length > 0) {
-    const event = machine.queue.shift()!;
+    const event = machine.queue.shift();
+    if (event === undefined) break;
 
     switch (event.kind) {
-      case "call": {
-        const child = createThread(
-          machine,
-          event.blockId,
-          event.parent,
-          event.callId,
-          event.args,
-          event.scopeId,
-        );
-        event.parent.children.set(event.callId, child);
-        dispatchOnCall(machine, child);
+      case "callBlock": {
+        // Top-level callable. Allocate a fresh isolated scope (parent = null).
+        const newScopeId = createScope(machine, null).id;
+        spawnChild(machine, event.parent, event.callId, event.blockId, event.args, newScopeId);
+        break;
+      }
+
+      case "callInline": {
+        // Inline child of a structural block. Allocate a new scope under
+        // the caller's current scope so that the inline body's `let`s do
+        // not leak outward.
+        const newScopeId = createScope(machine, event.scopeId).id;
+        spawnChild(machine, event.parent, event.callId, event.blockId, event.args, newScopeId);
+        break;
+      }
+
+      case "callValue": {
+        // Closure call. New scope with parent = closure's captured scope.
+        const newScopeId = createScope(machine, event.capturedScopeId).id;
+        spawnChild(machine, event.parent, event.callId, event.blockId, event.args, newScopeId);
         break;
       }
 
@@ -75,16 +91,20 @@ export function processQueue(machine: MachineState): void {
       }
 
       case "return": {
-        const parent = event.parent;
-        const child = parent.children.get(event.callId);
-        if (!child) break; // stale
-        parent.children.delete(event.callId);
-        machine.threads.delete(child.id);
-        if (parent.status === "cancelling") {
-          // Already cancelling — treat return as implicit cancelAck
-          checkAllChildrenDone(machine, parent);
+        // Direct delivery to the boundary thread for `return` / `for_break`
+        // / `break`. The boundary cancels its remaining children, then
+        // emits done with `pendingReturn`.
+        const target = event.target;
+        if (!machine.threads.has(target.id)) break; // stale
+        if (target.status === "cancelling") break;  // race with parent cancel — drop
+        target.status = "cancelling";
+        target.pendingReturn = event.value;
+        if (target.children.size === 0) {
+          finishCancelling(machine, target);
         } else {
-          handleReturnReceived(machine, parent, event.value, event.exitKind);
+          for (const child of target.children.values()) {
+            machine.queue.push({ kind: "cancel", target: child });
+          }
         }
         break;
       }
@@ -108,18 +128,41 @@ export function processQueue(machine: MachineState): void {
   }
 }
 
+/**
+ * Create a child thread with a pre-allocated scope and dispatch its onCall.
+ */
+function spawnChild(
+  machine: MachineState,
+  parent: Thread,
+  callId: CallId,
+  blockId: BlockId,
+  args: Map<string, Value>,
+  scopeId: ScopeId,
+): void {
+  const child = createThread(machine, blockId, parent, callId, args, scopeId);
+  parent.children.set(callId, child);
+  dispatchOnCall(machine, child);
+}
+
 // ─── Cancel / Return ─────────────────────────────────────────────────────────
 
 /**
  * Handle a cancel event targeting a specific thread.
+ *
+ * `cancel` is never directed at a root thread (APIThread) — root cancellation
+ * is initiated by `handleTerminateFromAPI`, which propagates `cancel` to the
+ * root's children directly. So `target` here is always a ChildThreadBase.
  */
 function handleCancelReceived(machine: MachineState, target: Thread): void {
+  if (target.kind === "api") {
+    throw new Error("handleCancelReceived: APIThread is root and cannot be cancelled by a cancel event");
+  }
   if (target.status === "cancelling") return; // idempotent
   target.status = "cancelling";
 
   // ExternalThread: emit terminate to FFI, wait for terminateAck
   if (target.kind === "external") {
-    machine.outEvents.push({
+    machine.pendingOutEvents.push({
       from: "CORE",
       to: "FFI",
       kind: "terminate",
@@ -132,40 +175,14 @@ function handleCancelReceived(machine: MachineState, target: Thread): void {
     // Leaf thread — ack parent immediately
     machine.queue.push({
       kind: "cancelAck",
-      parent: target.parent!,
-      callId: target.parentCallId!,
+      parent: target.parent,
+      callId: target.parentCallId,
     });
     return;
   }
 
   // Propagate cancel to all children
   for (const child of target.children.values()) {
-    machine.queue.push({ kind: "cancel", target: child });
-  }
-}
-
-/**
- * Handle a return event received by a parent thread.
- * Cancels remaining children and prepares to propagate or convert to done.
- */
-function handleReturnReceived(
-  machine: MachineState,
-  parent: Thread,
-  value: Value,
-  exitKind: ExitKind,
-): void {
-  parent.status = "cancelling";
-  parent.pendingReturn = value;
-  parent.pendingExitKind = isBoundaryFor(parent, exitKind) ? undefined : exitKind;
-
-  if (parent.children.size === 0) {
-    // No remaining children to cancel
-    finishCancelling(machine, parent);
-    return;
-  }
-
-  // Cancel all remaining children
-  for (const child of parent.children.values()) {
     machine.queue.push({ kind: "cancel", target: child });
   }
 }
@@ -181,13 +198,16 @@ function checkAllChildrenDone(machine: MachineState, thread: Thread): void {
 
 /**
  * Called when a cancelling thread has no more children.
- * Emits the appropriate event (done, return, cancelAck, or terminateAck).
+ * - Root (APIThread): emit terminateAck and clean up.
+ * - Non-root with `pendingReturn` (= boundary that received a return event):
+ *   emit done with the stored value.
+ * - Non-root without `pendingReturn` (= cancelled by parent's cascade):
+ *   emit cancelAck to parent.
  */
 export function finishCancelling(machine: MachineState, thread: Thread): void {
-  // Root thread (APIThread) — emit terminateAck and clean up
   if (thread.parent === null) {
     if (thread.kind === "api") {
-      machine.outEvents.push({
+      machine.pendingOutEvents.push({
         from: "CORE",
         to: "API",
         kind: "terminateAck",
@@ -200,45 +220,18 @@ export function finishCancelling(machine: MachineState, thread: Thread): void {
   }
 
   if (thread.pendingReturn !== undefined) {
-    if (thread.pendingExitKind !== undefined) {
-      // Non-boundary: propagate return upward
-      machine.queue.push({
-        kind: "return",
-        parent: thread.parent,
-        callId: thread.parentCallId!,
-        value: thread.pendingReturn,
-        exitKind: thread.pendingExitKind,
-      });
-    } else {
-      // Boundary: convert to done
-      machine.queue.push({
-        kind: "done",
-        parent: thread.parent,
-        callId: thread.parentCallId!,
-        value: thread.pendingReturn,
-      });
-    }
+    machine.queue.push({
+      kind: "done",
+      parent: thread.parent,
+      callId: thread.parentCallId,
+      value: thread.pendingReturn,
+    });
   } else {
-    // Cancelled by parent — ack
     machine.queue.push({
       kind: "cancelAck",
       parent: thread.parent,
-      callId: thread.parentCallId!,
+      callId: thread.parentCallId,
     });
-  }
-}
-
-/**
- * Determine if a thread is the boundary for a given exit kind.
- */
-function isBoundaryFor(thread: Thread, exitKind: ExitKind): boolean {
-  switch (exitKind) {
-    case "exitKindReturn":
-      return thread.kind === "user" && thread.block.kind === "blockKindAgent";
-    case "exitKindForBreak":
-      return thread.kind === "for";
-    case "exitKindBreak":
-      return thread.kind === "handle";
   }
 }
 
@@ -261,7 +254,9 @@ function dispatchOnCall(machine: MachineState, thread: Thread): void {
     case "for":
       return onCallFor(machine, thread);
     case "api":
-      return onCallAPI(machine, thread);
+      throw new Error(
+        "dispatchOnCall: APIThread is a root and must not be dispatched via call event",
+      );
     case "handle":
       throw new Error("dispatchOnCall: handle not implemented");
     case "request":
@@ -308,6 +303,11 @@ function dispatchOnChildDone(
 /**
  * Create a child thread for a given blockId.
  * Dispatches to the appropriate module's create function.
+ *
+ * Boundaries: the child inherits parent's `boundaries` by reference (no
+ * mutation downstream). After dispatch we examine the new thread; if it
+ * is itself a boundary type (agent UserThread / ForThread / HandleThread)
+ * we branch a new map with the relevant key(s) overridden to point at it.
  */
 export function createThread(
   machine: MachineState,
@@ -326,10 +326,30 @@ export function createThread(
     id: createThreadId(),
     parent,
     parentCallId: callId,
-    handlers: parent.handlers,
+    // Copy parent's handlers so child mutations (handle implementation) do
+    // not leak back to the parent's map.
+    handlers: new Map(parent.handlers),
     scopeId,
+    // Share parent's boundaries by reference. Override below if needed.
+    boundaries: parent.boundaries,
   };
 
+  const thread = dispatchCreate(machine, init, block, args);
+
+  const overrides = computeSelfBoundaryOverrides(thread);
+  if (overrides !== null) {
+    thread.boundaries = { ...parent.boundaries, ...overrides };
+  }
+
+  return thread;
+}
+
+function dispatchCreate(
+  machine: MachineState,
+  init: CreateThreadInit,
+  block: import("../ir/types.js").Block,
+  args: Map<string, Value>,
+): Thread {
   switch (block.kind) {
     case "blockUser":
       return createUserThread(machine, init, block.body, args);
@@ -352,4 +372,22 @@ export function createThread(
     case "blockRequest":
       return createRequestThread(machine, init, block.reqId, args);
   }
+}
+
+/**
+ * If `thread` is a boundary type, return the keys of `boundaries` it
+ * should claim. Otherwise return null and the inherited boundaries are
+ * used as-is.
+ */
+function computeSelfBoundaryOverrides(thread: Thread): Partial<Boundaries> | null {
+  if (thread.kind === "user" && thread.block.kind === "blockKindAgent") {
+    return { exitKindReturn: thread };
+  }
+  if (thread.kind === "for") {
+    return { exitKindForBreak: thread, contKindForNext: thread };
+  }
+  if (thread.kind === "handle") {
+    return { exitKindBreak: thread, contKindNext: thread };
+  }
+  return null;
 }

@@ -4,7 +4,7 @@ import { createThreadId } from "../id.js";
 import type { MachineState } from "../machine.js";
 import { createScope } from "../scope.js";
 import type { Value } from "../value.js";
-import type { CallId, ThreadBase } from "./types.js";
+import { EMPTY_BOUNDARIES, type CallId, type RootThreadBase } from "./types.js";
 
 /**
  * Per-delegation root thread managing a single API → CORE delegation.
@@ -15,19 +15,14 @@ import type { CallId, ThreadBase } from "./types.js";
  * 2. Pushes a call event for the target agent block
  * 3. On child completion: emits delegateAck (CORE→API), terminates self
  */
-export type APIThread = ThreadBase & {
+export type APIThread = RootThreadBase & {
   kind: "api";
   delegationId: DelegationId;
 };
 
-export function onCallAPI(_machine: MachineState, _thread: APIThread): void {
-  // APIThread is never dispatched via onCall — it's created directly.
-  // Kept for dispatch table exhaustiveness.
-}
-
 export function onChildDoneAPI(machine: MachineState, thread: APIThread, _callId: CallId, value: Value): void {
   // Emit delegateAck to API
-  machine.outEvents.push({
+  machine.pendingOutEvents.push({
     from: "CORE",
     to: "API",
     kind: "delegateAck",
@@ -42,7 +37,7 @@ export function onChildDoneAPI(machine: MachineState, thread: APIThread, _callId
 
 /**
  * Handle an inbound delegate event from API.
- * Creates a per-delegation APIThread and pushes a call event for the target block.
+ * Creates a per-delegation APIThread and pushes a callBlock event for the target agent.
  */
 export function handleDelegateFromAPI(
   state: MachineState,
@@ -57,7 +52,8 @@ export function handleDelegateFromAPI(
     );
   }
 
-  // Create a per-delegation APIThread
+  // APIThread is the root and never reads variables; it still carries a
+  // scopeId for uniformity (RootThreadBase requires one).
   const apiScope = createScope(state, null);
   const apiThread: APIThread = {
     id: createThreadId(),
@@ -68,20 +64,49 @@ export function handleDelegateFromAPI(
     handlers: new Map(),
     children: new Map(),
     status: "running",
+    boundaries: EMPTY_BOUNDARIES,
     delegationId,
   };
   state.threads.set(apiThread.id, apiThread);
   state.apiDelegations.set(delegationId, apiThread);
 
-  // Push call event — child will be the target agent
+  // Top-level agent call — runner allocates a fresh isolated scope.
   state.queue.push({
-    kind: "call",
+    kind: "callBlock",
     parent: apiThread,
     callId: 0,
     blockId,
     args,
-    scopeId: apiThread.scopeId,
   });
+}
+
+/**
+ * Handle an inbound terminate event from API.
+ * Cancels the APIThread's children and emits terminateAck when done.
+ */
+export function handleTerminateFromAPI(
+  state: MachineState,
+  delegationId: DelegationId,
+): void {
+  const apiThread = state.apiDelegations.get(delegationId);
+  if (!apiThread || apiThread.status === "cancelling") return;
+
+  apiThread.status = "cancelling";
+  if (apiThread.children.size === 0) {
+    // No children — finish immediately (import avoidance: inline terminateAck emit)
+    state.pendingOutEvents.push({
+      from: "CORE",
+      to: "API",
+      kind: "terminateAck",
+      delegationId: apiThread.delegationId,
+    });
+    state.apiDelegations.delete(apiThread.delegationId);
+    state.threads.delete(apiThread.id);
+  } else {
+    for (const child of apiThread.children.values()) {
+      state.queue.push({ kind: "cancel", target: child });
+    }
+  }
 }
 
 function findBlockByQualifiedName(

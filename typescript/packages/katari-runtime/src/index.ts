@@ -4,7 +4,8 @@ export { createMachine, applyEvent } from "./machine/machine.js";
 export { processQueue } from "./machine/runner.js";
 export type {
   Thread,
-  ThreadBase,
+  RootThreadBase,
+  ChildThreadBase,
   CallId,
   QueueEvent,
   CreateThreadInit,

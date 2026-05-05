@@ -6,56 +6,66 @@ Katari 言語のランタイム実装。
 
 ## 全体構成
 
-katari-runtime は 2 つのサブシステムから構成される。
+katari-runtime は 2 つのサブシステムで構成される。
 
 ### 1. Katari Core Runtime
 
-Katari IR の実行エンジン。HTTP API でエージェントの起動・状態照会を受け付け、State Machine が IR を解釈して実行する。
+Katari IR を解釈実行する State Machine。HTTP / 外部からのイベントを受け取り、IR 上の block を Thread として走らせる。
 
-### 2. Sidecar JS Runtime
+### 2. Sidecar JS Runtime (将来実装)
 
-FFI 機構。`.ktr` ファイルと同名の `.ts` / `.js` ファイルに定義した関数を Katari から呼び出せる。
+FFI 機構。`.ktr` ファイルと同名の `.ts` / `.js` に書いた関数を Katari の `ext` 経由で呼び出せる。
 
----
-
-## FFI (Sidecar) の方式
-
-**Dynamic import 方式** を採用する。
-
-- `katari-cli` が esbuild を使って sidecar ファイル群を 1 つの `.mjs` に bundle
-- runtime が初回 ext call 時に `await import(bundlePath)` で同プロセスに読み込む
-- エクスポート形式: `export default { "module.func": fn, ... }` の qualified name マップ
-
-IPC なし。runtime が Node.js である以上、同プロセス import が最もシンプルかつ高速。
-
-### バンドルの責務
-
-```
-katari apply
-  → Haskell compiler (pure) → IR JSON + ext 参照一覧
-  → katari-cli が esbuild API を呼んで bundle.mjs を生成
-  → runtime API に POST /apply { irJson, bundleJs } で送付
-```
-
-- `katari-compiler` は pure のまま (file IO なし)
-- bundler は katari-cli に同梱の esbuild
-
-### katari FFI ライブラリ
-
-sidecar JS 内で `import { call } from "katari"` として使える薄い wrapper。
-runtime のベース URL を受け取り、Katari エージェントを呼び出せる。
-→ `packages/katari-ffi` として別途実装予定。
+`katari-cli` が esbuild で sidecar 群を 1 つの `.mjs` にバンドルし、runtime が初回 ext 呼び出しで `await import(bundlePath)` する想定。本パッケージにはまだ含まれない。
 
 ---
 
-## Core Runtime のレイヤー構成
+## 現状の実装範囲
+
+- IR JSON の型 mirror ([`src/ir/types.ts`](src/ir/types.ts))
+- State Machine 本体 ([`src/machine/`](src/machine/))
+  - 全 Thread 種別の create / onCall / onChildDone
+  - Cancellation 伝播 (cancel / cancelAck / return / done)
+  - FFI delegate の往復 (CORE↔FFI)
+  - API delegate の往復 (API↔CORE)
+  - Lexical scope GC
+- prim 一通り (算術 / 比較 / 論理 / `tuple_get` / `get_field` / `to_string` / `concat`)
+
+**未実装**: handle / req / handler 系の dispatch、`statementCont` (= `next`)、`statementBindPattern` (let 分解)、API/HTTP レイヤー、永続化 (DB)、sidecar bundling。HTTP API レイヤと DB は別タスクで追加予定。
+
+---
+
+## ディレクトリ構成
 
 ```
-API Layer        HTTP エンドポイント (Hono)
-     ↓
-State Machine    同期的な実行エンジン
-     ↓
-DB Layer         正規化 DB への永続化 (postgres)
+src/
+  index.ts                         公開 API (型と関数を再エクスポート)
+
+  ir/
+    types.ts                       Haskell IR の TypeScript mirror
+
+  machine/
+    machine.ts                     MachineState 型 + applyEvent
+    runner.ts                      processQueue (メインループ) と createThread
+    events.ts                      MachineEvent (CORE↔API/FFI 境界イベント)
+    id.ts                          ThreadId / ScopeId / DelegationId / EscalationId
+    scope.ts                       Scope, MemoryCell 相当の値ストレージ + GC
+    value.ts                       Value 型と LiteralValue 変換
+
+    thread/
+      types.ts                     RootThreadBase / ChildThreadBase / QueueEvent / Thread
+      index.ts                     Thread 種別の再エクスポート
+      api.ts                       APIThread (root, API delegation を root として保持)
+      user.ts                      UserThread (BlockUser; statement 実行)
+      prim.ts                      PrimThread (BlockPrim)
+      ctor.ts                      CtorThread (BlockCtor)
+      external.ts                  ExternalThread (BlockExternal; FFI delegation)
+      match.ts                     MatchThread (BlockMatch)
+      for.ts                       ForThread (BlockFor)
+      handle.ts                    HandleThread (BlockHandle; placeholder)
+      tuple.ts                     TupleThread (BlockTuple)
+      array.ts                     ArrayThread (BlockArray)
+      request.ts                   RequestThread (BlockRequest; placeholder)
 ```
 
 ---
@@ -64,272 +74,166 @@ DB Layer         正規化 DB への永続化 (postgres)
 
 ### 基本方針
 
-- **同期的**: State Machine 自体はシングルスレッドの同期ループ
-- **非同期点は 2 つのみ**: 外部 API 入力 / Sidecar 完了通知
-- **仮想並列**: 実行可能な全 Thread を一斉に step し、quiescence まで回す
-- **純粋関数**: State Machine 実行中は DB に触らない。`applyEvent` は純粋な計算として `(MachineState, Event) → (MachineState, DbDiff, Log[])` を返す。DB 書き込みは API 層が差分を受け取って行う (Functional Core / Imperative Shell)。
+- **同期ループ**: `processQueue` は内部 `QueueEvent` を順次処理し、queue が空になるまで回す。
+- **非同期点は外部境界のみ**: API → CORE (`delegate` / `terminate`), FFI → CORE (`delegateAck` / `terminateAck`)。これらは `applyEvent` の inbound として届く。
+- **MachineState は in-place mutation**: 関数型分離 (Functional Core / Imperative Shell) は将来検討。今は thread 関数群が `MachineState` を直接書き換える。
+- **outbound buffer**: `MachineState.pendingOutEvents` は `applyEvent` 1 回ごとにリセットされる transient 配列。thread 関数群が CORE→API / CORE→FFI の発信イベントをここに push し、`applyEvent` が末尾でまとめて返す。
 
-### イベント
+### 主要な型
 
-```
-Invoke(irModuleId, qualifiedName, args)  # agent 起動 (globalThread を親にして Thread 作成)
-FillValue(threadId, value)               # ext call 完了 / 外部入力
-CancelThread(threadId)                   # Thread ツリーをキャンセル
-LoadIrModule(ir)                         # IR apply (将来は global thread も起動)
-```
+#### MachineEvent (CORE 境界)
 
-Session (誰が何を頼んだか) は API 層が管理する。State Machine はイベントを受けて Thread を操作するだけ。
+`{ kind, from, to, ...payload }` の形。`from` / `to` は `"API" | "CORE" | "FFI"` のいずれか。
 
-### 静的概念 (IR から決まる)
+| kind | from→to | 用途 |
+|---|---|---|
+| `delegate` | API→CORE | エージェント起動依頼 |
+| `delegateAck` | CORE→API | 起動結果返却 |
+| `terminate` | API→CORE | エージェント停止依頼 |
+| `terminateAck` | CORE→API | 停止完了 |
+| `delegate` | CORE→FFI | 外部関数呼び出し |
+| `delegateAck` | FFI→CORE | 外部関数結果 |
+| `terminate` | CORE→FFI | 外部関数キャンセル |
+| `terminateAck` | FFI→CORE | 外部関数キャンセル完了 |
+| `escalate` / `escalateAck` | (将来) | request 系拡張 |
 
-| 概念 | 説明 |
+#### QueueEvent (内部キュー)
+
+`processQueue` が回す内部イベント。Thread 木の構築・進行・伝播を表す。
+
+| kind | 役割 |
 |---|---|
-| IrModuleId | 適用済み IR module の識別子 (apply 時に割り当て) |
-| BlockId | IR 内の callable 識別子 (module 内でユニーク) |
-| **BlockRef** | `(IrModuleId, BlockId)` — runtime 全体でユニークな block 参照 |
-| VarId | IR の値スロット識別子 (per-occurrence) |
-| ReqId | Request handler 識別子 |
-| CtorId | Data constructor 識別子 |
+| `callBlock` | top-level callable (top-level agent / prim / ctor / external / request) を子として起動。新 scope の親 = `null` (孤立)。 |
+| `callInline` | 構造的 block 内部からの inline 子 dispatch。新 scope の親 = caller の現 scope。 |
+| `callValue` | closure 値経由の呼び出し。新 scope の親 = closure の captured scope。 |
+| `done` | 子完了通知 (値あり) |
+| `return` | 大域脱出 (`return` / `break` / `for_break`) を**境界 thread に直接届ける** (target 指定)。境界が子をキャンセルし `done` に変換 |
+| `cancel` | 子の停止要求 (再帰伝播) |
+| `cancelAck` | 子からの停止完了通知 |
 
-`BlockId` は IR module 内でしかユニークでないため、Thread・HandlerEntry・Closure が block を参照する場合は常に `BlockRef` を使う。
-
-### 動的概念 (実行時に生成)
+3 種類の call イベントは「新 scope の親」だけが違う。**全 thread が自分の scope を必ず 1 つ作る**ので、block の種類を見て scope の作り方を変える分岐は runtime に存在しない。
 
 #### Thread
 
-Block の実体化。以下を保持する。
-
-```
-ThreadId → Thread
-  block           : BlockRef   # 実行中の block
-  scopeId         : ScopeId    # 字句的 scope (変数参照の起点)
-  parentThreadId  : ThreadId?  # 実行ツリー上の親 (動的)
-  sessionId       : SessionId  # 所属 session
-  handlers        : Map<ReqId, HandlerEntry>
-  pc              : Int         # 実行済み statement の個数
-  status          : Running
-                 | WaitingFor(Set<MemoryKey>)
-                 | Done
-                 | Cancelled
+```ts
+type Thread = APIThread | UserThread | PrimThread | CtorThread | ExternalThread
+            | MatchThread | ForThread | HandleThread | TupleThread | ArrayThread
+            | RequestThread;
 ```
 
-`scopeId` と `parentThreadId` は通常一致するが、**クロージャ呼び出し時は乖離する**。
-クロージャ body の Thread の `parentThreadId` は呼び出し元だが、`scopeId` の親は
-closure が作られた時点の scope (= `Closure.capturedScopeId` を親とした新 scope)。
+`ThreadBase` は root 用 (`RootThreadBase`, `parent: null`) と child 用 (`ChildThreadBase`, `parent: Thread`) の 2 形に分かれる。`APIThread` のみ root、ほかは child。これにより `parent! / parentCallId!` の non-null assert が消える。
 
-#### HandlerEntry
-
-handler は実行時に **登録した `where` block の scope** で動く必要がある (`var s` がその scope に属するため)。
-
-```
-HandlerEntry
-  block   : BlockRef
-  scopeId : ScopeId  # handler を登録した where-block の scope
-```
-
-Thread 作成時に親の `handlers` map を引き継ぎ、自身のブロックが持つ handler を上書き merge する。
-各 HandlerEntry は登録元の `scopeId` を保持したまま伝播するため、
-inner handler が outer handler を shadow しても outer の `scopeId` は失われない。
-
-#### Scope
-
-変数の束縛環境を表す薄い概念。実際の値は MemoryCell が保持する。
-
-```
-ScopeId → Scope
-  parentId : ScopeId?
-```
-
-#### MemoryCell
-
-変数の実態。`(ScopeId, VarId, Version)` で特定。一度 fill されたら immutable。
-
-```
-MemoryKey = (ScopeId, VarId, Version)
-
-MemoryCell
-  key     : MemoryKey
-  status  : Wait | Filled(Value)
-  waiters : Set<ThreadId>   # fill 時に起こす Thread
-```
-
-#### Closure
-
-`MakeClosure` で生成。Block + 捕捉 Scope の組。
-
-```
-ClosureId → Closure
-  block           : BlockRef
-  capturedScopeId : ScopeId  # closure 作成時点の字句的 scope
-```
-
-closure body の Thread を作る際は、`capturedScopeId` を親とした新しい Scope を作成し、
-それをその Thread の `scopeId` とする。
-
-### Version の意味
-
-| 文脈 | Version |
+| 種別 | 概要 |
 |---|---|
-| 通常の `let` | 常に 0 |
-| `where` block の `var s` | req handler の発火順 (0 = 初期値) |
-| `for` block の `var s` | イテレーション index (0 = init, k+1 = k 番目の next) |
+| `APIThread` | 1 delegation = 1 thread。子の done で `delegateAck` を outbound、終了。 |
+| `UserThread` | `BlockUser` を実行。`pc` で statement を進める。`statementCall` 時は callTarget の種類で `callBlock` / `callValue` を発行。 |
+| `PrimThread` | `BlockPrim`。onCall で計算して即 done。 |
+| `CtorThread` | `BlockCtor`。onCall で `tagged` 値を作って即 done。 |
+| `ExternalThread` | `BlockExternal`。onCall で `delegate` を FFI に outbound。`delegateAck` 受信で done。 |
+| `MatchThread` | `BlockMatch`。subject を評価し pattern bind を thread の scope に書き、armBody を `callInline`。 |
+| `ForThread` | `BlockFor`。stateInits を scope に置き、要素ごとに body を `callInline`。`for_break` の境界 (`boundaries.exitKindForBreak`)。 |
+| `HandleThread` | `BlockHandle`。`break` / `next` の境界 (`boundaries.exitKindBreak` / `contKindNext`)。dispatch は **未実装**。 |
+| `TupleThread` / `ArrayThread` | 各要素 block を `callInline`。並列 / 逐次を block 側 flag で切替。 |
+| `RequestThread` | `BlockRequest`。**未実装**。 |
 
-`for` は全要素を並列に Thread 化するが、各 version は前の version が fill されないと fill できないため、書き込み順序の整合が保たれる。
+### Boundaries (大域脱出の境界)
 
-### Value 型
+5 種類の大域脱出 (`return` / `for_break` / `break` / `for_next` / `next`) は、それぞれ対応する境界 thread に直接届けられる。各 thread は `boundaries` field に各 IR kind → 境界 thread の対応を持つ:
 
-```
-Value =
-  | { kind: "number",  value: number }
-  | { kind: "string",  value: string }
-  | { kind: "boolean", value: boolean }
-  | { kind: "null" }
-  | { kind: "tuple",   elements: Value[] }
-  | { kind: "tagged",  ctorId: CtorId, fields: Record<string, Value> }
-  | { kind: "closure", closureId: ClosureId }
-```
-
-### MachineState
-
-```
-MachineState
-  irModules     : Map<IrModuleId, IRModule>   # read-only (apply 時に追加)
-  globalThreads : Map<IrModuleId, ThreadId>   # IR version ごとの global thread (現在は常に空)
-  threads       : Map<ThreadId, Thread>
-  scopes        : Map<ScopeId, Scope>
-  cells         : Map<MemoryKey, MemoryCell>
-  closures      : Map<ClosureId, Closure>
+```ts
+type Boundaries = {
+  exitKindReturn: Thread | null;     // 直近の agent UserThread
+  exitKindForBreak: Thread | null;   // 直近の ForThread
+  exitKindBreak: Thread | null;      // 直近の HandleThread
+  contKindForNext: Thread | null;    // 直近の ForThread (cont 用; runtime 未実装)
+  contKindNext: Thread | null;       // 直近の HandleThread (cont 用; runtime 未実装)
+};
 ```
 
-#### Global Thread (将来の拡張)
+- 子 thread は親の `boundaries` を **参照共有** で継承する (どの thread も `boundaries` を直接 mutate しない)。
+- 自身が境界となる thread は spread で新オブジェクトを作って該当 key を self に上書きする:
+  - UserThread (`blockKindAgent`) → `exitKindReturn`
+  - ForThread → `exitKindForBreak` + `contKindForNext`
+  - HandleThread → `exitKindBreak` + `contKindNext`
+- APIThread は root で agent ではないため `boundaries` の全 key が `null` (= 直下の entry agent UserThread が `exitKindReturn` を自分自身に上書き)。
 
-Katari のトップレベルに `req` handler / `var` を書けるようにする拡張のフック。
-IR version ごとに 1 つの **global thread** を自動起動し、全 agent の Thread はその子として生まれる。
-これにより global な `var` 状態・handler が全 agent に自動継承される。
+### Cancellation セマンティクス
 
-現在は `globalThreads` は空 Map で、`Invoke` は親なし Thread を作る。
-将来は `Invoke` が `globalThreads[irModuleId]` を親に指定するだけで拡張が完了する。
+`statementExit` (大域脱出) は `boundaries[exitKind]` で境界 thread を引き、その thread を `target` にした `return` キューイベントを発行する。境界 thread は `return` 受信で `cancelling` になり、自身の子に `cancel` を伝播する。各子は次のいずれかで応える:
 
-global thread 自体は `BlockAgentEntryWithHandlers` 相当で body は空 (handler 登録のみ)。
-Done にならず `GlobalWaiting` 状態で待機し続ける (`ThreadStatus` の将来追加 variant)。
+- `cancelAck` (キャンセルが完了した leaf) — 親が `children.delete` して、`children` が空なら `finishCancelling`
+- `done` / `return` — `cancelling` 状態の親はこれらを受けても新規 dispatch せず `checkAllChildrenDone` を呼ぶだけ
 
-### applyEvent (pure)
+`finishCancelling` で:
 
-```
-applyEvent(state, event) → { nextState, dbDiff, logs }
+- `pendingReturn` が立っていれば (= `return` event を受けた境界) `done` を親に出す。`then` ブロックは経由されない。
+- 立っていなければ純粋なキャンセル (= 親からのカスケード) なので `cancelAck` を親に出す。
+- 自身が root (APIThread) なら `terminateAck` を CORE→API に発信。
 
-  1. event を適用 (Thread 作成 / MemoryCell fill など)
-  2. runUntilQuiescence:
-       runnable な Thread を全て step
-       fill が発生したら waitingFor Thread を起こして再度 step
-       変化がなくなったら終了
-  3. nextState / dbDiff / logs を返す  ← DB アクセスなし
-```
+親の `return` event の `target` が **既に `cancelling`** だった場合 (親からのキャンセルが先行した race)、`return` は破棄される (値はロスト)。これは「親に取り消されている境界に脱出値を返しても親は受け取らない」ためで、最終的には `cancelAck` が親に出る。
 
-API 層が `dbDiff` を受け取って DB に書き込む。
+### Closure と scope
+
+- `statementMakeClosure` は `{ kind: "closure", blockId, scopeId: thread.scopeId }` を作る (現スコープを capture)。
+- `statementCall callTargetValue` で closure を呼ぶと `callValue` event を発行し、`capturedScopeId` をその event に乗せる。
+- `processQueue` が `callValue` を見たら `createScope(machine, capturedScopeId).id` で新 scope を作り、子 thread に持たせる。これにより closure の captured 変数が子から見える。
+
+### FFI 終端契約
+
+- 通常: CORE→FFI `delegate` → FFI→CORE `delegateAck` → 親に done。
+- キャンセル: CORE→FFI `terminate` → FFI→CORE `terminateAck` → 親に cancelAck。
+- **緩和**: キャンセル中に FFI が `delegateAck` を返してきても、runtime は値を捨て即座に `cancelAck` を親に伝える。これにより「terminate を受けたが既に flight していた delegateAck だけ返って終了」「terminateAck を返さない FFI 実装」でも runtime はハングしない。
+- 後から `terminateAck` が届いた場合は `state.delegations` が既に空なので no-op。
+
+### Scope GC
+
+`applyEvent` の末尾で `collectGarbage(state)` が走る。
+
+- ルート: 全生存 thread の `scopeId`
+- トレース: scope の親チェーンと、scope 内の値が closure / tuple / array / tagged で持つ `scopeId` を辿る
+- スイープ: 到達不能 scope を `state.scopes` から削除
 
 ---
 
-## モジュール構成 (src/)
+## IR 入力の取り扱い
 
-```
-src/
-  ir/
-    types.ts          Haskell IR の TypeScript mirror
-                      (BlockId, VarId, Block, Statement, MatchPattern, ...)
+IR は Haskell `Katari.IR.IRModule` を JSON にしたもの。JSON の主要箇所:
 
-  machine/
-    value.ts          Value 型定義
-    types.ts          Thread, Scope, MemoryCell, Closure, MachineState 型定義
-    memory.ts         MemoryStore: fill / wait / waiter 管理
-    scope.ts          ScopeStore: scope 作成・親チェーン参照・var lookup
-    thread.ts         Thread 作成・PC advance・状態遷移
-    evaluate.ts       Statement 1 個を実行する (MachineState を直接変更)
-    scheduler.ts      runnable Thread を全て step → quiescence まで回す
-    machine.ts        MachineState + イベントハンドラ (top-level)
+- `blocks: Record<BlockId, Block>` — block 集合
+- `entries: Record<"module.name", BlockId>` — FFI 境界の名前解決テーブル
+  - **キーは `module.name` 形式の文字列** (Haskell 側で `instance ToJSONKey QualifiedName` をカスタム実装してこの形式に固定済み)
+  - `module` が空のときはキーは `name` のみ
+- `nameTable` — debug 用
+- `metadata.schemaVersion` — IR のバージョン
 
-  prim/
-    index.ts          Map<string, (...args: Value[]) => Value>
-                      BlockPrim.name とそのまま一致するキー
-
-  sidecar/
-    loader.ts         dynamic import & キャッシュ
-    caller.ts         ext call → sidecar 監視 Thread 作成
-
-  db/
-    schema.ts         postgres テーブル定義 (マイグレーション SQL)
-    queries.ts        CRUD クエリ
-
-  api/
-    routes.ts         POST /invoke, POST /apply, GET /status/:id
-    server.ts         Hono server セットアップ
-
-  index.ts            エントリポイント
-```
+`handleDelegateFromAPI` ([thread/api.ts](src/machine/thread/api.ts)) はこの `entries` を `state.irModule.entries[qualifiedName]` で直接 lookup する。
 
 ---
 
-## DB スキーマ (正規化)
+## 検証
 
-```sql
-ir_modules (
-  id           SERIAL PRIMARY KEY,
-  name         TEXT NOT NULL,
-  version_hash TEXT NOT NULL UNIQUE,
-  ir_json      JSONB NOT NULL,
-  bundle_path  TEXT,
-  created_at   TIMESTAMPTZ DEFAULT now()
-)
-
-sessions (
-  id             UUID PRIMARY KEY,
-  ir_module_id   INT REFERENCES ir_modules,
-  qualified_name TEXT NOT NULL,
-  args_json      JSONB,
-  status         TEXT NOT NULL,  -- 'running' | 'done' | 'cancelled'
-  result_json    JSONB,
-  created_at     TIMESTAMPTZ DEFAULT now(),
-  completed_at   TIMESTAMPTZ
-)
-
-threads (
-  id               UUID PRIMARY KEY,
-  session_id       UUID REFERENCES sessions,
-  parent_thread_id UUID REFERENCES threads,   -- 実行ツリー上の親 (動的)
-  block_id         TEXT NOT NULL,
-  scope_id         UUID REFERENCES scopes,    -- 字句的 scope (変数参照の起点)
-  pc               INT NOT NULL DEFAULT 0,
-  status           TEXT NOT NULL,  -- 'running' | 'waiting' | 'done' | 'cancelled'
-  handlers         JSONB NOT NULL DEFAULT '{}'
-  -- handlers の要素は { blockId: string, scopeId: string } の map
-)
-
-scopes (
-  id        UUID PRIMARY KEY,
-  parent_id UUID REFERENCES scopes
-)
-
-memory_cells (
-  scope_id   UUID    NOT NULL REFERENCES scopes,
-  var_id     TEXT    NOT NULL,
-  version    INT     NOT NULL DEFAULT 0,
-  status     TEXT    NOT NULL DEFAULT 'wait',  -- 'wait' | 'filled'
-  value_json JSONB,
-  PRIMARY KEY (scope_id, var_id, version)
-)
-
-closures (
-  id                UUID PRIMARY KEY,
-  block_id          TEXT NOT NULL,
-  captured_scope_id UUID REFERENCES scopes  -- closure 作成時点の字句的 scope
-)
+```sh
+pnpm install
+pnpm -r run build      # tsc --noEmit 相当
 ```
+
+Haskell 側 IR の roundtrip は `stack test katari-compiler` でカバー (`Katari.IRSpec`)。entries の string キー化は同 spec の golden test で固定。
+
+---
+
+## 公開 API
+
+`index.ts` から以下を re-export:
+
+- 関数: `createMachine`, `applyEvent`, `processQueue`, `collectGarbage`
+- 型: `MachineState`, `Thread` ファミリー, `Value`, `Scope`, `MachineEvent` 系, `ThreadId` / `ScopeId` / `DelegationId` / `EscalationId`
 
 ---
 
 ## 未決事項
 
-- DB の persist タイミング: event ごとに全差分を書くか、quiescence 後にまとめて書くか
-- `katari-ffi` パッケージを同 workspace に含めるか
-- sidecar bundle のストレージ: DB blob か、ファイルシステムか
-- prim 名の Haskell / TS 間の同期方法 (共有 const か、テストで検出か)
+- DB 永続化のタイミング (event ごと / quiescence 後一括)
+- sidecar bundle のストレージ (DB blob / FS)
+- prim 名の Haskell / TS 同期方法 (共有 const か検出テストか)
+- handle / req / handler の dispatch 設計 (effect handler セマンティクスを含めて別タスク)
+- `return` / `break` / `next` を言語レベルで残すかどうか — 構文と合わせて議論中

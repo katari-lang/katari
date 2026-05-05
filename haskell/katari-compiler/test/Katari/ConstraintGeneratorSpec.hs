@@ -373,30 +373,23 @@ whereBlocks = describe "handle blocks" $ do
               _ -> False
         )
 
-  it "handler implicit completion: body tail flows to whole-block tv (implicit break)" $ do
-    -- A handler body that falls through without explicit 'next' / 'break'
-    -- is treated as an implicit 'break' (Koka-style algebraic requests). Its
-    -- tail value flows to the handle-containing block's whole type, NOT to
-    -- the handler's declared return type.
-    (cg, errors) <-
+  it "handler body must end with break/next (never type) — explicit break passes" $ do
+    -- A handler body's inferred type is constrained to 'never'. Falling
+    -- through to a value would mean returning past the request handler
+    -- frame with no continuation site, which is a type error. An explicit
+    -- @break@ produces type 'never' and satisfies the constraint.
+    (_cg, errors) <-
       runOne $
         mconcat
           [ "req fetch() -> string\n",
             "agent main() -> string {\n",
             "  handle {\n",
-            "    req fetch() -> string { \"implicit\" }\n",
+            "    req fetch() -> string { break \"explicit\"; }\n",
             "  }\n",
             "  fetch()\n",
             "}\n"
           ]
     errors `shouldBe` []
-    cg
-      `shouldSatisfy` hasTypeConstraint
-        ( \l r ->
-            l == SemanticTypeLiteralString "implicit" && case r of
-              SemanticTypeVariable _ -> True
-              _ -> False
-        )
 
   it "handle block emits a handler-request-bound constraint (e4 <: e1)" $ do
     -- In addition to the discharge constraint (e3 <: e1 ∪ e2), a handle

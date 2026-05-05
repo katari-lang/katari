@@ -1,13 +1,13 @@
 import type { CtorId } from "../../ir/types.js";
 import type { MachineState } from "../machine.js";
 import type { Value } from "../value.js";
-import type { CreateThreadInit, ThreadBase } from "./types.js";
+import type { ChildThreadBase, CreateThreadInit } from "./types.js";
 
 /**
  * Executes a BlockCtor (data constructor application).
  * Completes immediately in onCall: constructs a tagged value from arguments.
  */
-export type CtorThread = ThreadBase & {
+export type CtorThread = ChildThreadBase & {
   kind: "ctor";
   ctorId: CtorId;
   args: Map<string, Value>;
@@ -22,7 +22,6 @@ export function createCtorThread(
   const thread: CtorThread = {
     ...init,
     kind: "ctor",
-    scopeId: init.parent.scopeId,
     children: new Map(),
     status: "running",
     ctorId,
@@ -35,8 +34,8 @@ export function createCtorThread(
 export function onCallCtor(machine: MachineState, thread: CtorThread): void {
   machine.queue.push({
     kind: "done",
-    parent: thread.parent!,
-    callId: thread.parentCallId!,
+    parent: thread.parent,
+    callId: thread.parentCallId,
     value: {
       kind: "tagged",
       ctorId: thread.ctorId,

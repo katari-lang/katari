@@ -70,15 +70,16 @@ where
 
 import Data.Aeson
   ( FromJSON (..),
-    FromJSONKey,
+    FromJSONKey (..),
     Options (..),
     SumEncoding (..),
     ToJSON (..),
-    ToJSONKey,
+    ToJSONKey (..),
     defaultOptions,
     genericParseJSON,
     genericToJSON,
   )
+import Data.Aeson.Types (FromJSONKeyFunction (..), toJSONKeyText)
 import Data.Char (toLower)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
@@ -138,14 +139,31 @@ instance ToJSON QualifiedName where
 instance FromJSON QualifiedName where
   parseJSON = genericParseJSON irOptions
 
-instance ToJSONKey QualifiedName
+-- | Render @{module_, name}@ as a string key for use as a JSON object key.
+-- Aeson's default 'ToJSONKey' for record types encodes the map as a JSON
+-- array of @[key, value]@ pairs, which the runtime cannot index directly.
+-- We instead emit a textual @"module.name"@ key (or @"name"@ when the
+-- module is empty) so the runtime can do plain object lookups.
+instance ToJSONKey QualifiedName where
+  toJSONKey = toJSONKeyText renderQualifiedName
 
-instance FromJSONKey QualifiedName
+instance FromJSONKey QualifiedName where
+  fromJSONKey = FromJSONKeyTextParser (pure . parseQualifiedName)
 
 renderQualifiedName :: QualifiedName -> Text
 renderQualifiedName q
   | T.null q.module_ = q.name
   | otherwise = q.module_ <> "." <> q.name
+
+-- | Inverse of 'renderQualifiedName'. Splits at the LAST @"."@: a name
+-- without a dot becomes @QualifiedName "" name@. A name with one or more
+-- dots takes everything after the final dot as the bare name.
+parseQualifiedName :: Text -> QualifiedName
+parseQualifiedName t =
+  let (modulePart, namePart) = T.breakOnEnd "." t
+   in if T.null modulePart
+        then QualifiedName "" namePart
+        else QualifiedName (T.dropEnd 1 modulePart) namePart
 
 -- | Identifier of an external (sidecar) callable. Wraps a 'QualifiedName'
 -- under a distinct type so the runtime layer can evolve its lookup

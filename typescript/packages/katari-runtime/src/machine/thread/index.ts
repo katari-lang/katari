@@ -1,10 +1,14 @@
 export type {
-  ThreadBase,
+  RootThreadBase,
+  ChildThreadBase,
   Thread,
   CallId,
   QueueEvent,
   CreateThreadInit,
+  Boundaries,
+  BoundaryKey,
 } from "./types.js";
+export { EMPTY_BOUNDARIES } from "./types.js";
 export type { APIThread } from "./api.js";
 export type { UserThread } from "./user.js";
 export type { PrimThread } from "./prim.js";
