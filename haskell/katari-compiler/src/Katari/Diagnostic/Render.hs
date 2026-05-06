@@ -17,6 +17,7 @@ import Data.Text (Text)
 import Data.Text qualified as Text
 import Katari.Diagnostic (Diagnostic (..), DiagnosticNote (..), Severity (..))
 import Katari.SourceSpan (Position (..), SourceSpan (..))
+import Safe (atMay)
 
 -- | Render a diagnostic with an inline source snippet when the file is
 -- available in the source map. Falls back to 'renderDiagnosticPlain' if
@@ -87,7 +88,7 @@ renderSnippet sources sourceSpan = do
   source <- Map.lookup sourceSpan.filePath sources
   let sourceLines = Text.lines source
       lineIndex = sourceSpan.start.line - 1
-      line = fromMaybe "" (sourceLines !? lineIndex)
+      line = fromMaybe "" (sourceLines `atMay` lineIndex)
       lineNumberText = Text.pack (show sourceSpan.start.line)
       padding = Text.replicate (Text.length lineNumberText) " "
       startCol = sourceSpan.start.column - 1
@@ -107,9 +108,3 @@ renderSnippet sources sourceSpan = do
       <> padding
       <> " | "
       <> underline
-
--- | Safe list index.
-(!?) :: [a] -> Int -> Maybe a
-[] !? _ = Nothing
-(x : _) !? 0 = Just x
-(_ : rest) !? n = rest !? (n - 1)

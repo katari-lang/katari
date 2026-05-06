@@ -37,7 +37,6 @@ module Katari.Typechecker.Solver.Substitution
 where
 
 import Data.Functor.Identity (Identity (..))
-import Data.List (nub)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (mapMaybe)
@@ -266,8 +265,9 @@ collectFinalSubstitutions constraints =
    in Map.map pickFromBounds bounds
   where
     pickFromBounds (Bounds lowers uppers) =
-      let solvedLowers = nub (filter containsNoTypeVars ((.boundType) <$> lowers))
-          solvedUppers = nub (filter containsNoTypeVars ((.boundType) <$> uppers))
+      let dedupConcrete = Set.toAscList . Set.fromList . filter containsNoTypeVars . map (.boundType)
+          solvedLowers = dedupConcrete lowers
+          solvedUppers = dedupConcrete uppers
        in case solvedLowers of
             -- No concrete lower bound: pin to the principal upper bound
             -- (intersection of all known upper bounds) if any. With a
