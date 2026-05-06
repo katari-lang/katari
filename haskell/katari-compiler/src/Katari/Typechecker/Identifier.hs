@@ -46,7 +46,7 @@ where
 
 import Control.Monad (foldM, when)
 import Control.Monad.State.Strict (State, get, gets, modify, put, runState)
-import Data.Foldable (foldl')
+import Data.Foldable (foldl', for_)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (catMaybes, isJust)
@@ -65,6 +65,7 @@ import Katari.Id
   )
 import Katari.Internal qualified as Internal
 import Katari.SourceSpan (HasSourceSpan (..), SourceSpan (..))
+import Katari.Typechecker.ImportGraph (findImportCycles)
 
 -- ---------------------------------------------------------------------------
 -- Identified GADT
@@ -282,6 +283,9 @@ data IdentifierError where
   ErrorImportNameNotFound :: SourceSpan -> Text -> Text -> IdentifierError
   -- | The module referenced by @ImportModule@ / @ImportNames@ does not exist.
   ErrorImportModuleNotFound :: SourceSpan -> Text -> IdentifierError
+  -- | An import cycle was detected. The list contains every module name in the
+  -- cycle. The diagnostic span points at the first module in the list.
+  ErrorImportCycle :: SourceSpan -> [Text] -> IdentifierError
   -- | A name appears in @req@ handler position but does not name a @req@
   -- declaration (or names nothing at all).
   ErrorNotARequest :: SourceSpan -> Text -> IdentifierError
@@ -308,6 +312,7 @@ instance HasSourceSpan IdentifierError where
     ErrorNotAModule sourceSpan _ -> sourceSpan
     ErrorImportNameNotFound sourceSpan _ _ -> sourceSpan
     ErrorImportModuleNotFound sourceSpan _ -> sourceSpan
+    ErrorImportCycle sourceSpan _ -> sourceSpan
     ErrorNotARequest sourceSpan _ -> sourceSpan
     ErrorNotAConstructor sourceSpan _ -> sourceSpan
     ErrorMissingExternalAgentAnnotation sourceSpan _ -> sourceSpan
@@ -359,6 +364,11 @@ toDiagnostic = \case
       "K0107"
       ("import: module '" <> moduleName <> "' not found")
       sourceSpan
+  ErrorImportCycle sourceSpan modules ->
+    let rendered = case modules of
+          (m : _) -> T.intercalate " → " (modules <> [m])
+          [] -> ""
+     in diagnosticError "K0110" ("import cycle: " <> rendered) sourceSpan
   ErrorNotARequest sourceSpan name ->
     diagnosticError
       "K0108"
@@ -715,6 +725,22 @@ identifiedNameRef resolution nameRef =
 
 labelRef :: NameRef Parsed LabelRef -> NameRef Identified LabelRef
 labelRef = identifiedNameRef ()
+
+-- ---------------------------------------------------------------------------
+-- Phase 0: import cycle reporting
+-- ---------------------------------------------------------------------------
+
+-- | Emit an 'ErrorImportCycle' for one cycle returned by 'findImportCycles'.
+-- The diagnostic span is taken from the first module in the cycle (every
+-- name in the cycle is guaranteed to be present in @moduleMap@ because
+-- 'findImportCycles' constructs the graph from that same map).
+emitImportCycleError :: Map Text (Module Parsed) -> [Text] -> Identifier ()
+emitImportCycleError moduleMap = \case
+  [] -> pure ()
+  cycle_@(m : _) ->
+    case Map.lookup m moduleMap of
+      Just module_ -> emitError (ErrorImportCycle module_.sourceSpan cycle_)
+      Nothing -> pure ()
 
 -- ---------------------------------------------------------------------------
 -- Phase A: assign ModuleIds
@@ -2069,6 +2095,7 @@ identify :: Map Text (Module Parsed) -> (IdentifierResult, [IdentifierError])
 identify moduleMap =
   let (asts, finalState) =
         runIdentifier $ do
+          for_ (findImportCycles moduleMap) (emitImportCycleError moduleMap)
           moduleNameToId <- assignModuleIds moduleMap
           exports <- buildExports moduleMap
           topLevels <- buildTopLevels moduleNameToId exports moduleMap

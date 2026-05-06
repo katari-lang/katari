@@ -145,6 +145,20 @@ isMissingName :: IdentifierError -> Bool
 isMissingName (ErrorImportNameNotFound _ _ _) = True
 isMissingName _ = False
 
+isImportCycle :: IdentifierError -> Bool
+isImportCycle (ErrorImportCycle _ _) = True
+isImportCycle _ = False
+
+countImportCycles :: Either [IdentifierError] a -> Int
+countImportCycles = \case
+  Left errs -> length (filter isImportCycle errs)
+  Right _ -> 0
+
+countMissingMods :: Either [IdentifierError] a -> Int
+countMissingMods = \case
+  Left errs -> length (filter isMissingMod errs)
+  Right _ -> 0
+
 -- ---------------------------------------------------------------------------
 -- Spec
 -- ---------------------------------------------------------------------------
@@ -432,6 +446,22 @@ importHandling = describe "imports" $ do
           ("main", "import { bar } from lib\nagent run() { bar() }")
         ]
     res `shouldSatisfy` hasError isMissingName
+
+  it "flags self-import as a 1-element cycle" $ do
+    res <- identifyMany [("a", "import a\nagent run() { 0 }")]
+    countImportCycles res `shouldBe` 1
+
+  it "flags mutual import as a single cycle" $ do
+    res <-
+      identifyMany
+        [ ("a", "import b\nagent runA() { 0 }"),
+          ("b", "import a\nagent runB() { 0 }")
+        ]
+    countImportCycles res `shouldBe` 1
+
+  it "reports missing import only once (no duplicate K0107)" $ do
+    res <- identifyMany [("main", "import nonexistent\nagent run() { 0 }")]
+    countMissingMods res `shouldBe` 1
 
 -- ---------------------------------------------------------------------------
 -- Duplicate name detection

@@ -10,9 +10,8 @@
 --
 -- @
 -- parseSources
---   → detectImportCycles  -- diagnostics only; pipeline continues
---   → detectMissingImports
---   → identify
+--   → identify         -- emits import-cycle (K0110) and missing-import (K0107)
+--                      --   diagnostics in addition to name-resolution errors
 --   → generateConstraints
 --   → solve
 --   → zonk
@@ -37,32 +36,20 @@ module Katari.Compile
 
     -- * Helpers (exposed for testing)
     parseSources,
-    detectImportCycles,
-    detectMissingImports,
   )
 where
 
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
-import Data.Set (Set)
-import Data.Set qualified as Set
 import Data.Text (Text)
-import Data.Text qualified as Text
-import Katari.AST
-  ( Declaration (..),
-    ImportDeclaration (..),
-    ImportKind (..),
-    Module (..),
-    Phase (Parsed),
-  )
-import Katari.Diagnostic (Diagnostic, diagnosticError, hasErrors)
+import Katari.AST (Module, Phase (Parsed))
+import Katari.Diagnostic (Diagnostic, hasErrors)
 import Katari.IR (IRModule)
 import Katari.Lexer as Lexer
 import Katari.Lowering (lowerProgram)
 import Katari.Lowering qualified as Lowering
 import Katari.Parser qualified as Parser
 import Katari.Schema (SchemaEntry, buildSchemas)
-import Katari.SourceSpan (HasSourceSpan (..), Position (..), SourceSpan (..))
 import Katari.Typechecker.ConstraintGenerator (generateConstraints)
 import Katari.Typechecker.ConstraintGenerator qualified as CG
 import Katari.Typechecker.Exhaustive (checkExhaustive)
@@ -136,8 +123,6 @@ data CompileResult = CompileResult
 compile :: CompileInput -> CompileResult
 compile input =
   let (parsed, parseDiags) = parseSources input.sources
-      cycleDiags = detectImportCycles parsed
-      missingDiags = detectMissingImports parsed
       (idResult, idErrors) = identify parsed
       idDiags = map Identifier.toDiagnostic idErrors
       (cgResult, cgErrors) = generateConstraints idResult
@@ -149,8 +134,6 @@ compile input =
       exhaustiveDiags = map Exhaustive.toDiagnostic (checkExhaustive zonkResult_)
       preLowerDiags =
         parseDiags
-          <> cycleDiags
-          <> missingDiags
           <> idDiags
           <> cgDiags
           <> solverDiags
@@ -194,126 +177,3 @@ parseSources sources =
       modules = Map.fromList (map fst parsedEntries)
       diags = concatMap snd parsedEntries
    in (modules, diags)
-
--- ===========================================================================
--- Import-cycle detection
--- ===========================================================================
-
--- | Detect any non-trivial strongly-connected component in the import
--- graph. Self-imports are also flagged.
-detectImportCycles :: Map ModuleName (Module Parsed) -> [Diagnostic]
-detectImportCycles modules =
-  let graph = Map.map (importsOf modules) modules
-      cycles = findCycles graph
-   in concatMap (cycleDiagnostic modules) cycles
-
-importsOf :: Map ModuleName (Module Parsed) -> Module Parsed -> Set ModuleName
-importsOf _ m =
-  Set.fromList
-    [ importModuleName imp
-      | DeclarationImport ImportDeclaration {kind = imp} <- m.declarations
-    ]
-
-importModuleName :: ImportKind -> ModuleName
-importModuleName = \case
-  ImportNames {moduleName} -> moduleName
-  ImportModule {moduleName} -> moduleName
-
--- | Tarjan-style SCC over a 'Map'-encoded directed graph. Returns each
--- SCC of size >= 2 *and* every self-loop as a 1-element cycle.
-findCycles :: Map ModuleName (Set ModuleName) -> [[ModuleName]]
-findCycles graph =
-  let nodes = Map.keys graph
-      sccs = strongComponents graph nodes
-      multi = filter (\xs -> length xs > 1) sccs
-      selfLoops = [[n] | n <- nodes, n `Set.member` Map.findWithDefault Set.empty n graph]
-   in multi <> selfLoops
-
--- | Minimal Tarjan implementation. Not optimised for large graphs (we
--- expect <1000 modules) but stable and dependency-free.
-strongComponents :: Map ModuleName (Set ModuleName) -> [ModuleName] -> [[ModuleName]]
-strongComponents graph allNodes =
-  let go (visited, ordered) node
-        | Set.member node visited = (visited, ordered)
-        | otherwise =
-            let (visited', subOrdered) = dfs visited node
-             in (visited', subOrdered <> ordered)
-      dfs visited node
-        | Set.member node visited = (visited, [])
-        | otherwise =
-            let visited1 = Set.insert node visited
-                successors = Set.toList (Map.findWithDefault Set.empty node graph)
-                (visited2, sub) = foldl stepDfs (visited1, []) successors
-             in (visited2, node : sub)
-      stepDfs (vis, acc) n =
-        let (vis', sub) = dfs vis n
-         in (vis', sub <> acc)
-      (_, postOrder) = foldl go (Set.empty, []) allNodes
-      reversed = reverseGraph graph
-      assignSccs (visited, sccs) node
-        | Set.member node visited = (visited, sccs)
-        | otherwise =
-            let (visited', component) = collect reversed visited node
-             in (visited', component : sccs)
-      collect rev visited node
-        | Set.member node visited = (visited, [])
-        | otherwise =
-            let visited1 = Set.insert node visited
-                successors = Set.toList (Map.findWithDefault Set.empty node rev)
-                (visited2, sub) = foldl (\(v, acc) n -> let (v', s) = collect rev v n in (v', s <> acc)) (visited1, []) successors
-             in (visited2, node : sub)
-      (_, components) = foldl assignSccs (Set.empty, []) postOrder
-   in components
-
-reverseGraph :: Map ModuleName (Set ModuleName) -> Map ModuleName (Set ModuleName)
-reverseGraph graph =
-  Map.fromListWith
-    Set.union
-    [ (target, Set.singleton source)
-      | (source, targets) <- Map.toList graph,
-        target <- Set.toList targets
-    ]
-
-cycleDiagnostic :: Map ModuleName (Module Parsed) -> [ModuleName] -> [Diagnostic]
-cycleDiagnostic modules cycle_ =
-  case cycle_ of
-    [] -> []
-    (m : _) ->
-      let sourceSpan = case Map.lookup m modules of
-            Just module_ -> module_.sourceSpan
-            Nothing -> dummySpan
-          rendered = Text.intercalate " → " (cycle_ <> [m])
-       in [diagnosticError "K0110" ("import cycle: " <> rendered) sourceSpan]
-
--- ===========================================================================
--- Missing-import detection
--- ===========================================================================
-
--- | Flag imports that reference modules absent from the input map.
-detectMissingImports :: Map ModuleName (Module Parsed) -> [Diagnostic]
-detectMissingImports modules =
-  [ missingDiagnostic decl name
-    | (_, m) <- Map.toList modules,
-      decl@(DeclarationImport ImportDeclaration {kind}) <- m.declarations,
-      let name = importModuleName kind,
-      not (Map.member name modules)
-  ]
-
-missingDiagnostic :: Declaration Parsed -> ModuleName -> Diagnostic
-missingDiagnostic decl name =
-  diagnosticError
-    "K0107"
-    ("imported module not found: '" <> name <> "'")
-    (sourceSpanOf decl)
-
--- ===========================================================================
--- Internal helpers
--- ===========================================================================
-
-dummySpan :: SourceSpan
-dummySpan =
-  SrcSpan
-    { filePath = "<unknown>",
-      start = Position {line = 1, column = 1},
-      end = Position {line = 1, column = 1}
-    }
