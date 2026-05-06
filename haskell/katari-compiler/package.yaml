@@ -67,6 +67,8 @@ dependencies:
   - mtl
   - transformers
   - aeson
+  - prettyprinter
+  - prettyprinter-ansi-terminal
   - safe
 
 default-extensions:
