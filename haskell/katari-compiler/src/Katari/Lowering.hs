@@ -498,7 +498,7 @@ registerDeclarationKinds zonkResult =
     registerModule (moduleId, m) = do
       let moduleName = case Map.lookup moduleId zonkResult.zonkedModuleNames of
             Just name -> name
-            Nothing -> error "registerDeclarationKinds: ModuleId not in zonkedModuleNames (internal invariant violated)"
+            Nothing -> internalErrorNoSpan "registerDeclarationKinds: ModuleId not in zonkedModuleNames (internal invariant violated)"
       mapM_ (registerDecl moduleName) m.declarations
 
     registerDecl :: Text -> AST.Declaration Zonked -> Lower ()

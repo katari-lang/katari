@@ -627,7 +627,7 @@ withScopeFrame action = do
     context
       { scopeStack = case context.scopeStack of
           (_ : rest) -> rest
-          [] -> error "withScopeFrame: scope stack underflow (compiler bug)"
+          [] -> Internal.internalErrorNoSpan "withScopeFrame: scope stack underflow (compiler bug)"
       }
   pure result
 
