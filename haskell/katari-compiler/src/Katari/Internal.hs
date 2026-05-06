@@ -1,8 +1,15 @@
--- | Internal panic helpers for compiler-invariant violations.
+-- | Helpers for compiler-invariant violations.
 --
--- These should never fire under correct compiler state. They wrap raw
--- 'error' calls so the message is consistent and includes a call stack.
--- User-facing problems must go through 'Katari.Diagnostic' instead.
+-- These produce 'K9999' 'Diagnostic' values that callers thread through
+-- their existing error-collection mechanism (e.g. 'MonadError' /
+-- @[Diagnostic]@ accumulator). No call site panics; if an invariant is
+-- violated, downstream phases produce a partial result and the
+-- diagnostic surfaces in 'CompileResult.diagnostics'.
+--
+-- This is the OSS Production-Ready replacement for the previous version
+-- of this module, which called 'error' directly. Long-running embedders
+-- (LSP / playground) can now recover from compiler bugs without
+-- crashing the host process.
 module Katari.Internal
   ( internalError,
     internalErrorNoSpan,
@@ -10,21 +17,25 @@ module Katari.Internal
 where
 
 import Data.Text (Text)
-import Data.Text qualified as Text
-import GHC.Stack (HasCallStack)
-import Katari.SourceSpan (SourceSpan)
+import Katari.Diagnostic (Diagnostic, diagnosticInternalError)
+import Katari.SourceSpan (Position (..), SourceSpan (..))
 
--- | Panic with a location and a message describing the violated invariant.
--- The location is 'Show'-constrained so that callers can pass a 'SourceSpan'
--- (or any other printable locator) without this module depending on
--- 'Katari.AST'.
-internalError :: (HasCallStack) => SourceSpan -> Text -> a
-internalError location msg =
-  error ("internal compiler error at " <> show location <> ": " <> Text.unpack msg)
+-- | Build a 'K9999' 'Diagnostic' describing an invariant violation at a
+-- known span. Use when the call site has a 'SourceSpan' to attach
+-- (typically: a node currently being processed).
+internalError :: SourceSpan -> Text -> Diagnostic
+internalError = diagnosticInternalError
 
--- | Panic without a span. Use only when the call site has no easy way to
--- thread a 'SourceSpan'; the 'HasCallStack' constraint preserves location
--- information in the panic.
-internalErrorNoSpan :: (HasCallStack) => Text -> a
-internalErrorNoSpan msg =
-  error ("internal compiler error: " <> Text.unpack msg)
+-- | Build a 'K9999' 'Diagnostic' when the call site has no useful span.
+-- The diagnostic gets a placeholder span (line 0:0 of the empty file
+-- path) which downstream renderers should treat as "no location".
+internalErrorNoSpan :: Text -> Diagnostic
+internalErrorNoSpan = diagnosticInternalError placeholderSpan
+
+placeholderSpan :: SourceSpan
+placeholderSpan =
+  SrcSpan
+    { filePath = "",
+      start = Position {line = 0, column = 0},
+      end = Position {line = 0, column = 0}
+    }

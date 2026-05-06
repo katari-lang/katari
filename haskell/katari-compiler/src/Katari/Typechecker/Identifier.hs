@@ -289,6 +289,10 @@ data IdentifierError where
   ErrorMissingExternalAgentAnnotation :: SourceSpan -> Text -> IdentifierError
   -- | An @ext agent@ declaration's @\@\"...\"@ annotation is empty or whitespace.
   ErrorEmptyExternalAgentAnnotation :: SourceSpan -> Text -> IdentifierError
+  -- | A 'K9999' invariant violation (compiler bug). Wraps a fully-formed
+  -- 'Diagnostic' produced by 'Katari.Internal' so it surfaces in the
+  -- diagnostic stream without panicking the host.
+  ErrorInternal :: Diagnostic -> IdentifierError
 
 deriving instance Show IdentifierError
 
@@ -309,6 +313,7 @@ instance HasSourceSpan IdentifierError where
     ErrorNotAConstructor sourceSpan _ -> sourceSpan
     ErrorMissingExternalAgentAnnotation sourceSpan _ -> sourceSpan
     ErrorEmptyExternalAgentAnnotation sourceSpan _ -> sourceSpan
+    ErrorInternal diagnostic -> diagnostic.span
 
 -- | Convert an 'IdentifierError' to a unified 'Diagnostic'. Codes
 -- K0100-K0199 are reserved for the identifier pass.
@@ -381,6 +386,7 @@ toDiagnostic = \case
       "K0151"
       ("external agent '" <> name <> "' has an empty @\"\" annotation (server identifier must not be blank)")
       sourceSpan
+  ErrorInternal diagnostic -> diagnostic
 
 -- ---------------------------------------------------------------------------
 -- Identifier monad
@@ -619,16 +625,23 @@ bindLocalVariable nameRef = do
       (innermost : remaining) -> Map.insert insertName (singletonVariable variableId) innermost : remaining
 
 -- | Push a fresh empty frame, run the action, then pop the frame.
+-- If the stack is unexpectedly empty when popping (compiler bug), emit
+-- a 'K9999' internal-error diagnostic via 'ErrorInternal' and skip the
+-- pop instead of panicking.
 withScopeFrame :: Identifier a -> Identifier a
 withScopeFrame action = do
   modifyResolveContext $ \context -> context {scopeStack = Map.empty : context.scopeStack}
   result <- action
-  modifyResolveContext $ \context ->
-    context
-      { scopeStack = case context.scopeStack of
-          (_ : rest) -> rest
-          [] -> Internal.internalErrorNoSpan "withScopeFrame: scope stack underflow (compiler bug)"
-      }
+  scope <- gets ((.scopeStack) . (.resolveContext))
+  case scope of
+    (_ : _) ->
+      modifyResolveContext $ \context ->
+        context {scopeStack = drop 1 context.scopeStack}
+    [] ->
+      emitError $
+        ErrorInternal $
+          Internal.internalErrorNoSpan
+            "withScopeFrame: scope stack underflow (compiler bug)"
   pure result
 
 -- | Replace the resolve context for the duration of an action (used to switch
@@ -1672,12 +1685,23 @@ resolveExpression = \case
   ExpressionHandle expression -> ExpressionHandle <$> resolveHandleExpr expression
   ExpressionParTuple expression -> ExpressionParTuple <$> resolveParTupleExpr expression
   ExpressionParArray expression -> ExpressionParArray <$> resolveParArrayExpr expression
-  ExpressionQualifiedReference qref ->
-    -- The parser never produces this constructor on a Parsed AST. Treat it
-    -- as an internal invariant violation and crash loudly.
-    Internal.internalError
-      qref.sourceSpan
-      "Identifier: ExpressionQualifiedReference encountered in Parsed AST (parser invariant violation)"
+  ExpressionQualifiedReference qref -> do
+    -- The parser never produces this constructor on a Parsed AST.
+    -- Surface as a 'K9999' invariant-violation diagnostic and fall
+    -- back to an unresolved bare-variable expression so downstream
+    -- phases can keep walking the tree.
+    emitError $
+      ErrorInternal $
+        Internal.internalError
+          qref.sourceSpan
+          "Identifier: ExpressionQualifiedReference encountered in Parsed AST (parser invariant violation)"
+    pure $
+      ExpressionVariable
+        VariableExpression
+          { name = identifiedNameRef Nothing qref.target,
+            sourceSpan = qref.sourceSpan,
+            typeOf = ()
+          }
 
 resolveLiteralExpr :: LiteralExpression Parsed -> Identifier (LiteralExpression Identified)
 resolveLiteralExpr LiteralExpression {value, sourceSpan} =
@@ -2026,11 +2050,22 @@ resolveModuleQualifiedChain moduleId moduleRef labels totalSpan =
     -- The only call site is 'resolveFieldChainHead', which itself is only
     -- reached via 'resolveFieldAccess' on an 'ExpressionFieldAccess' — that
     -- guarantees at least one label was peeled. A bare 'ExpressionVariable'
-    -- never enters this code path.
-    [] ->
-      Internal.internalError
-        totalSpan
-        "resolveModuleQualifiedChain: labels must be non-empty (caller invariant violation)"
+    -- never enters this code path. If it ever does, surface a 'K9999'
+    -- diagnostic and fall back to an unresolved bare-variable expression
+    -- using the module name as the placeholder.
+    [] -> do
+      emitError $
+        ErrorInternal $
+          Internal.internalError
+            totalSpan
+            "resolveModuleQualifiedChain: labels must be non-empty (caller invariant violation)"
+      pure $
+        ExpressionVariable
+          VariableExpression
+            { name = identifiedNameRef Nothing moduleRef,
+              sourceSpan = totalSpan,
+              typeOf = ()
+            }
     (target : remainingLabels) -> do
       maybeVariableId <- lookupModuleExportVariable moduleId target.text
       variableMetadata <- case maybeVariableId of

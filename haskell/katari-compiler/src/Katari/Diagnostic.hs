@@ -18,6 +18,10 @@
 --   * K0200-K0299 — constraint generator / solver / zonker
 --   * K0300-K0399 — lowering
 --   * K0400-K0499 — schema / emit
+--   * K9999       — internal compiler error (invariant violation;
+--                   produced by 'Katari.Internal' helpers and surfaced
+--                   in the diagnostic stream so long-running embedders
+--                   such as LSP do not crash on a compiler bug)
 --
 -- The full registry lives in CHANGELOG.md (Phase 14); a code is added the
 -- moment a per-phase converter starts emitting it.
@@ -27,6 +31,7 @@ module Katari.Diagnostic
     DiagnosticNote (..),
     diagnosticError,
     diagnosticWarning,
+    diagnosticInternalError,
     hasErrors,
     filterAtLeast,
     sortBySpan,
@@ -136,6 +141,24 @@ diagnosticError code_ message_ span_ =
       span = span_,
       notes = [],
       hints = []
+    }
+
+-- | Convenience constructor for a 'K9999' internal-error diagnostic.
+-- Used by 'Katari.Internal' helpers to report invariant violations
+-- without panicking. Long-running embedders (LSP / playground) can
+-- recover by surfacing the diagnostic to the user.
+diagnosticInternalError :: SourceSpan -> Text -> Diagnostic
+diagnosticInternalError span_ message_ =
+  Diagnostic
+    { severity = SeverityError,
+      code = "K9999",
+      message = "internal compiler error: " <> message_,
+      span = span_,
+      notes = [],
+      hints =
+        [ "this indicates a bug in the Katari compiler; please report \
+          \it together with the source program that triggered it"
+        ]
     }
 
 -- | Convenience constructor for a warning-severity diagnostic.

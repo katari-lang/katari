@@ -142,8 +142,11 @@ compile input =
       shouldLower = not (hasErrors preLowerDiags)
       (loweredIR, loweringDiags)
         | shouldLower =
-            let (ir, errs) = lowerProgram input.rootModule idResult zonkResult_
-             in (Just ir, map Lowering.toDiagnostic errs)
+            let (eitherIR, errs) = lowerProgram input.rootModule idResult zonkResult_
+                structuralDiags = map Lowering.toDiagnostic errs
+             in case eitherIR of
+                  Right ir -> (Just ir, structuralDiags)
+                  Left internalDiag -> (Nothing, structuralDiags <> [internalDiag])
         | otherwise = (Nothing, [])
       shouldEmitArtefacts =
         shouldLower && not (hasErrors loweringDiags)

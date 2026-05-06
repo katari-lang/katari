@@ -38,7 +38,6 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Void (Void)
 import Katari.Diagnostic (Diagnostic, diagnosticError)
-import Katari.Internal qualified as Internal
 import Katari.SourceSpan (HasSourceSpan (..), Position (..), SourceSpan (..))
 import Numeric (readHex, showHex)
 import Safe (headMay)
@@ -789,9 +788,12 @@ lexEscapeCharacter = do
       hex2 <- hexDigitChar
       hex3 <- hexDigitChar
       hex4 <- hexDigitChar
-      case readHex [hex1, hex2, hex3, hex4] of
-        ((codePoint, _) : _) -> pure codePoint
-        [] -> Internal.internalErrorNoSpan "fourHexRaw: readHex failed despite hexDigitChar validation"
+      -- 'hexDigitChar' has already validated each character, so 'readHex'
+      -- always returns a non-empty list. The fallback to U+FFFD is
+      -- unreachable in practice but keeps this monad pure (no panic).
+      pure $ case readHex [hex1, hex2, hex3, hex4] of
+        ((codePoint, _) : _) -> codePoint
+        [] -> 0xFFFD
 
     readFourHex startSourcePos = do
       result <- optional (try fourHexRaw)

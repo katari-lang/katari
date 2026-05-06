@@ -16,6 +16,7 @@ module Katari.Lowering
 where
 
 import Control.Monad (foldM, forM, mapAndUnzipM)
+import Control.Monad.Except (ExceptT, runExceptT, throwError)
 import Control.Monad.Reader (ReaderT, asks, local, runReaderT)
 import Control.Monad.State.Strict (State, gets, modify, runState)
 import Data.Map.Strict (Map)
@@ -28,7 +29,7 @@ import Katari.AST qualified as AST
 import Katari.Diagnostic (Diagnostic, diagnosticError)
 import Katari.IR
 import Katari.IR qualified as IR
-import Katari.Internal (internalErrorNoSpan)
+import Katari.Internal qualified as Internal
 import Katari.SourceSpan (SourceSpan)
 import Katari.Id (VariableId)
 import Katari.Id qualified as Id
@@ -219,7 +220,13 @@ initialLowerState =
       lsErrors = []
     }
 
-type Lower = ReaderT LowerEnv (State LowerState)
+-- | Lowering monad. The 'ExceptT' layer carries 'K9999' invariant
+-- violations from 'Katari.Internal' so they reach 'compile' as
+-- diagnostics rather than as a bare 'error' panic. Most call sites
+-- never encounter it; the few that do (e.g. unresolved 'BlockId'
+-- lookups for an upstream-bug shape of the AST) abort the current
+-- 'lowerProgram' invocation cleanly.
+type Lower = ExceptT Diagnostic (ReaderT LowerEnv (State LowerState))
 
 freshBlockId :: Lower BlockId
 freshBlockId = do
@@ -385,7 +392,7 @@ primBlockId name = do
   ids <- gets (.lsPrimBlockIds)
   case Map.lookup name ids of
     Just blockId -> pure blockId
-    Nothing -> internalErrorNoSpan ("primBlockId: unknown primitive " <> name)
+    Nothing -> throwError (Internal.internalErrorNoSpan ("primBlockId: unknown primitive " <> name))
 
 -- ===========================================================================
 -- Statement buffer (implicit via 'lsCurrentEmitted')
@@ -436,16 +443,24 @@ defaultUserBlock =
 -- Entry
 -- ===========================================================================
 
--- | Lower a 'ZonkResult' to an 'IRModule'. Returns the module plus any
--- structural lowering errors encountered. Errors do not abort the pipeline:
--- the resulting IR may be partial.
-lowerProgram :: Text -> IdentifierResult -> ZonkResult -> (IRModule, [LoweringError])
+-- | Lower a 'ZonkResult' to an 'IRModule'.
+--
+-- The 'Either' carries an internal-error 'Diagnostic' (K9999) when an
+-- invariant from an upstream phase is violated; the second component is
+-- the list of structural lowering errors encountered along the way.
+-- Structural errors do not abort the pipeline (the IR may be partial),
+-- but an internal-error short-circuits early.
+lowerProgram ::
+  Text ->
+  IdentifierResult ->
+  ZonkResult ->
+  (Either Diagnostic IRModule, [LoweringError])
 lowerProgram moduleName idResult zonkResult =
-  let (irModule, finalState) =
+  let (result, finalState) =
         runState
-          (runReaderT (lowerProgramM moduleName zonkResult) (initialLowerEnv idResult))
+          (runReaderT (runExceptT (lowerProgramM moduleName zonkResult)) (initialLowerEnv idResult))
           initialLowerState
-   in (irModule, reverse finalState.lsErrors)
+   in (result, reverse finalState.lsErrors)
 
 lowerProgramM :: Text -> ZonkResult -> Lower IRModule
 lowerProgramM moduleName zonkResult = do
@@ -521,9 +536,12 @@ registerDeclarationKinds zonkResult =
   mapM_ registerModule (Map.toList zonkResult.zonkedModules)
   where
     registerModule (moduleId, m) = do
-      let moduleName = case Map.lookup moduleId zonkResult.zonkedModuleNames of
-            Just name -> name
-            Nothing -> internalErrorNoSpan "registerDeclarationKinds: ModuleId not in zonkedModuleNames (internal invariant violated)"
+      moduleName <- case Map.lookup moduleId zonkResult.zonkedModuleNames of
+        Just name -> pure name
+        Nothing ->
+          throwError $
+            Internal.internalErrorNoSpan
+              "registerDeclarationKinds: ModuleId not in zonkedModuleNames (internal invariant violated)"
       mapM_ (registerDecl moduleName) m.declarations
 
     registerDecl :: Text -> AST.Declaration Zonked -> Lower ()
@@ -576,8 +594,8 @@ registerDeclarationKinds zonkResult =
           mapped <- gets (Map.lookup requestId . (.lsRequestIds))
           case mapped of
             Just irReqId -> pure irReqId
-            Nothing -> internalErrorNoSpan "requestIdForVariable: IR.RequestId not pre-allocated"
-        Nothing -> internalErrorNoSpan "requestIdForVariable: VariableId not in requestByVariable"
+            Nothing -> throwError (Internal.internalErrorNoSpan "requestIdForVariable: IR.RequestId not pre-allocated")
+        Nothing -> throwError (Internal.internalErrorNoSpan "requestIdForVariable: VariableId not in requestByVariable")
 
     constructorIdForVariable :: VariableId -> Lower IR.ConstructorId
     constructorIdForVariable variableId = do
@@ -587,8 +605,8 @@ registerDeclarationKinds zonkResult =
           mapped <- gets (Map.lookup constructorId . (.lsConstructorIds))
           case mapped of
             Just irCtorId -> pure irCtorId
-            Nothing -> internalErrorNoSpan "constructorIdForVariable: IR.ConstructorId not pre-allocated"
-        Nothing -> internalErrorNoSpan "constructorIdForVariable: VariableId not in constructorByVariable"
+            Nothing -> throwError (Internal.internalErrorNoSpan "constructorIdForVariable: IR.ConstructorId not pre-allocated")
+        Nothing -> throwError (Internal.internalErrorNoSpan "constructorIdForVariable: VariableId not in constructorByVariable")
 
     recordEntry :: Text -> Text -> BlockId -> Lower ()
     recordEntry moduleName_ declName blockId =
@@ -841,7 +859,7 @@ lowerBlockInto blk = go blk.statements
 lowerStmt :: AST.Statement Zonked -> Lower Bool
 lowerStmt = \case
   AST.StatementLet _ ->
-    internalErrorNoSpan "lowerStmt: StatementLet must be peeled by lowerBlockInto"
+    throwError (Internal.internalErrorNoSpan "lowerStmt: StatementLet must be peeled by lowerBlockInto")
   AST.StatementReturn stmt -> do
     var <- lowerExpr stmt.value
     emit (StatementExit ExitData {exitKind = ExitKindReturn, value = var})
@@ -867,7 +885,7 @@ lowerStmt = \case
     _ <- lowerExpr expr
     pure False
   AST.StatementAgent _ ->
-    internalErrorNoSpan "lowerStmt: StatementAgent must be peeled by lowerBlockInto"
+    throwError (Internal.internalErrorNoSpan "lowerStmt: StatementAgent must be peeled by lowerBlockInto")
   AST.StatementError sourceSpan -> do
     recordError (LoweringErrorParseSentinel sourceSpan)
     pure False
