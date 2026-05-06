@@ -176,6 +176,13 @@ diagnosticWarning code_ message_ span_ =
 -- | True if any of the diagnostics in the list has 'Error' severity.
 -- Used by orchestrators (e.g. 'Katari.Compile') to decide whether to skip
 -- IR / schema emission.
+--
+-- @
+-- let result = compile input
+-- if hasErrors (diagnostics result)
+--   then putStrLn "compilation failed"
+--   else runIR (irModule result)
+-- @
 hasErrors :: [Diagnostic] -> Bool
 hasErrors = any ((== SeverityError) . (.severity))
 

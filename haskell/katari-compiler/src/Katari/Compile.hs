@@ -120,6 +120,20 @@ data CompileResult = CompileResult
 -- The result's @diagnostics@ list is the single source of truth for
 -- failure: callers should branch on @hasErrors diagnostics@ rather than
 -- on the @Maybe@ payloads.
+--
+-- Example:
+--
+-- @
+-- import Data.Map.Strict qualified as Map
+--
+-- let src    = "agent hello() -> string { return \\"hello\\" }"
+--     input  = CompileInput
+--                { sources    = Map.singleton "main" (SourceEntry "main.ktr" src)
+--                , rootModule = "main" }
+--     result = compile input
+-- null (diagnostics result)  -- True  (no errors)
+-- isJust (irModule result)   -- True  (IR was emitted)
+-- @
 compile :: CompileInput -> CompileResult
 compile input =
   let (parsed, parseDiags) = parseSources input.sources

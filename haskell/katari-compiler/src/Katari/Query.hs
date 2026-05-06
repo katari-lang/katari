@@ -96,6 +96,15 @@ data HoverInfo = HoverInfo
 -- | Find hover information for the innermost typed node at a position.
 -- Returns 'Nothing' if the position falls outside all known spans or no
 -- typed node covers it.
+--
+-- @
+-- let result = compile input
+--     info   = lookupAtPosition
+--                (identifierResult result) (zonkResult result)
+--                "main.ktr" (Position {line = 0, column = 10})
+-- -- info :: Maybe HoverInfo
+-- -- Just (HoverInfo {hoverType = Just ..., hoverNameSpan = ..., ...})
+-- @
 lookupAtPosition :: IdentifierResult -> ZonkResult -> FilePath -> Position -> Maybe HoverInfo
 lookupAtPosition idResult zonkResult filePath position = do
   moduleData <- findModuleByFilePath idResult zonkResult filePath

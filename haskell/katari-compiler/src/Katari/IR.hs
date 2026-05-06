@@ -154,6 +154,23 @@ instance FromJSON IRMetadata where
 currentIRMetadata :: IRMetadata
 currentIRMetadata = IRMetadata {schemaVersion = 1}
 
+-- | The output of one compilation. The runtime loads this value from JSON
+-- and uses 'entries' to resolve named callables.
+--
+-- JSON encoding example (fields abbreviated):
+--
+-- @
+-- import Data.Aeson (encode)
+-- import Katari.Compile (compile, CompileInput (..))
+-- import Katari.IR ()           -- ToJSON instance
+--
+-- let result = compile input
+-- case irModule result of
+--   Just ir -> encode ir  -- → {"metadata":{"schemaVersion":1},
+--                         --    "name":"main","blocks":{...},
+--                         --    "entries":{...},"nameTable":{...}}
+--   Nothing -> error "compilation failed"
+-- @
 data IRModule = IRModule
   { metadata :: IRMetadata,
     name :: Text,

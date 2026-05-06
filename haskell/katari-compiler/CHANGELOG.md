@@ -1,117 +1,188 @@
 # Changelog — katari-compiler
 
-## Unreleased (Phase 19 — Production-Ready Refactoring)
+All notable changes to `katari-compiler` are recorded here.
+
+The format roughly follows [Keep a Changelog](https://keepachangelog.com/),
+with project-specific extensions: every change to the `Diagnostic` table
+updates the [Diagnostic code registry](#diagnostic-code-registry) section
+below.
+
+## Unreleased — OSS pre-publish refactor
+
+This pass tightens the public surface area of the library so the API is
+defensible under semver before the first OSS release.
+
+### Added
+
+- `Katari.Common` module hosting the shared `QualifiedName` and
+  `LiteralValue` types (previously duplicated between `Katari.AST` /
+  `Katari.IR` / `Katari.Id`).
+- `Katari.Diagnostic.diagnosticInternalError` and the `K9999` reserved
+  code for invariant-violation diagnostics.
+- `Katari.Diagnostic.Render.renderDiagnosticAnsi` for severity-coloured
+  terminal output (built on `prettyprinter` /
+  `prettyprinter-ansi-terminal`).
+- Golden-test suite (`test/golden/cases/`, runner in
+  `Katari.GoldenSpec`) protecting the IR JSON, schema JSON, and
+  diagnostic-rendering shapes.
+- Property-test suite (`Katari.PropertySpec`, hedgehog-based) covering
+  JSON round-trips and `compile` determinism.
+
+### Changed
+
+- `Katari.Internal.internalError` / `internalErrorNoSpan` no longer
+  panic via `error`; they construct a `K9999` `Diagnostic` that callers
+  thread through their existing error-collection mechanism. The
+  `Lower` monad gains `ExceptT Diagnostic` so internal errors surface
+  in `CompileResult.diagnostics` instead of crashing the host. Long-
+  running embedders (LSP, playground) can now recover from a Katari
+  compiler bug without taking the host process down.
+- `Katari.Lexer` now has an explicit export list. Internal helpers
+  (`LexerState`, `LexerContext`, `lexNumber`, etc.) are no longer
+  public.
+- `Katari.Typechecker.Identifier` no longer re-exports the ID newtypes
+  (`VariableId` / `TypeId` / `ModuleId` / `RequestId` / `ConstructorId`)
+  or `QualifiedName`. Downstream call sites now import them from
+  `Katari.Id` (or from `Katari.Common` for `QualifiedName`).
+- `Katari.Compile.CompileResult` drops the redundant `Maybe` wrappers
+  on `identifierResult` / `solverResult` / `zonkResult` (these were
+  always `Just`).
+- `solve` and `zonk` now return `(Result, [Error])` tuples, matching
+  the other phases. The `solverErrors` / `zonkErrors` record fields
+  are gone.
+- `ConstraintGenResult` replaces the bare `nextTypeVariableId` /
+  `nextRequestVariableId` `Int` fields with a `VariableSupply`
+  newtype.
+- `ZonkResult` no longer republishes `IdentifierResult` fields. The
+  affected downstream APIs (`lowerProgram`, `buildSchemas`,
+  `checkExhaustive`, the `Katari.Query` family) now take both
+  `IdentifierResult` and `ZonkResult` directly.
+- IR identifier renames (JSON-breaking): `ReqId` → `RequestId`,
+  `CtorId` → `ConstructorId`, `BlockCtor` → `BlockConstructor`. All
+  `Block` variants are now positional and serialise their payload
+  under the `body` key (previously `contents`); `sumOptions` for
+  every IR sum type uses `contentsFieldName = "body"` consistently.
+- `ImportDeclaration` drops its phase parameter — it carried no
+  phase-dependent fields. The `retagImportDeclaration` helper is gone.
+- `Katari.Diagnostic.Render` is rebuilt on `prettyprinter`. The plain
+  text renderers (`renderDiagnostic` / `renderDiagnosticPlain`) keep
+  their previous shape; the new ANSI renderer
+  (`renderDiagnosticAnsi`) emits severity-coloured headers and
+  underlines.
+- `lowerProgram` returns `(Either Diagnostic IRModule, [LoweringError])`
+  (was `(IRModule, [LoweringError])`) — `Left` carries the K9999
+  diagnostic when an internal error fires.
+
+### Removed
+
+- `bytestring`, `scientific`, `vector` library dependencies — none of
+  them were imported anywhere in the library or test suite.
+- The hand-rolled Tarjan SCC implementation in
+  `Katari.Typechecker.ImportGraph` (replaced by
+  `Data.Graph.stronglyConnComp`).
+- The hand-rolled list-index helper `(!?)` in `Diagnostic.Render`
+  (replaced by `Safe.atMay`).
+- The `nub`-based dedup in `Solver.Substitution` (replaced by an
+  `Ord`-based set, O(n²) → O(n log n)).
+- `Katari.Typechecker.Solver.solveRequestWorklist` no longer takes the
+  unused leading `Int` parameter.
+
+## Earlier — Phase 19 (pre-OSS internal refactor)
+
+Highlights of the work that landed before the OSS pre-publish pass:
 
 ### Breaking changes
 
-#### IR JSON shape
+- IR JSON sum tags switched to camelCase with full type-name prefixes
+  (`SCall` → `statementCall`, `MPAny` → `matchPatternAny`,
+  `LVInteger` → `literalValueInteger`, etc.). The runtime must use
+  these tag names.
+- `IRModule` gained a `metadata` field carrying `schemaVersion`. The
+  runtime should reject loads with an unexpected schema version.
 
-Constructor names in the IR JSON now carry the full type-name prefix and are
-serialized verbatim (PascalCase). Runtime consumers must update tag names:
+### Added
 
-| Old tag              | New tag                    |
-| -------------------- | -------------------------- |
-| `SCall`              | `StatementCall`            |
-| `SMakeClosure`       | `StatementMakeClosure`     |
-| `SLoadLiteral`       | `StatementLoadLiteral`     |
-| `SMatch`             | `StatementMatch`           |
-| `SFor`               | `StatementFor`             |
-| `SExit`              | `StatementExit`            |
-| `SCont`              | `StatementCont`            |
-| `SBindPattern`       | `StatementBindPattern`     |
-| `MPAny`              | `MatchPatternAny`          |
-| `MPVariable`         | `MatchPatternVariable`     |
-| `MPLiteral`          | `MatchPatternLiteral`      |
-| `MPConstructor`      | `MatchPatternConstructor`  |
-| `MPTuple`            | `MatchPatternTuple`        |
-| `CTBlock`            | `CallTargetBlock`          |
-| `CTValue`            | `CallTargetValue`          |
-| `LVInteger`          | `LiteralValueInteger`      |
-| `LVNumber`           | `LiteralValueNumber`       |
-| `LVString`           | `LiteralValueString`       |
-| `LVBoolean`          | `LiteralValueBoolean`      |
-| `LVNull`             | `LiteralValueNull`         |
-| `ExitReturn`         | `ExitKindReturn`           |
-| `ExitBreak`          | `ExitKindBreak`            |
-| `ExitForBreak`       | `ExitKindForBreak`         |
-| `ContNext`           | `ContKindNext`             |
-| `ContForNext`        | `ContKindForNext`          |
+- `CompileResult.identifierResult` exposes the name-resolution table
+  for editor tooling.
+- `Katari.Query` provides `lookupAtPosition`, `buildOccurrenceIndex`,
+  `identifyAtPosition`, `findReferences`, `findDefinition`. Positions
+  are code-point based; LSP layers convert UTF-16 offsets before
+  calling.
+- `Katari.Diagnostic.Render` separates source-text-dependent rendering
+  from `Katari.Diagnostic` itself.
+- `Katari.Diagnostic.{filterAtLeast, sortBySpan, groupByFilePath}`
+  helpers for orchestrators.
 
-PascalCase を使う理由: `foo` (変数) と `Foo` (コンストラクタ) は Katari 言語で
-意味が異なるため、JSON レベルでも大文字・小文字を区別する必要がある。
-`lowerHead` による camelCase 変換は行わない。
+### Internal
 
-Schema / Diagnostic / Constraint / NormalizedType のコンストラクタも同様にリネーム
-(内部型なので JSON 公開形式への影響は IRModule のみ)。
+- All sum types switched to GADT syntax with constructor-name prefixes.
+- `parse*` / `lex*` prefix conventions enforced project-wide.
+- `passThroughX` boilerplate eliminated (phase transitions are now
+  identity transformations on shape).
 
-#### IRModule に `metadata` フィールドを追加
+## Diagnostic code registry
 
-```json
-{
-  "metadata": { "schemaVersion": 1 },
-  "name": "main",
-  "blocks": { ... },
-  "entries": { ... },
-  "nameTable": { ... }
-}
-```
+| Range          | Phase                  |
+| -------------- | ---------------------- |
+| K0001 – K0099  | Lexer / Parser         |
+| K0100 – K0199  | Identifier             |
+| K0200 – K0299  | Constraint generator / Solver / Zonker / Exhaustive |
+| K0300 – K0399  | Lowering               |
+| K0400 – K0499  | Schema / emit (reserved) |
+| K9999          | Internal compiler error (any phase) |
 
-`schemaVersion` が runtime の期待値と一致しない場合はロードを拒否することを推奨。
+### Lexer / Parser
 
-#### CallTarget / entries は変更なし
+| Code  | Trigger |
+| ----- | ------- |
+| K0001 | unterminated template literal |
+| K0002 | unterminated string literal |
+| K0003 | invalid unicode escape sequence |
+| K0004 | unrecognised character |
+| K0020 | parse error (megaparsec failure) |
+| K0021 | unexpected end-of-input |
 
-`CallTarget = CallTargetBlock | CallTargetValue` の意味論は維持。
-`IRModule.entries :: Map QualifiedName BlockId` も変更なし。
+### Identifier
 
-### New features
+| Code  | Trigger |
+| ----- | ------- |
+| K0100 | duplicate definition |
+| K0101 | local binding shadows a non-variable (module / type) |
+| K0102 | undefined name |
+| K0103 | qualified-name lookup failed (`module.member`) |
+| K0104 | name used in a type position is not a type |
+| K0105 | name used as a module is not a module |
+| K0106 | imported name not found in source module |
+| K0107 | imported module not found |
+| K0108 | request-handler target is not a `req` |
+| K0109 | match-pattern constructor is not a `data` constructor |
+| K0110 | import cycle |
+| K0150 | external agent declaration without `@""` annotation |
+| K0151 | external agent declaration with empty `@""` annotation |
 
-#### `CompileResult.identifierResult`
+### Constraint generator / Solver / Zonker / Exhaustive
 
-```haskell
-identifierResult :: Maybe IdentifierResult
-```
+| Code  | Trigger |
+| ----- | ------- |
+| K0200 | type synonym cycle |
+| K0220 | structural type mismatch (function vs tuple, etc.) |
+| K0221 | subtype mismatch |
+| K0222 | annotation does not subtype-match expression |
+| K0250 | solver substitution missing a type variable (defensive fallback) |
+| K0251 | solver substitution missing a request variable (defensive fallback) |
+| K0290 | non-exhaustive `match` |
+| K0291 | refutable irrefutable-pattern context (`let`, parameter, etc.) |
+| K0292 | unreachable `match` arm |
 
-LSP / CLI が agent listing・未使用変数検出・qualified-name lookup を実装するのに必要な
-名前解決テーブルを `CompileResult` 経由で取得できるようになった。
+### Lowering
 
-#### `Katari.Query` — LSP / CLI 向け query layer
+| Code  | Trigger |
+| ----- | ------- |
+| K0300 | unresolved variable reaching lowering |
+| K0301 | parser / identifier sentinel reaching lowering |
 
-```haskell
-lookupAtPosition  :: ZonkResult -> FilePath -> Position -> Maybe HoverInfo
-buildOccurrenceIndex :: ZonkResult -> OccurrenceIndex
-identifyAtPosition :: ZonkResult -> FilePath -> Position -> Maybe ResolvedReference
-findReferences    :: OccurrenceIndex -> ResolvedReference -> [SourceSpan]
-findDefinition    :: ZonkResult -> FilePath -> Position -> Maybe SourceSpan
-```
+### Internal
 
-Position は **code-point 単位** (LSP layer が UTF-16 オフセットを変換してから渡す)。
-`OccurrenceIndex` は一度 `buildOccurrenceIndex` で構築してから繰り返し query する。
-
-#### `Katari.Diagnostic.Render` — CLI 向けレンダリング
-
-```haskell
-renderDiagnostic      :: Map FilePath Text -> Diagnostic -> Text
-renderDiagnosticPlain :: Diagnostic -> Text
-```
-
-source text dependency を `Katari.Diagnostic` 本体から分離するため別モジュールに設置。
-
-#### `Katari.Diagnostic` helpers
-
-```haskell
-filterAtLeast   :: Severity -> [Diagnostic] -> [Diagnostic]
-sortBySpan      :: [Diagnostic] -> [Diagnostic]
-groupByFilePath :: [Diagnostic] -> Map FilePath [Diagnostic]
-```
-
-### Internal refactoring (コンパイラ利用者への影響なし)
-
-- 全直和型を GADTs 構文 (`data T where ...`) に統一
-- 全コンストラクタに型名プレフィックスを付与 (`stripXXPrefix` 全廃)
-- `Parser a` を返す全関数に `parse` プレフィックス付与
-- `Lexer a` を返す全関数に `lex` プレフィックス付与
-- 短縮変数名を全廃 (ドメイン値はフルネーム)
-- `passThroughX` boilerplate を全廃 (TYG phase 推移が identity 変換)
-- `zonkedModuleNames` を廃止 (`Module Zonked` の `moduleName` フィールドを使用)
-- `lsVarBlockIds` を `lsTopLevelBlocks` にリネーム (top-level callable のみ格納、local agent は `localVars` Reader へ)
-- `CompileResult.zonkResult` を追加 (Zonker 結果を Query layer へ直接渡せるように)
+| Code  | Trigger |
+| ----- | ------- |
+| K9999 | internal compiler error (invariant violation; please report as a bug) |

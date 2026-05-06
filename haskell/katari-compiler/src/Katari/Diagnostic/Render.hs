@@ -46,6 +46,17 @@ import Safe (atMay)
 -- | Render a diagnostic with an inline source snippet when the file is
 -- available in the source map. Falls back to 'renderDiagnosticPlain'
 -- shape if the file is absent. Plain text — no ANSI escapes.
+--
+-- @
+-- import Data.Map.Strict qualified as Map
+--
+-- let sources = Map.singleton "main.ktr" src
+-- putStrLn (Text.unpack (renderDiagnostic sources diag))
+-- -- error[K0001]: unterminated string literal
+-- --   --> main.ktr:1:5
+-- --    1 | let x = "hello
+-- --                ^
+-- @
 renderDiagnostic :: Map FilePath Text -> Diagnostic -> Text
 renderDiagnostic sources diagnostic =
   renderPlainText (diagnosticDoc sources diagnostic)
