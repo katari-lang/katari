@@ -52,14 +52,20 @@ tests:
       - Katari.SchemaSpec
       - Katari.CompileSpec
       - Katari.GoldenSpec
+      - Katari.PropertySpec
     dependencies:
       - katari-compiler
       - hspec
+      - hspec-hedgehog
+      - hedgehog
       - megaparsec
       - directory
       - filepath
       - aeson-pretty
+      - aeson
       - bytestring
+      - text
+      - containers
 
 dependencies:
   - base >= 4.18 && < 5

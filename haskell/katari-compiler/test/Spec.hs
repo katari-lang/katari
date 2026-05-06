@@ -2,6 +2,7 @@ import Katari.CompileSpec qualified as CompileSpec
 import Katari.ConstraintGeneratorSpec qualified as ConstraintGeneratorSpec
 import Katari.DiagnosticSpec qualified as DiagnosticSpec
 import Katari.GoldenSpec qualified as GoldenSpec
+import Katari.PropertySpec qualified as PropertySpec
 import Katari.IRSpec qualified as IRSpec
 import Katari.IdentifierSpec qualified as IdentifierSpec
 import Katari.LoweringSpec qualified as LoweringSpec
@@ -24,3 +25,4 @@ main = hspec $ do
   SchemaSpec.spec
   CompileSpec.spec
   GoldenSpec.spec
+  PropertySpec.spec
