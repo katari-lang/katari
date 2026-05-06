@@ -29,8 +29,8 @@ import Katari.Diagnostic (Diagnostic, diagnosticError)
 import Katari.IR
 import Katari.Internal (internalErrorNoSpan)
 import Katari.SourceSpan (SourceSpan)
-import Katari.Typechecker.Identifier (VariableId)
-import Katari.Typechecker.Identifier qualified as Identifier
+import Katari.Id (VariableId)
+import Katari.Id qualified as Id
 import Katari.Typechecker.Zonker (ZonkResult (..))
 
 -- ===========================================================================
@@ -158,10 +158,10 @@ data LowerState = LowerState
     -- the start of lowering (one IR ReqId per Identifier RequestId, 1:1
     -- currently). Used by 'lowerHandler' / 'patternToArm' to translate
     -- Identifier resolution into the IR's runtime-dispatch id space.
-    lsReqIds :: Map Identifier.RequestId ReqId,
+    lsReqIds :: Map Id.RequestId ReqId,
     -- | Identifier-pass 'ConstructorId' → IR-internal 'CtorId'. Same
     -- pattern as 'lsReqIds'.
-    lsCtorIds :: Map Identifier.ConstructorId CtorId,
+    lsCtorIds :: Map Id.ConstructorId CtorId,
     -- | FFI translation table: qualified name → BlockId. Populated as
     -- top-level callables are registered; surfaces in
     -- 'IRModule.entries'.

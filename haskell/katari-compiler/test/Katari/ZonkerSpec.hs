@@ -20,12 +20,11 @@ import Katari.Typechecker.ConstraintGenerator
   ( ConstraintGenResult (..),
     generateConstraints,
   )
+import Katari.Id (RequestId, VariableId)
 import Katari.Typechecker.Identifier
   ( IdentifierResult (..),
     RequestData,
-    RequestId,
     VariableData (..),
-    VariableId,
     identify,
   )
 import Katari.Typechecker.Identifier qualified as Identifier

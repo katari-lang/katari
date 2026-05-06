@@ -72,7 +72,7 @@ import Katari.Typechecker.ConstraintGenerator
     ConstraintReason (..),
     ReasonKind (..),
   )
-import Katari.Typechecker.Identifier (RequestId)
+import Katari.Id (RequestId)
 import Katari.Typechecker.NormalizedType
   ( NormalizedType (..),
     normaliseSemantic,

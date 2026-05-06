@@ -1,4 +1,28 @@
-module Katari.Lexer where
+module Katari.Lexer
+  ( -- * Tokens
+    KatariToken (..),
+    Keyword (..),
+    Punctuation (..),
+    Operator (..),
+    WithSourceSpan (..),
+    KatariTokenStream (..),
+
+    -- * Errors
+    LexerError (..),
+    toDiagnostic,
+
+    -- * Entry point
+    lex,
+
+    -- * Pretty printers (used by 'Katari.Parser' for error messages)
+    showKeyword,
+    showPunctuation,
+    showOperator,
+    showToken,
+  )
+where
+
+import Prelude hiding (lex)
 
 import Control.Monad (void, when)
 import Control.Monad.State.Strict

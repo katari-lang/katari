@@ -15,6 +15,7 @@ import Data.Aeson qualified as Aeson
 import Data.Text (Text)
 import Data.Text qualified as T
 import Katari.Diagnostic
+import Katari.Id (TypeId (..))
 import Katari.Lexer qualified as Lexer
 import Katari.Lowering qualified as Lowering
 import Katari.Parser qualified as Parser
@@ -116,7 +117,7 @@ perPhaseConverterSpec = describe "per-phase toDiagnostic" $ do
     mapM_ (\d -> isReservedCode "K0100" "K0199" d.code `shouldBe` True) diags
 
   it "ConstraintGenerator codes fall in K0200-K0299" $ do
-    let diag = CG.toDiagnostic (CG.ConstraintErrorTypeSynonymCycle dummySpan (Identifier.TypeId 0))
+    let diag = CG.toDiagnostic (CG.ConstraintErrorTypeSynonymCycle dummySpan (TypeId 0))
     diag.severity `shouldBe` SeverityError
     isReservedCode "K0200" "K0299" diag.code `shouldBe` True
 

@@ -57,16 +57,18 @@ import Katari.AST
 import Katari.Diagnostic (Diagnostic, diagnosticError)
 import Katari.SemanticType
 import Katari.SourceSpan
-import Katari.Typechecker.Identifier
-  ( ConstructorData (..),
-    ConstructorId,
-    IdentifierResult (..),
+import Katari.Id
+  ( ConstructorId,
     ModuleId,
-    RequestData (..),
     RequestId,
-    TypeData (..),
     TypeId (..),
     VariableId,
+  )
+import Katari.Typechecker.Identifier
+  ( ConstructorData (..),
+    IdentifierResult (..),
+    RequestData (..),
+    TypeData (..),
   )
 
 -- The 'Constrained' phase reuses the 'NameRefResolution Constrained s' family for

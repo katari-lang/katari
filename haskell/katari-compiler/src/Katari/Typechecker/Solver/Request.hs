@@ -31,7 +31,7 @@ import Katari.SemanticType
     SemanticRequestElement (..),
   )
 import Katari.Typechecker.ConstraintGenerator (Constraint (..))
-import Katari.Typechecker.Identifier (RequestId)
+import Katari.Id (RequestId)
 import Katari.Typechecker.Solver.Internal
   ( SolverError,
   )

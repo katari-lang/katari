@@ -20,13 +20,6 @@
 -- is consulted only in type-annotation positions.
 module Katari.Typechecker.Identifier
   ( -- * Types
-    VariableId (..),
-    TypeId (..),
-    ModuleId (..),
-    RequestId (..),
-    ConstructorId (..),
-    QualifiedName (..),
-    renderQualifiedName,
     SymbolEntry (..),
     ModuleData (..),
     VariableData (..),
@@ -61,7 +54,6 @@ import Katari.Id
     RequestId (..),
     TypeId (..),
     VariableId (..),
-    renderQualifiedName,
   )
 import Katari.Internal qualified as Internal
 import Katari.SourceSpan (HasSourceSpan (..), SourceSpan (..))

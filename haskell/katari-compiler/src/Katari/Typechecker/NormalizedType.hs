@@ -57,7 +57,7 @@ import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Katari.SemanticType (Resolved, SemanticRequest (..), SemanticRequestElement (..), SemanticType (..))
-import Katari.Typechecker.Identifier (RequestId, TypeId)
+import Katari.Id (RequestId, TypeId)
 
 -- ---------------------------------------------------------------------------
 -- NormalizedType

@@ -4,7 +4,12 @@ import Data.List (find)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.Text (Text)
-import Katari.Id (QualifiedName (QualifiedName))
+import Katari.Id
+  ( QualifiedName (QualifiedName),
+    RequestId,
+    TypeId,
+    VariableId,
+  )
 import Katari.Lexer qualified as Lexer
 import Katari.Parser qualified as Parser
 import Katari.SemanticType
@@ -12,11 +17,8 @@ import Katari.Typechecker.ConstraintGenerator
 import Katari.Typechecker.Identifier
   ( IdentifierResult (..),
     RequestData (RequestData),
-    RequestId,
     TypeData (..),
-    TypeId,
     VariableData (..),
-    VariableId,
     identify,
   )
 import Test.Hspec

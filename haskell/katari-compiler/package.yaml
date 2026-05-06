@@ -62,13 +62,10 @@ dependencies:
   - megaparsec
   - parser-combinators
   - text
-  - bytestring
   - containers
   - mtl
   - transformers
   - aeson
-  - scientific
-  - vector
   - safe
 
 default-extensions:

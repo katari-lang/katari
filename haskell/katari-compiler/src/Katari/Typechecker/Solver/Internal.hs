@@ -44,7 +44,7 @@ import Katari.Typechecker.ConstraintGenerator
   ( Constraint (..),
     ConstraintReason,
   )
-import Katari.Typechecker.Identifier (RequestId)
+import Katari.Id (RequestId)
 import Katari.Typechecker.NormalizedType
   ( NormalizedType,
     normaliseSemantic,

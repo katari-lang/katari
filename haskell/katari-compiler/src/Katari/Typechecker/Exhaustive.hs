@@ -38,12 +38,14 @@ import Katari.SemanticType
     SemanticType (..),
   )
 import Katari.SourceSpan (HasSourceSpan (..), SourceSpan)
-import Katari.Typechecker.Identifier
-  ( ConstructorData (..),
-    ConstructorId,
+import Katari.Id
+  ( ConstructorId,
     QualifiedName (..),
     TypeId,
     VariableId,
+  )
+import Katari.Typechecker.Identifier
+  ( ConstructorData (..),
   )
 import Katari.Typechecker.Zonker (ZonkResult (..))
 

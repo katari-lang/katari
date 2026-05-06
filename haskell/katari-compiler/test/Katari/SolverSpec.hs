@@ -15,10 +15,10 @@ import Katari.Typechecker.ConstraintGenerator
   ( ConstraintGenResult (..),
     generateConstraints,
   )
+import Katari.Id (VariableId)
 import Katari.Typechecker.Identifier
   ( IdentifierResult (..),
     VariableData (..),
-    VariableId,
     identify,
   )
 import Katari.Typechecker.NormalizedType

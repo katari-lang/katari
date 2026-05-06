@@ -7,7 +7,7 @@ import Data.Map.Strict qualified as Map
 import Data.Maybe (isJust, isNothing)
 import Data.Text (Text)
 import Katari.AST
-import Katari.Id (QualifiedName)
+import Katari.Id (QualifiedName (..))
 import Katari.Lexer qualified as Lexer
 import Katari.Parser qualified as Parser
 import Katari.Typechecker.Identifier
