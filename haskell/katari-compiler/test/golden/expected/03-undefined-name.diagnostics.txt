@@ -1,0 +1,5 @@
+error[K0102]: undefined name 'unknown_function'
+  --> test/golden/cases/03-undefined-name.ktr (2:3)
+  |
+2 |   unknown_function()
+  |   ^^^^^^^^^^^^^^^^

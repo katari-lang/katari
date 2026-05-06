@@ -51,12 +51,15 @@ tests:
       - Katari.DiagnosticSpec
       - Katari.SchemaSpec
       - Katari.CompileSpec
+      - Katari.GoldenSpec
     dependencies:
       - katari-compiler
       - hspec
       - megaparsec
       - directory
       - filepath
+      - aeson-pretty
+      - bytestring
 
 dependencies:
   - base >= 4.18 && < 5

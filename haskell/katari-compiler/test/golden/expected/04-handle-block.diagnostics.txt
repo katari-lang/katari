@@ -1,0 +1,5 @@
+error[K0220]: type contradiction at ReasonKindRequestHandlerNever: expected `SemanticTypeLiteralInteger 42`, found `SemanticTypeNever`
+  --> test/golden/cases/04-handle-block.ktr (7:5)
+  |
+7 |     req fetch_answer() { 42 }
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^

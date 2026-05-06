@@ -1,0 +1,9 @@
+@"A two-element point in 2-D space."
+data point(x: integer, y: integer)
+
+@"Returns the x-coordinate of a point."
+agent project_x(p = pt: point) -> integer {
+  match (pt) {
+    case point(x = xv, y = _) => { xv }
+  }
+}

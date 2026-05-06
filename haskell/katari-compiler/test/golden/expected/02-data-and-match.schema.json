@@ -1,0 +1,74 @@
+[
+  {
+    "description": "A two-element point in 2-D space.",
+    "input": {
+      "additionalProperties": false,
+      "description": "A two-element point in 2-D space.",
+      "properties": {
+        "x": {
+          "type": "integer"
+        },
+        "y": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "x",
+        "y"
+      ],
+      "title": "point",
+      "type": "object"
+    },
+    "name": "main.point",
+    "output": {
+      "additionalProperties": false,
+      "properties": {
+        "x": {
+          "type": "integer"
+        },
+        "y": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "x",
+        "y"
+      ],
+      "type": "object"
+    },
+    "requests": []
+  },
+  {
+    "description": "Returns the x-coordinate of a point.",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "p": {
+          "additionalProperties": false,
+          "properties": {
+            "x": {
+              "type": "integer"
+            },
+            "y": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "x",
+            "y"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "p"
+      ],
+      "type": "object"
+    },
+    "name": "main.project_x",
+    "output": {
+      "type": "integer"
+    },
+    "requests": []
+  }
+]

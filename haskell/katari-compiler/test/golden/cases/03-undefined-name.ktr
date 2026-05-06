@@ -1,0 +1,3 @@
+agent main() -> integer {
+  unknown_function()
+}
