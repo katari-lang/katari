@@ -65,17 +65,17 @@ agentBody agentName irMod = do
   entryId <- Map.lookup (QualifiedName "main" agentName) irMod.entries
   block <- Map.lookup entryId irMod.blocks
   case block of
-    BlockUser {body} -> Just body
+    BlockUser body -> Just body
     _ -> Nothing
 
 -- | Resolve a constructor's bare name (in module @"main"@) to its IR
--- 'CtorId' so 'MatchTag' assertions can compare against the
+-- 'ConstructorId' so 'MatchTag' assertions can compare against the
 -- declaration-side identifier rather than a string.
-ctorIdOf :: Text -> IRModule -> Maybe CtorId
+ctorIdOf :: Text -> IRModule -> Maybe ConstructorId
 ctorIdOf ctorName irMod = do
   bid <- Map.lookup (QualifiedName "main" ctorName) irMod.entries
   case Map.lookup bid irMod.blocks of
-    Just BlockCtor {ctorId} -> Just ctorId
+    Just (BlockConstructor ctorId) -> Just ctorId
     _ -> Nothing
 
 -- | Look up the BlockId for a primitive by name.
@@ -84,7 +84,7 @@ primId primName irMod =
   fst
     <$> find (matchPrim primName . snd) (Map.toList irMod.blocks)
   where
-    matchPrim wanted (BlockPrim {name}) = name == wanted
+    matchPrim wanted (BlockPrim primName) = primName == wanted
     matchPrim _ _ = False
 
 -- | Extract the StatementCall statements from a UserBlock body.
@@ -98,19 +98,19 @@ literalLoads ub = [d | StatementLoadLiteral d <- ub.statements]
 -- | Extract MatchBlock from a block in the IR module (for BlockMatch blocks).
 matchBlockOf :: BlockId -> IRModule -> Maybe MatchBlock
 matchBlockOf bid irMod = case Map.lookup bid irMod.blocks of
-  Just (BlockMatch {matchBlock}) -> Just matchBlock
+  Just (BlockMatch matchBlock) -> Just matchBlock
   _ -> Nothing
 
 -- | Extract ForBlock from a block in the IR module (for BlockFor blocks).
 forBlockOf :: BlockId -> IRModule -> Maybe ForBlock
 forBlockOf bid irMod = case Map.lookup bid irMod.blocks of
-  Just (BlockFor {forBlock}) -> Just forBlock
+  Just (BlockFor forBlock) -> Just forBlock
   _ -> Nothing
 
 -- | Extract HandleBlock from a block in the IR module (for BlockHandle blocks).
 handleBlockOf :: BlockId -> IRModule -> Maybe HandleBlock
 handleBlockOf bid irMod = case Map.lookup bid irMod.blocks of
-  Just (BlockHandle {handleBlock}) -> Just handleBlock
+  Just (BlockHandle handleBlock) -> Just handleBlock
   _ -> Nothing
 
 -- | Find all BlockMatch blocks that are called from a UserBlock.
@@ -264,7 +264,7 @@ callTargetBlockMaybe c = case c.target of
 -- | Look up a UserBlock by id.
 userBlockOf :: BlockId -> IRModule -> Maybe UserBlock
 userBlockOf bid irMod = case Map.lookup bid irMod.blocks of
-  Just (BlockUser {body}) -> Just body
+  Just (BlockUser body) -> Just body
   _ -> Nothing
 
 -- ===========================================================================
@@ -405,17 +405,17 @@ stage2Spec = describe "Stage 2 \8212 control flow" $ do
 -- | Find all MatchBlock payloads in the module.
 findAllMatchBlocks :: IRModule -> [MatchBlock]
 findAllMatchBlocks irMod =
-  [mb | BlockMatch {matchBlock = mb} <- Map.elems irMod.blocks]
+  [mb | BlockMatch mb <- Map.elems irMod.blocks]
 
 -- | Find all ForBlock payloads in the module.
 findAllForBlocks :: IRModule -> [ForBlock]
 findAllForBlocks irMod =
-  [fb | BlockFor {forBlock = fb} <- Map.elems irMod.blocks]
+  [fb | BlockFor fb <- Map.elems irMod.blocks]
 
 -- | Find all HandleBlock payloads in the module.
 findAllHandleBlocks :: IRModule -> [HandleBlock]
 findAllHandleBlocks irMod =
-  [hb | BlockHandle {handleBlock = hb} <- Map.elems irMod.blocks]
+  [hb | BlockHandle hb <- Map.elems irMod.blocks]
 
 -- ===========================================================================
 -- Stage 3 — block / let / scope
@@ -553,7 +553,7 @@ stage3Spec = describe "Stage 3 \8212 block / let / scope" $ do
 isChildBlockCall :: CallData -> IRModule -> Bool
 isChildBlockCall c irMod = case c.target of
   CallTargetBlock {block} -> case Map.lookup block irMod.blocks of
-    Just (BlockUser {body}) -> body.kind == BlockKindInline
+    Just (BlockUser body) -> body.kind == BlockKindInline
     _ -> False
   _ -> False
 
@@ -799,7 +799,7 @@ stage6Spec = describe "Stage 6 \8212 handle scope / where / state vars" $ do
     errs `shouldBe` []
     -- Find the handler block and check its StatementCont
     let allBlocks = Map.elems irMod.blocks
-        userBlocks = [u | BlockUser {body = u} <- allBlocks]
+        userBlocks = [u | BlockUser u <- allBlocks]
         contStmts = [d | u <- userBlocks, StatementCont d <- u.statements]
     case contStmts of
       (c : _) -> do
@@ -931,7 +931,7 @@ stage8Spec = describe "Stage 8 \8212 edge cases" $ do
         outputVars = catMaybes [c.output | c <- calls ub]
     length outputVars `shouldBe` length (Set.toList (Set.fromList outputVars))
 
-  it "data constructor call targets a BlockCtor" $ do
+  it "data constructor call targets a BlockConstructor" $ do
     (irMod, errs) <-
       lowerSource $
         Text.unlines
@@ -945,7 +945,7 @@ stage8Spec = describe "Stage 8 \8212 edge cases" $ do
             | c <- calls ub,
               case c.target of
                 CallTargetBlock {block} -> case Map.lookup block irMod.blocks of
-                  Just (BlockCtor _) -> True
+                  Just (BlockConstructor _) -> True
                   _ -> False
                 _ -> False
           ]

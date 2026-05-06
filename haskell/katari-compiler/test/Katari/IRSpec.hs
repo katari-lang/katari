@@ -52,7 +52,7 @@ blockSpec = describe "Block (sum)" $ do
               statements = [],
               trailing = Just (VarId 1)
             }
-    BlockUser {body = userBlock}
+    BlockUser userBlock
       `shouldEncodeAs` object
         [ "kind" .= ("blockUser" :: String),
           "body"
@@ -64,37 +64,37 @@ blockSpec = describe "Block (sum)" $ do
               ]
         ]
 
-  it "BlockPrim has only kind + name" $ do
-    BlockPrim {name = "add"}
-      `shouldEncodeAs` object ["kind" .= ("blockPrim" :: String), "name" .= ("add" :: String)]
+  it "BlockPrim carries kind + body (the prim name)" $ do
+    BlockPrim "add"
+      `shouldEncodeAs` object ["kind" .= ("blockPrim" :: String), "body" .= ("add" :: String)]
 
-  it "BlockRequest carries kind + reqId" $ do
-    BlockRequest {reqId = ReqId 7}
-      `shouldEncodeAs` object ["kind" .= ("blockRequest" :: String), "reqId" .= (7 :: Int)]
+  it "BlockRequest carries kind + body (RequestId)" $ do
+    BlockRequest (RequestId 7)
+      `shouldEncodeAs` object ["kind" .= ("blockRequest" :: String), "body" .= (7 :: Int)]
 
-  it "BlockExternal carries kind + externalName" $ do
-    BlockExternal {externalName = ExternalName (QualifiedName "discord" "send_message")}
+  it "BlockExternal carries kind + body (ExternalName)" $ do
+    BlockExternal (ExternalName (QualifiedName "discord" "send_message"))
       `shouldEncodeAs` object
         [ "kind" .= ("blockExternal" :: String),
-          "externalName" .= object ["module_" .= ("discord" :: String), "name" .= ("send_message" :: String)]
+          "body" .= object ["module_" .= ("discord" :: String), "name" .= ("send_message" :: String)]
         ]
 
-  it "BlockCtor carries kind + ctorId" $ do
-    BlockCtor {ctorId = CtorId 3}
-      `shouldEncodeAs` object ["kind" .= ("blockCtor" :: String), "ctorId" .= (3 :: Int)]
+  it "BlockConstructor carries kind + body (ConstructorId)" $ do
+    BlockConstructor (ConstructorId 3)
+      `shouldEncodeAs` object ["kind" .= ("blockConstructor" :: String), "body" .= (3 :: Int)]
 
-  it "BlockTuple carries kind + tupleBlock" $ do
-    BlockTuple {tupleBlock = TupleBlock {parallel = False, elements = [BlockId 1, BlockId 2]}}
+  it "BlockTuple carries kind + body (TupleBlock)" $ do
+    BlockTuple TupleBlock {parallel = False, elements = [BlockId 1, BlockId 2]}
       `shouldEncodeAs` object
         [ "kind" .= ("blockTuple" :: String),
-          "tupleBlock" .= object ["parallel" .= False, "elements" .= [1 :: Int, 2]]
+          "body" .= object ["parallel" .= False, "elements" .= [1 :: Int, 2]]
         ]
 
-  it "BlockArray carries kind + arrayBlock" $ do
-    BlockArray {arrayBlock = ArrayBlock {parallel = True, elements = [BlockId 5]}}
+  it "BlockArray carries kind + body (ArrayBlock)" $ do
+    BlockArray ArrayBlock {parallel = True, elements = [BlockId 5]}
       `shouldEncodeAs` object
         [ "kind" .= ("blockArray" :: String),
-          "arrayBlock" .= object ["parallel" .= True, "elements" .= [5 :: Int]]
+          "body" .= object ["parallel" .= True, "elements" .= [5 :: Int]]
         ]
 
   it "round-trips all variants" $ do
@@ -105,16 +105,16 @@ blockSpec = describe "Block (sum)" $ do
               statements = [],
               trailing = Nothing
             }
-    roundTrip BlockUser {body = userBody}
-    roundTrip BlockPrim {name = "add"}
-    roundTrip BlockRequest {reqId = ReqId 7}
+    roundTrip (BlockUser userBody)
+    roundTrip (BlockPrim "add")
+    roundTrip (BlockRequest (RequestId 7))
     roundTrip (BlockExternal (ExternalName (QualifiedName "discord" "send")))
-    roundTrip BlockCtor {ctorId = CtorId 3}
-    roundTrip (BlockMatch {matchBlock = MatchBlock {subject = VarId 0, arms = [], defaultArm = Nothing}})
-    roundTrip (BlockFor {forBlock = ForBlock {parallel = False, iters = [], stateInits = [], bodyBlock = BlockId 0, thenBlock = Nothing}})
-    roundTrip (BlockHandle {handleBlock = HandleBlock {parallel = False, stateInits = [], body = BlockId 0, handlers = [], thenBlock = Nothing}})
-    roundTrip (BlockTuple {tupleBlock = TupleBlock {parallel = False, elements = []}})
-    roundTrip (BlockArray {arrayBlock = ArrayBlock {parallel = True, elements = [BlockId 1]}})
+    roundTrip (BlockConstructor (ConstructorId 3))
+    roundTrip (BlockMatch MatchBlock {subject = VarId 0, arms = [], defaultArm = Nothing})
+    roundTrip (BlockFor ForBlock {parallel = False, iters = [], stateInits = [], bodyBlock = BlockId 0, thenBlock = Nothing})
+    roundTrip (BlockHandle HandleBlock {parallel = False, stateInits = [], body = BlockId 0, handlers = [], thenBlock = Nothing})
+    roundTrip (BlockTuple TupleBlock {parallel = False, elements = []})
+    roundTrip (BlockArray ArrayBlock {parallel = True, elements = [BlockId 1]})
 
 blockKindSpec :: Spec
 blockKindSpec = describe "BlockKind" $ do
@@ -131,7 +131,7 @@ blockKindSpec = describe "BlockKind" $ do
 
 statementSpec :: Spec
 statementSpec = describe "Statement (sum)" $ do
-  it "StatementCall nests CallData under 'contents'" $ do
+  it "StatementCall nests CallData under 'body'" $ do
     StatementCall
       CallData
         { target = CallTargetBlock {block = BlockId 7},
@@ -140,7 +140,7 @@ statementSpec = describe "Statement (sum)" $ do
         }
       `shouldEncodeAs` object
         [ "kind" .= ("statementCall" :: String),
-          "contents"
+          "body"
             .= object
               [ "target" .= object ["kind" .= ("callTargetBlock" :: String), "block" .= (7 :: Int)],
                 "arguments" .= [object ["label" .= ("x" :: String), "var" .= (1 :: Int)]],
@@ -148,22 +148,22 @@ statementSpec = describe "Statement (sum)" $ do
               ]
         ]
 
-  it "StatementMakeClosure nests MakeClosureData under 'contents'" $ do
+  it "StatementMakeClosure nests MakeClosureData under 'body'" $ do
     StatementMakeClosure MakeClosureData {output = VarId 3, block = BlockId 12}
       `shouldEncodeAs` object
         [ "kind" .= ("statementMakeClosure" :: String),
-          "contents"
+          "body"
             .= object
               [ "output" .= (3 :: Int),
                 "block" .= (12 :: Int)
               ]
         ]
 
-  it "StatementExit nests ExitData under 'contents' (with exitKind enum)" $ do
+  it "StatementExit nests ExitData under 'body' (with exitKind enum)" $ do
     StatementExit ExitData {exitKind = ExitKindReturn, value = VarId 4}
       `shouldEncodeAs` object
         [ "kind" .= ("statementExit" :: String),
-          "contents"
+          "body"
             .= object
               [ "exitKind" .= ("exitKindReturn" :: String),
                 "value" .= (4 :: Int)
@@ -179,7 +179,7 @@ statementSpec = describe "Statement (sum)" $ do
         }
       `shouldEncodeAs` object
         [ "kind" .= ("statementCont" :: String),
-          "contents"
+          "body"
             .= object
               [ "contKind" .= ("contKindForNext" :: String),
                 "modifiers" .= [[Aeson.Number 5, Aeson.Number 6]]
@@ -190,7 +190,7 @@ statementSpec = describe "Statement (sum)" $ do
     StatementLoadLiteral LoadLiteralData {output = VarId 5, value = LiteralValueInteger 42}
       `shouldEncodeAs` object
         [ "kind" .= ("statementLoadLiteral" :: String),
-          "contents"
+          "body"
             .= object
               [ "output" .= (5 :: Int),
                 "value" .= object ["kind" .= ("literalValueInteger" :: String), "integer" .= (42 :: Int)]
@@ -262,7 +262,7 @@ matchArmSpec = describe "MatchArm" $ do
       MatchArm
         { pattern =
             MatchPatternConstructor
-              (CtorId 5)
+              (ConstructorId 5)
               [("head", MatchPatternVariable (VarId 1)), ("tail", MatchPatternVariable (VarId 2))],
           body = BlockId 3
         }
@@ -282,14 +282,12 @@ moduleSpec = describe "IRModule" $ do
   it "round-trips a small module with one block" $ do
     let block =
           BlockUser
-            { body =
-                UserBlock
-                  { kind = BlockKindAgent,
-                    parameters = [],
-                    statements = [StatementExit ExitData {exitKind = ExitKindReturn, value = VarId 0}],
-                    trailing = Nothing
-                  }
-            }
+            UserBlock
+              { kind = BlockKindAgent,
+                parameters = [],
+                statements = [StatementExit ExitData {exitKind = ExitKindReturn, value = VarId 0}],
+                trailing = Nothing
+              }
     roundTrip
       IRModule
         { metadata = currentIRMetadata,

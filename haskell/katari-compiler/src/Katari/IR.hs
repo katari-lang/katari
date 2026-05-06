@@ -25,8 +25,8 @@ module Katari.IR
   ( -- * Identifiers
     BlockId (..),
     VarId (..),
-    ReqId (..),
-    CtorId (..),
+    RequestId (..),
+    ConstructorId (..),
     QualifiedName (..),
     renderQualifiedName,
     ExternalName (..),
@@ -105,20 +105,24 @@ newtype VarId = VarId Word32
   deriving newtype (ToJSON, FromJSON, ToJSONKey, FromJSONKey)
 
 -- | IR-level request identifier carried by a 'BlockRequest'. Independent
--- of the Identifier-pass 'RequestId' (Lowering re-allocates these so the
--- IR can be re-indexed without touching upstream phases). Currently 1:1
--- with the corresponding 'BlockRequest'\'s 'BlockId', but kept as a
--- separate id space to preserve flexibility (the runtime dispatches
--- handlers by 'ReqId' equality, which is faster than walking the block
--- table).
-newtype ReqId = ReqId Word32
+-- of the Identifier-pass 'Katari.Id.RequestId' (Lowering re-allocates
+-- these so the IR can be re-indexed without touching upstream phases).
+-- Currently 1:1 with the corresponding 'BlockRequest'\'s 'BlockId', but
+-- kept as a separate id space to preserve flexibility (the runtime
+-- dispatches handlers by id equality, which is faster than walking the
+-- block table).
+--
+-- Use a qualified import (e.g. @import Katari.IR qualified as IR@) when
+-- both this and the AST-side 'Katari.Id.RequestId' are in scope.
+newtype RequestId = RequestId Word32
   deriving stock (Eq, Ord, Show)
   deriving newtype (ToJSON, FromJSON, ToJSONKey, FromJSONKey)
 
--- | IR-level constructor identifier carried by a 'BlockCtor' and stored
--- inside every tagged value the runtime constructs. Independent of the
--- Identifier-pass 'ConstructorId' for the same reason as 'ReqId'.
-newtype CtorId = CtorId Word32
+-- | IR-level constructor identifier carried by a 'BlockConstructor' and
+-- stored inside every tagged value the runtime constructs. Independent of
+-- the Identifier-pass 'Katari.Id.ConstructorId' for the same reason as
+-- the IR 'RequestId'.
+newtype ConstructorId = ConstructorId Word32
   deriving stock (Eq, Ord, Show)
   deriving newtype (ToJSON, FromJSON, ToJSONKey, FromJSONKey)
 
@@ -126,7 +130,7 @@ newtype CtorId = CtorId Word32
 -- as the canonical pair). Used as the FFI-boundary identifier in
 -- 'IRModule.entries' so that JS / external callers can address a
 -- callable without depending on the IR's internal 'BlockId' /
--- 'ReqId' / 'CtorId' allocation.
+-- 'RequestId' / 'ConstructorId' allocation.
 data QualifiedName = QualifiedName
   { module_ :: Text,
     name :: Text
@@ -202,7 +206,7 @@ data IRModule = IRModule
     -- 'BlockId'. Covers every top-level callable (agent / req / ext /
     -- ctor) so external callers (JS sidecars, LSP, tooling) can address
     -- them by name. The IR's internal id allocations ('BlockId',
-    -- 'ReqId', 'CtorId') are intentionally not exposed; the runtime
+    -- 'RequestId', 'ConstructorId') are intentionally not exposed; the runtime
     -- derives any inverse maps it needs by walking 'blocks' once at
     -- load time.
     entries :: Map QualifiedName BlockId,
@@ -237,51 +241,51 @@ emptyNameTable = NameTable {varNames = Map.empty, blockNames = Map.empty}
 -- Block
 -- ===========================================================================
 
--- | All callable units. Special blocks (prim / req / ext / ctor) carry only
--- the metadata the runtime needs to dispatch them; the public,
--- FFI-visible name lives at the 'IRModule' level instead, so each block
--- variant only stores its dispatch-axis identifier.
+-- | All callable units. Each variant carries exactly one payload,
+-- serialised as the JSON @body@ field via 'sumOptions'
+-- (@contentsFieldName = \"body\"@). GHC forbids GADT constructors that
+-- share a record-syntax field with different types, so the data type is
+-- positional; pattern-match to extract the payload.
 data Block where
-  -- | Regular user-defined block. The body lives in a separate record so
-  -- the field set can grow independently of the sum tag.
-  BlockUser :: {body :: UserBlock} -> Block
-  -- | Built-in primitive. The runtime resolves @name@ against its prim
-  -- registry. Prims are system-provided and have no module of origin,
-  -- so they keep a plain 'Text' identifier (and never appear in
-  -- 'IRModule.entries').
-  BlockPrim :: {name :: Text} -> Block
-  -- | Request declaration. The 'reqId' is what handlers match against
-  -- ('Handler.request') when a request is raised via 'SCall'. The
-  -- public qualified name lives in 'IRModule.entries'.
-  BlockRequest :: {reqId :: ReqId} -> Block
-  -- | External agent stub. The runtime looks up @externalName@ in a
+  -- | Regular user-defined block.
+  BlockUser :: UserBlock -> Block
+  -- | Built-in primitive. The runtime resolves the carried name against
+  -- its prim registry. Prims are system-provided and have no module of
+  -- origin (they never appear in 'IRModule.entries').
+  BlockPrim :: Text -> Block
+  -- | Request declaration. Handlers match the carried 'RequestId' on
+  -- 'SCall'. The public qualified name lives in 'IRModule.entries'.
+  BlockRequest :: RequestId -> Block
+  -- | External agent stub. The runtime looks up the 'ExternalName' in a
   -- JS sidecar bundle.
-  BlockExternal :: {externalName :: ExternalName} -> Block
-  -- | Data constructor. The 'ctorId' is what 'MatchTagConstructor'
-  -- compares against in match arms; values built by this block carry
-  -- @{__ctor: <ctorId>, ...}@ at runtime.
-  BlockCtor :: {ctorId :: CtorId} -> Block
+  BlockExternal :: ExternalName -> Block
+  -- | Data constructor. The carried 'ConstructorId' is what
+  -- 'MatchPatternConstructor' compares against in match arms; values
+  -- built by this block carry @{__ctor: <constructorId>, ...}@ at
+  -- runtime.
+  BlockConstructor :: ConstructorId -> Block
   -- | Match block. The runtime creates a management thread, evaluates
-  -- 'subject' from the inherited parent scope, walks arms in order, and
-  -- executes the first matching arm's body. Called via 'StatementCall'.
-  BlockMatch :: {matchBlock :: MatchBlock} -> Block
+  -- the subject from the inherited parent scope, walks arms in order,
+  -- and executes the first matching arm's body. Called via
+  -- 'StatementCall'.
+  BlockMatch :: MatchBlock -> Block
   -- | For-loop block. The runtime creates a management thread, reads
   -- source arrays and init values from the inherited parent scope,
-  -- manages iteration / state-var updates, and runs the body per element.
-  -- Called via 'StatementCall'.
-  BlockFor :: {forBlock :: ForBlock} -> Block
+  -- manages iteration / state-var updates, and runs the body per
+  -- element. Called via 'StatementCall'.
+  BlockFor :: ForBlock -> Block
   -- | Handle block. The runtime creates a management thread, initialises
   -- state vars from the inherited parent scope, runs the body, and
   -- dispatches requests to handlers. Called via 'StatementCall'.
-  BlockHandle :: {handleBlock :: HandleBlock} -> Block
+  BlockHandle :: HandleBlock -> Block
   -- | Tuple construction. Each element is an independent block whose
   -- trailing value becomes one component of the resulting tuple.
   -- When @parallel = True@, element blocks run concurrently.
-  BlockTuple :: {tupleBlock :: TupleBlock} -> Block
+  BlockTuple :: TupleBlock -> Block
   -- | Array construction. Each element is an independent block whose
   -- trailing value becomes one item in the resulting array.
   -- When @parallel = True@, element blocks run concurrently.
-  BlockArray :: {arrayBlock :: ArrayBlock} -> Block
+  BlockArray :: ArrayBlock -> Block
   deriving (Eq, Show, Generic)
 
 instance ToJSON Block where
@@ -353,11 +357,11 @@ instance FromJSON Param where
   parseJSON = genericParseJSON irOptions
 
 -- | A request handler inside a 'HandleData'. Handler dispatch compares the
--- raised request's 'ReqId' against this 'request' field; on equality the
+-- raised request's 'RequestId' against this 'request' field; on equality the
 -- runtime invokes 'handlerBody'.
 data Handler = Handler
-  { -- | The 'ReqId' of the 'BlockRequest' being handled.
-    request :: ReqId,
+  { -- | The 'RequestId' of the 'BlockRequest' being handled.
+    request :: RequestId,
     -- | The handler body block ('BlockKindInline'). Inherits the handle scope
     -- (state vars are directly accessible). Its 'parameters' carry the req args.
     handlerBody :: BlockId
@@ -488,7 +492,7 @@ data HandleBlock = HandleBlock
     stateInits :: [(VarId, VarId)],
     -- | Body block ('BlockKindInline'). Inherits the handle scope.
     body :: BlockId,
-    -- | Request handlers dispatched by 'ReqId'.
+    -- | Request handlers dispatched by 'RequestId'.
     handlers :: [Handler],
     -- | Optional then-block ('BlockKindInline') run when body completes.
     -- Its single parameter (label @\"value\"@) receives the body's trailing value.
@@ -649,7 +653,7 @@ data MatchPattern where
   MatchPatternLiteral :: LiteralValue -> MatchPattern
   -- | Match if the subject is a tagged value with this constructor
   -- id; recursively match each named field's sub-pattern.
-  MatchPatternConstructor :: CtorId -> [(Text, MatchPattern)] -> MatchPattern
+  MatchPatternConstructor :: ConstructorId -> [(Text, MatchPattern)] -> MatchPattern
   -- | Match a tuple positionally; recurse into each element.
   MatchPatternTuple :: [MatchPattern] -> MatchPattern
   deriving (Eq, Show, Generic)
@@ -721,7 +725,7 @@ lowerHead (c : cs) = toLower c : cs
 sumOptions :: Options
 sumOptions =
   defaultOptions
-    { sumEncoding = TaggedObject "kind" "contents",
+    { sumEncoding = TaggedObject "kind" "body",
       fieldLabelModifier = id,
       constructorTagModifier = lowerHead,
       omitNothingFields = True
