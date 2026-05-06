@@ -46,6 +46,7 @@ import Katari.Id
   )
 import Katari.Typechecker.Identifier
   ( ConstructorData (..),
+    IdentifierResult (..),
   )
 import Katari.Typechecker.Zonker (ZonkResult (..))
 
@@ -125,9 +126,11 @@ newtype PatMatrix = PatMatrix [PatRow]
 -- ===========================================================================
 
 -- | Threading context for the algorithm. Carries the subject column type
--- for each column (left-to-right) and the ZonkResult for ctor lookups.
+-- for each column (left-to-right), the 'IdentifierResult' for constructor
+-- lookups, and the 'ZonkResult' for type-environment lookups.
 data TypeCtx = TypeCtx
   { columnTypes :: [SemanticType Resolved],
+    identifierResult :: IdentifierResult,
     zonkResult :: ZonkResult
   }
 
@@ -153,7 +156,7 @@ useful context matrix@(PatMatrix rows) testRow = case (rows, testRow) of
   (_, PatHeadWildcard : restPats) ->
     let columnType = headColumnType context
         sigma = headsOf matrix
-     in if isCompleteSig (map fst sigma) columnType context.zonkResult
+     in if isCompleteSig (map fst sigma) columnType context.identifierResult context.zonkResult
           then -- complete signature: recurse on each specialisation
             any
               ( \(tag, arity) ->
@@ -214,7 +217,7 @@ defaultRow PatRow {patRowPats, patRowSpan} =
 -- The head column is replaced by the field types of @tag@.
 specializeCtx :: CtorTag -> SemanticType Resolved -> TypeCtx -> TypeCtx
 specializeCtx tag columnType context =
-  let subFieldTypes = getSubFieldTypes tag columnType context.zonkResult
+  let subFieldTypes = getSubFieldTypes tag columnType context.identifierResult context.zonkResult
       remaining = drop 1 context.columnTypes
    in context {columnTypes = subFieldTypes ++ remaining}
 
@@ -224,10 +227,10 @@ defaultCtx context = context {columnTypes = drop 1 context.columnTypes}
 
 -- | Field types for a constructor, in alphabetical label order. Returns []
 -- for literal / null tags (arity 0) and tuples (handled separately).
-getSubFieldTypes :: CtorTag -> SemanticType Resolved -> ZonkResult -> [SemanticType Resolved]
-getSubFieldTypes tag columnType zonkResult = case tag of
+getSubFieldTypes :: CtorTag -> SemanticType Resolved -> IdentifierResult -> ZonkResult -> [SemanticType Resolved]
+getSubFieldTypes tag columnType idResult zonkResult = case tag of
   CtorTagData cid ->
-    case Map.lookup cid zonkResult.zonkedConstructors of
+    case Map.lookup cid idResult.identifiedConstructors of
       Nothing -> []
       Just cd ->
         case Map.lookup cd.constructorVariableId zonkResult.zonkedTypeEnvironment of
@@ -243,11 +246,11 @@ getSubFieldTypes tag columnType zonkResult = case tag of
 -- Complete-signature check
 -- ===========================================================================
 
--- | @isCompleteSig seen ty zonkResult@ — returns 'True' if @seen@ (the set of ctor
--- tags appearing in the first column of the pattern matrix) constitutes a
--- complete signature for @ty@.
-isCompleteSig :: [CtorTag] -> SemanticType Resolved -> ZonkResult -> Bool
-isCompleteSig seen ty zonkResult = case ty of
+-- | @isCompleteSig seen ty idResult zonkResult@ — returns 'True' if @seen@
+-- (the set of ctor tags appearing in the first column of the pattern
+-- matrix) constitutes a complete signature for @ty@.
+isCompleteSig :: [CtorTag] -> SemanticType Resolved -> IdentifierResult -> ZonkResult -> Bool
+isCompleteSig seen ty idResult zonkResult = case ty of
   SemanticTypeBoolean ->
     CtorTagLitBool True `elem` seen && CtorTagLitBool False `elem` seen
   SemanticTypeNull ->
@@ -261,14 +264,14 @@ isCompleteSig seen ty zonkResult = case ty of
   SemanticTypeTuple tupleTypes ->
     CtorTagTupleN (length tupleTypes) `elem` seen
   SemanticTypeData tid ->
-    let ctorIds = [cid | (cid, _) <- ctorsOfType zonkResult tid]
+    let ctorIds = [cid | (cid, _) <- ctorsOfType idResult zonkResult tid]
         seenCtorIds = [cid | CtorTagData cid <- seen]
      in null ctorIds -- vacuously complete (no constructors)
           || all (`elem` seenCtorIds) ctorIds
   SemanticTypeUnion branches ->
     -- Complete iff every branch is completely covered.
     not (null branches)
-      && all (\branch -> isCompleteSig seen branch zonkResult) branches
+      && all (\branch -> isCompleteSig seen branch idResult zonkResult) branches
   SemanticTypeNever ->
     True -- no values; vacuously exhaustive
   _ ->
@@ -279,10 +282,10 @@ isCompleteSig seen ty zonkResult = case ty of
 -- ===========================================================================
 
 -- | All constructors of a data type, with their arities.
-ctorsOfType :: ZonkResult -> TypeId -> [(ConstructorId, Int)]
-ctorsOfType zonkResult typeId =
+ctorsOfType :: IdentifierResult -> ZonkResult -> TypeId -> [(ConstructorId, Int)]
+ctorsOfType idResult zonkResult typeId =
   [ (cid, lookupCtorArity zonkResult cd.constructorVariableId)
-    | (cid, cd) <- Map.toList zonkResult.zonkedConstructors,
+    | (cid, cd) <- Map.toList idResult.identifiedConstructors,
       cd.constructorTypeId == typeId
   ]
 
@@ -358,8 +361,8 @@ renderWitnesses witnesses = "`" <> Text.intercalate " | " witnesses <> "`"
 
 -- | Build a minimal human-readable counter-example from a 'PatHead'. Used
 -- for K0290 / K0291 diagnostic messages.
-renderPatHead :: ZonkResult -> PatHead -> Text
-renderPatHead zonkResult = \case
+renderPatHead :: IdentifierResult -> ZonkResult -> PatHead -> Text
+renderPatHead idResult zonkResult = \case
   PatHeadWildcard -> "_"
   PatHeadCtor (CtorTagLitBool b) _ -> if b then "true" else "false"
   PatHeadCtor CtorTagNull _ -> "null"
@@ -367,25 +370,25 @@ renderPatHead zonkResult = \case
   PatHeadCtor (CtorTagLitStr s) _ -> "\"" <> s <> "\""
   PatHeadCtor (CtorTagTupleN n) subs ->
     "("
-      <> Text.intercalate ", " (map (renderPatHead zonkResult) subs)
+      <> Text.intercalate ", " (map (renderPatHead idResult zonkResult) subs)
       <> ")"
       <> if null subs then Text.pack (" {tuple/" <> show n <> "}") else ""
   PatHeadCtor (CtorTagData cid) subs ->
-    let ctorName = case Map.lookup cid zonkResult.zonkedConstructors of
+    let ctorName = case Map.lookup cid idResult.identifiedConstructors of
           Just cd -> cd.constructorQualifiedName.name
           Nothing -> "?"
      in if null subs
           then ctorName <> "()"
-          else ctorName <> "(" <> Text.intercalate ", " (map (renderPatHead zonkResult) subs) <> ")"
+          else ctorName <> "(" <> Text.intercalate ", " (map (renderPatHead idResult zonkResult) subs) <> ")"
 
 -- ===========================================================================
 -- Match checking
 -- ===========================================================================
 
-checkMatch :: ZonkResult -> AST.MatchExpression Zonked -> [ExhaustiveError]
-checkMatch zonkResult me =
+checkMatch :: IdentifierResult -> ZonkResult -> AST.MatchExpression Zonked -> [ExhaustiveError]
+checkMatch idResult zonkResult me =
   let subjectType = getExpressionType me.subject
-      context = TypeCtx {columnTypes = [subjectType], zonkResult = zonkResult}
+      context = TypeCtx {columnTypes = [subjectType], identifierResult = idResult, zonkResult = zonkResult}
       arms = me.cases
       armHeads = map (\arm -> patternToHead arm.pattern) arms
       armRows = [PatRow [h] arm.sourceSpan | (arm, h) <- zip arms armHeads]
@@ -394,7 +397,7 @@ checkMatch zonkResult me =
       nonExhaustiveErrors =
         if useful context matrix [PatHeadWildcard]
           then
-            let witness = renderPatHead zonkResult PatHeadWildcard
+            let witness = renderPatHead idResult zonkResult PatHeadWildcard
              in [ExhaustiveErrorNonExhaustiveMatch me.sourceSpan [witness]]
           else []
       -- Reachability: is arm i already covered by prior arms?
@@ -410,18 +413,19 @@ checkMatch zonkResult me =
 -- | Check that @pattern@ is irrefutable (covers all values of @subjectType@).
 -- Returns a K0291 error if not.
 checkIrrefutable ::
+  IdentifierResult ->
   ZonkResult ->
   AST.Pattern Zonked ->
   SemanticType Resolved ->
   [ExhaustiveError]
-checkIrrefutable zonkResult pattern subjectType =
+checkIrrefutable idResult zonkResult pattern subjectType =
   let headPat = patternToHead pattern
-      context = TypeCtx {columnTypes = [subjectType], zonkResult = zonkResult}
+      context = TypeCtx {columnTypes = [subjectType], identifierResult = idResult, zonkResult = zonkResult}
       sourceSpan = sourceSpanOf pattern
       row = PatRow [headPat] sourceSpan
    in if useful context (PatMatrix [row]) [PatHeadWildcard]
         then
-          let witness = renderPatHead zonkResult PatHeadWildcard
+          let witness = renderPatHead idResult zonkResult PatHeadWildcard
            in [ExhaustiveErrorNonExhaustiveBinding sourceSpan [witness]]
         else []
 
@@ -430,17 +434,17 @@ checkIrrefutable zonkResult pattern subjectType =
 -- ===========================================================================
 
 -- | Entry point: walk all Zonked modules and collect exhaustiveness errors.
-checkExhaustive :: ZonkResult -> [ExhaustiveError]
-checkExhaustive zonkResult =
-  concatMap (walkModule zonkResult) (Map.elems zonkResult.zonkedModules)
+checkExhaustive :: IdentifierResult -> ZonkResult -> [ExhaustiveError]
+checkExhaustive idResult zonkResult =
+  concatMap (walkModule idResult zonkResult) (Map.elems zonkResult.zonkedModules)
 
-walkModule :: ZonkResult -> AST.Module Zonked -> [ExhaustiveError]
-walkModule zonkResult m = concatMap (walkDeclaration zonkResult) m.declarations
+walkModule :: IdentifierResult -> ZonkResult -> AST.Module Zonked -> [ExhaustiveError]
+walkModule idResult zonkResult m = concatMap (walkDeclaration idResult zonkResult) m.declarations
 
-walkDeclaration :: ZonkResult -> AST.Declaration Zonked -> [ExhaustiveError]
-walkDeclaration zonkResult = \case
+walkDeclaration :: IdentifierResult -> ZonkResult -> AST.Declaration Zonked -> [ExhaustiveError]
+walkDeclaration idResult zonkResult = \case
   AST.DeclarationAgent decl ->
-    walkAgentBody zonkResult decl.name.resolution decl.parameters decl.body
+    walkAgentBody idResult zonkResult decl.name.resolution decl.parameters decl.body
   AST.DeclarationRequest _ -> []
   AST.DeclarationExternalAgent _ -> []
   AST.DeclarationData _ -> []
@@ -450,122 +454,124 @@ walkDeclaration zonkResult = \case
 
 -- | Walk an agent body: check parameter irrefutability + walk the block.
 walkAgentBody ::
+  IdentifierResult ->
   ZonkResult ->
   Maybe VariableId ->
   [AST.ParameterBinding Zonked] ->
   AST.Block Zonked ->
   [ExhaustiveError]
-walkAgentBody zonkResult maybeVarId parameters block =
-  paramErrors ++ walkBlock zonkResult block
+walkAgentBody idResult zonkResult maybeVarId parameters block =
+  paramErrors ++ walkBlock idResult zonkResult block
   where
     paramErrors = case maybeVarId of
       Nothing -> []
       Just varId ->
         case Map.lookup varId zonkResult.zonkedTypeEnvironment of
           Just (SemanticTypeFunction paramTypes _ _) ->
-            concatMap (checkParam zonkResult paramTypes) parameters
+            concatMap (checkParam idResult zonkResult paramTypes) parameters
           _ -> []
 
 -- | Check that a parameter's pattern is irrefutable for its declared type.
 checkParam ::
+  IdentifierResult ->
   ZonkResult ->
   Map Text (SemanticType Resolved) ->
   AST.ParameterBinding Zonked ->
   [ExhaustiveError]
-checkParam zonkResult paramTypes pb =
+checkParam idResult zonkResult paramTypes pb =
   let paramType = Map.findWithDefault SemanticTypeUnknown pb.label paramTypes
-   in checkIrrefutable zonkResult pb.pattern paramType
+   in checkIrrefutable idResult zonkResult pb.pattern paramType
 
-walkBlock :: ZonkResult -> AST.Block Zonked -> [ExhaustiveError]
-walkBlock zonkResult block =
-  concatMap (walkStatement zonkResult) block.statements
-    ++ maybe [] (walkExpression zonkResult) block.returnExpression
+walkBlock :: IdentifierResult -> ZonkResult -> AST.Block Zonked -> [ExhaustiveError]
+walkBlock idResult zonkResult block =
+  concatMap (walkStatement idResult zonkResult) block.statements
+    ++ maybe [] (walkExpression idResult zonkResult) block.returnExpression
 
-walkHandler :: ZonkResult -> AST.RequestHandler Zonked -> [ExhaustiveError]
-walkHandler zonkResult rh = walkBlock zonkResult rh.body
+walkHandler :: IdentifierResult -> ZonkResult -> AST.RequestHandler Zonked -> [ExhaustiveError]
+walkHandler idResult zonkResult rh = walkBlock idResult zonkResult rh.body
 
-walkStatement :: ZonkResult -> AST.Statement Zonked -> [ExhaustiveError]
-walkStatement zonkResult = \case
+walkStatement :: IdentifierResult -> ZonkResult -> AST.Statement Zonked -> [ExhaustiveError]
+walkStatement idResult zonkResult = \case
   AST.StatementLet ls ->
-    walkExpression zonkResult ls.value
-      ++ checkIrrefutable zonkResult ls.pattern (getExpressionType ls.value)
+    walkExpression idResult zonkResult ls.value
+      ++ checkIrrefutable idResult zonkResult ls.pattern (getExpressionType ls.value)
   AST.StatementAgent ls ->
-    walkAgentBody zonkResult ls.name.resolution ls.parameters ls.body
+    walkAgentBody idResult zonkResult ls.name.resolution ls.parameters ls.body
   AST.StatementReturn rs ->
-    walkExpression zonkResult rs.value
+    walkExpression idResult zonkResult rs.value
   AST.StatementNext ns ->
-    walkExpression zonkResult ns.value
-      ++ concatMap (walkExpression zonkResult . (.value)) ns.modifiers
+    walkExpression idResult zonkResult ns.value
+      ++ concatMap (walkExpression idResult zonkResult . (.value)) ns.modifiers
   AST.StatementBreak bs ->
-    walkExpression zonkResult bs.value
+    walkExpression idResult zonkResult bs.value
   AST.StatementForBreak fbs ->
-    walkExpression zonkResult fbs.value
+    walkExpression idResult zonkResult fbs.value
   AST.StatementExpression expr ->
-    walkExpression zonkResult expr
+    walkExpression idResult zonkResult expr
   AST.StatementForNext _ -> []
   AST.StatementError _ -> []
 
-walkExpression :: ZonkResult -> AST.Expression Zonked -> [ExhaustiveError]
-walkExpression zonkResult = \case
+walkExpression :: IdentifierResult -> ZonkResult -> AST.Expression Zonked -> [ExhaustiveError]
+walkExpression idResult zonkResult = \case
   AST.ExpressionMatch me ->
-    walkExpression zonkResult me.subject
-      ++ concatMap (walkBlock zonkResult . (.body)) me.cases
-      ++ checkMatch zonkResult me
+    walkExpression idResult zonkResult me.subject
+      ++ concatMap (walkBlock idResult zonkResult . (.body)) me.cases
+      ++ checkMatch idResult zonkResult me
   AST.ExpressionFor fe ->
-    concatMap (walkForInBinding zonkResult) fe.inBindings
-      ++ concatMap (walkExpression zonkResult . (.initial)) fe.varBindings
-      ++ walkBlock zonkResult fe.body
-      ++ maybe [] (walkBlock zonkResult) fe.thenBlock
+    concatMap (walkForInBinding idResult zonkResult) fe.inBindings
+      ++ concatMap (walkExpression idResult zonkResult . (.initial)) fe.varBindings
+      ++ walkBlock idResult zonkResult fe.body
+      ++ maybe [] (walkBlock idResult zonkResult) fe.thenBlock
   AST.ExpressionIf ie ->
-    walkExpression zonkResult ie.condition
-      ++ walkBlock zonkResult ie.thenBlock
-      ++ maybe [] (walkBlock zonkResult) ie.elseBlock
+    walkExpression idResult zonkResult ie.condition
+      ++ walkBlock idResult zonkResult ie.thenBlock
+      ++ maybe [] (walkBlock idResult zonkResult) ie.elseBlock
   AST.ExpressionBlock be ->
-    walkBlock zonkResult be.block
+    walkBlock idResult zonkResult be.block
   AST.ExpressionCall ce ->
-    walkExpression zonkResult ce.callee
-      ++ concatMap (walkExpression zonkResult . (.value)) ce.arguments
+    walkExpression idResult zonkResult ce.callee
+      ++ concatMap (walkExpression idResult zonkResult . (.value)) ce.arguments
   AST.ExpressionBinaryOperator be ->
-    walkExpression zonkResult be.left ++ walkExpression zonkResult be.right
+    walkExpression idResult zonkResult be.left ++ walkExpression idResult zonkResult be.right
   AST.ExpressionUnaryOperator ue ->
-    walkExpression zonkResult ue.operand
+    walkExpression idResult zonkResult ue.operand
   AST.ExpressionTuple te ->
-    concatMap (walkExpression zonkResult) te.elements
+    concatMap (walkExpression idResult zonkResult) te.elements
   AST.ExpressionArray ae ->
-    concatMap (walkExpression zonkResult) ae.elements
+    concatMap (walkExpression idResult zonkResult) ae.elements
   AST.ExpressionFieldAccess fa ->
-    walkExpression zonkResult fa.object
+    walkExpression idResult zonkResult fa.object
   AST.ExpressionIndexAccess ia ->
-    walkExpression zonkResult ia.array ++ walkExpression zonkResult ia.index
+    walkExpression idResult zonkResult ia.array ++ walkExpression idResult zonkResult ia.index
   AST.ExpressionTemplate te ->
-    concatMap (walkTemplateElement zonkResult) te.elements
+    concatMap (walkTemplateElement idResult zonkResult) te.elements
   AST.ExpressionHandle he ->
-    concatMap (walkHandler zonkResult) he.handlers
+    concatMap (walkHandler idResult zonkResult) he.handlers
       ++ maybe
         []
         ( \(maybePattern, thenBlock) ->
-            maybe [] (\pat -> checkIrrefutable zonkResult pat SemanticTypeUnknown) maybePattern
-              ++ walkBlock zonkResult thenBlock
+            maybe [] (\pat -> checkIrrefutable idResult zonkResult pat SemanticTypeUnknown) maybePattern
+              ++ walkBlock idResult zonkResult thenBlock
         )
         he.thenClause
-      ++ walkBlock zonkResult he.body
+      ++ walkBlock idResult zonkResult he.body
   AST.ExpressionParTuple pte ->
-    concatMap (walkExpression zonkResult) pte.elements
+    concatMap (walkExpression idResult zonkResult) pte.elements
   AST.ExpressionParArray pae ->
-    concatMap (walkExpression zonkResult) pae.elements
+    concatMap (walkExpression idResult zonkResult) pae.elements
   AST.ExpressionLiteral _ -> []
   AST.ExpressionVariable _ -> []
   AST.ExpressionQualifiedReference _ -> []
 
-walkForInBinding :: ZonkResult -> AST.ForInBinding Zonked -> [ExhaustiveError]
-walkForInBinding zonkResult fib =
-  walkExpression zonkResult fib.source
+walkForInBinding :: IdentifierResult -> ZonkResult -> AST.ForInBinding Zonked -> [ExhaustiveError]
+walkForInBinding idResult zonkResult fib =
+  walkExpression idResult zonkResult fib.source
     ++ let elemType = case getExpressionType fib.source of
              SemanticTypeArray t -> t
              _ -> SemanticTypeUnknown
-        in checkIrrefutable zonkResult fib.pattern elemType
+        in checkIrrefutable idResult zonkResult fib.pattern elemType
 
-walkTemplateElement :: ZonkResult -> AST.TemplateElement Zonked -> [ExhaustiveError]
-walkTemplateElement zonkResult = \case
+walkTemplateElement :: IdentifierResult -> ZonkResult -> AST.TemplateElement Zonked -> [ExhaustiveError]
+walkTemplateElement idResult zonkResult = \case
   AST.TemplateElementString _ -> []
-  AST.TemplateElementExpression ee -> walkExpression zonkResult ee.value
+  AST.TemplateElementExpression ee -> walkExpression idResult zonkResult ee.value

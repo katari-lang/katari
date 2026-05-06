@@ -136,7 +136,7 @@ instance HasSourceSpan (Module phase) where
 data Declaration (phase :: Phase) where
   DeclarationAgent :: AgentDeclaration phase -> Declaration phase
   DeclarationRequest :: RequestDeclaration phase -> Declaration phase
-  DeclarationImport :: ImportDeclaration phase -> Declaration phase
+  DeclarationImport :: ImportDeclaration -> Declaration phase
   DeclarationExternalAgent :: ExternalAgentDeclaration phase -> Declaration phase
   DeclarationData :: DataDeclaration phase -> Declaration phase
   DeclarationTypeSynonym :: TypeSynonymDeclaration phase -> Declaration phase
@@ -182,12 +182,12 @@ data RequestDeclaration (phase :: Phase) = RequestDeclaration
 instance HasSourceSpan (RequestDeclaration phase) where
   sourceSpanOf declaration = declaration.sourceSpan
 
-data ImportDeclaration (phase :: Phase) = ImportDeclaration
+data ImportDeclaration = ImportDeclaration
   { kind :: ImportKind,
     sourceSpan :: SourceSpan
   }
 
-instance HasSourceSpan (ImportDeclaration phase) where
+instance HasSourceSpan ImportDeclaration where
   sourceSpanOf declaration = declaration.sourceSpan
 
 -- | Import shape. Not phase-parameterised: import names are resolved
@@ -1102,11 +1102,6 @@ retagSyntacticRequest req =
       sourceSpan = req.sourceSpan
     }
 
--- | Change the phase tag of an 'ImportDeclaration'. Safe for any pair of
--- phases because 'ImportDeclaration' carries no phase-dependent fields.
-retagImportDeclaration :: ImportDeclaration phase1 -> ImportDeclaration phase2
-retagImportDeclaration ImportDeclaration {kind, sourceSpan} =
-  ImportDeclaration {kind = kind, sourceSpan = sourceSpan}
 
 -- ---------------------------------------------------------------------------
 -- Aggregate Eq / Show constraints
@@ -1191,9 +1186,9 @@ deriving instance (EqPhase phase) => Eq (RequestDeclaration phase)
 
 deriving instance (ShowPhase phase) => Show (RequestDeclaration phase)
 
-deriving instance Eq (ImportDeclaration phase)
+deriving instance Eq ImportDeclaration
 
-deriving instance Show (ImportDeclaration phase)
+deriving instance Show ImportDeclaration
 
 deriving instance (EqPhase phase) => Eq (ExternalAgentDeclaration phase)
 

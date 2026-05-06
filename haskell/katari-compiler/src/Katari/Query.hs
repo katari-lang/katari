@@ -69,6 +69,7 @@ import Katari.SemanticType (Resolved, SemanticType)
 import Katari.SourceSpan (HasSourceSpan (..), Position (..), SourceSpan (..))
 import Katari.Typechecker.Identifier
   ( ConstructorData (..),
+    IdentifierResult (..),
     RequestData (..),
     TypeData (..),
     VariableData (..),
@@ -95,10 +96,10 @@ data HoverInfo = HoverInfo
 -- | Find hover information for the innermost typed node at a position.
 -- Returns 'Nothing' if the position falls outside all known spans or no
 -- typed node covers it.
-lookupAtPosition :: ZonkResult -> FilePath -> Position -> Maybe HoverInfo
-lookupAtPosition zonkResult filePath position = do
-  moduleData <- findModuleByFilePath zonkResult filePath
-  listToMaybe (mapMaybe (hoverFromDeclaration zonkResult position) moduleData.declarations)
+lookupAtPosition :: IdentifierResult -> ZonkResult -> FilePath -> Position -> Maybe HoverInfo
+lookupAtPosition idResult zonkResult filePath position = do
+  moduleData <- findModuleByFilePath idResult zonkResult filePath
+  listToMaybe (mapMaybe (hoverFromDeclaration idResult zonkResult position) moduleData.declarations)
 
 -- ===========================================================================
 -- Occurrence index
@@ -127,8 +128,8 @@ emptyOccurrenceIndex =
 
 -- | Walk all modules in 'ZonkResult' and collect every name-reference
 -- occurrence grouped by its resolved identifier.
-buildOccurrenceIndex :: ZonkResult -> OccurrenceIndex
-buildOccurrenceIndex zonkResult =
+buildOccurrenceIndex :: IdentifierResult -> ZonkResult -> OccurrenceIndex
+buildOccurrenceIndex idResult zonkResult =
   foldr collectModuleOccurrences emptyOccurrenceIndex (Map.elems zonkResult.zonkedModules)
 
 collectModuleOccurrences :: Module Zonked -> OccurrenceIndex -> OccurrenceIndex
@@ -149,9 +150,9 @@ data ResolvedReference where
   deriving (Eq, Show)
 
 -- | Identify which resolved identifier (if any) sits at a source position.
-identifyAtPosition :: ZonkResult -> FilePath -> Position -> Maybe ResolvedReference
-identifyAtPosition zonkResult filePath position = do
-  moduleData <- findModuleByFilePath zonkResult filePath
+identifyAtPosition :: IdentifierResult -> ZonkResult -> FilePath -> Position -> Maybe ResolvedReference
+identifyAtPosition idResult zonkResult filePath position = do
+  moduleData <- findModuleByFilePath idResult zonkResult filePath
   listToMaybe (mapMaybe (refFromDeclaration position) moduleData.declarations)
 
 -- | All occurrence spans of a resolved identifier (uses 'OccurrenceIndex').
@@ -169,54 +170,54 @@ findReferences index = \case
     Map.findWithDefault [] constructorId index.constructorOccurrences
 
 -- | Definition span of the symbol at a position, if it can be resolved.
-findDefinition :: ZonkResult -> FilePath -> Position -> Maybe SourceSpan
-findDefinition zonkResult filePath position = do
-  resolvedRef <- identifyAtPosition zonkResult filePath position
+findDefinition :: IdentifierResult -> ZonkResult -> FilePath -> Position -> Maybe SourceSpan
+findDefinition idResult zonkResult filePath position = do
+  resolvedRef <- identifyAtPosition idResult zonkResult filePath position
   case resolvedRef of
     ResolvedReferenceVariable variableId ->
-      fmap (.variableSourceSpan) (Map.lookup variableId zonkResult.zonkedVariables)
+      fmap (.variableSourceSpan) (Map.lookup variableId idResult.identifiedVariables)
     ResolvedReferenceType typeId ->
-      fmap (.typeSourceSpan) (Map.lookup typeId zonkResult.zonkedTypes)
+      fmap (.typeSourceSpan) (Map.lookup typeId idResult.identifiedTypes)
     ResolvedReferenceModule _ -> Nothing
     ResolvedReferenceRequest requestId ->
-      fmap (.requestSourceSpan) (Map.lookup requestId zonkResult.zonkedRequests)
+      fmap (.requestSourceSpan) (Map.lookup requestId idResult.identifiedRequests)
     ResolvedReferenceConstructor constructorId ->
-      fmap (.constructorSourceSpan) (Map.lookup constructorId zonkResult.zonkedConstructors)
+      fmap (.constructorSourceSpan) (Map.lookup constructorId idResult.identifiedConstructors)
 
 -- ===========================================================================
 -- Internal: module lookup
 -- ===========================================================================
 
-findModuleByFilePath :: ZonkResult -> FilePath -> Maybe (Module Zonked)
-findModuleByFilePath zonkResult filePath =
+findModuleByFilePath :: IdentifierResult -> ZonkResult -> FilePath -> Maybe (Module Zonked)
+findModuleByFilePath idResult zonkResult filePath =
   listToMaybe [m | m <- Map.elems zonkResult.zonkedModules, m.sourceSpan.filePath == filePath]
 
 -- ===========================================================================
 -- Internal: hover extraction
 -- ===========================================================================
 
-hoverFromDeclaration :: ZonkResult -> Position -> Declaration Zonked -> Maybe HoverInfo
-hoverFromDeclaration zonkResult position = \case
+hoverFromDeclaration :: IdentifierResult -> ZonkResult -> Position -> Declaration Zonked -> Maybe HoverInfo
+hoverFromDeclaration idResult zonkResult position = \case
   DeclarationAgent decl
     | spanContains decl.sourceSpan position ->
-        hoverFromBlock zonkResult position decl.body
-          `orElse` hoverFromVariableRef zonkResult decl.name
+        hoverFromBlock idResult zonkResult position decl.body
+          `orElse` hoverFromVariableRef idResult zonkResult decl.name
   DeclarationRequest decl
     | spanContains decl.sourceSpan position ->
-        hoverFromVariableRef zonkResult decl.name
+        hoverFromVariableRef idResult zonkResult decl.name
   DeclarationExternalAgent decl
     | spanContains decl.sourceSpan position ->
-        hoverFromVariableRef zonkResult decl.name
+        hoverFromVariableRef idResult zonkResult decl.name
   DeclarationData decl
     | spanContains decl.sourceSpan position ->
-        hoverFromVariableRef zonkResult decl.name
+        hoverFromVariableRef idResult zonkResult decl.name
   _ -> Nothing
 
-hoverFromVariableRef :: ZonkResult -> NameRef Zonked VariableRef -> Maybe HoverInfo
-hoverFromVariableRef zonkResult nameRef = do
+hoverFromVariableRef :: IdentifierResult -> ZonkResult -> NameRef Zonked VariableRef -> Maybe HoverInfo
+hoverFromVariableRef idResult zonkResult nameRef = do
   variableId <- nameRef.resolution
   let semanticType = Map.lookup variableId zonkResult.zonkedTypeEnvironment
-      variableData = Map.lookup variableId zonkResult.zonkedVariables
+      variableData = Map.lookup variableId idResult.identifiedVariables
       qualifiedName = variableData >>= (.variableQualifiedName)
   pure
     HoverInfo
@@ -226,42 +227,42 @@ hoverFromVariableRef zonkResult nameRef = do
         hoverQualifiedName = fmap renderQualifiedName qualifiedName
       }
 
-hoverFromBlock :: ZonkResult -> Position -> Block Zonked -> Maybe HoverInfo
-hoverFromBlock zonkResult position block
+hoverFromBlock :: IdentifierResult -> ZonkResult -> Position -> Block Zonked -> Maybe HoverInfo
+hoverFromBlock idResult zonkResult position block
   | spanContains block.sourceSpan position =
-      listToMaybe (mapMaybe (hoverFromStatement zonkResult position) block.statements)
-        `orElse` (block.returnExpression >>= hoverFromExpression zonkResult position)
+      listToMaybe (mapMaybe (hoverFromStatement idResult zonkResult position) block.statements)
+        `orElse` (block.returnExpression >>= hoverFromExpression idResult zonkResult position)
   | otherwise = Nothing
 
-hoverFromStatement :: ZonkResult -> Position -> Statement Zonked -> Maybe HoverInfo
-hoverFromStatement zonkResult position = \case
+hoverFromStatement :: IdentifierResult -> ZonkResult -> Position -> Statement Zonked -> Maybe HoverInfo
+hoverFromStatement idResult zonkResult position = \case
   StatementLet letStatement
     | spanContains letStatement.sourceSpan position ->
-        hoverFromExpression zonkResult position letStatement.value
+        hoverFromExpression idResult zonkResult position letStatement.value
   StatementExpression expression
     | spanContains (sourceSpanOf expression) position ->
-        hoverFromExpression zonkResult position expression
+        hoverFromExpression idResult zonkResult position expression
   StatementAgent agentStatement
     | spanContains agentStatement.sourceSpan position ->
-        hoverFromBlock zonkResult position agentStatement.body
+        hoverFromBlock idResult zonkResult position agentStatement.body
   StatementReturn returnStatement
     | spanContains returnStatement.sourceSpan position ->
-        hoverFromExpression zonkResult position returnStatement.value
+        hoverFromExpression idResult zonkResult position returnStatement.value
   StatementBreak breakStatement
     | spanContains breakStatement.sourceSpan position ->
-        hoverFromExpression zonkResult position breakStatement.value
+        hoverFromExpression idResult zonkResult position breakStatement.value
   StatementNext nextStatement
     | spanContains nextStatement.sourceSpan position ->
-        hoverFromExpression zonkResult position nextStatement.value
+        hoverFromExpression idResult zonkResult position nextStatement.value
   _ -> Nothing
 
-hoverFromExpression :: ZonkResult -> Position -> Expression Zonked -> Maybe HoverInfo
-hoverFromExpression zonkResult position expression
+hoverFromExpression :: IdentifierResult -> ZonkResult -> Position -> Expression Zonked -> Maybe HoverInfo
+hoverFromExpression idResult zonkResult position expression
   | not (spanContains (sourceSpanOf expression) position) = Nothing
   | otherwise = case expression of
       ExpressionVariable ve ->
         let semanticType = ve.name.resolution >>= \vid -> Map.lookup vid zonkResult.zonkedTypeEnvironment
-            variableData = ve.name.resolution >>= \vid -> Map.lookup vid zonkResult.zonkedVariables
+            variableData = ve.name.resolution >>= \vid -> Map.lookup vid idResult.identifiedVariables
          in Just
               HoverInfo
                 { hoverType = semanticType,
@@ -271,29 +272,29 @@ hoverFromExpression zonkResult position expression
                     variableData >>= (.variableQualifiedName) >>= Just . renderQualifiedName
                 }
       ExpressionCall ce ->
-        hoverFromExpression zonkResult position ce.callee
-          `orElse` listToMaybe (mapMaybe (hoverFromExpression zonkResult position . (.value)) ce.arguments)
+        hoverFromExpression idResult zonkResult position ce.callee
+          `orElse` listToMaybe (mapMaybe (hoverFromExpression idResult zonkResult position . (.value)) ce.arguments)
       ExpressionBinaryOperator be ->
-        hoverFromExpression zonkResult position be.left
-          `orElse` hoverFromExpression zonkResult position be.right
+        hoverFromExpression idResult zonkResult position be.left
+          `orElse` hoverFromExpression idResult zonkResult position be.right
       ExpressionUnaryOperator ue ->
-        hoverFromExpression zonkResult position ue.operand
+        hoverFromExpression idResult zonkResult position ue.operand
       ExpressionIf ie ->
-        hoverFromExpression zonkResult position ie.condition
-          `orElse` hoverFromBlock zonkResult position ie.thenBlock
-          `orElse` (ie.elseBlock >>= hoverFromBlock zonkResult position)
+        hoverFromExpression idResult zonkResult position ie.condition
+          `orElse` hoverFromBlock idResult zonkResult position ie.thenBlock
+          `orElse` (ie.elseBlock >>= hoverFromBlock idResult zonkResult position)
       ExpressionMatch me ->
-        hoverFromExpression zonkResult position me.subject
-          `orElse` listToMaybe (mapMaybe (hoverFromBlock zonkResult position . (.body)) me.cases)
+        hoverFromExpression idResult zonkResult position me.subject
+          `orElse` listToMaybe (mapMaybe (hoverFromBlock idResult zonkResult position . (.body)) me.cases)
       ExpressionFor fe ->
-        listToMaybe (mapMaybe (hoverFromExpression zonkResult position . (.source)) fe.inBindings)
-          `orElse` hoverFromBlock zonkResult position fe.body
+        listToMaybe (mapMaybe (hoverFromExpression idResult zonkResult position . (.source)) fe.inBindings)
+          `orElse` hoverFromBlock idResult zonkResult position fe.body
       ExpressionBlock be ->
-        hoverFromBlock zonkResult position be.block
+        hoverFromBlock idResult zonkResult position be.block
       ExpressionTuple te ->
-        listToMaybe (mapMaybe (hoverFromExpression zonkResult position) te.elements)
+        listToMaybe (mapMaybe (hoverFromExpression idResult zonkResult position) te.elements)
       ExpressionArray ae ->
-        listToMaybe (mapMaybe (hoverFromExpression zonkResult position) ae.elements)
+        listToMaybe (mapMaybe (hoverFromExpression idResult zonkResult position) ae.elements)
       _ -> Nothing
 
 -- ===========================================================================

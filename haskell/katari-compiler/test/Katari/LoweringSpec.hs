@@ -18,7 +18,7 @@ import Katari.Lowering (LoweringError (..), lowerProgram)
 import Katari.Lexer qualified as Lexer
 import Katari.Parser qualified as Parser
 import Katari.SemanticType (RequestVariableId (..), TypeVariableId (..))
-import Katari.Typechecker.ConstraintGenerator (ConstraintGenResult (..), generateConstraints)
+import Katari.Typechecker.ConstraintGenerator (ConstraintGenResult (..), VariableSupply (..), generateConstraints)
 import Katari.Typechecker.Identifier (identify)
 import Katari.Typechecker.NormalizedType (NormalizedType (..))
 import Katari.Typechecker.Solver (SolverResult (..))
@@ -45,13 +45,12 @@ lowerSource src =
             solver =
               SolverResult
                 { typeSubstitution =
-                    Map.fromList [(TypeVariableId i, NormalizedTypeUnknown) | i <- [0 .. cg.nextTypeVariableId - 1]],
+                    Map.fromList [(TypeVariableId i, NormalizedTypeUnknown) | i <- [0 .. cg.variableSupply.typeVarSupply - 1]],
                   requestSubstitution =
-                    Map.fromList [(RequestVariableId i, Set.empty) | i <- [0 .. cg.nextRequestVariableId - 1]],
-                  solverErrors = []
+                    Map.fromList [(RequestVariableId i, Set.empty) | i <- [0 .. cg.variableSupply.requestVarSupply - 1]]
                 }
-            zr = zonk idResult cg solver
-        pure (lowerProgram "main" zr)
+            (zr, _) = zonk idResult cg solver
+        pure (lowerProgram "main" idResult zr)
       (_, errs) -> fail ("identify failure: " ++ show errs)
 
 -- ===========================================================================

@@ -71,6 +71,7 @@ import Katari.Typechecker.ConstraintGenerator
     ConstraintGenResult (..),
     ConstraintReason (..),
     ReasonKind (..),
+    VariableSupply (..),
   )
 import Katari.Id (RequestId)
 import Katari.Typechecker.NormalizedType
@@ -88,28 +89,29 @@ import Katari.Typechecker.Solver.Substitution qualified as Substitution
 -- Top-level entry
 -- ===========================================================================
 
-solve :: ConstraintGenResult -> SolverResult
+solve :: ConstraintGenResult -> (SolverResult, [SolverError])
 solve cgResult =
   let allConstraints = cgResult.constraints
       typeConstraints = Set.filter isTypeConstraint allConstraints
       requestConstraints = Set.filter isRequestConstraint allConstraints
       (typeSubstitution_, typeErrors) =
-        solveTypeWorklist cgResult.nextTypeVariableId cgResult.nextRequestVariableId typeConstraints
+        solveTypeWorklist cgResult.variableSupply.typeVarSupply cgResult.variableSupply.requestVarSupply typeConstraints
       (requestSubstitution_, requestErrors) =
-        solveRequestWorklist cgResult.nextRequestVariableId requestConstraints
+        solveRequestWorklist requestConstraints
       -- Apply the request substitution to the type sub's values so that
       -- narrowed function shapes (which carry fresh request vars) become
       -- request-concrete before 'substToNormalizedSafe' inspects them.
       typeSubAfterRequest =
         Map.map (Substitution.applyRequestSubstToType requestSubstitution_) typeSubstitution_
       normalizedTypeSubstitution = substToNormalizedSafe typeSubAfterRequest
-   in SolverResult
-        { typeSubstitution =
-            totaliseTypes cgResult.nextTypeVariableId normalizedTypeSubstitution,
-          requestSubstitution =
-            totaliseRequests cgResult.nextRequestVariableId requestSubstitution_,
-          solverErrors = typeErrors <> requestErrors
-        }
+      result =
+        SolverResult
+          { typeSubstitution =
+              totaliseTypes cgResult.variableSupply.typeVarSupply normalizedTypeSubstitution,
+            requestSubstitution =
+              totaliseRequests cgResult.variableSupply.requestVarSupply requestSubstitution_
+          }
+   in (result, typeErrors <> requestErrors)
 
 -- ---------------------------------------------------------------------------
 -- Type worklist
@@ -263,10 +265,9 @@ substToNormalizedSafe = Map.map convert
 -- ---------------------------------------------------------------------------
 
 solveRequestWorklist ::
-  Int ->
   Set Constraint ->
   (Map RequestVariableId (Set RequestId), [SolverError])
-solveRequestWorklist _ = Request.solveRequestConstraints
+solveRequestWorklist = Request.solveRequestConstraints
 
 -- ---------------------------------------------------------------------------
 -- Total contract: fill missing entries

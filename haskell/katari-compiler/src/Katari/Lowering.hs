@@ -31,6 +31,7 @@ import Katari.Internal (internalErrorNoSpan)
 import Katari.SourceSpan (SourceSpan)
 import Katari.Id (VariableId)
 import Katari.Id qualified as Id
+import Katari.Typechecker.Identifier (ConstructorData (..), IdentifierResult (..), RequestData (..), VariableData (..))
 import Katari.Typechecker.Zonker (ZonkResult (..))
 
 -- ===========================================================================
@@ -133,15 +134,39 @@ unaryOpPrim = \case
 --     に一度だけ reverse して O(n) で取り出す。
 -- ===========================================================================
 
-newtype LowerEnv = LowerEnv
+data LowerEnv = LowerEnv
   { -- | 局所束縛: @let@ / 関数 param / pattern / local agent によって
     -- 導入された @VariableId → IRの VarId@。トップレベルの callable
     -- 解決は別途 'lsTopLevelBlocks' を見る。
-    localVars :: Map VariableId VarId
+    localVars :: Map VariableId VarId,
+    -- | Identifier-pass output. Lowering needs the symbol tables
+    -- (@identifiedRequests@ / @identifiedConstructors@) for both id
+    -- enumeration (ReqId/CtorId allocation) and call-site reverse lookup.
+    identifierResult :: IdentifierResult,
+    -- | Inverse of 'identifierResult.identifiedRequests', precomputed once
+    -- at 'lowerProgram' entry so per-call-site lookups are O(log n) rather
+    -- than O(n).
+    requestByVariable :: Map VariableId Id.RequestId,
+    -- | Inverse of 'identifierResult.identifiedConstructors'. See above.
+    constructorByVariable :: Map VariableId Id.ConstructorId
   }
 
-emptyLowerEnv :: LowerEnv
-emptyLowerEnv = LowerEnv {localVars = Map.empty}
+initialLowerEnv :: IdentifierResult -> LowerEnv
+initialLowerEnv idResult =
+  LowerEnv
+    { localVars = Map.empty,
+      identifierResult = idResult,
+      requestByVariable =
+        Map.fromList
+          [ (requestData.requestVariableId, requestId)
+            | (requestId, requestData) <- Map.toList idResult.identifiedRequests
+          ],
+      constructorByVariable =
+        Map.fromList
+          [ (constructorData.constructorVariableId, constructorId)
+            | (constructorId, constructorData) <- Map.toList idResult.identifiedConstructors
+          ]
+    }
 
 data LowerState = LowerState
   { lsNextBlockId :: Word32,
@@ -231,16 +256,17 @@ freshCtorId = do
 -- 'CtorId' per Identifier 'ConstructorId'. Stores both translation
 -- tables in 'lsReqIds' / 'lsCtorIds'. Called once at the start of
 -- 'lowerProgramM' before declaration walking begins.
-allocateReqAndCtorIds :: ZonkResult -> Lower ()
-allocateReqAndCtorIds zonkResult = do
-  reqIdPairs <- forM (Map.keys zonkResult.zonkedRequests) $ \identRid -> do
+allocateReqAndCtorIds :: Lower ()
+allocateReqAndCtorIds = do
+  idResult <- asks (.identifierResult)
+  reqIdPairs <- forM (Map.keys idResult.identifiedRequests) $ \identRid -> do
     irReqId <- freshReqId
     pure (identRid, irReqId)
-  ctorIdPairs <- forM (Map.keys zonkResult.zonkedConstructors) $ \identCid -> do
+  ctorIdPairs <- forM (Map.keys idResult.identifiedConstructors) $ \identCid -> do
     irCtorId <- freshCtorId
     pure (identCid, irCtorId)
-  modify $ \s ->
-    s
+  modify $ \state ->
+    state
       { lsReqIds = Map.fromList reqIdPairs,
         lsCtorIds = Map.fromList ctorIdPairs
       }
@@ -412,10 +438,12 @@ defaultUserBlock =
 -- | Lower a 'ZonkResult' to an 'IRModule'. Returns the module plus any
 -- structural lowering errors encountered. Errors do not abort the pipeline:
 -- the resulting IR may be partial.
-lowerProgram :: Text -> ZonkResult -> (IRModule, [LoweringError])
-lowerProgram moduleName zonkResult =
+lowerProgram :: Text -> IdentifierResult -> ZonkResult -> (IRModule, [LoweringError])
+lowerProgram moduleName idResult zonkResult =
   let (irModule, finalState) =
-        runState (runReaderT (lowerProgramM moduleName zonkResult) emptyLowerEnv) initialLowerState
+        runState
+          (runReaderT (lowerProgramM moduleName zonkResult) (initialLowerEnv idResult))
+          initialLowerState
    in (irModule, reverse finalState.lsErrors)
 
 lowerProgramM :: Text -> ZonkResult -> Lower IRModule
@@ -425,7 +453,7 @@ lowerProgramM moduleName zonkResult = do
   -- 'CtorId' per Identifier 'ConstructorId') so the handler / pattern
   -- match call sites can translate from the Identifier id space to the
   -- IR's runtime-dispatch id space.
-  allocateReqAndCtorIds zonkResult
+  allocateReqAndCtorIds
   registerDeclarationKinds zonkResult
   _ <- lowerAllDeclarations zonkResult
   state <- gets id
@@ -536,27 +564,30 @@ registerDeclarationKinds zonkResult =
       AST.DeclarationTypeSynonym _ -> pure ()
       AST.DeclarationError sourceSpan -> recordError (LoweringErrorParseSentinel sourceSpan)
 
-    -- \| O(1) lookup of the IR 'ReqId' for a @req@ declaration's call-side
-    -- 'VariableId', using the pre-built inverse map in 'ZonkResult'.
+    -- \| O(log n) lookup of the IR 'ReqId' for a @req@ declaration's
+    -- call-side 'VariableId', using the inverse map precomputed in
+    -- 'LowerEnv'.
     requestIdForVariable :: VariableId -> Lower ReqId
-    requestIdForVariable variableId =
-      case Map.lookup variableId zonkResult.zonkedRequestByVariable of
+    requestIdForVariable variableId = do
+      inverse <- asks (.requestByVariable)
+      case Map.lookup variableId inverse of
         Just requestId -> do
           mapped <- gets (Map.lookup requestId . (.lsReqIds))
           case mapped of
             Just irReqId -> pure irReqId
             Nothing -> internalErrorNoSpan "requestIdForVariable: ReqId not pre-allocated"
-        Nothing -> internalErrorNoSpan "requestIdForVariable: VariableId not in zonkedRequestByVariable"
+        Nothing -> internalErrorNoSpan "requestIdForVariable: VariableId not in requestByVariable"
 
     constructorIdForVariable :: VariableId -> Lower CtorId
-    constructorIdForVariable variableId =
-      case Map.lookup variableId zonkResult.zonkedConstructorByVariable of
+    constructorIdForVariable variableId = do
+      inverse <- asks (.constructorByVariable)
+      case Map.lookup variableId inverse of
         Just constructorId -> do
           mapped <- gets (Map.lookup constructorId . (.lsCtorIds))
           case mapped of
             Just irCtorId -> pure irCtorId
             Nothing -> internalErrorNoSpan "constructorIdForVariable: CtorId not pre-allocated"
-        Nothing -> internalErrorNoSpan "constructorIdForVariable: VariableId not in zonkedConstructorByVariable"
+        Nothing -> internalErrorNoSpan "constructorIdForVariable: VariableId not in constructorByVariable"
 
     recordEntry :: Text -> Text -> BlockId -> Lower ()
     recordEntry moduleName_ declName blockId =

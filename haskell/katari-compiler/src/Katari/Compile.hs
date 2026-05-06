@@ -103,12 +103,12 @@ data CompileResult = CompileResult
     -- | Name resolution result. Always returned so LSP / CLI can list
     -- agents, detect unused declarations, and perform qualified-name
     -- lookup without re-running the compiler.
-    identifierResult :: Maybe IdentifierResult,
+    identifierResult :: IdentifierResult,
     -- | Solver output for LSP type-on-hover. Always returned (even when
     -- diagnostics are present) so the editor can show partial results.
-    solverResult :: Maybe SolverResult,
+    solverResult :: SolverResult,
     -- | Zonker output for LSP type-on-hover. Always returned.
-    zonkResult :: Maybe ZonkResult
+    zonkResult :: ZonkResult
   }
 
 -- ===========================================================================
@@ -127,11 +127,11 @@ compile input =
       idDiags = map Identifier.toDiagnostic idErrors
       (cgResult, cgErrors) = generateConstraints idResult
       cgDiags = map CG.toDiagnostic cgErrors
-      solverResult_ = solve cgResult
-      solverDiags = map Solver.toDiagnostic solverResult_.solverErrors
-      zonkResult_ = zonk idResult cgResult solverResult_
-      zonkDiags = map Zonker.toDiagnostic zonkResult_.zonkErrors
-      exhaustiveDiags = map Exhaustive.toDiagnostic (checkExhaustive zonkResult_)
+      (solverResult_, solverErrors) = solve cgResult
+      solverDiags = map Solver.toDiagnostic solverErrors
+      (zonkResult_, zonkErrors) = zonk idResult cgResult solverResult_
+      zonkDiags = map Zonker.toDiagnostic zonkErrors
+      exhaustiveDiags = map Exhaustive.toDiagnostic (checkExhaustive idResult zonkResult_)
       preLowerDiags =
         parseDiags
           <> idDiags
@@ -142,21 +142,21 @@ compile input =
       shouldLower = not (hasErrors preLowerDiags)
       (loweredIR, loweringDiags)
         | shouldLower =
-            let (ir, errs) = lowerProgram input.rootModule zonkResult_
+            let (ir, errs) = lowerProgram input.rootModule idResult zonkResult_
              in (Just ir, map Lowering.toDiagnostic errs)
         | otherwise = (Nothing, [])
       shouldEmitArtefacts =
         shouldLower && not (hasErrors loweringDiags)
-      schema = if shouldEmitArtefacts then Just (buildSchemas zonkResult_) else Nothing
+      schema = if shouldEmitArtefacts then Just (buildSchemas idResult zonkResult_) else Nothing
       finalIR = if shouldEmitArtefacts then loweredIR else Nothing
       allDiags = preLowerDiags <> loweringDiags
    in CompileResult
         { irModule = finalIR,
           schemaEntries = schema,
           diagnostics = allDiags,
-          identifierResult = Just idResult,
-          solverResult = Just solverResult_,
-          zonkResult = Just zonkResult_
+          identifierResult = idResult,
+          solverResult = solverResult_,
+          zonkResult = zonkResult_
         }
 
 -- ===========================================================================

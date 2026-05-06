@@ -50,13 +50,6 @@ happyPathSpec = describe "well-formed single-module input" $ do
     hasErrors result.diagnostics `shouldBe` False
     isJust result.irModule `shouldBe` True
     isJust result.schemaEntries `shouldBe` True
-    isJust result.solverResult `shouldBe` True
-    isJust result.zonkResult `shouldBe` True
-
-  it "always returns solverResult / zonkResult, even on success" $ do
-    let result = compile (singleSourceInput "agent main() { 1 }")
-    isJust result.solverResult `shouldBe` True
-    isJust result.zonkResult `shouldBe` True
 
   it "multi-line array literal does NOT require trailing comma" $ do
     let src =

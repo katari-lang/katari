@@ -85,22 +85,7 @@ data ZonkResult = ZonkResult
     -- | 'ModuleId' → モジュール名 (dotted text)。'Katari.Lowering' が
     -- 'QualifiedName.module_' を付与する際に参照する。
     zonkedModuleNames :: Map ModuleId Text,
-    zonkedTypeEnvironment :: Map VariableId (SemanticType Resolved),
-    -- | Passthroughs from 'IdentifierResult' so 'Katari.Lowering' and
-    -- 'Katari.Schema' can resolve qualified names and look up
-    -- 'RequestId' / 'ConstructorId' → 'VariableId' cross-references
-    -- without re-threading 'IdentifierResult' alongside 'ZonkResult'.
-    zonkedVariables :: Map VariableId VariableData,
-    zonkedTypes :: Map TypeId TypeData,
-    zonkedRequests :: Map RequestId RequestData,
-    zonkedConstructors :: Map ConstructorId ConstructorData,
-    -- | Inverse maps built at ZonkResult construction time. Allow O(1)
-    -- lookup of RequestId / ConstructorId by the call-side VariableId
-    -- without O(n) scans through 'zonkedRequests' / 'zonkedConstructors'.
-    zonkedRequestByVariable :: Map VariableId RequestId,
-    zonkedConstructorByVariable :: Map VariableId ConstructorId,
-    -- | Solver 契約逸脱 (lookup miss) 検知用。通常 path では空のはず。
-    zonkErrors :: [ZonkError]
+    zonkedTypeEnvironment :: Map VariableId (SemanticType Resolved)
   }
   deriving (Show)
 
@@ -197,7 +182,7 @@ walkDeclaration = \case
   DeclarationExternalAgent decl -> DeclarationExternalAgent <$> walkExternalAgentDecl decl
   DeclarationData decl -> DeclarationData <$> walkDataDecl decl
   DeclarationTypeSynonym decl -> DeclarationTypeSynonym <$> walkTypeSynonymDecl decl
-  DeclarationImport decl -> pure (DeclarationImport (retagImportDeclaration decl))
+  DeclarationImport decl -> pure (DeclarationImport decl)
   DeclarationError span_ -> pure (DeclarationError span_)
 
 walkAgentDecl :: AgentDeclaration Constrained -> Zonk (AgentDeclaration Zonked)
@@ -738,33 +723,20 @@ walkParArrayExpr ParArrayExpression {elements, sourceSpan, typeOf} = do
 -- ===========================================================================
 
 -- | Run zonking over the constrained AST and the type environment.
-zonk :: IdentifierResult -> ConstraintGenResult -> SolverResult -> ZonkResult
+zonk :: IdentifierResult -> ConstraintGenResult -> SolverResult -> (ZonkResult, [ZonkError])
 zonk idResult cgResult solverResult =
   let action =
         (,)
           <$> traverse walkModule cgResult.constrainedModules
           <*> Map.traverseWithKey (zonkEnvEntry idResult) cgResult.typeEnvironment
       ((modulesResult, envResult), errs) = runState (runReaderT action solverResult) []
-   in ZonkResult
-        { zonkedModules = modulesResult,
-          zonkedModuleNames = Map.map (.moduleName) idResult.identifiedModules,
-          zonkedTypeEnvironment = envResult,
-          zonkedVariables = idResult.identifiedVariables,
-          zonkedTypes = idResult.identifiedTypes,
-          zonkedRequests = idResult.identifiedRequests,
-          zonkedConstructors = idResult.identifiedConstructors,
-          zonkedRequestByVariable =
-            Map.fromList
-              [ (requestData.requestVariableId, requestId)
-                | (requestId, requestData) <- Map.toList idResult.identifiedRequests
-              ],
-          zonkedConstructorByVariable =
-            Map.fromList
-              [ (constructorData.constructorVariableId, constructorId)
-                | (constructorId, constructorData) <- Map.toList idResult.identifiedConstructors
-              ],
-          zonkErrors = reverse errs
-        }
+      result =
+        ZonkResult
+          { zonkedModules = modulesResult,
+            zonkedModuleNames = Map.map (.moduleName) idResult.identifiedModules,
+            zonkedTypeEnvironment = envResult
+          }
+   in (result, reverse errs)
   where
     zonkEnvEntry idResult_ variableId t =
       let sourceSpan = case Map.lookup variableId idResult_.identifiedVariables of

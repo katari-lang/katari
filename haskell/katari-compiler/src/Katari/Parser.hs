@@ -615,7 +615,7 @@ parseTypeSynonym = parseWithSpan $ do
 -- Import
 -- ---------------------------------------------------------------------------
 
-parseImport :: Parser (ImportDeclaration Parsed)
+parseImport :: Parser ImportDeclaration
 parseImport = parseWithSpan $ do
   parseKeyword KeywordImport
   importKind <-

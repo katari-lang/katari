@@ -33,6 +33,7 @@ module Katari.Typechecker.ConstraintGenerator
 
     -- * Result
     ConstraintGenResult (..),
+    VariableSupply (..),
     TypeEnvironment,
 
     -- * Diagnostics
@@ -199,12 +200,20 @@ toDiagnostic = \case
 -- assigned to it.
 type TypeEnvironment = Map VariableId (SemanticType Unresolved)
 
+-- | High-water marks of fresh-id supplies left over from constraint
+-- generation. The Solver consumes these to allocate further fresh
+-- variables during branching.
+data VariableSupply = VariableSupply
+  { typeVarSupply :: Int,
+    requestVarSupply :: Int
+  }
+  deriving (Eq, Show)
+
 data ConstraintGenResult = ConstraintGenResult
   { constrainedModules :: Map ModuleId (Module Constrained),
     typeEnvironment :: TypeEnvironment,
     constraints :: Set Constraint,
-    nextTypeVariableId :: Int,
-    nextRequestVariableId :: Int
+    variableSupply :: VariableSupply
   }
   deriving (Show)
 
@@ -508,7 +517,7 @@ walkDeclaration = \case
   DeclarationExternalAgent decl -> DeclarationExternalAgent <$> walkExternalAgentDecl decl
   DeclarationData decl -> DeclarationData <$> walkDataDecl decl
   DeclarationTypeSynonym decl -> DeclarationTypeSynonym <$> walkTypeSynonymDecl decl
-  DeclarationImport decl -> pure (DeclarationImport (retagImportDeclaration decl))
+  DeclarationImport decl -> pure (DeclarationImport decl)
   DeclarationError span_ -> pure (DeclarationError span_)
 
 -- ---------------------------------------------------------------------------
@@ -1611,8 +1620,11 @@ generateConstraints result = case runState (runReaderT action context) initialSt
         { constrainedModules = Map.fromList modulesPair,
           typeEnvironment = finalState.stateTypeEnvironment,
           constraints = finalState.stateConstraints,
-          nextTypeVariableId = finalState.stateNextTypeVariableId,
-          nextRequestVariableId = finalState.stateNextRequestVariableId
+          variableSupply =
+            VariableSupply
+              { typeVarSupply = finalState.stateNextTypeVariableId,
+                requestVarSupply = finalState.stateNextRequestVariableId
+              }
         },
       finalState.stateErrors
     )

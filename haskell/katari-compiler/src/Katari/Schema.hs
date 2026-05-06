@@ -70,6 +70,7 @@ import Katari.SemanticType
   )
 import Katari.Typechecker.Identifier
   ( ConstructorData (..),
+    IdentifierResult (..),
     RequestData (..),
     VariableData (..),
   )
@@ -230,11 +231,11 @@ type DataDefs = Map TypeId (Map Text (SemanticType Resolved))
 -- | Build 'DataDefs' from the Zonked output. Each @data@ declaration
 -- contributes one entry: its 'TypeId' maps to the field types taken from
 -- the constructor function's signature in 'zonkedTypeEnvironment'.
-buildDataDefs :: ZonkResult -> DataDefs
-buildDataDefs zonkResult =
+buildDataDefs :: IdentifierResult -> ZonkResult -> DataDefs
+buildDataDefs idResult zonkResult =
   Map.fromList
     [ (cd.constructorTypeId, fieldTypes)
-      | (_, cd) <- Map.toList zonkResult.zonkedConstructors,
+      | (_, cd) <- Map.toList idResult.identifiedConstructors,
         Just (SemanticTypeFunction fieldTypes _ _) <-
           [Map.lookup cd.constructorVariableId zonkResult.zonkedTypeEnvironment]
     ]
@@ -304,30 +305,33 @@ compactUnion cores =
 
 -- | Build schema entries for a compiled program. Walks every module's
 -- declarations and emits one 'SchemaEntry' per top-level callable.
-buildSchemas :: ZonkResult -> [SchemaEntry]
-buildSchemas zonkResult =
-  let dataDefs = buildDataDefs zonkResult
+buildSchemas :: IdentifierResult -> ZonkResult -> [SchemaEntry]
+buildSchemas idResult zonkResult =
+  let dataDefs = buildDataDefs idResult zonkResult
    in concatMap
-        (buildModuleEntries dataDefs zonkResult)
+        (buildModuleEntries dataDefs idResult zonkResult)
         (Map.toList zonkResult.zonkedModules)
 
 buildModuleEntries ::
   DataDefs ->
+  IdentifierResult ->
   ZonkResult ->
   (ModuleId, Module Zonked) ->
   [SchemaEntry]
-buildModuleEntries dataDefs zonkResult (_, m) =
-  mapMaybe (buildDeclarationEntry dataDefs zonkResult) m.declarations
+buildModuleEntries dataDefs idResult zonkResult (_, m) =
+  mapMaybe (buildDeclarationEntry dataDefs idResult zonkResult) m.declarations
 
 buildDeclarationEntry ::
   DataDefs ->
+  IdentifierResult ->
   ZonkResult ->
   Declaration Zonked ->
   Maybe SchemaEntry
-buildDeclarationEntry dataDefs zonkResult = \case
+buildDeclarationEntry dataDefs idResult zonkResult = \case
   DeclarationAgent agentDecl ->
     buildAgentLike
       dataDefs
+      idResult
       zonkResult
       agentDecl.annotation
       agentDecl.name
@@ -335,6 +339,7 @@ buildDeclarationEntry dataDefs zonkResult = \case
   DeclarationRequest requestDecl ->
     buildAgentLike
       dataDefs
+      idResult
       zonkResult
       requestDecl.annotation
       requestDecl.name
@@ -342,12 +347,13 @@ buildDeclarationEntry dataDefs zonkResult = \case
   DeclarationExternalAgent externalDecl ->
     buildAgentLike
       dataDefs
+      idResult
       zonkResult
       externalDecl.annotation
       externalDecl.name
       externalDecl.parameters
   DeclarationData dataDecl ->
-    buildDataEntry dataDefs zonkResult dataDecl
+    buildDataEntry dataDefs idResult zonkResult dataDecl
   DeclarationImport {} -> Nothing
   DeclarationTypeSynonym {} -> Nothing
   DeclarationError {} -> Nothing
@@ -358,19 +364,20 @@ buildDeclarationEntry dataDefs zonkResult = \case
 -- Solver-contract violation that was already reported as a diagnostic).
 buildAgentLike ::
   DataDefs ->
+  IdentifierResult ->
   ZonkResult ->
   Maybe Text ->
   NameRef Zonked VariableRef ->
   [ParameterBinding Zonked] ->
   Maybe SchemaEntry
-buildAgentLike dataDefs zonkResult annotation nameRef parameters = do
+buildAgentLike dataDefs idResult zonkResult annotation nameRef parameters = do
   variableId <- nameRef.resolution
-  variableData <- Map.lookup variableId zonkResult.zonkedVariables
+  variableData <- Map.lookup variableId idResult.identifiedVariables
   qualifiedName <- variableData.variableQualifiedName
   SemanticTypeFunction paramTypes returnType requestSet <-
     Map.lookup variableId zonkResult.zonkedTypeEnvironment
   let inputCore = paramObject dataDefs paramTypes parameters
-      requestRefs = buildRequestRefs dataDefs zonkResult requestSet
+      requestRefs = buildRequestRefs dataDefs idResult zonkResult requestSet
   pure
     SchemaEntry
       { name = renderQualifiedName qualifiedName,
@@ -404,12 +411,13 @@ paramObject dataDefs paramTypes parameters =
 -- inline-expanded object shape of the constructed value.
 buildDataEntry ::
   DataDefs ->
+  IdentifierResult ->
   ZonkResult ->
   DataDeclaration Zonked ->
   Maybe SchemaEntry
-buildDataEntry dataDefs zonkResult dataDecl = do
+buildDataEntry dataDefs idResult zonkResult dataDecl = do
   variableId <- dataDecl.name.resolution
-  variableData <- Map.lookup variableId zonkResult.zonkedVariables
+  variableData <- Map.lookup variableId idResult.identifiedVariables
   qualifiedName <- variableData.variableQualifiedName
   let fieldTypes = case Map.lookup variableId zonkResult.zonkedTypeEnvironment of
         Just (SemanticTypeFunction paramTypes _ _) -> paramTypes
@@ -459,16 +467,16 @@ dataParamObject dataDefs fieldTypes parameters =
 -- Request schema expansion
 -- ===========================================================================
 
-buildRequestRefs :: DataDefs -> ZonkResult -> SemanticRequest Resolved -> [RequestSchemaRef]
-buildRequestRefs dataDefs zonkResult (SemanticRequest elements) =
+buildRequestRefs :: DataDefs -> IdentifierResult -> ZonkResult -> SemanticRequest Resolved -> [RequestSchemaRef]
+buildRequestRefs dataDefs idResult zonkResult (SemanticRequest elements) =
   mapMaybe buildRef (Set.toList elements)
   where
     buildRef (SemanticRequestElementConcrete requestId) =
-      buildRequestRef dataDefs zonkResult requestId
+      buildRequestRef dataDefs idResult zonkResult requestId
 
-buildRequestRef :: DataDefs -> ZonkResult -> RequestId -> Maybe RequestSchemaRef
-buildRequestRef dataDefs zonkResult requestId = do
-  rd <- Map.lookup requestId zonkResult.zonkedRequests
+buildRequestRef :: DataDefs -> IdentifierResult -> ZonkResult -> RequestId -> Maybe RequestSchemaRef
+buildRequestRef dataDefs idResult zonkResult requestId = do
+  rd <- Map.lookup requestId idResult.identifiedRequests
   SemanticTypeFunction paramTypes returnType _ <-
     Map.lookup rd.requestVariableId zonkResult.zonkedTypeEnvironment
   let inputCore =

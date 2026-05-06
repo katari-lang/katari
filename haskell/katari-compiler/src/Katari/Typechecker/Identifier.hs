@@ -1023,15 +1023,11 @@ resolveDeclaration = \case
   DeclarationExternalAgent declaration -> DeclarationExternalAgent <$> resolveExternalAgent declaration
   DeclarationData declaration -> DeclarationData <$> resolveData declaration
   DeclarationTypeSynonym declaration -> DeclarationTypeSynonym <$> resolveTypeSynonym declaration
-  DeclarationImport declaration -> pure (DeclarationImport (resolveImportDecl declaration))
+  DeclarationImport declaration -> pure (DeclarationImport declaration)
   -- Parser-recovery sentinel: passthrough unchanged. The parallel
   -- @[ParseError]@ list keeps the structured error detail; this phase has
   -- nothing to resolve here.
   DeclarationError sourceSpan -> pure (DeclarationError sourceSpan)
-
-resolveImportDecl :: ImportDeclaration Parsed -> ImportDeclaration Identified
-resolveImportDecl ImportDeclaration {kind, sourceSpan} =
-  ImportDeclaration {kind = kind, sourceSpan = sourceSpan}
 
 -- | Fill in the variable id for a signature-position 'NameRef' (the @name@ of
 -- an agent / req / ext-agent / data declaration). Phase B has already issued

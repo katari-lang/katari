@@ -13,6 +13,7 @@ import Katari.SemanticType
   )
 import Katari.Typechecker.ConstraintGenerator
   ( ConstraintGenResult (..),
+    VariableSupply (..),
     generateConstraints,
   )
 import Katari.Id (VariableId)
@@ -30,7 +31,8 @@ import Katari.Typechecker.NormalizedType
     ObjectSlot (..),
     StringSlot (..),
   )
-import Katari.Typechecker.Solver (SolverResult (..), solve)
+import Katari.Typechecker.Solver (SolverError, SolverResult (..), solve)
+import Katari.Typechecker.Solver qualified as Solver
 import Katari.Typechecker.Zonker (ZonkResult (..), zonk)
 import Test.Hspec
 
@@ -38,7 +40,7 @@ import Test.Hspec
 -- Helpers
 -- ---------------------------------------------------------------------------
 
-runSolve :: Text -> IO (IdentifierResult, ConstraintGenResult, SolverResult)
+runSolve :: Text -> IO (IdentifierResult, ConstraintGenResult, SolverResult, [Solver.SolverError])
 runSolve source =
   let (stream, _) = Lexer.lex "<test>" source
       (parsed, parseErrors) = Parser.parse "<test>" stream
@@ -47,8 +49,8 @@ runSolve source =
     [] -> case identify (Map.singleton "main" parsed) of
       (idResult, []) ->
         let (cgResult, _) = generateConstraints idResult
-            solverResult = solve cgResult
-         in pure (idResult, cgResult, solverResult)
+            (solverResult, solverErrors) = solve cgResult
+         in pure (idResult, cgResult, solverResult, solverErrors)
       (_, errors) -> fail ("identify failure: " ++ show errors)
 
 variableIdOf :: Text -> IdentifierResult -> Maybe VariableId
@@ -84,7 +86,7 @@ shouldHaveTotalSubstitution ::
   ConstraintGenResult ->
   Expectation
 shouldHaveTotalSubstitution solverResult cgResult = do
-  let required = Set.fromList [TypeVariableId i | i <- [0 .. cgResult.nextTypeVariableId - 1]]
+  let required = Set.fromList [TypeVariableId i | i <- [0 .. cgResult.variableSupply.typeVarSupply - 1]]
       actual = Map.keysSet solverResult.typeSubstitution
   Set.isSubsetOf required actual `shouldBe` True
 
@@ -117,16 +119,16 @@ spec = describe "Katari.Typechecker.Solver" $ do
 basicLiterals :: Spec
 basicLiterals = describe "basic literal inference" $ do
   it "agent foo() { 42 } - solver succeeds, no errors" $ do
-    (_, _, solverResult) <- runSolve "agent foo() { 42 }"
-    solverResult.solverErrors `shouldBe` []
+    (_, _, solverResult, solverErrors) <- runSolve "agent foo() { 42 }"
+    solverErrors `shouldBe` []
 
   it "string literal program solves cleanly" $ do
-    (_, _, solverResult) <- runSolve "agent foo() { \"hi\" }"
-    solverResult.solverErrors `shouldBe` []
+    (_, _, solverResult, solverErrors) <- runSolve "agent foo() { \"hi\" }"
+    solverErrors `shouldBe` []
 
   it "boolean literal program solves cleanly" $ do
-    (_, _, solverResult) <- runSolve "agent foo() { true }"
-    solverResult.solverErrors `shouldBe` []
+    (_, _, solverResult, solverErrors) <- runSolve "agent foo() { true }"
+    solverErrors `shouldBe` []
 
 -- ---------------------------------------------------------------------------
 -- Total contract
@@ -135,19 +137,19 @@ basicLiterals = describe "basic literal inference" $ do
 totalContract :: Spec
 totalContract = describe "Solver totality contract" $ do
   it "trivial agent: every TypeVariableId has a substitution entry" $ do
-    (_, cgResult, solverResult) <- runSolve "agent foo() { 42 }"
+    (_, cgResult, solverResult, solverErrors) <- runSolve "agent foo() { 42 }"
     solverResult `shouldHaveTotalSubstitution` cgResult
 
   it "agent with parameters: total substitution" $ do
-    (_, cgResult, solverResult) <- runSolve "agent foo(x: integer) { x }"
+    (_, cgResult, solverResult, solverErrors) <- runSolve "agent foo(x: integer) { x }"
     solverResult `shouldHaveTotalSubstitution` cgResult
 
   it "agent with let binding: total substitution" $ do
-    (_, cgResult, solverResult) <- runSolve "agent foo() { let x = 1; x }"
+    (_, cgResult, solverResult, solverErrors) <- runSolve "agent foo() { let x = 1; x }"
     solverResult `shouldHaveTotalSubstitution` cgResult
 
   it "if expression: total substitution" $ do
-    (_, cgResult, solverResult) <-
+    (_, cgResult, solverResult, solverErrors) <-
       runSolve "agent foo(c: boolean) { if (c) { 1 } else { 2 } }"
     solverResult `shouldHaveTotalSubstitution` cgResult
 
@@ -158,14 +160,14 @@ totalContract = describe "Solver totality contract" $ do
 ifBranchUnion :: Spec
 ifBranchUnion = describe "if branches" $ do
   it "if cond { 1 } else { 2 } - both branches concrete, no errors" $ do
-    (_, _, solverResult) <-
+    (_, _, solverResult, solverErrors) <-
       runSolve "agent foo(c: boolean) { if (c) { 1 } else { 2 } }"
-    solverResult.solverErrors `shouldBe` []
+    solverErrors `shouldBe` []
 
   it "if cond { 1 } else { \"x\" } - mixed types, no errors (union allowed)" $ do
-    (_, _, solverResult) <-
+    (_, _, solverResult, solverErrors) <-
       runSolve "agent foo(c: boolean) { if (c) { 1 } else { \"x\" } }"
-    solverResult.solverErrors `shouldBe` []
+    solverErrors `shouldBe` []
 
 -- ---------------------------------------------------------------------------
 -- Arithmetic operators
@@ -174,12 +176,12 @@ ifBranchUnion = describe "if branches" $ do
 arithmeticOperators :: Spec
 arithmeticOperators = describe "arithmetic" $ do
   it "1 + 2 narrows operands to number, no errors" $ do
-    (_, _, solverResult) <- runSolve "agent foo() { 1 + 2 }"
-    solverResult.solverErrors `shouldBe` []
+    (_, _, solverResult, solverErrors) <- runSolve "agent foo() { 1 + 2 }"
+    solverErrors `shouldBe` []
 
   it "1 + 2 + 3 chained: no errors" $ do
-    (_, _, solverResult) <- runSolve "agent foo() { 1 + 2 + 3 }"
-    solverResult.solverErrors `shouldBe` []
+    (_, _, solverResult, solverErrors) <- runSolve "agent foo() { 1 + 2 + 3 }"
+    solverErrors `shouldBe` []
 
 -- ---------------------------------------------------------------------------
 -- match expression union narrowing
@@ -188,14 +190,14 @@ arithmeticOperators = describe "arithmetic" $ do
 matchUnion :: Spec
 matchUnion = describe "match" $ do
   it "match on integer with one case, no errors" $ do
-    (_, _, solverResult) <-
+    (_, _, solverResult, solverErrors) <-
       runSolve $
         mconcat
           [ "agent foo(x: integer) {\n",
             "  match (x) { case n => { n } }\n",
             "}"
           ]
-    solverResult.solverErrors `shouldBe` []
+    solverErrors `shouldBe` []
 
 -- ---------------------------------------------------------------------------
 -- Contradictions
@@ -204,14 +206,14 @@ matchUnion = describe "match" $ do
 contradictions :: Spec
 contradictions = describe "contradictions" $ do
   it "agent foo() -> integer { \"bad\" } records solver error" $ do
-    (_, _, solverResult) <- runSolve "agent foo() -> integer { \"bad\" }"
-    null solverResult.solverErrors `shouldBe` False
+    (_, _, solverResult, solverErrors) <- runSolve "agent foo() -> integer { \"bad\" }"
+    null solverErrors `shouldBe` False
 
   it "even with errors, substitution is still total" $ do
-    (_, cgResult, solverResult) <- runSolve "agent foo() -> integer { \"bad\" }"
+    (_, cgResult, solverResult, solverErrors) <- runSolve "agent foo() -> integer { \"bad\" }"
     -- Errors mean the type substitution may be empty + filled with NormalizedTypeUnknown
     -- by the totality layer, so all TypeVariableIds still have entries.
-    Map.size solverResult.typeSubstitution `shouldBe` cgResult.nextTypeVariableId
+    Map.size solverResult.typeSubstitution `shouldBe` cgResult.variableSupply.typeVarSupply
 
 -- ---------------------------------------------------------------------------
 -- End-to-end with Zonker
@@ -220,12 +222,12 @@ contradictions = describe "contradictions" $ do
 endToEndZonk :: Spec
 endToEndZonk = describe "end-to-end pipeline (Solver -> Zonker)" $ do
   it "Zonker over a real Solver result has no zonkErrors on a basic program" $ do
-    (idResult, cgResult, solverResult) <- runSolve "agent foo() { 42 }"
-    let zonkResult = zonk idResult cgResult solverResult
-    zonkResult.zonkErrors `shouldBe` []
+    (idResult, cgResult, solverResult, _solverErrors) <- runSolve "agent foo() { 42 }"
+    let (_zonkResult, zonkErrors) = zonk idResult cgResult solverResult
+    zonkErrors `shouldBe` []
 
   it "totality is sufficient for Zonker even on programs with let / if" $ do
-    (idResult, cgResult, solverResult) <-
+    (idResult, cgResult, solverResult, solverErrors) <-
       runSolve $
         mconcat
           [ "agent foo(c: boolean) {\n",
@@ -233,8 +235,8 @@ endToEndZonk = describe "end-to-end pipeline (Solver -> Zonker)" $ do
             "  x\n",
             "}"
           ]
-    let zonkResult = zonk idResult cgResult solverResult
-    zonkResult.zonkErrors `shouldBe` []
+    let (_zonkResult, zonkErrors) = zonk idResult cgResult solverResult
+    zonkErrors `shouldBe` []
 
 -- ---------------------------------------------------------------------------
 -- where / handler blocks
@@ -245,7 +247,7 @@ whereHandlerBlocks = describe "handle blocks and request handlers" $ do
   it "handle with state variable: solver succeeds" $ do
     -- State variables are visible to handlers / then, NOT to the body.
     -- The body returns a literal; @n@ is just declared.
-    (_, _, solverResult) <-
+    (_, _, solverResult, solverErrors) <-
       runSolve $
         mconcat
           [ "agent counter() -> integer {\n",
@@ -253,10 +255,10 @@ whereHandlerBlocks = describe "handle blocks and request handlers" $ do
             "  0\n",
             "}"
           ]
-    solverResult.solverErrors `shouldBe` []
+    solverErrors `shouldBe` []
 
   it "handle with request handler: req is discharged, agent has empty request" $ do
-    (_, _, solverResult) <-
+    (_, _, solverResult, solverErrors) <-
       runSolve $
         mconcat
           [ "req fetch() -> integer\n",
@@ -267,10 +269,10 @@ whereHandlerBlocks = describe "handle blocks and request handlers" $ do
             "  fetch()\n",
             "}"
           ]
-    solverResult.solverErrors `shouldBe` []
+    solverErrors `shouldBe` []
 
   it "handle with state var + handler combining state mutation via next" $ do
-    (_, _, solverResult) <-
+    (_, _, solverResult, solverErrors) <-
       runSolve $
         mconcat
           [ "req inc() -> integer\n",
@@ -285,12 +287,12 @@ whereHandlerBlocks = describe "handle blocks and request handlers" $ do
             "  inc()\n",
             "}"
           ]
-    solverResult.solverErrors `shouldBe` []
+    solverErrors `shouldBe` []
 
   it "explicit next with wrong type → records solver error" $ do
     -- The declared @-> integer@ on req constrains explicit @next@. Use
     -- @next \"bad\"@ to surface the type mismatch.
-    (_, _, solverResult) <-
+    (_, _, solverResult, solverErrors) <-
       runSolve $
         mconcat
           [ "req fetch() -> integer\n",
@@ -303,13 +305,13 @@ whereHandlerBlocks = describe "handle blocks and request handlers" $ do
             "  fetch()\n",
             "}"
           ]
-    null solverResult.solverErrors `shouldBe` False
+    null solverErrors `shouldBe` False
 
   it "request handler body must be never: falling through with a value is a type error" $ do
     -- Replaces the prior implicit-break behavior. A handler body that
     -- ends with a value (no break / no next) violates the never-typing
     -- constraint and is rejected by the solver.
-    (_, _, solverResult) <-
+    (_, _, solverResult, solverErrors) <-
       runSolve $
         mconcat
           [ "req fetch() -> integer\n",
@@ -320,12 +322,12 @@ whereHandlerBlocks = describe "handle blocks and request handlers" $ do
             "  fetch()\n",
             "}"
           ]
-    null solverResult.solverErrors `shouldBe` False
+    null solverErrors `shouldBe` False
 
   it "request handler body of type never (explicit break) passes" $ do
     -- An explicit `break v` makes the handler body inferable as `never`,
     -- satisfying the new constraint.
-    (_, _, solverResult) <-
+    (_, _, solverResult, solverErrors) <-
       runSolve $
         mconcat
           [ "req fetch() -> integer\n",
@@ -336,10 +338,10 @@ whereHandlerBlocks = describe "handle blocks and request handlers" $ do
             "  fetch()\n",
             "}"
           ]
-    solverResult.solverErrors `shouldBe` []
+    solverErrors `shouldBe` []
 
   it "then clause: body tail flows through pattern, then body type is whole block" $ do
-    (_, _, solverResult) <-
+    (_, _, solverResult, solverErrors) <-
       runSolve $
         mconcat
           [ "agent foo() -> integer {\n",
@@ -347,10 +349,10 @@ whereHandlerBlocks = describe "handle blocks and request handlers" $ do
             "  42\n",
             "}"
           ]
-    solverResult.solverErrors `shouldBe` []
+    solverErrors `shouldBe` []
 
   it "then clause with state var: state var visible in then" $ do
-    (_, _, solverResult) <-
+    (_, _, solverResult, solverErrors) <-
       runSolve $
         mconcat
           [ "req inc() -> integer\n",
@@ -365,14 +367,14 @@ whereHandlerBlocks = describe "handle blocks and request handlers" $ do
             "  inc()\n",
             "}"
           ]
-    solverResult.solverErrors `shouldBe` []
+    solverErrors `shouldBe` []
 
   it "explicit break in handler routes value to whole-block (not declared next type)" $ do
     -- @req fetch() -> integer@: declared return only constrains @next@.
     -- An explicit @break "ok"@ flows to the handle-block whole type —
     -- independent of the declared @integer@ next return. Without a
     -- stricter agent annotation, no contradiction arises.
-    (_, _, solverResult) <-
+    (_, _, solverResult, solverErrors) <-
       runSolve $
         mconcat
           [ "req fetch() -> integer\n",
@@ -383,12 +385,12 @@ whereHandlerBlocks = describe "handle blocks and request handlers" $ do
             "  fetch()\n",
             "}"
           ]
-    solverResult.solverErrors `shouldBe` []
+    solverErrors `shouldBe` []
 
   it "break inside handler body of block-with-then routes through then" $ do
     -- Handler @break 5@ : 5 <: pattern p (number) → then body @p + 1@ :
     -- number <: agent return integer. Should pass.
-    (_, _, solverResult) <-
+    (_, _, solverResult, solverErrors) <-
       runSolve $
         mconcat
           [ "req dummy() -> integer\n",
@@ -399,7 +401,7 @@ whereHandlerBlocks = describe "handle blocks and request handlers" $ do
             "  dummy()\n",
             "}"
           ]
-    solverResult.solverErrors `shouldBe` []
+    solverErrors `shouldBe` []
 
 -- ---------------------------------------------------------------------------
 -- match expressions
@@ -408,7 +410,7 @@ whereHandlerBlocks = describe "handle blocks and request handlers" $ do
 matchExpressions :: Spec
 matchExpressions = describe "match expressions" $ do
   it "match on union with two literal arms" $ do
-    (_, _, solverResult) <-
+    (_, _, solverResult, solverErrors) <-
       runSolve $
         mconcat
           [ "agent label(n: integer) -> string {\n",
@@ -418,10 +420,10 @@ matchExpressions = describe "match expressions" $ do
             "  }\n",
             "}"
           ]
-    solverResult.solverErrors `shouldBe` []
+    solverErrors `shouldBe` []
 
   it "match on data constructor pattern" $ do
-    (_, _, solverResult) <-
+    (_, _, solverResult, solverErrors) <-
       runSolve $
         mconcat
           [ "data circle(r: integer)\n",
@@ -429,10 +431,10 @@ matchExpressions = describe "match expressions" $ do
             "  return match (c) { case circle(r = v) => { v } }\n",
             "}"
           ]
-    solverResult.solverErrors `shouldBe` []
+    solverErrors `shouldBe` []
 
   it "match arm bodies with mismatched types union into result" $ do
-    (_, _, solverResult) <-
+    (_, _, solverResult, solverErrors) <-
       runSolve $
         mconcat
           [ "agent describe(b: boolean) {\n",
@@ -442,7 +444,7 @@ matchExpressions = describe "match expressions" $ do
             "  }\n",
             "}"
           ]
-    solverResult.solverErrors `shouldBe` []
+    solverErrors `shouldBe` []
 
 -- ---------------------------------------------------------------------------
 -- for loops with var bindings, next/break (modifiers)
@@ -451,17 +453,17 @@ matchExpressions = describe "match expressions" $ do
 forLoops :: Spec
 forLoops = describe "for loops" $ do
   it "for ... in over an array" $ do
-    (_, _, solverResult) <-
+    (_, _, solverResult, solverErrors) <-
       runSolve $
         mconcat
           [ "agent run(xs: array[integer]) {\n",
             "  for (x in xs) { x }\n",
             "}"
           ]
-    solverResult.solverErrors `shouldBe` []
+    solverErrors `shouldBe` []
 
   it "for with var binding and next-with-modifier" $ do
-    (_, _, solverResult) <-
+    (_, _, solverResult, solverErrors) <-
       runSolve $
         mconcat
           [ "agent sum(xs: array[integer]) -> integer {\n",
@@ -470,10 +472,10 @@ forLoops = describe "for loops" $ do
             "  } then { acc }\n",
             "}"
           ]
-    solverResult.solverErrors `shouldBe` []
+    solverErrors `shouldBe` []
 
   it "for with break terminating early" $ do
-    (_, _, solverResult) <-
+    (_, _, solverResult, solverErrors) <-
       runSolve $
         mconcat
           [ "agent firstPositive(xs: array[integer]) -> integer | null {\n",
@@ -482,7 +484,7 @@ forLoops = describe "for loops" $ do
             "  } then { null }\n",
             "}"
           ]
-    solverResult.solverErrors `shouldBe` []
+    solverErrors `shouldBe` []
 
 -- ---------------------------------------------------------------------------
 -- local agent statements
@@ -491,7 +493,7 @@ forLoops = describe "for loops" $ do
 localAgents :: Spec
 localAgents = describe "local agent statements" $ do
   it "local agent declared inside another agent's body" $ do
-    (_, _, solverResult) <-
+    (_, _, solverResult, solverErrors) <-
       runSolve $
         mconcat
           [ "agent outer() -> integer {\n",
@@ -499,10 +501,10 @@ localAgents = describe "local agent statements" $ do
             "  return inner()\n",
             "}"
           ]
-    solverResult.solverErrors `shouldBe` []
+    solverErrors `shouldBe` []
 
   it "local agent capturing outer parameter" $ do
-    (_, _, solverResult) <-
+    (_, _, solverResult, solverErrors) <-
       runSolve $
         mconcat
           [ "agent outer(x: integer) -> integer {\n",
@@ -510,7 +512,7 @@ localAgents = describe "local agent statements" $ do
             "  return inner()\n",
             "}"
           ]
-    solverResult.solverErrors `shouldBe` []
+    solverErrors `shouldBe` []
 
 -- ---------------------------------------------------------------------------
 -- nested blocks and let bindings
@@ -519,24 +521,24 @@ localAgents = describe "local agent statements" $ do
 nestedBlocks :: Spec
 nestedBlocks = describe "nested blocks and let" $ do
   it "let inside if branch" $ do
-    (_, _, solverResult) <-
+    (_, _, solverResult, solverErrors) <-
       runSolve $
         mconcat
           [ "agent f(c: boolean) -> integer {\n",
             "  return if (c) { let y = 10; y } else { 0 }\n",
             "}"
           ]
-    solverResult.solverErrors `shouldBe` []
+    solverErrors `shouldBe` []
 
   it "deeply nested if expressions" $ do
-    (_, _, solverResult) <-
+    (_, _, solverResult, solverErrors) <-
       runSolve $
         mconcat
           [ "agent f(a: boolean, b: boolean) -> integer {\n",
             "  return if (a) { if (b) { 1 } else { 2 } } else { if (b) { 3 } else { 4 } }\n",
             "}"
           ]
-    solverResult.solverErrors `shouldBe` []
+    solverErrors `shouldBe` []
 
   it "multi-line block: trailing expression before close-brace is the return value" $ do
     -- Regression test for the virtual-';' / block-return UX: when an
@@ -544,7 +546,7 @@ nestedBlocks = describe "nested blocks and let" $ do
     -- the block's return value (not a statement). Without this fix, the
     -- inner @if (b) { 1 } else { 2 }@ would become a statement and the
     -- block would return null.
-    (_, _, solverResult) <-
+    (_, _, solverResult, solverErrors) <-
       runSolve $
         mconcat
           [ "agent f(a: boolean, b: boolean) -> integer {\n",
@@ -555,10 +557,10 @@ nestedBlocks = describe "nested blocks and let" $ do
             "  }\n",
             "}"
           ]
-    solverResult.solverErrors `shouldBe` []
+    solverErrors `shouldBe` []
 
   it "block expression with return statement inside" $ do
-    (_, _, solverResult) <-
+    (_, _, solverResult, solverErrors) <-
       runSolve $
         mconcat
           [ "agent early(c: boolean) -> integer {\n",
@@ -566,7 +568,7 @@ nestedBlocks = describe "nested blocks and let" $ do
             "  return 2\n",
             "}"
           ]
-    solverResult.solverErrors `shouldBe` []
+    solverErrors `shouldBe` []
 
 -- ---------------------------------------------------------------------------
 -- data declarations + tuple/array/object inference
@@ -575,36 +577,36 @@ nestedBlocks = describe "nested blocks and let" $ do
 dataAndCompositeTypes :: Spec
 dataAndCompositeTypes = describe "data and composite types" $ do
   it "data constructor returns its data type" $ do
-    (_, _, solverResult) <-
+    (_, _, solverResult, solverErrors) <-
       runSolve $
         mconcat
           [ "data point(x: integer, y: integer)\n",
             "agent origin() -> point { point(x = 0, y = 0) }"
           ]
-    solverResult.solverErrors `shouldBe` []
+    solverErrors `shouldBe` []
 
   it "array of integers" $ do
-    (_, _, solverResult) <-
+    (_, _, solverResult, solverErrors) <-
       runSolve $
         mconcat
           [ "agent ones() -> array[integer] {\n",
             "  return [1, 2, 3]\n",
             "}"
           ]
-    solverResult.solverErrors `shouldBe` []
+    solverErrors `shouldBe` []
 
   it "tuple inference" $ do
-    (_, _, solverResult) <-
+    (_, _, solverResult, solverErrors) <-
       runSolve $
         mconcat
           [ "agent pair() -> (integer, string) {\n",
             "  return (42, \"hi\")\n",
             "}"
           ]
-    solverResult.solverErrors `shouldBe` []
+    solverErrors `shouldBe` []
 
   it "data field access through pattern match" $ do
-    (_, _, solverResult) <-
+    (_, _, solverResult, solverErrors) <-
       runSolve $
         mconcat
           [ "data box(value: integer)\n",
@@ -612,7 +614,7 @@ dataAndCompositeTypes = describe "data and composite types" $ do
             "  return match (b) { case box(value = v) => { v } }\n",
             "}"
           ]
-    solverResult.solverErrors `shouldBe` []
+    solverErrors `shouldBe` []
 
 -- ---------------------------------------------------------------------------
 -- Higher-order: passing one agent as another's argument
@@ -621,24 +623,24 @@ dataAndCompositeTypes = describe "data and composite types" $ do
 higherOrderFunctions :: Spec
 higherOrderFunctions = describe "higher-order agents" $ do
   it "agent receives a function and calls it" $ do
-    (_, _, solverResult) <-
+    (_, _, solverResult, solverErrors) <-
       runSolve $
         mconcat
           [ "agent caller(callback: (x: integer) -> integer) -> integer {\n",
             "  return callback(x = 1)\n",
             "}"
           ]
-    solverResult.solverErrors `shouldBe` []
+    solverErrors `shouldBe` []
 
   it "function-typed parameter unified across call site" $ do
-    (_, _, solverResult) <-
+    (_, _, solverResult, solverErrors) <-
       runSolve $
         mconcat
           [ "agent identity(n: integer) -> integer { n }\n",
             "agent caller(cb: (n: integer) -> integer) -> integer { cb(n = 1) }\n",
             "agent run() -> integer { caller(cb = identity) }"
           ]
-    solverResult.solverErrors `shouldBe` []
+    solverErrors `shouldBe` []
 
 -- ---------------------------------------------------------------------------
 -- narrow + substitution composition
@@ -657,21 +659,21 @@ narrowAndSubstitutionComposition = describe "narrow + substitution composition" 
     -- which triggers narrow. After narrow, t_g := (x: p_var) -> r_var with
     -- p_var, r_var fresh. Without final deep substitution composition,
     -- t_g's value still references those vars and degenerates to NormalizedTypeUnknown.
-    (idResult, cgResult, solverResult) <-
+    (idResult, cgResult, solverResult, solverErrors) <-
       runSolve $
         mconcat
           [ "agent apply(g) {\n",
             "  return g(x = 1)\n",
             "}"
           ]
-    solverResult.solverErrors `shouldBe` []
+    solverErrors `shouldBe` []
     let inferred = inferredTypeOf "g" idResult cgResult solverResult
     inferred `shouldSatisfy` isFunctionShape
 
   it "(b) transitive var-on-var: x flows through y to number" $ do
     -- t_x <: t_y (let y = x), t_y <: number (via y + 1 arithmetic).
     -- Propagation should derive t_x <: number (transitively), pinning t_x.
-    (idResult, cgResult, solverResult) <-
+    (idResult, cgResult, solverResult, solverErrors) <-
       runSolve $
         mconcat
           [ "agent f(x) {\n",
@@ -679,7 +681,7 @@ narrowAndSubstitutionComposition = describe "narrow + substitution composition" 
             "  return y + 1\n",
             "}"
           ]
-    solverResult.solverErrors `shouldBe` []
+    solverErrors `shouldBe` []
     let inferred = inferredTypeOf "x" idResult cgResult solverResult
     inferred `shouldSatisfy` isInhabited
     inferred `shouldNotSatisfy` isNTUnknown
@@ -688,7 +690,7 @@ narrowAndSubstitutionComposition = describe "narrow + substitution composition" 
     -- t_x <: t_y, t_y == number (via wildcard-pattern annotation in let).
     -- t_x's only direct lower bound is t_y (var) → propagation must derive
     -- t_x <: number to avoid NormalizedTypeUnknown fallback.
-    (idResult, cgResult, solverResult) <-
+    (idResult, cgResult, solverResult, solverErrors) <-
       runSolve $
         mconcat
           [ "agent f(x) {\n",
@@ -696,7 +698,7 @@ narrowAndSubstitutionComposition = describe "narrow + substitution composition" 
             "  let _: number = y\n",
             "}"
           ]
-    solverResult.solverErrors `shouldBe` []
+    solverErrors `shouldBe` []
     let inferred = inferredTypeOf "x" idResult cgResult solverResult
     inferred `shouldSatisfy` isInhabited
     inferred `shouldNotSatisfy` isNTUnknown
@@ -709,7 +711,7 @@ narrowAndSubstitutionComposition = describe "narrow + substitution composition" 
     --   int <: α                           (separate int flow)
     -- Both γ (= g) and α must be sensibly inferred. γ would degenerate to
     -- NormalizedTypeUnknown without deep substitution composition.
-    (idResult, cgResult, solverResult) <-
+    (idResult, cgResult, solverResult, solverErrors) <-
       runSolve $
         mconcat
           [ "agent doubler(x: integer) -> number { 1 }\n",
@@ -719,7 +721,7 @@ narrowAndSubstitutionComposition = describe "narrow + substitution composition" 
             "  return if (true) { r } else { extra }\n",
             "}"
           ]
-    solverResult.solverErrors `shouldBe` []
+    solverErrors `shouldBe` []
     let inferredG = inferredTypeOf "g" idResult cgResult solverResult
     inferredG `shouldSatisfy` isFunctionShape
 

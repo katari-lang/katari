@@ -18,6 +18,7 @@ import Katari.SemanticType
   )
 import Katari.Typechecker.ConstraintGenerator
   ( ConstraintGenResult (..),
+    VariableSupply (..),
     generateConstraints,
   )
 import Katari.Id (RequestId, VariableId)
@@ -77,11 +78,10 @@ mkTotalSolverResult cg typeOverrides requestOverrides =
   SolverResult
     { typeSubstitution =
         Map.fromList typeOverrides
-          `Map.union` Map.fromList [(TypeVariableId i, NormalizedTypeUnknown) | i <- [0 .. cg.nextTypeVariableId - 1]],
+          `Map.union` Map.fromList [(TypeVariableId i, NormalizedTypeUnknown) | i <- [0 .. cg.variableSupply.typeVarSupply - 1]],
       requestSubstitution =
         Map.fromList requestOverrides
-          `Map.union` Map.fromList [(RequestVariableId i, Set.empty) | i <- [0 .. cg.nextRequestVariableId - 1]],
-      solverErrors = []
+          `Map.union` Map.fromList [(RequestVariableId i, Set.empty) | i <- [0 .. cg.variableSupply.requestVarSupply - 1]]
     }
 
 -- | Build a Solver result that *deliberately leaves entries missing*. Used to
@@ -93,12 +93,11 @@ mkPartialSolverResult ::
 mkPartialSolverResult ts es =
   SolverResult
     { typeSubstitution = Map.fromList ts,
-      requestSubstitution = Map.fromList es,
-      solverErrors = []
+      requestSubstitution = Map.fromList es
     }
 
 -- | Run zonker end-to-end with a totalised SolverResult.
-runZonkTotal :: Text -> IO ZonkResult
+runZonkTotal :: Text -> IO (ZonkResult, [ZonkError])
 runZonkTotal src = do
   (idResult, cg) <- pipeline src
   pure (zonk idResult cg (mkTotalSolverResult cg [] []))
@@ -278,20 +277,20 @@ denormaliseUnit = describe "denormalise" $ do
 basicZonk :: Spec
 basicZonk = describe "basic zonk" $ do
   it "literal integer expression keeps its concrete type" $ do
-    zr <- runZonkTotal "agent foo() { 42 }"
+    (zr, zonkErrs) <- runZonkTotal "agent foo() { 42 }"
     -- 42 のリテラル expression に対応する metadata が SemanticTypeLiteralInteger 42
     let mod_ = soleModule zr
     SemanticTypeLiteralInteger 42 `elem` expressionTypes mod_ `shouldBe` True
 
   it "string literal expression keeps its concrete type" $ do
-    zr <- runZonkTotal "agent foo() { \"hello\" }"
+    (zr, zonkErrs) <- runZonkTotal "agent foo() { \"hello\" }"
     let mod_ = soleModule zr
     SemanticTypeLiteralString "hello" `elem` expressionTypes mod_ `shouldBe` True
 
   it "Identifier ids carry through Zonked AST" $ do
     -- foo の VariableId が ZonkedVariable に乗ってきて、id が一致している。
     (idResult, cg) <- pipeline "agent foo() { 0 }"
-    let zr = zonk idResult cg (mkTotalSolverResult cg [] [])
+    let (zr, _zonkErrs) = zonk idResult cg (mkTotalSolverResult cg [] [])
         mainModule = soleModule zr
         Just fooVid = variableIdOf "foo" idResult
         names = [decl.name | DeclarationAgent decl <- mainModule.declarations]
@@ -311,9 +310,9 @@ typeVarSubstitution = describe "type var substitution" $ do
     -- 全 TypeVar を NumberSlotInteger に統一して埋める
     let allInt =
           [ (TypeVariableId i, NormalizedTypeLayered emptyLayered {numberLayer = NumberSlotInteger})
-            | i <- [0 .. cg.nextTypeVariableId - 1]
+            | i <- [0 .. cg.variableSupply.typeVarSupply - 1]
           ]
-        zr = zonk idResult cg (mkTotalSolverResult cg allInt [])
+        (zr, _zonkErrs) = zonk idResult cg (mkTotalSolverResult cg allInt [])
         mod_ = soleModule zr
     -- expression 由来の metadata は全て SemanticTypeInteger に解決される
     -- (ただし Constructor 由来の literal e.g. SemanticTypeLiteralInteger は常駐)
@@ -363,12 +362,12 @@ requestSubstitutionSpec = describe "request substitution" $ do
                         requests = Set.singleton fetchReqId
                       }
               }
-        zr = zonk idResult cg (mkTotalSolverResult cg [(tApp, appFnNT)] [])
+        (zr, zonkErrs) = zonk idResult cg (mkTotalSolverResult cg [(tApp, appFnNT)] [])
     case Map.lookup appVid zr.zonkedTypeEnvironment of
       Just (SemanticTypeFunction _ _ eff) ->
         eff `shouldBe` SemanticRequest (Set.singleton (SemanticRequestElementConcrete fetchReqId))
       other -> expectationFailure ("app not bound to function type: " ++ show other)
-    zr.zonkErrors `shouldBe` []
+    zonkErrs `shouldBe` []
 
 -- ---------------------------------------------------------------------------
 -- typeEnvironment zonk
@@ -378,7 +377,7 @@ typeEnvironmentZonk :: Spec
 typeEnvironmentZonk = describe "type environment zonk" $ do
   it "zonkedTypeEnvironment contains entry for every identifier variable" $ do
     (idResult, cg) <- pipeline "agent foo() { 0 }"
-    let zr = zonk idResult cg (mkTotalSolverResult cg [] [])
+    let (zr, _zonkErrs) = zonk idResult cg (mkTotalSolverResult cg [] [])
     Map.keysSet zr.zonkedTypeEnvironment
       `shouldBe` Map.keysSet idResult.identifiedVariables
 
@@ -386,7 +385,7 @@ typeEnvironmentZonk = describe "type environment zonk" $ do
     -- SemanticTypeVariable は Resolved phase では型レベルで構築不能なので、
     -- 型がついていれば自動的に保証されるが、念のため Show 文字列に
     -- "SemanticTypeVariable" が含まれていないことを spot check。
-    zr <- runZonkTotal "agent foo() { 0 }"
+    (zr, zonkErrs) <- runZonkTotal "agent foo() { 0 }"
     let strs = map show (Map.elems zr.zonkedTypeEnvironment)
     any (\s -> "SemanticTypeVariable" `elem` words s) strs `shouldBe` False
 
@@ -397,11 +396,11 @@ typeEnvironmentZonk = describe "type environment zonk" $ do
 contractInvariant :: Spec
 contractInvariant = describe "Solver totality invariant" $ do
   it "totalised Solver result yields empty zonkErrors (basic)" $ do
-    zr <- runZonkTotal "agent foo() { 42 }"
-    zr.zonkErrors `shouldBe` []
+    (zr, zonkErrs) <- runZonkTotal "agent foo() { 42 }"
+    zonkErrs `shouldBe` []
 
   it "totalised Solver result yields empty zonkErrors (handler / handle)" $ do
-    zr <-
+    (_zr, zonkErrs) <-
       runZonkTotal $
         mconcat
           [ "req ping() -> integer\n",
@@ -412,7 +411,7 @@ contractInvariant = describe "Solver totality invariant" $ do
             "  ping()\n",
             "}"
           ]
-    zr.zonkErrors `shouldBe` []
+    zonkErrs `shouldBe` []
 
 -- ---------------------------------------------------------------------------
 -- Defensive fallback: missing entries still produce a Zonked AST
@@ -423,9 +422,9 @@ defensiveFallback = describe "defensive fallback for Solver bug" $ do
   it "missing TypeVar entry: ZonkErrorMissingTypeVar is recorded and node defaults to Unknown" $ do
     (idResult, cg) <- pipeline "agent foo() { foo() }"
     -- 完全に空の substitution → 全 TypeVar が miss
-    let zr = zonk idResult cg (mkPartialSolverResult [] [])
+    let (zr, zonkErrs) = zonk idResult cg (mkPartialSolverResult [] [])
     -- 少なくとも 1 つは ZonkErrorMissingTypeVar が出る
-    any isMissingTypeVar zr.zonkErrors `shouldBe` True
+    any isMissingTypeVar zonkErrs `shouldBe` True
     -- AST 自体は生成されている
     Map.size zr.zonkedModules `shouldBe` 1
   where

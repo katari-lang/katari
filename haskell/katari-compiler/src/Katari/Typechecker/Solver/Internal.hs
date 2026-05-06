@@ -57,12 +57,12 @@ import Katari.Typechecker.NormalizedType
 
 -- | Constraint solver の最終出力。'typeSubstitution' / 'requestSubstitution'
 -- は ConstraintGenerator が allocate した全 ID をカバーする (Zonker plan で
--- 確定済 total 契約)。解決不能な制約は 'solverErrors' に記録され、対応する
--- var は NormalizedTypeUnknown / 空 set にフォールバック。
+-- 確定済 total 契約)。解決不能な制約は 'solve' の戻り値タプル右側
+-- ([SolverError]) に記録され、対応する var は NormalizedTypeUnknown / 空
+-- set にフォールバック。
 data SolverResult = SolverResult
   { typeSubstitution :: Map TypeVariableId NormalizedType,
-    requestSubstitution :: Map RequestVariableId (Set RequestId),
-    solverErrors :: [SolverError]
+    requestSubstitution :: Map RequestVariableId (Set RequestId)
   }
   deriving (Show)
 
