@@ -1,8 +1,15 @@
 import type { BlockId, LiteralValue, MatchBlock, MatchPattern, VarId } from "../../ir/types.js";
+import type { ThreadId } from "../id.js";
 import type { MachineState } from "../machine.js";
 import { getValueFromScope, setValueInScope } from "../scope.js";
 import type { Value } from "../value.js";
-import type { CallId, ChildThreadBase, CreateThreadInit } from "./types.js";
+import {
+  ChildThread,
+  type CallId,
+  type ChildThreadInit,
+  type SerializedChildThreadCommon,
+  type Thread,
+} from "./types.js";
 
 /**
  * Executes a BlockMatch (pattern matching).
@@ -11,70 +18,86 @@ import type { CallId, ChildThreadBase, CreateThreadInit } from "./types.js";
  * onChildDone: propagates arm result as own result.
  * CallId = 0 (only one child: the matched arm body).
  */
-export type MatchThread = ChildThreadBase & {
+export class MatchThread extends ChildThread {
+  readonly matchBlock: MatchBlock;
+
+  constructor(init: ChildThreadInit, matchBlock: MatchBlock) {
+    super(init);
+    this.matchBlock = matchBlock;
+  }
+
+  override onCall(machine: MachineState): void {
+    const subject = getValueFromScope(machine, this.scopeId, this.matchBlock.subject);
+
+    for (const arm of this.matchBlock.arms) {
+      const bindings = tryMatch(arm.pattern, subject);
+      if (bindings !== null) {
+        for (const [varId, value] of bindings) {
+          setValueInScope(machine, this.scopeId, varId, value);
+        }
+        this.pushArmCall(machine, arm.body);
+        return;
+      }
+    }
+
+    if (this.matchBlock.defaultArm !== undefined) {
+      this.pushArmCall(machine, this.matchBlock.defaultArm);
+      return;
+    }
+
+    throw new Error("MatchThread: no arm matched and no default");
+  }
+
+  protected override onChildDone(machine: MachineState, _callId: CallId, value: Value): void {
+    machine.queue.push({
+      kind: "done",
+      parent: this.parent,
+      callId: this.parentCallId,
+      value,
+    });
+  }
+
+  private pushArmCall(machine: MachineState, blockId: BlockId): void {
+    machine.queue.push({
+      kind: "callInline",
+      parent: this,
+      callId: 0,
+      blockId,
+      args: {},
+      scopeId: this.scopeId,
+    });
+  }
+
+  // ─── Snapshot ──────────────────────────────────────────────────────────
+
+  override serialize(): SerializedMatchThread {
+    return {
+      kind: "match",
+      ...this.serializeChildCommon(),
+      matchBlock: this.matchBlock,
+    };
+  }
+
+  static restoreSkeleton(serialized: SerializedMatchThread): MatchThread {
+    const thread = Object.create(MatchThread.prototype) as MatchThread;
+    thread.applySnapshotChildCommon(serialized);
+    const writable = thread as unknown as { matchBlock: MatchBlock };
+    writable.matchBlock = serialized.matchBlock;
+    return thread;
+  }
+
+  link(
+    serialized: SerializedMatchThread,
+    threadsById: ReadonlyMap<ThreadId, Thread>,
+  ): void {
+    this.linkChildCommon(serialized, threadsById);
+  }
+}
+
+export type SerializedMatchThread = SerializedChildThreadCommon & {
   kind: "match";
   matchBlock: MatchBlock;
 };
-
-export function createMatchThread(
-  machine: MachineState,
-  init: CreateThreadInit,
-  matchBlock: MatchBlock,
-): MatchThread {
-  const thread: MatchThread = {
-    ...init,
-    kind: "match",
-    children: new Map(),
-    status: "running",
-    matchBlock,
-  };
-  machine.threads.set(thread.id, thread);
-  return thread;
-}
-
-export function onCallMatch(machine: MachineState, thread: MatchThread): void {
-  const subject = getValueFromScope(machine, thread.scopeId, thread.matchBlock.subject);
-  const arms = thread.matchBlock.arms;
-
-  for (const arm of arms) {
-    const bindings = tryMatch(arm.pattern, subject);
-    if (bindings !== null) {
-      for (const [varId, value] of bindings) {
-        setValueInScope(machine, thread.scopeId, varId, value);
-      }
-      pushArmCall(machine, thread, arm.body);
-      return;
-    }
-  }
-
-  // Default arm
-  if (thread.matchBlock.defaultArm !== undefined) {
-    pushArmCall(machine, thread, thread.matchBlock.defaultArm);
-    return;
-  }
-
-  throw new Error("MatchThread: no arm matched and no default");
-}
-
-export function onChildDoneMatch(machine: MachineState, thread: MatchThread, _callId: CallId, value: Value): void {
-  machine.queue.push({
-    kind: "done",
-    parent: thread.parent,
-    callId: thread.parentCallId,
-    value,
-  });
-}
-
-function pushArmCall(machine: MachineState, thread: MatchThread, blockId: BlockId): void {
-  machine.queue.push({
-    kind: "callInline",
-    parent: thread,
-    callId: 0,
-    blockId,
-    args: {},
-    scopeId: thread.scopeId,
-  });
-}
 
 // ─── Pattern matching ─────────────────────────────────────────────────────────
 

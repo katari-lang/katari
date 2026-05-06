@@ -4,13 +4,8 @@ import { collectGarbage, type Scope } from "./scope.js";
 import type { MachineEvent } from "./events.js";
 import { processQueue } from "./runner.js";
 import type { QueueEvent, Thread } from "./thread/types.js";
-import type { ExternalThread } from "./thread/external.js";
-import {
-  handleDelegateAckFromFFI,
-  handleTerminateAckFromFFI,
-} from "./thread/external.js";
-import type { APIThread } from "./thread/api.js";
-import { handleDelegateFromAPI, handleTerminateFromAPI } from "./thread/api.js";
+import { ExternalThread } from "./thread/external.js";
+import { APIThread } from "./thread/api.js";
 
 // ─── MachineState ───────────────────────────────────────────────────────────
 
@@ -74,7 +69,7 @@ export function applyEvent(
   switch (event.kind) {
     case "delegate": {
       if (event.from === "API" && event.to === "CORE") {
-        handleDelegateFromAPI(
+        APIThread.handleDelegateFromAPI(
           state,
           event.qualifiedName,
           event.args,
@@ -86,21 +81,21 @@ export function applyEvent(
 
     case "delegateAck": {
       if (event.from === "FFI" && event.to === "CORE") {
-        handleDelegateAckFromFFI(state, event.delegationId, event.value);
+        ExternalThread.handleDelegateAckFromFFI(state, event.delegationId, event.value);
       }
       break;
     }
 
     case "terminate": {
       if (event.from === "API" && event.to === "CORE") {
-        handleTerminateFromAPI(state, event.delegationId);
+        APIThread.handleTerminateFromAPI(state, event.delegationId);
       }
       break;
     }
 
     case "terminateAck": {
       if (event.from === "FFI" && event.to === "CORE") {
-        handleTerminateAckFromFFI(state, event.delegationId);
+        ExternalThread.handleTerminateAckFromFFI(state, event.delegationId);
       }
       break;
     }

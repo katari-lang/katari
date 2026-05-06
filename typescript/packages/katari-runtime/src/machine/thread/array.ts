@@ -1,114 +1,142 @@
 import type { ArrayBlock, BlockId } from "../../ir/types.js";
+import type { ThreadId } from "../id.js";
 import type { MachineState } from "../machine.js";
 import type { Value } from "../value.js";
-import type { CallId, ChildThreadBase, CreateThreadInit } from "./types.js";
+import {
+  ChildThread,
+  type CallId,
+  type ChildThreadInit,
+  type SerializedChildThreadCommon,
+  type Thread,
+} from "./types.js";
 
 /**
  * Executes a BlockArray (array construction).
  *
  * Sequential: evaluates element blocks one by one.
- * Parallel: evaluates all element blocks concurrently.
+ * Parallel:   evaluates all element blocks concurrently.
  *
  * CallId = element index (0, 1, 2, ...).
  */
-export type ArrayThread = ChildThreadBase & {
-  kind: "array";
-  block: ArrayBlock;
+export class ArrayThread extends ChildThread {
+  readonly block: ArrayBlock;
   /** Collected results from children. */
-  collected: Map<CallId, Value>;
+  private readonly collected: Map<CallId, Value> = new Map();
   /** Sequential mode: next element index to dispatch. */
-  nextIndex: number;
-};
+  private nextIndex: number = 0;
 
-export function createArrayThread(
-  machine: MachineState,
-  init: CreateThreadInit,
-  block: ArrayBlock,
-): ArrayThread {
-  const thread: ArrayThread = {
-    ...init,
-    kind: "array",
-    children: new Map(),
-    status: "running",
-    collected: new Map(),
-    block,
-    nextIndex: 0,
-  };
-  machine.threads.set(thread.id, thread);
-  return thread;
-}
+  constructor(init: ChildThreadInit, block: ArrayBlock) {
+    super(init);
+    this.block = block;
+  }
 
-export function onCallArray(machine: MachineState, thread: ArrayThread): void {
-  const elements = thread.block.elements;
+  override onCall(machine: MachineState): void {
+    const elements = this.block.elements;
+    if (elements.length === 0) {
+      machine.queue.push({
+        kind: "done",
+        parent: this.parent,
+        callId: this.parentCallId,
+        value: { kind: "array", elements: [] },
+      });
+      return;
+    }
 
-  if (elements.length === 0) {
+    if (this.block.parallel) {
+      for (let i = 0; i < elements.length; i++) {
+        this.pushElementCall(machine, i, elementAt(elements, i));
+      }
+    } else {
+      this.pushElementCall(machine, 0, elementAt(elements, 0));
+    }
+  }
+
+  protected override onChildDone(machine: MachineState, callId: CallId, value: Value): void {
+    this.collected.set(callId, value);
+    const elements = this.block.elements;
+
+    if (this.block.parallel) {
+      if (this.collected.size >= elements.length) {
+        this.emitDone(machine, elements);
+      }
+      return;
+    }
+
+    this.nextIndex++;
+    if (this.nextIndex >= elements.length) {
+      this.emitDone(machine, elements);
+      return;
+    }
+    this.pushElementCall(machine, this.nextIndex, elementAt(elements, this.nextIndex));
+  }
+
+  private pushElementCall(machine: MachineState, index: number, blockId: BlockId): void {
+    machine.queue.push({
+      kind: "callInline",
+      parent: this,
+      callId: index,
+      blockId,
+      args: {},
+      scopeId: this.scopeId,
+    });
+  }
+
+  private emitDone(machine: MachineState, elements: BlockId[]): void {
+    const values = elements.map((_, i) => {
+      const v = this.collected.get(i);
+      if (v === undefined) {
+        throw new Error(`ArrayThread.emitDone: missing element ${i}`);
+      }
+      return v;
+    });
     machine.queue.push({
       kind: "done",
-      parent: thread.parent,
-      callId: thread.parentCallId,
-      value: { kind: "array", elements: [] },
+      parent: this.parent,
+      callId: this.parentCallId,
+      value: { kind: "array", elements: values },
     });
-    return;
   }
 
-  if (thread.block.parallel) {
-    for (let i = 0; i < elements.length; i++) {
-      pushElementCall(machine, thread, i, elementAt(elements, i));
-    }
-  } else {
-    pushElementCall(machine, thread, 0, elementAt(elements, 0));
+  // ─── Snapshot ──────────────────────────────────────────────────────────
+
+  override serialize(): SerializedArrayThread {
+    return {
+      kind: "array",
+      ...this.serializeChildCommon(),
+      block: this.block,
+      collected: [...this.collected.entries()],
+      nextIndex: this.nextIndex,
+    };
+  }
+
+  static restoreSkeleton(serialized: SerializedArrayThread): ArrayThread {
+    const thread = Object.create(ArrayThread.prototype) as ArrayThread;
+    thread.applySnapshotChildCommon(serialized);
+    const writable = thread as unknown as {
+      block: ArrayBlock;
+      collected: Map<CallId, Value>;
+      nextIndex: number;
+    };
+    writable.block = serialized.block;
+    writable.collected = new Map(serialized.collected);
+    writable.nextIndex = serialized.nextIndex;
+    return thread;
+  }
+
+  link(
+    serialized: SerializedArrayThread,
+    threadsById: ReadonlyMap<ThreadId, Thread>,
+  ): void {
+    this.linkChildCommon(serialized, threadsById);
   }
 }
 
-export function onChildDoneArray(machine: MachineState, thread: ArrayThread, callId: CallId, value: Value): void {
-  thread.collected.set(callId, value);
-  const elements = thread.block.elements;
-
-  if (thread.block.parallel) {
-    if (thread.collected.size >= elements.length) {
-      emitDone(machine, thread, elements);
-    }
-  } else {
-    thread.nextIndex++;
-    if (thread.nextIndex >= elements.length) {
-      emitDone(machine, thread, elements);
-    } else {
-      pushElementCall(machine, thread, thread.nextIndex, elementAt(elements, thread.nextIndex));
-    }
-  }
-}
-
-function pushElementCall(
-  machine: MachineState,
-  thread: ArrayThread,
-  index: number,
-  blockId: BlockId,
-): void {
-  machine.queue.push({
-    kind: "callInline",
-    parent: thread,
-    callId: index,
-    blockId,
-    args: {},
-    scopeId: thread.scopeId,
-  });
-}
-
-function emitDone(machine: MachineState, thread: ArrayThread, elements: BlockId[]): void {
-  const values = elements.map((_, i) => {
-    const v = thread.collected.get(i);
-    if (v === undefined) {
-      throw new Error(`ArrayThread.emitDone: missing element ${i}`);
-    }
-    return v;
-  });
-  machine.queue.push({
-    kind: "done",
-    parent: thread.parent,
-    callId: thread.parentCallId,
-    value: { kind: "array", elements: values },
-  });
-}
+export type SerializedArrayThread = SerializedChildThreadCommon & {
+  kind: "array";
+  block: ArrayBlock;
+  collected: [CallId, Value][];
+  nextIndex: number;
+};
 
 function elementAt(elements: BlockId[], index: number): BlockId {
   const blockId = elements[index];

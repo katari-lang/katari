@@ -1,44 +1,77 @@
+import type { ThreadId } from "../id.js";
 import type { MachineState } from "../machine.js";
 import type { Value } from "../value.js";
-import type { ChildThreadBase, CreateThreadInit } from "./types.js";
+import {
+  ChildThread,
+  type ChildThreadInit,
+  type SerializedChildThreadCommon,
+  type Thread,
+} from "./types.js";
 
 /**
  * Executes a BlockPrim (pure primitive computation).
- * Completes immediately in onCall — no children.
+ * Completes immediately in `onCall` — no children.
  */
-export type PrimThread = ChildThreadBase & {
+export class PrimThread extends ChildThread {
+  readonly primName: string;
+  readonly args: Record<string, Value>;
+
+  constructor(init: ChildThreadInit, primName: string, args: Record<string, Value>) {
+    super(init);
+    this.primName = primName;
+    this.args = args;
+  }
+
+  override onCall(machine: MachineState): void {
+    const value = executePrim(this.primName, this.args);
+    machine.queue.push({
+      kind: "done",
+      parent: this.parent,
+      callId: this.parentCallId,
+      value,
+    });
+  }
+
+  // ─── Snapshot ──────────────────────────────────────────────────────────
+  // PrimThread completes synchronously inside `onCall` and never survives
+  // an `applyEvent` call, so in practice `serialize` is unreachable. We
+  // implement it for completeness so that mid-flight snapshots remain
+  // well-defined.
+
+  override serialize(): SerializedPrimThread {
+    return {
+      kind: "prim",
+      ...this.serializeChildCommon(),
+      primName: this.primName,
+      args: this.args,
+    };
+  }
+
+  static restoreSkeleton(serialized: SerializedPrimThread): PrimThread {
+    const thread = Object.create(PrimThread.prototype) as PrimThread;
+    thread.applySnapshotChildCommon(serialized);
+    const writable = thread as unknown as {
+      primName: string;
+      args: Record<string, Value>;
+    };
+    writable.primName = serialized.primName;
+    writable.args = serialized.args;
+    return thread;
+  }
+
+  link(
+    serialized: SerializedPrimThread,
+    threadsById: ReadonlyMap<ThreadId, Thread>,
+  ): void {
+    this.linkChildCommon(serialized, threadsById);
+  }
+}
+
+export type SerializedPrimThread = SerializedChildThreadCommon & {
   kind: "prim";
   primName: string;
   args: Record<string, Value>;
 };
-
-export function createPrimThread(
-  machine: MachineState,
-  init: CreateThreadInit,
-  primName: string,
-  args: Record<string, Value>,
-): PrimThread {
-  const thread: PrimThread = {
-    ...init,
-    kind: "prim",
-    children: new Map(),
-    status: "running",
-    primName,
-    args,
-  };
-  machine.threads.set(thread.id, thread);
-  return thread;
-}
-
-export function onCallPrim(machine: MachineState, thread: PrimThread): void {
-  const value = executePrim(thread.primName, thread.args);
-  machine.queue.push({
-    kind: "done",
-    parent: thread.parent,
-    callId: thread.parentCallId,
-    value,
-  });
-}
 
 // ─── Prim execution ─────────────────────────────────────────────────────────
 

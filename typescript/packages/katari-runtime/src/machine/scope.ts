@@ -63,6 +63,31 @@ export function getValueFromScope(
   );
 }
 
+// ─── Snapshot helpers ──────────────────────────────────────────────────────
+
+/** Plain JSON shape for a Scope. Maps are flattened to entry arrays. */
+export type SerializedScope = {
+  id: ScopeId;
+  parentId: ScopeId | null;
+  values: [VarId, Value][];
+};
+
+export function serializeScope(scope: Scope): SerializedScope {
+  return {
+    id: scope.id,
+    parentId: scope.parentId,
+    values: [...scope.values.entries()],
+  };
+}
+
+export function deserializeScope(serialized: SerializedScope): Scope {
+  return {
+    id: serialized.id,
+    parentId: serialized.parentId,
+    values: new Map(serialized.values),
+  };
+}
+
 // ─── Garbage Collection ─────────────────────────────────────────────────────
 
 /**

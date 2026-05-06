@@ -1,22 +1,25 @@
-export type {
-  RootThreadBase,
-  ChildThreadBase,
+export {
   Thread,
+  ChildThread,
+  EMPTY_BOUNDARIES,
+} from "./types.js";
+export type {
+  ThreadInit,
+  ChildThreadInit,
+  CreateThreadInit,
   CallId,
   QueueEvent,
-  CreateThreadInit,
   Boundaries,
   BoundaryKey,
 } from "./types.js";
-export { EMPTY_BOUNDARIES } from "./types.js";
-export type { APIThread } from "./api.js";
-export type { UserThread } from "./user.js";
-export type { PrimThread } from "./prim.js";
-export type { RequestThread } from "./request.js";
-export type { ExternalThread } from "./external.js";
-export type { CtorThread } from "./ctor.js";
-export type { MatchThread } from "./match.js";
-export type { ForThread } from "./for.js";
-export type { HandleThread } from "./handle.js";
-export type { TupleThread } from "./tuple.js";
-export type { ArrayThread } from "./array.js";
+export { APIThread } from "./api.js";
+export { UserThread } from "./user.js";
+export { PrimThread } from "./prim.js";
+export { RequestThread } from "./request.js";
+export { ExternalThread } from "./external.js";
+export { CtorThread } from "./ctor.js";
+export { MatchThread } from "./match.js";
+export { ForThread } from "./for.js";
+export { HandleThread } from "./handle.js";
+export { TupleThread } from "./tuple.js";
+export { ArrayThread } from "./array.js";
