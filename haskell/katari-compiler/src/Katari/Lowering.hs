@@ -1193,13 +1193,11 @@ lowerPattern = \case
         locals = concatMap snd pairs
     pure (MatchPatternConstructor irCtorId fields, locals)
 
-literalValueToIR :: AST.LiteralValue -> LiteralValue
-literalValueToIR = \case
-  AST.LiteralValueBoolean b -> LiteralValueBoolean {boolean = b}
-  AST.LiteralValueNull -> LiteralValueNull
-  AST.LiteralValueInteger n -> LiteralValueInteger {integer = n}
-  AST.LiteralValueNumber n -> LiteralValueNumber {number = n}
-  AST.LiteralValueString s -> LiteralValueString {string = s}
+-- | AST and IR share 'LiteralValue' (defined in 'Katari.Common'), so
+-- lowering is the identity. Kept as an alias for call sites that read
+-- as a phase boundary.
+literalValueToIR :: LiteralValue -> LiteralValue
+literalValueToIR = id
 
 -- | Build a child block for a match arm body. The given locals (from
 -- pattern bindings) are added to the Reader scope before lowering the

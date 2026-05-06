@@ -22,6 +22,7 @@ module Katari.AST where
 
 import Data.Kind (Type)
 import Data.Text (Text)
+import Katari.Common (LiteralValue (..), QualifiedName (..))
 import Katari.Id
   ( ConstructorId,
     ModuleId,
@@ -531,13 +532,6 @@ data LiteralPattern (phase :: Phase) = LiteralPattern
 instance HasSourceSpan (LiteralPattern phase) where
   sourceSpanOf pattern' = pattern'.sourceSpan
 
-data LiteralValue where
-  LiteralValueInteger :: Integer -> LiteralValue
-  LiteralValueNumber :: Double -> LiteralValue
-  LiteralValueString :: Text -> LiteralValue
-  LiteralValueBoolean :: Bool -> LiteralValue
-  LiteralValueNull :: LiteralValue
-  deriving (Eq, Show)
 
 -- ---------------------------------------------------------------------------
 -- Types

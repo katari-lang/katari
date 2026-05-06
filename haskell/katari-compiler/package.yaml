@@ -10,6 +10,7 @@ library:
   exposed-modules:
     - Katari
     - Katari.AST
+    - Katari.Common
     - Katari.Id
     - Katari.Diagnostic
     - Katari.Diagnostic.Render

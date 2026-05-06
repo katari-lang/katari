@@ -5,6 +5,7 @@ import Data.Maybe (isJust, isNothing)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Katari.AST
+import Katari.Common (LiteralValue (..))
 import Katari.Diagnostic (Diagnostic (..))
 import Katari.Lexer qualified as Lexer
 import Katari.Parser qualified as Parser

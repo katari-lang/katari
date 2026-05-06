@@ -79,14 +79,13 @@ import Data.Aeson
     genericParseJSON,
     genericToJSON,
   )
-import Data.Aeson.Types (FromJSONKeyFunction (..), toJSONKeyText)
 import Data.Char (toLower)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
-import Data.Text qualified as T
 import Data.Word (Word32)
 import GHC.Generics (Generic)
+import Katari.Common (LiteralValue (..), QualifiedName (..), parseQualifiedName, renderQualifiedName)
 
 -- ===========================================================================
 -- Identifiers
@@ -125,49 +124,6 @@ newtype RequestId = RequestId Word32
 newtype ConstructorId = ConstructorId Word32
   deriving stock (Eq, Ord, Show)
   deriving newtype (ToJSON, FromJSON, ToJSONKey, FromJSONKey)
-
--- | A top-level declaration's qualified name (@\<modulePath\>.\<bareName\>@
--- as the canonical pair). Used as the FFI-boundary identifier in
--- 'IRModule.entries' so that JS / external callers can address a
--- callable without depending on the IR's internal 'BlockId' /
--- 'RequestId' / 'ConstructorId' allocation.
-data QualifiedName = QualifiedName
-  { module_ :: Text,
-    name :: Text
-  }
-  deriving (Eq, Ord, Show, Generic)
-
-instance ToJSON QualifiedName where
-  toJSON = genericToJSON irOptions
-
-instance FromJSON QualifiedName where
-  parseJSON = genericParseJSON irOptions
-
--- | Render @{module_, name}@ as a string key for use as a JSON object key.
--- Aeson's default 'ToJSONKey' for record types encodes the map as a JSON
--- array of @[key, value]@ pairs, which the runtime cannot index directly.
--- We instead emit a textual @"module.name"@ key (or @"name"@ when the
--- module is empty) so the runtime can do plain object lookups.
-instance ToJSONKey QualifiedName where
-  toJSONKey = toJSONKeyText renderQualifiedName
-
-instance FromJSONKey QualifiedName where
-  fromJSONKey = FromJSONKeyTextParser (pure . parseQualifiedName)
-
-renderQualifiedName :: QualifiedName -> Text
-renderQualifiedName qualifiedName
-  | T.null qualifiedName.module_ = qualifiedName.name
-  | otherwise = qualifiedName.module_ <> "." <> qualifiedName.name
-
--- | Inverse of 'renderQualifiedName'. Splits at the LAST @"."@: a name
--- without a dot becomes @QualifiedName "" name@. A name with one or more
--- dots takes everything after the final dot as the bare name.
-parseQualifiedName :: Text -> QualifiedName
-parseQualifiedName text =
-  let (modulePart, namePart) = T.breakOnEnd "." text
-   in if T.null modulePart
-        then QualifiedName "" namePart
-        else QualifiedName (T.dropEnd 1 modulePart) namePart
 
 -- | Identifier of an external (sidecar) callable. Wraps a 'QualifiedName'
 -- under a distinct type so the runtime layer can evolve its lookup
@@ -592,22 +548,6 @@ instance ToJSON BindPatternData where
 
 instance FromJSON BindPatternData where
   parseJSON = genericParseJSON irOptions
-
--- | IR-level literal values. Mirrors 'AST.LiteralValue' but lives in the IR
--- namespace so the IR is self-contained (the runtime needs only IR types).
-data LiteralValue where
-  LiteralValueInteger :: {integer :: Integer} -> LiteralValue
-  LiteralValueNumber :: {number :: Double} -> LiteralValue
-  LiteralValueString :: {string :: Text} -> LiteralValue
-  LiteralValueBoolean :: {boolean :: Bool} -> LiteralValue
-  LiteralValueNull :: LiteralValue
-  deriving (Eq, Show, Generic)
-
-instance ToJSON LiteralValue where
-  toJSON = genericToJSON sumOptions
-
-instance FromJSON LiteralValue where
-  parseJSON = genericParseJSON sumOptions
 
 -- | Resolution of an 'SCall' target.
 data CallTarget where

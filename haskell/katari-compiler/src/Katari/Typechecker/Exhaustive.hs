@@ -32,6 +32,7 @@ import Data.Text (Text)
 import Data.Text qualified as Text
 import Katari.AST (NameRef (..), Zonked)
 import Katari.AST qualified as AST
+import Katari.Common (LiteralValue (..))
 import Katari.Diagnostic (Diagnostic, diagnosticError, diagnosticWarning)
 import Katari.SemanticType
   ( Resolved,
@@ -321,13 +322,13 @@ patternToHead = \case
                 sortBy (comparing ((.text) . fst)) qp.parameters
          in PatHeadCtor (CtorTagData cid) sortedSubs
 
-literalTag :: AST.LiteralValue -> CtorTag
+literalTag :: LiteralValue -> CtorTag
 literalTag = \case
-  AST.LiteralValueInteger n -> CtorTagLitInt n
-  AST.LiteralValueString s -> CtorTagLitStr s
-  AST.LiteralValueBoolean b -> CtorTagLitBool b
-  AST.LiteralValueNull -> CtorTagNull
-  AST.LiteralValueNumber _ -> CtorTagLitStr "(number)"
+  LiteralValueInteger n -> CtorTagLitInt n
+  LiteralValueString s -> CtorTagLitStr s
+  LiteralValueBoolean b -> CtorTagLitBool b
+  LiteralValueNull -> CtorTagNull
+  LiteralValueNumber _ -> CtorTagLitStr "(number)"
 
 -- | Extract the semantic type from any 'AST.Expression Zonked'.
 getExpressionType :: AST.Expression Zonked -> SemanticType Resolved

@@ -55,6 +55,7 @@ import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
 import Katari.AST
+import Katari.Common (LiteralValue (..))
 import Katari.Diagnostic (Diagnostic, diagnosticError)
 import Katari.SemanticType
 import Katari.SourceSpan

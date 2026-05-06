@@ -4,11 +4,21 @@
 -- 'Identified' phase onward. They are split into a dedicated module so that
 -- both 'Katari.AST' and 'Katari.Typechecker.SemanticType' can depend on them
 -- without circular imports.
-module Katari.Id where
+--
+-- 'QualifiedName' / 'renderQualifiedName' live in 'Katari.Common' so the
+-- IR can share them; they are re-exported here for convenience.
+module Katari.Id
+  ( VariableId (..),
+    TypeId (..),
+    ModuleId (..),
+    RequestId (..),
+    ConstructorId (..),
+    QualifiedName (..),
+    renderQualifiedName,
+  )
+where
 
-import Data.Aeson (FromJSON, FromJSONKey, ToJSON, ToJSONKey)
-import Data.Text (Text)
-import GHC.Generics (Generic)
+import Katari.Common (QualifiedName (..), renderQualifiedName)
 
 -- | Unique id in the value namespace. Shared by agent / req / ext-agent /
 -- constructor function / local variable. (\"value\" here means a name that
@@ -38,31 +48,3 @@ newtype RequestId = RequestId Int
 -- side) of the same declaration.
 newtype ConstructorId = ConstructorId Int
   deriving (Eq, Ord, Show)
-
--- | A top-level declaration's fully qualified name: the dotted module path
--- plus the bare name. Local variables (let / pattern bind / param) do not
--- carry a 'QualifiedName' (they live inside a scope and have no addressable
--- identity outside it).
---
--- The structured form (rather than a single 'Text') keeps the components
--- queryable inside the compiler; render to dotted form via
--- 'renderQualifiedName' at FFI / debug boundaries.
-data QualifiedName = QualifiedName
-  { module_ :: Text,
-    name :: Text
-  }
-  deriving (Eq, Ord, Show, Generic)
-
-instance ToJSON QualifiedName
-
-instance FromJSON QualifiedName
-
-instance ToJSONKey QualifiedName
-
-instance FromJSONKey QualifiedName
-
--- | Join a 'QualifiedName' into its dotted form @\"path.to.mod.name\"@.
--- Handles the empty-module-path edge case (which should not occur in
--- well-formed sources) by emitting just the bare name.
-renderQualifiedName :: QualifiedName -> Text
-renderQualifiedName q = q.module_ <> "." <> q.name
