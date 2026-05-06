@@ -162,7 +162,7 @@ parse filePath stream =
 parseKatariTokenWith :: (KatariToken -> Maybe value) -> Parser value
 parseKatariTokenWith predicate = do
   (result, endPos) <- MP.token testKatariToken Set.empty
-  modify' (\s -> s {previousEndPosition = Just endPos})
+  modify' (\state -> state {previousEndPosition = Just endPos})
   pure result
   where
     testKatariToken (WithSourceSpan span_ inputKatariToken) = do
@@ -263,7 +263,7 @@ parseWithSpan body = do
 -- ===========================================================================
 
 parseRecordError :: ParseError -> Parser ()
-parseRecordError err = modify' (\s -> s {parseErrors = err : s.parseErrors})
+parseRecordError err = modify' (\state -> state {parseErrors = err : state.parseErrors})
 
 -- | Project a megaparsec parse error into our structured 'ParseErrorReason'.
 -- Used inside 'withRecovery' handlers at the declaration and statement levels.
@@ -765,7 +765,7 @@ parseNonExpressionStatement =
 --
 -- @
 -- (par) handle (var s = init, ...) {
---   req name(params) -> T { body }
+--   req name(parameters) -> T { body }
 --   ...
 -- } then (pat) { ... }
 -- continuation_statements; trailing_expr

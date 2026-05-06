@@ -197,38 +197,34 @@ type Lower = ReaderT LowerEnv (State LowerState)
 
 freshBlockId :: Lower BlockId
 freshBlockId = do
-  state <- gets id
-  let blockId = BlockId state.lsNextBlockId
-  modify (\s -> s {lsNextBlockId = s.lsNextBlockId + 1})
+  blockId <- gets (BlockId . (.lsNextBlockId))
+  modify (\state -> state {lsNextBlockId = state.lsNextBlockId + 1})
   pure blockId
 
 freshVarId :: Maybe Text -> Lower VarId
 freshVarId hint = do
-  state <- gets id
-  let varId = VarId state.lsNextVarId
+  varId <- gets (VarId . (.lsNextVarId))
   modify
-    ( \s ->
-        s
-          { lsNextVarId = s.lsNextVarId + 1,
+    ( \state ->
+        state
+          { lsNextVarId = state.lsNextVarId + 1,
             lsVarNames = case hint of
-              Just name -> Map.insert varId name s.lsVarNames
-              Nothing -> s.lsVarNames
+              Just name -> Map.insert varId name state.lsVarNames
+              Nothing -> state.lsVarNames
           }
     )
   pure varId
 
 freshReqId :: Lower ReqId
 freshReqId = do
-  state <- gets id
-  let reqId = ReqId state.lsNextReqId
-  modify (\s -> s {lsNextReqId = s.lsNextReqId + 1})
+  reqId <- gets (ReqId . (.lsNextReqId))
+  modify (\state -> state {lsNextReqId = state.lsNextReqId + 1})
   pure reqId
 
 freshCtorId :: Lower CtorId
 freshCtorId = do
-  state <- gets id
-  let ctorId = CtorId state.lsNextCtorId
-  modify (\s -> s {lsNextCtorId = s.lsNextCtorId + 1})
+  ctorId <- gets (CtorId . (.lsNextCtorId))
+  modify (\state -> state {lsNextCtorId = state.lsNextCtorId + 1})
   pure ctorId
 
 -- | Allocate one IR 'ReqId' per Identifier 'RequestId' and one IR
@@ -265,12 +261,12 @@ reserveBlockId :: Maybe Text -> Lower BlockId
 reserveBlockId name = do
   blockId <- freshBlockId
   case name of
-    Just n -> modify (\s -> s {lsBlockNames = Map.insert blockId n s.lsBlockNames})
+    Just n -> modify (\state -> state {lsBlockNames = Map.insert blockId n state.lsBlockNames})
     Nothing -> pure ()
   pure blockId
 
 recordError :: LoweringError -> Lower ()
-recordError err = modify (\s -> s {lsErrors = err : s.lsErrors})
+recordError err = modify (\state -> state {lsErrors = err : state.lsErrors})
 
 -- | Run an action with additional local variable bindings in scope. Uses
 -- 'ReaderT' 'local' so cleanup is automatic — no manual restorer chain.
@@ -454,12 +450,12 @@ registerPrimitives = mapM_ go primitiveNames
     go primName = do
       blockId <- freshBlockId
       recordBlock blockId (BlockPrim {name = primName}) (Just ("prim:" <> primName))
-      modify (\s -> s {lsPrimBlockIds = Map.insert primName blockId s.lsPrimBlockIds})
+      modify (\state -> state {lsPrimBlockIds = Map.insert primName blockId state.lsPrimBlockIds})
 
 -- | Bind a top-level @VariableId@ to its callable @BlockId@.
 recordVarBlockId :: VariableId -> BlockId -> Lower ()
 recordVarBlockId variableId blockId =
-  modify (\s -> s {lsTopLevelBlocks = Map.insert variableId blockId s.lsTopLevelBlocks})
+  modify (\state -> state {lsTopLevelBlocks = Map.insert variableId blockId state.lsTopLevelBlocks})
 
 -- Closure capture for local agents is handled by the runtime: a local
 -- agent's body block runs with the parent scope visible (the runtime
@@ -565,7 +561,7 @@ registerDeclarationKinds zonkResult =
     recordEntry :: Text -> Text -> BlockId -> Lower ()
     recordEntry moduleName_ declName blockId =
       let qualifiedName = QualifiedName {module_ = moduleName_, name = declName}
-       in modify (\s -> s {lsEntries = Map.insert qualifiedName blockId s.lsEntries})
+       in modify (\state -> state {lsEntries = Map.insert qualifiedName blockId state.lsEntries})
 
 lowerAllDeclarations :: ZonkResult -> Lower (Map Text BlockId)
 lowerAllDeclarations zonkResult = do

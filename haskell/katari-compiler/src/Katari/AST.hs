@@ -1171,266 +1171,266 @@ instance
   ) =>
   ShowPhase phase
 
-deriving instance (Eq (NameRefResolution p s)) => Eq (NameRef p s)
+deriving instance (Eq (NameRefResolution phase nameRefKind)) => Eq (NameRef phase nameRefKind)
 
-deriving instance (Show (NameRefResolution p s)) => Show (NameRef p s)
+deriving instance (Show (NameRefResolution phase nameRefKind)) => Show (NameRef phase nameRefKind)
 
-deriving instance (EqPhase p) => Eq (Module p)
+deriving instance (EqPhase phase) => Eq (Module phase)
 
-deriving instance (ShowPhase p) => Show (Module p)
+deriving instance (ShowPhase phase) => Show (Module phase)
 
-deriving instance (EqPhase p) => Eq (Declaration p)
+deriving instance (EqPhase phase) => Eq (Declaration phase)
 
-deriving instance (ShowPhase p) => Show (Declaration p)
+deriving instance (ShowPhase phase) => Show (Declaration phase)
 
-deriving instance (EqPhase p) => Eq (AgentDeclaration p)
+deriving instance (EqPhase phase) => Eq (AgentDeclaration phase)
 
-deriving instance (ShowPhase p) => Show (AgentDeclaration p)
+deriving instance (ShowPhase phase) => Show (AgentDeclaration phase)
 
-deriving instance (EqPhase p) => Eq (RequestDeclaration p)
+deriving instance (EqPhase phase) => Eq (RequestDeclaration phase)
 
-deriving instance (ShowPhase p) => Show (RequestDeclaration p)
+deriving instance (ShowPhase phase) => Show (RequestDeclaration phase)
 
-deriving instance Eq (ImportDeclaration p)
+deriving instance Eq (ImportDeclaration phase)
 
-deriving instance Show (ImportDeclaration p)
+deriving instance Show (ImportDeclaration phase)
 
-deriving instance (EqPhase p) => Eq (ExternalAgentDeclaration p)
+deriving instance (EqPhase phase) => Eq (ExternalAgentDeclaration phase)
 
-deriving instance (ShowPhase p) => Show (ExternalAgentDeclaration p)
+deriving instance (ShowPhase phase) => Show (ExternalAgentDeclaration phase)
 
-deriving instance (EqPhase p) => Eq (DataDeclaration p)
+deriving instance (EqPhase phase) => Eq (DataDeclaration phase)
 
-deriving instance (ShowPhase p) => Show (DataDeclaration p)
+deriving instance (ShowPhase phase) => Show (DataDeclaration phase)
 
-deriving instance (EqPhase p) => Eq (DataParameter p)
+deriving instance (EqPhase phase) => Eq (DataParameter phase)
 
-deriving instance (ShowPhase p) => Show (DataParameter p)
+deriving instance (ShowPhase phase) => Show (DataParameter phase)
 
-deriving instance (EqPhase p) => Eq (TypeSynonymDeclaration p)
+deriving instance (EqPhase phase) => Eq (TypeSynonymDeclaration phase)
 
-deriving instance (ShowPhase p) => Show (TypeSynonymDeclaration p)
+deriving instance (ShowPhase phase) => Show (TypeSynonymDeclaration phase)
 
-deriving instance (EqPhase p) => Eq (Block p)
+deriving instance (EqPhase phase) => Eq (Block phase)
 
-deriving instance (ShowPhase p) => Show (Block p)
+deriving instance (ShowPhase phase) => Show (Block phase)
 
-deriving instance (EqPhase p) => Eq (HandleExpression p)
+deriving instance (EqPhase phase) => Eq (HandleExpression phase)
 
-deriving instance (ShowPhase p) => Show (HandleExpression p)
+deriving instance (ShowPhase phase) => Show (HandleExpression phase)
 
-deriving instance (EqPhase p) => Eq (StateVariableBinding p)
+deriving instance (EqPhase phase) => Eq (StateVariableBinding phase)
 
-deriving instance (ShowPhase p) => Show (StateVariableBinding p)
+deriving instance (ShowPhase phase) => Show (StateVariableBinding phase)
 
-deriving instance (EqPhase p) => Eq (Statement p)
+deriving instance (EqPhase phase) => Eq (Statement phase)
 
-deriving instance (ShowPhase p) => Show (Statement p)
+deriving instance (ShowPhase phase) => Show (Statement phase)
 
-deriving instance (EqPhase p) => Eq (LetStatement p)
+deriving instance (EqPhase phase) => Eq (LetStatement phase)
 
-deriving instance (ShowPhase p) => Show (LetStatement p)
+deriving instance (ShowPhase phase) => Show (LetStatement phase)
 
-deriving instance (EqPhase p) => Eq (AgentStatement p)
+deriving instance (EqPhase phase) => Eq (AgentStatement phase)
 
-deriving instance (ShowPhase p) => Show (AgentStatement p)
+deriving instance (ShowPhase phase) => Show (AgentStatement phase)
 
-deriving instance (EqPhase p) => Eq (ReturnStatement p)
+deriving instance (EqPhase phase) => Eq (ReturnStatement phase)
 
-deriving instance (ShowPhase p) => Show (ReturnStatement p)
+deriving instance (ShowPhase phase) => Show (ReturnStatement phase)
 
-deriving instance (EqPhase p) => Eq (NextStatement p)
+deriving instance (EqPhase phase) => Eq (NextStatement phase)
 
-deriving instance (ShowPhase p) => Show (NextStatement p)
+deriving instance (ShowPhase phase) => Show (NextStatement phase)
 
-deriving instance (EqPhase p) => Eq (BreakStatement p)
+deriving instance (EqPhase phase) => Eq (BreakStatement phase)
 
-deriving instance (ShowPhase p) => Show (BreakStatement p)
+deriving instance (ShowPhase phase) => Show (BreakStatement phase)
 
-deriving instance (EqPhase p) => Eq (ForNextStatement p)
+deriving instance (EqPhase phase) => Eq (ForNextStatement phase)
 
-deriving instance (ShowPhase p) => Show (ForNextStatement p)
+deriving instance (ShowPhase phase) => Show (ForNextStatement phase)
 
-deriving instance (EqPhase p) => Eq (ForBreakStatement p)
+deriving instance (EqPhase phase) => Eq (ForBreakStatement phase)
 
-deriving instance (ShowPhase p) => Show (ForBreakStatement p)
+deriving instance (ShowPhase phase) => Show (ForBreakStatement phase)
 
-deriving instance (EqPhase p) => Eq (Modifier p)
+deriving instance (EqPhase phase) => Eq (Modifier phase)
 
-deriving instance (ShowPhase p) => Show (Modifier p)
+deriving instance (ShowPhase phase) => Show (Modifier phase)
 
-deriving instance (EqPhase p) => Eq (RequestHandler p)
+deriving instance (EqPhase phase) => Eq (RequestHandler phase)
 
-deriving instance (ShowPhase p) => Show (RequestHandler p)
+deriving instance (ShowPhase phase) => Show (RequestHandler phase)
 
-deriving instance (EqPhase p) => Eq (Pattern p)
+deriving instance (EqPhase phase) => Eq (Pattern phase)
 
-deriving instance (ShowPhase p) => Show (Pattern p)
+deriving instance (ShowPhase phase) => Show (Pattern phase)
 
-deriving instance (EqPhase p) => Eq (TuplePattern p)
+deriving instance (EqPhase phase) => Eq (TuplePattern phase)
 
-deriving instance (ShowPhase p) => Show (TuplePattern p)
+deriving instance (ShowPhase phase) => Show (TuplePattern phase)
 
-deriving instance (EqPhase p) => Eq (WildcardPattern p)
+deriving instance (EqPhase phase) => Eq (WildcardPattern phase)
 
-deriving instance (ShowPhase p) => Show (WildcardPattern p)
+deriving instance (ShowPhase phase) => Show (WildcardPattern phase)
 
-deriving instance (EqPhase p) => Eq (VariablePattern p)
+deriving instance (EqPhase phase) => Eq (VariablePattern phase)
 
-deriving instance (ShowPhase p) => Show (VariablePattern p)
+deriving instance (ShowPhase phase) => Show (VariablePattern phase)
 
-deriving instance (EqPhase p) => Eq (ParameterBinding p)
+deriving instance (EqPhase phase) => Eq (ParameterBinding phase)
 
-deriving instance (ShowPhase p) => Show (ParameterBinding p)
+deriving instance (ShowPhase phase) => Show (ParameterBinding phase)
 
-deriving instance (EqPhase p) => Eq (QualifiedConstructorPattern p)
+deriving instance (EqPhase phase) => Eq (QualifiedConstructorPattern phase)
 
-deriving instance (ShowPhase p) => Show (QualifiedConstructorPattern p)
+deriving instance (ShowPhase phase) => Show (QualifiedConstructorPattern phase)
 
-deriving instance (EqPhase p) => Eq (LiteralPattern p)
+deriving instance (EqPhase phase) => Eq (LiteralPattern phase)
 
-deriving instance (ShowPhase p) => Show (LiteralPattern p)
+deriving instance (ShowPhase phase) => Show (LiteralPattern phase)
 
-deriving instance (EqPhase p) => Eq (SyntacticType p)
+deriving instance (EqPhase phase) => Eq (SyntacticType phase)
 
-deriving instance (ShowPhase p) => Show (SyntacticType p)
+deriving instance (ShowPhase phase) => Show (SyntacticType phase)
 
-deriving instance Eq (PrimitiveTypeNode p)
+deriving instance Eq (PrimitiveTypeNode phase)
 
-deriving instance Show (PrimitiveTypeNode p)
+deriving instance Show (PrimitiveTypeNode phase)
 
-deriving instance Eq (NeverTypeNode p)
+deriving instance Eq (NeverTypeNode phase)
 
-deriving instance Show (NeverTypeNode p)
+deriving instance Show (NeverTypeNode phase)
 
-deriving instance Eq (UnknownTypeNode p)
+deriving instance Eq (UnknownTypeNode phase)
 
-deriving instance Show (UnknownTypeNode p)
+deriving instance Show (UnknownTypeNode phase)
 
-deriving instance (EqPhase p) => Eq (TypeNameNode p)
+deriving instance (EqPhase phase) => Eq (TypeNameNode phase)
 
-deriving instance (ShowPhase p) => Show (TypeNameNode p)
+deriving instance (ShowPhase phase) => Show (TypeNameNode phase)
 
-deriving instance (EqPhase p) => Eq (FunctionTypeNode p)
+deriving instance (EqPhase phase) => Eq (FunctionTypeNode phase)
 
-deriving instance (ShowPhase p) => Show (FunctionTypeNode p)
+deriving instance (ShowPhase phase) => Show (FunctionTypeNode phase)
 
-deriving instance (EqPhase p) => Eq (ArrayTypeNode p)
+deriving instance (EqPhase phase) => Eq (ArrayTypeNode phase)
 
-deriving instance (ShowPhase p) => Show (ArrayTypeNode p)
+deriving instance (ShowPhase phase) => Show (ArrayTypeNode phase)
 
-deriving instance (EqPhase p) => Eq (TupleTypeNode p)
+deriving instance (EqPhase phase) => Eq (TupleTypeNode phase)
 
-deriving instance (ShowPhase p) => Show (TupleTypeNode p)
+deriving instance (ShowPhase phase) => Show (TupleTypeNode phase)
 
-deriving instance (EqPhase p) => Eq (QualifiedTypeNode p)
+deriving instance (EqPhase phase) => Eq (QualifiedTypeNode phase)
 
-deriving instance (ShowPhase p) => Show (QualifiedTypeNode p)
+deriving instance (ShowPhase phase) => Show (QualifiedTypeNode phase)
 
-deriving instance (EqPhase p) => Eq (TypeUnionNode p)
+deriving instance (EqPhase phase) => Eq (TypeUnionNode phase)
 
-deriving instance (ShowPhase p) => Show (TypeUnionNode p)
+deriving instance (ShowPhase phase) => Show (TypeUnionNode phase)
 
-deriving instance (EqPhase p) => Eq (SyntacticRequest p)
+deriving instance (EqPhase phase) => Eq (SyntacticRequest phase)
 
-deriving instance (ShowPhase p) => Show (SyntacticRequest p)
+deriving instance (ShowPhase phase) => Show (SyntacticRequest phase)
 
-deriving instance (EqPhase p) => Eq (Expression p)
+deriving instance (EqPhase phase) => Eq (Expression phase)
 
-deriving instance (ShowPhase p) => Show (Expression p)
+deriving instance (ShowPhase phase) => Show (Expression phase)
 
-deriving instance (EqPhase p) => Eq (LiteralExpression p)
+deriving instance (EqPhase phase) => Eq (LiteralExpression phase)
 
-deriving instance (ShowPhase p) => Show (LiteralExpression p)
+deriving instance (ShowPhase phase) => Show (LiteralExpression phase)
 
-deriving instance (EqPhase p) => Eq (VariableExpression p)
+deriving instance (EqPhase phase) => Eq (VariableExpression phase)
 
-deriving instance (ShowPhase p) => Show (VariableExpression p)
+deriving instance (ShowPhase phase) => Show (VariableExpression phase)
 
-deriving instance (EqPhase p) => Eq (CallExpression p)
+deriving instance (EqPhase phase) => Eq (CallExpression phase)
 
-deriving instance (ShowPhase p) => Show (CallExpression p)
+deriving instance (ShowPhase phase) => Show (CallExpression phase)
 
-deriving instance (EqPhase p) => Eq (CallArgument p)
+deriving instance (EqPhase phase) => Eq (CallArgument phase)
 
-deriving instance (ShowPhase p) => Show (CallArgument p)
+deriving instance (ShowPhase phase) => Show (CallArgument phase)
 
-deriving instance (EqPhase p) => Eq (BinaryOperatorExpression p)
+deriving instance (EqPhase phase) => Eq (BinaryOperatorExpression phase)
 
-deriving instance (ShowPhase p) => Show (BinaryOperatorExpression p)
+deriving instance (ShowPhase phase) => Show (BinaryOperatorExpression phase)
 
-deriving instance (EqPhase p) => Eq (UnaryOperatorExpression p)
+deriving instance (EqPhase phase) => Eq (UnaryOperatorExpression phase)
 
-deriving instance (ShowPhase p) => Show (UnaryOperatorExpression p)
+deriving instance (ShowPhase phase) => Show (UnaryOperatorExpression phase)
 
-deriving instance (EqPhase p) => Eq (TupleExpression p)
+deriving instance (EqPhase phase) => Eq (TupleExpression phase)
 
-deriving instance (ShowPhase p) => Show (TupleExpression p)
+deriving instance (ShowPhase phase) => Show (TupleExpression phase)
 
-deriving instance (EqPhase p) => Eq (ArrayExpression p)
+deriving instance (EqPhase phase) => Eq (ArrayExpression phase)
 
-deriving instance (ShowPhase p) => Show (ArrayExpression p)
+deriving instance (ShowPhase phase) => Show (ArrayExpression phase)
 
-deriving instance (EqPhase p) => Eq (ParTupleExpression p)
+deriving instance (EqPhase phase) => Eq (ParTupleExpression phase)
 
-deriving instance (ShowPhase p) => Show (ParTupleExpression p)
+deriving instance (ShowPhase phase) => Show (ParTupleExpression phase)
 
-deriving instance (EqPhase p) => Eq (ParArrayExpression p)
+deriving instance (EqPhase phase) => Eq (ParArrayExpression phase)
 
-deriving instance (ShowPhase p) => Show (ParArrayExpression p)
+deriving instance (ShowPhase phase) => Show (ParArrayExpression phase)
 
-deriving instance (EqPhase p) => Eq (IfExpression p)
+deriving instance (EqPhase phase) => Eq (IfExpression phase)
 
-deriving instance (ShowPhase p) => Show (IfExpression p)
+deriving instance (ShowPhase phase) => Show (IfExpression phase)
 
-deriving instance (EqPhase p) => Eq (MatchExpression p)
+deriving instance (EqPhase phase) => Eq (MatchExpression phase)
 
-deriving instance (ShowPhase p) => Show (MatchExpression p)
+deriving instance (ShowPhase phase) => Show (MatchExpression phase)
 
-deriving instance (EqPhase p) => Eq (ForExpression p)
+deriving instance (EqPhase phase) => Eq (ForExpression phase)
 
-deriving instance (ShowPhase p) => Show (ForExpression p)
+deriving instance (ShowPhase phase) => Show (ForExpression phase)
 
-deriving instance (EqPhase p) => Eq (ForInBinding p)
+deriving instance (EqPhase phase) => Eq (ForInBinding phase)
 
-deriving instance (ShowPhase p) => Show (ForInBinding p)
+deriving instance (ShowPhase phase) => Show (ForInBinding phase)
 
-deriving instance (EqPhase p) => Eq (ForVarBinding p)
+deriving instance (EqPhase phase) => Eq (ForVarBinding phase)
 
-deriving instance (ShowPhase p) => Show (ForVarBinding p)
+deriving instance (ShowPhase phase) => Show (ForVarBinding phase)
 
-deriving instance (EqPhase p) => Eq (BlockExpression p)
+deriving instance (EqPhase phase) => Eq (BlockExpression phase)
 
-deriving instance (ShowPhase p) => Show (BlockExpression p)
+deriving instance (ShowPhase phase) => Show (BlockExpression phase)
 
-deriving instance (EqPhase p) => Eq (FieldAccessExpression p)
+deriving instance (EqPhase phase) => Eq (FieldAccessExpression phase)
 
-deriving instance (ShowPhase p) => Show (FieldAccessExpression p)
+deriving instance (ShowPhase phase) => Show (FieldAccessExpression phase)
 
-deriving instance (EqPhase p) => Eq (IndexAccessExpression p)
+deriving instance (EqPhase phase) => Eq (IndexAccessExpression phase)
 
-deriving instance (ShowPhase p) => Show (IndexAccessExpression p)
+deriving instance (ShowPhase phase) => Show (IndexAccessExpression phase)
 
-deriving instance (EqPhase p) => Eq (TemplateExpression p)
+deriving instance (EqPhase phase) => Eq (TemplateExpression phase)
 
-deriving instance (ShowPhase p) => Show (TemplateExpression p)
+deriving instance (ShowPhase phase) => Show (TemplateExpression phase)
 
-deriving instance (EqPhase p) => Eq (QualifiedReferenceExpression p)
+deriving instance (EqPhase phase) => Eq (QualifiedReferenceExpression phase)
 
-deriving instance (ShowPhase p) => Show (QualifiedReferenceExpression p)
+deriving instance (ShowPhase phase) => Show (QualifiedReferenceExpression phase)
 
-deriving instance (EqPhase p) => Eq (CaseArm p)
+deriving instance (EqPhase phase) => Eq (CaseArm phase)
 
-deriving instance (ShowPhase p) => Show (CaseArm p)
+deriving instance (ShowPhase phase) => Show (CaseArm phase)
 
-deriving instance (EqPhase p) => Eq (TemplateElement p)
+deriving instance (EqPhase phase) => Eq (TemplateElement phase)
 
-deriving instance (ShowPhase p) => Show (TemplateElement p)
+deriving instance (ShowPhase phase) => Show (TemplateElement phase)
 
-deriving instance Eq (TemplateStringElement p)
+deriving instance Eq (TemplateStringElement phase)
 
-deriving instance Show (TemplateStringElement p)
+deriving instance Show (TemplateStringElement phase)
 
-deriving instance (EqPhase p) => Eq (TemplateExpressionElement p)
+deriving instance (EqPhase phase) => Eq (TemplateExpressionElement phase)
 
-deriving instance (ShowPhase p) => Show (TemplateExpressionElement p)
+deriving instance (ShowPhase phase) => Show (TemplateExpressionElement phase)

@@ -151,16 +151,16 @@ instance FromJSONKey QualifiedName where
   fromJSONKey = FromJSONKeyTextParser (pure . parseQualifiedName)
 
 renderQualifiedName :: QualifiedName -> Text
-renderQualifiedName q
-  | T.null q.module_ = q.name
-  | otherwise = q.module_ <> "." <> q.name
+renderQualifiedName qualifiedName
+  | T.null qualifiedName.module_ = qualifiedName.name
+  | otherwise = qualifiedName.module_ <> "." <> qualifiedName.name
 
 -- | Inverse of 'renderQualifiedName'. Splits at the LAST @"."@: a name
 -- without a dot becomes @QualifiedName "" name@. A name with one or more
 -- dots takes everything after the final dot as the bare name.
 parseQualifiedName :: Text -> QualifiedName
-parseQualifiedName t =
-  let (modulePart, namePart) = T.breakOnEnd "." t
+parseQualifiedName text =
+  let (modulePart, namePart) = T.breakOnEnd "." text
    in if T.null modulePart
         then QualifiedName "" namePart
         else QualifiedName (T.dropEnd 1 modulePart) namePart

@@ -446,7 +446,7 @@ lexNewline = KatariTokenNewline <$ char '\n'
 --     KatariTokenPunctuation PunctuationLeftBrace.
 --   * LexerContextTemplateExpression d + `}` (d > 0): pop depth to d-1,
 --     emit KatariTokenPunctuation PunctuationRightBrace.
---   * Any other ctx : plain `{` / `}` → PunctuationLeftBrace / PunctuationRightBrace.
+--   * Any other context : plain `{` / `}` → PunctuationLeftBrace / PunctuationRightBrace.
 lexBrace :: Lexer KatariToken
 lexBrace = do
   context <- lexGetTopContext
@@ -764,14 +764,14 @@ lexEscapeCharacter = do
       startSourcePos <- getSourcePos
       _ <- char 'u'
       firstCodePoint <- readFourHex startSourcePos
-      case classifySurrogate firstCodePoint of
+      case lexClassifySurrogate firstCodePoint of
         SurrogateClassNone -> pure (chr firstCodePoint)
         SurrogateClassHigh -> do
           maybeSecond <- optional . try $ char '\\' *> char 'u' *> fourHexRaw
           endSourcePos <- getSourcePos
           case maybeSecond of
             Just secondCodePoint
-              | SurrogateClassLow <- classifySurrogate secondCodePoint ->
+              | SurrogateClassLow <- lexClassifySurrogate secondCodePoint ->
                   pure
                     ( chr
                         ( 0x10000
@@ -819,8 +819,8 @@ data SurrogateClass where
   SurrogateClassHigh :: SurrogateClass
   SurrogateClassLow :: SurrogateClass
 
-classifySurrogate :: Int -> SurrogateClass
-classifySurrogate codePoint
+lexClassifySurrogate :: Int -> SurrogateClass
+lexClassifySurrogate codePoint
   | codePoint >= 0xD800 && codePoint <= 0xDBFF = SurrogateClassHigh
   | codePoint >= 0xDC00 && codePoint <= 0xDFFF = SurrogateClassLow
   | otherwise = SurrogateClassNone

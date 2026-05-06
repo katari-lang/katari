@@ -442,12 +442,12 @@ dataParamObject ::
   Map Text (SemanticType Resolved) ->
   [DataParameter Zonked] ->
   SchemaCore
-dataParamObject dataDefs fieldTypes params =
+dataParamObject dataDefs fieldTypes parameters =
   let properties =
         Map.fromList
-          [ (dp.name, withDesc dp.annotation (toJsonSchema dataDefs Set.empty fieldType))
-            | dp <- params,
-              Just fieldType <- [Map.lookup dp.name fieldTypes]
+          [ (dataParameter.name, withDesc dataParameter.annotation (toJsonSchema dataDefs Set.empty fieldType))
+            | dataParameter <- parameters,
+              Just fieldType <- [Map.lookup dataParameter.name fieldTypes]
           ]
    in SchemaCoreObject
         { properties = properties,

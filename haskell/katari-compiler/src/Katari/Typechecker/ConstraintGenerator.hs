@@ -291,7 +291,7 @@ initialContext types requests constructors =
 freshTypeVariableId :: CG TypeVariableId
 freshTypeVariableId = lift $ do
   current <- gets (.stateNextTypeVariableId)
-  modify $ \s -> s {stateNextTypeVariableId = current + 1}
+  modify $ \state -> state {stateNextTypeVariableId = current + 1}
   pure (TypeVariableId current)
 
 freshTypeVar :: CG (SemanticType Unresolved)
@@ -300,7 +300,7 @@ freshTypeVar = SemanticTypeVariable <$> freshTypeVariableId
 freshRequestVariableId :: CG RequestVariableId
 freshRequestVariableId = lift $ do
   current <- gets (.stateNextRequestVariableId)
-  modify $ \s -> s {stateNextRequestVariableId = current + 1}
+  modify $ \state -> state {stateNextRequestVariableId = current + 1}
   pure (RequestVariableId current)
 
 bindVariable :: VariableId -> SemanticType Unresolved -> CG ()
@@ -360,7 +360,7 @@ addReturnAnnotationEq retTvId retSemantic sourceSpan =
       (ConstraintReason ReasonKindReturnTypeAnnotation sourceSpan)
 
 emitError :: ConstraintError -> CG ()
-emitError err = lift . modify $ \s -> s {stateErrors = err : s.stateErrors}
+emitError err = lift . modify $ \state -> state {stateErrors = err : state.stateErrors}
 
 -- ---------------------------------------------------------------------------
 -- Reader updates (scope context)
@@ -663,7 +663,7 @@ walkDataParameter DataParameter {annotation, name, parameterType, sourceSpan} =
 walkParameterListForSignature ::
   [ParameterBinding Identified] ->
   CG ([ParameterBinding Constrained], Map Text (SemanticType Unresolved))
-walkParameterListForSignature params = do
+walkParameterListForSignature parameters = do
   let walkOne ParameterBinding {annotation, label, pattern, sourceSpan} = do
         (pattern', patternType) <- walkPattern pattern
         let rebuilt =
@@ -674,7 +674,7 @@ walkParameterListForSignature params = do
                   sourceSpan = sourceSpan
                 }
         pure (rebuilt, (label, patternType))
-  rebuilt <- mapM walkOne params
+  rebuilt <- mapM walkOne parameters
   pure (map fst rebuilt, Map.fromList (map snd rebuilt))
 
 -- | Walk a 'Pattern', returning the rebuilt Constrained pattern and its
@@ -1605,7 +1605,7 @@ freshReturnTypeVar = \case
 -- variable in Phase A, then declarations are walked in Phase B to emit
 -- constraints and produce the @Constrained@-phase ASTs.
 generateConstraints :: IdentifierResult -> (ConstraintGenResult, [ConstraintError])
-generateConstraints result = case runState (runReaderT action ctx) initialState of
+generateConstraints result = case runState (runReaderT action context) initialState of
   (modulesPair, finalState) ->
     ( ConstraintGenResult
         { constrainedModules = Map.fromList modulesPair,
@@ -1617,7 +1617,7 @@ generateConstraints result = case runState (runReaderT action ctx) initialState 
       finalState.stateErrors
     )
   where
-    ctx = initialContext result.identifiedTypes result.identifiedRequests result.identifiedConstructors
+    context = initialContext result.identifiedTypes result.identifiedRequests result.identifiedConstructors
     action = do
       allocateAllVariables result
       mapM walkOne (Map.toList result.moduleASTs)
