@@ -25,6 +25,34 @@ import type {
 
 type Sql = ReturnType<typeof postgres>;
 
+/**
+ * Helper for the `postgres` driver's `sql.json(...)` argument: the driver
+ * types it as a domain-specific `JSONValue` that doesn't intersect with
+ * our app's data shapes (recursive Value / IRModule), so direct passing
+ * fails type-check. We funnel every json-serializable parameter through
+ * here so the unsafe cast lives in exactly one place — easier to audit
+ * and to swap out if we ever migrate off this driver.
+ */
+function asJson<T>(value: T): never {
+  return value as never;
+}
+
+const DEFAULT_LIMIT = 100;
+const MAX_LIMIT = 500;
+
+function clampLimit(requested: number | undefined): number {
+  if (requested === undefined) return DEFAULT_LIMIT;
+  if (!Number.isFinite(requested) || requested <= 0) return DEFAULT_LIMIT;
+  return Math.min(MAX_LIMIT, Math.floor(requested));
+}
+
+function clampOffset(requested: number | undefined): number {
+  if (requested === undefined || !Number.isFinite(requested) || requested < 0) {
+    return 0;
+  }
+  return Math.floor(requested);
+}
+
 class PgModuleRepo implements ModuleRepo {
   constructor(private readonly sql: Sql) {}
 
@@ -36,12 +64,14 @@ class PgModuleRepo implements ModuleRepo {
     const id = uuidv7();
     await this.sql`
       INSERT INTO module_versions (id, name, ir_module, schema_bundle)
-      VALUES (${id}, ${input.name}, ${this.sql.json(input.irModule as never)}, ${this.sql.json(input.schemaBundle as never)})
+      VALUES (${id}, ${input.name}, ${this.sql.json(asJson(input.irModule))}, ${this.sql.json(asJson(input.schemaBundle))})
     `;
     return id as VersionId;
   }
 
-  async list(): Promise<ModuleSummary[]> {
+  async list(options?: { limit?: number; offset?: number }): Promise<ModuleSummary[]> {
+    const limit = clampLimit(options?.limit);
+    const offset = clampOffset(options?.offset);
     const rows = await this.sql<{
       id: string;
       name: string;
@@ -50,6 +80,7 @@ class PgModuleRepo implements ModuleRepo {
       SELECT id, name, created_at
       FROM module_versions
       ORDER BY created_at DESC
+      LIMIT ${limit} OFFSET ${offset}
     `;
     return rows.map((r) => ({
       id: r.id as VersionId,
@@ -93,9 +124,9 @@ class PgAgentRepo implements AgentRepo {
         ${row.delegationId},
         ${row.versionId},
         ${row.qualifiedName},
-        ${this.sql.json(row.args as never)},
+        ${this.sql.json(asJson(row.args))},
         ${row.state},
-        ${row.result === undefined ? null : this.sql.json(row.result as never)},
+        ${row.result === undefined ? null : this.sql.json(asJson(row.result))},
         ${row.errorMessage ?? null},
         ${row.createdAt},
         ${row.updatedAt}
@@ -125,7 +156,13 @@ class PgAgentRepo implements AgentRepo {
     return row === undefined ? null : dbRowToAgentRow(row);
   }
 
-  async list(filter?: { versionId?: VersionId }): Promise<AgentRow[]> {
+  async list(filter?: {
+    versionId?: VersionId;
+    limit?: number;
+    offset?: number;
+  }): Promise<AgentRow[]> {
+    const limit = clampLimit(filter?.limit);
+    const offset = clampOffset(filter?.offset);
     const rows =
       filter?.versionId !== undefined
         ? await this.sql<DbAgentRow[]>`
@@ -133,11 +170,13 @@ class PgAgentRepo implements AgentRepo {
             FROM agents
             WHERE version_id = ${filter.versionId}
             ORDER BY created_at DESC
+            LIMIT ${limit} OFFSET ${offset}
           `
         : await this.sql<DbAgentRow[]>`
             SELECT id, delegation_id, version_id, qualified_name, args, state, result, error_message, created_at, updated_at
             FROM agents
             ORDER BY created_at DESC
+            LIMIT ${limit} OFFSET ${offset}
           `;
     return rows.map(dbRowToAgentRow);
   }
@@ -145,7 +184,8 @@ class PgAgentRepo implements AgentRepo {
   async setState(
     id: AgentId,
     patch: Partial<Pick<AgentRow, "state" | "result" | "errorMessage">>,
-  ): Promise<void> {
+    options?: { expectedState?: AgentState },
+  ): Promise<boolean> {
     // Build the update set dynamically. Each column has its own clause.
     const sets: ReturnType<Sql>[] = [];
     if (patch.state !== undefined) {
@@ -153,20 +193,26 @@ class PgAgentRepo implements AgentRepo {
     }
     if (patch.result !== undefined) {
       sets.push(
-        this.sql`result = ${this.sql.json(patch.result as never)}`,
+        this.sql`result = ${this.sql.json(asJson(patch.result))}`,
       );
     }
     if (patch.errorMessage !== undefined) {
       sets.push(this.sql`error_message = ${patch.errorMessage}`);
     }
-    if (sets.length === 0) return;
+    if (sets.length === 0) return true;
     sets.push(this.sql`updated_at = now()`);
 
     // Join sets with commas. `sql.join` exists on the postgres driver.
     const joined = sets.reduce((acc, cur, i) =>
       i === 0 ? cur : this.sql`${acc}, ${cur}`,
     );
-    await this.sql`UPDATE agents SET ${joined} WHERE id = ${id}`;
+    const expected = options?.expectedState;
+    const result =
+      expected !== undefined
+        ? await this.sql`UPDATE agents SET ${joined} WHERE id = ${id} AND state = ${expected}`
+        : await this.sql`UPDATE agents SET ${joined} WHERE id = ${id}`;
+    // postgres driver exposes affected-row count on the result object.
+    return (result.count ?? 0) > 0;
   }
 
   async markAllRunningAsError(
@@ -199,7 +245,7 @@ class PgSnapshotRepo implements SnapshotRepo {
   async upsert(versionId: VersionId, snapshot: MachineSnapshot): Promise<void> {
     await this.sql`
       INSERT INTO machine_snapshots (version_id, snapshot, updated_at)
-      VALUES (${versionId}, ${this.sql.json(snapshot as never)}, now())
+      VALUES (${versionId}, ${this.sql.json(asJson(snapshot))}, now())
       ON CONFLICT (version_id) DO UPDATE
         SET snapshot = EXCLUDED.snapshot,
             updated_at = EXCLUDED.updated_at
@@ -260,6 +306,36 @@ export class PostgresStorage implements Storage {
   static create(databaseUrl: string): PostgresStorage {
     const sql = postgres(databaseUrl, { transform: { undefined: null } });
     return new PostgresStorage(sql);
+  }
+
+  /**
+   * Run `fn` inside a Postgres transaction. The `tx` argument is a `Storage`
+   * scoped to the transaction's `sql` handle — every call on `tx.modules`,
+   * `tx.agents`, or `tx.snapshots` participates in the same BEGIN/COMMIT
+   * boundary. Throwing from `fn` triggers a ROLLBACK; returning normally
+   * triggers COMMIT.
+   *
+   * Nested calls open a savepoint (`postgres` driver semantics), so callers
+   * may compose smaller `withTransaction` blocks safely.
+   */
+  async withTransaction<T>(fn: (tx: Storage) => Promise<T>): Promise<T> {
+    return this.sql.begin(async (txSql) => {
+      // The `postgres` driver narrows the callback argument to
+      // `TransactionSql`, which is a structural subset of `Sql` minus the
+      // pool-management methods (END / CLOSE etc.) that don't make sense
+      // inside a transaction. The Repo classes only use the tagged-template
+      // call form, which both share, so the cast is safe in practice.
+      const innerSql = txSql as unknown as Sql;
+      const txStorage: Storage = {
+        modules: new PgModuleRepo(innerSql),
+        agents: new PgAgentRepo(innerSql),
+        snapshots: new PgSnapshotRepo(innerSql),
+        // Nested withTransaction reuses the same outer txSql via savepoint —
+        // postgres' sql.begin handles that internally.
+        withTransaction: this.withTransaction.bind(this),
+      };
+      return fn(txStorage);
+    }) as T;
   }
 
   async close(): Promise<void> {

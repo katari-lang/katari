@@ -1,10 +1,13 @@
-import type { BlockId, LiteralValue, MatchBlock, MatchPattern, VarId } from "../../ir/types.js";
+import type { BlockId, IRModule, MatchBlock } from "../../ir/types.js";
 import type { ThreadId } from "../id.js";
 import type { MachineState } from "../machine.js";
+import { tryMatch } from "../pattern.js";
+import { RecoverableEngineError } from "../../runtime/errors.js";
 import { getValueFromScope, setValueInScope } from "../scope.js";
 import type { Value } from "../value.js";
 import {
   ChildThread,
+  resolveBlockPayload,
   type CallId,
   type ChildThreadInit,
   type SerializedChildThreadCommon,
@@ -20,10 +23,13 @@ import {
  */
 export class MatchThread extends ChildThread {
   readonly matchBlock: MatchBlock;
+  /** IR id of the BlockMatch backing this thread. See UserThread.blockId. */
+  readonly blockId: BlockId;
 
-  constructor(init: ChildThreadInit, matchBlock: MatchBlock) {
+  constructor(init: ChildThreadInit, matchBlock: MatchBlock, blockId: BlockId) {
     super(init);
     this.matchBlock = matchBlock;
+    this.blockId = blockId;
   }
 
   override onCall(machine: MachineState): void {
@@ -45,7 +51,14 @@ export class MatchThread extends ChildThread {
       return;
     }
 
-    throw new Error("MatchThread: no arm matched and no default");
+    // No arm matched the subject and there's no default. The compiler's
+    // exhaustiveness checker should have rejected this earlier; reaching
+    // here means either a user-supplied IR is malformed or a value of
+    // unexpected shape leaked across the API boundary. Either way it's a
+    // single-agent problem, so we surface a Recoverable error.
+    throw new RecoverableEngineError(
+      "MatchThread: no arm matched and no default",
+    );
   }
 
   protected override onChildDone(machine: MachineState, _callId: CallId, value: Value): void {
@@ -74,15 +87,23 @@ export class MatchThread extends ChildThread {
     return {
       kind: "match",
       ...this.serializeChildCommon(),
-      matchBlock: this.matchBlock,
+      blockId: this.blockId,
     };
   }
 
-  static restoreSkeleton(serialized: SerializedMatchThread): MatchThread {
+  static restoreSkeleton(
+    serialized: SerializedMatchThread,
+    irModule: IRModule,
+  ): MatchThread {
     const thread = Object.create(MatchThread.prototype) as MatchThread;
     thread.applySnapshotChildCommon(serialized);
-    const writable = thread as unknown as { matchBlock: MatchBlock };
-    writable.matchBlock = serialized.matchBlock;
+    const writable = thread as unknown as {
+      matchBlock: MatchBlock;
+      blockId: BlockId;
+    };
+    const block = resolveBlockPayload(irModule, serialized.blockId, "blockMatch");
+    writable.matchBlock = block.matchBlock;
+    writable.blockId = serialized.blockId;
     return thread;
   }
 
@@ -96,68 +117,10 @@ export class MatchThread extends ChildThread {
 
 export type SerializedMatchThread = SerializedChildThreadCommon & {
   kind: "match";
-  matchBlock: MatchBlock;
+  blockId: BlockId;
 };
 
-// ─── Pattern matching ─────────────────────────────────────────────────────────
-
-/**
- * Try to match a value against a pattern.
- * Returns variable bindings on success, null on failure.
- */
-function tryMatch(pattern: MatchPattern, value: Value): Map<VarId, Value> | null {
-  switch (pattern.kind) {
-    case "matchPatternAny":
-      return new Map();
-
-    case "matchPatternVariable":
-      return new Map([[pattern.contents, value]]);
-
-    case "matchPatternLiteral":
-      return matchLiteral(pattern.contents, value) ? new Map() : null;
-
-    case "matchPatternConstructor": {
-      const [ctorId, fieldPatterns] = pattern.contents;
-      if (value.kind !== "tagged" || value.ctorId !== ctorId) return null;
-      const bindings = new Map<VarId, Value>();
-      for (const [fieldName, fieldPattern] of fieldPatterns) {
-        const fieldValue = value.fields[fieldName];
-        if (fieldValue === undefined) return null;
-        const subBindings = tryMatch(fieldPattern, fieldValue);
-        if (subBindings === null) return null;
-        for (const [k, v] of subBindings) bindings.set(k, v);
-      }
-      return bindings;
-    }
-
-    case "matchPatternTuple": {
-      if (value.kind !== "tuple") return null;
-      if (value.elements.length !== pattern.contents.length) return null;
-      const bindings = new Map<VarId, Value>();
-      for (let i = 0; i < pattern.contents.length; i++) {
-        const subPattern = pattern.contents[i];
-        const subValue = value.elements[i];
-        if (subPattern === undefined || subValue === undefined) return null;
-        const subBindings = tryMatch(subPattern, subValue);
-        if (subBindings === null) return null;
-        for (const [k, v] of subBindings) bindings.set(k, v);
-      }
-      return bindings;
-    }
-  }
-}
-
-function matchLiteral(literal: LiteralValue, value: Value): boolean {
-  switch (literal.kind) {
-    case "literalValueInteger":
-      return value.kind === "number" && value.value === literal.integer;
-    case "literalValueNumber":
-      return value.kind === "number" && value.value === literal.number;
-    case "literalValueString":
-      return value.kind === "string" && value.value === literal.string;
-    case "literalValueBoolean":
-      return value.kind === "boolean" && value.value === literal.boolean;
-    case "literalValueNull":
-      return value.kind === "null";
-  }
-}
+// Pattern matching helpers live in `../pattern.ts` and are imported above.
+// MatchThread uses `tryMatch` directly; the previous local copies (and the
+// `matchLiteral` helper) were extracted so that UserThread's
+// `statementBindPattern` case can share the exact same matching semantics.

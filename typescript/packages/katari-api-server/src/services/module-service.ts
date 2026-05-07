@@ -65,8 +65,8 @@ export class ModuleService {
     return { versionId };
   }
 
-  list(): Promise<ModuleSummary[]> {
-    return this.storage.modules.list();
+  list(options?: { limit?: number; offset?: number }): Promise<ModuleSummary[]> {
+    return this.storage.modules.list(options);
   }
 
   async get(versionId: VersionId): Promise<ModuleRow> {

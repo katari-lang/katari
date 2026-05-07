@@ -4,6 +4,8 @@ import { createThreadId } from "../id.js";
 import type { MachineState } from "../machine.js";
 import { createScope } from "../scope.js";
 import type { Value } from "../value.js";
+import { EntryNotFoundError } from "../../runtime/errors.js";
+import type { HandleThread } from "./handle.js";
 import {
   EMPTY_BOUNDARIES,
   Thread,
@@ -123,9 +125,9 @@ export class APIThread extends Thread {
   ): void {
     const blockId = state.irModule.entries[qualifiedName];
     if (blockId === undefined) {
-      throw new Error(
-        `handleDelegateFromAPI: block ${qualifiedName} not found in IR module`,
-      );
+      // Recoverable: a typo'd qualifiedName from the API client should not
+      // poison the entire version. The api-server maps this to HTTP 400.
+      throw new EntryNotFoundError(qualifiedName, delegationId);
     }
 
     // APIThread is the root and never reads variables; it still carries a
@@ -135,7 +137,7 @@ export class APIThread extends Thread {
       {
         id: createThreadId(),
         scopeId: apiScope.id,
-        handlers: new Map<ReqId, Thread>(),
+        handlers: new Map<ReqId, HandleThread>(),
         boundaries: EMPTY_BOUNDARIES,
       },
       delegationId,

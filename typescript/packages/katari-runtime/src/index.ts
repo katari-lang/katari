@@ -48,6 +48,11 @@ export type {
 export { createDelegationId, createThreadId, createScopeId } from "./machine/id.js";
 
 // Runtime layer (pure facade, snapshot, logger).
+export {
+  RecoverableEngineError,
+  EntryNotFoundError,
+  IrrecoverableEngineError,
+} from "./runtime/errors.js";
 export { MachineHandle } from "./runtime/facade.js";
 export {
   serializeMachine,
@@ -58,6 +63,7 @@ export type {
   SerializedThread,
 } from "./runtime/snapshot.js";
 export {
+  buildConsoleLogger,
   consoleLogger,
   noopLogger,
   type Logger,

@@ -3,7 +3,11 @@
 
 export { buildApp, type AppDeps } from "./routes/app.js";
 export { MachineRegistry, MachineNotFound } from "./registry.js";
-export { AgentService, AgentNotFound } from "./services/agent-service.js";
+export {
+  AgentService,
+  AgentNotFound,
+  EntryNotFoundError,
+} from "./services/agent-service.js";
 export {
   ModuleService,
   ModuleNotFound,

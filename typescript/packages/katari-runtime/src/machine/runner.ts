@@ -16,6 +16,9 @@ import { UserThread } from "./thread/user.js";
 import { HandleThread } from "./thread/handle.js";
 import { RequestThread } from "./thread/request.js";
 
+// Re-export imported HandleThread type for the spawnChild signature; keeps
+// the direct dependency explicit at the use site.
+
 // ─── Main loop ──────────────────────────────────────────────────────────────
 
 /**
@@ -66,17 +69,33 @@ export function processQueue(machine: MachineState): void {
         break;
 
       case "return":
-        if (!machine.threads.has(event.target.id)) break; // stale
+        if (!machine.threads.has(event.target.id)) {
+          machine.logger.log("debug", "runner: stale return event dropped", {
+            targetId: event.target.id,
+          });
+          break;
+        }
         event.target.onReturnReceived(machine, event.value);
         break;
 
       case "cancel":
-        if (!machine.threads.has(event.target.id)) break; // stale
+        if (!machine.threads.has(event.target.id)) {
+          machine.logger.log("debug", "runner: stale cancel event dropped", {
+            targetId: event.target.id,
+          });
+          break;
+        }
         event.target.onCancelReceived(machine);
         break;
 
       case "ask":
-        if (!machine.threads.has(event.target.id)) break; // stale
+        if (!machine.threads.has(event.target.id)) {
+          machine.logger.log("debug", "runner: stale ask event dropped", {
+            targetId: event.target.id,
+            askId: event.askId,
+          });
+          break;
+        }
         event.target.onAsk(
           machine,
           event.asker,
@@ -87,12 +106,24 @@ export function processQueue(machine: MachineState): void {
         break;
 
       case "askComplete":
-        if (!machine.threads.has(event.target.id)) break; // stale
+        if (!machine.threads.has(event.target.id)) {
+          machine.logger.log("debug", "runner: stale askComplete event dropped", {
+            targetId: event.target.id,
+            askId: event.askId,
+          });
+          break;
+        }
         event.target.onAskComplete(machine, event.askId, event.value);
         break;
 
       case "cont":
-        if (!machine.threads.has(event.target.id)) break; // stale
+        if (!machine.threads.has(event.target.id)) {
+          machine.logger.log("debug", "runner: stale cont event dropped", {
+            targetId: event.target.id,
+            contKind: event.contKind,
+          });
+          break;
+        }
         event.target.onCont(
           machine,
           event.source,
@@ -121,7 +152,7 @@ function spawnChild(
   blockId: BlockId,
   args: Record<string, Value>,
   scopeId: ScopeId,
-  handlers: ReadonlyMap<ReqId, Thread>,
+  handlers: ReadonlyMap<ReqId, HandleThread>,
 ): void {
   const block = machine.irModule.blocks[blockId];
   if (block === undefined) {
@@ -140,7 +171,7 @@ function spawnChild(
     boundaries: parent.boundariesView,
   };
 
-  const child = createThreadFromBlock(machine, init, block, args);
+  const child = createThreadFromBlock(machine, init, block, blockId, args);
   machine.threads.set(child.id, child);
   parent.adoptChild(machine, callId, child);
 }
@@ -149,11 +180,12 @@ function createThreadFromBlock(
   machine: MachineState,
   init: ChildThreadInit,
   block: Block,
+  blockId: BlockId,
   args: Record<string, Value>,
 ): Thread {
   switch (block.kind) {
     case "blockUser":
-      return new UserThread(machine, init, block.body, args);
+      return new UserThread(machine, init, block.body, blockId, args);
     case "blockPrim":
       return new PrimThread(init, block.name, args);
     case "blockCtor":
@@ -161,15 +193,15 @@ function createThreadFromBlock(
     case "blockExternal":
       return new ExternalThread(init, block.externalName, args);
     case "blockMatch":
-      return new MatchThread(init, block.matchBlock);
+      return new MatchThread(init, block.matchBlock, blockId);
     case "blockFor":
-      return new ForThread(machine, init, block.forBlock);
+      return new ForThread(machine, init, block.forBlock, blockId);
     case "blockHandle":
-      return new HandleThread(machine, init, block.handleBlock);
+      return new HandleThread(machine, init, block.handleBlock, blockId);
     case "blockTuple":
-      return new TupleThread(init, block.tupleBlock);
+      return new TupleThread(init, block.tupleBlock, blockId);
     case "blockArray":
-      return new ArrayThread(init, block.arrayBlock);
+      return new ArrayThread(init, block.arrayBlock, blockId);
     case "blockRequest":
       return new RequestThread(init, block.reqId, args);
   }

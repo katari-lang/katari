@@ -1,6 +1,7 @@
 import type { ThreadId } from "../id.js";
 import type { MachineState } from "../machine.js";
 import type { Value } from "../value.js";
+import { RecoverableEngineError } from "../../runtime/errors.js";
 import {
   ChildThread,
   type ChildThreadInit,
@@ -83,7 +84,7 @@ function executePrim(name: string, args: Record<string, Value>): Value {
       if (left?.kind === "number" && right?.kind === "number") {
         return { kind: "number", value: left.value + right.value };
       }
-      throw new Error(`prim add: invalid args`);
+      throw new RecoverableEngineError(`prim add: invalid args`);
     }
     case "sub": {
       const left = args["left"];
@@ -91,7 +92,7 @@ function executePrim(name: string, args: Record<string, Value>): Value {
       if (left?.kind === "number" && right?.kind === "number") {
         return { kind: "number", value: left.value - right.value };
       }
-      throw new Error(`prim sub: invalid args`);
+      throw new RecoverableEngineError(`prim sub: invalid args`);
     }
     case "mul": {
       const left = args["left"];
@@ -99,30 +100,41 @@ function executePrim(name: string, args: Record<string, Value>): Value {
       if (left?.kind === "number" && right?.kind === "number") {
         return { kind: "number", value: left.value * right.value };
       }
-      throw new Error(`prim mul: invalid args`);
+      throw new RecoverableEngineError(`prim mul: invalid args`);
     }
     case "div": {
       const left = args["left"];
       const right = args["right"];
       if (left?.kind === "number" && right?.kind === "number") {
+        // JS would yield ±Infinity / NaN for x/0; we fail loudly instead so
+        // the bad value never propagates into pattern match / equality and
+        // confuses downstream behavior. Will be reclassified as
+        // RecoverableEngineError in Stage A11 so a single agent's mistake
+        // does not poison the version.
+        if (right.value === 0) {
+          throw new RecoverableEngineError("prim div: division by zero");
+        }
         return { kind: "number", value: left.value / right.value };
       }
-      throw new Error(`prim div: invalid args`);
+      throw new RecoverableEngineError(`prim div: invalid args`);
     }
     case "mod": {
       const left = args["left"];
       const right = args["right"];
       if (left?.kind === "number" && right?.kind === "number") {
+        if (right.value === 0) {
+          throw new RecoverableEngineError("prim mod: modulo by zero");
+        }
         return { kind: "number", value: left.value % right.value };
       }
-      throw new Error(`prim mod: invalid args`);
+      throw new RecoverableEngineError(`prim mod: invalid args`);
     }
     case "negate": {
       const value = args["value"];
       if (value?.kind === "number") {
         return { kind: "number", value: -value.value };
       }
-      throw new Error(`prim negate: invalid args`);
+      throw new RecoverableEngineError(`prim negate: invalid args`);
     }
     case "eq": {
       const left = args["left"];
@@ -140,7 +152,7 @@ function executePrim(name: string, args: Record<string, Value>): Value {
       if (left?.kind === "number" && right?.kind === "number") {
         return { kind: "boolean", value: left.value < right.value };
       }
-      throw new Error(`prim lt: invalid args`);
+      throw new RecoverableEngineError(`prim lt: invalid args`);
     }
     case "gt": {
       const left = args["left"];
@@ -148,7 +160,7 @@ function executePrim(name: string, args: Record<string, Value>): Value {
       if (left?.kind === "number" && right?.kind === "number") {
         return { kind: "boolean", value: left.value > right.value };
       }
-      throw new Error(`prim gt: invalid args`);
+      throw new RecoverableEngineError(`prim gt: invalid args`);
     }
     case "lte": {
       const left = args["left"];
@@ -156,7 +168,7 @@ function executePrim(name: string, args: Record<string, Value>): Value {
       if (left?.kind === "number" && right?.kind === "number") {
         return { kind: "boolean", value: left.value <= right.value };
       }
-      throw new Error(`prim lte: invalid args`);
+      throw new RecoverableEngineError(`prim lte: invalid args`);
     }
     case "gte": {
       const left = args["left"];
@@ -164,14 +176,14 @@ function executePrim(name: string, args: Record<string, Value>): Value {
       if (left?.kind === "number" && right?.kind === "number") {
         return { kind: "boolean", value: left.value >= right.value };
       }
-      throw new Error(`prim gte: invalid args`);
+      throw new RecoverableEngineError(`prim gte: invalid args`);
     }
     case "not": {
       const value = args["value"];
       if (value?.kind === "boolean") {
         return { kind: "boolean", value: !value.value };
       }
-      throw new Error(`prim not: invalid args`);
+      throw new RecoverableEngineError(`prim not: invalid args`);
     }
     case "and": {
       const left = args["left"];
@@ -179,7 +191,7 @@ function executePrim(name: string, args: Record<string, Value>): Value {
       if (left?.kind === "boolean" && right?.kind === "boolean") {
         return { kind: "boolean", value: left.value && right.value };
       }
-      throw new Error(`prim and: invalid args`);
+      throw new RecoverableEngineError(`prim and: invalid args`);
     }
     case "or": {
       const left = args["left"];
@@ -187,7 +199,7 @@ function executePrim(name: string, args: Record<string, Value>): Value {
       if (left?.kind === "boolean" && right?.kind === "boolean") {
         return { kind: "boolean", value: left.value || right.value };
       }
-      throw new Error(`prim or: invalid args`);
+      throw new RecoverableEngineError(`prim or: invalid args`);
     }
     case "concat": {
       const left = args["left"];
@@ -195,7 +207,7 @@ function executePrim(name: string, args: Record<string, Value>): Value {
       if (left?.kind === "string" && right?.kind === "string") {
         return { kind: "string", value: left.value + right.value };
       }
-      throw new Error(`prim concat: invalid args`);
+      throw new RecoverableEngineError(`prim concat: invalid args`);
     }
     case "to_string": {
       const value = args["value"];
@@ -206,23 +218,23 @@ function executePrim(name: string, args: Record<string, Value>): Value {
       const index = args["index"];
       if (tuple?.kind === "tuple" && index?.kind === "number") {
         const elem = tuple.elements[index.value];
-        if (elem === undefined) throw new Error(`prim tuple_get: index out of bounds`);
+        if (elem === undefined) throw new RecoverableEngineError(`prim tuple_get: index out of bounds`);
         return elem;
       }
-      throw new Error(`prim tuple_get: invalid args`);
+      throw new RecoverableEngineError(`prim tuple_get: invalid args`);
     }
     case "get_field": {
       const value = args["value"];
       const field = args["field"];
       if (value?.kind === "tagged" && field?.kind === "string") {
         const fieldValue = value.fields[field.value];
-        if (fieldValue === undefined) throw new Error(`prim get_field: field ${field.value} not found`);
+        if (fieldValue === undefined) throw new RecoverableEngineError(`prim get_field: field ${field.value} not found`);
         return fieldValue;
       }
-      throw new Error(`prim get_field: invalid args`);
+      throw new RecoverableEngineError(`prim get_field: invalid args`);
     }
     default:
-      throw new Error(`Unknown prim: ${name}`);
+      throw new RecoverableEngineError(`Unknown prim: ${name}`);
   }
 }
 

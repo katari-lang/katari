@@ -1,10 +1,12 @@
-import type { ContKind, HandleBlock, ReqId, VarId } from "../../ir/types.js";
+import type { BlockId, ContKind, HandleBlock, IRModule, ReqId, VarId } from "../../ir/types.js";
 import type { AskId, ThreadId } from "../id.js";
 import type { MachineState } from "../machine.js";
 import { getValueFromScope, setValueInScope } from "../scope.js";
 import type { Value } from "../value.js";
 import {
   ChildThread,
+  extendBoundaries,
+  resolveBlockPayload,
   type CallId,
   type ChildThreadInit,
   type SerializedChildThreadCommon,
@@ -46,21 +48,47 @@ import type { RequestThread } from "./request.js";
  */
 export class HandleThread extends ChildThread {
   readonly block: HandleBlock;
+  /** IR id of the BlockHandle backing this thread. See UserThread.blockId. */
+  readonly blockId: BlockId;
   private readonly childRoles: Map<CallId, ChildRole> = new Map();
   private readonly pendingActions: PendingAction[] = [];
   private readonly postCancelActions: Map<CallId, PostCancelAction> = new Map();
   /** CallId allocator for non-main children. main is reserved as 0. */
   private nextCallId: CallId = 1;
-  /**
-   * In sequential mode, true while a handler-body or thenClause is in
-   * flight. New asks queue while busy. Parallel mode keeps this false
-   * (every ask spawns immediately).
-   */
-  private busy: boolean = false;
 
-  constructor(machine: MachineState, init: ChildThreadInit, block: HandleBlock) {
+  /**
+   * Sequential-mode gate: true while a handler-body or thenClause is in
+   * flight, derived from `childRoles`. New asks queue while busy; parallel
+   * mode bypasses the gate entirely (returns false unconditionally).
+   *
+   * **Why a getter, not a stored field**: previous revisions kept `busy`
+   * as a serialized field. A snapshot taken between
+   * `pendingActions.shift()` and the spawn of the next action could pin
+   * `busy = true` with `pendingActions` empty and no live handlerBody —
+   * after restore, every new ask would queue forever (deadlock). Deriving
+   * `busy` from the live `childRoles` map makes round-trip impossible to
+   * desynchronize: re-entry to onAsk after restore re-checks the same
+   * source of truth the live code uses.
+   */
+  private get busy(): boolean {
+    if (this.block.parallel) return false;
+    for (const role of this.childRoles.values()) {
+      if (role.kind === "handlerBody" || role.kind === "thenClause") {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  constructor(
+    machine: MachineState,
+    init: ChildThreadInit,
+    block: HandleBlock,
+    blockId: BlockId,
+  ) {
     super(init);
     this.block = block;
+    this.blockId = blockId;
 
     // Initialize state variables in the handle scope from the caller scope.
     // The caller scope is reachable via the parent chain (init.scopeId is
@@ -71,11 +99,10 @@ export class HandleThread extends ChildThread {
     }
 
     // Install self as the boundary for break / next.
-    this.boundaries = {
-      ...this.boundaries,
+    this.boundaries = extendBoundaries(this.boundaries, {
       exitKindBreak: this,
       contKindNext: this,
-    };
+    });
   }
 
   override onCall(machine: MachineState): void {
@@ -149,7 +176,8 @@ export class HandleThread extends ChildThread {
       askId: action.askId,
       asker: action.asker,
     });
-    this.busy = !this.block.parallel;
+    // `busy` becomes true automatically: it's derived from childRoles and we
+    // just inserted a "handlerBody" role above.
     // No handlersOverride — the body inherits this HandleThread's handlers,
     // which deliberately do NOT include this handle's own overrides.
     machine.queue.push({
@@ -172,7 +200,7 @@ export class HandleThread extends ChildThread {
     }
     const callId = this.nextCallId++ as CallId;
     this.childRoles.set(callId, { kind: "thenClause", mainResultValue });
-    this.busy = !this.block.parallel;
+    // `busy` becomes true automatically via childRoles.
     machine.queue.push({
       kind: "callInline",
       parent: this,
@@ -276,8 +304,9 @@ export class HandleThread extends ChildThread {
           askId: action.askId,
           value: action.value,
         });
-        // Free the busy slot and dispatch the next pending action if any.
-        this.busy = false;
+        // `busy` becomes false automatically: childRoles.delete(callId) above
+        // removed the only handlerBody role this gate was waiting on. Now
+        // dispatch the next pending action if any.
         const next = this.pendingActions.shift();
         if (next !== undefined) {
           this.runPendingAction(machine, next);
@@ -312,7 +341,7 @@ export class HandleThread extends ChildThread {
     return {
       kind: "handle",
       ...this.serializeChildCommon(),
-      block: this.block,
+      blockId: this.blockId,
       childRoles: [...this.childRoles.entries()].map(([callId, role]) => [
         callId,
         serializeChildRole(role),
@@ -322,27 +351,33 @@ export class HandleThread extends ChildThread {
         ([callId, action]) => [callId, serializePostCancelAction(action)],
       ),
       nextCallId: this.nextCallId,
-      busy: this.busy,
+      // busy is intentionally omitted — it's derived from `childRoles` at
+      // read time; persisting it risks deadlock after a snapshot taken in
+      // the gap between pendingActions.shift() and the next spawn.
     };
   }
 
-  static restoreSkeleton(serialized: SerializedHandleThread): HandleThread {
+  static restoreSkeleton(
+    serialized: SerializedHandleThread,
+    irModule: IRModule,
+  ): HandleThread {
     const thread = Object.create(HandleThread.prototype) as HandleThread;
     thread.applySnapshotChildCommon(serialized);
     const writable = thread as unknown as {
       block: HandleBlock;
+      blockId: BlockId;
       childRoles: Map<CallId, ChildRole>;
       pendingActions: PendingAction[];
       postCancelActions: Map<CallId, PostCancelAction>;
       nextCallId: CallId;
-      busy: boolean;
     };
-    writable.block = serialized.block;
+    const block = resolveBlockPayload(irModule, serialized.blockId, "blockHandle");
+    writable.block = block.handleBlock;
+    writable.blockId = serialized.blockId;
     writable.childRoles = new Map(); // filled by link
     writable.pendingActions = []; // filled by link
     writable.postCancelActions = new Map(); // filled by link
     writable.nextCallId = serialized.nextCallId;
-    writable.busy = serialized.busy;
     return thread;
   }
 
@@ -418,12 +453,17 @@ export type SerializedPostCancelAction = {
 
 export type SerializedHandleThread = SerializedChildThreadCommon & {
   kind: "handle";
-  block: HandleBlock;
+  blockId: BlockId;
   childRoles: [CallId, SerializedChildRole][];
   pendingActions: SerializedPendingAction[];
   postCancelActions: [CallId, SerializedPostCancelAction][];
   nextCallId: CallId;
-  busy: boolean;
+  /**
+   * Optional / legacy. The runtime no longer persists `busy` (see the
+   * getter on HandleThread for the rationale); older snapshots that still
+   * include the field are accepted and ignored on restore.
+   */
+  busy?: boolean;
 };
 
 function serializeChildRole(role: ChildRole): SerializedChildRole {

@@ -6,33 +6,34 @@ import {
   ModuleNotFound,
   type ModuleService,
 } from "../services/module-service.js";
-import type { VersionId } from "../storage/types.js";
+import {
+  PaginationQuerySchema,
+  UploadModuleSchema,
+  VersionIdSchema,
+} from "./middleware/validation.js";
 
 export function buildModuleRoutes(modules: ModuleService): Hono {
   const app = new Hono();
 
   app.post("/", async (c) => {
-    const body = (await c.req.json()) as {
-      irModule?: IRModule;
-      schemaBundle?: SchemaBundle;
-    };
-    if (body.irModule === undefined || body.schemaBundle === undefined) {
-      return c.json({ error: "irModule and schemaBundle are required" }, 400);
-    }
+    const body = UploadModuleSchema.parse(await c.req.json());
     const { versionId } = await modules.upload({
-      irModule: body.irModule,
-      schemaBundle: body.schemaBundle,
+      // Schema validates only that the values are objects — the deep IR
+      // structure is the compiler's contract, not the HTTP layer's.
+      irModule: body.irModule as IRModule,
+      schemaBundle: body.schemaBundle as SchemaBundle,
     });
     return c.json({ versionId }, 201);
   });
 
   app.get("/", async (c) => {
-    const summaries = await modules.list();
+    const { limit, offset } = PaginationQuerySchema.parse(c.req.query());
+    const summaries = await modules.list({ limit, offset });
     return c.json({ modules: summaries });
   });
 
   app.get("/:versionId", async (c) => {
-    const versionId = c.req.param("versionId") as VersionId;
+    const versionId = VersionIdSchema.parse(c.req.param("versionId"));
     try {
       const row = await modules.get(versionId);
       // Don't dump the full IR + schema bundle by default — they can be

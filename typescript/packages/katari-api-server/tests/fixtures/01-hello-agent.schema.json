@@ -1,0 +1,16 @@
+[
+  {
+    "description": "Returns the canonical greeting.",
+    "input": {
+      "additionalProperties": false,
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "name": "main.main",
+    "output": {
+      "type": "string"
+    },
+    "requests": []
+  }
+]

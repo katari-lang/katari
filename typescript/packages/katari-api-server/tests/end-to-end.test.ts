@@ -15,7 +15,10 @@ function setup() {
   const registry = new MachineRegistry(storage, logger);
   const modules = new ModuleService(storage, logger);
   const agents = new AgentService(storage, registry, logger);
-  const app = buildApp({ modules, agents });
+  // apiKey: null disables auth, rateLimit: null disables throttling — these
+  // tests focus on the routes/services surface, not on middleware. A dedicated
+  // middleware test exercises auth and rate-limit independently.
+  const app = buildApp({ modules, agents, apiKey: null, rateLimit: null });
   return { app, storage, registry, modules, agents };
 }
 

@@ -136,7 +136,7 @@ export function deserializeMachine(
   // Pass 1: thread skeletons
   const threadsById = new Map<ThreadId, Thread>();
   for (const ser of snap.threads) {
-    const thread = restoreSkeleton(ser);
+    const thread = restoreSkeleton(ser, irModule);
     threadsById.set(ser.id, thread);
     state.threads.set(ser.id, thread);
   }
@@ -170,29 +170,55 @@ export function deserializeMachine(
     state.apiDelegations.set(delegationId, thread);
   }
 
+  // Pass 3: re-trigger onCall on RequestThreads whose ask never went out.
+  //
+  // Invariant of the live runtime: a freshly-spawned RequestThread has
+  // `onCall` invoked synchronously from `parent.adoptChild`, which sets its
+  // `pendingAskId` to 0 and pushes the `ask` event onto the queue. The
+  // current synchronous applyEvent loop drains the queue completely before
+  // returning, so a snapshot taken at applyEvent boundaries always sees
+  // `pendingAskId` set.
+  //
+  // If a future change ever produces a snapshot at a different point (e.g.
+  // step-bounded execution, async preemption, or a hand-built snapshot used
+  // for testing), a `pendingAskId === undefined` RequestThread can survive
+  // the round-trip. Re-triggering onCall here makes the invariant hold
+  // unconditionally on the deserialized state, which is cheaper than
+  // sprinkling defensive checks everywhere downstream.
+  for (const ser of snap.threads) {
+    if (ser.kind !== "request") continue;
+    const thread = threadsById.get(ser.id);
+    if (
+      thread instanceof RequestThread &&
+      !thread.hasIssuedAsk
+    ) {
+      thread.onCall(state);
+    }
+  }
+
   return state;
 }
 
-function restoreSkeleton(ser: SerializedThread): Thread {
+function restoreSkeleton(ser: SerializedThread, irModule: IRModule): Thread {
   switch (ser.kind) {
     case "api":
       return APIThread.restoreSkeleton(ser);
     case "user":
-      return UserThread.restoreSkeleton(ser);
+      return UserThread.restoreSkeleton(ser, irModule);
     case "handle":
-      return HandleThread.restoreSkeleton(ser);
+      return HandleThread.restoreSkeleton(ser, irModule);
     case "for":
-      return ForThread.restoreSkeleton(ser);
+      return ForThread.restoreSkeleton(ser, irModule);
     case "match":
-      return MatchThread.restoreSkeleton(ser);
+      return MatchThread.restoreSkeleton(ser, irModule);
     case "request":
       return RequestThread.restoreSkeleton(ser);
     case "external":
       return ExternalThread.restoreSkeleton(ser);
     case "array":
-      return ArrayThread.restoreSkeleton(ser);
+      return ArrayThread.restoreSkeleton(ser, irModule);
     case "tuple":
-      return TupleThread.restoreSkeleton(ser);
+      return TupleThread.restoreSkeleton(ser, irModule);
     case "prim":
       return PrimThread.restoreSkeleton(ser);
     case "ctor":

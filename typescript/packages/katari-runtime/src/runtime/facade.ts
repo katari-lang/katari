@@ -27,7 +27,7 @@ export class MachineHandle {
 
   /** Build a fresh handle from an IR module. */
   static create(irModule: IRModule, logger: Logger): MachineHandle {
-    return new MachineHandle(createMachine(irModule), logger);
+    return new MachineHandle(createMachine(irModule, logger), logger);
   }
 
   /**
@@ -35,13 +35,19 @@ export class MachineHandle {
    * snapshot was produced against a different IR module shape that the
    * engine cannot interpret (callers are expected to feed the same
    * `irModule` they uploaded with the version).
+   *
+   * The logger is re-attached on the deserialized state — `MachineState.logger`
+   * is intentionally not part of the snapshot payload (each process starts
+   * fresh and may use a different logger).
    */
   static fromSnapshot(
     irModule: IRModule,
     snap: MachineSnapshot,
     logger: Logger,
   ): MachineHandle {
-    return new MachineHandle(deserializeMachine(irModule, snap), logger);
+    const state = deserializeMachine(irModule, snap);
+    state.logger = logger;
+    return new MachineHandle(state, logger);
   }
 
   /**

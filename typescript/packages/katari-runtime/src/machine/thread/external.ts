@@ -69,6 +69,15 @@ export class ExternalThread extends ChildThread {
    * sidecar may respond with delegateAck even after receiving terminate;
    * the runtime absorbs it. A subsequent terminateAck (if any) becomes a
    * no-op because the delegation entry has already been removed.
+   *
+   * **Idempotent on unknown / already-cleaned-up delegationId**: matching
+   * the symmetric behavior of {@link handleTerminateAckFromFFI}. A
+   * delegateAck arriving after the delegation has already been resolved
+   * (e.g. by an out-of-order terminateAck → delegateAck pair, or a
+   * duplicate ack the FFI side retried after a connection blip) used to
+   * throw and poison the entire version. We now treat it as a no-op so a
+   * single agent's transient FFI flakiness cannot take everyone else with
+   * it.
    */
   static handleDelegateAckFromFFI(
     state: MachineState,
@@ -77,9 +86,15 @@ export class ExternalThread extends ChildThread {
   ): void {
     const ext = state.delegations.get(delegationId);
     if (ext === undefined) {
-      throw new Error(
-        `handleDelegateAckFromFFI: delegationId ${delegationId} not found`,
+      // Unknown / stale delegation. Silently absorb so FFI retries and
+      // out-of-order delegateAck-after-terminateAck pairs don't poison
+      // the version, but log so ops can spot a misbehaving sidecar.
+      state.logger.log(
+        "debug",
+        "ExternalThread.handleDelegateAckFromFFI: unknown delegationId (already cleaned up); dropping",
+        { delegationId },
       );
+      return;
     }
     state.delegations.delete(delegationId);
 

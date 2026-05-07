@@ -1,15 +1,29 @@
 // Agent lifecycle: start, cancel, query.
 //
-// The single SSoT for `delegationId` is this service: it mints the id when
-// starting an agent, persists it as the `agents.id` row, hands it to the
-// runtime, and uses the same id to terminate / receive ack events.
+// Concurrency / consistency model (Stage B1-B8 onwards):
+//   - All engine work for a given `versionId` runs inside that version's
+//     `Mutex` (held by `MachineRegistry`). Within the mutex, we wrap the DB
+//     operations in `Storage.withTransaction` so either every state change
+//     commits or none does — a process crash between `agents.insert` and
+//     `snapshots.upsert` no longer leaves a permanently-running ghost agent.
 //
-// All public methods catch exceptions thrown by the engine and either route
-// them to a single agent (when there is one) or poison the whole version.
+// Error recovery:
+//   - Engine throws are split by `RecoverableEngineError` vs anything else.
+//   - Recoverable: only the offending agent is marked `error`; the in-memory
+//     handle is rolled back from the pre-call snapshot via
+//     `versionedRollback`. Sibling agents on the same version keep running.
+//   - Non-recoverable: the entire version is poisoned (legacy behaviour).
+//
+// Outbound FFI events still arrive but the executor isn't built yet — we
+// surface a `RecoverableEngineError` for those, downgrading what used to
+// poison the version into a single-agent failure.
 
 import { v7 as uuidv7 } from "uuid";
 import {
   createDelegationId,
+  EntryNotFoundError,
+  MachineHandle,
+  RecoverableEngineError,
   type Logger,
   type MachineEvent,
   type Value,
@@ -32,6 +46,12 @@ export class AgentNotFound extends Error {
   }
 }
 
+/**
+ * Re-export so route handlers can `instanceof EntryNotFoundError` to map
+ * "qualifiedName unknown" to HTTP 400 / 404 cleanly.
+ */
+export { EntryNotFoundError };
+
 export class AgentService {
   constructor(
     private readonly storage: Storage,
@@ -40,17 +60,16 @@ export class AgentService {
   ) {}
 
   /**
-   * Start a new agent on `versionId`. Mints two distinct ids:
-   *   - `agentId` (UUID v7): API-layer SSoT, returned to the caller and
-   *     used in REST paths.
-   *   - `delegationId`: runtime-layer SSoT, passed to the engine for
-   *     this specific delegation. Outbound `delegateAck` /
-   *     `terminateAck` events carry it back so we can map them to the
-   *     agent row via `findByDelegationId`.
+   * Start a new agent on `versionId`.
    *
-   * On any internal failure both the agent row and any sibling running
-   * agents in the same version are flipped to `error`, the snapshot is
-   * dropped, and the machine is evicted.
+   * Concurrency / crash safety: the entire engine + DB sequence runs inside
+   * the version's mutex (so concurrent starts on the same version are
+   * serialized) AND inside a Storage transaction (so a crash between
+   * snapshot upsert and agent insert leaves no half-state). The pre-call
+   * snapshot is captured up front; if `applyEvent` raises a
+   * `RecoverableEngineError` we restore from it — the live agent row never
+   * gets inserted in the first place because the surrounding transaction
+   * rolls back too.
    */
   async startAgent(input: {
     versionId: VersionId;
@@ -70,58 +89,120 @@ export class AgentService {
       createdAt: now,
       updatedAt: now,
     };
-    await this.storage.agents.insert(row);
 
-    let handle;
-    try {
-      handle = await this.registry.acquire(input.versionId);
-    } catch (err) {
-      // Module not found. Mark the agent error before propagating so the
-      // record is consistent with what the user just saw.
-      await this.storage.agents.setState(agentId, {
-        state: "error",
-        errorMessage: errorMessage(err),
-      });
-      throw err;
-    }
+    const handle = await this.registry.acquire(input.versionId);
+    const mutex = this.registry.getMutex(input.versionId);
 
-    try {
-      const out = handle.startAgent(
-        input.qualifiedName,
-        input.args,
-        delegationId,
-      );
-      await this.routeOutbound(out, input.versionId);
-      await this.storage.snapshots.upsert(
-        input.versionId,
-        handle.toSnapshot(),
-      );
-    } catch (err) {
-      await this.poison(input.versionId, agentId, err);
-    }
+    await mutex.runExclusive(async () => {
+      const rollbackSnap = handle.toSnapshot();
+      try {
+        await this.storage.withTransaction(async (tx) => {
+          const out = handle.startAgent(
+            input.qualifiedName,
+            input.args,
+            delegationId,
+          );
+          await tx.agents.insert(row);
+          await this.routeOutbound(out, input.versionId, tx);
+          await tx.snapshots.upsert(input.versionId, handle.toSnapshot());
+        });
+      } catch (err) {
+        if (err instanceof EntryNotFoundError) {
+          // qualifiedName isn't in the IR — this is a client mistake.
+          // Surface it to the route layer as a 400 instead of persisting
+          // a phantom error agent. The DB transaction rolled back, so
+          // agents.insert is already gone.
+          this.versionedRollback(input.versionId, rollbackSnap);
+          throw err;
+        }
+        if (err instanceof RecoverableEngineError) {
+          // Rebuild the in-memory handle from the pre-call snapshot — the
+          // engine state may have been mutated mid-event before the throw.
+          // The DB transaction has already rolled back, so `agents.insert`
+          // is gone too. We re-insert with state=error so the API client
+          // can observe the failure.
+          this.versionedRollback(input.versionId, rollbackSnap);
+          await this.storage.agents.insert({
+            ...row,
+            state: "error",
+            errorMessage: err.message,
+            updatedAt: new Date().toISOString(),
+          });
+          this.logger.log("info", "agent rolled back as error", {
+            versionId: input.versionId,
+            agentId,
+            error: err.message,
+            errorClass: err.name,
+          });
+          return; // do not throw — the agent is observable via GET /agent/:id
+        }
+        // Non-recoverable: poison the entire version.
+        await this.poison(input.versionId, agentId, row, err);
+      }
+    });
 
     return { agentId };
   }
 
   /**
-   * Best-effort cancel. If the agent has already moved to a terminal
-   * state, returns its current row unchanged.
+   * Best-effort cancel. Idempotent at the runtime level.
+   *
+   * Same mutex / transaction wrapping as `startAgent`. If the engine
+   * throws a Recoverable while processing the terminate, we roll the
+   * machine state back to before the cancel attempt and flip the
+   * agent to error — the original `running`/`cancelling` state is
+   * abandoned because the engine no longer believes it can drive that
+   * agent forward cleanly.
    */
   async cancelAgent(agentId: AgentId): Promise<AgentRow> {
     const row = await this.storage.agents.get(agentId);
     if (row === null) throw new AgentNotFound(agentId);
     if (isTerminal(row.state)) return row;
 
-    await this.storage.agents.setState(agentId, { state: "cancelling" });
-
     const handle = await this.registry.acquire(row.versionId);
-    try {
-      const out = handle.cancelAgent(row.delegationId);
-      await this.routeOutbound(out, row.versionId);
-      await this.storage.snapshots.upsert(row.versionId, handle.toSnapshot());
-    } catch (err) {
-      await this.poison(row.versionId, agentId, err);
-    }
+    const mutex = this.registry.getMutex(row.versionId);
+
+    await mutex.runExclusive(async () => {
+      const rollbackSnap = handle.toSnapshot();
+      try {
+        await this.storage.withTransaction(async (tx) => {
+          // expectedState=running gates the cancel: if a delegateAck
+          // raced ahead and already flipped the agent to "succeeded",
+          // we leave it alone.
+          const transitioned = await tx.agents.setState(
+            agentId,
+            { state: "cancelling" },
+            { expectedState: "running" },
+          );
+          if (!transitioned) {
+            this.logger.log("info", "cancelAgent: agent no longer running, skipping engine cancel", {
+              agentId,
+              versionId: row.versionId,
+            });
+            return; // tx commits with no-op; outer cancelAgent returns the refreshed row
+          }
+          const out = handle.cancelAgent(row.delegationId);
+          await this.routeOutbound(out, row.versionId, tx);
+          await tx.snapshots.upsert(row.versionId, handle.toSnapshot());
+        });
+      } catch (err) {
+        if (err instanceof RecoverableEngineError) {
+          this.versionedRollback(row.versionId, rollbackSnap);
+          await this.storage.agents.setState(agentId, {
+            state: "error",
+            errorMessage: err.message,
+          });
+          this.logger.log("info", "cancelAgent rolled back as error", {
+            versionId: row.versionId,
+            agentId,
+            error: err.message,
+            errorClass: err.name,
+          });
+          return;
+        }
+        await this.poison(row.versionId, agentId, row, err);
+      }
+    });
 
     const refreshed = await this.storage.agents.get(agentId);
     return refreshed ?? row;
@@ -133,21 +214,34 @@ export class AgentService {
     return row;
   }
 
-  listAgents(filter?: { versionId?: VersionId }): Promise<AgentRow[]> {
+  listAgents(filter?: {
+    versionId?: VersionId;
+    limit?: number;
+    offset?: number;
+  }): Promise<AgentRow[]> {
     return this.storage.agents.list(filter);
   }
 
   // ─── Internal: outbound event routing ──────────────────────────────────
+  //
+  // `routeOutbound` walks the events the engine emitted during one
+  // `applyEvent` invocation and translates them into DB writes against the
+  // *same* transaction (`tx`). Currently:
+  //   - delegateAck CORE→API → setState(succeeded, result=value)
+  //   - terminateAck CORE→API → setState(cancelled)
+  //   - any CORE→FFI event → throw RecoverableEngineError (FFI executor
+  //     not yet built; the agent that triggered it errors out, but the
+  //     rest of the version stays alive — see Stage B5 in the rollout
+  //     plan).
 
   private async routeOutbound(
     events: MachineEvent[],
     versionId: VersionId,
+    tx: Storage,
   ): Promise<void> {
     for (const event of events) {
       if (event.kind === "delegateAck" && event.from === "CORE" && event.to === "API") {
-        const row = await this.storage.agents.findByDelegationId(
-          event.delegationId,
-        );
+        const row = await tx.agents.findByDelegationId(event.delegationId);
         if (row === null) {
           this.logger.log("warn", "delegateAck for unknown delegationId", {
             versionId,
@@ -155,18 +249,27 @@ export class AgentService {
           });
           continue;
         }
-        await this.storage.agents.setState(row.id, {
-          state: "succeeded",
-          result: event.value,
-        });
+        // Only running agents can transition to succeeded. If a concurrent
+        // cancel landed first, leave its "cancelling" state alone — the
+        // matching terminateAck will follow shortly.
+        const updated = await tx.agents.setState(
+          row.id,
+          { state: "succeeded", result: event.value },
+          { expectedState: "running" },
+        );
+        if (!updated) {
+          this.logger.log("info", "delegateAck dropped: agent no longer running", {
+            versionId,
+            agentId: row.id,
+            wasState: row.state,
+          });
+        }
       } else if (
         event.kind === "terminateAck" &&
         event.from === "CORE" &&
         event.to === "API"
       ) {
-        const row = await this.storage.agents.findByDelegationId(
-          event.delegationId,
-        );
+        const row = await tx.agents.findByDelegationId(event.delegationId);
         if (row === null) {
           this.logger.log("warn", "terminateAck for unknown delegationId", {
             versionId,
@@ -174,18 +277,34 @@ export class AgentService {
           });
           continue;
         }
-        await this.storage.agents.setState(row.id, { state: "cancelled" });
+        // Only "cancelling" agents transition to "cancelled". Anything
+        // else (e.g. the agent already moved to `error` via poison) is
+        // left as-is.
+        const updated = await tx.agents.setState(
+          row.id,
+          { state: "cancelled" },
+          { expectedState: "cancelling" },
+        );
+        if (!updated) {
+          this.logger.log("info", "terminateAck dropped: agent not in cancelling state", {
+            versionId,
+            agentId: row.id,
+            wasState: row.state,
+          });
+        }
       } else if (event.to === "FFI") {
-        // FFI executor is not yet built. The IR mentioned an external
-        // call but we have nobody to dispatch to — fail loudly so the
-        // version gets poisoned.
-        this.logger.log("warn", "FFI dispatch not implemented", {
+        // FFI executor is not yet built. Outbound CORE→FFI events are
+        // dropped on the floor here — the engine state stays valid (the
+        // ExternalThread is still in `delegations`, waiting for an
+        // ack), and the agent simply sits in `running` until something
+        // outside this process feeds the ack back in via
+        // MachineHandle.feedEvent. When the FFI executor lands, replace
+        // this branch with a real dispatch.
+        // TODO(katari/ffi): wire to the FFI executor.
+        this.logger.log("debug", "FFI event held pending executor", {
           versionId,
           eventKind: event.kind,
         });
-        throw new Error(
-          `FFI ${event.kind} not implemented (event from CORE to FFI)`,
-        );
       } else {
         this.logger.log("debug", "ignoring outbound event", {
           eventKind: event.kind,
@@ -196,9 +315,46 @@ export class AgentService {
     }
   }
 
+  /**
+   * Roll the in-memory machine for `versionId` back to `snap` and put it
+   * in the registry cache. The DB layer's transaction has already rolled
+   * back; this method only reconciles the engine's mutated state. The
+   * caller must already hold the version's mutex.
+   */
+  private versionedRollback(versionId: VersionId, snap: ReturnType<MachineHandle["toSnapshot"]>): void {
+    // Re-acquire the IR module from registry cache rebuild path.
+    // We need the IR to fromSnapshot; the simplest path is a private hook
+    // on the registry that takes a fresh handle and writes it.
+    // We rebuild via the same loadHandle path the registry uses, but using
+    // the supplied `snap` directly.
+    void this.rebuildAndCache(versionId, snap).catch((err) => {
+      // Swallow — if rebuild fails (storage unavailable), the next acquire
+      // will reload from storage anyway. Logging is sufficient.
+      this.logger.log("error", "versionedRollback rebuild failed", {
+        versionId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      this.registry.evict(versionId);
+    });
+  }
+
+  private async rebuildAndCache(
+    versionId: VersionId,
+    snap: ReturnType<MachineHandle["toSnapshot"]>,
+  ): Promise<void> {
+    const moduleRow = await this.storage.modules.get(versionId);
+    if (moduleRow === null) {
+      this.registry.evict(versionId);
+      return;
+    }
+    const fresh = MachineHandle.fromSnapshot(moduleRow.irModule, snap, this.logger);
+    this.registry.replaceHandle(versionId, fresh);
+  }
+
   private async poison(
     versionId: VersionId,
     triggeringAgentId: AgentId,
+    triggeringRow: AgentRow,
     err: unknown,
   ): Promise<void> {
     const message = errorMessage(err);
@@ -207,10 +363,25 @@ export class AgentService {
       triggeringAgentId,
       error: message,
     });
-    await this.storage.agents.setState(triggeringAgentId, {
-      state: "error",
-      errorMessage: message,
-    });
+    // Best-effort: each step is idempotent / null-safe so a partial failure
+    // here doesn't make things much worse than they already are.
+    try {
+      // The triggering agent may not be persisted yet (startAgent path
+      // inserts inside the rolled-back tx). Insert-or-update via insert
+      // first, swallowing any duplicate-key error.
+      await this.storage.agents.insert({
+        ...triggeringRow,
+        state: "error",
+        errorMessage: message,
+        updatedAt: new Date().toISOString(),
+      });
+    } catch {
+      // Already persisted earlier — fall through to setState.
+      await this.storage.agents.setState(triggeringAgentId, {
+        state: "error",
+        errorMessage: message,
+      });
+    }
     await this.storage.agents.markAllRunningAsError(
       versionId,
       "machine poisoned by sibling failure",

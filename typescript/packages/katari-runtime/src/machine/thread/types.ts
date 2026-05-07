@@ -12,6 +12,7 @@ import type { Value } from "../value.js";
 import type { ForThread } from "./for.js";
 import type { HandleThread } from "./handle.js";
 import type { RequestThread } from "./request.js";
+import type { UserThread } from "./user.js";
 
 // ─── CallId ─────────────────────────────────────────────────────────────────
 
@@ -30,27 +31,71 @@ export type CallId = number;
  * boundary thread directly via `thread.boundaries[exitKind | contKind]`.
  * Inherited from parent by reference at thread creation. Boundary-type
  * subclasses (UserThread for agents, ForThread, HandleThread) overwrite
- * the relevant slot(s) with `this` in their constructor.
+ * the relevant slot(s) by *replacing* their `boundaries` field with a new
+ * frozen object derived via {@link extendBoundaries} — the parent's map
+ * is never mutated.
+ *
+ * Frozen at construction so attempts to mutate the inherited map (which
+ * would silently corrupt the parent's view as well) fail loudly.
  */
-export type Boundaries = {
-  exitKindReturn: Thread | null;
-  exitKindForBreak: Thread | null;
-  exitKindBreak: Thread | null;
-  contKindForNext: Thread | null;
-  contKindNext: Thread | null;
-};
+export type Boundaries = Readonly<{
+  /**
+   * Return boundary. Always a UserThread whose underlying block has
+   * `kind === "blockKindAgent"` — that's the only construct that catches
+   * `return`.
+   */
+  exitKindReturn: UserThread | null;
+  /** for_break boundary — always the for thread itself. */
+  exitKindForBreak: ForThread | null;
+  /** break boundary — always the handle thread itself. */
+  exitKindBreak: HandleThread | null;
+  /** for_next boundary — always the for thread itself. */
+  contKindForNext: ForThread | null;
+  /** next boundary — always the handle thread itself. */
+  contKindNext: HandleThread | null;
+}>;
 
 /** Initial boundaries with every key set to null. Used for root (APIThread). */
-export const EMPTY_BOUNDARIES: Boundaries = {
+export const EMPTY_BOUNDARIES: Boundaries = Object.freeze({
   exitKindReturn: null,
   exitKindForBreak: null,
   exitKindBreak: null,
   contKindForNext: null,
   contKindNext: null,
-};
+});
+
+/**
+ * Build a new (frozen) Boundaries by overlaying `overrides` on top of
+ * `parent`. The parent map is left untouched; the result is the *only*
+ * sanctioned way for a boundary thread (UserThread for agents, ForThread,
+ * HandleThread) to install itself into one or more slots without leaking
+ * mutations back to its parent.
+ */
+export function extendBoundaries(
+  parent: Boundaries,
+  overrides: Partial<Boundaries>,
+): Boundaries {
+  return Object.freeze({ ...parent, ...overrides });
+}
 
 /** Key used to address a boundary slot. ExitKind ∪ ContKind. */
 export type BoundaryKey = ExitKind | ContKind;
+
+/**
+ * Mutable view of a class instance, produced by stripping `readonly`
+ * from every field. Used exclusively in snapshot-restoration code paths,
+ * where each `Thread` subclass needs to assign through its declared
+ * readonly fields after the prototype has been attached via
+ * `Object.create`. Constructors handle that automatically; here we are
+ * outside any constructor, so we narrow the unsafe `as unknown as ...`
+ * idiom to a single named cast that documents the intent.
+ *
+ * Note: `InternalMutable<T>` only exposes `keyof T` — TypeScript's `keyof`
+ * does not include private fields, so this cast cannot be used to write
+ * through `private` slots. Variant-specific restoreSkeleton paths still
+ * use a smaller anonymous shape for those private fields.
+ */
+export type InternalMutable<T> = { -readonly [K in keyof T]: T[K] };
 
 // ─── Init payloads ──────────────────────────────────────────────────────────
 
@@ -58,7 +103,13 @@ export type BoundaryKey = ExitKind | ContKind;
 export type ThreadInit = {
   id: ThreadId;
   scopeId: ScopeId;
-  handlers: ReadonlyMap<ReqId, Thread>;
+  /**
+   * Active handler-owning HandleThreads, keyed by the request id they
+   * service. Only HandleThread can install entries (via `block.handlers`
+   * spawn paths), so the value type is narrowed accordingly — RequestThread
+   * et al. can dispatch to `handlers.get(reqId)` without casting.
+   */
+  handlers: ReadonlyMap<ReqId, HandleThread>;
   boundaries: Boundaries;
 };
 
@@ -116,15 +167,23 @@ export function deserializeBoundaries(
   s: SerializedBoundaries,
   threadsById: ReadonlyMap<ThreadId, Thread>,
 ): Boundaries {
-  const lookup = (id: ThreadId | null): Thread | null =>
-    id === null ? null : resolveThread(threadsById, id);
-  return {
-    exitKindReturn: lookup(s.exitKindReturn),
-    exitKindForBreak: lookup(s.exitKindForBreak),
-    exitKindBreak: lookup(s.exitKindBreak),
-    contKindForNext: lookup(s.contKindForNext),
-    contKindNext: lookup(s.contKindNext),
-  };
+  // Each slot's runtime type is narrower than `Thread` (UserThread for
+  // exitKindReturn, ForThread for exitKindFor*, HandleThread for the
+  // remainder), but the snapshot only stores ThreadIds and the resolver
+  // only knows about the generic Thread base. The serializer wrote slots
+  // from a properly-narrowed Boundaries; we trust the round-trip and cast
+  // back to the narrowed type. If the snapshot was hand-crafted with the
+  // wrong kind in a slot, downstream uses (statementExit/statementCont
+  // dispatch sites) will fail loudly.
+  const lookup = <T extends Thread>(id: ThreadId | null): T | null =>
+    id === null ? null : (resolveThread(threadsById, id) as T);
+  return Object.freeze({
+    exitKindReturn: lookup<UserThread>(s.exitKindReturn),
+    exitKindForBreak: lookup<ForThread>(s.exitKindForBreak),
+    exitKindBreak: lookup<HandleThread>(s.exitKindBreak),
+    contKindForNext: lookup<ForThread>(s.contKindForNext),
+    contKindNext: lookup<HandleThread>(s.contKindNext),
+  });
 }
 
 export function resolveThread(
@@ -136,6 +195,32 @@ export function resolveThread(
     throw new Error(`snapshot: thread ${id} not found while linking refs`);
   }
   return thread;
+}
+
+/**
+ * Look up a block payload from the IR module by id and assert its kind.
+ * Used by the per-variant `restoreSkeleton` paths so they don't have to
+ * carry the full block payload through the snapshot — only its blockId is
+ * persisted, and the IR (which is supplied separately to the
+ * deserializer) is the source of truth for the block's contents.
+ */
+export function resolveBlockPayload<K extends import("../../ir/types.js").Block["kind"]>(
+  irModule: import("../../ir/types.js").IRModule,
+  blockId: import("../../ir/types.js").BlockId,
+  expectedKind: K,
+): Extract<import("../../ir/types.js").Block, { kind: K }> {
+  const block = irModule.blocks[blockId];
+  if (block === undefined) {
+    throw new Error(
+      `snapshot: blockId ${blockId} referenced by thread skeleton not found in IR module`,
+    );
+  }
+  if (block.kind !== expectedKind) {
+    throw new Error(
+      `snapshot: expected blockId ${blockId} to be of kind ${expectedKind}, got ${block.kind}`,
+    );
+  }
+  return block as Extract<import("../../ir/types.js").Block, { kind: K }>;
 }
 
 /**
@@ -168,7 +253,7 @@ export abstract class Thread {
 
   readonly id: ThreadId;
   readonly scopeId: ScopeId;
-  readonly handlers: ReadonlyMap<ReqId, Thread>;
+  readonly handlers: ReadonlyMap<ReqId, HandleThread>;
 
   protected children: Map<CallId, Thread>;
   protected status: "running" | "cancelling";
@@ -256,9 +341,36 @@ export abstract class Thread {
    * is the boundary for some `return` / `for_break` / `break`). Stores the
    * value, cancels remaining children, then `finishCancelling` once they
    * all ack.
+   *
+   * **Return / cancel race semantics**: queue events are dispatched in FIFO
+   * order, so the resolution of a "return arrived around the same time as a
+   * cancel" race is fully determined by the order in which the events were
+   * pushed. Two scenarios cover the matrix:
+   *
+   *   1. Cancel pushed before return:
+   *      `onCancelReceived` runs first → status becomes "cancelling" →
+   *      `pendingReturn` is *not* set. The later return event arrives,
+   *      `onReturnReceived` sees status === "cancelling" and drops the
+   *      value (early return at the top of this method). When the cancel
+   *      cascade finishes, `finishCancelling` emits `cancelAck` to the
+   *      parent (ChildThread.finishCancelling: `pendingReturn === undefined`
+   *      branch). Cancel "wins".
+   *
+   *   2. Return pushed before cancel:
+   *      `onReturnReceived` runs first, transitions status to "cancelling",
+   *      sets `pendingReturn`, and cancels remaining children. The later
+   *      cancel event hits `onCancelReceived` which is idempotent on
+   *      `status === "cancelling"`. When the children all ack,
+   *      `finishCancelling` emits `done` (because `pendingReturn !== undefined`).
+   *      Return "wins".
+   *
+   * Both outcomes are well-defined; the runtime is deterministic given a
+   * fixed event order. Cross-applyEvent races are funneled through the
+   * api-server's per-version mutex (Stage B1), so observers never see
+   * interleaved partial transitions.
    */
   onReturnReceived(machine: MachineState, value: Value): void {
-    if (this.status === "cancelling") return; // race with parent cancel — drop
+    if (this.status === "cancelling") return; // see scenario (1) above
     this.status = "cancelling";
     this.pendingReturn = value;
     if (this.children.size === 0) {
@@ -432,15 +544,15 @@ export abstract class Thread {
    * has been instantiated.
    */
   protected applySnapshotCommon(serialized: SerializedThreadCommon): void {
-    const writable = this as {
-      -readonly [K in keyof Thread]: Thread[K];
-    };
+    const writable = this as InternalMutable<Thread>;
     writable.id = serialized.id;
     writable.scopeId = serialized.scopeId;
     writable.handlers = new Map(); // filled by linkCommon
     this.children = new Map();
     this.status = serialized.status;
-    this.boundaries = { ...EMPTY_BOUNDARIES };
+    // EMPTY_BOUNDARIES is frozen, so sharing the reference is safe.
+    // linkCommon replaces it with the resolved Boundaries shortly after.
+    this.boundaries = EMPTY_BOUNDARIES;
     this.pendingReturn = serialized.pendingReturn;
   }
 
@@ -453,11 +565,16 @@ export abstract class Thread {
     serialized: SerializedThreadCommon,
     threadsById: ReadonlyMap<ThreadId, Thread>,
   ): void {
-    const writable = this as { -readonly [K in keyof Thread]: Thread[K] };
+    const writable = this as InternalMutable<Thread>;
+    // Snapshot stores ThreadIds; the runtime invariant is that every entry
+    // in `handlers` resolves to a HandleThread (only HandleThread inserts
+    // itself into a child's handlers map). The cast reflects that — if a
+    // hand-crafted snapshot violates it, downstream `onAsk` dispatch will
+    // throw via the per-class hook defaults.
     writable.handlers = new Map(
       serialized.handlers.map(([reqId, threadId]) => [
         reqId,
-        resolveThread(threadsById, threadId),
+        resolveThread(threadsById, threadId) as HandleThread,
       ]),
     );
     this.children = new Map(
@@ -538,7 +655,7 @@ export abstract class ChildThread extends Thread {
     serialized: SerializedChildThreadCommon,
   ): void {
     this.applySnapshotCommon(serialized);
-    const writable = this as { -readonly [K in keyof ChildThread]: ChildThread[K] };
+    const writable = this as InternalMutable<ChildThread>;
     writable.parentCallId = serialized.parentCallId;
     // `parent` is set during linkChildCommon
   }
@@ -548,7 +665,7 @@ export abstract class ChildThread extends Thread {
     threadsById: ReadonlyMap<ThreadId, Thread>,
   ): void {
     this.linkCommon(serialized, threadsById);
-    const writable = this as { -readonly [K in keyof ChildThread]: ChildThread[K] };
+    const writable = this as InternalMutable<ChildThread>;
     writable.parent = resolveThread(threadsById, serialized.parent);
   }
 }
@@ -598,7 +715,7 @@ export type QueueEvent =
        * handle's own overrides) while still spawning handler-body /
        * thenClause without those overrides.
        */
-      handlersOverride?: ReadonlyMap<ReqId, Thread>;
+      handlersOverride?: ReadonlyMap<ReqId, HandleThread>;
     }
   | {
       kind: "callValue";

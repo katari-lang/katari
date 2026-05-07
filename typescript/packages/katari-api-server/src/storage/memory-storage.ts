@@ -25,6 +25,20 @@ function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
 
+/**
+ * Default page size and hard cap for `list` endpoints. The default is
+ * intentionally low so a forgetful client gets bounded payload back, and
+ * the cap prevents callers from asking for the whole table at once.
+ */
+const DEFAULT_LIMIT = 100;
+const MAX_LIMIT = 500;
+
+function clampLimit(requested: number | undefined): number {
+  if (requested === undefined) return DEFAULT_LIMIT;
+  if (!Number.isFinite(requested) || requested <= 0) return DEFAULT_LIMIT;
+  return Math.min(MAX_LIMIT, Math.floor(requested));
+}
+
 class InMemoryModuleRepo implements ModuleRepo {
   private rows = new Map<VersionId, ModuleRow>();
 
@@ -44,12 +58,15 @@ class InMemoryModuleRepo implements ModuleRepo {
     return id;
   }
 
-  async list(): Promise<ModuleSummary[]> {
-    return [...this.rows.values()].map((row) => ({
+  async list(options?: { limit?: number; offset?: number }): Promise<ModuleSummary[]> {
+    const all = [...this.rows.values()].map((row) => ({
       id: row.id,
       name: row.name,
       createdAt: row.createdAt,
     }));
+    const offset = Math.max(0, options?.offset ?? 0);
+    const limit = clampLimit(options?.limit);
+    return all.slice(offset, offset + limit);
   }
 
   async get(id: VersionId): Promise<ModuleRow | null> {
@@ -81,27 +98,38 @@ class InMemoryAgentRepo implements AgentRepo {
     return row ? clone(row) : null;
   }
 
-  async list(filter?: { versionId?: VersionId }): Promise<AgentRow[]> {
+  async list(filter?: {
+    versionId?: VersionId;
+    limit?: number;
+    offset?: number;
+  }): Promise<AgentRow[]> {
     const all = [...this.rows.values()];
     const filtered =
       filter?.versionId !== undefined
         ? all.filter((row) => row.versionId === filter.versionId)
         : all;
-    return filtered.map(clone);
+    const offset = Math.max(0, filter?.offset ?? 0);
+    const limit = clampLimit(filter?.limit);
+    return filtered.slice(offset, offset + limit).map(clone);
   }
 
   async setState(
     id: AgentId,
     patch: Partial<Pick<AgentRow, "state" | "result" | "errorMessage">>,
-  ): Promise<void> {
+    options?: { expectedState?: import("./types.js").AgentState },
+  ): Promise<boolean> {
     const row = this.rows.get(id);
-    if (row === undefined) return;
+    if (row === undefined) return false;
+    if (options?.expectedState !== undefined && row.state !== options.expectedState) {
+      return false;
+    }
     const updated: AgentRow = {
       ...row,
       ...clone(patch),
       updatedAt: new Date().toISOString(),
     };
     this.rows.set(id, updated);
+    return true;
   }
 
   async markAllRunningAsError(
@@ -153,4 +181,61 @@ export class InMemoryStorage implements Storage {
   readonly modules = new InMemoryModuleRepo();
   readonly agents = new InMemoryAgentRepo();
   readonly snapshots = new InMemorySnapshotRepo();
+
+  /**
+   * Snapshot-and-restore implementation: the in-memory backend isn't a real
+   * MVCC store, so we approximate transactions by deep-cloning every Map
+   * state up front and restoring on throw. On success, the live state
+   * (which `fn` mutated through `this.modules` / `this.agents` /
+   * `this.snapshots`) becomes the committed state.
+   *
+   * The `tx` argument is `this` itself — there is no separate "transaction
+   * scope" in the memory backend, so any call on `tx.modules`/etc. flows
+   * straight to the live data structures. Callers must not interleave
+   * unrelated work inside the `fn` callback.
+   */
+  async withTransaction<T>(fn: (tx: Storage) => Promise<T>): Promise<T> {
+    // Capture per-repo internal state. Each repo maintains private Maps
+    // that we deep-clone via structuredClone, then swap back on throw.
+    type RepoState = {
+      modules: Map<VersionId, ModuleRow>;
+      agentRows: Map<AgentId, AgentRow>;
+      agentByDelegation: Map<DelegationId, AgentId>;
+      snapshots: Map<VersionId, MachineSnapshot>;
+    };
+    const captureState = (): RepoState => {
+      const m = this.modules as unknown as { rows: Map<VersionId, ModuleRow> };
+      const a = this.agents as unknown as {
+        rows: Map<AgentId, AgentRow>;
+        byDelegation: Map<DelegationId, AgentId>;
+      };
+      const s = this.snapshots as unknown as { rows: Map<VersionId, MachineSnapshot> };
+      return {
+        modules: new Map(m.rows),
+        agentRows: new Map(a.rows),
+        agentByDelegation: new Map(a.byDelegation),
+        snapshots: new Map(s.rows),
+      };
+    };
+    const restoreState = (snap: RepoState): void => {
+      const m = this.modules as unknown as { rows: Map<VersionId, ModuleRow> };
+      const a = this.agents as unknown as {
+        rows: Map<AgentId, AgentRow>;
+        byDelegation: Map<DelegationId, AgentId>;
+      };
+      const s = this.snapshots as unknown as { rows: Map<VersionId, MachineSnapshot> };
+      m.rows = snap.modules;
+      a.rows = snap.agentRows;
+      a.byDelegation = snap.agentByDelegation;
+      s.rows = snap.snapshots;
+    };
+
+    const before = captureState();
+    try {
+      return await fn(this);
+    } catch (err) {
+      restoreState(before);
+      throw err;
+    }
+  }
 }

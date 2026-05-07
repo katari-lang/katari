@@ -6,16 +6,17 @@ import {
   ModuleNotFound,
   type ModuleService,
 } from "../services/module-service.js";
-import type { VersionId } from "../storage/types.js";
+import { VersionIdSchema } from "./middleware/validation.js";
 
 export function buildAgentDefinitionRoutes(modules: ModuleService): Hono {
   const app = new Hono();
 
   app.get("/", async (c) => {
-    const versionId = c.req.query("versionId") as VersionId | undefined;
-    if (versionId === undefined) {
+    const queryVersionId = c.req.query("versionId");
+    if (queryVersionId === undefined) {
       return c.json({ error: "versionId query parameter is required" }, 400);
     }
+    const versionId = VersionIdSchema.parse(queryVersionId);
     try {
       const defs = await modules.listAgentDefinitions(versionId);
       return c.json({ agents: defs });
@@ -28,7 +29,10 @@ export function buildAgentDefinitionRoutes(modules: ModuleService): Hono {
   });
 
   app.get("/:versionId/:qualifiedName", async (c) => {
-    const versionId = c.req.param("versionId") as VersionId;
+    const versionId = VersionIdSchema.parse(c.req.param("versionId"));
+    // Hono's `:qualifiedName` is delivered raw (un-decoded); we decode
+    // exactly once so the user-supplied "test.main" pattern works whether
+    // the client sent it raw or as "test%2Emain".
     const qualifiedName = decodeURIComponent(c.req.param("qualifiedName"));
     try {
       const def = await modules.getAgentDefinition(versionId, qualifiedName);

@@ -1,9 +1,10 @@
-import type { BlockId, TupleBlock } from "../../ir/types.js";
+import type { BlockId, IRModule, TupleBlock } from "../../ir/types.js";
 import type { ThreadId } from "../id.js";
 import type { MachineState } from "../machine.js";
 import type { Value } from "../value.js";
 import {
   ChildThread,
+  resolveBlockPayload,
   type CallId,
   type ChildThreadInit,
   type SerializedChildThreadCommon,
@@ -20,12 +21,15 @@ import {
  */
 export class TupleThread extends ChildThread {
   readonly block: TupleBlock;
+  /** IR id of the BlockTuple backing this thread. See UserThread.blockId. */
+  readonly blockId: BlockId;
   private readonly collected: Map<CallId, Value> = new Map();
   private nextIndex: number = 0;
 
-  constructor(init: ChildThreadInit, block: TupleBlock) {
+  constructor(init: ChildThreadInit, block: TupleBlock, blockId: BlockId) {
     super(init);
     this.block = block;
+    this.blockId = blockId;
   }
 
   override onCall(machine: MachineState): void {
@@ -101,21 +105,27 @@ export class TupleThread extends ChildThread {
     return {
       kind: "tuple",
       ...this.serializeChildCommon(),
-      block: this.block,
+      blockId: this.blockId,
       collected: [...this.collected.entries()],
       nextIndex: this.nextIndex,
     };
   }
 
-  static restoreSkeleton(serialized: SerializedTupleThread): TupleThread {
+  static restoreSkeleton(
+    serialized: SerializedTupleThread,
+    irModule: IRModule,
+  ): TupleThread {
     const thread = Object.create(TupleThread.prototype) as TupleThread;
     thread.applySnapshotChildCommon(serialized);
     const writable = thread as unknown as {
       block: TupleBlock;
+      blockId: BlockId;
       collected: Map<CallId, Value>;
       nextIndex: number;
     };
-    writable.block = serialized.block;
+    const block = resolveBlockPayload(irModule, serialized.blockId, "blockTuple");
+    writable.block = block.tupleBlock;
+    writable.blockId = serialized.blockId;
     writable.collected = new Map(serialized.collected);
     writable.nextIndex = serialized.nextIndex;
     return thread;
@@ -131,7 +141,7 @@ export class TupleThread extends ChildThread {
 
 export type SerializedTupleThread = SerializedChildThreadCommon & {
   kind: "tuple";
-  block: TupleBlock;
+  blockId: BlockId;
   collected: [CallId, Value][];
   nextIndex: number;
 };

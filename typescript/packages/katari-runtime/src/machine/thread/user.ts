@@ -1,17 +1,19 @@
-import type { Block, CallData, UserBlock, VarId } from "../../ir/types.js";
+import type { Block, BlockId, CallData, IRModule, UserBlock, VarId } from "../../ir/types.js";
 import type { ScopeId, ThreadId } from "../id.js";
 import type { MachineState } from "../machine.js";
+import { tryMatch } from "../pattern.js";
+import { RecoverableEngineError } from "../../runtime/errors.js";
 import { getScope, getValueFromScope, setValueInScope } from "../scope.js";
 import { literalToValue, NULL_VALUE, type Value } from "../value.js";
 import {
   ChildThread,
+  extendBoundaries,
+  resolveBlockPayload,
   type CallId,
   type ChildThreadInit,
   type SerializedChildThreadCommon,
   type Thread,
 } from "./types.js";
-import type { HandleThread } from "./handle.js";
-import type { ForThread } from "./for.js";
 
 /**
  * Executes a BlockUser (agent or inline).
@@ -25,14 +27,38 @@ import type { ForThread } from "./for.js";
  */
 export class UserThread extends ChildThread {
   readonly block: UserBlock;
+  /**
+   * IR id of the block backing this thread. Persisted in snapshots in
+   * place of the full block payload — `restoreSkeleton` re-resolves the
+   * payload from the IR module on load. This dropped per-thread snapshot
+   * size from O(IR-block size) to O(1).
+   */
+  readonly blockId: BlockId;
   /** Index of the next statement to execute. */
   private pc: number = 0;
 
-  constructor(machine: MachineState, init: ChildThreadInit, block: UserBlock, args: Record<string, Value>) {
+  constructor(
+    machine: MachineState,
+    init: ChildThreadInit,
+    block: UserBlock,
+    blockId: BlockId,
+    args: Record<string, Value>,
+  ) {
     super(init);
     this.block = block;
+    this.blockId = blockId;
 
     // Bind parameters into the freshly-allocated scope (allocated by the runner).
+    //
+    // Each `param` has the IR var `param.var` allocated by the compiler's
+    // `bindParam` helper. We populate that slot from the incoming `args` here.
+    // Any non-trivial destructuring (tuple / constructor patterns, or even a
+    // plain `PatternVariable` whose user-facing name differs from `param.var`)
+    // is *not* performed here: the compiler always emits a
+    // `StatementBindPattern { source = param.var, pattern = ... }` as the
+    // body's prelude. UserThread's `runStatements` runs the prelude and
+    // expands the pattern into the user-visible local bindings via
+    // `tryMatch` from `../pattern.ts`.
     const scope = getScope(machine, init.scopeId);
     for (const param of block.parameters) {
       const argValue = args[param.label];
@@ -43,7 +69,9 @@ export class UserThread extends ChildThread {
 
     // Agent body installs itself as the `return` boundary.
     if (block.kind === "blockKindAgent") {
-      this.boundaries = { ...this.boundaries, exitKindReturn: this };
+      this.boundaries = extendBoundaries(this.boundaries, {
+        exitKindReturn: this,
+      });
     }
   }
 
@@ -100,8 +128,27 @@ export class UserThread extends ChildThread {
           continue;
         }
 
-        case "statementBindPattern":
-          throw new Error("UserThread.runStatements: statementBindPattern not implemented");
+        case "statementBindPattern": {
+          // Lowering emits a `StatementBindPattern` for every irrefutable
+          // bind site: function parameters (after the param's incoming arg
+          // is written into `param.var`), `let pat = expr` with structural
+          // patterns, `then(p) { ... }` clauses, and for-loop element
+          // patterns. The pattern is irrefutable (Maranget exhaustiveness,
+          // K0291), so a null result here indicates a compiler bug.
+          const { source, pattern } = stmt.contents;
+          const incoming = getValueFromScope(machine, this.scopeId, source);
+          const bindings = tryMatch(pattern, incoming);
+          if (bindings === null) {
+            throw new Error(
+              `statementBindPattern: refutable pattern reached runtime (compiler bug — Maranget K0291 should have rejected this)`,
+            );
+          }
+          for (const [varId, value] of bindings) {
+            setValueInScope(machine, this.scopeId, varId, value);
+          }
+          this.pc++;
+          continue;
+        }
 
         case "statementExit": {
           const exitValue = getValueFromScope(machine, this.scopeId, stmt.contents.value);
@@ -148,12 +195,12 @@ export class UserThread extends ChildThread {
               getValueFromScope(machine, this.scopeId, newValueVar),
             );
           }
-          // boundary slots for cont are only ever populated by ForThread or
-          // HandleThread (their constructors install `this` into the relevant
-          // slot). The cast reflects that runtime invariant.
+          // `boundaries` is now slot-narrowed: contKindForNext is ForThread,
+          // contKindNext is HandleThread, so `target` already has the right
+          // union type without an explicit cast.
           machine.queue.push({
             kind: "cont",
-            target: target as HandleThread | ForThread,
+            target,
             source: this,
             contKind,
             value: valueResolved,
@@ -228,7 +275,12 @@ export class UserThread extends ChildThread {
       case "callTargetValue": {
         const value = getValueFromScope(machine, this.scopeId, call.target.var);
         if (value.kind !== "closure") {
-          throw new Error(`UserThread.pushCallEvent: expected closure, got ${value.kind}`);
+          // Compiler-checked invariant under normal operation; reaching this
+          // means an IR-level type mismatch (closure expected, something
+          // else encountered). Single-agent issue → Recoverable.
+          throw new RecoverableEngineError(
+            `UserThread.pushCallEvent: expected closure, got ${value.kind}`,
+          );
         }
         machine.queue.push({
           kind: "callValue",
@@ -249,16 +301,25 @@ export class UserThread extends ChildThread {
     return {
       kind: "user",
       ...this.serializeChildCommon(),
-      block: this.block,
+      blockId: this.blockId,
       pc: this.pc,
     };
   }
 
-  static restoreSkeleton(serialized: SerializedUserThread): UserThread {
+  static restoreSkeleton(
+    serialized: SerializedUserThread,
+    irModule: IRModule,
+  ): UserThread {
     const thread = Object.create(UserThread.prototype) as UserThread;
     thread.applySnapshotChildCommon(serialized);
-    const writable = thread as unknown as { block: UserBlock; pc: number };
-    writable.block = serialized.block;
+    const writable = thread as unknown as {
+      block: UserBlock;
+      blockId: BlockId;
+      pc: number;
+    };
+    const block = resolveBlockPayload(irModule, serialized.blockId, "blockUser");
+    writable.block = block.body;
+    writable.blockId = serialized.blockId;
     writable.pc = serialized.pc;
     return thread;
   }
@@ -273,7 +334,7 @@ export class UserThread extends ChildThread {
 
 export type SerializedUserThread = SerializedChildThreadCommon & {
   kind: "user";
-  block: UserBlock;
+  blockId: BlockId;
   pc: number;
 };
 

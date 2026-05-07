@@ -8,7 +8,6 @@ import {
   type SerializedChildThreadCommon,
   type Thread,
 } from "./types.js";
-import type { HandleThread } from "./handle.js";
 
 /**
  * Executes a BlockRequest. Issues a single `ask` to the registered
@@ -42,20 +41,20 @@ export class RequestThread extends ChildThread {
   static readonly REQUEST_ASK_ID = 0 as AskId;
 
   override onCall(machine: MachineState): void {
-    const handler: Thread | undefined = this.handlers.get(this.reqId);
+    // `handlers` is now typed as `ReadonlyMap<ReqId, HandleThread>`
+    // (HandleThread is the only construct that installs entries into a
+    // child's handler map), so no `as HandleThread` cast is needed at the
+    // ask dispatch site below.
+    const handler = this.handlers.get(this.reqId);
     if (handler === undefined) {
       throw new Error(
         `RequestThread.onCall: no handler registered for reqId ${this.reqId}`,
       );
     }
-    // Handlers are only ever populated by HandleThread (which inserts itself
-    // into a child's handler map for its declared requests). This invariant
-    // is upheld by the runtime — if it ever breaks, downstream methods on
-    // `target` will throw via the per-class hook defaults.
     this.pendingAskId = RequestThread.REQUEST_ASK_ID;
     machine.queue.push({
       kind: "ask",
-      target: handler as HandleThread,
+      target: handler,
       asker: this,
       askId: RequestThread.REQUEST_ASK_ID,
       reqId: this.reqId,
@@ -64,6 +63,18 @@ export class RequestThread extends ChildThread {
   }
 
   override onAskComplete(machine: MachineState, askId: AskId, value: Value): void {
+    if (this.pendingAskId === undefined) {
+      // Reachable only via a snapshot taken before this thread's onCall ran.
+      // The current synchronous applyEvent model never persists such a state
+      // (onCall fires from adoptChild within the same processQueue pass), but
+      // the deserializer re-triggers onCall for these threads as a defensive
+      // measure (see snapshot.ts deserializeMachine pass 3). If we still see
+      // this here, something bypassed that pass — fail loudly so the bug is
+      // visible.
+      throw new Error(
+        `RequestThread.onAskComplete: pendingAskId is undefined — onCall was never invoked (snapshot inconsistency)`,
+      );
+    }
     if (this.pendingAskId !== askId) {
       throw new Error(
         `RequestThread.onAskComplete: askId mismatch (expected ${this.pendingAskId}, got ${askId})`,
@@ -75,6 +86,11 @@ export class RequestThread extends ChildThread {
       callId: this.parentCallId,
       value,
     });
+  }
+
+  /** Snapshot inspector used by the deserializer's pass-3 re-trigger. */
+  get hasIssuedAsk(): boolean {
+    return this.pendingAskId !== undefined;
   }
 
   // ─── Snapshot ──────────────────────────────────────────────────────────
