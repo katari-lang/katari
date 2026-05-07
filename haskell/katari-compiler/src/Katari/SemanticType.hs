@@ -20,6 +20,7 @@
 module Katari.SemanticType where
 
 import Data.Functor.Const (Const (..))
+import Data.Functor.Identity (Identity (..))
 import Data.Map.Strict (Map)
 import Data.Set (Set)
 import Data.Set qualified as Set
@@ -209,3 +210,24 @@ foldVariable ::
   SemanticType phase ->
   m
 foldVariable onVariable onRequest = getConst . substituteVariable (Const . onVariable) (Const . onRequest)
+
+-- | Re-tag a 'Resolved' semantic type as 'Unresolved'. Sound because the
+-- 'SemanticTypeVariable' constructor only exists at @Unresolved@ phase, so a
+-- @SemanticType Resolved@ value structurally cannot contain anything that is
+-- not also a valid 'Unresolved' shape. The @onVariable@ closure is statically
+-- unreachable; supplying a sentinel so we don't have to call 'error' there.
+liftResolvedToUnresolved :: SemanticType Resolved -> SemanticType Unresolved
+liftResolvedToUnresolved =
+  runIdentity
+    . substituteVariable
+      (\_ -> Identity SemanticTypeNever)
+      (\_ -> Identity emptyRequest)
+
+-- | Re-tag a 'Resolved' request set as 'Unresolved'. See
+-- 'liftResolvedToUnresolved' for the soundness argument.
+liftRequestResolvedToUnresolved :: SemanticRequest Resolved -> SemanticRequest Unresolved
+liftRequestResolvedToUnresolved (SemanticRequest elements) =
+  SemanticRequest (Set.fromList (map liftElement (Set.toList elements)))
+  where
+    liftElement :: SemanticRequestElement Resolved -> SemanticRequestElement Unresolved
+    liftElement (SemanticRequestElementConcrete reqId) = SemanticRequestElementConcrete reqId

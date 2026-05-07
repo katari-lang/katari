@@ -56,6 +56,8 @@ import Katari.Id
     VariableId (..),
   )
 import Katari.Internal qualified as Internal
+import Katari.Prim (PrimConstraintRule, PrimDefinition (..))
+import Katari.Prim qualified as Prim
 import Katari.SourceSpan (HasSourceSpan (..), SourceSpan (..))
 import Katari.Typechecker.ImportGraph (findImportCycles)
 
@@ -216,7 +218,17 @@ data IdentifierResult = IdentifierResult
     topLevelVariablesByQName :: Map QualifiedName VariableId,
     typesByQName :: Map QualifiedName TypeId,
     requestsByQName :: Map QualifiedName RequestId,
-    constructorsByQName :: Map QualifiedName ConstructorId
+    constructorsByQName :: Map QualifiedName ConstructorId,
+    -- | Built-in primitives, keyed by their qualified name (e.g.
+    -- @QualifiedName "prim" "add"@). Mirrored into 'identifiedVariables'
+    -- as ordinary entries; the dedicated map gives O(log n) lookup
+    -- without scanning. Populated by 'preregisterPrimitives'.
+    primitiveVariableIds :: Map QualifiedName VariableId,
+    -- | Constraint-rule per prim (operator-style prims need special
+    -- subtype constraints; ordinary prims use 'PrimRuleSimple'). Indexed
+    -- by 'VariableId' so the constraint generator can dispatch directly
+    -- on the resolved callee.
+    primitiveRulesByVariableId :: Map VariableId PrimConstraintRule
   }
   deriving (Show)
 
@@ -229,8 +241,10 @@ mkIdentifierResult ::
   Map RequestId RequestData ->
   Map ConstructorId ConstructorData ->
   Map ModuleId (Module Identified) ->
+  Map QualifiedName VariableId ->
+  Map VariableId PrimConstraintRule ->
   IdentifierResult
-mkIdentifierResult modules variables types requests constructors asts =
+mkIdentifierResult modules variables types requests constructors asts primVars primRules =
   IdentifierResult
     { identifiedModules = modules,
       identifiedVariables = variables,
@@ -249,7 +263,9 @@ mkIdentifierResult modules variables types requests constructors asts =
       requestsByQName =
         Map.fromList [(requestData.requestQualifiedName, requestId) | (requestId, requestData) <- Map.toList requests],
       constructorsByQName =
-        Map.fromList [(constructorData.constructorQualifiedName, constructorId) | (constructorId, constructorData) <- Map.toList constructors]
+        Map.fromList [(constructorData.constructorQualifiedName, constructorId) | (constructorId, constructorData) <- Map.toList constructors],
+      primitiveVariableIds = primVars,
+      primitiveRulesByVariableId = primRules
     }
 
 -- ---------------------------------------------------------------------------
@@ -289,6 +305,13 @@ data IdentifierError where
   ErrorMissingExternalAgentAnnotation :: SourceSpan -> Text -> IdentifierError
   -- | An @ext agent@ declaration's @\@\"...\"@ annotation is empty or whitespace.
   ErrorEmptyExternalAgentAnnotation :: SourceSpan -> Text -> IdentifierError
+  -- | A user definition collided with a built-in primitive name (root
+  -- prim flat-injected into every module's top-level scope, or an
+  -- alias module from @prim.\<sub\>@).
+  ErrorPrimitiveConflict :: SourceSpan -> Text -> IdentifierError
+  -- | The user tried to declare a module under the reserved @prim@ /
+  -- @prim.*@ namespace.
+  ErrorReservedPrimitiveModule :: SourceSpan -> Text -> IdentifierError
   -- | A 'K9999' invariant violation (compiler bug). Wraps a fully-formed
   -- 'Diagnostic' produced by 'Katari.Internal' so it surfaces in the
   -- diagnostic stream without panicking the host.
@@ -313,6 +336,8 @@ instance HasSourceSpan IdentifierError where
     ErrorNotAConstructor sourceSpan _ -> sourceSpan
     ErrorMissingExternalAgentAnnotation sourceSpan _ -> sourceSpan
     ErrorEmptyExternalAgentAnnotation sourceSpan _ -> sourceSpan
+    ErrorPrimitiveConflict sourceSpan _ -> sourceSpan
+    ErrorReservedPrimitiveModule sourceSpan _ -> sourceSpan
     ErrorInternal diagnostic -> diagnostic.span
 
 -- | Convert an 'IdentifierError' to a unified 'Diagnostic'. Codes
@@ -386,6 +411,16 @@ toDiagnostic = \case
       "K0151"
       ("external agent '" <> name <> "' has an empty @\"\" annotation (server identifier must not be blank)")
       sourceSpan
+  ErrorPrimitiveConflict sourceSpan name ->
+    diagnosticError
+      "K0112"
+      ("'" <> name <> "' conflicts with a built-in primitive name")
+      sourceSpan
+  ErrorReservedPrimitiveModule sourceSpan name ->
+    diagnosticError
+      "K0113"
+      ("module name '" <> name <> "' is reserved for the primitive namespace")
+      sourceSpan
   ErrorInternal diagnostic -> diagnostic
 
 -- ---------------------------------------------------------------------------
@@ -408,7 +443,12 @@ data IdentifierState = IdentifierState
     requests :: Map RequestId RequestData,
     constructors :: Map ConstructorId ConstructorData,
     errors :: [IdentifierError],
-    resolveContext :: ResolveContext
+    resolveContext :: ResolveContext,
+    -- | Prim qualified-name → 'VariableId' map. Populated by
+    -- 'preregisterPrimitives'; consulted by 'bindLocalVariable' to
+    -- detect prim-shadowing locals and by the operator desugar to
+    -- attach the resolved id without a string lookup at every call.
+    statePrimitiveVariableIds :: Map QualifiedName VariableId
   }
 
 -- | Lookup tables required during name resolution. Phase D sets one up for
@@ -449,7 +489,8 @@ runIdentifier action = runState action initialState
           requests = Map.empty,
           constructors = Map.empty,
           errors = [],
-          resolveContext = emptyResolveContext
+          resolveContext = emptyResolveContext,
+          statePrimitiveVariableIds = Map.empty
         }
 
 -- ---------------------------------------------------------------------------
@@ -555,16 +596,22 @@ mergeSymbol newPos name existing incoming = do
 
 -- | Generic per-slot merge. The first existing id wins on conflict; the
 -- caller's @reportConflict@ records the duplicate-name error against it.
+-- If @existing@ and @new@ refer to the same id (e.g. a redundant
+-- @import "prim"@ on top of the implicit prim injection), the merge is
+-- a no-op rather than a duplicate-name error.
 mergeSlot ::
+  (Eq a) =>
   (a -> Identifier ()) ->
   Maybe a ->
   Maybe a ->
   Identifier (Maybe a)
 mergeSlot _ existing Nothing = pure existing
 mergeSlot _ Nothing newSlot = pure newSlot
-mergeSlot reportConflict (Just existingId) (Just _) = do
-  reportConflict existingId
-  pure (Just existingId)
+mergeSlot reportConflict (Just existingId) (Just newId)
+  | existingId == newId = pure (Just existingId)
+  | otherwise = do
+      reportConflict existingId
+      pure (Just existingId)
 
 -- | Merge @incoming@ into the existing entry for @name@ in @table@ (if any),
 -- then @Map.insert@ the result.
@@ -601,6 +648,9 @@ bindLocalVariable nameRef = do
   context <- gets (.resolveContext)
   let name = nameRef.text
   when (chainHasModule name context.scopeStack) $
+    emitError (ErrorShadowNonVariable nameRef.sourceSpan name)
+  primShadow <- isShadowingPrim name
+  when primShadow $
     emitError (ErrorShadowNonVariable nameRef.sourceSpan name)
   variableId <-
     freshVariableId
@@ -716,6 +766,15 @@ lookupModuleExportSlot getSlot moduleId name = do
     entry <- Map.lookup name table
     getSlot entry
 
+-- | True if @name@ is the bare name of a root-prim entry (e.g. @add@,
+-- @eq@). Local bindings that shadow such a name are rejected with K0101
+-- because the user-facing semantics of @name(...)@ would silently flip
+-- between operator-prim and a local binding.
+isShadowingPrim :: Text -> Identifier Bool
+isShadowingPrim name = do
+  primVars <- gets (.statePrimitiveVariableIds)
+  pure (Map.member (QualifiedName "prim" name) primVars)
+
 -- ---------------------------------------------------------------------------
 -- NameRef helpers
 -- ---------------------------------------------------------------------------
@@ -748,17 +807,69 @@ emitImportCycleError moduleMap = \case
       Nothing -> pure ()
 
 -- ---------------------------------------------------------------------------
+-- Phase 0': prim namespace preregistration
+-- ---------------------------------------------------------------------------
+
+-- | Allocate 'ModuleId's for every prim module ('prim' / 'prim.\<sub\>')
+-- and 'VariableId's for every 'PrimDefinition'. Stores the resulting
+-- prim id map in 'IdentifierState' so Phase D's local-shadowing check
+-- and the operator desugar can read it back. Runs before 'assignModuleIds'
+-- so prim ids occupy the lowest VariableId / ModuleId numbers — this is
+-- not load-bearing for correctness, but it gives stable test fixtures.
+preregisterPrimitives ::
+  Identifier
+    ( Map Text ModuleId,
+      Map QualifiedName VariableId,
+      Map VariableId PrimConstraintRule
+    )
+preregisterPrimitives = do
+  modulePairs <-
+    mapM
+      ( \name ->
+          (name,)
+            <$> freshModuleId
+              ModuleData
+                { moduleName = name,
+                  moduleSourceSpan = Prim.primSourceSpan
+                }
+      )
+      Prim.primModuleNames
+  varPairs <-
+    mapM
+      ( \def -> do
+          let qname = QualifiedName {module_ = def.primModule, name = def.primName}
+          variableId <-
+            freshVariableId
+              VariableData
+                { variableName = def.primName,
+                  variableQualifiedName = Just qname,
+                  variableSourceSpan = Prim.primSourceSpan
+                }
+          pure ((qname, variableId), (variableId, def.primConstraintRule))
+      )
+      Prim.primDefinitions
+  let primVars = Map.fromList (map fst varPairs)
+      primRules = Map.fromList (map snd varPairs)
+  modify $ \s -> s {statePrimitiveVariableIds = primVars}
+  pure (Map.fromList modulePairs, primVars, primRules)
+
+-- ---------------------------------------------------------------------------
 -- Phase A: assign ModuleIds
 -- ---------------------------------------------------------------------------
 
 -- | Allocate a 'ModuleId' for each input module. The Identified AST is built
 -- separately in Phase D and stored in the result, so no placeholder is needed
--- here.
+-- here. User-defined modules under the reserved @prim@ / @prim.*@ namespace
+-- are flagged with 'ErrorReservedPrimitiveModule' (K0113); a 'ModuleId' is
+-- still allocated so downstream phases can keep walking, but the prim
+-- injection skips those modules.
 assignModuleIds :: Map Text (Module Parsed) -> Identifier (Map Text ModuleId)
 assignModuleIds moduleMap =
   Map.fromList <$> mapM allocate (Map.toList moduleMap)
   where
     allocate (moduleName, parsedModule) = do
+      when (Prim.isPrimReservedModuleName moduleName) $
+        emitError (ErrorReservedPrimitiveModule parsedModule.sourceSpan moduleName)
       moduleId <-
         freshModuleId
           ModuleData
@@ -884,6 +995,20 @@ buildExports moduleMap =
               }
       insertSymbolEntry name.sourceSpan name.text entry table
 
+-- | Build the export tables of the prim modules from a preregistered
+-- 'primitiveVariableIds' map. Variable-only entries (no type / module
+-- slots), keyed by prim module name. Used by 'identify' to merge into
+-- 'allExports' alongside user modules.
+buildPrimExports :: Map QualifiedName VariableId -> Map Text (Map Text SymbolEntry)
+buildPrimExports primVars =
+  Map.fromListWith
+    (Map.unionWith (\existing _new -> existing))
+    [ (def.primModule, Map.singleton def.primName (singletonVariable variableId))
+      | def <- Prim.primDefinitions,
+        let q = QualifiedName {module_ = def.primModule, name = def.primName},
+        Just variableId <- [Map.lookup q primVars]
+    ]
+
 -- ---------------------------------------------------------------------------
 -- Phase C: build per-module top-level scope by resolving imports
 -- ---------------------------------------------------------------------------
@@ -891,6 +1016,20 @@ buildExports moduleMap =
 -- | Merge a module's own declarations with the symbols brought in by its
 -- import statements to produce a flat @Map Text SymbolEntry@ for use as the
 -- top-level frame.
+--
+-- Prim injection: every user module additionally receives
+--
+--   * the full export table of the @prim@ root module flat-injected
+--     under its bare names (named-import semantics);
+--   * each @prim.\<sub\>@ as a module alias under its last segment
+--     (qualified-import semantics).
+--
+-- Collisions with user-defined names are reported as
+-- 'ErrorPrimitiveConflict' (K0112) and the prim entry is silently
+-- dropped — the user's definition keeps the slot so the rest of the
+-- pipeline can keep walking. Modules under the reserved @prim@ /
+-- @prim.*@ namespace skip the injection (they are themselves the prim
+-- modules, or the user is colliding and K0113 already fired).
 buildTopLevels ::
   Map Text ModuleId ->
   Map Text (Map Text SymbolEntry) ->
@@ -901,8 +1040,48 @@ buildTopLevels moduleNameToId exports moduleMap =
   where
     buildOne (currentModuleName, parsedModule) = do
       let ownExports = Map.findWithDefault Map.empty currentModuleName exports
-      table <- foldM addImport ownExports parsedModule.declarations
+      base <-
+        if Prim.isPrimReservedModuleName currentModuleName
+          then pure ownExports
+          else injectPrimitives parsedModule.sourceSpan ownExports
+      table <- foldM addImport base parsedModule.declarations
       pure (currentModuleName, table)
+
+    -- Inject prim root exports + prim sub-module aliases.
+    injectPrimitives ::
+      SourceSpan ->
+      Map Text SymbolEntry ->
+      Identifier (Map Text SymbolEntry)
+    injectPrimitives moduleSourceSpan userTable = do
+      let rootExports = Map.findWithDefault Map.empty "prim" exports
+      step1 <- foldM (injectOne moduleSourceSpan) userTable (Map.toList rootExports)
+      foldM (injectAlias moduleSourceSpan) step1 Prim.primSubModuleNames
+
+    injectOne ::
+      SourceSpan ->
+      Map Text SymbolEntry ->
+      (Text, SymbolEntry) ->
+      Identifier (Map Text SymbolEntry)
+    injectOne moduleSourceSpan table (name, primEntry) =
+      case Map.lookup name table of
+        Just _ -> do
+          emitError (ErrorPrimitiveConflict moduleSourceSpan name)
+          pure table
+        Nothing -> pure (Map.insert name primEntry table)
+
+    injectAlias ::
+      SourceSpan ->
+      Map Text SymbolEntry ->
+      Text ->
+      Identifier (Map Text SymbolEntry)
+    injectAlias moduleSourceSpan table subName =
+      case Map.lookup ("prim." <> subName) moduleNameToId of
+        Just mid -> case Map.lookup subName table of
+          Just _ -> do
+            emitError (ErrorPrimitiveConflict moduleSourceSpan subName)
+            pure table
+          Nothing -> pure (Map.insert subName (singletonModule mid) table)
+        Nothing -> pure table
 
     addImport table = \case
       DeclarationImport importDeclaration -> resolveImport table importDeclaration
@@ -1673,8 +1852,8 @@ resolveExpression = \case
   ExpressionTuple expression -> ExpressionTuple <$> resolveTupleExpr expression
   ExpressionArray expression -> ExpressionArray <$> resolveArrayExpr expression
   ExpressionCall expression -> ExpressionCall <$> resolveCallExpr expression
-  ExpressionBinaryOperator expression -> ExpressionBinaryOperator <$> resolveBinaryExpr expression
-  ExpressionUnaryOperator expression -> ExpressionUnaryOperator <$> resolveUnaryExpr expression
+  ExpressionBinaryOperator expression -> resolveBinaryOperatorAsCall expression
+  ExpressionUnaryOperator expression -> resolveUnaryOperatorAsCall expression
   ExpressionIf expression -> ExpressionIf <$> resolveIfExpr expression
   ExpressionMatch expression -> ExpressionMatch <$> resolveMatchExpr expression
   ExpressionFor expression -> ExpressionFor <$> resolveForExpr expression
@@ -1788,26 +1967,84 @@ resolveCallArgument CallArgument {label, value, sourceSpan} = do
         sourceSpan = sourceSpan
       }
 
-resolveBinaryExpr :: BinaryOperatorExpression Parsed -> Identifier (BinaryOperatorExpression Identified)
-resolveBinaryExpr BinaryOperatorExpression {operator, left, right, sourceSpan} = do
+-- | Desugar a binary operator into a call to the matching root prim.
+-- @a \<op\> b@ becomes @add(lhs=a, rhs=b)@ (or whichever prim matches
+-- 'binaryOperatorPrimName'). The synthesised callee 'NameRef' carries
+-- the prim's pre-allocated 'VariableId' so the constraint generator
+-- and lowering can dispatch as if the user wrote @add(...)@ directly.
+resolveBinaryOperatorAsCall ::
+  BinaryOperatorExpression Parsed -> Identifier (Expression Identified)
+resolveBinaryOperatorAsCall BinaryOperatorExpression {operator, left, right, sourceSpan} = do
   left' <- resolveExpression left
   right' <- resolveExpression right
-  pure
-    BinaryOperatorExpression
-      { operator = operator,
-        left = left',
-        right = right',
-        sourceSpan = sourceSpan,
-        typeOf = ()
-      }
+  let primName = Prim.binaryOperatorPrimName operator
+  metadata <- lookupPrimVariable primName
+  pure (mkPrimCall primName metadata sourceSpan [("lhs", left'), ("rhs", right')])
 
-resolveUnaryExpr :: UnaryOperatorExpression Parsed -> Identifier (UnaryOperatorExpression Identified)
-resolveUnaryExpr UnaryOperatorExpression {operator, operand, sourceSpan} = do
+-- | Desugar a unary operator into a call to the matching root prim
+-- (@!x@ → @not(value=x)@; @-x@ → @neg(value=x)@).
+resolveUnaryOperatorAsCall ::
+  UnaryOperatorExpression Parsed -> Identifier (Expression Identified)
+resolveUnaryOperatorAsCall UnaryOperatorExpression {operator, operand, sourceSpan} = do
   operand' <- resolveExpression operand
-  pure
-    UnaryOperatorExpression
-      { operator = operator,
-        operand = operand',
+  let primName = Prim.unaryOperatorPrimName operator
+  metadata <- lookupPrimVariable primName
+  pure (mkPrimCall primName metadata sourceSpan [("value", operand')])
+
+-- | Look up a root prim's 'VariableId' from the preregistered map.
+-- Missing entries indicate a compiler bug (every operator name in
+-- 'Prim.binaryOperatorPrimName' / 'Prim.unaryOperatorPrimName' must be
+-- present in 'Prim.primDefinitions') and are surfaced as a K9999.
+lookupPrimVariable :: Text -> Identifier (NameRefResolution Identified VariableRef)
+lookupPrimVariable primName = do
+  primVars <- gets (.statePrimitiveVariableIds)
+  case Map.lookup (QualifiedName "prim" primName) primVars of
+    Just variableId -> pure (Just variableId)
+    Nothing -> do
+      emitError $
+        ErrorInternal $
+          Internal.internalErrorNoSpan
+            ("Identifier: prim '" <> primName <> "' missing from registry (compiler bug)")
+      pure Nothing
+
+-- | Build a synthesised 'ExpressionCall' targeting a root prim. The
+-- callee's source span and label spans all collapse to the original
+-- operator's span — diagnostics still anchor to the user's @+@ /
+-- @!@ token.
+mkPrimCall ::
+  Text ->
+  NameRefResolution Identified VariableRef ->
+  SourceSpan ->
+  [(Text, Expression Identified)] ->
+  Expression Identified
+mkPrimCall primName metadata sourceSpan args =
+  ExpressionCall
+    CallExpression
+      { callee =
+          ExpressionVariable
+            VariableExpression
+              { name =
+                  NameRef
+                    { text = primName,
+                      sourceSpan = sourceSpan,
+                      resolution = metadata
+                    },
+                sourceSpan = sourceSpan,
+                typeOf = ()
+              },
+        arguments =
+          [ CallArgument
+              { label =
+                  NameRef
+                    { text = label,
+                      sourceSpan = sourceSpan,
+                      resolution = ()
+                    },
+                value = value,
+                sourceSpan = sourceSpan
+              }
+            | (label, value) <- args
+          ],
         sourceSpan = sourceSpan,
         typeOf = ()
       }
@@ -2116,13 +2353,18 @@ resolveModuleQualifiedChain moduleId moduleRef labels totalSpan =
 -- old fail-fast behaviour can branch on @null errors@.
 identify :: Map Text (Module Parsed) -> (IdentifierResult, [IdentifierError])
 identify moduleMap =
-  let (asts, finalState) =
+  let (resolved, finalState) =
         runIdentifier $ do
           for_ (findImportCycles moduleMap) (emitImportCycleError moduleMap)
-          moduleNameToId <- assignModuleIds moduleMap
-          exports <- buildExports moduleMap
-          topLevels <- buildTopLevels moduleNameToId exports moduleMap
-          resolveModule topLevels moduleNameToId exports moduleMap
+          (primModuleIds, primVars, primRules) <- preregisterPrimitives
+          userModuleIds <- assignModuleIds moduleMap
+          let allModuleIds = Map.union primModuleIds userModuleIds
+          userExports <- buildExports moduleMap
+          let allExports = Map.unionWith Map.union userExports (buildPrimExports primVars)
+          topLevels <- buildTopLevels allModuleIds allExports moduleMap
+          identifiedAsts <- resolveModule topLevels allModuleIds allExports moduleMap
+          pure (identifiedAsts, primVars, primRules)
+      (asts, primVars, primRules) = resolved
       result =
         mkIdentifierResult
           finalState.modules
@@ -2131,4 +2373,6 @@ identify moduleMap =
           finalState.requests
           finalState.constructors
           asts
+          primVars
+          primRules
    in (result, reverse finalState.errors)

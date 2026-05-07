@@ -41,11 +41,11 @@
       "kind": "blockPrim"
     },
     "18": {
-      "body": "type_of",
+      "body": "tuple_get",
       "kind": "blockPrim"
     },
     "19": {
-      "body": "to_string",
+      "body": "type_of",
       "kind": "blockPrim"
     },
     "2": {
@@ -53,10 +53,14 @@
       "kind": "blockPrim"
     },
     "20": {
+      "body": "to_string",
+      "kind": "blockPrim"
+    },
+    "21": {
       "body": 0,
       "kind": "blockConstructor"
     },
-    "21": {
+    "22": {
       "body": {
         "kind": "blockKindAgent",
         "parameters": [
@@ -81,7 +85,7 @@
               "arguments": [],
               "output": 3,
               "target": {
-                "block": 23,
+                "block": 24,
                 "kind": "callTargetBlock"
               }
             },
@@ -92,7 +96,7 @@
       },
       "kind": "blockUser"
     },
-    "22": {
+    "23": {
       "body": {
         "kind": "blockKindInline",
         "parameters": [],
@@ -101,11 +105,11 @@
       },
       "kind": "blockUser"
     },
-    "23": {
+    "24": {
       "body": {
         "arms": [
           {
-            "body": 22,
+            "body": 23,
             "pattern": {
               "body": [
                 0,
@@ -163,8 +167,8 @@
     }
   },
   "entries": {
-    "main.point": 20,
-    "main.project_x": 21
+    "main.point": 21,
+    "main.project_x": 22
   },
   "metadata": {
     "schemaVersion": 1
@@ -182,11 +186,12 @@
       "15": "prim:array_get",
       "16": "prim:array_length",
       "17": "prim:get_field",
-      "18": "prim:type_of",
-      "19": "prim:to_string",
+      "18": "prim:tuple_get",
+      "19": "prim:type_of",
       "2": "prim:mul",
-      "20": "point",
-      "21": "project_x",
+      "20": "prim:to_string",
+      "21": "point",
+      "22": "project_x",
       "3": "prim:div",
       "4": "prim:neg",
       "5": "prim:eq",

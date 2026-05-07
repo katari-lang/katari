@@ -70,9 +70,9 @@ happyPathSpec = describe "well-formed single-module input" $ do
   it "multi-line call argument list does NOT require trailing comma" $ do
     let src =
           mconcat
-            [ "agent add(a = a: integer, b = b: integer) -> integer { a + b }\n",
+            [ "agent myAdd(a = a: integer, b = b: integer) -> integer { a + b }\n",
               "agent main() -> integer {\n",
-              "  add(\n",
+              "  myAdd(\n",
               "    a = 1,\n",
               "    b = 2\n",
               "  )\n",

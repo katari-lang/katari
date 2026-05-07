@@ -41,11 +41,11 @@
       "kind": "blockPrim"
     },
     "18": {
-      "body": "type_of",
+      "body": "tuple_get",
       "kind": "blockPrim"
     },
     "19": {
-      "body": "to_string",
+      "body": "type_of",
       "kind": "blockPrim"
     },
     "2": {
@@ -53,6 +53,10 @@
       "kind": "blockPrim"
     },
     "20": {
+      "body": "to_string",
+      "kind": "blockPrim"
+    },
+    "21": {
       "body": {
         "kind": "blockKindAgent",
         "parameters": [],
@@ -102,7 +106,7 @@
     }
   },
   "entries": {
-    "main.main": 20
+    "main.main": 21
   },
   "metadata": {
     "schemaVersion": 1
@@ -120,10 +124,11 @@
       "15": "prim:array_get",
       "16": "prim:array_length",
       "17": "prim:get_field",
-      "18": "prim:type_of",
-      "19": "prim:to_string",
+      "18": "prim:tuple_get",
+      "19": "prim:type_of",
       "2": "prim:mul",
-      "20": "main",
+      "20": "prim:to_string",
+      "21": "main",
       "3": "prim:div",
       "4": "prim:neg",
       "5": "prim:eq",

@@ -201,7 +201,7 @@ stage1Spec = describe "Stage 1 — literals / arithmetic" $ do
     case calls ub of
       [c] -> do
         c.target `shouldBe` CallTargetBlock {block = negId}
-        map (.label) c.arguments `shouldBe` ["operand"]
+        map (.label) c.arguments `shouldBe` ["value"]
         c.output `shouldBe` ub.trailing
       _ -> expectationFailure "expected exactly one neg call"
     map (.value) (literalLoads ub) `shouldBe` [LiteralValueInteger 7]

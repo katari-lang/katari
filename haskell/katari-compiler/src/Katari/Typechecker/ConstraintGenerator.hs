@@ -62,10 +62,13 @@ import Katari.SourceSpan
 import Katari.Id
   ( ConstructorId,
     ModuleId,
+    QualifiedName (..),
     RequestId,
     TypeId (..),
     VariableId,
   )
+import Katari.Prim (PrimConstraintRule (..))
+import Katari.Prim qualified as Prim
 import Katari.Typechecker.Identifier
   ( ConstructorData (..),
     IdentifierResult (..),
@@ -256,7 +259,11 @@ data ConstraintContext = ConstraintContext
     -- handler. @next e@ inside a handler body flows into this. There is at
     -- most one in scope: 'NextStatement' is a lexically-scoped construct and
     -- always refers to the innermost handler.
-    contextEnclosingHandleNext :: Maybe TypeVariableId
+    contextEnclosingHandleNext :: Maybe TypeVariableId,
+    -- | Prim constraint-rule lookup, indexed by 'VariableId'. Populated
+    -- from 'IdentifierResult.primitiveRulesByVariableId' at the
+    -- pipeline entry. Empty for non-prim variables.
+    contextPrimRules :: Map VariableId PrimConstraintRule
   }
 
 type CG = ReaderT ConstraintContext (State ConstraintState)
@@ -275,8 +282,9 @@ initialContext ::
   Map TypeId TypeData ->
   Map RequestId RequestData ->
   Map ConstructorId ConstructorData ->
+  Map VariableId PrimConstraintRule ->
   ConstraintContext
-initialContext types requests constructors =
+initialContext types requests constructors primRules =
   ConstraintContext
     { contextIdentifiedTypes = types,
       contextIdentifiedRequests = requests,
@@ -291,7 +299,8 @@ initialContext types requests constructors =
       contextEnclosingRequests = Nothing,
       contextEnclosingForBreak = Nothing,
       contextEnclosingHandleBreak = Nothing,
-      contextEnclosingHandleNext = Nothing
+      contextEnclosingHandleNext = Nothing,
+      contextPrimRules = primRules
     }
 
 -- ---------------------------------------------------------------------------
@@ -1117,9 +1126,41 @@ walkArrayExpr ArrayExpression {elements, sourceSpan} = do
 walkCallExpr :: CallExpression Identified -> CG (Expression Constrained)
 walkCallExpr CallExpression {callee, arguments, sourceSpan} = do
   callee' <- walkExpression callee
-  let calleeType = constrainedExpressionType callee'
   arguments' <- mapM walkCallArgument arguments
-  let argSig =
+  -- Identifier desugars operators into calls whose callee is a prim
+  -- VariableExpression. Detect that here and route through the
+  -- prim-specific constraint rule instead of the generic call path,
+  -- so subtype-flavoured operator typing (e.g. @1 + 2 : Integer@) is
+  -- preserved.
+  primRule <- case callee' of
+    ExpressionVariable VariableExpression {name = NameRef {resolution = Just vid}} ->
+      asks (Map.lookup vid . (.contextPrimRules))
+    _ -> pure Nothing
+  resultType <- case primRule of
+    Just rule | rule /= PrimRuleSimple -> applyPrimRule rule arguments' sourceSpan
+    _ -> applyNormalCall callee' arguments' sourceSpan
+  pure
+    ( ExpressionCall
+        CallExpression
+          { callee = callee',
+            arguments = arguments',
+            sourceSpan = sourceSpan,
+            typeOf = resultType
+          }
+    )
+
+-- | Generic call constraint emission. Used when the callee is not a
+-- prim, or when the prim uses 'PrimRuleSimple' (in which case the prim's
+-- signature is pinned by 'bindPrimitiveTypes' and the standard call
+-- subtype constraint is sufficient).
+applyNormalCall ::
+  Expression Constrained ->
+  [CallArgument Constrained] ->
+  SourceSpan ->
+  CG (SemanticType Unresolved)
+applyNormalCall callee' arguments' sourceSpan = do
+  let calleeType = constrainedExpressionType callee'
+      argSig =
         Map.fromList
           [ (label.text, constrainedExpressionType value')
             | CallArgument {label, value = value'} <- arguments'
@@ -1129,15 +1170,65 @@ walkCallExpr CallExpression {callee, arguments, sourceSpan} = do
   let calleeEff = maybe emptyRequest singletonRequestVariable enclosing
       expected = SemanticTypeFunction argSig tResult calleeEff
   addTypeConstraint calleeType expected (ConstraintReason ReasonKindCallArgument sourceSpan)
-  pure
-    ( ExpressionCall
-        CallExpression
-          { callee = callee',
-            arguments = arguments',
-            sourceSpan = sourceSpan,
-            typeOf = tResult
-          }
-    )
+  pure tResult
+
+-- | Emit operator-flavoured constraints at a prim call site. The
+-- argument labels are pulled by name (@lhs@ / @rhs@ / @value@) — the
+-- Identifier desugar always produces these labels for operators, and
+-- 'PrimDefinition' fixes them for non-operator prims.
+applyPrimRule ::
+  PrimConstraintRule ->
+  [CallArgument Constrained] ->
+  SourceSpan ->
+  CG (SemanticType Unresolved)
+applyPrimRule rule arguments sourceSpan =
+  let bag =
+        Map.fromList
+          [ (label.text, constrainedExpressionType value')
+            | CallArgument {label, value = value'} <- arguments
+          ]
+      lhs = Map.findWithDefault SemanticTypeUnknown "lhs" bag
+      rhs = Map.findWithDefault SemanticTypeUnknown "rhs" bag
+      value_ = Map.findWithDefault SemanticTypeUnknown "value" bag
+      reasonBin = ConstraintReason ReasonKindBinaryOperator sourceSpan
+      reasonUn = ConstraintReason ReasonKindUnaryOperator sourceSpan
+   in case rule of
+        PrimRuleAddSubMul -> do
+          resultType <- freshTypeVar
+          addTypeConstraint lhs SemanticTypeNumber reasonBin
+          addTypeConstraint rhs SemanticTypeNumber reasonBin
+          addTypeConstraint lhs resultType reasonBin
+          addTypeConstraint rhs resultType reasonBin
+          addTypeConstraint SemanticTypeInteger resultType reasonBin
+          pure resultType
+        PrimRuleDivide -> do
+          resultType <- freshTypeVar
+          addTypeConstraint lhs SemanticTypeNumber reasonBin
+          addTypeConstraint rhs SemanticTypeNumber reasonBin
+          addTypeConstraint SemanticTypeNumber resultType reasonBin
+          pure resultType
+        PrimRuleEqLike -> pure SemanticTypeBoolean
+        PrimRuleCompareNumeric -> do
+          addTypeConstraint lhs SemanticTypeNumber reasonBin
+          addTypeConstraint rhs SemanticTypeNumber reasonBin
+          pure SemanticTypeBoolean
+        PrimRuleLogical -> do
+          addTypeConstraint lhs SemanticTypeBoolean reasonBin
+          addTypeConstraint rhs SemanticTypeBoolean reasonBin
+          pure SemanticTypeBoolean
+        PrimRuleConcat -> do
+          addTypeConstraint lhs SemanticTypeString reasonBin
+          addTypeConstraint rhs SemanticTypeString reasonBin
+          pure SemanticTypeString
+        PrimRuleNegate -> do
+          addTypeConstraint value_ SemanticTypeNumber reasonUn
+          pure SemanticTypeNumber
+        PrimRuleNot -> do
+          addTypeConstraint value_ SemanticTypeBoolean reasonUn
+          pure SemanticTypeBoolean
+        PrimRuleSimple ->
+          -- Caller filters PrimRuleSimple before invoking applyPrimRule.
+          pure SemanticTypeUnknown
 
 walkCallArgument :: CallArgument Identified -> CG (CallArgument Constrained)
 walkCallArgument CallArgument {label, value, sourceSpan} = do
@@ -1149,101 +1240,43 @@ walkCallArgument CallArgument {label, value, sourceSpan} = do
         sourceSpan = sourceSpan
       }
 
+-- | The Identifier pass desugars 'ExpressionBinaryOperator' /
+-- 'ExpressionUnaryOperator' into 'ExpressionCall' against the matching
+-- prim. Reaching this walker means an upstream invariant was violated
+-- (likely a phase-retag bug); surface as K9999.
 walkBinaryExpr :: BinaryOperatorExpression Identified -> CG (Expression Constrained)
-walkBinaryExpr BinaryOperatorExpression {operator, left, right, sourceSpan} = do
-  left' <- walkExpression left
-  right' <- walkExpression right
-  let lt = constrainedExpressionType left'
-      rt = constrainedExpressionType right'
-  resultType <- binaryOperatorConstraints operator lt rt sourceSpan
+walkBinaryExpr BinaryOperatorExpression {sourceSpan} = do
+  emitInternalError sourceSpan "ConstraintGenerator: BinaryOperator survived past Identifier desugar"
   pure
-    ( ExpressionBinaryOperator
-        BinaryOperatorExpression
-          { operator = operator,
-            left = left',
-            right = right',
+    ( ExpressionLiteral
+        LiteralExpression
+          { value = LiteralValueNull,
             sourceSpan = sourceSpan,
-            typeOf = resultType
+            typeOf = SemanticTypeNull
           }
     )
-
-binaryOperatorConstraints ::
-  BinaryOperator ->
-  SemanticType Unresolved ->
-  SemanticType Unresolved ->
-  SourceSpan ->
-  CG (SemanticType Unresolved)
-binaryOperatorConstraints operator lhs rhs sourceSpan = case operator of
-  BinaryOperatorAdd -> addSubMul
-  BinaryOperatorSubtract -> addSubMul
-  BinaryOperatorMultiply -> addSubMul
-  BinaryOperatorDivide -> divide
-  BinaryOperatorEqual -> noConstraintBoolean
-  BinaryOperatorNotEqual -> noConstraintBoolean
-  BinaryOperatorLessThan -> compareNumeric
-  BinaryOperatorLessOrEqual -> compareNumeric
-  BinaryOperatorGreaterThan -> compareNumeric
-  BinaryOperatorGreaterOrEqual -> compareNumeric
-  BinaryOperatorAnd -> logical
-  BinaryOperatorOr -> logical
-  BinaryOperatorConcat -> concatString
-  where
-    -- +, -, * : both operands must be numeric; result is at least the union
-    -- of the operand types floored at Integer.  No upper bound is imposed —
-    -- the call-site context will constrain further if needed.
-    --   integer + integer  →  tv = integer
-    --   number  + integer  →  tv = number
-    --   number  + number   →  tv = number
-    addSubMul = do
-      resultType <- freshTypeVar
-      addTypeConstraint lhs SemanticTypeNumber (ConstraintReason ReasonKindBinaryOperator sourceSpan)
-      addTypeConstraint rhs SemanticTypeNumber (ConstraintReason ReasonKindBinaryOperator sourceSpan)
-      addTypeConstraint lhs resultType (ConstraintReason ReasonKindBinaryOperator sourceSpan)
-      addTypeConstraint rhs resultType (ConstraintReason ReasonKindBinaryOperator sourceSpan)
-      addTypeConstraint SemanticTypeInteger resultType (ConstraintReason ReasonKindBinaryOperator sourceSpan)
-      pure resultType
-    -- / : result is always at least Number because division can produce
-    -- non-integer values (e.g. 1 / 3 = 0.333…).
-    divide = do
-      resultType <- freshTypeVar
-      addTypeConstraint lhs SemanticTypeNumber (ConstraintReason ReasonKindBinaryOperator sourceSpan)
-      addTypeConstraint rhs SemanticTypeNumber (ConstraintReason ReasonKindBinaryOperator sourceSpan)
-      addTypeConstraint SemanticTypeNumber resultType (ConstraintReason ReasonKindBinaryOperator sourceSpan)
-      pure resultType
-    noConstraintBoolean = pure SemanticTypeBoolean
-    compareNumeric = do
-      addTypeConstraint lhs SemanticTypeNumber (ConstraintReason ReasonKindBinaryOperator sourceSpan)
-      addTypeConstraint rhs SemanticTypeNumber (ConstraintReason ReasonKindBinaryOperator sourceSpan)
-      pure SemanticTypeBoolean
-    logical = do
-      addTypeConstraint lhs SemanticTypeBoolean (ConstraintReason ReasonKindBinaryOperator sourceSpan)
-      addTypeConstraint rhs SemanticTypeBoolean (ConstraintReason ReasonKindBinaryOperator sourceSpan)
-      pure SemanticTypeBoolean
-    concatString = do
-      addTypeConstraint lhs SemanticTypeString (ConstraintReason ReasonKindBinaryOperator sourceSpan)
-      addTypeConstraint rhs SemanticTypeString (ConstraintReason ReasonKindBinaryOperator sourceSpan)
-      pure SemanticTypeString
 
 walkUnaryExpr :: UnaryOperatorExpression Identified -> CG (Expression Constrained)
-walkUnaryExpr UnaryOperatorExpression {operator, operand, sourceSpan} = do
-  operand' <- walkExpression operand
-  let ot = constrainedExpressionType operand'
-  resultType <- case operator of
-    UnaryOperatorNegate -> do
-      addTypeConstraint ot SemanticTypeNumber (ConstraintReason ReasonKindUnaryOperator sourceSpan)
-      pure SemanticTypeNumber
-    UnaryOperatorNot -> do
-      addTypeConstraint ot SemanticTypeBoolean (ConstraintReason ReasonKindUnaryOperator sourceSpan)
-      pure SemanticTypeBoolean
+walkUnaryExpr UnaryOperatorExpression {sourceSpan} = do
+  emitInternalError sourceSpan "ConstraintGenerator: UnaryOperator survived past Identifier desugar"
   pure
-    ( ExpressionUnaryOperator
-        UnaryOperatorExpression
-          { operator = operator,
-            operand = operand',
+    ( ExpressionLiteral
+        LiteralExpression
+          { value = LiteralValueNull,
             sourceSpan = sourceSpan,
-            typeOf = resultType
+            typeOf = SemanticTypeNull
           }
     )
+
+-- | Surface a compiler-bug Diagnostic as a structural ConstraintError.
+-- The constraint generator's existing error type is narrow ('cyclic
+-- type synonym' only); for invariant violations we emit a K9999-flavoured
+-- 'TypeSynonymCycle' over a sentinel TypeId so the diagnostic at least
+-- propagates. Plumbing a richer error variant through is left for a
+-- follow-up; the operator-survival case only fires on a real bug.
+emitInternalError :: SourceSpan -> Text -> CG ()
+emitInternalError sourceSpan _msg =
+  emitError (ConstraintErrorTypeSynonymCycle sourceSpan (TypeId (-1)))
 
 walkIfExpr :: IfExpression Identified -> CG (Expression Constrained)
 walkIfExpr IfExpression {condition, thenBlock, elseBlock, sourceSpan} = do
@@ -1630,10 +1663,37 @@ generateConstraints result = case runState (runReaderT action context) initialSt
       finalState.stateErrors
     )
   where
-    context = initialContext result.identifiedTypes result.identifiedRequests result.identifiedConstructors
+    context =
+      initialContext
+        result.identifiedTypes
+        result.identifiedRequests
+        result.identifiedConstructors
+        result.primitiveRulesByVariableId
     action = do
       allocateAllVariables result
+      bindPrimitiveTypes result
       mapM walkOne (Map.toList result.moduleASTs)
     walkOne (mid, mod') = do
       mod'' <- walkModule mod'
       pure (mid, mod'')
+
+-- | Pin the type of every 'PrimRuleSimple' prim to its declared
+-- signature (lifted from 'Resolved' to 'Unresolved'). Operator-style
+-- prims with non-'Simple' rules get their type per call site via
+-- 'applyPrimRule'; their VariableId is left bound to the fresh type
+-- variable that 'allocateAllVariables' assigned.
+bindPrimitiveTypes :: IdentifierResult -> CG ()
+bindPrimitiveTypes result =
+  mapM_ bindOne Prim.primDefinitions
+  where
+    bindOne def =
+      let qname = QualifiedName {module_ = def.primModule, name = def.primName}
+       in case Map.lookup qname result.primitiveVariableIds of
+            Just vid | def.primConstraintRule == PrimRuleSimple -> do
+              tVar <- lookupVariable vid
+              let sig = liftResolvedToUnresolved def.primType
+              addEqTypeConstraint
+                sig
+                tVar
+                (ConstraintReason ReasonKindAgentSignature Prim.primSourceSpan)
+            _ -> pure ()

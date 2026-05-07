@@ -17,6 +17,7 @@ library:
     - Katari.Internal
     - Katari.Lexer
     - Katari.Parser
+    - Katari.Prim
     - Katari.Typechecker.Identifier
     - Katari.SemanticType
     - Katari.Typechecker.NormalizedType

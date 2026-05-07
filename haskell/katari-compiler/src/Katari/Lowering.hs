@@ -33,7 +33,9 @@ import Katari.Internal qualified as Internal
 import Katari.SourceSpan (SourceSpan)
 import Katari.Id (VariableId)
 import Katari.Id qualified as Id
-import Katari.Typechecker.Identifier (ConstructorData (..), IdentifierResult (..), RequestData (..), VariableData (..))
+import Katari.Prim (PrimDefinition (..))
+import Katari.Prim qualified as Prim
+import Katari.Typechecker.Identifier (ConstructorData (..), IdentifierResult (..), RequestData (..))
 import Katari.Typechecker.Zonker (ZonkResult (..))
 
 -- ===========================================================================
@@ -67,61 +69,11 @@ toDiagnostic = \case
 -- ===========================================================================
 -- Primitive table
 -- ===========================================================================
-
--- | Names of all primitive blocks. Block ids are assigned at the start of
--- lowering in a deterministic order (so test expectations are stable).
 --
--- Literals do not use prim blocks: they are emitted as 'StatementLoadLiteral'
--- statements that carry the value directly.
-primitiveNames :: [Text]
-primitiveNames =
-  [ -- arithmetic / comparison / logic
-    "add",
-    "sub",
-    "mul",
-    "div",
-    "neg",
-    "eq",
-    "ne",
-    "lt",
-    "le",
-    "gt",
-    "ge",
-    "and",
-    "or",
-    "not",
-    "concat",
-    -- aggregate construction / access
-    "array_get",
-    "array_length",
-    "get_field",
-    -- type
-    "type_of",
-    "to_string"
-  ]
-
--- | Map an 'AST.BinaryOperator' to its primitive name.
-binaryOpPrim :: AST.BinaryOperator -> Text
-binaryOpPrim = \case
-  AST.BinaryOperatorAdd -> "add"
-  AST.BinaryOperatorSubtract -> "sub"
-  AST.BinaryOperatorMultiply -> "mul"
-  AST.BinaryOperatorDivide -> "div"
-  AST.BinaryOperatorEqual -> "eq"
-  AST.BinaryOperatorNotEqual -> "ne"
-  AST.BinaryOperatorLessThan -> "lt"
-  AST.BinaryOperatorLessOrEqual -> "le"
-  AST.BinaryOperatorGreaterThan -> "gt"
-  AST.BinaryOperatorGreaterOrEqual -> "ge"
-  AST.BinaryOperatorAnd -> "and"
-  AST.BinaryOperatorOr -> "or"
-  AST.BinaryOperatorConcat -> "concat"
-
--- | Map an 'AST.UnaryOperator' to its primitive name.
-unaryOpPrim :: AST.UnaryOperator -> Text
-unaryOpPrim = \case
-  AST.UnaryOperatorNegate -> "neg"
-  AST.UnaryOperatorNot -> "not"
+-- All prim definitions and operator-name mappings live in 'Katari.Prim'.
+-- Lowering allocates one 'BlockPrim' block per prim and indexes them by
+-- the prim's pre-allocated 'VariableId' so call-site resolution flows
+-- through the standard top-level callable path.
 
 -- ===========================================================================
 -- Lowering monad
@@ -193,7 +145,10 @@ data LowerState = LowerState
     -- top-level callables are registered; surfaces in
     -- 'IRModule.entries'.
     lsEntries :: Map QualifiedName BlockId,
-    lsPrimBlockIds :: Map Text BlockId,
+    -- | Prim 'VariableId' → 'BlockId'. Populated by 'registerPrimitives'
+    -- alongside 'lsTopLevelBlocks' so the standard call-resolution
+    -- path treats prims uniformly with user-defined callables.
+    lsPrimBlockIds :: Map VariableId BlockId,
     -- | Statements for the block currently being lowered, stored in
     -- reverse order. 'emit' prepends; 'runWithFreshBuffer' saves/restores
     -- and reverses at the end.
@@ -383,15 +338,20 @@ resolveAsCallTarget canBeLocal resolution sourceSpan nameText = do
       v <- freshVarId Nothing
       pure (CallTargetValue {var = v})
 
--- | Resolve a primitive name to its 'BlockId'. The map is populated by
--- 'registerPrimitives' once at the start of lowering, so a missing entry
--- means the call site references a name that is not in 'primitiveNames'
--- — a compiler invariant violation, not a user error.
+-- | Resolve a root-prim name to its 'BlockId'. Used by lowering sites
+-- that emit prim calls directly (template / field-access / index-access
+-- desugaring), as opposed to call-syntax that flows through the standard
+-- callable path. A missing entry means the prim name is not registered
+-- in 'Katari.Prim.primDefinitions' — compiler invariant violation.
 primBlockId :: Text -> Lower BlockId
 primBlockId name = do
-  ids <- gets (.lsPrimBlockIds)
-  case Map.lookup name ids of
-    Just blockId -> pure blockId
+  primVars <- asks ((.primitiveVariableIds) . (.identifierResult))
+  case Map.lookup (QualifiedName "prim" name) primVars of
+    Just vid -> do
+      blocks <- gets (.lsPrimBlockIds)
+      case Map.lookup vid blocks of
+        Just blockId -> pure blockId
+        Nothing -> throwError (Internal.internalErrorNoSpan ("primBlockId: prim '" <> name <> "' VariableId not in lsPrimBlockIds"))
     Nothing -> throwError (Internal.internalErrorNoSpan ("primBlockId: unknown primitive " <> name))
 
 -- ===========================================================================
@@ -486,15 +446,33 @@ lowerProgramM moduleName zonkResult = do
             }
       }
 
--- | Allocate one 'BlockPrim' per primitive name so call sites can resolve
--- by name → BlockId.
+-- | Allocate one 'BlockPrim' per registered prim. Each prim block is
+-- also injected into 'lsTopLevelBlocks' so the regular call / closure
+-- resolution path can handle prims without a special case. Iteration
+-- follows 'Katari.Prim.primDefinitions' order so BlockId assignments
+-- are stable across builds (golden tests).
 registerPrimitives :: Lower ()
-registerPrimitives = mapM_ go primitiveNames
+registerPrimitives = do
+  primVars <- asks ((.primitiveVariableIds) . (.identifierResult))
+  mapM_ (registerOne primVars) Prim.primDefinitions
   where
-    go primName = do
-      blockId <- freshBlockId
-      recordBlock blockId (BlockPrim primName) (Just ("prim:" <> primName))
-      modify (\state -> state {lsPrimBlockIds = Map.insert primName blockId state.lsPrimBlockIds})
+    registerOne primVars def = do
+      let qname = QualifiedName def.primModule def.primName
+      case Map.lookup qname primVars of
+        Just vid -> do
+          blockId <- freshBlockId
+          recordBlock blockId (BlockPrim def.primName) (Just ("prim:" <> def.primName))
+          modify $ \state ->
+            state
+              { lsPrimBlockIds = Map.insert vid blockId state.lsPrimBlockIds,
+                lsTopLevelBlocks = Map.insert vid blockId state.lsTopLevelBlocks
+              }
+        Nothing ->
+          -- Identifier preregistered every prim; missing entry is a bug.
+          throwError
+            ( Internal.internalErrorNoSpan
+                ("registerPrimitives: prim '" <> def.primName <> "' missing from IdentifierResult")
+            )
 
 -- | Bind a top-level @VariableId@ to its callable @BlockId@.
 recordVarBlockId :: VariableId -> BlockId -> Lower ()
@@ -924,31 +902,21 @@ lowerExpr :: AST.Expression Zonked -> Lower VarId
 lowerExpr = \case
   AST.ExpressionLiteral lit -> lowerLiteral lit
   AST.ExpressionVariable variableExpression -> lowerVariable variableExpression
-  AST.ExpressionBinaryOperator binaryExpr -> do
-    lhs <- lowerExpr binaryExpr.left
-    rhs <- lowerExpr binaryExpr.right
-    out <- freshVarId Nothing
-    blockId <- primBlockId (binaryOpPrim binaryExpr.operator)
-    emit $
-      StatementCall
-        CallData
-          { target = CallTargetBlock {block = blockId},
-            arguments = [Arg "lhs" lhs, Arg "rhs" rhs],
-            output = Just out
-          }
-    pure out
-  AST.ExpressionUnaryOperator unaryExpr -> do
-    operand <- lowerExpr unaryExpr.operand
-    out <- freshVarId Nothing
-    blockId <- primBlockId (unaryOpPrim unaryExpr.operator)
-    emit $
-      StatementCall
-        CallData
-          { target = CallTargetBlock {block = blockId},
-            arguments = [Arg "operand" operand],
-            output = Just out
-          }
-    pure out
+  -- The Identifier pass desugars binary / unary operator expressions
+  -- into prim calls (e.g. @a + b@ → @add(lhs=a, rhs=b)@). Surviving
+  -- operator nodes here indicate an upstream invariant violation.
+  AST.ExpressionBinaryOperator binaryExpr ->
+    throwError
+      ( Internal.internalError
+          binaryExpr.sourceSpan
+          "Lowering: BinaryOperator survived past Identifier desugar"
+      )
+  AST.ExpressionUnaryOperator unaryExpr ->
+    throwError
+      ( Internal.internalError
+          unaryExpr.sourceSpan
+          "Lowering: UnaryOperator survived past Identifier desugar"
+      )
   AST.ExpressionCall callExpr -> lowerCall callExpr
   AST.ExpressionTuple tupleExpr -> lowerTupleExpr False tupleExpr.elements
   AST.ExpressionArray arrayExpr -> lowerArrayExpr False arrayExpr.elements
