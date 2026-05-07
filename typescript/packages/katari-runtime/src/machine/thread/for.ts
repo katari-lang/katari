@@ -258,7 +258,7 @@ export class ForThread extends ChildThread {
       iterableSnapshot: Value[];
     };
     const block = resolveBlockPayload(irModule, serialized.blockId, "blockFor");
-    writable.block = block.forBlock;
+    writable.block = block.body;
     writable.blockId = serialized.blockId;
     writable.currentIndex = serialized.currentIndex;
     writable.postCancelActions = new Map(serialized.postCancelActions);

@@ -102,7 +102,7 @@ export class MatchThread extends ChildThread {
       blockId: BlockId;
     };
     const block = resolveBlockPayload(irModule, serialized.blockId, "blockMatch");
-    writable.matchBlock = block.matchBlock;
+    writable.matchBlock = block.body;
     writable.blockId = serialized.blockId;
     return thread;
   }

@@ -29,14 +29,14 @@ function tryMatchInto(
       return true;
 
     case "matchPatternVariable":
-      bindOnce(bindings, pattern.contents, value);
+      bindOnce(bindings, pattern.body, value);
       return true;
 
     case "matchPatternLiteral":
-      return matchLiteral(pattern.contents, value);
+      return matchLiteral(pattern.body, value);
 
     case "matchPatternConstructor": {
-      const [ctorId, fieldPatterns] = pattern.contents;
+      const [ctorId, fieldPatterns] = pattern.body;
       if (value.kind !== "tagged" || value.ctorId !== ctorId) return false;
       for (const [fieldName, fieldPattern] of fieldPatterns) {
         const fieldValue = value.fields[fieldName];
@@ -48,9 +48,9 @@ function tryMatchInto(
 
     case "matchPatternTuple": {
       if (value.kind !== "tuple") return false;
-      if (value.elements.length !== pattern.contents.length) return false;
-      for (let i = 0; i < pattern.contents.length; i++) {
-        const subPattern = pattern.contents[i];
+      if (value.elements.length !== pattern.body.length) return false;
+      for (let i = 0; i < pattern.body.length; i++) {
+        const subPattern = pattern.body[i];
         const subValue = value.elements[i];
         if (subPattern === undefined || subValue === undefined) return false;
         if (!tryMatchInto(subPattern, subValue, bindings)) return false;

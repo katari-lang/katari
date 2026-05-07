@@ -85,8 +85,8 @@ export class UserThread extends ChildThread {
     if (stmt === undefined) {
       throw new Error(`UserThread.onChildDone: no statement at callId ${callId}`);
     }
-    if (stmt.kind === "statementCall" && stmt.contents.output !== undefined) {
-      setValueInScope(machine, this.scopeId, stmt.contents.output, value);
+    if (stmt.kind === "statementCall" && stmt.body.output !== undefined) {
+      setValueInScope(machine, this.scopeId, stmt.body.output, value);
     }
     this.runStatements(machine);
   }
@@ -105,20 +105,20 @@ export class UserThread extends ChildThread {
         case "statementCall": {
           const callId = this.pc;
           this.pc++;
-          const args = resolveArgs(machine, this.scopeId, stmt.contents);
-          this.pushCallEvent(machine, callId, stmt.contents, args);
+          const args = resolveArgs(machine, this.scopeId, stmt.body);
+          this.pushCallEvent(machine, callId, stmt.body, args);
           return; // wait for child completion
         }
 
         case "statementLoadLiteral": {
-          const { output, value } = stmt.contents;
+          const { output, value } = stmt.body;
           setValueInScope(machine, this.scopeId, output, literalToValue(value));
           this.pc++;
           continue;
         }
 
         case "statementMakeClosure": {
-          const { output, block } = stmt.contents;
+          const { output, block } = stmt.body;
           setValueInScope(machine, this.scopeId, output, {
             kind: "closure",
             blockId: block,
@@ -135,7 +135,7 @@ export class UserThread extends ChildThread {
           // patterns, `then(p) { ... }` clauses, and for-loop element
           // patterns. The pattern is irrefutable (Maranget exhaustiveness,
           // K0291), so a null result here indicates a compiler bug.
-          const { source, pattern } = stmt.contents;
+          const { source, pattern } = stmt.body;
           const incoming = getValueFromScope(machine, this.scopeId, source);
           const bindings = tryMatch(pattern, incoming);
           if (bindings === null) {
@@ -151,8 +151,8 @@ export class UserThread extends ChildThread {
         }
 
         case "statementExit": {
-          const exitValue = getValueFromScope(machine, this.scopeId, stmt.contents.value);
-          const exitKind = stmt.contents.exitKind;
+          const exitValue = getValueFromScope(machine, this.scopeId, stmt.body.value);
+          const exitKind = stmt.body.exitKind;
           // Direct delivery to the registered boundary. The boundary cancels
           // its remaining children and emits done with `exitValue`. Bypasses
           // any intermediate `then` blocks.
@@ -177,7 +177,7 @@ export class UserThread extends ChildThread {
           // intermediate `then` blocks. Modifiers are pre-evaluated here
           // (Option A) so the boundary doesn't need to read the source's
           // scope to apply them.
-          const { contKind, value, modifiers } = stmt.contents;
+          const { contKind, value, modifiers } = stmt.body;
           const target = this.boundaries[contKind];
           if (target === null) {
             throw new Error(

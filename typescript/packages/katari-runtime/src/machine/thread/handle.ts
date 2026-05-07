@@ -372,7 +372,7 @@ export class HandleThread extends ChildThread {
       nextCallId: CallId;
     };
     const block = resolveBlockPayload(irModule, serialized.blockId, "blockHandle");
-    writable.block = block.handleBlock;
+    writable.block = block.body;
     writable.blockId = serialized.blockId;
     writable.childRoles = new Map(); // filled by link
     writable.pendingActions = []; // filled by link

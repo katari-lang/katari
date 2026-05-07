@@ -33,7 +33,7 @@ function brokenCallIR(): IRModule {
           // Call blockId 999 — no such block.
           {
             kind: "statementCall",
-            contents: {
+            body: {
               target: { kind: "callTargetBlock", block: 999 },
               arguments: [],
               output: 0 as VarId,
@@ -41,7 +41,7 @@ function brokenCallIR(): IRModule {
           },
           {
             kind: "statementExit",
-            contents: { exitKind: "exitKindReturn", value: 0 as VarId },
+            body: { exitKind: "exitKindReturn", value: 0 as VarId },
           },
         ],
       },

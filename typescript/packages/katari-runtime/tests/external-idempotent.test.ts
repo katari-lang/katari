@@ -52,7 +52,7 @@ function pausesOnExternalIR(): IRModule {
         statements: [
           {
             kind: "statementCall",
-            contents: {
+            body: {
               target: { kind: "callTargetBlock", block: 1 },
               arguments: [],
               output: 0 as VarId,
@@ -60,14 +60,14 @@ function pausesOnExternalIR(): IRModule {
           },
           {
             kind: "statementExit",
-            contents: { exitKind: "exitKindReturn", value: 0 as VarId },
+            body: { exitKind: "exitKindReturn", value: 0 as VarId },
           },
         ],
       },
     },
     1: {
       kind: "blockExternal",
-      externalName: { module_: "test", name: "ext_call" },
+      body: { module_: "test", name: "ext_call" },
     },
   };
   return makeIR(blocks, "main", 0);

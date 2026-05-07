@@ -15,14 +15,14 @@ export function literalReturnIR(literal: string, irName = "test"): IRModule {
         statements: [
           {
             kind: "statementLoadLiteral",
-            contents: {
+            body: {
               output: 0 as VarId,
               value: { kind: "literalValueString", string: literal },
             },
           },
           {
             kind: "statementExit",
-            contents: { exitKind: "exitKindReturn", value: 0 as VarId },
+            body: { exitKind: "exitKindReturn", value: 0 as VarId },
           },
         ],
       },
@@ -50,7 +50,7 @@ export function pausesOnExternalIR(irName = "test"): IRModule {
         statements: [
           {
             kind: "statementCall",
-            contents: {
+            body: {
               target: { kind: "callTargetBlock", block: 1 },
               arguments: [],
               output: 0 as VarId,
@@ -58,14 +58,14 @@ export function pausesOnExternalIR(irName = "test"): IRModule {
           },
           {
             kind: "statementExit",
-            contents: { exitKind: "exitKindReturn", value: 0 as VarId },
+            body: { exitKind: "exitKindReturn", value: 0 as VarId },
           },
         ],
       },
     },
     1: {
       kind: "blockExternal",
-      externalName: { module_: irName, name: "ext_call" },
+      body: { module_: irName, name: "ext_call" },
     },
   };
   return {

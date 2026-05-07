@@ -94,7 +94,7 @@ describe("MachineSnapshot round-trip", () => {
           statements: [
             {
               kind: "statementCall",
-              contents: {
+              body: {
                 target: { kind: "callTargetBlock", block: 1 },
                 arguments: [],
                 output: 0 as VarId,
@@ -102,14 +102,14 @@ describe("MachineSnapshot round-trip", () => {
             },
             {
               kind: "statementExit",
-              contents: { exitKind: "exitKindReturn", value: 0 as VarId },
+              body: { exitKind: "exitKindReturn", value: 0 as VarId },
             },
           ],
         },
       },
       1: {
         kind: "blockExternal",
-        externalName: { module_: "test", name: "ext_call" },
+        body: { module_: "test", name: "ext_call" },
       },
     };
     const ir = makeIR(blocks, "main", 0);
@@ -165,14 +165,14 @@ describe("MachineSnapshot round-trip", () => {
           statements: [
             {
               kind: "statementLoadLiteral",
-              contents: {
+              body: {
                 output: 0 as VarId,
                 value: { kind: "literalValueString", string: "fresh" },
               },
             },
             {
               kind: "statementExit",
-              contents: { exitKind: "exitKindReturn", value: 0 as VarId },
+              body: { exitKind: "exitKindReturn", value: 0 as VarId },
             },
           ],
         },

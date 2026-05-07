@@ -88,7 +88,7 @@ describe("handler / request system", () => {
           statements: [
             {
               kind: "statementCall",
-              contents: {
+              body: {
                 target: { kind: "callTargetBlock", block: 1 },
                 arguments: [],
                 output: 0 as VarId,
@@ -96,14 +96,14 @@ describe("handler / request system", () => {
             },
             {
               kind: "statementExit",
-              contents: { exitKind: "exitKindReturn", value: 0 as VarId },
+              body: { exitKind: "exitKindReturn", value: 0 as VarId },
             },
           ],
         },
       },
       1: {
         kind: "blockHandle",
-        handleBlock: {
+        body: {
           parallel: false,
           stateInits: [],
           body: 2,
@@ -118,7 +118,7 @@ describe("handler / request system", () => {
           statements: [
             {
               kind: "statementCall",
-              contents: {
+              body: {
                 target: { kind: "callTargetBlock", block: 4 },
                 arguments: [],
                 output: 1 as VarId,
@@ -136,19 +136,19 @@ describe("handler / request system", () => {
           statements: [
             {
               kind: "statementLoadLiteral",
-              contents: {
+              body: {
                 output: 2 as VarId,
                 value: { kind: "literalValueString", string: "hello" },
               },
             },
             {
               kind: "statementExit",
-              contents: { exitKind: "exitKindBreak", value: 2 as VarId },
+              body: { exitKind: "exitKindBreak", value: 2 as VarId },
             },
           ],
         },
       },
-      4: { kind: "blockRequest", reqId: 0 as ReqId },
+      4: { kind: "blockRequest", body: 0 as ReqId },
     };
     const ir = makeIR(blocks, "main", 0);
     const machine = createMachine(ir);
@@ -224,14 +224,14 @@ describe("handler / request system", () => {
           statements: [
             {
               kind: "statementLoadLiteral",
-              contents: {
+              body: {
                 output: 20 as VarId,
                 value: { kind: "literalValueInteger", integer: 0 },
               },
             },
             {
               kind: "statementCall",
-              contents: {
+              body: {
                 target: { kind: "callTargetBlock", block: 1 },
                 arguments: [],
                 output: 0 as VarId,
@@ -239,14 +239,14 @@ describe("handler / request system", () => {
             },
             {
               kind: "statementExit",
-              contents: { exitKind: "exitKindReturn", value: 0 as VarId },
+              body: { exitKind: "exitKindReturn", value: 0 as VarId },
             },
           ],
         },
       },
       1: {
         kind: "blockHandle",
-        handleBlock: {
+        body: {
           parallel: false,
           stateInits: [[10 as VarId, 20 as VarId]],
           body: 2,
@@ -261,7 +261,7 @@ describe("handler / request system", () => {
           statements: [
             {
               kind: "statementCall",
-              contents: {
+              body: {
                 target: { kind: "callTargetBlock", block: 4 },
                 arguments: [],
                 output: 30 as VarId,
@@ -269,7 +269,7 @@ describe("handler / request system", () => {
             },
             {
               kind: "statementCall",
-              contents: {
+              body: {
                 target: { kind: "callTargetBlock", block: 4 },
                 arguments: [],
                 output: 31 as VarId,
@@ -277,7 +277,7 @@ describe("handler / request system", () => {
             },
             {
               kind: "statementCall",
-              contents: {
+              body: {
                 target: { kind: "callTargetBlock", block: 4 },
                 arguments: [],
                 output: 32 as VarId,
@@ -295,14 +295,14 @@ describe("handler / request system", () => {
           statements: [
             {
               kind: "statementLoadLiteral",
-              contents: {
+              body: {
                 output: 40 as VarId,
                 value: { kind: "literalValueInteger", integer: 1 },
               },
             },
             {
               kind: "statementCall",
-              contents: {
+              body: {
                 target: { kind: "callTargetBlock", block: 5 },
                 arguments: [
                   { label: "left", var: 10 as VarId },
@@ -313,7 +313,7 @@ describe("handler / request system", () => {
             },
             {
               kind: "statementCont",
-              contents: {
+              body: {
                 contKind: "contKindNext",
                 value: 10 as VarId,
                 modifiers: [[10 as VarId, 41 as VarId]],
@@ -322,8 +322,8 @@ describe("handler / request system", () => {
           ],
         },
       },
-      4: { kind: "blockRequest", reqId: 0 as ReqId },
-      5: { kind: "blockPrim", name: "add" },
+      4: { kind: "blockRequest", body: 0 as ReqId },
+      5: { kind: "blockPrim", body: "add" },
     };
     const ir = makeIR(blocks, "counter", 0);
     const machine = createMachine(ir);

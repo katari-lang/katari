@@ -187,22 +187,22 @@ function createThreadFromBlock(
     case "blockUser":
       return new UserThread(machine, init, block.body, blockId, args);
     case "blockPrim":
-      return new PrimThread(init, block.name, args);
-    case "blockCtor":
-      return new CtorThread(init, block.ctorId, args);
+      return new PrimThread(init, block.body, args);
+    case "blockConstructor":
+      return new CtorThread(init, block.body, args);
     case "blockExternal":
-      return new ExternalThread(init, block.externalName, args);
+      return new ExternalThread(init, block.body, args);
     case "blockMatch":
-      return new MatchThread(init, block.matchBlock, blockId);
+      return new MatchThread(init, block.body, blockId);
     case "blockFor":
-      return new ForThread(machine, init, block.forBlock, blockId);
+      return new ForThread(machine, init, block.body, blockId);
     case "blockHandle":
-      return new HandleThread(machine, init, block.handleBlock, blockId);
+      return new HandleThread(machine, init, block.body, blockId);
     case "blockTuple":
-      return new TupleThread(init, block.tupleBlock, blockId);
+      return new TupleThread(init, block.body, blockId);
     case "blockArray":
-      return new ArrayThread(init, block.arrayBlock, blockId);
+      return new ArrayThread(init, block.body, blockId);
     case "blockRequest":
-      return new RequestThread(init, block.reqId, args);
+      return new RequestThread(init, block.body, args);
   }
 }

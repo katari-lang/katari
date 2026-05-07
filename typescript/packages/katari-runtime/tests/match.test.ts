@@ -64,7 +64,7 @@ function armReturningString(
       statements: [
         {
           kind: "statementLoadLiteral",
-          contents: {
+          body: {
             output: varBase as VarId,
             value: { kind: "literalValueString", string: s },
           },
@@ -93,7 +93,7 @@ describe("MatchThread", () => {
           statements: [
             {
               kind: "statementCall",
-              contents: {
+              body: {
                 target: { kind: "callTargetBlock", block: 1 },
                 arguments: [],
                 output: 2 as VarId,
@@ -101,27 +101,27 @@ describe("MatchThread", () => {
             },
             {
               kind: "statementExit",
-              contents: { exitKind: "exitKindReturn", value: 2 as VarId },
+              body: { exitKind: "exitKindReturn", value: 2 as VarId },
             },
           ],
         },
       },
       1: {
         kind: "blockMatch",
-        matchBlock: {
+        body: {
           subject: 1 as VarId,
           arms: [
             {
               pattern: {
                 kind: "matchPatternLiteral",
-                contents: { kind: "literalValueInteger", integer: 1 },
+                body: { kind: "literalValueInteger", integer: 1 },
               },
               body: 10,
             },
             {
               pattern: {
                 kind: "matchPatternLiteral",
-                contents: { kind: "literalValueInteger", integer: 2 },
+                body: { kind: "literalValueInteger", integer: 2 },
               },
               body: 11,
             },
@@ -176,7 +176,7 @@ describe("MatchThread", () => {
           statements: [
             {
               kind: "statementCall",
-              contents: {
+              body: {
                 target: { kind: "callTargetBlock", block: 1 },
                 arguments: [],
                 output: 2 as VarId,
@@ -184,20 +184,20 @@ describe("MatchThread", () => {
             },
             {
               kind: "statementExit",
-              contents: { exitKind: "exitKindReturn", value: 2 as VarId },
+              body: { exitKind: "exitKindReturn", value: 2 as VarId },
             },
           ],
         },
       },
       1: {
         kind: "blockMatch",
-        matchBlock: {
+        body: {
           subject: 1 as VarId,
           arms: [
             {
               pattern: {
                 kind: "matchPatternConstructor",
-                contents: [
+                body: [
                   77 as CtorId,
                   [],
                 ],
@@ -236,7 +236,7 @@ describe("MatchThread", () => {
           statements: [
             {
               kind: "statementCall",
-              contents: {
+              body: {
                 target: { kind: "callTargetBlock", block: 1 },
                 arguments: [],
                 output: 2 as VarId,
@@ -244,18 +244,18 @@ describe("MatchThread", () => {
             },
             {
               kind: "statementExit",
-              contents: { exitKind: "exitKindReturn", value: 2 as VarId },
+              body: { exitKind: "exitKindReturn", value: 2 as VarId },
             },
           ],
         },
       },
       1: {
         kind: "blockMatch",
-        matchBlock: {
+        body: {
           subject: 1 as VarId,
           arms: [
             {
-              pattern: { kind: "matchPatternVariable", contents: 9 as VarId },
+              pattern: { kind: "matchPatternVariable", body: 9 as VarId },
               body: 10,
             },
           ],
@@ -291,7 +291,7 @@ describe("MatchThread", () => {
           statements: [
             {
               kind: "statementCall",
-              contents: {
+              body: {
                 target: { kind: "callTargetBlock", block: 1 },
                 arguments: [],
                 output: 2 as VarId,
@@ -299,20 +299,20 @@ describe("MatchThread", () => {
             },
             {
               kind: "statementExit",
-              contents: { exitKind: "exitKindReturn", value: 2 as VarId },
+              body: { exitKind: "exitKindReturn", value: 2 as VarId },
             },
           ],
         },
       },
       1: {
         kind: "blockMatch",
-        matchBlock: {
+        body: {
           subject: 1 as VarId,
           arms: [
             {
               pattern: {
                 kind: "matchPatternLiteral",
-                contents: { kind: "literalValueInteger", integer: 5 },
+                body: { kind: "literalValueInteger", integer: 5 },
               },
               body: 10,
             },

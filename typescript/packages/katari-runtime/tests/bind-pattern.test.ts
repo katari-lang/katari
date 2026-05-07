@@ -77,7 +77,7 @@ describe("tryMatch (pattern module)", () => {
   it("matchPatternVariable binds the value", () => {
     const pat: MatchPattern = {
       kind: "matchPatternVariable",
-      contents: 7 as VarId,
+      body: 7 as VarId,
     };
     const r = tryMatch(pat, { kind: "number", value: 42 });
     expect(r).not.toBeNull();
@@ -87,9 +87,9 @@ describe("tryMatch (pattern module)", () => {
   it("matchPatternTuple destructures by index", () => {
     const pat: MatchPattern = {
       kind: "matchPatternTuple",
-      contents: [
-        { kind: "matchPatternVariable", contents: 1 as VarId },
-        { kind: "matchPatternVariable", contents: 2 as VarId },
+      body: [
+        { kind: "matchPatternVariable", body: 1 as VarId },
+        { kind: "matchPatternVariable", body: 2 as VarId },
       ],
     };
     const value: Value = {
@@ -108,9 +108,9 @@ describe("tryMatch (pattern module)", () => {
   it("matchPatternTuple returns null on length mismatch", () => {
     const pat: MatchPattern = {
       kind: "matchPatternTuple",
-      contents: [
-        { kind: "matchPatternVariable", contents: 1 as VarId },
-        { kind: "matchPatternVariable", contents: 2 as VarId },
+      body: [
+        { kind: "matchPatternVariable", body: 1 as VarId },
+        { kind: "matchPatternVariable", body: 2 as VarId },
       ],
     };
     const value: Value = {
@@ -123,11 +123,11 @@ describe("tryMatch (pattern module)", () => {
   it("matchPatternConstructor matches ctorId + field patterns", () => {
     const pat: MatchPattern = {
       kind: "matchPatternConstructor",
-      contents: [
+      body: [
         9 as CtorId,
         [
-          ["fst", { kind: "matchPatternVariable", contents: 1 as VarId }],
-          ["snd", { kind: "matchPatternVariable", contents: 2 as VarId }],
+          ["fst", { kind: "matchPatternVariable", body: 1 as VarId }],
+          ["snd", { kind: "matchPatternVariable", body: 2 as VarId }],
         ],
       ],
     };
@@ -148,7 +148,7 @@ describe("tryMatch (pattern module)", () => {
   it("matchPatternConstructor rejects different ctorId", () => {
     const pat: MatchPattern = {
       kind: "matchPatternConstructor",
-      contents: [9 as CtorId, []],
+      body: [9 as CtorId, []],
     };
     expect(
       tryMatch(pat, { kind: "tagged", ctorId: 10 as CtorId, fields: {} }),
@@ -159,20 +159,20 @@ describe("tryMatch (pattern module)", () => {
     // pattern: Pair { fst = (a, b), snd = c }
     const pat: MatchPattern = {
       kind: "matchPatternConstructor",
-      contents: [
+      body: [
         1 as CtorId,
         [
           [
             "fst",
             {
               kind: "matchPatternTuple",
-              contents: [
-                { kind: "matchPatternVariable", contents: 1 as VarId },
-                { kind: "matchPatternVariable", contents: 2 as VarId },
+              body: [
+                { kind: "matchPatternVariable", body: 1 as VarId },
+                { kind: "matchPatternVariable", body: 2 as VarId },
               ],
             },
           ],
-          ["snd", { kind: "matchPatternVariable", contents: 3 as VarId }],
+          ["snd", { kind: "matchPatternVariable", body: 3 as VarId }],
         ],
       ],
     };
@@ -202,9 +202,9 @@ describe("tryMatch (pattern module)", () => {
     // pattern: (x, x) — VarId 1 bound twice
     const pat: MatchPattern = {
       kind: "matchPatternTuple",
-      contents: [
-        { kind: "matchPatternVariable", contents: 1 as VarId },
-        { kind: "matchPatternVariable", contents: 1 as VarId },
+      body: [
+        { kind: "matchPatternVariable", body: 1 as VarId },
+        { kind: "matchPatternVariable", body: 1 as VarId },
       ],
     };
     const value: Value = {
@@ -220,7 +220,7 @@ describe("tryMatch (pattern module)", () => {
   it("literal pattern matches by value", () => {
     const pat: MatchPattern = {
       kind: "matchPatternLiteral",
-      contents: { kind: "literalValueInteger", integer: 5 },
+      body: { kind: "literalValueInteger", integer: 5 },
     };
     expect(tryMatch(pat, { kind: "number", value: 5 })).not.toBeNull();
     expect(tryMatch(pat, { kind: "number", value: 6 })).toBeNull();
@@ -249,24 +249,24 @@ describe("statementBindPattern (UserThread)", () => {
           statements: [
             {
               kind: "statementLoadLiteral",
-              contents: {
+              body: {
                 output: 0 as VarId,
                 value: { kind: "literalValueString", string: "hi" },
               },
             },
             {
               kind: "statementBindPattern",
-              contents: {
+              body: {
                 source: 0 as VarId,
                 pattern: {
                   kind: "matchPatternVariable",
-                  contents: 1 as VarId,
+                  body: 1 as VarId,
                 },
               },
             },
             {
               kind: "statementExit",
-              contents: { exitKind: "exitKindReturn", value: 1 as VarId },
+              body: { exitKind: "exitKindReturn", value: 1 as VarId },
             },
           ],
         },
@@ -293,21 +293,21 @@ describe("statementBindPattern (UserThread)", () => {
           statements: [
             {
               kind: "statementLoadLiteral",
-              contents: {
+              body: {
                 output: 0 as VarId,
                 value: { kind: "literalValueString", string: "kept" },
               },
             },
             {
               kind: "statementBindPattern",
-              contents: {
+              body: {
                 source: 0 as VarId,
                 pattern: { kind: "matchPatternAny" },
               },
             },
             {
               kind: "statementExit",
-              contents: { exitKind: "exitKindReturn", value: 0 as VarId },
+              body: { exitKind: "exitKindReturn", value: 0 as VarId },
             },
           ],
         },
@@ -337,20 +337,20 @@ describe("statementBindPattern (UserThread)", () => {
           statements: [
             {
               kind: "statementBindPattern",
-              contents: {
+              body: {
                 source: 10 as VarId,
                 pattern: {
                   kind: "matchPatternTuple",
-                  contents: [
-                    { kind: "matchPatternVariable", contents: 1 as VarId },
-                    { kind: "matchPatternVariable", contents: 2 as VarId },
+                  body: [
+                    { kind: "matchPatternVariable", body: 1 as VarId },
+                    { kind: "matchPatternVariable", body: 2 as VarId },
                   ],
                 },
               },
             },
             {
               kind: "statementExit",
-              contents: { exitKind: "exitKindReturn", value: 2 as VarId },
+              body: { exitKind: "exitKindReturn", value: 2 as VarId },
             },
           ],
         },
@@ -385,25 +385,25 @@ describe("statementBindPattern (UserThread)", () => {
           statements: [
             {
               kind: "statementBindPattern",
-              contents: {
+              body: {
                 source: 10 as VarId,
                 pattern: {
                   kind: "matchPatternConstructor",
-                  contents: [
+                  body: [
                     42 as CtorId,
                     [
                       [
                         "first",
                         {
                           kind: "matchPatternVariable",
-                          contents: 1 as VarId,
+                          body: 1 as VarId,
                         },
                       ],
                       [
                         "second",
                         {
                           kind: "matchPatternVariable",
-                          contents: 2 as VarId,
+                          body: 2 as VarId,
                         },
                       ],
                     ],
@@ -413,7 +413,7 @@ describe("statementBindPattern (UserThread)", () => {
             },
             {
               kind: "statementExit",
-              contents: { exitKind: "exitKindReturn", value: 2 as VarId },
+              body: { exitKind: "exitKindReturn", value: 2 as VarId },
             },
           ],
         },
@@ -449,20 +449,20 @@ describe("statementBindPattern (UserThread)", () => {
           statements: [
             {
               kind: "statementBindPattern",
-              contents: {
+              body: {
                 source: 10 as VarId,
                 pattern: {
                   kind: "matchPatternConstructor",
-                  contents: [
+                  body: [
                     1 as CtorId,
                     [
                       [
                         "fst",
                         {
                           kind: "matchPatternTuple",
-                          contents: [
-                            { kind: "matchPatternVariable", contents: 1 as VarId },
-                            { kind: "matchPatternVariable", contents: 2 as VarId },
+                          body: [
+                            { kind: "matchPatternVariable", body: 1 as VarId },
+                            { kind: "matchPatternVariable", body: 2 as VarId },
                           ],
                         },
                       ],
@@ -470,7 +470,7 @@ describe("statementBindPattern (UserThread)", () => {
                         "snd",
                         {
                           kind: "matchPatternVariable",
-                          contents: 3 as VarId,
+                          body: 3 as VarId,
                         },
                       ],
                     ],
@@ -480,7 +480,7 @@ describe("statementBindPattern (UserThread)", () => {
             },
             {
               kind: "statementExit",
-              contents: { exitKind: "exitKindReturn", value: 3 as VarId },
+              body: { exitKind: "exitKindReturn", value: 3 as VarId },
             },
           ],
         },
@@ -527,24 +527,24 @@ describe("statementBindPattern (UserThread)", () => {
           statements: [
             {
               kind: "statementLoadLiteral",
-              contents: {
+              body: {
                 output: 0 as VarId,
                 value: { kind: "literalValueString", string: "x" },
               },
             },
             {
               kind: "statementBindPattern",
-              contents: {
+              body: {
                 source: 0 as VarId,
                 pattern: {
                   kind: "matchPatternLiteral",
-                  contents: { kind: "literalValueString", string: "y" },
+                  body: { kind: "literalValueString", string: "y" },
                 },
               },
             },
             {
               kind: "statementExit",
-              contents: { exitKind: "exitKindReturn", value: 0 as VarId },
+              body: { exitKind: "exitKindReturn", value: 0 as VarId },
             },
           ],
         },

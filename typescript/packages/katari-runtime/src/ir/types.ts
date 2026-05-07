@@ -2,10 +2,18 @@
 //
 // JSON encoding follows IR.hs Aeson options:
 //   irOptions  : record fields as-is, omit Nothing (→ optional fields)
-//   sumOptions : TaggedObject { "kind": tag, ...rest } — tag = lowerHead(constructor) = camelCase
+//   sumOptions : TaggedObject { "kind": tag, "body": payload } — tag = lowerHead(constructor) = camelCase
 //     - GADT record constructors  → fields merged flat into object
-//     - GADT positional ctors     → single "contents" key
+//     - GADT positional ctors (single-arg) → single "body" key
+//     - GADT positional ctors (multi-arg)  → "body" is a JSON array
 //   enumOptions: bare camelCase string (UntaggedValue, constructorTagModifier = lowerHead)
+//
+// **Important**: the sum-payload field name is `body`, *not* `contents` (the
+// Haskell side overrides it via `TaggedObject "kind" "body"` in `sumOptions`).
+// Older mirrors of this file used `contents` / individual field names like
+// `name`/`matchBlock`/`forBlock`; that was wrong and prevented compiler-output
+// IR from being executed by the runtime. All payload fields below are
+// uniformly `body` for sum types.
 
 // ─── Identifiers ─────────────────────────────────────────────────────────────
 
@@ -107,19 +115,25 @@ export type UserBlock = {
   trailing?: VarId;
 };
 
-// ─── Block (sumOptions, GADT record ctors → flat) ────────────────────────────
+// ─── Block (sumOptions, "body" payload key) ────────────────────────────────
 
 export type Block =
   | { kind: "blockUser"; body: UserBlock }
-  | { kind: "blockPrim"; name: string }
-  | { kind: "blockRequest"; reqId: ReqId }
-  | { kind: "blockExternal"; externalName: ExternalName }
-  | { kind: "blockCtor"; ctorId: CtorId }
-  | { kind: "blockMatch"; matchBlock: MatchBlock }
-  | { kind: "blockFor"; forBlock: ForBlock }
-  | { kind: "blockHandle"; handleBlock: HandleBlock }
-  | { kind: "blockTuple"; tupleBlock: TupleBlock }
-  | { kind: "blockArray"; arrayBlock: ArrayBlock };
+  | { kind: "blockPrim"; body: string }
+  | { kind: "blockRequest"; body: ReqId }
+  | { kind: "blockExternal"; body: ExternalName }
+  /**
+   * Constructor block. Note the kind is `blockConstructor` (matching
+   * Haskell's `BlockConstructor` ctor name); earlier drafts of this
+   * mirror used `blockCtor`, which the Aeson-generated JSON never
+   * actually produced.
+   */
+  | { kind: "blockConstructor"; body: CtorId }
+  | { kind: "blockMatch"; body: MatchBlock }
+  | { kind: "blockFor"; body: ForBlock }
+  | { kind: "blockHandle"; body: HandleBlock }
+  | { kind: "blockTuple"; body: TupleBlock }
+  | { kind: "blockArray"; body: ArrayBlock };
 
 // ─── Arg (irOptions → flat record) ───────────────────────────────────────────
 
@@ -143,17 +157,18 @@ export type CallTarget =
   | { kind: "callTargetBlock"; block: BlockId }
   | { kind: "callTargetValue"; var: VarId };
 
-// ─── MatchPattern (sumOptions, GADT positional ctors → contents) ─────────────
+// ─── MatchPattern (sumOptions, "body" payload key) ─────────────────────────
 
 export type MatchPattern =
   | { kind: "matchPatternAny" }
-  | { kind: "matchPatternVariable"; contents: VarId }
-  | { kind: "matchPatternLiteral"; contents: LiteralValue }
+  | { kind: "matchPatternVariable"; body: VarId }
+  | { kind: "matchPatternLiteral"; body: LiteralValue }
   | {
       kind: "matchPatternConstructor";
-      contents: [CtorId, [string, MatchPattern][]];
+      // Multi-arg GADT positional ctor → JSON array under `body`.
+      body: [CtorId, [string, MatchPattern][]];
     }
-  | { kind: "matchPatternTuple"; contents: MatchPattern[] };
+  | { kind: "matchPatternTuple"; body: MatchPattern[] };
 
 // ─── MatchArm (irOptions → flat record) ──────────────────────────────────────
 
@@ -253,12 +268,12 @@ export type BindPatternData = {
   pattern: MatchPattern;
 };
 
-// ─── Statement (sumOptions, positional single-arg → contents) ─────────────────
+// ─── Statement (sumOptions, "body" payload key) ────────────────────────────
 
 export type Statement =
-  | { kind: "statementCall"; contents: CallData }
-  | { kind: "statementMakeClosure"; contents: MakeClosureData }
-  | { kind: "statementLoadLiteral"; contents: LoadLiteralData }
-  | { kind: "statementExit"; contents: ExitData }
-  | { kind: "statementCont"; contents: ContData }
-  | { kind: "statementBindPattern"; contents: BindPatternData };
+  | { kind: "statementCall"; body: CallData }
+  | { kind: "statementMakeClosure"; body: MakeClosureData }
+  | { kind: "statementLoadLiteral"; body: LoadLiteralData }
+  | { kind: "statementExit"; body: ExitData }
+  | { kind: "statementCont"; body: ContData }
+  | { kind: "statementBindPattern"; body: BindPatternData };

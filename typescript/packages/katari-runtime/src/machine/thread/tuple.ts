@@ -124,7 +124,7 @@ export class TupleThread extends ChildThread {
       nextIndex: number;
     };
     const block = resolveBlockPayload(irModule, serialized.blockId, "blockTuple");
-    writable.block = block.tupleBlock;
+    writable.block = block.body;
     writable.blockId = serialized.blockId;
     writable.collected = new Map(serialized.collected);
     writable.nextIndex = serialized.nextIndex;

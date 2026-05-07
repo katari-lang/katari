@@ -135,7 +135,7 @@ describe("ForThread Cartesian product", () => {
             // var 100 = xs (call array block 1)
             {
               kind: "statementCall",
-              contents: {
+              body: {
                 target: { kind: "callTargetBlock", block: 1 },
                 arguments: [],
                 output: 100 as VarId,
@@ -144,7 +144,7 @@ describe("ForThread Cartesian product", () => {
             // var 101 = ys (call array block 2)
             {
               kind: "statementCall",
-              contents: {
+              body: {
                 target: { kind: "callTargetBlock", block: 2 },
                 arguments: [],
                 output: 101 as VarId,
@@ -153,7 +153,7 @@ describe("ForThread Cartesian product", () => {
             // var 120 = 0 (acc init)
             {
               kind: "statementLoadLiteral",
-              contents: {
+              body: {
                 output: 120 as VarId,
                 value: { kind: "literalValueInteger", integer: 0 },
               },
@@ -161,7 +161,7 @@ describe("ForThread Cartesian product", () => {
             // var 200 = call for block 3 (result = final acc)
             {
               kind: "statementCall",
-              contents: {
+              body: {
                 target: { kind: "callTargetBlock", block: 3 },
                 arguments: [],
                 output: 200 as VarId,
@@ -169,7 +169,7 @@ describe("ForThread Cartesian product", () => {
             },
             {
               kind: "statementExit",
-              contents: { exitKind: "exitKindReturn", value: 200 as VarId },
+              body: { exitKind: "exitKindReturn", value: 200 as VarId },
             },
           ],
         },
@@ -177,17 +177,17 @@ describe("ForThread Cartesian product", () => {
       // xs = [1, 2, 3]
       1: {
         kind: "blockArray",
-        arrayBlock: { parallel: false, elements: [10, 11, 12] },
+        body: { parallel: false, elements: [10, 11, 12] },
       },
       // ys = [10, 20]
       2: {
         kind: "blockArray",
-        arrayBlock: { parallel: false, elements: [20, 21] },
+        body: { parallel: false, elements: [20, 21] },
       },
       // for-block: iters=[(a=110, src=100), (b=111, src=101)] stateInits=[(acc=121, init=120)]
       3: {
         kind: "blockFor",
-        forBlock: {
+        body: {
           parallel: false,
           iters: [
             [110 as VarId, 100 as VarId],
@@ -208,14 +208,14 @@ describe("ForThread Cartesian product", () => {
             // var 130 = a*10
             {
               kind: "statementLoadLiteral",
-              contents: {
+              body: {
                 output: 131 as VarId,
                 value: { kind: "literalValueInteger", integer: 10 },
               },
             },
             {
               kind: "statementCall",
-              contents: {
+              body: {
                 target: { kind: "callTargetBlock", block: 6 }, // mul
                 arguments: [
                   { label: "left", var: 110 as VarId }, // a
@@ -227,7 +227,7 @@ describe("ForThread Cartesian product", () => {
             // var 133 = a*10 + b
             {
               kind: "statementCall",
-              contents: {
+              body: {
                 target: { kind: "callTargetBlock", block: 7 }, // add
                 arguments: [
                   { label: "left", var: 132 as VarId },
@@ -239,14 +239,14 @@ describe("ForThread Cartesian product", () => {
             // var 134 = acc * 100
             {
               kind: "statementLoadLiteral",
-              contents: {
+              body: {
                 output: 135 as VarId,
                 value: { kind: "literalValueInteger", integer: 100 },
               },
             },
             {
               kind: "statementCall",
-              contents: {
+              body: {
                 target: { kind: "callTargetBlock", block: 6 }, // mul
                 arguments: [
                   { label: "left", var: 121 as VarId }, // acc
@@ -258,7 +258,7 @@ describe("ForThread Cartesian product", () => {
             // var 137 = acc*100 + chunk
             {
               kind: "statementCall",
-              contents: {
+              body: {
                 target: { kind: "callTargetBlock", block: 7 }, // add
                 arguments: [
                   { label: "left", var: 136 as VarId },
@@ -270,7 +270,7 @@ describe("ForThread Cartesian product", () => {
             // cont for_next, modifier acc → 137
             {
               kind: "statementCont",
-              contents: {
+              body: {
                 contKind: "contKindForNext",
                 modifiers: [[121 as VarId, 137 as VarId]],
               },
@@ -297,8 +297,8 @@ describe("ForThread Cartesian product", () => {
         },
       },
       // mul / add
-      6: { kind: "blockPrim", name: "mul" },
-      7: { kind: "blockPrim", name: "add" },
+      6: { kind: "blockPrim", body: "mul" },
+      7: { kind: "blockPrim", body: "add" },
     };
     // xs element blocks (referenced by block 1)
     blocks[10] = literalBlock(1);
@@ -328,7 +328,7 @@ describe("ForThread Cartesian product", () => {
           statements: [
             {
               kind: "statementCall",
-              contents: {
+              body: {
                 target: { kind: "callTargetBlock", block: 1 },
                 arguments: [],
                 output: 100 as VarId,
@@ -336,14 +336,14 @@ describe("ForThread Cartesian product", () => {
             },
             {
               kind: "statementLoadLiteral",
-              contents: {
+              body: {
                 output: 120 as VarId,
                 value: { kind: "literalValueInteger", integer: 0 },
               },
             },
             {
               kind: "statementCall",
-              contents: {
+              body: {
                 target: { kind: "callTargetBlock", block: 3 },
                 arguments: [],
                 output: 200 as VarId,
@@ -351,18 +351,18 @@ describe("ForThread Cartesian product", () => {
             },
             {
               kind: "statementExit",
-              contents: { exitKind: "exitKindReturn", value: 200 as VarId },
+              body: { exitKind: "exitKindReturn", value: 200 as VarId },
             },
           ],
         },
       },
       1: {
         kind: "blockArray",
-        arrayBlock: { parallel: false, elements: [10, 11] },
+        body: { parallel: false, elements: [10, 11] },
       },
       3: {
         kind: "blockFor",
-        forBlock: {
+        body: {
           parallel: false,
           iters: [[110 as VarId, 100 as VarId]],
           stateInits: [[121 as VarId, 120 as VarId]],
@@ -378,14 +378,14 @@ describe("ForThread Cartesian product", () => {
           statements: [
             {
               kind: "statementLoadLiteral",
-              contents: {
+              body: {
                 output: 131 as VarId,
                 value: { kind: "literalValueInteger", integer: 10 },
               },
             },
             {
               kind: "statementCall",
-              contents: {
+              body: {
                 target: { kind: "callTargetBlock", block: 6 },
                 arguments: [
                   { label: "left", var: 121 as VarId },
@@ -396,7 +396,7 @@ describe("ForThread Cartesian product", () => {
             },
             {
               kind: "statementCall",
-              contents: {
+              body: {
                 target: { kind: "callTargetBlock", block: 7 },
                 arguments: [
                   { label: "left", var: 132 as VarId },
@@ -407,7 +407,7 @@ describe("ForThread Cartesian product", () => {
             },
             {
               kind: "statementCont",
-              contents: {
+              body: {
                 contKind: "contKindForNext",
                 modifiers: [[121 as VarId, 133 as VarId]],
               },
@@ -424,8 +424,8 @@ describe("ForThread Cartesian product", () => {
           trailing: 121 as VarId,
         },
       },
-      6: { kind: "blockPrim", name: "mul" },
-      7: { kind: "blockPrim", name: "add" },
+      6: { kind: "blockPrim", body: "mul" },
+      7: { kind: "blockPrim", body: "add" },
     };
     // arrays of literal values (block 10, 11): we model as integer literal
     // loaders into per-element wrapper blocks. Reuse blockArray's element
@@ -450,7 +450,7 @@ describe("ForThread Cartesian product", () => {
           statements: [
             {
               kind: "statementCall",
-              contents: {
+              body: {
                 target: { kind: "callTargetBlock", block: 1 },
                 arguments: [],
                 output: 100 as VarId,
@@ -458,7 +458,7 @@ describe("ForThread Cartesian product", () => {
             },
             {
               kind: "statementCall",
-              contents: {
+              body: {
                 target: { kind: "callTargetBlock", block: 2 },
                 arguments: [],
                 output: 101 as VarId,
@@ -466,14 +466,14 @@ describe("ForThread Cartesian product", () => {
             },
             {
               kind: "statementLoadLiteral",
-              contents: {
+              body: {
                 output: 120 as VarId,
                 value: { kind: "literalValueInteger", integer: 999 },
               },
             },
             {
               kind: "statementCall",
-              contents: {
+              body: {
                 target: { kind: "callTargetBlock", block: 3 },
                 arguments: [],
                 output: 200 as VarId,
@@ -481,23 +481,23 @@ describe("ForThread Cartesian product", () => {
             },
             {
               kind: "statementExit",
-              contents: { exitKind: "exitKindReturn", value: 200 as VarId },
+              body: { exitKind: "exitKindReturn", value: 200 as VarId },
             },
           ],
         },
       },
       1: {
         kind: "blockArray",
-        arrayBlock: { parallel: false, elements: [10, 11, 12] },
+        body: { parallel: false, elements: [10, 11, 12] },
       },
       // ys = []
       2: {
         kind: "blockArray",
-        arrayBlock: { parallel: false, elements: [] },
+        body: { parallel: false, elements: [] },
       },
       3: {
         kind: "blockFor",
-        forBlock: {
+        body: {
           parallel: false,
           iters: [
             [110 as VarId, 100 as VarId],
@@ -518,14 +518,14 @@ describe("ForThread Cartesian product", () => {
             // different value (we update acc to 1).
             {
               kind: "statementLoadLiteral",
-              contents: {
+              body: {
                 output: 130 as VarId,
                 value: { kind: "literalValueInteger", integer: 1 },
               },
             },
             {
               kind: "statementCont",
-              contents: {
+              body: {
                 contKind: "contKindForNext",
                 modifiers: [[121 as VarId, 130 as VarId]],
               },
@@ -569,7 +569,7 @@ describe("ForThread Cartesian product", () => {
           statements: [
             {
               kind: "statementCall",
-              contents: {
+              body: {
                 target: { kind: "callTargetBlock", block: 1 },
                 arguments: [],
                 output: 100 as VarId,
@@ -577,7 +577,7 @@ describe("ForThread Cartesian product", () => {
             },
             {
               kind: "statementCall",
-              contents: {
+              body: {
                 target: { kind: "callTargetBlock", block: 3 },
                 arguments: [],
                 output: 200 as VarId,
@@ -585,18 +585,18 @@ describe("ForThread Cartesian product", () => {
             },
             {
               kind: "statementExit",
-              contents: { exitKind: "exitKindReturn", value: 200 as VarId },
+              body: { exitKind: "exitKindReturn", value: 200 as VarId },
             },
           ],
         },
       },
       1: {
         kind: "blockArray",
-        arrayBlock: { parallel: false, elements: [10, 11, 12] },
+        body: { parallel: false, elements: [10, 11, 12] },
       },
       3: {
         kind: "blockFor",
-        forBlock: {
+        body: {
           parallel: false,
           iters: [[110 as VarId, 100 as VarId]],
           stateInits: [],
@@ -612,14 +612,14 @@ describe("ForThread Cartesian product", () => {
           statements: [
             {
               kind: "statementLoadLiteral",
-              contents: {
+              body: {
                 output: 130 as VarId,
                 value: { kind: "literalValueString", string: "hit" },
               },
             },
             {
               kind: "statementExit",
-              contents: {
+              body: {
                 exitKind: "exitKindForBreak",
                 value: 130 as VarId,
               },
@@ -635,7 +635,7 @@ describe("ForThread Cartesian product", () => {
           statements: [
             {
               kind: "statementLoadLiteral",
-              contents: {
+              body: {
                 output: 151 as VarId,
                 value: { kind: "literalValueString", string: "should-not-see" },
               },
@@ -664,7 +664,7 @@ describe("ForThread Cartesian product", () => {
           statements: [
             {
               kind: "statementCall",
-              contents: {
+              body: {
                 target: { kind: "callTargetBlock", block: 1 },
                 arguments: [],
                 output: 100 as VarId,
@@ -672,7 +672,7 @@ describe("ForThread Cartesian product", () => {
             },
             {
               kind: "statementCall",
-              contents: {
+              body: {
                 target: { kind: "callTargetBlock", block: 3 },
                 arguments: [],
                 output: 200 as VarId,
@@ -680,18 +680,18 @@ describe("ForThread Cartesian product", () => {
             },
             {
               kind: "statementExit",
-              contents: { exitKind: "exitKindReturn", value: 200 as VarId },
+              body: { exitKind: "exitKindReturn", value: 200 as VarId },
             },
           ],
         },
       },
       1: {
         kind: "blockArray",
-        arrayBlock: { parallel: false, elements: [10, 11] },
+        body: { parallel: false, elements: [10, 11] },
       },
       3: {
         kind: "blockFor",
-        forBlock: {
+        body: {
           parallel: true, // unsupported
           iters: [[110 as VarId, 100 as VarId]],
           stateInits: [],
@@ -706,7 +706,7 @@ describe("ForThread Cartesian product", () => {
           statements: [
             {
               kind: "statementCont",
-              contents: { contKind: "contKindForNext", modifiers: [] },
+              body: { contKind: "contKindForNext", modifiers: [] },
             },
           ],
         },
@@ -737,7 +737,7 @@ describe("ForThread Cartesian product", () => {
           statements: [
             {
               kind: "statementCall",
-              contents: {
+              body: {
                 target: { kind: "callTargetBlock", block: 1 },
                 arguments: [],
                 output: 100 as VarId,
@@ -745,7 +745,7 @@ describe("ForThread Cartesian product", () => {
             },
             {
               kind: "statementCall",
-              contents: {
+              body: {
                 target: { kind: "callTargetBlock", block: 2 },
                 arguments: [],
                 output: 101 as VarId,
@@ -753,14 +753,14 @@ describe("ForThread Cartesian product", () => {
             },
             {
               kind: "statementLoadLiteral",
-              contents: {
+              body: {
                 output: 120 as VarId,
                 value: { kind: "literalValueInteger", integer: 0 },
               },
             },
             {
               kind: "statementCall",
-              contents: {
+              body: {
                 target: { kind: "callTargetBlock", block: 3 },
                 arguments: [],
                 output: 200 as VarId,
@@ -768,22 +768,22 @@ describe("ForThread Cartesian product", () => {
             },
             {
               kind: "statementExit",
-              contents: { exitKind: "exitKindReturn", value: 200 as VarId },
+              body: { exitKind: "exitKindReturn", value: 200 as VarId },
             },
           ],
         },
       },
       1: {
         kind: "blockArray",
-        arrayBlock: { parallel: false, elements: [10, 11] },
+        body: { parallel: false, elements: [10, 11] },
       },
       2: {
         kind: "blockArray",
-        arrayBlock: { parallel: false, elements: [12, 13] },
+        body: { parallel: false, elements: [12, 13] },
       },
       3: {
         kind: "blockFor",
-        forBlock: {
+        body: {
           parallel: false,
           iters: [
             [110 as VarId, 100 as VarId],
@@ -803,14 +803,14 @@ describe("ForThread Cartesian product", () => {
           statements: [
             {
               kind: "statementLoadLiteral",
-              contents: {
+              body: {
                 output: 131 as VarId,
                 value: { kind: "literalValueInteger", integer: 10 },
               },
             },
             {
               kind: "statementCall",
-              contents: {
+              body: {
                 target: { kind: "callTargetBlock", block: 6 },
                 arguments: [
                   { label: "left", var: 110 as VarId },
@@ -821,7 +821,7 @@ describe("ForThread Cartesian product", () => {
             },
             {
               kind: "statementCall",
-              contents: {
+              body: {
                 target: { kind: "callTargetBlock", block: 7 },
                 arguments: [
                   { label: "left", var: 132 as VarId },
@@ -832,14 +832,14 @@ describe("ForThread Cartesian product", () => {
             },
             {
               kind: "statementLoadLiteral",
-              contents: {
+              body: {
                 output: 135 as VarId,
                 value: { kind: "literalValueInteger", integer: 100 },
               },
             },
             {
               kind: "statementCall",
-              contents: {
+              body: {
                 target: { kind: "callTargetBlock", block: 6 },
                 arguments: [
                   { label: "left", var: 121 as VarId },
@@ -850,7 +850,7 @@ describe("ForThread Cartesian product", () => {
             },
             {
               kind: "statementCall",
-              contents: {
+              body: {
                 target: { kind: "callTargetBlock", block: 7 },
                 arguments: [
                   { label: "left", var: 136 as VarId },
@@ -861,7 +861,7 @@ describe("ForThread Cartesian product", () => {
             },
             {
               kind: "statementCont",
-              contents: {
+              body: {
                 contKind: "contKindForNext",
                 modifiers: [[121 as VarId, 137 as VarId]],
               },
@@ -878,8 +878,8 @@ describe("ForThread Cartesian product", () => {
           trailing: 121 as VarId,
         },
       },
-      6: { kind: "blockPrim", name: "mul" },
-      7: { kind: "blockPrim", name: "add" },
+      6: { kind: "blockPrim", body: "mul" },
+      7: { kind: "blockPrim", body: "add" },
     };
     blocks[10] = literalBlock(1);
     blocks[11] = literalBlock(2);
@@ -908,7 +908,7 @@ function literalBlock(n: number): Block {
       statements: [
         {
           kind: "statementLoadLiteral",
-          contents: {
+          body: {
             output: 999 as VarId,
             value: { kind: "literalValueInteger", integer: n },
           },

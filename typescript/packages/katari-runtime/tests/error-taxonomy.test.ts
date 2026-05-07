@@ -72,21 +72,21 @@ describe("Engine error taxonomy", () => {
           statements: [
             {
               kind: "statementLoadLiteral",
-              contents: {
+              body: {
                 output: 1 as VarId,
                 value: { kind: "literalValueString", string: "hi" },
               },
             },
             {
               kind: "statementLoadLiteral",
-              contents: {
+              body: {
                 output: 2 as VarId,
                 value: { kind: "literalValueInteger", integer: 1 },
               },
             },
             {
               kind: "statementCall",
-              contents: {
+              body: {
                 target: { kind: "callTargetBlock", block: 1 },
                 arguments: [
                   { label: "left", var: 1 as VarId },
@@ -97,12 +97,12 @@ describe("Engine error taxonomy", () => {
             },
             {
               kind: "statementExit",
-              contents: { exitKind: "exitKindReturn", value: 3 as VarId },
+              body: { exitKind: "exitKindReturn", value: 3 as VarId },
             },
           ],
         },
       },
-      1: { kind: "blockPrim", name: "add" },
+      1: { kind: "blockPrim", body: "add" },
     };
     const ir = makeIR(blocks, "main", 0);
     const machine = createMachine(ir);
@@ -120,14 +120,14 @@ describe("Engine error taxonomy", () => {
           statements: [
             {
               kind: "statementLoadLiteral",
-              contents: {
+              body: {
                 output: 0 as VarId,
                 value: { kind: "literalValueString", string: "x" },
               },
             },
             {
               kind: "statementCall",
-              contents: {
+              body: {
                 target: { kind: "callTargetBlock", block: 1 },
                 arguments: [],
                 output: 1 as VarId,
@@ -135,14 +135,14 @@ describe("Engine error taxonomy", () => {
             },
             {
               kind: "statementExit",
-              contents: { exitKind: "exitKindReturn", value: 1 as VarId },
+              body: { exitKind: "exitKindReturn", value: 1 as VarId },
             },
           ],
         },
       },
       1: {
         kind: "blockMatch",
-        matchBlock: { subject: 0 as VarId, arms: [] },
+        body: { subject: 0 as VarId, arms: [] },
       },
     };
     const ir = makeIR(blocks, "main", 0);

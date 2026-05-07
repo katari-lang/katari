@@ -61,21 +61,21 @@ function agentApplyingPrim(
         statements: [
           {
             kind: "statementLoadLiteral",
-            contents: {
+            body: {
               output: 1 as VarId,
               value: { kind: "literalValueInteger", integer: leftLit },
             },
           },
           {
             kind: "statementLoadLiteral",
-            contents: {
+            body: {
               output: 2 as VarId,
               value: { kind: "literalValueInteger", integer: rightLit },
             },
           },
           {
             kind: "statementCall",
-            contents: {
+            body: {
               target: { kind: "callTargetBlock", block: 1 },
               arguments: [
                 { label: "left", var: 1 as VarId },
@@ -86,12 +86,12 @@ function agentApplyingPrim(
           },
           {
             kind: "statementExit",
-            contents: { exitKind: "exitKindReturn", value: 3 as VarId },
+            body: { exitKind: "exitKindReturn", value: 3 as VarId },
           },
         ],
       },
     },
-    1: { kind: "blockPrim", name: primName },
+    1: { kind: "blockPrim", body: primName },
   };
   return makeIR(blocks, "main", 0);
 }

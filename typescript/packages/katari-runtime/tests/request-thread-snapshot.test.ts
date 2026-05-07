@@ -87,7 +87,7 @@ function buildHandleRequestIR(): IRModule {
         statements: [
           {
             kind: "statementCall",
-            contents: {
+            body: {
               target: { kind: "callTargetBlock", block: 1 },
               arguments: [],
               output: 0 as VarId,
@@ -95,14 +95,14 @@ function buildHandleRequestIR(): IRModule {
           },
           {
             kind: "statementExit",
-            contents: { exitKind: "exitKindReturn", value: 0 as VarId },
+            body: { exitKind: "exitKindReturn", value: 0 as VarId },
           },
         ],
       },
     },
     1: {
       kind: "blockHandle",
-      handleBlock: {
+      body: {
         parallel: false,
         stateInits: [],
         body: 2,
@@ -117,7 +117,7 @@ function buildHandleRequestIR(): IRModule {
         statements: [
           {
             kind: "statementCall",
-            contents: {
+            body: {
               target: { kind: "callTargetBlock", block: 4 },
               arguments: [],
               output: 1 as VarId,
@@ -135,19 +135,19 @@ function buildHandleRequestIR(): IRModule {
         statements: [
           {
             kind: "statementLoadLiteral",
-            contents: {
+            body: {
               output: 2 as VarId,
               value: { kind: "literalValueString", string: "fetched" },
             },
           },
           {
             kind: "statementExit",
-            contents: { exitKind: "exitKindBreak", value: 2 as VarId },
+            body: { exitKind: "exitKindBreak", value: 2 as VarId },
           },
         ],
       },
     },
-    4: { kind: "blockRequest", reqId: 0 as ReqId },
+    4: { kind: "blockRequest", body: 0 as ReqId },
   };
   return makeIR(blocks, "main", 0);
 }
