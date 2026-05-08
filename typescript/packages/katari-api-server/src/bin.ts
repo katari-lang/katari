@@ -53,7 +53,15 @@ const registry = new MachineRegistry(storage, logger, {
 const metrics = buildMetrics();
 
 const modules = new ModuleService(storage, logger);
-const agents = new AgentService(storage, registry, logger);
+const agents = new AgentService(storage, registry, logger, metrics);
+
+// Refresh the machinesLoaded gauge on a slow timer. The cache size
+// changes from acquire / evict; sampling at 5s is fine for ops dashboards
+// and avoids hooking into every code path that mutates the cache.
+const machinesLoadedInterval = setInterval(() => {
+  metrics.machinesLoaded.set(registry.cacheSize);
+}, 5_000);
+machinesLoadedInterval.unref();
 
 await recoverOnBoot(storage, registry, logger, agents);
 

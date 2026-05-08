@@ -5,7 +5,6 @@ import type { Draft } from "immer";
 import type { CallId } from "../../id.js";
 import { executePrim } from "../../prim.js";
 import { RecoverableEngineError } from "../../errors.js";
-import type { StepCtx } from "../../step-ctx.js";
 import type { PrimThread } from "../types.js";
 import {
   defaultAskAckProxy,
@@ -54,8 +53,8 @@ export const primOps: ThreadOps<PrimThread> = {
 
   cancel: (ctx, t) => defaultCancel<PrimThread>(ctx, t as Draft<PrimThread>),
   cancelAck: defaultCancelAckUnexpected,
-  ask: (ctx, t, askId, kind, payload, mods, childCallId) =>
-    defaultAskProxy<PrimThread>(ctx, t as Draft<PrimThread>, askId, kind, payload, mods, childCallId),
+  ask: (ctx, t, askId, kind, childCallId) =>
+    defaultAskProxy<PrimThread>(ctx, t as Draft<PrimThread>, askId, kind, childCallId),
   askAck: (ctx, t, askId, value) =>
     defaultAskAckProxy<PrimThread>(ctx, t as Draft<PrimThread>, askId, value),
 };

@@ -120,13 +120,13 @@ export const forOps: ThreadOps<ForThread> = {
     spawnBody(ctx, t as Draft<ForThread>, t.currentIndex);
   },
 
-  ask(ctx, t, askId, kind, payload, mods, childCallId) {
+  ask(ctx, t, askId, kind, childCallId) {
     if (kind.kind === "break-for") {
-      handleBreakFor(ctx, t as Draft<ForThread>, payload);
+      handleBreakFor(ctx, t as Draft<ForThread>, kind.value);
       return;
     }
     if (kind.kind === "next-for") {
-      handleNextFor(ctx, t as Draft<ForThread>, mods, childCallId);
+      handleNextFor(ctx, t as Draft<ForThread>, kind.mods, childCallId);
       return;
     }
     proxyAskToParent(
@@ -135,8 +135,6 @@ export const forOps: ThreadOps<ForThread> = {
       childCallId,
       askId,
       kind,
-      payload,
-      mods,
     );
   },
 

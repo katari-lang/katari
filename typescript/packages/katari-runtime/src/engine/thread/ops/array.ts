@@ -22,8 +22,8 @@ export const arrayOps: ThreadOps<ArrayThread> = {
   },
   cancel: (ctx, t) => defaultCancel<ArrayThread>(ctx, t as Draft<ArrayThread>),
   cancelAck: defaultCancelAckUnexpected,
-  ask: (ctx, t, askId, kind, payload, mods, childCallId) =>
-    defaultAskProxy<ArrayThread>(ctx, t as Draft<ArrayThread>, askId, kind, payload, mods, childCallId),
+  ask: (ctx, t, askId, kind, childCallId) =>
+    defaultAskProxy<ArrayThread>(ctx, t as Draft<ArrayThread>, askId, kind, childCallId),
   askAck: (ctx, t, askId, value) =>
     defaultAskAckProxy<ArrayThread>(ctx, t as Draft<ArrayThread>, askId, value),
 };

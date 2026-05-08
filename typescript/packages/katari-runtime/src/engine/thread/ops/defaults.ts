@@ -4,7 +4,7 @@
 
 import type { Draft } from "immer";
 import type { AskId, CallId } from "../../id.js";
-import type { AskKind, ModMap } from "../../event.js";
+import type { AskKind } from "../../event.js";
 import type { StepCtx } from "../../step-ctx.js";
 import type { Value } from "../../value.js";
 import {
@@ -28,23 +28,20 @@ export function defaultCancel<T extends Thread>(
 
 /**
  * Variants that don't catch any ask kind use this — just bubble up to
- * their parent. Examples: PrimThread, CtorThread, MatchThread, TupleThread,
- * ArrayThread.
+ * their parent. Examples: TupleThread, ArrayThread, MatchThread.
  *
- * Note: leaf threads (PrimThread, CtorThread, ExternalThread) won't
+ * Note: leaf threads (PrimThread, CtorThread, ExternalThread) cannot
  * actually receive asks at runtime because they have no children. The
- * default exists so the dispatch table is total.
+ * default exists only to make the dispatch table total.
  */
 export function defaultAskProxy<T extends Thread>(
   ctx: StepCtx,
   t: Draft<T>,
-  _askId: AskId,
+  childAskId: AskId,
   askKind: AskKind,
-  payload: Value,
-  mods: ModMap | undefined,
   childCallId: CallId,
 ): void {
-  proxyAskToParent(ctx, t, childCallId, _askId, askKind, payload, mods);
+  proxyAskToParent(ctx, t, childCallId, childAskId, askKind);
 }
 
 /** Default askAck behaviour: forward via askIdMap. */

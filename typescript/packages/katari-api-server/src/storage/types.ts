@@ -80,6 +80,14 @@ export interface ModuleRepo {
   }): Promise<VersionId>;
   list(options?: ListOptions): Promise<ModuleSummary[]>;
   get(id: VersionId): Promise<ModuleRow | null>;
+  /**
+   * Delete a module version. Returns true if a row was removed, false if
+   * the version did not exist. Caller is responsible for ensuring no
+   * agents are still referencing the version (the storage layer reports
+   * a constraint violation otherwise — DELETE on `module_versions` is
+   * gated by the FK from `agents.version_id`).
+   */
+  delete(id: VersionId): Promise<boolean>;
 }
 
 export interface AgentRepo {

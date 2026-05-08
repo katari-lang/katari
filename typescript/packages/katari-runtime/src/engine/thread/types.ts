@@ -95,20 +95,39 @@ export type ChildRole =
   | {
       kind: "handlerBody";
       reqId: ReqId;
-      /** Which AskId on this thread is currently being serviced. */
+      /**
+       * The askId we received on the inbound `request` ask, used to
+       * address the eventual `askAck` back to the proxy chain.
+       */
       askId: AskId;
+      /**
+       * Which child of the HandleThread the inbound `request` arrived
+       * from — the ack travels back through this same proxy.
+       */
+      askerCallId: CallId;
     }
   | { kind: "thenClause"; mainResultValue: Value };
 
 export type PendingAction =
-  | { kind: "ask"; reqId: ReqId; args: Record<string, Value>; askId: AskId }
+  | {
+      kind: "ask";
+      reqId: ReqId;
+      args: Record<string, Value>;
+      askId: AskId;
+      askerCallId: CallId;
+    }
   | { kind: "thenClause"; mainResultValue: Value };
 
 export type PostCancelAction =
-  /** Pattern (i): general post-cancel cleanup. */
+  /** Pattern (i): general post-cancel cleanup, used by ForThread. */
   | { kind: "finish"; value?: Value }
-  /** Pattern (ii): targeted next/break-for resume. */
-  | { kind: "askComplete"; askId: AskId; value: Value };
+  /** Pattern (ii): targeted `next` resume — fire askAck after the cancel completes. */
+  | {
+      kind: "askComplete";
+      askId: AskId;
+      askerCallId: CallId;
+      value: Value;
+    };
 
 export type ForThread = Common & {
   kind: "for";

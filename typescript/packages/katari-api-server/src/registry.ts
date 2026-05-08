@@ -143,4 +143,12 @@ export class MachineRegistry {
   isLoaded(versionId: VersionId): boolean {
     return this.cache.has(versionId);
   }
+
+  /**
+   * Current LRU size (number of `MachineHandle`s held in memory).
+   * Surfaced via metrics by bin.ts.
+   */
+  get cacheSize(): number {
+    return this.cache.size;
+  }
 }

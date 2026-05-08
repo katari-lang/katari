@@ -111,6 +111,11 @@ class PgModuleRepo implements ModuleRepo {
       createdAt: row.created_at.toISOString(),
     };
   }
+
+  async delete(id: VersionId): Promise<boolean> {
+    const result = await this.sql`DELETE FROM module_versions WHERE id = ${id}`;
+    return (result.count ?? 0) > 0;
+  }
 }
 
 class PgAgentRepo implements AgentRepo {
@@ -315,30 +320,55 @@ export class PostgresStorage implements Storage {
    * boundary. Throwing from `fn` triggers a ROLLBACK; returning normally
    * triggers COMMIT.
    *
-   * Nested calls open a savepoint (`postgres` driver semantics), so callers
-   * may compose smaller `withTransaction` blocks safely.
+   * Nested calls open a savepoint via the same `txSql.begin` so the inner
+   * commit/rollback only affects work since the savepoint, not the whole
+   * outer transaction. The previous implementation bound
+   * `this.withTransaction` (= the *outer* pool's begin), which silently
+   * opened a parallel BEGIN that didn't participate in the savepoint —
+   * BUG-03 in /review/02-phase2-modules.md.
    */
   async withTransaction<T>(fn: (tx: Storage) => Promise<T>): Promise<T> {
-    return this.sql.begin(async (txSql) => {
-      // The `postgres` driver narrows the callback argument to
-      // `TransactionSql`, which is a structural subset of `Sql` minus the
-      // pool-management methods (END / CLOSE etc.) that don't make sense
-      // inside a transaction. The Repo classes only use the tagged-template
-      // call form, which both share, so the cast is safe in practice.
-      const innerSql = txSql as unknown as Sql;
-      const txStorage: Storage = {
-        modules: new PgModuleRepo(innerSql),
-        agents: new PgAgentRepo(innerSql),
-        snapshots: new PgSnapshotRepo(innerSql),
-        // Nested withTransaction reuses the same outer txSql via savepoint —
-        // postgres' sql.begin handles that internally.
-        withTransaction: this.withTransaction.bind(this),
-      };
-      return fn(txStorage);
-    }) as T;
+    return runInTx(this.sql, fn) as Promise<T>;
   }
 
   async close(): Promise<void> {
     await this.sql.end();
   }
+}
+
+// ─── Transaction helper ────────────────────────────────────────────────────
+
+/**
+ * Open a transaction (or savepoint, when called with a TransactionSql)
+ * via `sqlHandle.begin(...)` and run `fn` against a Storage facade scoped
+ * to the inner `txSql`.
+ *
+ * The `postgres` driver's `.begin` is the key: invoked on a pool it
+ * starts a new BEGIN; invoked on a TransactionSql it issues a savepoint.
+ * That makes this function reentrant — `txStorage.withTransaction(...)`
+ * inside an outer block reuses the inner sql handle and creates a
+ * savepoint, instead of (incorrectly) starting a parallel transaction
+ * on the outer pool.
+ */
+function runInTx<T>(
+  sqlHandle: Sql,
+  fn: (tx: Storage) => Promise<T>,
+): Promise<T> {
+  // `sqlHandle` may be either the pool Sql or a TransactionSql. Both
+  // expose `.begin(...)` with the same signature. The cast keeps
+  // TypeScript happy because the postgres types narrow `.begin` differently
+  // for these two.
+  const begin = (sqlHandle as unknown as { begin: typeof sqlHandle.begin }).begin.bind(sqlHandle);
+  return begin(async (txSql) => {
+    const innerSql = txSql as unknown as Sql;
+    const txStorage: Storage = {
+      modules: new PgModuleRepo(innerSql),
+      agents: new PgAgentRepo(innerSql),
+      snapshots: new PgSnapshotRepo(innerSql),
+      // Bind the *inner* sql so nested calls use savepoints on it,
+      // not new BEGINs on the outer pool.
+      withTransaction: (innerFn) => runInTx(innerSql, innerFn),
+    };
+    return fn(txStorage);
+  }) as Promise<T>;
 }

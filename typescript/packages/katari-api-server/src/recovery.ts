@@ -79,6 +79,10 @@ async function recoverOneVersion(
   // forever — the engine knows they're being cancelled (the snapshot
   // captured that), but it has no event to drive the cleanup forward.
   //
+  // Use `resumeCancellingOnBoot` (not `cancelAgent`) — the latter has an
+  // expectedState=running gate that no-ops on `cancelling` rows
+  // (BUG-01 fixed in 2026-05).
+  //
   // We page through `agents.list` with the largest allowed page size so
   // a version with hundreds of cancelling agents doesn't get partially
   // recovered. The implementation cap is 500 (see storage list options).
@@ -91,7 +95,7 @@ async function recoverOneVersion(
       for (const row of rows) {
         if (row.state !== "cancelling") continue;
         try {
-          await agents.cancelAgent(row.id);
+          await agents.resumeCancellingOnBoot(row.id);
           logger.log("info", "re-issued terminate for cancelling agent", {
             versionId,
             agentId: row.id,

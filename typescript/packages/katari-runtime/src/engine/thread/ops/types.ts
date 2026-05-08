@@ -14,7 +14,7 @@
 
 import type { Draft } from "immer";
 import type { AskId, CallId } from "../../id.js";
-import type { AskKind, ModMap } from "../../event.js";
+import type { AskKind } from "../../event.js";
 import type { StepCtx } from "../../step-ctx.js";
 import type { Value } from "../../value.js";
 import type { Thread } from "../types.js";
@@ -36,14 +36,14 @@ export type ThreadOps<T extends Thread> = {
    * An ask bubbled up from `childCallId`. The variant decides whether to
    * catch (process locally + emit askAck or convert to done) or to proxy
    * to its own parent via `proxyAskToParent` from `common.ts`.
+   *
+   * Kind-specific data (value, args, mods, reqId) lives on `askKind`.
    */
   ask(
     ctx: StepCtx,
     t: Draft<T>,
     askId: AskId,
     askKind: AskKind,
-    payload: Value,
-    mods: ModMap | undefined,
     childCallId: CallId,
   ): void;
   /**

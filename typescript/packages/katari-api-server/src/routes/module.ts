@@ -36,9 +36,9 @@ export function buildModuleRoutes(modules: ModuleService): Hono {
     const versionId = VersionIdSchema.parse(c.req.param("versionId"));
     try {
       const row = await modules.get(versionId);
-      // Don't dump the full IR + schema bundle by default — they can be
-      // large. Return metadata only; clients that need the IR can hit a
-      // dedicated route in the future.
+      // Default response: metadata only — IR + schema bundle can be
+      // large, and most clients want to list / probe versions, not
+      // download the IR. The /ir and /schema sub-routes return them.
       return c.json({
         id: row.id,
         name: row.name,
@@ -47,6 +47,54 @@ export function buildModuleRoutes(modules: ModuleService): Hono {
     } catch (err) {
       if (err instanceof ModuleNotFound) {
         return c.json({ error: err.message }, 404);
+      }
+      throw err;
+    }
+  });
+
+  app.get("/:versionId/ir", async (c) => {
+    const versionId = VersionIdSchema.parse(c.req.param("versionId"));
+    try {
+      const row = await modules.get(versionId);
+      return c.json(row.irModule);
+    } catch (err) {
+      if (err instanceof ModuleNotFound) {
+        return c.json({ error: err.message }, 404);
+      }
+      throw err;
+    }
+  });
+
+  app.get("/:versionId/schema", async (c) => {
+    const versionId = VersionIdSchema.parse(c.req.param("versionId"));
+    try {
+      const row = await modules.get(versionId);
+      return c.json(row.schemaBundle);
+    } catch (err) {
+      if (err instanceof ModuleNotFound) {
+        return c.json({ error: err.message }, 404);
+      }
+      throw err;
+    }
+  });
+
+  app.delete("/:versionId", async (c) => {
+    const versionId = VersionIdSchema.parse(c.req.param("versionId"));
+    try {
+      await modules.delete(versionId);
+      return c.body(null, 204);
+    } catch (err) {
+      if (err instanceof ModuleNotFound) {
+        return c.json({ error: err.message }, 404);
+      }
+      // Postgres FK violations from `agents.version_id` surface here as
+      // "update or delete on table ... violates foreign key constraint".
+      // Map to 409 so clients distinguish "still in use" from server errors.
+      if (err instanceof Error && /foreign key/i.test(err.message)) {
+        return c.json(
+          { error: "module version still has agents — cancel/delete them first" },
+          409,
+        );
       }
       throw err;
     }

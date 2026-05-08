@@ -67,22 +67,36 @@ export type ExternalEventPayload =
 
 import type { ReqId } from "../ir/types.js";
 
-export type AskKind =
-  /** algebraic-effect request; caught by the relevant HandleThread */
-  | { kind: "request"; reqId: ReqId }
-  /** handler resume; caught by the same HandleThread that holds the req */
-  | { kind: "next"; reqId: ReqId }
-  /** for-loop continue; caught by the surrounding ForThread */
-  | { kind: "next-for" }
-  /** agent return; caught by the surrounding agent UserThread (done-terminating) */
-  | { kind: "return" }
-  /** handle break; caught by the surrounding HandleThread (done-terminating) */
-  | { kind: "break" }
-  /** for break; caught by the surrounding ForThread (done-terminating) */
-  | { kind: "break-for" };
-
-/** Pre-evaluated state-var modifiers attached to `next` / `next-for` asks. */
+/**
+ * Pre-evaluated state-var modifiers attached to `next` / `next-for` asks.
+ * Keyed by the target VarId, valued by the new Value to write into scope.
+ */
 export type ModMap = Record<number, Value>;
+
+/**
+ * AskKind: every kind of "ask the parent for something" the engine
+ * supports, with the data each kind needs carried inline.
+ *
+ * - `request`  caught by the HandleThread that owns the reqId; askAck-terminating.
+ * - `next`     caught by the same HandleThread; askAck-terminating
+ *              (with state-var modifiers applied to the handle's scope).
+ * - `next-for` caught by the surrounding ForThread; askAck-terminating
+ *              (advances the iteration with state-var mods applied).
+ * - `return`   caught by the agent UserThread; done-terminating.
+ * - `break`    caught by the surrounding HandleThread; done-terminating.
+ * - `break-for` caught by the surrounding ForThread; done-terminating.
+ *
+ * "askAck-terminating" means the boundary replies via `askAck` and the
+ * asker resumes; "done-terminating" means the boundary cancels its
+ * children and emits `done` upward (no askAck travels back).
+ */
+export type AskKind =
+  | { kind: "request"; reqId: ReqId; args: Record<string, Value> }
+  | { kind: "next"; value: Value; mods: ModMap }
+  | { kind: "next-for"; value: Value; mods: ModMap }
+  | { kind: "return"; value: Value }
+  | { kind: "break"; value: Value }
+  | { kind: "break-for"; value: Value };
 
 export type InternalEventPayload =
   | {
@@ -112,13 +126,18 @@ export type InternalEventPayload =
       callId: CallId;
     }
   | {
+      /**
+       * An `ask` bubbling up the thread tree. The target is the immediate
+       * parent of the asker (or proxy thread). The kind-specific data
+       * (value, args, mods, reqId) lives on `askKind`. `childCallId`
+       * tells the receiver which of its children sent this — used by
+       * boundary catches that need to identify the originating subtree
+       * (e.g. HandleThread routing askAck back through the right child).
+       */
       kind: "ask";
       target: ThreadId;
       askId: AskId;
       askKind: AskKind;
-      payload: Value;
-      mods?: ModMap;
-      /** Identifies which child of the target this ask came from. */
       childCallId: CallId;
     }
   | {

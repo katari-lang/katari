@@ -24,8 +24,7 @@ export const requestOps: ThreadOps<RequestThread> = {
       kind: "ask",
       target: t.parent,
       askId,
-      askKind: { kind: "request", reqId: t.reqId },
-      payload: { kind: "tagged", ctorId: -1, fields: { ...t.args } },
+      askKind: { kind: "request", reqId: t.reqId, args: { ...t.args } },
       childCallId: t.parentCallId,
     });
   },
@@ -44,7 +43,7 @@ export const requestOps: ThreadOps<RequestThread> = {
    * Default ask is "proxy to parent" — but RequestThread has no
    * children to ask, so this should never fire. Treat as invariant.
    */
-  ask(_ctx, t, askId, kind) {
+  ask(_ctx, t, askId, kind, _childCallId) {
     throw new Error(
       `engine.request: RequestThread ${t.id} unexpectedly received ask (kind=${kind.kind}, askId=${askId})`,
     );

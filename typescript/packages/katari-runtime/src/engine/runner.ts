@@ -153,7 +153,7 @@ function onAsk(
     ctx.log("debug", "engine: stale ask dropped", { target: ev.target, askId: ev.askId });
     return;
   }
-  dispatchAsk(ctx, t, ev.askId, ev.askKind, ev.payload, ev.mods, ev.childCallId);
+  dispatchAsk(ctx, t, ev.askId, ev.askKind, ev.childCallId);
 }
 
 function onAskAck(

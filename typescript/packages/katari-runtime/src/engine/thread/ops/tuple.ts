@@ -25,8 +25,8 @@ export const tupleOps: ThreadOps<TupleThread> = {
   },
   cancel: (ctx, t) => defaultCancel<TupleThread>(ctx, t as Draft<TupleThread>),
   cancelAck: defaultCancelAckUnexpected,
-  ask: (ctx, t, askId, kind, payload, mods, childCallId) =>
-    defaultAskProxy<TupleThread>(ctx, t as Draft<TupleThread>, askId, kind, payload, mods, childCallId),
+  ask: (ctx, t, askId, kind, childCallId) =>
+    defaultAskProxy<TupleThread>(ctx, t as Draft<TupleThread>, askId, kind, childCallId),
   askAck: (ctx: StepCtx, t: Draft<TupleThread>, askId, value: Value) =>
     defaultAskAckProxy<TupleThread>(ctx, t, askId, value),
 };

@@ -32,8 +32,8 @@ export const ctorOps: ThreadOps<CtorThread> = {
 
   cancel: (ctx, t) => defaultCancel<CtorThread>(ctx, t as Draft<CtorThread>),
   cancelAck: defaultCancelAckUnexpected,
-  ask: (ctx, t, askId, kind, payload, mods, childCallId) =>
-    defaultAskProxy<CtorThread>(ctx, t as Draft<CtorThread>, askId, kind, payload, mods, childCallId),
+  ask: (ctx, t, askId, kind, childCallId) =>
+    defaultAskProxy<CtorThread>(ctx, t as Draft<CtorThread>, askId, kind, childCallId),
   askAck: (ctx, t, askId, value) =>
     defaultAskAckProxy<CtorThread>(ctx, t as Draft<CtorThread>, askId, value),
 };

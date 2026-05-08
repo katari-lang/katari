@@ -52,12 +52,28 @@ export class AgentNotFound extends Error {
  */
 export { EntryNotFoundError };
 
+/**
+ * Optional metrics interface AgentService writes to. The shape mirrors
+ * `AppMetrics` from `metrics.ts` but is declared here to avoid a circular
+ * import; bin.ts wires the concrete instance through.
+ */
+export interface AgentServiceMetrics {
+  agentStartTotal: { inc(by?: number): void };
+  agentCancelTotal: { inc(by?: number): void };
+  applyEventDuration: { observe(seconds: number): void };
+}
+
 export class AgentService {
+  private readonly metrics: AgentServiceMetrics | undefined;
+
   constructor(
     private readonly storage: Storage,
     private readonly registry: MachineRegistry,
     private readonly logger: Logger,
-  ) {}
+    metrics?: AgentServiceMetrics,
+  ) {
+    this.metrics = metrics;
+  }
 
   /**
    * Start a new agent on `versionId`.
@@ -90,11 +106,13 @@ export class AgentService {
       updatedAt: now,
     };
 
+    this.metrics?.agentStartTotal.inc();
     const handle = await this.registry.acquire(input.versionId);
     const mutex = this.registry.getMutex(input.versionId);
 
     await mutex.runExclusive(async () => {
       const rollbackSnap = handle.toSnapshot();
+      const startedAt = performance.now();
       try {
         await this.storage.withTransaction(async (tx) => {
           const out = handle.startAgent(
@@ -112,7 +130,7 @@ export class AgentService {
           // Surface it to the route layer as a 400 instead of persisting
           // a phantom error agent. The DB transaction rolled back, so
           // agents.insert is already gone.
-          this.versionedRollback(input.versionId, rollbackSnap);
+          await this.versionedRollback(input.versionId, rollbackSnap);
           throw err;
         }
         if (err instanceof RecoverableEngineError) {
@@ -121,7 +139,7 @@ export class AgentService {
           // The DB transaction has already rolled back, so `agents.insert`
           // is gone too. We re-insert with state=error so the API client
           // can observe the failure.
-          this.versionedRollback(input.versionId, rollbackSnap);
+          await this.versionedRollback(input.versionId, rollbackSnap);
           await this.storage.agents.insert({
             ...row,
             state: "error",
@@ -138,6 +156,10 @@ export class AgentService {
         }
         // Non-recoverable: poison the entire version.
         await this.poison(input.versionId, agentId, row, err);
+      } finally {
+        this.metrics?.applyEventDuration.observe(
+          (performance.now() - startedAt) / 1000,
+        );
       }
     });
 
@@ -155,6 +177,7 @@ export class AgentService {
    * agent forward cleanly.
    */
   async cancelAgent(agentId: AgentId): Promise<AgentRow> {
+    this.metrics?.agentCancelTotal.inc();
     const row = await this.storage.agents.get(agentId);
     if (row === null) throw new AgentNotFound(agentId);
     if (isTerminal(row.state)) return row;
@@ -164,6 +187,7 @@ export class AgentService {
 
     await mutex.runExclusive(async () => {
       const rollbackSnap = handle.toSnapshot();
+      const startedAt = performance.now();
       try {
         await this.storage.withTransaction(async (tx) => {
           // expectedState=running gates the cancel: if a delegateAck
@@ -187,7 +211,7 @@ export class AgentService {
         });
       } catch (err) {
         if (err instanceof RecoverableEngineError) {
-          this.versionedRollback(row.versionId, rollbackSnap);
+          await this.versionedRollback(row.versionId, rollbackSnap);
           await this.storage.agents.setState(agentId, {
             state: "error",
             errorMessage: err.message,
@@ -201,6 +225,10 @@ export class AgentService {
           return;
         }
         await this.poison(row.versionId, agentId, row, err);
+      } finally {
+        this.metrics?.applyEventDuration.observe(
+          (performance.now() - startedAt) / 1000,
+        );
       }
     });
 
@@ -220,6 +248,56 @@ export class AgentService {
     offset?: number;
   }): Promise<AgentRow[]> {
     return this.storage.agents.list(filter);
+  }
+
+  /**
+   * Recovery-only: re-issue the engine `terminate` for an agent that was
+   * mid-cancel when the previous process died.
+   *
+   * Why we can't just call `cancelAgent` from recovery: that path's
+   * `setState(..., expectedState: "running")` is a no-op on a row whose
+   * state is already "cancelling", so the engine never gets the second
+   * terminate and the agent remains stuck. (BUG-01 in
+   * /review/02-phase2-modules.md.)
+   *
+   * This method skips the expectedState gate, drives `handle.cancelAgent`
+   * directly, and routes the resulting outbound events. Snapshot upsert
+   * inside the same transaction keeps engine state consistent with the
+   * row state on disk.
+   */
+  async resumeCancellingOnBoot(agentId: AgentId): Promise<void> {
+    const row = await this.storage.agents.get(agentId);
+    if (row === null) return;
+    if (row.state !== "cancelling") return;
+
+    const handle = await this.registry.acquire(row.versionId);
+    const mutex = this.registry.getMutex(row.versionId);
+
+    await mutex.runExclusive(async () => {
+      const rollbackSnap = handle.toSnapshot();
+      try {
+        await this.storage.withTransaction(async (tx) => {
+          const out = handle.cancelAgent(row.delegationId);
+          await this.routeOutbound(out, row.versionId, tx);
+          await tx.snapshots.upsert(row.versionId, handle.toSnapshot());
+        });
+      } catch (err) {
+        if (err instanceof RecoverableEngineError) {
+          await this.versionedRollback(row.versionId, rollbackSnap);
+          await this.storage.agents.setState(agentId, {
+            state: "error",
+            errorMessage: err.message,
+          });
+          this.logger.log("info", "resumeCancellingOnBoot: rolled back as error", {
+            versionId: row.versionId,
+            agentId,
+            error: err.message,
+          });
+          return;
+        }
+        await this.poison(row.versionId, agentId, row, err);
+      }
+    });
   }
 
   // ─── Internal: outbound event routing ──────────────────────────────────
@@ -320,22 +398,28 @@ export class AgentService {
    * in the registry cache. The DB layer's transaction has already rolled
    * back; this method only reconciles the engine's mutated state. The
    * caller must already hold the version's mutex.
+   *
+   * **Awaited** — the previous fire-and-forget version released the mutex
+   * before the rebuild finished, letting concurrent acquires hit the
+   * still-poisoned handle. (BUG-02 in /review/02-phase2-modules.md.)
    */
-  private versionedRollback(versionId: VersionId, snap: ReturnType<MachineHandle["toSnapshot"]>): void {
-    // Re-acquire the IR module from registry cache rebuild path.
-    // We need the IR to fromSnapshot; the simplest path is a private hook
-    // on the registry that takes a fresh handle and writes it.
-    // We rebuild via the same loadHandle path the registry uses, but using
-    // the supplied `snap` directly.
-    void this.rebuildAndCache(versionId, snap).catch((err) => {
-      // Swallow — if rebuild fails (storage unavailable), the next acquire
-      // will reload from storage anyway. Logging is sufficient.
+  private async versionedRollback(
+    versionId: VersionId,
+    snap: ReturnType<MachineHandle["toSnapshot"]>,
+  ): Promise<void> {
+    try {
+      await this.rebuildAndCache(versionId, snap);
+    } catch (err) {
+      // If rebuild fails (storage unavailable), evict so the next acquire
+      // reloads cleanly from storage. Logging is sufficient otherwise —
+      // the next acquire will see the original poisoned state replaced
+      // by the persisted snapshot.
       this.logger.log("error", "versionedRollback rebuild failed", {
         versionId,
         error: err instanceof Error ? err.message : String(err),
       });
       this.registry.evict(versionId);
-    });
+    }
   }
 
   private async rebuildAndCache(

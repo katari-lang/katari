@@ -10,7 +10,7 @@
 
 import type { Draft } from "immer";
 import { match } from "ts-pattern";
-import type { AskKind, ModMap } from "../../event.js";
+import type { AskKind } from "../../event.js";
 import type { AskId, CallId } from "../../id.js";
 import type { StepCtx } from "../../step-ctx.js";
 import type { Value } from "../../value.js";
@@ -19,12 +19,12 @@ import { arrayOps } from "./array.js";
 import { ctorOps } from "./ctor.js";
 import { externalOps } from "./external.js";
 import { forOps } from "./for.js";
+import { handleOps } from "./handle.js";
 import { matchOps } from "./match.js";
 import { primOps } from "./prim.js";
 import { requestOps } from "./request.js";
 import { tupleOps } from "./tuple.js";
 import { userOps } from "./user.js";
-import type { ThreadOps } from "./types.js";
 
 // ─── Per-method dispatch ───────────────────────────────────────────────────
 
@@ -39,7 +39,8 @@ export function dispatchCreate(ctx: StepCtx, t: Draft<Thread>): void {
     .with({ kind: "for" }, x => forOps.create(ctx, x))
     .with({ kind: "request" }, x => requestOps.create(ctx, x))
     .with({ kind: "external" }, x => externalOps.create(ctx, x))
-    .otherwise(x => unimplemented("create", x.kind));
+    .with({ kind: "handle" }, x => handleOps.create(ctx, x))
+    .exhaustive();
 }
 
 export function dispatchDone(
@@ -58,7 +59,8 @@ export function dispatchDone(
     .with({ kind: "for" }, x => forOps.done(ctx, x, callId, value))
     .with({ kind: "request" }, x => requestOps.done(ctx, x, callId, value))
     .with({ kind: "external" }, x => externalOps.done(ctx, x, callId, value))
-    .otherwise(x => unimplemented("done", x.kind));
+    .with({ kind: "handle" }, x => handleOps.done(ctx, x, callId, value))
+    .exhaustive();
 }
 
 export function dispatchCancel(ctx: StepCtx, t: Draft<Thread>): void {
@@ -72,7 +74,8 @@ export function dispatchCancel(ctx: StepCtx, t: Draft<Thread>): void {
     .with({ kind: "for" }, x => forOps.cancel(ctx, x))
     .with({ kind: "request" }, x => requestOps.cancel(ctx, x))
     .with({ kind: "external" }, x => externalOps.cancel(ctx, x))
-    .otherwise(x => unimplemented("cancel", x.kind));
+    .with({ kind: "handle" }, x => handleOps.cancel(ctx, x))
+    .exhaustive();
 }
 
 export function dispatchCancelAck(
@@ -90,7 +93,8 @@ export function dispatchCancelAck(
     .with({ kind: "for" }, x => forOps.cancelAck(ctx, x, callId))
     .with({ kind: "request" }, x => requestOps.cancelAck(ctx, x, callId))
     .with({ kind: "external" }, x => externalOps.cancelAck(ctx, x, callId))
-    .otherwise(x => unimplemented("cancelAck", x.kind));
+    .with({ kind: "handle" }, x => handleOps.cancelAck(ctx, x, callId))
+    .exhaustive();
 }
 
 export function dispatchAsk(
@@ -98,21 +102,20 @@ export function dispatchAsk(
   t: Draft<Thread>,
   askId: AskId,
   kind: AskKind,
-  payload: Value,
-  mods: ModMap | undefined,
   childCallId: CallId,
 ): void {
   match(t)
-    .with({ kind: "prim" }, x => primOps.ask(ctx, x, askId, kind, payload, mods, childCallId))
-    .with({ kind: "ctor" }, x => ctorOps.ask(ctx, x, askId, kind, payload, mods, childCallId))
-    .with({ kind: "tuple" }, x => tupleOps.ask(ctx, x, askId, kind, payload, mods, childCallId))
-    .with({ kind: "array" }, x => arrayOps.ask(ctx, x, askId, kind, payload, mods, childCallId))
-    .with({ kind: "match" }, x => matchOps.ask(ctx, x, askId, kind, payload, mods, childCallId))
-    .with({ kind: "user" }, x => userOps.ask(ctx, x, askId, kind, payload, mods, childCallId))
-    .with({ kind: "for" }, x => forOps.ask(ctx, x, askId, kind, payload, mods, childCallId))
-    .with({ kind: "request" }, x => requestOps.ask(ctx, x, askId, kind, payload, mods, childCallId))
-    .with({ kind: "external" }, x => externalOps.ask(ctx, x, askId, kind, payload, mods, childCallId))
-    .otherwise(x => unimplemented("ask", x.kind));
+    .with({ kind: "prim" }, x => primOps.ask(ctx, x, askId, kind, childCallId))
+    .with({ kind: "ctor" }, x => ctorOps.ask(ctx, x, askId, kind, childCallId))
+    .with({ kind: "tuple" }, x => tupleOps.ask(ctx, x, askId, kind, childCallId))
+    .with({ kind: "array" }, x => arrayOps.ask(ctx, x, askId, kind, childCallId))
+    .with({ kind: "match" }, x => matchOps.ask(ctx, x, askId, kind, childCallId))
+    .with({ kind: "user" }, x => userOps.ask(ctx, x, askId, kind, childCallId))
+    .with({ kind: "for" }, x => forOps.ask(ctx, x, askId, kind, childCallId))
+    .with({ kind: "request" }, x => requestOps.ask(ctx, x, askId, kind, childCallId))
+    .with({ kind: "external" }, x => externalOps.ask(ctx, x, askId, kind, childCallId))
+    .with({ kind: "handle" }, x => handleOps.ask(ctx, x, askId, kind, childCallId))
+    .exhaustive();
 }
 
 export function dispatchAskAck(
@@ -131,13 +134,6 @@ export function dispatchAskAck(
     .with({ kind: "for" }, x => forOps.askAck(ctx, x, askId, value))
     .with({ kind: "request" }, x => requestOps.askAck(ctx, x, askId, value))
     .with({ kind: "external" }, x => externalOps.askAck(ctx, x, askId, value))
-    .otherwise(x => unimplemented("askAck", x.kind));
-}
-
-// ─── Stub for unimplemented kinds ──────────────────────────────────────────
-
-function unimplemented(method: keyof ThreadOps<Thread>, kind: Thread["kind"]): never {
-  throw new Error(
-    `engine: ${kind} thread has no ${method} implementation yet (Phase B in progress)`,
-  );
+    .with({ kind: "handle" }, x => handleOps.askAck(ctx, x, askId, value))
+    .exhaustive();
 }

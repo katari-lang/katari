@@ -65,10 +65,10 @@ export const userOps: ThreadOps<UserThread> = {
   cancel: (ctx, t) => defaultCancel<UserThread>(ctx, t as Draft<UserThread>),
   cancelAck: defaultCancelAckUnexpected,
 
-  ask(ctx, t, askId, kind, payload, mods, childCallId) {
+  ask(ctx, t, askId, kind, childCallId) {
     // Agent UserThreads catch `return`. Everything else bubbles up.
     if (kind.kind === "return" && t.catchesReturn) {
-      handleReturnCaught(ctx, t as Draft<UserThread>, payload);
+      handleReturnCaught(ctx, t as Draft<UserThread>, kind.value);
       // The `return` ask never gets askAck — it's a done-terminating ask.
       // We don't ack the immediate child; instead the caller (deep
       // descendant) will be cancelled as part of the cascade.
@@ -80,8 +80,6 @@ export const userOps: ThreadOps<UserThread> = {
       childCallId,
       askId,
       kind,
-      payload,
-      mods,
     );
   },
 
@@ -134,9 +132,12 @@ function runStatements(
     }
 
     const advance = handleStatement(ctx, t, stmt);
-    if (advance === "wait") return; // wait for child / ack
+    if (advance === "wait") return; // wait for child / ack — the handler
+    // advanced pc itself if appropriate (e.g. statementCall).
 
-    t.pc += 1;
+    if (advance === "advance") {
+      t.pc += 1;
+    }
   }
 
   // All statements done — emit our trailing value as `done` to parent.
@@ -162,7 +163,11 @@ function handleStatement(
 ): StatementOutcome {
   switch (stmt.kind) {
     case "statementCall": {
+      // Advance pc BEFORE spawning so that the eventual `done` event re-enters
+      // runStatements with the next pc, not the call statement again
+      // (which would re-spawn and infinite-loop).
       const callId = t.pc as CallId;
+      t.pc += 1;
       pushCallEvent(ctx, t, callId, stmt.body);
       return "wait";
     }
@@ -196,8 +201,8 @@ function handleStatement(
     }
     case "statementExit": {
       const value = lookupValue(ctx, t.scopeId, stmt.body.value);
-      const askKind = exitKindToAsk(stmt.body.exitKind);
-      emitAskUpwards(ctx, t, askKind, value, undefined);
+      const askKind = exitKindToAsk(stmt.body.exitKind, value);
+      emitAskUpwards(ctx, t, askKind);
       // We do not advance pc; the cancel cascade will reach us.
       return "wait";
     }
@@ -206,8 +211,8 @@ function handleStatement(
         ? lookupValue(ctx, t.scopeId, stmt.body.value)
         : NULL_VALUE;
       const mods = resolveModifiers(ctx, t.scopeId, stmt.body.modifiers);
-      const askKind = contKindToAsk(stmt.body.contKind);
-      emitAskUpwards(ctx, t, askKind, value, mods);
+      const askKind = contKindToAsk(stmt.body.contKind, value, mods);
+      emitAskUpwards(ctx, t, askKind);
       return "wait";
     }
   }
@@ -311,28 +316,30 @@ function resolveModifiers(
   return out;
 }
 
-function exitKindToAsk(kind: import("../../../ir/types.js").ExitKind): AskKind {
+function exitKindToAsk(
+  kind: import("../../../ir/types.js").ExitKind,
+  value: Value,
+): AskKind {
   switch (kind) {
     case "exitKindReturn":
-      return { kind: "return" };
+      return { kind: "return", value };
     case "exitKindBreak":
-      return { kind: "break" };
+      return { kind: "break", value };
     case "exitKindForBreak":
-      return { kind: "break-for" };
+      return { kind: "break-for", value };
   }
 }
 
-function contKindToAsk(kind: import("../../../ir/types.js").ContKind): AskKind {
+function contKindToAsk(
+  kind: import("../../../ir/types.js").ContKind,
+  value: Value,
+  mods: ModMap,
+): AskKind {
   switch (kind) {
     case "contKindNext":
-      // The compiler currently doesn't carry the originating reqId on
-      // statementCont; the immediate handler decides which req's next
-      // this is via context. We thread a placeholder reqId of -1 and
-      // let HandleThread dispatch by "I'm the boundary" rather than by
-      // matching reqId. (Phase B.7 will refine if needed.)
-      return { kind: "next", reqId: -1 as import("../../../ir/types.js").ReqId };
+      return { kind: "next", value, mods };
     case "contKindForNext":
-      return { kind: "next-for" };
+      return { kind: "next-for", value, mods };
   }
 }
 
@@ -340,8 +347,6 @@ function emitAskUpwards(
   ctx: StepCtx,
   t: Draft<UserThread>,
   askKind: AskKind,
-  payload: Value,
-  mods: ModMap | undefined,
 ): void {
   if (t.parent === null) {
     ctx.recordError(
@@ -357,8 +362,6 @@ function emitAskUpwards(
     target: t.parent,
     askId,
     askKind,
-    payload,
-    mods,
     childCallId: t.parentCallId!,
   });
 }

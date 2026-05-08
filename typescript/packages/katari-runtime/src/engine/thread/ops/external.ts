@@ -61,8 +61,8 @@ export const externalOps: ThreadOps<ExternalThread> = {
   },
 
   cancelAck: defaultCancelAckUnexpected,
-  ask: (ctx, t, askId, kind, payload, mods, childCallId) =>
-    defaultAskProxy<ExternalThread>(ctx, t as Draft<ExternalThread>, askId, kind, payload, mods, childCallId),
+  ask: (ctx, t, askId, kind, childCallId) =>
+    defaultAskProxy<ExternalThread>(ctx, t as Draft<ExternalThread>, askId, kind, childCallId),
   askAck: (ctx, t, askId, value) =>
     defaultAskAckProxy<ExternalThread>(ctx, t as Draft<ExternalThread>, askId, value),
 };

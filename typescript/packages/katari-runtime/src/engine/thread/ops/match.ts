@@ -76,8 +76,8 @@ export const matchOps: ThreadOps<MatchThread> = {
 
   cancel: (ctx, t) => defaultCancel<MatchThread>(ctx, t as Draft<MatchThread>),
   cancelAck: defaultCancelAckUnexpected,
-  ask: (ctx, t, askId, kind, payload, mods, childCallId) =>
-    defaultAskProxy<MatchThread>(ctx, t as Draft<MatchThread>, askId, kind, payload, mods, childCallId),
+  ask: (ctx, t, askId, kind, childCallId) =>
+    defaultAskProxy<MatchThread>(ctx, t as Draft<MatchThread>, askId, kind, childCallId),
   askAck: (ctx, t, askId, value) =>
     defaultAskAckProxy<MatchThread>(ctx, t as Draft<MatchThread>, askId, value),
 };

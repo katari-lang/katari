@@ -73,6 +73,10 @@ class InMemoryModuleRepo implements ModuleRepo {
     const row = this.rows.get(id);
     return row ? clone(row) : null;
   }
+
+  async delete(id: VersionId): Promise<boolean> {
+    return this.rows.delete(id);
+  }
 }
 
 class InMemoryAgentRepo implements AgentRepo {

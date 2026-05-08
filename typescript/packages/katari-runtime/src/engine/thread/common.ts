@@ -194,8 +194,8 @@ export function popAskForward(
 
 /**
  * Default proxy behavior: forward an ask to the parent. Allocates a new
- * AskId on `t`, records the mapping, and enqueues an `ask` event to
- * `t.parent` with the new id.
+ * AskId on `t`, records the (childCallId, childAskId) mapping under it,
+ * and enqueues an `ask` event addressed to `t.parent` with the new id.
  */
 export function proxyAskToParent(
   ctx: StepCtx,
@@ -203,8 +203,6 @@ export function proxyAskToParent(
   childCallId: CallId,
   childAskId: AskId,
   askKind: import("../event.js").AskKind,
-  payload: Value,
-  mods?: import("../event.js").ModMap,
 ): void {
   if (t.parent === null) {
     // No parent to forward to — this ask cannot be served. Drop and log.
@@ -221,8 +219,6 @@ export function proxyAskToParent(
     target: t.parent,
     askId: ownAskId,
     askKind,
-    payload,
-    mods,
     childCallId: t.parentCallId!,
   });
 }

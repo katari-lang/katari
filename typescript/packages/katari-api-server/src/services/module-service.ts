@@ -95,4 +95,15 @@ export class ModuleService {
     }
     return found;
   }
+
+  /**
+   * Delete a module version. Throws `ModuleNotFound` if the version
+   * doesn't exist. The storage layer's FK from `agents.version_id`
+   * ensures we cannot delete a version that still has agents.
+   */
+  async delete(versionId: VersionId): Promise<void> {
+    const removed = await this.storage.modules.delete(versionId);
+    if (!removed) throw new ModuleNotFound(versionId);
+    this.logger.log("info", "module deleted", { versionId });
+  }
 }

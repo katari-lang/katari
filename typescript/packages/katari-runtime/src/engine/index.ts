@@ -73,3 +73,8 @@ export type { Result } from "./result.js";
 export { emptyResult } from "./result.js";
 
 export { applyEvent, createState } from "./apply.js";
+
+export type { Snapshot } from "./snapshot.js";
+export { serialize, deserialize } from "./snapshot.js";
+
+export { collectGarbage, shouldGc } from "./gc.js";
