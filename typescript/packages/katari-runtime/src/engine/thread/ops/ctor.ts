@@ -1,0 +1,39 @@
+// CtorThread ops. Leaf — `create` builds a tagged value and emits done.
+
+import type { Draft } from "immer";
+import type { CallId } from "../../id.js";
+import type { CtorThread } from "../types.js";
+import {
+  defaultAskAckProxy,
+  defaultAskProxy,
+  defaultCancel,
+  defaultCancelAckUnexpected,
+} from "./defaults.js";
+import type { ThreadOps } from "./types.js";
+
+export const ctorOps: ThreadOps<CtorThread> = {
+  create(ctx, t) {
+    if (t.parent === null || t.parentCallId === null) return;
+    ctx.enqueue({
+      kind: "done",
+      target: t.parent,
+      callId: t.parentCallId,
+      value: {
+        kind: "tagged",
+        ctorId: t.ctorId,
+        fields: { ...t.args },
+      },
+    });
+  },
+
+  done(_ctx, t, callId: CallId) {
+    throw new Error(`ctor thread received done (callId=${callId}) — no children expected on ${t.id}`);
+  },
+
+  cancel: (ctx, t) => defaultCancel<CtorThread>(ctx, t as Draft<CtorThread>),
+  cancelAck: defaultCancelAckUnexpected,
+  ask: (ctx, t, askId, kind, payload, mods, childCallId) =>
+    defaultAskProxy<CtorThread>(ctx, t as Draft<CtorThread>, askId, kind, payload, mods, childCallId),
+  askAck: (ctx, t, askId, value) =>
+    defaultAskAckProxy<CtorThread>(ctx, t as Draft<CtorThread>, askId, value),
+};

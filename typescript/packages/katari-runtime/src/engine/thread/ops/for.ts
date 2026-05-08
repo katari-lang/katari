@@ -1,0 +1,268 @@
+// ForThread ops.
+//
+// Iterates over a Cartesian product of one or more iter sources. The
+// first iter is the outermost loop. For multi-iter `(a in xs, b in ys)`
+// the body sees `(a,b) ∈ {(x0,y0), (x0,y1), ..., (xN,yM)}`.
+//
+// Sequential mode: spawn one body at a time, advance on done.
+// Parallel mode:   not yet implemented (Phase H).
+//
+// Catches `break-for` (done-terminating) and `next-for` (askAck-terminating
+// with state-var modifiers) asks. Other asks bubble up.
+
+import type { Draft } from "immer";
+import type { ForBlock } from "../../../ir/types.js";
+import type { AskId, CallId } from "../../id.js";
+import type { AskKind, ModMap } from "../../event.js";
+import { spawnChild } from "../../spawn.js";
+import type { StepCtx } from "../../step-ctx.js";
+import { NULL_VALUE, type Value } from "../../value.js";
+import {
+  beginCancel,
+  commonRemoveChild,
+  hasChildren,
+  lookupValue,
+  proxyAskToParent,
+  setValueInScope,
+} from "../common.js";
+import type { ForThread, PostCancelAction } from "../types.js";
+import {
+  defaultAskAckProxy,
+  defaultCancel,
+} from "./defaults.js";
+import type { ThreadOps } from "./types.js";
+
+const THEN_CALL_ID = -1 as CallId;
+
+export const forOps: ThreadOps<ForThread> = {
+  create(ctx, t) {
+    const block = getForBlock(ctx, t.blockId);
+    if (block.parallel) {
+      throw new Error("engine.for: parallel for not yet implemented");
+    }
+
+    // Initialize state vars from caller scope into our own scope.
+    for (const [bodyVar, initVar] of block.stateInits) {
+      const v = lookupValue(ctx, t.scopeId, initVar);
+      setValueInScope(ctx, t.scopeId, bodyVar, v);
+    }
+
+    // Resolve iter sources once into a snapshot.
+    const iterables: Value[] = block.iters.map(([_elem, source]) =>
+      lookupValue(ctx, t.scopeId, source),
+    );
+    t.iterableSnapshot = iterables as Draft<Value[]>;
+
+    const total = getIterableTotal(iterables);
+    if (total === 0) {
+      emitForDone(ctx, t as Draft<ForThread>, NULL_VALUE);
+      return;
+    }
+    bindElementVars(ctx, t as Draft<ForThread>, block, iterables, 0);
+    spawnBody(ctx, t as Draft<ForThread>, 0);
+  },
+
+  done(ctx, t, callId, value) {
+    if (!commonRemoveChild(ctx, t as Draft<ForThread>, callId)) return;
+
+    if ((callId as number) === (THEN_CALL_ID as number)) {
+      // Then block done — propagate as our result.
+      if (t.parent !== null && t.parentCallId !== null) {
+        ctx.enqueue({
+          kind: "done",
+          target: t.parent,
+          callId: t.parentCallId,
+          value,
+        });
+      }
+      return;
+    }
+
+    const block = getForBlock(ctx, t.blockId);
+    t.currentIndex += 1;
+    const total = getIterableTotal(t.iterableSnapshot as Value[]);
+    if (t.currentIndex >= total) {
+      emitForDone(ctx, t as Draft<ForThread>, NULL_VALUE);
+      return;
+    }
+    bindElementVars(ctx, t as Draft<ForThread>, block, t.iterableSnapshot as Value[], t.currentIndex);
+    spawnBody(ctx, t as Draft<ForThread>, t.currentIndex);
+  },
+
+  cancel: (ctx, t) => defaultCancel<ForThread>(ctx, t as Draft<ForThread>),
+
+  /**
+   * Targeted-cancel followup for `next-for`.
+   */
+  cancelAck(ctx, t, callId) {
+    if (!commonRemoveChild(ctx, t as Draft<ForThread>, callId)) return;
+    const action = (t.postCancelActions as Record<number, PostCancelAction>)[callId as number];
+    if (action === undefined) {
+      throw new Error(
+        `engine.for: cancelAck on ${t.id} without postCancelAction for callId ${callId}`,
+      );
+    }
+    delete t.postCancelActions[callId as number];
+    if (action.kind !== "finish") {
+      throw new Error(
+        `engine.for: unexpected postCancelAction.kind=${action.kind} on ${t.id}`,
+      );
+    }
+    // "finish" here for ForThread means "advance to next iteration".
+    const block = getForBlock(ctx, t.blockId);
+    t.currentIndex += 1;
+    const total = getIterableTotal(t.iterableSnapshot as Value[]);
+    if (t.currentIndex >= total) {
+      emitForDone(ctx, t as Draft<ForThread>, NULL_VALUE);
+      return;
+    }
+    bindElementVars(ctx, t as Draft<ForThread>, block, t.iterableSnapshot as Value[], t.currentIndex);
+    spawnBody(ctx, t as Draft<ForThread>, t.currentIndex);
+  },
+
+  ask(ctx, t, askId, kind, payload, mods, childCallId) {
+    if (kind.kind === "break-for") {
+      handleBreakFor(ctx, t as Draft<ForThread>, payload);
+      return;
+    }
+    if (kind.kind === "next-for") {
+      handleNextFor(ctx, t as Draft<ForThread>, mods, childCallId);
+      return;
+    }
+    proxyAskToParent(
+      ctx,
+      t as Draft<ForThread>,
+      childCallId,
+      askId,
+      kind,
+      payload,
+      mods,
+    );
+  },
+
+  askAck: (ctx, t, askId, value) =>
+    defaultAskAckProxy<ForThread>(ctx, t as Draft<ForThread>, askId, value),
+};
+
+// ─── helpers ───────────────────────────────────────────────────────────────
+
+function getForBlock(ctx: StepCtx, blockId: import("../../../ir/types.js").BlockId): ForBlock {
+  const b = ctx.state.irModule.blocks[String(blockId)];
+  if (b === undefined) throw new Error(`engine.for: block ${blockId} not found`);
+  if (b.kind !== "blockFor") {
+    throw new Error(`engine.for: block ${blockId} is not blockFor (${b.kind})`);
+  }
+  return b.body;
+}
+
+function getIterableTotal(iterables: Value[]): number {
+  let total = 1;
+  for (const it of iterables) {
+    if (it.kind !== "array") {
+      throw new Error("engine.for: iter source is not an array");
+    }
+    total *= it.elements.length;
+  }
+  return total;
+}
+
+function bindElementVars(
+  ctx: StepCtx,
+  t: Draft<ForThread>,
+  block: ForBlock,
+  iterables: Value[],
+  linearIndex: number,
+): void {
+  let remaining = linearIndex;
+  for (let i = block.iters.length - 1; i >= 0; i--) {
+    const iter = block.iters[i]!;
+    const arr = iterables[i];
+    if (arr === undefined || arr.kind !== "array") {
+      throw new Error("engine.for: iter source is not an array");
+    }
+    const len = arr.elements.length;
+    if (len === 0) {
+      throw new Error(`engine.for: iter at index ${i} is empty`);
+    }
+    const digit = remaining % len;
+    remaining = Math.floor(remaining / len);
+    const elem = arr.elements[digit]!;
+    setValueInScope(ctx, t.scopeId, iter[0], elem);
+  }
+}
+
+function spawnBody(ctx: StepCtx, t: Draft<ForThread>, index: number): void {
+  const block = getForBlock(ctx, t.blockId);
+  spawnChild(ctx, {
+    parentId: t.id,
+    parentCallId: index as CallId,
+    blockId: block.bodyBlock,
+    callArgs: {},
+    scopeMode: { mode: "inline", parentScopeId: t.scopeId },
+  });
+}
+
+function emitForDone(
+  ctx: StepCtx,
+  t: Draft<ForThread>,
+  value: Value,
+): void {
+  const block = getForBlock(ctx, t.blockId);
+  if (block.thenBlock !== undefined) {
+    spawnChild(ctx, {
+      parentId: t.id,
+      parentCallId: THEN_CALL_ID,
+      blockId: block.thenBlock,
+      callArgs: {},
+      scopeMode: { mode: "inline", parentScopeId: t.scopeId },
+    });
+    return;
+  }
+  if (t.parent !== null && t.parentCallId !== null) {
+    ctx.enqueue({
+      kind: "done",
+      target: t.parent,
+      callId: t.parentCallId,
+      value,
+    });
+  }
+}
+
+function handleBreakFor(
+  ctx: StepCtx,
+  t: Draft<ForThread>,
+  value: Value,
+): void {
+  if (t.status === "cancelling") return;
+  t.pendingReturn = value;
+  beginCancel(ctx, t);
+}
+
+function handleNextFor(
+  ctx: StepCtx,
+  t: Draft<ForThread>,
+  mods: ModMap | undefined,
+  childCallId: CallId,
+): void {
+  if (mods !== undefined) {
+    for (const [varKey, value] of Object.entries(mods)) {
+      setValueInScope(ctx, t.scopeId, Number(varKey), value);
+    }
+  }
+  // Issue a targeted cancel to the body iteration whose descendant
+  // emitted the ask. The childCallId on the inbound ask is the immediate
+  // child (i.e. the body iteration for the current index).
+  const childId = (t.children as Record<number, import("../../id.js").ThreadId>)[childCallId as number];
+  if (childId === undefined) {
+    // Body already gone — race. Just advance.
+    return;
+  }
+  t.postCancelActions[childCallId as number] = { kind: "finish" };
+  ctx.enqueue({ kind: "cancel", target: childId });
+}
+
+// `AskKind`/`AskId` referenced indirectly via signatures.
+void (null as unknown as AskKind);
+void (null as unknown as AskId);
+// hasChildren imported but used only for clarity in the file's mental model.
+void hasChildren;

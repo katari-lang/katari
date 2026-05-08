@@ -71,3 +71,5 @@ export { LoggerTag, buildConsoleLogger, consoleLogger, noopLogger } from "./logg
 
 export type { Result } from "./result.js";
 export { emptyResult } from "./result.js";
+
+export { applyEvent, createState } from "./apply.js";

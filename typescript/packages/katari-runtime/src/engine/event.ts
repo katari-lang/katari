@@ -21,7 +21,6 @@ import type {
   CallId,
   DelegationId,
   EscalationId,
-  ScopeId,
   ThreadId,
 } from "./id.js";
 import type { Value } from "./value.js";
@@ -87,13 +86,15 @@ export type ModMap = Record<number, Value>;
 
 export type InternalEventPayload =
   | {
+      /**
+       * Run the variant's create op. The thread record itself must already
+       * be in `state.threads[threadId]` when this event is enqueued —
+       * the spawning code is responsible for allocating the record (with
+       * its parent / parentCallId / scopeId / variant-specific fields)
+       * and registering it before queueing this event.
+       */
       kind: "create";
       threadId: ThreadId;
-      blockId: number;
-      args: Record<string, Value>;
-      parent: ThreadId | null;
-      parentCallId: CallId | null;
-      scopeId: ScopeId;
     }
   | {
       kind: "done";

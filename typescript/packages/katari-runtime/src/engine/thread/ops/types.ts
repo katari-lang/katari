@@ -1,0 +1,55 @@
+// ThreadOps: the per-variant method record. Each Thread kind exports a
+// `ThreadOps<KindName>` value that fills in:
+//
+//   - create:   first dispatch after spawn — kick off the variant's body
+//   - done:     a child completed normally
+//   - cancel:   cancel was requested (default: cascade to children)
+//   - cancelAck: a child finished cancellation (used for targeted cancels)
+//   - ask:      an ask bubbled up — catch or proxy to parent
+//   - askAck:   an askAck arrived — typically forward via askIdMap
+//
+// All ops mutate `ctx.state` (Immer draft). Outbound events / errors / logs
+// go via `ctx.emit` / `ctx.recordError` / `ctx.log`. Internal events go via
+// `ctx.enqueue`.
+
+import type { Draft } from "immer";
+import type { AskId, CallId } from "../../id.js";
+import type { AskKind, ModMap } from "../../event.js";
+import type { StepCtx } from "../../step-ctx.js";
+import type { Value } from "../../value.js";
+import type { Thread } from "../types.js";
+
+export type ThreadOps<T extends Thread> = {
+  /** First dispatch after the thread is registered in state.threads. */
+  create(ctx: StepCtx, t: Draft<T>): void;
+  /** A direct child completed normally with `value`. */
+  done(ctx: StepCtx, t: Draft<T>, callId: CallId, value: Value): void;
+  /**
+   * cancel was requested. Default behaviour (in `defaultOps`) is the cascade
+   * via `beginCancel`; variants override to send custom outbound events
+   * first (e.g. ExternalThread emits a terminate to FFI before waiting).
+   */
+  cancel(ctx: StepCtx, t: Draft<T>): void;
+  /** A direct child cancellation completed (used for targeted cancel). */
+  cancelAck(ctx: StepCtx, t: Draft<T>, callId: CallId): void;
+  /**
+   * An ask bubbled up from `childCallId`. The variant decides whether to
+   * catch (process locally + emit askAck or convert to done) or to proxy
+   * to its own parent via `proxyAskToParent` from `common.ts`.
+   */
+  ask(
+    ctx: StepCtx,
+    t: Draft<T>,
+    askId: AskId,
+    askKind: AskKind,
+    payload: Value,
+    mods: ModMap | undefined,
+    childCallId: CallId,
+  ): void;
+  /**
+   * An askAck addressed to this thread arrived. Typically forwarded via
+   * `proxyAskAckToChild`; variants that originate asks (RequestThread)
+   * intercept and convert to `done`.
+   */
+  askAck(ctx: StepCtx, t: Draft<T>, askId: AskId, value: Value): void;
+};

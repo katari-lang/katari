@@ -1,0 +1,73 @@
+// Default ThreadOps fragments shared across variants. Variants spread these
+// into their own ops record and override only the methods that need
+// variant-specific behaviour.
+
+import type { Draft } from "immer";
+import type { AskId, CallId } from "../../id.js";
+import type { AskKind, ModMap } from "../../event.js";
+import type { StepCtx } from "../../step-ctx.js";
+import type { Value } from "../../value.js";
+import {
+  beginCancel,
+  proxyAskAckToChild,
+  proxyAskToParent,
+} from "../common.js";
+import type { Thread } from "../types.js";
+
+/**
+ * Standard cancel: enter "cancelling" state and cascade to children.
+ * Almost every variant uses this directly; `ExternalThread` overrides
+ * to emit an outbound terminate first.
+ */
+export function defaultCancel<T extends Thread>(
+  ctx: StepCtx,
+  t: Draft<T>,
+): void {
+  beginCancel(ctx, t);
+}
+
+/**
+ * Variants that don't catch any ask kind use this — just bubble up to
+ * their parent. Examples: PrimThread, CtorThread, MatchThread, TupleThread,
+ * ArrayThread.
+ *
+ * Note: leaf threads (PrimThread, CtorThread, ExternalThread) won't
+ * actually receive asks at runtime because they have no children. The
+ * default exists so the dispatch table is total.
+ */
+export function defaultAskProxy<T extends Thread>(
+  ctx: StepCtx,
+  t: Draft<T>,
+  _askId: AskId,
+  askKind: AskKind,
+  payload: Value,
+  mods: ModMap | undefined,
+  childCallId: CallId,
+): void {
+  proxyAskToParent(ctx, t, childCallId, _askId, askKind, payload, mods);
+}
+
+/** Default askAck behaviour: forward via askIdMap. */
+export function defaultAskAckProxy<T extends Thread>(
+  ctx: StepCtx,
+  t: Draft<T>,
+  askId: AskId,
+  value: Value,
+): void {
+  proxyAskAckToChild(ctx, t, askId, value);
+}
+
+/**
+ * Most leaf variants don't expect children to ack a cancel — if it
+ * happens it is from a targeted cancel only HandleThread / ForThread
+ * issue. This default throws as an irrecoverable invariant violation.
+ */
+export function defaultCancelAckUnexpected<T extends Thread>(
+  _ctx: StepCtx,
+  t: Draft<T>,
+  callId: CallId,
+): void {
+  throw new Error(
+    `engine: ${t.kind} thread received unexpected cancelAck (callId=${callId})`,
+  );
+}
