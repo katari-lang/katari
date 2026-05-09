@@ -580,7 +580,7 @@ mergeSymbol newPos name existing incoming = do
       }
   where
     reportFrom ::
-      Ord k =>
+      (Ord k) =>
       (IdentifierState -> Map k v) ->
       (v -> SourceSpan) ->
       k ->
@@ -588,10 +588,10 @@ mergeSymbol newPos name existing incoming = do
     reportFrom getMap getSpan xId = do
       maybeSpan <- gets (fmap getSpan . Map.lookup xId . getMap)
       maybe (pure ()) (emitError . ErrorDuplicateName newPos name) maybeSpan
-    reportFromVariable    = reportFrom (.variables)    (.variableSourceSpan)
-    reportFromType        = reportFrom (.types)        (.typeSourceSpan)
-    reportFromModule      = reportFrom (.modules)      (.moduleSourceSpan)
-    reportFromRequest     = reportFrom (.requests)     (.requestSourceSpan)
+    reportFromVariable = reportFrom (.variables) (.variableSourceSpan)
+    reportFromType = reportFrom (.types) (.typeSourceSpan)
+    reportFromModule = reportFrom (.modules) (.moduleSourceSpan)
+    reportFromRequest = reportFrom (.requests) (.requestSourceSpan)
     reportFromConstructor = reportFrom (.constructors) (.constructorSourceSpan)
 
 -- | Generic per-slot merge. The first existing id wins on conflict; the
@@ -2353,18 +2353,17 @@ resolveModuleQualifiedChain moduleId moduleRef labels totalSpan =
 -- old fail-fast behaviour can branch on @null errors@.
 identify :: Map Text (Module Parsed) -> (IdentifierResult, [IdentifierError])
 identify moduleMap =
-  let (resolved, finalState) =
+  let ((asts, primVars, primRules), finalState) =
         runIdentifier $ do
           for_ (findImportCycles moduleMap) (emitImportCycleError moduleMap)
-          (primModuleIds, primVars, primRules) <- preregisterPrimitives
+          (primModuleIds, primVars', primRules') <- preregisterPrimitives
           userModuleIds <- assignModuleIds moduleMap
           let allModuleIds = Map.union primModuleIds userModuleIds
           userExports <- buildExports moduleMap
-          let allExports = Map.unionWith Map.union userExports (buildPrimExports primVars)
+          let allExports = Map.unionWith Map.union userExports (buildPrimExports primVars')
           topLevels <- buildTopLevels allModuleIds allExports moduleMap
           identifiedAsts <- resolveModule topLevels allModuleIds allExports moduleMap
-          pure (identifiedAsts, primVars, primRules)
-      (asts, primVars, primRules) = resolved
+          pure (identifiedAsts, primVars', primRules')
       result =
         mkIdentifierResult
           finalState.modules

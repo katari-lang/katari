@@ -138,7 +138,7 @@ emptyOccurrenceIndex =
 -- | Walk all modules in 'ZonkResult' and collect every name-reference
 -- occurrence grouped by its resolved identifier.
 buildOccurrenceIndex :: IdentifierResult -> ZonkResult -> OccurrenceIndex
-buildOccurrenceIndex idResult zonkResult =
+buildOccurrenceIndex _ zonkResult =
   foldr collectModuleOccurrences emptyOccurrenceIndex (Map.elems zonkResult.zonkedModules)
 
 collectModuleOccurrences :: Module Zonked -> OccurrenceIndex -> OccurrenceIndex
@@ -198,7 +198,7 @@ findDefinition idResult zonkResult filePath position = do
 -- ===========================================================================
 
 findModuleByFilePath :: IdentifierResult -> ZonkResult -> FilePath -> Maybe (Module Zonked)
-findModuleByFilePath idResult zonkResult filePath =
+findModuleByFilePath _ zonkResult filePath =
   listToMaybe [m | m <- Map.elems zonkResult.zonkedModules, m.sourceSpan.filePath == filePath]
 
 -- ===========================================================================
