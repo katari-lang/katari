@@ -15,6 +15,7 @@ import type { AskId, CallId } from "../../id.js";
 import type { StepCtx } from "../../step-ctx.js";
 import type { Value } from "../../value.js";
 import type { Thread } from "../types.js";
+import { agentOps } from "./agent.js";
 import { arrayOps } from "./array.js";
 import { ctorOps } from "./ctor.js";
 import { externalOps } from "./external.js";
@@ -30,6 +31,7 @@ import { userOps } from "./user.js";
 
 export function dispatchCreate(ctx: StepCtx, t: Draft<Thread>): void {
   match(t)
+    .with({ kind: "agent" }, x => agentOps.create(ctx, x))
     .with({ kind: "prim" }, x => primOps.create(ctx, x))
     .with({ kind: "ctor" }, x => ctorOps.create(ctx, x))
     .with({ kind: "tuple" }, x => tupleOps.create(ctx, x))
@@ -50,6 +52,7 @@ export function dispatchDone(
   value: Value,
 ): void {
   match(t)
+    .with({ kind: "agent" }, x => agentOps.done(ctx, x, callId, value))
     .with({ kind: "prim" }, x => primOps.done(ctx, x, callId, value))
     .with({ kind: "ctor" }, x => ctorOps.done(ctx, x, callId, value))
     .with({ kind: "tuple" }, x => tupleOps.done(ctx, x, callId, value))
@@ -65,6 +68,7 @@ export function dispatchDone(
 
 export function dispatchCancel(ctx: StepCtx, t: Draft<Thread>): void {
   match(t)
+    .with({ kind: "agent" }, x => agentOps.cancel(ctx, x))
     .with({ kind: "prim" }, x => primOps.cancel(ctx, x))
     .with({ kind: "ctor" }, x => ctorOps.cancel(ctx, x))
     .with({ kind: "tuple" }, x => tupleOps.cancel(ctx, x))
@@ -84,6 +88,7 @@ export function dispatchCancelAck(
   callId: CallId,
 ): void {
   match(t)
+    .with({ kind: "agent" }, x => agentOps.cancelAck(ctx, x, callId))
     .with({ kind: "prim" }, x => primOps.cancelAck(ctx, x, callId))
     .with({ kind: "ctor" }, x => ctorOps.cancelAck(ctx, x, callId))
     .with({ kind: "tuple" }, x => tupleOps.cancelAck(ctx, x, callId))
@@ -105,6 +110,7 @@ export function dispatchAsk(
   childCallId: CallId,
 ): void {
   match(t)
+    .with({ kind: "agent" }, x => agentOps.ask(ctx, x, askId, kind, childCallId))
     .with({ kind: "prim" }, x => primOps.ask(ctx, x, askId, kind, childCallId))
     .with({ kind: "ctor" }, x => ctorOps.ask(ctx, x, askId, kind, childCallId))
     .with({ kind: "tuple" }, x => tupleOps.ask(ctx, x, askId, kind, childCallId))
@@ -125,6 +131,7 @@ export function dispatchAskAck(
   value: Value,
 ): void {
   match(t)
+    .with({ kind: "agent" }, x => agentOps.askAck(ctx, x, askId, value))
     .with({ kind: "prim" }, x => primOps.askAck(ctx, x, askId, value))
     .with({ kind: "ctor" }, x => ctorOps.askAck(ctx, x, askId, value))
     .with({ kind: "tuple" }, x => tupleOps.askAck(ctx, x, askId, value))

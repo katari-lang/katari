@@ -63,12 +63,21 @@ lowerSource src =
 -- | Look up the user-block body of a top-level agent by bare name.
 -- Test fixtures load every source under module name @"main"@, so the
 -- qualified name we look up is @QualifiedName "main" agentName@.
+--
+-- Lowering wraps the body in a 'BlockAgent' (the externally-callable id)
+-- whose 'entryBody' points to the inner 'BlockUser'. This helper
+-- transparently follows the wrapper.
 agentBody :: Text -> IRModule -> Maybe UserBlock
 agentBody agentName irMod = do
   entryId <- Map.lookup (QualifiedName "main" agentName) irMod.entries
   block <- Map.lookup entryId irMod.blocks
   case block of
     BlockUser body -> Just body
+    BlockAgent agent -> do
+      bodyBlock <- Map.lookup agent.entryBody irMod.blocks
+      case bodyBlock of
+        BlockUser body -> Just body
+        _ -> Nothing
     _ -> Nothing
 
 -- | Resolve a constructor's bare name (in module @"main"@) to its IR
@@ -166,7 +175,6 @@ stage1Spec = describe "Stage 1 — literals / arithmetic" $ do
         ub.statements `shouldBe` []
         ub.trailing `shouldBe` Nothing
         ub.parameters `shouldBe` []
-        ub.kind `shouldBe` BlockKindAgent
 
   it "lowers an integer literal as StatementLoadLiteral with the integer value" $ do
     (irMod, errs) <- lowerSource "agent main() { 42 }"
@@ -304,11 +312,11 @@ stage2Spec = describe "Stage 2 \8212 control flow" $ do
       [m] -> do
         let [arm] = m.arms
         case userBlockOf arm.body irMod of
-          Just child -> child.kind `shouldBe` BlockKindInline
+          Just _ -> pure ()
           Nothing -> expectationFailure "then-branch block not found"
         case m.defaultArm of
           Just defId -> case userBlockOf defId irMod of
-            Just child -> child.kind `shouldBe` BlockKindInline
+            Just _ -> pure ()
             Nothing -> expectationFailure "else-branch block not found"
           Nothing -> expectationFailure "expected default branch"
       _ -> expectationFailure "expected 1 BlockMatch call"
@@ -437,7 +445,7 @@ stage3Spec = describe "Stage 3 \8212 block / let / scope" $ do
     let lastCall = last (calls ub)
     lastCall.output `shouldBe` ub.trailing
 
-  it "inline block creates a child block with BlockKindInline" $ do
+  it "inline block creates a child BlockUser" $ do
     (irMod, errs) <- lowerSource "agent main() { let x = { let a = 1; a + 1 }; x }"
     errs `shouldBe` []
     let Just ub = agentBody "main" irMod
@@ -447,7 +455,7 @@ stage3Spec = describe "Stage 3 \8212 block / let / scope" $ do
     case childCalls of
       (c : _) -> case c.target of
         CallTargetBlock {block} -> case userBlockOf block irMod of
-          Just child -> child.kind `shouldBe` BlockKindInline
+          Just _ -> pure ()
           Nothing -> expectationFailure "child block not found"
         _ -> expectationFailure "child call must target a block"
       _ -> pure ()
@@ -520,17 +528,17 @@ stage3Spec = describe "Stage 3 \8212 block / let / scope" $ do
     errs `shouldBe` []
     let Just ub = agentBody "main" irMod
     -- The main body should issue a StatementMakeClosure whose block is a
-    -- BlockUser (the local helper agent), followed by a StatementCall via
-    -- CallTargetValue (the closure var).
+    -- BlockAgent (the local helper agent), followed by a
+    -- StatementAgentCallClosure that dispatches via the closure value.
     let closures =
-          [ mc | StatementMakeClosure mc <- ub.statements, Just (BlockUser _) <- [Map.lookup mc.block irMod.blocks]
+          [ mc | StatementMakeClosure mc <- ub.statements, Just (BlockAgent _) <- [Map.lookup mc.block irMod.blocks]
           ]
     length closures `shouldBe` 1
     let helperVar = (head closures).output
-    let valueCalls =
-          [ c | StatementCall c <- ub.statements, CallTargetValue {var} <- [c.target], var == helperVar
+    let agentClosureCalls =
+          [ d | StatementAgentCallClosure d <- ub.statements, d.target == helperVar
           ]
-    length valueCalls `shouldBe` 1
+    length agentClosureCalls `shouldBe` 1
 
   it "function parameter with tuple pattern destructures via StatementBindPattern" $ do
     (irMod, errs) <-
@@ -556,7 +564,7 @@ stage3Spec = describe "Stage 3 \8212 block / let / scope" $ do
 isChildBlockCall :: CallData -> IRModule -> Bool
 isChildBlockCall c irMod = case c.target of
   CallTargetBlock {block} -> case Map.lookup block irMod.blocks of
-    Just (BlockUser body) -> body.kind == BlockKindInline
+    Just (BlockUser _) -> True
     _ -> False
   _ -> False
 
@@ -566,7 +574,7 @@ isChildBlockCall c irMod = case c.target of
 
 stage4Spec :: Spec
 stage4Spec = describe "Stage 4 \8212 agent calls / closure" $ do
-  it "direct call to a top-level agent uses CallTargetBlock" $ do
+  it "direct call to a top-level agent uses StatementAgentCall" $ do
     (irMod, errs) <-
       lowerSource $
         Text.unlines
@@ -575,14 +583,14 @@ stage4Spec = describe "Stage 4 \8212 agent calls / closure" $ do
           ]
     errs `shouldBe` []
     let Just ub = agentBody "main" irMod
-    case calls ub of
-      [c] -> case c.target of
-        CallTargetBlock {block} -> case Map.lookup block irMod.blocks of
-          Just (BlockUser _) -> pure () -- helper is a user block
-          Just _ -> expectationFailure "expected user block target"
-          Nothing -> expectationFailure "target block not found"
-        _ -> expectationFailure "expected CallTargetBlock target"
-      _ -> expectationFailure "expected 1 call"
+    -- Top-level agent dispatch is via StatementAgentCall keyed by qualified name,
+    -- not StatementCall + CallTargetBlock.
+    let agentCalls = [d | StatementAgentCall d <- ub.statements]
+    case agentCalls of
+      [d] -> do
+        d.target.name `shouldBe` "helper"
+        d.target.module_ `shouldBe` "main"
+      _ -> expectationFailure "expected exactly one StatementAgentCall"
 
   it "agent value escapes via StatementMakeClosure when used as a binding" $ do
     (irMod, errs) <-
@@ -596,18 +604,17 @@ stage4Spec = describe "Stage 4 \8212 agent calls / closure" $ do
         closures = [d | StatementMakeClosure d <- ub.statements]
     closures `shouldNotBe` []
     -- With StatementBindPattern, the closure var is routed through a pattern binding.
-    -- The call should use CallTargetValue on the pattern-bound var, not the closure var.
+    -- The call should be StatementAgentCallClosure on the pattern-bound var.
     case closures of
       (d : _) -> do
-        -- The StatementBindPattern that follows should source from the closure output.
         let bindPat = listToMaybe [bp | StatementBindPattern bp <- ub.statements, bp.source == d.output]
         bindPat `shouldSatisfy` isJust
-        -- The var used in the CallTargetValue call is the pattern var (not d.output).
         case bindPat of
           Just bp -> case bp.pattern of
             MatchPatternVariable patVar -> do
-              let valueCalls = [c | c <- calls ub, c.target == CallTargetValue {var = patVar}]
-              valueCalls `shouldNotBe` []
+              let agentClosureCalls =
+                    [c | StatementAgentCallClosure c <- ub.statements, c.target == patVar]
+              agentClosureCalls `shouldNotBe` []
             _ -> expectationFailure "expected MatchPatternVariable pattern for simple let binding"
           Nothing -> pure ()
       _ -> pure ()
@@ -1002,3 +1009,22 @@ stage8Spec = describe "Stage 8 \8212 edge cases" $ do
     -- runtime scope inheritance the outer locals stay visible at lower
     -- time and the runtime bridges them at call time.
     errs `shouldBe` []
+
+  -- stack-safe up to ~10000 depth (Haskell's ReaderT/State stack is lazy)
+  it "10000 sequential let bindings lower without stack overflow" $ do
+    let depth = 10000 :: Int
+        letLines =
+          [ "  let x" <> Text.pack (show i)
+              <> " = "
+              <> if i == 0 then "0" else "x" <> Text.pack (show (i - 1))
+          | i <- [0 .. depth - 1]
+          ]
+        src =
+          Text.unlines $
+            ["agent main() -> integer {"]
+              ++ letLines
+              ++ ["  x" <> Text.pack (show (depth - 1)), "}"]
+    result <- try @SomeException (lowerSource src)
+    case result of
+      Left ex -> expectationFailure ("stack overflow or exception at depth 10000: " ++ show ex)
+      Right (_, errs) -> errs `shouldBe` []

@@ -48,12 +48,24 @@ export type ExternalEventPayload =
       delegationId: DelegationId;
     }
   | {
+      /**
+       * External party requests a capability (request) from inside an
+       * agent we are running. `delegationId` identifies which inbound
+       * delegation the escalation belongs to (i.e. which AgentThread
+       * should receive the proxied ask). `request` is the qualified name
+       * of the request being asked.
+       */
       kind: "escalate";
-      target: QualifiedName;
-      args: Record<string, Value>;
+      delegationId: DelegationId;
       escalationId: EscalationId;
+      request: QualifiedName;
+      args: Record<string, Value>;
     }
   | {
+      /**
+       * Reply to an outbound escalate. `escalationId` matches the id
+       * recorded on the corresponding ExternalThread.pendingEscalations.
+       */
       kind: "escalateAck";
       escalationId: EscalationId;
       value: Value;

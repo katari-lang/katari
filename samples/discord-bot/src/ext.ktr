@@ -1,88 +1,85 @@
 // ext.ktr -- 外部サーバー宣言
 
-import types
+import { ChannelId, MessageId, Message, SearchResult, AgentRef } from types
 
 // ─── Discord サーバー ───────────────────────────────────────────
 
-@"チャンネルを監視し、メッセージ受信ごとに on_message request を発火する"
-external agent watch_channel(channel_id: ChannelId) -> null with on_message from "discord:watch_channel"
+@"チャンネルを監視し、メッセージ受信ごとに on_message req を発火する"
+ext agent watch_channel(@"監視するチャンネルの ID" channel_id: ChannelId) -> null with on_message
 
 @"メッセージ受信イベント"
-external request on_message(msg: Message) -> null from "discord:on_message"
+req on_message(msg: Message) -> null
 
 @"メッセージを送信する"
-external agent send_message(
-  channel_id: ChannelId @"送信先チャンネルID",
-  content: string @"メッセージ本文"
-) -> MessageId from "discord:send_message"
+ext agent send_message(
+  @"送信先チャンネル ID" channel_id: ChannelId,
+  @"メッセージ本文" content: string
+) -> MessageId
 
 @"メッセージに返信する"
-external agent reply_to(
-  channel_id: ChannelId @"チャンネルID",
-  message_id: MessageId @"返信先メッセージID",
-  content: string @"返信本文"
-) -> MessageId from "discord:reply_to"
+ext agent reply_to(
+  @"チャンネル ID" channel_id: ChannelId,
+  @"返信先メッセージ ID" message_id: MessageId,
+  @"返信本文" content: string
+) -> MessageId
 
 @"チャンネルの最新メッセージを取得する"
-external agent fetch_messages(
-  channel_id: ChannelId @"チャンネルID",
-  limit: integer @"取得件数"
-) -> array[Message] from "discord:fetch_messages"
+ext agent fetch_messages(
+  @"チャンネル ID" channel_id: ChannelId,
+  @"取得件数" limit: integer
+) -> array[Message]
 
 // ─── AI サーバー ────────────────────────────────────────────────
-@"AIセッションを作成する"
-external agent create_session(
-  summary_threshold: integer | null @ "要約トリガーの文字数閾値 (null の場合 50000)"
-) -> string from "ai:create_session"
 
-@"AIにプロンプトを送信し、ツール呼び出し付きで応答を得る"
-external agent ask_ai_with_tools(
-  session_id: string @"セッションID",
-  system: string @"システムプロンプト",
-  prompt: string @"プロンプト",
-  tools: array[AgentRef] @"使用可能なツールの配列"
-) -> string from "ai:ask_with_tools"
+@"AI セッションを作成する"
+ext agent create_session(
+  @"要約トリガーの文字数閾値 (null の場合 50000)" summary_threshold: integer | null
+) -> string
+
+@"AI にプロンプトを送信し、ツール呼び出し付きで応答を得る"
+ext agent ask_ai_with_tools(
+  @"セッション ID" session_id: string,
+  @"システムプロンプト" system: string,
+  @"プロンプト" prompt: string,
+  @"使用可能なツールの配列" tools: array[AgentRef]
+) -> string
 
 // ─── Cron サーバー ──────────────────────────────────────────────
 
-@"Cron式に基づき定期的にnotify requestを発火する"
-external agent schedule(cron_expr: string @"Cron式") -> null with notify from "cron:schedule"
+@"Cron 式に基づき定期的に notify req を発火する"
+ext agent schedule(@"Cron 式" cron_expr: string) -> null with notify
 
 @"定期実行トリガー"
-external request notify(time: string @"現在時刻") -> null from "cron:notify"
+req notify(@"現在時刻" time: string) -> null
 
-// ─── Web検索サーバー ────────────────────────────────────────────
+// ─── Web 検索サーバー ────────────────────────────────────────────
 
-@"Webを検索して結果を取得する"
-external agent web_search(
-  query: string @"検索クエリ"
-) -> array[SearchResult] from "websearch:search"
+@"Web を検索して結果を取得する"
+ext agent web_search(@"検索クエリ" query: string) -> array[SearchResult]
 
 // ─── Sandbox サーバー ────────────────────────────────────────────
 
 @"Docker sandbox を作成する"
-external agent create_sandbox() -> string from "sandbox:create"
+ext agent create_sandbox() -> string
 
 @"sandbox でコマンドを実行する"
-external agent exec_in_sandbox(
-  sandbox_id: string @"サンドボックスID",
-  command: string @"実行するコマンド"
-) -> string from "sandbox:exec"
+ext agent exec_in_sandbox(
+  @"サンドボックス ID" sandbox_id: string,
+  @"実行するコマンド" command: string
+) -> string
 
 @"sandbox にファイルを書き込む"
-external agent write_file_in_sandbox(
-  sandbox_id: string @"サンドボックスID",
-  path: string @"ファイルパス",
-  content: string @"ファイル内容"
-) -> null from "sandbox:write_file"
+ext agent write_file_in_sandbox(
+  @"サンドボックス ID" sandbox_id: string,
+  @"ファイルパス" path: string,
+  @"ファイル内容" content: string
+) -> null
 
 @"sandbox からファイルを読み込む"
-external agent read_file_from_sandbox(
-  sandbox_id: string @"サンドボックスID",
-  path: string @"ファイルパス"
-) -> string from "sandbox:read_file"
+ext agent read_file_from_sandbox(
+  @"サンドボックス ID" sandbox_id: string,
+  @"ファイルパス" path: string
+) -> string
 
 @"sandbox を破棄する"
-external agent destroy_sandbox(
-  sandbox_id: string @"サンドボックスID"
-) -> null from "sandbox:destroy"
+ext agent destroy_sandbox(@"サンドボックス ID" sandbox_id: string) -> null

@@ -62,43 +62,22 @@
     },
     "22": {
       "body": {
-        "kind": "blockKindAgent",
+        "entryBody": 25,
         "parameters": [
           {
             "label": "p",
             "var": 0
           }
         ],
-        "statements": [
-          {
-            "body": {
-              "pattern": {
-                "body": 1,
-                "kind": "matchPatternVariable"
-              },
-              "source": 0
-            },
-            "kind": "statementBindPattern"
-          },
-          {
-            "body": {
-              "arguments": [],
-              "output": 3,
-              "target": {
-                "block": 24,
-                "kind": "callTargetBlock"
-              }
-            },
-            "kind": "statementCall"
-          }
-        ],
-        "trailing": 3
+        "qualifiedName": {
+          "module_": "main",
+          "name": "project_x"
+        }
       },
-      "kind": "blockUser"
+      "kind": "blockAgent"
     },
     "23": {
       "body": {
-        "kind": "blockKindInline",
         "parameters": [],
         "statements": [],
         "trailing": 2
@@ -136,6 +115,41 @@
         "subject": 1
       },
       "kind": "blockMatch"
+    },
+    "25": {
+      "body": {
+        "parameters": [
+          {
+            "label": "p",
+            "var": 0
+          }
+        ],
+        "statements": [
+          {
+            "body": {
+              "pattern": {
+                "body": 1,
+                "kind": "matchPatternVariable"
+              },
+              "source": 0
+            },
+            "kind": "statementBindPattern"
+          },
+          {
+            "body": {
+              "arguments": [],
+              "output": 3,
+              "target": {
+                "block": 24,
+                "kind": "callTargetBlock"
+              }
+            },
+            "kind": "statementCall"
+          }
+        ],
+        "trailing": 3
+      },
+      "kind": "blockUser"
     },
     "3": {
       "body": "div",
@@ -192,6 +206,7 @@
       "20": "prim:to_string",
       "21": "point",
       "22": "project_x",
+      "25": "project_x.body",
       "3": "prim:div",
       "4": "prim:neg",
       "5": "prim:eq",

@@ -12,8 +12,9 @@
 --     statement として残す。jump / label は使わない。
 --   * 大域脱出は 'SExit' (return / break / for_break) と 'SCont' (next /
 --     for_next) の 2 系統。経路上 then-block の適用ルールが異なる。
---   * Variable は 'VarId' のみ。scope は runtime 側で 'UserBlock.kind' /
---     'BlockHandler' を見て管理する。
+--   * Variable は 'VarId' のみ。scope は runtime 側で 'BlockAgent' /
+--     'BlockHandler' を見て管理する。'BlockUser' は常に inline (parent
+--     scope inherit) として扱う。
 --   * 型情報は IR に含まれない。
 --
 -- JSON 表現は全て 'genericToJSON' / 'genericParseJSON' で導出する。
@@ -41,7 +42,6 @@ module Katari.IR
     -- * Block
     Block (..),
     UserBlock (..),
-    BlockKind (..),
     AgentBlock (..),
     MatchBlock (..),
     ForBlock (..),
@@ -267,11 +267,6 @@ data Block where
   -- Top-level agent declarations lower to this. Inline blocks (match arm
   -- bodies, for bodies, handle bodies) lower to 'BlockUser' and do NOT
   -- create an agent boundary.
-  --
-  -- Phase 3.1 (additive): the type exists but Lowering does not emit it
-  -- yet — agents currently still go through 'BlockUser' with
-  -- 'BlockKindAgent'. Phase 3.7 flips the emit path and removes the
-  -- 'kind' field from 'UserBlock'.
   BlockAgent :: AgentBlock -> Block
   deriving (Eq, Show, Generic)
 
@@ -281,45 +276,12 @@ instance ToJSON Block where
 instance FromJSON Block where
   parseJSON = genericParseJSON sumOptions
 
--- | Structural role of a 'UserBlock'. Determines scope inheritance and
--- exit-capture semantics at runtime.
---
--- @
---                  catchesReturn  inheritScope
--- BlockKindAgent   True           False
--- BlockKindInline  False          True
--- @
---
--- Break is never caught by 'UserBlock' — it propagates upward until it
--- reaches a 'BlockHandler', which is the only construct that catches it.
-data BlockKind where
-  -- | Agent / handler body: creates a fresh scope, catches @return@.
-  -- Replaces the old 'BlockAgentEntry' / 'BlockAgentEntryWithHandlers' /
-  -- 'BlockHandlerBody'.
-  BlockKindAgent :: BlockKind
-  -- | Inline block / arm body / for-body: inherits the parent scope,
-  -- catches nothing. Replaces the old 'BlockHandleScope' / 'BlockInline'.
-  BlockKindInline :: BlockKind
-  deriving (Eq, Show, Generic)
-
-instance ToJSON BlockKind where
-  toJSON = genericToJSON enumOptions
-
-instance FromJSON BlockKind where
-  parseJSON = genericParseJSON enumOptions
-
 -- | The body of an agent block. Carried by 'BlockAgent' to mark the
 -- agent boundary (return catch + scope isolation) at the IR level.
---
--- Phase 3.1 introduces the type; Lowering still emits 'BlockUser' with
--- 'BlockKindAgent' and only flips to 'BlockAgent' in Phase 3.7. Closure
--- and free-form local-agent declarations also lower here once the
--- AgentThread runtime path lands.
 data AgentBlock = AgentBlock
   { -- | Public name. For top-level agents this is the same value that
     -- appears in 'IRModule.entries'; for local / closure agents it is a
-    -- compiler-synthesized fresh name (placeholder until Phase 3.7
-    -- decides on the synthesis scheme).
+    -- compiler-synthesized fresh name.
     qualifiedName :: QualifiedName,
     -- | Labeled parameters. Caller binds args here.
     parameters :: [Param],
@@ -335,14 +297,12 @@ instance ToJSON AgentBlock where
 instance FromJSON AgentBlock where
   parseJSON = genericParseJSON irOptions
 
--- | The body of a regular user-defined block.
+-- | The body of a regular user-defined block. Always inline
+-- (inherits parent scope, catches nothing). Agent boundaries are
+-- represented by 'BlockAgent' instead.
 data UserBlock = UserBlock
-  { -- | Structural role: 'BlockKindAgent' (new scope, catches return) or
-    -- 'BlockKindInline' (inherits scope, catches nothing).
-    kind :: BlockKind,
-    -- | Labeled parameters. Only meaningful for 'BlockKindAgent' blocks
-    -- (new scope: caller binds arguments here) and for 'BlockKindInline'
-    -- handler / then-clause blocks (req args / break value).
+  { -- | Labeled parameters. Meaningful for handler / then-clause blocks
+    -- (req args / break value); empty for plain inline blocks.
     parameters :: [Param],
     statements :: [Statement],
     -- | Tail value when the block completes normally (Rust-style trailing
@@ -376,7 +336,7 @@ instance FromJSON Param where
 data Handler = Handler
   { -- | The 'RequestId' of the 'BlockRequest' being handled.
     request :: RequestId,
-    -- | The handler body block ('BlockKindInline'). Inherits the handle scope
+    -- | The handler body block ('BlockUser'). Inherits the handle scope
     -- (state vars are directly accessible). Its 'parameters' carry the req args.
     handlerBody :: BlockId
   }
@@ -528,7 +488,7 @@ data ForBlock = ForBlock
     -- | (bodyVar in for scope, init value var in this scope). Empty if parallel.
     stateInits :: [(VarId, VarId)],
     bodyBlock :: BlockId,
-    -- | Optional then-block (BlockKindInline) run on normal completion.
+    -- | Optional then-block (BlockUser) run on normal completion.
     thenBlock :: Maybe BlockId
   }
   deriving (Eq, Show, Generic)
@@ -551,11 +511,11 @@ data HandleBlock = HandleBlock
     parallel :: !Bool,
     -- | (bodyVar allocated in handle scope, initVar computed in caller)
     stateInits :: [(VarId, VarId)],
-    -- | Body block ('BlockKindInline'). Inherits the handle scope.
+    -- | Body block ('BlockUser'). Inherits the handle scope.
     body :: BlockId,
     -- | Request handlers dispatched by 'RequestId'.
     handlers :: [Handler],
-    -- | Optional then-block ('BlockKindInline') run when body completes.
+    -- | Optional then-block ('BlockUser') run when body completes.
     -- Its single parameter (label @\"value\"@) receives the body's trailing value.
     thenBlock :: Maybe BlockId
   }

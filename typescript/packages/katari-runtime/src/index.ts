@@ -67,6 +67,7 @@ export type {
   ThreadKind,
   ThreadStatus,
   AskIdMap,
+  AgentThread,
   UserThread,
   HandleThread,
   ForThread,

@@ -35,7 +35,6 @@ shouldEncodeAs value expected = Aeson.toJSON value `shouldBe` expected
 spec :: Spec
 spec = describe "Katari.IR" $ do
   blockSpec
-  blockKindSpec
   statementSpec
   callTargetSpec
   exitContSpec
@@ -47,8 +46,7 @@ blockSpec = describe "Block (sum)" $ do
   it "BlockUser nests UserBlock under 'body'" $ do
     let userBlock =
           UserBlock
-            { kind = BlockKindAgent,
-              parameters = [Param {label = "x", var = VarId 0}],
+            { parameters = [Param {label = "x", var = VarId 0}],
               statements = [],
               trailing = Just (VarId 1)
             }
@@ -57,8 +55,7 @@ blockSpec = describe "Block (sum)" $ do
         [ "kind" .= ("blockUser" :: String),
           "body"
             .= object
-              [ "kind" .= ("blockKindAgent" :: String),
-                "parameters" .= [object ["label" .= ("x" :: String), "var" .= (0 :: Int)]],
+              [ "parameters" .= [object ["label" .= ("x" :: String), "var" .= (0 :: Int)]],
                 "statements" .= ([] :: [Value]),
                 "trailing" .= (1 :: Int)
               ]
@@ -100,8 +97,7 @@ blockSpec = describe "Block (sum)" $ do
   it "round-trips all variants" $ do
     let userBody =
           UserBlock
-            { kind = BlockKindInline,
-              parameters = [],
+            { parameters = [],
               statements = [],
               trailing = Nothing
             }
@@ -115,19 +111,6 @@ blockSpec = describe "Block (sum)" $ do
     roundTrip (BlockHandle HandleBlock {parallel = False, stateInits = [], body = BlockId 0, handlers = [], thenBlock = Nothing})
     roundTrip (BlockTuple TupleBlock {parallel = False, elements = []})
     roundTrip (BlockArray ArrayBlock {parallel = True, elements = [BlockId 1]})
-
-blockKindSpec :: Spec
-blockKindSpec = describe "BlockKind" $ do
-  it "serializes each variant as a bare camelCase string" $ do
-    Aeson.toJSON BlockKindAgent `shouldBe` Aeson.String "blockKindAgent"
-    Aeson.toJSON BlockKindInline `shouldBe` Aeson.String "blockKindInline"
-
-  it "round-trips all variants" $ do
-    mapM_
-      roundTrip
-      [ BlockKindAgent,
-        BlockKindInline
-      ]
 
 statementSpec :: Spec
 statementSpec = describe "Statement (sum)" $ do
@@ -283,8 +266,7 @@ moduleSpec = describe "IRModule" $ do
     let block =
           BlockUser
             UserBlock
-              { kind = BlockKindAgent,
-                parameters = [],
+              { parameters = [],
                 statements = [StatementExit ExitData {exitKind = ExitKindReturn, value = VarId 0}],
                 trailing = Nothing
               }

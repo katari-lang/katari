@@ -1,16 +1,20 @@
-// Mark-and-sweep GC for scopes.
+// Mark-and-sweep GC for scopes + closures.
 //
-// Scopes form a tree (`parentId`); closures, tuples, arrays, and tagged
-// values can hold scope refs through their fields/elements. The GC root
-// set is every live thread's scopeId. From there we trace parent chains
-// + every scopeId reachable through Value graphs in scope.values.
+// Scopes form a tree (`parentId`); closures live in `state.closures` and
+// hold a ScopeId. Tuples / arrays / tagged values can hold further refs
+// transitively. The GC root set is every live thread's scopeId. From
+// there we trace parent chains + every Value graph in scope.values, with
+// closure-id derefs adding the captured scope (and its parent chain).
+//
+// Closures are reachable iff some live Value has `closure { closureId }`.
+// Unreachable closures are dropped from `state.closures`.
 //
 // Invocation: the runner calls `collectGarbage` at the end of an
 // `applyEvent` drain when scope count growth crosses a heuristic
 // threshold.
 
 import type { Draft } from "immer";
-import type { ScopeId } from "./id.js";
+import type { ClosureId, ScopeId } from "./id.js";
 import type { Scope } from "./scope.js";
 import type { State } from "./state.js";
 import type { Value } from "./value.js";
@@ -32,18 +36,31 @@ export function shouldGc(state: State): boolean {
   return scopeCount > state.lastGcScopeCount * GC_GROWTH_FACTOR + GC_MIN_DELTA;
 }
 
-/** Mutate the Immer draft to remove unreachable scopes. */
+/** Mutate the Immer draft to remove unreachable scopes + closures. */
 export function collectGarbage(state: Draft<State>): void {
-  const reachable = new Set<ScopeId>();
+  const reachableScopes = new Set<ScopeId>();
+  const reachableClosures = new Set<number>();
   const worklist: ScopeId[] = [];
+
+  const visitScope = (scopeId: ScopeId | null): void => {
+    if (scopeId === null) return;
+    if (reachableScopes.has(scopeId)) return;
+    reachableScopes.add(scopeId);
+    worklist.push(scopeId);
+  };
+
+  const visitClosure = (closureId: ClosureId): void => {
+    const num = closureId as unknown as number;
+    if (reachableClosures.has(num)) return;
+    reachableClosures.add(num);
+    const cl = state.closures[num];
+    if (cl !== undefined) visitScope(cl.scopeId);
+  };
 
   // Roots: every live thread's scopeId.
   for (const t of Object.values(state.threads)) {
     if (t === undefined) continue;
-    if (!reachable.has(t.scopeId)) {
-      reachable.add(t.scopeId);
-      worklist.push(t.scopeId);
-    }
+    visitScope(t.scopeId);
   }
 
   while (worklist.length > 0) {
@@ -51,19 +68,21 @@ export function collectGarbage(state: Draft<State>): void {
     const sc = state.scopes[scopeId] as Scope | undefined;
     if (sc === undefined) continue;
 
-    if (sc.parentId !== null && !reachable.has(sc.parentId)) {
-      reachable.add(sc.parentId);
-      worklist.push(sc.parentId);
-    }
+    visitScope(sc.parentId);
 
     for (const v of Object.values(sc.values)) {
-      if (v !== undefined) traceValue(v, reachable, worklist);
+      if (v !== undefined) traceValue(v, visitScope, visitClosure);
     }
   }
 
   for (const scopeId of Object.keys(state.scopes)) {
-    if (!reachable.has(scopeId as ScopeId)) {
+    if (!reachableScopes.has(scopeId as ScopeId)) {
       delete state.scopes[scopeId];
+    }
+  }
+  for (const closureKey of Object.keys(state.closures)) {
+    if (!reachableClosures.has(Number(closureKey))) {
+      delete state.closures[closureKey as unknown as number];
     }
   }
 
@@ -72,22 +91,19 @@ export function collectGarbage(state: Draft<State>): void {
 
 function traceValue(
   v: Value,
-  reachable: Set<ScopeId>,
-  worklist: ScopeId[],
+  visitScope: (s: ScopeId | null) => void,
+  visitClosure: (c: ClosureId) => void,
 ): void {
   switch (v.kind) {
     case "closure":
-      if (!reachable.has(v.scopeId)) {
-        reachable.add(v.scopeId);
-        worklist.push(v.scopeId);
-      }
+      visitClosure(v.closureId);
       return;
     case "tuple":
     case "array":
-      for (const e of v.elements) traceValue(e, reachable, worklist);
+      for (const e of v.elements) traceValue(e, visitScope, visitClosure);
       return;
     case "tagged":
-      for (const f of Object.values(v.fields)) traceValue(f, reachable, worklist);
+      for (const f of Object.values(v.fields)) traceValue(f, visitScope, visitClosure);
       return;
     default:
       return;

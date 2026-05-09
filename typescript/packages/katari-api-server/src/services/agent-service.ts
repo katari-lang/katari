@@ -74,6 +74,8 @@ export class AgentService {
   private readonly ffiTimeoutMs: number;
   /** Fire-and-forget FFI dispatch promises. Tracked for `drainFFI`. */
   private readonly pendingFFI = new Set<Promise<unknown>>();
+  /** Maps FFI delegationId → the API agentId that triggered it. */
+  private readonly ffiOwners = new Map<string, AgentId>();
 
   constructor(
     private readonly storage: Storage,
@@ -151,9 +153,8 @@ export class AgentService {
             throw out.errors[0]!;
           }
           await tx.agents.insert(row);
-          await this.routeOutbound(out.outbound, input.versionId, tx);
+          await this.routeOutbound(out.outbound, input.versionId, tx, agentId);
           await tx.snapshots.upsert(input.versionId, handle.toSnapshot());
-          await tx.diffs.append(input.versionId, out.diffs);
         });
       } catch (err) {
         if (err instanceof EntryNotFoundError) {
@@ -240,8 +241,8 @@ export class AgentService {
           if (out.errors.length > 0) {
             throw out.errors[0]!;
           }
-          await this.routeOutbound(out.outbound, row.versionId, tx);
-          await tx.snapshots.upsert(row.versionId, handle.toSnapshot()); await tx.diffs.append(row.versionId, out.diffs);
+          await this.routeOutbound(out.outbound, row.versionId, tx, agentId);
+          await tx.snapshots.upsert(row.versionId, handle.toSnapshot());
         });
       } catch (err) {
         if (err instanceof RecoverableEngineError) {
@@ -315,8 +316,8 @@ export class AgentService {
           if (out.errors.length > 0) {
             throw out.errors[0]!;
           }
-          await this.routeOutbound(out.outbound, row.versionId, tx);
-          await tx.snapshots.upsert(row.versionId, handle.toSnapshot()); await tx.diffs.append(row.versionId, out.diffs);
+          await this.routeOutbound(out.outbound, row.versionId, tx, agentId);
+          await tx.snapshots.upsert(row.versionId, handle.toSnapshot());
         });
       } catch (err) {
         if (err instanceof RecoverableEngineError) {
@@ -353,6 +354,7 @@ export class AgentService {
     events: MachineEvent[],
     versionId: VersionId,
     tx: Storage,
+    callerAgentId?: AgentId,
   ): Promise<void> {
     for (const event of events) {
       const p = event.payload;
@@ -415,7 +417,7 @@ export class AgentService {
             eventKind: p.kind,
           });
         } else if (p.kind === "delegate") {
-          this.dispatchFFIDelegate(versionId, p.targetBlock, p.args, p.delegationId);
+          this.dispatchFFIDelegate(versionId, p.targetBlock, p.args, p.delegationId, callerAgentId);
         } else if (p.kind === "terminate") {
           this.dispatchFFITerminate(p.delegationId);
         }
@@ -470,8 +472,12 @@ export class AgentService {
     targetBlock: import("katari-runtime").QualifiedName,
     args: Record<string, Value>,
     delegationId: import("katari-runtime").DelegationId,
+    ownerAgentId?: AgentId,
   ): void {
     if (this.ffi === undefined) return;
+    if (ownerAgentId !== undefined) {
+      this.ffiOwners.set(delegationId, ownerAgentId);
+    }
     const pending: Promise<void> = this.ffi
       .invoke({
         qualifiedName: targetBlock,
@@ -482,37 +488,33 @@ export class AgentService {
       .then(
         (value) => this.feedFFIAck(versionId, delegationId, value),
         async (err) => {
-          // FFI failed (timeout / connection / sidecar error). The
-          // engine's ExternalThread is still RUNNING — terminateAck
-          // would be rejected because the engine never saw a terminate
-          // for that delegation. Instead we cancel the agent so the
-          // engine drives the External into cancelling, then feed the
-          // terminateAck.
           this.logger.log("warn", "FFI invoke failed; cancelling agent", {
             versionId,
             delegationId,
             error: err instanceof Error ? err.message : String(err),
           });
-          // The delegationId we hold here is the FFI delegationId, not
-          // the API one. Find the agent row by it: row.delegationId is
-          // the API delegationId (different from the FFI one). The link
-          // is the engine's own ffiDelegations map — but at this layer
-          // we look up by walking the agents whose versionId matches
-          // and checking for outstanding FFI delegations on the engine
-          // state. Simpler: the agent that triggered the FFI is the one
-          // that called this FFI block; we track it by spawning an
-          // index in the OutboundEventDispatcher's call site. For now
-          // we walk the running agents on this version.
-          const candidates = await this.storage.agents.list({ versionId });
-          const target = candidates.find(
-            (r) => r.state === "running" && r.versionId === versionId,
-          );
-          if (target !== undefined) {
-            await this.cancelAgent(target.id).catch((cancelErr) => {
+          // Use the registered owner if available; otherwise fall back to
+          // walking running agents (less precise but safe when ownerAgentId
+          // was not provided, e.g. from feedFFIAck-triggered re-dispatch).
+          const targetId = this.ffiOwners.get(delegationId);
+          if (targetId !== undefined) {
+            await this.cancelAgent(targetId).catch((cancelErr) => {
               this.logger.log("warn", "cancelAgent during FFI failure threw", {
                 error: cancelErr instanceof Error ? cancelErr.message : String(cancelErr),
               });
             });
+          } else {
+            const candidates = await this.storage.agents.list({ versionId });
+            const fallback = candidates.find(
+              (r) => r.state === "running" && r.versionId === versionId,
+            );
+            if (fallback !== undefined) {
+              await this.cancelAgent(fallback.id).catch((cancelErr) => {
+                this.logger.log("warn", "cancelAgent during FFI failure threw", {
+                  error: cancelErr instanceof Error ? cancelErr.message : String(cancelErr),
+                });
+              });
+            }
           }
           await this.feedFFITerminateAck(versionId, delegationId);
         },
@@ -525,6 +527,7 @@ export class AgentService {
         });
       })
       .finally(() => {
+        this.ffiOwners.delete(delegationId);
         this.pendingFFI.delete(pending);
       });
     this.pendingFFI.add(pending);
@@ -566,7 +569,7 @@ export class AgentService {
             throw out.errors[0]!;
           }
           await this.routeOutbound(out.outbound, versionId, tx);
-          await tx.snapshots.upsert(versionId, handle.toSnapshot()); await tx.diffs.append(versionId, out.diffs);
+          await tx.snapshots.upsert(versionId, handle.toSnapshot());
         });
       } catch (err) {
         if (err instanceof RecoverableEngineError) {
@@ -607,7 +610,7 @@ export class AgentService {
             throw out.errors[0]!;
           }
           await this.routeOutbound(out.outbound, versionId, tx);
-          await tx.snapshots.upsert(versionId, handle.toSnapshot()); await tx.diffs.append(versionId, out.diffs);
+          await tx.snapshots.upsert(versionId, handle.toSnapshot());
         });
       } catch (err) {
         this.logger.log("warn", "feedFFITerminateAck failed", {

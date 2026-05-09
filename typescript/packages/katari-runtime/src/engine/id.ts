@@ -12,6 +12,15 @@ export type DelegationId = string & { readonly __brand: "DelegationId" };
 export type EscalationId = string & { readonly __brand: "EscalationId" };
 
 /**
+ * ClosureId: machine-local identifier for a closure record stored in
+ * `state.closures`. Allocated by `statementMakeClosure` execution. Closures
+ * are first-class runtime objects (rather than inlined into `Value`) so
+ * agent calls via closure can reference them by id, and so the GC can
+ * collect them when no live `Value` holds a closure reference.
+ */
+export type ClosureId = number & { readonly __brand: "ClosureId" };
+
+/**
  * AskId: per-asker counter that pairs an `ask` with its eventual `askAck`.
  * The asker allocates the AskId (typically `0, 1, 2, ...`); proxy threads
  * also allocate their own AskIds when forwarding asks upwards (see

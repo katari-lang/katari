@@ -58,7 +58,17 @@
     },
     "21": {
       "body": {
-        "kind": "blockKindAgent",
+        "entryBody": 22,
+        "parameters": [],
+        "qualifiedName": {
+          "module_": "main",
+          "name": "main"
+        }
+      },
+      "kind": "blockAgent"
+    },
+    "22": {
+      "body": {
         "parameters": [],
         "statements": [
           {
@@ -129,6 +139,7 @@
       "2": "prim:mul",
       "20": "prim:to_string",
       "21": "main",
+      "22": "main.body",
       "3": "prim:div",
       "4": "prim:neg",
       "5": "prim:eq",

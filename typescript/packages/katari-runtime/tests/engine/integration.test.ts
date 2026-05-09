@@ -1,10 +1,10 @@
 // Integration tests for the new engine.
 //
 // We feed an external `delegate API→CORE` event into the engine to spawn
-// a root user thread. The engine's translateExternal builds the root
-// thread, the runner drives it to completion, and emitRootCompletion
-// fires a `delegateAck CORE→API` outbound. The test asserts on that
-// outbound event.
+// a root AgentThread. translateExternal registers the delegation, the
+// AgentThread spawns its body UserThread, the runner drives it to
+// completion, and `emitAgentRootCompletion` fires a `delegateAck
+// CORE→API` outbound. The test asserts on that outbound event.
 
 import { describe, expect, it } from "vitest";
 import {
@@ -36,9 +36,19 @@ function ir(blocks: Record<number, Block>, entries: Record<string, number> = {})
 }
 
 function userBlock(
-  args: Pick<UserBlock, "kind" | "parameters" | "statements" | "trailing">,
+  args: Pick<UserBlock, "parameters" | "statements" | "trailing">,
 ): Block {
   return { kind: "blockUser", body: args };
+}
+
+function agentBlock(
+  qualifiedName: { module_: string; name: string },
+  entryBody: number,
+): Block {
+  return {
+    kind: "blockAgent",
+    body: { qualifiedName, parameters: [], entryBody },
+  };
 }
 
 function primBlock(name: string): Block {
@@ -69,14 +79,15 @@ describe("engine integration: end-to-end via external delegate", () => {
       },
     ];
     const userBlk = userBlock({
-      kind: "blockKindAgent",
       parameters: [],
       statements: stmts,
       trailing: out,
     });
 
     const module = ir({
-      1: userBlk,
+      // Entry block: BlockAgent wrapping the body BlockUser at id 2.
+      1: agentBlock({ module_: "", name: "main" }, 2),
+      2: userBlk,
       100: primBlock("add"),
     }, { main: 1 });
 
@@ -103,8 +114,9 @@ describe("engine integration: end-to-end via external delegate", () => {
     if (ack && ack.payload.kind === "delegateAck") {
       expect(ack.payload.value).toEqual({ kind: "number", value: 5 });
     }
-    // Apidelegation cleared.
-    expect(Object.keys(result.state.apiDelegations).length).toBe(0);
+    // Delegation entry cleared after the agent finished.
+    expect(Object.keys(result.state.delegations).length).toBe(0);
+    expect(Object.keys(result.state.delegationSenders).length).toBe(0);
   });
 
   it("missing entry returns Recoverable error and no outbound", () => {
@@ -124,6 +136,83 @@ describe("engine integration: end-to-end via external delegate", () => {
     expect(result.outbound).toEqual([]);
   });
 
+  it("core→core: top-level agent calling another top-level agent resolves in one applyEvent", () => {
+    const out0 = 0 as VarId;
+    const out1 = 1 as VarId;
+
+    // helper(): returns 7 directly.
+    const helperBody = userBlock({
+      parameters: [],
+      statements: [
+        {
+          kind: "statementLoadLiteral",
+          body: { output: out0, value: { kind: "literalValueInteger", integer: 7 } },
+        },
+      ],
+      trailing: out0,
+    });
+
+    // main(): calls helper() via StatementAgentCall, returns its value.
+    const mainBody = userBlock({
+      parameters: [],
+      statements: [
+        {
+          kind: "statementAgentCall",
+          body: {
+            target: { module_: "", name: "helper" },
+            arguments: [],
+            output: out1,
+          },
+        },
+      ],
+      trailing: out1,
+    });
+
+    const module = ir(
+      {
+        1: agentBlock({ module_: "", name: "main" }, 2),
+        2: mainBody,
+        3: agentBlock({ module_: "", name: "helper" }, 4),
+        4: helperBody,
+      },
+      { main: 1, helper: 3 },
+    );
+
+    const state = createState(module);
+    const delegationId = createDelegationId();
+
+    const result = applyEvent(state, {
+      from: API_ENDPOINT,
+      to: CORE_ENDPOINT,
+      payload: {
+        kind: "delegate",
+        targetBlock: { module_: "", name: "main" },
+        args: {},
+        delegationId,
+      },
+    });
+    expect(result.errors).toEqual([]);
+
+    // Self-loop: main → helper → main is fully resolved within one
+    // applyEvent. The only API-bound outbound should be the final
+    // delegateAck for the API delegation.
+    const apiAck = result.outbound.find(
+      (e) =>
+        e.payload.kind === "delegateAck" &&
+        e.payload.delegationId === delegationId,
+    );
+    expect(apiAck).toBeDefined();
+    if (apiAck && apiAck.payload.kind === "delegateAck") {
+      expect(apiAck.payload.value).toEqual({ kind: "number", value: 7 });
+    }
+    // No leftover delegations or pending senders for the helper.
+    expect(Object.keys(result.state.delegations).length).toBe(0);
+    expect(Object.keys(result.state.pendingDelegateOut).length).toBe(0);
+    expect(Object.keys(result.state.delegationSenders).length).toBe(0);
+    // No threads remain — both main and helper have completed.
+    expect(Object.keys(result.state.threads).length).toBe(0);
+  });
+
   it("terminate before completion: cancel cascade + terminateAck outbound", () => {
     // Set up an agent that pauses on an external — call ext "wait", then
     // return its value. Because the engine's external translation
@@ -141,14 +230,14 @@ describe("engine integration: end-to-end via external delegate", () => {
       },
     ];
     const userBlk = userBlock({
-      kind: "blockKindAgent",
       parameters: [],
       statements: stmts,
       trailing: v0,
     });
 
     const module = ir({
-      1: userBlk,
+      1: agentBlock({ module_: "", name: "main" }, 2),
+      2: userBlk,
       200: { kind: "blockExternal", body: { module_: "test", name: "wait" } },
     }, { main: 1 });
 

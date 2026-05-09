@@ -25,9 +25,16 @@ import type { Block, IRModule, VarId } from "katari-runtime/dist/ir/types.js";
 function brokenCallIR(): IRModule {
   const blocks: Record<number, Block> = {
     0: {
+      kind: "blockAgent",
+      body: {
+        qualifiedName: { module_: "broken", name: "main" },
+        parameters: [],
+        entryBody: 1,
+      },
+    },
+    1: {
       kind: "blockUser",
       body: {
-        kind: "blockKindAgent",
         parameters: [],
         statements: [
           // Call blockId 999 — no such block.

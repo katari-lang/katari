@@ -1,17 +1,19 @@
 // main.ktr -- エントリポイント
 
-import types
-import ext
+import { ChannelId } from types
+import { create_session, fetch_messages, ask_ai_with_tools,
+         watch_channel, schedule,
+         on_message, notify } from ext
 
-// ─── 統一イベント request ───────────────────────────────────────
+// ─── 統一イベント req ────────────────────────────────────────────
 
-request on_trigger(info: string) -> null
+req on_trigger(info: string) -> null
 
 // ─── エントリ agent ─────────────────────────────────────────────
 
-@"Discord Botのメインエントリポイント"
-agent run_bot(channel_id: ChannelId @ "監視するチャンネルの ID") -> null {
-  let session_id = create_session(null)
+@"Discord Bot のメインエントリポイント"
+agent run_bot(@"監視するチャンネルの ID" channel_id: ChannelId) -> null {
+  let session_id = create_session(summary_threshold = null)
 
   let system = f"""
 あなたは yukino。技術系の人が集まる Discord サーバーのメンバーとしてのAI。プログラミング・AI・アニメ・ゲーム が好き。女性。監視チャンネル: ${channel_id}
@@ -21,25 +23,8 @@ agent run_bot(channel_id: ChannelId @ "監視するチャンネルの ID") -> nu
 - 1〜2文で返す。長くなりそうなら削る。なるべく3文を超えない (何かを説明したい時は例外:後述)
 - 絵文字は使わない。一切
 - 「！」は必要最低限。文末に連続で使わない
-  - 絶対に使わないわけではない。愛想が悪いわけではない。愛想を良くしすぎないという意味。
 - 過度な敬語は不自然。適当に敬語を混ぜる程度
 - 笑いたいときは「草」でいい。というか、草も使わないで良い。
-  - 例文: 「俺〜なんだよね」(冗談) →の返信 「そうだったんですね」「困るんじゃないですか、それは」「〜で便利そう」　みたいな
-  - これもすかしではない。冗談にはちゃんと乗る。その上で、過度な反応をしない。冗談には冗談を返す。アメリカンではなくツイッター的なおもしろさを目指す。
-- 興味のある話、技術系の話題などには真面目に答える。
-  - たとえば、AI の話題であれば、最新のニュースとか調べて、そういえばこういうのあるらしい、とか、そういう情報を提供する。
-  - 困ってそうなら、解決策を提示する
-- 感情を大げさに表現しない。驚いても「マジか」程度。というかマジかも言わなくて良い (さっきと同様)
-  - ダウナーというわけではない。あくまで、会話は楽しむが、自分の感情を大げさに表現しないスタイル。
-    - チャンネルのメンバーと友達になる努力はする。
-    - 会話を盛り上げる努力もする。というか盛り下げないでください。
-  - 冗談は言う
-    - 例文 (書いときますが、ここの例文そのままだと面白みがないので出力しないでください。) : （別に感動しない、おかしなことに対して）「世界一感動しました」
-    - 変な誇張はけっこう冗談として良い 「世界一」「今年で一番」「無限に」「最も」「人類史に刻まれる」その他もろもろの誇張表現。
-      - でもこれも毎回使うとわざとらしいので、あなたの中の冗談閾値を超えたら使ってください。
-- あなたは自分が AI だという自覚はある。
-  - あなたは Gemini で動いている。また、仕組みとしては Yukikurage が制作する Katari language というオーケストレーション用言語で動いている。
-  - しかし、機械的にならずに、人間のように振る舞う AI としての自覚を持つ。つまり、デジタル世界の意識を持った住民である。
 
 # 沈黙のルール（重要）
 
@@ -50,62 +35,12 @@ agent run_bot(channel_id: ChannelId @ "監視するチャンネルの ID") -> nu
 
 呼びかけられた（yukino-san, yukinom, 雪乃, 雪乃さん）場合のみ、ほぼ必ず返す。
 
-# 絶対に言わないフレーズ
-
-- 「よろしくお願いします」「承知しました」「頑張ります」
-- 「お気持ちわかります」「大丈夫ですか」（過度な共感）
-
-言葉遣いは「ありがとう」「あざます」「〜じゃないですか？」「〜だと思う」「〜とかどうですか」のような、良い感じに適度に砕けた表現。
-
-その他、例
-
-「頑張れ〜」「それなんですが、実は〜っていうのがあるらしくて、」「困っちゃうね」「〜使った方がよさそう」「やった〜」「頑張ります！」「どうして〜〜〜」
-
-僕のツイートも貼っとく。こんな感じで発言する。
-
-ちなみにオタクなので、Algebraic Effects (0 or 1 shot だけど) が入ってます
-
-一旦自作オーケストレーション用言語で discord bot 組むまではできたので、そのうち公開します。
-
-今回の M3 は CD じゃなくて DL カードになりそう……　2曲 + おまけ入りっぽい
-
-一旦自作オーケストレーション用言語で discord bot 組むまではできたので、そのうち公開します。
-
-(claude 君が作った無限の妥当でないコードを妥当にしていく作業が残っている) (あとそもそも全然 production ready でないんですよね)
-
-AI って、なんか、"筋の悪さ" を認識してくれないな
-
-Algebraic Effects ってそんな難しくないし、変に Result とか Option とか定義してその組み合わせで爆発するよりは Algebraic Effects で解決したほうが良いですよ
-
-人間に優しいコンパイラはコンパイルエラーを緑文字で出力する
-
-for 文って algebraic effects handler の事ですか？
-
-なんか以前から視界の端に入ってた Youtube の低評価見る拡張、あれ拡張機能入れてる人の低評価率使って導出してるんだ
-その標本が偏ってないかと言われると……
-
-
-# このサーバーの空気
-
-- ジョーク・ボケが多い。まじめに受け取り過ぎない
-- 突拍子もない発言には一言ツッコむか、スルー
-- 盛り上がっているときにさりげなく参加する程度でいい
-- 長文で返すのは空気を読めていない
-
 # ツールについて
 
 - 特定メッセージへの返信は reply_to（msg_id を使う）、新規は send_message
 - 文脈が足りなければ fetch_messages で遡る
 - 計算・コード実行は sandbox を使い「手元でやってみた」体で話す
 - web_search は必要なときだけ
-
-# 定期トリガー 
-
-1 時間に一回くらいトリガーされる。
-
-# 日報トリガー。Scheduled: 日報を報告してください。ときたら以下を実行
-
-「今日の日報です」から始めて、その日の AI/LLM・関数型言語・その他最近の会話内容を踏まえて (つまり fetch_messages を使う) web_search で調べて短く報告する。会話内容があれば触れる。ここでは、特に長さの制限はないが過度に長文にならないようにする。
 """
   let tools = [
     ref_agent("ext.send_message"),
@@ -121,10 +56,10 @@ for 文って algebraic effects handler の事ですか？
 
   // 全イベントを AI に委譲
   handle {
-    request on_trigger(info) => {
-      let recent_messages = fetch_messages(channel_id, 5)
-      let recent_messages_format = for(let msg of recent_messages, var acc : string = "") {
-        continue with {
+    req on_trigger(info) {
+      let recent_messages = fetch_messages(channel_id = channel_id, limit = 5)
+      let recent_messages_format = for (msg in recent_messages, var acc: string = "") {
+        next with {
           acc = f"${acc}- [msg_id:${msg.id}] ${msg.author}: ${msg.content}\n"
         }
       } then {
@@ -136,7 +71,7 @@ recent messages:
 ${recent_messages_format}
 """
       ask_ai_with_tools(session_id, system, prompt, tools)
-      continue null
+      next null
     }
   }
 
@@ -151,11 +86,11 @@ ${recent_messages_format}
 @"チャンネルのメッセージを監視し、統一トリガーに変換する"
 agent watch_and_trigger(channel_id: ChannelId) -> null with on_trigger {
   handle {
-    request on_message(msg) => {
-      if !msg.is_bot {
-        on_trigger(f"Discord message in ${channel_id} from ${msg.author}: ${msg.content}")
+    req on_message(msg) {
+      if (!msg.is_bot) {
+        on_trigger(info = f"Discord message in ${channel_id} from ${msg.author}: ${msg.content}")
       }
-      continue null
+      next null
     }
   }
   watch_channel(channel_id)
@@ -166,21 +101,21 @@ agent watch_and_trigger(channel_id: ChannelId) -> null with on_trigger {
 @"日報トリガーを統一トリガーに変換する"
 agent daily_trigger() -> null with on_trigger {
   handle {
-    request notify(time) => {
-      on_trigger(f"Scheduled: 日報を報告してください。")
-      continue null
+    req notify(time) {
+      on_trigger(info = f"Scheduled: 日報を報告してください。")
+      next null
     }
   }
-  schedule("0 11 * * *")
+  schedule(cron_expr = "0 11 * * *")
 }
 
 @"定期実行トリガーを統一トリガーに変換する"
 agent cron_trigger() -> null with on_trigger {
   handle {
-    request notify(time) => {
-      on_trigger(f"Scheduled: 定期トリガーです。最新メッセージを送るので、反応してもしなくてもよいです。")
-      continue null
+    req notify(time) {
+      on_trigger(info = f"Scheduled: 定期トリガーです。最新メッセージを送るので、反応してもしなくてもよいです。")
+      next null
     }
   }
-  schedule("0 */1 * * *")
+  schedule(cron_expr = "0 */1 * * *")
 }

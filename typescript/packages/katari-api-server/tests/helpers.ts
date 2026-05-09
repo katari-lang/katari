@@ -1,5 +1,10 @@
 // Shared fixtures for api-server tests. Builds a minimal but useful IR
 // module + matching schema bundle.
+//
+// All entries are wrapped in a `blockAgent` (the externally-callable
+// boundary in the new runtime). The inner `blockUser` body holds the
+// actual statements (the agent boundary semantics live on the wrapper,
+// not the inner block).
 
 import type { IRModule, SchemaBundle } from "katari-runtime";
 import type { Block, VarId } from "katari-runtime/dist/ir/types.js";
@@ -8,9 +13,16 @@ import type { Block, VarId } from "katari-runtime/dist/ir/types.js";
 export function literalReturnIR(literal: string, irName = "test"): IRModule {
   const blocks: Record<number, Block> = {
     0: {
+      kind: "blockAgent",
+      body: {
+        qualifiedName: { module_: irName, name: "main" },
+        parameters: [],
+        entryBody: 1,
+      },
+    },
+    1: {
       kind: "blockUser",
       body: {
-        kind: "blockKindAgent",
         parameters: [],
         statements: [
           {
@@ -43,15 +55,22 @@ export function literalReturnIR(literal: string, irName = "test"): IRModule {
 export function pausesOnExternalIR(irName = "test"): IRModule {
   const blocks: Record<number, Block> = {
     0: {
+      kind: "blockAgent",
+      body: {
+        qualifiedName: { module_: irName, name: "main" },
+        parameters: [],
+        entryBody: 1,
+      },
+    },
+    1: {
       kind: "blockUser",
       body: {
-        kind: "blockKindAgent",
         parameters: [],
         statements: [
           {
             kind: "statementCall",
             body: {
-              target: { kind: "callTargetBlock", block: 1 },
+              target: { kind: "callTargetBlock", block: 2 },
               arguments: [],
               output: 0 as VarId,
             },
@@ -63,7 +82,7 @@ export function pausesOnExternalIR(irName = "test"): IRModule {
         ],
       },
     },
-    1: {
+    2: {
       kind: "blockExternal",
       body: { module_: irName, name: "ext_call" },
     },

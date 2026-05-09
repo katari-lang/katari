@@ -14,33 +14,37 @@ import type { IRModule } from "../ir/types.js";
 import type { State } from "./state.js";
 
 export type Snapshot = {
-  schemaVersion: 1;
+  schemaVersion: 3;
   selfEndpoint: string;
   ffiTargetEndpoint: string;
   threads: State["threads"];
   scopes: State["scopes"];
-  apiDelegations: State["apiDelegations"];
-  apiDelegationSenders: State["apiDelegationSenders"];
-  ffiDelegations: State["ffiDelegations"];
+  closures: State["closures"];
+  nextClosureId: number;
+  delegations: State["delegations"];
+  pendingDelegateOut: State["pendingDelegateOut"];
+  delegationSenders: State["delegationSenders"];
   lastGcScopeCount: number;
 };
 
 export function serialize(state: State): Snapshot {
   return {
-    schemaVersion: 1,
+    schemaVersion: 3,
     selfEndpoint: state.selfEndpoint,
     ffiTargetEndpoint: state.ffiTargetEndpoint,
     threads: structuredClone(state.threads),
     scopes: structuredClone(state.scopes),
-    apiDelegations: structuredClone(state.apiDelegations),
-    apiDelegationSenders: structuredClone(state.apiDelegationSenders),
-    ffiDelegations: structuredClone(state.ffiDelegations),
+    closures: structuredClone(state.closures),
+    nextClosureId: state.nextClosureId,
+    delegations: structuredClone(state.delegations),
+    pendingDelegateOut: structuredClone(state.pendingDelegateOut),
+    delegationSenders: structuredClone(state.delegationSenders),
     lastGcScopeCount: state.lastGcScopeCount,
   };
 }
 
 export function deserialize(irModule: IRModule, snap: Snapshot): State {
-  if (snap.schemaVersion !== 1) {
+  if (snap.schemaVersion !== 3) {
     throw new Error(`engine.snapshot: unsupported schemaVersion ${snap.schemaVersion}`);
   }
   return {
@@ -48,9 +52,11 @@ export function deserialize(irModule: IRModule, snap: Snapshot): State {
     irModule,
     threads: structuredClone(snap.threads),
     scopes: structuredClone(snap.scopes),
-    apiDelegations: structuredClone(snap.apiDelegations),
-    apiDelegationSenders: structuredClone(snap.apiDelegationSenders),
-    ffiDelegations: structuredClone(snap.ffiDelegations),
+    closures: structuredClone(snap.closures),
+    nextClosureId: snap.nextClosureId,
+    delegations: structuredClone(snap.delegations),
+    pendingDelegateOut: structuredClone(snap.pendingDelegateOut),
+    delegationSenders: structuredClone(snap.delegationSenders),
     ffiTargetEndpoint: snap.ffiTargetEndpoint as State["ffiTargetEndpoint"],
     lastGcScopeCount: snap.lastGcScopeCount,
   };

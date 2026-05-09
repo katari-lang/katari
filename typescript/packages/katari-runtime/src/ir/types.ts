@@ -67,18 +67,6 @@ export type NameTable = {
   blockNames: Record<string, string>;
 };
 
-// ─── BlockKind (enumOptions → bare camelCase string) ─────────────────────────
-
-export type BlockKind =
-  /** New scope, catches return. */
-  | "blockKindAgent"
-  /**
-   * Inherits parent scope, catches nothing.
-   * Used for inline blocks, match arms, for bodies, handle bodies,
-   * req handler bodies, and then-clauses.
-   */
-  | "blockKindInline";
-
 // ─── ExitKind / ContKind (enumOptions) ───────────────────────────────────────
 
 export type ExitKind = "exitKindReturn" | "exitKindBreak" | "exitKindForBreak";
@@ -94,7 +82,7 @@ export type Param = {
 
 /**
  * A request handler inside a HandleData.
- * The handlerBody block is BlockKindInline and inherits the handle scope.
+ * The handlerBody block is a BlockUser inheriting the handle scope.
  * Its parameters carry the req args; state vars are accessible directly.
  */
 export type Handler = {
@@ -103,12 +91,15 @@ export type Handler = {
 };
 
 // ─── UserBlock (irOptions → flat record) ─────────────────────────────────────
+//
+// UserBlock is always inline: inherits the parent scope and catches nothing.
+// Agent boundaries (new scope, return catch) are represented by `BlockAgent`
+// instead.
 
 export type UserBlock = {
-  kind: BlockKind;
   /**
-   * Labeled parameters. Meaningful for BlockKindAgent blocks (new scope)
-   * and for BlockKindInline handler/then-clause blocks (req args / break value).
+   * Labeled parameters. Meaningful for handler / then-clause blocks
+   * (req args / break value); empty for plain inline blocks.
    */
   parameters: Param[];
   statements: Statement[];
@@ -116,10 +107,6 @@ export type UserBlock = {
 };
 
 // ─── AgentBlock (irOptions → flat record) ────────────────────────────────────
-//
-// Phase 3.1 (additive): the type is mirrored from Haskell IR but Lowering
-// does not yet emit `blockAgent` blocks — agents still go through `blockUser`
-// with `blockKindAgent`. Phase 3.7 flips the emit path.
 
 /**
  * Payload for `blockAgent`. Marks an agent boundary at the IR level —
@@ -267,18 +254,18 @@ export type ForBlock = {
 
 /**
  * Payload for blockHandle.
- * The outer BlockKindAgent block evaluates the init expressions,
- * then calls this block via StatementCall.
+ * The caller evaluates the init expressions, then calls this block via
+ * StatementCall.
  */
 export type HandleBlock = {
   parallel: boolean;
   /** [bodyVar allocated in handle scope, initVar computed in caller] */
   stateInits: [VarId, VarId][];
-  /** Body block (blockKindInline). Inherits the handle scope. */
+  /** Body block (BlockUser). Inherits the handle scope. */
   body: BlockId;
   handlers: Handler[];
   /**
-   * Optional then-block (blockKindInline) run when the body completes
+   * Optional then-block (BlockUser) run when the body completes
    * normally (= the body's last statement returns a trailing value, no
    * `break`). Its single parameter (label "value") receives the body's
    * trailing value. `break` bypasses then-block and propagates the break

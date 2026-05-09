@@ -133,6 +133,12 @@ data LowerState = LowerState
     -- | Top-level @VariableId@ → its callable @BlockId@. Used at call /
     -- closure sites to resolve agent / req / ext-agent / data-ctor names.
     lsTopLevelBlocks :: Map VariableId BlockId,
+    -- | Top-level @VariableId@ → its 'QualifiedName' for callables that
+    -- ARE agent boundaries (and thus dispatched via core→core
+    -- 'StatementAgentCall' rather than through 'StatementCall' on the
+    -- internal block). Populated by the agent-declaration walker; not
+    -- populated for prims, ctors, or external-agent stubs.
+    lsAgentNames :: Map VariableId QualifiedName,
     -- | Identifier-pass 'RequestId' → IR-internal 'IR.RequestId'. Allocated at
     -- the start of lowering (one IR IR.RequestId per Identifier RequestId, 1:1
     -- currently). Used by 'lowerHandler' / 'patternToArm' to translate
@@ -167,6 +173,7 @@ initialLowerState =
       lsVarNames = Map.empty,
       lsBlockNames = Map.empty,
       lsTopLevelBlocks = Map.empty,
+      lsAgentNames = Map.empty,
       lsRequestIds = Map.empty,
       lsConstructorIds = Map.empty,
       lsEntries = Map.empty,
@@ -321,23 +328,6 @@ resolveAsValue canBeLocal resolution sourceSpan nameText hint = do
       pure v
     ResolvedVarUnresolved -> freshVarId Nothing
 
--- | Resolve a variable reference in 'call-target' context: locals yield
--- 'CallTargetValue', top-level callables yield 'CallTargetBlock'.
-resolveAsCallTarget ::
-  Bool ->
-  AST.NameRefResolution Zonked AST.VariableRef ->
-  SourceSpan ->
-  Text ->
-  Lower CallTarget
-resolveAsCallTarget canBeLocal resolution sourceSpan nameText = do
-  resolved <- resolveVariable canBeLocal resolution sourceSpan nameText
-  case resolved of
-    ResolvedVarLocal irVar -> pure (CallTargetValue {var = irVar})
-    ResolvedVarTopLevel blockId -> pure (CallTargetBlock {block = blockId})
-    ResolvedVarUnresolved -> do
-      v <- freshVarId Nothing
-      pure (CallTargetValue {var = v})
-
 -- | Resolve a root-prim name to its 'BlockId'. Used by lowering sites
 -- that emit prim calls directly (template / field-access / index-access
 -- desugaring), as opposed to call-syntax that flows through the standard
@@ -386,15 +376,10 @@ runWithFreshBuffer action = do
 -- (agent entry / agent-with-handlers / handle scope / handler body / inline
 -- block) used to inline several lines of record syntax each; now they
 -- record-update only the fields they care about.
---
--- The default @kind@ is 'BlockKindInline' (the most common role: inline
--- blocks / match-arm bodies / for bodies / then-clauses inherit the parent
--- scope). Sites with a different role override 'kind' explicitly.
 defaultUserBlock :: UserBlock
 defaultUserBlock =
   UserBlock
-    { kind = BlockKindInline,
-      parameters = [],
+    { parameters = [],
       statements = [],
       trailing = Nothing
     }
@@ -529,6 +514,10 @@ registerDeclarationKinds zonkResult =
           blockId <- reserveBlockId (Just decl.name.text)
           recordVarBlockId variableId blockId
           recordEntry moduleName decl.name.text blockId
+          -- Record qname for core→core agent dispatch.
+          let qname = QualifiedName {module_ = moduleName, name = decl.name.text}
+          modify $ \state ->
+            state {lsAgentNames = Map.insert variableId qname state.lsAgentNames}
       AST.DeclarationRequest decl ->
         registerCallable decl.name decl.sourceSpan $ \variableId -> do
           blockId <- freshBlockId
@@ -616,7 +605,8 @@ lowerAllDeclarations zonkResult = do
 -- ===========================================================================
 
 -- | Lower a top-level 'AgentDeclaration' into the reserved BlockId.
--- Produces a single 'BlockKindAgent' block that catches @return@.
+-- Produces a 'BlockAgent' wrapper that catches @return@ and references
+-- an inner 'BlockUser' body.
 lowerAgentDeclaration :: AST.AgentDeclaration Zonked -> BlockId -> Lower ()
 lowerAgentDeclaration decl =
   lowerAgentLike decl.name.text decl.parameters decl.body
@@ -637,9 +627,13 @@ lowerAgentLike name parameters body blockId = do
       paramPrelude = combineParamPreludes (map snd paramBindings)
   lowerSimpleAgent blockId name paramVars paramPrelude body
 
--- | Plain agent (no @where@): single block, @catchesReturn=True@. The
--- @prelude@ runs inside the block's buffer so any parameter destructuring
--- is emitted before the body proper.
+-- | Plain agent (no @where@). Emits a 'BlockAgent' wrapper at @blockId@ that
+-- references an inner 'BlockUser' holding the actual body statements.
+-- The runtime spawns an AgentThread for @blockId@; the AgentThread
+-- spawns the inner UserThread on create.
+--
+-- The @prelude@ runs inside the inner block's buffer so any parameter
+-- destructuring is emitted before the body proper.
 lowerSimpleAgent ::
   BlockId ->
   Text ->
@@ -651,21 +645,44 @@ lowerSimpleAgent blockId name paramVars prelude blk = do
   (trailing, statements) <- runWithFreshBuffer $ do
     locals <- prelude
     withLocals locals (lowerBlockInto blk)
-  let userBlock =
+  -- Allocate the inner BlockUser body, then wrap it in a BlockAgent at
+  -- @blockId@ (the externally-callable id).
+  bodyBlockId <- freshBlockId
+  let bodyBlock =
         defaultUserBlock
-          { kind = BlockKindAgent,
-            parameters = paramVars,
+          { parameters = paramVars,
             statements = statements,
             trailing = trailing
           }
-  recordBlock blockId (BlockUser (userBlock)) (Just name)
+  recordBlock bodyBlockId (BlockUser bodyBlock) (Just (name <> ".body"))
+  -- Resolve qualifiedName by reverse-lookup of the wrapper blockId in
+  -- lsEntries (top-level agents are pre-registered with their qname).
+  -- Local / nested agents use a synthetic name; the runtime never reads
+  -- AgentBlock.qualifiedName for dispatch, only for debug output.
+  entries <- gets (.lsEntries)
+  let qname = case findQNameForBlock blockId entries of
+        Just qn -> qn
+        Nothing -> QualifiedName "<local>" name
+      agent =
+        AgentBlock
+          { qualifiedName = qname,
+            parameters = paramVars,
+            entryBody = bodyBlockId
+          }
+  recordBlock blockId (BlockAgent agent) (Just name)
+  where
+    findQNameForBlock :: BlockId -> Map QualifiedName BlockId -> Maybe QualifiedName
+    findQNameForBlock target entries =
+      case [qn | (qn, bid) <- Map.toList entries, bid == target] of
+        (qn : _) -> Just qn
+        [] -> Nothing
 
 
--- | Lower a 'RequestHandler' to a 'BlockKindInline' user block.
--- The handler body inherits the handle scope (state vars are directly
--- accessible). Only req args are passed via 'parameters'.
--- The body's trailing value is treated as an implicit @break@; an explicit
--- 'StatementExit ExitKindBreak' is appended if the body completes normally.
+-- | Lower a 'RequestHandler' to a 'BlockUser'. The handler body inherits
+-- the handle scope (state vars are directly accessible). Only req args
+-- are passed via 'parameters'. The body's trailing value is treated as
+-- an implicit @break@; an explicit 'StatementExit ExitKindBreak' is
+-- appended if the body completes normally.
 --
 -- @stateLocals@ is the @(VariableId, VarId)@ map already in scope via
 -- 'withLocals'; it is passed here only so the caller's intent is explicit.
@@ -689,14 +706,16 @@ lowerHandler _stateLocals hr = do
   (trailing, statements) <- runWithFreshBuffer $ do
     locals <- paramPrelude
     withLocals locals (lowerBlockInto hr.body)
-  let finalStatements = case trailing of
-        Just t ->
+  let lastIsExit = case reverse statements of
+        (StatementExit {} : _) -> True
+        _ -> False
+      finalStatements = case trailing of
+        Just t | not lastIsExit ->
           statements ++ [StatementExit ExitData {exitKind = ExitKindBreak, value = t}]
-        Nothing -> statements
+        _ -> statements
       userBlock =
         defaultUserBlock
-          { kind = BlockKindInline,
-            parameters = reqParamVars,
+          { parameters = reqParamVars,
             statements = finalStatements
           }
   recordBlock bodyBlockId (BlockUser (userBlock)) (Just hr.name.text)
@@ -965,29 +984,90 @@ lowerExpr = \case
       qualifiedRefExpr.target.text
       (Just qualifiedRefExpr.target.text)
 
--- | Lower a function call. Decides whether to emit a static 'CallTargetBlock' call
--- (when the callee resolves to a top-level decl / ctor / prim) or a closure
--- 'CallTargetValue' call (when the callee is a local variable holding a function).
+-- | Lower a function call. Dispatches by the callee's resolution kind:
+--
+--   * Top-level agent → 'StatementAgentCall' (core→core delegate event).
+--   * Top-level non-agent (prim / ctor / external-agent) →
+--     'StatementCall' with 'CallTargetBlock'.
+--   * Local var (= closure-of-agent) or any computed callee →
+--     'StatementAgentCallClosure'.
 lowerCall :: AST.CallExpression Zonked -> Lower VarId
 lowerCall callExpression = do
   argVars <- mapM (lowerExpr . (.value)) callExpression.arguments
   let callArgs = zipWith Arg (map (.label.text) callExpression.arguments) argVars
-  target <- resolveCallee callExpression.callee
   out <- freshVarId Nothing
-  emit (StatementCall CallData {target = target, arguments = callArgs, output = Just out})
+  callee <- resolveCalleeKind callExpression.callee
+  case callee of
+    CalleeAgent qname ->
+      emit
+        ( StatementAgentCall
+            AgentCallData {target = qname, arguments = callArgs, output = Just out}
+        )
+    CalleeBlock blockId ->
+      emit
+        ( StatementCall
+            CallData {target = CallTargetBlock {block = blockId}, arguments = callArgs, output = Just out}
+        )
+    CalleeClosure varId ->
+      emit
+        ( StatementAgentCallClosure
+            AgentCallClosureData {target = varId, arguments = callArgs, output = Just out}
+        )
   pure out
 
--- | Resolve an expression that's used in the callee position.
-resolveCallee :: AST.Expression Zonked -> Lower CallTarget
-resolveCallee = \case
+-- | Result of resolving a callee. The dispatch decision is encoded in
+-- the constructor; the IR emit is a switch over this.
+data CalleeKind where
+  CalleeAgent :: QualifiedName -> CalleeKind
+  CalleeBlock :: BlockId -> CalleeKind
+  CalleeClosure :: VarId -> CalleeKind
+
+resolveCalleeKind :: AST.Expression Zonked -> Lower CalleeKind
+resolveCalleeKind = \case
   AST.ExpressionVariable variableExpression ->
-    resolveAsCallTarget True variableExpression.name.resolution variableExpression.sourceSpan variableExpression.name.text
+    resolveNameAsCallee
+      True
+      variableExpression.name.resolution
+      variableExpression.sourceSpan
+      variableExpression.name.text
   AST.ExpressionQualifiedReference qualifiedRefExpr ->
-    -- Qualified references never bind locally.
-    resolveAsCallTarget False qualifiedRefExpr.target.resolution qualifiedRefExpr.sourceSpan qualifiedRefExpr.target.text
+    resolveNameAsCallee
+      False
+      qualifiedRefExpr.target.resolution
+      qualifiedRefExpr.sourceSpan
+      qualifiedRefExpr.target.text
   other -> do
     var <- lowerExpr other
-    pure (CallTargetValue {var = var})
+    pure (CalleeClosure var)
+
+-- | Resolve a 'NameRef' callee: locals → closure call; top-level agents →
+-- core→core delegate; top-level non-agents → block call. Records an
+-- error and returns a closure-of-fresh-var fallback when the name is
+-- unresolved.
+resolveNameAsCallee ::
+  Bool ->
+  AST.NameRefResolution Zonked AST.VariableRef ->
+  SourceSpan ->
+  Text ->
+  Lower CalleeKind
+resolveNameAsCallee canBeLocal resolution sourceSpan nameText = do
+  resolved <- resolveVariable canBeLocal resolution sourceSpan nameText
+  case resolved of
+    ResolvedVarLocal irVar -> pure (CalleeClosure irVar)
+    ResolvedVarTopLevel blockId -> do
+      -- Top-level callable: if it's a user-defined agent, dispatch by
+      -- qualified name through core→core; otherwise (prim / ctor /
+      -- external-agent) call its block directly.
+      case resolution of
+        Just variableId -> do
+          mAgentName <- gets (Map.lookup variableId . (.lsAgentNames))
+          case mAgentName of
+            Just qname -> pure (CalleeAgent qname)
+            Nothing -> pure (CalleeBlock blockId)
+        Nothing -> pure (CalleeBlock blockId)
+    ResolvedVarUnresolved -> do
+      v <- freshVarId Nothing
+      pure (CalleeClosure v)
 
 -- | Lower an 'AST.TemplateExpression' as a left-fold of @concat@ prim
 -- calls.
@@ -1357,7 +1437,7 @@ lowerHandleExpr handleExpr = do
     -- Body block (the continuation).
     (bodyTrailing, bodyStatements) <- runWithFreshBuffer (lowerBlockInto handleExpr.body)
     recordBlock bodyBlockId
-      (BlockUser (defaultUserBlock {kind = BlockKindInline, statements = bodyStatements, trailing = bodyTrailing}))
+      (BlockUser (defaultUserBlock {statements = bodyStatements, trailing = bodyTrailing}))
       Nothing
     -- Handlers.
     handlerList <- mapM (lowerHandler stateLocals) handleExpr.handlers

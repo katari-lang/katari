@@ -7,16 +7,20 @@
 
 import type { Draft } from "immer";
 import { match } from "ts-pattern";
-import type { Block, BlockId } from "../ir/types.js";
-import { createScopeId, createThreadId, type CallId, type ScopeId, type ThreadId } from "./id.js";
+import type { Block, BlockId, ReqId } from "../ir/types.js";
+import {
+  createDelegationId,
+  createScopeId,
+  createThreadId,
+  type CallId,
+  type DelegationId,
+  type ScopeId,
+  type ThreadId,
+} from "./id.js";
 import type { StepCtx } from "./step-ctx.js";
 import type { Value } from "./value.js";
-import {
-  newCommonFields,
-  setChild,
-} from "./thread/common.js";
-import type { ReqId } from "../ir/types.js";
-import type { Thread } from "./thread/types.js";
+import { newCommonFields, setChild } from "./thread/common.js";
+import type { ExternalThread, Thread } from "./thread/types.js";
 
 /**
  * Decide where the freshly-allocated child scope's parentId should point.
@@ -89,12 +93,11 @@ export function spawnChild(ctx: StepCtx, args: SpawnArgs): ThreadId {
   });
 
   const thread: Thread = match(block)
-    .with({ kind: "blockUser" }, b => ({
+    .with({ kind: "blockUser" }, () => ({
       ...common,
       kind: "user" as const,
       blockId: args.blockId,
       pc: 0,
-      catchesReturn: b.body.kind === "blockKindAgent",
     }))
     .with({ kind: "blockPrim" }, b => ({
       ...common,
@@ -113,7 +116,8 @@ export function spawnChild(ctx: StepCtx, args: SpawnArgs): ThreadId {
       kind: "external" as const,
       externalName: b.body,
       args: args.callArgs,
-      delegationId: createDelegationIdLocal(),
+      delegationId: createDelegationId(),
+      pendingEscalations: {},
     }))
     .with({ kind: "blockMatch" }, () => ({
       ...common,
@@ -157,12 +161,13 @@ export function spawnChild(ctx: StepCtx, args: SpawnArgs): ThreadId {
       args: args.callArgs,
     }))
     .with({ kind: "blockAgent" }, () => {
-      // Phase 3.1 stub: BlockAgent variant is reserved for the AgentThread
-      // refactor (Phase 3.3). Lowering does not currently emit blockAgent,
-      // so this branch is unreachable; it exists only to satisfy the
-      // ts-pattern exhaustiveness check while the new variant lands.
+      // Should not be reached: Lowering routes top-level agent calls
+      // through `StatementAgentCall` (core→core delegate), which spawns
+      // an AgentThread root via `translateExternal` rather than as a
+      // child. Reaching here means an old IR with `StatementCall +
+      // CallTargetBlock(blockAgentId)` slipped through.
       throw new Error(
-        "engine.spawnChild: blockAgent is not yet implemented (Phase 3.3 pending)",
+        `engine.spawnChild: blockId ${args.blockId} targets a blockAgent — agent calls must use StatementAgentCall`,
       );
     })
     .exhaustive();
@@ -175,8 +180,114 @@ export function spawnChild(ctx: StepCtx, args: SpawnArgs): ThreadId {
   return newThreadId;
 }
 
-// Local delegation-id allocator (UUID). Kept here instead of importing
-// from id.ts to avoid an unused-import lint when the file uses it once.
-function createDelegationIdLocal(): import("./id.js").DelegationId {
-  return crypto.randomUUID() as import("./id.js").DelegationId;
+// ─── AgentThread + ExternalThread (delegation boundary) ───────────────────
+
+export type SpawnAgentRootArgs = {
+  blockId: BlockId;
+  args: Record<string, Value>;
+  delegationId: DelegationId;
+};
+
+/**
+ * Spawn a fresh root AgentThread for an inbound `delegate` event. Args are
+ * bound into the agent's body scope by the AgentThread's own `create` op
+ * (which spawns the body UserThread). Returns the new ThreadId so the
+ * caller can register it under `state.delegations`.
+ */
+export function spawnAgentRoot(
+  ctx: StepCtx,
+  args: SpawnAgentRootArgs,
+): ThreadId {
+  const block = ctx.state.irModule.blocks[String(args.blockId)] as Block | undefined;
+  if (block === undefined || block.kind !== "blockAgent") {
+    throw new Error(
+      `engine.spawnAgentRoot: blockId ${args.blockId} is not a blockAgent (${block?.kind})`,
+    );
+  }
+
+  const newScopeId = createScopeId();
+  ctx.state.scopes[newScopeId] = {
+    id: newScopeId,
+    parentId: null,
+    values: {},
+  };
+
+  const newThreadId = createThreadId();
+  const common = newCommonFields({
+    id: newThreadId,
+    parent: null,
+    parentCallId: null,
+    scopeId: newScopeId,
+    handlers: {},
+  });
+  const agent: Thread = {
+    ...common,
+    kind: "agent",
+    blockId: args.blockId,
+    args: { ...args.args },
+    delegationId: args.delegationId,
+  };
+  ctx.state.threads[newThreadId] = agent as Draft<Thread>;
+  ctx.enqueue({ kind: "create", threadId: newThreadId });
+  return newThreadId;
+}
+
+export type SpawnExternalForAgentArgs = {
+  parentId: ThreadId;
+  parentCallId: CallId;
+  delegationId: DelegationId;
+  args: Record<string, Value>;
+};
+
+/**
+ * Spawn a "phantom" ExternalThread to receive the eventual `delegateAck`
+ * for a core→core agent delegate. Unlike a normal ExternalThread (which
+ * fires its own outbound `delegate` on create), this one is created with
+ * the delegation already in flight — the caller emits the outbound event
+ * directly.
+ *
+ * Used by `statementAgentCall` / `statementAgentCallClosure` in the
+ * UserThread ops.
+ */
+export function spawnExternalForAgentDelegate(
+  ctx: StepCtx,
+  args: SpawnExternalForAgentArgs,
+): ThreadId {
+  const parent = ctx.state.threads[args.parentId] as Draft<Thread> | undefined;
+  if (parent === undefined) {
+    throw new Error(
+      `engine.spawnExternalForAgentDelegate: parent ${args.parentId} not found`,
+    );
+  }
+
+  const newScopeId = createScopeId();
+  ctx.state.scopes[newScopeId] = {
+    id: newScopeId,
+    parentId: parent.scopeId,
+    values: {},
+  };
+
+  const newThreadId = createThreadId();
+  const common = newCommonFields({
+    id: newThreadId,
+    parent: args.parentId,
+    parentCallId: args.parentCallId,
+    scopeId: newScopeId,
+    handlers: { ...(parent.handlers as Record<number, ThreadId>) },
+  });
+  const ext: ExternalThread = {
+    ...common,
+    kind: "external",
+    externalName: { module_: "<agent>", name: "<delegate>" },
+    args: { ...args.args },
+    delegationId: args.delegationId,
+    pendingEscalations: {},
+  };
+  ctx.state.threads[newThreadId] = ext as Draft<Thread>;
+  setChild(parent, args.parentCallId, newThreadId);
+  // Register on the sender side so inbound delegateAck / terminateAck
+  // can be routed back to this phantom. The caller emits the outbound
+  // delegate event itself.
+  ctx.state.pendingDelegateOut[args.delegationId as string] = newThreadId;
+  return newThreadId;
 }

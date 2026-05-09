@@ -1,0 +1,51 @@
+{
+  "name": "katari-vscode",
+  "displayName": "Katari",
+  "description": "Syntax highlighting and language support for the Katari language.",
+  "version": "0.1.0",
+  "private": true,
+  "publisher": "katari",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "katari",
+        "aliases": [
+          "Katari",
+          "katari"
+        ],
+        "extensions": [
+          ".ktr"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "katari",
+        "scopeName": "source.katari",
+        "path": "./syntaxes/katari.tmLanguage.json"
+      }
+    ]
+  },
+  "exports": {
+    "./grammar": "./syntaxes/katari.tmLanguage.json",
+    "./language-configuration": "./language-configuration.json"
+  },
+  "files": [
+    "syntaxes",
+    "language-configuration.json"
+  ],
+  "scripts": {
+    "test": "node --experimental-vm-modules ./scripts/tokenize-samples.mjs"
+  },
+  "devDependencies": {
+    "vscode-oniguruma": "^2.0.1",
+    "vscode-textmate": "^9.1.0"
+  }
+}

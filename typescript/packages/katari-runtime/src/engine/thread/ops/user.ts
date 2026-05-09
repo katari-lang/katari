@@ -1,16 +1,25 @@
-// UserThread ops.
+// UserThread ops — pure statement-execution unit.
 //
 // Drives a BlockUser by running statements sequentially via `pc`. The
-// thread's `catchesReturn` flag signals that this is an agent boundary
-// (`block.kind === "blockKindAgent"`); it intercepts `return` asks instead
-// of proxying them upward.
-//
-// `break` / `for_break` / `next` / `for_next` are likewise translated
-// into bubbling asks — emitted from `statementExit` / `statementCont`
-// straight into the parent chain.
+// thread does NOT catch any asks — `return` / `break` / `break-for` /
+// `next` / `next-for` / `request` all bubble up through `proxyAskToParent`.
+// Boundary catches live on AgentThread (return) / HandleThread (break,
+// next) / ForThread (break-for, next-for) instead.
 //
 // `request` calls are dispatched the usual way: a `RequestThread` is
 // spawned, which itself emits a `request` ask up the chain.
+//
+// Cross-agent dispatch lives here too:
+//   - `statementAgentCall`        → outbound core→core `delegate` event
+//                                   targeting a top-level qualified name
+//   - `statementAgentCallClosure` → outbound core→core `delegate` event
+//                                   carrying the captured agent's body
+//                                   blockId resolved from the closure
+//
+// The runner picks the outbound `delegate` up via `translateExternal` on
+// the next iteration and spawns a fresh AgentThread. A local
+// ExternalThread is registered as the receiver of the eventual
+// `delegateAck`, which becomes a `done` to this UserThread.
 
 import type { Draft } from "immer";
 import type {
@@ -21,34 +30,32 @@ import type {
   UserBlock,
   VarId,
 } from "../../../ir/types.js";
-import type { AskId, CallId, ScopeId, ThreadId } from "../../id.js";
+import type { CallId, ScopeId, ThreadId } from "../../id.js";
 import type { AskKind, ModMap } from "../../event.js";
 import { RecoverableEngineError } from "../../errors.js";
 import { tryMatch } from "../../pattern.js";
-import { spawnChild } from "../../spawn.js";
+import { spawnChild, spawnExternalForAgentDelegate } from "../../spawn.js";
+import { createDelegationId } from "../../id.js";
 import type { StepCtx } from "../../step-ctx.js";
 import { literalToValue, NULL_VALUE, type Value } from "../../value.js";
 import {
   allocAskId,
   commonRemoveChild,
-  emitRootCompletion,
-  hasChildren,
   lookupValue,
   setValueInScope,
 } from "../common.js";
 import type { UserThread } from "../types.js";
 import {
   defaultAskAckProxy,
+  defaultAskProxy,
   defaultCancel,
   defaultCancelAckUnexpected,
 } from "./defaults.js";
-import { proxyAskToParent } from "../common.js";
 import type { ThreadOps } from "./types.js";
 
 export const userOps: ThreadOps<UserThread> = {
   create(ctx, t) {
     const block = getUserBlock(ctx, t.blockId);
-    bindParameters(ctx, t.scopeId, block);
     runStatements(ctx, t as Draft<UserThread>, block);
   },
 
@@ -57,8 +64,11 @@ export const userOps: ThreadOps<UserThread> = {
     const block = getUserBlock(ctx, t.blockId);
     // Carry the call's output VarId, if any.
     const stmt = block.statements[callId as number];
-    if (stmt && stmt.kind === "statementCall" && stmt.body.output !== undefined) {
-      setValueInScope(ctx, t.scopeId, stmt.body.output, value);
+    if (stmt !== undefined) {
+      const output = outputVarOf(stmt);
+      if (output !== undefined) {
+        setValueInScope(ctx, t.scopeId, output, value);
+      }
     }
     runStatements(ctx, t as Draft<UserThread>, block);
   },
@@ -66,27 +76,23 @@ export const userOps: ThreadOps<UserThread> = {
   cancel: (ctx, t) => defaultCancel<UserThread>(ctx, t as Draft<UserThread>),
   cancelAck: defaultCancelAckUnexpected,
 
-  ask(ctx, t, askId, kind, childCallId) {
-    // Agent UserThreads catch `return`. Everything else bubbles up.
-    if (kind.kind === "return" && t.catchesReturn) {
-      handleReturnCaught(ctx, t as Draft<UserThread>, kind.value);
-      // The `return` ask never gets askAck — it's a done-terminating ask.
-      // We don't ack the immediate child; instead the caller (deep
-      // descendant) will be cancelled as part of the cascade.
-      return;
-    }
-    proxyAskToParent(
-      ctx,
-      t as Draft<UserThread>,
-      childCallId,
-      askId,
-      kind,
-    );
-  },
+  ask: (ctx, t, askId, kind, childCallId) =>
+    defaultAskProxy<UserThread>(ctx, t as Draft<UserThread>, askId, kind, childCallId),
 
   askAck: (ctx, t, askId, value) =>
     defaultAskAckProxy<UserThread>(ctx, t as Draft<UserThread>, askId, value),
 };
+
+function outputVarOf(stmt: Statement): VarId | undefined {
+  switch (stmt.kind) {
+    case "statementCall":
+    case "statementAgentCall":
+    case "statementAgentCallClosure":
+      return stmt.body.output;
+    default:
+      return undefined;
+  }
+}
 
 // ─── helpers ───────────────────────────────────────────────────────────────
 
@@ -99,24 +105,6 @@ function getUserBlock(ctx: StepCtx, blockId: BlockId): UserBlock {
     throw new Error(`engine.user: block ${blockId} is not a user block (${b.kind})`);
   }
   return b.body;
-}
-
-function bindParameters(
-  ctx: StepCtx,
-  scopeId: ScopeId,
-  block: UserBlock,
-): void {
-  // Parameters carry the args we were spawned with. The thread record
-  // doesn't store args directly (parents pass them via spawnChild).
-  // This is a bit awkward in the new design — the spawning op writes
-  // args into our scope before the create event fires.
-  // Currently spawnChild does NOT do that; we delegate to whoever spawned
-  // us by reading `args` saved on the thread for variants that take args.
-  // UserThread doesn't have an `args` field; we rely on the parameters
-  // having been written into the scope via `setValueInScope` by the
-  // caller. Future-proof: if needed, push the args into UserThread.
-  void block;
-  void scopeId;
 }
 
 function runStatements(
@@ -133,16 +121,17 @@ function runStatements(
     }
 
     const advance = handleStatement(ctx, t, stmt);
-    if (advance === "wait") return; // wait for child / ack — the handler
-    // advanced pc itself if appropriate (e.g. statementCall).
+    if (advance === "wait") return;
 
     if (advance === "advance") {
       t.pc += 1;
     }
   }
 
-  // All statements done — emit our trailing value as `done` to parent,
-  // or as an external delegateAck if we are a root thread.
+  // All statements done — emit our trailing value as `done` to parent.
+  // UserThreads are never roots in the new design (AgentThread always
+  // wraps); if parent is null, the test scaffolding spawned us directly
+  // and we just disappear.
   const value = block.trailing !== undefined
     ? lookupValue(ctx, t.scopeId, block.trailing)
     : NULL_VALUE;
@@ -155,8 +144,9 @@ function runStatements(
     });
     return;
   }
-  // Root thread: emit external delegateAck and remove ourselves.
-  emitRootCompletion(ctx, t, value);
+  ctx.log("debug", "engine.user: parentless UserThread completed", {
+    threadId: t.id,
+  });
   delete ctx.state.threads[t.id];
 }
 
@@ -169,9 +159,6 @@ function handleStatement(
 ): StatementOutcome {
   switch (stmt.kind) {
     case "statementCall": {
-      // Advance pc BEFORE spawning so that the eventual `done` event re-enters
-      // runStatements with the next pc, not the call statement again
-      // (which would re-spawn and infinite-loop).
       const callId = t.pc as CallId;
       t.pc += 1;
       pushCallEvent(ctx, t, callId, stmt.body);
@@ -182,10 +169,16 @@ function handleStatement(
       return "advance";
     }
     case "statementMakeClosure": {
-      setValueInScope(ctx, t.scopeId, stmt.body.output, {
-        kind: "closure",
+      const closureId = (ctx.state.nextClosureId as number) as import("../../id.js").ClosureId;
+      ctx.state.nextClosureId = (ctx.state.nextClosureId as number) + 1;
+      ctx.state.closures[closureId as unknown as number] = {
+        id: closureId,
         blockId: stmt.body.block,
         scopeId: t.scopeId,
+      };
+      setValueInScope(ctx, t.scopeId, stmt.body.output, {
+        kind: "closure",
+        closureId,
       });
       return "advance";
     }
@@ -198,7 +191,7 @@ function handleStatement(
             "statementBindPattern: refutable pattern reached runtime (compiler bug)",
           ),
         );
-        return "wait"; // freeze the thread; caller will see the error
+        return "wait";
       }
       for (const [varId, value] of Object.entries(bindings)) {
         setValueInScope(ctx, t.scopeId, Number(varId), value);
@@ -207,15 +200,6 @@ function handleStatement(
     }
     case "statementExit": {
       const value = lookupValue(ctx, t.scopeId, stmt.body.value);
-      // If we ourselves are the boundary for this exit kind, handle it
-      // directly without bubbling — the boundary mechanism reuses our
-      // own `catchesReturn` flag for return; break/break-for ought to
-      // be caught by some ancestor (the compiler enforces) so we just
-      // bubble those.
-      if (stmt.body.exitKind === "exitKindReturn" && t.catchesReturn) {
-        handleReturnCaught(ctx, t, value);
-        return "wait";
-      }
       const askKind = exitKindToAsk(stmt.body.exitKind, value);
       emitAskUpwards(ctx, t, askKind);
       return "wait";
@@ -229,17 +213,93 @@ function handleStatement(
       emitAskUpwards(ctx, t, askKind);
       return "wait";
     }
-    case "statementAgentCall":
+    case "statementAgentCall": {
+      const callId = t.pc as CallId;
+      t.pc += 1;
+      const args: Record<string, Value> = {};
+      for (const a of stmt.body.arguments) {
+        args[a.label] = lookupValue(ctx, t.scopeId, a.var);
+      }
+      pushAgentDelegate(ctx, t, callId, args, {
+        module_: stmt.body.target.module_,
+        name: stmt.body.target.name,
+      });
+      return "wait";
+    }
     case "statementAgentCallClosure": {
-      // Phase 3.1 stub: cross-agent dispatch via core→core delegate events
-      // lands together with the AgentThread runtime path (Phase 3.3 / 3.7).
-      // Lowering does not emit these statements yet, so this branch is
-      // unreachable; it exists to satisfy the exhaustiveness check.
-      throw new Error(
-        `engine.user: ${stmt.kind} is not yet implemented (Phase 3.3 / 3.7 pending)`,
-      );
+      const callId = t.pc as CallId;
+      t.pc += 1;
+      const closureValue = lookupValue(ctx, t.scopeId, stmt.body.target);
+      if (closureValue.kind !== "closure") {
+        ctx.recordError(
+          new RecoverableEngineError(
+            `engine.user: statementAgentCallClosure expected closure, got ${closureValue.kind}`,
+          ),
+        );
+        return "wait";
+      }
+      const closure = ctx.state.closures[closureValue.closureId as unknown as number];
+      if (closure === undefined) {
+        throw new Error(
+          `engine.user: closure ${closureValue.closureId} not found`,
+        );
+      }
+      const args: Record<string, Value> = {};
+      for (const a of stmt.body.arguments) {
+        args[a.label] = lookupValue(ctx, t.scopeId, a.var);
+      }
+      // Closure-based dispatch: encode the underlying blockId as a
+      // synthetic qualified name (`<closure>.<blockId>`); the runner's
+      // `resolveDelegateTarget` decodes it.
+      pushAgentDelegate(ctx, t, callId, args, {
+        module_: "<closure>",
+        name: String(closure.blockId as unknown as number),
+      });
+      return "wait";
     }
   }
+}
+
+/**
+ * Issue a core→core agent delegate. Spawns a phantom ExternalThread as a
+ * child of `t` at `parentCallId = callId`, registers it under
+ * `state.pendingDelegateOut[delegationId]`, and emits the outbound
+ * `delegate` event from=to=self. The runner's `translateExternal` picks
+ * the event up on the next iteration, spawns a fresh AgentThread root,
+ * and registers it under `state.delegations[delegationId]` /
+ * `state.delegationSenders[delegationId] = self`.
+ *
+ * When the AgentThread completes, `emitAgentRootCompletion` emits a
+ * `delegateAck` outbound to `delegationSenders` (= self). On the next
+ * iteration `translateExternal` finds the phantom in
+ * `pendingDelegateOut`, fires `done` to its parent (this UserThread),
+ * and the inherited `done` handler binds the value to the call's output
+ * VarId.
+ */
+function pushAgentDelegate(
+  ctx: StepCtx,
+  t: Draft<UserThread>,
+  callId: CallId,
+  args: Record<string, Value>,
+  target: { module_: string; name: string },
+): void {
+  const delegationId = createDelegationId();
+  spawnExternalForAgentDelegate(ctx, {
+    parentId: t.id,
+    parentCallId: callId,
+    delegationId,
+    args,
+  });
+  ctx.emit({
+    from: ctx.state.selfEndpoint,
+    to: ctx.state.selfEndpoint,
+    payload: {
+      kind: "delegate",
+      targetBlock: target,
+      args,
+      delegationId,
+    },
+  });
 }
 
 function pushCallEvent(
@@ -258,13 +318,6 @@ function pushCallEvent(
       const scopeMode = isStructuralBlock(block.kind)
         ? { mode: "inline" as const, parentScopeId: t.scopeId }
         : { mode: "isolated" as const };
-      // Args for the callee land in the *child's* scope after spawn —
-      // for that we need to push them into the new scope. The current
-      // spawnChild does not write args; UserThread's child sees its own
-      // params via `block.parameters[i].var`. We write args into the
-      // child scope by spawning first then writing — but we don't have
-      // the child's scope yet at the spawnChild caller site. Solution:
-      // spawn returns the new ThreadId, and we look up its scopeId.
       const childId = spawnChild(ctx, {
         parentId: t.id,
         parentCallId: callId,
@@ -272,7 +325,6 @@ function pushCallEvent(
         callArgs: args,
         scopeMode,
       });
-      // Write call args into the child's scope based on parameter labels.
       writeArgsIntoChildScope(ctx, childId, block, args);
       return;
     }
@@ -286,16 +338,20 @@ function pushCallEvent(
         );
         return;
       }
-      const calledBlock = ctx.state.irModule.blocks[String(value.blockId)] as Block | undefined;
+      const closure = ctx.state.closures[value.closureId as unknown as number];
+      if (closure === undefined) {
+        throw new Error(`engine.user: closure ${value.closureId} not found`);
+      }
+      const calledBlock = ctx.state.irModule.blocks[String(closure.blockId)] as Block | undefined;
       if (calledBlock === undefined) {
-        throw new Error(`engine.user: block ${value.blockId} not found (closure call)`);
+        throw new Error(`engine.user: block ${closure.blockId} not found (closure call)`);
       }
       const childId = spawnChild(ctx, {
         parentId: t.id,
         parentCallId: callId,
-        blockId: value.blockId as BlockId,
+        blockId: closure.blockId as BlockId,
         callArgs: args,
-        scopeMode: { mode: "captured", capturedScopeId: value.scopeId },
+        scopeMode: { mode: "captured", capturedScopeId: closure.scopeId },
       });
       writeArgsIntoChildScope(ctx, childId, calledBlock, args);
       return;
@@ -390,37 +446,6 @@ function emitAskUpwards(
   });
 }
 
-function handleReturnCaught(
-  ctx: StepCtx,
-  t: Draft<UserThread>,
-  value: Value,
-): void {
-  // Convert the caught return into our pending done value, then cancel
-  // children to drain. finishCancelling will emit done to our parent.
-  if (t.status === "cancelling") return;
-  t.status = "cancelling";
-  t.pendingReturn = value;
-  if (!hasChildren(t)) {
-    // No children — emit our done now (or root delegateAck if root).
-    if (t.parent !== null && t.parentCallId !== null) {
-      ctx.enqueue({
-        kind: "done",
-        target: t.parent,
-        callId: t.parentCallId,
-        value,
-      });
-    } else {
-      // Root thread: emit external delegateAck and remove ourselves.
-      emitRootCompletion(ctx, t, value);
-      delete ctx.state.threads[t.id];
-    }
-    return;
-  }
-  for (const childId of Object.values(t.children) as ThreadId[]) {
-    ctx.enqueue({ kind: "cancel", target: childId });
-  }
-}
-
 /**
  * The caller (this UserThread) just spawned a child via spawnChild;
  * the child's scope is a fresh empty scope. Walk the called block's
@@ -433,7 +458,7 @@ function writeArgsIntoChildScope(
   calledBlock: Block,
   args: Record<string, Value>,
 ): void {
-  if (calledBlock.kind !== "blockUser") return; // only user blocks have parameters
+  if (calledBlock.kind !== "blockUser") return;
   const child = ctx.state.threads[childId];
   if (child === undefined) return;
   for (const param of calledBlock.body.parameters) {
@@ -443,6 +468,3 @@ function writeArgsIntoChildScope(
     }
   }
 }
-
-// askId/AskId import only used inside helpers above.
-void (null as unknown as AskId);

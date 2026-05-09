@@ -544,8 +544,7 @@ parseExternalAgentDeclaration annotation = parseWithSpan $ do
   parameters <- parseParameterList
   parsePunctuation PunctuationArrow
   returnType <- parseType
-  parseKeyword KeywordWith
-  requests <- parseRequests
+  requests <- option [] (parseKeyword KeywordWith *> parseRequests)
   pure $ \sourceSpan ->
     ExternalAgentDeclaration
       { annotation = annotation,

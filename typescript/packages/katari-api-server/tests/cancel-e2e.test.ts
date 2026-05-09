@@ -54,12 +54,25 @@ describe("cancel agent e2e (suspended on FFI → cancel → terminateAck → can
     const cancelRow = (await cancelResp.json()) as { state: string };
     expect(cancelRow.state).toBe("cancelling");
 
-    // Locate the FFI delegationId from the engine snapshot.
+    // Locate the FFI delegationId from the engine snapshot. Outbound
+    // delegations live in `snap.pendingDelegateOut` (sender side); the
+    // FFI one is owned by an ExternalThread for the `blockExternal` block
+    // (module_ !== "<agent>").
     const handle = await registry.acquire(versionId as never);
     const snap = handle.toSnapshot();
-    const ffiIds = Object.keys(snap.ffiDelegations);
-    expect(ffiIds.length).toBe(1);
-    const ffiDelegationId = ffiIds[0]!;
+    const ffiDelegationId = (() => {
+      for (const [delegationId, threadId] of Object.entries(snap.pendingDelegateOut)) {
+        const t = snap.threads[threadId];
+        if (
+          t !== undefined &&
+          t.kind === "external" &&
+          t.externalName.module_ !== "<agent>"
+        ) {
+          return delegationId;
+        }
+      }
+      throw new Error("no FFI ExternalThread found in snapshot");
+    })();
 
     // Feed the FFI terminateAck.
     const ffiSelf = endpoint("ext://ffi");

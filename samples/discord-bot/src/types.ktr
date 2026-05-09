@@ -3,24 +3,32 @@
 type ChannelId = string
 type MessageId = string
 
-type Message = {
+@"Discord メッセージ"
+data Message(
   id: MessageId,
   channel_id: ChannelId,
   author: string,
   content: string,
   is_bot: boolean
-}
+)
 
-type Channel = {
+@"Discord チャンネル"
+data Channel(
   id: ChannelId,
   name: string
-}
+)
 
-type SearchResult = { title: string, snippet: string, url: string }
+@"Web 検索結果の 1 件"
+data SearchResult(
+  title: string,
+  snippet: string,
+  url: string
+)
 
-type AgentRef = {
+@"呼び出し可能なエージェントへの参照"
+data AgentRef(
   url: string,
   agent_def_id: string,
   name: string,
   description: string
-}
+)

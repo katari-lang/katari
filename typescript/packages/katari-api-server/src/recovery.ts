@@ -88,9 +88,9 @@ async function recoverOneVersion(
   // recovered. The implementation cap is 500 (see storage list options).
   if (agents !== undefined) {
     const PAGE_SIZE = 500;
-    let offset = 0;
+    let afterId: import("./storage/types.js").AgentId | undefined = undefined;
     while (true) {
-      const rows = await storage.agents.list({ versionId, limit: PAGE_SIZE, offset });
+      const rows = await storage.agents.list({ versionId, limit: PAGE_SIZE, afterId });
       if (rows.length === 0) break;
       for (const row of rows) {
         if (row.state !== "cancelling") continue;
@@ -109,7 +109,7 @@ async function recoverOneVersion(
         }
       }
       if (rows.length < PAGE_SIZE) break;
-      offset += PAGE_SIZE;
+      afterId = rows[rows.length - 1]!.id;
     }
   }
 }

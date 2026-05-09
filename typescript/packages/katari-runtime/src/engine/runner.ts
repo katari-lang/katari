@@ -13,15 +13,16 @@ import { match } from "ts-pattern";
 import { EntryNotFoundError, RecoverableEngineError } from "./errors.js";
 import type { Event, InternalEventPayload } from "./event.js";
 import { isInternal } from "./event.js";
-import { createScopeId, createThreadId, type CallId, type ScopeId, type ThreadId, type AskId } from "./id.js";
+import type { CallId, ThreadId, AskId } from "./id.js";
 import type { Diff } from "./diff.js";
+import { spawnAgentRoot } from "./spawn.js";
 import type { State } from "./state.js";
 import {
   emptyBuffers,
   makeStepCtx,
   type StepBuffers,
 } from "./step-ctx.js";
-import type { Thread, UserThread } from "./thread/types.js";
+import type { Thread } from "./thread/types.js";
 import {
   dispatchAsk,
   dispatchAskAck,
@@ -38,9 +39,19 @@ enablePatches();
  * Drive the event queue starting with `initial`. Returns the new state
  * plus the side-effects accumulated during the drain.
  *
- * `initial` may be any Event (internal or external). External events are
- * silently ignored at the engine layer — the host translates them into
- * internal events before feeding the engine.
+ * `initial` may be any Event (internal or external). External events
+ * with `to === selfEndpoint` are translated locally (this is how
+ * core→core agent dispatch works); other external events go through
+ * `translateExternal` once for the initial event.
+ *
+ * Self-loop handling: any outbound events emitted during the drain
+ * whose `to` matches `state.selfEndpoint` are looped back through
+ * `translateExternal` after the queue settles. This lets a single
+ * `applyEvent` resolve an entire same-machine agent-call chain
+ * (StatementAgentCall → delegate → AgentThread spawn → … → delegateAck
+ *  → done → resume caller) without round-tripping through the host.
+ * Cross-machine events (to !== selfEndpoint) remain in `outbound` for
+ * the host to deliver.
  */
 export function drive(
   state: State,
@@ -58,35 +69,72 @@ export function drive(
   // proper sees them. Internal events are queued directly.
   let current = state;
   if (!isInternal(initial.payload)) {
-    const [next, patches] = produceWithPatches(current, (draft) => {
-      const ctx = makeStepCtx(draft, buffers);
-      try {
-        translateExternal(ctx, initial);
-      } catch (err) {
-        if (err instanceof RecoverableEngineError) {
-          ctx.recordError(err);
-        } else {
-          throw err;
-        }
-      }
-    });
-    allPatches.push(...patches);
-    current = next;
+    current = applyTranslateExternal(current, buffers, initial, allPatches);
   } else {
     buffers.queue.push(initial.payload);
   }
 
-  while (buffers.queue.length > 0) {
-    const ev = buffers.queue.shift()!;
-    const [next, patches] = produceWithPatches(current, (draft) => {
-      const ctx = makeStepCtx(draft, buffers);
-      step(ctx, ev);
-    });
-    allPatches.push(...patches);
-    current = next;
+  while (true) {
+    // Drain the internal event queue.
+    while (buffers.queue.length > 0) {
+      const ev = buffers.queue.shift()!;
+      const [next, patches] = produceWithPatches(current, (draft) => {
+        const ctx = makeStepCtx(draft, buffers);
+        step(ctx, ev);
+      });
+      allPatches.push(...patches);
+      current = next;
+    }
+
+    // After the queue is empty, peel off any self-targeted outbound
+    // events and feed them back through `translateExternal`. Each
+    // translated event may push fresh internal events back onto the
+    // queue, so we re-enter the outer loop until everything settles.
+    const selfEvents: Event[] = [];
+    const remaining: Event[] = [];
+    for (const ev of buffers.outbound) {
+      if (ev.to === current.selfEndpoint) {
+        selfEvents.push(ev);
+      } else {
+        remaining.push(ev);
+      }
+    }
+    if (selfEvents.length === 0) break;
+    buffers.outbound = remaining;
+    for (const ev of selfEvents) {
+      current = applyTranslateExternal(current, buffers, ev, allPatches);
+    }
   }
 
   return { state: current, buffers, patches: allPatches };
+}
+
+/**
+ * Run `translateExternal` against the current state, accumulating its
+ * patches into `allPatches` and returning the next state. Recoverable
+ * errors raised inside translation are recorded; anything else
+ * propagates.
+ */
+function applyTranslateExternal(
+  current: State,
+  buffers: StepBuffers,
+  event: Event,
+  allPatches: Patch[],
+): State {
+  const [next, patches] = produceWithPatches(current, (draft) => {
+    const ctx = makeStepCtx(draft, buffers);
+    try {
+      translateExternal(ctx, event);
+    } catch (err) {
+      if (err instanceof RecoverableEngineError) {
+        ctx.recordError(err);
+      } else {
+        throw err;
+      }
+    }
+  });
+  allPatches.push(...patches);
+  return next;
 }
 
 // ─── Single-step dispatch ──────────────────────────────────────────────────
@@ -183,19 +231,25 @@ function onAskAck(
 // ─── External event translation ────────────────────────────────────────────
 
 /**
- * Translate an external Event (`from` / `to` not both equal to selfEndpoint)
- * into one or more internal events. Mutates the draft directly to register
- * delegation indexes / spawn root threads.
+ * Translate an external Event into engine actions:
  *
- * Recognized:
- *   - `delegate` to self → spawn root user thread + register apiDelegations
- *   - `terminate` to self → cancel the root thread for that delegationId
- *   - `delegateAck` to self → done (or cancelAck if cancelling) for the
- *     ExternalThread for that delegationId
- *   - `terminateAck` to self → cancelAck for the ExternalThread for that delegationId
+ *   - `delegate` to self  → spawn an AgentThread and register
+ *     `state.delegations[delegationId] = agentThreadId`
+ *   - `terminate` to self → look up the thread under that delegationId
+ *     and cancel it (whether the local owner is an AgentThread we spawned
+ *     for an inbound delegate, or an ExternalThread that emitted an
+ *     outbound delegate — same machinery either way)
+ *   - `delegateAck` to self  → translate to a `done` event addressed at
+ *     the local ExternalThread that owns the delegationId
+ *   - `terminateAck` to self → translate to a `cancelAck` event addressed
+ *     at the local ExternalThread's parent
+ *   - `escalate` to self → forward to the AgentThread that owns the
+ *     delegationId; AgentThread.ask routes the request through its body
+ *   - `escalateAck` to self → match to ExternalThread.pendingEscalations
+ *     and fire askAck back to the chain that originally bubbled the ask
  *
- * Anything else (including events whose `to` is not selfEndpoint) is logged
- * and dropped.
+ * Anything addressed elsewhere (`event.to !== selfEndpoint`) is dropped
+ * with a debug log — the runner only consumes its own inbound events.
  */
 function translateExternal(
   ctx: ReturnType<typeof makeStepCtx>,
@@ -209,24 +263,42 @@ function translateExternal(
     return;
   }
   const p = event.payload;
+
   if (p.kind === "delegate") {
-    spawnApiRoot(ctx, p.targetBlock, p.args, p.delegationId, event.from);
+    const blockId = resolveDelegateTarget(ctx, p.targetBlock, p.delegationId);
+    const agentThreadId = spawnAgentRoot(ctx, {
+      blockId,
+      args: p.args,
+      delegationId: p.delegationId,
+    });
+    ctx.state.delegations[p.delegationId as string] = agentThreadId;
+    ctx.state.delegationSenders[p.delegationId as string] = event.from;
     return;
   }
+
   if (p.kind === "terminate") {
-    const threadId = ctx.state.apiDelegations[p.delegationId] as ThreadId | undefined;
+    const threadId = ctx.state.delegations[p.delegationId as string] as ThreadId | undefined;
     if (threadId === undefined) return;
     ctx.enqueue({ kind: "cancel", target: threadId });
     return;
   }
+
   if (p.kind === "delegateAck") {
-    const threadId = ctx.state.ffiDelegations[p.delegationId] as ThreadId | undefined;
+    // Look up the sender side: the ExternalThread (real or phantom) that
+    // issued the outbound delegate. The receiver-side AgentThread (if
+    // any, for self→self) has already cleaned itself up before emitting
+    // this ack.
+    const threadId = ctx.state.pendingDelegateOut[p.delegationId as string] as
+      | ThreadId
+      | undefined;
     if (threadId === undefined) return;
     const ext = ctx.state.threads[threadId];
-    if (ext === undefined || ext.kind !== "external") return;
-    delete ctx.state.ffiDelegations[p.delegationId];
+    if (ext === undefined || ext.kind !== "external") {
+      ctx.log("debug", "engine: delegateAck for non-external thread", { kind: ext?.kind });
+      return;
+    }
+    delete ctx.state.pendingDelegateOut[p.delegationId as string];
     if (ext.status === "cancelling") {
-      // Late delegateAck during cancellation: drop the value, ack as cancel.
       if (ext.parent !== null && ext.parentCallId !== null) {
         ctx.enqueue({ kind: "cancelAck", target: ext.parent, callId: ext.parentCallId });
       }
@@ -242,99 +314,138 @@ function translateExternal(
     }
     return;
   }
+
   if (p.kind === "terminateAck") {
-    const threadId = ctx.state.ffiDelegations[p.delegationId] as ThreadId | undefined;
+    const threadId = ctx.state.pendingDelegateOut[p.delegationId as string] as
+      | ThreadId
+      | undefined;
     if (threadId === undefined) return;
     const ext = ctx.state.threads[threadId];
     if (ext === undefined || ext.kind !== "external") return;
-    delete ctx.state.ffiDelegations[p.delegationId];
+    delete ctx.state.pendingDelegateOut[p.delegationId as string];
     if (ext.parent !== null && ext.parentCallId !== null) {
       ctx.enqueue({ kind: "cancelAck", target: ext.parent, callId: ext.parentCallId });
     }
     return;
   }
+
+  if (p.kind === "escalate") {
+    // Inbound escalate: an external (the receiver side of one of OUR
+    // outbound delegates) is asking us for a capability.
+    //
+    // We find the local sender ExternalThread (under
+    // `pendingDelegateOut[delegationId]`) and inject the request as an
+    // ask bubbling upward through that thread's parent chain — the same
+    // path a request statement takes locally. The escalateAck round-trip
+    // matches via `ExternalThread.pendingEscalations[escalationId]`.
+    const threadId = ctx.state.pendingDelegateOut[p.delegationId as string] as
+      | ThreadId
+      | undefined;
+    if (threadId === undefined) {
+      ctx.log("debug", "engine: escalate for unknown delegationId", {
+        delegationId: p.delegationId,
+      });
+      return;
+    }
+    const ext = ctx.state.threads[threadId];
+    if (ext === undefined || ext.kind !== "external") {
+      ctx.log("debug", "engine: escalate target not an ExternalThread", {
+        kind: ext?.kind,
+      });
+      return;
+    }
+    if (ext.parent === null || ext.parentCallId === null) {
+      ctx.log("warn", "engine: escalate at parentless external; dropping", {
+        threadId: ext.id,
+      });
+      return;
+    }
+    // Allocate an own askId on the external for the upward forward, and
+    // map (escalationId → ownAskId) so the eventual escalateAck can route
+    // back. The request payload uses the placeholder reqId of `0` since
+    // the receiving AgentThread looks up handlers by qualified name; the
+    // concrete ReqId mapping will be provided once requests carry their
+    // qname through the engine layer.
+    const draft = ext as import("immer").Draft<typeof ext>;
+    const ownAskId = (draft.nextAskId as number) as import("./id.js").AskId;
+    draft.nextAskId = ((draft.nextAskId as number) + 1) as import("./id.js").AskId;
+    draft.pendingEscalations[ownAskId as unknown as number] =
+      p.escalationId as import("./id.js").EscalationId;
+    ctx.enqueue({
+      kind: "ask",
+      target: ext.parent,
+      askId: ownAskId,
+      askKind: {
+        kind: "request",
+        reqId: 0 as import("../ir/types.js").ReqId,
+        args: { ...p.args },
+      },
+      childCallId: ext.parentCallId,
+    });
+    return;
+  }
+
+  if (p.kind === "escalateAck") {
+    // Find the ExternalThread holding this escalation in pendingEscalations.
+    for (const t of Object.values(ctx.state.threads)) {
+      if (t === undefined || t.kind !== "external") continue;
+      const askIdNum = findEscalationAskId(t.pendingEscalations, p.escalationId as string);
+      if (askIdNum === undefined) continue;
+      delete t.pendingEscalations[askIdNum];
+      // Fire askAck back to the chain that originally asked.
+      ctx.enqueue({
+        kind: "askAck",
+        target: t.id,
+        askId: askIdNum as AskId,
+        value: p.value,
+      });
+      return;
+    }
+    ctx.log("debug", "engine: escalateAck without registered escalation", {
+      escalationId: p.escalationId,
+    });
+    return;
+  }
+
   ctx.log("debug", "engine: unrecognized external event kind", { kind: p.kind });
 }
 
 /**
- * Allocate a fresh root UserThread for the given entry block and register
- * it under apiDelegations. Throws `EntryNotFoundError` (Recoverable) if
- * the qualified name doesn't exist in the IR.
+ * Resolve a delegate `targetBlock` to a BlockId.
+ *
+ * - `module_ === "<closure>"` → the `name` is the BlockId stringified.
+ *   Closure-based agent calls (`statementAgentCallClosure`) take this
+ *   path — the BlockAgent body lives directly in IR; no entry lookup.
+ * - otherwise the qualified name is resolved through `IRModule.entries`.
  */
-function spawnApiRoot(
+function resolveDelegateTarget(
   ctx: ReturnType<typeof makeStepCtx>,
-  targetBlock: { module_: string; name: string },
-  args: Record<string, import("./value.js").Value>,
-  delegationId: string,
-  sender: import("./endpoint.js").Endpoint,
-): void {
-  const qn =
-    targetBlock.module_ === ""
-      ? targetBlock.name
-      : `${targetBlock.module_}.${targetBlock.name}`;
+  target: { module_: string; name: string },
+  delegationId: import("./id.js").DelegationId,
+): import("../ir/types.js").BlockId {
+  if (target.module_ === "<closure>") {
+    return Number(target.name) as import("../ir/types.js").BlockId;
+  }
+  const qn = target.module_ === "" ? target.name : `${target.module_}.${target.name}`;
   const blockId = ctx.state.irModule.entries[qn];
   if (blockId === undefined) {
-    throw new EntryNotFoundError(qn, delegationId as import("./id.js").DelegationId);
+    throw new EntryNotFoundError(qn, delegationId);
   }
-  const block = ctx.state.irModule.blocks[String(blockId)];
-  if (block === undefined || block.kind !== "blockUser") {
-    throw new RecoverableEngineError(
-      `engine.spawnApiRoot: entry "${qn}" maps to block ${blockId}, but it is not a blockUser (${block?.kind})`,
-      delegationId as import("./id.js").DelegationId,
-    );
-  }
-
-  const threadId = createThreadId();
-  const scopeId = createScopeId();
-  ctx.state.scopes[scopeId] = { id: scopeId, parentId: null, values: {} };
-
-  // Bind args into the new scope by parameter label.
-  for (const param of block.body.parameters) {
-    const v = args[param.label];
-    if (v !== undefined) {
-      ctx.state.scopes[scopeId]!.values[param.var] = v;
-    }
-  }
-
-  const root: UserThread = {
-    kind: "user",
-    id: threadId,
-    parent: null,
-    parentCallId: null,
-    scopeId,
-    status: "running",
-    children: {},
-    handlers: {},
-    nextCallId: 0 as CallId,
-    nextAskId: 0 as AskId,
-    askIdMap: {},
-    blockId: blockId as import("../ir/types.js").BlockId,
-    pc: 0,
-    catchesReturn: block.body.kind === "blockKindAgent",
-  };
-  ctx.state.threads[threadId] = root;
-  ctx.state.apiDelegations[delegationId] = threadId;
-  ctx.state.apiDelegationSenders[delegationId] = sender;
-
-  ctx.enqueue({ kind: "create", threadId });
+  return blockId;
 }
 
-/** Used by spawn.ts and the External thread's outbound emission. */
-export function findApiDelegationByThreadId(
-  state: State,
-  threadId: ThreadId,
-): { delegationId: string; sender: import("./endpoint.js").Endpoint } | undefined {
-  for (const [did, tid] of Object.entries(state.apiDelegations)) {
-    if (tid === threadId) {
-      const sender = state.apiDelegationSenders[did];
-      if (sender !== undefined) return { delegationId: did, sender };
-    }
+function findEscalationAskId(
+  pendingEscalations: Record<number, import("./id.js").EscalationId>,
+  escalationId: string,
+): number | undefined {
+  for (const [askIdStr, esc] of Object.entries(pendingEscalations)) {
+    if ((esc as string) === escalationId) return Number(askIdStr);
   }
   return undefined;
 }
 
-// `ScopeId` referenced indirectly via spawnApiRoot.
-void (null as unknown as ScopeId);
+// `CallId` referenced via signatures.
+void (null as unknown as CallId);
 
 // ─── Patches → Diff translation ────────────────────────────────────────────
 
@@ -344,9 +455,8 @@ void (null as unknown as ScopeId);
  * Immer patches are JSON-Pointer style:
  *   { op: "replace" | "add" | "remove", path: (string | number)[], value? }
  *
- * For Stage A we recognize the common cases and emit `thread.update` with
- * the raw patch under `patch` for everything else. The host layer can
- * either consume these as-is or post-process them into row-level upserts.
+ * The host layer no longer consumes these (DiffRepo was removed) but we
+ * keep the translation for future audit/replay use.
  */
 export function patchesToDiffs(patches: Patch[]): Diff[] {
   const diffs: Diff[] = [];
@@ -385,9 +495,6 @@ export function patchesToDiffs(patches: Patch[]): Diff[] {
           value: p.value as import("./value.js").Value,
         });
       }
-      // Other scope-internal patches roll into the snapshot via
-      // `scope.create` semantics on rebuild — the host can replay the
-      // raw Immer patch separately if needed.
     }
   }
   return diffs;

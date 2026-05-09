@@ -107,6 +107,23 @@ export function checkCancelComplete(ctx: StepCtx, t: Draft<Thread>): void {
 }
 
 /**
+ * Variants that can carry a `pendingReturn` (a caught done-terminating ask
+ * value) — i.e. AgentThread (return), HandleThread (break), ForThread
+ * (break-for). Centralized here so `finishCancelling` can read the field
+ * without proliferating type guards everywhere.
+ */
+function readPendingReturn(t: Draft<Thread>): import("../value.js").Value | undefined {
+  switch (t.kind) {
+    case "agent":
+    case "handle":
+    case "for":
+      return t.pendingReturn;
+    default:
+      return undefined;
+  }
+}
+
+/**
  * The thread has no remaining children; emit the appropriate notification
  * to the parent and cease.
  *
@@ -114,23 +131,33 @@ export function checkCancelComplete(ctx: StepCtx, t: Draft<Thread>): void {
  *   emit `done` to parent with that value.
  * - Otherwise, emit `cancelAck` to parent (pure cancel cascade).
  *
- * For root threads (parent === null), the engine emits the corresponding
- * external `delegateAck` / `terminateAck` to the API delegation sender
- * (recorded in `apiDelegationSenders`) and removes the thread + its
- * apiDelegations entry.
+ * For root threads (parent === null) — only AgentThreads can be roots in
+ * the new design — we delegate to the variant's own completion path via
+ * `emitAgentRootCompletion`.
  */
 export function finishCancelling(ctx: StepCtx, t: Draft<Thread>): void {
+  const pending = readPendingReturn(t);
   if (t.parent === null) {
-    emitRootCompletion(ctx, t, t.pendingReturn);
+    if (t.kind === "agent") {
+      emitAgentRootCompletion(ctx, t, pending);
+      deleteThread(ctx, t.id);
+      return;
+    }
+    // Non-agent root: nothing to emit (test scaffolding may spawn these
+    // directly). Drop with a debug log.
+    ctx.log("debug", "engine: non-agent root thread cancelled", {
+      threadId: t.id,
+      kind: t.kind,
+    });
     deleteThread(ctx, t.id);
     return;
   }
-  if (t.pendingReturn !== undefined) {
+  if (pending !== undefined) {
     ctx.enqueue({
       kind: "done",
       target: t.parent,
       callId: t.parentCallId!,
-      value: t.pendingReturn,
+      value: pending,
     });
   } else {
     ctx.enqueue({
@@ -142,53 +169,45 @@ export function finishCancelling(ctx: StepCtx, t: Draft<Thread>): void {
 }
 
 /**
- * Emit a completion notification (`delegateAck` for normal done,
- * `terminateAck` for cancel completion) for an API root thread back to
- * the original sender, then clean up the apiDelegations entries.
+ * Emit a completion notification for an AgentThread root back to the
+ * delegation's sender, then drop the delegations entries.
  *
- * `value` is the return value when defined; for cancellation
- * completion (`pendingReturn === undefined`) we emit `terminateAck`
- * with no payload.
+ * `value !== undefined` → `delegateAck` (normal completion or caught return).
+ * `value === undefined` → `terminateAck` (pure cancel cascade).
  */
-export function emitRootCompletion(
+export function emitAgentRootCompletion(
   ctx: StepCtx,
-  t: Draft<Thread>,
+  t: Draft<import("./types.js").AgentThread>,
   value: import("../value.js").Value | undefined,
 ): void {
-  // Find the delegationId for this root thread by reverse lookup.
-  let delegationId: string | undefined;
-  for (const [did, tid] of Object.entries(ctx.state.apiDelegations)) {
-    if (tid === t.id) {
-      delegationId = did;
-      break;
-    }
-  }
-  if (delegationId === undefined) {
-    // No registered delegation — nothing to emit. Could happen for
-    // ad-hoc root threads spawned directly via test setup.
-    ctx.log("debug", "engine: root thread completed without registered delegation", {
-      threadId: t.id,
-    });
-    return;
-  }
-  const sender = ctx.state.apiDelegationSenders[delegationId];
+  const delegationId = t.delegationId as string;
+  const sender = ctx.state.delegationSenders[delegationId];
   if (sender !== undefined) {
     if (value !== undefined) {
       ctx.emit({
         from: ctx.state.selfEndpoint,
         to: sender,
-        payload: { kind: "delegateAck", delegationId: delegationId as import("../id.js").DelegationId, value: value as import("../value.js").Value },
+        payload: {
+          kind: "delegateAck",
+          delegationId: t.delegationId,
+          value: value as import("../value.js").Value,
+        },
       });
     } else {
       ctx.emit({
         from: ctx.state.selfEndpoint,
         to: sender,
-        payload: { kind: "terminateAck", delegationId: delegationId as import("../id.js").DelegationId },
+        payload: { kind: "terminateAck", delegationId: t.delegationId },
       });
     }
+  } else {
+    ctx.log("debug", "engine: agent root completed without registered sender", {
+      threadId: t.id,
+      delegationId,
+    });
   }
-  delete ctx.state.apiDelegations[delegationId];
-  delete ctx.state.apiDelegationSenders[delegationId];
+  delete ctx.state.delegations[delegationId];
+  delete ctx.state.delegationSenders[delegationId];
 }
 
 /**

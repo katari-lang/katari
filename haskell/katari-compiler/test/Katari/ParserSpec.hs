@@ -1856,8 +1856,9 @@ spanBoundaries = describe "source span boundaries" $ do
 
 declarationsNegative :: Spec
 declarationsNegative = describe "declaration negative cases" $ do
-  it "rejects ext agent without 'with'" $ do
-    shouldFail "ext agent ask(prompt: string) -> string"
+  it "parses ext agent without 'with'" $ do
+    _ <- shouldSucceed "ext agent ask(prompt: string) -> string"
+    pure ()
 
 -- ---------------------------------------------------------------------------
 -- Number literal edge cases

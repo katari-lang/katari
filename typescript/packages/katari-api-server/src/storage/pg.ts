@@ -5,7 +5,6 @@ import postgres from "postgres";
 import { v7 as uuidv7 } from "uuid";
 import type {
   DelegationId,
-  Diff,
   EngineSnapshot,
   EngineValue,
   IRModule,
@@ -167,26 +166,47 @@ class PgAgentRepo implements AgentRepo {
 
   async list(filter?: {
     versionId?: VersionId;
+    afterId?: AgentId;
     limit?: number;
     offset?: number;
   }): Promise<AgentRow[]> {
     const limit = clampLimit(filter?.limit);
     const offset = clampOffset(filter?.offset);
+    // afterId keyset: only include rows whose id > afterId (uuidv7 is
+    // monotonically increasing, so string comparison is equivalent to
+    // insertion-order comparison).
+    const afterId = filter?.afterId;
     const rows =
       filter?.versionId !== undefined
-        ? await this.sql<DbAgentRow[]>`
-            SELECT id, delegation_id, version_id, qualified_name, args, state, result, error_message, created_at, updated_at
-            FROM agents
-            WHERE version_id = ${filter.versionId}
-            ORDER BY created_at DESC
-            LIMIT ${limit} OFFSET ${offset}
-          `
-        : await this.sql<DbAgentRow[]>`
-            SELECT id, delegation_id, version_id, qualified_name, args, state, result, error_message, created_at, updated_at
-            FROM agents
-            ORDER BY created_at DESC
-            LIMIT ${limit} OFFSET ${offset}
-          `;
+        ? afterId !== undefined
+          ? await this.sql<DbAgentRow[]>`
+              SELECT id, delegation_id, version_id, qualified_name, args, state, result, error_message, created_at, updated_at
+              FROM agents
+              WHERE version_id = ${filter.versionId} AND id > ${afterId}
+              ORDER BY id ASC
+              LIMIT ${limit} OFFSET ${offset}
+            `
+          : await this.sql<DbAgentRow[]>`
+              SELECT id, delegation_id, version_id, qualified_name, args, state, result, error_message, created_at, updated_at
+              FROM agents
+              WHERE version_id = ${filter.versionId}
+              ORDER BY id ASC
+              LIMIT ${limit} OFFSET ${offset}
+            `
+        : afterId !== undefined
+          ? await this.sql<DbAgentRow[]>`
+              SELECT id, delegation_id, version_id, qualified_name, args, state, result, error_message, created_at, updated_at
+              FROM agents
+              WHERE id > ${afterId}
+              ORDER BY id ASC
+              LIMIT ${limit} OFFSET ${offset}
+            `
+          : await this.sql<DbAgentRow[]>`
+              SELECT id, delegation_id, version_id, qualified_name, args, state, result, error_message, created_at, updated_at
+              FROM agents
+              ORDER BY id ASC
+              LIMIT ${limit} OFFSET ${offset}
+            `;
     return rows.map(dbRowToAgentRow);
   }
 
@@ -248,30 +268,6 @@ class PgAgentRepo implements AgentRepo {
   }
 }
 
-class PgDiffRepo {
-  constructor(private readonly sql: Sql) {}
-
-  async append(versionId: VersionId, diffs: Diff[]): Promise<void> {
-    if (diffs.length === 0) return;
-    await this.sql`
-      INSERT INTO machine_diffs (version_id, batch, created_at)
-      VALUES (${versionId}, ${this.sql.json(asJson(diffs))}, now())
-    `;
-  }
-
-  async list(versionId: VersionId): Promise<Diff[]> {
-    const rows = await this.sql<{ batch: Diff[] }[]>`
-      SELECT batch FROM machine_diffs
-      WHERE version_id = ${versionId}
-      ORDER BY id ASC
-    `;
-    return rows.flatMap((r) => r.batch);
-  }
-
-  async delete(versionId: VersionId): Promise<void> {
-    await this.sql`DELETE FROM machine_diffs WHERE version_id = ${versionId}`;
-  }
-}
 
 class PgSnapshotRepo implements SnapshotRepo {
   constructor(private readonly sql: Sql) {}
@@ -330,13 +326,11 @@ export class PostgresStorage implements Storage {
   readonly modules: ModuleRepo;
   readonly agents: AgentRepo;
   readonly snapshots: SnapshotRepo;
-  readonly diffs: PgDiffRepo;
 
   private constructor(private readonly sql: Sql) {
     this.modules = new PgModuleRepo(sql);
     this.agents = new PgAgentRepo(sql);
     this.snapshots = new PgSnapshotRepo(sql);
-    this.diffs = new PgDiffRepo(sql);
   }
 
   static create(databaseUrl: string): PostgresStorage {
@@ -396,7 +390,6 @@ function runInTx<T>(
       modules: new PgModuleRepo(innerSql),
       agents: new PgAgentRepo(innerSql),
       snapshots: new PgSnapshotRepo(innerSql),
-      diffs: new PgDiffRepo(innerSql),
       // Bind the *inner* sql so nested calls use savepoints on it,
       // not new BEGINs on the outer pool.
       withTransaction: (innerFn) => runInTx(innerSql, innerFn),

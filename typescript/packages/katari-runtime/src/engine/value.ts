@@ -1,8 +1,12 @@
-// Runtime Value type. Identical in shape to the previous machine/value.ts.
-// Closures carry a ScopeId pointing at the captured lexical scope.
+// Runtime Value type. Identical in shape to the previous machine/value.ts
+// except that closure values are now machine-local id references into
+// `state.closures` (the actual block / captured scope live there). Reasons:
+//   - agent-call-via-closure dispatch needs an opaque id to pass around
+//   - GC can collect closures when no Value still references the id
+//   - keeps Value purely structural, no captured state inside the type
 
-import type { BlockId, CtorId, LiteralValue } from "../ir/types.js";
-import type { ScopeId } from "./id.js";
+import type { CtorId, LiteralValue } from "../ir/types.js";
+import type { ClosureId } from "./id.js";
 
 export type Value =
   | { kind: "number"; value: number }
@@ -12,7 +16,7 @@ export type Value =
   | { kind: "tuple"; elements: Value[] }
   | { kind: "array"; elements: Value[] }
   | { kind: "tagged"; ctorId: CtorId; fields: Record<string, Value> }
-  | { kind: "closure"; blockId: BlockId; scopeId: ScopeId };
+  | { kind: "closure"; closureId: ClosureId };
 
 /** Convert an IR LiteralValue to a runtime Value. */
 export function literalToValue(literal: LiteralValue): Value {

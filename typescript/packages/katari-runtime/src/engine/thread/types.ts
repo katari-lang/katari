@@ -21,6 +21,7 @@ import type {
   AskId,
   CallId,
   DelegationId,
+  EscalationId,
   ScopeId,
   ThreadId,
 } from "../id.js";
@@ -55,19 +56,48 @@ type Common = {
   nextAskId: AskId;
   /** Forwarding bookkeeping for asks bubbled through this thread. */
   askIdMap: AskIdMap;
-  /** Set when a done-terminating ask (return/break/break-for) was caught. */
-  pendingReturn?: Value;
 };
 
 // ─── Variant payloads ──────────────────────────────────────────────────────
+
+/**
+ * AgentThread: agent boundary. Wraps a `BlockAgent` IR block.
+ *
+ * Spawned by:
+ *   - inbound `delegate` event (translateExternal): creates a root AgentThread
+ *     for the entry block, registered under `state.delegations[delegationId]`.
+ *   - inline `StatementAgentCall` / `StatementAgentCallClosure`: emits an
+ *     outbound `delegate` event (core→core, from=to=selfEndpoint) that the
+ *     runner picks up on the next iteration and spawns a fresh AgentThread.
+ *
+ * Catches `return` asks bubbling up from descendants. Owns one body
+ * UserThread spawned at create-time (callId 0). When the body completes
+ * — naturally, via caught return, or via cancel — the AgentThread emits
+ * `delegateAck` / `terminateAck` to the registered sender.
+ */
+export type AgentThread = Common & {
+  kind: "agent";
+  /** BlockId of the BlockAgent we represent. */
+  blockId: BlockId;
+  /** Args this agent was called with (passed into the body's scope at create). */
+  args: Record<string, Value>;
+  /**
+   * Delegation id that landed us here. Used to look up the sender in
+   * `state.delegationSenders` when emitting delegateAck/terminateAck.
+   */
+  delegationId: DelegationId;
+  /**
+   * Set when a `return` ask (or natural body done) was caught. Drives the
+   * eventual outbound `delegateAck` after children finish cancelling.
+   */
+  pendingReturn?: Value;
+};
 
 export type UserThread = Common & {
   kind: "user";
   blockId: BlockId;
   /** Statement program counter. */
   pc: number;
-  /** True if this user thread caches `return` (block.kind === "blockKindAgent"). */
-  catchesReturn: boolean;
 };
 
 export type HandleThread = Common & {
@@ -88,6 +118,12 @@ export type HandleThread = Common & {
   pendingActions: PendingAction[];
   /** Action to fire once a specific child finishes cancelling. */
   postCancelActions: Record<number, PostCancelAction>;
+  /**
+   * Set when a `break` ask was caught (handle scope's done-terminating
+   * exit). Drives the eventual `done` to parent after children finish
+   * cancelling.
+   */
+  pendingReturn?: Value;
 };
 
 export type ChildRole =
@@ -136,6 +172,8 @@ export type ForThread = Common & {
   /** Iter source array values resolved at construction. */
   iterableSnapshot: Value[];
   postCancelActions: Record<number, PostCancelAction>;
+  /** Set when a `break-for` ask was caught. */
+  pendingReturn?: Value;
 };
 
 export type MatchThread = Common & {
@@ -156,6 +194,13 @@ export type ExternalThread = Common & {
   externalName: ExternalName;
   args: Record<string, Value>;
   delegationId: DelegationId;
+  /**
+   * Outstanding outbound escalations: childAskId → escalationId. Set when
+   * an `ask` bubbles up into this thread; cleared on the matching
+   * `escalateAck` from the external side. Late acks after the thread is
+   * cancelling get dropped.
+   */
+  pendingEscalations: Record<number, EscalationId>;
 };
 
 export type PrimThread = Common & {
@@ -186,6 +231,7 @@ export type ArrayThread = Common & {
 };
 
 export type Thread =
+  | AgentThread
   | UserThread
   | HandleThread
   | ForThread

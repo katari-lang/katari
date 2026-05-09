@@ -105,7 +105,7 @@ export interface AgentRepo {
    * when the runtime only carries a `DelegationId`.
    */
   findByDelegationId(delegationId: DelegationId): Promise<AgentRow | null>;
-  list(filter?: { versionId?: VersionId } & ListOptions): Promise<AgentRow[]>;
+  list(filter?: { versionId?: VersionId; afterId?: AgentId } & ListOptions): Promise<AgentRow[]>;
   /**
    * Patch state / result / errorMessage on a single agent.
    *
@@ -139,30 +139,10 @@ export interface SnapshotRepo {
   delete(versionId: VersionId): Promise<void>;
 }
 
-/**
- * DiffRepo: append-only persistence for the Diff[] emitted by every
- * `applyEvent` call. Used alongside (or, eventually, instead of)
- * snapshot.upsert for incremental recovery. Each call corresponds to
- * one engine `applyEvent` and is stored in order — recovery replays
- * the diffs against an empty state to reconstruct.
- *
- * Phase G provides the API surface. Recovery from diff log is left for
- * a future revision; today recoverOnBoot still relies on snapshots.
- */
-export interface DiffRepo {
-  /** Append a batch of diffs for `versionId` in the order they occurred. */
-  append(versionId: VersionId, diffs: Diff[]): Promise<void>;
-  /** Read all diffs for a version in append order. */
-  list(versionId: VersionId): Promise<Diff[]>;
-  /** Delete every diff for a version. Used after a poison event. */
-  delete(versionId: VersionId): Promise<void>;
-}
-
 export interface Storage {
   modules: ModuleRepo;
   agents: AgentRepo;
   snapshots: SnapshotRepo;
-  diffs: DiffRepo;
   /**
    * Run `fn` inside a backend-native transaction. The `tx` argument is a
    * `Storage`-shaped facade whose `modules` / `agents` / `snapshots`
