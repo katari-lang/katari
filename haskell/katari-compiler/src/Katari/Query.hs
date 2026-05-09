@@ -40,19 +40,34 @@ import Katari.AST
     Declaration (..),
     Expression (..),
     ExternalAgentDeclaration (..),
+    FieldAccessExpression (..),
+    ForBreakStatement (..),
     ForExpression (..),
     ForInBinding (..),
+    ForNextStatement (..),
+    ForVarBinding (..),
+    HandleExpression (..),
     IfExpression (..),
+    IndexAccessExpression (..),
     LetStatement (..),
     MatchExpression (..),
+    Modifier (..),
     Module (..),
     NameRef (..),
     NameRefKind (..),
     NextStatement (..),
+    ParArrayExpression (..),
+    ParTupleExpression (..),
     Phase (Zonked),
+    QualifiedReferenceExpression (..),
     RequestDeclaration (..),
+    RequestHandler (..),
     ReturnStatement (..),
+    StateVariableBinding (..),
     Statement (..),
+    TemplateElement (..),
+    TemplateExpression (..),
+    TemplateExpressionElement (..),
     TupleExpression (..),
     UnaryOperatorExpression (..),
     VariableExpression (..),
@@ -263,7 +278,23 @@ hoverFromStatement idResult zonkResult position = \case
   StatementNext nextStatement
     | spanContains nextStatement.sourceSpan position ->
         hoverFromExpression idResult zonkResult position nextStatement.value
+          `orElse` listToMaybe (mapMaybe (hoverFromModifier idResult zonkResult position) nextStatement.modifiers)
+  StatementForBreak ForBreakStatement {value, sourceSpan}
+    | spanContains sourceSpan position ->
+        hoverFromExpression idResult zonkResult position value
+  StatementForNext ForNextStatement {modifiers, sourceSpan}
+    | spanContains sourceSpan position ->
+        listToMaybe (mapMaybe (hoverFromModifier idResult zonkResult position) modifiers)
   _ -> Nothing
+
+hoverFromModifier :: IdentifierResult -> ZonkResult -> Position -> Modifier Zonked -> Maybe HoverInfo
+hoverFromModifier idResult zonkResult position modifier
+  | spanContains modifier.sourceSpan position =
+      hoverFromExpression idResult zonkResult position modifier.value
+        `orElse` if spanContains modifier.name.sourceSpan position
+          then hoverFromVariableRef idResult zonkResult modifier.name
+          else Nothing
+  | otherwise = Nothing
 
 hoverFromExpression :: IdentifierResult -> ZonkResult -> Position -> Expression Zonked -> Maybe HoverInfo
 hoverFromExpression idResult zonkResult position expression
@@ -297,14 +328,66 @@ hoverFromExpression idResult zonkResult position expression
           `orElse` listToMaybe (mapMaybe (hoverFromBlock idResult zonkResult position . (.body)) me.cases)
       ExpressionFor fe ->
         listToMaybe (mapMaybe (hoverFromExpression idResult zonkResult position . (.source)) fe.inBindings)
+          `orElse` listToMaybe (mapMaybe (hoverFromForVarBinding idResult zonkResult position) fe.varBindings)
           `orElse` hoverFromBlock idResult zonkResult position fe.body
+          `orElse` (fe.thenBlock >>= hoverFromBlock idResult zonkResult position)
       ExpressionBlock be ->
         hoverFromBlock idResult zonkResult position be.block
       ExpressionTuple te ->
         listToMaybe (mapMaybe (hoverFromExpression idResult zonkResult position) te.elements)
       ExpressionArray ae ->
         listToMaybe (mapMaybe (hoverFromExpression idResult zonkResult position) ae.elements)
+      ExpressionParTuple pte ->
+        listToMaybe (mapMaybe (hoverFromExpression idResult zonkResult position) pte.elements)
+      ExpressionParArray pae ->
+        listToMaybe (mapMaybe (hoverFromExpression idResult zonkResult position) pae.elements)
+      ExpressionFieldAccess fae ->
+        hoverFromExpression idResult zonkResult position fae.object
+      ExpressionIndexAccess iae ->
+        hoverFromExpression idResult zonkResult position iae.array
+          `orElse` hoverFromExpression idResult zonkResult position iae.index
+      ExpressionTemplate te ->
+        listToMaybe (mapMaybe (hoverFromTemplateElement idResult zonkResult position) te.elements)
+      ExpressionHandle he ->
+        listToMaybe (mapMaybe (hoverFromStateVariable idResult zonkResult position) he.stateVariables)
+          `orElse` listToMaybe (mapMaybe (hoverFromRequestHandler idResult zonkResult position) he.handlers)
+          `orElse` (he.thenClause >>= hoverFromBlock idResult zonkResult position . snd)
+          `orElse` hoverFromBlock idResult zonkResult position he.body
+      ExpressionQualifiedReference qre ->
+        hoverFromVariableRef idResult zonkResult qre.target
       _ -> Nothing
+
+hoverFromForVarBinding :: IdentifierResult -> ZonkResult -> Position -> ForVarBinding Zonked -> Maybe HoverInfo
+hoverFromForVarBinding idResult zonkResult position binding
+  | spanContains binding.sourceSpan position =
+      hoverFromExpression idResult zonkResult position binding.initial
+        `orElse` if spanContains binding.name.sourceSpan position
+          then hoverFromVariableRef idResult zonkResult binding.name
+          else Nothing
+  | otherwise = Nothing
+
+hoverFromStateVariable :: IdentifierResult -> ZonkResult -> Position -> StateVariableBinding Zonked -> Maybe HoverInfo
+hoverFromStateVariable idResult zonkResult position binding
+  | spanContains binding.sourceSpan position =
+      hoverFromExpression idResult zonkResult position binding.initial
+        `orElse` if spanContains binding.name.sourceSpan position
+          then hoverFromVariableRef idResult zonkResult binding.name
+          else Nothing
+  | otherwise = Nothing
+
+hoverFromRequestHandler :: IdentifierResult -> ZonkResult -> Position -> RequestHandler Zonked -> Maybe HoverInfo
+hoverFromRequestHandler idResult zonkResult position handler
+  | spanContains handler.sourceSpan position =
+      hoverFromBlock idResult zonkResult position handler.body
+  | otherwise = Nothing
+
+hoverFromTemplateElement :: IdentifierResult -> ZonkResult -> Position -> TemplateElement Zonked -> Maybe HoverInfo
+hoverFromTemplateElement idResult zonkResult position = \case
+  TemplateElementString _ -> Nothing
+  TemplateElementExpression element
+    | spanContains element.sourceSpan position ->
+        hoverFromExpression idResult zonkResult position element.value
+    | otherwise -> Nothing
 
 -- ===========================================================================
 -- Internal: reference extraction
@@ -360,7 +443,21 @@ refFromStatement position = \case
   StatementNext nextStatement
     | spanContains nextStatement.sourceSpan position ->
         refFromExpression position nextStatement.value
+          `orElse` listToMaybe (mapMaybe (refFromModifier position) nextStatement.modifiers)
+  StatementForBreak ForBreakStatement {value, sourceSpan}
+    | spanContains sourceSpan position ->
+        refFromExpression position value
+  StatementForNext ForNextStatement {modifiers, sourceSpan}
+    | spanContains sourceSpan position ->
+        listToMaybe (mapMaybe (refFromModifier position) modifiers)
   _ -> Nothing
+
+refFromModifier :: Position -> Modifier Zonked -> Maybe ResolvedReference
+refFromModifier position modifier
+  | spanContains modifier.sourceSpan position =
+      refFromExpression position modifier.value
+        `orElse` refFromVariableNameRef position modifier.name
+  | otherwise = Nothing
 
 refFromExpression :: Position -> Expression Zonked -> Maybe ResolvedReference
 refFromExpression position expression
@@ -386,14 +483,65 @@ refFromExpression position expression
           `orElse` listToMaybe (mapMaybe (refFromBlock position . (.body)) me.cases)
       ExpressionFor fe ->
         listToMaybe (mapMaybe (refFromExpression position . (.source)) fe.inBindings)
+          `orElse` listToMaybe (mapMaybe (refFromForVarBinding position) fe.varBindings)
           `orElse` refFromBlock position fe.body
+          `orElse` (fe.thenBlock >>= refFromBlock position)
       ExpressionBlock be ->
         refFromBlock position be.block
       ExpressionTuple te ->
         listToMaybe (mapMaybe (refFromExpression position) te.elements)
       ExpressionArray ae ->
         listToMaybe (mapMaybe (refFromExpression position) ae.elements)
+      ExpressionParTuple pte ->
+        listToMaybe (mapMaybe (refFromExpression position) pte.elements)
+      ExpressionParArray pae ->
+        listToMaybe (mapMaybe (refFromExpression position) pae.elements)
+      ExpressionFieldAccess fae ->
+        refFromExpression position fae.object
+      ExpressionIndexAccess iae ->
+        refFromExpression position iae.array
+          `orElse` refFromExpression position iae.index
+      ExpressionTemplate te ->
+        listToMaybe (mapMaybe (refFromTemplateElement position) te.elements)
+      ExpressionHandle he ->
+        listToMaybe (mapMaybe (refFromStateVariable position) he.stateVariables)
+          `orElse` listToMaybe (mapMaybe (refFromRequestHandler position) he.handlers)
+          `orElse` (he.thenClause >>= refFromBlock position . snd)
+          `orElse` refFromBlock position he.body
+      ExpressionQualifiedReference qre
+        | spanContains qre.target.sourceSpan position ->
+            fmap ResolvedReferenceVariable qre.target.resolution
+        | spanContains qre.moduleQualifier.sourceSpan position ->
+            fmap ResolvedReferenceModule qre.moduleQualifier.resolution
       _ -> Nothing
+
+refFromForVarBinding :: Position -> ForVarBinding Zonked -> Maybe ResolvedReference
+refFromForVarBinding position binding
+  | spanContains binding.sourceSpan position =
+      refFromExpression position binding.initial
+        `orElse` refFromVariableNameRef position binding.name
+  | otherwise = Nothing
+
+refFromStateVariable :: Position -> StateVariableBinding Zonked -> Maybe ResolvedReference
+refFromStateVariable position binding
+  | spanContains binding.sourceSpan position =
+      refFromExpression position binding.initial
+        `orElse` refFromVariableNameRef position binding.name
+  | otherwise = Nothing
+
+refFromRequestHandler :: Position -> RequestHandler Zonked -> Maybe ResolvedReference
+refFromRequestHandler position handler
+  | spanContains handler.sourceSpan position =
+      refFromBlock position handler.body
+  | otherwise = Nothing
+
+refFromTemplateElement :: Position -> TemplateElement Zonked -> Maybe ResolvedReference
+refFromTemplateElement position = \case
+  TemplateElementString _ -> Nothing
+  TemplateElementExpression element
+    | spanContains element.sourceSpan position ->
+        refFromExpression position element.value
+    | otherwise -> Nothing
 
 -- ===========================================================================
 -- Internal: occurrence collection
@@ -429,8 +577,16 @@ collectStatementOccurrences statement index = case statement of
   StatementBreak breakStatement ->
     collectExpressionOccurrences breakStatement.value index
   StatementNext nextStatement ->
-    collectExpressionOccurrences nextStatement.value index
+    foldr collectModifierOccurrences (collectExpressionOccurrences nextStatement.value index) nextStatement.modifiers
+  StatementForBreak ForBreakStatement {value} ->
+    collectExpressionOccurrences value index
+  StatementForNext ForNextStatement {modifiers} ->
+    foldr collectModifierOccurrences index modifiers
   _ -> index
+
+collectModifierOccurrences :: Modifier Zonked -> OccurrenceIndex -> OccurrenceIndex
+collectModifierOccurrences modifier index =
+  collectExpressionOccurrences modifier.value (addVariableOccurrence modifier.name index)
 
 collectExpressionOccurrences :: Expression Zonked -> OccurrenceIndex -> OccurrenceIndex
 collectExpressionOccurrences expression index = case expression of
@@ -457,14 +613,56 @@ collectExpressionOccurrences expression index = case expression of
       me.subject
       (foldr (collectBlockOccurrences . (.body)) index me.cases)
   ExpressionFor fe ->
-    foldr (collectExpressionOccurrences . (.source)) (collectBlockOccurrences fe.body index) fe.inBindings
+    let withInBindings = foldr (collectExpressionOccurrences . (.source)) index fe.inBindings
+        withVarBindings = foldr collectForVarBindingOccurrences withInBindings fe.varBindings
+        withBody = collectBlockOccurrences fe.body withVarBindings
+     in maybe withBody (`collectBlockOccurrences` withBody) fe.thenBlock
   ExpressionBlock be ->
     collectBlockOccurrences be.block index
   ExpressionTuple te ->
     foldr collectExpressionOccurrences index te.elements
   ExpressionArray ae ->
     foldr collectExpressionOccurrences index ae.elements
+  ExpressionParTuple pte ->
+    foldr collectExpressionOccurrences index pte.elements
+  ExpressionParArray pae ->
+    foldr collectExpressionOccurrences index pae.elements
+  ExpressionFieldAccess fae ->
+    collectExpressionOccurrences fae.object index
+  ExpressionIndexAccess iae ->
+    collectExpressionOccurrences iae.array (collectExpressionOccurrences iae.index index)
+  ExpressionTemplate te ->
+    foldr collectTemplateElementOccurrences index te.elements
+  ExpressionHandle he ->
+    let withState = foldr collectStateVariableOccurrences index he.stateVariables
+        withHandlers = foldr (collectBlockOccurrences . (.body)) withState he.handlers
+        withThen = maybe withHandlers ((`collectBlockOccurrences` withHandlers) . snd) he.thenClause
+     in collectBlockOccurrences he.body withThen
+  ExpressionQualifiedReference qre ->
+    addModuleOccurrence qre.moduleQualifier (addVariableOccurrence qre.target index)
   _ -> index
+
+collectForVarBindingOccurrences :: ForVarBinding Zonked -> OccurrenceIndex -> OccurrenceIndex
+collectForVarBindingOccurrences binding index =
+  collectExpressionOccurrences binding.initial (addVariableOccurrence binding.name index)
+
+collectStateVariableOccurrences :: StateVariableBinding Zonked -> OccurrenceIndex -> OccurrenceIndex
+collectStateVariableOccurrences binding index =
+  collectExpressionOccurrences binding.initial (addVariableOccurrence binding.name index)
+
+collectTemplateElementOccurrences :: TemplateElement Zonked -> OccurrenceIndex -> OccurrenceIndex
+collectTemplateElementOccurrences = \case
+  TemplateElementString _ -> id
+  TemplateElementExpression element -> collectExpressionOccurrences element.value
+
+addModuleOccurrence :: NameRef Zonked ModuleRef -> OccurrenceIndex -> OccurrenceIndex
+addModuleOccurrence nameRef index = case nameRef.resolution of
+  Nothing -> index
+  Just moduleId ->
+    index
+      { moduleOccurrences =
+          Map.insertWith (<>) moduleId [nameRef.sourceSpan] index.moduleOccurrences
+      }
 
 addVariableOccurrence :: NameRef Zonked VariableRef -> OccurrenceIndex -> OccurrenceIndex
 addVariableOccurrence nameRef index = case nameRef.resolution of

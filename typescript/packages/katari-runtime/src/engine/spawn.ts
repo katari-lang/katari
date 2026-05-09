@@ -156,6 +156,15 @@ export function spawnChild(ctx: StepCtx, args: SpawnArgs): ThreadId {
       reqId: b.body as ReqId,
       args: args.callArgs,
     }))
+    .with({ kind: "blockAgent" }, () => {
+      // Phase 3.1 stub: BlockAgent variant is reserved for the AgentThread
+      // refactor (Phase 3.3). Lowering does not currently emit blockAgent,
+      // so this branch is unreachable; it exists only to satisfy the
+      // ts-pattern exhaustiveness check while the new variant lands.
+      throw new Error(
+        "engine.spawnChild: blockAgent is not yet implemented (Phase 3.3 pending)",
+      );
+    })
     .exhaustive();
 
   ctx.state.threads[newThreadId] = thread as Draft<Thread>;

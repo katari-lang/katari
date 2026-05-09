@@ -229,6 +229,16 @@ function handleStatement(
       emitAskUpwards(ctx, t, askKind);
       return "wait";
     }
+    case "statementAgentCall":
+    case "statementAgentCallClosure": {
+      // Phase 3.1 stub: cross-agent dispatch via core→core delegate events
+      // lands together with the AgentThread runtime path (Phase 3.3 / 3.7).
+      // Lowering does not emit these statements yet, so this branch is
+      // unreachable; it exists to satisfy the exhaustiveness check.
+      throw new Error(
+        `engine.user: ${stmt.kind} is not yet implemented (Phase 3.3 / 3.7 pending)`,
+      );
+    }
   }
 }
 

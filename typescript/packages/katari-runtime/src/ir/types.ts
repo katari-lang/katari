@@ -115,6 +115,29 @@ export type UserBlock = {
   trailing?: VarId;
 };
 
+// ─── AgentBlock (irOptions → flat record) ────────────────────────────────────
+//
+// Phase 3.1 (additive): the type is mirrored from Haskell IR but Lowering
+// does not yet emit `blockAgent` blocks — agents still go through `blockUser`
+// with `blockKindAgent`. Phase 3.7 flips the emit path.
+
+/**
+ * Payload for `blockAgent`. Marks an agent boundary at the IR level —
+ * the runtime spawns an `AgentThread` that catches `return` and isolates
+ * the scope, then runs `entryBody` as a child UserThread.
+ */
+export type AgentBlock = {
+  /**
+   * Public name. Top-level agent decls use the same value that appears in
+   * `IRModule.entries`; closure / local agents will use a synthesized
+   * fresh name once Phase 3.7 lands.
+   */
+  qualifiedName: QualifiedName;
+  parameters: Param[];
+  /** BlockId of the body. Typically a `blockUser` (inline) or `blockHandle`. */
+  entryBody: BlockId;
+};
+
 // ─── Block (sumOptions, "body" payload key) ────────────────────────────────
 
 export type Block =
@@ -133,7 +156,8 @@ export type Block =
   | { kind: "blockFor"; body: ForBlock }
   | { kind: "blockHandle"; body: HandleBlock }
   | { kind: "blockTuple"; body: TupleBlock }
-  | { kind: "blockArray"; body: ArrayBlock };
+  | { kind: "blockArray"; body: ArrayBlock }
+  | { kind: "blockAgent"; body: AgentBlock };
 
 // ─── Arg (irOptions → flat record) ───────────────────────────────────────────
 
@@ -181,6 +205,32 @@ export type MatchArm = {
 
 export type CallData = {
   target: CallTarget;
+  arguments: Arg[];
+  output?: VarId;
+};
+
+/**
+ * Payload for `statementAgentCall` — cross-agent dispatch by qualified
+ * name. Runtime resolves the name through `IRModule.entries`, allocates
+ * a fresh delegationId, and emits a `core→core` delegate event that
+ * spawns an `AgentThread`.
+ *
+ * Phase 3.1 (additive): the type is mirrored but Lowering does not yet
+ * emit it. Phase 3.7 enables emission.
+ */
+export type AgentCallData = {
+  target: QualifiedName;
+  arguments: Arg[];
+  output?: VarId;
+};
+
+/**
+ * Payload for `statementAgentCallClosure`. The `target` `VarId` holds a
+ * closure value; the runtime resolves its `closureId` through the
+ * machine-local closures table to find the underlying `AgentBlock`.
+ */
+export type AgentCallClosureData = {
+  target: VarId;
   arguments: Arg[];
   output?: VarId;
 };
@@ -276,4 +326,6 @@ export type Statement =
   | { kind: "statementLoadLiteral"; body: LoadLiteralData }
   | { kind: "statementExit"; body: ExitData }
   | { kind: "statementCont"; body: ContData }
-  | { kind: "statementBindPattern"; body: BindPatternData };
+  | { kind: "statementBindPattern"; body: BindPatternData }
+  | { kind: "statementAgentCall"; body: AgentCallData }
+  | { kind: "statementAgentCallClosure"; body: AgentCallClosureData };

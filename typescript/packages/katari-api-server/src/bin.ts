@@ -18,6 +18,7 @@ import {
   buildConsoleLogger,
   type LogLevel,
 } from "katari-runtime";
+import { HttpFFIExecutor } from "./ffi/http.js";
 import { buildMetrics } from "./metrics.js";
 import { MachineRegistry } from "./registry.js";
 import { recoverOnBoot } from "./recovery.js";
@@ -52,8 +53,28 @@ const registry = new MachineRegistry(storage, logger, {
 });
 const metrics = buildMetrics();
 
+// ─── FFI executor wiring ──────────────────────────────────────────────────
+// `KATARI_FFI_BASE_URL` enables HTTP-sidecar FFI: every BlockExternal
+// invocation maps to `<baseUrl>/<module>/<name>` via `HttpFFIExecutor`. This
+// is the only delivery model wired today — JS bundle / JS eval are deferred
+// to a separate design round (see plan doc). When unset, the engine still
+// runs but external delegate events stay parked indefinitely (intended
+// behaviour for environments that don't need FFI).
+const ffiBaseUrl = process.env.KATARI_FFI_BASE_URL;
+const ffiTimeoutMs = parseIntEnv("KATARI_FFI_TIMEOUT_MS", 60_000);
+const ffi = ffiBaseUrl !== undefined && ffiBaseUrl !== ""
+  ? new HttpFFIExecutor({
+      baseUrl: ffiBaseUrl,
+      authHeader: process.env.KATARI_FFI_AUTH,
+      defaultTimeoutMs: ffiTimeoutMs,
+    })
+  : undefined;
+if (ffi === undefined) {
+  logger.log("info", "FFI executor not configured (KATARI_FFI_BASE_URL unset); external delegate events will be held");
+}
+
 const modules = new ModuleService(storage, logger);
-const agents = new AgentService(storage, registry, logger, metrics);
+const agents = new AgentService(storage, registry, logger, metrics, ffi, ffiTimeoutMs);
 
 // Refresh the machinesLoaded gauge on a slow timer. The cache size
 // changes from acquire / evict; sampling at 5s is fine for ops dashboards
@@ -81,14 +102,22 @@ const shutdown = (signal: string): void => {
     if (err !== undefined && err !== null) {
       logger.log("error", "server.close error", { error: err.message });
     }
-    void storage.close?.().catch((closeErr) => {
-      logger.log("error", "storage.close error", {
-        error: closeErr instanceof Error ? closeErr.message : String(closeErr),
+    void agents.drainFFI()
+      .catch((drainErr) => {
+        logger.log("error", "drainFFI error", {
+          error: drainErr instanceof Error ? drainErr.message : String(drainErr),
+        });
+      })
+      .then(() => storage.close?.())
+      .catch((closeErr) => {
+        logger.log("error", "storage.close error", {
+          error: closeErr instanceof Error ? closeErr.message : String(closeErr),
+        });
+      })
+      .finally(() => {
+        logger.log("info", "shutdown complete");
+        process.exit(0);
       });
-    }).finally(() => {
-      logger.log("info", "shutdown complete");
-      process.exit(0);
-    });
   });
   // Hard timeout so a stuck close doesn't block forever — the process
   // supervisor will get a deterministic exit either way.

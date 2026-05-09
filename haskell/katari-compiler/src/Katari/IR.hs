@@ -42,6 +42,7 @@ module Katari.IR
     Block (..),
     UserBlock (..),
     BlockKind (..),
+    AgentBlock (..),
     MatchBlock (..),
     ForBlock (..),
     HandleBlock (..),
@@ -55,6 +56,8 @@ module Katari.IR
     -- * Statement
     Statement (..),
     CallData (..),
+    AgentCallData (..),
+    AgentCallClosureData (..),
     MakeClosureData (..),
     ExitData (..),
     ContData (..),
@@ -259,6 +262,17 @@ data Block where
   -- trailing value becomes one item in the resulting array.
   -- When @parallel = True@, element blocks run concurrently.
   BlockArray :: ArrayBlock -> Block
+  -- | Agent boundary. The runtime spawns an 'AgentThread' that catches
+  -- 'return' and isolates the scope, then runs 'entryBody' inside it.
+  -- Top-level agent declarations lower to this. Inline blocks (match arm
+  -- bodies, for bodies, handle bodies) lower to 'BlockUser' and do NOT
+  -- create an agent boundary.
+  --
+  -- Phase 3.1 (additive): the type exists but Lowering does not emit it
+  -- yet — agents currently still go through 'BlockUser' with
+  -- 'BlockKindAgent'. Phase 3.7 flips the emit path and removes the
+  -- 'kind' field from 'UserBlock'.
+  BlockAgent :: AgentBlock -> Block
   deriving (Eq, Show, Generic)
 
 instance ToJSON Block where
@@ -293,6 +307,33 @@ instance ToJSON BlockKind where
 
 instance FromJSON BlockKind where
   parseJSON = genericParseJSON enumOptions
+
+-- | The body of an agent block. Carried by 'BlockAgent' to mark the
+-- agent boundary (return catch + scope isolation) at the IR level.
+--
+-- Phase 3.1 introduces the type; Lowering still emits 'BlockUser' with
+-- 'BlockKindAgent' and only flips to 'BlockAgent' in Phase 3.7. Closure
+-- and free-form local-agent declarations also lower here once the
+-- AgentThread runtime path lands.
+data AgentBlock = AgentBlock
+  { -- | Public name. For top-level agents this is the same value that
+    -- appears in 'IRModule.entries'; for local / closure agents it is a
+    -- compiler-synthesized fresh name (placeholder until Phase 3.7
+    -- decides on the synthesis scheme).
+    qualifiedName :: QualifiedName,
+    -- | Labeled parameters. Caller binds args here.
+    parameters :: [Param],
+    -- | The 'BlockId' of the agent body. Typically a 'BlockUser'
+    -- (inline) or 'BlockHandle' for @where { handlers }@ agents.
+    entryBody :: BlockId
+  }
+  deriving (Eq, Show, Generic)
+
+instance ToJSON AgentBlock where
+  toJSON = genericToJSON irOptions
+
+instance FromJSON AgentBlock where
+  parseJSON = genericParseJSON irOptions
 
 -- | The body of a regular user-defined block.
 data UserBlock = UserBlock
@@ -370,6 +411,20 @@ data Statement where
   -- 'BlockMatch' there is no @defaultArm@; the pattern is irrefutable
   -- (guaranteed by the exhaustiveness checker — K0291 / Phase 16).
   StatementBindPattern :: BindPatternData -> Statement
+  -- | Cross-agent call by 'QualifiedName'. Lowering emits this for
+  -- top-level agent invocations (replacing inline 'StatementCall' with
+  -- 'CallTargetBlock'). At runtime the engine emits a @core→core@
+  -- delegate event that spawns an 'AgentThread' for the resolved entry,
+  -- then feeds the result back as a delegateAck.
+  --
+  -- Phase 3.1 (additive): the variant exists but Lowering does not emit
+  -- it yet. Phase 3.7 enables emission.
+  StatementAgentCall :: AgentCallData -> Statement
+  -- | Cross-agent call via a closure value. The 'target' 'VarId' holds a
+  -- closure value whose @ClosureId@ identifies which 'AgentBlock' to
+  -- start. Same @core→core@ delegate event mechanics as
+  -- 'StatementAgentCall'.
+  StatementAgentCallClosure :: AgentCallClosureData -> Statement
   deriving (Eq, Show, Generic)
 
 instance ToJSON Statement where
@@ -391,6 +446,39 @@ instance ToJSON CallData where
   toJSON = genericToJSON irOptions
 
 instance FromJSON CallData where
+  parseJSON = genericParseJSON irOptions
+
+-- | Payload for 'StatementAgentCall'. Cross-agent dispatch by qualified
+-- name. The runtime resolves the name through 'IRModule.entries' (or
+-- through cross-module dispatch in a future round), allocates a fresh
+-- delegationId, and sends a @core→core@ delegate event.
+data AgentCallData = AgentCallData
+  { target :: QualifiedName,
+    arguments :: [Arg],
+    output :: Maybe VarId
+  }
+  deriving (Eq, Show, Generic)
+
+instance ToJSON AgentCallData where
+  toJSON = genericToJSON irOptions
+
+instance FromJSON AgentCallData where
+  parseJSON = genericParseJSON irOptions
+
+-- | Payload for 'StatementAgentCallClosure'. The 'target' 'VarId' holds
+-- a closure value; the runtime resolves its @ClosureId@ through the
+-- machine-local closures table to find the underlying 'AgentBlock'.
+data AgentCallClosureData = AgentCallClosureData
+  { target :: VarId,
+    arguments :: [Arg],
+    output :: Maybe VarId
+  }
+  deriving (Eq, Show, Generic)
+
+instance ToJSON AgentCallClosureData where
+  toJSON = genericToJSON irOptions
+
+instance FromJSON AgentCallClosureData where
   parseJSON = genericParseJSON irOptions
 
 -- | Payload for 'SMakeClosure'. The closure captures its lexical scope at
