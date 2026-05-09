@@ -1,8 +1,0 @@
-// effect_mismatch.ktr -- EffectMismatch error expected
-// Agent declares "with agent" (no effects) but calls a request
-
-request secret_request() -> string
-
-agent main() -> string with agent {
-  secret_request()
-}

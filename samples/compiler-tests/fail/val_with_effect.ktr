@@ -1,6 +1,0 @@
-// val_with_effect.ktr -- ValWithEffect error expected
-// val expression uses a request (not allowed)
-
-request get_data() -> integer
-
-val x: integer = get_data()

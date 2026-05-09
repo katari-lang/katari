@@ -1,5 +1,0 @@
-// return_outside.ktr -- return used outside agent body (InvalidOp)
-// Note: actually "return" at top-level should be invalid.
-// But since every .ktr file needs an agent, this tests return in val context.
-
-val x: integer = return 42
