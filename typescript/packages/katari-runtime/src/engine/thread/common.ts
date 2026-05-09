@@ -114,16 +114,14 @@ export function checkCancelComplete(ctx: StepCtx, t: Draft<Thread>): void {
  *   emit `done` to parent with that value.
  * - Otherwise, emit `cancelAck` to parent (pure cancel cascade).
  *
- * Root threads (parent === null) just disappear from `state.threads` —
- * the host's DelegationRouter detects the disappearance via diffs and
- * sends the corresponding external delegateAck / terminateAck.
- *
- * `t` itself is *not* removed here — the parent's done/cancelAck handler
- * removes it via `deleteChild` + `deleteThread` in the next step.
- * For root threads we delete here because there's no parent to do it.
+ * For root threads (parent === null), the engine emits the corresponding
+ * external `delegateAck` / `terminateAck` to the API delegation sender
+ * (recorded in `apiDelegationSenders`) and removes the thread + its
+ * apiDelegations entry.
  */
 export function finishCancelling(ctx: StepCtx, t: Draft<Thread>): void {
   if (t.parent === null) {
+    emitRootCompletion(ctx, t, t.pendingReturn);
     deleteThread(ctx, t.id);
     return;
   }
@@ -141,6 +139,56 @@ export function finishCancelling(ctx: StepCtx, t: Draft<Thread>): void {
       callId: t.parentCallId!,
     });
   }
+}
+
+/**
+ * Emit a completion notification (`delegateAck` for normal done,
+ * `terminateAck` for cancel completion) for an API root thread back to
+ * the original sender, then clean up the apiDelegations entries.
+ *
+ * `value` is the return value when defined; for cancellation
+ * completion (`pendingReturn === undefined`) we emit `terminateAck`
+ * with no payload.
+ */
+export function emitRootCompletion(
+  ctx: StepCtx,
+  t: Draft<Thread>,
+  value: import("../value.js").Value | undefined,
+): void {
+  // Find the delegationId for this root thread by reverse lookup.
+  let delegationId: string | undefined;
+  for (const [did, tid] of Object.entries(ctx.state.apiDelegations)) {
+    if (tid === t.id) {
+      delegationId = did;
+      break;
+    }
+  }
+  if (delegationId === undefined) {
+    // No registered delegation — nothing to emit. Could happen for
+    // ad-hoc root threads spawned directly via test setup.
+    ctx.log("debug", "engine: root thread completed without registered delegation", {
+      threadId: t.id,
+    });
+    return;
+  }
+  const sender = ctx.state.apiDelegationSenders[delegationId];
+  if (sender !== undefined) {
+    if (value !== undefined) {
+      ctx.emit({
+        from: ctx.state.selfEndpoint,
+        to: sender,
+        payload: { kind: "delegateAck", delegationId: delegationId as import("../id.js").DelegationId, value: value as import("../value.js").Value },
+      });
+    } else {
+      ctx.emit({
+        from: ctx.state.selfEndpoint,
+        to: sender,
+        payload: { kind: "terminateAck", delegationId: delegationId as import("../id.js").DelegationId },
+      });
+    }
+  }
+  delete ctx.state.apiDelegations[delegationId];
+  delete ctx.state.apiDelegationSenders[delegationId];
 }
 
 /**

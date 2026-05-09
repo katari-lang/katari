@@ -18,8 +18,13 @@
 
 import { Mutex } from "async-mutex";
 import { LRUCache } from "lru-cache";
-import { MachineHandle, type Logger } from "katari-runtime";
+import { EngineHandle, type Logger } from "katari-runtime";
 import type { Storage, VersionId } from "./storage/types.js";
+
+// Locally re-alias so the rest of the file reads naturally as
+// "MachineHandle" — the engine layer provides the implementation.
+export type MachineHandle = EngineHandle;
+export const MachineHandle = EngineHandle;
 
 export class MachineNotFound extends Error {
   constructor(public readonly versionId: VersionId) {
@@ -100,8 +105,8 @@ export class MachineRegistry {
     const snap = await this.storage.snapshots.get(versionId);
     const handle =
       snap !== null
-        ? MachineHandle.fromSnapshot(moduleRow.irModule, snap, this.logger)
-        : MachineHandle.create(moduleRow.irModule, this.logger);
+        ? MachineHandle.fromSnapshot(moduleRow.irModule, snap)
+        : MachineHandle.create(moduleRow.irModule);
     this.logger.log("info", "machine loaded", {
       versionId,
       fromSnapshot: snap !== null,

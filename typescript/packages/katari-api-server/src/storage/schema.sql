@@ -28,3 +28,15 @@ CREATE TABLE IF NOT EXISTS machine_snapshots (
   snapshot   JSONB NOT NULL,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Append-only diff log per version. Each row is one applyEvent's
+-- emitted Diff[] (Phase G). Recovery may replay these against an
+-- empty state to reconstruct, in addition to (or instead of) loading
+-- machine_snapshots.
+CREATE TABLE IF NOT EXISTS machine_diffs (
+  id         BIGSERIAL PRIMARY KEY,
+  version_id UUID NOT NULL REFERENCES module_versions(id) ON DELETE CASCADE,
+  batch      JSONB NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS machine_diffs_version_idx ON machine_diffs (version_id, id);

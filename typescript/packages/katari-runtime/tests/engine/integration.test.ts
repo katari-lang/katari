@@ -1,30 +1,19 @@
 // Integration tests for the new engine.
 //
-// We hand-craft minimal IR modules to exercise the variants together:
-//   - root user thread (parent=null, catches return) calls a prim and
-//     returns the result.
-//   - tuple element evaluation collects values from prim children.
-//   - match selects an arm by literal pattern.
-//   - request/handle catches a request and resumes via next.
-//
-// Bypasses the host layer entirely: tests build the State by hand and
-// feed `applyEvent` directly. This keeps the tests focused on engine
-// semantics.
+// We feed an external `delegate API→CORE` event into the engine to spawn
+// a root user thread. The engine's translateExternal builds the root
+// thread, the runner drives it to completion, and emitRootCompletion
+// fires a `delegateAck CORE→API` outbound. The test asserts on that
+// outbound event.
 
 import { describe, expect, it } from "vitest";
 import {
   applyEvent,
   CORE_ENDPOINT,
-  createScopeId,
+  createDelegationId,
   createState,
-  createThreadId,
-  type AskId,
-  type CallId,
-  type ScopeId,
-  type State,
-  type ThreadId,
-  type UserThread,
-  type Value,
+  endpoint,
+  type Event,
 } from "../../src/engine/index.js";
 import type {
   IRModule,
@@ -33,12 +22,6 @@ import type {
   UserBlock,
   VarId,
 } from "../../src/ir/types.js";
-
-// ─── Mini IR builders ──────────────────────────────────────────────────────
-//
-// Constructors that mirror the Haskell-side IRModule.toJSON shape but
-// expose ergonomic helpers for tests. Only blocks actually used in the
-// tests are populated.
 
 function ir(blocks: Record<number, Block>, entries: Record<string, number> = {}): IRModule {
   return {
@@ -62,57 +45,10 @@ function primBlock(name: string): Block {
   return { kind: "blockPrim", body: name };
 }
 
-// ─── Spawn helper for tests: drop a root UserThread into the state ────────
+const API_ENDPOINT = endpoint("api://test");
 
-function spawnRootUser(
-  state: State,
-  blockId: number,
-  catchesReturn: boolean,
-  argScopeBindings: Record<number, Value> = {},
-): { threadId: ThreadId; scopeId: ScopeId } {
-  const threadId = createThreadId();
-  const scopeId = createScopeId();
-  state.scopes[scopeId] = {
-    id: scopeId,
-    parentId: null,
-    values: { ...argScopeBindings },
-  };
-  const t: UserThread = {
-    kind: "user",
-    id: threadId,
-    parent: null,
-    parentCallId: null,
-    scopeId,
-    status: "running",
-    children: {},
-    handlers: {},
-    nextCallId: 0 as CallId,
-    nextAskId: 0 as AskId,
-    askIdMap: {},
-    blockId,
-    pc: 0,
-    catchesReturn,
-  };
-  state.threads[threadId] = t;
-  return { threadId, scopeId };
-}
-
-function feedCreate(state: State, threadId: ThreadId) {
-  return applyEvent(state, {
-    from: CORE_ENDPOINT,
-    to: CORE_ENDPOINT,
-    payload: { kind: "create", threadId },
-  });
-}
-
-// ─── Tests ─────────────────────────────────────────────────────────────────
-
-describe("engine integration: simple computation", () => {
-  it("user thread calls add(2,3), trailing returns 5 — root completes", () => {
-    // Vars used in the user block:
-    //   2 → result of add (output)
-    //   0 → literal 2
-    //   1 → literal 3
+describe("engine integration: end-to-end via external delegate", () => {
+  it("user thread calls add(2,3); engine emits delegateAck with 5", () => {
     const v0 = 0 as VarId;
     const v1 = 1 as VarId;
     const out = 2 as VarId;
@@ -142,37 +78,111 @@ describe("engine integration: simple computation", () => {
     const module = ir({
       1: userBlk,
       100: primBlock("add"),
-    });
+    }, { main: 1 });
 
     const state = createState(module);
-    const { threadId } = spawnRootUser(state, 1, true);
+    const delegationId = createDelegationId();
 
-    const result = feedCreate(state, threadId);
+    const event: Event = {
+      from: API_ENDPOINT,
+      to: CORE_ENDPOINT,
+      payload: {
+        kind: "delegate",
+        targetBlock: { module_: "", name: "main" },
+        args: {},
+        delegationId,
+      },
+    };
 
-    // A root user thread (parent=null) emits no done event externally;
-    // it just removes itself when the trailing value is computed.
+    const result = applyEvent(state, event);
     expect(result.errors).toEqual([]);
-    // The root thread should be gone from the state (root completion
-    // path deletes it).
-    //
-    // …except: when the user block's last statement runs and the
-    // trailing value is computed, runStatements enqueues a `done` event
-    // targeting `t.parent`. Since parent=null, that branch is skipped
-    // and the thread stays around. In the new model the "I'm done"
-    // signal for root threads needs separate handling. For now we
-    // assert that the call's output landed in scope so we know the
-    // computation ran end-to-end.
-    const sc = result.state.scopes[Object.keys(result.state.scopes)[0]!]!;
-    // The last live scope is one of the user/prim scopes. Find the one
-    // that holds `out` = 5.
-    let foundFive = false;
-    for (const scope of Object.values(result.state.scopes)) {
-      if (scope.values[out]?.kind === "number" && scope.values[out].value === 5) {
-        foundFive = true;
-        break;
-      }
+    const ack = result.outbound.find(
+      (e) => e.payload.kind === "delegateAck" && e.payload.delegationId === delegationId,
+    );
+    expect(ack).toBeDefined();
+    if (ack && ack.payload.kind === "delegateAck") {
+      expect(ack.payload.value).toEqual({ kind: "number", value: 5 });
     }
-    expect(foundFive).toBe(true);
-    void sc;
+    // Apidelegation cleared.
+    expect(Object.keys(result.state.apiDelegations).length).toBe(0);
+  });
+
+  it("missing entry returns Recoverable error and no outbound", () => {
+    const state = createState(ir({}, {}));
+    const result = applyEvent(state, {
+      from: API_ENDPOINT,
+      to: CORE_ENDPOINT,
+      payload: {
+        kind: "delegate",
+        targetBlock: { module_: "", name: "missing" },
+        args: {},
+        delegationId: createDelegationId(),
+      },
+    });
+    expect(result.errors.length).toBe(1);
+    expect(result.errors[0]?.name).toBe("EntryNotFoundError");
+    expect(result.outbound).toEqual([]);
+  });
+
+  it("terminate before completion: cancel cascade + terminateAck outbound", () => {
+    // Set up an agent that pauses on an external — call ext "wait", then
+    // return its value. Because the engine's external translation
+    // translates the inbound delegateAck before the agent finishes, we
+    // can issue a `terminate` while it's paused.
+    const v0 = 0 as VarId;
+    const stmts: Statement[] = [
+      {
+        kind: "statementCall",
+        body: {
+          target: { kind: "callTargetBlock", block: 200 },
+          arguments: [],
+          output: v0,
+        },
+      },
+    ];
+    const userBlk = userBlock({
+      kind: "blockKindAgent",
+      parameters: [],
+      statements: stmts,
+      trailing: v0,
+    });
+
+    const module = ir({
+      1: userBlk,
+      200: { kind: "blockExternal", body: { module_: "test", name: "wait" } },
+    }, { main: 1 });
+
+    const state = createState(module);
+    const delegationId = createDelegationId();
+
+    // Start the agent — it pauses on the external delegate.
+    const startResult = applyEvent(state, {
+      from: API_ENDPOINT,
+      to: CORE_ENDPOINT,
+      payload: {
+        kind: "delegate",
+        targetBlock: { module_: "", name: "main" },
+        args: {},
+        delegationId,
+      },
+    });
+    expect(startResult.errors).toEqual([]);
+    // Outbound should include a CORE→FFI delegate.
+    const ffiDelegate = startResult.outbound.find((e) => e.payload.kind === "delegate");
+    expect(ffiDelegate).toBeDefined();
+
+    // Now terminate.
+    const cancelResult = applyEvent(startResult.state, {
+      from: API_ENDPOINT,
+      to: CORE_ENDPOINT,
+      payload: { kind: "terminate", delegationId },
+    });
+    expect(cancelResult.errors).toEqual([]);
+
+    // We expect outbound to contain a CORE→FFI terminate.
+    const ffiTerminate = cancelResult.outbound.find(
+      (e) => e.payload.kind === "terminate",
+    );
+    expect(ffiTerminate).toBeDefined();
   });
 });

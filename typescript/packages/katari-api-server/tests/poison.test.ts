@@ -92,7 +92,7 @@ describe("poison flow", () => {
     const got = await app.fetch(new Request(`http://test/agent/${agentId}`));
     const row = (await got.json()) as { state: string; errorMessage?: string };
     expect(row.state).toBe("error");
-    expect(row.errorMessage).toMatch(/blockId 999 not found/);
+    expect(row.errorMessage).toMatch(/block 999 not found/);
 
     // Snapshot row was deleted, machine evicted.
     expect(await storage.snapshots.get(versionId as never)).toBeNull();

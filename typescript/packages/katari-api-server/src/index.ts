@@ -2,7 +2,14 @@
 // binary entry is `bin.ts`.
 
 export { buildApp, type AppDeps } from "./routes/app.js";
-export { MachineRegistry, MachineNotFound } from "./registry.js";
+export { MachineRegistry, MachineNotFound, MachineHandle } from "./registry.js";
+export type { FFIExecutor, InvokeArgs } from "./ffi/executor.js";
+export { withTimeout } from "./ffi/executor.js";
+export { InProcessFFIExecutor, type InProcessHandler } from "./ffi/inproc.js";
+export { HttpFFIExecutor, type HttpFFIOptions } from "./ffi/http.js";
+export { OutboundEventDispatcher } from "./services/outbound-dispatcher.js";
+export { MachineRebuilder } from "./services/machine-rebuilder.js";
+export { PoisonHandler } from "./services/poison-handler.js";
 export {
   AgentService,
   AgentNotFound,

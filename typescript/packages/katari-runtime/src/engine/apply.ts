@@ -10,7 +10,7 @@
 // `done` / etc. events before feeding them to the engine.
 
 import { produceWithPatches, type Patch } from "immer";
-import { CORE_ENDPOINT, type Endpoint } from "./endpoint.js";
+import { CORE_ENDPOINT, endpoint, type Endpoint } from "./endpoint.js";
 import type { Event } from "./event.js";
 import { collectGarbage, shouldGc } from "./gc.js";
 import type { IRModule } from "../ir/types.js";
@@ -18,18 +18,24 @@ import type { Result } from "./result.js";
 import { drive, patchesToDiffs } from "./runner.js";
 import type { State } from "./state.js";
 
+const DEFAULT_FFI_ENDPOINT = endpoint("ext://ffi");
+
 // ─── State construction ────────────────────────────────────────────────────
 
 /** Build a fresh empty State for an IR module. */
 export function createState(
   irModule: IRModule,
-  options: { selfEndpoint?: Endpoint } = {},
+  options: { selfEndpoint?: Endpoint; ffiEndpoint?: Endpoint } = {},
 ): State {
   return {
     selfEndpoint: options.selfEndpoint ?? CORE_ENDPOINT,
     irModule,
     threads: {},
     scopes: {},
+    apiDelegations: {},
+    apiDelegationSenders: {},
+    ffiDelegations: {},
+    ffiTargetEndpoint: options.ffiEndpoint ?? DEFAULT_FFI_ENDPOINT,
     lastGcScopeCount: 0,
   };
 }

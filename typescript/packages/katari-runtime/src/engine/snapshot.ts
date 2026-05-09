@@ -2,8 +2,8 @@
 //
 // Because State is plain data (Record-of-data, no class instances, no
 // non-JSON values), serialize is just a structuredClone-equivalent and
-// deserialize is the inverse. Selfendpoint is included in the snapshot
-// so the host can verify it on restore.
+// deserialize is the inverse. Selfendpoint / ffiTargetEndpoint are
+// included so they survive the round-trip.
 //
 // We deliberately do NOT serialize the IRModule into the snapshot — the
 // host supplies it on restore (it's the source of truth, separately
@@ -16,8 +16,12 @@ import type { State } from "./state.js";
 export type Snapshot = {
   schemaVersion: 1;
   selfEndpoint: string;
+  ffiTargetEndpoint: string;
   threads: State["threads"];
   scopes: State["scopes"];
+  apiDelegations: State["apiDelegations"];
+  apiDelegationSenders: State["apiDelegationSenders"];
+  ffiDelegations: State["ffiDelegations"];
   lastGcScopeCount: number;
 };
 
@@ -25,11 +29,12 @@ export function serialize(state: State): Snapshot {
   return {
     schemaVersion: 1,
     selfEndpoint: state.selfEndpoint,
-    // structuredClone keeps these JSON-safe: Threads/Scopes have no
-    // class instances or non-JSON values (closures carry plain
-    // ScopeId strings).
+    ffiTargetEndpoint: state.ffiTargetEndpoint,
     threads: structuredClone(state.threads),
     scopes: structuredClone(state.scopes),
+    apiDelegations: structuredClone(state.apiDelegations),
+    apiDelegationSenders: structuredClone(state.apiDelegationSenders),
+    ffiDelegations: structuredClone(state.ffiDelegations),
     lastGcScopeCount: state.lastGcScopeCount,
   };
 }
@@ -43,6 +48,10 @@ export function deserialize(irModule: IRModule, snap: Snapshot): State {
     irModule,
     threads: structuredClone(snap.threads),
     scopes: structuredClone(snap.scopes),
+    apiDelegations: structuredClone(snap.apiDelegations),
+    apiDelegationSenders: structuredClone(snap.apiDelegationSenders),
+    ffiDelegations: structuredClone(snap.ffiDelegations),
+    ffiTargetEndpoint: snap.ffiTargetEndpoint as State["ffiTargetEndpoint"],
     lastGcScopeCount: snap.lastGcScopeCount,
   };
 }

@@ -9,6 +9,7 @@ import type { StepCtx } from "../../step-ctx.js";
 import type { Value } from "../../value.js";
 import {
   beginCancel,
+  commonRemoveChild,
   proxyAskAckToChild,
   proxyAskToParent,
 } from "../common.js";
@@ -55,16 +56,25 @@ export function defaultAskAckProxy<T extends Thread>(
 }
 
 /**
- * Most leaf variants don't expect children to ack a cancel — if it
- * happens it is from a targeted cancel only HandleThread / ForThread
- * issue. This default throws as an irrecoverable invariant violation.
+ * Most variants don't expect children to ack a cancel from a *targeted*
+ * cancel (only HandleThread / ForThread issue those). But every thread
+ * receives cancelAck from its children during a normal cascade — so
+ * this default accepts the ack, removes the child, and lets the
+ * cancellation logic in `commonRemoveChild` advance. Throwing is
+ * reserved for the case where the parent is still running and a child
+ * acknowledged a cancel that wasn't issued — that's an invariant.
  */
 export function defaultCancelAckUnexpected<T extends Thread>(
-  _ctx: StepCtx,
+  ctx: StepCtx,
   t: Draft<T>,
   callId: CallId,
 ): void {
-  throw new Error(
-    `engine: ${t.kind} thread received unexpected cancelAck (callId=${callId})`,
-  );
+  if (commonRemoveChild(ctx, t as unknown as Draft<Thread>, callId)) {
+    // Parent is running and the child went away unexpectedly.
+    throw new Error(
+      `engine: ${t.kind} thread received unexpected cancelAck (callId=${callId})`,
+    );
+  }
+  // Otherwise: parent was cancelling (or child stale). commonRemoveChild
+  // already advanced the cascade.
 }

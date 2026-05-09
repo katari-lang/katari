@@ -1,10 +1,13 @@
+// Snapshot recovery: the engine pauses on an outbound FFI delegate, the
+// host persists the snapshot + agent row, then a fresh process boots and
+// resumes the agent by feeding the FFI ack via the recovered handle.
+
 import { describe, expect, it } from "vitest";
 import {
-  applyEvent,
+  CORE_ENDPOINT,
+  EngineHandle,
   createDelegationId,
-  createMachine,
-  noopLogger,
-  serializeMachine,
+  endpoint,
 } from "katari-runtime";
 import {
   AgentService,
@@ -18,8 +21,6 @@ import { pausesOnExternalIR, trivialSchemaBundle } from "./helpers.js";
 
 describe("snapshot recovery", () => {
   it("recovers a paused agent from snapshot, then completes via FFI ack", async () => {
-    // First "process": upload a module, start an agent that pauses on
-    // external, persist snapshot, then drop everything and simulate restart.
     const storage = new InMemoryStorage();
     const versionId = await storage.modules.insert({
       irModule: pausesOnExternalIR(),
@@ -29,29 +30,19 @@ describe("snapshot recovery", () => {
     const moduleRow = await storage.modules.get(versionId);
     if (moduleRow === null) throw new Error("module disappeared");
 
-    // Drive the engine directly so we can observe the FFI delegation id
-    // before the snapshot is taken. Mirrors what AgentService.startAgent
-    // would do internally.
-    const machine = createMachine(moduleRow.irModule);
+    // Drive the engine directly to the "paused on FFI" state.
+    const machine = EngineHandle.create(moduleRow.irModule);
     const apiDelegationId = createDelegationId();
     const agentId = "00000000-0000-7000-8000-000000000abc" as AgentId;
-    const out = applyEvent(machine, {
-      from: "API",
-      to: "CORE",
-      kind: "delegate",
-      qualifiedName: "main",
-      args: {},
-      delegationId: apiDelegationId,
-    });
-    const ffiEvent = out.find(
-      (e) => e.kind === "delegate" && e.from === "CORE" && e.to === "FFI",
+    const out = machine.startAgent("main", {}, apiDelegationId);
+    const ffiEvent = out.outbound.find(
+      (e) => e.payload.kind === "delegate" && e.to.startsWith("ext:"),
     );
-    if (ffiEvent === undefined || ffiEvent.kind !== "delegate") {
+    if (ffiEvent === undefined || ffiEvent.payload.kind !== "delegate") {
       throw new Error("expected outbound FFI delegate");
     }
-    const ffiDelegationId = ffiEvent.delegationId;
+    const ffiDelegationId = ffiEvent.payload.delegationId;
 
-    // Persist the agent row (separate AgentId vs DelegationId) and snapshot.
     const now = new Date().toISOString();
     const agentRow: AgentRow = {
       id: agentId,
@@ -64,10 +55,10 @@ describe("snapshot recovery", () => {
       updatedAt: now,
     };
     await storage.agents.insert(agentRow);
-    await storage.snapshots.upsert(versionId, serializeMachine(machine));
+    await storage.snapshots.upsert(versionId, machine.toSnapshot());
 
-    // Second "process": fresh registry / services against the same storage.
-    const logger = noopLogger;
+    // Second "process": fresh registry/services against the same storage.
+    const logger = (await import("katari-runtime")).noopLogger;
     const registry = new MachineRegistry(storage, logger);
     new ModuleService(storage, logger);
     const agents = new AgentService(storage, registry, logger);
@@ -75,29 +66,27 @@ describe("snapshot recovery", () => {
 
     expect(registry.isLoaded(versionId)).toBe(true);
 
-    // Deliver the FFI ack on the recovered handle and mirror the parts of
-    // AgentService.routeOutbound that flip agent state. (The full route
-    // path is exercised by the e2e test; here we only need to prove the
-    // recovered machine actually completes.)
     const handle = await registry.acquire(versionId);
+    const ffiSelf = endpoint("ext://ffi");
     const finishOut = handle.feedEvent({
-      from: "FFI",
-      to: "CORE",
-      kind: "delegateAck",
-      delegationId: ffiDelegationId,
-      value: { kind: "string", value: "recovered" },
+      from: ffiSelf,
+      to: CORE_ENDPOINT,
+      payload: {
+        kind: "delegateAck",
+        delegationId: ffiDelegationId,
+        value: { kind: "string", value: "recovered" },
+      },
     });
-    for (const event of finishOut) {
+    for (const event of finishOut.outbound) {
       if (
-        event.kind === "delegateAck" &&
-        event.from === "CORE" &&
-        event.to === "API"
+        event.payload.kind === "delegateAck" &&
+        event.from.startsWith("core:")
       ) {
-        const row = await storage.agents.findByDelegationId(event.delegationId);
+        const row = await storage.agents.findByDelegationId(event.payload.delegationId);
         if (row !== null) {
           await storage.agents.setState(row.id, {
             state: "succeeded",
-            result: event.value,
+            result: event.payload.value,
           });
         }
       }
@@ -127,7 +116,7 @@ describe("snapshot recovery", () => {
       updatedAt: now,
     });
 
-    const logger = noopLogger;
+    const logger = (await import("katari-runtime")).noopLogger;
     const registry = new MachineRegistry(storage, logger);
     await recoverOnBoot(storage, registry, logger);
 

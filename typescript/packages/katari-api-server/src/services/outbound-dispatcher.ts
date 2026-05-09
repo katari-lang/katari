@@ -1,7 +1,7 @@
 // OutboundEventDispatcher.
 //
-// Extracted from AgentService — translates the engine's outbound event
-// stream into DB writes (and, in the future, FFI invocations).
+// Translates the engine's outbound `Event` stream into DB writes (and,
+// in Phase F, FFI invocations).
 //
 // Currently handles:
 //   - delegateAck CORE→API → setState(succeeded, result=value)
@@ -11,30 +11,31 @@
 // Operates inside the caller's Storage transaction so the DB writes are
 // atomic with the snapshot upsert that surrounds them.
 
-import type { Logger, MachineEvent } from "katari-runtime";
+import type { EngineEvent, Logger } from "katari-runtime";
 import type { Storage, VersionId } from "../storage/types.js";
 
 export class OutboundEventDispatcher {
   constructor(private readonly logger: Logger) {}
 
   async route(
-    events: MachineEvent[],
+    events: EngineEvent[],
     versionId: VersionId,
     tx: Storage,
   ): Promise<void> {
     for (const event of events) {
-      if (event.kind === "delegateAck" && event.from === "CORE" && event.to === "API") {
-        const row = await tx.agents.findByDelegationId(event.delegationId);
+      const p = event.payload;
+      if (p.kind === "delegateAck" && event.from.startsWith("core:")) {
+        const row = await tx.agents.findByDelegationId(p.delegationId);
         if (row === null) {
           this.logger.log("warn", "delegateAck for unknown delegationId", {
             versionId,
-            delegationId: event.delegationId,
+            delegationId: p.delegationId,
           });
           continue;
         }
         const updated = await tx.agents.setState(
           row.id,
-          { state: "succeeded", result: event.value },
+          { state: "succeeded", result: p.value },
           { expectedState: "running" },
         );
         if (!updated) {
@@ -44,16 +45,12 @@ export class OutboundEventDispatcher {
             wasState: row.state,
           });
         }
-      } else if (
-        event.kind === "terminateAck" &&
-        event.from === "CORE" &&
-        event.to === "API"
-      ) {
-        const row = await tx.agents.findByDelegationId(event.delegationId);
+      } else if (p.kind === "terminateAck" && event.from.startsWith("core:")) {
+        const row = await tx.agents.findByDelegationId(p.delegationId);
         if (row === null) {
           this.logger.log("warn", "terminateAck for unknown delegationId", {
             versionId,
-            delegationId: event.delegationId,
+            delegationId: p.delegationId,
           });
           continue;
         }
@@ -69,17 +66,15 @@ export class OutboundEventDispatcher {
             wasState: row.state,
           });
         }
-      } else if (event.to === "FFI") {
-        // FFI executor not yet wired (Phase F). Hold the event — the
-        // ExternalThread is still in `delegations`, waiting for an
-        // ack the host must inject once the executor lands.
+      } else if (event.to.startsWith("ext:")) {
+        // Phase F wires this to the FFI executor.
         this.logger.log("debug", "FFI event held pending executor", {
           versionId,
-          eventKind: event.kind,
+          eventKind: p.kind,
         });
       } else {
         this.logger.log("debug", "ignoring outbound event", {
-          eventKind: event.kind,
+          eventKind: p.kind,
           from: event.from,
           to: event.to,
         });

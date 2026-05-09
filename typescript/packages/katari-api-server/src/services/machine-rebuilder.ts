@@ -4,8 +4,8 @@
 // before a throw, restore from pre-call snapshot" path. The caller must
 // hold the version's mutex around `rollback`.
 
-import { MachineHandle, type Logger } from "katari-runtime";
-import type { MachineRegistry } from "../registry.js";
+import { type Logger } from "katari-runtime";
+import { MachineHandle, type MachineRegistry } from "../registry.js";
 import type { Storage, VersionId } from "../storage/types.js";
 
 export class MachineRebuilder {
@@ -31,7 +31,7 @@ export class MachineRebuilder {
         this.registry.evict(versionId);
         return;
       }
-      const fresh = MachineHandle.fromSnapshot(moduleRow.irModule, snap, this.logger);
+      const fresh = MachineHandle.fromSnapshot(moduleRow.irModule, snap);
       this.registry.replaceHandle(versionId, fresh);
     } catch (err) {
       this.logger.log("error", "rollback rebuild failed", {

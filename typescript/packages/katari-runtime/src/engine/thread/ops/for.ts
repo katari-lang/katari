@@ -37,9 +37,6 @@ const THEN_CALL_ID = -1 as CallId;
 export const forOps: ThreadOps<ForThread> = {
   create(ctx, t) {
     const block = getForBlock(ctx, t.blockId);
-    if (block.parallel) {
-      throw new Error("engine.for: parallel for not yet implemented");
-    }
 
     // Initialize state vars from caller scope into our own scope.
     for (const [bodyVar, initVar] of block.stateInits) {
@@ -58,6 +55,22 @@ export const forOps: ThreadOps<ForThread> = {
       emitForDone(ctx, t as Draft<ForThread>, NULL_VALUE);
       return;
     }
+
+    if (block.parallel) {
+      // Spawn every iteration up-front. Each iteration gets its own
+      // scope (callInline) into which we write per-iteration iter vars
+      // so concurrent iterations don't race on the for thread's scope.
+      // break-for / next-for inside parallel mode are not supported —
+      // the runtime cannot give them well-defined ordering semantics.
+      // The compiler is expected to reject them; if one slips through
+      // we let it propagate via the bubbling ask and the surrounding
+      // ask handler decides.
+      for (let i = 0; i < total; i++) {
+        spawnParallelBody(ctx, t as Draft<ForThread>, block, iterables, i);
+      }
+      return;
+    }
+
     bindElementVars(ctx, t as Draft<ForThread>, block, iterables, 0);
     spawnBody(ctx, t as Draft<ForThread>, 0);
   },
@@ -79,6 +92,15 @@ export const forOps: ThreadOps<ForThread> = {
     }
 
     const block = getForBlock(ctx, t.blockId);
+
+    if (block.parallel) {
+      // Parallel mode: count down by checking remaining children.
+      if (Object.keys(t.children).length === 0) {
+        emitForDone(ctx, t as Draft<ForThread>, NULL_VALUE);
+      }
+      return;
+    }
+
     t.currentIndex += 1;
     const total = getIterableTotal(t.iterableSnapshot as Value[]);
     if (t.currentIndex >= total) {
@@ -198,6 +220,44 @@ function spawnBody(ctx: StepCtx, t: Draft<ForThread>, index: number): void {
     callArgs: {},
     scopeMode: { mode: "inline", parentScopeId: t.scopeId },
   });
+}
+
+/**
+ * Spawn one parallel iteration. Each iteration's iter-var bindings live
+ * in *its own* fresh inline scope (not shared with siblings) so the
+ * iterations don't race on the for thread's scope.
+ */
+function spawnParallelBody(
+  ctx: StepCtx,
+  t: Draft<ForThread>,
+  block: import("../../../ir/types.js").ForBlock,
+  iterables: Value[],
+  index: number,
+): void {
+  const childId = spawnChild(ctx, {
+    parentId: t.id,
+    parentCallId: index as CallId,
+    blockId: block.bodyBlock,
+    callArgs: {},
+    scopeMode: { mode: "inline", parentScopeId: t.scopeId },
+  });
+  // Decode iter indices and write into the child's scope.
+  let remaining = index;
+  const child = ctx.state.threads[childId];
+  if (child === undefined) return;
+  const childScopeId = child.scopeId;
+  for (let i = block.iters.length - 1; i >= 0; i--) {
+    const iter = block.iters[i]!;
+    const arr = iterables[i];
+    if (arr === undefined || arr.kind !== "array") {
+      throw new Error("engine.for: iter source is not an array");
+    }
+    const len = arr.elements.length;
+    const digit = remaining % len;
+    remaining = Math.floor(remaining / len);
+    const elem = arr.elements[digit]!;
+    setValueInScope(ctx, childScopeId, iter[0], elem);
+  }
 }
 
 function emitForDone(

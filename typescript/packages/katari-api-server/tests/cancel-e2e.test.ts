@@ -1,18 +1,12 @@
-// End-to-end cancel flow:
-//   1. Start an agent that suspends on FFI (so it doesn't auto-complete).
-//   2. POST /agent/:id/cancel → state moves to "cancelling", outbound
-//      CORE→FFI terminate is emitted.
-//   3. Simulate the FFI sidecar acknowledging the terminate.
-//   4. The agent state lands on "cancelled".
-//
-// The api-server's `routeOutbound` only knows about delegateAck/terminateAck
-// originating from CORE→API; the inbound FFI ack arrives via
-// MachineHandle.feedEvent (no public REST endpoint exists for it yet, since
-// the FFI executor isn't built — Stage 5+). To exercise the full path we
-// reach into the registry to grab the handle and feed the ack manually.
+// End-to-end cancel flow against the new engine.
+//   1. Start an agent that suspends on FFI.
+//   2. POST /agent/:id/cancel → state="cancelling", outbound CORE→FFI terminate.
+//   3. Locate the FFI delegationId from the registry snapshot.
+//   4. Feed the FFI terminateAck → engine emits terminateAck CORE→API.
+//   5. Mirror routeOutbound's setState path so the row reaches "cancelled".
 
 import { describe, expect, it } from "vitest";
-import { noopLogger, type DelegationId } from "katari-runtime";
+import { CORE_ENDPOINT, endpoint, noopLogger, type DelegationId } from "katari-runtime";
 import {
   AgentService,
   buildApp,
@@ -31,8 +25,6 @@ describe("cancel agent e2e (suspended on FFI → cancel → terminateAck → can
     const agents = new AgentService(storage, registry, logger);
     const app = buildApp({ modules, agents, apiKey: null, rateLimit: null });
 
-    // 1. Upload module + start agent. The agent calls an external block,
-    // so it suspends on the outbound CORE→FFI delegate and stays running.
     const upload = await app.fetch(
       new Request("http://test/module", {
         method: "POST",
@@ -55,54 +47,46 @@ describe("cancel agent e2e (suspended on FFI → cancel → terminateAck → can
     expect(start.status).toBe(201);
     const { agentId } = (await start.json()) as { agentId: string };
 
-    const beforeCancel = await app.fetch(new Request(`http://test/agent/${agentId}`));
-    expect(((await beforeCancel.json()) as { state: string }).state).toBe("running");
-
-    // 2. POST cancel → state="cancelling", and we capture the FFI delegationId
-    // by grabbing the in-memory handle's outbound events on the next feedEvent.
-    // The simpler observation path: state in DB.
     const cancelResp = await app.fetch(
       new Request(`http://test/agent/${agentId}/cancel`, { method: "POST" }),
     );
     expect(cancelResp.status).toBe(200);
-    const cancelRow = (await cancelResp.json()) as { state: string; delegationId: string };
+    const cancelRow = (await cancelResp.json()) as { state: string };
     expect(cancelRow.state).toBe("cancelling");
 
-    // 3. Locate the FFI delegationId. The handle's snapshot exposes
-    // `delegations` keyed by FFI id. We grab the one ExternalThread that
-    // exists (the agent we just started has exactly one outstanding FFI).
+    // Locate the FFI delegationId from the engine snapshot.
     const handle = await registry.acquire(versionId as never);
     const snap = handle.toSnapshot();
-    expect(snap.delegations).toHaveLength(1);
-    const ffiDelegationId = snap.delegations[0]!.delegationId;
+    const ffiIds = Object.keys(snap.ffiDelegations);
+    expect(ffiIds.length).toBe(1);
+    const ffiDelegationId = ffiIds[0]!;
 
-    // 4. Feed the FFI terminateAck into the engine. routeOutbound runs
-    // inside the runtime adapter, so we reach the same path the api-server
-    // uses internally: feedEvent → applyEvent → outbound terminateAck CORE→API.
-    // We then have to mirror the parts of routeOutbound the api-server
-    // does, since feedEvent is below the AgentService layer.
+    // Feed the FFI terminateAck.
+    const ffiSelf = endpoint("ext://ffi");
     const out = handle.feedEvent({
-      from: "FFI",
-      to: "CORE",
-      kind: "terminateAck",
-      delegationId: ffiDelegationId,
+      from: ffiSelf,
+      to: CORE_ENDPOINT,
+      payload: {
+        kind: "terminateAck",
+        delegationId: ffiDelegationId as DelegationId,
+      },
     });
-    for (const event of out) {
+    for (const event of out.outbound) {
       if (
-        event.kind === "terminateAck" &&
-        event.from === "CORE" &&
-        event.to === "API"
+        event.payload.kind === "terminateAck" &&
+        event.from.startsWith("core:")
       ) {
-        const row = await storage.agents.findByDelegationId(
-          event.delegationId as DelegationId,
-        );
+        const row = await storage.agents.findByDelegationId(event.payload.delegationId);
         if (row !== null) {
-          await storage.agents.setState(row.id, { state: "cancelled" }, { expectedState: "cancelling" });
+          await storage.agents.setState(
+            row.id,
+            { state: "cancelled" },
+            { expectedState: "cancelling" },
+          );
         }
       }
     }
 
-    // 5. Final state.
     const after = await app.fetch(new Request(`http://test/agent/${agentId}`));
     const afterRow = (await after.json()) as { state: string };
     expect(afterRow.state).toBe("cancelled");

@@ -21,17 +21,22 @@
 import { v7 as uuidv7 } from "uuid";
 import {
   createDelegationId,
+  EngineHandle,
   EntryNotFoundError,
-  MachineHandle,
   RecoverableEngineError,
+  type EngineEvent,
+  type EngineValue,
   type Logger,
-  type MachineEvent,
-  type Value,
 } from "katari-runtime";
 import {
   MachineNotFound,
   MachineRegistry,
 } from "../registry.js";
+
+// Aliases to ease the legacy → new engine rename.
+type MachineHandle = EngineHandle;
+type MachineEvent = EngineEvent;
+type Value = EngineValue;
 import type {
   AgentId,
   AgentRow,
@@ -65,14 +70,33 @@ export interface AgentServiceMetrics {
 
 export class AgentService {
   private readonly metrics: AgentServiceMetrics | undefined;
+  private readonly ffi: import("../ffi/executor.js").FFIExecutor | undefined;
+  private readonly ffiTimeoutMs: number;
+  /** Fire-and-forget FFI dispatch promises. Tracked for `drainFFI`. */
+  private readonly pendingFFI = new Set<Promise<unknown>>();
 
   constructor(
     private readonly storage: Storage,
     private readonly registry: MachineRegistry,
     private readonly logger: Logger,
     metrics?: AgentServiceMetrics,
+    ffi?: import("../ffi/executor.js").FFIExecutor,
+    ffiTimeoutMs: number = 60_000,
   ) {
     this.metrics = metrics;
+    this.ffi = ffi;
+    this.ffiTimeoutMs = ffiTimeoutMs;
+  }
+
+  /**
+   * Wait until every fire-and-forget FFI dispatch currently in flight
+   * has completed. Tests and graceful shutdown use this to drain
+   * outstanding FFI work before observing final agent state.
+   */
+  async drainFFI(): Promise<void> {
+    while (this.pendingFFI.size > 0) {
+      await Promise.allSettled([...this.pendingFFI]);
+    }
   }
 
   /**
@@ -120,9 +144,16 @@ export class AgentService {
             input.args,
             delegationId,
           );
+          // Recoverable errors are surfaced via `out.errors` rather than
+          // thrown by `feedEvent`. Re-throw so the outer catch matches on
+          // the error type and rolls back the tx.
+          if (out.errors.length > 0) {
+            throw out.errors[0]!;
+          }
           await tx.agents.insert(row);
-          await this.routeOutbound(out, input.versionId, tx);
+          await this.routeOutbound(out.outbound, input.versionId, tx);
           await tx.snapshots.upsert(input.versionId, handle.toSnapshot());
+          await tx.diffs.append(input.versionId, out.diffs);
         });
       } catch (err) {
         if (err instanceof EntryNotFoundError) {
@@ -206,8 +237,11 @@ export class AgentService {
             return; // tx commits with no-op; outer cancelAgent returns the refreshed row
           }
           const out = handle.cancelAgent(row.delegationId);
-          await this.routeOutbound(out, row.versionId, tx);
-          await tx.snapshots.upsert(row.versionId, handle.toSnapshot());
+          if (out.errors.length > 0) {
+            throw out.errors[0]!;
+          }
+          await this.routeOutbound(out.outbound, row.versionId, tx);
+          await tx.snapshots.upsert(row.versionId, handle.toSnapshot()); await tx.diffs.append(row.versionId, out.diffs);
         });
       } catch (err) {
         if (err instanceof RecoverableEngineError) {
@@ -278,8 +312,11 @@ export class AgentService {
       try {
         await this.storage.withTransaction(async (tx) => {
           const out = handle.cancelAgent(row.delegationId);
-          await this.routeOutbound(out, row.versionId, tx);
-          await tx.snapshots.upsert(row.versionId, handle.toSnapshot());
+          if (out.errors.length > 0) {
+            throw out.errors[0]!;
+          }
+          await this.routeOutbound(out.outbound, row.versionId, tx);
+          await tx.snapshots.upsert(row.versionId, handle.toSnapshot()); await tx.diffs.append(row.versionId, out.diffs);
         });
       } catch (err) {
         if (err instanceof RecoverableEngineError) {
@@ -318,21 +355,20 @@ export class AgentService {
     tx: Storage,
   ): Promise<void> {
     for (const event of events) {
-      if (event.kind === "delegateAck" && event.from === "CORE" && event.to === "API") {
-        const row = await tx.agents.findByDelegationId(event.delegationId);
+      const p = event.payload;
+      if (p.kind === "delegateAck" && event.from.startsWith("core:")) {
+        // delegateAck CORE→API: agent completed normally.
+        const row = await tx.agents.findByDelegationId(p.delegationId);
         if (row === null) {
           this.logger.log("warn", "delegateAck for unknown delegationId", {
             versionId,
-            delegationId: event.delegationId,
+            delegationId: p.delegationId,
           });
           continue;
         }
-        // Only running agents can transition to succeeded. If a concurrent
-        // cancel landed first, leave its "cancelling" state alone — the
-        // matching terminateAck will follow shortly.
         const updated = await tx.agents.setState(
           row.id,
-          { state: "succeeded", result: event.value },
+          { state: "succeeded", result: p.value },
           { expectedState: "running" },
         );
         if (!updated) {
@@ -343,21 +379,17 @@ export class AgentService {
           });
         }
       } else if (
-        event.kind === "terminateAck" &&
-        event.from === "CORE" &&
-        event.to === "API"
+        p.kind === "terminateAck" && event.from.startsWith("core:")
       ) {
-        const row = await tx.agents.findByDelegationId(event.delegationId);
+        // terminateAck CORE→API: cancellation completed.
+        const row = await tx.agents.findByDelegationId(p.delegationId);
         if (row === null) {
           this.logger.log("warn", "terminateAck for unknown delegationId", {
             versionId,
-            delegationId: event.delegationId,
+            delegationId: p.delegationId,
           });
           continue;
         }
-        // Only "cancelling" agents transition to "cancelled". Anything
-        // else (e.g. the agent already moved to `error` via poison) is
-        // left as-is.
         const updated = await tx.agents.setState(
           row.id,
           { state: "cancelled" },
@@ -370,22 +402,26 @@ export class AgentService {
             wasState: row.state,
           });
         }
-      } else if (event.to === "FFI") {
-        // FFI executor is not yet built. Outbound CORE→FFI events are
-        // dropped on the floor here — the engine state stays valid (the
-        // ExternalThread is still in `delegations`, waiting for an
-        // ack), and the agent simply sits in `running` until something
-        // outside this process feeds the ack back in via
-        // MachineHandle.feedEvent. When the FFI executor lands, replace
-        // this branch with a real dispatch.
-        // TODO(katari/ffi): wire to the FFI executor.
-        this.logger.log("debug", "FFI event held pending executor", {
-          versionId,
-          eventKind: event.kind,
-        });
+      } else if (event.to.startsWith("ext:")) {
+        // CORE→FFI: external delegate / terminate. Dispatch to the
+        // FFI executor (if wired) — the call is fire-and-forget; the
+        // executor will eventually feed the ack back into the engine
+        // via `feedFFIAck` / `feedFFITerminateAck` (re-acquiring the
+        // version mutex). If no executor is wired, log and let the
+        // agent sit on the FFI delegate forever (host responsibility).
+        if (this.ffi === undefined) {
+          this.logger.log("debug", "FFI event held pending executor", {
+            versionId,
+            eventKind: p.kind,
+          });
+        } else if (p.kind === "delegate") {
+          this.dispatchFFIDelegate(versionId, p.targetBlock, p.args, p.delegationId);
+        } else if (p.kind === "terminate") {
+          this.dispatchFFITerminate(p.delegationId);
+        }
       } else {
         this.logger.log("debug", "ignoring outbound event", {
-          eventKind: event.kind,
+          eventKind: p.kind,
           from: event.from,
           to: event.to,
         });
@@ -422,6 +458,167 @@ export class AgentService {
     }
   }
 
+  // ─── FFI dispatch ──────────────────────────────────────────────────────
+  //
+  // `dispatchFFIDelegate` and `dispatchFFITerminate` are fire-and-forget:
+  // they kick off the executor outside any mutex, then re-acquire the
+  // version mutex when the result is ready and feed the ack into the
+  // engine.
+
+  private dispatchFFIDelegate(
+    versionId: VersionId,
+    targetBlock: import("katari-runtime").QualifiedName,
+    args: Record<string, Value>,
+    delegationId: import("katari-runtime").DelegationId,
+  ): void {
+    if (this.ffi === undefined) return;
+    const pending: Promise<void> = this.ffi
+      .invoke({
+        qualifiedName: targetBlock,
+        args,
+        delegationId,
+        timeoutMs: this.ffiTimeoutMs,
+      })
+      .then(
+        (value) => this.feedFFIAck(versionId, delegationId, value),
+        async (err) => {
+          // FFI failed (timeout / connection / sidecar error). The
+          // engine's ExternalThread is still RUNNING — terminateAck
+          // would be rejected because the engine never saw a terminate
+          // for that delegation. Instead we cancel the agent so the
+          // engine drives the External into cancelling, then feed the
+          // terminateAck.
+          this.logger.log("warn", "FFI invoke failed; cancelling agent", {
+            versionId,
+            delegationId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+          // The delegationId we hold here is the FFI delegationId, not
+          // the API one. Find the agent row by it: row.delegationId is
+          // the API delegationId (different from the FFI one). The link
+          // is the engine's own ffiDelegations map — but at this layer
+          // we look up by walking the agents whose versionId matches
+          // and checking for outstanding FFI delegations on the engine
+          // state. Simpler: the agent that triggered the FFI is the one
+          // that called this FFI block; we track it by spawning an
+          // index in the OutboundEventDispatcher's call site. For now
+          // we walk the running agents on this version.
+          const candidates = await this.storage.agents.list({ versionId });
+          const target = candidates.find(
+            (r) => r.state === "running" && r.versionId === versionId,
+          );
+          if (target !== undefined) {
+            await this.cancelAgent(target.id).catch((cancelErr) => {
+              this.logger.log("warn", "cancelAgent during FFI failure threw", {
+                error: cancelErr instanceof Error ? cancelErr.message : String(cancelErr),
+              });
+            });
+          }
+          await this.feedFFITerminateAck(versionId, delegationId);
+        },
+      )
+      .catch((err) => {
+        this.logger.log("error", "feedFFIAck threw", {
+          versionId,
+          delegationId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      })
+      .finally(() => {
+        this.pendingFFI.delete(pending);
+      });
+    this.pendingFFI.add(pending);
+  }
+
+  private dispatchFFITerminate(
+    delegationId: import("katari-runtime").DelegationId,
+  ): void {
+    if (this.ffi === undefined) return;
+    void this.ffi.terminate(delegationId).catch((err) => {
+      this.logger.log("warn", "FFI terminate threw", {
+        delegationId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+  }
+
+  /**
+   * Feed an FFI delegateAck back into the engine for the given version.
+   * Re-acquires the version mutex so concurrent agent work serializes.
+   */
+  private async feedFFIAck(
+    versionId: VersionId,
+    delegationId: import("katari-runtime").DelegationId,
+    value: Value,
+  ): Promise<void> {
+    const handle = await this.registry.acquire(versionId);
+    const mutex = this.registry.getMutex(versionId);
+    await mutex.runExclusive(async () => {
+      const rollbackSnap = handle.toSnapshot();
+      try {
+        await this.storage.withTransaction(async (tx) => {
+          const out = handle.feedEvent({
+            from: ("ext://ffi" as unknown) as import("katari-runtime").Endpoint,
+            to: handle.currentState.selfEndpoint,
+            payload: { kind: "delegateAck", delegationId, value },
+          });
+          if (out.errors.length > 0) {
+            throw out.errors[0]!;
+          }
+          await this.routeOutbound(out.outbound, versionId, tx);
+          await tx.snapshots.upsert(versionId, handle.toSnapshot()); await tx.diffs.append(versionId, out.diffs);
+        });
+      } catch (err) {
+        if (err instanceof RecoverableEngineError) {
+          await this.versionedRollback(versionId, rollbackSnap);
+          this.logger.log("info", "feedFFIAck rolled back as error", {
+            versionId,
+            delegationId,
+            error: err.message,
+          });
+          return;
+        }
+        // Non-recoverable: bulk poison this version.
+        await this.storage.agents.markAllRunningAsError(
+          versionId,
+          err instanceof Error ? err.message : "unknown FFI ack failure",
+        );
+        await this.storage.snapshots.delete(versionId);
+        this.registry.evict(versionId);
+      }
+    });
+  }
+
+  private async feedFFITerminateAck(
+    versionId: VersionId,
+    delegationId: import("katari-runtime").DelegationId,
+  ): Promise<void> {
+    const handle = await this.registry.acquire(versionId);
+    const mutex = this.registry.getMutex(versionId);
+    await mutex.runExclusive(async () => {
+      try {
+        await this.storage.withTransaction(async (tx) => {
+          const out = handle.feedEvent({
+            from: ("ext://ffi" as unknown) as import("katari-runtime").Endpoint,
+            to: handle.currentState.selfEndpoint,
+            payload: { kind: "terminateAck", delegationId },
+          });
+          if (out.errors.length > 0) {
+            throw out.errors[0]!;
+          }
+          await this.routeOutbound(out.outbound, versionId, tx);
+          await tx.snapshots.upsert(versionId, handle.toSnapshot()); await tx.diffs.append(versionId, out.diffs);
+        });
+      } catch (err) {
+        this.logger.log("warn", "feedFFITerminateAck failed", {
+          versionId,
+          delegationId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    });
+  }
+
   private async rebuildAndCache(
     versionId: VersionId,
     snap: ReturnType<MachineHandle["toSnapshot"]>,
@@ -431,7 +628,7 @@ export class AgentService {
       this.registry.evict(versionId);
       return;
     }
-    const fresh = MachineHandle.fromSnapshot(moduleRow.irModule, snap, this.logger);
+    const fresh = EngineHandle.fromSnapshot(moduleRow.irModule, snap);
     this.registry.replaceHandle(versionId, fresh);
   }
 

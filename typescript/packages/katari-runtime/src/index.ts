@@ -1,146 +1,105 @@
 // Public API.
 //
-// Stage A keeps the *legacy* surface (machine/runtime classes) unchanged
-// so the existing katari-api-server keeps building. The *new* engine is
-// also exported, with a distinct prefix where the names would otherwise
-// collide. Phase H of the refactor drops the legacy block once
-// api-server has migrated.
+// All exports come from the new engine layer. Legacy `machine/` and
+// `runtime/` modules were removed in Phase D — this file is the single
+// source of truth for what `katari-api-server` (and any future host)
+// imports.
 
-// ───────────────────────────────────────────────────────────────────────────
-// Legacy surface — unchanged from before the refactor.
-// ───────────────────────────────────────────────────────────────────────────
-
-export type { MachineState } from "./machine/machine.js";
-export { createMachine, applyEvent } from "./machine/machine.js";
-export { processQueue } from "./machine/runner.js";
-export {
-  Thread,
-  ChildThread,
-  APIThread,
-  UserThread,
-  PrimThread,
-  RequestThread,
-  ExternalThread,
-  CtorThread,
-  MatchThread,
-  ForThread,
-  HandleThread,
-  TupleThread,
-  ArrayThread,
-} from "./machine/thread/index.js";
-export type {
-  CallId,
-  QueueEvent,
-  ThreadInit,
-  ChildThreadInit,
-  CreateThreadInit,
-  Boundaries,
-  BoundaryKey,
-} from "./machine/thread/index.js";
-export type { Value } from "./machine/value.js";
-export type { Scope } from "./machine/scope.js";
-export {
-  collectGarbage,
-  serializeScope,
-  deserializeScope,
-} from "./machine/scope.js";
-export type { SerializedScope } from "./machine/scope.js";
-export type {
-  Endpoint,
-  MachineEventPayload,
-  MachineEvent,
-} from "./machine/events.js";
-export type {
-  ThreadId,
-  ScopeId,
-  DelegationId,
-  EscalationId,
-} from "./machine/id.js";
-export {
-  createDelegationId,
-  createThreadId,
-  createScopeId,
-} from "./machine/id.js";
-
-export {
-  RecoverableEngineError,
-  EntryNotFoundError,
-  IrrecoverableEngineError,
-} from "./runtime/errors.js";
-export { MachineHandle } from "./runtime/facade.js";
-export {
-  serializeMachine,
-  deserializeMachine,
-} from "./runtime/snapshot.js";
-export type {
-  MachineSnapshot,
-  SerializedThread,
-} from "./runtime/snapshot.js";
-export {
-  buildConsoleLogger,
-  consoleLogger,
-  noopLogger,
-  type Logger,
-  type LogLevel,
-} from "./runtime/logger.js";
-
-export type { IRModule, BlockId, QualifiedName } from "./ir/types.js";
-export type { SchemaBundle, AgentDefinition, JsonSchema } from "./ir/schema.js";
-
-// ───────────────────────────────────────────────────────────────────────────
-// New engine surface — prefixed with `Engine` / `engine` where names
-// would clash with the legacy entries above.
-// ───────────────────────────────────────────────────────────────────────────
+// ─── Facade ────────────────────────────────────────────────────────────────
 
 export { MachineHandle as EngineHandle } from "./facade.js";
+// Provide the legacy `MachineHandle` alias for callers that haven't
+// renamed yet. Both names refer to the same class.
+export { MachineHandle } from "./facade.js";
+
+// ─── Engine functions ──────────────────────────────────────────────────────
 
 export {
-  applyEvent as engineApplyEvent,
-  createState as createEngineState,
+  applyEvent,
+  createState,
   CORE_ENDPOINT,
   endpoint,
   NULL_VALUE,
   literalToValue,
   isInternal,
   emptyResult,
-  serialize as serializeEngineState,
-  deserialize as deserializeEngineState,
-  collectGarbage as engineCollectGarbage,
+  serialize,
+  deserialize,
+  collectGarbage,
   shouldGc,
   LoggerTag,
+  RecoverableEngineError,
+  IrrecoverableEngineError,
+  EntryNotFoundError,
+  buildConsoleLogger,
+  consoleLogger,
+  noopLogger,
+  createDelegationId,
+  createEscalationId,
+  createScopeId,
+  createThreadId,
 } from "./engine/index.js";
 
+// ─── Engine types ──────────────────────────────────────────────────────────
+
 export type {
+  Endpoint,
   AskId,
+  CallId,
+  DelegationId,
+  EscalationId,
+  ScopeId,
+  ThreadId,
+  Value,
   Value as EngineValue,
+  Scope,
   Scope as EngineScope,
   AskKind,
+  Event,
   Event as EngineEvent,
-  EventPayload as EngineEventPayload,
-  ExternalEventPayload as EngineExternalPayload,
-  InternalEventPayload as EngineInternalPayload,
+  Event as MachineEvent,
+  EventPayload,
+  ExternalEventPayload,
+  InternalEventPayload,
   ModMap,
+  Thread,
   Thread as EngineThread,
   ThreadKind,
   ThreadStatus,
   AskIdMap,
-  UserThread as EngineUserThread,
-  HandleThread as EngineHandleThread,
-  ForThread as EngineForThread,
-  MatchThread as EngineMatchThread,
-  RequestThread as EngineRequestThread,
-  ExternalThread as EngineExternalThread,
-  PrimThread as EnginePrimThread,
-  CtorThread as EngineCtorThread,
-  TupleThread as EngineTupleThread,
-  ArrayThread as EngineArrayThread,
+  UserThread,
+  HandleThread,
+  ForThread,
+  MatchThread,
+  RequestThread,
+  ExternalThread,
+  PrimThread,
+  CtorThread,
+  TupleThread,
+  ArrayThread,
   ChildRole,
   PendingAction,
   PostCancelAction,
+  State,
   State as EngineState,
+  State as MachineState,
   Diff,
   EngineError,
   LogEntry,
+  LogLevel,
+  Logger,
+  Result,
   Result as EngineResult,
+  Snapshot,
   Snapshot as EngineSnapshot,
+  Snapshot as MachineSnapshot,
 } from "./engine/index.js";
+
+// ─── IR + schema types (Haskell mirror) ────────────────────────────────────
+
+export type {
+  IRModule,
+  BlockId,
+  QualifiedName,
+} from "./ir/types.js";
+export type { SchemaBundle, AgentDefinition, JsonSchema } from "./ir/schema.js";

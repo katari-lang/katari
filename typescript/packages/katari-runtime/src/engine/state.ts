@@ -13,7 +13,6 @@
 
 import type { IRModule } from "../ir/types.js";
 import type { Endpoint } from "./endpoint.js";
-import type { ScopeId, ThreadId } from "./id.js";
 import type { Scope } from "./scope.js";
 import type { Thread } from "./thread/types.js";
 
@@ -25,6 +24,27 @@ export type State = {
   threads: Record<string, Thread>;
   /** ScopeId → Scope. Encoded as Record<string, Scope>. */
   scopes: Record<string, Scope>;
+  /**
+   * API delegationId → root thread id.
+   * When an external `delegate API→CORE` arrives the engine spawns a root
+   * UserThread and registers it here. When that thread completes (or is
+   * cancelled) the engine emits `delegateAck` / `terminateAck` to the
+   * stored sender and clears the entry.
+   */
+  apiDelegations: Record<string, string>;
+  /**
+   * Sender endpoint per API delegation, recorded so the engine knows
+   * where to address `delegateAck` / `terminateAck` back to.
+   */
+  apiDelegationSenders: Record<string, Endpoint>;
+  /**
+   * FFI delegationId → ExternalThread id.
+   * Set by spawnChild when an ExternalThread is created. Used to look up
+   * the target of inbound `delegateAck` / `terminateAck` from FFI.
+   */
+  ffiDelegations: Record<string, string>;
+  /** Endpoint to send CORE→FFI delegate / terminate to. Set per delegation? */
+  ffiTargetEndpoint: Endpoint;
   /** Scope count at the most recent GC pass. Used by the GC trigger heuristic. */
   lastGcScopeCount: number;
 };

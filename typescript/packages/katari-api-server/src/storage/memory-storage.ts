@@ -5,10 +5,13 @@
 import { v7 as uuidv7 } from "uuid";
 import type {
   DelegationId,
+  Diff,
+  EngineSnapshot,
   IRModule,
-  MachineSnapshot,
   SchemaBundle,
 } from "katari-runtime";
+
+type MachineSnapshot = EngineSnapshot;
 import type {
   AgentId,
   AgentRepo,
@@ -181,10 +184,31 @@ class InMemorySnapshotRepo implements SnapshotRepo {
   }
 }
 
+class InMemoryDiffRepo {
+  private rows = new Map<VersionId, Diff[]>();
+
+  async append(versionId: VersionId, diffs: Diff[]): Promise<void> {
+    if (diffs.length === 0) return;
+    const existing = this.rows.get(versionId) ?? [];
+    existing.push(...clone(diffs));
+    this.rows.set(versionId, existing);
+  }
+
+  async list(versionId: VersionId): Promise<Diff[]> {
+    const list = this.rows.get(versionId);
+    return list ? clone(list) : [];
+  }
+
+  async delete(versionId: VersionId): Promise<void> {
+    this.rows.delete(versionId);
+  }
+}
+
 export class InMemoryStorage implements Storage {
   readonly modules = new InMemoryModuleRepo();
   readonly agents = new InMemoryAgentRepo();
   readonly snapshots = new InMemorySnapshotRepo();
+  readonly diffs = new InMemoryDiffRepo();
 
   /**
    * Snapshot-and-restore implementation: the in-memory backend isn't a real
@@ -206,6 +230,7 @@ export class InMemoryStorage implements Storage {
       agentRows: Map<AgentId, AgentRow>;
       agentByDelegation: Map<DelegationId, AgentId>;
       snapshots: Map<VersionId, MachineSnapshot>;
+      diffs: Map<VersionId, Diff[]>;
     };
     const captureState = (): RepoState => {
       const m = this.modules as unknown as { rows: Map<VersionId, ModuleRow> };
@@ -214,11 +239,15 @@ export class InMemoryStorage implements Storage {
         byDelegation: Map<DelegationId, AgentId>;
       };
       const s = this.snapshots as unknown as { rows: Map<VersionId, MachineSnapshot> };
+      const d = this.diffs as unknown as { rows: Map<VersionId, Diff[]> };
       return {
         modules: new Map(m.rows),
         agentRows: new Map(a.rows),
         agentByDelegation: new Map(a.byDelegation),
         snapshots: new Map(s.rows),
+        diffs: new Map(
+          [...d.rows.entries()].map(([k, v]) => [k, [...v]] as const),
+        ),
       };
     };
     const restoreState = (snap: RepoState): void => {
@@ -228,10 +257,12 @@ export class InMemoryStorage implements Storage {
         byDelegation: Map<DelegationId, AgentId>;
       };
       const s = this.snapshots as unknown as { rows: Map<VersionId, MachineSnapshot> };
+      const d = this.diffs as unknown as { rows: Map<VersionId, Diff[]> };
       m.rows = snap.modules;
       a.rows = snap.agentRows;
       a.byDelegation = snap.agentByDelegation;
       s.rows = snap.snapshots;
+      d.rows = snap.diffs;
     };
 
     const before = captureState();

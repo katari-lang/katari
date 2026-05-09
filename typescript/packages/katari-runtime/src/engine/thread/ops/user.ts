@@ -31,6 +31,7 @@ import { literalToValue, NULL_VALUE, type Value } from "../../value.js";
 import {
   allocAskId,
   commonRemoveChild,
+  emitRootCompletion,
   hasChildren,
   lookupValue,
   setValueInScope,
@@ -140,7 +141,8 @@ function runStatements(
     }
   }
 
-  // All statements done — emit our trailing value as `done` to parent.
+  // All statements done — emit our trailing value as `done` to parent,
+  // or as an external delegateAck if we are a root thread.
   const value = block.trailing !== undefined
     ? lookupValue(ctx, t.scopeId, block.trailing)
     : NULL_VALUE;
@@ -151,7 +153,11 @@ function runStatements(
       callId: t.parentCallId,
       value,
     });
+    return;
   }
+  // Root thread: emit external delegateAck and remove ourselves.
+  emitRootCompletion(ctx, t, value);
+  delete ctx.state.threads[t.id];
 }
 
 type StatementOutcome = "advance" | "wait";
@@ -201,9 +207,17 @@ function handleStatement(
     }
     case "statementExit": {
       const value = lookupValue(ctx, t.scopeId, stmt.body.value);
+      // If we ourselves are the boundary for this exit kind, handle it
+      // directly without bubbling — the boundary mechanism reuses our
+      // own `catchesReturn` flag for return; break/break-for ought to
+      // be caught by some ancestor (the compiler enforces) so we just
+      // bubble those.
+      if (stmt.body.exitKind === "exitKindReturn" && t.catchesReturn) {
+        handleReturnCaught(ctx, t, value);
+        return "wait";
+      }
       const askKind = exitKindToAsk(stmt.body.exitKind, value);
       emitAskUpwards(ctx, t, askKind);
-      // We do not advance pc; the cancel cascade will reach us.
       return "wait";
     }
     case "statementCont": {
@@ -377,7 +391,7 @@ function handleReturnCaught(
   t.status = "cancelling";
   t.pendingReturn = value;
   if (!hasChildren(t)) {
-    // No children — emit our done now.
+    // No children — emit our done now (or root delegateAck if root).
     if (t.parent !== null && t.parentCallId !== null) {
       ctx.enqueue({
         kind: "done",
@@ -385,6 +399,10 @@ function handleReturnCaught(
         callId: t.parentCallId,
         value,
       });
+    } else {
+      // Root thread: emit external delegateAck and remove ourselves.
+      emitRootCompletion(ctx, t, value);
+      delete ctx.state.threads[t.id];
     }
     return;
   }

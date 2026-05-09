@@ -12,7 +12,6 @@
 import type { Draft } from "immer";
 import type { CallId } from "../../id.js";
 import type { Endpoint } from "../../endpoint.js";
-import { endpoint } from "../../endpoint.js";
 import type { ExternalThread } from "../types.js";
 import {
   defaultAskAckProxy,
@@ -21,13 +20,15 @@ import {
 } from "./defaults.js";
 import type { ThreadOps } from "./types.js";
 
-const FFI_ENDPOINT_PLACEHOLDER: Endpoint = endpoint("ext://ffi");
-
 export const externalOps: ThreadOps<ExternalThread> = {
   create(ctx, t) {
+    // Register this thread as the receiver for the eventual `delegateAck`
+    // / `terminateAck` from FFI. The runner's translateExternal looks
+    // it up by delegationId.
+    ctx.state.ffiDelegations[t.delegationId as string] = t.id;
     ctx.emit({
       from: ctx.state.selfEndpoint as Endpoint,
-      to: FFI_ENDPOINT_PLACEHOLDER,
+      to: ctx.state.ffiTargetEndpoint as Endpoint,
       payload: {
         kind: "delegate",
         targetBlock: t.externalName,
@@ -55,7 +56,7 @@ export const externalOps: ThreadOps<ExternalThread> = {
     t.status = "cancelling";
     ctx.emit({
       from: ctx.state.selfEndpoint as Endpoint,
-      to: FFI_ENDPOINT_PLACEHOLDER,
+      to: ctx.state.ffiTargetEndpoint as Endpoint,
       payload: { kind: "terminate", delegationId: t.delegationId },
     });
   },

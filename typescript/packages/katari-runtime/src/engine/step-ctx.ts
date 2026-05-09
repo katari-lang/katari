@@ -55,16 +55,30 @@ export function makeStepCtx(
   return {
     state: draft,
     enqueue(event) {
-      buffers.queue.push(event);
+      // Detach from the Immer draft graph: queue events live across
+      // step boundaries; if any field is still a proxy when the draft's
+      // produce returns, it gets revoked and the next dispatch reads
+      // garbage. JSON round-trip is cheaper than `current()` here
+      // because event payloads are guaranteed JSON-safe (no functions,
+      // no closures-as-values, no Maps).
+      buffers.queue.push(detach(event));
     },
     emit(event) {
-      buffers.outbound.push(event);
+      buffers.outbound.push(detach(event));
     },
     log(level, message, context) {
-      buffers.logs.push({ level, message, context });
+      buffers.logs.push({
+        level,
+        message,
+        context: context !== undefined ? detach(context) : undefined,
+      });
     },
     recordError(err) {
       buffers.errors.push(err);
     },
   };
+}
+
+function detach<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T;
 }
