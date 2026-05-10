@@ -22,7 +22,7 @@ module Katari.AST where
 
 import Data.Kind (Type)
 import Data.Text (Text)
-import Katari.Common (LiteralValue (..), QualifiedName (..))
+import Katari.Common (LiteralValue (..))
 import Katari.Id
   ( ConstructorId,
     ModuleId,
@@ -531,7 +531,6 @@ data LiteralPattern (phase :: Phase) = LiteralPattern
 
 instance HasSourceSpan (LiteralPattern phase) where
   sourceSpanOf pattern' = pattern'.sourceSpan
-
 
 -- ---------------------------------------------------------------------------
 -- Types
@@ -1095,7 +1094,6 @@ retagSyntacticRequest req =
     { name = retagNameRef req.name,
       sourceSpan = req.sourceSpan
     }
-
 
 -- ---------------------------------------------------------------------------
 -- Aggregate Eq / Show constraints

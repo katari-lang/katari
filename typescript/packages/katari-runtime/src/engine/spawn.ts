@@ -186,6 +186,13 @@ export type SpawnAgentRootArgs = {
   blockId: BlockId;
   args: Record<string, Value>;
   delegationId: DelegationId;
+  /**
+   * Optional parent scope. When set, the new agent's scope inherits from
+   * it — used for closure-based dispatch so the body can see captured
+   * locals. Top-level qualifiedName dispatch leaves it null and the agent
+   * runs in a fresh isolated scope.
+   */
+  capturedScopeId?: import("./id.js").ScopeId | null;
 };
 
 /**
@@ -208,7 +215,7 @@ export function spawnAgentRoot(
   const newScopeId = createScopeId();
   ctx.state.scopes[newScopeId] = {
     id: newScopeId,
-    parentId: null,
+    parentId: args.capturedScopeId ?? null,
     values: {},
   };
 
@@ -226,6 +233,7 @@ export function spawnAgentRoot(
     blockId: args.blockId,
     args: { ...args.args },
     delegationId: args.delegationId,
+    pendingEscalations: {},
   };
   ctx.state.threads[newThreadId] = agent as Draft<Thread>;
   ctx.enqueue({ kind: "create", threadId: newThreadId });

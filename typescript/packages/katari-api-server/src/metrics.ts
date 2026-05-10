@@ -141,7 +141,7 @@ export function buildMetrics(): AppMetrics {
       new Counter("katari_agent_cancel_total", "Number of agent cancel requests."),
     ),
     machinesLoaded: registry.register(
-      new Gauge("katari_machines_loaded", "Number of MachineHandles cached in memory."),
+      new Gauge("katari_machines_loaded", "Number of live sidecar processes (per snapshot)."),
     ),
     applyEventDuration: registry.register(
       new Histogram(

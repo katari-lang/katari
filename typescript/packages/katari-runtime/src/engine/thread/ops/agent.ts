@@ -29,6 +29,7 @@ import {
   beginCancel,
   commonRemoveChild,
   emitAgentRootCompletion,
+  emitEscalateUpward,
   hasChildren,
   proxyAskToParent,
   setValueInScope,
@@ -90,10 +91,25 @@ export const agentOps: ThreadOps<AgentThread> = {
       catchReturn(ctx, t as Draft<AgentThread>, kind.value);
       return;
     }
-    // Anything else (break / break-for / next / next-for / request)
-    // bubbles past us: agent boundary doesn't catch them. The compiler
-    // ensures break/next have a HandleThread/ForThread between the
-    // asker and us.
+    if (t.parent === null) {
+      // Root AgentThread = receiver side of a delegation. A `request` ask
+      // that reaches us has no local handler — escalate it back to the
+      // delegation sender (symmetric with ExternalThread sender side).
+      const peer = ctx.state.delegationSenders[t.delegationId as string];
+      if (peer === undefined) {
+        ctx.log("warn", "engine.agent: ask at root with no registered sender", {
+          threadId: t.id,
+          delegationId: t.delegationId,
+          askKind: kind.kind,
+        });
+        return;
+      }
+      emitEscalateUpward(ctx, t as Draft<AgentThread>, peer, kind, childCallId, askId);
+      return;
+    }
+    // Non-root AgentThread (spawned via spawnChild for a structural agent
+    // call — currently unreachable because agent calls go through
+    // StatementAgentCall, but kept for symmetry): bubble past as before.
     proxyAskToParent(ctx, t as Draft<AgentThread>, childCallId, askId, kind);
   },
 

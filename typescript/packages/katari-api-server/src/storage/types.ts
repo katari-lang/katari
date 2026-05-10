@@ -1,36 +1,43 @@
 // Persistence layer interfaces.
 //
 // `katari-api-server` always talks to storage through these interfaces. The
-// production binding is Postgres (`pg.ts`), but tests use `memory-storage.ts`
-// to keep them hermetic. Adding a new backend means only implementing
-// `Storage` (and optionally individual repo classes); nothing else changes.
+// production binding is Postgres (`pg.ts`); tests use `memory-storage.ts`
+// for hermeticity. Adding a new backend means only implementing `Storage`.
+//
+// Naming conventions (本 plan で確定):
+//   - `Project` / `ProjectId`     — top-level deploy unit (e.g. one app)
+//   - `Snapshot` / `SnapshotId`   — one `apply` の成果物 (IR + sidecar JS +
+//                                    schema)。1 project に複数 snapshot。
+//   - `EngineCheckpoint`          — engine 内部 state の凍結 (per-snapshot)
+//                                    — runtime 側で定義
+//   - `FfiPendingDelegation`      — FFI Runner が抱える未完 delegation
+//   - `FfiPendingEscalation`      — FFI Runner が抱える未完 escalation
+//   - `ApiPendingEscalation`      — API module が抱える、ユーザー宛の未答 escalation
+//                                    (= AI から user への質問の DB 表現)
+//
+// "agent" 自体は「API module から CORE への delegation」の永続化として
+// 既存 `agents` テーブルが直接対応する。delegationId をそのままキーに使う。
 
 import type {
   DelegationId,
-  Diff,
+  EscalationId,
+  EngineCheckpoint,
   IRModule,
-  EngineSnapshot,
   SchemaBundle,
-  EngineValue,
+  Value,
+  AgentDefId,
 } from "katari-runtime";
 
-// Local aliases to make the file read naturally; switch the imports
-// when legacy types are deleted.
-type Value = EngineValue;
-type MachineSnapshot = EngineSnapshot;
+// ─── Brands ────────────────────────────────────────────────────────────────
 
-export type VersionId = string & { readonly __brand: "VersionId" };
-
-/**
- * API-layer identifier for an agent. Distinct from `DelegationId`, which
- * is the runtime's identifier for the underlying delegation. Each agent
- * row carries both: `id` is what the REST client sees, `delegationId`
- * is what the runtime sees. Outbound runtime events identify the agent
- * by `delegationId`; we map back to the API id via `findByDelegationId`.
- */
+export type ProjectId = string & { readonly __brand: "ProjectId" };
+export type SnapshotId = string & { readonly __brand: "SnapshotId" };
 export type AgentId = string & { readonly __brand: "AgentId" };
 
-/** Lifecycle states an Agent can be in. Permanent rows live forever. */
+/**
+ * Lifecycle states an agent (= API→CORE delegation row) can be in.
+ * Mirrors the previous schema 1:1.
+ */
 export type AgentState =
   | "running"
   | "cancelling"
@@ -38,25 +45,87 @@ export type AgentState =
   | "succeeded"
   | "error";
 
-export type ModuleRow = {
-  id: VersionId;
+// ─── Project ───────────────────────────────────────────────────────────────
+
+export type Project = {
+  id: ProjectId;
   name: string;
+  createdAt: string;
+};
+
+export interface ProjectRepo {
+  /** Idempotent: returns existing if name already exists, else creates. */
+  upsertByName(name: string): Promise<Project>;
+  list(options?: ListOptions): Promise<Project[]>;
+  get(id: ProjectId): Promise<Project | null>;
+  getByName(name: string): Promise<Project | null>;
+  /** Throws via FK when snapshots are still attached. */
+  delete(id: ProjectId): Promise<boolean>;
+}
+
+// ─── Snapshot (= deploy unit) ──────────────────────────────────────────────
+
+/**
+ * Sidecar bundle attached to a snapshot. `null` means the snapshot uses
+ * no FFI (= `BlockExternal` blocks reach a sidecar that errors on every
+ * invoke). `entry` is the bundled JS source string (CLI bundles it via
+ * esbuild before upload). Mirrors `katari-runtime/src/sidecar/types.ts`.
+ */
+export type SidecarBundle = {
+  entry: string;
+  runtime: "node";
+  schemaVersion: 1;
+};
+
+export type Snapshot = {
+  id: SnapshotId;
+  projectId: ProjectId;
   irModule: IRModule;
+  sidecarBundle: SidecarBundle | null;
   schemaBundle: SchemaBundle;
   createdAt: string;
 };
 
-export type ModuleSummary = {
-  id: VersionId;
-  name: string;
+export type SnapshotSummary = {
+  id: SnapshotId;
+  projectId: ProjectId;
   createdAt: string;
 };
 
+export interface SnapshotRepo {
+  insert(input: {
+    projectId: ProjectId;
+    irModule: IRModule;
+    sidecarBundle: SidecarBundle | null;
+    schemaBundle: SchemaBundle;
+  }): Promise<SnapshotId>;
+  get(id: SnapshotId): Promise<Snapshot | null>;
+  list(
+    filter?: { projectId?: ProjectId } & ListOptions,
+  ): Promise<SnapshotSummary[]>;
+  /** project 内の最新 snapshot id。空なら null。 */
+  latest(projectId: ProjectId): Promise<SnapshotId | null>;
+  delete(id: SnapshotId): Promise<boolean>;
+}
+
+// ─── Engine checkpoint (CORE module state) ─────────────────────────────────
+
+export interface EngineCheckpointRepo {
+  upsert(snapshotId: SnapshotId, checkpoint: EngineCheckpoint): Promise<void>;
+  get(snapshotId: SnapshotId): Promise<EngineCheckpoint | null>;
+  delete(snapshotId: SnapshotId): Promise<void>;
+}
+
+// ─── Agents (= API → CORE delegation rows) ─────────────────────────────────
+//
+// 「agent」は API module の `pendingDelegateOut` (CORE 宛) の永続化先。
+// id = delegationId と読み替えて良い。
+
 export type AgentRow = {
   id: AgentId;
-  /** Runtime's delegation identifier for this agent. Unique per row. */
+  /** Same value as `id`, kept for API compatibility. */
   delegationId: DelegationId;
-  versionId: VersionId;
+  snapshotId: SnapshotId;
   qualifiedName: string;
   args: Record<string, Value>;
   state: AgentState;
@@ -66,100 +135,142 @@ export type AgentRow = {
   updatedAt: string;
 };
 
-/**
- * Pagination options accepted by `list` calls. `limit` is upper-bounded
- * by an internal cap (currently 500) inside the storage implementation;
- * supplying anything larger is silently clamped. `offset` is used because
- * key-set pagination would require exposing the underlying index column
- * shape; offset is enough for the small admin-style endpoints we have.
- */
-export type ListOptions = {
-  limit?: number;
-  offset?: number;
-};
-
-export interface ModuleRepo {
-  insert(input: {
-    irModule: IRModule;
-    schemaBundle: SchemaBundle;
-    name: string;
-  }): Promise<VersionId>;
-  list(options?: ListOptions): Promise<ModuleSummary[]>;
-  get(id: VersionId): Promise<ModuleRow | null>;
-  /**
-   * Delete a module version. Returns true if a row was removed, false if
-   * the version did not exist. Caller is responsible for ensuring no
-   * agents are still referencing the version (the storage layer reports
-   * a constraint violation otherwise — DELETE on `module_versions` is
-   * gated by the FK from `agents.version_id`).
-   */
-  delete(id: VersionId): Promise<boolean>;
-}
-
 export interface AgentRepo {
   insert(row: AgentRow): Promise<void>;
   get(id: AgentId): Promise<AgentRow | null>;
-  /**
-   * Look up by the runtime's delegation id. Used to route outbound
-   * `delegateAck` / `terminateAck` events back to their agent record
-   * when the runtime only carries a `DelegationId`.
-   */
   findByDelegationId(delegationId: DelegationId): Promise<AgentRow | null>;
-  list(filter?: { versionId?: VersionId; afterId?: AgentId } & ListOptions): Promise<AgentRow[]>;
-  /**
-   * Patch state / result / errorMessage on a single agent.
-   *
-   * `options.expectedState` enables optimistic concurrency: when supplied,
-   * the update is only applied if the row's current state matches —
-   * otherwise it's a no-op. Used to prevent the
-   * `cancelAgent("cancelling") + routeOutbound delegateAck("succeeded")`
-   * race from clobbering each other.
-   *
-   * Returns `true` if a row was updated, `false` if `expectedState` was
-   * supplied and didn't match (or, harmlessly, if no row exists). Callers
-   * that don't care about the outcome can ignore the return.
-   */
+  list(
+    filter?: {
+      snapshotId?: SnapshotId;
+      afterId?: AgentId;
+    } & ListOptions,
+  ): Promise<AgentRow[]>;
   setState(
     id: AgentId,
     patch: Partial<Pick<AgentRow, "state" | "result" | "errorMessage">>,
     options?: { expectedState?: AgentState },
   ): Promise<boolean>;
-  /**
-   * Bulk-mark every running/cancelling agent in `versionId` as `error`
-   * with the given message. Used when poisoning a machine.
-   */
-  markAllRunningAsError(versionId: VersionId, message: string): Promise<void>;
-  /** Distinct version_ids that still own at least one running/cancelling agent. */
-  listRunningVersionIds(): Promise<VersionId[]>;
+  markAllRunningAsError(snapshotId: SnapshotId, message: string): Promise<void>;
+  /** Distinct snapshot ids that still have at least one running/cancelling agent. */
+  listRunningSnapshotIds(): Promise<SnapshotId[]>;
 }
 
-export interface SnapshotRepo {
-  upsert(versionId: VersionId, snapshot: MachineSnapshot): Promise<void>;
-  get(versionId: VersionId): Promise<MachineSnapshot | null>;
-  delete(versionId: VersionId): Promise<void>;
+// ─── FFI module persistent state ───────────────────────────────────────────
+//
+// FFI Runner は per-snapshot で sidecar を抱える。Runner 自身の in-memory state
+// は subprocess pid 程度で、in-flight delegation / escalation は DB に書く。
+// サーバ再起動時に FFI Runner がこれらを読んで `restored` IPC event で sidecar
+// に通知。
+
+export type FfiPendingDelegation = {
+  delegationId: DelegationId;
+  snapshotId: SnapshotId;
+  /** ack を返す先 endpoint (= 通常 CORE)。 */
+  peerEndpoint: string;
+  agentDefId: AgentDefId;
+  args: Record<string, Value>;
+  state: "running" | "cancelling";
+  createdAt: string;
+};
+
+export interface FfiPendingDelegationRepo {
+  insert(row: FfiPendingDelegation): Promise<void>;
+  get(delegationId: DelegationId): Promise<FfiPendingDelegation | null>;
+  setState(
+    delegationId: DelegationId,
+    state: "running" | "cancelling",
+  ): Promise<boolean>;
+  delete(delegationId: DelegationId): Promise<boolean>;
+  listBySnapshot(snapshotId: SnapshotId): Promise<FfiPendingDelegation[]>;
 }
+
+export type FfiPendingEscalation = {
+  escalationId: EscalationId;
+  delegationId: DelegationId;
+  snapshotId: SnapshotId;
+  /** ack を返す先 endpoint (= 通常 sidecar 経由 = CORE 側からの想定)。 */
+  peerEndpoint: string;
+  agentDefId: AgentDefId;
+  args: Record<string, Value>;
+  createdAt: string;
+};
+
+export interface FfiPendingEscalationRepo {
+  insert(row: FfiPendingEscalation): Promise<void>;
+  get(escalationId: EscalationId): Promise<FfiPendingEscalation | null>;
+  delete(escalationId: EscalationId): Promise<boolean>;
+}
+
+// ─── API module persistent state ───────────────────────────────────────────
+//
+// API module = ユーザーの代理 endpoint。pendingDelegateOut は `agents`
+// テーブルがそのまま担当 (= CLI が起動した agent)。pendingEscalateIn は
+// 「AI から user への質問」を保持するキュー。
+
+export type ApiPendingEscalation = {
+  escalationId: EscalationId;
+  /** どの delegation の中で発火したか (= どの agent から)。 */
+  delegationId: DelegationId;
+  snapshotId: SnapshotId;
+  agentDefId: AgentDefId;
+  args: Record<string, Value>;
+  /** "open" = ユーザー回答待ち / "answered" = 既に escalateAck 済 / "cancelled" */
+  state: "open" | "answered" | "cancelled";
+  /** state === "answered" のとき設定。 */
+  value?: Value;
+  createdAt: string;
+};
+
+export interface ApiPendingEscalationRepo {
+  insert(row: ApiPendingEscalation): Promise<void>;
+  get(escalationId: EscalationId): Promise<ApiPendingEscalation | null>;
+  list(
+    filter?: { snapshotId?: SnapshotId; state?: ApiPendingEscalation["state"] }
+      & ListOptions,
+  ): Promise<ApiPendingEscalation[]>;
+  setAnswered(escalationId: EscalationId, value: Value): Promise<boolean>;
+  setCancelled(escalationId: EscalationId): Promise<boolean>;
+}
+
+// ─── Pagination ────────────────────────────────────────────────────────────
+
+export type ListOptions = {
+  limit?: number;
+  offset?: number;
+};
+
+// ─── Storage facade ────────────────────────────────────────────────────────
 
 export interface Storage {
-  modules: ModuleRepo;
-  agents: AgentRepo;
+  projects: ProjectRepo;
   snapshots: SnapshotRepo;
+  checkpoints: EngineCheckpointRepo;
+  agents: AgentRepo;
+  ffiDelegations: FfiPendingDelegationRepo;
+  ffiEscalations: FfiPendingEscalationRepo;
+  apiEscalations: ApiPendingEscalationRepo;
+
   /**
-   * Run `fn` inside a backend-native transaction. The `tx` argument is a
-   * `Storage`-shaped facade whose `modules` / `agents` / `snapshots`
-   * methods participate in the same transaction; outside-of-tx access
-   * (via the original `Storage`) bypasses it and is left to the caller's
-   * judgement.
-   *
-   * - PostgreSQL: implemented via `sql.begin` (BEGIN/COMMIT/ROLLBACK).
-   * - In-memory: implemented via a snapshot-and-restore-on-failure model
-   *   (`structuredClone` of the underlying maps before `fn` runs; on
-   *   throw, swap the cloned maps back in so the test sees a rollback).
-   *
-   * The api-server uses this to keep `agents.insert + snapshots.upsert +
-   * setState` mutations atomic: a process crash mid-sequence will see
-   * either all updates applied or none, never a half-state.
+   * Run `fn` inside a backend-native transaction. The `tx` argument exposes
+   * the same repo facade; all calls participate in the same tx.
    */
   withTransaction<T>(fn: (tx: Storage) => Promise<T>): Promise<T>;
-  /** Optional teardown for backends that hold sockets / pools. */
+
+  /**
+   * Run `fn` while holding a snapshot-level row lock. Used by the
+   * stateless orchestrator to serialize CORE state mutation per snapshot.
+   *
+   *   - Postgres: `SELECT ... FROM engine_checkpoints WHERE snapshot_id = $1 FOR UPDATE`
+   *   - Memory:   per-snapshot Mutex map internal to the implementation.
+   *
+   * The lock is released when the surrounding transaction commits or
+   * rolls back. `withSnapshotLock` MUST be called inside `withTransaction`.
+   */
+  withSnapshotLock<T>(
+    tx: Storage,
+    snapshotId: SnapshotId,
+    fn: () => Promise<T>,
+  ): Promise<T>;
+
   close?(): Promise<void>;
 }

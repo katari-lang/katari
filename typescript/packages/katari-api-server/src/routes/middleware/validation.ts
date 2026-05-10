@@ -1,39 +1,32 @@
-// Zod-backed request validators for the HTTP layer.
-//
-// We define schemas in one place and let route handlers parse with them so:
-//   - validation errors are rendered as a structured 400 response, not a
-//     generic 500 from a downstream type cast,
-//   - branded id types (VersionId / AgentId / DelegationId) become real
-//     UUID-validated brands instead of blind `as VersionId` casts at the
-//     route boundary.
-//
-// JSON parse failures (`c.req.json()` throwing on malformed input) are
-// caught by the top-level `onError` handler in `routes/app.ts` and turned
-// into 400, so they don't reach the schemas here.
+// Zod-backed request validators.
 
 import { z } from "zod";
-import type { AgentId, VersionId } from "../../storage/types.js";
+import type {
+  AgentId,
+  ProjectId,
+  SnapshotId,
+} from "../../storage/types.js";
 
-// ─── Branded id schemas ─────────────────────────────────────────────────────
+// ─── Branded id schemas ────────────────────────────────────────────────────
 
-/** UUID (v4 / v7) that the domain treats as a `VersionId`. */
-export const VersionIdSchema = z
+export const ProjectIdSchema = z
   .string()
   .uuid()
-  .transform((s) => s as VersionId);
+  .transform((s) => s as ProjectId);
+
+export const SnapshotIdSchema = z
+  .string()
+  .uuid()
+  .transform((s) => s as SnapshotId);
 
 export const AgentIdSchema = z
   .string()
   .uuid()
   .transform((s) => s as AgentId);
 
-// ─── Value schema ──────────────────────────────────────────────────────────
-//
-// Mirrors `katari-runtime`'s `Value` type. We accept the full structural
-// shape but treat the contents loosely — the runtime will type-check once
-// the value actually reaches a prim or pattern. Keeping the schema lax at
-// the HTTP boundary means a tagged value with a custom field set still
-// flows through (only the outer envelope is checked).
+export const EscalationIdSchema = z.string().min(1);
+
+// ─── Value schema (loose) ──────────────────────────────────────────────────
 
 const ValueSchema: z.ZodType<unknown> = z.lazy(() =>
   z.union([
@@ -50,41 +43,53 @@ const ValueSchema: z.ZodType<unknown> = z.lazy(() =>
     }),
     z.object({
       kind: z.literal("closure"),
-      blockId: z.number(),
-      scopeId: z.string(),
+      closureId: z.number(),
     }),
   ]),
 );
 
-// ─── Route input schemas ────────────────────────────────────────────────────
+// ─── Pagination ────────────────────────────────────────────────────────────
 
-/**
- * Optional `?limit=` and `?offset=` query parameters for list endpoints.
- * Storage clamps further if the client picks something silly; this schema
- * just enforces shape (positive integers).
- */
 export const PaginationQuerySchema = z.object({
   limit: z.coerce.number().int().positive().optional(),
   offset: z.coerce.number().int().nonnegative().optional(),
 });
 
+// ─── Project / Snapshot ────────────────────────────────────────────────────
+
+export const CreateProjectSchema = z.object({
+  name: z.string().min(1),
+});
+export type CreateProjectInput = z.infer<typeof CreateProjectSchema>;
+
+const SidecarBundleSchema = z.object({
+  entry: z.string(),
+  runtime: z.literal("node"),
+  schemaVersion: z.literal(1),
+});
+
+export const UploadSnapshotSchema = z.object({
+  irModule: z.unknown().refine((v) => typeof v === "object" && v !== null, {
+    message: "irModule must be an object",
+  }),
+  sidecarBundle: SidecarBundleSchema.nullable().optional().default(null),
+  schemaBundle: z.unknown().refine((v) => typeof v === "object" && v !== null, {
+    message: "schemaBundle must be an object",
+  }),
+});
+export type UploadSnapshotInput = z.infer<typeof UploadSnapshotSchema>;
+
+// ─── Agent / Escalation ────────────────────────────────────────────────────
+
 export const StartAgentSchema = z.object({
-  versionId: VersionIdSchema,
+  projectId: ProjectIdSchema,
+  snapshotId: SnapshotIdSchema.optional(),
   qualifiedName: z.string().min(1),
   args: z.record(z.string(), ValueSchema),
 });
 export type StartAgentInput = z.infer<typeof StartAgentSchema>;
 
-export const UploadModuleSchema = z.object({
-  // We don't deeply validate the IRModule structure here — that's the
-  // compiler's contract, and re-encoding the entire IR shape in Zod would
-  // create a parallel maintenance burden. The runtime will reject malformed
-  // IR at first use.
-  irModule: z.unknown().refine((v) => typeof v === "object" && v !== null, {
-    message: "irModule must be an object",
-  }),
-  schemaBundle: z.unknown().refine((v) => typeof v === "object" && v !== null, {
-    message: "schemaBundle must be an object",
-  }),
+export const AnswerEscalationSchema = z.object({
+  value: ValueSchema,
 });
-export type UploadModuleInput = z.infer<typeof UploadModuleSchema>;
+export type AnswerEscalationInput = z.infer<typeof AnswerEscalationSchema>;

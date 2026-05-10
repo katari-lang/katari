@@ -36,6 +36,10 @@ import { RecoverableEngineError } from "../../errors.js";
 import { tryMatch } from "../../pattern.js";
 import { spawnChild, spawnExternalForAgentDelegate } from "../../spawn.js";
 import { createDelegationId } from "../../id.js";
+import {
+  encodeCoreAgentDefId,
+  type AgentDefId,
+} from "../../../agent-def-id.js";
 import type { StepCtx } from "../../step-ctx.js";
 import { literalToValue, NULL_VALUE, type Value } from "../../value.js";
 import {
@@ -220,10 +224,19 @@ function handleStatement(
       for (const a of stmt.body.arguments) {
         args[a.label] = lookupValue(ctx, t.scopeId, a.var);
       }
-      pushAgentDelegate(ctx, t, callId, args, {
-        module_: stmt.body.target.module_,
-        name: stmt.body.target.name,
-      });
+      pushAgentDelegate(
+        ctx,
+        t,
+        callId,
+        args,
+        encodeCoreAgentDefId({
+          kind: "qname",
+          value: {
+            module_: stmt.body.target.module_,
+            name: stmt.body.target.name,
+          },
+        }),
+      );
       return "wait";
     }
     case "statementAgentCallClosure": {
@@ -238,23 +251,20 @@ function handleStatement(
         );
         return "wait";
       }
-      const closure = ctx.state.closures[closureValue.closureId as unknown as number];
-      if (closure === undefined) {
-        throw new Error(
-          `engine.user: closure ${closureValue.closureId} not found`,
-        );
-      }
       const args: Record<string, Value> = {};
       for (const a of stmt.body.arguments) {
         args[a.label] = lookupValue(ctx, t.scopeId, a.var);
       }
-      // Closure-based dispatch: encode the underlying blockId as a
-      // synthetic qualified name (`<closure>.<blockId>`); the runner's
-      // `resolveDelegateTarget` decodes it.
-      pushAgentDelegate(ctx, t, callId, args, {
-        module_: "<closure>",
-        name: String(closure.blockId as unknown as number),
-      });
+      pushAgentDelegate(
+        ctx,
+        t,
+        callId,
+        args,
+        encodeCoreAgentDefId({
+          kind: "closure",
+          value: closureValue.closureId,
+        }),
+      );
       return "wait";
     }
   }
@@ -264,24 +274,21 @@ function handleStatement(
  * Issue a core→core agent delegate. Spawns a phantom ExternalThread as a
  * child of `t` at `parentCallId = callId`, registers it under
  * `state.pendingDelegateOut[delegationId]`, and emits the outbound
- * `delegate` event from=to=self. The runner's `translateExternal` picks
- * the event up on the next iteration, spawns a fresh AgentThread root,
- * and registers it under `state.delegations[delegationId]` /
- * `state.delegationSenders[delegationId] = self`.
+ * `delegate` event from=to=self. The bus picks the event up on the next
+ * iteration, the same CORE module's `feed` is invoked again, and a fresh
+ * AgentThread root is spawned for the receiver side.
  *
  * When the AgentThread completes, `emitAgentRootCompletion` emits a
- * `delegateAck` outbound to `delegationSenders` (= self). On the next
- * iteration `translateExternal` finds the phantom in
- * `pendingDelegateOut`, fires `done` to its parent (this UserThread),
- * and the inherited `done` handler binds the value to the call's output
- * VarId.
+ * `delegateAck` outbound (also self→self for the CORE→CORE case). The bus
+ * loops it back, the phantom is found via `pendingDelegateOut`, and a
+ * `done` is fired to the original UserThread which binds the value.
  */
 function pushAgentDelegate(
   ctx: StepCtx,
   t: Draft<UserThread>,
   callId: CallId,
   args: Record<string, Value>,
-  target: { module_: string; name: string },
+  agentDefId: AgentDefId,
 ): void {
   const delegationId = createDelegationId();
   spawnExternalForAgentDelegate(ctx, {
@@ -295,9 +302,9 @@ function pushAgentDelegate(
     to: ctx.state.selfEndpoint,
     payload: {
       kind: "delegate",
-      targetBlock: target,
-      args,
       delegationId,
+      agentDefId,
+      args,
     },
   });
 }

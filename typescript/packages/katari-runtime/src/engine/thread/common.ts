@@ -9,12 +9,14 @@
 // that each op delegates into.
 
 import type { Draft } from "immer";
-import type {
-  AskId,
-  CallId,
-  ScopeId,
-  ThreadId,
+import {
+  type AskId,
+  type CallId,
+  type ScopeId,
+  type ThreadId,
+  createEscalationId,
 } from "../id.js";
+import { encodeCoreAgentDefId } from "../../agent-def-id.js";
 import type { Scope } from "../scope.js";
 import type { StepCtx } from "../step-ctx.js";
 import type { Value } from "../value.js";
@@ -231,6 +233,76 @@ export function commonRemoveChild(
     return false;
   }
   return true;
+}
+
+// ─── Escalation across a delegation boundary ──────────────────────────────
+
+/**
+ * Threads that sit on a delegation boundary and forward asks across it as
+ * `escalate` events. Two cases, symmetric:
+ *
+ *   - `ExternalThread`: sender side. Children's asks are escalated to the
+ *     external peer (FFI sidecar / another machine).
+ *   - `AgentThread` at root (`parent === null`): receiver side. Children's
+ *     asks are escalated back to the delegation's original sender via
+ *     `state.delegationSenders[delegationId]`.
+ *
+ * Both threads carry `delegationId` + `pendingEscalations`, so the bookkeeping
+ * is identical. Only the peer endpoint (where the escalate event is `to`-ed)
+ * differs.
+ */
+type EscalatableThread = import("./types.js").ExternalThread | import("./types.js").AgentThread;
+
+/**
+ * Forward a `request` ask across the delegation boundary as an outbound
+ * `escalate` event. Allocates an own askId on `t`, records the forward
+ * mapping for the eventual escalateAck, allocates a fresh escalationId
+ * for the peer's matching, and emits the outbound event.
+ *
+ * Non-`request` ask kinds (return / break / next / break-for / next-for)
+ * never cross a delegation boundary — they are caught by earlier ancestors
+ * (HandleThread / ForThread / AgentThread for return). If one reaches here
+ * it's a compiler bug; we drop with a warn.
+ */
+export function emitEscalateUpward(
+  ctx: StepCtx,
+  t: Draft<EscalatableThread>,
+  peer: import("../endpoint.js").Endpoint,
+  askKind: import("../event.js").AskKind,
+  childCallId: CallId,
+  childAskId: AskId,
+): void {
+  if (askKind.kind !== "request") {
+    ctx.log("warn", "engine: non-request ask reached delegation boundary", {
+      threadId: t.id,
+      askKind: askKind.kind,
+    });
+    return;
+  }
+  const ownAskId = allocAskId(t as Draft<Thread>);
+  recordAskForward(t as Draft<Thread>, ownAskId, childCallId, childAskId);
+  const escalationId = createEscalationId();
+  t.pendingEscalations[ownAskId as unknown as number] = escalationId;
+  // ReqId is engine-internal; the receiver of this escalate must resolve
+  // its own AgentDefId. We currently synthesize a placeholder qname so the
+  // wire format stays valid — the proper qname-from-reqId mapping needs to
+  // flow from IR (TODO when handle-scope routing on inbound escalate matures).
+  const placeholder: import("../../agent-def-id.js").AgentDefId =
+    encodeCoreAgentDefId({
+      kind: "qname",
+      value: { module_: "", name: `req:${askKind.reqId}` },
+    });
+  ctx.emit({
+    from: ctx.state.selfEndpoint,
+    to: peer,
+    payload: {
+      kind: "escalate",
+      delegationId: t.delegationId,
+      escalationId,
+      agentDefId: placeholder,
+      args: { ...askKind.args },
+    },
+  });
 }
 
 // ─── askIdMap forwarding ───────────────────────────────────────────────────

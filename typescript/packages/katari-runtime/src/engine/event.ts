@@ -1,20 +1,20 @@
-// Event: the unit of communication between endpoints.
+// Event: the unit of communication between endpoints (= modules).
 //
 // Every event carries `from` / `to` Endpoints and a kind-tagged payload.
-// The engine inspects `event.to` to decide whether to consume the event
-// (when `to === selfEndpoint`) or treat it as outbound. There is no
-// hard-coded `"CORE" | "API" | "FFI"` enum — endpoints are opaque strings.
+// 3 module + 6 event の対称設計の core:
 //
-// **Engine-internal events** (`from === self && to === self`) drive the
-// thread tree. They include `create` / `done` / `cancel` / `cancelAck` /
-// `ask` / `askAck`.
+//   - 6 cross-module events: delegate, delegateAck, terminate, terminateAck,
+//     escalate, escalateAck. どの (from, to) ペアでも成立する。
+//   - delegate / escalate は対象を `agentDefId` で指す (= module 局所の
+//     opaque な識別子。受信側 module だけが decode する)。
+//   - `from` / `to` は Endpoint 文字列、識別する module は bus 層が解決する
+//     (engine 自身は "CORE" | "API" | "FFI" のような enum は持たない)。
 //
-// **External events** (one of `from` / `to` is *not* the engine) are
-// translated by the host layer (DelegationRouter) into engine-internal
-// `create` events and outbound delegateAck/terminateAck events. The engine
-// itself never special-cases delegation ids.
+// **Engine-internal events** (`from === self && to === self`) は thread tree
+// の制御信号: create / done / cancel / cancelAck / ask / askAck。これらは
+// engine の内部 queue に閉じ、cross-module bus には流れない。
 
-import type { QualifiedName } from "../ir/types.js";
+import type { AgentDefId } from "../agent-def-id.js";
 import type { Endpoint } from "./endpoint.js";
 import type {
   AskId,
@@ -25,47 +25,51 @@ import type {
 } from "./id.js";
 import type { Value } from "./value.js";
 
-// ─── External payloads (over the public protocol) ──────────────────────────
+// ─── External payloads (3 module + 6 event protocol) ───────────────────────
 
 export type ExternalEventPayload =
   | {
+      /** Start a new agent on the receiver. */
       kind: "delegate";
-      targetBlock: QualifiedName;
-      args: Record<string, Value>;
       delegationId: DelegationId;
+      agentDefId: AgentDefId;
+      args: Record<string, Value>;
     }
   | {
+      /** Successful completion of a `delegate`. */
       kind: "delegateAck";
       delegationId: DelegationId;
       value: Value;
     }
   | {
+      /** Cancel an in-flight delegate. */
       kind: "terminate";
       delegationId: DelegationId;
     }
   | {
+      /** Acknowledge a `terminate`. */
       kind: "terminateAck";
       delegationId: DelegationId;
     }
   | {
       /**
-       * External party requests a capability (request) from inside an
-       * agent we are running. `delegationId` identifies which inbound
-       * delegation the escalation belongs to (i.e. which AgentThread
-       * should receive the proxied ask). `request` is the qualified name
-       * of the request being asked.
+       * Mid-flight, the receiver of a delegation needs a capability —
+       * it asks the sender to perform an agent on its behalf.
+       *
+       *   - `delegationId` identifies the parent delegation context.
+       *   - `escalationId` is the sender's local id for the matching ack
+       *     (allocated by whoever emits this escalate).
+       *   - `agentDefId` is the requested capability, decoded by the
+       *     receiver of THIS escalate event.
        */
       kind: "escalate";
       delegationId: DelegationId;
       escalationId: EscalationId;
-      request: QualifiedName;
+      agentDefId: AgentDefId;
       args: Record<string, Value>;
     }
   | {
-      /**
-       * Reply to an outbound escalate. `escalationId` matches the id
-       * recorded on the corresponding ExternalThread.pendingEscalations.
-       */
+      /** Reply to an `escalate`. Matched via `escalationId`. */
       kind: "escalateAck";
       escalationId: EscalationId;
       value: Value;
@@ -167,6 +171,17 @@ export type Event = {
   from: Endpoint;
   to: Endpoint;
   payload: EventPayload;
+};
+
+/**
+ * Cross-module event over the bus. `payload` is restricted to one of the
+ * 6 external event kinds (delegate / delegateAck / terminate / terminateAck
+ * / escalate / escalateAck). Internal events never cross module boundary.
+ */
+export type ExternalEvent = {
+  from: Endpoint;
+  to: Endpoint;
+  payload: ExternalEventPayload;
 };
 
 /** Type guard: is this event one the engine can dispatch internally? */

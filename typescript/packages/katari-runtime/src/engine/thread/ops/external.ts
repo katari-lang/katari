@@ -21,14 +21,14 @@
 
 import type { Draft } from "immer";
 import type { CallId } from "../../id.js";
-import { createEscalationId } from "../../id.js";
 import type { Endpoint } from "../../endpoint.js";
 import type { ExternalThread } from "../types.js";
 import {
   defaultAskAckProxy,
   defaultCancelAckUnexpected,
 } from "./defaults.js";
-import { allocAskId, recordAskForward } from "../common.js";
+import { emitEscalateUpward } from "../common.js";
+import { encodeFfiAgentDefId } from "../../../agent-def-id.js";
 import type { ThreadOps } from "./types.js";
 
 export const externalOps: ThreadOps<ExternalThread> = {
@@ -39,16 +39,16 @@ export const externalOps: ThreadOps<ExternalThread> = {
     if (t.externalName.module_ === "<agent>") return;
 
     // Ordinary external: register on the sender side and emit the outbound
-    // delegate.
+    // delegate. The target FFI module decodes our agentDefId.
     ctx.state.pendingDelegateOut[t.delegationId as string] = t.id;
     ctx.emit({
       from: ctx.state.selfEndpoint as Endpoint,
       to: ctx.state.ffiTargetEndpoint as Endpoint,
       payload: {
         kind: "delegate",
-        targetBlock: t.externalName,
-        args: { ...t.args },
         delegationId: t.delegationId,
+        agentDefId: encodeFfiAgentDefId({ kind: "qname", value: t.externalName }),
+        args: { ...t.args },
       },
     });
   },
@@ -78,44 +78,22 @@ export const externalOps: ThreadOps<ExternalThread> = {
   cancelAck: defaultCancelAckUnexpected,
 
   /**
-   * Ask received from a child: forward to the external side as
-   * `escalate`. Allocates an EscalationId, records it under
-   * pendingEscalations[ownAskId] so the eventual escalateAck can be
-   * routed back to the asker.
+   * Ask received from a child: forward to the external peer as `escalate`.
+   * Shared logic with `AgentThread` root via `emitEscalateUpward`.
    */
   ask(ctx, t, askId, kind, childCallId) {
-    if (kind.kind !== "request") {
-      // Non-request asks (return / break / next / break-for / next-for)
-      // never cross an external boundary — they should be caught by
-      // earlier ancestors. Drop with a warning.
-      ctx.log("warn", "engine.external: non-request ask reached external boundary", {
-        threadId: t.id,
-        askKind: kind.kind,
-      });
-      return;
-    }
-    const draft = t as Draft<ExternalThread>;
-    const ownAskId = allocAskId(draft);
-    recordAskForward(draft, ownAskId, childCallId, askId);
-    const escalationId = createEscalationId();
-    draft.pendingEscalations[ownAskId as unknown as number] = escalationId;
-    const target = t.externalName.module_ === "<agent>"
-      ? ctx.state.selfEndpoint
-      : ctx.state.ffiTargetEndpoint;
-    ctx.emit({
-      from: ctx.state.selfEndpoint as Endpoint,
-      to: target as Endpoint,
-      payload: {
-        kind: "escalate",
-        delegationId: t.delegationId,
-        escalationId,
-        // Synthesize a placeholder qualified name; the receiving side
-        // routes by `delegationId`, not by name. The actual ReqId mapping
-        // belongs to the outbound IR — for now this is opaque.
-        request: { module_: "", name: `req:${kind.reqId}` },
-        args: { ...kind.args },
-      },
-    });
+    const peer: Endpoint =
+      t.externalName.module_ === "<agent>"
+        ? ctx.state.selfEndpoint
+        : ctx.state.ffiTargetEndpoint;
+    emitEscalateUpward(
+      ctx,
+      t as Draft<ExternalThread>,
+      peer,
+      kind,
+      childCallId,
+      askId,
+    );
   },
 
   /**

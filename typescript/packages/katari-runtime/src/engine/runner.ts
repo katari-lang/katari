@@ -16,6 +16,7 @@ import { isInternal } from "./event.js";
 import type { CallId, ThreadId, AskId } from "./id.js";
 import type { Diff } from "./diff.js";
 import { spawnAgentRoot } from "./spawn.js";
+import { decodeCoreAgentDefId } from "../agent-def-id.js";
 import type { State } from "./state.js";
 import {
   emptyBuffers,
@@ -36,22 +37,17 @@ import {
 enablePatches();
 
 /**
- * Drive the event queue starting with `initial`. Returns the new state
- * plus the side-effects accumulated during the drain.
+ * Process a single inbound event against `state` and drain only the
+ * **internal** event queue (thread-tree control: create / done / cancel
+ * / cancelAck / ask / askAck). Cross-module events emitted via
+ * `ctx.emit(...)` accumulate on `buffers.outbound` and are returned
+ * as-is — including self-targeted ones (= CORE→CORE).
  *
- * `initial` may be any Event (internal or external). External events
- * with `to === selfEndpoint` are translated locally (this is how
- * core→core agent dispatch works); other external events go through
- * `translateExternal` once for the initial event.
+ * The host's bus loops self-targeted outbound events back into another
+ * `drive(...)` call. The engine itself never special-cases self routing.
  *
- * Self-loop handling: any outbound events emitted during the drain
- * whose `to` matches `state.selfEndpoint` are looped back through
- * `translateExternal` after the queue settles. This lets a single
- * `applyEvent` resolve an entire same-machine agent-call chain
- * (StatementAgentCall → delegate → AgentThread spawn → … → delegateAck
- *  → done → resume caller) without round-tripping through the host.
- * Cross-machine events (to !== selfEndpoint) remain in `outbound` for
- * the host to deliver.
+ * `initial` may be either an external event (= one of the 6 cross-module
+ * events) or an internal event (only used by tests / pre-Bus call sites).
  */
 export function drive(
   state: State,
@@ -64,9 +60,6 @@ export function drive(
   const buffers = emptyBuffers();
   const allPatches: Patch[] = [];
 
-  // External events go through a translation step that may register
-  // delegation indexes / spawn root threads / etc. before the runner
-  // proper sees them. Internal events are queued directly.
   let current = state;
   if (!isInternal(initial.payload)) {
     current = applyTranslateExternal(current, buffers, initial, allPatches);
@@ -74,36 +67,14 @@ export function drive(
     buffers.queue.push(initial.payload);
   }
 
-  while (true) {
-    // Drain the internal event queue.
-    while (buffers.queue.length > 0) {
-      const ev = buffers.queue.shift()!;
-      const [next, patches] = produceWithPatches(current, (draft) => {
-        const ctx = makeStepCtx(draft, buffers);
-        step(ctx, ev);
-      });
-      allPatches.push(...patches);
-      current = next;
-    }
-
-    // After the queue is empty, peel off any self-targeted outbound
-    // events and feed them back through `translateExternal`. Each
-    // translated event may push fresh internal events back onto the
-    // queue, so we re-enter the outer loop until everything settles.
-    const selfEvents: Event[] = [];
-    const remaining: Event[] = [];
-    for (const ev of buffers.outbound) {
-      if (ev.to === current.selfEndpoint) {
-        selfEvents.push(ev);
-      } else {
-        remaining.push(ev);
-      }
-    }
-    if (selfEvents.length === 0) break;
-    buffers.outbound = remaining;
-    for (const ev of selfEvents) {
-      current = applyTranslateExternal(current, buffers, ev, allPatches);
-    }
+  while (buffers.queue.length > 0) {
+    const ev = buffers.queue.shift()!;
+    const [next, patches] = produceWithPatches(current, (draft) => {
+      const ctx = makeStepCtx(draft, buffers);
+      step(ctx, ev);
+    });
+    allPatches.push(...patches);
+    current = next;
   }
 
   return { state: current, buffers, patches: allPatches };
@@ -265,11 +236,12 @@ function translateExternal(
   const p = event.payload;
 
   if (p.kind === "delegate") {
-    const blockId = resolveDelegateTarget(ctx, p.targetBlock, p.delegationId);
+    const target = resolveDelegateTarget(ctx, p.agentDefId, p.delegationId);
     const agentThreadId = spawnAgentRoot(ctx, {
-      blockId,
+      blockId: target.blockId,
       args: p.args,
       delegationId: p.delegationId,
+      capturedScopeId: target.capturedScopeId,
     });
     ctx.state.delegations[p.delegationId as string] = agentThreadId;
     ctx.state.delegationSenders[p.delegationId as string] = event.from;
@@ -362,10 +334,10 @@ function translateExternal(
     }
     // Allocate an own askId on the external for the upward forward, and
     // map (escalationId → ownAskId) so the eventual escalateAck can route
-    // back. The request payload uses the placeholder reqId of `0` since
-    // the receiving AgentThread looks up handlers by qualified name; the
-    // concrete ReqId mapping will be provided once requests carry their
-    // qname through the engine layer.
+    // back. Resolve agentDefId → ReqId via IRModule.entries when it's a
+    // qname-encoded request; closure-encoded escalates are not yet
+    // handle-routable and fall back to reqId 0 (caught only by handlers
+    // installed at reqId 0, mostly a debug fallback).
     const draft = ext as import("immer").Draft<typeof ext>;
     const ownAskId = (draft.nextAskId as number) as import("./id.js").AskId;
     draft.nextAskId = ((draft.nextAskId as number) + 1) as import("./id.js").AskId;
@@ -377,7 +349,7 @@ function translateExternal(
       askId: ownAskId,
       askKind: {
         kind: "request",
-        reqId: 0 as import("../ir/types.js").ReqId,
+        reqId: resolveRequestReqId(ctx, p.agentDefId),
         args: { ...p.args },
       },
       childCallId: ext.parentCallId,
@@ -411,27 +383,77 @@ function translateExternal(
 }
 
 /**
- * Resolve a delegate `targetBlock` to a BlockId.
+ * Resolve a CORE-encoded `agentDefId` to a target BlockAgent.
  *
- * - `module_ === "<closure>"` → the `name` is the BlockId stringified.
- *   Closure-based agent calls (`statementAgentCallClosure`) take this
- *   path — the BlockAgent body lives directly in IR; no entry lookup.
- * - otherwise the qualified name is resolved through `IRModule.entries`.
+ *   - `{ kind: "qname",   value }` → `IRModule.entries` lookup (top-level)
+ *   - `{ kind: "closure", value }` → `state.closures` lookup (closure dispatch)
+ *
+ * The `capturedScopeId` is non-null only for closure dispatch; the new
+ * AgentThread's body scope inherits from it so captured locals are visible.
  */
 function resolveDelegateTarget(
   ctx: ReturnType<typeof makeStepCtx>,
-  target: { module_: string; name: string },
+  agentDefId: import("../agent-def-id.js").AgentDefId,
   delegationId: import("./id.js").DelegationId,
-): import("../ir/types.js").BlockId {
-  if (target.module_ === "<closure>") {
-    return Number(target.name) as import("../ir/types.js").BlockId;
+): {
+  blockId: import("../ir/types.js").BlockId;
+  capturedScopeId: import("./id.js").ScopeId | null;
+} {
+  const decoded = decodeCoreAgentDefId(agentDefId);
+  if (decoded.kind === "qname") {
+    const qn =
+      decoded.value.module_ === ""
+        ? decoded.value.name
+        : `${decoded.value.module_}.${decoded.value.name}`;
+    const blockId = ctx.state.irModule.entries[qn];
+    if (blockId === undefined) {
+      throw new EntryNotFoundError(qn, delegationId);
+    }
+    return { blockId, capturedScopeId: null };
   }
-  const qn = target.module_ === "" ? target.name : `${target.module_}.${target.name}`;
+  // kind === "closure"
+  const record = ctx.state.closures[decoded.value as unknown as number];
+  if (record === undefined) {
+    throw new Error(
+      `engine.runner: closure ${decoded.value} not found for delegate ${delegationId}`,
+    );
+  }
+  return {
+    blockId: record.blockId,
+    capturedScopeId: record.scopeId,
+  };
+}
+
+/**
+ * Resolve an inbound `escalate`'s `agentDefId` to a CORE-internal `ReqId`.
+ * For qname-encoded ids we look up the entry block (must be `BlockRequest`).
+ * For closure-encoded or unresolved cases we fall back to `0`, which is
+ * effectively a sentinel — only a handler bound to reqId 0 will catch it.
+ */
+function resolveRequestReqId(
+  ctx: ReturnType<typeof makeStepCtx>,
+  agentDefId: import("../agent-def-id.js").AgentDefId,
+): import("../ir/types.js").ReqId {
+  let decoded: import("../agent-def-id.js").CoreAgentDefId | undefined;
+  try {
+    decoded = decodeCoreAgentDefId(agentDefId);
+  } catch {
+    return 0 as import("../ir/types.js").ReqId;
+  }
+  if (decoded.kind !== "qname") {
+    return 0 as import("../ir/types.js").ReqId;
+  }
+  const qn =
+    decoded.value.module_ === ""
+      ? decoded.value.name
+      : `${decoded.value.module_}.${decoded.value.name}`;
   const blockId = ctx.state.irModule.entries[qn];
-  if (blockId === undefined) {
-    throw new EntryNotFoundError(qn, delegationId);
+  if (blockId === undefined) return 0 as import("../ir/types.js").ReqId;
+  const block = ctx.state.irModule.blocks[String(blockId)];
+  if (block === undefined || block.kind !== "blockRequest") {
+    return 0 as import("../ir/types.js").ReqId;
   }
-  return blockId;
+  return block.body as import("../ir/types.js").ReqId;
 }
 
 function findEscalationAskId(

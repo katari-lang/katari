@@ -5,19 +5,11 @@
 // source of truth for what `katari-api-server` (and any future host)
 // imports.
 
-// ─── Facade ────────────────────────────────────────────────────────────────
-
-export { MachineHandle as EngineHandle } from "./facade.js";
-// Provide the legacy `MachineHandle` alias for callers that haven't
-// renamed yet. Both names refer to the same class.
-export { MachineHandle } from "./facade.js";
-
 // ─── Engine functions ──────────────────────────────────────────────────────
 
 export {
   applyEvent,
   createState,
-  CORE_ENDPOINT,
   endpoint,
   NULL_VALUE,
   literalToValue,
@@ -91,9 +83,10 @@ export type {
   Logger,
   Result,
   Result as EngineResult,
-  Snapshot,
-  Snapshot as EngineSnapshot,
-  Snapshot as MachineSnapshot,
+  EngineCheckpoint,
+  EngineCheckpoint as Snapshot,
+  EngineCheckpoint as EngineSnapshot,
+  EngineCheckpoint as MachineSnapshot,
 } from "./engine/index.js";
 
 // ─── IR + schema types (Haskell mirror) ────────────────────────────────────
@@ -104,3 +97,62 @@ export type {
   QualifiedName,
 } from "./ir/types.js";
 export type { SchemaBundle, AgentDefinition, JsonSchema } from "./ir/schema.js";
+
+// ─── Agent def id (cross-module opaque) ────────────────────────────────────
+
+export {
+  encodeCoreAgentDefId,
+  decodeCoreAgentDefId,
+  encodeFfiAgentDefId,
+  decodeFfiAgentDefId,
+} from "./agent-def-id.js";
+export type {
+  AgentDefId,
+  CoreAgentDefId,
+  FfiAgentDefId,
+} from "./agent-def-id.js";
+
+// ─── 3 module + bus 抽象 ───────────────────────────────────────────────────
+
+export type { Module } from "./module.js";
+export { ExternalEventBus } from "./bus.js";
+export type { RegisteredModule } from "./bus.js";
+export type { ExternalEvent } from "./engine/event.js";
+
+export { CoreModule } from "./modules/core.js";
+export type {
+  CoreCheckpointStore,
+  CoreModuleOptions,
+} from "./modules/core.js";
+
+export { FfiModule } from "./modules/ffi.js";
+export type { FfiModuleOptions } from "./modules/ffi.js";
+
+export {
+  API_ENDPOINT,
+  CORE_ENDPOINT,
+  FFI_ENDPOINT,
+} from "./modules/endpoints.js";
+
+// ─── Sidecar (FFI runner ↔ subprocess IPC) ─────────────────────────────────
+
+export type {
+  SidecarBundle,
+  ParentToChild,
+  ChildToParent,
+} from "./sidecar/types.js";
+
+export { InProcessSidecar } from "./sidecar/sidecar.js";
+export type { Sidecar, InProcessHandler } from "./sidecar/sidecar.js";
+
+export { SidecarManager } from "./sidecar/sidecar-manager.js";
+export type {
+  SidecarFactory,
+  SidecarMessageHandler,
+} from "./sidecar/sidecar-manager.js";
+
+export type {
+  FfiStore,
+  FfiPendingDelegation,
+  FfiPendingEscalation,
+} from "./sidecar/store.js";

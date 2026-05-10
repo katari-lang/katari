@@ -83,7 +83,7 @@ export type AgentThread = Common & {
   args: Record<string, Value>;
   /**
    * Delegation id that landed us here. Used to look up the sender in
-   * `state.delegationSenders` when emitting delegateAck/terminateAck.
+   * `state.delegationSenders` when emitting delegateAck/terminateAck/escalate.
    */
   delegationId: DelegationId;
   /**
@@ -91,6 +91,14 @@ export type AgentThread = Common & {
    * eventual outbound `delegateAck` after children finish cancelling.
    */
   pendingReturn?: Value;
+  /**
+   * Outstanding outbound escalations: childAskId → escalationId. Populated
+   * when a non-return `ask` reaches a root AgentThread (parent === null) —
+   * we forward it to the delegation sender as an `escalate` event,
+   * symmetric with `ExternalThread.pendingEscalations`. Cleared on the
+   * matching `escalateAck` from the sender side.
+   */
+  pendingEscalations: Record<number, EscalationId>;
 };
 
 export type UserThread = Common & {

@@ -65,9 +65,10 @@ Katari.Lowering              -- AST Zonked → IRModule. ReaderT (LowerEnv) Stat
                                 walk). closure capture は runtime の scope inheritance
                                 に委譲 (IR captures は予約のみ).
 Katari.IR                    -- IR データ型 + JSON serialization. Block sum は
-                                BlockUser / Prim / Request {reqId} / External
-                                {externalName} / Ctor {ctorId}. BlockKind enum で
-                                UserBlock の役割を表現. MatchArm は再帰的 MatchPattern
+                                BlockAgent / BlockUser / Prim / Request {reqId} /
+                                External {externalName} / Ctor {ctorId}.
+                                BlockAgent が agent 境界 (return 捕捉 + scope 隔離),
+                                BlockUser は inline only. MatchArm は再帰的 MatchPattern
                                 (MPAny / MPVariable / MPLiteral / MPConstructor / MPTuple).
                                 IRModule.entries :: Map QualifiedName BlockId を FFI
                                 境界の唯一の SSoT として持つ. ToJSON / FromJSON は

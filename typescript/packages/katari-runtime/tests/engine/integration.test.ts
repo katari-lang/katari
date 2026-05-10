@@ -15,6 +15,7 @@ import {
   endpoint,
   type Event,
 } from "../../src/engine/index.js";
+import { encodeCoreAgentDefId } from "../../src/agent-def-id.js";
 import type {
   IRModule,
   Block,
@@ -99,7 +100,10 @@ describe("engine integration: end-to-end via external delegate", () => {
       to: CORE_ENDPOINT,
       payload: {
         kind: "delegate",
-        targetBlock: { module_: "", name: "main" },
+        agentDefId: encodeCoreAgentDefId({
+          kind: "qname",
+          value: { module_: "", name: "main" },
+        }),
         args: {},
         delegationId,
       },
@@ -126,7 +130,10 @@ describe("engine integration: end-to-end via external delegate", () => {
       to: CORE_ENDPOINT,
       payload: {
         kind: "delegate",
-        targetBlock: { module_: "", name: "missing" },
+        agentDefId: encodeCoreAgentDefId({
+          kind: "qname",
+          value: { module_: "", name: "missing" },
+        }),
         args: {},
         delegationId: createDelegationId(),
       },
@@ -136,7 +143,7 @@ describe("engine integration: end-to-end via external delegate", () => {
     expect(result.outbound).toEqual([]);
   });
 
-  it("core→core: top-level agent calling another top-level agent resolves in one applyEvent", () => {
+  it("core→core: top-level agent calling another top-level agent resolves through the bus", async () => {
     const out0 = 0 as VarId;
     const out1 = 1 as VarId;
 
@@ -178,25 +185,54 @@ describe("engine integration: end-to-end via external delegate", () => {
       { main: 1, helper: 3 },
     );
 
-    const state = createState(module);
     const delegationId = createDelegationId();
+    const apiOutbound: Event[] = [];
 
-    const result = applyEvent(state, {
+    // Test wires: a CoreModule (= the engine) registered with a bus, plus
+    // a tiny stub API module that just collects outbound delegateAck events.
+    const { CoreModule } = await import("../../src/modules/core.js");
+    const { ExternalEventBus } = await import("../../src/bus.js");
+    const { noopLogger } = await import("../../src/engine/logger.js");
+
+    const core = new CoreModule({
+      endpoint: CORE_ENDPOINT,
+      snapshotId: "test-snap",
+      irModule: module,
+      logger: noopLogger,
+    });
+
+    const apiStub = {
+      endpoint: API_ENDPOINT,
+      async feed(event: Event) {
+        apiOutbound.push(event);
+        return { outbound: [] };
+      },
+      async persist() {},
+      async load() {},
+    };
+
+    const bus = new ExternalEventBus(noopLogger);
+    bus.registerAll([
+      { name: "core", module: core },
+      { name: "api", module: apiStub },
+    ]);
+
+    bus.push({
       from: API_ENDPOINT,
       to: CORE_ENDPOINT,
       payload: {
         kind: "delegate",
-        targetBlock: { module_: "", name: "main" },
+        agentDefId: encodeCoreAgentDefId({
+          kind: "qname",
+          value: { module_: "", name: "main" },
+        }),
         args: {},
         delegationId,
       },
     });
-    expect(result.errors).toEqual([]);
+    await bus.drain();
 
-    // Self-loop: main → helper → main is fully resolved within one
-    // applyEvent. The only API-bound outbound should be the final
-    // delegateAck for the API delegation.
-    const apiAck = result.outbound.find(
+    const apiAck = apiOutbound.find(
       (e) =>
         e.payload.kind === "delegateAck" &&
         e.payload.delegationId === delegationId,
@@ -205,12 +241,12 @@ describe("engine integration: end-to-end via external delegate", () => {
     if (apiAck && apiAck.payload.kind === "delegateAck") {
       expect(apiAck.payload.value).toEqual({ kind: "number", value: 7 });
     }
-    // No leftover delegations or pending senders for the helper.
-    expect(Object.keys(result.state.delegations).length).toBe(0);
-    expect(Object.keys(result.state.pendingDelegateOut).length).toBe(0);
-    expect(Object.keys(result.state.delegationSenders).length).toBe(0);
-    // No threads remain — both main and helper have completed.
-    expect(Object.keys(result.state.threads).length).toBe(0);
+    // CORE state cleaned up: no leftover delegations or threads.
+    const coreState = core.currentState;
+    expect(Object.keys(coreState.delegations).length).toBe(0);
+    expect(Object.keys(coreState.pendingDelegateOut).length).toBe(0);
+    expect(Object.keys(coreState.delegationSenders).length).toBe(0);
+    expect(Object.keys(coreState.threads).length).toBe(0);
   });
 
   it("terminate before completion: cancel cascade + terminateAck outbound", () => {
@@ -250,7 +286,10 @@ describe("engine integration: end-to-end via external delegate", () => {
       to: CORE_ENDPOINT,
       payload: {
         kind: "delegate",
-        targetBlock: { module_: "", name: "main" },
+        agentDefId: encodeCoreAgentDefId({
+          kind: "qname",
+          value: { module_: "", name: "main" },
+        }),
         args: {},
         delegationId,
       },

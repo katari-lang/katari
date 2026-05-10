@@ -75,7 +75,7 @@ export { emptyResult } from "./result.js";
 
 export { applyEvent, createState } from "./apply.js";
 
-export type { Snapshot } from "./snapshot.js";
+export type { EngineCheckpoint } from "./snapshot.js";
 export { serialize, deserialize } from "./snapshot.js";
 
 export { collectGarbage, shouldGc } from "./gc.js";

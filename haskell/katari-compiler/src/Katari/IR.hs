@@ -88,7 +88,7 @@ import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 import Data.Word (Word32)
 import GHC.Generics (Generic)
-import Katari.Common (LiteralValue (..), QualifiedName (..), parseQualifiedName, renderQualifiedName)
+import Katari.Common (LiteralValue (..), QualifiedName (..), renderQualifiedName)
 
 -- ===========================================================================
 -- Identifiers

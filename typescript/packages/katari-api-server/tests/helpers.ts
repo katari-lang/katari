@@ -1,15 +1,26 @@
-// Shared fixtures for api-server tests. Builds a minimal but useful IR
-// module + matching schema bundle.
+// Shared fixtures for api-server tests.
 //
-// All entries are wrapped in a `blockAgent` (the externally-callable
-// boundary in the new runtime). The inner `blockUser` body holds the
-// actual statements (the agent boundary semantics live on the wrapper,
-// not the inner block).
+// 新設計向け: project + snapshot を upload するヘルパと、orchestrator + bus
+// を含むテスト用 app を作るヘルパを提供する。
 
-import type { IRModule, SchemaBundle } from "katari-runtime";
+import { noopLogger, type IRModule, type SchemaBundle } from "katari-runtime";
 import type { Block, VarId } from "katari-runtime/dist/ir/types.js";
+import {
+  InMemoryStorage,
+  InProcessSidecar,
+  Orchestrator,
+  ProjectService,
+  SidecarManager,
+  SnapshotService,
+  buildApp,
+  type AppDeps,
+  type SidecarBundle,
+} from "../src/index.js";
+import type { InProcessHandler } from "../src/modules/sidecar.js";
+import type { Hono } from "hono";
 
-// A trivial agent: agent main() -> string { return "hi" }
+// ─── IR fixtures ───────────────────────────────────────────────────────────
+
 export function literalReturnIR(literal: string, irName = "test"): IRModule {
   const blocks: Record<number, Block> = {
     0: {
@@ -51,7 +62,6 @@ export function literalReturnIR(literal: string, irName = "test"): IRModule {
   };
 }
 
-// Calls an external block, so machine pauses on outbound delegate.
 export function pausesOnExternalIR(irName = "test"): IRModule {
   const blocks: Record<number, Block> = {
     0: {
@@ -110,4 +120,107 @@ export function trivialSchemaBundle(): SchemaBundle {
       },
     ],
   };
+}
+
+/** Trivially-valid sidecar bundle for snapshots that don't need FFI. */
+export function noOpSidecarBundle(): SidecarBundle {
+  return {
+    entry: "exports.invoke = async () => ({ kind: 'null' });",
+    runtime: "node",
+    schemaVersion: 1,
+  };
+}
+
+// ─── Test harness ──────────────────────────────────────────────────────────
+
+export type TestHarness = {
+  storage: InMemoryStorage;
+  app: Hono;
+  orchestrator: Orchestrator;
+  shutdown: () => Promise<void>;
+};
+
+/**
+ * Build a test harness wired with `InMemoryStorage` and `InProcessSidecar`
+ * (factory-driven from a shared handler map). Use `setHandler(qname, fn)`
+ * to register sidecar invokes for a specific test.
+ */
+export function buildTestHarness(opts?: {
+  ffiHandlers?: Record<string, InProcessHandler>;
+}): TestHarness & {
+  setHandler: (qname: string, handler: InProcessHandler) => void;
+} {
+  const handlers = new Map<string, InProcessHandler>(
+    Object.entries(opts?.ffiHandlers ?? {}),
+  );
+  const storage = new InMemoryStorage();
+  const sidecarManager = new SidecarManager(
+    (_bundle, sidecarLogger) => {
+      const dispatch: InProcessHandler = async (input) => {
+        const decoded = input.agentDefId as { kind: string; value: { module_: string; name: string } };
+        const key =
+          decoded.value.module_ === ""
+            ? decoded.value.name
+            : `${decoded.value.module_}.${decoded.value.name}`;
+        const handler = handlers.get(key);
+        if (handler === undefined) {
+          throw new Error(`no test handler registered for ${key}`);
+        }
+        return handler(input);
+      };
+      return new InProcessSidecar(dispatch, sidecarLogger);
+    },
+    noopLogger,
+  );
+  const orchestrator = new Orchestrator(storage, sidecarManager, noopLogger);
+  const projects = new ProjectService(storage, noopLogger);
+  const snapshots = new SnapshotService(storage, noopLogger);
+  const deps: AppDeps = {
+    storage,
+    projects,
+    snapshots,
+    orchestrator,
+    apiKey: null,
+    rateLimit: null,
+  };
+  const app = buildApp(deps);
+  return {
+    storage,
+    app,
+    orchestrator,
+    setHandler(qname, handler) {
+      handlers.set(qname, handler);
+    },
+    async shutdown() {
+      await sidecarManager.shutdown();
+    },
+  };
+}
+
+/** Convenience: upsert project + upload snapshot, return snapshotId. */
+export async function uploadSnapshot(
+  harness: TestHarness,
+  projectName: string,
+  irModule: IRModule,
+  schemaBundle: SchemaBundle,
+  sidecarBundle: SidecarBundle | null = null,
+): Promise<{ projectId: string; snapshotId: string }> {
+  const projectResp = await harness.app.fetch(
+    new Request("http://test/project", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: projectName }),
+    }),
+  );
+  const projectBody = (await projectResp.json()) as { project: { id: string } };
+  const projectId = projectBody.project.id;
+  const snapResp = await harness.app.fetch(
+    new Request(`http://test/project/${projectId}/snapshot`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ irModule, sidecarBundle, schemaBundle }),
+    }),
+  );
+  const snapBody = (await snapResp.json()) as { snapshotId: string };
+  return { projectId, snapshotId: snapBody.snapshotId };
 }
