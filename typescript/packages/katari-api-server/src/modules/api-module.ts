@@ -11,18 +11,17 @@
 // per-tick instance: 1 request の中で生きる。永続化は tx 経由で書き通すので
 // `persist()` / `load()` は no-op。
 
-import { v7 as uuidv7 } from "uuid";
 import {
-  decodeCoreAgentDefId,
+  API_ENDPOINT,
+  CORE_ENDPOINT,
+  createDelegationId,
   encodeCoreAgentDefId,
   type ExternalEvent,
   type Logger,
   type Module,
   type Value,
-  createDelegationId,
 } from "katari-runtime";
 import type { DelegationId, EscalationId } from "katari-runtime";
-import { API_ENDPOINT, CORE_ENDPOINT } from "./endpoints.js";
 import type {
   AgentId,
   AgentRow,
@@ -54,15 +53,12 @@ export class ApiModule implements Module {
     switch (event.payload.kind) {
       case "delegate":
         // ユーザー (= API module) は agent 定義を提供しない。
-        // 即座に delegateError 相当として error を返す。現状は terminate ack
-        // 系にもう一度返さないため、デバッグログだけ出して放置。
         this.logger.log("warn", "api: received delegate but provides no defs", {
           delegationId: event.payload.delegationId,
         });
         return { outbound: [] };
 
       case "delegateAck":
-        // CLI が起動した agent が完了 → agents 行を succeeded に。
         await this.completeAgent(event.payload.delegationId, event.payload.value);
         return { outbound: [] };
 
@@ -90,8 +86,7 @@ export class ApiModule implements Module {
         return { outbound: [] };
 
       case "escalateAck":
-        // ユーザーが何かに対して escalate していたら戻ってくる。現状は
-        // user → CORE への escalate flow がないので drop with debug log。
+        // ユーザー → CORE への escalate flow がないので drop with debug log。
         this.logger.log("debug", "api: stray escalateAck", {
           escalationId: event.payload.escalationId,
         });
@@ -99,20 +94,11 @@ export class ApiModule implements Module {
     }
   }
 
-  async persist(_tx: unknown): Promise<void> {
-    // 全部 tx 経由で書き通すので no-op。
-  }
-
-  async load(_tx: unknown): Promise<void> {
-    // tx 経由で読み込むので no-op。
-  }
+  async persist(_tx: unknown): Promise<void> {}
+  async load(_tx: unknown): Promise<void> {}
 
   // ─── HTTP-facing methods (called by routes) ─────────────────────────────
 
-  /**
-   * Start an agent (= delegate to CORE)。bus にイベントを push して agent 行
-   * を agents テーブルに insert する。`agentId` を返す (= 同 delegationId)。
-   */
   async startAgent(input: {
     bus: { push: (event: ExternalEvent) => void };
     qualifiedName: string;
@@ -176,10 +162,6 @@ export class ApiModule implements Module {
     return { row: refreshed };
   }
 
-  /**
-   * User answered an escalation. Push escalateAck onto the bus so the
-   * waiting agent thread can resume.
-   */
   async answerEscalation(input: {
     bus: { push: (event: ExternalEvent) => void };
     escalationId: EscalationId;
@@ -232,11 +214,6 @@ export class ApiModule implements Module {
     );
   }
 }
-
-// uuidv7 reference for stable ordering in agent rows when needed.
-void uuidv7;
-// decodeCoreAgentDefId re-export silenced (used by inbound flows in tests).
-void decodeCoreAgentDefId;
 
 function parseQualifiedName(s: string): { module_: string; name: string } {
   const idx = s.lastIndexOf(".");

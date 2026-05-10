@@ -2,7 +2,6 @@ snapshot: lts-22.44 # GHC 9.6.7
 
 packages:
   - haskell/katari-compiler
-  # - haskell/katari-cli  # TEMPORARILY DISABLED: will be re-enabled once katari-compiler is production-ready (see plan: unified-wandering-hippo.md)
 
 ghc-options:
   "$locals": -Wall -Wcompat -Wincomplete-record-updates

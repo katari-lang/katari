@@ -13,22 +13,25 @@ export {
 } from "./services/snapshot-service.js";
 
 export { ApiModule } from "./modules/api-module.js";
-export { FfiModule } from "./modules/ffi-module.js";
-export { SidecarManager } from "./modules/sidecar-manager.js";
-export type {
-  Sidecar,
-  InProcessHandler,
-} from "./modules/sidecar.js";
-export {
-  InProcessSidecar,
-  SubprocessSidecar,
-} from "./modules/sidecar.js";
+export { StorageFfiStore } from "./modules/ffi-store.js";
 
+// Runtime-provided abstractions re-exported for convenience.
 export {
   API_ENDPOINT,
   CORE_ENDPOINT,
   FFI_ENDPOINT,
-} from "./modules/endpoints.js";
+  FfiModule,
+  InProcessSidecar,
+  SidecarManager,
+} from "katari-runtime";
+export type {
+  FfiStore,
+  InProcessHandler,
+  Sidecar,
+  SidecarBundle,
+  SidecarFactory,
+  SidecarMessageHandler,
+} from "katari-runtime";
 
 export { recoverOnBoot } from "./recovery.js";
 export { InMemoryStorage } from "./storage/memory-storage.js";
@@ -42,7 +45,6 @@ export type {
   FfiPendingEscalation,
   Project,
   ProjectId,
-  SidecarBundle,
   Snapshot,
   SnapshotId,
   SnapshotSummary,

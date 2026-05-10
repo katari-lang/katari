@@ -187,5 +187,6 @@ export function valueToString(v: Value): string {
       `${x.ctorId}{${Object.entries(x.fields).map(([k, v]) => `${k}: ${valueToString(v)}`).join(", ")}}`,
     )
     .with({ kind: "closure" }, () => `<closure>`)
+    .with({ kind: "agentLiteral" }, x => `<agent ${x.qualifiedName.module_}.${x.qualifiedName.name}>`)
     .exhaustive();
 }

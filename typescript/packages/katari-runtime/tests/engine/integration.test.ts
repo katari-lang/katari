@@ -70,7 +70,7 @@ describe("engine integration: end-to-end via external delegate", () => {
       {
         kind: "statementCall",
         body: {
-          target: { kind: "callTargetBlock", block: 100 },
+          block: 100,
           arguments: [
             { label: "left", var: v0 },
             { label: "right", var: v1 },
@@ -145,7 +145,8 @@ describe("engine integration: end-to-end via external delegate", () => {
 
   it("core→core: top-level agent calling another top-level agent resolves through the bus", async () => {
     const out0 = 0 as VarId;
-    const out1 = 1 as VarId;
+    const helperLit = 1 as VarId;
+    const out1 = 2 as VarId;
 
     // helper(): returns 7 directly.
     const helperBody = userBlock({
@@ -159,14 +160,25 @@ describe("engine integration: end-to-end via external delegate", () => {
       trailing: out0,
     });
 
-    // main(): calls helper() via StatementAgentCall, returns its value.
+    // main(): loads an agent literal for `helper`, then dispatches via
+    // StatementAgentCall on that VarId, returning the result.
     const mainBody = userBlock({
       parameters: [],
       statements: [
         {
+          kind: "statementLoadLiteral",
+          body: {
+            output: helperLit,
+            value: {
+              kind: "literalValueAgent",
+              qualifiedName: { module_: "", name: "helper" },
+            },
+          },
+        },
+        {
           kind: "statementAgentCall",
           body: {
-            target: { module_: "", name: "helper" },
+            target: helperLit,
             arguments: [],
             output: out1,
           },
@@ -259,7 +271,7 @@ describe("engine integration: end-to-end via external delegate", () => {
       {
         kind: "statementCall",
         body: {
-          target: { kind: "callTargetBlock", block: 200 },
+          block: 200,
           arguments: [],
           output: v0,
         },

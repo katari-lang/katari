@@ -133,12 +133,14 @@ data LowerState = LowerState
     -- | Top-level @VariableId@ → its callable @BlockId@. Used at call /
     -- closure sites to resolve agent / req / ext-agent / data-ctor names.
     lsTopLevelBlocks :: Map VariableId BlockId,
-    -- | Top-level @VariableId@ → its 'QualifiedName' for callables that
-    -- ARE agent boundaries (and thus dispatched via core→core
-    -- 'StatementAgentCall' rather than through 'StatementCall' on the
-    -- internal block). Populated by the agent-declaration walker; not
-    -- populated for prims, ctors, or external-agent stubs.
-    lsAgentNames :: Map VariableId QualifiedName,
+    -- | Top-level @VariableId@ → its 'QualifiedName' for every top-level
+    -- callable (agent / req / external / data ctor / prim). When a
+    -- callable name is referenced as a value (e.g. @return foo@,
+    -- @let f = foo@, @foo()@), Lowering looks up the qualified name here
+    -- and emits 'StatementLoadLiteral' carrying a 'LiteralValueAgent'.
+    -- The runtime treats all such values uniformly: dispatch is by
+    -- 'IRModule.entries' lookup of the qualified name.
+    lsTopLevelQNames :: Map VariableId QualifiedName,
     -- | Identifier-pass 'RequestId' → IR-internal 'IR.RequestId'. Allocated at
     -- the start of lowering (one IR IR.RequestId per Identifier RequestId, 1:1
     -- currently). Used by 'lowerHandler' / 'patternToArm' to translate
@@ -173,7 +175,7 @@ initialLowerState =
       lsVarNames = Map.empty,
       lsBlockNames = Map.empty,
       lsTopLevelBlocks = Map.empty,
-      lsAgentNames = Map.empty,
+      lsTopLevelQNames = Map.empty,
       lsRequestIds = Map.empty,
       lsConstructorIds = Map.empty,
       lsEntries = Map.empty,
@@ -310,7 +312,11 @@ resolveVariable canBeLocal resolution sourceSpan nameText = case resolution of
             pure ResolvedVarUnresolved
 
 -- | Resolve a variable reference in 'value' context: locals pass through,
--- top-level callables emit an implicit 'StatementMakeClosure'.
+-- top-level callables emit a 'StatementLoadLiteral' carrying a
+-- 'LiteralValueAgent' (the qualified name of the callable). The runtime
+-- resolves the qualified name to a 'BlockId' via 'IRModule.entries' on
+-- dispatch — top-level callables therefore carry no captured scope.
+-- 'StatementMakeClosure' is reserved for local-agent (closure) creation.
 resolveAsValue ::
   Bool ->
   AST.NameRefResolution Zonked AST.VariableRef ->
@@ -322,11 +328,41 @@ resolveAsValue canBeLocal resolution sourceSpan nameText hint = do
   resolved <- resolveVariable canBeLocal resolution sourceSpan nameText
   case resolved of
     ResolvedVarLocal irVar -> pure irVar
-    ResolvedVarTopLevel blockId -> do
+    ResolvedVarTopLevel _blockId -> do
+      qname <- topLevelQNameForResolution resolution sourceSpan nameText
       v <- freshVarId hint
-      emit (StatementMakeClosure MakeClosureData {output = v, block = blockId})
+      emit (StatementLoadLiteral LoadLiteralData {output = v, value = LiteralValueAgent qname})
       pure v
     ResolvedVarUnresolved -> freshVarId Nothing
+
+-- | Look up the 'QualifiedName' of a top-level callable resolved to a
+-- 'VariableId'. Invoked from 'resolveAsValue' after a successful
+-- 'ResolvedVarTopLevel'; a missing entry indicates an upstream
+-- registration bug (every top-level callable should appear in
+-- 'lsTopLevelQNames' via 'recordTopLevelCallable' or 'registerPrimitives').
+topLevelQNameForResolution ::
+  AST.NameRefResolution Zonked AST.VariableRef ->
+  SourceSpan ->
+  Text ->
+  Lower QualifiedName
+topLevelQNameForResolution resolution sourceSpan nameText =
+  case resolution of
+    Just variableId -> do
+      mQname <- gets (Map.lookup variableId . (.lsTopLevelQNames))
+      case mQname of
+        Just qname -> pure qname
+        Nothing ->
+          throwError
+            ( Internal.internalError
+                sourceSpan
+                ("topLevelQNameForResolution: top-level callable '" <> nameText <> "' missing from lsTopLevelQNames")
+            )
+    Nothing ->
+      throwError
+        ( Internal.internalError
+            sourceSpan
+            ("topLevelQNameForResolution: callable '" <> nameText <> "' has no resolution but resolved to a top-level block")
+        )
 
 -- | Resolve a root-prim name to its 'BlockId'. Used by lowering sites
 -- that emit prim calls directly (template / field-access / index-access
@@ -450,7 +486,8 @@ registerPrimitives = do
           modify $ \state ->
             state
               { lsPrimBlockIds = Map.insert vid blockId state.lsPrimBlockIds,
-                lsTopLevelBlocks = Map.insert vid blockId state.lsTopLevelBlocks
+                lsTopLevelBlocks = Map.insert vid blockId state.lsTopLevelBlocks,
+                lsTopLevelQNames = Map.insert vid qname state.lsTopLevelQNames
               }
         Nothing ->
           -- Identifier preregistered every prim; missing entry is a bug.
@@ -512,12 +549,7 @@ registerDeclarationKinds zonkResult =
       AST.DeclarationAgent decl ->
         registerCallable decl.name decl.sourceSpan $ \variableId -> do
           blockId <- reserveBlockId (Just decl.name.text)
-          recordVarBlockId variableId blockId
-          recordEntry moduleName decl.name.text blockId
-          -- Record qname for core→core agent dispatch.
-          let qname = QualifiedName {module_ = moduleName, name = decl.name.text}
-          modify $ \state ->
-            state {lsAgentNames = Map.insert variableId qname state.lsAgentNames}
+          recordTopLevelCallable variableId moduleName decl.name.text blockId
       AST.DeclarationRequest decl ->
         registerCallable decl.name decl.sourceSpan $ \variableId -> do
           blockId <- freshBlockId
@@ -527,8 +559,7 @@ registerDeclarationKinds zonkResult =
           -- consistency bug).
           irReqId <- requestIdForVariable variableId
           recordBlock blockId (BlockRequest irReqId) (Just decl.name.text)
-          recordVarBlockId variableId blockId
-          recordEntry moduleName decl.name.text blockId
+          recordTopLevelCallable variableId moduleName decl.name.text blockId
       AST.DeclarationExternalAgent decl ->
         registerCallable decl.name decl.sourceSpan $ \variableId -> do
           blockId <- freshBlockId
@@ -537,15 +568,13 @@ registerDeclarationKinds zonkResult =
             blockId
             (BlockExternal (ExternalName qualifiedName))
             (Just decl.name.text)
-          recordVarBlockId variableId blockId
-          recordEntry moduleName decl.name.text blockId
+          recordTopLevelCallable variableId moduleName decl.name.text blockId
       AST.DeclarationData decl ->
         registerCallable decl.name decl.sourceSpan $ \variableId -> do
           blockId <- freshBlockId
           irCtorId <- constructorIdForVariable variableId
           recordBlock blockId (BlockConstructor irCtorId) (Just decl.name.text)
-          recordVarBlockId variableId blockId
-          recordEntry moduleName decl.name.text blockId
+          recordTopLevelCallable variableId moduleName decl.name.text blockId
       AST.DeclarationImport _ -> pure ()
       AST.DeclarationTypeSynonym _ -> pure ()
       AST.DeclarationError sourceSpan -> recordError (LoweringErrorParseSentinel sourceSpan)
@@ -575,10 +604,18 @@ registerDeclarationKinds zonkResult =
             Nothing -> throwError (Internal.internalErrorNoSpan "constructorIdForVariable: IR.ConstructorId not pre-allocated")
         Nothing -> throwError (Internal.internalErrorNoSpan "constructorIdForVariable: VariableId not in constructorByVariable")
 
-    recordEntry :: Text -> Text -> BlockId -> Lower ()
-    recordEntry moduleName_ declName blockId =
+    -- | Register a top-level callable: bind the @VariableId@ to its
+    -- @BlockId@, record its 'QualifiedName' for value-side dispatch, and
+    -- expose it in 'IRModule.entries' for FFI lookup.
+    recordTopLevelCallable :: VariableId -> Text -> Text -> BlockId -> Lower ()
+    recordTopLevelCallable variableId moduleName_ declName blockId = do
       let qualifiedName = QualifiedName {module_ = moduleName_, name = declName}
-       in modify (\state -> state {lsEntries = Map.insert qualifiedName blockId state.lsEntries})
+      recordVarBlockId variableId blockId
+      modify $ \state ->
+        state
+          { lsEntries = Map.insert qualifiedName blockId state.lsEntries,
+            lsTopLevelQNames = Map.insert variableId qualifiedName state.lsTopLevelQNames
+          }
 
 lowerAllDeclarations :: ZonkResult -> Lower (Map Text BlockId)
 lowerAllDeclarations zonkResult = do
@@ -949,7 +986,7 @@ lowerExpr = \case
     emit $
       StatementCall
         CallData
-          { target = CallTargetBlock {block = blockId},
+          { block = blockId,
             arguments = [Arg "object" object, Arg "field" fieldVar],
             output = Just out
           }
@@ -962,7 +999,7 @@ lowerExpr = \case
     emit $
       StatementCall
         CallData
-          { target = CallTargetBlock {block = blockId},
+          { block = blockId,
             arguments = [Arg "array" array, Arg "index" index],
             output = Just out
           }
@@ -984,90 +1021,23 @@ lowerExpr = \case
       qualifiedRefExpr.target.text
       (Just qualifiedRefExpr.target.text)
 
--- | Lower a function call. Dispatches by the callee's resolution kind:
---
---   * Top-level agent → 'StatementAgentCall' (core→core delegate event).
---   * Top-level non-agent (prim / ctor / external-agent) →
---     'StatementCall' with 'CallTargetBlock'.
---   * Local var (= closure-of-agent) or any computed callee →
---     'StatementAgentCallClosure'.
+-- | Lower a function call. The callee is always evaluated to a value
+-- (an @agentLiteral@ for top-level callables, a @closure@ for local
+-- agents, or whatever an arbitrary expression produces); the runtime
+-- dispatches on the value's variant. Inline (structural) block
+-- invocations — @match@ arms, @for@ bodies, @where@ scopes, etc. —
+-- are emitted by their respective lowering helpers, not by this path.
 lowerCall :: AST.CallExpression Zonked -> Lower VarId
 lowerCall callExpression = do
   argVars <- mapM (lowerExpr . (.value)) callExpression.arguments
   let callArgs = zipWith Arg (map (.label.text) callExpression.arguments) argVars
+  calleeVar <- lowerExpr callExpression.callee
   out <- freshVarId Nothing
-  callee <- resolveCalleeKind callExpression.callee
-  case callee of
-    CalleeAgent qname ->
-      emit
-        ( StatementAgentCall
-            AgentCallData {target = qname, arguments = callArgs, output = Just out}
-        )
-    CalleeBlock blockId ->
-      emit
-        ( StatementCall
-            CallData {target = CallTargetBlock {block = blockId}, arguments = callArgs, output = Just out}
-        )
-    CalleeClosure varId ->
-      emit
-        ( StatementAgentCallClosure
-            AgentCallClosureData {target = varId, arguments = callArgs, output = Just out}
-        )
+  emit
+    ( StatementAgentCall
+        AgentCallData {target = calleeVar, arguments = callArgs, output = Just out}
+    )
   pure out
-
--- | Result of resolving a callee. The dispatch decision is encoded in
--- the constructor; the IR emit is a switch over this.
-data CalleeKind where
-  CalleeAgent :: QualifiedName -> CalleeKind
-  CalleeBlock :: BlockId -> CalleeKind
-  CalleeClosure :: VarId -> CalleeKind
-
-resolveCalleeKind :: AST.Expression Zonked -> Lower CalleeKind
-resolveCalleeKind = \case
-  AST.ExpressionVariable variableExpression ->
-    resolveNameAsCallee
-      True
-      variableExpression.name.resolution
-      variableExpression.sourceSpan
-      variableExpression.name.text
-  AST.ExpressionQualifiedReference qualifiedRefExpr ->
-    resolveNameAsCallee
-      False
-      qualifiedRefExpr.target.resolution
-      qualifiedRefExpr.sourceSpan
-      qualifiedRefExpr.target.text
-  other -> do
-    var <- lowerExpr other
-    pure (CalleeClosure var)
-
--- | Resolve a 'NameRef' callee: locals → closure call; top-level agents →
--- core→core delegate; top-level non-agents → block call. Records an
--- error and returns a closure-of-fresh-var fallback when the name is
--- unresolved.
-resolveNameAsCallee ::
-  Bool ->
-  AST.NameRefResolution Zonked AST.VariableRef ->
-  SourceSpan ->
-  Text ->
-  Lower CalleeKind
-resolveNameAsCallee canBeLocal resolution sourceSpan nameText = do
-  resolved <- resolveVariable canBeLocal resolution sourceSpan nameText
-  case resolved of
-    ResolvedVarLocal irVar -> pure (CalleeClosure irVar)
-    ResolvedVarTopLevel blockId -> do
-      -- Top-level callable: if it's a user-defined agent, dispatch by
-      -- qualified name through core→core; otherwise (prim / ctor /
-      -- external-agent) call its block directly.
-      case resolution of
-        Just variableId -> do
-          mAgentName <- gets (Map.lookup variableId . (.lsAgentNames))
-          case mAgentName of
-            Just qname -> pure (CalleeAgent qname)
-            Nothing -> pure (CalleeBlock blockId)
-        Nothing -> pure (CalleeBlock blockId)
-    ResolvedVarUnresolved -> do
-      v <- freshVarId Nothing
-      pure (CalleeClosure v)
 
 -- | Lower an 'AST.TemplateExpression' as a left-fold of @concat@ prim
 -- calls.
@@ -1087,7 +1057,7 @@ lowerTemplate templateExpression = do
       emit $
         StatementCall
           CallData
-            { target = CallTargetBlock {block = blockId},
+            { block = blockId,
               arguments = [Arg "value" v],
               output = Just out
             }
@@ -1100,7 +1070,7 @@ lowerTemplate templateExpression = do
       emit $
         StatementCall
           CallData
-            { target = CallTargetBlock {block = blockId},
+            { block = blockId,
               arguments = [Arg "lhs" lhs, Arg "rhs" rhs],
               output = Just out
             }
@@ -1125,7 +1095,7 @@ lowerBlockExpr blockExpression = do
   emit $
     StatementCall
       CallData
-        { target = CallTargetBlock {block = childBlockId},
+        { block = childBlockId,
           arguments = [],
           output = Just out
         }
@@ -1170,7 +1140,7 @@ lowerIfExpr ifExpression = do
   emit $
     StatementCall
       CallData
-        { target = CallTargetBlock {block = matchBlockId},
+        { block = matchBlockId,
           arguments = [],
           output = Just out
         }
@@ -1204,7 +1174,7 @@ lowerMatchExpr matchExpression = do
   emit $
     StatementCall
       CallData
-        { target = CallTargetBlock {block = matchBlockId},
+        { block = matchBlockId,
           arguments = [],
           output = Just out
         }
@@ -1304,7 +1274,7 @@ lowerForExpr forExpression = do
   emit $
     StatementCall
       CallData
-        { target = CallTargetBlock {block = forBlockId},
+        { block = forBlockId,
           arguments = [],
           output = Just out
         }
@@ -1381,7 +1351,7 @@ lowerTupleExpr isParallel elements = do
   emit $
     StatementCall
       CallData
-        { target = CallTargetBlock {block = tupleBlockId},
+        { block = tupleBlockId,
           arguments = [],
           output = Just out
         }
@@ -1403,7 +1373,7 @@ lowerArrayExpr isParallel elements = do
   emit $
     StatementCall
       CallData
-        { target = CallTargetBlock {block = arrayBlockId},
+        { block = arrayBlockId,
           arguments = [],
           output = Just out
         }
@@ -1458,7 +1428,7 @@ lowerHandleExpr handleExpr = do
     emit $
       StatementCall
         CallData
-          { target = CallTargetBlock {block = handleBlockId},
+          { block = handleBlockId,
             arguments = [],
             output = Just out
           }

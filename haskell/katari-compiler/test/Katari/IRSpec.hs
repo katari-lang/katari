@@ -117,7 +117,7 @@ statementSpec = describe "Statement (sum)" $ do
   it "StatementCall nests CallData under 'body'" $ do
     StatementCall
       CallData
-        { target = CallTargetBlock {block = BlockId 7},
+        { block = BlockId 7,
           arguments = [Arg {label = "x", var = VarId 1}],
           output = Just (VarId 2)
         }
@@ -125,7 +125,7 @@ statementSpec = describe "Statement (sum)" $ do
         [ "kind" .= ("statementCall" :: String),
           "body"
             .= object
-              [ "target" .= object ["kind" .= ("callTargetBlock" :: String), "block" .= (7 :: Int)],
+              [ "block" .= (7 :: Int),
                 "arguments" .= [object ["label" .= ("x" :: String), "var" .= (1 :: Int)]],
                 "output" .= (2 :: Int)
               ]
@@ -184,13 +184,16 @@ statementSpec = describe "Statement (sum)" $ do
     roundTrip $
       StatementCall
         CallData
-          { target = CallTargetValue (VarId 0),
+          { block = BlockId 0,
             arguments = [],
             output = Nothing
           }
     roundTrip $ StatementMakeClosure MakeClosureData {output = VarId 0, block = BlockId 0}
     roundTrip $
       StatementLoadLiteral LoadLiteralData {output = VarId 0, value = LiteralValueInteger 0}
+    roundTrip $
+      StatementAgentCall
+        AgentCallData {target = VarId 0, arguments = [], output = Nothing}
     roundTrip $ StatementExit ExitData {exitKind = ExitKindBreak, value = VarId 0}
     roundTrip $ StatementCont ContData {contKind = ContKindNext, value = Just (VarId 0), modifiers = []}
     roundTrip $ StatementBindPattern BindPatternData {source = VarId 0, pattern = MatchPatternAny}
@@ -201,20 +204,21 @@ statementSpec = describe "Statement (sum)" $ do
     roundTrip (LiteralValueString "hello")
     roundTrip (LiteralValueBoolean True)
     roundTrip LiteralValueNull
+    roundTrip (LiteralValueAgent (QualifiedName "main" "foo"))
 
 callTargetSpec :: Spec
-callTargetSpec = describe "CallTarget" $ do
-  it "CallTargetBlock encodes as kind=block" $ do
-    CallTargetBlock (BlockId 5)
-      `shouldEncodeAs` object ["kind" .= ("callTargetBlock" :: String), "block" .= (5 :: Int)]
-
-  it "CallTargetValue encodes as kind=value" $ do
-    CallTargetValue (VarId 7)
-      `shouldEncodeAs` object ["kind" .= ("callTargetValue" :: String), "var" .= (7 :: Int)]
-
-  it "round-trips both variants" $ do
-    roundTrip (CallTargetBlock (BlockId 0))
-    roundTrip (CallTargetValue (VarId 0))
+callTargetSpec = describe "CallData (inline block target)" $ do
+  it "encodes block id directly under body" $ do
+    StatementCall
+      CallData {block = BlockId 5, arguments = [], output = Nothing}
+      `shouldEncodeAs` object
+        [ "kind" .= ("statementCall" :: String),
+          "body"
+            .= object
+              [ "block" .= (5 :: Int),
+                "arguments" .= ([] :: [Aeson.Value])
+              ]
+        ]
 
 exitContSpec :: Spec
 exitContSpec = describe "ExitKind / ContKind" $ do

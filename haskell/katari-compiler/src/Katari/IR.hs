@@ -57,13 +57,11 @@ module Katari.IR
     Statement (..),
     CallData (..),
     AgentCallData (..),
-    AgentCallClosureData (..),
     MakeClosureData (..),
     ExitData (..),
     ContData (..),
     LoadLiteralData (..),
     LiteralValue (..),
-    CallTarget (..),
     Arg (..),
     BindPatternData (..),
     ExitKind (..),
@@ -371,20 +369,15 @@ data Statement where
   -- 'BlockMatch' there is no @defaultArm@; the pattern is irrefutable
   -- (guaranteed by the exhaustiveness checker — K0291 / Phase 16).
   StatementBindPattern :: BindPatternData -> Statement
-  -- | Cross-agent call by 'QualifiedName'. Lowering emits this for
-  -- top-level agent invocations (replacing inline 'StatementCall' with
-  -- 'CallTargetBlock'). At runtime the engine emits a @core→core@
-  -- delegate event that spawns an 'AgentThread' for the resolved entry,
-  -- then feeds the result back as a delegateAck.
-  --
-  -- Phase 3.1 (additive): the variant exists but Lowering does not emit
-  -- it yet. Phase 3.7 enables emission.
+  -- | Value-targeted callable invocation. The @target@ 'VarId' holds either
+  -- an @agentLiteral@ value (top-level callable: agent / prim / ctor /
+  -- external — the runtime resolves it to a 'BlockId' via 'IRModule.entries')
+  -- or a @closure@ value (local agent — the runtime resolves the
+  -- @ClosureId@ via the closures table, which also supplies the captured
+  -- parent scope). In all cases the runtime emits a @core→core@ delegate
+  -- event that spawns the appropriate child execution and feeds the
+  -- result back as a delegateAck.
   StatementAgentCall :: AgentCallData -> Statement
-  -- | Cross-agent call via a closure value. The 'target' 'VarId' holds a
-  -- closure value whose @ClosureId@ identifies which 'AgentBlock' to
-  -- start. Same @core→core@ delegate event mechanics as
-  -- 'StatementAgentCall'.
-  StatementAgentCallClosure :: AgentCallClosureData -> Statement
   deriving (Eq, Show, Generic)
 
 instance ToJSON Statement where
@@ -393,9 +386,13 @@ instance ToJSON Statement where
 instance FromJSON Statement where
   parseJSON = genericParseJSON sumOptions
 
--- | Payload for 'SCall'.
+-- | Payload for 'SCall'. After the agent-value redesign, 'SCall' targets
+-- a statically known inline (structural) block — its body inherits the
+-- caller's lexical scope (match arm body / for body / handle scope /
+-- handler body / tuple / array / etc.). Cross-callable invocations
+-- flow through 'StatementAgentCall' instead.
 data CallData = CallData
-  { target :: CallTarget,
+  { block :: BlockId,
     arguments :: [Arg],
     -- | Output var receives the callee's trailing value. 'Nothing' = drop.
     output :: Maybe VarId
@@ -408,12 +405,13 @@ instance ToJSON CallData where
 instance FromJSON CallData where
   parseJSON = genericParseJSON irOptions
 
--- | Payload for 'StatementAgentCall'. Cross-agent dispatch by qualified
--- name. The runtime resolves the name through 'IRModule.entries' (or
--- through cross-module dispatch in a future round), allocates a fresh
--- delegationId, and sends a @core→core@ delegate event.
+-- | Payload for 'StatementAgentCall'. The 'target' 'VarId' holds the
+-- callable value (@agentLiteral@ → resolved via 'IRModule.entries';
+-- @closure@ → resolved via the closures table, supplying the captured
+-- parent scope). The runtime allocates a fresh delegationId and sends
+-- a @core→core@ delegate event regardless of variant.
 data AgentCallData = AgentCallData
-  { target :: QualifiedName,
+  { target :: VarId,
     arguments :: [Arg],
     output :: Maybe VarId
   }
@@ -423,22 +421,6 @@ instance ToJSON AgentCallData where
   toJSON = genericToJSON irOptions
 
 instance FromJSON AgentCallData where
-  parseJSON = genericParseJSON irOptions
-
--- | Payload for 'StatementAgentCallClosure'. The 'target' 'VarId' holds
--- a closure value; the runtime resolves its @ClosureId@ through the
--- machine-local closures table to find the underlying 'AgentBlock'.
-data AgentCallClosureData = AgentCallClosureData
-  { target :: VarId,
-    arguments :: [Arg],
-    output :: Maybe VarId
-  }
-  deriving (Eq, Show, Generic)
-
-instance ToJSON AgentCallClosureData where
-  toJSON = genericToJSON irOptions
-
-instance FromJSON AgentCallClosureData where
   parseJSON = genericParseJSON irOptions
 
 -- | Payload for 'SMakeClosure'. The closure captures its lexical scope at
@@ -613,20 +595,6 @@ instance ToJSON BindPatternData where
 
 instance FromJSON BindPatternData where
   parseJSON = genericParseJSON irOptions
-
--- | Resolution of an 'SCall' target.
-data CallTarget where
-  -- | Statically known target (top-level agent / req / ext / ctor / prim).
-  CallTargetBlock :: {block :: BlockId} -> CallTarget
-  -- | Dynamic target via a closure value.
-  CallTargetValue :: {var :: VarId} -> CallTarget
-  deriving (Eq, Show, Generic)
-
-instance ToJSON CallTarget where
-  toJSON = genericToJSON sumOptions
-
-instance FromJSON CallTarget where
-  parseJSON = genericParseJSON sumOptions
 
 data Arg = Arg
   { label :: Text,

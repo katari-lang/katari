@@ -160,13 +160,11 @@ export type LiteralValue =
   | { kind: "literalValueNumber"; number: number }
   | { kind: "literalValueString"; string: string }
   | { kind: "literalValueBoolean"; boolean: boolean }
-  | { kind: "literalValueNull" };
-
-// ─── CallTarget (sumOptions, GADT record ctors → flat) ───────────────────────
-
-export type CallTarget =
-  | { kind: "callTargetBlock"; block: BlockId }
-  | { kind: "callTargetValue"; var: VarId };
+  | { kind: "literalValueNull" }
+  // Reference to a top-level callable (agent / prim / ctor / external).
+  // The runtime resolves `qualifiedName` through `IRModule.entries` to
+  // a `BlockId` on dispatch; the value carries no captured scope.
+  | { kind: "literalValueAgent"; qualifiedName: QualifiedName };
 
 // ─── MatchPattern (sumOptions, "body" payload key) ─────────────────────────
 
@@ -190,33 +188,29 @@ export type MatchArm = {
 
 // ─── Statement payload types (irOptions → flat record) ───────────────────────
 
+/**
+ * Payload for `statementCall` — invocation of an inline (structural)
+ * block whose body inherits the caller's lexical scope. Used for
+ * match-arm bodies, for-loop bodies, handle scopes, tuple / array
+ * constructions, and compiler-internal prim calls. Cross-callable
+ * invocations flow through `statementAgentCall` instead.
+ */
 export type CallData = {
-  target: CallTarget;
+  block: BlockId;
   arguments: Arg[];
   output?: VarId;
 };
 
 /**
- * Payload for `statementAgentCall` — cross-agent dispatch by qualified
- * name. Runtime resolves the name through `IRModule.entries`, allocates
- * a fresh delegationId, and emits a `core→core` delegate event that
- * spawns an `AgentThread`.
- *
- * Phase 3.1 (additive): the type is mirrored but Lowering does not yet
- * emit it. Phase 3.7 enables emission.
+ * Payload for `statementAgentCall` — value-targeted callable dispatch.
+ * The `target` `VarId` holds either an `agentLiteral` value (a
+ * top-level callable: agent / prim / ctor / external — runtime resolves
+ * via `IRModule.entries`) or a `closure` value (a local agent — runtime
+ * resolves via the closures table, which also supplies the captured
+ * parent scope). In all cases the runtime emits a `core→core` delegate
+ * event that spawns the appropriate child execution.
  */
 export type AgentCallData = {
-  target: QualifiedName;
-  arguments: Arg[];
-  output?: VarId;
-};
-
-/**
- * Payload for `statementAgentCallClosure`. The `target` `VarId` holds a
- * closure value; the runtime resolves its `closureId` through the
- * machine-local closures table to find the underlying `AgentBlock`.
- */
-export type AgentCallClosureData = {
   target: VarId;
   arguments: Arg[];
   output?: VarId;
@@ -314,5 +308,4 @@ export type Statement =
   | { kind: "statementExit"; body: ExitData }
   | { kind: "statementCont"; body: ContData }
   | { kind: "statementBindPattern"; body: BindPatternData }
-  | { kind: "statementAgentCall"; body: AgentCallData }
-  | { kind: "statementAgentCallClosure"; body: AgentCallClosureData };
+  | { kind: "statementAgentCall"; body: AgentCallData };

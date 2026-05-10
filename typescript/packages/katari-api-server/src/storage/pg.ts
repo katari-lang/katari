@@ -551,6 +551,32 @@ class PgFfiPendingEscalationRepo implements FfiPendingEscalationRepo {
     `;
     return result.count > 0;
   }
+
+  async listBySnapshot(snapshotId: SnapshotId): Promise<FfiPendingEscalation[]> {
+    const rows = await this.sql<
+      {
+        escalation_id: string;
+        delegation_id: string;
+        snapshot_id: string;
+        peer_endpoint: string;
+        agent_def_id: AgentDefId;
+        args: Record<string, Value>;
+        created_at: Date;
+      }[]
+    >`
+      SELECT escalation_id, delegation_id, snapshot_id, peer_endpoint, agent_def_id, args, created_at
+      FROM ffi_pending_escalations WHERE snapshot_id = ${snapshotId}
+    `;
+    return rows.map((row) => ({
+      escalationId: row.escalation_id as EscalationId,
+      delegationId: row.delegation_id as DelegationId,
+      snapshotId: row.snapshot_id as SnapshotId,
+      peerEndpoint: row.peer_endpoint,
+      agentDefId: row.agent_def_id,
+      args: row.args,
+      createdAt: row.created_at.toISOString(),
+    }));
+  }
 }
 
 class PgApiPendingEscalationRepo implements ApiPendingEscalationRepo {

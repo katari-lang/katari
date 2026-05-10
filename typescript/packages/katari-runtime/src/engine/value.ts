@@ -5,7 +5,7 @@
 //   - GC can collect closures when no Value still references the id
 //   - keeps Value purely structural, no captured state inside the type
 
-import type { CtorId, LiteralValue } from "../ir/types.js";
+import type { CtorId, LiteralValue, QualifiedName } from "../ir/types.js";
 import type { ClosureId } from "./id.js";
 
 export type Value =
@@ -16,7 +16,13 @@ export type Value =
   | { kind: "tuple"; elements: Value[] }
   | { kind: "array"; elements: Value[] }
   | { kind: "tagged"; ctorId: CtorId; fields: Record<string, Value> }
-  | { kind: "closure"; closureId: ClosureId };
+  | { kind: "closure"; closureId: ClosureId }
+  // Top-level callable reference (agent / prim / ctor / external).
+  // Carries only the qualified name; the runtime resolves it through
+  // IRModule.entries on dispatch. Distinct from `closure` in that it
+  // captures no lexical scope — GC reachability is bounded by the
+  // value alone.
+  | { kind: "agentLiteral"; qualifiedName: QualifiedName };
 
 /** Convert an IR LiteralValue to a runtime Value. */
 export function literalToValue(literal: LiteralValue): Value {
@@ -31,6 +37,8 @@ export function literalToValue(literal: LiteralValue): Value {
       return { kind: "boolean", value: literal.boolean };
     case "literalValueNull":
       return { kind: "null" };
+    case "literalValueAgent":
+      return { kind: "agentLiteral", qualifiedName: literal.qualifiedName };
   }
 }
 

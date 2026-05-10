@@ -329,6 +329,9 @@ literalTag = \case
   LiteralValueBoolean b -> CtorTagLitBool b
   LiteralValueNull -> CtorTagNull
   LiteralValueNumber _ -> CtorTagLitStr "(number)"
+  -- 'LiteralValueAgent' is an IR-only literal produced by Lowering; the
+  -- AST exhaustiveness checker should never encounter one.
+  LiteralValueAgent _ -> error "literalTag: LiteralValueAgent should not appear in AST patterns"
 
 -- | Extract the semantic type from any 'AST.Expression Zonked'.
 getExpressionType :: AST.Expression Zonked -> SemanticType Resolved

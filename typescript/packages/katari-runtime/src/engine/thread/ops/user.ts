@@ -91,7 +91,6 @@ function outputVarOf(stmt: Statement): VarId | undefined {
   switch (stmt.kind) {
     case "statementCall":
     case "statementAgentCall":
-    case "statementAgentCallClosure":
       return stmt.body.output;
     default:
       return undefined;
@@ -220,33 +219,25 @@ function handleStatement(
     case "statementAgentCall": {
       const callId = t.pc as CallId;
       t.pc += 1;
-      const args: Record<string, Value> = {};
-      for (const a of stmt.body.arguments) {
-        args[a.label] = lookupValue(ctx, t.scopeId, a.var);
-      }
-      pushAgentDelegate(
-        ctx,
-        t,
-        callId,
-        args,
-        encodeCoreAgentDefId({
+      const value = lookupValue(ctx, t.scopeId, stmt.body.target);
+      let agentDefId: AgentDefId;
+      if (value.kind === "agentLiteral") {
+        agentDefId = encodeCoreAgentDefId({
           kind: "qname",
           value: {
-            module_: stmt.body.target.module_,
-            name: stmt.body.target.name,
+            module_: value.qualifiedName.module_,
+            name: value.qualifiedName.name,
           },
-        }),
-      );
-      return "wait";
-    }
-    case "statementAgentCallClosure": {
-      const callId = t.pc as CallId;
-      t.pc += 1;
-      const closureValue = lookupValue(ctx, t.scopeId, stmt.body.target);
-      if (closureValue.kind !== "closure") {
+        });
+      } else if (value.kind === "closure") {
+        agentDefId = encodeCoreAgentDefId({
+          kind: "closure",
+          value: value.closureId,
+        });
+      } else {
         ctx.recordError(
           new RecoverableEngineError(
-            `engine.user: statementAgentCallClosure expected closure, got ${closureValue.kind}`,
+            `engine.user: statementAgentCall expected agentLiteral or closure, got ${value.kind}`,
           ),
         );
         return "wait";
@@ -255,16 +246,7 @@ function handleStatement(
       for (const a of stmt.body.arguments) {
         args[a.label] = lookupValue(ctx, t.scopeId, a.var);
       }
-      pushAgentDelegate(
-        ctx,
-        t,
-        callId,
-        args,
-        encodeCoreAgentDefId({
-          kind: "closure",
-          value: closureValue.closureId,
-        }),
-      );
+      pushAgentDelegate(ctx, t, callId, args, agentDefId);
       return "wait";
     }
   }
@@ -316,54 +298,21 @@ function pushCallEvent(
   call: CallData,
 ): void {
   const args = resolveArgs(ctx, t.scopeId, call);
-  switch (call.target.kind) {
-    case "callTargetBlock": {
-      const block = ctx.state.irModule.blocks[String(call.target.block)] as Block | undefined;
-      if (block === undefined) {
-        throw new Error(`engine.user: block ${call.target.block} not found`);
-      }
-      const scopeMode = isStructuralBlock(block.kind)
-        ? { mode: "inline" as const, parentScopeId: t.scopeId }
-        : { mode: "isolated" as const };
-      const childId = spawnChild(ctx, {
-        parentId: t.id,
-        parentCallId: callId,
-        blockId: call.target.block as BlockId,
-        callArgs: args,
-        scopeMode,
-      });
-      writeArgsIntoChildScope(ctx, childId, block, args);
-      return;
-    }
-    case "callTargetValue": {
-      const value = lookupValue(ctx, t.scopeId, call.target.var);
-      if (value.kind !== "closure") {
-        ctx.recordError(
-          new RecoverableEngineError(
-            `engine.user: callTargetValue expected closure, got ${value.kind}`,
-          ),
-        );
-        return;
-      }
-      const closure = ctx.state.closures[value.closureId as unknown as number];
-      if (closure === undefined) {
-        throw new Error(`engine.user: closure ${value.closureId} not found`);
-      }
-      const calledBlock = ctx.state.irModule.blocks[String(closure.blockId)] as Block | undefined;
-      if (calledBlock === undefined) {
-        throw new Error(`engine.user: block ${closure.blockId} not found (closure call)`);
-      }
-      const childId = spawnChild(ctx, {
-        parentId: t.id,
-        parentCallId: callId,
-        blockId: closure.blockId as BlockId,
-        callArgs: args,
-        scopeMode: { mode: "captured", capturedScopeId: closure.scopeId },
-      });
-      writeArgsIntoChildScope(ctx, childId, calledBlock, args);
-      return;
-    }
+  const block = ctx.state.irModule.blocks[String(call.block)] as Block | undefined;
+  if (block === undefined) {
+    throw new Error(`engine.user: block ${call.block} not found`);
   }
+  const scopeMode = isStructuralBlock(block.kind)
+    ? { mode: "inline" as const, parentScopeId: t.scopeId }
+    : { mode: "isolated" as const };
+  const childId = spawnChild(ctx, {
+    parentId: t.id,
+    parentCallId: callId,
+    blockId: call.block as BlockId,
+    callArgs: args,
+    scopeMode,
+  });
+  writeArgsIntoChildScope(ctx, childId, block, args);
 }
 
 function isStructuralBlock(kind: Block["kind"]): boolean {

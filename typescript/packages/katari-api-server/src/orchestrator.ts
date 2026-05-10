@@ -4,7 +4,7 @@
 //
 //   1. snapshot の row lock を取る (withTransaction + withSnapshotLock)
 //   2. CoreModule を engine_checkpoints から load
-//   3. ApiModule / FfiModule は per-tick で tx を抱えて作成 (load 不要)
+//   3. ApiModule / FfiModule は per-tick で tx を抱えて作成
 //   4. ExternalEventBus に 3 module を register
 //   5. caller (HTTP route, または sidecar dispatcher) が初期 event を push
 //   6. bus.drain() で全 event chain を解消
@@ -12,29 +12,24 @@
 //   8. commit
 //
 // FFI sidecar 応答は async に起きるので、orchestrator は SidecarManager の
-// `setMessageHandler` 経由で「sidecar からの ChildToParent → ExternalEvent」
-// 変換を引き受け、新しい tick を起こす。
-//
-// このパターンにより:
-//   - api-server レイヤは in-memory state を持たない (= sidecar process 以外)
-//   - 1 request 中の event chain は all-or-nothing で commit される
-//   - long-running な FFI invoke は別 tick で resume するので request 自体は
-//     早く返せる
+// `setMessageHandler` 経由で「sidecar からの ChildToParent → tick 起動」
+// 変換を引き受ける。
 
 import {
-  decodeFfiAgentDefId,
-  encodeFfiAgentDefId,
+  CORE_ENDPOINT,
+  CoreModule,
   ExternalEventBus,
+  FFI_ENDPOINT,
+  FfiModule,
+  type ChildToParent,
   type ExternalEvent,
   type Logger,
-  type Value,
+  type SidecarBundle,
+  type SidecarManager,
+  type Sidecar,
 } from "katari-runtime";
-import { CoreModule } from "katari-runtime";
-import type { ChildToParent } from "katari-runtime/dist/sidecar/types.js";
 import { ApiModule } from "./modules/api-module.js";
-import { CORE_ENDPOINT, FFI_ENDPOINT } from "./modules/endpoints.js";
-import { FfiModule } from "./modules/ffi-module.js";
-import type { SidecarManager } from "./modules/sidecar-manager.js";
+import { StorageFfiStore } from "./modules/ffi-store.js";
 import type {
   SnapshotId,
   Storage,
@@ -58,7 +53,7 @@ export type TickContext = {
 export class Orchestrator {
   constructor(
     private readonly storage: Storage,
-    private readonly sidecarManager: SidecarManager,
+    private readonly sidecarManager: SidecarManager<SnapshotId>,
     private readonly logger: Logger,
   ) {
     sidecarManager.setMessageHandler((snapshotId, msg) =>
@@ -66,11 +61,6 @@ export class Orchestrator {
     );
   }
 
-  /**
-   * One tick of request processing for `snapshotId`. The user `fn`
-   * pushes initial events into `ctx.bus` (= via `ApiModule.startAgent`
-   * etc.) and returns whatever the HTTP layer needs.
-   */
   async tick<T>(
     snapshotId: SnapshotId,
     fn: (ctx: TickContext) => Promise<T>,
@@ -80,9 +70,9 @@ export class Orchestrator {
         const snapshot = await tx.snapshots.get(snapshotId);
         if (snapshot === null) throw new SnapshotNotFound(snapshotId);
 
-        // Make sure the sidecar exists (idempotent).
+        // Make sure the sidecar process exists (idempotent).
         await this.sidecarManager.ensureStarted({
-          snapshotId,
+          key: snapshotId,
           bundle: snapshot.sidecarBundle,
         });
 
@@ -93,19 +83,36 @@ export class Orchestrator {
           logger: this.logger,
         });
         const api = new ApiModule({ snapshotId, tx, logger: this.logger });
-        const ffi = new FfiModule({
-          snapshotId,
-          tx,
-          sidecarManager: this.sidecarManager,
-          logger: this.logger,
-        });
 
         const bus = new ExternalEventBus(this.logger);
-        bus.registerAll([
-          { name: "api", module: api },
-          { name: "core", module: core },
-          { name: "ffi", module: ffi },
-        ]);
+
+        // FfiModule は scope-bound な FfiStore + 該当 sidecar を渡す。
+        // sidecar が無い snapshot の場合は ffi module 自体を register しない。
+        const sidecar = this.sidecarFor(snapshotId);
+        let ffi: FfiModule;
+        if (sidecar !== null) {
+          const store = new StorageFfiStore(tx, snapshotId);
+          ffi = new FfiModule({
+            endpoint: FFI_ENDPOINT,
+            sidecar,
+            store,
+            logger: this.logger,
+            onSidecarResponse: (event) => bus.push(event),
+          });
+          bus.registerAll([
+            { name: "api", module: api },
+            { name: "core", module: core },
+            { name: "ffi", module: ffi },
+          ]);
+        } else {
+          // FFI を持たない snapshot 用に空の placeholder を用意 (= type
+          // satisfaction)。delegate が来ても bus が "no module" warn を出す。
+          ffi = makeNoOpFfi();
+          bus.registerAll([
+            { name: "api", module: api },
+            { name: "core", module: core },
+          ]);
+        }
 
         await core.load({ coreCheckpoints: tx.checkpoints });
 
@@ -122,59 +129,110 @@ export class Orchestrator {
   }
 
   /**
-   * Sidecar からの child→parent message を ExternalEvent に変換し、新しい
-   * tick を起こす。
-   *
-   * Sidecar message → ExternalEvent への変換:
-   *   - delegateAck     → FFI → CORE delegateAck
-   *   - delegateError   → FFI → CORE delegateAck (with error sentinel
-   *                                                value? for now, log + drop)
-   *   - terminateAck    → FFI → CORE terminateAck
-   *   - escalate        → FFI → CORE escalate
-   *
-   * `from` は FFI_ENDPOINT、`to` は元の peer (DB の peer_endpoint) を使う。
-   * sidecar が知っているのは delegationId だけなので、peer は DB から逆引き。
+   * Boot 時: running/cancelling agent を持つ snapshot に対して subprocess
+   * を spawn し、in-flight delegation について `restoredDelegate` を sidecar
+   * に送る (FfiModule.recoverInflight)。
    */
+  async recoverOnBoot(): Promise<void> {
+    const snapshotIds = await this.storage.agents.listRunningSnapshotIds();
+    for (const snapshotId of snapshotIds) {
+      const snapshot = await this.storage.snapshots.get(snapshotId);
+      if (snapshot === null) continue;
+      await this.sidecarManager.ensureStarted({
+        key: snapshotId,
+        bundle: snapshot.sidecarBundle,
+      });
+      const sidecar = this.sidecarFor(snapshotId);
+      if (sidecar === null) continue;
+      // recoverInflight needs an FfiModule + FfiStore bound to this snapshot.
+      // Run inside a short tx so the store reads are consistent.
+      await this.storage.withTransaction(async (tx) => {
+        const store = new StorageFfiStore(tx, snapshotId);
+        const ffi = new FfiModule({
+          endpoint: FFI_ENDPOINT,
+          sidecar,
+          store,
+          logger: this.logger,
+          // Sidecar responses produced during recoverInflight will be
+          // routed when the next tick fires (= next sidecar message
+          // handler invocation). Here we drop synchronous sidecar
+          // responses; the real responses come back asynchronously
+          // through `setMessageHandler`.
+          onSidecarResponse: () => {},
+        });
+        await ffi.recoverInflight();
+      });
+    }
+  }
+
+  // ─── Sidecar message handler ────────────────────────────────────────────
+
   private async onSidecarMessage(
     snapshotId: SnapshotId,
     msg: ChildToParent,
   ): Promise<void> {
-    const event = await this.sidecarMessageToEvent(snapshotId, msg);
-    if (event === null) return;
+    // Run a fresh tick that lets the per-tick FfiModule see this message
+    // and translate it into an ExternalEvent push on the bus. We
+    // re-attach the message handler to the per-tick FfiModule by
+    // replaying the message after FfiModule.feed sets up its own
+    // onMessage subscription.
+    //
+    // Simplest approach: open a tick whose body manually invokes
+    // ffi.dispatchSidecarMessage. We expose that via a thin helper on
+    // FfiModule (not yet — for now, push the equivalent event directly).
+    //
+    // For v1 we reconstruct the event from the message via the
+    // FfiStore peer lookup, then push onto the per-tick bus.
     await this.tick(snapshotId, async (ctx) => {
-      ctx.bus.push(event);
+      const event = await this.sidecarMessageToEvent(ctx.tx, snapshotId, msg);
+      if (event !== null) ctx.bus.push(event);
+    }).catch((err) => {
+      this.logger.log("error", "orchestrator: tick failed for sidecar message", {
+        snapshotId,
+        type: msg.type,
+        err: err instanceof Error ? err.message : String(err),
+      });
     });
   }
 
   private async sidecarMessageToEvent(
+    tx: Storage,
     snapshotId: SnapshotId,
     msg: ChildToParent,
   ): Promise<ExternalEvent | null> {
+    const lookupPeer = async (
+      delegationId: import("katari-runtime").DelegationId,
+    ): Promise<import("katari-runtime").Endpoint | null> => {
+      const row = await tx.ffiDelegations.get(delegationId);
+      if (row === null || row.snapshotId !== snapshotId) return null;
+      return row.peerEndpoint as import("katari-runtime").Endpoint;
+    };
     switch (msg.type) {
+      case "ready":
+      case "log":
+        return null;
       case "delegateAck": {
-        const peer = await this.lookupDelegationPeer(msg.delegationId);
+        const peer = await lookupPeer(msg.delegationId);
         if (peer === null) return null;
+        await tx.ffiDelegations.delete(msg.delegationId);
         return {
           from: FFI_ENDPOINT,
           to: peer,
           payload: {
             kind: "delegateAck",
             delegationId: msg.delegationId,
-            value: msg.value as Value,
+            value: msg.value,
           },
         };
       }
       case "delegateError": {
-        // Surface as a recoverable failure: turn the in-flight FFI
-        // delegation into a `terminateAck` and let CORE error out the
-        // calling agent. Future work: dedicated `delegateError` event in
-        // the 6-event protocol.
-        const peer = await this.lookupDelegationPeer(msg.delegationId);
+        const peer = await lookupPeer(msg.delegationId);
         this.logger.log("warn", "ffi sidecar delegate failed", {
           delegationId: msg.delegationId,
           message: msg.message,
         });
         if (peer === null) return null;
+        await tx.ffiDelegations.delete(msg.delegationId);
         return {
           from: FFI_ENDPOINT,
           to: peer,
@@ -185,8 +243,9 @@ export class Orchestrator {
         };
       }
       case "terminateAck": {
-        const peer = await this.lookupDelegationPeer(msg.delegationId);
+        const peer = await lookupPeer(msg.delegationId);
         if (peer === null) return null;
+        await tx.ffiDelegations.delete(msg.delegationId);
         return {
           from: FFI_ENDPOINT,
           to: peer,
@@ -197,16 +256,15 @@ export class Orchestrator {
         };
       }
       case "escalate": {
-        const peer = await this.lookupDelegationPeer(msg.delegationId);
+        const peer = await lookupPeer(msg.delegationId);
         if (peer === null) return null;
-        // Persist the FFI's outbound escalate so terminations can clean up.
-        await this.storage.ffiEscalations.insert({
+        await tx.ffiEscalations.insert({
           escalationId: msg.escalationId,
           delegationId: msg.delegationId,
           snapshotId,
           peerEndpoint: peer,
           agentDefId: msg.agentDefId,
-          args: msg.args as Record<string, Value>,
+          args: msg.args,
           createdAt: new Date().toISOString(),
         });
         return {
@@ -217,53 +275,45 @@ export class Orchestrator {
             delegationId: msg.delegationId,
             escalationId: msg.escalationId,
             agentDefId: msg.agentDefId,
-            args: msg.args as Record<string, Value>,
+            args: msg.args,
           },
         };
       }
-      case "ready":
-      case "log":
-        return null;
     }
   }
 
-  private async lookupDelegationPeer(
-    delegationId: import("katari-runtime").DelegationId,
-  ): Promise<import("katari-runtime").Endpoint | null> {
-    const row = await this.storage.ffiDelegations.get(delegationId);
-    if (row === null) {
-      this.logger.log("warn", "orchestrator: no FFI pending row for delegationId", {
-        delegationId,
-      });
-      return null;
-    }
-    return row.peerEndpoint as import("katari-runtime").Endpoint;
-  }
-
-  /**
-   * Boot 時: running/cancelling agent を持つ snapshot に対して subprocess
-   * を spawn し、`restored` IPC で in-flight delegationId 一覧を通知する。
-   */
-  async recoverOnBoot(): Promise<void> {
-    const snapshotIds = await this.storage.agents.listRunningSnapshotIds();
-    for (const snapshotId of snapshotIds) {
-      const snapshot = await this.storage.snapshots.get(snapshotId);
-      if (snapshot === null) continue;
-      await this.sidecarManager.ensureStarted({
-        snapshotId,
-        bundle: snapshot.sidecarBundle,
-      });
-      const pending = await this.storage.ffiDelegations.listBySnapshot(snapshotId);
-      if (pending.length > 0 && this.sidecarManager.hasSidecar(snapshotId)) {
-        await this.sidecarManager.send(snapshotId, {
-          type: "restored",
-          delegationIds: pending.map((p) => p.delegationId),
-        });
-      }
-    }
+  private sidecarFor(snapshotId: SnapshotId): Sidecar | null {
+    if (!this.sidecarManager.hasSidecar(snapshotId)) return null;
+    // SidecarManager doesn't expose direct Sidecar references; we proxy
+    // via a thin shim that forwards `send` and stores the inbound handler
+    // for the FfiModule to receive sidecar messages. The per-tick
+    // FfiModule then uses this proxy as its sidecar.
+    const manager = this.sidecarManager;
+    return {
+      async send(msg) {
+        await manager.send(snapshotId, msg);
+      },
+      onMessage(_cb) {
+        // The real message handler is set on the manager via
+        // setMessageHandler in the orchestrator constructor; per-tick
+        // FfiModule subscriptions are no-op (the orchestrator-level
+        // dispatch routes each message to a fresh tick).
+      },
+      async start() {
+        // Already started by ensureStarted.
+      },
+      async shutdown() {
+        // Lifecycle owned by SidecarManager.
+      },
+    };
   }
 }
 
-// Re-exports referenced by ffi-module / api-module via the runtime barrel.
-void decodeFfiAgentDefId;
-void encodeFfiAgentDefId;
+// ─── Helpers ───────────────────────────────────────────────────────────────
+
+function makeNoOpFfi(): FfiModule {
+  // Used when a snapshot has no sidecar bundle. delegations are still
+  // routed via `bus.registerAll` minus `ffi`, so this object is a pure
+  // type-fill — never invoked.
+  return {} as FfiModule;
+}

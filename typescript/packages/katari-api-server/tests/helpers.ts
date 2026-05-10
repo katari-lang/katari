@@ -3,20 +3,26 @@
 // 新設計向け: project + snapshot を upload するヘルパと、orchestrator + bus
 // を含むテスト用 app を作るヘルパを提供する。
 
-import { noopLogger, type IRModule, type SchemaBundle } from "katari-runtime";
+import {
+  InProcessSidecar,
+  SidecarManager,
+  noopLogger,
+  type IRModule,
+  type InProcessHandler,
+  type SchemaBundle,
+  type Sidecar,
+  type SidecarBundle,
+} from "katari-runtime";
 import type { Block, VarId } from "katari-runtime/dist/ir/types.js";
 import {
   InMemoryStorage,
-  InProcessSidecar,
   Orchestrator,
   ProjectService,
-  SidecarManager,
   SnapshotService,
   buildApp,
   type AppDeps,
-  type SidecarBundle,
 } from "../src/index.js";
-import type { InProcessHandler } from "../src/modules/sidecar.js";
+import type { SnapshotId } from "../src/storage/types.js";
 import type { Hono } from "hono";
 
 // ─── IR fixtures ───────────────────────────────────────────────────────────
@@ -154,10 +160,13 @@ export function buildTestHarness(opts?: {
     Object.entries(opts?.ffiHandlers ?? {}),
   );
   const storage = new InMemoryStorage();
-  const sidecarManager = new SidecarManager(
-    (_bundle, sidecarLogger) => {
+  const sidecarManager = new SidecarManager<SnapshotId>(
+    (_key, _bundle, sidecarLogger): Sidecar | null => {
       const dispatch: InProcessHandler = async (input) => {
-        const decoded = input.agentDefId as { kind: string; value: { module_: string; name: string } };
+        const decoded = input.agentDefId as {
+          kind: string;
+          value: { module_: string; name: string };
+        };
         const key =
           decoded.value.module_ === ""
             ? decoded.value.name

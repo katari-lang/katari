@@ -37,6 +37,22 @@ library:
     - Katari.Query
     - Katari.SourceSpan
 
+executables:
+  katari-compiler:
+    main: Main.hs
+    source-dirs: app
+    dependencies:
+      - katari-compiler
+      - optparse-applicative
+      - aeson
+      - aeson-pretty
+      - bytestring
+      - text
+      - containers
+      - directory
+      - filepath
+      - mtl
+
 tests:
   katari-compiler-test:
     main: Spec.hs

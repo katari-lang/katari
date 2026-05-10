@@ -451,6 +451,10 @@ literalValueToSemantic = \case
   LiteralValueNumber _ -> SemanticTypeNumber
   LiteralValueString s -> SemanticTypeLiteralString s
   LiteralValueBoolean b -> SemanticTypeLiteralBoolean b
+  -- 'LiteralValueAgent' is created only by Lowering when resolving a
+  -- top-level callable as a value; it must never appear in an AST
+  -- literal node, so the typechecker should never see it.
+  LiteralValueAgent _ -> error "literalValueToSemantic: LiteralValueAgent should not appear in AST literals"
 
 -- | Resolve a TypeRef' name to its semantic counterpart, expanding
 -- synonyms on the fly with cycle detection.

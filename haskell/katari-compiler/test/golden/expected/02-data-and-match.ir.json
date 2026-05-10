@@ -138,11 +138,8 @@
           {
             "body": {
               "arguments": [],
-              "output": 3,
-              "target": {
-                "block": 24,
-                "kind": "callTargetBlock"
-              }
+              "block": 24,
+              "output": 3
             },
             "kind": "statementCall"
           }

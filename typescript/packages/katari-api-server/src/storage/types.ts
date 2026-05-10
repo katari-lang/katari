@@ -199,6 +199,7 @@ export interface FfiPendingEscalationRepo {
   insert(row: FfiPendingEscalation): Promise<void>;
   get(escalationId: EscalationId): Promise<FfiPendingEscalation | null>;
   delete(escalationId: EscalationId): Promise<boolean>;
+  listBySnapshot(snapshotId: SnapshotId): Promise<FfiPendingEscalation[]>;
 }
 
 // ─── API module persistent state ───────────────────────────────────────────

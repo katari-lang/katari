@@ -130,7 +130,7 @@ calledMatchBlocks :: UserBlock -> IRModule -> [MatchBlock]
 calledMatchBlocks ub irMod =
   [ mb
     | StatementCall c <- ub.statements,
-      CallTargetBlock {block} <- [c.target],
+      let block = c.block,
       Just mb <- [matchBlockOf block irMod]
   ]
 
@@ -139,7 +139,7 @@ calledForBlocks :: UserBlock -> IRModule -> [ForBlock]
 calledForBlocks ub irMod =
   [ fb
     | StatementCall c <- ub.statements,
-      CallTargetBlock {block} <- [c.target],
+      let block = c.block,
       Just fb <- [forBlockOf block irMod]
   ]
 
@@ -148,7 +148,7 @@ calledHandleBlocks :: UserBlock -> IRModule -> [HandleBlock]
 calledHandleBlocks ub irMod =
   [ hb
     | StatementCall c <- ub.statements,
-      CallTargetBlock {block} <- [c.target],
+      let block = c.block,
       Just hb <- [handleBlockOf block irMod]
   ]
 
@@ -186,33 +186,34 @@ stage1Spec = describe "Stage 1 — literals / arithmetic" $ do
         Just d.output `shouldBe` ub.trailing
       _ -> expectationFailure "expected exactly one StatementLoadLiteral"
 
-  it "lowers x + y to add prim call with two StatementLoadLiteral inputs" $ do
+  it "lowers x + y to add prim agent-call with two integer literals" $ do
     (irMod, errs) <- lowerSource "agent main() { let x = 1; let y = 2; x + y }"
     errs `shouldBe` []
     let Just ub = agentBody "main" irMod
-        Just addId = primId "add" irMod
-        loads = literalLoads ub
-    length loads `shouldBe` 2
-    map (.value) loads `shouldMatchList` [LiteralValueInteger 1, LiteralValueInteger 2]
-    case calls ub of
+    -- Integer-literal LoadLiterals plus the agent-literal LoadLiteral for `add`.
+    let intLits = [d.value | d <- literalLoads ub, case d.value of LiteralValueInteger _ -> True; _ -> False]
+        agentLits = [qname | StatementLoadLiteral d <- ub.statements, LiteralValueAgent qname <- [d.value]]
+    intLits `shouldMatchList` [LiteralValueInteger 1, LiteralValueInteger 2]
+    agentLits `shouldContain` [QualifiedName "prim" "add"]
+    case [d | StatementAgentCall d <- ub.statements] of
       [addCall] -> do
-        addCall.target `shouldBe` CallTargetBlock {block = addId}
         map (.label) addCall.arguments `shouldMatchList` ["lhs", "rhs"]
         addCall.output `shouldBe` ub.trailing
-      _ -> expectationFailure "expected exactly one add call"
+      _ -> expectationFailure "expected exactly one StatementAgentCall (the add op)"
 
-  it "lowers unary negation to neg prim" $ do
+  it "lowers unary negation to neg prim agent-call" $ do
     (irMod, errs) <- lowerSource "agent main() { let x = 7; -x }"
     errs `shouldBe` []
     let Just ub = agentBody "main" irMod
-        Just negId = primId "neg" irMod
-    case calls ub of
+        agentLits = [qname | StatementLoadLiteral d <- ub.statements, LiteralValueAgent qname <- [d.value]]
+    agentLits `shouldContain` [QualifiedName "prim" "neg"]
+    case [d | StatementAgentCall d <- ub.statements] of
       [c] -> do
-        c.target `shouldBe` CallTargetBlock {block = negId}
         map (.label) c.arguments `shouldBe` ["value"]
         c.output `shouldBe` ub.trailing
-      _ -> expectationFailure "expected exactly one neg call"
-    map (.value) (literalLoads ub) `shouldBe` [LiteralValueInteger 7]
+      _ -> expectationFailure "expected exactly one StatementAgentCall (the neg op)"
+    let intLits = [d.value | d <- literalLoads ub, case d.value of LiteralValueInteger _ -> True; _ -> False]
+    intLits `shouldBe` [LiteralValueInteger 7]
 
   it "lowers boolean literal as StatementLoadLiteral LiteralValueBoolean" $ do
     (irMod, errs) <- lowerSource "agent main() { true }"
@@ -263,14 +264,10 @@ stage1Spec = describe "Stage 1 — literals / arithmetic" $ do
     LiteralValueString "x" `elem` map (.value) loads `shouldBe` True
 
 callTargetBlockId :: CallData -> BlockId
-callTargetBlockId c = case c.target of
-  CallTargetBlock {block} -> block
-  CallTargetValue _ -> BlockId maxBound -- sentinel for filter
+callTargetBlockId c = c.block
 
 callTargetBlockMaybe :: CallData -> Maybe BlockId
-callTargetBlockMaybe c = case c.target of
-  CallTargetBlock {block} -> Just block
-  _ -> Nothing
+callTargetBlockMaybe c = Just c.block
 
 -- | Look up a UserBlock by id.
 userBlockOf :: BlockId -> IRModule -> Maybe UserBlock
@@ -438,12 +435,14 @@ stage3Spec = describe "Stage 3 \8212 block / let / scope" $ do
     (irMod, errs) <- lowerSource "agent main() { let x = 1; let y = 2; x + y }"
     errs `shouldBe` []
     let Just ub = agentBody "main" irMod
-    -- Two StatementLoadLiteral (1, 2) plus one StatementCall (add) = 3 statements
-    length (literalLoads ub) `shouldBe` 2
-    length (calls ub) `shouldBe` 1
-    -- The final call's output equals the trailing var
-    let lastCall = last (calls ub)
-    lastCall.output `shouldBe` ub.trailing
+    -- Two integer LoadLiteral (1, 2) plus one agent literal LoadLiteral
+    -- (the `add` prim ref) plus one StatementAgentCall (the actual call).
+    let intLits = [() | StatementLoadLiteral d <- ub.statements, LiteralValueInteger _ <- [d.value]]
+        agentCalls = [d | StatementAgentCall d <- ub.statements]
+    length intLits `shouldBe` 2
+    length agentCalls `shouldBe` 1
+    -- The final agent-call's output equals the trailing var
+    (head agentCalls).output `shouldBe` ub.trailing
 
   it "inline block creates a child BlockUser" $ do
     (irMod, errs) <- lowerSource "agent main() { let x = { let a = 1; a + 1 }; x }"
@@ -453,11 +452,9 @@ stage3Spec = describe "Stage 3 \8212 block / let / scope" $ do
     let childCalls = [c | c <- calls ub, isChildBlockCall c irMod]
     childCalls `shouldNotBe` []
     case childCalls of
-      (c : _) -> case c.target of
-        CallTargetBlock {block} -> case userBlockOf block irMod of
-          Just _ -> pure ()
-          Nothing -> expectationFailure "child block not found"
-        _ -> expectationFailure "child call must target a block"
+      (c : _) -> case userBlockOf c.block irMod of
+        Just _ -> pure ()
+        Nothing -> expectationFailure "child block not found"
       _ -> pure ()
 
   it "shadowing assigns a fresh IR var per let binding" $ do
@@ -528,17 +525,17 @@ stage3Spec = describe "Stage 3 \8212 block / let / scope" $ do
     errs `shouldBe` []
     let Just ub = agentBody "main" irMod
     -- The main body should issue a StatementMakeClosure whose block is a
-    -- BlockAgent (the local helper agent), followed by a
-    -- StatementAgentCallClosure that dispatches via the closure value.
+    -- BlockAgent (the local helper agent), followed by a StatementAgentCall
+    -- that dispatches via that closure value.
     let closures =
           [ mc | StatementMakeClosure mc <- ub.statements, Just (BlockAgent _) <- [Map.lookup mc.block irMod.blocks]
           ]
     length closures `shouldBe` 1
     let helperVar = (head closures).output
-    let agentClosureCalls =
-          [ d | StatementAgentCallClosure d <- ub.statements, d.target == helperVar
+    let agentCalls =
+          [ d | StatementAgentCall d <- ub.statements, d.target == helperVar
           ]
-    length agentClosureCalls `shouldBe` 1
+    length agentCalls `shouldBe` 1
 
   it "function parameter with tuple pattern destructures via StatementBindPattern" $ do
     (irMod, errs) <-
@@ -562,10 +559,8 @@ stage3Spec = describe "Stage 3 \8212 block / let / scope" $ do
       Nothing -> expectationFailure "helper agent body not found"
 
 isChildBlockCall :: CallData -> IRModule -> Bool
-isChildBlockCall c irMod = case c.target of
-  CallTargetBlock {block} -> case Map.lookup block irMod.blocks of
-    Just (BlockUser _) -> True
-    _ -> False
+isChildBlockCall c irMod = case Map.lookup c.block irMod.blocks of
+  Just (BlockUser _) -> True
   _ -> False
 
 -- ===========================================================================
@@ -574,7 +569,7 @@ isChildBlockCall c irMod = case c.target of
 
 stage4Spec :: Spec
 stage4Spec = describe "Stage 4 \8212 agent calls / closure" $ do
-  it "direct call to a top-level agent uses StatementAgentCall" $ do
+  it "direct call to a top-level agent loads an agent literal then dispatches via StatementAgentCall" $ do
     (irMod, errs) <-
       lowerSource $
         Text.unlines
@@ -583,16 +578,22 @@ stage4Spec = describe "Stage 4 \8212 agent calls / closure" $ do
           ]
     errs `shouldBe` []
     let Just ub = agentBody "main" irMod
-    -- Top-level agent dispatch is via StatementAgentCall keyed by qualified name,
-    -- not StatementCall + CallTargetBlock.
-    let agentCalls = [d | StatementAgentCall d <- ub.statements]
-    case agentCalls of
-      [d] -> do
-        d.target.name `shouldBe` "helper"
-        d.target.module_ `shouldBe` "main"
-      _ -> expectationFailure "expected exactly one StatementAgentCall"
+    -- Top-level callable references load a 'LiteralValueAgent' and the
+    -- subsequent 'StatementAgentCall' dispatches via that VarId — the
+    -- runtime resolves the qualified name through 'IRModule.entries'.
+    let agentLits =
+          [ d
+            | StatementLoadLiteral d <- ub.statements,
+              LiteralValueAgent qname <- [d.value],
+              qname.name == "helper",
+              qname.module_ == "main"
+          ]
+    length agentLits `shouldBe` 1
+    let helperLitVar = (head agentLits).output
+        agentCalls = [d | StatementAgentCall d <- ub.statements, d.target == helperLitVar]
+    length agentCalls `shouldBe` 1
 
-  it "agent value escapes via StatementMakeClosure when used as a binding" $ do
+  it "agent value bound to a local var routes through a pattern binding" $ do
     (irMod, errs) <-
       lowerSource $
         Text.unlines
@@ -601,23 +602,26 @@ stage4Spec = describe "Stage 4 \8212 agent calls / closure" $ do
           ]
     errs `shouldBe` []
     let Just ub = agentBody "main" irMod
-        closures = [d | StatementMakeClosure d <- ub.statements]
-    closures `shouldNotBe` []
-    -- With StatementBindPattern, the closure var is routed through a pattern binding.
-    -- The call should be StatementAgentCallClosure on the pattern-bound var.
-    case closures of
-      (d : _) -> do
-        let bindPat = listToMaybe [bp | StatementBindPattern bp <- ub.statements, bp.source == d.output]
-        bindPat `shouldSatisfy` isJust
-        case bindPat of
-          Just bp -> case bp.pattern of
-            MatchPatternVariable patVar -> do
-              let agentClosureCalls =
-                    [c | StatementAgentCallClosure c <- ub.statements, c.target == patVar]
-              agentClosureCalls `shouldNotBe` []
-            _ -> expectationFailure "expected MatchPatternVariable pattern for simple let binding"
-          Nothing -> pure ()
-      _ -> pure ()
+    -- 'let f = helper' loads an agent literal and binds it via
+    -- 'StatementBindPattern'; the subsequent call dispatches on the
+    -- pattern-bound var with a 'StatementAgentCall'.
+    let agentLits =
+          [ d
+            | StatementLoadLiteral d <- ub.statements,
+              LiteralValueAgent qname <- [d.value],
+              qname.name == "helper"
+          ]
+    agentLits `shouldNotBe` []
+    let litVar = (head agentLits).output
+        bindPat = listToMaybe [bp | StatementBindPattern bp <- ub.statements, bp.source == litVar]
+    bindPat `shouldSatisfy` isJust
+    case bindPat of
+      Just bp -> case bp.pattern of
+        MatchPatternVariable patVar -> do
+          let agentCalls = [c | StatementAgentCall c <- ub.statements, c.target == patVar]
+          agentCalls `shouldNotBe` []
+        _ -> expectationFailure "expected MatchPatternVariable pattern for simple let binding"
+      Nothing -> pure ()
 
 -- ===========================================================================
 -- Stage 5 — for / state / next
@@ -688,14 +692,12 @@ collectAllExits ub irMod = directExits ++ indirectExits
           ++ matchBodies
           ++ forBodies
           ++ handleBodies
-    callTargetUser c = case c.target of
-      CallTargetBlock {block} -> userBlockOf block irMod
-      _ -> Nothing
+    callTargetUser c = userBlockOf c.block irMod
     matchBodies =
       concat
         [ ub' : maybeToList (mb.defaultArm >>= flip userBlockOf irMod)
           | StatementCall c <- ub.statements,
-            CallTargetBlock {block} <- [c.target],
+            let block = c.block,
             Just mb <- [matchBlockOf block irMod],
             arm <- mb.arms,
             Just ub' <- [userBlockOf arm.body irMod]
@@ -704,14 +706,14 @@ collectAllExits ub irMod = directExits ++ indirectExits
       concat
         [ catMaybes [userBlockOf fb.bodyBlock irMod, fb.thenBlock >>= flip userBlockOf irMod]
           | StatementCall c <- ub.statements,
-            CallTargetBlock {block} <- [c.target],
+            let block = c.block,
             Just fb <- [forBlockOf block irMod]
         ]
     handleBodies =
       concat
         [ catMaybes [userBlockOf hb.body irMod] ++ [hBody | h <- hb.handlers, Just hBody <- [userBlockOf h.handlerBody irMod]]
           | StatementCall c <- ub.statements,
-            CallTargetBlock {block} <- [c.target],
+            let block = c.block,
             Just hb <- [handleBlockOf block irMod]
         ]
     recurse child = collectAllExits child irMod
@@ -950,19 +952,18 @@ stage8Spec = describe "Stage 8 \8212 edge cases" $ do
           ]
     errs `shouldBe` []
     let Just ub = agentBody "main" irMod
-        ctorCalls =
-          [ c
-            | c <- calls ub,
-              case c.target of
-                CallTargetBlock {block} -> case Map.lookup block irMod.blocks of
-                  Just (BlockConstructor _) -> True
-                  _ -> False
-                _ -> False
+        ctorLits =
+          [ d
+            | StatementLoadLiteral d <- ub.statements,
+              LiteralValueAgent qname <- [d.value],
+              qname.name == "Point"
           ]
-    length ctorCalls `shouldBe` 1
+    length ctorLits `shouldBe` 1
+    let ctorVar = (head ctorLits).output
+        ctorCalls = [c | StatementAgentCall c <- ub.statements, c.target == ctorVar]
     case ctorCalls of
       [c] -> map (.label) c.arguments `shouldMatchList` ["x", "y"]
-      _ -> pure ()
+      _ -> expectationFailure "expected exactly one StatementAgentCall on the ctor literal"
 
   it "nested literal pattern lowers to MatchPatternConstructor with MatchPatternLiteral inner" $ do
     (irMod, errs) <-

@@ -88,6 +88,11 @@ data LiteralValue where
   LiteralValueString :: {string :: Text} -> LiteralValue
   LiteralValueBoolean :: {boolean :: Bool} -> LiteralValue
   LiteralValueNull :: LiteralValue
+  -- | Reference to a top-level agent declaration. Carries only the
+  -- 'QualifiedName' (FFI-stable identifier); the runtime resolves it to a
+  -- 'BlockId' via 'IRModule.entries' at dispatch time. Distinct from a
+  -- closure value in that it captures no lexical scope.
+  LiteralValueAgent :: {qualifiedName :: QualifiedName} -> LiteralValue
   deriving (Eq, Show, Generic)
 
 instance ToJSON LiteralValue where

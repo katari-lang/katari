@@ -3,7 +3,12 @@
 // database before first launch.
 
 import { serve } from "@hono/node-server";
-import { buildConsoleLogger, type LogLevel } from "katari-runtime";
+import {
+  buildConsoleLogger,
+  SidecarManager,
+  type LogLevel,
+  type Sidecar,
+} from "katari-runtime";
 import { buildMetrics } from "./metrics.js";
 import { Orchestrator } from "./orchestrator.js";
 import { recoverOnBoot } from "./recovery.js";
@@ -11,8 +16,7 @@ import { buildApp } from "./routes/app.js";
 import { ProjectService } from "./services/project-service.js";
 import { SnapshotService } from "./services/snapshot-service.js";
 import { PostgresStorage } from "./storage/pg.js";
-import { SubprocessSidecar } from "./modules/sidecar.js";
-import { SidecarManager } from "./modules/sidecar-manager.js";
+import type { SnapshotId } from "./storage/types.js";
 
 const databaseUrl = process.env.DATABASE_URL;
 if (databaseUrl === undefined || databaseUrl === "") {
@@ -35,10 +39,15 @@ if (apiKey === undefined || apiKey === "") {
 const storage = PostgresStorage.create(databaseUrl);
 const metrics = buildMetrics();
 
-// Sidecar manager: spawns a Node subprocess per snapshot using the
-// runtime's bundled bootstrapper.
-const sidecarManager = new SidecarManager(
-  (bundle, sidecarLogger) => new SubprocessSidecar(bundle, sidecarLogger),
+// Sidecar manager: production builds need a real subprocess factory
+// supplied by the future `katari-port` library. Until that lands the
+// factory below returns null for every snapshot — FFI invokes will fail
+// closed, which is the safest default before the transport is wired.
+const sidecarManager = new SidecarManager<SnapshotId>(
+  (_key, _bundle, _sidecarLogger): Sidecar | null => {
+    logger.log("warn", "no sidecar factory configured; FFI will be unavailable");
+    return null;
+  },
   logger,
 );
 

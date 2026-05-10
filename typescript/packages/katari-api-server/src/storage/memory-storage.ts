@@ -317,6 +317,12 @@ class InMemoryFfiPendingEscalationRepo implements FfiPendingEscalationRepo {
   async delete(escalationId: EscalationId): Promise<boolean> {
     return this.rows.delete(escalationId);
   }
+
+  async listBySnapshot(snapshotId: SnapshotId): Promise<FfiPendingEscalation[]> {
+    return [...this.rows.values()]
+      .filter((r) => r.snapshotId === snapshotId)
+      .map(clone);
+  }
 }
 
 class InMemoryApiPendingEscalationRepo implements ApiPendingEscalationRepo {
