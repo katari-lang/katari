@@ -205,14 +205,13 @@ export function stateBadge(state: AgentRow["state"]): string {
 }
 
 export function summarizeAgentDefId(id: unknown): string {
-  if (typeof id === "object" && id !== null && "kind" in id) {
-    const decoded = id as { kind: string; value: unknown };
-    if (decoded.kind === "qname" && typeof decoded.value === "string") {
-      return formatQualifiedName(decoded.value);
+  // Wire format is a flat string. `closure:N` (CORE-only) for engine
+  // closures, otherwise a `module.name` qname.
+  if (typeof id === "string") {
+    if (id.startsWith("closure:")) {
+      return pc.dim(`<closure ${id.slice("closure:".length)}>`);
     }
-    if (decoded.kind === "closure") {
-      return pc.dim(`<closure ${decoded.value}>`);
-    }
+    return formatQualifiedName(id);
   }
   return pc.dim("<opaque>");
 }

@@ -1,76 +1,88 @@
-// AgentDefId: opaque, module-local agent identifier.
+// AgentDefId: opaque, module-local agent identifier carried on
+// `delegate` / `escalate` events.
 //
-// 6 event のうち `delegate` / `escalate` は対象 agent を `agentDefId` で指す。
-// この id は **受信側 module 局所** の意味だけ持つ。送信側は受信側が知る形に
-// pre-encode して渡し、受信側が自分で decode する。bus / 中間層は中身を見ない。
+// **Wire format**: a flat string. Either a 'QualifiedName' (e.g.
+// `"main.foo"` or `"prim.add_two_numbers"`) for top-level agents, or a
+// `"closure:N"` prefix-form for local closures (CORE only). This shape
+// is identical to what `get_metadata` returns in its `id` field and to
+// what JSON Schema declares for `$callable`, so the same string flows
+// end-to-end through CORE / FFI / API / sidecar / AI tool calls.
 //
-// 各 module の encoding (現状):
+// **Branding**: each module owns its own opaque type wrapper around the
+// raw string. `encodeCoreAgentDefId` / `encodeFfiAgentDefId` are the
+// only way to construct one, and `decodeCoreAgentDefId` /
+// `decodeFfiAgentDefId` are the only way to extract the underlying
+// shape. The wire JSON is identical (both modules use plain strings),
+// but the type checker prevents cross-namespace usage at code-edit
+// time.
 //
-//   - CORE encoding:
-//       { kind: "qname",   value: { module_, name } }   — top-level agent
-//     | { kind: "closure", value: ClosureId }            — closure dispatch
-//
-//   - FFI encoding:
-//       { kind: "qname",   value: { module_, name } }   — sidecar handler
-//                                                         (CORE と同じ shape だが
-//                                                          名前空間は別)
-//
-//   - API encoding (現状空、将来 user 提供 def 用):
-//       (currently no agent definitions; receiving a delegate yields
-//        delegateError)
-//
-// **重要**: CORE と FFI の `qname` は同じ JSON 形でも *別 namespace*。
-// CORE の IR 内の `BlockExternal` が指す QualifiedName と、FFI sidecar が
-// 公開する QualifiedName は同名でも違う関数を指す。decoder 関数経由で
-// 必ず module を意識して narrow すること。
+// **Closure prefix safety**: `:` is not a valid character in a Katari
+// identifier (qname segments are `[A-Za-z_][A-Za-z0-9_]*`), so the
+// `closure:` prefix can never collide with a real qname.
 
 import type { ClosureId } from "./engine/id.js";
 import type { QualifiedName } from "./ir/types.js";
 
+const CLOSURE_PREFIX = "closure:";
+
 /**
  * Bus / 中間層で扱う opaque な agent identifier。受信側 module だけが decode する。
- *
- * Wire 形式は JSON-serializable (= structuredClone-safe)。
+ * Wire 形式は flat string (JSON-serializable / structuredClone-safe).
  */
-export type AgentDefId = unknown & { readonly __brand: "AgentDefId" };
+export type AgentDefId = string & { readonly __brand: "AgentDefId" };
 
 // ─── CORE encoding / decoding ──────────────────────────────────────────────
 
+/** CORE module knows two flavours: a top-level callable's qname, or an
+ * engine-allocated closure id. */
 export type CoreAgentDefId =
   | { kind: "qname"; value: QualifiedName }
   | { kind: "closure"; value: ClosureId };
 
 export function encodeCoreAgentDefId(value: CoreAgentDefId): AgentDefId {
-  return value as unknown as AgentDefId;
+  if (value.kind === "closure") {
+    return (CLOSURE_PREFIX + String(value.value)) as AgentDefId;
+  }
+  return value.value as AgentDefId;
 }
 
 export function decodeCoreAgentDefId(id: AgentDefId): CoreAgentDefId {
-  const v = id as unknown as Partial<CoreAgentDefId>;
-  if (v && typeof v === "object" && "kind" in v) {
-    if (v.kind === "qname" || v.kind === "closure") {
-      return v as CoreAgentDefId;
-    }
+  const s = id as unknown as string;
+  if (typeof s !== "string") {
+    throw new Error(`agent-def-id: invalid CORE encoding: ${JSON.stringify(id)}`);
   }
-  throw new Error(`agent-def-id: invalid CORE encoding: ${JSON.stringify(id)}`);
+  if (s.startsWith(CLOSURE_PREFIX)) {
+    const n = Number(s.slice(CLOSURE_PREFIX.length));
+    if (!Number.isInteger(n) || n < 0) {
+      throw new Error(`agent-def-id: malformed closure id: ${JSON.stringify(s)}`);
+    }
+    return { kind: "closure", value: n as ClosureId };
+  }
+  return { kind: "qname", value: s };
 }
 
 // ─── FFI encoding / decoding ───────────────────────────────────────────────
 //
-// FFI side currently only handles qualified-name dispatch. The shape is
-// identical to CORE's `qname` variant but conceptually distinct — the
-// wire format happens to overlap because both modules want "module.name"
-// strings. Dedicated encoders prevent accidental cross-namespace use.
+// FFI side currently only handles qualified-name dispatch — sidecars have
+// no concept of "closure". The wire format is the same flat string CORE
+// uses for the qname case; the decoder simply rejects anything that
+// looks like a closure prefix as a fast invariant check.
 
 export type FfiAgentDefId = { kind: "qname"; value: QualifiedName };
 
 export function encodeFfiAgentDefId(value: FfiAgentDefId): AgentDefId {
-  return value as unknown as AgentDefId;
+  return value.value as AgentDefId;
 }
 
 export function decodeFfiAgentDefId(id: AgentDefId): FfiAgentDefId {
-  const v = id as unknown as Partial<FfiAgentDefId>;
-  if (v && typeof v === "object" && v.kind === "qname" && "value" in v) {
-    return v as FfiAgentDefId;
+  const s = id as unknown as string;
+  if (typeof s !== "string") {
+    throw new Error(`agent-def-id: invalid FFI encoding: ${JSON.stringify(id)}`);
   }
-  throw new Error(`agent-def-id: invalid FFI encoding: ${JSON.stringify(id)}`);
+  if (s.startsWith(CLOSURE_PREFIX)) {
+    throw new Error(
+      `agent-def-id: FFI received a closure-form AgentDefId (${JSON.stringify(s)}); FFI agents are dispatched by qname only`,
+    );
+  }
+  return { kind: "qname", value: s };
 }
