@@ -1238,7 +1238,7 @@ lowerTemplate templateExpression = do
       foldM concatStep initVar rest
   where
     stringify v = do
-      blockId <- primBlockId "to_string"
+      blockId <- primBlockId "format"
       out <- freshVarId Nothing
       emit $
         StatementCall

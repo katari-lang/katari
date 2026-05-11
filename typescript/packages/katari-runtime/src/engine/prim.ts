@@ -6,6 +6,7 @@
 
 import { match, P } from "ts-pattern";
 import { RecoverableEngineError } from "./errors.js";
+import { valueToRaw } from "../value-codec.js";
 import type { Value } from "./value.js";
 
 export function executePrim(name: string, args: Record<string, Value>): Value {
@@ -69,7 +70,13 @@ export function executePrim(name: string, args: Record<string, Value>): Value {
     case "to_string": {
       const v = args["value"];
       if (v === undefined) throw new RecoverableEngineError("prim to_string: missing arg");
-      return { kind: "string", value: valueToString(v) };
+      return { kind: "string", value: JSON.stringify(valueToRaw(v)) };
+    }
+    case "format": {
+      const v = args["value"];
+      if (v === undefined) throw new RecoverableEngineError("prim format: missing arg");
+      if (v.kind === "string") return v;
+      return { kind: "string", value: JSON.stringify(valueToRaw(v)) };
     }
     case "tuple_get": {
       const tuple = args["tuple"], index = args["index"];
@@ -182,18 +189,3 @@ function arrayEqual(xs: Value[], ys: Value[]): boolean {
   return true;
 }
 
-export function valueToString(v: Value): string {
-  return match(v)
-    .with({ kind: "number" }, x => String(x.value))
-    .with({ kind: "string" }, x => x.value)
-    .with({ kind: "boolean" }, x => String(x.value))
-    .with({ kind: "null" }, () => "null")
-    .with({ kind: "tuple" }, x => `(${x.elements.map(valueToString).join(", ")})`)
-    .with({ kind: "array" }, x => `[${x.elements.map(valueToString).join(", ")}]`)
-    .with({ kind: "tagged" }, x =>
-      `${x.ctorId}{${Object.entries(x.fields).map(([k, v]) => `${k}: ${valueToString(v)}`).join(", ")}}`,
-    )
-    .with({ kind: "closure" }, () => `<closure>`)
-    .with({ kind: "agentLiteral" }, x => `<agent ${x.qualifiedName}>`)
-    .exhaustive();
-}

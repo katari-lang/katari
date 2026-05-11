@@ -3,7 +3,7 @@
     "0": {
       "body": {
         "description": "A two-element point in 2-D space.",
-        "entryBody": 52,
+        "entryBody": 54,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"x\":{\"type\":\"integer\"},\"y\":{\"type\":\"integer\"}},\"required\":[\"x\",\"y\"],\"type\":\"object\"}",
         "name": "point",
         "outputSchema": "{\"additionalProperties\":false,\"properties\":{\"$ctor\":{\"const\":\"main.point\"},\"x\":{\"type\":\"integer\"},\"y\":{\"type\":\"integer\"}},\"required\":[\"$ctor\",\"x\",\"y\"],\"type\":\"object\"}",
@@ -24,7 +24,7 @@
     "1": {
       "body": {
         "description": "Returns the x-coordinate of a point.",
-        "entryBody": 55,
+        "entryBody": 57,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"p\":{\"additionalProperties\":false,\"properties\":{\"$ctor\":{\"const\":\"main.point\"},\"x\":{\"type\":\"integer\"},\"y\":{\"type\":\"integer\"}},\"required\":[\"$ctor\",\"x\",\"y\"],\"type\":\"object\"}},\"required\":[\"p\"],\"type\":\"object\"}",
         "name": "project_x",
         "outputSchema": "{\"type\":\"integer\"}",
@@ -45,7 +45,7 @@
     "11": {
       "body": {
         "description": "Divide two numbers (always returns number).",
-        "entryBody": 62,
+        "entryBody": 64,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"lhs\":{\"type\":\"number\"},\"rhs\":{\"type\":\"number\"}},\"required\":[\"lhs\",\"rhs\"],\"type\":\"object\"}",
         "name": "div",
         "outputSchema": "{\"type\":\"number\"}",
@@ -70,7 +70,7 @@
     "13": {
       "body": {
         "description": "Unary negate.",
-        "entryBody": 63,
+        "entryBody": 65,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"value\":{\"type\":\"number\"}},\"required\":[\"value\"],\"type\":\"object\"}",
         "name": "neg",
         "outputSchema": "{\"type\":\"number\"}",
@@ -91,7 +91,7 @@
     "15": {
       "body": {
         "description": "Absolute value (integer when operand is integer).",
-        "entryBody": 64,
+        "entryBody": 66,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"value\":{\"type\":\"number\"}},\"required\":[\"value\"],\"type\":\"object\"}",
         "name": "abs",
         "outputSchema": "{\"type\":\"number\"}",
@@ -112,7 +112,7 @@
     "17": {
       "body": {
         "description": "Structural equality.",
-        "entryBody": 65,
+        "entryBody": 67,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"lhs\":{},\"rhs\":{}},\"required\":[\"lhs\",\"rhs\"],\"type\":\"object\"}",
         "name": "eq",
         "outputSchema": "{\"type\":\"boolean\"}",
@@ -137,7 +137,7 @@
     "19": {
       "body": {
         "description": "Structural inequality.",
-        "entryBody": 66,
+        "entryBody": 68,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"lhs\":{},\"rhs\":{}},\"required\":[\"lhs\",\"rhs\"],\"type\":\"object\"}",
         "name": "ne",
         "outputSchema": "{\"type\":\"boolean\"}",
@@ -158,7 +158,7 @@
     "2": {
       "body": {
         "description": "AI metadata of a callable (name / id / description / I-O schema).",
-        "entryBody": 57,
+        "entryBody": 59,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"description\":{\"type\":\"string\"},\"id\":{\"type\":\"string\"},\"input\":{\"type\":\"string\"},\"name\":{\"type\":\"string\"},\"output\":{\"type\":\"string\"}},\"required\":[\"description\",\"id\",\"input\",\"name\",\"output\"],\"type\":\"object\"}",
         "name": "agent_metadata",
         "outputSchema": "{\"additionalProperties\":false,\"properties\":{\"$ctor\":{\"const\":\"prim.agent_metadata\"},\"description\":{\"type\":\"string\"},\"id\":{\"type\":\"string\"},\"input\":{\"type\":\"string\"},\"name\":{\"type\":\"string\"},\"output\":{\"type\":\"string\"}},\"required\":[\"$ctor\",\"description\",\"id\",\"input\",\"name\",\"output\"],\"type\":\"object\"}",
@@ -195,7 +195,7 @@
     "21": {
       "body": {
         "description": "Less than.",
-        "entryBody": 67,
+        "entryBody": 69,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"lhs\":{\"type\":\"number\"},\"rhs\":{\"type\":\"number\"}},\"required\":[\"lhs\",\"rhs\"],\"type\":\"object\"}",
         "name": "lt",
         "outputSchema": "{\"type\":\"boolean\"}",
@@ -220,7 +220,7 @@
     "23": {
       "body": {
         "description": "Less or equal.",
-        "entryBody": 68,
+        "entryBody": 70,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"lhs\":{\"type\":\"number\"},\"rhs\":{\"type\":\"number\"}},\"required\":[\"lhs\",\"rhs\"],\"type\":\"object\"}",
         "name": "le",
         "outputSchema": "{\"type\":\"boolean\"}",
@@ -245,7 +245,7 @@
     "25": {
       "body": {
         "description": "Greater than.",
-        "entryBody": 69,
+        "entryBody": 71,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"lhs\":{\"type\":\"number\"},\"rhs\":{\"type\":\"number\"}},\"required\":[\"lhs\",\"rhs\"],\"type\":\"object\"}",
         "name": "gt",
         "outputSchema": "{\"type\":\"boolean\"}",
@@ -270,7 +270,7 @@
     "27": {
       "body": {
         "description": "Greater or equal.",
-        "entryBody": 70,
+        "entryBody": 72,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"lhs\":{\"type\":\"number\"},\"rhs\":{\"type\":\"number\"}},\"required\":[\"lhs\",\"rhs\"],\"type\":\"object\"}",
         "name": "ge",
         "outputSchema": "{\"type\":\"boolean\"}",
@@ -295,7 +295,7 @@
     "29": {
       "body": {
         "description": "Logical and.",
-        "entryBody": 71,
+        "entryBody": 73,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"lhs\":{\"type\":\"boolean\"},\"rhs\":{\"type\":\"boolean\"}},\"required\":[\"lhs\",\"rhs\"],\"type\":\"object\"}",
         "name": "and",
         "outputSchema": "{\"type\":\"boolean\"}",
@@ -316,7 +316,7 @@
     "3": {
       "body": {
         "description": "Add two numbers.",
-        "entryBody": 58,
+        "entryBody": 60,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"lhs\":{\"type\":\"number\"},\"rhs\":{\"type\":\"number\"}},\"required\":[\"lhs\",\"rhs\"],\"type\":\"object\"}",
         "name": "add",
         "outputSchema": "{\"type\":\"number\"}",
@@ -341,7 +341,7 @@
     "31": {
       "body": {
         "description": "Logical or.",
-        "entryBody": 72,
+        "entryBody": 74,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"lhs\":{\"type\":\"boolean\"},\"rhs\":{\"type\":\"boolean\"}},\"required\":[\"lhs\",\"rhs\"],\"type\":\"object\"}",
         "name": "or",
         "outputSchema": "{\"type\":\"boolean\"}",
@@ -366,7 +366,7 @@
     "33": {
       "body": {
         "description": "Logical not.",
-        "entryBody": 73,
+        "entryBody": 75,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"value\":{\"type\":\"boolean\"}},\"required\":[\"value\"],\"type\":\"object\"}",
         "name": "not",
         "outputSchema": "{\"type\":\"boolean\"}",
@@ -387,7 +387,7 @@
     "35": {
       "body": {
         "description": "Concatenate two strings.",
-        "entryBody": 74,
+        "entryBody": 76,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"lhs\":{\"type\":\"string\"},\"rhs\":{\"type\":\"string\"}},\"required\":[\"lhs\",\"rhs\"],\"type\":\"object\"}",
         "name": "concat",
         "outputSchema": "{\"type\":\"string\"}",
@@ -412,7 +412,7 @@
     "37": {
       "body": {
         "description": "Return the runtime type-of-value tag as a string.",
-        "entryBody": 75,
+        "entryBody": 77,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"value\":{}},\"required\":[\"value\"],\"type\":\"object\"}",
         "name": "type_of",
         "outputSchema": "{\"type\":\"string\"}",
@@ -432,8 +432,8 @@
     },
     "39": {
       "body": {
-        "description": "Convert any value to a debug string.",
-        "entryBody": 76,
+        "description": "Serialize any value to its canonical JSON string (strings get quoted; round-trips with @from_string@ when added).",
+        "entryBody": 78,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"value\":{}},\"required\":[\"value\"],\"type\":\"object\"}",
         "name": "to_string",
         "outputSchema": "{\"type\":\"string\"}",
@@ -457,121 +457,121 @@
     },
     "41": {
       "body": {
+        "description": "Format any value for f-string interpolation: strings are emitted bare, other values fall back to @to_string@'s JSON form.",
+        "entryBody": 79,
+        "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"value\":{}},\"required\":[\"value\"],\"type\":\"object\"}",
+        "name": "format",
+        "outputSchema": "{\"type\":\"string\"}",
+        "parameters": [
+          {
+            "label": "value",
+            "var": 65
+          }
+        ],
+        "qualifiedName": "prim.format"
+      },
+      "kind": "blockAgent"
+    },
+    "42": {
+      "body": "format",
+      "kind": "blockPrim"
+    },
+    "43": {
+      "body": {
         "description": "Retrieve the element at @index@.",
-        "entryBody": 77,
+        "entryBody": 80,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"array\":{},\"index\":{\"type\":\"integer\"}},\"required\":[\"array\",\"index\"],\"type\":\"object\"}",
         "name": "array_get",
         "outputSchema": "{}",
         "parameters": [
           {
             "label": "array",
-            "var": 65
+            "var": 67
           },
           {
             "label": "index",
-            "var": 66
+            "var": 68
           }
         ],
         "qualifiedName": "prim.array_get"
       },
       "kind": "blockAgent"
     },
-    "42": {
+    "44": {
       "body": "array_get",
       "kind": "blockPrim"
     },
-    "43": {
+    "45": {
       "body": {
         "description": "Length of an array.",
-        "entryBody": 78,
+        "entryBody": 81,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"array\":{}},\"required\":[\"array\"],\"type\":\"object\"}",
         "name": "array_length",
         "outputSchema": "{\"type\":\"integer\"}",
         "parameters": [
           {
             "label": "array",
-            "var": 68
+            "var": 70
           }
         ],
         "qualifiedName": "prim.array_length"
       },
       "kind": "blockAgent"
     },
-    "44": {
+    "46": {
       "body": "array_length",
       "kind": "blockPrim"
     },
-    "45": {
+    "47": {
       "body": {
         "description": "Retrieve a tagged-value field by name.",
-        "entryBody": 79,
+        "entryBody": 82,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"field\":{\"type\":\"string\"},\"object\":{}},\"required\":[\"field\",\"object\"],\"type\":\"object\"}",
         "name": "get_field",
         "outputSchema": "{}",
         "parameters": [
           {
             "label": "object",
-            "var": 70
+            "var": 72
           },
           {
             "label": "field",
-            "var": 71
+            "var": 73
           }
         ],
         "qualifiedName": "prim.get_field"
       },
       "kind": "blockAgent"
     },
-    "46": {
+    "48": {
       "body": "get_field",
       "kind": "blockPrim"
     },
-    "47": {
+    "49": {
       "body": {
         "description": "Retrieve a tuple element by positional index.",
-        "entryBody": 80,
+        "entryBody": 83,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"index\":{\"type\":\"integer\"},\"tuple\":{}},\"required\":[\"index\",\"tuple\"],\"type\":\"object\"}",
         "name": "tuple_get",
         "outputSchema": "{}",
         "parameters": [
           {
             "label": "tuple",
-            "var": 73
+            "var": 75
           },
           {
             "label": "index",
-            "var": 74
+            "var": 76
           }
         ],
         "qualifiedName": "prim.tuple_get"
       },
       "kind": "blockAgent"
     },
-    "48": {
-      "body": "tuple_get",
-      "kind": "blockPrim"
-    },
-    "49": {
-      "body": {
-        "description": "Return the AI metadata of any callable value.",
-        "entryBody": 81,
-        "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"value\":{\"additionalProperties\":false,\"properties\":{\"$callable\":{\"type\":\"string\"}},\"required\":[\"$callable\"],\"type\":\"object\"}},\"required\":[\"value\"],\"type\":\"object\"}",
-        "name": "get_metadata",
-        "outputSchema": "{\"additionalProperties\":false,\"properties\":{\"$ctor\":{\"const\":\"prim.agent_metadata\"},\"description\":{\"type\":\"string\"},\"id\":{\"type\":\"string\"},\"input\":{\"type\":\"string\"},\"name\":{\"type\":\"string\"},\"output\":{\"type\":\"string\"}},\"required\":[\"$ctor\",\"description\",\"id\",\"input\",\"name\",\"output\"],\"type\":\"object\"}",
-        "parameters": [
-          {
-            "label": "value",
-            "var": 76
-          }
-        ],
-        "qualifiedName": "prim.get_metadata"
-      },
-      "kind": "blockAgent"
-    },
     "5": {
       "body": {
         "description": "Subtract two numbers.",
-        "entryBody": 59,
+        "entryBody": 61,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"lhs\":{\"type\":\"number\"},\"rhs\":{\"type\":\"number\"}},\"required\":[\"lhs\",\"rhs\"],\"type\":\"object\"}",
         "name": "sub",
         "outputSchema": "{\"type\":\"number\"}",
@@ -590,14 +590,35 @@
       "kind": "blockAgent"
     },
     "50": {
-      "body": "get_metadata",
+      "body": "tuple_get",
       "kind": "blockPrim"
     },
     "51": {
+      "body": {
+        "description": "Return the AI metadata of any callable value.",
+        "entryBody": 84,
+        "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"value\":{\"additionalProperties\":false,\"properties\":{\"$callable\":{\"type\":\"string\"}},\"required\":[\"$callable\"],\"type\":\"object\"}},\"required\":[\"value\"],\"type\":\"object\"}",
+        "name": "get_metadata",
+        "outputSchema": "{\"additionalProperties\":false,\"properties\":{\"$ctor\":{\"const\":\"prim.agent_metadata\"},\"description\":{\"type\":\"string\"},\"id\":{\"type\":\"string\"},\"input\":{\"type\":\"string\"},\"name\":{\"type\":\"string\"},\"output\":{\"type\":\"string\"}},\"required\":[\"$ctor\",\"description\",\"id\",\"input\",\"name\",\"output\"],\"type\":\"object\"}",
+        "parameters": [
+          {
+            "label": "value",
+            "var": 78
+          }
+        ],
+        "qualifiedName": "prim.get_metadata"
+      },
+      "kind": "blockAgent"
+    },
+    "52": {
+      "body": "get_metadata",
+      "kind": "blockPrim"
+    },
+    "53": {
       "body": "main.point",
       "kind": "blockConstructor"
     },
-    "52": {
+    "54": {
       "body": {
         "parameters": [
           {
@@ -622,7 +643,7 @@
                   "var": 1
                 }
               ],
-              "block": 51,
+              "block": 53,
               "output": 2
             },
             "kind": "statementCall"
@@ -632,7 +653,7 @@
       },
       "kind": "blockUser"
     },
-    "53": {
+    "55": {
       "body": {
         "parameters": [],
         "statements": [],
@@ -640,11 +661,11 @@
       },
       "kind": "blockUser"
     },
-    "54": {
+    "56": {
       "body": {
         "arms": [
           {
-            "body": 53,
+            "body": 55,
             "pattern": {
               "body": [
                 "main.point",
@@ -672,7 +693,7 @@
       },
       "kind": "blockMatch"
     },
-    "55": {
+    "57": {
       "body": {
         "parameters": [
           {
@@ -694,7 +715,7 @@
           {
             "body": {
               "arguments": [],
-              "block": 54,
+              "block": 56,
               "output": 6
             },
             "kind": "statementCall"
@@ -704,11 +725,11 @@
       },
       "kind": "blockUser"
     },
-    "56": {
+    "58": {
       "body": "prim.agent_metadata",
       "kind": "blockConstructor"
     },
-    "57": {
+    "59": {
       "body": {
         "parameters": [
           {
@@ -757,7 +778,7 @@
                   "var": 11
                 }
               ],
-              "block": 56,
+              "block": 58,
               "output": 12
             },
             "kind": "statementCall"
@@ -767,7 +788,11 @@
       },
       "kind": "blockUser"
     },
-    "58": {
+    "6": {
+      "body": "sub",
+      "kind": "blockPrim"
+    },
+    "60": {
       "body": {
         "parameters": [
           {
@@ -802,7 +827,7 @@
       },
       "kind": "blockUser"
     },
-    "59": {
+    "61": {
       "body": {
         "parameters": [
           {
@@ -837,11 +862,7 @@
       },
       "kind": "blockUser"
     },
-    "6": {
-      "body": "sub",
-      "kind": "blockPrim"
-    },
-    "60": {
+    "62": {
       "body": {
         "parameters": [
           {
@@ -876,7 +897,7 @@
       },
       "kind": "blockUser"
     },
-    "61": {
+    "63": {
       "body": {
         "parameters": [
           {
@@ -911,7 +932,7 @@
       },
       "kind": "blockUser"
     },
-    "62": {
+    "64": {
       "body": {
         "parameters": [
           {
@@ -946,7 +967,7 @@
       },
       "kind": "blockUser"
     },
-    "63": {
+    "65": {
       "body": {
         "parameters": [
           {
@@ -973,7 +994,7 @@
       },
       "kind": "blockUser"
     },
-    "64": {
+    "66": {
       "body": {
         "parameters": [
           {
@@ -1000,7 +1021,7 @@
       },
       "kind": "blockUser"
     },
-    "65": {
+    "67": {
       "body": {
         "parameters": [
           {
@@ -1035,7 +1056,7 @@
       },
       "kind": "blockUser"
     },
-    "66": {
+    "68": {
       "body": {
         "parameters": [
           {
@@ -1070,7 +1091,7 @@
       },
       "kind": "blockUser"
     },
-    "67": {
+    "69": {
       "body": {
         "parameters": [
           {
@@ -1105,7 +1126,28 @@
       },
       "kind": "blockUser"
     },
-    "68": {
+    "7": {
+      "body": {
+        "description": "Multiply two numbers.",
+        "entryBody": 62,
+        "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"lhs\":{\"type\":\"number\"},\"rhs\":{\"type\":\"number\"}},\"required\":[\"lhs\",\"rhs\"],\"type\":\"object\"}",
+        "name": "mul",
+        "outputSchema": "{\"type\":\"number\"}",
+        "parameters": [
+          {
+            "label": "lhs",
+            "var": 19
+          },
+          {
+            "label": "rhs",
+            "var": 20
+          }
+        ],
+        "qualifiedName": "prim.mul"
+      },
+      "kind": "blockAgent"
+    },
+    "70": {
       "body": {
         "parameters": [
           {
@@ -1140,7 +1182,7 @@
       },
       "kind": "blockUser"
     },
-    "69": {
+    "71": {
       "body": {
         "parameters": [
           {
@@ -1175,28 +1217,7 @@
       },
       "kind": "blockUser"
     },
-    "7": {
-      "body": {
-        "description": "Multiply two numbers.",
-        "entryBody": 60,
-        "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"lhs\":{\"type\":\"number\"},\"rhs\":{\"type\":\"number\"}},\"required\":[\"lhs\",\"rhs\"],\"type\":\"object\"}",
-        "name": "mul",
-        "outputSchema": "{\"type\":\"number\"}",
-        "parameters": [
-          {
-            "label": "lhs",
-            "var": 19
-          },
-          {
-            "label": "rhs",
-            "var": 20
-          }
-        ],
-        "qualifiedName": "prim.mul"
-      },
-      "kind": "blockAgent"
-    },
-    "70": {
+    "72": {
       "body": {
         "parameters": [
           {
@@ -1231,7 +1252,7 @@
       },
       "kind": "blockUser"
     },
-    "71": {
+    "73": {
       "body": {
         "parameters": [
           {
@@ -1266,7 +1287,7 @@
       },
       "kind": "blockUser"
     },
-    "72": {
+    "74": {
       "body": {
         "parameters": [
           {
@@ -1301,7 +1322,7 @@
       },
       "kind": "blockUser"
     },
-    "73": {
+    "75": {
       "body": {
         "parameters": [
           {
@@ -1328,7 +1349,7 @@
       },
       "kind": "blockUser"
     },
-    "74": {
+    "76": {
       "body": {
         "parameters": [
           {
@@ -1363,7 +1384,7 @@
       },
       "kind": "blockUser"
     },
-    "75": {
+    "77": {
       "body": {
         "parameters": [
           {
@@ -1390,7 +1411,7 @@
       },
       "kind": "blockUser"
     },
-    "76": {
+    "78": {
       "body": {
         "parameters": [
           {
@@ -1417,16 +1438,12 @@
       },
       "kind": "blockUser"
     },
-    "77": {
+    "79": {
       "body": {
         "parameters": [
           {
-            "label": "array",
+            "label": "value",
             "var": 65
-          },
-          {
-            "label": "index",
-            "var": 66
           }
         ],
         "statements": [
@@ -1434,29 +1451,33 @@
             "body": {
               "arguments": [
                 {
-                  "label": "array",
+                  "label": "value",
                   "var": 65
-                },
-                {
-                  "label": "index",
-                  "var": 66
                 }
               ],
               "block": 42,
-              "output": 67
+              "output": 66
             },
             "kind": "statementCall"
           }
         ],
-        "trailing": 67
+        "trailing": 66
       },
       "kind": "blockUser"
     },
-    "78": {
+    "8": {
+      "body": "mul",
+      "kind": "blockPrim"
+    },
+    "80": {
       "body": {
         "parameters": [
           {
             "label": "array",
+            "var": 67
+          },
+          {
+            "label": "index",
             "var": 68
           }
         ],
@@ -1466,6 +1487,10 @@
               "arguments": [
                 {
                   "label": "array",
+                  "var": 67
+                },
+                {
+                  "label": "index",
                   "var": 68
                 }
               ],
@@ -1479,16 +1504,43 @@
       },
       "kind": "blockUser"
     },
-    "79": {
+    "81": {
+      "body": {
+        "parameters": [
+          {
+            "label": "array",
+            "var": 70
+          }
+        ],
+        "statements": [
+          {
+            "body": {
+              "arguments": [
+                {
+                  "label": "array",
+                  "var": 70
+                }
+              ],
+              "block": 46,
+              "output": 71
+            },
+            "kind": "statementCall"
+          }
+        ],
+        "trailing": 71
+      },
+      "kind": "blockUser"
+    },
+    "82": {
       "body": {
         "parameters": [
           {
             "label": "object",
-            "var": 70
+            "var": 72
           },
           {
             "label": "field",
-            "var": 71
+            "var": 73
           }
         ],
         "statements": [
@@ -1497,67 +1549,32 @@
               "arguments": [
                 {
                   "label": "object",
-                  "var": 70
+                  "var": 72
                 },
                 {
                   "label": "field",
-                  "var": 71
+                  "var": 73
                 }
               ],
-              "block": 46,
-              "output": 72
+              "block": 48,
+              "output": 74
             },
             "kind": "statementCall"
           }
         ],
-        "trailing": 72
+        "trailing": 74
       },
       "kind": "blockUser"
     },
-    "8": {
-      "body": "mul",
-      "kind": "blockPrim"
-    },
-    "80": {
+    "83": {
       "body": {
         "parameters": [
           {
             "label": "tuple",
-            "var": 73
+            "var": 75
           },
           {
             "label": "index",
-            "var": 74
-          }
-        ],
-        "statements": [
-          {
-            "body": {
-              "arguments": [
-                {
-                  "label": "tuple",
-                  "var": 73
-                },
-                {
-                  "label": "index",
-                  "var": 74
-                }
-              ],
-              "block": 48,
-              "output": 75
-            },
-            "kind": "statementCall"
-          }
-        ],
-        "trailing": 75
-      },
-      "kind": "blockUser"
-    },
-    "81": {
-      "body": {
-        "parameters": [
-          {
-            "label": "value",
             "var": 76
           }
         ],
@@ -1566,7 +1583,11 @@
             "body": {
               "arguments": [
                 {
-                  "label": "value",
+                  "label": "tuple",
+                  "var": 75
+                },
+                {
+                  "label": "index",
                   "var": 76
                 }
               ],
@@ -1580,10 +1601,37 @@
       },
       "kind": "blockUser"
     },
+    "84": {
+      "body": {
+        "parameters": [
+          {
+            "label": "value",
+            "var": 78
+          }
+        ],
+        "statements": [
+          {
+            "body": {
+              "arguments": [
+                {
+                  "label": "value",
+                  "var": 78
+                }
+              ],
+              "block": 52,
+              "output": 79
+            },
+            "kind": "statementCall"
+          }
+        ],
+        "trailing": 79
+      },
+      "kind": "blockUser"
+    },
     "9": {
       "body": {
         "description": "Floor-mod two numbers.",
-        "entryBody": 61,
+        "entryBody": 63,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"lhs\":{\"type\":\"number\"},\"rhs\":{\"type\":\"number\"}},\"required\":[\"lhs\",\"rhs\"],\"type\":\"object\"}",
         "name": "mod",
         "outputSchema": "{\"type\":\"number\"}",
@@ -1609,14 +1657,15 @@
     "prim.add": 3,
     "prim.agent_metadata": 2,
     "prim.and": 29,
-    "prim.array_get": 41,
-    "prim.array_length": 43,
+    "prim.array_get": 43,
+    "prim.array_length": 45,
     "prim.concat": 35,
     "prim.div": 11,
     "prim.eq": 17,
+    "prim.format": 41,
     "prim.ge": 27,
-    "prim.get_field": 45,
-    "prim.get_metadata": 49,
+    "prim.get_field": 47,
+    "prim.get_metadata": 51,
     "prim.gt": 25,
     "prim.le": 23,
     "prim.lt": 21,
@@ -1628,7 +1677,7 @@
     "prim.or": 31,
     "prim.sub": 5,
     "prim.to_string": 39,
-    "prim.tuple_get": 47,
+    "prim.tuple_get": 49,
     "prim.type_of": 37
   },
   "metadata": {
@@ -1673,49 +1722,52 @@
       "39": "prim:to_string:agent",
       "4": "prim:add:leaf",
       "40": "prim:to_string:leaf",
-      "41": "prim:array_get:agent",
-      "42": "prim:array_get:leaf",
-      "43": "prim:array_length:agent",
-      "44": "prim:array_length:leaf",
-      "45": "prim:get_field:agent",
-      "46": "prim:get_field:leaf",
-      "47": "prim:tuple_get:agent",
-      "48": "prim:tuple_get:leaf",
-      "49": "prim:get_metadata:agent",
+      "41": "prim:format:agent",
+      "42": "prim:format:leaf",
+      "43": "prim:array_get:agent",
+      "44": "prim:array_get:leaf",
+      "45": "prim:array_length:agent",
+      "46": "prim:array_length:leaf",
+      "47": "prim:get_field:agent",
+      "48": "prim:get_field:leaf",
+      "49": "prim:tuple_get:agent",
       "5": "prim:sub:agent",
-      "50": "prim:get_metadata:leaf",
-      "51": "point:ctor",
-      "52": "point:body",
-      "55": "project_x.body",
-      "56": "agent_metadata:ctor",
-      "57": "agent_metadata:body",
-      "58": "prim:add:body",
-      "59": "prim:sub:body",
+      "50": "prim:tuple_get:leaf",
+      "51": "prim:get_metadata:agent",
+      "52": "prim:get_metadata:leaf",
+      "53": "point:ctor",
+      "54": "point:body",
+      "57": "project_x.body",
+      "58": "agent_metadata:ctor",
+      "59": "agent_metadata:body",
       "6": "prim:sub:leaf",
-      "60": "prim:mul:body",
-      "61": "prim:mod:body",
-      "62": "prim:div:body",
-      "63": "prim:neg:body",
-      "64": "prim:abs:body",
-      "65": "prim:eq:body",
-      "66": "prim:ne:body",
-      "67": "prim:lt:body",
-      "68": "prim:le:body",
-      "69": "prim:gt:body",
+      "60": "prim:add:body",
+      "61": "prim:sub:body",
+      "62": "prim:mul:body",
+      "63": "prim:mod:body",
+      "64": "prim:div:body",
+      "65": "prim:neg:body",
+      "66": "prim:abs:body",
+      "67": "prim:eq:body",
+      "68": "prim:ne:body",
+      "69": "prim:lt:body",
       "7": "prim:mul:agent",
-      "70": "prim:ge:body",
-      "71": "prim:and:body",
-      "72": "prim:or:body",
-      "73": "prim:not:body",
-      "74": "prim:concat:body",
-      "75": "prim:type_of:body",
-      "76": "prim:to_string:body",
-      "77": "prim:array_get:body",
-      "78": "prim:array_length:body",
-      "79": "prim:get_field:body",
+      "70": "prim:le:body",
+      "71": "prim:gt:body",
+      "72": "prim:ge:body",
+      "73": "prim:and:body",
+      "74": "prim:or:body",
+      "75": "prim:not:body",
+      "76": "prim:concat:body",
+      "77": "prim:type_of:body",
+      "78": "prim:to_string:body",
+      "79": "prim:format:body",
       "8": "prim:mul:leaf",
-      "80": "prim:tuple_get:body",
-      "81": "prim:get_metadata:body",
+      "80": "prim:array_get:body",
+      "81": "prim:array_length:body",
+      "82": "prim:get_field:body",
+      "83": "prim:tuple_get:body",
+      "84": "prim:get_metadata:body",
       "9": "prim:mod:agent"
     },
     "varNames": {
