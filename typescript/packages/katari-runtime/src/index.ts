@@ -98,6 +98,17 @@ export type {
 } from "./ir/types.js";
 export type { SchemaBundle, AgentDefinition, JsonSchema } from "./ir/schema.js";
 
+// ─── Raw ↔ Value codec (REST / sidecar / CLI boundary) ────────────────────
+
+export {
+  valueFromRaw,
+  valueToRaw,
+  RawValueDecodeError,
+  CTOR_DISCRIMINATOR,
+  CALLABLE_DISCRIMINATOR,
+} from "./value-codec.js";
+export type { RawValue } from "./value-codec.js";
+
 // ─── Agent def id (cross-module opaque) ────────────────────────────────────
 
 export {
