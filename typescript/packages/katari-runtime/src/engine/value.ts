@@ -5,7 +5,7 @@
 //   - GC can collect closures when no Value still references the id
 //   - keeps Value purely structural, no captured state inside the type
 
-import type { CtorId, LiteralValue, QualifiedName } from "../ir/types.js";
+import type { LiteralValue, QualifiedName } from "../ir/types.js";
 import type { ClosureId } from "./id.js";
 
 export type Value =
@@ -15,7 +15,7 @@ export type Value =
   | { kind: "null" }
   | { kind: "tuple"; elements: Value[] }
   | { kind: "array"; elements: Value[] }
-  | { kind: "tagged"; ctorId: CtorId; fields: Record<string, Value> }
+  | { kind: "tagged"; ctorId: QualifiedName; fields: Record<string, Value> }
   | { kind: "closure"; closureId: ClosureId }
   // Top-level callable reference (agent / prim / ctor / external).
   // Carries only the qualified name; the runtime resolves it through

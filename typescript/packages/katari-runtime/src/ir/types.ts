@@ -23,17 +23,18 @@ export type BlockId = number;
 /** IR-level variable identifier (per-occurrence slot). */
 export type VarId = number;
 
-/** IR-level request identifier (handler dispatch key). */
-export type ReqId = number;
-
-/** IR-level data constructor identifier. */
-export type CtorId = number;
-
-/** FFI boundary public name. */
+/** FFI boundary public name. Used to identify every top-level callable
+ * (agent / request / external / data constructor / prim) plus the
+ * dispatch key for handlers and tagged values' ctor identity. */
 export type QualifiedName = {
   module_: string;
   name: string;
 };
+
+/** Structural equality on 'QualifiedName'. */
+export function qnameEqual(a: QualifiedName, b: QualifiedName): boolean {
+  return a.module_ === b.module_ && a.name === b.name;
+}
 
 /**
  * ExternalName is a newtype over QualifiedName in Haskell.
@@ -86,7 +87,7 @@ export type Param = {
  * Its parameters carry the req args; state vars are accessible directly.
  */
 export type Handler = {
-  request: ReqId;
+  request: QualifiedName;
   handlerBody: BlockId;
 };
 
@@ -123,6 +124,19 @@ export type AgentBlock = {
   parameters: Param[];
   /** BlockId of the body. Typically a `blockUser` (inline) or `blockHandle`. */
   entryBody: BlockId;
+  /**
+   * The human-readable name as it appears in the surface declaration
+   * (`agent foo() ...` → `"foo"`). Distinct from `qualifiedName.name` so
+   * local agents can carry their bare source-side name even though
+   * their qualified name is a synthetic `<local>.foo`.
+   */
+  name: string;
+  /** `@"..."` annotation text, when present on the declaration. */
+  description?: string;
+  /** Aeson-encoded JSON Schema string for the agent's parameter object. */
+  inputSchema: string;
+  /** Aeson-encoded JSON Schema string for the agent's return type. */
+  outputSchema: string;
 };
 
 // ─── Block (sumOptions, "body" payload key) ────────────────────────────────
@@ -130,7 +144,7 @@ export type AgentBlock = {
 export type Block =
   | { kind: "blockUser"; body: UserBlock }
   | { kind: "blockPrim"; body: string }
-  | { kind: "blockRequest"; body: ReqId }
+  | { kind: "blockRequest"; body: QualifiedName }
   | { kind: "blockExternal"; body: ExternalName }
   /**
    * Constructor block. Note the kind is `blockConstructor` (matching
@@ -138,7 +152,7 @@ export type Block =
    * mirror used `blockCtor`, which the Aeson-generated JSON never
    * actually produced.
    */
-  | { kind: "blockConstructor"; body: CtorId }
+  | { kind: "blockConstructor"; body: QualifiedName }
   | { kind: "blockMatch"; body: MatchBlock }
   | { kind: "blockFor"; body: ForBlock }
   | { kind: "blockHandle"; body: HandleBlock }
@@ -175,7 +189,7 @@ export type MatchPattern =
   | {
       kind: "matchPatternConstructor";
       // Multi-arg GADT positional ctor → JSON array under `body`.
-      body: [CtorId, [string, MatchPattern][]];
+      body: [QualifiedName, [string, MatchPattern][]];
     }
   | { kind: "matchPatternTuple"; body: MatchPattern[] };
 

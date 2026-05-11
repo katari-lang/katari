@@ -868,6 +868,7 @@ parseRequestHandler = parseWithSpan $ do
 
 parseAgentStatement :: Parser (AgentStatement Parsed)
 parseAgentStatement = parseWithSpan $ do
+  annotation <- parseAnnotation
   parseKeyword KeywordAgent
   name <- parseNameRef
   parameters <- parseParameterList
@@ -876,7 +877,8 @@ parseAgentStatement = parseWithSpan $ do
   body <- parseWithBreakContext BreakContextTop parseBlock
   pure $ \sourceSpan ->
     AgentStatement
-      { name = name,
+      { annotation = annotation,
+        name = name,
         parameters = parameters,
         returnType = returnType,
         withRequests = requests,

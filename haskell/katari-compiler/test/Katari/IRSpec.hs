@@ -65,9 +65,12 @@ blockSpec = describe "Block (sum)" $ do
     BlockPrim "add"
       `shouldEncodeAs` object ["kind" .= ("blockPrim" :: String), "body" .= ("add" :: String)]
 
-  it "BlockRequest carries kind + body (RequestId)" $ do
-    BlockRequest (RequestId 7)
-      `shouldEncodeAs` object ["kind" .= ("blockRequest" :: String), "body" .= (7 :: Int)]
+  it "BlockRequest carries kind + body (QualifiedName)" $ do
+    BlockRequest (QualifiedName "main" "log")
+      `shouldEncodeAs` object
+        [ "kind" .= ("blockRequest" :: String),
+          "body" .= object ["module_" .= ("main" :: String), "name" .= ("log" :: String)]
+        ]
 
   it "BlockExternal carries kind + body (ExternalName)" $ do
     BlockExternal (ExternalName (QualifiedName "discord" "send_message"))
@@ -76,9 +79,12 @@ blockSpec = describe "Block (sum)" $ do
           "body" .= object ["module_" .= ("discord" :: String), "name" .= ("send_message" :: String)]
         ]
 
-  it "BlockConstructor carries kind + body (ConstructorId)" $ do
-    BlockConstructor (ConstructorId 3)
-      `shouldEncodeAs` object ["kind" .= ("blockConstructor" :: String), "body" .= (3 :: Int)]
+  it "BlockConstructor carries kind + body (QualifiedName)" $ do
+    BlockConstructor (QualifiedName "main" "point")
+      `shouldEncodeAs` object
+        [ "kind" .= ("blockConstructor" :: String),
+          "body" .= object ["module_" .= ("main" :: String), "name" .= ("point" :: String)]
+        ]
 
   it "BlockTuple carries kind + body (TupleBlock)" $ do
     BlockTuple TupleBlock {parallel = False, elements = [BlockId 1, BlockId 2]}
@@ -103,9 +109,9 @@ blockSpec = describe "Block (sum)" $ do
             }
     roundTrip (BlockUser userBody)
     roundTrip (BlockPrim "add")
-    roundTrip (BlockRequest (RequestId 7))
+    roundTrip (BlockRequest (QualifiedName "main" "log"))
     roundTrip (BlockExternal (ExternalName (QualifiedName "discord" "send")))
-    roundTrip (BlockConstructor (ConstructorId 3))
+    roundTrip (BlockConstructor (QualifiedName "main" "point"))
     roundTrip (BlockMatch MatchBlock {subject = VarId 0, arms = [], defaultArm = Nothing})
     roundTrip (BlockFor ForBlock {parallel = False, iters = [], stateInits = [], bodyBlock = BlockId 0, thenBlock = Nothing})
     roundTrip (BlockHandle HandleBlock {parallel = False, stateInits = [], body = BlockId 0, handlers = [], thenBlock = Nothing})
@@ -249,7 +255,7 @@ matchArmSpec = describe "MatchArm" $ do
       MatchArm
         { pattern =
             MatchPatternConstructor
-              (ConstructorId 5)
+              (QualifiedName "main" "cons")
               [("head", MatchPatternVariable (VarId 1)), ("tail", MatchPatternVariable (VarId 2))],
           body = BlockId 3
         }

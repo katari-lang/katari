@@ -13,9 +13,8 @@
 
 import type {
   BlockId,
-  CtorId,
   ExternalName,
-  ReqId,
+  QualifiedName,
 } from "../../ir/types.js";
 import type {
   AskId,
@@ -138,7 +137,7 @@ export type ChildRole =
   | { kind: "main" }
   | {
       kind: "handlerBody";
-      reqId: ReqId;
+      reqId: QualifiedName;
       /**
        * The askId we received on the inbound `request` ask, used to
        * address the eventual `askAck` back to the proxy chain.
@@ -155,7 +154,7 @@ export type ChildRole =
 export type PendingAction =
   | {
       kind: "ask";
-      reqId: ReqId;
+      reqId: QualifiedName;
       args: Record<string, Value>;
       askId: AskId;
       askerCallId: CallId;
@@ -191,7 +190,7 @@ export type MatchThread = Common & {
 
 export type RequestThread = Common & {
   kind: "request";
-  reqId: ReqId;
+  reqId: QualifiedName;
   args: Record<string, Value>;
   /** Set after the initial ask has been emitted. */
   pendingAskId?: AskId;
@@ -219,7 +218,7 @@ export type PrimThread = Common & {
 
 export type CtorThread = Common & {
   kind: "ctor";
-  ctorId: CtorId;
+  ctorId: QualifiedName;
   args: Record<string, Value>;
 };
 

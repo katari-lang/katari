@@ -83,6 +83,12 @@ data PrimConstraintRule
     -- type joined with @Integer@ (mirrors 'PrimRuleAddSubMul'). I.e.
     -- @abs(integer) -> integer@, @abs(number) -> number@.
     PrimRuleAbs
+  | -- | @get_metadata(value)@: operand subtype of 'SemanticTypeFunctionAny'
+    -- (any callable); result is the stdlib data type
+    -- @prim.agent_metadata@ (resolved per call site against the Identifier
+    -- type table, since stdlib type ids aren't known at 'Prim'-table
+    -- construction time).
+    PrimRuleGetMetadata
   deriving (Eq, Show)
 
 -- | A built-in primitive definition.
@@ -180,7 +186,22 @@ primDefinitions =
       [("tuple", SemanticTypeUnknown), ("index", SemanticTypeInteger)]
       SemanticTypeUnknown,
     simple "type_of" [("value", SemanticTypeUnknown)] SemanticTypeString,
-    simple "to_string" [("value", SemanticTypeUnknown)] SemanticTypeString
+    simple "to_string" [("value", SemanticTypeUnknown)] SemanticTypeString,
+    -- AI tool-calling foundation: yields the agent_metadata data value
+    -- (name / id / description / input / output) of any callable. The
+    -- primType here is an approximation — the real per-call rule pins
+    -- the result to @prim.agent_metadata@ via 'PrimRuleGetMetadata'.
+    PrimDefinition
+      { primName = "get_metadata",
+        primModule = "prim",
+        primType =
+          SemanticTypeFunction
+            (Map.singleton "value" SemanticTypeFunctionAny)
+            SemanticTypeUnknown
+            emptyRequest,
+        primEffect = emptyRequest,
+        primConstraintRule = PrimRuleGetMetadata
+      }
   ]
   where
     binary name rule =

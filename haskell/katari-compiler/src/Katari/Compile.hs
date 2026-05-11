@@ -50,6 +50,7 @@ import Katari.Lowering (lowerProgram)
 import Katari.Lowering qualified as Lowering
 import Katari.Parser qualified as Parser
 import Katari.Schema (SchemaEntry, buildSchemas)
+import Katari.Stdlib qualified as Stdlib
 import Katari.Typechecker.ConstraintGenerator (generateConstraints)
 import Katari.Typechecker.ConstraintGenerator qualified as CG
 import Katari.Typechecker.Exhaustive (checkExhaustive)
@@ -136,8 +137,16 @@ data CompileResult = CompileResult
 -- @
 compile :: CompileInput -> CompileResult
 compile input =
-  let (parsed, parseDiags) = parseSources input.sources
-      (idResult, idErrors) = identify parsed
+  let stdlibEntries =
+        Map.mapWithKey
+          (\moduleName src -> SourceEntry ("<stdlib:" <> show moduleName <> ">") src)
+          Stdlib.stdlibSources
+      -- User sources win on overlap so that a user-facing error
+      -- (K0113 reserved-name conflict) still surfaces if someone
+      -- defines a module called @prim@ themselves.
+      mergedSources = Map.union input.sources stdlibEntries
+      (parsed, parseDiags) = parseSources mergedSources
+      (idResult, idErrors) = identify Stdlib.stdlibModuleNames parsed
       idDiags = map Identifier.toDiagnostic idErrors
       (cgResult, cgErrors) = generateConstraints idResult
       cgDiags = map CG.toDiagnostic cgErrors

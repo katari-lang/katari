@@ -81,7 +81,7 @@ export type ExternalEventPayload =
 // kinds (e.g. future tracing taps) can be added without touching engine
 // dispatch — only the variant that catches them needs to know.
 
-import type { ReqId } from "../ir/types.js";
+import type { QualifiedName } from "../ir/types.js";
 
 /**
  * Pre-evaluated state-var modifiers attached to `next` / `next-for` asks.
@@ -107,7 +107,7 @@ export type ModMap = Record<number, Value>;
  * children and emits `done` upward (no askAck travels back).
  */
 export type AskKind =
-  | { kind: "request"; reqId: ReqId; args: Record<string, Value> }
+  | { kind: "request"; reqId: QualifiedName; args: Record<string, Value> }
   | { kind: "next"; value: Value; mods: ModMap }
   | { kind: "next-for"; value: Value; mods: ModMap }
   | { kind: "return"; value: Value }

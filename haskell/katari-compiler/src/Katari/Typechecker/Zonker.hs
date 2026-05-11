@@ -406,12 +406,13 @@ walkLet LetStatement {pattern, value, sourceSpan} = do
   pure LetStatement {pattern = pattern', value = value', sourceSpan = sourceSpan}
 
 walkAgentStatement :: AgentStatement Constrained -> Zonk (AgentStatement Zonked)
-walkAgentStatement AgentStatement {name, parameters, returnType, withRequests, body, sourceSpan} = do
+walkAgentStatement AgentStatement {annotation, name, parameters, returnType, withRequests, body, sourceSpan} = do
   parameters' <- mapM walkParameter parameters
   body' <- walkBlock body
   pure
     AgentStatement
-      { name = retagNameRef name,
+      { annotation = annotation,
+        name = retagNameRef name,
         parameters = parameters',
         returnType = fmap retagSyntacticType returnType,
         withRequests = fmap (fmap retagSyntacticRequest) withRequests,

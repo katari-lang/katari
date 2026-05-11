@@ -158,9 +158,13 @@ async function promptObject(schema: AnySchema, path: string): Promise<Value> {
   }
   // Object → Value: tagged constructor convention is for known ctors. For
   // open-ended JSON Schema objects we use a synthetic kind via the `tagged`
-  // shape (ctorId: 0 for "anonymous record"). The runtime treats this as
-  // an opaque tagged value.
-  return { kind: "tagged", ctorId: 0, fields } as Value;
+  // shape with an anonymous-record sentinel qname. The runtime treats this
+  // as an opaque tagged value.
+  return {
+    kind: "tagged",
+    ctorId: { module_: "<anonymous>", name: "record" },
+    fields,
+  } as Value;
 }
 
 async function promptArray(schema: AnySchema, path: string): Promise<Value> {

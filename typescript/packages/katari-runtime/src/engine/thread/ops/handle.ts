@@ -23,7 +23,8 @@
 // children, finishCancelling emits `done` with `pendingReturn`.
 
 import type { Draft } from "immer";
-import type { Block, BlockId, HandleBlock, ReqId } from "../../../ir/types.js";
+import type { Block, BlockId, HandleBlock, QualifiedName } from "../../../ir/types.js";
+import { qnameEqual } from "../../../ir/types.js";
 import type { AskId, CallId, ThreadId } from "../../id.js";
 import type { AskKind } from "../../event.js";
 import { spawnChild } from "../../spawn.js";
@@ -154,7 +155,7 @@ export const handleOps: ThreadOps<HandleThread> = {
     // request: catch if we own the reqId, else proxy.
     if (kind.kind === "request") {
       const block = getHandleBlock(ctx, t.blockId);
-      if (block.handlers.find(h => h.request === kind.reqId) !== undefined) {
+      if (block.handlers.find(h => qnameEqual(h.request, kind.reqId)) !== undefined) {
         const action: PendingAction = {
           kind: "ask",
           reqId: kind.reqId,
@@ -261,15 +262,15 @@ function runAction(
 function spawnHandlerBody(
   ctx: StepCtx,
   t: Draft<HandleThread>,
-  reqId: ReqId,
+  reqId: QualifiedName,
   args: Record<string, Value>,
   askId: AskId,
   askerCallId: CallId,
 ): void {
   const block = getHandleBlock(ctx, t.blockId);
-  const handler = block.handlers.find(h => h.request === reqId);
+  const handler = block.handlers.find(h => qnameEqual(h.request, reqId));
   if (handler === undefined) {
-    throw new Error(`engine.handle: no handler for reqId ${reqId} (post-catch)`);
+    throw new Error(`engine.handle: no handler for reqId ${reqId.module_}.${reqId.name} (post-catch)`);
   }
   const callId = t.nextCallId;
   t.nextCallId = ((callId as number) + 1) as CallId;

@@ -39,7 +39,7 @@ lowerSource src =
       (parsed, parseErrors) = Parser.parse "<test>" stream
   in case parseErrors of
     (_:_) -> fail ("parse failure: " ++ show parseErrors)
-    [] -> case identify (Map.singleton "main" parsed) of
+    [] -> case identify Set.empty (Map.singleton "main" parsed) of
       (idResult, []) -> do
         let (cg, _) = generateConstraints idResult
             solver =
@@ -80,19 +80,20 @@ agentBody agentName irMod = do
         _ -> Nothing
     _ -> Nothing
 
--- | Resolve a constructor's bare name (in module @"main"@) to its IR
--- 'ConstructorId' so 'MatchTag' assertions can compare against the
--- declaration-side identifier rather than a string.
+-- | Resolve a constructor's bare name (in module @"main"@) to its
+-- 'QualifiedName' carried by the 'BlockConstructor' it lowered to. Used by
+-- match-arm assertions that want to compare against the declaration-side
+-- identifier.
 --
 -- Constructors are now wrapped in a 'BlockAgent' for uniform delegate
 -- dispatch (the wrapper's body issues a 'StatementCall' to the inner
 -- 'BlockConstructor'). We follow the agent wrapper to find the inner
 -- ctor block.
-ctorIdOf :: Text -> IRModule -> Maybe ConstructorId
+ctorIdOf :: Text -> IRModule -> Maybe QualifiedName
 ctorIdOf ctorName irMod = do
   bid <- Map.lookup (QualifiedName "main" ctorName) irMod.entries
   case Map.lookup bid irMod.blocks of
-    Just (BlockConstructor ctorId) -> Just ctorId
+    Just (BlockConstructor qname) -> Just qname
     Just (BlockAgent agent) -> do
       bodyBlock <- Map.lookup agent.entryBody irMod.blocks
       case bodyBlock of
@@ -100,10 +101,10 @@ ctorIdOf ctorName irMod = do
         _ -> Nothing
     _ -> Nothing
   where
-    firstCtorBlock :: UserBlock -> IRModule -> Maybe ConstructorId
+    firstCtorBlock :: UserBlock -> IRModule -> Maybe QualifiedName
     firstCtorBlock body m = case body.statements of
       [StatementCall callData] -> case Map.lookup callData.block m.blocks of
-        Just (BlockConstructor ctorId) -> Just ctorId
+        Just (BlockConstructor qname) -> Just qname
         _ -> Nothing
       _ -> Nothing
 

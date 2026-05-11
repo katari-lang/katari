@@ -425,35 +425,37 @@ function resolveDelegateTarget(
 }
 
 /**
- * Resolve an inbound `escalate`'s `agentDefId` to a CORE-internal `ReqId`.
- * For qname-encoded ids we look up the entry block (must be `BlockRequest`).
- * For closure-encoded or unresolved cases we fall back to `0`, which is
- * effectively a sentinel — only a handler bound to reqId 0 will catch it.
+ * Resolve an inbound `escalate`'s `agentDefId` to a CORE-internal request
+ * 'QualifiedName'. For qname-encoded ids we look up the entry block (must
+ * be 'blockRequest') and return its carried qname. Closure-encoded or
+ * unresolved cases yield a synthetic '<unresolved>' qname that no real
+ * handler will equal.
  */
 function resolveRequestReqId(
   ctx: ReturnType<typeof makeStepCtx>,
   agentDefId: import("../agent-def-id.js").AgentDefId,
-): import("../ir/types.js").ReqId {
+): import("../ir/types.js").QualifiedName {
+  const sentinel = { module_: "<unresolved>", name: "<unresolved>" };
   let decoded: import("../agent-def-id.js").CoreAgentDefId | undefined;
   try {
     decoded = decodeCoreAgentDefId(agentDefId);
   } catch {
-    return 0 as import("../ir/types.js").ReqId;
+    return sentinel;
   }
   if (decoded.kind !== "qname") {
-    return 0 as import("../ir/types.js").ReqId;
+    return sentinel;
   }
   const qn =
     decoded.value.module_ === ""
       ? decoded.value.name
       : `${decoded.value.module_}.${decoded.value.name}`;
   const blockId = ctx.state.irModule.entries[qn];
-  if (blockId === undefined) return 0 as import("../ir/types.js").ReqId;
+  if (blockId === undefined) return sentinel;
   const block = ctx.state.irModule.blocks[String(blockId)];
   if (block === undefined || block.kind !== "blockRequest") {
-    return 0 as import("../ir/types.js").ReqId;
+    return sentinel;
   }
-  return block.body as import("../ir/types.js").ReqId;
+  return block.body;
 }
 
 function findEscalationAskId(

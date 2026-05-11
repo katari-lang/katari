@@ -1,5 +1,66 @@
 [
   {
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "input": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "output": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "description",
+        "id",
+        "input",
+        "name",
+        "output"
+      ],
+      "title": "agent_metadata",
+      "type": "object"
+    },
+    "name": "prim.agent_metadata",
+    "output": {
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "input": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "output": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "description",
+        "id",
+        "input",
+        "name",
+        "output"
+      ],
+      "type": "object"
+    },
+    "requests": []
+  },
+  {
     "description": "Returns the canonical greeting.",
     "input": {
       "additionalProperties": false,

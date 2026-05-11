@@ -46,7 +46,7 @@ runSolve source =
       (parsed, parseErrors) = Parser.parse "<test>" stream
   in case parseErrors of
     (_:_) -> fail ("parse failure: " ++ show parseErrors)
-    [] -> case identify (Map.singleton "main" parsed) of
+    [] -> case identify Set.empty (Map.singleton "main" parsed) of
       (idResult, []) ->
         let (cgResult, _) = generateConstraints idResult
             (solverResult, solverErrors) = solve cgResult

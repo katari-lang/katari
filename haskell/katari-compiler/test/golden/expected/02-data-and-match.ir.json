@@ -2,10 +2,10 @@
   "blocks": {
     "0": {
       "body": {
-        "entryBody": 26,
-        "inputSchema": "{}",
+        "entryBody": 28,
+        "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"lhs\":{\"type\":\"number\"},\"rhs\":{\"type\":\"number\"}},\"required\":[\"lhs\",\"rhs\"],\"type\":\"object\"}",
         "name": "add",
-        "outputSchema": "{}",
+        "outputSchema": "{\"type\":\"number\"}",
         "parameters": [
           {
             "label": "lhs",
@@ -25,10 +25,10 @@
     },
     "1": {
       "body": {
-        "entryBody": 28,
-        "inputSchema": "{}",
+        "entryBody": 30,
+        "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"lhs\":{\"type\":\"number\"},\"rhs\":{\"type\":\"number\"}},\"required\":[\"lhs\",\"rhs\"],\"type\":\"object\"}",
         "name": "sub",
-        "outputSchema": "{}",
+        "outputSchema": "{\"type\":\"number\"}",
         "parameters": [
           {
             "label": "lhs",
@@ -48,10 +48,10 @@
     },
     "10": {
       "body": {
-        "entryBody": 46,
-        "inputSchema": "{}",
+        "entryBody": 48,
+        "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"lhs\":{\"type\":\"number\"},\"rhs\":{\"type\":\"number\"}},\"required\":[\"lhs\",\"rhs\"],\"type\":\"object\"}",
         "name": "le",
-        "outputSchema": "{}",
+        "outputSchema": "{\"type\":\"boolean\"}",
         "parameters": [
           {
             "label": "lhs",
@@ -71,10 +71,10 @@
     },
     "11": {
       "body": {
-        "entryBody": 48,
-        "inputSchema": "{}",
+        "entryBody": 50,
+        "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"lhs\":{\"type\":\"number\"},\"rhs\":{\"type\":\"number\"}},\"required\":[\"lhs\",\"rhs\"],\"type\":\"object\"}",
         "name": "gt",
-        "outputSchema": "{}",
+        "outputSchema": "{\"type\":\"boolean\"}",
         "parameters": [
           {
             "label": "lhs",
@@ -94,10 +94,10 @@
     },
     "12": {
       "body": {
-        "entryBody": 50,
-        "inputSchema": "{}",
+        "entryBody": 52,
+        "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"lhs\":{\"type\":\"number\"},\"rhs\":{\"type\":\"number\"}},\"required\":[\"lhs\",\"rhs\"],\"type\":\"object\"}",
         "name": "ge",
-        "outputSchema": "{}",
+        "outputSchema": "{\"type\":\"boolean\"}",
         "parameters": [
           {
             "label": "lhs",
@@ -117,10 +117,10 @@
     },
     "13": {
       "body": {
-        "entryBody": 52,
-        "inputSchema": "{}",
+        "entryBody": 54,
+        "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"lhs\":{\"type\":\"boolean\"},\"rhs\":{\"type\":\"boolean\"}},\"required\":[\"lhs\",\"rhs\"],\"type\":\"object\"}",
         "name": "and",
-        "outputSchema": "{}",
+        "outputSchema": "{\"type\":\"boolean\"}",
         "parameters": [
           {
             "label": "lhs",
@@ -140,10 +140,10 @@
     },
     "14": {
       "body": {
-        "entryBody": 54,
-        "inputSchema": "{}",
+        "entryBody": 56,
+        "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"lhs\":{\"type\":\"boolean\"},\"rhs\":{\"type\":\"boolean\"}},\"required\":[\"lhs\",\"rhs\"],\"type\":\"object\"}",
         "name": "or",
-        "outputSchema": "{}",
+        "outputSchema": "{\"type\":\"boolean\"}",
         "parameters": [
           {
             "label": "lhs",
@@ -163,10 +163,10 @@
     },
     "15": {
       "body": {
-        "entryBody": 56,
-        "inputSchema": "{}",
+        "entryBody": 58,
+        "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"value\":{\"type\":\"boolean\"}},\"required\":[\"value\"],\"type\":\"object\"}",
         "name": "not",
-        "outputSchema": "{}",
+        "outputSchema": "{\"type\":\"boolean\"}",
         "parameters": [
           {
             "label": "value",
@@ -182,10 +182,10 @@
     },
     "16": {
       "body": {
-        "entryBody": 58,
-        "inputSchema": "{}",
+        "entryBody": 60,
+        "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"lhs\":{\"type\":\"string\"},\"rhs\":{\"type\":\"string\"}},\"required\":[\"lhs\",\"rhs\"],\"type\":\"object\"}",
         "name": "concat",
-        "outputSchema": "{}",
+        "outputSchema": "{\"type\":\"string\"}",
         "parameters": [
           {
             "label": "lhs",
@@ -205,8 +205,8 @@
     },
     "17": {
       "body": {
-        "entryBody": 60,
-        "inputSchema": "{}",
+        "entryBody": 62,
+        "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"array\":{\"items\":{},\"type\":\"array\"},\"index\":{\"type\":\"integer\"}},\"required\":[\"array\",\"index\"],\"type\":\"object\"}",
         "name": "array_get",
         "outputSchema": "{}",
         "parameters": [
@@ -228,10 +228,10 @@
     },
     "18": {
       "body": {
-        "entryBody": 62,
-        "inputSchema": "{}",
+        "entryBody": 64,
+        "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"array\":{\"items\":{},\"type\":\"array\"}},\"required\":[\"array\"],\"type\":\"object\"}",
         "name": "array_length",
-        "outputSchema": "{}",
+        "outputSchema": "{\"type\":\"integer\"}",
         "parameters": [
           {
             "label": "array",
@@ -247,8 +247,8 @@
     },
     "19": {
       "body": {
-        "entryBody": 64,
-        "inputSchema": "{}",
+        "entryBody": 66,
+        "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"field\":{\"type\":\"string\"},\"object\":{}},\"required\":[\"field\",\"object\"],\"type\":\"object\"}",
         "name": "get_field",
         "outputSchema": "{}",
         "parameters": [
@@ -270,10 +270,10 @@
     },
     "2": {
       "body": {
-        "entryBody": 30,
-        "inputSchema": "{}",
+        "entryBody": 32,
+        "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"lhs\":{\"type\":\"number\"},\"rhs\":{\"type\":\"number\"}},\"required\":[\"lhs\",\"rhs\"],\"type\":\"object\"}",
         "name": "mul",
-        "outputSchema": "{}",
+        "outputSchema": "{\"type\":\"number\"}",
         "parameters": [
           {
             "label": "lhs",
@@ -293,8 +293,8 @@
     },
     "20": {
       "body": {
-        "entryBody": 66,
-        "inputSchema": "{}",
+        "entryBody": 68,
+        "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"index\":{\"type\":\"integer\"},\"tuple\":{}},\"required\":[\"index\",\"tuple\"],\"type\":\"object\"}",
         "name": "tuple_get",
         "outputSchema": "{}",
         "parameters": [
@@ -316,10 +316,10 @@
     },
     "21": {
       "body": {
-        "entryBody": 68,
-        "inputSchema": "{}",
+        "entryBody": 70,
+        "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"value\":{}},\"required\":[\"value\"],\"type\":\"object\"}",
         "name": "type_of",
-        "outputSchema": "{}",
+        "outputSchema": "{\"type\":\"string\"}",
         "parameters": [
           {
             "label": "value",
@@ -335,10 +335,10 @@
     },
     "22": {
       "body": {
-        "entryBody": 70,
-        "inputSchema": "{}",
+        "entryBody": 72,
+        "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"value\":{}},\"required\":[\"value\"],\"type\":\"object\"}",
         "name": "to_string",
-        "outputSchema": "{}",
+        "outputSchema": "{\"type\":\"string\"}",
         "parameters": [
           {
             "label": "value",
@@ -354,19 +354,73 @@
     },
     "23": {
       "body": {
-        "description": "A two-element point in 2-D space.",
-        "entryBody": 72,
-        "inputSchema": "{}",
-        "name": "point",
+        "entryBody": 74,
+        "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"value\":{}},\"required\":[\"value\"],\"type\":\"object\"}",
+        "name": "get_metadata",
         "outputSchema": "{}",
         "parameters": [
           {
-            "label": "x",
+            "label": "value",
             "var": 63
+          }
+        ],
+        "qualifiedName": {
+          "module_": "prim",
+          "name": "get_metadata"
+        }
+      },
+      "kind": "blockAgent"
+    },
+    "24": {
+      "body": {
+        "entryBody": 76,
+        "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"description\":{\"type\":\"string\"},\"id\":{\"type\":\"string\"},\"input\":{\"type\":\"string\"},\"name\":{\"type\":\"string\"},\"output\":{\"type\":\"string\"}},\"required\":[\"description\",\"id\",\"input\",\"name\",\"output\"],\"type\":\"object\"}",
+        "name": "agent_metadata",
+        "outputSchema": "{\"additionalProperties\":false,\"properties\":{\"description\":{\"type\":\"string\"},\"id\":{\"type\":\"string\"},\"input\":{\"type\":\"string\"},\"name\":{\"type\":\"string\"},\"output\":{\"type\":\"string\"}},\"required\":[\"description\",\"id\",\"input\",\"name\",\"output\"],\"type\":\"object\"}",
+        "parameters": [
+          {
+            "label": "name",
+            "var": 65
+          },
+          {
+            "label": "id",
+            "var": 66
+          },
+          {
+            "label": "description",
+            "var": 67
+          },
+          {
+            "label": "input",
+            "var": 68
+          },
+          {
+            "label": "output",
+            "var": 69
+          }
+        ],
+        "qualifiedName": {
+          "module_": "prim",
+          "name": "agent_metadata"
+        }
+      },
+      "kind": "blockAgent"
+    },
+    "25": {
+      "body": {
+        "description": "A two-element point in 2-D space.",
+        "entryBody": 78,
+        "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"x\":{\"type\":\"integer\"},\"y\":{\"type\":\"integer\"}},\"required\":[\"x\",\"y\"],\"type\":\"object\"}",
+        "name": "point",
+        "outputSchema": "{\"additionalProperties\":false,\"properties\":{\"x\":{\"type\":\"integer\"},\"y\":{\"type\":\"integer\"}},\"required\":[\"x\",\"y\"],\"type\":\"object\"}",
+        "parameters": [
+          {
+            "label": "x",
+            "var": 71
           },
           {
             "label": "y",
-            "var": 64
+            "var": 72
           }
         ],
         "qualifiedName": {
@@ -376,16 +430,17 @@
       },
       "kind": "blockAgent"
     },
-    "24": {
+    "26": {
       "body": {
-        "entryBody": 75,
-        "inputSchema": "{}",
+        "description": "Returns the x-coordinate of a point.",
+        "entryBody": 81,
+        "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"p\":{\"additionalProperties\":false,\"properties\":{\"x\":{\"type\":\"integer\"},\"y\":{\"type\":\"integer\"}},\"required\":[\"x\",\"y\"],\"type\":\"object\"}},\"required\":[\"p\"],\"type\":\"object\"}",
         "name": "project_x",
-        "outputSchema": "{}",
+        "outputSchema": "{\"type\":\"integer\"}",
         "parameters": [
           {
             "label": "p",
-            "var": 66
+            "var": 74
           }
         ],
         "qualifiedName": {
@@ -395,11 +450,11 @@
       },
       "kind": "blockAgent"
     },
-    "25": {
+    "27": {
       "body": "add",
       "kind": "blockPrim"
     },
-    "26": {
+    "28": {
       "body": {
         "parameters": [
           {
@@ -424,7 +479,7 @@
                   "var": 1
                 }
               ],
-              "block": 25,
+              "block": 27,
               "output": 2
             },
             "kind": "statementCall"
@@ -434,11 +489,34 @@
       },
       "kind": "blockUser"
     },
-    "27": {
+    "29": {
       "body": "sub",
       "kind": "blockPrim"
     },
-    "28": {
+    "3": {
+      "body": {
+        "entryBody": 34,
+        "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"lhs\":{\"type\":\"number\"},\"rhs\":{\"type\":\"number\"}},\"required\":[\"lhs\",\"rhs\"],\"type\":\"object\"}",
+        "name": "div",
+        "outputSchema": "{\"type\":\"number\"}",
+        "parameters": [
+          {
+            "label": "lhs",
+            "var": 9
+          },
+          {
+            "label": "rhs",
+            "var": 10
+          }
+        ],
+        "qualifiedName": {
+          "module_": "prim",
+          "name": "div"
+        }
+      },
+      "kind": "blockAgent"
+    },
+    "30": {
       "body": {
         "parameters": [
           {
@@ -463,7 +541,7 @@
                   "var": 4
                 }
               ],
-              "block": 27,
+              "block": 29,
               "output": 5
             },
             "kind": "statementCall"
@@ -473,34 +551,11 @@
       },
       "kind": "blockUser"
     },
-    "29": {
+    "31": {
       "body": "mul",
       "kind": "blockPrim"
     },
-    "3": {
-      "body": {
-        "entryBody": 32,
-        "inputSchema": "{}",
-        "name": "div",
-        "outputSchema": "{}",
-        "parameters": [
-          {
-            "label": "lhs",
-            "var": 9
-          },
-          {
-            "label": "rhs",
-            "var": 10
-          }
-        ],
-        "qualifiedName": {
-          "module_": "prim",
-          "name": "div"
-        }
-      },
-      "kind": "blockAgent"
-    },
-    "30": {
+    "32": {
       "body": {
         "parameters": [
           {
@@ -525,7 +580,7 @@
                   "var": 7
                 }
               ],
-              "block": 29,
+              "block": 31,
               "output": 8
             },
             "kind": "statementCall"
@@ -535,11 +590,11 @@
       },
       "kind": "blockUser"
     },
-    "31": {
+    "33": {
       "body": "div",
       "kind": "blockPrim"
     },
-    "32": {
+    "34": {
       "body": {
         "parameters": [
           {
@@ -564,7 +619,7 @@
                   "var": 10
                 }
               ],
-              "block": 31,
+              "block": 33,
               "output": 11
             },
             "kind": "statementCall"
@@ -574,11 +629,11 @@
       },
       "kind": "blockUser"
     },
-    "33": {
+    "35": {
       "body": "mod",
       "kind": "blockPrim"
     },
-    "34": {
+    "36": {
       "body": {
         "parameters": [
           {
@@ -603,7 +658,7 @@
                   "var": 13
                 }
               ],
-              "block": 33,
+              "block": 35,
               "output": 14
             },
             "kind": "statementCall"
@@ -613,11 +668,11 @@
       },
       "kind": "blockUser"
     },
-    "35": {
+    "37": {
       "body": "neg",
       "kind": "blockPrim"
     },
-    "36": {
+    "38": {
       "body": {
         "parameters": [
           {
@@ -634,7 +689,7 @@
                   "var": 15
                 }
               ],
-              "block": 35,
+              "block": 37,
               "output": 16
             },
             "kind": "statementCall"
@@ -644,47 +699,16 @@
       },
       "kind": "blockUser"
     },
-    "37": {
-      "body": "abs",
-      "kind": "blockPrim"
-    },
-    "38": {
-      "body": {
-        "parameters": [
-          {
-            "label": "value",
-            "var": 17
-          }
-        ],
-        "statements": [
-          {
-            "body": {
-              "arguments": [
-                {
-                  "label": "value",
-                  "var": 17
-                }
-              ],
-              "block": 37,
-              "output": 18
-            },
-            "kind": "statementCall"
-          }
-        ],
-        "trailing": 18
-      },
-      "kind": "blockUser"
-    },
     "39": {
-      "body": "eq",
+      "body": "abs",
       "kind": "blockPrim"
     },
     "4": {
       "body": {
-        "entryBody": 34,
-        "inputSchema": "{}",
+        "entryBody": 36,
+        "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"lhs\":{\"type\":\"number\"},\"rhs\":{\"type\":\"number\"}},\"required\":[\"lhs\",\"rhs\"],\"type\":\"object\"}",
         "name": "mod",
-        "outputSchema": "{}",
+        "outputSchema": "{\"type\":\"number\"}",
         "parameters": [
           {
             "label": "lhs",
@@ -703,6 +727,37 @@
       "kind": "blockAgent"
     },
     "40": {
+      "body": {
+        "parameters": [
+          {
+            "label": "value",
+            "var": 17
+          }
+        ],
+        "statements": [
+          {
+            "body": {
+              "arguments": [
+                {
+                  "label": "value",
+                  "var": 17
+                }
+              ],
+              "block": 39,
+              "output": 18
+            },
+            "kind": "statementCall"
+          }
+        ],
+        "trailing": 18
+      },
+      "kind": "blockUser"
+    },
+    "41": {
+      "body": "eq",
+      "kind": "blockPrim"
+    },
+    "42": {
       "body": {
         "parameters": [
           {
@@ -727,7 +782,7 @@
                   "var": 20
                 }
               ],
-              "block": 39,
+              "block": 41,
               "output": 21
             },
             "kind": "statementCall"
@@ -737,11 +792,11 @@
       },
       "kind": "blockUser"
     },
-    "41": {
+    "43": {
       "body": "ne",
       "kind": "blockPrim"
     },
-    "42": {
+    "44": {
       "body": {
         "parameters": [
           {
@@ -766,7 +821,7 @@
                   "var": 23
                 }
               ],
-              "block": 41,
+              "block": 43,
               "output": 24
             },
             "kind": "statementCall"
@@ -776,11 +831,11 @@
       },
       "kind": "blockUser"
     },
-    "43": {
+    "45": {
       "body": "lt",
       "kind": "blockPrim"
     },
-    "44": {
+    "46": {
       "body": {
         "parameters": [
           {
@@ -805,7 +860,7 @@
                   "var": 26
                 }
               ],
-              "block": 43,
+              "block": 45,
               "output": 27
             },
             "kind": "statementCall"
@@ -815,11 +870,11 @@
       },
       "kind": "blockUser"
     },
-    "45": {
+    "47": {
       "body": "le",
       "kind": "blockPrim"
     },
-    "46": {
+    "48": {
       "body": {
         "parameters": [
           {
@@ -844,7 +899,7 @@
                   "var": 29
                 }
               ],
-              "block": 45,
+              "block": 47,
               "output": 30
             },
             "kind": "statementCall"
@@ -854,11 +909,30 @@
       },
       "kind": "blockUser"
     },
-    "47": {
+    "49": {
       "body": "gt",
       "kind": "blockPrim"
     },
-    "48": {
+    "5": {
+      "body": {
+        "entryBody": 38,
+        "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"value\":{\"type\":\"number\"}},\"required\":[\"value\"],\"type\":\"object\"}",
+        "name": "neg",
+        "outputSchema": "{\"type\":\"number\"}",
+        "parameters": [
+          {
+            "label": "value",
+            "var": 15
+          }
+        ],
+        "qualifiedName": {
+          "module_": "prim",
+          "name": "neg"
+        }
+      },
+      "kind": "blockAgent"
+    },
+    "50": {
       "body": {
         "parameters": [
           {
@@ -883,7 +957,7 @@
                   "var": 32
                 }
               ],
-              "block": 47,
+              "block": 49,
               "output": 33
             },
             "kind": "statementCall"
@@ -893,30 +967,11 @@
       },
       "kind": "blockUser"
     },
-    "49": {
+    "51": {
       "body": "ge",
       "kind": "blockPrim"
     },
-    "5": {
-      "body": {
-        "entryBody": 36,
-        "inputSchema": "{}",
-        "name": "neg",
-        "outputSchema": "{}",
-        "parameters": [
-          {
-            "label": "value",
-            "var": 15
-          }
-        ],
-        "qualifiedName": {
-          "module_": "prim",
-          "name": "neg"
-        }
-      },
-      "kind": "blockAgent"
-    },
-    "50": {
+    "52": {
       "body": {
         "parameters": [
           {
@@ -941,7 +996,7 @@
                   "var": 35
                 }
               ],
-              "block": 49,
+              "block": 51,
               "output": 36
             },
             "kind": "statementCall"
@@ -951,11 +1006,11 @@
       },
       "kind": "blockUser"
     },
-    "51": {
+    "53": {
       "body": "and",
       "kind": "blockPrim"
     },
-    "52": {
+    "54": {
       "body": {
         "parameters": [
           {
@@ -980,7 +1035,7 @@
                   "var": 38
                 }
               ],
-              "block": 51,
+              "block": 53,
               "output": 39
             },
             "kind": "statementCall"
@@ -990,11 +1045,11 @@
       },
       "kind": "blockUser"
     },
-    "53": {
+    "55": {
       "body": "or",
       "kind": "blockPrim"
     },
-    "54": {
+    "56": {
       "body": {
         "parameters": [
           {
@@ -1019,7 +1074,7 @@
                   "var": 41
                 }
               ],
-              "block": 53,
+              "block": 55,
               "output": 42
             },
             "kind": "statementCall"
@@ -1029,11 +1084,11 @@
       },
       "kind": "blockUser"
     },
-    "55": {
+    "57": {
       "body": "not",
       "kind": "blockPrim"
     },
-    "56": {
+    "58": {
       "body": {
         "parameters": [
           {
@@ -1050,7 +1105,7 @@
                   "var": 43
                 }
               ],
-              "block": 55,
+              "block": 57,
               "output": 44
             },
             "kind": "statementCall"
@@ -1060,11 +1115,30 @@
       },
       "kind": "blockUser"
     },
-    "57": {
+    "59": {
       "body": "concat",
       "kind": "blockPrim"
     },
-    "58": {
+    "6": {
+      "body": {
+        "entryBody": 40,
+        "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"value\":{\"type\":\"number\"}},\"required\":[\"value\"],\"type\":\"object\"}",
+        "name": "abs",
+        "outputSchema": "{\"type\":\"number\"}",
+        "parameters": [
+          {
+            "label": "value",
+            "var": 17
+          }
+        ],
+        "qualifiedName": {
+          "module_": "prim",
+          "name": "abs"
+        }
+      },
+      "kind": "blockAgent"
+    },
+    "60": {
       "body": {
         "parameters": [
           {
@@ -1089,7 +1163,7 @@
                   "var": 46
                 }
               ],
-              "block": 57,
+              "block": 59,
               "output": 47
             },
             "kind": "statementCall"
@@ -1099,30 +1173,11 @@
       },
       "kind": "blockUser"
     },
-    "59": {
+    "61": {
       "body": "array_get",
       "kind": "blockPrim"
     },
-    "6": {
-      "body": {
-        "entryBody": 38,
-        "inputSchema": "{}",
-        "name": "abs",
-        "outputSchema": "{}",
-        "parameters": [
-          {
-            "label": "value",
-            "var": 17
-          }
-        ],
-        "qualifiedName": {
-          "module_": "prim",
-          "name": "abs"
-        }
-      },
-      "kind": "blockAgent"
-    },
-    "60": {
+    "62": {
       "body": {
         "parameters": [
           {
@@ -1147,7 +1202,7 @@
                   "var": 49
                 }
               ],
-              "block": 59,
+              "block": 61,
               "output": 50
             },
             "kind": "statementCall"
@@ -1157,11 +1212,11 @@
       },
       "kind": "blockUser"
     },
-    "61": {
+    "63": {
       "body": "array_length",
       "kind": "blockPrim"
     },
-    "62": {
+    "64": {
       "body": {
         "parameters": [
           {
@@ -1178,7 +1233,7 @@
                   "var": 51
                 }
               ],
-              "block": 61,
+              "block": 63,
               "output": 52
             },
             "kind": "statementCall"
@@ -1188,11 +1243,11 @@
       },
       "kind": "blockUser"
     },
-    "63": {
+    "65": {
       "body": "get_field",
       "kind": "blockPrim"
     },
-    "64": {
+    "66": {
       "body": {
         "parameters": [
           {
@@ -1217,7 +1272,7 @@
                   "var": 54
                 }
               ],
-              "block": 63,
+              "block": 65,
               "output": 55
             },
             "kind": "statementCall"
@@ -1227,11 +1282,11 @@
       },
       "kind": "blockUser"
     },
-    "65": {
+    "67": {
       "body": "tuple_get",
       "kind": "blockPrim"
     },
-    "66": {
+    "68": {
       "body": {
         "parameters": [
           {
@@ -1256,7 +1311,7 @@
                   "var": 57
                 }
               ],
-              "block": 65,
+              "block": 67,
               "output": 58
             },
             "kind": "statementCall"
@@ -1266,47 +1321,16 @@
       },
       "kind": "blockUser"
     },
-    "67": {
-      "body": "type_of",
-      "kind": "blockPrim"
-    },
-    "68": {
-      "body": {
-        "parameters": [
-          {
-            "label": "value",
-            "var": 59
-          }
-        ],
-        "statements": [
-          {
-            "body": {
-              "arguments": [
-                {
-                  "label": "value",
-                  "var": 59
-                }
-              ],
-              "block": 67,
-              "output": 60
-            },
-            "kind": "statementCall"
-          }
-        ],
-        "trailing": 60
-      },
-      "kind": "blockUser"
-    },
     "69": {
-      "body": "to_string",
+      "body": "type_of",
       "kind": "blockPrim"
     },
     "7": {
       "body": {
-        "entryBody": 40,
-        "inputSchema": "{}",
+        "entryBody": 42,
+        "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"lhs\":{},\"rhs\":{}},\"required\":[\"lhs\",\"rhs\"],\"type\":\"object\"}",
         "name": "eq",
-        "outputSchema": "{}",
+        "outputSchema": "{\"type\":\"boolean\"}",
         "parameters": [
           {
             "label": "lhs",
@@ -1329,6 +1353,37 @@
         "parameters": [
           {
             "label": "value",
+            "var": 59
+          }
+        ],
+        "statements": [
+          {
+            "body": {
+              "arguments": [
+                {
+                  "label": "value",
+                  "var": 59
+                }
+              ],
+              "block": 69,
+              "output": 60
+            },
+            "kind": "statementCall"
+          }
+        ],
+        "trailing": 60
+      },
+      "kind": "blockUser"
+    },
+    "71": {
+      "body": "to_string",
+      "kind": "blockPrim"
+    },
+    "72": {
+      "body": {
+        "parameters": [
+          {
+            "label": "value",
             "var": 61
           }
         ],
@@ -1341,7 +1396,7 @@
                   "var": 61
                 }
               ],
-              "block": 69,
+              "block": 71,
               "output": 62
             },
             "kind": "statementCall"
@@ -1351,20 +1406,120 @@
       },
       "kind": "blockUser"
     },
-    "71": {
-      "body": 0,
+    "73": {
+      "body": "get_metadata",
+      "kind": "blockPrim"
+    },
+    "74": {
+      "body": {
+        "parameters": [
+          {
+            "label": "value",
+            "var": 63
+          }
+        ],
+        "statements": [
+          {
+            "body": {
+              "arguments": [
+                {
+                  "label": "value",
+                  "var": 63
+                }
+              ],
+              "block": 73,
+              "output": 64
+            },
+            "kind": "statementCall"
+          }
+        ],
+        "trailing": 64
+      },
+      "kind": "blockUser"
+    },
+    "75": {
+      "body": {
+        "module_": "prim",
+        "name": "agent_metadata"
+      },
       "kind": "blockConstructor"
     },
-    "72": {
+    "76": {
+      "body": {
+        "parameters": [
+          {
+            "label": "name",
+            "var": 65
+          },
+          {
+            "label": "id",
+            "var": 66
+          },
+          {
+            "label": "description",
+            "var": 67
+          },
+          {
+            "label": "input",
+            "var": 68
+          },
+          {
+            "label": "output",
+            "var": 69
+          }
+        ],
+        "statements": [
+          {
+            "body": {
+              "arguments": [
+                {
+                  "label": "name",
+                  "var": 65
+                },
+                {
+                  "label": "id",
+                  "var": 66
+                },
+                {
+                  "label": "description",
+                  "var": 67
+                },
+                {
+                  "label": "input",
+                  "var": 68
+                },
+                {
+                  "label": "output",
+                  "var": 69
+                }
+              ],
+              "block": 75,
+              "output": 70
+            },
+            "kind": "statementCall"
+          }
+        ],
+        "trailing": 70
+      },
+      "kind": "blockUser"
+    },
+    "77": {
+      "body": {
+        "module_": "main",
+        "name": "point"
+      },
+      "kind": "blockConstructor"
+    },
+    "78": {
       "body": {
         "parameters": [
           {
             "label": "x",
-            "var": 63
+            "var": 71
           },
           {
             "label": "y",
-            "var": 64
+            "var": 72
           }
         ],
         "statements": [
@@ -1373,101 +1528,37 @@
               "arguments": [
                 {
                   "label": "x",
-                  "var": 63
+                  "var": 71
                 },
                 {
                   "label": "y",
-                  "var": 64
+                  "var": 72
                 }
               ],
-              "block": 71,
-              "output": 65
+              "block": 77,
+              "output": 73
             },
             "kind": "statementCall"
           }
         ],
-        "trailing": 65
+        "trailing": 73
       },
       "kind": "blockUser"
     },
-    "73": {
+    "79": {
       "body": {
         "parameters": [],
         "statements": [],
-        "trailing": 68
-      },
-      "kind": "blockUser"
-    },
-    "74": {
-      "body": {
-        "arms": [
-          {
-            "body": 73,
-            "pattern": {
-              "body": [
-                0,
-                [
-                  [
-                    "x",
-                    {
-                      "body": 68,
-                      "kind": "matchPatternVariable"
-                    }
-                  ],
-                  [
-                    "y",
-                    {
-                      "kind": "matchPatternAny"
-                    }
-                  ]
-                ]
-              ],
-              "kind": "matchPatternConstructor"
-            }
-          }
-        ],
-        "subject": 67
-      },
-      "kind": "blockMatch"
-    },
-    "75": {
-      "body": {
-        "parameters": [
-          {
-            "label": "p",
-            "var": 66
-          }
-        ],
-        "statements": [
-          {
-            "body": {
-              "pattern": {
-                "body": 67,
-                "kind": "matchPatternVariable"
-              },
-              "source": 66
-            },
-            "kind": "statementBindPattern"
-          },
-          {
-            "body": {
-              "arguments": [],
-              "block": 74,
-              "output": 69
-            },
-            "kind": "statementCall"
-          }
-        ],
-        "trailing": 69
+        "trailing": 76
       },
       "kind": "blockUser"
     },
     "8": {
       "body": {
-        "entryBody": 42,
-        "inputSchema": "{}",
+        "entryBody": 44,
+        "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"lhs\":{},\"rhs\":{}},\"required\":[\"lhs\",\"rhs\"],\"type\":\"object\"}",
         "name": "ne",
-        "outputSchema": "{}",
+        "outputSchema": "{\"type\":\"boolean\"}",
         "parameters": [
           {
             "label": "lhs",
@@ -1485,12 +1576,79 @@
       },
       "kind": "blockAgent"
     },
+    "80": {
+      "body": {
+        "arms": [
+          {
+            "body": 79,
+            "pattern": {
+              "body": [
+                {
+                  "module_": "main",
+                  "name": "point"
+                },
+                [
+                  [
+                    "x",
+                    {
+                      "body": 76,
+                      "kind": "matchPatternVariable"
+                    }
+                  ],
+                  [
+                    "y",
+                    {
+                      "kind": "matchPatternAny"
+                    }
+                  ]
+                ]
+              ],
+              "kind": "matchPatternConstructor"
+            }
+          }
+        ],
+        "subject": 75
+      },
+      "kind": "blockMatch"
+    },
+    "81": {
+      "body": {
+        "parameters": [
+          {
+            "label": "p",
+            "var": 74
+          }
+        ],
+        "statements": [
+          {
+            "body": {
+              "pattern": {
+                "body": 75,
+                "kind": "matchPatternVariable"
+              },
+              "source": 74
+            },
+            "kind": "statementBindPattern"
+          },
+          {
+            "body": {
+              "arguments": [],
+              "block": 80,
+              "output": 77
+            },
+            "kind": "statementCall"
+          }
+        ],
+        "trailing": 77
+      },
+      "kind": "blockUser"
+    },
     "9": {
       "body": {
-        "entryBody": 44,
-        "inputSchema": "{}",
+        "entryBody": 46,
+        "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"lhs\":{\"type\":\"number\"},\"rhs\":{\"type\":\"number\"}},\"required\":[\"lhs\",\"rhs\"],\"type\":\"object\"}",
         "name": "lt",
-        "outputSchema": "{}",
+        "outputSchema": "{\"type\":\"boolean\"}",
         "parameters": [
           {
             "label": "lhs",
@@ -1510,10 +1668,11 @@
     }
   },
   "entries": {
-    "main.point": 23,
-    "main.project_x": 24,
+    "main.point": 25,
+    "main.project_x": 26,
     "prim.abs": 6,
     "prim.add": 0,
+    "prim.agent_metadata": 24,
     "prim.and": 13,
     "prim.array_get": 17,
     "prim.array_length": 18,
@@ -1522,6 +1681,7 @@
     "prim.eq": 7,
     "prim.ge": 12,
     "prim.get_field": 19,
+    "prim.get_metadata": 23,
     "prim.gt": 11,
     "prim.le": 10,
     "prim.lt": 9,
@@ -1558,69 +1718,75 @@
       "20": "prim:tuple_get:agent",
       "21": "prim:type_of:agent",
       "22": "prim:to_string:agent",
-      "23": "point:agent",
-      "24": "project_x",
-      "25": "prim:add:leaf",
-      "26": "prim:add:body",
-      "27": "prim:sub:leaf",
-      "28": "prim:sub:body",
-      "29": "prim:mul:leaf",
+      "23": "prim:get_metadata:agent",
+      "24": "agent_metadata:agent",
+      "25": "point:agent",
+      "26": "project_x",
+      "27": "prim:add:leaf",
+      "28": "prim:add:body",
+      "29": "prim:sub:leaf",
       "3": "prim:div:agent",
-      "30": "prim:mul:body",
-      "31": "prim:div:leaf",
-      "32": "prim:div:body",
-      "33": "prim:mod:leaf",
-      "34": "prim:mod:body",
-      "35": "prim:neg:leaf",
-      "36": "prim:neg:body",
-      "37": "prim:abs:leaf",
-      "38": "prim:abs:body",
-      "39": "prim:eq:leaf",
+      "30": "prim:sub:body",
+      "31": "prim:mul:leaf",
+      "32": "prim:mul:body",
+      "33": "prim:div:leaf",
+      "34": "prim:div:body",
+      "35": "prim:mod:leaf",
+      "36": "prim:mod:body",
+      "37": "prim:neg:leaf",
+      "38": "prim:neg:body",
+      "39": "prim:abs:leaf",
       "4": "prim:mod:agent",
-      "40": "prim:eq:body",
-      "41": "prim:ne:leaf",
-      "42": "prim:ne:body",
-      "43": "prim:lt:leaf",
-      "44": "prim:lt:body",
-      "45": "prim:le:leaf",
-      "46": "prim:le:body",
-      "47": "prim:gt:leaf",
-      "48": "prim:gt:body",
-      "49": "prim:ge:leaf",
+      "40": "prim:abs:body",
+      "41": "prim:eq:leaf",
+      "42": "prim:eq:body",
+      "43": "prim:ne:leaf",
+      "44": "prim:ne:body",
+      "45": "prim:lt:leaf",
+      "46": "prim:lt:body",
+      "47": "prim:le:leaf",
+      "48": "prim:le:body",
+      "49": "prim:gt:leaf",
       "5": "prim:neg:agent",
-      "50": "prim:ge:body",
-      "51": "prim:and:leaf",
-      "52": "prim:and:body",
-      "53": "prim:or:leaf",
-      "54": "prim:or:body",
-      "55": "prim:not:leaf",
-      "56": "prim:not:body",
-      "57": "prim:concat:leaf",
-      "58": "prim:concat:body",
-      "59": "prim:array_get:leaf",
+      "50": "prim:gt:body",
+      "51": "prim:ge:leaf",
+      "52": "prim:ge:body",
+      "53": "prim:and:leaf",
+      "54": "prim:and:body",
+      "55": "prim:or:leaf",
+      "56": "prim:or:body",
+      "57": "prim:not:leaf",
+      "58": "prim:not:body",
+      "59": "prim:concat:leaf",
       "6": "prim:abs:agent",
-      "60": "prim:array_get:body",
-      "61": "prim:array_length:leaf",
-      "62": "prim:array_length:body",
-      "63": "prim:get_field:leaf",
-      "64": "prim:get_field:body",
-      "65": "prim:tuple_get:leaf",
-      "66": "prim:tuple_get:body",
-      "67": "prim:type_of:leaf",
-      "68": "prim:type_of:body",
-      "69": "prim:to_string:leaf",
+      "60": "prim:concat:body",
+      "61": "prim:array_get:leaf",
+      "62": "prim:array_get:body",
+      "63": "prim:array_length:leaf",
+      "64": "prim:array_length:body",
+      "65": "prim:get_field:leaf",
+      "66": "prim:get_field:body",
+      "67": "prim:tuple_get:leaf",
+      "68": "prim:tuple_get:body",
+      "69": "prim:type_of:leaf",
       "7": "prim:eq:agent",
-      "70": "prim:to_string:body",
-      "71": "point:ctor",
-      "72": "point:body",
-      "75": "project_x.body",
+      "70": "prim:type_of:body",
+      "71": "prim:to_string:leaf",
+      "72": "prim:to_string:body",
+      "73": "prim:get_metadata:leaf",
+      "74": "prim:get_metadata:body",
+      "75": "agent_metadata:ctor",
+      "76": "agent_metadata:body",
+      "77": "point:ctor",
+      "78": "point:body",
       "8": "prim:ne:agent",
+      "81": "project_x.body",
       "9": "prim:lt:agent"
     },
     "varNames": {
-      "66": "pt",
-      "67": "pt",
-      "68": "xv"
+      "74": "pt",
+      "75": "pt",
+      "76": "xv"
     }
   }
 }

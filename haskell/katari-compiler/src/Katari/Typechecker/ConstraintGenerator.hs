@@ -50,6 +50,7 @@ import Control.Monad.State.Strict (State, gets, modify, runState)
 import Control.Monad.Trans (lift)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
+import Data.Maybe (listToMaybe)
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
@@ -976,11 +977,12 @@ walkLet LetStatement {pattern, value, sourceSpan} = do
   pure LetStatement {pattern = pattern', value = value', sourceSpan = sourceSpan}
 
 walkAgentStatement :: AgentStatement Identified -> CG (AgentStatement Constrained)
-walkAgentStatement AgentStatement {name, parameters, returnType, withRequests, body, sourceSpan} = do
+walkAgentStatement AgentStatement {annotation, name, parameters, returnType, withRequests, body, sourceSpan} = do
   (parameters', body') <- processAgentLike sourceSpan name parameters returnType withRequests body
   pure
     AgentStatement
-      { name = retagNameRef name,
+      { annotation = annotation,
+        name = retagNameRef name,
         parameters = parameters',
         returnType = fmap retagSyntacticType returnType,
         withRequests = fmap (fmap retagSyntacticRequest) withRequests,
@@ -1241,6 +1243,29 @@ applyPrimRule rule arguments sourceSpan =
           addTypeConstraint value_ resultType reasonUn
           addTypeConstraint SemanticTypeInteger resultType reasonUn
           pure resultType
+        PrimRuleGetMetadata -> do
+          -- @get_metadata(value)@ — @value@ floored at @function@
+          -- (the function-lattice top); result is the stdlib data type
+          -- @prim.agent_metadata@. The type id is looked up dynamically
+          -- because stdlib type ids are issued by the Identifier pass
+          -- and aren't constants visible from 'Katari.Prim'.
+          let reasonCall = ConstraintReason ReasonKindCallArgument sourceSpan
+          addTypeConstraint value_ SemanticTypeFunctionAny reasonCall
+          types <- asks (.contextIdentifiedTypes)
+          let agentMetadataQName = QualifiedName {module_ = "prim", name = "agent_metadata"}
+              agentMetadataTypeId =
+                listToMaybe
+                  [ tid
+                    | (tid, td) <- Map.toList types,
+                      td.typeQualifiedName == agentMetadataQName
+                  ]
+          case agentMetadataTypeId of
+            Just tid -> pure (SemanticTypeData tid)
+            -- Stdlib not injected (e.g. unit-test bypass path). Fall
+            -- back to 'SemanticTypeUnknown' rather than abort — the
+            -- runtime layer will surface a clearer error if a
+            -- @get_metadata@ result actually flows somewhere typed.
+            Nothing -> pure SemanticTypeUnknown
         PrimRuleSimple ->
           -- Caller filters PrimRuleSimple before invoking applyPrimRule.
           pure SemanticTypeUnknown

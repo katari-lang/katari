@@ -1,0 +1,7 @@
+project = "metadata"
+
+[compile]
+src = "src/"
+
+[api]
+url = "http://localhost:8080"

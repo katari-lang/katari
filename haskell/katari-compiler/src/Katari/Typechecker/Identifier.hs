@@ -43,6 +43,8 @@ import Data.Foldable (foldl', for_)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (catMaybes, isJust)
+import Data.Set (Set)
+import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
 import Katari.AST
@@ -863,13 +865,19 @@ preregisterPrimitives = do
 -- are flagged with 'ErrorReservedPrimitiveModule' (K0113); a 'ModuleId' is
 -- still allocated so downstream phases can keep walking, but the prim
 -- injection skips those modules.
-assignModuleIds :: Map Text (Module Parsed) -> Identifier (Map Text ModuleId)
-assignModuleIds moduleMap =
+--
+-- @trustedStdlibNames@ holds module names that the compiler itself owns
+-- (see 'Katari.Stdlib'); K0113 is skipped for them.
+assignModuleIds :: Set Text -> Map Text (Module Parsed) -> Identifier (Map Text ModuleId)
+assignModuleIds trustedStdlibNames moduleMap =
   Map.fromList <$> mapM allocate (Map.toList moduleMap)
   where
     allocate (moduleName, parsedModule) = do
-      when (Prim.isPrimReservedModuleName moduleName) $
-        emitError (ErrorReservedPrimitiveModule parsedModule.sourceSpan moduleName)
+      when
+        ( Prim.isPrimReservedModuleName moduleName
+            && not (Set.member moduleName trustedStdlibNames)
+        )
+        $ emitError (ErrorReservedPrimitiveModule parsedModule.sourceSpan moduleName)
       moduleId <-
         freshModuleId
           ModuleData
@@ -1792,12 +1800,13 @@ resolveLet LetStatement {pattern, value, sourceSpan} = do
 -- rules) before resolving the body, so the agent may call itself recursively.
 -- The body is resolved in a fresh scope frame.
 resolveAgentStatement :: AgentStatement Parsed -> Identifier (AgentStatement Identified)
-resolveAgentStatement AgentStatement {name, parameters, returnType, withRequests, body, sourceSpan} = do
+resolveAgentStatement AgentStatement {annotation, name, parameters, returnType, withRequests, body, sourceSpan} = do
   name' <- bindLocalVariable name
   (parameters', returnType', withRequests', body') <- resolveSignatureBody parameters returnType withRequests body
   pure
     AgentStatement
-      { name = name',
+      { annotation = annotation,
+        name = name',
         parameters = parameters',
         returnType = returnType',
         withRequests = withRequests',
@@ -2353,13 +2362,13 @@ resolveModuleQualifiedChain moduleId moduleRef labels totalSpan =
 -- (e.g. type inference) to continue with a fresh type variable instead of
 -- aborting on the first name-resolution failure. Callers that want the
 -- old fail-fast behaviour can branch on @null errors@.
-identify :: Map Text (Module Parsed) -> (IdentifierResult, [IdentifierError])
-identify moduleMap =
+identify :: Set Text -> Map Text (Module Parsed) -> (IdentifierResult, [IdentifierError])
+identify trustedStdlibNames moduleMap =
   let ((asts, primVars, primRules), finalState) =
         runIdentifier $ do
           for_ (findImportCycles moduleMap) (emitImportCycleError moduleMap)
           (primModuleIds, primVars', primRules') <- preregisterPrimitives
-          userModuleIds <- assignModuleIds moduleMap
+          userModuleIds <- assignModuleIds trustedStdlibNames moduleMap
           let allModuleIds = Map.union primModuleIds userModuleIds
           userExports <- buildExports moduleMap
           let allExports = Map.unionWith Map.union userExports (buildPrimExports primVars')

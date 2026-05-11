@@ -5,6 +5,7 @@ import Data.List (find)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (isJust, isNothing)
+import Data.Set qualified as Set
 import Data.Text (Text)
 import Katari.AST
 import Katari.Id (QualifiedName (..))
@@ -34,7 +35,7 @@ parseOne src =
 identifyOne :: Text -> IO (Either [IdentifierError] IdentifierResult)
 identifyOne src = do
   m <- parseOne src
-  pure $ case identify (Map.singleton "main" m) of
+  pure $ case identify Set.empty (Map.singleton "main" m) of
     (r, []) -> Right r
     (_, es) -> Left es
 
@@ -51,7 +52,7 @@ identifyMany sources = do
             [] -> pure (name, parsed)
       )
       sources
-  pure $ case identify (Map.fromList parsedList) of
+  pure $ case identify Set.empty (Map.fromList parsedList) of
     (r, []) -> Right r
     (_, es) -> Left es
 

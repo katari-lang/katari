@@ -8,6 +8,7 @@
 
 import { match, P } from "ts-pattern";
 import type { LiteralValue, MatchPattern } from "../ir/types.js";
+import { qnameEqual } from "../ir/types.js";
 import type { Value } from "./value.js";
 
 /** Returns a flat Record<varId, Value> on match, or null on miss. */
@@ -32,8 +33,8 @@ function tryMatchInto(
     })
     .with({ kind: "matchPatternLiteral" }, (p) => matchLiteral(p.body, value))
     .with({ kind: "matchPatternConstructor" }, (p) => {
-      const [ctorId, fieldPatterns] = p.body;
-      if (value.kind !== "tagged" || value.ctorId !== ctorId) return false;
+      const [ctorQName, fieldPatterns] = p.body;
+      if (value.kind !== "tagged" || !qnameEqual(value.ctorId, ctorQName)) return false;
       for (const [fieldName, fieldPattern] of fieldPatterns) {
         const fv = value.fields[fieldName];
         if (fv === undefined) return false;

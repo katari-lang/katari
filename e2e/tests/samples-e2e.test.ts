@@ -146,4 +146,15 @@ describe("samples/ end-to-end (compile → upload → run → verify)", () => {
     const result = await applyAndRun("abs-and-mod", "07-abs-and-mod");
     expect(result).toEqual({ kind: "number", value: 11 });
   });
+
+  itE2E(
+    "08-metadata: get_metadata on top-level agent + local closure yields 'add_them|main.add_them|local_bar|closure:0'",
+    async () => {
+      const result = await applyAndRun("metadata", "08-metadata");
+      expect(result).toEqual({
+        kind: "string",
+        value: "add_them|main.add_them|local_bar|closure:0",
+      });
+    },
+  );
 });

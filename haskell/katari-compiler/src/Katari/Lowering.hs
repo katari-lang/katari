@@ -28,14 +28,14 @@ import Katari.AST (Phase (Zonked))
 import Katari.AST qualified as AST
 import Katari.Diagnostic (Diagnostic, diagnosticError)
 import Katari.IR
-import Katari.IR qualified as IR
 import Katari.Internal qualified as Internal
 import Katari.SourceSpan (SourceSpan)
 import Katari.Id (VariableId)
 import Katari.Id qualified as Id
 import Katari.Prim (PrimDefinition (..))
 import Katari.Prim qualified as Prim
-import Katari.SemanticType (SemanticType (..))
+import Katari.Schema qualified as Schema
+import Katari.SemanticType (Resolved, SemanticType (..))
 import Katari.Typechecker.Identifier (ConstructorData (..), IdentifierResult (..), RequestData (..))
 import Katari.Typechecker.Zonker (ZonkResult (..))
 
@@ -98,6 +98,15 @@ data LowerEnv = LowerEnv
     -- (@identifiedRequests@ / @identifiedConstructors@) for both id
     -- enumeration (IR.RequestId/IR.ConstructorId allocation) and call-site reverse lookup.
     identifierResult :: IdentifierResult,
+    -- | Zonker-pass output. Lowering reads
+    -- 'zonkedTypeEnvironment' at each agent / wrapper construction site
+    -- to compute the per-agent input/output JSON Schemas for
+    -- 'AgentBlock'.
+    zonkResult :: ZonkResult,
+    -- | Pre-built 'DataDefs' for inline expansion of 'SemanticTypeData'
+    -- references when computing 'AgentBlock' schemas. Built once at
+    -- 'lowerProgram' entry from 'zonkResult'.
+    dataDefs :: Schema.DataDefs,
     -- | Inverse of 'identifierResult.identifiedRequests', precomputed once
     -- at 'lowerProgram' entry so per-call-site lookups are O(log n) rather
     -- than O(n).
@@ -106,11 +115,13 @@ data LowerEnv = LowerEnv
     constructorByVariable :: Map VariableId Id.ConstructorId
   }
 
-initialLowerEnv :: IdentifierResult -> LowerEnv
-initialLowerEnv idResult =
+initialLowerEnv :: IdentifierResult -> ZonkResult -> LowerEnv
+initialLowerEnv idResult zonk =
   LowerEnv
     { localVars = Map.empty,
       identifierResult = idResult,
+      zonkResult = zonk,
+      dataDefs = Schema.buildDataDefs idResult zonk,
       requestByVariable =
         Map.fromList
           [ (requestData.requestVariableId, requestId)
@@ -126,8 +137,6 @@ initialLowerEnv idResult =
 data LowerState = LowerState
   { lsNextBlockId :: Word32,
     lsNextVarId :: Word32,
-    lsNextRequestId :: Word32,
-    lsNextConstructorId :: Word32,
     lsBlocks :: Map BlockId Block,
     lsVarNames :: Map VarId Text,
     lsBlockNames :: Map BlockId Text,
@@ -142,14 +151,6 @@ data LowerState = LowerState
     -- The runtime treats all such values uniformly: dispatch is by
     -- 'IRModule.entries' lookup of the qualified name.
     lsTopLevelQNames :: Map VariableId QualifiedName,
-    -- | Identifier-pass 'RequestId' → IR-internal 'IR.RequestId'. Allocated at
-    -- the start of lowering (one IR IR.RequestId per Identifier RequestId, 1:1
-    -- currently). Used by 'lowerHandler' / 'patternToArm' to translate
-    -- Identifier resolution into the IR's runtime-dispatch id space.
-    lsRequestIds :: Map Id.RequestId IR.RequestId,
-    -- | Identifier-pass 'ConstructorId' → IR-internal 'IR.ConstructorId'. Same
-    -- pattern as 'lsRequestIds'.
-    lsConstructorIds :: Map Id.ConstructorId IR.ConstructorId,
     -- | FFI translation table: qualified name → BlockId. Populated as
     -- top-level callables are registered; surfaces in
     -- 'IRModule.entries'.
@@ -170,15 +171,11 @@ initialLowerState =
   LowerState
     { lsNextBlockId = 0,
       lsNextVarId = 0,
-      lsNextRequestId = 0,
-      lsNextConstructorId = 0,
       lsBlocks = Map.empty,
       lsVarNames = Map.empty,
       lsBlockNames = Map.empty,
       lsTopLevelBlocks = Map.empty,
       lsTopLevelQNames = Map.empty,
-      lsRequestIds = Map.empty,
-      lsConstructorIds = Map.empty,
       lsEntries = Map.empty,
       lsPrimBlockIds = Map.empty,
       lsCurrentEmitted = [],
@@ -212,37 +209,6 @@ freshVarId hint = do
           }
     )
   pure varId
-
-freshRequestId :: Lower IR.RequestId
-freshRequestId = do
-  reqId <- gets (IR.RequestId . (.lsNextRequestId))
-  modify (\state -> state {lsNextRequestId = state.lsNextRequestId + 1})
-  pure reqId
-
-freshConstructorId :: Lower IR.ConstructorId
-freshConstructorId = do
-  ctorId <- gets (IR.ConstructorId . (.lsNextConstructorId))
-  modify (\state -> state {lsNextConstructorId = state.lsNextConstructorId + 1})
-  pure ctorId
-
--- | Allocate one IR 'IR.RequestId' per Identifier 'RequestId' and one IR
--- 'IR.ConstructorId' per Identifier 'ConstructorId'. Stores both translation
--- tables in 'lsRequestIds' / 'lsConstructorIds'. Called once at the start of
--- 'lowerProgramM' before declaration walking begins.
-allocateReqAndCtorIds :: Lower ()
-allocateReqAndCtorIds = do
-  idResult <- asks (.identifierResult)
-  reqIdPairs <- forM (Map.keys idResult.identifiedRequests) $ \identRid -> do
-    irReqId <- freshRequestId
-    pure (identRid, irReqId)
-  ctorIdPairs <- forM (Map.keys idResult.identifiedConstructors) $ \identCid -> do
-    irCtorId <- freshConstructorId
-    pure (identCid, irCtorId)
-  modify $ \state ->
-    state
-      { lsRequestIds = Map.fromList reqIdPairs,
-        lsConstructorIds = Map.fromList ctorIdPairs
-      }
 
 recordBlock :: BlockId -> Block -> Maybe Text -> Lower ()
 recordBlock blockId block name =
@@ -406,6 +372,49 @@ runWithFreshBuffer action = do
   pure (result, reverse emitted)
 
 -- ===========================================================================
+-- Schema computation helpers
+-- ===========================================================================
+
+-- | Compute the @(inputSchema, outputSchema)@ text pair for an agent /
+-- wrapper whose function type is recorded under @variableId@ in the
+-- zonked type environment.
+--
+-- @labelsAndAnnotations@ supplies the surface-level annotation for each
+-- parameter (so the generated JSON Schema can surface
+-- @\@\"...\"@ docstrings to AI tool-calling consumers). On a missing or
+-- non-function lookup we degrade to the open-schema placeholder
+-- @("{}", "{}")@: the Zonker should produce a function type for every
+-- callable, but a few synthetic agents (locals not yet in the
+-- environment, error recovery) might land here without one.
+schemasForVariable ::
+  VariableId ->
+  [(Text, Maybe Text)] ->
+  Lower (Text, Text)
+schemasForVariable variableId labelsAndAnnotations = do
+  zr <- asks (.zonkResult)
+  case Map.lookup variableId zr.zonkedTypeEnvironment of
+    Just functionType -> schemasForFunctionType functionType labelsAndAnnotations
+    Nothing -> pure ("{}", "{}")
+
+-- | Direct variant of 'schemasForVariable' for call sites that already
+-- hold the resolved function type (e.g. prim wrappers, which read it
+-- straight from 'Katari.Prim.primDefinitions').
+schemasForFunctionType ::
+  SemanticType Resolved ->
+  [(Text, Maybe Text)] ->
+  Lower (Text, Text)
+schemasForFunctionType functionType labelsAndAnnotations = do
+  dd <- asks (.dataDefs)
+  case functionType of
+    SemanticTypeFunction paramTypes returnType _ ->
+      pure
+        ( Schema.jsonSchemaToText
+            (Schema.buildInputObject dd paramTypes labelsAndAnnotations),
+          Schema.jsonSchemaToText (Schema.buildOutputSchema dd returnType)
+        )
+    _ -> pure ("{}", "{}")
+
+-- ===========================================================================
 -- UserBlock default template
 -- ===========================================================================
 
@@ -437,10 +446,10 @@ lowerProgram ::
   IdentifierResult ->
   ZonkResult ->
   (Either Diagnostic IRModule, [LoweringError])
-lowerProgram moduleName idResult zonkResult =
+lowerProgram moduleName idResult zonk =
   let (result, finalState) =
         runState
-          (runReaderT (runExceptT (lowerProgramM moduleName zonkResult)) (initialLowerEnv idResult))
+          (runReaderT (runExceptT (lowerProgramM moduleName zonk)) (initialLowerEnv idResult zonk))
           initialLowerState
    in (result, reverse finalState.lsErrors)
 
@@ -451,7 +460,6 @@ lowerProgramM moduleName zonkResult = do
   -- 'IR.ConstructorId' per Identifier 'ConstructorId') so the handler / pattern
   -- match call sites can translate from the Identifier id space to the
   -- IR's runtime-dispatch id space.
-  allocateReqAndCtorIds
   registerDeclarationKinds zonkResult
   lowerPrimitives
   _ <- lowerAllDeclarations zonkResult
@@ -528,8 +536,20 @@ lowerPrimitives = do
                 )
           primBlk <- freshBlockId
           recordBlock primBlk (BlockPrim def.primName) (Just ("prim:" <> def.primName <> ":leaf"))
-          -- TODO(Phase 1.2): compute real input/output JSON Schemas from primType
-          writeWrapperAgent agentBlk qname paramLabels primBlk ("prim:" <> def.primName) def.primName Nothing "{}" "{}"
+          (inputSchema, outputSchema) <-
+            schemasForFunctionType
+              def.primType
+              [(label, Nothing) | label <- paramLabels]
+          writeWrapperAgent
+            agentBlk
+            qname
+            paramLabels
+            primBlk
+            ("prim:" <> def.primName)
+            def.primName
+            Nothing
+            inputSchema
+            outputSchema
           modify $ \state ->
             state {lsPrimBlockIds = Map.insert vid primBlk state.lsPrimBlockIds}
         Nothing ->
@@ -656,12 +676,8 @@ registerDeclarationKinds zonkResult =
       AST.DeclarationRequest decl ->
         registerCallable decl.name decl.sourceSpan $ \variableId -> do
           blockId <- freshBlockId
-          -- Look up the IR IR.RequestId we pre-allocated for this Identifier RequestId
-          -- (the request id slot of the @req@ name). Defensive fallback:
-          -- allocate a fresh IR.RequestId if missing (would indicate an upstream
-          -- consistency bug).
-          irReqId <- requestIdForVariable variableId
-          recordBlock blockId (BlockRequest irReqId) (Just decl.name.text)
+          reqQName <- requestQNameForVariable variableId
+          recordBlock blockId (BlockRequest reqQName) (Just decl.name.text)
           recordTopLevelCallable variableId moduleName decl.name.text blockId
       AST.DeclarationExternalAgent decl ->
         registerCallable decl.name decl.sourceSpan $ \variableId -> do
@@ -681,30 +697,20 @@ registerDeclarationKinds zonkResult =
       AST.DeclarationTypeSynonym _ -> pure ()
       AST.DeclarationError sourceSpan -> recordError (LoweringErrorParseSentinel sourceSpan)
 
-    -- \| O(log n) lookup of the IR 'IR.RequestId' for a @req@ declaration's
-    -- call-side 'VariableId', using the inverse map precomputed in
-    -- 'LowerEnv'.
-    requestIdForVariable :: VariableId -> Lower IR.RequestId
-    requestIdForVariable variableId = do
+    -- | Look up the 'QualifiedName' that identifies the @req@ declaration
+    -- whose call-side 'VariableId' is the argument. Used to stamp
+    -- 'BlockRequest' / 'Handler.request' with the qname carried by the
+    -- 'RequestData' built during the Identifier pass.
+    requestQNameForVariable :: VariableId -> Lower QualifiedName
+    requestQNameForVariable variableId = do
       inverse <- asks (.requestByVariable)
+      idResult <- asks (.identifierResult)
       case Map.lookup variableId inverse of
-        Just requestId -> do
-          mapped <- gets (Map.lookup requestId . (.lsRequestIds))
-          case mapped of
-            Just irReqId -> pure irReqId
-            Nothing -> throwError (Internal.internalErrorNoSpan "requestIdForVariable: IR.RequestId not pre-allocated")
-        Nothing -> throwError (Internal.internalErrorNoSpan "requestIdForVariable: VariableId not in requestByVariable")
-
-    constructorIdForVariable :: VariableId -> Lower IR.ConstructorId
-    constructorIdForVariable variableId = do
-      inverse <- asks (.constructorByVariable)
-      case Map.lookup variableId inverse of
-        Just constructorId -> do
-          mapped <- gets (Map.lookup constructorId . (.lsConstructorIds))
-          case mapped of
-            Just irCtorId -> pure irCtorId
-            Nothing -> throwError (Internal.internalErrorNoSpan "constructorIdForVariable: IR.ConstructorId not pre-allocated")
-        Nothing -> throwError (Internal.internalErrorNoSpan "constructorIdForVariable: VariableId not in constructorByVariable")
+        Just requestId ->
+          case Map.lookup requestId idResult.identifiedRequests of
+            Just rd -> pure rd.requestQualifiedName
+            Nothing -> throwError (Internal.internalErrorNoSpan "requestQNameForVariable: RequestId not in identifiedRequests")
+        Nothing -> throwError (Internal.internalErrorNoSpan "requestQNameForVariable: VariableId not in requestByVariable")
 
     -- | Register a top-level callable: bind the @VariableId@ to its
     -- @BlockId@, record its 'QualifiedName' for value-side dispatch, and
@@ -734,22 +740,43 @@ lowerAllDeclarations zonkResult = do
       AST.DeclarationData decl -> resolveDecl decl.name $ \variableId agentBlk -> do
         qname <- requireAgentQName "DeclarationData" decl.name.text agentBlk
         let paramLabels = map (.name) decl.parameters
-        irCtorId <- lookupConstructorId variableId
+            labelsAndAnnotations =
+              [(dataParameter.name, dataParameter.annotation) | dataParameter <- decl.parameters]
+        ctorQName <- lookupConstructorQName variableId
         innerBlk <- freshBlockId
-        recordBlock innerBlk (BlockConstructor irCtorId) (Just (decl.name.text <> ":ctor"))
-        -- TODO(Phase 1.2): compute real input/output JSON Schemas from zonked types
-        writeWrapperAgent agentBlk qname paramLabels innerBlk decl.name.text decl.name.text decl.annotation "{}" "{}"
+        recordBlock innerBlk (BlockConstructor ctorQName) (Just (decl.name.text <> ":ctor"))
+        (inputSchema, outputSchema) <- schemasForVariable variableId labelsAndAnnotations
+        writeWrapperAgent
+          agentBlk
+          qname
+          paramLabels
+          innerBlk
+          decl.name.text
+          decl.name.text
+          decl.annotation
+          inputSchema
+          outputSchema
         pure (Just (decl.name.text, agentBlk))
-      AST.DeclarationExternalAgent decl -> resolveDecl decl.name $ \_variableId agentBlk -> do
+      AST.DeclarationExternalAgent decl -> resolveDecl decl.name $ \variableId agentBlk -> do
         qname <- requireAgentQName "DeclarationExternalAgent" decl.name.text agentBlk
         let paramLabels = map (.label) decl.parameters
+            labelsAndAnnotations = [(pb.label, pb.annotation) | pb <- decl.parameters]
         innerBlk <- freshBlockId
         recordBlock
           innerBlk
           (BlockExternal (ExternalName qname))
           (Just (decl.name.text <> ":external"))
-        -- TODO(Phase 1.2): compute real input/output JSON Schemas
-        writeWrapperAgent agentBlk qname paramLabels innerBlk decl.name.text decl.name.text decl.annotation "{}" "{}"
+        (inputSchema, outputSchema) <- schemasForVariable variableId labelsAndAnnotations
+        writeWrapperAgent
+          agentBlk
+          qname
+          paramLabels
+          innerBlk
+          decl.name.text
+          decl.name.text
+          decl.annotation
+          inputSchema
+          outputSchema
         pure (Just (decl.name.text, agentBlk))
       _ -> pure Nothing
 
@@ -781,23 +808,23 @@ lowerAllDeclarations zonkResult = do
                 (ctx <> ": '" <> declName <> "' agent slot not in lsEntries")
             )
 
-    lookupConstructorId :: VariableId -> Lower IR.ConstructorId
-    lookupConstructorId variableId = do
+    lookupConstructorQName :: VariableId -> Lower QualifiedName
+    lookupConstructorQName variableId = do
       inverse <- asks (.constructorByVariable)
+      idResult <- asks (.identifierResult)
       case Map.lookup variableId inverse of
-        Just identCid -> do
-          mapped <- gets (Map.lookup identCid . (.lsConstructorIds))
-          case mapped of
-            Just irCtorId -> pure irCtorId
+        Just identCid ->
+          case Map.lookup identCid idResult.identifiedConstructors of
+            Just cd -> pure cd.constructorQualifiedName
             Nothing ->
               throwError
                 ( Internal.internalErrorNoSpan
-                    "lookupConstructorId: IR.ConstructorId not pre-allocated"
+                    "lookupConstructorQName: ConstructorId not in identifiedConstructors"
                 )
         Nothing ->
           throwError
             ( Internal.internalErrorNoSpan
-                "lookupConstructorId: VariableId not in constructorByVariable"
+                "lookupConstructorQName: VariableId not in constructorByVariable"
             )
 
 -- ===========================================================================
@@ -809,23 +836,48 @@ lowerAllDeclarations zonkResult = do
 -- an inner 'BlockUser' body.
 lowerAgentDeclaration :: AST.AgentDeclaration Zonked -> BlockId -> Lower ()
 lowerAgentDeclaration decl =
-  lowerAgentLike decl.name.text decl.parameters decl.body
+  lowerAgentLike
+    decl.name.text
+    decl.name.resolution
+    decl.annotation
+    decl.parameters
+    decl.body
 
 -- | Shared lowering shape for any \"agent-like\" callable: a top-level
 -- 'AgentDeclaration', or a local 'AgentStatement'. Allocates param
 -- slots, threads param destructuring as a prelude, and builds the
--- agent block.
+-- agent block (with its precomputed metadata).
+--
+-- @variableId@ is consulted in 'zonkedTypeEnvironment' to fetch the
+-- function type used to generate the input/output JSON Schemas embedded
+-- in the resulting 'AgentBlock'. @description@ is the @\@\"...\"@
+-- annotation on the declaration (top-level agents already carry one;
+-- local agents will once Phase 1.6 lands).
 lowerAgentLike ::
   Text ->
+  Maybe VariableId ->
+  Maybe Text ->
   [AST.ParameterBinding Zonked] ->
   AST.Block Zonked ->
   BlockId ->
   Lower ()
-lowerAgentLike name parameters body blockId = do
+lowerAgentLike name mVariableId description parameters body blockId = do
   paramBindings <- mapM bindParam parameters
   let paramVars = map fst paramBindings
       paramPrelude = combineParamPreludes (map snd paramBindings)
-  lowerSimpleAgent blockId name paramVars paramPrelude body
+      labelsAndAnnotations = [(pb.label, pb.annotation) | pb <- parameters]
+  (inputSchema, outputSchema) <- case mVariableId of
+    Just variableId -> schemasForVariable variableId labelsAndAnnotations
+    Nothing -> pure ("{}", "{}")
+  lowerSimpleAgent
+    blockId
+    name
+    paramVars
+    paramPrelude
+    body
+    description
+    inputSchema
+    outputSchema
 
 -- | Plain agent (no @where@). Emits a 'BlockAgent' wrapper at @blockId@ that
 -- references an inner 'BlockUser' holding the actual body statements.
@@ -834,14 +886,21 @@ lowerAgentLike name parameters body blockId = do
 --
 -- The @prelude@ runs inside the inner block's buffer so any parameter
 -- destructuring is emitted before the body proper.
+--
+-- @description@ / @inputSchema@ / @outputSchema@ are precomputed by the
+-- caller and embedded verbatim in 'AgentBlock', so @get_metadata@ at
+-- runtime can return them without re-deriving from the type.
 lowerSimpleAgent ::
   BlockId ->
   Text ->
   [Param] ->
   Lower [(VariableId, VarId)] ->
   AST.Block Zonked ->
+  Maybe Text ->
+  Text ->
+  Text ->
   Lower ()
-lowerSimpleAgent blockId name paramVars prelude blk = do
+lowerSimpleAgent blockId name paramVars prelude blk description inputSchema outputSchema = do
   (trailing, statements) <- runWithFreshBuffer $ do
     locals <- prelude
     withLocals locals (lowerBlockInto blk)
@@ -868,15 +927,10 @@ lowerSimpleAgent blockId name paramVars prelude blk = do
           { qualifiedName = qname,
             parameters = paramVars,
             entryBody = bodyBlockId,
-            -- TODO(Phase 1.2): plumb name/description/inputSchema/outputSchema
-            -- through 'lowerSimpleAgent' for top-level and local agents.
-            -- Local agents currently surface synthetic info; properly
-            -- threading these requires passing the declaration's
-            -- annotation and zonked function type through the call chain.
             name = name,
-            description = Nothing,
-            inputSchema = "{}",
-            outputSchema = "{}"
+            description = description,
+            inputSchema = inputSchema,
+            outputSchema = outputSchema
           }
   recordBlock blockId (BlockAgent agent) (Just name)
   where
@@ -897,17 +951,17 @@ lowerSimpleAgent blockId name paramVars prelude blk = do
 -- 'withLocals'; it is passed here only so the caller's intent is explicit.
 lowerHandler :: [(VariableId, VarId)] -> AST.RequestHandler Zonked -> Lower Handler
 lowerHandler _stateLocals hr = do
-  irReqId <- case hr.name.resolution of
+  reqQName <- case hr.name.resolution of
     Just identRequestId -> do
-      mapped <- gets (Map.lookup identRequestId . (.lsRequestIds))
-      case mapped of
-        Just foundReqId -> pure foundReqId
+      idResult <- asks (.identifierResult)
+      case Map.lookup identRequestId idResult.identifiedRequests of
+        Just rd -> pure rd.requestQualifiedName
         Nothing -> do
           recordError (LoweringErrorUnresolvedVariable hr.sourceSpan hr.name.text)
-          freshRequestId
+          pure (QualifiedName "<unresolved>" hr.name.text)
     Nothing -> do
       recordError (LoweringErrorUnresolvedVariable hr.sourceSpan hr.name.text)
-      freshRequestId
+      pure (QualifiedName "<unresolved>" hr.name.text)
   bodyBlockId <- freshBlockId
   paramBindings <- mapM bindParam hr.parameters
   let reqParamVars = map fst paramBindings
@@ -928,7 +982,7 @@ lowerHandler _stateLocals hr = do
             statements = finalStatements
           }
   recordBlock bodyBlockId (BlockUser (userBlock)) (Just hr.name.text)
-  pure Handler {request = irReqId, handlerBody = bodyBlockId}
+  pure Handler {request = reqQName, handlerBody = bodyBlockId}
 
 -- | Lower the optional then-clause to its own block.
 lowerThenClause ::
@@ -1043,7 +1097,13 @@ lowerBlockInto blk = go blk.statements
         blockId <- freshBlockId
         var <- freshVarId (Just stmt.name.text)
         withLocals [(variableId, var)] $ do
-          lowerAgentLike stmt.name.text stmt.parameters stmt.body blockId
+          lowerAgentLike
+            stmt.name.text
+            (Just variableId)
+            stmt.annotation
+            stmt.parameters
+            stmt.body
+            blockId
           emit (StatementMakeClosure MakeClosureData {output = var, block = blockId})
           go rest
     go (stmt : rest) = do
@@ -1381,25 +1441,25 @@ lowerPattern = \case
     (subs, localss) <- mapAndUnzipM lowerPattern tp.elements
     pure (MatchPatternTuple subs, concat localss)
   AST.PatternQualifiedConstructor qp -> do
-    irCtorId <- case qp.constructorName.resolution of
+    ctorQName <- case qp.constructorName.resolution of
       Just identCtorId -> do
-        mapped <- gets (Map.lookup identCtorId . (.lsConstructorIds))
-        case mapped of
-          Just resolvedCtorId -> pure resolvedCtorId
+        idResult <- asks (.identifierResult)
+        case Map.lookup identCtorId idResult.identifiedConstructors of
+          Just cd -> pure cd.constructorQualifiedName
           Nothing -> do
             recordError
               (LoweringErrorUnresolvedVariable qp.sourceSpan qp.constructorName.text)
-            freshConstructorId
+            pure (QualifiedName "<unresolved>" qp.constructorName.text)
       Nothing -> do
         recordError
           (LoweringErrorUnresolvedVariable qp.sourceSpan qp.constructorName.text)
-        freshConstructorId
+        pure (QualifiedName "<unresolved>" qp.constructorName.text)
     pairs <- forM qp.parameters $ \(labelRef, sub) -> do
       (subPat, subLocals) <- lowerPattern sub
       pure ((labelRef.text, subPat), subLocals)
     let fields = map fst pairs
         locals = concatMap snd pairs
-    pure (MatchPatternConstructor irCtorId fields, locals)
+    pure (MatchPatternConstructor ctorQName fields, locals)
 
 -- | AST and IR share 'LiteralValue' (defined in 'Katari.Common'), so
 -- lowering is the identity. Kept as an alias for call sites that read

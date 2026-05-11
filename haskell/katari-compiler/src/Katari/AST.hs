@@ -359,7 +359,12 @@ instance HasSourceSpan (LetStatement phase) where
   sourceSpanOf statement = statement.sourceSpan
 
 data AgentStatement (phase :: Phase) = AgentStatement
-  { name :: NameRef phase VariableRef,
+  { -- | Optional @\@"..."@ annotation, mirroring top-level @agent@ decls
+    -- (parsed in front of the @agent@ keyword). Documentation only —
+    -- ignored by the type system; surfaces in 'Katari.IR.AgentBlock'
+    -- so AI tool-calling consumers can read it via @get_metadata@.
+    annotation :: Maybe Text,
+    name :: NameRef phase VariableRef,
     parameters :: [ParameterBinding phase],
     returnType :: Maybe (SyntacticType phase),
     withRequests :: Maybe [SyntacticRequest phase],

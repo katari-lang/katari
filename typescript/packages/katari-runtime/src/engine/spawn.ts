@@ -7,7 +7,7 @@
 
 import type { Draft } from "immer";
 import { match } from "ts-pattern";
-import type { Block, BlockId, ReqId } from "../ir/types.js";
+import type { Block, BlockId } from "../ir/types.js";
 import {
   createDelegationId,
   createScopeId,
@@ -157,7 +157,7 @@ export function spawnChild(ctx: StepCtx, args: SpawnArgs): ThreadId {
     .with({ kind: "blockRequest" }, b => ({
       ...common,
       kind: "request" as const,
-      reqId: b.body as ReqId,
+      reqId: b.body,
       args: args.callArgs,
     }))
     .with({ kind: "blockAgent" }, () => {

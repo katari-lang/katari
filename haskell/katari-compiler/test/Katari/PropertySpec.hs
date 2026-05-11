@@ -26,9 +26,7 @@ import Katari.Compile
   )
 import Katari.IR
   ( BlockId (..),
-    ConstructorId (..),
     ExternalName (..),
-    RequestId (..),
     VarId (..),
   )
 import Test.Hspec
@@ -83,14 +81,6 @@ irIdJsonRoundtrip =
 
     it "VarId" $ hedgehog $ do
       value <- forAll (VarId <$> Gen.word32 (Range.linear 0 1_000_000))
-      tripping value Aeson.toJSON Aeson.fromJSON
-
-    it "RequestId" $ hedgehog $ do
-      value <- forAll (RequestId <$> Gen.word32 (Range.linear 0 1_000_000))
-      tripping value Aeson.toJSON Aeson.fromJSON
-
-    it "ConstructorId" $ hedgehog $ do
-      value <- forAll (ConstructorId <$> Gen.word32 (Range.linear 0 1_000_000))
       tripping value Aeson.toJSON Aeson.fromJSON
 
     it "ExternalName" $ hedgehog $ do

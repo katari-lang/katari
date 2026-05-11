@@ -26,8 +26,6 @@ module Katari.IR
   ( -- * Identifiers
     BlockId (..),
     VarId (..),
-    RequestId (..),
-    ConstructorId (..),
     QualifiedName (..),
     renderQualifiedName,
     ExternalName (..),
@@ -104,28 +102,6 @@ newtype VarId = VarId Word32
   deriving stock (Eq, Ord, Show)
   deriving newtype (ToJSON, FromJSON, ToJSONKey, FromJSONKey)
 
--- | IR-level request identifier carried by a 'BlockRequest'. Independent
--- of the Identifier-pass 'Katari.Id.RequestId' (Lowering re-allocates
--- these so the IR can be re-indexed without touching upstream phases).
--- Currently 1:1 with the corresponding 'BlockRequest'\'s 'BlockId', but
--- kept as a separate id space to preserve flexibility (the runtime
--- dispatches handlers by id equality, which is faster than walking the
--- block table).
---
--- Use a qualified import (e.g. @import Katari.IR qualified as IR@) when
--- both this and the AST-side 'Katari.Id.RequestId' are in scope.
-newtype RequestId = RequestId Word32
-  deriving stock (Eq, Ord, Show)
-  deriving newtype (ToJSON, FromJSON, ToJSONKey, FromJSONKey)
-
--- | IR-level constructor identifier carried by a 'BlockConstructor' and
--- stored inside every tagged value the runtime constructs. Independent of
--- the Identifier-pass 'Katari.Id.ConstructorId' for the same reason as
--- the IR 'RequestId'.
-newtype ConstructorId = ConstructorId Word32
-  deriving stock (Eq, Ord, Show)
-  deriving newtype (ToJSON, FromJSON, ToJSONKey, FromJSONKey)
-
 -- | Identifier of an external (sidecar) callable. Wraps a 'QualifiedName'
 -- under a distinct type so the runtime layer can evolve its lookup
 -- protocol independently (e.g. switching to per-sidecar namespaces)
@@ -179,10 +155,9 @@ data IRModule = IRModule
     -- | FFI inbound name resolution: @\<modulePath\>.\<bareName\>@ →
     -- 'BlockId'. Covers every top-level callable (agent / req / ext /
     -- ctor) so external callers (JS sidecars, LSP, tooling) can address
-    -- them by name. The IR's internal id allocations ('BlockId',
-    -- 'RequestId', 'ConstructorId') are intentionally not exposed; the runtime
-    -- derives any inverse maps it needs by walking 'blocks' once at
-    -- load time.
+    -- them by name. The runtime derives any inverse maps it needs (e.g.
+    -- ReqId / CtorId qname tables) by walking 'blocks' once at load
+    -- time.
     entries :: Map QualifiedName BlockId,
     -- | Debug-only var/block names. Runtime ignores; pretty printer / dev
     -- tools consume.
@@ -227,17 +202,18 @@ data Block where
   -- its prim registry. Prims are system-provided and have no module of
   -- origin (they never appear in 'IRModule.entries').
   BlockPrim :: Text -> Block
-  -- | Request declaration. Handlers match the carried 'RequestId' on
-  -- 'SCall'. The public qualified name lives in 'IRModule.entries'.
-  BlockRequest :: RequestId -> Block
+  -- | Request declaration. Handlers compare the carried 'QualifiedName'
+  -- on 'SCall' (handler dispatch is by name). The same qualified name
+  -- also lives in 'IRModule.entries'.
+  BlockRequest :: QualifiedName -> Block
   -- | External agent stub. The runtime looks up the 'ExternalName' in a
   -- JS sidecar bundle.
   BlockExternal :: ExternalName -> Block
-  -- | Data constructor. The carried 'ConstructorId' is what
+  -- | Data constructor. The carried 'QualifiedName' is what
   -- 'MatchPatternConstructor' compares against in match arms; values
-  -- built by this block carry @{__ctor: <constructorId>, ...}@ at
+  -- built by this block carry @{__ctor: <qualifiedName>, ...}@ at
   -- runtime.
-  BlockConstructor :: ConstructorId -> Block
+  BlockConstructor :: QualifiedName -> Block
   -- | Match block. The runtime creates a management thread, evaluates
   -- the subject from the inherited parent scope, walks arms in order,
   -- and executes the first matching arm's body. Called via
@@ -347,11 +323,11 @@ instance FromJSON Param where
   parseJSON = genericParseJSON irOptions
 
 -- | A request handler inside a 'HandleData'. Handler dispatch compares the
--- raised request's 'RequestId' against this 'request' field; on equality the
--- runtime invokes 'handlerBody'.
+-- raised request's 'QualifiedName' against this 'request' field; on equality
+-- the runtime invokes 'handlerBody'.
 data Handler = Handler
-  { -- | The 'RequestId' of the 'BlockRequest' being handled.
-    request :: RequestId,
+  { -- | The 'QualifiedName' of the 'BlockRequest' being handled.
+    request :: QualifiedName,
     -- | The handler body block ('BlockUser'). Inherits the handle scope
     -- (state vars are directly accessible). Its 'parameters' carry the req args.
     handlerBody :: BlockId
@@ -513,7 +489,7 @@ data HandleBlock = HandleBlock
     stateInits :: [(VarId, VarId)],
     -- | Body block ('BlockUser'). Inherits the handle scope.
     body :: BlockId,
-    -- | Request handlers dispatched by 'RequestId'.
+    -- | Request handlers dispatched by 'QualifiedName'.
     handlers :: [Handler],
     -- | Optional then-block ('BlockUser') run when body completes.
     -- Its single parameter (label @\"value\"@) receives the body's trailing value.
@@ -643,8 +619,8 @@ data MatchPattern where
   -- | Match if the subject equals this literal value.
   MatchPatternLiteral :: LiteralValue -> MatchPattern
   -- | Match if the subject is a tagged value with this constructor
-  -- id; recursively match each named field's sub-pattern.
-  MatchPatternConstructor :: ConstructorId -> [(Text, MatchPattern)] -> MatchPattern
+  -- qualified name; recursively match each named field's sub-pattern.
+  MatchPatternConstructor :: QualifiedName -> [(Text, MatchPattern)] -> MatchPattern
   -- | Match a tuple positionally; recurse into each element.
   MatchPatternTuple :: [MatchPattern] -> MatchPattern
   deriving (Eq, Show, Generic)

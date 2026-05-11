@@ -61,7 +61,7 @@ pipeline src =
       (parsed, parseErrors) = Parser.parse "<test>" stream
   in case parseErrors of
     (_:_) -> fail ("parse failure: " ++ show parseErrors)
-    [] -> case identify (Map.singleton "main" parsed) of
+    [] -> case identify Set.empty (Map.singleton "main" parsed) of
       (idResult, []) -> let (cg, _) = generateConstraints idResult in pure (idResult, cg)
       (_, errs) -> fail ("identify failure: " ++ show errs)
 
