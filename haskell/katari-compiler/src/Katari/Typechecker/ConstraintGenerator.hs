@@ -1321,7 +1321,7 @@ walkMatchExpr MatchExpression {subject, cases, sourceSpan} = do
   subject' <- walkExpression subject
   let subjectType = constrainedExpressionType subject'
   tMatch <- freshTypeVar
-  pairs <- mapM (walkCaseArm tMatch) cases
+  pairs <- mapM (walkCaseArm subjectType tMatch) cases
   let (cases', patternTypes) = unzip pairs
       patternUnion = unionSemantic patternTypes
   addTypeConstraint subjectType patternUnion (ConstraintReason ReasonKindMatchSubject sourceSpan)
@@ -1337,10 +1337,23 @@ walkMatchExpr MatchExpression {subject, cases, sourceSpan} = do
 
 walkCaseArm ::
   SemanticType Unresolved ->
+  SemanticType Unresolved ->
   CaseArm Identified ->
   CG (CaseArm Constrained, SemanticType Unresolved)
-walkCaseArm tMatch CaseArm {pattern, body, sourceSpan} = do
+walkCaseArm subjectType tMatch CaseArm {pattern, body, sourceSpan} = do
   (pattern', patternType) <- walkPattern pattern
+  -- A top-level VariablePattern or WildcardPattern accepts every value that
+  -- reaches this arm, so the binding must be wide enough to hold the full
+  -- subject. Without this, the result-type expectation could narrow the
+  -- bound variable's type below the actual runtime value type
+  -- (e.g. `match (x: number) { case y => y; case _ => 0 } : integer`
+  -- would otherwise type-check with y : integer).
+  case pattern of
+    PatternVariable _ ->
+      addTypeConstraint subjectType patternType (ConstraintReason ReasonKindMatchArm sourceSpan)
+    PatternWildcard _ ->
+      addTypeConstraint subjectType patternType (ConstraintReason ReasonKindMatchArm sourceSpan)
+    _ -> pure ()
   (body', bodyTy) <- walkBlock body
   addTypeConstraint bodyTy tMatch (ConstraintReason ReasonKindMatchArm sourceSpan)
   pure

@@ -303,6 +303,13 @@ data IdentifierError where
   -- @numeric_join_binary@ / @numeric_join_unary@). Carries the source
   -- span of the declaration and the offending rule name.
   ErrorUnknownPrimRule :: SourceSpan -> Text -> IdentifierError
+  -- | A variable / wildcard pattern carried a type annotation
+  -- (@case y: integer => ...@) inside a refutable position (match arm).
+  -- This is rejected because Katari has no runtime type-narrowing for
+  -- non-tagged scalars — the annotation would either be redundant or
+  -- silently lie about the bound variable's runtime type. For
+  -- type-directed narrowing, use a tagged @data@ union.
+  ErrorPatternTypeAnnotation :: SourceSpan -> IdentifierError
   -- | A user definition collided with a built-in primitive name (root
   -- prim flat-injected into every module's top-level scope, or an
   -- alias module from @prim.\<sub\>@).
@@ -335,6 +342,7 @@ instance HasSourceSpan IdentifierError where
     ErrorMissingExternalAgentAnnotation sourceSpan _ -> sourceSpan
     ErrorEmptyExternalAgentAnnotation sourceSpan _ -> sourceSpan
     ErrorUnknownPrimRule sourceSpan _ -> sourceSpan
+    ErrorPatternTypeAnnotation sourceSpan -> sourceSpan
     ErrorPrimitiveConflict sourceSpan _ -> sourceSpan
     ErrorReservedPrimitiveModule sourceSpan _ -> sourceSpan
     ErrorInternal diagnostic -> diagnostic.span
@@ -414,6 +422,11 @@ toDiagnostic = \case
     diagnosticError
       "K0152"
       ("prim agent uses unknown 'using' rule: '" <> ruleName <> "' (known rules: numeric_join_binary, numeric_join_unary)")
+      sourceSpan
+  ErrorPatternTypeAnnotation sourceSpan ->
+    diagnosticError
+      "K0160"
+      "type annotation on a match pattern is not supported (Katari has no runtime type narrowing for non-tagged values; use a tagged `data` union if you need to discriminate)"
       sourceSpan
   ErrorPrimitiveConflict sourceSpan name ->
     diagnosticError
@@ -2077,9 +2090,29 @@ resolveMatchExpr MatchExpression {subject, cases, sourceSpan} = do
 -- introduce a fresh scope frame around it.
 resolveCaseArm :: CaseArm Parsed -> Identifier (CaseArm Identified)
 resolveCaseArm CaseArm {pattern, body, sourceSpan} = withScopeFrame $ do
+  rejectPatternAnnotations pattern
   pattern' <- resolvePattern pattern
   body' <- resolveBlock body
   pure CaseArm {pattern = pattern', body = body', sourceSpan = sourceSpan}
+
+-- | Walk a match-arm pattern and emit 'ErrorPatternTypeAnnotation' for
+-- every variable / wildcard sub-pattern that carries an explicit type
+-- annotation. Match arms must dispatch by structure (constructor /
+-- tuple / literal); a type annotation on a variable or wildcard there
+-- has no runtime effect and would silently mislead about the bound
+-- variable's actual runtime type.
+rejectPatternAnnotations :: Pattern Parsed -> Identifier ()
+rejectPatternAnnotations = \case
+  PatternVariable vp ->
+    when (isJust vp.typeAnnotation) $
+      emitError (ErrorPatternTypeAnnotation vp.sourceSpan)
+  PatternWildcard wp ->
+    when (isJust wp.typeAnnotation) $
+      emitError (ErrorPatternTypeAnnotation wp.sourceSpan)
+  PatternTuple tp -> mapM_ rejectPatternAnnotations tp.elements
+  PatternQualifiedConstructor qp ->
+    mapM_ (rejectPatternAnnotations . snd) qp.parameters
+  PatternLiteral _ -> pure ()
 
 -- | A @for@ loop. Source expressions of in-bindings are resolved in the
 -- outer scope; the patterns and var-bindings introduce a fresh frame in which
