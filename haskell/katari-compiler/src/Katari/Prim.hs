@@ -79,6 +79,10 @@ data PrimConstraintRule
     PrimRuleNegate
   | -- | Unary @!@: operand floored at @Boolean@; result @Boolean@.
     PrimRuleNot
+  | -- | Unary @abs@: operand floored at @Number@; result is the operand
+    -- type joined with @Integer@ (mirrors 'PrimRuleAddSubMul'). I.e.
+    -- @abs(integer) -> integer@, @abs(number) -> number@.
+    PrimRuleAbs
   deriving (Eq, Show)
 
 -- | A built-in primitive definition.
@@ -125,7 +129,14 @@ primDefinitions =
     binary "sub" PrimRuleAddSubMul,
     binary "mul" PrimRuleAddSubMul,
     binary "div" PrimRuleDivide,
+    -- @%@: integer/integer → integer, anything-number → number (same
+    -- subtype shape as add/sub/mul). Runtime uses floor-mod semantics
+    -- (result rounds toward negative infinity), matching Python's @%@.
+    binary "mod" PrimRuleAddSubMul,
     unary "neg" SemanticTypeNumber SemanticTypeNumber PrimRuleNegate,
+    -- @abs@: integer → integer, number → number. Same shape as the
+    -- binary arithmetic rule but unary.
+    unary "abs" SemanticTypeNumber SemanticTypeNumber PrimRuleAbs,
     binaryEq "eq",
     binaryEq "ne",
     binaryCompare "lt",
@@ -276,6 +287,7 @@ binaryOperatorPrimName = \case
   BinaryOperatorSubtract -> "sub"
   BinaryOperatorMultiply -> "mul"
   BinaryOperatorDivide -> "div"
+  BinaryOperatorModulo -> "mod"
   BinaryOperatorEqual -> "eq"
   BinaryOperatorNotEqual -> "ne"
   BinaryOperatorLessThan -> "lt"

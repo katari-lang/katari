@@ -88,6 +88,13 @@ data SemanticType phase where
     SemanticType phase ->
     SemanticRequest phase ->
     SemanticType phase
+  -- | Top of the function-type lattice: any callable
+  -- ('SemanticTypeFunction' with any params/return/effects) is a subtype.
+  -- Callers can pass values typed as concrete functions to APIs expecting
+  -- @function@ (e.g. @get_metadata(value: function)@) but cannot @call@
+  -- a value typed at 'SemanticTypeFunctionAny' because the parameter
+  -- shape is unknown. Used by reflection-style prims.
+  SemanticTypeFunctionAny :: SemanticType phase
   SemanticTypeArray :: SemanticType phase -> SemanticType phase
   SemanticTypeTuple :: [SemanticType phase] -> SemanticType phase
   -- | Union of types. Convention: 0 or 2+ branches.
@@ -185,6 +192,7 @@ substituteVariable onVariable onRequest = \case
   SemanticTypeObject fields -> SemanticTypeObject <$> traverse (substituteVariable onVariable onRequest) fields
   SemanticTypeNever -> pure SemanticTypeNever
   SemanticTypeUnknown -> pure SemanticTypeUnknown
+  SemanticTypeFunctionAny -> pure SemanticTypeFunctionAny
   SemanticTypeNull -> pure SemanticTypeNull
   SemanticTypeInteger -> pure SemanticTypeInteger
   SemanticTypeNumber -> pure SemanticTypeNumber

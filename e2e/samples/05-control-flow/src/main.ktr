@@ -1,0 +1,14 @@
+@"Returns 'positive', 'zero', or 'negative' for the given integer."
+agent sign(n: integer) -> string {
+  match (n) {
+    case 0 => { "zero" }
+    case _ => {
+      if (n > 0) { "positive" } else { "negative" }
+    }
+  }
+}
+
+@"sign(7) = 'positive'."
+agent main() -> string {
+  sign(n = 7)
+}

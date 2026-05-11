@@ -1,72 +1,391 @@
 {
   "blocks": {
     "0": {
-      "body": "add",
-      "kind": "blockPrim"
+      "body": {
+        "entryBody": 26,
+        "inputSchema": "{}",
+        "name": "add",
+        "outputSchema": "{}",
+        "parameters": [
+          {
+            "label": "lhs",
+            "var": 0
+          },
+          {
+            "label": "rhs",
+            "var": 1
+          }
+        ],
+        "qualifiedName": {
+          "module_": "prim",
+          "name": "add"
+        }
+      },
+      "kind": "blockAgent"
     },
     "1": {
-      "body": "sub",
-      "kind": "blockPrim"
+      "body": {
+        "entryBody": 28,
+        "inputSchema": "{}",
+        "name": "sub",
+        "outputSchema": "{}",
+        "parameters": [
+          {
+            "label": "lhs",
+            "var": 3
+          },
+          {
+            "label": "rhs",
+            "var": 4
+          }
+        ],
+        "qualifiedName": {
+          "module_": "prim",
+          "name": "sub"
+        }
+      },
+      "kind": "blockAgent"
     },
     "10": {
-      "body": "ge",
-      "kind": "blockPrim"
+      "body": {
+        "entryBody": 46,
+        "inputSchema": "{}",
+        "name": "le",
+        "outputSchema": "{}",
+        "parameters": [
+          {
+            "label": "lhs",
+            "var": 28
+          },
+          {
+            "label": "rhs",
+            "var": 29
+          }
+        ],
+        "qualifiedName": {
+          "module_": "prim",
+          "name": "le"
+        }
+      },
+      "kind": "blockAgent"
     },
     "11": {
-      "body": "and",
-      "kind": "blockPrim"
+      "body": {
+        "entryBody": 48,
+        "inputSchema": "{}",
+        "name": "gt",
+        "outputSchema": "{}",
+        "parameters": [
+          {
+            "label": "lhs",
+            "var": 31
+          },
+          {
+            "label": "rhs",
+            "var": 32
+          }
+        ],
+        "qualifiedName": {
+          "module_": "prim",
+          "name": "gt"
+        }
+      },
+      "kind": "blockAgent"
     },
     "12": {
-      "body": "or",
-      "kind": "blockPrim"
+      "body": {
+        "entryBody": 50,
+        "inputSchema": "{}",
+        "name": "ge",
+        "outputSchema": "{}",
+        "parameters": [
+          {
+            "label": "lhs",
+            "var": 34
+          },
+          {
+            "label": "rhs",
+            "var": 35
+          }
+        ],
+        "qualifiedName": {
+          "module_": "prim",
+          "name": "ge"
+        }
+      },
+      "kind": "blockAgent"
     },
     "13": {
-      "body": "not",
-      "kind": "blockPrim"
+      "body": {
+        "entryBody": 52,
+        "inputSchema": "{}",
+        "name": "and",
+        "outputSchema": "{}",
+        "parameters": [
+          {
+            "label": "lhs",
+            "var": 37
+          },
+          {
+            "label": "rhs",
+            "var": 38
+          }
+        ],
+        "qualifiedName": {
+          "module_": "prim",
+          "name": "and"
+        }
+      },
+      "kind": "blockAgent"
     },
     "14": {
-      "body": "concat",
-      "kind": "blockPrim"
+      "body": {
+        "entryBody": 54,
+        "inputSchema": "{}",
+        "name": "or",
+        "outputSchema": "{}",
+        "parameters": [
+          {
+            "label": "lhs",
+            "var": 40
+          },
+          {
+            "label": "rhs",
+            "var": 41
+          }
+        ],
+        "qualifiedName": {
+          "module_": "prim",
+          "name": "or"
+        }
+      },
+      "kind": "blockAgent"
     },
     "15": {
-      "body": "array_get",
-      "kind": "blockPrim"
+      "body": {
+        "entryBody": 56,
+        "inputSchema": "{}",
+        "name": "not",
+        "outputSchema": "{}",
+        "parameters": [
+          {
+            "label": "value",
+            "var": 43
+          }
+        ],
+        "qualifiedName": {
+          "module_": "prim",
+          "name": "not"
+        }
+      },
+      "kind": "blockAgent"
     },
     "16": {
-      "body": "array_length",
-      "kind": "blockPrim"
+      "body": {
+        "entryBody": 58,
+        "inputSchema": "{}",
+        "name": "concat",
+        "outputSchema": "{}",
+        "parameters": [
+          {
+            "label": "lhs",
+            "var": 45
+          },
+          {
+            "label": "rhs",
+            "var": 46
+          }
+        ],
+        "qualifiedName": {
+          "module_": "prim",
+          "name": "concat"
+        }
+      },
+      "kind": "blockAgent"
     },
     "17": {
-      "body": "get_field",
-      "kind": "blockPrim"
+      "body": {
+        "entryBody": 60,
+        "inputSchema": "{}",
+        "name": "array_get",
+        "outputSchema": "{}",
+        "parameters": [
+          {
+            "label": "array",
+            "var": 48
+          },
+          {
+            "label": "index",
+            "var": 49
+          }
+        ],
+        "qualifiedName": {
+          "module_": "prim",
+          "name": "array_get"
+        }
+      },
+      "kind": "blockAgent"
     },
     "18": {
-      "body": "tuple_get",
-      "kind": "blockPrim"
+      "body": {
+        "entryBody": 62,
+        "inputSchema": "{}",
+        "name": "array_length",
+        "outputSchema": "{}",
+        "parameters": [
+          {
+            "label": "array",
+            "var": 51
+          }
+        ],
+        "qualifiedName": {
+          "module_": "prim",
+          "name": "array_length"
+        }
+      },
+      "kind": "blockAgent"
     },
     "19": {
-      "body": "type_of",
-      "kind": "blockPrim"
+      "body": {
+        "entryBody": 64,
+        "inputSchema": "{}",
+        "name": "get_field",
+        "outputSchema": "{}",
+        "parameters": [
+          {
+            "label": "field",
+            "var": 53
+          },
+          {
+            "label": "object",
+            "var": 54
+          }
+        ],
+        "qualifiedName": {
+          "module_": "prim",
+          "name": "get_field"
+        }
+      },
+      "kind": "blockAgent"
     },
     "2": {
-      "body": "mul",
-      "kind": "blockPrim"
+      "body": {
+        "entryBody": 30,
+        "inputSchema": "{}",
+        "name": "mul",
+        "outputSchema": "{}",
+        "parameters": [
+          {
+            "label": "lhs",
+            "var": 6
+          },
+          {
+            "label": "rhs",
+            "var": 7
+          }
+        ],
+        "qualifiedName": {
+          "module_": "prim",
+          "name": "mul"
+        }
+      },
+      "kind": "blockAgent"
     },
     "20": {
-      "body": "to_string",
-      "kind": "blockPrim"
+      "body": {
+        "entryBody": 66,
+        "inputSchema": "{}",
+        "name": "tuple_get",
+        "outputSchema": "{}",
+        "parameters": [
+          {
+            "label": "index",
+            "var": 56
+          },
+          {
+            "label": "tuple",
+            "var": 57
+          }
+        ],
+        "qualifiedName": {
+          "module_": "prim",
+          "name": "tuple_get"
+        }
+      },
+      "kind": "blockAgent"
     },
     "21": {
-      "body": 0,
-      "kind": "blockConstructor"
+      "body": {
+        "entryBody": 68,
+        "inputSchema": "{}",
+        "name": "type_of",
+        "outputSchema": "{}",
+        "parameters": [
+          {
+            "label": "value",
+            "var": 59
+          }
+        ],
+        "qualifiedName": {
+          "module_": "prim",
+          "name": "type_of"
+        }
+      },
+      "kind": "blockAgent"
     },
     "22": {
       "body": {
-        "entryBody": 25,
+        "entryBody": 70,
+        "inputSchema": "{}",
+        "name": "to_string",
+        "outputSchema": "{}",
+        "parameters": [
+          {
+            "label": "value",
+            "var": 61
+          }
+        ],
+        "qualifiedName": {
+          "module_": "prim",
+          "name": "to_string"
+        }
+      },
+      "kind": "blockAgent"
+    },
+    "23": {
+      "body": {
+        "description": "A two-element point in 2-D space.",
+        "entryBody": 72,
+        "inputSchema": "{}",
+        "name": "point",
+        "outputSchema": "{}",
+        "parameters": [
+          {
+            "label": "x",
+            "var": 63
+          },
+          {
+            "label": "y",
+            "var": 64
+          }
+        ],
+        "qualifiedName": {
+          "module_": "main",
+          "name": "point"
+        }
+      },
+      "kind": "blockAgent"
+    },
+    "24": {
+      "body": {
+        "entryBody": 75,
+        "inputSchema": "{}",
+        "name": "project_x",
+        "outputSchema": "{}",
         "parameters": [
           {
             "label": "p",
-            "var": 0
+            "var": 66
           }
         ],
         "qualifiedName": {
@@ -76,19 +395,1014 @@
       },
       "kind": "blockAgent"
     },
-    "23": {
+    "25": {
+      "body": "add",
+      "kind": "blockPrim"
+    },
+    "26": {
       "body": {
-        "parameters": [],
-        "statements": [],
+        "parameters": [
+          {
+            "label": "lhs",
+            "var": 0
+          },
+          {
+            "label": "rhs",
+            "var": 1
+          }
+        ],
+        "statements": [
+          {
+            "body": {
+              "arguments": [
+                {
+                  "label": "lhs",
+                  "var": 0
+                },
+                {
+                  "label": "rhs",
+                  "var": 1
+                }
+              ],
+              "block": 25,
+              "output": 2
+            },
+            "kind": "statementCall"
+          }
+        ],
         "trailing": 2
       },
       "kind": "blockUser"
     },
-    "24": {
+    "27": {
+      "body": "sub",
+      "kind": "blockPrim"
+    },
+    "28": {
+      "body": {
+        "parameters": [
+          {
+            "label": "lhs",
+            "var": 3
+          },
+          {
+            "label": "rhs",
+            "var": 4
+          }
+        ],
+        "statements": [
+          {
+            "body": {
+              "arguments": [
+                {
+                  "label": "lhs",
+                  "var": 3
+                },
+                {
+                  "label": "rhs",
+                  "var": 4
+                }
+              ],
+              "block": 27,
+              "output": 5
+            },
+            "kind": "statementCall"
+          }
+        ],
+        "trailing": 5
+      },
+      "kind": "blockUser"
+    },
+    "29": {
+      "body": "mul",
+      "kind": "blockPrim"
+    },
+    "3": {
+      "body": {
+        "entryBody": 32,
+        "inputSchema": "{}",
+        "name": "div",
+        "outputSchema": "{}",
+        "parameters": [
+          {
+            "label": "lhs",
+            "var": 9
+          },
+          {
+            "label": "rhs",
+            "var": 10
+          }
+        ],
+        "qualifiedName": {
+          "module_": "prim",
+          "name": "div"
+        }
+      },
+      "kind": "blockAgent"
+    },
+    "30": {
+      "body": {
+        "parameters": [
+          {
+            "label": "lhs",
+            "var": 6
+          },
+          {
+            "label": "rhs",
+            "var": 7
+          }
+        ],
+        "statements": [
+          {
+            "body": {
+              "arguments": [
+                {
+                  "label": "lhs",
+                  "var": 6
+                },
+                {
+                  "label": "rhs",
+                  "var": 7
+                }
+              ],
+              "block": 29,
+              "output": 8
+            },
+            "kind": "statementCall"
+          }
+        ],
+        "trailing": 8
+      },
+      "kind": "blockUser"
+    },
+    "31": {
+      "body": "div",
+      "kind": "blockPrim"
+    },
+    "32": {
+      "body": {
+        "parameters": [
+          {
+            "label": "lhs",
+            "var": 9
+          },
+          {
+            "label": "rhs",
+            "var": 10
+          }
+        ],
+        "statements": [
+          {
+            "body": {
+              "arguments": [
+                {
+                  "label": "lhs",
+                  "var": 9
+                },
+                {
+                  "label": "rhs",
+                  "var": 10
+                }
+              ],
+              "block": 31,
+              "output": 11
+            },
+            "kind": "statementCall"
+          }
+        ],
+        "trailing": 11
+      },
+      "kind": "blockUser"
+    },
+    "33": {
+      "body": "mod",
+      "kind": "blockPrim"
+    },
+    "34": {
+      "body": {
+        "parameters": [
+          {
+            "label": "lhs",
+            "var": 12
+          },
+          {
+            "label": "rhs",
+            "var": 13
+          }
+        ],
+        "statements": [
+          {
+            "body": {
+              "arguments": [
+                {
+                  "label": "lhs",
+                  "var": 12
+                },
+                {
+                  "label": "rhs",
+                  "var": 13
+                }
+              ],
+              "block": 33,
+              "output": 14
+            },
+            "kind": "statementCall"
+          }
+        ],
+        "trailing": 14
+      },
+      "kind": "blockUser"
+    },
+    "35": {
+      "body": "neg",
+      "kind": "blockPrim"
+    },
+    "36": {
+      "body": {
+        "parameters": [
+          {
+            "label": "value",
+            "var": 15
+          }
+        ],
+        "statements": [
+          {
+            "body": {
+              "arguments": [
+                {
+                  "label": "value",
+                  "var": 15
+                }
+              ],
+              "block": 35,
+              "output": 16
+            },
+            "kind": "statementCall"
+          }
+        ],
+        "trailing": 16
+      },
+      "kind": "blockUser"
+    },
+    "37": {
+      "body": "abs",
+      "kind": "blockPrim"
+    },
+    "38": {
+      "body": {
+        "parameters": [
+          {
+            "label": "value",
+            "var": 17
+          }
+        ],
+        "statements": [
+          {
+            "body": {
+              "arguments": [
+                {
+                  "label": "value",
+                  "var": 17
+                }
+              ],
+              "block": 37,
+              "output": 18
+            },
+            "kind": "statementCall"
+          }
+        ],
+        "trailing": 18
+      },
+      "kind": "blockUser"
+    },
+    "39": {
+      "body": "eq",
+      "kind": "blockPrim"
+    },
+    "4": {
+      "body": {
+        "entryBody": 34,
+        "inputSchema": "{}",
+        "name": "mod",
+        "outputSchema": "{}",
+        "parameters": [
+          {
+            "label": "lhs",
+            "var": 12
+          },
+          {
+            "label": "rhs",
+            "var": 13
+          }
+        ],
+        "qualifiedName": {
+          "module_": "prim",
+          "name": "mod"
+        }
+      },
+      "kind": "blockAgent"
+    },
+    "40": {
+      "body": {
+        "parameters": [
+          {
+            "label": "lhs",
+            "var": 19
+          },
+          {
+            "label": "rhs",
+            "var": 20
+          }
+        ],
+        "statements": [
+          {
+            "body": {
+              "arguments": [
+                {
+                  "label": "lhs",
+                  "var": 19
+                },
+                {
+                  "label": "rhs",
+                  "var": 20
+                }
+              ],
+              "block": 39,
+              "output": 21
+            },
+            "kind": "statementCall"
+          }
+        ],
+        "trailing": 21
+      },
+      "kind": "blockUser"
+    },
+    "41": {
+      "body": "ne",
+      "kind": "blockPrim"
+    },
+    "42": {
+      "body": {
+        "parameters": [
+          {
+            "label": "lhs",
+            "var": 22
+          },
+          {
+            "label": "rhs",
+            "var": 23
+          }
+        ],
+        "statements": [
+          {
+            "body": {
+              "arguments": [
+                {
+                  "label": "lhs",
+                  "var": 22
+                },
+                {
+                  "label": "rhs",
+                  "var": 23
+                }
+              ],
+              "block": 41,
+              "output": 24
+            },
+            "kind": "statementCall"
+          }
+        ],
+        "trailing": 24
+      },
+      "kind": "blockUser"
+    },
+    "43": {
+      "body": "lt",
+      "kind": "blockPrim"
+    },
+    "44": {
+      "body": {
+        "parameters": [
+          {
+            "label": "lhs",
+            "var": 25
+          },
+          {
+            "label": "rhs",
+            "var": 26
+          }
+        ],
+        "statements": [
+          {
+            "body": {
+              "arguments": [
+                {
+                  "label": "lhs",
+                  "var": 25
+                },
+                {
+                  "label": "rhs",
+                  "var": 26
+                }
+              ],
+              "block": 43,
+              "output": 27
+            },
+            "kind": "statementCall"
+          }
+        ],
+        "trailing": 27
+      },
+      "kind": "blockUser"
+    },
+    "45": {
+      "body": "le",
+      "kind": "blockPrim"
+    },
+    "46": {
+      "body": {
+        "parameters": [
+          {
+            "label": "lhs",
+            "var": 28
+          },
+          {
+            "label": "rhs",
+            "var": 29
+          }
+        ],
+        "statements": [
+          {
+            "body": {
+              "arguments": [
+                {
+                  "label": "lhs",
+                  "var": 28
+                },
+                {
+                  "label": "rhs",
+                  "var": 29
+                }
+              ],
+              "block": 45,
+              "output": 30
+            },
+            "kind": "statementCall"
+          }
+        ],
+        "trailing": 30
+      },
+      "kind": "blockUser"
+    },
+    "47": {
+      "body": "gt",
+      "kind": "blockPrim"
+    },
+    "48": {
+      "body": {
+        "parameters": [
+          {
+            "label": "lhs",
+            "var": 31
+          },
+          {
+            "label": "rhs",
+            "var": 32
+          }
+        ],
+        "statements": [
+          {
+            "body": {
+              "arguments": [
+                {
+                  "label": "lhs",
+                  "var": 31
+                },
+                {
+                  "label": "rhs",
+                  "var": 32
+                }
+              ],
+              "block": 47,
+              "output": 33
+            },
+            "kind": "statementCall"
+          }
+        ],
+        "trailing": 33
+      },
+      "kind": "blockUser"
+    },
+    "49": {
+      "body": "ge",
+      "kind": "blockPrim"
+    },
+    "5": {
+      "body": {
+        "entryBody": 36,
+        "inputSchema": "{}",
+        "name": "neg",
+        "outputSchema": "{}",
+        "parameters": [
+          {
+            "label": "value",
+            "var": 15
+          }
+        ],
+        "qualifiedName": {
+          "module_": "prim",
+          "name": "neg"
+        }
+      },
+      "kind": "blockAgent"
+    },
+    "50": {
+      "body": {
+        "parameters": [
+          {
+            "label": "lhs",
+            "var": 34
+          },
+          {
+            "label": "rhs",
+            "var": 35
+          }
+        ],
+        "statements": [
+          {
+            "body": {
+              "arguments": [
+                {
+                  "label": "lhs",
+                  "var": 34
+                },
+                {
+                  "label": "rhs",
+                  "var": 35
+                }
+              ],
+              "block": 49,
+              "output": 36
+            },
+            "kind": "statementCall"
+          }
+        ],
+        "trailing": 36
+      },
+      "kind": "blockUser"
+    },
+    "51": {
+      "body": "and",
+      "kind": "blockPrim"
+    },
+    "52": {
+      "body": {
+        "parameters": [
+          {
+            "label": "lhs",
+            "var": 37
+          },
+          {
+            "label": "rhs",
+            "var": 38
+          }
+        ],
+        "statements": [
+          {
+            "body": {
+              "arguments": [
+                {
+                  "label": "lhs",
+                  "var": 37
+                },
+                {
+                  "label": "rhs",
+                  "var": 38
+                }
+              ],
+              "block": 51,
+              "output": 39
+            },
+            "kind": "statementCall"
+          }
+        ],
+        "trailing": 39
+      },
+      "kind": "blockUser"
+    },
+    "53": {
+      "body": "or",
+      "kind": "blockPrim"
+    },
+    "54": {
+      "body": {
+        "parameters": [
+          {
+            "label": "lhs",
+            "var": 40
+          },
+          {
+            "label": "rhs",
+            "var": 41
+          }
+        ],
+        "statements": [
+          {
+            "body": {
+              "arguments": [
+                {
+                  "label": "lhs",
+                  "var": 40
+                },
+                {
+                  "label": "rhs",
+                  "var": 41
+                }
+              ],
+              "block": 53,
+              "output": 42
+            },
+            "kind": "statementCall"
+          }
+        ],
+        "trailing": 42
+      },
+      "kind": "blockUser"
+    },
+    "55": {
+      "body": "not",
+      "kind": "blockPrim"
+    },
+    "56": {
+      "body": {
+        "parameters": [
+          {
+            "label": "value",
+            "var": 43
+          }
+        ],
+        "statements": [
+          {
+            "body": {
+              "arguments": [
+                {
+                  "label": "value",
+                  "var": 43
+                }
+              ],
+              "block": 55,
+              "output": 44
+            },
+            "kind": "statementCall"
+          }
+        ],
+        "trailing": 44
+      },
+      "kind": "blockUser"
+    },
+    "57": {
+      "body": "concat",
+      "kind": "blockPrim"
+    },
+    "58": {
+      "body": {
+        "parameters": [
+          {
+            "label": "lhs",
+            "var": 45
+          },
+          {
+            "label": "rhs",
+            "var": 46
+          }
+        ],
+        "statements": [
+          {
+            "body": {
+              "arguments": [
+                {
+                  "label": "lhs",
+                  "var": 45
+                },
+                {
+                  "label": "rhs",
+                  "var": 46
+                }
+              ],
+              "block": 57,
+              "output": 47
+            },
+            "kind": "statementCall"
+          }
+        ],
+        "trailing": 47
+      },
+      "kind": "blockUser"
+    },
+    "59": {
+      "body": "array_get",
+      "kind": "blockPrim"
+    },
+    "6": {
+      "body": {
+        "entryBody": 38,
+        "inputSchema": "{}",
+        "name": "abs",
+        "outputSchema": "{}",
+        "parameters": [
+          {
+            "label": "value",
+            "var": 17
+          }
+        ],
+        "qualifiedName": {
+          "module_": "prim",
+          "name": "abs"
+        }
+      },
+      "kind": "blockAgent"
+    },
+    "60": {
+      "body": {
+        "parameters": [
+          {
+            "label": "array",
+            "var": 48
+          },
+          {
+            "label": "index",
+            "var": 49
+          }
+        ],
+        "statements": [
+          {
+            "body": {
+              "arguments": [
+                {
+                  "label": "array",
+                  "var": 48
+                },
+                {
+                  "label": "index",
+                  "var": 49
+                }
+              ],
+              "block": 59,
+              "output": 50
+            },
+            "kind": "statementCall"
+          }
+        ],
+        "trailing": 50
+      },
+      "kind": "blockUser"
+    },
+    "61": {
+      "body": "array_length",
+      "kind": "blockPrim"
+    },
+    "62": {
+      "body": {
+        "parameters": [
+          {
+            "label": "array",
+            "var": 51
+          }
+        ],
+        "statements": [
+          {
+            "body": {
+              "arguments": [
+                {
+                  "label": "array",
+                  "var": 51
+                }
+              ],
+              "block": 61,
+              "output": 52
+            },
+            "kind": "statementCall"
+          }
+        ],
+        "trailing": 52
+      },
+      "kind": "blockUser"
+    },
+    "63": {
+      "body": "get_field",
+      "kind": "blockPrim"
+    },
+    "64": {
+      "body": {
+        "parameters": [
+          {
+            "label": "field",
+            "var": 53
+          },
+          {
+            "label": "object",
+            "var": 54
+          }
+        ],
+        "statements": [
+          {
+            "body": {
+              "arguments": [
+                {
+                  "label": "field",
+                  "var": 53
+                },
+                {
+                  "label": "object",
+                  "var": 54
+                }
+              ],
+              "block": 63,
+              "output": 55
+            },
+            "kind": "statementCall"
+          }
+        ],
+        "trailing": 55
+      },
+      "kind": "blockUser"
+    },
+    "65": {
+      "body": "tuple_get",
+      "kind": "blockPrim"
+    },
+    "66": {
+      "body": {
+        "parameters": [
+          {
+            "label": "index",
+            "var": 56
+          },
+          {
+            "label": "tuple",
+            "var": 57
+          }
+        ],
+        "statements": [
+          {
+            "body": {
+              "arguments": [
+                {
+                  "label": "index",
+                  "var": 56
+                },
+                {
+                  "label": "tuple",
+                  "var": 57
+                }
+              ],
+              "block": 65,
+              "output": 58
+            },
+            "kind": "statementCall"
+          }
+        ],
+        "trailing": 58
+      },
+      "kind": "blockUser"
+    },
+    "67": {
+      "body": "type_of",
+      "kind": "blockPrim"
+    },
+    "68": {
+      "body": {
+        "parameters": [
+          {
+            "label": "value",
+            "var": 59
+          }
+        ],
+        "statements": [
+          {
+            "body": {
+              "arguments": [
+                {
+                  "label": "value",
+                  "var": 59
+                }
+              ],
+              "block": 67,
+              "output": 60
+            },
+            "kind": "statementCall"
+          }
+        ],
+        "trailing": 60
+      },
+      "kind": "blockUser"
+    },
+    "69": {
+      "body": "to_string",
+      "kind": "blockPrim"
+    },
+    "7": {
+      "body": {
+        "entryBody": 40,
+        "inputSchema": "{}",
+        "name": "eq",
+        "outputSchema": "{}",
+        "parameters": [
+          {
+            "label": "lhs",
+            "var": 19
+          },
+          {
+            "label": "rhs",
+            "var": 20
+          }
+        ],
+        "qualifiedName": {
+          "module_": "prim",
+          "name": "eq"
+        }
+      },
+      "kind": "blockAgent"
+    },
+    "70": {
+      "body": {
+        "parameters": [
+          {
+            "label": "value",
+            "var": 61
+          }
+        ],
+        "statements": [
+          {
+            "body": {
+              "arguments": [
+                {
+                  "label": "value",
+                  "var": 61
+                }
+              ],
+              "block": 69,
+              "output": 62
+            },
+            "kind": "statementCall"
+          }
+        ],
+        "trailing": 62
+      },
+      "kind": "blockUser"
+    },
+    "71": {
+      "body": 0,
+      "kind": "blockConstructor"
+    },
+    "72": {
+      "body": {
+        "parameters": [
+          {
+            "label": "x",
+            "var": 63
+          },
+          {
+            "label": "y",
+            "var": 64
+          }
+        ],
+        "statements": [
+          {
+            "body": {
+              "arguments": [
+                {
+                  "label": "x",
+                  "var": 63
+                },
+                {
+                  "label": "y",
+                  "var": 64
+                }
+              ],
+              "block": 71,
+              "output": 65
+            },
+            "kind": "statementCall"
+          }
+        ],
+        "trailing": 65
+      },
+      "kind": "blockUser"
+    },
+    "73": {
+      "body": {
+        "parameters": [],
+        "statements": [],
+        "trailing": 68
+      },
+      "kind": "blockUser"
+    },
+    "74": {
       "body": {
         "arms": [
           {
-            "body": 23,
+            "body": 73,
             "pattern": {
               "body": [
                 0,
@@ -96,7 +1410,7 @@
                   [
                     "x",
                     {
-                      "body": 2,
+                      "body": 68,
                       "kind": "matchPatternVariable"
                     }
                   ],
@@ -112,74 +1426,115 @@
             }
           }
         ],
-        "subject": 1
+        "subject": 67
       },
       "kind": "blockMatch"
     },
-    "25": {
+    "75": {
       "body": {
         "parameters": [
           {
             "label": "p",
-            "var": 0
+            "var": 66
           }
         ],
         "statements": [
           {
             "body": {
               "pattern": {
-                "body": 1,
+                "body": 67,
                 "kind": "matchPatternVariable"
               },
-              "source": 0
+              "source": 66
             },
             "kind": "statementBindPattern"
           },
           {
             "body": {
               "arguments": [],
-              "block": 24,
-              "output": 3
+              "block": 74,
+              "output": 69
             },
             "kind": "statementCall"
           }
         ],
-        "trailing": 3
+        "trailing": 69
       },
       "kind": "blockUser"
     },
-    "3": {
-      "body": "div",
-      "kind": "blockPrim"
-    },
-    "4": {
-      "body": "neg",
-      "kind": "blockPrim"
-    },
-    "5": {
-      "body": "eq",
-      "kind": "blockPrim"
-    },
-    "6": {
-      "body": "ne",
-      "kind": "blockPrim"
-    },
-    "7": {
-      "body": "lt",
-      "kind": "blockPrim"
-    },
     "8": {
-      "body": "le",
-      "kind": "blockPrim"
+      "body": {
+        "entryBody": 42,
+        "inputSchema": "{}",
+        "name": "ne",
+        "outputSchema": "{}",
+        "parameters": [
+          {
+            "label": "lhs",
+            "var": 22
+          },
+          {
+            "label": "rhs",
+            "var": 23
+          }
+        ],
+        "qualifiedName": {
+          "module_": "prim",
+          "name": "ne"
+        }
+      },
+      "kind": "blockAgent"
     },
     "9": {
-      "body": "gt",
-      "kind": "blockPrim"
+      "body": {
+        "entryBody": 44,
+        "inputSchema": "{}",
+        "name": "lt",
+        "outputSchema": "{}",
+        "parameters": [
+          {
+            "label": "lhs",
+            "var": 25
+          },
+          {
+            "label": "rhs",
+            "var": 26
+          }
+        ],
+        "qualifiedName": {
+          "module_": "prim",
+          "name": "lt"
+        }
+      },
+      "kind": "blockAgent"
     }
   },
   "entries": {
-    "main.point": 21,
-    "main.project_x": 22
+    "main.point": 23,
+    "main.project_x": 24,
+    "prim.abs": 6,
+    "prim.add": 0,
+    "prim.and": 13,
+    "prim.array_get": 17,
+    "prim.array_length": 18,
+    "prim.concat": 16,
+    "prim.div": 3,
+    "prim.eq": 7,
+    "prim.ge": 12,
+    "prim.get_field": 19,
+    "prim.gt": 11,
+    "prim.le": 10,
+    "prim.lt": 9,
+    "prim.mod": 4,
+    "prim.mul": 2,
+    "prim.ne": 8,
+    "prim.neg": 5,
+    "prim.not": 15,
+    "prim.or": 14,
+    "prim.sub": 1,
+    "prim.to_string": 22,
+    "prim.tuple_get": 20,
+    "prim.type_of": 21
   },
   "metadata": {
     "schemaVersion": 1
@@ -187,35 +1542,85 @@
   "name": "main",
   "nameTable": {
     "blockNames": {
-      "0": "prim:add",
-      "1": "prim:sub",
-      "10": "prim:ge",
-      "11": "prim:and",
-      "12": "prim:or",
-      "13": "prim:not",
-      "14": "prim:concat",
-      "15": "prim:array_get",
-      "16": "prim:array_length",
-      "17": "prim:get_field",
-      "18": "prim:tuple_get",
-      "19": "prim:type_of",
-      "2": "prim:mul",
-      "20": "prim:to_string",
-      "21": "point",
-      "22": "project_x",
-      "25": "project_x.body",
-      "3": "prim:div",
-      "4": "prim:neg",
-      "5": "prim:eq",
-      "6": "prim:ne",
-      "7": "prim:lt",
-      "8": "prim:le",
-      "9": "prim:gt"
+      "0": "prim:add:agent",
+      "1": "prim:sub:agent",
+      "10": "prim:le:agent",
+      "11": "prim:gt:agent",
+      "12": "prim:ge:agent",
+      "13": "prim:and:agent",
+      "14": "prim:or:agent",
+      "15": "prim:not:agent",
+      "16": "prim:concat:agent",
+      "17": "prim:array_get:agent",
+      "18": "prim:array_length:agent",
+      "19": "prim:get_field:agent",
+      "2": "prim:mul:agent",
+      "20": "prim:tuple_get:agent",
+      "21": "prim:type_of:agent",
+      "22": "prim:to_string:agent",
+      "23": "point:agent",
+      "24": "project_x",
+      "25": "prim:add:leaf",
+      "26": "prim:add:body",
+      "27": "prim:sub:leaf",
+      "28": "prim:sub:body",
+      "29": "prim:mul:leaf",
+      "3": "prim:div:agent",
+      "30": "prim:mul:body",
+      "31": "prim:div:leaf",
+      "32": "prim:div:body",
+      "33": "prim:mod:leaf",
+      "34": "prim:mod:body",
+      "35": "prim:neg:leaf",
+      "36": "prim:neg:body",
+      "37": "prim:abs:leaf",
+      "38": "prim:abs:body",
+      "39": "prim:eq:leaf",
+      "4": "prim:mod:agent",
+      "40": "prim:eq:body",
+      "41": "prim:ne:leaf",
+      "42": "prim:ne:body",
+      "43": "prim:lt:leaf",
+      "44": "prim:lt:body",
+      "45": "prim:le:leaf",
+      "46": "prim:le:body",
+      "47": "prim:gt:leaf",
+      "48": "prim:gt:body",
+      "49": "prim:ge:leaf",
+      "5": "prim:neg:agent",
+      "50": "prim:ge:body",
+      "51": "prim:and:leaf",
+      "52": "prim:and:body",
+      "53": "prim:or:leaf",
+      "54": "prim:or:body",
+      "55": "prim:not:leaf",
+      "56": "prim:not:body",
+      "57": "prim:concat:leaf",
+      "58": "prim:concat:body",
+      "59": "prim:array_get:leaf",
+      "6": "prim:abs:agent",
+      "60": "prim:array_get:body",
+      "61": "prim:array_length:leaf",
+      "62": "prim:array_length:body",
+      "63": "prim:get_field:leaf",
+      "64": "prim:get_field:body",
+      "65": "prim:tuple_get:leaf",
+      "66": "prim:tuple_get:body",
+      "67": "prim:type_of:leaf",
+      "68": "prim:type_of:body",
+      "69": "prim:to_string:leaf",
+      "7": "prim:eq:agent",
+      "70": "prim:to_string:body",
+      "71": "point:ctor",
+      "72": "point:body",
+      "75": "project_x.body",
+      "8": "prim:ne:agent",
+      "9": "prim:lt:agent"
     },
     "varNames": {
-      "0": "pt",
-      "1": "pt",
-      "2": "xv"
+      "66": "pt",
+      "67": "pt",
+      "68": "xv"
     }
   }
 }

@@ -1,0 +1,21 @@
+@"A 2-D point."
+data point(x: integer, y: integer)
+
+@"Manhattan distance between two points = |x1-x2| + |y1-y2|."
+agent manhattan(p = pa: point, q = pb: point) -> integer {
+  match (pa) {
+    case point(x = x1, y = y1) => {
+      match (pb) {
+        case point(x = x2, y = y2) => {
+          abs(value = x1 - x2) + abs(value = y1 - y2)
+        }
+      }
+    }
+  }
+}
+
+@"manhattan(point(3, -4), point(-1, 2)) = |3-(-1)| + |-4-2| = 4 + 6 = 10. Also exercises 10 % 3 = 1, so result = 11."
+agent main() -> integer {
+  let d = manhattan(p = point(x = 3, y = -4), q = point(x = -1, y = 2))
+  d + d % 3
+}

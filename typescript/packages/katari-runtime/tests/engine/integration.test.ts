@@ -72,8 +72,8 @@ describe("engine integration: end-to-end via external delegate", () => {
         body: {
           block: 100,
           arguments: [
-            { label: "left", var: v0 },
-            { label: "right", var: v1 },
+            { label: "lhs", var: v0 },
+            { label: "rhs", var: v1 },
           ],
           output: out,
         },

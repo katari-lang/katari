@@ -89,6 +89,7 @@ dependencies:
   - megaparsec
   - parser-combinators
   - text
+  - bytestring
   - containers
   - mtl
   - transformers

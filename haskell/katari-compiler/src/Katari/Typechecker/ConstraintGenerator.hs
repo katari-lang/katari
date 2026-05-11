@@ -431,6 +431,7 @@ elaborateType = \case
   TypeLiteral TypeLiteralNode {value} -> pure (literalValueToSemantic value)
   TypeNever _ -> pure SemanticTypeNever
   TypeUnknown _ -> pure SemanticTypeUnknown
+  TypeFunctionAny _ -> pure SemanticTypeFunctionAny
 
 -- | Map a 'PrimitiveTypeKind' to the matching 'SemanticType' constructor.
 primitiveToSemantic :: PrimitiveTypeKind -> SemanticType phase
@@ -1230,6 +1231,16 @@ applyPrimRule rule arguments sourceSpan =
         PrimRuleNot -> do
           addTypeConstraint value_ SemanticTypeBoolean reasonUn
           pure SemanticTypeBoolean
+        PrimRuleAbs -> do
+          -- @abs(x)@ — operand floored at Number, result reflects the
+          -- operand's underlying numeric kind (mirrors 'PrimRuleAddSubMul'
+          -- in unary form). @abs(integer) -> integer@,
+          -- @abs(number) -> number@.
+          resultType <- freshTypeVar
+          addTypeConstraint value_ SemanticTypeNumber reasonUn
+          addTypeConstraint value_ resultType reasonUn
+          addTypeConstraint SemanticTypeInteger resultType reasonUn
+          pure resultType
         PrimRuleSimple ->
           -- Caller filters PrimRuleSimple before invoking applyPrimRule.
           pure SemanticTypeUnknown
@@ -1567,8 +1578,10 @@ walkTemplateElement = \case
     pure (TemplateElementString TemplateStringElement {value = value, sourceSpan = sourceSpan})
   TemplateElementExpression TemplateExpressionElement {value, sourceSpan} -> do
     value' <- walkExpression value
-    let valueType = constrainedExpressionType value'
-    addTypeConstraint valueType SemanticTypeString (ConstraintReason ReasonKindTemplateInterpolation sourceSpan)
+    -- f-string interpolations accept any type; Lowering emits a
+    -- 'to_string' prim call on each interpolated value before
+    -- concatenation, so there is no type constraint to add here.
+    -- 'constrainedExpressionType value'' is intentionally discarded.
     pure (TemplateElementExpression TemplateExpressionElement {value = value', sourceSpan = sourceSpan})
 
 walkQualifiedReferenceExpr ::

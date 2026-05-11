@@ -1,0 +1,3 @@
+packages:
+  - "typescript/packages/*"
+  - "e2e"

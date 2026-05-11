@@ -1010,7 +1010,8 @@ expressionOperatorTable =
       parsePrefixOperator (parseOperator OperatorNot) UnaryOperatorNot
     ],
     [ parseLeftAssociativeBinaryOperator (parseOperator OperatorMultiply) BinaryOperatorMultiply,
-      parseLeftAssociativeBinaryOperator (parseOperator OperatorDivide) BinaryOperatorDivide
+      parseLeftAssociativeBinaryOperator (parseOperator OperatorDivide) BinaryOperatorDivide,
+      parseLeftAssociativeBinaryOperator (parseOperator OperatorModulo) BinaryOperatorModulo
     ],
     [ parseLeftAssociativeBinaryOperator (parseOperator OperatorAdd) BinaryOperatorAdd,
       parseLeftAssociativeBinaryOperator (parseOperator OperatorSubtract) BinaryOperatorSubtract
@@ -1057,11 +1058,39 @@ parsePrefixOperator parserAction unaryOperator = Expr.Prefix $ do
   parserAction
   currentFilePath <- parseFilePath
   pure $ \operand ->
+    let span_ = SrcSpan currentFilePath startPosition (sourceSpanOf operand).end
+     in fuseNegativeLiteral unaryOperator operand span_
+
+-- | Parser-level fusion: when a unary @-@ is applied directly to an
+-- integer / number literal (no intervening grouping), absorb the
+-- negation into the literal itself instead of emitting an
+-- 'ExpressionUnaryOperator' that calls the @neg@ prim. This lets
+-- @-4@ keep its 'LiteralValueInteger (-4)' shape, so it remains
+-- assignable to @integer@-typed parameters. Anything else falls
+-- through to the regular unary-operator AST node.
+fuseNegativeLiteral ::
+  UnaryOperator -> Expression Parsed -> SourceSpan -> Expression Parsed
+fuseNegativeLiteral op operand fullSpan = case (op, operand) of
+  (UnaryOperatorNegate, ExpressionLiteral LiteralExpression {value = LiteralValueInteger n}) ->
+    ExpressionLiteral
+      LiteralExpression
+        { value = LiteralValueInteger (-n),
+          sourceSpan = fullSpan,
+          typeOf = ()
+        }
+  (UnaryOperatorNegate, ExpressionLiteral LiteralExpression {value = LiteralValueNumber n}) ->
+    ExpressionLiteral
+      LiteralExpression
+        { value = LiteralValueNumber (-n),
+          sourceSpan = fullSpan,
+          typeOf = ()
+        }
+  _ ->
     ExpressionUnaryOperator
       UnaryOperatorExpression
-        { operator = unaryOperator,
+        { operator = op,
           operand = operand,
-          sourceSpan = SrcSpan currentFilePath startPosition (sourceSpanOf operand).end,
+          sourceSpan = fullSpan,
           typeOf = ()
         }
 
@@ -1640,6 +1669,7 @@ parseAtomicType =
       parsePrimitiveType PrimitiveTypeKindBoolean KeywordBoolean,
       parseNeverType,
       parseUnknownType,
+      parseFunctionAnyType,
       parseLiteralType,
       try parseArrayType,
       try parseFunctionType,
@@ -1658,6 +1688,12 @@ parseUnknownType :: Parser (SyntacticType Parsed)
 parseUnknownType = parseWithSpan $ do
   parseKeyword KeywordUnknown
   pure $ \sourceSpan -> TypeUnknown UnknownTypeNode {sourceSpan = sourceSpan}
+
+-- | @function@ — function-type lattice の top (任意の callable)。
+parseFunctionAnyType :: Parser (SyntacticType Parsed)
+parseFunctionAnyType = parseWithSpan $ do
+  parseKeyword KeywordFunction
+  pure $ \sourceSpan -> TypeFunctionAny FunctionAnyTypeNode {sourceSpan = sourceSpan}
 
 -- | Literal type: @"a"@, @42@, @true@, or @false@.
 -- @null@ is intentionally omitted: 'parsePrimitiveType' already handles the

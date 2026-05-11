@@ -83,12 +83,35 @@ agentBody agentName irMod = do
 -- | Resolve a constructor's bare name (in module @"main"@) to its IR
 -- 'ConstructorId' so 'MatchTag' assertions can compare against the
 -- declaration-side identifier rather than a string.
+--
+-- Constructors are now wrapped in a 'BlockAgent' for uniform delegate
+-- dispatch (the wrapper's body issues a 'StatementCall' to the inner
+-- 'BlockConstructor'). We follow the agent wrapper to find the inner
+-- ctor block.
 ctorIdOf :: Text -> IRModule -> Maybe ConstructorId
 ctorIdOf ctorName irMod = do
   bid <- Map.lookup (QualifiedName "main" ctorName) irMod.entries
   case Map.lookup bid irMod.blocks of
     Just (BlockConstructor ctorId) -> Just ctorId
+    Just (BlockAgent agent) -> do
+      bodyBlock <- Map.lookup agent.entryBody irMod.blocks
+      case bodyBlock of
+        BlockUser body -> firstCtorBlock body irMod
+        _ -> Nothing
     _ -> Nothing
+  where
+    firstCtorBlock :: UserBlock -> IRModule -> Maybe ConstructorId
+    firstCtorBlock body m = case body.statements of
+      [StatementCall callData] -> case Map.lookup callData.block m.blocks of
+        Just (BlockConstructor ctorId) -> Just ctorId
+        _ -> Nothing
+      _ -> Nothing
+
+-- | Entries excluding builtin prims (module @"prim"@). Useful for tests
+-- that want to assert on user-defined declarations only.
+userEntries :: IRModule -> [QualifiedName]
+userEntries irMod =
+  [qn | qn <- Map.keys irMod.entries, qn.module_ /= "prim"]
 
 -- | Look up the BlockId for a primitive by name.
 primId :: Text -> IRModule -> Maybe BlockId
@@ -168,7 +191,7 @@ stage1Spec = describe "Stage 1 — literals / arithmetic" $ do
   it "lowers a trivial empty agent" $ do
     (irMod, errs) <- lowerSource "agent main() {}"
     errs `shouldBe` []
-    Map.keys irMod.entries `shouldBe` [QualifiedName "main" "main"]
+    userEntries irMod `shouldBe` [QualifiedName "main" "main"]
     case agentBody "main" irMod of
       Nothing -> expectationFailure "main agent not found in IR"
       Just ub -> do

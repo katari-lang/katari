@@ -687,12 +687,14 @@ constraintContents = describe "constraint contents" $ do
         ( \l r -> l == SemanticTypeLiteralInteger 2 && r == SemanticTypeNumber
         )
 
-  it "template literal interpolation requires string subtype" $ do
-    (cg, _) <- runOne "agent foo() { f\"hello ${\"world\"}\" }"
-    -- "world" interp → string の constraint
+  it "template literal interpolation does not constrain operand type" $ do
+    -- f-string interpolations accept any type; Lowering emits `to_string`
+    -- on each interpolation before concatenation. No constraint is
+    -- emitted between the interpolated value's type and 'String'.
+    (cg, _) <- runOne "agent foo() { f\"hello ${42}\" }"
     cg
-      `shouldSatisfy` hasTypeConstraint
-        ( \l r -> l == SemanticTypeLiteralString "world" && r == SemanticTypeString
+      `shouldNotSatisfy` hasTypeConstraint
+        ( \l r -> l == SemanticTypeLiteralInteger 42 && r == SemanticTypeString
         )
 
 -- ---------------------------------------------------------------------------

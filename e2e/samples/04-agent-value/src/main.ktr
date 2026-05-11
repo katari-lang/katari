@@ -1,0 +1,15 @@
+@"Returns 42."
+agent forty_two() -> integer {
+  42
+}
+
+@"Returns the agent value of forty_two without invoking it (an agentLiteral)."
+agent pick() -> () -> integer {
+  forty_two
+}
+
+@"Pick forty_two as a value, bind it locally, and call it. (= 42)"
+agent main() -> integer {
+  let f = pick()
+  f()
+}

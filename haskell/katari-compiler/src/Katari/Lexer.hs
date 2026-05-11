@@ -140,6 +140,7 @@ data Keyword where
   KeywordType :: Keyword
   KeywordNever :: Keyword
   KeywordUnknown :: Keyword
+  KeywordFunction :: Keyword
   deriving (Eq, Ord, Show, Bounded, Enum)
 
 data Punctuation where
@@ -164,6 +165,7 @@ data Operator where
   OperatorSubtract :: Operator
   OperatorMultiply :: Operator
   OperatorDivide :: Operator
+  OperatorModulo :: Operator
   OperatorEqual :: Operator
   OperatorNotEqual :: Operator
   OperatorLessThan :: Operator
@@ -560,6 +562,7 @@ lexKeywordText = \case
   KeywordType -> "type"
   KeywordNever -> "never"
   KeywordUnknown -> "unknown"
+  KeywordFunction -> "function"
 
 -- | Reverse lookup: surface text → 'Keyword'. Built from 'lexKeywordText' so
 -- adding a new keyword only requires extending the single table above.
@@ -595,6 +598,7 @@ lexPunctuationOrOperator =
       KatariTokenOperator OperatorSubtract <$ char '-',
       KatariTokenOperator OperatorMultiply <$ char '*',
       KatariTokenOperator OperatorDivide <$ char '/',
+      KatariTokenOperator OperatorModulo <$ char '%',
       KatariTokenOperator OperatorLessThan <$ char '<',
       KatariTokenOperator OperatorGreaterThan <$ char '>',
       KatariTokenOperator OperatorNot <$ char '!'
@@ -1024,6 +1028,7 @@ showOperator = \case
   OperatorSubtract -> "-"
   OperatorMultiply -> "*"
   OperatorDivide -> "/"
+  OperatorModulo -> "%"
   OperatorEqual -> "=="
   OperatorNotEqual -> "!="
   OperatorLessThan -> "<"

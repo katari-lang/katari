@@ -285,7 +285,25 @@ data AgentBlock = AgentBlock
     parameters :: [Param],
     -- | The 'BlockId' of the agent body. Typically a 'BlockUser'
     -- (inline) or 'BlockHandle' for @where { handlers }@ agents.
-    entryBody :: BlockId
+    entryBody :: BlockId,
+    -- | User-facing simple name (e.g. @"local_bar"@ for a local agent
+    -- declaration or @"foo"@ for a top-level one). Used as the
+    -- @name@ field of 'agent_metadata' returned by @get_metadata@.
+    -- Distinct from 'qualifiedName' which always carries the module
+    -- prefix.
+    name :: Text,
+    -- | The @\@\"...\"@ annotation string attached to the declaration,
+    -- if any. Surfaced as the @description@ field of
+    -- 'agent_metadata'.
+    description :: Maybe Text,
+    -- | Aeson-encoded JSON Schema string describing the agent's input
+    -- (named parameters as an @object@ schema). Pre-computed at
+    -- lowering time so the runtime can return it verbatim without
+    -- recomputing from semantic types.
+    inputSchema :: Text,
+    -- | Aeson-encoded JSON Schema string describing the agent's
+    -- output (return type).
+    outputSchema :: Text
   }
   deriving (Eq, Show, Generic)
 

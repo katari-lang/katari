@@ -128,14 +128,18 @@ branchType nextTypeVariableId nextRequestVariableId leftType rightType reason =
     _ -> Nothing
 
 -- | True iff the shape has internal structure that warrants branching.
--- Primitives, literals, and bare data refs don't need branching — bound
--- aggregation handles them.
+-- Primitives, literals, bare data refs, and the function top type
+-- ('function') don't need branching — bound aggregation handles them.
 isBranchableShape :: SemanticType Unresolved -> Bool
 isBranchableShape = \case
   SemanticTypeFunction {} -> True
   SemanticTypeArray _ -> True
   SemanticTypeTuple _ -> True
   SemanticTypeObject _ -> True
+  -- 'function' (function-top) is treated as a primitive: it has no
+  -- internal structure to branch on; the constraint goes straight to
+  -- bound aggregation just like @α \<: integer@ or @integer \<: α@.
+  SemanticTypeFunctionAny -> False
   _ -> False
 
 -- ---------------------------------------------------------------------------
@@ -222,9 +226,20 @@ branchVar ::
 branchVar side nextTypeVariableId nextRequestVariableId typeVarId shape reason =
   let (narrowedShape, freshConstraints, nextTypeVariableIdAfter, nextRequestVariableIdAfter) =
         narrowShape side nextTypeVariableId nextRequestVariableId shape reason
+      -- Fallback substitution for the second branch. For @α \<: F@ the
+      -- vacuous bound is 'SemanticTypeNever' (bottom). For @F \<: α@ we
+      -- pick the tightest top that still satisfies the constraint:
+      --   * If F is a function shape, use 'SemanticTypeFunctionAny' —
+      --     the function-lattice top — so that α need only be \"some
+      --     function or wider\" rather than the full \"unknown\". This
+      --     keeps later constraints like @α \<: integer@ correctly
+      --     rejecting (a callable is not an integer).
+      --   * Otherwise (array / tuple / object), keep 'SemanticTypeUnknown'.
       fallback = case side of
         LeftVar -> SemanticTypeNever
-        RightVar -> SemanticTypeUnknown
+        RightVar -> case shape of
+          SemanticTypeFunction {} -> SemanticTypeFunctionAny
+          _ -> SemanticTypeUnknown
    in [ BranchAlt
           { branchSubst = Map.singleton typeVarId narrowedShape,
             branchNewConstraints = freshConstraints,

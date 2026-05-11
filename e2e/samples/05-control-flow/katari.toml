@@ -1,0 +1,7 @@
+project = "control-flow"
+
+[compile]
+src = "src/"
+
+[api]
+url = "http://localhost:8080"

@@ -556,6 +556,10 @@ data SyntacticType (phase :: Phase) where
   -- | @unknown@ — lattice の top 型。任意の値を許容するが、利用側で必ず
   -- narrow する必要がある (TypeScript の @unknown@ と同じ思想)。
   TypeUnknown :: UnknownTypeNode phase -> SyntacticType phase
+  -- | @function@ — function-type lattice の top。任意の callable
+  -- (具体的な @(P) -> R with E@) を受け取る reflection-style API
+  -- (@get_metadata@ 等) で用いる。call はできない (params 不明)。
+  TypeFunctionAny :: FunctionAnyTypeNode phase -> SyntacticType phase
 
 instance HasSourceSpan (SyntacticType phase) where
   sourceSpanOf = \case
@@ -569,6 +573,7 @@ instance HasSourceSpan (SyntacticType phase) where
     TypeUnion node -> node.sourceSpan
     TypeNever node -> node.sourceSpan
     TypeUnknown node -> node.sourceSpan
+    TypeFunctionAny node -> node.sourceSpan
 
 data PrimitiveTypeKind where
   PrimitiveTypeKindNull :: PrimitiveTypeKind
@@ -602,6 +607,15 @@ newtype UnknownTypeNode (phase :: Phase) = UnknownTypeNode
   }
 
 instance HasSourceSpan (UnknownTypeNode p) where
+  sourceSpanOf node = node.sourceSpan
+
+-- | @function@ 型の AST ノード。function-type lattice の top。任意の
+-- 具体 'FunctionTypeNode' のスーパータイプ。call はできない (params 不明)。
+newtype FunctionAnyTypeNode (phase :: Phase) = FunctionAnyTypeNode
+  { sourceSpan :: SourceSpan
+  }
+
+instance HasSourceSpan (FunctionAnyTypeNode p) where
   sourceSpanOf node = node.sourceSpan
 
 data TypeNameNode (phase :: Phase) = TypeNameNode
@@ -771,6 +785,7 @@ data BinaryOperator where
   BinaryOperatorSubtract :: BinaryOperator
   BinaryOperatorMultiply :: BinaryOperator
   BinaryOperatorDivide :: BinaryOperator
+  BinaryOperatorModulo :: BinaryOperator
   BinaryOperatorEqual :: BinaryOperator
   BinaryOperatorNotEqual :: BinaryOperator
   BinaryOperatorLessThan :: BinaryOperator
@@ -1082,6 +1097,8 @@ retagSyntacticType = \case
     TypeNever NeverTypeNode {sourceSpan = sourceSpan}
   TypeUnknown UnknownTypeNode {sourceSpan} ->
     TypeUnknown UnknownTypeNode {sourceSpan = sourceSpan}
+  TypeFunctionAny FunctionAnyTypeNode {sourceSpan} ->
+    TypeFunctionAny FunctionAnyTypeNode {sourceSpan = sourceSpan}
 
 -- | Change the phase tag of a 'SyntacticRequest'.
 retagSyntacticRequest ::
@@ -1293,6 +1310,10 @@ deriving instance Show (NeverTypeNode phase)
 deriving instance Eq (UnknownTypeNode phase)
 
 deriving instance Show (UnknownTypeNode phase)
+
+deriving instance Eq (FunctionAnyTypeNode phase)
+
+deriving instance Show (FunctionAnyTypeNode phase)
 
 deriving instance (EqPhase phase) => Eq (TypeNameNode phase)
 

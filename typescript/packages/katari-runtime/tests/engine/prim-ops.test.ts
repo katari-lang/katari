@@ -27,12 +27,12 @@ describe("engine: prim builtin", () => {
     expect(executePrim("sub", num(10, 4))).toEqual({ kind: "number", value: 6 });
     expect(executePrim("div", num(10, 4))).toEqual({ kind: "number", value: 2.5 });
     expect(executePrim("mod", num(10, 4))).toEqual({ kind: "number", value: 2 });
-    expect(executePrim("negate", { value: { kind: "number", value: 7 } })).toEqual({ kind: "number", value: -7 });
+    expect(executePrim("neg", { value: { kind: "number", value: 7 } })).toEqual({ kind: "number", value: -7 });
   });
 
   it("compares numbers", () => {
     expect(executePrim("lt", num(1, 2))).toEqual({ kind: "boolean", value: true });
-    expect(executePrim("gte", num(2, 2))).toEqual({ kind: "boolean", value: true });
+    expect(executePrim("ge", num(2, 2))).toEqual({ kind: "boolean", value: true });
   });
 
   it("structural equality", () => {
@@ -43,7 +43,7 @@ describe("engine: prim builtin", () => {
 
   it("fails recoverable on bad args", () => {
     expect(() =>
-      executePrim("add", { left: { kind: "string", value: "hi" }, right: num1(1) }),
+      executePrim("add", { lhs: { kind: "string", value: "hi" }, rhs: num1(1) }),
     ).toThrow(/invalid args/);
   });
 });
@@ -74,7 +74,7 @@ describe("engine: runner dispatches prim create without crashing", () => {
       nextAskId: 0 as AskId,
       askIdMap: {},
       primName: "add",
-      args: { left: num1(2), right: num1(3) },
+      args: { lhs: num1(2), rhs: num1(3) },
     };
     state.threads[threadId] = prim;
 
@@ -93,7 +93,7 @@ describe("engine: runner dispatches prim create without crashing", () => {
 });
 
 function num(a: number, b: number) {
-  return { left: { kind: "number" as const, value: a }, right: { kind: "number" as const, value: b } };
+  return { lhs: { kind: "number" as const, value: a }, rhs: { kind: "number" as const, value: b } };
 }
 
 function num1(n: number) {

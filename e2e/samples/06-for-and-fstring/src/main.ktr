@@ -1,0 +1,7 @@
+@"Sum 1..3 via for/then with state var, formatted as f-string."
+agent main() -> string {
+  let total = for (x in [1, 2, 3], var acc: integer = 0) {
+    next with { acc = acc + x }
+  } then { acc }
+  f"sum = ${total}"
+}

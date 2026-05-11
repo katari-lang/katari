@@ -5,6 +5,11 @@
   "bin": {
     "katari": "dist/index.js"
   },
+  "exports": {
+    ".": "./dist/index.js",
+    "./services/api-client": "./dist/services/api-client.js",
+    "./services/compile": "./dist/services/compile.js"
+  },
   "scripts": {
     "build": "tsc",
     "test": "vitest run"

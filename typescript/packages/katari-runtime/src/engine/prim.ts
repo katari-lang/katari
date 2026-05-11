@@ -24,24 +24,31 @@ export function executePrim(name: string, args: Record<string, Value>): Value {
     case "mod":
       return arith(name, args, (a, b) => {
         if (b === 0) throw new RecoverableEngineError("prim mod: modulo by zero");
-        return a % b;
+        // Floor mod (Python-style): result has the sign of the divisor,
+        // not the dividend. JS' % truncates toward zero, so we adjust.
+        return a - Math.floor(a / b) * b;
       });
-    case "negate": {
+    case "neg": {
       const v = args["value"];
       if (v?.kind === "number") return { kind: "number", value: -v.value };
-      throw new RecoverableEngineError("prim negate: invalid args");
+      throw new RecoverableEngineError("prim neg: invalid args");
+    }
+    case "abs": {
+      const v = args["value"];
+      if (v?.kind === "number") return { kind: "number", value: Math.abs(v.value) };
+      throw new RecoverableEngineError("prim abs: invalid args");
     }
     case "eq":
-      return { kind: "boolean", value: valueEquals(req(args, "left"), req(args, "right")) };
-    case "neq":
-      return { kind: "boolean", value: !valueEquals(req(args, "left"), req(args, "right")) };
+      return { kind: "boolean", value: valueEquals(req(args, "lhs"), req(args, "rhs")) };
+    case "ne":
+      return { kind: "boolean", value: !valueEquals(req(args, "lhs"), req(args, "rhs")) };
     case "lt":
       return cmp(name, args, (a, b) => a < b);
     case "gt":
       return cmp(name, args, (a, b) => a > b);
-    case "lte":
+    case "le":
       return cmp(name, args, (a, b) => a <= b);
-    case "gte":
+    case "ge":
       return cmp(name, args, (a, b) => a >= b);
     case "not": {
       const v = args["value"];
@@ -53,9 +60,9 @@ export function executePrim(name: string, args: Record<string, Value>): Value {
     case "or":
       return logical(name, args, (a, b) => a || b);
     case "concat": {
-      const left = args["left"], right = args["right"];
-      if (left?.kind === "string" && right?.kind === "string") {
-        return { kind: "string", value: left.value + right.value };
+      const lhs = args["lhs"], rhs = args["rhs"];
+      if (lhs?.kind === "string" && rhs?.kind === "string") {
+        return { kind: "string", value: lhs.value + rhs.value };
       }
       throw new RecoverableEngineError("prim concat: invalid args");
     }
@@ -76,7 +83,7 @@ export function executePrim(name: string, args: Record<string, Value>): Value {
       throw new RecoverableEngineError("prim tuple_get: invalid args");
     }
     case "get_field": {
-      const value = args["value"], field = args["field"];
+      const value = args["object"], field = args["field"];
       if (value?.kind === "tagged" && field?.kind === "string") {
         const v = value.fields[field.value];
         if (v === undefined) {
@@ -108,9 +115,9 @@ function arith(
   args: Record<string, Value>,
   op: (a: number, b: number) => number,
 ): Value {
-  const left = args["left"], right = args["right"];
-  if (left?.kind === "number" && right?.kind === "number") {
-    return { kind: "number", value: op(left.value, right.value) };
+  const lhs = args["lhs"], rhs = args["rhs"];
+  if (lhs?.kind === "number" && rhs?.kind === "number") {
+    return { kind: "number", value: op(lhs.value, rhs.value) };
   }
   throw new RecoverableEngineError(`prim ${name}: invalid args`);
 }
@@ -120,9 +127,9 @@ function cmp(
   args: Record<string, Value>,
   op: (a: number, b: number) => boolean,
 ): Value {
-  const left = args["left"], right = args["right"];
-  if (left?.kind === "number" && right?.kind === "number") {
-    return { kind: "boolean", value: op(left.value, right.value) };
+  const lhs = args["lhs"], rhs = args["rhs"];
+  if (lhs?.kind === "number" && rhs?.kind === "number") {
+    return { kind: "boolean", value: op(lhs.value, rhs.value) };
   }
   throw new RecoverableEngineError(`prim ${name}: invalid args`);
 }
@@ -132,9 +139,9 @@ function logical(
   args: Record<string, Value>,
   op: (a: boolean, b: boolean) => boolean,
 ): Value {
-  const left = args["left"], right = args["right"];
-  if (left?.kind === "boolean" && right?.kind === "boolean") {
-    return { kind: "boolean", value: op(left.value, right.value) };
+  const lhs = args["lhs"], rhs = args["rhs"];
+  if (lhs?.kind === "boolean" && rhs?.kind === "boolean") {
+    return { kind: "boolean", value: op(lhs.value, rhs.value) };
   }
   throw new RecoverableEngineError(`prim ${name}: invalid args`);
 }

@@ -1,0 +1,7 @@
+project = "hello"
+
+[compile]
+src = "src/"
+
+[api]
+url = "http://localhost:8080"

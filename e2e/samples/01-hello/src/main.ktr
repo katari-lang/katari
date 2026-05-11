@@ -1,0 +1,4 @@
+@"Returns the canonical greeting."
+agent main() -> string {
+  "hello, world"
+}

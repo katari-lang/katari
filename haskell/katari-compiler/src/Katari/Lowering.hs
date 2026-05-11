@@ -35,6 +35,7 @@ import Katari.Id (VariableId)
 import Katari.Id qualified as Id
 import Katari.Prim (PrimDefinition (..))
 import Katari.Prim qualified as Prim
+import Katari.SemanticType (SemanticType (..))
 import Katari.Typechecker.Identifier (ConstructorData (..), IdentifierResult (..), RequestData (..))
 import Katari.Typechecker.Zonker (ZonkResult (..))
 
@@ -452,6 +453,7 @@ lowerProgramM moduleName zonkResult = do
   -- IR's runtime-dispatch id space.
   allocateReqAndCtorIds
   registerDeclarationKinds zonkResult
+  lowerPrimitives
   _ <- lowerAllDeclarations zonkResult
   state <- gets id
   pure
@@ -467,11 +469,12 @@ lowerProgramM moduleName zonkResult = do
             }
       }
 
--- | Allocate one 'BlockPrim' per registered prim. Each prim block is
--- also injected into 'lsTopLevelBlocks' so the regular call / closure
--- resolution path can handle prims without a special case. Iteration
--- follows 'Katari.Prim.primDefinitions' order so BlockId assignments
--- are stable across builds (golden tests).
+-- | Phase 1 for prims: reserve a 'BlockAgent' slot per prim and
+-- register it in 'lsEntries' / 'lsTopLevelBlocks' / 'lsTopLevelQNames'.
+-- The inner 'BlockPrim' leaf and the wrapping body are produced later
+-- by 'lowerPrimitives' (Phase 2). Iteration follows
+-- 'Katari.Prim.primDefinitions' order so BlockId assignments are
+-- stable across builds (golden tests).
 registerPrimitives :: Lower ()
 registerPrimitives = do
   primVars <- asks ((.primitiveVariableIds) . (.identifierResult))
@@ -481,13 +484,12 @@ registerPrimitives = do
       let qname = QualifiedName def.primModule def.primName
       case Map.lookup qname primVars of
         Just vid -> do
-          blockId <- freshBlockId
-          recordBlock blockId (BlockPrim def.primName) (Just ("prim:" <> def.primName))
+          agentBlk <- reserveBlockId (Just ("prim:" <> def.primName))
           modify $ \state ->
             state
-              { lsPrimBlockIds = Map.insert vid blockId state.lsPrimBlockIds,
-                lsTopLevelBlocks = Map.insert vid blockId state.lsTopLevelBlocks,
-                lsTopLevelQNames = Map.insert vid qname state.lsTopLevelQNames
+              { lsTopLevelBlocks = Map.insert vid agentBlk state.lsTopLevelBlocks,
+                lsTopLevelQNames = Map.insert vid qname state.lsTopLevelQNames,
+                lsEntries = Map.insert qname agentBlk state.lsEntries
               }
         Nothing ->
           -- Identifier preregistered every prim; missing entry is a bug.
@@ -495,6 +497,107 @@ registerPrimitives = do
             ( Internal.internalErrorNoSpan
                 ("registerPrimitives: prim '" <> def.primName <> "' missing from IdentifierResult")
             )
+
+-- | Phase 2 for prims: allocate the inner 'BlockPrim' leaf and emit the
+-- wrapping body + 'BlockAgent' at the slot reserved by
+-- 'registerPrimitives'. The leaf 'BlockId' is recorded in
+-- 'lsPrimBlockIds' for any compile-internal direct 'StatementCall'
+-- callers (e.g. desugared field / index access).
+lowerPrimitives :: Lower ()
+lowerPrimitives = do
+  primVars <- asks ((.primitiveVariableIds) . (.identifierResult))
+  mapM_ (lowerOne primVars) Prim.primDefinitions
+  where
+    lowerOne primVars def = do
+      let qname = QualifiedName def.primModule def.primName
+      case Map.lookup qname primVars of
+        Just vid -> do
+          agentBlk <- gets (Map.lookup vid . (.lsTopLevelBlocks)) >>= \case
+            Just b -> pure b
+            Nothing ->
+              throwError
+                ( Internal.internalErrorNoSpan
+                    ("lowerPrimitives: prim '" <> def.primName <> "' slot not reserved")
+                )
+          paramLabels <- case def.primType of
+            SemanticTypeFunction params _ _ -> pure (Map.keys params)
+            _ ->
+              throwError
+                ( Internal.internalErrorNoSpan
+                    ("lowerPrimitives: prim '" <> def.primName <> "' has non-function primType")
+                )
+          primBlk <- freshBlockId
+          recordBlock primBlk (BlockPrim def.primName) (Just ("prim:" <> def.primName <> ":leaf"))
+          -- TODO(Phase 1.2): compute real input/output JSON Schemas from primType
+          writeWrapperAgent agentBlk qname paramLabels primBlk ("prim:" <> def.primName) def.primName Nothing "{}" "{}"
+          modify $ \state ->
+            state {lsPrimBlockIds = Map.insert vid primBlk state.lsPrimBlockIds}
+        Nothing ->
+          throwError
+            ( Internal.internalErrorNoSpan
+                ("lowerPrimitives: prim '" <> def.primName <> "' missing from IdentifierResult")
+            )
+
+-- | Write a 'BlockAgent' wrapper at a pre-reserved 'BlockId' for a
+-- non-agent leaf (BlockPrim / BlockConstructor / BlockExternal).
+--
+-- Mirrors the 2-phase shape used for 'DeclarationAgent': Phase 1
+-- ('registerDeclarationKinds' / 'registerPrimitives') reserves the
+-- @agentBlk@ slot and registers it in 'lsEntries' / 'lsTopLevelBlocks';
+-- Phase 2 (this function) allocates the inner leaf block, builds a
+-- 'BlockUser' body that issues a single 'StatementCall' to the leaf,
+-- and writes the 'BlockAgent' at @agentBlk@.
+--
+-- This way the runtime only ever spawns 'AgentThread' for delegate
+-- roots — leaf threads stay leaves.
+writeWrapperAgent ::
+  BlockId ->
+  QualifiedName ->
+  [Text] ->
+  BlockId ->
+  Text ->
+  Text ->
+  Maybe Text ->
+  Text ->
+  Text ->
+  Lower ()
+writeWrapperAgent agentBlk qname paramLabels innerBlk hint simpleName desc inputSchemaJson outputSchemaJson = do
+  paramVars <- mapM (\_ -> freshVarId Nothing) paramLabels
+  let wrapperParams = zipWith Param paramLabels paramVars
+      callArgs = zipWith Arg paramLabels paramVars
+  outVar <- freshVarId Nothing
+  let bodyStmt =
+        StatementCall
+          CallData
+            { block = innerBlk,
+              arguments = callArgs,
+              output = Just outVar
+            }
+  bodyBlk <- freshBlockId
+  recordBlock
+    bodyBlk
+    ( BlockUser
+        UserBlock
+          { parameters = wrapperParams,
+            statements = [bodyStmt],
+            trailing = Just outVar
+          }
+    )
+    (Just (hint <> ":body"))
+  recordBlock
+    agentBlk
+    ( BlockAgent
+        AgentBlock
+          { qualifiedName = qname,
+            parameters = wrapperParams,
+            entryBody = bodyBlk,
+            name = simpleName,
+            description = desc,
+            inputSchema = inputSchemaJson,
+            outputSchema = outputSchemaJson
+          }
+    )
+    (Just (hint <> ":agent"))
 
 -- | Bind a top-level @VariableId@ to its callable @BlockId@.
 recordVarBlockId :: VariableId -> BlockId -> Lower ()
@@ -562,19 +665,18 @@ registerDeclarationKinds zonkResult =
           recordTopLevelCallable variableId moduleName decl.name.text blockId
       AST.DeclarationExternalAgent decl ->
         registerCallable decl.name decl.sourceSpan $ \variableId -> do
-          blockId <- freshBlockId
-          let qualifiedName = QualifiedName {module_ = moduleName, name = decl.name.text}
-          recordBlock
-            blockId
-            (BlockExternal (ExternalName qualifiedName))
-            (Just decl.name.text)
-          recordTopLevelCallable variableId moduleName decl.name.text blockId
+          -- Phase 1: reserve the wrapper agent slot only. The inner
+          -- 'BlockExternal' leaf + wrapping body are built in Phase 2
+          -- ('lowerAllDeclarations').
+          agentBlk <- reserveBlockId (Just decl.name.text)
+          recordTopLevelCallable variableId moduleName decl.name.text agentBlk
       AST.DeclarationData decl ->
         registerCallable decl.name decl.sourceSpan $ \variableId -> do
-          blockId <- freshBlockId
-          irCtorId <- constructorIdForVariable variableId
-          recordBlock blockId (BlockConstructor irCtorId) (Just decl.name.text)
-          recordTopLevelCallable variableId moduleName decl.name.text blockId
+          -- Phase 1: reserve the wrapper agent slot only. The inner
+          -- 'BlockConstructor' leaf + wrapping body are built in
+          -- Phase 2 ('lowerAllDeclarations').
+          agentBlk <- reserveBlockId (Just decl.name.text)
+          recordTopLevelCallable variableId moduleName decl.name.text agentBlk
       AST.DeclarationImport _ -> pure ()
       AST.DeclarationTypeSynonym _ -> pure ()
       AST.DeclarationError sourceSpan -> recordError (LoweringErrorParseSentinel sourceSpan)
@@ -626,16 +728,77 @@ lowerAllDeclarations zonkResult = do
 
     lowerDeclaration :: AST.Declaration Zonked -> Lower (Maybe (Text, BlockId))
     lowerDeclaration = \case
-      AST.DeclarationAgent decl -> case decl.name.resolution of
-        Just variableId -> do
-          maybeBlockId <- gets (Map.lookup variableId . (.lsTopLevelBlocks))
-          case maybeBlockId of
-            Just blockId -> do
-              lowerAgentDeclaration decl blockId
-              pure (Just (decl.name.text, blockId))
-            Nothing -> pure Nothing
-        Nothing -> pure Nothing
+      AST.DeclarationAgent decl -> resolveDecl decl.name $ \_variableId blockId -> do
+        lowerAgentDeclaration decl blockId
+        pure (Just (decl.name.text, blockId))
+      AST.DeclarationData decl -> resolveDecl decl.name $ \variableId agentBlk -> do
+        qname <- requireAgentQName "DeclarationData" decl.name.text agentBlk
+        let paramLabels = map (.name) decl.parameters
+        irCtorId <- lookupConstructorId variableId
+        innerBlk <- freshBlockId
+        recordBlock innerBlk (BlockConstructor irCtorId) (Just (decl.name.text <> ":ctor"))
+        -- TODO(Phase 1.2): compute real input/output JSON Schemas from zonked types
+        writeWrapperAgent agentBlk qname paramLabels innerBlk decl.name.text decl.name.text decl.annotation "{}" "{}"
+        pure (Just (decl.name.text, agentBlk))
+      AST.DeclarationExternalAgent decl -> resolveDecl decl.name $ \_variableId agentBlk -> do
+        qname <- requireAgentQName "DeclarationExternalAgent" decl.name.text agentBlk
+        let paramLabels = map (.label) decl.parameters
+        innerBlk <- freshBlockId
+        recordBlock
+          innerBlk
+          (BlockExternal (ExternalName qname))
+          (Just (decl.name.text <> ":external"))
+        -- TODO(Phase 1.2): compute real input/output JSON Schemas
+        writeWrapperAgent agentBlk qname paramLabels innerBlk decl.name.text decl.name.text decl.annotation "{}" "{}"
+        pure (Just (decl.name.text, agentBlk))
       _ -> pure Nothing
+
+    -- Look up the (already reserved) wrapper agent 'BlockId' for a
+    -- declaration's name and run the per-kind body builder.
+    resolveDecl ::
+      AST.NameRef Zonked AST.VariableRef ->
+      (VariableId -> BlockId -> Lower (Maybe (Text, BlockId))) ->
+      Lower (Maybe (Text, BlockId))
+    resolveDecl nameRef action = case nameRef.resolution of
+      Just variableId -> do
+        maybeBlockId <- gets (Map.lookup variableId . (.lsTopLevelBlocks))
+        case maybeBlockId of
+          Just blockId -> action variableId blockId
+          Nothing -> pure Nothing
+      Nothing -> pure Nothing
+
+    -- Phase 1 invariant: every reserved agent slot has exactly one
+    -- 'lsEntries' entry pointing at it (registered by
+    -- 'recordTopLevelCallable' / 'registerPrimitives').
+    requireAgentQName :: Text -> Text -> BlockId -> Lower QualifiedName
+    requireAgentQName ctx declName agentBlk = do
+      entries <- gets (.lsEntries)
+      case [qn | (qn, bid) <- Map.toList entries, bid == agentBlk] of
+        (qn : _) -> pure qn
+        [] ->
+          throwError
+            ( Internal.internalErrorNoSpan
+                (ctx <> ": '" <> declName <> "' agent slot not in lsEntries")
+            )
+
+    lookupConstructorId :: VariableId -> Lower IR.ConstructorId
+    lookupConstructorId variableId = do
+      inverse <- asks (.constructorByVariable)
+      case Map.lookup variableId inverse of
+        Just identCid -> do
+          mapped <- gets (Map.lookup identCid . (.lsConstructorIds))
+          case mapped of
+            Just irCtorId -> pure irCtorId
+            Nothing ->
+              throwError
+                ( Internal.internalErrorNoSpan
+                    "lookupConstructorId: IR.ConstructorId not pre-allocated"
+                )
+        Nothing ->
+          throwError
+            ( Internal.internalErrorNoSpan
+                "lookupConstructorId: VariableId not in constructorByVariable"
+            )
 
 -- ===========================================================================
 -- Agent declaration
@@ -704,7 +867,16 @@ lowerSimpleAgent blockId name paramVars prelude blk = do
         AgentBlock
           { qualifiedName = qname,
             parameters = paramVars,
-            entryBody = bodyBlockId
+            entryBody = bodyBlockId,
+            -- TODO(Phase 1.2): plumb name/description/inputSchema/outputSchema
+            -- through 'lowerSimpleAgent' for top-level and local agents.
+            -- Local agents currently surface synthetic info; properly
+            -- threading these requires passing the declaration's
+            -- annotation and zonked function type through the call chain.
+            name = name,
+            description = Nothing,
+            inputSchema = "{}",
+            outputSchema = "{}"
           }
   recordBlock blockId (BlockAgent agent) (Just name)
   where
@@ -1256,10 +1428,18 @@ buildArmBodyWithLocals locals blk = do
 -- more 'var' (state) bindings, and an optional then-block.
 lowerForExpr :: AST.ForExpression Zonked -> Lower VarId
 lowerForExpr forExpression = do
-  (iterPairs, iterLocals) <- lowerForIters forExpression.inBindings
+  -- Each iter is (elementVar, sourceVar, pattern). The element pattern
+  -- is destructured INSIDE the for body (so the bind statement reads
+  -- the per-iteration element value), not in the enclosing scope.
+  iters <- lowerForIters forExpression.inBindings
   (stateInits, stateLocals) <- lowerForStates forExpression.varBindings
-  bodyBlockId <- buildForBody (iterLocals ++ stateLocals) forExpression.body
-  thenBlockId <- traverse buildInlineBlock forExpression.thenBlock
+  bodyBlockId <- buildForBody iters stateLocals forExpression.body
+  -- The @then@ block sees state vars (their final value after the loop)
+  -- but not iter vars (iteration is over). Mirrors the surface semantics:
+  -- `for (x in xs, var acc = 0) { ... } then { acc }` — `acc` is the
+  -- accumulator's final value; `x` is no longer bound.
+  thenBlockId <- traverse (buildForThenBlock stateLocals) forExpression.thenBlock
+  let iterPairs = map (\(e, s, _) -> (e, s)) iters
   forBlockId <- freshBlockId
   recordBlock forBlockId
     (BlockFor (ForBlock
@@ -1282,19 +1462,22 @@ lowerForExpr forExpression = do
 
 -- | Lower @for(p in arr) ...@ bindings. Each element-pattern variable
 -- receives a fresh IR var; the source array is lowered to a var.
--- Returns @[(elementVar, sourceVar)]@ and the locals to add to the body
--- scope.
+-- Returns @[(elementVar, sourceVar, pattern)]@. The element pattern is
+-- destructured INSIDE 'buildForBody' (once per iteration) — emitting
+-- the bind into the enclosing scope here would read the iter var
+-- before the for has run.
 lowerForIters ::
   [AST.ForInBinding Zonked] ->
-  Lower ([(VarId, VarId)], [(VariableId, VarId)])
-lowerForIters bindings = do
-  results <- mapM one bindings
-  pure (map fst results, concatMap snd results)
+  Lower [(VarId, VarId, AST.Pattern Zonked)]
+lowerForIters bindings = mapM one bindings
   where
     one b = do
       sourceVar <- lowerExpr b.source
-      (elementVar, locals) <- bindPatternToFreshVar b.pattern Nothing
-      pure ((elementVar, sourceVar), locals)
+      let nameHint = case b.pattern of
+            AST.PatternVariable vp -> Just vp.name.text
+            _ -> Just "iter"
+      elementVar <- freshVarId nameHint
+      pure (elementVar, sourceVar, b.pattern)
 
 -- | Lower @for(... )(var s = init) ...@ state bindings. Returns
 -- @(stateInits, stateLocals)@ where @stateInits = [(bodyVar, initVar)]@
@@ -1318,10 +1501,42 @@ lowerForStates bindings = do
           recordError (LoweringErrorUnresolvedVariable binding.sourceSpan nameRef.text)
           pure Nothing
 
-buildForBody :: [(VariableId, VarId)] -> AST.Block Zonked -> Lower BlockId
-buildForBody locals body = do
+-- | Build the inner body block of a @for@. Destructures each iter
+-- element pattern into the body's local scope (so the bind statements
+-- run per iteration, against the current iter value) and brings the
+-- @for@'s state vars into scope. State-var bindings are bare
+-- '(VariableId, VarId)' pairs because they are written by the runtime
+-- on @next with { ... }@; no destructuring statement is needed.
+buildForBody ::
+  [(VarId, VarId, AST.Pattern Zonked)] ->
+  [(VariableId, VarId)] ->
+  AST.Block Zonked ->
+  Lower BlockId
+buildForBody iters stateLocals body = do
   blockId <- freshBlockId
-  withLocals locals $ do
+  (trailing, statements) <- runWithFreshBuffer $ do
+    iterLocals <-
+      concat
+        <$> mapM
+          (\(elemVar, _src, pat) -> destructurePattern elemVar pat)
+          iters
+    withLocals (iterLocals ++ stateLocals) (lowerBlockInto body)
+  let userBlock =
+        defaultUserBlock
+          { statements = statements,
+            trailing = trailing
+          }
+  recordBlock blockId (BlockUser (userBlock)) Nothing
+  pure blockId
+
+-- | Build the @then { ... }@ block of a @for@ expression. Differs from
+-- 'buildInlineBlock' in that the caller passes the @for@'s state-var
+-- locals so the @then@ block can resolve references to them; iter vars
+-- intentionally are NOT in scope.
+buildForThenBlock :: [(VariableId, VarId)] -> AST.Block Zonked -> Lower BlockId
+buildForThenBlock stateLocals body = do
+  blockId <- freshBlockId
+  withLocals stateLocals $ do
     (statements, trailing) <- lowerBlockBody body
     let userBlock =
           defaultUserBlock

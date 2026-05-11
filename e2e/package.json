@@ -1,0 +1,20 @@
+{
+  "name": "katari-e2e",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "katari-api-server": "workspace:*",
+    "katari-cli": "workspace:*",
+    "katari-runtime": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "hono": "^4.7.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  }
+}

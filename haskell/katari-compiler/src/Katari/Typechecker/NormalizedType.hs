@@ -163,6 +163,9 @@ data ObjectSlot where
 --
 --   * 'FunctionSlotAbsent' — no function values inhabit this type.
 --   * @'FunctionSlotOf' shape@ — function values matching @shape@.
+--   * 'FunctionSlotAny' — every callable inhabits this slot (the
+--     normalised form of the surface @function@ top type). Acts as the
+--     top element of the function-slot lattice.
 --
 -- Multiple function shapes in a union are collapsed into a single shape via
 -- the product-normalisation rule (label-set union with per-common-label
@@ -170,6 +173,7 @@ data ObjectSlot where
 data FunctionSlot where
   FunctionSlotAbsent :: FunctionSlot
   FunctionSlotOf :: FunctionShape -> FunctionSlot
+  FunctionSlotAny :: FunctionSlot
   deriving (Eq, Show)
 
 -- | Concrete function shape. Parameters are keyed by their label (order is
@@ -259,6 +263,7 @@ functionBranches :: FunctionSlot -> [SemanticType Resolved]
 functionBranches = \case
   FunctionSlotAbsent -> []
   FunctionSlotOf shape -> [makeFunction shape]
+  FunctionSlotAny -> [SemanticTypeFunctionAny]
   where
     makeFunction FunctionShape {parameters, returnType, requests} =
       SemanticTypeFunction
@@ -347,6 +352,11 @@ normaliseSemantic :: SemanticType Resolved -> NormalizedType
 normaliseSemantic = \case
   SemanticTypeUnknown -> NormalizedTypeUnknown
   SemanticTypeNever -> NormalizedTypeLayered emptyLayered
+  -- function-top: the only layer that's non-empty is the function
+  -- layer set to 'FunctionSlotAny'. This is the top element of the
+  -- function lattice — every concrete function shape is a subtype.
+  SemanticTypeFunctionAny ->
+    NormalizedTypeLayered emptyLayered {functionLayer = FunctionSlotAny}
   SemanticTypeNull -> NormalizedTypeLayered emptyLayered {nullLayer = True}
   SemanticTypeBoolean ->
     NormalizedTypeLayered emptyLayered {booleanLayer = Set.fromList [True, False]}
@@ -450,6 +460,9 @@ unionFunctionLayer :: FunctionSlot -> FunctionSlot -> FunctionSlot
 unionFunctionLayer leftSlot rightSlot = case (leftSlot, rightSlot) of
   (FunctionSlotAbsent, other) -> other
   (other, FunctionSlotAbsent) -> other
+  -- 'function' (top of the function lattice) absorbs any specific shape.
+  (FunctionSlotAny, _) -> FunctionSlotAny
+  (_, FunctionSlotAny) -> FunctionSlotAny
   (FunctionSlotOf leftShape, FunctionSlotOf rightShape) ->
     FunctionSlotOf (unionFunctionShape leftShape rightShape)
 
@@ -536,6 +549,10 @@ intersectFunctionLayer :: FunctionSlot -> FunctionSlot -> FunctionSlot
 intersectFunctionLayer leftSlot rightSlot = case (leftSlot, rightSlot) of
   (FunctionSlotAbsent, _) -> FunctionSlotAbsent
   (_, FunctionSlotAbsent) -> FunctionSlotAbsent
+  -- 'function' is the function-lattice top; intersecting with it is
+  -- the identity (any specific shape ⊆ function).
+  (FunctionSlotAny, other) -> other
+  (other, FunctionSlotAny) -> other
   (FunctionSlotOf leftShape, FunctionSlotOf rightShape) ->
     FunctionSlotOf (intersectFunctionShape leftShape rightShape)
 
@@ -623,6 +640,10 @@ subtypeFunctionLayer :: FunctionSlot -> FunctionSlot -> Bool
 subtypeFunctionLayer leftSlot rightSlot = case (leftSlot, rightSlot) of
   (FunctionSlotAbsent, _) -> True
   (_, FunctionSlotAbsent) -> False
+  -- 'function' is the function-lattice top: any function (shape or
+  -- top) flows in; nothing other than top flows out of top.
+  (_, FunctionSlotAny) -> True
+  (FunctionSlotAny, FunctionSlotOf _) -> False
   (FunctionSlotOf leftShape, FunctionSlotOf rightShape) ->
     subtypeFunctionShape leftShape rightShape
 

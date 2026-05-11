@@ -20,6 +20,11 @@ module Katari.Schema
     buildDataDefs,
     toJsonSchema,
 
+    -- * Lowering-facing helpers (per-agent schema computation)
+    buildInputObject,
+    buildOutputSchema,
+    jsonSchemaToText,
+
     -- * Top-level builder
     buildSchemas,
   )
@@ -31,17 +36,20 @@ import Data.Aeson
     ToJSON (..),
     Value (..),
     defaultOptions,
+    encode,
     genericToJSON,
     object,
     (.=),
   )
 import Data.Aeson.KeyMap qualified as KeyMap
+import Data.ByteString.Lazy qualified as LazyByteString
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (catMaybes, mapMaybe)
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
+import Data.Text.Encoding qualified as Encoding
 import GHC.Generics (Generic)
 import Katari.AST
   ( AgentDeclaration (..),
@@ -288,6 +296,9 @@ toCore dataDefs visited = \case
     | otherwise -> SchemaCoreUnknown
   -- Functions cannot be serialised to JSON.
   SemanticTypeFunction {} -> SchemaCoreUnknown
+  -- 'function' top type: any callable. Represented as an opaque
+  -- reference (string id) at the JSON-Schema boundary.
+  SemanticTypeFunctionAny -> SchemaCoreUnknown
 
 -- | Compact a union of string-literal types into a single string-enum
 -- where possible. Mixed unions fall back to @anyOf@.
@@ -406,6 +417,53 @@ paramObject dataDefs paramTypes parameters =
           required = Map.keysSet paramTypes,
           additionalProperties = False
         }
+
+-- | Build a JSON Schema object describing the input parameters of any
+-- callable. Lowering-facing variant of 'paramObject' that takes the raw
+-- per-label annotations (Lowering doesn't always have a
+-- @[ParameterBinding Zonked]@ — e.g. for prim wrappers it knows only
+-- @(label, optionalAnnotation)@). Returns a wrapped 'JsonSchema' for
+-- direct insertion into 'AgentBlock.inputSchema'.
+buildInputObject ::
+  DataDefs ->
+  Map Text (SemanticType Resolved) ->
+  [(Text, Maybe Text)] ->
+  JsonSchema
+buildInputObject dataDefs paramTypes labelsAndAnnotations =
+  let annotationByLabel = Map.fromList labelsAndAnnotations
+      properties =
+        Map.mapWithKey
+          ( \label t ->
+              let ann = Map.findWithDefault Nothing label annotationByLabel
+               in withDesc ann (toJsonSchema dataDefs Set.empty t)
+          )
+          paramTypes
+   in plain
+        ( SchemaCoreObject
+            { properties = properties,
+              required = Map.keysSet paramTypes,
+              additionalProperties = False
+            }
+        )
+
+-- | Build the output schema for a callable's return type. Thin wrapper
+-- around 'toJsonSchema' exposed alongside 'buildInputObject' so
+-- Lowering has a single API surface for per-agent schema computation.
+buildOutputSchema ::
+  DataDefs ->
+  SemanticType Resolved ->
+  JsonSchema
+buildOutputSchema dataDefs returnType =
+  toJsonSchema dataDefs Set.empty returnType
+
+-- | Aeson-encode a 'JsonSchema' to a strict 'Text'. Used by Lowering to
+-- persist precomputed schemas in 'AgentBlock.inputSchema' /
+-- 'AgentBlock.outputSchema'.
+jsonSchemaToText :: JsonSchema -> Text
+jsonSchemaToText =
+  Encoding.decodeUtf8
+    . LazyByteString.toStrict
+    . encode
 
 -- | Build a 'SchemaEntry' for a @data@ constructor. The output schema is the
 -- inline-expanded object shape of the constructed value.

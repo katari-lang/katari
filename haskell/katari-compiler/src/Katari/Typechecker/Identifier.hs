@@ -1600,11 +1600,13 @@ resolveType = \case
   TypeUnion TypeUnionNode {branches, sourceSpan} -> do
     branches' <- mapM resolveType branches
     pure (TypeUnion TypeUnionNode {branches = branches', sourceSpan = sourceSpan})
-  -- never / unknown carry only a sourceSpan; phase change is mechanical.
+  -- never / unknown / function carry only a sourceSpan; phase change is mechanical.
   TypeNever NeverTypeNode {sourceSpan} ->
     pure (TypeNever NeverTypeNode {sourceSpan = sourceSpan})
   TypeUnknown UnknownTypeNode {sourceSpan} ->
     pure (TypeUnknown UnknownTypeNode {sourceSpan = sourceSpan})
+  TypeFunctionAny FunctionAnyTypeNode {sourceSpan} ->
+    pure (TypeFunctionAny FunctionAnyTypeNode {sourceSpan = sourceSpan})
   where
     rebuildPrimitive PrimitiveTypeNode {kind, sourceSpan} =
       PrimitiveTypeNode {kind = kind, sourceSpan = sourceSpan}
