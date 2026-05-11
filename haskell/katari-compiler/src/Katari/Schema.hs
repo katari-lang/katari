@@ -66,6 +66,7 @@ import Katari.AST
   )
 import Katari.Id
   ( ModuleId,
+    QualifiedName,
     RequestId,
     TypeId,
     renderQualifiedName,
@@ -231,22 +232,70 @@ withDesc d JsonSchema {core, title, examples} =
 -- DataDefs: pre-built map for inline data-type expansion
 -- ===========================================================================
 
--- | Maps each data type's 'TypeId' to its field-name → 'SemanticType' map.
--- Built once from 'ZonkResult' and threaded through schema generation to
--- enable inline expansion of 'SemanticTypeData' references without @$defs@.
-type DataDefs = Map TypeId (Map Text (SemanticType Resolved))
+-- | Per-data-type metadata threaded through schema generation. Carries
+-- the constructor's 'QualifiedName' so the emitted schema can stamp
+-- a @"$ctor": {"const": "module.name"}@ discriminator on the resulting
+-- object schema (required for raw ↔ Value round-trip without ambiguity
+-- on unions). Field annotations come along so recursive
+-- 'SemanticTypeData' references render with the same descriptions as
+-- the original @data@ declaration.
+data DataInfo = DataInfo
+  { dataQName :: QualifiedName,
+    dataFields :: Map Text DataFieldInfo
+  }
+  deriving (Eq, Show)
+
+-- | One field of a 'DataInfo': its semantic type plus the original
+-- @\@\"...\"@ annotation (if any) from the @data@ declaration.
+data DataFieldInfo = DataFieldInfo
+  { fieldType :: SemanticType Resolved,
+    fieldAnnotation :: Maybe Text
+  }
+  deriving (Eq, Show)
+
+-- | Maps each data type's 'TypeId' to its qname + per-field info.
+type DataDefs = Map TypeId DataInfo
 
 -- | Build 'DataDefs' from the Zonked output. Each @data@ declaration
--- contributes one entry: its 'TypeId' maps to the field types taken from
--- the constructor function's signature in 'zonkedTypeEnvironment'.
+-- contributes one entry: its 'TypeId' maps to the constructor qname,
+-- field types (from 'zonkedTypeEnvironment'), and per-field
+-- annotations (from the surface 'DataDeclaration' parameters).
 buildDataDefs :: IdentifierResult -> ZonkResult -> DataDefs
 buildDataDefs idResult zonkResult =
-  Map.fromList
-    [ (cd.constructorTypeId, fieldTypes)
-      | (_, cd) <- Map.toList idResult.identifiedConstructors,
-        Just (SemanticTypeFunction fieldTypes _ _) <-
-          [Map.lookup cd.constructorVariableId zonkResult.zonkedTypeEnvironment]
-    ]
+  let annotationsByQName :: Map QualifiedName (Map Text (Maybe Text))
+      annotationsByQName =
+        Map.fromList
+          [ (qname, annotations)
+            | m <- Map.elems zonkResult.zonkedModules,
+              DeclarationData dataDecl <- m.declarations,
+              Just variableId <- [dataDecl.name.resolution],
+              Just variableData <- [Map.lookup variableId idResult.identifiedVariables],
+              Just qname <- [variableData.variableQualifiedName],
+              let annotations =
+                    Map.fromList
+                      [(p.name, p.annotation) | p <- dataDecl.parameters]
+          ]
+   in Map.fromList
+        [ ( cd.constructorTypeId,
+            DataInfo
+              cd.constructorQualifiedName
+              ( Map.mapWithKey
+                  ( \label ty ->
+                      DataFieldInfo
+                        { fieldType = ty,
+                          fieldAnnotation =
+                            Map.findWithDefault Nothing label perFieldAnnotations
+                        }
+                  )
+                  fieldTypes
+              )
+          )
+          | (_, cd) <- Map.toList idResult.identifiedConstructors,
+            Just (SemanticTypeFunction fieldTypes _ _) <-
+              [Map.lookup cd.constructorVariableId zonkResult.zonkedTypeEnvironment],
+            let perFieldAnnotations =
+                  Map.findWithDefault Map.empty cd.constructorQualifiedName annotationsByQName
+        ]
 
 -- ===========================================================================
 -- SemanticType -> JsonSchema
@@ -286,19 +335,57 @@ toCore dataDefs visited = \case
     | Set.member typeId visited ->
         -- Circular reference: break the cycle with an open schema.
         SchemaCoreUnknown
-    | Just fields <- Map.lookup typeId dataDefs ->
+    | Just info <- Map.lookup typeId dataDefs ->
         let visited' = Set.insert typeId visited
+            qnameStr = renderQualifiedName info.dataQName
+            fieldProps =
+              Map.map
+                ( \fi ->
+                    withDesc fi.fieldAnnotation (toJsonSchema dataDefs visited' fi.fieldType)
+                )
+                info.dataFields
+            ctorProp = plain SchemaCoreConst {value = toJSON qnameStr}
+            properties = Map.insert ctorDiscriminatorKey ctorProp fieldProps
          in SchemaCoreObject
-              { properties = Map.map (toJsonSchema dataDefs visited') fields,
-                required = Map.keysSet fields,
+              { properties = properties,
+                required = Set.insert ctorDiscriminatorKey (Map.keysSet info.dataFields),
                 additionalProperties = False
               }
     | otherwise -> SchemaCoreUnknown
-  -- Functions cannot be serialised to JSON.
-  SemanticTypeFunction {} -> SchemaCoreUnknown
-  -- 'function' top type: any callable. Represented as an opaque
-  -- reference (string id) at the JSON-Schema boundary.
-  SemanticTypeFunctionAny -> SchemaCoreUnknown
+  -- Concrete function types and the 'function' top type are both
+  -- carried on the wire as a callable reference @{"$callable":
+  -- "module.name" | "closure:N"}@. The reference is what 'get_metadata'
+  -- returns in its 'id' field.
+  SemanticTypeFunction {} -> callableRefCore
+  SemanticTypeFunctionAny -> callableRefCore
+
+-- | Reserved JSON-Schema property name carrying the tagged-value
+-- constructor identifier on the wire. Receivers (CLI / REST clients /
+-- AI tools) use the value as a discriminator when picking the matching
+-- arm of a union.
+ctorDiscriminatorKey :: Text
+ctorDiscriminatorKey = "$ctor"
+
+-- | Reserved JSON-Schema property name carrying a callable reference.
+-- The value is the same string the @get_metadata@ prim returns in its
+-- @id@ field: @"module.name"@ for top-level agents or @"closure:N"@
+-- for local closures.
+callableDiscriminatorKey :: Text
+callableDiscriminatorKey = "$callable"
+
+-- | Schema for a callable-reference object: a single required
+-- @"$callable": string@ property. Used as the wire representation of
+-- every value of a function-shaped type.
+callableRefCore :: SchemaCore
+callableRefCore =
+  SchemaCoreObject
+    { properties =
+        Map.singleton
+          callableDiscriminatorKey
+          (plain SchemaCoreString {schemaEnum = []}),
+      required = Set.singleton callableDiscriminatorKey,
+      additionalProperties = False
+    }
 
 -- | Compact a union of string-literal types into a single string-enum
 -- where possible. Mixed unions fall back to @anyOf@.
@@ -484,6 +571,9 @@ buildDataEntry dataDefs idResult zonkResult dataDecl = do
   let fieldTypes = case Map.lookup variableId zonkResult.zonkedTypeEnvironment of
         Just (SemanticTypeFunction paramTypes _ _) -> paramTypes
         _ -> Map.empty
+      -- Input (call-side) is the ctor's parameter list — no @$ctor@
+      -- discriminator needed since the caller already targets a
+      -- specific constructor.
       inputCore = dataParamObject dataDefs fieldTypes dataDecl.parameters
       inputSchema =
         JsonSchema
@@ -492,10 +582,12 @@ buildDataEntry dataDefs idResult zonkResult dataDecl = do
             description = dataDecl.annotation,
             examples = []
           }
-      -- Output mirrors the input shape (same fields, same per-field
-      -- annotations). The data constructor's constructed value has the
-      -- same structure as its parameter list.
-      outputCore = dataParamObject dataDefs fieldTypes dataDecl.parameters
+      -- Output (constructed tagged value) reuses the unified
+      -- 'SemanticTypeData' rendering so the @$ctor@ discriminator
+      -- automatically appears.
+      outputCore = case dataDecl.typeName.resolution of
+        Just typeId -> toCore dataDefs Set.empty (SemanticTypeData typeId)
+        Nothing -> dataParamObject dataDefs fieldTypes dataDecl.parameters
   pure
     SchemaEntry
       { name = renderQualifiedName qualifiedName,

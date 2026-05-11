@@ -90,13 +90,18 @@ toJsonSchemaSpec = describe "toJsonSchema (SemanticType -> JsonSchema)" $ do
         additionalProperties `shouldBe` False
       _ -> expectationFailure "expected SchemaCoreObject"
 
-  it "function types fall back to SchemaCoreUnknown (not JSON-serialisable)" $ do
+  it "function types emit a callable-reference object with required $callable: string" $ do
     let t =
           SemanticTypeFunction
             Map.empty
             SemanticTypeNull
             (SemanticRequest Set.empty)
-    t `shouldHaveCore` SchemaCoreUnknown
+    case (simpleToJson t).core of
+      SchemaCoreObject {properties, required, additionalProperties} -> do
+        Map.keys properties `shouldBe` ["$callable"]
+        required `shouldBe` Set.singleton "$callable"
+        additionalProperties `shouldBe` False
+      _ -> expectationFailure "expected SchemaCoreObject (callable reference)"
 
 unionCompactionSpec :: Spec
 unionCompactionSpec = describe "union compaction" $ do

@@ -23,6 +23,9 @@
     "output": {
       "additionalProperties": false,
       "properties": {
+        "$ctor": {
+          "const": "main.point"
+        },
         "x": {
           "type": "integer"
         },
@@ -31,6 +34,7 @@
         }
       },
       "required": [
+        "$ctor",
         "x",
         "y"
       ],
@@ -46,6 +50,9 @@
         "p": {
           "additionalProperties": false,
           "properties": {
+            "$ctor": {
+              "const": "main.point"
+            },
             "x": {
               "type": "integer"
             },
@@ -54,6 +61,7 @@
             }
           },
           "required": [
+            "$ctor",
             "x",
             "y"
           ],
@@ -107,6 +115,9 @@
     "output": {
       "additionalProperties": false,
       "properties": {
+        "$ctor": {
+          "const": "prim.agent_metadata"
+        },
         "description": {
           "type": "string"
         },
@@ -124,6 +135,7 @@
         }
       },
       "required": [
+        "$ctor",
         "description",
         "id",
         "input",
