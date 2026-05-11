@@ -7,8 +7,8 @@
 
 import type { AgentDefId } from "../agent-def-id.js";
 import type { DelegationId, EscalationId } from "../engine/id.js";
-import type { Value } from "../engine/value.js";
 import type { QualifiedName } from "../ir/types.js";
+import type { RawValue } from "../value-codec.js";
 
 void (null as unknown as QualifiedName); // referenced via AgentDefId encoding
 
@@ -36,7 +36,7 @@ export type ParentToChild =
       type: "delegate";
       delegationId: DelegationId;
       agentDefId: AgentDefId;
-      args: Record<string, Value>;
+      args: Record<string, RawValue>;
     }
   | {
       /**
@@ -55,10 +55,10 @@ export type ParentToChild =
       type: "restoredDelegate";
       delegationId: DelegationId;
       agentDefId: AgentDefId;
-      args: Record<string, Value>;
+      args: Record<string, RawValue>;
     }
   | { type: "terminate"; delegationId: DelegationId }
-  | { type: "escalateAck"; escalationId: EscalationId; value: Value }
+  | { type: "escalateAck"; escalationId: EscalationId; value: RawValue }
   | { type: "escalateError"; escalationId: EscalationId; message: string }
   | { type: "shutdown" };
 
@@ -68,7 +68,7 @@ export type ChildToParent =
   | {
       type: "delegateAck";
       delegationId: DelegationId;
-      value: Value;
+      value: RawValue;
     }
   | {
       type: "delegateError";
@@ -81,7 +81,7 @@ export type ChildToParent =
       delegationId: DelegationId;
       escalationId: EscalationId;
       agentDefId: AgentDefId;
-      args: Record<string, Value>;
+      args: Record<string, RawValue>;
     }
   | {
       type: "log";
@@ -91,4 +91,4 @@ export type ChildToParent =
     };
 
 // Re-exports for cross-package imports
-export type { AgentDefId, DelegationId, EscalationId, Value };
+export type { AgentDefId, DelegationId, EscalationId, RawValue };

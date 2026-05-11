@@ -21,12 +21,15 @@ import {
   ExternalEventBus,
   FFI_ENDPOINT,
   FfiModule,
+  valueFromRaw,
   type ChildToParent,
   type ExternalEvent,
   type Logger,
+  type RawValue,
   type SidecarBundle,
   type SidecarManager,
   type Sidecar,
+  type Value,
 } from "katari-runtime";
 import { ApiModule } from "./modules/api-module.js";
 import { StorageFfiStore } from "./modules/ffi-store.js";
@@ -221,7 +224,7 @@ export class Orchestrator {
           payload: {
             kind: "delegateAck",
             delegationId: msg.delegationId,
-            value: msg.value,
+            value: valueFromRaw(msg.value),
           },
         };
       }
@@ -258,13 +261,14 @@ export class Orchestrator {
       case "escalate": {
         const peer = await lookupPeer(msg.delegationId);
         if (peer === null) return null;
+        const argsValue = argsRawToValue(msg.args);
         await tx.ffiEscalations.insert({
           escalationId: msg.escalationId,
           delegationId: msg.delegationId,
           snapshotId,
           peerEndpoint: peer,
           agentDefId: msg.agentDefId,
-          args: msg.args,
+          args: argsValue,
           createdAt: new Date().toISOString(),
         });
         return {
@@ -275,7 +279,7 @@ export class Orchestrator {
             delegationId: msg.delegationId,
             escalationId: msg.escalationId,
             agentDefId: msg.agentDefId,
-            args: msg.args,
+            args: argsValue,
           },
         };
       }
@@ -316,4 +320,14 @@ function makeNoOpFfi(): FfiModule {
   // routed via `bus.registerAll` minus `ffi`, so this object is a pure
   // type-fill — never invoked.
   return {} as FfiModule;
+}
+
+/** Lift the sidecar-side raw `args` map into the bus's internal `Value`
+ * shape. Used when forwarding a sidecar `escalate` into the bus. */
+function argsRawToValue(
+  args: Record<string, RawValue>,
+): Record<string, Value> {
+  const out: Record<string, Value> = {};
+  for (const [k, v] of Object.entries(args)) out[k] = valueFromRaw(v);
+  return out;
 }

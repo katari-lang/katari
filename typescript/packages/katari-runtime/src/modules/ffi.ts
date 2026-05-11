@@ -27,6 +27,8 @@ import type { DelegationId, EscalationId } from "../engine/id.js";
 import type { Endpoint } from "../engine/endpoint.js";
 import type { Logger } from "../engine/logger.js";
 import type { Value } from "../engine/value.js";
+import { valueFromRaw, valueToRaw } from "../value-codec.js";
+import type { RawValue } from "../value-codec.js";
 import type { Module } from "../module.js";
 import type { Sidecar } from "../sidecar/sidecar.js";
 import type { FfiStore } from "../sidecar/store.js";
@@ -110,7 +112,7 @@ export class FfiModule implements Module {
           type: "restoredDelegate",
           delegationId: row.delegationId,
           agentDefId: row.agentDefId,
-          args: row.args,
+          args: argsToRaw(row.args),
         });
       } catch (err) {
         this.logger.log("error", "ffi: restoredDelegate send failed", {
@@ -149,7 +151,7 @@ export class FfiModule implements Module {
       type: "delegate",
       delegationId,
       agentDefId,
-      args,
+      args: argsToRaw(args),
     });
   }
 
@@ -177,7 +179,11 @@ export class FfiModule implements Module {
       return;
     }
     await this.store.deleteEscalation(escalationId);
-    await this.sidecar.send({ type: "escalateAck", escalationId, value });
+    await this.sidecar.send({
+      type: "escalateAck",
+      escalationId,
+      value: valueToRaw(value),
+    });
   }
 
   // ─── Outbound (Sidecar → FFI → bus) ────────────────────────────────────
@@ -207,7 +213,7 @@ export class FfiModule implements Module {
           payload: {
             kind: "delegateAck",
             delegationId: msg.delegationId,
-            value: msg.value,
+            value: valueFromRaw(msg.value),
           },
         });
         return;
@@ -248,12 +254,13 @@ export class FfiModule implements Module {
       case "escalate": {
         const peer = await this.peerForDelegation(msg.delegationId);
         if (peer === null) return;
+        const argsValue = argsFromRaw(msg.args);
         await this.store.insertEscalation({
           escalationId: msg.escalationId,
           delegationId: msg.delegationId,
           peerEndpoint: peer,
           agentDefId: msg.agentDefId,
-          args: msg.args,
+          args: argsValue,
           createdAt: new Date().toISOString(),
         });
         this.onSidecarResponse({
@@ -264,7 +271,7 @@ export class FfiModule implements Module {
             delegationId: msg.delegationId,
             escalationId: msg.escalationId,
             agentDefId: msg.agentDefId,
-            args: msg.args,
+            args: argsValue,
           },
         });
         return;
@@ -305,3 +312,22 @@ export class FfiModule implements Module {
 // type re-exports for convenience
 export type { AgentDefId, EscalationId, Value };
 void CORE_ENDPOINT;
+
+// ─── Value ↔ Raw helpers (sidecar wire boundary) ───────────────────────────
+//
+// The bus / CORE event types carry `Value` (tagged) everywhere. The sidecar
+// IPC speaks raw JSON shapes (`RawValue`). Convert at the boundary so
+// user-implemented sidecar handlers see plain `{x: 5}` instead of
+// `{x: {kind: "number", value: 5}}`.
+
+function argsToRaw(args: Record<string, Value>): Record<string, RawValue> {
+  const out: Record<string, RawValue> = {};
+  for (const [k, v] of Object.entries(args)) out[k] = valueToRaw(v);
+  return out;
+}
+
+function argsFromRaw(args: Record<string, RawValue>): Record<string, Value> {
+  const out: Record<string, Value> = {};
+  for (const [k, v] of Object.entries(args)) out[k] = valueFromRaw(v);
+  return out;
+}

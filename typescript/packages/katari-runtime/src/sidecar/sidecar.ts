@@ -27,24 +27,30 @@ export interface Sidecar {
 // ─── InProcessSidecar ──────────────────────────────────────────────────────
 
 import type { Logger } from "../engine/logger.js";
+import type { RawValue } from "../value-codec.js";
 
 /**
  * テスト用 in-process sidecar。subprocess を起動せず、user の `invoke`
  * 関数を直接呼ぶ。Subprocess 版と同じ `Sidecar` interface を提供するので、
  * テストと本番で FFI Module 側のコードが共通化できる。
+ *
+ * Args / return values are 'RawValue' (plain JSON shapes; the runtime
+ * converts to / from the internal 'Value' tagged form at the FFI module
+ * boundary). User code therefore sees `{x: 5}` rather than
+ * `{x: {kind: "number", value: 5}}`.
  */
 export type InProcessHandler = (input: {
   agentDefId: unknown;
-  args: Record<string, unknown>;
+  args: Record<string, RawValue>;
   delegationId: string;
   /** "delegate" の場合 false、"restoredDelegate" の場合 true */
   isRestored: boolean;
   signal: AbortSignal;
   escalate: (
     agentDefId: unknown,
-    args: Record<string, unknown>,
-  ) => Promise<unknown>;
-}) => Promise<unknown>;
+    args: Record<string, RawValue>,
+  ) => Promise<RawValue>;
+}) => Promise<RawValue>;
 
 export class InProcessSidecar implements Sidecar {
   private handler: ((msg: ChildToParent) => void) | null = null;
@@ -113,16 +119,22 @@ export class InProcessSidecar implements Sidecar {
     const ctrl = new AbortController();
     this.inflight.set(msg.delegationId, ctrl);
     let currentDelegationId = msg.delegationId;
-    const escalate = (agentDefId: unknown, args: Record<string, unknown>) => {
+    const escalate = (
+      agentDefId: unknown,
+      args: Record<string, RawValue>,
+    ): Promise<RawValue> => {
       const escalationId = generateId();
-      return new Promise<unknown>((resolve, reject) => {
-        this.pendingEscalations.set(escalationId, { resolve, reject });
+      return new Promise<RawValue>((resolve, reject) => {
+        this.pendingEscalations.set(
+          escalationId,
+          { resolve: resolve as (v: unknown) => void, reject },
+        );
         this.handler?.({
           type: "escalate",
           delegationId: currentDelegationId as never,
           escalationId: escalationId as never,
           agentDefId: agentDefId as never,
-          args: args as never,
+          args,
         });
       });
     };
