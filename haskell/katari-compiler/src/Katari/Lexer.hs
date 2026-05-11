@@ -141,6 +141,8 @@ data Keyword where
   KeywordNever :: Keyword
   KeywordUnknown :: Keyword
   KeywordFunction :: Keyword
+  KeywordPrim :: Keyword
+  KeywordUsing :: Keyword
   deriving (Eq, Ord, Show, Bounded, Enum)
 
 data Punctuation where
@@ -563,6 +565,8 @@ lexKeywordText = \case
   KeywordNever -> "never"
   KeywordUnknown -> "unknown"
   KeywordFunction -> "function"
+  KeywordPrim -> "prim"
+  KeywordUsing -> "using"
 
 -- | Reverse lookup: surface text → 'Keyword'. Built from 'lexKeywordText' so
 -- adding a new keyword only requires extending the single table above.
@@ -898,6 +902,9 @@ insertVirtualSemicolons = go (0 :: Int) Nothing
       KatariTokenKeyword KeywordBoolean -> True
       KatariTokenKeyword KeywordNumber -> True
       KatariTokenKeyword KeywordString -> True
+      KatariTokenKeyword KeywordNever -> True
+      KatariTokenKeyword KeywordUnknown -> True
+      KatariTokenKeyword KeywordFunction -> True
       KatariTokenPunctuation PunctuationRightParenthesis -> True
       KatariTokenPunctuation PunctuationRightBracket -> True
       KatariTokenPunctuation PunctuationRightBrace -> True

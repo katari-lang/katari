@@ -47,6 +47,7 @@ import Katari.Typechecker.Zonker
     ZonkResult (..),
     zonk,
   )
+import Katari.Compile qualified as Compile
 import Test.Hspec
 
 -- ---------------------------------------------------------------------------
@@ -61,7 +62,7 @@ pipeline src =
       (parsed, parseErrors) = Parser.parse "<test>" stream
   in case parseErrors of
     (_:_) -> fail ("parse failure: " ++ show parseErrors)
-    [] -> case identify Set.empty (Map.singleton "main" parsed) of
+    [] -> case Compile.identifyWithStdlib (Map.singleton "main" parsed) of
       (idResult, []) -> let (cg, _) = generateConstraints idResult in pure (idResult, cg)
       (_, errs) -> fail ("identify failure: " ++ show errs)
 
@@ -425,8 +426,10 @@ defensiveFallback = describe "defensive fallback for Solver bug" $ do
     let (zr, zonkErrs) = zonk idResult cg (mkPartialSolverResult [] [])
     -- 少なくとも 1 つは ZonkErrorMissingTypeVar が出る
     any isMissingTypeVar zonkErrs `shouldBe` True
-    -- AST 自体は生成されている
-    Map.size zr.zonkedModules `shouldBe` 1
+    -- AST 自体は生成されている。stdlib の 'prim' モジュールが
+    -- 'Compile.identifyWithStdlib' により追加されるので、ユーザ "main"
+    -- とあわせて 2 つ。
+    Map.size zr.zonkedModules `shouldBe` 2
   where
     isMissingTypeVar = \case
       ZonkErrorMissingTypeVar _ _ -> True

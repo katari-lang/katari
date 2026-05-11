@@ -25,6 +25,7 @@ import Katari.Typechecker.Solver (SolverResult (..))
 import Katari.Typechecker.Zonker (zonk)
 import System.Directory (listDirectory)
 import System.FilePath ((</>))
+import Katari.Compile qualified as Compile
 import Test.Hspec
 
 -- ===========================================================================
@@ -39,7 +40,7 @@ lowerSource src =
       (parsed, parseErrors) = Parser.parse "<test>" stream
   in case parseErrors of
     (_:_) -> fail ("parse failure: " ++ show parseErrors)
-    [] -> case identify Set.empty (Map.singleton "main" parsed) of
+    [] -> case Compile.identifyWithStdlib (Map.singleton "main" parsed) of
       (idResult, []) -> do
         let (cg, _) = generateConstraints idResult
             solver =

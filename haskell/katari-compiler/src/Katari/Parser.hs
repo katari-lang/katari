@@ -476,6 +476,7 @@ parseAnnotatedDeclaration = do
   annotation <- parseAnnotation
   choice
     [ DeclarationExternalAgent <$> parseExternalAgentDeclaration annotation,
+      DeclarationPrimAgent <$> parsePrimAgentDeclaration annotation,
       DeclarationAgent <$> parseAgentDeclaration annotation,
       DeclarationRequest <$> parseRequestDeclaration annotation,
       DeclarationData <$> parseDataDeclaration annotation
@@ -552,6 +553,35 @@ parseExternalAgentDeclaration annotation = parseWithSpan $ do
         parameters = parameters,
         returnType = returnType,
         withRequests = requests,
+        sourceSpan = sourceSpan
+      }
+
+-- ---------------------------------------------------------------------------
+-- Prim Agent
+-- ---------------------------------------------------------------------------
+
+-- | @prim agent name(...) -> T [with E] [using rule_name]@ — a built-in
+-- primitive declared via the surface language. Mirrors 'ExternalAgentDeclaration'
+-- with an extra optional @using@ clause that names a special constraint
+-- rule for the constraint generator (e.g. @numeric_join_binary@).
+parsePrimAgentDeclaration :: Maybe Text -> Parser (PrimAgentDeclaration Parsed)
+parsePrimAgentDeclaration annotation = parseWithSpan $ do
+  parseKeyword KeywordPrim
+  parseKeyword KeywordAgent
+  name <- parseNameRef
+  parameters <- parseParameterList
+  parsePunctuation PunctuationArrow
+  returnType <- parseType
+  requests <- option [] (parseKeyword KeywordWith *> parseRequests)
+  using <- optional (parseKeyword KeywordUsing *> parseIdentifier)
+  pure $ \sourceSpan ->
+    PrimAgentDeclaration
+      { annotation = annotation,
+        name = name,
+        parameters = parameters,
+        returnType = returnType,
+        withRequests = requests,
+        using = using,
         sourceSpan = sourceSpan
       }
 

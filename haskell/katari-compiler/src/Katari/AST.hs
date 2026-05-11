@@ -139,6 +139,7 @@ data Declaration (phase :: Phase) where
   DeclarationRequest :: RequestDeclaration phase -> Declaration phase
   DeclarationImport :: ImportDeclaration -> Declaration phase
   DeclarationExternalAgent :: ExternalAgentDeclaration phase -> Declaration phase
+  DeclarationPrimAgent :: PrimAgentDeclaration phase -> Declaration phase
   DeclarationData :: DataDeclaration phase -> Declaration phase
   DeclarationTypeSynonym :: TypeSynonymDeclaration phase -> Declaration phase
   -- | Structural sentinel left behind when parser recovery skipped over a
@@ -153,6 +154,7 @@ instance HasSourceSpan (Declaration phase) where
     DeclarationRequest declaration -> declaration.sourceSpan
     DeclarationImport declaration -> declaration.sourceSpan
     DeclarationExternalAgent declaration -> declaration.sourceSpan
+    DeclarationPrimAgent declaration -> declaration.sourceSpan
     DeclarationData declaration -> declaration.sourceSpan
     DeclarationTypeSynonym declaration -> declaration.sourceSpan
     DeclarationError sourceSpan -> sourceSpan
@@ -225,6 +227,30 @@ data ExternalAgentDeclaration (phase :: Phase) = ExternalAgentDeclaration
   }
 
 instance HasSourceSpan (ExternalAgentDeclaration phase) where
+  sourceSpanOf declaration = declaration.sourceSpan
+
+-- | @prim agent name(...) -> T [with E] [using rule_name]@ — a built-in
+-- primitive declared via the surface language. Treated like 'ExternalAgentDeclaration'
+-- throughout typechecking; the only runtime difference is that the runtime
+-- executes a hardcoded implementation keyed on 'name' rather than
+-- delegating to a sidecar.
+--
+-- @using@ optionally names a special typing rule consulted by the
+-- constraint generator (e.g. @numeric_join_binary@ for arithmetic prims
+-- whose result is the join of operand types floored at integer). When
+-- omitted the prim is type-checked as a vanilla function — its declared
+-- 'returnType' is the inferred result.
+data PrimAgentDeclaration (phase :: Phase) = PrimAgentDeclaration
+  { annotation :: Maybe Text,
+    name :: NameRef phase VariableRef,
+    parameters :: [ParameterBinding phase],
+    returnType :: SyntacticType phase,
+    withRequests :: [SyntacticRequest phase],
+    using :: Maybe Text,
+    sourceSpan :: SourceSpan
+  }
+
+instance HasSourceSpan (PrimAgentDeclaration phase) where
   sourceSpanOf declaration = declaration.sourceSpan
 
 -- | @data ctor_name(field: type, ...)@ — 1 declaration につき 1 constructor。
@@ -800,12 +826,12 @@ data BinaryOperator where
   BinaryOperatorAnd :: BinaryOperator
   BinaryOperatorOr :: BinaryOperator
   BinaryOperatorConcat :: BinaryOperator
-  deriving (Eq, Show)
+  deriving (Eq, Show, Bounded, Enum)
 
 data UnaryOperator where
   UnaryOperatorNegate :: UnaryOperator
   UnaryOperatorNot :: UnaryOperator
-  deriving (Eq, Show)
+  deriving (Eq, Show, Bounded, Enum)
 
 data BinaryOperatorExpression (phase :: Phase) = BinaryOperatorExpression
   { operator :: BinaryOperator,
@@ -1207,6 +1233,10 @@ deriving instance Show ImportDeclaration
 deriving instance (EqPhase phase) => Eq (ExternalAgentDeclaration phase)
 
 deriving instance (ShowPhase phase) => Show (ExternalAgentDeclaration phase)
+
+deriving instance (EqPhase phase) => Eq (PrimAgentDeclaration phase)
+
+deriving instance (ShowPhase phase) => Show (PrimAgentDeclaration phase)
 
 deriving instance (EqPhase phase) => Eq (DataDeclaration phase)
 

@@ -180,6 +180,7 @@ walkDeclaration = \case
   DeclarationAgent decl -> DeclarationAgent <$> walkAgentDecl decl
   DeclarationRequest decl -> DeclarationRequest <$> walkRequestDecl decl
   DeclarationExternalAgent decl -> DeclarationExternalAgent <$> walkExternalAgentDecl decl
+  DeclarationPrimAgent decl -> DeclarationPrimAgent <$> walkPrimAgentDecl decl
   DeclarationData decl -> DeclarationData <$> walkDataDecl decl
   DeclarationTypeSynonym decl -> DeclarationTypeSynonym <$> walkTypeSynonymDecl decl
   DeclarationImport decl -> pure (DeclarationImport decl)
@@ -223,6 +224,20 @@ walkExternalAgentDecl ExternalAgentDeclaration {annotation, name, parameters, re
         parameters = parameters',
         returnType = retagSyntacticType returnType,
         withRequests = map retagSyntacticRequest withRequests,
+        sourceSpan = sourceSpan
+      }
+
+walkPrimAgentDecl :: PrimAgentDeclaration Constrained -> Zonk (PrimAgentDeclaration Zonked)
+walkPrimAgentDecl PrimAgentDeclaration {annotation, name, parameters, returnType, withRequests, using, sourceSpan} = do
+  parameters' <- mapM walkParameter parameters
+  pure
+    PrimAgentDeclaration
+      { annotation = annotation,
+        name = retagNameRef name,
+        parameters = parameters',
+        returnType = retagSyntacticType returnType,
+        withRequests = map retagSyntacticRequest withRequests,
+        using = using,
         sourceSpan = sourceSpan
       }
 

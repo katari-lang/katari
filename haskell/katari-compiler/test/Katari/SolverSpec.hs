@@ -34,6 +34,7 @@ import Katari.Typechecker.NormalizedType
 import Katari.Typechecker.Solver (SolverError, SolverResult (..), solve)
 import Katari.Typechecker.Solver qualified as Solver
 import Katari.Typechecker.Zonker (ZonkResult (..), zonk)
+import Katari.Compile qualified as Compile
 import Test.Hspec
 
 -- ---------------------------------------------------------------------------
@@ -46,7 +47,7 @@ runSolve source =
       (parsed, parseErrors) = Parser.parse "<test>" stream
   in case parseErrors of
     (_:_) -> fail ("parse failure: " ++ show parseErrors)
-    [] -> case identify Set.empty (Map.singleton "main" parsed) of
+    [] -> case Compile.identifyWithStdlib (Map.singleton "main" parsed) of
       (idResult, []) ->
         let (cgResult, _) = generateConstraints idResult
             (solverResult, solverErrors) = solve cgResult

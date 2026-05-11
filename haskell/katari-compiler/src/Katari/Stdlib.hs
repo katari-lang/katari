@@ -1,19 +1,20 @@
 -- | Compiler-blessed source snippets that are spliced into every program
 -- before the user's modules are processed.
 --
--- The motivating use case is supplying \"system\" data declarations like
--- @agent_metadata@ which the runtime / prim system needs to refer to by
--- name. Keeping them as Katari source (rather than building constructor
--- definitions from Haskell) lets the normal Identifier / Lowering /
--- Schema pipeline produce all the usual derived data (qname-keyed
--- constructor identity, field types, JSON schema, ...) without
--- special-case shortcuts.
+-- The @prim@ module's source carries:
 --
--- All snippets are injected under their stated module name and become
--- part of that module's exports. For @prim@ in particular, the
--- Identifier-pass auto-import mechanism then propagates the resulting
--- symbols into every user module's lexical scope (so end-users can write
--- @agent_metadata@ unqualified).
+--   1. Built-in @data@ declarations the runtime / prims need to refer to
+--      by name (e.g. 'agent_metadata' returned by @get_metadata@).
+--   2. @prim agent@ declarations for every built-in primitive. The
+--      compiler parses these like any other declaration and runs them
+--      through the usual Identifier / CG / Zonk / Lowering pipeline. The
+--      runtime executes a hardcoded implementation keyed on the prim's
+--      bare name (see @katari-runtime/src/engine/prim.ts@).
+--
+-- All snippets are spliced under their stated module name. For @prim@
+-- specifically, the Identifier-pass auto-import mechanism then propagates
+-- the resulting symbols into every user module's lexical scope (so users
+-- can write @add@ / @agent_metadata@ unqualified).
 module Katari.Stdlib
   ( stdlibSources,
     stdlibModuleNames,
@@ -39,16 +40,78 @@ stdlibSources =
 stdlibModuleNames :: Set Text
 stdlibModuleNames = Map.keysSet stdlibSources
 
--- | The @prim@ module's stdlib source. Currently provides @agent_metadata@:
--- the data type returned by @get_metadata@ for any callable value.
+-- | The full @prim@ module source. Includes the @agent_metadata@ data
+-- type plus a @prim agent@ declaration for every built-in primitive
+-- the runtime ships with.
 primStdlibSource :: Text
 primStdlibSource =
   Text.unlines
-    [ "data agent_metadata(",
+    [ "@\"AI metadata of a callable (name / id / description / I-O schema).\"",
+      "data agent_metadata(",
       "  name: string,",
       "  id: string,",
       "  description: string,",
       "  input: string,",
       "  output: string,",
-      ")"
+      ")",
+      "",
+      "// Arithmetic (operand-aware: integer + integer = integer).",
+      "@\"Add two numbers.\"",
+      "prim agent add(lhs: number, rhs: number) -> number using numeric_join_binary",
+      "@\"Subtract two numbers.\"",
+      "prim agent sub(lhs: number, rhs: number) -> number using numeric_join_binary",
+      "@\"Multiply two numbers.\"",
+      "prim agent mul(lhs: number, rhs: number) -> number using numeric_join_binary",
+      "@\"Floor-mod two numbers.\"",
+      "prim agent mod(lhs: number, rhs: number) -> number using numeric_join_binary",
+      "@\"Divide two numbers (always returns number).\"",
+      "prim agent div(lhs: number, rhs: number) -> number",
+      "@\"Unary negate.\"",
+      "prim agent neg(value: number) -> number",
+      "@\"Absolute value (integer when operand is integer).\"",
+      "prim agent abs(value: number) -> number using numeric_join_unary",
+      "",
+      "// Comparison.",
+      "@\"Structural equality.\"",
+      "prim agent eq(lhs: unknown, rhs: unknown) -> boolean",
+      "@\"Structural inequality.\"",
+      "prim agent ne(lhs: unknown, rhs: unknown) -> boolean",
+      "@\"Less than.\"",
+      "prim agent lt(lhs: number, rhs: number) -> boolean",
+      "@\"Less or equal.\"",
+      "prim agent le(lhs: number, rhs: number) -> boolean",
+      "@\"Greater than.\"",
+      "prim agent gt(lhs: number, rhs: number) -> boolean",
+      "@\"Greater or equal.\"",
+      "prim agent ge(lhs: number, rhs: number) -> boolean",
+      "",
+      "// Logic.",
+      "@\"Logical and.\"",
+      "prim agent and(lhs: boolean, rhs: boolean) -> boolean",
+      "@\"Logical or.\"",
+      "prim agent or(lhs: boolean, rhs: boolean) -> boolean",
+      "@\"Logical not.\"",
+      "prim agent not(value: boolean) -> boolean",
+      "",
+      "// String / pretty-print.",
+      "@\"Concatenate two strings.\"",
+      "prim agent concat(lhs: string, rhs: string) -> string",
+      "@\"Return the runtime type-of-value tag as a string.\"",
+      "prim agent type_of(value: unknown) -> string",
+      "@\"Convert any value to a debug string.\"",
+      "prim agent to_string(value: unknown) -> string",
+      "",
+      "// Structural access.",
+      "@\"Retrieve the element at @index@.\"",
+      "prim agent array_get(array: unknown, index: integer) -> unknown",
+      "@\"Length of an array.\"",
+      "prim agent array_length(array: unknown) -> integer",
+      "@\"Retrieve a tagged-value field by name.\"",
+      "prim agent get_field(object: unknown, field: string) -> unknown",
+      "@\"Retrieve a tuple element by positional index.\"",
+      "prim agent tuple_get(tuple: unknown, index: integer) -> unknown",
+      "",
+      "// Metadata.",
+      "@\"Return the AI metadata of any callable value.\"",
+      "prim agent get_metadata(value: function) -> agent_metadata"
     ]

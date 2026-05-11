@@ -21,6 +21,7 @@ import Katari.Typechecker.Identifier
     VariableData (..),
     identify,
   )
+import Katari.Compile qualified as Compile
 import Test.Hspec
 
 -- ---------------------------------------------------------------------------
@@ -41,7 +42,7 @@ runOneWithIdentifier src =
       (parsed, parseErrors) = Parser.parse "<test>" stream
   in case parseErrors of
     (_:_) -> fail ("parse failure: " ++ show parseErrors)
-    [] -> case identify Set.empty (Map.singleton "main" parsed) of
+    [] -> case Compile.identifyWithStdlib (Map.singleton "main" parsed) of
       (result, []) ->
         let (cg, errs) = generateConstraints result
          in pure (cg, errs, result)
@@ -174,7 +175,7 @@ multipleModules = describe "multiple modules" $ do
         (mainMod, mainErrors) = Parser.parse "<test>" mainStream
     case libErrors ++ mainErrors of
       (_:_) -> expectationFailure ("parse: " ++ show (libErrors ++ mainErrors))
-      [] -> case identify Set.empty (Map.fromList [("lib", libMod), ("main", mainMod)]) of
+      [] -> case Compile.identifyWithStdlib (Map.fromList [("lib", libMod), ("main", mainMod)]) of
         (_, e : es) -> expectationFailure ("identify errors: " ++ show (e : es))
         (result, []) -> do
           let (cg, cgErrors) = generateConstraints result
@@ -716,7 +717,7 @@ dataNameClash = describe "cross-module data name clash" $ do
     case errorsA ++ errorsB of
       (_:_) -> expectationFailure ("parse: " ++ show (errorsA ++ errorsB))
       [] ->
-        case identify Set.empty (Map.fromList [("a", parsedA), ("b", parsedB)]) of
+        case Compile.identifyWithStdlib (Map.fromList [("a", parsedA), ("b", parsedB)]) of
           (_, e : es) -> expectationFailure ("identify errors: " ++ show (e : es))
           (result, []) -> do
             let (cg, cgErrors) = generateConstraints result

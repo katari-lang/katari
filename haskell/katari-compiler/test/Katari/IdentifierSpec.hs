@@ -12,6 +12,7 @@ import Katari.Id (QualifiedName (..))
 import Katari.Lexer qualified as Lexer
 import Katari.Parser qualified as Parser
 import Katari.Typechecker.Identifier
+import Katari.Compile qualified as Compile
 import Test.Hspec
 
 -- ---------------------------------------------------------------------------
@@ -35,7 +36,7 @@ parseOne src =
 identifyOne :: Text -> IO (Either [IdentifierError] IdentifierResult)
 identifyOne src = do
   m <- parseOne src
-  pure $ case identify Set.empty (Map.singleton "main" m) of
+  pure $ case Compile.identifyWithStdlib (Map.singleton "main" m) of
     (r, []) -> Right r
     (_, es) -> Left es
 
@@ -52,7 +53,7 @@ identifyMany sources = do
             [] -> pure (name, parsed)
       )
       sources
-  pure $ case identify Set.empty (Map.fromList parsedList) of
+  pure $ case Compile.identifyWithStdlib (Map.fromList parsedList) of
     (r, []) -> Right r
     (_, es) -> Left es
 
@@ -283,10 +284,21 @@ dataDeclarations = describe "data declarations" $ do
     case eitherRes of
       Left errs -> expectationFailure ("identify failed: " ++ show errs)
       Right res -> do
-        let asts = Map.elems res.moduleASTs
+        -- Filter out stdlib modules ('prim') so the assertion only counts
+        -- the user-declared `data foo` instances.
+        let userModuleIds =
+              [ mid
+                | (mid, md) <- Map.toList res.identifiedModules,
+                  md.moduleName /= "prim"
+              ]
+            userAsts =
+              [ m
+                | mid <- userModuleIds,
+                  Just m <- [Map.lookup mid res.moduleASTs]
+              ]
             typeIds =
               [ tid
-                | m <- asts,
+                | m <- userAsts,
                   metadata <- collectDataTypeNameRefResolutiondata m,
                   Just tid <- [metadata]
               ]

@@ -1,7 +1,23 @@
 [
   {
+    "description": "Returns the canonical greeting.",
     "input": {
       "additionalProperties": false,
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "name": "main.main",
+    "output": {
+      "type": "string"
+    },
+    "requests": []
+  },
+  {
+    "description": "AI metadata of a callable (name / id / description / I-O schema).",
+    "input": {
+      "additionalProperties": false,
+      "description": "AI metadata of a callable (name / id / description / I-O schema).",
       "properties": {
         "description": {
           "type": "string"
@@ -57,20 +73,6 @@
         "output"
       ],
       "type": "object"
-    },
-    "requests": []
-  },
-  {
-    "description": "Returns the canonical greeting.",
-    "input": {
-      "additionalProperties": false,
-      "properties": {},
-      "required": [],
-      "type": "object"
-    },
-    "name": "main.main",
-    "output": {
-      "type": "string"
     },
     "requests": []
   }

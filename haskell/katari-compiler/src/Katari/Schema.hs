@@ -363,6 +363,10 @@ buildDeclarationEntry dataDefs idResult zonkResult = \case
       externalDecl.annotation
       externalDecl.name
       externalDecl.parameters
+  -- Stdlib-owned prim agents are an implementation detail of the
+  -- runtime; we don't surface them in the AI tool-calling schema bundle
+  -- (they'd just clutter the discovered-tools list).
+  DeclarationPrimAgent _ -> Nothing
   DeclarationData dataDecl ->
     buildDataEntry dataDefs idResult zonkResult dataDecl
   DeclarationImport {} -> Nothing

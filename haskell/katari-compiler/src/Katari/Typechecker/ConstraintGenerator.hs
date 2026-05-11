@@ -68,13 +68,14 @@ import Katari.Id
     TypeId (..),
     VariableId,
   )
-import Katari.Prim (PrimConstraintRule (..))
+import Katari.Prim (PrimRule (..))
 import Katari.Prim qualified as Prim
 import Katari.Typechecker.Identifier
   ( ConstructorData (..),
     IdentifierResult (..),
     RequestData (..),
     TypeData (..),
+    VariableData (..),
   )
 
 -- The 'Constrained' phase reuses the 'NameRefResolution Constrained s' family for
@@ -264,7 +265,7 @@ data ConstraintContext = ConstraintContext
     -- | Prim constraint-rule lookup, indexed by 'VariableId'. Populated
     -- from 'IdentifierResult.primitiveRulesByVariableId' at the
     -- pipeline entry. Empty for non-prim variables.
-    contextPrimRules :: Map VariableId PrimConstraintRule
+    contextPrimRules :: Map VariableId PrimRule
   }
 
 type CG = ReaderT ConstraintContext (State ConstraintState)
@@ -283,7 +284,7 @@ initialContext ::
   Map TypeId TypeData ->
   Map RequestId RequestData ->
   Map ConstructorId ConstructorData ->
-  Map VariableId PrimConstraintRule ->
+  Map VariableId PrimRule ->
   ConstraintContext
 initialContext types requests constructors primRules =
   ConstraintContext
@@ -531,6 +532,7 @@ walkDeclaration = \case
   DeclarationAgent decl -> DeclarationAgent <$> walkAgentDecl decl
   DeclarationRequest decl -> DeclarationRequest <$> walkRequestDecl decl
   DeclarationExternalAgent decl -> DeclarationExternalAgent <$> walkExternalAgentDecl decl
+  DeclarationPrimAgent decl -> DeclarationPrimAgent <$> walkPrimAgentDecl decl
   DeclarationData decl -> DeclarationData <$> walkDataDecl decl
   DeclarationTypeSynonym decl -> DeclarationTypeSynonym <$> walkTypeSynonymDecl decl
   DeclarationImport decl -> pure (DeclarationImport decl)
@@ -627,6 +629,25 @@ walkExternalAgentDecl ExternalAgentDeclaration {annotation, name, parameters, re
         parameters = parameters',
         returnType = retagSyntacticType returnType,
         withRequests = fmap retagSyntacticRequest withRequests,
+        sourceSpan = sourceSpan
+      }
+
+walkPrimAgentDecl :: PrimAgentDeclaration Identified -> CG (PrimAgentDeclaration Constrained)
+walkPrimAgentDecl PrimAgentDeclaration {annotation, name, parameters, returnType, withRequests, using, sourceSpan} = do
+  tPrim <- variableTypeFromName name
+  (parameters', paramSig) <- walkParameterListForSignature parameters
+  retSemantic <- elaborateType returnType
+  requests <- elaborateRequestList withRequests
+  let signature = SemanticTypeFunction paramSig retSemantic requests
+  addEqTypeConstraint signature tPrim (ConstraintReason ReasonKindExternalAgentSignature sourceSpan)
+  pure
+    PrimAgentDeclaration
+      { annotation = annotation,
+        name = retagNameRef name,
+        parameters = parameters',
+        returnType = retagSyntacticType returnType,
+        withRequests = fmap retagSyntacticRequest withRequests,
+        using = using,
         sourceSpan = sourceSpan
       }
 
@@ -1179,12 +1200,13 @@ applyNormalCall callee' arguments' sourceSpan = do
   addTypeConstraint calleeType expected (ConstraintReason ReasonKindCallArgument sourceSpan)
   pure tResult
 
--- | Emit operator-flavoured constraints at a prim call site. The
--- argument labels are pulled by name (@lhs@ / @rhs@ / @value@) — the
--- Identifier desugar always produces these labels for operators, and
--- 'PrimDefinition' fixes them for non-operator prims.
+-- | Emit operand-aware constraints at a prim call site for the two
+-- arithmetic rules that can't be expressed as a plain function
+-- signature. All other prims (incl. @eq@ / @lt@ / @get_metadata@ / etc.)
+-- take the standard 'applyNormalCall' path keyed on the declared
+-- 'PrimAgentDeclaration' signature.
 applyPrimRule ::
-  PrimConstraintRule ->
+  PrimRule ->
   [CallArgument Constrained] ->
   SourceSpan ->
   CG (SemanticType Unresolved)
@@ -1200,7 +1222,9 @@ applyPrimRule rule arguments sourceSpan =
       reasonBin = ConstraintReason ReasonKindBinaryOperator sourceSpan
       reasonUn = ConstraintReason ReasonKindUnaryOperator sourceSpan
    in case rule of
-        PrimRuleAddSubMul -> do
+        PrimRuleNumericJoinBinary -> do
+          -- result >: lhs ∪ rhs ∪ integer. integer + integer → integer,
+          -- otherwise number. Used by add / sub / mul / mod.
           resultType <- freshTypeVar
           addTypeConstraint lhs SemanticTypeNumber reasonBin
           addTypeConstraint rhs SemanticTypeNumber reasonBin
@@ -1208,64 +1232,13 @@ applyPrimRule rule arguments sourceSpan =
           addTypeConstraint rhs resultType reasonBin
           addTypeConstraint SemanticTypeInteger resultType reasonBin
           pure resultType
-        PrimRuleDivide -> do
-          resultType <- freshTypeVar
-          addTypeConstraint lhs SemanticTypeNumber reasonBin
-          addTypeConstraint rhs SemanticTypeNumber reasonBin
-          addTypeConstraint SemanticTypeNumber resultType reasonBin
-          pure resultType
-        PrimRuleEqLike -> pure SemanticTypeBoolean
-        PrimRuleCompareNumeric -> do
-          addTypeConstraint lhs SemanticTypeNumber reasonBin
-          addTypeConstraint rhs SemanticTypeNumber reasonBin
-          pure SemanticTypeBoolean
-        PrimRuleLogical -> do
-          addTypeConstraint lhs SemanticTypeBoolean reasonBin
-          addTypeConstraint rhs SemanticTypeBoolean reasonBin
-          pure SemanticTypeBoolean
-        PrimRuleConcat -> do
-          addTypeConstraint lhs SemanticTypeString reasonBin
-          addTypeConstraint rhs SemanticTypeString reasonBin
-          pure SemanticTypeString
-        PrimRuleNegate -> do
-          addTypeConstraint value_ SemanticTypeNumber reasonUn
-          pure SemanticTypeNumber
-        PrimRuleNot -> do
-          addTypeConstraint value_ SemanticTypeBoolean reasonUn
-          pure SemanticTypeBoolean
-        PrimRuleAbs -> do
-          -- @abs(x)@ — operand floored at Number, result reflects the
-          -- operand's underlying numeric kind (mirrors 'PrimRuleAddSubMul'
-          -- in unary form). @abs(integer) -> integer@,
-          -- @abs(number) -> number@.
+        PrimRuleNumericJoinUnary -> do
+          -- result >: value ∪ integer. Unary analogue used by abs.
           resultType <- freshTypeVar
           addTypeConstraint value_ SemanticTypeNumber reasonUn
           addTypeConstraint value_ resultType reasonUn
           addTypeConstraint SemanticTypeInteger resultType reasonUn
           pure resultType
-        PrimRuleGetMetadata -> do
-          -- @get_metadata(value)@ — @value@ floored at @function@
-          -- (the function-lattice top); result is the stdlib data type
-          -- @prim.agent_metadata@. The type id is looked up dynamically
-          -- because stdlib type ids are issued by the Identifier pass
-          -- and aren't constants visible from 'Katari.Prim'.
-          let reasonCall = ConstraintReason ReasonKindCallArgument sourceSpan
-          addTypeConstraint value_ SemanticTypeFunctionAny reasonCall
-          types <- asks (.contextIdentifiedTypes)
-          let agentMetadataQName = QualifiedName {module_ = "prim", name = "agent_metadata"}
-              agentMetadataTypeId =
-                listToMaybe
-                  [ tid
-                    | (tid, td) <- Map.toList types,
-                      td.typeQualifiedName == agentMetadataQName
-                  ]
-          case agentMetadataTypeId of
-            Just tid -> pure (SemanticTypeData tid)
-            -- Stdlib not injected (e.g. unit-test bypass path). Fall
-            -- back to 'SemanticTypeUnknown' rather than abort — the
-            -- runtime layer will surface a clearer error if a
-            -- @get_metadata@ result actually flows somewhere typed.
-            Nothing -> pure SemanticTypeUnknown
         PrimRuleSimple ->
           -- Caller filters PrimRuleSimple before invoking applyPrimRule.
           pure SemanticTypeUnknown
@@ -1710,32 +1683,18 @@ generateConstraints result = case runState (runReaderT action context) initialSt
         result.identifiedTypes
         result.identifiedRequests
         result.identifiedConstructors
-        result.primitiveRulesByVariableId
+        primRules
+    -- Reconstruct the prim-rule lookup from every 'VariableData' that
+    -- the Identifier pass marked with a 'variablePrimRule'.
+    primRules =
+      Map.fromList
+        [ (vid, rule)
+          | (vid, vd) <- Map.toList result.identifiedVariables,
+            Just rule <- [vd.variablePrimRule]
+        ]
     action = do
       allocateAllVariables result
-      bindPrimitiveTypes result
       mapM walkOne (Map.toList result.moduleASTs)
     walkOne (mid, mod') = do
       mod'' <- walkModule mod'
       pure (mid, mod'')
-
--- | Pin the type of every 'PrimRuleSimple' prim to its declared
--- signature (lifted from 'Resolved' to 'Unresolved'). Operator-style
--- prims with non-'Simple' rules get their type per call site via
--- 'applyPrimRule'; their VariableId is left bound to the fresh type
--- variable that 'allocateAllVariables' assigned.
-bindPrimitiveTypes :: IdentifierResult -> CG ()
-bindPrimitiveTypes result =
-  mapM_ bindOne Prim.primDefinitions
-  where
-    bindOne def =
-      let qname = QualifiedName {module_ = def.primModule, name = def.primName}
-       in case Map.lookup qname result.primitiveVariableIds of
-            Just vid | def.primConstraintRule == PrimRuleSimple -> do
-              tVar <- lookupVariable vid
-              let sig = liftResolvedToUnresolved def.primType
-              addEqTypeConstraint
-                sig
-                tVar
-                (ConstraintReason ReasonKindAgentSignature Prim.primSourceSpan)
-            _ -> pure ()

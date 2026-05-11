@@ -32,8 +32,6 @@ import Katari.Internal qualified as Internal
 import Katari.SourceSpan (SourceSpan)
 import Katari.Id (VariableId)
 import Katari.Id qualified as Id
-import Katari.Prim (PrimDefinition (..))
-import Katari.Prim qualified as Prim
 import Katari.Schema qualified as Schema
 import Katari.SemanticType (Resolved, SemanticType (..))
 import Katari.Typechecker.Identifier (ConstructorData (..), IdentifierResult (..), RequestData (..))
@@ -155,10 +153,11 @@ data LowerState = LowerState
     -- top-level callables are registered; surfaces in
     -- 'IRModule.entries'.
     lsEntries :: Map QualifiedName BlockId,
-    -- | Prim 'VariableId' → 'BlockId'. Populated by 'registerPrimitives'
-    -- alongside 'lsTopLevelBlocks' so the standard call-resolution
-    -- path treats prims uniformly with user-defined callables.
-    lsPrimBlockIds :: Map VariableId BlockId,
+    -- | Prim bare name → leaf 'BlockPrim' 'BlockId'. Populated when a
+    -- 'DeclarationPrimAgent' is lowered; read by 'primBlockId' for
+    -- compiler-internal desugar sites that emit direct 'StatementCall'
+    -- to a prim leaf (e.g. @get_field@ for field access).
+    lsPrimBlockIds :: Map Text BlockId,
     -- | Statements for the block currently being lowered, stored in
     -- reverse order. 'emit' prepends; 'runWithFreshBuffer' saves/restores
     -- and reverses at the end.
@@ -338,14 +337,14 @@ topLevelQNameForResolution resolution sourceSpan nameText =
 -- in 'Katari.Prim.primDefinitions' — compiler invariant violation.
 primBlockId :: Text -> Lower BlockId
 primBlockId name = do
-  primVars <- asks ((.primitiveVariableIds) . (.identifierResult))
-  case Map.lookup (QualifiedName "prim" name) primVars of
-    Just vid -> do
-      blocks <- gets (.lsPrimBlockIds)
-      case Map.lookup vid blocks of
-        Just blockId -> pure blockId
-        Nothing -> throwError (Internal.internalErrorNoSpan ("primBlockId: prim '" <> name <> "' VariableId not in lsPrimBlockIds"))
-    Nothing -> throwError (Internal.internalErrorNoSpan ("primBlockId: unknown primitive " <> name))
+  leaves <- gets (.lsPrimBlockIds)
+  case Map.lookup name leaves of
+    Just blockId -> pure blockId
+    Nothing ->
+      throwError
+        ( Internal.internalErrorNoSpan
+            ("primBlockId: unknown primitive '" <> name <> "' — stdlib not loaded or prim agent missing")
+        )
 
 -- ===========================================================================
 -- Statement buffer (implicit via 'lsCurrentEmitted')
@@ -455,13 +454,7 @@ lowerProgram moduleName idResult zonk =
 
 lowerProgramM :: Text -> ZonkResult -> Lower IRModule
 lowerProgramM moduleName zonkResult = do
-  registerPrimitives
-  -- Allocate one IR 'IR.RequestId' per Identifier 'RequestId' (and one IR
-  -- 'IR.ConstructorId' per Identifier 'ConstructorId') so the handler / pattern
-  -- match call sites can translate from the Identifier id space to the
-  -- IR's runtime-dispatch id space.
   registerDeclarationKinds zonkResult
-  lowerPrimitives
   _ <- lowerAllDeclarations zonkResult
   state <- gets id
   pure
@@ -476,87 +469,6 @@ lowerProgramM moduleName zonkResult = do
               blockNames = state.lsBlockNames
             }
       }
-
--- | Phase 1 for prims: reserve a 'BlockAgent' slot per prim and
--- register it in 'lsEntries' / 'lsTopLevelBlocks' / 'lsTopLevelQNames'.
--- The inner 'BlockPrim' leaf and the wrapping body are produced later
--- by 'lowerPrimitives' (Phase 2). Iteration follows
--- 'Katari.Prim.primDefinitions' order so BlockId assignments are
--- stable across builds (golden tests).
-registerPrimitives :: Lower ()
-registerPrimitives = do
-  primVars <- asks ((.primitiveVariableIds) . (.identifierResult))
-  mapM_ (registerOne primVars) Prim.primDefinitions
-  where
-    registerOne primVars def = do
-      let qname = QualifiedName def.primModule def.primName
-      case Map.lookup qname primVars of
-        Just vid -> do
-          agentBlk <- reserveBlockId (Just ("prim:" <> def.primName))
-          modify $ \state ->
-            state
-              { lsTopLevelBlocks = Map.insert vid agentBlk state.lsTopLevelBlocks,
-                lsTopLevelQNames = Map.insert vid qname state.lsTopLevelQNames,
-                lsEntries = Map.insert qname agentBlk state.lsEntries
-              }
-        Nothing ->
-          -- Identifier preregistered every prim; missing entry is a bug.
-          throwError
-            ( Internal.internalErrorNoSpan
-                ("registerPrimitives: prim '" <> def.primName <> "' missing from IdentifierResult")
-            )
-
--- | Phase 2 for prims: allocate the inner 'BlockPrim' leaf and emit the
--- wrapping body + 'BlockAgent' at the slot reserved by
--- 'registerPrimitives'. The leaf 'BlockId' is recorded in
--- 'lsPrimBlockIds' for any compile-internal direct 'StatementCall'
--- callers (e.g. desugared field / index access).
-lowerPrimitives :: Lower ()
-lowerPrimitives = do
-  primVars <- asks ((.primitiveVariableIds) . (.identifierResult))
-  mapM_ (lowerOne primVars) Prim.primDefinitions
-  where
-    lowerOne primVars def = do
-      let qname = QualifiedName def.primModule def.primName
-      case Map.lookup qname primVars of
-        Just vid -> do
-          agentBlk <- gets (Map.lookup vid . (.lsTopLevelBlocks)) >>= \case
-            Just b -> pure b
-            Nothing ->
-              throwError
-                ( Internal.internalErrorNoSpan
-                    ("lowerPrimitives: prim '" <> def.primName <> "' slot not reserved")
-                )
-          paramLabels <- case def.primType of
-            SemanticTypeFunction params _ _ -> pure (Map.keys params)
-            _ ->
-              throwError
-                ( Internal.internalErrorNoSpan
-                    ("lowerPrimitives: prim '" <> def.primName <> "' has non-function primType")
-                )
-          primBlk <- freshBlockId
-          recordBlock primBlk (BlockPrim def.primName) (Just ("prim:" <> def.primName <> ":leaf"))
-          (inputSchema, outputSchema) <-
-            schemasForFunctionType
-              def.primType
-              [(label, Nothing) | label <- paramLabels]
-          writeWrapperAgent
-            agentBlk
-            qname
-            paramLabels
-            primBlk
-            ("prim:" <> def.primName)
-            def.primName
-            Nothing
-            inputSchema
-            outputSchema
-          modify $ \state ->
-            state {lsPrimBlockIds = Map.insert vid primBlk state.lsPrimBlockIds}
-        Nothing ->
-          throwError
-            ( Internal.internalErrorNoSpan
-                ("lowerPrimitives: prim '" <> def.primName <> "' missing from IdentifierResult")
-            )
 
 -- | Write a 'BlockAgent' wrapper at a pre-reserved 'BlockId' for a
 -- non-agent leaf (BlockPrim / BlockConstructor / BlockExternal).
@@ -686,6 +598,22 @@ registerDeclarationKinds zonkResult =
           -- ('lowerAllDeclarations').
           agentBlk <- reserveBlockId (Just decl.name.text)
           recordTopLevelCallable variableId moduleName decl.name.text agentBlk
+      AST.DeclarationPrimAgent decl ->
+        registerCallable decl.name decl.sourceSpan $ \variableId -> do
+          -- Phase 1: reserve the wrapper agent slot AND eagerly create
+          -- the inner 'BlockPrim' leaf. The leaf must exist before any
+          -- user agent body's lowering, since compile-internal desugar
+          -- sites (e.g. field access → 'get_field') look it up by bare
+          -- name via 'primBlockId'.
+          agentBlk <- reserveBlockId (Just decl.name.text)
+          leafBlk <- freshBlockId
+          recordBlock
+            leafBlk
+            (BlockPrim decl.name.text)
+            (Just ("prim:" <> decl.name.text <> ":leaf"))
+          modify $ \state ->
+            state {lsPrimBlockIds = Map.insert decl.name.text leafBlk state.lsPrimBlockIds}
+          recordTopLevelCallable variableId moduleName decl.name.text agentBlk
       AST.DeclarationData decl ->
         registerCallable decl.name decl.sourceSpan $ \variableId -> do
           -- Phase 1: reserve the wrapper agent slot only. The inner
@@ -773,6 +701,32 @@ lowerAllDeclarations zonkResult = do
           paramLabels
           innerBlk
           decl.name.text
+          decl.name.text
+          decl.annotation
+          inputSchema
+          outputSchema
+        pure (Just (decl.name.text, agentBlk))
+      AST.DeclarationPrimAgent decl -> resolveDecl decl.name $ \variableId agentBlk -> do
+        qname <- requireAgentQName "DeclarationPrimAgent" decl.name.text agentBlk
+        let paramLabels = map (.label) decl.parameters
+            labelsAndAnnotations = [(pb.label, pb.annotation) | pb <- decl.parameters]
+        -- The leaf was pre-registered in 'registerDeclarationKinds' so any
+        -- user agent's body could resolve compile-internal prim calls
+        -- (e.g. @get_field@) regardless of declaration order.
+        innerBlk <- gets (Map.lookup decl.name.text . (.lsPrimBlockIds)) >>= \case
+          Just b -> pure b
+          Nothing ->
+            throwError
+              ( Internal.internalErrorNoSpan
+                  ("DeclarationPrimAgent: leaf for '" <> decl.name.text <> "' missing from lsPrimBlockIds")
+              )
+        (inputSchema, outputSchema) <- schemasForVariable variableId labelsAndAnnotations
+        writeWrapperAgent
+          agentBlk
+          qname
+          paramLabels
+          innerBlk
+          ("prim:" <> decl.name.text)
           decl.name.text
           decl.annotation
           inputSchema

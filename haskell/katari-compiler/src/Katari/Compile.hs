@@ -36,6 +36,8 @@ module Katari.Compile
 
     -- * Helpers (exposed for testing)
     parseSources,
+    parsedStdlibModules,
+    identifyWithStdlib,
   )
 where
 
@@ -203,3 +205,25 @@ parseSources sources =
       modules = Map.fromList (map fst parsedEntries)
       diags = concatMap snd parsedEntries
    in (modules, diags)
+
+-- | Parse 'Stdlib.stdlibSources' and produce a 'Map ModuleName (Module Parsed)'
+-- ready for merging into an Identifier-pass input. Parse errors are
+-- ignored here (the stdlib source is compiler-managed; if it fails to
+-- parse, that's a compiler bug, not a user issue).
+parsedStdlibModules :: Map ModuleName (Module Parsed)
+parsedStdlibModules = fst (parseSources stdlibEntries)
+  where
+    stdlibEntries =
+      Map.mapWithKey
+        (\moduleName src -> SourceEntry ("<stdlib:" <> show moduleName <> ">") src)
+        Stdlib.stdlibSources
+
+-- | Test-facing helper: run 'identify' against a user-module map with
+-- 'parsedStdlibModules' merged in and 'Stdlib.stdlibModuleNames' marked
+-- as trusted. Mirrors what 'compile' does internally so unit tests don't
+-- have to repeat the boilerplate.
+identifyWithStdlib ::
+  Map ModuleName (Module Parsed) ->
+  (IdentifierResult, [Identifier.IdentifierError])
+identifyWithStdlib userMods =
+  identify Stdlib.stdlibModuleNames (Map.union userMods parsedStdlibModules)

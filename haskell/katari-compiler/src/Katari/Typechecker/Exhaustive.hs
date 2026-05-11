@@ -451,6 +451,7 @@ walkDeclaration idResult zonkResult = \case
     walkAgentBody idResult zonkResult decl.name.resolution decl.parameters decl.body
   AST.DeclarationRequest _ -> []
   AST.DeclarationExternalAgent _ -> []
+  AST.DeclarationPrimAgent _ -> []
   AST.DeclarationData _ -> []
   AST.DeclarationTypeSynonym _ -> []
   AST.DeclarationImport _ -> []
