@@ -65,25 +65,25 @@ blockSpec = describe "Block (sum)" $ do
     BlockPrim "add"
       `shouldEncodeAs` object ["kind" .= ("blockPrim" :: String), "body" .= ("add" :: String)]
 
-  it "BlockRequest carries kind + body (QualifiedName)" $ do
+  it "BlockRequest carries kind + body (QualifiedName as flat string)" $ do
     BlockRequest (QualifiedName "main" "log")
       `shouldEncodeAs` object
         [ "kind" .= ("blockRequest" :: String),
-          "body" .= object ["module_" .= ("main" :: String), "name" .= ("log" :: String)]
+          "body" .= ("main.log" :: String)
         ]
 
-  it "BlockExternal carries kind + body (ExternalName)" $ do
+  it "BlockExternal carries kind + body (ExternalName as flat string)" $ do
     BlockExternal (ExternalName (QualifiedName "discord" "send_message"))
       `shouldEncodeAs` object
         [ "kind" .= ("blockExternal" :: String),
-          "body" .= object ["module_" .= ("discord" :: String), "name" .= ("send_message" :: String)]
+          "body" .= ("discord.send_message" :: String)
         ]
 
-  it "BlockConstructor carries kind + body (QualifiedName)" $ do
+  it "BlockConstructor carries kind + body (QualifiedName as flat string)" $ do
     BlockConstructor (QualifiedName "main" "point")
       `shouldEncodeAs` object
         [ "kind" .= ("blockConstructor" :: String),
-          "body" .= object ["module_" .= ("main" :: String), "name" .= ("point" :: String)]
+          "body" .= ("main.point" :: String)
         ]
 
   it "BlockTuple carries kind + body (TupleBlock)" $ do

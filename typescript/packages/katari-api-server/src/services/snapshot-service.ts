@@ -35,11 +35,10 @@ export class AgentDefinitionNotFound extends Error {
   }
 }
 
-export function formatQualifiedName(qn: {
-  module_: string;
-  name: string;
-}): string {
-  return qn.module_ === "" ? qn.name : `${qn.module_}.${qn.name}`;
+/** 'QualifiedName' is already a flat dotted string; this helper exists for
+ * call-site clarity (and is a no-op now). */
+export function formatQualifiedName(qn: string): string {
+  return qn;
 }
 
 export class SnapshotService {

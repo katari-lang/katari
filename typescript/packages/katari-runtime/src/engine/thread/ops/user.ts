@@ -224,10 +224,7 @@ function handleStatement(
       if (value.kind === "agentLiteral") {
         agentDefId = encodeCoreAgentDefId({
           kind: "qname",
-          value: {
-            module_: value.qualifiedName.module_,
-            name: value.qualifiedName.name,
-          },
+          value: value.qualifiedName,
         });
       } else if (value.kind === "closure") {
         agentDefId = encodeCoreAgentDefId({

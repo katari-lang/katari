@@ -290,7 +290,7 @@ export function emitEscalateUpward(
   const placeholder: import("../../agent-def-id.js").AgentDefId =
     encodeCoreAgentDefId({
       kind: "qname",
-      value: { module_: "", name: `req:${askKind.reqId}` },
+      value: `req:${askKind.reqId}`,
     });
   ctx.emit({
     from: ctx.state.selfEndpoint,

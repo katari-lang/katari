@@ -162,7 +162,7 @@ async function promptObject(schema: AnySchema, path: string): Promise<Value> {
   // as an opaque tagged value.
   return {
     kind: "tagged",
-    ctorId: { module_: "<anonymous>", name: "record" },
+    ctorId: "<anonymous>.record",
     fields,
   } as Value;
 }

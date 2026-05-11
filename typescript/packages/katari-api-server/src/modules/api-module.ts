@@ -126,7 +126,7 @@ export class ApiModule implements Module {
         delegationId,
         agentDefId: encodeCoreAgentDefId({
           kind: "qname",
-          value: parseQualifiedName(input.qualifiedName),
+          value: input.qualifiedName,
         }),
         args: input.args,
       },
@@ -215,8 +215,3 @@ export class ApiModule implements Module {
   }
 }
 
-function parseQualifiedName(s: string): { module_: string; name: string } {
-  const idx = s.lastIndexOf(".");
-  if (idx === -1) return { module_: "", name: s };
-  return { module_: s.slice(0, idx), name: s.slice(idx + 1) };
-}

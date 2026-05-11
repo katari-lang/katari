@@ -60,7 +60,7 @@ export function summarizeValue(v: Value, maxLen = 30): string {
       s = "<closure>";
       break;
     case "agentLiteral":
-      s = `<agent ${v.qualifiedName.module_}.${v.qualifiedName.name}>`;
+      s = `<agent ${v.qualifiedName}>`;
       break;
   }
   return s.length > maxLen ? s.slice(0, maxLen - 1) + "…" : s;
@@ -190,11 +190,10 @@ export async function selectEscalation(
 
 // ─── Formatters ────────────────────────────────────────────────────────────
 
-export function formatQualifiedName(qn: {
-  module_: string;
-  name: string;
-}): string {
-  return qn.module_.length > 0 ? `${qn.module_}.${qn.name}` : qn.name;
+/** 'QualifiedName' is already a flat dotted string; this helper exists
+ * for call-site clarity (and is a no-op now). */
+export function formatQualifiedName(qn: string): string {
+  return qn;
 }
 
 export function stateBadge(state: AgentRow["state"]): string {
@@ -215,9 +214,8 @@ export function stateBadge(state: AgentRow["state"]): string {
 export function summarizeAgentDefId(id: unknown): string {
   if (typeof id === "object" && id !== null && "kind" in id) {
     const decoded = id as { kind: string; value: unknown };
-    if (decoded.kind === "qname" && isObject(decoded.value)) {
-      const qn = decoded.value as { module_: string; name: string };
-      return formatQualifiedName(qn);
+    if (decoded.kind === "qname" && typeof decoded.value === "string") {
+      return formatQualifiedName(decoded.value);
     }
     if (decoded.kind === "closure") {
       return pc.dim(`<closure ${decoded.value}>`);
@@ -226,6 +224,3 @@ export function summarizeAgentDefId(id: unknown): string {
   return pc.dim("<opaque>");
 }
 
-function isObject(v: unknown): v is Record<string, unknown> {
-  return typeof v === "object" && v !== null;
-}

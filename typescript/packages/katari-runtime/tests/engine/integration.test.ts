@@ -42,13 +42,18 @@ function userBlock(
   return { kind: "blockUser", body: args };
 }
 
-function agentBlock(
-  qualifiedName: { module_: string; name: string },
-  entryBody: number,
-): Block {
+function agentBlock(qualifiedName: string, entryBody: number): Block {
   return {
     kind: "blockAgent",
-    body: { qualifiedName, parameters: [], entryBody },
+    body: {
+      qualifiedName,
+      parameters: [],
+      entryBody,
+      name: qualifiedName,
+      description: undefined,
+      inputSchema: "{}",
+      outputSchema: "{}",
+    },
   };
 }
 
@@ -87,7 +92,7 @@ describe("engine integration: end-to-end via external delegate", () => {
 
     const module = ir({
       // Entry block: BlockAgent wrapping the body BlockUser at id 2.
-      1: agentBlock({ module_: "", name: "main" }, 2),
+      1: agentBlock("main", 2),
       2: userBlk,
       100: primBlock("add"),
     }, { main: 1 });
@@ -102,7 +107,7 @@ describe("engine integration: end-to-end via external delegate", () => {
         kind: "delegate",
         agentDefId: encodeCoreAgentDefId({
           kind: "qname",
-          value: { module_: "", name: "main" },
+          value: "main",
         }),
         args: {},
         delegationId,
@@ -132,7 +137,7 @@ describe("engine integration: end-to-end via external delegate", () => {
         kind: "delegate",
         agentDefId: encodeCoreAgentDefId({
           kind: "qname",
-          value: { module_: "", name: "missing" },
+          value: "missing",
         }),
         args: {},
         delegationId: createDelegationId(),
@@ -171,7 +176,7 @@ describe("engine integration: end-to-end via external delegate", () => {
             output: helperLit,
             value: {
               kind: "literalValueAgent",
-              qualifiedName: { module_: "", name: "helper" },
+              qualifiedName: "helper",
             },
           },
         },
@@ -189,9 +194,9 @@ describe("engine integration: end-to-end via external delegate", () => {
 
     const module = ir(
       {
-        1: agentBlock({ module_: "", name: "main" }, 2),
+        1: agentBlock("main", 2),
         2: mainBody,
-        3: agentBlock({ module_: "", name: "helper" }, 4),
+        3: agentBlock("helper", 4),
         4: helperBody,
       },
       { main: 1, helper: 3 },
@@ -236,7 +241,7 @@ describe("engine integration: end-to-end via external delegate", () => {
         kind: "delegate",
         agentDefId: encodeCoreAgentDefId({
           kind: "qname",
-          value: { module_: "", name: "main" },
+          value: "main",
         }),
         args: {},
         delegationId,
@@ -284,7 +289,7 @@ describe("engine integration: end-to-end via external delegate", () => {
     });
 
     const module = ir({
-      1: agentBlock({ module_: "", name: "main" }, 2),
+      1: agentBlock("main", 2),
       2: userBlk,
       200: { kind: "blockExternal", body: { module_: "test", name: "wait" } },
     }, { main: 1 });
@@ -300,7 +305,7 @@ describe("engine integration: end-to-end via external delegate", () => {
         kind: "delegate",
         agentDefId: encodeCoreAgentDefId({
           kind: "qname",
-          value: { module_: "", name: "main" },
+          value: "main",
         }),
         args: {},
         delegationId,

@@ -36,7 +36,7 @@ export const externalOps: ThreadOps<ExternalThread> = {
     // Phantom externals (those created for agent-call delegations) have
     // module_ === "<agent>" — the spawning op already registered the
     // delegation and emitted the outbound event. Nothing to do here.
-    if (t.externalName.module_ === "<agent>") return;
+    if (t.externalName === "<agent>.<delegate>") return;
 
     // Ordinary external: register on the sender side and emit the outbound
     // delegate. The target FFI module decodes our agentDefId.
@@ -65,7 +65,7 @@ export const externalOps: ThreadOps<ExternalThread> = {
   cancel(ctx, t) {
     if (t.status === "cancelling") return;
     t.status = "cancelling";
-    const target = t.externalName.module_ === "<agent>"
+    const target = t.externalName === "<agent>.<delegate>"
       ? ctx.state.selfEndpoint
       : ctx.state.ffiTargetEndpoint;
     ctx.emit({
@@ -83,7 +83,7 @@ export const externalOps: ThreadOps<ExternalThread> = {
    */
   ask(ctx, t, askId, kind, childCallId) {
     const peer: Endpoint =
-      t.externalName.module_ === "<agent>"
+      t.externalName === "<agent>.<delegate>"
         ? ctx.state.selfEndpoint
         : ctx.state.ffiTargetEndpoint;
     emitEscalateUpward(

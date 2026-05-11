@@ -23,17 +23,27 @@ export type BlockId = number;
 /** IR-level variable identifier (per-occurrence slot). */
 export type VarId = number;
 
-/** FFI boundary public name. Used to identify every top-level callable
- * (agent / request / external / data constructor / prim) plus the
- * dispatch key for handlers and tagged values' ctor identity. */
-export type QualifiedName = {
-  module_: string;
-  name: string;
-};
+/**
+ * FFI boundary public name. Flat dotted string `"module.name"` (or
+ * `"name"` when the module is empty). Used to identify every top-level
+ * callable (agent / request / external / data constructor / prim) plus
+ * the dispatch key for handlers and tagged values' ctor identity.
+ *
+ * Helpers below decompose the string when individual segments are
+ * needed (rarely; mostly internal naming / FFI cosmetics).
+ */
+export type QualifiedName = string;
 
-/** Structural equality on 'QualifiedName'. */
-export function qnameEqual(a: QualifiedName, b: QualifiedName): boolean {
-  return a.module_ === b.module_ && a.name === b.name;
+/** Decompose a 'QualifiedName' into (moduleName, bareName). */
+export function splitQualifiedName(qn: QualifiedName): { module_: string; name: string } {
+  const lastDot = qn.lastIndexOf(".");
+  if (lastDot < 0) return { module_: "", name: qn };
+  return { module_: qn.slice(0, lastDot), name: qn.slice(lastDot + 1) };
+}
+
+/** Build a flat 'QualifiedName' from segments. Empty module → bare name. */
+export function joinQualifiedName(module_: string, name: string): QualifiedName {
+  return module_ === "" ? name : `${module_}.${name}`;
 }
 
 /**

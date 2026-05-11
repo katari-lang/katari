@@ -28,6 +28,7 @@ import Data.Aeson
     defaultOptions,
     genericParseJSON,
     genericToJSON,
+    withText,
   )
 import Data.Aeson.Types (FromJSONKeyFunction (..), toJSONKeyText)
 import Data.Char (toLower)
@@ -45,17 +46,18 @@ data QualifiedName = QualifiedName
   }
   deriving (Eq, Ord, Show, Generic)
 
+-- | Wire format: flat dotted string @\"module.name\"@ (or @\"name\"@ when
+-- the module is empty). The runtime / FFI / REST API all consume this
+-- form, so wrapping a qname in JSON has minimal overhead and the wire is
+-- @grep@-friendly. Pattern matching on the Haskell side still uses the
+-- record fields directly — the JSON instance is the only thing that
+-- flattens.
 instance ToJSON QualifiedName where
-  toJSON = genericToJSON commonOptions
+  toJSON = toJSON . renderQualifiedName
 
 instance FromJSON QualifiedName where
-  parseJSON = genericParseJSON commonOptions
+  parseJSON = withText "QualifiedName" (pure . parseQualifiedName)
 
--- | Render @{module_, name}@ as a string key for use as a JSON object key.
--- Aeson's default 'ToJSONKey' for record types encodes the map as a JSON
--- array of @[key, value]@ pairs, which the runtime cannot index directly.
--- We instead emit a textual @\"module.name\"@ key (or @\"name\"@ when the
--- module is empty) so the runtime can do plain object lookups.
 instance ToJSONKey QualifiedName where
   toJSONKey = toJSONKeyText renderQualifiedName
 

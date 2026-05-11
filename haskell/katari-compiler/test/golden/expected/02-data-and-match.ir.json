@@ -17,10 +17,7 @@
             "var": 1
           }
         ],
-        "qualifiedName": {
-          "module_": "main",
-          "name": "point"
-        }
+        "qualifiedName": "main.point"
       },
       "kind": "blockAgent"
     },
@@ -37,10 +34,7 @@
             "var": 3
           }
         ],
-        "qualifiedName": {
-          "module_": "main",
-          "name": "project_x"
-        }
+        "qualifiedName": "main.project_x"
       },
       "kind": "blockAgent"
     },
@@ -65,10 +59,7 @@
             "var": 26
           }
         ],
-        "qualifiedName": {
-          "module_": "prim",
-          "name": "div"
-        }
+        "qualifiedName": "prim.div"
       },
       "kind": "blockAgent"
     },
@@ -89,10 +80,7 @@
             "var": 28
           }
         ],
-        "qualifiedName": {
-          "module_": "prim",
-          "name": "neg"
-        }
+        "qualifiedName": "prim.neg"
       },
       "kind": "blockAgent"
     },
@@ -113,10 +101,7 @@
             "var": 30
           }
         ],
-        "qualifiedName": {
-          "module_": "prim",
-          "name": "abs"
-        }
+        "qualifiedName": "prim.abs"
       },
       "kind": "blockAgent"
     },
@@ -141,10 +126,7 @@
             "var": 33
           }
         ],
-        "qualifiedName": {
-          "module_": "prim",
-          "name": "eq"
-        }
+        "qualifiedName": "prim.eq"
       },
       "kind": "blockAgent"
     },
@@ -169,10 +151,7 @@
             "var": 36
           }
         ],
-        "qualifiedName": {
-          "module_": "prim",
-          "name": "ne"
-        }
+        "qualifiedName": "prim.ne"
       },
       "kind": "blockAgent"
     },
@@ -205,10 +184,7 @@
             "var": 11
           }
         ],
-        "qualifiedName": {
-          "module_": "prim",
-          "name": "agent_metadata"
-        }
+        "qualifiedName": "prim.agent_metadata"
       },
       "kind": "blockAgent"
     },
@@ -233,10 +209,7 @@
             "var": 39
           }
         ],
-        "qualifiedName": {
-          "module_": "prim",
-          "name": "lt"
-        }
+        "qualifiedName": "prim.lt"
       },
       "kind": "blockAgent"
     },
@@ -261,10 +234,7 @@
             "var": 42
           }
         ],
-        "qualifiedName": {
-          "module_": "prim",
-          "name": "le"
-        }
+        "qualifiedName": "prim.le"
       },
       "kind": "blockAgent"
     },
@@ -289,10 +259,7 @@
             "var": 45
           }
         ],
-        "qualifiedName": {
-          "module_": "prim",
-          "name": "gt"
-        }
+        "qualifiedName": "prim.gt"
       },
       "kind": "blockAgent"
     },
@@ -317,10 +284,7 @@
             "var": 48
           }
         ],
-        "qualifiedName": {
-          "module_": "prim",
-          "name": "ge"
-        }
+        "qualifiedName": "prim.ge"
       },
       "kind": "blockAgent"
     },
@@ -345,10 +309,7 @@
             "var": 51
           }
         ],
-        "qualifiedName": {
-          "module_": "prim",
-          "name": "and"
-        }
+        "qualifiedName": "prim.and"
       },
       "kind": "blockAgent"
     },
@@ -369,10 +330,7 @@
             "var": 14
           }
         ],
-        "qualifiedName": {
-          "module_": "prim",
-          "name": "add"
-        }
+        "qualifiedName": "prim.add"
       },
       "kind": "blockAgent"
     },
@@ -397,10 +355,7 @@
             "var": 54
           }
         ],
-        "qualifiedName": {
-          "module_": "prim",
-          "name": "or"
-        }
+        "qualifiedName": "prim.or"
       },
       "kind": "blockAgent"
     },
@@ -421,10 +376,7 @@
             "var": 56
           }
         ],
-        "qualifiedName": {
-          "module_": "prim",
-          "name": "not"
-        }
+        "qualifiedName": "prim.not"
       },
       "kind": "blockAgent"
     },
@@ -449,10 +401,7 @@
             "var": 59
           }
         ],
-        "qualifiedName": {
-          "module_": "prim",
-          "name": "concat"
-        }
+        "qualifiedName": "prim.concat"
       },
       "kind": "blockAgent"
     },
@@ -473,10 +422,7 @@
             "var": 61
           }
         ],
-        "qualifiedName": {
-          "module_": "prim",
-          "name": "type_of"
-        }
+        "qualifiedName": "prim.type_of"
       },
       "kind": "blockAgent"
     },
@@ -497,10 +443,7 @@
             "var": 63
           }
         ],
-        "qualifiedName": {
-          "module_": "prim",
-          "name": "to_string"
-        }
+        "qualifiedName": "prim.to_string"
       },
       "kind": "blockAgent"
     },
@@ -529,10 +472,7 @@
             "var": 66
           }
         ],
-        "qualifiedName": {
-          "module_": "prim",
-          "name": "array_get"
-        }
+        "qualifiedName": "prim.array_get"
       },
       "kind": "blockAgent"
     },
@@ -553,10 +493,7 @@
             "var": 68
           }
         ],
-        "qualifiedName": {
-          "module_": "prim",
-          "name": "array_length"
-        }
+        "qualifiedName": "prim.array_length"
       },
       "kind": "blockAgent"
     },
@@ -581,10 +518,7 @@
             "var": 71
           }
         ],
-        "qualifiedName": {
-          "module_": "prim",
-          "name": "get_field"
-        }
+        "qualifiedName": "prim.get_field"
       },
       "kind": "blockAgent"
     },
@@ -609,10 +543,7 @@
             "var": 74
           }
         ],
-        "qualifiedName": {
-          "module_": "prim",
-          "name": "tuple_get"
-        }
+        "qualifiedName": "prim.tuple_get"
       },
       "kind": "blockAgent"
     },
@@ -633,10 +564,7 @@
             "var": 76
           }
         ],
-        "qualifiedName": {
-          "module_": "prim",
-          "name": "get_metadata"
-        }
+        "qualifiedName": "prim.get_metadata"
       },
       "kind": "blockAgent"
     },
@@ -657,10 +585,7 @@
             "var": 17
           }
         ],
-        "qualifiedName": {
-          "module_": "prim",
-          "name": "sub"
-        }
+        "qualifiedName": "prim.sub"
       },
       "kind": "blockAgent"
     },
@@ -669,10 +594,7 @@
       "kind": "blockPrim"
     },
     "51": {
-      "body": {
-        "module_": "main",
-        "name": "point"
-      },
+      "body": "main.point",
       "kind": "blockConstructor"
     },
     "52": {
@@ -725,10 +647,7 @@
             "body": 53,
             "pattern": {
               "body": [
-                {
-                  "module_": "main",
-                  "name": "point"
-                },
+                "main.point",
                 [
                   [
                     "x",
@@ -786,10 +705,7 @@
       "kind": "blockUser"
     },
     "56": {
-      "body": {
-        "module_": "prim",
-        "name": "agent_metadata"
-      },
+      "body": "prim.agent_metadata",
       "kind": "blockConstructor"
     },
     "57": {
@@ -1276,10 +1192,7 @@
             "var": 20
           }
         ],
-        "qualifiedName": {
-          "module_": "prim",
-          "name": "mul"
-        }
+        "qualifiedName": "prim.mul"
       },
       "kind": "blockAgent"
     },
@@ -1684,10 +1597,7 @@
             "var": 23
           }
         ],
-        "qualifiedName": {
-          "module_": "prim",
-          "name": "mod"
-        }
+        "qualifiedName": "prim.mod"
       },
       "kind": "blockAgent"
     }

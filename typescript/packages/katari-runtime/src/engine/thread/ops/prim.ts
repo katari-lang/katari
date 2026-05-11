@@ -92,7 +92,7 @@ function executeGetMetadata(
 
   return {
     kind: "tagged",
-    ctorId: { module_: "prim", name: "agent_metadata" },
+    ctorId: "prim.agent_metadata",
     fields: {
       name: { kind: "string", value: agentBlock.name },
       id: { kind: "string", value: dispatchId },
@@ -121,8 +121,8 @@ function resolveCallable(
     case "agentLiteral": {
       const blockId = lookupQualified(ctx, value.qualifiedName);
       return [
-        requireAgentBlock(ctx, blockId, value.qualifiedName.name),
-        renderQualified(value.qualifiedName),
+        requireAgentBlock(ctx, blockId, value.qualifiedName),
+        value.qualifiedName,
       ];
     }
     case "closure": {
@@ -145,11 +145,10 @@ function resolveCallable(
 }
 
 function lookupQualified(ctx: StepCtx, qname: QualifiedName): BlockId {
-  const key = renderQualified(qname);
-  const blockId = ctx.state.irModule.entries[key];
+  const blockId = ctx.state.irModule.entries[qname];
   if (blockId === undefined) {
     throw new RecoverableEngineError(
-      `prim get_metadata: '${key}' not found in irModule.entries`,
+      `prim get_metadata: '${qname}' not found in irModule.entries`,
     );
   }
   return blockId;
@@ -174,6 +173,3 @@ function requireAgentBlock(
   return block.body;
 }
 
-function renderQualified(qname: QualifiedName): string {
-  return qname.module_ === "" ? qname.name : `${qname.module_}.${qname.name}`;
-}

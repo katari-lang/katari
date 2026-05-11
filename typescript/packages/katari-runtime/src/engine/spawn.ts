@@ -286,7 +286,7 @@ export function spawnExternalForAgentDelegate(
   const ext: ExternalThread = {
     ...common,
     kind: "external",
-    externalName: { module_: "<agent>", name: "<delegate>" },
+    externalName: "<agent>.<delegate>",
     args: { ...args.args },
     delegationId: args.delegationId,
     pendingEscalations: {},

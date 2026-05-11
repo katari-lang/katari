@@ -401,10 +401,7 @@ function resolveDelegateTarget(
 } {
   const decoded = decodeCoreAgentDefId(agentDefId);
   if (decoded.kind === "qname") {
-    const qn =
-      decoded.value.module_ === ""
-        ? decoded.value.name
-        : `${decoded.value.module_}.${decoded.value.name}`;
+    const qn = decoded.value;
     const blockId = ctx.state.irModule.entries[qn];
     if (blockId === undefined) {
       throw new EntryNotFoundError(qn, delegationId);
@@ -435,7 +432,7 @@ function resolveRequestReqId(
   ctx: ReturnType<typeof makeStepCtx>,
   agentDefId: import("../agent-def-id.js").AgentDefId,
 ): import("../ir/types.js").QualifiedName {
-  const sentinel = { module_: "<unresolved>", name: "<unresolved>" };
+  const sentinel = "<unresolved>.<unresolved>";
   let decoded: import("../agent-def-id.js").CoreAgentDefId | undefined;
   try {
     decoded = decodeCoreAgentDefId(agentDefId);
@@ -445,10 +442,7 @@ function resolveRequestReqId(
   if (decoded.kind !== "qname") {
     return sentinel;
   }
-  const qn =
-    decoded.value.module_ === ""
-      ? decoded.value.name
-      : `${decoded.value.module_}.${decoded.value.name}`;
+  const qn = decoded.value;
   const blockId = ctx.state.irModule.entries[qn];
   if (blockId === undefined) return sentinel;
   const block = ctx.state.irModule.blocks[String(blockId)];
