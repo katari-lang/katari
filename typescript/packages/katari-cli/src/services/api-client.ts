@@ -6,8 +6,8 @@
 import type {
   AgentDefinition,
   IRModule,
+  RawValue,
   SchemaBundle,
-  Value,
 } from "katari-runtime";
 import type { SidecarBundle } from "../types.js";
 
@@ -58,9 +58,11 @@ export type AgentRow = {
   delegationId: string;
   snapshotId: string;
   qualifiedName: string;
-  args: Record<string, Value>;
+  // Wire format: raw JSON (the API server applies `valueToRaw` to
+  // `Value`s at the boundary).
+  args: Record<string, RawValue>;
   state: "running" | "cancelling" | "cancelled" | "succeeded" | "error";
-  result?: Value;
+  result?: RawValue;
   errorMessage?: string;
   createdAt: string;
   updatedAt: string;
@@ -71,9 +73,9 @@ export type ApiPendingEscalation = {
   delegationId: string;
   snapshotId: string;
   agentDefId: unknown;
-  args: Record<string, Value>;
+  args: Record<string, RawValue>;
   state: "open" | "answered" | "cancelled";
-  value?: Value;
+  value?: RawValue;
   createdAt: string;
 };
 
@@ -138,7 +140,7 @@ export class ApiClient {
     projectId: string;
     snapshotId?: string;
     qualifiedName: string;
-    args: Record<string, Value>;
+    args: Record<string, RawValue>;
   }): Promise<{ agentId: string }> {
     return this.post("/agent", input);
   }
@@ -211,7 +213,7 @@ export class ApiClient {
 
   answerEscalation(
     escalationId: string,
-    value: Value,
+    value: RawValue,
   ): Promise<{ ok: boolean }> {
     return this.post(
       `/escalation/${encodeURIComponent(escalationId)}/ack`,

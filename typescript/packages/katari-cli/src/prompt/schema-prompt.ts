@@ -1,23 +1,28 @@
 // JSON Schema → @clack/prompts walker.
 //
 // 与えられた JSON Schema (Draft 2020-12 サブセット) を歩いて、各ノードに対応
-// する prompt を出して、最終的に runtime の `Value` 型に変換した結果を返す。
+// する prompt を出して、最終的に runtime の wire 表現 `RawValue` を返す。
+// Wire 形式が `Value` ではなく raw である理由は (a) JSON Schema が描く対象
+// と同じ shape のため変換コストがゼロ、(b) REST / sidecar / AI tool calling
+// など他の境界とも揃う、の 2 点。
 //
 // サポート:
-//   - { type: "string" }        → text
-//   - { type: "number" | "integer" } → text + parse
-//   - { type: "boolean" }       → confirm
-//   - { type: "null" }          → 自動 null
-//   - { enum: [...] }           → select
-//   - { type: "object", properties }     → 各 property を順次 prompt
-//   - { type: "array", items }  → 個数 prompt + 各要素 prompt
-//   - { oneOf | anyOf: [...] }  → variant select → 再帰
+//   - { type: "string" }              → text
+//   - { type: "number" | "integer" }  → text + parse
+//   - { type: "boolean" }             → confirm
+//   - { type: "null" }                → 自動 null
+//   - { enum: [...] }                 → select
+//   - { type: "object", properties }  → 各 property を順次 prompt
+//                                       (`$ctor` / `$callable` const は
+//                                        自動補完してユーザには聞かない)
+//   - { type: "array", items }        → 個数 prompt + 各要素 prompt
+//   - { oneOf | anyOf: [...] }        → variant select → 再帰
 //
 // `description` フィールドは prompt のヒント (subtle 表示) として使う。
 
 import * as p from "@clack/prompts";
 import pc from "picocolors";
-import type { Value } from "../types.js";
+import type { RawValue } from "katari-runtime";
 
 export class PromptCancelled extends Error {
   constructor() {
@@ -28,6 +33,9 @@ export class PromptCancelled extends Error {
 
 type AnySchema = Record<string, unknown>;
 
+const CTOR_DISCRIMINATOR = "$ctor";
+const CALLABLE_DISCRIMINATOR = "$callable";
+
 /**
  * Top-level entry. Schema の最上位は通常 object (= agent parameters は keyword
  * 引数なので)。最上位のラベルは省略可。
@@ -35,7 +43,7 @@ type AnySchema = Record<string, unknown>;
 export async function promptForSchema(
   schema: unknown,
   opts: { label: string; description?: string } = { label: "value" },
-): Promise<Value> {
+): Promise<RawValue> {
   return walk(asSchema(schema), opts.label, opts.description);
 }
 
@@ -48,7 +56,7 @@ async function walk(
   schema: AnySchema,
   path: string,
   parentDescription?: string,
-): Promise<Value> {
+): Promise<RawValue> {
   // enum: pick from list
   if (Array.isArray(schema.enum)) {
     return promptEnum(schema.enum, path, schema.description as string | undefined ?? parentDescription);
@@ -85,7 +93,7 @@ async function walk(
       initialValue: typeof schema.default === "boolean" ? schema.default : true,
     });
     if (p.isCancel(value)) throw new PromptCancelled();
-    return { kind: "boolean", value: Boolean(value) } as Value;
+    return Boolean(value);
   }
   if (t === "integer" || t === "number") {
     const isInt = t === "integer";
@@ -101,10 +109,10 @@ async function walk(
       },
     });
     if (p.isCancel(txt)) throw new PromptCancelled();
-    return { kind: "number", value: Number(txt) } as Value;
+    return Number(txt);
   }
   if (t === "null") {
-    return { kind: "null" } as Value;
+    return null;
   }
   // default to string for `type: "string"` and unknown / unspecified
   const txt = await p.text({
@@ -113,14 +121,14 @@ async function walk(
     validate: (v) => (v.length === 0 ? "required" : undefined),
   });
   if (p.isCancel(txt)) throw new PromptCancelled();
-  return { kind: "string", value: String(txt) } as Value;
+  return String(txt);
 }
 
 async function promptEnum(
   values: unknown[],
   path: string,
   description?: string,
-): Promise<Value> {
+): Promise<RawValue> {
   if (description !== undefined && description.length > 0) {
     p.note(description, path);
   }
@@ -129,18 +137,32 @@ async function promptEnum(
     options: values.map((v) => ({ value: v, label: String(v) })),
   });
   if (p.isCancel(choice)) throw new PromptCancelled();
-  return literalToValue(choice);
+  return choice as RawValue;
 }
 
-async function promptObject(schema: AnySchema, path: string): Promise<Value> {
+async function promptObject(schema: AnySchema, path: string): Promise<RawValue> {
   const properties = (schema.properties ?? {}) as Record<string, unknown>;
   const required = new Set(
     Array.isArray(schema.required) ? (schema.required as string[]) : [],
   );
-  const fields: Record<string, Value> = {};
-  // Preserve declaration order from `properties`
-  for (const [propName, propSchema] of Object.entries(properties)) {
-    const sub = asSchema(propSchema);
+  const out: Record<string, RawValue> = {};
+
+  for (const [propName, propSchemaRaw] of Object.entries(properties)) {
+    const sub = asSchema(propSchemaRaw);
+
+    // Reserved discriminator fields (`$ctor` / `$callable`) carry their
+    // value in `const` directly from the schema. Auto-fill them so the
+    // user only sees the *meaningful* fields; they still appear in the
+    // resulting raw object.
+    if (propName === CTOR_DISCRIMINATOR || propName === CALLABLE_DISCRIMINATOR) {
+      if (sub.const !== undefined) {
+        out[propName] = sub.const as RawValue;
+        continue;
+      }
+      // No const (rare — only when the schema is `function`-top without
+      // a known callable). Fall through to the normal prompt path.
+    }
+
     const isRequired = required.has(propName);
     if (!isRequired) {
       const include = await p.confirm({
@@ -153,21 +175,12 @@ async function promptObject(schema: AnySchema, path: string): Promise<Value> {
     if (typeof sub.description === "string" && sub.description.length > 0) {
       p.note(sub.description, propPath(path, propName));
     }
-    const v = await walk(sub, propPath(path, propName));
-    fields[propName] = v;
+    out[propName] = await walk(sub, propPath(path, propName));
   }
-  // Object → Value: tagged constructor convention is for known ctors. For
-  // open-ended JSON Schema objects we use a synthetic kind via the `tagged`
-  // shape with an anonymous-record sentinel qname. The runtime treats this
-  // as an opaque tagged value.
-  return {
-    kind: "tagged",
-    ctorId: "<anonymous>.record",
-    fields,
-  } as Value;
+  return out;
 }
 
-async function promptArray(schema: AnySchema, path: string): Promise<Value> {
+async function promptArray(schema: AnySchema, path: string): Promise<RawValue> {
   const items = asSchema(schema.items ?? {});
   const lenStr = await p.text({
     message: pathLabel(path, "array length"),
@@ -181,12 +194,11 @@ async function promptArray(schema: AnySchema, path: string): Promise<Value> {
   });
   if (p.isCancel(lenStr)) throw new PromptCancelled();
   const len = lenStr.length === 0 ? 0 : Number(lenStr);
-  const elements: Value[] = [];
+  const elements: RawValue[] = [];
   for (let i = 0; i < len; i++) {
-    const v = await walk(items, `${path}[${i}]`);
-    elements.push(v);
+    elements.push(await walk(items, `${path}[${i}]`));
   }
-  return { kind: "array", elements } as Value;
+  return elements;
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
@@ -200,19 +212,35 @@ function propPath(parent: string, prop: string): string {
   return `${parent}.${prop}`;
 }
 
+/**
+ * Build a human-readable label for one arm of a `oneOf` / `anyOf`. We
+ * prefer the most informative source available:
+ *
+ *   1. `title` if present (the compiler stamps this for data ctors)
+ *   2. `properties.$ctor.const` → the constructor's qualified name
+ *      (e.g. `"main.point" (object)`)
+ *   3. `properties.$callable.const` → the bound callable id, if any
+ *   4. `const` value (for primitive const arms)
+ *   5. `type` keyword
+ *   6. positional fallback `"variant N"`
+ */
 function variantLabel(variant: unknown, index: number): string {
   const s = asSchema(variant);
-  if (typeof s.title === "string") return s.title;
+  if (typeof s.title === "string" && s.title.length > 0) return s.title;
+  const ctor = discriminatorConst(s, CTOR_DISCRIMINATOR);
+  if (ctor !== undefined) return `${ctor} ${pc.dim("(object)")}`;
+  const callable = discriminatorConst(s, CALLABLE_DISCRIMINATOR);
+  if (callable !== undefined) return `${callable} ${pc.dim("(callable)")}`;
   if (typeof s.const !== "undefined") return String(s.const);
-  if (typeof s.type === "string") return `${s.type} (variant ${index})`;
+  if (typeof s.type === "string") return s.type;
   return `variant ${index}`;
 }
 
-function literalToValue(v: unknown): Value {
-  if (typeof v === "string") return { kind: "string", value: v };
-  if (typeof v === "number") return { kind: "number", value: v };
-  if (typeof v === "boolean") return { kind: "boolean", value: v };
-  if (v === null) return { kind: "null" } as Value;
-  // For other JSON-encodable enum values (objects, arrays), approximate.
-  return { kind: "string", value: JSON.stringify(v) };
+function discriminatorConst(schema: AnySchema, key: string): string | undefined {
+  const props = schema.properties as Record<string, unknown> | undefined;
+  if (props === undefined) return undefined;
+  const propSchema = props[key];
+  if (typeof propSchema !== "object" || propSchema === null) return undefined;
+  const c = (propSchema as AnySchema).const;
+  return typeof c === "string" ? c : undefined;
 }

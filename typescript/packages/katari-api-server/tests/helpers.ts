@@ -32,9 +32,13 @@ export function literalReturnIR(literal: string, irName = "test"): IRModule {
     0: {
       kind: "blockAgent",
       body: {
-        qualifiedName: { module_: irName, name: "main" },
+        qualifiedName: irName === "" ? "main" : `${irName}.main`,
         parameters: [],
         entryBody: 1,
+        name: "main",
+        description: undefined,
+        inputSchema: "{}",
+        outputSchema: '{"type":"string"}',
       },
     },
     1: {
@@ -73,9 +77,13 @@ export function pausesOnExternalIR(irName = "test"): IRModule {
     0: {
       kind: "blockAgent",
       body: {
-        qualifiedName: { module_: irName, name: "main" },
+        qualifiedName: irName === "" ? "main" : `${irName}.main`,
         parameters: [],
         entryBody: 1,
+        name: "main",
+        description: undefined,
+        inputSchema: "{}",
+        outputSchema: "{}",
       },
     },
     1: {
@@ -100,7 +108,7 @@ export function pausesOnExternalIR(irName = "test"): IRModule {
     },
     2: {
       kind: "blockExternal",
-      body: { module_: irName, name: "ext_call" },
+      body: irName === "" ? "ext_call" : `${irName}.ext_call`,
     },
   };
   return {
@@ -119,7 +127,7 @@ export function trivialSchemaBundle(): SchemaBundle {
     schemaVersion: 1,
     agents: [
       {
-        qualifiedName: { module_: "test", name: "main" },
+        qualifiedName: "test.main",
         parameters: { type: "object", properties: {} },
         returns: { type: "string" },
         description: "Returns a greeting",

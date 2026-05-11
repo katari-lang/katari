@@ -60,10 +60,14 @@ describe("CLI ApiClient against in-memory api-server", () => {
 
     const row = await api.getAgent(agentId);
     expect(row.state).toBe("succeeded");
-    expect(row.result).toEqual({ kind: "string", value: "hello" });
+    // API server returns raw JSON (Value → raw conversion at the
+    // boundary), so a string Value lands as just the bare string.
+    expect(row.result).toBe("hello");
 
     const defs = await api.listAgentDefinitions({ projectId: project.id });
     expect(defs.definitions).toHaveLength(1);
-    expect(defs.definitions[0]?.qualifiedName.name).toBe("main");
+    // qualifiedName is now a flat dotted string ("main" or
+    // "module.name") — splitting is the caller's responsibility.
+    expect(defs.definitions[0]?.qualifiedName).toBe("test.main");
   });
 });

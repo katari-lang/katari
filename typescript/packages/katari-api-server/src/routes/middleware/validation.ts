@@ -26,25 +26,21 @@ export const AgentIdSchema = z
 
 export const EscalationIdSchema = z.string().min(1);
 
-// ─── Value schema (loose) ──────────────────────────────────────────────────
+// ─── Raw value schema ──────────────────────────────────────────────────────
+//
+// Wire format is JSON-shaped raw with `$ctor` / `$callable` discriminators
+// where structural identity matters (tagged values, callables). The
+// runtime adapter (`valueFromRaw` from `katari-runtime`) decodes this
+// into a `Value` before handing it to CORE.
 
-const ValueSchema: z.ZodType<unknown> = z.lazy(() =>
+const RawValueSchema: z.ZodType<unknown> = z.lazy(() =>
   z.union([
-    z.object({ kind: z.literal("number"), value: z.number() }),
-    z.object({ kind: z.literal("string"), value: z.string() }),
-    z.object({ kind: z.literal("boolean"), value: z.boolean() }),
-    z.object({ kind: z.literal("null") }),
-    z.object({ kind: z.literal("tuple"), elements: z.array(ValueSchema) }),
-    z.object({ kind: z.literal("array"), elements: z.array(ValueSchema) }),
-    z.object({
-      kind: z.literal("tagged"),
-      ctorId: z.number(),
-      fields: z.record(z.string(), ValueSchema),
-    }),
-    z.object({
-      kind: z.literal("closure"),
-      closureId: z.number(),
-    }),
+    z.number(),
+    z.string(),
+    z.boolean(),
+    z.null(),
+    z.array(RawValueSchema),
+    z.record(z.string(), RawValueSchema),
   ]),
 );
 
@@ -85,11 +81,11 @@ export const StartAgentSchema = z.object({
   projectId: ProjectIdSchema,
   snapshotId: SnapshotIdSchema.optional(),
   qualifiedName: z.string().min(1),
-  args: z.record(z.string(), ValueSchema),
+  args: z.record(z.string(), RawValueSchema),
 });
 export type StartAgentInput = z.infer<typeof StartAgentSchema>;
 
 export const AnswerEscalationSchema = z.object({
-  value: ValueSchema,
+  value: RawValueSchema,
 });
 export type AnswerEscalationInput = z.infer<typeof AnswerEscalationSchema>;

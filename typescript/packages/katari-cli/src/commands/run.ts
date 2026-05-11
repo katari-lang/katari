@@ -17,7 +17,7 @@ import {
   PromptCancelled,
   promptForSchema,
 } from "../prompt/schema-prompt.js";
-import type { Value } from "../types.js";
+import type { RawValue } from "katari-runtime";
 
 export type RunOptions = {
   qualifiedName?: string;
@@ -100,11 +100,13 @@ export async function runCmd(opts: RunOptions): Promise<void> {
     }
   }
 
-  // Resolve args
-  let args: Record<string, Value>;
+  // Resolve args — kept in raw (wire) form end-to-end. The schema-prompt
+  // walks the JSON Schema and emits raw directly; `--args` is already
+  // raw JSON.
+  let argsRaw: Record<string, RawValue>;
   if (opts.args !== undefined) {
     try {
-      args = JSON.parse(opts.args);
+      argsRaw = JSON.parse(opts.args);
     } catch (err) {
       p.cancel(
         `--args must be valid JSON: ${err instanceof Error ? err.message : String(err)}`,
@@ -113,7 +115,7 @@ export async function runCmd(opts: RunOptions): Promise<void> {
     }
   } else {
     try {
-      args = await promptArgsFromSchema(targetDef.parameters);
+      argsRaw = await promptArgsFromSchema(targetDef.parameters);
     } catch (err) {
       if (err instanceof PromptCancelled) {
         p.cancel("cancelled");
@@ -132,7 +134,7 @@ export async function runCmd(opts: RunOptions): Promise<void> {
       projectId,
       snapshotId,
       qualifiedName: targetQname,
-      args,
+      args: argsRaw,
     });
     agentId = result.agentId;
     startSpinner.stop(
@@ -159,7 +161,7 @@ export async function runCmd(opts: RunOptions): Promise<void> {
  */
 async function promptArgsFromSchema(
   schema: unknown,
-): Promise<Record<string, Value>> {
+): Promise<Record<string, RawValue>> {
   if (
     typeof schema === "object" &&
     schema !== null &&
@@ -167,8 +169,8 @@ async function promptArgsFromSchema(
     (schema as { type?: unknown }).type === "object"
   ) {
     const v = await promptForSchema(schema, { label: "args" });
-    if (v.kind === "tagged") {
-      return v.fields;
+    if (typeof v === "object" && v !== null && !Array.isArray(v)) {
+      return v;
     }
   }
   // Fallback: schema-less / non-object → no args.

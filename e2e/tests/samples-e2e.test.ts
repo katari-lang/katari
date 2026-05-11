@@ -17,7 +17,7 @@ import {
   type TestHarness,
 } from "katari-api-server/tests/helpers.js";
 import type { Hono } from "hono";
-import type { Value } from "katari-runtime";
+import type { RawValue } from "katari-runtime";
 
 const SAMPLES_ROOT = resolve(__dirname, "../samples");
 
@@ -71,7 +71,7 @@ const itE2E = RUN_E2E ? it : it.skip;
 async function applyAndRun(
   projectName: string,
   sampleDir: string,
-): Promise<Value> {
+): Promise<RawValue> {
   const harness = buildTestHarness();
   active = harness;
   const api = clientFor(harness.app);
@@ -112,49 +112,49 @@ describe("samples/ end-to-end (compile → upload → run → verify)", () => {
     return;
   }
 
+  // API server returns the agent result in raw form
+  // (`valueToRaw`-encoded), so primitives land as bare JSON values.
+
   itE2E("01-hello: main() returns 'hello, world'", async () => {
     const result = await applyAndRun("hello", "01-hello");
-    expect(result).toEqual({ kind: "string", value: "hello, world" });
+    expect(result).toBe("hello, world");
   });
 
   itE2E("02-arithmetic: main() returns 5", async () => {
     const result = await applyAndRun("arithmetic", "02-arithmetic");
-    expect(result).toEqual({ kind: "number", value: 5 });
+    expect(result).toBe(5);
   });
 
   itE2E("03-data-and-match: main() returns 7", async () => {
     const result = await applyAndRun("data-and-match", "03-data-and-match");
-    expect(result).toEqual({ kind: "number", value: 7 });
+    expect(result).toBe(7);
   });
 
   itE2E("04-agent-value: main() returns 42 (exercises agentLiteral)", async () => {
     const result = await applyAndRun("agent-value", "04-agent-value");
-    expect(result).toEqual({ kind: "number", value: 42 });
+    expect(result).toBe(42);
   });
 
   itE2E("05-control-flow: main() returns 'positive'", async () => {
     const result = await applyAndRun("control-flow", "05-control-flow");
-    expect(result).toEqual({ kind: "string", value: "positive" });
+    expect(result).toBe("positive");
   });
 
   itE2E("06-for-and-fstring: main() returns 'sum = 6'", async () => {
     const result = await applyAndRun("for-and-fstring", "06-for-and-fstring");
-    expect(result).toEqual({ kind: "string", value: "sum = 6" });
+    expect(result).toBe("sum = 6");
   });
 
   itE2E("07-abs-and-mod: manhattan with negative literals + mod = 11", async () => {
     const result = await applyAndRun("abs-and-mod", "07-abs-and-mod");
-    expect(result).toEqual({ kind: "number", value: 11 });
+    expect(result).toBe(11);
   });
 
   itE2E(
     "08-metadata: get_metadata on top-level agent + local closure yields 'add_them|main.add_them|local_bar|closure:0'",
     async () => {
       const result = await applyAndRun("metadata", "08-metadata");
-      expect(result).toEqual({
-        kind: "string",
-        value: "add_them|main.add_them|local_bar|closure:0",
-      });
+      expect(result).toBe("add_them|main.add_them|local_bar|closure:0");
     },
   );
 });

@@ -5,6 +5,7 @@
 // `orchestrator.tick(...)`.
 
 import { Hono } from "hono";
+import { valueFromRaw } from "katari-runtime";
 import type { Value } from "katari-runtime";
 import {
   AgentIdSchema,
@@ -13,6 +14,7 @@ import {
   SnapshotIdSchema,
   StartAgentSchema,
 } from "./middleware/validation.js";
+import { agentRowToWire } from "../wire/agent-wire.js";
 import type { Orchestrator } from "../orchestrator.js";
 import type { SnapshotService } from "../services/snapshot-service.js";
 import { z } from "zod";
@@ -37,11 +39,15 @@ export function buildAgentRoutes(
       projectId: body.projectId,
       snapshotId: body.snapshotId,
     });
+    const argsValue: Record<string, Value> = {};
+    for (const [k, v] of Object.entries(body.args)) {
+      argsValue[k] = valueFromRaw(v);
+    }
     const result = await orchestrator.tick(snapshotId, async (ctx) => {
       return ctx.api.startAgent({
         bus: ctx.bus,
         qualifiedName: body.qualifiedName,
-        args: body.args as Record<string, Value>,
+        args: argsValue,
       });
     });
     return c.json({ agentId: result.agentId }, 201);
@@ -59,7 +65,7 @@ export function buildAgentRoutes(
       limit: query.limit,
       offset: query.offset,
     });
-    return c.json({ agents: rows });
+    return c.json({ agents: rows.map(agentRowToWire) });
   });
 
   app.get("/:agentId", async (c) => {
@@ -68,7 +74,7 @@ export function buildAgentRoutes(
     if (row === null) {
       return c.json({ error: `agent ${agentId} not found` }, 404);
     }
-    return c.json({ agent: row });
+    return c.json({ agent: agentRowToWire(row) });
   });
 
   app.post("/:agentId/cancel", async (c) => {
@@ -81,7 +87,7 @@ export function buildAgentRoutes(
       const result = await ctx.api.cancelAgent({ bus: ctx.bus, agentId });
       return result.row;
     });
-    return c.json({ agent: refreshed ?? row });
+    return c.json({ agent: agentRowToWire(refreshed ?? row) });
   });
 
   return app;

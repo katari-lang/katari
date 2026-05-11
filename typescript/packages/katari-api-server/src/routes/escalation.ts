@@ -6,7 +6,8 @@
 // が再開する。
 
 import { Hono } from "hono";
-import type { EscalationId, Value } from "katari-runtime";
+import { valueFromRaw } from "katari-runtime";
+import type { EscalationId } from "katari-runtime";
 import {
   AnswerEscalationSchema,
   EscalationIdSchema,
@@ -14,6 +15,7 @@ import {
   ProjectIdSchema,
   SnapshotIdSchema,
 } from "./middleware/validation.js";
+import { apiEscalationToWire } from "../wire/agent-wire.js";
 import type { Orchestrator } from "../orchestrator.js";
 import type { Storage } from "../storage/types.js";
 import { z } from "zod";
@@ -45,7 +47,7 @@ export function buildEscalationRoutes(
       limit: query.limit,
       offset: query.offset,
     });
-    return c.json({ escalations: list });
+    return c.json({ escalations: list.map(apiEscalationToWire) });
   });
 
   app.post("/:escalationId/ack", async (c) => {
@@ -63,11 +65,12 @@ export function buildEscalationRoutes(
         409,
       );
     }
+    const decoded = valueFromRaw(body.value);
     const result = await orchestrator.tick(escalation.snapshotId, async (ctx) => {
       return ctx.api.answerEscalation({
         bus: ctx.bus,
         escalationId,
-        value: body.value as Value,
+        value: decoded,
       });
     });
     return c.json({ ok: result.ok });

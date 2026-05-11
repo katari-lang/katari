@@ -9,7 +9,7 @@ import type {
   Project,
   SnapshotSummary,
 } from "../services/api-client.js";
-import type { AgentDefinition, Value } from "katari-runtime";
+import type { AgentDefinition, RawValue } from "katari-runtime";
 import { PromptCancelled } from "./schema-prompt.js";
 
 /** ISO timestamp → "2 hours ago" 風表示。 */
@@ -32,41 +32,34 @@ export function shortId(id: string): string {
 }
 
 /** Value を 1 行の human readable な表示に。 */
-export function summarizeValue(v: Value, maxLen = 30): string {
+export function summarizeValue(v: RawValue, maxLen = 30): string {
   let s: string;
-  switch (v.kind) {
-    case "null":
-      s = "null";
-      break;
-    case "string":
-      s = JSON.stringify(v.value);
-      break;
-    case "number":
-      s = String(v.value);
-      break;
-    case "boolean":
-      s = String(v.value);
-      break;
-    case "array":
-      s = `[${v.elements.length} items]`;
-      break;
-    case "tuple":
-      s = `(${v.elements.length}-tuple)`;
-      break;
-    case "tagged":
-      s = `{${Object.keys(v.fields).join(",")}}`;
-      break;
-    case "closure":
-      s = "<closure>";
-      break;
-    case "agentLiteral":
-      s = `<agent ${v.qualifiedName}>`;
-      break;
+  if (v === null) {
+    s = "null";
+  } else if (typeof v === "string") {
+    s = JSON.stringify(v);
+  } else if (typeof v === "number") {
+    s = String(v);
+  } else if (typeof v === "boolean") {
+    s = String(v);
+  } else if (Array.isArray(v)) {
+    s = `[${v.length} items]`;
+  } else if (typeof v === "object") {
+    if ("$callable" in v && typeof v.$callable === "string") {
+      s = `<callable ${v.$callable}>`;
+    } else if ("$ctor" in v && typeof v.$ctor === "string") {
+      const fields = Object.keys(v).filter((k) => k !== "$ctor");
+      s = `${v.$ctor}{${fields.join(",")}}`;
+    } else {
+      s = `{${Object.keys(v).join(",")}}`;
+    }
+  } else {
+    s = String(v);
   }
   return s.length > maxLen ? s.slice(0, maxLen - 1) + "…" : s;
 }
 
-export function summarizeArgs(args: Record<string, Value>, maxLen = 40): string {
+export function summarizeArgs(args: Record<string, RawValue>, maxLen = 40): string {
   const parts = Object.entries(args).map(
     ([k, v]) => `${k}=${summarizeValue(v, 20)}`,
   );

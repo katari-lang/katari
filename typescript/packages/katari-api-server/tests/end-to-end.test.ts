@@ -50,10 +50,12 @@ describe("end-to-end: project + snapshot + agent flow", () => {
     );
     expect(got.status).toBe(200);
     const body = (await got.json()) as {
-      agent: { state: string; result: { kind: string; value: string } };
+      agent: { state: string; result: string };
     };
     expect(body.agent.state).toBe("succeeded");
-    expect(body.agent.result).toEqual({ kind: "string", value: "hello" });
+    // Wire format: raw JSON values (the API server converts Value→raw at
+    // the boundary), so a string Value lands as just the string.
+    expect(body.agent.result).toBe("hello");
   });
 
   it("snapshotId omitted → uses latest of the project", async () => {
@@ -91,10 +93,10 @@ describe("end-to-end: project + snapshot + agent flow", () => {
       new Request(`http://test/agent/${agentId}`),
     );
     const body = (await got.json()) as {
-      agent: { state: string; result: { kind: string; value: string } };
+      agent: { state: string; result: string };
     };
     expect(body.agent.state).toBe("succeeded");
-    expect(body.agent.result.value).toBe("second");
+    expect(body.agent.result).toBe("second");
   });
 
   it("rejects POST /project/:p/snapshot without irModule", async () => {
