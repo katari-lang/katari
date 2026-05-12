@@ -118,10 +118,14 @@ function emitDone(
   elements: Value[],
 ): void {
   if (t.parent === null || t.parentCallId === null) return;
+  // Tuples and arrays share one runtime Value variant. The TupleThread
+  // vs ArrayThread distinction only affects the IR-level evaluation
+  // strategy (sequential vs parallel element collection); the produced
+  // 'Value' is the same shape either way.
   ctx.enqueue({
     kind: "done",
     target: t.parent,
     callId: t.parentCallId,
-    value: { kind: t.kind === "tuple" ? "tuple" : "array", elements },
+    value: { kind: "array", elements },
   });
 }

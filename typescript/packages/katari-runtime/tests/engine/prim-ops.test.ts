@@ -36,8 +36,8 @@ describe("engine: prim builtin", () => {
   });
 
   it("structural equality", () => {
-    const a = { kind: "tuple", elements: [num1(1), num1(2)] } as const;
-    const b = { kind: "tuple", elements: [num1(1), num1(2)] } as const;
+    const a = { kind: "array", elements: [num1(1), num1(2)] } as const;
+    const b = { kind: "array", elements: [num1(1), num1(2)] } as const;
     expect(valueEquals(a, b)).toBe(true);
   });
 

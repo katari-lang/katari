@@ -165,4 +165,12 @@ describe("samples/ end-to-end (compile → upload → run → verify)", () => {
       expect(result).toBe(6);
     },
   );
+
+  itE2E(
+    "10-tuple-pattern: (integer, string) tuple destructured via match returns '42 with hello'",
+    async () => {
+      const result = await applyAndRun("tuple-pattern", "10-tuple-pattern");
+      expect(result).toBe("42 with hello");
+    },
+  );
 });

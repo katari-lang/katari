@@ -6,18 +6,18 @@
 //   * Tagged values  ←→  `{$ctor: "module.name", ...fieldsRaw}`
 //   * Callables      ←→  `{$callable: "module.name" | "closure:N"}`
 //   * Primitives     ←→  themselves (`5`, `"hi"`, `true`, `null`)
-//   * Arrays / tuples → arrays (tuple vs array is indistinguishable in
-//     raw form without a schema; the decoder defaults to `array`).
+//   * Arrays         ←→  arrays. Tuples share this representation
+//     (they're a single 'kind: "array"' Value variant; arity is
+//     enforced by static typing + pattern matching, not at the
+//     runtime level), so no special-casing is needed at the wire.
 //
 // REST clients / AI tool-call results / sidecar handlers all speak this
 // raw form; the runtime adapts at the boundary using these helpers
 // instead of forcing callers to hand-write `Value` objects.
 //
 // **Schema-less round-trip guarantee**: `valueFromRaw(valueToRaw(v))`
-// equals `v` for every Value variant *except* the tuple / array
-// ambiguity (a `tuple` round-trips as an `array`). Schema-aware
-// decoding can recover tuple identity; that helper will be added
-// alongside structured-JSON support.
+// equals `v` for every Value variant. Tuple and array are the same
+// Value variant at runtime, so there is no ambiguity to recover.
 
 import type { ClosureId } from "./engine/id.js";
 import type { Value } from "./engine/value.js";
@@ -55,8 +55,6 @@ export function valueToRaw(value: Value): RawValue {
       return value.value;
     case "null":
       return null;
-    case "tuple":
-      return value.elements.map(valueToRaw);
     case "array":
       return value.elements.map(valueToRaw);
     case "tagged": {

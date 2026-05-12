@@ -89,23 +89,19 @@ describe("value-codec", () => {
     expect(rt(v)).toEqual(v);
   });
 
-  it("tuple round-trips as array (schema-less ambiguity)", () => {
+  it("heterogeneous array (formerly 'tuple') round-trips", () => {
+    // Tuples are stored as 'kind: array' at runtime (heterogeneous
+    // arity is enforced by static typing, not by the Value variant).
+    // The codec therefore just round-trips an array.
     const v: Value = {
-      kind: "tuple",
-      elements: [
-        { kind: "number", value: 1 },
-        { kind: "string", value: "a" },
-      ],
-    };
-    // Encoding is array-shaped; decoding without schema produces `array`.
-    expect(valueToRaw(v)).toEqual([1, "a"]);
-    expect(rt(v)).toEqual({
       kind: "array",
       elements: [
         { kind: "number", value: 1 },
         { kind: "string", value: "a" },
       ],
-    });
+    };
+    expect(valueToRaw(v)).toEqual([1, "a"]);
+    expect(rt(v)).toEqual(v);
   });
 
   it("decodes a discriminator-less object as anonymous record", () => {

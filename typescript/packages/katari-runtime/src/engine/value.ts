@@ -13,7 +13,13 @@ export type Value =
   | { kind: "string"; value: string }
   | { kind: "boolean"; value: boolean }
   | { kind: "null" }
-  | { kind: "tuple"; elements: Value[] }
+  // Tuples and arrays share one runtime variant — they're both
+  // ordered sequences of 'Value's. The static type system enforces
+  // arity / homogeneity at compile time; the runtime needs neither
+  // distinction nor a length check beyond what pattern matching
+  // imposes ('MatchPatternTuple' checks 'elements.length' against
+  // the pattern arity). This also makes the raw-JSON boundary
+  // unambiguous: a JSON array decodes to this variant directly.
   | { kind: "array"; elements: Value[] }
   | { kind: "tagged"; ctorId: QualifiedName; fields: Record<string, Value> }
   | { kind: "closure"; closureId: ClosureId }

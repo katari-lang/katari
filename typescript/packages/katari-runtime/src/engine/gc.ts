@@ -98,7 +98,6 @@ function traceValue(
     case "closure":
       visitClosure(v.closureId);
       return;
-    case "tuple":
     case "array":
       for (const e of v.elements) traceValue(e, visitScope, visitClosure);
       return;

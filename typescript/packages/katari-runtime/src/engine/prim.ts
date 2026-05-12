@@ -79,8 +79,12 @@ export function executePrim(name: string, args: Record<string, Value>): Value {
       return { kind: "string", value: JSON.stringify(valueToRaw(v)) };
     }
     case "tuple_get": {
+      // Tuples are stored as arrays at runtime (see 'Value'); the
+      // static type system already distinguishes the two. This prim
+      // and 'array_get' share an implementation; both dispatch on the
+      // single 'array' Value variant.
       const tuple = args["tuple"], index = args["index"];
-      if (tuple?.kind === "tuple" && index?.kind === "number") {
+      if (tuple?.kind === "array" && index?.kind === "number") {
         const elem = tuple.elements[index.value];
         if (elem === undefined) {
           throw new RecoverableEngineError("prim tuple_get: index out of bounds");
@@ -163,7 +167,6 @@ export function valueEquals(a: Value, b: Value): boolean {
     .with([{ kind: "string" }, { kind: "string" }], ([x, y]) => x.value === y.value)
     .with([{ kind: "boolean" }, { kind: "boolean" }], ([x, y]) => x.value === y.value)
     .with([{ kind: "null" }, { kind: "null" }], () => true)
-    .with([{ kind: "tuple" }, { kind: "tuple" }], ([x, y]) => arrayEqual(x.elements, y.elements))
     .with([{ kind: "array" }, { kind: "array" }], ([x, y]) => arrayEqual(x.elements, y.elements))
     .with([{ kind: "tagged" }, { kind: "tagged" }], ([x, y]) => {
       if (x.ctorId !== y.ctorId) return false;

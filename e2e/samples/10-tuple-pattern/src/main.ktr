@@ -1,0 +1,12 @@
+@"Branches on a (integer, string) tuple's structure to build a label."
+agent describe(p: (integer, string)) -> string {
+  match (p) {
+    case (0, s) => { f"zero with ${s}" }
+    case (n, s) => { f"${n} with ${s}" }
+  }
+}
+
+@"Drives 'describe' with (42, \"hello\"); exercises the tuple-as-array runtime."
+agent main() -> string {
+  describe(p = (42, "hello"))
+}

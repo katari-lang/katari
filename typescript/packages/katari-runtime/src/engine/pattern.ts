@@ -42,7 +42,10 @@ function tryMatchInto(
       return true;
     })
     .with({ kind: "matchPatternTuple" }, (p) => {
-      if (value.kind !== "tuple") return false;
+      // Tuples are stored as arrays at runtime; the pattern enforces
+      // exact arity (matching the static type's tuple length, which
+      // the solver already pins via 'tuple arity mismatch' / K0220).
+      if (value.kind !== "array") return false;
       if (value.elements.length !== p.body.length) return false;
       for (let i = 0; i < p.body.length; i++) {
         const sp = p.body[i]!;
