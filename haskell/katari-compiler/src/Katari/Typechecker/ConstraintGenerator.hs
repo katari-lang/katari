@@ -1590,7 +1590,7 @@ walkTemplateElement = \case
   TemplateElementExpression TemplateExpressionElement {value, sourceSpan} -> do
     value' <- walkExpression value
     -- f-string interpolations accept any type; Lowering emits a
-    -- 'to_string' prim call on each interpolated value before
+    -- 'format' prim call on each interpolated value before
     -- concatenation, so there is no type constraint to add here.
     -- 'constrainedExpressionType value'' is intentionally discarded.
     pure (TemplateElementExpression TemplateExpressionElement {value = value', sourceSpan = sourceSpan})
