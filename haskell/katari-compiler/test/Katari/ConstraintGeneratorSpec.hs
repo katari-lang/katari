@@ -689,7 +689,7 @@ constraintContents = describe "constraint contents" $ do
         )
 
   it "template literal interpolation does not constrain operand type" $ do
-    -- f-string interpolations accept any type; Lowering emits `to_string`
+    -- f-string interpolations accept any type; Lowering emits `format`
     -- on each interpolation before concatenation. No constraint is
     -- emitted between the interpolated value's type and 'String'.
     (cg, _) <- runOne "agent foo() { f\"hello ${42}\" }"

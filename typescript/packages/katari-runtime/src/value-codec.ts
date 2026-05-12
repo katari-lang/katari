@@ -108,14 +108,15 @@ export function valueFromRaw(raw: unknown): Value {
   if (CTOR_DISCRIMINATOR in obj) {
     return decodeTagged(obj);
   }
-  // Bare object with no discriminator. Default to the anonymous-record
-  // sentinel ctor so the value survives unchanged through the runtime
-  // (the receiver of an anonymous record can still walk fields).
-  const fields: Record<string, Value> = {};
-  for (const [k, v] of Object.entries(obj)) {
-    fields[k] = valueFromRaw(v);
-  }
-  return { kind: "tagged", ctorId: "<anonymous>.record", fields };
+  // Bare object with no discriminator: every object-shaped Value in
+  // Katari is either a tagged ctor instance (carrying `$ctor`) or a
+  // callable reference (carrying `$callable`). A raw object missing
+  // both means the wire shape contradicts the schema — fail loudly so
+  // the boundary surfaces the bug instead of producing a sentinel
+  // value that pretends to be a record.
+  throw new RawValueDecodeError(
+    `valueFromRaw: object missing '${CTOR_DISCRIMINATOR}' / '${CALLABLE_DISCRIMINATOR}' discriminator: ${JSON.stringify(obj).slice(0, 80)}`,
+  );
 }
 
 /** Decoding error surfaced from 'valueFromRaw' for inputs that can't be

@@ -26,6 +26,7 @@ export interface Sidecar {
 
 // ─── InProcessSidecar ──────────────────────────────────────────────────────
 
+import type { AgentDefId } from "../agent-def-id.js";
 import type { Logger } from "../engine/logger.js";
 import type { RawValue } from "../value-codec.js";
 
@@ -40,14 +41,17 @@ import type { RawValue } from "../value-codec.js";
  * `{x: {kind: "number", value: 5}}`.
  */
 export type InProcessHandler = (input: {
-  agentDefId: unknown;
+  /** Branded flat string. Decode with 'decodeFfiAgentDefId' to get the
+   * qname; in-process handlers can also compare raw strings directly
+   * since the FFI wire format is just the qname. */
+  agentDefId: AgentDefId;
   args: Record<string, RawValue>;
   delegationId: string;
   /** "delegate" の場合 false、"restoredDelegate" の場合 true */
   isRestored: boolean;
   signal: AbortSignal;
   escalate: (
-    agentDefId: unknown,
+    agentDefId: AgentDefId,
     args: Record<string, RawValue>,
   ) => Promise<RawValue>;
 }) => Promise<RawValue>;

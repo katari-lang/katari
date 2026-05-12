@@ -104,16 +104,11 @@ describe("value-codec", () => {
     expect(rt(v)).toEqual(v);
   });
 
-  it("decodes a discriminator-less object as anonymous record", () => {
-    const decoded = valueFromRaw({ x: 1, y: 2 });
-    expect(decoded).toEqual({
-      kind: "tagged",
-      ctorId: "<anonymous>.record",
-      fields: {
-        x: { kind: "number", value: 1 },
-        y: { kind: "number", value: 2 },
-      },
-    });
+  it("rejects a discriminator-less object", () => {
+    // Every object-shaped Value is either a tagged ctor instance or a
+    // callable reference; a bare object means the wire violated the
+    // schema and we want to surface that at the boundary.
+    expect(() => valueFromRaw({ x: 1, y: 2 })).toThrow(RawValueDecodeError);
   });
 
   it("rejects malformed $callable", () => {
