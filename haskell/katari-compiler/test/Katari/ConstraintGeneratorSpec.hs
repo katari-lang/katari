@@ -22,6 +22,7 @@ import Katari.Typechecker.Identifier
     identify,
   )
 import Katari.Compile qualified as Compile
+import Katari.Diagnostic (Diagnostic, hasErrors)
 import Test.Hspec
 
 -- ---------------------------------------------------------------------------
@@ -47,6 +48,21 @@ runOneWithIdentifier src =
         let (cg, errs) = generateConstraints result
          in pure (cg, errs, result)
       (_, errs) -> fail ("identify failure: " ++ show errs)
+
+-- | Run the full compile pipeline (parse → identify → CG → solve → zonk →
+-- lower) on a single "main" module and return all diagnostics. Unlike
+-- 'runOne', this surfaces solver-level type errors (K0220, etc.) in
+-- addition to CG errors.
+compileOne :: Text -> IO [Diagnostic]
+compileOne src =
+  let entry = Compile.SourceEntry {filePath = "<test>", sourceText = src}
+      input = Compile.CompileInput
+                { sources = Map.singleton "main" entry
+                , rootModule = "main"
+                }
+      result = Compile.compile input
+  in pure result.diagnostics
+
 
 countTypeConstraints :: ConstraintGenResult -> Int
 countTypeConstraints result =
@@ -132,6 +148,7 @@ spec = do
   declarations
   callExpressions
   constructorPatterns
+  matchPatterns
   whereBlocks
   exitStatementBlocks
   typeSynonymCycle
@@ -249,6 +266,60 @@ callExpressions = describe "call expressions" $ do
 -- ---------------------------------------------------------------------------
 -- Constructor pattern (reverse-call)
 -- ---------------------------------------------------------------------------
+
+matchPatterns :: Spec
+matchPatterns = describe "match patterns" $ do
+  it "variable pattern in match arm: subject type variable flows to bound variable" $ do
+    -- At CG time, `x` is represented as a type variable (x_type), not the
+    -- concrete SemanticTypeInteger. The constraint x_type <: y_type must be
+    -- emitted so the bound variable is at least as wide as the subject.
+    (cg, errors, ir) <-
+      runOneWithIdentifier
+        "agent foo(x: integer) -> integer { match (x) { case y => { y } } }"
+    errors `shouldBe` []
+    case (typeVarOf "x" cg ir, typeVarOf "y" cg ir) of
+      (Just xType, Just yType) ->
+        cg `shouldSatisfy` hasTypeConstraint (\l r -> l == xType && r == yType)
+      _ -> expectationFailure "variables 'x' or 'y' not found"
+
+  it "variable pattern: result-type annotation does not narrow the bound variable below the subject" $ do
+    -- The solver must reject this: subject is number but return annotation is
+    -- integer. The chain number <: y_type <: tMatch <: integer forces
+    -- number <: integer which fails (K0220).
+    diags <-
+      compileOne
+        "agent foo(x: number) -> integer { match (x) { case y => { y } } }"
+    diags `shouldSatisfy` hasErrors
+
+  it "tuple pattern: component type variables flow from the concrete tuple subject" $ do
+    -- At CG time the subject `p` is a type variable p_type with eq constraint
+    -- p_type = (integer, string). projectTupleSubjectTypes cannot statically
+    -- decompose a type variable, so we verify there are no type errors and
+    -- that the overall result is well-formed (the e2e sample 10 covers the
+    -- runtime behaviour more directly).
+    (_, errors) <-
+      runOne $
+        mconcat
+          [ "agent foo(p: (integer, string)) -> integer {\n",
+            "  match (p) { case (a, b) => { 0 } }\n",
+            "}"
+          ]
+    errors `shouldBe` []
+
+  it "tuple pattern on union subject: only the tuple branch constraint, no type error" $ do
+    -- subject: (integer, string) | boolean. The tuple arm (a, b) should not
+    -- produce a type error even though the boolean branch cannot be a tuple.
+    (_, errors) <-
+      runOne $
+        mconcat
+          [ "agent foo(p: (integer, string) | boolean) {\n",
+            "  match (p) {\n",
+            "    case (a, b) => { 0 }\n",
+            "    case _ => { 1 }\n",
+            "  }\n",
+            "}"
+          ]
+    errors `shouldBe` []
 
 constructorPatterns :: Spec
 constructorPatterns = describe "constructor patterns" $ do

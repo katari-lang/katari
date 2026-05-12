@@ -44,7 +44,8 @@ module Katari.Typechecker.ConstraintGenerator
   )
 where
 
-import Control.Monad (unless)
+import Control.Monad (replicateM, unless)
+import Data.List (transpose)
 import Control.Monad.Reader (ReaderT, asks, local, runReaderT)
 import Control.Monad.State.Strict (State, gets, modify, runState)
 import Control.Monad.Trans (lift)
@@ -711,7 +712,7 @@ walkParameterListForSignature ::
   CG ([ParameterBinding Constrained], Map Text (SemanticType Unresolved))
 walkParameterListForSignature parameters = do
   let walkOne ParameterBinding {annotation, label, pattern, sourceSpan} = do
-        (pattern', patternType) <- walkPattern pattern
+        (pattern', patternType) <- walkPattern Nothing pattern
         let rebuilt =
               ParameterBinding
                 { annotation = annotation,
@@ -725,26 +726,40 @@ walkParameterListForSignature parameters = do
 
 -- | Walk a 'Pattern', returning the rebuilt Constrained pattern and its
 -- inferred type (as a 'SemanticType' Unresolved). Variable bindings are
--- registered in the type environment as a side request.
-walkPattern :: Pattern Identified -> CG (Pattern Constrained, SemanticType Unresolved)
-walkPattern = \case
+-- registered in the type environment as a side effect.
+--
+-- 'maybeSubject': when 'Just subject', the subject type is the type of the
+-- value being matched against this pattern at this position. Variable
+-- patterns emit @subject <: varType@ so the binding captures the full
+-- range of values the subject can carry. Tuple patterns project the subject
+-- into component subjects and recurse. Pass 'Nothing' for irrefutable
+-- contexts (let / for / parameter) where the caller adds its own bridge
+-- constraint after the fact.
+walkPattern ::
+  Maybe (SemanticType Unresolved) ->
+  Pattern Identified ->
+  CG (Pattern Constrained, SemanticType Unresolved)
+walkPattern maybeSubject = \case
   PatternVariable VariablePattern {name, typeAnnotation, sourceSpan} -> do
     tx <- variableTypeFromName name
-    patternType <- case typeAnnotation of
+    case maybeSubject of
+      Just subject ->
+        addTypeConstraint subject tx (ConstraintReason ReasonKindMatchArm sourceSpan)
+      Nothing -> pure ()
+    case typeAnnotation of
       Just t -> do
         annotated <- elaborateType t
         addEqTypeConstraint tx annotated (ConstraintReason ReasonKindVariablePatternAnnotation sourceSpan)
-        pure annotated
-      Nothing -> pure tx
+      Nothing -> pure ()
     pure
       ( PatternVariable
           VariablePattern
             { name = retagNameRef name,
               typeAnnotation = fmap retagSyntacticType typeAnnotation,
               sourceSpan = sourceSpan,
-              typeOf = patternType
+              typeOf = tx
             },
-        patternType
+        tx
       )
   PatternWildcard WildcardPattern {typeAnnotation, sourceSpan} -> do
     patternType <- maybe freshTypeVar elaborateType typeAnnotation
@@ -769,7 +784,10 @@ walkPattern = \case
         patternType
       )
   PatternTuple TuplePattern {elements, sourceSpan} -> do
-    pairs <- mapM walkPattern elements
+    componentSubjects <- case maybeSubject of
+      Just subject -> projectTupleSubjectTypes (length elements) subject sourceSpan
+      Nothing      -> replicateM (length elements) freshTypeVar
+    pairs <- mapM (\(cs, el) -> walkPattern (Just cs) el) (zip componentSubjects elements)
     let patternType = SemanticTypeTuple (map snd pairs)
     pure
       ( PatternTuple
@@ -806,8 +824,30 @@ walkPattern = \case
       )
   where
     walkPatternField (label, sub) = do
-      (sub', subType) <- walkPattern sub
+      (sub', subType) <- walkPattern Nothing sub
       pure ((retagNameRef label, sub'), (label.text, subType))
+
+-- | Project the component subject types from a subject type for a tuple
+-- pattern of the given arity. For union subjects, only the tuple-shaped
+-- branches with the right arity are considered; their components are
+-- unioned position-wise. For type variables or non-tuple concretes a fresh
+-- type variable is used per slot (no useful static information available).
+projectTupleSubjectTypes ::
+  Int ->
+  SemanticType Unresolved ->
+  SourceSpan ->
+  CG [SemanticType Unresolved]
+projectTupleSubjectTypes arity subjectType _sourceSpan = case subjectType of
+  SemanticTypeTuple ts
+    | length ts == arity -> pure ts
+    | otherwise          -> replicateM arity freshTypeVar
+  SemanticTypeUnion branches ->
+    let tupleBranches = [ts | SemanticTypeTuple ts <- branches, length ts == arity]
+    in if null tupleBranches
+         then replicateM arity freshTypeVar
+         else pure (map unionSemantic (transpose tupleBranches))
+  SemanticTypeUnknown -> pure (replicate arity SemanticTypeUnknown)
+  _ -> replicateM arity freshTypeVar
 
 -- ---------------------------------------------------------------------------
 -- Block walking (with where-block request discharge)
@@ -993,7 +1033,7 @@ walkLet :: LetStatement Identified -> CG (LetStatement Constrained)
 walkLet LetStatement {pattern, value, sourceSpan} = do
   value' <- walkExpression value
   let valueType = constrainedExpressionType value'
-  (pattern', patternType) <- walkPattern pattern
+  (pattern', patternType) <- walkPattern Nothing pattern
   addTypeConstraint valueType patternType (ConstraintReason ReasonKindLetPattern sourceSpan)
   pure LetStatement {pattern = pattern', value = value', sourceSpan = sourceSpan}
 
@@ -1321,10 +1361,7 @@ walkMatchExpr MatchExpression {subject, cases, sourceSpan} = do
   subject' <- walkExpression subject
   let subjectType = constrainedExpressionType subject'
   tMatch <- freshTypeVar
-  pairs <- mapM (walkCaseArm subjectType tMatch) cases
-  let (cases', patternTypes) = unzip pairs
-      patternUnion = unionSemantic patternTypes
-  addTypeConstraint subjectType patternUnion (ConstraintReason ReasonKindMatchSubject sourceSpan)
+  cases' <- mapM (walkCaseArm subjectType tMatch) cases
   pure
     ( ExpressionMatch
         MatchExpression
@@ -1339,31 +1376,17 @@ walkCaseArm ::
   SemanticType Unresolved ->
   SemanticType Unresolved ->
   CaseArm Identified ->
-  CG (CaseArm Constrained, SemanticType Unresolved)
+  CG (CaseArm Constrained)
 walkCaseArm subjectType tMatch CaseArm {pattern, body, sourceSpan} = do
-  (pattern', patternType) <- walkPattern pattern
-  -- A top-level VariablePattern or WildcardPattern accepts every value that
-  -- reaches this arm, so the binding must be wide enough to hold the full
-  -- subject. Without this, the result-type expectation could narrow the
-  -- bound variable's type below the actual runtime value type
-  -- (e.g. `match (x: number) { case y => y; case _ => 0 } : integer`
-  -- would otherwise type-check with y : integer).
-  case pattern of
-    PatternVariable _ ->
-      addTypeConstraint subjectType patternType (ConstraintReason ReasonKindMatchArm sourceSpan)
-    PatternWildcard _ ->
-      addTypeConstraint subjectType patternType (ConstraintReason ReasonKindMatchArm sourceSpan)
-    _ -> pure ()
+  (pattern', _patternType) <- walkPattern (Just subjectType) pattern
   (body', bodyTy) <- walkBlock body
   addTypeConstraint bodyTy tMatch (ConstraintReason ReasonKindMatchArm sourceSpan)
   pure
-    ( CaseArm
-        { pattern = pattern',
-          body = body',
-          sourceSpan = sourceSpan
-        },
-      patternType
-    )
+    CaseArm
+      { pattern = pattern',
+        body = body',
+        sourceSpan = sourceSpan
+      }
 
 walkForExpr :: ForExpression Identified -> CG (Expression Constrained)
 walkForExpr ForExpression {parallel, inBindings, varBindings, body, thenBlock, sourceSpan} = do
@@ -1400,7 +1423,7 @@ walkForInBinding ForInBinding {pattern, source, sourceSpan} = do
   let sourceType = constrainedExpressionType source'
   tElem <- freshTypeVar
   addTypeConstraint sourceType (SemanticTypeArray tElem) (ConstraintReason ReasonKindForIn sourceSpan)
-  (pattern', patternType) <- walkPattern pattern
+  (pattern', patternType) <- walkPattern Nothing pattern
   addTypeConstraint tElem patternType (ConstraintReason ReasonKindForIn sourceSpan)
   pure ForInBinding {pattern = pattern', source = source', sourceSpan = sourceSpan}
 
@@ -1448,7 +1471,7 @@ walkHandleExpr HandleExpression {parallel, stateVariables, handlers, thenClause,
     Just (maybePattern, thenBody) -> do
       (pattern', patternType) <- case maybePattern of
         Just p -> do
-          (p', t) <- walkPattern p
+          (p', t) <- walkPattern Nothing p
           pure (Just p', t)
         Nothing -> do
           t <- freshTypeVar
