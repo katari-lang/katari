@@ -97,9 +97,39 @@ export const externalOps: ThreadOps<ExternalThread> = {
   },
 
   /**
-   * AskAck routed back from translateExternal (escalateAck path).
-   * Default proxy: look up the original asker via askIdMap and forward.
+   * AskAck has two sources:
+   *
+   *   (a) Inbound `escalateAck` event was translated into an `askAck` by
+   *       the runner (FFI / CORE→CORE 'sender side'). The runner already
+   *       cleared 'pendingEscalations[askId]' before enqueuing; we forward
+   *       the value down via 'askIdMap' to the original asker child.
+   *
+   *   (b) The askAck arrived from above as part of an inbound-escalate's
+   *       proxy chain (CORE→CORE 'receiver side', where an inbound
+   *       'escalate' was turned into an upward ask through E.parent). In
+   *       this case 'pendingEscalations[askId]' is STILL set — the local
+   *       handler's response now needs to be sent back over the wire as
+   *       an outbound 'escalateAck' so the originating sender can resume.
    */
-  askAck: (ctx, t, askId, value) =>
-    defaultAskAckProxy<ExternalThread>(ctx, t as Draft<ExternalThread>, askId, value),
+  askAck(ctx, t, askId, value) {
+    const escalationId = t.pendingEscalations[askId as unknown as number];
+    if (escalationId !== undefined) {
+      delete t.pendingEscalations[askId as unknown as number];
+      const peer: Endpoint =
+        t.externalName === "<agent>.<delegate>"
+          ? ctx.state.selfEndpoint
+          : ctx.state.ffiTargetEndpoint;
+      ctx.emit({
+        from: ctx.state.selfEndpoint as Endpoint,
+        to: peer,
+        payload: {
+          kind: "escalateAck",
+          escalationId,
+          value,
+        },
+      });
+      return;
+    }
+    defaultAskAckProxy<ExternalThread>(ctx, t as Draft<ExternalThread>, askId, value);
+  },
 };

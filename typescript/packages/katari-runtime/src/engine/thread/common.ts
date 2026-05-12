@@ -283,14 +283,16 @@ export function emitEscalateUpward(
   recordAskForward(t as Draft<Thread>, ownAskId, childCallId, childAskId);
   const escalationId = createEscalationId();
   t.pendingEscalations[ownAskId as unknown as number] = escalationId;
-  // ReqId is engine-internal; the receiver of this escalate must resolve
-  // its own AgentDefId. We currently synthesize a placeholder qname so the
-  // wire format stays valid — the proper qname-from-reqId mapping needs to
-  // flow from IR (TODO when handle-scope routing on inbound escalate matures).
-  const placeholder: import("../../agent-def-id.js").AgentDefId =
+  // 'reqId' is already the request's 'QualifiedName' (since the IR-id
+  // unification in Phase 2.A), so we ship it as the escalate's
+  // 'agentDefId' directly. CORE→CORE: the receiver decodes it and pumps
+  // an upward request ask carrying the same qname; CORE→FFI: the
+  // sidecar dispatcher sees a qname-form agentDefId and looks it up by
+  // module-local convention.
+  const wireId: import("../../agent-def-id.js").AgentDefId =
     encodeCoreAgentDefId({
       kind: "qname",
-      value: `req:${askKind.reqId}`,
+      value: askKind.reqId,
     });
   ctx.emit({
     from: ctx.state.selfEndpoint,
@@ -299,7 +301,7 @@ export function emitEscalateUpward(
       kind: "escalate",
       delegationId: t.delegationId,
       escalationId,
-      agentDefId: placeholder,
+      agentDefId: wireId,
       args: { ...askKind.args },
     },
   });

@@ -1,0 +1,7 @@
+project = "req-handler"
+
+[compile]
+src = "src/"
+
+[api]
+url = "http://localhost:8080"

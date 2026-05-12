@@ -358,13 +358,19 @@ function translateExternal(
   }
 
   if (p.kind === "escalateAck") {
-    // Find the ExternalThread holding this escalation in pendingEscalations.
+    // Find any thread (ExternalThread or root AgentThread) carrying this
+    // escalation in 'pendingEscalations'. Both 'ask -> emitEscalateUpward'
+    // (root AgentThread on the receiver side) and inbound-escalate
+    // bookkeeping (ExternalThread on the sender side) populate the same
+    // map, and the matching escalateAck must reach whichever one is the
+    // local end of THIS hop. Iterating both kinds keeps CORE→CORE
+    // round-trips (sender + receiver are the same module) correct.
     for (const t of Object.values(ctx.state.threads)) {
-      if (t === undefined || t.kind !== "external") continue;
+      if (t === undefined) continue;
+      if (t.kind !== "external" && t.kind !== "agent") continue;
       const askIdNum = findEscalationAskId(t.pendingEscalations, p.escalationId as string);
       if (askIdNum === undefined) continue;
       delete t.pendingEscalations[askIdNum];
-      // Fire askAck back to the chain that originally asked.
       ctx.enqueue({
         kind: "askAck",
         target: t.id,
@@ -422,14 +428,15 @@ function resolveDelegateTarget(
 }
 
 /**
- * Resolve an inbound `escalate`'s `agentDefId` to a CORE-internal request
- * 'QualifiedName'. For qname-encoded ids we look up the entry block (must
- * be 'blockRequest') and return its carried qname. Closure-encoded or
- * unresolved cases yield a synthetic '<unresolved>' qname that no real
- * handler will equal.
+ * Decode an inbound `escalate`'s `agentDefId` into the request
+ * 'QualifiedName' used by handle scopes for dispatch. Since
+ * 'emitEscalateUpward' ships the qname directly (Phase 2.A unified
+ * 'reqId' with 'QualifiedName'), the decode is a thin wrapper that
+ * returns a sentinel for closure-encoded ids — those have no qname-side
+ * handler.
  */
 function resolveRequestReqId(
-  ctx: ReturnType<typeof makeStepCtx>,
+  _ctx: ReturnType<typeof makeStepCtx>,
   agentDefId: import("../agent-def-id.js").AgentDefId,
 ): import("../ir/types.js").QualifiedName {
   const sentinel = "<unresolved>.<unresolved>";
@@ -442,14 +449,7 @@ function resolveRequestReqId(
   if (decoded.kind !== "qname") {
     return sentinel;
   }
-  const qn = decoded.value;
-  const blockId = ctx.state.irModule.entries[qn];
-  if (blockId === undefined) return sentinel;
-  const block = ctx.state.irModule.blocks[String(blockId)];
-  if (block === undefined || block.kind !== "blockRequest") {
-    return sentinel;
-  }
-  return block.body;
+  return decoded.value;
 }
 
 function findEscalationAskId(

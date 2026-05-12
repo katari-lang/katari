@@ -157,4 +157,12 @@ describe("samples/ end-to-end (compile → upload → run → verify)", () => {
       expect(result).toBe("add_them|main.add_them|local_bar|closure:0");
     },
   );
+
+  itE2E(
+    "09-req-handler: three ticks under a stateful handler sum to 6",
+    async () => {
+      const result = await applyAndRun("req-handler", "09-req-handler");
+      expect(result).toBe(6);
+    },
+  );
 });

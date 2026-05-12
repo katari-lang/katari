@@ -62,8 +62,13 @@ export const handleOps: ThreadOps<HandleThread> = {
       setValueInScope(ctx, t.scopeId, bodyVar, v);
     }
 
-    // Spawn the main body. callId = 0.
+    // Spawn the main body. callId = 0 (MAIN_CALL_ID). Reserve the slot
+    // and bump `nextCallId` past it so subsequent handler-body /
+    // thenClause allocations don't collide with the main continuation.
     t.childRoles[MAIN_CALL_ID as number] = { kind: "main" };
+    if ((t.nextCallId as number) <= (MAIN_CALL_ID as number)) {
+      t.nextCallId = ((MAIN_CALL_ID as number) + 1) as CallId;
+    }
     spawnChild(ctx, {
       parentId: t.id,
       parentCallId: MAIN_CALL_ID,

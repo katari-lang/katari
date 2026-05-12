@@ -587,10 +587,15 @@ registerDeclarationKinds zonkResult =
           recordTopLevelCallable variableId moduleName decl.name.text blockId
       AST.DeclarationRequest decl ->
         registerCallable decl.name decl.sourceSpan $ \variableId -> do
-          blockId <- freshBlockId
-          reqQName <- requestQNameForVariable variableId
-          recordBlock blockId (BlockRequest reqQName) (Just decl.name.text)
-          recordTopLevelCallable variableId moduleName decl.name.text blockId
+          -- Phase 1: reserve the wrapper agent slot only. The inner
+          -- 'BlockRequest' leaf + wrapping body are built in Phase 2
+          -- ('lowerAllDeclarations'). The wrapper makes a req
+          -- indistinguishable from prim / ext / ctor at the call site:
+          -- @statementAgentCall(literalValueAgent "module.req")@ spawns
+          -- the wrapper, whose body fires the request via a child
+          -- 'statementCall' targeting the leaf.
+          agentBlk <- reserveBlockId (Just decl.name.text)
+          recordTopLevelCallable variableId moduleName decl.name.text agentBlk
       AST.DeclarationExternalAgent decl ->
         registerCallable decl.name decl.sourceSpan $ \variableId -> do
           -- Phase 1: reserve the wrapper agent slot only. The inner
@@ -624,21 +629,6 @@ registerDeclarationKinds zonkResult =
       AST.DeclarationImport _ -> pure ()
       AST.DeclarationTypeSynonym _ -> pure ()
       AST.DeclarationError sourceSpan -> recordError (LoweringErrorParseSentinel sourceSpan)
-
-    -- | Look up the 'QualifiedName' that identifies the @req@ declaration
-    -- whose call-side 'VariableId' is the argument. Used to stamp
-    -- 'BlockRequest' / 'Handler.request' with the qname carried by the
-    -- 'RequestData' built during the Identifier pass.
-    requestQNameForVariable :: VariableId -> Lower QualifiedName
-    requestQNameForVariable variableId = do
-      inverse <- asks (.requestByVariable)
-      idResult <- asks (.identifierResult)
-      case Map.lookup variableId inverse of
-        Just requestId ->
-          case Map.lookup requestId idResult.identifiedRequests of
-            Just rd -> pure rd.requestQualifiedName
-            Nothing -> throwError (Internal.internalErrorNoSpan "requestQNameForVariable: RequestId not in identifiedRequests")
-        Nothing -> throwError (Internal.internalErrorNoSpan "requestQNameForVariable: VariableId not in requestByVariable")
 
     -- | Register a top-level callable: bind the @VariableId@ to its
     -- @BlockId@, record its 'QualifiedName' for value-side dispatch, and
@@ -694,6 +684,25 @@ lowerAllDeclarations zonkResult = do
           innerBlk
           (BlockExternal (ExternalName qname))
           (Just (decl.name.text <> ":external"))
+        (inputSchema, outputSchema) <- schemasForVariable variableId labelsAndAnnotations
+        writeWrapperAgent
+          agentBlk
+          qname
+          paramLabels
+          innerBlk
+          decl.name.text
+          decl.name.text
+          decl.annotation
+          inputSchema
+          outputSchema
+        pure (Just (decl.name.text, agentBlk))
+      AST.DeclarationRequest decl -> resolveDecl decl.name $ \variableId agentBlk -> do
+        qname <- requireAgentQName "DeclarationRequest" decl.name.text agentBlk
+        let paramLabels = map (.label) decl.parameters
+            labelsAndAnnotations = [(pb.label, pb.annotation) | pb <- decl.parameters]
+        reqQName <- lookupRequestQName variableId
+        innerBlk <- freshBlockId
+        recordBlock innerBlk (BlockRequest reqQName) (Just (decl.name.text <> ":request"))
         (inputSchema, outputSchema) <- schemasForVariable variableId labelsAndAnnotations
         writeWrapperAgent
           agentBlk
@@ -779,6 +788,28 @@ lowerAllDeclarations zonkResult = do
           throwError
             ( Internal.internalErrorNoSpan
                 "lookupConstructorQName: VariableId not in constructorByVariable"
+            )
+
+    -- | Look up the request 'QualifiedName' stamped on a @req@ declaration's
+    -- 'BlockRequest' leaf. Mirrors 'lookupConstructorQName' for the data /
+    -- ctor side.
+    lookupRequestQName :: VariableId -> Lower QualifiedName
+    lookupRequestQName variableId = do
+      inverse <- asks (.requestByVariable)
+      idResult <- asks (.identifierResult)
+      case Map.lookup variableId inverse of
+        Just requestId ->
+          case Map.lookup requestId idResult.identifiedRequests of
+            Just rd -> pure rd.requestQualifiedName
+            Nothing ->
+              throwError
+                ( Internal.internalErrorNoSpan
+                    "lookupRequestQName: RequestId not in identifiedRequests"
+                )
+        Nothing ->
+          throwError
+            ( Internal.internalErrorNoSpan
+                "lookupRequestQName: VariableId not in requestByVariable"
             )
 
 -- ===========================================================================
