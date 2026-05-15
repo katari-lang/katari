@@ -53,18 +53,12 @@ import Katari.SemanticType
 import Katari.SourceSpan (Position (..), SourceSpan (..))
 import Katari.Typechecker.ConstraintGenerator (ConstraintGenResult (..))
 import Katari.Id
-  ( ConstructorId,
-    ModuleId,
-    RequestId,
-    TypeId,
+  ( ModuleId,
     VariableId,
   )
 import Katari.Typechecker.Identifier
-  ( ConstructorData (..),
-    IdentifierResult (..),
+  ( IdentifierResult (..),
     ModuleData (..),
-    RequestData (..),
-    TypeData (..),
     VariableData (..),
   )
 import Katari.Typechecker.NormalizedType (denormalise)

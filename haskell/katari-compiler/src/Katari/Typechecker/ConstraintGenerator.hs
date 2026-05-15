@@ -51,7 +51,6 @@ import Control.Monad.State.Strict (State, gets, modify, runState)
 import Control.Monad.Trans (lift)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (listToMaybe)
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
@@ -64,13 +63,11 @@ import Katari.SourceSpan
 import Katari.Id
   ( ConstructorId,
     ModuleId,
-    QualifiedName (..),
     RequestId,
     TypeId (..),
     VariableId,
   )
 import Katari.Prim (PrimRule (..))
-import Katari.Prim qualified as Prim
 import Katari.Typechecker.Identifier
   ( ConstructorData (..),
     IdentifierResult (..),

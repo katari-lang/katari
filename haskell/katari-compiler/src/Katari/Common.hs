@@ -107,14 +107,6 @@ instance FromJSON LiteralValue where
 -- Internal aeson options
 -- ===========================================================================
 
--- | Plain record options (fields kept as-is; @Nothing@ omitted).
-commonOptions :: Options
-commonOptions =
-  defaultOptions
-    { fieldLabelModifier = id,
-      omitNothingFields = True
-    }
-
 -- | Tagged-object sum options matching the IR's flavour: @kind@ + @body@,
 -- camelCase constructor tags.
 commonSumOptions :: Options

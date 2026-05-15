@@ -2089,11 +2089,12 @@ resolveMatchExpr MatchExpression {subject, cases, sourceSpan} = do
 -- | Case arm: pattern bindings are visible only inside the arm body, so we
 -- introduce a fresh scope frame around it.
 resolveCaseArm :: CaseArm Parsed -> Identifier (CaseArm Identified)
-resolveCaseArm CaseArm {pattern, body, sourceSpan} = withScopeFrame $ do
+resolveCaseArm CaseArm {pattern, body, sourceSpan} = do
   rejectPatternAnnotations pattern
-  pattern' <- resolvePattern pattern
-  body' <- resolveBlock body
-  pure CaseArm {pattern = pattern', body = body', sourceSpan = sourceSpan}
+  withScopeFrame $ do
+    pattern' <- resolvePattern pattern
+    body' <- resolveBlock body
+    pure CaseArm {pattern = pattern', body = body', sourceSpan = sourceSpan}
 
 -- | Walk a match-arm pattern and emit 'ErrorPatternTypeAnnotation' for
 -- every variable / wildcard sub-pattern that carries an explicit type
