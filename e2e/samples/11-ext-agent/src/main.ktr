@@ -1,0 +1,7 @@
+@"Greet via an ext agent (host-provided JS)."
+ext agent extGreet(name: string) -> string
+
+@"Calls extGreet and returns its result verbatim."
+agent main() -> string {
+  extGreet(name = "ext")
+}

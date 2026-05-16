@@ -8,6 +8,7 @@
   "exports": {
     ".": "./dist/index.js",
     "./services/api-client": "./dist/services/api-client.js",
+    "./services/bundle": "./dist/services/bundle.js",
     "./services/compile": "./dist/services/compile.js"
   },
   "scripts": {

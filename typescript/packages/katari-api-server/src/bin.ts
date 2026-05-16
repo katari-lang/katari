@@ -5,8 +5,10 @@
 import { serve } from "@hono/node-server";
 import {
   buildConsoleLogger,
+  loadSubprocessSidecar,
   SidecarManager,
   type LogLevel,
+  type Logger,
   type Sidecar,
 } from "katari-runtime";
 import { buildMetrics } from "./metrics.js";
@@ -39,14 +41,13 @@ if (apiKey === undefined || apiKey === "") {
 const storage = PostgresStorage.create(databaseUrl);
 const metrics = buildMetrics();
 
-// Sidecar manager: production builds need a real subprocess factory
-// supplied by the future `katari-port` library. Until that lands the
-// factory below returns null for every snapshot — FFI invokes will fail
-// closed, which is the safest default before the transport is wired.
+// Sidecar manager: per snapshot we spawn a `node <bundle.mjs>`
+// subprocess. Snapshots without a bundle (= no ext agent declarations)
+// short-circuit to `null` so the orchestrator skips FFI plumbing.
 const sidecarManager = new SidecarManager<SnapshotId>(
-  (_key, _bundle, _sidecarLogger): Sidecar | null => {
-    logger.log("warn", "no sidecar factory configured; FFI will be unavailable");
-    return null;
+  async (_key, bundle, sidecarLogger: Logger): Promise<Sidecar | null> => {
+    if (bundle === null) return null;
+    return await loadSubprocessSidecar({ bundle, logger: sidecarLogger });
   },
   logger,
 );

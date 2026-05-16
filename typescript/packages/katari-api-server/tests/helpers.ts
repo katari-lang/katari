@@ -4,11 +4,11 @@
 // を含むテスト用 app を作るヘルパを提供する。
 
 import {
-  InProcessSidecar,
+  MockSidecar,
   SidecarManager,
   noopLogger,
   type IRModule,
-  type InProcessHandler,
+  type MockAgentHandler,
   type SchemaBundle,
   type Sidecar,
   type SidecarBundle,
@@ -155,37 +155,30 @@ export type TestHarness = {
 };
 
 /**
- * Build a test harness wired with `InMemoryStorage` and `InProcessSidecar`
+ * Build a test harness wired with `InMemoryStorage` and `MockSidecar`
  * (factory-driven from a shared handler map). Use `setHandler(qname, fn)`
  * to register sidecar invokes for a specific test.
  */
 export function buildTestHarness(opts?: {
-  ffiHandlers?: Record<string, InProcessHandler>;
+  ffiHandlers?: Record<string, MockAgentHandler>;
 }): TestHarness & {
-  setHandler: (qname: string, handler: InProcessHandler) => void;
+  setHandler: (qname: string, handler: MockAgentHandler) => void;
 } {
-  const handlers = new Map<string, InProcessHandler>(
+  const handlers = new Map<string, MockAgentHandler>(
     Object.entries(opts?.ffiHandlers ?? {}),
   );
+  // Track every live MockSidecar that this harness produces so external
+  // setHandler() calls reach already-running sidecars too. Practically
+  // a harness owns at most one or two sidecars (one per snapshot), but
+  // a Set keeps the bookkeeping uniform.
+  const liveSidecars = new Set<MockSidecar>();
   const storage = new InMemoryStorage();
   const sidecarManager = new SidecarManager<SnapshotId>(
     (_key, _bundle, sidecarLogger): Sidecar | null => {
-      const dispatch: InProcessHandler = async (input) => {
-        const decoded = input.agentDefId as {
-          kind: string;
-          value: { module_: string; name: string };
-        };
-        const key =
-          decoded.value.module_ === ""
-            ? decoded.value.name
-            : `${decoded.value.module_}.${decoded.value.name}`;
-        const handler = handlers.get(key);
-        if (handler === undefined) {
-          throw new Error(`no test handler registered for ${key}`);
-        }
-        return handler(input);
-      };
-      return new InProcessSidecar(dispatch, sidecarLogger);
+      const mock = new MockSidecar({ logger: sidecarLogger });
+      for (const [k, v] of handlers.entries()) mock.setHandler(k, v);
+      liveSidecars.add(mock);
+      return mock;
     },
     noopLogger,
   );
@@ -207,9 +200,11 @@ export function buildTestHarness(opts?: {
     orchestrator,
     setHandler(qname, handler) {
       handlers.set(qname, handler);
+      for (const mock of liveSidecars) mock.setHandler(qname, handler);
     },
     async shutdown() {
       await sidecarManager.shutdown();
+      liveSidecars.clear();
     },
   };
 }

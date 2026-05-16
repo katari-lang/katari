@@ -76,10 +76,17 @@ function validateConfig(raw: unknown, path: string): KatariConfig {
       ? compile.root
       : undefined;
   const sidecar = isObject(raw.sidecar) ? raw.sidecar : undefined;
-  const sidecarEntry =
-    sidecar !== undefined && typeof sidecar.entry === "string"
-      ? sidecar.entry
-      : undefined;
+  const sidecarSourceRoots = (() => {
+    if (sidecar === undefined) return undefined;
+    const v = sidecar.sourceRoots;
+    if (v === undefined) return undefined;
+    if (!Array.isArray(v) || !v.every((x) => typeof x === "string")) {
+      throw new ConfigError(
+        `${path}: 'sidecar.sourceRoots' must be an array of strings`,
+      );
+    }
+    return v as string[];
+  })();
   const api = isObject(raw.api) ? raw.api : {};
   const apiUrl =
     typeof api.url === "string" && api.url.length > 0
@@ -91,7 +98,10 @@ function validateConfig(raw: unknown, path: string): KatariConfig {
   return {
     project,
     compile: { src: compileSrc, root: compileRoot },
-    sidecar: sidecarEntry !== undefined ? { entry: sidecarEntry } : undefined,
+    sidecar:
+      sidecarSourceRoots !== undefined
+        ? { sourceRoots: sidecarSourceRoots }
+        : undefined,
     api: { url: apiUrl, auth: apiAuth },
   };
 }

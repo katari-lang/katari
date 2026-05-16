@@ -10,7 +10,13 @@ export type KatariConfig = {
     root?: string;
   };
   sidecar?: {
-    entry: string;
+    /**
+     * Co-location sources. Bundle walks each root, finds `foo.ktr`
+     * with a sibling `foo.js` / `foo.ts`, and packs them into a single
+     * ESM bundle that imports katari-port. Defaults to `[compile.src]`
+     * when omitted.
+     */
+    sourceRoots?: string[];
   };
   api: {
     url: string;

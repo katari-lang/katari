@@ -13,11 +13,12 @@ import { ApiClient } from "katari-cli/services/api-client";
 import { compile } from "katari-cli/services/compile";
 import {
   buildTestHarness,
+  noOpSidecarBundle,
   trivialSchemaBundle,
   type TestHarness,
 } from "katari-api-server/tests/helpers.js";
 import type { Hono } from "hono";
-import type { RawValue } from "katari-runtime";
+import type { MockAgentHandler, RawValue, SidecarBundle } from "katari-runtime";
 
 const SAMPLES_ROOT = resolve(__dirname, "../samples");
 
@@ -71,9 +72,16 @@ const itE2E = RUN_E2E ? it : it.skip;
 async function applyAndRun(
   projectName: string,
   sampleDir: string,
+  opts?: {
+    sidecarBundle?: SidecarBundle | null;
+    handlers?: Record<string, MockAgentHandler>;
+  },
 ): Promise<RawValue> {
   const harness = buildTestHarness();
   active = harness;
+  for (const [qname, fn] of Object.entries(opts?.handlers ?? {})) {
+    harness.setHandler(qname, fn);
+  }
   const api = clientFor(harness.app);
 
   const project = await api.upsertProject(projectName);
@@ -83,7 +91,7 @@ async function applyAndRun(
   const { snapshotId } = await api.uploadSnapshot({
     projectId: project.id,
     irModule,
-    sidecarBundle: null,
+    sidecarBundle: opts?.sidecarBundle ?? null,
     schemaBundle: schemaBundle ?? trivialSchemaBundle(),
   });
 
@@ -94,7 +102,14 @@ async function applyAndRun(
     args: {},
   });
 
-  const row = await api.getAgent(agentId);
+  // Most samples finalize within startAgent's tick; ext-agent samples
+  // resume in a follow-up tick once the sidecar acks. Poll briefly.
+  const deadline = Date.now() + 5000;
+  let row = await api.getAgent(agentId);
+  while (row.state === "running" && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 10));
+    row = await api.getAgent(agentId);
+  }
   if (row.state !== "succeeded") {
     throw new Error(
       `agent state was '${row.state}' (errorMessage: ${row.errorMessage ?? "<none>"})`,
@@ -171,6 +186,25 @@ describe("samples/ end-to-end (compile → upload → run → verify)", () => {
     async () => {
       const result = await applyAndRun("tuple-pattern", "10-tuple-pattern");
       expect(result).toBe("42 with hello");
+    },
+  );
+
+  itE2E(
+    "11-ext-agent: extGreet returns 'hello, ext' via the MockSidecar registry",
+    async () => {
+      const result = await applyAndRun("ext-agent", "11-ext-agent", {
+        // Non-null bundle so the orchestrator wires up the sidecar
+        // factory; MockSidecar ignores `entry` content and looks up
+        // handlers by qname via setHandler.
+        sidecarBundle: noOpSidecarBundle(),
+        handlers: {
+          "main.extGreet": async ({ args }) => {
+            const name = args["name"] as string;
+            return `hello, ${name}`;
+          },
+        },
+      });
+      expect(result).toBe("hello, ext");
     },
   );
 });

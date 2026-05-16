@@ -24,7 +24,7 @@ export type SidecarFactory<TKey> = (
   key: TKey,
   bundle: SidecarBundle | null,
   logger: Logger,
-) => Sidecar | null;
+) => Promise<Sidecar | null> | Sidecar | null;
 
 /**
  * Sidecar からの child→parent message を 1 個受け取った時の callback。
@@ -55,7 +55,7 @@ export class SidecarManager<TKey> {
   }): Promise<void> {
     const k = this.keyToString(input.key);
     if (this.sidecars.has(k)) return;
-    const sidecar = this.factory(input.key, input.bundle, this.logger);
+    const sidecar = await this.factory(input.key, input.bundle, this.logger);
     if (sidecar === null) {
       this.logger.log("debug", "sidecar factory returned null", { key: k });
       return;

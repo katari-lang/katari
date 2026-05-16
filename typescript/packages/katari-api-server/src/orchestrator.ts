@@ -212,7 +212,6 @@ export class Orchestrator {
     };
     switch (msg.type) {
       case "ready":
-      case "log":
         return null;
       case "delegateAck": {
         const peer = await lookupPeer(msg.delegationId);
@@ -255,31 +254,6 @@ export class Orchestrator {
           payload: {
             kind: "terminateAck",
             delegationId: msg.delegationId,
-          },
-        };
-      }
-      case "escalate": {
-        const peer = await lookupPeer(msg.delegationId);
-        if (peer === null) return null;
-        const argsValue = argsRawToValue(msg.args);
-        await tx.ffiEscalations.insert({
-          escalationId: msg.escalationId,
-          delegationId: msg.delegationId,
-          snapshotId,
-          peerEndpoint: peer,
-          agentDefId: msg.agentDefId,
-          args: argsValue,
-          createdAt: new Date().toISOString(),
-        });
-        return {
-          from: FFI_ENDPOINT,
-          to: peer,
-          payload: {
-            kind: "escalate",
-            delegationId: msg.delegationId,
-            escalationId: msg.escalationId,
-            agentDefId: msg.agentDefId,
-            args: argsValue,
           },
         };
       }

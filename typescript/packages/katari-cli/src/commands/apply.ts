@@ -12,7 +12,6 @@ import { shortId } from "../prompt/picker-utils.js";
 export type ApplyOptions = {
   project?: string;
   src?: string;
-  sidecar?: string;
 };
 
 export async function applyCmd(opts: ApplyOptions): Promise<void> {
@@ -24,11 +23,11 @@ export async function applyCmd(opts: ApplyOptions): Promise<void> {
     configDir,
     opts.src ?? config.compile.src,
   );
-  const sidecarEntry = opts.sidecar ?? config.sidecar?.entry;
-  const sidecarPath =
-    sidecarEntry !== undefined
-      ? resolveConfigPath(configDir, sidecarEntry)
-      : undefined;
+  // Co-location bundle source roots default to the compile source dir.
+  // Future package-manager phase will append `.katari/packages/*/src`.
+  const sourceRoots = (config.sidecar?.sourceRoots ?? [config.compile.src]).map(
+    (root) => resolveConfigPath(configDir, root),
+  );
 
   if (!existsSync(srcPath)) {
     p.cancel(`source path not found: ${srcPath}`);
@@ -55,27 +54,24 @@ export async function applyCmd(opts: ApplyOptions): Promise<void> {
     process.exit(1);
   }
 
-  // 2. Bundle sidecar (optional)
+  // 2. Bundle sidecar (co-location: walk source roots for .ktr siblings)
   let sidecarBundle = null;
-  if (sidecarPath !== undefined) {
-    if (!existsSync(sidecarPath)) {
-      p.cancel(`sidecar entry not found: ${sidecarPath}`);
-      process.exit(1);
-    }
-    const bundleSpinner = p.spinner();
-    bundleSpinner.start(`Bundling sidecar (${sidecarEntry})`);
-    try {
-      sidecarBundle = await bundleSidecar({ entry: sidecarPath });
+  const bundleSpinner = p.spinner();
+  bundleSpinner.start("Bundling sidecar (co-location)");
+  try {
+    const result = await bundleSidecar({ sourceRoots });
+    if (result === null) {
+      bundleSpinner.stop("No ext-agent siblings found; sidecar-less snapshot");
+    } else {
+      sidecarBundle = result.bundle;
       bundleSpinner.stop(
-        `Bundled sidecar (${humanSize(sidecarBundle.entry.length)})`,
+        `Bundled sidecar (${humanSize(sidecarBundle.entry.length)}, ${result.modules.length} module${result.modules.length === 1 ? "" : "s"})`,
       );
-    } catch (err) {
-      bundleSpinner.stop(pc.red("Bundle failed"), 1);
-      p.cancel(err instanceof Error ? err.message : String(err));
-      process.exit(1);
     }
-  } else {
-    p.note("No sidecar entry configured; uploading sidecar-less snapshot.");
+  } catch (err) {
+    bundleSpinner.stop(pc.red("Bundle failed"), 1);
+    p.cancel(err instanceof Error ? err.message : String(err));
+    process.exit(1);
   }
 
   // 3. Upload to api-server

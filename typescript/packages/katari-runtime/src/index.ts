@@ -152,9 +152,21 @@ export type {
   ParentToChild,
   ChildToParent,
 } from "./sidecar/types.js";
+export { PROTOCOL_VERSION } from "./sidecar/types.js";
 
-export { InProcessSidecar } from "./sidecar/sidecar.js";
-export type { Sidecar, InProcessHandler } from "./sidecar/sidecar.js";
+export type { Sidecar } from "./sidecar/sidecar.js";
+
+export { SubprocessSidecar } from "./sidecar/subprocess-sidecar.js";
+export type { SubprocessSidecarOptions } from "./sidecar/subprocess-sidecar.js";
+
+export { MockSidecar } from "./sidecar/mock-sidecar.js";
+export type {
+  MockAgentHandler,
+  MockSidecarOptions,
+} from "./sidecar/mock-sidecar.js";
+
+export { loadSubprocessSidecar } from "./sidecar/bundle-loader.js";
+export type { LoadSubprocessSidecarOptions } from "./sidecar/bundle-loader.js";
 
 export { SidecarManager } from "./sidecar/sidecar-manager.js";
 export type {

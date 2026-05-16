@@ -1,29 +1,31 @@
 // FfiModule — runtime 側の FFI Runner。`Module` interface 実装。
 //
-// 役割:
+// 役割 (protocol v1, 7 message variants):
 //
-//   1. CORE → FFI 方向の 6 event のうち、自分宛 inbound (= delegate /
-//      terminate / escalateAck) を受け取り、対応する IPC message を
-//      sidecar に送る。同時に自分の `FfiStore` に persistent 状態を書く。
+//   1. CORE → FFI 方向の inbound event (= delegate / terminate) を受け取り、
+//      対応する `ParentToChild` IPC message を sidecar に送る。同時に自分の
+//      `FfiStore` に persistent 状態を書く。
 //
-//   2. Sidecar からの child→parent message (= delegateAck / terminateAck
-//      / escalate / delegateError) を受け取って、bus に逆向き ExternalEvent
-//      を push する (async)。
+//   2. Sidecar からの `ChildToParent` (= ready / delegateAck / delegateError
+//      / terminateAck) を受け取って、bus に逆向き ExternalEvent を push
+//      する (async)。`ready` は handshake で `SubprocessSidecar.start()` 内
+//      で吸い取られるので、ここに届くのは spurious 再 emit のみ。
 //
 //   3. 起動直後の復旧 (`recoverInflight`): `FfiStore.listDelegations()` を
-//      読み、各 delegation について sidecar に `restoredDelegate` を送る。
-//      sidecar 側 (= user code) が per-delegation で「冪等じゃないので
-//      delegateError 返す」「冪等なので走らせる」を選ぶ。escalation は
-//      sidecar 跨ぎで継続不能なので drop + warn。
+//      読み、各 delegation について sidecar に `delegateRestored` を送る。
+//      sidecar 側 (= user code) が `isRestored: true` を見て per-delegation
+//      で「冪等じゃないので throw」「冪等なので走らせる」を選ぶ。
+//
+// Escalation (= ext → core / ext → ext call) と log IPC は本リビジョンの
+// protocol には含まれない (= 別 RFC で v2 として追加予定)。
 //
 // 注意: 1 FfiModule = 1 sidecar = 1 snapshot scope。`ffiStore` は予め
 // その scope に bind 済みのインスタンスを受け取る (= storage layer 側で
 // 構築する)。
 
-import type { AgentDefId } from "../agent-def-id.js";
 import { CORE_ENDPOINT, FFI_ENDPOINT } from "./endpoints.js";
 import type { ExternalEvent } from "../engine/event.js";
-import type { DelegationId, EscalationId } from "../engine/id.js";
+import type { DelegationId } from "../engine/id.js";
 import type { Endpoint } from "../engine/endpoint.js";
 import type { Logger } from "../engine/logger.js";
 import type { Value } from "../engine/value.js";
@@ -32,7 +34,7 @@ import type { RawValue } from "../value-codec.js";
 import type { Module } from "../module.js";
 import type { Sidecar } from "../sidecar/sidecar.js";
 import type { FfiStore } from "../sidecar/store.js";
-import type { ChildToParent } from "../sidecar/types.js";
+import { PROTOCOL_VERSION, type ChildToParent } from "../sidecar/types.js";
 
 export type FfiModuleOptions = {
   /**
@@ -77,7 +79,12 @@ export class FfiModule implements Module {
         await this.handleInboundTerminate(event);
         return { outbound: [] };
       case "escalateAck":
-        await this.handleInboundEscalateAck(event);
+        // protocol v1 では escalate 経路を扱わない。 escalation 自体が
+        // sidecar 側から発火しないので escalateAck もここには来ない
+        // (= 来たら CORE / bus 側のバグ)。
+        this.logger.log("warn", "ffi: escalateAck in v1 protocol (dropped)", {
+          from: event.from,
+        });
         return { outbound: [] };
       case "delegateAck":
       case "terminateAck":
@@ -100,7 +107,7 @@ export class FfiModule implements Module {
 
   /**
    * Server 起動直後に呼ぶ。store から in-flight delegation を読んで sidecar
-   * に `restoredDelegate` を送り、escalation は drop + warn する。
+   * に `delegateRestored` を送る。
    *
    * 注: sidecar が起動済み (= `start()` 済) であることを前提とする。
    */
@@ -109,28 +116,30 @@ export class FfiModule implements Module {
     for (const row of delegations) {
       try {
         await this.sidecar.send({
-          type: "restoredDelegate",
+          type: "delegateRestored",
+          protocolVersion: PROTOCOL_VERSION,
           delegationId: row.delegationId,
           agentDefId: row.agentDefId,
           args: argsToRaw(row.args),
         });
       } catch (err) {
-        this.logger.log("error", "ffi: restoredDelegate send failed", {
+        this.logger.log("error", "ffi: delegateRestored send failed", {
           delegationId: row.delegationId,
           err: err instanceof Error ? err.message : String(err),
         });
       }
     }
 
+    // protocol v1 では escalate 経路が無いので、 store 上に残っている
+    // escalation row は (古い data か CORE 側の予期せぬ書き込みの) いずれ
+    // にせよ clean up しておく。
     const escalations = await this.store.listEscalations();
     for (const row of escalations) {
-      this.logger.log("warn", "ffi: dropping cross-restart escalation", {
+      this.logger.log("warn", "ffi: dropping stale escalation row", {
         escalationId: row.escalationId,
         delegationId: row.delegationId,
       });
       await this.store.deleteEscalation(row.escalationId);
-      // CORE が以後 escalateAck を投げてくる場合に備えてレコードは消す。
-      // 対応する delegation は restoredDelegate で別途 user に判断させる。
     }
   }
 
@@ -149,6 +158,7 @@ export class FfiModule implements Module {
     });
     await this.sidecar.send({
       type: "delegate",
+      protocolVersion: PROTOCOL_VERSION,
       delegationId,
       agentDefId,
       args: argsToRaw(args),
@@ -165,24 +175,10 @@ export class FfiModule implements Module {
       });
       return;
     }
-    await this.sidecar.send({ type: "terminate", delegationId });
-  }
-
-  private async handleInboundEscalateAck(event: ExternalEvent): Promise<void> {
-    if (event.payload.kind !== "escalateAck") return;
-    const { escalationId, value } = event.payload;
-    const pending = await this.store.getEscalation(escalationId);
-    if (pending === null) {
-      this.logger.log("debug", "ffi: escalateAck for unknown escalation", {
-        escalationId,
-      });
-      return;
-    }
-    await this.store.deleteEscalation(escalationId);
     await this.sidecar.send({
-      type: "escalateAck",
-      escalationId,
-      value: valueToRaw(value),
+      type: "terminate",
+      protocolVersion: PROTOCOL_VERSION,
+      delegationId,
     });
   }
 
@@ -200,9 +196,9 @@ export class FfiModule implements Module {
   private async dispatchSidecarMessage(msg: ChildToParent): Promise<void> {
     switch (msg.type) {
       case "ready":
-        return;
-      case "log":
-        this.logger.log(msg.level, `sidecar: ${msg.message}`, msg.context);
+        // start() で吸い取られる handshake。 ここに来たら spurious 再 emit
+        // (= sidecar 側の bug) なので drop。
+        this.logger.log("debug", "ffi: spurious ready from sidecar");
         return;
       case "delegateAck": {
         const peer = await this.consumePendingDelegationPeer(msg.delegationId);
@@ -225,9 +221,9 @@ export class FfiModule implements Module {
           message: msg.message,
         });
         if (peer === null) return;
-        // v1: surface as terminateAck (= treat as "the call ended without
-        // a value"). Future protocol revision should add a dedicated
-        // `delegateError` external event.
+        // protocol v1: surface as terminateAck (= "the call ended without
+        // producing a value"). A dedicated cross-module `delegateError`
+        // event is a future RFC.
         this.onSidecarResponse({
           from: this.endpoint,
           to: peer,
@@ -251,31 +247,6 @@ export class FfiModule implements Module {
         });
         return;
       }
-      case "escalate": {
-        const peer = await this.peerForDelegation(msg.delegationId);
-        if (peer === null) return;
-        const argsValue = argsFromRaw(msg.args);
-        await this.store.insertEscalation({
-          escalationId: msg.escalationId,
-          delegationId: msg.delegationId,
-          peerEndpoint: peer,
-          agentDefId: msg.agentDefId,
-          args: argsValue,
-          createdAt: new Date().toISOString(),
-        });
-        this.onSidecarResponse({
-          from: this.endpoint,
-          to: peer,
-          payload: {
-            kind: "escalate",
-            delegationId: msg.delegationId,
-            escalationId: msg.escalationId,
-            agentDefId: msg.agentDefId,
-            args: argsValue,
-          },
-        });
-        return;
-      }
     }
   }
 
@@ -293,24 +264,10 @@ export class FfiModule implements Module {
     await this.store.deleteDelegation(delegationId);
     return row.peerEndpoint;
   }
-
-  /** Pending delegation の peer (escalate 用) を引く (削除はしない)。 */
-  private async peerForDelegation(
-    delegationId: DelegationId,
-  ): Promise<Endpoint | null> {
-    const row = await this.store.getDelegation(delegationId);
-    if (row === null) {
-      this.logger.log("debug", "ffi: escalate for unknown delegationId", {
-        delegationId,
-      });
-      return null;
-    }
-    return row.peerEndpoint;
-  }
 }
 
 // type re-exports for convenience
-export type { AgentDefId, EscalationId, Value };
+export type { Value };
 void CORE_ENDPOINT;
 
 // ─── Value ↔ Raw helpers (sidecar wire boundary) ───────────────────────────
@@ -323,11 +280,5 @@ void CORE_ENDPOINT;
 function argsToRaw(args: Record<string, Value>): Record<string, RawValue> {
   const out: Record<string, RawValue> = {};
   for (const [k, v] of Object.entries(args)) out[k] = valueToRaw(v);
-  return out;
-}
-
-function argsFromRaw(args: Record<string, RawValue>): Record<string, Value> {
-  const out: Record<string, Value> = {};
-  for (const [k, v] of Object.entries(args)) out[k] = valueFromRaw(v);
   return out;
 }

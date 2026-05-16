@@ -1,0 +1,25 @@
+{
+  "name": "katari-port",
+  "version": "0.1.0",
+  "description": "Katari user-facing FFI SDK: register ext agent handlers that run in a Katari sidecar subprocess.",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js",
+    "./protocol": "./dist/protocol.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run --passWithNoTests"
+  },
+  "peerDependencies": {
+    "katari-runtime": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "katari-runtime": "workspace:*",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  }
+}

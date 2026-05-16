@@ -21,12 +21,14 @@ export {
   CORE_ENDPOINT,
   FFI_ENDPOINT,
   FfiModule,
-  InProcessSidecar,
+  MockSidecar,
   SidecarManager,
+  SubprocessSidecar,
+  loadSubprocessSidecar,
 } from "katari-runtime";
 export type {
   FfiStore,
-  InProcessHandler,
+  MockAgentHandler,
   Sidecar,
   SidecarBundle,
   SidecarFactory,
