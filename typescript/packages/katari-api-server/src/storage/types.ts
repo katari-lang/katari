@@ -171,6 +171,13 @@ export type FfiPendingDelegation = {
   args: Record<string, Value>;
   state: "running" | "cancelling";
   createdAt: string;
+  /**
+   * Non-null when this delegation was started by an ext handler via
+   * `katari.delegate(...)`. Points at the ext invocation that owns it
+   * so the FfiModule can route escalate relays and terminate orphans
+   * on restart.
+   */
+  parentExtDelegationId: DelegationId | null;
 };
 
 export interface FfiPendingDelegationRepo {
@@ -182,6 +189,10 @@ export interface FfiPendingDelegationRepo {
   ): Promise<boolean>;
   delete(delegationId: DelegationId): Promise<boolean>;
   listBySnapshot(snapshotId: SnapshotId): Promise<FfiPendingDelegation[]>;
+  /** Children of a given ext-call delegation (= parentExtDelegationId match). */
+  listChildrenOf(
+    parentDelegationId: DelegationId,
+  ): Promise<FfiPendingDelegation[]>;
 }
 
 export type FfiPendingEscalation = {

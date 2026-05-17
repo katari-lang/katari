@@ -174,21 +174,12 @@ export class Orchestrator {
     snapshotId: SnapshotId,
     msg: ChildToParent,
   ): Promise<void> {
-    // Run a fresh tick that lets the per-tick FfiModule see this message
-    // and translate it into an ExternalEvent push on the bus. We
-    // re-attach the message handler to the per-tick FfiModule by
-    // replaying the message after FfiModule.feed sets up its own
-    // onMessage subscription.
-    //
-    // Simplest approach: open a tick whose body manually invokes
-    // ffi.dispatchSidecarMessage. We expose that via a thin helper on
-    // FfiModule (not yet — for now, push the equivalent event directly).
-    //
-    // For v1 we reconstruct the event from the message via the
-    // FfiStore peer lookup, then push onto the per-tick bus.
+    // Open a fresh tick and route the message through the per-tick
+    // FfiModule. FfiModule.dispatchSidecarMessage updates the store
+    // and pushes the resulting bus events; bus.drain() then runs the
+    // engine + downstream modules to completion.
     await this.tick(snapshotId, async (ctx) => {
-      const event = await this.sidecarMessageToEvent(ctx.tx, snapshotId, msg);
-      if (event !== null) ctx.bus.push(event);
+      await ctx.ffi.dispatchSidecarMessage(msg);
     }).catch((err) => {
       this.logger.log("error", "orchestrator: tick failed for sidecar message", {
         snapshotId,
@@ -196,68 +187,6 @@ export class Orchestrator {
         err: err instanceof Error ? err.message : String(err),
       });
     });
-  }
-
-  private async sidecarMessageToEvent(
-    tx: Storage,
-    snapshotId: SnapshotId,
-    msg: ChildToParent,
-  ): Promise<ExternalEvent | null> {
-    const lookupPeer = async (
-      delegationId: import("katari-runtime").DelegationId,
-    ): Promise<import("katari-runtime").Endpoint | null> => {
-      const row = await tx.ffiDelegations.get(delegationId);
-      if (row === null || row.snapshotId !== snapshotId) return null;
-      return row.peerEndpoint as import("katari-runtime").Endpoint;
-    };
-    switch (msg.type) {
-      case "ready":
-        return null;
-      case "delegateAck": {
-        const peer = await lookupPeer(msg.delegationId);
-        if (peer === null) return null;
-        await tx.ffiDelegations.delete(msg.delegationId);
-        return {
-          from: FFI_ENDPOINT,
-          to: peer,
-          payload: {
-            kind: "delegateAck",
-            delegationId: msg.delegationId,
-            value: valueFromRaw(msg.value),
-          },
-        };
-      }
-      case "delegateError": {
-        const peer = await lookupPeer(msg.delegationId);
-        this.logger.log("warn", "ffi sidecar delegate failed", {
-          delegationId: msg.delegationId,
-          message: msg.message,
-        });
-        if (peer === null) return null;
-        await tx.ffiDelegations.delete(msg.delegationId);
-        return {
-          from: FFI_ENDPOINT,
-          to: peer,
-          payload: {
-            kind: "terminateAck",
-            delegationId: msg.delegationId,
-          },
-        };
-      }
-      case "terminateAck": {
-        const peer = await lookupPeer(msg.delegationId);
-        if (peer === null) return null;
-        await tx.ffiDelegations.delete(msg.delegationId);
-        return {
-          from: FFI_ENDPOINT,
-          to: peer,
-          payload: {
-            kind: "terminateAck",
-            delegationId: msg.delegationId,
-          },
-        };
-      }
-    }
   }
 
   private sidecarFor(snapshotId: SnapshotId): Sidecar | null {

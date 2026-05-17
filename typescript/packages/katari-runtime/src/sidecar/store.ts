@@ -16,8 +16,13 @@ import type { Value } from "../engine/value.js";
 /**
  * FFI Module が「自分が sidecar に投げて返答待ち」のレコード。
  *
- *   - `peerEndpoint`: ack を返す相手 (= 通常 CORE)
+ *   - `peerEndpoint`: ack を返す相手 (= ext call の caller、 通常 CORE)
  *   - `agentDefId`:   wire 上で受け取った encoding (= FFI 側の名前空間)
+ *   - `parentExtDelegationId`: ext-delegated child agent のみ非 null。
+ *     ext handler が `katari.delegate(...)` で起こした子 agent の場合、
+ *     ここに「ext call 自体の delegationId」 が入る。 これにより
+ *     escalate 中継時に親 ext delegation の peer を引ける + restart 時に
+ *     orphan 子を terminate できる。
  */
 export type FfiPendingDelegation = {
   delegationId: DelegationId;
@@ -26,6 +31,7 @@ export type FfiPendingDelegation = {
   args: Record<string, Value>;
   state: "running" | "cancelling";
   createdAt: string;
+  parentExtDelegationId: DelegationId | null;
 };
 
 /**
@@ -50,8 +56,10 @@ export interface FfiStore {
     state: "running" | "cancelling",
   ): Promise<boolean>;
   deleteDelegation(id: DelegationId): Promise<boolean>;
-  /** 起動時 `restoredDelegate` 送信用に scope 内全件返す。 */
+  /** 起動時 `ipcDelegateRestarted` 送信 + child terminate 発火用に scope 内全件返す。 */
   listDelegations(): Promise<FfiPendingDelegation[]>;
+  /** 指定の親 ext delegation を `parentExtDelegationId` に持つ子 delegations を返す。 */
+  listChildrenOf(parentId: DelegationId): Promise<FfiPendingDelegation[]>;
 
   // ─── Pending escalations ──────────────────────────────────────────────
   insertEscalation(row: FfiPendingEscalation): Promise<void>;

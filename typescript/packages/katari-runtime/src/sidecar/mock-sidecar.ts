@@ -56,7 +56,7 @@ export class MockSidecar implements Sidecar {
 
   async start(): Promise<void> {
     queueMicrotask(() => {
-      this.cb?.({ type: "ready", protocolVersion: PROTOCOL_VERSION });
+      this.cb?.({ type: "ipcReady", protocolVersion: PROTOCOL_VERSION });
     });
   }
 
@@ -69,13 +69,13 @@ export class MockSidecar implements Sidecar {
       return;
     }
     switch (msg.type) {
-      case "delegate":
+      case "ipcDelegate":
         void this.handleDelegate(msg, false);
         return;
-      case "delegateRestored":
+      case "ipcDelegateRestarted":
         void this.handleDelegate(msg, true);
         return;
-      case "terminate": {
+      case "ipcTerminate": {
         const entry = this.inflight.get(msg.delegationId);
         if (entry !== undefined) {
           entry.terminating = true;
@@ -83,12 +83,23 @@ export class MockSidecar implements Sidecar {
           return;
         }
         this.cb?.({
-          type: "terminateAck",
+          type: "ipcTerminateAck",
           protocolVersion: PROTOCOL_VERSION,
           delegationId: msg.delegationId,
         });
         return;
       }
+      case "ipcChildDelegateAck":
+      case "ipcChildTerminateAck":
+        // Child delegations aren't routed back into a MockSidecar
+        // handler (= mocks don't run katari-port's child dispatch
+        // logic). Tests that need to exercise child delegations should
+        // use SubprocessSidecar against a real bundle.
+        this.logger.log(
+          "debug",
+          `mock sidecar: ignoring ${msg.type} (no child-delegate path in mock)`,
+        );
+        return;
     }
   }
 
@@ -105,7 +116,10 @@ export class MockSidecar implements Sidecar {
   }
 
   private async handleDelegate(
-    msg: Extract<ParentToChild, { type: "delegate" | "delegateRestored" }>,
+    msg: Extract<
+      ParentToChild,
+      { type: "ipcDelegate" | "ipcDelegateRestarted" }
+    >,
     isRestored: boolean,
   ): Promise<void> {
     // AgentDefId is documented as a flat dotted-name string on the
@@ -115,7 +129,7 @@ export class MockSidecar implements Sidecar {
     const handler = this.handlers.get(key);
     if (handler === undefined) {
       this.cb?.({
-        type: "delegateError",
+        type: "ipcDelegateError",
         protocolVersion: PROTOCOL_VERSION,
         delegationId: msg.delegationId,
         message: `mock sidecar: no handler for ${key}`,
@@ -141,7 +155,7 @@ export class MockSidecar implements Sidecar {
     }
     if (entry.terminating) {
       this.cb?.({
-        type: "terminateAck",
+        type: "ipcTerminateAck",
         protocolVersion: PROTOCOL_VERSION,
         delegationId: msg.delegationId,
       });
@@ -149,7 +163,7 @@ export class MockSidecar implements Sidecar {
     }
     if (error !== null) {
       this.cb?.({
-        type: "delegateError",
+        type: "ipcDelegateError",
         protocolVersion: PROTOCOL_VERSION,
         delegationId: msg.delegationId,
         message: error instanceof Error ? error.message : String(error),
@@ -157,7 +171,7 @@ export class MockSidecar implements Sidecar {
       return;
     }
     this.cb?.({
-      type: "delegateAck",
+      type: "ipcDelegateAck",
       protocolVersion: PROTOCOL_VERSION,
       delegationId: msg.delegationId,
       value: value as RawValue,

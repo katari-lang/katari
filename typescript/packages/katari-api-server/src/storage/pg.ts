@@ -424,11 +424,13 @@ class PgFfiPendingDelegationRepo implements FfiPendingDelegationRepo {
 
   async insert(row: FfiPendingDelegation): Promise<void> {
     await this.sql`
-      INSERT INTO ffi_pending_delegations (delegation_id, snapshot_id, peer_endpoint, agent_def_id, args, state, created_at)
+      INSERT INTO ffi_pending_delegations
+        (delegation_id, snapshot_id, peer_endpoint, agent_def_id, args, state, created_at, parent_ext_delegation_id)
       VALUES (${row.delegationId}, ${row.snapshotId}, ${row.peerEndpoint},
               ${this.sql.json(asJson(row.agentDefId))},
               ${this.sql.json(asJson(row.args))},
-              ${row.state}, ${row.createdAt})
+              ${row.state}, ${row.createdAt},
+              ${row.parentExtDelegationId})
     `;
   }
 
@@ -442,9 +444,10 @@ class PgFfiPendingDelegationRepo implements FfiPendingDelegationRepo {
         args: Record<string, Value>;
         state: "running" | "cancelling";
         created_at: Date;
+        parent_ext_delegation_id: string | null;
       }[]
     >`
-      SELECT delegation_id, snapshot_id, peer_endpoint, agent_def_id, args, state, created_at
+      SELECT delegation_id, snapshot_id, peer_endpoint, agent_def_id, args, state, created_at, parent_ext_delegation_id
       FROM ffi_pending_delegations WHERE delegation_id = ${delegationId}
     `;
     const row = rows[0];
@@ -457,6 +460,10 @@ class PgFfiPendingDelegationRepo implements FfiPendingDelegationRepo {
       args: row.args,
       state: row.state,
       createdAt: row.created_at.toISOString(),
+      parentExtDelegationId:
+        row.parent_ext_delegation_id === null
+          ? null
+          : (row.parent_ext_delegation_id as DelegationId),
     };
   }
 
@@ -487,9 +494,10 @@ class PgFfiPendingDelegationRepo implements FfiPendingDelegationRepo {
         args: Record<string, Value>;
         state: "running" | "cancelling";
         created_at: Date;
+        parent_ext_delegation_id: string | null;
       }[]
     >`
-      SELECT delegation_id, snapshot_id, peer_endpoint, agent_def_id, args, state, created_at
+      SELECT delegation_id, snapshot_id, peer_endpoint, agent_def_id, args, state, created_at, parent_ext_delegation_id
       FROM ffi_pending_delegations WHERE snapshot_id = ${snapshotId}
     `;
     return rows.map((row) => ({
@@ -500,6 +508,44 @@ class PgFfiPendingDelegationRepo implements FfiPendingDelegationRepo {
       args: row.args,
       state: row.state,
       createdAt: row.created_at.toISOString(),
+      parentExtDelegationId:
+        row.parent_ext_delegation_id === null
+          ? null
+          : (row.parent_ext_delegation_id as DelegationId),
+    }));
+  }
+
+  async listChildrenOf(
+    parentDelegationId: DelegationId,
+  ): Promise<FfiPendingDelegation[]> {
+    const rows = await this.sql<
+      {
+        delegation_id: string;
+        snapshot_id: string;
+        peer_endpoint: string;
+        agent_def_id: AgentDefId;
+        args: Record<string, Value>;
+        state: "running" | "cancelling";
+        created_at: Date;
+        parent_ext_delegation_id: string | null;
+      }[]
+    >`
+      SELECT delegation_id, snapshot_id, peer_endpoint, agent_def_id, args, state, created_at, parent_ext_delegation_id
+      FROM ffi_pending_delegations
+      WHERE parent_ext_delegation_id = ${parentDelegationId}
+    `;
+    return rows.map((row) => ({
+      delegationId: row.delegation_id as DelegationId,
+      snapshotId: row.snapshot_id as SnapshotId,
+      peerEndpoint: row.peer_endpoint,
+      agentDefId: row.agent_def_id,
+      args: row.args,
+      state: row.state,
+      createdAt: row.created_at.toISOString(),
+      parentExtDelegationId:
+        row.parent_ext_delegation_id === null
+          ? null
+          : (row.parent_ext_delegation_id as DelegationId),
     }));
   }
 }

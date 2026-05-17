@@ -300,6 +300,14 @@ class InMemoryFfiPendingDelegationRepo implements FfiPendingDelegationRepo {
       .filter((r) => r.snapshotId === snapshotId)
       .map(clone);
   }
+
+  async listChildrenOf(
+    parentDelegationId: DelegationId,
+  ): Promise<FfiPendingDelegation[]> {
+    return [...this.rows.values()]
+      .filter((r) => r.parentExtDelegationId === parentDelegationId)
+      .map(clone);
+  }
 }
 
 class InMemoryFfiPendingEscalationRepo implements FfiPendingEscalationRepo {

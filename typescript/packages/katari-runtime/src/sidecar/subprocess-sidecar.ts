@@ -80,7 +80,7 @@ export class SubprocessSidecar implements Sidecar {
       const onLine = (line: string): void => {
         const msg = parseChildLine(line, this.opts.logger);
         if (msg === null) return;
-        if (msg.type === "ready") {
+        if (msg.type === "ipcReady") {
           clearTimeout(timer);
           this.rl?.off("line", onLine);
           this.rl?.on("line", (l) => this.handleLine(l));
@@ -165,7 +165,7 @@ export class SubprocessSidecar implements Sidecar {
   private handleLine(line: string): void {
     const msg = parseChildLine(line, this.opts.logger);
     if (msg === null) return;
-    if (msg.type === "ready") {
+    if (msg.type === "ipcReady") {
       // Extra ready after start() resolves — log and ignore.
       this.opts.logger.log("debug", "sidecar: spurious ready after start");
       return;

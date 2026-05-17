@@ -35,6 +35,7 @@ export class StorageFfiStore implements FfiStore {
       args: row.args,
       state: row.state,
       createdAt: row.createdAt,
+      parentExtDelegationId: row.parentExtDelegationId,
     });
   }
 
@@ -60,6 +61,15 @@ export class StorageFfiStore implements FfiStore {
       this.snapshotId,
     );
     return rows.map(toRuntimeDelegation);
+  }
+
+  async listChildrenOf(
+    parentId: DelegationId,
+  ): Promise<FfiPendingDelegation[]> {
+    const rows = await this.storage.ffiDelegations.listChildrenOf(parentId);
+    return rows
+      .filter((r) => r.snapshotId === this.snapshotId)
+      .map(toRuntimeDelegation);
   }
 
   // ─── Escalations ────────────────────────────────────────────────────────
@@ -102,6 +112,7 @@ function toRuntimeDelegation(row: DbDelegation): FfiPendingDelegation {
     args: row.args,
     state: row.state,
     createdAt: row.createdAt,
+    parentExtDelegationId: row.parentExtDelegationId,
   };
 }
 

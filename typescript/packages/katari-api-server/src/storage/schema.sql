@@ -52,16 +52,23 @@ CREATE INDEX IF NOT EXISTS agents_delegation_idx
   ON agents (delegation_id);
 
 CREATE TABLE IF NOT EXISTS ffi_pending_delegations (
-  delegation_id  UUID PRIMARY KEY,
-  snapshot_id    UUID NOT NULL REFERENCES snapshots(id) ON DELETE CASCADE,
-  peer_endpoint  TEXT NOT NULL,
-  agent_def_id   JSONB NOT NULL,
-  args           JSONB NOT NULL,
-  state          TEXT NOT NULL,             -- running / cancelling
-  created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+  delegation_id            UUID PRIMARY KEY,
+  snapshot_id              UUID NOT NULL REFERENCES snapshots(id) ON DELETE CASCADE,
+  peer_endpoint            TEXT NOT NULL,
+  agent_def_id             JSONB NOT NULL,
+  args                     JSONB NOT NULL,
+  state                    TEXT NOT NULL,             -- running / cancelling
+  created_at               TIMESTAMPTZ NOT NULL DEFAULT now(),
+  -- NULL = parent delegation (caller → ext); non-NULL = ext-spawned
+  -- child agent that was started via katari.delegate(...). The value
+  -- points at the owning ext invocation so escalate relays and restart
+  -- cleanup can find the parent.
+  parent_ext_delegation_id UUID
 );
 CREATE INDEX IF NOT EXISTS ffi_pending_delegations_snapshot_idx
   ON ffi_pending_delegations (snapshot_id);
+CREATE INDEX IF NOT EXISTS ffi_pending_delegations_parent_idx
+  ON ffi_pending_delegations (parent_ext_delegation_id);
 
 CREATE TABLE IF NOT EXISTS ffi_pending_escalations (
   escalation_id  UUID PRIMARY KEY,

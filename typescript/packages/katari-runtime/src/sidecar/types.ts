@@ -1,4 +1,4 @@
-// Sidecar bundle + IPC protocol types.
+// Sidecar bundle + IPC protocol types — protocol v2.
 //
 // **Sidecar**: subprocess that the FFI Runner spawns per snapshot. The
 // user's bundled JS (built with the Katari CLI + `katari-port`) runs
@@ -9,6 +9,14 @@
 // **Protocol versioning**: every message carries `protocolVersion`.
 // Receivers fail-fast on mismatch so a new parent talking to an old
 // child (or vice-versa) is detected before any state diverges.
+//
+// **v1 → v2 delta**: v2 adds the "ext spawns a CORE-side child agent"
+// path (`ipcChildDelegate` / `ipcChildTerminate` from C→P,
+// `ipcChildDelegateAck` / `ipcChildTerminateAck` from P→C) plus an
+// `ipc` prefix on every variant to disambiguate from bus event kinds.
+// Escalate / log / shutdown are still not on the wire — FfiModule
+// relays escalate on the bus, console.* is redirected to stderr, and
+// graceful shutdown uses SIGTERM → SIGKILL.
 
 import type { AgentDefId } from "../agent-def-id.js";
 import type { DelegationId } from "../engine/id.js";
@@ -18,7 +26,7 @@ import type { RawValue } from "../value-codec.js";
 void (null as unknown as QualifiedName); // referenced via AgentDefId encoding
 
 /** Current wire protocol version. Bump when adding/changing a message. */
-export const PROTOCOL_VERSION = 1;
+export const PROTOCOL_VERSION = 2;
 
 /**
  * Bundled sidecar source. v1 is a single ESM string (esbuild output)
@@ -33,12 +41,12 @@ export type SidecarBundle = {
   schemaVersion: 1;
 };
 
-// ─── IPC protocol (7 message variants) ─────────────────────────────────────
+// ─── IPC protocol (11 message variants, all `ipc`-prefixed) ────────────────
 
 /** Parent (FFI Module) → Child (Sidecar). */
 export type ParentToChild =
   | {
-      type: "delegate";
+      type: "ipcDelegate";
       protocolVersion: number;
       delegationId: DelegationId;
       agentDefId: AgentDefId;
@@ -46,40 +54,80 @@ export type ParentToChild =
     }
   | {
       /**
-       * Same payload as `delegate` but flagged as "this was already
-       * in flight before the parent restarted". User code should
-       * decide per-call whether to fail-safe (return delegateError to
-       * avoid duplicate side effects) or re-run (idempotent calls).
+       * Same payload as `ipcDelegate` but flagged as "this was already
+       * in flight before the parent restarted". User code branches on
+       * `isRestored` to fail-safe (return error to avoid duplicate
+       * side effects) or re-run (idempotent calls).
        */
-      type: "delegateRestored";
+      type: "ipcDelegateRestarted";
       protocolVersion: number;
       delegationId: DelegationId;
       agentDefId: AgentDefId;
       args: Record<string, RawValue>;
     }
   | {
-      type: "terminate";
+      type: "ipcTerminate";
+      protocolVersion: number;
+      delegationId: DelegationId;
+    }
+  | {
+      /**
+       * Result for a child agent the ext started via `katari.delegate`.
+       * `delegationId` is the child's id (= the one the sidecar
+       * generated and sent in `ipcChildDelegate`).
+       */
+      type: "ipcChildDelegateAck";
+      protocolVersion: number;
+      delegationId: DelegationId;
+      value: RawValue;
+    }
+  | {
+      /**
+       * Cancellation completion for a child agent the ext cancelled
+       * via `ipcChildTerminate` (or that was killed during a parent
+       * restart's cleanup pass).
+       */
+      type: "ipcChildTerminateAck";
       protocolVersion: number;
       delegationId: DelegationId;
     };
 
 /** Child (Sidecar) → Parent (FFI Module). */
 export type ChildToParent =
-  | { type: "ready"; protocolVersion: number }
+  | { type: "ipcReady"; protocolVersion: number }
   | {
-      type: "delegateAck";
+      type: "ipcDelegateAck";
       protocolVersion: number;
       delegationId: DelegationId;
       value: RawValue;
     }
   | {
-      type: "delegateError";
+      type: "ipcDelegateError";
       protocolVersion: number;
       delegationId: DelegationId;
       message: string;
     }
   | {
-      type: "terminateAck";
+      type: "ipcTerminateAck";
+      protocolVersion: number;
+      delegationId: DelegationId;
+    }
+  | {
+      /**
+       * Ext is starting a CORE-side child agent via `katari.delegate`.
+       * `parentDelegationId` is the ext invocation that owns the
+       * child; `delegationId` is the freshly-minted id for the child.
+       */
+      type: "ipcChildDelegate";
+      protocolVersion: number;
+      parentDelegationId: DelegationId;
+      delegationId: DelegationId;
+      agentDefId: AgentDefId;
+      args: Record<string, RawValue>;
+    }
+  | {
+      /** Ext is cancelling a child agent it previously started. */
+      type: "ipcChildTerminate";
       protocolVersion: number;
       delegationId: DelegationId;
     };

@@ -1,68 +1,93 @@
-// Wire-level IPC protocol between the Katari runtime (parent) and the
-// katari-port subprocess (child). 7 message variants, all tagged with
-// `protocolVersion` so receivers can fail-fast on a mismatch.
+// Wire-level IPC protocol — v2. 11 message variants, all `ipc`-prefixed,
+// every payload tagged with `protocolVersion` so receivers fail-fast on
+// a mismatch.
 //
-// Parent → Child (3 variants):
-//   - delegate          : fresh invocation
-//   - delegateRestored  : same payload as delegate but re-issued after a
-//                         parent restart; handler should treat as
-//                         at-least-once delivery
-//   - terminate         : cancel an in-flight delegation
+// Parent → Child (5):
+//   - ipcDelegate           : fresh invocation
+//   - ipcDelegateRestarted  : re-issued after a parent restart
+//   - ipcTerminate          : cancel an in-flight delegation
+//   - ipcChildDelegateAck   : result of a child agent started via
+//                             katari.delegate
+//   - ipcChildTerminateAck  : cancel completion for a child agent
 //
-// Child → Parent (4 variants):
-//   - ready             : sent once after the subprocess finishes loading
-//                         the user bundle (= all `katari.agent(...)`
-//                         registrations have run)
-//   - delegateAck       : delegation completed successfully
-//   - delegateError     : delegation failed (handler threw or unknown
-//                         agentDefId)
-//   - terminateAck      : terminate is observed (either cancelled
-//                         in-flight, completed before the terminate
-//                         arrived, or unknown delegation id — all three
-//                         produce the same ack so the parent's
-//                         send/recv stays a direct 1:1 pair)
+// Child → Parent (6):
+//   - ipcReady              : bundle finished evaluating, ready to dispatch
+//   - ipcDelegateAck        : ext handler completed
+//   - ipcDelegateError      : ext handler threw (or no handler registered)
+//   - ipcTerminateAck       : ext handler observed the terminate
+//   - ipcChildDelegate      : ext wants to start a CORE-side child agent
+//   - ipcChildTerminate     : ext wants to cancel a child agent
+//
+// Escalation (= ext → core req cap) is **not** on the wire — child
+// agents emit req asks from inside CORE; the FfiModule relays the
+// resulting escalate event on the bus to the parent agent's handle
+// scope without involving the sidecar at all.
 
 import type { RawValue } from "katari-runtime";
 
-export const PROTOCOL_VERSION = 1;
+export const PROTOCOL_VERSION = 2;
 
 export type ParentToChild =
   | {
-      type: "delegate";
+      type: "ipcDelegate";
       protocolVersion: number;
       delegationId: string;
       agentDefId: string;
       args: Record<string, RawValue>;
     }
   | {
-      type: "delegateRestored";
+      type: "ipcDelegateRestarted";
       protocolVersion: number;
       delegationId: string;
       agentDefId: string;
       args: Record<string, RawValue>;
     }
   | {
-      type: "terminate";
+      type: "ipcTerminate";
       protocolVersion: number;
       delegationId: string;
-    };
-
-export type ChildToParent =
-  | { type: "ready"; protocolVersion: number }
+    }
   | {
-      type: "delegateAck";
+      type: "ipcChildDelegateAck";
       protocolVersion: number;
       delegationId: string;
       value: RawValue;
     }
   | {
-      type: "delegateError";
+      type: "ipcChildTerminateAck";
+      protocolVersion: number;
+      delegationId: string;
+    };
+
+export type ChildToParent =
+  | { type: "ipcReady"; protocolVersion: number }
+  | {
+      type: "ipcDelegateAck";
+      protocolVersion: number;
+      delegationId: string;
+      value: RawValue;
+    }
+  | {
+      type: "ipcDelegateError";
       protocolVersion: number;
       delegationId: string;
       message: string;
     }
   | {
-      type: "terminateAck";
+      type: "ipcTerminateAck";
+      protocolVersion: number;
+      delegationId: string;
+    }
+  | {
+      type: "ipcChildDelegate";
+      protocolVersion: number;
+      parentDelegationId: string;
+      delegationId: string;
+      agentDefId: string;
+      args: Record<string, RawValue>;
+    }
+  | {
+      type: "ipcChildTerminate";
       protocolVersion: number;
       delegationId: string;
     };

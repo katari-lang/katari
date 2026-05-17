@@ -1,23 +1,40 @@
 // FfiModule — runtime 側の FFI Runner。`Module` interface 実装。
 //
-// 役割 (protocol v1, 7 message variants):
+// 役割 (protocol v2, 11 message variants):
 //
-//   1. CORE → FFI 方向の inbound event (= delegate / terminate) を受け取り、
-//      対応する `ParentToChild` IPC message を sidecar に送る。同時に自分の
-//      `FfiStore` に persistent 状態を書く。
+//   1. CORE → FFI 方向の inbound event を受け取って sidecar や bus に
+//      取り次ぐ:
 //
-//   2. Sidecar からの `ChildToParent` (= ready / delegateAck / delegateError
-//      / terminateAck) を受け取って、bus に逆向き ExternalEvent を push
-//      する (async)。`ready` は handshake で `SubprocessSidecar.start()` 内
-//      で吸い取られるので、ここに届くのは spurious 再 emit のみ。
+//        - `delegate` (CORE が ext を呼んだ): store insert + `ipcDelegate`
+//        - `terminate` (CORE が ext を cancel): store setState + `ipcTerminate`
+//        - `delegateAck` / `terminateAck` (= ext が起こした child agent の終了):
+//          store から「親 ext delegation」 を引いて sidecar に
+//          `ipcChildDelegateAck` / `ipcChildTerminateAck` を返す
+//        - `escalate` (= ext-spawned child agent が発火した escalate):
+//          そのまま「親 ext delegation の caller」 に向けて bus に再 push
+//          (sidecar には届けない、 ExternalThread の handle scope chain に届く)
+//        - `escalateAck` (上の escalate に対する逆方向 ack): in-memory
+//          escalation map から original child の endpoint を引き、 同じく
+//          bus に再 push
 //
-//   3. 起動直後の復旧 (`recoverInflight`): `FfiStore.listDelegations()` を
-//      読み、各 delegation について sidecar に `delegateRestored` を送る。
-//      sidecar 側 (= user code) が `isRestored: true` を見て per-delegation
-//      で「冪等じゃないので throw」「冪等なので走らせる」を選ぶ。
+//   2. Sidecar からの `ChildToParent` を受けて bus / store を更新:
 //
-// Escalation (= ext → core / ext → ext call) と log IPC は本リビジョンの
-// protocol には含まれない (= 別 RFC で v2 として追加予定)。
+//        - `ipcReady`: handshake で start() に吸われるので spurious のみ
+//        - `ipcDelegateAck` / `ipcDelegateError` / `ipcTerminateAck`:
+//          ext invocation の終了。 store から peer を引いて逆向き bus event
+//        - `ipcChildDelegate`: ext が CORE 側に child agent を起動。
+//          parentExtDelegationId 付きで store insert + bus に
+//          `{from: FFI, to: CORE, kind: delegate}` を発火
+//        - `ipcChildTerminate`: ext が child を cancel。 bus に terminate を発火
+//
+//   3. 起動直後の復旧 (`recoverInflight`):
+//
+//        - parent ext delegation (= `parentExtDelegationId === null`) には
+//          `ipcDelegateRestarted` を投げて handler に「restart 後」 と知らせる
+//        - 子 delegation (= ext が katari.delegate で起こしたもの) は ext
+//          側 Promise が失われているので CORE 側で terminate を発火 + store
+//          から削除 (orphan cleanup)
+//        - 残ってる escalation row は全削除 (sidecar 跨ぎで継続不能)
 //
 // 注意: 1 FfiModule = 1 sidecar = 1 snapshot scope。`ffiStore` は予め
 // その scope に bind 済みのインスタンスを受け取る (= storage layer 側で
@@ -25,7 +42,7 @@
 
 import { CORE_ENDPOINT, FFI_ENDPOINT } from "./endpoints.js";
 import type { ExternalEvent } from "../engine/event.js";
-import type { DelegationId } from "../engine/id.js";
+import type { DelegationId, EscalationId } from "../engine/id.js";
 import type { Endpoint } from "../engine/endpoint.js";
 import type { Logger } from "../engine/logger.js";
 import type { Value } from "../engine/value.js";
@@ -51,12 +68,24 @@ export type FfiModuleOptions = {
   logger: Logger;
 };
 
+interface EscalationRelayEntry {
+  /** Original (= source) child delegationId that produced the escalate. */
+  childDelegationId: DelegationId;
+}
+
 export class FfiModule implements Module {
   readonly endpoint: Endpoint;
   private readonly sidecar: Sidecar;
   private readonly store: FfiStore;
   private readonly logger: Logger;
   private readonly onSidecarResponse: (event: ExternalEvent) => void;
+  /**
+   * In-memory escalation relay state. Keyed by `escalationId` (= the
+   * id the sender assigned). Lost on restart by design — that matches
+   * the user-approved policy: pending escalations across restarts get
+   * dropped, and the eventual ack is treated as unknown.
+   */
+  private readonly escalations = new Map<EscalationId, EscalationRelayEntry>();
 
   constructor(opts: FfiModuleOptions) {
     this.endpoint = opts.endpoint ?? FFI_ENDPOINT;
@@ -64,8 +93,11 @@ export class FfiModule implements Module {
     this.store = opts.store;
     this.logger = opts.logger;
     this.onSidecarResponse = opts.onSidecarResponse;
-
-    this.sidecar.onMessage((msg) => this.handleSidecarMessage(msg));
+    // Note: we do NOT subscribe `sidecar.onMessage` here. The host
+    // (orchestrator / api-server) owns the long-lived sidecar message
+    // pump; it calls `dispatchSidecarMessage` from inside a tick so
+    // every message is processed through the per-tick FfiModule (and
+    // the transactional store it owns).
   }
 
   // ─── Module interface ───────────────────────────────────────────────────
@@ -78,23 +110,17 @@ export class FfiModule implements Module {
       case "terminate":
         await this.handleInboundTerminate(event);
         return { outbound: [] };
-      case "escalateAck":
-        // protocol v1 では escalate 経路を扱わない。 escalation 自体が
-        // sidecar 側から発火しないので escalateAck もここには来ない
-        // (= 来たら CORE / bus 側のバグ)。
-        this.logger.log("warn", "ffi: escalateAck in v1 protocol (dropped)", {
-          from: event.from,
-        });
-        return { outbound: [] };
       case "delegateAck":
+        await this.handleInboundChildDelegateAck(event);
+        return { outbound: [] };
       case "terminateAck":
+        await this.handleInboundChildTerminateAck(event);
+        return { outbound: [] };
       case "escalate":
-        // FFI Module は受信側ではない方向の event。Bus が誤って
-        // routing しない限り来ない。drop with debug log。
-        this.logger.log("debug", "ffi: unexpected inbound event for FFI", {
-          kind: event.payload.kind,
-          from: event.from,
-        });
+        await this.handleInboundEscalate(event);
+        return { outbound: [] };
+      case "escalateAck":
+        await this.handleInboundEscalateAck(event);
         return { outbound: [] };
     }
   }
@@ -106,33 +132,61 @@ export class FfiModule implements Module {
   // ─── Recovery ──────────────────────────────────────────────────────────
 
   /**
-   * Server 起動直後に呼ぶ。store から in-flight delegation を読んで sidecar
-   * に `delegateRestored` を送る。
+   * Server 起動直後に呼ぶ。 store の in-flight rows を以下のように整理する:
+   *
+   *   - parent (`parentExtDelegationId === null`): `ipcDelegateRestarted` 送信
+   *   - child (`parentExtDelegationId != null`): bus に terminate を発火 +
+   *     store から削除 (= ext 側 Promise が消えてるので CORE 側を強制 kill)
    *
    * 注: sidecar が起動済み (= `start()` 済) であることを前提とする。
    */
   async recoverInflight(): Promise<void> {
     const delegations = await this.store.listDelegations();
+    const orphanChildren: typeof delegations = [];
+    const parents: typeof delegations = [];
     for (const row of delegations) {
+      if (row.parentExtDelegationId === null) parents.push(row);
+      else orphanChildren.push(row);
+    }
+
+    // Restart 通知を先に送る — sidecar が child を再 spawn する race を
+    // 避けるため、 orphan terminate より先に handler に走らせる。
+    for (const row of parents) {
       try {
         await this.sidecar.send({
-          type: "delegateRestored",
+          type: "ipcDelegateRestarted",
           protocolVersion: PROTOCOL_VERSION,
           delegationId: row.delegationId,
           agentDefId: row.agentDefId,
           args: argsToRaw(row.args),
         });
       } catch (err) {
-        this.logger.log("error", "ffi: delegateRestored send failed", {
+        this.logger.log("error", "ffi: ipcDelegateRestarted send failed", {
           delegationId: row.delegationId,
           err: err instanceof Error ? err.message : String(err),
         });
       }
     }
 
-    // protocol v1 では escalate 経路が無いので、 store 上に残っている
-    // escalation row は (古い data か CORE 側の予期せぬ書き込みの) いずれ
-    // にせよ clean up しておく。
+    for (const row of orphanChildren) {
+      // Tell CORE to terminate the orphan child agent thread, then drop
+      // the row. CORE will eventually emit `terminateAck` for it on the
+      // bus; our terminateAck handler will see "child of an unknown
+      // ext", treat it as already-cleaned, and drop again.
+      this.onSidecarResponse({
+        from: this.endpoint,
+        to: CORE_ENDPOINT,
+        payload: {
+          kind: "terminate",
+          delegationId: row.delegationId,
+        },
+      });
+      await this.store.deleteDelegation(row.delegationId);
+    }
+
+    // Escalations across restarts are unsalvageable: the sidecar's
+    // in-memory pendingEscalations map is gone too. Wipe whatever's in
+    // the store.
     const escalations = await this.store.listEscalations();
     for (const row of escalations) {
       this.logger.log("warn", "ffi: dropping stale escalation row", {
@@ -155,9 +209,10 @@ export class FfiModule implements Module {
       args,
       state: "running",
       createdAt: new Date().toISOString(),
+      parentExtDelegationId: null,
     });
     await this.sidecar.send({
-      type: "delegate",
+      type: "ipcDelegate",
       protocolVersion: PROTOCOL_VERSION,
       delegationId,
       agentDefId,
@@ -176,31 +231,178 @@ export class FfiModule implements Module {
       return;
     }
     await this.sidecar.send({
-      type: "terminate",
+      type: "ipcTerminate",
       protocolVersion: PROTOCOL_VERSION,
       delegationId,
     });
   }
 
-  // ─── Outbound (Sidecar → FFI → bus) ────────────────────────────────────
-
-  private handleSidecarMessage(msg: ChildToParent): void {
-    void this.dispatchSidecarMessage(msg).catch((err) => {
-      this.logger.log("error", "ffi: dispatch sidecar message threw", {
-        type: msg.type,
-        err: err instanceof Error ? err.message : String(err),
+  /**
+   * `from: CORE, to: FFI, kind: delegateAck` — ext-spawned child agent
+   * が成功裏に完了した。 child row を store から引いて、 親 ext call の
+   * sidecar に `ipcChildDelegateAck` を投げる。
+   */
+  private async handleInboundChildDelegateAck(
+    event: ExternalEvent,
+  ): Promise<void> {
+    if (event.payload.kind !== "delegateAck") return;
+    const { delegationId, value } = event.payload;
+    const row = await this.store.getDelegation(delegationId);
+    if (row === null) {
+      this.logger.log("debug", "ffi: delegateAck for unknown child", {
+        delegationId,
       });
+      return;
+    }
+    if (row.parentExtDelegationId === null) {
+      this.logger.log(
+        "warn",
+        "ffi: delegateAck arrived for non-child delegation (= unexpected, dropping)",
+        { delegationId },
+      );
+      return;
+    }
+    await this.store.deleteDelegation(delegationId);
+    await this.sidecar.send({
+      type: "ipcChildDelegateAck",
+      protocolVersion: PROTOCOL_VERSION,
+      delegationId,
+      value: valueToRaw(value),
     });
   }
 
-  private async dispatchSidecarMessage(msg: ChildToParent): Promise<void> {
+  /**
+   * `from: CORE, to: FFI, kind: terminateAck` — ext-spawned child agent
+   * の cancel が完了した。
+   */
+  private async handleInboundChildTerminateAck(
+    event: ExternalEvent,
+  ): Promise<void> {
+    if (event.payload.kind !== "terminateAck") return;
+    const { delegationId } = event.payload;
+    const row = await this.store.getDelegation(delegationId);
+    if (row === null) {
+      // Could be the orphan-cleanup pass acking after recoverInflight
+      // already deleted the row. Silent drop.
+      this.logger.log("debug", "ffi: terminateAck for unknown child", {
+        delegationId,
+      });
+      return;
+    }
+    if (row.parentExtDelegationId === null) {
+      this.logger.log(
+        "warn",
+        "ffi: terminateAck arrived for non-child delegation (= unexpected, dropping)",
+        { delegationId },
+      );
+      return;
+    }
+    await this.store.deleteDelegation(delegationId);
+    await this.sidecar.send({
+      type: "ipcChildTerminateAck",
+      protocolVersion: PROTOCOL_VERSION,
+      delegationId,
+    });
+  }
+
+  /**
+   * Escalate relay. A CORE-side child agent (= one the ext spawned via
+   * `katari.delegate`) raised a req ask, its root AgentThread had no
+   * handler, so `emitEscalateUpward` shipped the event to us. Look up
+   * the owning ext delegation's caller and re-push the escalate on the
+   * bus to that caller — the sidecar is bypassed.
+   */
+  private async handleInboundEscalate(event: ExternalEvent): Promise<void> {
+    if (event.payload.kind !== "escalate") return;
+    const { delegationId, escalationId, agentDefId, args } = event.payload;
+    const childRow = await this.store.getDelegation(delegationId);
+    if (childRow === null) {
+      this.logger.log("debug", "ffi: escalate for unknown child delegation", {
+        delegationId,
+        escalationId,
+      });
+      return;
+    }
+    if (childRow.parentExtDelegationId === null) {
+      this.logger.log(
+        "warn",
+        "ffi: escalate from non-child delegation (dropping)",
+        { delegationId },
+      );
+      return;
+    }
+    const parentRow = await this.store.getDelegation(
+      childRow.parentExtDelegationId,
+    );
+    if (parentRow === null) {
+      this.logger.log("debug", "ffi: escalate parent already gone", {
+        delegationId,
+        parentExtDelegationId: childRow.parentExtDelegationId,
+      });
+      return;
+    }
+    this.escalations.set(escalationId, {
+      childDelegationId: delegationId,
+    });
+    this.onSidecarResponse({
+      from: this.endpoint,
+      to: parentRow.peerEndpoint,
+      payload: {
+        kind: "escalate",
+        delegationId: childRow.parentExtDelegationId,
+        escalationId,
+        agentDefId,
+        args,
+      },
+    });
+  }
+
+  /**
+   * Escalate ack relay. The handle scope handler returned; ship the ack
+   * back toward the original child via CORE.
+   */
+  private async handleInboundEscalateAck(event: ExternalEvent): Promise<void> {
+    if (event.payload.kind !== "escalateAck") return;
+    const { escalationId, value } = event.payload;
+    const entry = this.escalations.get(escalationId);
+    if (entry === undefined) {
+      this.logger.log(
+        "debug",
+        "ffi: escalateAck for unknown escalation (= probably restart-dropped)",
+        { escalationId },
+      );
+      return;
+    }
+    this.escalations.delete(escalationId);
+    this.onSidecarResponse({
+      from: this.endpoint,
+      to: CORE_ENDPOINT,
+      payload: {
+        kind: "escalateAck",
+        escalationId,
+        value,
+      },
+    });
+    // Avoid lint for unused variable in case of future refactor
+    void entry;
+  }
+
+  // ─── Outbound (Sidecar → FFI → bus) ────────────────────────────────────
+
+  /**
+   * Process one `ChildToParent` IPC message. The host (orchestrator)
+   * calls this from inside a tick so the per-tick FfiModule + store
+   * stay transactional. Errors are logged + swallowed (= a bad message
+   * shouldn't crash the orchestrator's tick).
+   */
+  async dispatchSidecarMessage(msg: ChildToParent): Promise<void> {
     switch (msg.type) {
-      case "ready":
+      case "ipcReady":
         // start() で吸い取られる handshake。 ここに来たら spurious 再 emit
         // (= sidecar 側の bug) なので drop。
         this.logger.log("debug", "ffi: spurious ready from sidecar");
         return;
-      case "delegateAck": {
+      case "ipcDelegateAck": {
         const peer = await this.consumePendingDelegationPeer(msg.delegationId);
         if (peer === null) return;
         this.onSidecarResponse({
@@ -214,16 +416,17 @@ export class FfiModule implements Module {
         });
         return;
       }
-      case "delegateError": {
+      case "ipcDelegateError": {
         const peer = await this.consumePendingDelegationPeer(msg.delegationId);
         this.logger.log("warn", "sidecar reported delegate error", {
           delegationId: msg.delegationId,
           message: msg.message,
         });
         if (peer === null) return;
-        // protocol v1: surface as terminateAck (= "the call ended without
-        // producing a value"). A dedicated cross-module `delegateError`
-        // event is a future RFC.
+        // protocol v2: still surface ext-handler error as terminateAck on
+        // the bus (= "the call ended without producing a value"). A
+        // dedicated cross-module `delegateError` event awaits the CORE
+        // error-typing RFC.
         this.onSidecarResponse({
           from: this.endpoint,
           to: peer,
@@ -234,7 +437,7 @@ export class FfiModule implements Module {
         });
         return;
       }
-      case "terminateAck": {
+      case "ipcTerminateAck": {
         const peer = await this.consumePendingDelegationPeer(msg.delegationId);
         if (peer === null) return;
         this.onSidecarResponse({
@@ -242,6 +445,50 @@ export class FfiModule implements Module {
           to: peer,
           payload: {
             kind: "terminateAck",
+            delegationId: msg.delegationId,
+          },
+        });
+        return;
+      }
+      case "ipcChildDelegate": {
+        // Ext is starting a CORE-side child. Persist the child row
+        // (parentExtDelegationId pointing at the ext call) and push a
+        // delegate event on the bus toward CORE.
+        await this.store.insertDelegation({
+          delegationId: msg.delegationId,
+          peerEndpoint: this.endpoint, // ack comes back to us
+          agentDefId: msg.agentDefId,
+          args: argsFromRaw(msg.args),
+          state: "running",
+          createdAt: new Date().toISOString(),
+          parentExtDelegationId: msg.parentDelegationId,
+        });
+        this.onSidecarResponse({
+          from: this.endpoint,
+          to: CORE_ENDPOINT,
+          payload: {
+            kind: "delegate",
+            delegationId: msg.delegationId,
+            agentDefId: msg.agentDefId,
+            args: argsFromRaw(msg.args),
+          },
+        });
+        return;
+      }
+      case "ipcChildTerminate": {
+        const row = await this.store.getDelegation(msg.delegationId);
+        if (row === null || row.parentExtDelegationId === null) {
+          this.logger.log("debug", "ffi: child terminate for unknown child", {
+            delegationId: msg.delegationId,
+          });
+          return;
+        }
+        await this.store.setDelegationState(msg.delegationId, "cancelling");
+        this.onSidecarResponse({
+          from: this.endpoint,
+          to: CORE_ENDPOINT,
+          payload: {
+            kind: "terminate",
             delegationId: msg.delegationId,
           },
         });
@@ -261,6 +508,14 @@ export class FfiModule implements Module {
       });
       return null;
     }
+    if (row.parentExtDelegationId !== null) {
+      this.logger.log(
+        "warn",
+        "ffi: ext-handler ack arrived for a child delegation (= unexpected)",
+        { delegationId },
+      );
+      return null;
+    }
     await this.store.deleteDelegation(delegationId);
     return row.peerEndpoint;
   }
@@ -268,7 +523,6 @@ export class FfiModule implements Module {
 
 // type re-exports for convenience
 export type { Value };
-void CORE_ENDPOINT;
 
 // ─── Value ↔ Raw helpers (sidecar wire boundary) ───────────────────────────
 //
@@ -280,5 +534,11 @@ void CORE_ENDPOINT;
 function argsToRaw(args: Record<string, Value>): Record<string, RawValue> {
   const out: Record<string, RawValue> = {};
   for (const [k, v] of Object.entries(args)) out[k] = valueToRaw(v);
+  return out;
+}
+
+function argsFromRaw(args: Record<string, RawValue>): Record<string, Value> {
+  const out: Record<string, Value> = {};
+  for (const [k, v] of Object.entries(args)) out[k] = valueFromRaw(v);
   return out;
 }

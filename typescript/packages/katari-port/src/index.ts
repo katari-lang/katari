@@ -1,16 +1,16 @@
 // katari-port — user-facing FFI SDK.
 //
 // User code imports this package's default export and calls
-// `katari.agent(name, handler)` to register ext-agent implementations.
-// The actual IPC machinery (stdio listener, console redirect) does
-// **not** run on import — it only activates once `__startSidecar()` is
-// invoked, which the Katari CLI bundler appends to the synthetic entry.
+// `katari.agent(name, handler)` to register ext-agent implementations,
+// and `katari.delegate(callable, args, opts?)` from inside a handler
+// to start a CORE-side child agent (e.g. an AI tool call, a cron
+// notify callback, a discord-event router).
 //
-// Splitting "registration" from "activation" lets tooling (tests,
-// linters, `tsc`) import the package safely without commandeering
-// stdin / stdout. User code that runs outside a Katari host (e.g.
-// `node main.ts` for hand-testing) simply never registers a listener,
-// so `katari.agent(...)` calls are recorded but no IPC is performed.
+// The IPC machinery (stdio listener, console redirect) does **not** run
+// on import — it only activates once `__startSidecar()` is invoked,
+// which the Katari CLI bundler appends to the synthetic entry. Splitting
+// "registration" from "activation" lets tooling (tests, linters, `tsc`)
+// import the package safely without commandeering stdin / stdout.
 
 import { stdin, stdout, stderr, exit } from "node:process";
 import { createInterface } from "node:readline";
@@ -22,6 +22,7 @@ import {
 import type {
   AgentContext,
   AgentHandler,
+  DelegateOptions,
   KatariPort,
   RawValue,
 } from "./types.js";
@@ -36,11 +37,16 @@ interface InflightEntry {
 }
 const inflight = new Map<string, InflightEntry>();
 
-// The bundler wraps each user module in `__withModule(qname, () => {...})`
-// so `katari.agent(localName, handler)` resolves to a fully-qualified
-// registry key. Outside any such wrapper the qname is "" — that's a
-// programming error during normal use, surfaced by the registry-clash
-// check inside `agent()`.
+interface PendingChild {
+  resolve(value: RawValue): void;
+  reject(error: Error): void;
+  signal: AbortSignal | null;
+  abortListener: (() => void) | null;
+  /** Set to true once we send ipcChildTerminate so the next ack settles as cancel. */
+  terminating: boolean;
+}
+const pendingChildren = new Map<string, PendingChild>();
+
 let currentModuleQname = "";
 
 // ─── Public API singleton ──────────────────────────────────────────────────
@@ -55,6 +61,10 @@ const katari: KatariPort = {
       throw new Error(`katari-port: handler already registered for ${key}`);
     }
     registry.set(key, handler);
+  },
+
+  delegate(callable, args, opts) {
+    return delegateChild(callable, args, opts ?? {});
   },
 };
 
@@ -79,8 +89,6 @@ declare global {
 };
 
 // ─── Sidecar activation (called from the bundler-generated entry) ──────────
-//
-// Sets up stdio IPC, redirects console.*, and emits `ready`. Idempotent.
 
 let started = false;
 let stdoutWrite: ((chunk: string) => boolean) | null = null;
@@ -107,14 +115,144 @@ const send = (msg: ChildToParent): void => {
   stdoutWrite(`${JSON.stringify(msg)}\n`);
 };
 
+// ─── Currently-delegating context plumbing ─────────────────────────────────
+//
+// When a handler calls `katari.delegate(...)`, we need to know which
+// delegationId the child belongs to so the parent side can find the
+// owning ext call. We thread the current delegation id through a stack
+// (handlers can compose, e.g. a handler that awaits another handler's
+// helper, although ext handlers don't typically nest beyond one level).
+
+const delegationStack: string[] = [];
+const currentDelegationId = (): string | null =>
+  delegationStack.length === 0 ? null : delegationStack[delegationStack.length - 1]!;
+
+function generateChildDelegationId(): string {
+  // 128 bit random hex. Collisions across the whole runtime would
+  // require billions of in-flight delegations, so this is fine for now.
+  const a = Math.floor(Math.random() * 0xffffffff)
+    .toString(16)
+    .padStart(8, "0");
+  const b = Math.floor(Math.random() * 0xffffffff)
+    .toString(16)
+    .padStart(8, "0");
+  const c = Math.floor(Math.random() * 0xffffffff)
+    .toString(16)
+    .padStart(8, "0");
+  const d = Math.floor(Math.random() * 0xffffffff)
+    .toString(16)
+    .padStart(8, "0");
+  return `child-${a}${b}${c}${d}`;
+}
+
+async function delegateChild(
+  callable: RawValue,
+  args: Record<string, RawValue>,
+  opts: DelegateOptions,
+): Promise<RawValue> {
+  if (typeof callable !== "string") {
+    throw new Error(
+      `katari.delegate: callable must be a flat-string RawValue (agent def id), got ${typeof callable}`,
+    );
+  }
+  const parentDelegationId = currentDelegationId();
+  if (parentDelegationId === null) {
+    throw new Error(
+      "katari.delegate: must be called from inside a katari.agent handler",
+    );
+  }
+  if (!started) {
+    throw new Error(
+      "katari.delegate: sidecar not started — wait for __startSidecar()",
+    );
+  }
+  const childId = generateChildDelegationId();
+  return new Promise<RawValue>((resolve, reject) => {
+    const entry: PendingChild = {
+      resolve,
+      reject,
+      signal: opts.signal ?? null,
+      abortListener: null,
+      terminating: false,
+    };
+    pendingChildren.set(childId, entry);
+
+    if (opts.signal !== undefined) {
+      if (opts.signal.aborted) {
+        sendChildTerminate(childId);
+        entry.terminating = true;
+      } else {
+        const listener = (): void => {
+          if (!pendingChildren.has(childId)) return;
+          sendChildTerminate(childId);
+          entry.terminating = true;
+        };
+        opts.signal.addEventListener("abort", listener, { once: true });
+        entry.abortListener = listener;
+      }
+    }
+
+    send({
+      type: "ipcChildDelegate",
+      protocolVersion: PROTOCOL_VERSION,
+      parentDelegationId,
+      delegationId: childId,
+      agentDefId: callable,
+      args,
+    });
+  });
+}
+
+function sendChildTerminate(childId: string): void {
+  send({
+    type: "ipcChildTerminate",
+    protocolVersion: PROTOCOL_VERSION,
+    delegationId: childId,
+  });
+}
+
+function settlePendingChild(
+  childId: string,
+  outcome:
+    | { kind: "ack"; value: RawValue }
+    | { kind: "terminate" }
+    | { kind: "error"; message: string },
+): void {
+  const entry = pendingChildren.get(childId);
+  if (entry === undefined) return;
+  pendingChildren.delete(childId);
+  if (entry.abortListener !== null && entry.signal !== null) {
+    entry.signal.removeEventListener("abort", entry.abortListener);
+  }
+  if (outcome.kind === "ack") {
+    if (entry.terminating) {
+      // Race: we sent terminate but ack arrived first. Treat as ack
+      // (the value is real; the cancel races to next time).
+    }
+    entry.resolve(outcome.value);
+    return;
+  }
+  if (outcome.kind === "error") {
+    entry.reject(new Error(outcome.message));
+    return;
+  }
+  // terminate
+  const err = new Error("katari.delegate: child terminated");
+  (err as Error & { name: string }).name = "AbortError";
+  entry.reject(err);
+}
+
 async function handleDelegate(
-  msg: Extract<ParentToChild, { type: "delegate" | "delegateRestored" }>,
+  msg: Extract<
+    ParentToChild,
+    { type: "ipcDelegate" | "ipcDelegateRestarted" }
+  >,
   isRestored: boolean,
 ): Promise<void> {
   const handler = registry.get(msg.agentDefId);
   if (handler === undefined) {
     send({
-      type: "delegateError",
+      type: "ipcDelegateError",
       protocolVersion: PROTOCOL_VERSION,
       delegationId: msg.delegationId,
       message: `katari-port: no handler registered for ${msg.agentDefId}`,
@@ -126,6 +264,7 @@ async function handleDelegate(
     terminating: false,
   };
   inflight.set(msg.delegationId, entry);
+  delegationStack.push(msg.delegationId);
   const ctx: AgentContext = {
     args: msg.args,
     delegationId: msg.delegationId,
@@ -140,10 +279,20 @@ async function handleDelegate(
     error = err;
   } finally {
     inflight.delete(msg.delegationId);
+    const top = delegationStack.pop();
+    if (top !== msg.delegationId) {
+      // Should never happen because handlers don't nest, but log so we
+      // notice if it ever does.
+      stderr.write(
+        `[katari-port] delegation stack drift: popped ${String(
+          top,
+        )} expected ${msg.delegationId}\n`,
+      );
+    }
   }
   if (entry.terminating) {
     send({
-      type: "terminateAck",
+      type: "ipcTerminateAck",
       protocolVersion: PROTOCOL_VERSION,
       delegationId: msg.delegationId,
     });
@@ -151,7 +300,7 @@ async function handleDelegate(
   }
   if (error !== null) {
     send({
-      type: "delegateError",
+      type: "ipcDelegateError",
       protocolVersion: PROTOCOL_VERSION,
       delegationId: msg.delegationId,
       message: error instanceof Error ? error.message : String(error),
@@ -159,7 +308,7 @@ async function handleDelegate(
     return;
   }
   send({
-    type: "delegateAck",
+    type: "ipcDelegateAck",
     protocolVersion: PROTOCOL_VERSION,
     delegationId: msg.delegationId,
     value: value as RawValue,
@@ -177,8 +326,6 @@ export const __startSidecar = (): void => {
 
   stdoutWrite = stdout.write.bind(stdout);
 
-  // stdout is the IPC channel; rebind console.* to stderr so user
-  // `console.log` calls don't corrupt the protocol stream.
   console.log = redirectConsole("console.log");
   console.info = redirectConsole("console.info");
   console.warn = redirectConsole("console.warn");
@@ -210,30 +357,35 @@ export const __startSidecar = (): void => {
       exit(1);
     }
     switch (msg.type) {
-      case "delegate":
+      case "ipcDelegate":
         void handleDelegate(msg, false);
         return;
-      case "delegateRestored":
+      case "ipcDelegateRestarted":
         void handleDelegate(msg, true);
         return;
-      case "terminate": {
+      case "ipcTerminate": {
         const entry = inflight.get(msg.delegationId);
         if (entry !== undefined) {
           entry.terminating = true;
           entry.ctrl.abort();
-          // The Ack is emitted by handleDelegate once the handler
-          // observes the abort (or finishes naturally).
           return;
         }
-        // Either the delegation already completed or it never reached
-        // us. Either way: respond idempotently.
         send({
-          type: "terminateAck",
+          type: "ipcTerminateAck",
           protocolVersion: PROTOCOL_VERSION,
           delegationId: msg.delegationId,
         });
         return;
       }
+      case "ipcChildDelegateAck":
+        settlePendingChild(msg.delegationId, {
+          kind: "ack",
+          value: msg.value,
+        });
+        return;
+      case "ipcChildTerminateAck":
+        settlePendingChild(msg.delegationId, { kind: "terminate" });
+        return;
       default: {
         const unknown = (msg as { type: string }).type;
         stderr.write(`[katari-port] unknown message type: ${unknown}\n`);
@@ -242,13 +394,14 @@ export const __startSidecar = (): void => {
     }
   });
 
-  send({ type: "ready", protocolVersion: PROTOCOL_VERSION });
+  send({ type: "ipcReady", protocolVersion: PROTOCOL_VERSION });
 };
 
 export default katari;
 export type {
   AgentContext,
   AgentHandler,
+  DelegateOptions,
   KatariPort,
   RawValue,
 } from "./types.js";
