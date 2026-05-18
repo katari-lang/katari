@@ -71,10 +71,6 @@ function validateConfig(raw: unknown, path: string): KatariConfig {
     typeof compile.src === "string" && compile.src.length > 0
       ? compile.src
       : "src/";
-  const compileRoot =
-    typeof compile.root === "string" && compile.root.length > 0
-      ? compile.root
-      : undefined;
   const sidecar = isObject(raw.sidecar) ? raw.sidecar : undefined;
   const sidecarSourceRoots = (() => {
     if (sidecar === undefined) return undefined;
@@ -97,7 +93,7 @@ function validateConfig(raw: unknown, path: string): KatariConfig {
 
   return {
     project,
-    compile: { src: compileSrc, root: compileRoot },
+    compile: { src: compileSrc },
     sidecar:
       sidecarSourceRoots !== undefined
         ? { sourceRoots: sidecarSourceRoots }

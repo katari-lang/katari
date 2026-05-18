@@ -238,4 +238,50 @@ describe("samples/ end-to-end (compile → upload → run → verify)", () => {
       expect(result).toBe("ext threw: kaboom from JS");
     },
   );
+
+  // Schema/qualifiedName round-trip via the agent-definition API. This
+  // path was previously dormant because the compiler used to emit
+  // `qualifiedName` as a `{ module_, name }` object while the TS type
+  // declared it as a flat dotted string. The mismatch made
+  // `getAgentDefinition` always return 404 silently.
+  itE2E(
+    "01-hello: schemaBundle.qualifiedName is a flat dotted string and getAgentDefinition resolves",
+    async () => {
+      const harness = buildTestHarness();
+      active = harness;
+      const api = clientFor(harness.app);
+      const project = await api.upsertProject("hello-schema");
+      const { irModule, schemaBundle } = await compile({
+        srcPath: resolve(SAMPLES_ROOT, "01-hello", "src"),
+      });
+      const { snapshotId } = await api.uploadSnapshot({
+        projectId: project.id,
+        irModule,
+        sidecarBundle: null,
+        schemaBundle: schemaBundle ?? trivialSchemaBundle(),
+      });
+
+      // 1. Every emitted agent definition uses a flat string for
+      //    qualifiedName (no { module_, name } object shape).
+      const { definitions } = await api.listAgentDefinitions({
+        projectId: project.id,
+        snapshotId,
+      });
+      expect(definitions.length).toBeGreaterThan(0);
+      for (const d of definitions) {
+        expect(typeof d.qualifiedName).toBe("string");
+      }
+      const names = definitions.map((d) => d.qualifiedName);
+      expect(names).toContain("main.main");
+
+      // 2. getAgentDefinition resolves via the flat name. (Used to
+      //    return 404 because the comparison was object === string.)
+      const { definition } = await api.getAgentDefinition({
+        projectId: project.id,
+        snapshotId,
+        qualifiedName: "main.main",
+      });
+      expect(definition.qualifiedName).toBe("main.main");
+    },
+  );
 });

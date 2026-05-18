@@ -51,7 +51,7 @@ lowerSource src =
                     Map.fromList [(RequestVariableId i, Set.empty) | i <- [0 .. cg.variableSupply.requestVarSupply - 1]]
                 }
             (zr, _) = zonk idResult cg solver
-        case lowerProgram "main" idResult zr of
+        case lowerProgram idResult zr of
           (Right ir, errs) -> pure (ir, errs)
           (Left internalDiag, _) ->
             fail ("lowering hit internal compiler error: " ++ show internalDiag)

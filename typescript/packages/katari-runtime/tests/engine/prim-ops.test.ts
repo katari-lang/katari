@@ -52,7 +52,6 @@ describe("engine: runner dispatches prim create without crashing", () => {
   it("runs a parentless prim through create", () => {
     const state = createState({
       metadata: { schemaVersion: 1 },
-      name: "test",
       blocks: {},
       entries: {},
       nameTable: { varNames: {}, blockNames: {} },

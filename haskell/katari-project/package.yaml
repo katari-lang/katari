@@ -1,0 +1,49 @@
+name: katari-project
+version: 0.1.0.0
+author: yukikurage
+license: MIT
+
+language: GHC2021
+
+library:
+  source-dirs: src
+  exposed-modules:
+    - Katari.Project.Config
+    - Katari.Project.Discovery
+    - Katari.Project.ModuleName
+
+tests:
+  katari-project-test:
+    main: Spec.hs
+    source-dirs: test
+    other-modules:
+      - Katari.Project.ConfigSpec
+      - Katari.Project.DiscoverySpec
+    dependencies:
+      - katari-project
+      - hspec
+      - directory
+      - filepath
+      - text
+      - containers
+      - temporary
+
+dependencies:
+  - base >= 4.18 && < 5
+  - text
+  - bytestring
+  - containers
+  - directory
+  - filepath
+  - mtl
+  - transformers
+
+default-extensions:
+  - LambdaCase
+  - OverloadedStrings
+  - DuplicateRecordFields
+  - NoFieldSelectors
+  - OverloadedRecordDot
+  - RecordWildCards
+  - StrictData
+  - DerivingStrategies

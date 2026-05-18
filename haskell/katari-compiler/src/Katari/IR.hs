@@ -144,13 +144,12 @@ currentIRMetadata = IRMetadata {schemaVersion = 1}
 -- let result = compile input
 -- case irModule result of
 --   Just ir -> encode ir  -- → {"metadata":{"schemaVersion":1},
---                         --    "name":"main","blocks":{...},
+--                         --    "blocks":{...},
 --                         --    "entries":{...},"nameTable":{...}}
 --   Nothing -> error "compilation failed"
 -- @
 data IRModule = IRModule
   { metadata :: IRMetadata,
-    name :: Text,
     blocks :: Map BlockId Block,
     -- | FFI inbound name resolution: @\<modulePath\>.\<bareName\>@ →
     -- 'BlockId'. Covers every top-level callable (agent / req / ext /

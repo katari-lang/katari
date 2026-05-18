@@ -39,10 +39,7 @@ export async function applyCmd(opts: ApplyOptions): Promise<void> {
   compileSpinner.start("Compiling sources");
   let compiled;
   try {
-    compiled = await compile({
-      srcPath,
-      rootModule: config.compile.root,
-    });
+    compiled = await compile({ srcPath });
     compileSpinner.stop("Compiled");
   } catch (err) {
     compileSpinner.stop(pc.red("Compile failed"), 1);

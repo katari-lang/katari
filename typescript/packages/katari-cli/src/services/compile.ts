@@ -29,12 +29,8 @@ function resolveBinary(): string {
  */
 export async function compile(opts: {
   srcPath: string;
-  rootModule?: string;
 }): Promise<CompileOutput> {
   const args = ["compile", opts.srcPath];
-  if (opts.rootModule !== undefined) {
-    args.push("--root", opts.rootModule);
-  }
   const { stdout } = await runBinary(args);
   let parsed: unknown;
   try {
@@ -61,12 +57,8 @@ export async function compile(opts: {
 
 export async function typecheck(opts: {
   srcPath: string;
-  rootModule?: string;
 }): Promise<void> {
   const args = ["typecheck", opts.srcPath];
-  if (opts.rootModule !== undefined) {
-    args.push("--root", opts.rootModule);
-  }
   await runBinary(args);
 }
 

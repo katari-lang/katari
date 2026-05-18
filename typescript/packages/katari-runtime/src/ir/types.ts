@@ -60,7 +60,6 @@ export type IRMetadata = {
 
 export type IRModule = {
   metadata: IRMetadata;
-  name: string;
   /** BlockId (number) as string key → Block */
   blocks: Record<string, Block>;
   /**

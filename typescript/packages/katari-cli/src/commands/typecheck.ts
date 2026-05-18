@@ -24,7 +24,7 @@ export async function typecheckCmd(opts: TypecheckOptions): Promise<void> {
   const spinner = p.spinner();
   spinner.start("Type-checking");
   try {
-    await typecheck({ srcPath, rootModule: config.compile.root });
+    await typecheck({ srcPath });
     spinner.stop(pc.green("✓ no errors"));
     p.outro("done");
   } catch (err) {

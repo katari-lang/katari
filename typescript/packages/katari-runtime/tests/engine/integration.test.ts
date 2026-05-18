@@ -27,7 +27,6 @@ import type {
 function ir(blocks: Record<number, Block>, entries: Record<string, number> = {}): IRModule {
   return {
     metadata: { schemaVersion: 1 },
-    name: "test",
     blocks: Object.fromEntries(
       Object.entries(blocks).map(([k, v]) => [k, v]),
     ) as IRModule["blocks"],

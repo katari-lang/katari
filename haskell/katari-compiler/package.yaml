@@ -44,6 +44,7 @@ executables:
     source-dirs: app
     dependencies:
       - katari-compiler
+      - katari-project
       - optparse-applicative
       - aeson
       - aeson-pretty

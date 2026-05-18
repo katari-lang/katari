@@ -82,14 +82,11 @@ data SourceEntry = SourceEntry
   }
   deriving (Show)
 
-data CompileInput = CompileInput
+newtype CompileInput = CompileInput
   { -- | Module name → source entry. The map is treated as the complete
     -- world: any module not present here is "missing" from the
     -- compiler's point of view.
-    sources :: Map ModuleName SourceEntry,
-    -- | The module that drives the build. Used as the IR module name and
-    -- as the root for missing-import detection.
-    rootModule :: ModuleName
+    sources :: Map ModuleName SourceEntry
   }
   deriving (Show)
 
@@ -130,9 +127,7 @@ data CompileResult = CompileResult
 -- import Data.Map.Strict qualified as Map
 --
 -- let src    = "agent hello() -> string { return \\"hello\\" }"
---     input  = CompileInput
---                { sources    = Map.singleton "main" (SourceEntry "main.ktr" src)
---                , rootModule = "main" }
+--     input  = CompileInput { sources = Map.singleton "main" (SourceEntry "main.ktr" src) }
 --     result = compile input
 -- null (diagnostics result)  -- True  (no errors)
 -- isJust (irModule result)   -- True  (IR was emitted)
@@ -167,7 +162,7 @@ compile input =
       shouldLower = not (hasErrors preLowerDiags)
       (loweredIR, loweringDiags)
         | shouldLower =
-            let (eitherIR, errs) = lowerProgram input.rootModule idResult zonkResult_
+            let (eitherIR, errs) = lowerProgram idResult zonkResult_
                 structuralDiags = map Lowering.toDiagnostic errs
              in case eitherIR of
                   Right ir -> (Just ir, structuralDiags)

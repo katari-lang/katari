@@ -2,6 +2,7 @@ snapshot: lts-22.44 # GHC 9.6.7
 
 packages:
   - haskell/katari-compiler
+  - haskell/katari-project
 
 ghc-options:
   "$locals": -Wall -Wcompat -Wincomplete-record-updates

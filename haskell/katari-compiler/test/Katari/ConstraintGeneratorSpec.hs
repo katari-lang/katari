@@ -58,7 +58,6 @@ compileOne src =
   let entry = Compile.SourceEntry {filePath = "<test>", sourceText = src}
       input = Compile.CompileInput
                 { sources = Map.singleton "main" entry
-                , rootModule = "main"
                 }
       result = Compile.compile input
   in pure result.diagnostics

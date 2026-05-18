@@ -63,7 +63,6 @@ export function literalReturnIR(literal: string, irName = "test"): IRModule {
   };
   return {
     metadata: { schemaVersion: 1 },
-    name: irName,
     blocks: Object.fromEntries(
       Object.entries(blocks).map(([k, v]) => [k, v]),
     ),
@@ -113,7 +112,6 @@ export function pausesOnExternalIR(irName = "test"): IRModule {
   };
   return {
     metadata: { schemaVersion: 1 },
-    name: irName,
     blocks: Object.fromEntries(
       Object.entries(blocks).map(([k, v]) => [k, v]),
     ),

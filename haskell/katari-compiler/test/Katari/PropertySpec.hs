@@ -106,8 +106,7 @@ compileDeterminism =
                           { filePath = "<property>",
                             sourceText = sourceText
                           }
-                      ),
-                  rootModule = "main"
+                      )
                 }
             r1 = compile mkInput
             r2 = compile mkInput

@@ -441,26 +441,24 @@ defaultUserBlock =
 -- Structural errors do not abort the pipeline (the IR may be partial),
 -- but an internal-error short-circuits early.
 lowerProgram ::
-  Text ->
   IdentifierResult ->
   ZonkResult ->
   (Either Diagnostic IRModule, [LoweringError])
-lowerProgram moduleName idResult zonk =
+lowerProgram idResult zonk =
   let (result, finalState) =
         runState
-          (runReaderT (runExceptT (lowerProgramM moduleName zonk)) (initialLowerEnv idResult zonk))
+          (runReaderT (runExceptT (lowerProgramM zonk)) (initialLowerEnv idResult zonk))
           initialLowerState
    in (result, reverse finalState.lsErrors)
 
-lowerProgramM :: Text -> ZonkResult -> Lower IRModule
-lowerProgramM moduleName zonkResult = do
+lowerProgramM :: ZonkResult -> Lower IRModule
+lowerProgramM zonkResult = do
   registerDeclarationKinds zonkResult
   _ <- lowerAllDeclarations zonkResult
   state <- gets id
   pure
     IRModule
       { metadata = currentIRMetadata,
-        name = moduleName,
         blocks = state.lsBlocks,
         entries = state.lsEntries,
         nameTable =

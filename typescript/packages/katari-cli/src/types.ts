@@ -7,7 +7,6 @@ export type KatariConfig = {
   project: string;
   compile: {
     src: string;
-    root?: string;
   };
   sidecar?: {
     /**

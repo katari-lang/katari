@@ -60,11 +60,7 @@ goldenCase path = describe ("compiling " <> takeBaseName path) $ do
             { filePath = path,
               sourceText = sourceText
             }
-        input =
-          CompileInput
-            { sources = Map.singleton "main" entry,
-              rootModule = "main"
-            }
+        input = CompileInput {sources = Map.singleton "main" entry}
     pure (compile input, sourceText)
 
   let (compiled, sourceText) = result

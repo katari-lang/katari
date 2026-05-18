@@ -19,15 +19,13 @@ import Test.Hspec
 singleSourceInput :: Text -> CompileInput
 singleSourceInput src =
   CompileInput
-    { sources = Map.singleton "main" SourceEntry {filePath = "main", sourceText = src},
-      rootModule = "main"
+    { sources = Map.singleton "main" SourceEntry {filePath = "main", sourceText = src}
     }
 
-multiSourceInput :: [(Text, Text)] -> Text -> CompileInput
-multiSourceInput pairs root =
+multiSourceInput :: [(Text, Text)] -> CompileInput
+multiSourceInput pairs =
   CompileInput
-    { sources = Map.fromList [(modName, SourceEntry {filePath = unpack modName, sourceText = src}) | (modName, src) <- pairs],
-      rootModule = root
+    { sources = Map.fromList [(modName, SourceEntry {filePath = unpack modName, sourceText = src}) | (modName, src) <- pairs]
     }
 
 -- ===========================================================================
@@ -185,7 +183,6 @@ multiModuleSpec = describe "multi-module input" $ do
                 [ ("util", "agent helper() { 1 }"),
                   ("main", "agent main() { 2 }")
                 ]
-                "main"
             )
     hasErrors result.diagnostics `shouldBe` False
     isJust result.irModule `shouldBe` True
