@@ -14,11 +14,7 @@
 
 import { stdin, stdout, stderr, exit } from "node:process";
 import { createInterface } from "node:readline";
-import {
-  PROTOCOL_VERSION,
-  type ChildToParent,
-  type ParentToChild,
-} from "./protocol.js";
+import type { ChildToParent, ParentToChild } from "./protocol.js";
 import type {
   AgentContext,
   AgentHandler,
@@ -194,7 +190,6 @@ async function delegateChild(
 
     send({
       type: "ipcChildDelegate",
-      protocolVersion: PROTOCOL_VERSION,
       parentDelegationId,
       delegationId: childId,
       agentDefId: callable,
@@ -206,7 +201,6 @@ async function delegateChild(
 function sendChildTerminate(childId: string): void {
   send({
     type: "ipcChildTerminate",
-    protocolVersion: PROTOCOL_VERSION,
     delegationId: childId,
   });
 }
@@ -253,7 +247,6 @@ async function handleDelegate(
   if (handler === undefined) {
     send({
       type: "ipcDelegateError",
-      protocolVersion: PROTOCOL_VERSION,
       delegationId: msg.delegationId,
       message: `katari-port: no handler registered for ${msg.agentDefId}`,
     });
@@ -293,7 +286,6 @@ async function handleDelegate(
   if (entry.terminating) {
     send({
       type: "ipcTerminateAck",
-      protocolVersion: PROTOCOL_VERSION,
       delegationId: msg.delegationId,
     });
     return;
@@ -301,7 +293,6 @@ async function handleDelegate(
   if (error !== null) {
     send({
       type: "ipcDelegateError",
-      protocolVersion: PROTOCOL_VERSION,
       delegationId: msg.delegationId,
       message: error instanceof Error ? error.message : String(error),
     });
@@ -309,7 +300,6 @@ async function handleDelegate(
   }
   send({
     type: "ipcDelegateAck",
-    protocolVersion: PROTOCOL_VERSION,
     delegationId: msg.delegationId,
     value: value as RawValue,
   });
@@ -342,19 +332,9 @@ export const __startSidecar = (): void => {
       stderr.write(`[katari-port] bad JSON from parent: ${line}\n`);
       return;
     }
-    if (
-      typeof msg !== "object" ||
-      msg === null ||
-      msg.protocolVersion !== PROTOCOL_VERSION
-    ) {
-      const got =
-        typeof msg === "object" && msg !== null
-          ? msg.protocolVersion
-          : "<missing>";
-      stderr.write(
-        `[katari-port] protocol mismatch (got ${got}, expected ${PROTOCOL_VERSION})\n`,
-      );
-      exit(1);
+    if (typeof msg !== "object" || msg === null) {
+      stderr.write(`[katari-port] non-object message from parent: ${line}\n`);
+      return;
     }
     switch (msg.type) {
       case "ipcDelegate":
@@ -372,7 +352,6 @@ export const __startSidecar = (): void => {
         }
         send({
           type: "ipcTerminateAck",
-          protocolVersion: PROTOCOL_VERSION,
           delegationId: msg.delegationId,
         });
         return;
@@ -394,7 +373,7 @@ export const __startSidecar = (): void => {
     }
   });
 
-  send({ type: "ipcReady", protocolVersion: PROTOCOL_VERSION });
+  send({ type: "ipcReady" });
 };
 
 export default katari;
@@ -405,5 +384,4 @@ export type {
   KatariPort,
   RawValue,
 } from "./types.js";
-export { PROTOCOL_VERSION } from "./protocol.js";
 export type { ParentToChild, ChildToParent } from "./protocol.js";

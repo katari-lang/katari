@@ -152,7 +152,6 @@ export type {
   ParentToChild,
   ChildToParent,
 } from "./sidecar/types.js";
-export { PROTOCOL_VERSION } from "./sidecar/types.js";
 
 export type { Sidecar } from "./sidecar/sidecar.js";
 

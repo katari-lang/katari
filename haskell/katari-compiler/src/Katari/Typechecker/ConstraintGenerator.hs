@@ -63,6 +63,7 @@ import Katari.SourceSpan
 import Katari.Id
   ( ConstructorId,
     ModuleId,
+    QualifiedName (..),
     RequestId,
     TypeId (..),
     VariableId,
@@ -277,6 +278,16 @@ initialState =
       stateConstraints = Set.empty,
       stateErrors = []
     }
+
+-- | Does the given 'RequestId' point at the stdlib-provided
+-- @prim.throw@ request? Used to special-case the universal
+-- recoverable-error capability throughout the constraint generator
+-- so callers never need a @with throw@ annotation.
+isThrowRequestId :: RequestId -> Map RequestId RequestData -> Bool
+isThrowRequestId rid requests = case Map.lookup rid requests of
+  Just RequestData {requestQualifiedName = QualifiedName {module_, name}} ->
+    module_ == "prim" && name == "throw"
+  Nothing -> False
 
 initialContext ::
   Map TypeId TypeData ->
@@ -596,11 +607,20 @@ walkRequestDecl RequestDeclaration {annotation, name, requestName, parameters, r
   reqId <- case variableIdOfName name of
     Nothing -> pure Nothing
     Just vid -> asks (Map.lookup vid . (.contextRequestOfVariable))
-  let signature =
-        SemanticTypeFunction
-          paramSig
-          retSemantic
-          (maybe emptyRequest singletonRequest reqId)
+  -- Special-case: `throw` is the universal recoverable-error capability.
+  -- Its signature carries an *empty* request set so callers never need to
+  -- write `with throw` — every agent can raise it implicitly. Handlers
+  -- still catch it through the regular `req throw(msg) { ... }` form
+  -- because the RequestId is unchanged; we only suppress the effect-set
+  -- contribution at the signature level.
+  isThrow <- case reqId of
+    Just rid -> asks (isThrowRequestId rid . (.contextIdentifiedRequests))
+    Nothing -> pure False
+  let signatureEff =
+        if isThrow
+          then emptyRequest
+          else maybe emptyRequest singletonRequest reqId
+      signature = SemanticTypeFunction paramSig retSemantic signatureEff
   addEqTypeConstraint signature tReq (ConstraintReason ReasonKindRequestSignature sourceSpan)
   pure
     RequestDeclaration

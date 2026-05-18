@@ -1,4 +1,4 @@
-// Sidecar bundle + IPC protocol types — protocol v2.
+// Sidecar bundle + IPC protocol types.
 //
 // **Sidecar**: subprocess that the FFI Runner spawns per snapshot. The
 // user's bundled JS (built with the Katari CLI + `katari-port`) runs
@@ -6,17 +6,12 @@
 // `ChildToParent` over stdout (one JSON object per line). stderr is
 // passed through to the parent for log output.
 //
-// **Protocol versioning**: every message carries `protocolVersion`.
-// Receivers fail-fast on mismatch so a new parent talking to an old
-// child (or vice-versa) is detected before any state diverges.
-//
-// **v1 → v2 delta**: v2 adds the "ext spawns a CORE-side child agent"
-// path (`ipcChildDelegate` / `ipcChildTerminate` from C→P,
-// `ipcChildDelegateAck` / `ipcChildTerminateAck` from P→C) plus an
-// `ipc` prefix on every variant to disambiguate from bus event kinds.
-// Escalate / log / shutdown are still not on the wire — FfiModule
-// relays escalate on the bus, console.* is redirected to stderr, and
-// graceful shutdown uses SIGTERM → SIGKILL.
+// 11 message variants, all `ipc`-prefixed so log lines and switch arms
+// read distinguishably from bus event kinds. Escalate / log / shutdown
+// are deliberately not on the wire — FfiModule relays escalate on the
+// bus, console.* is redirected to stderr, and graceful shutdown uses
+// SIGTERM → SIGKILL. The wire is still pre-publish, so there's no
+// `protocolVersion` field; readers fail-fast on unknown `type` values.
 
 import type { AgentDefId } from "../agent-def-id.js";
 import type { DelegationId } from "../engine/id.js";
@@ -24,9 +19,6 @@ import type { QualifiedName } from "../ir/types.js";
 import type { RawValue } from "../value-codec.js";
 
 void (null as unknown as QualifiedName); // referenced via AgentDefId encoding
-
-/** Current wire protocol version. Bump when adding/changing a message. */
-export const PROTOCOL_VERSION = 2;
 
 /**
  * Bundled sidecar source. v1 is a single ESM string (esbuild output)
@@ -47,7 +39,6 @@ export type SidecarBundle = {
 export type ParentToChild =
   | {
       type: "ipcDelegate";
-      protocolVersion: number;
       delegationId: DelegationId;
       agentDefId: AgentDefId;
       args: Record<string, RawValue>;
@@ -60,14 +51,12 @@ export type ParentToChild =
        * side effects) or re-run (idempotent calls).
        */
       type: "ipcDelegateRestarted";
-      protocolVersion: number;
       delegationId: DelegationId;
       agentDefId: AgentDefId;
       args: Record<string, RawValue>;
     }
   | {
       type: "ipcTerminate";
-      protocolVersion: number;
       delegationId: DelegationId;
     }
   | {
@@ -77,7 +66,6 @@ export type ParentToChild =
        * generated and sent in `ipcChildDelegate`).
        */
       type: "ipcChildDelegateAck";
-      protocolVersion: number;
       delegationId: DelegationId;
       value: RawValue;
     }
@@ -88,28 +76,24 @@ export type ParentToChild =
        * restart's cleanup pass).
        */
       type: "ipcChildTerminateAck";
-      protocolVersion: number;
       delegationId: DelegationId;
     };
 
 /** Child (Sidecar) → Parent (FFI Module). */
 export type ChildToParent =
-  | { type: "ipcReady"; protocolVersion: number }
+  | { type: "ipcReady" }
   | {
       type: "ipcDelegateAck";
-      protocolVersion: number;
       delegationId: DelegationId;
       value: RawValue;
     }
   | {
       type: "ipcDelegateError";
-      protocolVersion: number;
       delegationId: DelegationId;
       message: string;
     }
   | {
       type: "ipcTerminateAck";
-      protocolVersion: number;
       delegationId: DelegationId;
     }
   | {
@@ -119,7 +103,6 @@ export type ChildToParent =
        * child; `delegationId` is the freshly-minted id for the child.
        */
       type: "ipcChildDelegate";
-      protocolVersion: number;
       parentDelegationId: DelegationId;
       delegationId: DelegationId;
       agentDefId: AgentDefId;
@@ -128,7 +111,6 @@ export type ChildToParent =
   | {
       /** Ext is cancelling a child agent it previously started. */
       type: "ipcChildTerminate";
-      protocolVersion: number;
       delegationId: DelegationId;
     };
 

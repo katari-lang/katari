@@ -3,7 +3,7 @@
     "0": {
       "body": {
         "description": "A two-element point in 2-D space.",
-        "entryBody": 54,
+        "entryBody": 55,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"x\":{\"type\":\"integer\"},\"y\":{\"type\":\"integer\"}},\"required\":[\"x\",\"y\"],\"type\":\"object\"}",
         "name": "point",
         "outputSchema": "{\"additionalProperties\":false,\"properties\":{\"$ctor\":{\"const\":\"main.point\"},\"x\":{\"type\":\"integer\"},\"y\":{\"type\":\"integer\"}},\"required\":[\"$ctor\",\"x\",\"y\"],\"type\":\"object\"}",
@@ -24,7 +24,7 @@
     "1": {
       "body": {
         "description": "Returns the x-coordinate of a point.",
-        "entryBody": 57,
+        "entryBody": 58,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"p\":{\"additionalProperties\":false,\"properties\":{\"$ctor\":{\"const\":\"main.point\"},\"x\":{\"type\":\"integer\"},\"y\":{\"type\":\"integer\"}},\"required\":[\"$ctor\",\"x\",\"y\"],\"type\":\"object\"}},\"required\":[\"p\"],\"type\":\"object\"}",
         "name": "project_x",
         "outputSchema": "{\"type\":\"integer\"}",
@@ -45,7 +45,7 @@
     "11": {
       "body": {
         "description": "Divide two numbers (always returns number).",
-        "entryBody": 64,
+        "entryBody": 65,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"lhs\":{\"type\":\"number\"},\"rhs\":{\"type\":\"number\"}},\"required\":[\"lhs\",\"rhs\"],\"type\":\"object\"}",
         "name": "div",
         "outputSchema": "{\"type\":\"number\"}",
@@ -70,7 +70,7 @@
     "13": {
       "body": {
         "description": "Unary negate.",
-        "entryBody": 65,
+        "entryBody": 66,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"value\":{\"type\":\"number\"}},\"required\":[\"value\"],\"type\":\"object\"}",
         "name": "neg",
         "outputSchema": "{\"type\":\"number\"}",
@@ -91,7 +91,7 @@
     "15": {
       "body": {
         "description": "Absolute value (integer when operand is integer).",
-        "entryBody": 66,
+        "entryBody": 67,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"value\":{\"type\":\"number\"}},\"required\":[\"value\"],\"type\":\"object\"}",
         "name": "abs",
         "outputSchema": "{\"type\":\"number\"}",
@@ -112,7 +112,7 @@
     "17": {
       "body": {
         "description": "Structural equality.",
-        "entryBody": 67,
+        "entryBody": 68,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"lhs\":{},\"rhs\":{}},\"required\":[\"lhs\",\"rhs\"],\"type\":\"object\"}",
         "name": "eq",
         "outputSchema": "{\"type\":\"boolean\"}",
@@ -137,7 +137,7 @@
     "19": {
       "body": {
         "description": "Structural inequality.",
-        "entryBody": 68,
+        "entryBody": 69,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"lhs\":{},\"rhs\":{}},\"required\":[\"lhs\",\"rhs\"],\"type\":\"object\"}",
         "name": "ne",
         "outputSchema": "{\"type\":\"boolean\"}",
@@ -158,7 +158,7 @@
     "2": {
       "body": {
         "description": "AI metadata of a callable (name / id / description / I-O schema).",
-        "entryBody": 59,
+        "entryBody": 60,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"description\":{\"type\":\"string\"},\"id\":{\"type\":\"string\"},\"input\":{\"type\":\"string\"},\"name\":{\"type\":\"string\"},\"output\":{\"type\":\"string\"}},\"required\":[\"description\",\"id\",\"input\",\"name\",\"output\"],\"type\":\"object\"}",
         "name": "agent_metadata",
         "outputSchema": "{\"additionalProperties\":false,\"properties\":{\"$ctor\":{\"const\":\"prim.agent_metadata\"},\"description\":{\"type\":\"string\"},\"id\":{\"type\":\"string\"},\"input\":{\"type\":\"string\"},\"name\":{\"type\":\"string\"},\"output\":{\"type\":\"string\"}},\"required\":[\"$ctor\",\"description\",\"id\",\"input\",\"name\",\"output\"],\"type\":\"object\"}",
@@ -195,7 +195,7 @@
     "21": {
       "body": {
         "description": "Less than.",
-        "entryBody": 69,
+        "entryBody": 70,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"lhs\":{\"type\":\"number\"},\"rhs\":{\"type\":\"number\"}},\"required\":[\"lhs\",\"rhs\"],\"type\":\"object\"}",
         "name": "lt",
         "outputSchema": "{\"type\":\"boolean\"}",
@@ -220,7 +220,7 @@
     "23": {
       "body": {
         "description": "Less or equal.",
-        "entryBody": 70,
+        "entryBody": 71,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"lhs\":{\"type\":\"number\"},\"rhs\":{\"type\":\"number\"}},\"required\":[\"lhs\",\"rhs\"],\"type\":\"object\"}",
         "name": "le",
         "outputSchema": "{\"type\":\"boolean\"}",
@@ -245,7 +245,7 @@
     "25": {
       "body": {
         "description": "Greater than.",
-        "entryBody": 71,
+        "entryBody": 72,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"lhs\":{\"type\":\"number\"},\"rhs\":{\"type\":\"number\"}},\"required\":[\"lhs\",\"rhs\"],\"type\":\"object\"}",
         "name": "gt",
         "outputSchema": "{\"type\":\"boolean\"}",
@@ -270,7 +270,7 @@
     "27": {
       "body": {
         "description": "Greater or equal.",
-        "entryBody": 72,
+        "entryBody": 73,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"lhs\":{\"type\":\"number\"},\"rhs\":{\"type\":\"number\"}},\"required\":[\"lhs\",\"rhs\"],\"type\":\"object\"}",
         "name": "ge",
         "outputSchema": "{\"type\":\"boolean\"}",
@@ -295,7 +295,7 @@
     "29": {
       "body": {
         "description": "Logical and.",
-        "entryBody": 73,
+        "entryBody": 74,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"lhs\":{\"type\":\"boolean\"},\"rhs\":{\"type\":\"boolean\"}},\"required\":[\"lhs\",\"rhs\"],\"type\":\"object\"}",
         "name": "and",
         "outputSchema": "{\"type\":\"boolean\"}",
@@ -316,7 +316,7 @@
     "3": {
       "body": {
         "description": "Add two numbers.",
-        "entryBody": 60,
+        "entryBody": 61,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"lhs\":{\"type\":\"number\"},\"rhs\":{\"type\":\"number\"}},\"required\":[\"lhs\",\"rhs\"],\"type\":\"object\"}",
         "name": "add",
         "outputSchema": "{\"type\":\"number\"}",
@@ -341,7 +341,7 @@
     "31": {
       "body": {
         "description": "Logical or.",
-        "entryBody": 74,
+        "entryBody": 75,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"lhs\":{\"type\":\"boolean\"},\"rhs\":{\"type\":\"boolean\"}},\"required\":[\"lhs\",\"rhs\"],\"type\":\"object\"}",
         "name": "or",
         "outputSchema": "{\"type\":\"boolean\"}",
@@ -366,7 +366,7 @@
     "33": {
       "body": {
         "description": "Logical not.",
-        "entryBody": 75,
+        "entryBody": 76,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"value\":{\"type\":\"boolean\"}},\"required\":[\"value\"],\"type\":\"object\"}",
         "name": "not",
         "outputSchema": "{\"type\":\"boolean\"}",
@@ -387,7 +387,7 @@
     "35": {
       "body": {
         "description": "Concatenate two strings.",
-        "entryBody": 76,
+        "entryBody": 77,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"lhs\":{\"type\":\"string\"},\"rhs\":{\"type\":\"string\"}},\"required\":[\"lhs\",\"rhs\"],\"type\":\"object\"}",
         "name": "concat",
         "outputSchema": "{\"type\":\"string\"}",
@@ -412,7 +412,7 @@
     "37": {
       "body": {
         "description": "Return the runtime type-of-value tag as a string.",
-        "entryBody": 77,
+        "entryBody": 78,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"value\":{}},\"required\":[\"value\"],\"type\":\"object\"}",
         "name": "type_of",
         "outputSchema": "{\"type\":\"string\"}",
@@ -433,7 +433,7 @@
     "39": {
       "body": {
         "description": "Serialize any value to its canonical JSON string (strings get quoted; round-trips with @from_string@ when added).",
-        "entryBody": 78,
+        "entryBody": 79,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"value\":{}},\"required\":[\"value\"],\"type\":\"object\"}",
         "name": "to_string",
         "outputSchema": "{\"type\":\"string\"}",
@@ -458,7 +458,7 @@
     "41": {
       "body": {
         "description": "Format any value for f-string interpolation: strings are emitted bare, other values fall back to @to_string@'s JSON form.",
-        "entryBody": 79,
+        "entryBody": 80,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"value\":{}},\"required\":[\"value\"],\"type\":\"object\"}",
         "name": "format",
         "outputSchema": "{\"type\":\"string\"}",
@@ -479,7 +479,7 @@
     "43": {
       "body": {
         "description": "Retrieve the element at @index@.",
-        "entryBody": 80,
+        "entryBody": 81,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"array\":{},\"index\":{\"type\":\"integer\"}},\"required\":[\"array\",\"index\"],\"type\":\"object\"}",
         "name": "array_get",
         "outputSchema": "{}",
@@ -504,7 +504,7 @@
     "45": {
       "body": {
         "description": "Length of an array.",
-        "entryBody": 81,
+        "entryBody": 82,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"array\":{}},\"required\":[\"array\"],\"type\":\"object\"}",
         "name": "array_length",
         "outputSchema": "{\"type\":\"integer\"}",
@@ -525,7 +525,7 @@
     "47": {
       "body": {
         "description": "Retrieve a tagged-value field by name.",
-        "entryBody": 82,
+        "entryBody": 83,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"field\":{\"type\":\"string\"},\"object\":{}},\"required\":[\"field\",\"object\"],\"type\":\"object\"}",
         "name": "get_field",
         "outputSchema": "{}",
@@ -550,7 +550,7 @@
     "49": {
       "body": {
         "description": "Retrieve a tuple element by positional index.",
-        "entryBody": 83,
+        "entryBody": 84,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"index\":{\"type\":\"integer\"},\"tuple\":{}},\"required\":[\"index\",\"tuple\"],\"type\":\"object\"}",
         "name": "tuple_get",
         "outputSchema": "{}",
@@ -571,7 +571,7 @@
     "5": {
       "body": {
         "description": "Subtract two numbers.",
-        "entryBody": 61,
+        "entryBody": 62,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"lhs\":{\"type\":\"number\"},\"rhs\":{\"type\":\"number\"}},\"required\":[\"lhs\",\"rhs\"],\"type\":\"object\"}",
         "name": "sub",
         "outputSchema": "{\"type\":\"number\"}",
@@ -596,7 +596,7 @@
     "51": {
       "body": {
         "description": "Return the AI metadata of any callable value.",
-        "entryBody": 84,
+        "entryBody": 85,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"value\":{\"additionalProperties\":false,\"properties\":{\"$callable\":{\"type\":\"string\"}},\"required\":[\"$callable\"],\"type\":\"object\"}},\"required\":[\"value\"],\"type\":\"object\"}",
         "name": "get_metadata",
         "outputSchema": "{\"additionalProperties\":false,\"properties\":{\"$ctor\":{\"const\":\"prim.agent_metadata\"},\"description\":{\"type\":\"string\"},\"id\":{\"type\":\"string\"},\"input\":{\"type\":\"string\"},\"name\":{\"type\":\"string\"},\"output\":{\"type\":\"string\"}},\"required\":[\"$ctor\",\"description\",\"id\",\"input\",\"name\",\"output\"],\"type\":\"object\"}",
@@ -615,10 +615,27 @@
       "kind": "blockPrim"
     },
     "53": {
+      "body": {
+        "description": "Raise a recoverable runtime error. Bubbles through enclosing handle scopes until a `req throw` handler catches it; if nothing catches it the snapshot transitions to the `error` state.",
+        "entryBody": 87,
+        "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"msg\":{\"type\":\"string\"}},\"required\":[\"msg\"],\"type\":\"object\"}",
+        "name": "throw",
+        "outputSchema": "{\"not\":{}}",
+        "parameters": [
+          {
+            "label": "msg",
+            "var": 80
+          }
+        ],
+        "qualifiedName": "prim.throw"
+      },
+      "kind": "blockAgent"
+    },
+    "54": {
       "body": "main.point",
       "kind": "blockConstructor"
     },
-    "54": {
+    "55": {
       "body": {
         "parameters": [
           {
@@ -643,7 +660,7 @@
                   "var": 1
                 }
               ],
-              "block": 53,
+              "block": 54,
               "output": 2
             },
             "kind": "statementCall"
@@ -653,7 +670,7 @@
       },
       "kind": "blockUser"
     },
-    "55": {
+    "56": {
       "body": {
         "parameters": [],
         "statements": [],
@@ -661,11 +678,11 @@
       },
       "kind": "blockUser"
     },
-    "56": {
+    "57": {
       "body": {
         "arms": [
           {
-            "body": 55,
+            "body": 56,
             "pattern": {
               "body": [
                 "main.point",
@@ -693,7 +710,7 @@
       },
       "kind": "blockMatch"
     },
-    "57": {
+    "58": {
       "body": {
         "parameters": [
           {
@@ -715,7 +732,7 @@
           {
             "body": {
               "arguments": [],
-              "block": 56,
+              "block": 57,
               "output": 6
             },
             "kind": "statementCall"
@@ -725,11 +742,15 @@
       },
       "kind": "blockUser"
     },
-    "58": {
+    "59": {
       "body": "prim.agent_metadata",
       "kind": "blockConstructor"
     },
-    "59": {
+    "6": {
+      "body": "sub",
+      "kind": "blockPrim"
+    },
+    "60": {
       "body": {
         "parameters": [
           {
@@ -778,7 +799,7 @@
                   "var": 11
                 }
               ],
-              "block": 58,
+              "block": 59,
               "output": 12
             },
             "kind": "statementCall"
@@ -788,11 +809,7 @@
       },
       "kind": "blockUser"
     },
-    "6": {
-      "body": "sub",
-      "kind": "blockPrim"
-    },
-    "60": {
+    "61": {
       "body": {
         "parameters": [
           {
@@ -827,7 +844,7 @@
       },
       "kind": "blockUser"
     },
-    "61": {
+    "62": {
       "body": {
         "parameters": [
           {
@@ -862,7 +879,7 @@
       },
       "kind": "blockUser"
     },
-    "62": {
+    "63": {
       "body": {
         "parameters": [
           {
@@ -897,7 +914,7 @@
       },
       "kind": "blockUser"
     },
-    "63": {
+    "64": {
       "body": {
         "parameters": [
           {
@@ -932,7 +949,7 @@
       },
       "kind": "blockUser"
     },
-    "64": {
+    "65": {
       "body": {
         "parameters": [
           {
@@ -967,7 +984,7 @@
       },
       "kind": "blockUser"
     },
-    "65": {
+    "66": {
       "body": {
         "parameters": [
           {
@@ -994,7 +1011,7 @@
       },
       "kind": "blockUser"
     },
-    "66": {
+    "67": {
       "body": {
         "parameters": [
           {
@@ -1021,7 +1038,7 @@
       },
       "kind": "blockUser"
     },
-    "67": {
+    "68": {
       "body": {
         "parameters": [
           {
@@ -1056,7 +1073,7 @@
       },
       "kind": "blockUser"
     },
-    "68": {
+    "69": {
       "body": {
         "parameters": [
           {
@@ -1091,7 +1108,28 @@
       },
       "kind": "blockUser"
     },
-    "69": {
+    "7": {
+      "body": {
+        "description": "Multiply two numbers.",
+        "entryBody": 63,
+        "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"lhs\":{\"type\":\"number\"},\"rhs\":{\"type\":\"number\"}},\"required\":[\"lhs\",\"rhs\"],\"type\":\"object\"}",
+        "name": "mul",
+        "outputSchema": "{\"type\":\"number\"}",
+        "parameters": [
+          {
+            "label": "lhs",
+            "var": 19
+          },
+          {
+            "label": "rhs",
+            "var": 20
+          }
+        ],
+        "qualifiedName": "prim.mul"
+      },
+      "kind": "blockAgent"
+    },
+    "70": {
       "body": {
         "parameters": [
           {
@@ -1126,28 +1164,7 @@
       },
       "kind": "blockUser"
     },
-    "7": {
-      "body": {
-        "description": "Multiply two numbers.",
-        "entryBody": 62,
-        "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"lhs\":{\"type\":\"number\"},\"rhs\":{\"type\":\"number\"}},\"required\":[\"lhs\",\"rhs\"],\"type\":\"object\"}",
-        "name": "mul",
-        "outputSchema": "{\"type\":\"number\"}",
-        "parameters": [
-          {
-            "label": "lhs",
-            "var": 19
-          },
-          {
-            "label": "rhs",
-            "var": 20
-          }
-        ],
-        "qualifiedName": "prim.mul"
-      },
-      "kind": "blockAgent"
-    },
-    "70": {
+    "71": {
       "body": {
         "parameters": [
           {
@@ -1182,7 +1199,7 @@
       },
       "kind": "blockUser"
     },
-    "71": {
+    "72": {
       "body": {
         "parameters": [
           {
@@ -1217,7 +1234,7 @@
       },
       "kind": "blockUser"
     },
-    "72": {
+    "73": {
       "body": {
         "parameters": [
           {
@@ -1252,7 +1269,7 @@
       },
       "kind": "blockUser"
     },
-    "73": {
+    "74": {
       "body": {
         "parameters": [
           {
@@ -1287,7 +1304,7 @@
       },
       "kind": "blockUser"
     },
-    "74": {
+    "75": {
       "body": {
         "parameters": [
           {
@@ -1322,7 +1339,7 @@
       },
       "kind": "blockUser"
     },
-    "75": {
+    "76": {
       "body": {
         "parameters": [
           {
@@ -1349,7 +1366,7 @@
       },
       "kind": "blockUser"
     },
-    "76": {
+    "77": {
       "body": {
         "parameters": [
           {
@@ -1384,7 +1401,7 @@
       },
       "kind": "blockUser"
     },
-    "77": {
+    "78": {
       "body": {
         "parameters": [
           {
@@ -1411,7 +1428,7 @@
       },
       "kind": "blockUser"
     },
-    "78": {
+    "79": {
       "body": {
         "parameters": [
           {
@@ -1438,7 +1455,11 @@
       },
       "kind": "blockUser"
     },
-    "79": {
+    "8": {
+      "body": "mul",
+      "kind": "blockPrim"
+    },
+    "80": {
       "body": {
         "parameters": [
           {
@@ -1465,11 +1486,7 @@
       },
       "kind": "blockUser"
     },
-    "8": {
-      "body": "mul",
-      "kind": "blockPrim"
-    },
-    "80": {
+    "81": {
       "body": {
         "parameters": [
           {
@@ -1504,7 +1521,7 @@
       },
       "kind": "blockUser"
     },
-    "81": {
+    "82": {
       "body": {
         "parameters": [
           {
@@ -1531,7 +1548,7 @@
       },
       "kind": "blockUser"
     },
-    "82": {
+    "83": {
       "body": {
         "parameters": [
           {
@@ -1566,7 +1583,7 @@
       },
       "kind": "blockUser"
     },
-    "83": {
+    "84": {
       "body": {
         "parameters": [
           {
@@ -1601,7 +1618,7 @@
       },
       "kind": "blockUser"
     },
-    "84": {
+    "85": {
       "body": {
         "parameters": [
           {
@@ -1628,10 +1645,41 @@
       },
       "kind": "blockUser"
     },
+    "86": {
+      "body": "prim.throw",
+      "kind": "blockRequest"
+    },
+    "87": {
+      "body": {
+        "parameters": [
+          {
+            "label": "msg",
+            "var": 80
+          }
+        ],
+        "statements": [
+          {
+            "body": {
+              "arguments": [
+                {
+                  "label": "msg",
+                  "var": 80
+                }
+              ],
+              "block": 86,
+              "output": 81
+            },
+            "kind": "statementCall"
+          }
+        ],
+        "trailing": 81
+      },
+      "kind": "blockUser"
+    },
     "9": {
       "body": {
         "description": "Floor-mod two numbers.",
-        "entryBody": 63,
+        "entryBody": 64,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"lhs\":{\"type\":\"number\"},\"rhs\":{\"type\":\"number\"}},\"required\":[\"lhs\",\"rhs\"],\"type\":\"object\"}",
         "name": "mod",
         "outputSchema": "{\"type\":\"number\"}",
@@ -1676,6 +1724,7 @@
     "prim.not": 33,
     "prim.or": 31,
     "prim.sub": 5,
+    "prim.throw": 53,
     "prim.to_string": 39,
     "prim.tuple_get": 49,
     "prim.type_of": 37
@@ -1735,39 +1784,42 @@
       "50": "prim:tuple_get:leaf",
       "51": "prim:get_metadata:agent",
       "52": "prim:get_metadata:leaf",
-      "53": "point:ctor",
-      "54": "point:body",
-      "57": "project_x.body",
-      "58": "agent_metadata:ctor",
-      "59": "agent_metadata:body",
+      "53": "throw:agent",
+      "54": "point:ctor",
+      "55": "point:body",
+      "58": "project_x.body",
+      "59": "agent_metadata:ctor",
       "6": "prim:sub:leaf",
-      "60": "prim:add:body",
-      "61": "prim:sub:body",
-      "62": "prim:mul:body",
-      "63": "prim:mod:body",
-      "64": "prim:div:body",
-      "65": "prim:neg:body",
-      "66": "prim:abs:body",
-      "67": "prim:eq:body",
-      "68": "prim:ne:body",
-      "69": "prim:lt:body",
+      "60": "agent_metadata:body",
+      "61": "prim:add:body",
+      "62": "prim:sub:body",
+      "63": "prim:mul:body",
+      "64": "prim:mod:body",
+      "65": "prim:div:body",
+      "66": "prim:neg:body",
+      "67": "prim:abs:body",
+      "68": "prim:eq:body",
+      "69": "prim:ne:body",
       "7": "prim:mul:agent",
-      "70": "prim:le:body",
-      "71": "prim:gt:body",
-      "72": "prim:ge:body",
-      "73": "prim:and:body",
-      "74": "prim:or:body",
-      "75": "prim:not:body",
-      "76": "prim:concat:body",
-      "77": "prim:type_of:body",
-      "78": "prim:to_string:body",
-      "79": "prim:format:body",
+      "70": "prim:lt:body",
+      "71": "prim:le:body",
+      "72": "prim:gt:body",
+      "73": "prim:ge:body",
+      "74": "prim:and:body",
+      "75": "prim:or:body",
+      "76": "prim:not:body",
+      "77": "prim:concat:body",
+      "78": "prim:type_of:body",
+      "79": "prim:to_string:body",
       "8": "prim:mul:leaf",
-      "80": "prim:array_get:body",
-      "81": "prim:array_length:body",
-      "82": "prim:get_field:body",
-      "83": "prim:tuple_get:body",
-      "84": "prim:get_metadata:body",
+      "80": "prim:format:body",
+      "81": "prim:array_get:body",
+      "82": "prim:array_length:body",
+      "83": "prim:get_field:body",
+      "84": "prim:tuple_get:body",
+      "85": "prim:get_metadata:body",
+      "86": "throw:request",
+      "87": "throw:body",
       "9": "prim:mod:agent"
     },
     "varNames": {

@@ -17,7 +17,6 @@ import { bundleSidecar } from "katari-cli/services/bundle";
 import {
   loadSubprocessSidecar,
   noopLogger,
-  PROTOCOL_VERSION,
   type AgentDefId,
   type ChildToParent,
   type DelegationId,
@@ -60,7 +59,6 @@ describe("SubprocessSidecar — real Node subprocess", () => {
 
     await sidecar.send({
       type: "ipcDelegate",
-      protocolVersion: PROTOCOL_VERSION,
       delegationId: "delegation-1" as DelegationId,
       // The bundle's __withModule plugin prefixes the agent name with
       // the file's module qname; main.ts → "main".
@@ -109,7 +107,6 @@ describe("SubprocessSidecar — real Node subprocess", () => {
     // Invoke cron_impl with a callback qname.
     await sidecar.send({
       type: "ipcDelegate",
-      protocolVersion: PROTOCOL_VERSION,
       delegationId: "cron-delegation-1" as DelegationId,
       agentDefId: "main.cron_impl" as AgentDefId,
       args: { callback: "main.notify_scheduled" },
@@ -135,7 +132,6 @@ describe("SubprocessSidecar — real Node subprocess", () => {
     // Pretend CORE finished the child agent successfully.
     await sidecar.send({
       type: "ipcChildDelegateAck",
-      protocolVersion: PROTOCOL_VERSION,
       delegationId: childDelegate.delegationId,
       value: null,
     });
@@ -143,7 +139,6 @@ describe("SubprocessSidecar — real Node subprocess", () => {
     // Ext is now stuck in its never-return Promise; cancel it.
     await sidecar.send({
       type: "ipcTerminate",
-      protocolVersion: PROTOCOL_VERSION,
       delegationId: "cron-delegation-1" as DelegationId,
     });
 

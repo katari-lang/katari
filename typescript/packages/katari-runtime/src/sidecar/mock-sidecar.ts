@@ -10,11 +10,7 @@
 
 import type { Logger } from "../engine/logger.js";
 import type { Sidecar } from "./sidecar.js";
-import {
-  PROTOCOL_VERSION,
-  type ChildToParent,
-  type ParentToChild,
-} from "./types.js";
+import type { ChildToParent, ParentToChild } from "./types.js";
 import type { RawValue } from "../value-codec.js";
 
 /**
@@ -56,18 +52,11 @@ export class MockSidecar implements Sidecar {
 
   async start(): Promise<void> {
     queueMicrotask(() => {
-      this.cb?.({ type: "ipcReady", protocolVersion: PROTOCOL_VERSION });
+      this.cb?.({ type: "ipcReady" });
     });
   }
 
   async send(msg: ParentToChild): Promise<void> {
-    if (msg.protocolVersion !== PROTOCOL_VERSION) {
-      this.logger.log(
-        "error",
-        `mock sidecar: protocol version mismatch (got ${msg.protocolVersion}, expected ${PROTOCOL_VERSION})`,
-      );
-      return;
-    }
     switch (msg.type) {
       case "ipcDelegate":
         void this.handleDelegate(msg, false);
@@ -84,7 +73,6 @@ export class MockSidecar implements Sidecar {
         }
         this.cb?.({
           type: "ipcTerminateAck",
-          protocolVersion: PROTOCOL_VERSION,
           delegationId: msg.delegationId,
         });
         return;
@@ -130,7 +118,6 @@ export class MockSidecar implements Sidecar {
     if (handler === undefined) {
       this.cb?.({
         type: "ipcDelegateError",
-        protocolVersion: PROTOCOL_VERSION,
         delegationId: msg.delegationId,
         message: `mock sidecar: no handler for ${key}`,
       });
@@ -156,7 +143,6 @@ export class MockSidecar implements Sidecar {
     if (entry.terminating) {
       this.cb?.({
         type: "ipcTerminateAck",
-        protocolVersion: PROTOCOL_VERSION,
         delegationId: msg.delegationId,
       });
       return;
@@ -164,7 +150,6 @@ export class MockSidecar implements Sidecar {
     if (error !== null) {
       this.cb?.({
         type: "ipcDelegateError",
-        protocolVersion: PROTOCOL_VERSION,
         delegationId: msg.delegationId,
         message: error instanceof Error ? error.message : String(error),
       });
@@ -172,7 +157,6 @@ export class MockSidecar implements Sidecar {
     }
     this.cb?.({
       type: "ipcDelegateAck",
-      protocolVersion: PROTOCOL_VERSION,
       delegationId: msg.delegationId,
       value: value as RawValue,
     });

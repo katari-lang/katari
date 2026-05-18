@@ -115,5 +115,13 @@ primStdlibSource =
       "",
       "// Metadata.",
       "@\"Return the AI metadata of any callable value.\"",
-      "prim agent get_metadata(value: function) -> agent_metadata"
+      "prim agent get_metadata(value: function) -> agent_metadata",
+      "",
+      "// Errors. `throw` is the universal recoverable-error capability:",
+      "// engine prim errors, FFI-handler throws, refutable pattern misses",
+      "// all surface here. The typechecker special-cases it so callers",
+      "// don't have to write `with throw` everywhere; handlers catch via",
+      "// the usual `req throw(msg) { ... }` form inside a handle scope.",
+      "@\"Raise a recoverable runtime error. Bubbles through enclosing handle scopes until a `req throw` handler catches it; if nothing catches it the snapshot transitions to the `error` state.\"",
+      "req throw(msg: string) -> never"
     ]

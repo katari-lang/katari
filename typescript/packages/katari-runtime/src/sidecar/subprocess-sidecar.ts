@@ -1,6 +1,6 @@
 // SubprocessSidecar — production `Sidecar` implementation.
 //
-// Spawns `node <bundle.mjs>` and speaks the 7-message IPC over stdio:
+// Spawns `node <bundle.mjs>` and speaks the 11-message IPC over stdio:
 //
 //   - stdin  : Parent → Child (one JSON ParentToChild per line)
 //   - stdout : Child → Parent (one JSON ChildToParent per line)
@@ -13,11 +13,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { createInterface, type Interface as ReadlineInterface } from "node:readline";
 import type { Logger } from "../engine/logger.js";
 import type { Sidecar } from "./sidecar.js";
-import {
-  PROTOCOL_VERSION,
-  type ChildToParent,
-  type ParentToChild,
-} from "./types.js";
+import type { ChildToParent, ParentToChild } from "./types.js";
 
 export interface SubprocessSidecarOptions {
   /** Absolute path to the bundled ESM entry written to disk. */
@@ -118,7 +114,7 @@ export class SubprocessSidecar implements Sidecar {
     if (stdin === null || stdin === undefined) {
       throw new Error("subprocess sidecar: child not started or stdin closed");
     }
-    const payload = `${JSON.stringify({ ...msg, protocolVersion: PROTOCOL_VERSION })}\n`;
+    const payload = `${JSON.stringify(msg)}\n`;
     await new Promise<void>((resolve, reject) => {
       stdin.write(payload, (err) => {
         if (err !== undefined && err !== null) reject(err);
@@ -186,19 +182,8 @@ function parseChildLine(
     logger.log("error", `sidecar: bad JSON from child: ${line}`);
     return null;
   }
-  if (
-    typeof msg !== "object" ||
-    msg === null ||
-    msg.protocolVersion !== PROTOCOL_VERSION
-  ) {
-    const got =
-      typeof msg === "object" && msg !== null && "protocolVersion" in msg
-        ? msg.protocolVersion
-        : "<missing>";
-    logger.log(
-      "error",
-      `sidecar: protocol version mismatch (got ${got}, expected ${PROTOCOL_VERSION})`,
-    );
+  if (typeof msg !== "object" || msg === null) {
+    logger.log("error", `sidecar: non-object message from child: ${line}`);
     return null;
   }
   return msg;

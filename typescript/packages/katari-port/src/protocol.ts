@@ -1,6 +1,4 @@
-// Wire-level IPC protocol — v2. 11 message variants, all `ipc`-prefixed,
-// every payload tagged with `protocolVersion` so receivers fail-fast on
-// a mismatch.
+// Wire-level IPC protocol. 11 message variants, all `ipc`-prefixed.
 //
 // Parent → Child (5):
 //   - ipcDelegate           : fresh invocation
@@ -22,65 +20,57 @@
 // agents emit req asks from inside CORE; the FfiModule relays the
 // resulting escalate event on the bus to the parent agent's handle
 // scope without involving the sidecar at all.
+//
+// The wire is still pre-publish, so there's no protocolVersion field.
+// Readers fail-fast on unknown `type` values.
 
 import type { RawValue } from "katari-runtime";
-
-export const PROTOCOL_VERSION = 2;
 
 export type ParentToChild =
   | {
       type: "ipcDelegate";
-      protocolVersion: number;
       delegationId: string;
       agentDefId: string;
       args: Record<string, RawValue>;
     }
   | {
       type: "ipcDelegateRestarted";
-      protocolVersion: number;
       delegationId: string;
       agentDefId: string;
       args: Record<string, RawValue>;
     }
   | {
       type: "ipcTerminate";
-      protocolVersion: number;
       delegationId: string;
     }
   | {
       type: "ipcChildDelegateAck";
-      protocolVersion: number;
       delegationId: string;
       value: RawValue;
     }
   | {
       type: "ipcChildTerminateAck";
-      protocolVersion: number;
       delegationId: string;
     };
 
 export type ChildToParent =
-  | { type: "ipcReady"; protocolVersion: number }
+  | { type: "ipcReady" }
   | {
       type: "ipcDelegateAck";
-      protocolVersion: number;
       delegationId: string;
       value: RawValue;
     }
   | {
       type: "ipcDelegateError";
-      protocolVersion: number;
       delegationId: string;
       message: string;
     }
   | {
       type: "ipcTerminateAck";
-      protocolVersion: number;
       delegationId: string;
     }
   | {
       type: "ipcChildDelegate";
-      protocolVersion: number;
       parentDelegationId: string;
       delegationId: string;
       agentDefId: string;
@@ -88,6 +78,5 @@ export type ChildToParent =
     }
   | {
       type: "ipcChildTerminate";
-      protocolVersion: number;
       delegationId: string;
     };

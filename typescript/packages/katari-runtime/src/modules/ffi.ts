@@ -51,7 +51,7 @@ import type { RawValue } from "../value-codec.js";
 import type { Module } from "../module.js";
 import type { Sidecar } from "../sidecar/sidecar.js";
 import type { FfiStore } from "../sidecar/store.js";
-import { PROTOCOL_VERSION, type ChildToParent } from "../sidecar/types.js";
+import type { ChildToParent } from "../sidecar/types.js";
 
 export type FfiModuleOptions = {
   /**
@@ -155,7 +155,6 @@ export class FfiModule implements Module {
       try {
         await this.sidecar.send({
           type: "ipcDelegateRestarted",
-          protocolVersion: PROTOCOL_VERSION,
           delegationId: row.delegationId,
           agentDefId: row.agentDefId,
           args: argsToRaw(row.args),
@@ -213,7 +212,6 @@ export class FfiModule implements Module {
     });
     await this.sidecar.send({
       type: "ipcDelegate",
-      protocolVersion: PROTOCOL_VERSION,
       delegationId,
       agentDefId,
       args: argsToRaw(args),
@@ -232,7 +230,6 @@ export class FfiModule implements Module {
     }
     await this.sidecar.send({
       type: "ipcTerminate",
-      protocolVersion: PROTOCOL_VERSION,
       delegationId,
     });
   }
@@ -265,7 +262,6 @@ export class FfiModule implements Module {
     await this.store.deleteDelegation(delegationId);
     await this.sidecar.send({
       type: "ipcChildDelegateAck",
-      protocolVersion: PROTOCOL_VERSION,
       delegationId,
       value: valueToRaw(value),
     });
@@ -300,7 +296,6 @@ export class FfiModule implements Module {
     await this.store.deleteDelegation(delegationId);
     await this.sidecar.send({
       type: "ipcChildTerminateAck",
-      protocolVersion: PROTOCOL_VERSION,
       delegationId,
     });
   }
