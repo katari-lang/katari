@@ -6,7 +6,6 @@
 // of one inbound event including any internal queue draining.
 
 import type { Diff } from "./diff.js";
-import type { EngineError } from "./errors.js";
 import type { Event } from "./event.js";
 import type { LogEntry } from "./logger.js";
 import type { State } from "./state.js";
@@ -15,8 +14,6 @@ export type Result = {
   state: State;
   /** Events whose `to` is not the engine's selfEndpoint. Caller forwards. */
   outbound: Event[];
-  /** Errors raised during processing — recoverable + irrecoverable mixed. */
-  errors: EngineError[];
   /** Log entries captured during processing. */
   logs: LogEntry[];
   /** Domain diffs (translated from Immer patches) for incremental persist. */
@@ -28,7 +25,6 @@ export function emptyResult(state: State): Result {
   return {
     state,
     outbound: [],
-    errors: [],
     logs: [],
     diffs: [],
   };

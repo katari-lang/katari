@@ -142,6 +142,7 @@ export interface AgentRepo {
   list(
     filter?: {
       snapshotId?: SnapshotId;
+      state?: AgentState;
       afterId?: AgentId;
     } & ListOptions,
   ): Promise<AgentRow[]>;

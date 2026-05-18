@@ -8,7 +8,8 @@ import { RecoverableEngineError } from "../../errors.js";
 import type { StepCtx } from "../../step-ctx.js";
 import type { Value } from "../../value.js";
 import type { AgentBlock, BlockId, QualifiedName } from "../../../ir/types.js";
-import type { PrimThread } from "../types.js";
+import type { PrimThread, Thread } from "../types.js";
+import { emitThrowEscalate } from "../common.js";
 import {
   defaultAskAckProxy,
   defaultAskProxy,
@@ -31,18 +32,7 @@ export const primOps: ThreadOps<PrimThread> = {
           : executePrim(t.primName, t.args);
     } catch (err) {
       if (err instanceof RecoverableEngineError) {
-        ctx.recordError(err);
-        // The engine cannot continue this thread; emit cancelAck-equivalent
-        // by enqueuing a `cancelAck` to the parent so the parent sees the
-        // child go away. Parent variant decides what to do (typically
-        // surfaces as an irrecoverable failure for the agent).
-        if (t.parent !== null && t.parentCallId !== null) {
-          ctx.enqueue({
-            kind: "cancelAck",
-            target: t.parent,
-            callId: t.parentCallId,
-          });
-        }
+        emitThrowEscalate(ctx, t as Draft<Thread>, err.message);
         return;
       }
       throw err;

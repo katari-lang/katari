@@ -203,12 +203,16 @@ class InMemoryAgentRepo implements AgentRepo {
   async list(
     filter?: {
       snapshotId?: SnapshotId;
+      state?: AgentState;
       afterId?: AgentId;
     } & ListOptions,
   ): Promise<AgentRow[]> {
     let all = [...this.rows.values()];
     if (filter?.snapshotId !== undefined) {
       all = all.filter((r) => r.snapshotId === filter.snapshotId);
+    }
+    if (filter?.state !== undefined) {
+      all = all.filter((r) => r.state === filter.state);
     }
     if (filter?.afterId !== undefined) {
       const afterId = filter.afterId;

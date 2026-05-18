@@ -207,4 +207,35 @@ describe("samples/ end-to-end (compile → upload → run → verify)", () => {
       expect(result).toBe("hello, ext");
     },
   );
+
+  itE2E(
+    "13-throw-catch: explicit throw caught by handle scope returns 'caught: kaboom!'",
+    async () => {
+      const result = await applyAndRun("throw-catch", "13-throw-catch");
+      expect(result).toBe("caught: kaboom!");
+    },
+  );
+
+  itE2E(
+    "14-runtime-error: prim div-by-zero caught by handle scope returns 'engine threw: prim div: division by zero'",
+    async () => {
+      const result = await applyAndRun("runtime-error", "14-runtime-error");
+      expect(result).toBe("engine threw: prim div: division by zero");
+    },
+  );
+
+  itE2E(
+    "15-ext-throw-catch: ext handler throw caught by handle scope returns 'ext threw: kaboom from JS'",
+    async () => {
+      const result = await applyAndRun("ext-throw-catch", "15-ext-throw-catch", {
+        sidecarBundle: noOpSidecarBundle(),
+        handlers: {
+          "main.boomExt": async () => {
+            throw new Error("kaboom from JS");
+          },
+        },
+      });
+      expect(result).toBe("ext threw: kaboom from JS");
+    },
+  );
 });

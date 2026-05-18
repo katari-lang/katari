@@ -60,12 +60,7 @@ export type { State } from "./state.js";
 
 export type { Diff } from "./diff.js";
 
-export type { EngineError } from "./errors.js";
-export {
-  RecoverableEngineError,
-  IrrecoverableEngineError,
-  EntryNotFoundError,
-} from "./errors.js";
+export { IrrecoverableEngineError } from "./errors.js";
 
 export type { LogEntry, LogLevel, Logger } from "./logger.js";
 export { LoggerTag, buildConsoleLogger, consoleLogger, noopLogger } from "./logger.js";

@@ -57,12 +57,6 @@ export class CoreModule implements Module {
   async feed(event: ExternalEvent): Promise<{ outbound: ExternalEvent[] }> {
     const result = applyEvent(this.state, event);
     this.state = result.state;
-    for (const err of result.errors) {
-      this.logger.log("warn", "core: applyEvent recorded error", {
-        message: err.message,
-        name: err.name,
-      });
-    }
     for (const log of result.logs) {
       this.logger.log(log.level, log.message, log.context);
     }

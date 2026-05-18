@@ -21,6 +21,8 @@ import {
   type Module,
   type Value,
 } from "katari-runtime";
+
+const THROW_AGENT_DEF_ID = encodeCoreAgentDefId({ kind: "qname", value: "prim.throw" });
 import type { DelegationId, EscalationId } from "katari-runtime";
 import type {
   AgentId,
@@ -73,6 +75,12 @@ export class ApiModule implements Module {
         return { outbound: [] };
 
       case "escalate":
+        if (event.payload.agentDefId === THROW_AGENT_DEF_ID) {
+          return await this.handleThrowEscalate(
+            event.payload.delegationId,
+            event.payload.args,
+          );
+        }
         // AI から user への質問。pending escalation として永続化。
         await this.tx.apiEscalations.insert({
           escalationId: event.payload.escalationId,
@@ -185,6 +193,52 @@ export class ApiModule implements Module {
   }
 
   // ─── Internal helpers ──────────────────────────────────────────────────
+
+  /**
+   * Handle an unhandled `prim.throw` escalate:
+   *   1. Mark all running/cancelling agents in the snapshot as `error`.
+   *   2. Send `terminate` to CORE for every agent that was still running.
+   *
+   * The CORE AgentThreads receive the cancel, complete their cascade, and
+   * emit `terminateAck`. When `markCancelled` runs for those, it attempts
+   * `cancelling → cancelled` but finds `error` (expectedState mismatch) →
+   * no-op, leaving the row in `error` state.
+   */
+  private async handleThrowEscalate(
+    delegationId: DelegationId,
+    args: Record<string, Value>,
+  ): Promise<{ outbound: ExternalEvent[] }> {
+    const msgValue = args["msg"];
+    const message =
+      msgValue !== undefined && msgValue.kind === "string"
+        ? msgValue.value
+        : "runtime error";
+
+    // Collect running delegations before marking them all as error.
+    const runningAgents = await this.tx.agents.list({
+      snapshotId: this.snapshotId,
+      state: "running",
+    });
+
+    await this.tx.agents.markAllRunningAsError(this.snapshotId, message);
+
+    const outbound: ExternalEvent[] = runningAgents.map((agent) => ({
+      from: API_ENDPOINT,
+      to: CORE_ENDPOINT,
+      payload: {
+        kind: "terminate" as const,
+        delegationId: agent.delegationId,
+      },
+    }));
+
+    this.logger.log("info", "api: prim.throw escalate — snapshot terminated", {
+      delegationId,
+      message,
+      terminatedCount: outbound.length,
+    });
+
+    return { outbound };
+  }
 
   private async completeAgent(
     delegationId: DelegationId,

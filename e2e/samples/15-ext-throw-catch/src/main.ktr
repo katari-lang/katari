@@ -1,0 +1,13 @@
+@"Ext agent that always throws a JS error."
+ext agent boomExt() -> null
+
+@"Catches the throw bubbled from the failing ext agent."
+agent main() -> string {
+  handle {
+    req throw(msg: string) {
+      break f"ext threw: ${msg}"
+    }
+  }
+  boomExt()
+  "unreachable"
+}

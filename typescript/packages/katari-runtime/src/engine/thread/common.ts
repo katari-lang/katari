@@ -399,6 +399,54 @@ export function proxyAskAckToChild(
   });
 }
 
+// ─── Throw escalation ─────────────────────────────────────────────────────
+//
+// Converts an engine-internal recoverable error into a `prim.throw` request
+// ask that bubbles up the normal handle chain. Two outcomes:
+//
+//   1. A `handle { req throw(msg) { ... } }` ancestor catches it —
+//      the user-defined handler executes and the program resumes.
+//
+//   2. The ask reaches a root AgentThread uncaught — `emitEscalateUpward`
+//      fires a `throw` escalate to the delegation sender (= API Module),
+//      which marks the agent as errored and terminates the snapshot.
+//
+// Callers MUST return immediately after this call. The thread stays alive
+// and will be cancelled by the cascade that the handler or API Module starts.
+
+/**
+ * Initiate a recoverable throw from inside a running thread. Enqueues a
+ * `request` ask to the parent with `reqId = "prim.throw"` and the given
+ * message, then returns. The ask travels through the normal handle chain:
+ * a matching `handle { req throw(msg) { ... } }` catches it; if nothing
+ * catches it, the root AgentThread escalates it to the API Module.
+ */
+export function emitThrowEscalate(
+  ctx: StepCtx,
+  t: Draft<Thread>,
+  message: string,
+): void {
+  if (t.parent === null || t.parentCallId === null) {
+    ctx.log("warn", "engine: throw escalate at root thread with no parent", {
+      threadId: t.id,
+      message,
+    });
+    return;
+  }
+  const askId = allocAskId(t);
+  ctx.enqueue({
+    kind: "ask",
+    target: t.parent,
+    askId,
+    askKind: {
+      kind: "request",
+      reqId: "prim.throw",
+      args: { msg: { kind: "string", value: message } },
+    },
+    childCallId: t.parentCallId,
+  });
+}
+
 // ─── Scope helpers ─────────────────────────────────────────────────────────
 
 export function getScope(ctx: StepCtx, id: ScopeId): Draft<Scope> {

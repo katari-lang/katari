@@ -14,9 +14,10 @@ import { EntryNotFoundError, RecoverableEngineError } from "./errors.js";
 import type { Event, InternalEventPayload } from "./event.js";
 import { isInternal } from "./event.js";
 import type { CallId, ThreadId, AskId } from "./id.js";
+import { createEscalationId } from "./id.js";
 import type { Diff } from "./diff.js";
 import { spawnAgentRoot } from "./spawn.js";
-import { decodeCoreAgentDefId } from "../agent-def-id.js";
+import { decodeCoreAgentDefId, encodeCoreAgentDefId } from "../agent-def-id.js";
 import type { State } from "./state.js";
 import {
   emptyBuffers,
@@ -98,7 +99,23 @@ function applyTranslateExternal(
       translateExternal(ctx, event);
     } catch (err) {
       if (err instanceof RecoverableEngineError) {
-        ctx.recordError(err);
+        // Emit a throw escalate back to the sender so they can surface
+        // the error (e.g. agent entry not found → API Module marks agent
+        // as error). Only meaningful for `delegate` events; other payload
+        // kinds that error here are dropped silently.
+        if (!isInternal(event.payload) && event.payload.kind === "delegate") {
+          ctx.emit({
+            from: ctx.state.selfEndpoint,
+            to: event.from,
+            payload: {
+              kind: "escalate",
+              delegationId: event.payload.delegationId,
+              escalationId: createEscalationId(),
+              agentDefId: encodeCoreAgentDefId({ kind: "qname", value: "prim.throw" }),
+              args: { msg: { kind: "string", value: err.message } },
+            },
+          });
+        }
       } else {
         throw err;
       }

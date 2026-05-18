@@ -115,7 +115,6 @@ describe("engine integration: end-to-end via external delegate", () => {
     };
 
     const result = applyEvent(state, event);
-    expect(result.errors).toEqual([]);
     const ack = result.outbound.find(
       (e) => e.payload.kind === "delegateAck" && e.payload.delegationId === delegationId,
     );
@@ -128,8 +127,9 @@ describe("engine integration: end-to-end via external delegate", () => {
     expect(Object.keys(result.state.delegationSenders).length).toBe(0);
   });
 
-  it("missing entry returns Recoverable error and no outbound", () => {
+  it("missing entry emits a prim.throw escalate back to the sender", () => {
     const state = createState(ir({}, {}));
+    const delegationId = createDelegationId();
     const result = applyEvent(state, {
       from: API_ENDPOINT,
       to: CORE_ENDPOINT,
@@ -140,12 +140,19 @@ describe("engine integration: end-to-end via external delegate", () => {
           value: "missing",
         }),
         args: {},
-        delegationId: createDelegationId(),
+        delegationId,
       },
     });
-    expect(result.errors.length).toBe(1);
-    expect(result.errors[0]?.name).toBe("EntryNotFoundError");
-    expect(result.outbound).toEqual([]);
+    // The runner converts EntryNotFoundError into an outbound throw escalate
+    // directed at the delegation sender so the API Module can mark the agent
+    // as errored.
+    const escalate = result.outbound.find(
+      (e) => e.payload.kind === "escalate" && e.payload.delegationId === delegationId,
+    );
+    expect(escalate).toBeDefined();
+    if (escalate && escalate.payload.kind === "escalate") {
+      expect(escalate.to).toBe(API_ENDPOINT);
+    }
   });
 
   it("core→core: top-level agent calling another top-level agent resolves through the bus", async () => {
@@ -311,7 +318,6 @@ describe("engine integration: end-to-end via external delegate", () => {
         delegationId,
       },
     });
-    expect(startResult.errors).toEqual([]);
     // Outbound should include a CORE→FFI delegate.
     const ffiDelegate = startResult.outbound.find((e) => e.payload.kind === "delegate");
     expect(ffiDelegate).toBeDefined();
@@ -322,7 +328,6 @@ describe("engine integration: end-to-end via external delegate", () => {
       to: CORE_ENDPOINT,
       payload: { kind: "terminate", delegationId },
     });
-    expect(cancelResult.errors).toEqual([]);
 
     // We expect outbound to contain a CORE→FFI terminate.
     const ffiTerminate = cancelResult.outbound.find(

@@ -71,7 +71,6 @@ export function applyEvent(state: State, event: Event): Result {
   return {
     state: finalState,
     outbound: driven.buffers.outbound,
-    errors: driven.buffers.errors,
     logs: driven.buffers.logs,
     diffs,
   };

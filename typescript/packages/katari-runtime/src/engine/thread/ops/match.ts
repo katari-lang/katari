@@ -11,17 +11,17 @@
 import type { Draft } from "immer";
 import type { CallId } from "../../id.js";
 import type { Block, BlockId, MatchBlock } from "../../../ir/types.js";
-import { RecoverableEngineError } from "../../errors.js";
 import { tryMatch } from "../../pattern.js";
 import { spawnChild } from "../../spawn.js";
 import type { StepCtx } from "../../step-ctx.js";
 import type { Value } from "../../value.js";
 import {
   commonRemoveChild,
+  emitThrowEscalate,
   lookupValue,
   setValueInScope,
 } from "../common.js";
-import type { MatchThread } from "../types.js";
+import type { MatchThread, Thread } from "../types.js";
 import {
   defaultAskAckProxy,
   defaultAskProxy,
@@ -49,17 +49,7 @@ export const matchOps: ThreadOps<MatchThread> = {
       spawnArm(ctx, t as Draft<MatchThread>, block.defaultArm);
       return;
     }
-    ctx.recordError(
-      new RecoverableEngineError("MatchThread: no arm matched and no default"),
-    );
-    // Surface as a cancelAck so the parent unwinds.
-    if (t.parent !== null && t.parentCallId !== null) {
-      ctx.enqueue({
-        kind: "cancelAck",
-        target: t.parent,
-        callId: t.parentCallId,
-      });
-    }
+    emitThrowEscalate(ctx, t as Draft<Thread>, "match: no arm matched");
   },
 
   done(ctx, t, callId, value) {

@@ -42,7 +42,8 @@
 
 import { CORE_ENDPOINT, FFI_ENDPOINT } from "./endpoints.js";
 import type { ExternalEvent } from "../engine/event.js";
-import type { DelegationId, EscalationId } from "../engine/id.js";
+import { createEscalationId, type DelegationId, type EscalationId } from "../engine/id.js";
+import { encodeCoreAgentDefId } from "../agent-def-id.js";
 import type { Endpoint } from "../engine/endpoint.js";
 import type { Logger } from "../engine/logger.js";
 import type { Value } from "../engine/value.js";
@@ -223,8 +224,16 @@ export class FfiModule implements Module {
     const { delegationId } = event.payload;
     const ok = await this.store.setDelegationState(delegationId, "cancelling");
     if (!ok) {
-      this.logger.log("debug", "ffi: terminate for unknown delegation", {
+      // The delegation was already removed (e.g. ipcDelegateError consumed it
+      // before CORE's cancel cascade reached us). Immediately ack so the
+      // ExternalThread on the CORE side can finish its cancellation.
+      this.logger.log("debug", "ffi: terminate for unknown delegation — sending immediate terminateAck", {
         delegationId,
+      });
+      this.onSidecarResponse({
+        from: this.endpoint,
+        to: event.from,
+        payload: { kind: "terminateAck", delegationId },
       });
       return;
     }
@@ -418,16 +427,18 @@ export class FfiModule implements Module {
           message: msg.message,
         });
         if (peer === null) return;
-        // protocol v2: still surface ext-handler error as terminateAck on
-        // the bus (= "the call ended without producing a value"). A
-        // dedicated cross-module `delegateError` event awaits the CORE
-        // error-typing RFC.
+        // Route as a throw escalate so the caller can handle it via
+        // `handle { req throw(msg) { ... } }` or the API Module's default
+        // handler marks the snapshot as errored.
         this.onSidecarResponse({
           from: this.endpoint,
           to: peer,
           payload: {
-            kind: "terminateAck",
+            kind: "escalate",
             delegationId: msg.delegationId,
+            escalationId: createEscalationId(),
+            agentDefId: encodeCoreAgentDefId({ kind: "qname", value: "prim.throw" }),
+            args: { msg: { kind: "string", value: msg.message } },
           },
         });
         return;

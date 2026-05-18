@@ -85,9 +85,8 @@ describe("engine: runner dispatches prim create without crashing", () => {
     };
 
     const result = applyEvent(state, event);
-    // No errors, no outbound. The prim ran but, having no parent, just
+    // No outbound. The prim ran but, having no parent, just
     // sat there — that's fine for the smoke test.
-    expect(result.errors).toEqual([]);
     expect(result.outbound).toEqual([]);
   });
 });

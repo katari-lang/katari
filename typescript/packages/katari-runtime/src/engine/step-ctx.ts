@@ -13,7 +13,6 @@
 // the runner picks them up on the next iteration of its drain loop.
 
 import type { Draft } from "immer";
-import type { EngineError } from "./errors.js";
 import type { Event, InternalEventPayload } from "./event.js";
 import type { LogEntry, LogLevel } from "./logger.js";
 import type { State } from "./state.js";
@@ -27,8 +26,6 @@ export interface StepCtx {
   emit(event: Event): void;
   /** Append a log entry. */
   log(level: LogLevel, message: string, context?: Record<string, unknown>): void;
-  /** Record a recoverable error without aborting the step loop. */
-  recordError(err: EngineError): void;
 }
 
 /**
@@ -39,12 +36,11 @@ export interface StepCtx {
 export type StepBuffers = {
   queue: InternalEventPayload[];
   outbound: Event[];
-  errors: EngineError[];
   logs: LogEntry[];
 };
 
 export function emptyBuffers(): StepBuffers {
-  return { queue: [], outbound: [], errors: [], logs: [] };
+  return { queue: [], outbound: [], logs: [] };
 }
 
 /** Build a StepCtx that backs onto the given draft + buffers. */
@@ -72,9 +68,6 @@ export function makeStepCtx(
         message,
         context: context !== undefined ? detach(context) : undefined,
       });
-    },
-    recordError(err) {
-      buffers.errors.push(err);
     },
   };
 }

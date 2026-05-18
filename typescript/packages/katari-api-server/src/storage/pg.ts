@@ -342,14 +342,27 @@ class PgAgentRepo implements AgentRepo {
   }
 
   async list(
-    filter?: { snapshotId?: SnapshotId; afterId?: AgentId } & ListOptions,
+    filter?: { snapshotId?: SnapshotId; state?: AgentState; afterId?: AgentId } & ListOptions,
   ): Promise<AgentRow[]> {
     const limit = clampLimit(filter?.limit);
     const offset = clampOffset(filter?.offset);
     const afterId = filter?.afterId;
     const snapshotId = filter?.snapshotId;
+    const state = filter?.state;
     let rows: DbAgentRow[];
-    if (snapshotId !== undefined && afterId !== undefined) {
+    if (snapshotId !== undefined && state !== undefined && afterId !== undefined) {
+      rows = await this.sql<DbAgentRow[]>`
+        SELECT id, delegation_id, snapshot_id, qualified_name, args, state, result, error_message, created_at, updated_at
+        FROM agents WHERE snapshot_id = ${snapshotId} AND state = ${state} AND id > ${afterId}
+        ORDER BY id ASC LIMIT ${limit} OFFSET ${offset}
+      `;
+    } else if (snapshotId !== undefined && state !== undefined) {
+      rows = await this.sql<DbAgentRow[]>`
+        SELECT id, delegation_id, snapshot_id, qualified_name, args, state, result, error_message, created_at, updated_at
+        FROM agents WHERE snapshot_id = ${snapshotId} AND state = ${state}
+        ORDER BY id ASC LIMIT ${limit} OFFSET ${offset}
+      `;
+    } else if (snapshotId !== undefined && afterId !== undefined) {
       rows = await this.sql<DbAgentRow[]>`
         SELECT id, delegation_id, snapshot_id, qualified_name, args, state, result, error_message, created_at, updated_at
         FROM agents WHERE snapshot_id = ${snapshotId} AND id > ${afterId}

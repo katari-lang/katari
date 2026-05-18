@@ -32,7 +32,6 @@ import type {
 } from "../../../ir/types.js";
 import type { CallId, ScopeId, ThreadId } from "../../id.js";
 import type { AskKind, ModMap } from "../../event.js";
-import { RecoverableEngineError } from "../../errors.js";
 import { tryMatch } from "../../pattern.js";
 import { spawnChild, spawnExternalForAgentDelegate } from "../../spawn.js";
 import { createDelegationId } from "../../id.js";
@@ -45,10 +44,11 @@ import { literalToValue, NULL_VALUE, type Value } from "../../value.js";
 import {
   allocAskId,
   commonRemoveChild,
+  emitThrowEscalate,
   lookupValue,
   setValueInScope,
 } from "../common.js";
-import type { UserThread } from "../types.js";
+import type { Thread, UserThread } from "../types.js";
 import {
   defaultAskAckProxy,
   defaultAskProxy,
@@ -189,11 +189,7 @@ function handleStatement(
       const incoming = lookupValue(ctx, t.scopeId, stmt.body.source);
       const bindings = tryMatch(stmt.body.pattern, incoming);
       if (bindings === null) {
-        ctx.recordError(
-          new RecoverableEngineError(
-            "statementBindPattern: refutable pattern reached runtime (compiler bug)",
-          ),
-        );
+        emitThrowEscalate(ctx, t as Draft<Thread>, "match: pattern did not match");
         return "wait";
       }
       for (const [varId, value] of Object.entries(bindings)) {
@@ -232,10 +228,10 @@ function handleStatement(
           value: value.closureId,
         });
       } else {
-        ctx.recordError(
-          new RecoverableEngineError(
-            `engine.user: statementAgentCall expected agentLiteral or closure, got ${value.kind}`,
-          ),
+        emitThrowEscalate(
+          ctx,
+          t as Draft<Thread>,
+          `call: expected a callable value, got ${value.kind}`,
         );
         return "wait";
       }
@@ -382,11 +378,10 @@ function emitAskUpwards(
   askKind: AskKind,
 ): void {
   if (t.parent === null) {
-    ctx.recordError(
-      new RecoverableEngineError(
-        `engine.user: ask "${askKind.kind}" issued from a parentless thread`,
-      ),
-    );
+    ctx.log("warn", "engine.user: ask issued from a parentless UserThread; ignoring", {
+      threadId: t.id,
+      askKind: askKind.kind,
+    });
     return;
   }
   const askId = allocAskId(t);
