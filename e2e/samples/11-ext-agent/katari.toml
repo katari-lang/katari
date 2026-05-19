@@ -1,4 +1,5 @@
-project = "ext-agent"
+[package]
+name = "ext_agent"
 
 [compile]
 src = "src/"

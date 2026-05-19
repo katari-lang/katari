@@ -1,4 +1,5 @@
-project = "metadata"
+[package]
+name = "metadata"
 
 [compile]
 src = "src/"

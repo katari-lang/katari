@@ -1,4 +1,5 @@
-project = "ext-throw-catch"
+[package]
+name = "ext_throw_catch"
 
 [compile]
 src = "src/"

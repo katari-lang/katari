@@ -1,4 +1,5 @@
-project = "req-handler"
+[package]
+name = "req_handler"
 
 [compile]
 src = "src/"

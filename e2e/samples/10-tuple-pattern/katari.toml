@@ -1,4 +1,5 @@
-project = "tuple-pattern"
+[package]
+name = "tuple_pattern"
 
 [compile]
 src = "src/"

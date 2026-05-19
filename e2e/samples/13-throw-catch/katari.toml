@@ -1,4 +1,5 @@
-project = "throw-catch"
+[package]
+name = "throw_catch"
 
 [compile]
 src = "src/"

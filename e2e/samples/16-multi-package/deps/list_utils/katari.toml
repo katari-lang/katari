@@ -1,0 +1,8 @@
+[package]
+name = "list_utils"
+
+[compile]
+src = "src"
+
+[api]
+url = "http://localhost:8080"

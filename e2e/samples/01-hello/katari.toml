@@ -1,4 +1,5 @@
-project = "hello"
+[package]
+name = "hello"
 
 [compile]
 src = "src/"

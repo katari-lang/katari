@@ -1,0 +1,6 @@
+import list_utils.helpers
+
+@"Public API of list_utils. Doubles an integer via a private helper."
+agent double(x: integer) -> integer {
+  helpers.times_two(x = x)
+}

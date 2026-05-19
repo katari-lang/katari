@@ -20,7 +20,9 @@ library:
     - Katari.Prim
     - Katari.Stdlib
     - Katari.Typechecker.Identifier
+    - Katari.Typechecker.ScopeIndex
     - Katari.SemanticType
+    - Katari.SemanticType.Render
     - Katari.Typechecker.NormalizedType
     - Katari.Typechecker.ConstraintGenerator
     - Katari.Typechecker.Solver
@@ -36,6 +38,7 @@ library:
     - Katari.Schema
     - Katari.Compile
     - Katari.Query
+    - Katari.Query.Completion
     - Katari.SourceSpan
 
 executables:
@@ -72,6 +75,9 @@ tests:
       - Katari.CompileSpec
       - Katari.GoldenSpec
       - Katari.PropertySpec
+      - Katari.ScopeIndexSpec
+      - Katari.Query.CompletionSpec
+      - Katari.QuerySpec
     dependencies:
       - katari-compiler
       - hspec

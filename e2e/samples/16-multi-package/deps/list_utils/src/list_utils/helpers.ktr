@@ -1,0 +1,4 @@
+@"Internal helper: returns 2 * x by repeated addition."
+agent times_two(x: integer) -> integer {
+  x + x
+}

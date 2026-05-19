@@ -1,0 +1,54 @@
+name: katari-lsp
+version: 0.1.0.0
+author: yukikurage
+license: MIT
+
+language: GHC2021
+
+library:
+  source-dirs: src
+  exposed-modules:
+    - Katari.LSP.Server
+    - Katari.LSP.State
+    - Katari.LSP.Convert
+    - Katari.LSP.Handlers.Document
+    - Katari.LSP.Handlers.Hover
+    - Katari.LSP.Handlers.Definition
+    - Katari.LSP.Handlers.References
+    - Katari.LSP.Handlers.Completion
+    - Katari.LSP.Handlers.Diagnostics
+
+executables:
+  katari-lsp:
+    main: Main.hs
+    source-dirs: app
+    dependencies:
+      - katari-lsp
+
+dependencies:
+  - base >= 4.18 && < 5
+  - katari-compiler
+  - katari-project
+  - lsp
+  - lsp-types
+  - text
+  - bytestring
+  - containers
+  - stm
+  - unliftio
+  - filepath
+  - directory
+  - mtl
+  - transformers
+  - aeson
+  - lens
+
+default-extensions:
+  - LambdaCase
+  - OverloadedStrings
+  - DuplicateRecordFields
+  - NoFieldSelectors
+  - OverloadedRecordDot
+  - RecordWildCards
+  - StrictData
+  - DerivingStrategies

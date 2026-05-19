@@ -1,4 +1,5 @@
-project = "data-and-match"
+[package]
+name = "data_and_match"
 
 [compile]
 src = "src/"

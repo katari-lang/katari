@@ -1,0 +1,513 @@
+-- | Position-based completion query for LSP.
+--
+-- Given a 'CompileResult', returns the symbols visible at a source
+-- position:
+--
+--   * Locals from 'Katari.Typechecker.ScopeIndex' — every binding in
+--     scope on the enclosing block / pattern / etc.
+--   * The enclosing module's bare-name top-level visibility from
+--     'IdentifierResult.moduleVisibleSymbols' — own declarations,
+--     named imports, automatic stdlib injections, and module-import
+--     aliases. Names from modules the user did not import are
+--     intentionally hidden.
+--
+-- The query intentionally does /not/ filter by prefix or by syntactic
+-- context. The LSP server is responsible for two follow-up steps:
+--
+--   1. Slice the prefix out of the current line (the token the user is
+--      typing) and pass it to the LSP client; clients always prefix-filter.
+--   2. Optionally narrow the kinds based on more refined context
+--      (type positions, label slots, ...) — none of which v1 does.
+--
+-- Pure: no IO, no compiler state. Suitable for caching the result keyed
+-- by file + position.
+module Katari.Query.Completion
+  ( CompletionItem (..),
+    CompletionKind (..),
+    completionsAt,
+    -- * Anchor-based (type-driven) completion
+    CompletionAnchor (..),
+    resolveDottedPath,
+    completionsOfModule,
+    completionsOfFields,
+    completionsOfCallLabels,
+    findModuleIdByFilePath,
+  )
+where
+
+import Control.Monad (foldM)
+import Data.Map.Strict (Map)
+import qualified Data.Map.Strict as Map
+import Data.Maybe (fromMaybe, listToMaybe, mapMaybe)
+import Data.Set (Set)
+import qualified Data.Set as Set
+import Data.Text (Text)
+import qualified Data.Text as Text
+import Katari.AST (Module (..), Phase (Zonked))
+import Katari.Id (ConstructorId, ModuleId, QualifiedName (..), RequestId, TypeId, VariableId)
+import Katari.SemanticType (Resolved, SemanticType (..))
+import Katari.SemanticType.Render (renderSemanticType)
+import Katari.SourceSpan (Position, SourceSpan (..))
+import Katari.Typechecker.Identifier
+  ( ConstructorData (..),
+    IdentifierResult (..),
+    RequestData (..),
+    SymbolEntry (..),
+    TypeData (..),
+    VariableData (..),
+  )
+import qualified Katari.Typechecker.ScopeIndex as Scope
+import Katari.Typechecker.Zonker (ZonkResult (..))
+
+-- | Convenience alias for the resolved semantic type used in
+-- label / member completion signatures.
+type SemTy = SemanticType Resolved
+
+-- | What "kind" of thing this completion represents — drives the icon
+-- the editor renders.
+data CompletionKind
+  = CKLocalVariable
+  | CKAgent
+  | CKRequest
+  | CKConstructor
+  | CKTypeName
+  | CKModule
+  deriving (Eq, Show)
+
+data CompletionItem = CompletionItem
+  { ciLabel :: Text,
+    ciKind :: CompletionKind,
+    -- | Short detail (typically the inferred / declared type). Shown to
+    -- the right of the label in the suggestion popup.
+    ciDetail :: Maybe Text,
+    -- | Documentation (typically the @\"...\"@ annotation, if any).
+    ciDoc :: Maybe Text
+  }
+  deriving (Eq, Show)
+
+completionsAt ::
+  IdentifierResult ->
+  ZonkResult ->
+  FilePath ->
+  Position ->
+  [CompletionItem]
+completionsAt idResult zonkResult filePath position =
+  let localItems = localsAt
+      topLevelItems = case findModuleIdByFilePath idResult zonkResult filePath of
+        Nothing -> []
+        Just moduleId ->
+          let visible = Map.findWithDefault Map.empty moduleId idResult.moduleVisibleSymbols
+           in concatMap symbolEntryToItems (Map.toList visible)
+   in mergeByLabel (localItems ++ topLevelItems)
+  where
+    -- Name tables for the semantic-type renderer. Built once per query.
+    typeNames = fmap (.typeQualifiedName.name) idResult.identifiedTypes
+    reqNames = fmap (.requestQualifiedName.name) idResult.identifiedRequests
+    renderType = renderSemanticType typeNames reqNames
+
+    -- Locals: walk the scope chain at position. Each frame is flattened
+    -- with innermost first (= inner shadows outer on collisions).
+    localsAt :: [CompletionItem]
+    localsAt =
+      let frames = Scope.scopeAt idResult.scopeIndex filePath position
+       in concatMap symbolEntryToItems (Map.toList (Map.unions frames))
+
+    -- A scope-level SymbolEntry may carry multiple slots (e.g. a data
+    -- decl registers in variable + type + constructor); fan them out
+    -- so completion shows each role distinctly. mergeByLabel later
+    -- collapses duplicate labels to the most-specific kind.
+    symbolEntryToItems :: (Text, SymbolEntry) -> [CompletionItem]
+    symbolEntryToItems (name, entry) =
+      mapMaybe
+        id
+        [ entry.variableSymbol >>= mkVariableItem name,
+          entry.typeSymbol >>= mkTypeItem name,
+          entry.moduleSymbol >>= mkModuleItem name
+        ]
+
+    mkVariableItem :: Text -> VariableId -> Maybe CompletionItem
+    mkVariableItem name vid = do
+      vdata <- Map.lookup vid idResult.identifiedVariables
+      let isTop = isJust vdata.variableQualifiedName
+          isCtor = Map.member vid ctorVariableIds
+          isReq = Map.member vid reqVariableIds
+          kind
+            | isCtor = CKConstructor
+            | isReq = CKRequest
+            | isTop = CKAgent
+            | otherwise = CKLocalVariable
+          detail = fmap renderType (Map.lookup vid zonkResult.zonkedTypeEnvironment)
+      pure
+        CompletionItem
+          { ciLabel = name,
+            ciKind = kind,
+            ciDetail = detail,
+            ciDoc = Nothing
+          }
+
+    mkTypeItem :: Text -> TypeId -> Maybe CompletionItem
+    mkTypeItem name tid = do
+      _ <- Map.lookup tid idResult.identifiedTypes
+      pure
+        CompletionItem
+          { ciLabel = name,
+            ciKind = CKTypeName,
+            ciDetail = Nothing,
+            ciDoc = Nothing
+          }
+
+    mkModuleItem :: Text -> ModuleId -> Maybe CompletionItem
+    mkModuleItem name mid = do
+      _ <- Map.lookup mid idResult.identifiedModules
+      pure
+        CompletionItem
+          { ciLabel = name,
+            ciKind = CKModule,
+            ciDetail = Nothing,
+            ciDoc = Nothing
+          }
+
+    -- VariableId-keyed lookup tables for kind classification.
+    reqVariableIds :: Map VariableId RequestId
+    reqVariableIds =
+      Map.fromList
+        [ (rdata.requestVariableId, rid)
+          | (rid, rdata) <- Map.toList idResult.identifiedRequests
+        ]
+
+    ctorVariableIds :: Map VariableId ConstructorId
+    ctorVariableIds =
+      Map.fromList
+        [ (cdata.constructorVariableId, cid)
+          | (cid, cdata) <- Map.toList idResult.identifiedConstructors
+        ]
+
+-- | Locate the 'ModuleId' that owns @filePath@. Mirrors the same lookup
+-- used by hover / def-jump (= scan zonked modules by sourceSpan).
+findModuleIdByFilePath :: IdentifierResult -> ZonkResult -> FilePath -> Maybe ModuleId
+findModuleIdByFilePath _ zonkResult filePath =
+  listToMaybe
+    [ moduleId
+      | (moduleId, m :: Module Zonked) <- Map.toList zonkResult.zonkedModules,
+        m.sourceSpan.filePath == filePath
+    ]
+
+-- ---------------------------------------------------------------------------
+-- Anchor-based (type-driven) completion
+-- ---------------------------------------------------------------------------
+
+-- | The "thing" the cursor's LHS resolves to: either a module
+-- reference (member completion lists the module's exports) or a
+-- typed value (field / label completion based on the type's
+-- structure).
+data CompletionAnchor
+  = AnchorModule ModuleId
+  | AnchorTyped SemTy
+  deriving (Show)
+
+-- | Resolve a dotted text path (= @foo@, @mod.bar@, @record.sub.field@…)
+-- to a 'CompletionAnchor', using the scope at @position@ to resolve
+-- the root segment and then walking each subsequent segment through
+-- either module exports or structural field projection.
+--
+-- Returns 'Nothing' when the path doesn't resolve to a usable anchor
+-- (= unknown name, segment not found, intermediate value of an
+-- unrecognised shape).
+resolveDottedPath ::
+  IdentifierResult ->
+  ZonkResult ->
+  FilePath ->
+  Position ->
+  Text ->
+  Maybe CompletionAnchor
+resolveDottedPath idResult zonkResult filePath position dotted = do
+  let segs = filter (not . Text.null) (Text.splitOn "." dotted)
+  case segs of
+    [] -> Nothing
+    (rootSeg : rest) -> do
+      root <- resolveRoot rootSeg
+      foldM (stepAnchor idResult zonkResult) root rest
+  where
+    resolveRoot :: Text -> Maybe CompletionAnchor
+    resolveRoot name = resolveLocal name `orElse` resolveModuleScoped name
+
+    -- Locals (via ScopeIndex) — innermost shadows outer.
+    resolveLocal name = do
+      let frames = Scope.scopeAt idResult.scopeIndex filePath position
+          merged = Map.unions frames
+      entry <- Map.lookup name merged
+      anchorFromEntry entry
+
+    -- Module-level visibility (= imports + own decls + auto-injected).
+    resolveModuleScoped name = do
+      moduleId <- findModuleIdByFilePath idResult zonkResult filePath
+      visible <- Map.lookup moduleId idResult.moduleVisibleSymbols
+      entry <- Map.lookup name visible
+      anchorFromEntry entry
+
+    anchorFromEntry :: SymbolEntry -> Maybe CompletionAnchor
+    anchorFromEntry entry =
+      (AnchorModule <$> entry.moduleSymbol)
+        `orElse` (entry.variableSymbol >>= variableAnchor)
+
+    variableAnchor :: VariableId -> Maybe CompletionAnchor
+    variableAnchor vid = AnchorTyped <$> Map.lookup vid zonkResult.zonkedTypeEnvironment
+
+-- | Walk one path segment forward from an existing anchor.
+stepAnchor ::
+  IdentifierResult ->
+  ZonkResult ->
+  CompletionAnchor ->
+  Text ->
+  Maybe CompletionAnchor
+stepAnchor idResult zonkResult anchor segment = case anchor of
+  AnchorModule moduleId -> do
+    exports <- Map.lookup moduleId idResult.moduleExports
+    entry <- Map.lookup segment exports
+    (AnchorModule <$> entry.moduleSymbol)
+      `orElse` ( entry.variableSymbol
+                   >>= \vid -> AnchorTyped <$> Map.lookup vid zonkResult.zonkedTypeEnvironment
+               )
+  AnchorTyped ty -> AnchorTyped <$> fieldTypeOf idResult zonkResult ty segment
+
+-- | Project a single field out of a value-side semantic type. Mirrors
+-- the dispatch table 'completionsOfFields' uses, but returns the
+-- field's type rather than building completion items.
+fieldTypeOf ::
+  IdentifierResult ->
+  ZonkResult ->
+  SemTy ->
+  Text ->
+  Maybe SemTy
+fieldTypeOf idResult zonkResult ty field = case ty of
+  SemanticTypeData typeId -> do
+    params <- dataConstructorParams idResult zonkResult typeId
+    Map.lookup field params
+  SemanticTypeObject fields -> Map.lookup field fields
+  SemanticTypeUnion branches -> do
+    let projected = mapMaybe (\branch -> fieldTypeOf idResult zonkResult branch field) branches
+    if length projected == length branches
+      then Just (unionOfTypes projected)
+      else Nothing
+  _ -> Nothing
+
+-- | Field map of the constructor that produces values of @typeId@:
+-- the @x: integer, y: string@ portion of @data Foo(x: integer, y: string)@.
+dataConstructorParams ::
+  IdentifierResult ->
+  ZonkResult ->
+  TypeId ->
+  Maybe (Map Text SemTy)
+dataConstructorParams idResult zonkResult typeId = do
+  cdata <-
+    listToMaybe
+      [ c
+        | (_, c) <- Map.toList idResult.identifiedConstructors,
+          c.constructorTypeId == typeId
+      ]
+  ctorType <- Map.lookup cdata.constructorVariableId zonkResult.zonkedTypeEnvironment
+  case ctorType of
+    SemanticTypeFunction params _ _ -> Just params
+    _ -> Nothing
+
+-- | Smart join of multiple resolved branch types into a single
+-- 'SemanticType Union'. Mirrors 'unionSemantic' but operates in
+-- the 'Resolved' phase.
+unionOfTypes :: [SemTy] -> SemTy
+unionOfTypes = \case
+  [] -> SemanticTypeNever
+  [single] -> single
+  branches -> SemanticTypeUnion branches
+
+-- | Completion items for the public surface of @moduleId@: every
+-- exported agent / req / data ctor / type. Used for @alias.@.
+completionsOfModule ::
+  IdentifierResult ->
+  ZonkResult ->
+  ModuleId ->
+  [CompletionItem]
+completionsOfModule idResult zonkResult moduleId =
+  let exports = Map.findWithDefault Map.empty moduleId idResult.moduleExports
+      entryToItems (name, entry) =
+        mapMaybe
+          id
+          [ entry.variableSymbol >>= mkVariableItemFor idResult zonkResult name,
+            entry.typeSymbol >>= mkTypeItemFor idResult name,
+            entry.moduleSymbol >>= mkModuleItemFor idResult name
+          ]
+   in mergeByLabel (concatMap entryToItems (Map.toList exports))
+
+-- | Field labels reachable via @.@ on a value of @ty@. Handles:
+--
+--   * 'SemanticTypeData typeId' — fields are the data ctor's parameter labels.
+--   * 'SemanticTypeObject fields' — fields are the structural object's keys.
+--   * 'SemanticTypeUnion branches' — intersection of every branch's
+--     field set (= safe: only labels present in /all/ branches are offered).
+--   * Anything else — empty list.
+completionsOfFields ::
+  IdentifierResult ->
+  ZonkResult ->
+  SemTy ->
+  [CompletionItem]
+completionsOfFields idResult zonkResult ty =
+  let typeNames = fmap (.typeQualifiedName.name) idResult.identifiedTypes
+      reqNames = fmap (.requestQualifiedName.name) idResult.identifiedRequests
+      renderType = renderSemanticType typeNames reqNames
+      fields = fieldsOf ty
+   in [ CompletionItem
+          { ciLabel = label,
+            ciKind = CKLocalVariable,
+            ciDetail = Just (renderType fieldTy),
+            ciDoc = Nothing
+          }
+        | (label, fieldTy) <- Map.toAscList fields
+      ]
+  where
+    fieldsOf :: SemTy -> Map Text SemTy
+    fieldsOf = \case
+      SemanticTypeData typeId ->
+        fromMaybe Map.empty (dataConstructorParams idResult zonkResult typeId)
+      SemanticTypeObject m -> m
+      SemanticTypeUnion branches ->
+        let perBranch = map fieldsOf branches
+            common label = all (Map.member label) perBranch
+            allLabels = Set.unions (map Map.keysSet perBranch)
+            unionFor label = unionOfTypes [m Map.! label | m <- perBranch]
+         in Map.fromList [(label, unionFor label) | label <- Set.toList allLabels, common label]
+      _ -> Map.empty
+
+-- | Call-argument labels reachable via @(@ on a value of @ty@.
+-- Handles:
+--
+--   * 'SemanticTypeFunction params _ _' — labels are 'Map.keys params'.
+--   * 'SemanticTypeUnion branches' — intersection of every branch's
+--     label set (= only labels common to all branches; safe by
+--     construction).
+--   * Anything else — empty list.
+--
+-- @usedLabels@ filters out labels already supplied in the current call.
+completionsOfCallLabels :: SemTy -> Set Text -> [CompletionItem]
+completionsOfCallLabels ty usedLabels =
+  [ CompletionItem
+      { ciLabel = label,
+        ciKind = CKLocalVariable,
+        ciDetail = Nothing,
+        ciDoc = Nothing
+      }
+    | label <- Set.toAscList (labelsOf ty),
+      not (Set.member label usedLabels)
+  ]
+  where
+    labelsOf :: SemTy -> Set Text
+    labelsOf = \case
+      SemanticTypeFunction params _ _ -> Map.keysSet params
+      SemanticTypeUnion branches ->
+        case map labelsOf branches of
+          [] -> Set.empty
+          (first : rest) -> foldr Set.intersection first rest
+      _ -> Set.empty
+
+-- ---------------------------------------------------------------------------
+-- Per-kind item constructors (shared between bare completions, module
+-- exports, and any future anchor-driven path)
+-- ---------------------------------------------------------------------------
+
+mkVariableItemFor ::
+  IdentifierResult ->
+  ZonkResult ->
+  Text ->
+  VariableId ->
+  Maybe CompletionItem
+mkVariableItemFor idResult zonkResult name vid = do
+  vdata <- Map.lookup vid idResult.identifiedVariables
+  let reqVariableIds =
+        Map.fromList
+          [ (rdata.requestVariableId, ())
+            | (_, rdata) <- Map.toList idResult.identifiedRequests
+          ]
+      ctorVariableIds =
+        Map.fromList
+          [ (cdata.constructorVariableId, ())
+            | (_, cdata) <- Map.toList idResult.identifiedConstructors
+          ]
+      isTop = isJust vdata.variableQualifiedName
+      kind
+        | Map.member vid ctorVariableIds = CKConstructor
+        | Map.member vid reqVariableIds = CKRequest
+        | isTop = CKAgent
+        | otherwise = CKLocalVariable
+      typeNames = fmap (.typeQualifiedName.name) idResult.identifiedTypes
+      reqNames = fmap (.requestQualifiedName.name) idResult.identifiedRequests
+      renderType = renderSemanticType typeNames reqNames
+      detail = fmap renderType (Map.lookup vid zonkResult.zonkedTypeEnvironment)
+  pure
+    CompletionItem
+      { ciLabel = name,
+        ciKind = kind,
+        ciDetail = detail,
+        ciDoc = Nothing
+      }
+
+mkTypeItemFor ::
+  IdentifierResult ->
+  Text ->
+  TypeId ->
+  Maybe CompletionItem
+mkTypeItemFor idResult name tid = do
+  _ <- Map.lookup tid idResult.identifiedTypes
+  pure
+    CompletionItem
+      { ciLabel = name,
+        ciKind = CKTypeName,
+        ciDetail = Nothing,
+        ciDoc = Nothing
+      }
+
+mkModuleItemFor ::
+  IdentifierResult ->
+  Text ->
+  ModuleId ->
+  Maybe CompletionItem
+mkModuleItemFor idResult name mid = do
+  _ <- Map.lookup mid idResult.identifiedModules
+  pure
+    CompletionItem
+      { ciLabel = name,
+        ciKind = CKModule,
+        ciDetail = Nothing,
+        ciDoc = Nothing
+      }
+
+-- | Lightweight 'Maybe' biased choice. Replaces ad-hoc @orElse@ helpers.
+orElse :: Maybe a -> Maybe a -> Maybe a
+orElse Nothing b = b
+orElse a _ = a
+
+-- | When multiple items share a label, prefer the one with the more
+-- specific kind. Order of preference: local > callable > type > module.
+mergeByLabel :: [CompletionItem] -> [CompletionItem]
+mergeByLabel items =
+  Map.elems $
+    Map.fromListWith pickMoreSpecific [(ci.ciLabel, ci) | ci <- items]
+  where
+    pickMoreSpecific :: CompletionItem -> CompletionItem -> CompletionItem
+    pickMoreSpecific a b
+      | rank a.ciKind <= rank b.ciKind = a
+      | otherwise = b
+    rank :: CompletionKind -> Int
+    rank = \case
+      CKLocalVariable -> 0
+      CKConstructor -> 1
+      CKAgent -> 2
+      CKRequest -> 3
+      CKTypeName -> 4
+      CKModule -> 5
+
+-- ---------------------------------------------------------------------------
+-- Small helpers
+-- ---------------------------------------------------------------------------
+
+isJust :: Maybe a -> Bool
+isJust = \case
+  Just _ -> True
+  Nothing -> False

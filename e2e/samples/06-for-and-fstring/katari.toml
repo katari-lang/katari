@@ -1,4 +1,5 @@
-project = "for-and-fstring"
+[package]
+name = "for_and_fstring"
 
 [compile]
 src = "src/"

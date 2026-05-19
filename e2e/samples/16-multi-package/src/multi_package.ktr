@@ -1,0 +1,6 @@
+import list_utils
+
+@"Calls into the list_utils package and doubles 6."
+agent main() -> integer {
+  list_utils.double(x = 6)
+}

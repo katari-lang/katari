@@ -19,14 +19,12 @@ import Test.Hspec
 singleSourceInput :: Text -> CompileInput
 singleSourceInput src =
   CompileInput
-    { sources = Map.singleton "main" SourceEntry {filePath = "main", sourceText = src}
-    }
+    { sources = Map.singleton "main" SourceEntry {filePath = "main", sourceText = src}    }
 
 multiSourceInput :: [(Text, Text)] -> CompileInput
 multiSourceInput pairs =
   CompileInput
-    { sources = Map.fromList [(modName, SourceEntry {filePath = unpack modName, sourceText = src}) | (modName, src) <- pairs]
-    }
+    { sources = Map.fromList [(modName, SourceEntry {filePath = unpack modName, sourceText = src}) | (modName, src) <- pairs]    }
 
 -- ===========================================================================
 -- Spec

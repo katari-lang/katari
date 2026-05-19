@@ -56,9 +56,7 @@ runOneWithIdentifier src =
 compileOne :: Text -> IO [Diagnostic]
 compileOne src =
   let entry = Compile.SourceEntry {filePath = "<test>", sourceText = src}
-      input = Compile.CompileInput
-                { sources = Map.singleton "main" entry
-                }
+      input = Compile.CompileInput {sources = Map.singleton "main" entry}
       result = Compile.compile input
   in pure result.diagnostics
 
@@ -268,17 +266,20 @@ callExpressions = describe "call expressions" $ do
 
 matchPatterns :: Spec
 matchPatterns = describe "match patterns" $ do
-  it "variable pattern in match arm: subject type variable flows to bound variable" $ do
-    -- At CG time, `x` is represented as a type variable (x_type), not the
-    -- concrete SemanticTypeInteger. The constraint x_type <: y_type must be
-    -- emitted so the bound variable is at least as wide as the subject.
+  it "variable pattern in match arm: bound variable is bound directly to the subject's type" $ do
+    -- The pattern binding `y` ties directly to the subject `x`: they
+    -- share the same SemanticType in the type environment. Earlier
+    -- iterations emitted @x_type \<: y_type@ instead, which left
+    -- @y_type@ stranded behind a type-variable indirection during
+    -- bound aggregation and zonked to @unknown@. Binding @y_id@ to
+    -- @x_type@ directly avoids that indirection.
     (cg, errors, ir) <-
       runOneWithIdentifier
         "agent foo(x: integer) -> integer { match (x) { case y => { y } } }"
     errors `shouldBe` []
     case (typeVarOf "x" cg ir, typeVarOf "y" cg ir) of
       (Just xType, Just yType) ->
-        cg `shouldSatisfy` hasTypeConstraint (\l r -> l == xType && r == yType)
+        yType `shouldBe` xType
       _ -> expectationFailure "variables 'x' or 'y' not found"
 
   it "variable pattern: result-type annotation does not narrow the bound variable below the subject" $ do

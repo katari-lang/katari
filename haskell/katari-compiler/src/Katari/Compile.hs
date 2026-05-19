@@ -86,6 +86,15 @@ newtype CompileInput = CompileInput
   { -- | Module name → source entry. The map is treated as the complete
     -- world: any module not present here is "missing" from the
     -- compiler's point of view.
+    --
+    -- Module names are derived from file paths by the embedder (= the
+    -- relative path under the package's @src/@ root, dot-joined). By
+    -- convention every file in a package @P@ lives under @src\/P.ktr@
+    -- or @src\/P\/...@, so module keys are naturally
+    -- package-qualified (e.g. @P@, @P.helpers@). The compiler itself
+    -- is package-agnostic and just does name lookup; the embedder
+    -- (= @katari-project@) is responsible for assembling sources
+    -- from all reachable packages.
     sources :: Map ModuleName SourceEntry
   }
   deriving (Show)

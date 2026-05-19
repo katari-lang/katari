@@ -1,0 +1,11 @@
+[package]
+name = "multi_package"
+
+[compile]
+src = "src"
+
+[api]
+url = "http://localhost:8080"
+
+[dependencies.list_utils]
+path = "deps/list_utils"

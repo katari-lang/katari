@@ -69,6 +69,14 @@ if (RESOLVED_COMPILER !== null) {
 const RUN_E2E = RESOLVED_COMPILER !== null;
 const itE2E = RUN_E2E ? it : it.skip;
 
+// Convention: every sample lives at `e2e/samples/<NN>-<name>` and its
+// Katari package name is `<name>` with hyphens turned into underscores.
+// The entry file is `src/<pkg>.ktr` defining `agent main()`, so the
+// runtime's fully-qualified name is `<pkg>.main` (= module.agent).
+function packageNameFromSampleDir(sampleDir: string): string {
+  return sampleDir.replace(/^\d+-/, "").replace(/-/g, "_");
+}
+
 async function applyAndRun(
   projectName: string,
   sampleDir: string,
@@ -95,10 +103,11 @@ async function applyAndRun(
     schemaBundle: schemaBundle ?? trivialSchemaBundle(),
   });
 
+  const pkg = packageNameFromSampleDir(sampleDir);
   const { agentId } = await api.startAgent({
     projectId: project.id,
     snapshotId,
-    qualifiedName: "main.main",
+    qualifiedName: `${pkg}.main`,
     args: {},
   });
 
@@ -166,10 +175,10 @@ describe("samples/ end-to-end (compile → upload → run → verify)", () => {
   });
 
   itE2E(
-    "08-metadata: get_metadata on top-level agent + local closure yields 'add_them|main.add_them|local_bar|closure:0'",
+    "08-metadata: get_metadata on top-level agent + local closure yields 'add_them|metadata.add_them|local_bar|closure:0'",
     async () => {
       const result = await applyAndRun("metadata", "08-metadata");
-      expect(result).toBe("add_them|main.add_them|local_bar|closure:0");
+      expect(result).toBe("add_them|metadata.add_them|local_bar|closure:0");
     },
   );
 
@@ -198,7 +207,7 @@ describe("samples/ end-to-end (compile → upload → run → verify)", () => {
         // handlers by qname via setHandler.
         sidecarBundle: noOpSidecarBundle(),
         handlers: {
-          "main.extGreet": async ({ args }) => {
+          "ext_agent.extGreet": async ({ args }) => {
             const name = args["name"] as string;
             return `hello, ${name}`;
           },
@@ -230,12 +239,20 @@ describe("samples/ end-to-end (compile → upload → run → verify)", () => {
       const result = await applyAndRun("ext-throw-catch", "15-ext-throw-catch", {
         sidecarBundle: noOpSidecarBundle(),
         handlers: {
-          "main.boomExt": async () => {
+          "ext_throw_catch.boomExt": async () => {
             throw new Error("kaboom from JS");
           },
         },
       });
       expect(result).toBe("ext threw: kaboom from JS");
+    },
+  );
+
+  itE2E(
+    "16-multi-package: dep `list_utils` doubles 6 to 12 across packages",
+    async () => {
+      const result = await applyAndRun("multi-package", "16-multi-package");
+      expect(result).toBe(12);
     },
   );
 
@@ -272,16 +289,16 @@ describe("samples/ end-to-end (compile → upload → run → verify)", () => {
         expect(typeof d.qualifiedName).toBe("string");
       }
       const names = definitions.map((d) => d.qualifiedName);
-      expect(names).toContain("main.main");
+      expect(names).toContain("hello.main");
 
       // 2. getAgentDefinition resolves via the flat name. (Used to
       //    return 404 because the comparison was object === string.)
       const { definition } = await api.getAgentDefinition({
         projectId: project.id,
         snapshotId,
-        qualifiedName: "main.main",
+        qualifiedName: "hello.main",
       });
-      expect(definition.qualifiedName).toBe("main.main");
+      expect(definition.qualifiedName).toBe("hello.main");
     },
   );
 });

@@ -11,6 +11,7 @@ library:
     - Katari.Project.Config
     - Katari.Project.Discovery
     - Katari.Project.ModuleName
+    - Katari.Project.Resolve
 
 tests:
   katari-project-test:

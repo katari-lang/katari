@@ -1,4 +1,5 @@
-project = "control-flow"
+[package]
+name = "control_flow"
 
 [compile]
 src = "src/"

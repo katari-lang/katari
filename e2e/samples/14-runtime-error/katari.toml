@@ -1,4 +1,5 @@
-project = "runtime-error"
+[package]
+name = "runtime_error"
 
 [compile]
 src = "src/"

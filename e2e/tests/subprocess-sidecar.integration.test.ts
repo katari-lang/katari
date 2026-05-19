@@ -61,8 +61,8 @@ describe("SubprocessSidecar — real Node subprocess", () => {
       type: "ipcDelegate",
       delegationId: "delegation-1" as DelegationId,
       // The bundle's __withModule plugin prefixes the agent name with
-      // the file's module qname; main.ts → "main".
-      agentDefId: "main.extGreet" as unknown as Parameters<
+      // the file's module qname; ext_agent.ts → "ext_agent".
+      agentDefId: "ext_agent.extGreet" as unknown as Parameters<
         Sidecar["send"]
       >[0] extends { agentDefId: infer A }
         ? A
@@ -108,8 +108,8 @@ describe("SubprocessSidecar — real Node subprocess", () => {
     await sidecar.send({
       type: "ipcDelegate",
       delegationId: "cron-delegation-1" as DelegationId,
-      agentDefId: "main.cron_impl" as AgentDefId,
-      args: { callback: "main.notify_scheduled" },
+      agentDefId: "ext_cron.cron_impl" as AgentDefId,
+      args: { callback: "ext_cron.notify_scheduled" },
     });
 
     // Wait for the ext to emit ipcChildDelegate.
@@ -126,7 +126,7 @@ describe("SubprocessSidecar — real Node subprocess", () => {
         `no ipcChildDelegate within timeout (received: ${JSON.stringify(received)})`,
       );
     }
-    expect(childDelegate.agentDefId).toBe("main.notify_scheduled");
+    expect(childDelegate.agentDefId).toBe("ext_cron.notify_scheduled");
     expect(childDelegate.parentDelegationId).toBe("cron-delegation-1");
 
     // Pretend CORE finished the child agent successfully.

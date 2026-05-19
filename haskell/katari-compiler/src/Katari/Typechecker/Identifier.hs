@@ -62,6 +62,7 @@ import Katari.Prim (PrimRule)
 import Katari.Prim qualified as Prim
 import Katari.SourceSpan (HasSourceSpan (..), SourceSpan (..))
 import Katari.Typechecker.ImportGraph (findImportCycles)
+import Katari.Typechecker.ScopeIndex (ScopeFrame (..), ScopeIndex, buildScopeIndex)
 
 -- ---------------------------------------------------------------------------
 -- Identified GADT
@@ -225,7 +226,23 @@ data IdentifierResult = IdentifierResult
     topLevelVariablesByQName :: Map QualifiedName VariableId,
     typesByQName :: Map QualifiedName TypeId,
     requestsByQName :: Map QualifiedName RequestId,
-    constructorsByQName :: Map QualifiedName ConstructorId
+    constructorsByQName :: Map QualifiedName ConstructorId,
+    -- | Per-position scope index captured during resolution. The LSP /
+    -- completion query layer consumes this to answer "what symbols are
+    -- visible at this position?". See 'Katari.Typechecker.ScopeIndex'.
+    scopeIndex :: ScopeIndex SymbolEntry,
+    -- | Per-module bare-name visibility: own top-level declarations +
+    -- named imports + automatic stdlib injections + aliases brought
+    -- in by @import ... as alias@. Used by completion to scope
+    -- suggestions to what the user can actually reference by bare
+    -- name from inside the module. Members reachable only through a
+    -- module alias (= @prim.add@) are intentionally excluded; consumers
+    -- handle those via member-style completion after a @.@.
+    moduleVisibleSymbols :: Map ModuleId (Map Text SymbolEntry),
+    -- | Per-module export table: every name reachable through
+    -- @<module>.<name>@ from outside (= member-completion source).
+    -- Keyed by 'ModuleId'.
+    moduleExports :: Map ModuleId (Map Text SymbolEntry)
   }
   deriving (Show)
 
@@ -238,8 +255,11 @@ mkIdentifierResult ::
   Map RequestId RequestData ->
   Map ConstructorId ConstructorData ->
   Map ModuleId (Module Identified) ->
+  ScopeIndex SymbolEntry ->
+  Map ModuleId (Map Text SymbolEntry) ->
+  Map ModuleId (Map Text SymbolEntry) ->
   IdentifierResult
-mkIdentifierResult modules variables types requests constructors asts =
+mkIdentifierResult modules variables types requests constructors asts scopeIdx visibleSymbols exportsByModuleId =
   IdentifierResult
     { identifiedModules = modules,
       identifiedVariables = variables,
@@ -258,7 +278,10 @@ mkIdentifierResult modules variables types requests constructors asts =
       requestsByQName =
         Map.fromList [(requestData.requestQualifiedName, requestId) | (requestId, requestData) <- Map.toList requests],
       constructorsByQName =
-        Map.fromList [(constructorData.constructorQualifiedName, constructorId) | (constructorId, constructorData) <- Map.toList constructors]
+        Map.fromList [(constructorData.constructorQualifiedName, constructorId) | (constructorId, constructorData) <- Map.toList constructors],
+      scopeIndex = scopeIdx,
+      moduleVisibleSymbols = visibleSymbols,
+      moduleExports = exportsByModuleId
     }
 
 -- ---------------------------------------------------------------------------
@@ -460,7 +483,11 @@ data IdentifierState = IdentifierState
     requests :: Map RequestId RequestData,
     constructors :: Map ConstructorId ConstructorData,
     errors :: [IdentifierError],
-    resolveContext :: ResolveContext
+    resolveContext :: ResolveContext,
+    -- | Captured (span, innermost-frame-symbols) pairs. Each
+    -- 'withScopeFrameAt' invocation pushes one entry on exit. The
+    -- raw list is folded into a 'ScopeIndex' by 'mkIdentifierResult'.
+    capturedScopeFrames :: [(SourceSpan, Map Text SymbolEntry)]
   }
 
 -- | Lookup tables required during name resolution. Phase D sets one up for
@@ -501,7 +528,8 @@ runIdentifier action = runState action initialState
           requests = Map.empty,
           constructors = Map.empty,
           errors = [],
-          resolveContext = emptyResolveContext
+          resolveContext = emptyResolveContext,
+          capturedScopeFrames = []
         }
 
 -- ---------------------------------------------------------------------------
@@ -687,23 +715,29 @@ bindLocalVariable nameRef = do
       (innermost : remaining) -> Map.insert insertName (singletonVariable variableId) innermost : remaining
 
 -- | Push a fresh empty frame, run the action, then pop the frame.
+-- Right before popping, snapshot the innermost frame together with the
+-- given source span into 'capturedScopeFrames' so the LSP / completion
+-- query layer can later answer "what is visible at position P?".
+--
 -- If the stack is unexpectedly empty when popping (compiler bug), emit
 -- a 'K9999' internal-error diagnostic via 'ErrorInternal' and skip the
 -- pop instead of panicking.
-withScopeFrame :: Identifier a -> Identifier a
-withScopeFrame action = do
+withScopeFrameAt :: SourceSpan -> Identifier a -> Identifier a
+withScopeFrameAt span_ action = do
   modifyResolveContext $ \context -> context {scopeStack = Map.empty : context.scopeStack}
   result <- action
   scope <- gets ((.scopeStack) . (.resolveContext))
   case scope of
-    (_ : _) ->
+    (innermost : _) -> do
+      modify $ \state ->
+        state {capturedScopeFrames = (span_, innermost) : state.capturedScopeFrames}
       modifyResolveContext $ \context ->
         context {scopeStack = drop 1 context.scopeStack}
     [] ->
       emitError $
         ErrorInternal $
           Internal.internalErrorNoSpan
-            "withScopeFrame: scope stack underflow (compiler bug)"
+            "withScopeFrameAt: scope stack underflow (compiler bug)"
   pure result
 
 -- | Replace the resolve context for the duration of an action (used to switch
@@ -1054,25 +1088,25 @@ buildTopLevels moduleNameToId exports moduleMap =
         ImportNames {items, moduleName} ->
           resolveImportNames importDeclaration.sourceSpan moduleName items table
 
-    resolveImportModule importPos targetModuleName maybeAlias table =
-      case Map.lookup targetModuleName moduleNameToId of
+    resolveImportModule importPos written maybeAlias table =
+      case Map.lookup written moduleNameToId of
         Nothing -> do
-          emitError (ErrorImportModuleNotFound importPos targetModuleName)
+          emitError (ErrorImportModuleNotFound importPos written)
           pure table
         Just targetModuleId -> do
           let bindName = case maybeAlias of
                 Just aliasName -> aliasName
-                Nothing -> moduleNameTail targetModuleName
+                Nothing -> moduleNameTail written
           insertSymbolEntry importPos bindName (singletonModule targetModuleId) table
 
-    resolveImportNames importPos targetModuleName items table =
-      case Map.lookup targetModuleName moduleNameToId of
+    resolveImportNames importPos written items table =
+      case Map.lookup written moduleNameToId of
         Nothing -> do
-          emitError (ErrorImportModuleNotFound importPos targetModuleName)
+          emitError (ErrorImportModuleNotFound importPos written)
           pure table
         Just _ -> do
-          let targetModuleExports = Map.findWithDefault Map.empty targetModuleName exports
-          foldM (addImportItem importPos targetModuleName targetModuleExports) table items
+          let targetModuleExports = Map.findWithDefault Map.empty written exports
+          foldM (addImportItem importPos written targetModuleExports) table items
 
     addImportItem importPos targetModuleName targetModuleExports table item =
       case Map.lookup item.name targetModuleExports of
@@ -1220,7 +1254,10 @@ resolveSignatureBody ::
   Block Parsed ->
   Identifier ([ParameterBinding Identified], Maybe (SyntacticType Identified), Maybe [SyntacticRequest Identified], Block Identified)
 resolveSignatureBody parameters returnType withRequests body =
-  withScopeFrame $ do
+  -- The signature frame covers the body block — that is where param
+  -- references typically occur. Param bindings shown by completion at
+  -- any position inside the body.
+  withScopeFrameAt body.sourceSpan $ do
     parameters' <- mapM resolveParameter parameters
     returnType' <- traverse resolveType returnType
     withRequests' <- traverse (mapM resolveSyntacticRequest) withRequests
@@ -1246,7 +1283,7 @@ resolveRequest :: RequestDeclaration Parsed -> Identifier (RequestDeclaration Id
 resolveRequest RequestDeclaration {..} = do
   name' <- liftSignatureVariable name
   reqestName' <- liftSignatureRequest requestName
-  withScopeFrame $ do
+  withScopeFrameAt sourceSpan $ do
     parameters' <- mapM resolveParameter parameters
     returnType' <- resolveType returnType
     pure
@@ -1266,7 +1303,7 @@ resolveExternalAgent ExternalAgentDeclaration {..} = do
     Nothing -> emitError (ErrorMissingExternalAgentAnnotation sourceSpan name.text)
     Just t | T.null (T.strip t) -> emitError (ErrorEmptyExternalAgentAnnotation sourceSpan name.text)
     _ -> pure ()
-  withScopeFrame $ do
+  withScopeFrameAt sourceSpan $ do
     parameters' <- mapM resolveParameter parameters
     returnType' <- resolveType returnType
     withRequests' <- mapM resolveSyntacticRequest withRequests
@@ -1306,7 +1343,7 @@ resolvePrimAgent PrimAgentDeclaration {..} = do
               s.variables
         }
     Nothing -> pure ()
-  withScopeFrame $ do
+  withScopeFrameAt sourceSpan $ do
     parameters' <- mapM resolveParameter parameters
     returnType' <- resolveType returnType
     withRequests' <- mapM resolveSyntacticRequest withRequests
@@ -1685,7 +1722,7 @@ resolveSyntacticRequest SyntacticRequest {name, sourceSpan} = do
 -- expression. Bindings declared in the block are not visible outside it.
 resolveBlock :: Block Parsed -> Identifier (Block Identified)
 resolveBlock Block {statements, returnExpression, sourceSpan} = do
-  (statements', returnExpression') <- withScopeFrame $ do
+  (statements', returnExpression') <- withScopeFrameAt sourceSpan $ do
     resolvedStatements <- mapM resolveStatement statements
     resolvedReturnExpression <- traverse resolveExpression returnExpression
     pure (resolvedStatements, resolvedReturnExpression)
@@ -1705,7 +1742,7 @@ resolveHandleExpr HandleExpression {parallel, stateVariables, handlers, thenClau
   -- Body resolves in the OUTER scope (before handle's internal frame).
   body' <- resolveBlock body
   -- Handle internals in their own frame (state vars visible to handlers/then, not body).
-  (stateVariables', handlers', thenClause') <- withScopeFrame $ do
+  (stateVariables', handlers', thenClause') <- withScopeFrameAt sourceSpan $ do
     stateVariables' <- mapM resolveStateVariable stateVariables
     handlers' <- mapM resolveRequestHandler handlers
     -- The @then@ clause shares the handle's frame, so it sees state vars.
@@ -1713,7 +1750,7 @@ resolveHandleExpr HandleExpression {parallel, stateVariables, handlers, thenClau
     -- pattern bindings.
     thenClause' <-
       traverse
-        ( \(maybePattern, block) -> withScopeFrame $ do
+        ( \(maybePattern, block) -> withScopeFrameAt block.sourceSpan $ do
             maybePattern' <- traverse resolvePattern maybePattern
             block' <- resolveBlock block
             pure (maybePattern', block')
@@ -1984,7 +2021,15 @@ resolveBinaryOperatorAsCall BinaryOperatorExpression {operator, left, right, sou
   right' <- resolveExpression right
   let primName = Prim.binaryOperatorPrimName operator
   metadata <- lookupPrimVariable primName
-  pure (mkPrimCall primName metadata sourceSpan [("lhs", left'), ("rhs", right')])
+  -- Narrow span for the synthetic callee: the gap between operands
+  -- (where the operator token actually sits). Keeps hover / diagnostics
+  -- anchored on the @+@ instead of swallowing the whole expression.
+  let opSpan =
+        SrcSpan
+          sourceSpan.filePath
+          (sourceSpanOf left').end
+          (sourceSpanOf right').start
+  pure (mkPrimCall primName metadata sourceSpan opSpan [("lhs", left'), ("rhs", right')])
 
 -- | Desugar a unary operator into a call to the matching root prim
 -- (@!x@ → @not(value=x)@; @-x@ → @neg(value=x)@).
@@ -1994,7 +2039,12 @@ resolveUnaryOperatorAsCall UnaryOperatorExpression {operator, operand, sourceSpa
   operand' <- resolveExpression operand
   let primName = Prim.unaryOperatorPrimName operator
   metadata <- lookupPrimVariable primName
-  pure (mkPrimCall primName metadata sourceSpan [("value", operand')])
+  let opSpan =
+        SrcSpan
+          sourceSpan.filePath
+          sourceSpan.start
+          (sourceSpanOf operand').start
+  pure (mkPrimCall primName metadata sourceSpan opSpan [("value", operand')])
 
 -- | Look up a root prim's 'VariableId' from the preregistered map.
 -- Missing entries indicate a compiler bug (every operator name in
@@ -2018,17 +2068,27 @@ lookupPrimVariable primName = do
             ("Identifier: prim '" <> primName <> "' missing from registry (compiler bug)")
       pure Nothing
 
--- | Build a synthesised 'ExpressionCall' targeting a root prim. The
--- callee's source span and label spans all collapse to the original
--- operator's span — diagnostics still anchor to the user's @+@ /
--- @!@ token.
+-- | Build a synthesised 'ExpressionCall' targeting a root prim.
+--
+--   * @outerSpan@: the original operator expression's full span. Used
+--     for the outer 'CallExpression' and for diagnostics that fire on
+--     the whole expression.
+--   * @opSpan@: the narrow span covering just the operator token (= the
+--     gap between operands for binary, leading prefix for unary). Used
+--     for the synthetic callee and label spans so hover / go-to-def on
+--     the operator anchors to its source location, not to the whole
+--     expression.
+--   * Each @arg.value@ keeps its own real span, and @arg.sourceSpan@
+--     mirrors that so the CallArgument doesn't shadow the operand on
+--     position queries.
 mkPrimCall ::
   Text ->
   NameRefResolution Identified VariableRef ->
   SourceSpan ->
+  SourceSpan ->
   [(Text, Expression Identified)] ->
   Expression Identified
-mkPrimCall primName metadata sourceSpan args =
+mkPrimCall primName metadata outerSpan opSpan args =
   ExpressionCall
     CallExpression
       { callee =
@@ -2037,10 +2097,10 @@ mkPrimCall primName metadata sourceSpan args =
               { name =
                   NameRef
                     { text = primName,
-                      sourceSpan = sourceSpan,
+                      sourceSpan = opSpan,
                       resolution = metadata
                     },
-                sourceSpan = sourceSpan,
+                sourceSpan = opSpan,
                 typeOf = ()
               },
         arguments =
@@ -2048,15 +2108,15 @@ mkPrimCall primName metadata sourceSpan args =
               { label =
                   NameRef
                     { text = label,
-                      sourceSpan = sourceSpan,
+                      sourceSpan = opSpan,
                       resolution = ()
                     },
                 value = value,
-                sourceSpan = sourceSpan
+                sourceSpan = sourceSpanOf value
               }
             | (label, value) <- args
           ],
-        sourceSpan = sourceSpan,
+        sourceSpan = outerSpan,
         typeOf = ()
       }
 
@@ -2091,7 +2151,7 @@ resolveMatchExpr MatchExpression {subject, cases, sourceSpan} = do
 resolveCaseArm :: CaseArm Parsed -> Identifier (CaseArm Identified)
 resolveCaseArm CaseArm {pattern, body, sourceSpan} = do
   rejectPatternAnnotations pattern
-  withScopeFrame $ do
+  withScopeFrameAt sourceSpan $ do
     pattern' <- resolvePattern pattern
     body' <- resolveBlock body
     pure CaseArm {pattern = pattern', body = body', sourceSpan = sourceSpan}
@@ -2128,7 +2188,7 @@ resolveForExpr ForExpression {parallel, inBindings, varBindings, body, thenBlock
           pure (pattern, source', bindingSourceSpan)
       )
       inBindings
-  withScopeFrame $ do
+  withScopeFrameAt sourceSpan $ do
     -- Bind patterns and var-bindings in the fresh frame.
     inBindings' <-
       mapM
@@ -2383,15 +2443,29 @@ resolveModuleQualifiedChain moduleId moduleRef labels totalSpan =
 -- (e.g. type inference) to continue with a fresh type variable instead of
 -- aborting on the first name-resolution failure. Callers that want the
 -- old fail-fast behaviour can branch on @null errors@.
-identify :: Set Text -> Map Text (Module Parsed) -> (IdentifierResult, [IdentifierError])
+identify ::
+  Set Text ->
+  Map Text (Module Parsed) ->
+  (IdentifierResult, [IdentifierError])
 identify trustedStdlibNames moduleMap =
-  let (asts, finalState) =
+  let ((asts, topLevels, allExports, allModuleIds), finalState) =
         runIdentifier $ do
           for_ (findImportCycles moduleMap) (emitImportCycleError moduleMap)
           allModuleIds <- assignModuleIds trustedStdlibNames moduleMap
           allExports <- buildExports moduleMap
           topLevels <- buildTopLevels allModuleIds allExports moduleMap
-          resolveModule topLevels allModuleIds allExports moduleMap
+          asts <- resolveModule topLevels allModuleIds allExports moduleMap
+          pure (asts, topLevels, allExports, allModuleIds)
+      capturedFrames =
+        [ScopeFrame {frameSpan = sp, frameSymbols = sym} | (sp, sym) <- finalState.capturedScopeFrames]
+      -- Per-module bare-name visibility, keyed by ModuleId. `topLevels`
+      -- / `allExports` are keyed by module name string; reproject onto
+      -- the assigned ModuleIds.
+      reprojectByModuleId table =
+        Map.fromList
+          [ (moduleId, Map.findWithDefault Map.empty moduleName table)
+            | (moduleName, moduleId) <- Map.toList allModuleIds
+          ]
       result =
         mkIdentifierResult
           finalState.modules
@@ -2400,4 +2474,7 @@ identify trustedStdlibNames moduleMap =
           finalState.requests
           finalState.constructors
           asts
+          (buildScopeIndex capturedFrames)
+          (reprojectByModuleId topLevels)
+          (reprojectByModuleId allExports)
    in (result, reverse finalState.errors)

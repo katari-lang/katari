@@ -1,0 +1,293 @@
+-- | Document lifecycle handlers: @didOpen@ / @didChange@ / @didClose@.
+--
+-- Each one updates the merged virtual file map, schedules a debounced
+-- recompile (150 ms), and republishes diagnostics for the changed
+-- workspace.
+module Katari.LSP.Handlers.Document
+  ( documentHandlers,
+    recompileNow,
+  )
+where
+
+import Control.Concurrent (forkIO, killThread, threadDelay)
+import Control.Concurrent.STM (atomically, readTVar, readTVarIO, writeTVar, modifyTVar')
+import Control.Monad (when)
+import Control.Monad.IO.Class (liftIO)
+import qualified Data.Map.Strict as Map
+import Data.Map.Strict (Map)
+import qualified Data.Set as Set
+import qualified Data.Text as Text
+import Data.Text (Text)
+import qualified Katari.Compile as Compile
+import Katari.Diagnostic (Diagnostic (..), Severity (..))
+import qualified Katari.Project.Config as Project
+import qualified Katari.Project.Discovery as Project
+import qualified Katari.Project.Resolve as Project
+import Katari.LSP.Convert (katariSpanToLspRange)
+import Katari.LSP.State (ServerState (..), WorkspaceState (..), snapshotWorkspaceSources)
+import Katari.SourceSpan (SourceSpan (..))
+import Katari.Query (buildOccurrenceIndex)
+import qualified Language.LSP.Protocol.Lens as L
+import qualified Language.LSP.Protocol.Message as LSP
+import qualified Language.LSP.Protocol.Types as LSP
+import qualified Language.LSP.Server as LSP
+import qualified Language.LSP.VFS as VFS
+import Control.Lens ((^.))
+import System.FilePath (isAbsolute, (</>))
+
+-- ---------------------------------------------------------------------------
+-- Handlers
+-- ---------------------------------------------------------------------------
+
+documentHandlers :: ServerState -> LSP.Handlers (LSP.LspM ())
+documentHandlers st =
+  mconcat
+    [ LSP.notificationHandler LSP.SMethod_TextDocumentDidOpen $ \msg -> do
+        let uri = msg ^. L.params . L.textDocument . L.uri
+            txt = msg ^. L.params . L.textDocument . L.text
+        case LSP.uriToFilePath uri of
+          Nothing -> pure ()
+          Just path -> liftIO (onOpen st path txt) >> scheduleRecompile st path
+    , LSP.notificationHandler LSP.SMethod_TextDocumentDidChange $ \msg -> do
+        let uri = msg ^. L.params . L.textDocument . L.uri
+        mvfs <- LSP.getVirtualFile (LSP.toNormalizedUri uri)
+        case (LSP.uriToFilePath uri, mvfs) of
+          (Just path, Just vfs) -> do
+            let txt = VFS.virtualFileText vfs
+            liftIO (onChange st path txt) >> scheduleRecompile st path
+          _ -> pure ()
+    , LSP.notificationHandler LSP.SMethod_TextDocumentDidClose $ \msg -> do
+        let uri = msg ^. L.params . L.textDocument . L.uri
+        case LSP.uriToFilePath uri of
+          Nothing -> pure ()
+          Just path -> liftIO (onClose st path) >> scheduleRecompile st path
+    ]
+
+-- ---------------------------------------------------------------------------
+-- State updates
+-- ---------------------------------------------------------------------------
+
+-- | Locate the workspace for @path@, attaching it to the server state if
+-- this is the first time we've seen its project root. If @path@ is
+-- outside any project, fall through to the orphan-files bucket.
+onOpen :: ServerState -> FilePath -> Text -> IO ()
+onOpen st path txt = do
+  mRoot <- Project.findProjectRoot path
+  case mRoot of
+    Nothing ->
+      atomically $ modifyTVar' st.orphanFiles (Map.insert path txt)
+    Just root -> do
+      ensureWorkspaceLoaded st root
+      atomically $ modifyTVar' st.workspaces $ \wsMap ->
+        Map.adjust
+          ( \ws ->
+              ws
+                { wsFiles = Map.insert path txt ws.wsFiles,
+                  wsOpenFiles = Set.insert path ws.wsOpenFiles
+                }
+          )
+          root
+          wsMap
+
+onChange :: ServerState -> FilePath -> Text -> IO ()
+onChange st path txt = do
+  mRoot <- Project.findProjectRoot path
+  case mRoot of
+    Nothing ->
+      atomically $ modifyTVar' st.orphanFiles (Map.insert path txt)
+    Just root ->
+      atomically $ modifyTVar' st.workspaces $ \wsMap ->
+        Map.adjust
+          ( \ws -> ws {wsFiles = Map.insert path txt ws.wsFiles}
+          )
+          root
+          wsMap
+
+onClose :: ServerState -> FilePath -> IO ()
+onClose st path = do
+  mRoot <- Project.findProjectRoot path
+  case mRoot of
+    Nothing ->
+      atomically $ modifyTVar' st.orphanFiles (Map.delete path)
+    Just root -> do
+      -- Drop the open-files marker; the on-disk view is still in
+      -- wsFiles (the file may have unsaved changes that we now want to
+      -- discard in favour of disk). We re-read disk lazily on the next
+      -- recompile cycle.
+      atomically $ modifyTVar' st.workspaces $ \wsMap ->
+        Map.adjust
+          (\ws -> ws {wsOpenFiles = Set.delete path ws.wsOpenFiles})
+          root
+          wsMap
+
+-- | Load the workspace at @root@ if not already present. Parses
+-- @katari.toml@, resolves the transitive path-dep graph, and reads
+-- every package's @.ktr@ files in one go.
+ensureWorkspaceLoaded :: ServerState -> FilePath -> IO ()
+ensureWorkspaceLoaded st root = do
+  existing <- readTVarIO st.workspaces
+  case Map.lookup root existing of
+    Just _ -> pure ()
+    Nothing -> do
+      cfgRes <- Project.loadKatariToml (root </> Project.configFilename)
+      case cfgRes of
+        Left _ -> pure () -- ignore broken config; orphan path won't kick in
+        Right cfg -> do
+          resolveRes <- Project.loadResolvedProject root
+          case resolveRes of
+            Left _ -> pure () -- ignore resolution failures (e.g. bad dep paths)
+            Right resolved -> case Project.assembleProject resolved of
+              Left _ -> pure ()
+              Right assembly -> do
+                let moduleByPath =
+                      Map.fromList
+                        [ (entry.sourcePath, modName)
+                          | (modName, entry) <- Map.toList assembly.sources
+                        ]
+                    ws =
+                      WorkspaceState
+                        { wsRoot = root,
+                          wsConfig = cfg,
+                          wsAssembly = assembly,
+                          wsModuleByPath = moduleByPath,
+                          wsFiles = Map.empty,
+                          wsOpenFiles = Set.empty,
+                          wsLastResult = Nothing,
+                          wsOccIndex = Nothing
+                        }
+                atomically $ modifyTVar' st.workspaces (Map.insert root ws)
+
+-- ---------------------------------------------------------------------------
+-- Debounced recompile
+-- ---------------------------------------------------------------------------
+
+-- Debounce interval in microseconds (150 ms).
+debounceUs :: Int
+debounceUs = 150_000
+
+scheduleRecompile :: ServerState -> FilePath -> LSP.LspM () ()
+scheduleRecompile st path = do
+  mRoot <- liftIO (Project.findProjectRoot path)
+  let key = maybe "" id mRoot
+  env <- LSP.getLspEnv
+  liftIO $ do
+    prevTimer <- atomically $ do
+      timers <- readTVar st.debounceTimers
+      pure (Map.lookup key timers)
+    case prevTimer of
+      Just tid -> killThread tid
+      Nothing -> pure ()
+    newTid <- forkIO $ do
+      threadDelay debounceUs
+      LSP.runLspT env (recompileNow st key)
+    atomically $ modifyTVar' st.debounceTimers (Map.insert key newTid)
+
+-- | Compile the workspace whose root is @key@ and publish diagnostics.
+-- An empty @key@ means "the orphan-files bucket".
+recompileNow :: ServerState -> FilePath -> LSP.LspM () ()
+recompileNow st key
+  | null key = recompileOrphans st
+  | otherwise = recompileWorkspace st key
+
+recompileWorkspace :: ServerState -> FilePath -> LSP.LspM () ()
+recompileWorkspace st root = do
+  mWs <- liftIO (atomically (Map.lookup root <$> readTVar st.workspaces))
+  case mWs of
+    Nothing -> pure ()
+    Just ws -> do
+      let input = snapshotWorkspaceSources ws
+          result = Compile.compile input
+          -- Diagnostics + LSP filePath → text map share the same view:
+          -- merge disk content from the assembly with buffer overrides.
+          fileTexts =
+            Map.union
+              ws.wsFiles
+              ( Map.fromList
+                  [ (entry.sourcePath, entry.sourceText)
+                    | entry <- Map.elems ws.wsAssembly.sources
+                  ]
+              )
+      liftIO $
+        atomically $
+          modifyTVar' st.workspaces $
+            Map.adjust
+              ( \w ->
+                  w
+                    { wsLastResult = Just result,
+                      wsOccIndex =
+                        Just (buildOccurrenceIndex result.identifierResult result.zonkResult)
+                    }
+              )
+              root
+      publishWorkspaceDiagnostics fileTexts result.diagnostics
+
+recompileOrphans :: ServerState -> LSP.LspM () ()
+recompileOrphans st = do
+  files <- liftIO (readTVarIO st.orphanFiles)
+  -- Compile each orphan individually so per-file diagnostics are
+  -- isolated. The orphan bucket cannot resolve cross-file imports.
+  mapM_ (uncurry (compileOneOrphan st)) (Map.toList files)
+
+compileOneOrphan :: ServerState -> FilePath -> Text -> LSP.LspM () ()
+compileOneOrphan _st path txt = do
+  let entry = Compile.SourceEntry {Compile.filePath = path, Compile.sourceText = txt}
+      sources = Map.singleton (singletonModuleName path) entry
+      result = Compile.compile (Compile.CompileInput {Compile.sources = sources})
+  publishWorkspaceDiagnostics (Map.singleton path txt) result.diagnostics
+  where
+    -- Strip the trailing @.ktr@ extension and treat the basename as the
+    -- module name. The orphan bucket cannot use directory-based module
+    -- naming because there's no project root to relativise against.
+    singletonModuleName :: FilePath -> Text
+    singletonModuleName p =
+      Text.pack
+        ( case reverse (takeWhile (/= '/') (reverse p)) of
+            base -> case break (== '.') base of
+              (stem, _) -> stem
+        )
+
+-- ---------------------------------------------------------------------------
+-- Diagnostics publishing
+-- ---------------------------------------------------------------------------
+
+publishWorkspaceDiagnostics :: Map FilePath Text -> [Diagnostic] -> LSP.LspM () ()
+publishWorkspaceDiagnostics fileTexts diags = do
+  let grouped =
+        Map.fromListWith (<>)
+          [(d.span.filePath, [d]) | d <- diags, d.severity /= SeverityHint]
+      -- Always emit an entry for every file we know about so the editor
+      -- clears stale diagnostics when problems disappear.
+      allFiles = Map.union grouped (Map.map (const []) fileTexts)
+  mapM_ (uncurry (publishForFile fileTexts)) (Map.toList allFiles)
+
+publishForFile :: Map FilePath Text -> FilePath -> [Diagnostic] -> LSP.LspM () ()
+publishForFile fileTexts path ds = do
+  let lsps = map (diagnosticToLsp fileTexts) ds
+      uri = LSP.filePathToUri path
+  LSP.sendNotification LSP.SMethod_TextDocumentPublishDiagnostics $
+    LSP.PublishDiagnosticsParams uri Nothing lsps
+
+diagnosticToLsp :: Map FilePath Text -> Diagnostic -> LSP.Diagnostic
+diagnosticToLsp fileTexts d =
+  LSP.Diagnostic
+    { LSP._range = katariSpanToLspRange fileTexts d.span,
+      LSP._severity = Just (mapSeverity d.severity),
+      LSP._code = Just (LSP.InR d.code),
+      LSP._codeDescription = Nothing,
+      LSP._source = Just "katari",
+      LSP._message = d.message,
+      LSP._tags = Nothing,
+      LSP._relatedInformation = Nothing,
+      LSP._data_ = Nothing
+    }
+
+mapSeverity :: Severity -> LSP.DiagnosticSeverity
+mapSeverity = \case
+  SeverityError -> LSP.DiagnosticSeverity_Error
+  SeverityWarning -> LSP.DiagnosticSeverity_Warning
+  SeverityInfo -> LSP.DiagnosticSeverity_Information
+  SeverityHint -> LSP.DiagnosticSeverity_Hint
+
+-- Silence "unused" warnings for guards we keep for future expansion.
+_when :: Bool -> IO () -> IO ()
+_when = when

@@ -36,3 +36,14 @@ mkSourceSpan path p1 p2
 -- uniformly by record-shaped nodes and by GADT sum types.
 class HasSourceSpan node where
   sourceSpanOf :: node -> SourceSpan
+
+-- | True iff @position@ lies within @sourceSpan@ (inclusive on both
+-- ends, half-open at end of file).
+spanContains :: SourceSpan -> Position -> Bool
+spanContains sourceSpan position =
+  ( sourceSpan.start.line < position.line
+      || sourceSpan.start.line == position.line && sourceSpan.start.column <= position.column
+  )
+    && ( position.line < sourceSpan.end.line
+           || position.line == sourceSpan.end.line && position.column <= sourceSpan.end.column
+       )

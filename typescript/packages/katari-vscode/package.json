@@ -5,6 +5,7 @@
   "version": "0.1.0",
   "private": true,
   "publisher": "katari",
+  "main": "./out/extension.js",
   "engines": {
     "vscode": "^1.80.0"
   },
@@ -31,20 +32,37 @@
         "scopeName": "source.katari",
         "path": "./syntaxes/katari.tmLanguage.json"
       }
-    ]
+    ],
+    "configuration": {
+      "title": "Katari",
+      "properties": {
+        "katari.server.path": {
+          "type": "string",
+          "default": "katari-lsp",
+          "description": "Path to the katari-lsp executable (looked up on PATH if not absolute)."
+        }
+      }
+    }
   },
   "exports": {
     "./grammar": "./syntaxes/katari.tmLanguage.json",
     "./language-configuration": "./language-configuration.json"
   },
   "files": [
+    "out",
     "syntaxes",
     "language-configuration.json"
   ],
   "scripts": {
+    "build": "tsc -p .",
     "test": "node --experimental-vm-modules ./scripts/tokenize-samples.mjs"
   },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  },
   "devDependencies": {
+    "@types/vscode": "^1.80.0",
+    "typescript": "^5.4.0",
     "vscode-oniguruma": "^2.0.1",
     "vscode-textmate": "^9.1.0"
   }

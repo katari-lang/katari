@@ -1,4 +1,5 @@
-project = "abs-and-mod"
+[package]
+name = "abs_and_mod"
 
 [compile]
 src = "src/"

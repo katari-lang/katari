@@ -758,11 +758,23 @@ walkPattern ::
   CG (Pattern Constrained, SemanticType Unresolved)
 walkPattern maybeSubject = \case
   PatternVariable VariablePattern {name, typeAnnotation, sourceSpan} -> do
-    tx <- variableTypeFromName name
-    case maybeSubject of
-      Just subject ->
-        addTypeConstraint subject tx (ConstraintReason ReasonKindMatchArm sourceSpan)
-      Nothing -> pure ()
+    -- When a subject is supplied (= a refutable pattern position like a
+    -- match arm or a destructured tuple element), the binding's type IS
+    -- the subject's type. Rebind the variable to point directly at the
+    -- subject so any downstream reference (e.g. inside the arm body)
+    -- propagates to the subject's concrete type instead of stranding
+    -- the original fresh type var with only a phantom @subject \<:
+    -- tv@ link that bound-aggregation can't resolve through type-var
+    -- indirection. Without a subject (= an irrefutable let / parameter
+    -- pattern), fall back to the variable's pre-allocated fresh tv;
+    -- the caller is expected to bridge from outside.
+    tx <- case maybeSubject of
+      Just subject -> do
+        case name.resolution of
+          Just vid -> bindVariable vid subject
+          Nothing -> pure ()
+        pure subject
+      Nothing -> variableTypeFromName name
     case typeAnnotation of
       Just t -> do
         annotated <- elaborateType t
@@ -802,7 +814,7 @@ walkPattern maybeSubject = \case
       )
   PatternTuple TuplePattern {elements, sourceSpan} -> do
     componentSubjects <- case maybeSubject of
-      Just subject -> projectTupleSubjectTypes (length elements) subject sourceSpan
+      Just subject -> projectTupleSubjectTypesLinked (length elements) subject sourceSpan
       Nothing      -> replicateM (length elements) freshTypeVar
     pairs <- mapM (\(cs, el) -> walkPattern (Just cs) el) (zip componentSubjects elements)
     let patternType = SemanticTypeTuple (map snd pairs)
@@ -865,6 +877,39 @@ projectTupleSubjectTypes arity subjectType _sourceSpan = case subjectType of
          else pure (map unionSemantic (transpose tupleBranches))
   SemanticTypeUnknown -> pure (replicate arity SemanticTypeUnknown)
   _ -> replicateM arity freshTypeVar
+
+-- | Like 'projectTupleSubjectTypes', but for cases where the subject
+-- is still a type variable (or otherwise unknown shape): generates
+-- fresh component type variables AND emits a flow constraint
+-- @SemanticTypeTuple [tv1, ..., tvN] \<: subject@ so propagation can
+-- push the subject's actual component types down into the patterns.
+--
+-- Without this link, pattern-bound variables under a tuple pattern
+-- end up with no concrete bound and zonk to 'SemanticTypeUnknown',
+-- which leaks into hover / completion as a useless display.
+projectTupleSubjectTypesLinked ::
+  Int ->
+  SemanticType Unresolved ->
+  SourceSpan ->
+  CG [SemanticType Unresolved]
+projectTupleSubjectTypesLinked arity subjectType sourceSpan = case subjectType of
+  SemanticTypeTuple ts
+    | length ts == arity -> pure ts
+  SemanticTypeUnion branches
+    | not (null [ts | SemanticTypeTuple ts <- branches, length ts == arity]) ->
+        projectTupleSubjectTypes arity subjectType sourceSpan
+  SemanticTypeUnknown -> pure (replicate arity SemanticTypeUnknown)
+  _ -> do
+    -- Subject is a type variable or an unrelated shape. Fall back to
+    -- fresh component vars, but also emit a bridging constraint so
+    -- propagation can flow the subject's eventual tuple components
+    -- back into each fresh component var.
+    fresh <- replicateM arity freshTypeVar
+    addTypeConstraint
+      (SemanticTypeTuple fresh)
+      subjectType
+      (ConstraintReason ReasonKindMatchArm sourceSpan)
+    pure fresh
 
 -- ---------------------------------------------------------------------------
 -- Block walking (with where-block request discharge)

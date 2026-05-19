@@ -1,4 +1,5 @@
-project = "arithmetic"
+[package]
+name = "arithmetic"
 
 [compile]
 src = "src/"

@@ -1,4 +1,5 @@
-project = "ext-cron"
+[package]
+name = "ext_cron"
 
 [compile]
 src = "src/"

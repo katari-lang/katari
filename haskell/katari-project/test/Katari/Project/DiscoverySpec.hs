@@ -4,6 +4,7 @@ import qualified Data.Map.Strict as Map
 import Katari.Project.Config
   ( ApiSection (..),
     CompileSection (..),
+    PackageSection (..),
     ProjectConfig (..),
   )
 import Katari.Project.Discovery
@@ -49,7 +50,13 @@ sampleConfig :: ProjectConfig
 sampleConfig =
   ProjectConfig
     { projectName = "x",
+      packageSection =
+        PackageSection
+          { packageName = "x",
+            packageVersion = Nothing
+          },
       compileSection = CompileSection {compileSrc = "src/", compileRoot = Nothing},
       sidecarSection = Nothing,
-      apiSection = ApiSection {apiUrl = "http://localhost", apiAuth = Nothing}
+      apiSection = ApiSection {apiUrl = "http://localhost", apiAuth = Nothing},
+      dependencies = Map.empty
     }

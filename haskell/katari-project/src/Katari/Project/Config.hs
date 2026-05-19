@@ -10,9 +10,11 @@
 -- surface area.
 module Katari.Project.Config
   ( ProjectConfig (..),
+    PackageSection (..),
     CompileSection (..),
     SidecarSection (..),
     ApiSection (..),
+    PathDependency (..),
     ConfigError (..),
     parseKatariToml,
     loadKatariToml,
@@ -37,10 +39,22 @@ import System.Environment (lookupEnv)
 -- ===========================================================================
 
 data ProjectConfig = ProjectConfig
-  { projectName :: Text,
+  { -- | Convenience mirror of @packageSection.packageName@. Kept for
+    -- back-compat with callers that read the package's display name.
+    projectName :: Text,
+    packageSection :: PackageSection,
     compileSection :: CompileSection,
     sidecarSection :: Maybe SidecarSection,
-    apiSection :: ApiSection
+    apiSection :: ApiSection,
+    -- | Path-based dependencies (the only kind supported in v1). Keys
+    -- are package names as written in @[dependencies.<name>]@.
+    dependencies :: Map Text PathDependency
+  }
+  deriving (Show, Eq)
+
+data PackageSection = PackageSection
+  { packageName :: Text,
+    packageVersion :: Maybe Text
   }
   deriving (Show, Eq)
 
@@ -58,6 +72,13 @@ newtype SidecarSection = SidecarSection
 data ApiSection = ApiSection
   { apiUrl :: Text,
     apiAuth :: Maybe Text
+  }
+  deriving (Show, Eq)
+
+-- | A path-based dependency entry. The path is interpreted relative to
+-- the @katari.toml@ that declares it (resolution happens elsewhere).
+newtype PathDependency = PathDependency
+  { depPath :: FilePath
   }
   deriving (Show, Eq)
 
@@ -130,10 +151,22 @@ interpolateEnv input = Text.pack . reverse <$> go (Text.unpack input) []
 
 validateConfig :: FilePath -> TomlTable -> Either ConfigError ProjectConfig
 validateConfig path table = do
-  name <-
-    case lookupScalar "project" table of
+  -- Package name: prefer [package].name, fall back to legacy top-level
+  -- `project = "..."`. At least one must be present.
+  let packageTable = lookupTable "package" table
+  name <- case lookupTableScalar "name" packageTable of
+    Just (TomlString s) | not (Text.null s) -> Right s
+    _ -> case lookupScalar "project" table of
       Just (TomlString s) | not (Text.null s) -> Right s
-      _ -> Left (ConfigValidationError path "required field 'project' (non-empty string)")
+      _ ->
+        Left
+          ( ConfigValidationError
+              path
+              "required field '[package].name' (or legacy top-level 'project')"
+          )
+  let version = case lookupTableScalar "version" packageTable of
+        Just (TomlString s) | not (Text.null s) -> Just s
+        _ -> Nothing
   let compileTable = lookupTable "compile" table
   let src = case lookupTableScalar "src" compileTable of
         Just (TomlString s) | not (Text.null s) -> Text.unpack s
@@ -163,18 +196,74 @@ validateConfig path table = do
   let auth = case lookupTableScalar "auth" apiTable of
         Just (TomlString s) | not (Text.null s) -> Just s
         _ -> Nothing
+  deps <- collectDependencies path table
   Right
     ProjectConfig
       { projectName = name,
+        packageSection =
+          PackageSection
+            { packageName = name,
+              packageVersion = version
+            },
         compileSection = CompileSection {compileSrc = src, compileRoot = root},
         sidecarSection = sidecar,
-        apiSection = ApiSection {apiUrl = url, apiAuth = auth}
+        apiSection = ApiSection {apiUrl = url, apiAuth = auth},
+        dependencies = deps
       }
   where
     expectString :: TomlValue -> Either ConfigError Text
     expectString = \case
       TomlString s -> Right s
       _ -> Left (ConfigValidationError path "expected string in array")
+
+-- | Walk every @[dependencies.<name>]@ section, requiring a @path@ key
+-- inside. Other fields (e.g. @git@, @rev@) are reserved for future
+-- snapshots and are rejected here so users get a clear error.
+collectDependencies ::
+  FilePath -> TomlTable -> Either ConfigError (Map Text PathDependency)
+collectDependencies path (TomlTable buckets) =
+  Map.fromList <$> traverse fromEntry depEntries
+  where
+    depEntries =
+      [ (Text.drop (Text.length prefix) sec, bucket)
+        | (sec, bucket) <- Map.toList buckets,
+          prefix `Text.isPrefixOf` sec,
+          sec /= "dependencies" -- bare `[dependencies]` has no <name>
+      ]
+    prefix = "dependencies."
+    fromEntry (depName, bucket) = do
+      depTable <- case bucket of
+        BucketTable t -> Right t
+        BucketScalar _ ->
+          Left
+            ( ConfigValidationError
+                path
+                ( "expected table at [dependencies."
+                    <> depName
+                    <> "], got scalar"
+                )
+            )
+      case Map.lookup "path" depTable of
+        Just (TomlString s) | not (Text.null s) ->
+          Right (depName, PathDependency {depPath = Text.unpack s})
+        Just _ ->
+          Left
+            ( ConfigValidationError
+                path
+                ( "[dependencies."
+                    <> depName
+                    <> "].path must be a non-empty string"
+                )
+            )
+        Nothing ->
+          Left
+            ( ConfigValidationError
+                path
+                ( "[dependencies."
+                    <> depName
+                    <> "] missing required key 'path' (only path deps are supported in v1)"
+                )
+            )
 
 -- ===========================================================================
 -- TOML reader (minimal, flat, single-level tables)

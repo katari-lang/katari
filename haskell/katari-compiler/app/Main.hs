@@ -30,6 +30,7 @@ import Katari.Diagnostic.Render (renderDiagnostic)
 import Katari.IR (IRModule)
 import qualified Katari.Project.Discovery as Project
 import qualified Katari.Project.ModuleName as Project
+import qualified Katari.Project.Resolve as Project
 import System.FilePath (takeFileName)
 import Katari.Schema (SchemaEntry (..))
 import Options.Applicative
@@ -107,8 +108,8 @@ main = do
 
 runCompile :: CompileOpts -> IO ()
 runCompile o = do
-  sources <- loadSources o.compileInputs
-  let result = compile (CompileInput {sources = sources})
+  input <- loadCompileInput o.compileInputs
+  let result = compile input
   emitDiagnostics result.diagnostics
   if hasErrors result.diagnostics
     then exitWith (ExitFailure 1)
@@ -118,8 +119,8 @@ runCompile o = do
 
 runTypecheck :: TypecheckOpts -> IO ()
 runTypecheck o = do
-  sources <- loadSources o.typecheckInputs
-  let result = compile (CompileInput {sources = sources})
+  input <- loadCompileInput o.typecheckInputs
+  let result = compile input
   emitDiagnostics result.diagnostics
   if hasErrors result.diagnostics
     then exitWith (ExitFailure 1)
@@ -128,12 +129,60 @@ runTypecheck o = do
 -- ===========================================================================
 -- Source loading (delegated to katari-project for directory scans)
 -- ===========================================================================
-
-loadSources :: [FilePath] -> IO (Map Text.Text SourceEntry)
-loadSources inputs = Map.unions <$> traverse loadOne inputs
+--
+-- Resolution rules:
+--
+--   * For each input path, walk up looking for @katari.toml@. If found,
+--     use 'Project.loadResolvedProject' so cross-package deps resolve.
+--     The first @katari.toml@ wins; subsequent inputs that fall under
+--     the same root are merged in (the workspace already covers them).
+--   * Inputs with no enclosing project fall back to the legacy flat
+--     scan (= single-file mode or a stand-alone @.ktr@).
+loadCompileInput :: [FilePath] -> IO CompileInput
+loadCompileInput inputs = do
+  -- Use the first project root we find; the compile input is one
+  -- single world, so we collapse everything into one assembly.
+  mRoot <- firstProjectRoot inputs
+  case mRoot of
+    Just _root -> do
+      assemblyResult <- loadFromProject inputs
+      case assemblyResult of
+        Left err -> do
+          hPutStrLn stderr $ "katari-compiler: " <> show err
+          exitWith (ExitFailure 2)
+        Right input -> pure input
+    Nothing -> do
+      flatSources <- Map.unions <$> traverse loadFlatPath inputs
+      pure CompileInput {sources = flatSources}
   where
-    loadOne :: FilePath -> IO (Map Text.Text SourceEntry)
-    loadOne p = do
+    firstProjectRoot :: [FilePath] -> IO (Maybe FilePath)
+    firstProjectRoot [] = pure Nothing
+    firstProjectRoot (p : rest) = do
+      r <- Project.findProjectRoot p
+      case r of
+        Just root -> pure (Just root)
+        Nothing -> firstProjectRoot rest
+
+    loadFromProject :: [FilePath] -> IO (Either Project.ResolveError CompileInput)
+    loadFromProject (firstInput : _) = do
+      mRoot <- Project.findProjectRoot firstInput
+      case mRoot of
+        Nothing -> pure (Left (Project.ResolveMissingConfig "" firstInput))
+        Just root -> do
+          rp <- Project.loadResolvedProject root
+          case rp of
+            Left err -> pure (Left err)
+            Right resolved -> pure (toCompileInput <$> Project.assembleProject resolved)
+    loadFromProject [] = pure (Right emptyCompileInput)
+
+    emptyCompileInput :: CompileInput
+    emptyCompileInput = CompileInput {sources = Map.empty}
+
+    toCompileInput :: Project.ProjectAssembly -> CompileInput
+    toCompileInput a = CompileInput {sources = Map.map toCompilerEntry a.sources}
+
+    loadFlatPath :: FilePath -> IO (Map Text.Text SourceEntry)
+    loadFlatPath p = do
       isDir <- doesDirectoryExist p
       if isDir
         then fmap toCompilerEntry <$> Project.scanSourcesFromDir p
@@ -142,8 +191,6 @@ loadSources inputs = Map.unions <$> traverse loadOne inputs
           if isFile
             then do
               txt <- TextIO.readFile p
-              -- Single-file CLI mode: no project context, so use just
-              -- the basename as the module name.
               let modName = Project.moduleNameFromRelativePath (takeFileName p)
               pure (Map.singleton modName SourceEntry {filePath = p, sourceText = txt})
             else do

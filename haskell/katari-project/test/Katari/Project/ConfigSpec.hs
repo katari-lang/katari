@@ -1,5 +1,6 @@
 module Katari.Project.ConfigSpec (spec) where
 
+import qualified Data.Map.Strict as Map
 import qualified Data.Text as Text
 import Katari.Project.Config
 import Test.Hspec
@@ -73,6 +74,53 @@ spec = do
         Right cfg -> do
           cfg.projectName `shouldBe` "x"
           cfg.apiSection.apiUrl `shouldBe` "http://example.com"
+
+    it "parses [package] in the new form" $ do
+      let raw =
+            Text.unlines
+              [ "[package]",
+                "name = \"my-app\"",
+                "version = \"0.1.0\""
+              ]
+      case parseKatariToml "katari.toml" raw of
+        Left e -> expectationFailure (show e)
+        Right cfg -> do
+          cfg.projectName `shouldBe` "my-app"
+          cfg.packageSection.packageName `shouldBe` "my-app"
+          cfg.packageSection.packageVersion `shouldBe` Just "0.1.0"
+          cfg.dependencies `shouldBe` Map.empty
+
+    it "collects every [dependencies.<name>] section as a PathDependency" $ do
+      let raw =
+            Text.unlines
+              [ "[package]",
+                "name = \"my-app\"",
+                "",
+                "[dependencies.list-utils]",
+                "path = \"../list-utils\"",
+                "",
+                "[dependencies.string-utils]",
+                "path = \"vendor/string-utils\""
+              ]
+      case parseKatariToml "katari.toml" raw of
+        Left e -> expectationFailure (show e)
+        Right cfg -> do
+          Map.keys cfg.dependencies
+            `shouldMatchList` ["list-utils", "string-utils"]
+          fmap (.depPath) (Map.lookup "list-utils" cfg.dependencies)
+            `shouldBe` Just "../list-utils"
+          fmap (.depPath) (Map.lookup "string-utils" cfg.dependencies)
+            `shouldBe` Just "vendor/string-utils"
+
+    it "rejects a dependency that is missing a 'path' key" $ do
+      let raw =
+            Text.unlines
+              [ "[package]",
+                "name = \"x\"",
+                "[dependencies.bogus]",
+                "version = \"1.0\""
+              ]
+      parseKatariToml "katari.toml" raw `shouldSatisfy` isValidationError
 
   where
     isValidationError = \case
