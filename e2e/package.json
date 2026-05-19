@@ -8,7 +8,7 @@
   },
   "dependencies": {
     "katari-api-server": "workspace:*",
-    "katari-cli": "workspace:*",
+    "katari-bundle": "workspace:*",
     "katari-port": "workspace:*",
     "katari-runtime": "workspace:*"
   },

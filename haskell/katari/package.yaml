@@ -1,0 +1,72 @@
+name: katari
+version: 0.1.0.0
+author: yukikurage
+license: MIT
+
+language: GHC2021
+
+library:
+  source-dirs: src
+  exposed-modules:
+    - Katari.Api.Client
+    - Katari.Api.Types
+    - Katari.Cli.Add
+    - Katari.Cli.Apply
+    - Katari.Cli.Build
+    - Katari.Cli.Cancel
+    - Katari.Cli.Check
+    - Katari.Cli.Escalation
+    - Katari.Cli.Init
+    - Katari.Cli.Ls
+    - Katari.Cli.Run
+
+executables:
+  katari:
+    main: Main.hs
+    source-dirs: app
+    dependencies:
+      - katari
+      - optparse-applicative
+
+tests:
+  katari-test:
+    main: Spec.hs
+    source-dirs: test
+    other-modules:
+      - Katari.Cli.InitSpec
+    dependencies:
+      - katari
+      - hspec
+      - directory
+      - filepath
+      - temporary
+      - text
+
+dependencies:
+  - base >= 4.18 && < 5
+  - katari-compiler
+  - katari-project
+  - aeson
+  - aeson-pretty
+  - bytestring
+  - case-insensitive
+  - containers
+  - directory
+  - filepath
+  - http-client
+  - http-client-tls
+  - http-types
+  - optparse-applicative
+  - process
+  - text
+
+default-extensions:
+  - LambdaCase
+  - OverloadedStrings
+  - DuplicateRecordFields
+  - NoFieldSelectors
+  - OverloadedRecordDot
+  - RecordWildCards
+  - StrictData
+  - DerivingStrategies
+  - DeriveAnyClass

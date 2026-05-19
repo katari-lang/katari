@@ -3,6 +3,7 @@
 // 新設計向け: project + snapshot を upload するヘルパと、orchestrator + bus
 // を含むテスト用 app を作るヘルパを提供する。
 
+import { serve, type ServerType } from "@hono/node-server";
 import {
   MockSidecar,
   SidecarManager,
@@ -203,6 +204,42 @@ export function buildTestHarness(opts?: {
     async shutdown() {
       await sidecarManager.shutdown();
       liveSidecars.clear();
+    },
+  };
+}
+
+/**
+ * Wrap a `TestHarness` with a real HTTP listener on an ephemeral port.
+ * Returns the URL ("http://127.0.0.1:<port>") and an extended shutdown
+ * that closes the socket too. Use this when a subprocess (= the
+ * Haskell `katari` binary in e2e tests) needs to talk to the harness.
+ */
+export async function startHttpHarness(opts?: {
+  ffiHandlers?: Record<string, MockAgentHandler>;
+}): Promise<
+  ReturnType<typeof buildTestHarness> & { url: string }
+> {
+  const harness = buildTestHarness(opts);
+  const server: ServerType = await new Promise((resolve) => {
+    const s = serve(
+      { fetch: harness.app.fetch, port: 0 },
+      () => resolve(s),
+    );
+  });
+  const addr = server.address();
+  if (addr === null || typeof addr === "string") {
+    throw new Error("node-server did not expose an AddressInfo");
+  }
+  const url = `http://127.0.0.1:${addr.port}`;
+  const innerShutdown = harness.shutdown;
+  return {
+    ...harness,
+    url,
+    async shutdown() {
+      await new Promise<void>((r, j) =>
+        server.close((err) => (err ? j(err) : r())),
+      );
+      await innerShutdown();
     },
   };
 }

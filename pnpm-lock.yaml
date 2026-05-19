@@ -13,9 +13,9 @@ importers:
       katari-api-server:
         specifier: workspace:*
         version: link:../typescript/packages/katari-api-server
-      katari-cli:
+      katari-bundle:
         specifier: workspace:*
-        version: link:../typescript/packages/katari-cli
+        version: link:../typescript/packages/katari-bundle
       katari-port:
         specifier: workspace:*
         version: link:../typescript/packages/katari-port
@@ -75,6 +75,22 @@ importers:
       vitest:
         specifier: ^3.0.0
         version: 3.2.4(@types/node@22.19.18)
+
+  typescript/packages/katari-bundle:
+    dependencies:
+      esbuild:
+        specifier: ^0.21.5
+        version: 0.21.5
+      katari-runtime:
+        specifier: workspace:*
+        version: link:../katari-runtime
+    devDependencies:
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.19.18
+      typescript:
+        specifier: ^5.7.0
+        version: 5.9.3
 
   typescript/packages/katari-cli:
     dependencies:

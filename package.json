@@ -5,7 +5,7 @@
     "build": "npm run build:hs && npm run build:ts",
     "build:hs": "stack build",
     "build:compiler": "stack build katari-compiler",
-    "build:cli": "stack build katari-cli",
+    "build:cli": "stack build katari",
     "build:lsp": "stack build katari-lsp",
     "build:ts": "pnpm -C ts -r build",
     "test": "npm run test:hs && npm run test:ts",

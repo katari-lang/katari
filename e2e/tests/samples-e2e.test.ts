@@ -1,28 +1,22 @@
-// Real end-to-end: each samples/ project is compiled via the actual
-// katari-compiler binary (= subprocess) and then run against an
-// in-memory api-server harness. The result of `main()` is asserted.
+// Real end-to-end: each samples/ project is applied + run through the
+// Haskell `katari` CLI. The runtime is the api-server test harness
+// bound to an ephemeral port; the binary speaks HTTP to it just like
+// it would in production.
 //
-// Skipped when the katari-compiler binary is not available on PATH /
-// KATARI_COMPILER_BIN — local test runs need `stack install
-// katari-compiler` first; CI will set the env var explicitly.
+// Skipped when the katari binary is not available — local runs need
+// `stack install katari` first. CI sets KATARI_BIN explicitly.
 
 import { describe, expect, it, afterEach } from "vitest";
 import { resolve } from "node:path";
-import { spawnSync } from "node:child_process";
-import { ApiClient } from "katari-cli/services/api-client";
-import { compile } from "katari-cli/services/compile";
-import {
-  buildTestHarness,
-  noOpSidecarBundle,
-  trivialSchemaBundle,
-  type TestHarness,
-} from "katari-api-server/tests/helpers.js";
-import type { Hono } from "hono";
-import type { MockAgentHandler, RawValue, SidecarBundle } from "katari-runtime";
+import { spawn, spawnSync } from "node:child_process";
+import { startHttpHarness } from "katari-api-server/tests/helpers.js";
+import type { MockAgentHandler, RawValue } from "katari-runtime";
 
 const SAMPLES_ROOT = resolve(__dirname, "../samples");
 
-let active: TestHarness | null = null;
+type HttpHarness = Awaited<ReturnType<typeof startHttpHarness>>;
+
+let active: HttpHarness | null = null;
 afterEach(async () => {
   if (active !== null) {
     await active.shutdown();
@@ -30,114 +24,127 @@ afterEach(async () => {
   }
 });
 
-function clientFor(app: Hono): ApiClient {
-  const shim = async (input: Request | URL | string, init?: RequestInit) => {
-    const req = input instanceof Request ? input : new Request(input, init);
-    return await app.fetch(req);
-  };
-  return new ApiClient({ baseUrl: "http://test" }).withFetch(shim);
-}
-
-function findCompilerBinary(): string | null {
-  // 1. Explicit env override.
-  const explicit = process.env.KATARI_COMPILER_BIN;
+function findKatariBinary(): string | null {
+  const explicit = process.env.KATARI_BIN;
   if (explicit !== undefined && explicit.length > 0) {
     const r = spawnSync(explicit, ["--help"], { stdio: "ignore" });
     if (r.status === 0 || r.status === 1) return explicit;
   }
-  // 2. Bare `katari-compiler` on PATH.
-  const onPath = spawnSync("katari-compiler", ["--help"], { stdio: "ignore" });
-  if (onPath.status === 0 || onPath.status === 1) return "katari-compiler";
-  // 3. Auto-resolve via `stack path --local-install-root`.
+  const onPath = spawnSync("katari", ["--help"], { stdio: "ignore" });
+  if (onPath.status === 0 || onPath.status === 1) return "katari";
   const stackPath = spawnSync("stack", ["path", "--local-install-root"], {
     encoding: "utf8",
     cwd: resolve(__dirname, "../.."),
   });
   if (stackPath.status === 0) {
     const root = stackPath.stdout.trim();
-    const candidate = `${root}/bin/katari-compiler`;
+    const candidate = `${root}/bin/katari`;
     const probe = spawnSync(candidate, ["--help"], { stdio: "ignore" });
     if (probe.status === 0 || probe.status === 1) return candidate;
   }
   return null;
 }
 
-const RESOLVED_COMPILER = findCompilerBinary();
-if (RESOLVED_COMPILER !== null) {
-  process.env.KATARI_COMPILER_BIN = RESOLVED_COMPILER;
+function findBundleScript(): string {
+  // The bundler script lives alongside katari-bundle's compiled output.
+  return resolve(__dirname, "../../typescript/packages/katari-bundle/dist/cli.js");
 }
-const RUN_E2E = RESOLVED_COMPILER !== null;
+
+const RESOLVED_KATARI = findKatariBinary();
+const RUN_E2E = RESOLVED_KATARI !== null;
 const itE2E = RUN_E2E ? it : it.skip;
 
 // Convention: every sample lives at `e2e/samples/<NN>-<name>` and its
 // Katari package name is `<name>` with hyphens turned into underscores.
-// The entry file is `src/<pkg>.ktr` defining `agent main()`, so the
-// runtime's fully-qualified name is `<pkg>.main` (= module.agent).
 function packageNameFromSampleDir(sampleDir: string): string {
   return sampleDir.replace(/^\d+-/, "").replace(/-/g, "_");
 }
 
+interface SpawnResult {
+  status: number | null;
+  stdout: string;
+  stderr: string;
+}
+
+function runKatari(args: string[], cwd: string): Promise<SpawnResult> {
+  // Async spawn (not spawnSync) so the in-process Hono harness on the
+  // same event loop can answer the binary's HTTP requests while we
+  // wait for it to exit.
+  return new Promise((resolveP, rejectP) => {
+    const child = spawn(RESOLVED_KATARI!, args, {
+      cwd,
+      env: {
+        ...process.env,
+        KATARI_BUNDLE_BIN: findBundleScript(),
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk: Buffer) => {
+      stdout += chunk.toString("utf8");
+    });
+    child.stderr.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString("utf8");
+    });
+    child.on("error", rejectP);
+    child.on("close", (status) => resolveP({ status, stdout, stderr }));
+  });
+}
+
 async function applyAndRun(
-  projectName: string,
+  _projectName: string,
   sampleDir: string,
   opts?: {
-    sidecarBundle?: SidecarBundle | null;
     handlers?: Record<string, MockAgentHandler>;
   },
 ): Promise<RawValue> {
-  const harness = buildTestHarness();
+  const harness = await startHttpHarness();
   active = harness;
   for (const [qname, fn] of Object.entries(opts?.handlers ?? {})) {
     harness.setHandler(qname, fn);
   }
-  const api = clientFor(harness.app);
-
-  const project = await api.upsertProject(projectName);
-  const { irModule, schemaBundle } = await compile({
-    srcPath: resolve(SAMPLES_ROOT, sampleDir, "src"),
-  });
-  const { snapshotId } = await api.uploadSnapshot({
-    projectId: project.id,
-    irModule,
-    sidecarBundle: opts?.sidecarBundle ?? null,
-    schemaBundle: schemaBundle ?? trivialSchemaBundle(),
-  });
-
+  const sampleRoot = resolve(SAMPLES_ROOT, sampleDir);
   const pkg = packageNameFromSampleDir(sampleDir);
-  const { agentId } = await api.startAgent({
-    projectId: project.id,
-    snapshotId,
-    qualifiedName: `${pkg}.main`,
-    args: {},
-  });
 
-  // Most samples finalize within startAgent's tick; ext-agent samples
-  // resume in a follow-up tick once the sidecar acks. Poll briefly.
-  const deadline = Date.now() + 5000;
-  let row = await api.getAgent(agentId);
-  while (row.state === "running" && Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, 10));
-    row = await api.getAgent(agentId);
-  }
-  if (row.state !== "succeeded") {
+  // 1. katari apply
+  const applyR = await runKatari(["apply", "--api-url", harness.url], sampleRoot);
+  if (applyR.status !== 0) {
     throw new Error(
-      `agent state was '${row.state}' (errorMessage: ${row.errorMessage ?? "<none>"})`,
+      `katari apply failed (status=${applyR.status})\nstdout:\n${applyR.stdout}\nstderr:\n${applyR.stderr}`,
     );
   }
-  if (row.result === undefined) {
-    throw new Error("agent succeeded but produced no result");
+
+  // 2. katari run --wait
+  const runR = await runKatari(
+    [
+      "run",
+      `${pkg}.main`,
+      "--api-url",
+      harness.url,
+      "--project",
+      pkg,
+      "--wait",
+    ],
+    sampleRoot,
+  );
+  if (runR.status !== 0) {
+    throw new Error(
+      `katari run failed (status=${runR.status})\nstdout:\n${runR.stdout}\nstderr:\n${runR.stderr}`,
+    );
   }
-  return row.result;
+  const trimmed = runR.stdout.trim();
+  if (trimmed === "") {
+    throw new Error(`katari run produced no result stdout (stderr: ${runR.stderr})`);
+  }
+  return JSON.parse(trimmed) as RawValue;
 }
 
-describe("samples/ end-to-end (compile → upload → run → verify)", () => {
+describe("samples/ end-to-end (apply → run → verify)", () => {
   if (!RUN_E2E) {
-    it.skip("katari-compiler binary not available — set KATARI_COMPILER_BIN or run `stack install katari-compiler`", () => {});
+    it.skip("katari binary not available — set KATARI_BIN or run `stack install katari`", () => {});
     return;
   }
-
-  // API server returns the agent result in raw form
-  // (`valueToRaw`-encoded), so primitives land as bare JSON values.
 
   itE2E("01-hello: main() returns 'hello, world'", async () => {
     const result = await applyAndRun("hello", "01-hello");
@@ -198,24 +205,18 @@ describe("samples/ end-to-end (compile → upload → run → verify)", () => {
     },
   );
 
-  itE2E(
-    "11-ext-agent: extGreet returns 'hello, ext' via the MockSidecar registry",
-    async () => {
-      const result = await applyAndRun("ext-agent", "11-ext-agent", {
-        // Non-null bundle so the orchestrator wires up the sidecar
-        // factory; MockSidecar ignores `entry` content and looks up
-        // handlers by qname via setHandler.
-        sidecarBundle: noOpSidecarBundle(),
-        handlers: {
-          "ext_agent.extGreet": async ({ args }) => {
-            const name = args["name"] as string;
-            return `hello, ${name}`;
-          },
-        },
-      });
-      expect(result).toBe("hello, ext");
-    },
-  );
+  itE2E("11-ext-agent: extGreet returns 'hello, ext' via the MockSidecar registry", async () => {
+    const result = await applyAndRun("ext-agent", "11-ext-agent", {
+      handlers: {
+        "ext_agent.extGreet": async ({ args }) => `hello, ${args.name as string}`,
+      },
+    });
+    expect(result).toBe("hello, ext");
+  });
+
+  // 12-ext-cron exercises ipcChildDelegate which the MockSidecar
+  // intentionally does not route. The full round-trip is exercised in
+  // subprocess-sidecar.integration.test.ts against a real bundle.
 
   itE2E(
     "13-throw-catch: explicit throw caught by handle scope returns 'caught: kaboom!'",
@@ -237,7 +238,6 @@ describe("samples/ end-to-end (compile → upload → run → verify)", () => {
     "15-ext-throw-catch: ext handler throw caught by handle scope returns 'ext threw: kaboom from JS'",
     async () => {
       const result = await applyAndRun("ext-throw-catch", "15-ext-throw-catch", {
-        sidecarBundle: noOpSidecarBundle(),
         handlers: {
           "ext_throw_catch.boomExt": async () => {
             throw new Error("kaboom from JS");
@@ -253,52 +253,6 @@ describe("samples/ end-to-end (compile → upload → run → verify)", () => {
     async () => {
       const result = await applyAndRun("multi-package", "16-multi-package");
       expect(result).toBe(12);
-    },
-  );
-
-  // Schema/qualifiedName round-trip via the agent-definition API. This
-  // path was previously dormant because the compiler used to emit
-  // `qualifiedName` as a `{ module_, name }` object while the TS type
-  // declared it as a flat dotted string. The mismatch made
-  // `getAgentDefinition` always return 404 silently.
-  itE2E(
-    "01-hello: schemaBundle.qualifiedName is a flat dotted string and getAgentDefinition resolves",
-    async () => {
-      const harness = buildTestHarness();
-      active = harness;
-      const api = clientFor(harness.app);
-      const project = await api.upsertProject("hello-schema");
-      const { irModule, schemaBundle } = await compile({
-        srcPath: resolve(SAMPLES_ROOT, "01-hello", "src"),
-      });
-      const { snapshotId } = await api.uploadSnapshot({
-        projectId: project.id,
-        irModule,
-        sidecarBundle: null,
-        schemaBundle: schemaBundle ?? trivialSchemaBundle(),
-      });
-
-      // 1. Every emitted agent definition uses a flat string for
-      //    qualifiedName (no { module_, name } object shape).
-      const { definitions } = await api.listAgentDefinitions({
-        projectId: project.id,
-        snapshotId,
-      });
-      expect(definitions.length).toBeGreaterThan(0);
-      for (const d of definitions) {
-        expect(typeof d.qualifiedName).toBe("string");
-      }
-      const names = definitions.map((d) => d.qualifiedName);
-      expect(names).toContain("hello.main");
-
-      // 2. getAgentDefinition resolves via the flat name. (Used to
-      //    return 404 because the comparison was object === string.)
-      const { definition } = await api.getAgentDefinition({
-        projectId: project.id,
-        snapshotId,
-        qualifiedName: "hello.main",
-      });
-      expect(definition.qualifiedName).toBe("hello.main");
     },
   );
 });

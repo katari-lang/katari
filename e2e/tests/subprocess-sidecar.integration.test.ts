@@ -13,7 +13,7 @@
 
 import { afterEach, describe, expect, it } from "vitest";
 import { resolve } from "node:path";
-import { bundleSidecar } from "katari-cli/services/bundle";
+import { bundleSidecar } from "katari-bundle";
 import {
   loadSubprocessSidecar,
   noopLogger,
