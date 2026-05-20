@@ -232,10 +232,14 @@ class PgSnapshotRepo implements SnapshotRepo {
   }
 
   async latest(projectId: ProjectId): Promise<SnapshotId | null> {
+    // Order by (created_at DESC, id DESC) so two snapshots written
+    // within the same now() tick — possible on a fast loop — produce a
+    // deterministic winner. The id is uuidv7-ish (time-ordered) so
+    // ties on created_at also break in chronological order.
     const rows = await this.sql<{ id: string }[]>`
       SELECT id FROM snapshots
       WHERE project_id = ${projectId}
-      ORDER BY created_at DESC
+      ORDER BY created_at DESC, id DESC
       LIMIT 1
     `;
     return rows[0]?.id as SnapshotId | undefined ?? null;
@@ -805,11 +809,14 @@ export class PostgresStorage implements Storage {
   /**
    * Apply the bundled DDL. The shipped `schema.sql` is fully idempotent
    * (every CREATE uses IF NOT EXISTS), so re-running is safe on every
-   * boot. Splits on `;` and skips empty lines so we don't ship a raw
-   * multi-statement query that `postgres` would reject.
+   * boot. Wrapping in a transaction is defensive: if one statement
+   * mid-file fails, the partial DDL rolls back rather than leaving the
+   * database half-migrated for the next boot to wrestle with.
    */
   async migrate(schemaSql: string): Promise<void> {
-    await this.sql.unsafe(schemaSql);
+    await this.sql.begin(async (tx) => {
+      await tx.unsafe(schemaSql);
+    });
   }
 
   async withTransaction<T>(fn: (tx: Storage) => Promise<T>): Promise<T> {

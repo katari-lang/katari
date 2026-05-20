@@ -36,7 +36,7 @@ import qualified Katari.Project.Snapshot as Snapshot
 
 import Control.Monad (foldM)
 import Data.Char (isAlphaNum)
-import Data.Maybe (fromMaybe, isJust, mapMaybe)
+import Data.Maybe (isJust, mapMaybe)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Set (Set)
@@ -118,6 +118,10 @@ data ResolveError
     -- in the snapshot file (or no snapshot is configured at all).
     -- Args: dependency name.
     ResolveUnresolvedDependency Text
+  | -- | @katari.lock@ doesn't contain an entry for a dep listed in
+    -- @[dependencies].packages@. The user must regenerate the lock
+    -- (= future @katari update@) to pick up the new dep. Args: dep name.
+    ResolveLockfileOutOfDate Text
   | -- | The snapshot file failed to load (network, parse, etc.).
     ResolveSnapshotError Snapshot.SnapshotError
   | -- | A dep's snapshot pin lists an expected sha256, but the actual
@@ -347,6 +351,7 @@ depEntries mSnap mLock pkg =
       Nothing -> case mSnap of
         Just snap | Just sp <- Map.lookup name snap.snapshotPackages ->
           Right (name, DSSnapshotGit sp.repo sp.ref sp.sha)
+        _ | isJust mLock -> Left (ResolveLockfileOutOfDate name)
         _ -> Left (ResolveUnresolvedDependency name)
 
     gitShaFromLock name = do
@@ -482,37 +487,37 @@ lockfileFromResolved rp =
 -- | Translate a resolved dep into a 'Lock.LockedSource'. The walker
 -- has already populated 'packageSha' for any fetch (= git override or
 -- snapshot resolution), so the lockfile only needs to dispatch on the
--- override entry (if any) or fall through to the snapshot pin.
+-- override entry (if any) or fall through to the snapshot pin. Any
+-- inconsistency (= missing sha on a fetch source, or missing snapshot
+-- pin on a non-overridden dep) raises 'error': writing a corrupt
+-- lockfile silently is strictly worse than crashing here, because the
+-- bad lockfile would then be accepted as authoritative on the next run.
 lockedSourceFor :: Text -> ResolvedProject -> ResolvedPackage -> Lock.LockedSource
 lockedSourceFor depName rp pkg =
   case Map.lookup depName rp.rootPackage.packageConfig.overrides of
     Just (OverridePath p) -> Lock.LockedPath {Lock.pathLocation = p}
-    Just (OverrideGit url rev) ->
-      Lock.LockedGit
-        { Lock.gitRepoUrl = url,
-          Lock.gitRev = rev,
-          Lock.gitSha = fromMaybe "" pkg.packageSha
-        }
-    Nothing ->
-      -- Snapshot-resolved dep (or transitive dep not in root's
-      -- overrides): record (repo, ref, sha) tuple that 'walkDeps'
-      -- threaded onto the package via 'packageSnapshotPin'.
-      case pkg.packageSnapshotPin of
-        Just (repo, ref) ->
-          Lock.LockedSnapshot
-            { Lock.snapshotRepo = repo,
-              Lock.snapshotRef = ref,
-              Lock.snapshotSha = fromMaybe "" pkg.packageSha
-            }
-        Nothing ->
-          -- Should be unreachable (= every snapshot-resolved dep
-          -- gets a pin), but emit an empty entry rather than
-          -- crashing if state ever drifts.
-          Lock.LockedSnapshot
-            { Lock.snapshotRepo = "",
-              Lock.snapshotRef = "",
-              Lock.snapshotSha = ""
-            }
+    Just (OverrideGit url rev) -> case pkg.packageSha of
+      Just sha ->
+        Lock.LockedGit {Lock.gitRepoUrl = url, Lock.gitRev = rev, Lock.gitSha = sha}
+      Nothing ->
+        error
+          ( "lockedSourceFor: git override '"
+              <> Text.unpack depName
+              <> "' has no recorded sha — this is a resolver bug"
+          )
+    Nothing -> case (pkg.packageSnapshotPin, pkg.packageSha) of
+      (Just (repo, ref), Just sha) ->
+        Lock.LockedSnapshot
+          { Lock.snapshotRepo = repo,
+            Lock.snapshotRef = ref,
+            Lock.snapshotSha = sha
+          }
+      _ ->
+        error
+          ( "lockedSourceFor: snapshot dep '"
+              <> Text.unpack depName
+              <> "' has no recorded (repo, ref, sha) — this is a resolver bug"
+          )
 
 -- | Returns the first module key in @sources@ whose path is not under
 -- the package's namespace (= not equal to @pkg@ and not prefixed by

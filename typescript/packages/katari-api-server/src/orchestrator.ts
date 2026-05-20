@@ -181,10 +181,20 @@ export class Orchestrator {
     await this.tick(snapshotId, async (ctx) => {
       await ctx.ffi.dispatchSidecarMessage(msg);
     }).catch((err) => {
+      // A failed tick on a sidecar message means the originating
+      // delegation is stuck — the ack/throw it was carrying never
+      // applied. We log the delegationId (when present) so operators
+      // can locate the agent. A future revision should transition the
+      // affected delegation to `error` in a fresh tx; for now the
+      // operator must inspect logs and manually cancel.
+      const delegationId =
+        "delegationId" in msg ? msg.delegationId : "(none)";
       this.logger.log("error", "orchestrator: tick failed for sidecar message", {
         snapshotId,
         type: msg.type,
+        delegationId,
         err: err instanceof Error ? err.message : String(err),
+        stack: err instanceof Error ? err.stack : undefined,
       });
     });
   }

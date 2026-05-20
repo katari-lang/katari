@@ -85,6 +85,14 @@ export function executePrim(name: string, args: Record<string, Value>): Value {
       // single 'array' Value variant.
       const tuple = args["tuple"], index = args["index"];
       if (tuple?.kind === "array" && index?.kind === "number") {
+        // Reject fractional / negative indices loudly rather than
+        // silently falling into the "out of bounds" branch — `t[1.5]`
+        // is a programming error, not an OOB access.
+        if (!Number.isInteger(index.value) || index.value < 0) {
+          throw new RecoverableEngineError(
+            `prim tuple_get: index must be a non-negative integer, got ${index.value}`,
+          );
+        }
         const elem = tuple.elements[index.value];
         if (elem === undefined) {
           throw new RecoverableEngineError("prim tuple_get: index out of bounds");

@@ -167,7 +167,7 @@ gatherSourceRoots rootDir = do
   where
     resolveSrc c =
       case c.sidecarSection of
-        Just s | not (null s.sidecarSourceRoots) -> head s.sidecarSourceRoots
+        Just s | (r : _) <- filter (not . null) s.sidecarSourceRoots -> r
         _ -> c.packageSection.packageSrc
 
 -- | Spawn @katari-bundle@ with one @--source-root@ flag per package

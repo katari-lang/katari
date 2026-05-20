@@ -181,7 +181,18 @@ function getIterableTotal(iterables: Value[]): number {
     if (it.kind !== "array") {
       throw new Error("engine.for: iter source is not an array");
     }
+    // Refuse cartesian products that overflow Number.MAX_SAFE_INTEGER
+    // (= 2^53 - 1). Past that point linearIndex / total comparisons
+    // start producing wrong results because adjacent doubles collide.
+    // A real program would never iterate that many times anyway, but
+    // an attacker who can pass two large arrays could lock the engine
+    // into Infinity-bound infinite loop without this guard.
     total *= it.elements.length;
+    if (!Number.isSafeInteger(total)) {
+      throw new Error(
+        `engine.for: cartesian product exceeds Number.MAX_SAFE_INTEGER (${Number.MAX_SAFE_INTEGER})`,
+      );
+    }
   }
   return total;
 }
