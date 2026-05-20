@@ -43,7 +43,10 @@ RUN pnpm --filter @katari-lang/runtime build \
  && pnpm --filter @katari-lang/api-server build
 
 # Produce a self-contained deploy dir with prod deps inlined.
-RUN pnpm --filter @katari-lang/api-server deploy --prod /deploy
+# `--legacy` is required since pnpm 10: the new default deploy
+# behavior expects `inject-workspace-packages=true`, which we don't
+# use. Legacy deploy resolves workspace deps directly from node_modules.
+RUN pnpm --filter @katari-lang/api-server deploy --legacy --prod /deploy
 
 # ---------------------------------------------------------------------------
 # Stage 2: minimal runtime image.
