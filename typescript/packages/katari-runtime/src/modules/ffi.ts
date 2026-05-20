@@ -211,12 +211,28 @@ export class FfiModule implements Module {
       createdAt: new Date().toISOString(),
       parentExtDelegationId: null,
     });
-    await this.sidecar.send({
-      type: "ipcDelegate",
-      delegationId,
-      agentDefId,
-      args: argsToRaw(args),
-    });
+    // The insert + send pair is not atomic across systems (the store is
+    // a DB tx scoped to the outer tick, the sidecar is a separate
+    // process). If the send throws, compensate by deleting the row we
+    // just inserted so the recovery sweep doesn't ship a
+    // `ipcDelegateRestarted` for a delegation the sidecar never heard
+    // about. The CORE caller still gets the rejection so its
+    // ExternalThread can transition to error.
+    try {
+      await this.sidecar.send({
+        type: "ipcDelegate",
+        delegationId,
+        agentDefId,
+        args: argsToRaw(args),
+      });
+    } catch (err) {
+      try {
+        await this.store.deleteDelegation(delegationId);
+      } catch {
+        /* swallow cleanup error — original send error is what matters */
+      }
+      throw err;
+    }
   }
 
   private async handleInboundTerminate(event: ExternalEvent): Promise<void> {

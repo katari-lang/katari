@@ -135,12 +135,20 @@ export class SubprocessSidecar implements Sidecar {
       throw new Error("subprocess sidecar: child not started or stdin closed");
     }
     const payload = `${JSON.stringify(msg)}\n`;
-    await new Promise<void>((resolve, reject) => {
-      stdin.write(payload, (err) => {
+    // `send` is awaited end-to-end through the orchestrator, so each
+    // write blocks the next; the write callback already accounts for
+    // OS-level flushing of THIS write. If the high-water mark was hit,
+    // also wait for `drain` so a large payload behind a stalled
+    // sidecar doesn't sit half-buffered while the next send queues.
+    const canContinue = await new Promise<boolean>((resolve, reject) => {
+      const flushed = stdin.write(payload, (err) => {
         if (err !== undefined && err !== null) reject(err);
-        else resolve();
+        else resolve(flushed);
       });
     });
+    if (!canContinue) {
+      await new Promise<void>((resolve) => stdin.once("drain", () => resolve()));
+    }
   }
 
   onMessage(cb: (msg: ChildToParent) => void): void {
