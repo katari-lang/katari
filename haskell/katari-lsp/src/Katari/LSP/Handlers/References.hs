@@ -14,10 +14,10 @@ import Katari.LSP.Convert (katariSpanToLspLocation, lspPositionToKatari)
 import Katari.LSP.State
   ( ServerState (..),
     WorkspaceState (..),
+    findProjectRootCached,
     lookupCompileResult,
     workspaceFileTexts,
   )
-import qualified Katari.Project.Discovery as Project
 import qualified Katari.Query as Query
 import qualified Language.LSP.Protocol.Lens as L
 import qualified Language.LSP.Protocol.Message as LSP
@@ -57,7 +57,7 @@ referencesHandler st =
 
 lookupOccIndex :: ServerState -> FilePath -> IO (Maybe Query.OccurrenceIndex)
 lookupOccIndex st path = do
-  mRoot <- Project.findProjectRoot path
+  mRoot <- findProjectRootCached st path
   case mRoot of
     Just root -> do
       wsMap <- readTVarIO st.workspaces

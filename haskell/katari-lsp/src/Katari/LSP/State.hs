@@ -17,12 +17,13 @@ module Katari.LSP.State
     snapshotWorkspaceSources,
     lookupCompileResult,
     workspaceFileTexts,
+    findProjectRootCached,
   )
 where
 
 import Control.Applicative ((<|>))
 import Control.Concurrent (ThreadId)
-import Control.Concurrent.STM (TVar, newTVarIO, readTVarIO)
+import Control.Concurrent.STM (TVar, atomically, modifyTVar', newTVarIO, readTVarIO)
 import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
 import Data.Set (Set)
@@ -60,7 +61,14 @@ data ServerState = ServerState
     orphanFiles :: TVar (Map FilePath Text),
     -- | Per-workspace debounce timers (keyed by workspace root, plus
     -- an empty string for the orphan bucket).
-    debounceTimers :: TVar (Map FilePath ThreadId)
+    debounceTimers :: TVar (Map FilePath ThreadId),
+    -- | Cache of @file path → enclosing workspace root@ resolved by
+    -- 'Project.findProjectRoot'. Each lookup canonicalises the path
+    -- and walks parents to find @katari.toml@; without this cache a
+    -- fast typist triggers dozens of those walks per second.
+    -- Populated lazily on first lookup; a value of 'Nothing' records
+    -- "no enclosing project" so we don't re-walk for known orphans.
+    projectRootCache :: TVar (Map FilePath (Maybe FilePath))
   }
 
 newServerState :: IO ServerState
@@ -68,7 +76,14 @@ newServerState = do
   ws <- newTVarIO Map.empty
   orph <- newTVarIO Map.empty
   timers <- newTVarIO Map.empty
-  pure ServerState {workspaces = ws, orphanFiles = orph, debounceTimers = timers}
+  prc <- newTVarIO Map.empty
+  pure
+    ServerState
+      { workspaces = ws,
+        orphanFiles = orph,
+        debounceTimers = timers,
+        projectRootCache = prc
+      }
 
 -- | Build the 'CompileInput' that the compiler consumes. The assembly
 -- already carries the canonical (convention-qualified) module-name
@@ -92,12 +107,31 @@ snapshotWorkspaceSources ws =
               sourceText = entry.sourceText
             }
 
+-- | Resolve @path@ to its enclosing workspace root via the cache.
+-- 'Project.findProjectRoot' canonicalises and walks parents; that's
+-- expensive enough to feel under fast typing, so we memoise the
+-- result for every path we've ever seen. Cache entries are conservative:
+-- adding or removing a katari.toml between the cached lookup and the
+-- next workspace recompile won't invalidate this map automatically;
+-- in practice that only matters for `katari init` ↔ editor races and
+-- is acceptable for v0.1.0.
+findProjectRootCached :: ServerState -> FilePath -> IO (Maybe FilePath)
+findProjectRootCached st path = do
+  cache <- readTVarIO st.projectRootCache
+  case Map.lookup path cache of
+    Just cached -> pure cached
+    Nothing -> do
+      result <- Project.findProjectRoot path
+      atomically $
+        modifyTVar' st.projectRootCache (Map.insert path result)
+      pure result
+
 -- | Most recent successful compile result for the file at @path@. Looks
 -- up the enclosing workspace; returns 'Nothing' for orphan files (the
 -- v1 server does not cache per-file orphan compiles).
 lookupCompileResult :: ServerState -> FilePath -> IO (Maybe (Text, CompileResult))
 lookupCompileResult st path = do
-  mRoot <- Project.findProjectRoot path
+  mRoot <- findProjectRootCached st path
   case mRoot of
     Just root -> do
       wsMap <- readTVarIO st.workspaces
@@ -122,7 +156,7 @@ lookupCompileResult st path = do
 -- lives in a sibling module, not just the request's own file.
 workspaceFileTexts :: ServerState -> FilePath -> IO (Map FilePath Text)
 workspaceFileTexts st path = do
-  mRoot <- Project.findProjectRoot path
+  mRoot <- findProjectRootCached st path
   case mRoot of
     Nothing -> pure Map.empty
     Just root -> do

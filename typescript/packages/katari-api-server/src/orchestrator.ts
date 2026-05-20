@@ -230,9 +230,24 @@ export class Orchestrator {
 
 function makeNoOpFfi(): FfiModule {
   // Used when a snapshot has no sidecar bundle. delegations are still
-  // routed via `bus.registerAll` minus `ffi`, so this object is a pure
-  // type-fill — never invoked.
-  return {} as FfiModule;
+  // routed via `bus.registerAll` minus `ffi`, so this object SHOULD
+  // never be invoked. Returning `{} as FfiModule` would crash with
+  // "x is not a function" on any accidental call. Throw a clear error
+  // instead so a registration bug surfaces with a useful message.
+  const thrower =
+    (method: string): ((...args: unknown[]) => never) =>
+    () => {
+      throw new Error(
+        `orchestrator: FfiModule.${method} called on a sidecar-less snapshot — this is a registration bug`,
+      );
+    };
+  return {
+    feed: thrower("feed"),
+    persist: thrower("persist"),
+    load: thrower("load"),
+    recoverInflight: thrower("recoverInflight"),
+    dispatchSidecarMessage: thrower("dispatchSidecarMessage"),
+  } as unknown as FfiModule;
 }
 
 /** Lift the sidecar-side raw `args` map into the bus's internal `Value`

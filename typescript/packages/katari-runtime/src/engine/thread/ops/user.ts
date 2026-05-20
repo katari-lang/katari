@@ -172,8 +172,18 @@ function handleStatement(
       return "advance";
     }
     case "statementMakeClosure": {
-      const closureId = (ctx.state.nextClosureId as number) as import("../../id.js").ClosureId;
-      ctx.state.nextClosureId = (ctx.state.nextClosureId as number) + 1;
+      // Guard against integer overflow near MAX_SAFE_INTEGER. A snapshot
+      // that ran long enough to allocate 2^53 closures would start
+      // colliding on closure id, silently misrouting dispatches. Surface
+      // it as a hard engine error instead.
+      const nextId = ctx.state.nextClosureId as number;
+      if (nextId >= Number.MAX_SAFE_INTEGER) {
+        throw new Error(
+          "engine: nextClosureId exceeded MAX_SAFE_INTEGER; persistent state has run out of closure ids",
+        );
+      }
+      const closureId = nextId as import("../../id.js").ClosureId;
+      ctx.state.nextClosureId = nextId + 1;
       ctx.state.closures[closureId as unknown as number] = {
         id: closureId,
         blockId: stmt.body.block,

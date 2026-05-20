@@ -24,7 +24,12 @@ import qualified Katari.Project.Config as Project
 import qualified Katari.Project.Discovery as Project
 import qualified Katari.Project.Resolve as Project
 import Katari.LSP.Convert (katariSpanToLspRange)
-import Katari.LSP.State (ServerState (..), WorkspaceState (..), snapshotWorkspaceSources)
+import Katari.LSP.State
+  ( ServerState (..),
+    WorkspaceState (..),
+    findProjectRootCached,
+    snapshotWorkspaceSources,
+  )
 import Katari.SourceSpan (SourceSpan (..))
 import Katari.Query (buildOccurrenceIndex)
 import qualified Language.LSP.Protocol.Lens as L
@@ -73,7 +78,7 @@ documentHandlers st =
 -- outside any project, fall through to the orphan-files bucket.
 onOpen :: ServerState -> FilePath -> Text -> IO ()
 onOpen st path txt = do
-  mRoot <- Project.findProjectRoot path
+  mRoot <- findProjectRootCached st path
   case mRoot of
     Nothing ->
       atomically $ modifyTVar' st.orphanFiles (Map.insert path txt)
@@ -92,7 +97,7 @@ onOpen st path txt = do
 
 onChange :: ServerState -> FilePath -> Text -> IO ()
 onChange st path txt = do
-  mRoot <- Project.findProjectRoot path
+  mRoot <- findProjectRootCached st path
   case mRoot of
     Nothing ->
       atomically $ modifyTVar' st.orphanFiles (Map.insert path txt)
@@ -106,7 +111,7 @@ onChange st path txt = do
 
 onClose :: ServerState -> FilePath -> IO ()
 onClose st path = do
-  mRoot <- Project.findProjectRoot path
+  mRoot <- findProjectRootCached st path
   case mRoot of
     Nothing ->
       atomically $ modifyTVar' st.orphanFiles (Map.delete path)
@@ -177,7 +182,7 @@ debounceUs = 150_000
 
 scheduleRecompile :: ServerState -> FilePath -> LSP.LspM () ()
 scheduleRecompile st path = do
-  mRoot <- liftIO (Project.findProjectRoot path)
+  mRoot <- liftIO (findProjectRootCached st path)
   -- Workspace files share the workspace's root as the debounce key so
   -- a flurry of edits across the same project collapses into one
   -- recompile. Orphan files use the file path itself; otherwise two
