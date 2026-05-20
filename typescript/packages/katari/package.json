@@ -24,5 +24,8 @@
   },
   "scripts": {
     "build": "node -e \"process.exit(0)\""
+  },
+  "dependencies": {
+    "@katari-lang/bundle": "workspace:*"
   }
 }

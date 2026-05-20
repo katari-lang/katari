@@ -68,6 +68,15 @@ for (const { key, os, cpu } of PLATFORMS) {
     bugs: "https://github.com/katari-lang/katari/issues",
     os: [os],
     cpu: [cpu],
+    // `bin` field is set even though we don't want a global command
+    // installed from this package: it triggers npm's auto-chmod +x on
+    // install, which would otherwise leave the binary with mode 644
+    // and EACCES on spawn. String form makes the .bin/<name> shim use
+    // the package's scope-stripped name (`cli-<plat>`), which is
+    // harmless dead weight — the user-facing `katari` shim lives in
+    // @katari-lang/cli and wins the .bin/katari slot. esbuild uses
+    // the same workaround for its platform packages.
+    bin: "bin/katari",
     files: ["bin", "README.md"],
   };
 

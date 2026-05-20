@@ -20,17 +20,9 @@ npm / pnpm pick the matching one automatically based on `os` / `cpu`.
 macOS Intel users can run the Apple Silicon binary via Rosetta 2, or
 build from source with stack.
 
-## Optional companion: `@katari-lang/bundle`
-
-`katari apply` invokes the `katari-bundle` CLI to produce sidecar JS
-bundles. Install it alongside if you have sidecars:
-
-```sh
-npm i -g @katari-lang/cli @katari-lang/bundle
-```
-
-If your project has no sidecars (no `.ts` / `.js` files next to `.ktr`
-sources), `@katari-lang/bundle` is not needed.
+`@katari-lang/bundle` (the sidecar JS bundler invoked by `katari apply`)
+is pulled in as a regular dependency, so `npm i @katari-lang/cli` is
+all you need for the full workflow.
 
 ## Manual install (alternative)
 
