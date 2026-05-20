@@ -20,6 +20,7 @@ library:
     - Katari.Cli.Ls
     - Katari.Cli.Prompt
     - Katari.Cli.Run
+    - Katari.Cli.Status
 
 executables:
   katari:

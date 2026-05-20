@@ -26,13 +26,14 @@ import qualified Data.Text as Text
 import qualified Katari.Api.Client as Api
 import qualified Katari.Api.Types as Api
 import qualified Katari.Cli.Prompt as Prompt
+import qualified Katari.Cli.Status as Status
 import qualified Katari.Project.Config as Project
 import qualified Katari.Project.Discovery as Project
 import Options.Applicative
 import System.Directory (getCurrentDirectory)
 import System.Exit (ExitCode (..), exitWith)
 import System.FilePath ((</>))
-import System.IO (hPutStrLn, stderr)
+import System.IO (hPutStr, hPutStrLn, stderr)
 
 data Options = Options
   { optQualifiedName :: Maybe Text,
@@ -102,9 +103,12 @@ run opts = do
           Api.args = args
         }
   hPutStrLn stderr ("Started " <> Text.unpack agentId)
-  if not opts.optWait
-    then pure ()
-    else pollUntilDone client agentId
+  if opts.optWait
+    then pollUntilDone client agentId
+    else
+      hPutStrLn
+        stderr
+        ("(re-run with --wait, or `katari status " <> Text.unpack agentId <> "` to inspect)")
 
 -- | Choose @(qualifiedName, args)@ via:
 --
@@ -218,16 +222,13 @@ pollUntilDone client agentId = loop (0 :: Int)
           case row.state of
             Api.AgentRunning -> threadDelay 20000 >> loop (n + 1)
             Api.AgentCancelling -> threadDelay 20000 >> loop (n + 1)
+            -- Pretty block on stderr so a downstream `| jq` keeps
+            -- working on the bare result on stdout.
             done -> do
-              -- Informational lines on stderr so stdout stays parseable.
-              hPutStrLn stderr ("State: " <> show done)
+              hPutStr stderr (Text.unpack (Status.renderAgentDetailed row))
               case done of
                 Api.AgentSucceeded -> case row.result of
                   Just v -> LC8.putStrLn (Aeson.encode v)
-                  Nothing -> hPutStrLn stderr "(succeeded with no result)"
-                Api.AgentError -> do
-                  case row.errorMessage of
-                    Just msg -> hPutStrLn stderr ("error: " <> Text.unpack msg)
-                    Nothing -> pure ()
-                  exitWith (ExitFailure 1)
+                  Nothing -> pure ()
+                Api.AgentError -> exitWith (ExitFailure 1)
                 _ -> pure ()

@@ -20,6 +20,7 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Katari.Api.Client as Api
 import qualified Katari.Api.Types as Api
+import qualified Katari.Cli.Status as Status
 import qualified Katari.Project.Config as Project
 import qualified Katari.Project.Discovery as Project
 import Options.Applicative
@@ -172,6 +173,8 @@ printAgent a =
         <> show a.state
         <> "  "
         <> Text.unpack a.qualifiedName
+        <> "  "
+        <> Text.unpack (Status.renderResultPreview a.result)
         <> "  ("
         <> Text.unpack a.updatedAt
         <> ")"

@@ -10,6 +10,7 @@ import qualified Katari.Cli.Escalation as Escalation
 import qualified Katari.Cli.Init as Init
 import qualified Katari.Cli.Ls as Ls
 import qualified Katari.Cli.Run as Run
+import qualified Katari.Cli.Status as Status
 import Options.Applicative
 
 data Cmd
@@ -21,6 +22,7 @@ data Cmd
   | Run Run.Options
   | Cancel Cancel.Options
   | Ls Ls.Options
+  | Status Status.Options
   | Escalation Escalation.Options
 
 cmdParser :: Parser Cmd
@@ -38,6 +40,7 @@ cmdParser =
           <> command "run" (info (Run <$> Run.optionsParser) (progDesc "Start an agent on the runtime"))
           <> command "cancel" (info (Cancel <$> Cancel.optionsParser) (progDesc "Cancel a running agent"))
           <> command "ls" (info (Ls <$> Ls.optionsParser) (progDesc "List runtime resources"))
+          <> command "status" (info (Status <$> Status.optionsParser) (progDesc "Show one agent's state + result"))
           <> command "escalation" (info (Escalation <$> Escalation.optionsParser) (progDesc "Manage escalations"))
       )
 
@@ -53,4 +56,5 @@ main = do
     Run opts -> Run.run opts
     Cancel opts -> Cancel.run opts
     Ls opts -> Ls.run opts
+    Status opts -> Status.run opts
     Escalation opts -> Escalation.run opts
