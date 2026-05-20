@@ -45,13 +45,11 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import Katari.Project.Config
   ( ConfigError (..),
-    OverrideSource (..),
+    DependencySource (..),
     PackageSection (..),
     ProjectConfig (..),
-    SnapshotSection (..),
     loadKatariToml,
   )
-import qualified Data.Text as Text
 import Katari.Project.Discovery (SourceEntry (..), configFilename, scanSources)
 import System.Directory (canonicalizePath, doesFileExist)
 import System.FilePath (isAbsolute, (</>))
@@ -115,9 +113,9 @@ data ResolveError
   | -- | A dependency's @[package].name@ disagrees with the key it is
     -- declared under. Args: declared key, actual package name.
     ResolveDepNameMismatch Text Text
-  | -- | A name in @[snapshot].dependencies@ has neither a matching
-    -- @[overrides.\<name>]@ block nor a matching entry in the
-    -- snapshot file. Args: dependency name.
+  | -- | A @[dependencies].\<name> = \"*\"@ entry has no matching entry
+    -- in the snapshot file (or no snapshot is configured at all).
+    -- Args: dependency name.
     ResolveUnresolvedDependency Text
   | -- | The snapshot file failed to load (network, parse, etc.).
     ResolveSnapshotError Snapshot.SnapshotError
@@ -145,22 +143,20 @@ loadResolvedProject rootDir = do
   case rootRes of
     Left err -> pure (Left err)
     Right rootPkg -> do
-      -- Lazily load the snapshot file iff the project has a snapshot
-      -- pin AND at least one dep that isn't covered by an override.
-      let snap = rootPkg.packageConfig.snapshotSection
+      -- Lazily load the snapshot file iff at least one dep is a
+      -- snapshot pin (= DepSnapshot).
+      let cfg = rootPkg.packageConfig
           needsSnapshot =
-            any
-              (\n -> not (Map.member n rootPkg.packageConfig.overrides))
-              snap.snapshotDependencies
+            DepSnapshot `elem` Map.elems cfg.dependencies
       mSnap <-
         if needsSnapshot
-          then case snap.snapshotUrl of
+          then case cfg.snapshotUrl of
             Nothing ->
-              -- No URL = caller will see ResolveUnresolvedDependency
-              -- on the first non-override dep.
+              -- No snapshot_url = caller will see
+              -- ResolveUnresolvedDependency on the first snapshot dep.
               pure (Right Nothing)
             Just url -> do
-              r <- Snapshot.loadSnapshotFromUrl url snap.snapshotVersion
+              r <- Snapshot.loadSnapshotFromUrl url cfg.snapshotVersion
               pure (fmap Just r)
           else pure (Right Nothing)
       case mSnap of
@@ -285,20 +281,20 @@ walkDeps mSnap rootPkg =
                         transitive = initialQueue innerEntries pinned.packageRoot
                      in go visited' accDeps' (transitive <> rest)
 
--- | Resolve a package's @[snapshot].dependencies@ list into concrete
--- 'DepSource' values, merging @[overrides]@ first and falling back to
--- the snapshot file when no override is present.
+-- | Resolve a package's @[dependencies]@ map into concrete 'DepSource'
+-- values. Path / git entries resolve directly; snapshot pins (@"*"@)
+-- consult the snapshot file.
 depEntries ::
   Maybe Snapshot.Snapshot ->
   ResolvedPackage ->
   Either ResolveError [(Text, DepSource)]
 depEntries mSnap pkg =
-  traverse one pkg.packageConfig.snapshotSection.snapshotDependencies
+  traverse one (Map.toList pkg.packageConfig.dependencies)
   where
-    one name = case Map.lookup name pkg.packageConfig.overrides of
-      Just (OverridePath p) -> Right (name, DSPath p)
-      Just (OverrideGit url rev) -> Right (name, DSGit url rev)
-      Nothing -> case mSnap of
+    one (name, src) = case src of
+      DepPath p -> Right (name, DSPath p)
+      DepGit url rev -> Right (name, DSGit url rev)
+      DepSnapshot -> case mSnap of
         Just snap | Just sp <- Map.lookup name snap.snapshotPackages ->
           Right (name, DSSnapshotGit sp.spRepo sp.spRef sp.spSha)
         _ -> Left (ResolveUnresolvedDependency name)
@@ -411,7 +407,7 @@ lockfileFromResolved :: ResolvedProject -> Lock.Lockfile
 lockfileFromResolved rp =
   Lock.Lockfile
     { Lock.lockVersion = 1,
-      Lock.lockSnapshot = rp.rootPackage.packageConfig.snapshotSection.snapshotVersion,
+      Lock.lockSnapshot = rp.rootPackage.packageConfig.snapshotVersion,
       Lock.lockPackages =
         Map.fromList
           [ ( depName,
@@ -427,21 +423,21 @@ lockfileFromResolved rp =
 -- | Translate a resolved dep into a 'Lock.LockedSource'. The walker
 -- has already populated 'packageSha' for any fetch (= git override or
 -- snapshot resolution), so the lockfile only needs to dispatch on the
--- override shape (or fall through to a snapshot entry when no
--- override exists for the name).
+-- dep entry shape.
 lockedSourceFor :: Text -> ResolvedProject -> ResolvedPackage -> Lock.LockedSource
 lockedSourceFor depName rp pkg =
-  case Map.lookup depName rp.rootPackage.packageConfig.overrides of
-    Just (OverridePath p) -> Lock.LockedPath {Lock.pathLocation = p}
-    Just (OverrideGit url rev) ->
+  case Map.lookup depName rp.rootPackage.packageConfig.dependencies of
+    Just (DepPath p) -> Lock.LockedPath {Lock.pathLocation = p}
+    Just (DepGit url rev) ->
       Lock.LockedGit
         { Lock.gitRepoUrl = url,
           Lock.gitRev = rev,
           Lock.gitSha = maybe "" id pkg.packageSha
         }
-    Nothing ->
-      -- Snapshot-resolved dep: record (repo, ref, sha) tuple that
-      -- 'walkDeps' threaded onto the package via 'packageSnapshotPin'.
+    _ ->
+      -- Snapshot-resolved dep (or transitive dep not in root's
+      -- [dependencies]): record (repo, ref, sha) tuple that 'walkDeps'
+      -- threaded onto the package via 'packageSnapshotPin'.
       case pkg.packageSnapshotPin of
         Just (repo, ref) ->
           Lock.LockedSnapshot

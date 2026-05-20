@@ -1,18 +1,15 @@
 -- | @katari add@ — declare a new dependency in the current
 -- @katari.toml@.
 --
--- v1 only writes @path = "..."@ overrides. Once the registry +
--- snapshot-fetch machinery lands, @katari add\<name>@ (no @--path@)
--- will resolve against the snapshot; @--git URL --rev SHA@ will
--- write a git override and update the lockfile.
+-- v1 writes path / git overrides only. Snapshot pins (@name = "*"@)
+-- are added manually by the user. Once the registry workflow stabilises
+-- we can teach @katari add NAME@ (no @--path@ / @--git@) to default to
+-- a snapshot pin and update the lockfile.
 --
--- The command rewrites @katari.toml@ in-place by:
---
---   1. Appending the new name to @[snapshot].dependencies@ — keeping
---      the array on one line for readability.
---   2. Appending a @[overrides.\<name>]@ block at end-of-file.
---
--- Comments and unrelated whitespace are preserved.
+-- The command rewrites @katari.toml@ in-place by inserting a single
+-- @name = { ... }@ line under the @[dependencies]@ section (creating
+-- the section if missing). Comments and unrelated whitespace are
+-- preserved.
 module Katari.Cli.Add
   ( Options (..),
     optionsParser,
@@ -22,6 +19,7 @@ where
 
 import Control.Monad (unless, when)
 import Data.List (elemIndex)
+import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as TextIO
@@ -96,7 +94,7 @@ run opts = do
   let depName = Text.pack opts.optName
 
   -- Reject duplicate dep names so this command is non-destructive.
-  when (depName `elem` consumerCfg.snapshotSection.snapshotDependencies) $
+  when (Map.member depName consumerCfg.dependencies) $
     die ("dependency '" <> opts.optName <> "' already declared in " <> consumerToml)
 
   description <- case opts.optSource of
@@ -131,83 +129,30 @@ run opts = do
 -- TOML rewriting
 -- ---------------------------------------------------------------------------
 
--- | In-place edit: insert @depName@ into the @[snapshot].dependencies@
--- list and append a @[overrides.\<depName>]@ block. The dep list is
--- collapsed onto one line for simplicity.
+-- | In-place edit: insert a @name = { path = "..." }@ (or git form) line
+-- under @[dependencies]@. Creates the section at end-of-file when it
+-- doesn't exist yet.
 rewriteToml :: Text -> Source -> Text -> Either String Text
-rewriteToml depName src oldText = do
+rewriteToml depName src oldText =
   let ls = Text.lines oldText
-  ls' <- updateSnapshotDeps depName ls
-  let header = ["", "[overrides." <> depName <> "]"]
-      body = case src of
-        SourcePath p -> ["path = \"" <> Text.pack p <> "\""]
-        SourceGit url rev ->
-          [ "git = \"" <> url <> "\"",
-            "rev = \"" <> rev <> "\""
-          ]
-  Right (Text.unlines (ls' <> header <> body))
+      depLine = depName <> " = " <> inlineTable src
+   in case elemIndex "[dependencies]" (map Text.strip ls) of
+        Nothing ->
+          Right (Text.unlines (ls <> ["", "[dependencies]", depLine]))
+        Just sectionIx ->
+          -- Insert as the first entry of the existing [dependencies]
+          -- section so the file naturally groups deps together.
+          let (before, fromSection) = splitAt (sectionIx + 1) ls
+           in Right (Text.unlines (before <> [depLine] <> fromSection))
 
--- | Find the @[snapshot]@ section and rewrite its @dependencies@ line.
--- If the section is missing entirely, append a new one at end-of-file
--- (= same behaviour as the @katari init@ template).
-updateSnapshotDeps :: Text -> [Text] -> Either String [Text]
-updateSnapshotDeps depName ls =
-  case elemIndex "[snapshot]" (map Text.strip ls) of
-    Nothing ->
-      Right
-        ( ls
-            <> ["", "[snapshot]", "dependencies = [" <> quoted depName <> "]"]
-        )
-    Just sectionIx ->
-      let (before, snapRest) = splitAt sectionIx ls
-          (sectionBody, after) = breakOnNextSection (drop 1 snapRest)
-       in case findDepLine sectionBody of
-            Just (relIx, oldDeps) ->
-              let newDeps = appendToList depName oldDeps
-                  updatedBody =
-                    take relIx sectionBody
-                      <> [newDeps]
-                      <> drop (relIx + 1) sectionBody
-               in Right (before <> [head snapRest] <> updatedBody <> after)
-            Nothing ->
-              -- The section exists but has no @dependencies@ entry yet —
-              -- insert one right after the section header.
-              Right
-                ( before
-                    <> [head snapRest, "dependencies = [" <> quoted depName <> "]"]
-                    <> sectionBody
-                    <> after
-                )
+inlineTable :: Source -> Text
+inlineTable = \case
+  SourcePath p -> "{ path = " <> quoted (Text.pack p) <> " }"
+  SourceGit url rev ->
+    "{ git = " <> quoted url <> ", ref = " <> quoted rev <> " }"
 
 quoted :: Text -> Text
 quoted s = "\"" <> s <> "\""
-
--- | Look for a @dependencies = [...]@ line inside an iteration. Returns
--- the index within the supplied slice and the original line text.
-findDepLine :: [Text] -> Maybe (Int, Text)
-findDepLine xs =
-  case [(i, l) | (i, l) <- zip [0 ..] xs, "dependencies" `Text.isPrefixOf` Text.stripStart l] of
-    ((i, l) : _) -> Just (i, l)
-    [] -> Nothing
-
--- | Take the lines until the next @[section]@ header (exclusive). The
--- remainder includes that header line.
-breakOnNextSection :: [Text] -> ([Text], [Text])
-breakOnNextSection = break (\l -> "[" `Text.isPrefixOf` Text.stripStart l)
-
--- | Append a quoted name to a TOML array string like
--- @dependencies = ["a", "b"]@. Keeps the line on a single line; if
--- the array is empty produces @["new"]@.
-appendToList :: Text -> Text -> Text
-appendToList newName line =
-  let (prefix, arr) = Text.breakOn "[" line
-   in case arr of
-        "" -> line -- malformed; leave alone
-        _ ->
-          let inner = Text.dropEnd 1 (Text.drop 1 arr) -- drop surrounding [ ]
-              trimmed = Text.strip inner
-              addition = if Text.null trimmed then quoted newName else trimmed <> ", " <> quoted newName
-           in prefix <> "[" <> addition <> "]"
 
 -- ---------------------------------------------------------------------------
 -- Validation helpers

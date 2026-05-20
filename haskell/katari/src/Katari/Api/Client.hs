@@ -11,6 +11,7 @@ module Katari.Api.Client
   ( ApiClient (..),
     ApiError (..),
     newApiClient,
+    apiAuthFromEnv,
     -- * Projects
     upsertProject,
     listProjects,
@@ -31,6 +32,7 @@ module Katari.Api.Client
 where
 
 import Control.Exception (Exception, throwIO, try)
+import System.Environment (lookupEnv)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as AesonKey
 import qualified Data.Aeson.KeyMap as AesonKM
@@ -89,6 +91,16 @@ newApiClient base tok = do
     stripSlash t = case Text.unsnoc t of
       Just (rest, '/') -> rest
       _ -> t
+
+-- | Read the API key from @KATARI_API_KEY@. Returns 'Nothing' if unset
+-- or empty. The @katari.toml@ no longer holds the secret — env var is
+-- the only sanctioned source.
+apiAuthFromEnv :: IO (Maybe Text)
+apiAuthFromEnv = do
+  v <- lookupEnv "KATARI_API_KEY"
+  pure $ case v of
+    Just s | not (null s) -> Just (Text.pack s)
+    _ -> Nothing
 
 -- ---------------------------------------------------------------------------
 -- Projects

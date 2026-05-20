@@ -1,7 +1,10 @@
 name: release-katari-runtime
 
-# Build the katari-runtime Docker image (linux/amd64 + linux/arm64) and
-# push to GHCR on tag push. Same tag convention as release-katari.yml.
+# Build the katari Docker image (linux/amd64 + linux/arm64) and push
+# to GHCR on tag push. Same tag convention as release-katari.yml.
+#
+# Image name is `katari` (not katari-runtime) — matches the user-facing
+# product name. See docs/PUBLISHING.md.
 
 on:
   push:
@@ -19,7 +22,7 @@ permissions:
 
 jobs:
   image:
-    name: build & push katari-runtime image
+    name: build & push katari image
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -49,12 +52,20 @@ jobs:
         shell: bash
         run: |
           owner="$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
-          image="ghcr.io/${owner}/katari-runtime"
+          image="ghcr.io/${owner}/katari"
+          # Only stable tags update :latest. A prerelease tag (anything
+          # containing '-' per semver) gets only its versioned tag, so
+          # end users running `:latest` never inherit an rc.
+          version="${{ steps.version.outputs.version }}"
+          tag_lines="${image}:${version}"
+          case "$version" in
+            *-*) ;;  # prerelease, skip :latest
+            *)   tag_lines="${tag_lines}"$'\n'"${image}:latest" ;;
+          esac
           {
             echo "image=${image}"
             echo "tags<<EOF"
-            echo "${image}:${{ steps.version.outputs.version }}"
-            echo "${image}:latest"
+            echo "$tag_lines"
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
 

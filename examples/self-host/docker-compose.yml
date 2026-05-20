@@ -1,9 +1,9 @@
-# Self-host compose: pulls the published katari-runtime image from GHCR.
+# Self-host compose: pulls the published katari image from GHCR.
 # Copy `.env.example` to `.env` and edit before `docker compose up -d`.
 
 services:
   runtime:
-    image: ghcr.io/${KATARI_IMAGE_OWNER:-katari-lang}/katari-runtime:${KATARI_VERSION:-latest}
+    image: ghcr.io/${KATARI_IMAGE_OWNER:-katari-lang}/katari:${KATARI_VERSION:-latest}
     restart: unless-stopped
     ports:
       - "${KATARI_PORT:-8000}:8000"

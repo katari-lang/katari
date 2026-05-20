@@ -1,8 +1,7 @@
 [package]
 name = "throw_catch"
 
-[compile]
-src = "src/"
+[runtime]
+url = "http://localhost:8000"
 
-[api]
-url = "http://localhost:8080"
+[dependencies]

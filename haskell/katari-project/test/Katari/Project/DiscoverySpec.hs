@@ -2,11 +2,9 @@ module Katari.Project.DiscoverySpec (spec) where
 
 import qualified Data.Map.Strict as Map
 import Katari.Project.Config
-  ( ApiSection (..),
-    CompileSection (..),
-    PackageSection (..),
+  ( PackageSection (..),
     ProjectConfig (..),
-    SnapshotSection (..),
+    RuntimeSection (..),
   )
 import Katari.Project.Discovery
 import System.Directory (createDirectoryIfMissing)
@@ -33,7 +31,7 @@ spec = do
   describe "findProjectRoot" $ do
     it "returns the dir containing katari.toml when given a sub-path" $ do
       withSystemTempDirectory "katari-project-test" $ \root -> do
-        writeFile (root </> "katari.toml") "project = \"x\"\n"
+        writeFile (root </> "katari.toml") "[package]\nname = \"x\"\n"
         let sub = root </> "src" </> "deeper"
         createDirectoryIfMissing True sub
         writeFile (sub </> "main.ktr") "agent main() -> integer { 1 }\n"
@@ -54,16 +52,12 @@ sampleConfig =
       packageSection =
         PackageSection
           { packageName = "x",
-            packageVersion = Nothing
+            packageVersion = Nothing,
+            packageSrc = "src"
           },
-      compileSection = CompileSection {compileSrc = "src/", compileRoot = Nothing},
       sidecarSection = Nothing,
-      apiSection = ApiSection {apiUrl = "http://localhost", apiAuth = Nothing},
-      snapshotSection =
-        SnapshotSection
-          { snapshotVersion = Nothing,
-            snapshotUrl = Nothing,
-            snapshotDependencies = []
-          },
-      overrides = Map.empty
+      runtimeSection = RuntimeSection {runtimeUrl = "http://localhost"},
+      snapshotVersion = Nothing,
+      snapshotUrl = Nothing,
+      dependencies = Map.empty
     }

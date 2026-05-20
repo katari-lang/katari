@@ -1,6 +1,7 @@
 // Top-level Hono app. Composed in `bin.ts` with concrete services and
 // reused by integration tests via `app.fetch(req)`.
 
+import type { Logger } from "@katari-lang/runtime";
 import { Hono } from "hono";
 import { ZodError } from "zod";
 import type { Storage } from "../storage/types.js";
@@ -24,6 +25,7 @@ export type AppDeps = {
   projects: ProjectService;
   snapshots: SnapshotService;
   orchestrator: Orchestrator;
+  logger: Logger;
   apiKey?: string | null;
   rateLimit?: RateLimitOptions | null;
   metrics?: AppMetrics;
@@ -55,6 +57,16 @@ export function buildApp(deps: AppDeps): Hono {
     if (err instanceof SyntaxError) {
       return c.json({ error: "invalid JSON in request body" }, 400);
     }
+    // Any other exception bubbling up here is a real server bug — log
+    // it loudly so operators can diagnose. Without this the route would
+    // return `{"error":"internal server error"}` with zero trace in
+    // `docker logs`, making prod issues impossible to triage.
+    deps.logger.log("error", "unhandled exception in route handler", {
+      method: c.req.method,
+      path: c.req.path,
+      error: err instanceof Error ? err.message : String(err),
+      stack: err instanceof Error ? err.stack : undefined,
+    });
     return c.json({ error: "internal server error" }, 500);
   });
 

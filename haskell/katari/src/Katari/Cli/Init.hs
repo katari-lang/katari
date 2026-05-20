@@ -113,14 +113,10 @@ katariTomlTemplate name =
     [ "[package]",
       "name = \"" <> name <> "\"",
       "",
-      "[compile]",
-      "src = \"src\"",
+      "[runtime]",
+      "url = \"http://localhost:8000\"",
       "",
-      "[api]",
-      "url = \"http://localhost:8080\"",
-      "",
-      "[snapshot]",
-      "dependencies = []"
+      "[dependencies]"
     ]
 
 entryKtrTemplate :: String -> String

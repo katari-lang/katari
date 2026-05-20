@@ -1,22 +1,41 @@
 -- | TOML schema and loader for @katari.toml@.
 --
--- The schema mirrors the TypeScript-side reader in
--- @typescript/packages/katari-cli/src/services/config.ts@ so the LSP /
--- compiler / future package manager agree on every field.
+-- Layout (v0.1 schema):
 --
--- The parser is hand-rolled (no @tomland@ dep): @katari.toml@ has a flat
--- shape with primitive scalar / array values only. Sections, key=value
--- assignments, comments, and @${VAR}@ env interpolation are the entire
--- surface area.
+-- @
+-- [package]
+-- name = \"hello\"
+-- # version = \"0.1.0\"        # optional
+-- # src     = \"src\"          # optional, default \"src\"
+--
+-- [runtime]
+-- url = \"http:\/\/localhost:8000\"
+--
+-- # Optional snapshot block. Both fields are optional; absence of [snapshot]
+-- # means \"no snapshot-based resolution\" (every dep must be path / git).
+-- # [snapshot]
+-- # version = \"2026-05-01\"
+-- # url     = \"https:\/\/github.com\/katari-lang\/katari-registry\"
+--
+-- [dependencies]
+-- # list_utils = \"*\"                                       # snapshot pin
+-- # my_fork    = { path = \"..\/my_fork\" }                  # local override
+-- # upstream   = { git  = \"https:\/\/...\", ref = \"abc\" }  # git override
+-- @
+--
+-- Auth is intentionally NOT a TOML field — @katari.toml@ is commonly
+-- committed to VCS, and the auth value is a secret. CLI commands read
+-- @KATARI_API_KEY@ from the environment instead.
+--
+-- The parser is hand-rolled (no @tomland@ dep). Inline tables are
+-- supported on the right-hand side of a key=value assignment. Nested
+-- sections deeper than one level are not.
 module Katari.Project.Config
   ( ProjectConfig (..),
     PackageSection (..),
-    CompileSection (..),
     SidecarSection (..),
-    ApiSection (..),
-    SnapshotSection (..),
-    OverrideSource (..),
-    PathDependency (..),
+    RuntimeSection (..),
+    DependencySource (..),
     ConfigError (..),
     parseKatariToml,
     loadKatariToml,
@@ -45,36 +64,30 @@ import System.Environment (lookupEnv)
 -- ===========================================================================
 
 data ProjectConfig = ProjectConfig
-  { -- | Convenience mirror of @packageSection.packageName@. Kept for
-    -- back-compat with callers that read the package's display name.
+  { -- | Convenience mirror of @packageSection.packageName@.
     projectName :: Text,
     packageSection :: PackageSection,
-    compileSection :: CompileSection,
     sidecarSection :: Maybe SidecarSection,
-    apiSection :: ApiSection,
-    -- | The snapshot pin + the flat dependency name list. Stackage /
-    -- spago model: the @snapshot@ pins a curated set of compatible
-    -- packages; @dependencies@ enumerates which of those (plus any
-    -- 'overrides') this project actually uses.
-    snapshotSection :: SnapshotSection,
-    -- | Local replacements for packages in the snapshot (or extras
-    -- not in the snapshot at all). Every name appearing here must
-    -- also appear in @snapshotSection.dependencies@; the absence of
-    -- a snapshot entry then means "this package comes purely from
-    -- this override".
-    overrides :: Map Text OverrideSource
+    runtimeSection :: RuntimeSection,
+    -- | Top-level @snapshot = \"...\"@ value, or 'Nothing' if absent.
+    snapshotVersion :: Maybe Text,
+    -- | Top-level @snapshot_url = \"...\"@ value, or 'Nothing' if absent.
+    snapshotUrl :: Maybe Text,
+    -- | @[dependencies]@ entries. Each value is one of:
+    --
+    --   * 'DepSnapshot': @name = \"*\"@ — resolve via the snapshot file.
+    --   * 'DepPath': @name = { path = \"...\" }@ — local filesystem source.
+    --   * 'DepGit': @name = { git = \"...\", ref = \"...\" }@ — pinned git
+    --     commit, fetched as a tarball at resolve time.
+    dependencies :: Map Text DependencySource
   }
   deriving (Show, Eq)
 
 data PackageSection = PackageSection
   { packageName :: Text,
-    packageVersion :: Maybe Text
-  }
-  deriving (Show, Eq)
-
-data CompileSection = CompileSection
-  { compileSrc :: FilePath,
-    compileRoot :: Maybe Text
+    packageVersion :: Maybe Text,
+    -- | Relative source dir under the project root. Defaults to @"src"@.
+    packageSrc :: FilePath
   }
   deriving (Show, Eq)
 
@@ -83,55 +96,23 @@ newtype SidecarSection = SidecarSection
   }
   deriving (Show, Eq)
 
-data ApiSection = ApiSection
-  { apiUrl :: Text,
-    apiAuth :: Maybe Text
+newtype RuntimeSection = RuntimeSection
+  { runtimeUrl :: Text
   }
   deriving (Show, Eq)
 
-data SnapshotSection = SnapshotSection
-  { -- | Snapshot identifier, e.g. @"2026-05-01"@. Resolved against
-    -- the katari-registry's @package-sets\/@ directory (or whatever
-    -- mirror is configured downstream).
-    snapshotVersion :: Maybe Text,
-    -- | Optional explicit URL for the snapshot TOML file (or its
-    -- containing registry). Accepted forms:
-    --
-    --   * @file:\/\/\/abs\/path\/to\/registry@ — local dev override.
-    --     Snapshot file lives at @\<url>\/package-sets\/\<version>.toml@.
-    --   * @file:\/\/\/abs\/path\/to\/2026-05-01.toml@ — direct file URL.
-    --   * @https:\/\/...@ — canonical registry / mirror URL.
-    --
-    -- 'Nothing' means "no snapshot resolution requested" (= every dep
-    -- must be in @[overrides]@).
-    snapshotUrl :: Maybe Text,
-    -- | Flat list of package names this project depends on. Each
-    -- name resolves to either the snapshot's entry for it or a local
-    -- @[overrides.\<name>]@ block.
-    snapshotDependencies :: [Text]
-  }
-  deriving (Show, Eq)
-
--- | The local replacement / external source for a single dependency
--- name. Only path sources are wired in v1; git is parsed and held
--- for the upcoming git-fetch implementation.
-data OverrideSource
-  = -- | @path = "..."@ — relative or absolute filesystem path. Mutable;
-    -- not cached.
-    OverridePath FilePath
-  | -- | @git = "..." rev = "..."@ — full-SHA git ref. Cached under
-    -- @~\/.katari\/cache\/git\/\<sha>\/@ at resolve time.
-    OverrideGit
+-- | One @[dependencies]@ entry's resolution source.
+data DependencySource
+  = -- | The dependency is resolved via the snapshot file (@name = \"*\"@).
+    DepSnapshot
+  | -- | Local filesystem override. Path is interpreted relative to the
+    -- @katari.toml@ that declared it.
+    DepPath FilePath
+  | -- | Pinned git source. Cached under @\~\/.katari\/cache\/git\/\<sha>\/@.
+    DepGit
       { gitUrl :: Text,
         gitRev :: Text
       }
-  deriving (Show, Eq)
-
--- | A path-based dependency entry. The path is interpreted relative to
--- the @katari.toml@ that declares it (resolution happens elsewhere).
-newtype PathDependency = PathDependency
-  { depPath :: FilePath
-  }
   deriving (Show, Eq)
 
 data ConfigError
@@ -203,36 +184,28 @@ interpolateEnv input = Text.pack . reverse <$> go (Text.unpack input) []
 
 validateConfig :: FilePath -> TomlTable -> Either ConfigError ProjectConfig
 validateConfig path table = do
-  -- Package name: prefer [package].name, fall back to legacy top-level
-  -- `project = "..."`. At least one must be present.
   let packageTable = lookupTable "package" table
   name <- case lookupTableScalar "name" packageTable of
     Just (TomlString s) | not (Text.null s) -> Right s
-    _ -> case lookupScalar "project" table of
-      Just (TomlString s) | not (Text.null s) -> Right s
-      _ ->
-        Left
-          ( ConfigValidationError
-              path
-              "required field '[package].name' (or legacy top-level 'project')"
-          )
+    _ ->
+      Left
+        ( ConfigValidationError
+            path
+            "required field '[package].name'"
+        )
   let version = case lookupTableScalar "version" packageTable of
         Just (TomlString s) | not (Text.null s) -> Just s
         _ -> Nothing
-  let compileTable = lookupTable "compile" table
-  let src = case lookupTableScalar "src" compileTable of
+  let src = case lookupTableScalar "src" packageTable of
         Just (TomlString s) | not (Text.null s) -> Text.unpack s
-        _ -> "src/"
-  let root = case lookupTableScalar "root" compileTable of
-        Just (TomlString s) | not (Text.null s) -> Just s
-        _ -> Nothing
+        _ -> "src"
   let sidecarTable = lookupTable "sidecar" table
   sidecar <-
     if Map.null sidecarTable
       then Right Nothing
       else case lookupTableScalar "sourceRoots" sidecarTable of
         Just (TomlArray xs) -> do
-          roots <- traverse expectString xs
+          roots <- traverse (expectString path) xs
           Right (Just SidecarSection {sidecarSourceRoots = map Text.unpack roots})
         Just _ ->
           Left
@@ -241,159 +214,111 @@ validateConfig path table = do
                 "'sidecar.sourceRoots' must be an array of strings"
             )
         Nothing -> Right (Just SidecarSection {sidecarSourceRoots = []})
-  let apiTable = lookupTable "api" table
-  let url = case lookupTableScalar "url" apiTable of
+  let runtimeTable = lookupTable "runtime" table
+  let url = case lookupTableScalar "url" runtimeTable of
         Just (TomlString s) | not (Text.null s) -> s
-        _ -> "http://localhost:8080"
-  let auth = case lookupTableScalar "auth" apiTable of
+        _ -> "http://localhost:8000"
+  let snapshotTable = lookupTable "snapshot" table
+      snapVer = case lookupTableScalar "version" snapshotTable of
         Just (TomlString s) | not (Text.null s) -> Just s
         _ -> Nothing
-  snapshot <- parseSnapshotSection path table
-  overrideMap <- parseOverrides path table snapshot.snapshotDependencies
+      snapUrl = case lookupTableScalar "url" snapshotTable of
+        Just (TomlString s) | not (Text.null s) -> Just s
+        _ -> Nothing
+  deps <- parseDependencies path (lookupTable "dependencies" table)
   Right
     ProjectConfig
       { projectName = name,
         packageSection =
           PackageSection
             { packageName = name,
-              packageVersion = version
+              packageVersion = version,
+              packageSrc = src
             },
-        compileSection = CompileSection {compileSrc = src, compileRoot = root},
         sidecarSection = sidecar,
-        apiSection = ApiSection {apiUrl = url, apiAuth = auth},
-        snapshotSection = snapshot,
-        overrides = overrideMap
-      }
-  where
-    expectString :: TomlValue -> Either ConfigError Text
-    expectString = \case
-      TomlString s -> Right s
-      _ -> Left (ConfigValidationError path "expected string in array")
-
--- | Read the @[snapshot]@ block: @version@ (string, optional) and
--- @dependencies@ (array of strings, optional — defaults to @[]@).
-parseSnapshotSection ::
-  FilePath -> TomlTable -> Either ConfigError SnapshotSection
-parseSnapshotSection path table = do
-  let snapTable = lookupTable "snapshot" table
-      ver = case lookupTableScalar "version" snapTable of
-        Just (TomlString s) | not (Text.null s) -> Just s
-        _ -> Nothing
-      url = case lookupTableScalar "url" snapTable of
-        Just (TomlString s) | not (Text.null s) -> Just s
-        _ -> Nothing
-  deps <- case lookupTableScalar "dependencies" snapTable of
-    Nothing -> Right []
-    Just (TomlArray xs) -> traverse (expectDepName path) xs
-    Just _ ->
-      Left
-        ( ConfigValidationError
-            path
-            "[snapshot].dependencies must be an array of strings"
-        )
-  Right
-    SnapshotSection
-      { snapshotVersion = ver,
-        snapshotUrl = url,
-        snapshotDependencies = deps
+        runtimeSection = RuntimeSection {runtimeUrl = url},
+        snapshotVersion = snapVer,
+        snapshotUrl = snapUrl,
+        dependencies = deps
       }
 
-expectDepName :: FilePath -> TomlValue -> Either ConfigError Text
-expectDepName path = \case
-  TomlString s | not (Text.null s) -> Right s
-  _ -> Left (ConfigValidationError path "expected non-empty string in [snapshot].dependencies")
+expectString :: FilePath -> TomlValue -> Either ConfigError Text
+expectString path = \case
+  TomlString s -> Right s
+  _ -> Left (ConfigValidationError path "expected string in array")
 
--- | Walk every @[overrides.<name>]@ section. Each must point at exactly
--- one source: @path@ or @git@+@rev@. Names found here that are not in
--- @snapshotDependencies@ produce a validation error (= a dead override
--- is almost always a typo).
-parseOverrides ::
-  FilePath ->
-  TomlTable ->
-  [Text] ->
-  Either ConfigError (Map Text OverrideSource)
-parseOverrides path (TomlTable buckets) declared = do
-  pairs <- traverse fromEntry overrideEntries
-  let names = map fst pairs
-      orphan = filter (`notElem` declared) names
-  case orphan of
-    (n : _) ->
-      Left
-        ( ConfigValidationError
-            path
-            ( "[overrides."
-                <> n
-                <> "] is declared but does not appear in [snapshot].dependencies"
-            )
-        )
-    [] -> Right (Map.fromList pairs)
+-- | Parse every entry in the @[dependencies]@ table.
+parseDependencies ::
+  FilePath -> Map Text TomlValue -> Either ConfigError (Map Text DependencySource)
+parseDependencies path tbl = Map.fromList <$> traverse one (Map.toList tbl)
   where
-    prefix = "overrides."
-    overrideEntries =
-      [ (Text.drop (Text.length prefix) sec, bucket)
-        | (sec, bucket) <- Map.toList buckets,
-          prefix `Text.isPrefixOf` sec,
-          sec /= "overrides"
-      ]
+    one :: (Text, TomlValue) -> Either ConfigError (Text, DependencySource)
+    one (name, value) = do
+      src <- parseDepValue path name value
+      Right (name, src)
 
-    fromEntry (depName, bucket) = do
-      tbl <- case bucket of
-        BucketTable t -> Right t
-        BucketScalar _ ->
-          Left
-            ( ConfigValidationError
-                path
-                ( "expected table at [overrides."
-                    <> depName
-                    <> "], got scalar"
-                )
-            )
-      src <- parseOverrideTable path depName tbl
-      Right (depName, src)
-
-parseOverrideTable ::
-  FilePath ->
-  Text ->
-  Map Text TomlValue ->
-  Either ConfigError OverrideSource
-parseOverrideTable path depName tbl =
-  case (Map.lookup "path" tbl, Map.lookup "git" tbl) of
-    (Just (TomlString p), Nothing) | not (Text.null p) ->
-      Right (OverridePath (Text.unpack p))
-    (Nothing, Just (TomlString u)) | not (Text.null u) ->
-      case Map.lookup "rev" tbl of
-        Just (TomlString r) | not (Text.null r) ->
-          Right OverrideGit {gitUrl = u, gitRev = r}
-        _ ->
-          Left
-            ( ConfigValidationError
-                path
-                ( "[overrides."
-                    <> depName
-                    <> "] is git source but missing required 'rev = \"<sha>\"'"
-                )
-            )
-    (Just _, Just _) ->
-      Left
-        ( ConfigValidationError
-            path
-            ( "[overrides."
-                <> depName
-                <> "] must use 'path' XOR 'git', not both"
-            )
-        )
-    _ ->
-      Left
-        ( ConfigValidationError
-            path
-            ( "[overrides."
-                <> depName
-                <> "] must specify either 'path = \"...\"' or 'git = \"...\" rev = \"...\"'"
-            )
-        )
+parseDepValue ::
+  FilePath -> Text -> TomlValue -> Either ConfigError DependencySource
+parseDepValue path name = \case
+  TomlString "*" -> Right DepSnapshot
+  TomlString other ->
+    Left
+      ( ConfigValidationError
+          path
+          ( "[dependencies]."
+              <> name
+              <> " has unsupported string value \""
+              <> other
+              <> "\"; expected \"*\" (snapshot pin) or an inline table"
+          )
+      )
+  TomlInlineTable m ->
+    case (Map.lookup "path" m, Map.lookup "git" m) of
+      (Just (TomlString p), Nothing) | not (Text.null p) ->
+        Right (DepPath (Text.unpack p))
+      (Nothing, Just (TomlString u)) | not (Text.null u) ->
+        case Map.lookup "ref" m of
+          Just (TomlString r) | not (Text.null r) ->
+            Right DepGit {gitUrl = u, gitRev = r}
+          _ ->
+            Left
+              ( ConfigValidationError
+                  path
+                  ( "[dependencies]."
+                      <> name
+                      <> " is git source but missing required 'ref = \"<sha>\"'"
+                  )
+              )
+      (Just _, Just _) ->
+        Left
+          ( ConfigValidationError
+              path
+              ( "[dependencies]."
+                  <> name
+                  <> " must use 'path' XOR 'git', not both"
+              )
+          )
+      _ ->
+        Left
+          ( ConfigValidationError
+              path
+              ( "[dependencies]."
+                  <> name
+                  <> " inline table must specify 'path = \"...\"' or 'git = \"...\" ref = \"...\"'"
+              )
+          )
+  _ ->
+    Left
+      ( ConfigValidationError
+          path
+          ( "[dependencies]."
+              <> name
+              <> " value must be \"*\" or an inline table"
+          )
+      )
 
 -- ===========================================================================
--- TOML reader (minimal, flat, single-level tables)
+-- TOML reader (minimal, flat, single-level tables + inline tables)
 -- ===========================================================================
 
 data TomlValue
@@ -401,6 +326,8 @@ data TomlValue
   | TomlArray [TomlValue]
   | TomlBool Bool
   | TomlInt Integer
+  | -- | Inline table on the rhs of an assignment: @k = { a = 1, b = 2 }@.
+    TomlInlineTable (Map Text TomlValue)
   deriving (Show, Eq)
 
 -- | Either a top-level scalar or a nested table. We only handle one level
@@ -412,11 +339,6 @@ data TomlBucket
 
 newtype TomlTable = TomlTable (Map Text TomlBucket)
   deriving (Show, Eq)
-
-lookupScalar :: Text -> TomlTable -> Maybe TomlValue
-lookupScalar k (TomlTable m) = case Map.lookup k m of
-  Just (BucketScalar v) -> Just v
-  _ -> Nothing
 
 lookupTable :: Text -> TomlTable -> Map Text TomlValue
 lookupTable k (TomlTable m) = case Map.lookup k m of
@@ -491,6 +413,9 @@ parseValue n txt
   | Just rest <- Text.stripPrefix "[" txt,
     Just inner <- Text.stripSuffix "]" rest =
       parseArray n inner
+  | Just rest <- Text.stripPrefix "{" txt,
+    Just inner <- Text.stripSuffix "}" rest =
+      parseInlineTable n inner
   | Right i <- parseIntegerStrict txt = Right (TomlInt i)
   | otherwise = Left (n, "unrecognised value: " <> txt)
 
@@ -504,21 +429,61 @@ parseArray n inner =
           vals <- traverse (parseValue n . Text.strip) parts
           Right (TomlArray vals)
 
--- | Split on commas not inside a quoted string. Adequate for our subset
--- (no nested brackets, no escaped quotes).
-splitTopLevelCommas :: Int -> Text -> Either (Int, Text) [Text]
-splitTopLevelCommas n s = go (Text.unpack s) [] [] Nothing
+parseInlineTable :: Int -> Text -> Either (Int, Text) TomlValue
+parseInlineTable n inner =
+  let trimmed = Text.strip inner
+   in if Text.null trimmed
+        then Right (TomlInlineTable Map.empty)
+        else do
+          parts <- splitTopLevelCommas n trimmed
+          entries <- traverse (parseEntry . Text.strip) parts
+          Right (TomlInlineTable (Map.fromList entries))
   where
-    go :: String -> String -> [String] -> Maybe Char -> Either (Int, Text) [Text]
-    go [] cur acc Nothing = Right (reverse (map (Text.pack . reverse) (cur : acc)))
-    go [] _ _ (Just _) = Left (n, "unterminated string in array")
-    go (c : rest) cur acc Nothing
-      | c == ',' = go rest [] (cur : acc) Nothing
-      | c == '"' || c == '\'' = go rest (c : cur) acc (Just c)
-      | otherwise = go rest (c : cur) acc Nothing
-    go (c : rest) cur acc (Just q)
-      | c == q = go rest (c : cur) acc Nothing
-      | otherwise = go rest (c : cur) acc (Just q)
+    parseEntry :: Text -> Either (Int, Text) (Text, TomlValue)
+    parseEntry s =
+      let (kRaw, eqVal) = Text.breakOn "=" s
+       in if Text.null eqVal
+            then Left (n, "inline-table entry missing '=': " <> s)
+            else
+              let key = Text.strip kRaw
+                  valTxt = Text.strip (Text.drop 1 eqVal)
+               in if Text.null key
+                    then Left (n, "inline-table empty key")
+                    else do
+                      v <- parseValue n valTxt
+                      Right (key, v)
+
+-- | Split on commas not inside a quoted string or a nested bracket /
+-- brace. Adequate for our subset (one level of array / inline-table
+-- nesting suffices).
+splitTopLevelCommas :: Int -> Text -> Either (Int, Text) [Text]
+splitTopLevelCommas n s = go (Text.unpack s) [] [] Nothing 0 0
+  where
+    go ::
+      String ->
+      String ->
+      [String] ->
+      Maybe Char ->
+      Int -> -- bracket depth
+      Int -> -- brace depth
+      Either (Int, Text) [Text]
+    go [] cur acc Nothing 0 0 = Right (reverse (map (Text.pack . reverse) (cur : acc)))
+    go [] _ _ (Just _) _ _ = Left (n, "unterminated string in nested value")
+    go [] _ _ _ b1 b2
+      | b1 > 0 = Left (n, "unterminated '[' in nested value")
+      | b2 > 0 = Left (n, "unterminated '{' in nested value")
+      | otherwise = Left (n, "unbalanced nesting")
+    go (c : rest) cur acc Nothing b1 b2
+      | c == ',' && b1 == 0 && b2 == 0 = go rest [] (cur : acc) Nothing 0 0
+      | c == '"' || c == '\'' = go rest (c : cur) acc (Just c) b1 b2
+      | c == '[' = go rest (c : cur) acc Nothing (b1 + 1) b2
+      | c == ']' = go rest (c : cur) acc Nothing (b1 - 1) b2
+      | c == '{' = go rest (c : cur) acc Nothing b1 (b2 + 1)
+      | c == '}' = go rest (c : cur) acc Nothing b1 (b2 - 1)
+      | otherwise = go rest (c : cur) acc Nothing b1 b2
+    go (c : rest) cur acc (Just q) b1 b2
+      | c == q = go rest (c : cur) acc Nothing b1 b2
+      | otherwise = go rest (c : cur) acc (Just q) b1 b2
 
 stripQuotes :: Char -> Text -> Maybe Text
 stripQuotes q txt = do

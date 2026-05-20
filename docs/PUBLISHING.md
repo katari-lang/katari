@@ -9,7 +9,7 @@ release, then the per-release procedure.
 | Artefact | Channel | Workflow |
 |---|---|---|
 | `katari` Haskell binary | GitHub Release tarballs | `release-katari.yml` |
-| `katari-runtime` Docker image | `ghcr.io/katari-lang/katari-runtime` | `release-katari-runtime.yml` |
+| Katari runtime Docker image | `ghcr.io/katari-lang/katari` | `release-katari-runtime.yml` |
 | `@katari-lang/*` (7 packages) | npm | `release-npm.yml` |
 | `katari-vscode` VSIX | GitHub Release | `release-vsix.yml` |
 
@@ -89,7 +89,7 @@ See the [npm announcement][npm-tp] for background.
 
 ### 4. Confirm Docker registry access
 
-The runtime image pushes to GHCR (`ghcr.io/katari-lang/katari-runtime`).
+The runtime image pushes to GHCR (`ghcr.io/katari-lang/katari`).
 This works out of the box with the default `GITHUB_TOKEN` — no manual
 setup required, provided the org has GHCR enabled and the workflow has
 `packages: write` permission (already declared in

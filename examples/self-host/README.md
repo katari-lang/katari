@@ -1,8 +1,8 @@
-# Self-hosting katari-runtime
+# Self-hosting Katari
 
 Minimum viable production setup for the Katari runtime. Spins up:
 
-- `katari-runtime` from `ghcr.io/<owner>/katari-runtime`
+- `katari` runtime image from `ghcr.io/<owner>/katari`
 - Postgres 17
 
 ## Quickstart

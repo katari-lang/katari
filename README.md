@@ -71,7 +71,7 @@ The full registry lives in [`haskell/katari-compiler/CHANGELOG.md`](haskell/kata
 | Artefact | Where |
 |---|---|
 | `katari` CLI binary | npm (`npm i -g @katari-lang/cli`) + GitHub Releases tarballs |
-| `katari-runtime` (Docker) | `ghcr.io/katari-lang/katari-runtime` |
+| Katari runtime (Docker) | `ghcr.io/katari-lang/katari` |
 | `@katari-lang/runtime`, `@katari-lang/port`, `@katari-lang/bundle`, `@katari-lang/api-server` | npm |
 | `katari-vscode` | VSIX on GitHub Releases (Marketplace TBD) |
 

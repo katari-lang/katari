@@ -132,10 +132,11 @@ mkClient mOverride = do
       case mRoot of
         Just root ->
           Project.loadKatariToml (root </> Project.configFilename) >>= \case
-            Right cfg -> pure cfg.apiSection.apiUrl
-            Left _ -> die "could not read katari.toml for [api].url"
+            Right cfg -> pure cfg.runtimeSection.runtimeUrl
+            Left _ -> die "could not read katari.toml for [runtime].url"
         Nothing -> die "no --api-url and no surrounding katari.toml found"
-  Api.newApiClient url Nothing
+  auth <- Api.apiAuthFromEnv
+  Api.newApiClient url auth
 
 resolveProjectId :: Api.ApiClient -> Text -> IO Text
 resolveProjectId c name = do

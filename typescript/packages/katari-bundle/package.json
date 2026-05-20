@@ -13,7 +13,7 @@
   "bugs": "https://github.com/katari-lang/katari/issues",
   "type": "module",
   "bin": {
-    "@katari-lang/bundle": "dist/cli.js"
+    "katari-bundle": "dist/cli.js"
   },
   "exports": {
     ".": "./dist/index.js"

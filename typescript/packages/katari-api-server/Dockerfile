@@ -3,11 +3,11 @@
 # Build context expected at repo root (so the whole pnpm workspace is
 # visible). Build with:
 #
-#   docker build -f typescript/packages/katari-api-server/Dockerfile -t katari-runtime .
+#   docker build -f typescript/packages/katari-api-server/Dockerfile -t katari .
 #
 # At runtime the container reads:
 #   DATABASE_URL  (required)  Postgres connection string
-#   PORT          (default 8080)
+#   PORT          (default 8000)
 #   LOG_LEVEL     (default "info")
 #
 # Apply schema.sql (shipped at /app/share/schema.sql) to your Postgres
@@ -61,10 +61,10 @@ COPY --from=builder /deploy/ ./
 COPY --from=builder /work/typescript/packages/katari-api-server/src/storage/schema.sql /app/share/schema.sql
 
 ENV NODE_ENV=production
-ENV PORT=8080
+ENV PORT=8000
 ENV LOG_LEVEL=info
 
-EXPOSE 8080
+EXPOSE 8000
 
 ENTRYPOINT ["/sbin/tini", "--"]
 CMD ["node", "dist/bin.js"]

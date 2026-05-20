@@ -786,6 +786,16 @@ export class PostgresStorage implements Storage {
     return new PostgresStorage(sql);
   }
 
+  /**
+   * Apply the bundled DDL. The shipped `schema.sql` is fully idempotent
+   * (every CREATE uses IF NOT EXISTS), so re-running is safe on every
+   * boot. Splits on `;` and skips empty lines so we don't ship a raw
+   * multi-statement query that `postgres` would reject.
+   */
+  async migrate(schemaSql: string): Promise<void> {
+    await this.sql.unsafe(schemaSql);
+  }
+
   async withTransaction<T>(fn: (tx: Storage) => Promise<T>): Promise<T> {
     return runInTx(this.sql, fn) as Promise<T>;
   }

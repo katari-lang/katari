@@ -1,7 +1,12 @@
 // Process entry. Wires Postgres + console logger + Hono and starts an HTTP
-// server on PORT (default 8080). Apply `storage/schema.sql` to your
-// database before first launch.
+// server on PORT (default 8000). The bundled `schema.sql` is applied
+// automatically on boot (idempotent — safe to re-run). Set
+// `KATARI_AUTO_MIGRATE=false` to opt out if you migrate via your own
+// tooling.
 
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { serve } from "@hono/node-server";
 import {
   buildConsoleLogger,
@@ -25,7 +30,7 @@ if (databaseUrl === undefined || databaseUrl === "") {
   console.error("DATABASE_URL is required");
   process.exit(1);
 }
-const port = Number(process.env.PORT ?? 8080);
+const port = Number(process.env.PORT ?? 8000);
 
 const logLevel = (process.env.LOG_LEVEL ?? "info") as LogLevel;
 const logger = buildConsoleLogger(logLevel);
@@ -40,6 +45,22 @@ if (apiKey === undefined || apiKey === "") {
 
 const storage = PostgresStorage.create(databaseUrl);
 const metrics = buildMetrics();
+
+if (process.env.KATARI_AUTO_MIGRATE !== "false") {
+  // dist/bin.js → ../src/storage/schema.sql. The path resolves the
+  // same way under `pnpm deploy` (Docker), bare `node dist/bin.js`,
+  // and an npm-installed @katari-lang/api-server.
+  const schemaPath = resolve(
+    dirname(fileURLToPath(import.meta.url)),
+    "..",
+    "src",
+    "storage",
+    "schema.sql",
+  );
+  const schemaSql = readFileSync(schemaPath, "utf8");
+  await storage.migrate(schemaSql);
+  logger.log("info", "schema migration applied", { schemaPath });
+}
 
 // Sidecar manager: per snapshot we spawn a `node <bundle.mjs>`
 // subprocess. Snapshots without a bundle (= no ext agent declarations)
@@ -63,6 +84,7 @@ const app = buildApp({
   projects,
   snapshots,
   orchestrator,
+  logger,
   apiKey,
   metrics,
 });

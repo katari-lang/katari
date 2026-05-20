@@ -71,20 +71,21 @@ optionsParser =
           )
       )
     <*> switch (long "wait" <> help "Poll until the agent finishes; print its result")
-    <*> optional (strOption (long "api-url" <> metavar "URL" <> help "Override [api].url"))
+    <*> optional (strOption (long "api-url" <> metavar "URL" <> help "Override [runtime].url"))
 
 run :: Options -> IO ()
 run opts = do
   cfg <- tryLoadCfg
   let url = case opts.optApiUrl of
         Just u -> Just u
-        Nothing -> fmap (.apiSection.apiUrl) cfg
+        Nothing -> fmap (.runtimeSection.runtimeUrl) cfg
       project = case opts.optProject of
         Just p -> Just p
         Nothing -> fmap (.packageSection.packageName) cfg
   urlOk <- maybe (die "no --api-url and no surrounding katari.toml found") pure url
   projectOk <- maybe (die "no --project and no surrounding katari.toml found") pure project
-  client <- Api.newApiClient urlOk (cfg >>= (.apiSection.apiAuth))
+  auth <- Api.apiAuthFromEnv
+  client <- Api.newApiClient urlOk auth
   proj <- resolveProjectId client projectOk
 
   -- Resolve qualified name (interactive picker if absent), and

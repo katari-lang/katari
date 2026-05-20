@@ -1,14 +1,8 @@
 [package]
 name = "multi_package"
 
-[compile]
-src = "src"
+[runtime]
+url = "http://localhost:8000"
 
-[api]
-url = "http://localhost:8080"
-
-[snapshot]
-dependencies = ["list_utils"]
-
-[overrides.list_utils]
-path = "deps/list_utils"
+[dependencies]
+list_utils = { path = "deps/list_utils" }

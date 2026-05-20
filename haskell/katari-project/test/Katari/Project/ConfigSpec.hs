@@ -8,46 +8,51 @@ import Test.Hspec
 spec :: Spec
 spec = do
   describe "parseKatariToml" $ do
-    it "parses the minimal sample shape" $ do
+    it "parses a minimal [package] + [runtime] config" $ do
       let raw =
             Text.unlines
-              [ "project = \"hello\"",
+              [ "[package]",
+                "name = \"hello\"",
                 "",
-                "[compile]",
-                "src = \"src/\"",
-                "",
-                "[api]",
-                "url = \"http://localhost:8080\""
+                "[runtime]",
+                "url = \"http://localhost:8000\""
               ]
       case parseKatariToml "katari.toml" raw of
         Left e -> expectationFailure (show e)
         Right cfg -> do
           cfg.projectName `shouldBe` "hello"
-          cfg.compileSection.compileSrc `shouldBe` "src/"
-          cfg.compileSection.compileRoot `shouldBe` Nothing
-          cfg.apiSection.apiUrl `shouldBe` "http://localhost:8080"
+          cfg.packageSection.packageName `shouldBe` "hello"
+          cfg.packageSection.packageSrc `shouldBe` "src"
+          cfg.runtimeSection.runtimeUrl `shouldBe` "http://localhost:8000"
 
-    it "defaults compile.src when omitted" $ do
-      let raw = "project = \"x\""
+    it "defaults [package].src to \"src\" when omitted" $ do
+      let raw = Text.unlines ["[package]", "name = \"x\""]
       case parseKatariToml "katari.toml" raw of
         Left e -> expectationFailure (show e)
-        Right cfg -> cfg.compileSection.compileSrc `shouldBe` "src/"
+        Right cfg -> cfg.packageSection.packageSrc `shouldBe` "src"
 
-    it "reads [compile].root override" $ do
+    it "reads [package].src override" $ do
       let raw =
             Text.unlines
-              [ "project = \"x\"",
-                "[compile]",
-                "root = \"entry\""
+              [ "[package]",
+                "name = \"x\"",
+                "src = \"lib\""
               ]
       case parseKatariToml "katari.toml" raw of
         Left e -> expectationFailure (show e)
-        Right cfg -> cfg.compileSection.compileRoot `shouldBe` Just "entry"
+        Right cfg -> cfg.packageSection.packageSrc `shouldBe` "lib"
+
+    it "defaults [runtime].url when omitted" $ do
+      let raw = Text.unlines ["[package]", "name = \"x\""]
+      case parseKatariToml "katari.toml" raw of
+        Left e -> expectationFailure (show e)
+        Right cfg -> cfg.runtimeSection.runtimeUrl `shouldBe` "http://localhost:8000"
 
     it "parses [sidecar].sourceRoots array" $ do
       let raw =
             Text.unlines
-              [ "project = \"x\"",
+              [ "[package]",
+                "name = \"x\"",
                 "[sidecar]",
                 "sourceRoots = [\"a\", \"b\"]"
               ]
@@ -56,7 +61,7 @@ spec = do
         Right cfg ->
           fmap (.sidecarSourceRoots) cfg.sidecarSection `shouldBe` Just ["a", "b"]
 
-    it "rejects missing 'project'" $ do
+    it "rejects missing [package].name" $ do
       parseKatariToml "katari.toml" "# nothing here\n"
         `shouldSatisfy` isValidationError
 
@@ -64,100 +69,87 @@ spec = do
       let raw =
             Text.unlines
               [ "# leading comment",
-                "project = \"x\"  # trailing comment",
+                "[package]",
+                "name = \"x\"  # trailing comment",
                 "",
-                "[api]",
+                "[runtime]",
                 "url = \"http://example.com\""
               ]
       case parseKatariToml "katari.toml" raw of
         Left e -> expectationFailure (show e)
         Right cfg -> do
           cfg.projectName `shouldBe` "x"
-          cfg.apiSection.apiUrl `shouldBe` "http://example.com"
+          cfg.runtimeSection.runtimeUrl `shouldBe` "http://example.com"
 
-    it "parses [package] in the new form" $ do
-      let raw =
-            Text.unlines
-              [ "[package]",
-                "name = \"my-app\"",
-                "version = \"0.1.0\""
-              ]
-      case parseKatariToml "katari.toml" raw of
-        Left e -> expectationFailure (show e)
-        Right cfg -> do
-          cfg.projectName `shouldBe` "my-app"
-          cfg.packageSection.packageName `shouldBe` "my-app"
-          cfg.packageSection.packageVersion `shouldBe` Just "0.1.0"
-          cfg.snapshotSection.snapshotDependencies `shouldBe` []
-          cfg.overrides `shouldBe` Map.empty
-
-    it "parses [snapshot] + [overrides.X] as a Model-2 config" $ do
+    it "parses snapshot pin (= \"*\") in [dependencies]" $ do
       let raw =
             Text.unlines
               [ "[package]",
                 "name = \"my_app\"",
-                "",
                 "[snapshot]",
                 "version = \"2026-05-01\"",
-                "dependencies = [\"list_utils\", \"local_fork\"]",
-                "",
-                "[overrides.local_fork]",
-                "path = \"../local_fork\""
+                "url = \"https://example.com/registry\"",
+                "[dependencies]",
+                "list_utils = \"*\""
               ]
       case parseKatariToml "katari.toml" raw of
         Left e -> expectationFailure (show e)
         Right cfg -> do
-          cfg.snapshotSection.snapshotVersion `shouldBe` Just "2026-05-01"
-          cfg.snapshotSection.snapshotDependencies
-            `shouldMatchList` ["list_utils", "local_fork"]
-          Map.keys cfg.overrides `shouldMatchList` ["local_fork"]
-          Map.lookup "local_fork" cfg.overrides
-            `shouldBe` Just (OverridePath "../local_fork")
+          cfg.snapshotVersion `shouldBe` Just "2026-05-01"
+          cfg.snapshotUrl `shouldBe` Just "https://example.com/registry"
+          Map.lookup "list_utils" cfg.dependencies `shouldBe` Just DepSnapshot
 
-    it "parses git overrides" $ do
+    it "parses an inline-table path dep" $ do
       let raw =
             Text.unlines
               [ "[package]",
                 "name = \"my_app\"",
-                "[snapshot]",
-                "dependencies = [\"bleeding_edge\"]",
-                "[overrides.bleeding_edge]",
-                "git = \"https://example.com/repo\"",
-                "rev = \"abc1234\""
+                "[dependencies]",
+                "local_fork = { path = \"../local_fork\" }"
               ]
       case parseKatariToml "katari.toml" raw of
         Left e -> expectationFailure (show e)
         Right cfg ->
-          Map.lookup "bleeding_edge" cfg.overrides
+          Map.lookup "local_fork" cfg.dependencies
+            `shouldBe` Just (DepPath "../local_fork")
+
+    it "parses an inline-table git dep" $ do
+      let raw =
+            Text.unlines
+              [ "[package]",
+                "name = \"my_app\"",
+                "[dependencies]",
+                "bleeding_edge = { git = \"https://example.com/repo\", ref = \"abc1234\" }"
+              ]
+      case parseKatariToml "katari.toml" raw of
+        Left e -> expectationFailure (show e)
+        Right cfg ->
+          Map.lookup "bleeding_edge" cfg.dependencies
             `shouldBe` Just
-              ( OverrideGit
-                  { gitUrl = "https://example.com/repo",
-                    gitRev = "abc1234"
-                  }
-              )
+              DepGit
+                { gitUrl = "https://example.com/repo",
+                  gitRev = "abc1234"
+                }
 
-    it "rejects an override that names neither path nor git" $ do
+    it "rejects an inline-table dep that names neither path nor git" $ do
       let raw =
             Text.unlines
               [ "[package]",
                 "name = \"x\"",
-                "[snapshot]",
-                "dependencies = [\"bogus\"]",
-                "[overrides.bogus]",
-                "version = \"1.0\""
+                "[dependencies]",
+                "bogus = { version = \"1.0\" }"
               ]
       parseKatariToml "katari.toml" raw `shouldSatisfy` isValidationError
 
-    it "rejects an override whose name is not in [snapshot].dependencies" $ do
+    it "rejects a string-valued dep that isn't \"*\"" $ do
       let raw =
             Text.unlines
               [ "[package]",
                 "name = \"x\"",
-                "[overrides.orphan]",
-                "path = \"../orphan\""
+                "[dependencies]",
+                "weird = \"1.2.3\""
               ]
       parseKatariToml "katari.toml" raw `shouldSatisfy` isValidationError
-
   where
     isValidationError = \case
       Left (ConfigValidationError _ _) -> True

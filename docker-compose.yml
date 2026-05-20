@@ -1,4 +1,4 @@
-# Dev compose: builds katari-runtime from the local tree.
+# Dev compose: builds the katari runtime image from the local tree.
 # For self-host (uses the published GHCR image instead) see
 # `examples/self-host/docker-compose.yml`.
 

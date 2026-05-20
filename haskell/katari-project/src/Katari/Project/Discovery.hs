@@ -17,7 +17,7 @@ import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text.IO as TextIO
-import Katari.Project.Config (CompileSection (..), ProjectConfig (..))
+import Katari.Project.Config (PackageSection (..), ProjectConfig (..))
 import Katari.Project.ModuleName (moduleNameFromRelativePath)
 import System.Directory
   ( canonicalizePath,
@@ -61,11 +61,11 @@ findProjectRoot start = do
                 else go parent
 
 -- | Load every @.ktr@ file under the project's source directory (as
--- specified by @[compile].src@, relative to the project root). The
+-- specified by @[package].src@, relative to the project root). The
 -- resulting map is keyed by module name.
 scanSources :: FilePath -> ProjectConfig -> IO (Map Text SourceEntry)
 scanSources rootDir config = do
-  let rawSrc = config.compileSection.compileSrc
+  let rawSrc = config.packageSection.packageSrc
   let srcDir = if isAbsolute rawSrc then rawSrc else rootDir </> rawSrc
   scanSourcesFromDir srcDir
 

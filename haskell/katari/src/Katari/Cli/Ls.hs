@@ -125,7 +125,8 @@ mkClient opts = do
     Nothing -> do
       mUrl <- tryLoadApiUrl
       maybe (die "no --api-url and no surrounding katari.toml found") pure mUrl
-  Api.newApiClient url Nothing
+  auth <- Api.apiAuthFromEnv
+  Api.newApiClient url auth
 
 tryLoadApiUrl :: IO (Maybe Text)
 tryLoadApiUrl = do
@@ -136,7 +137,7 @@ tryLoadApiUrl = do
     Just root -> do
       r <- Project.loadKatariToml (root </> Project.configFilename)
       pure $ case r of
-        Right cfg -> Just cfg.apiSection.apiUrl
+        Right cfg -> Just cfg.runtimeSection.runtimeUrl
         Left _ -> Nothing
 
 requireProjectId :: Api.ApiClient -> Options -> IO Text

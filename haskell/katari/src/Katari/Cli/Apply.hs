@@ -106,11 +106,12 @@ run opts = do
   let schemaJson = buildSchemaBundle result.schemaEntries
       apiUrl = case opts.optApiUrl of
         Just u -> u
-        Nothing -> cfg.apiSection.apiUrl
+        Nothing -> cfg.runtimeSection.runtimeUrl
       projectName = case opts.optProjectName of
         Just n -> n
         Nothing -> cfg.packageSection.packageName
-  client <- Api.newApiClient apiUrl cfg.apiSection.apiAuth
+  auth <- Api.apiAuthFromEnv
+  client <- Api.newApiClient apiUrl auth
   project <- Api.upsertProject client projectName
   snapshotId <-
     Api.uploadSnapshot
@@ -164,7 +165,7 @@ gatherSourceRoots rootDir = do
     resolveSrc c =
       case c.sidecarSection of
         Just s | not (null s.sidecarSourceRoots) -> head s.sidecarSourceRoots
-        _ -> c.compileSection.compileSrc
+        _ -> c.packageSection.packageSrc
 
 -- | Spawn @katari-bundle@ with one @--source-root@ flag per package
 -- and decode its JSON output.

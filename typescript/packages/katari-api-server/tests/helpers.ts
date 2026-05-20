@@ -189,6 +189,7 @@ export function buildTestHarness(opts?: {
     projects,
     snapshots,
     orchestrator,
+    logger: noopLogger,
     apiKey: null,
     rateLimit: null,
   };
