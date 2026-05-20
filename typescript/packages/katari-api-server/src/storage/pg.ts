@@ -269,7 +269,23 @@ class PgEngineCheckpointRepo implements EngineCheckpointRepo {
     const rows = await this.sql<{ checkpoint: EngineCheckpoint }[]>`
       SELECT checkpoint FROM engine_checkpoints WHERE snapshot_id = ${snapshotId}
     `;
-    return rows[0]?.checkpoint ?? null;
+    const checkpoint = rows[0]?.checkpoint;
+    if (checkpoint === undefined || checkpoint === null) return null;
+    // Legacy compat: pre-v0.1.0-rc4 deployments used a `{}` placeholder
+    // row to anchor `SELECT ... FOR UPDATE` locks. Current code uses an
+    // advisory lock instead and never inserts placeholders, but rows
+    // left by older servers can still be in the DB after an upgrade.
+    // Treat any object lacking `schemaVersion` as "no real checkpoint
+    // yet" so the engine boots a fresh state and overwrites it on
+    // persist.
+    if (
+      typeof checkpoint === "object"
+      && !Array.isArray(checkpoint)
+      && (checkpoint as { schemaVersion?: unknown }).schemaVersion === undefined
+    ) {
+      return null;
+    }
+    return checkpoint;
   }
 
   async delete(snapshotId: SnapshotId): Promise<void> {
@@ -805,17 +821,8 @@ export class PostgresStorage implements Storage {
     snapshotId: SnapshotId,
     fn: () => Promise<T>,
   ): Promise<T> {
-    // Acquire row lock on the corresponding engine_checkpoints row. If it
-    // doesn't exist yet, insert a placeholder so subsequent SELECT FOR
-    // UPDATE has something to lock. The placeholder gets overwritten by
-    // the eventual `checkpoints.upsert(...)`.
     const inner = (tx as PostgresStorage).sql;
-    await inner`
-      INSERT INTO engine_checkpoints (snapshot_id, checkpoint, updated_at)
-      VALUES (${snapshotId}, ${inner.json(asJson({}))}, now())
-      ON CONFLICT (snapshot_id) DO NOTHING
-    `;
-    await inner`SELECT 1 FROM engine_checkpoints WHERE snapshot_id = ${snapshotId} FOR UPDATE`;
+    await acquireSnapshotAdvisoryLock(inner, snapshotId);
     return fn();
   }
 
@@ -845,15 +852,32 @@ function runInTx<T>(
       apiEscalations: new PgApiPendingEscalationRepo(innerSql),
       withTransaction: (innerFn) => runInTx(innerSql, innerFn),
       withSnapshotLock: async (_innerTx, snapshotId, body) => {
-        await innerSql`
-          INSERT INTO engine_checkpoints (snapshot_id, checkpoint, updated_at)
-          VALUES (${snapshotId}, ${innerSql.json(asJson({}))}, now())
-          ON CONFLICT (snapshot_id) DO NOTHING
-        `;
-        await innerSql`SELECT 1 FROM engine_checkpoints WHERE snapshot_id = ${snapshotId} FOR UPDATE`;
+        await acquireSnapshotAdvisoryLock(innerSql, snapshotId);
         return body();
       },
     };
     return fn(txStorage);
   }) as Promise<T>;
+}
+
+/**
+ * Per-snapshot transaction-scoped advisory lock.
+ *
+ * Postgres' `pg_advisory_xact_lock(bigint)` blocks until the key is
+ * free and auto-releases on commit/rollback. Unlike `SELECT ... FOR
+ * UPDATE` it doesn't need an existing row to anchor on, so we can
+ * serialize ticks without inserting a placeholder checkpoint first
+ * (the historical placeholder occasionally leaked into `core.load`
+ * and tripped the engine's schemaVersion check).
+ *
+ * `hashtextextended(text, bigint)` returns int8 — exactly the type
+ * `pg_advisory_xact_lock` takes. Collisions across snapshot UUIDs
+ * are 2^-64-ish and harmless (= two unrelated snapshots would briefly
+ * serialise) so we don't bother with a longer key.
+ */
+async function acquireSnapshotAdvisoryLock(
+  sql: Sql,
+  snapshotId: string,
+): Promise<void> {
+  await sql`SELECT pg_advisory_xact_lock(hashtextextended(${snapshotId}, 0))`;
 }
