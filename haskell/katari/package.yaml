@@ -10,7 +10,6 @@ library:
   exposed-modules:
     - Katari.Api.Client
     - Katari.Api.Types
-    - Katari.Cli.Add
     - Katari.Cli.Apply
     - Katari.Cli.Build
     - Katari.Cli.Cancel

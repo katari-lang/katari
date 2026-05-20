@@ -51,7 +51,12 @@ dependencies:
   - mtl
   - process
   - temporary
+  - tar
+  - tomland
   - transformers
+  - unordered-containers
+  - validation-selective
+  - zlib
 
 default-extensions:
   - LambdaCase

@@ -43,7 +43,7 @@ import qualified Data.Text.Encoding as TextEnc
 import GHC.Generics (Generic)
 import Katari.Api.Types
 import Network.HTTP.Client
-  ( HttpException,
+  ( HttpException (..),
     Manager,
     Request,
     RequestBody (..),
@@ -55,6 +55,7 @@ import Network.HTTP.Client
     responseBody,
     responseStatus,
   )
+import qualified Network.HTTP.Client as HC
 import Network.HTTP.Client.TLS (newTlsManager)
 import Network.HTTP.Types.Status (statusCode)
 
@@ -221,7 +222,7 @@ request c httpMethod path body = do
   rq0 <- mkRequest c httpMethod path body
   resE <- try (httpLbs rq0 c.manager)
   res <- case resE of
-    Left (e :: HttpException) -> throwIO (ApiNetworkError (show e))
+    Left (e :: HttpException) -> throwIO (ApiNetworkError (formatHttpException e))
     Right ok -> pure ok
   let status = statusCode (responseStatus res)
       bs = responseBody res
@@ -287,3 +288,23 @@ percentEncode = Text.concatMap esc
 
 emptyObject :: Aeson.Value
 emptyObject = Aeson.Object mempty
+
+-- | Render an 'HttpException' without leaking sensitive request headers.
+-- 'show' on the raw exception dumps the full 'Request', which includes
+-- the @Authorization: Bearer ...@ header on every authenticated call.
+-- We redact that header before formatting.
+formatHttpException :: HttpException -> String
+formatHttpException = \case
+  HttpExceptionRequest req content ->
+    "HttpExceptionRequest "
+      <> show (redactRequest req)
+      <> " "
+      <> show content
+  e@(InvalidUrlException _ _) -> show e
+  where
+    redactRequest r =
+      r {requestHeaders = map redactHeader (HC.requestHeaders r)}
+    redactHeader (name, value)
+      | name == "Authorization" = (name, "<redacted>")
+      | name == "Cookie" = (name, "<redacted>")
+      | otherwise = (name, value)

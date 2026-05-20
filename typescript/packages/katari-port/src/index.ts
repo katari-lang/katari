@@ -12,6 +12,7 @@
 // "registration" from "activation" lets tooling (tests, linters, `tsc`)
 // import the package safely without commandeering stdin / stdout.
 
+import { randomUUID } from "node:crypto";
 import { stdin, stdout, stderr, exit } from "node:process";
 import { createInterface } from "node:readline";
 import type { ChildToParent, ParentToChild } from "./protocol.js";
@@ -124,21 +125,12 @@ const currentDelegationId = (): string | null =>
   delegationStack.length === 0 ? null : delegationStack[delegationStack.length - 1]!;
 
 function generateChildDelegationId(): string {
-  // 128 bit random hex. Collisions across the whole runtime would
-  // require billions of in-flight delegations, so this is fine for now.
-  const a = Math.floor(Math.random() * 0xffffffff)
-    .toString(16)
-    .padStart(8, "0");
-  const b = Math.floor(Math.random() * 0xffffffff)
-    .toString(16)
-    .padStart(8, "0");
-  const c = Math.floor(Math.random() * 0xffffffff)
-    .toString(16)
-    .padStart(8, "0");
-  const d = Math.floor(Math.random() * 0xffffffff)
-    .toString(16)
-    .padStart(8, "0");
-  return `child-${a}${b}${c}${d}`;
+  // Cryptographically random v4 UUID. The delegation id is used as a
+  // key to look up the owning ext call when the child responds; using
+  // Math.random would make it predictable enough that a misbehaving
+  // sidecar could guess sibling ids and steer responses to the wrong
+  // call. randomUUID is available on Node ≥14.17 and all modern browsers.
+  return `child-${randomUUID().replace(/-/g, "")}`;
 }
 
 async function delegateChild(

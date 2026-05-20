@@ -8,6 +8,7 @@
 // to hand stdio control over to katari-port.
 
 import { build, type Plugin } from "esbuild";
+import { init as initLexer, parse as parseLexer } from "es-module-lexer";
 import { readdir, readFile, stat } from "node:fs/promises";
 import { dirname, extname, join, relative, sep } from "node:path";
 import type { SidecarBundle } from "@katari-lang/runtime";
@@ -214,7 +215,7 @@ function makeModuleWrapPlugin(entries: SiblingEntry[]): Plugin {
         const qname = pathToQname.get(args.path);
         if (qname === undefined) return null; // not a tracked sibling
         const raw = await readFile(args.path, "utf8");
-        const { imports, body } = splitTopLevelImports(raw);
+        const { imports, body } = await splitTopLevelImports(raw);
         const loader: "ts" | "js" = args.path.endsWith(".ts") ? "ts" : "js";
         const wrapped =
           `${imports}\n` +
@@ -228,52 +229,51 @@ function makeModuleWrapPlugin(entries: SiblingEntry[]): Plugin {
 }
 
 /**
- * Quick & dirty top-level import extractor. Recognises a few common
- * shapes:
+ * Extract top-level static imports using es-module-lexer (a real ES
+ * tokenizer) rather than regex over lines. Returns the original source
+ * split into `imports` (the verbatim import statements concatenated) and
+ * `body` (everything else). String literals, template literals, and
+ * comments are correctly skipped so a payload like
  *
- *   import foo from "x";
- *   import { a, b } from "x";
- *   import "side-effect";
- *   import type { X } from "x";        // dropped post-tsx, but kept here
+ *     // import { x } from "y";
+ *     `import { z } from "w"`;
  *
- * Multi-line imports (with newlines between `{` and `}`) and dynamic
- * imports (`import("...")`) are out of scope; users are expected to
- * stick to single-line top-level imports inside katari-port siblings.
+ * is treated as body, not as imports. Dynamic imports (`import(...)`)
+ * are left in the body.
+ *
+ * The lexer is async-init; callers must `await initLexer` once before
+ * the first call. We do that on every invocation — `init` is idempotent
+ * and the cost amortises trivially across a build.
  */
-function splitTopLevelImports(source: string): {
+async function splitTopLevelImports(source: string): Promise<{
   imports: string;
   body: string;
-} {
-  const lines = source.split("\n");
-  const importLines: string[] = [];
-  const bodyLines: string[] = [];
-  let inMultilineImport = false;
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (inMultilineImport) {
-      importLines.push(line);
-      if (trimmed.includes("}") || trimmed.endsWith(";")) {
-        // Heuristic: end of multi-line import when we see a closing
-        // brace or trailing semicolon on the line.
-        inMultilineImport = false;
-      }
-      continue;
-    }
-    if (/^import\s/.test(trimmed)) {
-      importLines.push(line);
-      // Detect a multi-line import if the line opens a `{` without
-      // closing it on the same line.
-      const open = (trimmed.match(/\{/g) ?? []).length;
-      const close = (trimmed.match(/\}/g) ?? []).length;
-      if (open > close) {
-        inMultilineImport = true;
-      }
-      continue;
-    }
-    bodyLines.push(line);
+}> {
+  await initLexer;
+  const [staticImports] = parseLexer(source);
+  if (staticImports.length === 0) {
+    return { imports: "", body: source };
+  }
+
+  // es-module-lexer gives statement-start (ss) and statement-end (se)
+  // offsets for each import. Slice them out of the source into
+  // `imports`, replace each occupied range in the body with a blank of
+  // the same length so source positions in the body don't shift (= keeps
+  // any sourcemap-ish reasoning intact).
+  const importChunks: string[] = [];
+  let body = source;
+  // Iterate in reverse so substring positions stay valid as we splice.
+  for (let i = staticImports.length - 1; i >= 0; i--) {
+    const imp = staticImports[i]!;
+    // ss/se are character offsets including the trailing semicolon when
+    // present. Dynamic imports report d >= 0 and we skip them.
+    if (imp.d !== -1) continue;
+    const chunk = source.slice(imp.ss, imp.se);
+    importChunks.unshift(chunk);
+    body = body.slice(0, imp.ss) + " ".repeat(imp.se - imp.ss) + body.slice(imp.se);
   }
   return {
-    imports: importLines.join("\n"),
-    body: bodyLines.join("\n"),
+    imports: importChunks.join("\n"),
+    body,
   };
 }

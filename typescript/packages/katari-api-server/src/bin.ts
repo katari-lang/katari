@@ -37,9 +37,21 @@ const logger = buildConsoleLogger(logLevel);
 
 const apiKey = process.env.KATARI_API_KEY;
 if (apiKey === undefined || apiKey === "") {
+  // Refuse to boot — an unset API key in production would make every
+  // call return 503 anyway, and a misconfigured deployment that silently
+  // accepts traffic on a non-functional auth path is strictly worse than
+  // failing loud at startup. Set KATARI_API_KEY=disabled to opt out of
+  // auth entirely (only safe for local dev / sandboxes).
+  console.error(
+    "KATARI_API_KEY is required (set to 'disabled' to allow unauthenticated access in dev)",
+  );
+  process.exit(1);
+}
+const authDisabled = apiKey === "disabled";
+if (authDisabled) {
   logger.log(
     "warn",
-    "KATARI_API_KEY is not set; the auth middleware will reject every request with 503",
+    "KATARI_API_KEY=disabled — auth middleware is OFF; do not run this configuration in production",
   );
 }
 
@@ -85,7 +97,7 @@ const app = buildApp({
   snapshots,
   orchestrator,
   logger,
-  apiKey,
+  apiKey: authDisabled ? null : apiKey,
   metrics,
 });
 

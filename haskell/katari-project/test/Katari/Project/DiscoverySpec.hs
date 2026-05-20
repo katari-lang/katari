@@ -2,7 +2,8 @@ module Katari.Project.DiscoverySpec (spec) where
 
 import qualified Data.Map.Strict as Map
 import Katari.Project.Config
-  ( PackageSection (..),
+  ( DependenciesSection (..),
+    PackageSection (..),
     ProjectConfig (..),
     RuntimeSection (..),
   )
@@ -48,8 +49,7 @@ spec = do
 sampleConfig :: ProjectConfig
 sampleConfig =
   ProjectConfig
-    { projectName = "x",
-      packageSection =
+    { packageSection =
         PackageSection
           { packageName = "x",
             packageVersion = Nothing,
@@ -57,7 +57,11 @@ sampleConfig =
           },
       sidecarSection = Nothing,
       runtimeSection = RuntimeSection {runtimeUrl = "http://localhost"},
-      snapshotVersion = Nothing,
-      snapshotUrl = Nothing,
-      dependencies = Map.empty
+      dependenciesSection =
+        DependenciesSection
+          { dependenciesRegistry = Nothing,
+            dependenciesSnapshot = Nothing,
+            dependenciesPackages = []
+          },
+      overrides = Map.empty
     }

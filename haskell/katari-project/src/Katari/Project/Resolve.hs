@@ -36,7 +36,7 @@ import qualified Katari.Project.Snapshot as Snapshot
 
 import Control.Monad (foldM)
 import Data.Char (isAlphaNum)
-import Data.Maybe (isJust)
+import Data.Maybe (fromMaybe, isJust)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Set (Set)
@@ -45,7 +45,8 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import Katari.Project.Config
   ( ConfigError (..),
-    DependencySource (..),
+    DependenciesSection (..),
+    OverrideSource (..),
     PackageSection (..),
     ProjectConfig (..),
     loadKatariToml,
@@ -143,20 +144,24 @@ loadResolvedProject rootDir = do
   case rootRes of
     Left err -> pure (Left err)
     Right rootPkg -> do
-      -- Lazily load the snapshot file iff at least one dep is a
-      -- snapshot pin (= DepSnapshot).
+      -- Lazily load the snapshot file iff at least one dep needs it
+      -- (= a package listed in [dependencies].packages with no matching
+      -- [overrides.X] entry).
       let cfg = rootPkg.packageConfig
+          deps = cfg.dependenciesSection
           needsSnapshot =
-            DepSnapshot `elem` Map.elems cfg.dependencies
+            any
+              (\n -> not (Map.member n cfg.overrides))
+              deps.dependenciesPackages
       mSnap <-
         if needsSnapshot
-          then case cfg.snapshotUrl of
+          then case deps.dependenciesRegistry of
             Nothing ->
-              -- No snapshot_url = caller will see
+              -- No registry url = caller will see
               -- ResolveUnresolvedDependency on the first snapshot dep.
               pure (Right Nothing)
             Just url -> do
-              r <- Snapshot.loadSnapshotFromUrl url cfg.snapshotVersion
+              r <- Snapshot.loadSnapshotFromUrl url deps.dependenciesSnapshot
               pure (fmap Just r)
           else pure (Right Nothing)
       case mSnap of
@@ -168,7 +173,7 @@ loadResolvedProject rootDir = do
 data DepSource
   = DSPath FilePath
   | DSGit Text Text -- url, rev (= user override; no expected sha)
-  | DSSnapshotGit Text Text (Maybe Text)
+  | DSSnapshotGit Text Text Text
   -- ^ url, rev, expected sha256 (= sha is the registry's pin; verified
   -- against the actual download).
   deriving (Show)
@@ -209,7 +214,7 @@ walkDeps mSnap rootPkg =
         | otherwise -> case src of
             DSGit url rev -> resolveGit depName url rev Nothing visited accDeps rest
             DSSnapshotGit url rev expectedSha ->
-              resolveGit depName url rev expectedSha visited accDeps rest
+              resolveGit depName url rev (Just expectedSha) visited accDeps rest
             DSPath p -> do
               let depDir = resolveDepDir parentRoot p
               canonical <- canonicalizePath depDir
@@ -281,22 +286,23 @@ walkDeps mSnap rootPkg =
                         transitive = initialQueue innerEntries pinned.packageRoot
                      in go visited' accDeps' (transitive <> rest)
 
--- | Resolve a package's @[dependencies]@ map into concrete 'DepSource'
--- values. Path / git entries resolve directly; snapshot pins (@"*"@)
--- consult the snapshot file.
+-- | Resolve a package's @[dependencies].packages@ list into concrete
+-- 'DepSource' values. Path / git overrides (from @[overrides.X]@) win
+-- over snapshot pins. Names with neither resolution emit
+-- 'ResolveUnresolvedDependency'.
 depEntries ::
   Maybe Snapshot.Snapshot ->
   ResolvedPackage ->
   Either ResolveError [(Text, DepSource)]
 depEntries mSnap pkg =
-  traverse one (Map.toList pkg.packageConfig.dependencies)
+  traverse one pkg.packageConfig.dependenciesSection.dependenciesPackages
   where
-    one (name, src) = case src of
-      DepPath p -> Right (name, DSPath p)
-      DepGit url rev -> Right (name, DSGit url rev)
-      DepSnapshot -> case mSnap of
+    one name = case Map.lookup name pkg.packageConfig.overrides of
+      Just (OverridePath p) -> Right (name, DSPath p)
+      Just (OverrideGit url rev) -> Right (name, DSGit url rev)
+      Nothing -> case mSnap of
         Just snap | Just sp <- Map.lookup name snap.snapshotPackages ->
-          Right (name, DSSnapshotGit sp.spRepo sp.spRef sp.spSha)
+          Right (name, DSSnapshotGit sp.repo sp.ref sp.sha)
         _ -> Left (ResolveUnresolvedDependency name)
 
 -- | IO-flavoured wrapper around 'depEntries' — same logic, but lifted
@@ -407,7 +413,8 @@ lockfileFromResolved :: ResolvedProject -> Lock.Lockfile
 lockfileFromResolved rp =
   Lock.Lockfile
     { Lock.lockVersion = 1,
-      Lock.lockSnapshot = rp.rootPackage.packageConfig.snapshotVersion,
+      Lock.lockSnapshot =
+        rp.rootPackage.packageConfig.dependenciesSection.dependenciesSnapshot,
       Lock.lockPackages =
         Map.fromList
           [ ( depName,
@@ -423,27 +430,27 @@ lockfileFromResolved rp =
 -- | Translate a resolved dep into a 'Lock.LockedSource'. The walker
 -- has already populated 'packageSha' for any fetch (= git override or
 -- snapshot resolution), so the lockfile only needs to dispatch on the
--- dep entry shape.
+-- override entry (if any) or fall through to the snapshot pin.
 lockedSourceFor :: Text -> ResolvedProject -> ResolvedPackage -> Lock.LockedSource
 lockedSourceFor depName rp pkg =
-  case Map.lookup depName rp.rootPackage.packageConfig.dependencies of
-    Just (DepPath p) -> Lock.LockedPath {Lock.pathLocation = p}
-    Just (DepGit url rev) ->
+  case Map.lookup depName rp.rootPackage.packageConfig.overrides of
+    Just (OverridePath p) -> Lock.LockedPath {Lock.pathLocation = p}
+    Just (OverrideGit url rev) ->
       Lock.LockedGit
         { Lock.gitRepoUrl = url,
           Lock.gitRev = rev,
-          Lock.gitSha = maybe "" id pkg.packageSha
+          Lock.gitSha = fromMaybe "" pkg.packageSha
         }
-    _ ->
+    Nothing ->
       -- Snapshot-resolved dep (or transitive dep not in root's
-      -- [dependencies]): record (repo, ref, sha) tuple that 'walkDeps'
+      -- overrides): record (repo, ref, sha) tuple that 'walkDeps'
       -- threaded onto the package via 'packageSnapshotPin'.
       case pkg.packageSnapshotPin of
         Just (repo, ref) ->
           Lock.LockedSnapshot
             { Lock.snapshotRepo = repo,
               Lock.snapshotRef = ref,
-              Lock.snapshotSha = maybe "" id pkg.packageSha
+              Lock.snapshotSha = fromMaybe "" pkg.packageSha
             }
         Nothing ->
           -- Should be unreachable (= every snapshot-resolved dep

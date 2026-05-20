@@ -116,7 +116,17 @@ katariTomlTemplate name =
       "[runtime]",
       "url = \"http://localhost:8000\"",
       "",
-      "[dependencies]"
+      "[dependencies]",
+      "# registry = \"https://github.com/katari-lang/katari-registry\"",
+      "# snapshot = \"v0.1.0\"",
+      "packages = []",
+      "",
+      "# [overrides.my_fork]",
+      "# path = \"../my_fork\"",
+      "#",
+      "# [overrides.upstream]",
+      "# git = \"https://github.com/...\"",
+      "# ref = \"<full 40-hex commit sha>\""
     ]
 
 entryKtrTemplate :: String -> String

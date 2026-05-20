@@ -29,8 +29,17 @@ jobs:
       - name: Resolve version
         id: version
         shell: bash
+        # See release-katari.yml for the rationale behind env-passing
+        # user-controllable inputs into shell.
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          REF_NAME: ${{ github.ref_name }}
         run: |
-          ref="${{ inputs.tag || github.ref_name }}"
+          ref="${INPUT_TAG:-$REF_NAME}"
+          if [[ ! "$ref" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$ ]]; then
+            echo "::error::tag must match v<major>.<minor>.<patch>[-prerelease]; got '$ref'"
+            exit 1
+          fi
           echo "tag=$ref" >> "$GITHUB_OUTPUT"
           echo "version=${ref#v}" >> "$GITHUB_OUTPUT"
 

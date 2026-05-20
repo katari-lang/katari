@@ -20,11 +20,13 @@ module Katari.Project.Fetch
   )
 where
 
-import Control.Exception (IOException, try)
+import qualified Codec.Archive.Tar as Tar
+import qualified Codec.Archive.Tar.Check as Tar
+import qualified Codec.Compression.GZip as GZip
+import Control.Exception (Exception, IOException, SomeException, try)
 import Crypto.Hash (Digest, SHA256, hash)
 import Data.ByteArray.Encoding (Base (Base16), convertToBase)
 import Data.ByteString (ByteString)
-import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -44,13 +46,10 @@ import System.Directory
   ( createDirectoryIfMissing,
     doesDirectoryExist,
     listDirectory,
-    removeFile,
     renameDirectory,
   )
-import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
 import System.IO.Temp (withSystemTempDirectory)
-import System.Process (readProcessWithExitCode)
 
 -- | The git information the user supplied. @url@ is the canonical
 -- repo URL (e.g. @https://github.com/user/repo@); @rev@ must be a
@@ -135,34 +134,29 @@ doFetch cache name url = do
 -- | Extract a gzipped tarball ('ByteString') into @target@. We unwrap
 -- GitHub's outer @REPO-\<short>@ directory so the cache layout starts
 -- at the package root (= @target\/katari.toml@ is directly visible).
+--
+-- Path-traversal safety is enforced by 'Tar.checkSecurity', which
+-- rejects entries whose names are absolute, contain @..@ components,
+-- or are symlinks/hardlinks pointing outside the destination tree.
+-- A malicious tarball cannot escape @stagingDir@.
 extractInto :: FilePath -> ByteString -> IO (Either FetchError ())
 extractInto target body = withSystemTempDirectory "katari-fetch" $ \tmp -> do
-  let tarballPath = tmp </> "archive.tar.gz"
-      stagingDir = tmp </> "stage"
-  BS.writeFile tarballPath body
+  let stagingDir = tmp </> "stage"
   createDirectoryIfMissing True stagingDir
-  -- Shell out to `tar` — universally available on Unix-likes and
-  -- avoids pulling a tar library into the snapshot for a fetcher
-  -- that's already calling git/network anyway.
-  (exit, _stdout, stderrOut) <-
-    readProcessWithExitCode
-      "tar"
-      ["-xzf", tarballPath, "-C", stagingDir]
-      ""
-  removeFile tarballPath
-  case exit of
-    ExitFailure code ->
-      pure
-        ( Left
-            ( FetchTarballError
-                ( "tar exited "
-                    <> Text.pack (show code)
-                    <> ": "
-                    <> Text.pack stderrOut
-                )
-            )
-        )
-    ExitSuccess -> do
+  -- Decompress in memory, validate every entry, then unpack. Tar.unpack
+  -- itself only writes regular files / dirs / safe symlinks, never
+  -- followed by chmod / chown, so a hostile entry can't widen perms.
+  let entries =
+        rewrapErrors
+          . Tar.checkSecurity
+          . Tar.read
+          . GZip.decompress
+          $ LBS.fromStrict body
+  res <- try (Tar.unpack stagingDir entries) :: IO (Either SomeException ())
+  case res of
+    Left err ->
+      pure (Left (FetchTarballError (Text.pack (show err))))
+    Right () -> do
       entries <- listDirectory stagingDir
       case entries of
         [single] -> do
@@ -181,3 +175,18 @@ extractInto target body = withSystemTempDirectory "katari-fetch" $ \tmp -> do
     -- Avoid pulling in System.FilePath.takeDirectory just for this
     -- one call site — the inline reverse-split is cheap and clear.
     takeParent p = reverse (drop 1 (dropWhile (/= '/') (reverse p)))
+
+-- | Wrap @tar@'s sum-of-error-types in a single Exception so 'Tar.unpack'
+-- can surface them through 'try'.
+newtype TarUnpackError = TarUnpackError String deriving stock (Show)
+
+instance Exception TarUnpackError
+
+rewrapErrors ::
+  Tar.Entries (Either Tar.FormatError Tar.FileNameError) ->
+  Tar.Entries TarUnpackError
+rewrapErrors =
+  Tar.foldEntries
+    Tar.Next
+    Tar.Done
+    (Tar.Fail . TarUnpackError . either show show)

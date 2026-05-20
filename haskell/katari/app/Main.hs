@@ -1,7 +1,6 @@
 -- | Entry point for the @katari@ binary.
 module Main (main) where
 
-import qualified Katari.Cli.Add as Add
 import qualified Katari.Cli.Apply as Apply
 import qualified Katari.Cli.Build as Build
 import qualified Katari.Cli.Cancel as Cancel
@@ -15,7 +14,6 @@ import Options.Applicative
 
 data Cmd
   = Init Init.Options
-  | Add Add.Options
   | Check Check.Options
   | Build Build.Options
   | Apply Apply.Options
@@ -30,7 +28,6 @@ cmdParser =
   hsubparser
     ( commandGroup "Project:"
         <> command "init" (info (Init <$> Init.optionsParser) (progDesc "Scaffold a new Katari project"))
-        <> command "add" (info (Add <$> Add.optionsParser) (progDesc "Add a path dependency to the current project"))
         <> command "check" (info (Check <$> Check.optionsParser) (progDesc "Type-check sources without uploading"))
         <> command "build" (info (Build <$> Build.optionsParser) (progDesc "Compile to IR JSON"))
     )
@@ -49,7 +46,6 @@ main = do
   cmd <- execParser (info (cmdParser <**> helper) (progDesc "Katari CLI"))
   case cmd of
     Init opts -> Init.run opts
-    Add opts -> Add.run opts
     Check opts -> Check.run opts
     Build opts -> Build.run opts
     Apply opts -> Apply.run opts

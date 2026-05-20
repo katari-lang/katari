@@ -87,6 +87,9 @@ importers:
       '@katari-lang/runtime':
         specifier: workspace:*
         version: link:../katari-runtime
+      es-module-lexer:
+        specifier: ^1.5.4
+        version: 1.7.0
       esbuild:
         specifier: ^0.21.5
         version: 0.21.5

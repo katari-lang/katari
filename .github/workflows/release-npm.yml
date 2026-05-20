@@ -36,18 +36,25 @@ jobs:
       - name: Resolve tag
         id: tag
         shell: bash
+        # Pass user-controllable values through `env:` rather than direct
+        # ${{ }} interpolation. Interpolation expands BEFORE the shell
+        # parses the command, so a malicious `inputs.tag` like
+        # `v0.1.0; curl evil` would execute as shell. Env vars are
+        # substituted at shell-evaluation time and survive proper quoting.
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          RUN_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
-          # workflow_run -> head_branch is the tag for tag-triggered runs.
-          # workflow_dispatch -> inputs.tag.
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            tag="${{ inputs.tag }}"
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            tag="$INPUT_TAG"
           else
-            tag="${{ github.event.workflow_run.head_branch }}"
+            tag="$RUN_BRANCH"
           fi
-          case "$tag" in
-            v*) ;;
-            *) echo "::error::expected tag to start with 'v', got '$tag'" ; exit 1 ;;
-          esac
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$ ]]; then
+            echo "::error::tag must match v<major>.<minor>.<patch>[-prerelease]; got '$tag'"
+            exit 1
+          fi
           version="${tag#v}"
           # Pick the npm dist-tag from the prerelease identifier so end
           # users get the expected behaviour:

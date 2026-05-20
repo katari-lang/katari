@@ -24,10 +24,9 @@
 -- sha256 = "def..."
 -- @
 --
--- The lockfile is generated/refreshed by 'Katari.Cli.Resolve' (= the
--- internal resolver run by @build@ / @apply@ / @add@) and is meant to
--- be committed to git so every consumer of the project gets the same
--- byte-for-byte resolution.
+-- The lockfile is generated/refreshed by 'Katari.Cli.Apply' (or
+-- @katari resolve@) and is meant to be committed to git so every
+-- consumer of the project gets the same byte-for-byte resolution.
 module Katari.Project.Lockfile
   ( Lockfile (..),
     LockedPackage (..),
@@ -42,27 +41,28 @@ module Katari.Project.Lockfile
 where
 
 import Control.Exception (IOException, try)
+import Data.Bifunctor (first)
+import qualified Data.HashMap.Strict as HashMap
+import Data.List.NonEmpty (NonEmpty (..))
+import qualified Data.List.NonEmpty as NonEmpty
 import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as TextIO
-import Katari.Project.Config
-  ( TomlBucket (..),
-    TomlTable (..),
-    TomlValue (..),
-    lookupTable,
-    lookupTableScalar,
-    parseTomlText,
-  )
+import qualified Toml
+import Toml (TomlCodec, (.=))
+import qualified Toml.Type.PrefixTree as Toml
+import qualified Toml.Type.Key as Toml
+import qualified Toml.Type.TOML as Toml
+import qualified Validation
 
 -- | Conventional filename, sibling to @katari.toml@.
 lockfileFilename :: FilePath
 lockfileFilename = "katari.lock"
 
 data Lockfile = Lockfile
-  { -- | Current schema version (1 for now). Bumped if the on-disk
-    -- shape needs to evolve incompatibly.
+  { -- | Current schema version (1 for now).
     lockVersion :: Int,
     -- | The snapshot id that was in effect when this lock was
     -- generated. 'Nothing' when the project hasn't pinned a snapshot
@@ -82,25 +82,13 @@ data LockedPackage = LockedPackage
   deriving (Show, Eq)
 
 data LockedSource
-  = -- | Pulled from the registry snapshot at the recorded
-    -- @(repo, ref, sha256)@ triple. The @sha256@ is the integrity
-    -- digest of the upstream tarball as recorded in the snapshot
-    -- file; mismatches mean the upstream archive has been tampered
-    -- with or the lockfile has gone out of sync.
-    LockedSnapshot
+  = LockedSnapshot
       { snapshotRepo :: Text,
         snapshotRef :: Text,
         snapshotSha :: Text
       }
-  | -- | Local path override. The path is interpreted relative to the
-    -- @katari.toml@ that declared it. No integrity check is possible
-    -- here — path deps are inherently mutable.
-    LockedPath {pathLocation :: FilePath}
-  | -- | Git override. @gitRev@ is the resolved full commit SHA
-    -- (not a branch/tag), so the contents are reproducible. @gitSha@
-    -- is the integrity digest of the archived tarball that was
-    -- pulled into the cache.
-    LockedGit
+  | LockedPath {pathLocation :: FilePath}
+  | LockedGit
       { gitRepoUrl :: Text,
         gitRev :: Text,
         gitSha :: Text
@@ -109,16 +97,63 @@ data LockedSource
 
 data LockfileError
   = LockIOError FilePath Text
-  | LockParseError FilePath Int Text
+  | LockParseError FilePath Text
   | LockValidationError FilePath Text
   deriving (Show, Eq)
 
--- ---------------------------------------------------------------------------
--- Loading
--- ---------------------------------------------------------------------------
+-- ===========================================================================
+-- Raw codec (mirror TOML 1:1, validated to LockedSource after parse)
+-- ===========================================================================
 
--- | Read + parse @katari.lock@ from disk. Returns 'Left' on I/O,
--- parse, or validation errors.
+data RawLockfile = RawLockfile
+  { rawLockMeta :: RawLockMeta,
+    rawLockPackages :: Map Text RawLockedPackage
+  }
+
+data RawLockMeta = RawLockMeta
+  { rawLockVersion :: Int,
+    rawLockSnapshot :: Maybe Text
+  }
+
+data RawLockedPackage = RawLockedPackage
+  { rawSource :: Text,
+    rawRepo :: Maybe Text,
+    rawRef :: Maybe Text,
+    rawRev :: Maybe Text,
+    rawSha :: Maybe Text,
+    rawPath :: Maybe FilePath
+  }
+
+-- | Codec for the @[lock]@ block only. @[packages.X]@ entries are
+-- extracted from the raw 'Toml.TOML' AST by 'extractLockedPackages'
+-- since tomland's @tableMap@ doesn't reliably decode nested sections.
+rawLockfileCodec :: TomlCodec RawLockfile
+rawLockfileCodec =
+  RawLockfile
+    <$> Toml.table rawLockMetaCodec "lock" .= (.rawLockMeta)
+    -- Packages are stitched in after AST-level extraction.
+    <*> pure Map.empty .= (.rawLockPackages)
+
+rawLockMetaCodec :: TomlCodec RawLockMeta
+rawLockMetaCodec =
+  RawLockMeta
+    <$> Toml.int "version" .= (.rawLockVersion)
+    <*> Toml.dioptional (Toml.text "snapshot") .= (.rawLockSnapshot)
+
+rawLockedPackageCodec :: TomlCodec RawLockedPackage
+rawLockedPackageCodec =
+  RawLockedPackage
+    <$> Toml.text "source" .= (.rawSource)
+    <*> Toml.dioptional (Toml.text "repo") .= (.rawRepo)
+    <*> Toml.dioptional (Toml.text "ref") .= (.rawRef)
+    <*> Toml.dioptional (Toml.text "rev") .= (.rawRev)
+    <*> Toml.dioptional (Toml.text "sha256") .= (.rawSha)
+    <*> Toml.dioptional (Toml.string "path") .= (.rawPath)
+
+-- ===========================================================================
+-- Loading
+-- ===========================================================================
+
 loadLockfile :: FilePath -> IO (Either LockfileError Lockfile)
 loadLockfile path = do
   readResult <- try (TextIO.readFile path) :: IO (Either IOException Text)
@@ -126,108 +161,109 @@ loadLockfile path = do
     Left e -> pure (Left (LockIOError path (Text.pack (show e))))
     Right raw -> pure (parseLockfile path raw)
 
--- | Parse the textual contents of a @katari.lock@.
 parseLockfile :: FilePath -> Text -> Either LockfileError Lockfile
 parseLockfile path raw = do
-  table <- mapLeft (uncurry (LockParseError path)) (parseTomlText raw)
-  validate path table
+  toml <-
+    first
+      (LockParseError path . Text.pack . show)
+      (Toml.parse raw)
+  rawLock <-
+    first
+      (LockParseError path . Toml.prettyTomlDecodeErrors)
+      (Validation.validationToEither (Toml.runTomlCodec rawLockfileCodec toml))
+  pkgs <- extractLockedPackages path toml
+  validate path (rawLock {rawLockPackages = pkgs})
 
-validate :: FilePath -> TomlTable -> Either LockfileError Lockfile
-validate path table = do
-  let lockTable = lookupTable "lock" table
-  ver <- case lookupTableScalar "version" lockTable of
-    Just (TomlInt n) -> Right (fromInteger n :: Int)
-    _ -> Left (LockValidationError path "[lock].version must be an integer")
-  let snapshot = case lookupTableScalar "snapshot" lockTable of
-        Just (TomlString s) | not (Text.null s) -> Just s
-        _ -> Nothing
-  pkgs <- parseEachPackage path table
-  Right Lockfile {lockVersion = ver, lockSnapshot = snapshot, lockPackages = pkgs}
-
-parseEachPackage :: FilePath -> TomlTable -> Either LockfileError (Map Text LockedPackage)
-parseEachPackage path (TomlTable buckets) =
-  Map.fromList <$> traverse step packageEntries
+extractLockedPackages ::
+  FilePath -> Toml.TOML -> Either LockfileError (Map Text RawLockedPackage)
+extractLockedPackages path toml =
+  case HashMap.lookup packagesPiece (Toml.tomlTables toml) of
+    Nothing -> Right Map.empty
+    Just tree -> Map.fromList <$> walk tree
   where
-    packageEntries =
-      [ (Text.drop (Text.length prefix) sec, body)
-        | (sec, body) <- Map.toList buckets,
-          prefix `Text.isPrefixOf` sec
-      ]
-    prefix = "packages."
-    step (name, BucketTable t) = do
-      lp <- parseLockedPackage path name t
-      Right (name, lp)
-    step (name, _) =
+    packagesPiece = Toml.Piece "packages"
+
+    walk = \case
+      Toml.Leaf fullKey sub ->
+        case dropPrefix fullKey of
+          Nothing -> Right []
+          Just name -> do
+            lp <- decodeLockedPackage path name sub
+            Right [(name, lp)]
+      Toml.Branch _ _ children ->
+        concat <$> traverse walk (HashMap.elems children)
+
+    dropPrefix :: Toml.Key -> Maybe Text
+    dropPrefix key = case NonEmpty.toList (Toml.unKey key) of
+      Toml.Piece "packages" : rest@(_ : _) ->
+        Just (Text.intercalate "." [p | Toml.Piece p <- rest])
+      _ -> Nothing
+
+decodeLockedPackage ::
+  FilePath -> Text -> Toml.TOML -> Either LockfileError RawLockedPackage
+decodeLockedPackage path name sub =
+  case Validation.validationToEither (Toml.runTomlCodec rawLockedPackageCodec sub) of
+    Left errs ->
       Left
         ( LockValidationError
             path
-            ("[packages." <> name <> "] must be a table")
+            ("[packages." <> name <> "]: " <> Toml.prettyTomlDecodeErrors errs)
         )
+    Right lp -> Right lp
 
-parseLockedPackage ::
-  FilePath -> Text -> Map Text TomlValue -> Either LockfileError LockedPackage
-parseLockedPackage path name t = do
-  src <- case Map.lookup "source" t of
-    Just (TomlString s) -> Right s
-    _ -> Left (LockValidationError path ("[packages." <> name <> "].source missing"))
-  body <- case src of
+validate :: FilePath -> RawLockfile -> Either LockfileError Lockfile
+validate path RawLockfile {..} = do
+  pkgs <- traverse (validateLockedPackage path) rawLockPackages
+  let named = Map.mapWithKey (\name lp -> LockedPackage {lockedName = name, lockedSource = lp}) pkgs
+  Right
+    Lockfile
+      { lockVersion = rawLockMeta.rawLockVersion,
+        lockSnapshot = rawLockMeta.rawLockSnapshot,
+        lockPackages = named
+      }
+
+validateLockedPackage :: FilePath -> RawLockedPackage -> Either LockfileError LockedSource
+validateLockedPackage path RawLockedPackage {..} =
+  case rawSource of
     "snapshot" -> do
-      repo <- requireString path name "repo" t
-      ref <- requireString path name "ref" t
-      sha <- requireString path name "sha256" t
-      Right
-        LockedSnapshot
-          { snapshotRepo = repo,
-            snapshotRef = ref,
-            snapshotSha = sha
-          }
+      repo <- need "repo" rawRepo
+      ref' <- need "ref" rawRef
+      sha <- need "sha256" rawSha
+      Right LockedSnapshot {snapshotRepo = repo, snapshotRef = ref', snapshotSha = sha}
     "path" -> do
-      p <- requireString path name "path" t
+      p <- need "path" (fmap Text.pack rawPath)
       Right (LockedPath (Text.unpack p))
     "git" -> do
-      repo <- requireString path name "repo" t
-      rev <- requireString path name "rev" t
-      sha <- requireString path name "sha256" t
-      Right
-        LockedGit
-          { gitRepoUrl = repo,
-            gitRev = rev,
-            gitSha = sha
-          }
+      repo <- need "repo" rawRepo
+      rev <- need "rev" rawRev
+      sha <- need "sha256" rawSha
+      Right LockedGit {gitRepoUrl = repo, gitRev = rev, gitSha = sha}
     other ->
       Left
         ( LockValidationError
             path
-            ( "[packages."
-                <> name
-                <> "].source: unknown '"
-                <> other
-                <> "' (expected snapshot|path|git)"
-            )
+            ("unknown source '" <> other <> "' (expected snapshot|path|git)")
         )
-  Right (LockedPackage {lockedName = name, lockedSource = body})
+  where
+    need :: Text -> Maybe Text -> Either LockfileError Text
+    need fieldName m = case m of
+      Just v | not (Text.null v) -> Right v
+      _ ->
+        Left
+          ( LockValidationError
+              path
+              ("[packages.X]." <> fieldName <> " missing or empty for source '" <> rawSource <> "'")
+          )
 
-requireString :: FilePath -> Text -> Text -> Map Text TomlValue -> Either LockfileError Text
-requireString path name key m = case Map.lookup key m of
-  Just (TomlString s) | not (Text.null s) -> Right s
-  _ ->
-    Left
-      ( LockValidationError
-          path
-          ("[packages." <> name <> "]." <> key <> " missing or empty")
-      )
-
--- ---------------------------------------------------------------------------
+-- ===========================================================================
 -- Writing
--- ---------------------------------------------------------------------------
+-- ===========================================================================
 
 -- | Render a 'Lockfile' to a deterministic, byte-stable TOML string.
--- Packages are emitted in lexicographic order so two locks generated
--- from the same inputs compare equal byte-for-byte.
 renderLockfile :: Lockfile -> Text
 renderLockfile l =
   Text.unlines $
-    [ "# katari.lock — auto-generated by `katari resolve`; commit to git.",
+    [ "# katari.lock — auto-generated by `katari apply`; commit to git.",
       "",
       "[lock]",
       "version = " <> Text.pack (show l.lockVersion)
@@ -264,6 +300,3 @@ quote s = "\"" <> s <> "\""
 -- | Write a 'Lockfile' to @path@, overwriting any existing file.
 writeLockfile :: FilePath -> Lockfile -> IO ()
 writeLockfile path l = TextIO.writeFile path (renderLockfile l)
-
-mapLeft :: (a -> c) -> Either a b -> Either c b
-mapLeft f = either (Left . f) Right

@@ -105,11 +105,11 @@ spec = do
                 "[packages.weird]",
                 "source = \"smoke-signals\""
               ]
-      parseLockfile "katari.lock" raw `shouldSatisfy` isValidationError
+      parseLockfile "katari.lock" raw `shouldSatisfy` isLeftErr
 
     it "requires version" $ do
-      parseLockfile "katari.lock" "" `shouldSatisfy` isValidationError
+      parseLockfile "katari.lock" "" `shouldSatisfy` isLeftErr
   where
-    isValidationError = \case
-      Left (LockValidationError _ _) -> True
+    isLeftErr = \case
+      Left _ -> True
       _ -> False

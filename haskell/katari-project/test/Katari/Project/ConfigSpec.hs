@@ -20,7 +20,6 @@ spec = do
       case parseKatariToml "katari.toml" raw of
         Left e -> expectationFailure (show e)
         Right cfg -> do
-          cfg.projectName `shouldBe` "hello"
           cfg.packageSection.packageName `shouldBe` "hello"
           cfg.packageSection.packageSrc `shouldBe` "src"
           cfg.runtimeSection.runtimeUrl `shouldBe` "http://localhost:8000"
@@ -63,94 +62,85 @@ spec = do
 
     it "rejects missing [package].name" $ do
       parseKatariToml "katari.toml" "# nothing here\n"
-        `shouldSatisfy` isValidationError
+        `shouldSatisfy` isError
 
-    it "ignores comments and blank lines" $ do
+    it "parses [dependencies] with registry + snapshot + packages" $ do
       let raw =
             Text.unlines
-              [ "# leading comment",
-                "[package]",
-                "name = \"x\"  # trailing comment",
-                "",
-                "[runtime]",
-                "url = \"http://example.com\""
+              [ "[package]",
+                "name = \"my_app\"",
+                "[dependencies]",
+                "registry = \"https://github.com/katari-lang/katari-registry\"",
+                "snapshot = \"v0.1.0\"",
+                "packages = [\"list_utils\", \"http_client\"]"
               ]
       case parseKatariToml "katari.toml" raw of
         Left e -> expectationFailure (show e)
         Right cfg -> do
-          cfg.projectName `shouldBe` "x"
-          cfg.runtimeSection.runtimeUrl `shouldBe` "http://example.com"
+          cfg.dependenciesSection.dependenciesRegistry
+            `shouldBe` Just "https://github.com/katari-lang/katari-registry"
+          cfg.dependenciesSection.dependenciesSnapshot `shouldBe` Just "v0.1.0"
+          cfg.dependenciesSection.dependenciesPackages
+            `shouldMatchList` ["list_utils", "http_client"]
+          cfg.overrides `shouldBe` Map.empty
 
-    it "parses snapshot pin (= \"*\") in [dependencies]" $ do
-      let raw =
-            Text.unlines
-              [ "[package]",
-                "name = \"my_app\"",
-                "[snapshot]",
-                "version = \"2026-05-01\"",
-                "url = \"https://example.com/registry\"",
-                "[dependencies]",
-                "list_utils = \"*\""
-              ]
-      case parseKatariToml "katari.toml" raw of
-        Left e -> expectationFailure (show e)
-        Right cfg -> do
-          cfg.snapshotVersion `shouldBe` Just "2026-05-01"
-          cfg.snapshotUrl `shouldBe` Just "https://example.com/registry"
-          Map.lookup "list_utils" cfg.dependencies `shouldBe` Just DepSnapshot
-
-    it "parses an inline-table path dep" $ do
+    it "parses a path override" $ do
       let raw =
             Text.unlines
               [ "[package]",
                 "name = \"my_app\"",
                 "[dependencies]",
-                "local_fork = { path = \"../local_fork\" }"
+                "packages = [\"local_fork\"]",
+                "[overrides.local_fork]",
+                "path = \"../local_fork\""
               ]
       case parseKatariToml "katari.toml" raw of
         Left e -> expectationFailure (show e)
         Right cfg ->
-          Map.lookup "local_fork" cfg.dependencies
-            `shouldBe` Just (DepPath "../local_fork")
+          Map.lookup "local_fork" cfg.overrides
+            `shouldBe` Just (OverridePath "../local_fork")
 
-    it "parses an inline-table git dep" $ do
+    it "parses a git override" $ do
       let raw =
             Text.unlines
               [ "[package]",
                 "name = \"my_app\"",
                 "[dependencies]",
-                "bleeding_edge = { git = \"https://example.com/repo\", ref = \"abc1234\" }"
+                "packages = [\"upstream\"]",
+                "[overrides.upstream]",
+                "git = \"https://example.com/repo\"",
+                "ref = \"abc1234\""
               ]
       case parseKatariToml "katari.toml" raw of
         Left e -> expectationFailure (show e)
         Right cfg ->
-          Map.lookup "bleeding_edge" cfg.dependencies
-            `shouldBe` Just
-              DepGit
-                { gitUrl = "https://example.com/repo",
-                  gitRev = "abc1234"
-                }
+          Map.lookup "upstream" cfg.overrides
+            `shouldBe` Just OverrideGit {gitUrl = "https://example.com/repo", gitRev = "abc1234"}
 
-    it "rejects an inline-table dep that names neither path nor git" $ do
+    it "rejects an override whose name is not in [dependencies].packages" $ do
       let raw =
             Text.unlines
               [ "[package]",
                 "name = \"x\"",
                 "[dependencies]",
-                "bogus = { version = \"1.0\" }"
+                "packages = []",
+                "[overrides.orphan]",
+                "path = \"../orphan\""
               ]
-      parseKatariToml "katari.toml" raw `shouldSatisfy` isValidationError
+      parseKatariToml "katari.toml" raw `shouldSatisfy` isError
 
-    it "rejects a string-valued dep that isn't \"*\"" $ do
+    it "rejects an override that names neither path nor git" $ do
       let raw =
             Text.unlines
               [ "[package]",
                 "name = \"x\"",
                 "[dependencies]",
-                "weird = \"1.2.3\""
+                "packages = [\"bogus\"]",
+                "[overrides.bogus]"
               ]
-      parseKatariToml "katari.toml" raw `shouldSatisfy` isValidationError
+      parseKatariToml "katari.toml" raw `shouldSatisfy` isError
   where
-    isValidationError = \case
-      Left (ConfigValidationError _ _) -> True
-      _ -> False
+    isError :: Either ConfigError a -> Bool
+    isError = \case
+      Left _ -> True
+      Right _ -> False

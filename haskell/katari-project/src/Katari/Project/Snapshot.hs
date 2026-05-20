@@ -4,8 +4,8 @@
 -- This module covers two concerns:
 --
 --   1. Parsing a snapshot TOML file (= one of @package-sets\/\<date>.toml@).
---   2. Resolving a URL (from @[snapshot].url@) into the raw bytes
---      of the snapshot file, supporting both @file:\/\/@ and
+--   2. Resolving a URL (from @[dependencies].registry@ + @[dependencies].snapshot@)
+--      into the raw bytes of the snapshot file, supporting both @file:\/\/@ and
 --      @https:\/\/@ schemes plus a "URL points at the registry root,
 --      version is the filename" convention.
 --
@@ -23,19 +23,17 @@ module Katari.Project.Snapshot
 where
 
 import Control.Exception (IOException, try)
+import Data.Bifunctor (first)
 import qualified Data.ByteString.Lazy as LBS
+import qualified Data.HashMap.Strict as HashMap
+import Data.List.NonEmpty (NonEmpty (..))
+import qualified Data.List.NonEmpty as NonEmpty
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TE
 import qualified Data.Text.IO as TextIO
-import Katari.Project.Config
-  ( TomlBucket (..),
-    TomlTable (..),
-    TomlValue (..),
-    parseTomlText,
-  )
 import Network.HTTP.Client
   ( HttpException,
     Request,
@@ -48,6 +46,12 @@ import Network.HTTP.Client
 import Network.HTTP.Client.TLS (newTlsManager)
 import Network.HTTP.Types.Status (statusCode)
 import System.Directory (doesFileExist)
+import qualified Toml
+import Toml (TomlCodec, (.=))
+import qualified Toml.Type.PrefixTree as Toml
+import qualified Toml.Type.Key as Toml
+import qualified Toml.Type.TOML as Toml
+import qualified Validation
 
 data Snapshot = Snapshot
   { snapshotCompilerVersion :: Maybe Text,
@@ -56,80 +60,131 @@ data Snapshot = Snapshot
   deriving (Show, Eq)
 
 data SnapshotPackage = SnapshotPackage
-  { spRepo :: Text,
-    spRef :: Text,
-    spSha :: Maybe Text
+  { repo :: Text,
+    ref :: Text,
+    sha :: Text
   }
   deriving (Show, Eq)
 
 data SnapshotError
   = SnapshotIOError Text Text
   | SnapshotHttpError Text Text
-  | SnapshotParseError FilePath Int Text
+  | SnapshotParseError FilePath Text
   | SnapshotValidationError FilePath Text
   | SnapshotUnsupportedUrl Text
   deriving (Show, Eq)
 
 -- ---------------------------------------------------------------------------
--- Parsing
+-- Raw codec + post-parse validation
+--
+-- tomland's @tableMap@ silently drops entries whose inner codec fails
+-- to decode (e.g. a [packages.X] table missing a required field). To
+-- get a hard "this entry is malformed" error we read every inner field
+-- as @Maybe@ and validate after the parse.
 -- ---------------------------------------------------------------------------
+
+data RawSnapshot = RawSnapshot
+  { rawCompiler :: Maybe Text,
+    rawPackages :: Map Text RawSnapshotPackage
+  }
+
+data RawSnapshotPackage = RawSnapshotPackage
+  { rawRepo :: Maybe Text,
+    rawRef :: Maybe Text,
+    rawSha :: Maybe Text
+  }
+
+-- | Codec for the top-level scalars only. The @[packages.X]@ nested
+-- tables are extracted from the raw 'Toml.TOML' AST by
+-- 'extractPackages' because tomland's @tableMap@ does not reliably
+-- decode nested sections.
+rawSnapshotCodec :: TomlCodec RawSnapshot
+rawSnapshotCodec =
+  RawSnapshot
+    <$> Toml.dioptional (Toml.text "katari_compiler") .= (.rawCompiler)
+    -- Packages are stitched in after AST-level extraction.
+    <*> pure Map.empty .= (.rawPackages)
+
+rawSnapshotPackageCodec :: TomlCodec RawSnapshotPackage
+rawSnapshotPackageCodec =
+  RawSnapshotPackage
+    <$> Toml.dioptional (Toml.text "repo") .= (.rawRepo)
+    <*> Toml.dioptional (Toml.text "ref") .= (.rawRef)
+    <*> Toml.dioptional (Toml.text "sha256") .= (.rawSha)
 
 parseSnapshot :: FilePath -> Text -> Either SnapshotError Snapshot
 parseSnapshot path raw = do
-  table <- mapLeft (uncurry (SnapshotParseError path)) (parseTomlText raw)
-  let compilerVer = case lookupTopScalar "katari_compiler" table of
-        Just (TomlString s) | not (Text.null s) -> Just s
-        _ -> Nothing
-  pkgs <- parseSnapshotPackages path table
-  Right
-    Snapshot
-      { snapshotCompilerVersion = compilerVer,
-        snapshotPackages = pkgs
-      }
+  toml <-
+    first
+      (SnapshotParseError path . Text.pack . show)
+      (Toml.parse raw)
+  rs <-
+    first
+      (SnapshotParseError path . Toml.prettyTomlDecodeErrors)
+      (Validation.validationToEither (Toml.runTomlCodec rawSnapshotCodec toml))
+  pkgs <- extractPackages path toml
+  validateSnapshot path (rs {rawPackages = pkgs})
 
-parseSnapshotPackages ::
-  FilePath -> TomlTable -> Either SnapshotError (Map Text SnapshotPackage)
-parseSnapshotPackages path (TomlTable buckets) =
-  Map.fromList <$> traverse step pkgEntries
+extractPackages :: FilePath -> Toml.TOML -> Either SnapshotError (Map Text RawSnapshotPackage)
+extractPackages path toml =
+  case HashMap.lookup packagesPiece (Toml.tomlTables toml) of
+    Nothing -> Right Map.empty
+    Just tree -> Map.fromList <$> walk tree
   where
-    pkgEntries =
-      [ (Text.drop (Text.length prefix) sec, body)
-        | (sec, body) <- Map.toList buckets,
-          prefix `Text.isPrefixOf` sec
-      ]
-    prefix = "packages."
-    step (name, BucketTable t) = do
-      sp <- parseOnePackage path name t
-      Right (name, sp)
-    step (name, _) =
+    packagesPiece = Toml.Piece "packages"
+
+    walk = \case
+      Toml.Leaf fullKey sub ->
+        case dropPrefix fullKey of
+          Nothing -> Right []
+          Just name -> do
+            pkg <- decodePackage path name sub
+            Right [(name, pkg)]
+      Toml.Branch _ _ children ->
+        concat <$> traverse walk (HashMap.elems children)
+
+    dropPrefix :: Toml.Key -> Maybe Text
+    dropPrefix key = case NonEmpty.toList (Toml.unKey key) of
+      Toml.Piece "packages" : rest@(_ : _) ->
+        Just (Text.intercalate "." [p | Toml.Piece p <- rest])
+      _ -> Nothing
+
+decodePackage :: FilePath -> Text -> Toml.TOML -> Either SnapshotError RawSnapshotPackage
+decodePackage path name sub =
+  case Validation.validationToEither (Toml.runTomlCodec rawSnapshotPackageCodec sub) of
+    Left errs ->
       Left
         ( SnapshotValidationError
             path
-            ("[packages." <> name <> "] must be a table")
+            ("[packages." <> name <> "]: " <> Toml.prettyTomlDecodeErrors errs)
         )
+    Right pkg -> Right pkg
 
-parseOnePackage ::
-  FilePath ->
-  Text ->
-  Map Text TomlValue ->
-  Either SnapshotError SnapshotPackage
-parseOnePackage path name t = do
-  repo <- requireString path name "repo" t
-  ref <- requireString path name "ref" t
-  let sha = case Map.lookup "sha256" t of
-        Just (TomlString s) | not (Text.null s) -> Just s
-        _ -> Nothing
-  Right SnapshotPackage {spRepo = repo, spRef = ref, spSha = sha}
+validateSnapshot :: FilePath -> RawSnapshot -> Either SnapshotError Snapshot
+validateSnapshot path RawSnapshot {..} = do
+  pkgs <- Map.traverseWithKey (validateOnePackage path) rawPackages
+  Right
+    Snapshot
+      { snapshotCompilerVersion = rawCompiler,
+        snapshotPackages = pkgs
+      }
 
-requireString :: FilePath -> Text -> Text -> Map Text TomlValue -> Either SnapshotError Text
-requireString path name key m = case Map.lookup key m of
-  Just (TomlString s) | not (Text.null s) -> Right s
-  _ ->
-    Left
-      ( SnapshotValidationError
-          path
-          ("[packages." <> name <> "]." <> key <> " missing or empty")
-      )
+validateOnePackage ::
+  FilePath -> Text -> RawSnapshotPackage -> Either SnapshotError SnapshotPackage
+validateOnePackage path name RawSnapshotPackage {..} = do
+  r <- require "repo" rawRepo
+  rf <- require "ref" rawRef
+  sh <- require "sha256" rawSha
+  Right SnapshotPackage {repo = r, ref = rf, sha = sh}
+  where
+    require field m = case m of
+      Just t | not (Text.null t) -> Right t
+      _ ->
+        Left
+          ( SnapshotValidationError
+              path
+              ("[packages." <> name <> "]." <> field <> " missing or empty")
+          )
 
 -- ---------------------------------------------------------------------------
 -- Fetching
@@ -148,10 +203,14 @@ loadSnapshotFromUrl ::
 loadSnapshotFromUrl url mVersion =
   case Text.stripPrefix "file://" url of
     Just rest -> loadFromFile (Text.unpack rest) mVersion
-    Nothing ->
-      if "https://" `Text.isPrefixOf` url || "http://" `Text.isPrefixOf` url
-        then loadFromHttp url mVersion
-        else pure (Left (SnapshotUnsupportedUrl url))
+    Nothing
+      | "https://" `Text.isPrefixOf` url -> loadFromHttp url mVersion
+      | "http://" `Text.isPrefixOf` url ->
+          -- Plaintext registries would let a MITM swap the snapshot pin
+          -- (and thus the sha256 we verify tarballs against). Refuse
+          -- outright; users must use TLS or a local file:// mirror.
+          pure (Left (SnapshotUnsupportedUrl ("http:// snapshot URLs are not supported (use https:// or file://): " <> url)))
+      | otherwise -> pure (Left (SnapshotUnsupportedUrl url))
 
 loadFromFile :: FilePath -> Maybe Text -> IO (Either SnapshotError Snapshot)
 loadFromFile path mVersion = do
@@ -212,15 +271,3 @@ loadFromHttp url mVersion = do
                     )
                 )
             else pure (parseSnapshot (Text.unpack target) (TE.decodeUtf8 body))
-
--- ---------------------------------------------------------------------------
--- Local helpers
--- ---------------------------------------------------------------------------
-
-mapLeft :: (a -> c) -> Either a b -> Either c b
-mapLeft f = either (Left . f) Right
-
-lookupTopScalar :: Text -> TomlTable -> Maybe TomlValue
-lookupTopScalar k (TomlTable m) = case Map.lookup k m of
-  Just (BucketScalar v) -> Just v
-  _ -> Nothing
