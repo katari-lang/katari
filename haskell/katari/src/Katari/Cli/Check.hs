@@ -20,16 +20,17 @@ import Data.Text (Text)
 import qualified Data.Text.IO as TextIO
 import qualified Katari.Compile as Compile
 import Katari.Diagnostic (Diagnostic, Severity (..), filterAtLeast, hasErrors)
-import Katari.Diagnostic.Render (renderDiagnostic)
+import Katari.Diagnostic.Render (renderDiagnostic, renderDiagnosticAnsi)
 import qualified Data.Text as Text
 import qualified Katari.Project.Discovery as Project
 import qualified Katari.Project.Lockfile as Lock
 import qualified Katari.Project.Resolve as Project
 import Options.Applicative
 import System.Directory (getCurrentDirectory)
+import System.Environment (lookupEnv)
 import System.Exit (ExitCode (..), exitWith)
 import System.FilePath ((</>))
-import System.IO (hPutStrLn, stderr)
+import System.IO (hIsTerminalDevice, hPutStrLn, stderr)
 
 newtype Options = Options
   { -- | Project root override; defaults to walking up from @.@.
@@ -106,5 +107,12 @@ loadProject opts = do
             pure (Compile.CompileInput {Compile.sources = sources}, fileTexts)
 
 emitDiagnostics :: Map FilePath Text -> [Diagnostic] -> IO ()
-emitDiagnostics fileTexts ds =
-  mapM_ (TextIO.hPutStrLn stderr . renderDiagnostic fileTexts) (filterAtLeast SeverityWarning ds)
+emitDiagnostics fileTexts ds = do
+  -- Use ANSI colours on a TTY, fall back to plain text when stderr is
+  -- a pipe / file (= an editor or CI buffer). Reading TERM=dumb opts
+  -- out for users on dumb terminals that mishandle escape sequences.
+  isTty <- hIsTerminalDevice stderr
+  term <- lookupEnv "TERM"
+  let useAnsi = isTty && term /= Just "dumb"
+      render = if useAnsi then renderDiagnosticAnsi fileTexts else renderDiagnostic fileTexts
+  mapM_ (TextIO.hPutStrLn stderr . render) (filterAtLeast SeverityWarning ds)

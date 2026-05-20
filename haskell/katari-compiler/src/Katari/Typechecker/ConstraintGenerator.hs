@@ -187,13 +187,19 @@ data ConstraintError
   deriving (Eq, Show)
 
 -- | Convert a 'ConstraintError' to a unified 'Diagnostic'. Codes
--- K0200-K0219 are reserved for the constraint generator.
-toDiagnostic :: ConstraintError -> Diagnostic
-toDiagnostic = \case
-  ConstraintErrorTypeSynonymCycle sourceSpan (TypeId tid) ->
+-- K0200-K0219 are reserved for the constraint generator. The name map
+-- (= 'TypeId' → user-declared name) lets us print
+-- /"cyclic type synonym 'Foo'"/ instead of /"cyclic type synonym (TypeId 7)"/.
+toDiagnostic :: Map TypeId Text -> ConstraintError -> Diagnostic
+toDiagnostic typeNames = \case
+  ConstraintErrorTypeSynonymCycle sourceSpan tid@(TypeId rawId) ->
     diagnosticError
       "K0200"
-      ("cyclic type synonym (TypeId " <> T.pack (show tid) <> ")")
+      ( "cyclic type synonym "
+          <> case Map.lookup tid typeNames of
+            Just n -> "'" <> n <> "'"
+            Nothing -> "(TypeId " <> T.pack (show rawId) <> ")"
+      )
       sourceSpan
 
 -- ===========================================================================

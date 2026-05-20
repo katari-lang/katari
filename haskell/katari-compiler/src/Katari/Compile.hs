@@ -45,6 +45,7 @@ import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 import Katari.AST (Module, Phase (Parsed))
+import qualified Katari.Common as Common
 import Katari.Diagnostic (Diagnostic, hasErrors)
 import Katari.IR (IRModule)
 import Katari.Lexer as Lexer
@@ -155,9 +156,22 @@ compile input =
       (idResult, idErrors) = identify Stdlib.stdlibModuleNames parsed
       idDiags = map Identifier.toDiagnostic idErrors
       (cgResult, cgErrors) = generateConstraints idResult
-      cgDiags = map CG.toDiagnostic cgErrors
+      cgDiags = map (CG.toDiagnostic solverTypeNames) cgErrors
       (solverResult_, solverErrors) = solve cgResult
-      solverDiags = map Solver.toDiagnostic solverErrors
+      -- Type / request name maps let Solver.toDiagnostic render
+      -- user-facing surface names (= `User`, `Greet`) instead of
+      -- internal ids (= `<TypeId 7>`) inside K0220/K0221/K0222.
+      solverTypeNames =
+        Map.map
+          (qname . (.typeQualifiedName))
+          idResult.identifiedTypes
+      solverReqNames =
+        Map.map
+          (qname . (.requestQualifiedName))
+          idResult.identifiedRequests
+      qname (Common.QualifiedName _ n) = n
+      solverDiags =
+        map (Solver.toDiagnostic solverTypeNames solverReqNames) solverErrors
       (zonkResult_, zonkErrors) = zonk idResult cgResult solverResult_
       zonkDiags = map Zonker.toDiagnostic zonkErrors
       exhaustiveDiags = map Exhaustive.toDiagnostic (checkExhaustive idResult zonkResult_)

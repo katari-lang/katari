@@ -65,6 +65,7 @@ import Katari.SemanticType
   ( RequestVariableId (..),
     TypeVariableId (..),
   )
+import qualified Katari.SemanticType.Render as STR
 import Katari.SourceSpan (HasSourceSpan (..), Position (..), SourceSpan (..))
 import Katari.Typechecker.ConstraintGenerator
   ( Constraint (..),
@@ -73,7 +74,7 @@ import Katari.Typechecker.ConstraintGenerator
     ReasonKind (..),
     VariableSupply (..),
   )
-import Katari.Id (RequestId)
+import Katari.Id (RequestId, TypeId)
 import Katari.Typechecker.NormalizedType
   ( NormalizedType (..),
     normaliseSemantic,
@@ -298,17 +299,22 @@ totaliseRequests upperLimit given =
 -- are reserved for the solver. Type rendering is shallow (uses 'Show')
 -- because solver diagnostics carry both sides for tools to render
 -- structurally.
-toDiagnostic :: SolverError -> Diagnostic
-toDiagnostic = \case
+--
+-- Type-renderer name maps default to empty when callers don't have
+-- them — primitive types render fine without; data names degrade to a
+-- placeholder. Production call sites (= 'Katari.Compile') populate
+-- both maps so diagnostics print e.g. /"expected `User`, found `Int`"/.
+toDiagnostic :: Map TypeId Text -> Map RequestId Text -> SolverError -> Diagnostic
+toDiagnostic typeNames reqNames = \case
   SolverErrorContradiction reason expected found ->
     diagnosticError
       "K0220"
       ( "type contradiction at "
           <> renderReason reason
           <> ": expected `"
-          <> tShow expected
+          <> renderTy expected
           <> "`, found `"
-          <> tShow found
+          <> renderTy found
           <> "`"
       )
       (sourceSpanOf reason)
@@ -318,11 +324,11 @@ toDiagnostic = \case
       ( "type-variable bounds conflict for α"
           <> tShow tv
           <> ": lower bound `"
-          <> tShow lower
+          <> renderTy lower
           <> "` ("
           <> renderReason lowerReason
           <> ") incompatible with upper bound `"
-          <> tShow upper
+          <> renderTy upper
           <> "` ("
           <> renderReason upperReason
           <> ")"
@@ -334,6 +340,8 @@ toDiagnostic = \case
       ("structural type mismatch: " <> msg)
       (sourceSpanOf reason)
   where
+    renderTy = STR.renderSemanticType typeNames reqNames
+
     tShow :: (Show a) => a -> Text
     tShow = T.pack . show
 
