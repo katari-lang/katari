@@ -15,6 +15,10 @@ module Katari.Diagnostic.Render
 
     -- * ANSI rendering (severity-coloured headers / underlines)
     renderDiagnosticAnsi,
+
+    -- * Batched rendering (one Text.lines pass per file across N diagnostics)
+    renderDiagnostics,
+    renderDiagnosticsAnsi,
   )
 where
 
@@ -23,6 +27,8 @@ import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as Text
+import Data.Vector (Vector)
+import Data.Vector qualified as Vector
 import Katari.Diagnostic (Diagnostic (..), DiagnosticNote (..), Severity (..))
 import Katari.SourceSpan (Position (..), SourceSpan (..))
 import Prettyprinter
@@ -37,7 +43,6 @@ import Prettyprinter qualified as PP
 import Prettyprinter.Render.Terminal (AnsiStyle, Color (..))
 import Prettyprinter.Render.Terminal qualified as PPAnsi
 import Prettyprinter.Render.Text qualified as PPText
-import Safe (atMay)
 
 -- ===========================================================================
 -- Public API
@@ -59,7 +64,28 @@ import Safe (atMay)
 -- @
 renderDiagnostic :: Map FilePath Text -> Diagnostic -> Text
 renderDiagnostic sources diagnostic =
-  renderPlainText (diagnosticDoc sources diagnostic)
+  renderPlainText (diagnosticDoc (splitLines sources) diagnostic)
+
+-- | Render @diagnostics@ in one pass, splitting each source file's
+-- lines only once. Equivalent to @'map' ('renderDiagnostic' sources)@
+-- but O(diagnostics + Σ file-lengths) instead of O(diagnostics × Σ
+-- file-lengths). Use this when the diagnostic list has more than a
+-- handful of entries.
+renderDiagnostics :: Map FilePath Text -> [Diagnostic] -> [Text]
+renderDiagnostics sources diagnostics =
+  let cache = splitLines sources
+   in map (renderPlainText . diagnosticDoc cache) diagnostics
+
+renderDiagnosticsAnsi :: Map FilePath Text -> [Diagnostic] -> [Text]
+renderDiagnosticsAnsi sources diagnostics =
+  let cache = splitLines sources
+      renderOne d =
+        PPAnsi.renderStrict $
+          PP.layoutPretty PP.defaultLayoutOptions (diagnosticDoc cache d)
+   in map renderOne diagnostics
+
+splitLines :: Map FilePath Text -> Map FilePath (Vector Text)
+splitLines = Map.map (Vector.fromList . Text.lines)
 
 -- | Render a diagnostic without source snippets. Suitable for contexts
 -- where source text is unavailable.
@@ -73,21 +99,21 @@ renderDiagnosticPlain :: Diagnostic -> Text
 renderDiagnosticPlain diagnostic =
   renderPlainText (diagnosticDoc Map.empty diagnostic)
 
+-- ===========================================================================
+-- Doc construction (internal)
+-- ===========================================================================
+
 -- | Render a diagnostic with severity-coloured headers / underlines and
 -- (when available) an inline source snippet. Emits ANSI escape sequences
 -- suitable for a 256-colour terminal.
 renderDiagnosticAnsi :: Map FilePath Text -> Diagnostic -> Text
 renderDiagnosticAnsi sources diagnostic =
   PPAnsi.renderStrict $
-    PP.layoutPretty PP.defaultLayoutOptions (diagnosticDoc sources diagnostic)
-
--- ===========================================================================
--- Doc construction
--- ===========================================================================
+    PP.layoutPretty PP.defaultLayoutOptions (diagnosticDoc (splitLines sources) diagnostic)
 
 -- | The shared 'Doc' for plain and ANSI rendering. Style annotations are
 -- discarded by the plain renderer.
-diagnosticDoc :: Map FilePath Text -> Diagnostic -> Doc AnsiStyle
+diagnosticDoc :: Map FilePath (Vector Text) -> Diagnostic -> Doc AnsiStyle
 diagnosticDoc sources diagnostic =
   vsep $
     headerLine
@@ -143,12 +169,11 @@ hintDoc hint =
 -- | Build the snippet block for the span's primary line, with an
 -- underline marking the affected columns. Returns 'Nothing' if the
 -- file is absent from the source map.
-snippetDoc :: Map FilePath Text -> SourceSpan -> Maybe (Doc AnsiStyle)
+snippetDoc :: Map FilePath (Vector Text) -> SourceSpan -> Maybe (Doc AnsiStyle)
 snippetDoc sources sourceSpan = do
-  source <- Map.lookup sourceSpan.filePath sources
-  let sourceLines = Text.lines source
-      lineIndex = sourceSpan.start.line - 1
-      line = fromMaybe "" (sourceLines `atMay` lineIndex)
+  sourceLines <- Map.lookup sourceSpan.filePath sources
+  let lineIndex = sourceSpan.start.line - 1
+      line = fromMaybe "" (sourceLines Vector.!? lineIndex)
       lineNumberText = Text.pack (show sourceSpan.start.line)
       gutterPad = Text.replicate (Text.length lineNumberText) " "
       startCol = sourceSpan.start.column - 1

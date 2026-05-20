@@ -105,6 +105,7 @@ dependencies:
   - prettyprinter
   - prettyprinter-ansi-terminal
   - safe
+  - vector
 
 default-extensions:
   - DataKinds

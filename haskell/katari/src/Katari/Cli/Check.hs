@@ -20,7 +20,7 @@ import Data.Text (Text)
 import qualified Data.Text.IO as TextIO
 import qualified Katari.Compile as Compile
 import Katari.Diagnostic (Diagnostic, Severity (..), filterAtLeast, hasErrors)
-import Katari.Diagnostic.Render (renderDiagnostic, renderDiagnosticAnsi)
+import Katari.Diagnostic.Render (renderDiagnostics, renderDiagnosticsAnsi)
 import qualified Data.Text as Text
 import qualified Katari.Project.Discovery as Project
 import qualified Katari.Project.Lockfile as Lock
@@ -114,5 +114,9 @@ emitDiagnostics fileTexts ds = do
   isTty <- hIsTerminalDevice stderr
   term <- lookupEnv "TERM"
   let useAnsi = isTty && term /= Just "dumb"
-      render = if useAnsi then renderDiagnosticAnsi fileTexts else renderDiagnostic fileTexts
-  mapM_ (TextIO.hPutStrLn stderr . render) (filterAtLeast SeverityWarning ds)
+      filtered = filterAtLeast SeverityWarning ds
+      rendered =
+        if useAnsi
+          then renderDiagnosticsAnsi fileTexts filtered
+          else renderDiagnostics fileTexts filtered
+  mapM_ (TextIO.hPutStrLn stderr) rendered
