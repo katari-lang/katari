@@ -13,6 +13,7 @@ import Control.Lens ((^.))
 import Control.Monad.IO.Class (liftIO)
 import qualified Data.Text as Text
 import Data.Text (Text)
+import qualified Data.Vector as Vector
 import Katari.Compile (CompileResult (..))
 import Katari.Id (QualifiedName (..))
 import Katari.LSP.Convert (lspPositionToKatari)
@@ -83,26 +84,23 @@ renderHover idResult fileText h =
 -- | Extract the text between @span.start@ and @span.end@ from the
 -- whole-file content. Positions are 1-indexed (line, column) and
 -- inclusive on both ends. Multi-line snippets are joined with @\\n@.
+-- Uses 'Vector' indexing so each line lookup is O(1) rather than the
+-- O(line-number) cost of a linked-list walk; this fires on every
+-- cursor movement in the editor.
 sliceSpan :: Text -> SourceSpan -> Text
 sliceSpan fileText span_ =
-  let ls = Text.lines fileText
+  let ls = Vector.fromList (Text.lines fileText)
       startL = span_.start.line - 1
       endL = span_.end.line - 1
       startC = span_.start.column - 1
       endC = span_.end.column - 1
-   in case (atIndex startL ls, atIndex endL ls) of
+   in case (ls Vector.!? startL, ls Vector.!? endL) of
         (Just s, Just e)
           | startL == endL ->
               Text.take (endC - startC) (Text.drop startC s)
           | otherwise ->
-              let middle = drop (startL + 1) (take endL ls)
+              let middle = Vector.toList (Vector.slice (startL + 1) (endL - startL - 1) ls)
                   firstLine = Text.drop startC s
                   lastLine = Text.take endC e
                in Text.intercalate "\n" (firstLine : middle <> [lastLine])
         _ -> ""
-
-atIndex :: Int -> [a] -> Maybe a
-atIndex n _ | n < 0 = Nothing
-atIndex 0 (x : _) = Just x
-atIndex n (_ : xs) = atIndex (n - 1) xs
-atIndex _ [] = Nothing

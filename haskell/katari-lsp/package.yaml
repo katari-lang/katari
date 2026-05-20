@@ -42,6 +42,7 @@ dependencies:
   - transformers
   - aeson
   - lens
+  - vector
 
 default-extensions:
   - LambdaCase
