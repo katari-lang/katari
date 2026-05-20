@@ -14,6 +14,7 @@ module Katari.Cli.Run
   )
 where
 
+import Control.Applicative ((<|>))
 import Control.Concurrent (threadDelay)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as AesonKey
@@ -25,14 +26,12 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Katari.Api.Client as Api
 import qualified Katari.Api.Types as Api
+import qualified Katari.Cli.Common as Common
 import qualified Katari.Cli.Prompt as Prompt
-import qualified Katari.Cli.Status as Status
 import qualified Katari.Project.Config as Project
-import qualified Katari.Project.Discovery as Project
+import qualified Katari.Cli.Status as Status
 import Options.Applicative
-import System.Directory (getCurrentDirectory)
 import System.Exit (ExitCode (..), exitWith)
-import System.FilePath ((</>))
 import System.IO (hPutStr, hPutStrLn, stderr)
 
 data Options = Options
@@ -76,18 +75,14 @@ optionsParser =
 
 run :: Options -> IO ()
 run opts = do
-  cfg <- tryLoadCfg
-  let url = case opts.optApiUrl of
-        Just u -> Just u
-        Nothing -> fmap (.runtimeSection.runtimeUrl) cfg
-      project = case opts.optProject of
-        Just p -> Just p
-        Nothing -> fmap (.packageSection.packageName) cfg
-  urlOk <- maybe (die "no --api-url and no surrounding katari.toml found") pure url
-  projectOk <- maybe (die "no --project and no surrounding katari.toml found") pure project
-  auth <- Api.apiAuthFromEnv
-  client <- Api.newApiClient urlOk auth
-  proj <- resolveProjectId client projectOk
+  cfg <- Common.tryLoadProjectConfig
+  client <- Common.resolveApiClient "run" opts.optApiUrl
+  let nameFromCfg :: Project.ProjectConfig -> Text
+      nameFromCfg c = c.packageSection.packageName
+  projectName <- case opts.optProject <|> fmap nameFromCfg cfg of
+    Just p -> pure p
+    Nothing -> die "no --project and no surrounding katari.toml found"
+  proj <- Common.resolveProjectId "run" client projectName
 
   -- Resolve qualified name (interactive picker if absent), and
   -- gather args (from --args JSON, otherwise walk the schema).
@@ -183,27 +178,7 @@ promptArgs def = do
 -- ---------------------------------------------------------------------------
 
 die :: String -> IO a
-die msg = do
-  hPutStrLn stderr ("katari run: " <> msg)
-  exitWith (ExitFailure 2)
-
-tryLoadCfg :: IO (Maybe Project.ProjectConfig)
-tryLoadCfg = do
-  cwd <- getCurrentDirectory
-  mRoot <- Project.findProjectRoot cwd
-  case mRoot of
-    Nothing -> pure Nothing
-    Just root -> do
-      r <- Project.loadKatariToml (root </> Project.configFilename)
-      pure (either (const Nothing) Just r)
-
-resolveProjectId :: Api.ApiClient -> Text -> IO Text
-resolveProjectId c name = do
-  ps <- Api.listProjects c
-  case [p.id | p <- ps, p.name == name] of
-    [pid] -> pure pid
-    [] -> die ("project '" <> Text.unpack name <> "' not found on the runtime — `katari apply` first?")
-    _ -> die ("multiple projects named '" <> Text.unpack name <> "'")
+die = Common.dieIn "run"
 
 decodeArgsJson :: Text -> IO (Map Text Aeson.Value)
 decodeArgsJson s = case Aeson.eitherDecode (LC8.pack (Text.unpack s)) of

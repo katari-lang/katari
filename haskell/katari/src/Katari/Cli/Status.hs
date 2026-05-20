@@ -19,13 +19,8 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Katari.Api.Client as Api
 import qualified Katari.Api.Types as Api
-import qualified Katari.Project.Config as Project
-import qualified Katari.Project.Discovery as Project
+import Katari.Cli.Common (resolveApiClient)
 import Options.Applicative
-import System.Directory (getCurrentDirectory)
-import System.Exit (ExitCode (..), exitWith)
-import System.FilePath ((</>))
-import System.IO (hPutStrLn, stderr)
 
 data Options = Options
   { optAgentId :: Text,
@@ -42,7 +37,7 @@ optionsParser =
 
 run :: Options -> IO ()
 run opts = do
-  client <- mkClient opts.optApiUrl
+  client <- resolveApiClient "status" opts.optApiUrl
   row <- Api.getAgent client opts.optAgentId
   if opts.optJson
     then LC8.putStrLn (AesonPretty.encodePretty row)
@@ -98,27 +93,3 @@ renderJsonOneLine v =
   -- after keys, which is the densest single-line form we ship.
   Text.pack (LC8.unpack (Aeson.encode v))
 
--- ---------------------------------------------------------------------------
--- Client wiring (mirrors Ls/Cancel)
--- ---------------------------------------------------------------------------
-
-mkClient :: Maybe Text -> IO Api.ApiClient
-mkClient mOverride = do
-  url <- case mOverride of
-    Just u -> pure u
-    Nothing -> do
-      cwd <- getCurrentDirectory
-      mRoot <- Project.findProjectRoot cwd
-      case mRoot of
-        Just root ->
-          Project.loadKatariToml (root </> Project.configFilename) >>= \case
-            Right cfg -> pure cfg.runtimeSection.runtimeUrl
-            Left _ -> die "could not read katari.toml for [runtime].url"
-        Nothing -> die "no --api-url and no surrounding katari.toml found"
-  auth <- Api.apiAuthFromEnv
-  Api.newApiClient url auth
-
-die :: String -> IO a
-die msg = do
-  hPutStrLn stderr ("katari status: " <> msg)
-  exitWith (ExitFailure 2)

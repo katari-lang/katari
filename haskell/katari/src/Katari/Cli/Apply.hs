@@ -104,12 +104,15 @@ run opts = do
 
   -- 4. Talk to the runtime.
   let schemaJson = buildSchemaBundle result.schemaEntries
-      apiUrl = case opts.optApiUrl of
-        Just u -> u
-        Nothing -> cfg.runtimeSection.runtimeUrl
       projectName = case opts.optProjectName of
         Just n -> n
         Nothing -> cfg.packageSection.packageName
+  -- Apply has a cfg already loaded, so we shortcut the URL resolution
+  -- here instead of going through `Common.resolveApiClient` (which
+  -- would re-walk to the project root). Auth still comes from env.
+  let apiUrl = case opts.optApiUrl of
+        Just u -> u
+        Nothing -> cfg.runtimeSection.runtimeUrl
   auth <- Api.apiAuthFromEnv
   client <- Api.newApiClient apiUrl auth
   project <- Api.upsertProject client projectName

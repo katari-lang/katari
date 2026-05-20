@@ -18,13 +18,8 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Katari.Api.Client as Api
 import qualified Katari.Api.Types as Api
-import qualified Katari.Project.Config as Project
-import qualified Katari.Project.Discovery as Project
+import qualified Katari.Cli.Common as Common
 import Options.Applicative
-import System.Directory (getCurrentDirectory)
-import System.Exit (ExitCode (..), exitWith)
-import System.FilePath ((</>))
-import System.IO (hPutStrLn, stderr)
 
 data Options
   = List ListOptions
@@ -118,33 +113,13 @@ runAnswer o = do
 -- ---------------------------------------------------------------------------
 
 die :: String -> IO a
-die msg = do
-  hPutStrLn stderr ("katari escalation: " <> msg)
-  exitWith (ExitFailure 2)
+die = Common.dieIn "escalation"
 
 mkClient :: Maybe Text -> IO Api.ApiClient
-mkClient mOverride = do
-  url <- case mOverride of
-    Just u -> pure u
-    Nothing -> do
-      cwd <- getCurrentDirectory
-      mRoot <- Project.findProjectRoot cwd
-      case mRoot of
-        Just root ->
-          Project.loadKatariToml (root </> Project.configFilename) >>= \case
-            Right cfg -> pure cfg.runtimeSection.runtimeUrl
-            Left _ -> die "could not read katari.toml for [runtime].url"
-        Nothing -> die "no --api-url and no surrounding katari.toml found"
-  auth <- Api.apiAuthFromEnv
-  Api.newApiClient url auth
+mkClient = Common.resolveApiClient "escalation"
 
 resolveProjectId :: Api.ApiClient -> Text -> IO Text
-resolveProjectId c name = do
-  ps <- Api.listProjects c
-  case [p.id | p <- ps, p.name == name] of
-    [pid] -> pure pid
-    [] -> die ("project '" <> Text.unpack name <> "' not found")
-    _ -> die ("multiple projects named '" <> Text.unpack name <> "'")
+resolveProjectId = Common.resolveProjectId "escalation"
 
 printRow :: Api.EscalationRow -> IO ()
 printRow r =

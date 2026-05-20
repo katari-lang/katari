@@ -20,14 +20,9 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Katari.Api.Client as Api
 import qualified Katari.Api.Types as Api
+import qualified Katari.Cli.Common as Common
 import qualified Katari.Cli.Status as Status
-import qualified Katari.Project.Config as Project
-import qualified Katari.Project.Discovery as Project
 import Options.Applicative
-import System.Directory (getCurrentDirectory)
-import System.Exit (ExitCode (..), exitWith)
-import System.FilePath ((</>))
-import System.IO (hPutStrLn, stderr)
 
 data Target
   = TProjects
@@ -98,7 +93,7 @@ run opts = do
         then emitJson snaps
         else mapM_ printSnap snaps
     TAgents -> do
-      pid <- traverse (resolveProjectId client) opts.optProject
+      pid <- traverse (Common.resolveProjectId "ls" client) opts.optProject
       ags <- Api.listAgents client pid opts.optSnapshot
       if opts.optJson then emitJson ags else mapM_ printAgent ags
     TAgentDefs -> do
@@ -115,44 +110,15 @@ run opts = do
 -- ---------------------------------------------------------------------------
 
 die :: String -> IO a
-die msg = do
-  hPutStrLn stderr ("katari ls: " <> msg)
-  exitWith (ExitFailure 2)
+die = Common.dieIn "ls"
 
 mkClient :: Options -> IO Api.ApiClient
-mkClient opts = do
-  url <- case opts.optApiUrl of
-    Just u -> pure u
-    Nothing -> do
-      mUrl <- tryLoadApiUrl
-      maybe (die "no --api-url and no surrounding katari.toml found") pure mUrl
-  auth <- Api.apiAuthFromEnv
-  Api.newApiClient url auth
-
-tryLoadApiUrl :: IO (Maybe Text)
-tryLoadApiUrl = do
-  cwd <- getCurrentDirectory
-  mRoot <- Project.findProjectRoot cwd
-  case mRoot of
-    Nothing -> pure Nothing
-    Just root -> do
-      r <- Project.loadKatariToml (root </> Project.configFilename)
-      pure $ case r of
-        Right cfg -> Just cfg.runtimeSection.runtimeUrl
-        Left _ -> Nothing
+mkClient opts = Common.resolveApiClient "ls" opts.optApiUrl
 
 requireProjectId :: Api.ApiClient -> Options -> IO Text
 requireProjectId c opts = case opts.optProject of
-  Just name -> resolveProjectId c name
+  Just name -> Common.resolveProjectId "ls" c name
   Nothing -> die "this target requires --project NAME"
-
-resolveProjectId :: Api.ApiClient -> Text -> IO Text
-resolveProjectId c name = do
-  ps <- Api.listProjects c
-  case [p.id | p <- ps, p.name == name] of
-    [pid] -> pure pid
-    [] -> die ("project '" <> Text.unpack name <> "' not found")
-    multi -> die ("multiple projects named '" <> Text.unpack name <> "': " <> show multi)
 
 emitJson :: Aeson.ToJSON a => a -> IO ()
 emitJson = LC8.putStrLn . Pretty.encodePretty
