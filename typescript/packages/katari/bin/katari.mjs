@@ -23,7 +23,6 @@ const require = createRequire(import.meta.url);
 const supported = new Set([
   "linux-x64",
   "darwin-arm64",
-  "darwin-x64",
 ]);
 
 const key = `${process.platform}-${process.arch}`;

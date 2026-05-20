@@ -33,7 +33,7 @@ const PUBLISHABLE = [
   { dir: "katari-api-server", name: "@katari-lang/api-server" },
 ];
 
-const PLATFORMS = ["linux-x64", "darwin-arm64", "darwin-x64"];
+const PLATFORMS = ["linux-x64", "darwin-arm64"];
 
 function arg(name) {
   const i = process.argv.indexOf(`--${name}`);

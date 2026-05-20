@@ -27,7 +27,6 @@ import { resolve } from "node:path";
 const PLATFORMS = [
   { key: "linux-x64",    os: "linux",  cpu: "x64"   },
   { key: "darwin-arm64", os: "darwin", cpu: "arm64" },
-  { key: "darwin-x64",   os: "darwin", cpu: "x64"   },
 ];
 
 function arg(name) {

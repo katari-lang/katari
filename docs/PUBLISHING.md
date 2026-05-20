@@ -10,17 +10,16 @@ release, then the per-release procedure.
 |---|---|---|
 | `katari` Haskell binary | GitHub Release tarballs | `release-katari.yml` |
 | `katari-runtime` Docker image | `ghcr.io/katari-lang/katari-runtime` | `release-katari-runtime.yml` |
-| `@katari-lang/*` (8 packages) | npm | `release-npm.yml` |
+| `@katari-lang/*` (7 packages) | npm | `release-npm.yml` |
 | `katari-vscode` VSIX | GitHub Release | `release-vsix.yml` |
 
-The 8 npm packages are:
+The 7 npm packages are:
 
 | Package | Type |
 |---|---|
 | `@katari-lang/cli` | shim |
 | `@katari-lang/cli-linux-x64` | prebuilt binary |
 | `@katari-lang/cli-darwin-arm64` | prebuilt binary |
-| `@katari-lang/cli-darwin-x64` | prebuilt binary |
 | `@katari-lang/runtime` | library |
 | `@katari-lang/api-server` | library |
 | `@katari-lang/port` | library |
@@ -69,7 +68,7 @@ to 404 until the first real release lands.
 
 ### 3. Configure Trusted Publishing for each package
 
-For each of the 8 packages now on npm, open
+For each of the 7 packages now on npm, open
 <https://www.npmjs.com/settings/katari-lang/packages>, click into the
 package, then **Settings → Trusted publisher**, and add:
 
@@ -81,7 +80,7 @@ package, then **Settings → Trusted publisher**, and add:
 | Workflow filename | `release-npm.yml` |
 | Environment | *(blank — no GitHub Environment is used)* |
 
-Once all 8 are configured, **delete the Automation token** you used
+Once all 7 are configured, **delete the Automation token** you used
 for the bootstrap. No `NPM_TOKEN` GitHub secret is needed —
 authentication is short-lived OIDC issued by Actions at publish time.
 See the [npm announcement][npm-tp] for background.
@@ -107,15 +106,15 @@ setup required, provided the org has GHCR enabled and the workflow has
    ```
 
 3. CI runs four workflows automatically:
-   - `release-katari` — builds 3 platform binaries, attaches to the
-     GitHub Release.
+   - `release-katari` — builds 2 platform binaries (linux-x64 +
+     darwin-arm64), attaches to the GitHub Release.
    - `release-katari-runtime` — builds multi-arch Docker image, pushes
      to GHCR.
    - `release-vsix` — builds `katari-vscode-X.Y.Z.vsix`, attaches to
      the Release.
    - `release-npm` — chained off `release-katari` completion; downloads
      the binaries, stages `@katari-lang/cli-<platform>` packages, then
-     publishes all 8 npm packages via OIDC. Provenance attestations are
+     publishes all 7 npm packages via OIDC. Provenance attestations are
      automatic.
 
 The 4 workflows run in parallel except `release-npm`, which waits for

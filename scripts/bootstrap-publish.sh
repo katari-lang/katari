@@ -18,7 +18,7 @@
 #        mkdir -p .binaries
 #        tar czf .binaries/katari-${BOOTSTRAP_VERSION}-linux-x64.tar.gz \
 #          -C bin katari
-#        # repeat for darwin-arm64 / darwin-x64 if you have those builds.
+#        # repeat for darwin-arm64 if you have that build.
 #   4. Run:
 #        NPM_TOKEN=<token> BOOTSTRAP_VERSION=0.0.1-bootstrap \
 #          bash scripts/bootstrap-publish.sh
@@ -108,7 +108,7 @@ if [[ "${SKIP_CLI_BINARIES:-0}" != "1" ]]; then
   node scripts/stage-binary-packages.mjs --version "${BOOTSTRAP_VERSION}"
 
   echo "==> publishing @katari-lang/cli-<platform> packages"
-  for plat in linux-x64 darwin-arm64 darwin-x64; do
+  for plat in linux-x64 darwin-arm64; do
     echo "--- @katari-lang/cli-${plat} ---"
     ( cd ".staged/${plat}" \
       && npm publish --access public --tag bootstrap )

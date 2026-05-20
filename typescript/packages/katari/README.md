@@ -15,9 +15,10 @@ is shipped per-platform via optional dependencies:
 |---|---|
 | Linux x64 | `@katari-lang/cli-linux-x64` |
 | macOS Apple Silicon | `@katari-lang/cli-darwin-arm64` |
-| macOS Intel | `@katari-lang/cli-darwin-x64` |
 
 npm / pnpm pick the matching one automatically based on `os` / `cpu`.
+macOS Intel users can run the Apple Silicon binary via Rosetta 2, or
+build from source with stack.
 
 ## Optional companion: `@katari-lang/bundle`
 

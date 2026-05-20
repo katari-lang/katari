@@ -81,7 +81,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           mkdir -p .binaries
-          for plat in linux-x64 darwin-arm64 darwin-x64; do
+          for plat in linux-x64 darwin-arm64; do
             asset="katari-${{ steps.tag.outputs.version }}-${plat}.tar.gz"
             # release-katari uploads in parallel; allow a brief grace period.
             for i in 1 2 3 4 5; do
@@ -121,7 +121,7 @@ jobs:
 
       - name: Publish @katari-lang/cli-<platform> packages
         run: |
-          for plat in linux-x64 darwin-arm64 darwin-x64; do
+          for plat in linux-x64 darwin-arm64; do
             echo "::group::publishing @katari-lang/cli-$plat"
             ( cd .staged/$plat && pnpm publish --access public --no-git-checks )
             echo "::endgroup::"
