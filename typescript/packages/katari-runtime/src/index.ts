@@ -47,7 +47,6 @@ export type {
   AskKind,
   Event,
   Event as EngineEvent,
-  Event as MachineEvent,
   EventPayload,
   ExternalEventPayload,
   InternalEventPayload,
@@ -73,7 +72,6 @@ export type {
   PostCancelAction,
   State,
   State as EngineState,
-  State as MachineState,
   Diff,
   LogEntry,
   LogLevel,
@@ -81,9 +79,6 @@ export type {
   Result,
   Result as EngineResult,
   EngineCheckpoint,
-  EngineCheckpoint as Snapshot,
-  EngineCheckpoint as EngineSnapshot,
-  EngineCheckpoint as MachineSnapshot,
 } from "./engine/index.js";
 
 // ─── IR + schema types (Haskell mirror) ────────────────────────────────────
