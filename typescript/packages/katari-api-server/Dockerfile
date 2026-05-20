@@ -17,7 +17,7 @@
 # Stage 1: build the TS workspace with pnpm and produce a self-contained
 # deploy directory for katari-api-server.
 # ---------------------------------------------------------------------------
-FROM node:20-alpine AS builder
+FROM node:24-alpine AS builder
 
 ENV PNPM_HOME=/pnpm
 ENV PATH="$PNPM_HOME:$PATH"
@@ -48,7 +48,7 @@ RUN pnpm --filter @katari-lang/api-server deploy --prod /deploy
 # ---------------------------------------------------------------------------
 # Stage 2: minimal runtime image.
 # ---------------------------------------------------------------------------
-FROM node:20-alpine
+FROM node:24-alpine
 
 RUN apk add --no-cache tini
 
