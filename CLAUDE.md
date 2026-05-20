@@ -6,26 +6,24 @@ KATARI 言語のコンパイラ・ランタイム・LSP の実装リポジトリ
 
 ```
 haskell/
-  katari-compiler/   # コンパイラライブラリ (pure / IO なし)
-  katari-cli/        # CLI ツール (executable: katari) — 現在再設計中
-  katari-lsp/        # LSP サーバー — 現在再設計中
-ts/                  # TypeScript 実装 (pnpm workspace)
+  katari-compiler/   # コンパイラ library (pure / IO なし)
+  katari-project/    # katari.toml / lockfile / snapshot / package resolution
+  katari/            # CLI binary (executable: katari)
+  katari-lsp/        # LSP サーバー (再設計中)
+typescript/          # TypeScript 実装 (pnpm workspace)
   packages/
-    katari-protocol/         # Katari Protocol ライブラリ (型, Store, Server, Router)
-    katari-runtime/          # ランタイム — 現在再設計中 (新 IR JSON に合わせ作り直し予定)
-    katari-discord-server/   # Discord 外部サーバー
-    katari-ai-server/        # AI (Gemini) 外部サーバー
-    katari-cron-server/      # Cron 外部サーバー
-    katari-websearch-server/ # Web 検索外部サーバー
-    katari-sandbox-server/   # Docker サンドボックス外部サーバー
-haskell-old/         # 旧実装 (参考用)
-samples/             # haskell-old の旧 syntax を使う未対応サンプル群 (compiler の参照対象外)
+    katari-runtime/      # ランタイム本体 (pure core + HTTP server)
+    katari-api-server/   # runtime を HTTP で expose する server
+    katari-port/         # 外部サーバー共通 port abstraction
+    katari-bundle/       # esbuild bundler (katari binary が spawn する CLI)
+    katari-vscode/       # VSCode extension
+e2e/                 # end-to-end test (samples + tests)
 ```
 
 ## ビルド・実行
 
 ```sh
-# Haskell コンパイラのビルドと test
+# Haskell (compiler / katari-project / katari binary / lsp)
 stack build
 stack test
 
@@ -33,7 +31,7 @@ stack test
 stack haddock katari-compiler --no-haddock-deps
 
 # TypeScript (pnpm v9 を使用)
-cd ts && pnpm install && pnpm -r run build
+cd typescript && pnpm install && pnpm -r run build
 ```
 
 ### pnpm バージョン

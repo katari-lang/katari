@@ -88,37 +88,73 @@ spec = do
           cfg.projectName `shouldBe` "my-app"
           cfg.packageSection.packageName `shouldBe` "my-app"
           cfg.packageSection.packageVersion `shouldBe` Just "0.1.0"
-          cfg.dependencies `shouldBe` Map.empty
+          cfg.snapshotSection.snapshotDependencies `shouldBe` []
+          cfg.overrides `shouldBe` Map.empty
 
-    it "collects every [dependencies.<name>] section as a PathDependency" $ do
+    it "parses [snapshot] + [overrides.X] as a Model-2 config" $ do
       let raw =
             Text.unlines
               [ "[package]",
-                "name = \"my-app\"",
+                "name = \"my_app\"",
                 "",
-                "[dependencies.list-utils]",
-                "path = \"../list-utils\"",
+                "[snapshot]",
+                "version = \"2026-05-01\"",
+                "dependencies = [\"list_utils\", \"local_fork\"]",
                 "",
-                "[dependencies.string-utils]",
-                "path = \"vendor/string-utils\""
+                "[overrides.local_fork]",
+                "path = \"../local_fork\""
               ]
       case parseKatariToml "katari.toml" raw of
         Left e -> expectationFailure (show e)
         Right cfg -> do
-          Map.keys cfg.dependencies
-            `shouldMatchList` ["list-utils", "string-utils"]
-          fmap (.depPath) (Map.lookup "list-utils" cfg.dependencies)
-            `shouldBe` Just "../list-utils"
-          fmap (.depPath) (Map.lookup "string-utils" cfg.dependencies)
-            `shouldBe` Just "vendor/string-utils"
+          cfg.snapshotSection.snapshotVersion `shouldBe` Just "2026-05-01"
+          cfg.snapshotSection.snapshotDependencies
+            `shouldMatchList` ["list_utils", "local_fork"]
+          Map.keys cfg.overrides `shouldMatchList` ["local_fork"]
+          Map.lookup "local_fork" cfg.overrides
+            `shouldBe` Just (OverridePath "../local_fork")
 
-    it "rejects a dependency that is missing a 'path' key" $ do
+    it "parses git overrides" $ do
+      let raw =
+            Text.unlines
+              [ "[package]",
+                "name = \"my_app\"",
+                "[snapshot]",
+                "dependencies = [\"bleeding_edge\"]",
+                "[overrides.bleeding_edge]",
+                "git = \"https://example.com/repo\"",
+                "rev = \"abc1234\""
+              ]
+      case parseKatariToml "katari.toml" raw of
+        Left e -> expectationFailure (show e)
+        Right cfg ->
+          Map.lookup "bleeding_edge" cfg.overrides
+            `shouldBe` Just
+              ( OverrideGit
+                  { gitUrl = "https://example.com/repo",
+                    gitRev = "abc1234"
+                  }
+              )
+
+    it "rejects an override that names neither path nor git" $ do
       let raw =
             Text.unlines
               [ "[package]",
                 "name = \"x\"",
-                "[dependencies.bogus]",
+                "[snapshot]",
+                "dependencies = [\"bogus\"]",
+                "[overrides.bogus]",
                 "version = \"1.0\""
+              ]
+      parseKatariToml "katari.toml" raw `shouldSatisfy` isValidationError
+
+    it "rejects an override whose name is not in [snapshot].dependencies" $ do
+      let raw =
+            Text.unlines
+              [ "[package]",
+                "name = \"x\"",
+                "[overrides.orphan]",
+                "path = \"../orphan\""
               ]
       parseKatariToml "katari.toml" raw `shouldSatisfy` isValidationError
 

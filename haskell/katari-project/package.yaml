@@ -8,10 +8,14 @@ language: GHC2021
 library:
   source-dirs: src
   exposed-modules:
+    - Katari.Project.Cache
     - Katari.Project.Config
     - Katari.Project.Discovery
+    - Katari.Project.Fetch
+    - Katari.Project.Lockfile
     - Katari.Project.ModuleName
     - Katari.Project.Resolve
+    - Katari.Project.Snapshot
 
 tests:
   katari-project-test:
@@ -20,6 +24,8 @@ tests:
     other-modules:
       - Katari.Project.ConfigSpec
       - Katari.Project.DiscoverySpec
+      - Katari.Project.LockfileSpec
+      - Katari.Project.SnapshotSpec
     dependencies:
       - katari-project
       - hspec
@@ -33,10 +39,18 @@ dependencies:
   - base >= 4.18 && < 5
   - text
   - bytestring
+  - base16-bytestring
   - containers
+  - crypton
   - directory
   - filepath
+  - http-client
+  - http-client-tls
+  - http-types
+  - memory
   - mtl
+  - process
+  - temporary
   - transformers
 
 default-extensions:

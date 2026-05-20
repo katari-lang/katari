@@ -1,0 +1,35 @@
+# Self-host compose: pulls the published katari-runtime image from GHCR.
+# Copy `.env.example` to `.env` and edit before `docker compose up -d`.
+
+services:
+  runtime:
+    image: ghcr.io/${KATARI_IMAGE_OWNER:-yukikurage}/katari-runtime:${KATARI_VERSION:-latest}
+    restart: unless-stopped
+    ports:
+      - "${KATARI_PORT:-8000}:8000"
+    environment:
+      - PORT=8000
+      - DATABASE_URL=postgresql://katari:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@db:5432/katari_runtime
+      - LOG_LEVEL=${KATARI_LOG_LEVEL:-info}
+    depends_on:
+      db:
+        condition: service_healthy
+
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=katari
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      - POSTGRES_DB=postgres
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U katari -d postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  pgdata:

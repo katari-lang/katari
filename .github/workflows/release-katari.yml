@@ -1,0 +1,111 @@
+name: release-katari
+
+# Build the `katari` Haskell binary for each supported platform and
+# attach the resulting tarballs to a GitHub Release on tag push.
+#
+# Tag convention: vMAJOR.MINOR.PATCH (eg. v0.1.0). Pushing such a tag
+# triggers the workflow and creates / updates a Release with that name.
+#
+# Artifact naming: katari-<version>-<platform>.tar.gz where <platform>
+# is one of linux-x64 / darwin-arm64 / darwin-x64. Each tarball contains
+# a single `katari` executable at its root.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build (eg. v0.1.0). Required for manual runs."
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            platform: linux-x64
+          - os: macos-14
+            platform: darwin-arm64
+          - os: macos-13
+            platform: darwin-x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: haskell-actions/setup@v2
+        id: setup
+        with:
+          ghc-version: "9.6.7"
+          enable-stack: true
+          stack-version: latest
+
+      - name: Resolve cache key inputs
+        id: cache-key
+        shell: bash
+        run: |
+          echo "stack-version=$(stack --numeric-version)" >> "$GITHUB_OUTPUT"
+          echo "snapshot=$(grep '^snapshot:' stack.yaml | awk '{print $2}')" >> "$GITHUB_OUTPUT"
+
+      - name: Cache ~/.stack (snapshot-scoped)
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.setup.outputs.stack-root }}
+          key: ${{ runner.os }}-${{ runner.arch }}-stack-${{ steps.cache-key.outputs.snapshot }}-${{ hashFiles('stack.yaml', 'stack.yaml.lock', 'haskell/**/package.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-stack-${{ steps.cache-key.outputs.snapshot }}-
+
+      - name: Cache .stack-work (project-scoped)
+        uses: actions/cache@v4
+        with:
+          path: |
+            .stack-work
+            haskell/*/.stack-work
+          key: ${{ runner.os }}-${{ runner.arch }}-stackwork-${{ steps.cache-key.outputs.snapshot }}-${{ hashFiles('haskell/**/*.hs', 'haskell/**/package.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-stackwork-${{ steps.cache-key.outputs.snapshot }}-
+
+      - name: Build katari
+        run: |
+          stack build katari:katari --copy-bins --local-bin-path ./bin
+          ls -la ./bin
+
+      - name: Strip binary
+        if: runner.os != 'macOS'
+        run: strip ./bin/katari
+
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: |
+          ref="${{ inputs.tag || github.ref_name }}"
+          echo "tag=$ref" >> "$GITHUB_OUTPUT"
+          echo "version=${ref#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Package tarball
+        shell: bash
+        run: |
+          mkdir -p dist
+          name="katari-${{ steps.version.outputs.version }}-${{ matrix.platform }}"
+          tar czf "dist/${name}.tar.gz" -C ./bin katari
+          ( cd dist && shasum -a 256 "${name}.tar.gz" > "${name}.tar.gz.sha256" )
+          ls -la dist
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          files: |
+            dist/katari-${{ steps.version.outputs.version }}-${{ matrix.platform }}.tar.gz
+            dist/katari-${{ steps.version.outputs.version }}-${{ matrix.platform }}.tar.gz.sha256
+          fail_on_unmatched_files: true
+          generate_release_notes: true

@@ -18,6 +18,7 @@ library:
     - Katari.Cli.Escalation
     - Katari.Cli.Init
     - Katari.Cli.Ls
+    - Katari.Cli.Prompt
     - Katari.Cli.Run
 
 executables:
@@ -58,7 +59,9 @@ dependencies:
   - http-types
   - optparse-applicative
   - process
+  - scientific
   - text
+  - vector
 
 default-extensions:
   - LambdaCase

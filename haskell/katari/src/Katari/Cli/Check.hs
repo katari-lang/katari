@@ -22,10 +22,12 @@ import qualified Katari.Compile as Compile
 import Katari.Diagnostic (Diagnostic, Severity (..), filterAtLeast, hasErrors)
 import Katari.Diagnostic.Render (renderDiagnostic)
 import qualified Katari.Project.Discovery as Project
+import qualified Katari.Project.Lockfile as Lock
 import qualified Katari.Project.Resolve as Project
 import Options.Applicative
 import System.Directory (getCurrentDirectory)
 import System.Exit (ExitCode (..), exitWith)
+import System.FilePath ((</>))
 import System.IO (hPutStrLn, stderr)
 
 newtype Options = Options
@@ -78,6 +80,15 @@ loadProject opts = do
             hPutStrLn stderr ("katari check: " <> show err)
             exitWith (ExitFailure 2)
           Right assembly -> do
+            -- Refresh katari.lock to mirror the resolved graph. This
+            -- runs on every check/build/apply, so the lock stays in
+            -- sync with katari.toml without an explicit `resolve`
+            -- step. Path deps record their root path verbatim; once
+            -- snapshot / git resolution land here, those branches
+            -- will record sha256 digests too.
+            Lock.writeLockfile
+              (root </> Lock.lockfileFilename)
+              (Project.lockfileFromResolved resolved)
             let sources =
                   Map.map
                     ( \e ->

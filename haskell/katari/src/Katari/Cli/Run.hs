@@ -1,9 +1,12 @@
 -- | @katari run [qualifiedName]@ — start an agent on the runtime.
 --
--- v1 is a non-interactive entry: the user passes @qualifiedName@ and
--- @--args JSON@; we POST and (optionally) poll until the agent
--- finishes. Interactive picker + schema-driven arg prompt are
--- planned for a later pass — see PM-6 follow-ups.
+-- Two modes:
+--
+--   * @--args JSON@ supplied (or all parameters are optional): runs
+--     non-interactively.
+--   * Otherwise: drops into the interactive prompt — pick the agent
+--     def from a numbered menu, walk its JSON Schema asking for each
+--     parameter, and confirm before POSTing.
 module Katari.Cli.Run
   ( Options (..),
     optionsParser,
@@ -22,6 +25,7 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Katari.Api.Client as Api
 import qualified Katari.Api.Types as Api
+import qualified Katari.Cli.Prompt as Prompt
 import qualified Katari.Project.Config as Project
 import qualified Katari.Project.Discovery as Project
 import Options.Applicative
@@ -31,7 +35,7 @@ import System.FilePath ((</>))
 import System.IO (hPutStrLn, stderr)
 
 data Options = Options
-  { optQualifiedName :: Text,
+  { optQualifiedName :: Maybe Text,
     optProject :: Maybe Text,
     optSnapshot :: Maybe Text,
     optArgs :: Maybe Text,
@@ -43,7 +47,13 @@ data Options = Options
 optionsParser :: Parser Options
 optionsParser =
   Options
-    <$> argument str (metavar "QUALIFIED_NAME" <> help "Agent qualified name, e.g. 'hello.main'")
+    <$> optional
+      ( argument
+          str
+          ( metavar "QUALIFIED_NAME"
+              <> help "Agent qualified name, e.g. 'hello.main' (omit to pick interactively)"
+          )
+      )
     <*> optional
       ( strOption
           ( long "project"
@@ -74,22 +84,94 @@ run opts = do
         Nothing -> fmap (.packageSection.packageName) cfg
   urlOk <- maybe (die "no --api-url and no surrounding katari.toml found") pure url
   projectOk <- maybe (die "no --project and no surrounding katari.toml found") pure project
-  args <- decodeArgs opts.optArgs
   client <- Api.newApiClient urlOk (cfg >>= (.apiSection.apiAuth))
   proj <- resolveProjectId client projectOk
+
+  -- Resolve qualified name (interactive picker if absent), and
+  -- gather args (from --args JSON, otherwise walk the schema).
+  (qname, args) <- resolveQualifiedNameAndArgs client proj opts
+
   agentId <-
     Api.startAgent
       client
       Api.StartAgentRequest
         { Api.projectId = proj,
           Api.snapshotId = opts.optSnapshot,
-          Api.qualifiedName = opts.optQualifiedName,
+          Api.qualifiedName = qname,
           Api.args = args
         }
   hPutStrLn stderr ("Started " <> Text.unpack agentId)
   if not opts.optWait
     then pure ()
     else pollUntilDone client agentId
+
+-- | Choose @(qualifiedName, args)@ via:
+--
+--   1. If @--args@ given AND @qualifiedName@ given, use both verbatim.
+--   2. If @qualifiedName@ given but @--args@ missing, fetch its
+--      definition and prompt the user through the schema.
+--   3. If @qualifiedName@ missing, fetch every agent def, let the
+--      user pick, then prompt for args (or use the supplied @--args@
+--      if provided).
+resolveQualifiedNameAndArgs ::
+  Api.ApiClient ->
+  Text ->
+  Options ->
+  IO (Text, Map Text Aeson.Value)
+resolveQualifiedNameAndArgs client projectId opts = do
+  case (opts.optQualifiedName, opts.optArgs) of
+    (Just qn, Just argsJson) -> do
+      args <- decodeArgsJson argsJson
+      pure (qn, args)
+    (Just qn, Nothing) -> do
+      def <- findDefinition client projectId opts.optSnapshot qn
+      args <- promptArgs def
+      pure (qn, args)
+    (Nothing, _) -> do
+      (defs, _snapId) <-
+        Api.listAgentDefinitions client projectId opts.optSnapshot
+      case defs of
+        [] -> die "no agent definitions on this snapshot (did you run `katari apply`?)"
+        _ -> do
+          mDef <- Prompt.pickFromList "Pick an agent:" defs renderDefLabel
+          case mDef of
+            Nothing -> die "nothing to pick"
+            Just def -> do
+              args <- case opts.optArgs of
+                Just argsJson -> decodeArgsJson argsJson
+                Nothing -> promptArgs def
+              pure (def.qualifiedName, args)
+  where
+    renderDefLabel d = case d.description of
+      Just desc -> d.qualifiedName <> "  — " <> desc
+      Nothing -> d.qualifiedName
+
+findDefinition ::
+  Api.ApiClient ->
+  Text ->
+  Maybe Text ->
+  Text ->
+  IO Api.AgentDefinition
+findDefinition client projectId snap qname = do
+  (defs, _) <- Api.listAgentDefinitions client projectId snap
+  case filter (\d -> d.qualifiedName == qname) defs of
+    [d] -> pure d
+    [] -> die ("agent '" <> Text.unpack qname <> "' not found in this snapshot")
+    multi -> die ("multiple agent defs named '" <> Text.unpack qname <> "' (" <> show (length multi) <> ")")
+
+-- | Walk the agent's @parameters@ JSON Schema to gather an args object,
+-- then confirm. Aborts if the user declines.
+promptArgs :: Api.AgentDefinition -> IO (Map Text Aeson.Value)
+promptArgs def = do
+  hPutStrLn stderr ("Agent: " <> Text.unpack def.qualifiedName)
+  argsValue <- Prompt.promptForSchema [] def.parameters
+  ok <- Prompt.confirmAndProceed argsValue
+  if not ok
+    then die "user cancelled"
+    else case argsValue of
+      Aeson.Object o ->
+        pure (Map.fromList [(AesonKey.toText k, v) | (k, v) <- AesonKM.toList o])
+      _ -> die "expected the schema's top-level shape to be an object"
 
 -- ---------------------------------------------------------------------------
 -- Helpers
@@ -118,14 +200,12 @@ resolveProjectId c name = do
     [] -> die ("project '" <> Text.unpack name <> "' not found on the runtime — `katari apply` first?")
     _ -> die ("multiple projects named '" <> Text.unpack name <> "'")
 
-decodeArgs :: Maybe Text -> IO (Map Text Aeson.Value)
-decodeArgs = \case
-  Nothing -> pure Map.empty
-  Just s -> case Aeson.eitherDecode (LC8.pack (Text.unpack s)) of
-    Right (Aeson.Object o) ->
-      pure (Map.fromList [(AesonKey.toText k, v) | (k, v) <- AesonKM.toList o])
-    Right _ -> die "--args must be a JSON object"
-    Left err -> die ("--args is not valid JSON: " <> err)
+decodeArgsJson :: Text -> IO (Map Text Aeson.Value)
+decodeArgsJson s = case Aeson.eitherDecode (LC8.pack (Text.unpack s)) of
+  Right (Aeson.Object o) ->
+    pure (Map.fromList [(AesonKey.toText k, v) | (k, v) <- AesonKM.toList o])
+  Right _ -> die "--args must be a JSON object"
+  Left err -> die ("--args is not valid JSON: " <> err)
 
 pollUntilDone :: Api.ApiClient -> Text -> IO ()
 pollUntilDone client agentId = loop (0 :: Int)

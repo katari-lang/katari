@@ -14,14 +14,20 @@ module Katari.Project.Config
     CompileSection (..),
     SidecarSection (..),
     ApiSection (..),
+    SnapshotSection (..),
+    OverrideSource (..),
     PathDependency (..),
     ConfigError (..),
     parseKatariToml,
     loadKatariToml,
     interpolateEnv,
-    -- For tests.
+    -- For tests + sibling validators (e.g. Katari.Project.Lockfile).
     parseTomlText,
     TomlValue (..),
+    TomlTable (..),
+    TomlBucket (..),
+    lookupTable,
+    lookupTableScalar,
   )
 where
 
@@ -46,9 +52,17 @@ data ProjectConfig = ProjectConfig
     compileSection :: CompileSection,
     sidecarSection :: Maybe SidecarSection,
     apiSection :: ApiSection,
-    -- | Path-based dependencies (the only kind supported in v1). Keys
-    -- are package names as written in @[dependencies.<name>]@.
-    dependencies :: Map Text PathDependency
+    -- | The snapshot pin + the flat dependency name list. Stackage /
+    -- spago model: the @snapshot@ pins a curated set of compatible
+    -- packages; @dependencies@ enumerates which of those (plus any
+    -- 'overrides') this project actually uses.
+    snapshotSection :: SnapshotSection,
+    -- | Local replacements for packages in the snapshot (or extras
+    -- not in the snapshot at all). Every name appearing here must
+    -- also appear in @snapshotSection.dependencies@; the absence of
+    -- a snapshot entry then means "this package comes purely from
+    -- this override".
+    overrides :: Map Text OverrideSource
   }
   deriving (Show, Eq)
 
@@ -73,6 +87,44 @@ data ApiSection = ApiSection
   { apiUrl :: Text,
     apiAuth :: Maybe Text
   }
+  deriving (Show, Eq)
+
+data SnapshotSection = SnapshotSection
+  { -- | Snapshot identifier, e.g. @"2026-05-01"@. Resolved against
+    -- the katari-registry's @package-sets\/@ directory (or whatever
+    -- mirror is configured downstream).
+    snapshotVersion :: Maybe Text,
+    -- | Optional explicit URL for the snapshot TOML file (or its
+    -- containing registry). Accepted forms:
+    --
+    --   * @file:\/\/\/abs\/path\/to\/registry@ — local dev override.
+    --     Snapshot file lives at @\<url>\/package-sets\/\<version>.toml@.
+    --   * @file:\/\/\/abs\/path\/to\/2026-05-01.toml@ — direct file URL.
+    --   * @https:\/\/...@ — canonical registry / mirror URL.
+    --
+    -- 'Nothing' means "no snapshot resolution requested" (= every dep
+    -- must be in @[overrides]@).
+    snapshotUrl :: Maybe Text,
+    -- | Flat list of package names this project depends on. Each
+    -- name resolves to either the snapshot's entry for it or a local
+    -- @[overrides.\<name>]@ block.
+    snapshotDependencies :: [Text]
+  }
+  deriving (Show, Eq)
+
+-- | The local replacement / external source for a single dependency
+-- name. Only path sources are wired in v1; git is parsed and held
+-- for the upcoming git-fetch implementation.
+data OverrideSource
+  = -- | @path = "..."@ — relative or absolute filesystem path. Mutable;
+    -- not cached.
+    OverridePath FilePath
+  | -- | @git = "..." rev = "..."@ — full-SHA git ref. Cached under
+    -- @~\/.katari\/cache\/git\/\<sha>\/@ at resolve time.
+    OverrideGit
+      { gitUrl :: Text,
+        gitRev :: Text
+      }
   deriving (Show, Eq)
 
 -- | A path-based dependency entry. The path is interpreted relative to
@@ -196,7 +248,8 @@ validateConfig path table = do
   let auth = case lookupTableScalar "auth" apiTable of
         Just (TomlString s) | not (Text.null s) -> Just s
         _ -> Nothing
-  deps <- collectDependencies path table
+  snapshot <- parseSnapshotSection path table
+  overrideMap <- parseOverrides path table snapshot.snapshotDependencies
   Right
     ProjectConfig
       { projectName = name,
@@ -208,7 +261,8 @@ validateConfig path table = do
         compileSection = CompileSection {compileSrc = src, compileRoot = root},
         sidecarSection = sidecar,
         apiSection = ApiSection {apiUrl = url, apiAuth = auth},
-        dependencies = deps
+        snapshotSection = snapshot,
+        overrides = overrideMap
       }
   where
     expectString :: TomlValue -> Either ConfigError Text
@@ -216,54 +270,127 @@ validateConfig path table = do
       TomlString s -> Right s
       _ -> Left (ConfigValidationError path "expected string in array")
 
--- | Walk every @[dependencies.<name>]@ section, requiring a @path@ key
--- inside. Other fields (e.g. @git@, @rev@) are reserved for future
--- snapshots and are rejected here so users get a clear error.
-collectDependencies ::
-  FilePath -> TomlTable -> Either ConfigError (Map Text PathDependency)
-collectDependencies path (TomlTable buckets) =
-  Map.fromList <$> traverse fromEntry depEntries
+-- | Read the @[snapshot]@ block: @version@ (string, optional) and
+-- @dependencies@ (array of strings, optional — defaults to @[]@).
+parseSnapshotSection ::
+  FilePath -> TomlTable -> Either ConfigError SnapshotSection
+parseSnapshotSection path table = do
+  let snapTable = lookupTable "snapshot" table
+      ver = case lookupTableScalar "version" snapTable of
+        Just (TomlString s) | not (Text.null s) -> Just s
+        _ -> Nothing
+      url = case lookupTableScalar "url" snapTable of
+        Just (TomlString s) | not (Text.null s) -> Just s
+        _ -> Nothing
+  deps <- case lookupTableScalar "dependencies" snapTable of
+    Nothing -> Right []
+    Just (TomlArray xs) -> traverse (expectDepName path) xs
+    Just _ ->
+      Left
+        ( ConfigValidationError
+            path
+            "[snapshot].dependencies must be an array of strings"
+        )
+  Right
+    SnapshotSection
+      { snapshotVersion = ver,
+        snapshotUrl = url,
+        snapshotDependencies = deps
+      }
+
+expectDepName :: FilePath -> TomlValue -> Either ConfigError Text
+expectDepName path = \case
+  TomlString s | not (Text.null s) -> Right s
+  _ -> Left (ConfigValidationError path "expected non-empty string in [snapshot].dependencies")
+
+-- | Walk every @[overrides.<name>]@ section. Each must point at exactly
+-- one source: @path@ or @git@+@rev@. Names found here that are not in
+-- @snapshotDependencies@ produce a validation error (= a dead override
+-- is almost always a typo).
+parseOverrides ::
+  FilePath ->
+  TomlTable ->
+  [Text] ->
+  Either ConfigError (Map Text OverrideSource)
+parseOverrides path (TomlTable buckets) declared = do
+  pairs <- traverse fromEntry overrideEntries
+  let names = map fst pairs
+      orphan = filter (`notElem` declared) names
+  case orphan of
+    (n : _) ->
+      Left
+        ( ConfigValidationError
+            path
+            ( "[overrides."
+                <> n
+                <> "] is declared but does not appear in [snapshot].dependencies"
+            )
+        )
+    [] -> Right (Map.fromList pairs)
   where
-    depEntries =
+    prefix = "overrides."
+    overrideEntries =
       [ (Text.drop (Text.length prefix) sec, bucket)
         | (sec, bucket) <- Map.toList buckets,
           prefix `Text.isPrefixOf` sec,
-          sec /= "dependencies" -- bare `[dependencies]` has no <name>
+          sec /= "overrides"
       ]
-    prefix = "dependencies."
+
     fromEntry (depName, bucket) = do
-      depTable <- case bucket of
+      tbl <- case bucket of
         BucketTable t -> Right t
         BucketScalar _ ->
           Left
             ( ConfigValidationError
                 path
-                ( "expected table at [dependencies."
+                ( "expected table at [overrides."
                     <> depName
                     <> "], got scalar"
                 )
             )
-      case Map.lookup "path" depTable of
-        Just (TomlString s) | not (Text.null s) ->
-          Right (depName, PathDependency {depPath = Text.unpack s})
-        Just _ ->
+      src <- parseOverrideTable path depName tbl
+      Right (depName, src)
+
+parseOverrideTable ::
+  FilePath ->
+  Text ->
+  Map Text TomlValue ->
+  Either ConfigError OverrideSource
+parseOverrideTable path depName tbl =
+  case (Map.lookup "path" tbl, Map.lookup "git" tbl) of
+    (Just (TomlString p), Nothing) | not (Text.null p) ->
+      Right (OverridePath (Text.unpack p))
+    (Nothing, Just (TomlString u)) | not (Text.null u) ->
+      case Map.lookup "rev" tbl of
+        Just (TomlString r) | not (Text.null r) ->
+          Right OverrideGit {gitUrl = u, gitRev = r}
+        _ ->
           Left
             ( ConfigValidationError
                 path
-                ( "[dependencies."
+                ( "[overrides."
                     <> depName
-                    <> "].path must be a non-empty string"
+                    <> "] is git source but missing required 'rev = \"<sha>\"'"
                 )
             )
-        Nothing ->
-          Left
-            ( ConfigValidationError
-                path
-                ( "[dependencies."
-                    <> depName
-                    <> "] missing required key 'path' (only path deps are supported in v1)"
-                )
+    (Just _, Just _) ->
+      Left
+        ( ConfigValidationError
+            path
+            ( "[overrides."
+                <> depName
+                <> "] must use 'path' XOR 'git', not both"
             )
+        )
+    _ ->
+      Left
+        ( ConfigValidationError
+            path
+            ( "[overrides."
+                <> depName
+                <> "] must specify either 'path = \"...\"' or 'git = \"...\" rev = \"...\"'"
+            )
+        )
 
 -- ===========================================================================
 -- TOML reader (minimal, flat, single-level tables)

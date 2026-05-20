@@ -6,6 +6,7 @@ import Katari.Project.Config
     CompileSection (..),
     PackageSection (..),
     ProjectConfig (..),
+    SnapshotSection (..),
   )
 import Katari.Project.Discovery
 import System.Directory (createDirectoryIfMissing)
@@ -58,5 +59,11 @@ sampleConfig =
       compileSection = CompileSection {compileSrc = "src/", compileRoot = Nothing},
       sidecarSection = Nothing,
       apiSection = ApiSection {apiUrl = "http://localhost", apiAuth = Nothing},
-      dependencies = Map.empty
+      snapshotSection =
+        SnapshotSection
+          { snapshotVersion = Nothing,
+            snapshotUrl = Nothing,
+            snapshotDependencies = []
+          },
+      overrides = Map.empty
     }

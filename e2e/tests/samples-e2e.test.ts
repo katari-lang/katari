@@ -115,7 +115,10 @@ async function applyAndRun(
     );
   }
 
-  // 2. katari run --wait
+  // 2. katari run --wait (samples take no args, so pass `{}`
+  // explicitly — otherwise katari would drop into the interactive
+  // schema prompt which can't read from this subprocess's closed
+  // stdin.)
   const runR = await runKatari(
     [
       "run",
@@ -124,6 +127,8 @@ async function applyAndRun(
       harness.url,
       "--project",
       pkg,
+      "--args",
+      "{}",
       "--wait",
     ],
     sampleRoot,

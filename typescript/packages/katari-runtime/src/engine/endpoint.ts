@@ -1,7 +1,6 @@
 // Endpoint: opaque string identifying a participant in the protocol.
 //
-// Modeled after the old `katari-protocol` (ts-old/packages/katari-protocol):
-// any URL-like string identifies a peer. The engine itself is one such peer,
+// Any URL-like string identifies a peer. The engine itself is one such peer,
 // reachable via `core://katari` (or whatever the host registers it as).
 // External peers (the HTTP API, FFI sidecars, future cores) are identified
 // by their own URLs.

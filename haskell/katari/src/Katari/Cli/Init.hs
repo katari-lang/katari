@@ -117,7 +117,10 @@ katariTomlTemplate name =
       "src = \"src\"",
       "",
       "[api]",
-      "url = \"http://localhost:8080\""
+      "url = \"http://localhost:8080\"",
+      "",
+      "[snapshot]",
+      "dependencies = []"
     ]
 
 entryKtrTemplate :: String -> String
