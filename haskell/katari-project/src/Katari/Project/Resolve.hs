@@ -36,7 +36,7 @@ import qualified Katari.Project.Snapshot as Snapshot
 
 import Control.Monad (foldM)
 import Data.Char (isAlphaNum)
-import Data.Maybe (fromMaybe, isJust)
+import Data.Maybe (fromMaybe, isJust, mapMaybe)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Set (Set)
@@ -124,6 +124,8 @@ data ResolveError
     -- download hashed to a different value. Args: dep name, expected,
     -- actual.
     ResolveSnapshotShaMismatch Text Text Text
+  | -- | @katari.lock@ exists but failed to parse.
+    ResolveLockfileError Lock.LockfileError
   deriving (Show)
 
 -- ===========================================================================
@@ -144,35 +146,74 @@ loadResolvedProject rootDir = do
   case rootRes of
     Left err -> pure (Left err)
     Right rootPkg -> do
-      -- Lazily load the snapshot file iff at least one dep needs it
-      -- (= a package listed in [dependencies].packages with no matching
-      -- [overrides.X] entry).
       let cfg = rootPkg.packageConfig
           deps = cfg.dependenciesSection
+          lockPath = canonicalRoot </> Lock.lockfileFilename
           needsSnapshot =
             any
               (\n -> not (Map.member n cfg.overrides))
               deps.dependenciesPackages
-      mSnap <-
-        if needsSnapshot
-          then case deps.dependenciesRegistry of
-            Nothing ->
-              -- No registry url = caller will see
-              -- ResolveUnresolvedDependency on the first snapshot dep.
-              pure (Right Nothing)
-            Just url -> do
-              r <- Snapshot.loadSnapshotFromUrl url deps.dependenciesSnapshot
-              pure (fmap Just r)
-          else pure (Right Nothing)
-      case mSnap of
-        Left e -> pure (Left (ResolveSnapshotError e))
-        Right msnap -> walkDeps msnap rootPkg
+      -- Lockfile is the SSoT when present: it pins every snapshot dep
+      -- to a (repo, ref, sha) triple, so the registry snapshot URL
+      -- doesn't need to be reachable for reproducible builds. When the
+      -- lockfile is missing we fall back to the registry snapshot
+      -- (= first-time resolution) and a fresh lockfile is written by
+      -- the caller after success.
+      lockExists <- doesFileExist lockPath
+      mResolved <-
+        if lockExists
+          then do
+            lockRes <- Lock.loadLockfile lockPath
+            case lockRes of
+              Left e -> pure (Left (ResolveLockfileError e))
+              Right lock ->
+                pure (Right (Just (lockfileToSnapshot lock), Just lock))
+          else
+            if needsSnapshot
+              then case deps.dependenciesRegistry of
+                Nothing -> pure (Right (Nothing, Nothing))
+                Just url -> do
+                  r <- Snapshot.loadSnapshotFromUrl url deps.dependenciesSnapshot
+                  case r of
+                    Left e -> pure (Left (ResolveSnapshotError e))
+                    Right s -> pure (Right (Just s, Nothing))
+              else pure (Right (Nothing, Nothing))
+      case mResolved of
+        Left e -> pure (Left e)
+        Right (msnap, mlock) -> walkDeps msnap mlock rootPkg
+
+-- | Project the @snapshot@-source entries of a 'Lock.Lockfile' into a
+-- synthetic 'Snapshot.Snapshot'. Path / git overrides are ignored here
+-- because they are sourced from @[overrides.X]@ (= the in-toml override
+-- map), not from the lockfile's package list.
+lockfileToSnapshot :: Lock.Lockfile -> Snapshot.Snapshot
+lockfileToSnapshot lock =
+  Snapshot.Snapshot
+    { Snapshot.snapshotCompilerVersion = Nothing,
+      Snapshot.snapshotPackages =
+        Map.fromList (mapMaybe project (Map.toList lock.lockPackages))
+    }
+  where
+    project (name, lp) = case lp.lockedSource of
+      Lock.LockedSnapshot {snapshotRepo, snapshotRef, snapshotSha} ->
+        Just
+          ( name,
+            Snapshot.SnapshotPackage
+              { Snapshot.repo = snapshotRepo,
+                Snapshot.ref = snapshotRef,
+                Snapshot.sha = snapshotSha
+              }
+          )
+      _ -> Nothing
 
 -- | The merged dep source the walker actually consumes. Combines
 -- @[overrides]@ entries with snapshot lookups.
 data DepSource
   = DSPath FilePath
-  | DSGit Text Text -- url, rev (= user override; no expected sha)
+  | DSGit Text Text (Maybe Text)
+  -- ^ url, rev, expected sha256 from the lockfile if known. The first
+  -- resolution after writing a git override has no expected sha; the
+  -- lockfile records it so subsequent resolutions verify the download.
   | DSSnapshotGit Text Text Text
   -- ^ url, rev, expected sha256 (= sha is the registry's pin; verified
   -- against the actual download).
@@ -180,10 +221,11 @@ data DepSource
 
 walkDeps ::
   Maybe Snapshot.Snapshot ->
+  Maybe Lock.Lockfile ->
   ResolvedPackage ->
   IO (Either ResolveError ResolvedProject)
-walkDeps mSnap rootPkg =
-  case depEntries mSnap rootPkg of
+walkDeps mSnap mLock rootPkg =
+  case depEntries mSnap mLock rootPkg of
     Left err -> pure (Left err)
     Right entries -> go Set.empty Map.empty (initialQueue entries rootPkg.packageRoot)
   where
@@ -212,7 +254,8 @@ walkDeps mSnap rootPkg =
               (Just _, _) -> go visited accDeps rest
               (Nothing, _) -> pure (Left (ResolveCycle [depName]))
         | otherwise -> case src of
-            DSGit url rev -> resolveGit depName url rev Nothing visited accDeps rest
+            DSGit url rev mExpectedSha ->
+              resolveGit depName url rev mExpectedSha visited accDeps rest
             DSSnapshotGit url rev expectedSha ->
               resolveGit depName url rev (Just expectedSha) visited accDeps rest
             DSPath p -> do
@@ -229,7 +272,7 @@ walkDeps mSnap rootPkg =
                       case pkgRes of
                         Left err -> pure (Left err)
                         Right pkg -> do
-                          inner <- depEntriesIO mSnap pkg
+                          inner <- depEntriesIO mSnap mLock pkg
                           case inner of
                             Left err -> pure (Left err)
                             Right innerEntries ->
@@ -264,7 +307,7 @@ walkDeps mSnap rootPkg =
             case pkgRes of
               Left err -> pure (Left err)
               Right pkg -> do
-                inner <- depEntriesIO mSnap pkg
+                inner <- depEntriesIO mSnap mLock pkg
                 case inner of
                   Left e -> pure (Left e)
                   Right innerEntries ->
@@ -292,26 +335,35 @@ walkDeps mSnap rootPkg =
 -- 'ResolveUnresolvedDependency'.
 depEntries ::
   Maybe Snapshot.Snapshot ->
+  Maybe Lock.Lockfile ->
   ResolvedPackage ->
   Either ResolveError [(Text, DepSource)]
-depEntries mSnap pkg =
+depEntries mSnap mLock pkg =
   traverse one pkg.packageConfig.dependenciesSection.dependenciesPackages
   where
     one name = case Map.lookup name pkg.packageConfig.overrides of
       Just (OverridePath p) -> Right (name, DSPath p)
-      Just (OverrideGit url rev) -> Right (name, DSGit url rev)
+      Just (OverrideGit url rev) -> Right (name, DSGit url rev (gitShaFromLock name))
       Nothing -> case mSnap of
         Just snap | Just sp <- Map.lookup name snap.snapshotPackages ->
           Right (name, DSSnapshotGit sp.repo sp.ref sp.sha)
         _ -> Left (ResolveUnresolvedDependency name)
 
+    gitShaFromLock name = do
+      lock <- mLock
+      lp <- Map.lookup name lock.lockPackages
+      case lp.lockedSource of
+        Lock.LockedGit {gitSha} -> Just gitSha
+        _ -> Nothing
+
 -- | IO-flavoured wrapper around 'depEntries' — same logic, but lifted
 -- into 'IO' for the walker's monadic context.
 depEntriesIO ::
   Maybe Snapshot.Snapshot ->
+  Maybe Lock.Lockfile ->
   ResolvedPackage ->
   IO (Either ResolveError [(Text, DepSource)])
-depEntriesIO mSnap pkg = pure (depEntries mSnap pkg)
+depEntriesIO mSnap mLock pkg = pure (depEntries mSnap mLock pkg)
 
 loadOnePackage :: FilePath -> IO (Either ResolveError ResolvedPackage)
 loadOnePackage absRoot = do
