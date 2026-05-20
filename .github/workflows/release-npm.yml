@@ -48,8 +48,26 @@ jobs:
             v*) ;;
             *) echo "::error::expected tag to start with 'v', got '$tag'" ; exit 1 ;;
           esac
+          version="${tag#v}"
+          # Pick the npm dist-tag from the prerelease identifier so end
+          # users get the expected behaviour:
+          #   0.1.0        -> 'latest'  (the only tag that `npm i <pkg>`
+          #                              honours by default)
+          #   0.1.0-rc3    -> 'rc'      (-> `npm i pkg@rc` works)
+          #   0.1.0-alpha2 -> 'alpha'
+          #   0.1.0-beta.1 -> 'beta'
+          case "$version" in
+            *-*)
+              # Strip leading "<digits>.<digits>...-", trailing digits / "."
+              identifier="$(echo "$version" \
+                | sed -E 's/^[0-9.]+-//; s/[0-9.]+$//')"
+              [ -n "$identifier" ] || identifier="next"
+              ;;
+            *) identifier="latest" ;;
+          esac
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "dist_tag=$identifier" >> "$GITHUB_OUTPUT"
 
       - uses: actions/checkout@v4
         with:
@@ -115,7 +133,7 @@ jobs:
           for pkg in katari-runtime katari-port katari-bundle katari-api-server; do
             echo "::group::publishing $pkg"
             ( cd typescript/packages/$pkg \
-              && pnpm publish --access public --no-git-checks )
+              && pnpm publish --access public --no-git-checks --tag "${{ steps.tag.outputs.dist_tag }}" )
             echo "::endgroup::"
           done
 
@@ -123,11 +141,11 @@ jobs:
         run: |
           for plat in linux-x64 darwin-arm64; do
             echo "::group::publishing @katari-lang/cli-$plat"
-            ( cd .staged/$plat && pnpm publish --access public --no-git-checks )
+            ( cd .staged/$plat && pnpm publish --access public --no-git-checks --tag "${{ steps.tag.outputs.dist_tag }}" )
             echo "::endgroup::"
           done
 
       - name: Publish katari shim
         run: |
           cd typescript/packages/katari
-          pnpm publish --access public --no-git-checks
+          pnpm publish --access public --no-git-checks --tag "${{ steps.tag.outputs.dist_tag }}"

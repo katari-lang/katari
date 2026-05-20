@@ -121,6 +121,35 @@ The 4 workflows run in parallel except `release-npm`, which waits for
 `release-katari` to finish so the binary tarballs are available on the
 Release.
 
+## npm dist-tags
+
+The publish workflow assigns a dist-tag based on the version's
+prerelease identifier:
+
+| Tag | dist-tag | Example install |
+|---|---|---|
+| `v0.1.0` (stable) | `latest` | `npm i @katari-lang/cli` |
+| `v0.1.0-rc3` | `rc` | `npm i @katari-lang/cli@rc` |
+| `v0.1.0-alpha.2` | `alpha` | `npm i @katari-lang/cli@alpha` |
+| `v0.1.0-beta1` | `beta` | `npm i @katari-lang/cli@beta` |
+
+A bare `npm i @katari-lang/cli` always resolves to whatever package is
+under `latest`. Prereleases never overwrite `latest`, so they cannot
+accidentally hit end users.
+
+### Cleaning up a botched `latest` tag
+
+If `latest` was set to a prerelease (= earlier workflow runs that
+didn't pass `--tag`), point it back at the most recent stable, or
+remove it so npm falls back to highest semver:
+
+```sh
+# Remove latest entirely (npm install then errors without an explicit version)
+for pkg in @katari-lang/{cli,cli-linux-x64,cli-darwin-arm64,runtime,api-server,port,bundle}; do
+  npm dist-tag rm "$pkg" latest
+done
+```
+
 ## Manual re-publish
 
 If a publish step fails partway through, fix the underlying cause and
