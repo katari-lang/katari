@@ -11,7 +11,12 @@ import Control.Monad.IO.Class (liftIO)
 import qualified Data.Map.Strict as Map
 import Katari.Compile (CompileResult (..))
 import Katari.LSP.Convert (katariSpanToLspLocation, lspPositionToKatari)
-import Katari.LSP.State (ServerState (..), WorkspaceState (..), lookupCompileResult)
+import Katari.LSP.State
+  ( ServerState (..),
+    WorkspaceState (..),
+    lookupCompileResult,
+    workspaceFileTexts,
+  )
 import qualified Katari.Project.Discovery as Project
 import qualified Katari.Query as Query
 import qualified Language.LSP.Protocol.Lens as L
@@ -41,8 +46,12 @@ referencesHandler st =
             case mRef of
               Nothing -> responder (Right (LSP.InR LSP.Null))
               Just ref -> do
+                -- references can span the whole workspace (cross-file
+                -- imports, dep packages). Feed the full text map so
+                -- UTF-16 conversion works for sibling-file spans.
+                fileTexts <- liftIO (workspaceFileTexts st path)
                 let spans = Query.findReferences occ ref
-                    locs = map (katariSpanToLspLocation (Map.singleton path txt)) spans
+                    locs = map (katariSpanToLspLocation fileTexts) spans
                 responder (Right (LSP.InL locs))
           _ -> responder (Right (LSP.InR LSP.Null))
 

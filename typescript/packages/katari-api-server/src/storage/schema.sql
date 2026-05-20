@@ -27,7 +27,7 @@ CREATE INDEX IF NOT EXISTS snapshots_project_created_idx
   ON snapshots (project_id, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS engine_checkpoints (
-  snapshot_id UUID PRIMARY KEY REFERENCES snapshots(id),
+  snapshot_id UUID PRIMARY KEY REFERENCES snapshots(id) ON DELETE CASCADE,
   checkpoint  JSONB NOT NULL,
   updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -37,7 +37,7 @@ CREATE TABLE IF NOT EXISTS engine_checkpoints (
 CREATE TABLE IF NOT EXISTS agents (
   id              UUID PRIMARY KEY,         -- = delegationId
   delegation_id   UUID UNIQUE NOT NULL,
-  snapshot_id     UUID NOT NULL REFERENCES snapshots(id),
+  snapshot_id     UUID NOT NULL REFERENCES snapshots(id) ON DELETE CASCADE,
   qualified_name  TEXT NOT NULL,
   args            JSONB NOT NULL,
   state           TEXT NOT NULL,            -- running / cancelling / cancelled / succeeded / error
@@ -85,7 +85,7 @@ CREATE INDEX IF NOT EXISTS ffi_pending_escalations_snapshot_idx
 CREATE TABLE IF NOT EXISTS api_pending_escalations (
   escalation_id  UUID PRIMARY KEY,
   delegation_id  UUID NOT NULL,
-  snapshot_id    UUID NOT NULL REFERENCES snapshots(id),
+  snapshot_id    UUID NOT NULL REFERENCES snapshots(id) ON DELETE CASCADE,
   agent_def_id   JSONB NOT NULL,
   args           JSONB NOT NULL,
   state          TEXT NOT NULL,             -- open / answered / cancelled
@@ -99,3 +99,53 @@ CREATE INDEX IF NOT EXISTS api_pending_escalations_snapshot_state_idx
 --   DROP TABLE IF EXISTS machine_diffs;
 --   DROP TABLE IF EXISTS machine_snapshots;        -- replaced by engine_checkpoints
 --   DROP TABLE IF EXISTS module_versions;          -- replaced by snapshots + projects
+--
+-- v0.1.0 schema migration: add ON DELETE CASCADE on snapshot_id FKs that
+-- were missing it in earlier prototypes. Safe to re-run.
+DO $$
+BEGIN
+  -- engine_checkpoints.snapshot_id
+  IF EXISTS (
+    SELECT 1 FROM information_schema.referential_constraints rc
+    JOIN information_schema.key_column_usage k
+      ON rc.constraint_name = k.constraint_name
+    WHERE k.table_name = 'engine_checkpoints'
+      AND k.column_name = 'snapshot_id'
+      AND rc.delete_rule <> 'CASCADE'
+  ) THEN
+    EXECUTE 'ALTER TABLE engine_checkpoints
+             DROP CONSTRAINT engine_checkpoints_snapshot_id_fkey,
+             ADD CONSTRAINT engine_checkpoints_snapshot_id_fkey
+               FOREIGN KEY (snapshot_id) REFERENCES snapshots(id) ON DELETE CASCADE';
+  END IF;
+
+  -- agents.snapshot_id
+  IF EXISTS (
+    SELECT 1 FROM information_schema.referential_constraints rc
+    JOIN information_schema.key_column_usage k
+      ON rc.constraint_name = k.constraint_name
+    WHERE k.table_name = 'agents'
+      AND k.column_name = 'snapshot_id'
+      AND rc.delete_rule <> 'CASCADE'
+  ) THEN
+    EXECUTE 'ALTER TABLE agents
+             DROP CONSTRAINT agents_snapshot_id_fkey,
+             ADD CONSTRAINT agents_snapshot_id_fkey
+               FOREIGN KEY (snapshot_id) REFERENCES snapshots(id) ON DELETE CASCADE';
+  END IF;
+
+  -- api_pending_escalations.snapshot_id
+  IF EXISTS (
+    SELECT 1 FROM information_schema.referential_constraints rc
+    JOIN information_schema.key_column_usage k
+      ON rc.constraint_name = k.constraint_name
+    WHERE k.table_name = 'api_pending_escalations'
+      AND k.column_name = 'snapshot_id'
+      AND rc.delete_rule <> 'CASCADE'
+  ) THEN
+    EXECUTE 'ALTER TABLE api_pending_escalations
+             DROP CONSTRAINT api_pending_escalations_snapshot_id_fkey,
+             ADD CONSTRAINT api_pending_escalations_snapshot_id_fkey
+               FOREIGN KEY (snapshot_id) REFERENCES snapshots(id) ON DELETE CASCADE';
+  END IF;
+END $$;

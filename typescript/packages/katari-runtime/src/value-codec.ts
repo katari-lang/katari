@@ -48,6 +48,14 @@ export type RawValue =
 export function valueToRaw(value: Value): RawValue {
   switch (value.kind) {
     case "number":
+      // NaN / ±Infinity serialise as `null` under JSON.stringify, which
+      // would silently corrupt a sidecar round-trip. Refuse at the
+      // boundary so the bug surfaces where it originates.
+      if (!Number.isFinite(value.value)) {
+        throw new RawValueDecodeError(
+          `valueToRaw: non-finite number ${value.value} cannot be serialized`,
+        );
+      }
       return value.value;
     case "string":
       return value.value;
@@ -86,6 +94,11 @@ export function valueFromRaw(raw: unknown): Value {
   if (raw === null) return { kind: "null" };
   switch (typeof raw) {
     case "number":
+      if (!Number.isFinite(raw)) {
+        throw new RawValueDecodeError(
+          `valueFromRaw: non-finite number ${raw}`,
+        );
+      }
       return { kind: "number", value: raw };
     case "string":
       return { kind: "string", value: raw };
@@ -153,9 +166,17 @@ function decodeTagged(obj: Record<string, unknown>): Value {
       `valueFromRaw: $ctor must be a string, got ${typeof ctorRaw}`,
     );
   }
-  const fields: Record<string, Value> = {};
+  // Use a null-prototype object so a hostile payload carrying
+  // `__proto__` / `constructor` / `prototype` can't reach
+  // Object.prototype via the `fields` record.
+  const fields: Record<string, Value> = Object.create(null);
   for (const [k, v] of Object.entries(obj)) {
     if (k === CTOR_DISCRIMINATOR) continue;
+    if (k === "__proto__" || k === "constructor" || k === "prototype") {
+      throw new RawValueDecodeError(
+        `valueFromRaw: forbidden tagged field name '${k}'`,
+      );
+    }
     fields[k] = valueFromRaw(v);
   }
   return { kind: "tagged", ctorId: ctorRaw as QualifiedName, fields };

@@ -466,7 +466,11 @@ literalValueToSemantic = \case
   -- 'LiteralValueAgent' is created only by Lowering when resolving a
   -- top-level callable as a value; it must never appear in an AST
   -- literal node, so the typechecker should never see it.
-  LiteralValueAgent _ -> error "literalValueToSemantic: LiteralValueAgent should not appear in AST literals"
+  -- An ill-formed AST that smuggles in 'LiteralValueAgent' here is a
+  -- compiler bug, not user error. Returning 'Unknown' lets the
+  -- surrounding constraint set still be solved (= the LSP keeps
+  -- working) instead of crashing the entire process.
+  LiteralValueAgent _ -> SemanticTypeUnknown
 
 -- | Resolve a TypeRef' name to its semantic counterpart, expanding
 -- synonyms on the fly with cycle detection.

@@ -3,6 +3,7 @@
 import { z } from "zod";
 import type {
   AgentId,
+  EscalationId,
   ProjectId,
   SnapshotId,
 } from "../../storage/types.js";
@@ -24,7 +25,13 @@ export const AgentIdSchema = z
   .uuid()
   .transform((s) => s as AgentId);
 
-export const EscalationIdSchema = z.string().min(1);
+// Escalations are runtime-generated UUIDs (see katari-runtime); the
+// previous `min(1)` shape accepted arbitrary strings, which then broke
+// downstream DB query type coercion when callers passed garbage.
+export const EscalationIdSchema = z
+  .string()
+  .uuid()
+  .transform((s) => s as EscalationId);
 
 // ─── Raw value schema ──────────────────────────────────────────────────────
 //
@@ -64,14 +71,32 @@ const SidecarBundleSchema = z.object({
   schemaVersion: z.literal(1),
 });
 
+// Minimal shape check for an IR module — enough to reject obviously
+// malformed payloads at upload time so a bad blob can't end up
+// committed to DB only to crash every subsequent tick that loads it.
+// We deliberately stop short of validating block-by-block structure
+// because the engine itself does that on load and surfaces clearer
+// errors.
+const IRModuleShapeSchema = z
+  .object({
+    metadata: z.object({ schemaVersion: z.literal(1) }),
+    blocks: z.record(z.string(), z.unknown()),
+    entries: z.record(z.string(), z.unknown()),
+    nameTable: z.unknown(),
+  })
+  .passthrough();
+
+const SchemaBundleShapeSchema = z
+  .object({
+    schemaVersion: z.literal(1),
+    agents: z.array(z.unknown()),
+  })
+  .passthrough();
+
 export const UploadSnapshotSchema = z.object({
-  irModule: z.unknown().refine((v) => typeof v === "object" && v !== null, {
-    message: "irModule must be an object",
-  }),
+  irModule: IRModuleShapeSchema,
   sidecarBundle: SidecarBundleSchema.nullable().optional().default(null),
-  schemaBundle: z.unknown().refine((v) => typeof v === "object" && v !== null, {
-    message: "schemaBundle must be an object",
-  }),
+  schemaBundle: SchemaBundleShapeSchema,
 });
 export type UploadSnapshotInput = z.infer<typeof UploadSnapshotSchema>;
 

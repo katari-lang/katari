@@ -26,6 +26,7 @@ module Katari.Project.Resolve
     loadResolvedProject,
     assembleProject,
     lockfileFromResolved,
+    renderResolveError,
   )
 where
 
@@ -131,6 +132,57 @@ data ResolveError
   | -- | @katari.lock@ exists but failed to parse.
     ResolveLockfileError Lock.LockfileError
   deriving (Show)
+
+-- | Render a 'ResolveError' as a user-facing message. CLI commands
+-- (= @katari check@, @katari apply@, ...) use this instead of 'show'
+-- so users see e.g. /"cycle: a → b → a"/ rather than
+-- /"ResolveCycle [\"a\",\"b\",\"a\"]"/.
+renderResolveError :: ResolveError -> Text
+renderResolveError = \case
+  ResolveConfigError e ->
+    "config: " <> renderConfigError e
+  ResolveCycle chain ->
+    "dependency cycle: " <> Text.intercalate " → " chain
+  ResolveMissingConfig name path ->
+    "dependency '" <> name <> "' at " <> Text.pack path
+      <> " has no katari.toml"
+  ResolveAmbiguousDep name a b ->
+    "dependency '" <> name <> "' resolved to two different paths: "
+      <> Text.pack a <> " vs " <> Text.pack b
+  ResolveInvalidPackageName name ->
+    "invalid package name '" <> name
+      <> "' (must match [A-Za-z_][A-Za-z0-9_]*)"
+  ResolveModuleCollision m ->
+    "module '" <> m <> "' is contributed by two reachable packages"
+  ResolveOutOfNamespace pkg m ->
+    "package '" <> pkg <> "' contains a source file whose module name '"
+      <> m <> "' is outside the package's namespace"
+  ResolveDepNameMismatch declared actual ->
+    "dependency declared as '" <> declared
+      <> "' but [package].name in the dep's katari.toml is '"
+      <> actual <> "'"
+  ResolveUnresolvedDependency name ->
+    "dependency '" <> name
+      <> "' is not in the snapshot and has no [overrides] entry"
+  ResolveLockfileOutOfDate name ->
+    "dependency '" <> name
+      <> "' is in katari.toml but not in katari.lock; run `katari update`"
+      <> " (or delete katari.lock and re-run) to refresh the lockfile"
+  ResolveSnapshotError e ->
+    "snapshot: " <> Text.pack (show e)
+  ResolveSnapshotShaMismatch name expected actual ->
+    "dependency '" <> name <> "' download sha256 mismatch:\n"
+      <> "  expected " <> expected <> "\n"
+      <> "  actual   " <> actual
+  ResolveLockfileError e ->
+    "lockfile: " <> Text.pack (show e)
+
+renderConfigError :: ConfigError -> Text
+renderConfigError = \case
+  ConfigIOError path msg -> Text.pack path <> ": " <> msg
+  ConfigParseError path msg -> Text.pack path <> ": parse error: " <> msg
+  ConfigValidationError path msg ->
+    (if null path then "" else Text.pack path <> ": ") <> msg
 
 -- ===========================================================================
 -- Loading

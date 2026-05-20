@@ -9,10 +9,9 @@ where
 
 import Control.Lens ((^.))
 import Control.Monad.IO.Class (liftIO)
-import qualified Data.Map.Strict as Map
 import Katari.Compile (CompileResult (..))
 import Katari.LSP.Convert (katariSpanToLspLocation, lspPositionToKatari)
-import Katari.LSP.State (ServerState, lookupCompileResult)
+import Katari.LSP.State (ServerState, lookupCompileResult, workspaceFileTexts)
 import qualified Katari.Query as Query
 import qualified Language.LSP.Protocol.Lens as L
 import qualified Language.LSP.Protocol.Message as LSP
@@ -41,7 +40,11 @@ definitionHandler st =
             case mSpan of
               Nothing -> responder (Right (LSP.InR (LSP.InR LSP.Null)))
               Just span_ -> do
-                let loc = katariSpanToLspLocation (Map.singleton path txt) span_
+                -- definitions may land in other files (cross-module
+                -- imports), so feed the converter the whole workspace
+                -- text map rather than just the request's own file.
+                fileTexts <- liftIO (workspaceFileTexts st path)
+                let loc = katariSpanToLspLocation fileTexts span_
                 -- Use the single-location Definition variant.
                 responder
                   ( Right

@@ -83,6 +83,17 @@ export function buildAgentRoutes(
     if (row === null) {
       return c.json({ error: `agent ${agentId} not found` }, 404);
     }
+    // Short-circuit terminal states: re-running the orchestrator tick
+    // on an already-finished agent would needlessly allocate a tx,
+    // spin up the sidecar, and reload engine state. The state already
+    // reflects the answer.
+    if (
+      row.state === "cancelled" ||
+      row.state === "succeeded" ||
+      row.state === "error"
+    ) {
+      return c.json({ agent: agentRowToWire(row) });
+    }
     const refreshed = await orchestrator.tick(row.snapshotId, async (ctx) => {
       const result = await ctx.api.cancelAgent({ bus: ctx.bus, agentId });
       return result.row;

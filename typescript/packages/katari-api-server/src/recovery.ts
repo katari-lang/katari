@@ -19,19 +19,21 @@ export async function recoverOnBoot(
 ): Promise<void> {
   await orchestrator.recoverOnBoot();
 
-  // Re-issue terminate for cancelling agents.
+  // Re-issue terminate for cancelling agents. Filter by `state` in SQL
+  // so a snapshot with millions of succeeded rows doesn't drag the
+  // recovery loop through them just to find the handful in cancelling.
   const snapshotIds = await storage.agents.listRunningSnapshotIds();
   for (const snapshotId of snapshotIds) {
     let afterId: import("./storage/types.js").AgentId | undefined;
     while (true) {
       const rows = await storage.agents.list({
         snapshotId,
+        state: "cancelling",
         afterId,
         limit: 500,
       });
       if (rows.length === 0) break;
       for (const row of rows) {
-        if (row.state !== "cancelling") continue;
         try {
           await orchestrator.tick(snapshotId, async (ctx) => {
             await ctx.api.cancelAgent({ bus: ctx.bus, agentId: row.id });

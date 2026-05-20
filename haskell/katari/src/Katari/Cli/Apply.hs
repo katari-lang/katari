@@ -158,7 +158,7 @@ gatherSourceRoots :: FilePath -> IO [FilePath]
 gatherSourceRoots rootDir = do
   rpRes <- Project.loadResolvedProject rootDir
   case rpRes of
-    Left err -> die ("resolve: " <> show err)
+    Left err -> die ("resolve: " <> Text.unpack (Project.renderResolveError err))
     Right rp ->
       pure
         [ p.packageRoot </> resolveSrc p.packageConfig

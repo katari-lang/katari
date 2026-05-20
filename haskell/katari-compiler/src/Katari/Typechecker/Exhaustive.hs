@@ -99,6 +99,7 @@ toDiagnostic = \case
 data CtorTag where
   CtorTagData :: ConstructorId -> CtorTag
   CtorTagLitInt :: Integer -> CtorTag
+  CtorTagLitNum :: Double -> CtorTag
   CtorTagLitStr :: Text -> CtorTag
   CtorTagLitBool :: Bool -> CtorTag
   CtorTagNull :: CtorTag
@@ -328,10 +329,12 @@ literalTag = \case
   LiteralValueString s -> CtorTagLitStr s
   LiteralValueBoolean b -> CtorTagLitBool b
   LiteralValueNull -> CtorTagNull
-  LiteralValueNumber _ -> CtorTagLitStr "(number)"
+  LiteralValueNumber d -> CtorTagLitNum d
   -- 'LiteralValueAgent' is an IR-only literal produced by Lowering; the
-  -- AST exhaustiveness checker should never encounter one.
-  LiteralValueAgent _ -> error "literalTag: LiteralValueAgent should not appear in AST patterns"
+  -- AST exhaustiveness checker should never encounter one. Fall back to
+  -- 'Null' rather than crashing — the surrounding match is already
+  -- ill-typed and will emit a diagnostic via the regular path.
+  LiteralValueAgent _ -> CtorTagNull
 
 -- | Extract the semantic type from any 'AST.Expression Zonked'.
 getExpressionType :: AST.Expression Zonked -> SemanticType Resolved

@@ -29,6 +29,7 @@ import Katari.SourceSpan (SourceSpan (..))
 import Katari.Query (buildOccurrenceIndex)
 import qualified Language.LSP.Protocol.Lens as L
 import qualified Language.LSP.Protocol.Message as LSP
+import qualified System.IO
 import qualified Language.LSP.Protocol.Types as LSP
 import qualified Language.LSP.Server as LSP
 import qualified Language.LSP.VFS as VFS
@@ -120,6 +121,13 @@ onClose st path = do
           root
           wsMap
 
+-- | Workspace-load failures (broken katari.toml, bad dep paths)
+-- previously dropped silently — the user would just see "no
+-- intellisense" with no signal. Surface them via stderr so the
+-- VSCode "Output > Katari Language Server" panel shows the cause.
+warn :: String -> IO ()
+warn = System.IO.hPutStrLn System.IO.stderr . ("katari-lsp warning: " <>)
+
 -- | Load the workspace at @root@ if not already present. Parses
 -- @katari.toml@, resolves the transitive path-dep graph, and reads
 -- every package's @.ktr@ files in one go.
@@ -131,13 +139,15 @@ ensureWorkspaceLoaded st root = do
     Nothing -> do
       cfgRes <- Project.loadKatariToml (root </> Project.configFilename)
       case cfgRes of
-        Left _ -> pure () -- ignore broken config; orphan path won't kick in
+        Left e -> warn ("katari.toml at " <> root <> ": " <> show e)
         Right cfg -> do
           resolveRes <- Project.loadResolvedProject root
           case resolveRes of
-            Left _ -> pure () -- ignore resolution failures (e.g. bad dep paths)
+            Left e ->
+              warn ("katari-lsp: resolve failed at " <> root <> ": " <> Text.unpack (Project.renderResolveError e))
             Right resolved -> case Project.assembleProject resolved of
-              Left _ -> pure ()
+              Left e ->
+                warn ("katari-lsp: assemble failed at " <> root <> ": " <> Text.unpack (Project.renderResolveError e))
               Right assembly -> do
                 let moduleByPath =
                       Map.fromList
@@ -168,7 +178,14 @@ debounceUs = 150_000
 scheduleRecompile :: ServerState -> FilePath -> LSP.LspM () ()
 scheduleRecompile st path = do
   mRoot <- liftIO (Project.findProjectRoot path)
-  let key = maybe "" id mRoot
+  -- Workspace files share the workspace's root as the debounce key so
+  -- a flurry of edits across the same project collapses into one
+  -- recompile. Orphan files use the file path itself; otherwise two
+  -- orphans being edited alternately would steal the timer from each
+  -- other and one would never get a recompile to fire.
+  let key = case mRoot of
+        Just root -> "ws:" <> root
+        Nothing -> "orphan:" <> path
   env <- LSP.getLspEnv
   liftIO $ do
     prevTimer <- atomically $ do
@@ -183,11 +200,15 @@ scheduleRecompile st path = do
     atomically $ modifyTVar' st.debounceTimers (Map.insert key newTid)
 
 -- | Compile the workspace whose root is @key@ and publish diagnostics.
--- An empty @key@ means "the orphan-files bucket".
+-- Key is either @"ws:" <> root@ for a workspace recompile or
+-- @"orphan:" <> path@ for a single-file orphan recompile.
 recompileNow :: ServerState -> FilePath -> LSP.LspM () ()
 recompileNow st key
-  | null key = recompileOrphans st
-  | otherwise = recompileWorkspace st key
+  | Just orphanPath <- Text.stripPrefix "orphan:" (Text.pack key) =
+      recompileOrphan st (Text.unpack orphanPath)
+  | Just root <- Text.stripPrefix "ws:" (Text.pack key) =
+      recompileWorkspace st (Text.unpack root)
+  | otherwise = pure ()
 
 recompileWorkspace :: ServerState -> FilePath -> LSP.LspM () ()
 recompileWorkspace st root = do
@@ -221,12 +242,12 @@ recompileWorkspace st root = do
               root
       publishWorkspaceDiagnostics fileTexts result.diagnostics
 
-recompileOrphans :: ServerState -> LSP.LspM () ()
-recompileOrphans st = do
+recompileOrphan :: ServerState -> FilePath -> LSP.LspM () ()
+recompileOrphan st path = do
   files <- liftIO (readTVarIO st.orphanFiles)
-  -- Compile each orphan individually so per-file diagnostics are
-  -- isolated. The orphan bucket cannot resolve cross-file imports.
-  mapM_ (uncurry (compileOneOrphan st)) (Map.toList files)
+  case Map.lookup path files of
+    Just txt -> compileOneOrphan st path txt
+    Nothing -> pure ()
 
 compileOneOrphan :: ServerState -> FilePath -> Text -> LSP.LspM () ()
 compileOneOrphan _st path txt = do

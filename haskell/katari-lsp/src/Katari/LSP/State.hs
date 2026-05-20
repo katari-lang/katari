@@ -16,6 +16,7 @@ module Katari.LSP.State
     newServerState,
     snapshotWorkspaceSources,
     lookupCompileResult,
+    workspaceFileTexts,
   )
 where
 
@@ -113,3 +114,27 @@ lookupCompileResult st path = do
         txt <- buffered <|> disk
         Just (txt, r)
     Nothing -> pure Nothing
+
+-- | Map @path → text@ for every file in the enclosing workspace, with
+-- the editor buffer overlay applied. Handlers that follow cross-file
+-- references (find-definition, find-references) need the full map so
+-- 'katariSpanToLspLocation' can do UTF-16 conversion on a span that
+-- lives in a sibling module, not just the request's own file.
+workspaceFileTexts :: ServerState -> FilePath -> IO (Map FilePath Text)
+workspaceFileTexts st path = do
+  mRoot <- Project.findProjectRoot path
+  case mRoot of
+    Nothing -> pure Map.empty
+    Just root -> do
+      wsMap <- readTVarIO st.workspaces
+      case Map.lookup root wsMap of
+        Nothing -> pure Map.empty
+        Just ws ->
+          let diskTexts =
+                Map.fromList
+                  [ (entry.sourcePath, entry.sourceText)
+                    | entry <- Map.elems ws.wsAssembly.sources
+                  ]
+           in -- Buffer overlay wins per-file, so unsaved edits show up
+              -- in any UTF-16 conversion downstream.
+              pure (Map.union ws.wsFiles diskTexts)

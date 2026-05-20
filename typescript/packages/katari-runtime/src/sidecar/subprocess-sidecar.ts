@@ -25,6 +25,13 @@ export interface SubprocessSidecarOptions {
   env?: Record<string, string>;
   /** Called when shutdown() completes; useful for cleaning temp files. */
   onShutdown?: () => Promise<void> | void;
+  /**
+   * Called when the child exits at any time (= unexpectedly mid-flight,
+   * or as part of an orderly shutdown). The SidecarManager uses this
+   * to evict the entry so the next ensureStarted() spawns a fresh child
+   * instead of trying to talk to an EPIPE'd stdin.
+   */
+  onExit?: (code: number | null, signal: NodeJS.Signals | null) => Promise<void> | void;
   /** Max ms to wait for `ready` before rejecting `start()` (default 10000). */
   startupTimeoutMs?: number;
   /** Max ms to wait for graceful exit on shutdown before SIGKILL (default 1000). */
@@ -106,6 +113,19 @@ export class SubprocessSidecar implements Sidecar {
 
     child.on("exit", (code, signal) => {
       this.opts.logger.log("info", "sidecar child exited", { code, signal });
+      // Clear the reference so subsequent send()s fail fast with a
+      // clear "not started" error rather than racing against an EPIPE
+      // on a half-dead stdin. The SidecarManager's onExit hook (if
+      // configured) then has a chance to evict the entry and respawn
+      // on next use.
+      this.child = null;
+      try {
+        this.rl?.close();
+      } catch {
+        /* already closed */
+      }
+      this.rl = null;
+      void this.opts.onExit?.(code, signal);
     });
   }
 

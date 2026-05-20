@@ -188,22 +188,25 @@ decodeArgsJson s = case Aeson.eitherDecode (LC8.pack (Text.unpack s)) of
   Left err -> die ("--args is not valid JSON: " <> err)
 
 pollUntilDone :: Api.ApiClient -> Text -> IO ()
-pollUntilDone client agentId = loop (0 :: Int)
+pollUntilDone client agentId = loop (50_000 :: Int)
   where
-    loop n
-      | n > 1000 = die ("agent " <> Text.unpack agentId <> " did not finish within poll budget")
-      | otherwise = do
-          row <- Api.getAgent client agentId
-          case row.state of
-            Api.AgentRunning -> threadDelay 20000 >> loop (n + 1)
-            Api.AgentCancelling -> threadDelay 20000 >> loop (n + 1)
-            -- Pretty block on stderr so a downstream `| jq` keeps
-            -- working on the bare result on stdout.
-            done -> do
-              hPutStr stderr (Text.unpack (Status.renderAgentDetailed row))
-              case done of
-                Api.AgentSucceeded -> case row.result of
-                  Just v -> LC8.putStrLn (Aeson.encode v)
-                  Nothing -> pure ()
-                Api.AgentError -> exitWith (ExitFailure 1)
-                _ -> pure ()
+    -- Exponential backoff capped at 2 s. We deliberately have no overall
+    -- timeout: a `katari run` invocation blocks until the agent finishes
+    -- (or the user hits Ctrl-C). Earlier versions of this loop gave up
+    -- after 20 s of polling, which surprised users running long agents.
+    maxDelay = 2_000_000 :: Int
+    loop delay = do
+      row <- Api.getAgent client agentId
+      case row.state of
+        Api.AgentRunning -> threadDelay delay >> loop (min maxDelay (delay * 2))
+        Api.AgentCancelling -> threadDelay delay >> loop (min maxDelay (delay * 2))
+        -- Pretty block on stderr so a downstream `| jq` keeps working
+        -- on the bare result on stdout.
+        done -> do
+          hPutStr stderr (Text.unpack (Status.renderAgentDetailed row))
+          case done of
+            Api.AgentSucceeded -> case row.result of
+              Just v -> LC8.putStrLn (Aeson.encode v)
+              Nothing -> pure ()
+            Api.AgentError -> exitWith (ExitFailure 1)
+            _ -> pure ()

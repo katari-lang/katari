@@ -365,8 +365,11 @@ class PgAgentRepo implements AgentRepo {
     filter?: { snapshotId?: SnapshotId; state?: AgentState; afterId?: AgentId } & ListOptions,
   ): Promise<AgentRow[]> {
     const limit = clampLimit(filter?.limit);
-    const offset = clampOffset(filter?.offset);
     const afterId = filter?.afterId;
+    // afterId is keyset pagination; combining it with OFFSET produces
+    // an unstable window (each row skipped by OFFSET also shifts the
+    // keyset boundary). When afterId is provided, force offset = 0.
+    const offset = afterId !== undefined ? 0 : clampOffset(filter?.offset);
     const snapshotId = filter?.snapshotId;
     const state = filter?.state;
     let rows: DbAgentRow[];
@@ -435,9 +438,15 @@ class PgAgentRepo implements AgentRepo {
   }
 
   async markAllRunningAsError(snapshotId: SnapshotId, message: string): Promise<void> {
+    // Clear `result` alongside the state flip — a row that was running
+    // may have written a partial result before the engine gave up, and
+    // (state='error', result=<partial>) is contradictory to readers.
     await this.sql`
       UPDATE agents
-      SET state = 'error', error_message = ${message}, updated_at = now()
+      SET state = 'error',
+          error_message = ${message},
+          result = NULL,
+          updated_at = now()
       WHERE snapshot_id = ${snapshotId} AND state IN ('running', 'cancelling')
     `;
   }

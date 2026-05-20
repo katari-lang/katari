@@ -21,6 +21,7 @@ import qualified Data.Text.IO as TextIO
 import qualified Katari.Compile as Compile
 import Katari.Diagnostic (Diagnostic, Severity (..), filterAtLeast, hasErrors)
 import Katari.Diagnostic.Render (renderDiagnostic)
+import qualified Data.Text as Text
 import qualified Katari.Project.Discovery as Project
 import qualified Katari.Project.Lockfile as Lock
 import qualified Katari.Project.Resolve as Project
@@ -73,11 +74,11 @@ loadProject opts = do
       rpRes <- Project.loadResolvedProject root
       case rpRes of
         Left err -> do
-          hPutStrLn stderr ("katari check: " <> show err)
+          hPutStrLn stderr ("katari check: " <> Text.unpack (Project.renderResolveError err))
           exitWith (ExitFailure 2)
         Right resolved -> case Project.assembleProject resolved of
           Left err -> do
-            hPutStrLn stderr ("katari check: " <> show err)
+            hPutStrLn stderr ("katari check: " <> Text.unpack (Project.renderResolveError err))
             exitWith (ExitFailure 2)
           Right assembly -> do
             -- Refresh katari.lock to mirror the resolved graph. This

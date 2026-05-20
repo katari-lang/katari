@@ -434,8 +434,13 @@ function resolveDelegateTarget(
   // kind === "closure"
   const record = ctx.state.closures[decoded.value as unknown as number];
   if (record === undefined) {
-    throw new Error(
-      `engine.runner: closure ${decoded.value} not found for delegate ${delegationId}`,
+    // A stale `delegate` referencing a GC'd closure is a per-agent
+    // recoverable error (= the original closure is no longer alive),
+    // not an engine invariant violation. Throw the recoverable variant
+    // so the runner converts it into a `prim.throw` escalate; the
+    // previous raw `Error` poisoned the whole snapshot.
+    throw new RecoverableEngineError(
+      `engine.runner: closure ${decoded.value} not found for delegate ${delegationId} (closure may have been GC'd)`,
     );
   }
   return {

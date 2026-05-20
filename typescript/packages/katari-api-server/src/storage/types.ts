@@ -28,6 +28,8 @@ import type {
   AgentDefId,
 } from "@katari-lang/runtime";
 
+export type { EscalationId };
+
 // ─── Brands ────────────────────────────────────────────────────────────────
 
 export type ProjectId = string & { readonly __brand: "ProjectId" };
@@ -270,14 +272,17 @@ export interface Storage {
   withTransaction<T>(fn: (tx: Storage) => Promise<T>): Promise<T>;
 
   /**
-   * Run `fn` while holding a snapshot-level row lock. Used by the
+   * Run `fn` while holding a snapshot-level lock. Used by the
    * stateless orchestrator to serialize CORE state mutation per snapshot.
    *
-   *   - Postgres: `SELECT ... FROM engine_checkpoints WHERE snapshot_id = $1 FOR UPDATE`
+   *   - Postgres: `pg_advisory_xact_lock(hashtext('snapshot:' || $1))`.
+   *               No placeholder row is required; the advisory key is
+   *               derived from the snapshot id and released automatically
+   *               at tx end.
    *   - Memory:   per-snapshot Mutex map internal to the implementation.
    *
-   * The lock is released when the surrounding transaction commits or
-   * rolls back. `withSnapshotLock` MUST be called inside `withTransaction`.
+   * `withSnapshotLock` MUST be called inside `withTransaction` so the
+   * advisory lock is bound to the surrounding tx lifetime.
    */
   withSnapshotLock<T>(
     tx: Storage,
