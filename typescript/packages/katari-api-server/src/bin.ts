@@ -10,7 +10,7 @@ import {
   type LogLevel,
   type Logger,
   type Sidecar,
-} from "katari-runtime";
+} from "@katari-lang/runtime";
 import { buildMetrics } from "./metrics.js";
 import { Orchestrator } from "./orchestrator.js";
 import { recoverOnBoot } from "./recovery.js";

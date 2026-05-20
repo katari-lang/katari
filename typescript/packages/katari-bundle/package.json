@@ -1,19 +1,33 @@
 {
-  "name": "katari-bundle",
+  "name": "@katari-lang/bundle",
   "version": "0.1.0",
+  "description": "esbuild-based bundler for Katari sidecar JS modules. Spawned by the `katari` CLI during `katari apply`.",
+  "license": "MIT",
+  "author": "yukikurage",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/katari-lang/katari.git",
+    "directory": "typescript/packages/katari-bundle"
+  },
+  "homepage": "https://github.com/katari-lang/katari#readme",
+  "bugs": "https://github.com/katari-lang/katari/issues",
   "type": "module",
   "bin": {
-    "katari-bundle": "dist/cli.js"
+    "@katari-lang/bundle": "dist/cli.js"
   },
   "exports": {
     ".": "./dist/index.js"
   },
+  "files": [
+    "dist",
+    "README.md"
+  ],
   "scripts": {
     "build": "tsc"
   },
   "dependencies": {
     "esbuild": "^0.21.5",
-    "katari-runtime": "workspace:*"
+    "@katari-lang/runtime": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

@@ -9,8 +9,8 @@ import type {
   FfiPendingDelegation,
   FfiPendingEscalation,
   FfiStore,
-} from "katari-runtime";
-import type { DelegationId, EscalationId, Endpoint } from "katari-runtime";
+} from "@katari-lang/runtime";
+import type { DelegationId, EscalationId, Endpoint } from "@katari-lang/runtime";
 import type {
   Storage,
   SnapshotId,

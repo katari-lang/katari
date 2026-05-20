@@ -4,7 +4,15 @@
   "description": "Syntax highlighting and language support for the Katari language.",
   "version": "0.1.0",
   "private": true,
-  "publisher": "katari",
+  "license": "MIT",
+  "publisher": "yukikurage",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/katari-lang/katari.git",
+    "directory": "typescript/packages/katari-vscode"
+  },
+  "bugs": "https://github.com/katari-lang/katari/issues",
+  "homepage": "https://github.com/katari-lang/katari#readme",
   "main": "./out/extension.js",
   "engines": {
     "vscode": "^1.80.0"
@@ -48,13 +56,11 @@
     "./grammar": "./syntaxes/katari.tmLanguage.json",
     "./language-configuration": "./language-configuration.json"
   },
-  "files": [
-    "out",
-    "syntaxes",
-    "language-configuration.json"
-  ],
   "scripts": {
-    "build": "tsc -p .",
+    "build": "node scripts/bundle.mjs",
+    "build:typecheck": "tsc -p . --noEmit",
+    "vscode:prepublish": "NODE_ENV=production node scripts/bundle.mjs",
+    "package": "vsce package --no-dependencies --out katari-vscode.vsix",
     "test": "node --experimental-vm-modules ./scripts/tokenize-samples.mjs"
   },
   "dependencies": {
@@ -62,6 +68,8 @@
   },
   "devDependencies": {
     "@types/vscode": "^1.80.0",
+    "@vscode/vsce": "^3.6.0",
+    "esbuild": "^0.21.5",
     "typescript": "^5.4.0",
     "vscode-oniguruma": "^2.0.1",
     "vscode-textmate": "^9.1.0"

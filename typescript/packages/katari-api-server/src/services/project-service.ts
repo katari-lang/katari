@@ -1,7 +1,7 @@
 // Project CRUD service. Thin wrapper around `ProjectRepo` so HTTP
 // routes can depend on a service rather than the storage layer.
 
-import type { Logger } from "katari-runtime";
+import type { Logger } from "@katari-lang/runtime";
 import type {
   ListOptions,
   Project,

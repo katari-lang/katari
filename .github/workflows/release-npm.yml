@@ -1,0 +1,133 @@
+name: release-npm
+
+# Publishes `@katari-lang/cli` (shim), `@katari-lang/cli-<platform>`
+# (binaries), `@katari-lang/runtime`, `@katari-lang/port`,
+# `@katari-lang/bundle`, `@katari-lang/api-server` to npm. Triggered
+# after release-katari completes successfully so the tarballs are
+# already attached to the GitHub Release.
+#
+# Auth: npm Trusted Publishing (OIDC). No NPM_TOKEN secret is used —
+# instead each package must have a trusted publisher configured on
+# npmjs.com pointing at this workflow file. See `docs/PUBLISHING.md`.
+
+on:
+  workflow_run:
+    workflows: ["release-katari"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to publish (eg. v0.1.0)."
+        required: true
+
+permissions:
+  contents: read
+  id-token: write   # required for OIDC handshake with npm
+
+jobs:
+  publish:
+    name: publish to npm
+    # workflow_run fires regardless of conclusion — gate on success.
+    if: >-
+      ${{ github.event_name == 'workflow_dispatch'
+          || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Resolve tag
+        id: tag
+        shell: bash
+        run: |
+          # workflow_run -> head_branch is the tag for tag-triggered runs.
+          # workflow_dispatch -> inputs.tag.
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            tag="${{ inputs.tag }}"
+          else
+            tag="${{ github.event.workflow_run.head_branch }}"
+          fi
+          case "$tag" in
+            v*) ;;
+            *) echo "::error::expected tag to start with 'v', got '$tag'" ; exit 1 ;;
+          esac
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.tag.outputs.tag }}
+
+      # Node 24 is required for Trusted Publishing — earlier versions
+      # ship npm CLI < 11.5.1 and the publish handshake fails with E404.
+      # registry-url is intentionally set even under OIDC; the auth
+      # token line in .npmrc is empty when NODE_AUTH_TOKEN is unset
+      # and npm falls through to OIDC.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Setup pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@11.1.3 --activate
+
+      - name: Install workspace deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Build TS packages
+        run: pnpm -r --filter "./typescript/packages/*" run build
+
+      - name: Download binaries from release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p .binaries
+          for plat in linux-x64 darwin-arm64 darwin-x64; do
+            asset="katari-${{ steps.tag.outputs.version }}-${plat}.tar.gz"
+            # release-katari uploads in parallel; allow a brief grace period.
+            for i in 1 2 3 4 5; do
+              if gh release download "${{ steps.tag.outputs.tag }}" \
+                    --pattern "$asset" \
+                    --dir .binaries \
+                    --repo "${{ github.repository }}"; then
+                break
+              fi
+              echo "asset $asset not yet available, retry $i/5 in 10s..."
+              sleep 10
+            done
+            test -f ".binaries/$asset" || { echo "::error::missing $asset" ; exit 1 ; }
+          done
+          ls -la .binaries
+
+      - name: Stage @katari-lang/cli-<platform> packages
+        run: node scripts/stage-binary-packages.mjs --version "${{ steps.tag.outputs.version }}"
+
+      # Bumps versions across the publishable TS packages and injects
+      # the shim's optionalDependencies. workspace:* refs are left
+      # alone — `pnpm publish` rewrites them on the fly. Provenance is
+      # automatic under Trusted Publishing — no `--provenance` flag.
+      - name: Bump versions in TS packages
+        run: node scripts/bump-versions.mjs --version "${{ steps.tag.outputs.version }}"
+
+      - name: Publish library packages
+        run: |
+          # Order matters: dependents publish after their deps so that
+          # pnpm publish's workspace:* rewrite resolves correctly.
+          for pkg in katari-runtime katari-port katari-bundle katari-api-server; do
+            echo "::group::publishing $pkg"
+            ( cd typescript/packages/$pkg \
+              && pnpm publish --access public --no-git-checks )
+            echo "::endgroup::"
+          done
+
+      - name: Publish @katari-lang/cli-<platform> packages
+        run: |
+          for plat in linux-x64 darwin-arm64 darwin-x64; do
+            echo "::group::publishing @katari-lang/cli-$plat"
+            ( cd .staged/$plat && pnpm publish --access public --no-git-checks )
+            echo "::endgroup::"
+          done
+
+      - name: Publish katari shim
+        run: |
+          cd typescript/packages/katari
+          pnpm publish --access public --no-git-checks

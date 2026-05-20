@@ -9,8 +9,8 @@
 import { describe, expect, it, afterEach } from "vitest";
 import { resolve } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
-import { startHttpHarness } from "katari-api-server/tests/helpers.js";
-import type { MockAgentHandler, RawValue } from "katari-runtime";
+import { startHttpHarness } from "@katari-lang/api-server/tests/helpers.js";
+import type { MockAgentHandler, RawValue } from "@katari-lang/runtime";
 
 const SAMPLES_ROOT = resolve(__dirname, "../samples");
 

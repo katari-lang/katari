@@ -7,8 +7,8 @@
 // which terminates this delegation upstream. We wait on the signal so
 // the cancellation arrives cleanly.
 
-import type { RawValue } from "katari-port";
-import katari from "katari-port";
+import type { RawValue } from "@katari-lang/port";
+import katari from "@katari-lang/port";
 
 katari.agent("cron_impl", async ({ args, signal }) => {
   const callback = args["callback"];

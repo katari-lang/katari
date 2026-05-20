@@ -2,8 +2,8 @@
 // `Value`-tagged fields (canonical runtime form); HTTP clients see the
 // flat raw form produced by `valueToRaw`.
 
-import { valueToRaw } from "katari-runtime";
-import type { RawValue } from "katari-runtime";
+import { valueToRaw } from "@katari-lang/runtime";
+import type { RawValue } from "@katari-lang/runtime";
 import type { AgentRow, ApiPendingEscalation } from "../storage/types.js";
 
 export type AgentRowWire = Omit<AgentRow, "args" | "result"> & {

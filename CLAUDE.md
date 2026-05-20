@@ -36,8 +36,15 @@ cd typescript && pnpm install && pnpm -r run build
 
 ### pnpm バージョン
 
-pnpm v10 にワークスペース検出のバグがあるため、pnpm v9 を使用。
-`package.json` の `packageManager` フィールドで `pnpm@9.15.9` を指定済み。
+`packageManager` フィールドで `pnpm@11.1.3` を pin。
+
+注意:
+- pnpm 11 はデフォルトで `minimumReleaseAge` (~14h) を強制するため、
+  公開直後の dep が lockfile に入っていると install が止まる。
+  当面 `pnpm-workspace.yaml` で 0 に緩めている。
+- pnpm 11 は postinstall script の明示的 approve が必須
+  (`allowBuilds:` に列挙)。 現状 `esbuild` / `keytar` /
+  `@vscode/vsce-sign` を承認済み。
 
 ## コンパイラパイプライン
 

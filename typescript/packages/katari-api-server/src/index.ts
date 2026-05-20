@@ -25,7 +25,7 @@ export {
   SidecarManager,
   SubprocessSidecar,
   loadSubprocessSidecar,
-} from "katari-runtime";
+} from "@katari-lang/runtime";
 export type {
   FfiStore,
   MockAgentHandler,
@@ -33,7 +33,7 @@ export type {
   SidecarBundle,
   SidecarFactory,
   SidecarMessageHandler,
-} from "katari-runtime";
+} from "@katari-lang/runtime";
 
 export { recoverOnBoot } from "./recovery.js";
 export { InMemoryStorage } from "./storage/memory-storage.js";

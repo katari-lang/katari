@@ -14,7 +14,7 @@ import type {
   IRModule,
   SchemaBundle,
   Value,
-} from "katari-runtime";
+} from "@katari-lang/runtime";
 import type {
   AgentId,
   AgentRepo,

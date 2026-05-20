@@ -1,9 +1,23 @@
 {
-  "name": "katari-runtime",
+  "name": "@katari-lang/runtime",
   "version": "0.1.0",
+  "description": "Katari language runtime: pure execution core plus the building blocks (delegation engine, sidecar manager, IR loader) used by katari-api-server and embedded by the katari CLI.",
+  "license": "MIT",
+  "author": "yukikurage",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/katari-lang/katari.git",
+    "directory": "typescript/packages/katari-runtime"
+  },
+  "homepage": "https://github.com/katari-lang/katari#readme",
+  "bugs": "https://github.com/katari-lang/katari/issues",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md"
+  ],
   "scripts": {
     "build": "tsc",
     "test": "vitest run"

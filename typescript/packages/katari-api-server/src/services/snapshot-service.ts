@@ -7,7 +7,7 @@ import type {
   IRModule,
   Logger,
   SchemaBundle,
-} from "katari-runtime";
+} from "@katari-lang/runtime";
 import type {
   ListOptions,
   ProjectId,

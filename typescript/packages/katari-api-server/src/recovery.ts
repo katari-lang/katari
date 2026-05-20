@@ -8,7 +8,7 @@
 // 再投入する。これは ApiModule.cancelAgent と同じ振る舞いを Orchestrator
 // に呼び戻させるだけ。
 
-import type { Logger } from "katari-runtime";
+import type { Logger } from "@katari-lang/runtime";
 import type { Orchestrator } from "./orchestrator.js";
 import type { Storage } from "./storage/types.js";
 

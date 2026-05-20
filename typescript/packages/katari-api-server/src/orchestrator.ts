@@ -30,7 +30,7 @@ import {
   type SidecarManager,
   type Sidecar,
   type Value,
-} from "katari-runtime";
+} from "@katari-lang/runtime";
 import { ApiModule } from "./modules/api-module.js";
 import { StorageFfiStore } from "./modules/ffi-store.js";
 import type {

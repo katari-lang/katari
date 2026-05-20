@@ -21,7 +21,7 @@ FROM node:20-alpine AS builder
 
 ENV PNPM_HOME=/pnpm
 ENV PATH="$PNPM_HOME:$PATH"
-RUN corepack enable && corepack prepare pnpm@9.15.9 --activate
+RUN corepack enable && corepack prepare pnpm@11.1.3 --activate
 
 WORKDIR /work
 
@@ -32,17 +32,18 @@ COPY typescript/tsconfig.base.json typescript/
 COPY typescript/packages/katari-runtime/package.json typescript/packages/katari-runtime/
 COPY typescript/packages/katari-api-server/package.json typescript/packages/katari-api-server/
 
-# Install only the deps needed for katari-api-server's transitive set.
-RUN pnpm install --frozen-lockfile --filter "katari-api-server..."
+# Install only the deps needed for @katari-lang/api-server's
+# transitive set.
+RUN pnpm install --frozen-lockfile --filter "@katari-lang/api-server..."
 
 # Copy sources and build.
 COPY typescript/packages/katari-runtime/ typescript/packages/katari-runtime/
 COPY typescript/packages/katari-api-server/ typescript/packages/katari-api-server/
-RUN pnpm --filter katari-runtime build \
- && pnpm --filter katari-api-server build
+RUN pnpm --filter @katari-lang/runtime build \
+ && pnpm --filter @katari-lang/api-server build
 
 # Produce a self-contained deploy dir with prod deps inlined.
-RUN pnpm --filter katari-api-server deploy --prod /deploy
+RUN pnpm --filter @katari-lang/api-server deploy --prod /deploy
 
 # ---------------------------------------------------------------------------
 # Stage 2: minimal runtime image.

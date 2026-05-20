@@ -5,8 +5,8 @@
 // `orchestrator.tick(...)`.
 
 import { Hono } from "hono";
-import { valueFromRaw } from "katari-runtime";
-import type { Value } from "katari-runtime";
+import { valueFromRaw } from "@katari-lang/runtime";
+import type { Value } from "@katari-lang/runtime";
 import {
   AgentIdSchema,
   PaginationQuerySchema,

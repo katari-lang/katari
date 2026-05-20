@@ -20,10 +20,10 @@ import {
   type Logger,
   type Module,
   type Value,
-} from "katari-runtime";
+} from "@katari-lang/runtime";
 
 const THROW_AGENT_DEF_ID = encodeCoreAgentDefId({ kind: "qname", value: "prim.throw" });
-import type { DelegationId, EscalationId } from "katari-runtime";
+import type { DelegationId, EscalationId } from "@katari-lang/runtime";
 import type {
   AgentId,
   AgentRow,

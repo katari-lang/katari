@@ -1,6 +1,6 @@
 // Public types for user code that imports katari-port.
 
-import type { RawValue } from "katari-runtime";
+import type { RawValue } from "@katari-lang/runtime";
 
 /** Context handed to a user-provided agent handler at delegate time. */
 export interface AgentContext {
@@ -43,7 +43,7 @@ export interface DelegateOptions {
   signal?: AbortSignal;
 }
 
-/** Public surface of the singleton imported as `import katari from "katari-port"`. */
+/** Public surface of the singleton imported as `import katari from "@katari-lang/port"`. */
 export interface KatariPort {
   /**
    * Register a handler for an `ext agent <name>` declared in the

@@ -1,25 +1,23 @@
 {
   "private": true,
-  "packageManager": "pnpm@9.15.9",
+  "packageManager": "pnpm@11.1.3",
   "scripts": {
     "build": "npm run build:hs && npm run build:ts",
     "build:hs": "stack build",
     "build:compiler": "stack build katari-compiler",
     "build:cli": "stack build katari",
     "build:lsp": "stack build katari-lsp",
-    "build:ts": "pnpm -C ts -r build",
+    "build:ts": "pnpm -r --filter \"./typescript/packages/*\" run build",
     "test": "npm run test:hs && npm run test:ts",
     "test:hs": "stack test",
-    "test:ts": "pnpm -C ts -r test",
+    "test:ts": "pnpm -r run test",
     "clean": "npm run clean:hs && npm run clean:ts",
     "clean:hs": "stack clean",
-    "clean:ts": "pnpm -C ts -r exec -- rm -rf dist",
-    "fmt": "npm run fmt:hs",
+    "clean:ts": "pnpm -r exec -- rm -rf dist",
     "fmt:hs": "find haskell -name '*.hs' -not -path '*/.stack-work/*' -print0 | xargs -0 -r stack exec --package ormolu -- ormolu --mode inplace",
     "lint:hs": "hlint haskell",
     "watch:hs": "stack build --file-watch",
     "cli": "stack run katari --",
-    "lsp": "stack run katari-lsp",
-    "runtime": "pnpm -C ts/packages/katari-runtime start"
+    "lsp": "stack run katari-lsp"
   }
 }

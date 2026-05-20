@@ -3,7 +3,7 @@
 
 services:
   runtime:
-    image: ghcr.io/${KATARI_IMAGE_OWNER:-yukikurage}/katari-runtime:${KATARI_VERSION:-latest}
+    image: ghcr.io/${KATARI_IMAGE_OWNER:-katari-lang}/katari-runtime:${KATARI_VERSION:-latest}
     restart: unless-stopped
     ports:
       - "${KATARI_PORT:-8000}:8000"

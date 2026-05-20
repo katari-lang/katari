@@ -4,50 +4,46 @@ Katari is a small DSL for orchestrating agents — programs that delegate work
 to other agents, raise effects via requests, and run in a structured-concurrency
 runtime.
 
-This repository hosts the Katari compiler (Haskell), the runtime and its
-external services (TypeScript), and a set of language-server tools.
+This repository hosts the Katari compiler (Haskell), the runtime (TypeScript),
+the `katari` CLI binary, and the VSCode extension.
 
 ## Layout
 
 ```
 haskell/
-  katari-compiler/        Pure compiler library (input: source map → output: IR JSON + diagnostics)
-  katari-cli/             Command-line front-end (in redesign)
-  katari-lsp/             Language Server Protocol implementation (in redesign)
-ts/
+  katari-compiler/   Pure compiler library (input: source map → output: IR JSON + diagnostics)
+  katari-project/    katari.toml / lockfile / snapshot / package resolution
+  katari/            CLI binary (executable: katari)
+  katari-lsp/        LSP server (in redesign)
+typescript/
   packages/
-    katari-protocol/        Inter-agent protocol library (types, store, server, router)
-    katari-runtime/         Runtime (in redesign for the new IR JSON)
-    katari-discord-server/  Discord external service
-    katari-ai-server/       AI external service (Gemini)
-    katari-cron-server/     Cron external service
-    katari-websearch-server/ Web-search external service
-    katari-sandbox-server/  Docker sandbox external service
+    katari-runtime/      Runtime core + delegation engine + sidecar manager
+    katari-api-server/   HTTP server that hosts a runtime instance
+    katari-port/         FFI SDK for ext-agent sidecars
+    katari-bundle/       esbuild-based bundler invoked by `katari apply`
+    katari-vscode/       VSCode extension
+e2e/                 End-to-end tests + samples
 ```
 
-## Building the compiler
+Companion repositories:
+
+- [`katari-lang/katari-registry`](https://github.com/katari-lang/katari-registry)
+  — curated package set snapshots (the spago-style registry).
+- [`katari-lang/katari-web`](https://github.com/katari-lang/katari-web)
+  — documentation site.
+
+## Building
 
 ```sh
+# Haskell (compiler / katari-project / katari binary / lsp)
 stack build
 stack test
-```
 
-Haddock:
-
-```sh
-stack haddock katari-compiler --no-haddock-deps
-```
-
-## Building the runtime
-
-```sh
-cd ts
+# TypeScript (pnpm v9 — pinned via packageManager)
+cd typescript
 pnpm install
 pnpm -r run build
 ```
-
-`pnpm` v9 is required (the project pins `pnpm@9.15.9`); v10 has a
-workspace-detection bug we cannot work around yet.
 
 ## Compiler pipeline
 
@@ -62,7 +58,7 @@ It runs the entire pipeline (lex → parse → identify → constrain → solve 
 zonk → exhaustiveness → lower) and returns:
 
 - `irModule`         — JSON-serialisable IR for the runtime,
-- `schemaEntries`    — JSON Schema for AI tool calling,
+- `schemaBundle`     — JSON Schema for AI tool calling,
 - `diagnostics`      — unified diagnostic stream (errors, warnings, hints),
 - `identifierResult` / `solverResult` / `zonkResult` — partial-result
   artefacts useful for editor tooling (hover, find-references).
@@ -70,10 +66,17 @@ zonk → exhaustiveness → lower) and returns:
 Diagnostics are stable: every `Diagnostic` carries a 4-digit `K####` code.
 The full registry lives in [`haskell/katari-compiler/CHANGELOG.md`](haskell/katari-compiler/CHANGELOG.md).
 
-## Status
+## Distribution
 
-The compiler is OSS-ready; the runtime and tooling are mid-redesign for the
-new IR JSON shape.
+| Artefact | Where |
+|---|---|
+| `katari` CLI binary | npm (`npm i -g @katari-lang/cli`) + GitHub Releases tarballs |
+| `katari-runtime` (Docker) | `ghcr.io/katari-lang/katari-runtime` |
+| `@katari-lang/runtime`, `@katari-lang/port`, `@katari-lang/bundle`, `@katari-lang/api-server` | npm |
+| `katari-vscode` | VSIX on GitHub Releases (Marketplace TBD) |
+
+See [`examples/self-host/`](examples/self-host) for a `docker compose`
+quickstart for self-hosting.
 
 ## Licence
 

@@ -1,3 +1,20 @@
 packages:
   - "typescript/packages/*"
   - "e2e"
+
+# pnpm 11 requires explicit approval for postinstall scripts of new
+# deps. These are all legitimate native-binary fetches:
+#   - esbuild downloads the platform-specific @esbuild/<plat> binary
+#   - keytar builds a native node-keytar binding (Azure auth in vsce)
+#   - @vscode/vsce-sign runs its sign-tool installer
+allowBuilds:
+  '@vscode/vsce-sign': true
+  esbuild: true
+  keytar: true
+
+# pnpm 11 enforces minimumReleaseAge (~14h default) on every lockfile
+# entry. Transitive deps of @vscode/vsce (the Azure msal* chain) update
+# frequently and trip this on hours-old releases. Relaxing to 0 lets us
+# unblock; revisit if we want a real cooling-off window for direct
+# deps (would need pnpm-supported per-package overrides).
+minimumReleaseAge: 0

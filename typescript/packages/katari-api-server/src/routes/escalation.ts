@@ -6,8 +6,8 @@
 // が再開する。
 
 import { Hono } from "hono";
-import { valueFromRaw } from "katari-runtime";
-import type { EscalationId } from "katari-runtime";
+import { valueFromRaw } from "@katari-lang/runtime";
+import type { EscalationId } from "@katari-lang/runtime";
 import {
   AnswerEscalationSchema,
   EscalationIdSchema,

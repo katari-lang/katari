@@ -10,7 +10,7 @@
 import { build, type Plugin } from "esbuild";
 import { readdir, readFile, stat } from "node:fs/promises";
 import { dirname, extname, join, relative, sep } from "node:path";
-import type { SidecarBundle } from "katari-runtime";
+import type { SidecarBundle } from "@katari-lang/runtime";
 
 export class BundleError extends Error {
   constructor(message: string) {
@@ -184,7 +184,7 @@ function renderSyntheticEntry(entries: SiblingEntry[]): string {
 
   return [
     `// Auto-generated synthetic entry for katari-sidecar bundle.`,
-    `import { __startSidecar } from "katari-port";`,
+    `import { __startSidecar } from "@katari-lang/port";`,
     importLines,
     `__startSidecar();`,
     ``,

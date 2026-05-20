@@ -1,9 +1,27 @@
 {
-  "name": "katari-api-server",
+  "name": "@katari-lang/api-server",
   "version": "0.1.0",
+  "description": "HTTP API server that hosts a Katari runtime instance (snapshot apply, agent run, escalation handling). Distributed both as an npm library and as a Docker image (ghcr.io/katari-lang/katari-runtime).",
+  "license": "MIT",
+  "author": "yukikurage",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/katari-lang/katari.git",
+    "directory": "typescript/packages/katari-api-server"
+  },
+  "homepage": "https://github.com/katari-lang/katari#readme",
+  "bugs": "https://github.com/katari-lang/katari/issues",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "bin": {
+    "@katari-lang/api-server": "dist/bin.js"
+  },
+  "files": [
+    "dist",
+    "src/storage/schema.sql",
+    "README.md"
+  ],
   "scripts": {
     "build": "tsc",
     "test": "vitest run",
@@ -13,7 +31,7 @@
     "@hono/node-server": "^1.13.0",
     "async-mutex": "^0.5.0",
     "hono": "^4.7.0",
-    "katari-runtime": "workspace:*",
+    "@katari-lang/runtime": "workspace:*",
     "lru-cache": "^11.3.6",
     "postgres": "^3.4.0",
     "uuid": "^11.0.0",

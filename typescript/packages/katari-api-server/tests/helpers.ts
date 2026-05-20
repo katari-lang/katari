@@ -13,7 +13,7 @@ import {
   type SchemaBundle,
   type Sidecar,
   type SidecarBundle,
-} from "katari-runtime";
+} from "@katari-lang/runtime";
 import type { Block, VarId } from "katari-runtime/dist/ir/types.js";
 import {
   InMemoryStorage,

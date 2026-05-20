@@ -26,7 +26,7 @@ import type {
   SchemaBundle,
   Value,
   AgentDefId,
-} from "katari-runtime";
+} from "@katari-lang/runtime";
 
 // ─── Brands ────────────────────────────────────────────────────────────────
 

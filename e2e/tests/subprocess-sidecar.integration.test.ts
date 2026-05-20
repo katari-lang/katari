@@ -13,7 +13,7 @@
 
 import { afterEach, describe, expect, it } from "vitest";
 import { resolve } from "node:path";
-import { bundleSidecar } from "katari-bundle";
+import { bundleSidecar } from "@katari-lang/bundle";
 import {
   loadSubprocessSidecar,
   noopLogger,
@@ -21,7 +21,7 @@ import {
   type ChildToParent,
   type DelegationId,
   type Sidecar,
-} from "katari-runtime";
+} from "@katari-lang/runtime";
 
 const SAMPLE_ROOT = resolve(__dirname, "../samples/11-ext-agent/src");
 const CRON_SAMPLE_ROOT = resolve(__dirname, "../samples/12-ext-cron/src");

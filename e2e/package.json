@@ -7,10 +7,10 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "katari-api-server": "workspace:*",
-    "katari-bundle": "workspace:*",
-    "katari-port": "workspace:*",
-    "katari-runtime": "workspace:*"
+    "@katari-lang/api-server": "workspace:*",
+    "@katari-lang/bundle": "workspace:*",
+    "@katari-lang/port": "workspace:*",
+    "@katari-lang/runtime": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
