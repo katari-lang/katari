@@ -129,9 +129,10 @@ data ReasonKind where
   ReasonKindRequestHandlerSignature :: ReasonKind
   ReasonKindReturnTypeAnnotation :: ReasonKind
   ReasonKindReturnStatement :: ReasonKind
-  -- | Body の暗黙 fall-through return (明示 @return@ 文ではなく block の
-  -- 末尾式で関数を抜けるケース)。'ReasonKindReturnStatement' とは診断メッセージ
-  -- を分けたいので別 reason。
+  -- | Implicit fall-through return of the body (the case where the
+  -- function exits via the tail expression of a block rather than an
+  -- explicit @return@ statement). A separate reason from
+  -- 'ReasonKindReturnStatement' so the diagnostic messages can differ.
   ReasonKindImplicitReturn :: ReasonKind
   ReasonKindRequestBound :: ReasonKind
   ReasonKindHandleRequestDischarge :: ReasonKind
@@ -173,10 +174,11 @@ data ReasonKind where
   ReasonKindTemplateInterpolation :: ReasonKind
   ReasonKindArrayElement :: ReasonKind
   ReasonKindConstructorPattern :: ReasonKind
-  -- | Solver 内部で発生した「全 branch 失敗」など、syntactic な発生源を
-  -- 特定できない構造的破綻のための marker。Diagnostics は何らかの span が
-  -- 必要になるため、関連する第一の constraint の source span を載せる。
-  -- 通常コードパスでは発生しない (発生した場合 user-visible なエラー)。
+  -- | Marker for structural breakdowns that originate inside the Solver
+  -- (e.g. "all branches failed") and whose syntactic source cannot be
+  -- pinned down. Since Diagnostics need some span, we attach the source
+  -- span of the first related constraint. Should not occur on the normal
+  -- code path (if it does, it surfaces as a user-visible error).
   ReasonKindSolverInternal :: ReasonKind
   deriving (Eq, Ord, Show)
 
@@ -682,8 +684,9 @@ walkPrimAgentDecl PrimAgentDeclaration {annotation, name, parameters, returnType
 walkDataDecl :: DataDeclaration Identified -> CG (DataDeclaration Constrained)
 walkDataDecl DataDeclaration {annotation, name, typeName, constructorName, parameters, sourceSpan} = do
   tCtor <- variableTypeFromName name
-  -- data の TypeId は AST が直接保持する。@Unresolved@ 側 (parse / identify
-  -- エラー時) のみ @Nothing@ になり、@SemanticTypeUnknown@ にフォールバックする。
+  -- The TypeId of a data declaration is held directly by the AST. Only on
+  -- the @Unresolved@ side (parse / identify errors) is it @Nothing@, in
+  -- which case we fall back to @SemanticTypeUnknown@.
   let tid = typeName.resolution
   fields <- mapM elaborateDataParameter parameters
   let signature =
@@ -1462,7 +1465,7 @@ walkCaseArm subjectType tMatch CaseArm {pattern, body, sourceSpan} = do
 
 walkForExpr :: ForExpression Identified -> CG (Expression Constrained)
 walkForExpr ForExpression {parallel, inBindings, varBindings, body, thenBlock, sourceSpan} = do
-  -- in-bindings: source は外側 scope で walk
+  -- in-bindings: the source is walked in the outer scope
   inBindings' <- mapM walkForInBinding inBindings
   varBindings' <- mapM walkForVarBinding varBindings
   tForBreakId <- freshTypeVariableId

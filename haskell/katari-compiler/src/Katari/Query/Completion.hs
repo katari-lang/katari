@@ -281,8 +281,8 @@ fieldTypeOf ::
   Maybe SemTy
 fieldTypeOf idResult zonkResult ty field = case ty of
   SemanticTypeData typeId -> do
-    params <- dataConstructorParams idResult zonkResult typeId
-    Map.lookup field params
+    parameters <- dataConstructorParameters idResult zonkResult typeId
+    Map.lookup field parameters
   SemanticTypeObject fields -> Map.lookup field fields
   SemanticTypeUnion branches -> do
     let projected = mapMaybe (\branch -> fieldTypeOf idResult zonkResult branch field) branches
@@ -293,12 +293,12 @@ fieldTypeOf idResult zonkResult ty field = case ty of
 
 -- | Field map of the constructor that produces values of @typeId@:
 -- the @x: integer, y: string@ portion of @data Foo(x: integer, y: string)@.
-dataConstructorParams ::
+dataConstructorParameters ::
   IdentifierResult ->
   ZonkResult ->
   TypeId ->
   Maybe (Map Text SemTy)
-dataConstructorParams idResult zonkResult typeId = do
+dataConstructorParameters idResult zonkResult typeId = do
   cdata <-
     listToMaybe
       [ c
@@ -307,7 +307,7 @@ dataConstructorParams idResult zonkResult typeId = do
       ]
   ctorType <- Map.lookup cdata.constructorVariableId zonkResult.zonkedTypeEnvironment
   case ctorType of
-    SemanticTypeFunction params _ _ -> Just params
+    SemanticTypeFunction parameters _ _ -> Just parameters
     _ -> Nothing
 
 -- | Smart join of multiple resolved branch types into a single
@@ -366,7 +366,7 @@ completionsOfFields idResult zonkResult ty =
     fieldsOf :: SemTy -> Map Text SemTy
     fieldsOf = \case
       SemanticTypeData typeId ->
-        fromMaybe Map.empty (dataConstructorParams idResult zonkResult typeId)
+        fromMaybe Map.empty (dataConstructorParameters idResult zonkResult typeId)
       SemanticTypeObject m -> m
       SemanticTypeUnion branches ->
         let perBranch = map fieldsOf branches
@@ -400,7 +400,7 @@ completionsOfCallLabels ty usedLabels =
   where
     labelsOf :: SemTy -> Set Text
     labelsOf = \case
-      SemanticTypeFunction params _ _ -> Map.keysSet params
+      SemanticTypeFunction parameters _ _ -> Map.keysSet parameters
       SemanticTypeUnion branches ->
         case map labelsOf branches of
           [] -> Set.empty

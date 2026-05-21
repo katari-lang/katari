@@ -75,9 +75,10 @@ import Katari.Typechecker.Zonker qualified as Zonker
 -- responsibility.
 type ModuleName = Text
 
--- | 1 ソースファイル分のエントリ。
--- コンパイラは 'filePath' と 'moduleName' の間に一切の関係を仮定しない。
--- 'filePath' は診断スパン・Query 層で使用される実ファイルパスを表す。
+-- | One entry per source file.
+-- The compiler assumes no relationship whatsoever between 'filePath' and
+-- 'moduleName'. 'filePath' is the real file path used by diagnostic spans
+-- and the Query layer.
 data SourceEntry = SourceEntry
   { filePath :: FilePath,
     sourceText :: Text

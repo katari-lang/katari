@@ -2024,12 +2024,12 @@ resolveBinaryOperatorAsCall BinaryOperatorExpression {operator, left, right, sou
   -- Narrow span for the synthetic callee: the gap between operands
   -- (where the operator token actually sits). Keeps hover / diagnostics
   -- anchored on the @+@ instead of swallowing the whole expression.
-  let opSpan =
+  let operatorSpan =
         SrcSpan
           sourceSpan.filePath
           (sourceSpanOf left').end
           (sourceSpanOf right').start
-  pure (mkPrimCall primName metadata sourceSpan opSpan [("lhs", left'), ("rhs", right')])
+  pure (mkPrimCall primName metadata sourceSpan operatorSpan [("lhs", left'), ("rhs", right')])
 
 -- | Desugar a unary operator into a call to the matching root prim
 -- (@!x@ → @not(value=x)@; @-x@ → @neg(value=x)@).
@@ -2039,12 +2039,12 @@ resolveUnaryOperatorAsCall UnaryOperatorExpression {operator, operand, sourceSpa
   operand' <- resolveExpression operand
   let primName = Prim.unaryOperatorPrimName operator
   metadata <- lookupPrimVariable primName
-  let opSpan =
+  let operatorSpan =
         SrcSpan
           sourceSpan.filePath
           sourceSpan.start
           (sourceSpanOf operand').start
-  pure (mkPrimCall primName metadata sourceSpan opSpan [("value", operand')])
+  pure (mkPrimCall primName metadata sourceSpan operatorSpan [("value", operand')])
 
 -- | Look up a root prim's 'VariableId' from the preregistered map.
 -- Missing entries indicate a compiler bug (every operator name in
@@ -2073,7 +2073,7 @@ lookupPrimVariable primName = do
 --   * @outerSpan@: the original operator expression's full span. Used
 --     for the outer 'CallExpression' and for diagnostics that fire on
 --     the whole expression.
---   * @opSpan@: the narrow span covering just the operator token (= the
+--   * @operatorSpan@: the narrow span covering just the operator token (= the
 --     gap between operands for binary, leading prefix for unary). Used
 --     for the synthetic callee and label spans so hover / go-to-def on
 --     the operator anchors to its source location, not to the whole
@@ -2088,7 +2088,7 @@ mkPrimCall ::
   SourceSpan ->
   [(Text, Expression Identified)] ->
   Expression Identified
-mkPrimCall primName metadata outerSpan opSpan args =
+mkPrimCall primName metadata outerSpan operatorSpan arguments =
   ExpressionCall
     CallExpression
       { callee =
@@ -2097,10 +2097,10 @@ mkPrimCall primName metadata outerSpan opSpan args =
               { name =
                   NameRef
                     { text = primName,
-                      sourceSpan = opSpan,
+                      sourceSpan = operatorSpan,
                       resolution = metadata
                     },
-                sourceSpan = opSpan,
+                sourceSpan = operatorSpan,
                 typeOf = ()
               },
         arguments =
@@ -2108,13 +2108,13 @@ mkPrimCall primName metadata outerSpan opSpan args =
               { label =
                   NameRef
                     { text = label,
-                      sourceSpan = opSpan,
+                      sourceSpan = operatorSpan,
                       resolution = ()
                     },
                 value = value,
                 sourceSpan = sourceSpanOf value
               }
-            | (label, value) <- args
+            | (label, value) <- arguments
           ],
         sourceSpan = outerSpan,
         typeOf = ()

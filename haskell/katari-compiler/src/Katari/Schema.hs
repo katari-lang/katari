@@ -1,13 +1,13 @@
 -- | JSON Schema generation for the public API surface (agents, requests,
 -- external agents, and data constructors).
 --
--- 出力は flat な '[SchemaEntry]' 配列 — top-level callable につき 1 エントリ。
--- @input@ / @output@ フィールドは valid JSON Schema Draft 2020-12 (subset) を
--- 直接保持する。@data@ 宣言の型参照 ('SemanticTypeData') は 'DataDefs' を使って
--- inline 展開する (@$defs@ / @$ref@ なし)。
--- Description テキストは AST の @\@\"...\"@ annotation から拾う。
+-- The output is a flat '[SchemaEntry]' array — one entry per top-level
+-- callable. The @input@ / @output@ fields directly hold valid JSON Schema
+-- Draft 2020-12 (a subset). Type references to @data@ declarations
+-- ('SemanticTypeData') are inlined via 'DataDefs' (no @$defs@ / @$ref@).
+-- Description text is pulled from the AST's @\@\"...\"@ annotations.
 --
--- 入力は 'ZonkResult' のみ ('IRModule' は不要)。
+-- Input is 'ZonkResult' only ('IRModule' is not required).
 module Katari.Schema
   ( -- * Output types
     SchemaEntry (..),

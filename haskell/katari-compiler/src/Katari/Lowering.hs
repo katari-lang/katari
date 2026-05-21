@@ -1,13 +1,15 @@
 -- | Lower Zonked AST to 'IRModule'.
 --
--- 設計の概要は doc/ir-design 相当 / plan を参照。本モジュールは Zonked phase の
--- AST を入力に取り、型情報を捨てた 'IRModule' を返す。
+-- See doc/ir-design (or equivalent) / plan for the design overview. This
+-- module takes the Zonked-phase AST as input and returns an 'IRModule'
+-- with type information discarded.
 --
--- パイプライン:
+-- Pipeline:
 --
---   1. registerPrimitives — primitive 名 → BlockId を割当
---   2. registerDeclarationKinds — 全宣言の VariableId に kind/BlockId を予約
---   3. lowerAllDeclarations — 各宣言の本体を lower
+--   1. registerPrimitives — assign BlockIds to primitive names
+--   2. registerDeclarationKinds — reserve a kind/BlockId for the
+--      VariableId of every declaration
+--   3. lowerAllDeclarations — lower the body of each declaration
 module Katari.Lowering
   ( lowerProgram,
     LoweringError (..),
@@ -77,20 +79,22 @@ toDiagnostic = \case
 -- ===========================================================================
 -- Lowering monad
 --
--- 'Lower' は @ReaderT LowerEnv (State LowerState)@。
+-- 'Lower' is @ReaderT LowerEnv (State LowerState)@.
 --
---   * 'LowerEnv' は scope-local な情報のみ。@local@ で透過的に save/restore
---     できるため、@bindLocal@ + 手書き restorer が不要になる。
---   * 'LowerState' は累積的な情報 (allocator counters / 既出 block 表 /
---     errors) と「現在 build 中の block の statements」(@lsCurrentEmitted@)。
---     Statements は逆順で蓄積し、block を確定させる時 (@runWithFreshBuffer@)
---     に一度だけ reverse して O(n) で取り出す。
+--   * 'LowerEnv' carries only scope-local information. Since @local@
+--     transparently saves/restores it, no @bindLocal@ + hand-written
+--     restorer is required.
+--   * 'LowerState' carries cumulative information (allocator counters /
+--     accumulated block table / errors) plus the "statements of the block
+--     currently being built" (@lsCurrentEmitted@). Statements are
+--     accumulated in reverse order and reversed once in O(n) when the
+--     block is finalized (@runWithFreshBuffer@).
 -- ===========================================================================
 
 data LowerEnv = LowerEnv
-  { -- | 局所束縛: @let@ / 関数 param / pattern / local agent によって
-    -- 導入された @VariableId → IRの VarId@。トップレベルの callable
-    -- 解決は別途 'lsTopLevelBlocks' を見る。
+  { -- | Local bindings: @VariableId → IR's VarId@ introduced by @let@ /
+    -- function param / pattern / local agent. Top-level callable
+    -- resolution uses 'lsTopLevelBlocks' separately.
     localVars :: Map VariableId VarId,
     -- | Identifier-pass output. Lowering needs the symbol tables
     -- (@identifiedRequests@ / @identifiedConstructors@) for both id

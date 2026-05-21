@@ -1,23 +1,24 @@
 -- |
 -- Phase-indexed AST for the Katari language.
 --
--- 各 AST ノードはコンパイラのフェーズを 'Phase' tag (型レベル only,
--- TypeData) でパラメータ化する。'NameRef' は @resolution@ フィールドに
--- @NameRefResolution phase s@ (各 phase + symbol kind に応じた解決情報) を持ち、
--- expression / pattern ノードは @typeOf@ フィールドに @ExpressionType p@ /
--- @PatternType phase@ を持つ。
+-- Each AST node is parameterized by the compiler phase via a 'Phase' tag
+-- (type-level only, TypeData). 'NameRef' holds @NameRefResolution phase s@
+-- (resolution information per phase + symbol kind) in its @resolution@ field,
+-- and expression / pattern nodes hold @ExpressionType p@ / @PatternType phase@
+-- in their @typeOf@ field.
 --
--- 設計上の重要点:
+-- Key design points:
 --
---   * @NameRefResolution@ は閉じた type family で、Identified / Constrained /
---     Zonked の三相について同じ shape (@Maybe Identifier@) を返す。
---     phase 推移は 'retagNameRef' / 'retagSyntacticType' 等で素通しできる。
---   * @ExpressionType@ / @PatternType@ も閉じた type family で、Parsed / Identified
---     は @()@、Constrained / Zonked は @SemanticType@ を返す。
---     'Katari.SemanticType' は leaf module なので循環しない。
---   * 'Module' / 'Declaration' / 'Statement' 系には型情報を載せる予定が
---     ないため @typeOf@ フィールドを持たない (placeholder の no-op
---     フィールドを増やさないため)。
+--   * @NameRefResolution@ is a closed type family returning the same shape
+--     (@Maybe Identifier@) for the three phases Identified / Constrained /
+--     Zonked. Phase transitions can be passed through via 'retagNameRef' /
+--     'retagSyntacticType' etc.
+--   * @ExpressionType@ / @PatternType@ are also closed type families:
+--     @()@ for Parsed / Identified, @SemanticType@ for Constrained / Zonked.
+--     'Katari.SemanticType' is a leaf module so no cycles.
+--   * 'Module' / 'Declaration' / 'Statement' families are not expected to
+--     carry type information and therefore do not have a @typeOf@ field
+--     (to avoid adding placeholder no-op fields).
 module Katari.AST where
 
 import Data.Kind (Type)
@@ -34,24 +35,27 @@ import Katari.SemanticType (Resolved, SemanticType, Unresolved)
 import Katari.SourceSpan (HasSourceSpan (..), SourceSpan)
 
 -- ---------------------------------------------------------------------------
--- NameRefKind: 'NameRef' が指す名前空間の種別。
+-- NameRefKind: the kind of namespace that 'NameRef' refers to.
 -- ---------------------------------------------------------------------------
 
 type data NameRefKind where
-  -- | 値空間の名前参照 (agent / req / ext agent / constructor / local var)。
-  -- 値として呼べる名前はすべてここを通る。
+  -- | Name reference in the value namespace (agent / req / ext agent /
+  -- constructor / local var). Every name that can be called as a value goes
+  -- through here.
   VariableRef :: NameRefKind
-  -- | 型空間の名前参照 (enum 名、TypeName)。
+  -- | Name reference in the type namespace (enum names, TypeName).
   TypeRef :: NameRefKind
-  -- | モジュール空間の名前参照 (import alias、qualified の左辺)。
+  -- | Name reference in the module namespace (import alias, left side of a
+  -- qualified name).
   ModuleRef :: NameRefKind
-  -- | フィールド・引数ラベル (型指向で後段が解決)。
+  -- | Field / argument label (resolved later via type-directed lookup).
   LabelRef :: NameRefKind
-  -- | req handler の対象。@req@ 宣言以外の名前を handler として書くと
-  -- Identifier 段階で reject される (型レベルでスロットを分離している)。
+  -- | Target of a req handler. Writing any name other than a @req@
+  -- declaration as a handler is rejected at the Identifier stage (slots are
+  -- separated at the type level).
   RequestRef :: NameRefKind
-  -- | match パターンの constructor。@data@ 宣言以外の名前を constructor
-  -- パターンとして書くと Identifier 段階で reject される。
+  -- | Constructor in a match pattern. Writing any name other than a @data@
+  -- declaration as a constructor pattern is rejected at the Identifier stage.
   ConstructorRef :: NameRefKind
 
 -- | Compiler phase tag
@@ -203,7 +207,7 @@ data ImportKind where
   deriving (Eq, Show)
 
 -- | One name brought into scope by @import { ... } from ...@.
--- @kind@ で type 名前空間か value 名前空間かを区別する。
+-- @kind@ distinguishes between the type namespace and the value namespace.
 data ImportItem = ImportItem
   { kind :: ImportItemKind,
     name :: Text
@@ -211,9 +215,9 @@ data ImportItem = ImportItem
   deriving (Eq, Show)
 
 data ImportItemKind where
-  -- | 通常の値 import。
+  -- | Normal value import.
   ImportItemValue :: ImportItemKind
-  -- | @type@ prefix が付いた import。型名前空間に取り込む。
+  -- | Import with a @type@ prefix. Brings the name into the type namespace.
   ImportItemType :: ImportItemKind
   deriving (Eq, Show)
 
@@ -253,15 +257,18 @@ data PrimAgentDeclaration (phase :: Phase) = PrimAgentDeclaration
 instance HasSourceSpan (PrimAgentDeclaration phase) where
   sourceSpanOf declaration = declaration.sourceSpan
 
--- | @data ctor_name(field: type, ...)@ — 1 declaration につき 1 constructor。
--- 同じ名前で値空間 (constructor 関数) と型空間 (data 型) の両方を導入する。
+-- | @data ctor_name(field: type, ...)@ — one constructor per declaration.
+-- Introduces the same name into both the value namespace (constructor
+-- function) and the type namespace (data type).
 --
--- AST 上は両 role を別 'NameRef' として保持する: @name@ が値空間 (constructor
--- 関数) を、@typeName@ が型空間 (data 型) を指す。Parser は同一の identifier
--- token から両者を生成し (text と sourceSpan は共有)、Identifier フェーズが
--- 各々を独立に解決して resolution に固有の id (VariableId / TypeId) を埋める。
--- 後段 (ConstraintGenerator 以降) は AST から直接 TypeId を読めるので、
--- 名前テキストによる横断検索は不要。
+-- In the AST both roles are kept as separate 'NameRef's: @name@ points to
+-- the value namespace (constructor function) and @typeName@ points to the
+-- type namespace (data type). The Parser produces both from the same
+-- identifier token (sharing text and sourceSpan), and the Identifier phase
+-- resolves each independently, filling the resolution with a kind-specific
+-- id (VariableId / TypeId). Later phases (ConstraintGenerator onward) can
+-- read the TypeId directly from the AST, so no name-text cross lookup is
+-- needed.
 data DataDeclaration (phase :: Phase) = DataDeclaration
   { annotation :: Maybe Text,
     name :: NameRef phase VariableRef,
@@ -288,7 +295,7 @@ data DataParameter (phase :: Phase) = DataParameter
 instance HasSourceSpan (DataParameter phase) where
   sourceSpanOf parameter = parameter.sourceSpan
 
--- | @type T = ...@ — 型シノニム。annotation はなし、generics もなし。
+-- | @type T = ...@ — type synonym. No annotation, no generics.
 data TypeSynonymDeclaration (phase :: Phase) = TypeSynonymDeclaration
   { name :: NameRef phase TypeRef,
     rhs :: SyntacticType phase,
@@ -451,11 +458,13 @@ data Modifier (phase :: Phase) = Modifier
 instance HasSourceSpan (Modifier phase) where
   sourceSpanOf modifier = modifier.sourceSpan
 
--- | @req name(...) { body }@ または @req module.name(...) { body }@。
--- @name@ は新規 binding ではなく既存の req 宣言への参照。@moduleQualifier@ が
--- @Just@ の場合は他モジュールの req を実装する形。
--- | req handler は自身の request 集合を持たない (handler 内の request は
--- 囲む agent に bind されるため)。よって @with@ 節は構文上も AST 上も無い。
+-- | @req name(...) { body }@ or @req module.name(...) { body }@.
+-- @name@ is not a new binding but a reference to an existing req declaration.
+-- When @moduleQualifier@ is @Just@, this implements a req from another
+-- module.
+-- | A req handler does not have its own request set (requests inside the
+-- handler are bound to the enclosing agent), so there is no @with@ clause
+-- syntactically or in the AST.
 data RequestHandler (phase :: Phase) = RequestHandler
   { moduleQualifier :: Maybe (NameRef phase ModuleRef),
     -- | The request being handled. Resolved against the request namespace
@@ -530,13 +539,14 @@ data ParameterBinding (phase :: Phase) = ParameterBinding
 instance HasSourceSpan (ParameterBinding phase) where
   sourceSpanOf binding = binding.sourceSpan
 
--- | Constructor pattern. Constructor は所属モジュールのトップレベル variable
--- namespace に flat 展開されるため、bare @ctor(...)@ または @module.ctor(...)@
--- の二形式のみ。@type.ctor@ 構文は廃止。
+-- | Constructor pattern. Constructors are flattened into the top-level
+-- variable namespace of their owning module, so only two forms exist:
+-- bare @ctor(...)@ or @module.ctor(...)@. The @type.ctor@ syntax is
+-- obsolete.
 --
--- パーサーは pattern phaseosition で @ident(...)@ / @ident.ident(...)@ を見たら
--- これを生成する (lookahead で @(@ を確認)。bare @ident@ (no parens) は
--- 'VariablePattern' のまま。
+-- The parser produces this when it sees @ident(...)@ / @ident.ident(...)@
+-- at a pattern position (with a @(@ lookahead). A bare @ident@ (no parens)
+-- stays as 'VariablePattern'.
 data QualifiedConstructorPattern (phase :: Phase) = QualifiedConstructorPattern
   { -- | Optional module qualifier (left-most segment).
     moduleQualifier :: Maybe (NameRef phase ModuleRef),
@@ -575,21 +585,22 @@ data SyntacticType (phase :: Phase) where
   TypeTuple :: TupleTypeNode phase -> SyntacticType phase
   -- | @module.TypeName@ qualified reference.
   TypeQualified :: QualifiedTypeNode phase -> SyntacticType phase
-  -- | Type-level literal: @"foo"@ / @42@ / @true@ / @false@ / @null@。
-  -- 値レベルの 'LiteralValue' を再利用する (Float は対象外)。
+  -- | Type-level literal: @"foo"@ / @42@ / @true@ / @false@ / @null@.
+  -- Reuses the value-level 'LiteralValue' (Float is not supported).
   TypeLiteral :: TypeLiteralNode -> SyntacticType phase
-  -- | @T1 | T2 | ...@ union type。precedence は最低 (function/array より弱い)。
-  -- 2 個以上の branch を持つ。順序保持。
+  -- | @T1 | T2 | ...@ union type. Lowest precedence (weaker than
+  -- function/array). Always has 2 or more branches. Order preserving.
   TypeUnion :: TypeUnionNode phase -> SyntacticType phase
-  -- | @never@ — lattice の bottom 型。値を持たない。@agent f() -> never@ 等で
-  -- 「絶対に return しない」を明示する用途。
+  -- | @never@ — the bottom type of the lattice. Has no values. Used in
+  -- @agent f() -> never@ etc. to declare "never returns".
   TypeNever :: NeverTypeNode phase -> SyntacticType phase
-  -- | @unknown@ — lattice の top 型。任意の値を許容するが、利用側で必ず
-  -- narrow する必要がある (TypeScript の @unknown@ と同じ思想)。
+  -- | @unknown@ — the top type of the lattice. Accepts any value, but the
+  -- consumer must narrow it before use (same idea as TypeScript's
+  -- @unknown@).
   TypeUnknown :: UnknownTypeNode phase -> SyntacticType phase
-  -- | @function@ — function-type lattice の top。任意の callable
-  -- (具体的な @(P) -> R with E@) を受け取る reflection-style API
-  -- (@get_metadata@ 等) で用いる。call はできない (params 不明)。
+  -- | @function@ — the top of the function-type lattice. Used by
+  -- reflection-style APIs (e.g. @get_metadata@) that accept any callable
+  -- (any concrete @(P) -> R with E@). Cannot be called (params unknown).
   TypeFunctionAny :: FunctionAnyTypeNode phase -> SyntacticType phase
 
 instance HasSourceSpan (SyntacticType phase) where
@@ -622,8 +633,9 @@ data PrimitiveTypeNode (phase :: Phase) = PrimitiveTypeNode
 instance HasSourceSpan (PrimitiveTypeNode p) where
   sourceSpanOf node = node.sourceSpan
 
--- | @never@ 型の AST ノード。lattice の bottom (値を持たない型) で、
--- primitive (concrete data) ではないため別ノードに分けている。
+-- | AST node for the @never@ type. The bottom of the lattice (a type with
+-- no values); kept as a separate node because it is not a primitive
+-- (concrete data) type.
 newtype NeverTypeNode (phase :: Phase) = NeverTypeNode
   { sourceSpan :: SourceSpan
   }
@@ -631,8 +643,9 @@ newtype NeverTypeNode (phase :: Phase) = NeverTypeNode
 instance HasSourceSpan (NeverTypeNode p) where
   sourceSpanOf node = node.sourceSpan
 
--- | @unknown@ 型の AST ノード。lattice の top (任意の値) で、利用側で
--- narrow が必要。primitive ではないため別ノードに分けている。
+-- | AST node for the @unknown@ type. The top of the lattice (any value);
+-- callers must narrow it before use. Kept as a separate node because it is
+-- not a primitive.
 newtype UnknownTypeNode (phase :: Phase) = UnknownTypeNode
   { sourceSpan :: SourceSpan
   }
@@ -640,8 +653,9 @@ newtype UnknownTypeNode (phase :: Phase) = UnknownTypeNode
 instance HasSourceSpan (UnknownTypeNode p) where
   sourceSpanOf node = node.sourceSpan
 
--- | @function@ 型の AST ノード。function-type lattice の top。任意の
--- 具体 'FunctionTypeNode' のスーパータイプ。call はできない (params 不明)。
+-- | AST node for the @function@ type. The top of the function-type
+-- lattice; a supertype of any concrete 'FunctionTypeNode'. Cannot be called
+-- (params unknown).
 newtype FunctionAnyTypeNode (phase :: Phase) = FunctionAnyTypeNode
   { sourceSpan :: SourceSpan
   }
@@ -703,7 +717,7 @@ data TypeLiteralNode = TypeLiteralNode
 instance HasSourceSpan TypeLiteralNode where
   sourceSpanOf node = node.sourceSpan
 
--- | @T1 | T2 | ...@ union type。常に 2 個以上の branch を持つ。
+-- | @T1 | T2 | ...@ union type. Always has 2 or more branches.
 data TypeUnionNode (phase :: Phase) = TypeUnionNode
   { branches :: [SyntacticType phase],
     sourceSpan :: SourceSpan
@@ -746,8 +760,9 @@ data Expression (phase :: Phase) where
   -- | Parallel array construction: @par [e1, e2, ...]@.
   ExpressionParArray :: ParArrayExpression phase -> Expression phase
   -- | Synthesised by the Identifier pass from a @FieldAccess@ chain whose
-  -- left-most segment resolves to a module. 詳細は 'QualifiedReferenceExpression'
-  -- のコメント参照。Parser never produces this directly.
+  -- left-most segment resolves to a module. See the comment on
+  -- 'QualifiedReferenceExpression' for details. Parser never produces this
+  -- directly.
   ExpressionQualifiedReference :: QualifiedReferenceExpression phase -> Expression phase
 
 instance HasSourceSpan (Expression phase) where
@@ -988,14 +1003,16 @@ data TemplateExpression (phase :: Phase) = TemplateExpression
 instance HasSourceSpan (TemplateExpression phase) where
   sourceSpanOf expression = expression.sourceSpan
 
--- | 解決済み qualified 参照 @module.target@。
+-- | Resolved qualified reference @module.target@.
 --
--- @target@ は値空間のシンボル (agent / req / ext agent / constructor)。
--- enum constructor も自モジュールの variable namespace に flat 展開されるため、
--- @module.ctor@ も同じ shape で表現される。
+-- @target@ is a symbol in the value namespace (agent / req / ext agent /
+-- constructor). Enum constructors are also flattened into their owning
+-- module's variable namespace, so @module.ctor@ is represented with the
+-- same shape.
 --
--- Parser は生成せず、Identifier フェーズで FieldAccess チェーンの最左が module
--- に解決された場合のみ合成する。
+-- The parser does not produce this; the Identifier phase synthesises it
+-- only when the left-most segment of a FieldAccess chain resolves to a
+-- module.
 data QualifiedReferenceExpression (phase :: Phase) = QualifiedReferenceExpression
   { moduleQualifier :: NameRef phase ModuleRef,
     target :: NameRef phase VariableRef,
@@ -1043,15 +1060,16 @@ instance HasSourceSpan (TemplateExpressionElement p) where
 -- ---------------------------------------------------------------------------
 -- Phase retagging helpers
 --
--- 後段フェーズが上流フェーズの AST を「型レベルのタグ書き換えだけ」で渡し
--- 替えたい場合のための utility。NameRefResolution が両フェーズで一致している
--- (Identified / Constrained / Zonked の三相は閉じた type family により同じ
--- shape) ことを @~@ 制約で明示することで、安全に retag できる。
+-- Utility for downstream phases that want to pass through upstream phase
+-- ASTs with only "type-level tag rewriting". Safety is established by
+-- using a @~@ constraint to assert that @NameRefResolution@ agrees between
+-- the two phases (the three phases Identified / Constrained / Zonked share
+-- the same shape via a closed type family).
 --
--- ここで提供するのは @NameRef@ / @SyntacticType@ / @SyntacticRequest@ /
--- 各 @TypeNode@ のみ。Expression / Pattern / Statement / Declaration /
--- Module はフェーズごとに @typeOf@ が異なるため、各 walker が局所的に
--- 構築する。
+-- Only @NameRef@ / @SyntacticType@ / @SyntacticRequest@ / each @TypeNode@
+-- are provided here. Expression / Pattern / Statement / Declaration /
+-- Module have a phase-specific @typeOf@, so each walker constructs them
+-- locally.
 -- ---------------------------------------------------------------------------
 
 -- | Change the phase tag of a 'NameRef' when both phases share the same
@@ -1146,11 +1164,12 @@ retagSyntacticRequest req =
 -- ---------------------------------------------------------------------------
 -- Aggregate Eq / Show constraints
 --
--- 各 AST ノードの Eq / Show instance は phase の metadata 型 (NameRefResolution /
--- ExpressionType / PatternType) すべての Eq / Show を必要とする。@QuantifiedConstraints@
--- + @UndecidableInstances@ により @forall s. Eq (NameRefResolution phase s)@ という
--- 量化制約が書けるので、それを束ねた 'EqPhase' / 'ShowPhase' synonym で
--- 全ての standalone deriving の前置きを統一する。
+-- The Eq / Show instances of every AST node require Eq / Show for all the
+-- phase metadata types (NameRefResolution / ExpressionType / PatternType).
+-- With @QuantifiedConstraints@ + @UndecidableInstances@ we can write a
+-- quantified constraint like @forall s. Eq (NameRefResolution phase s)@,
+-- which we bundle into the 'EqPhase' / 'ShowPhase' synonyms to unify the
+-- preambles of every standalone deriving.
 -- ---------------------------------------------------------------------------
 
 -- | Phase-level Eq aggregate. Bundled as a class (rather than a type

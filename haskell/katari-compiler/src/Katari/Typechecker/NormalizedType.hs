@@ -544,7 +544,7 @@ intersectArraySlot leftSlot rightSlot = case (leftSlot, rightSlot) of
 --
 -- Per the user-specified rule: take the **intersection** of label sets,
 -- with each common label's type **unioned** (contravariant in args).
--- Requests are unioned (合併) per the spec.
+-- Requests are unioned per the spec.
 intersectFunctionLayer :: FunctionSlot -> FunctionSlot -> FunctionSlot
 intersectFunctionLayer leftSlot rightSlot = case (leftSlot, rightSlot) of
   (FunctionSlotAbsent, _) -> FunctionSlotAbsent

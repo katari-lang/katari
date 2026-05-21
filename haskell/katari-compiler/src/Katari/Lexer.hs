@@ -843,17 +843,20 @@ lexClassifySurrogate codePoint
 -- with KatariTokenSemicolonVirtual inserted at appropriate newlines and KatariTokenNewline
 -- KatariTokens removed.
 --
--- 採用基準: 「ここで expression の構文要素が完結しているとみなして良い」トークン
--- の直後の改行のみ仮想セミコロンに変換する。識別子・各種リテラル・閉じ括弧・
--- 特定キーワード (break / return / next / null / true / false / 型名キーワード)
--- が該当。
+-- Selection rule: only newlines immediately following a token "that can be
+-- considered to complete a syntactic element of an expression here" are
+-- converted into virtual semicolons. Identifiers, various literals,
+-- closing brackets, and certain keywords (break / return / next / null /
+-- true / false / type-name keywords) qualify.
 --
--- KatariTokenUnderscore は意図的に除外: 式位置で `_` 単独はエラー (式にならない)、
--- かつ `_: integer` 型注釈の頭になり得る。よって行末に来た場合に挿入しても
--- 良いケースがほぼ無い。
+-- KatariTokenUnderscore is deliberately excluded: a bare `_` is invalid at
+-- an expression position (it is not an expression), and it can start a
+-- `_: integer` type annotation, so there are essentially no cases where
+-- inserting at end of line is helpful.
 --
--- Bracket-context 抑制: @(@ と @[@ の中では仮想セミコロンを挿入しない。
--- これにより複数行の引数リスト・配列リテラルで末尾カンマを書かなくて済む:
+-- Bracket-context suppression: virtual semicolons are not inserted inside
+-- @(@ or @[@. This lets multi-line argument lists and array literals omit
+-- trailing commas:
 --
 -- @
 -- [
@@ -863,8 +866,8 @@ lexClassifySurrogate codePoint
 -- ]
 -- @
 --
--- @{ ... }@ は block 区切りでもあるため抑制対象外 (block 内では従来通り
--- 改行が文区切りとして機能する必要がある)。
+-- @{ ... }@ is not suppressed because it also delimits blocks (inside a
+-- block, newlines must still function as statement separators as before).
 insertVirtualSemicolons :: [WithSourceSpan KatariToken] -> [WithSourceSpan KatariToken]
 insertVirtualSemicolons = go (0 :: Int) Nothing
   where

@@ -1,22 +1,26 @@
--- | Typechecker phase 4: Zonk — Solver の置換結果を AST に焼き込む。
+-- | Typechecker phase 4: Zonk — bakes the Solver's substitution results
+-- into the AST.
 --
--- Input  : 'IdentifierResult' (Identifier 段階の VariableData / TypeData / ModuleData
---          引き当て用)、'ConstraintGenResult' (Constrained AST と
---          'typeEnvironment')、'SolverResult' (substitution maps)。
--- Output : 'ZonkResult' — Zonked AST、解決済 type environment、Solver 契約逸脱
---          検知用エラー集合。
+-- Input  : 'IdentifierResult' (for looking up VariableData / TypeData /
+--          ModuleData from the Identifier stage), 'ConstraintGenResult'
+--          (Constrained AST and 'typeEnvironment'), 'SolverResult'
+--          (substitution maps).
+-- Output : 'ZonkResult' — Zonked AST, resolved type environment, and an
+--          error set for detecting Solver-contract violations.
 --
--- 設計仮定:
+-- Design assumptions:
 --
---   * Solver の出力は **total** : 'typeSubstitution' / 'requestSubstitution' は
---     ConstraintGenerator が allocate した全 TypeVariableId / RequestVariableId に対し
---     entry を持つ。Zonker から見て lookup miss は発生しない想定。
---   * 万一の Solver bug (lookup miss) は 'ZonkErrorMissingTypeVar' /
---     'ZonkErrorMissingRequestVar' で検知し、'SemanticTypeUnknown' /
---     空 request set にフォールバックして AST 生成は中断しない。
---   * Zonked AST の Expression / Pattern metadata は @SemanticType Resolved@
---     を直接保持する。'SemanticRequest' Resolved は @requestVars = Set.empty@ を
---     構築側で強制する。
+--   * The Solver's output is **total**: 'typeSubstitution' /
+--     'requestSubstitution' have an entry for every TypeVariableId /
+--     RequestVariableId allocated by the ConstraintGenerator. From the
+--     Zonker's perspective lookup misses should not occur.
+--   * In case of a Solver bug (lookup miss) we detect it via
+--     'ZonkErrorMissingTypeVar' / 'ZonkErrorMissingRequestVar' and fall
+--     back to 'SemanticTypeUnknown' / an empty request set so AST
+--     generation is not aborted.
+--   * Expression / Pattern metadata on the Zonked AST holds
+--     @SemanticType Resolved@ directly. The construction side enforces
+--     @requestVars = Set.empty@ for any 'SemanticRequest' Resolved.
 module Katari.Typechecker.Zonker
   ( -- * Result
     ZonkResult (..),
@@ -76,8 +80,8 @@ import Katari.Typechecker.Solver (SolverResult (..))
 
 data ZonkResult = ZonkResult
   { zonkedModules :: Map ModuleId (Module Zonked),
-    -- | 'ModuleId' → モジュール名 (dotted text)。'Katari.Lowering' が
-    -- 'QualifiedName.module_' を付与する際に参照する。
+    -- | 'ModuleId' → module name (dotted text). 'Katari.Lowering' looks
+    -- this up when populating 'QualifiedName.module_'.
     zonkedModuleNames :: Map ModuleId Text,
     zonkedTypeEnvironment :: Map VariableId (SemanticType Resolved)
   }

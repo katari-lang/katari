@@ -61,17 +61,17 @@ renderSemanticType typeNames reqNames = renderTop
           ", "
           [k <> ": " <> render False v | (k, v) <- Map.toAscList fields]
         <> " }"
-    render parenthesise (ST.SemanticTypeFunction params ret effects) =
-      let paramText =
+    render parenthesise (ST.SemanticTypeFunction parameters returnType effects) =
+      let parameterText =
             Text.intercalate
               ", "
-              [k <> ": " <> render False v | (k, v) <- Map.toAscList params]
+              [k <> ": " <> render False v | (k, v) <- Map.toAscList parameters]
           effectsText = renderSemanticRequest reqNames effects
           body =
             "("
-              <> paramText
+              <> parameterText
               <> ") -> "
-              <> render True ret
+              <> render True returnType
               <> ( if Text.null effectsText
                      then ""
                      else " with " <> effectsText

@@ -1,27 +1,30 @@
 -- | Intermediate Representation for the Katari runtime.
 --
--- IR は block 中心の data-flow 言語。Lowering が Zonked AST から型情報を捨てて
--- 生成し、ランタイム (TS) は JSON 形式で受け取りインタプリトする。
+-- The IR is a block-centric data-flow language. Lowering produces it from
+-- the Zonked AST by discarding type information; the runtime (TS) receives
+-- and interprets it as JSON.
 --
--- 設計の核 (詳細は doc/ir-design.md 相当を参照):
+-- Design highlights (see doc/ir-design.md or equivalent for details):
 --
---   * 全ての callable (agent / req / ext / data ctor / prim) を 'Block' 表に
---     乗せ、'SCall' で統一的に呼ぶ。Special block (prim / req / ext / ctor) は
---     statements を持たず metadata のみ。
---   * 制御フローは if / match / for を 'SMatch' / 'SFor' という structured
---     statement として残す。jump / label は使わない。
---   * 大域脱出は 'SExit' (return / break / for_break) と 'SCont' (next /
---     for_next) の 2 系統。経路上 then-block の適用ルールが異なる。
---   * Variable は 'VarId' のみ。scope は runtime 側で 'BlockAgent' /
---     'BlockHandler' を見て管理する。'BlockUser' は常に inline (parent
---     scope inherit) として扱う。
---   * 型情報は IR に含まれない。
+--   * Every callable (agent / req / ext / data ctor / prim) lives in the
+--     'Block' table and is invoked uniformly via 'SCall'. Special blocks
+--     (prim / req / ext / ctor) have no statements, only metadata.
+--   * Control flow keeps if / match / for as structured statements
+--     'SMatch' / 'SFor'. No jumps or labels.
+--   * Non-local exits come in two flavors: 'SExit' (return / break /
+--     for_break) and 'SCont' (next / for_next). They differ in how
+--     then-blocks are applied along the path.
+--   * Variables use 'VarId' only. Scoping is handled on the runtime side
+--     by inspecting 'BlockAgent' / 'BlockHandler'. 'BlockUser' is always
+--     treated as inline (inheriting the parent scope).
+--   * Type information is not included in the IR.
 --
--- JSON 表現は全て 'genericToJSON' / 'genericParseJSON' で導出する。
--- Sum 型は @{"kind": tag, ...}@ の TaggedObject 形式: record 引数の
--- constructor は flat (例: @{"kind":"prim","name":"add"}@)、
--- 単一 non-record 引数の constructor は @"contents"@ にネスト
--- (例: @{"kind":"call","contents":{"target":...,"args":...,"output":...}}@)。
+-- The JSON representation is fully derived via 'genericToJSON' /
+-- 'genericParseJSON'. Sum types use the @{"kind": tag, ...}@ TaggedObject
+-- form: record-argument constructors are flat (e.g.
+-- @{"kind":"prim","name":"add"}@), while constructors with a single
+-- non-record argument nest under @"contents"@ (e.g.
+-- @{"kind":"call","contents":{"target":...,"args":...,"output":...}}@).
 module Katari.IR
   ( -- * Identifiers
     BlockId (..),

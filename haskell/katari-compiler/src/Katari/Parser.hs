@@ -868,9 +868,11 @@ parseStateVariable = parseWithSpan $ do
         sourceSpan = sourceSpan
       }
 
--- | req handler は @with@ 節を持たない。handler 内で発火する request は handler
--- ではなく囲む agent に bind されるため、handler 自身に request 注釈を付けるのは
--- 意味論的に invalid。Lexer / parser とも @with@ を受け付けない。
+-- | A req handler does not have a @with@ clause. Requests fired inside
+-- the handler are bound to the enclosing agent rather than the handler
+-- itself, so attaching a request annotation to the handler itself is
+-- semantically invalid. Neither the lexer nor the parser accepts @with@
+-- here.
 parseRequestHandler :: Parser (RequestHandler Parsed)
 parseRequestHandler = parseWithSpan $ do
   parseKeyword KeywordReq
@@ -1102,7 +1104,7 @@ parsePrefixOperator parserAction unaryOperator = Expr.Prefix $ do
 -- through to the regular unary-operator AST node.
 fuseNegativeLiteral ::
   UnaryOperator -> Expression Parsed -> SourceSpan -> Expression Parsed
-fuseNegativeLiteral op operand fullSpan = case (op, operand) of
+fuseNegativeLiteral operator operand fullSpan = case (operator, operand) of
   (UnaryOperatorNegate, ExpressionLiteral LiteralExpression {value = LiteralValueInteger n}) ->
     ExpressionLiteral
       LiteralExpression
@@ -1120,7 +1122,7 @@ fuseNegativeLiteral op operand fullSpan = case (op, operand) of
   _ ->
     ExpressionUnaryOperator
       UnaryOperatorExpression
-        { operator = op,
+        { operator = operator,
           operand = operand,
           sourceSpan = fullSpan,
           typeOf = ()
@@ -1709,19 +1711,19 @@ parseAtomicType =
       parseNamedOrQualifiedType
     ]
 
--- | @never@ — lattice の bottom 型。
+-- | @never@ — the bottom type of the lattice.
 parseNeverType :: Parser (SyntacticType Parsed)
 parseNeverType = parseWithSpan $ do
   parseKeyword KeywordNever
   pure $ \sourceSpan -> TypeNever NeverTypeNode {sourceSpan = sourceSpan}
 
--- | @unknown@ — lattice の top 型。
+-- | @unknown@ — the top type of the lattice.
 parseUnknownType :: Parser (SyntacticType Parsed)
 parseUnknownType = parseWithSpan $ do
   parseKeyword KeywordUnknown
   pure $ \sourceSpan -> TypeUnknown UnknownTypeNode {sourceSpan = sourceSpan}
 
--- | @function@ — function-type lattice の top (任意の callable)。
+-- | @function@ — the top of the function-type lattice (any callable).
 parseFunctionAnyType :: Parser (SyntacticType Parsed)
 parseFunctionAnyType = parseWithSpan $ do
   parseKeyword KeywordFunction
