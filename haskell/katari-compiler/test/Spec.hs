@@ -11,6 +11,7 @@ import Katari.Query.CompletionSpec qualified as CompletionSpec
 import Katari.QuerySpec qualified as QuerySpec
 import Katari.SchemaSpec qualified as SchemaSpec
 import Katari.ScopeIndexSpec qualified as ScopeIndexSpec
+import Katari.ExhaustiveSpec qualified as ExhaustiveSpec
 import Katari.SolverSpec qualified as SolverSpec
 import Katari.ZonkerSpec qualified as ZonkerSpec
 import Test.Hspec
@@ -22,6 +23,7 @@ main = hspec $ do
   ConstraintGeneratorSpec.spec
   ZonkerSpec.spec
   SolverSpec.spec
+  ExhaustiveSpec.spec
   IRSpec.spec
   LoweringSpec.spec
   DiagnosticSpec.spec

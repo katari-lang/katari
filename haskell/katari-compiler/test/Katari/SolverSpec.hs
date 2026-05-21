@@ -1017,17 +1017,13 @@ illTypedRejection = describe "ill-typed program rejection" $ do
           ]
     null solverErrors `shouldBe` False
 
-  -- Match-arm pattern type mismatch (using a string-literal pattern
-  -- against an integer-typed subject). This is by design NOT caught by
-  -- Solver — Katari allows pattern types to be wider/narrower/disjoint
-  -- from the subject, and disjoint arms should be flagged by Exhaustive
-  -- as unreachable instead. Currently Exhaustive doesn't catch this
-  -- (= Maranget's `useful` predicate doesn't check shape disjointness
-  -- against subject type), so the program silently typechecks. Tracked
-  -- as a separate fix.
-  it "match on integer with string-literal arm → error" $ do
-    pendingWith
-      "shape-disjoint match arm should be flagged by Exhaustive (K0292), not Solver"
+  -- Match-arm pattern type mismatch (string-literal pattern against an
+  -- integer subject). By design NOT a Solver error in Katari — pattern
+  -- types are allowed to be narrower/wider/disjoint from the subject.
+  -- An arm whose pattern is structurally disjoint from the subject is
+  -- flagged by 'Katari.Typechecker.Exhaustive' as K0292 (unreachable
+  -- arm) — see 'ExhaustiveSpec'. The Solver leaves it alone.
+  it "match on integer with string-literal arm → solver does NOT flag" $ do
     (_, _, _, solverErrors) <-
       runSolve $
         mconcat
@@ -1038,4 +1034,4 @@ illTypedRejection = describe "ill-typed program rejection" $ do
             "  }\n",
             "}"
           ]
-    null solverErrors `shouldBe` False
+    solverErrors `shouldBe` []

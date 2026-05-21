@@ -88,7 +88,7 @@ toDiagnostic = \case
   ExhaustiveErrorUnreachableArm sourceSpan ->
     diagnosticWarning
       "K0292"
-      "unreachable match arm: prior arms already cover this pattern"
+      "unreachable match arm: no value matches this pattern (prior arms already cover it, or its head is incompatible with the subject's type)"
       sourceSpan
 
 -- ===========================================================================
@@ -150,10 +150,19 @@ headColumnType context = case context.columnTypes of
 -- by any row of @P@.
 useful :: TypeCtx -> PatMatrix -> [PatHead] -> Bool
 useful context matrix@(PatMatrix rows) testRow = case (rows, testRow) of
-  -- Base: empty matrix — any query is useful (nothing is covered yet).
-  ([], _) -> True
   -- Base: empty query — useful only if matrix is empty (vacuous).
   (_, []) -> null rows
+  -- If the head of the query is a 'Ctor' tag structurally incompatible
+  -- with the column's subject type (e.g. a string-literal pattern against
+  -- an integer subject), the query matches no value — vacuously not
+  -- useful. Checked before the empty-matrix base case so a disjoint head
+  -- on the first arm is still flagged as unreachable.
+  (_, PatHeadCtor tag _ : _)
+    | not (tagCompatibleWithType tag (headColumnType context) context.identifierResult context.zonkResult) ->
+        False
+  -- Base: empty matrix — any (type-compatible) query is useful (nothing is
+  -- covered yet).
+  ([], _) -> True
   -- Recursive: dispatch on head of query.
   (_, PatHeadWildcard : restPats) ->
     let columnType = headColumnType context
@@ -251,6 +260,55 @@ getSubFieldTypes tag columnType idResult zonkResult = case tag of
 -- | @isCompleteSig seen ty idResult zonkResult@ — returns 'True' if @seen@
 -- (the set of ctor tags appearing in the first column of the pattern
 -- matrix) constitutes a complete signature for @ty@.
+-- | @tagCompatibleWithType tag ty ...@ — does the constructor tag denote
+-- at least one value of @ty@? Returns 'False' when the tag is structurally
+-- disjoint from the type (e.g. a string-literal tag against an integer
+-- column). Used by 'useful' to detect arms whose pattern can never match
+-- the subject. The check is conservative: unknown / variable / never
+-- column types return 'True' (= don't flag) so we don't over-warn while
+-- inference is incomplete.
+tagCompatibleWithType ::
+  CtorTag ->
+  SemanticType Resolved ->
+  IdentifierResult ->
+  ZonkResult ->
+  Bool
+tagCompatibleWithType tag ty idResult zonkResult = case ty of
+  SemanticTypeUnknown -> True
+  SemanticTypeNever -> True
+  SemanticTypeUnion branches ->
+    any (\branch -> tagCompatibleWithType tag branch idResult zonkResult) branches
+  _ -> case tag of
+    CtorTagLitInt n -> case ty of
+      SemanticTypeInteger -> True
+      SemanticTypeNumber -> True
+      SemanticTypeLiteralInteger m -> m == n
+      _ -> False
+    CtorTagLitNum d -> case ty of
+      SemanticTypeNumber -> True
+      SemanticTypeLiteralInteger m -> fromInteger m == d
+      _ -> False
+    CtorTagLitStr s -> case ty of
+      SemanticTypeString -> True
+      SemanticTypeLiteralString t -> t == s
+      _ -> False
+    CtorTagLitBool b -> case ty of
+      SemanticTypeBoolean -> True
+      SemanticTypeLiteralBoolean b' -> b == b'
+      _ -> False
+    CtorTagNull -> case ty of
+      SemanticTypeNull -> True
+      _ -> False
+    CtorTagTupleN n -> case ty of
+      SemanticTypeTuple es -> length es == n
+      _ -> False
+    CtorTagData cid -> case ty of
+      SemanticTypeData tid ->
+        case Map.lookup cid idResult.identifiedConstructors of
+          Just cd -> cd.constructorTypeId == tid
+          Nothing -> False
+      _ -> False
+
 isCompleteSig :: [CtorTag] -> SemanticType Resolved -> IdentifierResult -> ZonkResult -> Bool
 isCompleteSig seen ty idResult zonkResult = case ty of
   SemanticTypeBoolean ->
@@ -374,6 +432,7 @@ renderPatHead idResult zonkResult = \case
   PatHeadCtor (CtorTagLitBool b) _ -> if b then "true" else "false"
   PatHeadCtor CtorTagNull _ -> "null"
   PatHeadCtor (CtorTagLitInt n) _ -> Text.pack (show n)
+  PatHeadCtor (CtorTagLitNum d) _ -> Text.pack (show d)
   PatHeadCtor (CtorTagLitStr s) _ -> "\"" <> s <> "\""
   PatHeadCtor (CtorTagTupleN n) subs ->
     "("
