@@ -54,9 +54,21 @@ export function makeStepCtx(
       // Detach from the Immer draft graph: queue events live across
       // step boundaries; if any field is still a proxy when the draft's
       // produce returns, it gets revoked and the next dispatch reads
-      // garbage. JSON round-trip is cheaper than `current()` here
-      // because event payloads are guaranteed JSON-safe (no functions,
-      // no closures-as-values, no Maps).
+      // garbage.
+      //
+      // We use JSON round-trip rather than `structuredClone` (= V8
+      // native, ~2-3× faster) because thread ops construct events as
+      // plain objects whose nested `args` may still contain Immer-draft
+      // proxies. structuredClone refuses internal proxy slots; JSON
+      // serialise/parse walks the proxy via .toJSON() and produces a
+      // detached plain object. Immer's `current()` would also work but
+      // only on a top-level draft, and we'd need a deep walk to find
+      // the nested proxies — same cost.
+      //
+      // A faster alternative is to refactor op code so events never
+      // embed draft references in the first place (= always copy via
+      // `current()` at the source). Tracked as a v0.2.0 perf RFC; the
+      // JSON round-trip is the safe baseline.
       buffers.queue.push(detach(event));
     },
     emit(event) {

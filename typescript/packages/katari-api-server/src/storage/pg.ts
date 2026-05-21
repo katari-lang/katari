@@ -50,6 +50,13 @@ type Sql = ReturnType<typeof postgres>;
  * our app's data shapes (recursive Value / IRModule), so direct passing
  * fails type-check. We funnel every json-serializable parameter through
  * here.
+ *
+ * KNOWN TYPE LIE: this accepts and returns `never`, so the call site
+ * loses all type-check. Tightening (= a structural `JsonInput` parameter
+ * type) is blocked by upstream types (SchemaBundle.agents[i].parameters
+ * is `unknown`, AgentDefId / RawValue carry `unknown` field values). A
+ * proper fix requires making the source-of-truth types JSON-safe at the
+ * type level — tracked as a v0.2.0 RFC in memory.
  */
 function asJson<T>(value: T): never {
   return value as never;
