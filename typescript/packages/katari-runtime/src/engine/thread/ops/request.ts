@@ -7,7 +7,6 @@
 // RequestThread asks at most once in its lifetime; pendingAskId is
 // stored only as a sanity check.
 
-import type { Draft } from "immer";
 import { allocAskId } from "../common.js";
 import type { RequestThread } from "../types.js";
 import { defaultCancel, defaultCancelAckUnexpected } from "./defaults.js";
@@ -18,7 +17,7 @@ export const requestOps: ThreadOps<RequestThread> = {
     if (t.parent === null || t.parentCallId === null) {
       throw new Error("engine.request: RequestThread spawned with no parent");
     }
-    const askId = allocAskId(t as Draft<RequestThread>);
+    const askId = allocAskId(t as RequestThread);
     t.pendingAskId = askId;
     ctx.enqueue({
       kind: "ask",
@@ -36,7 +35,7 @@ export const requestOps: ThreadOps<RequestThread> = {
     throw new Error(`request thread received done (callId=${callId}) — no children expected on ${t.id}`);
   },
 
-  cancel: (ctx, t) => defaultCancel<RequestThread>(ctx, t as Draft<RequestThread>),
+  cancel: (ctx, t) => defaultCancel<RequestThread>(ctx, t as RequestThread),
   cancelAck: defaultCancelAckUnexpected,
 
   /**

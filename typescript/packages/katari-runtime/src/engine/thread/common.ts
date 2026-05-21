@@ -8,7 +8,6 @@
 // lives in the per-variant ops file. This module hosts the common code
 // that each op delegates into.
 
-import type { Draft } from "immer";
 import {
   type AskId,
   type CallId,
@@ -28,11 +27,11 @@ import type {
 
 // ─── Thread lookups ────────────────────────────────────────────────────────
 
-export function getThread(ctx: StepCtx, id: ThreadId): Draft<Thread> | undefined {
-  return ctx.state.threads[id] as Draft<Thread> | undefined;
+export function getThread(ctx: StepCtx, id: ThreadId): Thread | undefined {
+  return ctx.state.threads[id] as Thread | undefined;
 }
 
-export function requireThread(ctx: StepCtx, id: ThreadId): Draft<Thread> {
+export function requireThread(ctx: StepCtx, id: ThreadId): Thread {
   const t = getThread(ctx, id);
   if (t === undefined) {
     throw new Error(`engine: thread ${id} not found in state`);
@@ -46,34 +45,34 @@ export function deleteThread(ctx: StepCtx, id: ThreadId): void {
 
 // ─── Children bookkeeping ──────────────────────────────────────────────────
 
-export function setChild(t: Draft<Thread>, callId: CallId, childId: ThreadId): void {
+export function setChild(t: Thread, callId: CallId, childId: ThreadId): void {
   t.children[callId as number] = childId;
 }
 
-export function deleteChild(t: Draft<Thread>, callId: CallId): ThreadId | undefined {
+export function deleteChild(t: Thread, callId: CallId): ThreadId | undefined {
   const childId = t.children[callId as number];
   if (childId === undefined) return undefined;
   delete t.children[callId as number];
   return childId;
 }
 
-export function hasChildren(t: Draft<Thread>): boolean {
+export function hasChildren(t: Thread): boolean {
   return Object.keys(t.children).length > 0;
 }
 
-export function liveChildIds(t: Draft<Thread>): ThreadId[] {
+export function liveChildIds(t: Thread): ThreadId[] {
   return Object.values(t.children) as ThreadId[];
 }
 
 // ─── ID allocators (per-thread) ────────────────────────────────────────────
 
-export function allocCallId(t: Draft<Thread>): CallId {
+export function allocCallId(t: Thread): CallId {
   const id = t.nextCallId;
   t.nextCallId = ((id as number) + 1) as CallId;
   return id;
 }
 
-export function allocAskId(t: Draft<Thread>): AskId {
+export function allocAskId(t: Thread): AskId {
   const id = t.nextAskId;
   t.nextAskId = ((id as number) + 1) as AskId;
   return id;
@@ -86,7 +85,7 @@ export function allocAskId(t: Draft<Thread>): AskId {
  * child. If the thread already has no children, finishCancelling fires
  * immediately. Idempotent on already-cancelling threads.
  */
-export function beginCancel(ctx: StepCtx, t: Draft<Thread>): void {
+export function beginCancel(ctx: StepCtx, t: Thread): void {
   if (t.status === "cancelling") return;
   t.status = "cancelling";
   if (!hasChildren(t)) {
@@ -102,7 +101,7 @@ export function beginCancel(ctx: StepCtx, t: Draft<Thread>): void {
  * Re-check whether cancellation can complete now that a child went away.
  * Called from common done/cancelAck handlers when status === "cancelling".
  */
-export function checkCancelComplete(ctx: StepCtx, t: Draft<Thread>): void {
+export function checkCancelComplete(ctx: StepCtx, t: Thread): void {
   if (t.status !== "cancelling") return;
   if (hasChildren(t)) return;
   finishCancelling(ctx, t);
@@ -114,7 +113,7 @@ export function checkCancelComplete(ctx: StepCtx, t: Draft<Thread>): void {
  * (break-for). Centralized here so `finishCancelling` can read the field
  * without proliferating type guards everywhere.
  */
-function readPendingReturn(t: Draft<Thread>): import("../value.js").Value | undefined {
+function readPendingReturn(t: Thread): import("../value.js").Value | undefined {
   switch (t.kind) {
     case "agent":
     case "handle":
@@ -137,7 +136,7 @@ function readPendingReturn(t: Draft<Thread>): import("../value.js").Value | unde
  * the new design — we delegate to the variant's own completion path via
  * `emitAgentRootCompletion`.
  */
-export function finishCancelling(ctx: StepCtx, t: Draft<Thread>): void {
+export function finishCancelling(ctx: StepCtx, t: Thread): void {
   const pending = readPendingReturn(t);
   if (t.parent === null) {
     if (t.kind === "agent") {
@@ -179,7 +178,7 @@ export function finishCancelling(ctx: StepCtx, t: Draft<Thread>): void {
  */
 export function emitAgentRootCompletion(
   ctx: StepCtx,
-  t: Draft<import("./types.js").AgentThread>,
+  t: import("./types.js").AgentThread,
   value: import("../value.js").Value | undefined,
 ): void {
   const delegationId = t.delegationId as string;
@@ -218,7 +217,7 @@ export function emitAgentRootCompletion(
  */
 export function commonRemoveChild(
   ctx: StepCtx,
-  parent: Draft<Thread>,
+  parent: Thread,
   callId: CallId,
 ): boolean {
   const childId = deleteChild(parent, callId);
@@ -266,7 +265,7 @@ type EscalatableThread = import("./types.js").ExternalThread | import("./types.j
  */
 export function emitEscalateUpward(
   ctx: StepCtx,
-  t: Draft<EscalatableThread>,
+  t: EscalatableThread,
   peer: import("../endpoint.js").Endpoint,
   askKind: import("../event.js").AskKind,
   childCallId: CallId,
@@ -279,8 +278,8 @@ export function emitEscalateUpward(
     });
     return;
   }
-  const ownAskId = allocAskId(t as Draft<Thread>);
-  recordAskForward(t as Draft<Thread>, ownAskId, childCallId, childAskId);
+  const ownAskId = allocAskId(t as Thread);
+  recordAskForward(t as Thread, ownAskId, childCallId, childAskId);
   const escalationId = createEscalationId();
   t.pendingEscalations[ownAskId as unknown as number] = escalationId;
   // Mirror the registration into the global owner index so escalateAck
@@ -318,7 +317,7 @@ export function emitEscalateUpward(
  * `(childCallId, childAskId)` back to the original child.
  */
 export function recordAskForward(
-  t: Draft<Thread>,
+  t: Thread,
   ownAskId: AskId,
   childCallId: CallId,
   childAskId: AskId,
@@ -328,7 +327,7 @@ export function recordAskForward(
 
 /** Pop a forwarding entry. Returns undefined if no record exists. */
 export function popAskForward(
-  t: Draft<Thread>,
+  t: Thread,
   ownAskId: AskId,
 ): { childCallId: CallId; childAskId: AskId } | undefined {
   const entry = (t.askIdMap as AskIdMap)[ownAskId as number];
@@ -344,7 +343,7 @@ export function popAskForward(
  */
 export function proxyAskToParent(
   ctx: StepCtx,
-  t: Draft<Thread>,
+  t: Thread,
   childCallId: CallId,
   childAskId: AskId,
   askKind: import("../event.js").AskKind,
@@ -374,7 +373,7 @@ export function proxyAskToParent(
  */
 export function proxyAskAckToChild(
   ctx: StepCtx,
-  t: Draft<Thread>,
+  t: Thread,
   ownAskId: AskId,
   value: Value,
 ): void {
@@ -427,7 +426,7 @@ export function proxyAskAckToChild(
  */
 export function emitThrowEscalate(
   ctx: StepCtx,
-  t: Draft<Thread>,
+  t: Thread,
   message: string,
 ): void {
   if (t.parent === null || t.parentCallId === null) {
@@ -453,22 +452,22 @@ export function emitThrowEscalate(
 
 // ─── Scope helpers ─────────────────────────────────────────────────────────
 
-export function getScope(ctx: StepCtx, id: ScopeId): Draft<Scope> {
+export function getScope(ctx: StepCtx, id: ScopeId): Scope {
   const sc = ctx.state.scopes[id];
   if (sc === undefined) {
     throw new Error(`engine: scope ${id} not found`);
   }
-  return sc as Draft<Scope>;
+  return sc as Scope;
 }
 
 export function createScope(
   ctx: StepCtx,
   id: ScopeId,
   parentId: ScopeId | null,
-): Draft<Scope> {
+): Scope {
   const sc: Scope = { id, parentId, values: {} };
-  ctx.state.scopes[id] = sc as Draft<Scope>;
-  return ctx.state.scopes[id] as Draft<Scope>;
+  ctx.state.scopes[id] = sc as Scope;
+  return ctx.state.scopes[id] as Scope;
 }
 
 export function setValueInScope(
@@ -478,7 +477,7 @@ export function setValueInScope(
   value: Value,
 ): void {
   const sc = getScope(ctx, scopeId);
-  sc.values[varId] = value as Draft<Value>;
+  sc.values[varId] = value as Value;
 }
 
 // Hard upper bound on scope-chain depth to catch corrupt checkpoints

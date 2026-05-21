@@ -1,7 +1,6 @@
 // PrimThread ops. Leaf node — `create` runs the prim synchronously and
 // emits `done` to the parent. No children, no asks, no cancel cascade.
 
-import type { Draft } from "immer";
 import type { CallId } from "../../id.js";
 import { executePrim } from "../../prim.js";
 import { RecoverableEngineError } from "../../errors.js";
@@ -32,7 +31,7 @@ export const primOps: ThreadOps<PrimThread> = {
           : executePrim(t.primName, t.args);
     } catch (err) {
       if (err instanceof RecoverableEngineError) {
-        emitThrowEscalate(ctx, t as Draft<Thread>, err.message);
+        emitThrowEscalate(ctx, t as Thread, err.message);
         return;
       }
       throw err;
@@ -51,12 +50,12 @@ export const primOps: ThreadOps<PrimThread> = {
     throw new Error(`prim thread received done (callId=${callId}) — no children expected on ${t.id}`);
   },
 
-  cancel: (ctx, t) => defaultCancel<PrimThread>(ctx, t as Draft<PrimThread>),
+  cancel: (ctx, t) => defaultCancel<PrimThread>(ctx, t as PrimThread),
   cancelAck: defaultCancelAckUnexpected,
   ask: (ctx, t, askId, kind, childCallId) =>
-    defaultAskProxy<PrimThread>(ctx, t as Draft<PrimThread>, askId, kind, childCallId),
+    defaultAskProxy<PrimThread>(ctx, t as PrimThread, askId, kind, childCallId),
   askAck: (ctx, t, askId, value) =>
-    defaultAskAckProxy<PrimThread>(ctx, t as Draft<PrimThread>, askId, value),
+    defaultAskAckProxy<PrimThread>(ctx, t as PrimThread, askId, value),
 };
 
 // ─── get_metadata ──────────────────────────────────────────────────────────

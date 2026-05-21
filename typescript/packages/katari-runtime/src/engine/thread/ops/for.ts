@@ -10,7 +10,6 @@
 // Catches `break-for` (done-terminating) and `next-for` (askAck-terminating
 // with state-var modifiers) asks. Other asks bubble up.
 
-import type { Draft } from "immer";
 import type { ForBlock } from "../../../ir/types.js";
 import type { CallId } from "../../id.js";
 import type { ModMap } from "../../event.js";
@@ -47,11 +46,11 @@ export const forOps: ThreadOps<ForThread> = {
     const iterables: Value[] = block.iters.map(([_elem, source]) =>
       lookupValue(ctx, t.scopeId, source),
     );
-    t.iterableSnapshot = iterables as Draft<Value[]>;
+    t.iterableSnapshot = iterables;
 
     const total = getIterableTotal(iterables);
     if (total === 0) {
-      emitForDone(ctx, t as Draft<ForThread>, NULL_VALUE);
+      emitForDone(ctx, t as ForThread, NULL_VALUE);
       return;
     }
 
@@ -65,17 +64,17 @@ export const forOps: ThreadOps<ForThread> = {
       // we let it propagate via the bubbling ask and the surrounding
       // ask handler decides.
       for (let i = 0; i < total; i++) {
-        spawnParallelBody(ctx, t as Draft<ForThread>, block, iterables, i);
+        spawnParallelBody(ctx, t as ForThread, block, iterables, i);
       }
       return;
     }
 
-    bindElementVars(ctx, t as Draft<ForThread>, block, iterables, 0);
-    spawnBody(ctx, t as Draft<ForThread>, 0);
+    bindElementVars(ctx, t as ForThread, block, iterables, 0);
+    spawnBody(ctx, t as ForThread, 0);
   },
 
   done(ctx, t, callId, value) {
-    if (!commonRemoveChild(ctx, t as Draft<ForThread>, callId)) return;
+    if (!commonRemoveChild(ctx, t as ForThread, callId)) return;
 
     if ((callId as number) === (THEN_CALL_ID as number)) {
       // Then block done — propagate as our result.
@@ -95,7 +94,7 @@ export const forOps: ThreadOps<ForThread> = {
     if (block.parallel) {
       // Parallel mode: count down by checking remaining children.
       if (Object.keys(t.children).length === 0) {
-        emitForDone(ctx, t as Draft<ForThread>, NULL_VALUE);
+        emitForDone(ctx, t as ForThread, NULL_VALUE);
       }
       return;
     }
@@ -103,20 +102,20 @@ export const forOps: ThreadOps<ForThread> = {
     t.currentIndex += 1;
     const total = getIterableTotal(t.iterableSnapshot as Value[]);
     if (t.currentIndex >= total) {
-      emitForDone(ctx, t as Draft<ForThread>, NULL_VALUE);
+      emitForDone(ctx, t as ForThread, NULL_VALUE);
       return;
     }
-    bindElementVars(ctx, t as Draft<ForThread>, block, t.iterableSnapshot as Value[], t.currentIndex);
-    spawnBody(ctx, t as Draft<ForThread>, t.currentIndex);
+    bindElementVars(ctx, t as ForThread, block, t.iterableSnapshot as Value[], t.currentIndex);
+    spawnBody(ctx, t as ForThread, t.currentIndex);
   },
 
-  cancel: (ctx, t) => defaultCancel<ForThread>(ctx, t as Draft<ForThread>),
+  cancel: (ctx, t) => defaultCancel<ForThread>(ctx, t as ForThread),
 
   /**
    * Targeted-cancel followup for `next-for`.
    */
   cancelAck(ctx, t, callId) {
-    if (!commonRemoveChild(ctx, t as Draft<ForThread>, callId)) return;
+    if (!commonRemoveChild(ctx, t as ForThread, callId)) return;
     const action = (t.postCancelActions as Record<number, PostCancelAction>)[callId as number];
     if (action === undefined) {
       throw new Error(
@@ -134,25 +133,25 @@ export const forOps: ThreadOps<ForThread> = {
     t.currentIndex += 1;
     const total = getIterableTotal(t.iterableSnapshot as Value[]);
     if (t.currentIndex >= total) {
-      emitForDone(ctx, t as Draft<ForThread>, NULL_VALUE);
+      emitForDone(ctx, t as ForThread, NULL_VALUE);
       return;
     }
-    bindElementVars(ctx, t as Draft<ForThread>, block, t.iterableSnapshot as Value[], t.currentIndex);
-    spawnBody(ctx, t as Draft<ForThread>, t.currentIndex);
+    bindElementVars(ctx, t as ForThread, block, t.iterableSnapshot as Value[], t.currentIndex);
+    spawnBody(ctx, t as ForThread, t.currentIndex);
   },
 
   ask(ctx, t, askId, kind, childCallId) {
     if (kind.kind === "break-for") {
-      handleBreakFor(ctx, t as Draft<ForThread>, kind.value);
+      handleBreakFor(ctx, t as ForThread, kind.value);
       return;
     }
     if (kind.kind === "next-for") {
-      handleNextFor(ctx, t as Draft<ForThread>, kind.mods, childCallId);
+      handleNextFor(ctx, t as ForThread, kind.mods, childCallId);
       return;
     }
     proxyAskToParent(
       ctx,
-      t as Draft<ForThread>,
+      t as ForThread,
       childCallId,
       askId,
       kind,
@@ -160,7 +159,7 @@ export const forOps: ThreadOps<ForThread> = {
   },
 
   askAck: (ctx, t, askId, value) =>
-    defaultAskAckProxy<ForThread>(ctx, t as Draft<ForThread>, askId, value),
+    defaultAskAckProxy<ForThread>(ctx, t as ForThread, askId, value),
 };
 
 // ─── helpers ───────────────────────────────────────────────────────────────
@@ -198,7 +197,7 @@ function getIterableTotal(iterables: Value[]): number {
 
 function bindElementVars(
   ctx: StepCtx,
-  t: Draft<ForThread>,
+  t: ForThread,
   block: ForBlock,
   iterables: Value[],
   linearIndex: number,
@@ -221,7 +220,7 @@ function bindElementVars(
   }
 }
 
-function spawnBody(ctx: StepCtx, t: Draft<ForThread>, index: number): void {
+function spawnBody(ctx: StepCtx, t: ForThread, index: number): void {
   const block = getForBlock(ctx, t.blockId);
   spawnChild(ctx, {
     parentId: t.id,
@@ -239,7 +238,7 @@ function spawnBody(ctx: StepCtx, t: Draft<ForThread>, index: number): void {
  */
 function spawnParallelBody(
   ctx: StepCtx,
-  t: Draft<ForThread>,
+  t: ForThread,
   block: import("../../../ir/types.js").ForBlock,
   iterables: Value[],
   index: number,
@@ -272,7 +271,7 @@ function spawnParallelBody(
 
 function emitForDone(
   ctx: StepCtx,
-  t: Draft<ForThread>,
+  t: ForThread,
   value: Value,
 ): void {
   const block = getForBlock(ctx, t.blockId);
@@ -298,7 +297,7 @@ function emitForDone(
 
 function handleBreakFor(
   ctx: StepCtx,
-  t: Draft<ForThread>,
+  t: ForThread,
   value: Value,
 ): void {
   if (t.status === "cancelling") return;
@@ -308,7 +307,7 @@ function handleBreakFor(
 
 function handleNextFor(
   ctx: StepCtx,
-  t: Draft<ForThread>,
+  t: ForThread,
   mods: ModMap | undefined,
   childCallId: CallId,
 ): void {

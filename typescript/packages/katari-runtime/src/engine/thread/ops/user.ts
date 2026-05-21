@@ -21,7 +21,6 @@
 // ExternalThread is registered as the receiver of the eventual
 // `delegateAck`, which becomes a `done` to this UserThread.
 
-import type { Draft } from "immer";
 import type {
   Block,
   BlockId,
@@ -60,11 +59,11 @@ import type { ThreadOps } from "./types.js";
 export const userOps: ThreadOps<UserThread> = {
   create(ctx, t) {
     const block = getUserBlock(ctx, t.blockId);
-    runStatements(ctx, t as Draft<UserThread>, block);
+    runStatements(ctx, t as UserThread, block);
   },
 
   done(ctx, t, callId, value) {
-    if (!commonRemoveChild(ctx, t as Draft<UserThread>, callId)) return;
+    if (!commonRemoveChild(ctx, t as UserThread, callId)) return;
     const block = getUserBlock(ctx, t.blockId);
     // Carry the call's output VarId, if any.
     const stmt = block.statements[callId as number];
@@ -74,17 +73,17 @@ export const userOps: ThreadOps<UserThread> = {
         setValueInScope(ctx, t.scopeId, output, value);
       }
     }
-    runStatements(ctx, t as Draft<UserThread>, block);
+    runStatements(ctx, t as UserThread, block);
   },
 
-  cancel: (ctx, t) => defaultCancel<UserThread>(ctx, t as Draft<UserThread>),
+  cancel: (ctx, t) => defaultCancel<UserThread>(ctx, t as UserThread),
   cancelAck: defaultCancelAckUnexpected,
 
   ask: (ctx, t, askId, kind, childCallId) =>
-    defaultAskProxy<UserThread>(ctx, t as Draft<UserThread>, askId, kind, childCallId),
+    defaultAskProxy<UserThread>(ctx, t as UserThread, askId, kind, childCallId),
 
   askAck: (ctx, t, askId, value) =>
-    defaultAskAckProxy<UserThread>(ctx, t as Draft<UserThread>, askId, value),
+    defaultAskAckProxy<UserThread>(ctx, t as UserThread, askId, value),
 };
 
 function outputVarOf(stmt: Statement): VarId | undefined {
@@ -112,7 +111,7 @@ function getUserBlock(ctx: StepCtx, blockId: BlockId): UserBlock {
 
 function runStatements(
   ctx: StepCtx,
-  t: Draft<UserThread>,
+  t: UserThread,
   block: UserBlock,
 ): void {
   const statements = block.statements;
@@ -157,7 +156,7 @@ type StatementOutcome = "advance" | "wait";
 
 function handleStatement(
   ctx: StepCtx,
-  t: Draft<UserThread>,
+  t: UserThread,
   stmt: Statement,
 ): StatementOutcome {
   switch (stmt.kind) {
@@ -199,7 +198,7 @@ function handleStatement(
       const incoming = lookupValue(ctx, t.scopeId, stmt.body.source);
       const bindings = tryMatch(stmt.body.pattern, incoming);
       if (bindings === null) {
-        emitThrowEscalate(ctx, t as Draft<Thread>, "match: pattern did not match");
+        emitThrowEscalate(ctx, t as Thread, "match: pattern did not match");
         return "wait";
       }
       for (const [varId, value] of Object.entries(bindings)) {
@@ -240,7 +239,7 @@ function handleStatement(
       } else {
         emitThrowEscalate(
           ctx,
-          t as Draft<Thread>,
+          t as Thread,
           `call: expected a callable value, got ${value.kind}`,
         );
         return "wait";
@@ -270,7 +269,7 @@ function handleStatement(
  */
 function pushAgentDelegate(
   ctx: StepCtx,
-  t: Draft<UserThread>,
+  t: UserThread,
   callId: CallId,
   args: Record<string, Value>,
   agentDefId: AgentDefId,
@@ -296,7 +295,7 @@ function pushAgentDelegate(
 
 function pushCallEvent(
   ctx: StepCtx,
-  t: Draft<UserThread>,
+  t: UserThread,
   callId: CallId,
   call: CallData,
 ): void {
@@ -384,7 +383,7 @@ function contKindToAsk(
 
 function emitAskUpwards(
   ctx: StepCtx,
-  t: Draft<UserThread>,
+  t: UserThread,
   askKind: AskKind,
 ): void {
   if (t.parent === null) {

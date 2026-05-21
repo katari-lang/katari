@@ -19,7 +19,6 @@
 // delegation event channel (`escalate` / `escalateAck`), not through
 // this thread's parent chain.
 
-import type { Draft } from "immer";
 import type { CallId } from "../../id.js";
 import type { Endpoint } from "../../endpoint.js";
 import { PHANTOM_AGENT_EXTERNAL_NAME, type ExternalThread } from "../types.js";
@@ -88,7 +87,7 @@ export const externalOps: ThreadOps<ExternalThread> = {
         : ctx.state.ffiTargetEndpoint;
     emitEscalateUpward(
       ctx,
-      t as Draft<ExternalThread>,
+      t as ExternalThread,
       peer,
       kind,
       childCallId,
@@ -136,6 +135,6 @@ export const externalOps: ThreadOps<ExternalThread> = {
       });
       return;
     }
-    defaultAskAckProxy<ExternalThread>(ctx, t as Draft<ExternalThread>, askId, value);
+    defaultAskAckProxy<ExternalThread>(ctx, t as ExternalThread, askId, value);
   },
 };

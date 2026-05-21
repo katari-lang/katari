@@ -12,7 +12,6 @@
 // go via `ctx.emit` / `ctx.recordError` / `ctx.log`. Internal events go via
 // `ctx.enqueue`.
 
-import type { Draft } from "immer";
 import type { AskId, CallId } from "../../id.js";
 import type { AskKind } from "../../event.js";
 import type { StepCtx } from "../../step-ctx.js";
@@ -21,17 +20,17 @@ import type { Thread } from "../types.js";
 
 export type ThreadOps<T extends Thread> = {
   /** First dispatch after the thread is registered in state.threads. */
-  create(ctx: StepCtx, t: Draft<T>): void;
+  create(ctx: StepCtx, t: T): void;
   /** A direct child completed normally with `value`. */
-  done(ctx: StepCtx, t: Draft<T>, callId: CallId, value: Value): void;
+  done(ctx: StepCtx, t: T, callId: CallId, value: Value): void;
   /**
    * cancel was requested. Default behaviour (in `defaultOps`) is the cascade
    * via `beginCancel`; variants override to send custom outbound events
    * first (e.g. ExternalThread emits a terminate to FFI before waiting).
    */
-  cancel(ctx: StepCtx, t: Draft<T>): void;
+  cancel(ctx: StepCtx, t: T): void;
   /** A direct child cancellation completed (used for targeted cancel). */
-  cancelAck(ctx: StepCtx, t: Draft<T>, callId: CallId): void;
+  cancelAck(ctx: StepCtx, t: T, callId: CallId): void;
   /**
    * An ask bubbled up from `childCallId`. The variant decides whether to
    * catch (process locally + emit askAck or convert to done) or to proxy
@@ -41,7 +40,7 @@ export type ThreadOps<T extends Thread> = {
    */
   ask(
     ctx: StepCtx,
-    t: Draft<T>,
+    t: T,
     askId: AskId,
     askKind: AskKind,
     childCallId: CallId,
@@ -51,5 +50,5 @@ export type ThreadOps<T extends Thread> = {
    * `proxyAskAckToChild`; variants that originate asks (RequestThread)
    * intercept and convert to `done`.
    */
-  askAck(ctx: StepCtx, t: Draft<T>, askId: AskId, value: Value): void;
+  askAck(ctx: StepCtx, t: T, askId: AskId, value: Value): void;
 };

@@ -5,7 +5,6 @@
 // itself. Variant-specific fields are filled in here so the variant ops
 // can rely on a complete record from their first `create` invocation.
 
-import type { Draft } from "immer";
 import { match } from "ts-pattern";
 import type { Block, BlockId } from "../ir/types.js";
 import {
@@ -65,7 +64,7 @@ export function spawnChild(ctx: StepCtx, args: SpawnArgs): ThreadId {
     throw new Error(`engine.spawnChild: blockId ${args.blockId} not found in IR`);
   }
 
-  const parent = ctx.state.threads[args.parentId] as Draft<Thread> | undefined;
+  const parent = ctx.state.threads[args.parentId] as Thread | undefined;
   if (parent === undefined) {
     throw new Error(`engine.spawnChild: parent ${args.parentId} not found`);
   }
@@ -177,7 +176,7 @@ export function spawnChild(ctx: StepCtx, args: SpawnArgs): ThreadId {
     })
     .exhaustive();
 
-  ctx.state.threads[newThreadId] = thread as Draft<Thread>;
+  ctx.state.threads[newThreadId] = thread as Thread;
   setChild(parent, args.parentCallId, newThreadId);
 
   ctx.enqueue({ kind: "create", threadId: newThreadId });
@@ -240,7 +239,7 @@ export function spawnAgentRoot(
     delegationId: args.delegationId,
     pendingEscalations: {},
   };
-  ctx.state.threads[newThreadId] = agent as Draft<Thread>;
+  ctx.state.threads[newThreadId] = agent as Thread;
   ctx.enqueue({ kind: "create", threadId: newThreadId });
   return newThreadId;
 }
@@ -266,7 +265,7 @@ export function spawnExternalForAgentDelegate(
   ctx: StepCtx,
   args: SpawnExternalForAgentArgs,
 ): ThreadId {
-  const parent = ctx.state.threads[args.parentId] as Draft<Thread> | undefined;
+  const parent = ctx.state.threads[args.parentId] as Thread | undefined;
   if (parent === undefined) {
     throw new Error(
       `engine.spawnExternalForAgentDelegate: parent ${args.parentId} not found`,
@@ -296,7 +295,7 @@ export function spawnExternalForAgentDelegate(
     delegationId: args.delegationId,
     pendingEscalations: {},
   };
-  ctx.state.threads[newThreadId] = ext as Draft<Thread>;
+  ctx.state.threads[newThreadId] = ext as Thread;
   setChild(parent, args.parentCallId, newThreadId);
   // Register on the sender side so inbound delegateAck / terminateAck
   // can be routed back to this phantom. The caller emits the outbound

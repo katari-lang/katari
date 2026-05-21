@@ -15,7 +15,6 @@
 //   - `cancel`     incoming external terminate; cancel body, no
 //                  pendingReturn, finishCancelling emits terminateAck
 
-import type { Draft } from "immer";
 import type {
   AgentBlock,
   Block,
@@ -66,10 +65,10 @@ export const agentOps: ThreadOps<AgentThread> = {
   },
 
   done(ctx, t, callId, value) {
-    if (!commonRemoveChild(ctx, t as Draft<AgentThread>, callId)) return;
+    if (!commonRemoveChild(ctx, t as AgentThread, callId)) return;
     if (callId === BODY_CALL_ID) {
       // Body finished naturally — emit delegateAck and remove ourselves.
-      finishWithValue(ctx, t as Draft<AgentThread>, value);
+      finishWithValue(ctx, t as AgentThread, value);
       return;
     }
     // We don't expect any other children.
@@ -78,17 +77,17 @@ export const agentOps: ThreadOps<AgentThread> = {
     );
   },
 
-  cancel: (ctx, t) => defaultCancel<AgentThread>(ctx, t as Draft<AgentThread>),
+  cancel: (ctx, t) => defaultCancel<AgentThread>(ctx, t as AgentThread),
   cancelAck: (ctx, t, callId) => {
     // Body finished cancelling. commonRemoveChild handles the bookkeeping;
     // finishCancelling fires from there if status === "cancelling" and
     // there are no children left.
-    commonRemoveChild(ctx, t as Draft<AgentThread>, callId);
+    commonRemoveChild(ctx, t as AgentThread, callId);
   },
 
   ask(ctx, t, askId, kind, childCallId) {
     if (kind.kind === "return") {
-      catchReturn(ctx, t as Draft<AgentThread>, kind.value);
+      catchReturn(ctx, t as AgentThread, kind.value);
       return;
     }
     if (t.parent === null) {
@@ -104,17 +103,17 @@ export const agentOps: ThreadOps<AgentThread> = {
         });
         return;
       }
-      emitEscalateUpward(ctx, t as Draft<AgentThread>, peer, kind, childCallId, askId);
+      emitEscalateUpward(ctx, t as AgentThread, peer, kind, childCallId, askId);
       return;
     }
     // Non-root AgentThread (spawned via spawnChild for a structural agent
     // call — currently unreachable because agent calls go through
     // StatementAgentCall, but kept for symmetry): bubble past as before.
-    proxyAskToParent(ctx, t as Draft<AgentThread>, childCallId, askId, kind);
+    proxyAskToParent(ctx, t as AgentThread, childCallId, askId, kind);
   },
 
   askAck: (ctx, t, askId, value) =>
-    defaultAskAckProxy<AgentThread>(ctx, t as Draft<AgentThread>, askId, value),
+    defaultAskAckProxy<AgentThread>(ctx, t as AgentThread, askId, value),
 };
 
 // ─── helpers ───────────────────────────────────────────────────────────────
@@ -143,7 +142,7 @@ function getAgentBlock(ctx: StepCtx, blockId: BlockId): AgentBlock {
  */
 function finishWithValue(
   ctx: StepCtx,
-  t: Draft<AgentThread>,
+  t: AgentThread,
   value: Value,
 ): void {
   if (t.parent === null) {
@@ -167,7 +166,7 @@ function finishWithValue(
  */
 function catchReturn(
   ctx: StepCtx,
-  t: Draft<AgentThread>,
+  t: AgentThread,
   value: Value,
 ): void {
   if (t.status === "cancelling") return;

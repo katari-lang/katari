@@ -13,7 +13,6 @@
 // `applyEvent` drain when scope count growth crosses a heuristic
 // threshold.
 
-import type { Draft } from "immer";
 import type { ClosureId, ScopeId } from "./id.js";
 import type { Scope } from "./scope.js";
 import type { State } from "./state.js";
@@ -37,7 +36,7 @@ export function shouldGc(state: State): boolean {
 }
 
 /** Mutate the Immer draft to remove unreachable scopes + closures. */
-export function collectGarbage(state: Draft<State>): void {
+export function collectGarbage(state: State): void {
   const reachableScopes = new Set<ScopeId>();
   const reachableClosures = new Set<number>();
   const worklist: ScopeId[] = [];

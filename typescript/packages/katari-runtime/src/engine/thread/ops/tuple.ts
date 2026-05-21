@@ -1,6 +1,5 @@
 // TupleThread ops. Wraps the shared collecting logic.
 
-import type { Draft } from "immer";
 import type { CallId } from "../../id.js";
 import { commonRemoveChild } from "../common.js";
 import type { TupleThread } from "../types.js";
@@ -18,13 +17,13 @@ export const tupleOps: ThreadOps<TupleThread> = {
     collectingCreate(ctx, t);
   },
   done(ctx, t, callId, value) {
-    if (!commonRemoveChild(ctx, t as Draft<TupleThread>, callId)) return;
+    if (!commonRemoveChild(ctx, t as TupleThread, callId)) return;
     collectingDone(ctx, t, callId, value);
   },
-  cancel: (ctx, t) => defaultCancel<TupleThread>(ctx, t as Draft<TupleThread>),
+  cancel: (ctx, t) => defaultCancel<TupleThread>(ctx, t as TupleThread),
   cancelAck: defaultCancelAckUnexpected,
   ask: (ctx, t, askId, kind, childCallId) =>
-    defaultAskProxy<TupleThread>(ctx, t as Draft<TupleThread>, askId, kind, childCallId),
+    defaultAskProxy<TupleThread>(ctx, t as TupleThread, askId, kind, childCallId),
   askAck: (ctx, t, askId, value) =>
-    defaultAskAckProxy<TupleThread>(ctx, t as Draft<TupleThread>, askId, value),
+    defaultAskAckProxy<TupleThread>(ctx, t as TupleThread, askId, value),
 };

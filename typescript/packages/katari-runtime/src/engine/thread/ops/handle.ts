@@ -22,7 +22,6 @@
 // `break` is the same return-mechanism as agent UserThread: cancel all
 // children, finishCancelling emits `done` with `pendingReturn`.
 
-import type { Draft } from "immer";
 import type { Block, BlockId, HandleBlock, QualifiedName } from "../../../ir/types.js";
 import type { AskId, CallId, ThreadId } from "../../id.js";
 import { spawnChild } from "../../spawn.js";
@@ -79,7 +78,7 @@ export const handleOps: ThreadOps<HandleThread> = {
 
   done(ctx, t, callId, value) {
     const role = (t.childRoles as Record<number, ChildRole>)[callId as number];
-    if (!commonRemoveChild(ctx, t as Draft<HandleThread>, callId)) return;
+    if (!commonRemoveChild(ctx, t as HandleThread, callId)) return;
     if (role === undefined) return;
     delete t.childRoles[callId as number];
 
@@ -88,7 +87,7 @@ export const handleOps: ThreadOps<HandleThread> = {
         // Main finished — schedule the thenClause (or its absence).
         const action: PendingAction = { kind: "thenClause", mainResultValue: value };
         if (isParallel(ctx, t.blockId) || !isBusy(t)) {
-          runAction(ctx, t as Draft<HandleThread>, action);
+          runAction(ctx, t as HandleThread, action);
         } else {
           t.pendingActions.push(action);
         }
@@ -103,15 +102,15 @@ export const handleOps: ThreadOps<HandleThread> = {
       case "thenClause":
         // thenClause done — that's our result. Cancel anything still
         // running and emit `done` once the cascade clears.
-        enterCancellingForResult(ctx, t as Draft<HandleThread>, value);
+        enterCancellingForResult(ctx, t as HandleThread, value);
         return;
     }
   },
 
-  cancel: (ctx, t) => defaultCancel<HandleThread>(ctx, t as Draft<HandleThread>),
+  cancel: (ctx, t) => defaultCancel<HandleThread>(ctx, t as HandleThread),
 
   cancelAck(ctx, t, callId) {
-    if (!commonRemoveChild(ctx, t as Draft<HandleThread>, callId)) return;
+    if (!commonRemoveChild(ctx, t as HandleThread, callId)) return;
     delete t.childRoles[callId as number];
 
     const action = (t.postCancelActions as Record<number, PostCancelAction>)[callId as number];
@@ -150,7 +149,7 @@ export const handleOps: ThreadOps<HandleThread> = {
     // Sequential: dispatch the next pending action if any.
     if (!isParallel(ctx, t.blockId) && !isBusy(t) && t.pendingActions.length > 0) {
       const next = t.pendingActions.shift()!;
-      runAction(ctx, t as Draft<HandleThread>, next);
+      runAction(ctx, t as HandleThread, next);
     }
   },
 
@@ -167,14 +166,14 @@ export const handleOps: ThreadOps<HandleThread> = {
           askerCallId: childCallId,
         };
         if (block.parallel || !isBusy(t)) {
-          runAction(ctx, t as Draft<HandleThread>, action);
+          runAction(ctx, t as HandleThread, action);
         } else {
           t.pendingActions.push(action);
         }
         return;
       }
       // Not ours — bubble up.
-      proxyAskToParent(ctx, t as Draft<HandleThread>, childCallId, askId, kind);
+      proxyAskToParent(ctx, t as HandleThread, childCallId, askId, kind);
       return;
     }
 
@@ -206,22 +205,22 @@ export const handleOps: ThreadOps<HandleThread> = {
         return;
       }
       // Not ours — bubble up.
-      proxyAskToParent(ctx, t as Draft<HandleThread>, childCallId, askId, kind);
+      proxyAskToParent(ctx, t as HandleThread, childCallId, askId, kind);
       return;
     }
 
     // break: catch (done-terminating).
     if (kind.kind === "break") {
-      handleBreak(ctx, t as Draft<HandleThread>, kind.value);
+      handleBreak(ctx, t as HandleThread, kind.value);
       return;
     }
 
     // Anything else: bubble up.
-    proxyAskToParent(ctx, t as Draft<HandleThread>, childCallId, askId, kind);
+    proxyAskToParent(ctx, t as HandleThread, childCallId, askId, kind);
   },
 
   askAck: (ctx, t, askId, value) =>
-    defaultAskAckProxy<HandleThread>(ctx, t as Draft<HandleThread>, askId, value),
+    defaultAskAckProxy<HandleThread>(ctx, t as HandleThread, askId, value),
 };
 
 // ─── helpers ───────────────────────────────────────────────────────────────
@@ -240,7 +239,7 @@ function isParallel(ctx: StepCtx, blockId: BlockId): boolean {
 }
 
 /** A handler body or thenClause is currently running (sequential gate). */
-function isBusy(t: Draft<HandleThread>): boolean {
+function isBusy(t: HandleThread): boolean {
   for (const role of Object.values(t.childRoles as Record<number, ChildRole>)) {
     if (role.kind === "handlerBody" || role.kind === "thenClause") return true;
   }
@@ -249,7 +248,7 @@ function isBusy(t: Draft<HandleThread>): boolean {
 
 function runAction(
   ctx: StepCtx,
-  t: Draft<HandleThread>,
+  t: HandleThread,
   action: PendingAction,
 ): void {
   switch (action.kind) {
@@ -264,7 +263,7 @@ function runAction(
 
 function spawnHandlerBody(
   ctx: StepCtx,
-  t: Draft<HandleThread>,
+  t: HandleThread,
   reqId: QualifiedName,
   args: Record<string, Value>,
   askId: AskId,
@@ -298,7 +297,7 @@ function spawnHandlerBody(
 
 function spawnThenClauseOrFinish(
   ctx: StepCtx,
-  t: Draft<HandleThread>,
+  t: HandleThread,
   mainResultValue: Value,
 ): void {
   const block = getHandleBlock(ctx, t.blockId);
@@ -325,7 +324,7 @@ function spawnThenClauseOrFinish(
 
 function handleBreak(
   ctx: StepCtx,
-  t: Draft<HandleThread>,
+  t: HandleThread,
   value: Value,
 ): void {
   if (t.status === "cancelling") return;
@@ -335,7 +334,7 @@ function handleBreak(
 
 function enterCancellingForResult(
   ctx: StepCtx,
-  t: Draft<HandleThread>,
+  t: HandleThread,
   value: Value,
 ): void {
   if (t.status === "cancelling") return;

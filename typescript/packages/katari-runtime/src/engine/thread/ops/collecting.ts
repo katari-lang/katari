@@ -7,7 +7,6 @@
 //
 // The variant ops files just specialize this with the right `resultKind`.
 
-import type { Draft } from "immer";
 import type { ArrayBlock, BlockId, TupleBlock } from "../../../ir/types.js";
 import type { CallId } from "../../id.js";
 import { spawnChild } from "../../spawn.js";
@@ -20,7 +19,7 @@ type CollectingBlock = TupleBlock | ArrayBlock;
 
 export function collectingCreate(
   ctx: StepCtx,
-  t: Draft<CollectingThread>,
+  t: CollectingThread,
 ): void {
   const block = getBlock(ctx, t.blockId);
   const elements = block.elements;
@@ -41,7 +40,7 @@ export function collectingCreate(
 
 export function collectingDone(
   ctx: StepCtx,
-  t: Draft<CollectingThread>,
+  t: CollectingThread,
   callId: CallId,
   value: Value,
 ): void {
@@ -50,7 +49,7 @@ export function collectingDone(
   // Common bookkeeping (delete child) is done by the runner via the
   // common.ts helper before the variant op runs. Here we just record
   // the value and decide next steps.
-  t.collected[callId as number] = value as Draft<Value>;
+  t.collected[callId as number] = value as Value;
 
   if (block.parallel) {
     if (Object.keys(t.collected).length >= elements.length) {
@@ -83,7 +82,7 @@ function getBlock(ctx: StepCtx, blockId: BlockId): CollectingBlock {
 
 function spawnElement(
   ctx: StepCtx,
-  t: Draft<CollectingThread>,
+  t: CollectingThread,
   index: number,
   blockId: BlockId,
 ): void {
@@ -98,7 +97,7 @@ function spawnElement(
 
 function finishCollecting(
   ctx: StepCtx,
-  t: Draft<CollectingThread>,
+  t: CollectingThread,
   totalLen: number,
 ): void {
   const elements: Value[] = [];
@@ -114,7 +113,7 @@ function finishCollecting(
 
 function emitDone(
   ctx: StepCtx,
-  t: Draft<CollectingThread>,
+  t: CollectingThread,
   elements: Value[],
 ): void {
   if (t.parent === null || t.parentCallId === null) return;

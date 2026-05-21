@@ -2,7 +2,6 @@
 // into their own ops record and override only the methods that need
 // variant-specific behaviour.
 
-import type { Draft } from "immer";
 import type { AskId, CallId } from "../../id.js";
 import type { AskKind } from "../../event.js";
 import type { StepCtx } from "../../step-ctx.js";
@@ -22,7 +21,7 @@ import type { Thread } from "../types.js";
  */
 export function defaultCancel<T extends Thread>(
   ctx: StepCtx,
-  t: Draft<T>,
+  t: T,
 ): void {
   beginCancel(ctx, t);
 }
@@ -37,7 +36,7 @@ export function defaultCancel<T extends Thread>(
  */
 export function defaultAskProxy<T extends Thread>(
   ctx: StepCtx,
-  t: Draft<T>,
+  t: T,
   childAskId: AskId,
   askKind: AskKind,
   childCallId: CallId,
@@ -48,7 +47,7 @@ export function defaultAskProxy<T extends Thread>(
 /** Default askAck behaviour: forward via askIdMap. */
 export function defaultAskAckProxy<T extends Thread>(
   ctx: StepCtx,
-  t: Draft<T>,
+  t: T,
   askId: AskId,
   value: Value,
 ): void {
@@ -66,10 +65,10 @@ export function defaultAskAckProxy<T extends Thread>(
  */
 export function defaultCancelAckUnexpected<T extends Thread>(
   ctx: StepCtx,
-  t: Draft<T>,
+  t: T,
   callId: CallId,
 ): void {
-  if (commonRemoveChild(ctx, t as unknown as Draft<Thread>, callId)) {
+  if (commonRemoveChild(ctx, t as unknown as Thread, callId)) {
     // Parent is running and the child went away unexpectedly.
     throw new Error(
       `engine: ${t.kind} thread received unexpected cancelAck (callId=${callId})`,

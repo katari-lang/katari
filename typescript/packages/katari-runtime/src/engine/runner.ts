@@ -1,14 +1,15 @@
 // Runner: drives the internal event queue inside one applyEvent call.
 //
 // The runner doesn't know about Thread variants; it dispatches each event
-// to the per-method routing in `thread/ops/index.ts`. State updates pass
-// through Immer's `produceWithPatches` so we get diff information for free.
+// to the per-method routing in `thread/ops/index.ts`. State is mutated in
+// place: every tick creates a fresh `CoreModule` instance and reloads
+// state from the DB at tick start, so half-modified state from a thrown
+// op is discarded with the instance (tx rollback handles the DB side).
 //
 // Stale-event semantics: events targeting a thread that was already
 // removed from `state.threads` are dropped silently with a debug log
 // (matches the previous engine's behaviour).
 
-import { produce } from "immer";
 import { match } from "ts-pattern";
 import { EntryNotFoundError, RecoverableEngineError } from "./errors.js";
 import type { Event, InternalEventPayload } from "./event.js";
@@ -54,64 +55,55 @@ export function drive(
   buffers: StepBuffers;
 } {
   const buffers = emptyBuffers();
+  const ctx = makeStepCtx(state, buffers);
 
-  let current = state;
   if (!isInternal(initial.payload)) {
-    current = applyTranslateExternal(current, buffers, initial);
+    applyTranslateExternal(ctx, initial);
   } else {
     buffers.queue.push(initial.payload);
   }
 
   while (buffers.queue.length > 0) {
     const ev = buffers.queue.shift()!;
-    current = produce(current, (draft) => {
-      const ctx = makeStepCtx(draft, buffers);
-      step(ctx, ev);
-    });
+    step(ctx, ev);
   }
 
-  return { state: current, buffers };
+  return { state, buffers };
 }
 
 /**
- * Run `translateExternal` against the current state and return the
- * next state. Recoverable errors raised inside translation are
- * recorded; anything else propagates.
+ * Run `translateExternal` against the live state. Recoverable errors
+ * raised inside translation are recorded; anything else propagates.
  */
 function applyTranslateExternal(
-  current: State,
-  buffers: StepBuffers,
+  ctx: ReturnType<typeof makeStepCtx>,
   event: Event,
-): State {
-  const next = produce(current, (draft) => {
-    const ctx = makeStepCtx(draft, buffers);
-    try {
-      translateExternal(ctx, event);
-    } catch (err) {
-      if (err instanceof RecoverableEngineError) {
-        // Emit a throw escalate back to the sender so they can surface
-        // the error (e.g. agent entry not found → API Module marks agent
-        // as error). Only meaningful for `delegate` events; other payload
-        // kinds that error here are dropped silently.
-        if (!isInternal(event.payload) && event.payload.kind === "delegate") {
-          ctx.emit({
-            from: ctx.state.selfEndpoint,
-            to: event.from,
-            payload: {
-              kind: "escalate",
-              delegationId: event.payload.delegationId,
-              escalationId: createEscalationId(),
-              agentDefId: encodeCoreAgentDefId({ kind: "qname", value: "prim.throw" }),
-              args: { msg: { kind: "string", value: err.message } },
-            },
-          });
-        }
-      } else {
-        throw err;
+): void {
+  try {
+    translateExternal(ctx, event);
+  } catch (err) {
+    if (err instanceof RecoverableEngineError) {
+      // Emit a throw escalate back to the sender so they can surface
+      // the error (e.g. agent entry not found → API Module marks agent
+      // as error). Only meaningful for `delegate` events; other payload
+      // kinds that error here are dropped silently.
+      if (!isInternal(event.payload) && event.payload.kind === "delegate") {
+        ctx.emit({
+          from: ctx.state.selfEndpoint,
+          to: event.from,
+          payload: {
+            kind: "escalate",
+            delegationId: event.payload.delegationId,
+            escalationId: createEscalationId(),
+            agentDefId: encodeCoreAgentDefId({ kind: "qname", value: "prim.throw" }),
+            args: { msg: { kind: "string", value: err.message } },
+          },
+        });
       }
+    } else {
+      throw err;
     }
-  });
-  return next;
+  }
 }
 
 // ─── Single-step dispatch ──────────────────────────────────────────────────
@@ -136,7 +128,7 @@ function onCreate(
   ctx: ReturnType<typeof makeStepCtx>,
   ev: Extract<InternalEventPayload, { kind: "create" }>,
 ): void {
-  const t = ctx.state.threads[ev.threadId] as import("immer").Draft<Thread> | undefined;
+  const t = ctx.state.threads[ev.threadId] as Thread | undefined;
   if (t === undefined) {
     throw new Error(
       `engine: create event for ${ev.threadId} but no thread record present`,
@@ -149,7 +141,7 @@ function onDone(
   ctx: ReturnType<typeof makeStepCtx>,
   ev: Extract<InternalEventPayload, { kind: "done" }>,
 ): void {
-  const t = ctx.state.threads[ev.target] as import("immer").Draft<Thread> | undefined;
+  const t = ctx.state.threads[ev.target] as Thread | undefined;
   if (t === undefined) {
     ctx.log("debug", "engine: stale done dropped", { target: ev.target });
     return;
@@ -161,7 +153,7 @@ function onCancel(
   ctx: ReturnType<typeof makeStepCtx>,
   ev: Extract<InternalEventPayload, { kind: "cancel" }>,
 ): void {
-  const t = ctx.state.threads[ev.target] as import("immer").Draft<Thread> | undefined;
+  const t = ctx.state.threads[ev.target] as Thread | undefined;
   if (t === undefined) {
     ctx.log("debug", "engine: stale cancel dropped", { target: ev.target });
     return;
@@ -173,7 +165,7 @@ function onCancelAck(
   ctx: ReturnType<typeof makeStepCtx>,
   ev: Extract<InternalEventPayload, { kind: "cancelAck" }>,
 ): void {
-  const t = ctx.state.threads[ev.target] as import("immer").Draft<Thread> | undefined;
+  const t = ctx.state.threads[ev.target] as Thread | undefined;
   if (t === undefined) {
     ctx.log("debug", "engine: stale cancelAck dropped", { target: ev.target });
     return;
@@ -185,7 +177,7 @@ function onAsk(
   ctx: ReturnType<typeof makeStepCtx>,
   ev: Extract<InternalEventPayload, { kind: "ask" }>,
 ): void {
-  const t = ctx.state.threads[ev.target] as import("immer").Draft<Thread> | undefined;
+  const t = ctx.state.threads[ev.target] as Thread | undefined;
   if (t === undefined) {
     ctx.log("debug", "engine: stale ask dropped", { target: ev.target, askId: ev.askId });
     return;
@@ -197,7 +189,7 @@ function onAskAck(
   ctx: ReturnType<typeof makeStepCtx>,
   ev: Extract<InternalEventPayload, { kind: "askAck" }>,
 ): void {
-  const t = ctx.state.threads[ev.target] as import("immer").Draft<Thread> | undefined;
+  const t = ctx.state.threads[ev.target] as Thread | undefined;
   if (t === undefined) {
     ctx.log("debug", "engine: stale askAck dropped", { target: ev.target, askId: ev.askId });
     return;
@@ -344,10 +336,9 @@ function translateExternal(
     // qname-encoded request; closure-encoded escalates are not yet
     // handle-routable and fall back to reqId 0 (caught only by handlers
     // installed at reqId 0, mostly a debug fallback).
-    const draft = ext as import("immer").Draft<typeof ext>;
-    const ownAskId = (draft.nextAskId as number) as import("./id.js").AskId;
-    draft.nextAskId = ((draft.nextAskId as number) + 1) as import("./id.js").AskId;
-    draft.pendingEscalations[ownAskId as unknown as number] =
+    const ownAskId = (ext.nextAskId as number) as import("./id.js").AskId;
+    ext.nextAskId = ((ext.nextAskId as number) + 1) as import("./id.js").AskId;
+    ext.pendingEscalations[ownAskId as unknown as number] =
       p.escalationId as import("./id.js").EscalationId;
     // NOTE on the global owner index: do NOT write 'escalationOwners'
     // here. In a CORE→CORE round-trip the same escalationId is

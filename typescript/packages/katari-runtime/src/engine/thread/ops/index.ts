@@ -8,7 +8,6 @@
 // hasn't landed yet — useful for spotting integration gaps as variants
 // come online.
 
-import type { Draft } from "immer";
 import { match } from "ts-pattern";
 import type { AskKind } from "../../event.js";
 import type { AskId, CallId } from "../../id.js";
@@ -29,7 +28,7 @@ import { userOps } from "./user.js";
 
 // ─── Per-method dispatch ───────────────────────────────────────────────────
 
-export function dispatchCreate(ctx: StepCtx, t: Draft<Thread>): void {
+export function dispatchCreate(ctx: StepCtx, t: Thread): void {
   match(t)
     .with({ kind: "agent" }, x => agentOps.create(ctx, x))
     .with({ kind: "prim" }, x => primOps.create(ctx, x))
@@ -47,7 +46,7 @@ export function dispatchCreate(ctx: StepCtx, t: Draft<Thread>): void {
 
 export function dispatchDone(
   ctx: StepCtx,
-  t: Draft<Thread>,
+  t: Thread,
   callId: CallId,
   value: Value,
 ): void {
@@ -66,7 +65,7 @@ export function dispatchDone(
     .exhaustive();
 }
 
-export function dispatchCancel(ctx: StepCtx, t: Draft<Thread>): void {
+export function dispatchCancel(ctx: StepCtx, t: Thread): void {
   match(t)
     .with({ kind: "agent" }, x => agentOps.cancel(ctx, x))
     .with({ kind: "prim" }, x => primOps.cancel(ctx, x))
@@ -84,7 +83,7 @@ export function dispatchCancel(ctx: StepCtx, t: Draft<Thread>): void {
 
 export function dispatchCancelAck(
   ctx: StepCtx,
-  t: Draft<Thread>,
+  t: Thread,
   callId: CallId,
 ): void {
   match(t)
@@ -104,7 +103,7 @@ export function dispatchCancelAck(
 
 export function dispatchAsk(
   ctx: StepCtx,
-  t: Draft<Thread>,
+  t: Thread,
   askId: AskId,
   kind: AskKind,
   childCallId: CallId,
@@ -126,7 +125,7 @@ export function dispatchAsk(
 
 export function dispatchAskAck(
   ctx: StepCtx,
-  t: Draft<Thread>,
+  t: Thread,
   askId: AskId,
   value: Value,
 ): void {

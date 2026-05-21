@@ -121,9 +121,6 @@ importers:
       denque:
         specifier: ^2.1.0
         version: 2.1.0
-      immer:
-        specifier: ^11.1.8
-        version: 11.1.8
       ts-pattern:
         specifier: ^5.9.0
         version: 5.9.0
@@ -1285,9 +1282,6 @@ packages:
   ignore@7.0.5:
     resolution: {integrity: sha512-Hs59xBNfUIunMFgWAbGX5cq6893IbWg4KnrjbYwX3tx0ztorVgTDA6B2sxf8ejHJ4wz8BqGUMYlnzNBer5NvGg==}
     engines: {node: '>= 4'}
-
-  immer@11.1.8:
-    resolution: {integrity: sha512-/tbkHMW7y10Lx6i1crLjD4/OhNkRG+Fo7byZHtah0547nIeXYcpIXaUh0IAQY6gO5459qpGGYapcEOHtFXkIuA==}
 
   index-to-position@1.2.0:
     resolution: {integrity: sha512-Yg7+ztRkqslMAS2iFaU+Oa4KTSidr63OsFGlOrJoW981kIYO3CGCS3wA95P1mUi/IVSJkn0D479KTJpVpvFNuw==}
@@ -3124,8 +3118,6 @@ snapshots:
     optional: true
 
   ignore@7.0.5: {}
-
-  immer@11.1.8: {}
 
   index-to-position@1.2.0: {}
 

@@ -1,15 +1,17 @@
 // Engine entry point: applyEvent.
 //
-// Pure function: `(State, Event) => Result`. State is updated via Immer;
-// outbound events / errors / logs / diffs are accumulated separately and
-// returned in the Result.
+// `(State, Event) => Result`. State is mutated in place (= no Immer);
+// outbound events and logs are accumulated separately and returned in
+// the Result. The host (orchestrator) constructs a fresh `CoreModule`
+// per tick and reloads state from the DB at tick start, so an op
+// throwing partway through leaves the in-memory state half-modified
+// but observably discarded (= overwritten by the next tick's load).
 //
 // The engine ignores events whose payload is *external* (delegate /
 // delegateAck / terminate / terminateAck / escalate / escalateAck) — the
 // host layer is expected to translate those into internal `create` /
 // `done` / etc. events before feeding them to the engine.
 
-import { produce } from "immer";
 import { CORE_ENDPOINT, endpoint, type Endpoint } from "./endpoint.js";
 import type { Event } from "./event.js";
 import { collectGarbage, shouldGc } from "./gc.js";
@@ -54,16 +56,12 @@ export function createState(
  */
 export function applyEvent(state: State, event: Event): Result {
   const driven = drive(state, event);
-  let finalState = driven.state;
-
-  if (shouldGc(finalState)) {
-    finalState = produce(finalState, (draft) => {
-      collectGarbage(draft);
-    });
+  // drive() mutates `state` in place and returns the same reference.
+  if (shouldGc(driven.state)) {
+    collectGarbage(driven.state);
   }
-
   return {
-    state: finalState,
+    state: driven.state,
     outbound: driven.buffers.outbound,
     logs: driven.buffers.logs,
   };
