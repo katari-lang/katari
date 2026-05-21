@@ -112,6 +112,7 @@ spec = describe "Katari.Typechecker.Solver" $ do
   dataAndCompositeTypes
   higherOrderFunctions
   narrowAndSubstitutionComposition
+  illTypedRejection
 
 -- ---------------------------------------------------------------------------
 -- Basic literal inference
@@ -772,3 +773,269 @@ isInhabited = \case
     hasArray (ArraySlotOf _) = True
     hasObject ObjectSlotAbsent = False
     hasObject (ObjectSlotOf _) = True
+
+-- ---------------------------------------------------------------------------
+-- Ill-typed program rejection
+--
+-- These probe whether the solver correctly REJECTS programs with type
+-- errors. The existing positive tests verify well-typed programs solve
+-- cleanly, but the negative coverage was thin (only 3 cases). This block
+-- covers each composite-type shape (function / array / tuple / data /
+-- branch / annotation) with a deliberately bad assignment.
+-- ---------------------------------------------------------------------------
+
+illTypedRejection :: Spec
+illTypedRejection = describe "ill-typed program rejection" $ do
+  -- Direct let-annotation mismatches: trivial concrete-vs-concrete cases.
+  it "let x: integer = \"bad\" → solver error" $ do
+    (_, _, _, solverErrors) <-
+      runSolve "agent f() { let x: integer = \"bad\"; x }"
+    null solverErrors `shouldBe` False
+
+  it "let x: string = 42 → solver error" $ do
+    (_, _, _, solverErrors) <-
+      runSolve "agent f() { let x: string = 42; x }"
+    null solverErrors `shouldBe` False
+
+  -- Function-signature mismatch via annotation. Tests function shape
+  -- subtyping (contravariant in params, covariant in return).
+  it "let f: (s: string) -> integer = some_int_to_int_agent → error" $ do
+    -- 'square' has type (n: integer) -> integer. Binding to a function
+    -- expecting (s: string) -> integer should fail because the parameter
+    -- types are contravariantly compared (string is not a subtype of integer).
+    (_, _, _, solverErrors) <-
+      runSolve $
+        mconcat
+          [ "agent square(n: integer) -> integer { n }\n",
+            "agent caller() {\n",
+            "  let f: (s: string) -> integer = square;\n",
+            "  f(s = \"hi\")\n",
+            "}"
+          ]
+    null solverErrors `shouldBe` False
+
+  it "function return-type mismatch via annotation → error" $ do
+    -- 'square' returns integer. Annotating as -> string should fail
+    -- (covariant: integer is not a subtype of string).
+    (_, _, _, solverErrors) <-
+      runSolve $
+        mconcat
+          [ "agent square(n: integer) -> integer { n }\n",
+            "agent caller() {\n",
+            "  let f: (n: integer) -> string = square;\n",
+            "  f(n = 1)\n",
+            "}"
+          ]
+    null solverErrors `shouldBe` False
+
+  -- Calling a known agent with the wrong argument type.
+  it "calling square(n = \"hi\") → error" $ do
+    (_, _, _, solverErrors) <-
+      runSolve $
+        mconcat
+          [ "agent square(n: integer) -> integer { n }\n",
+            "agent caller() { square(n = \"hi\") }"
+          ]
+    null solverErrors `shouldBe` False
+
+  -- Branch-fallback probe: bare-param functions where one side has a
+  -- conflicting shape constraint while the other side has no concrete
+  -- lower bound. This is the exact pattern the audit memo flagged as
+  -- "α := Never fallback silently masks structural mismatch".
+  it "branch fallback probe: pass int agent where string agent expected → error" $ do
+    -- 'apply_string' expects a (s: string) -> integer callable. We pass
+    -- 'square' which is (n: integer) -> integer. The label mismatch
+    -- (n vs s) AND the parameter type mismatch (integer vs string) both
+    -- should be caught.
+    (_, _, _, solverErrors) <-
+      runSolve $
+        mconcat
+          [ "agent square(n: integer) -> integer { n }\n",
+            "agent apply_string(cb: (s: string) -> integer) -> integer {\n",
+            "  cb(s = \"hi\")\n",
+            "}\n",
+            "agent run() { apply_string(cb = square) }"
+          ]
+    null solverErrors `shouldBe` False
+
+  it "branch fallback probe: incompatible return types through HOF param" $ do
+    -- 'agent_returning_string' returns string. We pass it to a HOF that
+    -- expects a callable returning integer; result is used in arithmetic.
+    (_, _, _, solverErrors) <-
+      runSolve $
+        mconcat
+          [ "agent stringify() -> string { \"hi\" }\n",
+            "agent caller(cb: () -> integer) -> integer { cb() + 1 }\n",
+            "agent run() -> integer { caller(cb = stringify) }"
+          ]
+    null solverErrors `shouldBe` False
+
+  -- Array element type mismatch.
+  it "let xs: array[integer] = [1, \"two\", 3] → error" $ do
+    (_, _, _, solverErrors) <-
+      runSolve "agent f() { let xs: array[integer] = [1, \"two\", 3]; xs }"
+    null solverErrors `shouldBe` False
+
+  -- Tuple element type mismatch.
+  it "let p: (integer, string) = (\"flip\", 1) → error" $ do
+    (_, _, _, solverErrors) <-
+      runSolve "agent f() { let p: (integer, string) = (\"flip\", 1); p }"
+    null solverErrors `shouldBe` False
+
+  -- Data constructor field type mismatch.
+  it "Point(x = \"no\", y = 2) where x: integer → error" $ do
+    (_, _, _, solverErrors) <-
+      runSolve $
+        mconcat
+          [ "data Point(x: integer, y: integer)\n",
+            "agent f() { Point(x = \"no\", y = 2) }"
+          ]
+    null solverErrors `shouldBe` False
+
+  -- If-branch type mismatch when the result is then constrained by an
+  -- annotation that neither arm satisfies. (Both arms unioning is allowed
+  -- in general; this checks the annotation pins it.)
+  it "let n: integer = if (c) { 1 } else { \"x\" } → error" $ do
+    (_, _, _, solverErrors) <-
+      runSolve $
+        mconcat
+          [ "agent f(c: boolean) {\n",
+            "  let n: integer = if (c) { 1 } else { \"x\" };\n",
+            "  n\n",
+            "}"
+          ]
+    null solverErrors `shouldBe` False
+
+  -- Annotated function declaration whose body returns the wrong type.
+  it "agent f() -> integer { true } → error" $ do
+    (_, _, _, solverErrors) <-
+      runSolve "agent f() -> integer { true }"
+    null solverErrors `shouldBe` False
+
+  -- Match arm result mismatch against an annotated binding.
+  it "let n: integer = match (x) { ... \"string\" arm ... } → error" $ do
+    (_, _, _, solverErrors) <-
+      runSolve $
+        mconcat
+          [ "agent f(x: integer) {\n",
+            "  let n: integer = match (x) {\n",
+            "    case 0 => { \"zero\" }\n",
+            "    case _ => { 1 }\n",
+            "  };\n",
+            "  n\n",
+            "}"
+          ]
+    null solverErrors `shouldBe` False
+
+  -- ─── More corner cases ──────────────────────────────────────────────
+
+  -- Recursive call with mismatched return-type usage.
+  it "recursive agent: foo() + \"str\" with foo: () -> integer → error" $ do
+    (_, _, _, solverErrors) <-
+      runSolve $
+        mconcat
+          [ "agent foo() -> integer { foo() + 1 }\n",
+            "agent caller() { foo() + \"str\" }"
+          ]
+    null solverErrors `shouldBe` False
+
+  -- Block expression annotated mismatch.
+  it "let r: integer = { let x = 1; \"hi\" } → error" $ do
+    (_, _, _, solverErrors) <-
+      runSolve "agent f() { let r: integer = { let x = 1; \"hi\" }; r }"
+    null solverErrors `shouldBe` False
+
+  -- Empty array vs annotated incompatible element type.
+  it "let xs: array[integer] = [] then push string → error" $ do
+    -- An empty array literal infers its element type from context. Pushing
+    -- a string later via a let binding should still be rejected if the
+    -- annotated element type is integer.
+    (_, _, _, solverErrors) <-
+      runSolve $
+        mconcat
+          [ "agent f() {\n",
+            "  let xs: array[integer] = [];\n",
+            "  let bad: integer = \"hi\";\n",
+            "  xs\n",
+            "}"
+          ]
+    null solverErrors `shouldBe` False
+
+  -- Local agent capturing an outer parameter, with conflicting use.
+  it "local agent captures outer int, body misuses it as string → error" $ do
+    (_, _, _, solverErrors) <-
+      runSolve $
+        mconcat
+          [ "agent outer(x: integer) {\n",
+            "  agent helper() -> integer { x + \"oops\" }\n",
+            "  helper()\n",
+            "}"
+          ]
+    null solverErrors `shouldBe` False
+
+  -- HOF returning a callable; result called with wrong arg type.
+  it "HOF returns a callable, call site uses wrong arg type → error" $ do
+    -- The returned callable's parameter type is known statically (from the
+    -- HOF's return-type annotation); calling it with the wrong-typed arg
+    -- should be rejected. The HOF's inner agent definition exercises
+    -- local-agent / closure handling as a side benefit.
+    (_, _, _, solverErrors) <-
+      runSolve $
+        mconcat
+          [ "agent makeAdder() -> (n: integer) -> integer {\n",
+            "  agent inc(n: integer) -> integer { n + 1 }\n",
+            "  inc\n",
+            "}\n",
+            "agent run() {\n",
+            "  let f = makeAdder();\n",
+            "  f(n = \"oops\")\n",
+            "}"
+          ]
+    null solverErrors `shouldBe` False
+
+  -- Field access on a non-data type.
+  it "field access on integer-typed var → error" $ do
+    (_, _, _, solverErrors) <-
+      runSolve $
+        mconcat
+          [ "agent f() {\n",
+            "  let n: integer = 5;\n",
+            "  n.foo\n",
+            "}"
+          ]
+    null solverErrors `shouldBe` False
+
+  -- Indexing into a non-array.
+  it "indexing into a string-typed var → error" $ do
+    (_, _, _, solverErrors) <-
+      runSolve $
+        mconcat
+          [ "agent f() {\n",
+            "  let s: string = \"hi\";\n",
+            "  s[0]\n",
+            "}"
+          ]
+    null solverErrors `shouldBe` False
+
+  -- Match-arm pattern type mismatch (using a string-literal pattern
+  -- against an integer-typed subject). This is by design NOT caught by
+  -- Solver — Katari allows pattern types to be wider/narrower/disjoint
+  -- from the subject, and disjoint arms should be flagged by Exhaustive
+  -- as unreachable instead. Currently Exhaustive doesn't catch this
+  -- (= Maranget's `useful` predicate doesn't check shape disjointness
+  -- against subject type), so the program silently typechecks. Tracked
+  -- as a separate fix.
+  it "match on integer with string-literal arm → error" $ do
+    pendingWith
+      "shape-disjoint match arm should be flagged by Exhaustive (K0292), not Solver"
+    (_, _, _, solverErrors) <-
+      runSolve $
+        mconcat
+          [ "agent f(x: integer) {\n",
+            "  match (x) {\n",
+            "    case \"hi\" => { 1 }\n",
+            "    case _ => { 0 }\n",
+            "  }\n",
+            "}"
+          ]
+    null solverErrors `shouldBe` False

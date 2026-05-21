@@ -144,13 +144,59 @@ decomposeType original leftType rightType reason = case (leftType, rightType) of
               (SemanticTypeData leftTypeId)
               (SemanticTypeData rightTypeId)
           )
-  -- Other composites (e.g., function vs array) where one side might still
-  -- contain a var: hand off to branching / bound aggregation.
+  -- Cross-shape rejection: when neither side is a bare variable / union /
+  -- Never / Unknown (= all those are handled by the cases above) and the
+  -- two shapes live in disjoint layers (e.g., integer vs object{foo: α},
+  -- string vs array[β], function vs tuple), the constraint is
+  -- unsatisfiable regardless of any inner variables. Without this case
+  -- such constraints fell through to `_ -> keep`, were never picked up
+  -- by `checkContradictions` (which only fires on fully-concrete pairs),
+  -- and silently typechecked.
+  _
+    | Just leftKind <- shapeKind leftType,
+      Just rightKind <- shapeKind rightType,
+      leftKind /= rightKind ->
+        Left
+          ( SolverErrorStructuralMismatch
+              reason
+              ("shape mismatch: " <> leftKind <> " is not a subtype of " <> rightKind)
+          )
+  -- Other shapes where one side still contains a var and the layer kinds
+  -- are compatible (e.g., function-vs-function with mismatched param
+  -- labels already handled above; this catches functionAny vs function
+  -- and similar bound-aggregation cases): hand off to branching.
   _ -> keep
   where
     settled = Right Set.empty
     keep = Right (Set.singleton original)
     yield newConstraints = Right (Set.fromList newConstraints)
+
+-- | Classify a 'SemanticType' by which NormalizedType layer it lives in.
+-- Returns 'Nothing' for types whose layer is dynamic (variables, unions,
+-- never / unknown) — those are handled by other decompose cases. The
+-- classifier is conservative: when two non-'Nothing' kinds disagree,
+-- the constraint is provably unsatisfiable.
+shapeKind :: SemanticType Unresolved -> Maybe Text
+shapeKind = \case
+  SemanticTypeNull -> Just "null"
+  SemanticTypeInteger -> Just "number"
+  SemanticTypeNumber -> Just "number"
+  SemanticTypeLiteralInteger _ -> Just "number"
+  SemanticTypeString -> Just "string"
+  SemanticTypeLiteralString _ -> Just "string"
+  SemanticTypeBoolean -> Just "boolean"
+  SemanticTypeLiteralBoolean _ -> Just "boolean"
+  SemanticTypeFunction {} -> Just "function"
+  SemanticTypeFunctionAny -> Just "function"
+  SemanticTypeArray _ -> Just "array"
+  SemanticTypeTuple _ -> Just "tuple"
+  SemanticTypeObject _ -> Just "object"
+  SemanticTypeData _ -> Just "data"
+  -- Special forms (handled by earlier cases) intentionally fall through.
+  SemanticTypeVariable _ -> Nothing
+  SemanticTypeUnion _ -> Nothing
+  SemanticTypeNever -> Nothing
+  SemanticTypeUnknown -> Nothing
 
 showLabels :: Map.Map Text (SemanticType phase) -> Text
 showLabels parameters =
