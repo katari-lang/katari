@@ -258,20 +258,30 @@ export type CtorThread = Common & {
   args: Record<string, Value>;
 };
 
-export type TupleThread = Common & {
-  kind: "tuple";
+/**
+ * Shared shape for threads that fan out into N sibling element computations
+ * and collect their results into an ordered sequence (TupleThread / ArrayThread).
+ * The runtime helpers in `thread/ops/collecting.ts` operate generically on this
+ * base; only the final-value construction step (build a tuple vs an array Value)
+ * is variant-specific.
+ */
+type CollectingBase = {
   blockId: BlockId;
   /** CallId → element value, collected as children complete. */
   collected: Record<CallId, Value>;
   nextIndex: number;
 };
 
-export type ArrayThread = Common & {
-  kind: "array";
-  blockId: BlockId;
-  collected: Record<CallId, Value>;
-  nextIndex: number;
+export type TupleThread = Common & CollectingBase & {
+  kind: "tuple";
 };
+
+export type ArrayThread = Common & CollectingBase & {
+  kind: "array";
+};
+
+/** Union of every variant that uses the `CollectingBase` shape. */
+export type CollectingThread = TupleThread | ArrayThread;
 
 export type Thread =
   | AgentThread

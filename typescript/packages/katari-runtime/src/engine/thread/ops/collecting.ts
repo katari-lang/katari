@@ -12,9 +12,7 @@ import type { CallId } from "../../id.js";
 import { spawnChild } from "../../spawn.js";
 import type { StepCtx } from "../../step-ctx.js";
 import type { Value } from "../../value.js";
-import type { ArrayThread, TupleThread } from "../types.js";
-
-type CollectingThread = TupleThread | ArrayThread;
+import type { CollectingThread } from "../types.js";
 type CollectingBlock = TupleBlock | ArrayBlock;
 
 export function collectingCreate(
