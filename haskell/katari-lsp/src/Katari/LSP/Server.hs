@@ -9,7 +9,7 @@ where
 import Control.Monad.IO.Class (liftIO)
 import Katari.LSP.Handlers.Completion (completionHandler)
 import Katari.LSP.Handlers.Definition (definitionHandler)
-import Katari.LSP.Handlers.Document (documentHandlers)
+import Katari.LSP.Handlers.Document (documentHandlers, watchedFilesHandler)
 import Katari.LSP.Handlers.Hover (hoverHandler)
 import Katari.LSP.Handlers.References (referencesHandler)
 import Katari.LSP.State (newServerState)
@@ -43,7 +43,8 @@ runServer = do
               LSP.notificationHandler LSP.SMethod_SetTrace $ \_ -> pure (),
               LSP.notificationHandler LSP.SMethod_CancelRequest $ \_ -> pure (),
               LSP.notificationHandler LSP.SMethod_TextDocumentDidSave $ \_ -> pure (),
-              LSP.notificationHandler LSP.SMethod_WorkspaceDidChangeWatchedFiles $ \_ -> pure ()
+              LSP.notificationHandler LSP.SMethod_WorkspaceDidChangeWatchedFiles
+                (watchedFilesHandler st)
             ],
         LSP.interpretHandler = \env -> LSP.Iso (LSP.runLspT env) liftIO,
         LSP.options =

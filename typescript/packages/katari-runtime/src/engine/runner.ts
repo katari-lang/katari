@@ -8,14 +8,13 @@
 // removed from `state.threads` are dropped silently with a debug log
 // (matches the previous engine's behaviour).
 
-import { produceWithPatches, enablePatches, type Patch } from "immer";
+import { produce } from "immer";
 import { match } from "ts-pattern";
 import { EntryNotFoundError, RecoverableEngineError } from "./errors.js";
 import type { Event, InternalEventPayload } from "./event.js";
 import { isInternal } from "./event.js";
 import type { CallId, ThreadId, AskId } from "./id.js";
 import { createEscalationId } from "./id.js";
-import type { Diff } from "./diff.js";
 import { spawnAgentRoot } from "./spawn.js";
 import { decodeCoreAgentDefId, encodeCoreAgentDefId } from "../agent-def-id.js";
 import type { State } from "./state.js";
@@ -33,9 +32,6 @@ import {
   dispatchCreate,
   dispatchDone,
 } from "./thread/ops/index.js";
-
-// Immer patch generation is opt-in.
-enablePatches();
 
 /**
  * Process a single inbound event against `state` and drain only the
@@ -56,44 +52,38 @@ export function drive(
 ): {
   state: State;
   buffers: StepBuffers;
-  patches: Patch[];
 } {
   const buffers = emptyBuffers();
-  const allPatches: Patch[] = [];
 
   let current = state;
   if (!isInternal(initial.payload)) {
-    current = applyTranslateExternal(current, buffers, initial, allPatches);
+    current = applyTranslateExternal(current, buffers, initial);
   } else {
     buffers.queue.push(initial.payload);
   }
 
   while (buffers.queue.length > 0) {
     const ev = buffers.queue.shift()!;
-    const [next, patches] = produceWithPatches(current, (draft) => {
+    current = produce(current, (draft) => {
       const ctx = makeStepCtx(draft, buffers);
       step(ctx, ev);
     });
-    allPatches.push(...patches);
-    current = next;
   }
 
-  return { state: current, buffers, patches: allPatches };
+  return { state: current, buffers };
 }
 
 /**
- * Run `translateExternal` against the current state, accumulating its
- * patches into `allPatches` and returning the next state. Recoverable
- * errors raised inside translation are recorded; anything else
- * propagates.
+ * Run `translateExternal` against the current state and return the
+ * next state. Recoverable errors raised inside translation are
+ * recorded; anything else propagates.
  */
 function applyTranslateExternal(
   current: State,
   buffers: StepBuffers,
   event: Event,
-  allPatches: Patch[],
 ): State {
-  const [next, patches] = produceWithPatches(current, (draft) => {
+  const next = produce(current, (draft) => {
     const ctx = makeStepCtx(draft, buffers);
     try {
       translateExternal(ctx, event);
@@ -121,7 +111,6 @@ function applyTranslateExternal(
       }
     }
   });
-  allPatches.push(...patches);
   return next;
 }
 
@@ -520,55 +509,3 @@ function findEscalationAskId(
   return undefined;
 }
 
-// ─── Patches → Diff translation ────────────────────────────────────────────
-
-/**
- * Translate Immer's low-level Patch[] to our domain Diff[].
- *
- * Immer patches are JSON-Pointer style:
- *   { op: "replace" | "add" | "remove", path: (string | number)[], value? }
- *
- * The host layer no longer consumes these (DiffRepo was removed) but we
- * keep the translation for future audit/replay use.
- */
-export function patchesToDiffs(patches: Patch[]): Diff[] {
-  const diffs: Diff[] = [];
-  for (const p of patches) {
-    const path = p.path;
-    if (path.length === 0) continue;
-    const root = path[0] as string;
-    if (root === "threads") {
-      const threadId = path[1] as import("./id.js").ThreadId;
-      if (path.length === 2 && p.op === "add") {
-        diffs.push({ op: "thread.create", threadId, data: p.value as Thread });
-      } else if (path.length === 2 && p.op === "remove") {
-        diffs.push({ op: "thread.delete", threadId });
-      } else {
-        diffs.push({ op: "thread.update", threadId, patch: p });
-      }
-    } else if (root === "scopes") {
-      const scopeId = path[1] as import("./id.js").ScopeId;
-      if (path.length === 2 && p.op === "add") {
-        diffs.push({
-          op: "scope.create",
-          scopeId,
-          data: p.value as import("./scope.js").Scope,
-        });
-      } else if (path.length === 2 && p.op === "remove") {
-        diffs.push({ op: "scope.delete", scopeId });
-      } else if (
-        path.length === 4 &&
-        path[2] === "values" &&
-        (p.op === "add" || p.op === "replace")
-      ) {
-        diffs.push({
-          op: "scope.set",
-          scopeId,
-          varId: Number(path[3]),
-          value: p.value as import("./value.js").Value,
-        });
-      }
-    }
-  }
-  return diffs;
-}

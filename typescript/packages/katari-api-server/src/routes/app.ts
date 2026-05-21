@@ -3,6 +3,7 @@
 
 import type { Logger } from "@katari-lang/runtime";
 import { Hono } from "hono";
+import { bodyLimit } from "hono/body-limit";
 import { ZodError } from "zod";
 import type { Storage } from "../storage/types.js";
 import type { ProjectService } from "../services/project-service.js";
@@ -26,7 +27,13 @@ export type AppDeps = {
   snapshots: SnapshotService;
   orchestrator: Orchestrator;
   logger: Logger;
-  apiKey?: string | null;
+  /**
+   * `null` = auth disabled (`KATARI_API_KEY=disabled`, dev only).
+   * Non-empty string = the bearer token to require. `undefined` or
+   * empty is rejected: bin.ts is responsible for funneling those
+   * cases into the fail-fast exit path.
+   */
+  apiKey: string | null;
   rateLimit?: RateLimitOptions | null;
   metrics?: AppMetrics;
 };
@@ -39,25 +46,20 @@ const DEFAULT_RATE_LIMIT: RateLimitOptions = {
 export function buildApp(deps: AppDeps): Hono {
   const app = new Hono();
 
-  // Body-size guard (advisory). When a Content-Length header is
-  // present, refuse anything above 10 MB before reading the body. A
-  // client that omits the header (chunked transfer or in-process tests
-  // using `app.fetch(new Request(...))`) bypasses this check; the
-  // underlying Node @hono/node-server has its own (higher) cap and the
-  // KATARI_API_KEY auth gate sits in front, so the bypass surface is
-  // limited to authenticated clients. A truly hardened deployment
-  // should also set a reverse-proxy body limit.
+  // Body-size guard. Hono's `bodyLimit` streams the request and
+  // aborts as soon as the byte count exceeds the cap, so this works
+  // both for Content-Length-bearing requests AND for chunked transfer
+  // / missing-header clients (= the prior advisory check that we
+  // documented as a known bypass is now properly closed).
   const BODY_LIMIT_BYTES = 10 * 1024 * 1024;
-  app.use("*", async (c, next) => {
-    const lengthHeader = c.req.header("content-length");
-    if (lengthHeader !== undefined) {
-      const length = Number.parseInt(lengthHeader, 10);
-      if (Number.isFinite(length) && length > BODY_LIMIT_BYTES) {
-        return c.json({ error: "request body too large (limit: 10 MB)" }, 413);
-      }
-    }
-    return next();
-  });
+  app.use(
+    "*",
+    bodyLimit({
+      maxSize: BODY_LIMIT_BYTES,
+      onError: (c) =>
+        c.json({ error: "request body too large (limit: 10 MB)" }, 413),
+    }),
+  );
 
   app.onError((err, c) => {
     if (err instanceof ZodError) {

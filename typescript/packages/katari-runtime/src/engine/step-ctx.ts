@@ -2,8 +2,7 @@
 // side-effects during a single internal-event dispatch.
 //
 // `state` is an Immer draft that the op mutates as if it were plain
-// data — Immer captures the patches that the runner translates into
-// domain Diff[].
+// data — Immer commits the structural change when `produce` returns.
 //
 // Outbound events / errors / logs are appended to plain arrays. The
 // runner accumulates these across the queue drain and packs them into

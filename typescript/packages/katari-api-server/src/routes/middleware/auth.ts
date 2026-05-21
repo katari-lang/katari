@@ -1,13 +1,16 @@
 // Bearer-token authentication middleware.
 //
-// Reads `KATARI_API_KEY` from env at startup. If unset, the middleware
-// rejects every non-health request with 503 (misconfigured) — we do *not*
-// allow a "no auth" mode to silently slip into production.
+// Requires `Authorization: Bearer <key>` where <key> matches the
+// non-empty `apiKey` passed in. The boot path (`bin.ts`) refuses to
+// start without `KATARI_API_KEY` set (or with the explicit opt-out
+// `KATARI_API_KEY=disabled`, in which case `routes/app.ts` doesn't
+// register this middleware at all). The 503 "server misconfigured"
+// path is therefore unreachable from a properly-configured deployment;
+// we reflect that by requiring a non-empty string at the type level.
 //
-// Requests must carry `Authorization: Bearer <key>`. Constant-time string
-// compare prevents the obvious timing oracle (the practical risk on a
-// single-tenant API key is small but the cost of doing it right is one
-// helper function).
+// Constant-time string compare prevents the obvious timing oracle (the
+// practical risk on a single-tenant API key is small but the cost of
+// doing it right is one helper function).
 
 import type { Context, MiddlewareHandler } from "hono";
 
@@ -23,29 +26,24 @@ export type AuthOptions = {
 const DEFAULT_PUBLIC_PREFIXES: string[] = ["/healthz", "/readyz", "/metrics"];
 
 /**
- * Build the auth middleware.
- *
- * `apiKey` is read from the caller (typically `process.env.KATARI_API_KEY`)
- * so tests can inject a known value without touching environment variables.
- * If `apiKey` is `undefined` *or* empty string, the middleware fails closed:
- * every gated request gets 503. This matches the bin entry's expectation
- * that the operator sets the env var before launch.
+ * Build the auth middleware. `apiKey` must be a non-empty string;
+ * empty / undefined is rejected as a programming error since the
+ * boot path is responsible for filtering those out.
  */
 export function buildAuthMiddleware(
-  apiKey: string | undefined,
+  apiKey: string,
   options: AuthOptions = {},
 ): MiddlewareHandler {
+  if (apiKey === "") {
+    throw new Error(
+      "buildAuthMiddleware: apiKey must be a non-empty string; bin.ts should have rejected an unset KATARI_API_KEY before reaching this point",
+    );
+  }
   const publicPrefixes = options.publicPathPrefixes ?? DEFAULT_PUBLIC_PREFIXES;
   return async (c: Context, next) => {
     const path = new URL(c.req.url).pathname;
     if (publicPrefixes.some((p) => path.startsWith(p))) {
       return next();
-    }
-    if (apiKey === undefined || apiKey === "") {
-      return c.json(
-        { error: "server misconfigured: KATARI_API_KEY is not set" },
-        503,
-      );
     }
     const header = c.req.header("Authorization");
     if (header === undefined) {

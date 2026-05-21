@@ -13,15 +13,12 @@ import type { State } from "./state.js";
 
 export type EngineCheckpoint = {
   /**
-   * Bump on any breaking layout change.
-   *   3: pre-escalationOwners
-   *   4: adds escalationOwners (= EscalationId → ThreadId index).
-   *      Schema-version-3 checkpoints are still accepted on load;
-   *      `deserialize` reconstructs the index from existing thread
-   *      `pendingEscalations` maps so older state can be replayed
-   *      after an upgrade.
+   * Engine checkpoint layout version. v0.1.0 ships as v1 — the
+   * pre-release version numbers (3, 4) used during development were
+   * reset since there are no production checkpoints to migrate.
+   * Bump on any breaking layout change AFTER v0.1.0.
    */
-  schemaVersion: 3 | 4;
+  schemaVersion: 1;
   selfEndpoint: string;
   ffiTargetEndpoint: string;
   threads: State["threads"];
@@ -31,14 +28,13 @@ export type EngineCheckpoint = {
   delegations: State["delegations"];
   pendingDelegateOut: State["pendingDelegateOut"];
   delegationSenders: State["delegationSenders"];
-  /** Absent on schemaVersion=3 checkpoints; reconstructed on load. */
-  escalationOwners?: State["escalationOwners"];
+  escalationOwners: State["escalationOwners"];
   lastGcScopeCount: number;
 };
 
 export function serialize(state: State): EngineCheckpoint {
   return {
-    schemaVersion: 4,
+    schemaVersion: 1,
     selfEndpoint: state.selfEndpoint,
     ffiTargetEndpoint: state.ffiTargetEndpoint,
     threads: structuredClone(state.threads),
@@ -57,45 +53,23 @@ export function deserialize(
   irModule: IRModule,
   snap: EngineCheckpoint,
 ): State {
-  if (snap.schemaVersion !== 3 && snap.schemaVersion !== 4) {
+  if (snap.schemaVersion !== 1) {
     throw new Error(
       `engine.checkpoint: unsupported schemaVersion ${snap.schemaVersion}`,
     );
   }
-  const threads = structuredClone(snap.threads);
-  // schemaVersion=3 checkpoints predate `escalationOwners`. Reconstruct
-  // the index from the per-thread `pendingEscalations` so escalateAck
-  // routing keeps working without forcing a full re-resolve.
-  const escalationOwners =
-    snap.escalationOwners !== undefined
-      ? structuredClone(snap.escalationOwners)
-      : rebuildEscalationOwners(threads);
   return {
     selfEndpoint: snap.selfEndpoint as State["selfEndpoint"],
     irModule,
-    threads,
+    threads: structuredClone(snap.threads),
     scopes: structuredClone(snap.scopes),
     closures: structuredClone(snap.closures),
     nextClosureId: snap.nextClosureId,
     delegations: structuredClone(snap.delegations),
     pendingDelegateOut: structuredClone(snap.pendingDelegateOut),
     delegationSenders: structuredClone(snap.delegationSenders),
-    escalationOwners,
+    escalationOwners: structuredClone(snap.escalationOwners),
     ffiTargetEndpoint: snap.ffiTargetEndpoint as State["ffiTargetEndpoint"],
     lastGcScopeCount: snap.lastGcScopeCount,
   };
-}
-
-function rebuildEscalationOwners(
-  threads: State["threads"],
-): State["escalationOwners"] {
-  const out: Record<string, string> = {};
-  for (const [threadId, thread] of Object.entries(threads)) {
-    if (thread === undefined) continue;
-    if (thread.kind !== "external" && thread.kind !== "agent") continue;
-    for (const escalationId of Object.values(thread.pendingEscalations)) {
-      out[escalationId as unknown as string] = threadId;
-    }
-  }
-  return out;
 }

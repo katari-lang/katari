@@ -144,8 +144,16 @@ instance ToJSON JsonSchema where
                   ]
                   ++ [("examples", toJSON examples) | not (null examples)]
          in Object (coreMap <> extras)
-      -- SchemaCore always serialises to Object; this branch is unreachable.
-      other -> other
+      -- Every SchemaCore variant's ToJSON instance produces an Object
+      -- (the JSON Schema spec requires this). If this branch is ever
+      -- reached, a SchemaCore variant was added without an Object-shaped
+      -- encoder — that's a bug, not silent metadata loss.
+      other ->
+        error
+          ( "Katari.Schema: SchemaCore did not serialise to an Object — \
+            \this is a compiler bug. Got: "
+              <> show other
+          )
 
 -- | The structural part of a 'JsonSchema'. Serialises to valid JSON Schema
 -- Draft 2020-12 keywords (e.g. @{"type":"integer"}@, @{"anyOf":[...]}@).

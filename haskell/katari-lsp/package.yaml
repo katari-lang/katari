@@ -45,6 +45,7 @@ dependencies:
   - vector
 
 default-extensions:
+  - DataKinds
   - LambdaCase
   - OverloadedStrings
   - DuplicateRecordFields

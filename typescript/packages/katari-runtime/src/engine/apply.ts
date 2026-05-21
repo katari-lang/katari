@@ -9,13 +9,13 @@
 // host layer is expected to translate those into internal `create` /
 // `done` / etc. events before feeding them to the engine.
 
-import { produceWithPatches, type Patch } from "immer";
+import { produce } from "immer";
 import { CORE_ENDPOINT, endpoint, type Endpoint } from "./endpoint.js";
 import type { Event } from "./event.js";
 import { collectGarbage, shouldGc } from "./gc.js";
 import type { IRModule } from "../ir/types.js";
 import type { Result } from "./result.js";
-import { drive, patchesToDiffs } from "./runner.js";
+import { drive } from "./runner.js";
 import type { State } from "./state.js";
 
 const DEFAULT_FFI_ENDPOINT = endpoint("ext://ffi");
@@ -47,32 +47,24 @@ export function createState(
 
 /**
  * Process one event against `state`. Returns the new state plus the
- * accumulated outbound events, errors, logs, and diffs.
+ * accumulated outbound events and logs.
  *
  * No I/O; no logger injection. Logs accumulate in `Result.logs` and the
- * host writes them out (or wraps applyEvent in an Effect that pipes them
- * to a Logger service).
+ * host writes them out.
  */
 export function applyEvent(state: State, event: Event): Result {
   const driven = drive(state, event);
   let finalState = driven.state;
-  const allPatches: Patch[] = [...driven.patches];
 
-  // Run GC if the heuristic says so. The GC produces its own patches
-  // which we merge into the diff list.
   if (shouldGc(finalState)) {
-    const [next, gcPatches] = produceWithPatches(finalState, (draft) => {
+    finalState = produce(finalState, (draft) => {
       collectGarbage(draft);
     });
-    finalState = next;
-    allPatches.push(...gcPatches);
   }
 
-  const diffs = patchesToDiffs(allPatches);
   return {
     state: finalState,
     outbound: driven.buffers.outbound,
     logs: driven.buffers.logs,
-    diffs,
   };
 }

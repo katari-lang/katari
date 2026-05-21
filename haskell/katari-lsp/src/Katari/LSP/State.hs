@@ -18,6 +18,7 @@ module Katari.LSP.State
     lookupCompileResult,
     workspaceFileTexts,
     findProjectRootCached,
+    RecompileTarget (..),
   )
 where
 
@@ -54,14 +55,23 @@ data WorkspaceState = WorkspaceState
     wsOccIndex :: Maybe OccurrenceIndex
   }
 
+-- | What 'scheduleRecompile' will compile when its debounce fires.
+-- Lifted out of a stringly-typed key (= the old @"ws:" <> root@ /
+-- @"orphan:" <> path@ scheme) so the dispatch in 'recompileNow' is
+-- exhaustive at the type level.
+data RecompileTarget
+  = RecompileWorkspace FilePath  -- ^ Workspace root containing katari.toml.
+  | RecompileOrphan FilePath     -- ^ Single .ktr file outside any project.
+  deriving (Eq, Ord, Show)
+
 data ServerState = ServerState
   { workspaces :: TVar (Map FilePath WorkspaceState),
     -- | Files opened from outside any project (no enclosing
     -- @katari.toml@). They compile in isolation.
     orphanFiles :: TVar (Map FilePath Text),
-    -- | Per-workspace debounce timers (keyed by workspace root, plus
-    -- an empty string for the orphan bucket).
-    debounceTimers :: TVar (Map FilePath ThreadId),
+    -- | Debounce timers keyed by 'RecompileTarget' — workspace edits
+    -- collapse on the workspace root, orphan edits collapse per-file.
+    debounceTimers :: TVar (Map RecompileTarget ThreadId),
     -- | Cache of @file path → enclosing workspace root@ resolved by
     -- 'Project.findProjectRoot'. Each lookup canonicalises the path
     -- and walks parents to find @katari.toml@; without this cache a

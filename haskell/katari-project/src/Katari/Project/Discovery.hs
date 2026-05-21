@@ -15,6 +15,7 @@ where
 import Control.Monad (filterM)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as TextIO
@@ -110,16 +111,29 @@ scanSourcesFromDir srcDir = do
 
 -- | Recursively collect every @.ktr@ file under @dir@. Returns paths
 -- as-is (= relative or absolute depending on the input).
+--
+-- Symlink cycles are guarded against by tracking canonicalised paths:
+-- a symlink whose target's canonical path has already been visited
+-- is skipped. Without this, a cycle (= @src/a@ → @src/b@, @src/b@ →
+-- @src/a@) would walk forever.
 collectKtrFiles :: FilePath -> IO [FilePath]
 collectKtrFiles dir = do
-  exists <- doesDirectoryExist dir
-  if not exists
-    then pure []
-    else do
-      entries <- listDirectory dir
-      let withDir = map (dir </>) entries
-      files <- filterM doesFileExist withDir
-      let ktrFiles = filter ((== ".ktr") . takeExtension) files
-      subdirs <- filterM doesDirectoryExist withDir
-      rest <- concat <$> traverse collectKtrFiles subdirs
-      pure (ktrFiles <> rest)
+  go Set.empty dir
+  where
+    go visited path = do
+      exists <- doesDirectoryExist path
+      if not exists
+        then pure []
+        else do
+          canonical <- canonicalizePath path
+          if Set.member canonical visited
+            then pure [] -- already walked through here; symlink cycle
+            else do
+              let visited' = Set.insert canonical visited
+              entries <- listDirectory path
+              let withDir = map (path </>) entries
+              files <- filterM doesFileExist withDir
+              let ktrFiles = filter ((== ".ktr") . takeExtension) files
+              subdirs <- filterM doesDirectoryExist withDir
+              rest <- concat <$> traverse (go visited') subdirs
+              pure (ktrFiles <> rest)

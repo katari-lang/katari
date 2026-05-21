@@ -6,6 +6,7 @@
 module Katari.LSP.Handlers.Document
   ( documentHandlers,
     recompileNow,
+    watchedFilesHandler,
   )
 where
 
@@ -24,7 +25,8 @@ import qualified Katari.Project.Discovery as Project
 import qualified Katari.Project.Resolve as Project
 import Katari.LSP.Convert (katariSpanToLspRange)
 import Katari.LSP.State
-  ( ServerState (..),
+  ( RecompileTarget (..),
+    ServerState (..),
     WorkspaceState (..),
     findProjectRootCached,
     snapshotWorkspaceSources,
@@ -187,32 +189,29 @@ scheduleRecompile st path = do
   -- recompile. Orphan files use the file path itself; otherwise two
   -- orphans being edited alternately would steal the timer from each
   -- other and one would never get a recompile to fire.
-  let key = case mRoot of
-        Just root -> "ws:" <> root
-        Nothing -> "orphan:" <> path
+  let target = case mRoot of
+        Just root -> RecompileWorkspace root
+        Nothing -> RecompileOrphan path
   env <- LSP.getLspEnv
   liftIO $ do
     prevTimer <- atomically $ do
       timers <- readTVar st.debounceTimers
-      pure (Map.lookup key timers)
+      pure (Map.lookup target timers)
     case prevTimer of
       Just tid -> killThread tid
       Nothing -> pure ()
     newTid <- forkIO $ do
       threadDelay debounceUs
-      LSP.runLspT env (recompileNow st key)
-    atomically $ modifyTVar' st.debounceTimers (Map.insert key newTid)
+      LSP.runLspT env (recompileNow st target)
+    atomically $ modifyTVar' st.debounceTimers (Map.insert target newTid)
 
--- | Compile the workspace whose root is @key@ and publish diagnostics.
--- Key is either @"ws:" <> root@ for a workspace recompile or
--- @"orphan:" <> path@ for a single-file orphan recompile.
-recompileNow :: ServerState -> FilePath -> LSP.LspM () ()
-recompileNow st key
-  | Just orphanPath <- Text.stripPrefix "orphan:" (Text.pack key) =
-      recompileOrphan st (Text.unpack orphanPath)
-  | Just root <- Text.stripPrefix "ws:" (Text.pack key) =
-      recompileWorkspace st (Text.unpack root)
-  | otherwise = pure ()
+-- | Compile the requested target and publish diagnostics. Dispatch is
+-- exhaustive at the type level (= 'RecompileTarget' has two
+-- constructors), unlike the previous stringly-typed prefix-match shape.
+recompileNow :: ServerState -> RecompileTarget -> LSP.LspM () ()
+recompileNow st = \case
+  RecompileWorkspace root -> recompileWorkspace st root
+  RecompileOrphan path -> recompileOrphan st path
 
 recompileWorkspace :: ServerState -> FilePath -> LSP.LspM () ()
 recompileWorkspace st root = do
@@ -312,4 +311,46 @@ mapSeverity = \case
   SeverityWarning -> LSP.DiagnosticSeverity_Warning
   SeverityInfo -> LSP.DiagnosticSeverity_Information
   SeverityHint -> LSP.DiagnosticSeverity_Hint
+
+-- ---------------------------------------------------------------------------
+-- Watched-files (= disk-side .ktr create / delete / external rename)
+-- ---------------------------------------------------------------------------
+
+-- | Handle @workspace/didChangeWatchedFiles@. The dynamic-watch
+-- registration (set in 'Katari.LSP.Server' once the client confirms
+-- support) targets @**/*.ktr@; here we react to disk changes the user
+-- made outside the editor.
+--
+-- The minimum we need is: when a @.ktr@ file is deleted on disk,
+-- clear any diagnostics still pinned to it in the editor (otherwise
+-- the marker hangs around until restart) and schedule a workspace
+-- recompile so the in-memory assembly drops the gone module. Create /
+-- change events also trigger a recompile so a freshly written file
+-- shows up without the user having to open it.
+watchedFilesHandler ::
+  ServerState ->
+  LSP.TNotificationMessage LSP.Method_WorkspaceDidChangeWatchedFiles ->
+  LSP.LspM () ()
+watchedFilesHandler st msg = do
+  let changes = msg ^. L.params . L.changes
+  mapM_ (handleOne st) changes
+
+handleOne ::
+  ServerState ->
+  LSP.FileEvent ->
+  LSP.LspM () ()
+handleOne st (LSP.FileEvent uri changeType) =
+  case LSP.uriToFilePath uri of
+    Nothing -> pure ()
+    Just path -> case changeType of
+      LSP.FileChangeType_Deleted -> do
+        -- Clear the published diagnostics for this file so the editor
+        -- drops its markers; then recompile the enclosing workspace
+        -- so the next compile picks up the now-missing module.
+        LSP.sendNotification LSP.SMethod_TextDocumentPublishDiagnostics $
+          LSP.PublishDiagnosticsParams uri Nothing []
+        scheduleRecompile st path
+      LSP.FileChangeType_Created -> scheduleRecompile st path
+      LSP.FileChangeType_Changed -> scheduleRecompile st path
+      _ -> pure ()
 

@@ -73,7 +73,6 @@ export type {
   PostCancelAction,
   State,
   State as EngineState,
-  Diff,
   LogEntry,
   LogLevel,
   Logger,

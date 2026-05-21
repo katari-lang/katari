@@ -58,8 +58,6 @@ export type {
 
 export type { State } from "./state.js";
 
-export type { Diff } from "./diff.js";
-
 export {
   EntryNotFoundError,
   IrrecoverableEngineError,
