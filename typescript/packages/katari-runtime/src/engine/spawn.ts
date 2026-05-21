@@ -39,12 +39,6 @@ export type SpawnArgs = {
   blockId: BlockId;
   callArgs: Record<string, Value>;
   scopeMode: SpawnScopeMode;
-  /**
-   * Optional handler-map override. HandleThread uses this when spawning
-   * the main body so handlers it owns are visible inside the body. Other
-   * spawn sites omit it and inherit from `parent.handlers`.
-   */
-  handlersOverride?: Record<number, ThreadId>;
 };
 
 /**
@@ -79,16 +73,11 @@ export function spawnChild(ctx: StepCtx, args: SpawnArgs): ThreadId {
   };
 
   const newThreadId = createThreadId();
-  const handlers = args.handlersOverride
-    ? { ...args.handlersOverride }
-    : { ...(parent.handlers as Record<number, ThreadId>) };
-
   const common = newCommonFields({
     id: newThreadId,
     parent: args.parentId,
     parentCallId: args.parentCallId,
     scopeId: newScopeId,
-    handlers,
   });
 
   const thread: Thread = match(block)
@@ -224,7 +213,6 @@ export function spawnAgentRoot(
     parent: null,
     parentCallId: null,
     scopeId: newScopeId,
-    handlers: {},
   });
   const agent: Thread = {
     ...common,

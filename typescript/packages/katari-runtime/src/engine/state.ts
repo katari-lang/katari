@@ -17,6 +17,13 @@
 import type { IRModule } from "../ir/types.js";
 import type { ClosureRecord } from "./closure.js";
 import type { Endpoint } from "./endpoint.js";
+import type {
+  ClosureId,
+  DelegationId,
+  EscalationId,
+  ScopeId,
+  ThreadId,
+} from "./id.js";
 import type { Scope } from "./scope.js";
 import type { Thread } from "./thread/types.js";
 
@@ -24,16 +31,16 @@ export type State = {
   /** Identity of this engine instance. Events with `to !== selfEndpoint` are outbound. */
   selfEndpoint: Endpoint;
   irModule: IRModule;
-  /** ThreadId → Thread. Encoded as Record<string, Thread> for Immer ergonomics. */
-  threads: Record<string, Thread>;
-  /** ScopeId → Scope. Encoded as Record<string, Scope>. */
-  scopes: Record<string, Scope>;
+  /** ThreadId → Thread. */
+  threads: Record<ThreadId, Thread>;
+  /** ScopeId → Scope. */
+  scopes: Record<ScopeId, Scope>;
   /**
    * ClosureId → ClosureRecord. Allocated by `statementMakeClosure`.
    * Reachability traced through `Value { kind: "closure", closureId }` in
    * scope values; collected by GC when no live Value references the id.
    */
-  closures: Record<number, ClosureRecord>;
+  closures: Record<ClosureId, ClosureRecord>;
   /** Per-machine ClosureId allocator. Increments every makeClosure. */
   nextClosureId: number;
   /**
@@ -45,7 +52,7 @@ export type State = {
    *
    * Used by inbound `terminate` / `escalate` to find the receiver thread.
    */
-  delegations: Record<string, string>;
+  delegations: Record<DelegationId, ThreadId>;
   /**
    * Sender-side: delegationId → DelegateThread id.
    *
@@ -57,7 +64,7 @@ export type State = {
    * `delegations` map and this map can both hold the same delegationId
    * simultaneously when the delegate is self→self (core→core agent call).
    */
-  pendingDelegateOut: Record<string, string>;
+  pendingDelegateOut: Record<DelegationId, ThreadId>;
   /**
    * delegationId → sender Endpoint. Recorded for the receiver side so the
    * engine knows where to address `delegateAck` / `terminateAck` back when
@@ -65,7 +72,7 @@ export type State = {
    * value is `selfEndpoint`, and the loop-back is picked up by
    * translateExternal on the next iteration.
    */
-  delegationSenders: Record<string, Endpoint>;
+  delegationSenders: Record<DelegationId, Endpoint>;
   /**
    * EscalationId → owning AgentThread id. Index into the same data the
    * per-thread `outboundEscalations` map carries, kept here so the
@@ -78,7 +85,7 @@ export type State = {
    * is absent (= older checkpoint that pre-dates the field), so checkpoints
    * persisted before this version remain loadable.
    */
-  escalationOwners: Record<string, string>;
+  escalationOwners: Record<EscalationId, ThreadId>;
   /** Endpoint to send CORE→FFI delegate / terminate to. */
   ffiTargetEndpoint: Endpoint;
   /** Scope count at the most recent GC pass. Used by the GC trigger heuristic. */

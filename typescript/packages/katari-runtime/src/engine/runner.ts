@@ -243,13 +243,13 @@ function translateExternal(
       delegationId: p.delegationId,
       capturedScopeId: target.capturedScopeId,
     });
-    ctx.state.delegations[p.delegationId as string] = agentThreadId;
-    ctx.state.delegationSenders[p.delegationId as string] = event.from;
+    ctx.state.delegations[p.delegationId] = agentThreadId;
+    ctx.state.delegationSenders[p.delegationId] = event.from;
     return;
   }
 
   if (p.kind === "terminate") {
-    const threadId = ctx.state.delegations[p.delegationId as string] as ThreadId | undefined;
+    const threadId = ctx.state.delegations[p.delegationId] as ThreadId | undefined;
     if (threadId === undefined) return;
     ctx.enqueue({ kind: "cancel", target: threadId });
     return;
@@ -259,7 +259,7 @@ function translateExternal(
     // Look up the sender side: the DelegateThread that issued the
     // outbound delegate. The receiver-side AgentThread (if any, for
     // self→self) has already cleaned itself up before emitting this ack.
-    const threadId = ctx.state.pendingDelegateOut[p.delegationId as string] as
+    const threadId = ctx.state.pendingDelegateOut[p.delegationId] as
       | ThreadId
       | undefined;
     if (threadId === undefined) return;
@@ -268,7 +268,7 @@ function translateExternal(
       ctx.log("debug", "engine: delegateAck for non-delegate thread", { kind: sender?.kind });
       return;
     }
-    delete ctx.state.pendingDelegateOut[p.delegationId as string];
+    delete ctx.state.pendingDelegateOut[p.delegationId];
     if (sender.status === "cancelling") {
       if (sender.parent !== null && sender.parentCallId !== null) {
         ctx.enqueue({ kind: "cancelAck", target: sender.parent, callId: sender.parentCallId });
@@ -287,13 +287,13 @@ function translateExternal(
   }
 
   if (p.kind === "terminateAck") {
-    const threadId = ctx.state.pendingDelegateOut[p.delegationId as string] as
+    const threadId = ctx.state.pendingDelegateOut[p.delegationId] as
       | ThreadId
       | undefined;
     if (threadId === undefined) return;
     const sender = ctx.state.threads[threadId];
     if (sender === undefined || sender.kind !== "delegate") return;
-    delete ctx.state.pendingDelegateOut[p.delegationId as string];
+    delete ctx.state.pendingDelegateOut[p.delegationId];
     if (sender.parent !== null && sender.parentCallId !== null) {
       ctx.enqueue({ kind: "cancelAck", target: sender.parent, callId: sender.parentCallId });
     }
@@ -309,7 +309,7 @@ function translateExternal(
     // ask bubbling upward through that thread's parent chain — the same
     // path a request statement takes locally. The escalateAck round-trip
     // matches via `DelegateThread.inboundEscalations[askId]`.
-    const threadId = ctx.state.pendingDelegateOut[p.delegationId as string] as
+    const threadId = ctx.state.pendingDelegateOut[p.delegationId] as
       | ThreadId
       | undefined;
     if (threadId === undefined) {
@@ -339,7 +339,7 @@ function translateExternal(
     // back to a sentinel handled only by reqId-0 fallback handlers.
     const ownAskId = (sender.nextAskId as number) as import("./id.js").AskId;
     sender.nextAskId = ((sender.nextAskId as number) + 1) as import("./id.js").AskId;
-    sender.inboundEscalations[ownAskId as unknown as number] =
+    sender.inboundEscalations[ownAskId] =
       p.escalationId as import("./id.js").EscalationId;
     // NOTE on the global owner index: do NOT write 'escalationOwners'
     // here. In a CORE→CORE round-trip the same escalationId is
@@ -373,16 +373,16 @@ function translateExternal(
     // `outboundEscalations[escalationId]` gives the askId we need to use
     // when constructing the askAck — direct lookup, no linear scan.
     const ownerId =
-      ctx.state.escalationOwners[p.escalationId as unknown as string];
+      ctx.state.escalationOwners[p.escalationId];
     if (ownerId !== undefined) {
       const t = ctx.state.threads[ownerId];
       if (t !== undefined && t.kind === "agent") {
         const askId =
-          t.outboundEscalations[p.escalationId as unknown as string];
+          t.outboundEscalations[p.escalationId];
         if (askId !== undefined) {
-          delete t.outboundEscalations[p.escalationId as unknown as string];
+          delete t.outboundEscalations[p.escalationId];
           delete ctx.state.escalationOwners[
-            p.escalationId as unknown as string
+            p.escalationId
           ];
           ctx.enqueue({
             kind: "askAck",
@@ -395,7 +395,7 @@ function translateExternal(
       }
       // Index was stale (owner thread gone / wrong kind). Clean it
       // up and fall through to the debug log.
-      delete ctx.state.escalationOwners[p.escalationId as unknown as string];
+      delete ctx.state.escalationOwners[p.escalationId];
     }
     ctx.log("debug", "engine: escalateAck without registered escalation", {
       escalationId: p.escalationId,
@@ -433,7 +433,7 @@ function resolveDelegateTarget(
     return { blockId, capturedScopeId: null };
   }
   // kind === "closure"
-  const record = ctx.state.closures[decoded.value as unknown as number];
+  const record = ctx.state.closures[decoded.value];
   if (record === undefined) {
     // A stale `delegate` referencing a GC'd closure is a per-agent
     // recoverable error (= the original closure is no longer alive),

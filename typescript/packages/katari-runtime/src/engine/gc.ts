@@ -49,7 +49,7 @@ export function collectGarbage(state: State): void {
   };
 
   const visitClosure = (closureId: ClosureId): void => {
-    const num = closureId as unknown as number;
+    const num = closureId;
     if (reachableClosures.has(num)) return;
     reachableClosures.add(num);
     const cl = state.closures[num];
@@ -74,14 +74,15 @@ export function collectGarbage(state: State): void {
     }
   }
 
-  for (const scopeId of Object.keys(state.scopes)) {
-    if (!reachableScopes.has(scopeId as ScopeId)) {
+  for (const scopeId of Object.keys(state.scopes) as ScopeId[]) {
+    if (!reachableScopes.has(scopeId)) {
       delete state.scopes[scopeId];
     }
   }
   for (const closureKey of Object.keys(state.closures)) {
-    if (!reachableClosures.has(Number(closureKey))) {
-      delete state.closures[closureKey as unknown as number];
+    const closureId = Number(closureKey) as ClosureId;
+    if (!reachableClosures.has(closureId)) {
+      delete state.closures[closureId];
     }
   }
 
@@ -101,7 +102,8 @@ function traceValue(
       for (const e of v.elements) traceValue(e, visitScope, visitClosure);
       return;
     case "tagged":
-      for (const f of Object.values(v.fields)) traceValue(f, visitScope, visitClosure);
+      for (const f of Object.values(v.fields))
+        traceValue(f, visitScope, visitClosure);
       return;
     default:
       return;

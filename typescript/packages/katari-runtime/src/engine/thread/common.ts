@@ -181,7 +181,7 @@ export function emitAgentRootCompletion(
   t: import("./types.js").AgentThread,
   value: import("../value.js").Value | undefined,
 ): void {
-  const delegationId = t.delegationId as string;
+  const delegationId = t.delegationId;
   const sender = ctx.state.delegationSenders[delegationId];
   if (sender !== undefined) {
     if (value !== undefined) {
@@ -273,11 +273,10 @@ export function emitEscalateUpward(
   const ownAskId = allocAskId(t as Thread);
   recordAskForward(t as Thread, ownAskId, childCallId, childAskId);
   const escalationId = createEscalationId();
-  t.outboundEscalations[escalationId as unknown as string] = ownAskId;
+  t.outboundEscalations[escalationId] = ownAskId;
   // Mirror the registration into the global owner index so escalateAck
   // routing is O(1). See state.ts `escalationOwners`.
-  ctx.state.escalationOwners[escalationId as unknown as string] =
-    t.id as unknown as string;
+  ctx.state.escalationOwners[escalationId] = t.id;
   // 'reqId' is already the request's 'QualifiedName' (since the IR-id
   // unification in Phase 2.A), so we ship it as the escalate's
   // 'agentDefId' directly. The receiver decodes it and pumps an upward
@@ -312,7 +311,7 @@ export function recordAskForward(
   childCallId: CallId,
   childAskId: AskId,
 ): void {
-  t.askIdMap[ownAskId as number] = { childCallId, childAskId };
+  t.askIdMap[ownAskId] = { childCallId, childAskId };
 }
 
 /** Pop a forwarding entry. Returns undefined if no record exists. */
@@ -320,9 +319,9 @@ export function popAskForward(
   t: Thread,
   ownAskId: AskId,
 ): { childCallId: CallId; childAskId: AskId } | undefined {
-  const entry = (t.askIdMap as AskIdMap)[ownAskId as number];
+  const entry = t.askIdMap[ownAskId];
   if (entry === undefined) return undefined;
-  delete t.askIdMap[ownAskId as number];
+  delete t.askIdMap[ownAskId];
   return entry;
 }
 
@@ -512,15 +511,13 @@ export function newCommonFields(args: {
   parent: ThreadId | null;
   parentCallId: CallId | null;
   scopeId: ScopeId;
-  handlers: Record<number, ThreadId>;
 }): {
   id: ThreadId;
   parent: ThreadId | null;
   parentCallId: CallId | null;
   scopeId: ScopeId;
   status: ThreadStatus;
-  children: Record<number, ThreadId>;
-  handlers: Record<number, ThreadId>;
+  children: Record<CallId, ThreadId>;
   nextCallId: CallId;
   nextAskId: AskId;
   askIdMap: AskIdMap;
@@ -532,7 +529,6 @@ export function newCommonFields(args: {
     scopeId: args.scopeId,
     status: "running",
     children: {},
-    handlers: { ...args.handlers },
     nextCallId: 0 as CallId,
     nextAskId: 0 as AskId,
     askIdMap: {},

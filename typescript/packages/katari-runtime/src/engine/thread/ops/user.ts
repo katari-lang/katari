@@ -170,7 +170,7 @@ function handleStatement(
       }
       const closureId = nextId as import("../../id.js").ClosureId;
       ctx.state.nextClosureId = nextId + 1;
-      ctx.state.closures[closureId as unknown as number] = {
+      ctx.state.closures[closureId] = {
         id: closureId,
         blockId: stmt.body.block,
         scopeId: t.scopeId,

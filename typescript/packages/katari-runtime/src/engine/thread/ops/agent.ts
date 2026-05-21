@@ -94,7 +94,7 @@ export const agentOps: ThreadOps<AgentThread> = {
       // Root AgentThread = receiver side of a delegation. A `request` ask
       // that reaches us has no local handler — escalate it back to the
       // delegation sender (symmetric with DelegateThread sender side).
-      const peer = ctx.state.delegationSenders[t.delegationId as string];
+      const peer = ctx.state.delegationSenders[t.delegationId];
       if (peer === undefined) {
         ctx.log("warn", "engine.agent: ask at root with no registered sender", {
           threadId: t.id,

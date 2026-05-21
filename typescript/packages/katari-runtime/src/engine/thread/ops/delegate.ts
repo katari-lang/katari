@@ -83,9 +83,9 @@ export const delegateOps: ThreadOps<DelegateThread> = {
    * logs and drops.
    */
   askAck(ctx, t, askId, value) {
-    const escalationId = t.inboundEscalations[askId as unknown as number];
+    const escalationId = t.inboundEscalations[askId];
     if (escalationId !== undefined) {
-      delete t.inboundEscalations[askId as unknown as number];
+      delete t.inboundEscalations[askId];
       // The owner index entry for this escalationId points at the sender
       // (= the AgentThread that issued the original outbound escalate).
       // Do NOT delete it here — the matching inbound escalateAck is
@@ -128,7 +128,7 @@ function emitInitialDelegate(
 ): void {
   // Register on the sender side so inbound delegateAck / terminateAck
   // can be routed back here.
-  ctx.state.pendingDelegateOut[t.delegationId as string] = t.id;
+  ctx.state.pendingDelegateOut[t.delegationId] = t.id;
   const { peer, agentDefId } = resolveTarget(ctx, t, block);
   ctx.emit({
     from: ctx.state.selfEndpoint,

@@ -35,7 +35,7 @@ export type ThreadStatus = "running" | "cancelling";
  * matching askAck comes back addressed to `own_askId`, the proxy looks up
  * the original sender and forwards the ack down.
  */
-export type AskIdMap = Record<number, { childCallId: CallId; childAskId: AskId }>;
+export type AskIdMap = Record<AskId, { childCallId: CallId; childAskId: AskId }>;
 
 /** Common fields present on every thread variant. */
 type Common = {
@@ -44,13 +44,8 @@ type Common = {
   parentCallId: CallId | null;
   scopeId: ScopeId;
   status: ThreadStatus;
-  /**
-   * Live children, keyed by CallId (numeric index from allocCallId or
-   * a string sentinel like 'main' on HandleThread / 'then' on ForThread).
-   */
+  /** Live children, keyed by the CallId allocated when each was spawned. */
   children: Record<CallId, ThreadId>;
-  /** Active handler-owning HandleThread per ReqId, inherited from parent. */
-  handlers: Record<number, ThreadId>;
   /** Per-thread next CallId allocator. */
   nextCallId: CallId;
   /** Per-thread next AskId allocator (for proxy forwarding). */
@@ -106,7 +101,7 @@ export type AgentThread = Common & {
    * `DelegateThread.inboundEscalations` because the lookup driver is
    * different (we receive ack by escalationId, not by askId).
    */
-  outboundEscalations: Record<string, AskId>;
+  outboundEscalations: Record<EscalationId, AskId>;
 };
 
 export type UserThread = Common & {
@@ -248,7 +243,7 @@ export type DelegateThread = Common & {
    * peer). Cleared on the matching `askAck` from above (we then emit an
    * outbound `escalateAck`).
    */
-  inboundEscalations: Record<number, EscalationId>;
+  inboundEscalations: Record<AskId, EscalationId>;
 };
 
 export type PrimThread = Common & {
