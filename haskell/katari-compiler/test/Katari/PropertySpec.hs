@@ -26,7 +26,6 @@ import Katari.Compile
   )
 import Katari.IR
   ( BlockId (..),
-    ExternalName (..),
     VarId (..),
   )
 import Test.Hspec
@@ -82,10 +81,6 @@ irIdJsonRoundtrip =
     it "VarId" $ hedgehog $ do
       value <- forAll (VarId <$> Gen.word32 (Range.linear 0 1_000_000))
       tripping value Aeson.toJSON Aeson.fromJSON
-
-    it "ExternalName" $ hedgehog $ do
-      qualified <- forAll genQualifiedName
-      tripping (ExternalName qualified) Aeson.toJSON Aeson.fromJSON
 
 -- ===========================================================================
 -- compile is deterministic

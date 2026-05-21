@@ -12,7 +12,7 @@
 //          `ipcChildDelegateAck` / `ipcChildTerminateAck` を返す
 //        - `escalate` (= ext-spawned child agent が発火した escalate):
 //          そのまま「親 ext delegation の caller」 に向けて bus に再 push
-//          (sidecar には届けない、 ExternalThread の handle scope chain に届く)
+//          (sidecar には届けない、 DelegateThread の handle scope chain に届く)
 //        - `escalateAck` (上の escalate に対する逆方向 ack): in-memory
 //          escalation map から original child の endpoint を引き、 同じく
 //          bus に再 push
@@ -230,7 +230,7 @@ export class FfiModule implements Module {
     // just inserted so the recovery sweep doesn't ship a
     // `ipcDelegateRestarted` for a delegation the sidecar never heard
     // about. The CORE caller still gets the rejection so its
-    // ExternalThread can transition to error.
+    // DelegateThread can transition to error.
     try {
       await this.sidecar.send({
         type: "ipcDelegate",
@@ -255,7 +255,7 @@ export class FfiModule implements Module {
     if (!ok) {
       // The delegation was already removed (e.g. ipcDelegateError consumed it
       // before CORE's cancel cascade reached us). Immediately ack so the
-      // ExternalThread on the CORE side can finish its cancellation.
+      // DelegateThread on the CORE side can finish its cancellation.
       this.logger.log("debug", "ffi: terminate for unknown delegation — sending immediate terminateAck", {
         delegationId,
       });

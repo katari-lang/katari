@@ -13,7 +13,6 @@
 
 import type {
   BlockId,
-  ExternalName,
   QualifiedName,
 } from "../../ir/types.js";
 import type {
@@ -60,20 +59,23 @@ type Common = {
 // ─── Variant payloads ──────────────────────────────────────────────────────
 
 /**
- * AgentThread: agent boundary. Wraps a `BlockAgent` IR block.
+ * AgentThread: agent boundary (receiver side of a delegation). Wraps a
+ * `BlockAgent` IR block.
  *
- * Spawned by:
- *   - inbound `delegate` event (translateExternal): creates a root AgentThread
- *     for the entry block, registered under `state.delegations[delegationId]`.
- *   - inline `statementAgentCall` (either qname or value/closure form):
- *     emits an outbound `delegate` event (core→core, from=to=selfEndpoint)
- *     that the runner picks up on the next iteration and spawns a fresh
- *     AgentThread.
+ * Spawned by an inbound `delegate` event (translateExternal) — creates a
+ * root AgentThread for the entry block, registered under
+ * `state.delegations[delegationId]`.
  *
  * Catches `return` asks bubbling up from descendants. Owns one body
- * UserThread spawned at create-time (callId 0). When the body completes
+ * thread spawned at create-time (callId 0). When the body completes
  * — naturally, via caught return, or via cancel — the AgentThread emits
  * `delegateAck` / `terminateAck` to the registered sender.
+ *
+ * Children's non-return asks are converted into outbound `escalate`
+ * events to the delegation sender (= we are the sender of escalate, the
+ * sender of the original delegate is the receiver of escalate). The
+ * eventual `escalateAck` arrives inbound and is converted into an
+ * `askAck` to the child via `outboundEscalations`.
  */
 export type AgentThread = Common & {
   kind: "agent";
@@ -92,13 +94,16 @@ export type AgentThread = Common & {
    */
   pendingReturn?: Value;
   /**
-   * Outstanding outbound escalations: childAskId → escalationId. Populated
-   * when a non-return `ask` reaches a root AgentThread (parent === null) —
-   * we forward it to the delegation sender as an `escalate` event,
-   * symmetric with `ExternalThread.pendingEscalations`. Cleared on the
-   * matching `escalateAck` from the sender side.
+   * Outstanding outbound escalations: escalationId → askId. Populated when
+   * a non-return `ask` from a descendant reaches this root and is converted
+   * into an outbound `escalate` event (we issue the escalationId). The
+   * eventual inbound `escalateAck` carries the same escalationId and we
+   * look up the original askId here to deliver the `askAck` back to the
+   * descendant child. Direction is reversed compared to
+   * `DelegateThread.inboundEscalations` because the lookup driver is
+   * different (we receive ack by escalationId, not by askId).
    */
-  pendingEscalations: Record<number, EscalationId>;
+  outboundEscalations: Record<string, AskId>;
 };
 
 export type UserThread = Common & {
@@ -198,27 +203,41 @@ export type RequestThread = Common & {
 };
 
 /**
- * Sentinel `externalName` used by 'spawnExternalForAgentDelegate' for the
- * phantom external that wraps a CORE→CORE agent invocation. Branches on
- * this value in the external ops choose `selfEndpoint` over
- * `ffiTargetEndpoint`. v0.1.0 RFC: replace this sentinel + branches with
- * a proper discriminator on the thread variant; tracked in memory under
- * `project_thread_abstraction_refactor`.
+ * DelegateThread: sender side of a delegation. Spawned by `StatementCall`
+ * to a `BlockDelegate` IR block. On create the thread emits an outbound
+ * `delegate` event to the appropriate endpoint:
+ *
+ *   - target = `delegateTargetInternal`: selfEndpoint (CORE loopback).
+ *   - target = `delegateTargetExternal`: ffiTargetEndpoint.
+ *   - target = `delegateTargetValue`: resolves the runtime value at the
+ *     given VarId (agentLiteral → check entries to decide internal vs
+ *     external; closure → CORE loopback with captured scope).
+ *
+ * Has no children of its own. The inbound `delegateAck` is translated by
+ * the runner into a `done` event addressed to this thread; cancel emits a
+ * `terminate` to the peer and waits for the matching ack.
+ *
+ * Inbound `escalate` events from the receiver side are converted into
+ * upward `ask` events to this thread's parent. The eventual `askAck`
+ * from above is converted into an outbound `escalateAck` to the peer via
+ * `inboundEscalations`.
  */
-export const PHANTOM_AGENT_EXTERNAL_NAME = "<agent>.<delegate>";
-
-export type ExternalThread = Common & {
-  kind: "external";
-  externalName: ExternalName;
+export type DelegateThread = Common & {
+  kind: "delegate";
+  /** BlockId of the BlockDelegate that spawned us (target lives in the block). */
+  blockId: BlockId;
+  /** Args passed in the delegate event. */
   args: Record<string, Value>;
+  /** Delegation id issued by us at create time. */
   delegationId: DelegationId;
   /**
-   * Outstanding outbound escalations: childAskId → escalationId. Set when
-   * an `ask` bubbles up into this thread; cleared on the matching
-   * `escalateAck` from the external side. Late acks after the thread is
-   * cancelling get dropped.
+   * Outstanding inbound escalations: askId → escalationId. Set when an
+   * inbound `escalate` event from the receiver side is converted into an
+   * upward `ask` (we allocate the askId; the escalationId came from the
+   * peer). Cleared on the matching `askAck` from above (we then emit an
+   * outbound `escalateAck`).
    */
-  pendingEscalations: Record<number, EscalationId>;
+  inboundEscalations: Record<number, EscalationId>;
 };
 
 export type PrimThread = Common & {
@@ -255,7 +274,7 @@ export type Thread =
   | ForThread
   | MatchThread
   | RequestThread
-  | ExternalThread
+  | DelegateThread
   | PrimThread
   | CtorThread
   | TupleThread

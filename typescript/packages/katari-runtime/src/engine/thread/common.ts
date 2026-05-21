@@ -237,35 +237,27 @@ export function commonRemoveChild(
 // ─── Escalation across a delegation boundary ──────────────────────────────
 
 /**
- * Threads that sit on a delegation boundary and forward asks across it as
- * `escalate` events. Two cases, symmetric:
+ * Forward a `request` ask from a descendant across the delegation
+ * boundary as an outbound `escalate` event. This is the AgentThread root
+ * case: a child's ask reached us with no local handler, so we issue a
+ * fresh escalationId and ship the request to the delegation sender.
  *
- *   - `ExternalThread`: sender side. Children's asks are escalated to the
- *     external peer (FFI sidecar / another machine).
- *   - `AgentThread` at root (`parent === null`): receiver side. Children's
- *     asks are escalated back to the delegation's original sender via
- *     `state.delegationSenders[delegationId]`.
- *
- * Both threads carry `delegationId` + `pendingEscalations`, so the bookkeeping
- * is identical. Only the peer endpoint (where the escalate event is `to`-ed)
- * differs.
- */
-type EscalatableThread = import("./types.js").ExternalThread | import("./types.js").AgentThread;
-
-/**
- * Forward a `request` ask across the delegation boundary as an outbound
- * `escalate` event. Allocates an own askId on `t`, records the forward
- * mapping for the eventual escalateAck, allocates a fresh escalationId
- * for the peer's matching, and emits the outbound event.
+ * Bookkeeping written:
+ *   - allocate `ownAskId` on `t` (for the upward forward + eventual ack)
+ *   - `askIdMap[ownAskId] = (childCallId, childAskId)` so a future
+ *     askAck can be routed back down to the original asker
+ *   - `outboundEscalations[escalationId] = ownAskId` so the inbound
+ *     `escalateAck` (which carries escalationId) can be matched in O(1)
+ *   - `escalationOwners[escalationId] = t.id` so the runner can find us
+ *     given just the escalationId
  *
  * Non-`request` ask kinds (return / break / next / break-for / next-for)
- * never cross a delegation boundary — they are caught by earlier ancestors
- * (HandleThread / ForThread / AgentThread for return). If one reaches here
- * it's a compiler bug; we drop with a warn.
+ * never cross a delegation boundary — they are caught by earlier ancestors.
+ * If one reaches here it's a compiler bug; we drop with a warn.
  */
 export function emitEscalateUpward(
   ctx: StepCtx,
-  t: EscalatableThread,
+  t: import("./types.js").AgentThread,
   peer: import("../endpoint.js").Endpoint,
   askKind: import("../event.js").AskKind,
   childCallId: CallId,
@@ -281,17 +273,15 @@ export function emitEscalateUpward(
   const ownAskId = allocAskId(t as Thread);
   recordAskForward(t as Thread, ownAskId, childCallId, childAskId);
   const escalationId = createEscalationId();
-  t.pendingEscalations[ownAskId as unknown as number] = escalationId;
+  t.outboundEscalations[escalationId as unknown as string] = ownAskId;
   // Mirror the registration into the global owner index so escalateAck
   // routing is O(1). See state.ts `escalationOwners`.
   ctx.state.escalationOwners[escalationId as unknown as string] =
     t.id as unknown as string;
   // 'reqId' is already the request's 'QualifiedName' (since the IR-id
   // unification in Phase 2.A), so we ship it as the escalate's
-  // 'agentDefId' directly. CORE→CORE: the receiver decodes it and pumps
-  // an upward request ask carrying the same qname; CORE→FFI: the
-  // sidecar dispatcher sees a qname-form agentDefId and looks it up by
-  // module-local convention.
+  // 'agentDefId' directly. The receiver decodes it and pumps an upward
+  // request ask carrying the same qname.
   const wireId: import("../../agent-def-id.js").AgentDefId =
     encodeCoreAgentDefId({
       kind: "qname",

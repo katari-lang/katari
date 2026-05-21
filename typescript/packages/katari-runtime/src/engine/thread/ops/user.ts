@@ -9,17 +9,10 @@
 // `request` calls are dispatched the usual way: a `RequestThread` is
 // spawned, which itself emits a `request` ask up the chain.
 //
-// Cross-agent dispatch lives here too:
-//   - `statementAgentCall`        → outbound core→core `delegate` event
-//                                   targeting a top-level qualified name
-//   - `statementAgentCallClosure` → outbound core→core `delegate` event
-//                                   carrying the captured agent's body
-//                                   blockId resolved from the closure
-//
-// The runner picks the outbound `delegate` up via `translateExternal` on
-// the next iteration and spawns a fresh AgentThread. A local
-// ExternalThread is registered as the receiver of the eventual
-// `delegateAck`, which becomes a `done` to this UserThread.
+// Cross-agent dispatch uses the standard `statementCall` path targeting
+// a `BlockDelegate`; the runtime spawns a `DelegateThread` that emits
+// the outbound `delegate` event and waits for `delegateAck`. UserThread
+// itself stays uniform — no special agent-call statement variant.
 
 import type {
   Block,
@@ -32,12 +25,7 @@ import type {
 import type { CallId, ScopeId, ThreadId } from "../../id.js";
 import type { AskKind, ModMap } from "../../event.js";
 import { tryMatch } from "../../pattern.js";
-import { spawnChild, spawnExternalForAgentDelegate } from "../../spawn.js";
-import { createDelegationId } from "../../id.js";
-import {
-  encodeCoreAgentDefId,
-  type AgentDefId,
-} from "../../../agent-def-id.js";
+import { spawnChild } from "../../spawn.js";
 import type { StepCtx } from "../../step-ctx.js";
 import { literalToValue, NULL_VALUE, type Value } from "../../value.js";
 import {
@@ -89,7 +77,6 @@ export const userOps: ThreadOps<UserThread> = {
 function outputVarOf(stmt: Statement): VarId | undefined {
   switch (stmt.kind) {
     case "statementCall":
-    case "statementAgentCall":
       return stmt.body.output;
     default:
       return undefined;
@@ -221,76 +208,14 @@ function handleStatement(
       emitAskUpwards(ctx, t, askKind);
       return "wait";
     }
-    case "statementAgentCall": {
-      const callId = t.pc as CallId;
-      t.pc += 1;
-      const value = lookupValue(ctx, t.scopeId, stmt.body.target);
-      let agentDefId: AgentDefId;
-      if (value.kind === "agentLiteral") {
-        agentDefId = encodeCoreAgentDefId({
-          kind: "qname",
-          value: value.qualifiedName,
-        });
-      } else if (value.kind === "closure") {
-        agentDefId = encodeCoreAgentDefId({
-          kind: "closure",
-          value: value.closureId,
-        });
-      } else {
-        emitThrowEscalate(
-          ctx,
-          t as Thread,
-          `call: expected a callable value, got ${value.kind}`,
-        );
-        return "wait";
-      }
-      const args: Record<string, Value> = {};
-      for (const a of stmt.body.arguments) {
-        args[a.label] = lookupValue(ctx, t.scopeId, a.var);
-      }
-      pushAgentDelegate(ctx, t, callId, args, agentDefId);
-      return "wait";
+    default: {
+      // Defensive: a deserialized IR may carry a kind we removed (e.g. an
+      // old `statementAgentCall`). Without an explicit throw the
+      // `runStatements` loop would never advance and we'd spin forever.
+      const k = (stmt as { kind: string }).kind;
+      throw new Error(`engine.user: unknown statement kind '${k}' at pc=${t.pc}`);
     }
   }
-}
-
-/**
- * Issue a core→core agent delegate. Spawns a phantom ExternalThread as a
- * child of `t` at `parentCallId = callId`, registers it under
- * `state.pendingDelegateOut[delegationId]`, and emits the outbound
- * `delegate` event from=to=self. The bus picks the event up on the next
- * iteration, the same CORE module's `feed` is invoked again, and a fresh
- * AgentThread root is spawned for the receiver side.
- *
- * When the AgentThread completes, `emitAgentRootCompletion` emits a
- * `delegateAck` outbound (also self→self for the CORE→CORE case). The bus
- * loops it back, the phantom is found via `pendingDelegateOut`, and a
- * `done` is fired to the original UserThread which binds the value.
- */
-function pushAgentDelegate(
-  ctx: StepCtx,
-  t: UserThread,
-  callId: CallId,
-  args: Record<string, Value>,
-  agentDefId: AgentDefId,
-): void {
-  const delegationId = createDelegationId();
-  spawnExternalForAgentDelegate(ctx, {
-    parentId: t.id,
-    parentCallId: callId,
-    delegationId,
-    args,
-  });
-  ctx.emit({
-    from: ctx.state.selfEndpoint,
-    to: ctx.state.selfEndpoint,
-    payload: {
-      kind: "delegate",
-      delegationId,
-      agentDefId,
-      args,
-    },
-  });
 }
 
 function pushCallEvent(
@@ -324,6 +249,11 @@ function isStructuralBlock(kind: Block["kind"]): boolean {
     case "blockMatch":
     case "blockTuple":
     case "blockArray":
+      return true;
+    case "blockDelegate":
+      // BlockDelegate may reference a runtime value at a VarId in the
+      // caller's scope (DelegateTargetValue); inherit so the lookup
+      // resolves. For static targets the inheritance is harmless.
       return true;
     default:
       return false;

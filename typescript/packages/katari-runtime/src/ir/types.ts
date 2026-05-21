@@ -46,12 +46,6 @@ export function joinQualifiedName(module_: string, name: string): QualifiedName 
   return module_ === "" ? name : `${module_}.${name}`;
 }
 
-/**
- * ExternalName is a newtype over QualifiedName in Haskell.
- * JSON shape is identical to QualifiedName.
- */
-export type ExternalName = QualifiedName;
-
 // ─── Module ──────────────────────────────────────────────────────────────────
 
 export type IRMetadata = {
@@ -154,7 +148,6 @@ export type Block =
   | { kind: "blockUser"; body: UserBlock }
   | { kind: "blockPrim"; body: string }
   | { kind: "blockRequest"; body: QualifiedName }
-  | { kind: "blockExternal"; body: ExternalName }
   /**
    * Constructor block. Note the kind is `blockConstructor` (matching
    * Haskell's `BlockConstructor` ctor name); earlier drafts of this
@@ -167,7 +160,33 @@ export type Block =
   | { kind: "blockHandle"; body: HandleBlock }
   | { kind: "blockTuple"; body: TupleBlock }
   | { kind: "blockArray"; body: ArrayBlock }
-  | { kind: "blockAgent"; body: AgentBlock };
+  | { kind: "blockAgent"; body: AgentBlock }
+  | { kind: "blockDelegate"; body: DelegateBlock };
+
+/**
+ * Payload for `blockDelegate`. Identifies the delegation target; runtime
+ * picks the endpoint (CORE loopback / FFI / dynamic value resolution)
+ * based on the `target` variant.
+ */
+export type DelegateBlock = {
+  target: DelegateTarget;
+};
+
+/**
+ * Discriminator for `BlockDelegate`.
+ *
+ *   - `delegateTargetInternal`: statically known CORE qname; runtime emits
+ *     `delegate` to the local self-endpoint.
+ *   - `delegateTargetExternal`: statically known external qname; runtime
+ *     emits `delegate` to the FFI endpoint.
+ *   - `delegateTargetValue`: runtime value at the given VarId
+ *     (agentLiteral → qname resolved via entries to decide internal vs
+ *     external; closure → CORE loopback with captured scope).
+ */
+export type DelegateTarget =
+  | { kind: "delegateTargetInternal"; body: QualifiedName }
+  | { kind: "delegateTargetExternal"; body: QualifiedName }
+  | { kind: "delegateTargetValue"; body: VarId };
 
 // ─── Arg (irOptions → flat record) ───────────────────────────────────────────
 
@@ -212,29 +231,14 @@ export type MatchArm = {
 // ─── Statement payload types (irOptions → flat record) ───────────────────────
 
 /**
- * Payload for `statementCall` — invocation of an inline (structural)
- * block whose body inherits the caller's lexical scope. Used for
- * match-arm bodies, for-loop bodies, handle scopes, tuple / array
- * constructions, and compiler-internal prim calls. Cross-callable
- * invocations flow through `statementAgentCall` instead.
+ * Payload for `statementCall` — targets any IR block. For inline
+ * (structural) blocks (match arm body / for body / handle scope / tuple
+ * / array / prim leaf) the runtime runs them in-thread inheriting the
+ * caller's lexical scope. For a `blockDelegate` block the runtime spawns
+ * a `DelegateThread` that crosses the delegation boundary.
  */
 export type CallData = {
   block: BlockId;
-  arguments: Arg[];
-  output?: VarId;
-};
-
-/**
- * Payload for `statementAgentCall` — value-targeted callable dispatch.
- * The `target` `VarId` holds either an `agentLiteral` value (a
- * top-level callable: agent / prim / ctor / external — runtime resolves
- * via `IRModule.entries`) or a `closure` value (a local agent — runtime
- * resolves via the closures table, which also supplies the captured
- * parent scope). In all cases the runtime emits a `core→core` delegate
- * event that spawns the appropriate child execution.
- */
-export type AgentCallData = {
-  target: VarId;
   arguments: Arg[];
   output?: VarId;
 };
@@ -330,5 +334,4 @@ export type Statement =
   | { kind: "statementLoadLiteral"; body: LoadLiteralData }
   | { kind: "statementExit"; body: ExitData }
   | { kind: "statementCont"; body: ContData }
-  | { kind: "statementBindPattern"; body: BindPatternData }
-  | { kind: "statementAgentCall"; body: AgentCallData };
+  | { kind: "statementBindPattern"; body: BindPatternData };

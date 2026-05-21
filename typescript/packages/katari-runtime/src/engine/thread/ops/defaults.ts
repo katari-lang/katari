@@ -16,7 +16,7 @@ import type { Thread } from "../types.js";
 
 /**
  * Standard cancel: enter "cancelling" state and cascade to children.
- * Almost every variant uses this directly; `ExternalThread` overrides
+ * Almost every variant uses this directly; `DelegateThread` overrides
  * to emit an outbound terminate first.
  */
 export function defaultCancel<T extends Thread>(
@@ -30,7 +30,7 @@ export function defaultCancel<T extends Thread>(
  * Variants that don't catch any ask kind use this — just bubble up to
  * their parent. Examples: TupleThread, ArrayThread, MatchThread.
  *
- * Note: leaf threads (PrimThread, CtorThread, ExternalThread) cannot
+ * Note: leaf threads (PrimThread, CtorThread, DelegateThread) cannot
  * actually receive asks at runtime because they have no children. The
  * default exists only to make the dispatch table total.
  */

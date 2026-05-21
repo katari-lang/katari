@@ -172,7 +172,7 @@ describe("engine integration: end-to-end via external delegate", () => {
     });
 
     // main(): loads an agent literal for `helper`, then dispatches via
-    // StatementAgentCall on that VarId, returning the result.
+    // a per-call-site BlockDelegate{TargetValue helperLit}.
     const mainBody = userBlock({
       parameters: [],
       statements: [
@@ -187,9 +187,9 @@ describe("engine integration: end-to-end via external delegate", () => {
           },
         },
         {
-          kind: "statementAgentCall",
+          kind: "statementCall",
           body: {
-            target: helperLit,
+            block: 5,
             arguments: [],
             output: out1,
           },
@@ -198,12 +198,20 @@ describe("engine integration: end-to-end via external delegate", () => {
       trailing: out1,
     });
 
+    const helperDelegate: Block = {
+      kind: "blockDelegate",
+      body: {
+        target: { kind: "delegateTargetValue", body: helperLit },
+      },
+    };
+
     const module = ir(
       {
         1: agentBlock("main", 2),
         2: mainBody,
         3: agentBlock("helper", 4),
         4: helperBody,
+        5: helperDelegate,
       },
       { main: 1, helper: 3 },
     );
@@ -297,7 +305,10 @@ describe("engine integration: end-to-end via external delegate", () => {
     const module = ir({
       1: agentBlock("main", 2),
       2: userBlk,
-      200: { kind: "blockExternal", body: { module_: "test", name: "wait" } },
+      200: {
+        kind: "blockDelegate",
+        body: { target: { kind: "delegateTargetExternal", body: "test.wait" } },
+      },
     }, { main: 1 });
 
     const state = createState(module);

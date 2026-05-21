@@ -469,14 +469,18 @@ lowerProgramM zonkResult = do
       }
 
 -- | Write a 'BlockAgent' wrapper at a pre-reserved 'BlockId' for a
--- non-agent leaf (BlockPrim / BlockConstructor / BlockExternal).
+-- non-agent leaf (BlockPrim / BlockConstructor / BlockRequest / BlockDelegate
+-- for external).
 --
 -- Mirrors the 2-phase shape used for 'DeclarationAgent': Phase 1
 -- ('registerDeclarationKinds' / 'registerPrimitives') reserves the
 -- @agentBlk@ slot and registers it in 'lsEntries' / 'lsTopLevelBlocks';
--- Phase 2 (this function) allocates the inner leaf block, builds a
--- 'BlockUser' body that issues a single 'StatementCall' to the leaf,
--- and writes the 'BlockAgent' at @agentBlk@.
+-- Phase 2 (this function) writes the 'BlockAgent' at @agentBlk@ whose
+-- 'entryBody' points directly at the leaf block. The runtime's
+-- 'AgentThread' spawns the leaf with the args passed by label; no
+-- intermediate 'BlockUser' is needed because all leaf threads
+-- (PrimThread / CtorThread / RequestThread / DelegateThread) consume
+-- 'callArgs' by label directly.
 --
 -- This way the runtime only ever spawns 'AgentThread' for delegate
 -- roots — leaf threads stay leaves.
@@ -494,33 +498,13 @@ writeWrapperAgent ::
 writeWrapperAgent agentBlk qname paramLabels innerBlk hint simpleName desc inputSchemaJson outputSchemaJson = do
   paramVars <- mapM (\_ -> freshVarId Nothing) paramLabels
   let wrapperParams = zipWith Param paramLabels paramVars
-      callArgs = zipWith Arg paramLabels paramVars
-  outVar <- freshVarId Nothing
-  let bodyStmt =
-        StatementCall
-          CallData
-            { block = innerBlk,
-              arguments = callArgs,
-              output = Just outVar
-            }
-  bodyBlk <- freshBlockId
-  recordBlock
-    bodyBlk
-    ( BlockUser
-        UserBlock
-          { parameters = wrapperParams,
-            statements = [bodyStmt],
-            trailing = Just outVar
-          }
-    )
-    (Just (hint <> ":body"))
   recordBlock
     agentBlk
     ( BlockAgent
         AgentBlock
           { qualifiedName = qname,
             parameters = wrapperParams,
-            entryBody = bodyBlk,
+            entryBody = innerBlk,
             name = simpleName,
             description = desc,
             inputSchema = inputSchemaJson,
@@ -680,7 +664,7 @@ lowerAllDeclarations zonkResult = do
         innerBlk <- freshBlockId
         recordBlock
           innerBlk
-          (BlockExternal (ExternalName qname))
+          (BlockDelegate DelegateBlock {target = DelegateTargetExternal qname})
           (Just (decl.name.text <> ":external"))
         (inputSchema, outputSchema) <- schemasForVariable variableId labelsAndAnnotations
         writeWrapperAgent
@@ -1238,19 +1222,30 @@ lowerExpr = \case
 
 -- | Lower a function call. The callee is always evaluated to a value
 -- (an @agentLiteral@ for top-level callables, a @closure@ for local
--- agents, or whatever an arbitrary expression produces); the runtime
--- dispatches on the value's variant. Inline (structural) block
--- invocations — @match@ arms, @for@ bodies, @where@ scopes, etc. —
--- are emitted by their respective lowering helpers, not by this path.
+-- agents, or whatever an arbitrary expression produces); we allocate a
+-- per-call-site 'BlockDelegate' whose 'DelegateTargetValue' carries the
+-- callee 'VarId', and emit a regular 'StatementCall' targeting it. The
+-- runtime spawns a 'DelegateThread' that resolves the value at create
+-- time (agentLiteral qname → internal/external lookup; closure → CORE
+-- loopback with captured scope).
+--
+-- Inline (structural) block invocations — @match@ arms, @for@ bodies,
+-- @where@ scopes, etc. — are emitted by their respective lowering
+-- helpers, not by this path.
 lowerCall :: AST.CallExpression Zonked -> Lower VarId
 lowerCall callExpression = do
   argVars <- mapM (lowerExpr . (.value)) callExpression.arguments
   let callArgs = zipWith Arg (map (.label.text) callExpression.arguments) argVars
   calleeVar <- lowerExpr callExpression.callee
+  delegateBlk <- freshBlockId
+  recordBlock
+    delegateBlk
+    (BlockDelegate DelegateBlock {target = DelegateTargetValue calleeVar})
+    Nothing
   out <- freshVarId Nothing
   emit
-    ( StatementAgentCall
-        AgentCallData {target = calleeVar, arguments = callArgs, output = Just out}
+    ( StatementCall
+        CallData {block = delegateBlk, arguments = callArgs, output = Just out}
     )
   pure out
 

@@ -93,7 +93,7 @@ export const agentOps: ThreadOps<AgentThread> = {
     if (t.parent === null) {
       // Root AgentThread = receiver side of a delegation. A `request` ask
       // that reaches us has no local handler — escalate it back to the
-      // delegation sender (symmetric with ExternalThread sender side).
+      // delegation sender (symmetric with DelegateThread sender side).
       const peer = ctx.state.delegationSenders[t.delegationId as string];
       if (peer === undefined) {
         ctx.log("warn", "engine.agent: ask at root with no registered sender", {
@@ -106,9 +106,10 @@ export const agentOps: ThreadOps<AgentThread> = {
       emitEscalateUpward(ctx, t as AgentThread, peer, kind, childCallId, askId);
       return;
     }
-    // Non-root AgentThread (spawned via spawnChild for a structural agent
-    // call — currently unreachable because agent calls go through
-    // StatementAgentCall, but kept for symmetry): bubble past as before.
+    // Non-root AgentThread: currently unreachable in well-formed IR
+    // (top-level agent calls always go through a BlockDelegate which
+    // spawns an AgentThread as a delegation root, not as a child).
+    // Kept for symmetry — proxy upward through the parent chain.
     proxyAskToParent(ctx, t as AgentThread, childCallId, askId, kind);
   },
 

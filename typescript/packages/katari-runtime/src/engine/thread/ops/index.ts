@@ -17,7 +17,7 @@ import type { Thread } from "../types.js";
 import { agentOps } from "./agent.js";
 import { arrayOps } from "./array.js";
 import { ctorOps } from "./ctor.js";
-import { externalOps } from "./external.js";
+import { delegateOps } from "./delegate.js";
 import { forOps } from "./for.js";
 import { handleOps } from "./handle.js";
 import { matchOps } from "./match.js";
@@ -39,7 +39,7 @@ export function dispatchCreate(ctx: StepCtx, t: Thread): void {
     .with({ kind: "user" }, x => userOps.create(ctx, x))
     .with({ kind: "for" }, x => forOps.create(ctx, x))
     .with({ kind: "request" }, x => requestOps.create(ctx, x))
-    .with({ kind: "external" }, x => externalOps.create(ctx, x))
+    .with({ kind: "delegate" }, x => delegateOps.create(ctx, x))
     .with({ kind: "handle" }, x => handleOps.create(ctx, x))
     .exhaustive();
 }
@@ -60,7 +60,7 @@ export function dispatchDone(
     .with({ kind: "user" }, x => userOps.done(ctx, x, callId, value))
     .with({ kind: "for" }, x => forOps.done(ctx, x, callId, value))
     .with({ kind: "request" }, x => requestOps.done(ctx, x, callId, value))
-    .with({ kind: "external" }, x => externalOps.done(ctx, x, callId, value))
+    .with({ kind: "delegate" }, x => delegateOps.done(ctx, x, callId, value))
     .with({ kind: "handle" }, x => handleOps.done(ctx, x, callId, value))
     .exhaustive();
 }
@@ -76,7 +76,7 @@ export function dispatchCancel(ctx: StepCtx, t: Thread): void {
     .with({ kind: "user" }, x => userOps.cancel(ctx, x))
     .with({ kind: "for" }, x => forOps.cancel(ctx, x))
     .with({ kind: "request" }, x => requestOps.cancel(ctx, x))
-    .with({ kind: "external" }, x => externalOps.cancel(ctx, x))
+    .with({ kind: "delegate" }, x => delegateOps.cancel(ctx, x))
     .with({ kind: "handle" }, x => handleOps.cancel(ctx, x))
     .exhaustive();
 }
@@ -96,7 +96,7 @@ export function dispatchCancelAck(
     .with({ kind: "user" }, x => userOps.cancelAck(ctx, x, callId))
     .with({ kind: "for" }, x => forOps.cancelAck(ctx, x, callId))
     .with({ kind: "request" }, x => requestOps.cancelAck(ctx, x, callId))
-    .with({ kind: "external" }, x => externalOps.cancelAck(ctx, x, callId))
+    .with({ kind: "delegate" }, x => delegateOps.cancelAck(ctx, x, callId))
     .with({ kind: "handle" }, x => handleOps.cancelAck(ctx, x, callId))
     .exhaustive();
 }
@@ -118,7 +118,7 @@ export function dispatchAsk(
     .with({ kind: "user" }, x => userOps.ask(ctx, x, askId, kind, childCallId))
     .with({ kind: "for" }, x => forOps.ask(ctx, x, askId, kind, childCallId))
     .with({ kind: "request" }, x => requestOps.ask(ctx, x, askId, kind, childCallId))
-    .with({ kind: "external" }, x => externalOps.ask(ctx, x, askId, kind, childCallId))
+    .with({ kind: "delegate" }, x => delegateOps.ask(ctx, x, askId, kind, childCallId))
     .with({ kind: "handle" }, x => handleOps.ask(ctx, x, askId, kind, childCallId))
     .exhaustive();
 }
@@ -139,7 +139,7 @@ export function dispatchAskAck(
     .with({ kind: "user" }, x => userOps.askAck(ctx, x, askId, value))
     .with({ kind: "for" }, x => forOps.askAck(ctx, x, askId, value))
     .with({ kind: "request" }, x => requestOps.askAck(ctx, x, askId, value))
-    .with({ kind: "external" }, x => externalOps.askAck(ctx, x, askId, value))
+    .with({ kind: "delegate" }, x => delegateOps.askAck(ctx, x, askId, value))
     .with({ kind: "handle" }, x => handleOps.askAck(ctx, x, askId, value))
     .exhaustive();
 }

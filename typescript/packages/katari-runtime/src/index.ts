@@ -63,7 +63,7 @@ export type {
   ForThread,
   MatchThread,
   RequestThread,
-  ExternalThread,
+  DelegateThread,
   PrimThread,
   CtorThread,
   TupleThread,

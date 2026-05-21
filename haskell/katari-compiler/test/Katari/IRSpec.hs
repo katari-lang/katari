@@ -72,11 +72,18 @@ blockSpec = describe "Block (sum)" $ do
           "body" .= ("main.log" :: String)
         ]
 
-  it "BlockExternal carries kind + body (ExternalName as flat string)" $ do
-    BlockExternal (ExternalName (QualifiedName "discord" "send_message"))
+  it "BlockDelegate (TargetExternal) nests DelegateBlock under 'body'" $ do
+    BlockDelegate DelegateBlock {target = DelegateTargetExternal (QualifiedName "discord" "send_message")}
       `shouldEncodeAs` object
-        [ "kind" .= ("blockExternal" :: String),
-          "body" .= ("discord.send_message" :: String)
+        [ "kind" .= ("blockDelegate" :: String),
+          "body"
+            .= object
+              [ "target"
+                  .= object
+                    [ "kind" .= ("delegateTargetExternal" :: String),
+                      "body" .= ("discord.send_message" :: String)
+                    ]
+              ]
         ]
 
   it "BlockConstructor carries kind + body (QualifiedName as flat string)" $ do
@@ -110,7 +117,9 @@ blockSpec = describe "Block (sum)" $ do
     roundTrip (BlockUser userBody)
     roundTrip (BlockPrim "add")
     roundTrip (BlockRequest (QualifiedName "main" "log"))
-    roundTrip (BlockExternal (ExternalName (QualifiedName "discord" "send")))
+    roundTrip (BlockDelegate DelegateBlock {target = DelegateTargetInternal (QualifiedName "main" "agent")})
+    roundTrip (BlockDelegate DelegateBlock {target = DelegateTargetExternal (QualifiedName "discord" "send")})
+    roundTrip (BlockDelegate DelegateBlock {target = DelegateTargetValue (VarId 7)})
     roundTrip (BlockConstructor (QualifiedName "main" "point"))
     roundTrip (BlockMatch MatchBlock {subject = VarId 0, arms = [], defaultArm = Nothing})
     roundTrip (BlockFor ForBlock {parallel = False, iters = [], stateInits = [], bodyBlock = BlockId 0, thenBlock = Nothing})
@@ -197,9 +206,6 @@ statementSpec = describe "Statement (sum)" $ do
     roundTrip $ StatementMakeClosure MakeClosureData {output = VarId 0, block = BlockId 0}
     roundTrip $
       StatementLoadLiteral LoadLiteralData {output = VarId 0, value = LiteralValueInteger 0}
-    roundTrip $
-      StatementAgentCall
-        AgentCallData {target = VarId 0, arguments = [], output = Nothing}
     roundTrip $ StatementExit ExitData {exitKind = ExitKindBreak, value = VarId 0}
     roundTrip $ StatementCont ContData {contKind = ContKindNext, value = Just (VarId 0), modifiers = []}
     roundTrip $ StatementBindPattern BindPatternData {source = VarId 0, pattern = MatchPatternAny}

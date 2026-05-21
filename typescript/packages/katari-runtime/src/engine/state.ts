@@ -4,7 +4,7 @@
 //   - `pendingOutEvents` is not on State — outbound events go on the Result.
 //   - `delegations` / `delegationSenders` are unified: the engine doesn't
 //     distinguish API / FFI senders. Each delegationId maps to a single
-//     thread (AgentThread inbound or ExternalThread outbound) and to the
+//     thread (AgentThread inbound or DelegateThread outbound) and to the
 //     endpoint we owe a reply to.
 //   - Logger is not on State — it is passed to `applyEvent` separately
 //     and is therefore not persisted across snapshots.
@@ -47,11 +47,10 @@ export type State = {
    */
   delegations: Record<string, string>;
   /**
-   * Sender-side: delegationId → ExternalThread id.
+   * Sender-side: delegationId → DelegateThread id.
    *
-   * Set when we issue an outbound `delegate`:
-   *   - real external (FFI): registered by `externalOps.create`
-   *   - core→core agent call: registered by `spawnExternalForAgentDelegate`
+   * Set by `delegateOps.create` when we issue an outbound `delegate`
+   * (CORE→CORE loopback, CORE→FFI, or via a runtime value target).
    *
    * Used by inbound `delegateAck` / `terminateAck` to find the sender
    * thread so we can deliver the ack to its parent. The receiver-side
@@ -68,10 +67,12 @@ export type State = {
    */
   delegationSenders: Record<string, Endpoint>;
   /**
-   * EscalationId → owning ThreadId. Index into the same data the per-thread
-   * `pendingEscalations` map carries, kept here so escalateAck routing is
-   * O(1) instead of O(threads × pendingEscalations). Populated/cleared
-   * alongside writes to thread.pendingEscalations.
+   * EscalationId → owning AgentThread id. Index into the same data the
+   * per-thread `outboundEscalations` map carries, kept here so the
+   * inbound `escalateAck` routing is O(1) instead of O(threads). Owners
+   * are always the AgentThread root that issued the outbound escalate
+   * via `emitEscalateUpward`. Populated/cleared alongside writes to
+   * `AgentThread.outboundEscalations`.
    *
    * On load, the engine rebuilds this index from existing threads if it
    * is absent (= older checkpoint that pre-dates the field), so checkpoints

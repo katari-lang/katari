@@ -86,28 +86,40 @@ agentBody agentName irMod = do
 -- match-arm assertions that want to compare against the declaration-side
 -- identifier.
 --
--- Constructors are now wrapped in a 'BlockAgent' for uniform delegate
--- dispatch (the wrapper's body issues a 'StatementCall' to the inner
--- 'BlockConstructor'). We follow the agent wrapper to find the inner
--- ctor block.
+-- Constructors are wrapped in a 'BlockAgent' for uniform delegate
+-- dispatch; the wrapper's 'entryBody' points directly at the inner
+-- 'BlockConstructor'.
 ctorIdOf :: Text -> IRModule -> Maybe QualifiedName
 ctorIdOf ctorName irMod = do
   bid <- Map.lookup (QualifiedName "main" ctorName) irMod.entries
   case Map.lookup bid irMod.blocks of
     Just (BlockConstructor qname) -> Just qname
-    Just (BlockAgent agent) -> do
-      bodyBlock <- Map.lookup agent.entryBody irMod.blocks
-      case bodyBlock of
-        BlockUser body -> firstCtorBlock body irMod
-        _ -> Nothing
-    _ -> Nothing
-  where
-    firstCtorBlock :: UserBlock -> IRModule -> Maybe QualifiedName
-    firstCtorBlock body m = case body.statements of
-      [StatementCall callData] -> case Map.lookup callData.block m.blocks of
-        Just (BlockConstructor qname) -> Just qname
-        _ -> Nothing
+    Just (BlockAgent agent) -> case Map.lookup agent.entryBody irMod.blocks of
+      Just (BlockConstructor qname) -> Just qname
       _ -> Nothing
+    _ -> Nothing
+
+-- | Find 'StatementCall' statements whose target is a 'BlockDelegate' with
+-- 'DelegateTargetValue' matching @calleeVar@. Replaces the pre-refactor
+-- 'StatementAgentCall' filter (the value-targeted dispatch path now flows
+-- through a 'BlockDelegate' generated per call site).
+agentCallsViaValue :: VarId -> UserBlock -> IRModule -> [CallData]
+agentCallsViaValue calleeVar ub irMod =
+  [ c
+    | StatementCall c <- ub.statements,
+      Just (BlockDelegate db) <- [Map.lookup c.block irMod.blocks],
+      DelegateTargetValue v <- [db.target],
+      v == calleeVar
+  ]
+
+-- | All delegate-via-value calls in a block (regardless of callee var).
+allDelegateValueCalls :: UserBlock -> IRModule -> [CallData]
+allDelegateValueCalls ub irMod =
+  [ c
+    | StatementCall c <- ub.statements,
+      Just (BlockDelegate db) <- [Map.lookup c.block irMod.blocks],
+      DelegateTargetValue _ <- [db.target]
+  ]
 
 -- | Entries excluding builtin prims (module @"prim"@). Useful for tests
 -- that want to assert on user-defined declarations only.
@@ -220,11 +232,11 @@ stage1Spec = describe "Stage 1 — literals / arithmetic" $ do
         agentLits = [qname | StatementLoadLiteral d <- ub.statements, LiteralValueAgent qname <- [d.value]]
     intLits `shouldMatchList` [LiteralValueInteger 1, LiteralValueInteger 2]
     agentLits `shouldContain` [QualifiedName "prim" "add"]
-    case [d | StatementAgentCall d <- ub.statements] of
+    case allDelegateValueCalls ub irMod of
       [addCall] -> do
         map (.label) addCall.arguments `shouldMatchList` ["lhs", "rhs"]
         addCall.output `shouldBe` ub.trailing
-      _ -> expectationFailure "expected exactly one StatementAgentCall (the add op)"
+      _ -> expectationFailure "expected exactly one delegate-via-value call (the add op)"
 
   it "lowers unary negation to neg prim agent-call" $ do
     (irMod, errs) <- lowerSource "agent main() { let x = 7; -x }"
@@ -232,11 +244,11 @@ stage1Spec = describe "Stage 1 — literals / arithmetic" $ do
     let Just ub = agentBody "main" irMod
         agentLits = [qname | StatementLoadLiteral d <- ub.statements, LiteralValueAgent qname <- [d.value]]
     agentLits `shouldContain` [QualifiedName "prim" "neg"]
-    case [d | StatementAgentCall d <- ub.statements] of
+    case allDelegateValueCalls ub irMod of
       [c] -> do
         map (.label) c.arguments `shouldBe` ["value"]
         c.output `shouldBe` ub.trailing
-      _ -> expectationFailure "expected exactly one StatementAgentCall (the neg op)"
+      _ -> expectationFailure "expected exactly one delegate-via-value call (the neg op)"
     let intLits = [d.value | d <- literalLoads ub, case d.value of LiteralValueInteger _ -> True; _ -> False]
     intLits `shouldBe` [LiteralValueInteger 7]
 
@@ -461,9 +473,9 @@ stage3Spec = describe "Stage 3 \8212 block / let / scope" $ do
     errs `shouldBe` []
     let Just ub = agentBody "main" irMod
     -- Two integer LoadLiteral (1, 2) plus one agent literal LoadLiteral
-    -- (the `add` prim ref) plus one StatementAgentCall (the actual call).
+    -- (the `add` prim ref) plus one delegate-via-value call (the actual call).
     let intLits = [() | StatementLoadLiteral d <- ub.statements, LiteralValueInteger _ <- [d.value]]
-        agentCalls = [d | StatementAgentCall d <- ub.statements]
+        agentCalls = allDelegateValueCalls ub irMod
     length intLits `shouldBe` 2
     length agentCalls `shouldBe` 1
     -- The final agent-call's output equals the trailing var
@@ -550,16 +562,14 @@ stage3Spec = describe "Stage 3 \8212 block / let / scope" $ do
     errs `shouldBe` []
     let Just ub = agentBody "main" irMod
     -- The main body should issue a StatementMakeClosure whose block is a
-    -- BlockAgent (the local helper agent), followed by a StatementAgentCall
-    -- that dispatches via that closure value.
+    -- BlockAgent (the local helper agent), followed by a delegate-via-value
+    -- call that dispatches via that closure value.
     let closures =
           [ mc | StatementMakeClosure mc <- ub.statements, Just (BlockAgent _) <- [Map.lookup mc.block irMod.blocks]
           ]
     length closures `shouldBe` 1
     let helperVar = (head closures).output
-    let agentCalls =
-          [ d | StatementAgentCall d <- ub.statements, d.target == helperVar
-          ]
+    let agentCalls = agentCallsViaValue helperVar ub irMod
     length agentCalls `shouldBe` 1
 
   it "function parameter with tuple pattern destructures via StatementBindPattern" $ do
@@ -594,7 +604,7 @@ isChildBlockCall c irMod = case Map.lookup c.block irMod.blocks of
 
 stage4Spec :: Spec
 stage4Spec = describe "Stage 4 \8212 agent calls / closure" $ do
-  it "direct call to a top-level agent loads an agent literal then dispatches via StatementAgentCall" $ do
+  it "direct call to a top-level agent loads an agent literal then dispatches via a delegate BlockDelegate" $ do
     (irMod, errs) <-
       lowerSource $
         Text.unlines
@@ -604,8 +614,8 @@ stage4Spec = describe "Stage 4 \8212 agent calls / closure" $ do
     errs `shouldBe` []
     let Just ub = agentBody "main" irMod
     -- Top-level callable references load a 'LiteralValueAgent' and the
-    -- subsequent 'StatementAgentCall' dispatches via that VarId — the
-    -- runtime resolves the qualified name through 'IRModule.entries'.
+    -- subsequent 'StatementCall' targets a per-call-site 'BlockDelegate'
+    -- whose 'DelegateTargetValue' references the literal's 'VarId'.
     let agentLits =
           [ d
             | StatementLoadLiteral d <- ub.statements,
@@ -615,7 +625,7 @@ stage4Spec = describe "Stage 4 \8212 agent calls / closure" $ do
           ]
     length agentLits `shouldBe` 1
     let helperLitVar = (head agentLits).output
-        agentCalls = [d | StatementAgentCall d <- ub.statements, d.target == helperLitVar]
+        agentCalls = agentCallsViaValue helperLitVar ub irMod
     length agentCalls `shouldBe` 1
 
   it "agent value bound to a local var routes through a pattern binding" $ do
@@ -629,7 +639,8 @@ stage4Spec = describe "Stage 4 \8212 agent calls / closure" $ do
     let Just ub = agentBody "main" irMod
     -- 'let f = helper' loads an agent literal and binds it via
     -- 'StatementBindPattern'; the subsequent call dispatches on the
-    -- pattern-bound var with a 'StatementAgentCall'.
+    -- pattern-bound var via a per-call-site 'BlockDelegate' whose target
+    -- is 'DelegateTargetValue' carrying that pattern var.
     let agentLits =
           [ d
             | StatementLoadLiteral d <- ub.statements,
@@ -643,7 +654,7 @@ stage4Spec = describe "Stage 4 \8212 agent calls / closure" $ do
     case bindPat of
       Just bp -> case bp.pattern of
         MatchPatternVariable patVar -> do
-          let agentCalls = [c | StatementAgentCall c <- ub.statements, c.target == patVar]
+          let agentCalls = agentCallsViaValue patVar ub irMod
           agentCalls `shouldNotBe` []
         _ -> expectationFailure "expected MatchPatternVariable pattern for simple let binding"
       Nothing -> pure ()
@@ -985,10 +996,10 @@ stage8Spec = describe "Stage 8 \8212 edge cases" $ do
           ]
     length ctorLits `shouldBe` 1
     let ctorVar = (head ctorLits).output
-        ctorCalls = [c | StatementAgentCall c <- ub.statements, c.target == ctorVar]
+        ctorCalls = agentCallsViaValue ctorVar ub irMod
     case ctorCalls of
       [c] -> map (.label) c.arguments `shouldMatchList` ["x", "y"]
-      _ -> expectationFailure "expected exactly one StatementAgentCall on the ctor literal"
+      _ -> expectationFailure "expected exactly one delegate-via-value call on the ctor literal"
 
   it "nested literal pattern lowers to MatchPatternConstructor with MatchPatternLiteral inner" $ do
     (irMod, errs) <-

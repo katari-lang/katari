@@ -26,7 +26,7 @@ export type ThreadOps<T extends Thread> = {
   /**
    * cancel was requested. Default behaviour (in `defaultOps`) is the cascade
    * via `beginCancel`; variants override to send custom outbound events
-   * first (e.g. ExternalThread emits a terminate to FFI before waiting).
+   * first (e.g. DelegateThread emits a terminate to FFI before waiting).
    */
   cancel(ctx: StepCtx, t: T): void;
   /** A direct child cancellation completed (used for targeted cancel). */

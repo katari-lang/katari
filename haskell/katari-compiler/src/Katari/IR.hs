@@ -28,7 +28,6 @@ module Katari.IR
     VarId (..),
     QualifiedName (..),
     renderQualifiedName,
-    ExternalName (..),
 
     -- * Module
     IRModule (..),
@@ -41,6 +40,8 @@ module Katari.IR
     Block (..),
     UserBlock (..),
     AgentBlock (..),
+    DelegateBlock (..),
+    DelegateTarget (..),
     MatchBlock (..),
     ForBlock (..),
     HandleBlock (..),
@@ -54,7 +55,6 @@ module Katari.IR
     -- * Statement
     Statement (..),
     CallData (..),
-    AgentCallData (..),
     MakeClosureData (..),
     ExitData (..),
     ContData (..),
@@ -101,14 +101,6 @@ newtype BlockId = BlockId Word32
 newtype VarId = VarId Word32
   deriving stock (Eq, Ord, Show)
   deriving newtype (ToJSON, FromJSON, ToJSONKey, FromJSONKey)
-
--- | Identifier of an external (sidecar) callable. Wraps a 'QualifiedName'
--- under a distinct type so the runtime layer can evolve its lookup
--- protocol independently (e.g. switching to per-sidecar namespaces)
--- without churning every 'BlockExternal' use site.
-newtype ExternalName = ExternalName QualifiedName
-  deriving stock (Eq, Ord, Show)
-  deriving newtype (ToJSON, FromJSON)
 
 -- ===========================================================================
 -- Top-level module
@@ -205,9 +197,6 @@ data Block where
   -- on 'SCall' (handler dispatch is by name). The same qualified name
   -- also lives in 'IRModule.entries'.
   BlockRequest :: QualifiedName -> Block
-  -- | External agent stub. The runtime looks up the 'ExternalName' in a
-  -- JS sidecar bundle.
-  BlockExternal :: ExternalName -> Block
   -- | Data constructor. The carried 'QualifiedName' is what
   -- 'MatchPatternConstructor' compares against in match arms; values
   -- built by this block carry @{__ctor: <qualifiedName>, ...}@ at
@@ -241,6 +230,11 @@ data Block where
   -- bodies, for bodies, handle bodies) lower to 'BlockUser' and do NOT
   -- create an agent boundary.
   BlockAgent :: AgentBlock -> Block
+  -- | Outbound delegation boundary. The runtime spawns a 'DelegateThread'
+  -- that emits a @delegate@ event to the appropriate endpoint based on
+  -- 'target' (CORE loopback for internal targets, FFI for external,
+  -- runtime value resolution for value targets).
+  BlockDelegate :: DelegateBlock -> Block
   deriving (Eq, Show, Generic)
 
 instance ToJSON Block where
@@ -287,6 +281,42 @@ instance ToJSON AgentBlock where
 
 instance FromJSON AgentBlock where
   parseJSON = genericParseJSON irOptions
+
+-- | Payload for 'BlockDelegate'. Identifies the delegation target — the
+-- runtime decides routing (CORE loopback / FFI / dynamic value lookup)
+-- based on the 'target' variant.
+newtype DelegateBlock = DelegateBlock
+  { target :: DelegateTarget
+  }
+  deriving (Eq, Show, Generic)
+
+instance ToJSON DelegateBlock where
+  toJSON = genericToJSON irOptions
+
+instance FromJSON DelegateBlock where
+  parseJSON = genericParseJSON irOptions
+
+-- | Discriminator for a 'BlockDelegate'.
+--
+--   * 'DelegateTargetInternal': statically known CORE qname; runtime
+--     emits a @delegate@ event to the local self-endpoint (loopback).
+--   * 'DelegateTargetExternal': statically known external qname; runtime
+--     emits a @delegate@ event to the FFI endpoint.
+--   * 'DelegateTargetValue': the callee is a runtime value at the given
+--     'VarId'. The runtime reads the value (@agentLiteral@ → qname
+--     resolved through 'IRModule.entries' to decide internal vs external,
+--     @closure@ → CORE loopback with captured scope) and routes accordingly.
+data DelegateTarget where
+  DelegateTargetInternal :: QualifiedName -> DelegateTarget
+  DelegateTargetExternal :: QualifiedName -> DelegateTarget
+  DelegateTargetValue :: VarId -> DelegateTarget
+  deriving (Eq, Show, Generic)
+
+instance ToJSON DelegateTarget where
+  toJSON = genericToJSON sumOptions
+
+instance FromJSON DelegateTarget where
+  parseJSON = genericParseJSON sumOptions
 
 -- | The body of a regular user-defined block. Always inline
 -- (inherits parent scope, catches nothing). Agent boundaries are
@@ -362,15 +392,6 @@ data Statement where
   -- 'BlockMatch' there is no @defaultArm@; the pattern is irrefutable
   -- (guaranteed by the exhaustiveness checker — K0291 / Phase 16).
   StatementBindPattern :: BindPatternData -> Statement
-  -- | Value-targeted callable invocation. The @target@ 'VarId' holds either
-  -- an @agentLiteral@ value (top-level callable: agent / prim / ctor /
-  -- external — the runtime resolves it to a 'BlockId' via 'IRModule.entries')
-  -- or a @closure@ value (local agent — the runtime resolves the
-  -- @ClosureId@ via the closures table, which also supplies the captured
-  -- parent scope). In all cases the runtime emits a @core→core@ delegate
-  -- event that spawns the appropriate child execution and feeds the
-  -- result back as a delegateAck.
-  StatementAgentCall :: AgentCallData -> Statement
   deriving (Eq, Show, Generic)
 
 instance ToJSON Statement where
@@ -379,11 +400,11 @@ instance ToJSON Statement where
 instance FromJSON Statement where
   parseJSON = genericParseJSON sumOptions
 
--- | Payload for 'SCall'. After the agent-value redesign, 'SCall' targets
--- a statically known inline (structural) block — its body inherits the
--- caller's lexical scope (match arm body / for body / handle scope /
--- handler body / tuple / array / etc.). Cross-callable invocations
--- flow through 'StatementAgentCall' instead.
+-- | Payload for 'StatementCall'. Targets any IR block: inline
+-- (structural) blocks for in-thread execution (match arm body /
+-- for body / handle scope / handler body / tuple / array / prim leaf),
+-- or a 'BlockDelegate' for cross-callable agent invocations. The runtime
+-- dispatches on the target block's kind.
 data CallData = CallData
   { block :: BlockId,
     arguments :: [Arg],
@@ -396,24 +417,6 @@ instance ToJSON CallData where
   toJSON = genericToJSON irOptions
 
 instance FromJSON CallData where
-  parseJSON = genericParseJSON irOptions
-
--- | Payload for 'StatementAgentCall'. The 'target' 'VarId' holds the
--- callable value (@agentLiteral@ → resolved via 'IRModule.entries';
--- @closure@ → resolved via the closures table, supplying the captured
--- parent scope). The runtime allocates a fresh delegationId and sends
--- a @core→core@ delegate event regardless of variant.
-data AgentCallData = AgentCallData
-  { target :: VarId,
-    arguments :: [Arg],
-    output :: Maybe VarId
-  }
-  deriving (Eq, Show, Generic)
-
-instance ToJSON AgentCallData where
-  toJSON = genericToJSON irOptions
-
-instance FromJSON AgentCallData where
   parseJSON = genericParseJSON irOptions
 
 -- | Payload for 'SMakeClosure'. The closure captures its lexical scope at
