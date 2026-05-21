@@ -37,6 +37,7 @@ export function createState(
     delegations: {},
     pendingDelegateOut: {},
     delegationSenders: {},
+    escalationOwners: {},
     ffiTargetEndpoint: options.ffiEndpoint ?? DEFAULT_FFI_ENDPOINT,
     lastGcScopeCount: 0,
   };

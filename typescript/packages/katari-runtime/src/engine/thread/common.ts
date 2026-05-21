@@ -283,6 +283,10 @@ export function emitEscalateUpward(
   recordAskForward(t as Draft<Thread>, ownAskId, childCallId, childAskId);
   const escalationId = createEscalationId();
   t.pendingEscalations[ownAskId as unknown as number] = escalationId;
+  // Mirror the registration into the global owner index so escalateAck
+  // routing is O(1). See state.ts `escalationOwners`.
+  ctx.state.escalationOwners[escalationId as unknown as string] =
+    t.id as unknown as string;
   // 'reqId' is already the request's 'QualifiedName' (since the IR-id
   // unification in Phase 2.A), so we ship it as the escalate's
   // 'agentDefId' directly. CORE→CORE: the receiver decodes it and pumps
@@ -477,13 +481,26 @@ export function setValueInScope(
   sc.values[varId] = value as Draft<Value>;
 }
 
+// Hard upper bound on scope-chain depth to catch corrupt checkpoints
+// that contain a cycle (parentId pointing back into the chain). Real
+// programs nest 10-20 frames at the deepest; 1000 is comfortably above
+// anything reachable through legal lowering. Above that we'd rather
+// fail loudly than spin in an infinite walk.
+const MAX_SCOPE_DEPTH = 1000;
+
 export function lookupValue(
   ctx: StepCtx,
   scopeId: ScopeId,
   varId: number,
 ): Value {
   let cur: ScopeId | null = scopeId;
+  let depth = 0;
   while (cur !== null) {
+    if (depth++ > MAX_SCOPE_DEPTH) {
+      throw new Error(
+        `engine: scope chain from ${scopeId} exceeded ${MAX_SCOPE_DEPTH} frames while looking up var ${varId} (possible cycle in scope.parentId)`,
+      );
+    }
     const sc: Scope | undefined = ctx.state.scopes[cur] as Scope | undefined;
     if (sc === undefined) {
       throw new Error(`engine: scope ${cur} not found while looking up var ${varId}`);

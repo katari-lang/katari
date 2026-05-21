@@ -8,6 +8,7 @@
 
 import type { MiddlewareHandler } from "hono";
 import { LRUCache } from "lru-cache";
+import type { Logger } from "@katari-lang/runtime";
 
 export type RateLimitOptions = {
   /** Maximum tokens (= burst capacity) per IP. */
@@ -23,6 +24,14 @@ export type RateLimitOptions = {
    * process.
    */
   publicPathPrefixes?: string[];
+  /**
+   * Optional logger. When provided, the limiter emits a one-time warning
+   * the first time it falls back to the "__direct__" key (= no
+   * x-forwarded-for header on a rate-limited request). That signals the
+   * deployment is exposing the api-server directly rather than behind a
+   * trusted reverse proxy, which makes the limiter a global cap.
+   */
+  logger?: Logger;
 };
 
 const DEFAULT_PUBLIC_PREFIXES: string[] = ["/healthz", "/readyz", "/metrics"];
@@ -52,6 +61,7 @@ export function buildRateLimitMiddleware(
     max: options.maxClients ?? 10_000,
   });
   const publicPrefixes = options.publicPathPrefixes ?? DEFAULT_PUBLIC_PREFIXES;
+  let warnedDirect = false;
 
   return async (c, next) => {
     const path = new URL(c.req.url).pathname;
@@ -59,6 +69,14 @@ export function buildRateLimitMiddleware(
       return next();
     }
     const key = clientKey(c.req.header("x-forwarded-for"));
+    if (key === "__direct__" && !warnedDirect) {
+      warnedDirect = true;
+      options.logger?.log(
+        "warn",
+        "rate-limit: request without x-forwarded-for; the limiter is now a global cap. " +
+          "Put api-server behind a reverse proxy that injects x-forwarded-for to get per-client limits.",
+      );
+    }
     const now = Date.now();
     const bucket = buckets.get(key) ?? {
       tokens: options.capacity,

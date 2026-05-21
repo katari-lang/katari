@@ -360,6 +360,16 @@ function translateExternal(
     draft.nextAskId = ((draft.nextAskId as number) + 1) as import("./id.js").AskId;
     draft.pendingEscalations[ownAskId as unknown as number] =
       p.escalationId as import("./id.js").EscalationId;
+    // NOTE on the global owner index: do NOT write 'escalationOwners'
+    // here. In a CORE→CORE round-trip the same escalationId is
+    // registered first by 'emitEscalateUpward' on the SENDER thread
+    // (T_A) and then again here on the RECEIVER bookkeeping thread
+    // (T_B). The owner index must remain pointing at T_A because the
+    // eventual inbound 'escalateAck' has to deliver its askAck to T_A
+    // (= the original sender's pending askId). Overwriting with T_B's
+    // id would route the ack to the wrong end and strand T_A. In
+    // cross-module cases (FFI→CORE) the matching escalateAck is
+    // OUTBOUND, never inbound, so the owner index is not consulted.
     ctx.enqueue({
       kind: "ask",
       target: ext.parent,
@@ -375,26 +385,38 @@ function translateExternal(
   }
 
   if (p.kind === "escalateAck") {
-    // Find any thread (ExternalThread or root AgentThread) carrying this
-    // escalation in 'pendingEscalations'. Both 'ask -> emitEscalateUpward'
-    // (root AgentThread on the receiver side) and inbound-escalate
-    // bookkeeping (ExternalThread on the sender side) populate the same
-    // map, and the matching escalateAck must reach whichever one is the
-    // local end of THIS hop. Iterating both kinds keeps CORE→CORE
-    // round-trips (sender + receiver are the same module) correct.
-    for (const t of Object.values(ctx.state.threads)) {
-      if (t === undefined) continue;
-      if (t.kind !== "external" && t.kind !== "agent") continue;
-      const askIdNum = findEscalationAskId(t.pendingEscalations, p.escalationId as string);
-      if (askIdNum === undefined) continue;
-      delete t.pendingEscalations[askIdNum];
-      ctx.enqueue({
-        kind: "askAck",
-        target: t.id,
-        askId: askIdNum as AskId,
-        value: p.value,
-      });
-      return;
+    // Resolve the owning thread via the global `escalationOwners`
+    // index (O(1)) instead of scanning every thread's
+    // `pendingEscalations` map. The index is populated alongside the
+    // per-thread map at registration time in 'emitEscalateUpward' and
+    // the inbound-escalate branch above; on load() of an older
+    // checkpoint, snapshot.ts rebuilds it from existing thread maps.
+    const ownerId =
+      ctx.state.escalationOwners[p.escalationId as unknown as string];
+    if (ownerId !== undefined) {
+      const t = ctx.state.threads[ownerId];
+      if (t !== undefined && (t.kind === "external" || t.kind === "agent")) {
+        const askIdNum = findEscalationAskId(
+          t.pendingEscalations,
+          p.escalationId as string,
+        );
+        if (askIdNum !== undefined) {
+          delete t.pendingEscalations[askIdNum];
+          delete ctx.state.escalationOwners[
+            p.escalationId as unknown as string
+          ];
+          ctx.enqueue({
+            kind: "askAck",
+            target: t.id,
+            askId: askIdNum as AskId,
+            value: p.value,
+          });
+          return;
+        }
+      }
+      // Index was stale (owner thread gone / wrong kind). Clean it
+      // up and fall through to the debug log.
+      delete ctx.state.escalationOwners[p.escalationId as unknown as string];
     }
     ctx.log("debug", "engine: escalateAck without registered escalation", {
       escalationId: p.escalationId,

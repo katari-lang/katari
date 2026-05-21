@@ -66,6 +66,17 @@ export type State = {
    * translateExternal on the next iteration.
    */
   delegationSenders: Record<string, Endpoint>;
+  /**
+   * EscalationId → owning ThreadId. Index into the same data the per-thread
+   * `pendingEscalations` map carries, kept here so escalateAck routing is
+   * O(1) instead of O(threads × pendingEscalations). Populated/cleared
+   * alongside writes to thread.pendingEscalations.
+   *
+   * On load, the engine rebuilds this index from existing threads if it
+   * is absent (= older checkpoint that pre-dates the field), so checkpoints
+   * persisted before this version remain loadable.
+   */
+  escalationOwners: Record<string, string>;
   /** Endpoint to send CORE→FFI delegate / terminate to. */
   ffiTargetEndpoint: Endpoint;
   /** Scope count at the most recent GC pass. Used by the GC trigger heuristic. */

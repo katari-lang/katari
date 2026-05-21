@@ -71,7 +71,8 @@ export function buildApp(deps: AppDeps): Hono {
   });
 
   if (deps.rateLimit !== null) {
-    app.use("*", buildRateLimitMiddleware(deps.rateLimit ?? DEFAULT_RATE_LIMIT));
+    const opts = deps.rateLimit ?? DEFAULT_RATE_LIMIT;
+    app.use("*", buildRateLimitMiddleware({ ...opts, logger: deps.logger }));
   }
 
   if (deps.apiKey !== null) {

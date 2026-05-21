@@ -82,9 +82,13 @@ export class FfiModule implements Module {
   private readonly onSidecarResponse: (event: ExternalEvent) => void;
   /**
    * In-memory escalation relay state. Keyed by `escalationId` (= the
-   * id the sender assigned). Lost on restart by design — that matches
-   * the user-approved policy: pending escalations across restarts get
-   * dropped, and the eventual ack is treated as unknown.
+   * id the sender assigned). Rebuilt from the persistent store via
+   * 'load()' so a server restart does not strand pending escalations:
+   * the rows have always been written to FfiStore, the previous
+   * comment claiming "lost on restart by design" was contradicted by
+   * the (still-present) DB rows. After load the map matches the rows;
+   * inbound escalateAck during the partial-restart window now finds
+   * its entry rather than dropping as "unknown escalation".
    */
   private readonly escalations = new Map<EscalationId, EscalationRelayEntry>();
 
@@ -126,9 +130,24 @@ export class FfiModule implements Module {
     }
   }
 
-  /** State は store に書き通すので no-op。 */
+  /** State は store に書き通すので persist は no-op。 */
   async persist(): Promise<void> {}
-  async load(): Promise<void> {}
+
+  /**
+   * Rebuild the in-memory escalation relay map from the persistent
+   * store. Called by the orchestrator at the start of every tick that
+   * uses this FfiModule. Idempotent — repopulating an already-populated
+   * map yields the same entries.
+   */
+  async load(): Promise<void> {
+    const rows = await this.store.listEscalations();
+    this.escalations.clear();
+    for (const row of rows) {
+      this.escalations.set(row.escalationId, {
+        childDelegationId: row.delegationId,
+      });
+    }
+  }
 
   // ─── Recovery ──────────────────────────────────────────────────────────
 
@@ -184,17 +203,11 @@ export class FfiModule implements Module {
       await this.store.deleteDelegation(row.delegationId);
     }
 
-    // Escalations across restarts are unsalvageable: the sidecar's
-    // in-memory pendingEscalations map is gone too. Wipe whatever's in
-    // the store.
-    const escalations = await this.store.listEscalations();
-    for (const row of escalations) {
-      this.logger.log("warn", "ffi: dropping stale escalation row", {
-        escalationId: row.escalationId,
-        delegationId: row.delegationId,
-      });
-      await this.store.deleteEscalation(row.escalationId);
-    }
+    // Escalations are preserved across restarts: the persisted rows
+    // are the source of truth, and 'load()' rebuilds the in-memory
+    // relay map. An inbound escalateAck arriving after the restart but
+    // before its corresponding ipcDelegateRestarted now finds its
+    // entry rather than dropping as "unknown".
   }
 
   // ─── Inbound handlers (CORE → FFI) ────────────────────────────────────

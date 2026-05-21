@@ -418,6 +418,11 @@ class PgAgentRepo implements AgentRepo {
     patch: Partial<Pick<AgentRow, "state" | "result" | "errorMessage">>,
     options?: { expectedState?: AgentState },
   ): Promise<boolean> {
+    // The patch is sparse — any subset of (state, result, error_message)
+    // may be supplied. We compose the SET clause by chaining tagged-
+    // template fragments through reduce. The intermediate ReturnType<Sql>
+    // type is awkward but is the documented postgres.js pattern for
+    // dynamic SET lists when fragment values must remain parameterised.
     const sets: ReturnType<Sql>[] = [];
     if (patch.state !== undefined) sets.push(this.sql`state = ${patch.state}`);
     if (patch.result !== undefined) {

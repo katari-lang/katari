@@ -34,6 +34,7 @@ import {
 import { ApiModule } from "./modules/api-module.js";
 import { StorageFfiStore } from "./modules/ffi-store.js";
 import type {
+  ProjectId,
   SnapshotId,
   Storage,
 } from "./storage/types.js";
@@ -41,6 +42,12 @@ import type {
 export class SnapshotNotFound extends Error {
   constructor(public readonly snapshotId: SnapshotId) {
     super(`snapshot ${snapshotId} not found`);
+  }
+}
+
+export class NoSnapshotForProject extends Error {
+  constructor(public readonly projectId: ProjectId) {
+    super(`no snapshot exists for project ${projectId}`);
   }
 }
 
@@ -68,10 +75,56 @@ export class Orchestrator {
     snapshotId: SnapshotId,
     fn: (ctx: TickContext) => Promise<T>,
   ): Promise<T> {
+    return this.runTick(
+      async (tx) => {
+        const sid = snapshotId;
+        const snapshot = await tx.snapshots.get(sid);
+        if (snapshot === null) throw new SnapshotNotFound(sid);
+        return { snapshotId: sid, snapshot };
+      },
+      fn,
+    );
+  }
+
+  /**
+   * Like 'tick', but resolves the snapshot id inside the transaction.
+   * Use this when the caller has `(projectId, snapshotId?)` rather than
+   * a concrete snapshot id; the old shape resolved the snapshot via a
+   * separate read first, leaving a window where the snapshot could be
+   * deleted before the tick acquired its lock.
+   */
+  async tickResolved<T>(
+    input: { projectId: ProjectId; snapshotId?: SnapshotId | undefined },
+    fn: (ctx: TickContext) => Promise<T>,
+  ): Promise<T> {
+    return this.runTick(
+      async (tx) => {
+        let sid = input.snapshotId;
+        if (sid === undefined) {
+          const latest = await tx.snapshots.latest(input.projectId);
+          if (latest === null) throw new NoSnapshotForProject(input.projectId);
+          sid = latest;
+        }
+        const snapshot = await tx.snapshots.get(sid);
+        if (snapshot === null) throw new SnapshotNotFound(sid);
+        return { snapshotId: sid, snapshot };
+      },
+      fn,
+    );
+  }
+
+  private async runTick<T>(
+    resolveSnapshot: (
+      tx: Storage,
+    ) => Promise<{
+      snapshotId: SnapshotId;
+      snapshot: NonNullable<Awaited<ReturnType<Storage["snapshots"]["get"]>>>;
+    }>,
+    fn: (ctx: TickContext) => Promise<T>,
+  ): Promise<T> {
     return this.storage.withTransaction(async (tx) => {
+      const { snapshotId, snapshot } = await resolveSnapshot(tx);
       return tx.withSnapshotLock(tx, snapshotId, async () => {
-        const snapshot = await tx.snapshots.get(snapshotId);
-        if (snapshot === null) throw new SnapshotNotFound(snapshotId);
 
         // Make sure the sidecar process exists (idempotent).
         await this.sidecarManager.ensureStarted({

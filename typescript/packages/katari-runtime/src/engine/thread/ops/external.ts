@@ -115,6 +115,12 @@ export const externalOps: ThreadOps<ExternalThread> = {
     const escalationId = t.pendingEscalations[askId as unknown as number];
     if (escalationId !== undefined) {
       delete t.pendingEscalations[askId as unknown as number];
+      // NOTE: do NOT delete from ctx.state.escalationOwners here. In a
+      // CORE→CORE round-trip this thread is the RECEIVER bookkeeping;
+      // the owner index entry belongs to the original SENDER thread,
+      // which still needs the eventual inbound escalateAck to route
+      // back to it. The runner's escalateAck handler removes the entry
+      // when the ack actually lands.
       const peer: Endpoint =
         t.externalName === "<agent>.<delegate>"
           ? ctx.state.selfEndpoint

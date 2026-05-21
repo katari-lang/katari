@@ -35,21 +35,23 @@ export function buildAgentRoutes(
 
   app.post("/", async (c) => {
     const body = StartAgentSchema.parse(await c.req.json());
-    const snapshotId = await snapshots.resolve({
-      projectId: body.projectId,
-      snapshotId: body.snapshotId,
-    });
     const argsValue: Record<string, Value> = {};
     for (const [k, v] of Object.entries(body.args)) {
       argsValue[k] = valueFromRaw(v);
     }
-    const result = await orchestrator.tick(snapshotId, async (ctx) => {
-      return ctx.api.startAgent({
-        bus: ctx.bus,
-        qualifiedName: body.qualifiedName,
-        args: argsValue,
-      });
-    });
+    // tickResolved performs the (projectId, snapshotId?) → SnapshotId
+    // resolution INSIDE the transaction so the snapshot can't be
+    // deleted between resolve and the tick acquiring its lock.
+    const result = await orchestrator.tickResolved(
+      { projectId: body.projectId, snapshotId: body.snapshotId },
+      async (ctx) => {
+        return ctx.api.startAgent({
+          bus: ctx.bus,
+          qualifiedName: body.qualifiedName,
+          args: argsValue,
+        });
+      },
+    );
     return c.json({ agentId: result.agentId }, 201);
   });
 
