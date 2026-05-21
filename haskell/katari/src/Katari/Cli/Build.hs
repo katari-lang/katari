@@ -17,6 +17,7 @@ import Data.Aeson (Value (..), object, (.=))
 import Data.Aeson.Encode.Pretty (encodePretty)
 import qualified Data.ByteString.Lazy as LBS
 import qualified Katari.Cli.Check as Check
+import qualified Katari.Cli.Common as Common
 import qualified Katari.Compile as Compile
 import Katari.Diagnostic (hasErrors)
 import Katari.IR (IRModule)
@@ -68,22 +69,11 @@ run opts = do
       putStrLn ("Wrote " <> outputPath)
 
 -- | Shape kept compatible with the legacy @katari-compiler@ binary.
+-- The schema-bundle inner shape is shared with 'Katari.Cli.Apply' via
+-- 'Common.schemaBundleJson' so the two paths can't drift.
 buildBundleJson :: Maybe IRModule -> Maybe [SchemaEntry] -> Value
 buildBundleJson mIr mEntries =
   object
     [ "irModule" .= maybe Null Aeson.toJSON mIr,
-      "schemaBundle"
-        .= object
-          [ "schemaVersion" .= (1 :: Int),
-            "agents" .= maybe ([] :: [Value]) (map schemaEntryToAgent) mEntries
-          ]
-    ]
-
-schemaEntryToAgent :: SchemaEntry -> Value
-schemaEntryToAgent e =
-  object
-    [ "qualifiedName" .= e.name,
-      "parameters" .= e.input,
-      "returns" .= e.output,
-      "description" .= e.description
+      "schemaBundle" .= Common.schemaBundleJson mEntries
     ]

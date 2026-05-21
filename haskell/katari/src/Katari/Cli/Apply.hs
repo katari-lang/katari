@@ -29,6 +29,7 @@ import GHC.Generics (Generic)
 import qualified Katari.Api.Client as Api
 import qualified Katari.Api.Types as Api
 import qualified Katari.Cli.Check as Check
+import qualified Katari.Cli.Common as Common
 import qualified Katari.Compile as Compile
 import Katari.Diagnostic (hasErrors)
 import qualified Katari.Project.Config as Project
@@ -103,7 +104,7 @@ run opts = do
   sidecarBundle <- runKatariBundle sourceRoots
 
   -- 4. Talk to the runtime.
-  let schemaJson = buildSchemaBundle result.schemaEntries
+  let schemaJson = Common.schemaBundleJson result.schemaEntries
       projectName = case opts.optProjectName of
         Just n -> n
         Nothing -> cfg.packageSection.packageName
@@ -213,19 +214,3 @@ data BundleResponse = BundleResponse {bundle :: Maybe Api.SidecarBundle}
   deriving stock (Show, Generic)
   deriving anyclass (Aeson.FromJSON)
 
--- | Same shape that 'Katari.Cli.Build' produces.
-buildSchemaBundle :: Maybe [SchemaEntry] -> Aeson.Value
-buildSchemaBundle mEntries =
-  Aeson.object
-    [ "schemaVersion" .= (1 :: Int),
-      "agents" .= maybe ([] :: [Aeson.Value]) (map schemaEntryToAgent) mEntries
-    ]
-
-schemaEntryToAgent :: SchemaEntry -> Aeson.Value
-schemaEntryToAgent e =
-  Aeson.object
-    [ "qualifiedName" .= e.name,
-      "parameters" .= e.input,
-      "returns" .= e.output,
-      "description" .= e.description
-    ]

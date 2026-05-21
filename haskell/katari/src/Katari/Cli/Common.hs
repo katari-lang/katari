@@ -17,6 +17,10 @@ module Katari.Cli.Common
     -- * Project id resolution
     resolveProjectId,
 
+    -- * Schema bundle helpers
+    schemaBundleJson,
+    schemaEntryToAgent,
+
     -- * Error handling
     dieIn,
     runWithApiErrors,
@@ -24,10 +28,13 @@ module Katari.Cli.Common
 where
 
 import Control.Exception (catch)
+import qualified Data.Aeson as Aeson
+import Data.Aeson ((.=))
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Katari.Api.Client as Api
 import qualified Katari.Api.Types as Api
+import Katari.Schema (SchemaEntry (..))
 import qualified Katari.Project.Config as Project
 import qualified Katari.Project.Discovery as Project
 import System.Directory (getCurrentDirectory)
@@ -119,6 +126,29 @@ resolveProjectId subcmdName client name = do
       dieIn
         subcmdName
         ("multiple projects named '" <> Text.unpack name <> "' on the runtime")
+
+-- | The on-the-wire schema-bundle JSON shape that both `katari apply`
+-- and `katari build` produce. Shared here so the two output paths
+-- can't drift apart (= snapshot upload uses this shape; build emits
+-- it nested under "schemaBundle" in the local IR-bundle file).
+schemaBundleJson :: Maybe [SchemaEntry] -> Aeson.Value
+schemaBundleJson mEntries =
+  Aeson.object
+    [ "schemaVersion" .= (1 :: Int),
+      "agents" .= maybe ([] :: [Aeson.Value]) (map schemaEntryToAgent) mEntries
+    ]
+
+-- | Single 'SchemaEntry' → wire-format agent definition. Surface
+-- shape used by both CLI commands and consumed by AI tool-calling
+-- consumers via the api-server's /agent-definition endpoints.
+schemaEntryToAgent :: SchemaEntry -> Aeson.Value
+schemaEntryToAgent e =
+  Aeson.object
+    [ "qualifiedName" .= e.name,
+      "parameters" .= e.input,
+      "returns" .= e.output,
+      "description" .= e.description
+    ]
 
 -- | Standard CLI bail: print to stderr with the subcommand prefix and
 -- exit with code 2 (setup / usage error).
