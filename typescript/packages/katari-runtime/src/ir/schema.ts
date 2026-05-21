@@ -8,10 +8,16 @@
 //
 // If the Haskell SchemaBundle layout changes, update this file to match.
 
+import type { Json } from "../json.js";
 import type { QualifiedName } from "./types.js";
 
-/** A JSON Schema document (RFC draft-07-ish). Treated as opaque JSON. */
-export type JsonSchema = unknown;
+/**
+ * A JSON Schema document (RFC draft-07-ish). Treated as opaque JSON at
+ * runtime — typed as 'Json' (= the recursive structural JSON type)
+ * rather than 'unknown' so downstream persistence helpers can
+ * type-check their JSON payloads.
+ */
+export type JsonSchema = Json;
 
 /** Per-entry agent definition exposed to AI tool callers. */
 export type AgentDefinition = {

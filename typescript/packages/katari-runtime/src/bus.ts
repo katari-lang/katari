@@ -19,7 +19,10 @@ import type { Logger } from "./engine/logger.js";
 export type RegisteredModule = {
   /** Display name for logs / debugging. */
   name: string;
-  module: Module;
+  // The bus only invokes `feed`; persist/load are called by the host
+  // (orchestrator) directly on the typed concrete module. We carry the
+  // `Module<unknown>` shape just to express that constraint.
+  module: Module<unknown>;
 };
 
 export class ExternalEventBus {
@@ -75,17 +78,8 @@ export class ExternalEventBus {
     }
   }
 
-  /** drain 後に各 module の persist を呼ぶ。tx は host が提供。 */
-  async persistAll(tx: unknown): Promise<void> {
-    for (const { module } of this.modules.values()) {
-      await module.persist(tx);
-    }
-  }
-
-  /** request 処理開始時に各 module の load を呼ぶ。 */
-  async loadAll(tx: unknown): Promise<void> {
-    for (const { module } of this.modules.values()) {
-      await module.load(tx);
-    }
-  }
+  // NOTE: persist / load are NOT mediated by the bus. Each module has
+  // its own concrete tx shape (CORE wants CoreCheckpointStore, FFI is
+  // no-op, API wants the SQL tx directly), so the orchestrator calls
+  // them on the typed concrete reference instead of through the bus.
 }

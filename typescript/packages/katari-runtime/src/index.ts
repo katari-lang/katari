@@ -89,6 +89,7 @@ export type {
   QualifiedName,
 } from "./ir/types.js";
 export type { SchemaBundle, AgentDefinition, JsonSchema } from "./ir/schema.js";
+export type { Json } from "./json.js";
 
 // ─── Raw ↔ Value codec (REST / sidecar / CLI boundary) ────────────────────
 

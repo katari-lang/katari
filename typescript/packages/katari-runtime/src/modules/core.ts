@@ -39,7 +39,10 @@ export type CoreModuleOptions = {
   logger: Logger;
 };
 
-export class CoreModule implements Module {
+/** Tx shape CoreModule.persist / load expect. */
+export type CoreTx = { coreCheckpoints: CoreCheckpointStore };
+
+export class CoreModule implements Module<CoreTx> {
   readonly endpoint: Endpoint;
   private readonly snapshotId: string;
   private readonly irModule: IRModule;
@@ -67,16 +70,12 @@ export class CoreModule implements Module {
     return { outbound: result.outbound as ExternalEvent[] };
   }
 
-  async persist(tx: unknown): Promise<void> {
-    const store = (tx as { coreCheckpoints: CoreCheckpointStore })
-      .coreCheckpoints;
-    await store.upsert(this.snapshotId, serialize(this.state));
+  async persist(tx: CoreTx): Promise<void> {
+    await tx.coreCheckpoints.upsert(this.snapshotId, serialize(this.state));
   }
 
-  async load(tx: unknown): Promise<void> {
-    const store = (tx as { coreCheckpoints: CoreCheckpointStore })
-      .coreCheckpoints;
-    const checkpoint = await store.get(this.snapshotId);
+  async load(tx: CoreTx): Promise<void> {
+    const checkpoint = await tx.coreCheckpoints.get(this.snapshotId);
     this.state = checkpoint !== null
       ? deserialize(this.irModule, checkpoint)
       : createState(this.irModule, { selfEndpoint: this.endpoint });

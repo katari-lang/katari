@@ -15,6 +15,7 @@ import type {
   EngineCheckpoint,
   EscalationId,
   IRModule,
+  Json,
   SchemaBundle,
   Value,
 } from "@katari-lang/runtime";
@@ -45,20 +46,18 @@ import type {
 type Sql = ReturnType<typeof postgres>;
 
 /**
- * Helper for the `postgres` driver's `sql.json(...)` argument: the driver
- * types it as a domain-specific `JSONValue` that doesn't intersect with
- * our app's data shapes (recursive Value / IRModule), so direct passing
- * fails type-check. We funnel every json-serializable parameter through
- * here.
+ * Helper for the `postgres` driver's `sql.json(...)` argument: the
+ * driver types it as a domain-specific `JSONValue` that doesn't
+ * structurally intersect with our 'Json' type. We accept anything that
+ * fits our project-wide 'Json' (the recursive structural JSON type) and
+ * adapt to the driver's expected shape at the call site.
  *
- * KNOWN TYPE LIE: this accepts and returns `never`, so the call site
- * loses all type-check. Tightening (= a structural `JsonInput` parameter
- * type) is blocked by upstream types (SchemaBundle.agents[i].parameters
- * is `unknown`, AgentDefId / RawValue carry `unknown` field values). A
- * proper fix requires making the source-of-truth types JSON-safe at the
- * type level — tracked as a v0.2.0 RFC in memory.
+ * Previous shape returned `never` and accepted anything, defeating the
+ * type-check at every call site (= a known type lie). Tightening the
+ * upstream types (JsonSchema, RawValue, IRModule) to fit 'Json' made
+ * this swap viable.
  */
-function asJson<T>(value: T): never {
+function asJson(value: Json): never {
   return value as never;
 }
 
