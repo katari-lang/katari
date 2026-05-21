@@ -53,8 +53,12 @@ const RawValueSchema: z.ZodType<unknown> = z.lazy(() =>
 
 // ─── Pagination ────────────────────────────────────────────────────────────
 
+// Pagination query: limit is bounded so a client passing `?limit=999999999`
+// can't ask storage for an arbitrarily large page. Storage layers already
+// clamp at MAX_LIMIT=500; mirror that here so validation rejects loudly
+// rather than silently truncating.
 export const PaginationQuerySchema = z.object({
-  limit: z.coerce.number().int().positive().optional(),
+  limit: z.coerce.number().int().positive().max(500).optional(),
   offset: z.coerce.number().int().nonnegative().optional(),
 });
 

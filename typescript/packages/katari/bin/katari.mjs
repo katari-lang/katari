@@ -87,7 +87,11 @@ child.on("error", (err) => {
   process.exit(1);
 });
 
-child.on("exit", (code, signal) => {
+// Use `close` rather than `exit` so we wait until the child's stdio
+// streams drain before mirroring its exit code. With "inherit" stdio
+// the parent shares fds so the distinction rarely matters, but `close`
+// is the correct event when output ordering matters.
+child.on("close", (code, signal) => {
   if (signal) {
     process.kill(process.pid, signal);
   } else {

@@ -24,6 +24,12 @@ interface ParsedArgs {
 }
 
 function parseArgs(argv: string[]): ParsedArgs {
+  // No-args → print help and exit 0 so users get a usage hint when they
+  // run the binary directly.
+  if (argv.length === 0) {
+    printHelp(process.stdout);
+    process.exit(0);
+  }
   const sourceRoots: string[] = [];
   let i = 0;
   while (i < argv.length) {
@@ -38,7 +44,7 @@ function parseArgs(argv: string[]): ParsedArgs {
       continue;
     }
     if (a === "--help" || a === "-h") {
-      printHelp();
+      printHelp(process.stdout);
       process.exit(0);
     }
     bail(`unknown argument: ${a}`);
@@ -49,21 +55,26 @@ function parseArgs(argv: string[]): ParsedArgs {
   return { sourceRoots };
 }
 
-function printHelp(): void {
-  process.stdout.write(
+function printHelp(out: NodeJS.WritableStream): void {
+  out.write(
     [
       "Usage: katari-bundle --source-root <PATH> [--source-root <PATH> ...]",
       "",
       "Walks each source root for .ktr files with sibling .ts/.js, bundles them into",
       "an ESM bundle, and writes { bundle, modules } JSON to stdout.",
       "",
+      "Exit codes:",
+      "  0  success (= valid JSON written to stdout)",
+      "  1  bundle failure surfaced from esbuild",
+      "  2  argument / usage error",
+      "",
     ].join("\n"),
   );
 }
 
-function bail(msg: string): never {
+function bail(msg: string, code = 2): never {
   process.stderr.write(`katari-bundle: ${msg}\n`);
-  process.exit(2);
+  process.exit(code);
 }
 
 async function main(): Promise<void> {
@@ -78,10 +89,13 @@ async function main(): Promise<void> {
       );
     }
   } catch (err) {
+    // BundleError = bundling pipeline rejected the input (esbuild
+    // failure / sibling conflict / etc.). Exit 1 so callers can
+    // distinguish from usage errors (exit 2).
     if (err instanceof BundleError) {
-      bail(err.message);
+      bail(err.message, 1);
     }
-    bail(err instanceof Error ? err.message : String(err));
+    bail(err instanceof Error ? err.message : String(err), 1);
   }
 }
 

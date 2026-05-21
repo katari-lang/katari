@@ -18,6 +18,23 @@ const ListQuerySchema = z.object({
   snapshotId: SnapshotIdSchema.optional(),
 });
 
+// QualifiedName wire format: dotted module path + leaf identifier
+// (e.g. "tools.http.fetch"). We accept letters, digits, underscores,
+// and dots only — anything else (including empty) is rejected at the
+// route boundary before it reaches storage.
+const QualifiedNameSchema = z
+  .string()
+  .min(1)
+  .max(256)
+  .regex(/^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$/, {
+    message:
+      "qualifiedName must be a dotted identifier path (e.g. 'tools.http.fetch')",
+  });
+
+function parseQualifiedName(raw: string | undefined): string {
+  return QualifiedNameSchema.parse(raw === undefined ? "" : decodeURIComponent(raw));
+}
+
 export function buildAgentDefinitionRoutes(snapshots: SnapshotService): Hono {
   const app = new Hono();
 
@@ -30,7 +47,7 @@ export function buildAgentDefinitionRoutes(snapshots: SnapshotService): Hono {
 
   app.get("/:projectId/latest/:qualifiedName", async (c) => {
     const projectId = ProjectIdSchema.parse(c.req.param("projectId"));
-    const qualifiedName = c.req.param("qualifiedName");
+    const qualifiedName = parseQualifiedName(c.req.param("qualifiedName"));
     try {
       const snapshotId = await snapshots.resolve({ projectId });
       const definition = await snapshots.getAgentDefinition(
@@ -51,7 +68,7 @@ export function buildAgentDefinitionRoutes(snapshots: SnapshotService): Hono {
 
   app.get("/:projectId/:snapshotId/:qualifiedName", async (c) => {
     const snapshotId = SnapshotIdSchema.parse(c.req.param("snapshotId"));
-    const qualifiedName = c.req.param("qualifiedName");
+    const qualifiedName = parseQualifiedName(c.req.param("qualifiedName"));
     try {
       const definition = await snapshots.getAgentDefinition(
         snapshotId,

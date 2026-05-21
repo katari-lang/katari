@@ -377,6 +377,18 @@ export class FfiModule implements Module {
     this.escalations.set(escalationId, {
       childDelegationId: delegationId,
     });
+    // Persist alongside the in-memory entry so a server restart that
+    // happens before the matching escalateAck arrives can rebuild this
+    // map via load(). Without the store write, the load() reconstruction
+    // path is dead code.
+    await this.store.insertEscalation({
+      escalationId,
+      delegationId,
+      peerEndpoint: parentRow.peerEndpoint,
+      agentDefId,
+      args,
+      createdAt: new Date().toISOString(),
+    });
     this.onSidecarResponse({
       from: this.endpoint,
       to: parentRow.peerEndpoint,
@@ -407,6 +419,9 @@ export class FfiModule implements Module {
       return;
     }
     this.escalations.delete(escalationId);
+    // Mirror into the store so a restart doesn't resurrect an
+    // already-acknowledged escalation.
+    await this.store.deleteEscalation(escalationId);
     this.onSidecarResponse({
       from: this.endpoint,
       to: CORE_ENDPOINT,

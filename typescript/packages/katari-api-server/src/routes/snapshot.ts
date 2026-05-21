@@ -10,6 +10,7 @@ import {
   UploadSnapshotSchema,
 } from "./middleware/validation.js";
 import {
+  NoSnapshotForProject,
   SnapshotNotFound,
   type SnapshotService,
 } from "../services/snapshot-service.js";
@@ -38,9 +39,19 @@ export function buildSnapshotRoutes(snapshots: SnapshotService): Hono {
 
   app.get("/latest", async (c) => {
     const projectId = ProjectIdSchema.parse(c.req.param("projectId"));
-    const snapshotId = await snapshots.resolve({ projectId });
-    const snapshot = await snapshots.get(snapshotId);
-    return c.json({ snapshot });
+    try {
+      const snapshotId = await snapshots.resolve({ projectId });
+      const snapshot = await snapshots.get(snapshotId);
+      return c.json({ snapshot });
+    } catch (err) {
+      if (
+        err instanceof NoSnapshotForProject ||
+        err instanceof SnapshotNotFound
+      ) {
+        return c.json({ error: err.message }, 404);
+      }
+      throw err;
+    }
   });
 
   app.get("/:snapshotId", async (c) => {

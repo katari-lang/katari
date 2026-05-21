@@ -39,11 +39,20 @@ const DEFAULT_RATE_LIMIT: RateLimitOptions = {
 export function buildApp(deps: AppDeps): Hono {
   const app = new Hono();
 
+  // Body-size guard (advisory). When a Content-Length header is
+  // present, refuse anything above 10 MB before reading the body. A
+  // client that omits the header (chunked transfer or in-process tests
+  // using `app.fetch(new Request(...))`) bypasses this check; the
+  // underlying Node @hono/node-server has its own (higher) cap and the
+  // KATARI_API_KEY auth gate sits in front, so the bypass surface is
+  // limited to authenticated clients. A truly hardened deployment
+  // should also set a reverse-proxy body limit.
+  const BODY_LIMIT_BYTES = 10 * 1024 * 1024;
   app.use("*", async (c, next) => {
     const lengthHeader = c.req.header("content-length");
     if (lengthHeader !== undefined) {
       const length = Number.parseInt(lengthHeader, 10);
-      if (Number.isFinite(length) && length > 10 * 1024 * 1024) {
+      if (Number.isFinite(length) && length > BODY_LIMIT_BYTES) {
         return c.json({ error: "request body too large (limit: 10 MB)" }, 413);
       }
     }

@@ -33,23 +33,20 @@ import {
 } from "@katari-lang/runtime";
 import { ApiModule } from "./modules/api-module.js";
 import { StorageFfiStore } from "./modules/ffi-store.js";
+import {
+  NoSnapshotForProject,
+  SnapshotNotFound,
+} from "./services/snapshot-service.js";
 import type {
   ProjectId,
   SnapshotId,
   Storage,
 } from "./storage/types.js";
 
-export class SnapshotNotFound extends Error {
-  constructor(public readonly snapshotId: SnapshotId) {
-    super(`snapshot ${snapshotId} not found`);
-  }
-}
-
-export class NoSnapshotForProject extends Error {
-  constructor(public readonly projectId: ProjectId) {
-    super(`no snapshot exists for project ${projectId}`);
-  }
-}
+// Re-exported so callers that import from the orchestrator (= the public
+// entry for tick error mapping) can still resolve them. The canonical
+// definitions live in services/snapshot-service.ts.
+export { NoSnapshotForProject, SnapshotNotFound };
 
 export type TickContext = {
   snapshotId: SnapshotId;

@@ -48,6 +48,12 @@
           "type": "string",
           "default": "katari-lsp",
           "description": "Path to the katari-lsp executable (looked up on PATH if not absolute)."
+        },
+        "katari.server.args": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "Extra command-line arguments passed to katari-lsp (useful for verbose logging flags during LSP development)."
         }
       }
     }

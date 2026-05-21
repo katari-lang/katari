@@ -24,6 +24,12 @@ export class SnapshotNotFound extends Error {
   }
 }
 
+export class NoSnapshotForProject extends Error {
+  constructor(public readonly projectId: ProjectId) {
+    super(`no snapshot exists for project ${projectId}`);
+  }
+}
+
 export class AgentDefinitionNotFound extends Error {
   constructor(
     public readonly snapshotId: SnapshotId,
@@ -84,9 +90,7 @@ export class SnapshotService {
     if (input.snapshotId !== undefined) return input.snapshotId;
     const latest = await this.storage.snapshots.latest(input.projectId);
     if (latest === null) {
-      throw new Error(
-        `no snapshot exists for project ${input.projectId}`,
-      );
+      throw new NoSnapshotForProject(input.projectId);
     }
     return latest;
   }

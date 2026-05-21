@@ -18109,8 +18109,10 @@ var client;
 function activate(context) {
   const config = vscode.workspace.getConfiguration("katari");
   const serverPath = config.get("server.path", "katari-lsp");
+  const serverArgs = config.get("server.args", []);
   const serverOptions = {
     command: serverPath,
+    args: serverArgs,
     transport: import_node.TransportKind.stdio
   };
   const clientOptions = {
@@ -18125,7 +18127,12 @@ function activate(context) {
     serverOptions,
     clientOptions
   );
-  client.start();
+  client.start().catch((err) => {
+    const message = err instanceof Error ? err.message : String(err);
+    void vscode.window.showErrorMessage(
+      `Katari Language Server failed to start: ${message}. Check 'katari.server.path' (currently '${serverPath}') and make sure katari-lsp is installed.`
+    );
+  });
   context.subscriptions.push({
     dispose: () => {
       client?.stop();

@@ -50,10 +50,25 @@ let currentModuleQname = "";
 
 const katari: KatariPort = {
   agent(name, handler) {
-    const key =
-      currentModuleQname.length === 0
-        ? name
-        : `${currentModuleQname}.${name}`;
+    // Module qname is set by the bundler-injected `__withModule(qname,
+    // body)` wrapper. If we're called outside that wrapper, the bundle
+    // pipeline didn't run (= user loaded katari-port directly in a test
+    // or REPL); registering under a bare `name` would silently produce
+    // unqualified keys that the engine can never route. Refuse loudly.
+    if (currentModuleQname.length === 0) {
+      throw new Error(
+        `katari-port: katari.agent('${name}', ...) called outside a __withModule(...) wrapper. ` +
+          `User code must be bundled through katari-bundle (or invoked via the synthetic bundle entry) so the module qname is in scope.`,
+      );
+    }
+    // `name` is the leaf identifier the user writes (`agent foo`). It
+    // must not contain `.` or the resulting qname would mis-parse.
+    if (name.includes(".")) {
+      throw new Error(
+        `katari-port: agent name '${name}' contains '.' — only dotted module qnames may contain '.'; pass a bare identifier here.`,
+      );
+    }
+    const key = `${currentModuleQname}.${name}`;
     if (registry.has(key)) {
       throw new Error(`katari-port: handler already registered for ${key}`);
     }
@@ -211,10 +226,9 @@ function settlePendingChild(
     entry.signal.removeEventListener("abort", entry.abortListener);
   }
   if (outcome.kind === "ack") {
-    if (entry.terminating) {
-      // Race: we sent terminate but ack arrived first. Treat as ack
-      // (the value is real; the cancel races to next time).
-    }
+    // Race tolerated silently: if `entry.terminating` is set, we sent
+    // terminate but the ack landed first. The value is real; we accept
+    // it as the result. No branch needed — both paths just resolve.
     entry.resolve(outcome.value);
     return;
   }
@@ -276,6 +290,18 @@ async function handleDelegate(
     }
   }
   if (entry.terminating) {
+    // The handler may have thrown DURING the termination window. We
+    // ack the terminate (= caller is already cancelling, doesn't care
+    // about the value), but log the error to stderr so operators
+    // aren't left guessing why a "cancelled" agent has a silent
+    // failure.
+    if (error !== null) {
+      stderr.write(
+        `[katari-port] handler ${msg.agentDefId} threw during termination: ${
+          error instanceof Error ? error.message : String(error)
+        }\n`,
+      );
+    }
     send({
       type: "ipcTerminateAck",
       delegationId: msg.delegationId,

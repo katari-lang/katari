@@ -20,5 +20,11 @@ export function endpoint(url: string): Endpoint {
 /**
  * The conventional endpoint identifying the engine itself when no host has
  * supplied a more specific URL. Tests and small embeds default to this.
+ *
+ * MUST match the public `CORE_ENDPOINT` re-exported from
+ * `modules/endpoints.ts`; otherwise host code that imports
+ * `CORE_ENDPOINT` from `@katari-lang/runtime` and addresses events
+ * with `to: CORE_ENDPOINT` would fail the engine's
+ * `event.to === selfEndpoint` routing check.
  */
-export const CORE_ENDPOINT: Endpoint = "core://katari" as Endpoint;
+export const CORE_ENDPOINT: Endpoint = "core://main" as Endpoint;

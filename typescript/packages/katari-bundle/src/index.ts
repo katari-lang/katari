@@ -114,12 +114,28 @@ async function collectSiblingEntries(
       const hasJs = await pathExists(candidateJs);
       if (hasTs && hasJs) {
         throw new BundleError(
-          `both ${candidateTs} and ${candidateJs} exist — keep only one`,
+          `both ${candidateTs} and ${candidateJs} exist next to ${ktrPath} — keep only one`,
         );
       }
       if (!hasTs && !hasJs) continue;
       const sibling = hasTs ? candidateTs : candidateJs;
       const relFromRoot = relative(root, sibling);
+      // Path components that themselves contain `.` would collide with
+      // the dotted module-qname separator (e.g. `v1.2/foo.ts` → qname
+      // `v1.2.foo`, indistinguishable from a hypothetical `v1/2/foo.ts`).
+      // Reject at discovery time so the conflict surfaces at apply
+      // time with a clear message.
+      const segments = relFromRoot.split(/[\\/]/g).filter((s) => s.length > 0);
+      const noExt = segments.map((s, i) =>
+        i === segments.length - 1 ? s.replace(/\.(ts|js)$/, "") : s,
+      );
+      for (const seg of noExt) {
+        if (seg.includes(".")) {
+          throw new BundleError(
+            `path segment '${seg}' in ${sibling} contains '.' — module qnames use '.' as the segment separator. Rename the offending directory or file.`,
+          );
+        }
+      }
       const moduleQname = pathToQname(relFromRoot);
       out.push({ siblingPath: sibling, moduleQname });
     }
