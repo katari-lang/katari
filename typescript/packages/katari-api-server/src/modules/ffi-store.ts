@@ -1,9 +1,9 @@
 // Storage-backed `FfiStore` implementation.
 //
-// 1 instance = 1 snapshot scope。orchestrator.tick の中で tx + snapshotId
-// を bind してインスタンス化する。基となる行は `ffi_pending_delegations` /
-// `ffi_pending_escalations` テーブル (`Storage.ffiDelegations` /
-// `Storage.ffiEscalations` repo)。
+// 1 instance = 1 snapshot scope. Instantiated inside orchestrator.tick
+// with tx + snapshotId bound. The underlying rows are in the
+// `ffi_pending_delegations` / `ffi_pending_escalations` tables
+// (`Storage.ffiDelegations` / `Storage.ffiEscalations` repo).
 
 import type {
   FfiPendingDelegation,

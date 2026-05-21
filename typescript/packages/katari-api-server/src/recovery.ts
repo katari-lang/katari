@@ -1,12 +1,12 @@
 // Boot recovery wrapper.
 //
-// 大半は `Orchestrator.recoverOnBoot()` がやる: running agent を持つ
-// snapshot を列挙して subprocess を re-spawn し、`restored` IPC で
-// in-flight delegationId を通知。
+// Most of this is done by `Orchestrator.recoverOnBoot()`: enumerate the
+// snapshots that have running agents, re-spawn subprocesses, and notify
+// in-flight delegationIds via `restored` IPC.
 //
-// 加えて: `cancelling` 状態で停止していた agent に対して terminate を
-// 再投入する。これは ApiModule.cancelAgent と同じ振る舞いを Orchestrator
-// に呼び戻させるだけ。
+// In addition: re-inject terminate for agents that were stopped in the
+// `cancelling` state. This just makes the Orchestrator invoke the same
+// behavior as ApiModule.cancelAgent again.
 
 import type { Logger } from "@katari-lang/runtime";
 import type { Orchestrator } from "./orchestrator.js";

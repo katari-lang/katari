@@ -1,19 +1,19 @@
-// Orchestrator — request 処理の中心。
+// Orchestrator — the heart of request processing.
 //
-// 各 HTTP request、または各 sidecar 応答が「1 tick」を起こす。tick は:
+// Each HTTP request, or each sidecar response, triggers "one tick". A tick:
 //
-//   1. snapshot の row lock を取る (withTransaction + withSnapshotLock)
-//   2. CoreModule を engine_checkpoints から load
-//   3. ApiModule / FfiModule は per-tick で tx を抱えて作成
-//   4. ExternalEventBus に 3 module を register
-//   5. caller (HTTP route, または sidecar dispatcher) が初期 event を push
-//   6. bus.drain() で全 event chain を解消
-//   7. CoreModule.persist で checkpoint を書き戻す
+//   1. Acquires the snapshot row lock (withTransaction + withSnapshotLock)
+//   2. Loads CoreModule from engine_checkpoints
+//   3. Creates ApiModule / FfiModule per-tick with a transaction
+//   4. Registers the 3 modules on ExternalEventBus
+//   5. The caller (HTTP route, or sidecar dispatcher) pushes the initial event
+//   6. bus.drain() resolves the entire event chain
+//   7. CoreModule.persist writes back the checkpoint
 //   8. commit
 //
-// FFI sidecar 応答は async に起きるので、orchestrator は SidecarManager の
-// `setMessageHandler` 経由で「sidecar からの ChildToParent → tick 起動」
-// 変換を引き受ける。
+// Since FFI sidecar responses happen asynchronously, the orchestrator handles
+// the "ChildToParent from sidecar -> tick launch" conversion via
+// SidecarManager's `setMessageHandler`.
 
 import {
   CORE_ENDPOINT,
@@ -139,8 +139,8 @@ export class Orchestrator {
 
         const bus = new ExternalEventBus(this.logger);
 
-        // FfiModule は scope-bound な FfiStore + 該当 sidecar を渡す。
-        // sidecar が無い snapshot の場合は ffi module 自体を register しない。
+        // Pass FfiModule a scope-bound FfiStore + the corresponding sidecar.
+        // For snapshots without a sidecar, don't register the ffi module itself.
         const sidecar = this.sidecarFor(snapshotId);
         let ffi: FfiModule;
         if (sidecar !== null) {
@@ -158,8 +158,8 @@ export class Orchestrator {
             { name: "ffi", module: ffi },
           ]);
         } else {
-          // FFI を持たない snapshot 用に空の placeholder を用意 (= type
-          // satisfaction)。delegate が来ても bus が "no module" warn を出す。
+          // Prepare an empty placeholder for snapshots without FFI (= type
+          // satisfaction). If a delegate arrives, the bus emits a "no module" warn.
           ffi = makeNoOpFfi();
           bus.registerAll([
             { name: "api", module: api },
@@ -182,9 +182,9 @@ export class Orchestrator {
   }
 
   /**
-   * Boot 時: running/cancelling agent を持つ snapshot に対して subprocess
-   * を spawn し、in-flight delegation について `restoredDelegate` を sidecar
-   * に送る (FfiModule.recoverInflight)。
+   * On boot: for each snapshot that has running/cancelling agents, spawn
+   * the subprocess and send `restoredDelegate` to the sidecar for any
+   * in-flight delegations (FfiModule.recoverInflight).
    */
   async recoverOnBoot(): Promise<void> {
     const snapshotIds = await this.storage.agents.listRunningSnapshotIds();

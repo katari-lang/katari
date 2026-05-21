@@ -1,7 +1,7 @@
 // Project routes: upsert / list / get.
 //
-// `katari apply` 時の最初の HTTP コール = `POST /project { name }`。
-// 同名 project があれば既存を返す (idempotent)。
+// The first HTTP call at `katari apply` time = `POST /project { name }`.
+// If a project with the same name exists, return it (idempotent).
 
 import { Hono } from "hono";
 import {

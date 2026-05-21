@@ -1,15 +1,19 @@
-// ExternalEventBus: 3 module 間の cross-module event を routing する薄い queue。
+// ExternalEventBus: a thin queue that routes cross-module events between
+// the 3 modules.
 //
-// 設計原則:
-//   - bus は `to` endpoint を見て該当 module の `feed` を呼ぶだけ
-//   - どの (from, to) ペアでも routing する (API↔API / FFI↔FFI 含む)
-//   - module の `feed` は 1 inbound → outbound 0..n を返す
-//   - 自己宛 event (例: CORE→CORE) も特別扱いせず bus 経由で復帰する
-//   - 非同期処理 (例: FFI Runner の sidecar IPC 応答) は `bus.push(event)` で
-//     後追い注入できる
+// Design principles:
+//   - The bus just looks at the `to` endpoint and calls `feed` on the
+//     matching module
+//   - Routes any (from, to) pair (including API<->API / FFI<->FFI)
+//   - A module's `feed` returns 0..n outbound events per 1 inbound
+//   - Self-addressed events (e.g. CORE->CORE) are not special-cased; they
+//     loop back through the bus
+//   - Async work (e.g. FFI Runner sidecar IPC responses) can be injected
+//     after the fact via `bus.push(event)`
 //
-// CORE 内部の thread-tree event (create / done / cancel / ask / askAck) は
-// engine 側の internal queue に閉じる。bus には流れない。
+// CORE-internal thread-tree events (create / done / cancel / ask / askAck)
+// are confined to the engine-side internal queue. They do not flow through
+// the bus.
 
 import type { ExternalEvent } from "./engine/event.js";
 import type { Endpoint } from "./engine/endpoint.js";
@@ -32,7 +36,7 @@ export class ExternalEventBus {
 
   constructor(private readonly logger: Logger) {}
 
-  /** Register a module. `(name, module)` の配列を一括登録するヘルパも提供。 */
+  /** Register a module. A helper for bulk-registering an `(name, module)` array is also provided. */
   register(entry: RegisteredModule): void {
     if (this.modules.has(entry.module.endpoint)) {
       throw new Error(
@@ -46,14 +50,15 @@ export class ExternalEventBus {
     for (const e of entries) this.register(e);
   }
 
-  /** Async に event を流し込む (例: FFI Runner が sidecar 応答受信時)。 */
+  /** Inject an event asynchronously (e.g. when the FFI Runner receives a sidecar response). */
   push(event: ExternalEvent): void {
     this.queue.push(event);
   }
 
   /**
-   * Queue が空になるまで drain する。drain 中に新しい event が push されたら
-   * 同じループで処理を続ける。重複呼び出しは即 return (= reentrant safe)。
+   * Drain the queue until it is empty. If new events are pushed during a
+   * drain, the same loop keeps processing them. Re-entrant calls return
+   * immediately (= reentrant safe).
    */
   async drain(): Promise<void> {
     if (this.draining) return;

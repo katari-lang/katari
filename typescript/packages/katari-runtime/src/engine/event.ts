@@ -1,18 +1,20 @@
 // Event: the unit of communication between endpoints (= modules).
 //
 // Every event carries `from` / `to` Endpoints and a kind-tagged payload.
-// 3 module + 6 event の対称設計の core:
+// Core of the 3-module + 6-event symmetric design:
 //
 //   - 6 cross-module events: delegate, delegateAck, terminate, terminateAck,
-//     escalate, escalateAck. どの (from, to) ペアでも成立する。
-//   - delegate / escalate は対象を `agentDefId` で指す (= module 局所の
-//     opaque な識別子。受信側 module だけが decode する)。
-//   - `from` / `to` は Endpoint 文字列、識別する module は bus 層が解決する
-//     (engine 自身は "CORE" | "API" | "FFI" のような enum は持たない)。
+//     escalate, escalateAck. Valid for any (from, to) pair.
+//   - delegate / escalate identify the target via `agentDefId` (= a
+//     module-local opaque identifier. Only the receiving module decodes it).
+//   - `from` / `to` are Endpoint strings; the bus layer resolves the
+//     identifying module (the engine itself has no "CORE" | "API" | "FFI"
+//     enum).
 //
-// **Engine-internal events** (`from === self && to === self`) は thread tree
-// の制御信号: create / done / cancel / cancelAck / ask / askAck。これらは
-// engine の内部 queue に閉じ、cross-module bus には流れない。
+// **Engine-internal events** (`from === self && to === self`) are control
+// signals of the thread tree: create / done / cancel / cancelAck / ask /
+// askAck. These stay within the engine's internal queue and do not flow
+// onto the cross-module bus.
 
 import type { AgentDefId } from "../agent-def-id.js";
 import type { Endpoint } from "./endpoint.js";

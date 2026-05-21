@@ -1,13 +1,13 @@
 -- katari-api-server schema.
 --
--- Layout (3 module + bus 設計):
+-- Layout (3-module + bus design):
 --   - projects                  : top-level deploy unit (1 project = 1 app)
---   - snapshots                 : 1 apply で凍結された (IR + sidecar JS + schema)
---   - engine_checkpoints        : CORE module の per-snapshot 状態
---   - agents                    : API → CORE delegation rows (= CLI が起動した agent)
---   - ffi_pending_delegations   : FFI Runner の in-flight delegate
---   - ffi_pending_escalations   : FFI Runner の in-flight escalate
---   - api_pending_escalations   : AI から user への質問キュー
+--   - snapshots                 : a single apply's frozen (IR + sidecar JS + schema)
+--   - engine_checkpoints        : per-snapshot state of the CORE module
+--   - agents                    : API → CORE delegation rows (= agents the CLI started)
+--   - ffi_pending_delegations   : in-flight delegates owned by the FFI Runner
+--   - ffi_pending_escalations   : in-flight escalates owned by the FFI Runner
+--   - api_pending_escalations   : queue of questions from AI to user
 
 CREATE TABLE IF NOT EXISTS projects (
   id          UUID PRIMARY KEY,
@@ -32,8 +32,8 @@ CREATE TABLE IF NOT EXISTS engine_checkpoints (
   updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- Agent rows = API module の pendingDelegateOut (CORE 宛) の永続化先。
--- delegationId をそのまま PK に使う。
+-- Agent rows are the persistence backing for the API module's
+-- pendingDelegateOut (CORE-bound) map. The delegationId doubles as the PK.
 CREATE TABLE IF NOT EXISTS agents (
   id              UUID PRIMARY KEY,         -- = delegationId
   delegation_id   UUID UNIQUE NOT NULL,

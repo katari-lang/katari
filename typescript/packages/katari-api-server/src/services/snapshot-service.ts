@@ -1,6 +1,6 @@
 // Snapshot CRUD service.
 //
-// `apply` 時の upload エンドポイントが直接呼び出す。`latest` 解決もここ。
+// Called directly by the upload endpoint at `apply` time. `latest` resolution is also here.
 
 import type {
   AgentDefinition,

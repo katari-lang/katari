@@ -4,19 +4,19 @@
 // production binding is Postgres (`pg.ts`); tests use `memory-storage.ts`
 // for hermeticity. Adding a new backend means only implementing `Storage`.
 //
-// Naming conventions (本 plan で確定):
+// Naming conventions (finalized in this plan):
 //   - `Project` / `ProjectId`     — top-level deploy unit (e.g. one app)
-//   - `Snapshot` / `SnapshotId`   — one `apply` の成果物 (IR + sidecar JS +
-//                                    schema)。1 project に複数 snapshot。
-//   - `EngineCheckpoint`          — engine 内部 state の凍結 (per-snapshot)
-//                                    — runtime 側で定義
-//   - `FfiPendingDelegation`      — FFI Runner が抱える未完 delegation
-//   - `FfiPendingEscalation`      — FFI Runner が抱える未完 escalation
-//   - `ApiPendingEscalation`      — API module が抱える、ユーザー宛の未答 escalation
-//                                    (= AI から user への質問の DB 表現)
+//   - `Snapshot` / `SnapshotId`   — output of one `apply` (IR + sidecar JS +
+//                                    schema). Multiple snapshots per project.
+//   - `EngineCheckpoint`          — frozen engine-internal state (per-snapshot)
+//                                    — defined on the runtime side
+//   - `FfiPendingDelegation`      — pending delegation held by the FFI Runner
+//   - `FfiPendingEscalation`      — pending escalation held by the FFI Runner
+//   - `ApiPendingEscalation`      — pending user-bound escalation held by the API module
+//                                    (= DB representation of an AI -> user question)
 //
-// "agent" 自体は「API module から CORE への delegation」の永続化として
-// 既存 `agents` テーブルが直接対応する。delegationId をそのままキーに使う。
+// "agent" itself corresponds directly to the existing `agents` table as the
+// persistence of "delegation from API module to CORE". Use delegationId as the key.
 
 import type {
   DelegationId,
@@ -105,7 +105,7 @@ export interface SnapshotRepo {
   list(
     filter?: { projectId?: ProjectId } & ListOptions,
   ): Promise<SnapshotSummary[]>;
-  /** project 内の最新 snapshot id。空なら null。 */
+  /** Latest snapshot id within a project. `null` if empty. */
   latest(projectId: ProjectId): Promise<SnapshotId | null>;
   delete(id: SnapshotId): Promise<boolean>;
 }
@@ -120,8 +120,8 @@ export interface EngineCheckpointRepo {
 
 // ─── Agents (= API → CORE delegation rows) ─────────────────────────────────
 //
-// 「agent」は API module の `pendingDelegateOut` (CORE 宛) の永続化先。
-// id = delegationId と読み替えて良い。
+// "agent" is the persistence destination of the API module's
+// `pendingDelegateOut` (CORE-bound). Read id = delegationId.
 
 export type AgentRow = {
   id: AgentId;
@@ -160,15 +160,15 @@ export interface AgentRepo {
 
 // ─── FFI module persistent state ───────────────────────────────────────────
 //
-// FFI Runner は per-snapshot で sidecar を抱える。Runner 自身の in-memory state
-// は subprocess pid 程度で、in-flight delegation / escalation は DB に書く。
-// サーバ再起動時に FFI Runner がこれらを読んで `restored` IPC event で sidecar
-// に通知。
+// The FFI Runner holds a sidecar per-snapshot. The Runner's own in-memory
+// state is only the subprocess pid level; in-flight delegation / escalation
+// is written to the DB. On server restart, the FFI Runner reads these and
+// notifies the sidecar via a `restored` IPC event.
 
 export type FfiPendingDelegation = {
   delegationId: DelegationId;
   snapshotId: SnapshotId;
-  /** ack を返す先 endpoint (= 通常 CORE)。 */
+  /** Endpoint to send acks to (= normally CORE). */
   peerEndpoint: string;
   agentDefId: AgentDefId;
   args: Record<string, Value>;
@@ -202,7 +202,7 @@ export type FfiPendingEscalation = {
   escalationId: EscalationId;
   delegationId: DelegationId;
   snapshotId: SnapshotId;
-  /** ack を返す先 endpoint (= 通常 sidecar 経由 = CORE 側からの想定)。 */
+  /** Endpoint to send acks to (= normally via sidecar = expected from the CORE side). */
   peerEndpoint: string;
   agentDefId: AgentDefId;
   args: Record<string, Value>;
@@ -218,20 +218,20 @@ export interface FfiPendingEscalationRepo {
 
 // ─── API module persistent state ───────────────────────────────────────────
 //
-// API module = ユーザーの代理 endpoint。pendingDelegateOut は `agents`
-// テーブルがそのまま担当 (= CLI が起動した agent)。pendingEscalateIn は
-// 「AI から user への質問」を保持するキュー。
+// API module = user's proxy endpoint. pendingDelegateOut is handled directly
+// by the `agents` table (= agents launched by the CLI). pendingEscalateIn is
+// the queue that holds "AI -> user questions".
 
 export type ApiPendingEscalation = {
   escalationId: EscalationId;
-  /** どの delegation の中で発火したか (= どの agent から)。 */
+  /** Which delegation fired this (= from which agent). */
   delegationId: DelegationId;
   snapshotId: SnapshotId;
   agentDefId: AgentDefId;
   args: Record<string, Value>;
-  /** "open" = ユーザー回答待ち / "answered" = 既に escalateAck 済 / "cancelled" */
+  /** "open" = awaiting user reply / "answered" = already escalateAck'd / "cancelled" */
   state: "open" | "answered" | "cancelled";
-  /** state === "answered" のとき設定。 */
+  /** Set when state === "answered". */
   value?: Value;
   createdAt: string;
 };

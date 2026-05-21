@@ -1,39 +1,42 @@
-// Module: 3 module + 6 event 対称設計の core 抽象。
+// Module: core abstraction of the 3-module + 6-event symmetric design.
 //
-// API / CORE / FFI の各 module はこの interface を実装する。bus は (endpoint
-// → module) の対応表しか持たず、event の `to` を見て module.feed を呼ぶだけ。
+// API / CORE / FFI modules each implement this interface. The bus only
+// holds an (endpoint -> module) table and calls module.feed based on
+// the event's `to` field.
 //
-// **責任分担**:
-//   - Module: 自分宛の event を 1 つ処理して outbound を返す。永続化も自分で。
-//   - Bus:   event を queue して `to` を見て dispatch するだけ。中身は見ない。
+// **Responsibility split**:
+//   - Module: processes one event addressed to itself and returns outbound.
+//             Persistence is its own job.
+//   - Bus:   queues events and dispatches based on `to` — doesn't look inside.
 //
-// `persist` / `load` の tx 引数は module 実装ごとに型が違う (CORE module は
-// `{coreCheckpoints: CoreCheckpointStore}`、FFI module は no-op、API module は
-// SQL tx を直接受け取る)。`Module<Tx>` 型変数で各実装が自分の必要な型を
-// 宣言できるようにし、bus は `Module<unknown>` として扱う (= dispatch には
-// tx 内容を見ないため安全)。
+// The tx argument of `persist` / `load` has a different type per module impl
+// (CORE module: `{coreCheckpoints: CoreCheckpointStore}`, FFI module: no-op,
+// API module: receives a SQL tx directly). The `Module<Tx>` type parameter
+// lets each impl declare the type it needs, and the bus handles it as
+// `Module<unknown>` (= safe because dispatch doesn't inspect tx contents).
 
 import type { ExternalEvent } from "./engine/event.js";
 import type { Endpoint } from "./engine/endpoint.js";
 
 export interface Module<Tx = unknown> {
-  /** Self-identifier. bus が `event.to === endpoint` で routing する。 */
+  /** Self-identifier. The bus routes by `event.to === endpoint`. */
   readonly endpoint: Endpoint;
 
   /**
-   * Inbound event を 1 つ処理。
+   * Process one inbound event.
    *
-   * 同期で確定した outbound を返す。非同期処理 (例: FFI sidecar の IPC 応答)
-   * は別経路で `bus.push(...)` して bus drain を継続させる。
+   * Returns outbound events determined synchronously. Asynchronous work
+   * (e.g. FFI sidecar IPC responses) goes through a separate route
+   * (`bus.push(...)`) to continue the bus drain.
    */
   feed(event: ExternalEvent): Promise<{ outbound: ExternalEvent[] }>;
 
-  /** State を tx に保存。bus drain 完了時に呼ばれる。 */
+  /** Save state to tx. Called when bus drain completes. */
   persist(tx: Tx): Promise<void>;
 
   /**
-   * State を tx から復元。リクエスト処理開始時に呼ばれる。state を持たない
-   * module (現状の API module 等) は no-op で良い。
+   * Restore state from tx. Called at the start of request processing.
+   * Stateless modules (e.g. the current API module) can be a no-op.
    */
   load(tx: Tx): Promise<void>;
 }

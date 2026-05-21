@@ -1,9 +1,9 @@
 // Escalation routes: list pending user-facing escalations and answer them.
 //
-// AI から user への質問は ApiModule.feed の `escalate` で
-// `api_pending_escalations` に open 状態で記録される。CLI / GUI が
-// この一覧を見て回答すると、`escalateAck` が bus に流れて agent thread
-// が再開する。
+// AI -> user questions are recorded as open in `api_pending_escalations`
+// via the `escalate` branch of ApiModule.feed. When the CLI / GUI views
+// this list and answers, an `escalateAck` flows on the bus and the agent
+// thread resumes.
 
 import { Hono } from "hono";
 import { valueFromRaw } from "@katari-lang/runtime";

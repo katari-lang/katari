@@ -1,15 +1,15 @@
-// ApiModule — ユーザー (CLI / external client) の代理 endpoint。
+// ApiModule — proxy endpoint for the user (CLI / external client).
 //
-// 「API module は HTTP server ではなく、ユーザーそのもの」という設計に従い、
-// HTTP route は ApiModule の特殊メソッド (startAgent / cancelAgent /
-// answerEscalation / list*) を呼んで bus を kick する薄い shim。
+// Following the design "the API module is not the HTTP server, it is the
+// user", HTTP routes are thin shims that call special ApiModule methods
+// (startAgent / cancelAgent / answerEscalation / list*) and kick the bus.
 //
 // State (DB-backed):
-//   - pendingDelegateOut = `agents` テーブル        (CLI 起動 agent のキュー)
-//   - pendingEscalateIn  = `api_pending_escalations` (AI から user への質問待ち)
+//   - pendingDelegateOut = `agents` table              (queue of CLI-launched agents)
+//   - pendingEscalateIn  = `api_pending_escalations` (questions from AI awaiting user reply)
 //
-// per-tick instance: 1 request の中で生きる。永続化は tx 経由で書き通すので
-// `persist()` / `load()` は no-op。
+// per-tick instance: lives within one request. Persistence writes through
+// via tx, so `persist()` / `load()` are no-ops.
 
 import {
   API_ENDPOINT,
@@ -54,7 +54,7 @@ export class ApiModule implements Module {
   async feed(event: ExternalEvent): Promise<{ outbound: ExternalEvent[] }> {
     switch (event.payload.kind) {
       case "delegate":
-        // ユーザー (= API module) は agent 定義を提供しない。
+        // The user (= API module) provides no agent definitions.
         this.logger.log("warn", "api: received delegate but provides no defs", {
           delegationId: event.payload.delegationId,
         });
@@ -81,7 +81,7 @@ export class ApiModule implements Module {
             event.payload.args,
           );
         }
-        // AI から user への質問。pending escalation として永続化。
+        // Question from AI to user. Persist as a pending escalation.
         await this.tx.apiEscalations.insert({
           escalationId: event.payload.escalationId,
           delegationId: event.payload.delegationId,
@@ -94,7 +94,7 @@ export class ApiModule implements Module {
         return { outbound: [] };
 
       case "escalateAck":
-        // ユーザー → CORE への escalate flow がないので drop with debug log。
+        // There is no user -> CORE escalate flow, so drop with a debug log.
         this.logger.log("debug", "api: stray escalateAck", {
           escalationId: event.payload.escalationId,
         });

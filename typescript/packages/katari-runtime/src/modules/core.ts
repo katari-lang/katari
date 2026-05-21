@@ -1,14 +1,15 @@
-// CoreModule: engine を Module interface に wrap する薄いアダプター。
+// CoreModule: a thin adapter wrapping the engine into the Module interface.
 //
-// 責任:
-//   - feed(event):   1 event を applyEvent に通して outbound を返す
-//   - persist(tx):   現在の State を `tx.upsert(...)` で永続化
-//   - load(tx):      checkpoint があれば deserialize、無ければ createState
+// Responsibilities:
+//   - feed(event):   feed one event through applyEvent and return outbound
+//   - persist(tx):   persist the current State via `tx.upsert(...)`
+//   - load(tx):      deserialize if a checkpoint exists, else createState
 //
-// CORE は 1 snapshot = 1 IRModule = 1 State。`snapshotId` は永続化キー。
+// CORE has 1 snapshot = 1 IRModule = 1 State. `snapshotId` is the persistence key.
 //
-// 自己宛 event (= CORE→CORE) は applyEvent の outbound に含まれて bus に返り、
-// bus がまた同じ CoreModule.feed に渡す (self-loop は engine 内に閉じない)。
+// Self-addressed events (= CORE->CORE) are included in applyEvent's outbound,
+// returned to the bus, and the bus hands them back to the same CoreModule.feed
+// (self-loops do not stay inside the engine).
 
 import { applyEvent, createState } from "../engine/apply.js";
 import type { Endpoint } from "../engine/endpoint.js";

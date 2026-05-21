@@ -26,8 +26,9 @@ import type { QualifiedName } from "./ir/types.js";
 const CLOSURE_PREFIX = "closure:";
 
 /**
- * Bus / 中間層で扱う opaque な agent identifier。受信側 module だけが decode する。
- * Wire 形式は flat string (JSON-serializable / structuredClone-safe).
+ * Opaque agent identifier handled by the bus / middle layer. Only the
+ * receiving module decodes it. Wire format is a flat string
+ * (JSON-serializable / structuredClone-safe).
  */
 export type AgentDefId = string & { readonly __brand: "AgentDefId" };
 

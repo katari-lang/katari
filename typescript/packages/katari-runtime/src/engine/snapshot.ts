@@ -1,12 +1,14 @@
 // EngineCheckpoint: pure JSON conversion for engine `State`.
 //
-// 名前について: 「Snapshot」は user-facing の deploy unit (= IR + sidecar JS +
-// schema bundle) を指し、それは `katari-api-server` 側で `Snapshot` 型で
-// 表される。この engine 内部の凍結は **EngineCheckpoint** と呼んで衝突を回避。
+// On naming: "Snapshot" refers to the user-facing deploy unit (= IR +
+// sidecar JS + schema bundle), represented as `Snapshot` on the
+// `katari-api-server` side. This engine-internal freeze is called
+// **EngineCheckpoint** to avoid collision.
 //
-// State は plain data (Record-of-data, no class instances, no non-JSON values)
-// なので serialize は structuredClone 相当、deserialize は逆変換。
-// IRModule はここに含めない (host が deploy unit から渡す)。
+// State is plain data (Record-of-data, no class instances, no non-JSON
+// values), so serialize is equivalent to structuredClone, and deserialize
+// is the inverse. IRModule is not included here (the host provides it
+// from the deploy unit).
 
 import type { IRModule } from "../ir/types.js";
 import type { State } from "./state.js";

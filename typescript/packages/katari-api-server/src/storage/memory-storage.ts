@@ -1,8 +1,9 @@
 // In-memory implementation of `Storage`. Used by tests to avoid a real DB.
 //
-// 本実装は per-snapshot Mutex map で `withSnapshotLock` を、global snapshot &
-// restore で `withTransaction` を提供する。orchestrator (api-server コア) は
-// この interface だけを知り、Postgres 実装と差し替え可能。
+// This implementation provides `withSnapshotLock` via a per-snapshot Mutex
+// map, and `withTransaction` via global snapshot & restore. The orchestrator
+// (api-server core) only knows this interface and can be swapped with the
+// Postgres impl.
 
 import { v7 as uuidv7 } from "uuid";
 import { Mutex } from "async-mutex";
@@ -400,12 +401,12 @@ export class InMemoryStorage implements Storage {
   readonly ffiEscalations = new InMemoryFfiPendingEscalationRepo();
   readonly apiEscalations = new InMemoryApiPendingEscalationRepo();
 
-  /** Per-snapshot mutex map for `withSnapshotLock` (= row lock の memory 版)。 */
+  /** Per-snapshot mutex map for `withSnapshotLock` (= in-memory version of a row lock). */
   private readonly snapshotMutexes = new Map<SnapshotId, Mutex>();
 
   /**
-   * snapshot-and-restore による疑似トランザクション。fn 内で発生した
-   * mutation は、throw で全 repo 状態をロールバックする。
+   * Pseudo-transaction via snapshot-and-restore. Mutations inside fn are
+   * rolled back across all repos on throw.
    */
   async withTransaction<T>(fn: (tx: Storage) => Promise<T>): Promise<T> {
     const before = this.snapshotState();
@@ -417,10 +418,11 @@ export class InMemoryStorage implements Storage {
     }
   }
 
-  /**
-   * Per-snapshot Mutex で同時実行を直列化。tx は使わず、Mutex 単独で
-   * 直列化を保証する (Postgres 版は `SELECT ... FOR UPDATE` 相当)。
-   */
+   /**
+    * Serialize concurrency via a per-snapshot Mutex. tx is not used; the
+    * Mutex alone guarantees serialization (the Postgres version uses the
+    * equivalent of `SELECT ... FOR UPDATE`).
+    */
   async withSnapshotLock<T>(
     _tx: Storage,
     snapshotId: SnapshotId,

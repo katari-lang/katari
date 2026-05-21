@@ -1,12 +1,12 @@
-// FfiStore — FFI Module の永続化レイヤ interface。
+// FfiStore — persistence layer interface for the FFI Module.
 //
-// FFI Module は「sidecar に投げて未完了の delegation / escalation」を
-// 自分の DB に保持する (CORE 側の状態とは独立)。host (api-server / cli /
-// テスト) が具体実装を提供する。
+// The FFI Module keeps "delegation / escalation that has been sent to the
+// sidecar and is still pending" in its own DB (independent of CORE-side
+// state). The host (api-server / cli / tests) provides the concrete impl.
 //
-// 各 instance は **特定の "key" (= 通常 snapshotId) に bind 済み** とする。
-// メソッド引数に key を取らないことで、misuse (= 別 snapshot のレコードを
-// 触る) を構造的に防ぐ。
+// Each instance must be **bound to a specific "key" (= normally snapshotId)**.
+// By not taking a key in method arguments, misuse (= touching records of
+// another snapshot) is structurally prevented.
 
 import type { AgentDefId } from "../agent-def-id.js";
 import type { DelegationId, EscalationId } from "../engine/id.js";
@@ -14,15 +14,15 @@ import type { Endpoint } from "../engine/endpoint.js";
 import type { Value } from "../engine/value.js";
 
 /**
- * FFI Module が「自分が sidecar に投げて返答待ち」のレコード。
+ * Record of "FFI Module has sent this to the sidecar and is awaiting a reply".
  *
- *   - `peerEndpoint`: ack を返す相手 (= ext call の caller、 通常 CORE)
- *   - `agentDefId`:   wire 上で受け取った encoding (= FFI 側の名前空間)
- *   - `parentExtDelegationId`: ext-delegated child agent のみ非 null。
- *     ext handler が `katari.delegate(...)` で起こした子 agent の場合、
- *     ここに「ext call 自体の delegationId」 が入る。 これにより
- *     escalate 中継時に親 ext delegation の peer を引ける + restart 時に
- *     orphan 子を terminate できる。
+ *   - `peerEndpoint`: who to ack to (= ext call caller, normally CORE)
+ *   - `agentDefId`:   encoding received on the wire (= FFI-side namespace)
+ *   - `parentExtDelegationId`: non-null only for ext-delegated child agents.
+ *     For a child agent spawned by an ext handler via `katari.delegate(...)`,
+ *     this holds "the delegationId of the ext call itself". Using it we can
+ *     look up the parent ext delegation's peer for escalate relaying + on
+ *     restart we can terminate orphan children.
  */
 export type FfiPendingDelegation = {
   delegationId: DelegationId;
@@ -35,8 +35,9 @@ export type FfiPendingDelegation = {
 };
 
 /**
- * FFI Module が「sidecar が emit して CORE に転送中の escalate」のレコード。
- * sidecar process が再起動で失われた場合は、起動時に整理対象 (= drop)。
+ * Record of "an escalate that the sidecar emitted and is being forwarded
+ * to CORE". If the sidecar process is lost on restart, these are cleaned
+ * up (= dropped) on startup.
  */
 export type FfiPendingEscalation = {
   escalationId: EscalationId;
@@ -56,15 +57,15 @@ export interface FfiStore {
     state: "running" | "cancelling",
   ): Promise<boolean>;
   deleteDelegation(id: DelegationId): Promise<boolean>;
-  /** 起動時 `ipcDelegateRestarted` 送信 + child terminate 発火用に scope 内全件返す。 */
+  /** Return all rows in scope, for `ipcDelegateRestarted` send + child terminate fire on startup. */
   listDelegations(): Promise<FfiPendingDelegation[]>;
-  /** 指定の親 ext delegation を `parentExtDelegationId` に持つ子 delegations を返す。 */
+  /** Return child delegations whose `parentExtDelegationId` is the given parent ext delegation. */
   listChildrenOf(parentId: DelegationId): Promise<FfiPendingDelegation[]>;
 
   // ─── Pending escalations ──────────────────────────────────────────────
   insertEscalation(row: FfiPendingEscalation): Promise<void>;
   getEscalation(id: EscalationId): Promise<FfiPendingEscalation | null>;
   deleteEscalation(id: EscalationId): Promise<boolean>;
-  /** 起動時 cleanup 用に scope 内全件返す。 */
+  /** Return all rows in scope, for startup cleanup. */
   listEscalations(): Promise<FfiPendingEscalation[]>;
 }

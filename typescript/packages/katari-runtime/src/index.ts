@@ -116,7 +116,7 @@ export type {
   FfiAgentDefId,
 } from "./agent-def-id.js";
 
-// ─── 3 module + bus 抽象 ───────────────────────────────────────────────────
+// ─── 3-module + bus abstraction ────────────────────────────────────────────
 
 export type { Module } from "./module.js";
 export { ExternalEventBus } from "./bus.js";

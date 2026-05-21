@@ -1,44 +1,43 @@
-// FfiModule — runtime 側の FFI Runner。`Module` interface 実装。
+// FfiModule — runtime-side FFI Runner. Implements the `Module` interface.
 //
-// 役割 (protocol v2, 11 message variants):
+// Role (protocol v2, 11 message variants):
 //
-//   1. CORE → FFI 方向の inbound event を受け取って sidecar や bus に
-//      取り次ぐ:
+//   1. Receive CORE -> FFI inbound events and forward them to the sidecar
+//      or bus:
 //
-//        - `delegate` (CORE が ext を呼んだ): store insert + `ipcDelegate`
-//        - `terminate` (CORE が ext を cancel): store setState + `ipcTerminate`
-//        - `delegateAck` / `terminateAck` (= ext が起こした child agent の終了):
-//          store から「親 ext delegation」 を引いて sidecar に
-//          `ipcChildDelegateAck` / `ipcChildTerminateAck` を返す
-//        - `escalate` (= ext-spawned child agent が発火した escalate):
-//          そのまま「親 ext delegation の caller」 に向けて bus に再 push
-//          (sidecar には届けない、 DelegateThread の handle scope chain に届く)
-//        - `escalateAck` (上の escalate に対する逆方向 ack): in-memory
-//          escalation map から original child の endpoint を引き、 同じく
-//          bus に再 push
+//        - `delegate` (CORE called ext): store insert + `ipcDelegate`
+//        - `terminate` (CORE cancelled ext): store setState + `ipcTerminate`
+//        - `delegateAck` / `terminateAck` (= child agent spawned by ext finished):
+//          look up the "parent ext delegation" from the store and send
+//          `ipcChildDelegateAck` / `ipcChildTerminateAck` to the sidecar
+//        - `escalate` (= escalate emitted by ext-spawned child agent):
+//          re-push to the bus targeting "the caller of the parent ext delegation"
+//          (do not deliver to the sidecar; reaches the DelegateThread handle scope chain)
+//        - `escalateAck` (reverse-direction ack for the above escalate): look up
+//          the original child's endpoint from the in-memory escalation map and
+//          likewise re-push to the bus
 //
-//   2. Sidecar からの `ChildToParent` を受けて bus / store を更新:
+//   2. Receive `ChildToParent` from the sidecar and update bus / store:
 //
-//        - `ipcReady`: handshake で start() に吸われるので spurious のみ
+//        - `ipcReady`: absorbed by start() during handshake, so only spurious here
 //        - `ipcDelegateAck` / `ipcDelegateError` / `ipcTerminateAck`:
-//          ext invocation の終了。 store から peer を引いて逆向き bus event
-//        - `ipcChildDelegate`: ext が CORE 側に child agent を起動。
-//          parentExtDelegationId 付きで store insert + bus に
-//          `{from: FFI, to: CORE, kind: delegate}` を発火
-//        - `ipcChildTerminate`: ext が child を cancel。 bus に terminate を発火
+//          end of ext invocation. Look up peer from store and emit reverse bus event
+//        - `ipcChildDelegate`: ext launched a child agent on the CORE side.
+//          store insert with parentExtDelegationId + fire
+//          `{from: FFI, to: CORE, kind: delegate}` on the bus
+//        - `ipcChildTerminate`: ext cancelled a child. Fire terminate on the bus
 //
-//   3. 起動直後の復旧 (`recoverInflight`):
+//   3. Recovery right after startup (`recoverInflight`):
 //
-//        - parent ext delegation (= `parentExtDelegationId === null`) には
-//          `ipcDelegateRestarted` を投げて handler に「restart 後」 と知らせる
-//        - 子 delegation (= ext が katari.delegate で起こしたもの) は ext
-//          側 Promise が失われているので CORE 側で terminate を発火 + store
-//          から削除 (orphan cleanup)
-//        - 残ってる escalation row は全削除 (sidecar 跨ぎで継続不能)
+//        - parent ext delegation (= `parentExtDelegationId === null`): send
+//          `ipcDelegateRestarted` to inform the handler "after restart"
+//        - child delegation (= one spawned by ext via katari.delegate): the
+//          ext-side Promise is lost, so fire terminate on the CORE side + delete
+//          from store (orphan cleanup)
+//        - any remaining escalation rows are deleted (cannot continue across sidecars)
 //
-// 注意: 1 FfiModule = 1 sidecar = 1 snapshot scope。`ffiStore` は予め
-// その scope に bind 済みのインスタンスを受け取る (= storage layer 側で
-// 構築する)。
+// Note: 1 FfiModule = 1 sidecar = 1 snapshot scope. `ffiStore` must be an
+// instance already bound to that scope (= constructed by the storage layer).
 
 import { CORE_ENDPOINT, FFI_ENDPOINT } from "./endpoints.js";
 import type { ExternalEvent } from "../engine/event.js";
@@ -56,15 +55,15 @@ import type { ChildToParent } from "../sidecar/types.js";
 
 export type FfiModuleOptions = {
   /**
-   * Module の self endpoint。デフォルトは {@link FFI_ENDPOINT} (`ext://ffi`)。
-   * 複数 FFI module を併存させたい場合 (将来) は別 endpoint で区別する。
+   * Module's self endpoint. Default is {@link FFI_ENDPOINT} (`ext://ffi`).
+   * If multiple FFI modules need to coexist (future), distinguish them by endpoint.
    */
   endpoint?: Endpoint;
-  /** 1 FfiModule に対応する sidecar (per-snapshot)。`null` 不可。 */
+  /** Sidecar corresponding to one FfiModule (per-snapshot). `null` not allowed. */
   sidecar: Sidecar;
-  /** Sidecar からの応答を bus に投げる callback。 */
+  /** Callback to push sidecar responses onto the bus. */
   onSidecarResponse: (event: ExternalEvent) => void;
-  /** 永続化レイヤ。snapshot scope に bind 済みであること。 */
+  /** Persistence layer. Must be already bound to the snapshot scope. */
   store: FfiStore;
   logger: Logger;
 };
@@ -130,7 +129,7 @@ export class FfiModule implements Module {
     }
   }
 
-  /** State は store に書き通すので persist は no-op。 */
+  /** State is fully written through to the store, so persist is a no-op. */
   async persist(): Promise<void> {}
 
   /**
@@ -152,13 +151,14 @@ export class FfiModule implements Module {
   // ─── Recovery ──────────────────────────────────────────────────────────
 
   /**
-   * Server 起動直後に呼ぶ。 store の in-flight rows を以下のように整理する:
+   * Call immediately after server startup. Reconciles in-flight rows in
+   * the store as follows:
    *
-   *   - parent (`parentExtDelegationId === null`): `ipcDelegateRestarted` 送信
-   *   - child (`parentExtDelegationId != null`): bus に terminate を発火 +
-   *     store から削除 (= ext 側 Promise が消えてるので CORE 側を強制 kill)
+   *   - parent (`parentExtDelegationId === null`): send `ipcDelegateRestarted`
+   *   - child (`parentExtDelegationId != null`): fire terminate on the bus +
+   *     delete from store (= ext-side Promise is gone, so force-kill the CORE side)
    *
-   * 注: sidecar が起動済み (= `start()` 済) であることを前提とする。
+   * Note: assumes the sidecar is already started (= `start()` has been called).
    */
   async recoverInflight(): Promise<void> {
     const delegations = await this.store.listDelegations();
@@ -169,8 +169,8 @@ export class FfiModule implements Module {
       else orphanChildren.push(row);
     }
 
-    // Restart 通知を先に送る — sidecar が child を再 spawn する race を
-    // 避けるため、 orphan terminate より先に handler に走らせる。
+    // Send the restart notification first — to avoid a race where the
+    // sidecar re-spawns a child, run the handler before the orphan terminate.
     for (const row of parents) {
       try {
         await this.sidecar.send({
@@ -274,8 +274,8 @@ export class FfiModule implements Module {
 
   /**
    * `from: CORE, to: FFI, kind: delegateAck` — ext-spawned child agent
-   * が成功裏に完了した。 child row を store から引いて、 親 ext call の
-   * sidecar に `ipcChildDelegateAck` を投げる。
+   * completed successfully. Look up the child row from the store and send
+   * `ipcChildDelegateAck` to the sidecar of the parent ext call.
    */
   private async handleInboundChildDelegateAck(
     event: ExternalEvent,
@@ -306,8 +306,8 @@ export class FfiModule implements Module {
   }
 
   /**
-   * `from: CORE, to: FFI, kind: terminateAck` — ext-spawned child agent
-   * の cancel が完了した。
+   * `from: CORE, to: FFI, kind: terminateAck` — cancel of ext-spawned
+   * child agent completed.
    */
   private async handleInboundChildTerminateAck(
     event: ExternalEvent,
@@ -444,8 +444,8 @@ export class FfiModule implements Module {
   async dispatchSidecarMessage(msg: ChildToParent): Promise<void> {
     switch (msg.type) {
       case "ipcReady":
-        // start() で吸い取られる handshake。 ここに来たら spurious 再 emit
-        // (= sidecar 側の bug) なので drop。
+        // Handshake absorbed by start(). If we reach here, it's a spurious
+        // re-emit (= sidecar-side bug), so drop.
         this.logger.log("debug", "ffi: spurious ready from sidecar");
         return;
       case "ipcDelegateAck": {
@@ -545,7 +545,7 @@ export class FfiModule implements Module {
     }
   }
 
-  /** Pending delegation を引いて peer を返し、レコード削除。 */
+  /** Look up the pending delegation, return its peer, and delete the record. */
   private async consumePendingDelegationPeer(
     delegationId: DelegationId,
   ): Promise<Endpoint | null> {
