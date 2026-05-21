@@ -54,7 +54,7 @@ export const userOps: ThreadOps<UserThread> = {
     if (!commonRemoveChild(ctx, t as UserThread, callId)) return;
     const block = getUserBlock(ctx, t.blockId);
     // Carry the call's output VarId, if any.
-    const stmt = block.statements[callId as number];
+    const stmt = block.statements[callId];
     if (stmt !== undefined) {
       const output = outputVarOf(stmt);
       if (output !== undefined) {

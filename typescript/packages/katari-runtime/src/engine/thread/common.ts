@@ -46,13 +46,13 @@ export function deleteThread(ctx: StepCtx, id: ThreadId): void {
 // ─── Children bookkeeping ──────────────────────────────────────────────────
 
 export function setChild(t: Thread, callId: CallId, childId: ThreadId): void {
-  t.children[callId as number] = childId;
+  t.children[callId] = childId;
 }
 
 export function deleteChild(t: Thread, callId: CallId): ThreadId | undefined {
-  const childId = t.children[callId as number];
+  const childId = t.children[callId];
   if (childId === undefined) return undefined;
-  delete t.children[callId as number];
+  delete t.children[callId];
   return childId;
 }
 
@@ -375,7 +375,7 @@ export function proxyAskAckToChild(
     });
     return;
   }
-  const childId = t.children[entry.childCallId as number];
+  const childId = t.children[entry.childCallId];
   if (childId === undefined) {
     // Child went away while the ack was in flight. Drop.
     ctx.log("debug", "engine: askAck dropped — child gone", {

@@ -28,7 +28,15 @@ export type ClosureId = number & { readonly __brand: "ClosureId" };
  */
 export type AskId = number & { readonly __brand: "AskId" };
 
-/** CallId: parent-local index identifying a specific child call. */
+/**
+ * CallId: parent-local discriminator identifying a specific child call.
+ *
+ * A pure per-thread counter (allocated via `allocCallId`, exactly like
+ * `AskId`). Variants that need to track special-role children — e.g.
+ * HandleThread's main body, ForThread's then-block — record the
+ * allocated CallId in a variant-specific field (`thenCallId`) or the
+ * shared `childRoles` map. No reserved magic value is needed.
+ */
 export type CallId = number & { readonly __brand: "CallId" };
 
 export function createThreadId(): ThreadId {

@@ -130,6 +130,7 @@ export function spawnChild(ctx: StepCtx, args: SpawnArgs): ThreadId {
       currentIndex: 0,
       iterableSnapshot: [],
       postCancelActions: {},
+      thenCallId: null,
     }))
     .with({ kind: "blockHandle" }, () => ({
       ...common,

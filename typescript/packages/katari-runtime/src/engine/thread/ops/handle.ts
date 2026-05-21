@@ -28,6 +28,7 @@ import { spawnChild } from "../../spawn.js";
 import type { StepCtx } from "../../step-ctx.js";
 import { type Value } from "../../value.js";
 import {
+  allocCallId,
   beginCancel,
   commonRemoveChild,
   hasChildren,
@@ -47,8 +48,6 @@ import {
 } from "./defaults.js";
 import type { ThreadOps } from "./types.js";
 
-const MAIN_CALL_ID = 0 as CallId;
-
 export const handleOps: ThreadOps<HandleThread> = {
   create(ctx, t) {
     const block = getHandleBlock(ctx, t.blockId);
@@ -60,16 +59,13 @@ export const handleOps: ThreadOps<HandleThread> = {
       setValueInScope(ctx, t.scopeId, bodyVar, v);
     }
 
-    // Spawn the main body. callId = 0 (MAIN_CALL_ID). Reserve the slot
-    // and bump `nextCallId` past it so subsequent handler-body /
-    // thenClause allocations don't collide with the main continuation.
-    t.childRoles[MAIN_CALL_ID as number] = { kind: "main" };
-    if ((t.nextCallId as number) <= (MAIN_CALL_ID as number)) {
-      t.nextCallId = ((MAIN_CALL_ID as number) + 1) as CallId;
-    }
+    // Allocate the main body's CallId from the shared counter. Role
+    // discrimination lives in `childRoles` — no magic CallId reserved.
+    const mainCallId = allocCallId(t);
+    t.childRoles[mainCallId] = { kind: "main" };
     spawnChild(ctx, {
       parentId: t.id,
-      parentCallId: MAIN_CALL_ID,
+      parentCallId: mainCallId,
       blockId: block.body,
       callArgs: {},
       scopeMode: { mode: "inline", parentScopeId: t.scopeId },
@@ -77,10 +73,10 @@ export const handleOps: ThreadOps<HandleThread> = {
   },
 
   done(ctx, t, callId, value) {
-    const role = (t.childRoles as Record<number, ChildRole>)[callId as number];
+    const role = t.childRoles[callId];
     if (!commonRemoveChild(ctx, t as HandleThread, callId)) return;
     if (role === undefined) return;
-    delete t.childRoles[callId as number];
+    delete t.childRoles[callId];
 
     switch (role.kind) {
       case "main": {
@@ -111,16 +107,16 @@ export const handleOps: ThreadOps<HandleThread> = {
 
   cancelAck(ctx, t, callId) {
     if (!commonRemoveChild(ctx, t as HandleThread, callId)) return;
-    delete t.childRoles[callId as number];
+    delete t.childRoles[callId];
 
-    const action = (t.postCancelActions as Record<number, PostCancelAction>)[callId as number];
+    const action = t.postCancelActions[callId];
     if (action === undefined) {
       // Untracked targeted cancel — likely a logic error, throw.
       throw new Error(
         `engine.handle: cancelAck without postCancelAction (callId=${callId})`,
       );
     }
-    delete t.postCancelActions[callId as number];
+    delete t.postCancelActions[callId];
 
     if (action.kind !== "askComplete") {
       throw new Error(
@@ -131,7 +127,7 @@ export const handleOps: ThreadOps<HandleThread> = {
     // Fire askAck back to the proxy chain that delivered the original
     // request ask. The proxy's askIdMap will route it down to the
     // RequestThread.
-    const askerThreadId = (t.children as Record<number, ThreadId>)[action.askerCallId as number];
+    const askerThreadId = t.children[action.askerCallId];
     if (askerThreadId !== undefined) {
       ctx.enqueue({
         kind: "askAck",
@@ -183,7 +179,7 @@ export const handleOps: ThreadOps<HandleThread> = {
     // body of *this* handle). Identify the originating handler body via
     // childCallId, confirm it's a handlerBody role here, and proceed.
     if (kind.kind === "next") {
-      const role = (t.childRoles as Record<number, ChildRole>)[childCallId as number];
+      const role = t.childRoles[childCallId];
       if (role !== undefined && role.kind === "handlerBody") {
         // Apply state-var modifiers to our scope, then targeted cancel.
         for (const [varKey, value] of Object.entries(kind.mods)) {
@@ -192,13 +188,13 @@ export const handleOps: ThreadOps<HandleThread> = {
         // Schedule the askAck for after the cancel completes. The
         // (askId, askerCallId) carried by the role identify the
         // outstanding request ask whose ack we need to fire.
-        t.postCancelActions[childCallId as number] = {
+        t.postCancelActions[childCallId] = {
           kind: "askComplete",
           askId: role.askId,
           askerCallId: role.askerCallId,
           value: kind.value,
         };
-        const childId = (t.children as Record<number, ThreadId>)[childCallId as number];
+        const childId = t.children[childCallId];
         if (childId !== undefined) {
           ctx.enqueue({ kind: "cancel", target: childId });
         }
@@ -240,7 +236,7 @@ function isParallel(ctx: StepCtx, blockId: BlockId): boolean {
 
 /** A handler body or thenClause is currently running (sequential gate). */
 function isBusy(t: HandleThread): boolean {
-  for (const role of Object.values(t.childRoles as Record<number, ChildRole>)) {
+  for (const role of Object.values(t.childRoles)) {
     if (role.kind === "handlerBody" || role.kind === "thenClause") return true;
   }
   return false;
@@ -276,7 +272,7 @@ function spawnHandlerBody(
   }
   const callId = t.nextCallId;
   t.nextCallId = ((callId as number) + 1) as CallId;
-  t.childRoles[callId as number] = {
+  t.childRoles[callId] = {
     kind: "handlerBody",
     reqId,
     askId,
@@ -310,7 +306,7 @@ function spawnThenClauseOrFinish(
   }
   const callId = t.nextCallId;
   t.nextCallId = ((callId as number) + 1) as CallId;
-  t.childRoles[callId as number] = { kind: "thenClause", mainResultValue };
+  t.childRoles[callId] = { kind: "thenClause", mainResultValue };
   const childId = spawnChild(ctx, {
     parentId: t.id,
     parentCallId: callId,

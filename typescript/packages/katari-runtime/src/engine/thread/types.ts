@@ -44,8 +44,11 @@ type Common = {
   parentCallId: CallId | null;
   scopeId: ScopeId;
   status: ThreadStatus;
-  /** Live children. Map<CallId, ThreadId>, encoded as a Record for Immer. */
-  children: Record<number, ThreadId>;
+  /**
+   * Live children, keyed by CallId (numeric index from allocCallId or
+   * a string sentinel like 'main' on HandleThread / 'then' on ForThread).
+   */
+  children: Record<CallId, ThreadId>;
   /** Active handler-owning HandleThread per ReqId, inherited from parent. */
   handlers: Record<number, ThreadId>;
   /** Per-thread next CallId allocator. */
@@ -124,13 +127,13 @@ export type HandleThread = Common & {
    *   - "handlerBody" — a handler invocation (carries the asker chain)
    *   - "thenClause"  — the optional `then` clause spawned after main done
    */
-  childRoles: Record<number, ChildRole>;
+  childRoles: Record<CallId, ChildRole>;
   /**
    * Sequential-mode pending action queue. Empty when block.parallel === true.
    */
   pendingActions: PendingAction[];
   /** Action to fire once a specific child finishes cancelling. */
-  postCancelActions: Record<number, PostCancelAction>;
+  postCancelActions: Record<CallId, PostCancelAction>;
   /**
    * Set when a `break` ask was caught (handle scope's done-terminating
    * exit). Drives the eventual `done` to parent after children finish
@@ -184,9 +187,17 @@ export type ForThread = Common & {
   currentIndex: number;
   /** Iter source array values resolved at construction. */
   iterableSnapshot: Value[];
-  postCancelActions: Record<number, PostCancelAction>;
+  postCancelActions: Record<CallId, PostCancelAction>;
   /** Set when a `break-for` ask was caught. */
   pendingReturn?: Value;
+  /**
+   * CallId of the spawned then-block child, when one exists. Set in
+   * `emitForDone` at the moment the then-block is spawned; consulted in
+   * `done` to tell a then-block completion apart from an iteration
+   * body completion. `null` when there is no then-block or it has not
+   * yet been spawned.
+   */
+  thenCallId: CallId | null;
 };
 
 export type MatchThread = Common & {
@@ -256,14 +267,14 @@ export type TupleThread = Common & {
   kind: "tuple";
   blockId: BlockId;
   /** CallId → element value, collected as children complete. */
-  collected: Record<number, Value>;
+  collected: Record<CallId, Value>;
   nextIndex: number;
 };
 
 export type ArrayThread = Common & {
   kind: "array";
   blockId: BlockId;
-  collected: Record<number, Value>;
+  collected: Record<CallId, Value>;
   nextIndex: number;
 };
 

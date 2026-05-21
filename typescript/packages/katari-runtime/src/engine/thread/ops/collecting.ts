@@ -49,7 +49,7 @@ export function collectingDone(
   // Common bookkeeping (delete child) is done by the runner via the
   // common.ts helper before the variant op runs. Here we just record
   // the value and decide next steps.
-  t.collected[callId as number] = value as Value;
+  t.collected[callId] = value as Value;
 
   if (block.parallel) {
     if (Object.keys(t.collected).length >= elements.length) {
@@ -102,7 +102,7 @@ function finishCollecting(
 ): void {
   const elements: Value[] = [];
   for (let i = 0; i < totalLen; i++) {
-    const v = t.collected[i] as Value | undefined;
+    const v = t.collected[i as CallId] as Value | undefined;
     if (v === undefined) {
       throw new Error(`engine.collecting: missing element ${i}`);
     }

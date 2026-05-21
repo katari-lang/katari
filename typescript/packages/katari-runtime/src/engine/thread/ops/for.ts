@@ -17,6 +17,7 @@ import { spawnChild } from "../../spawn.js";
 import type { StepCtx } from "../../step-ctx.js";
 import { NULL_VALUE, type Value } from "../../value.js";
 import {
+  allocCallId,
   beginCancel,
   commonRemoveChild,
   lookupValue,
@@ -29,8 +30,6 @@ import {
   defaultCancel,
 } from "./defaults.js";
 import type { ThreadOps } from "./types.js";
-
-const THEN_CALL_ID = -1 as CallId;
 
 export const forOps: ThreadOps<ForThread> = {
   create(ctx, t) {
@@ -70,14 +69,15 @@ export const forOps: ThreadOps<ForThread> = {
     }
 
     bindElementVars(ctx, t as ForThread, block, iterables, 0);
-    spawnBody(ctx, t as ForThread, 0);
+    spawnBody(ctx, t as ForThread);
   },
 
   done(ctx, t, callId, value) {
     if (!commonRemoveChild(ctx, t as ForThread, callId)) return;
 
-    if ((callId as number) === (THEN_CALL_ID as number)) {
+    if (t.thenCallId !== null && callId === t.thenCallId) {
       // Then block done — propagate as our result.
+      t.thenCallId = null;
       if (t.parent !== null && t.parentCallId !== null) {
         ctx.enqueue({
           kind: "done",
@@ -106,7 +106,7 @@ export const forOps: ThreadOps<ForThread> = {
       return;
     }
     bindElementVars(ctx, t as ForThread, block, t.iterableSnapshot as Value[], t.currentIndex);
-    spawnBody(ctx, t as ForThread, t.currentIndex);
+    spawnBody(ctx, t as ForThread);
   },
 
   cancel: (ctx, t) => defaultCancel<ForThread>(ctx, t as ForThread),
@@ -116,13 +116,13 @@ export const forOps: ThreadOps<ForThread> = {
    */
   cancelAck(ctx, t, callId) {
     if (!commonRemoveChild(ctx, t as ForThread, callId)) return;
-    const action = (t.postCancelActions as Record<number, PostCancelAction>)[callId as number];
+    const action = t.postCancelActions[callId];
     if (action === undefined) {
       throw new Error(
         `engine.for: cancelAck on ${t.id} without postCancelAction for callId ${callId}`,
       );
     }
-    delete t.postCancelActions[callId as number];
+    delete t.postCancelActions[callId];
     if (action.kind !== "finish") {
       throw new Error(
         `engine.for: unexpected postCancelAction.kind=${action.kind} on ${t.id}`,
@@ -137,7 +137,7 @@ export const forOps: ThreadOps<ForThread> = {
       return;
     }
     bindElementVars(ctx, t as ForThread, block, t.iterableSnapshot as Value[], t.currentIndex);
-    spawnBody(ctx, t as ForThread, t.currentIndex);
+    spawnBody(ctx, t as ForThread);
   },
 
   ask(ctx, t, askId, kind, childCallId) {
@@ -220,11 +220,12 @@ function bindElementVars(
   }
 }
 
-function spawnBody(ctx: StepCtx, t: ForThread, index: number): void {
+function spawnBody(ctx: StepCtx, t: ForThread): void {
   const block = getForBlock(ctx, t.blockId);
+  const callId = allocCallId(t);
   spawnChild(ctx, {
     parentId: t.id,
-    parentCallId: index as CallId,
+    parentCallId: callId,
     blockId: block.bodyBlock,
     callArgs: {},
     scopeMode: { mode: "inline", parentScopeId: t.scopeId },
@@ -243,9 +244,10 @@ function spawnParallelBody(
   iterables: Value[],
   index: number,
 ): void {
+  const callId = allocCallId(t);
   const childId = spawnChild(ctx, {
     parentId: t.id,
-    parentCallId: index as CallId,
+    parentCallId: callId,
     blockId: block.bodyBlock,
     callArgs: {},
     scopeMode: { mode: "inline", parentScopeId: t.scopeId },
@@ -276,9 +278,11 @@ function emitForDone(
 ): void {
   const block = getForBlock(ctx, t.blockId);
   if (block.thenBlock !== undefined) {
+    const thenCallId = allocCallId(t);
+    t.thenCallId = thenCallId;
     spawnChild(ctx, {
       parentId: t.id,
-      parentCallId: THEN_CALL_ID,
+      parentCallId: thenCallId,
       blockId: block.thenBlock,
       callArgs: {},
       scopeMode: { mode: "inline", parentScopeId: t.scopeId },
@@ -319,12 +323,12 @@ function handleNextFor(
   // Issue a targeted cancel to the body iteration whose descendant
   // emitted the ask. The childCallId on the inbound ask is the immediate
   // child (i.e. the body iteration for the current index).
-  const childId = (t.children as Record<number, import("../../id.js").ThreadId>)[childCallId as number];
+  const childId = t.children[childCallId];
   if (childId === undefined) {
     // Body already gone — race. Just advance.
     return;
   }
-  t.postCancelActions[childCallId as number] = { kind: "finish" };
+  t.postCancelActions[childCallId] = { kind: "finish" };
   ctx.enqueue({ kind: "cancel", target: childId });
 }
 
