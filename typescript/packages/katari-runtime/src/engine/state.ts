@@ -6,7 +6,8 @@
 //     distinguish API / FFI senders. Each delegationId maps to a single
 //     thread (AgentThread inbound or ExternalThread outbound) and to the
 //     endpoint we owe a reply to.
-//   - Logger is not on State — it is supplied via Effect Context to applyEvent.
+//   - Logger is not on State — it is passed to `applyEvent` separately
+//     and is therefore not persisted across snapshots.
 //   - Internal event queue is transient: the runner builds one per
 //     applyEvent call, it does not survive snapshots.
 //

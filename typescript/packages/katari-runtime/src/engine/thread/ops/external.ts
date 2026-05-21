@@ -22,7 +22,7 @@
 import type { Draft } from "immer";
 import type { CallId } from "../../id.js";
 import type { Endpoint } from "../../endpoint.js";
-import type { ExternalThread } from "../types.js";
+import { PHANTOM_AGENT_EXTERNAL_NAME, type ExternalThread } from "../types.js";
 import {
   defaultAskAckProxy,
   defaultCancelAckUnexpected,
@@ -36,7 +36,7 @@ export const externalOps: ThreadOps<ExternalThread> = {
     // Phantom externals (those created for agent-call delegations) have
     // module_ === "<agent>" — the spawning op already registered the
     // delegation and emitted the outbound event. Nothing to do here.
-    if (t.externalName === "<agent>.<delegate>") return;
+    if (t.externalName === PHANTOM_AGENT_EXTERNAL_NAME) return;
 
     // Ordinary external: register on the sender side and emit the outbound
     // delegate. The target FFI module decodes our agentDefId.
@@ -65,7 +65,7 @@ export const externalOps: ThreadOps<ExternalThread> = {
   cancel(ctx, t) {
     if (t.status === "cancelling") return;
     t.status = "cancelling";
-    const target = t.externalName === "<agent>.<delegate>"
+    const target = t.externalName === PHANTOM_AGENT_EXTERNAL_NAME
       ? ctx.state.selfEndpoint
       : ctx.state.ffiTargetEndpoint;
     ctx.emit({
@@ -83,7 +83,7 @@ export const externalOps: ThreadOps<ExternalThread> = {
    */
   ask(ctx, t, askId, kind, childCallId) {
     const peer: Endpoint =
-      t.externalName === "<agent>.<delegate>"
+      t.externalName === PHANTOM_AGENT_EXTERNAL_NAME
         ? ctx.state.selfEndpoint
         : ctx.state.ffiTargetEndpoint;
     emitEscalateUpward(
@@ -122,7 +122,7 @@ export const externalOps: ThreadOps<ExternalThread> = {
       // back to it. The runner's escalateAck handler removes the entry
       // when the ack actually lands.
       const peer: Endpoint =
-        t.externalName === "<agent>.<delegate>"
+        t.externalName === PHANTOM_AGENT_EXTERNAL_NAME
           ? ctx.state.selfEndpoint
           : ctx.state.ffiTargetEndpoint;
       ctx.emit({

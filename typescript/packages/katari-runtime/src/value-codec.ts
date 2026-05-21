@@ -75,6 +75,12 @@ export function valueToRaw(value: Value): RawValue {
       return out;
     }
     case "closure":
+      // NOTE: closure ids are machine-local + persistent-state-coupled.
+      // The encoded `closure:N` string is stable WITHIN a single
+      // snapshot's lifetime but MUST NOT be persisted by FFI handlers
+      // or relayed to LLMs as a stable callable identifier — across
+      // snapshots the N space is reassigned. Pass agent-literal qnames
+      // back when the value needs to survive a snapshot swap.
       return { [CALLABLE_DISCRIMINATOR]: `closure:${value.closureId}` };
     case "agentLiteral":
       return { [CALLABLE_DISCRIMINATOR]: value.qualifiedName };

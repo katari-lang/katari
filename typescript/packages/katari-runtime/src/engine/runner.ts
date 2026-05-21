@@ -480,17 +480,31 @@ function resolveDelegateTarget(
  * handler.
  */
 function resolveRequestReqId(
-  _ctx: ReturnType<typeof makeStepCtx>,
+  ctx: ReturnType<typeof makeStepCtx>,
   agentDefId: import("../agent-def-id.js").AgentDefId,
 ): import("../ir/types.js").QualifiedName {
   const sentinel = "<unresolved>.<unresolved>";
   let decoded: import("../agent-def-id.js").CoreAgentDefId | undefined;
   try {
     decoded = decodeCoreAgentDefId(agentDefId);
-  } catch {
+  } catch (err) {
+    ctx.log("warn", "engine: escalate carried an undecodable agentDefId", {
+      agentDefId,
+      err: err instanceof Error ? err.message : String(err),
+    });
     return sentinel;
   }
   if (decoded.kind !== "qname") {
+    // Closure-encoded escalate targets have no handle-scope handler
+    // (only qname-keyed handlers are registered). Returning a sentinel
+    // routes the ask to a handler at reqId=0 (= debug fallback only).
+    // Surface this so a misconfigured ext agent surface doesn't silently
+    // misroute requests.
+    ctx.log(
+      "warn",
+      "engine: escalate carried a closure-encoded agentDefId; no handle-scope dispatch possible",
+      { agentDefId },
+    );
     return sentinel;
   }
   return decoded.value;
@@ -505,9 +519,6 @@ function findEscalationAskId(
   }
   return undefined;
 }
-
-// `CallId` referenced via signatures.
-void (null as unknown as CallId);
 
 // ─── Patches → Diff translation ────────────────────────────────────────────
 

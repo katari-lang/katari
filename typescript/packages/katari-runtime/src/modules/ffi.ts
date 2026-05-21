@@ -431,8 +431,6 @@ export class FfiModule implements Module {
         value,
       },
     });
-    // Avoid lint for unused variable in case of future refactor
-    void entry;
   }
 
   // ─── Outbound (Sidecar → FFI → bus) ────────────────────────────────────

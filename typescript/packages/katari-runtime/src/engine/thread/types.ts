@@ -65,9 +65,10 @@ type Common = {
  * Spawned by:
  *   - inbound `delegate` event (translateExternal): creates a root AgentThread
  *     for the entry block, registered under `state.delegations[delegationId]`.
- *   - inline `StatementAgentCall` / `StatementAgentCallClosure`: emits an
- *     outbound `delegate` event (core→core, from=to=selfEndpoint) that the
- *     runner picks up on the next iteration and spawns a fresh AgentThread.
+ *   - inline `statementAgentCall` (either qname or value/closure form):
+ *     emits an outbound `delegate` event (core→core, from=to=selfEndpoint)
+ *     that the runner picks up on the next iteration and spawns a fresh
+ *     AgentThread.
  *
  * Catches `return` asks bubbling up from descendants. Owns one body
  * UserThread spawned at create-time (callId 0). When the body completes
@@ -195,6 +196,16 @@ export type RequestThread = Common & {
   /** Set after the initial ask has been emitted. */
   pendingAskId?: AskId;
 };
+
+/**
+ * Sentinel `externalName` used by 'spawnExternalForAgentDelegate' for the
+ * phantom external that wraps a CORE→CORE agent invocation. Branches on
+ * this value in the external ops choose `selfEndpoint` over
+ * `ffiTargetEndpoint`. v0.1.0 RFC: replace this sentinel + branches with
+ * a proper discriminator on the thread variant; tracked in memory under
+ * `project_thread_abstraction_refactor`.
+ */
+export const PHANTOM_AGENT_EXTERNAL_NAME = "<agent>.<delegate>";
 
 export type ExternalThread = Common & {
   kind: "external";

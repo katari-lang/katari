@@ -2,8 +2,6 @@
 
 import type { Draft } from "immer";
 import type { CallId } from "../../id.js";
-import type { StepCtx } from "../../step-ctx.js";
-import type { Value } from "../../value.js";
 import { commonRemoveChild } from "../common.js";
 import type { TupleThread } from "../types.js";
 import { collectingCreate, collectingDone } from "./collecting.js";
@@ -27,6 +25,6 @@ export const tupleOps: ThreadOps<TupleThread> = {
   cancelAck: defaultCancelAckUnexpected,
   ask: (ctx, t, askId, kind, childCallId) =>
     defaultAskProxy<TupleThread>(ctx, t as Draft<TupleThread>, askId, kind, childCallId),
-  askAck: (ctx: StepCtx, t: Draft<TupleThread>, askId, value: Value) =>
-    defaultAskAckProxy<TupleThread>(ctx, t, askId, value),
+  askAck: (ctx, t, askId, value) =>
+    defaultAskAckProxy<TupleThread>(ctx, t as Draft<TupleThread>, askId, value),
 };

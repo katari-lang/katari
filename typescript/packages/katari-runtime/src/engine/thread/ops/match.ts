@@ -14,7 +14,6 @@ import type { Block, BlockId, MatchBlock } from "../../../ir/types.js";
 import { tryMatch } from "../../pattern.js";
 import { spawnChild } from "../../spawn.js";
 import type { StepCtx } from "../../step-ctx.js";
-import type { Value } from "../../value.js";
 import {
   commonRemoveChild,
   emitThrowEscalate,
@@ -93,6 +92,3 @@ function spawnArm(ctx: StepCtx, t: Draft<MatchThread>, blockId: BlockId): void {
   });
 }
 
-// `Value` is referenced indirectly via `lookupValue`'s return type; the
-// import above is necessary for the explicit signatures of helper calls.
-void (null as unknown as Value);

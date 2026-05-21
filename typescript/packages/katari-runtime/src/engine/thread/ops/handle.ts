@@ -25,7 +25,6 @@
 import type { Draft } from "immer";
 import type { Block, BlockId, HandleBlock, QualifiedName } from "../../../ir/types.js";
 import type { AskId, CallId, ThreadId } from "../../id.js";
-import type { AskKind } from "../../event.js";
 import { spawnChild } from "../../spawn.js";
 import type { StepCtx } from "../../step-ctx.js";
 import { type Value } from "../../value.js";
@@ -378,5 +377,3 @@ function writeArgsIntoChildScope(
   }
 }
 
-// `AskKind` referenced via the ops signature.
-void (null as unknown as AskKind);

@@ -59,10 +59,10 @@ export class MockSidecar implements Sidecar {
   async send(msg: ParentToChild): Promise<void> {
     switch (msg.type) {
       case "ipcDelegate":
-        void this.handleDelegate(msg, false);
+        this.runHandlerInBackground(msg, false);
         return;
       case "ipcDelegateRestarted":
-        void this.handleDelegate(msg, true);
+        this.runHandlerInBackground(msg, true);
         return;
       case "ipcTerminate": {
         const entry = this.inflight.get(msg.delegationId);
@@ -101,6 +101,28 @@ export class MockSidecar implements Sidecar {
       entry.ctrl.abort();
     }
     this.inflight.clear();
+  }
+
+  /**
+   * Fire-and-forget handler dispatch with a `.catch` so a handler that
+   * throws AFTER the first microtask boundary doesn't become an
+   * unhandled rejection on the Node process. The error is logged; the
+   * pending ack will time out on the caller side (= same behavior as
+   * the subprocess sidecar when its handler vanishes).
+   */
+  private runHandlerInBackground(
+    msg: Extract<
+      ParentToChild,
+      { type: "ipcDelegate" | "ipcDelegateRestarted" }
+    >,
+    isRestored: boolean,
+  ): void {
+    this.handleDelegate(msg, isRestored).catch((err: unknown) => {
+      this.logger.log("error", "mock-sidecar: handler threw", {
+        delegationId: msg.delegationId,
+        err: err instanceof Error ? err.message : String(err),
+      });
+    });
   }
 
   private async handleDelegate(

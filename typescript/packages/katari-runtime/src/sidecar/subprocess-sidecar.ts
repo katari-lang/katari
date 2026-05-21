@@ -100,6 +100,10 @@ export class SubprocessSidecar implements Sidecar {
         }
       };
       this.rl?.on("line", onLine);
+      // `child.once` so we don't leave a permanent listener that
+      // would still try to reject the already-settled start() promise
+      // on the eventual real exit (the `settled` guard inside `settle`
+      // handles that, but `once` is cleaner).
       const onExit = (code: number | null): void => {
         clearTimeout(timer);
         settle(() =>
@@ -108,7 +112,7 @@ export class SubprocessSidecar implements Sidecar {
           ),
         );
       };
-      child.on("exit", onExit);
+      child.once("exit", onExit);
     });
 
     child.on("exit", (code, signal) => {

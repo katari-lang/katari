@@ -1,16 +1,13 @@
-// Logger: an Effect Service the engine writes diagnostic events to.
+// Logger: a small interface the engine writes diagnostic events to.
 //
-// Modeled as a Context.Tag so any code path inside `applyEvent` can `yield*
-// Logger` and emit log entries without threading a Logger argument
-// through every helper. The host attaches its own Logger via
-// `Effect.provideService(LoggerTag, hostLogger)`.
+// Earlier shapes of this module exposed an Effect `Context.Tag` so
+// callers could `yield* Logger`. The engine never actually ran in an
+// Effect context (the runner uses plain async/await), so the tag was
+// dead. It was removed (and the `effect` dependency along with it).
 //
 // The on-the-wire log shape is captured as `LogEntry` so the engine can
-// also accumulate logs into the Result (without an attached service) when
-// running outside an Effect context — useful for tests / future synchronous
-// callers.
-
-import { Context } from "effect";
+// also accumulate logs into the Result for callers that prefer to drain
+// them on the way out.
 
 export type LogLevel = "debug" | "info" | "warn" | "error";
 
@@ -25,12 +22,6 @@ export type LogEntry = {
 export interface Logger {
   log(level: LogLevel, message: string, context?: Record<string, unknown>): void;
 }
-
-/** Effect Service tag — `yield* Logger` to obtain the active Logger. */
-export class LoggerTag extends Context.Tag("katari/Logger")<
-  LoggerTag,
-  Logger
->() {}
 
 // ─── Built-in adapters ─────────────────────────────────────────────────────
 

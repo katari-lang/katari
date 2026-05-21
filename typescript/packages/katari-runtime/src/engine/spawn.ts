@@ -20,7 +20,12 @@ import {
 import type { StepCtx } from "./step-ctx.js";
 import type { Value } from "./value.js";
 import { newCommonFields, setChild } from "./thread/common.js";
-import type { ExternalThread, Thread } from "./thread/types.js";
+import {
+  PHANTOM_AGENT_EXTERNAL_NAME,
+  type ExternalThread,
+  type Thread,
+} from "./thread/types.js";
+import type { ExternalName } from "../ir/types.js";
 
 /**
  * Decide where the freshly-allocated child scope's parentId should point.
@@ -286,7 +291,7 @@ export function spawnExternalForAgentDelegate(
   const ext: ExternalThread = {
     ...common,
     kind: "external",
-    externalName: "<agent>.<delegate>",
+    externalName: PHANTOM_AGENT_EXTERNAL_NAME as ExternalName,
     args: { ...args.args },
     delegationId: args.delegationId,
     pendingEscalations: {},

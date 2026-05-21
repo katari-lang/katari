@@ -24,7 +24,6 @@
   },
   "dependencies": {
     "denque": "^2.1.0",
-    "effect": "^3.21.2",
     "immer": "^11.1.8",
     "ts-pattern": "^5.9.0"
   },

@@ -12,15 +12,14 @@
 
 import type { Draft } from "immer";
 import type { ForBlock } from "../../../ir/types.js";
-import type { AskId, CallId } from "../../id.js";
-import type { AskKind, ModMap } from "../../event.js";
+import type { CallId } from "../../id.js";
+import type { ModMap } from "../../event.js";
 import { spawnChild } from "../../spawn.js";
 import type { StepCtx } from "../../step-ctx.js";
 import { NULL_VALUE, type Value } from "../../value.js";
 import {
   beginCancel,
   commonRemoveChild,
-  hasChildren,
   lookupValue,
   proxyAskToParent,
   setValueInScope,
@@ -330,8 +329,3 @@ function handleNextFor(
   ctx.enqueue({ kind: "cancel", target: childId });
 }
 
-// `AskKind`/`AskId` referenced indirectly via signatures.
-void (null as unknown as AskKind);
-void (null as unknown as AskId);
-// hasChildren imported but used only for clarity in the file's mental model.
-void hasChildren;

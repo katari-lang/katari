@@ -15,10 +15,7 @@
 
 import type { AgentDefId } from "../agent-def-id.js";
 import type { DelegationId } from "../engine/id.js";
-import type { QualifiedName } from "../ir/types.js";
 import type { RawValue } from "../value-codec.js";
-
-void (null as unknown as QualifiedName); // referenced via AgentDefId encoding
 
 /**
  * Bundled sidecar source. v1 is a single ESM string (esbuild output)
