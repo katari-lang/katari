@@ -44,6 +44,7 @@ where
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
+import qualified Data.Text as Text
 import Katari.AST (Module, Phase (Parsed))
 import qualified Katari.Common as Common
 import Katari.Diagnostic (Diagnostic, hasErrors)
@@ -146,7 +147,7 @@ compile :: CompileInput -> CompileResult
 compile input =
   let stdlibEntries =
         Map.mapWithKey
-          (\moduleName src -> SourceEntry ("<stdlib:" <> show moduleName <> ">") src)
+          (\moduleName src -> SourceEntry ("<stdlib:" <> Text.unpack moduleName <> ">") src)
           Stdlib.stdlibSources
       -- User sources win on overlap so that a user-facing error
       -- (K0113 reserved-name conflict) still surfaces if someone

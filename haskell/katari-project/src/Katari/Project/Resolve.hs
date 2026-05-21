@@ -36,7 +36,6 @@ import qualified Katari.Project.Lockfile as Lock
 import qualified Katari.Project.Snapshot as Snapshot
 
 import Control.Monad (foldM)
-import Data.Char (isAlphaNum)
 import Data.Maybe (isJust, mapMaybe)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
@@ -451,8 +450,15 @@ validatePackageName name
   | Text.all validChar name && validHead (Text.head name) = Nothing
   | otherwise = Just (ResolveInvalidPackageName name)
   where
-    validChar c = isAlphaNum c || c == '_'
-    validHead c = not (c >= '0' && c <= '9')
+    -- Matches [A-Za-z_][A-Za-z0-9_]*, in sync with the error message
+    -- shown to users (= the user-facing contract) and with the
+    -- duplicated check in 'Katari.Cli.Init.validateName'. A common
+    -- helper would be cleaner; tracked as a future cleanup.
+    validChar c = isAlpha c || isDigit c || c == '_'
+    validHead c = isAlpha c || c == '_'
+
+    isAlpha c = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
+    isDigit c = c >= '0' && c <= '9'
 
 -- ===========================================================================
 -- Assembly

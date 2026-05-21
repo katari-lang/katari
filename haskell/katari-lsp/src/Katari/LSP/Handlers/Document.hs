@@ -11,7 +11,6 @@ where
 
 import Control.Concurrent (forkIO, killThread, threadDelay)
 import Control.Concurrent.STM (atomically, readTVar, readTVarIO, writeTVar, modifyTVar')
-import Control.Monad (when)
 import Control.Monad.IO.Class (liftIO)
 import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
@@ -314,6 +313,3 @@ mapSeverity = \case
   SeverityInfo -> LSP.DiagnosticSeverity_Information
   SeverityHint -> LSP.DiagnosticSeverity_Hint
 
--- Silence "unused" warnings for guards we keep for future expansion.
-_when :: Bool -> IO () -> IO ()
-_when = when

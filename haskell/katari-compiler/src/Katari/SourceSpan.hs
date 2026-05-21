@@ -1,3 +1,12 @@
+-- | Source positions and spans used across the compiler pipeline.
+--
+-- 'Position' is line-and-column (1-indexed), 'SourceSpan' is a
+-- @(start, end)@ pair attached to a 'FilePath'. The 'HasSourceSpan'
+-- class exists so callers can ask any AST / IR node for its origin
+-- without committing to a concrete type.
+--
+-- Both types are 'ToJSON' / 'FromJSON' so they can ride along in
+-- 'Diagnostic' wire payloads.
 module Katari.SourceSpan where
 
 import Data.Aeson (FromJSON, ToJSON)
@@ -37,8 +46,14 @@ mkSourceSpan path p1 p2
 class HasSourceSpan node where
   sourceSpanOf :: node -> SourceSpan
 
--- | True iff @position@ lies within @sourceSpan@ (inclusive on both
--- ends, half-open at end of file).
+-- | True iff @position@ lies within @sourceSpan@.
+--
+-- Semantics: the lexer's 'end' column is the position one past the
+-- last character of the token (= the "caret to the right of the last
+-- char" position, see 'Katari.Lexer'). So @position.column ==
+-- sourceSpan.end.column@ corresponds to the cursor sitting on the
+-- character AFTER the token — we treat that as "in the span" to make
+-- LSP hover on a cursor adjacent to an identifier behave naturally.
 spanContains :: SourceSpan -> Position -> Bool
 spanContains sourceSpan position =
   ( sourceSpan.start.line < position.line

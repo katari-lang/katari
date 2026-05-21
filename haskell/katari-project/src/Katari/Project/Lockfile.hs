@@ -294,8 +294,18 @@ renderSource = \case
       "sha256 = " <> quote gitSha
     ]
 
+-- | TOML basic-string literal. Backslashes and double-quotes must be
+-- escaped per the TOML spec. Without this, an OverridePath containing
+-- @"@ or @\\@ would emit malformed TOML the next loader would reject.
 quote :: Text -> Text
-quote s = "\"" <> s <> "\""
+quote s = "\"" <> Text.concatMap escapeChar s <> "\""
+  where
+    escapeChar '\\' = "\\\\"
+    escapeChar '"' = "\\\""
+    escapeChar '\n' = "\\n"
+    escapeChar '\t' = "\\t"
+    escapeChar '\r' = "\\r"
+    escapeChar c = Text.singleton c
 
 -- | Write a 'Lockfile' to @path@, overwriting any existing file.
 writeLockfile :: FilePath -> Lockfile -> IO ()

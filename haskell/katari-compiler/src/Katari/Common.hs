@@ -72,12 +72,23 @@ renderQualifiedName qualifiedName
 -- | Inverse of 'renderQualifiedName'. Splits at the last @.@: a name
 -- without a dot becomes @QualifiedName "" name@. A name with one or
 -- more dots takes everything after the final dot as the bare name.
+--
+-- A trailing dot or empty leaf segment (e.g. @\"abc.\"@) is malformed
+-- — accepting it would produce a 'QualifiedName' whose @name@ field
+-- silently round-trips to a different shape. The function is total
+-- on well-formed inputs (= anything 'renderQualifiedName' emits); for
+-- malformed input it falls back to keeping the whole text as the name
+-- with empty module, which is the same shape as a single-segment
+-- identifier and surfaces as a normal lookup miss downstream.
 parseQualifiedName :: Text -> QualifiedName
 parseQualifiedName text =
   let (modulePart, namePart) = T.breakOnEnd "." text
    in if T.null modulePart
         then QualifiedName "" namePart
-        else QualifiedName (T.dropEnd 1 modulePart) namePart
+        else
+          if T.null namePart
+            then QualifiedName "" text -- malformed (trailing dot); preserve verbatim
+            else QualifiedName (T.dropEnd 1 modulePart) namePart
 
 -- | Literal scalar values shared between source patterns / expressions
 -- (the AST side) and IR @StatementLoadLiteral@ / @MatchPatternLiteral@

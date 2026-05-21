@@ -58,6 +58,7 @@ import Network.HTTP.Client
 import qualified Network.HTTP.Client as HC
 import Network.HTTP.Client.TLS (newTlsManager)
 import Network.HTTP.Types.Status (statusCode)
+import qualified Network.HTTP.Types.URI as HttpUri
 
 -- ---------------------------------------------------------------------------
 -- Client + errors
@@ -263,28 +264,16 @@ buildQuery pairs =
   let kept = [k <> "=" <> percentEncode v | (k, Just v) <- pairs]
    in if null kept then "" else "?" <> Text.intercalate "&" kept
 
--- | Minimal percent-encoder. The api-server only uses identifiers /
--- UUIDs in query params so this is mostly identity in practice.
+-- | Percent-encode a query-string value as UTF-8 bytes (RFC 3986).
+-- Delegates to 'Network.HTTP.Types.URI.urlEncode' so non-ASCII code
+-- points are correctly encoded as multi-byte UTF-8 sequences rather
+-- than the previous hand-rolled per-char `fromEnum` (which emitted a
+-- single `%XYZW` for a >0xFF code point — wrong on the wire).
 percentEncode :: Text -> Text
-percentEncode = Text.concatMap esc
-  where
-    esc c
-      | isUnreserved c = Text.singleton c
-      | otherwise = Text.pack ('%' : pad (showHex (fromEnum c)))
-    isUnreserved c =
-      (c >= 'A' && c <= 'Z')
-        || (c >= 'a' && c <= 'z')
-        || (c >= '0' && c <= '9')
-        || c `elem` ("-_.~" :: String)
-    showHex n = case toHex n of
-      "" -> "00"
-      s -> s
-    pad s = if length s == 1 then '0' : s else s
-    toHex 0 = ""
-    toHex n =
-      let (q, r) = n `divMod` 16
-          d = "0123456789ABCDEF" !! r
-       in toHex q <> [d]
+percentEncode =
+  TextEnc.decodeUtf8
+    . HttpUri.urlEncode False
+    . TextEnc.encodeUtf8
 
 emptyObject :: Aeson.Value
 emptyObject = Aeson.Object mempty

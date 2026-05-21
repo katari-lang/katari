@@ -96,7 +96,7 @@ run opts = do
     else pure ()
   irModule <- case result.irModule of
     Just ir -> pure ir
-    Nothing -> die "internal: compile produced no IR module despite clean diagnostics"
+    Nothing -> dieInternal "compile produced no IR module despite clean diagnostics"
 
   -- 3. Bundle ext-agent siblings.
   sourceRoots <- gatherSourceRoots rootDir
@@ -139,10 +139,21 @@ run opts = do
 -- Helpers
 -- ---------------------------------------------------------------------------
 
+-- | User-facing error: configuration / usage problem. Exits with 2,
+-- matching the convention shared by other CLI subcommands.
 die :: String -> IO a
 die msg = do
   hPutStrLn stderr ("katari apply: " <> msg)
   exitWith (ExitFailure 2)
+
+-- | Internal-invariant violation: the compiler produced an unexpected
+-- result, a bundler output failed to decode, etc. Distinct exit code
+-- (70 = sysexits.h EX_SOFTWARE) so CI / wrappers can separate "user
+-- did something wrong" from "katari itself is buggy".
+dieInternal :: String -> IO a
+dieInternal msg = do
+  hPutStrLn stderr ("katari apply: internal error: " <> msg)
+  exitWith (ExitFailure 70)
 
 loadCfg :: FilePath -> IO Project.ProjectConfig
 loadCfg path = do

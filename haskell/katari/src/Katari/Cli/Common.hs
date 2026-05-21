@@ -17,11 +17,13 @@ module Katari.Cli.Common
     -- * Project id resolution
     resolveProjectId,
 
-    -- * Errors
+    -- * Error handling
     dieIn,
+    runWithApiErrors,
   )
 where
 
+import Control.Exception (catch)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Katari.Api.Client as Api
@@ -29,6 +31,7 @@ import qualified Katari.Api.Types as Api
 import qualified Katari.Project.Config as Project
 import qualified Katari.Project.Discovery as Project
 import System.Directory (getCurrentDirectory)
+import System.Environment (lookupEnv)
 import System.Exit (ExitCode (..), exitWith)
 import System.FilePath ((</>))
 import System.IO (hPutStrLn, stderr)
@@ -38,8 +41,9 @@ import System.IO (hPutStrLn, stderr)
 -- The URL comes from (in priority order):
 --
 --   1. The explicit override (e.g. @--api-url@ on the CLI).
---   2. The surrounding @katari.toml@'s @[runtime].url@.
---   3. (No further fallback — bail with a fixed message.)
+--   2. The @KATARI_API_URL@ environment variable, when non-empty.
+--   3. The surrounding @katari.toml@'s @[runtime].url@.
+--   4. (No further fallback — bail with a fixed message.)
 --
 -- The bearer token always comes from @KATARI_API_KEY@ in the
 -- environment; @katari.toml@ no longer carries it.
@@ -48,15 +52,27 @@ resolveApiClient subcmdName mOverride = do
   url <- case mOverride of
     Just u -> pure u
     Nothing -> do
-      mUrl <- tryLoadProjectUrl
-      case mUrl of
+      mEnvUrl <- lookupNonEmpty "KATARI_API_URL"
+      case mEnvUrl of
         Just u -> pure u
-        Nothing ->
-          dieIn
-            subcmdName
-            "no --api-url provided and no surrounding katari.toml's [runtime].url found"
+        Nothing -> do
+          mUrl <- tryLoadProjectUrl
+          case mUrl of
+            Just u -> pure u
+            Nothing ->
+              dieIn
+                subcmdName
+                "no --api-url provided, KATARI_API_URL unset, and no surrounding katari.toml's [runtime].url found"
   auth <- Api.apiAuthFromEnv
   Api.newApiClient url auth
+
+-- | Read an env var, treating empty / unset as 'Nothing'.
+lookupNonEmpty :: String -> IO (Maybe Text)
+lookupNonEmpty name = do
+  v <- lookupEnv name
+  pure $ case v of
+    Just s | not (null s) -> Just (Text.pack s)
+    _ -> Nothing
 
 -- | Load the surrounding @katari.toml@. Returns 'Nothing' if no
 -- project root is found OR if parsing failed (the parse error is
@@ -110,3 +126,20 @@ dieIn :: Text -> String -> IO a
 dieIn subcmdName msg = do
   hPutStrLn stderr ("katari " <> Text.unpack subcmdName <> ": " <> msg)
   exitWith (ExitFailure 2)
+
+-- | Run @action@; catch any 'Api.ApiError' it raises and re-emit as a
+-- 'dieIn' message with the subcommand prefix. Without this wrapper, a
+-- 404 / 500 from the runtime crashes the CLI with a Haskell stack
+-- trace instead of a friendly @katari <cmd>:@ line.
+runWithApiErrors :: Text -> IO a -> IO a
+runWithApiErrors subcmdName action =
+  action `catch` \err -> dieIn subcmdName (renderApiError err)
+  where
+    renderApiError = \case
+      Api.ApiNetworkError msg -> "network error: " <> msg
+      Api.ApiHttpError status body ->
+        "runtime returned HTTP "
+          <> show status
+          <> ": "
+          <> Text.unpack body
+      Api.ApiDecodeError msg -> "could not decode runtime response: " <> msg

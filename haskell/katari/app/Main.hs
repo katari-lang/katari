@@ -5,12 +5,15 @@ import qualified Katari.Cli.Apply as Apply
 import qualified Katari.Cli.Build as Build
 import qualified Katari.Cli.Cancel as Cancel
 import qualified Katari.Cli.Check as Check
+import qualified Katari.Cli.Common as Common
 import qualified Katari.Cli.Escalation as Escalation
 import qualified Katari.Cli.Init as Init
 import qualified Katari.Cli.Ls as Ls
 import qualified Katari.Cli.Run as Run
 import qualified Katari.Cli.Status as Status
+import Data.Version (showVersion)
 import Options.Applicative
+import qualified Paths_katari as Pkg
 
 data Cmd
   = Init Init.Options
@@ -41,16 +44,38 @@ cmdParser =
           <> command "escalation" (info (Escalation <$> Escalation.optionsParser) (progDesc "Manage escalations"))
       )
 
+versionOption :: Parser (a -> a)
+versionOption =
+  infoOption
+    (showVersion Pkg.version)
+    ( long "version"
+        <> help "Show the katari CLI version and exit"
+        <> hidden
+    )
+
 main :: IO ()
 main = do
-  cmd <- execParser (info (cmdParser <**> helper) (progDesc "Katari CLI"))
+  cmd <-
+    execParser
+      ( info
+          (cmdParser <**> versionOption <**> helper)
+          ( fullDesc
+              <> header "katari — DSL for orchestrating AI agents"
+              <> progDesc "Project + Runtime CLI. Use `katari <subcommand> --help` for details."
+          )
+      )
+  -- Commands that talk to the runtime translate ApiError exceptions
+  -- (HTTP 4xx/5xx, network failures, decode errors) into friendly
+  -- `katari <cmd>:` messages with exit 2. Project-local commands
+  -- (init/check/build) never touch the network, so they go through
+  -- the bare entry.
   case cmd of
     Init opts -> Init.run opts
     Check opts -> Check.run opts
     Build opts -> Build.run opts
-    Apply opts -> Apply.run opts
-    Run opts -> Run.run opts
-    Cancel opts -> Cancel.run opts
-    Ls opts -> Ls.run opts
-    Status opts -> Status.run opts
-    Escalation opts -> Escalation.run opts
+    Apply opts -> Common.runWithApiErrors "apply" (Apply.run opts)
+    Run opts -> Common.runWithApiErrors "run" (Run.run opts)
+    Cancel opts -> Common.runWithApiErrors "cancel" (Cancel.run opts)
+    Ls opts -> Common.runWithApiErrors "ls" (Ls.run opts)
+    Status opts -> Common.runWithApiErrors "status" (Status.run opts)
+    Escalation opts -> Common.runWithApiErrors "escalation" (Escalation.run opts)
