@@ -174,8 +174,15 @@ hintDoc hint =
 -- | Build the snippet block for the span's primary line, with an
 -- underline marking the affected columns. Returns 'Nothing' if the
 -- file is absent from the source map.
+--
+-- Defensively swaps 'start' and 'end' if the caller handed us an
+-- inverted span (start > end). All in-tree callers of 'SrcSpan' build
+-- monotonic spans, but a future programmer-error or a malformed
+-- deserialised diagnostic should still render legibly instead of
+-- collapsing to a one-caret underline at the wrong column.
 snippetDoc :: Map FilePath (Vector Text) -> SourceSpan -> Maybe (Doc AnsiStyle)
-snippetDoc sources sourceSpan = do
+snippetDoc sources sourceSpanIn = do
+  let sourceSpan = normaliseSpan sourceSpanIn
   sourceLines <- Map.lookup sourceSpan.filePath sources
   let lineIndex = sourceSpan.start.line - 1
       line = fromMaybe "" (sourceLines Vector.!? lineIndex)
@@ -195,6 +202,16 @@ snippetDoc sources sourceSpan = do
         pretty lineNumberText <+> "|" <+> pretty line,
         pretty gutterPad <+> "|" <+> annotate snippetUnderlineStyle (pretty underlineText)
       ]
+
+-- | Swap 'start' and 'end' if the span is inverted; pass through otherwise.
+-- Mirrors 'Katari.SourceSpan.mkSourceSpan' but operates on an existing
+-- span so 'snippetDoc' can stay robust regardless of how the span was
+-- constructed.
+normaliseSpan :: SourceSpan -> SourceSpan
+normaliseSpan sourceSpan
+  | sourceSpan.start <= sourceSpan.end = sourceSpan
+  | otherwise =
+      sourceSpan {start = sourceSpan.end, end = sourceSpan.start}
 
 snippetUnderlineStyle :: AnsiStyle
 snippetUnderlineStyle = PPAnsi.color Red <> PPAnsi.bold
