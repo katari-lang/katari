@@ -15,7 +15,7 @@
 --   2 = invalid args / IO error
 module Main (main) where
 
-import Control.Monad (forM_, unless)
+import Control.Monad (forM_, unless, when)
 import Data.Aeson (Value (..), object, (.=))
 import Data.Aeson qualified as Aeson
 import Data.Aeson.Encode.Pretty (encodePretty)
@@ -122,9 +122,7 @@ runTypecheck o = do
   input <- loadCompileInput o.typecheckInputs
   let result = compile input
   emitDiagnostics result.diagnostics
-  if hasErrors result.diagnostics
-    then exitWith (ExitFailure 1)
-    else pure ()
+  when (hasErrors result.diagnostics) $ exitWith (ExitFailure 1)
 
 -- ===========================================================================
 -- Source loading (delegated to katari-project for directory scans)
