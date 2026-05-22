@@ -17,25 +17,25 @@ module Main (main) where
 
 import Control.Monad (forM_, unless)
 import Data.Aeson (Value (..), object, (.=))
+import Data.Aeson qualified as Aeson
 import Data.Aeson.Encode.Pretty (encodePretty)
-import qualified Data.ByteString.Lazy as LBS
+import Data.ByteString.Lazy qualified as LBS
 import Data.Map.Strict (Map)
-import qualified Data.Map.Strict as Map
-import qualified Data.Text as Text
-import qualified Data.Text.IO as TextIO
-import qualified Data.Aeson as Aeson
+import Data.Map.Strict qualified as Map
+import Data.Text qualified as Text
+import Data.Text.IO qualified as TextIO
 import Katari.Compile (CompileInput (..), CompileResult (..), SourceEntry (..), compile)
 import Katari.Diagnostic (Diagnostic, Severity (..), filterAtLeast, hasErrors)
 import Katari.Diagnostic.Render (renderDiagnostic)
 import Katari.IR (IRModule)
-import qualified Katari.Project.Discovery as Project
-import qualified Katari.Project.ModuleName as Project
-import qualified Katari.Project.Resolve as Project
-import System.FilePath (takeFileName)
+import Katari.Project.Discovery qualified as Project
+import Katari.Project.ModuleName qualified as Project
+import Katari.Project.Resolve qualified as Project
 import Katari.Schema (SchemaEntry (..))
 import Options.Applicative
 import System.Directory (doesDirectoryExist, doesFileExist)
 import System.Exit (ExitCode (..), exitWith)
+import System.FilePath (takeFileName)
 import System.IO (hPutStrLn, stderr)
 
 -- ===========================================================================

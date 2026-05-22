@@ -34,17 +34,17 @@ import Katari.AST (NameRef (..), Zonked)
 import Katari.AST qualified as AST
 import Katari.Common (LiteralValue (..))
 import Katari.Diagnostic (Diagnostic, diagnosticError, diagnosticWarning)
-import Katari.SemanticType
-  ( Resolved,
-    SemanticType (..),
-  )
-import Katari.SourceSpan (HasSourceSpan (..), SourceSpan)
 import Katari.Id
   ( ConstructorId,
     QualifiedName (..),
     TypeId,
     VariableId,
   )
+import Katari.SemanticType
+  ( Resolved,
+    SemanticType (..),
+  )
+import Katari.SourceSpan (HasSourceSpan (..), SourceSpan)
 import Katari.Typechecker.Identifier
   ( ConstructorData (..),
     IdentifierResult (..),

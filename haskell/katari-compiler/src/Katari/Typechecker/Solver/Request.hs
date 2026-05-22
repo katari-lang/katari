@@ -25,13 +25,13 @@ import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Set (Set)
 import Data.Set qualified as Set
+import Katari.Id (RequestId)
 import Katari.SemanticType
   ( RequestVariableId,
     SemanticRequest (..),
     SemanticRequestElement (..),
   )
 import Katari.Typechecker.ConstraintGenerator (Constraint (..))
-import Katari.Id (RequestId)
 import Katari.Typechecker.Solver.Internal
   ( SolverError,
   )

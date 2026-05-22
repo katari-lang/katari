@@ -25,6 +25,7 @@ module Katari.Query.Completion
   ( CompletionItem (..),
     CompletionKind (..),
     completionsAt,
+
     -- * Anchor-based (type-driven) completion
     CompletionAnchor (..),
     resolveDottedPath,
@@ -37,12 +38,12 @@ where
 
 import Control.Monad (foldM)
 import Data.Map.Strict (Map)
-import qualified Data.Map.Strict as Map
-import Data.Maybe (fromMaybe, listToMaybe, mapMaybe)
+import Data.Map.Strict qualified as Map
+import Data.Maybe (catMaybes, fromMaybe, listToMaybe, mapMaybe)
 import Data.Set (Set)
-import qualified Data.Set as Set
+import Data.Set qualified as Set
 import Data.Text (Text)
-import qualified Data.Text as Text
+import Data.Text qualified as Text
 import Katari.AST (Module (..), Phase (Zonked))
 import Katari.Id (ConstructorId, ModuleId, QualifiedName (..), RequestId, TypeId, VariableId)
 import Katari.SemanticType (Resolved, SemanticType (..))
@@ -56,7 +57,7 @@ import Katari.Typechecker.Identifier
     TypeData (..),
     VariableData (..),
   )
-import qualified Katari.Typechecker.ScopeIndex as Scope
+import Katari.Typechecker.ScopeIndex qualified as Scope
 import Katari.Typechecker.Zonker (ZonkResult (..))
 
 -- | Convenience alias for the resolved semantic type used in
@@ -127,8 +128,7 @@ completionsAt idResult zonkResult filePath position =
     -- collapses duplicate labels to the most-specific kind.
     symbolEntryToItems :: (Text, SymbolEntry) -> [CompletionItem]
     symbolEntryToItems (name, entry) =
-      mapMaybe
-        id
+      catMaybes
         [ entry.variableSymbol >>= mkVariableItem name,
           entry.typeSymbol >>= mkTypeItem name,
           entry.moduleSymbol >>= mkModuleItem name
@@ -338,8 +338,7 @@ completionsOfModule ::
 completionsOfModule idResult zonkResult moduleId =
   let exports = Map.findWithDefault Map.empty moduleId idResult.moduleExports
       entryToItems (name, entry) =
-        mapMaybe
-          id
+        catMaybes
           [ entry.variableSymbol >>= mkVariableItemFor idResult zonkResult name,
             entry.typeSymbol >>= mkTypeItemFor idResult name,
             entry.moduleSymbol >>= mkModuleItemFor idResult name

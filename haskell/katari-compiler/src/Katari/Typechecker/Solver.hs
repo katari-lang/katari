@@ -61,11 +61,12 @@ import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
 import Katari.Diagnostic (Diagnostic, diagnosticError)
+import Katari.Id (RequestId, TypeId)
 import Katari.SemanticType
   ( RequestVariableId (..),
     TypeVariableId (..),
   )
-import qualified Katari.SemanticType.Render as STR
+import Katari.SemanticType.Render qualified as STR
 import Katari.SourceSpan (HasSourceSpan (..), Position (..), SourceSpan (..))
 import Katari.Typechecker.ConstraintGenerator
   ( Constraint (..),
@@ -74,7 +75,6 @@ import Katari.Typechecker.ConstraintGenerator
     ReasonKind (..),
     VariableSupply (..),
   )
-import Katari.Id (RequestId, TypeId)
 import Katari.Typechecker.NormalizedType
   ( NormalizedType (..),
     normaliseSemantic,

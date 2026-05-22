@@ -31,6 +31,7 @@ import Data.Map.Strict (Map)
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
+import Katari.Id (RequestId)
 import Katari.SemanticType
   ( RequestVariableId,
     Resolved,
@@ -44,7 +45,6 @@ import Katari.Typechecker.ConstraintGenerator
   ( Constraint (..),
     ConstraintReason,
   )
-import Katari.Id (RequestId)
 import Katari.Typechecker.NormalizedType
   ( NormalizedType,
     normaliseSemantic,

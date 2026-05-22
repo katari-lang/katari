@@ -30,7 +30,7 @@ where
 import Data.Function (on)
 import Data.List (sortBy)
 import Data.Map.Strict (Map)
-import qualified Data.Map.Strict as Map
+import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 import Katari.SourceSpan (Position (..), SourceSpan (..), spanContains)
 

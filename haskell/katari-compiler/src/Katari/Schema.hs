@@ -276,12 +276,15 @@ buildDataDefs idResult zonkResult =
           [ (qname, annotations)
             | m <- Map.elems zonkResult.zonkedModules,
               DeclarationData dataDecl <- m.declarations,
-              Just variableId <- [dataDecl.name.resolution],
-              Just variableData <- [Map.lookup variableId idResult.identifiedVariables],
-              Just qname <- [variableData.variableQualifiedName],
               let annotations =
-                    Map.fromList
-                      [(p.name, p.annotation) | p <- dataDecl.parameters]
+                    Map.fromList [(p.name, p.annotation) | p <- dataDecl.parameters],
+              Just variableId <- [dataDecl.name.resolution],
+              Just variableData <-
+                [ Map.lookup
+                    variableId
+                    idResult.identifiedVariables
+                ],
+              Just qname <- [variableData.variableQualifiedName]
           ]
    in Map.fromList
         [ ( cd.constructorTypeId,
@@ -292,17 +295,26 @@ buildDataDefs idResult zonkResult =
                       DataFieldInfo
                         { fieldType = ty,
                           fieldAnnotation =
-                            Map.findWithDefault Nothing label perFieldAnnotations
+                            Map.findWithDefault
+                              Nothing
+                              label
+                              perFieldAnnotations
                         }
                   )
                   fieldTypes
               )
           )
           | (_, cd) <- Map.toList idResult.identifiedConstructors,
-            Just (SemanticTypeFunction fieldTypes _ _) <-
-              [Map.lookup cd.constructorVariableId zonkResult.zonkedTypeEnvironment],
             let perFieldAnnotations =
-                  Map.findWithDefault Map.empty cd.constructorQualifiedName annotationsByQName
+                  Map.findWithDefault
+                    Map.empty
+                    cd.constructorQualifiedName
+                    annotationsByQName,
+            Just (SemanticTypeFunction fieldTypes _ _) <-
+              [ Map.lookup
+                  cd.constructorVariableId
+                  zonkResult.zonkedTypeEnvironment
+              ]
         ]
 
 -- ===========================================================================
@@ -552,8 +564,7 @@ buildOutputSchema ::
   DataDefs ->
   SemanticType Resolved ->
   JsonSchema
-buildOutputSchema dataDefs returnType =
-  toJsonSchema dataDefs Set.empty returnType
+buildOutputSchema dataDefs = toJsonSchema dataDefs Set.empty
 
 -- | Aeson-encode a 'JsonSchema' to a strict 'Text'. Used by Lowering to
 -- persist precomputed schemas in 'AgentBlock.inputSchema' /

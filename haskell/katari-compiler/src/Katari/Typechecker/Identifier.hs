@@ -872,7 +872,6 @@ emitImportCycleError moduleMap = \case
 -- Phase 0': prim namespace preregistration
 -- ---------------------------------------------------------------------------
 
-
 -- ---------------------------------------------------------------------------
 -- Phase A: assign ModuleIds
 -- ---------------------------------------------------------------------------
@@ -2461,11 +2460,11 @@ identify trustedStdlibNames moduleMap =
   let ((asts, topLevels, allExports, allModuleIds), finalState) =
         runIdentifier $ do
           for_ (findImportCycles moduleMap) (emitImportCycleError moduleMap)
-          allModuleIds <- assignModuleIds trustedStdlibNames moduleMap
-          allExports <- buildExports moduleMap
-          topLevels <- buildTopLevels allModuleIds allExports moduleMap
-          asts <- resolveModule topLevels allModuleIds allExports moduleMap
-          pure (asts, topLevels, allExports, allModuleIds)
+          allModuleIds' <- assignModuleIds trustedStdlibNames moduleMap
+          allExports' <- buildExports moduleMap
+          topLevels' <- buildTopLevels allModuleIds' allExports' moduleMap
+          asts' <- resolveModule topLevels' allModuleIds' allExports' moduleMap
+          pure (asts', topLevels', allExports', allModuleIds')
       capturedFrames =
         [ScopeFrame {frameSpan = sp, frameSymbols = sym} | (sp, sym) <- finalState.capturedScopeFrames]
       -- Per-module bare-name visibility, keyed by ModuleId. `topLevels`

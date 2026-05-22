@@ -45,10 +45,10 @@ module Katari.Typechecker.ConstraintGenerator
 where
 
 import Control.Monad (replicateM, unless)
-import Data.List (transpose)
 import Control.Monad.Reader (ReaderT, asks, local, runReaderT)
 import Control.Monad.State.Strict (State, gets, modify, runState)
 import Control.Monad.Trans (lift)
+import Data.List (transpose)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Set (Set)
@@ -58,8 +58,6 @@ import Data.Text qualified as T
 import Katari.AST
 import Katari.Common (LiteralValue (..))
 import Katari.Diagnostic (Diagnostic, diagnosticError)
-import Katari.SemanticType
-import Katari.SourceSpan
 import Katari.Id
   ( ConstructorId,
     ModuleId,
@@ -69,6 +67,8 @@ import Katari.Id
     VariableId,
   )
 import Katari.Prim (PrimRule (..))
+import Katari.SemanticType
+import Katari.SourceSpan
 import Katari.Typechecker.Identifier
   ( ConstructorData (..),
     IdentifierResult (..),
@@ -834,7 +834,7 @@ walkPattern maybeSubject = \case
   PatternTuple TuplePattern {elements, sourceSpan} -> do
     componentSubjects <- case maybeSubject of
       Just subject -> projectTupleSubjectTypesLinked (length elements) subject sourceSpan
-      Nothing      -> replicateM (length elements) freshTypeVar
+      Nothing -> replicateM (length elements) freshTypeVar
     pairs <- mapM (\(cs, el) -> walkPattern (Just cs) el) (zip componentSubjects elements)
     let patternType = SemanticTypeTuple (map snd pairs)
     pure
@@ -888,12 +888,12 @@ projectTupleSubjectTypes ::
 projectTupleSubjectTypes arity subjectType _sourceSpan = case subjectType of
   SemanticTypeTuple ts
     | length ts == arity -> pure ts
-    | otherwise          -> replicateM arity freshTypeVar
+    | otherwise -> replicateM arity freshTypeVar
   SemanticTypeUnion branches ->
     let tupleBranches = [ts | SemanticTypeTuple ts <- branches, length ts == arity]
-    in if null tupleBranches
-         then replicateM arity freshTypeVar
-         else pure (map unionSemantic (transpose tupleBranches))
+     in if null tupleBranches
+          then replicateM arity freshTypeVar
+          else pure (map unionSemantic (transpose tupleBranches))
   SemanticTypeUnknown -> pure (replicate arity SemanticTypeUnknown)
   _ -> replicateM arity freshTypeVar
 

@@ -44,6 +44,10 @@ import Data.Text (Text)
 import Data.Text qualified as Text
 import Katari.AST
 import Katari.Diagnostic (Diagnostic, diagnosticError)
+import Katari.Id
+  ( ModuleId,
+    VariableId,
+  )
 import Katari.SemanticType
   ( RequestVariableId (..),
     Resolved,
@@ -56,10 +60,6 @@ import Katari.SemanticType
   )
 import Katari.SourceSpan (Position (..), SourceSpan (..))
 import Katari.Typechecker.ConstraintGenerator (ConstraintGenResult (..))
-import Katari.Id
-  ( ModuleId,
-    VariableId,
-  )
 import Katari.Typechecker.Identifier
   ( IdentifierResult (..),
     ModuleData (..),

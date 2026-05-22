@@ -37,8 +37,6 @@ module Katari.Lexer
   )
 where
 
-import Prelude hiding (lex)
-
 import Control.Monad (void, when)
 import Control.Monad.State.Strict
   ( MonadState (get),
@@ -88,6 +86,7 @@ import Text.Megaparsec.Char
     string,
   )
 import Text.Megaparsec.Char.Lexer qualified as L
+import Prelude hiding (lex)
 
 -- ===========================================================================
 -- KatariToken types

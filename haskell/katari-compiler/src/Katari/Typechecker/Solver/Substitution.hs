@@ -42,6 +42,7 @@ import Data.Map.Strict qualified as Map
 import Data.Maybe (mapMaybe)
 import Data.Set (Set)
 import Data.Set qualified as Set
+import Katari.Id (RequestId)
 import Katari.SemanticType
   ( RequestVariableId,
     Resolved,
@@ -55,7 +56,6 @@ import Katari.SemanticType
     unionSemantic,
   )
 import Katari.Typechecker.ConstraintGenerator (Constraint (..))
-import Katari.Id (RequestId)
 import Katari.Typechecker.NormalizedType
   ( NormalizedType (..),
     denormalise,

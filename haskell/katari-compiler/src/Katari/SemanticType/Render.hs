@@ -12,12 +12,12 @@ module Katari.SemanticType.Render
 where
 
 import Data.Map.Strict (Map)
-import qualified Data.Map.Strict as Map
-import qualified Data.Set as Set
+import Data.Map.Strict qualified as Map
+import Data.Set qualified as Set
 import Data.Text (Text)
-import qualified Data.Text as Text
+import Data.Text qualified as Text
 import Katari.Id (RequestId, TypeId)
-import qualified Katari.SemanticType as ST
+import Katari.SemanticType qualified as ST
 
 -- | @typeNames@ resolves user-declared 'TypeId's to surface names.
 -- @reqNames@ resolves request 'VariableId's to surface names. Both can
@@ -28,10 +28,8 @@ renderSemanticType ::
   Map RequestId Text ->
   ST.SemanticType ST.Resolved ->
   Text
-renderSemanticType typeNames reqNames = renderTop
+renderSemanticType typeNames reqNames = render False
   where
-    renderTop t = render False t
-
     render :: Bool -> ST.SemanticType ST.Resolved -> Text
     render _ ST.SemanticTypeNever = "never"
     render _ ST.SemanticTypeUnknown = "unknown"

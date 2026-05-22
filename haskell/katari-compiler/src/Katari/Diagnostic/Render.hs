@@ -24,7 +24,7 @@ where
 
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, maybeToList)
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Vector (Vector)
@@ -123,7 +123,7 @@ diagnosticDoc sources diagnostic =
   vsep $
     headerLine
       : locationLine
-      : maybe [] (\snip -> [snip]) (snippetDoc sources diagnostic.span)
+      : maybeToList (snippetDoc sources diagnostic.span)
         <> map noteDoc diagnostic.notes
         <> map hintDoc diagnostic.hints
   where

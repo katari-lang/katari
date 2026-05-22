@@ -44,9 +44,9 @@ where
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
-import qualified Data.Text as Text
+import Data.Text qualified as Text
 import Katari.AST (Module, Phase (Parsed))
-import qualified Katari.Common as Common
+import Katari.Common qualified as Common
 import Katari.Diagnostic (Diagnostic, hasErrors)
 import Katari.IR (IRModule)
 import Katari.Lexer as Lexer

@@ -30,12 +30,12 @@ import Katari.AST (Phase (Zonked))
 import Katari.AST qualified as AST
 import Katari.Diagnostic (Diagnostic, diagnosticError)
 import Katari.IR
-import Katari.Internal qualified as Internal
-import Katari.SourceSpan (SourceSpan)
 import Katari.Id (VariableId)
 import Katari.Id qualified as Id
+import Katari.Internal qualified as Internal
 import Katari.Schema qualified as Schema
 import Katari.SemanticType (Resolved, SemanticType (..))
+import Katari.SourceSpan (SourceSpan)
 import Katari.Typechecker.Identifier (ConstructorData (..), IdentifierResult (..), RequestData (..))
 import Katari.Typechecker.Zonker (ZonkResult (..))
 
@@ -621,7 +621,7 @@ registerDeclarationKinds zonkResult =
       AST.DeclarationTypeSynonym _ -> pure ()
       AST.DeclarationError sourceSpan -> recordError (LoweringErrorParseSentinel sourceSpan)
 
-    -- | Register a top-level callable: bind the @VariableId@ to its
+    -- \| Register a top-level callable: bind the @VariableId@ to its
     -- @BlockId@, record its 'QualifiedName' for value-side dispatch, and
     -- expose it in 'IRModule.entries' for FFI lookup.
     recordTopLevelCallable :: VariableId -> Text -> Text -> BlockId -> Lower ()
@@ -713,13 +713,14 @@ lowerAllDeclarations zonkResult = do
         -- The leaf was pre-registered in 'registerDeclarationKinds' so any
         -- user agent's body could resolve compile-internal prim calls
         -- (e.g. @get_field@) regardless of declaration order.
-        innerBlk <- gets (Map.lookup decl.name.text . (.lsPrimBlockIds)) >>= \case
-          Just b -> pure b
-          Nothing ->
-            throwError
-              ( Internal.internalErrorNoSpan
-                  ("DeclarationPrimAgent: leaf for '" <> decl.name.text <> "' missing from lsPrimBlockIds")
-              )
+        innerBlk <-
+          gets (Map.lookup decl.name.text . (.lsPrimBlockIds)) >>= \case
+            Just b -> pure b
+            Nothing ->
+              throwError
+                ( Internal.internalErrorNoSpan
+                    ("DeclarationPrimAgent: leaf for '" <> decl.name.text <> "' missing from lsPrimBlockIds")
+                )
         (inputSchema, outputSchema) <- schemasForVariable variableId labelsAndAnnotations
         writeWrapperAgent
           agentBlk
@@ -781,7 +782,7 @@ lowerAllDeclarations zonkResult = do
                 "lookupConstructorQName: VariableId not in constructorByVariable"
             )
 
-    -- | Look up the request 'QualifiedName' stamped on a @req@ declaration's
+    -- \| Look up the request 'QualifiedName' stamped on a @req@ declaration's
     -- 'BlockRequest' leaf. Mirrors 'lookupConstructorQName' for the data /
     -- ctor side.
     lookupRequestQName :: VariableId -> Lower QualifiedName
@@ -916,7 +917,6 @@ lowerSimpleAgent blockId name paramVars prelude blk description inputSchema outp
         (qn : _) -> Just qn
         [] -> Nothing
 
-
 -- | Lower a 'RequestHandler' to a 'BlockUser'. The handler body inherits
 -- the handle scope (state vars are directly accessible). Only req args
 -- are passed via 'parameters'. The body's trailing value is treated as
@@ -949,15 +949,16 @@ lowerHandler _stateLocals hr = do
         (StatementExit {} : _) -> True
         _ -> False
       finalStatements = case trailing of
-        Just t | not lastIsExit ->
-          statements ++ [StatementExit ExitData {exitKind = ExitKindBreak, value = t}]
+        Just t
+          | not lastIsExit ->
+              statements ++ [StatementExit ExitData {exitKind = ExitKindBreak, value = t}]
         _ -> statements
       userBlock =
         defaultUserBlock
           { parameters = reqParamVars,
             statements = finalStatements
           }
-  recordBlock bodyBlockId (BlockUser (userBlock)) (Just hr.name.text)
+  recordBlock bodyBlockId (BlockUser userBlock) (Just hr.name.text)
   pure Handler {request = reqQName, handlerBody = bodyBlockId}
 
 -- | Lower the optional then-clause to its own block.
@@ -984,7 +985,7 @@ lowerThenClause = \case
                 statements = statements,
                 trailing = trailing
               }
-      recordBlock blockId (BlockUser (userBlock)) Nothing
+      recordBlock blockId (BlockUser userBlock) Nothing
     pure (Just blockId)
 
 -- | Bind a function parameter: allocate the param's IR var (the slot the
@@ -1331,7 +1332,7 @@ buildInlineBlock blk = do
           { statements = statements,
             trailing = trailing
           }
-  recordBlock blockId (BlockUser (userBlock)) Nothing
+  recordBlock blockId (BlockUser userBlock) Nothing
   pure blockId
 
 -- | Lower an if expression as 'StatementMatch' on a boolean subject. The "true"
@@ -1343,17 +1344,21 @@ lowerIfExpr ifExpression = do
   thenBlockId <- buildInlineBlock ifExpression.thenBlock
   defaultBlockId <- traverse buildInlineBlock ifExpression.elseBlock
   matchBlockId <- freshBlockId
-  recordBlock matchBlockId
-    (BlockMatch (MatchBlock
-          { subject = cond,
-            arms =
-              [ MatchArm
-                  { pattern = MatchPatternLiteral LiteralValueBoolean {boolean = True},
-                    body = thenBlockId
-                  }
-              ],
-            defaultArm = defaultBlockId
-          }))
+  recordBlock
+    matchBlockId
+    ( BlockMatch
+        ( MatchBlock
+            { subject = cond,
+              arms =
+                [ MatchArm
+                    { pattern = MatchPatternLiteral LiteralValueBoolean {boolean = True},
+                      body = thenBlockId
+                    }
+                ],
+              defaultArm = defaultBlockId
+            }
+        )
+    )
     Nothing
   out <- freshVarId Nothing
   emit $
@@ -1382,12 +1387,16 @@ lowerMatchExpr matchExpression = do
   subject <- lowerExpr matchExpression.subject
   arms <- mapM lowerMatchArm matchExpression.cases
   matchBlockId <- freshBlockId
-  recordBlock matchBlockId
-    (BlockMatch (MatchBlock
-          { subject = subject,
-            arms = arms,
-            defaultArm = Nothing
-          }))
+  recordBlock
+    matchBlockId
+    ( BlockMatch
+        ( MatchBlock
+            { subject = subject,
+              arms = arms,
+              defaultArm = Nothing
+            }
+        )
+    )
     Nothing
   out <- freshVarId Nothing
   emit $
@@ -1468,7 +1477,7 @@ buildArmBodyWithLocals locals blk = do
           { statements = statements,
             trailing = trailing
           }
-  recordBlock blockId (BlockUser (userBlock)) Nothing
+  recordBlock blockId (BlockUser userBlock) Nothing
   pure blockId
 
 -- | Lower a for expression. Supports zero or more 'in' bindings, zero or
@@ -1488,14 +1497,18 @@ lowerForExpr forExpression = do
   thenBlockId <- traverse (buildForThenBlock stateLocals) forExpression.thenBlock
   let iterPairs = map (\(e, s, _) -> (e, s)) iters
   forBlockId <- freshBlockId
-  recordBlock forBlockId
-    (BlockFor (ForBlock
-          { parallel = forExpression.parallel,
-            iters = iterPairs,
-            stateInits = stateInits,
-            bodyBlock = bodyBlockId,
-            thenBlock = thenBlockId
-          }))
+  recordBlock
+    forBlockId
+    ( BlockFor
+        ( ForBlock
+            { parallel = forExpression.parallel,
+              iters = iterPairs,
+              stateInits = stateInits,
+              bodyBlock = bodyBlockId,
+              thenBlock = thenBlockId
+            }
+        )
+    )
     Nothing
   out <- freshVarId Nothing
   emit $
@@ -1516,7 +1529,7 @@ lowerForExpr forExpression = do
 lowerForIters ::
   [AST.ForInBinding Zonked] ->
   Lower [(VarId, VarId, AST.Pattern Zonked)]
-lowerForIters bindings = mapM one bindings
+lowerForIters = mapM one
   where
     one b = do
       sourceVar <- lowerExpr b.source
@@ -1573,7 +1586,7 @@ buildForBody iters stateLocals body = do
           { statements = statements,
             trailing = trailing
           }
-  recordBlock blockId (BlockUser (userBlock)) Nothing
+  recordBlock blockId (BlockUser userBlock) Nothing
   pure blockId
 
 -- | Build the @then { ... }@ block of a @for@ expression. Differs from
@@ -1590,7 +1603,7 @@ buildForThenBlock stateLocals body = do
             { statements = statements,
               trailing = trailing
             }
-    recordBlock blockId (BlockUser (userBlock)) Nothing
+    recordBlock blockId (BlockUser userBlock) Nothing
   pure blockId
 
 -- ===========================================================================
@@ -1603,11 +1616,15 @@ lowerTupleExpr :: Bool -> [AST.Expression Zonked] -> Lower VarId
 lowerTupleExpr isParallel elements = do
   elementBlockIds <- mapM buildElementBlock elements
   tupleBlockId <- freshBlockId
-  recordBlock tupleBlockId
-    (BlockTuple (TupleBlock
-          { parallel = isParallel,
-            elements = elementBlockIds
-          }))
+  recordBlock
+    tupleBlockId
+    ( BlockTuple
+        ( TupleBlock
+            { parallel = isParallel,
+              elements = elementBlockIds
+            }
+        )
+    )
     Nothing
   out <- freshVarId Nothing
   emit $
@@ -1625,11 +1642,15 @@ lowerArrayExpr :: Bool -> [AST.Expression Zonked] -> Lower VarId
 lowerArrayExpr isParallel elements = do
   elementBlockIds <- mapM buildElementBlock elements
   arrayBlockId <- freshBlockId
-  recordBlock arrayBlockId
-    (BlockArray (ArrayBlock
-          { parallel = isParallel,
-            elements = elementBlockIds
-          }))
+  recordBlock
+    arrayBlockId
+    ( BlockArray
+        ( ArrayBlock
+            { parallel = isParallel,
+              elements = elementBlockIds
+            }
+        )
+    )
     Nothing
   out <- freshVarId Nothing
   emit $
@@ -1652,7 +1673,7 @@ buildElementBlock expr = do
           { statements = statements,
             trailing = trailing
           }
-  recordBlock blockId (BlockUser (userBlock)) Nothing
+  recordBlock blockId (BlockUser userBlock) Nothing
   pure blockId
 
 -- | Lower a handle expression (Koka-style). State vars are evaluated in
@@ -1668,7 +1689,8 @@ lowerHandleExpr handleExpr = do
   withLocals stateLocals $ do
     -- Body block (the continuation).
     (bodyTrailing, bodyStatements) <- runWithFreshBuffer (lowerBlockInto handleExpr.body)
-    recordBlock bodyBlockId
+    recordBlock
+      bodyBlockId
       (BlockUser (defaultUserBlock {statements = bodyStatements, trailing = bodyTrailing}))
       Nothing
     -- Handlers.
@@ -1677,14 +1699,18 @@ lowerHandleExpr handleExpr = do
     thenBlockId <- lowerThenClause handleExpr.thenClause
     -- Record BlockHandle and call it.
     handleBlockId <- freshBlockId
-    recordBlock handleBlockId
-      (BlockHandle (HandleBlock
-            { parallel = handleExpr.parallel,
-              stateInits = stateInits_,
-              body = bodyBlockId,
-              handlers = handlerList,
-              thenBlock = thenBlockId
-            }))
+    recordBlock
+      handleBlockId
+      ( BlockHandle
+          ( HandleBlock
+              { parallel = handleExpr.parallel,
+                stateInits = stateInits_,
+                body = bodyBlockId,
+                handlers = handlerList,
+                thenBlock = thenBlockId
+              }
+          )
+      )
       Nothing
     out <- freshVarId Nothing
     emit $
