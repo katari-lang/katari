@@ -85,6 +85,11 @@ data SourceEntry = SourceEntry
   }
   deriving (Show)
 
+-- | Input bundle for 'compile'. Carries the full set of modules the
+-- compiler should treat as in scope. The compiler is package-agnostic:
+-- merging packages, resolving dependencies, and locating @.ktr@ files
+-- happens upstream (in @katari-project@), and the result is handed to
+-- the compiler as a flat 'Map' so the entire pipeline stays pure.
 newtype CompileInput = CompileInput
   { -- | Module name → source entry. The map is treated as the complete
     -- world: any module not present here is "missing" from the
@@ -102,6 +107,13 @@ newtype CompileInput = CompileInput
   }
   deriving (Show)
 
+-- | Output of 'compile'. The 'diagnostics' field is the single source of
+-- truth for success / failure; the @Maybe@-wrapped artefacts ('irModule',
+-- 'schemaEntries') are convenience hints that mirror @not (hasErrors
+-- diagnostics)@. The non-@Maybe@ intermediate-phase results
+-- ('identifierResult', 'solverResult', 'zonkResult') are always returned
+-- so LSP / CLI tooling can serve partial information (hover, completion,
+-- agent listing) even when the program fails to compile end-to-end.
 data CompileResult = CompileResult
   { -- | The lowered IR. 'Nothing' if any error-severity diagnostic was
     -- raised before lowering succeeded.

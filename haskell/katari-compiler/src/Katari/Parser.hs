@@ -1,3 +1,18 @@
+-- | Megaparsec-based parser for Katari source.
+--
+-- Consumes the 'KatariTokenStream' produced by 'Katari.Lexer' and
+-- produces a @'Module' 'Parsed'@ — the Trees-that-Grow AST at its
+-- earliest phase, where every metadata slot is @()@ or 'Nothing'.
+-- Identifier resolution, type inference and lowering happen
+-- downstream.
+--
+-- The parser uses recovery: it returns a (possibly truncated) AST plus
+-- a list of structured 'ParseError' values (K0020-K0099) so the
+-- diagnostic stream never bottoms out on the first mistake. Statement
+-- and declaration boundaries serve as sync points. Surface-language
+-- constructs that depend on lexical context (@break@ / @next@ /
+-- @return@ keywords) are gated through a 'BreakContext' carried in a
+-- ReaderT.
 module Katari.Parser
   ( ParseError (..),
     ParseErrorReason (..),
@@ -135,6 +150,12 @@ parseMakeSpan startPosition endPosition = do
 -- Public API
 -- ===========================================================================
 
+-- | Parse one source file's token stream into a @'Module' 'Parsed'@.
+-- The returned list collects every 'ParseError' the recovery
+-- machinery observed; on catastrophic failure (= megaparsec aborted
+-- before any declaration was finished) an empty module is returned
+-- along with whatever errors were already accumulated, so callers
+-- always get a well-typed AST to continue with.
 parse :: FilePath -> KatariTokenStream -> (Module Parsed, [ParseError])
 parse filePath stream =
   let env = ParserEnv {filePath = filePath, breakContext = BreakContextTop}

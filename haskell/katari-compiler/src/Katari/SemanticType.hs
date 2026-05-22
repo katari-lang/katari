@@ -150,6 +150,13 @@ deriving instance Eq (SemanticRequest phase)
 
 deriving instance Ord (SemanticRequest phase)
 
+-- | One member of a 'SemanticRequest' set. A concrete element points at
+-- a specific @req@ declaration by 'RequestId' and is valid in any
+-- phase. A variable element stands for an unsolved request-row
+-- placeholder introduced by the constraint generator and only exists
+-- at @Unresolved@ phase; the solver discharges it before zonking, so
+-- after zonk a @SemanticRequest Resolved@ contains concrete elements
+-- only.
 data SemanticRequestElement phase where
   SemanticRequestElementVariable :: RequestVariableId -> SemanticRequestElement Unresolved
   SemanticRequestElementConcrete :: RequestId -> SemanticRequestElement phase
@@ -160,19 +167,38 @@ deriving instance Eq (SemanticRequestElement phase)
 
 deriving instance Ord (SemanticRequestElement phase)
 
+-- | The empty request set. Represents \"this expression performs no
+-- request\". Identity for 'unionRequests'.
 emptyRequest :: SemanticRequest phase
 emptyRequest = SemanticRequest Set.empty
 
+-- | A request set containing exactly one concrete request. Used when
+-- the constraint generator records that a particular call site triggers
+-- a specific declared @req@.
 singletonRequest :: RequestId -> SemanticRequest phase
 singletonRequest requestId = SemanticRequest (Set.singleton (SemanticRequestElementConcrete requestId))
 
+-- | A request set containing exactly one row-variable placeholder.
+-- The constraint generator emits this when it does not yet know which
+-- concrete request(s) an expression will perform; the solver later
+-- substitutes a concrete 'SemanticRequest' for the variable. Only
+-- valid at @Unresolved@ phase.
 singletonRequestVariable :: RequestVariableId -> SemanticRequest Unresolved
 singletonRequestVariable varId = SemanticRequest (Set.singleton (SemanticRequestElementVariable varId))
 
+-- | Set union over request elements. Used to combine the request sets
+-- of subexpressions (@e1 + e2@'s requests = @e1@'s ∪ @e2@'s).
 unionRequests :: SemanticRequest phase -> SemanticRequest phase -> SemanticRequest phase
 unionRequests (SemanticRequest elements1) (SemanticRequest elements2) =
   SemanticRequest (Set.union elements1 elements2)
 
+-- | Applicative traversal that rewrites every type variable and every
+-- request variable inside a 'SemanticType', threading the user's
+-- effects (substitution lookup, error accumulation, ...) through the
+-- structure. The two callbacks decide what each leaf becomes, and the
+-- traversal handles all the structural cases (function / array / tuple
+-- / union / object / ...) uniformly. Building blocks 'foldVariable' is
+-- the @Const@-specialised pure-fold variant of this.
 substituteVariable ::
   (Applicative f) =>
   (TypeVariableId -> f (SemanticType phase)) ->
@@ -211,6 +237,11 @@ substituteVariable onVariable onRequest = \case
           SemanticRequestElementVariable variableId -> onRequest variableId
           SemanticRequestElementConcrete requestId -> pure (singletonRequest requestId)
 
+-- | Read-only traversal: collect a monoidal summary of every type
+-- variable and every request variable that occurs anywhere inside a
+-- 'SemanticType'. Used for free-variable computation, occurs checks,
+-- and pretty printing. The 'Monoid' choice (e.g. @Set TypeVariableId@,
+-- @Any@, @Sum Int@) picks the analysis.
 foldVariable ::
   (Monoid m) =>
   (TypeVariableId -> m) ->

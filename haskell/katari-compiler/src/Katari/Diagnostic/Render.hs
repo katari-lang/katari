@@ -76,6 +76,11 @@ renderDiagnostics sources diagnostics =
   let cache = splitLines sources
    in map (renderPlainText . diagnosticDoc cache) diagnostics
 
+-- | Batched ANSI rendering of multiple diagnostics. Like
+-- 'renderDiagnostics' but emits ANSI-coloured output (severity-coloured
+-- headers and red underlines), and shares the same one-pass source-line
+-- cache across all diagnostics. Preferred over @'map'
+-- ('renderDiagnosticAnsi' sources)@ when the diagnostic list is non-trivial.
 renderDiagnosticsAnsi :: Map FilePath Text -> [Diagnostic] -> [Text]
 renderDiagnosticsAnsi sources diagnostics =
   let cache = splitLines sources

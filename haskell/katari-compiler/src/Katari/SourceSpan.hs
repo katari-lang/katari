@@ -12,6 +12,10 @@ module Katari.SourceSpan where
 import Data.Aeson (FromJSON, ToJSON)
 import GHC.Generics (Generic)
 
+-- | A point in a source file, 1-indexed by both line and column.
+-- Columns count Unicode code points (not bytes, not UTF-16 code units),
+-- so the LSP layer must transcode from UTF-16 offsets at the boundary.
+-- Used to anchor diagnostic spans, hover queries, and reference lookups.
 data Position = Position
   { line :: Int,
     column :: Int
@@ -22,6 +26,11 @@ instance ToJSON Position
 
 instance FromJSON Position
 
+-- | A half-open @[start, end)@ range inside a particular file. The
+-- @end@ position is one past the last covered character — for a single
+-- character at line @l@, column @c@, the span is
+-- @SrcSpan _ (Position l c) (Position l (c+1))@. Every diagnostic and
+-- every AST / IR node carries one of these for source attribution.
 data SourceSpan = SrcSpan
   { filePath :: FilePath,
     start :: Position,

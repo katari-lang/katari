@@ -222,6 +222,12 @@ data VariableSupply = VariableSupply
   }
   deriving (Eq, Show)
 
+-- | Output of the constraint-generation pass. Carries the phase-advanced
+-- AST ('Constrained' phase, with each expression / pattern annotated by
+-- an unresolved 'SemanticType'), the seeded type environment, the
+-- accumulated subtype / effect 'Constraint' set the solver must
+-- discharge, and the next-id supply so the solver can keep allocating
+-- fresh variables consistently.
 data ConstraintGenResult = ConstraintGenResult
   { constrainedModules :: Map ModuleId (Module Constrained),
     typeEnvironment :: TypeEnvironment,

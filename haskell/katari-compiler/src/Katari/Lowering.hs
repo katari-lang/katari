@@ -43,6 +43,11 @@ import Katari.Typechecker.Zonker (ZonkResult (..))
 -- Errors
 -- ===========================================================================
 
+-- | Errors raised by the Lowering pass. These are reserved for cases
+-- where a sentinel from an upstream phase (parser recovery, unresolved
+-- identifier) makes it as far as Lowering despite the pipeline's
+-- gating; in a clean compile run no 'LoweringError' should ever fire.
+-- Converted to a K0300-series 'Diagnostic' via 'toDiagnostic'.
 data LoweringError where
   -- | Encountered a 'IdentifiedUnresolvedVariable' / 'Nothing'
   -- (parser/identifier produced a sentinel; cannot lower).

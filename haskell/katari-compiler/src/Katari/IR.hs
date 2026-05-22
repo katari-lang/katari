@@ -123,6 +123,9 @@ instance ToJSON IRMetadata where
 instance FromJSON IRMetadata where
   parseJSON = genericParseJSON irOptions
 
+-- | The 'IRMetadata' value the compiler stamps onto every newly emitted
+-- 'IRModule'. Bumped whenever the IR JSON shape changes incompatibly so
+-- that the runtime can refuse stale bundles at load time.
 currentIRMetadata :: IRMetadata
 currentIRMetadata = IRMetadata {schemaVersion = 1}
 
@@ -165,6 +168,11 @@ instance ToJSON IRModule where
 instance FromJSON IRModule where
   parseJSON = genericParseJSON irOptions
 
+-- | Debug-only mapping from internal 'VarId' / 'BlockId' values back to
+-- their human-readable surface names. Carried alongside the IR for
+-- pretty printers, stack traces, and dev tools; the runtime's hot path
+-- does not consult it. Missing entries are not an error — anonymous
+-- callables / synthetic slots simply have no name.
 data NameTable = NameTable
   { varNames :: Map VarId Text,
     blockNames :: Map BlockId Text
@@ -177,6 +185,9 @@ instance ToJSON NameTable where
 instance FromJSON NameTable where
   parseJSON = genericParseJSON irOptions
 
+-- | The empty 'NameTable'. Used as the Lowering starting state and as a
+-- sensible default when constructing an 'IRModule' in tests where debug
+-- names don't matter.
 emptyNameTable :: NameTable
 emptyNameTable = NameTable {varNames = Map.empty, blockNames = Map.empty}
 
@@ -595,6 +606,11 @@ instance ToJSON BindPatternData where
 instance FromJSON BindPatternData where
   parseJSON = genericParseJSON irOptions
 
+-- | A single labeled argument passed at a call site. Katari calls are
+-- keyword-style: every argument has a surface 'label' (matched against
+-- the callee's parameter name) and a 'var' carrying the IR slot whose
+-- value is passed in. Order in the argument list is irrelevant for the
+-- runtime; only labels matter.
 data Arg = Arg
   { label :: Text,
     var :: VarId
@@ -651,6 +667,12 @@ instance ToJSON MatchArm where
 instance FromJSON MatchArm where
   parseJSON = genericParseJSON irOptions
 
+-- | How an 'SExit' statement unwinds. Each kind targets a different
+-- enclosing block role: 'ExitKindReturn' propagates out of an
+-- agent / handler body and produces its return value, 'ExitKindBreak'
+-- exits the innermost @where@ handle scope, and 'ExitKindForBreak'
+-- exits the innermost @for@ loop. Lowering picks the kind statically
+-- based on the parser's 'BreakContext'; the runtime never has to guess.
 data ExitKind where
   ExitKindReturn :: ExitKind
   ExitKindBreak :: ExitKind
@@ -663,6 +685,11 @@ instance ToJSON ExitKind where
 instance FromJSON ExitKind where
   parseJSON = genericParseJSON enumOptions
 
+-- | How an 'SCont' statement continues. 'ContKindNext' resumes a
+-- request handler with a fresh state value (the @next(...)@ form);
+-- 'ContKindForNext' advances a @for@ loop to its next iteration
+-- (the bare @next@ form). The two are distinct surface keywords in
+-- different 'BreakContext's and Lowering picks the kind statically.
 data ContKind where
   ContKindNext :: ContKind
   ContKindForNext :: ContKind

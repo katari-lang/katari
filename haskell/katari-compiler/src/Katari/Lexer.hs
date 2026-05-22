@@ -1,3 +1,18 @@
+-- | Katari source-text lexer.
+--
+-- Turns raw source 'Text' into a 'KatariTokenStream' that the Megaparsec-based
+-- parser consumes. Whitespace and comments are stripped; raw @\\n@ characters
+-- are preserved as 'KatariTokenNewline' and later filtered by
+-- 'insertVirtualSemicolons' into either 'KatariTokenSemicolonVirtual' (when
+-- they end a statement) or nothing (when they fall inside parens / brackets,
+-- or after an operator). Template literals (@f\"...\"@ / @f\"\"\"...\"\"\"@)
+-- are tokenised with a small mode stack that alternates between string and
+-- expression contexts.
+--
+-- The lexer is intentionally tolerant: it emits 'LexerError' values
+-- (convertible to K0001-K0009 'Diagnostic's via 'toDiagnostic') for
+-- malformed escapes / unterminated literals but always returns a usable
+-- token stream so the parser can keep going.
 module Katari.Lexer
   ( -- * Tokens
     KatariToken (..),
@@ -78,6 +93,12 @@ import Text.Megaparsec.Char.Lexer qualified as L
 -- KatariToken types
 -- ===========================================================================
 
+-- | One lexical token. The lexer pairs each value with a 'SourceSpan'
+-- via 'WithSourceSpan' before feeding it to the parser. Identifiers and
+-- numeric / string literals carry their decoded payload directly;
+-- keywords / punctuation / operators are tagged with their respective
+-- enum. The semicolon variants and 'KatariTokenNewline' are bookkeeping
+-- artifacts of the virtual-semicolon insertion pipeline.
 data KatariToken where
   KatariTokenIdentifier :: Text -> KatariToken
   -- | Bare underscore; distinct from KatariTokenIdentifier so the parser can treat
@@ -107,6 +128,11 @@ data KatariToken where
   KatariTokenNewline :: KatariToken
   deriving (Eq, Ord, Show)
 
+-- | The fixed set of reserved words in the Katari surface language.
+-- The lexer matches each one as a complete identifier (no prefix /
+-- substring matching) and emits 'KatariTokenKeyword' instead of
+-- 'KatariTokenIdentifier'. Adding a new keyword here also requires a
+-- corresponding case in 'lexIdentifierOrKeyword' and 'showKeyword'.
 data Keyword where
   KeywordLet :: Keyword
   KeywordAgent :: Keyword
@@ -145,6 +171,10 @@ data Keyword where
   KeywordUsing :: Keyword
   deriving (Eq, Ord, Show, Bounded, Enum)
 
+-- | Single- or two-character punctuation tokens distinct from
+-- 'Operator' (= no arithmetic / comparison semantics). Bracketing
+-- punctuation (@(@, @[@, @{@ and their closers) doubles as the lexer's
+-- depth tracker for virtual-semicolon suppression.
 data Punctuation where
   PunctuationLeftParenthesis :: Punctuation
   PunctuationRightParenthesis :: Punctuation
@@ -162,6 +192,11 @@ data Punctuation where
   PunctuationPipe :: Punctuation
   deriving (Eq, Ord, Show)
 
+-- | Binary / unary operators recognised at the lexical level. The
+-- parser later decides arity (e.g. @-@ as 'OperatorSubtract' may bind
+-- as unary negation). Operators that span two characters
+-- (@==@, @\<=@, @&&@, ...) are lexed atomically — there is no @=@ +
+-- @=@ tokenisation in source.
 data Operator where
   OperatorAdd :: Operator
   OperatorSubtract :: Operator
@@ -311,6 +346,10 @@ lexRecordError lexerError = modify' $ \LexerState {contextStack, accumulatedErro
       contextStack = contextStack
     }
 
+-- | Top-level entry to the lexer. Normalises CRLF to LF, runs the
+-- token recogniser, threads virtual-semicolon insertion, and returns a
+-- 'KatariTokenStream' (consumed by 'Katari.Parser.parse') plus any
+-- recovered 'LexerError's.
 --
 -- The lexer no longer hard-fails on malformed input: unterminated literals
 -- get synthesized closing KatariTokens, invalid escape sequences become U+FFFD,
@@ -917,6 +956,10 @@ insertVirtualSemicolons = go (0 :: Int) Nothing
 -- Custom megaparsec Stream instance
 -- ===========================================================================
 
+-- | The token stream consumed by the parser. Pairs the post-newline-
+-- normalised source 'input' (kept so the parser can echo source lines
+-- in error messages via the 'Stream' instance's @reachOffset@) with
+-- the recognised token list. Provides a Megaparsec 'Stream' instance.
 data KatariTokenStream = KatariTokenStream
   { input :: Text,
     tokens :: [WithSourceSpan KatariToken]
@@ -1012,9 +1055,14 @@ linePrefixFor sourceText sourcePos =
         (lineText : _) -> T.take columnIndex lineText
         [] -> T.empty
 
+-- | Render a 'Keyword' back to its surface spelling (e.g.
+-- @KeywordLet@ → @\"let\"@). Used by 'Katari.Parser' when constructing
+-- \"expected ...\" portions of error messages.
 showKeyword :: Keyword -> String
 showKeyword = T.unpack . lexKeywordText
 
+-- | Render a 'Punctuation' back to its surface spelling (e.g.
+-- @PunctuationFatArrow@ → @\"=>\"@). Same use as 'showKeyword'.
 showPunctuation :: Punctuation -> String
 showPunctuation = \case
   PunctuationLeftParenthesis -> "("
@@ -1032,6 +1080,8 @@ showPunctuation = \case
   PunctuationFatArrow -> "=>"
   PunctuationPipe -> "|"
 
+-- | Render an 'Operator' back to its surface spelling (e.g.
+-- @OperatorLessOrEqual@ → @\"\<=\"@). Same use as 'showKeyword'.
 showOperator :: Operator -> String
 showOperator = \case
   OperatorAdd -> "+"

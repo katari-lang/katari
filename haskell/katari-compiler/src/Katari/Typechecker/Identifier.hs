@@ -143,6 +143,10 @@ singletonModule moduleId = emptySymbolEntry {moduleSymbol = Just moduleId}
 -- Result tables
 -- ---------------------------------------------------------------------------
 
+-- | Identifier-pass metadata for one module. Keyed by 'ModuleId' in
+-- 'IdentifierResult.identifiedModules'; lets later phases (and the
+-- LSP) recover the dotted module name and the file-level source span
+-- for go-to-definition / hover on a module identifier.
 data ModuleData = ModuleData
   { moduleName :: Text,
     moduleSourceSpan :: SourceSpan
@@ -288,6 +292,12 @@ mkIdentifierResult modules variables types requests constructors asts scopeIdx v
 -- Errors
 -- ---------------------------------------------------------------------------
 
+-- | Errors raised by the Identifier (name-resolution + import) pass.
+-- Each variant carries enough context — the offending 'SourceSpan',
+-- the bare name, and any colliding definition site — to render a
+-- self-contained diagnostic without re-walking the AST. Codes
+-- K0100-K0199 are reserved for this phase; see 'toDiagnostic' for the
+-- mapping.
 data IdentifierError where
   -- | A second registration into the same slot for the same name, or
   -- variable + module coexistence.

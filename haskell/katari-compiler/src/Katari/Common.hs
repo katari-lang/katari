@@ -64,6 +64,11 @@ instance ToJSONKey QualifiedName where
 instance FromJSONKey QualifiedName where
   fromJSONKey = FromJSONKeyTextParser (pure . parseQualifiedName)
 
+-- | Render a 'QualifiedName' to its canonical flat dotted form
+-- (@\"module.name\"@, or just @\"name\"@ when the module part is empty).
+-- This is the wire format used in JSON output, IR @entries@ keys, and any
+-- user-visible diagnostic that mentions a top-level callable. The result
+-- round-trips through 'parseQualifiedName'.
 renderQualifiedName :: QualifiedName -> Text
 renderQualifiedName qualifiedName
   | T.null qualifiedName.module_ = qualifiedName.name

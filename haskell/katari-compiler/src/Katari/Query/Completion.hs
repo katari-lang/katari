@@ -74,6 +74,10 @@ data CompletionKind
   | CKModule
   deriving (Eq, Show)
 
+-- | A single suggestion entry returned to the LSP for a completion
+-- request. Carries the surface label to insert, the kind for icon /
+-- sorting, a one-line detail string (typically the type), and optional
+-- documentation pulled from the declaration's @\"...\"@ annotation.
 data CompletionItem = CompletionItem
   { ciLabel :: Text,
     ciKind :: CompletionKind,
@@ -85,6 +89,11 @@ data CompletionItem = CompletionItem
   }
   deriving (Eq, Show)
 
+-- | Compute completion candidates visible at @position@ inside @filePath@.
+-- Returns lexical locals (walking the scope chain inside-out) plus the
+-- module's visible top-level symbols (imported + own declarations), with
+-- duplicate labels collapsed to the most-specific kind. The result is
+-- in display order, suitable for handing straight back to the LSP.
 completionsAt ::
   IdentifierResult ->
   ZonkResult ->
