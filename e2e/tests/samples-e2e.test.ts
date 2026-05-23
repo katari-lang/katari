@@ -6,11 +6,23 @@
 // Skipped when the katari binary is not available — local runs need
 // `stack install katari` first. CI sets KATARI_BIN explicitly.
 
-import { describe, expect, it, afterEach } from "vitest";
+import { beforeAll, describe, expect, it, afterEach } from "vitest";
 import { resolve } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { startHttpHarness } from "@katari-lang/api-server/tests/helpers.js";
+import { encryptSecret, resetKeyCacheForTesting } from "@katari-lang/runtime";
 import type { MockAgentHandler, RawValue } from "@katari-lang/runtime";
+
+// Crypto key for secret-bearing samples. Set before any harness boots so
+// that the api-server side can encrypt / decrypt env entries; the key
+// itself is throw-away (= per-test-run random).
+beforeAll(() => {
+  if (process.env.KATARI_SECRET_KEY === undefined || process.env.KATARI_SECRET_KEY === "") {
+    process.env.KATARI_SECRET_KEY = randomBytes(32).toString("hex");
+  }
+  resetKeyCacheForTesting();
+});
 
 const SAMPLES_ROOT = resolve(__dirname, "../samples");
 
@@ -97,12 +109,24 @@ async function applyAndRun(
   sampleDir: string,
   opts?: {
     handlers?: Record<string, MockAgentHandler>;
+    /** Env entries seeded into the harness's store before `katari run`.
+     * Secret entries should pass `isSecret: true` along with the
+     * plaintext; this helper encrypts via 'encryptSecret' to match
+     * what the live HTTP `PUT /env` route does. */
+    envEntries?: { key: string; value: string; isSecret: boolean }[];
   },
 ): Promise<RawValue> {
   const harness = await startHttpHarness();
   active = harness;
   for (const [qname, fn] of Object.entries(opts?.handlers ?? {})) {
     harness.setHandler(qname, fn);
+  }
+  for (const entry of opts?.envEntries ?? []) {
+    await harness.storage.envEntries.upsert({
+      key: entry.key,
+      value: entry.isSecret ? encryptSecret(entry.value) : entry.value,
+      isSecret: entry.isSecret,
+    });
   }
   const sampleRoot = resolve(SAMPLES_ROOT, sampleDir);
   const pkg = packageNameFromSampleDir(sampleDir);
@@ -258,6 +282,27 @@ describe("samples/ end-to-end (apply → run → verify)", () => {
     async () => {
       const result = await applyAndRun("multi-package", "16-multi-package");
       expect(result).toBe(12);
+    },
+  );
+
+  itE2E(
+    "17-secret-mock-ai: get_secret_env → http_request roundtrip preserves the secret value across the FFI boundary",
+    async () => {
+      const result = await applyAndRun("secret-mock-ai", "17-secret-mock-ai", {
+        envEntries: [
+          { key: "MOCK_KEY", value: "test_token_123", isSecret: true },
+        ],
+        handlers: {
+          "secret_mock_ai.http_request": async ({ args }) => {
+            const url = args["url"] as string;
+            const auth = args["auth"] as { $secret: string };
+            return `GET ${url} (auth=${auth.$secret})`;
+          },
+        },
+      });
+      expect(result).toBe(
+        "GET https://example.com/echo (auth=test_token_123)",
+      );
     },
   );
 });
