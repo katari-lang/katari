@@ -184,6 +184,7 @@ shapeKind = \case
   SemanticTypeLiteralInteger _ -> Just "number"
   SemanticTypeString -> Just "string"
   SemanticTypeLiteralString _ -> Just "string"
+  SemanticTypeSecret -> Just "secret"
   SemanticTypeBoolean -> Just "boolean"
   SemanticTypeLiteralBoolean _ -> Just "boolean"
   SemanticTypeFunction {} -> Just "function"

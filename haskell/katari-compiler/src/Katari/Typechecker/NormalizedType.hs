@@ -86,6 +86,11 @@ data LayeredType = LayeredType
     booleanLayer :: Set Bool,
     -- | Whether @null@ is inhabited.
     nullLayer :: Bool,
+    -- | Whether @secret@ is inhabited. The @secret@ type is opaque and
+    -- carries no internal structure (no literals, no subdivision), so a
+    -- single Bool slot suffices. Disjoint from 'stringLayer' — there
+    -- is no subtype relation between @secret@ and @string@.
+    secretLayer :: Bool,
     -- | Function layer. 'FunctionSlotAbsent' means no function values inhabit
     -- this type; 'FunctionSlotOf' carries a single function shape (with named
     -- parameters). Per Katari's product-normalisation rule, multiple
@@ -198,6 +203,7 @@ emptyLayered =
       stringLayer = StringSlotLiterals Set.empty,
       booleanLayer = Set.empty,
       nullLayer = False,
+      secretLayer = False,
       functionLayer = FunctionSlotAbsent,
       arrayLayer = ArraySlotAbsent,
       tupleLayer = Map.empty,
@@ -232,6 +238,7 @@ denormaliseBranches LayeredType {..} =
       stringBranches stringLayer,
       booleanBranches booleanLayer,
       nullBranches nullLayer,
+      secretBranches secretLayer,
       functionBranches functionLayer,
       arrayBranches arrayLayer,
       tupleBranches tupleLayer,
@@ -258,6 +265,10 @@ booleanBranches values
 nullBranches :: Bool -> [SemanticType Resolved]
 nullBranches True = [SemanticTypeNull]
 nullBranches False = []
+
+secretBranches :: Bool -> [SemanticType Resolved]
+secretBranches True = [SemanticTypeSecret]
+secretBranches False = []
 
 functionBranches :: FunctionSlot -> [SemanticType Resolved]
 functionBranches = \case
@@ -309,6 +320,7 @@ isEmptyLayered LayeredType {..} =
     && isEmptyString stringLayer
     && Set.null booleanLayer
     && not nullLayer
+    && not secretLayer
     && isEmptyFunction functionLayer
     && isEmptyArray arrayLayer
     && Map.null tupleLayer
@@ -366,6 +378,8 @@ normaliseSemantic = \case
     NormalizedTypeLayered emptyLayered {numberLayer = NumberSlotNumber}
   SemanticTypeString ->
     NormalizedTypeLayered emptyLayered {stringLayer = StringSlotAny}
+  SemanticTypeSecret ->
+    NormalizedTypeLayered emptyLayered {secretLayer = True}
   SemanticTypeLiteralInteger value ->
     NormalizedTypeLayered emptyLayered {numberLayer = NumberSlotLiterals (Set.singleton value)}
   SemanticTypeLiteralString value ->
@@ -420,6 +434,7 @@ unionLayered leftLayered rightLayered =
       stringLayer = unionStringSlot leftLayered.stringLayer rightLayered.stringLayer,
       booleanLayer = Set.union leftLayered.booleanLayer rightLayered.booleanLayer,
       nullLayer = leftLayered.nullLayer || rightLayered.nullLayer,
+      secretLayer = leftLayered.secretLayer || rightLayered.secretLayer,
       functionLayer = unionFunctionLayer leftLayered.functionLayer rightLayered.functionLayer,
       arrayLayer = unionArraySlot leftLayered.arrayLayer rightLayered.arrayLayer,
       tupleLayer = unionTupleLayer leftLayered.tupleLayer rightLayered.tupleLayer,
@@ -510,6 +525,7 @@ intersectLayered leftLayered rightLayered =
       stringLayer = intersectStringSlot leftLayered.stringLayer rightLayered.stringLayer,
       booleanLayer = Set.intersection leftLayered.booleanLayer rightLayered.booleanLayer,
       nullLayer = leftLayered.nullLayer && rightLayered.nullLayer,
+      secretLayer = leftLayered.secretLayer && rightLayered.secretLayer,
       functionLayer = intersectFunctionLayer leftLayered.functionLayer rightLayered.functionLayer,
       arrayLayer = intersectArraySlot leftLayered.arrayLayer rightLayered.arrayLayer,
       tupleLayer = intersectTupleLayer leftLayered.tupleLayer rightLayered.tupleLayer,
@@ -604,6 +620,7 @@ subtypeLayered leftLayered rightLayered =
     && subtypeStringSlot leftLayered.stringLayer rightLayered.stringLayer
     && Set.isSubsetOf leftLayered.booleanLayer rightLayered.booleanLayer
     && (not leftLayered.nullLayer || rightLayered.nullLayer)
+    && (not leftLayered.secretLayer || rightLayered.secretLayer)
     && subtypeFunctionLayer leftLayered.functionLayer rightLayered.functionLayer
     && subtypeArraySlot leftLayered.arrayLayer rightLayered.arrayLayer
     && subtypeTupleLayer leftLayered.tupleLayer rightLayered.tupleLayer

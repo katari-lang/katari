@@ -1721,6 +1721,7 @@ parseAtomicType =
       parsePrimitiveType PrimitiveTypeKindInteger KeywordInteger,
       parsePrimitiveType PrimitiveTypeKindNumber KeywordNumber,
       parsePrimitiveType PrimitiveTypeKindString KeywordString,
+      parsePrimitiveType PrimitiveTypeKindSecret KeywordSecret,
       parsePrimitiveType PrimitiveTypeKindBoolean KeywordBoolean,
       parseNeverType,
       parseUnknownType,

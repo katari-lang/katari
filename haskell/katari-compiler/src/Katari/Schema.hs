@@ -336,6 +336,13 @@ toCore dataDefs visited = \case
   SemanticTypeInteger -> SchemaCoreInteger {minimum = Nothing, maximum = Nothing}
   SemanticTypeNumber -> SchemaCoreNumber
   SemanticTypeString -> SchemaCoreString {schemaEnum = []}
+  -- 'secret' should not surface in AI tool-calling schemas; the AI must
+  -- not be allowed to inspect credential values. Callers (e.g. the
+  -- schema-bundle builder) should reject any callable whose param /
+  -- result mentions @secret@ before reaching here. We fall back to
+  -- 'SchemaCoreUnknown' as a defensive no-op (= maximally permissive)
+  -- so a stray path doesn't crash; the proper guard belongs upstream.
+  SemanticTypeSecret -> SchemaCoreUnknown
   SemanticTypeLiteralInteger n -> SchemaCoreConst {value = toJSON n}
   SemanticTypeLiteralString s -> SchemaCoreConst {value = toJSON s}
   SemanticTypeLiteralBoolean b -> SchemaCoreConst {value = toJSON b}

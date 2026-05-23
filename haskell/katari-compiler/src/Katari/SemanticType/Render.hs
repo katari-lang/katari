@@ -37,6 +37,7 @@ renderSemanticType typeNames reqNames = render False
     render _ ST.SemanticTypeInteger = "integer"
     render _ ST.SemanticTypeNumber = "number"
     render _ ST.SemanticTypeString = "string"
+    render _ ST.SemanticTypeSecret = "secret"
     render _ ST.SemanticTypeBoolean = "boolean"
     render _ (ST.SemanticTypeLiteralInteger n) = Text.pack (show n)
     render _ (ST.SemanticTypeLiteralString s) = "\"" <> s <> "\""

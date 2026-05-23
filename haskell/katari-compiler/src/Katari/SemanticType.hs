@@ -74,6 +74,16 @@ data SemanticType phase where
   SemanticTypeInteger :: SemanticType phase
   SemanticTypeNumber :: SemanticType phase
   SemanticTypeString :: SemanticType phase
+  -- | Opaque credential string. Disjoint from 'SemanticTypeString'
+  -- (no subtype relation). Values flow into runtime only via env-bound
+  -- ext agents (e.g. @get_secret_env@); they propagate transparently
+  -- through f-string interpolation (the @fstring_join@ prim rule taints
+  -- the result type with @secret@), but cannot be printed, compared,
+  -- pattern-matched, or downcast to @string@. The runtime stores the
+  -- value as a string but treats the wrapper as a separate Value
+  -- variant for boundary-crossing concerns (redaction in logs,
+  -- AES encryption in DB persistence).
+  SemanticTypeSecret :: SemanticType phase
   SemanticTypeBoolean :: SemanticType phase
   -- Literal types: a singleton type containing exactly one value.
   SemanticTypeLiteralInteger :: Integer -> SemanticType phase
@@ -223,6 +233,7 @@ substituteVariable onVariable onRequest = \case
   SemanticTypeInteger -> pure SemanticTypeInteger
   SemanticTypeNumber -> pure SemanticTypeNumber
   SemanticTypeString -> pure SemanticTypeString
+  SemanticTypeSecret -> pure SemanticTypeSecret
   SemanticTypeBoolean -> pure SemanticTypeBoolean
   SemanticTypeLiteralInteger value -> pure (SemanticTypeLiteralInteger value)
   SemanticTypeLiteralString value -> pure (SemanticTypeLiteralString value)

@@ -162,6 +162,7 @@ data Keyword where
   KeywordBoolean :: Keyword
   KeywordNumber :: Keyword
   KeywordString :: Keyword
+  KeywordSecret :: Keyword
   KeywordType :: Keyword
   KeywordNever :: Keyword
   KeywordUnknown :: Keyword
@@ -599,6 +600,7 @@ lexKeywordText = \case
   KeywordBoolean -> "boolean"
   KeywordNumber -> "number"
   KeywordString -> "string"
+  KeywordSecret -> "secret"
   KeywordType -> "type"
   KeywordNever -> "never"
   KeywordUnknown -> "unknown"
