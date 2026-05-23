@@ -40,7 +40,9 @@ afterEach(async () => {
 
 describe("SubprocessSidecar — real Node subprocess", () => {
   it("round-trips ipcDelegate → ipcDelegateAck for 11-ext-agent", async () => {
-    const result = await bundleSidecar({ sourceRoots: [SAMPLE_ROOT] });
+    const result = await bundleSidecar({
+      packages: [{ packageName: "ext_agent", sourceRoot: SAMPLE_ROOT }],
+    });
     expect(result).not.toBeNull();
     const bundle = result!.bundle;
 
@@ -87,7 +89,9 @@ describe("SubprocessSidecar — real Node subprocess", () => {
   });
 
   it("12-ext-cron: ext emits ipcChildDelegate for the callback and honours ipcTerminate", async () => {
-    const result = await bundleSidecar({ sourceRoots: [CRON_SAMPLE_ROOT] });
+    const result = await bundleSidecar({
+      packages: [{ packageName: "ext_cron", sourceRoot: CRON_SAMPLE_ROOT }],
+    });
     expect(result).not.toBeNull();
     const bundle = result!.bundle;
 

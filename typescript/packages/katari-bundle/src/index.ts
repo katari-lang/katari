@@ -1,16 +1,21 @@
-// Sidecar bundler. Walks one or more `sourceRoots` to find `.ktr` files
-// with sibling `.js` / `.ts` (= ext-agent implementations), and packs
-// them into a single ESM bundle that imports `katari-port`.
+// Sidecar bundler. Each input is a `{ packageName, sourceRoot }` pair —
+// one package's source tree. The bundler walks the source root for a
+// single `.ts` / `.js` file (anywhere under the root; nesting is not
+// inherently forbidden but having more than one sidecar in the same
+// package is a hard error) and packs every package's sidecar into a
+// single ESM bundle that imports `katari-port`.
 //
-// The generated entry wires each user module through `__withModule(qname, body)`
-// so katari.agent(localName, ...) calls register under the qualified key
-// `<module qname>.<localName>`. The bundle ends with `__startSidecar()`
-// to hand stdio control over to katari-port.
+// The generated entry wires each package through
+// `__withModule(packageName, body)` so `katari.agent(localName, ...)`
+// calls register under the **flat** key `<packageName>.<localName>` —
+// completely independent of the sidecar file's path within the package.
+// The bundle ends with `__startSidecar()` to hand stdio control over to
+// katari-port.
 
 import { build, type Plugin } from "esbuild";
 import { init as initLexer, parse as parseLexer } from "es-module-lexer";
 import { readdir, readFile, stat } from "node:fs/promises";
-import { dirname, extname, join, relative, sep } from "node:path";
+import { extname, join } from "node:path";
 import type { SidecarBundle } from "@katari-lang/runtime";
 
 export class BundleError extends Error {
@@ -20,30 +25,43 @@ export class BundleError extends Error {
   }
 }
 
-export interface BundleOptions {
+export interface BundlePackage {
   /**
-   * Absolute paths of directories to walk for ext-agent siblings.
-   * `foo.ktr` adjacent to `foo.js` or `foo.ts` (exactly one) under any
-   * of these roots is included in the bundle.
+   * Package name from `katari.toml` (e.g. `"ext_agent"`). Used as the
+   * flat prefix for every `katari.agent(name, ...)` registration in the
+   * package's sidecar — the bundle registers them under
+   * `<packageName>.<name>`.
    */
-  sourceRoots: string[];
+  packageName: string;
+  /**
+   * Absolute path of the package's source root (typically
+   * `<packageRoot>/src`). The bundler walks it for the single sidecar
+   * `.ts` / `.js` file.
+   */
+  sourceRoot: string;
+}
+
+export interface BundleOptions {
+  /** One entry per katari package whose sidecar (if any) should be bundled. */
+  packages: BundlePackage[];
 }
 
 export interface BundleResult {
   bundle: SidecarBundle;
-  /** Module qnames discovered, e.g. `"main"`, `"tools.http"`. */
+  /** Package names whose sidecars were included in the bundle. */
   modules: string[];
 }
 
 /**
- * Bundle every ext-agent sibling under `sourceRoots` into one ESM bundle.
- * Returns `null` when no sibling JS/TS files are found (= the snapshot
- * doesn't need a sidecar).
+ * Bundle every package's sidecar into one ESM bundle. Returns `null`
+ * when no package has a sidecar (= the snapshot doesn't need a sidecar
+ * runtime). Each package is allowed at most one `.ts` / `.js` file under
+ * its source root; more than one is a hard error.
  */
 export async function bundleSidecar(
   opts: BundleOptions,
 ): Promise<BundleResult | null> {
-  const entries = await collectSiblingEntries(opts.sourceRoots);
+  const entries = await collectSiblingEntries(opts.packages);
   if (entries.length === 0) return null;
 
   const syntheticEntry = renderSyntheticEntry(entries);
@@ -55,7 +73,7 @@ export async function bundleSidecar(
     result = await build({
       stdin: {
         contents: syntheticEntry,
-        resolveDir: opts.sourceRoots[0] ?? process.cwd(),
+        resolveDir: opts.packages[0]?.sourceRoot ?? process.cwd(),
         loader: "ts",
         sourcefile: "<katari-sidecar-entry>",
       },
@@ -89,60 +107,67 @@ export async function bundleSidecar(
   };
 }
 
-// ─── Sibling discovery ─────────────────────────────────────────────────────
+// ─── Sidecar discovery ─────────────────────────────────────────────────────
 
 interface SiblingEntry {
-  /** Absolute path of the sibling JS / TS source. */
+  /** Absolute path of the sidecar JS / TS source. */
   siblingPath: string;
-  /** Module qualified name (= dotted path relative to the sourceRoot). */
+  /** Module qualified name (= package name, flat). */
   moduleQname: string;
 }
 
+/**
+ * For each package, find the single sidecar file under its source root.
+ * Returns one entry per package that has a sidecar (packages with none
+ * are silently skipped — they're katari-only). Throws when a package
+ * has more than one `.ts` / `.js` file under its source root.
+ */
 async function collectSiblingEntries(
-  sourceRoots: string[],
+  packages: BundlePackage[],
 ): Promise<SiblingEntry[]> {
   const out: SiblingEntry[] = [];
-  for (const root of sourceRoots) {
-    const exists = await pathExists(root);
+  for (const pkg of packages) {
+    const exists = await pathExists(pkg.sourceRoot);
     if (!exists) continue;
-    for (const ktrPath of await walkFiles(root, ".ktr")) {
-      const dir = dirname(ktrPath);
-      const baseNoExt = basenameNoExt(ktrPath);
-      const candidateTs = join(dir, `${baseNoExt}.ts`);
-      const candidateJs = join(dir, `${baseNoExt}.js`);
-      const hasTs = await pathExists(candidateTs);
-      const hasJs = await pathExists(candidateJs);
-      if (hasTs && hasJs) {
-        throw new BundleError(
-          `both ${candidateTs} and ${candidateJs} exist next to ${ktrPath} — keep only one`,
-        );
-      }
-      if (!hasTs && !hasJs) continue;
-      const sibling = hasTs ? candidateTs : candidateJs;
-      const relFromRoot = relative(root, sibling);
-      // Path components that themselves contain `.` would collide with
-      // the dotted module-qname separator (e.g. `v1.2/foo.ts` → qname
-      // `v1.2.foo`, indistinguishable from a hypothetical `v1/2/foo.ts`).
-      // Reject at discovery time so the conflict surfaces at apply
-      // time with a clear message.
-      const segments = relFromRoot.split(/[\\/]/g).filter((s) => s.length > 0);
-      const noExt = segments.map((s, i) =>
-        i === segments.length - 1 ? s.replace(/\.(ts|js)$/, "") : s,
+    const sidecars = await walkSidecars(pkg.sourceRoot);
+    if (sidecars.length === 0) continue;
+    if (sidecars.length > 1) {
+      throw new BundleError(
+        `package "${pkg.packageName}" has ${sidecars.length} sidecar files under ${pkg.sourceRoot}:\n  - ${sidecars.join(
+          "\n  - ",
+        )}\nEach katari package may register at most one sidecar file (Wave 6b-A3 flat-bundle rule). Combine them into one ts/js file.`,
       );
-      for (const seg of noExt) {
-        if (seg.includes(".")) {
-          throw new BundleError(
-            `path segment '${seg}' in ${sibling} contains '.' — module qnames use '.' as the segment separator. Rename the offending directory or file.`,
-          );
-        }
-      }
-      const moduleQname = pathToQname(relFromRoot);
-      out.push({ siblingPath: sibling, moduleQname });
     }
+    out.push({ siblingPath: sidecars[0]!, moduleQname: pkg.packageName });
   }
   // Deterministic order for reproducible bundles.
   out.sort((a, b) => (a.moduleQname < b.moduleQname ? -1 : 1));
   return out;
+}
+
+/**
+ * Walk a directory for `.ts` / `.js` files, treating both `foo.ts` and
+ * `foo.js` for the same basename as one sidecar (the JS variant is the
+ * compiled output of the TS source). Throws if both exist with the same
+ * basename in the same directory.
+ */
+async function walkSidecars(root: string): Promise<string[]> {
+  const tsFiles = await walkFiles(root, ".ts");
+  const jsFiles = await walkFiles(root, ".js");
+  const byBasename = new Map<string, string>();
+  for (const p of tsFiles) {
+    byBasename.set(noExtKey(p), p);
+  }
+  for (const p of jsFiles) {
+    const key = noExtKey(p);
+    if (byBasename.has(key)) {
+      throw new BundleError(
+        `both ${byBasename.get(key)!} and ${p} exist — keep only one`,
+      );
+    }
+    byBasename.set(key, p);
+  }
+  return [...byBasename.values()].sort();
 }
 
 async function walkFiles(root: string, ext: string): Promise<string[]> {
@@ -163,17 +188,10 @@ async function walkFiles(root: string, ext: string): Promise<string[]> {
   return out;
 }
 
-function basenameNoExt(path: string): string {
-  const idx = path.lastIndexOf(sep);
-  const base = idx === -1 ? path : path.slice(idx + 1);
-  const dot = base.lastIndexOf(".");
-  return dot === -1 ? base : base.slice(0, dot);
-}
-
-function pathToQname(relPath: string): string {
-  // Drop extension and split on path separator.
-  const noExt = relPath.replace(/\.(ts|js)$/, "");
-  return noExt.split(/[\\/]/g).filter((s) => s.length > 0).join(".");
+function noExtKey(path: string): string {
+  // Strip the .ts / .js extension to group TS/JS variants of the same
+  // sidecar together.
+  return path.replace(/\.(ts|js)$/, "");
 }
 
 async function pathExists(p: string): Promise<boolean> {

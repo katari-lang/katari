@@ -100,8 +100,8 @@ run opts = do
     Nothing -> dieInternal "compile produced no IR module despite clean diagnostics"
 
   -- 3. Bundle ext-agent siblings.
-  sourceRoots <- gatherSourceRoots rootDir
-  sidecarBundle <- runKatariBundle sourceRoots
+  packages <- gatherSourceRoots rootDir
+  sidecarBundle <- runKatariBundle packages
 
   -- 4. Talk to the runtime.
   let schemaJson = Common.schemaBundleJson result.schemaEntries
@@ -163,17 +163,31 @@ loadCfg path = do
     Right c -> pure c
     Left err -> die ("config: " <> show err)
 
+-- | Per-package (name, source-root) pair handed to the bundler. The
+-- package name becomes the flat namespace prefix for that package's
+-- sidecar agent registrations (Wave 6b-A3): each registered agent
+-- @katari.agent("foo", ...)@ lands under @\<packageName\>.foo@ in the
+-- dispatch registry.
+data BundlePackage = BundlePackage
+  { packageName :: Text.Text,
+    sourceRoot :: FilePath
+  }
+
 -- | Resolve every package's @[sidecar].sourceRoots@ (falling back to
--- @[compile].src@) and return absolute paths. The katari-bundle CLI
--- accepts absolute paths and walks each one recursively.
-gatherSourceRoots :: FilePath -> IO [FilePath]
+-- @[compile].src@) and return @(packageName, absoluteSourceRoot)@
+-- pairs. @katari-bundle@ uses the package name as the bundle's
+-- registry prefix.
+gatherSourceRoots :: FilePath -> IO [BundlePackage]
 gatherSourceRoots rootDir = do
   rpRes <- Project.loadResolvedProject rootDir
   case rpRes of
     Left err -> die ("resolve: " <> Text.unpack (Project.renderResolveError err))
     Right rp ->
       pure
-        [ p.packageRoot </> resolveSrc p.packageConfig
+        [ BundlePackage
+            { packageName = p.packageConfig.packageSection.packageName,
+              sourceRoot = p.packageRoot </> resolveSrc p.packageConfig
+            }
           | p <- rp.rootPackage : Map.elems rp.depPackages
         ]
   where
@@ -182,17 +196,21 @@ gatherSourceRoots rootDir = do
         Just s | (r : _) <- filter (not . null) s.sidecarSourceRoots -> r
         _ -> c.packageSection.packageSrc
 
--- | Spawn @katari-bundle@ with one @--source-root@ flag per package
--- and decode its JSON output.
-runKatariBundle :: [FilePath] -> IO (Maybe Api.SidecarBundle)
-runKatariBundle sourceRoots = do
+-- | Spawn @katari-bundle@ with one @--package \<name\>=\<path\>@ flag
+-- per package and decode its JSON output.
+runKatariBundle :: [BundlePackage] -> IO (Maybe Api.SidecarBundle)
+runKatariBundle packages = do
   mEnv <- lookupEnv "KATARI_BUNDLE_BIN"
   let (cmd, prefixArgs) = case mEnv of
         Just envCmd
           | ".js" `endsWith` envCmd -> ("node", [envCmd])
           | otherwise -> (envCmd, [])
         Nothing -> ("katari-bundle", [])
-      args = prefixArgs <> concatMap (\r -> ["--source-root", r]) sourceRoots
+      args =
+        prefixArgs
+          <> concatMap
+            (\p -> ["--package", Text.unpack p.packageName <> "=" <> p.sourceRoot])
+            packages
   (exit, stdout, stderrOut) <- readProcessWithExitCode cmd args ""
   case exit of
     ExitFailure code ->
