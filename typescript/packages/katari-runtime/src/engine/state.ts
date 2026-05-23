@@ -88,6 +88,8 @@ export type State = {
   escalationOwners: Record<EscalationId, ThreadId>;
   /** Endpoint to send CORE→FFI delegate / terminate to. */
   ffiTargetEndpoint: Endpoint;
+  /** Endpoint to send CORE→ENV delegate to (= EnvModule, host-provided). */
+  envTargetEndpoint: Endpoint;
   /** Scope count at the most recent GC pass. Used by the GC trigger heuristic. */
   lastGcScopeCount: number;
 };

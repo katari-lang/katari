@@ -18,6 +18,8 @@
 import {
   CORE_ENDPOINT,
   CoreModule,
+  ENV_ENDPOINT,
+  EnvModule,
   ExternalEventBus,
   FFI_ENDPOINT,
   FfiModule,
@@ -32,6 +34,7 @@ import {
   type Value,
 } from "@katari-lang/runtime";
 import { ApiModule } from "./modules/api-module.js";
+import { StorageEnvStore } from "./modules/env-store.js";
 import { StorageFfiStore } from "./modules/ffi-store.js";
 import {
   NoSnapshotForProject,
@@ -139,6 +142,13 @@ export class Orchestrator {
 
         const bus = new ExternalEventBus(this.logger);
 
+        const env = new EnvModule({
+          endpoint: ENV_ENDPOINT,
+          store: new StorageEnvStore(tx),
+          logger: this.logger,
+          onBusResponse: (event) => bus.push(event),
+        });
+
         // Pass FfiModule a scope-bound FfiStore + the corresponding sidecar.
         // For snapshots without a sidecar, don't register the ffi module itself.
         const sidecar = this.sidecarFor(snapshotId);
@@ -156,6 +166,7 @@ export class Orchestrator {
             { name: "api", module: api },
             { name: "core", module: core },
             { name: "ffi", module: ffi },
+            { name: "env", module: env },
           ]);
         } else {
           // Prepare an empty placeholder for snapshots without FFI (= type
@@ -164,6 +175,7 @@ export class Orchestrator {
           bus.registerAll([
             { name: "api", module: api },
             { name: "core", module: core },
+            { name: "env", module: env },
           ]);
         }
 

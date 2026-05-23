@@ -27,6 +27,8 @@ import type {
   ApiPendingEscalation,
   ApiPendingEscalationRepo,
   EngineCheckpointRepo,
+  EnvEntryRepo,
+  EnvEntryRow,
   FfiPendingDelegation,
   FfiPendingDelegationRepo,
   FfiPendingEscalation,
@@ -814,6 +816,63 @@ class PgApiPendingEscalationRepo implements ApiPendingEscalationRepo {
   }
 }
 
+// ─── Env entries ────────────────────────────────────────────────────────────
+
+class PgEnvEntryRepo implements EnvEntryRepo {
+  constructor(private readonly sql: Sql) {}
+
+  async get(key: string): Promise<EnvEntryRow | null> {
+    const rows = await this.sql<
+      { key: string; value: string; is_secret: boolean; updated_at: Date }[]
+    >`
+      SELECT key, value, is_secret, updated_at
+      FROM env_entries WHERE key = ${key}
+    `;
+    const row = rows[0];
+    if (row === undefined) return null;
+    return {
+      key: row.key,
+      value: row.value,
+      isSecret: row.is_secret,
+      updatedAt: row.updated_at.toISOString(),
+    };
+  }
+
+  async upsert(row: {
+    key: string;
+    value: string;
+    isSecret: boolean;
+  }): Promise<void> {
+    await this.sql`
+      INSERT INTO env_entries (key, value, is_secret, updated_at)
+      VALUES (${row.key}, ${row.value}, ${row.isSecret}, now())
+      ON CONFLICT (key) DO UPDATE
+        SET value = EXCLUDED.value,
+            is_secret = EXCLUDED.is_secret,
+            updated_at = now()
+    `;
+  }
+
+  async delete(key: string): Promise<boolean> {
+    const result = await this.sql`DELETE FROM env_entries WHERE key = ${key}`;
+    return result.count > 0;
+  }
+
+  async list(): Promise<EnvEntryRow[]> {
+    const rows = await this.sql<
+      { key: string; value: string; is_secret: boolean; updated_at: Date }[]
+    >`
+      SELECT key, value, is_secret, updated_at FROM env_entries ORDER BY key
+    `;
+    return rows.map((r) => ({
+      key: r.key,
+      value: r.value,
+      isSecret: r.is_secret,
+      updatedAt: r.updated_at.toISOString(),
+    }));
+  }
+}
+
 // ─── Storage facade ────────────────────────────────────────────────────────
 
 export class PostgresStorage implements Storage {
@@ -824,6 +883,7 @@ export class PostgresStorage implements Storage {
   readonly ffiDelegations: FfiPendingDelegationRepo;
   readonly ffiEscalations: FfiPendingEscalationRepo;
   readonly apiEscalations: ApiPendingEscalationRepo;
+  readonly envEntries: EnvEntryRepo;
 
   private constructor(private readonly sql: Sql) {
     this.projects = new PgProjectRepo(sql);
@@ -833,6 +893,7 @@ export class PostgresStorage implements Storage {
     this.ffiDelegations = new PgFfiPendingDelegationRepo(sql);
     this.ffiEscalations = new PgFfiPendingEscalationRepo(sql);
     this.apiEscalations = new PgApiPendingEscalationRepo(sql);
+    this.envEntries = new PgEnvEntryRepo(sql);
   }
 
   static create(databaseUrl: string): PostgresStorage {
@@ -891,6 +952,7 @@ function runInTx<T>(
       ffiDelegations: new PgFfiPendingDelegationRepo(innerSql),
       ffiEscalations: new PgFfiPendingEscalationRepo(innerSql),
       apiEscalations: new PgApiPendingEscalationRepo(innerSql),
+      envEntries: new PgEnvEntryRepo(innerSql),
       withTransaction: (innerFn) => runInTx(innerSql, innerFn),
       withSnapshotLock: async (_innerTx, snapshotId, body) => {
         await acquireSnapshotAdvisoryLock(innerSql, snapshotId);

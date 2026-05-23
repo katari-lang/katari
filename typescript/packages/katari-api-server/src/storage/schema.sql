@@ -95,6 +95,18 @@ CREATE TABLE IF NOT EXISTS api_pending_escalations (
 CREATE INDEX IF NOT EXISTS api_pending_escalations_snapshot_state_idx
   ON api_pending_escalations (snapshot_id, state);
 
+-- EnvModule entries. Shared across snapshots (env values live longer
+-- than any single deploy). The `value` column holds plaintext for
+-- non-secret entries and AES-GCM ciphertext for secret entries; the
+-- EnvModule encrypts/decrypts at its boundary so the storage layer
+-- never sees plaintext credentials.
+CREATE TABLE IF NOT EXISTS env_entries (
+  key        TEXT PRIMARY KEY,
+  value      TEXT NOT NULL,
+  is_secret  BOOLEAN NOT NULL DEFAULT FALSE,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 -- Migration hint for existing deployments (v1 prototype):
 --   DROP TABLE IF EXISTS machine_diffs;
 --   DROP TABLE IF EXISTS machine_snapshots;        -- replaced by engine_checkpoints

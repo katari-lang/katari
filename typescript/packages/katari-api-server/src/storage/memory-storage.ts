@@ -24,6 +24,8 @@ import type {
   ApiPendingEscalation,
   ApiPendingEscalationRepo,
   EngineCheckpointRepo,
+  EnvEntryRepo,
+  EnvEntryRow,
   FfiPendingDelegation,
   FfiPendingDelegationRepo,
   FfiPendingEscalation,
@@ -392,6 +394,32 @@ class InMemoryApiPendingEscalationRepo implements ApiPendingEscalationRepo {
 
 // ─── Storage facade ────────────────────────────────────────────────────────
 
+class InMemoryEnvEntryRepo implements EnvEntryRepo {
+  rows = new Map<string, EnvEntryRow>();
+
+  async get(key: string): Promise<EnvEntryRow | null> {
+    return this.rows.get(key) ?? null;
+  }
+
+  async upsert(row: {
+    key: string;
+    value: string;
+    isSecret: boolean;
+  }): Promise<void> {
+    this.rows.set(row.key, { ...row, updatedAt: new Date().toISOString() });
+  }
+
+  async delete(key: string): Promise<boolean> {
+    return this.rows.delete(key);
+  }
+
+  async list(): Promise<EnvEntryRow[]> {
+    return [...this.rows.values()].sort((a, b) =>
+      a.key < b.key ? -1 : a.key > b.key ? 1 : 0,
+    );
+  }
+}
+
 export class InMemoryStorage implements Storage {
   readonly projects = new InMemoryProjectRepo();
   readonly snapshots = new InMemorySnapshotRepo();
@@ -400,6 +428,7 @@ export class InMemoryStorage implements Storage {
   readonly ffiDelegations = new InMemoryFfiPendingDelegationRepo();
   readonly ffiEscalations = new InMemoryFfiPendingEscalationRepo();
   readonly apiEscalations = new InMemoryApiPendingEscalationRepo();
+  readonly envEntries = new InMemoryEnvEntryRepo();
 
   /** Per-snapshot mutex map for `withSnapshotLock` (= in-memory version of a row lock). */
   private readonly snapshotMutexes = new Map<SnapshotId, Mutex>();
@@ -449,6 +478,7 @@ export class InMemoryStorage implements Storage {
       ffiDelegationsRows: new Map(this.ffiDelegations.rows),
       ffiEscalationsRows: new Map(this.ffiEscalations.rows),
       apiEscalationsRows: new Map(this.apiEscalations.rows),
+      envEntriesRows: new Map(this.envEntries.rows),
     };
   }
 
@@ -462,6 +492,7 @@ export class InMemoryStorage implements Storage {
     this.ffiDelegations.rows = snap.ffiDelegationsRows;
     this.ffiEscalations.rows = snap.ffiEscalationsRows;
     this.apiEscalations.rows = snap.apiEscalationsRows;
+    this.envEntries.rows = snap.envEntriesRows;
   }
 }
 
@@ -475,6 +506,7 @@ type TxSnapshot = {
   ffiDelegationsRows: Map<DelegationId, FfiPendingDelegation>;
   ffiEscalationsRows: Map<EscalationId, FfiPendingEscalation>;
   apiEscalationsRows: Map<EscalationId, ApiPendingEscalation>;
+  envEntriesRows: Map<string, EnvEntryRow>;
 };
 
 // `AgentDefId` is referenced in repo types but not used directly here.

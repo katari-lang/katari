@@ -11,6 +11,7 @@ import type { SnapshotService } from "../services/snapshot-service.js";
 import type { Orchestrator } from "../orchestrator.js";
 import { buildAgentRoutes } from "./agent.js";
 import { buildAgentDefinitionRoutes } from "./agent-definition.js";
+import { buildEnvRoutes } from "./env.js";
 import { buildEscalationRoutes } from "./escalation.js";
 import { buildProjectRoutes } from "./project.js";
 import { buildSnapshotRoutes } from "./snapshot.js";
@@ -126,6 +127,7 @@ export function buildApp(deps: AppDeps): Hono {
   );
   app.route("/agent-definition", buildAgentDefinitionRoutes(deps.snapshots));
   app.route("/escalation", buildEscalationRoutes(deps.orchestrator, deps.storage));
+  app.route("/env", buildEnvRoutes(deps.storage));
 
   return app;
 }

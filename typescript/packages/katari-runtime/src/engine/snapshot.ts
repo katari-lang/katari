@@ -36,6 +36,7 @@ export type EngineCheckpoint = {
   schemaVersion: 1;
   selfEndpoint: string;
   ffiTargetEndpoint: string;
+  envTargetEndpoint: string;
   threads: State["threads"];
   scopes: State["scopes"];
   closures: State["closures"];
@@ -52,6 +53,7 @@ export function serialize(state: State): EngineCheckpoint {
     schemaVersion: 1,
     selfEndpoint: state.selfEndpoint,
     ffiTargetEndpoint: state.ffiTargetEndpoint,
+    envTargetEndpoint: state.envTargetEndpoint,
     threads: structuredClone(state.threads),
     scopes: structuredClone(state.scopes),
     closures: structuredClone(state.closures),
@@ -85,6 +87,7 @@ export function deserialize(
     delegationSenders: structuredClone(snap.delegationSenders),
     escalationOwners: structuredClone(snap.escalationOwners),
     ffiTargetEndpoint: snap.ffiTargetEndpoint as State["ffiTargetEndpoint"],
+    envTargetEndpoint: snap.envTargetEndpoint as State["envTargetEndpoint"],
     lastGcScopeCount: snap.lastGcScopeCount,
   };
 }

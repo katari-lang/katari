@@ -236,6 +236,27 @@ export type ApiPendingEscalation = {
   createdAt: string;
 };
 
+// ─── Env entries ──────────────────────────────────────────────────────────
+//
+// Key/value store backing EnvModule. Shared across snapshots (env
+// outlives any single deploy). Secret entries hold AES-GCM ciphertext
+// produced by the EnvModule; the storage layer sees only opaque
+// strings.
+
+export type EnvEntryRow = {
+  key: string;
+  value: string;
+  isSecret: boolean;
+  updatedAt: string;
+};
+
+export interface EnvEntryRepo {
+  get(key: string): Promise<EnvEntryRow | null>;
+  upsert(row: { key: string; value: string; isSecret: boolean }): Promise<void>;
+  delete(key: string): Promise<boolean>;
+  list(): Promise<EnvEntryRow[]>;
+}
+
 export interface ApiPendingEscalationRepo {
   insert(row: ApiPendingEscalation): Promise<void>;
   get(escalationId: EscalationId): Promise<ApiPendingEscalation | null>;
@@ -264,6 +285,7 @@ export interface Storage {
   ffiDelegations: FfiPendingDelegationRepo;
   ffiEscalations: FfiPendingEscalationRepo;
   apiEscalations: ApiPendingEscalationRepo;
+  envEntries: EnvEntryRepo;
 
   /**
    * Run `fn` inside a backend-native transaction. The `tx` argument exposes

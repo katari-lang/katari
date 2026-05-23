@@ -13,3 +13,7 @@ import { CORE_ENDPOINT, endpoint, type Endpoint } from "../engine/endpoint.js";
 export { CORE_ENDPOINT };
 export const API_ENDPOINT: Endpoint = endpoint("api://main");
 export const FFI_ENDPOINT: Endpoint = endpoint("ext://ffi");
+/** EnvModule's endpoint. Receives 'delegate' events for the stdlib
+ * env builtins ('get_env' / 'get_secret_env' / 'set_env'). Resolves
+ * Katari source declarations of the form `from "ENV:..."`. */
+export const ENV_ENDPOINT: Endpoint = endpoint("ext://env");

@@ -159,18 +159,32 @@ function resolveTarget(
       };
     case "delegateTargetExternal": {
       const { endpoint, dispatchName } = target.body;
-      if (endpoint !== "FFI") {
-        throw new Error(
-          `engine.delegate: external endpoint ${JSON.stringify(endpoint)} not yet supported by this runtime (only "FFI" is wired up; ENV lands in Wave 6b-B). dispatchName=${JSON.stringify(dispatchName)}`,
-        );
+      // dispatchName is the flat opaque registry key from the source
+      // `from "ENDPOINT:name"` clause (e.g. "lib.greet", "get_env").
+      // QualifiedName is just an alias for `string` in this runtime
+      // so we hand it through verbatim.
+      switch (endpoint) {
+        case "FFI":
+          return {
+            peer: ctx.state.ffiTargetEndpoint,
+            agentDefId: encodeFfiAgentDefId({
+              kind: "qname",
+              value: dispatchName,
+            }),
+          };
+        case "ENV":
+          return {
+            peer: ctx.state.envTargetEndpoint,
+            agentDefId: encodeFfiAgentDefId({
+              kind: "qname",
+              value: dispatchName,
+            }),
+          };
+        default:
+          throw new Error(
+            `engine.delegate: unknown external endpoint ${JSON.stringify(endpoint)} (dispatchName=${JSON.stringify(dispatchName)})`,
+          );
       }
-      // After Wave 6b-A2 the dispatchName is the flat opaque registry key
-      // (e.g. "lib.greet"); QualifiedName is just an alias for `string` in
-      // this runtime so we hand it through verbatim.
-      return {
-        peer: ctx.state.ffiTargetEndpoint,
-        agentDefId: encodeFfiAgentDefId({ kind: "qname", value: dispatchName }),
-      };
     }
     case "delegateTargetValue": {
       const value = lookupValue(ctx, t.scopeId, target.body);

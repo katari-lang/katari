@@ -21,13 +21,18 @@ import { drive } from "./runner.js";
 import type { State } from "./state.js";
 
 const DEFAULT_FFI_ENDPOINT = endpoint("ext://ffi");
+const DEFAULT_ENV_ENDPOINT = endpoint("ext://env");
 
 // ─── State construction ────────────────────────────────────────────────────
 
 /** Build a fresh empty State for an IR module. */
 export function createState(
   irModule: IRModule,
-  options: { selfEndpoint?: Endpoint; ffiEndpoint?: Endpoint } = {},
+  options: {
+    selfEndpoint?: Endpoint;
+    ffiEndpoint?: Endpoint;
+    envEndpoint?: Endpoint;
+  } = {},
 ): State {
   return {
     selfEndpoint: options.selfEndpoint ?? CORE_ENDPOINT,
@@ -41,6 +46,7 @@ export function createState(
     delegationSenders: {},
     escalationOwners: {},
     ffiTargetEndpoint: options.ffiEndpoint ?? DEFAULT_FFI_ENDPOINT,
+    envTargetEndpoint: options.envEndpoint ?? DEFAULT_ENV_ENDPOINT,
     lastGcScopeCount: 0,
   };
 }

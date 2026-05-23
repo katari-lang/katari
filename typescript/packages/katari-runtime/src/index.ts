@@ -151,10 +151,14 @@ export type {
 export { FfiModule } from "./modules/ffi.js";
 export type { FfiModuleOptions } from "./modules/ffi.js";
 
+export { EnvModule } from "./modules/env.js";
+export type { EnvModuleOptions } from "./modules/env.js";
+
 export {
   API_ENDPOINT,
   CORE_ENDPOINT,
   FFI_ENDPOINT,
+  ENV_ENDPOINT,
 } from "./modules/endpoints.js";
 
 // ─── Sidecar (FFI runner ↔ subprocess IPC) ─────────────────────────────────
@@ -190,3 +194,5 @@ export type {
   FfiPendingDelegation,
   FfiPendingEscalation,
 } from "./sidecar/store.js";
+
+export type { EnvStore, EnvEntry } from "./sidecar/env-store.js";
