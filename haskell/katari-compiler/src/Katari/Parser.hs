@@ -567,6 +567,17 @@ parseExternalAgentDeclaration annotation = parseWithSpan $ do
   parsePunctuation PunctuationArrow
   returnType <- parseType
   requests <- option [] (parseKeyword KeywordWith *> parseRequests)
+  parseKeyword KeywordFrom
+  fromSpec <- parseStringLiteral <?> "\"ENDPOINT:agent_def_name\""
+  (endpoint, dispatchName) <- case splitFromSpec fromSpec of
+    Just pair -> pure pair
+    Nothing ->
+      fail $
+        "ext agent `from` clause must be of the form "
+          <> "\"ENDPOINT:agent_def_name\" (e.g. \"FFI:my_package.greet\"); "
+          <> "got \""
+          <> T.unpack fromSpec
+          <> "\""
   pure $ \sourceSpan ->
     ExternalAgentDeclaration
       { annotation = annotation,
@@ -574,8 +585,24 @@ parseExternalAgentDeclaration annotation = parseWithSpan $ do
         parameters = parameters,
         returnType = returnType,
         withRequests = requests,
+        endpoint = endpoint,
+        dispatchName = dispatchName,
         sourceSpan = sourceSpan
       }
+
+-- | Split @\"ENDPOINT:agent_def_name\"@ on the first @:@. Returns
+-- 'Nothing' if there is no @:@ or either side is empty. The endpoint is
+-- additionally constrained to be a non-empty identifier-like string (no
+-- @:@ inside); the dispatch name is the rest of the literal verbatim.
+splitFromSpec :: Text -> Maybe (Text, Text)
+splitFromSpec spec =
+  case T.breakOn ":" spec of
+    (endpoint, rest)
+      | T.null endpoint -> Nothing
+      | T.null rest -> Nothing
+      | otherwise ->
+          let dispatchName = T.drop 1 rest
+           in if T.null dispatchName then Nothing else Just (endpoint, dispatchName)
 
 -- ---------------------------------------------------------------------------
 -- Prim Agent

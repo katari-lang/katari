@@ -1,5 +1,5 @@
 @"Ext agent that always throws a JS error."
-ext agent boomExt() -> null
+ext agent boomExt() -> null from "FFI:ext_throw_catch.boomExt"
 
 @"Catches the throw bubbled from the failing ext agent."
 agent main() -> string {

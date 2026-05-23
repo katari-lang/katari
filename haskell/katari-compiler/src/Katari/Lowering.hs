@@ -670,10 +670,15 @@ lowerAllDeclarations zonkResult = do
         qname <- requireAgentQName "DeclarationExternalAgent" decl.name.text agentBlk
         let paramLabels = map (.label) decl.parameters
             labelsAndAnnotations = [(pb.label, pb.annotation) | pb <- decl.parameters]
+            externalDispatch =
+              ExternalDispatch
+                { endpoint = decl.endpoint,
+                  dispatchName = decl.dispatchName
+                }
         innerBlk <- freshBlockId
         recordBlock
           innerBlk
-          (BlockDelegate DelegateBlock {target = DelegateTargetExternal qname})
+          (BlockDelegate DelegateBlock {target = DelegateTargetExternal externalDispatch})
           (Just (decl.name.text <> ":external"))
         (inputSchema, outputSchema) <- schemasForVariable variableId labelsAndAnnotations
         writeWrapperAgent

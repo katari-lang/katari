@@ -123,5 +123,20 @@ primStdlibSource =
       "// don't have to write `with throw` everywhere; handlers catch via",
       "// the usual `req throw(msg) { ... }` form inside a handle scope.",
       "@\"Raise a recoverable runtime error. Bubbles through enclosing handle scopes until a `req throw` handler catches it; if nothing catches it the snapshot transitions to the `error` state.\"",
-      "req throw(msg: string) -> never"
+      "req throw(msg: string) -> never",
+      "",
+      "// Env access. The runtime's ENV module owns a key/value store backed",
+      "// by the project's runtime (Postgres in `katari-api-server`). Secret",
+      "// entries are returned as the disjoint `secret` type so the type",
+      "// system can prevent them from leaking into `print` / `to_string` etc.",
+      "// Missing keys surface as `env_not_found` — handle it with",
+      "// `req env_not_found(key) { ... }` to provide a fallback.",
+      "@\"Raised when a requested env key is not present in the store. Handle to provide a default; if uncaught the snapshot transitions to the `error` state.\"",
+      "req env_not_found(key: string) -> never",
+      "@\"Look up a non-secret env entry by key. Raises `env_not_found` if the key is missing.\"",
+      "ext agent get_env(key: string) -> string with env_not_found from \"ENV:get_env\"",
+      "@\"Look up a secret env entry by key. The result is the disjoint `secret` type and never leaks into `print` / `to_string`. Raises `env_not_found` if the key is missing.\"",
+      "ext agent get_secret_env(key: string) -> secret with env_not_found from \"ENV:get_secret_env\"",
+      "@\"Write an env entry. `is_secret = true` stores the value encrypted; reading it back requires `get_secret_env`.\"",
+      "ext agent set_env(key: string, value: string, is_secret: boolean) -> null from \"ENV:set_env\""
     ]

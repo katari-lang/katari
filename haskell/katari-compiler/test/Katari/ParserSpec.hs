@@ -861,15 +861,15 @@ declarations = describe "declarations" $ do
     pure ()
 
   it "parses ext agent" $ do
-    _ <- shouldSucceed "ext agent ask(prompt: string) -> string with ai_req"
+    _ <- shouldSucceed "ext agent ask(prompt: string) -> string with ai_req from \"FFI:lib.ask\""
     pure ()
 
   it "parses ext agent with multiple requests" $ do
-    _ <- shouldSucceed "ext agent ask(prompt: string) -> string with ai_req, log_req"
+    _ <- shouldSucceed "ext agent ask(prompt: string) -> string with ai_req, log_req from \"FFI:lib.ask\""
     pure ()
 
   it "parses ext agent with annotation" $ do
-    _ <- shouldSucceed "@\"external ai\" ext agent ask(prompt: string) -> string with ai_req"
+    _ <- shouldSucceed "@\"external ai\" ext agent ask(prompt: string) -> string with ai_req from \"FFI:lib.ask\""
     pure ()
 
   it "parses data with no parameters" $ do
@@ -1856,9 +1856,21 @@ spanBoundaries = describe "source span boundaries" $ do
 
 declarationsNegative :: Spec
 declarationsNegative = describe "declaration negative cases" $ do
-  it "parses ext agent without 'with'" $ do
-    _ <- shouldSucceed "ext agent ask(prompt: string) -> string"
+  it "parses ext agent without 'with' (from clause still required)" $ do
+    _ <- shouldSucceed "ext agent ask(prompt: string) -> string from \"FFI:lib.ask\""
     pure ()
+
+  it "rejects ext agent missing the required 'from' clause" $ do
+    shouldFail "ext agent ask(prompt: string) -> string"
+
+  it "rejects ext agent whose 'from' spec lacks a colon" $ do
+    shouldFail "ext agent ask(prompt: string) -> string from \"lib.ask\""
+
+  it "rejects ext agent whose 'from' spec has an empty endpoint" $ do
+    shouldFail "ext agent ask(prompt: string) -> string from \":lib.ask\""
+
+  it "rejects ext agent whose 'from' spec has an empty dispatch name" $ do
+    shouldFail "ext agent ask(prompt: string) -> string from \"FFI:\""
 
 -- ---------------------------------------------------------------------------
 -- Number literal edge cases

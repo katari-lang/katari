@@ -177,16 +177,25 @@ export type DelegateBlock = {
  *
  *   - `delegateTargetInternal`: statically known CORE qname; runtime emits
  *     `delegate` to the local self-endpoint.
- *   - `delegateTargetExternal`: statically known external qname; runtime
- *     emits `delegate` to the FFI endpoint.
+ *   - `delegateTargetExternal`: statically known external dispatch. The
+ *     `endpoint` field (e.g. `"FFI"`, `"ENV"`) selects which runtime module
+ *     handles dispatch; `dispatchName` is the flat opaque key that module's
+ *     registry expects. Both come from the source `from "ENDPOINT:name"`
+ *     clause and are independent of Katari's module path.
  *   - `delegateTargetValue`: runtime value at the given VarId
  *     (agentLiteral → qname resolved via entries to decide internal vs
  *     external; closure → CORE loopback with captured scope).
  */
 export type DelegateTarget =
   | { kind: "delegateTargetInternal"; body: QualifiedName }
-  | { kind: "delegateTargetExternal"; body: QualifiedName }
+  | { kind: "delegateTargetExternal"; body: ExternalDispatch }
   | { kind: "delegateTargetValue"; body: VarId };
+
+/** Payload for `delegateTargetExternal`. */
+export type ExternalDispatch = {
+  endpoint: string;
+  dispatchName: string;
+};
 
 // ─── Arg (irOptions → flat record) ───────────────────────────────────────────
 

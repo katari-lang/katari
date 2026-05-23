@@ -3,7 +3,7 @@
     "0": {
       "body": {
         "description": "A two-element point in 2-D space.",
-        "entryBody": 54,
+        "entryBody": 58,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"x\":{\"type\":\"integer\"},\"y\":{\"type\":\"integer\"}},\"required\":[\"x\",\"y\"],\"type\":\"object\"}",
         "name": "point",
         "outputSchema": "{\"additionalProperties\":false,\"properties\":{\"$ctor\":{\"const\":\"main.point\"},\"x\":{\"type\":\"integer\"},\"y\":{\"type\":\"integer\"}},\"required\":[\"$ctor\",\"x\",\"y\"],\"type\":\"object\"}",
@@ -24,7 +24,7 @@
     "1": {
       "body": {
         "description": "Returns the x-coordinate of a point.",
-        "entryBody": 57,
+        "entryBody": 61,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"p\":{\"additionalProperties\":false,\"properties\":{\"$ctor\":{\"const\":\"main.point\"},\"x\":{\"type\":\"integer\"},\"y\":{\"type\":\"integer\"}},\"required\":[\"$ctor\",\"x\",\"y\"],\"type\":\"object\"}},\"required\":[\"p\"],\"type\":\"object\"}",
         "name": "project_x",
         "outputSchema": "{\"type\":\"integer\"}",
@@ -158,7 +158,7 @@
     "2": {
       "body": {
         "description": "AI metadata of a callable (name / id / description / I-O schema).",
-        "entryBody": 58,
+        "entryBody": 62,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"description\":{\"type\":\"string\"},\"id\":{\"type\":\"string\"},\"input\":{\"type\":\"string\"},\"name\":{\"type\":\"string\"},\"output\":{\"type\":\"string\"}},\"required\":[\"description\",\"id\",\"input\",\"name\",\"output\"],\"type\":\"object\"}",
         "name": "agent_metadata",
         "outputSchema": "{\"additionalProperties\":false,\"properties\":{\"$ctor\":{\"const\":\"prim.agent_metadata\"},\"description\":{\"type\":\"string\"},\"id\":{\"type\":\"string\"},\"input\":{\"type\":\"string\"},\"name\":{\"type\":\"string\"},\"output\":{\"type\":\"string\"}},\"required\":[\"$ctor\",\"description\",\"id\",\"input\",\"name\",\"output\"],\"type\":\"object\"}",
@@ -617,7 +617,7 @@
     "53": {
       "body": {
         "description": "Raise a recoverable runtime error. Bubbles through enclosing handle scopes until a `req throw` handler catches it; if nothing catches it the snapshot transitions to the `error` state.",
-        "entryBody": 59,
+        "entryBody": 63,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"msg\":{\"type\":\"string\"}},\"required\":[\"msg\"],\"type\":\"object\"}",
         "name": "throw",
         "outputSchema": "{\"not\":{}}",
@@ -632,10 +632,86 @@
       "kind": "blockAgent"
     },
     "54": {
+      "body": {
+        "description": "Raised when a requested env key is not present in the store. Handle to provide a default; if uncaught the snapshot transitions to the `error` state.",
+        "entryBody": 64,
+        "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"key\":{\"type\":\"string\"}},\"required\":[\"key\"],\"type\":\"object\"}",
+        "name": "env_not_found",
+        "outputSchema": "{\"not\":{}}",
+        "parameters": [
+          {
+            "label": "key",
+            "var": 54
+          }
+        ],
+        "qualifiedName": "prim.env_not_found"
+      },
+      "kind": "blockAgent"
+    },
+    "55": {
+      "body": {
+        "description": "Look up a non-secret env entry by key. Raises `env_not_found` if the key is missing.",
+        "entryBody": 65,
+        "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"key\":{\"type\":\"string\"}},\"required\":[\"key\"],\"type\":\"object\"}",
+        "name": "get_env",
+        "outputSchema": "{\"type\":\"string\"}",
+        "parameters": [
+          {
+            "label": "key",
+            "var": 55
+          }
+        ],
+        "qualifiedName": "prim.get_env"
+      },
+      "kind": "blockAgent"
+    },
+    "56": {
+      "body": {
+        "description": "Look up a secret env entry by key. The result is the disjoint `secret` type and never leaks into `print` / `to_string`. Raises `env_not_found` if the key is missing.",
+        "entryBody": 66,
+        "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"key\":{\"type\":\"string\"}},\"required\":[\"key\"],\"type\":\"object\"}",
+        "name": "get_secret_env",
+        "outputSchema": "{}",
+        "parameters": [
+          {
+            "label": "key",
+            "var": 56
+          }
+        ],
+        "qualifiedName": "prim.get_secret_env"
+      },
+      "kind": "blockAgent"
+    },
+    "57": {
+      "body": {
+        "description": "Write an env entry. `is_secret = true` stores the value encrypted; reading it back requires `get_secret_env`.",
+        "entryBody": 67,
+        "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"is_secret\":{\"type\":\"boolean\"},\"key\":{\"type\":\"string\"},\"value\":{\"type\":\"string\"}},\"required\":[\"is_secret\",\"key\",\"value\"],\"type\":\"object\"}",
+        "name": "set_env",
+        "outputSchema": "{\"type\":\"null\"}",
+        "parameters": [
+          {
+            "label": "key",
+            "var": 57
+          },
+          {
+            "label": "value",
+            "var": 58
+          },
+          {
+            "label": "is_secret",
+            "var": 59
+          }
+        ],
+        "qualifiedName": "prim.set_env"
+      },
+      "kind": "blockAgent"
+    },
+    "58": {
       "body": "main.point",
       "kind": "blockConstructor"
     },
-    "55": {
+    "59": {
       "body": {
         "parameters": [],
         "statements": [],
@@ -643,11 +719,15 @@
       },
       "kind": "blockUser"
     },
-    "56": {
+    "6": {
+      "body": "sub",
+      "kind": "blockPrim"
+    },
+    "60": {
       "body": {
         "arms": [
           {
-            "body": 55,
+            "body": 59,
             "pattern": {
               "body": [
                 "main.point",
@@ -675,7 +755,7 @@
       },
       "kind": "blockMatch"
     },
-    "57": {
+    "61": {
       "body": {
         "parameters": [
           {
@@ -697,7 +777,7 @@
           {
             "body": {
               "arguments": [],
-              "block": 56,
+              "block": 60,
               "output": 5
             },
             "kind": "statementCall"
@@ -707,17 +787,53 @@
       },
       "kind": "blockUser"
     },
-    "58": {
+    "62": {
       "body": "prim.agent_metadata",
       "kind": "blockConstructor"
     },
-    "59": {
+    "63": {
       "body": "prim.throw",
       "kind": "blockRequest"
     },
-    "6": {
-      "body": "sub",
-      "kind": "blockPrim"
+    "64": {
+      "body": "prim.env_not_found",
+      "kind": "blockRequest"
+    },
+    "65": {
+      "body": {
+        "target": {
+          "body": {
+            "dispatchName": "get_env",
+            "endpoint": "ENV"
+          },
+          "kind": "delegateTargetExternal"
+        }
+      },
+      "kind": "blockDelegate"
+    },
+    "66": {
+      "body": {
+        "target": {
+          "body": {
+            "dispatchName": "get_secret_env",
+            "endpoint": "ENV"
+          },
+          "kind": "delegateTargetExternal"
+        }
+      },
+      "kind": "blockDelegate"
+    },
+    "67": {
+      "body": {
+        "target": {
+          "body": {
+            "dispatchName": "set_env",
+            "endpoint": "ENV"
+          },
+          "kind": "delegateTargetExternal"
+        }
+      },
+      "kind": "blockDelegate"
     },
     "7": {
       "body": {
@@ -777,11 +893,14 @@
     "prim.array_length": 45,
     "prim.concat": 35,
     "prim.div": 11,
+    "prim.env_not_found": 54,
     "prim.eq": 17,
     "prim.format": 41,
     "prim.ge": 27,
+    "prim.get_env": 55,
     "prim.get_field": 47,
     "prim.get_metadata": 51,
+    "prim.get_secret_env": 56,
     "prim.gt": 25,
     "prim.le": 23,
     "prim.lt": 21,
@@ -791,6 +910,7 @@
     "prim.neg": 13,
     "prim.not": 33,
     "prim.or": 31,
+    "prim.set_env": 57,
     "prim.sub": 5,
     "prim.throw": 53,
     "prim.to_string": 39,
@@ -852,11 +972,19 @@
       "51": "prim:get_metadata:agent",
       "52": "prim:get_metadata:leaf",
       "53": "throw:agent",
-      "54": "point:ctor",
-      "57": "project_x.body",
-      "58": "agent_metadata:ctor",
-      "59": "throw:request",
+      "54": "env_not_found:agent",
+      "55": "get_env:agent",
+      "56": "get_secret_env:agent",
+      "57": "set_env:agent",
+      "58": "point:ctor",
       "6": "prim:sub:leaf",
+      "61": "project_x.body",
+      "62": "agent_metadata:ctor",
+      "63": "throw:request",
+      "64": "env_not_found:request",
+      "65": "get_env:external",
+      "66": "get_secret_env:external",
+      "67": "set_env:external",
       "7": "prim:mul:agent",
       "8": "prim:mul:leaf",
       "9": "prim:mod:agent"

@@ -1,5 +1,5 @@
 @"Greet via an ext agent (host-provided JS)."
-ext agent extGreet(name: string) -> string
+ext agent extGreet(name: string) -> string from "FFI:ext_agent.extGreet"
 
 @"Calls extGreet and returns its result verbatim."
 agent main() -> string {

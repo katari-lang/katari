@@ -307,7 +307,12 @@ describe("engine integration: end-to-end via external delegate", () => {
       2: userBlk,
       200: {
         kind: "blockDelegate",
-        body: { target: { kind: "delegateTargetExternal", body: "test.wait" } },
+        body: {
+          target: {
+            kind: "delegateTargetExternal",
+            body: { endpoint: "FFI", dispatchName: "test.wait" },
+          },
+        },
       },
     }, { main: 1 });
 

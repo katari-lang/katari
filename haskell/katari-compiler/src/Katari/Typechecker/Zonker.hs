@@ -213,7 +213,7 @@ walkRequestDecl RequestDeclaration {annotation, name, requestName, parameters, r
       }
 
 walkExternalAgentDecl :: ExternalAgentDeclaration Constrained -> Zonk (ExternalAgentDeclaration Zonked)
-walkExternalAgentDecl ExternalAgentDeclaration {annotation, name, parameters, returnType, withRequests, sourceSpan} = do
+walkExternalAgentDecl ExternalAgentDeclaration {annotation, name, parameters, returnType, withRequests, endpoint, dispatchName, sourceSpan} = do
   parameters' <- mapM walkParameter parameters
   pure
     ExternalAgentDeclaration
@@ -222,6 +222,8 @@ walkExternalAgentDecl ExternalAgentDeclaration {annotation, name, parameters, re
         parameters = parameters',
         returnType = retagSyntacticType returnType,
         withRequests = map retagSyntacticRequest withRequests,
+        endpoint = endpoint,
+        dispatchName = dispatchName,
         sourceSpan = sourceSpan
       }
 

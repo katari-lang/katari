@@ -244,7 +244,7 @@ declarations = describe "declarations" $ do
     errors `shouldBe` []
     countTypeConstraints cg `shouldSatisfy` (>= 2) -- eq = 2 subtype
   it "ext-agent emits eq constraint (requests from with clause)" $ do
-    (cg, errors) <- runOne "req bar(x: integer) -> string\n@\"svc\"\next agent foo() -> integer with bar"
+    (cg, errors) <- runOne "req bar(x: integer) -> string\n@\"svc\"\next agent foo() -> integer with bar from \"FFI:lib.foo\""
     errors `shouldBe` []
     countTypeConstraints cg `shouldSatisfy` (>= 2)
 

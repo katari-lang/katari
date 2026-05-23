@@ -99,5 +99,148 @@
       "not": {}
     },
     "requests": []
+  },
+  {
+    "description": "Raised when a requested env key is not present in the store. Handle to provide a default; if uncaught the snapshot transitions to the `error` state.",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "key": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "key"
+      ],
+      "type": "object"
+    },
+    "name": "prim.env_not_found",
+    "output": {
+      "not": {}
+    },
+    "requests": [
+      {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "key": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "key"
+          ],
+          "type": "object"
+        },
+        "name": "prim.env_not_found",
+        "output": {
+          "not": {}
+        }
+      }
+    ]
+  },
+  {
+    "description": "Look up a non-secret env entry by key. Raises `env_not_found` if the key is missing.",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "key": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "key"
+      ],
+      "type": "object"
+    },
+    "name": "prim.get_env",
+    "output": {
+      "type": "string"
+    },
+    "requests": [
+      {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "key": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "key"
+          ],
+          "type": "object"
+        },
+        "name": "prim.env_not_found",
+        "output": {
+          "not": {}
+        }
+      }
+    ]
+  },
+  {
+    "description": "Look up a secret env entry by key. The result is the disjoint `secret` type and never leaks into `print` / `to_string`. Raises `env_not_found` if the key is missing.",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "key": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "key"
+      ],
+      "type": "object"
+    },
+    "name": "prim.get_secret_env",
+    "output": {},
+    "requests": [
+      {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "key": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "key"
+          ],
+          "type": "object"
+        },
+        "name": "prim.env_not_found",
+        "output": {
+          "not": {}
+        }
+      }
+    ]
+  },
+  {
+    "description": "Write an env entry. `is_secret = true` stores the value encrypted; reading it back requires `get_secret_env`.",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "is_secret": {
+          "type": "boolean"
+        },
+        "key": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "is_secret",
+        "key",
+        "value"
+      ],
+      "type": "object"
+    },
+    "name": "prim.set_env",
+    "output": {
+      "type": "null"
+    },
+    "requests": []
   }
 ]

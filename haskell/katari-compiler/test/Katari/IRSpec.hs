@@ -73,7 +73,15 @@ blockSpec = describe "Block (sum)" $ do
         ]
 
   it "BlockDelegate (TargetExternal) nests DelegateBlock under 'body'" $ do
-    BlockDelegate DelegateBlock {target = DelegateTargetExternal (QualifiedName "discord" "send_message")}
+    BlockDelegate
+      DelegateBlock
+        { target =
+            DelegateTargetExternal
+              ExternalDispatch
+                { endpoint = "FFI",
+                  dispatchName = "discord.send_message"
+                }
+        }
       `shouldEncodeAs` object
         [ "kind" .= ("blockDelegate" :: String),
           "body"
@@ -81,7 +89,11 @@ blockSpec = describe "Block (sum)" $ do
               [ "target"
                   .= object
                     [ "kind" .= ("delegateTargetExternal" :: String),
-                      "body" .= ("discord.send_message" :: String)
+                      "body"
+                        .= object
+                          [ "endpoint" .= ("FFI" :: String),
+                            "dispatchName" .= ("discord.send_message" :: String)
+                          ]
                     ]
               ]
         ]
@@ -118,7 +130,17 @@ blockSpec = describe "Block (sum)" $ do
     roundTrip (BlockPrim "add")
     roundTrip (BlockRequest (QualifiedName "main" "log"))
     roundTrip (BlockDelegate DelegateBlock {target = DelegateTargetInternal (QualifiedName "main" "agent")})
-    roundTrip (BlockDelegate DelegateBlock {target = DelegateTargetExternal (QualifiedName "discord" "send")})
+    roundTrip
+      ( BlockDelegate
+          DelegateBlock
+            { target =
+                DelegateTargetExternal
+                  ExternalDispatch
+                    { endpoint = "FFI",
+                      dispatchName = "discord.send"
+                    }
+            }
+      )
     roundTrip (BlockDelegate DelegateBlock {target = DelegateTargetValue (VarId 7)})
     roundTrip (BlockConstructor (QualifiedName "main" "point"))
     roundTrip (BlockMatch MatchBlock {subject = VarId 0, arms = [], defaultArm = Nothing})

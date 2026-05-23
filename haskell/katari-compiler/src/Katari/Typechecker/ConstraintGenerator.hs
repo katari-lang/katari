@@ -652,7 +652,7 @@ walkRequestDecl RequestDeclaration {annotation, name, requestName, parameters, r
       }
 
 walkExternalAgentDecl :: ExternalAgentDeclaration Identified -> CG (ExternalAgentDeclaration Constrained)
-walkExternalAgentDecl ExternalAgentDeclaration {annotation, name, parameters, returnType, withRequests, sourceSpan} = do
+walkExternalAgentDecl ExternalAgentDeclaration {annotation, name, parameters, returnType, withRequests, endpoint, dispatchName, sourceSpan} = do
   tExt <- variableTypeFromName name
   (parameters', paramSig) <- walkParameterListForSignature parameters
   retSemantic <- elaborateType returnType
@@ -666,6 +666,8 @@ walkExternalAgentDecl ExternalAgentDeclaration {annotation, name, parameters, re
         parameters = parameters',
         returnType = retagSyntacticType returnType,
         withRequests = fmap retagSyntacticRequest withRequests,
+        endpoint = endpoint,
+        dispatchName = dispatchName,
         sourceSpan = sourceSpan
       }
 

@@ -45,6 +45,7 @@ module Katari.IR
     AgentBlock (..),
     DelegateBlock (..),
     DelegateTarget (..),
+    ExternalDispatch (..),
     MatchBlock (..),
     ForBlock (..),
     HandleBlock (..),
@@ -314,17 +315,37 @@ instance FromJSON DelegateBlock where
 --
 --   * 'DelegateTargetInternal': statically known CORE qname; runtime
 --     emits a @delegate@ event to the local self-endpoint (loopback).
---   * 'DelegateTargetExternal': statically known external qname; runtime
---     emits a @delegate@ event to the FFI endpoint.
+--   * 'DelegateTargetExternal': statically known external dispatch. The
+--     @endpoint@ field (e.g. @\"FFI\"@, @\"ENV\"@) selects the runtime
+--     module that handles dispatch; @dispatchName@ is the flat opaque key
+--     that module's registry expects. Both come straight from the source
+--     @from \"ENDPOINT:name\"@ clause and are completely independent of
+--     Katari's module path.
 --   * 'DelegateTargetValue': the callee is a runtime value at the given
 --     'VarId'. The runtime reads the value (@agentLiteral@ → qname
 --     resolved through 'IRModule.entries' to decide internal vs external,
 --     @closure@ → CORE loopback with captured scope) and routes accordingly.
 data DelegateTarget where
   DelegateTargetInternal :: QualifiedName -> DelegateTarget
-  DelegateTargetExternal :: QualifiedName -> DelegateTarget
+  DelegateTargetExternal :: ExternalDispatch -> DelegateTarget
   DelegateTargetValue :: VarId -> DelegateTarget
   deriving (Eq, Show, Generic)
+
+-- | Payload for 'DelegateTargetExternal'. The @endpoint@ field selects
+-- the runtime module (e.g. @\"FFI\"@, @\"ENV\"@); @dispatchName@ is the
+-- flat opaque key looked up in that module's registry. Both come straight
+-- from the source @from \"ENDPOINT:name\"@ clause.
+data ExternalDispatch = ExternalDispatch
+  { endpoint :: Text,
+    dispatchName :: Text
+  }
+  deriving (Eq, Show, Generic)
+
+instance ToJSON ExternalDispatch where
+  toJSON = genericToJSON irOptions
+
+instance FromJSON ExternalDispatch where
+  parseJSON = genericParseJSON irOptions
 
 instance ToJSON DelegateTarget where
   toJSON = genericToJSON sumOptions

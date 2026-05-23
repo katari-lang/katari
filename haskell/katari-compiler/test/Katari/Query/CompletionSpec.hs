@@ -209,7 +209,7 @@ spec = describe "Katari.Query.Completion" $ do
           [ "@\"Cron tick.\"",
             "req scheduled() -> null",
             "@\"Schedule a callback.\"",
-            "ext agent cron_impl(callback: () -> null with scheduled) -> null",
+            "ext agent cron_impl(callback: () -> null with scheduled) -> null from \"FFI:lib.cron_impl\"",
             "agent main() -> integer { 0 }"
           ]
     case resolveDottedPath idr zr "<test>" Position {line = 5, column = 26} "cron_impl" of

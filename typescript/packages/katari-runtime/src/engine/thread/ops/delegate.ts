@@ -157,11 +157,21 @@ function resolveTarget(
         peer: ctx.state.selfEndpoint,
         agentDefId: encodeCoreAgentDefId({ kind: "qname", value: target.body }),
       };
-    case "delegateTargetExternal":
+    case "delegateTargetExternal": {
+      const { endpoint, dispatchName } = target.body;
+      if (endpoint !== "FFI") {
+        throw new Error(
+          `engine.delegate: external endpoint ${JSON.stringify(endpoint)} not yet supported by this runtime (only "FFI" is wired up; ENV lands in Wave 6b-B). dispatchName=${JSON.stringify(dispatchName)}`,
+        );
+      }
+      // After Wave 6b-A2 the dispatchName is the flat opaque registry key
+      // (e.g. "lib.greet"); QualifiedName is just an alias for `string` in
+      // this runtime so we hand it through verbatim.
       return {
         peer: ctx.state.ffiTargetEndpoint,
-        agentDefId: encodeFfiAgentDefId({ kind: "qname", value: target.body }),
+        agentDefId: encodeFfiAgentDefId({ kind: "qname", value: dispatchName }),
       };
+    }
     case "delegateTargetValue": {
       const value = lookupValue(ctx, t.scopeId, target.body);
       if (value.kind === "agentLiteral") {

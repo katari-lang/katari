@@ -256,15 +256,26 @@ data ImportItemKind where
   ImportItemType :: ImportItemKind
   deriving (Eq, Show)
 
--- | @ext agent name(...) -> T [with E]@ — a foreign agent implemented by
--- a JavaScript sidecar. The compiler treats it like a regular agent for
--- typechecking; the runtime dispatches to the sidecar at call time.
+-- | @ext agent name(...) -> T [with E] from "ENDPOINT:dispatch_name"@ — a
+-- foreign agent implemented outside Katari (JS sidecar, ENV module, ...).
+-- The compiler treats it like a regular agent for typechecking; the runtime
+-- dispatches to the named endpoint at call time using @dispatchName@ as the
+-- opaque key.
+--
+-- @from "ENDPOINT:name"@ is **required** (parser error otherwise). The
+-- endpoint string (e.g. @"FFI"@ / @"ENV"@) selects the runtime module that
+-- handles dispatch, and @dispatchName@ is the flat name that module
+-- registers under — completely independent of Katari's module path.
 data ExternalAgentDeclaration (phase :: Phase) = ExternalAgentDeclaration
   { annotation :: Maybe Text,
     name :: NameRef phase VariableRef,
     parameters :: [ParameterBinding phase],
     returnType :: SyntacticType phase,
     withRequests :: [SyntacticRequest phase],
+    -- | Endpoint identifier (e.g. @"FFI"@, @"ENV"@). Always present.
+    endpoint :: Text,
+    -- | Flat dispatch name inside the endpoint's registry. Always present.
+    dispatchName :: Text,
     sourceSpan :: SourceSpan
   }
 

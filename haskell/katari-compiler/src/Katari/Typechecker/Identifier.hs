@@ -1323,6 +1323,8 @@ resolveExternalAgent ExternalAgentDeclaration {..} = do
           parameters = parameters',
           returnType = returnType',
           withRequests = withRequests',
+          endpoint = endpoint,
+          dispatchName = dispatchName,
           sourceSpan = sourceSpan
         }
 
