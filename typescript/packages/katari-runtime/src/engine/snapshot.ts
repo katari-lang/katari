@@ -172,7 +172,18 @@ function walkValuesInTree(
     return node.map((n) => walkValuesInTree(n, transform));
   }
   const obj = node as Record<string, unknown>;
-  if (typeof obj.kind === "string" && VALUE_KIND_TAGS.has(obj.kind)) {
+  // Match BOTH the plaintext Value shape (= kind ∈ VALUE_KIND_TAGS) and
+  // the encrypted-storage envelope (= '$envelope' marker). 'encryptValueTree'
+  // is fed only plaintext Values during encrypt (no envelopes exist at
+  // that point); 'decryptValueTree' is fed both shapes during decrypt
+  // (plaintext Values pass through unchanged, envelopes decrypt back).
+  // Keeping the match here — not in two separate walkers — means a
+  // checkpoint that mixes plaintext and encrypted nodes (e.g. an
+  // already-encrypted checkpoint re-encrypted) still round-trips.
+  if (
+    (typeof obj.kind === "string" && VALUE_KIND_TAGS.has(obj.kind))
+    || typeof obj.$envelope === "string"
+  ) {
     return transform(obj);
   }
   const out: Record<string, unknown> = {};

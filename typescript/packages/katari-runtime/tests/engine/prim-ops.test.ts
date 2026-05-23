@@ -46,6 +46,48 @@ describe("engine: prim builtin", () => {
       executePrim("add", { lhs: { kind: "string", value: "hi" }, rhs: num1(1) }),
     ).toThrow(/invalid args/);
   });
+
+  it("concat propagates taint: string + string = string", () => {
+    expect(
+      executePrim("concat", {
+        lhs: { kind: "string", value: "a" },
+        rhs: { kind: "string", value: "b" },
+      }),
+    ).toEqual({ kind: "string", value: "ab" });
+  });
+
+  it("concat propagates taint: secret + string = secret", () => {
+    expect(
+      executePrim("concat", {
+        lhs: { kind: "secret", value: "tok" },
+        rhs: { kind: "string", value: "/api" },
+      }),
+    ).toEqual({ kind: "secret", value: "tok/api" });
+  });
+
+  it("concat propagates taint: string + secret = secret", () => {
+    expect(
+      executePrim("concat", {
+        lhs: { kind: "string", value: "Bearer " },
+        rhs: { kind: "secret", value: "tok" },
+      }),
+    ).toEqual({ kind: "secret", value: "Bearer tok" });
+  });
+
+  it("format passes secrets through preserving the variant", () => {
+    expect(
+      executePrim("format", { value: { kind: "secret", value: "x" } }),
+    ).toEqual({ kind: "secret", value: "x" });
+    expect(
+      executePrim("format", { value: { kind: "string", value: "x" } }),
+    ).toEqual({ kind: "string", value: "x" });
+  });
+
+  it("to_string refuses to launder secret taint into a plain string", () => {
+    expect(() =>
+      executePrim("to_string", { value: { kind: "secret", value: "x" } }),
+    ).toThrow(/refusing to stringify a secret/);
+  });
 });
 
 describe("engine: runner dispatches prim create without crashing", () => {

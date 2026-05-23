@@ -7,6 +7,7 @@ import {
   CALLABLE_DISCRIMINATOR,
   CTOR_DISCRIMINATOR,
   RawValueDecodeError,
+  SECRET_DISCRIMINATOR,
   valueFromRaw,
   valueToRaw,
 } from "../src/value-codec.js";
@@ -128,5 +129,29 @@ describe("value-codec", () => {
 
   it("rejects undefined as a top-level raw", () => {
     expect(() => valueFromRaw(undefined)).toThrow(RawValueDecodeError);
+  });
+
+  it("encodes a secret as { $secret: <plaintext> } on outbound wire", () => {
+    const v: Value = { kind: "secret", value: "sk-live-abc" };
+    expect(valueToRaw(v)).toEqual({ [SECRET_DISCRIMINATOR]: "sk-live-abc" });
+  });
+
+  it("refuses to decode '$secret' on inbound (sidecar→runtime is one-way)", () => {
+    // Sidecar IPC trust direction is outbound-only for secrets; the
+    // runtime would happily round-trip if we allowed it, so the
+    // refusal is what guards against a misbehaving / malicious
+    // sidecar trying to inject cleartext back.
+    expect(() =>
+      valueFromRaw({ [SECRET_DISCRIMINATOR]: "leaked" }),
+    ).toThrow(RawValueDecodeError);
+  });
+
+  it("a secret nested inside a tagged value still triggers the inbound refusal", () => {
+    expect(() =>
+      valueFromRaw({
+        [CTOR_DISCRIMINATOR]: "main.payload",
+        token: { [SECRET_DISCRIMINATOR]: "x" },
+      }),
+    ).toThrow(RawValueDecodeError);
   });
 });
