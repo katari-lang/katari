@@ -64,7 +64,9 @@ import Katari.Diagnostic (Diagnostic, diagnosticError)
 import Katari.Id (RequestId, TypeId)
 import Katari.SemanticType
   ( RequestVariableId (..),
+    SemanticType (..),
     TypeVariableId (..),
+    Unresolved,
   )
 import Katari.SemanticType.Render qualified as STR
 import Katari.SourceSpan (HasSourceSpan (..), Position (..), SourceSpan (..))
@@ -221,15 +223,40 @@ resolveDeepSubst substitution =
 
 -- | Detect concrete-vs-concrete contradictions in remaining constraints
 -- after propagation.
+--
+-- The naïve check (\"both whole sides concrete\") is not enough: when a
+-- type variable's lower bound is a union containing an unresolved var
+-- — e.g. the @Union[42, β] \<: α@ that the bounds calculator records
+-- as-is whenever the @(_, SemanticTypeVariable _) -> keep@ clause in
+-- 'Decompose' refuses to split a union-LHS — propagation derives
+-- @Union[42, β] \<: upper@ and the whole-LHS 'semanticToConcrete' fails
+-- (β is unresolved). Splitting union-LHS in 'Decompose' itself would
+-- be cleaner but loses an important shortcut: when the inherited
+-- equality @upper \<: α@ pins α via a syntactically-identical union
+-- lower, splitting eagerly breaks the equality-driven shortcut and
+-- forces branching that no longer succeeds. So instead we split
+-- unions inside the contradiction checker only: this is sound
+-- because @(A | B) \<: C@ iff @A \<: C AND B \<: C@.
 checkContradictions :: Set Constraint -> [SolverError]
 checkContradictions = foldr collect []
   where
     collect (TypeConstraint leftType rightType reason) accumulator
-      | Just leftConcrete <- semanticToConcrete leftType,
-        Just rightConcrete <- semanticToConcrete rightType,
-        not (subtypeNormalizedType (normaliseSemantic leftConcrete) (normaliseSemantic rightConcrete)) =
-          SolverErrorContradiction reason leftConcrete rightConcrete : accumulator
+      | Just rightConcrete <- semanticToConcrete rightType =
+          [ SolverErrorContradiction reason leftBranchConcrete rightConcrete
+            | leftBranch <- splitLowerUnion leftType,
+              Just leftBranchConcrete <- [semanticToConcrete leftBranch],
+              not (subtypeNormalizedType (normaliseSemantic leftBranchConcrete) (normaliseSemantic rightConcrete))
+          ]
+            <> accumulator
     collect _ accumulator = accumulator
+
+    -- | Flatten a union-of-union LHS into its leaf branches so each
+    -- concrete branch can be checked individually against the RHS.
+    -- Non-union types are returned as singleton lists.
+    splitLowerUnion :: SemanticType Unresolved -> [SemanticType Unresolved]
+    splitLowerUnion = \case
+      SemanticTypeUnion branches -> concatMap splitLowerUnion branches
+      other -> [other]
 
 -- | Pick a 'ConstraintReason' to attach to a synthesised solver error
 -- ("all branches failed"): use the reason of the first constraint that
