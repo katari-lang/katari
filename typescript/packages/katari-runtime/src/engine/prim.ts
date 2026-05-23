@@ -61,22 +61,52 @@ export function executePrim(name: string, args: Record<string, Value>): Value {
     case "or":
       return logical(name, args, (a, b) => a || b);
     case "concat": {
+      // Taint-aware concat (via the `using fstring_join` rule on
+      // 'prim agent concat'): both operands must be string-or-secret,
+      // and if EITHER operand is secret the result is secret too.
+      // The type system has already narrowed each argument to
+      // string ∪ secret at compile time; at runtime we just observe
+      // which variant landed.
       const lhs = args["lhs"], rhs = args["rhs"];
-      if (lhs?.kind === "string" && rhs?.kind === "string") {
-        return { kind: "string", value: lhs.value + rhs.value };
+      if (
+        (lhs?.kind === "string" || lhs?.kind === "secret") &&
+        (rhs?.kind === "string" || rhs?.kind === "secret")
+      ) {
+        const joined = lhs.value + rhs.value;
+        const tainted = lhs.kind === "secret" || rhs.kind === "secret";
+        return tainted
+          ? { kind: "secret", value: joined }
+          : { kind: "string", value: joined };
       }
       throw new RecoverableEngineError("prim concat: invalid args");
     }
     case "to_string": {
       const v = args["value"];
       if (v === undefined) throw new RecoverableEngineError("prim to_string: missing arg");
+      // 'to_string' is the **type-erasing** stringifier: by spec it
+      // refuses 'secret' because that would launder taint into a
+      // plain `string`. The type system rejects this statically
+      // ('to_string' takes `unknown` excluding `secret`); the
+      // runtime check below is defence-in-depth.
+      if (v.kind === "secret") {
+        throw new RecoverableEngineError(
+          "prim to_string: refusing to stringify a secret value (would launder taint)",
+        );
+      }
       return { kind: "string", value: JSON.stringify(valueToRaw(v)) };
     }
     case "format": {
+      // Taint-aware unary format (via `using fstring_join`). Pass
+      // string and secret through verbatim — preserving the variant
+      // is exactly the taint-propagation rule. Other inputs were
+      // already rejected at typecheck (fstring_join restricts to
+      // string ∪ secret), but we throw defensively here.
       const v = args["value"];
       if (v === undefined) throw new RecoverableEngineError("prim format: missing arg");
-      if (v.kind === "string") return v;
-      return { kind: "string", value: JSON.stringify(valueToRaw(v)) };
+      if (v.kind === "string" || v.kind === "secret") return v;
+      throw new RecoverableEngineError(
+        `prim format: argument must be string or secret, got ${v.kind}`,
+      );
     }
     case "tuple_get": {
       // Tuples are stored as arrays at runtime (see 'Value'); the
@@ -186,6 +216,17 @@ export function valueEquals(a: Value, b: Value): boolean {
       }
       return true;
     })
+    .with(
+      [{ kind: "secret" }, { kind: "secret" }],
+      // Plaintext equality on secrets is a deliberate compromise:
+      // it's needed for legitimate "is this key the same as that
+      // key" checks (e.g. token rotation logic), but the JS string
+      // == comparison short-circuits on first mismatched character
+      // — a side-channel timing leak. v0.2 should either replace
+      // this with a constant-time compare or remove `secret` from
+      // the `eq` prim's input type entirely.
+      ([x, y]) => x.value === y.value,
+    )
     .with([{ kind: "closure" }, P._], () => false)
     .with([P._, { kind: "closure" }], () => false)
     // Cross-kind comparison always false.

@@ -16,9 +16,11 @@ import type { Endpoint } from "../engine/endpoint.js";
 import type { ExternalEvent } from "../engine/event.js";
 import type { Logger } from "../engine/logger.js";
 import {
+  decryptCheckpoint,
   deserialize,
+  encryptCheckpoint,
   serialize,
-  type EngineCheckpoint,
+  type EncryptedEngineCheckpoint,
 } from "../engine/snapshot.js";
 import type { State } from "../engine/state.js";
 import type { Module } from "../module.js";
@@ -27,10 +29,19 @@ import type { IRModule } from "../ir/types.js";
 /**
  * Storage interface that the CoreModule depends on. The host (api-server)
  * provides a concrete implementation backed by Postgres / in-memory.
+ *
+ * The shape exchanged is the **encrypted** form: CoreModule wraps every
+ * persist/load with 'encryptCheckpoint' / 'decryptCheckpoint' so the
+ * storage layer never sees plaintext secrets. The 'EncryptedEngineCheckpoint'
+ * type is structurally identical to 'EngineCheckpoint' and is JSON-safe
+ * for direct JSONB persistence.
  */
 export interface CoreCheckpointStore {
-  get(snapshotId: string): Promise<EngineCheckpoint | null>;
-  upsert(snapshotId: string, checkpoint: EngineCheckpoint): Promise<void>;
+  get(snapshotId: string): Promise<EncryptedEngineCheckpoint | null>;
+  upsert(
+    snapshotId: string,
+    checkpoint: EncryptedEngineCheckpoint,
+  ): Promise<void>;
 }
 
 export type CoreModuleOptions = {
@@ -72,13 +83,14 @@ export class CoreModule implements Module<CoreTx> {
   }
 
   async persist(tx: CoreTx): Promise<void> {
-    await tx.coreCheckpoints.upsert(this.snapshotId, serialize(this.state));
+    const encrypted = encryptCheckpoint(serialize(this.state));
+    await tx.coreCheckpoints.upsert(this.snapshotId, encrypted);
   }
 
   async load(tx: CoreTx): Promise<void> {
-    const checkpoint = await tx.coreCheckpoints.get(this.snapshotId);
-    this.state = checkpoint !== null
-      ? deserialize(this.irModule, checkpoint)
+    const encrypted = await tx.coreCheckpoints.get(this.snapshotId);
+    this.state = encrypted !== null
+      ? deserialize(this.irModule, decryptCheckpoint(encrypted))
       : createState(this.irModule, { selfEndpoint: this.endpoint });
   }
 

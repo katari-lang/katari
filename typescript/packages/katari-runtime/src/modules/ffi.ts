@@ -48,6 +48,10 @@ import type { Logger } from "../engine/logger.js";
 import type { Value } from "../engine/value.js";
 import { valueFromRaw, valueToRaw } from "../value-codec.js";
 import type { RawValue } from "../value-codec.js";
+import {
+  decryptValueRecord,
+  encryptValueRecord,
+} from "../value-secret-codec.js";
 import type { Module } from "../module.js";
 import type { Sidecar } from "../sidecar/sidecar.js";
 import type { FfiStore } from "../sidecar/store.js";
@@ -177,7 +181,7 @@ export class FfiModule implements Module {
           type: "ipcDelegateRestarted",
           delegationId: row.delegationId,
           agentDefId: row.agentDefId,
-          args: argsToRaw(row.args),
+          args: argsToRaw(decryptValueRecord(row.args)),
         });
       } catch (err) {
         this.logger.log("error", "ffi: ipcDelegateRestarted send failed", {
@@ -219,7 +223,7 @@ export class FfiModule implements Module {
       delegationId,
       peerEndpoint: event.from,
       agentDefId,
-      args,
+      args: encryptValueRecord(args),
       state: "running",
       createdAt: new Date().toISOString(),
       parentExtDelegationId: null,
@@ -386,7 +390,7 @@ export class FfiModule implements Module {
       delegationId,
       peerEndpoint: parentRow.peerEndpoint,
       agentDefId,
-      args,
+      args: encryptValueRecord(args),
       createdAt: new Date().toISOString(),
     });
     this.onSidecarResponse({
@@ -506,7 +510,7 @@ export class FfiModule implements Module {
           delegationId: msg.delegationId,
           peerEndpoint: this.endpoint, // ack comes back to us
           agentDefId: msg.agentDefId,
-          args: argsFromRaw(msg.args),
+          args: encryptValueRecord(argsFromRaw(msg.args)),
           state: "running",
           createdAt: new Date().toISOString(),
           parentExtDelegationId: msg.parentDelegationId,

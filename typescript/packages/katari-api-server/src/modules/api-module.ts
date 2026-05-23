@@ -16,6 +16,8 @@ import {
   CORE_ENDPOINT,
   createDelegationId,
   encodeCoreAgentDefId,
+  encryptValueRecord,
+  encryptValueTree,
   type ExternalEvent,
   type Logger,
   type Module,
@@ -87,7 +89,7 @@ export class ApiModule implements Module {
           delegationId: event.payload.delegationId,
           snapshotId: this.snapshotId,
           agentDefId: event.payload.agentDefId,
-          args: event.payload.args,
+          args: encryptValueRecord(event.payload.args),
           state: "open",
           createdAt: new Date().toISOString(),
         });
@@ -120,7 +122,12 @@ export class ApiModule implements Module {
       delegationId,
       snapshotId: this.snapshotId,
       qualifiedName: input.qualifiedName,
-      args: input.args,
+      // input.args originated from `valueFromRaw` at the HTTP boundary
+      // (which already refuses '$secret' shapes), so secrets cannot
+      // appear here — but `encryptValueRecord` is a no-op on
+      // secret-free trees, and applying it uniformly keeps the
+      // "storage sees encrypted form only" invariant trivially true.
+      args: encryptValueRecord(input.args),
       state: "running",
       createdAt: now,
       updatedAt: now,
@@ -177,7 +184,7 @@ export class ApiModule implements Module {
   }): Promise<{ ok: boolean }> {
     const ok = await this.tx.apiEscalations.setAnswered(
       input.escalationId,
-      input.value,
+      encryptValueTree(input.value),
     );
     if (!ok) return { ok: false };
     input.bus.push({
@@ -253,7 +260,7 @@ export class ApiModule implements Module {
     }
     await this.tx.agents.setState(
       row.id,
-      { state: "succeeded", result: value },
+      { state: "succeeded", result: encryptValueTree(value) },
       { expectedState: "running" },
     );
   }

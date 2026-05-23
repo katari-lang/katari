@@ -20,11 +20,11 @@
 
 import type {
   DelegationId,
+  EncryptedValue,
   EscalationId,
   EngineCheckpoint,
   IRModule,
   SchemaBundle,
-  Value,
   AgentDefId,
 } from "@katari-lang/runtime";
 
@@ -129,9 +129,9 @@ export type AgentRow = {
   delegationId: DelegationId;
   snapshotId: SnapshotId;
   qualifiedName: string;
-  args: Record<string, Value>;
+  args: Record<string, EncryptedValue>;
   state: AgentState;
-  result?: Value;
+  result?: EncryptedValue;
   errorMessage?: string;
   createdAt: string;
   updatedAt: string;
@@ -171,7 +171,7 @@ export type FfiPendingDelegation = {
   /** Endpoint to send acks to (= normally CORE). */
   peerEndpoint: string;
   agentDefId: AgentDefId;
-  args: Record<string, Value>;
+  args: Record<string, EncryptedValue>;
   state: "running" | "cancelling";
   createdAt: string;
   /**
@@ -205,7 +205,7 @@ export type FfiPendingEscalation = {
   /** Endpoint to send acks to (= normally via sidecar = expected from the CORE side). */
   peerEndpoint: string;
   agentDefId: AgentDefId;
-  args: Record<string, Value>;
+  args: Record<string, EncryptedValue>;
   createdAt: string;
 };
 
@@ -228,11 +228,11 @@ export type ApiPendingEscalation = {
   delegationId: DelegationId;
   snapshotId: SnapshotId;
   agentDefId: AgentDefId;
-  args: Record<string, Value>;
+  args: Record<string, EncryptedValue>;
   /** "open" = awaiting user reply / "answered" = already escalateAck'd / "cancelled" */
   state: "open" | "answered" | "cancelled";
   /** Set when state === "answered". */
-  value?: Value;
+  value?: EncryptedValue;
   createdAt: string;
 };
 
@@ -243,7 +243,7 @@ export interface ApiPendingEscalationRepo {
     filter?: { snapshotId?: SnapshotId; state?: ApiPendingEscalation["state"] }
       & ListOptions,
   ): Promise<ApiPendingEscalation[]>;
-  setAnswered(escalationId: EscalationId, value: Value): Promise<boolean>;
+  setAnswered(escalationId: EscalationId, value: EncryptedValue): Promise<boolean>;
   setCancelled(escalationId: EscalationId): Promise<boolean>;
 }
 

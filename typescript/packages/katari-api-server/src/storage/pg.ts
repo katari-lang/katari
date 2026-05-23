@@ -12,12 +12,12 @@ import { v7 as uuidv7 } from "uuid";
 import type {
   AgentDefId,
   DelegationId,
+  EncryptedValue,
   EngineCheckpoint,
   EscalationId,
   IRModule,
   Json,
   SchemaBundle,
-  Value,
 } from "@katari-lang/runtime";
 import type {
   AgentId,
@@ -52,13 +52,25 @@ type Sql = ReturnType<typeof postgres>;
  * fits our project-wide 'Json' (the recursive structural JSON type) and
  * adapt to the driver's expected shape at the call site.
  *
- * Previous shape returned `never` and accepted anything, defeating the
- * type-check at every call site (= a known type lie). Tightening the
- * upstream types (JsonSchema, RawValue, IRModule) to fit 'Json' made
- * this swap viable.
+ * Secret encryption is the **caller's** responsibility (= each
+ * Module's persistor encrypts at its typed boundary via
+ * 'value-secret-codec' before handing data here); the storage layer
+ * just persists what it's given.
  */
 function asJson(value: Json): never {
   return value as never;
+}
+
+/**
+ * Identity helper retained at the call sites that previously decrypted
+ * on read. With encryption now living inside each Module's persistor,
+ * storage hands back whatever JSON was persisted; the Module decrypts
+ * on the way out. This shim keeps the call-site shape stable so the
+ * post-refactor Module wiring can land in one pass — once every
+ * caller has moved to the new persistor, the shim disappears.
+ */
+function fromStorageJson<T>(value: T): T {
+  return value;
 }
 
 const DEFAULT_LIMIT = 100;
@@ -279,8 +291,9 @@ class PgEngineCheckpointRepo implements EngineCheckpointRepo {
     const rows = await this.sql<{ checkpoint: EngineCheckpoint }[]>`
       SELECT checkpoint FROM engine_checkpoints WHERE snapshot_id = ${snapshotId}
     `;
-    const checkpoint = rows[0]?.checkpoint;
-    if (checkpoint === undefined || checkpoint === null) return null;
+    const rawCheckpoint = rows[0]?.checkpoint;
+    if (rawCheckpoint === undefined || rawCheckpoint === null) return null;
+    const checkpoint = fromStorageJson(rawCheckpoint);
     // Legacy compat: pre-v0.1.0-rc4 deployments used a `{}` placeholder
     // row to anchor `SELECT ... FOR UPDATE` locks. Current code uses an
     // advisory lock instead and never inserts placeholders, but rows
@@ -310,9 +323,9 @@ type DbAgentRow = {
   delegation_id: string;
   snapshot_id: string;
   qualified_name: string;
-  args: Record<string, Value>;
+  args: Record<string, EncryptedValue>;
   state: AgentState;
-  result: Value | null;
+  result: EncryptedValue | null;
   error_message: string | null;
   created_at: Date;
   updated_at: Date;
@@ -324,9 +337,10 @@ function dbToAgentRow(row: DbAgentRow): AgentRow {
     delegationId: row.delegation_id as DelegationId,
     snapshotId: row.snapshot_id as SnapshotId,
     qualifiedName: row.qualified_name,
-    args: row.args,
+    args: fromStorageJson(row.args),
     state: row.state,
-    result: row.result === null ? undefined : row.result,
+    result:
+      row.result === null ? undefined : fromStorageJson(row.result),
     errorMessage: row.error_message === null ? undefined : row.error_message,
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),
@@ -494,7 +508,7 @@ class PgFfiPendingDelegationRepo implements FfiPendingDelegationRepo {
         snapshot_id: string;
         peer_endpoint: string;
         agent_def_id: AgentDefId;
-        args: Record<string, Value>;
+        args: Record<string, EncryptedValue>;
         state: "running" | "cancelling";
         created_at: Date;
         parent_ext_delegation_id: string | null;
@@ -510,7 +524,7 @@ class PgFfiPendingDelegationRepo implements FfiPendingDelegationRepo {
       snapshotId: row.snapshot_id as SnapshotId,
       peerEndpoint: row.peer_endpoint,
       agentDefId: row.agent_def_id,
-      args: row.args,
+      args: fromStorageJson(row.args),
       state: row.state,
       createdAt: row.created_at.toISOString(),
       parentExtDelegationId:
@@ -544,7 +558,7 @@ class PgFfiPendingDelegationRepo implements FfiPendingDelegationRepo {
         snapshot_id: string;
         peer_endpoint: string;
         agent_def_id: AgentDefId;
-        args: Record<string, Value>;
+        args: Record<string, EncryptedValue>;
         state: "running" | "cancelling";
         created_at: Date;
         parent_ext_delegation_id: string | null;
@@ -558,7 +572,7 @@ class PgFfiPendingDelegationRepo implements FfiPendingDelegationRepo {
       snapshotId: row.snapshot_id as SnapshotId,
       peerEndpoint: row.peer_endpoint,
       agentDefId: row.agent_def_id,
-      args: row.args,
+      args: fromStorageJson(row.args),
       state: row.state,
       createdAt: row.created_at.toISOString(),
       parentExtDelegationId:
@@ -577,7 +591,7 @@ class PgFfiPendingDelegationRepo implements FfiPendingDelegationRepo {
         snapshot_id: string;
         peer_endpoint: string;
         agent_def_id: AgentDefId;
-        args: Record<string, Value>;
+        args: Record<string, EncryptedValue>;
         state: "running" | "cancelling";
         created_at: Date;
         parent_ext_delegation_id: string | null;
@@ -592,7 +606,7 @@ class PgFfiPendingDelegationRepo implements FfiPendingDelegationRepo {
       snapshotId: row.snapshot_id as SnapshotId,
       peerEndpoint: row.peer_endpoint,
       agentDefId: row.agent_def_id,
-      args: row.args,
+      args: fromStorageJson(row.args),
       state: row.state,
       createdAt: row.created_at.toISOString(),
       parentExtDelegationId:
@@ -624,7 +638,7 @@ class PgFfiPendingEscalationRepo implements FfiPendingEscalationRepo {
         snapshot_id: string;
         peer_endpoint: string;
         agent_def_id: AgentDefId;
-        args: Record<string, Value>;
+        args: Record<string, EncryptedValue>;
         created_at: Date;
       }[]
     >`
@@ -639,7 +653,7 @@ class PgFfiPendingEscalationRepo implements FfiPendingEscalationRepo {
       snapshotId: row.snapshot_id as SnapshotId,
       peerEndpoint: row.peer_endpoint,
       agentDefId: row.agent_def_id,
-      args: row.args,
+      args: fromStorageJson(row.args),
       createdAt: row.created_at.toISOString(),
     };
   }
@@ -659,7 +673,7 @@ class PgFfiPendingEscalationRepo implements FfiPendingEscalationRepo {
         snapshot_id: string;
         peer_endpoint: string;
         agent_def_id: AgentDefId;
-        args: Record<string, Value>;
+        args: Record<string, EncryptedValue>;
         created_at: Date;
       }[]
     >`
@@ -672,7 +686,7 @@ class PgFfiPendingEscalationRepo implements FfiPendingEscalationRepo {
       snapshotId: row.snapshot_id as SnapshotId,
       peerEndpoint: row.peer_endpoint,
       agentDefId: row.agent_def_id,
-      args: row.args,
+      args: fromStorageJson(row.args),
       createdAt: row.created_at.toISOString(),
     }));
   }
@@ -700,9 +714,9 @@ class PgApiPendingEscalationRepo implements ApiPendingEscalationRepo {
         delegation_id: string;
         snapshot_id: string;
         agent_def_id: AgentDefId;
-        args: Record<string, Value>;
+        args: Record<string, EncryptedValue>;
         state: ApiPendingEscalation["state"];
-        value: Value | null;
+        value: EncryptedValue | null;
         created_at: Date;
       }[]
     >`
@@ -716,9 +730,9 @@ class PgApiPendingEscalationRepo implements ApiPendingEscalationRepo {
       delegationId: row.delegation_id as DelegationId,
       snapshotId: row.snapshot_id as SnapshotId,
       agentDefId: row.agent_def_id,
-      args: row.args,
+      args: fromStorageJson(row.args),
       state: row.state,
-      value: row.value === null ? undefined : row.value,
+      value: row.value === null ? undefined : fromStorageJson(row.value),
       createdAt: row.created_at.toISOString(),
     };
   }
@@ -736,9 +750,9 @@ class PgApiPendingEscalationRepo implements ApiPendingEscalationRepo {
       delegation_id: string;
       snapshot_id: string;
       agent_def_id: AgentDefId;
-      args: Record<string, Value>;
+      args: Record<string, EncryptedValue>;
       state: ApiPendingEscalation["state"];
-      value: Value | null;
+      value: EncryptedValue | null;
       created_at: Date;
     }[];
     if (snapshotId !== undefined && state !== undefined) {
@@ -772,16 +786,16 @@ class PgApiPendingEscalationRepo implements ApiPendingEscalationRepo {
       delegationId: row.delegation_id as DelegationId,
       snapshotId: row.snapshot_id as SnapshotId,
       agentDefId: row.agent_def_id,
-      args: row.args,
+      args: fromStorageJson(row.args),
       state: row.state,
-      value: row.value === null ? undefined : row.value,
+      value: row.value === null ? undefined : fromStorageJson(row.value),
       createdAt: row.created_at.toISOString(),
     }));
   }
 
   async setAnswered(
     escalationId: EscalationId,
-    value: Value,
+    value: EncryptedValue,
   ): Promise<boolean> {
     const result = await this.sql`
       UPDATE api_pending_escalations

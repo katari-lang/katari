@@ -99,8 +99,27 @@ export {
   RawValueDecodeError,
   CTOR_DISCRIMINATOR,
   CALLABLE_DISCRIMINATOR,
+  SECRET_DISCRIMINATOR,
 } from "./value-codec.js";
 export type { RawValue } from "./value-codec.js";
+
+// ─── Secret crypto + Value ↔ EncryptedValue (storage boundary) ────────────
+
+export {
+  encryptSecret,
+  decryptSecret,
+  SecretCryptoError,
+  resetKeyCacheForTesting,
+} from "./secret-crypto.js";
+
+export {
+  encryptValueTree,
+  decryptValueTree,
+  encryptValueRecord,
+  decryptValueRecord,
+  redactSecretsInEncrypted,
+} from "./value-secret-codec.js";
+export type { EncryptedValue, EncryptedSecret } from "./value-secret-codec.js";
 
 // ─── Agent def id (cross-module opaque) ────────────────────────────────────
 

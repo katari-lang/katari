@@ -9,9 +9,22 @@
 // values), so serialize is equivalent to structuredClone, and deserialize
 // is the inverse. IRModule is not included here (the host provides it
 // from the deploy unit).
+//
+// **Secret encryption**: `encryptCheckpoint` / `decryptCheckpoint`
+// transform the checkpoint at the storage boundary. They walk the
+// JSON tree, detect every `Value`-shaped node (= `kind` ∈ the set of
+// runtime Value variants), and pass it through 'encryptValueTree' /
+// 'decryptValueTree'. Non-Value objects are recursed through
+// structurally. This keeps the storage layer completely unaware of
+// what counts as a secret — CoreModule encrypts before save and
+// decrypts after load; storage just sees an opaque JSON blob.
 
 import type { IRModule } from "../ir/types.js";
 import type { State } from "./state.js";
+import {
+  decryptValueTree,
+  encryptValueTree,
+} from "../value-secret-codec.js";
 
 export type EngineCheckpoint = {
   /**
@@ -74,4 +87,94 @@ export function deserialize(
     ffiTargetEndpoint: snap.ffiTargetEndpoint as State["ffiTargetEndpoint"],
     lastGcScopeCount: snap.lastGcScopeCount,
   };
+}
+
+// ─── Secret encryption at the storage boundary ─────────────────────────────
+
+/**
+ * The storage-side counterpart of 'EngineCheckpoint'. Structurally
+ * identical to 'EngineCheckpoint' except every nested 'Value' has
+ * been replaced by 'EncryptedValue' (= 'secret' variants are now
+ * '$envelope' ciphertext blobs).
+ *
+ * Treated as opaque by storage: the type is exported only so the
+ * CoreModule persistor signature can express "produces the encrypted
+ * form" / "expects the encrypted form" at the call sites.
+ */
+export type EncryptedEngineCheckpoint = Omit<EngineCheckpoint, never>;
+
+/** Runtime tag set used by 'walkValuesInTree' to identify a
+ * 'Value'-shaped object inside the otherwise unstructured JSON
+ * tree of a checkpoint. Kept in sync with the 'Value' tagged union
+ * in 'value.ts'. */
+const VALUE_KIND_TAGS: ReadonlySet<string> = new Set([
+  "number",
+  "string",
+  "boolean",
+  "null",
+  "array",
+  "tagged",
+  "closure",
+  "agentLiteral",
+  "secret",
+]);
+
+/**
+ * Encrypt every 'secret' Value embedded in a checkpoint. Returns a
+ * structurally-equivalent JSON tree where each former 'secret' Value
+ * has been replaced by the storage-only 'EncryptedSecret' envelope.
+ * Idempotent on checkpoints that have no secrets.
+ */
+export function encryptCheckpoint(
+  checkpoint: EngineCheckpoint,
+): EncryptedEngineCheckpoint {
+  return walkValuesInTree(checkpoint, encryptValueTree) as
+    EncryptedEngineCheckpoint;
+}
+
+/**
+ * Inverse of 'encryptCheckpoint'. Throws via 'secret-crypto' if any
+ * envelope fails AES-GCM authentication (= tampering or wrong key).
+ */
+export function decryptCheckpoint(
+  encrypted: EncryptedEngineCheckpoint,
+): EngineCheckpoint {
+  return walkValuesInTree(encrypted, decryptValueTree) as EngineCheckpoint;
+}
+
+/**
+ * Walk a JSON tree, calling `transform` on every node whose shape
+ * matches a 'Value' variant (= `kind` field in 'VALUE_KIND_TAGS').
+ * Other objects are recursed structurally. Pure: returns a fresh
+ * tree without mutating the input.
+ *
+ * Untyped on purpose: the checkpoint structure threads `Value` through
+ * deeply nested Thread variants whose full type-level enumeration
+ * would be both verbose and brittle to internal refactors. The
+ * 'VALUE_KIND_TAGS' set is the single source of truth — extending the
+ * 'Value' union elsewhere requires only updating that set.
+ *
+ * The transform's input/output relationship (Value→EncryptedValue or
+ * EncryptedValue→Value) is enforced by the typed wrappers
+ * 'encryptCheckpoint' / 'decryptCheckpoint', not by this internal
+ * helper.
+ */
+function walkValuesInTree(
+  node: unknown,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  transform: (v: any) => unknown,
+): unknown {
+  if (node === null || typeof node !== "object") return node;
+  if (Array.isArray(node)) {
+    return node.map((n) => walkValuesInTree(n, transform));
+  }
+  const obj = node as Record<string, unknown>;
+  if (typeof obj.kind === "string" && VALUE_KIND_TAGS.has(obj.kind)) {
+    return transform(obj);
+  }
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(obj)) {
+    out[k] = walkValuesInTree(v, transform);
+  }
+  return out;
 }

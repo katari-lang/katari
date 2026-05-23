@@ -11,7 +11,7 @@
 import type { AgentDefId } from "../agent-def-id.js";
 import type { DelegationId, EscalationId } from "../engine/id.js";
 import type { Endpoint } from "../engine/endpoint.js";
-import type { Value } from "../engine/value.js";
+import type { EncryptedValue } from "../value-secret-codec.js";
 
 /**
  * Record of "FFI Module has sent this to the sidecar and is awaiting a reply".
@@ -23,12 +23,17 @@ import type { Value } from "../engine/value.js";
  *     this holds "the delegationId of the ext call itself". Using it we can
  *     look up the parent ext delegation's peer for escalate relaying + on
  *     restart we can terminate orphan children.
+ *
+ * **Wire form**: `args` carries 'EncryptedValue' (= `secret` variants
+ * replaced by the storage envelope). FfiModule encrypts on the way
+ * in and decrypts on the way out so the store implementation (=
+ * api-server side) is unaware of secret semantics.
  */
 export type FfiPendingDelegation = {
   delegationId: DelegationId;
   peerEndpoint: Endpoint;
   agentDefId: AgentDefId;
-  args: Record<string, Value>;
+  args: Record<string, EncryptedValue>;
   state: "running" | "cancelling";
   createdAt: string;
   parentExtDelegationId: DelegationId | null;
@@ -37,14 +42,15 @@ export type FfiPendingDelegation = {
 /**
  * Record of "an escalate that the sidecar emitted and is being forwarded
  * to CORE". If the sidecar process is lost on restart, these are cleaned
- * up (= dropped) on startup.
+ * up (= dropped) on startup. `args` is the encrypted form (see
+ * 'FfiPendingDelegation' note).
  */
 export type FfiPendingEscalation = {
   escalationId: EscalationId;
   delegationId: DelegationId;
   peerEndpoint: Endpoint;
   agentDefId: AgentDefId;
-  args: Record<string, Value>;
+  args: Record<string, EncryptedValue>;
   createdAt: string;
 };
 

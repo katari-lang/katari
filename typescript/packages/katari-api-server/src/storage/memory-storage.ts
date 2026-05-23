@@ -10,11 +10,11 @@ import { Mutex } from "async-mutex";
 import type {
   AgentDefId,
   DelegationId,
+  EncryptedValue,
   EngineCheckpoint,
   EscalationId,
   IRModule,
   SchemaBundle,
-  Value,
 } from "@katari-lang/runtime";
 import type {
   AgentId,
@@ -368,7 +368,7 @@ class InMemoryApiPendingEscalationRepo implements ApiPendingEscalationRepo {
 
   async setAnswered(
     escalationId: EscalationId,
-    value: Value,
+    value: EncryptedValue,
   ): Promise<boolean> {
     const row = this.rows.get(escalationId);
     if (row === undefined) return false;

@@ -28,7 +28,16 @@ export type Value =
   // IRModule.entries on dispatch. Distinct from `closure` in that it
   // captures no lexical scope — GC reachability is bounded by the
   // value alone.
-  | { kind: "agentLiteral"; qualifiedName: QualifiedName };
+  | { kind: "agentLiteral"; qualifiedName: QualifiedName }
+  // Opaque credential string. Disjoint from `string` at the type
+  // level (the type system rejects `print(secret)` and friends);
+  // the runtime keeps the plaintext in-process so taint propagation
+  // through f-string / `format` / `concat` can preserve secrecy
+  // dynamically. Secrets cross the sidecar boundary as plaintext
+  // (sidecar IPC is a same-host trust assumption — see value-codec
+  // for the wire shape) and cross the storage boundary encrypted
+  // via 'value-tree-walk' + 'secret-crypto'.
+  | { kind: "secret"; value: string };
 
 /** Convert an IR LiteralValue to a runtime Value. */
 export function literalToValue(literal: LiteralValue): Value {
