@@ -360,7 +360,7 @@
     },
     "34": {
       "body": {
-        "description": "Concatenate two strings.",
+        "description": "Concatenate two strings (taint-aware: if either operand is secret, the result is secret).",
         "entryBody": 35,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"lhs\":{\"type\":\"string\"},\"rhs\":{\"type\":\"string\"}},\"required\":[\"lhs\",\"rhs\"],\"type\":\"object\"}",
         "name": "concat",
@@ -448,7 +448,7 @@
     },
     "40": {
       "body": {
-        "description": "Format any value for f-string interpolation: strings are emitted bare, other values fall back to @to_string@'s JSON form.",
+        "description": "Format a value for f-string interpolation. Accepts string or secret only (taint-aware: secret yields secret); other types must be converted via @to_string@ first.",
         "entryBody": 41,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"value\":{}},\"required\":[\"value\"],\"type\":\"object\"}",
         "name": "format",

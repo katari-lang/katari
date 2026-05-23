@@ -3,5 +3,5 @@ agent main() -> string {
   let total = for (x in [1, 2, 3], var acc: integer = 0) {
     next with { acc = acc + x }
   } then { acc }
-  f"sum = ${total}"
+  f"sum = ${to_string(value = total)}"
 }

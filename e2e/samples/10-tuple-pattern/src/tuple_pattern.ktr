@@ -2,7 +2,7 @@
 agent describe(p: (integer, string)) -> string {
   match (p) {
     case (0, s) => { f"zero with ${s}" }
-    case (n, s) => { f"${n} with ${s}" }
+    case (n, s) => { f"${to_string(value = n)} with ${s}" }
   }
 }
 

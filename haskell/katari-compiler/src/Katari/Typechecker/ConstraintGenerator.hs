@@ -1361,6 +1361,27 @@ applyPrimRule rule arguments sourceSpan =
           addTypeConstraint value_ resultType reasonUn
           addTypeConstraint SemanticTypeInteger resultType reasonUn
           pure resultType
+        PrimRuleFstringJoin -> do
+          -- Every argument must be string or secret; result is the
+          -- supremum (sup) of the argument types. Concretely:
+          --   format("hi")            : string
+          --   format(some_secret)     : secret
+          --   concat("a", "b")        : string
+          --   concat("a", secret_v)   : secret
+          -- Used by @format@ / @concat@ for taint-aware f-string and
+          -- @++@ behaviour.
+          let reason = ConstraintReason ReasonKindCallArgument sourceSpan
+              stringOrSecret =
+                SemanticTypeUnion [SemanticTypeString, SemanticTypeSecret]
+          resultType <- freshTypeVar
+          mapM_
+            ( \CallArgument {value = value'} -> do
+                let argType = constrainedExpressionType value'
+                addTypeConstraint argType stringOrSecret reason
+                addTypeConstraint argType resultType reason
+            )
+            arguments
+          pure resultType
         PrimRuleSimple ->
           -- Caller filters PrimRuleSimple before invoking applyPrimRule.
           pure SemanticTypeUnknown
@@ -1679,12 +1700,33 @@ walkIndexAccessExpr IndexAccessExpression {array, index, sourceSpan} = do
 walkTemplateExpr :: TemplateExpression Identified -> CG (Expression Constrained)
 walkTemplateExpr TemplateExpression {elements, sourceSpan} = do
   elements' <- mapM walkTemplateElement elements
+  -- The f-string's overall type is the supremum of its parts.
+  -- Plain string segments contribute `string`; embedded expressions
+  -- contribute their own type (which must be `string` or `secret`).
+  -- If any embedded expression has type `secret`, the result is
+  -- `secret` and taint propagates outward; otherwise it stays `string`.
+  let reason = ConstraintReason ReasonKindCallArgument sourceSpan
+      stringOrSecret =
+        SemanticTypeUnion [SemanticTypeString, SemanticTypeSecret]
+  resultType <- freshTypeVar
+  -- Every f-string contains at least an empty string contribution, so
+  -- the result is always at least `string`.
+  addTypeConstraint SemanticTypeString resultType reason
+  mapM_
+    ( \case
+        TemplateElementString _ -> pure ()
+        TemplateElementExpression TemplateExpressionElement {value = value'} -> do
+          let argType = constrainedExpressionType value'
+          addTypeConstraint argType stringOrSecret reason
+          addTypeConstraint argType resultType reason
+    )
+    elements'
   pure
     ( ExpressionTemplate
         TemplateExpression
           { elements = elements',
             sourceSpan = sourceSpan,
-            typeOf = SemanticTypeString
+            typeOf = resultType
           }
     )
 
@@ -1694,10 +1736,9 @@ walkTemplateElement = \case
     pure (TemplateElementString TemplateStringElement {value = value, sourceSpan = sourceSpan})
   TemplateElementExpression TemplateExpressionElement {value, sourceSpan} -> do
     value' <- walkExpression value
-    -- f-string interpolations accept any type; Lowering emits a
-    -- 'format' prim call on each interpolated value before
-    -- concatenation, so there is no type constraint to add here.
-    -- 'constrainedExpressionType value'' is intentionally discarded.
+    -- Per-element typing constraints are emitted by 'walkTemplateExpr'
+    -- (the parent), which has access to the overall result-type
+    -- variable. Here we just walk the subexpression.
     pure (TemplateElementExpression TemplateExpressionElement {value = value', sourceSpan = sourceSpan})
 
 walkQualifiedReferenceExpr ::

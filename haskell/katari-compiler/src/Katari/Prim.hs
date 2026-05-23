@@ -46,6 +46,15 @@ data PrimRule
   | -- | @value : number@ — result is @value ∪ integer@. Unary analogue
     -- of 'PrimRuleNumericJoinBinary', used by @abs@.
     PrimRuleNumericJoinUnary
+  | -- | Every argument is constrained to @string ∪ secret@; the result
+    -- type is the supremum of the arguments. So @format(\"hi\")@ →
+    -- @string@, @format(some_secret)@ → @secret@, and any
+    -- @concat(\"hi\", some_secret)@ → @secret@. Used by @format@ /
+    -- @concat@ to make f-string interpolation taint-aware (any secret
+    -- in any embedded expression poisons the resulting string), while
+    -- statically rejecting integer / boolean f-string interpolation
+    -- (the user must @to_string(n)@ them first).
+    PrimRuleFstringJoin
   deriving (Eq, Show)
 
 -- | Decode a surface @using <name>@ identifier into a 'PrimRule', or
@@ -55,6 +64,7 @@ parsePrimRule :: Text -> Maybe PrimRule
 parsePrimRule = \case
   "numeric_join_binary" -> Just PrimRuleNumericJoinBinary
   "numeric_join_unary" -> Just PrimRuleNumericJoinUnary
+  "fstring_join" -> Just PrimRuleFstringJoin
   _ -> Nothing
 
 -- | Sentinel source span for synthetic prim nodes (used by operator

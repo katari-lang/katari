@@ -454,7 +454,7 @@ toDiagnostic = \case
   ErrorUnknownPrimRule sourceSpan ruleName ->
     diagnosticError
       "K0152"
-      ("prim agent uses unknown 'using' rule: '" <> ruleName <> "' (known rules: numeric_join_binary, numeric_join_unary)")
+      ("prim agent uses unknown 'using' rule: '" <> ruleName <> "' (known rules: numeric_join_binary, numeric_join_unary, fstring_join)")
       sourceSpan
   ErrorPatternTypeAnnotation sourceSpan ->
     diagnosticError
