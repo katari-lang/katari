@@ -23,10 +23,17 @@ type SchemaFormProps = {
  * schema per the decl-agnostic Schema gen path, so no normalisation is
  * needed here.
  */
-export function SchemaForm({ schema, onSubmit, renderActions }: SchemaFormProps) {
+export function SchemaForm({
+  schema,
+  onSubmit,
+  renderActions,
+}: SchemaFormProps) {
   const initial = useMemo<Record<string, unknown>>(() => {
     const v = schemaInitialValue(schema);
-    return (v !== null && typeof v === "object" ? v : {}) as Record<string, unknown>;
+    return (v !== null && typeof v === "object" ? v : {}) as Record<
+      string,
+      unknown
+    >;
   }, [schema]);
   const [value, setValue] = useState<Record<string, unknown>>(initial);
 

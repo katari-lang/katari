@@ -9,6 +9,7 @@ import { AgentDetailPage } from "@/pages/AgentDetailPage";
 import { DefinitionsPage } from "@/pages/DefinitionsPage";
 import { DefinitionDetailPage } from "@/pages/DefinitionDetailPage";
 import { EscalationsPage } from "@/pages/EscalationsPage";
+import { EscalationDetailPage } from "@/pages/EscalationDetailPage";
 import { EnvPage } from "@/pages/EnvPage";
 import { SettingsPage } from "@/pages/SettingsPage";
 import { PlaceholderPage } from "@/pages/PlaceholderPage";
@@ -29,6 +30,7 @@ export default function App() {
               <Route path="definitions" element={<DefinitionsPage />} />
               <Route path="definitions/:qualifiedName" element={<DefinitionDetailPage />} />
               <Route path="escalations" element={<EscalationsPage />} />
+              <Route path="escalations/:escalationId" element={<EscalationDetailPage />} />
             </Route>
             <Route path="/env" element={<EnvPage />} />
             <Route path="/settings" element={<SettingsPage />} />

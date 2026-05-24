@@ -93,7 +93,9 @@ run = \case
 runList :: ListOptions -> IO ()
 runList o = do
   client <- mkClient o.listApiUrl
-  pid <- traverse (resolveProjectId client) o.listProject
+  pid <- case o.listProject of
+    Just name -> resolveProjectId client name
+    Nothing -> die "katari escalation list: --project NAME required"
   rows <- Api.listEscalations client pid o.listSnapshot o.listState
   mapM_ printRow rows
 

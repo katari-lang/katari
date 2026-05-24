@@ -140,15 +140,22 @@ newtype ListSnapshotsResponse = ListSnapshotsResponse {snapshots :: [SnapshotSum
 -- Agents
 -- ---------------------------------------------------------------------------
 
+-- Agents / escalations are project-scoped at the URL level
+-- (`/project/:projectId/...`); single-entity GET / POST-cancel /
+-- POST-ack also have flat `/agent/:id` and `/escalation/:id` aliases
+-- since the CLI typically holds a globally-unique UUID without needing
+-- project context (e.g. `katari status <agentId>`).
+
 startAgent :: ApiClient -> StartAgentRequest -> IO Text
 startAgent c req = do
-  r :: StartAgentResponse <- post c "/agent" req
+  r :: StartAgentResponse <-
+    post c ("/project/" <> req.projectId <> "/agent") req
   pure r.agentId
 
-listAgents :: ApiClient -> Maybe Text -> Maybe Text -> IO [AgentRow]
+listAgents :: ApiClient -> Text -> Maybe Text -> IO [AgentRow]
 listAgents c projectId snapshotId = do
-  let q = buildQuery [("projectId", projectId), ("snapshotId", snapshotId)]
-  r :: ListAgentsResponse <- get c ("/agent" <> q)
+  let q = buildQuery [("snapshotId", snapshotId)]
+  r :: ListAgentsResponse <- get c ("/project/" <> projectId <> "/agent" <> q)
   pure r.agents
 
 getAgent :: ApiClient -> Text -> IO AgentRow
@@ -167,12 +174,9 @@ cancelAgent c agentId = do
 
 listAgentDefinitions :: ApiClient -> Text -> Maybe Text -> IO ([AgentDefinition], Text)
 listAgentDefinitions c projectId snapshotId = do
-  let q =
-        buildQuery
-          [ ("projectId", Just projectId),
-            ("snapshotId", snapshotId)
-          ]
-  r :: ListAgentDefinitionsResponse <- get c ("/agent-definition" <> q)
+  let sid = maybe "latest" id snapshotId
+  r :: ListAgentDefinitionsResponse <-
+    get c ("/project/" <> projectId <> "/snapshot/" <> sid <> "/agent-definition")
   pure (r.definitions, r.snapshotId)
 
 -- ---------------------------------------------------------------------------
@@ -180,15 +184,15 @@ listAgentDefinitions c projectId snapshotId = do
 -- ---------------------------------------------------------------------------
 
 listEscalations ::
-  ApiClient -> Maybe Text -> Maybe Text -> Maybe EscalationState -> IO [EscalationRow]
+  ApiClient -> Text -> Maybe Text -> Maybe EscalationState -> IO [EscalationRow]
 listEscalations c projectId snapshotId stateF = do
   let q =
         buildQuery
-          [ ("projectId", projectId),
-            ("snapshotId", snapshotId),
+          [ ("snapshotId", snapshotId),
             ("state", fmap escalationStateLit stateF)
           ]
-  r :: ListEscalationsResponse <- get c ("/escalation" <> q)
+  r :: ListEscalationsResponse <-
+    get c ("/project/" <> projectId <> "/escalation" <> q)
   pure r.escalations
   where
     escalationStateLit = \case

@@ -141,8 +141,15 @@ export interface AgentRepo {
   insert(row: AgentRow): Promise<void>;
   get(id: AgentId): Promise<AgentRow | null>;
   findByDelegationId(delegationId: DelegationId): Promise<AgentRow | null>;
+  /**
+   * List agents matching the filter. Either or both of `projectId` /
+   * `snapshotId` may be supplied; `projectId` filters via a join to the
+   * snapshots table so callers don't need to know which snapshots belong
+   * to which project. With neither, returns runtime-wide agents.
+   */
   list(
     filter?: {
+      projectId?: ProjectId;
       snapshotId?: SnapshotId;
       state?: AgentState;
       afterId?: AgentId;
@@ -260,9 +267,16 @@ export interface EnvEntryRepo {
 export interface ApiPendingEscalationRepo {
   insert(row: ApiPendingEscalation): Promise<void>;
   get(escalationId: EscalationId): Promise<ApiPendingEscalation | null>;
+  /**
+   * List escalations matching the filter. Same project / snapshot
+   * filtering semantics as {@link AgentRepo.list}.
+   */
   list(
-    filter?: { snapshotId?: SnapshotId; state?: ApiPendingEscalation["state"] }
-      & ListOptions,
+    filter?: {
+      projectId?: ProjectId;
+      snapshotId?: SnapshotId;
+      state?: ApiPendingEscalation["state"];
+    } & ListOptions,
   ): Promise<ApiPendingEscalation[]>;
   setAnswered(escalationId: EscalationId, value: EncryptedValue): Promise<boolean>;
   setCancelled(escalationId: EscalationId): Promise<boolean>;

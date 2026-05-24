@@ -31,11 +31,10 @@ describe("end-to-end: project + snapshot + agent flow", () => {
     expect(snapshotId).toMatch(/^[0-9a-f-]{36}$/);
 
     const start = await harness.app.fetch(
-      new Request("http://test/agent", {
+      new Request(`http://test/project/${projectId}/agent`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          projectId,
           snapshotId,
           qualifiedName: "main",
           args: {},
@@ -46,7 +45,7 @@ describe("end-to-end: project + snapshot + agent flow", () => {
     const { agentId } = (await start.json()) as { agentId: string };
 
     const got = await harness.app.fetch(
-      new Request(`http://test/agent/${agentId}`),
+      new Request(`http://test/project/${projectId}/agent/${agentId}`),
     );
     expect(got.status).toBe(200);
     const body = (await got.json()) as {
@@ -77,11 +76,10 @@ describe("end-to-end: project + snapshot + agent flow", () => {
     );
 
     const start = await harness.app.fetch(
-      new Request("http://test/agent", {
+      new Request(`http://test/project/${projectId}/agent`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          projectId,
           qualifiedName: "main",
           args: {},
         }),
@@ -90,7 +88,7 @@ describe("end-to-end: project + snapshot + agent flow", () => {
     const { agentId } = (await start.json()) as { agentId: string };
 
     const got = await harness.app.fetch(
-      new Request(`http://test/agent/${agentId}`),
+      new Request(`http://test/project/${projectId}/agent/${agentId}`),
     );
     const body = (await got.json()) as {
       agent: { state: string; result: string };
@@ -124,7 +122,9 @@ describe("end-to-end: project + snapshot + agent flow", () => {
     const harness = buildTestHarness();
     active = harness;
     const a = await harness.app.fetch(
-      new Request("http://test/agent/00000000-0000-0000-0000-000000000000"),
+      new Request(
+        "http://test/project/00000000-0000-0000-0000-000000000000/agent/00000000-0000-0000-0000-000000000000",
+      ),
     );
     expect(a.status).toBe(404);
     const s = await harness.app.fetch(

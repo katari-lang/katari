@@ -1,7 +1,12 @@
 import { useQuery } from "@tanstack/react-query";
 import { Camera, Check, History } from "lucide-react";
 import { useApiClient } from "@/contexts/ApiKeyContext";
-import { Dropdown, DropdownDivider, DropdownItem, DropdownLabel } from "@/components/ui/Dropdown";
+import {
+  Dropdown,
+  DropdownDivider,
+  DropdownItem,
+  DropdownLabel,
+} from "@/components/ui/Dropdown";
 import { shortId, relativeTime, formatDateTime } from "@/lib/format";
 import { Button } from "@/components/ui/Button";
 import type { ProjectId, SnapshotId } from "@/api/types";
@@ -21,7 +26,12 @@ type Props = {
  * or the one chosen). Showing both lets the user see "you're viewing
  * snap_abc — which is also currently the latest".
  */
-export function DefinitionsSnapshotPicker({ projectId, selected, resolvedId, onSelect }: Props) {
+export function DefinitionsSnapshotPicker({
+  projectId,
+  selected,
+  resolvedId,
+  onSelect,
+}: Props) {
   const client = useApiClient();
   const { data } = useQuery({
     queryKey: ["snapshots", projectId],
@@ -35,7 +45,7 @@ export function DefinitionsSnapshotPicker({ projectId, selected, resolvedId, onS
   const trigger = (
     <button
       type="button"
-      className="inline-flex items-center gap-2  border border-border  px-3 py-1.5 text-sm transition-colors hover:bg-muted hover:cursor-pointer"
+      className="inline-flex items-center gap-2  border border-border px-3 py-2 text-sm transition-colors hover:bg-muted hover:cursor-pointer"
     >
       <Camera className="size-3.5 text-muted-foreground" />
       <span className="font-mono text-xs text-foreground">{label}</span>
@@ -50,7 +60,7 @@ export function DefinitionsSnapshotPicker({ projectId, selected, resolvedId, onS
 
   return (
     <div className="flex items-center gap-2">
-      <Dropdown trigger={trigger} align="end" className="w-72">
+      <Dropdown trigger={trigger} align="start" className="w-72">
         {(close) => (
           <div>
             <DropdownLabel>Snapshot history</DropdownLabel>
@@ -66,7 +76,9 @@ export function DefinitionsSnapshotPicker({ projectId, selected, resolvedId, onS
             </DropdownItem>
             <DropdownDivider />
             {snapshots.length === 0 ? (
-              <p className="px-3 py-3 text-xs text-subtle-foreground">No snapshots.</p>
+              <p className="px-3 py-3 text-xs text-subtle-foreground">
+                No snapshots.
+              </p>
             ) : (
               <div className="max-h-80 overflow-y-auto">
                 {snapshots.map((s) => (
@@ -79,11 +91,11 @@ export function DefinitionsSnapshotPicker({ projectId, selected, resolvedId, onS
                     }}
                   >
                     <div className="flex-1">
-                      <div className="font-mono text-xs text-foreground">
+                      <div className="font-mono text-xs">
                         {shortId(s.id, 12, 4)}
                       </div>
                       <div
-                        className="mt-0.5 text-[11px] text-subtle-foreground"
+                        className="mt-0.5 text-[11px] opacity-70"
                         title={formatDateTime(s.createdAt)}
                       >
                         {relativeTime(s.createdAt)}

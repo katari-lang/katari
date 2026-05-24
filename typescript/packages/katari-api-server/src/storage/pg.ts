@@ -384,7 +384,12 @@ class PgAgentRepo implements AgentRepo {
   }
 
   async list(
-    filter?: { snapshotId?: SnapshotId; state?: AgentState; afterId?: AgentId } & ListOptions,
+    filter?: {
+      projectId?: ProjectId;
+      snapshotId?: SnapshotId;
+      state?: AgentState;
+      afterId?: AgentId;
+    } & ListOptions,
   ): Promise<AgentRow[]> {
     const limit = clampLimit(filter?.limit);
     const afterId = filter?.afterId;
@@ -392,46 +397,38 @@ class PgAgentRepo implements AgentRepo {
     // an unstable window (each row skipped by OFFSET also shifts the
     // keyset boundary). When afterId is provided, force offset = 0.
     const offset = afterId !== undefined ? 0 : clampOffset(filter?.offset);
-    const snapshotId = filter?.snapshotId;
-    const state = filter?.state;
-    let rows: DbAgentRow[];
-    if (snapshotId !== undefined && state !== undefined && afterId !== undefined) {
-      rows = await this.sql<DbAgentRow[]>`
-        SELECT id, delegation_id, snapshot_id, qualified_name, args, state, result, error_message, created_at, updated_at
-        FROM agents WHERE snapshot_id = ${snapshotId} AND state = ${state} AND id > ${afterId}
-        ORDER BY id ASC LIMIT ${limit} OFFSET ${offset}
-      `;
-    } else if (snapshotId !== undefined && state !== undefined) {
-      rows = await this.sql<DbAgentRow[]>`
-        SELECT id, delegation_id, snapshot_id, qualified_name, args, state, result, error_message, created_at, updated_at
-        FROM agents WHERE snapshot_id = ${snapshotId} AND state = ${state}
-        ORDER BY id ASC LIMIT ${limit} OFFSET ${offset}
-      `;
-    } else if (snapshotId !== undefined && afterId !== undefined) {
-      rows = await this.sql<DbAgentRow[]>`
-        SELECT id, delegation_id, snapshot_id, qualified_name, args, state, result, error_message, created_at, updated_at
-        FROM agents WHERE snapshot_id = ${snapshotId} AND id > ${afterId}
-        ORDER BY id ASC LIMIT ${limit} OFFSET ${offset}
-      `;
-    } else if (snapshotId !== undefined) {
-      rows = await this.sql<DbAgentRow[]>`
-        SELECT id, delegation_id, snapshot_id, qualified_name, args, state, result, error_message, created_at, updated_at
-        FROM agents WHERE snapshot_id = ${snapshotId}
-        ORDER BY id ASC LIMIT ${limit} OFFSET ${offset}
-      `;
-    } else if (afterId !== undefined) {
-      rows = await this.sql<DbAgentRow[]>`
-        SELECT id, delegation_id, snapshot_id, qualified_name, args, state, result, error_message, created_at, updated_at
-        FROM agents WHERE id > ${afterId}
-        ORDER BY id ASC LIMIT ${limit} OFFSET ${offset}
-      `;
-    } else {
-      rows = await this.sql<DbAgentRow[]>`
-        SELECT id, delegation_id, snapshot_id, qualified_name, args, state, result, error_message, created_at, updated_at
-        FROM agents
-        ORDER BY id ASC LIMIT ${limit} OFFSET ${offset}
-      `;
-    }
+    const sql = this.sql;
+    // Project filter joins through snapshots; the other filters are
+    // simple equality predicates. Composing them inline via postgres-js
+    // sql fragments avoids the 8-way if/else explosion the previous
+    // code had.
+    const joinClause =
+      filter?.projectId !== undefined
+        ? sql`JOIN snapshots s ON s.id = a.snapshot_id`
+        : sql``;
+    const wherePieces = [
+      filter?.projectId !== undefined
+        ? sql`s.project_id = ${filter.projectId}`
+        : null,
+      filter?.snapshotId !== undefined
+        ? sql`a.snapshot_id = ${filter.snapshotId}`
+        : null,
+      filter?.state !== undefined ? sql`a.state = ${filter.state}` : null,
+      afterId !== undefined ? sql`a.id > ${afterId}` : null,
+    ].filter((p): p is NonNullable<typeof p> => p !== null);
+    const whereClause =
+      wherePieces.length === 0
+        ? sql``
+        : sql`WHERE ${wherePieces.reduce((acc, p, i) =>
+            i === 0 ? p : sql`${acc} AND ${p}`,
+          )}`;
+    const rows = await sql<DbAgentRow[]>`
+      SELECT a.id, a.delegation_id, a.snapshot_id, a.qualified_name, a.args, a.state, a.result, a.error_message, a.created_at, a.updated_at
+      FROM agents a
+      ${joinClause}
+      ${whereClause}
+      ORDER BY a.id ASC LIMIT ${limit} OFFSET ${offset}
+    `;
     return rows.map(dbToAgentRow);
   }
 
@@ -740,14 +737,38 @@ class PgApiPendingEscalationRepo implements ApiPendingEscalationRepo {
   }
 
   async list(
-    filter?: { snapshotId?: SnapshotId; state?: ApiPendingEscalation["state"] }
-      & ListOptions,
+    filter?: {
+      projectId?: ProjectId;
+      snapshotId?: SnapshotId;
+      state?: ApiPendingEscalation["state"];
+    } & ListOptions,
   ): Promise<ApiPendingEscalation[]> {
     const limit = clampLimit(filter?.limit);
     const offset = clampOffset(filter?.offset);
-    const snapshotId = filter?.snapshotId;
-    const state = filter?.state;
-    let rows: {
+    const sql = this.sql;
+    // Same fragment-composition pattern as PgAgentRepo.list — project
+    // filter joins through snapshots so callers can scope to a single
+    // project without enumerating its snapshots themselves.
+    const joinClause =
+      filter?.projectId !== undefined
+        ? sql`JOIN snapshots s ON s.id = e.snapshot_id`
+        : sql``;
+    const wherePieces = [
+      filter?.projectId !== undefined
+        ? sql`s.project_id = ${filter.projectId}`
+        : null,
+      filter?.snapshotId !== undefined
+        ? sql`e.snapshot_id = ${filter.snapshotId}`
+        : null,
+      filter?.state !== undefined ? sql`e.state = ${filter.state}` : null,
+    ].filter((p): p is NonNullable<typeof p> => p !== null);
+    const whereClause =
+      wherePieces.length === 0
+        ? sql``
+        : sql`WHERE ${wherePieces.reduce((acc, p, i) =>
+            i === 0 ? p : sql`${acc} AND ${p}`,
+          )}`;
+    const rows = await sql<{
       escalation_id: string;
       delegation_id: string;
       snapshot_id: string;
@@ -756,33 +777,13 @@ class PgApiPendingEscalationRepo implements ApiPendingEscalationRepo {
       state: ApiPendingEscalation["state"];
       value: EncryptedValue | null;
       created_at: Date;
-    }[];
-    if (snapshotId !== undefined && state !== undefined) {
-      rows = await this.sql`
-        SELECT escalation_id, delegation_id, snapshot_id, agent_def_id, args, state, value, created_at
-        FROM api_pending_escalations
-        WHERE snapshot_id = ${snapshotId} AND state = ${state}
-        ORDER BY created_at DESC LIMIT ${limit} OFFSET ${offset}
-      `;
-    } else if (snapshotId !== undefined) {
-      rows = await this.sql`
-        SELECT escalation_id, delegation_id, snapshot_id, agent_def_id, args, state, value, created_at
-        FROM api_pending_escalations WHERE snapshot_id = ${snapshotId}
-        ORDER BY created_at DESC LIMIT ${limit} OFFSET ${offset}
-      `;
-    } else if (state !== undefined) {
-      rows = await this.sql`
-        SELECT escalation_id, delegation_id, snapshot_id, agent_def_id, args, state, value, created_at
-        FROM api_pending_escalations WHERE state = ${state}
-        ORDER BY created_at DESC LIMIT ${limit} OFFSET ${offset}
-      `;
-    } else {
-      rows = await this.sql`
-        SELECT escalation_id, delegation_id, snapshot_id, agent_def_id, args, state, value, created_at
-        FROM api_pending_escalations
-        ORDER BY created_at DESC LIMIT ${limit} OFFSET ${offset}
-      `;
-    }
+    }[]>`
+      SELECT e.escalation_id, e.delegation_id, e.snapshot_id, e.agent_def_id, e.args, e.state, e.value, e.created_at
+      FROM api_pending_escalations e
+      ${joinClause}
+      ${whereClause}
+      ORDER BY e.created_at DESC LIMIT ${limit} OFFSET ${offset}
+    `;
     return rows.map((row) => ({
       escalationId: row.escalation_id as EscalationId,
       delegationId: row.delegation_id as DelegationId,

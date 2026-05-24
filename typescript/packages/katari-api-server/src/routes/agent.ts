@@ -1,14 +1,17 @@
-// Agent routes: start / list / get / cancel.
+// Project-scoped agent routes.
 //
-// Thin shim that translates HTTP into orchestrator ticks. The actual
-// state changes happen inside `ApiModule` methods invoked through
-// `orchestrator.tick(...)`.
+// Mounted at `/project/:projectId/agent`. Agents are project-scoped
+// entities — `snapshotId` is metadata recording which snapshot was the
+// "deploy target" when the agent started, but the listing axis is the
+// project. A long-running agent stays visible after newer snapshots
+// land, which it wouldn't if we keyed by latest snapshot.
 
 import { Hono } from "hono";
 import { valueFromRaw } from "@katari-lang/runtime";
 import type { Value } from "@katari-lang/runtime";
 import {
   AgentIdSchema,
+  AgentStateSchema,
   PaginationQuerySchema,
   ProjectIdSchema,
   SnapshotIdSchema,
@@ -16,24 +19,23 @@ import {
 } from "./middleware/validation.js";
 import { agentRowToWire } from "../wire/agent-wire.js";
 import type { Orchestrator } from "../orchestrator.js";
-import type { SnapshotService } from "../services/snapshot-service.js";
 import { z } from "zod";
 
 const AgentListQuerySchema = z
   .object({
-    projectId: ProjectIdSchema.optional(),
     snapshotId: SnapshotIdSchema.optional(),
+    state: AgentStateSchema.optional(),
   })
   .merge(PaginationQuerySchema);
 
 export function buildAgentRoutes(
   orchestrator: Orchestrator,
-  snapshots: SnapshotService,
   storage: import("../storage/types.js").Storage,
 ): Hono {
   const app = new Hono();
 
   app.post("/", async (c) => {
+    const projectId = ProjectIdSchema.parse(c.req.param("projectId"));
     const body = StartAgentSchema.parse(await c.req.json());
     const argsValue: Record<string, Value> = {};
     for (const [k, v] of Object.entries(body.args)) {
@@ -43,7 +45,7 @@ export function buildAgentRoutes(
     // resolution INSIDE the transaction so the snapshot can't be
     // deleted between resolve and the tick acquiring its lock.
     const result = await orchestrator.tickResolved(
-      { projectId: body.projectId, snapshotId: body.snapshotId },
+      { projectId, snapshotId: body.snapshotId },
       async (ctx) => {
         return ctx.api.startAgent({
           bus: ctx.bus,
@@ -56,14 +58,12 @@ export function buildAgentRoutes(
   });
 
   app.get("/", async (c) => {
+    const projectId = ProjectIdSchema.parse(c.req.param("projectId"));
     const query = AgentListQuerySchema.parse(c.req.query());
-    let snapshotId = query.snapshotId;
-    if (snapshotId === undefined && query.projectId !== undefined) {
-      const latest = await storage.snapshots.latest(query.projectId);
-      snapshotId = latest ?? undefined;
-    }
     const rows = await storage.agents.list({
-      snapshotId,
+      projectId,
+      snapshotId: query.snapshotId,
+      state: query.state,
       limit: query.limit,
       offset: query.offset,
     });

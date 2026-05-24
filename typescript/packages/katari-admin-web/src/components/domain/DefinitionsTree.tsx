@@ -1,7 +1,6 @@
 import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { ChevronDown, ChevronRight, Folder, FolderOpen, FileCode } from "lucide-react";
-import { cn } from "@/lib/cn";
 import type { AgentDefinitionWire } from "@/api/types";
 
 type TreeNode =
@@ -59,6 +58,14 @@ type Props = {
   href: (def: AgentDefinitionWire) => string;
 };
 
+// Row height matched to the rest of the admin tables (= py-2.5, ~40px
+// without description, ~52px with). Per-row hairline border keeps the
+// "list of clickable rows" feel without leaning on background contrast.
+const ROW_BASE = "flex w-full items-start gap-2 px-3 py-2.5 text-left transition-colors hover:bg-muted/50";
+// Indent per nesting level (rem). Used in inline style so depth can be
+// arbitrarily nested without Tailwind needing to know about it.
+const INDENT_REM = 1.25;
+
 export function DefinitionsTree({ definitions, href }: Props) {
   const tree = useMemo(() => buildTree(definitions), [definitions]);
   // Default-open every folder so the operator sees everything immediately.
@@ -77,7 +84,7 @@ export function DefinitionsTree({ definitions, href }: Props) {
   }
 
   return (
-    <ul className="text-sm">
+    <ul className="divide-y divide-border text-sm">
       {tree.map((node) => (
         <TreeRow
           key={nodeKey(node)}
@@ -120,8 +127,7 @@ function TreeRow({
   onToggle: (path: string) => void;
   href: (def: AgentDefinitionWire) => string;
 }) {
-  // Indent in 1rem steps so nesting is visible without dominating the row.
-  const indent = { paddingLeft: `${depth * 1.25 + 0.5}rem` };
+  const indent = { paddingLeft: `${depth * INDENT_REM + 0.75}rem` };
 
   if (node.kind === "folder") {
     const isOpen = openSet.has(node.path);
@@ -131,22 +137,22 @@ function TreeRow({
           type="button"
           onClick={() => onToggle(node.path)}
           style={indent}
-          className="flex w-full items-center gap-1.5 py-1 pr-2 text-left text-foreground transition-colors hover:bg-muted hover:cursor-pointer"
+          className={`${ROW_BASE} items-center pr-3 text-foreground hover:cursor-pointer`}
         >
           {isOpen ? (
-            <ChevronDown className="size-3.5 text-muted-foreground" />
+            <ChevronDown className="size-4 shrink-0 text-muted-foreground" />
           ) : (
-            <ChevronRight className="size-3.5 text-muted-foreground" />
+            <ChevronRight className="size-4 shrink-0 text-muted-foreground" />
           )}
           {isOpen ? (
-            <FolderOpen className="size-4 text-muted-foreground" />
+            <FolderOpen className="size-4 shrink-0 text-muted-foreground" />
           ) : (
-            <Folder className="size-4 text-muted-foreground" />
+            <Folder className="size-4 shrink-0 text-muted-foreground" />
           )}
           <span className="font-mono">{node.name}</span>
         </button>
         {isOpen && (
-          <ul>
+          <ul className="divide-y divide-border border-t border-border">
             {node.children.map((child) => (
               <TreeRow
                 key={nodeKey(child)}
@@ -163,25 +169,27 @@ function TreeRow({
     );
   }
 
-  // Leaf — clickable link to definition detail.
+  // Leaf: file-style row with name on top + description below. Larger
+  // click target than the previous single-line version.
+  const desc = node.definition.description;
   return (
     <li>
       <Link
         to={href(node.definition)}
         style={indent}
-        className={cn(
-          "flex items-center gap-1.5 py-1 pr-2 text-foreground transition-colors hover:bg-muted",
-        )}
+        className={`${ROW_BASE} pr-3 text-foreground`}
       >
-        <span className="inline-block w-3.5" aria-hidden />
-        <FileCode className="size-4 text-muted-foreground" />
-        <span className="font-mono">{node.name}</span>
-        {node.definition.description !== undefined &&
-          node.definition.description !== "" && (
-            <span className="ml-2 truncate text-xs text-subtle-foreground">
-              — {node.definition.description}
+        {/* Spacer to align with folder rows' chevron column. */}
+        <span className="inline-block size-4 shrink-0" aria-hidden />
+        <FileCode className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+        <div className="flex min-w-0 flex-1 flex-col">
+          <span className="truncate font-mono text-foreground">{node.name}</span>
+          {desc !== undefined && desc !== "" && (
+            <span className="mt-0.5 truncate text-xs text-muted-foreground">
+              {desc}
             </span>
           )}
+        </div>
       </Link>
     </li>
   );

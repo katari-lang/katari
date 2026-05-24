@@ -12,6 +12,7 @@ export function StringField({
       type="text"
       value={typeof value === "string" ? value : ""}
       onChange={(e) => onChange(e.target.value)}
+      placeholder="string"
     />
   );
 }

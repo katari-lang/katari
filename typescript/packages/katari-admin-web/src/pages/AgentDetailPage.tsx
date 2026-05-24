@@ -8,30 +8,38 @@ import { PageContent, PageHeader } from "@/components/ui/PageHeader";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { SpinnerOverlay } from "@/components/ui/Spinner";
-import { AgentStatusBadge, isTerminalState } from "@/components/domain/AgentStatusBadge";
+import {
+  AgentStatusBadge,
+  isTerminalState,
+} from "@/components/domain/AgentStatusBadge";
 import { ValueViewer } from "@/components/domain/ValueViewer";
 import { formatDateTime } from "@/lib/format";
-import type { AgentId } from "@/api/types";
+import type { AgentId, ProjectId } from "@/api/types";
 
 const POLL_MS = 3_000;
 
 export function AgentDetailPage() {
-  const { projectId, agentId } = useParams<{ projectId: string; agentId: string }>();
+  const { projectId, agentId } = useParams<{
+    projectId: string;
+    agentId: string;
+  }>();
   const client = useApiClient();
   const queryClient = useQueryClient();
 
   const { data, isLoading, isError, error } = useQuery({
     queryKey: ["agent", agentId],
-    queryFn: () => client.getAgent(agentId as AgentId),
-    enabled: typeof agentId === "string",
+    queryFn: () => client.getAgent(projectId as ProjectId, agentId as AgentId),
+    enabled: typeof projectId === "string" && typeof agentId === "string",
     refetchInterval: (query) =>
-      query.state.data !== undefined && !isTerminalState(query.state.data.agent.state)
+      query.state.data !== undefined &&
+      !isTerminalState(query.state.data.agent.state)
         ? POLL_MS
         : false,
   });
 
   const cancel = useMutation({
-    mutationFn: () => client.cancelAgent(agentId as AgentId),
+    mutationFn: () =>
+      client.cancelAgent(projectId as ProjectId, agentId as AgentId),
     onSuccess: () => {
       toast.success("Cancel requested");
       void queryClient.invalidateQueries({ queryKey: ["agent", agentId] });
@@ -44,7 +52,8 @@ export function AgentDetailPage() {
 
   const agent = data?.agent;
   const canCancel =
-    agent !== undefined && (agent.state === "running" || agent.state === "cancelling");
+    agent !== undefined &&
+    (agent.state === "running" || agent.state === "cancelling");
 
   return (
     <div>
@@ -58,8 +67,10 @@ export function AgentDetailPage() {
               <ArrowLeft className="size-4" />
               <span className="text-sm font-normal">Agents</span>
             </Link>
-            <span className="text-subtle-foreground">/</span>
-            <span className="font-mono text-base">{agent?.qualifiedName ?? agentId}</span>
+            <span className="text-subtle-foreground text-sm">/</span>
+            <span className="font-mono text-base text-foreground">
+              {agent?.qualifiedName ?? agentId}
+            </span>
             {agent !== undefined && <AgentStatusBadge state={agent.state} />}
           </span>
         }
@@ -79,7 +90,7 @@ export function AgentDetailPage() {
       <PageContent>
         {isLoading && <SpinnerOverlay />}
         {isError && (
-          <p className=" border border-danger/30 bg-danger/10 px-4 py-3 text-sm text-danger">
+          <p className="border border-danger/30 bg-danger/10 px-4 py-3 text-sm text-danger">
             {error instanceof Error ? error.message : "Failed to load agent."}
           </p>
         )}
@@ -104,10 +115,28 @@ export function AgentDetailPage() {
               </CardHeader>
               <CardContent>
                 <dl className="space-y-2 text-sm">
-                  <Row label="Agent ID" value={<code className="font-mono text-xs">{agent.id}</code>} />
-                  <Row label="Snapshot" value={<code className="font-mono text-xs">{agent.snapshotId}</code>} />
-                  <Row label="Started" value={formatDateTime(agent.createdAt)} />
-                  <Row label="Updated" value={formatDateTime(agent.updatedAt)} />
+                  <Row
+                    label="Agent ID"
+                    value={
+                      <code className="font-mono text-xs">{agent.id}</code>
+                    }
+                  />
+                  <Row
+                    label="Snapshot"
+                    value={
+                      <code className="font-mono text-xs">
+                        {agent.snapshotId}
+                      </code>
+                    }
+                  />
+                  <Row
+                    label="Started"
+                    value={formatDateTime(agent.createdAt)}
+                  />
+                  <Row
+                    label="Updated"
+                    value={formatDateTime(agent.updatedAt)}
+                  />
                 </dl>
               </CardContent>
             </Card>
@@ -143,7 +172,9 @@ export function AgentDetailPage() {
 function Row({ label, value }: { label: string; value: React.ReactNode }) {
   return (
     <div className="flex items-baseline justify-between gap-3">
-      <dt className="text-[11px] uppercase tracking-wider text-subtle-foreground">{label}</dt>
+      <dt className="text-[11px] uppercase tracking-wider text-subtle-foreground">
+        {label}
+      </dt>
       <dd className="text-right text-foreground">{value}</dd>
     </div>
   );

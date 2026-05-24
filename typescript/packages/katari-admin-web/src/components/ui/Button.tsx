@@ -17,7 +17,7 @@ type ButtonProps = ButtonHTMLAttributes<HTMLButtonElement> & {
 // fill since destructive intent needs a strong visual signal.
 const variantClasses: Record<Variant, string> = {
   primary:
-    "bg-accent text-accent-foreground border border-accent hover:bg-accent/85 active:bg-accent/75",
+    "bg-highlight text-accent-foreground hover:bg-highlight/85 active:bg-highlight/75",
   secondary:
     "border border-border text-foreground hover:bg-muted hover:border-border-strong",
   ghost: "text-muted-foreground hover:bg-muted hover:text-foreground",
@@ -31,26 +31,36 @@ const sizeClasses: Record<Size, string> = {
   lg: "h-11 px-5 text-base gap-2",
 };
 
-export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button(
-  { className, variant = "secondary", size = "md", loading, children, disabled, ...rest },
-  ref,
-) {
-  return (
-    <button
-      ref={ref}
-      disabled={(disabled ?? false) || loading === true}
-      className={cn(
-        "inline-flex items-center justify-center font-normal transition-colors",
-        "hover:cursor-pointer disabled:cursor-not-allowed disabled:opacity-50",
-        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background",
-        variantClasses[variant],
-        sizeClasses[size],
-        className,
-      )}
-      {...rest}
-    >
-      {loading === true ? <Loader2 className="size-4 animate-spin" /> : null}
-      {children}
-    </button>
-  );
-});
+export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
+  function Button(
+    {
+      className,
+      variant = "secondary",
+      size = "md",
+      loading,
+      children,
+      disabled,
+      ...rest
+    },
+    ref,
+  ) {
+    return (
+      <button
+        ref={ref}
+        disabled={(disabled ?? false) || loading === true}
+        className={cn(
+          "inline-flex items-center justify-center font-normal transition-colors",
+          "hover:cursor-pointer disabled:cursor-not-allowed disabled:opacity-50",
+          "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background",
+          variantClasses[variant],
+          sizeClasses[size],
+          className,
+        )}
+        {...rest}
+      >
+        {loading === true ? <Loader2 className="size-4 animate-spin" /> : null}
+        {children}
+      </button>
+    );
+  },
+);

@@ -21,8 +21,16 @@ function projectItems(projectId: string): MenuItem[] {
   return [
     { to: `/project/${projectId}`, label: "Dashboard", icon: LayoutDashboard },
     { to: `/project/${projectId}/agents`, label: "Agents", icon: Activity },
-    { to: `/project/${projectId}/definitions`, label: "Definitions", icon: Boxes },
-    { to: `/project/${projectId}/escalations`, label: "Escalations", icon: MessageCircleQuestion },
+    {
+      to: `/project/${projectId}/definitions`,
+      label: "Definitions",
+      icon: Boxes,
+    },
+    {
+      to: `/project/${projectId}/escalations`,
+      label: "Escalations",
+      icon: MessageCircleQuestion,
+    },
   ];
 }
 
@@ -44,7 +52,7 @@ export function SidebarMenu() {
             Select a project to navigate.
           </p>
         ) : (
-          <ul className="space-y-0.5 border-l border-border">
+          <ul>
             {projectMenu.map((item) => (
               <MenuLink
                 key={item.to}
@@ -57,7 +65,7 @@ export function SidebarMenu() {
       </div>
       <div className="space-y-1">
         <SectionLabel>Runtime</SectionLabel>
-        <ul className="space-y-0.5 border-l border-border">
+        <ul>
           {globalItems.map((item) => (
             <MenuLink key={item.to} item={item} />
           ))}
@@ -85,9 +93,9 @@ function MenuLink({ item, end }: { item: MenuItem; end?: boolean }) {
         className={({ isActive }) =>
           cn(
             // Left-border highlight (katari-web docs sidebar style) — no fill.
-            "-ml-px flex items-center gap-2 border-l border-transparent py-1.5 pl-3 text-sm transition-colors",
+            "-ml-px flex items-center gap-2 py-2 pl-3 text-sm transition-colors",
             isActive
-              ? "border-foreground font-medium text-foreground"
+              ? "bg-accent font-medium text-accent-foreground"
               : "text-muted-foreground hover:border-border-strong hover:text-foreground",
           )
         }

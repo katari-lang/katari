@@ -1,0 +1,7 @@
+[package]
+name = "playground"
+
+[runtime]
+url = "http://localhost:8000"
+
+[dependencies]

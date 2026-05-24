@@ -1,11 +1,9 @@
-// Project-scoped escalation routes.
+// Flat "by id" single-entity escalation routes.
 //
-// Mounted at `/project/:projectId/escalation`. Escalations are project-
-// scoped (= the deploy unit), even though each one carries the
-// snapshotId of the agent that raised it. AI → user questions are
-// recorded as open in `api_pending_escalations` via the `escalate`
-// branch of ApiModule.feed; when the GUI views this list and answers,
-// an `escalateAck` flows on the bus and the agent thread resumes.
+// Mounted at `/escalation` alongside the project-scoped routes at
+// `/project/:projectId/escalation`. Same rationale as agent-by-id: the
+// CLI knows escalation ids without context, and a UUID is sufficient
+// for lookups / ack. List endpoints stay project-scoped.
 
 import { Hono } from "hono";
 import { valueFromRaw } from "@katari-lang/runtime";
@@ -13,43 +11,17 @@ import type { EscalationId } from "@katari-lang/runtime";
 import {
   AnswerEscalationSchema,
   EscalationIdSchema,
-  PaginationQuerySchema,
-  ProjectIdSchema,
-  SnapshotIdSchema,
 } from "./middleware/validation.js";
 import { apiEscalationToWire } from "../wire/agent-wire.js";
 import type { Orchestrator } from "../orchestrator.js";
 import type { Storage } from "../storage/types.js";
-import { z } from "zod";
 
-const ListQuerySchema = z
-  .object({
-    snapshotId: SnapshotIdSchema.optional(),
-    state: z.enum(["open", "answered", "cancelled"]).optional(),
-  })
-  .merge(PaginationQuerySchema);
-
-export function buildEscalationRoutes(
+export function buildEscalationByIdRoutes(
   orchestrator: Orchestrator,
   storage: Storage,
 ): Hono {
   const app = new Hono();
 
-  app.get("/", async (c) => {
-    const projectId = ProjectIdSchema.parse(c.req.param("projectId"));
-    const query = ListQuerySchema.parse(c.req.query());
-    const list = await storage.apiEscalations.list({
-      projectId,
-      snapshotId: query.snapshotId,
-      state: query.state,
-      limit: query.limit,
-      offset: query.offset,
-    });
-    return c.json({ escalations: list.map(apiEscalationToWire) });
-  });
-
-  // Single-escalation lookup for detail pages that need a stable URL per
-  // escalation (e.g. the admin's "answer" page) without listing first.
   app.get("/:escalationId", async (c) => {
     const escalationId = EscalationIdSchema.parse(
       c.req.param("escalationId"),

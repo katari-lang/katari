@@ -106,8 +106,19 @@ export type UploadSnapshotInput = z.infer<typeof UploadSnapshotSchema>;
 
 // ─── Agent / Escalation ────────────────────────────────────────────────────
 
+export const AgentStateSchema = z.enum([
+  "running",
+  "cancelling",
+  "cancelled",
+  "succeeded",
+  "error",
+]);
+export type AgentStateInput = z.infer<typeof AgentStateSchema>;
+
+// Project comes from the URL path now (`/project/:projectId/agent`),
+// so the start-agent body only carries snapshot selection + the call
+// itself.
 export const StartAgentSchema = z.object({
-  projectId: ProjectIdSchema,
   snapshotId: SnapshotIdSchema.optional(),
   qualifiedName: z.string().min(1),
   args: z.record(z.string(), RawValueSchema),

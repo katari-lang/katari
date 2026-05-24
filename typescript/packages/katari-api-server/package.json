@@ -26,7 +26,7 @@
     "build": "tsc",
     "test": "vitest run",
     "start": "node dist/bin.js",
-    "dev": "tsx watch src/bin.ts"
+    "dev": "tsx watch --env-file=../../../.env src/bin.ts"
   },
   "dependencies": {
     "@hono/node-server": "^1.13.0",

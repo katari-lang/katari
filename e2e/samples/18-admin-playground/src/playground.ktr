@@ -1,0 +1,130 @@
+// Admin UI form playground.
+//
+// Each agent here exercises a different SchemaForm shape. Apply this
+// snapshot, then click through them in /admin/.../definitions.
+//
+// Known limitation: agents that return a union of data ctors (e.g.
+// `-> ok | err`) are not included — they trigger a current Solver bug
+// that corrupts unrelated `to_string` typing in the same module
+// (see project_solver_union_return_secret_taint.md). Re-add once the
+// Solver refactor lands.
+
+// === Primitives ===
+
+@"Single string param - exercises StringField."
+agent echo_string(@"The text to echo back, prefixed with 'echo: '." text: string) -> string { f"echo: ${text}" }
+
+@"Single integer param - exercises NumberField (integer)."
+agent double_int(@"Any integer. The result is n + n." n: integer) -> integer { n + n }
+
+@"Single number param - exercises NumberField."
+agent halve(@"The number to divide by two." value: number) -> number { value / 2 }
+
+@"Single boolean param - exercises BooleanField (toggle)."
+agent flip(@"The flag to invert." flag: boolean) -> boolean { not(value = flag) }
+
+// === Multi-parameter agent (= each parameter independently annotated) ===
+
+@"Greets a person - exercises per-parameter descriptions on the invoke form."
+agent greet(
+  @"The greeter's name; appears verbatim in the result."
+  name: string,
+  @"Style of greeting prefix to use."
+  style: "casual" | "formal"
+) -> string {
+  match (style) {
+    case "casual" => { f"hey ${name}!" }
+    case _        => { f"Good day, ${name}." }
+  }
+}
+
+// === Data ctor (object form) ===
+
+@"A 2-D point."
+data point(
+  @"Horizontal coordinate (rightward positive)."
+  x: integer,
+  @"Vertical coordinate (downward positive)."
+  y: integer
+)
+
+@"Takes a point - exercises ObjectField with auto-hidden $ctor."
+agent point_sum(p: point) -> integer {
+  match (p) {
+    case point(x = xv, y = yv) => { xv + yv }
+  }
+}
+
+// === Tuple ===
+
+@"Takes a 2-tuple - exercises TupleField with mixed element types."
+agent describe_pair(t: (integer, string)) -> string {
+  match (t) {
+    case (0, s) => { f"zero with ${s}" }
+    case (n, s) => { f"${to_string(value = n)} with ${s}" }
+  }
+}
+
+// === Single-type data return (= safe; tagged-union return is bugged) ===
+
+@"A success-shaped result."
+data ok(n: integer)
+
+@"Builds an ok value - exercises tagged-data return rendering on the Returns card."
+agent build_ok(n: integer) -> ok { ok(n = n) }
+
+@"A failure shape."
+data err(message: string)
+
+@"Tagged-union ARGUMENT (not return) - tests admin's tagged-union dropdown on the invoke form."
+agent describe_result(r: ok | err) -> string {
+  match (r) {
+    case ok(n = v) => { f"ok: ${to_string(value = v)}" }
+    case err(message = m) => { f"err: ${m}" }
+  }
+}
+
+@"String-literal union - admin should render EnumField (= dropdown of red/green/blue)."
+agent paint(color: "red" | "green" | "blue") -> string {
+  f"painted ${color}"
+}
+
+// === Escalation: regular req ===
+
+@"Operator-answerable prompt."
+req ask(@"Question the operator should answer. Free-form text." prompt: string) -> string
+
+@"Calls ask() with no surrounding handler - surfaces as an open escalation in admin."
+agent ask_name() -> string with ask {
+  let name = ask(prompt = "What's your name?")
+  f"hello, ${name}"
+}
+
+@"Boolean-returning req - escalation answer form renders a BooleanField toggle."
+req confirm(@"Yes/no question to display in the escalation UI." prompt: string) -> boolean
+
+@"Drives one confirm() call."
+agent check_proceed() -> string with confirm {
+  match (confirm(prompt = "Proceed?")) {
+    case true => { "proceeded" }
+    case _    => { "user said no" }
+  }
+}
+
+// === Escalation: never req (tests the never UX) ===
+
+@"A req declared with never. Cannot be answered with a value."
+req fatal(reason: string) -> never
+
+@"Raises a never-returning req - escalation page shows the never UX."
+agent trigger_never() -> string with fatal {
+  fatal(reason = "this demo can never receive a meaningful answer")
+  "unreachable"
+}
+
+// === Entry ===
+
+@"Default no-arg entry point."
+agent main() -> string {
+  "playground"
+}

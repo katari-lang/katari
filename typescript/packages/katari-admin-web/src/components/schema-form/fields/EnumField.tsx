@@ -1,4 +1,4 @@
-import { cn } from "@/lib/cn";
+import { SelectMenu } from "@/components/ui/SelectMenu";
 
 export function EnumField({
   value,
@@ -9,26 +9,23 @@ export function EnumField({
   options: unknown[];
   onChange: (v: unknown) => void;
 }) {
+  const items = options.map((opt) => ({
+    key: JSON.stringify(opt),
+    label: typeof opt === "string" ? opt : JSON.stringify(opt),
+  }));
   return (
-    <select
-      value={JSON.stringify(value)}
-      onChange={(e) => {
-        try {
-          onChange(JSON.parse(e.target.value));
-        } catch {
-          onChange(e.target.value);
-        }
-      }}
-      className={cn(
-        "h-9 w-full  border border-border-strong  px-3 text-sm text-foreground",
-        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-      )}
-    >
-      {options.map((opt, idx) => (
-        <option key={idx} value={JSON.stringify(opt)}>
-          {typeof opt === "string" ? opt : JSON.stringify(opt)}
-        </option>
-      ))}
-    </select>
+    <div className="w-fit min-w-48">
+      <SelectMenu
+        value={JSON.stringify(value)}
+        options={items}
+        onChange={(key) => {
+          try {
+            onChange(JSON.parse(key));
+          } catch {
+            onChange(key);
+          }
+        }}
+      />
+    </div>
   );
 }

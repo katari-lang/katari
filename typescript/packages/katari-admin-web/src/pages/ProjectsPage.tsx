@@ -25,7 +25,9 @@ export function ProjectsPage() {
         {isLoading && <SpinnerOverlay />}
         {isError && (
           <p className=" border border-danger/30 bg-danger/10 px-4 py-3 text-sm text-danger">
-            {error instanceof Error ? error.message : "Failed to load projects."}
+            {error instanceof Error
+              ? error.message
+              : "Failed to load projects."}
           </p>
         )}
         {!isLoading && !isError && data !== undefined && (
@@ -36,7 +38,11 @@ export function ProjectsPage() {
                 title="No projects yet"
                 description={
                   <>
-                    Run <code className="font-mono text-foreground">katari apply</code> to publish a snapshot — the project will appear here.
+                    Run{" "}
+                    <code className="font-mono text-foreground">
+                      katari apply
+                    </code>{" "}
+                    to publish a snapshot — the project will appear here.
                   </>
                 }
               />
@@ -50,7 +56,7 @@ export function ProjectsPage() {
                     transition={{ duration: 0.2, delay: idx * 0.03 }}
                   >
                     <Link to={`/project/${p.id}`} className="block">
-                      <Card className="transition-all hover:border-border-strong hover:">
+                      <Card className="transition-all hover:border-border-strong hover:bg-muted">
                         <CardHeader>
                           <div className="flex items-center gap-2 text-muted-foreground">
                             <FolderOpen className="size-4" />
@@ -58,7 +64,9 @@ export function ProjectsPage() {
                               project
                             </span>
                           </div>
-                          <CardTitle className="truncate">{p.name}</CardTitle>
+                          <CardTitle className="truncate py-1">
+                            {p.name}
+                          </CardTitle>
                           <p className="font-mono text-[11px] text-subtle-foreground">
                             {p.id}
                           </p>

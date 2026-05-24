@@ -3,7 +3,12 @@ import { useNavigate } from "react-router-dom";
 import { Check, ChevronsUpDown, Folder } from "lucide-react";
 import { useApiClient, useApiKey } from "@/contexts/ApiKeyContext";
 import { useStickyProjectId } from "@/lib/useStickyProjectId";
-import { Dropdown, DropdownDivider, DropdownItem, DropdownLabel } from "@/components/ui/Dropdown";
+import {
+  Dropdown,
+  DropdownDivider,
+  DropdownItem,
+  DropdownLabel,
+} from "@/components/ui/Dropdown";
 
 export function SidebarProjectSwitcher() {
   const { apiKey } = useApiKey();

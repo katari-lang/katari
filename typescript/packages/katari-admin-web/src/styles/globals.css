@@ -145,6 +145,7 @@
   --font-sans: "DM Sans", "Noto Sans JP", system-ui, sans-serif;
   --font-mono: "DM Mono", ui-monospace, monospace;
   --font-display: "Lexend Tera", "Lexend", system-ui, sans-serif;
+  --font-display-text: "Lexend", system-ui, sans-serif;
 }
 
 html,

@@ -93,7 +93,7 @@ run opts = do
         then emitJson snaps
         else mapM_ printSnap snaps
     TAgents -> do
-      pid <- traverse (Common.resolveProjectId "ls" client) opts.optProject
+      pid <- requireProjectId client opts
       ags <- Api.listAgents client pid opts.optSnapshot
       if opts.optJson then emitJson ags else mapM_ printAgent ags
     TAgentDefs -> do

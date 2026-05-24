@@ -115,44 +115,78 @@ export function createApiClient(config: ApiClientConfig) {
         `/project/${projectId}/snapshot/${snapshotId}/schema`,
       ),
 
-    // Agent definitions
+    // Agent definitions (snapshot-scoped). `snapshotId === "latest"` is a
+    // server-side alias for the project's most-recent snapshot.
     listAgentDefinitions: (params: {
       projectId: ProjectId;
-      snapshotId?: SnapshotId;
+      snapshotId?: SnapshotId | "latest";
     }) =>
       request<{ definitions: AgentDefinitionWire[]; snapshotId: SnapshotId }>(
         config,
         "GET",
-        withQuery("/agent-definition", params),
+        `/project/${params.projectId}/snapshot/${params.snapshotId ?? "latest"}/agent-definition`,
+      ),
+    getAgentDefinition: (params: {
+      projectId: ProjectId;
+      snapshotId?: SnapshotId | "latest";
+      qualifiedName: string;
+    }) =>
+      request<{ definition: AgentDefinitionWire; snapshotId: SnapshotId }>(
+        config,
+        "GET",
+        `/project/${params.projectId}/snapshot/${params.snapshotId ?? "latest"}/agent-definition/${encodeURIComponent(params.qualifiedName)}`,
       ),
 
-    // Agents
+    // Agents (project-scoped; snapshotId is a filter, not part of identity).
     listAgents: (params: {
-      projectId?: ProjectId;
+      projectId: ProjectId;
       snapshotId?: SnapshotId;
+      state?: "running" | "cancelling" | "cancelled" | "succeeded" | "error";
       limit?: number;
       offset?: number;
     }) =>
       request<{ agents: AgentRowWire[] }>(
         config,
         "GET",
-        withQuery("/agent", params),
+        withQuery(`/project/${params.projectId}/agent`, {
+          snapshotId: params.snapshotId,
+          state: params.state,
+          limit: params.limit,
+          offset: params.offset,
+        }),
       ),
-    getAgent: (id: AgentId) =>
-      request<{ agent: AgentRowWire }>(config, "GET", `/agent/${id}`),
+    getAgent: (projectId: ProjectId, id: AgentId) =>
+      request<{ agent: AgentRowWire }>(
+        config,
+        "GET",
+        `/project/${projectId}/agent/${id}`,
+      ),
     startAgent: (input: {
       projectId: ProjectId;
       snapshotId?: SnapshotId;
       qualifiedName: string;
       args: Record<string, RawValue>;
     }) =>
-      request<{ agentId: AgentId }>(config, "POST", "/agent", input),
-    cancelAgent: (id: AgentId) =>
-      request<{ agent: AgentRowWire }>(config, "POST", `/agent/${id}/cancel`),
+      request<{ agentId: AgentId }>(
+        config,
+        "POST",
+        `/project/${input.projectId}/agent`,
+        {
+          snapshotId: input.snapshotId,
+          qualifiedName: input.qualifiedName,
+          args: input.args,
+        },
+      ),
+    cancelAgent: (projectId: ProjectId, id: AgentId) =>
+      request<{ agent: AgentRowWire }>(
+        config,
+        "POST",
+        `/project/${projectId}/agent/${id}/cancel`,
+      ),
 
-    // Escalations
+    // Escalations (project-scoped).
     listEscalations: (params: {
-      projectId?: ProjectId;
+      projectId: ProjectId;
       snapshotId?: SnapshotId;
       state?: EscalationState;
       limit?: number;
@@ -161,10 +195,26 @@ export function createApiClient(config: ApiClientConfig) {
       request<{ escalations: EscalationWire[] }>(
         config,
         "GET",
-        withQuery("/escalation", params),
+        withQuery(`/project/${params.projectId}/escalation`, {
+          snapshotId: params.snapshotId,
+          state: params.state,
+          limit: params.limit,
+          offset: params.offset,
+        }),
       ),
-    answerEscalation: (id: EscalationId, value: RawValue) =>
-      request<{ ok: boolean }>(config, "POST", `/escalation/${id}/ack`, { value }),
+    getEscalation: (projectId: ProjectId, id: EscalationId) =>
+      request<{ escalation: EscalationWire }>(
+        config,
+        "GET",
+        `/project/${projectId}/escalation/${id}`,
+      ),
+    answerEscalation: (projectId: ProjectId, id: EscalationId, value: RawValue) =>
+      request<{ ok: boolean }>(
+        config,
+        "POST",
+        `/project/${projectId}/escalation/${id}/ack`,
+        { value },
+      ),
 
     // Env
     listEnv: () =>

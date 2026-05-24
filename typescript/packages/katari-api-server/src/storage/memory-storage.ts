@@ -185,6 +185,14 @@ class InMemoryEngineCheckpointRepo implements EngineCheckpointRepo {
 class InMemoryAgentRepo implements AgentRepo {
   rows = new Map<AgentId, AgentRow>();
   byDelegation = new Map<DelegationId, AgentId>();
+  /**
+   * Snapshot → project lookup. Injected at construction time so the
+   * `projectId` filter on `list` can resolve a project's agents
+   * cross-snapshot without each repo owning its own snapshot table.
+   */
+  constructor(
+    private readonly projectIdOfSnapshot: (id: SnapshotId) => ProjectId | null,
+  ) {}
 
   async insert(row: AgentRow): Promise<void> {
     this.rows.set(row.id, clone(row));
@@ -205,12 +213,17 @@ class InMemoryAgentRepo implements AgentRepo {
 
   async list(
     filter?: {
+      projectId?: ProjectId;
       snapshotId?: SnapshotId;
       state?: AgentState;
       afterId?: AgentId;
     } & ListOptions,
   ): Promise<AgentRow[]> {
     let all = [...this.rows.values()];
+    if (filter?.projectId !== undefined) {
+      const want = filter.projectId;
+      all = all.filter((r) => this.projectIdOfSnapshot(r.snapshotId) === want);
+    }
     if (filter?.snapshotId !== undefined) {
       all = all.filter((r) => r.snapshotId === filter.snapshotId);
     }
@@ -343,6 +356,10 @@ class InMemoryFfiPendingEscalationRepo implements FfiPendingEscalationRepo {
 class InMemoryApiPendingEscalationRepo implements ApiPendingEscalationRepo {
   rows = new Map<EscalationId, ApiPendingEscalation>();
 
+  constructor(
+    private readonly projectIdOfSnapshot: (id: SnapshotId) => ProjectId | null,
+  ) {}
+
   async insert(row: ApiPendingEscalation): Promise<void> {
     this.rows.set(row.escalationId, clone(row));
   }
@@ -353,10 +370,17 @@ class InMemoryApiPendingEscalationRepo implements ApiPendingEscalationRepo {
   }
 
   async list(
-    filter?: { snapshotId?: SnapshotId; state?: ApiPendingEscalation["state"] }
-      & ListOptions,
+    filter?: {
+      projectId?: ProjectId;
+      snapshotId?: SnapshotId;
+      state?: ApiPendingEscalation["state"];
+    } & ListOptions,
   ): Promise<ApiPendingEscalation[]> {
     let all = [...this.rows.values()];
+    if (filter?.projectId !== undefined) {
+      const want = filter.projectId;
+      all = all.filter((r) => this.projectIdOfSnapshot(r.snapshotId) === want);
+    }
     if (filter?.snapshotId !== undefined) {
       all = all.filter((r) => r.snapshotId === filter.snapshotId);
     }
@@ -424,10 +448,17 @@ export class InMemoryStorage implements Storage {
   readonly projects = new InMemoryProjectRepo();
   readonly snapshots = new InMemorySnapshotRepo();
   readonly checkpoints = new InMemoryEngineCheckpointRepo();
-  readonly agents = new InMemoryAgentRepo();
+  // Snapshot → project lookup used by AgentRepo / ApiPendingEscalationRepo
+  // when filtering cross-snapshot by `projectId`. Direct `.rows` access
+  // avoids the async-Promise hop on every list() call.
+  private readonly projectIdOfSnapshot = (id: SnapshotId): ProjectId | null =>
+    this.snapshots.rows.get(id)?.projectId ?? null;
+  readonly agents = new InMemoryAgentRepo(this.projectIdOfSnapshot);
   readonly ffiDelegations = new InMemoryFfiPendingDelegationRepo();
   readonly ffiEscalations = new InMemoryFfiPendingEscalationRepo();
-  readonly apiEscalations = new InMemoryApiPendingEscalationRepo();
+  readonly apiEscalations = new InMemoryApiPendingEscalationRepo(
+    this.projectIdOfSnapshot,
+  );
   readonly envEntries = new InMemoryEnvEntryRepo();
 
   /** Per-snapshot mutex map for `withSnapshotLock` (= in-memory version of a row lock). */

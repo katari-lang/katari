@@ -8,7 +8,10 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { SpinnerOverlay } from "@/components/ui/Spinner";
-import { AgentStatusBadge, isTerminalState } from "@/components/domain/AgentStatusBadge";
+import {
+  AgentStatusBadge,
+  isTerminalState,
+} from "@/components/domain/AgentStatusBadge";
 import { formatDateTime, relativeTime, shortId } from "@/lib/format";
 import type { ProjectId } from "@/api/types";
 
@@ -26,7 +29,8 @@ export function DashboardPage() {
 
   const agentsQ = useQuery({
     queryKey: ["agents", projectId],
-    queryFn: () => client.listAgents({ projectId: projectId as ProjectId, limit: 200 }),
+    queryFn: () =>
+      client.listAgents({ projectId: projectId as ProjectId, limit: 200 }),
     enabled: typeof projectId === "string",
     refetchInterval: (query) =>
       (query.state.data?.agents ?? []).some((a) => !isTerminalState(a.state))
@@ -53,7 +57,9 @@ export function DashboardPage() {
   });
 
   const agents = agentsQ.data?.agents ?? [];
-  const liveAgents = agents.filter((a) => !isTerminalState(a.state)).slice(0, 5);
+  const liveAgents = agents
+    .filter((a) => !isTerminalState(a.state))
+    .slice(0, 5);
   const recentAgents = agents.slice(0, 5);
   const openEscalations = (escalationsQ.data?.escalations ?? []).slice(0, 5);
 
@@ -90,7 +96,9 @@ export function DashboardPage() {
               }
             >
               {liveAgents.length === 0 ? (
-                <p className="text-sm text-subtle-foreground">No live agents.</p>
+                <p className="text-sm text-subtle-foreground">
+                  No live agents.
+                </p>
               ) : (
                 <ul className="space-y-1.5">
                   {liveAgents.map((a) => (
@@ -127,11 +135,16 @@ export function DashboardPage() {
               }
             >
               {openEscalations.length === 0 ? (
-                <p className="text-sm text-subtle-foreground">No open escalations.</p>
+                <p className="text-sm text-subtle-foreground">
+                  No open escalations.
+                </p>
               ) : (
                 <ul className="space-y-1.5">
                   {openEscalations.map((e) => (
-                    <li key={e.escalationId} className=" px-2 py-1.5 text-sm hover:bg-muted">
+                    <li
+                      key={e.escalationId}
+                      className=" px-2 py-1.5 text-sm hover:bg-muted"
+                    >
                       <div className="flex items-center gap-2">
                         <Badge tone="info">open</Badge>
                         <span className="flex-1 truncate font-mono text-xs text-foreground">
@@ -147,18 +160,19 @@ export function DashboardPage() {
               )}
             </DashboardCard>
 
-            <DashboardCard
-              title="Project info"
-              count={null}
-              icon={null}
-            >
+            <DashboardCard title="Project info" count={null} icon={null}>
               <dl className="space-y-2 text-sm">
-                <InfoRow label="Project ID" value={<code className="font-mono text-xs">{projectId}</code>} />
+                <InfoRow
+                  label="Project ID"
+                  value={<code className="font-mono text-xs">{projectId}</code>}
+                />
                 {projectQ.data !== undefined && (
                   <InfoRow
                     label="Created"
                     value={
-                      <span title={formatDateTime(projectQ.data.project.createdAt)}>
+                      <span
+                        title={formatDateTime(projectQ.data.project.createdAt)}
+                      >
                         {relativeTime(projectQ.data.project.createdAt)}
                       </span>
                     }
@@ -177,7 +191,11 @@ export function DashboardPage() {
                     <InfoRow
                       label="Snapshot age"
                       value={
-                        <span title={formatDateTime(snapshotQ.data.snapshot.createdAt)}>
+                        <span
+                          title={formatDateTime(
+                            snapshotQ.data.snapshot.createdAt,
+                          )}
+                        >
                           {relativeTime(snapshotQ.data.snapshot.createdAt)}
                         </span>
                       }
@@ -203,10 +221,17 @@ export function DashboardPage() {
             >
               {recentAgents.length === 0 ? (
                 <p className="text-sm text-subtle-foreground">
-                  No agents yet. Invoke one from the <Link to={`/project/${projectId}/definitions`} className="underline">Definitions</Link> page.
+                  No agents yet. Invoke one from the{" "}
+                  <Link
+                    to={`/project/${projectId}/definitions`}
+                    className="underline"
+                  >
+                    Definitions
+                  </Link>{" "}
+                  page.
                 </p>
               ) : (
-                <ul className="divide-y divide-border">
+                <ul className="">
                   {recentAgents.map((a) => (
                     <li key={a.id}>
                       <Link
@@ -263,7 +288,7 @@ function DashboardCard({
       </CardHeader>
       <CardContent>{children}</CardContent>
       {footer !== undefined && (
-        <div className="flex justify-end border-t border-border px-3 py-2">{footer}</div>
+        <div className="flex justify-end px-3 py-2">{footer}</div>
       )}
     </Card>
   );
@@ -272,7 +297,9 @@ function DashboardCard({
 function InfoRow({ label, value }: { label: string; value: React.ReactNode }) {
   return (
     <div className="flex items-baseline justify-between gap-3">
-      <dt className="text-[11px] uppercase tracking-wider text-subtle-foreground">{label}</dt>
+      <dt className="text-[11px] uppercase tracking-wider text-subtle-foreground">
+        {label}
+      </dt>
       <dd className="text-right text-foreground">{value}</dd>
     </div>
   );

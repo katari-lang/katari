@@ -10,9 +10,10 @@ import type { ProjectService } from "../services/project-service.js";
 import type { SnapshotService } from "../services/snapshot-service.js";
 import type { Orchestrator } from "../orchestrator.js";
 import { buildAgentRoutes } from "./agent.js";
-import { buildAgentDefinitionRoutes } from "./agent-definition.js";
+import { buildAgentByIdRoutes } from "./agent-by-id.js";
 import { buildEnvRoutes } from "./env.js";
 import { buildEscalationRoutes } from "./escalation.js";
+import { buildEscalationByIdRoutes } from "./escalation-by-id.js";
 import { buildProjectRoutes } from "./project.js";
 import { buildSnapshotRoutes } from "./snapshot.js";
 import { buildAuthMiddleware } from "./middleware/auth.js";
@@ -129,17 +130,29 @@ export function buildApp(deps: AppDeps): Hono {
     });
   }
 
+  // Routes reflect the data hierarchy: project owns snapshots and any
+  // runtime artifact (= agents, escalations); snapshots own their
+  // compiled schema (= agent-definitions). Env is runtime-global.
   app.route("/project", buildProjectRoutes(deps.projects));
   app.route(
     "/project/:projectId/snapshot",
     buildSnapshotRoutes(deps.snapshots),
   );
   app.route(
-    "/agent",
-    buildAgentRoutes(deps.orchestrator, deps.snapshots, deps.storage),
+    "/project/:projectId/agent",
+    buildAgentRoutes(deps.orchestrator, deps.storage),
   );
-  app.route("/agent-definition", buildAgentDefinitionRoutes(deps.snapshots));
-  app.route("/escalation", buildEscalationRoutes(deps.orchestrator, deps.storage));
+  app.route(
+    "/project/:projectId/escalation",
+    buildEscalationRoutes(deps.orchestrator, deps.storage),
+  );
+  // Flat single-entity aliases for the CLI / scripts that already hold a
+  // UUID and don't need the navigation hierarchy.
+  app.route("/agent", buildAgentByIdRoutes(deps.orchestrator, deps.storage));
+  app.route(
+    "/escalation",
+    buildEscalationByIdRoutes(deps.orchestrator, deps.storage),
+  );
   app.route("/env", buildEnvRoutes(deps.storage));
 
   return app;

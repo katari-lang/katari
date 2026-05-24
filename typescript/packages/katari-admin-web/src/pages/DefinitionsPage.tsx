@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
 import { useParams, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { motion } from "framer-motion";
@@ -34,7 +34,17 @@ export function DefinitionsPage() {
   });
   const projectName = projectQ.data?.project.name;
 
-  const [showAll, setShowAll] = useState(false);
+  // Persist the "show stdlib & libraries" toggle in the URL so refreshes
+  // and shared links keep the same view. Truthy values that count as
+  // "on": `?showAll=1` / `?showAll=true`. Anything else is off.
+  const showAllParam = params.get("showAll");
+  const showAll = showAllParam === "1" || showAllParam === "true";
+
+  function setShowAll(next: boolean) {
+    if (next) params.set("showAll", "1");
+    else params.delete("showAll");
+    setParams(params);
+  }
 
   const { data, isLoading, isError, error } = useQuery({
     queryKey: ["definitions", projectId, selected ?? "latest"],
@@ -62,7 +72,10 @@ export function DefinitionsPage() {
     setParams(params);
   }
 
-  const hiddenCount = data === undefined ? 0 : data.definitions.length - visibleDefinitions.length;
+  const hiddenCount =
+    data === undefined
+      ? 0
+      : data.definitions.length - visibleDefinitions.length;
 
   return (
     <div>
@@ -72,36 +85,34 @@ export function DefinitionsPage() {
       />
       <PageContent>
         {/* Snapshot picker + show-all toggle: both scope the tree below, so
-            they sit immediately above it instead of in the right-aligned
-            header actions area. */}
+            they sit immediately above it. Keep them grouped on the left so
+            the toggle is close to the picker (= a few px away rather than
+            stranded at the page's right edge). */}
         {typeof projectId === "string" && (
-          <div className="mb-4 flex items-center justify-between gap-2">
+          <div className="mb-4 flex flex-wrap items-center gap-2">
             <DefinitionsSnapshotPicker
               projectId={projectId as ProjectId}
               selected={selected}
               resolvedId={data?.snapshotId ?? null}
               onSelect={setSelected}
             />
-            <label className="inline-flex cursor-pointer items-center gap-2 text-xs text-muted-foreground">
+            <label className="inline-flex cursor-pointer items-center gap-2 bg-transparent px-3 py-1.5 text-xs transition-colors text-muted-foreground">
               <input
                 type="checkbox"
                 checked={showAll}
                 onChange={(e) => setShowAll(e.target.checked)}
-                className="accent-accent"
+                className="accent-accent cursor-pointer bg-background transition-all"
               />
-              <span>
-                Show stdlib &amp; libraries
-                {hiddenCount > 0 && !showAll && (
-                  <span className="ml-1 text-subtle-foreground">({hiddenCount} hidden)</span>
-                )}
-              </span>
+              <span>Show stdlib &amp; libraries</span>
             </label>
           </div>
         )}
         {isLoading && <SpinnerOverlay />}
         {isError && (
           <p className="border border-danger/30 bg-danger/10 px-4 py-3 text-sm text-danger">
-            {error instanceof Error ? error.message : "Failed to load definitions."}
+            {error instanceof Error
+              ? error.message
+              : "Failed to load definitions."}
           </p>
         )}
         {!isLoading && !isError && data !== undefined && (
@@ -129,7 +140,8 @@ export function DefinitionsPage() {
                 <DefinitionsTree
                   definitions={visibleDefinitions}
                   href={(def) => {
-                    const search = selected === null ? "" : `?snapshot=${selected}`;
+                    const search =
+                      selected === null ? "" : `?snapshot=${selected}`;
                     return `/project/${projectId}/definitions/${encodeURIComponent(
                       def.qualifiedName,
                     )}${search}`;
