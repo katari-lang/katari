@@ -25,7 +25,8 @@
   "scripts": {
     "build": "tsc",
     "test": "vitest run",
-    "start": "node dist/bin.js"
+    "start": "node dist/bin.js",
+    "dev": "tsx watch src/bin.ts"
   },
   "dependencies": {
     "@hono/node-server": "^1.13.0",
@@ -40,6 +41,7 @@
   "devDependencies": {
     "@types/node": "^22.0.0",
     "@types/uuid": "^10.0.0",
+    "tsx": "^4.19.0",
     "typescript": "^5.7.0",
     "vitest": "^3.0.0"
   }

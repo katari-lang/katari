@@ -17,7 +17,6 @@
     "description": "AI metadata of a callable (name / id / description / I-O schema).",
     "input": {
       "additionalProperties": false,
-      "description": "AI metadata of a callable (name / id / description / I-O schema).",
       "properties": {
         "description": {
           "type": "string"
@@ -42,10 +41,587 @@
         "name",
         "output"
       ],
-      "title": "agent_metadata",
       "type": "object"
     },
     "name": "prim.agent_metadata",
+    "output": {
+      "additionalProperties": false,
+      "properties": {
+        "$ctor": {
+          "const": "prim.agent_metadata"
+        },
+        "description": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "input": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "output": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "$ctor",
+        "description",
+        "id",
+        "input",
+        "name",
+        "output"
+      ],
+      "type": "object"
+    },
+    "requests": []
+  },
+  {
+    "description": "Add two numbers.",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "lhs": {
+          "type": "number"
+        },
+        "rhs": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "lhs",
+        "rhs"
+      ],
+      "type": "object"
+    },
+    "name": "prim.add",
+    "output": {
+      "type": "number"
+    },
+    "requests": []
+  },
+  {
+    "description": "Subtract two numbers.",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "lhs": {
+          "type": "number"
+        },
+        "rhs": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "lhs",
+        "rhs"
+      ],
+      "type": "object"
+    },
+    "name": "prim.sub",
+    "output": {
+      "type": "number"
+    },
+    "requests": []
+  },
+  {
+    "description": "Multiply two numbers.",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "lhs": {
+          "type": "number"
+        },
+        "rhs": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "lhs",
+        "rhs"
+      ],
+      "type": "object"
+    },
+    "name": "prim.mul",
+    "output": {
+      "type": "number"
+    },
+    "requests": []
+  },
+  {
+    "description": "Floor-mod two numbers.",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "lhs": {
+          "type": "number"
+        },
+        "rhs": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "lhs",
+        "rhs"
+      ],
+      "type": "object"
+    },
+    "name": "prim.mod",
+    "output": {
+      "type": "number"
+    },
+    "requests": []
+  },
+  {
+    "description": "Divide two numbers (always returns number).",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "lhs": {
+          "type": "number"
+        },
+        "rhs": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "lhs",
+        "rhs"
+      ],
+      "type": "object"
+    },
+    "name": "prim.div",
+    "output": {
+      "type": "number"
+    },
+    "requests": []
+  },
+  {
+    "description": "Unary negate.",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "value": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "value"
+      ],
+      "type": "object"
+    },
+    "name": "prim.neg",
+    "output": {
+      "type": "number"
+    },
+    "requests": []
+  },
+  {
+    "description": "Absolute value (integer when operand is integer).",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "value": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "value"
+      ],
+      "type": "object"
+    },
+    "name": "prim.abs",
+    "output": {
+      "type": "number"
+    },
+    "requests": []
+  },
+  {
+    "description": "Structural equality.",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "lhs": {},
+        "rhs": {}
+      },
+      "required": [
+        "lhs",
+        "rhs"
+      ],
+      "type": "object"
+    },
+    "name": "prim.eq",
+    "output": {
+      "type": "boolean"
+    },
+    "requests": []
+  },
+  {
+    "description": "Structural inequality.",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "lhs": {},
+        "rhs": {}
+      },
+      "required": [
+        "lhs",
+        "rhs"
+      ],
+      "type": "object"
+    },
+    "name": "prim.ne",
+    "output": {
+      "type": "boolean"
+    },
+    "requests": []
+  },
+  {
+    "description": "Less than.",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "lhs": {
+          "type": "number"
+        },
+        "rhs": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "lhs",
+        "rhs"
+      ],
+      "type": "object"
+    },
+    "name": "prim.lt",
+    "output": {
+      "type": "boolean"
+    },
+    "requests": []
+  },
+  {
+    "description": "Less or equal.",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "lhs": {
+          "type": "number"
+        },
+        "rhs": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "lhs",
+        "rhs"
+      ],
+      "type": "object"
+    },
+    "name": "prim.le",
+    "output": {
+      "type": "boolean"
+    },
+    "requests": []
+  },
+  {
+    "description": "Greater than.",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "lhs": {
+          "type": "number"
+        },
+        "rhs": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "lhs",
+        "rhs"
+      ],
+      "type": "object"
+    },
+    "name": "prim.gt",
+    "output": {
+      "type": "boolean"
+    },
+    "requests": []
+  },
+  {
+    "description": "Greater or equal.",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "lhs": {
+          "type": "number"
+        },
+        "rhs": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "lhs",
+        "rhs"
+      ],
+      "type": "object"
+    },
+    "name": "prim.ge",
+    "output": {
+      "type": "boolean"
+    },
+    "requests": []
+  },
+  {
+    "description": "Logical and.",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "lhs": {
+          "type": "boolean"
+        },
+        "rhs": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "lhs",
+        "rhs"
+      ],
+      "type": "object"
+    },
+    "name": "prim.and",
+    "output": {
+      "type": "boolean"
+    },
+    "requests": []
+  },
+  {
+    "description": "Logical or.",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "lhs": {
+          "type": "boolean"
+        },
+        "rhs": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "lhs",
+        "rhs"
+      ],
+      "type": "object"
+    },
+    "name": "prim.or",
+    "output": {
+      "type": "boolean"
+    },
+    "requests": []
+  },
+  {
+    "description": "Logical not.",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "value": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "value"
+      ],
+      "type": "object"
+    },
+    "name": "prim.not",
+    "output": {
+      "type": "boolean"
+    },
+    "requests": []
+  },
+  {
+    "description": "Concatenate two strings (taint-aware: if either operand is secret, the result is secret).",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "lhs": {
+          "type": "string"
+        },
+        "rhs": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "lhs",
+        "rhs"
+      ],
+      "type": "object"
+    },
+    "name": "prim.concat",
+    "output": {
+      "type": "string"
+    },
+    "requests": []
+  },
+  {
+    "description": "Return the runtime type-of-value tag as a string.",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "value": {}
+      },
+      "required": [
+        "value"
+      ],
+      "type": "object"
+    },
+    "name": "prim.type_of",
+    "output": {
+      "type": "string"
+    },
+    "requests": []
+  },
+  {
+    "description": "Serialize any value to its canonical JSON string (strings get quoted; round-trips with @from_string@ when added).",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "value": {}
+      },
+      "required": [
+        "value"
+      ],
+      "type": "object"
+    },
+    "name": "prim.to_string",
+    "output": {
+      "type": "string"
+    },
+    "requests": []
+  },
+  {
+    "description": "Format a value for f-string interpolation. Accepts string or secret only (taint-aware: secret yields secret); other types must be converted via @to_string@ first.",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "value": {}
+      },
+      "required": [
+        "value"
+      ],
+      "type": "object"
+    },
+    "name": "prim.format",
+    "output": {
+      "type": "string"
+    },
+    "requests": []
+  },
+  {
+    "description": "Retrieve the element at @index@.",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "array": {},
+        "index": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "array",
+        "index"
+      ],
+      "type": "object"
+    },
+    "name": "prim.array_get",
+    "output": {},
+    "requests": []
+  },
+  {
+    "description": "Length of an array.",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "array": {}
+      },
+      "required": [
+        "array"
+      ],
+      "type": "object"
+    },
+    "name": "prim.array_length",
+    "output": {
+      "type": "integer"
+    },
+    "requests": []
+  },
+  {
+    "description": "Retrieve a tagged-value field by name.",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "field": {
+          "type": "string"
+        },
+        "object": {}
+      },
+      "required": [
+        "field",
+        "object"
+      ],
+      "type": "object"
+    },
+    "name": "prim.get_field",
+    "output": {},
+    "requests": []
+  },
+  {
+    "description": "Retrieve a tuple element by positional index.",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "index": {
+          "type": "integer"
+        },
+        "tuple": {}
+      },
+      "required": [
+        "index",
+        "tuple"
+      ],
+      "type": "object"
+    },
+    "name": "prim.tuple_get",
+    "output": {},
+    "requests": []
+  },
+  {
+    "description": "Return the AI metadata of any callable value.",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "value": {
+          "additionalProperties": false,
+          "properties": {
+            "$callable": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "$callable"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "value"
+      ],
+      "type": "object"
+    },
+    "name": "prim.get_metadata",
     "output": {
       "additionalProperties": false,
       "properties": {

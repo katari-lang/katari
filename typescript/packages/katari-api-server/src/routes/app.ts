@@ -16,6 +16,7 @@ import { buildEscalationRoutes } from "./escalation.js";
 import { buildProjectRoutes } from "./project.js";
 import { buildSnapshotRoutes } from "./snapshot.js";
 import { buildAuthMiddleware } from "./middleware/auth.js";
+import { mountAdminWeb } from "./admin-web.js";
 import {
   buildRateLimitMiddleware,
   type RateLimitOptions,
@@ -37,6 +38,13 @@ export type AppDeps = {
   apiKey: string | null;
   rateLimit?: RateLimitOptions | null;
   metrics?: AppMetrics;
+  /**
+   * Absolute or process-cwd-relative path to a built katari-admin-web
+   * `dist/` directory. When set, the SPA is served from `/admin/*`. `null`
+   * (= default) skips the mount entirely so deployments that don't ship
+   * the UI keep working unchanged.
+   */
+  adminWebDistPath?: string | null;
 };
 
 const DEFAULT_RATE_LIMIT: RateLimitOptions = {
@@ -90,6 +98,11 @@ export function buildApp(deps: AppDeps): Hono {
   if (deps.apiKey !== null) {
     app.use("*", buildAuthMiddleware(deps.apiKey));
   }
+
+  // Mount the admin SPA BEFORE the JSON routes so that, after the auth
+  // middleware lets `/admin/*` through, the static handler can respond
+  // without needing to fall through the route chain.
+  mountAdminWeb(app, deps.adminWebDistPath ?? null, deps.logger);
 
   app.get("/healthz", (c) => c.text("ok"));
 

@@ -39,11 +39,41 @@ Companion repositories:
 stack build
 stack test
 
-# TypeScript (pnpm v9 — pinned via packageManager)
+# TypeScript (pnpm v11 — pinned via packageManager)
 cd typescript
 pnpm install
 pnpm -r run build
 ```
+
+## Running locally
+
+The runtime is one Postgres + one Node process; the admin web UI is baked
+into the same image. Copy `.env.example` to `.env` first.
+
+```sh
+cp .env.example .env
+# edit .env to set KATARI_API_KEY / KATARI_SECRET_KEY (or keep dev defaults)
+```
+
+Three dev modes, pick by what you're iterating on:
+
+```sh
+# A. Full stack in Docker — admin UI baked, "does the prod image work?"
+docker compose up                       # http://localhost:8000/admin/
+
+# B. Editing admin web — vite hot reload on host, Postgres in Docker
+docker compose up db                                # Postgres only
+pnpm --filter @katari-lang/api-server dev           # :8000, tsx watch
+pnpm --filter @katari-lang/admin-web dev            # :5173/admin/, vite
+
+# C. Editing api-server / runtime — same as B but ignore the vite step
+docker compose up db
+pnpm --filter @katari-lang/api-server dev
+```
+
+`katari apply` (the CLI) reads `[runtime].url` from each project's
+`katari.toml`; the default `http://localhost:8000` works for all three
+modes. Pass `--api-url` to override.
 
 ## Compiler pipeline
 

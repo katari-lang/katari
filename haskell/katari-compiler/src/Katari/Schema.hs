@@ -52,23 +52,17 @@ import Data.Text (Text)
 import Data.Text.Encoding qualified as Encoding
 import GHC.Generics (Generic)
 import Katari.AST
-  ( AgentDeclaration (..),
-    DataDeclaration (..),
+  ( DataDeclaration (..),
     DataParameter (..),
     Declaration (..),
-    ExternalAgentDeclaration (..),
     Module (..),
     NameRef (..),
-    NameRefKind (..),
-    ParameterBinding (..),
-    Phase (Zonked),
-    RequestDeclaration (..),
   )
 import Katari.Id
-  ( ModuleId,
-    QualifiedName,
+  ( QualifiedName,
     RequestId,
     TypeId,
+    VariableId,
     renderQualifiedName,
   )
 import Katari.SemanticType
@@ -428,113 +422,54 @@ compactUnion cores =
 -- Top-level builder
 -- ===========================================================================
 
--- | Build schema entries for a compiled program. Walks every module's
--- declarations and emits one 'SchemaEntry' per top-level callable.
+-- | Build schema entries for a compiled program.
+--
+-- Decl-agnostic walk of every top-level callable: any 'VariableData'
+-- carrying a 'variableQualifiedName' whose zonked type is a
+-- 'SemanticTypeFunction' becomes one 'SchemaEntry'. The Identifier pass
+-- attaches the declaration's @\@"..."@ annotation and its per-parameter
+-- annotations to the 'VariableData' itself, so this builder doesn't need
+-- to inspect 'Declaration' shapes — all decl kinds (agent / ext agent /
+-- prim agent / req / data ctor) flow through the same path uniformly.
+--
+-- That means @prim agent add@ etc. ARE in the bundle now — AI tool
+-- calling consumers read the runtime-side 'get_metadata' prim for
+-- their tool discovery (the global bundle is operator / IDE facing),
+-- so there's no reason to filter out stdlib prims here. Consumers that
+-- want to hide @prim.*@ from a display list can filter by qualified-name
+-- prefix on their side.
 buildSchemas :: IdentifierResult -> ZonkResult -> [SchemaEntry]
 buildSchemas idResult zonkResult =
   let dataDefs = buildDataDefs idResult zonkResult
-   in concatMap
-        (buildModuleEntries dataDefs idResult zonkResult)
-        (Map.toList zonkResult.zonkedModules)
+   in mapMaybe
+        (buildVariableEntry dataDefs idResult zonkResult)
+        (Map.toList idResult.identifiedVariables)
 
-buildModuleEntries ::
+-- | One 'SchemaEntry' per top-level callable 'VariableId'. Returns
+-- 'Nothing' for: local bindings (no qualified name), non-callable
+-- bindings (= not a function in the type env), and any Solver-contract
+-- violation (= the diagnostic was already emitted upstream).
+buildVariableEntry ::
   DataDefs ->
   IdentifierResult ->
   ZonkResult ->
-  (ModuleId, Module Zonked) ->
-  [SchemaEntry]
-buildModuleEntries dataDefs idResult zonkResult (_, m) =
-  mapMaybe (buildDeclarationEntry dataDefs idResult zonkResult) m.declarations
-
-buildDeclarationEntry ::
-  DataDefs ->
-  IdentifierResult ->
-  ZonkResult ->
-  Declaration Zonked ->
+  (VariableId, VariableData) ->
   Maybe SchemaEntry
-buildDeclarationEntry dataDefs idResult zonkResult = \case
-  DeclarationAgent agentDecl ->
-    buildAgentLike
-      dataDefs
-      idResult
-      zonkResult
-      agentDecl.annotation
-      agentDecl.name
-      agentDecl.parameters
-  DeclarationRequest requestDecl ->
-    buildAgentLike
-      dataDefs
-      idResult
-      zonkResult
-      requestDecl.annotation
-      requestDecl.name
-      requestDecl.parameters
-  DeclarationExternalAgent externalDecl ->
-    buildAgentLike
-      dataDefs
-      idResult
-      zonkResult
-      externalDecl.annotation
-      externalDecl.name
-      externalDecl.parameters
-  -- Stdlib-owned prim agents are an implementation detail of the
-  -- runtime; we don't surface them in the AI tool-calling schema bundle
-  -- (they'd just clutter the discovered-tools list).
-  DeclarationPrimAgent _ -> Nothing
-  DeclarationData dataDecl ->
-    buildDataEntry dataDefs idResult zonkResult dataDecl
-  DeclarationImport {} -> Nothing
-  DeclarationTypeSynonym {} -> Nothing
-  DeclarationError {} -> Nothing
-
--- | Build a 'SchemaEntry' for an agent / request / external-agent.
--- The qualified name is recovered from 'zonkedVariables'; the type from
--- 'zonkedTypeEnvironment'. Returns 'Nothing' if either lookup fails (a
--- Solver-contract violation that was already reported as a diagnostic).
-buildAgentLike ::
-  DataDefs ->
-  IdentifierResult ->
-  ZonkResult ->
-  Maybe Text ->
-  NameRef Zonked VariableRef ->
-  [ParameterBinding Zonked] ->
-  Maybe SchemaEntry
-buildAgentLike dataDefs idResult zonkResult annotation nameRef parameters = do
-  variableId <- nameRef.resolution
-  variableData <- Map.lookup variableId idResult.identifiedVariables
+buildVariableEntry dataDefs idResult zonkResult (variableId, variableData) = do
   qualifiedName <- variableData.variableQualifiedName
   SemanticTypeFunction paramTypes returnType requestSet <-
     Map.lookup variableId zonkResult.zonkedTypeEnvironment
-  let inputCore = paramObject dataDefs paramTypes parameters
+  let inputSchema =
+        buildInputObject dataDefs paramTypes variableData.variableParameterAnnotations
       requestRefs = buildRequestRefs dataDefs idResult zonkResult requestSet
   pure
     SchemaEntry
       { name = renderQualifiedName qualifiedName,
-        description = annotation,
-        input = plain inputCore,
+        description = variableData.variableAnnotation,
+        input = inputSchema,
         output = toJsonSchema dataDefs Set.empty returnType,
         requests = requestRefs
       }
-
--- | Build the input @properties@ object, attaching per-parameter annotation
--- as JSON Schema @description@.
-paramObject ::
-  DataDefs ->
-  Map Text (SemanticType Resolved) ->
-  [ParameterBinding Zonked] ->
-  SchemaCore
-paramObject dataDefs paramTypes parameters =
-  let properties =
-        Map.fromList
-          [ (pb.label, withDesc pb.annotation (toJsonSchema dataDefs Set.empty t))
-            | pb <- parameters,
-              Just t <- [Map.lookup pb.label paramTypes]
-          ]
-   in SchemaCoreObject
-        { properties = properties,
-          required = Map.keysSet paramTypes,
-          additionalProperties = False
-        }
 
 -- | Build a JSON Schema object describing the input parameters of any
 -- callable. Lowering-facing variant of 'paramObject' that takes the raw
@@ -581,67 +516,6 @@ jsonSchemaToText =
   Encoding.decodeUtf8
     . LazyByteString.toStrict
     . encode
-
--- | Build a 'SchemaEntry' for a @data@ constructor. The output schema is the
--- inline-expanded object shape of the constructed value.
-buildDataEntry ::
-  DataDefs ->
-  IdentifierResult ->
-  ZonkResult ->
-  DataDeclaration Zonked ->
-  Maybe SchemaEntry
-buildDataEntry dataDefs idResult zonkResult dataDecl = do
-  variableId <- dataDecl.name.resolution
-  variableData <- Map.lookup variableId idResult.identifiedVariables
-  qualifiedName <- variableData.variableQualifiedName
-  let fieldTypes = case Map.lookup variableId zonkResult.zonkedTypeEnvironment of
-        Just (SemanticTypeFunction paramTypes _ _) -> paramTypes
-        _ -> Map.empty
-      -- Input (call-side) is the ctor's parameter list — no @$ctor@
-      -- discriminator needed since the caller already targets a
-      -- specific constructor.
-      inputCore = dataParamObject dataDefs fieldTypes dataDecl.parameters
-      inputSchema =
-        JsonSchema
-          { core = inputCore,
-            title = Just dataDecl.name.text,
-            description = dataDecl.annotation,
-            examples = []
-          }
-      -- Output (constructed tagged value) reuses the unified
-      -- 'SemanticTypeData' rendering so the @$ctor@ discriminator
-      -- automatically appears.
-      outputCore = case dataDecl.typeName.resolution of
-        Just typeId -> toCore dataDefs Set.empty (SemanticTypeData typeId)
-        Nothing -> dataParamObject dataDefs fieldTypes dataDecl.parameters
-  pure
-    SchemaEntry
-      { name = renderQualifiedName qualifiedName,
-        description = dataDecl.annotation,
-        input = inputSchema,
-        output = plain outputCore,
-        requests = []
-      }
-
--- | Build the @data@ parameter object, attaching per-field annotation as
--- JSON Schema @description@.
-dataParamObject ::
-  DataDefs ->
-  Map Text (SemanticType Resolved) ->
-  [DataParameter Zonked] ->
-  SchemaCore
-dataParamObject dataDefs fieldTypes parameters =
-  let properties =
-        Map.fromList
-          [ (dataParameter.name, withDesc dataParameter.annotation (toJsonSchema dataDefs Set.empty fieldType))
-            | dataParameter <- parameters,
-              Just fieldType <- [Map.lookup dataParameter.name fieldTypes]
-          ]
-   in SchemaCoreObject
-        { properties = properties,
-          required = Map.keysSet properties,
-          additionalProperties = False
-        }
 
 -- ===========================================================================
 -- Request schema expansion

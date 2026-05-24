@@ -23,7 +23,15 @@ export type AuthOptions = {
   publicPathPrefixes?: string[];
 };
 
-const DEFAULT_PUBLIC_PREFIXES: string[] = ["/healthz", "/readyz", "/metrics"];
+const DEFAULT_PUBLIC_PREFIXES: string[] = [
+  "/healthz",
+  "/readyz",
+  "/metrics",
+  // Admin SPA static assets — browsers can't attach Authorization to
+  // <link>/<script> requests, so the auth boundary is the JSON API
+  // (which the SPA hits with the Bearer header it gets from localStorage).
+  "/admin",
+];
 
 /**
  * Build the auth middleware. `apiKey` must be a non-empty string;

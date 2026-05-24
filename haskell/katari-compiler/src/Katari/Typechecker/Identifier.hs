@@ -164,7 +164,18 @@ data VariableData = VariableData
     -- @using@ clause names a known 'PrimRule'. Read by the constraint
     -- generator to apply operand-aware return typing at call sites.
     -- 'Nothing' for ordinary variables and prims without a @using@ clause.
-    variablePrimRule :: Maybe PrimRule
+    variablePrimRule :: Maybe PrimRule,
+    -- | The @\@"..."@ annotation on the top-level declaration that
+    -- introduced this variable, or 'Nothing' for local bindings / decls
+    -- without an annotation. Schema generation reads this directly so it
+    -- can be decl-kind-agnostic (every top-level callable, regardless of
+    -- whether it was @agent@ / @ext agent@ / @prim agent@ / @req@ / @data@,
+    -- exposes its annotation here).
+    variableAnnotation :: Maybe Text,
+    -- | Per-parameter @\@"..."@ annotations in source order. Empty for
+    -- local bindings and parameter-less decls. Schema generation maps
+    -- these to the JSON Schema @description@ field on each property.
+    variableParameterAnnotations :: [(Text, Maybe Text)]
   }
   deriving (Eq, Show)
 
@@ -707,7 +718,9 @@ bindLocalVariable nameRef = do
         { variableName = name,
           variableQualifiedName = Nothing,
           variableSourceSpan = nameRef.sourceSpan,
-          variablePrimRule = Nothing
+          variablePrimRule = Nothing,
+          variableAnnotation = Nothing,
+          variableParameterAnnotations = []
         }
   modifyResolveContext $ \currentContext ->
     currentContext {scopeStack = insertInnermost name variableId currentContext.scopeStack}
@@ -920,15 +933,25 @@ buildExports moduleMap =
       pure (moduleName, table)
 
     addDeclaration moduleName table = \case
-      DeclarationAgent declaration -> registerVariable moduleName table declaration.name
-      DeclarationRequest declaration -> registerRequest moduleName table declaration.name declaration.parameters
-      DeclarationExternalAgent declaration -> registerVariable moduleName table declaration.name
-      DeclarationPrimAgent declaration -> registerVariable moduleName table declaration.name
+      DeclarationAgent declaration ->
+        registerVariable moduleName table declaration.name declaration.annotation
+          (parameterBindingsToAnnotationPairs declaration.parameters)
+      DeclarationRequest declaration ->
+        registerRequest moduleName table declaration.name declaration.annotation
+          declaration.parameters
+      DeclarationExternalAgent declaration ->
+        registerVariable moduleName table declaration.name declaration.annotation
+          (parameterBindingsToAnnotationPairs declaration.parameters)
+      DeclarationPrimAgent declaration ->
+        registerVariable moduleName table declaration.name declaration.annotation
+          (parameterBindingsToAnnotationPairs declaration.parameters)
       -- A data declaration occupies the variable slot (constructor function),
       -- the type slot (the data type), AND the constructor slot (the
       -- constructor identity used by match patterns). All three live under
       -- the same name and are issued together.
-      DeclarationData declaration -> registerData moduleName table declaration.name
+      DeclarationData declaration ->
+        registerData moduleName table declaration.name declaration.annotation
+          (dataParametersToAnnotationPairs declaration.parameters)
       DeclarationTypeSynonym declaration -> registerTypeOnly moduleName table declaration.name
       DeclarationImport _ -> pure table -- handled in Phase C
       -- Recovery sentinel: do not occupy any slot. References that would have
@@ -937,7 +960,12 @@ buildExports moduleMap =
 
     qnameOf moduleName name = QualifiedName {module_ = moduleName, name = name.text}
 
-    registerVariable moduleName table name = do
+    -- Type inferred — local where-bindings can't easily reference the
+    -- phase-polymorphic AST types without extra imports / extensions.
+    parameterBindingsToAnnotationPairs ps = [(p.label, p.annotation) | p <- ps]
+    dataParametersToAnnotationPairs ps = [(p.name, p.annotation) | p <- ps]
+
+    registerVariable moduleName table name annotation parameterAnnotations = do
       let qualifiedName = qnameOf moduleName name
       variableId <-
         freshVariableId
@@ -945,21 +973,26 @@ buildExports moduleMap =
             { variableName = name.text,
               variableQualifiedName = Just qualifiedName,
               variableSourceSpan = name.sourceSpan,
-              variablePrimRule = Nothing
+              variablePrimRule = Nothing,
+              variableAnnotation = annotation,
+              variableParameterAnnotations = parameterAnnotations
             }
       insertSymbolEntry name.sourceSpan name.text (singletonVariable variableId) table
 
     -- @req foo@ issues both a 'VariableId' (callable side: @foo(...)@) and a
     -- 'RequestId' (handler-target / request-set side).
-    registerRequest moduleName table name parameters = do
+    registerRequest moduleName table name annotation parameters = do
       let qualifiedName = qnameOf moduleName name
+          parameterAnnotations = parameterBindingsToAnnotationPairs parameters
       variableId <-
         freshVariableId
           VariableData
             { variableName = name.text,
               variableQualifiedName = Just qualifiedName,
               variableSourceSpan = name.sourceSpan,
-              variablePrimRule = Nothing
+              variablePrimRule = Nothing,
+              variableAnnotation = annotation,
+              variableParameterAnnotations = parameterAnnotations
             }
       requestId <-
         freshRequestId
@@ -968,7 +1001,7 @@ buildExports moduleMap =
               requestSourceSpan = name.sourceSpan,
               requestVariableId = variableId,
               requestParameterAnnotations =
-                Map.fromList [(pb.label, pb.annotation) | pb <- parameters]
+                Map.fromList parameterAnnotations
             }
       let entry =
             emptySymbolEntry
@@ -991,7 +1024,7 @@ buildExports moduleMap =
     -- @data Foo(...)@ issues 'VariableId' (constructor function), 'TypeId'
     -- (the data type), and 'ConstructorId' (the constructor identity used by
     -- match patterns).
-    registerData moduleName table name = do
+    registerData moduleName table name annotation parameterAnnotations = do
       let qualifiedName = qnameOf moduleName name
       variableId <-
         freshVariableId
@@ -999,7 +1032,9 @@ buildExports moduleMap =
             { variableName = name.text,
               variableQualifiedName = Just qualifiedName,
               variableSourceSpan = name.sourceSpan,
-              variablePrimRule = Nothing
+              variablePrimRule = Nothing,
+              variableAnnotation = annotation,
+              variableParameterAnnotations = parameterAnnotations
             }
       typeId <-
         freshTypeId

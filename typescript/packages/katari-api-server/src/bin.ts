@@ -91,6 +91,14 @@ const orchestrator = new Orchestrator(storage, sidecarManager, logger);
 
 await recoverOnBoot(storage, orchestrator, logger);
 
+// Admin web SPA: serve from $KATARI_ADMIN_WEB_DIST if set (= the built
+// `dist/` directory). When unset, the runtime works fine without a UI.
+const adminWebDistPath =
+  process.env.KATARI_ADMIN_WEB_DIST !== undefined &&
+  process.env.KATARI_ADMIN_WEB_DIST !== ""
+    ? process.env.KATARI_ADMIN_WEB_DIST
+    : null;
+
 const app = buildApp({
   storage,
   projects,
@@ -99,6 +107,7 @@ const app = buildApp({
   logger,
   apiKey: authDisabled ? null : apiKey,
   metrics,
+  adminWebDistPath,
 });
 
 const server = serve({ fetch: app.fetch, port });

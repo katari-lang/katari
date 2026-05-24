@@ -1,4 +1,7 @@
-# Dev compose: builds the katari runtime image from the local tree.
+# Dev compose: builds the katari runtime image (api-server + admin-web baked)
+# from the local tree. Reads credentials from `.env` at repo root — copy
+# `.env.example` to `.env` before first `docker compose up`.
+#
 # For self-host (uses the published GHCR image instead) see
 # `examples/self-host/docker-compose.yml`.
 
@@ -13,6 +16,10 @@ services:
       - PORT=8000
       - DATABASE_URL=postgresql://katari:katari@db:5432/katari_runtime
       - LOG_LEVEL=${KATARI_LOG_LEVEL:-info}
+      # Auth + secret crypto. Fail loud if unset so a misconfigured deploy
+      # doesn't silently accept traffic on a broken auth path.
+      - KATARI_API_KEY=${KATARI_API_KEY:?set KATARI_API_KEY in .env (copy from .env.example)}
+      - KATARI_SECRET_KEY=${KATARI_SECRET_KEY:?set KATARI_SECRET_KEY in .env (copy from .env.example)}
     depends_on:
       db:
         condition: service_healthy
