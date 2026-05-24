@@ -1303,13 +1303,15 @@ parsePrimaryExpression =
       ]
 
 -- | @par for (...)@ / @par (e, e)@ / @par [e, e]@ — parallel modifier.
--- Dispatches based on the token following @par@.
+-- Dispatches based on the token following @par@. The `for` branch needs
+-- @try@ because it consumes the @par@ keyword before checking for @for@;
+-- without backtracking the tuple / array forms become unreachable.
 parseParExpression :: Parser (Expression Parsed)
 parseParExpression = do
   _ <- MP.lookAhead (parseKeyword KeywordPar)
   choice
     [ -- par for (...) { ... }
-      parseForExpression True,
+      try (parseForExpression True),
       -- par (e1, e2, ...) — parallel tuple
       parseParTupleExpression,
       -- par [e1, e2, ...] — parallel array

@@ -19,23 +19,21 @@ module Katari.Cli.Apply
   )
 where
 
-import qualified Data.Aeson as Aeson
-import Data.Aeson ((.=))
-import qualified Data.ByteString.Lazy.Char8 as LC8
-import qualified Data.Map.Strict as Map
+import Data.Aeson qualified as Aeson
+import Data.ByteString.Lazy.Char8 qualified as LC8
+import Data.Map.Strict qualified as Map
 import Data.Text (Text)
-import qualified Data.Text as Text
+import Data.Text qualified as Text
 import GHC.Generics (Generic)
-import qualified Katari.Api.Client as Api
-import qualified Katari.Api.Types as Api
-import qualified Katari.Cli.Check as Check
-import qualified Katari.Cli.Common as Common
-import qualified Katari.Compile as Compile
+import Katari.Api.Client qualified as Api
+import Katari.Api.Types qualified as Api
+import Katari.Cli.Check qualified as Check
+import Katari.Cli.Common qualified as Common
+import Katari.Compile qualified as Compile
 import Katari.Diagnostic (hasErrors)
-import qualified Katari.Project.Config as Project
-import qualified Katari.Project.Discovery as Project
-import qualified Katari.Project.Resolve as Project
-import Katari.Schema (SchemaEntry (..))
+import Katari.Project.Config qualified as Project
+import Katari.Project.Discovery qualified as Project
+import Katari.Project.Resolve qualified as Project
 import Options.Applicative
 import System.Directory (getCurrentDirectory)
 import System.Environment (lookupEnv)
@@ -241,4 +239,3 @@ runKatariBundle packages = do
 data BundleResponse = BundleResponse {bundle :: Maybe Api.SidecarBundle}
   deriving stock (Show, Generic)
   deriving anyclass (Aeson.FromJSON)
-

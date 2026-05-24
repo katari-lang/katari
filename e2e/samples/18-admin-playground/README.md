@@ -30,11 +30,29 @@ for the `playground` project.
 | `paint` | String-literal union → EnumField (= dropdown of `"red" / "green" / "blue"`) |
 | `ask_name` | Escalation flow → answer form is a StringField (= the req's `string` return) |
 | `check_proceed` | Escalation flow → answer form is a BooleanField |
-| `trigger_never` | Escalation flow → never UX (= no input, only "Acknowledge & dismiss") |
+| `trigger_never` | Escalation flow → never UX (= "Cancel this run") |
+| `demo_sequential_sleeps` | Tree view → sequential ext sleep nodes appearing one at a time |
+| `demo_par_sleeps` | Tree view → three sleep nodes in flight at once via Katari `par (...)` |
+| `demo_ffi_fanout` | Tree view → ext-side `katari.delegate` fan-out (= sidecar code path) |
 
 Plus: invoke `prim.array_get` / `prim.get_field` directly from the
 Definitions page (toggle "Show stdlib & libraries") to exercise the
 **AnyField** type picker on the `unknown` argument.
+
+## Tree-view exploration
+
+The `demo_*` agents are designed to be watched in the **Run tree** page
+after `katari run --as ...`. Each sleep takes 2–3 seconds, so polling at
+3 s actually shows nodes appearing / disappearing.
+
+- `demo_sequential_sleeps` — three ext calls chained: tree shows ONE
+  ext node at a time, three times in a row.
+- `demo_par_sleeps` — three ext calls launched concurrently via
+  Katari's built-in `par (e, e, e)`: tree shows three ext nodes in
+  flight simultaneously under the run root.
+- `demo_ffi_fanout` — the ext spawns three CORE-side `slow_child`
+  agents via `katari.delegate(...)`: tree shows the `fan_out` ext call
+  with three child branches running concurrently.
 
 ## Known gap (intentional)
 
