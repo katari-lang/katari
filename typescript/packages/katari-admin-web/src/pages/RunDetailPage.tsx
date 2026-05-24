@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useParams } from "react-router-dom";
 import { motion } from "framer-motion";
-import { ArrowLeft, Ban, GitFork } from "lucide-react";
+import { ArrowLeft, Ban } from "lucide-react";
 import toast from "react-hot-toast";
 import { useApiClient } from "@/contexts/ApiKeyContext";
 import { PageContent, PageHeader } from "@/components/ui/PageHeader";
@@ -12,6 +12,7 @@ import {
   RunStatusBadge,
   isTerminalState,
 } from "@/components/domain/RunStatusBadge";
+import { DelegationTreeGraph } from "@/components/domain/DelegationTreeGraph";
 import { ValueViewer } from "@/components/domain/ValueViewer";
 import { formatDateTime } from "@/lib/format";
 import type { ProjectId, RunId } from "@/api/types";
@@ -53,6 +54,23 @@ export function RunDetailPage() {
   const canCancel =
     run !== undefined &&
     (run.state === "running" || run.state === "cancelling");
+  const isLive = run !== undefined && !isTerminalState(run.state);
+
+  // Live tree polling. Only fires while the run is in flight — once the
+  // run reaches a terminal state, the tree has been deleted by the
+  // engine (= live `delegations` rows DROP on terminal ack), so polling
+  // would just return an empty tree.
+  const treeQ = useQuery({
+    queryKey: ["run-tree", runId],
+    queryFn: () =>
+      client.getRunTree(projectId as ProjectId, runId as RunId),
+    enabled: typeof projectId === "string" && typeof runId === "string" && isLive,
+    refetchInterval: (query) => {
+      const root = query.state.data?.tree.root;
+      if (root === undefined) return POLL_MS;
+      return isTerminalState(root.state) ? false : POLL_MS;
+    },
+  });
 
   return (
     <div>
@@ -74,25 +92,16 @@ export function RunDetailPage() {
           </span>
         }
         actions={
-          <div className="flex items-center gap-2">
-            <Link
-              to={`/project/${projectId}/runs/${runId}/tree`}
-              className="inline-flex items-center gap-1.5 border border-border px-3 py-1.5 text-sm transition-colors hover:bg-muted"
+          canCancel ? (
+            <Button
+              variant="danger"
+              onClick={() => cancel.mutate()}
+              loading={cancel.isPending}
             >
-              <GitFork className="size-4" />
-              View tree
-            </Link>
-            {canCancel ? (
-              <Button
-                variant="danger"
-                onClick={() => cancel.mutate()}
-                loading={cancel.isPending}
-              >
-                <Ban className="size-4" />
-                Cancel
-              </Button>
-            ) : null}
-          </div>
+              <Ban className="size-4" />
+              Cancel
+            </Button>
+          ) : null
         }
       />
       <PageContent>
@@ -176,7 +185,27 @@ export function RunDetailPage() {
                 </dl>
               </CardContent>
             </Card>
-            {run.result !== undefined && (
+            {isLive && (
+              <Card className="lg:col-span-3">
+                <CardHeader>
+                  <CardTitle>Delegation tree</CardTitle>
+                </CardHeader>
+                <CardContent className="overflow-auto">
+                  {treeQ.data !== undefined ? (
+                    <DelegationTreeGraph root={treeQ.data.tree.root} />
+                  ) : treeQ.isLoading ? (
+                    <p className="text-sm text-subtle-foreground">
+                      Loading tree...
+                    </p>
+                  ) : (
+                    <p className="text-sm text-subtle-foreground">
+                      No in-flight delegations.
+                    </p>
+                  )}
+                </CardContent>
+              </Card>
+            )}
+            {!isLive && run.result !== undefined && (
               <Card className="lg:col-span-3">
                 <CardHeader>
                   <CardTitle>Result</CardTitle>

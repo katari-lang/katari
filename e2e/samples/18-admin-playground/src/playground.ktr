@@ -150,7 +150,7 @@ agent demo_sequential_sleeps() -> string {
 
 @"Three parallel sleeps via `par (...)`. The tree shows three ext nodes in flight at once under the run root."
 agent demo_par_sleeps() -> string {
-  let _ = par (sleep_ms(ms = 3000), sleep_ms(ms = 3000), sleep_ms(ms = 3000))
+  let _ = par (sleep_ms(ms = 3000), sleep_ms(ms = 4000), sleep_ms(ms = 5000))
   "three parallel sleeps done"
 }
 

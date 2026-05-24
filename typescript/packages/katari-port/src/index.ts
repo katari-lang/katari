@@ -145,7 +145,11 @@ function generateChildDelegationId(): string {
   // Math.random would make it predictable enough that a misbehaving
   // sidecar could guess sibling ids and steer responses to the wrong
   // call. randomUUID is available on Node ≥14.17 and all modern browsers.
-  return `child-${randomUUID().replace(/-/g, "")}`;
+  //
+  // Must remain a valid UUID string: the host-side `delegations` /
+  // `ffi_pending_delegations` tables type this column as UUID, so any
+  // prefix / dash-stripping breaks the INSERT at the DB boundary.
+  return randomUUID();
 }
 
 async function delegateChild(
