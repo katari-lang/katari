@@ -1,20 +1,87 @@
+import { useState } from "react";
 import { motion } from "framer-motion";
-import { ArrowDown } from "lucide-react";
+import { ArrowDown, Maximize2, Minus, Plus } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { RunStatusBadge } from "./RunStatusBadge";
 import type { DelegationTreeNode } from "@/api/types";
+
+const MIN_SCALE = 0.3;
+const MAX_SCALE = 2;
+const SCALE_STEP = 0.15;
 
 /**
  * Render a delegation tree as a vertical layout: root at top, children
  * fanned out below, each branch recursively a sub-tree. Edges are simple
  * downward arrows — no React Flow / dagre for v0.1.0 (= keep the bundle
  * size and code surface small).
+ *
+ * Viewport: a scrollable container at fixed max-height with a CSS
+ * `transform: scale(...)` zoom. `transform-origin: top left` keeps the
+ * root in place when zooming. Buttons in the top-right corner step the
+ * scale; horizontal / vertical scrollbars catch overflow when zoomed in
+ * past the container size.
  */
 export function DelegationTreeGraph({ root }: { root: DelegationTreeNode }) {
+  const [scale, setScale] = useState(1);
   return (
-    <div className="flex flex-col items-center gap-2 py-4">
-      <TreeNode node={root} depth={0} />
+    <div className="relative">
+      <div className="pointer-events-none absolute right-2 top-2 z-10 flex gap-1">
+        <ZoomButton
+          icon={Minus}
+          onClick={() =>
+            setScale((s) => Math.max(MIN_SCALE, +(s - SCALE_STEP).toFixed(2)))
+          }
+          ariaLabel="Zoom out"
+        />
+        <ZoomButton
+          icon={Maximize2}
+          onClick={() => setScale(1)}
+          ariaLabel="Reset zoom"
+          label={`${Math.round(scale * 100)}%`}
+        />
+        <ZoomButton
+          icon={Plus}
+          onClick={() =>
+            setScale((s) => Math.min(MAX_SCALE, +(s + SCALE_STEP).toFixed(2)))
+          }
+          ariaLabel="Zoom in"
+        />
+      </div>
+      <div className="max-h-150 overflow-auto border border-border bg-muted/20">
+        <div
+          className="inline-block origin-top-left"
+          style={{ transform: `scale(${scale})` }}
+        >
+          <div className="flex flex-col items-center gap-2 px-4 py-4">
+            <TreeNode node={root} depth={0} />
+          </div>
+        </div>
+      </div>
     </div>
+  );
+}
+
+function ZoomButton({
+  icon: Icon,
+  onClick,
+  ariaLabel,
+  label,
+}: {
+  icon: React.ComponentType<{ className?: string }>;
+  onClick: () => void;
+  ariaLabel: string;
+  label?: string;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-label={ariaLabel}
+      className="pointer-events-auto inline-flex h-7 items-center gap-1 border border-border bg-background px-2 text-xs text-foreground transition-colors hover:bg-muted"
+    >
+      <Icon className="size-3.5" />
+      {label !== undefined && <span>{label}</span>}
+    </button>
   );
 }
 

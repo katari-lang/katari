@@ -190,7 +190,7 @@ export function RunDetailPage() {
                 <CardHeader>
                   <CardTitle>Delegation tree</CardTitle>
                 </CardHeader>
-                <CardContent className="overflow-auto">
+                <CardContent>
                   {treeQ.data !== undefined ? (
                     <DelegationTreeGraph root={treeQ.data.tree.root} />
                   ) : treeQ.isLoading ? (
