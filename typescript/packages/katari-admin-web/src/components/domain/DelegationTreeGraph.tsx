@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import { ArrowDown, Maximize2, Minus, Plus } from "lucide-react";
 import { cn } from "@/lib/cn";
@@ -23,6 +23,24 @@ const SCALE_STEP = 0.15;
  */
 export function DelegationTreeGraph({ root }: { root: DelegationTreeNode }) {
   const [scale, setScale] = useState(1);
+  const viewportRef = useRef<HTMLDivElement>(null);
+
+  // Center the horizontal scroll position whenever the zoom changes.
+  // For content that fits the viewport, `flex justify-center` on the
+  // inner row centers it as a no-op; once content overflows, scrollLeft
+  // = overflow / 2 starts the user in the middle so they can slide
+  // either direction. rAF defers the read until the scaled transform
+  // has been laid out.
+  useLayoutEffect(() => {
+    const vp = viewportRef.current;
+    if (vp === null) return;
+    const id = requestAnimationFrame(() => {
+      const overflow = vp.scrollWidth - vp.clientWidth;
+      if (overflow > 0) vp.scrollLeft = overflow / 2;
+    });
+    return () => cancelAnimationFrame(id);
+  }, [scale]);
+
   return (
     <div className="relative">
       <div className="pointer-events-none absolute right-2 top-2 z-10 flex gap-1">
@@ -47,13 +65,18 @@ export function DelegationTreeGraph({ root }: { root: DelegationTreeNode }) {
           ariaLabel="Zoom in"
         />
       </div>
-      <div className="max-h-150 overflow-auto border border-border bg-muted/20">
-        <div
-          className="inline-block origin-top-left"
-          style={{ transform: `scale(${scale})` }}
-        >
-          <div className="flex flex-col items-center gap-2 px-4 py-4">
-            <TreeNode node={root} depth={0} />
+      <div
+        ref={viewportRef}
+        className="max-h-150 overflow-auto border border-border bg-muted/20"
+      >
+        <div className="flex w-max min-w-full justify-center">
+          <div
+            className="origin-top-left"
+            style={{ transform: `scale(${scale})` }}
+          >
+            <div className="flex flex-col items-center gap-2 px-4 py-4">
+              <TreeNode node={root} depth={0} />
+            </div>
           </div>
         </div>
       </div>
