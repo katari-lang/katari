@@ -1,7 +1,7 @@
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { motion } from "framer-motion";
-import { ArrowLeft } from "lucide-react";
+import { ArrowLeft, Ban } from "lucide-react";
 import toast from "react-hot-toast";
 import { useApiClient } from "@/contexts/ApiKeyContext";
 import { PageContent, PageHeader } from "@/components/ui/PageHeader";
@@ -78,6 +78,32 @@ export function EscalationDetailPage() {
     },
   });
 
+  // never-return escalations can't be answered with a value. The only
+  // valid resolution is to cancel the parent run; the cancel cascade
+  // (ApiModule.cancelRun) then transitions this escalation to
+  // `cancelled` via the same SQL UPDATE that handles user-initiated
+  // cancels of any run.
+  const cancelRun = useMutation({
+    mutationFn: async () => {
+      if (escalation === undefined) throw new Error("No escalation");
+      await client.cancelRun(projectId as ProjectId, escalation.rootDelegationId);
+    },
+    onSuccess: () => {
+      toast.success("Cancel requested for the run");
+      void queryClient.invalidateQueries({ queryKey: ["escalations"] });
+      void queryClient.invalidateQueries({ queryKey: ["escalation", escalationId] });
+      void queryClient.invalidateQueries({ queryKey: ["runs", projectId] });
+      if (escalation !== undefined) {
+        navigate(
+          `/project/${projectId}/runs/${escalation.rootDelegationId}`,
+        );
+      }
+    },
+    onError: (err) => {
+      toast.error(err instanceof Error ? err.message : "Failed.");
+    },
+  });
+
   return (
     <div>
       <PageHeader
@@ -139,36 +165,43 @@ export function EscalationDetailPage() {
                 ) : isNeverSchema(requestDef.returns as JsonSchema) ? (
                   // `never` return: the request was declared `-> never`,
                   // so no value can validly resume the calling thread.
-                  // Surface that explicitly. We still send an `Acknowledge`
-                  // to unblock the runtime — proper "cancel / error"
-                  // propagation is on the D-12 followup.
+                  // The only resolution is to cancel the parent run; the
+                  // cancel cascade (ApiModule.cancelRun → cancelAllUnderRoot)
+                  // marks this escalation as `cancelled` in the same tick.
                   <div className="space-y-3">
                     <div className="border border-warning/40 bg-warning/10 px-3 py-2 text-sm text-warning">
                       <p className="font-medium">
-                        This request returns <code className="font-mono">never</code>.
+                        This escalation cannot be answered.
                       </p>
                       <p className="mt-1 text-xs">
-                        The calling agent does not expect any value back.
-                        Consider whether the agent should fail (error state)
-                        or whether this escalation should be cancelled.
-                        Runtime-side cancel propagation is a known followup;
-                        for now, acknowledging dismisses the escalation
-                        without resuming the call.
+                        The request{" "}
+                        <code className="font-mono">
+                          {escalation.agentDefId}
+                        </code>{" "}
+                        is declared with{" "}
+                        <code className="font-mono">-&gt; never</code> — no
+                        value can satisfy its return type. Resolve it by
+                        cancelling the parent run; the cancel cascade will
+                        transition this escalation to{" "}
+                        <span className="font-medium">cancelled</span>.
                       </p>
                     </div>
                     <div className="flex justify-end gap-2">
-                      <Link to={`/project/${projectId}/escalations`}>
+                      <Link
+                        to={`/project/${projectId}/runs/${escalation.rootDelegationId}`}
+                      >
                         <Button type="button" variant="secondary">
-                          Back
+                          Open run
                         </Button>
                       </Link>
                       <Button
                         type="button"
                         variant="danger"
-                        onClick={() => answer.mutate(null as RawValue)}
-                        loading={answer.isPending}
+                        onClick={() => cancelRun.mutate()}
+                        loading={cancelRun.isPending}
                       >
-                        Acknowledge &amp; dismiss
+                        <Ban className="size-4" />
+                        Cancel this run
                       </Button>
                     </div>
                   </div>
@@ -207,6 +240,17 @@ export function EscalationDetailPage() {
                     label="Request"
                     value={
                       <code className="font-mono text-xs">{escalation.agentDefId}</code>
+                    }
+                  />
+                  <Row
+                    label="Run"
+                    value={
+                      <Link
+                        to={`/project/${projectId}/runs/${escalation.rootDelegationId}`}
+                        className="font-mono text-xs hover:underline"
+                      >
+                        {escalation.rootDelegationId}
+                      </Link>
                     }
                   />
                   <Row
