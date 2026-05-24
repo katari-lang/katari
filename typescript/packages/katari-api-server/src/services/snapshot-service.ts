@@ -58,8 +58,13 @@ export class SnapshotService {
     irModule: IRModule;
     sidecarBundle: SidecarBundle | null;
     schemaBundle: SchemaBundle;
+    /** Operator-supplied commit-message-like text. `null` if omitted. */
+    message?: string | null;
   }): Promise<{ snapshotId: SnapshotId }> {
-    const snapshotId = await this.storage.snapshots.insert(input);
+    const snapshotId = await this.storage.snapshots.insert({
+      ...input,
+      message: input.message ?? null,
+    });
     this.logger.log("info", "snapshot uploaded", {
       snapshotId,
       projectId: input.projectId,

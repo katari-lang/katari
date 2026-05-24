@@ -39,14 +39,17 @@ export { recoverOnBoot } from "./recovery.js";
 export { InMemoryStorage } from "./storage/memory-storage.js";
 export { PostgresStorage } from "./storage/pg.js";
 export type {
-  AgentId,
-  AgentRow,
-  AgentState,
-  ApiPendingEscalation,
+  CancelReason,
+  DelegationRow,
+  DelegationState,
+  EscalationRow,
+  EscalationState,
   FfiPendingDelegation,
   FfiPendingEscalation,
   Project,
   ProjectId,
+  RunsAuditRow,
+  RunsAuditState,
   Snapshot,
   SnapshotId,
   SnapshotSummary,

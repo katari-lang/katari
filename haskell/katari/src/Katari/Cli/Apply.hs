@@ -47,6 +47,7 @@ import System.Process (readProcessWithExitCode)
 data Options = Options
   { optProjectRoot :: Maybe FilePath,
     optProjectName :: Maybe Text,
+    optMessage :: Maybe Text,
     optApiUrl :: Maybe Text
   }
   deriving (Show)
@@ -67,6 +68,14 @@ optionsParser =
           ( long "name"
               <> metavar "NAME"
               <> help "Override the project name registered with the runtime"
+          )
+      )
+    <*> optional
+      ( strOption
+          ( long "message"
+              <> short 'm'
+              <> metavar "TEXT"
+              <> help "Commit-message-like label for this snapshot (shown in `katari ls snapshots` / admin UI)"
           )
       )
     <*> optional
@@ -124,7 +133,8 @@ run opts = do
       Api.UploadSnapshotRequest
         { Api.irModule = irModule,
           Api.sidecarBundle = sidecarBundle,
-          Api.schemaBundle = schemaJson
+          Api.schemaBundle = schemaJson,
+          Api.message = opts.optMessage
         }
   putStrLn
     ( "Applied snapshot "

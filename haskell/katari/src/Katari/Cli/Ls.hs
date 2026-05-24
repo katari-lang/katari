@@ -4,7 +4,7 @@
 --
 --   * @projects@      — every project registered with the runtime
 --   * @snapshots@     — snapshots under @--project NAME@
---   * @agents@        — agent runs (optionally narrowed by project / snapshot)
+--   * @runs@          — operator-launched runs (optionally narrowed by project / snapshot)
 --   * @agent-defs@    — schema bundle entries (qualified names + descriptions)
 module Katari.Cli.Ls
   ( Options (..),
@@ -27,7 +27,7 @@ import Options.Applicative
 data Target
   = TProjects
   | TSnapshots
-  | TAgents
+  | TRuns
   | TAgentDefs
   deriving (Show)
 
@@ -43,13 +43,13 @@ data Options = Options
 optionsParser :: Parser Options
 optionsParser =
   Options
-    <$> argument readTarget (metavar "TARGET" <> help "projects | snapshots | agents | agent-defs")
+    <$> argument readTarget (metavar "TARGET" <> help "projects | snapshots | runs | agent-defs")
     <*> optional
       ( strOption
           ( long "project"
               <> short 'p'
               <> metavar "NAME"
-              <> help "Restrict to this project (required for snapshots / agent-defs)"
+              <> help "Restrict to this project (required for snapshots / runs / agent-defs)"
           )
       )
     <*> optional
@@ -73,9 +73,9 @@ optionsParser =
       eitherReader $ \case
         "projects" -> Right TProjects
         "snapshots" -> Right TSnapshots
-        "agents" -> Right TAgents
+        "runs" -> Right TRuns
         "agent-defs" -> Right TAgentDefs
-        other -> Left ("unknown target '" <> other <> "' (try projects | snapshots | agents | agent-defs)")
+        other -> Left ("unknown target '" <> other <> "' (try projects | snapshots | runs | agent-defs)")
 
 run :: Options -> IO ()
 run opts = do
@@ -92,10 +92,10 @@ run opts = do
       if opts.optJson
         then emitJson snaps
         else mapM_ printSnap snaps
-    TAgents -> do
+    TRuns -> do
       pid <- requireProjectId client opts
-      ags <- Api.listAgents client pid opts.optSnapshot
-      if opts.optJson then emitJson ags else mapM_ printAgent ags
+      runs <- Api.listRuns client pid opts.optSnapshot
+      if opts.optJson then emitJson runs else mapM_ printRun runs
     TAgentDefs -> do
       pid <- requireProjectId client opts
       (defs, snapId) <- Api.listAgentDefinitions client pid opts.optSnapshot
@@ -129,20 +129,27 @@ printProject p =
 
 printSnap :: Api.SnapshotSummary -> IO ()
 printSnap s =
-  putStrLn (Text.unpack s.id <> "  (" <> Text.unpack s.createdAt <> ")")
-
-printAgent :: Api.AgentRow -> IO ()
-printAgent a =
   putStrLn
-    ( Text.unpack a.id
-        <> "  "
-        <> show a.state
-        <> "  "
-        <> Text.unpack a.qualifiedName
-        <> "  "
-        <> Text.unpack (Status.renderResultPreview a.result)
+    ( Text.unpack s.id
+        <> maybe "" (\m -> "  " <> Text.unpack m) s.message
         <> "  ("
-        <> Text.unpack a.updatedAt
+        <> Text.unpack s.createdAt
+        <> ")"
+    )
+
+printRun :: Api.RunRow -> IO ()
+printRun r =
+  putStrLn
+    ( Text.unpack r.id
+        <> "  "
+        <> show r.state
+        <> "  "
+        <> Text.unpack r.qualifiedName
+        <> maybe "" (\n -> "  [" <> Text.unpack n <> "]") r.name
+        <> "  "
+        <> Text.unpack (Status.renderResultPreview r.result)
+        <> "  ("
+        <> Text.unpack r.updatedAt
         <> ")"
     )
 

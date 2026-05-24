@@ -3,15 +3,16 @@
 
 import type {
   AgentDefinitionWire,
-  AgentId,
-  AgentRowWire,
-  AgentState,
+  DelegationTree,
   EnvEntry,
   EscalationId,
   EscalationState,
   EscalationWire,
   Project,
   ProjectId,
+  RunId,
+  RunRowWire,
+  RunState,
   Snapshot,
   SnapshotId,
   SnapshotSummary,
@@ -137,51 +138,60 @@ export function createApiClient(config: ApiClientConfig) {
         `/project/${params.projectId}/snapshot/${params.snapshotId ?? "latest"}/agent-definition/${encodeURIComponent(params.qualifiedName)}`,
       ),
 
-    // Agents (project-scoped; snapshotId is a filter, not part of identity).
-    listAgents: (params: {
+    // Runs (= operator-launched root delegations; project-scoped).
+    listRuns: (params: {
       projectId: ProjectId;
       snapshotId?: SnapshotId;
-      state?: "running" | "cancelling" | "cancelled" | "succeeded" | "error";
+      state?: RunState;
       limit?: number;
       offset?: number;
     }) =>
-      request<{ agents: AgentRowWire[] }>(
+      request<{ runs: RunRowWire[] }>(
         config,
         "GET",
-        withQuery(`/project/${params.projectId}/agent`, {
+        withQuery(`/project/${params.projectId}/run`, {
           snapshotId: params.snapshotId,
           state: params.state,
           limit: params.limit,
           offset: params.offset,
         }),
       ),
-    getAgent: (projectId: ProjectId, id: AgentId) =>
-      request<{ agent: AgentRowWire }>(
+    getRun: (projectId: ProjectId, id: RunId) =>
+      request<{ run: RunRowWire }>(
         config,
         "GET",
-        `/project/${projectId}/agent/${id}`,
+        `/project/${projectId}/run/${id}`,
       ),
-    startAgent: (input: {
+    /** Live delegation tree rooted at `runId`. Polled by the run detail page. */
+    getRunTree: (projectId: ProjectId, runId: RunId) =>
+      request<{ tree: DelegationTree }>(
+        config,
+        "GET",
+        `/project/${projectId}/run/${runId}/tree`,
+      ),
+    startRun: (input: {
       projectId: ProjectId;
       snapshotId?: SnapshotId;
       qualifiedName: string;
+      name?: string | null;
       args: Record<string, RawValue>;
     }) =>
-      request<{ agentId: AgentId }>(
+      request<{ runId: RunId }>(
         config,
         "POST",
-        `/project/${input.projectId}/agent`,
+        `/project/${input.projectId}/run`,
         {
           snapshotId: input.snapshotId,
           qualifiedName: input.qualifiedName,
+          name: input.name ?? null,
           args: input.args,
         },
       ),
-    cancelAgent: (projectId: ProjectId, id: AgentId) =>
-      request<{ agent: AgentRowWire }>(
+    cancelRun: (projectId: ProjectId, id: RunId) =>
+      request<{ run: RunRowWire }>(
         config,
         "POST",
-        `/project/${projectId}/agent/${id}/cancel`,
+        `/project/${projectId}/run/${id}/cancel`,
       ),
 
     // Escalations (project-scoped).
@@ -241,18 +251,4 @@ function withQuery(
   }
   const queryString = search.toString();
   return queryString === "" ? path : `${path}?${queryString}`;
-}
-
-// `agent-definition` qualified name lookup uses a templated path that needs
-// path-style URL encoding. Not used by listAgentDefinitions which queries the
-// list endpoint, but exposed here in case a detail page wants to call it
-// directly later.
-export function buildAgentDefinitionDetailPath(
-  projectId: ProjectId,
-  snapshotId: SnapshotId | "latest",
-  qualifiedName: string,
-): string {
-  return `/agent-definition/${projectId}/${snapshotId}/${encodeURIComponent(
-    qualifiedName,
-  )}`;
 }

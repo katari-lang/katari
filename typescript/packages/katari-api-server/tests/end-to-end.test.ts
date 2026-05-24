@@ -31,7 +31,7 @@ describe("end-to-end: project + snapshot + agent flow", () => {
     expect(snapshotId).toMatch(/^[0-9a-f-]{36}$/);
 
     const start = await harness.app.fetch(
-      new Request(`http://test/project/${projectId}/agent`, {
+      new Request(`http://test/project/${projectId}/run`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
@@ -42,19 +42,19 @@ describe("end-to-end: project + snapshot + agent flow", () => {
       }),
     );
     expect(start.status).toBe(201);
-    const { agentId } = (await start.json()) as { agentId: string };
+    const { runId } = (await start.json()) as { runId: string };
 
     const got = await harness.app.fetch(
-      new Request(`http://test/project/${projectId}/agent/${agentId}`),
+      new Request(`http://test/project/${projectId}/run/${runId}`),
     );
     expect(got.status).toBe(200);
     const body = (await got.json()) as {
-      agent: { state: string; result: string };
+      run: { state: string; result: string };
     };
-    expect(body.agent.state).toBe("succeeded");
+    expect(body.run.state).toBe("succeeded");
     // Wire format: raw JSON values (the API server converts Value→raw at
     // the boundary), so a string Value lands as just the string.
-    expect(body.agent.result).toBe("hello");
+    expect(body.run.result).toBe("hello");
   });
 
   it("snapshotId omitted → uses latest of the project", async () => {
@@ -76,7 +76,7 @@ describe("end-to-end: project + snapshot + agent flow", () => {
     );
 
     const start = await harness.app.fetch(
-      new Request(`http://test/project/${projectId}/agent`, {
+      new Request(`http://test/project/${projectId}/run`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
@@ -85,16 +85,16 @@ describe("end-to-end: project + snapshot + agent flow", () => {
         }),
       }),
     );
-    const { agentId } = (await start.json()) as { agentId: string };
+    const { runId } = (await start.json()) as { runId: string };
 
     const got = await harness.app.fetch(
-      new Request(`http://test/project/${projectId}/agent/${agentId}`),
+      new Request(`http://test/project/${projectId}/run/${runId}`),
     );
     const body = (await got.json()) as {
-      agent: { state: string; result: string };
+      run: { state: string; result: string };
     };
-    expect(body.agent.state).toBe("succeeded");
-    expect(body.agent.result).toBe("second");
+    expect(body.run.state).toBe("succeeded");
+    expect(body.run.result).toBe("second");
   });
 
   it("rejects POST /project/:p/snapshot without irModule", async () => {
@@ -123,7 +123,7 @@ describe("end-to-end: project + snapshot + agent flow", () => {
     active = harness;
     const a = await harness.app.fetch(
       new Request(
-        "http://test/project/00000000-0000-0000-0000-000000000000/agent/00000000-0000-0000-0000-000000000000",
+        "http://test/project/00000000-0000-0000-0000-000000000000/run/00000000-0000-0000-0000-000000000000",
       ),
     );
     expect(a.status).toBe(404);

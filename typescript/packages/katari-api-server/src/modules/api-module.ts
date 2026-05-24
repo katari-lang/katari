@@ -2,11 +2,15 @@
 //
 // Following the design "the API module is not the HTTP server, it is the
 // user", HTTP routes are thin shims that call special ApiModule methods
-// (startAgent / cancelAgent / answerEscalation / list*) and kick the bus.
+// (startRun / cancelRun / answerEscalation / list*) and kick the bus.
 //
 // State (DB-backed):
-//   - pendingDelegateOut = `agents` table              (queue of CLI-launched agents)
-//   - pendingEscalateIn  = `api_pending_escalations` (questions from AI awaiting user reply)
+//   - delegations  : ApiModule-issued live entities (= top-level / root delegations
+//                    + nothing else, since API only delegates downward to CORE)
+//   - escalations  : open AI→user questions awaiting operator reply (receiver=API)
+//   - runs_audit   : persistent log of operator-launched root delegations;
+//                    survives the live delegations row's terminal deletion so
+//                    the UI can show "Run X finished with result Y"
 //
 // per-tick instance: lives within one request. Persistence writes through
 // via tx, so `persist()` / `load()` are no-ops.
@@ -27,8 +31,7 @@ import {
 const THROW_AGENT_DEF_ID = encodeCoreAgentDefId({ kind: "qname", value: "prim.throw" });
 import type { DelegationId, EscalationId } from "@katari-lang/runtime";
 import type {
-  AgentId,
-  AgentRow,
+  RunsAuditRow,
   Storage,
   SnapshotId,
 } from "../storage/types.js";
@@ -56,14 +59,16 @@ export class ApiModule implements Module {
   async feed(event: ExternalEvent): Promise<{ outbound: ExternalEvent[] }> {
     switch (event.payload.kind) {
       case "delegate":
-        // The user (= API module) provides no agent definitions.
+        // The user (= API module) provides no agent definitions, so any
+        // delegate addressed to it is a misconfigured caller. Drop with a
+        // log so the issue surfaces.
         this.logger.log("warn", "api: received delegate but provides no defs", {
           delegationId: event.payload.delegationId,
         });
         return { outbound: [] };
 
       case "delegateAck":
-        await this.completeAgent(event.payload.delegationId, event.payload.value);
+        await this.completeRun(event.payload.delegationId, event.payload.value);
         return { outbound: [] };
 
       case "terminate":
@@ -73,7 +78,7 @@ export class ApiModule implements Module {
         return { outbound: [] };
 
       case "terminateAck":
-        await this.markCancelled(event.payload.delegationId);
+        await this.handleTerminateAck(event.payload.delegationId);
         return { outbound: [] };
 
       case "escalate":
@@ -83,15 +88,9 @@ export class ApiModule implements Module {
             event.payload.args,
           );
         }
-        // Question from AI to user. Persist as a pending escalation.
-        await this.tx.apiEscalations.insert({
-          escalationId: event.payload.escalationId,
-          delegationId: event.payload.delegationId,
-          snapshotId: this.snapshotId,
-          agentDefId: event.payload.agentDefId,
-          args: encryptValueRecord(event.payload.args),
-          state: "open",
-          createdAt: new Date().toISOString(),
+        await this.recordEscalation({
+          from: event.from,
+          payload: event.payload,
         });
         return { outbound: [] };
 
@@ -109,30 +108,49 @@ export class ApiModule implements Module {
 
   // ─── HTTP-facing methods (called by routes) ─────────────────────────────
 
-  async startAgent(input: {
+  async startRun(input: {
     bus: { push: (event: ExternalEvent) => void };
     qualifiedName: string;
+    name: string | null;
     args: Record<string, Value>;
-  }): Promise<{ agentId: AgentId }> {
+  }): Promise<{ runId: DelegationId }> {
     const delegationId = createDelegationId();
-    const agentId = delegationId as unknown as AgentId;
     const now = new Date().toISOString();
-    const row: AgentRow = {
-      id: agentId,
-      delegationId,
+    const encryptedArgs = encryptValueRecord(input.args);
+
+    // Two-row insert: the live delegation entity (= drives runtime
+    // dispatch + cancel cascade) and the persistent audit row (= survives
+    // terminal state for the operator's history view).
+    await this.tx.delegations.insert({
+      id: delegationId,
+      rootDelegationId: delegationId,
+      parentDelegationId: null,
       snapshotId: this.snapshotId,
-      qualifiedName: input.qualifiedName,
-      // input.args originated from `valueFromRaw` at the HTTP boundary
-      // (which already refuses '$secret' shapes), so secrets cannot
-      // appear here — but `encryptValueRecord` is a no-op on
-      // secret-free trees, and applying it uniformly keeps the
-      // "storage sees encrypted form only" invariant trivially true.
-      args: encryptValueRecord(input.args),
+      callerEndpoint: API_ENDPOINT,
+      ownerEndpoint: CORE_ENDPOINT,
+      agentDefId: encodeCoreAgentDefId({
+        kind: "qname",
+        value: input.qualifiedName,
+      }),
+      args: encryptedArgs,
       state: "running",
       createdAt: now,
       updatedAt: now,
+    });
+
+    const auditRow: RunsAuditRow = {
+      id: delegationId,
+      snapshotId: this.snapshotId,
+      name: input.name,
+      qualifiedName: input.qualifiedName,
+      args: encryptedArgs,
+      state: "running",
+      cancelReason: null,
+      createdAt: now,
+      updatedAt: now,
     };
-    await this.tx.agents.insert(row);
+    await this.tx.runsAudit.insert(auditRow);
+
     input.bus.push({
       from: API_ENDPOINT,
       to: CORE_ENDPOINT,
@@ -146,34 +164,40 @@ export class ApiModule implements Module {
         args: input.args,
       },
     });
-    return { agentId };
+    return { runId: delegationId };
   }
 
-  async cancelAgent(input: {
+  async cancelRun(input: {
     bus: { push: (event: ExternalEvent) => void };
-    agentId: AgentId;
-  }): Promise<{ row: AgentRow | null }> {
-    const row = await this.tx.agents.get(input.agentId);
-    if (row === null) return { row: null };
-    if (row.state !== "running") return { row };
-    const ok = await this.tx.agents.setState(
-      input.agentId,
-      { state: "cancelling" },
-      { expectedState: "running" },
-    );
-    if (!ok) {
-      const refreshed = await this.tx.agents.get(input.agentId);
-      return { row: refreshed };
-    }
+    runId: DelegationId;
+  }): Promise<{ row: RunsAuditRow | null }> {
+    const auditRow = await this.tx.runsAudit.get(input.runId);
+    if (auditRow === null) return { row: null };
+    if (auditRow.state !== "running") return { row: auditRow };
+
+    // 1. Mark audit row as cancelling (user-initiated).
+    await this.tx.runsAudit.setState(input.runId, {
+      state: "cancelling",
+      cancelReason: "user",
+    });
+
+    // 2-3. Cascade through the run's tree: live delegations → cancelling,
+    //      open escalations → cancelled.
+    await this.tx.delegations.markAllUnderRootAsCancelling(input.runId);
+    await this.tx.escalations.cancelAllUnderRoot(input.runId);
+
+    // 4. Send terminate to CORE for the root only. The engine cascades
+    //    cancel through its internal threads and emits terminateAck.
     input.bus.push({
       from: API_ENDPOINT,
       to: CORE_ENDPOINT,
       payload: {
         kind: "terminate",
-        delegationId: row.delegationId,
+        delegationId: input.runId,
       },
     });
-    const refreshed = await this.tx.agents.get(input.agentId);
+
+    const refreshed = await this.tx.runsAudit.get(input.runId);
     return { row: refreshed };
   }
 
@@ -182,7 +206,7 @@ export class ApiModule implements Module {
     escalationId: EscalationId;
     value: Value;
   }): Promise<{ ok: boolean }> {
-    const ok = await this.tx.apiEscalations.setAnswered(
+    const ok = await this.tx.escalations.setAnswered(
       input.escalationId,
       encryptValueTree(input.value),
     );
@@ -202,14 +226,10 @@ export class ApiModule implements Module {
   // ─── Internal helpers ──────────────────────────────────────────────────
 
   /**
-   * Handle an unhandled `prim.throw` escalate:
-   *   1. Mark all running/cancelling agents in the snapshot as `error`.
-   *   2. Send `terminate` to CORE for every agent that was still running.
-   *
-   * The CORE AgentThreads receive the cancel, complete their cascade, and
-   * emit `terminateAck`. When `markCancelled` runs for those, it attempts
-   * `cancelling → cancelled` but finds `error` (expectedState mismatch) →
-   * no-op, leaving the row in `error` state.
+   * Unhandled `prim.throw` reached the API boundary. The throw originated
+   * inside `delegationId`'s tree, so we cascade-cancel only that run —
+   * NOT every running delegation in the snapshot, which the previous
+   * implementation did.
    */
   private async handleThrowEscalate(
     delegationId: DelegationId,
@@ -221,58 +241,95 @@ export class ApiModule implements Module {
         ? msgValue.value
         : "runtime error";
 
-    // Collect running delegations before marking them all as error.
-    const runningAgents = await this.tx.agents.list({
-      snapshotId: this.snapshotId,
-      state: "running",
+    const liveRow = await this.tx.delegations.get(delegationId);
+    const rootId = liveRow?.rootDelegationId ?? delegationId;
+
+    // Mark audit row as cancelling(reason=error) + persist the message
+    // so the eventual terminateAck → terminal transition keeps the cause.
+    await this.tx.runsAudit.setState(rootId, {
+      state: "cancelling",
+      cancelReason: "error",
+      errorMessage: message,
     });
 
-    await this.tx.agents.markAllRunningAsError(this.snapshotId, message);
+    await this.tx.delegations.markAllUnderRootAsCancelling(rootId);
+    await this.tx.escalations.cancelAllUnderRoot(rootId);
 
-    const outbound: ExternalEvent[] = runningAgents.map((agent) => ({
-      from: API_ENDPOINT,
-      to: CORE_ENDPOINT,
-      payload: {
-        kind: "terminate" as const,
-        delegationId: agent.delegationId,
-      },
-    }));
-
-    this.logger.log("info", "api: prim.throw escalate — snapshot terminated", {
+    this.logger.log("info", "api: prim.throw escalate — run cancelling", {
       delegationId,
+      rootId,
       message,
-      terminatedCount: outbound.length,
     });
 
-    return { outbound };
+    return {
+      outbound: [
+        {
+          from: API_ENDPOINT,
+          to: CORE_ENDPOINT,
+          payload: { kind: "terminate", delegationId: rootId },
+        },
+      ],
+    };
   }
 
-  private async completeAgent(
+  private async recordEscalation(event: {
+    from: string;
+    payload: Extract<ExternalEvent["payload"], { kind: "escalate" }>;
+  }): Promise<void> {
+    const { delegationId, escalationId, agentDefId, args } = event.payload;
+    const live = await this.tx.delegations.get(delegationId);
+    const rootId = live?.rootDelegationId ?? delegationId;
+    await this.tx.escalations.insert({
+      id: escalationId,
+      delegationId,
+      rootDelegationId: rootId,
+      snapshotId: this.snapshotId,
+      callerEndpoint: event.from,
+      receiverEndpoint: API_ENDPOINT,
+      agentDefId,
+      args: encryptValueRecord(args),
+      state: "open",
+      createdAt: new Date().toISOString(),
+    });
+  }
+
+  private async completeRun(
     delegationId: DelegationId,
     value: Value,
   ): Promise<void> {
-    const row = await this.tx.agents.findByDelegationId(delegationId);
-    if (row === null) {
-      this.logger.log("warn", "api: delegateAck for unknown delegationId", {
+    // Audit row update only happens if this was an operator-launched
+    // root. delegateAcks for child delegations don't reach the API
+    // module (they're owned by CORE / FFI), but we guard with a lookup
+    // anyway in case the protocol invariant is bent later.
+    const auditRow = await this.tx.runsAudit.get(delegationId);
+    if (auditRow !== null) {
+      await this.tx.runsAudit.setState(delegationId, {
+        state: "succeeded",
+        result: encryptValueTree(value),
+        completedAt: new Date().toISOString(),
+      });
+    } else {
+      this.logger.log("warn", "api: delegateAck for unknown run id", {
         delegationId,
       });
-      return;
     }
-    await this.tx.agents.setState(
-      row.id,
-      { state: "succeeded", result: encryptValueTree(value) },
-      { expectedState: "running" },
-    );
+    // The live row is gone (= terminal); the audit row remains.
+    await this.tx.delegations.delete(delegationId);
   }
 
-  private async markCancelled(delegationId: DelegationId): Promise<void> {
-    const row = await this.tx.agents.findByDelegationId(delegationId);
-    if (row === null) return;
-    await this.tx.agents.setState(
-      row.id,
-      { state: "cancelled" },
-      { expectedState: "cancelling" },
-    );
+  private async handleTerminateAck(delegationId: DelegationId): Promise<void> {
+    // Resolve the eventual audit-row state from the cancel reason that
+    // cancelRun / handleThrowEscalate persisted when transitioning to
+    // `cancelling`. user → cancelled, error → error.
+    const auditRow = await this.tx.runsAudit.get(delegationId);
+    if (auditRow !== null) {
+      const finalState =
+        auditRow.cancelReason === "error" ? "error" : "cancelled";
+      await this.tx.runsAudit.setState(delegationId, {
+        state: finalState,
+        completedAt: new Date().toISOString(),
+      });
+    }
+    await this.tx.delegations.delete(delegationId);
   }
 }
-

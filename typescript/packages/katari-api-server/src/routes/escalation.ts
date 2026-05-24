@@ -1,11 +1,11 @@
 // Project-scoped escalation routes.
 //
 // Mounted at `/project/:projectId/escalation`. Escalations are project-
-// scoped (= the deploy unit), even though each one carries the
-// snapshotId of the agent that raised it. AI → user questions are
-// recorded as open in `api_pending_escalations` via the `escalate`
-// branch of ApiModule.feed; when the GUI views this list and answers,
-// an `escalateAck` flows on the bus and the agent thread resumes.
+// scoped (= the deploy unit), even though each one carries the snapshot
+// of the delegation that raised it. AI → user questions are recorded as
+// open in `escalations` (receiver=API) via the `escalate` branch of
+// ApiModule.feed; when the operator views this list and answers, an
+// `escalateAck` flows on the bus and the delegation thread resumes.
 
 import { Hono } from "hono";
 import { valueFromRaw } from "@katari-lang/runtime";
@@ -17,8 +17,9 @@ import {
   ProjectIdSchema,
   SnapshotIdSchema,
 } from "./middleware/validation.js";
-import { apiEscalationToWire } from "../wire/agent-wire.js";
+import { escalationRowToWire } from "../wire/agent-wire.js";
 import type { Orchestrator } from "../orchestrator.js";
+import { API_ENDPOINT } from "@katari-lang/runtime";
 import type { Storage } from "../storage/types.js";
 import { z } from "zod";
 
@@ -38,27 +39,29 @@ export function buildEscalationRoutes(
   app.get("/", async (c) => {
     const projectId = ProjectIdSchema.parse(c.req.param("projectId"));
     const query = ListQuerySchema.parse(c.req.query());
-    const list = await storage.apiEscalations.list({
+    // Filter by `receiverEndpoint = API_ENDPOINT` so the operator-facing
+    // list never accidentally surfaces FFI-relay escalations (= those
+    // are internal plumbing, not questions a human should answer).
+    const list = await storage.escalations.list({
       projectId,
       snapshotId: query.snapshotId,
       state: query.state,
+      receiverEndpoint: API_ENDPOINT,
       limit: query.limit,
       offset: query.offset,
     });
-    return c.json({ escalations: list.map(apiEscalationToWire) });
+    return c.json({ escalations: list.map(escalationRowToWire) });
   });
 
-  // Single-escalation lookup for detail pages that need a stable URL per
-  // escalation (e.g. the admin's "answer" page) without listing first.
   app.get("/:escalationId", async (c) => {
     const escalationId = EscalationIdSchema.parse(
       c.req.param("escalationId"),
     ) as EscalationId;
-    const escalation = await storage.apiEscalations.get(escalationId);
+    const escalation = await storage.escalations.get(escalationId);
     if (escalation === null) {
       return c.json({ error: "escalation not found" }, 404);
     }
-    return c.json({ escalation: apiEscalationToWire(escalation) });
+    return c.json({ escalation: escalationRowToWire(escalation) });
   });
 
   app.post("/:escalationId/ack", async (c) => {
@@ -66,7 +69,7 @@ export function buildEscalationRoutes(
       c.req.param("escalationId"),
     ) as EscalationId;
     const body = AnswerEscalationSchema.parse(await c.req.json());
-    const escalation = await storage.apiEscalations.get(escalationId);
+    const escalation = await storage.escalations.get(escalationId);
     if (escalation === null) {
       return c.json({ error: "escalation not found" }, 404);
     }

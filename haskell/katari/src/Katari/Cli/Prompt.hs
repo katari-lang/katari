@@ -10,7 +10,7 @@
 -- All prompts read line-by-line from stdin and re-ask on invalid
 -- input rather than crashing. The output is an Aeson 'Value' shaped
 -- to match the schema, suitable for passing to the runtime as
--- @startAgent.args@.
+-- @startRun.args@.
 module Katari.Cli.Prompt
   ( pickFromList,
     promptForSchema,

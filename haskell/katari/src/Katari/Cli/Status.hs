@@ -1,13 +1,13 @@
--- | @katari status \<agent-id>@ — fetch one agent row and pretty-print
--- its current state, args, and result. The same shape rendered by
--- @katari run --wait@ when an agent finishes, so the two flows feel
+-- | @katari status \<run-id>@ — fetch one run row and pretty-print
+-- its current state, args, and result. Same shape rendered by
+-- @katari run --wait@ when a run finishes, so the two flows feel
 -- consistent.
 module Katari.Cli.Status
   ( Options (..),
     optionsParser,
     run,
     -- * Reused by Cli.Ls / Cli.Run
-    renderAgentDetailed,
+    renderRunDetailed,
     renderResultPreview,
   )
 where
@@ -23,7 +23,7 @@ import Katari.Cli.Common (resolveApiClient)
 import Options.Applicative
 
 data Options = Options
-  { optAgentId :: Text,
+  { optRunId :: Text,
     optApiUrl :: Maybe Text,
     optJson :: Bool
   }
@@ -31,28 +31,29 @@ data Options = Options
 optionsParser :: Parser Options
 optionsParser =
   Options
-    <$> argument str (metavar "AGENT_ID" <> help "Agent run id (see `katari ls agents`)")
+    <$> argument str (metavar "RUN_ID" <> help "Run id (see `katari ls runs`)")
     <*> optional (strOption (long "api-url" <> metavar "URL" <> help "Override [runtime].url"))
-    <*> switch (long "json" <> help "Emit raw agent JSON instead of the human-readable view")
+    <*> switch (long "json" <> help "Emit raw run JSON instead of the human-readable view")
 
 run :: Options -> IO ()
 run opts = do
   client <- resolveApiClient "status" opts.optApiUrl
-  row <- Api.getAgent client opts.optAgentId
+  row <- Api.getRun client opts.optRunId
   if opts.optJson
     then LC8.putStrLn (AesonPretty.encodePretty row)
-    else putStr (Text.unpack (renderAgentDetailed row))
+    else putStr (Text.unpack (renderRunDetailed row))
 
 -- ---------------------------------------------------------------------------
 -- Formatting
 -- ---------------------------------------------------------------------------
 
--- | Multi-line block describing the entire agent. Trailing newline so
+-- | Multi-line block describing the entire run. Trailing newline so
 -- callers can append more sections without splicing.
-renderAgentDetailed :: Api.AgentRow -> Text
-renderAgentDetailed row =
+renderRunDetailed :: Api.RunRow -> Text
+renderRunDetailed row =
   Text.unlines
-    [ "Agent     " <> row.id,
+    [ "Run       " <> row.id,
+      "Name      " <> maybe "(unnamed)" id row.name,
       "Qname     " <> row.qualifiedName,
       "State     " <> renderState row.state,
       "Args      " <> renderJsonOneLine (Aeson.toJSON row.args),
@@ -79,17 +80,16 @@ renderResultPreview = \case
           then s
           else Text.take (limit - 1) s <> "…"
 
-renderState :: Api.AgentState -> Text
+renderState :: Api.RunState -> Text
 renderState = \case
-  Api.AgentRunning -> "running"
-  Api.AgentCancelling -> "cancelling"
-  Api.AgentCancelled -> "cancelled"
-  Api.AgentSucceeded -> "succeeded"
-  Api.AgentError -> "error"
+  Api.RunRunning -> "running"
+  Api.RunCancelling -> "cancelling"
+  Api.RunCancelled -> "cancelled"
+  Api.RunSucceeded -> "succeeded"
+  Api.RunError -> "error"
 
 renderJsonOneLine :: Aeson.Value -> Text
 renderJsonOneLine v =
   -- aeson's compact encoding has no trailing newline and uses ":" + " "
   -- after keys, which is the densest single-line form we ship.
   Text.pack (LC8.unpack (Aeson.encode v))
-

@@ -36,6 +36,7 @@ import {
 import { ApiModule } from "./modules/api-module.js";
 import { StorageEnvStore } from "./modules/env-store.js";
 import { StorageFfiStore } from "./modules/ffi-store.js";
+import { StorageDelegationStore } from "./modules/delegation-store.js";
 import {
   NoSnapshotForProject,
   SnapshotNotFound,
@@ -137,6 +138,10 @@ export class Orchestrator {
           snapshotId,
           irModule: snapshot.irModule,
           logger: this.logger,
+          // Audit sink for outbound delegate events. Writes one row to
+          // `delegations` per CORE → X call so the admin tree view can
+          // render the call hierarchy. Scoped to this snapshot.
+          delegationStore: new StorageDelegationStore(tx, snapshotId),
         });
         const api = new ApiModule({ snapshotId, tx, logger: this.logger });
 
@@ -199,7 +204,10 @@ export class Orchestrator {
    * in-flight delegations (FfiModule.recoverInflight).
    */
   async recoverOnBoot(): Promise<void> {
-    const snapshotIds = await this.storage.agents.listRunningSnapshotIds();
+    // Snapshots that still own a live delegation (= ApiModule-issued root,
+    // or a child CORE / FFI hasn't acked yet) — these need their sidecar
+    // respawned so in-flight ext calls don't sit forever.
+    const snapshotIds = await this.storage.delegations.listLiveSnapshotIds();
     for (const snapshotId of snapshotIds) {
       const snapshot = await this.storage.snapshots.get(snapshotId);
       if (snapshot === null) continue;

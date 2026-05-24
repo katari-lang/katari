@@ -1,4 +1,4 @@
--- | @katari run [qualifiedName]@ — start an agent on the runtime.
+-- | @katari run [qualifiedName]@ — start a run on the runtime.
 --
 -- Two modes:
 --
@@ -38,6 +38,7 @@ data Options = Options
   { optQualifiedName :: Maybe Text,
     optProject :: Maybe Text,
     optSnapshot :: Maybe Text,
+    optName :: Maybe Text,
     optArgs :: Maybe Text,
     optWait :: Bool,
     optApiUrl :: Maybe Text
@@ -65,12 +66,19 @@ optionsParser =
     <*> optional (strOption (long "snapshot" <> short 's' <> metavar "ID" <> help "Pin to a snapshot id (else use the latest)"))
     <*> optional
       ( strOption
+          ( long "as"
+              <> metavar "NAME"
+              <> help "Operator-supplied label for this run (shown in `katari ls runs` / admin UI)"
+          )
+      )
+    <*> optional
+      ( strOption
           ( long "args"
               <> metavar "JSON"
               <> help "Argument record as JSON, e.g. '{\"x\":1}' (default: {})"
           )
       )
-    <*> switch (long "wait" <> help "Poll until the agent finishes; print its result")
+    <*> switch (long "wait" <> help "Poll until the run finishes; print its result")
     <*> optional (strOption (long "api-url" <> metavar "URL" <> help "Override [runtime].url"))
 
 run :: Options -> IO ()
@@ -88,22 +96,23 @@ run opts = do
   -- gather args (from --args JSON, otherwise walk the schema).
   (qname, args) <- resolveQualifiedNameAndArgs client proj opts
 
-  agentId <-
-    Api.startAgent
+  runId <-
+    Api.startRun
       client
-      Api.StartAgentRequest
+      Api.StartRunRequest
         { Api.projectId = proj,
           Api.snapshotId = opts.optSnapshot,
           Api.qualifiedName = qname,
+          Api.name = opts.optName,
           Api.args = args
         }
-  hPutStrLn stderr ("Started " <> Text.unpack agentId)
+  hPutStrLn stderr ("Started " <> Text.unpack runId)
   if opts.optWait
-    then pollUntilDone client agentId
+    then pollUntilDone client runId
     else
       hPutStrLn
         stderr
-        ("(re-run with --wait, or `katari status " <> Text.unpack agentId <> "` to inspect)")
+        ("(re-run with --wait, or `katari status " <> Text.unpack runId <> "` to inspect)")
 
 -- | Choose @(qualifiedName, args)@ via:
 --
@@ -188,25 +197,25 @@ decodeArgsJson s = case Aeson.eitherDecode (LC8.pack (Text.unpack s)) of
   Left err -> die ("--args is not valid JSON: " <> err)
 
 pollUntilDone :: Api.ApiClient -> Text -> IO ()
-pollUntilDone client agentId = loop (50_000 :: Int)
+pollUntilDone client runId = loop (50_000 :: Int)
   where
     -- Exponential backoff capped at 2 s. We deliberately have no overall
-    -- timeout: a `katari run` invocation blocks until the agent finishes
+    -- timeout: a `katari run` invocation blocks until the run finishes
     -- (or the user hits Ctrl-C). Earlier versions of this loop gave up
-    -- after 20 s of polling, which surprised users running long agents.
+    -- after 20 s of polling, which surprised users running long runs.
     maxDelay = 2_000_000 :: Int
     loop delay = do
-      row <- Api.getAgent client agentId
+      row <- Api.getRun client runId
       case row.state of
-        Api.AgentRunning -> threadDelay delay >> loop (min maxDelay (delay * 2))
-        Api.AgentCancelling -> threadDelay delay >> loop (min maxDelay (delay * 2))
+        Api.RunRunning -> threadDelay delay >> loop (min maxDelay (delay * 2))
+        Api.RunCancelling -> threadDelay delay >> loop (min maxDelay (delay * 2))
         -- Pretty block on stderr so a downstream `| jq` keeps working
         -- on the bare result on stdout.
         done -> do
-          hPutStr stderr (Text.unpack (Status.renderAgentDetailed row))
+          hPutStr stderr (Text.unpack (Status.renderRunDetailed row))
           case done of
-            Api.AgentSucceeded -> case row.result of
+            Api.RunSucceeded -> case row.result of
               Just v -> LC8.putStrLn (Aeson.encode v)
               Nothing -> pure ()
-            Api.AgentError -> exitWith (ExitFailure 1)
+            Api.RunError -> exitWith (ExitFailure 1)
             _ -> pure ()

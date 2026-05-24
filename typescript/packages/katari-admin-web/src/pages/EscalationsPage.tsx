@@ -110,11 +110,11 @@ export function EscalationsPage() {
                 <TBody>
                   {data.escalations.map((esc) => (
                     <TR
-                      key={esc.escalationId}
+                      key={esc.id}
                       className="cursor-pointer"
                       onClick={() =>
                         navigate(
-                          `/project/${projectId}/escalations/${esc.escalationId}`,
+                          `/project/${projectId}/escalations/${esc.id}`,
                         )
                       }
                     >
@@ -123,7 +123,7 @@ export function EscalationsPage() {
                       </TD>
                       <TD>
                         <Link
-                          to={`/project/${projectId}/escalations/${esc.escalationId}`}
+                          to={`/project/${projectId}/escalations/${esc.id}`}
                           className="block hover:underline"
                           onClick={(e) => e.stopPropagation()}
                         >
@@ -131,7 +131,7 @@ export function EscalationsPage() {
                             {esc.agentDefId}
                           </div>
                           <div className="mt-0.5 font-mono text-[11px] text-subtle-foreground">
-                            {shortId(esc.escalationId)}
+                            {shortId(esc.id)}
                           </div>
                         </Link>
                       </TD>

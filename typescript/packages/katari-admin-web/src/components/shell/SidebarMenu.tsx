@@ -20,7 +20,7 @@ type MenuItem = {
 function projectItems(projectId: string): MenuItem[] {
   return [
     { to: `/project/${projectId}`, label: "Dashboard", icon: LayoutDashboard },
-    { to: `/project/${projectId}/agents`, label: "Agents", icon: Activity },
+    { to: `/project/${projectId}/runs`, label: "Runs", icon: Activity },
     {
       to: `/project/${projectId}/definitions`,
       label: "Definitions",

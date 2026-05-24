@@ -17,14 +17,15 @@ module Katari.Api.Types
     UploadSnapshotRequest (..),
     UploadSnapshotResponse (..),
     SidecarBundle (..),
-    -- * Agents
-    AgentRow (..),
-    AgentState (..),
-    StartAgentRequest (..),
-    StartAgentResponse (..),
-    GetAgentResponse (..),
-    ListAgentsResponse (..),
-    CancelAgentResponse (..),
+    -- * Runs (= operator-launched root delegations)
+    RunRow (..),
+    RunState (..),
+    CancelReason (..),
+    StartRunRequest (..),
+    StartRunResponse (..),
+    GetRunResponse (..),
+    ListRunsResponse (..),
+    CancelRunResponse (..),
     -- * Agent definitions
     AgentDefinition (..),
     ListAgentDefinitionsResponse (..),
@@ -85,6 +86,9 @@ newtype ListProjectsResponse = ListProjectsResponse {projects :: [Project]}
 data SnapshotSummary = SnapshotSummary
   { id :: Text,
     projectId :: Text,
+    -- | Commit-message-like text supplied by the operator on @apply@.
+    -- 'Nothing' = no message attached.
+    message :: Maybe Text,
     createdAt :: Text
   }
   deriving stock (Show, Generic)
@@ -107,10 +111,20 @@ data UploadSnapshotRequest = UploadSnapshotRequest
     -- | @{ schemaVersion, agents: [...] }@ — we don't parse it on the
     -- Haskell side beyond round-tripping bytes, so a raw 'Value' is
     -- enough. Built by 'Katari.Cli.Build.buildBundleJson'.
-    schemaBundle :: Value
+    schemaBundle :: Value,
+    -- | Optional operator-supplied commit-message-like text. 'Nothing'
+    -- = no message attached (= the server stores @NULL@).
+    message :: Maybe Text
   }
   deriving stock (Show, Generic)
-  deriving anyclass (FromJSON, ToJSON)
+
+instance FromJSON UploadSnapshotRequest where
+  parseJSON = genericParseJSON defaultOptions
+
+-- | Drop @message: null@ when 'Nothing' so the api-server's Zod schema
+-- accepts an absent field rather than an explicit null.
+instance ToJSON UploadSnapshotRequest where
+  toJSON = genericToJSON defaultOptions {omitNothingFields = True}
 
 newtype UploadSnapshotResponse = UploadSnapshotResponse
   { snapshotId :: Text
@@ -119,91 +133,114 @@ newtype UploadSnapshotResponse = UploadSnapshotResponse
   deriving anyclass (FromJSON, ToJSON)
 
 -- ---------------------------------------------------------------------------
--- Agents
+-- Runs (= operator-launched root delegations; the "agent" entry point)
 -- ---------------------------------------------------------------------------
 
-data AgentState
-  = AgentRunning
-  | AgentCancelling
-  | AgentCancelled
-  | AgentSucceeded
-  | AgentError
+data RunState
+  = RunRunning
+  | RunCancelling
+  | RunCancelled
+  | RunSucceeded
+  | RunError
   deriving stock (Show, Eq)
 
-instance FromJSON AgentState where
-  parseJSON = withText "AgentState" $ \t -> case t of
-    "running" -> pure AgentRunning
-    "cancelling" -> pure AgentCancelling
-    "cancelled" -> pure AgentCancelled
-    "succeeded" -> pure AgentSucceeded
-    "error" -> pure AgentError
-    _ -> fail ("unknown agent state: " <> Text.unpack t)
+instance FromJSON RunState where
+  parseJSON = withText "RunState" $ \t -> case t of
+    "running" -> pure RunRunning
+    "cancelling" -> pure RunCancelling
+    "cancelled" -> pure RunCancelled
+    "succeeded" -> pure RunSucceeded
+    "error" -> pure RunError
+    _ -> fail ("unknown run state: " <> Text.unpack t)
 
-instance ToJSON AgentState where
+instance ToJSON RunState where
   toJSON = \case
-    AgentRunning -> "running"
-    AgentCancelling -> "cancelling"
-    AgentCancelled -> "cancelled"
-    AgentSucceeded -> "succeeded"
-    AgentError -> "error"
+    RunRunning -> "running"
+    RunCancelling -> "cancelling"
+    RunCancelled -> "cancelled"
+    RunSucceeded -> "succeeded"
+    RunError -> "error"
 
-data AgentRow = AgentRow
+data CancelReason
+  = CancelReasonUser
+  | CancelReasonError
+  deriving stock (Show, Eq)
+
+instance FromJSON CancelReason where
+  parseJSON = withText "CancelReason" $ \t -> case t of
+    "user" -> pure CancelReasonUser
+    "error" -> pure CancelReasonError
+    _ -> fail ("unknown cancel reason: " <> Text.unpack t)
+
+instance ToJSON CancelReason where
+  toJSON = \case
+    CancelReasonUser -> "user"
+    CancelReasonError -> "error"
+
+-- | One row from the @runs_audit@ table (= persistent operator-facing
+-- log). Survives terminal state so @katari status@ can render the
+-- post-run result / error.
+data RunRow = RunRow
   { id :: Text,
-    delegationId :: Text,
     snapshotId :: Text,
+    name :: Maybe Text,
     qualifiedName :: Text,
     args :: Map Text Value,
-    state :: AgentState,
+    state :: RunState,
+    cancelReason :: Maybe CancelReason,
     result :: Maybe Value,
     errorMessage :: Maybe Text,
     createdAt :: Text,
-    updatedAt :: Text
+    updatedAt :: Text,
+    completedAt :: Maybe Text
   }
   deriving stock (Show, Generic)
 
-instance FromJSON AgentRow where
+instance FromJSON RunRow where
   parseJSON = genericParseJSON defaultOptions
 
-instance ToJSON AgentRow where
+instance ToJSON RunRow where
   toJSON = genericToJSON defaultOptions
 
-data StartAgentRequest = StartAgentRequest
+data StartRunRequest = StartRunRequest
   { projectId :: Text,
     snapshotId :: Maybe Text,
     qualifiedName :: Text,
+    -- | Operator-supplied label. 'Nothing' = unnamed run.
+    name :: Maybe Text,
     args :: Map Text Value
   }
   deriving stock (Show, Generic)
 
-instance FromJSON StartAgentRequest where
+instance FromJSON StartRunRequest where
   parseJSON = genericParseJSON defaultOptions
 
--- | Drop @snapshotId: null@ when it's 'Nothing' — the api-server's
--- Zod schema accepts the field as @optional()@ (absent) but not as
--- @null@.
-instance ToJSON StartAgentRequest where
+-- | Drop @snapshotId: null@ / @name: null@ when 'Nothing' — the
+-- api-server's Zod schema accepts these as @optional()@ (absent) but
+-- not as @null@ in some shapes.
+instance ToJSON StartRunRequest where
   toJSON = genericToJSON defaultOptions {omitNothingFields = True}
 
-newtype StartAgentResponse = StartAgentResponse
-  { agentId :: Text
+newtype StartRunResponse = StartRunResponse
+  { runId :: Text
   }
   deriving stock (Show, Generic)
   deriving anyclass (FromJSON, ToJSON)
 
-newtype GetAgentResponse = GetAgentResponse
-  { agent :: AgentRow
+newtype GetRunResponse = GetRunResponse
+  { run :: RunRow
   }
   deriving stock (Show, Generic)
   deriving anyclass (FromJSON, ToJSON)
 
-newtype ListAgentsResponse = ListAgentsResponse
-  { agents :: [AgentRow]
+newtype ListRunsResponse = ListRunsResponse
+  { runs :: [RunRow]
   }
   deriving stock (Show, Generic)
   deriving anyclass (FromJSON, ToJSON)
 
-newtype CancelAgentResponse = CancelAgentResponse
-  { agent :: AgentRow
+newtype CancelRunResponse = CancelRunResponse
+  { run :: RunRow
   }
   deriving stock (Show, Generic)
   deriving anyclass (FromJSON, ToJSON)

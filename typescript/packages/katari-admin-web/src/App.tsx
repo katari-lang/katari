@@ -4,8 +4,9 @@ import { AppShell } from "@/components/shell/AppShell";
 import { LoginPage } from "@/pages/LoginPage";
 import { ProjectsPage } from "@/pages/ProjectsPage";
 import { DashboardPage } from "@/pages/DashboardPage";
-import { AgentsPage } from "@/pages/AgentsPage";
-import { AgentDetailPage } from "@/pages/AgentDetailPage";
+import { RunsPage } from "@/pages/RunsPage";
+import { RunDetailPage } from "@/pages/RunDetailPage";
+import { RunTreePage } from "@/pages/RunTreePage";
 import { DefinitionsPage } from "@/pages/DefinitionsPage";
 import { DefinitionDetailPage } from "@/pages/DefinitionDetailPage";
 import { EscalationsPage } from "@/pages/EscalationsPage";
@@ -25,8 +26,9 @@ export default function App() {
             <Route path="/projects" element={<ProjectsPage />} />
             <Route path="/project/:projectId">
               <Route index element={<DashboardPage />} />
-              <Route path="agents" element={<AgentsPage />} />
-              <Route path="agents/:agentId" element={<AgentDetailPage />} />
+              <Route path="runs" element={<RunsPage />} />
+              <Route path="runs/:runId" element={<RunDetailPage />} />
+              <Route path="runs/:runId/tree" element={<RunTreePage />} />
               <Route path="definitions" element={<DefinitionsPage />} />
               <Route path="definitions/:qualifiedName" element={<DefinitionDetailPage />} />
               <Route path="escalations" element={<EscalationsPage />} />

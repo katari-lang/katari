@@ -9,8 +9,10 @@ import type { Storage } from "../storage/types.js";
 import type { ProjectService } from "../services/project-service.js";
 import type { SnapshotService } from "../services/snapshot-service.js";
 import type { Orchestrator } from "../orchestrator.js";
-import { buildAgentRoutes } from "./agent.js";
-import { buildAgentByIdRoutes } from "./agent-by-id.js";
+import { buildRunRoutes } from "./run.js";
+import { buildRunByIdRoutes } from "./run-by-id.js";
+import { buildRunTreeRoutes } from "./run-tree.js";
+import { DelegationTreeService } from "../services/delegation-tree-service.js";
 import { buildEnvRoutes } from "./env.js";
 import { buildEscalationRoutes } from "./escalation.js";
 import { buildEscalationByIdRoutes } from "./escalation-by-id.js";
@@ -138,9 +140,14 @@ export function buildApp(deps: AppDeps): Hono {
     "/project/:projectId/snapshot",
     buildSnapshotRoutes(deps.snapshots),
   );
+  const treeService = new DelegationTreeService(deps.storage);
   app.route(
-    "/project/:projectId/agent",
-    buildAgentRoutes(deps.orchestrator, deps.storage),
+    "/project/:projectId/run",
+    buildRunRoutes(deps.orchestrator, deps.storage),
+  );
+  app.route(
+    "/project/:projectId/run/:runId/tree",
+    buildRunTreeRoutes(treeService),
   );
   app.route(
     "/project/:projectId/escalation",
@@ -148,7 +155,7 @@ export function buildApp(deps: AppDeps): Hono {
   );
   // Flat single-entity aliases for the CLI / scripts that already hold a
   // UUID and don't need the navigation hierarchy.
-  app.route("/agent", buildAgentByIdRoutes(deps.orchestrator, deps.storage));
+  app.route("/run", buildRunByIdRoutes(deps.orchestrator, deps.storage));
   app.route(
     "/escalation",
     buildEscalationByIdRoutes(deps.orchestrator, deps.storage),

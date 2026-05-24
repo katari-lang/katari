@@ -18,11 +18,11 @@ module Katari.Api.Client
     -- * Snapshots
     uploadSnapshot,
     listSnapshots,
-    -- * Agents
-    startAgent,
-    listAgents,
-    getAgent,
-    cancelAgent,
+    -- * Runs
+    startRun,
+    listRuns,
+    getRun,
+    cancelRun,
     -- * Agent definitions
     listAgentDefinitions,
     -- * Escalations
@@ -137,36 +137,35 @@ newtype ListSnapshotsResponse = ListSnapshotsResponse {snapshots :: [SnapshotSum
   deriving anyclass (Aeson.FromJSON)
 
 -- ---------------------------------------------------------------------------
--- Agents
+-- Runs (= operator-launched root delegations)
 -- ---------------------------------------------------------------------------
 
--- Agents / escalations are project-scoped at the URL level
--- (`/project/:projectId/...`); single-entity GET / POST-cancel /
--- POST-ack also have flat `/agent/:id` and `/escalation/:id` aliases
--- since the CLI typically holds a globally-unique UUID without needing
--- project context (e.g. `katari status <agentId>`).
+-- Runs / escalations are project-scoped at the URL level
+-- (`/project/:projectId/...`); single-entity GET / POST-cancel also
+-- have flat `/run/:id` aliases since the CLI typically holds a globally-
+-- unique UUID without needing project context (e.g. `katari status <runId>`).
 
-startAgent :: ApiClient -> StartAgentRequest -> IO Text
-startAgent c req = do
-  r :: StartAgentResponse <-
-    post c ("/project/" <> req.projectId <> "/agent") req
-  pure r.agentId
+startRun :: ApiClient -> StartRunRequest -> IO Text
+startRun c req = do
+  r :: StartRunResponse <-
+    post c ("/project/" <> req.projectId <> "/run") req
+  pure r.runId
 
-listAgents :: ApiClient -> Text -> Maybe Text -> IO [AgentRow]
-listAgents c projectId snapshotId = do
+listRuns :: ApiClient -> Text -> Maybe Text -> IO [RunRow]
+listRuns c projectId snapshotId = do
   let q = buildQuery [("snapshotId", snapshotId)]
-  r :: ListAgentsResponse <- get c ("/project/" <> projectId <> "/agent" <> q)
-  pure r.agents
+  r :: ListRunsResponse <- get c ("/project/" <> projectId <> "/run" <> q)
+  pure r.runs
 
-getAgent :: ApiClient -> Text -> IO AgentRow
-getAgent c agentId = do
-  r :: GetAgentResponse <- get c ("/agent/" <> agentId)
-  pure r.agent
+getRun :: ApiClient -> Text -> IO RunRow
+getRun c runId = do
+  r :: GetRunResponse <- get c ("/run/" <> runId)
+  pure r.run
 
-cancelAgent :: ApiClient -> Text -> IO AgentRow
-cancelAgent c agentId = do
-  r :: CancelAgentResponse <- post c ("/agent/" <> agentId <> "/cancel") emptyObject
-  pure r.agent
+cancelRun :: ApiClient -> Text -> IO RunRow
+cancelRun c runId = do
+  r :: CancelRunResponse <- post c ("/run/" <> runId <> "/cancel") emptyObject
+  pure r.run
 
 -- ---------------------------------------------------------------------------
 -- Agent definitions

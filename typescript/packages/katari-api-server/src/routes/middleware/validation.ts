@@ -2,7 +2,7 @@
 
 import { z } from "zod";
 import type {
-  AgentId,
+  DelegationId,
   EscalationId,
   ProjectId,
   SnapshotId,
@@ -20,10 +20,14 @@ export const SnapshotIdSchema = z
   .uuid()
   .transform((s) => s as SnapshotId);
 
-export const AgentIdSchema = z
+/**
+ * Run id (= the root delegation's UUID). The CLI / admin UI talk about
+ * "runs"; the underlying entity is a top-level delegation.
+ */
+export const RunIdSchema = z
   .string()
   .uuid()
-  .transform((s) => s as AgentId);
+  .transform((s) => s as DelegationId);
 
 // Escalations are runtime-generated UUIDs (see katari-runtime); the
 // previous `min(1)` shape accepted arbitrary strings, which then broke
@@ -101,29 +105,38 @@ export const UploadSnapshotSchema = z.object({
   irModule: IRModuleShapeSchema,
   sidecarBundle: SidecarBundleSchema.nullable().optional().default(null),
   schemaBundle: SchemaBundleShapeSchema,
+  /** Free-form commit-message-like text. Trimmed at 1KB so the wire
+   *  payload doesn't grow unboundedly with operator-written labels. */
+  message: z.string().max(1024).nullable().optional().default(null),
 });
 export type UploadSnapshotInput = z.infer<typeof UploadSnapshotSchema>;
 
-// ─── Agent / Escalation ────────────────────────────────────────────────────
+// ─── Run / Escalation ──────────────────────────────────────────────────────
 
-export const AgentStateSchema = z.enum([
+/**
+ * Audit state for a run (ApiModule-launched root delegation).
+ * Live delegation rows only carry `running | cancelling`; the terminal
+ * states (`cancelled / succeeded / error`) live in `runs_audit`.
+ */
+export const RunStateSchema = z.enum([
   "running",
   "cancelling",
   "cancelled",
   "succeeded",
   "error",
 ]);
-export type AgentStateInput = z.infer<typeof AgentStateSchema>;
+export type RunStateInput = z.infer<typeof RunStateSchema>;
 
-// Project comes from the URL path now (`/project/:projectId/agent`),
-// so the start-agent body only carries snapshot selection + the call
-// itself.
-export const StartAgentSchema = z.object({
+// Project comes from the URL path (`/project/:projectId/run`); the body
+// only carries snapshot selection + the call itself + an optional name.
+export const StartRunSchema = z.object({
   snapshotId: SnapshotIdSchema.optional(),
   qualifiedName: z.string().min(1),
+  /** Operator-supplied label. `null` / omitted = unnamed. */
+  name: z.string().min(1).max(128).nullable().optional().default(null),
   args: z.record(z.string(), RawValueSchema),
 });
-export type StartAgentInput = z.infer<typeof StartAgentSchema>;
+export type StartRunInput = z.infer<typeof StartRunSchema>;
 
 export const AnswerEscalationSchema = z.object({
   value: RawValueSchema,

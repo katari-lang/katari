@@ -91,7 +91,12 @@ export function DefinitionsSnapshotPicker({
                     }}
                   >
                     <div className="flex-1">
-                      <div className="font-mono text-xs">
+                      {s.message !== null && (
+                        <div className="text-xs text-foreground">
+                          {s.message}
+                        </div>
+                      )}
+                      <div className="font-mono text-[11px] opacity-70">
                         {shortId(s.id, 12, 4)}
                       </div>
                       <div

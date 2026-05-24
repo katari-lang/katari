@@ -63,7 +63,7 @@ export function EscalationDetailPage() {
       if (escalation === undefined) throw new Error("No escalation");
       await client.answerEscalation(
         projectId as ProjectId,
-        escalation.escalationId,
+        escalation.id,
         value,
       );
     },

@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useParams } from "react-router-dom";
 import { motion } from "framer-motion";
-import { ArrowLeft, Ban } from "lucide-react";
+import { ArrowLeft, Ban, GitFork } from "lucide-react";
 import toast from "react-hot-toast";
 import { useApiClient } from "@/contexts/ApiKeyContext";
 import { PageContent, PageHeader } from "@/components/ui/PageHeader";
@@ -9,51 +9,50 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { SpinnerOverlay } from "@/components/ui/Spinner";
 import {
-  AgentStatusBadge,
+  RunStatusBadge,
   isTerminalState,
-} from "@/components/domain/AgentStatusBadge";
+} from "@/components/domain/RunStatusBadge";
 import { ValueViewer } from "@/components/domain/ValueViewer";
 import { formatDateTime } from "@/lib/format";
-import type { AgentId, ProjectId } from "@/api/types";
+import type { ProjectId, RunId } from "@/api/types";
 
 const POLL_MS = 3_000;
 
-export function AgentDetailPage() {
-  const { projectId, agentId } = useParams<{
+export function RunDetailPage() {
+  const { projectId, runId } = useParams<{
     projectId: string;
-    agentId: string;
+    runId: string;
   }>();
   const client = useApiClient();
   const queryClient = useQueryClient();
 
   const { data, isLoading, isError, error } = useQuery({
-    queryKey: ["agent", agentId],
-    queryFn: () => client.getAgent(projectId as ProjectId, agentId as AgentId),
-    enabled: typeof projectId === "string" && typeof agentId === "string",
+    queryKey: ["run", runId],
+    queryFn: () => client.getRun(projectId as ProjectId, runId as RunId),
+    enabled: typeof projectId === "string" && typeof runId === "string",
     refetchInterval: (query) =>
       query.state.data !== undefined &&
-      !isTerminalState(query.state.data.agent.state)
+      !isTerminalState(query.state.data.run.state)
         ? POLL_MS
         : false,
   });
 
   const cancel = useMutation({
-    mutationFn: () =>
-      client.cancelAgent(projectId as ProjectId, agentId as AgentId),
+    mutationFn: () => client.cancelRun(projectId as ProjectId, runId as RunId),
     onSuccess: () => {
       toast.success("Cancel requested");
-      void queryClient.invalidateQueries({ queryKey: ["agent", agentId] });
-      void queryClient.invalidateQueries({ queryKey: ["agents", projectId] });
+      void queryClient.invalidateQueries({ queryKey: ["run", runId] });
+      void queryClient.invalidateQueries({ queryKey: ["runs", projectId] });
     },
     onError: (err) => {
       toast.error(err instanceof Error ? err.message : "Failed to cancel.");
     },
   });
 
-  const agent = data?.agent;
+  const run = data?.run;
   const canCancel =
-    agent !== undefined &&
-    (agent.state === "running" || agent.state === "cancelling");
+    run !== undefined &&
+    (run.state === "running" || run.state === "cancelling");
 
   return (
     <div>
@@ -61,40 +60,49 @@ export function AgentDetailPage() {
         title={
           <span className="inline-flex items-center gap-3">
             <Link
-              to={`/project/${projectId}/agents`}
+              to={`/project/${projectId}/runs`}
               className="inline-flex items-center gap-1 text-muted-foreground hover:text-foreground"
             >
               <ArrowLeft className="size-4" />
-              <span className="text-sm font-normal">Agents</span>
+              <span className="text-sm font-normal">Runs</span>
             </Link>
             <span className="text-subtle-foreground text-sm">/</span>
             <span className="font-mono text-base text-foreground">
-              {agent?.qualifiedName ?? agentId}
+              {run?.name ?? run?.qualifiedName ?? runId}
             </span>
-            {agent !== undefined && <AgentStatusBadge state={agent.state} />}
+            {run !== undefined && <RunStatusBadge state={run.state} />}
           </span>
         }
         actions={
-          canCancel ? (
-            <Button
-              variant="danger"
-              onClick={() => cancel.mutate()}
-              loading={cancel.isPending}
+          <div className="flex items-center gap-2">
+            <Link
+              to={`/project/${projectId}/runs/${runId}/tree`}
+              className="inline-flex items-center gap-1.5 border border-border px-3 py-1.5 text-sm transition-colors hover:bg-muted"
             >
-              <Ban className="size-4" />
-              Cancel
-            </Button>
-          ) : null
+              <GitFork className="size-4" />
+              View tree
+            </Link>
+            {canCancel ? (
+              <Button
+                variant="danger"
+                onClick={() => cancel.mutate()}
+                loading={cancel.isPending}
+              >
+                <Ban className="size-4" />
+                Cancel
+              </Button>
+            ) : null}
+          </div>
         }
       />
       <PageContent>
         {isLoading && <SpinnerOverlay />}
         {isError && (
           <p className="border border-danger/30 bg-danger/10 px-4 py-3 text-sm text-danger">
-            {error instanceof Error ? error.message : "Failed to load agent."}
+            {error instanceof Error ? error.message : "Failed to load run."}
           </p>
         )}
-        {agent !== undefined && (
+        {run !== undefined && (
           <motion.div
             initial={{ opacity: 0, y: 4 }}
             animate={{ opacity: 1, y: 0 }}
@@ -106,7 +114,7 @@ export function AgentDetailPage() {
                 <CardTitle>Arguments</CardTitle>
               </CardHeader>
               <CardContent>
-                <ValueViewer value={agent.args} />
+                <ValueViewer value={run.args} />
               </CardContent>
             </Card>
             <Card>
@@ -116,48 +124,76 @@ export function AgentDetailPage() {
               <CardContent>
                 <dl className="space-y-2 text-sm">
                   <Row
-                    label="Agent ID"
+                    label="Run ID"
                     value={
-                      <code className="font-mono text-xs">{agent.id}</code>
+                      <code className="font-mono text-xs">{run.id}</code>
+                    }
+                  />
+                  {run.name !== null && (
+                    <Row
+                      label="Name"
+                      value={
+                        <span className="text-foreground">{run.name}</span>
+                      }
+                    />
+                  )}
+                  <Row
+                    label="Agent"
+                    value={
+                      <code className="font-mono text-xs">
+                        {run.qualifiedName}
+                      </code>
                     }
                   />
                   <Row
                     label="Snapshot"
                     value={
                       <code className="font-mono text-xs">
-                        {agent.snapshotId}
+                        {run.snapshotId}
                       </code>
                     }
                   />
                   <Row
                     label="Started"
-                    value={formatDateTime(agent.createdAt)}
+                    value={formatDateTime(run.createdAt)}
                   />
                   <Row
                     label="Updated"
-                    value={formatDateTime(agent.updatedAt)}
+                    value={formatDateTime(run.updatedAt)}
                   />
+                  {run.cancelReason !== null && (
+                    <Row
+                      label="Cancel reason"
+                      value={
+                        <span className="text-foreground">
+                          {run.cancelReason === "user"
+                            ? "user-initiated"
+                            : "child error"}
+                        </span>
+                      }
+                    />
+                  )}
                 </dl>
               </CardContent>
             </Card>
-            {agent.result !== undefined && (
+            {run.result !== undefined && (
               <Card className="lg:col-span-3">
                 <CardHeader>
                   <CardTitle>Result</CardTitle>
                 </CardHeader>
                 <CardContent>
-                  <ValueViewer value={agent.result} />
+                  <ValueViewer value={run.result} />
                 </CardContent>
               </Card>
             )}
-            {agent.errorMessage !== undefined && agent.errorMessage !== "" && (
+            {run.errorMessage !== undefined && run.errorMessage !== "" && (
               <Card className="lg:col-span-3 border-danger/30">
                 <CardHeader>
                   <CardTitle className="text-danger">Error</CardTitle>
                 </CardHeader>
                 <CardContent>
                   <pre className="overflow-auto  border border-danger/30 bg-danger/5 p-3 text-xs text-danger">
-                    {agent.errorMessage}
+                    {run.errorMessage}
                   </pre>
                 </CardContent>
               </Card>

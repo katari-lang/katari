@@ -9,9 +9,9 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { SpinnerOverlay } from "@/components/ui/Spinner";
 import {
-  AgentStatusBadge,
+  RunStatusBadge,
   isTerminalState,
-} from "@/components/domain/AgentStatusBadge";
+} from "@/components/domain/RunStatusBadge";
 import { formatDateTime, relativeTime, shortId } from "@/lib/format";
 import type { ProjectId } from "@/api/types";
 
@@ -27,13 +27,13 @@ export function DashboardPage() {
     enabled: typeof projectId === "string",
   });
 
-  const agentsQ = useQuery({
-    queryKey: ["agents", projectId],
+  const runsQ = useQuery({
+    queryKey: ["runs", projectId],
     queryFn: () =>
-      client.listAgents({ projectId: projectId as ProjectId, limit: 200 }),
+      client.listRuns({ projectId: projectId as ProjectId, limit: 200 }),
     enabled: typeof projectId === "string",
     refetchInterval: (query) =>
-      (query.state.data?.agents ?? []).some((a) => !isTerminalState(a.state))
+      (query.state.data?.runs ?? []).some((r) => !isTerminalState(r.state))
         ? POLL_MS
         : false,
   });
@@ -56,11 +56,11 @@ export function DashboardPage() {
     enabled: typeof projectId === "string",
   });
 
-  const agents = agentsQ.data?.agents ?? [];
-  const liveAgents = agents
-    .filter((a) => !isTerminalState(a.state))
+  const runs = runsQ.data?.runs ?? [];
+  const liveRuns = runs
+    .filter((r) => !isTerminalState(r.state))
     .slice(0, 5);
-  const recentAgents = agents.slice(0, 5);
+  const recentRuns = runs.slice(0, 5);
   const openEscalations = (escalationsQ.data?.escalations ?? []).slice(0, 5);
 
   return (
@@ -83,11 +83,11 @@ export function DashboardPage() {
             className="grid gap-4 lg:grid-cols-2 xl:grid-cols-3"
           >
             <DashboardCard
-              title="Running agents"
-              count={liveAgents.length}
+              title="Running runs"
+              count={liveRuns.length}
               icon={<Activity className="size-4 text-highlight" />}
               footer={
-                <Link to={`/project/${projectId}/agents`}>
+                <Link to={`/project/${projectId}/runs`}>
                   <Button variant="ghost" size="sm">
                     See all
                     <ArrowRight className="size-3.5" />
@@ -95,24 +95,24 @@ export function DashboardPage() {
                 </Link>
               }
             >
-              {liveAgents.length === 0 ? (
+              {liveRuns.length === 0 ? (
                 <p className="text-sm text-subtle-foreground">
-                  No live agents.
+                  No live runs.
                 </p>
               ) : (
                 <ul className="space-y-1.5">
-                  {liveAgents.map((a) => (
-                    <li key={a.id}>
+                  {liveRuns.map((r) => (
+                    <li key={r.id}>
                       <Link
-                        to={`/project/${projectId}/agents/${a.id}`}
+                        to={`/project/${projectId}/runs/${r.id}`}
                         className="flex items-center gap-2  px-2 py-1.5 text-sm transition-colors hover:bg-muted"
                       >
-                        <AgentStatusBadge state={a.state} />
+                        <RunStatusBadge state={r.state} />
                         <span className="flex-1 truncate font-mono text-xs text-foreground">
-                          {a.qualifiedName}
+                          {r.name ?? r.qualifiedName}
                         </span>
                         <span className="text-[11px] text-subtle-foreground">
-                          {relativeTime(a.createdAt)}
+                          {relativeTime(r.createdAt)}
                         </span>
                       </Link>
                     </li>
@@ -142,7 +142,7 @@ export function DashboardPage() {
                 <ul className="space-y-1.5">
                   {openEscalations.map((e) => (
                     <li
-                      key={e.escalationId}
+                      key={e.id}
                       className=" px-2 py-1.5 text-sm hover:bg-muted"
                     >
                       <div className="flex items-center gap-2">
@@ -206,11 +206,11 @@ export function DashboardPage() {
             </DashboardCard>
 
             <DashboardCard
-              title="Recent agents"
+              title="Recent runs"
               count={null}
               icon={null}
               footer={
-                <Link to={`/project/${projectId}/agents`}>
+                <Link to={`/project/${projectId}/runs`}>
                   <Button variant="ghost" size="sm">
                     See all
                     <ArrowRight className="size-3.5" />
@@ -219,9 +219,9 @@ export function DashboardPage() {
               }
               className="lg:col-span-2 xl:col-span-3"
             >
-              {recentAgents.length === 0 ? (
+              {recentRuns.length === 0 ? (
                 <p className="text-sm text-subtle-foreground">
-                  No agents yet. Invoke one from the{" "}
+                  No runs yet. Start one from the{" "}
                   <Link
                     to={`/project/${projectId}/definitions`}
                     className="underline"
@@ -232,18 +232,18 @@ export function DashboardPage() {
                 </p>
               ) : (
                 <ul className="">
-                  {recentAgents.map((a) => (
-                    <li key={a.id}>
+                  {recentRuns.map((r) => (
+                    <li key={r.id}>
                       <Link
-                        to={`/project/${projectId}/agents/${a.id}`}
+                        to={`/project/${projectId}/runs/${r.id}`}
                         className="flex items-center gap-3 px-2 py-2 text-sm transition-colors hover:bg-muted"
                       >
-                        <AgentStatusBadge state={a.state} />
+                        <RunStatusBadge state={r.state} />
                         <span className="flex-1 truncate font-mono text-foreground">
-                          {a.qualifiedName}
+                          {r.name ?? r.qualifiedName}
                         </span>
                         <span className="text-[11px] text-subtle-foreground">
-                          {relativeTime(a.updatedAt)}
+                          {relativeTime(r.updatedAt)}
                         </span>
                       </Link>
                     </li>

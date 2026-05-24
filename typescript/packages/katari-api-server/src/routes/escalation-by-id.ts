@@ -12,7 +12,7 @@ import {
   AnswerEscalationSchema,
   EscalationIdSchema,
 } from "./middleware/validation.js";
-import { apiEscalationToWire } from "../wire/agent-wire.js";
+import { escalationRowToWire } from "../wire/agent-wire.js";
 import type { Orchestrator } from "../orchestrator.js";
 import type { Storage } from "../storage/types.js";
 
@@ -26,11 +26,11 @@ export function buildEscalationByIdRoutes(
     const escalationId = EscalationIdSchema.parse(
       c.req.param("escalationId"),
     ) as EscalationId;
-    const escalation = await storage.apiEscalations.get(escalationId);
+    const escalation = await storage.escalations.get(escalationId);
     if (escalation === null) {
       return c.json({ error: "escalation not found" }, 404);
     }
-    return c.json({ escalation: apiEscalationToWire(escalation) });
+    return c.json({ escalation: escalationRowToWire(escalation) });
   });
 
   app.post("/:escalationId/ack", async (c) => {
@@ -38,7 +38,7 @@ export function buildEscalationByIdRoutes(
       c.req.param("escalationId"),
     ) as EscalationId;
     const body = AnswerEscalationSchema.parse(await c.req.json());
-    const escalation = await storage.apiEscalations.get(escalationId);
+    const escalation = await storage.escalations.get(escalationId);
     if (escalation === null) {
       return c.json({ error: "escalation not found" }, 404);
     }

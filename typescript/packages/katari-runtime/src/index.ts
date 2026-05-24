@@ -148,6 +148,14 @@ export type {
   CoreModuleOptions,
 } from "./modules/core.js";
 
+export {
+  NULL_DELEGATION_STORE,
+} from "./modules/delegation-store.js";
+export type {
+  DelegationStore,
+  DelegationStoreRow,
+} from "./modules/delegation-store.js";
+
 export { FfiModule } from "./modules/ffi.js";
 export type { FfiModuleOptions } from "./modules/ffi.js";
 

@@ -51,15 +51,15 @@ export function DefinitionDetailPage() {
 
   const invoke = useMutation({
     mutationFn: (args: Record<string, RawValue>) =>
-      client.startAgent({
+      client.startRun({
         projectId: projectId as ProjectId,
         snapshotId: selectedSnapshot,
         qualifiedName: qualifiedName ?? "",
         args,
       }),
     onSuccess: (res) => {
-      toast.success("Agent started");
-      navigate(`/project/${projectId}/agents/${res.agentId}`);
+      toast.success("Run started");
+      navigate(`/project/${projectId}/runs/${res.runId}`);
     },
     onError: (err) => {
       toast.error(err instanceof Error ? err.message : "Failed to start.");

@@ -10,10 +10,18 @@
 // Self-addressed events (= CORE->CORE) are included in applyEvent's outbound,
 // returned to the bus, and the bus hands them back to the same CoreModule.feed
 // (self-loops do not stay inside the engine).
+//
+// **Audit hook**: every outbound `delegate` event CORE emits is recorded
+// in the unified `delegations` table via the injected `DelegationStore`
+// so the admin tree view can render CORE → X edges. Symmetrically, the
+// row is deleted on the matching `delegateAck` / `terminateAck`. The
+// store is optional (`NULL_DELEGATION_STORE`) so tests that don't care
+// about audit can skip it.
 
 import { applyEvent, createState } from "../engine/apply.js";
-import type { Endpoint } from "../engine/endpoint.js";
+import { CORE_ENDPOINT, type Endpoint } from "../engine/endpoint.js";
 import type { ExternalEvent } from "../engine/event.js";
+import type { DelegationId } from "../engine/id.js";
 import type { Logger } from "../engine/logger.js";
 import {
   decryptCheckpoint,
@@ -23,8 +31,14 @@ import {
   type EncryptedEngineCheckpoint,
 } from "../engine/snapshot.js";
 import type { State } from "../engine/state.js";
+import type { Thread } from "../engine/thread/types.js";
+import { encryptValueRecord } from "../value-secret-codec.js";
 import type { Module } from "../module.js";
 import type { IRModule } from "../ir/types.js";
+import {
+  NULL_DELEGATION_STORE,
+  type DelegationStore,
+} from "./delegation-store.js";
 
 /**
  * Storage interface that the CoreModule depends on. The host (api-server)
@@ -49,6 +63,12 @@ export type CoreModuleOptions = {
   snapshotId: string;
   irModule: IRModule;
   logger: Logger;
+  /**
+   * Audit sink for outbound delegate events. Defaults to a no-op store
+   * so tests that don't exercise the tree view don't have to provide a
+   * backing table.
+   */
+  delegationStore?: DelegationStore;
 };
 
 /** Tx shape CoreModule.persist / load expect. */
@@ -59,6 +79,7 @@ export class CoreModule implements Module<CoreTx> {
   private readonly snapshotId: string;
   private readonly irModule: IRModule;
   private readonly logger: Logger;
+  private readonly delegationStore: DelegationStore;
   private state: State;
 
   constructor(opts: CoreModuleOptions) {
@@ -66,20 +87,41 @@ export class CoreModule implements Module<CoreTx> {
     this.snapshotId = opts.snapshotId;
     this.irModule = opts.irModule;
     this.logger = opts.logger;
+    this.delegationStore = opts.delegationStore ?? NULL_DELEGATION_STORE;
     this.state = createState(opts.irModule, { selfEndpoint: opts.endpoint });
   }
 
   async feed(event: ExternalEvent): Promise<{ outbound: ExternalEvent[] }> {
+    // Inbound terminal acks resolve a delegation we previously issued;
+    // delete the audit row BEFORE applyEvent so a sub-delegate emitted
+    // during apply (if any) doesn't race the parent's row delete.
+    if (
+      event.payload.kind === "delegateAck"
+      || event.payload.kind === "terminateAck"
+    ) {
+      await this.delegationStore.delete(event.payload.delegationId);
+    }
+
     const result = applyEvent(this.state, event);
     this.state = result.state;
     for (const log of result.logs) {
       this.logger.log(log.level, log.message, log.context);
     }
-    // outbound is `Event[]` of external payload kinds — we return them
-    // as-is. Cast keeps the wider Event type compatible with ExternalEvent
-    // (Event = ExternalEvent ∪ internal-only forms; outbound is always
-    // external by construction).
-    return { outbound: result.outbound as ExternalEvent[] };
+
+    // Outbound delegates are CORE's "I'm calling X" — record them so the
+    // admin tree can show "this run did N child calls". The parent is
+    // the enclosing AgentThread, found by walking from the freshly-
+    // created DelegateThread up the parent chain.
+    //
+    // outbound is `Event[]` whose payloads are always external by
+    // construction; cast once here to avoid scattering casts inline.
+    const outbound = result.outbound as ExternalEvent[];
+    for (const ev of outbound) {
+      if (ev.payload.kind === "delegate") {
+        await this.persistOutboundDelegate(ev, ev.payload);
+      }
+    }
+    return { outbound };
   }
 
   async persist(tx: CoreTx): Promise<void> {
@@ -97,5 +139,63 @@ export class CoreModule implements Module<CoreTx> {
   /** Read-only access for tests / debug. */
   get currentState(): State {
     return this.state;
+  }
+
+  // ─── Audit helpers ─────────────────────────────────────────────────────
+
+  /**
+   * Insert one `delegations` row for an outbound `delegate` event. The
+   * parent is the enclosing AgentThread in the engine's thread tree;
+   * the root is inherited from the parent's existing audit row (and
+   * defaults to self when no parent is found — defensive, shouldn't
+   * happen for well-formed delegate emissions).
+   */
+  private async persistOutboundDelegate(
+    ev: ExternalEvent,
+    payload: Extract<ExternalEvent["payload"], { kind: "delegate" }>,
+  ): Promise<void> {
+    const parentDelegationId = this.findEnclosingAgentDelegation(
+      payload.delegationId,
+    );
+    const rootDelegationId =
+      parentDelegationId === null
+        ? payload.delegationId
+        : ((await this.delegationStore.getRoot(parentDelegationId))
+            ?? payload.delegationId);
+    const now = new Date().toISOString();
+    await this.delegationStore.insert({
+      id: payload.delegationId,
+      rootDelegationId,
+      parentDelegationId,
+      callerEndpoint: CORE_ENDPOINT,
+      ownerEndpoint: ev.to,
+      agentDefId: payload.agentDefId,
+      args: encryptValueRecord(payload.args),
+      state: "running",
+      createdAt: now,
+      updatedAt: now,
+    });
+  }
+
+  /**
+   * Walk the engine's thread tree from the DelegateThread that owns
+   * `delegationId` upward until reaching an AgentThread (= the body of
+   * the agent currently executing). Returns that AgentThread's
+   * delegationId. Returns `null` if no AgentThread sits above (= we are
+   * at the engine root, which shouldn't normally happen for CORE-issued
+   * outbound delegates).
+   */
+  private findEnclosingAgentDelegation(
+    delegationId: DelegationId,
+  ): DelegationId | null {
+    const senderThreadId = this.state.pendingDelegateOut[delegationId];
+    if (senderThreadId === undefined) return null;
+    let cursor: Thread | undefined = this.state.threads[senderThreadId];
+    while (cursor !== undefined) {
+      if (cursor.kind === "agent") return cursor.delegationId;
+      if (cursor.parent === null) return null;
+      cursor = this.state.threads[cursor.parent];
+    }
+    return null;
   }
 }
