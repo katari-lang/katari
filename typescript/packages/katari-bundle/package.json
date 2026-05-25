@@ -1,6 +1,6 @@
 {
   "name": "@katari-lang/bundle",
-  "version": "0.0.0-dev",
+  "version": "0.1.0-rc5",
   "description": "esbuild-based bundler for Katari sidecar JS modules. Spawned by the `katari` CLI during `katari apply`.",
   "license": "MIT",
   "author": "yukikurage",

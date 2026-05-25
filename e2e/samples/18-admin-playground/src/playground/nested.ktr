@@ -1,0 +1,4 @@
+@"Default no-arg entry point."
+agent main_nested() -> string {
+  "playground"
+}

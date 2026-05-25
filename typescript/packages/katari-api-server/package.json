@@ -1,6 +1,6 @@
 {
   "name": "@katari-lang/api-server",
-  "version": "0.0.0-dev",
+  "version": "0.1.0-rc5",
   "description": "HTTP API server that hosts a Katari runtime instance (snapshot apply, agent run, escalation handling). Distributed both as an npm library and as a Docker image (ghcr.io/katari-lang/katari).",
   "license": "MIT",
   "author": "yukikurage",

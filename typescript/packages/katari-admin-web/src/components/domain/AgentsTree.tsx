@@ -74,7 +74,7 @@ type Props = {
 // without description, ~52px with). Per-row hairline border keeps the
 // "list of clickable rows" feel without leaning on background contrast.
 const ROW_BASE =
-  "flex w-full items-start gap-2 px-3 py-2.5 text-left transition-colors hover:bg-muted/50";
+  "flex w-full items-center gap-2 px-3 py-2.5 text-left transition-colors hover:bg-muted/50";
 // Indent per nesting level (rem). Used in inline style so depth can be
 // arbitrarily nested without Tailwind needing to know about it.
 const INDENT_REM = 1.25;
@@ -124,9 +124,7 @@ function collectAllFolderPaths(nodes: TreeNode[]): Set<string> {
 }
 
 function nodeKey(n: TreeNode): string {
-  return n.kind === "folder"
-    ? `f:${n.path}`
-    : `l:${n.agent.qualifiedName}`;
+  return n.kind === "folder" ? `f:${n.path}` : `l:${n.agent.qualifiedName}`;
 }
 
 function TreeRow({
@@ -152,7 +150,7 @@ function TreeRow({
           type="button"
           onClick={() => onToggle(node.path)}
           style={indent}
-          className={`${ROW_BASE} items-center pr-3 text-foreground hover:cursor-pointer`}
+          className={`${ROW_BASE} items-center pr-3 text-foreground hover:cursor-pointer h-12`}
         >
           {isOpen ? (
             <ChevronDown className="size-4 shrink-0 text-muted-foreground" />
@@ -192,7 +190,7 @@ function TreeRow({
       <Link
         to={href(node.agent)}
         style={indent}
-        className={`${ROW_BASE} pr-3 text-foreground`}
+        className={`${ROW_BASE} pr-3 text-foreground h-16`}
       >
         {/* Spacer to align with folder rows' chevron column. */}
         <span className="inline-block size-4 shrink-0" aria-hidden />

@@ -20,4 +20,4 @@ module Katari.Version (katariVersion) where
 -- release pipeline's stamper / verifier. Do not reformat without
 -- updating @scripts\/stamp-version.mjs@ and @scripts\/verify-versions.mjs@.
 katariVersion :: String
-katariVersion = "0.0.0-dev" -- KATARI_VERSION
+katariVersion = "0.1.0-rc5" -- KATARI_VERSION

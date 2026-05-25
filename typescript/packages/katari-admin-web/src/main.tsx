@@ -61,7 +61,10 @@ createRoot(root).render(
             }}
           />
         </BrowserRouter>
-        <ReactQueryDevtools initialIsOpen={false} buttonPosition="bottom-left" />
+        <ReactQueryDevtools
+          initialIsOpen={false}
+          buttonPosition="bottom-left"
+        />
       </QueryClientProvider>
     </ThemeProvider>
   </StrictMode>,
