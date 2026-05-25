@@ -914,6 +914,12 @@ data Expression (phase :: Phase) where
   ExpressionTuple :: TupleExpression phase -> Expression phase
   -- | Array literal @[e1, e2, ...]@.
   ExpressionArray :: ArrayExpression phase -> Expression phase
+  -- | Record literal @{ label = expr, label = expr, ... }@. The wire
+  -- form is a plain JSON object. Distinguished from a block by the
+  -- presence of @label = ...@ at the head of the braces — block
+  -- statements either start with the @let@ keyword or are bare
+  -- expressions, never @label = expr@.
+  ExpressionRecord :: RecordExpression phase -> Expression phase
   -- | Function / agent call @callee(arg = expr, ...)@.
   ExpressionCall :: CallExpression phase -> Expression phase
   -- | Binary operator application @e1 op e2@.
@@ -952,6 +958,7 @@ instance HasSourceSpan (Expression phase) where
     ExpressionVariable expression -> expression.sourceSpan
     ExpressionTuple expression -> expression.sourceSpan
     ExpressionArray expression -> expression.sourceSpan
+    ExpressionRecord expression -> expression.sourceSpan
     ExpressionCall expression -> expression.sourceSpan
     ExpressionBinaryOperator expression -> expression.sourceSpan
     ExpressionUnaryOperator expression -> expression.sourceSpan
@@ -1083,6 +1090,18 @@ data ArrayExpression (phase :: Phase) = ArrayExpression
   }
 
 instance HasSourceSpan (ArrayExpression phase) where
+  sourceSpanOf expression = expression.sourceSpan
+
+-- | Record literal @{ label = expr, label = expr, ... }@. Keys are
+-- bare identifiers (stored as 'Text' — they are values on the wire,
+-- not references); evaluation is left-to-right.
+data RecordExpression (phase :: Phase) = RecordExpression
+  { entries :: [(Text, Expression phase)],
+    sourceSpan :: SourceSpan,
+    typeOf :: ExpressionType phase
+  }
+
+instance HasSourceSpan (RecordExpression phase) where
   sourceSpanOf expression = expression.sourceSpan
 
 -- | Parallel tuple construction: @par (e1, e2, ...)@.
@@ -1674,6 +1693,10 @@ deriving instance (ShowPhase phase) => Show (TupleExpression phase)
 deriving instance (EqPhase phase) => Eq (ArrayExpression phase)
 
 deriving instance (ShowPhase phase) => Show (ArrayExpression phase)
+
+deriving instance (EqPhase phase) => Eq (RecordExpression phase)
+
+deriving instance (ShowPhase phase) => Show (RecordExpression phase)
 
 deriving instance (EqPhase phase) => Eq (ParTupleExpression phase)
 

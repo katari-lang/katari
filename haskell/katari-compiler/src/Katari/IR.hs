@@ -51,6 +51,7 @@ module Katari.IR
     HandleBlock (..),
     TupleBlock (..),
     ArrayBlock (..),
+    RecordBlock (..),
     Param (..),
     Handler (..),
     MatchArm (..),
@@ -239,6 +240,11 @@ data Block where
   -- trailing value becomes one item in the resulting array.
   -- When @parallel = True@, element blocks run concurrently.
   BlockArray :: ArrayBlock -> Block
+  -- | Record construction. Each entry is a (label, block) pair; the
+  -- trailing value of each block becomes the entry's value. Entries
+  -- are evaluated left-to-right (sequential — there's no parallel
+  -- record literal at the surface).
+  BlockRecord :: RecordBlock -> Block
   -- | Agent boundary. The runtime spawns an 'AgentThread' that catches
   -- 'return' and isolates the scope, then runs 'entryBody' inside it.
   -- Top-level agent declarations lower to this. Inline blocks (match arm
@@ -568,6 +574,20 @@ instance ToJSON ArrayBlock where
   toJSON = genericToJSON irOptions
 
 instance FromJSON ArrayBlock where
+  parseJSON = genericParseJSON irOptions
+
+-- | Payload for 'BlockRecord'. Each entry is a @(label, BlockId)@
+-- whose trailing value becomes the entry's value. Entries are
+-- evaluated left-to-right.
+data RecordBlock = RecordBlock
+  { entries :: [(Text, BlockId)]
+  }
+  deriving (Eq, Show, Generic)
+
+instance ToJSON RecordBlock where
+  toJSON = genericToJSON irOptions
+
+instance FromJSON RecordBlock where
   parseJSON = genericParseJSON irOptions
 
 -- | Payload for 'SExit'.

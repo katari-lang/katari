@@ -160,6 +160,7 @@ export type Block =
   | { kind: "blockHandle"; body: HandleBlock }
   | { kind: "blockTuple"; body: TupleBlock }
   | { kind: "blockArray"; body: ArrayBlock }
+  | { kind: "blockRecord"; body: RecordBlock }
   | { kind: "blockAgent"; body: AgentBlock }
   | { kind: "blockDelegate"; body: DelegateBlock };
 
@@ -316,6 +317,14 @@ export type ArrayBlock = {
   parallel: boolean;
   /** Each element is an inline block computing one value. */
   elements: BlockId[];
+};
+
+/** Payload for blockRecord. Entries are evaluated left-to-right
+ * (no parallel record literal at the surface). */
+export type RecordBlock = {
+  /** Ordered (label, block) pairs. Each block's trailing value
+   * becomes the entry's value in the constructed record. */
+  entries: [string, BlockId][];
 };
 
 export type ExitData = {

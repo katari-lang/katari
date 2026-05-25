@@ -280,8 +280,12 @@ export type ArrayThread = Common & CollectingBase & {
   kind: "array";
 };
 
+export type RecordThread = Common & CollectingBase & {
+  kind: "record";
+};
+
 /** Union of every variant that uses the `CollectingBase` shape. */
-export type CollectingThread = TupleThread | ArrayThread;
+export type CollectingThread = TupleThread | ArrayThread | RecordThread;
 
 export type Thread =
   | AgentThread
@@ -294,6 +298,7 @@ export type Thread =
   | PrimThread
   | CtorThread
   | TupleThread
-  | ArrayThread;
+  | ArrayThread
+  | RecordThread;
 
 export type ThreadKind = Thread["kind"];

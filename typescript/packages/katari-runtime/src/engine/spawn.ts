@@ -143,6 +143,13 @@ export function spawnChild(ctx: StepCtx, args: SpawnArgs): ThreadId {
       collected: {},
       nextIndex: 0,
     }))
+    .with({ kind: "blockRecord" }, () => ({
+      ...common,
+      kind: "record" as const,
+      blockId: args.blockId,
+      collected: {},
+      nextIndex: 0,
+    }))
     .with({ kind: "blockRequest" }, b => ({
       ...common,
       kind: "request" as const,

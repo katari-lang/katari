@@ -1297,6 +1297,7 @@ parsePrimaryExpression =
         parseLiteralExpression,
         parseArrayExpression,
         parseTupleOrGroupedExpression,
+        parseRecordLiteralExpression,
         parseBlockExpression,
         parseVariableExpression
       ]
@@ -1419,6 +1420,39 @@ parseBlockExpression = parseWithSpan $ do
           sourceSpan = sourceSpan,
           typeOf = ()
         }
+
+-- | Record literal @{ label = expr, label = expr, ... }@. The parser
+-- commits to the record-literal shape only when the head of the
+-- braces is unambiguously @identifier =@; otherwise control falls
+-- through to 'parseBlockExpression' (block statements either start
+-- with @let@ or are bare expressions, never @identifier =@).
+parseRecordLiteralExpression :: Parser (Expression Parsed)
+parseRecordLiteralExpression = do
+  -- Lookahead-only commit: @{ identifier =@ uniquely identifies a
+  -- record literal. We do NOT consume the lookahead so 'try' is not
+  -- required here.
+  _ <- MP.lookAhead . try $ do
+    parsePunctuation PunctuationLeftBrace
+    _ <- parseIdentifier
+    parsePunctuation PunctuationEquals
+  parseWithSpan $ do
+    parsePunctuation PunctuationLeftBrace
+    entries <- parseRecordEntry `sepEndBy1` parseComma
+    parsePunctuation PunctuationRightBrace
+    pure $ \sourceSpan ->
+      ExpressionRecord
+        RecordExpression
+          { entries = entries,
+            sourceSpan = sourceSpan,
+            typeOf = ()
+          }
+
+parseRecordEntry :: Parser (Text, Expression Parsed)
+parseRecordEntry = do
+  entryLabel <- parseIdentifier
+  parsePunctuation PunctuationEquals
+  expr <- parseExpression
+  pure (entryLabel, expr)
 
 parseIfExpression :: Parser (Expression Parsed)
 parseIfExpression = parseWithSpan $ do

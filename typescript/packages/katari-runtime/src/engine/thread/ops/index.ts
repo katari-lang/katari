@@ -23,6 +23,7 @@ import { handleOps } from "./handle.js";
 import { matchOps } from "./match.js";
 import { primOps } from "./prim.js";
 import { requestOps } from "./request.js";
+import { recordOps } from "./record.js";
 import { tupleOps } from "./tuple.js";
 import { userOps } from "./user.js";
 
@@ -35,6 +36,7 @@ export function dispatchCreate(ctx: StepCtx, t: Thread): void {
     .with({ kind: "ctor" }, x => ctorOps.create(ctx, x))
     .with({ kind: "tuple" }, x => tupleOps.create(ctx, x))
     .with({ kind: "array" }, x => arrayOps.create(ctx, x))
+    .with({ kind: "record" }, x => recordOps.create(ctx, x))
     .with({ kind: "match" }, x => matchOps.create(ctx, x))
     .with({ kind: "user" }, x => userOps.create(ctx, x))
     .with({ kind: "for" }, x => forOps.create(ctx, x))
@@ -56,6 +58,7 @@ export function dispatchDone(
     .with({ kind: "ctor" }, x => ctorOps.done(ctx, x, callId, value))
     .with({ kind: "tuple" }, x => tupleOps.done(ctx, x, callId, value))
     .with({ kind: "array" }, x => arrayOps.done(ctx, x, callId, value))
+    .with({ kind: "record" }, x => recordOps.done(ctx, x, callId, value))
     .with({ kind: "match" }, x => matchOps.done(ctx, x, callId, value))
     .with({ kind: "user" }, x => userOps.done(ctx, x, callId, value))
     .with({ kind: "for" }, x => forOps.done(ctx, x, callId, value))
@@ -72,6 +75,7 @@ export function dispatchCancel(ctx: StepCtx, t: Thread): void {
     .with({ kind: "ctor" }, x => ctorOps.cancel(ctx, x))
     .with({ kind: "tuple" }, x => tupleOps.cancel(ctx, x))
     .with({ kind: "array" }, x => arrayOps.cancel(ctx, x))
+    .with({ kind: "record" }, x => recordOps.cancel(ctx, x))
     .with({ kind: "match" }, x => matchOps.cancel(ctx, x))
     .with({ kind: "user" }, x => userOps.cancel(ctx, x))
     .with({ kind: "for" }, x => forOps.cancel(ctx, x))
@@ -92,6 +96,7 @@ export function dispatchCancelAck(
     .with({ kind: "ctor" }, x => ctorOps.cancelAck(ctx, x, callId))
     .with({ kind: "tuple" }, x => tupleOps.cancelAck(ctx, x, callId))
     .with({ kind: "array" }, x => arrayOps.cancelAck(ctx, x, callId))
+    .with({ kind: "record" }, x => recordOps.cancelAck(ctx, x, callId))
     .with({ kind: "match" }, x => matchOps.cancelAck(ctx, x, callId))
     .with({ kind: "user" }, x => userOps.cancelAck(ctx, x, callId))
     .with({ kind: "for" }, x => forOps.cancelAck(ctx, x, callId))
@@ -114,6 +119,7 @@ export function dispatchAsk(
     .with({ kind: "ctor" }, x => ctorOps.ask(ctx, x, askId, kind, childCallId))
     .with({ kind: "tuple" }, x => tupleOps.ask(ctx, x, askId, kind, childCallId))
     .with({ kind: "array" }, x => arrayOps.ask(ctx, x, askId, kind, childCallId))
+    .with({ kind: "record" }, x => recordOps.ask(ctx, x, askId, kind, childCallId))
     .with({ kind: "match" }, x => matchOps.ask(ctx, x, askId, kind, childCallId))
     .with({ kind: "user" }, x => userOps.ask(ctx, x, askId, kind, childCallId))
     .with({ kind: "for" }, x => forOps.ask(ctx, x, askId, kind, childCallId))
@@ -135,6 +141,7 @@ export function dispatchAskAck(
     .with({ kind: "ctor" }, x => ctorOps.askAck(ctx, x, askId, value))
     .with({ kind: "tuple" }, x => tupleOps.askAck(ctx, x, askId, value))
     .with({ kind: "array" }, x => arrayOps.askAck(ctx, x, askId, value))
+    .with({ kind: "record" }, x => recordOps.askAck(ctx, x, askId, value))
     .with({ kind: "match" }, x => matchOps.askAck(ctx, x, askId, value))
     .with({ kind: "user" }, x => userOps.askAck(ctx, x, askId, value))
     .with({ kind: "for" }, x => forOps.askAck(ctx, x, askId, value))

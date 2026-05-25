@@ -173,6 +173,10 @@ data ReasonKind where
   ReasonKindIndexAccessIndex :: ReasonKind
   ReasonKindTemplateInterpolation :: ReasonKind
   ReasonKindArrayElement :: ReasonKind
+  -- | Every value in a record literal '{ a = e1, b = e2 }' must
+  -- agree on a single value type. Each entry's expression type is
+  -- subtype-constrained against the literal's fresh value-type var.
+  ReasonKindRecordValue :: ReasonKind
   ReasonKindConstructorPattern :: ReasonKind
   -- | Marker for structural breakdowns that originate inside the Solver
   -- (e.g. "all branches failed") and whose syntactic source cannot be
@@ -948,6 +952,7 @@ constrainedExpressionType = \case
   ExpressionVariable VariableExpression {typeOf} -> typeOf
   ExpressionTuple TupleExpression {typeOf} -> typeOf
   ExpressionArray ArrayExpression {typeOf} -> typeOf
+  ExpressionRecord RecordExpression {typeOf} -> typeOf
   ExpressionCall CallExpression {typeOf} -> typeOf
   ExpressionBinaryOperator BinaryOperatorExpression {typeOf} -> typeOf
   ExpressionUnaryOperator UnaryOperatorExpression {typeOf} -> typeOf
@@ -1204,6 +1209,7 @@ walkExpression = \case
   ExpressionVariable expr -> walkVariableExpr expr
   ExpressionTuple expr -> walkTupleExpr expr
   ExpressionArray expr -> walkArrayExpr expr
+  ExpressionRecord expr -> walkRecordExpr expr
   ExpressionCall expr -> walkCallExpr expr
   ExpressionBinaryOperator expr -> walkBinaryExpr expr
   ExpressionUnaryOperator expr -> walkUnaryExpr expr
@@ -1274,6 +1280,32 @@ walkArrayExpr ArrayExpression {elements, sourceSpan} = do
           { elements = elements',
             sourceSpan = sourceSpan,
             typeOf = SemanticTypeArray tElem
+          }
+    )
+
+-- | @{ label = expr, ... }@ — record literal. Every entry's value
+-- type flows into a single fresh value-type variable; the literal's
+-- type becomes @record[tValue]@. Keys are implicitly @string@ (the
+-- wire form is a JSON object) so the labels do not contribute to
+-- type generation here.
+walkRecordExpr :: RecordExpression Identified -> CG (Expression Constrained)
+walkRecordExpr RecordExpression {entries, sourceSpan} = do
+  entries' <- mapM (\(lbl, e) -> (lbl,) <$> walkExpression e) entries
+  tValue <- freshTypeVar
+  mapM_
+    ( \(_, e) ->
+        addTypeConstraint
+          (constrainedExpressionType e)
+          tValue
+          (ConstraintReason ReasonKindRecordValue sourceSpan)
+    )
+    entries'
+  pure
+    ( ExpressionRecord
+        RecordExpression
+          { entries = entries',
+            sourceSpan = sourceSpan,
+            typeOf = SemanticTypeRecord tValue
           }
     )
 

@@ -1190,6 +1190,7 @@ lowerExpr = \case
   AST.ExpressionCall callExpr -> lowerCall callExpr
   AST.ExpressionTuple tupleExpr -> lowerTupleExpr False tupleExpr.elements
   AST.ExpressionArray arrayExpr -> lowerArrayExpr False arrayExpr.elements
+  AST.ExpressionRecord recordExpr -> lowerRecordExpr recordExpr.entries
   AST.ExpressionFieldAccess fieldAccessExpr -> do
     object <- lowerExpr fieldAccessExpr.object
     -- Field name is loaded as a string literal; get_field consumes
@@ -1662,6 +1663,29 @@ lowerArrayExpr isParallel elements = do
     StatementCall
       CallData
         { block = arrayBlockId,
+          arguments = [],
+          output = Just out
+        }
+  pure out
+
+-- | Lower a record literal @{ label = expr, ... }@ to a 'BlockRecord'.
+-- Each entry's value expression is lowered into its own inline block;
+-- the runtime constructs the record by collecting their trailing
+-- values into a @{kind: "record", entries}@ Value.
+lowerRecordExpr :: [(Text, AST.Expression Zonked)] -> Lower VarId
+lowerRecordExpr entries = do
+  entryBlocks <-
+    mapM (\(lbl, e) -> (lbl,) <$> buildElementBlock e) entries
+  recordBlockId <- freshBlockId
+  recordBlock
+    recordBlockId
+    (BlockRecord RecordBlock {entries = entryBlocks})
+    Nothing
+  out <- freshVarId Nothing
+  emit $
+    StatementCall
+      CallData
+        { block = recordBlockId,
           arguments = [],
           output = Just out
         }

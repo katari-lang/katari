@@ -38,15 +38,14 @@
     "declarations": {
       "patterns": [
         {
-          "match": "\\b(ext)\\s+(agent)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "match": "\\b(external|primitive)\\s+([A-Za-z_][A-Za-z0-9_]*)",
           "captures": {
             "1": { "name": "storage.modifier.external.katari" },
-            "2": { "name": "keyword.declaration.agent.katari" },
-            "3": { "name": "entity.name.function.katari" }
+            "2": { "name": "entity.name.function.katari" }
           }
         },
         {
-          "match": "\\b(agent|req)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "match": "\\b(agent|request)\\s+([A-Za-z_][A-Za-z0-9_]*)",
           "captures": {
             "1": { "name": "keyword.declaration.katari" },
             "2": { "name": "entity.name.function.katari" }
@@ -79,11 +78,11 @@
       "patterns": [
         {
           "name": "keyword.control.katari",
-          "match": "\\b(if|else|match|case|return|next|break|for|then|handle|par|in|with)\\b"
+          "match": "\\b(if|else|match|case|return|next|break|for|then|handle|parallel|in|with)\\b"
         },
         {
           "name": "keyword.declaration.katari",
-          "match": "\\b(agent|req|data|ext|let|var|import|as|from|type|where)\\b"
+          "match": "\\b(agent|request|data|external|primitive|let|var|import|as|from|type|where)\\b"
         }
       ]
     },
