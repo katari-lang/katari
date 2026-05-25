@@ -30,6 +30,7 @@ module Katari.Typechecker.NormalizedType
     StringSlot (..),
     ArraySlot (..),
     ObjectSlot (..),
+    RecordSlot (..),
     FunctionSlot (..),
     FunctionShape (..),
 
@@ -114,7 +115,13 @@ data LayeredType = LayeredType
     -- product-normalisation rule, all object shapes in a union collapse
     -- into a single shape: union → common fields, each field type unioned;
     -- intersection → all fields, common field types intersected.
-    objectLayer :: ObjectSlot
+    objectLayer :: ObjectSlot,
+    -- | Record layer. 'RecordSlotAbsent' means "no record values".
+    -- 'RecordSlotOf k v' means "homogeneous dictionaries from k-typed
+    -- keys to v-typed values". Keys are invariant (key sets are dynamic
+    -- so we can't widen or narrow the domain), values are covariant.
+    -- Distinct from 'ObjectSlotOf' (= static field labels).
+    recordLayer :: RecordSlot
   }
   deriving (Eq, Show)
 
@@ -164,6 +171,18 @@ data ObjectSlot where
   ObjectSlotOf :: (Map Text NormalizedType) -> ObjectSlot
   deriving (Eq, Show)
 
+-- | Record slot.
+--
+--   * 'RecordSlotAbsent' — no record values inhabit this type.
+--   * @'RecordSlotOf' k v@ — homogeneous dictionaries from k-typed keys
+--     to v-typed values. Keys are invariant (the key set is dynamic, so
+--     widening or narrowing the key type isn't sound); values are
+--     covariant.
+data RecordSlot where
+  RecordSlotAbsent :: RecordSlot
+  RecordSlotOf :: NormalizedType -> NormalizedType -> RecordSlot
+  deriving (Eq, Show)
+
 -- | Function layer.
 --
 --   * 'FunctionSlotAbsent' — no function values inhabit this type.
@@ -208,7 +227,8 @@ emptyLayered =
       arrayLayer = ArraySlotAbsent,
       tupleLayer = Map.empty,
       dataLayer = Set.empty,
-      objectLayer = ObjectSlotAbsent
+      objectLayer = ObjectSlotAbsent,
+      recordLayer = RecordSlotAbsent
     }
 
 -- ---------------------------------------------------------------------------
@@ -243,7 +263,8 @@ denormaliseBranches LayeredType {..} =
       arrayBranches arrayLayer,
       tupleBranches tupleLayer,
       dataBranches dataLayer,
-      objectBranches objectLayer
+      objectBranches objectLayer,
+      recordBranches recordLayer
     ]
 
 numberBranches :: NumberSlot -> [SemanticType Resolved]
@@ -298,6 +319,12 @@ objectBranches = \case
   ObjectSlotAbsent -> []
   ObjectSlotOf fields -> [SemanticTypeObject (Map.map denormalise fields)]
 
+recordBranches :: RecordSlot -> [SemanticType Resolved]
+recordBranches = \case
+  RecordSlotAbsent -> []
+  RecordSlotOf keyType valueType ->
+    [SemanticTypeRecord (denormalise keyType) (denormalise valueType)]
+
 -- ---------------------------------------------------------------------------
 -- isNeverNT / isUnknownNT
 -- ---------------------------------------------------------------------------
@@ -326,6 +353,7 @@ isEmptyLayered LayeredType {..} =
     && Map.null tupleLayer
     && Set.null dataLayer
     && isEmptyObject objectLayer
+    && isEmptyRecord recordLayer
 
 isEmptyNumber :: NumberSlot -> Bool
 isEmptyNumber = \case
@@ -350,6 +378,11 @@ isEmptyFunction = \case
 isEmptyObject :: ObjectSlot -> Bool
 isEmptyObject = \case
   ObjectSlotAbsent -> True
+  _ -> False
+
+isEmptyRecord :: RecordSlot -> Bool
+isEmptyRecord = \case
+  RecordSlotAbsent -> True
   _ -> False
 
 -- ---------------------------------------------------------------------------
@@ -400,11 +433,11 @@ normaliseSemantic = \case
       emptyLayered
         { objectLayer = ObjectSlotOf (Map.map normaliseSemantic fields)
         }
-  -- TODO (Phase 2c): introduce a dedicated 'recordLayer' so subtyping
-  -- of @record[K, V]@ participates in the lattice. For now we collapse
-  -- to 'Unknown' so type-level integration compiles; this loses
-  -- soundness on record-specific subtype checks until Phase 2c lands.
-  SemanticTypeRecord _ _ -> NormalizedTypeUnknown
+  SemanticTypeRecord keyType valueType ->
+    NormalizedTypeLayered
+      emptyLayered
+        { recordLayer = RecordSlotOf (normaliseSemantic keyType) (normaliseSemantic valueType)
+        }
   SemanticTypeFunction parameterTypes returnType (SemanticRequest requests) ->
     let shape =
           FunctionShape
@@ -444,7 +477,8 @@ unionLayered leftLayered rightLayered =
       arrayLayer = unionArraySlot leftLayered.arrayLayer rightLayered.arrayLayer,
       tupleLayer = unionTupleLayer leftLayered.tupleLayer rightLayered.tupleLayer,
       dataLayer = Set.union leftLayered.dataLayer rightLayered.dataLayer,
-      objectLayer = unionObjectSlot leftLayered.objectLayer rightLayered.objectLayer
+      objectLayer = unionObjectSlot leftLayered.objectLayer rightLayered.objectLayer,
+      recordLayer = unionRecordSlot leftLayered.recordLayer rightLayered.recordLayer
     }
 
 unionNumberSlot :: NumberSlot -> NumberSlot -> NumberSlot
@@ -511,6 +545,22 @@ unionObjectSlot leftSlot rightSlot = case (leftSlot, rightSlot) of
     -- Width subtyping: union keeps only common fields with widened types.
     ObjectSlotOf (Map.intersectionWith unionNT leftFields rightFields)
 
+-- | Union of record slots. Keys are invariant in the lattice (the key
+-- set is dynamic, so we cannot soundly widen or narrow it), so we
+-- union the value types and union the key types — the result is the
+-- least @record[K1 ∪ K2, V1 ∪ V2]@ that contains values of both
+-- sides. (Two record values whose key types are disjoint cannot
+-- structurally collapse into a single record type, but the
+-- product-normalisation rule forces a single slot per layer; we accept
+-- that loss of precision for canonicality, matching how unions of
+-- objects fold into a single 'ObjectSlot'.)
+unionRecordSlot :: RecordSlot -> RecordSlot -> RecordSlot
+unionRecordSlot leftSlot rightSlot = case (leftSlot, rightSlot) of
+  (RecordSlotAbsent, other) -> other
+  (other, RecordSlotAbsent) -> other
+  (RecordSlotOf leftKey leftValue, RecordSlotOf rightKey rightValue) ->
+    RecordSlotOf (unionNT leftKey rightKey) (unionNT leftValue rightValue)
+
 -- ---------------------------------------------------------------------------
 -- Intersection (greatest lower bound)
 -- ---------------------------------------------------------------------------
@@ -535,7 +585,8 @@ intersectLayered leftLayered rightLayered =
       arrayLayer = intersectArraySlot leftLayered.arrayLayer rightLayered.arrayLayer,
       tupleLayer = intersectTupleLayer leftLayered.tupleLayer rightLayered.tupleLayer,
       dataLayer = Set.intersection leftLayered.dataLayer rightLayered.dataLayer,
-      objectLayer = intersectObjectSlot leftLayered.objectLayer rightLayered.objectLayer
+      objectLayer = intersectObjectSlot leftLayered.objectLayer rightLayered.objectLayer,
+      recordLayer = intersectRecordSlot leftLayered.recordLayer rightLayered.recordLayer
     }
 
 intersectNumberSlot :: NumberSlot -> NumberSlot -> NumberSlot
@@ -605,6 +656,19 @@ intersectObjectSlot leftSlot rightSlot = case (leftSlot, rightSlot) of
         rightOnlyFields = Map.difference rightFields leftFields
      in ObjectSlotOf (Map.unions [commonFields, leftOnlyFields, rightOnlyFields])
 
+-- | Intersection of record slots. Keys are invariant; values are
+-- covariant. The intersection is the largest record type contained in
+-- both sides: keys intersected, values intersected. If the resulting
+-- key type is empty (= 'Never') the record slot effectively contains
+-- only the empty dictionary; we keep it as 'RecordSlotOf Never V' for
+-- canonical comparison.
+intersectRecordSlot :: RecordSlot -> RecordSlot -> RecordSlot
+intersectRecordSlot leftSlot rightSlot = case (leftSlot, rightSlot) of
+  (RecordSlotAbsent, _) -> RecordSlotAbsent
+  (_, RecordSlotAbsent) -> RecordSlotAbsent
+  (RecordSlotOf leftKey leftValue, RecordSlotOf rightKey rightValue) ->
+    RecordSlotOf (intersectNT leftKey rightKey) (intersectNT leftValue rightValue)
+
 -- ---------------------------------------------------------------------------
 -- Subtype check
 -- ---------------------------------------------------------------------------
@@ -631,6 +695,7 @@ subtypeLayered leftLayered rightLayered =
     && subtypeTupleLayer leftLayered.tupleLayer rightLayered.tupleLayer
     && Set.isSubsetOf leftLayered.dataLayer rightLayered.dataLayer
     && subtypeObjectSlot leftLayered.objectLayer rightLayered.objectLayer
+    && subtypeRecordSlot leftLayered.recordLayer rightLayered.recordLayer
 
 subtypeNumberSlot :: NumberSlot -> NumberSlot -> Bool
 subtypeNumberSlot leftSlot rightSlot = case (leftSlot, rightSlot) of
@@ -717,3 +782,16 @@ subtypeObjectSlot leftSlot rightSlot = case (leftSlot, rightSlot) of
       case Map.lookup fieldName leftFields of
         Just leftFieldType -> subtypeNormalizedType leftFieldType rightFieldType
         Nothing -> False
+
+-- | @record[K1, V1] <: record[K2, V2]@ iff @K1@ and @K2@ are
+-- mutually-subtype (invariant on keys, since the key set is
+-- dynamic and we can neither widen nor narrow it soundly) and
+-- @V1 <: V2@ (covariant on values).
+subtypeRecordSlot :: RecordSlot -> RecordSlot -> Bool
+subtypeRecordSlot leftSlot rightSlot = case (leftSlot, rightSlot) of
+  (RecordSlotAbsent, _) -> True
+  (_, RecordSlotAbsent) -> False
+  (RecordSlotOf leftKey leftValue, RecordSlotOf rightKey rightValue) ->
+    subtypeNormalizedType leftKey rightKey
+      && subtypeNormalizedType rightKey leftKey
+      && subtypeNormalizedType leftValue rightValue
