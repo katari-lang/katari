@@ -12,7 +12,7 @@ import {
   RunStatusBadge,
   isTerminalState,
 } from "@/components/domain/RunStatusBadge";
-import { formatDateTime, relativeTime, shortId } from "@/lib/format";
+import { formatDateTime, relativeTime } from "@/lib/format";
 import type { ProjectId } from "@/api/types";
 
 const POLL_MS = 3_000;
@@ -32,6 +32,19 @@ export function RunsPage() {
       return anyLive ? POLL_MS : false;
     },
   });
+
+  // Snapshot summary lookup so the table can show the commit-message-like
+  // `message` instead of a shortened UUID. Cache is shared with the
+  // snapshot picker on /agents.
+  const snapshotsQ = useQuery({
+    queryKey: ["snapshots", projectId],
+    queryFn: () =>
+      client.listSnapshots(projectId as ProjectId, { limit: 200 }),
+    enabled: typeof projectId === "string",
+  });
+  const snapshotMessageById = new Map(
+    (snapshotsQ.data?.snapshots ?? []).map((s) => [s.id, s.message]),
+  );
 
   return (
     <div>
@@ -105,8 +118,14 @@ export function RunsPage() {
                       <TD className="font-mono text-xs text-muted-foreground">
                         {run.qualifiedName}
                       </TD>
-                      <TD className="font-mono text-xs text-muted-foreground">
-                        {shortId(run.snapshotId)}
+                      <TD className="text-xs text-muted-foreground">
+                        <Link
+                          to={`/project/${projectId}/agents?snapshot=${run.snapshotId}`}
+                          className="hover:underline hover:text-foreground"
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          {snapshotMessageById.get(run.snapshotId) ?? "—"}
+                        </Link>
                       </TD>
                       <TD
                         className="text-xs text-muted-foreground"

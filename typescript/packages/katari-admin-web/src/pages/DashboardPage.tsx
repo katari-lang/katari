@@ -106,7 +106,7 @@ export function DashboardPage() {
                       >
                         <RunStatusBadge state={r.state} />
                         <span className="flex-1 truncate font-mono text-xs text-foreground">
-                          {r.name ?? r.qualifiedName}
+                          {r.name}
                         </span>
                         <span className="text-xs text-subtle-foreground">
                           {relativeTime(r.createdAt)}
@@ -236,7 +236,7 @@ export function DashboardPage() {
                       >
                         <RunStatusBadge state={r.state} />
                         <span className="flex-1 truncate font-mono text-foreground">
-                          {r.name ?? r.qualifiedName}
+                          {r.name}
                         </span>
                         <span className="text-xs text-subtle-foreground">
                           {relativeTime(r.updatedAt)}

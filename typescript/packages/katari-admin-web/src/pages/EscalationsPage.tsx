@@ -10,7 +10,7 @@ import { EmptyState } from "@/components/ui/EmptyState";
 import { Table, TBody, TD, TH, THead, TR } from "@/components/ui/Table";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
-import { relativeTime, formatDateTime, shortId } from "@/lib/format";
+import { relativeTime, formatDateTime } from "@/lib/format";
 import type { EscalationState, ProjectId } from "@/api/types";
 
 const POLL_MS = 3_000;
@@ -47,6 +47,19 @@ export function EscalationsPage() {
     enabled: typeof projectId === "string",
     refetchInterval: stateFilter === "open" ? POLL_MS : false,
   });
+
+  // Run name lookup so the table can show the run a question was raised
+  // from by name rather than a delegation UUID. Cache is shared with
+  // RunsPage so visiting that page beforehand makes this free.
+  const runsQ = useQuery({
+    queryKey: ["runs", projectId],
+    queryFn: () =>
+      client.listRuns({ projectId: projectId as ProjectId, limit: 200 }),
+    enabled: typeof projectId === "string",
+  });
+  const runNameById = new Map(
+    (runsQ.data?.runs ?? []).map((r) => [r.id, r.name]),
+  );
 
   return (
     <div>
@@ -104,7 +117,7 @@ export function EscalationsPage() {
                   <TR>
                     <TH>State</TH>
                     <TH>Request</TH>
-                    <TH>Agent</TH>
+                    <TH>Run</TH>
                     <TH>Created</TH>
                   </TR>
                 </THead>
@@ -123,19 +136,20 @@ export function EscalationsPage() {
                       <TD>
                         <Link
                           to={`/project/${projectId}/escalations/${esc.id}`}
-                          className="block hover:underline"
+                          className="block font-medium text-foreground hover:underline"
                           onClick={(e) => e.stopPropagation()}
                         >
-                          <div className="font-medium text-foreground">
-                            {esc.agentDefId}
-                          </div>
-                          <div className="mt-0.5 font-mono text-xs text-subtle-foreground">
-                            {shortId(esc.id)}
-                          </div>
+                          {esc.agentDefId}
                         </Link>
                       </TD>
-                      <TD className="font-mono text-xs text-muted-foreground">
-                        {shortId(esc.delegationId)}
+                      <TD className="text-xs text-muted-foreground">
+                        <Link
+                          to={`/project/${projectId}/runs/${esc.rootDelegationId}`}
+                          className="hover:underline hover:text-foreground"
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          {runNameById.get(esc.rootDelegationId) ?? "—"}
+                        </Link>
                       </TD>
                       <TD
                         className="text-xs text-muted-foreground"
