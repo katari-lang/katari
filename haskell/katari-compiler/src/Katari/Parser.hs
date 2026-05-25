@@ -386,7 +386,7 @@ parseSkipUntilDeclarationSync = do
       KatariTokenKeyword KeywordImport -> True
       KatariTokenKeyword KeywordType -> True
       KatariTokenKeyword KeywordAgent -> True
-      KatariTokenKeyword KeywordReq -> True
+      KatariTokenKeyword KeywordRequest -> True
       KatariTokenKeyword KeywordExt -> True
       KatariTokenKeyword KeywordData -> True
       KatariTokenPunctuation PunctuationAt -> True
@@ -539,7 +539,7 @@ parseAgentDeclaration annotation = parseWithSpan $ do
 
 parseRequestDeclaration :: Maybe Text -> Parser (RequestDeclaration Parsed)
 parseRequestDeclaration annotation = parseWithSpan $ do
-  parseKeyword KeywordReq
+  parseKeyword KeywordRequest
   name <- parseNameRef
   parameters <- parseParameterList
   parsePunctuation PunctuationArrow
@@ -923,7 +923,7 @@ parseStateVariable = parseWithSpan $ do
 -- here.
 parseRequestHandler :: Parser (RequestHandler Parsed)
 parseRequestHandler = parseWithSpan $ do
-  parseKeyword KeywordReq
+  parseKeyword KeywordRequest
   -- Either @req name(...)@ or @req module.name(...)@: if a @.@ follows the
   -- first identifier, treat it as a qualified handler; otherwise bare.
   -- The handler's @name@ field is a RequestRef' (resolution will require it

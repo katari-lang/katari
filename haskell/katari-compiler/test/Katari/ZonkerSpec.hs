@@ -68,7 +68,7 @@ pipeline src =
 
 -- | Build a 'SolverResult' that satisfies the Solver totality contract for the
 -- given 'ConstraintGenResult'. Every TypeVariableId / RequestVariableId allocated by
--- constraint generation receives a default (NormalizedTypeUnknown / empty req-set) entry,
+-- constraint generation receives a default (NormalizedTypeUnknown / empty request-set) entry,
 -- which can be overridden by the user-supplied lists.
 mkTotalSolverResult ::
   ConstraintGenResult ->
@@ -344,7 +344,7 @@ requestSubstitutionSpec = describe "request substitution" $ do
     -- 「fetch を request として持つ関数」を表す NormalizedType を当てる。
     -- 結果として zonkedTypeEnvironment[app] が SemanticTypeFunction で、
     -- requestVars = empty、requestReqs ⊇ {fetch} になることを確認。
-    let src = "req fetch() -> string\nagent app() { 0 }"
+    let src = "request fetch() -> string\nagent app() { 0 }"
     (idResult, cg) <- pipeline src
     let Just fetchVid = variableIdOf "fetch" idResult
         Just appVid = variableIdOf "app" idResult
@@ -404,10 +404,10 @@ contractInvariant = describe "Solver totality invariant" $ do
     (_zr, zonkErrs) <-
       runZonkTotal $
         mconcat
-          [ "req ping() -> integer\n",
+          [ "request ping() -> integer\n",
             "agent app() {\n",
             "  handle {\n",
-            "    req ping() { 1 }\n",
+            "    request ping() { 1 }\n",
             "  }\n",
             "  ping()\n",
             "}"

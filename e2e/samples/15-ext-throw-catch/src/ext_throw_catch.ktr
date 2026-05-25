@@ -4,7 +4,7 @@ ext agent boomExt() -> null from "FFI:ext_throw_catch.boomExt"
 @"Catches the throw bubbled from the failing ext agent."
 agent main() -> string {
   handle {
-    req throw(msg: string) {
+    request throw(msg: string) {
       break f"ext threw: ${msg}"
     }
   }

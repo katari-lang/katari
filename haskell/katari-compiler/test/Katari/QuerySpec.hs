@@ -141,12 +141,12 @@ spec = describe "Katari.Query.lookupAtPosition (hover)" $ do
         expectationFailure $
           "expected integer for nested-tuple-bound `x`, got: " <> show other
 
-  it "handle: hover on the req name shows the request's signature + qname" $ do
+  it "handle: hover on the request name shows the request's signature + qname" $ do
     let src =
           Text.unlines
             [ "agent main() -> string {",
               "  handle {",
-              "    req throw(msg = msg: string) {",
+              "    request throw(msg = msg: string) {",
               "      break \"caught\"",
               "    }",
               "  }",
@@ -155,9 +155,9 @@ spec = describe "Katari.Query.lookupAtPosition (hover)" $ do
               "}"
             ]
     let r = prepare src
-    -- "    req throw(msg = msg: string) {" — `throw` starts at col 9 on
-    -- line 3.
-    let info = lookupAtPosition r.identifierResult r.zonkResult "<test>" Position {line = 3, column = 10}
+    -- "    request throw(msg = msg: string) {" — `throw` starts at col 13 on
+    -- line 3 (4-space indent + "request " (8 chars)).
+    let info = lookupAtPosition r.identifierResult r.zonkResult "<test>" Position {line = 3, column = 14}
     case info of
       Nothing -> expectationFailure "expected hover on `throw`"
       Just h -> do

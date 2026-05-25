@@ -638,30 +638,30 @@ fieldAccessResolution = describe "field access" $ do
 
 qualifiedRequestHandler :: Spec
 qualifiedRequestHandler = describe "request handlers" $ do
-  it "bare req handler resolves to existing req" $ do
+  it "bare request handler resolves to existing request" $ do
     _ <-
       shouldIdentify $
         mconcat
-          [ "req get() -> integer\n",
+          [ "request get() -> integer\n",
             "agent main() {\n",
             "  handle {\n",
-            "    req get() { break 0; }\n",
+            "    request get() { break 0; }\n",
             "  }\n",
             "  0\n",
             "}"
           ]
     pure ()
 
-  it "qualified req handler refers to other module's req" $ do
+  it "qualified request handler refers to other module's request" $ do
     res <-
       identifyMany
-        [ ("io", "req read() -> integer"),
+        [ ("io", "request read() -> integer"),
           ( "main",
             mconcat
               [ "import io\n",
                 "agent main() {\n",
                 "  handle {\n",
-                "    req io.read() { break 0; }\n",
+                "    request io.read() { break 0; }\n",
                 "  }\n",
                 "  0\n",
                 "}"
@@ -670,16 +670,16 @@ qualifiedRequestHandler = describe "request handlers" $ do
         ]
     res `shouldSatisfy` isRight
 
-  it "qualified req handler with unknown name fails" $ do
+  it "qualified request handler with unknown name fails" $ do
     res <-
       identifyMany
-        [ ("io", "req read() -> integer"),
+        [ ("io", "request read() -> integer"),
           ( "main",
             mconcat
               [ "import io\n",
                 "agent main() {\n",
                 "  handle {\n",
-                "    req io.absent() { break 0; }\n",
+                "    request io.absent() { break 0; }\n",
                 "  }\n",
                 "  0\n",
                 "}"
@@ -688,33 +688,33 @@ qualifiedRequestHandler = describe "request handlers" $ do
         ]
     res `shouldSatisfy` hasError isUndefQual
 
-  it "bare req handler with unknown name fails" $ do
+  it "bare request handler with unknown name fails" $ do
     shouldFailIdentifyWith isUndefName $
       mconcat
         [ "agent main() {\n",
           "  handle {\n",
-          "    req nonexistent() { break 0; }\n",
+          "    request nonexistent() { break 0; }\n",
           "  }\n",
           "  0\n",
           "}"
         ]
 
-  it "req handler whose target is an agent (not a req) fails with K0108" $ do
+  it "request handler whose target is an agent (not a request) fails with K0108" $ do
     shouldFailIdentifyWith isNotARequest $
       mconcat
         [ "agent helper() -> integer { 0 }\n",
           "agent main() {\n",
           "  handle {\n",
-          "    req helper() { break 0; }\n",
+          "    request helper() { break 0; }\n",
           "  }\n",
           "  0\n",
           "}"
         ]
 
-  it "match pattern using a req as constructor fails with K0109" $ do
+  it "match pattern using a request as constructor fails with K0109" $ do
     shouldFailIdentifyWith isNotAConstructor $
       mconcat
-        [ "req fetch() -> integer\n",
+        [ "request fetch() -> integer\n",
           "agent main() {\n",
           "  match (0) {\n",
           "    case fetch() => { 1 }\n",
@@ -742,10 +742,10 @@ scopeIsolation = describe "scope isolation" $ do
   it "handle state vars not visible in body" $ do
     shouldFailIdentifyWith isUndefName $
       mconcat
-        [ "req get() -> integer\n",
+        [ "request get() -> integer\n",
           "agent main() {\n",
           "  handle (var count = 0) {\n",
-          "    req get() { break 0; }\n",
+          "    request get() { break 0; }\n",
           "  }\n",
           "  count\n",
           "}"
@@ -754,10 +754,10 @@ scopeIsolation = describe "scope isolation" $ do
   it "body let not visible in handle state var initializer" $ do
     shouldFailIdentifyWith isUndefName $
       mconcat
-        [ "req get() -> integer\n",
+        [ "request get() -> integer\n",
           "agent main() {\n",
           "  handle (var y = x) {\n",
-          "    req get() { break 0; }\n",
+          "    request get() { break 0; }\n",
           "  }\n",
           "  let x = 0;\n",
           "  x\n",
@@ -768,10 +768,10 @@ scopeIsolation = describe "scope isolation" $ do
     res <-
       identifyOne $
         mconcat
-          [ "req inc() -> integer\n",
+          [ "request inc() -> integer\n",
             "agent main() {\n",
             "  handle (var a = 1, var b = a) {\n",
-            "    req inc() { break 0; }\n",
+            "    request inc() { break 0; }\n",
             "  }\n",
             "  0\n",
             "}"
@@ -781,10 +781,10 @@ scopeIsolation = describe "scope isolation" $ do
   it "earlier state var does NOT see later" $ do
     shouldFailIdentifyWith isUndefName $
       mconcat
-        [ "req inc() -> integer\n",
+        [ "request inc() -> integer\n",
           "agent main() {\n",
           "  handle (var a = b, var b = 1) {\n",
-          "    req inc() { break 0; }\n",
+          "    request inc() { break 0; }\n",
           "  }\n",
           "  0\n",
           "}"

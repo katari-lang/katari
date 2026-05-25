@@ -1,7 +1,7 @@
 @"Catches an explicit throw inside a handle scope."
 agent main() -> string {
   handle {
-    req throw(msg: string) {
+    request throw(msg: string) {
       break f"caught: ${msg}"
     }
   }

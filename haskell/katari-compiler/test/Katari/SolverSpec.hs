@@ -259,14 +259,14 @@ whereHandlerBlocks = describe "handle blocks and request handlers" $ do
           ]
     solverErrors `shouldBe` []
 
-  it "handle with request handler: req is discharged, agent has empty request" $ do
+  it "handle with request handler: request is discharged, agent has empty request" $ do
     (_, _, solverResult, solverErrors) <-
       runSolve $
         mconcat
-          [ "req fetch() -> integer\n",
+          [ "request fetch() -> integer\n",
             "agent app() {\n",
             "  handle {\n",
-            "    req fetch() { break 42; }\n",
+            "    request fetch() { break 42; }\n",
             "  }\n",
             "  fetch()\n",
             "}"
@@ -277,10 +277,10 @@ whereHandlerBlocks = describe "handle blocks and request handlers" $ do
     (_, _, solverResult, solverErrors) <-
       runSolve $
         mconcat
-          [ "req inc() -> integer\n",
+          [ "request inc() -> integer\n",
             "agent counter() -> integer {\n",
             "  handle (var n: integer = 0) {\n",
-            "    req inc() {\n",
+            "    request inc() {\n",
             "      next n with { n = n + 1 }\n",
             "    }\n",
             "  }\n",
@@ -292,15 +292,15 @@ whereHandlerBlocks = describe "handle blocks and request handlers" $ do
     solverErrors `shouldBe` []
 
   it "explicit next with wrong type → records solver error" $ do
-    -- The declared @-> integer@ on req constrains explicit @next@. Use
+    -- The declared @-> integer@ on request constrains explicit @next@. Use
     -- @next \"bad\"@ to surface the type mismatch.
     (_, _, solverResult, solverErrors) <-
       runSolve $
         mconcat
-          [ "req fetch() -> integer\n",
+          [ "request fetch() -> integer\n",
             "agent app() -> integer {\n",
             "  handle {\n",
-            "    req fetch() {\n",
+            "    request fetch() {\n",
             "      next \"bad\"\n",
             "    }\n",
             "  }\n",
@@ -316,10 +316,10 @@ whereHandlerBlocks = describe "handle blocks and request handlers" $ do
     (_, _, solverResult, solverErrors) <-
       runSolve $
         mconcat
-          [ "req fetch() -> integer\n",
+          [ "request fetch() -> integer\n",
             "agent app() {\n",
             "  handle {\n",
-            "    req fetch() { 42 }\n",
+            "    request fetch() { 42 }\n",
             "  }\n",
             "  fetch()\n",
             "}"
@@ -332,10 +332,10 @@ whereHandlerBlocks = describe "handle blocks and request handlers" $ do
     (_, _, solverResult, solverErrors) <-
       runSolve $
         mconcat
-          [ "req fetch() -> integer\n",
+          [ "request fetch() -> integer\n",
             "agent app() {\n",
             "  handle {\n",
-            "    req fetch() { break 42; }\n",
+            "    request fetch() { break 42; }\n",
             "  }\n",
             "  fetch()\n",
             "}"
@@ -357,10 +357,10 @@ whereHandlerBlocks = describe "handle blocks and request handlers" $ do
     (_, _, solverResult, solverErrors) <-
       runSolve $
         mconcat
-          [ "req inc() -> integer\n",
+          [ "request inc() -> integer\n",
             "agent counter() -> integer {\n",
             "  handle (var n: integer = 0) {\n",
-            "    req inc() {\n",
+            "    request inc() {\n",
             "      next n with { n = n + 1 }\n",
             "    }\n",
             "  } then(_) { n }\n",
@@ -372,17 +372,17 @@ whereHandlerBlocks = describe "handle blocks and request handlers" $ do
     solverErrors `shouldBe` []
 
   it "explicit break in handler routes value to whole-block (not declared next type)" $ do
-    -- @req fetch() -> integer@: declared return only constrains @next@.
+    -- @request fetch() -> integer@: declared return only constrains @next@.
     -- An explicit @break "ok"@ flows to the handle-block whole type —
     -- independent of the declared @integer@ next return. Without a
     -- stricter agent annotation, no contradiction arises.
     (_, _, solverResult, solverErrors) <-
       runSolve $
         mconcat
-          [ "req fetch() -> integer\n",
+          [ "request fetch() -> integer\n",
             "agent app() {\n",
             "  handle {\n",
-            "    req fetch() { break \"ok\"; }\n",
+            "    request fetch() { break \"ok\"; }\n",
             "  }\n",
             "  fetch()\n",
             "}"
@@ -395,10 +395,10 @@ whereHandlerBlocks = describe "handle blocks and request handlers" $ do
     (_, _, solverResult, solverErrors) <-
       runSolve $
         mconcat
-          [ "req dummy() -> integer\n",
+          [ "request dummy() -> integer\n",
             "agent foo() -> integer {\n",
             "  handle {\n",
-            "    req dummy() -> integer { break 5; }\n",
+            "    request dummy() -> integer { break 5; }\n",
             "  } then(p) { p + 1 }\n",
             "  dummy()\n",
             "}"

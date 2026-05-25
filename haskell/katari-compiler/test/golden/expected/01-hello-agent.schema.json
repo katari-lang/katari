@@ -657,7 +657,7 @@
     "requests": []
   },
   {
-    "description": "Raise a recoverable runtime error. Bubbles through enclosing handle scopes until a `req throw` handler catches it; if nothing catches it the snapshot transitions to the `error` state.",
+    "description": "Raise a recoverable runtime error. Bubbles through enclosing handle scopes until a `request throw` handler catches it; if nothing catches it the snapshot transitions to the `error` state.",
     "input": {
       "additionalProperties": false,
       "properties": {

@@ -91,10 +91,10 @@ agent paint(color: "red" | "green" | "blue") -> string {
   f"painted ${color}"
 }
 
-// === Escalation: regular req ===
+// === Escalation: regular request ===
 
 @"Operator-answerable prompt."
-req ask(@"Question the operator should answer. Free-form text." prompt: string) -> string
+request ask(@"Question the operator should answer. Free-form text." prompt: string) -> string
 
 @"Calls ask() with no surrounding handler - surfaces as an open escalation in admin."
 agent ask_name() -> string with ask {
@@ -102,8 +102,8 @@ agent ask_name() -> string with ask {
   f"hello, ${name}"
 }
 
-@"Boolean-returning req - escalation answer form renders a BooleanField toggle."
-req confirm(@"Yes/no question to display in the escalation UI." prompt: string) -> boolean
+@"Boolean-returning request - escalation answer form renders a BooleanField toggle."
+request confirm(@"Yes/no question to display in the escalation UI." prompt: string) -> boolean
 
 @"Drives one confirm() call."
 agent check_proceed() -> string with confirm {
@@ -113,12 +113,12 @@ agent check_proceed() -> string with confirm {
   }
 }
 
-// === Escalation: never req (tests the never UX) ===
+// === Escalation: never request (tests the never UX) ===
 
-@"A req declared with never. Cannot be answered with a value."
-req fatal(reason: string) -> never
+@"A request declared with never. Cannot be answered with a value."
+request fatal(reason: string) -> never
 
-@"Raises a never-returning req - escalation page shows the never UX."
+@"Raises a never-returning request - escalation page shows the never UX."
 agent trigger_never() -> string with fatal {
   fatal(reason = "this demo can never receive a meaningful answer")
   "unreachable"

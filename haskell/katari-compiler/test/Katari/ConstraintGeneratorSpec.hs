@@ -227,7 +227,7 @@ variablePatterns = describe "variable patterns" $ do
     countTypeConstraints cg1 `shouldSatisfy` (>= countTypeConstraints cg2 + 2)
 
 -- ---------------------------------------------------------------------------
--- Declarations: data ctor, req, ext-agent
+-- Declarations: data ctor, request, ext-agent
 -- ---------------------------------------------------------------------------
 
 declarations :: Spec
@@ -239,12 +239,12 @@ declarations = describe "declarations" $ do
     -- some constraints emitted.
     countTypeConstraints cg `shouldSatisfy` (> 0)
 
-  it "req declaration emits eq constraint" $ do
-    (cg, errors) <- runOne "req foo(x: integer) -> string"
+  it "request declaration emits eq constraint" $ do
+    (cg, errors) <- runOne "request foo(x: integer) -> string"
     errors `shouldBe` []
     countTypeConstraints cg `shouldSatisfy` (>= 2) -- eq = 2 subtype
   it "ext-agent emits eq constraint (requests from with clause)" $ do
-    (cg, errors) <- runOne "req bar(x: integer) -> string\n@\"svc\"\next agent foo() -> integer with bar from \"FFI:lib.foo\""
+    (cg, errors) <- runOne "request bar(x: integer) -> string\n@\"svc\"\next agent foo() -> integer with bar from \"FFI:lib.foo\""
     errors `shouldBe` []
     countTypeConstraints cg `shouldSatisfy` (>= 2)
 
@@ -346,10 +346,10 @@ whereBlocks = describe "handle blocks" $ do
     (cg, errors) <-
       runOne $
         mconcat
-          [ "req fetch() -> string\n",
+          [ "request fetch() -> string\n",
             "agent main() -> string {\n",
             "  handle {\n",
-            "    req fetch() -> string { \"ok\" }\n",
+            "    request fetch() -> string { \"ok\" }\n",
             "  }\n",
             "  fetch()\n",
             "}"
@@ -358,13 +358,13 @@ whereBlocks = describe "handle blocks" $ do
     -- Request constraints include the discharge: inner_eff <: outer ∪ {fetch}
     countRequestConstraints cg `shouldSatisfy` (> 0)
 
-  it "req handler with request annotation is rejected by parser" $ do
+  it "request handler with request annotation is rejected by parser" $ do
     let (stream, _) = Lexer.lex "<test>" $
           mconcat
-            [ "req fetch() -> string\n",
+            [ "request fetch() -> string\n",
               "agent main() -> string {\n",
               "  handle {\n",
-              "    req fetch() -> string with bar { \"ok\" }\n",
+              "    request fetch() -> string with bar { \"ok\" }\n",
               "  }\n",
               "  fetch()\n",
               "}"
@@ -378,10 +378,10 @@ whereBlocks = describe "handle blocks" $ do
     (cg, errors) <-
       runOne $
         mconcat
-          [ "req fetch() -> string\n",
+          [ "request fetch() -> string\n",
             "agent main() -> string {\n",
             "  handle {\n",
-            "    req fetch() -> string {\n",
+            "    request fetch() -> string {\n",
             "      break \"boom\"\n",
             "    }\n",
             "  }\n",
@@ -403,10 +403,10 @@ whereBlocks = describe "handle blocks" $ do
     (cg, errors) <-
       runOne $
         mconcat
-          [ "req fetch() -> string\n",
+          [ "request fetch() -> string\n",
             "agent main() -> string {\n",
             "  handle {\n",
-            "    req fetch() -> string {\n",
+            "    request fetch() -> string {\n",
             "      next \"resumed\"\n",
             "    }\n",
             "  }\n",
@@ -428,10 +428,10 @@ whereBlocks = describe "handle blocks" $ do
     (cg, errors) <-
       runOne $
         mconcat
-          [ "req fetch() -> string\n",
+          [ "request fetch() -> string\n",
             "agent main() -> string {\n",
             "  handle {\n",
-            "    req fetch() -> string {\n",
+            "    request fetch() -> string {\n",
             "      next \"x\"\n",
             "    }\n",
             "  }\n",
@@ -455,10 +455,10 @@ whereBlocks = describe "handle blocks" $ do
     (_cg, errors) <-
       runOne $
         mconcat
-          [ "req fetch() -> string\n",
+          [ "request fetch() -> string\n",
             "agent main() -> string {\n",
             "  handle {\n",
-            "    req fetch() -> string { break \"explicit\"; }\n",
+            "    request fetch() -> string { break \"explicit\"; }\n",
             "  }\n",
             "  fetch()\n",
             "}\n"
@@ -473,10 +473,10 @@ whereBlocks = describe "handle blocks" $ do
     (cg, errors) <-
       runOne $
         mconcat
-          [ "req fetch() -> string\n",
+          [ "request fetch() -> string\n",
             "agent main() -> string {\n",
             "  handle {\n",
-            "    req fetch() -> string {\n",
+            "    request fetch() -> string {\n",
             "      next \"x\"\n",
             "    }\n",
             "  }\n",
@@ -497,7 +497,7 @@ whereBlocks = describe "handle blocks" $ do
     -- A plain block (no where) should not introduce extra request
     -- constraints of its own. The only request constraint the agent should
     -- produce is bodyEff <: declared, with both sides request-vars only
-    -- (no req-id sets) since neither has a 'with' clause.
+    -- (no request-id sets) since neither has a 'with' clause.
     (cg, errors) <- runOne "agent main() -> string { \"hi\" }\n"
     errors `shouldBe` []
     let effs = requestConstraints cg
@@ -526,10 +526,10 @@ exitStatementBlocks = describe "exit-statement blocks" $ do
     (cg, errors) <-
       runOne $
         mconcat
-          [ "req fetch() -> string\n",
+          [ "request fetch() -> string\n",
             "agent main() -> string {\n",
             "  handle {\n",
-            "    req fetch() -> string {\n",
+            "    request fetch() -> string {\n",
             "      next \"x\"\n",
             "    }\n",
             "  }\n",
@@ -650,8 +650,8 @@ constraintContents = describe "constraint contents" $ do
                   _ -> False
             )
 
-  it "req declaration produces signature with self-request" $ do
-    (cg, _, ir) <- runOneWithIdentifier "req fetch() -> string"
+  it "request declaration produces signature with self-request" $ do
+    (cg, _, ir) <- runOneWithIdentifier "request fetch() -> string"
     case (variableIdOf "fetch" ir, typeVarOf "fetch" cg ir) of
       (Just fetchVid, Just tFetch) ->
         let fetchReqId = requestIdOfVariable fetchVid ir
@@ -699,10 +699,10 @@ constraintContents = describe "constraint contents" $ do
     (cg, _, ir) <-
       runOneWithIdentifier $
         mconcat
-          [ "req fetch() -> string\n",
+          [ "request fetch() -> string\n",
             "agent main() -> string {\n",
             "  handle {\n",
-            "    req fetch() -> string { \"ok\" }\n",
+            "    request fetch() -> string { \"ok\" }\n",
             "  }\n",
             "  fetch()\n",
             "}"

@@ -28,7 +28,7 @@ for the `playground` project.
 | `build_ok` returns | Single tagged-data return (= `$constructor` rendered cleanly on Returns card) |
 | `describe_result` | Tagged-union ARGUMENT — admin dropdown of `playground.ok` / `playground.err` |
 | `paint` | String-literal union → EnumField (= dropdown of `"red" / "green" / "blue"`) |
-| `ask_name` | Escalation flow → answer form is a StringField (= the req's `string` return) |
+| `ask_name` | Escalation flow → answer form is a StringField (= the request's `string` return) |
 | `check_proceed` | Escalation flow → answer form is a BooleanField |
 | `trigger_never` | Escalation flow → never UX (= "Cancel this run") |
 | `demo_sequential_sleeps` | Tree view → sequential ext sleep nodes appearing one at a time |

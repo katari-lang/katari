@@ -1,7 +1,7 @@
 @"Catches a prim runtime error (division by zero) that the engine emits as a throw."
 agent main() -> string {
   handle {
-    req throw(msg: string) {
+    request throw(msg: string) {
       break f"engine threw: ${msg}"
     }
   }

@@ -207,7 +207,7 @@ spec = describe "Katari.Query.Completion" $ do
       prepare $
         Text.unlines
           [ "@\"Cron tick.\"",
-            "req scheduled() -> null",
+            "request scheduled() -> null",
             "@\"Schedule a callback.\"",
             "ext agent cron_impl(callback: () -> null with scheduled) -> null from \"FFI:lib.cron_impl\"",
             "agent main() -> integer { 0 }"

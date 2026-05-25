@@ -142,7 +142,7 @@ data Keyword where
   KeywordReturn :: Keyword
   KeywordNext :: Keyword
   KeywordBreak :: Keyword
-  KeywordReq :: Keyword
+  KeywordRequest :: Keyword
   KeywordImport :: Keyword
   KeywordAs :: Keyword
   KeywordWith :: Keyword
@@ -579,7 +579,7 @@ lexKeywordText = \case
   KeywordReturn -> "return"
   KeywordNext -> "next"
   KeywordBreak -> "break"
-  KeywordReq -> "req"
+  KeywordRequest -> "request"
   KeywordImport -> "import"
   KeywordAs -> "as"
   KeywordWith -> "with"

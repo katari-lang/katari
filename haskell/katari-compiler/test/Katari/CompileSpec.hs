@@ -285,7 +285,7 @@ externalAgentSpec = describe "external agent annotation validation" $ do
     let result =
           compile
             ( singleSourceInput
-                "req http_req()\next agent fetch(url: string) -> string with http_req from \"FFI:lib.fetch\""
+                "request http_req()\next agent fetch(url: string) -> string with http_req from \"FFI:lib.fetch\""
             )
         codes = map (.code) result.diagnostics
     codes `shouldContain` ["K0150"]
@@ -294,7 +294,7 @@ externalAgentSpec = describe "external agent annotation validation" $ do
     let result =
           compile
             ( singleSourceInput
-                "req http_req()\n@\"\"\next agent fetch(url: string) -> string with http_req from \"FFI:lib.fetch\""
+                "request http_req()\n@\"\"\next agent fetch(url: string) -> string with http_req from \"FFI:lib.fetch\""
             )
         codes = map (.code) result.diagnostics
     codes `shouldContain` ["K0151"]
@@ -303,7 +303,7 @@ externalAgentSpec = describe "external agent annotation validation" $ do
     let result =
           compile
             ( singleSourceInput
-                "req http_req()\n@\"https://api.example.com\"\next agent fetch(url: string) -> string with http_req from \"FFI:lib.fetch\"\nagent main() -> string { \"ok\" }"
+                "request http_req()\n@\"https://api.example.com\"\next agent fetch(url: string) -> string with http_req from \"FFI:lib.fetch\"\nagent main() -> string { \"ok\" }"
             )
         codes = map (.code) result.diagnostics
     filter (\c -> c == "K0150" || c == "K0151") codes `shouldBe` []

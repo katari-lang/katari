@@ -1,10 +1,10 @@
 @"Reads the answer from a request handler."
-req fetch_answer() -> integer
+request fetch_answer() -> integer
 
 @"Computes the answer using a handler."
 agent main() -> integer {
   handle {
-    req fetch_answer() { 42 }
+    request fetch_answer() { 42 }
   }
   fetch_answer()
 }

@@ -625,14 +625,14 @@ nextAndBreak = describe "next and break" $ do
     _ <- shouldSucceed "agent main() { for (x in xs) { break 0; } }"
     pure ()
 
-  -- HandleCtx (inside req handler body)
+  -- HandleCtx (inside request handler body)
   it "parses next with value (handle context)" $ do
     _ <-
       shouldSucceed $
         mconcat
           [ "agent main() {\n",
             "  handle {\n",
-            "    req get() { next 42; }\n",
+            "    request get() { next 42; }\n",
             "  }\n",
             "  result\n",
             "}"
@@ -645,7 +645,7 @@ nextAndBreak = describe "next and break" $ do
         mconcat
           [ "agent main() {\n",
             "  handle {\n",
-            "    req get() { next 42 with { count = count + 1 }; }\n",
+            "    request get() { next 42 with { count = count + 1 }; }\n",
             "  }\n",
             "  result\n",
             "}"
@@ -658,7 +658,7 @@ nextAndBreak = describe "next and break" $ do
         mconcat
           [ "agent main() {\n",
             "  handle {\n",
-            "    req get() { break 0; }\n",
+            "    request get() { break 0; }\n",
             "  }\n",
             "  result\n",
             "}"
@@ -685,7 +685,7 @@ nextAndBreak = describe "next and break" $ do
   it "rejects next-with-value inside for (ForCtx)" $ do
     shouldFail "agent main() { for (x in xs) { next 42; } }"
 
-  it "accepts bare next inside req handler (defaults to next null)" $ do
+  it "accepts bare next inside request handler (defaults to next null)" $ do
     -- Bare `next` is shorthand for `next null` (the requestor is resumed
     -- with null). Same convention as bare `break` / bare `return`.
     _ <-
@@ -693,20 +693,20 @@ nextAndBreak = describe "next and break" $ do
         mconcat
           [ "agent main() {\n",
             "  handle {\n",
-            "    req get() { next; }\n",
+            "    request get() { next; }\n",
             "  }\n",
             "  result\n",
             "}"
           ]
     pure ()
 
-  it "accepts bare break inside req handler (defaults to break null)" $ do
+  it "accepts bare break inside request handler (defaults to break null)" $ do
     _ <-
       shouldSucceed $
         mconcat
           [ "agent main() {\n",
             "  handle {\n",
-            "    req get() { break; }\n",
+            "    request get() { break; }\n",
             "  }\n",
             "  result\n",
             "}"
@@ -746,13 +746,13 @@ nextAndBreak = describe "next and break" $ do
           _ -> expectationFailure "expected for expr"
       _ -> expectationFailure "expected agent"
 
-  it "next-with-value in req handler is StatementNext" $ do
+  it "next-with-value in request handler is StatementNext" $ do
     m <-
       shouldSucceed $
         mconcat
           [ "agent main() {\n",
             "  handle {\n",
-            "    req get() { next 42; }\n",
+            "    request get() { next 42; }\n",
             "  }\n",
             "  result\n",
             "}"
@@ -770,13 +770,13 @@ nextAndBreak = describe "next and break" $ do
           _ -> expectationFailure "expected handle expression"
       _ -> expectationFailure "expected agent"
 
-  it "break in req handler is StatementBreak" $ do
+  it "break in request handler is StatementBreak" $ do
     m <-
       shouldSucceed $
         mconcat
           [ "agent main() {\n",
             "  handle {\n",
-            "    req get() { break 0; }\n",
+            "    request get() { break 0; }\n",
             "  }\n",
             "  result\n",
             "}"
@@ -852,12 +852,12 @@ declarations = describe "declarations" $ do
     _ <- shouldSucceed "agent foo(@\"input\" input = x: integer) -> integer { x }"
     pure ()
 
-  it "parses req declaration" $ do
-    _ <- shouldSucceed "req get(prompt: string) -> string"
+  it "parses request declaration" $ do
+    _ <- shouldSucceed "request get(prompt: string) -> string"
     pure ()
 
-  it "parses req param with annotation" $ do
-    _ <- shouldSucceed "req get(@\"prompt\" prompt: string) -> string"
+  it "parses request param with annotation" $ do
+    _ <- shouldSucceed "request get(@\"prompt\" prompt: string) -> string"
     pure ()
 
   it "parses ext agent" $ do
@@ -999,8 +999,8 @@ declarations = describe "declarations" $ do
         isJust a.body.returnExpression `shouldBe` True
       _ -> expectationFailure "expected agent"
 
-  it "rejects missing -> in req declaration" $ do
-    shouldFail "req foo(x: integer) integer"
+  it "rejects missing -> in request declaration" $ do
+    shouldFail "request foo(x: integer) integer"
 
   it "rejects agent without body" $ do
     shouldFail "agent foo()"
@@ -1025,7 +1025,7 @@ declarations = describe "declarations" $ do
     m <-
       shouldSucceed $
         mconcat
-          [ "req greet(name: string) -> string\n",
+          [ "request greet(name: string) -> string\n",
             "agent foo() { 1 }\n",
             "agent bar() { 2 }"
           ]
@@ -1035,7 +1035,7 @@ declarations = describe "declarations" $ do
     m <-
       shouldSucceed $
         mconcat
-          [ "req greet(name: string) -> string\n",
+          [ "request greet(name: string) -> string\n",
             "agent main(name: string) -> string { greet(name) }"
           ]
     length (decls m) `shouldBe` 2
@@ -1052,20 +1052,20 @@ handleExpression = describe "handle expression" $ do
         mconcat
           [ "agent main() {\n",
             "  handle {\n",
-            "    req get() { break 1; }\n",
+            "    request get() { break 1; }\n",
             "  }\n",
             "  result\n",
             "}"
           ]
     pure ()
 
-  it "parses handle with qualified handler (req module.name)" $ do
+  it "parses handle with qualified handler (request module.name)" $ do
     m <-
       shouldSucceed $
         mconcat
           [ "agent main() {\n",
             "  handle {\n",
-            "    req io.read() { break 42; }\n",
+            "    request io.read() { break 42; }\n",
             "  }\n",
             "  result\n",
             "}"
@@ -1086,7 +1086,7 @@ handleExpression = describe "handle expression" $ do
         mconcat
           [ "agent main() {\n",
             "  handle {\n",
-            "    req get() { break 42; }\n",
+            "    request get() { break 42; }\n",
             "  }\n",
             "  result\n",
             "}"
@@ -1107,7 +1107,7 @@ handleExpression = describe "handle expression" $ do
         mconcat
           [ "agent main() {\n",
             "  handle (var count: integer = 0) {\n",
-            "    req inc() { next null with { count = count + 1 }; }\n",
+            "    request inc() { next null with { count = count + 1 }; }\n",
             "  }\n",
             "  result\n",
             "}"
@@ -1120,8 +1120,8 @@ handleExpression = describe "handle expression" $ do
         mconcat
           [ "agent main() {\n",
             "  handle (var x = 0, var y = 0) {\n",
-            "    req addX() { next null with { x = x + 1 }; }\n",
-            "    req addY() { next null with { y = y + 1 }; }\n",
+            "    request addX() { next null with { x = x + 1 }; }\n",
+            "    request addY() { next null with { y = y + 1 }; }\n",
             "  }\n",
             "  result\n",
             "}"
@@ -1134,7 +1134,7 @@ handleExpression = describe "handle expression" $ do
         mconcat
           [ "agent main() {\n",
             "  handle {\n",
-            "    req get() { break 1; }\n",
+            "    request get() { break 1; }\n",
             "  } then { 0 }\n",
             "  result\n",
             "}"
@@ -1156,7 +1156,7 @@ handleExpression = describe "handle expression" $ do
         mconcat
           [ "agent main() {\n",
             "  handle {\n",
-            "    req get() { break 1; }\n",
+            "    request get() { break 1; }\n",
             "  } then(p) { p }\n",
             "  result\n",
             "}"
@@ -1177,7 +1177,7 @@ handleExpression = describe "handle expression" $ do
       mconcat
         [ "agent main() {\n",
           "  handle {\n",
-          "    req get() { break 1; }\n",
+          "    request get() { break 1; }\n",
           "  }\n",
           "  then(p) { p }\n",
           "  result\n",
@@ -1190,7 +1190,7 @@ handleExpression = describe "handle expression" $ do
         mconcat
           [ "agent main() {\n",
             "  handle {\n",
-            "    req get() -> string { break \"hello\"; }\n",
+            "    request get() -> string { break \"hello\"; }\n",
             "  }\n",
             "  result\n",
             "}"
@@ -1203,7 +1203,7 @@ handleExpression = describe "handle expression" $ do
         mconcat
           [ "agent main() {\n",
             "  par handle {\n",
-            "    req get() { break 1; }\n",
+            "    request get() { break 1; }\n",
             "  }\n",
             "  result\n",
             "}"
@@ -1406,7 +1406,7 @@ autoSemicolon = describe "auto-inserted semicolons" $ do
     _ <-
       shouldSucceed $
         mconcat
-          [ "req greet(name: string) -> string\n",
+          [ "request greet(name: string) -> string\n",
             "agent main() { 1 }"
           ]
     pure ()
@@ -1443,7 +1443,7 @@ autoSemicolon = describe "auto-inserted semicolons" $ do
         mconcat
           [ "agent main() {\n",
             "  handle {\n",
-            "    req get() { next 1; }\n",
+            "    request get() { next 1; }\n",
             "  } then (x) {\n",
             "    x\n",
             "  }\n",
@@ -1480,7 +1480,7 @@ autoSemicolon = describe "auto-inserted semicolons" $ do
     m <-
       shouldSucceed $
         mconcat
-          [ "req greet(name: string) -> string\n",
+          [ "request greet(name: string) -> string\n",
             "agent foo() { 1 }\n",
             "agent bar() { 2 }\n"
           ]
@@ -1612,7 +1612,7 @@ sameLineBlockKeyword = describe "same-line block keyword rule" $ do
       (mconcat
         [ "agent main() {\n",
           "  handle {\n",
-          "    req get() { next 1; }\n",
+          "    request get() { next 1; }\n",
           "  }\n",
           "  then (x) {\n",
           "    x\n",
@@ -1636,7 +1636,7 @@ sameLineBlockKeyword = describe "same-line block keyword rule" $ do
         mconcat
           [ "agent main() {\n",
             "  handle {\n",
-            "    req get() { next 1; }\n",
+            "    request get() { next 1; }\n",
             "  } then (x) {\n",
             "    x\n",
             "  }\n",

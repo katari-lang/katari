@@ -12,7 +12,7 @@ like, minus the actual HTTP socket.
   `secret`, which is disjoint from `string` at the type level so it
   can't accidentally flow into `print`, `to_string`, or any
   HTTP-wire surface that expects plain strings.
-* `req env_not_found` handle — recover locally from a missing key
+* `request env_not_found` handle — recover locally from a missing key
   without escalating into the snapshot-error path.
 * User-declared `ext agent http_request(url, auth: secret) -> string`
   — the sample's own sidecar agent. `http_request` is intentionally

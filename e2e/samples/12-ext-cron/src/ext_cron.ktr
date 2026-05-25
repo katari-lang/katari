@@ -1,5 +1,5 @@
 @"Cron-like notification cap. Bumped once each time the ext invokes its callback."
-req scheduled() -> null
+request scheduled() -> null
 
 @"Hand a callback to the host JS. The ext delegates it as a child agent on a tick."
 ext agent cron_impl(callback: () -> null with scheduled) -> null from "FFI:ext_cron.cron_impl"
@@ -18,7 +18,7 @@ agent run() -> integer with scheduled {
 @"Returns the number of scheduled() ticks observed before the handler breaks (= 1 for this sample)."
 agent main() -> integer {
   handle (var counter = 0) {
-    req scheduled() {
+    request scheduled() {
       break counter + 1
     }
   }

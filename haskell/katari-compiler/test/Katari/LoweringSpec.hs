@@ -770,10 +770,10 @@ stage6Spec = describe "Stage 6 \8212 handle scope / where / state vars" $ do
     (irMod, errs) <-
       lowerSource $
         Text.unlines
-          [ "req fetch() -> integer",
+          [ "request fetch() -> integer",
             "agent main() -> integer {",
             "  handle {",
-            "    req fetch() { 42 }",
+            "    request fetch() { 42 }",
             "  }",
             "  fetch()",
             "}"
@@ -788,10 +788,10 @@ stage6Spec = describe "Stage 6 \8212 handle scope / where / state vars" $ do
     (irMod, errs) <-
       lowerSource $
         Text.unlines
-          [ "req fetch() -> integer",
+          [ "request fetch() -> integer",
             "agent main() -> integer {",
             "  handle {",
-            "    req fetch() { 42 }",
+            "    request fetch() { 42 }",
             "  }",
             "  fetch()",
             "}"
@@ -812,10 +812,10 @@ stage6Spec = describe "Stage 6 \8212 handle scope / where / state vars" $ do
     (irMod, errs) <-
       lowerSource $
         Text.unlines
-          [ "req inc() -> integer",
+          [ "request inc() -> integer",
             "agent counter() -> integer {",
             "  handle (var n: integer = 0) {",
-            "    req inc() {",
+            "    request inc() {",
             "      next n with { n = n + 1 }",
             "    }",
             "  }",
@@ -834,10 +834,10 @@ stage6Spec = describe "Stage 6 \8212 handle scope / where / state vars" $ do
     (irMod, errs) <-
       lowerSource $
         Text.unlines
-          [ "req inc() -> integer",
+          [ "request inc() -> integer",
             "agent counter() -> integer {",
             "  handle (var n: integer = 0) {",
-            "    req inc() {",
+            "    request inc() {",
             "      next n with { n = n + 1 }",
             "    }",
             "  }",
@@ -878,16 +878,16 @@ stage7Spec = describe "Stage 7 \8212 non-local exit semantics" $ do
     any (\e -> e.exitKind == ExitKindReturn) allExits `shouldBe` True
 
   it "break inside handler body emits StatementExit ExitKindBreak" $ do
-    -- 'break' is only allowed inside for or req handler bodies; the implicit
+    -- 'break' is only allowed inside for or request handler bodies; the implicit
     -- handler-body-tail also lowers as ExitKindBreak, so any handler block
     -- exhibits the property.
     (irMod, errs) <-
       lowerSource $
         Text.unlines
-          [ "req fetch() -> integer",
+          [ "request fetch() -> integer",
             "agent main() -> integer {",
             "  handle {",
-            "    req fetch() {",
+            "    request fetch() {",
             "      break 0",
             "    }",
             "  }",
@@ -903,9 +903,9 @@ stage7Spec = describe "Stage 7 \8212 non-local exit semantics" $ do
     (irMod, errs) <-
       lowerSource $
         Text.unlines
-          [ "req fetch() -> integer",
+          [ "request fetch() -> integer",
             "agent main() -> integer {",
-            "  handle { req fetch() { 1 } } then(v) { v }",
+            "  handle { request fetch() { 1 } } then(v) { v }",
             "  fetch()",
             "}"
           ]
