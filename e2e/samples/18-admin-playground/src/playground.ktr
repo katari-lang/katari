@@ -135,7 +135,7 @@ agent main() -> string {
 //
 // These give the admin's run tree view something visibly in-flight to
 // render. `sleep_ms` blocks the ext for the requested duration; the
-// agents below combine it with Katari's built-in `par (...)` to get
+// agents below combine it with Katari's built-in `parallel (...)` to get
 // parallel delegations under the same root, and with `fan_out` to also
 // exercise the FFI-side `katari.delegate` path.
 
@@ -150,9 +150,9 @@ agent demo_sequential_sleeps() -> string {
   "three sleeps done"
 }
 
-@"Three parallel sleeps via `par (...)`. The tree shows three ext nodes in flight at once under the run root."
+@"Three parallel sleeps via `parallel (...)`. The tree shows three ext nodes in flight at once under the run root."
 agent demo_par_sleeps() -> string {
-  let _ = par (sleep_ms(ms = 3000), sleep_ms(ms = 4000), sleep_ms(ms = 5000))
+  let _ = parallel (sleep_ms(ms = 3000), sleep_ms(ms = 4000), sleep_ms(ms = 5000))
   "three parallel sleeps done"
 }
 
@@ -160,7 +160,7 @@ agent demo_par_sleeps() -> string {
 //
 // Mostly to exercise the `katari.delegate` path on the sidecar side
 // (= ext-spawned child delegations, recorded under the ext call in the
-// tree). Pure-Katari `par` above is the cleaner way to fan out; this is
+// tree). Pure-Katari `parallel` above is the cleaner way to fan out; this is
 // here to make the FFI code path visible.
 
 @"Fan out `count` parallel copies of `callback` from the ext side. Returns the number of results gathered."

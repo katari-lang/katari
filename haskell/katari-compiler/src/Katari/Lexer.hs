@@ -151,7 +151,7 @@ data Keyword where
   KeywordThen :: Keyword
   KeywordVar :: Keyword
   KeywordHandle :: Keyword
-  KeywordPar :: Keyword
+  KeywordParallel :: Keyword
   KeywordExternal :: Keyword
   KeywordNull :: Keyword
   KeywordTrue :: Keyword
@@ -588,7 +588,7 @@ lexKeywordText = \case
   KeywordThen -> "then"
   KeywordVar -> "var"
   KeywordHandle -> "handle"
-  KeywordPar -> "par"
+  KeywordParallel -> "parallel"
   KeywordExternal -> "external"
   KeywordNull -> "null"
   KeywordTrue -> "true"

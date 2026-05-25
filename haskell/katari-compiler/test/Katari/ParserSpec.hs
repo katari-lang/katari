@@ -1197,12 +1197,12 @@ handleExpression = describe "handle expression" $ do
           ]
     pure ()
 
-  it "parses par handle" $ do
+  it "parses parallel handle" $ do
     _ <-
       shouldSucceed $
         mconcat
           [ "agent main() {\n",
-            "  par handle {\n",
+            "  parallel handle {\n",
             "    request get() { break 1; }\n",
             "  }\n",
             "  result\n",

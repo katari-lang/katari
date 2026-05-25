@@ -797,7 +797,7 @@ parseBlockBodyWithRecovery = loop []
           parseHandleStep False,
           -- par handle: also captures the rest.
           try $ do
-            _ <- MP.lookAhead (parseKeyword KeywordPar *> parseKeyword KeywordHandle)
+            _ <- MP.lookAhead (parseKeyword KeywordParallel *> parseKeyword KeywordHandle)
             parseHandleStep True,
           do
             expression <- parseExpression
@@ -852,7 +852,7 @@ parseNonExpressionStatement =
 -- is encountered at statement position.
 parseHandleExpression :: Bool -> Parser (Expression Parsed)
 parseHandleExpression parallel = parseWithSpan $ do
-  when parallel (void $ parseKeyword KeywordPar)
+  when parallel (void $ parseKeyword KeywordParallel)
   parseKeyword KeywordHandle
   stateVariables <- option [] . try $ parseParenthesizedList parseStateVariable
   parsePunctuation PunctuationLeftBrace
@@ -1307,7 +1307,7 @@ parsePrimaryExpression =
 -- without backtracking the tuple / array forms become unreachable.
 parseParExpression :: Parser (Expression Parsed)
 parseParExpression = do
-  _ <- MP.lookAhead (parseKeyword KeywordPar)
+  _ <- MP.lookAhead (parseKeyword KeywordParallel)
   choice
     [ -- par for (...) { ... }
       try (parseForExpression True),
@@ -1320,7 +1320,7 @@ parseParExpression = do
 -- | @par (e1, e2, ...)@ — parallel tuple construction.
 parseParTupleExpression :: Parser (Expression Parsed)
 parseParTupleExpression = parseWithSpan $ do
-  parseKeyword KeywordPar
+  parseKeyword KeywordParallel
   parsePunctuation PunctuationLeftParenthesis
   elements <- parseExpression `sepBy1` parsePunctuation PunctuationComma
   parsePunctuation PunctuationRightParenthesis
@@ -1335,7 +1335,7 @@ parseParTupleExpression = parseWithSpan $ do
 -- | @par [e1, e2, ...]@ — parallel array construction.
 parseParArrayExpression :: Parser (Expression Parsed)
 parseParArrayExpression = parseWithSpan $ do
-  parseKeyword KeywordPar
+  parseKeyword KeywordParallel
   parsePunctuation PunctuationLeftBracket
   elements <- parseExpression `sepBy` parsePunctuation PunctuationComma
   _ <- optional (parsePunctuation PunctuationComma)
@@ -1477,7 +1477,7 @@ parseCaseArm = parseWithSpan $ do
 
 parseForExpression :: Bool -> Parser (Expression Parsed)
 parseForExpression parallel = parseWithSpan $ do
-  when parallel (void $ parseKeyword KeywordPar)
+  when parallel (void $ parseKeyword KeywordParallel)
   parseKeyword KeywordFor
   (inBindings, varBindings) <-
     between

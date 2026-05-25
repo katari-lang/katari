@@ -32,7 +32,7 @@ for the `playground` project.
 | `check_proceed` | Escalation flow → answer form is a BooleanField |
 | `trigger_never` | Escalation flow → never UX (= "Cancel this run") |
 | `demo_sequential_sleeps` | Tree view → sequential ext sleep nodes appearing one at a time |
-| `demo_par_sleeps` | Tree view → three sleep nodes in flight at once via Katari `par (...)` |
+| `demo_par_sleeps` | Tree view → three sleep nodes in flight at once via Katari `parallel (...)` |
 | `demo_ffi_fanout` | Tree view → ext-side `katari.delegate` fan-out (= sidecar code path) |
 
 Plus: invoke `primitive.array_get` / `primitive.get_field` directly from the
@@ -48,7 +48,7 @@ after `katari run --as ...`. Each sleep takes 2–3 seconds, so polling at
 - `demo_sequential_sleeps` — three ext calls chained: tree shows ONE
   ext node at a time, three times in a row.
 - `demo_par_sleeps` — three ext calls launched concurrently via
-  Katari's built-in `par (e, e, e)`: tree shows three ext nodes in
+  Katari's built-in `parallel (e, e, e)`: tree shows three ext nodes in
   flight simultaneously under the run root.
 - `demo_ffi_fanout` — the ext spawns three CORE-side `slow_child`
   agents via `katari.delegate(...)`: tree shows the `fan_out` ext call
