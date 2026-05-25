@@ -144,6 +144,97 @@ export function executePrim(name: string, args: Record<string, Value>): Value {
       }
       throw new RecoverableEngineError("prim get_field: invalid args");
     }
+    case "record_empty": {
+      return { kind: "record", entries: Object.create(null) };
+    }
+    case "record_get": {
+      const r = req(args, "record"), key = req(args, "key");
+      if (r.kind !== "record") {
+        throw new RecoverableEngineError(
+          `prim record_get: first argument must be a record, got ${r.kind}`,
+        );
+      }
+      if (key.kind !== "string") {
+        throw new RecoverableEngineError(
+          `prim record_get: key must be a string, got ${key.kind}`,
+        );
+      }
+      const v = r.entries[key.value];
+      return v === undefined ? { kind: "null" } : v;
+    }
+    case "record_set": {
+      const r = req(args, "record"), key = req(args, "key"), value = req(args, "value");
+      if (r.kind !== "record") {
+        throw new RecoverableEngineError(
+          `prim record_set: first argument must be a record, got ${r.kind}`,
+        );
+      }
+      if (key.kind !== "string") {
+        throw new RecoverableEngineError(
+          `prim record_set: key must be a string, got ${key.kind}`,
+        );
+      }
+      const next: Record<string, Value> = Object.create(null);
+      for (const [k, v] of Object.entries(r.entries)) {
+        next[k] = v;
+      }
+      next[key.value] = value;
+      return { kind: "record", entries: next };
+    }
+    case "record_remove": {
+      const r = req(args, "record"), key = req(args, "key");
+      if (r.kind !== "record") {
+        throw new RecoverableEngineError(
+          `prim record_remove: first argument must be a record, got ${r.kind}`,
+        );
+      }
+      if (key.kind !== "string") {
+        throw new RecoverableEngineError(
+          `prim record_remove: key must be a string, got ${key.kind}`,
+        );
+      }
+      if (!(key.value in r.entries)) return r;
+      const next: Record<string, Value> = Object.create(null);
+      for (const [k, v] of Object.entries(r.entries)) {
+        if (k !== key.value) next[k] = v;
+      }
+      return { kind: "record", entries: next };
+    }
+    case "record_keys": {
+      const r = req(args, "record");
+      if (r.kind !== "record") {
+        throw new RecoverableEngineError(
+          `prim record_keys: argument must be a record, got ${r.kind}`,
+        );
+      }
+      const keys = Object.keys(r.entries).map(
+        (k): Value => ({ kind: "string", value: k }),
+      );
+      return { kind: "array", elements: keys };
+    }
+    case "record_has": {
+      const r = req(args, "record"), key = req(args, "key");
+      if (r.kind !== "record") {
+        throw new RecoverableEngineError(
+          `prim record_has: first argument must be a record, got ${r.kind}`,
+        );
+      }
+      if (key.kind !== "string") {
+        throw new RecoverableEngineError(
+          `prim record_has: key must be a string, got ${key.kind}`,
+        );
+      }
+      return { kind: "boolean", value: key.value in r.entries };
+    }
+    case "record_size": {
+      const r = req(args, "record");
+      if (r.kind !== "record") {
+        throw new RecoverableEngineError(
+          `prim record_size: argument must be a record, got ${r.kind}`,
+        );
+      }
+      return { kind: "number", value: Object.keys(r.entries).length };
+    }
     default:
       throw new RecoverableEngineError(`unknown prim: ${name}`);
   }

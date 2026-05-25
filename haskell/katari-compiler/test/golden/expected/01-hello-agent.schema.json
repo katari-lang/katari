@@ -599,6 +599,186 @@
     "requests": []
   },
   {
+    "description": "Construct an empty record.",
+    "input": {
+      "additionalProperties": false,
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "name": "primitive.record_empty",
+    "output": {
+      "additionalProperties": true,
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "requests": []
+  },
+  {
+    "description": "Retrieve a record entry by key. Returns null when the key is absent.",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "key": {
+          "type": "string"
+        },
+        "record": {
+          "additionalProperties": true,
+          "properties": {},
+          "required": [],
+          "type": "object"
+        }
+      },
+      "required": [
+        "key",
+        "record"
+      ],
+      "type": "object"
+    },
+    "name": "primitive.record_get",
+    "output": {},
+    "requests": []
+  },
+  {
+    "description": "Insert or replace an entry, returning a fresh record (records are immutable).",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "key": {
+          "type": "string"
+        },
+        "record": {
+          "additionalProperties": true,
+          "properties": {},
+          "required": [],
+          "type": "object"
+        },
+        "value": {}
+      },
+      "required": [
+        "key",
+        "record",
+        "value"
+      ],
+      "type": "object"
+    },
+    "name": "primitive.record_set",
+    "output": {
+      "additionalProperties": true,
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "requests": []
+  },
+  {
+    "description": "Remove an entry by key. Returns the record unchanged when the key is absent.",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "key": {
+          "type": "string"
+        },
+        "record": {
+          "additionalProperties": true,
+          "properties": {},
+          "required": [],
+          "type": "object"
+        }
+      },
+      "required": [
+        "key",
+        "record"
+      ],
+      "type": "object"
+    },
+    "name": "primitive.record_remove",
+    "output": {
+      "additionalProperties": true,
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "requests": []
+  },
+  {
+    "description": "List the keys present in the record (insertion order is not guaranteed).",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "record": {
+          "additionalProperties": true,
+          "properties": {},
+          "required": [],
+          "type": "object"
+        }
+      },
+      "required": [
+        "record"
+      ],
+      "type": "object"
+    },
+    "name": "primitive.record_keys",
+    "output": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "requests": []
+  },
+  {
+    "description": "True if the record carries an entry under the given key.",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "key": {
+          "type": "string"
+        },
+        "record": {
+          "additionalProperties": true,
+          "properties": {},
+          "required": [],
+          "type": "object"
+        }
+      },
+      "required": [
+        "key",
+        "record"
+      ],
+      "type": "object"
+    },
+    "name": "primitive.record_has",
+    "output": {
+      "type": "boolean"
+    },
+    "requests": []
+  },
+  {
+    "description": "Number of entries in the record.",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "record": {
+          "additionalProperties": true,
+          "properties": {},
+          "required": [],
+          "type": "object"
+        }
+      },
+      "required": [
+        "record"
+      ],
+      "type": "object"
+    },
+    "name": "primitive.record_size",
+    "output": {
+      "type": "integer"
+    },
+    "requests": []
+  },
+  {
     "description": "Return the AI metadata of any callable value.",
     "input": {
       "additionalProperties": false,
