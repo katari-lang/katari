@@ -363,37 +363,37 @@ matchExpression = describe "match expression" $ do
 forExpression :: Spec
 forExpression = describe "for expression" $ do
   it "parses basic for with in binding" $ do
-    _ <- shouldSucceed "agent main() { for (x in xs) { x } }"
+    _ <- shouldSucceed "agent main() { for (let x in xs) { x } }"
     pure ()
 
   it "parses for with state var" $ do
-    _ <- shouldSucceed "agent main() { for (x in xs, var acc = 0) { acc } }"
+    _ <- shouldSucceed "agent main() { for (let x in xs, var acc = 0) { acc } }"
     pure ()
 
   it "parses for with typed state var" $ do
-    _ <- shouldSucceed "agent main() { for (x in xs, var acc: integer = 0) { acc } }"
+    _ <- shouldSucceed "agent main() { for (let x in xs, var acc: integer = 0) { acc } }"
     pure ()
 
   it "parses for with then block" $ do
-    _ <- shouldSucceed "agent main() { for (x in xs) { x } then { null } }"
+    _ <- shouldSucceed "agent main() { for (let x in xs) { x } then { null } }"
     pure ()
 
   it "parses for with multiple in bindings then vars" $ do
-    _ <- shouldSucceed "agent main() { for (x in xs, y in ys, var acc = 0, var b = 0) { acc } }"
+    _ <- shouldSucceed "agent main() { for (let x in xs, let y in ys, var acc = 0, var b = 0) { acc } }"
     pure ()
 
   it "rejects in-binding after var binding" $ do
     shouldFailWith
-      "agent main() { for (var a = 0, x in xs) { a } }"
-      "'in' binding cannot follow 'var' binding"
+      "agent main() { for (var a = 0, let x in xs) { a } }"
+      "'let' binding cannot follow 'var' binding"
 
   it "rejects interleaved in/var bindings" $ do
     shouldFailWith
-      "agent main() { for (x in xs, var a = 0, y in ys) { a } }"
-      "'in' binding cannot follow 'var' binding"
+      "agent main() { for (let x in xs, var a = 0, let y in ys) { a } }"
+      "'let' binding cannot follow 'var' binding"
 
   it "for AST has ins first, vars second" $ do
-    e <- parseExpr "for (x in xs, y in ys, var a = 0, var b = 1) { a }"
+    e <- parseExpr "for (let x in xs, let y in ys, var a = 0, var b = 1) { a }"
     case e of
       ExpressionFor fe -> do
         length fe.inBindings `shouldBe` 2
@@ -614,15 +614,15 @@ nextAndBreak :: Spec
 nextAndBreak = describe "next and break" $ do
   -- ForCtx (inside for body)
   it "parses for-next (bare)" $ do
-    _ <- shouldSucceed "agent main() { for (x in xs) { next; } }"
+    _ <- shouldSucceed "agent main() { for (let x in xs) { next; } }"
     pure ()
 
   it "parses for-next with modifiers" $ do
-    _ <- shouldSucceed "agent main() { for (x in xs) { next with { acc = acc + 1 }; } }"
+    _ <- shouldSucceed "agent main() { for (let x in xs) { next with { acc = acc + 1 }; } }"
     pure ()
 
   it "parses for-break" $ do
-    _ <- shouldSucceed "agent main() { for (x in xs) { break 0; } }"
+    _ <- shouldSucceed "agent main() { for (let x in xs) { break 0; } }"
     pure ()
 
   -- HandleCtx (inside request handler body)
@@ -683,7 +683,7 @@ nextAndBreak = describe "next and break" $ do
 
   -- ForCtx / HandleCtx cross-errors
   it "rejects next-with-value inside for (ForCtx)" $ do
-    shouldFail "agent main() { for (x in xs) { next 42; } }"
+    shouldFail "agent main() { for (let x in xs) { next 42; } }"
 
   it "accepts bare next inside request handler (defaults to next null)" $ do
     -- Bare `next` is shorthand for `next null` (the requestor is resumed
@@ -714,7 +714,7 @@ nextAndBreak = describe "next and break" $ do
     pure ()
 
   it "accepts bare break inside for (defaults to break null)" $ do
-    _ <- shouldSucceed "agent main() { for (x in xs) { break; } }"
+    _ <- shouldSucceed "agent main() { for (let x in xs) { break; } }"
     pure ()
 
   it "accepts bare return inside agent body (defaults to return null)" $ do
@@ -723,7 +723,7 @@ nextAndBreak = describe "next and break" $ do
 
   -- Context-aware AST checks
   it "for-next inside for is StatementForNext" $ do
-    m <- shouldSucceed "agent main() { for (x in xs) { next; } }"
+    m <- shouldSucceed "agent main() { for (let x in xs) { next; } }"
     case head (decls m) of
       DeclarationAgent a ->
         case a.body.returnExpression of
@@ -735,7 +735,7 @@ nextAndBreak = describe "next and break" $ do
       _ -> expectationFailure "expected agent"
 
   it "for-break inside for is StatementForBreak" $ do
-    m <- shouldSucceed "agent main() { for (x in xs) { break 0; } }"
+    m <- shouldSucceed "agent main() { for (let x in xs) { break 0; } }"
     case head (decls m) of
       DeclarationAgent a ->
         case a.body.returnExpression of
@@ -1434,7 +1434,7 @@ autoSemicolon = describe "auto-inserted semicolons" $ do
     pure ()
 
   it "then on same line as closing brace (for)" $ do
-    _ <- shouldSucceed "agent main() {\n  for (x in xs) {\n    x\n  } then {\n    null\n  }\n}"
+    _ <- shouldSucceed "agent main() {\n  for (let x in xs) {\n    x\n  } then {\n    null\n  }\n}"
     pure ()
 
   it "then on same line as closing brace (handle)" $ do
@@ -1579,12 +1579,12 @@ sourceSpans = describe "source spans" $ do
     s.start.column `shouldSatisfy` (< s.end.column)
 
   it "for expression span covers for-then" $ do
-    e <- parseExpr "for (x in xs) { x } then { null }"
+    e <- parseExpr "for (let x in xs) { x } then { null }"
     let s = sourceSpanOf e
     s.start.line `shouldBe` 1
 
   it "ForInBinding has a non-degenerate span" $ do
-    e <- parseExpr "for (x in xs) { x }"
+    e <- parseExpr "for (let x in xs) { x }"
     case e of
       ExpressionFor fe -> case fe.inBindings of
         [b] -> b.sourceSpan.start.column `shouldSatisfy` (< b.sourceSpan.end.column)
@@ -1604,7 +1604,7 @@ sameLineBlockKeyword = describe "same-line block keyword rule" $ do
 
   it "rejects then on the line after }" $ do
     shouldFailWith
-      "agent main() { for (x in xs) { x }\nthen { null } }"
+      "agent main() { for (let x in xs) { x }\nthen { null } }"
       "must be on the same line as the preceding '}'"
 
   it "rejects then (handle) on the line after }" $ do
@@ -1627,7 +1627,7 @@ sameLineBlockKeyword = describe "same-line block keyword rule" $ do
     pure ()
 
   it "accepts then on the same line as }" $ do
-    _ <- shouldSucceed "agent main() { for (x in xs) { x } then { null } }"
+    _ <- shouldSucceed "agent main() { for (let x in xs) { x } then { null } }"
     pure ()
 
   it "accepts then (handle) on the same line as }" $ do

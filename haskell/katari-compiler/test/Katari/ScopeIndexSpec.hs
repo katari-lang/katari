@@ -92,14 +92,14 @@ spec = describe "Katari.Typechecker.ScopeIndex" $ do
 
   it "does not see for-loop var outside the loop" $ do
     -- agent foo() -> integer {
-    --   for (x in [1, 2, 3]) { 0 }
+    --   for (let x in [1, 2, 3]) { 0 }
     --   x   <- line 3, must NOT be visible
     -- }
     r <-
       identify $
         Text.unlines
           [ "agent foo() -> integer {",
-            "  for (x in [1, 2, 3]) { 0 }",
+            "  for (let x in [1, 2, 3]) { 0 }",
             "  0",
             "}"
           ]

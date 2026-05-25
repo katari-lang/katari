@@ -184,12 +184,12 @@ spec = describe "Katari.Query.lookupAtPosition (hover)" $ do
           "expected literal-integer 0 for `0` pattern, got: " <> show other
 
   it "for-in binding: variable gets the array element type" $ do
-    -- `for (v in [1, 2, 3])` should bind v to integer (or literal-int
+    -- `for (let v in [1, 2, 3])` should bind v to integer (or literal-int
     -- union); hovering on `v` inside the body must NOT show unknown.
     let src =
           Text.unlines
             [ "agent sum() -> integer {",
-              "  for (v in [1, 2, 3], var acc: integer = 0) {",
+              "  for (let v in [1, 2, 3], var acc: integer = 0) {",
               "    next with { acc = acc + v }",
               "  } then { acc }",
               "}"

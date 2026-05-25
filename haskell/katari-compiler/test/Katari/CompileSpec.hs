@@ -82,7 +82,7 @@ happyPathSpec = describe "well-formed single-module input" $ do
     let src =
           mconcat
             [ "agent main() -> null {\n",
-              "  for(x in [1, 2, 3]) {\n",
+              "  for(let x in [1, 2, 3]) {\n",
               "    break\n",
               "  } then { null }\n",
               "}\n"
@@ -134,7 +134,7 @@ happyPathSpec = describe "well-formed single-module input" $ do
     let src =
           mconcat
             [ "agent main() -> integer {\n",
-              "  for(x in [1, 2, 3]) {\n",
+              "  for(let x in [1, 2, 3]) {\n",
               "    break {\n",
               "      handle {} then(_) { 0 }\n",
               "      7\n",

@@ -1504,19 +1504,25 @@ parseForBindings :: Parser ([ForInBinding Parsed], [ForVarBinding Parsed])
 parseForBindings = do
   inBindings <- parseForInBinding `sepEndBy` parseComma
   varBindings <- parseForVarBinding `sepEndBy` parseComma
-  -- After all vars, if a `pattern in ...` still follows, it's an order violation.
+  -- After all vars, if a `let pattern in ...` still follows, it's an
+  -- order violation.
   violation <-
     MP.lookAhead . optional . try $ do
+      parseKeyword KeywordLet
       _ <- parsePattern
       parseKeyword KeywordIn
   case violation of
-    Just () -> fail "'in' binding cannot follow 'var' binding in 'for'"
+    Just () -> fail "'let' binding cannot follow 'var' binding in 'for'"
     Nothing -> pure (inBindings, varBindings)
 
 parseForInBinding :: Parser (ForInBinding Parsed)
 parseForInBinding = parseWithSpan $ do
-  -- Decide-and-commit: try the "pattern in" prefix, then commit to the RHS.
+  -- 'let pattern in expr' — the 'let' keyword makes the binding form
+  -- explicit so the for-head no longer reads 'for (x in xs)'
+  -- (which could be mistaken for a comparison) but
+  -- 'for (let x in xs)'.
   parsedPattern <- try $ do
+    parseKeyword KeywordLet
     parsedPattern <- parsePattern
     parseKeyword KeywordIn
     pure parsedPattern

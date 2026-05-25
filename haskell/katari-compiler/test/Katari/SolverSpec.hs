@@ -459,7 +459,7 @@ forLoops = describe "for loops" $ do
       runSolve $
         mconcat
           [ "agent run(xs: array[integer]) {\n",
-            "  for (x in xs) { x }\n",
+            "  for (let x in xs) { x }\n",
             "}"
           ]
     solverErrors `shouldBe` []
@@ -469,7 +469,7 @@ forLoops = describe "for loops" $ do
       runSolve $
         mconcat
           [ "agent sum(xs: array[integer]) -> integer {\n",
-            "  return for (x in xs, var acc = 0) {\n",
+            "  return for (let x in xs, var acc = 0) {\n",
             "    next with { acc = acc + x }\n",
             "  } then { acc }\n",
             "}"
@@ -481,7 +481,7 @@ forLoops = describe "for loops" $ do
       runSolve $
         mconcat
           [ "agent firstPositive(xs: array[integer]) -> integer | null {\n",
-            "  return for (x in xs) {\n",
+            "  return for (let x in xs) {\n",
             "    if (x > 0) { break x; } else { null }\n",
             "  } then { null }\n",
             "}"
@@ -798,7 +798,7 @@ illTypedRejection = describe "ill-typed program rejection" $ do
     null solverErrors `shouldBe` False
 
   -- Function-signature mismatch via annotation. Tests function shape
-  -- subtyping (contravariant in params, covariant in return).
+  -- subtyping (let contravariant in params, let covariant in return).
   it "let f: (s: string) -> integer = some_int_to_int_agent → error" $ do
     -- 'square' has type (n: integer) -> integer. Binding to a function
     -- expecting (s: string) -> integer should fail because the parameter
