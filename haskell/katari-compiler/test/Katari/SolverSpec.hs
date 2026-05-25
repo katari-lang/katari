@@ -20,7 +20,6 @@ import Katari.Id (VariableId)
 import Katari.Typechecker.Identifier
   ( IdentifierResult (..),
     VariableData (..),
-    identify,
   )
 import Katari.Typechecker.NormalizedType
   ( ArraySlot (..),
@@ -31,9 +30,9 @@ import Katari.Typechecker.NormalizedType
     ObjectSlot (..),
     StringSlot (..),
   )
-import Katari.Typechecker.Solver (SolverError, SolverResult (..), solve)
+import Katari.Typechecker.Solver (SolverResult (..), solve)
 import Katari.Typechecker.Solver qualified as Solver
-import Katari.Typechecker.Zonker (ZonkResult (..), zonk)
+import Katari.Typechecker.Zonker (zonk)
 import Katari.Compile qualified as Compile
 import Test.Hspec
 
@@ -113,6 +112,7 @@ spec = describe "Katari.Typechecker.Solver" $ do
   higherOrderFunctions
   narrowAndSubstitutionComposition
   illTypedRejection
+  unionReturnBoundAggregation
 
 -- ---------------------------------------------------------------------------
 -- Basic literal inference
@@ -1035,3 +1035,111 @@ illTypedRejection = describe "ill-typed program rejection" $ do
             "}"
           ]
     solverErrors `shouldBe` []
+
+-- ---------------------------------------------------------------------------
+-- Union return + multi-arm match → bound aggregation (regression)
+--
+-- Regression coverage for the union-return secret-taint bug
+-- (project_solver_union_return_secret_taint.md). The bug was triggered by
+-- `α ⊑ (A | B)` branching unsoundly when the upper-bound union was concrete:
+-- the solver committed to one branch, contradicted the other lower bound,
+-- and reported a misleading error. Worse, the global solver explored other
+-- branchable constraints in the same world line, leaking unrelated "secret"
+-- taint into f-string interpolations.
+--
+-- New algorithm: concrete union upper bounds are aggregated via intersectNT
+-- instead of branched. Per-var lower = unionNT of lowers, upper = intersectNT
+-- of uppers. The consistency check uses subtypeNormalizedType on those.
+-- ---------------------------------------------------------------------------
+
+unionReturnBoundAggregation :: Spec
+unionReturnBoundAggregation =
+  describe "union return + multi-arm match (bug repro)" $ do
+    it "data union return with one arm per ctor compiles cleanly" $ do
+      -- Minimal repro: lower bounds {ok, err}, upper bound (ok | err).
+      -- Old solver: branches into [tMatch ⊑ ok] OR [tMatch ⊑ err], both fail.
+      -- New solver: tMatch's lower = unionNT(ok, err); upper = (ok|err);
+      -- subtypeNormalizedType check passes. No error.
+      (_, _, _, solverErrors) <-
+        runSolve $
+          mconcat
+            [ "data ok(n: integer)\n",
+              "data err(message: string)\n",
+              "agent maybe_fail(b: boolean) -> ok | err {\n",
+              "  match (b) {\n",
+              "    case true => { err(message = \"x\") }\n",
+              "    case _    => { ok(n = 1) }\n",
+              "  }\n",
+              "}"
+            ]
+      solverErrors `shouldBe` []
+
+    it "primitive union return (integer | boolean) with multi-arm match" $ do
+      -- Same shape as above but without data ctors: confirms the bug is
+      -- not data-specific.
+      (_, _, _, solverErrors) <-
+        runSolve $
+          mconcat
+            [ "agent maybe_int_bool(b: boolean) -> integer | boolean {\n",
+              "  match (b) {\n",
+              "    case true => { 1 }\n",
+              "    case _    => { false }\n",
+              "  }\n",
+              "}"
+            ]
+      solverErrors `shouldBe` []
+
+    it "union return agent does NOT contaminate unrelated f-string in same module" $ do
+      -- The "secret taint leak" was the user-visible bug. Before the fix,
+      -- adding `maybe_fail` to the module broke `describe_pair` with
+      -- "expected string, found secret" at the to_string(value = n) span,
+      -- even though no `secret` appears anywhere in source. The whole
+      -- module must compile cleanly together.
+      (_, _, _, solverErrors) <-
+        runSolve $
+          mconcat
+            [ "data ok(n: integer)\n",
+              "data err(message: string)\n",
+              "agent describe_pair(t: (integer, string)) -> string {\n",
+              "  match (t) {\n",
+              "    case (0, s) => { f\"zero with ${s}\" }\n",
+              "    case (n, s) => { f\"${to_string(value = n)} with ${s}\" }\n",
+              "  }\n",
+              "}\n",
+              "agent maybe_fail(b: boolean) -> ok | err {\n",
+              "  match (b) {\n",
+              "    case true => { err(message = \"x\") }\n",
+              "    case _    => { ok(n = 1) }\n",
+              "  }\n",
+              "}"
+            ]
+      solverErrors `shouldBe` []
+
+    it "single-ctor return into declared union still compiles (regression: not broken by fix)" $ do
+      -- The pre-fix solver accepted this case (lower = {ok}, upper = (ok|err);
+      -- branching picks `tMatch ⊑ ok` and succeeds). Must continue to work.
+      (_, _, _, solverErrors) <-
+        runSolve $
+          mconcat
+            [ "data ok(n: integer)\n",
+              "data err(message: string)\n",
+              "agent always_ok() -> ok | err { ok(n = 1) }"
+            ]
+      solverErrors `shouldBe` []
+
+    it "union argument type (not return) still works" $ do
+      -- Sanity check: union ARGUMENT was never bugged. After the fix, must
+      -- still compile.
+      (_, _, _, solverErrors) <-
+        runSolve $
+          mconcat
+            [ "data ok(n: integer)\n",
+              "data err(message: string)\n",
+              "agent describe_result(r: ok | err) -> string {\n",
+              "  match (r) {\n",
+              "    case ok(n = v) => { \"ok\" }\n",
+              "    case err(message = m) => { m }\n",
+              "  }\n",
+              "}"
+            ]
+      solverErrors `shouldBe` []

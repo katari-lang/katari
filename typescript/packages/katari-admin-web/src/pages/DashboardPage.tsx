@@ -57,9 +57,7 @@ export function DashboardPage() {
   });
 
   const runs = runsQ.data?.runs ?? [];
-  const liveRuns = runs
-    .filter((r) => !isTerminalState(r.state))
-    .slice(0, 5);
+  const liveRuns = runs.filter((r) => !isTerminalState(r.state)).slice(0, 5);
   const recentRuns = runs.slice(0, 5);
   const openEscalations = (escalationsQ.data?.escalations ?? []).slice(0, 5);
 
@@ -83,7 +81,7 @@ export function DashboardPage() {
             className="grid gap-4 lg:grid-cols-2 xl:grid-cols-3"
           >
             <DashboardCard
-              title="Running runs"
+              title="Active runs"
               count={liveRuns.length}
               icon={<Activity className="size-4 text-highlight" />}
               footer={
@@ -97,7 +95,7 @@ export function DashboardPage() {
             >
               {liveRuns.length === 0 ? (
                 <p className="text-sm text-subtle-foreground">
-                  No live runs.
+                  No active runs.
                 </p>
               ) : (
                 <ul className="space-y-1.5">
@@ -145,7 +143,10 @@ export function DashboardPage() {
                       key={e.id}
                       className=" px-2 py-1.5 text-sm hover:bg-muted"
                     >
-                      <div className="flex items-center gap-2">
+                      <Link
+                        to={`/project/${projectId}/escalations/${e.id}`}
+                        className="flex items-center gap-2"
+                      >
                         <Badge tone="info">open</Badge>
                         <span className="flex-1 truncate font-mono text-xs text-foreground">
                           {e.agentDefId}
@@ -153,7 +154,7 @@ export function DashboardPage() {
                         <span className="text-[11px] text-subtle-foreground">
                           {relativeTime(e.createdAt)}
                         </span>
-                      </div>
+                      </Link>
                     </li>
                   ))}
                 </ul>
@@ -226,7 +227,7 @@ export function DashboardPage() {
                     to={`/project/${projectId}/definitions`}
                     className="underline"
                   >
-                    Definitions
+                    Agents
                   </Link>{" "}
                   page.
                 </p>

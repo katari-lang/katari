@@ -6,6 +6,7 @@ import {
   MessageCircleQuestion,
   KeyRound,
   Settings,
+  Bot,
 } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { useStickyProjectId } from "@/lib/useStickyProjectId";
@@ -23,7 +24,7 @@ function projectItems(projectId: string): MenuItem[] {
     { to: `/project/${projectId}/runs`, label: "Runs", icon: Activity },
     {
       to: `/project/${projectId}/definitions`,
-      label: "Definitions",
+      label: "Agents",
       icon: Boxes,
     },
     {

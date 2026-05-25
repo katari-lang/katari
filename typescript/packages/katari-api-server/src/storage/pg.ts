@@ -195,7 +195,7 @@ type DbSnapshotRow = {
   ir_module: IRModule;
   sidecar_bundle: SidecarBundle | null;
   schema_bundle: SchemaBundle;
-  message: string | null;
+  message: string;
   created_at: Date;
 };
 
@@ -207,7 +207,7 @@ class PgSnapshotRepo implements SnapshotRepo {
     irModule: IRModule;
     sidecarBundle: SidecarBundle | null;
     schemaBundle: SchemaBundle;
-    message: string | null;
+    message: string;
   }): Promise<SnapshotId> {
     const id = uuidv7();
     await this.sql`
@@ -254,7 +254,7 @@ class PgSnapshotRepo implements SnapshotRepo {
     const rows =
       filter?.projectId !== undefined
         ? await this.sql<
-            { id: string; project_id: string; message: string | null; created_at: Date }[]
+            { id: string; project_id: string; message: string; created_at: Date }[]
           >`
             SELECT id, project_id, message, created_at
             FROM snapshots
@@ -263,7 +263,7 @@ class PgSnapshotRepo implements SnapshotRepo {
             LIMIT ${limit} OFFSET ${offset}
           `
         : await this.sql<
-            { id: string; project_id: string; message: string | null; created_at: Date }[]
+            { id: string; project_id: string; message: string; created_at: Date }[]
           >`
             SELECT id, project_id, message, created_at
             FROM snapshots
@@ -640,7 +640,7 @@ class PgEscalationRepo implements EscalationRepo {
 type DbRunsAuditRow = {
   id: string;
   snapshot_id: string;
-  name: string | null;
+  name: string;
   qualified_name: string;
   args: Record<string, EncryptedValue>;
   state: RunsAuditState;

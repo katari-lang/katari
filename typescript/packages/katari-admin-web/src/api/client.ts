@@ -91,7 +91,10 @@ export function createApiClient(config: ApiClientConfig) {
       ),
 
     // Snapshots (mounted under /project/:projectId/snapshot)
-    listSnapshots: (projectId: ProjectId, params?: { limit?: number; offset?: number }) =>
+    listSnapshots: (
+      projectId: ProjectId,
+      params?: { limit?: number; offset?: number },
+    ) =>
       request<{ snapshots: SnapshotSummary[] }>(
         config,
         "GET",
@@ -118,14 +121,14 @@ export function createApiClient(config: ApiClientConfig) {
 
     // Agent definitions (snapshot-scoped). `snapshotId === "latest"` is a
     // server-side alias for the project's most-recent snapshot.
-    listAgentDefinitions: (params: {
+    listAgentAgents: (params: {
       projectId: ProjectId;
       snapshotId?: SnapshotId | "latest";
     }) =>
       request<{ definitions: AgentDefinitionWire[]; snapshotId: SnapshotId }>(
         config,
         "GET",
-        `/project/${params.projectId}/snapshot/${params.snapshotId ?? "latest"}/agent-definition`,
+        `/project/${params.projectId}/snapshot/${params.snapshotId ?? "latest"}/agent`,
       ),
     getAgentDefinition: (params: {
       projectId: ProjectId;
@@ -135,7 +138,7 @@ export function createApiClient(config: ApiClientConfig) {
       request<{ definition: AgentDefinitionWire; snapshotId: SnapshotId }>(
         config,
         "GET",
-        `/project/${params.projectId}/snapshot/${params.snapshotId ?? "latest"}/agent-definition/${encodeURIComponent(params.qualifiedName)}`,
+        `/project/${params.projectId}/snapshot/${params.snapshotId ?? "latest"}/agent/${encodeURIComponent(params.qualifiedName)}`,
       ),
 
     // Runs (= operator-launched root delegations; project-scoped).
@@ -218,7 +221,11 @@ export function createApiClient(config: ApiClientConfig) {
         "GET",
         `/project/${projectId}/escalation/${id}`,
       ),
-    answerEscalation: (projectId: ProjectId, id: EscalationId, value: RawValue) =>
+    answerEscalation: (
+      projectId: ProjectId,
+      id: EscalationId,
+      value: RawValue,
+    ) =>
       request<{ ok: boolean }>(
         config,
         "POST",
@@ -227,14 +234,17 @@ export function createApiClient(config: ApiClientConfig) {
       ),
 
     // Env
-    listEnv: () =>
-      request<{ entries: EnvEntry[] }>(config, "GET", "/env"),
+    listEnv: () => request<{ entries: EnvEntry[] }>(config, "GET", "/env"),
     getEnv: (key: string) =>
       request<EnvEntry>(config, "GET", `/env/${encodeURIComponent(key)}`),
     upsertEnv: (entry: { key: string; value: string; isSecret: boolean }) =>
       request<{ ok: boolean }>(config, "PUT", "/env", entry),
     deleteEnv: (key: string) =>
-      request<{ ok: boolean }>(config, "DELETE", `/env/${encodeURIComponent(key)}`),
+      request<{ ok: boolean }>(
+        config,
+        "DELETE",
+        `/env/${encodeURIComponent(key)}`,
+      ),
   };
 }
 

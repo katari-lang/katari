@@ -22,7 +22,9 @@ export type Project = {
 export type SnapshotSummary = {
   id: SnapshotId;
   projectId: ProjectId;
-  message: string | null;
+  /** Display label. The server always fills a default when the operator
+   *  omits `--message`, so this is never empty. */
+  message: string;
   createdAt: string;
 };
 
@@ -32,7 +34,7 @@ export type Snapshot = {
   irModule: unknown;
   sidecarBundle: { entry: string; runtime: "node"; schemaVersion: number } | null;
   schemaBundle: SchemaBundle;
-  message: string | null;
+  message: string;
   createdAt: string;
 };
 
@@ -54,8 +56,9 @@ export type CancelReason = "user" | "error";
 export type RunRowWire = {
   id: RunId;
   snapshotId: SnapshotId;
-  /** Operator-supplied label. `null` when unnamed. */
-  name: string | null;
+  /** Display label. The server always fills a default when the operator
+   *  omits one, so this is never empty. */
+  name: string;
   qualifiedName: string;
   args: Record<string, RawValue>;
   state: RunState;
@@ -108,7 +111,9 @@ export type DelegationTreeNode = {
   agentDefId: string;
   qualifiedName: string | null;
   state: "running" | "cancelling" | "cancelled" | "error" | "succeeded";
-  name?: string | null;
+  /** Present on the root node (= the run itself); always non-empty.
+   *  Absent on non-root delegations. */
+  name?: string;
   cancelReason?: CancelReason | null;
   args: Record<string, RawValue>;
   result?: RawValue;

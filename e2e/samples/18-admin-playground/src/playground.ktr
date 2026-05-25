@@ -2,12 +2,6 @@
 //
 // Each agent here exercises a different SchemaForm shape. Apply this
 // snapshot, then click through them in /admin/.../definitions.
-//
-// Known limitation: agents that return a union of data ctors (e.g.
-// `-> ok | err`) are not included — they trigger a current Solver bug
-// that corrupts unrelated `to_string` typing in the same module
-// (see project_solver_union_return_secret_taint.md). Re-add once the
-// Solver refactor lands.
 
 // === Primitives ===
 
@@ -65,7 +59,7 @@ agent describe_pair(t: (integer, string)) -> string {
   }
 }
 
-// === Single-type data return (= safe; tagged-union return is bugged) ===
+// === Data ctor returns (single and tagged-union) ===
 
 @"A success-shaped result."
 data ok(n: integer)
@@ -81,6 +75,14 @@ agent describe_result(r: ok | err) -> string {
   match (r) {
     case ok(n = v) => { f"ok: ${to_string(value = v)}" }
     case err(message = m) => { f"err: ${m}" }
+  }
+}
+
+@"Tagged-union RETURN - exercises bound-pair solver path for union upper bounds."
+agent maybe_fail(should_fail: boolean) -> ok | err {
+  match (should_fail) {
+    case true => { err(message = "intentional failure") }
+    case _    => { ok(n = 42) }
   }
 }
 

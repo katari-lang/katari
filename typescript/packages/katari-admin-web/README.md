@@ -69,7 +69,7 @@ src/
     shell/        # AppShell, Sidebar, TopBar, Logo, UserMenu
     ui/           # Button, Input, Card, Dialog, Table, ... (primitives)
     domain/       # AgentTable, EnvUpsertDialog, ValueViewer, ... (feature)
-    schema-form/  # JSON Schema → React form (used by Definitions invoke)
+    schema-form/  # JSON Schema → React form (used by Agents invoke)
   pages/          # Route entry points
   api/            # Typed fetch client
   contexts/       # ApiKey context

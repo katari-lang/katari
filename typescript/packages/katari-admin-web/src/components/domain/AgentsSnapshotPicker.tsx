@@ -19,14 +19,14 @@ type Props = {
 };
 
 /**
- * Snapshot picker for the Definitions page header.
+ * Snapshot picker for the Agents page header.
  *
  * `selected` is the operator's choice (= URL `?snapshot=...`); `null` =
  * "use latest". `resolvedId` is the actually-loaded snapshot id (latest
  * or the one chosen). Showing both lets the user see "you're viewing
  * snap_abc — which is also currently the latest".
  */
-export function DefinitionsSnapshotPicker({
+export function AgentsSnapshotPicker({
   projectId,
   selected,
   resolvedId,
@@ -91,11 +91,7 @@ export function DefinitionsSnapshotPicker({
                     }}
                   >
                     <div className="flex-1">
-                      {s.message !== null && (
-                        <div className="text-xs text-foreground">
-                          {s.message}
-                        </div>
-                      )}
+                      <div className="text-xs text-foreground">{s.message}</div>
                       <div className="font-mono text-[11px] opacity-70">
                         {shortId(s.id, 12, 4)}
                       </div>

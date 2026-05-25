@@ -47,6 +47,18 @@ export function formatQualifiedName(qn: string): string {
   return qn;
 }
 
+/** Default snapshot message used when the operator omits `-m`. Format
+ *  mirrors the snapshot list's primary display so a click-through reads
+ *  cleanly. */
+export function defaultSnapshotMessage(now: Date): string {
+  const y = now.getFullYear();
+  const mo = String(now.getMonth() + 1).padStart(2, "0");
+  const d = String(now.getDate()).padStart(2, "0");
+  const h = String(now.getHours()).padStart(2, "0");
+  const mi = String(now.getMinutes()).padStart(2, "0");
+  return `snapshot @ ${y}-${mo}-${d} ${h}:${mi}`;
+}
+
 export class SnapshotService {
   constructor(
     private readonly storage: Storage,
@@ -58,12 +70,18 @@ export class SnapshotService {
     irModule: IRModule;
     sidecarBundle: SidecarBundle | null;
     schemaBundle: SchemaBundle;
-    /** Operator-supplied commit-message-like text. `null` if omitted. */
+    /** Operator-supplied commit-message-like text. When `null` / omitted,
+     *  the service substitutes a default like `"snapshot @ 2026-05-25 15:42"`
+     *  so downstream rows always carry a human-readable label. */
     message?: string | null;
   }): Promise<{ snapshotId: SnapshotId }> {
+    const message =
+      input.message !== null && input.message !== undefined && input.message !== ""
+        ? input.message
+        : defaultSnapshotMessage(new Date());
     const snapshotId = await this.storage.snapshots.insert({
       ...input,
-      message: input.message ?? null,
+      message,
     });
     this.logger.log("info", "snapshot uploaded", {
       snapshotId,

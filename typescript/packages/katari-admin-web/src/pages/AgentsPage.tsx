@@ -7,11 +7,11 @@ import { useApiClient } from "@/contexts/ApiKeyContext";
 import { PageContent, PageHeader } from "@/components/ui/PageHeader";
 import { SpinnerOverlay } from "@/components/ui/Spinner";
 import { EmptyState } from "@/components/ui/EmptyState";
-import { DefinitionsSnapshotPicker } from "@/components/domain/DefinitionsSnapshotPicker";
-import { DefinitionsTree } from "@/components/domain/DefinitionsTree";
+import { AgentsSnapshotPicker } from "@/components/domain/AgentsSnapshotPicker";
+import { AgentsTree } from "@/components/domain/AgentsTree";
 import type { ProjectId, SnapshotId } from "@/api/types";
 
-export function DefinitionsPage() {
+export function AgentsPage() {
   const { projectId } = useParams<{ projectId: string }>();
   const [params, setParams] = useSearchParams();
   const client = useApiClient();
@@ -49,14 +49,14 @@ export function DefinitionsPage() {
   const { data, isLoading, isError, error } = useQuery({
     queryKey: ["definitions", projectId, selected ?? "latest"],
     queryFn: () =>
-      client.listAgentDefinitions({
+      client.listAgentAgents({
         projectId: projectId as ProjectId,
         snapshotId: selected ?? undefined,
       }),
     enabled: typeof projectId === "string",
   });
 
-  const visibleDefinitions = useMemo(() => {
+  const visibleAgents = useMemo(() => {
     if (data === undefined) return [];
     if (showAll || projectName === undefined) return data.definitions;
     const prefix = `${projectName}.`;
@@ -73,14 +73,12 @@ export function DefinitionsPage() {
   }
 
   const hiddenCount =
-    data === undefined
-      ? 0
-      : data.definitions.length - visibleDefinitions.length;
+    data === undefined ? 0 : data.definitions.length - visibleAgents.length;
 
   return (
     <div>
       <PageHeader
-        title="Definitions"
+        title="Agents"
         description="Callable agents in the selected snapshot. Pick one to invoke it with a generated form."
       />
       <PageContent>
@@ -90,7 +88,7 @@ export function DefinitionsPage() {
             stranded at the page's right edge). */}
         {typeof projectId === "string" && (
           <div className="mb-4 flex flex-wrap items-center gap-2">
-            <DefinitionsSnapshotPicker
+            <AgentsSnapshotPicker
               projectId={projectId as ProjectId}
               selected={selected}
               resolvedId={data?.snapshotId ?? null}
@@ -121,7 +119,7 @@ export function DefinitionsPage() {
             animate={{ opacity: 1 }}
             transition={{ duration: 0.15 }}
           >
-            {visibleDefinitions.length === 0 ? (
+            {visibleAgents.length === 0 ? (
               <EmptyState
                 icon={Boxes}
                 title={
@@ -137,8 +135,8 @@ export function DefinitionsPage() {
               />
             ) : (
               <div className="border border-border">
-                <DefinitionsTree
-                  definitions={visibleDefinitions}
+                <AgentsTree
+                  definitions={visibleAgents}
                   href={(def) => {
                     const search =
                       selected === null ? "" : `?snapshot=${selected}`;

@@ -19,10 +19,10 @@ import { buildAgentDefinitionRoutes } from "./agent-definition.js";
 export function buildSnapshotRoutes(snapshots: SnapshotService): Hono {
   const app = new Hono();
 
-  // Mount nested agent-definition router FIRST so longer paths like
-  // `/:snapshotId/agent-definition` win over the shorter `/:snapshotId`
+  // Mount nested agent router FIRST so longer paths like
+  // `/:snapshotId/agent` win over the shorter `/:snapshotId`
   // catch-all below. Hono matches in registration order.
-  app.route("/:snapshotId/agent-definition", buildAgentDefinitionRoutes(snapshots));
+  app.route("/:snapshotId/agent", buildAgentDefinitionRoutes(snapshots));
 
   app.post("/", async (c) => {
     const projectId = ProjectIdSchema.parse(c.req.param("projectId"));

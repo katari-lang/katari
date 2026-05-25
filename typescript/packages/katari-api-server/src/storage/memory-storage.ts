@@ -112,7 +112,7 @@ class InMemorySnapshotRepo implements SnapshotRepo {
     irModule: IRModule;
     sidecarBundle: SidecarBundle | null;
     schemaBundle: SchemaBundle;
-    message: string | null;
+    message: string;
   }): Promise<SnapshotId> {
     const id = uuidv7() as SnapshotId;
     this.rows.set(id, {

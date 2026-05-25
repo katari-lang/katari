@@ -1,6 +1,12 @@
 import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { ChevronDown, ChevronRight, Folder, FolderOpen, FileCode } from "lucide-react";
+import {
+  ChevronDown,
+  ChevronRight,
+  Folder,
+  FolderOpen,
+  FileCode,
+} from "lucide-react";
 import type { AgentDefinitionWire } from "@/api/types";
 
 type TreeNode =
@@ -14,11 +20,13 @@ function buildTree(defs: AgentDefinitionWire[]): TreeNode[] {
     let cursor = root;
     for (let i = 0; i < parts.length - 1; i += 1) {
       const seg = parts[i]!;
-      let next = cursor.kind === "folder"
-        ? cursor.children.find(
-            (c): c is TreeNode & { kind: "folder" } => c.kind === "folder" && c.name === seg,
-          )
-        : undefined;
+      let next =
+        cursor.kind === "folder"
+          ? cursor.children.find(
+              (c): c is TreeNode & { kind: "folder" } =>
+                c.kind === "folder" && c.name === seg,
+            )
+          : undefined;
       if (next === undefined) {
         next = {
           kind: "folder",
@@ -42,8 +50,12 @@ function buildTree(defs: AgentDefinitionWire[]): TreeNode[] {
 
 // Folders first (alpha), then leaves (alpha). Matches file-explorer norms.
 function sortTree(nodes: TreeNode[]): TreeNode[] {
-  const folders = nodes.filter((n): n is TreeNode & { kind: "folder" } => n.kind === "folder");
-  const leaves = nodes.filter((n): n is TreeNode & { kind: "leaf" } => n.kind === "leaf");
+  const folders = nodes.filter(
+    (n): n is TreeNode & { kind: "folder" } => n.kind === "folder",
+  );
+  const leaves = nodes.filter(
+    (n): n is TreeNode & { kind: "leaf" } => n.kind === "leaf",
+  );
   folders.sort((a, b) => a.name.localeCompare(b.name));
   leaves.sort((a, b) => a.name.localeCompare(b.name));
   return [
@@ -61,12 +73,13 @@ type Props = {
 // Row height matched to the rest of the admin tables (= py-2.5, ~40px
 // without description, ~52px with). Per-row hairline border keeps the
 // "list of clickable rows" feel without leaning on background contrast.
-const ROW_BASE = "flex w-full items-start gap-2 px-3 py-2.5 text-left transition-colors hover:bg-muted/50";
+const ROW_BASE =
+  "flex w-full items-start gap-2 px-3 py-2.5 text-left transition-colors hover:bg-muted/50";
 // Indent per nesting level (rem). Used in inline style so depth can be
 // arbitrarily nested without Tailwind needing to know about it.
 const INDENT_REM = 1.25;
 
-export function DefinitionsTree({ definitions, href }: Props) {
+export function AgentsTree({ definitions, href }: Props) {
   const tree = useMemo(() => buildTree(definitions), [definitions]);
   // Default-open every folder so the operator sees everything immediately.
   // The folder state is stored as a Set keyed by dotted path; toggling is
@@ -111,7 +124,9 @@ function collectAllFolderPaths(nodes: TreeNode[]): Set<string> {
 }
 
 function nodeKey(n: TreeNode): string {
-  return n.kind === "folder" ? `f:${n.path}` : `l:${n.definition.qualifiedName}`;
+  return n.kind === "folder"
+    ? `f:${n.path}`
+    : `l:${n.definition.qualifiedName}`;
 }
 
 function TreeRow({
@@ -183,7 +198,9 @@ function TreeRow({
         <span className="inline-block size-4 shrink-0" aria-hidden />
         <FileCode className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
         <div className="flex min-w-0 flex-1 flex-col">
-          <span className="truncate font-mono text-foreground">{node.name}</span>
+          <span className="truncate font-mono text-foreground">
+            {node.name}
+          </span>
           {desc !== undefined && desc !== "" && (
             <span className="mt-0.5 truncate text-xs text-muted-foreground">
               {desc}

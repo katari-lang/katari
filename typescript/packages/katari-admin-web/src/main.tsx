@@ -37,7 +37,27 @@ createRoot(root).render(
           <Toaster
             position="bottom-right"
             toastOptions={{
-              className: "! !text-foreground !border !border-border",
+              style: {
+                background: "var(--background)",
+                color: "var(--foreground)",
+                border: "1px solid var(--border)",
+                borderRadius: 0,
+                boxShadow: "none",
+                fontFamily: "var(--font-sans)",
+                fontSize: "14px",
+              },
+              success: {
+                iconTheme: {
+                  primary: "var(--success)",
+                  secondary: "var(--background)",
+                },
+              },
+              error: {
+                iconTheme: {
+                  primary: "var(--danger)",
+                  secondary: "var(--background)",
+                },
+              },
             }}
           />
         </BrowserRouter>

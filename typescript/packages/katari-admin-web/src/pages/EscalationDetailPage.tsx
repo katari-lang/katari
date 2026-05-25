@@ -12,7 +12,10 @@ import { Badge } from "@/components/ui/Badge";
 import { SchemaForm } from "@/components/schema-form/SchemaForm";
 import { ValueViewer } from "@/components/domain/ValueViewer";
 import { formatDateTime } from "@/lib/format";
-import { isNeverSchema, type JsonSchema } from "@/components/schema-form/schema-utils";
+import {
+  isNeverSchema,
+  type JsonSchema,
+} from "@/components/schema-form/schema-utils";
 import type { EscalationId, EscalationState, ProjectId } from "@/api/types";
 import type { RawValue } from "@katari-lang/runtime";
 
@@ -34,20 +37,19 @@ export function EscalationDetailPage() {
   const escalationQ = useQuery({
     queryKey: ["escalation", escalationId],
     queryFn: () =>
-      client.getEscalation(projectId as ProjectId, escalationId as EscalationId),
+      client.getEscalation(
+        projectId as ProjectId,
+        escalationId as EscalationId,
+      ),
     enabled: typeof projectId === "string" && typeof escalationId === "string",
   });
 
   const escalation = escalationQ.data?.escalation;
 
   const definitionsQ = useQuery({
-    queryKey: [
-      "definitions",
-      projectId,
-      escalation?.snapshotId ?? "latest",
-    ],
+    queryKey: ["definitions", projectId, escalation?.snapshotId ?? "latest"],
     queryFn: () =>
-      client.listAgentDefinitions({
+      client.listAgentAgents({
         projectId: projectId as ProjectId,
         snapshotId: escalation?.snapshotId,
       }),
@@ -70,7 +72,9 @@ export function EscalationDetailPage() {
     onSuccess: () => {
       toast.success("Escalation answered");
       void queryClient.invalidateQueries({ queryKey: ["escalations"] });
-      void queryClient.invalidateQueries({ queryKey: ["escalation", escalationId] });
+      void queryClient.invalidateQueries({
+        queryKey: ["escalation", escalationId],
+      });
       navigate(`/project/${projectId}/escalations`);
     },
     onError: (err) => {
@@ -86,17 +90,20 @@ export function EscalationDetailPage() {
   const cancelRun = useMutation({
     mutationFn: async () => {
       if (escalation === undefined) throw new Error("No escalation");
-      await client.cancelRun(projectId as ProjectId, escalation.rootDelegationId);
+      await client.cancelRun(
+        projectId as ProjectId,
+        escalation.rootDelegationId,
+      );
     },
     onSuccess: () => {
       toast.success("Cancel requested for the run");
       void queryClient.invalidateQueries({ queryKey: ["escalations"] });
-      void queryClient.invalidateQueries({ queryKey: ["escalation", escalationId] });
+      void queryClient.invalidateQueries({
+        queryKey: ["escalation", escalationId],
+      });
       void queryClient.invalidateQueries({ queryKey: ["runs", projectId] });
       if (escalation !== undefined) {
-        navigate(
-          `/project/${projectId}/runs/${escalation.rootDelegationId}`,
-        );
+        navigate(`/project/${projectId}/runs/${escalation.rootDelegationId}`);
       }
     },
     onError: (err) => {
@@ -121,7 +128,9 @@ export function EscalationDetailPage() {
               {escalation?.agentDefId ?? escalationId}
             </span>
             {escalation !== undefined && (
-              <Badge tone={stateTones[escalation.state]}>{escalation.state}</Badge>
+              <Badge tone={stateTones[escalation.state]}>
+                {escalation.state}
+              </Badge>
             )}
           </span>
         }
@@ -239,7 +248,9 @@ export function EscalationDetailPage() {
                   <Row
                     label="Request"
                     value={
-                      <code className="font-mono text-xs">{escalation.agentDefId}</code>
+                      <code className="font-mono text-xs">
+                        {escalation.agentDefId}
+                      </code>
                     }
                   />
                   <Row
@@ -269,7 +280,10 @@ export function EscalationDetailPage() {
                       </code>
                     }
                   />
-                  <Row label="Created" value={formatDateTime(escalation.createdAt)} />
+                  <Row
+                    label="Created"
+                    value={formatDateTime(escalation.createdAt)}
+                  />
                 </dl>
               </CardContent>
             </Card>

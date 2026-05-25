@@ -11,17 +11,15 @@ module Katari.Typechecker.Solver.Internal
 
     -- * Internal types
     Substitution,
-    BoundedType (..),
-    Bounds (..),
-    emptyBounds,
+    VarBounds (..),
+    BoundsMap,
+    VarGraph,
+    emptyVarBounds,
 
     -- * Helpers
     semanticToConcrete,
-    isSubtypeConcrete,
     containsNoTypeVars,
-    constraintTypeVars,
     typeVarsIn,
-    requestVarsIn,
     isTypeConstraint,
     isRequestConstraint,
   )
@@ -46,9 +44,8 @@ import Katari.Typechecker.ConstraintGenerator
     ConstraintReason,
   )
 import Katari.Typechecker.NormalizedType
-  ( NormalizedType,
-    normaliseSemantic,
-    subtypeNormalizedType,
+  ( NormalizedType (..),
+    emptyLayered,
   )
 
 -- ===========================================================================
@@ -98,20 +95,48 @@ deriving instance Show SolverError
 
 type Substitution = Map TypeVariableId (SemanticType Unresolved)
 
-data BoundedType = BoundedType
-  { boundType :: SemanticType Unresolved,
-    boundReason :: ConstraintReason
+-- | Per-variable bounds in the bound-pair Solver model.
+--
+-- Each type variable carries a SINGLE normalized lower (= union of every
+-- concrete flow into the variable) and a SINGLE normalized upper (=
+-- intersection of every concrete constraint flowing out of the variable).
+-- This replaces the older list-of-'BoundedType' model: as soon as a new
+-- concrete bound arrives, it is folded into the existing one via
+-- 'unionNT' / 'intersectNT', so the bounds are always already-aggregated.
+--
+-- The 'lowerReasons' / 'upperReasons' lists keep the originating
+-- 'ConstraintReason' of every contribution for diagnostics — the lattice
+-- collapse loses per-contribution shape, but we still want to point users
+-- at the source spans when a bounds conflict surfaces.
+--
+-- Initial state: lower = 'NTNever' (= 'NormalizedTypeLayered' 'emptyLayered'),
+-- upper = 'NormalizedTypeUnknown'. Both bounds are vacuously satisfied by
+-- any value; the variable is "unconstrained" until something is added.
+data VarBounds = VarBounds
+  { vbLower :: NormalizedType,
+    vbUpper :: NormalizedType,
+    vbLowerReasons :: [ConstraintReason],
+    vbUpperReasons :: [ConstraintReason]
   }
   deriving (Eq, Show)
 
-data Bounds = Bounds
-  { lowerBounds :: [BoundedType],
-    upperBounds :: [BoundedType]
-  }
-  deriving (Eq, Show)
+emptyVarBounds :: VarBounds
+emptyVarBounds =
+  VarBounds
+    { vbLower = NormalizedTypeLayered emptyLayered,
+      vbUpper = NormalizedTypeUnknown,
+      vbLowerReasons = [],
+      vbUpperReasons = []
+    }
 
-emptyBounds :: Bounds
-emptyBounds = Bounds {lowerBounds = [], upperBounds = []}
+type BoundsMap = Map TypeVariableId VarBounds
+
+-- | Adjacency for the var-on-var subtype graph: each entry @α ↦ {β₁, β₂}@
+-- records edges @α ⊑ β₁@ and @α ⊑ β₂@. After the worklist settles, the
+-- transitive closure of this graph drives bound propagation through
+-- variable chains (= @α ⊑ β ⊑ γ@ implies α's upper inherits γ's upper
+-- and γ's lower inherits α's lower).
+type VarGraph = Map TypeVariableId (Set TypeVariableId)
 
 -- ===========================================================================
 -- Conversion helpers
@@ -128,15 +153,6 @@ semanticToConcrete =
     (const Nothing)
     (const Nothing)
 
--- | Subtype check between two var-free 'SemanticType' values via
--- 'NormalizedType.subtypeNormalizedType'. Caller MUST 'containsNoTypeVars' both sides.
-isSubtypeConcrete :: SemanticType Unresolved -> SemanticType Unresolved -> Bool
-isSubtypeConcrete leftType rightType =
-  case (semanticToConcrete leftType, semanticToConcrete rightType) of
-    (Just leftConcrete, Just rightConcrete) ->
-      subtypeNormalizedType (normaliseSemantic leftConcrete) (normaliseSemantic rightConcrete)
-    _ -> False
-
 -- ===========================================================================
 -- Variable predicates / collection
 -- ===========================================================================
@@ -151,21 +167,6 @@ typeVarsIn =
   foldVariable
     Set.singleton
     (const Set.empty)
-
--- | Free 'RequestVariableId's appearing anywhere in the type. Function nodes are
--- the only constructors that carry requests; 'foldSemantic' delivers each
--- 'SemanticRequest' to the second argument.
-requestVarsIn :: SemanticType Unresolved -> Set RequestVariableId
-requestVarsIn =
-  foldVariable
-    (const Set.empty)
-    Set.singleton
-
-constraintTypeVars :: Constraint -> Set TypeVariableId
-constraintTypeVars = \case
-  TypeConstraint leftType rightType _ ->
-    Set.union (typeVarsIn leftType) (typeVarsIn rightType)
-  RequestConstraint {} -> Set.empty
 
 -- ===========================================================================
 -- Constraint partitioning

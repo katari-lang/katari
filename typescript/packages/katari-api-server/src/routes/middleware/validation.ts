@@ -106,7 +106,9 @@ export const UploadSnapshotSchema = z.object({
   sidecarBundle: SidecarBundleSchema.nullable().optional().default(null),
   schemaBundle: SchemaBundleShapeSchema,
   /** Free-form commit-message-like text. Trimmed at 1KB so the wire
-   *  payload doesn't grow unboundedly with operator-written labels. */
+   *  payload doesn't grow unboundedly with operator-written labels.
+   *  `null` / omitted is accepted; the server fills a default like
+   *  `"snapshot @ 2026-05-25 15:42"`. */
   message: z.string().max(1024).nullable().optional().default(null),
 });
 export type UploadSnapshotInput = z.infer<typeof UploadSnapshotSchema>;
@@ -132,7 +134,8 @@ export type RunStateInput = z.infer<typeof RunStateSchema>;
 export const StartRunSchema = z.object({
   snapshotId: SnapshotIdSchema.optional(),
   qualifiedName: z.string().min(1),
-  /** Operator-supplied label. `null` / omitted = unnamed. */
+  /** Operator-supplied display label. `null` / omitted is accepted; the
+   *  server fills a default like `"<qualifiedName> @ HH:mm"`. */
   name: z.string().min(1).max(128).nullable().optional().default(null),
   args: z.record(z.string(), RawValueSchema),
 });

@@ -35,7 +35,7 @@ CREATE TABLE IF NOT EXISTS snapshots (
   ir_module       JSONB NOT NULL,
   sidecar_bundle  JSONB,
   schema_bundle   JSONB NOT NULL,
-  message         TEXT,
+  message         TEXT NOT NULL,
   created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS snapshots_project_created_idx
@@ -115,7 +115,7 @@ CREATE INDEX IF NOT EXISTS escalations_receiver_state_idx
 CREATE TABLE IF NOT EXISTS runs_audit (
   id              UUID PRIMARY KEY,           -- = root delegation id
   snapshot_id     UUID NOT NULL REFERENCES snapshots(id) ON DELETE CASCADE,
-  name            TEXT,
+  name            TEXT NOT NULL,
   qualified_name  TEXT NOT NULL,
   args            JSONB NOT NULL,
   state           TEXT NOT NULL,              -- 'running' | 'cancelling' | 'cancelled' | 'error' | 'succeeded'

@@ -278,7 +278,7 @@ function NodeCard({ node }: { node: DelegationTreeNode }) {
       <div className="mt-1 font-mono text-xs text-foreground">
         {node.qualifiedName ?? node.agentDefId}
       </div>
-      {node.name !== undefined && node.name !== null && (
+      {node.name !== undefined && (
         <div className="mt-0.5 text-[11px] text-subtle-foreground">
           {node.name}
         </div>

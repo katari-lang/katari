@@ -7,7 +7,10 @@ import { PageContent, PageHeader } from "@/components/ui/PageHeader";
 import { SpinnerOverlay } from "@/components/ui/Spinner";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { Table, TBody, TD, TH, THead, TR } from "@/components/ui/Table";
-import { RunStatusBadge, isTerminalState } from "@/components/domain/RunStatusBadge";
+import {
+  RunStatusBadge,
+  isTerminalState,
+} from "@/components/domain/RunStatusBadge";
 import { formatDateTime, relativeTime, shortId } from "@/lib/format";
 import type { ProjectId } from "@/api/types";
 
@@ -19,7 +22,8 @@ export function RunsPage() {
   const navigate = useNavigate();
   const { data, isLoading, isError, error } = useQuery({
     queryKey: ["runs", projectId],
-    queryFn: () => client.listRuns({ projectId: projectId as ProjectId, limit: 200 }),
+    queryFn: () =>
+      client.listRuns({ projectId: projectId as ProjectId, limit: 200 }),
     enabled: typeof projectId === "string",
     refetchInterval: (query) => {
       const rows = query.state.data?.runs ?? [];
@@ -51,7 +55,7 @@ export function RunsPage() {
               <EmptyState
                 icon={Activity}
                 title="No runs yet"
-                description="Start a run from the Definitions page to populate this list."
+                description="Start a run from the Agents page to populate this list."
               />
             ) : (
               <Table>
@@ -69,7 +73,9 @@ export function RunsPage() {
                     <TR
                       key={run.id}
                       className="cursor-pointer"
-                      onClick={() => navigate(`/project/${projectId}/runs/${run.id}`)}
+                      onClick={() =>
+                        navigate(`/project/${projectId}/runs/${run.id}`)
+                      }
                     >
                       <TD>
                         <RunStatusBadge state={run.state} />
@@ -81,22 +87,26 @@ export function RunsPage() {
                           onClick={(e) => e.stopPropagation()}
                         >
                           <div className="font-medium text-foreground">
-                            {run.name ?? run.qualifiedName}
+                            {run.name}
                           </div>
                           <div className="mt-0.5 font-mono text-[11px] text-subtle-foreground">
-                            {run.name !== null
-                              ? `${run.qualifiedName} · ${shortId(run.id)}`
-                              : shortId(run.id)}
+                            {run.qualifiedName} · {shortId(run.id)}
                           </div>
                         </Link>
                       </TD>
                       <TD className="font-mono text-xs text-muted-foreground">
                         {shortId(run.snapshotId)}
                       </TD>
-                      <TD className="text-xs text-muted-foreground" title={formatDateTime(run.createdAt)}>
+                      <TD
+                        className="text-xs text-muted-foreground"
+                        title={formatDateTime(run.createdAt)}
+                      >
                         {relativeTime(run.createdAt)}
                       </TD>
-                      <TD className="text-xs text-muted-foreground" title={formatDateTime(run.updatedAt)}>
+                      <TD
+                        className="text-xs text-muted-foreground"
+                        title={formatDateTime(run.updatedAt)}
+                      >
                         {relativeTime(run.updatedAt)}
                       </TD>
                     </TR>

@@ -6,7 +6,7 @@ import { ProjectsPage } from "@/pages/ProjectsPage";
 import { DashboardPage } from "@/pages/DashboardPage";
 import { RunsPage } from "@/pages/RunsPage";
 import { RunDetailPage } from "@/pages/RunDetailPage";
-import { DefinitionsPage } from "@/pages/DefinitionsPage";
+import { AgentsPage } from "@/pages/AgentsPage";
 import { DefinitionDetailPage } from "@/pages/DefinitionDetailPage";
 import { EscalationsPage } from "@/pages/EscalationsPage";
 import { EscalationDetailPage } from "@/pages/EscalationDetailPage";
@@ -27,10 +27,16 @@ export default function App() {
               <Route index element={<DashboardPage />} />
               <Route path="runs" element={<RunsPage />} />
               <Route path="runs/:runId" element={<RunDetailPage />} />
-              <Route path="definitions" element={<DefinitionsPage />} />
-              <Route path="definitions/:qualifiedName" element={<DefinitionDetailPage />} />
+              <Route path="definitions" element={<AgentsPage />} />
+              <Route
+                path="definitions/:qualifiedName"
+                element={<DefinitionDetailPage />}
+              />
               <Route path="escalations" element={<EscalationsPage />} />
-              <Route path="escalations/:escalationId" element={<EscalationDetailPage />} />
+              <Route
+                path="escalations/:escalationId"
+                element={<EscalationDetailPage />}
+              />
             </Route>
             <Route path="/env" element={<EnvPage />} />
             <Route path="/settings" element={<SettingsPage />} />

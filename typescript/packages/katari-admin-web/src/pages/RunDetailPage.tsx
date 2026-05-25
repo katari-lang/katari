@@ -86,7 +86,7 @@ export function RunDetailPage() {
             </Link>
             <span className="text-subtle-foreground text-sm">/</span>
             <span className="font-mono text-base text-foreground">
-              {run?.name ?? run?.qualifiedName ?? runId}
+              {run?.name ?? runId}
             </span>
             {run !== undefined && <RunStatusBadge state={run.state} />}
           </span>
@@ -138,14 +138,12 @@ export function RunDetailPage() {
                       <code className="font-mono text-xs">{run.id}</code>
                     }
                   />
-                  {run.name !== null && (
-                    <Row
-                      label="Name"
-                      value={
-                        <span className="text-foreground">{run.name}</span>
-                      }
-                    />
-                  )}
+                  <Row
+                    label="Name"
+                    value={
+                      <span className="text-foreground">{run.name}</span>
+                    }
+                  />
                   <Row
                     label="Agent"
                     value={

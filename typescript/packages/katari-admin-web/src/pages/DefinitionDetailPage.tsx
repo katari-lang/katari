@@ -13,6 +13,8 @@ import { useApiClient } from "@/contexts/ApiKeyContext";
 import { PageContent, PageHeader } from "@/components/ui/PageHeader";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
+import { Input } from "@/components/ui/Input";
+import { Label } from "@/components/ui/Label";
 import { SpinnerOverlay } from "@/components/ui/Spinner";
 import { SchemaForm } from "@/components/schema-form/SchemaForm";
 import { ValueViewer } from "@/components/domain/ValueViewer";
@@ -38,7 +40,7 @@ export function DefinitionDetailPage() {
   const { data, isLoading, isError, error } = useQuery({
     queryKey: ["definitions", projectId, selectedSnapshot ?? "latest"],
     queryFn: () =>
-      client.listAgentDefinitions({
+      client.listAgentAgents({
         projectId: projectId as ProjectId,
         snapshotId: selectedSnapshot,
       }),
@@ -49,12 +51,18 @@ export function DefinitionDetailPage() {
     (d) => d.qualifiedName === qualifiedName,
   );
 
+  // Operator-supplied run label. Empty = let the server pick a default
+  // (typically `"<qualifiedName> @ HH:mm"`), so the placeholder previews
+  // what will be stored if the field is left blank.
+  const [runName, setRunName] = useState("");
+
   const invoke = useMutation({
     mutationFn: (args: Record<string, RawValue>) =>
       client.startRun({
         projectId: projectId as ProjectId,
         snapshotId: selectedSnapshot,
         qualifiedName: qualifiedName ?? "",
+        name: runName.trim() === "" ? null : runName.trim(),
         args,
       }),
     onSuccess: (res) => {
@@ -65,6 +73,8 @@ export function DefinitionDetailPage() {
       toast.error(err instanceof Error ? err.message : "Failed to start.");
     },
   });
+
+  const namePlaceholder = defaultRunNamePreview(qualifiedName);
 
   return (
     <div>
@@ -80,7 +90,7 @@ export function DefinitionDetailPage() {
               className="inline-flex items-center gap-1 text-muted-foreground hover:text-foreground"
             >
               <ArrowLeft className="size-4" />
-              <span className="text-sm font-normal">Definitions</span>
+              <span className="text-sm font-normal">Agents</span>
             </Link>
             <span className="text-subtle-foreground text-sm">/</span>
             <span className="break-all font-mono text-base text-foreground">
@@ -117,25 +127,40 @@ export function DefinitionDetailPage() {
                 <CardTitle>Invoke</CardTitle>
               </CardHeader>
               <CardContent>
-                <SchemaForm
-                  schema={definition.parameters as JsonSchema}
-                  onSubmit={(args) =>
-                    invoke.mutate(args as Record<string, RawValue>)
-                  }
-                  renderActions={({ submit }) => (
-                    <div className="flex justify-end pt-2">
-                      <Button
-                        type="button"
-                        variant="primary"
-                        onClick={submit}
-                        loading={invoke.isPending}
-                      >
-                        <Play className="size-4" />
-                        Run agent
-                      </Button>
-                    </div>
-                  )}
-                />
+                <div className="space-y-4">
+                  <div className="space-y-1.5">
+                    <Label htmlFor="run-name">Name</Label>
+                    <Input
+                      id="run-name"
+                      value={runName}
+                      onChange={(e) => setRunName(e.target.value)}
+                      placeholder={namePlaceholder}
+                      maxLength={128}
+                    />
+                    <p className="text-xs text-subtle-foreground">
+                      Optional. Leave blank to use the suggested default.
+                    </p>
+                  </div>
+                  <SchemaForm
+                    schema={definition.parameters as JsonSchema}
+                    onSubmit={(args) =>
+                      invoke.mutate(args as Record<string, RawValue>)
+                    }
+                    renderActions={({ submit }) => (
+                      <div className="flex justify-end pt-2">
+                        <Button
+                          type="button"
+                          variant="primary"
+                          onClick={submit}
+                          loading={invoke.isPending}
+                        >
+                          <Play className="size-4" />
+                          Run agent
+                        </Button>
+                      </div>
+                    )}
+                  />
+                </div>
               </CardContent>
             </Card>
             <ReturnsCard returns={definition.returns} />
@@ -144,6 +169,17 @@ export function DefinitionDetailPage() {
       </PageContent>
     </div>
   );
+}
+
+/** Mirrors the server's default-name format so the placeholder previews
+ *  what will actually be stored. Time is local to the browser, which is
+ *  also where the operator is looking — server-stamped time may differ
+ *  slightly but the format matches. */
+function defaultRunNamePreview(qualifiedName: string | undefined): string {
+  const now = new Date();
+  const h = String(now.getHours()).padStart(2, "0");
+  const m = String(now.getMinutes()).padStart(2, "0");
+  return `${qualifiedName ?? "agent"} @ ${h}:${m}`;
 }
 
 function ReturnsCard({ returns }: { returns: unknown }) {

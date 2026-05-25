@@ -18,7 +18,6 @@ import Data.Map.Strict qualified as Map
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
-import Data.Text qualified as T
 import Katari.SemanticType
   ( SemanticType (..),
     Unresolved,
@@ -90,49 +89,42 @@ decomposeType original leftType rightType reason = case (leftType, rightType) of
     keep
   ( SemanticTypeFunction leftParameters leftReturn leftRequests,
     SemanticTypeFunction rightParameters rightReturn rightRequests
-    )
-      | Map.keysSet leftParameters == Map.keysSet rightParameters ->
-          -- Args contravariant; return covariant; request covariant (subset).
-          -- Parameters are matched by label (named-parameter calling
-          -- convention): for each label L, derive @rightParameter \<: leftParameter@.
-          let parameterConstraints =
-                [ TypeConstraint rightParameter leftParameter reason
-                  | (label, leftParameter) <- Map.toList leftParameters,
-                    Just rightParameter <- [Map.lookup label rightParameters]
-                ]
-              returnConstraint = TypeConstraint leftReturn rightReturn reason
-              requestConstraint = RequestConstraint leftRequests rightRequests reason
-           in yield (requestConstraint : returnConstraint : parameterConstraints)
-      | otherwise ->
-          Left
-            ( SolverErrorStructuralMismatch
+    ) ->
+      -- Width-subtyping on the label set: missing labels on either side
+      -- are filled with 'SemanticTypeUnknown' (= top of the lattice),
+      -- then the standard contravariant param / covariant return /
+      -- covariant request decomposition runs over the union of labels.
+      --
+      -- Concretely: @f1 ⊑ f2@ where label sets differ becomes a check
+      -- that each common label's RHS-param ⊑ LHS-param, plus the
+      -- missing labels are checked against 'unknown' (vacuous for
+      -- "missing on LHS", error-revealing for "missing on RHS where
+      -- the LHS-param is concrete").
+      let allLabels = Map.keysSet leftParameters <> Map.keysSet rightParameters
+          parameterConstraints =
+            [ TypeConstraint
+                (Map.findWithDefault SemanticTypeUnknown label rightParameters)
+                (Map.findWithDefault SemanticTypeUnknown label leftParameters)
                 reason
-                ( "function signature mismatch: "
-                    <> showLabels leftParameters
-                    <> " vs "
-                    <> showLabels rightParameters
-                )
-            )
+              | label <- Set.toList allLabels
+            ]
+          returnConstraint = TypeConstraint leftReturn rightReturn reason
+          requestConstraint = RequestConstraint leftRequests rightRequests reason
+       in yield (requestConstraint : returnConstraint : parameterConstraints)
   (SemanticTypeArray leftElement, SemanticTypeArray rightElement) ->
     yield [TypeConstraint leftElement rightElement reason] -- covariant
-  (SemanticTypeTuple leftElements, SemanticTypeTuple rightElements)
-    | length leftElements == length rightElements ->
-        yield
-          ( zipWith
-              (\leftElement rightElement -> TypeConstraint leftElement rightElement reason)
-              leftElements
-              rightElements
-          )
-    | otherwise ->
-        Left
-          ( SolverErrorStructuralMismatch
-              reason
-              ( "tuple arity mismatch: "
-                  <> tshow (length leftElements)
-                  <> " vs "
-                  <> tshow (length rightElements)
-              )
-          )
+  (SemanticTypeTuple leftElements, SemanticTypeTuple rightElements) ->
+    -- Width-subtyping on positional length: missing positions filled
+    -- with 'SemanticTypeUnknown'. Allows e.g. @(int, string, bool) ⊑
+    -- (int, string)@ (= extra positions are dropped via fill).
+    let maxLen = max (length leftElements) (length rightElements)
+        padded xs = take maxLen (xs ++ repeat SemanticTypeUnknown)
+        elementConstraints =
+          zipWith
+            (\leftElement rightElement -> TypeConstraint leftElement rightElement reason)
+            (padded leftElements)
+            (padded rightElements)
+     in yield elementConstraints
   (SemanticTypeObject leftFields, SemanticTypeObject rightFields) ->
     decomposeObject leftFields rightFields reason
   (SemanticTypeData leftTypeId, SemanticTypeData rightTypeId)
@@ -199,36 +191,28 @@ shapeKind = \case
   SemanticTypeNever -> Nothing
   SemanticTypeUnknown -> Nothing
 
-showLabels :: Map.Map Text (SemanticType phase) -> Text
-showLabels parameters =
-  "{" <> T.intercalate ", " (Map.keys parameters) <> "}"
-
 decomposeObject ::
   Map.Map Text (SemanticType Unresolved) ->
   Map.Map Text (SemanticType Unresolved) ->
   ConstraintReason ->
   Either SolverError (Set Constraint)
 decomposeObject leftFields rightFields reason =
-  let missing = Map.keysSet rightFields `Set.difference` Map.keysSet leftFields
-   in if not (Set.null missing)
-        then
-          Left
-            ( SolverErrorStructuralMismatch
-                reason
-                ( "object missing required field(s): "
-                    <> T.intercalate ", " (Set.toList missing)
-                )
-            )
-        else
-          Right $
-            Set.fromList
-              [ TypeConstraint leftFieldType rightFieldType reason
-                | (label, rightFieldType) <- Map.toList rightFields,
-                  Just leftFieldType <- [Map.lookup label leftFields]
-              ]
-
-tshow :: (Show a) => a -> Text
-tshow = T.pack . show
+  -- Width-subtyping covariant: union the label sets and fill missing
+  -- labels with 'SemanticTypeUnknown'. A LHS missing a label demanded
+  -- by RHS yields @unknown ⊑ RHS_field_type@ which fails
+  -- concrete-vs-concrete in the next decompose pass and surfaces an
+  -- error. RHS missing a label LHS has yields @LHS_field_type ⊑
+  -- unknown@ which is vacuous (= extra LHS fields are accepted by
+  -- width subtyping).
+  let allLabels = Map.keysSet leftFields <> Map.keysSet rightFields
+   in Right $
+        Set.fromList
+          [ TypeConstraint
+              (Map.findWithDefault SemanticTypeUnknown label leftFields)
+              (Map.findWithDefault SemanticTypeUnknown label rightFields)
+              reason
+            | label <- Set.toList allLabels
+          ]
 
 -- ===========================================================================
 -- decomposeConstraintsAll

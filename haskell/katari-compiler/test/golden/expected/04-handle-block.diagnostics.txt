@@ -1,4 +1,4 @@
-error[K0220]: type contradiction at ReasonKindRequestHandlerNever: expected `42`, found `never`
+error[K0220]: type contradiction at ReasonKindRequestHandlerNever: expected `never`, found `42`
   --> test/golden/cases/04-handle-block.ktr (7:5)
   |
 7 |     req fetch_answer() { 42 }

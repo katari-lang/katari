@@ -14,16 +14,13 @@
 -- the variable's shape, OR commit the variable to 'never' / 'unknown'.
 --
 -- 'branchConstraint' returns a list of alternative branches. Each branch is
--- a triple @(subst, newConstraints, nextTypeVariableId)@: the variable
--- assignment, additional constraints to satisfy, and the updated TypeVar
--- counter (since branching may allocate fresh vars).
---
--- 'branchConstraints' picks the first branchable constraint in the worklist
--- and fans it out, leaving the rest of the constraints untouched.
+-- a 'BranchAlt' carrying the partial substitution, additional constraints
+-- to satisfy, and the updated TypeVar / RequestVar counters (since
+-- branching may allocate fresh vars).
 module Katari.Typechecker.Solver.Branch
   ( BranchAlt (..),
     branchConstraint,
-    branchConstraints,
+    isBranchableShape,
   )
 where
 
@@ -96,35 +93,33 @@ branchType ::
   SemanticType Unresolved ->
   ConstraintReason ->
   Maybe [BranchAlt]
-branchType nextTypeVariableId nextRequestVariableId leftType rightType reason =
+branchType nextTV nextRV leftType rightType reason =
   case (leftType, rightType) of
-    -- α <: B | C : try α <: B OR α <: C.
-    -- Only branch when LHS contains a type variable; if LHS is concrete the
-    -- decomposer already settled or rejected this constraint via subtypeNormalizedType.
+    -- α <: (B | C) where the union has internal vars (= not yet concrete).
+    -- Required: pick one branch (= world fan-out). When B and C are both
+    -- concrete, the bound-pair Solver loop aggregates the union as an
+    -- upper bound via 'intersectNT' instead, so branching is not used
+    -- and we avoid the union-return secret-taint bug (= committing
+    -- prematurely to one element of the upper union).
     (_, SemanticTypeUnion branches)
-      | not (Set.null (typeVarsIn leftType)) ->
+      | not (Set.null (typeVarsIn leftType))
+          && not (Set.null (typeVarsIn rightType)) ->
           Just
             [ BranchAlt
                 { branchSubst = Map.empty,
                   branchNewConstraints =
                     Set.singleton (TypeConstraint leftType branch reason),
-                  branchNextTypeVariableId = nextTypeVariableId,
-                  branchNextRequestVariableId = nextRequestVariableId
+                  branchNextTypeVariableId = nextTV,
+                  branchNextRequestVariableId = nextRV
                 }
               | branch <- branches
             ]
     -- α <: composite (LHS is var, RHS has structure).
-    (SemanticTypeVariable typeVarId, _)
-      | isBranchableShape rightType ->
-          Just
-            ( branchVarOnLeft nextTypeVariableId nextRequestVariableId typeVarId rightType reason
-            )
+    (SemanticTypeVariable α, _) | isBranchableShape rightType ->
+      Just (branchVar LeftVar nextTV nextRV α rightType reason)
     -- composite <: α (RHS is var, LHS has structure).
-    (_, SemanticTypeVariable typeVarId)
-      | isBranchableShape leftType ->
-          Just
-            ( branchVarOnRight nextTypeVariableId nextRequestVariableId leftType typeVarId reason
-            )
+    (_, SemanticTypeVariable α) | isBranchableShape leftType ->
+      Just (branchVar RightVar nextTV nextRV α leftType reason)
     _ -> Nothing
 
 -- | True iff the shape has internal structure that warrants branching.
@@ -187,34 +182,23 @@ flipSide = \case
   RightVar -> LeftVar
 
 -- ---------------------------------------------------------------------------
--- branchVar : unified narrow + fallback for both α \<: F and F \<: α
+-- branchVar : narrow + fallback for both α \<: F and F \<: α
 -- ---------------------------------------------------------------------------
-
-branchVarOnLeft ::
-  Int ->
-  Int ->
-  TypeVariableId ->
-  SemanticType Unresolved ->
-  ConstraintReason ->
-  [BranchAlt]
-branchVarOnLeft = branchVar LeftVar
-
-branchVarOnRight ::
-  Int ->
-  Int ->
-  SemanticType Unresolved ->
-  TypeVariableId ->
-  ConstraintReason ->
-  [BranchAlt]
-branchVarOnRight nextTypeVariableId nextRequestVariableId shape typeVarId =
-  branchVar RightVar nextTypeVariableId nextRequestVariableId typeVarId shape
 
 -- | Two alternatives for a stuck @α \<: F@ or @F \<: α@:
 --
 --   1. α takes the structural shape with fresh sub-vars (variance constraints
 --      are emitted via 'narrowShape').
 --   2. α := 'SemanticTypeNever' (for 'LeftVar', vacuously @α \<: anything@) or
---      α := 'SemanticTypeUnknown' (for 'RightVar', vacuously @anything \<: α@).
+--      α := 'SemanticTypeFunctionAny' / 'SemanticTypeUnknown' (for 'RightVar',
+--      vacuously @anything \<: α@).
+--
+-- The fallback is load-bearing: after substituting @α := Never@ (or
+-- 'Unknown'), any existing concrete lower bound @T \<: α@ in the worklist
+-- reduces to @T \<: Never@ on the next iteration, which fails the
+-- concrete-vs-concrete subtype check and surfaces the error. Removing
+-- the fallback silently masks signature mismatches that show up only
+-- through bound aggregation cross-checks.
 branchVar ::
   BranchSide ->
   Int ->
@@ -223,34 +207,25 @@ branchVar ::
   SemanticType Unresolved ->
   ConstraintReason ->
   [BranchAlt]
-branchVar side nextTypeVariableId nextRequestVariableId typeVarId shape reason =
-  let (narrowedShape, freshConstraints, nextTypeVariableIdAfter, nextRequestVariableIdAfter) =
-        narrowShape side nextTypeVariableId nextRequestVariableId shape reason
-      -- Fallback substitution for the second branch. For @α \<: F@ the
-      -- vacuous bound is 'SemanticTypeNever' (bottom). For @F \<: α@ we
-      -- pick the tightest top that still satisfies the constraint:
-      --   * If F is a function shape, use 'SemanticTypeFunctionAny' —
-      --     the function-lattice top — so that α need only be \"some
-      --     function or wider\" rather than the full \"unknown\". This
-      --     keeps later constraints like @α \<: integer@ correctly
-      --     rejecting (a callable is not an integer).
-      --   * Otherwise (array / tuple / object), keep 'SemanticTypeUnknown'.
+branchVar side nextTV nextRV α shape reason =
+  let (narrowedShape, freshConstraints, nextTVAfter, nextRVAfter) =
+        narrowShape side nextTV nextRV shape reason
       fallback = case side of
         LeftVar -> SemanticTypeNever
         RightVar -> case shape of
           SemanticTypeFunction {} -> SemanticTypeFunctionAny
           _ -> SemanticTypeUnknown
    in [ BranchAlt
-          { branchSubst = Map.singleton typeVarId narrowedShape,
+          { branchSubst = Map.singleton α narrowedShape,
             branchNewConstraints = freshConstraints,
-            branchNextTypeVariableId = nextTypeVariableIdAfter,
-            branchNextRequestVariableId = nextRequestVariableIdAfter
+            branchNextTypeVariableId = nextTVAfter,
+            branchNextRequestVariableId = nextRVAfter
           },
         BranchAlt
-          { branchSubst = Map.singleton typeVarId fallback,
+          { branchSubst = Map.singleton α fallback,
             branchNewConstraints = Set.empty,
-            branchNextTypeVariableId = nextTypeVariableId,
-            branchNextRequestVariableId = nextRequestVariableId
+            branchNextTypeVariableId = nextTV,
+            branchNextRequestVariableId = nextRV
           }
       ]
 
@@ -345,49 +320,3 @@ freshVars nextTypeVariableId count =
       (remaining, nextAfterAll) = freshVars nextAfterFirst (count - 1)
    in (typeVarId : remaining, nextAfterAll)
 
--- ===========================================================================
--- branchConstraints
--- ===========================================================================
-
--- | Find the first branchable constraint in the list and fan it out.
--- Returns 'Nothing' if no constraint is branchable.
---
--- Each result is @(subst, newConstraintList, nextTypeVariableId, nextRequestVariableId)@:
--- the alt's substitution, the worklist after the branch (remaining
--- constraints + new sub-constraints, with the substitution applied), and
--- the updated counters.
-branchConstraints ::
-  Int ->
-  Int ->
-  Set Constraint ->
-  Maybe [(Substitution, Set Constraint, Int, Int)]
-branchConstraints nextTypeVariableId nextRequestVariableId constraints =
-  case findFirstBranch nextTypeVariableId nextRequestVariableId constraints of
-    Nothing -> Nothing
-    Just (chosen, alternatives) ->
-      let untouched = Set.delete chosen constraints
-       in Just
-            [ ( alternative.branchSubst,
-                Set.union alternative.branchNewConstraints untouched,
-                alternative.branchNextTypeVariableId,
-                alternative.branchNextRequestVariableId
-              )
-              | alternative <- alternatives
-            ]
-
--- | Find the first 'Constraint' in the set that is branchable, returning it
--- alongside its alternatives. Iteration order is the 'Ord'-defined ascending
--- traversal of the set, which is deterministic across runs.
-findFirstBranch ::
-  Int ->
-  Int ->
-  Set Constraint ->
-  Maybe (Constraint, [BranchAlt])
-findFirstBranch nextTypeVariableId nextRequestVariableId constraints =
-  go (Set.toAscList constraints)
-  where
-    go [] = Nothing
-    go (current : remaining) =
-      case branchConstraint nextTypeVariableId nextRequestVariableId current of
-        Just alternatives -> Just (current, alternatives)
-        Nothing -> go remaining

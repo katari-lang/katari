@@ -33,7 +33,9 @@ export type DelegationTreeNode = {
   agentDefId: string;
   qualifiedName: string | null;
   state: "running" | "cancelling" | "cancelled" | "error" | "succeeded";
-  name?: string | null;
+  /** Present on the root node (= the run itself); always non-empty.
+   *  Absent on non-root delegations. */
+  name?: string;
   cancelReason?: "user" | "error" | null;
   args: Record<string, RawValue>;
   result?: RawValue;

@@ -36,6 +36,18 @@ import type {
   SnapshotId,
 } from "../storage/types.js";
 
+/** Default `run.name` used when the caller omits one. Format pairs the
+ *  agent qualified name with a wall-clock time, so the run is identifiable
+ *  in the Runs list at a glance ("hello.main @ 15:42") without the user
+ *  having to think up a label. The seconds are dropped because two runs
+ *  fired in the same minute is rare in operator workflow; if it happens
+ *  the row's id and createdAt still disambiguate. */
+function defaultRunName(qualifiedName: string, now: Date): string {
+  const h = String(now.getHours()).padStart(2, "0");
+  const m = String(now.getMinutes()).padStart(2, "0");
+  return `${qualifiedName} @ ${h}:${m}`;
+}
+
 export type ApiModuleOptions = {
   snapshotId: SnapshotId;
   tx: Storage;
@@ -111,12 +123,20 @@ export class ApiModule implements Module {
   async startRun(input: {
     bus: { push: (event: ExternalEvent) => void };
     qualifiedName: string;
+    /** Display label. When `null` / omitted, a default like
+     *  `"<qualifiedName> @ HH:mm"` is substituted so the audit row always
+     *  carries a non-empty name. */
     name: string | null;
     args: Record<string, Value>;
   }): Promise<{ runId: DelegationId }> {
     const delegationId = createDelegationId();
-    const now = new Date().toISOString();
+    const startedAt = new Date();
+    const now = startedAt.toISOString();
     const encryptedArgs = encryptValueRecord(input.args);
+    const name =
+      input.name !== null && input.name !== ""
+        ? input.name
+        : defaultRunName(input.qualifiedName, startedAt);
 
     // Two-row insert: the live delegation entity (= drives runtime
     // dispatch + cancel cascade) and the persistent audit row (= survives
@@ -141,7 +161,7 @@ export class ApiModule implements Module {
     const auditRow: RunsAuditRow = {
       id: delegationId,
       snapshotId: this.snapshotId,
-      name: input.name,
+      name,
       qualifiedName: input.qualifiedName,
       args: encryptedArgs,
       state: "running",

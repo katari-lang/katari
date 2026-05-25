@@ -102,15 +102,17 @@ export type Snapshot = {
   irModule: IRModule;
   sidecarBundle: SidecarBundle | null;
   schemaBundle: SchemaBundle;
-  /** Commit-message-like free text provided by the operator on `apply`. */
-  message: string | null;
+  /** Commit-message-like free text. Filled with a sensible default
+   *  (`"snapshot @ YYYY-MM-DD HH:mm"`) by the server when the operator
+   *  omits one, so this is always a non-empty string. */
+  message: string;
   createdAt: string;
 };
 
 export type SnapshotSummary = {
   id: SnapshotId;
   projectId: ProjectId;
-  message: string | null;
+  message: string;
   createdAt: string;
 };
 
@@ -120,7 +122,7 @@ export interface SnapshotRepo {
     irModule: IRModule;
     sidecarBundle: SidecarBundle | null;
     schemaBundle: SchemaBundle;
-    message: string | null;
+    message: string;
   }): Promise<SnapshotId>;
   get(id: SnapshotId): Promise<Snapshot | null>;
   list(
@@ -267,8 +269,10 @@ export type RunsAuditRow = {
   /** = root delegation id. */
   id: DelegationId;
   snapshotId: SnapshotId;
-  /** Operator-supplied free label. May be `null`. */
-  name: string | null;
+  /** Display label. Filled with a sensible default
+   *  (`"<qualifiedName> @ HH:mm"`) by the server when the operator
+   *  omits one, so this is always a non-empty string. */
+  name: string;
   qualifiedName: string;
   args: Record<string, EncryptedValue>;
   state: RunsAuditState;
