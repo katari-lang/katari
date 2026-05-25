@@ -33,14 +33,14 @@ katari.agent("sleep_ms", async ({ args, signal }) => {
 
 katari.agent("fan_out", async ({ args, signal }) => {
   const callbackRaw = args["callback"];
-  // The wire shape for a Katari callable arg is `{$callable: "qname"}`
+  // The wire shape for a Katari callable arg is `{$agent: "qname"}`
   // (= per value-codec.ts). `katari.delegate` expects the bare qname
   // string, so unwrap here before forwarding.
   const callable =
     typeof callbackRaw === "string"
       ? callbackRaw
       : isCallableEnvelope(callbackRaw)
-        ? callbackRaw.$callable
+        ? callbackRaw.$agent
         : null;
   if (callable === null) {
     throw new Error(
@@ -63,11 +63,11 @@ katari.agent("fan_out", async ({ args, signal }) => {
 
 function isCallableEnvelope(
   v: RawValue,
-): v is { $callable: string } {
+): v is { $agent: string } {
   return (
     typeof v === "object" &&
     v !== null &&
     !Array.isArray(v) &&
-    typeof (v as Record<string, unknown>).$callable === "string"
+    typeof (v as Record<string, unknown>).$agent === "string"
   );
 }

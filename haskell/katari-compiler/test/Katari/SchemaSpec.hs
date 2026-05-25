@@ -90,7 +90,7 @@ toJsonSchemaSpec = describe "toJsonSchema (SemanticType -> JsonSchema)" $ do
         additionalProperties `shouldBe` False
       _ -> expectationFailure "expected SchemaCoreObject"
 
-  it "function types emit a callable-reference object with required $callable: string" $ do
+  it "function types emit a callable-reference object with required $agent: string" $ do
     let t =
           SemanticTypeFunction
             Map.empty
@@ -98,8 +98,8 @@ toJsonSchemaSpec = describe "toJsonSchema (SemanticType -> JsonSchema)" $ do
             (SemanticRequest Set.empty)
     case (simpleToJson t).core of
       SchemaCoreObject {properties, required, additionalProperties} -> do
-        Map.keys properties `shouldBe` ["$callable"]
-        required `shouldBe` Set.singleton "$callable"
+        Map.keys properties `shouldBe` ["$agent"]
+        required `shouldBe` Set.singleton "$agent"
         additionalProperties `shouldBe` False
       _ -> expectationFailure "expected SchemaCoreObject (callable reference)"
 

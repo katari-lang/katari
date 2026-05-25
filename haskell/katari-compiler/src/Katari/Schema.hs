@@ -236,7 +236,7 @@ withDesc d JsonSchema {core, title, examples} =
 
 -- | Per-data-type metadata threaded through schema generation. Carries
 -- the constructor's 'QualifiedName' so the emitted schema can stamp
--- a @"$ctor": {"const": "module.name"}@ discriminator on the resulting
+-- a @"$constructor": {"const": "module.name"}@ discriminator on the resulting
 -- object schema (required for raw ↔ Value round-trip without ambiguity
 -- on unions). Field annotations come along so recursive
 -- 'SemanticTypeData' references render with the same descriptions as
@@ -374,7 +374,7 @@ toCore dataDefs visited = \case
               }
     | otherwise -> SchemaCoreUnknown
   -- Concrete function types and the 'function' top type are both
-  -- carried on the wire as a callable reference @{"$callable":
+  -- carried on the wire as a callable reference @{"$agent":
   -- "module.name" | "closure:N"}@. The reference is what 'get_metadata'
   -- returns in its 'id' field.
   SemanticTypeFunction {} -> callableRefCore
@@ -397,17 +397,17 @@ toCore dataDefs visited = \case
 -- AI tools) use the value as a discriminator when picking the matching
 -- arm of a union.
 ctorDiscriminatorKey :: Text
-ctorDiscriminatorKey = "$ctor"
+ctorDiscriminatorKey = "$constructor"
 
 -- | Reserved JSON-Schema property name carrying a callable reference.
 -- The value is the same string the @get_metadata@ prim returns in its
 -- @id@ field: @"module.name"@ for top-level agents or @"closure:N"@
 -- for local closures.
 callableDiscriminatorKey :: Text
-callableDiscriminatorKey = "$callable"
+callableDiscriminatorKey = "$agent"
 
 -- | Schema for a callable-reference object: a single required
--- @"$callable": string@ property. Used as the wire representation of
+-- @"$agent": string@ property. Used as the wire representation of
 -- every value of a function-shaped type.
 callableRefCore :: SchemaCore
 callableRefCore =

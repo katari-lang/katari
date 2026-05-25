@@ -2,15 +2,15 @@
 // schema-less raw JSON form. Decoding routes plain objects by
 // discriminator priority:
 //
-//   1. `{$ctor: "...", ...fieldsRaw}`     → tagged value
-//   2. `{$callable: "module.name" | "closure:N"}` → callable
+//   1. `{$constructor: "...", ...fieldsRaw}`     → tagged value
+//   2. `{$agent: "module.name" | "closure:N"}` → callable
 //   3. `{$secret: "..."}` (inbound)       → refused (one-way out)
 //   4. plain object (none of the above)   → record
 //
 // Round-trip guarantee is *one-way*: `valueFromRaw(valueToRaw(v))`
 // recovers every Value variant **except** records whose keys happen
 // to coincide with a reserved discriminator. A record carrying a
-// `$ctor` key written to the wire is read back as a tagged value;
+// `$constructor` key written to the wire is read back as a tagged value;
 // users should not mix reserved discriminator keys into record data.
 //
 // Other mappings:
@@ -29,10 +29,10 @@ import type { Value } from "./engine/value.js";
 import type { QualifiedName } from "./ir/types.js";
 
 /** Discriminator key for the constructor identity of a tagged value. */
-export const CTOR_DISCRIMINATOR = "$ctor";
+export const CTOR_DISCRIMINATOR = "$constructor";
 
 /** Discriminator key for a callable reference. */
-export const CALLABLE_DISCRIMINATOR = "$callable";
+export const CALLABLE_DISCRIMINATOR = "$agent";
 
 /** Discriminator key for an opaque secret string (sidecar wire form).
  * The value behind the discriminator is the **plaintext** secret —
@@ -42,7 +42,7 @@ export const CALLABLE_DISCRIMINATOR = "$callable";
 export const SECRET_DISCRIMINATOR = "$secret";
 
 /** Raw value: a JSON-shaped subset (numbers, strings, booleans, null,
- * arrays, objects). Object shapes carrying a `$ctor` / `$callable`
+ * arrays, objects). Object shapes carrying a `$constructor` / `$agent`
  * discriminator are decoded into the corresponding 'Value' variant. */
 export type RawValue =
   | number
@@ -88,7 +88,7 @@ export function valueToRaw(value: Value): RawValue {
     }
     case "record": {
       // Encode as a plain object. Reserved-discriminator keys
-      // (`$ctor` / `$callable` / `$secret`) are technically writable
+      // (`$constructor` / `$agent` / `$secret`) are technically writable
       // here, but the decoder will then misread the value as a
       // tagged / callable / secret on the inbound side — see the
       // module-level note about round-trip caveats.
@@ -122,11 +122,11 @@ export function valueToRaw(value: Value): RawValue {
 
 /**
  * Decode a raw JSON value into a runtime 'Value'. Schema-less: relies
- * on the `$ctor` / `$callable` discriminators when present; primitives
+ * on the `$constructor` / `$agent` discriminators when present; primitives
  * and arrays map to their obvious 'Value' variant.
  *
  * Throws 'RawValueDecodeError' if the input contains something that
- * can't be mapped (e.g. `undefined`, a function, or a `$callable` with
+ * can't be mapped (e.g. `undefined`, a function, or a `$agent` with
  * a malformed value).
  */
 export function valueFromRaw(raw: unknown): Value {
@@ -155,8 +155,8 @@ export function valueFromRaw(raw: unknown): Value {
   }
   const obj = raw as Record<string, unknown>;
   // Discriminator priority (Plan D):
-  //   1. $ctor       → tagged value
-  //   2. $callable   → callable
+  //   1. $constructor       → tagged value
+  //   2. $agent   → callable
   //   3. $secret     → refused (one-way out-only flow)
   //   4. (none)      → record
   if (CTOR_DISCRIMINATOR in obj) {
@@ -192,7 +192,7 @@ export class RawValueDecodeError extends Error {
 function decodeCallable(rawId: unknown): Value {
   if (typeof rawId !== "string") {
     throw new RawValueDecodeError(
-      `valueFromRaw: $callable must be a string, got ${typeof rawId}`,
+      `valueFromRaw: $agent must be a string, got ${typeof rawId}`,
     );
   }
   if (rawId.startsWith("closure:")) {
@@ -211,7 +211,7 @@ function decodeTagged(obj: Record<string, unknown>): Value {
   const ctorRaw = obj[CTOR_DISCRIMINATOR];
   if (typeof ctorRaw !== "string") {
     throw new RawValueDecodeError(
-      `valueFromRaw: $ctor must be a string, got ${typeof ctorRaw}`,
+      `valueFromRaw: $constructor must be a string, got ${typeof ctorRaw}`,
     );
   }
   // Use a null-prototype object so a hostile payload carrying

@@ -5,7 +5,7 @@
 // `"main.foo"` or `"prim.add_two_numbers"`) for top-level agents, or a
 // `"closure:N"` prefix-form for local closures (CORE only). This shape
 // is identical to what `get_metadata` returns in its `id` field and to
-// what JSON Schema declares for `$callable`, so the same string flows
+// what JSON Schema declares for `$agent`, so the same string flows
 // end-to-end through CORE / FFI / API / sidecar / AI tool calls.
 //
 // **Branding**: each module owns its own opaque type wrapper around the

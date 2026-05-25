@@ -27,8 +27,8 @@ export type Value =
   // no constructor identity attaches to the value. Maps to the
   // surface-level `record[K, V]` type.
   //
-  // Wire form: a plain JSON object that carries none of `$ctor` /
-  // `$callable` / `$secret` discriminator keys. The codec (= Plan D)
+  // Wire form: a plain JSON object that carries none of `$constructor` /
+  // `$agent` / `$secret` discriminator keys. The codec (= Plan D)
   // routes objects by discriminator priority and falls through to
   // record when none is present.
   | { kind: "record"; entries: Record<string, Value> }

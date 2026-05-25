@@ -47,7 +47,7 @@
     "output": {
       "additionalProperties": false,
       "properties": {
-        "$ctor": {
+        "$constructor": {
           "const": "prim.agent_metadata"
         },
         "description": {
@@ -67,7 +67,7 @@
         }
       },
       "required": [
-        "$ctor",
+        "$constructor",
         "description",
         "id",
         "input",
@@ -606,12 +606,12 @@
         "value": {
           "additionalProperties": false,
           "properties": {
-            "$callable": {
+            "$agent": {
               "type": "string"
             }
           },
           "required": [
-            "$callable"
+            "$agent"
           ],
           "type": "object"
         }
@@ -625,7 +625,7 @@
     "output": {
       "additionalProperties": false,
       "properties": {
-        "$ctor": {
+        "$constructor": {
           "const": "prim.agent_metadata"
         },
         "description": {
@@ -645,7 +645,7 @@
         }
       },
       "required": [
-        "$ctor",
+        "$constructor",
         "description",
         "id",
         "input",

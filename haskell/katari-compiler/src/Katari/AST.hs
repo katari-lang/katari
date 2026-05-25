@@ -733,7 +733,7 @@ data SyntacticType (phase :: Phase) where
   -- values of type @V@. In v0.1.0 @K@ is restricted to @string@ at
   -- the Identifier pass; the slot is kept generic for forward
   -- compatibility with generics (v0.2). The wire form is a plain
-  -- JSON object (no @$ctor@ / @$callable@ / @$secret@ discriminator);
+  -- JSON object (no @$constructor@ / @$agent@ / @$secret@ discriminator);
   -- the runtime reserves @$@-prefixed keys for tagged values.
   TypeRecord :: RecordTypeNode phase -> SyntacticType phase
 

@@ -42,7 +42,7 @@ data point(
   y: integer
 )
 
-@"Takes a point - exercises ObjectField with auto-hidden $ctor."
+@"Takes a point - exercises ObjectField with auto-hidden $constructor."
 agent point_sum(p: point) -> integer {
   match (p) {
     case point(x = xv, y = yv) => { xv + yv }

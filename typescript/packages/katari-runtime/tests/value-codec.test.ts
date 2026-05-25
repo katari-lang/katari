@@ -26,7 +26,7 @@ describe("value-codec", () => {
     expect(rt({ kind: "null" })).toEqual({ kind: "null" });
   });
 
-  it("encodes tagged values with $ctor + fields", () => {
+  it("encodes tagged values with $constructor + fields", () => {
     const v: Value = {
       kind: "tagged",
       ctorId: "main.point",
@@ -65,13 +65,13 @@ describe("value-codec", () => {
     expect(rt(v)).toEqual(v);
   });
 
-  it("encodes agentLiteral as $callable string", () => {
+  it("encodes agentLiteral as $agent string", () => {
     const v: Value = { kind: "agentLiteral", qualifiedName: "main.foo" };
     expect(valueToRaw(v)).toEqual({ [CALLABLE_DISCRIMINATOR]: "main.foo" });
     expect(rt(v)).toEqual(v);
   });
 
-  it("encodes closure as $callable closure:N", () => {
+  it("encodes closure as $agent closure:N", () => {
     const v: Value = { kind: "closure", closureId: 7 as ClosureId };
     expect(valueToRaw(v)).toEqual({ [CALLABLE_DISCRIMINATOR]: "closure:7" });
     expect(rt(v)).toEqual(v);
@@ -112,7 +112,7 @@ describe("value-codec", () => {
     expect(() => valueFromRaw({ x: 1, y: 2 })).toThrow(RawValueDecodeError);
   });
 
-  it("rejects malformed $callable", () => {
+  it("rejects malformed $agent", () => {
     expect(() => valueFromRaw({ [CALLABLE_DISCRIMINATOR]: 5 })).toThrow(
       RawValueDecodeError,
     );
@@ -121,7 +121,7 @@ describe("value-codec", () => {
     );
   });
 
-  it("rejects malformed $ctor", () => {
+  it("rejects malformed $constructor", () => {
     expect(() => valueFromRaw({ [CTOR_DISCRIMINATOR]: 42 })).toThrow(
       RawValueDecodeError,
     );

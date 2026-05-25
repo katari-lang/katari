@@ -12,7 +12,7 @@ import { SelectMenu } from "@/components/ui/SelectMenu";
 /**
  * Generic union picker. Renders a dropdown of branch labels plus the
  * SchemaField for the selected branch. Tagged unions (= every branch is
- * a `data` ctor with `$ctor: {const: "..."}`) get ctor-named options;
+ * a `data` ctor with `$constructor: {const: "..."}`) get ctor-named options;
  * other unions fall back to type names / titles.
  *
  * Switching branches resets the value to that branch's initial — there's
@@ -29,7 +29,7 @@ export function UnionField({
 }) {
   const tagged = useMemo(() => isTaggedUnion(branches), [branches]);
 
-  // Initial branch: if value carries a $ctor tag matching one branch,
+  // Initial branch: if value carries a $constructor tag matching one branch,
   // use that. Otherwise default to the first.
   const initialIdx = useMemo(
     () => detectBranch(value, branches),
@@ -73,7 +73,7 @@ export function UnionField({
 function detectBranch(value: unknown, branches: JsonSchema[]): number {
   if (value !== null && typeof value === "object" && !Array.isArray(value)) {
     const v = value as Record<string, unknown>;
-    const tag = v["$ctor"];
+    const tag = v["$constructor"];
     if (typeof tag === "string") {
       const idx = branches.findIndex((b) => taggedCtorOf(b) === tag);
       if (idx >= 0) return idx;

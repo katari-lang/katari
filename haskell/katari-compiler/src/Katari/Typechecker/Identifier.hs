@@ -361,6 +361,10 @@ data IdentifierError where
   -- | The user tried to declare a module under the reserved @prim@ /
   -- @prim.*@ namespace.
   ErrorReservedPrimitiveModule :: SourceSpan -> Text -> IdentifierError
+  -- | The key type in a @record[K, V]@ declaration is not @string@.
+  -- v0.1.0 restricts record keys to @string@ syntactically; generics
+  -- in v0.2 will lift this restriction.
+  ErrorRecordKeyMustBeString :: SourceSpan -> IdentifierError
   -- | A 'K9999' invariant violation (compiler bug). Wraps a fully-formed
   -- 'Diagnostic' produced by 'Katari.Internal' so it surfaces in the
   -- diagnostic stream without panicking the host.
@@ -389,6 +393,7 @@ instance HasSourceSpan IdentifierError where
     ErrorPatternTypeAnnotation sourceSpan -> sourceSpan
     ErrorPrimitiveConflict sourceSpan _ -> sourceSpan
     ErrorReservedPrimitiveModule sourceSpan _ -> sourceSpan
+    ErrorRecordKeyMustBeString sourceSpan -> sourceSpan
     ErrorInternal diagnostic -> diagnostic.span
 
 -- | Convert an 'IdentifierError' to a unified 'Diagnostic'. Codes
@@ -481,6 +486,11 @@ toDiagnostic = \case
     diagnosticError
       "K0113"
       ("module name '" <> name <> "' is reserved for the primitive namespace")
+      sourceSpan
+  ErrorRecordKeyMustBeString sourceSpan ->
+    diagnosticError
+      "K0114"
+      "record key type must be 'string' (generics are not supported in v0.1.0)"
       sourceSpan
   ErrorInternal diagnostic -> diagnostic
 
@@ -1695,6 +1705,13 @@ resolveType = \case
   TypeRecord RecordTypeNode {keyType, valueType, sourceSpan} -> do
     keyType' <- resolveType keyType
     valueType' <- resolveType valueType
+    -- v0.1.0 restricts the key type to a syntactic `string` keyword.
+    -- Type aliases that happen to resolve to `string` are still
+    -- rejected here; generics in v0.2 will lift the restriction.
+    case keyType' of
+      TypePrimitive PrimitiveTypeNode {kind = PrimitiveTypeKindString} ->
+        pure ()
+      _ -> emitError (ErrorRecordKeyMustBeString (sourceSpanOf keyType'))
     pure
       ( TypeRecord
           RecordTypeNode

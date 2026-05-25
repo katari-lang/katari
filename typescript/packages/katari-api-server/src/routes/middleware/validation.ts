@@ -39,7 +39,7 @@ export const EscalationIdSchema = z
 
 // ─── Raw value schema ──────────────────────────────────────────────────────
 //
-// Wire format is JSON-shaped raw with `$ctor` / `$callable` discriminators
+// Wire format is JSON-shaped raw with `$constructor` / `$agent` discriminators
 // where structural identity matters (tagged values, callables). The
 // runtime adapter (`valueFromRaw` from `katari-runtime`) decodes this
 // into a `Value` before handing it to CORE.

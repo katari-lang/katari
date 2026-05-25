@@ -24,7 +24,7 @@ export type JsonSchema = {
   [key: string]: unknown;
 };
 
-export const CTOR_DISCRIMINATOR = "$ctor";
+export const CTOR_DISCRIMINATOR = "$constructor";
 
 /** Return the single primary type for a schema, ignoring an explicit
  * `null` companion (`["string","null"]` → "string"). Returns undefined
@@ -45,7 +45,7 @@ export function unionBranches(schema: JsonSchema): JsonSchema[] | null {
 }
 
 /** True if the schema looks like Katari's tagged-data shape: an object
- * with a `$ctor: {const: "<qname>"}` property. */
+ * with a `$constructor: {const: "<qname>"}` property. */
 export function taggedCtorOf(schema: JsonSchema): string | null {
   if (singleType(schema) !== "object") return null;
   const props = schema.properties;

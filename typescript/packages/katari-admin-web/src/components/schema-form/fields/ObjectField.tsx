@@ -4,7 +4,7 @@ import type { JsonSchema } from "../schema-utils";
 
 /**
  * Object form: one field per `properties` entry. Const-typed properties
- * (e.g. `$ctor: {const: "main.Foo"}` emitted by katari for data ctors)
+ * (e.g. `$constructor: {const: "main.Foo"}` emitted by katari for data ctors)
  * are auto-set and hidden from the UI — operators don't need to type
  * "main.Foo" themselves. The const value is still injected into the
  * outgoing object so the wire shape stays whole.
