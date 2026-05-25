@@ -5,7 +5,13 @@ import toast from "react-hot-toast";
 import { Monitor, Moon, Sun } from "lucide-react";
 import { useApiKey } from "@/contexts/ApiKeyContext";
 import { PageContent, PageHeader } from "@/components/ui/PageHeader";
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/Card";
+import {
+  Card,
+  CardContent,
+  CardHeader,
+  CardTitle,
+  CardDescription,
+} from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { Label } from "@/components/ui/Label";
@@ -30,16 +36,15 @@ export function SettingsPage() {
 
   return (
     <div>
-      <PageHeader
-        title="Settings"
-        description="Theme + API key for this runtime. All stored in this browser's localStorage."
-      />
+      <PageHeader title="Settings" />
       <PageContent>
         <div className="grid gap-4 lg:grid-cols-2">
           <Card>
             <CardHeader>
               <CardTitle>Theme</CardTitle>
-              <CardDescription>Pick the system, light, or dark variant.</CardDescription>
+              <CardDescription>
+                Pick the system, light, or dark variant.
+              </CardDescription>
             </CardHeader>
             <CardContent>
               <div className="flex gap-2">
@@ -93,7 +98,9 @@ export function SettingsPage() {
                   <Button type="button" variant="ghost" onClick={signOut}>
                     Sign out
                   </Button>
-                  <Button type="submit" variant="primary">Save</Button>
+                  <Button type="submit" variant="primary">
+                    Save
+                  </Button>
                 </div>
               </form>
             </CardContent>

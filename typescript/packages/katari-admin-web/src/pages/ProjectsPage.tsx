@@ -17,10 +17,7 @@ export function ProjectsPage() {
 
   return (
     <div>
-      <PageHeader
-        title="Projects"
-        description="Pick a project to view its agents, definitions, and escalations."
-      />
+      <PageHeader title="Projects" description="Manage your projects" />
       <PageContent>
         {isLoading && <SpinnerOverlay />}
         {isError && (
@@ -58,18 +55,14 @@ export function ProjectsPage() {
                     <Link to={`/project/${p.id}`} className="block">
                       <Card className="transition-all hover:border-border-strong hover:bg-muted">
                         <CardHeader>
-                          <div className="flex items-center gap-2 text-muted-foreground">
-                            <FolderOpen className="size-4" />
-                            <span className="font-mono text-[11px] uppercase tracking-wider">
-                              project
-                            </span>
-                          </div>
                           <CardTitle className="truncate py-1">
                             {p.name}
                           </CardTitle>
-                          <p className="font-mono text-[11px] text-subtle-foreground">
-                            {p.id}
-                          </p>
+                          {p.description !== null && (
+                            <p className="line-clamp-2 text-xs text-subtle-foreground">
+                              {p.description}
+                            </p>
+                          )}
                         </CardHeader>
                       </Card>
                     </Link>

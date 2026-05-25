@@ -92,9 +92,6 @@ export function LoginPage() {
             Sign in
           </Button>
         </form>
-        <p className="mt-4 text-center text-xs text-subtle-foreground">
-          The API key is stored in this browser's localStorage only.
-        </p>
       </motion.div>
     </div>
   );

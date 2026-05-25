@@ -41,6 +41,24 @@ spec = do
         Left e -> expectationFailure (show e)
         Right cfg -> cfg.packageSection.packageSrc `shouldBe` "lib"
 
+    it "parses [package].description when present" $ do
+      let raw =
+            Text.unlines
+              [ "[package]",
+                "name = \"x\"",
+                "description = \"hello world\""
+              ]
+      case parseKatariToml "katari.toml" raw of
+        Left e -> expectationFailure (show e)
+        Right cfg ->
+          cfg.packageSection.packageDescription `shouldBe` Just "hello world"
+
+    it "defaults [package].description to Nothing when omitted" $ do
+      let raw = Text.unlines ["[package]", "name = \"x\""]
+      case parseKatariToml "katari.toml" raw of
+        Left e -> expectationFailure (show e)
+        Right cfg -> cfg.packageSection.packageDescription `shouldBe` Nothing
+
     it "defaults [runtime].url when omitted" $ do
       let raw = Text.unlines ["[package]", "name = \"x\""]
       case parseKatariToml "katari.toml" raw of

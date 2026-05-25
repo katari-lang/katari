@@ -47,6 +47,7 @@ import type {
   SnapshotRepo,
   SnapshotSummary,
   Storage,
+  UpsertProjectInput,
 } from "./types.js";
 
 type Sql = ReturnType<typeof postgres>;
@@ -115,69 +116,80 @@ function composeWhere(
 
 // ─── Project ───────────────────────────────────────────────────────────────
 
+type DbProjectRow = {
+  id: string;
+  name: string;
+  description: string | null;
+  readme: string | null;
+  created_at: Date;
+};
+
+function dbToProject(row: DbProjectRow): Project {
+  return {
+    id: row.id as ProjectId,
+    name: row.name,
+    description: row.description,
+    readme: row.readme,
+    createdAt: row.created_at.toISOString(),
+  };
+}
+
 class PgProjectRepo implements ProjectRepo {
   constructor(private readonly sql: Sql) {}
 
-  async upsertByName(name: string): Promise<Project> {
+  async upsertProject(input: UpsertProjectInput): Promise<Project> {
     const id = uuidv7();
-    const rows = await this.sql<
-      { id: string; name: string; created_at: Date }[]
-    >`
-      INSERT INTO projects (id, name, created_at)
-      VALUES (${id}, ${name}, now())
-      ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name
-      RETURNING id, name, created_at
+    // COALESCE semantics: when the caller omits a field (= passes
+    // `undefined`, normalised to `null` on the wire here as a sentinel
+    // "no change"), the existing value is kept. To distinguish "clear"
+    // from "skip" we send a second boolean per column.
+    const setDescription = input.description !== undefined;
+    const setReadme = input.readme !== undefined;
+    const rows = await this.sql<DbProjectRow[]>`
+      INSERT INTO projects (id, name, description, readme, created_at)
+      VALUES (
+        ${id},
+        ${input.name},
+        ${input.description ?? null},
+        ${input.readme ?? null},
+        now()
+      )
+      ON CONFLICT (name) DO UPDATE SET
+        description = CASE WHEN ${setDescription} THEN EXCLUDED.description ELSE projects.description END,
+        readme      = CASE WHEN ${setReadme}      THEN EXCLUDED.readme      ELSE projects.readme      END
+      RETURNING id, name, description, readme, created_at
     `;
-    const row = rows[0]!;
-    return {
-      id: row.id as ProjectId,
-      name: row.name,
-      createdAt: row.created_at.toISOString(),
-    };
+    return dbToProject(rows[0]!);
   }
 
   async list(options?: ListOptions): Promise<Project[]> {
     const limit = clampLimit(options?.limit);
     const offset = clampOffset(options?.offset);
-    const rows = await this.sql<
-      { id: string; name: string; created_at: Date }[]
-    >`
-      SELECT id, name, created_at
+    const rows = await this.sql<DbProjectRow[]>`
+      SELECT id, name, description, readme, created_at
       FROM projects
       ORDER BY created_at DESC
       LIMIT ${limit} OFFSET ${offset}
     `;
-    return rows.map((r) => ({
-      id: r.id as ProjectId,
-      name: r.name,
-      createdAt: r.created_at.toISOString(),
-    }));
+    return rows.map(dbToProject);
   }
 
   async get(id: ProjectId): Promise<Project | null> {
-    const rows = await this.sql<
-      { id: string; name: string; created_at: Date }[]
-    >`SELECT id, name, created_at FROM projects WHERE id = ${id}`;
+    const rows = await this.sql<DbProjectRow[]>`
+      SELECT id, name, description, readme, created_at
+      FROM projects WHERE id = ${id}
+    `;
     const row = rows[0];
-    if (row === undefined) return null;
-    return {
-      id: row.id as ProjectId,
-      name: row.name,
-      createdAt: row.created_at.toISOString(),
-    };
+    return row !== undefined ? dbToProject(row) : null;
   }
 
   async getByName(name: string): Promise<Project | null> {
-    const rows = await this.sql<
-      { id: string; name: string; created_at: Date }[]
-    >`SELECT id, name, created_at FROM projects WHERE name = ${name}`;
+    const rows = await this.sql<DbProjectRow[]>`
+      SELECT id, name, description, readme, created_at
+      FROM projects WHERE name = ${name}
+    `;
     const row = rows[0];
-    if (row === undefined) return null;
-    return {
-      id: row.id as ProjectId,
-      name: row.name,
-      createdAt: row.created_at.toISOString(),
-    };
+    return row !== undefined ? dbToProject(row) : null;
   }
 
   async delete(id: ProjectId): Promise<boolean> {

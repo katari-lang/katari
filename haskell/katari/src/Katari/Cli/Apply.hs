@@ -19,11 +19,13 @@ module Katari.Cli.Apply
   )
 where
 
+import Control.Exception (IOException, try)
 import Data.Aeson qualified as Aeson
 import Data.ByteString.Lazy.Char8 qualified as LC8
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 import Data.Text qualified as Text
+import Data.Text.IO qualified as TextIO
 import GHC.Generics (Generic)
 import Katari.Api.Client qualified as Api
 import Katari.Api.Types qualified as Api
@@ -123,7 +125,18 @@ run opts = do
         Nothing -> cfg.runtimeSection.runtimeUrl
   auth <- Api.apiAuthFromEnv
   client <- Api.newApiClient apiUrl auth
-  project <- Api.upsertProject client projectName
+  -- README is picked up from a sibling `README.md` so operators get GitHub-
+  -- style automatic discovery without an extra toml knob. Missing file =
+  -- `Nothing` (clears the field server-side, keeping the toml/disk as SSoT).
+  readme <- readSiblingReadme rootDir
+  project <-
+    Api.upsertProject
+      client
+      Api.UpsertProjectRequest
+        { Api.name = projectName,
+          Api.description = cfg.packageSection.packageDescription,
+          Api.readme = readme
+        }
   snapshotId <-
     Api.uploadSnapshot
       client
@@ -170,6 +183,20 @@ loadCfg path = do
   case r of
     Right c -> pure c
     Left err -> die ("config: " <> show err)
+
+-- | Read @README.md@ next to @katari.toml@ if it exists. Any IO failure
+-- (missing file, permission error, decode failure) → 'Nothing', which
+-- the server interprets as "clear the readme field". We deliberately do
+-- NOT walk up or look at alternative case spellings — operators who
+-- want a README put it in the canonical place, and silently picking up
+-- e.g. @Readme.markdown@ would be surprising.
+readSiblingReadme :: FilePath -> IO (Maybe Text)
+readSiblingReadme rootDir = do
+  let path = rootDir </> "README.md"
+  result <- try (TextIO.readFile path) :: IO (Either IOException Text)
+  pure $ case result of
+    Right body -> Just body
+    Left _ -> Nothing
 
 -- | Per-package (name, source-root) pair handed to the bundler. The
 -- package name becomes the flat namespace prefix for that package's

@@ -53,6 +53,7 @@ sampleConfig =
         PackageSection
           { packageName = "x",
             packageVersion = Nothing,
+            packageDescription = Nothing,
             packageSrc = "src"
           },
       sidecarSection = Nothing,

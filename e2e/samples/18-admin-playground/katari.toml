@@ -1,5 +1,6 @@
 [package]
 name = "playground"
+description = "Katari admin playground project"
 
 [runtime]
 url = "http://localhost:8000"

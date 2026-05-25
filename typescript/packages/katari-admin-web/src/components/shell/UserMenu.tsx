@@ -40,21 +40,15 @@ export function UserMenu() {
       </button>
       <div
         className={cn(
-          "absolute right-0 mt-2 w-72  border border-border  ",
+          "absolute right-0 mt-2 w-72 border border-border bg-background",
           "origin-top-right transition-all",
           open
             ? "scale-100 opacity-100"
             : "pointer-events-none scale-95 opacity-0",
         )}
       >
-        <div className="border-b border-border p-3">
+        <div className="p-3">
           <div className="text-xs uppercase tracking-wider text-subtle-foreground">
-            Endpoint
-          </div>
-          <div className="mt-1 break-all font-mono text-xs text-foreground">
-            {baseUrl}
-          </div>
-          <div className="mt-3 text-xs uppercase tracking-wider text-subtle-foreground">
             API key
           </div>
           <div className="mt-1 font-mono text-xs text-foreground">{masked}</div>

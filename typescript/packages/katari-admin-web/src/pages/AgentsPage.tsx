@@ -79,13 +79,9 @@ export function AgentsPage() {
     <div>
       <PageHeader
         title="Agents"
-        description="Callable agents in the selected snapshot. Pick one to invoke it with a generated form."
+        description="Callable agents in the selected snapshot"
       />
       <PageContent>
-        {/* Snapshot picker + show-all toggle: both scope the tree below, so
-            they sit immediately above it. Keep them grouped on the left so
-            the toggle is close to the picker (= a few px away rather than
-            stranded at the page's right edge). */}
         {typeof projectId === "string" && (
           <div className="mb-4 flex flex-wrap items-center gap-2">
             <AgentsSnapshotPicker

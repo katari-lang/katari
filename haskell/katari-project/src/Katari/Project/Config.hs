@@ -5,8 +5,9 @@
 -- @
 -- [package]
 -- name = \"hello\"
--- # version = \"0.1.0\"        # optional
--- # src     = \"src\"          # optional, default \"src\"
+-- # version     = \"0.1.0\"    # optional
+-- # description = \"...\"      # optional, human-readable summary
+-- # src         = \"src\"      # optional, default \"src\"
 --
 -- [runtime]
 -- url = \"http:\/\/localhost:8000\"
@@ -87,6 +88,9 @@ data ProjectConfig = ProjectConfig
 data PackageSection = PackageSection
   { packageName :: Text,
     packageVersion :: Maybe Text,
+    -- | Free-form human-readable summary. Surfaces in registry listings
+    -- and @katari ls@-style output. Optional.
+    packageDescription :: Maybe Text,
     -- | Relative source dir under the project root. Defaults to @"src"@.
     packageSrc :: FilePath
   }
@@ -159,6 +163,7 @@ data RawConfig = RawConfig
 data RawPackage = RawPackage
   { rawPackageName :: Text,
     rawPackageVersion :: Maybe Text,
+    rawPackageDescription :: Maybe Text,
     rawPackageSrc :: Maybe FilePath
   }
   deriving (Show)
@@ -212,6 +217,7 @@ rawPackageCodec =
   RawPackage
     <$> Toml.text "name" .= (.rawPackageName)
     <*> Toml.dioptional (Toml.text "version") .= (.rawPackageVersion)
+    <*> Toml.dioptional (Toml.text "description") .= (.rawPackageDescription)
     <*> Toml.dioptional (Toml.string "src") .= (.rawPackageSrc)
 
 rawSidecarCodec :: TomlCodec RawSidecar
@@ -330,6 +336,7 @@ validateConfig path RawConfig {..} = do
         PackageSection
           { packageName = rawPackage.rawPackageName,
             packageVersion = rawPackage.rawPackageVersion,
+            packageDescription = rawPackage.rawPackageDescription,
             packageSrc = fromMaybe "src" rawPackage.rawPackageSrc
           }
   -- Sidecar: pass through if present.

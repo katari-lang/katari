@@ -62,14 +62,33 @@ import Katari.IR (IRModule)
 data Project = Project
   { id :: Text,
     name :: Text,
+    -- | One-line summary from @katari.toml@. 'Nothing' = unset.
+    description :: Maybe Text,
+    -- | Long-form README (markdown). 'Nothing' = no @README.md@ next to
+    -- @katari.toml@ at last @apply@ time.
+    readme :: Maybe Text,
     createdAt :: Text
   }
   deriving stock (Show, Generic)
   deriving anyclass (FromJSON, ToJSON)
 
-newtype UpsertProjectRequest = UpsertProjectRequest {name :: Text}
+-- | Body for @POST /project@. Name is the identity key; description /
+-- readme are reconciler fields that overwrite the runtime row on every
+-- @apply@. 'Nothing' on either field = "clear" (so removing a
+-- @description@ from @katari.toml@ propagates).
+data UpsertProjectRequest = UpsertProjectRequest
+  { name :: Text,
+    description :: Maybe Text,
+    readme :: Maybe Text
+  }
   deriving stock (Show, Generic)
-  deriving anyclass (FromJSON, ToJSON)
+  deriving anyclass (FromJSON)
+
+-- | Always include @description@ / @readme@ on the wire — sending
+-- @null@ explicitly clears the field, which is the intended semantics
+-- of "this field is unset in katari.toml".
+instance ToJSON UpsertProjectRequest where
+  toJSON = genericToJSON defaultOptions
 
 newtype UpsertProjectResponse = UpsertProjectResponse {project :: Project}
   deriving stock (Show, Generic)

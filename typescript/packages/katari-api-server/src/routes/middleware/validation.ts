@@ -70,6 +70,13 @@ export const PaginationQuerySchema = z.object({
 
 export const CreateProjectSchema = z.object({
   name: z.string().min(1),
+  /** One-line description from `katari.toml` `[package].description`.
+   *  Omitted = "don't touch", `null` = "clear", string = "set". */
+  description: z.string().max(1024).nullable().optional(),
+  /** README markdown body — typically the contents of `README.md` next
+   *  to `katari.toml`. Capped at 256 KB so a stray binary file can't
+   *  blow up the row. */
+  readme: z.string().max(256 * 1024).nullable().optional(),
 });
 export type CreateProjectInput = z.infer<typeof CreateProjectSchema>;
 

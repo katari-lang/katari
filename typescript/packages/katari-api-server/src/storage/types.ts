@@ -69,12 +69,30 @@ export type CancelReason = "user" | "error";
 export type Project = {
   id: ProjectId;
   name: string;
+  /** One-line description from `katari.toml` `[package].description`.
+   *  `null` when the operator hasn't set one. */
+  description: string | null;
+  /** Long-form README, picked up from `README.md` sibling of
+   *  `katari.toml` on `apply`. `null` when no file is present. */
+  readme: string | null;
   createdAt: string;
 };
 
+/** Input to `upsertProject`. Name is the identity key; description and
+ *  readme are reconciler fields — they OVERWRITE the stored values on
+ *  every call so `katari apply` keeps the runtime in sync with the
+ *  operator's repo. `undefined` for either means "don't touch this
+ *  field" (= partial update), `null` means "clear it". */
+export type UpsertProjectInput = {
+  name: string;
+  description?: string | null;
+  readme?: string | null;
+};
+
 export interface ProjectRepo {
-  /** Idempotent: returns existing if name already exists, else creates. */
-  upsertByName(name: string): Promise<Project>;
+  /** Idempotent on `name`. Description / readme are overwritten when
+   *  provided so the toml-driven reconciler model holds. */
+  upsertProject(input: UpsertProjectInput): Promise<Project>;
   list(options?: ListOptions): Promise<Project[]>;
   get(id: ProjectId): Promise<Project | null>;
   getByName(name: string): Promise<Project | null>;

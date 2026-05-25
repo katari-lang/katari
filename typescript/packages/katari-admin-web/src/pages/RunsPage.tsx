@@ -34,10 +34,7 @@ export function RunsPage() {
 
   return (
     <div>
-      <PageHeader
-        title="Runs"
-        description="Operator-launched runs, refreshed every 3s while any are live."
-      />
+      <PageHeader title="Runs" description="Operator-launched runs" />
       <PageContent>
         {isLoading && <SpinnerOverlay />}
         {isError && (

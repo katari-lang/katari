@@ -108,9 +108,9 @@ apiAuthFromEnv = do
 -- Projects
 -- ---------------------------------------------------------------------------
 
-upsertProject :: ApiClient -> Text -> IO Project
-upsertProject c projectName = do
-  r :: UpsertProjectResponse <- post c "/project" (UpsertProjectRequest {name = projectName})
+upsertProject :: ApiClient -> UpsertProjectRequest -> IO Project
+upsertProject c req = do
+  r :: UpsertProjectResponse <- post c "/project" req
   pure r.project
 
 listProjects :: ApiClient -> IO [Project]

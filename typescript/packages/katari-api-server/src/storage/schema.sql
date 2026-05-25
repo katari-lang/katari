@@ -26,6 +26,11 @@ DROP TABLE IF EXISTS api_pending_escalations CASCADE;
 CREATE TABLE IF NOT EXISTS projects (
   id          UUID PRIMARY KEY,
   name        TEXT NOT NULL UNIQUE,
+  -- One-line summary from `katari.toml`. Long-form README is its own
+  -- column so dashboard hero text doesn't pull a multi-KB body across
+  -- the wire when we just need the headline.
+  description TEXT,
+  readme      TEXT,
   created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 

@@ -19,7 +19,7 @@ export function buildProjectRoutes(projects: ProjectService): Hono {
 
   app.post("/", async (c) => {
     const body = CreateProjectSchema.parse(await c.req.json());
-    const project = await projects.upsertByName(body.name);
+    const project = await projects.upsertProject(body);
     return c.json({ project }, 201);
   });
 

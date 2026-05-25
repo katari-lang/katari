@@ -67,7 +67,7 @@ export function EnvUpsertDialog({ open, onClose, editing }: Props) {
       title={editing !== null ? "Edit env entry" : "Add env entry"}
       description={
         isSecret
-          ? "Secret values are AES-256-GCM encrypted at rest. The plaintext is only sent over the wire to upload it."
+          ? "Secret values are AES-256-GCM encrypted at rest."
           : "Non-secret values are stored verbatim."
       }
     >
@@ -117,10 +117,15 @@ export function EnvUpsertDialog({ open, onClose, editing }: Props) {
           <div>
             <Label className="cursor-pointer">Secret</Label>
             <p className="mt-0.5 text-xs text-subtle-foreground">
-              Encrypts the value at rest; reads return <code className="font-mono">{`<redacted>`}</code>.
+              Encrypts the value at rest; reads return{" "}
+              <code className="font-mono">{`<redacted>`}</code>.
             </p>
           </div>
-          <Switch checked={isSecret} onChange={setIsSecret} ariaLabel="Mark as secret" />
+          <Switch
+            checked={isSecret}
+            onChange={setIsSecret}
+            ariaLabel="Mark as secret"
+          />
         </div>
         {error !== null && (
           <p className=" border border-danger/30 bg-danger/10 px-3 py-2 text-sm text-danger">

@@ -16,6 +16,12 @@ export type EscalationId = string;
 export type Project = {
   id: ProjectId;
   name: string;
+  /** One-line summary from `katari.toml`. `null` if the operator hasn't
+   *  set `[package].description`. */
+  description: string | null;
+  /** Long-form README markdown, picked up from `README.md` next to
+   *  `katari.toml` at `apply` time. `null` if the file is absent. */
+  readme: string | null;
   createdAt: string;
 };
 

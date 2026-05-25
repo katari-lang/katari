@@ -1,12 +1,13 @@
 import { Link, useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { motion } from "framer-motion";
-import { Activity, ArrowRight, MessageCircleQuestion } from "lucide-react";
+import { Activity, ArrowRight, BookOpen, MessageCircleQuestion } from "lucide-react";
 import { useApiClient } from "@/contexts/ApiKeyContext";
 import { PageContent, PageHeader } from "@/components/ui/PageHeader";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
+import { MarkdownContent } from "@/components/ui/MarkdownContent";
 import { SpinnerOverlay } from "@/components/ui/Spinner";
 import {
   RunStatusBadge,
@@ -66,9 +67,7 @@ export function DashboardPage() {
       <PageHeader
         title={projectQ.data?.project.name ?? "Project"}
         description={
-          projectId !== undefined ? (
-            <span className="font-mono text-xs">{projectId}</span>
-          ) : undefined
+          projectQ.data?.project.description ?? undefined
         }
       />
       <PageContent>
@@ -163,10 +162,6 @@ export function DashboardPage() {
 
             <DashboardCard title="Project info" count={null} icon={null}>
               <dl className="space-y-2 text-sm">
-                <InfoRow
-                  label="Project ID"
-                  value={<code className="font-mono text-xs">{projectId}</code>}
-                />
                 {projectQ.data !== undefined && (
                   <InfoRow
                     label="Created"
@@ -252,6 +247,18 @@ export function DashboardPage() {
                 </ul>
               )}
             </DashboardCard>
+
+            {projectQ.data?.project.readme !== undefined &&
+              projectQ.data.project.readme !== null && (
+                <DashboardCard
+                  title="README"
+                  count={null}
+                  icon={<BookOpen className="size-4 text-muted-foreground" />}
+                  className="lg:col-span-2 xl:col-span-3"
+                >
+                  <MarkdownContent source={projectQ.data.project.readme} />
+                </DashboardCard>
+              )}
           </motion.div>
         )}
       </PageContent>

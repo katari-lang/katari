@@ -52,7 +52,7 @@ export function EscalationsPage() {
     <div>
       <PageHeader
         title="Escalations"
-        description="AI-initiated questions that need a human answer."
+        description="Questions that need a human answer"
         actions={
           <div className="flex items-center border border-border">
             {stateOptions.map((opt) => (
@@ -113,9 +113,7 @@ export function EscalationsPage() {
                       key={esc.id}
                       className="cursor-pointer"
                       onClick={() =>
-                        navigate(
-                          `/project/${projectId}/escalations/${esc.id}`,
-                        )
+                        navigate(`/project/${projectId}/escalations/${esc.id}`)
                       }
                     >
                       <TD>

@@ -42,6 +42,7 @@ import type {
   SnapshotRepo,
   SnapshotSummary,
   Storage,
+  UpsertProjectInput,
 } from "./types.js";
 
 function clone<T>(value: T): T {
@@ -63,16 +64,33 @@ class InMemoryProjectRepo implements ProjectRepo {
   rows = new Map<ProjectId, Project>();
   byName = new Map<string, ProjectId>();
 
-  async upsertByName(name: string): Promise<Project> {
-    const existing = this.byName.get(name);
-    if (existing !== undefined) {
-      const row = this.rows.get(existing);
-      if (row !== undefined) return clone(row);
+  async upsertProject(input: UpsertProjectInput): Promise<Project> {
+    const existingId = this.byName.get(input.name);
+    if (existingId !== undefined) {
+      const row = this.rows.get(existingId);
+      if (row !== undefined) {
+        // Overwrite only the fields the caller explicitly provided;
+        // `undefined` = "leave as-is", `null` = "clear".
+        const next: Project = {
+          ...row,
+          description:
+            input.description === undefined ? row.description : input.description,
+          readme: input.readme === undefined ? row.readme : input.readme,
+        };
+        this.rows.set(existingId, next);
+        return clone(next);
+      }
     }
     const id = uuidv7() as ProjectId;
-    const project: Project = { id, name, createdAt: new Date().toISOString() };
+    const project: Project = {
+      id,
+      name: input.name,
+      description: input.description ?? null,
+      readme: input.readme ?? null,
+      createdAt: new Date().toISOString(),
+    };
     this.rows.set(id, project);
-    this.byName.set(name, id);
+    this.byName.set(input.name, id);
     return clone(project);
   }
 

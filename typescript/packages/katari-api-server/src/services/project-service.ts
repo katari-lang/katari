@@ -7,6 +7,7 @@ import type {
   Project,
   ProjectId,
   Storage,
+  UpsertProjectInput,
 } from "../storage/types.js";
 
 export class ProjectNotFound extends Error {
@@ -21,11 +22,13 @@ export class ProjectService {
     private readonly logger: Logger,
   ) {}
 
-  async upsertByName(name: string): Promise<Project> {
-    const project = await this.storage.projects.upsertByName(name);
+  async upsertProject(input: UpsertProjectInput): Promise<Project> {
+    const project = await this.storage.projects.upsertProject(input);
     this.logger.log("info", "project upsert", {
       projectId: project.id,
       name: project.name,
+      descriptionSet: input.description !== undefined,
+      readmeSet: input.readme !== undefined,
     });
     return project;
   }

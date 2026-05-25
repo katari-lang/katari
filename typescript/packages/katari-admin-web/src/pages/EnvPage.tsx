@@ -28,7 +28,7 @@ export function EnvPage() {
     <div>
       <PageHeader
         title="Environment"
-        description="Runtime-global key / value store. Secrets are AES-256-GCM encrypted at rest and redacted on read."
+        description="Global key-value store"
         actions={
           <Button onClick={() => setUpserting("new")}>
             <Plus className="size-4" />
@@ -53,7 +53,6 @@ export function EnvPage() {
               <EmptyState
                 icon={KeyRound}
                 title="No env entries"
-                description="Add API keys, endpoint URLs, and other runtime config here."
                 action={
                   <Button variant="primary" onClick={() => setUpserting("new")}>
                     <Plus className="size-4" />
@@ -76,7 +75,9 @@ export function EnvPage() {
                     <TR key={entry.key}>
                       <TD>
                         <div className="flex items-center gap-2">
-                          <span className="font-mono text-foreground">{entry.key}</span>
+                          <span className="font-mono text-foreground">
+                            {entry.key}
+                          </span>
                           {entry.isSecret && (
                             <Badge tone="warning">
                               <ShieldCheck className="size-3" />
@@ -96,7 +97,10 @@ export function EnvPage() {
                           </code>
                         )}
                       </TD>
-                      <TD className="text-xs text-muted-foreground" title={formatDateTime(entry.updatedAt)}>
+                      <TD
+                        className="text-xs text-muted-foreground"
+                        title={formatDateTime(entry.updatedAt)}
+                      >
                         {relativeTime(entry.updatedAt)}
                       </TD>
                       <TD>
