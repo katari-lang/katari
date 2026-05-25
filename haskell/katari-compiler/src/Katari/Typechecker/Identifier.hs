@@ -1948,6 +1948,7 @@ resolveExpression = \case
   ExpressionVariable expression -> resolveVariableExpr expression
   ExpressionTuple expression -> ExpressionTuple <$> resolveTupleExpr expression
   ExpressionArray expression -> ExpressionArray <$> resolveArrayExpr expression
+  ExpressionRecord expression -> ExpressionRecord <$> resolveRecordExpr expression
   ExpressionCall expression -> ExpressionCall <$> resolveCallExpr expression
   ExpressionBinaryOperator expression -> resolveBinaryOperatorAsCall expression
   ExpressionUnaryOperator expression -> resolveUnaryOperatorAsCall expression
@@ -2018,6 +2019,16 @@ resolveArrayExpr ArrayExpression {elements, sourceSpan} = do
   pure
     ArrayExpression
       { elements = elements',
+        sourceSpan = sourceSpan,
+        typeOf = ()
+      }
+
+resolveRecordExpr :: RecordExpression Parsed -> Identifier (RecordExpression Identified)
+resolveRecordExpr RecordExpression {entries, sourceSpan} = do
+  entries' <- mapM (\(lbl, e) -> (lbl,) <$> resolveExpression e) entries
+  pure
+    RecordExpression
+      { entries = entries',
         sourceSpan = sourceSpan,
         typeOf = ()
       }

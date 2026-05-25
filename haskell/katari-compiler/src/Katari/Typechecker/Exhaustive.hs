@@ -401,6 +401,7 @@ getExpressionType = \case
   AST.ExpressionVariable e -> e.typeOf
   AST.ExpressionTuple e -> e.typeOf
   AST.ExpressionArray e -> e.typeOf
+  AST.ExpressionRecord e -> e.typeOf
   AST.ExpressionCall e -> e.typeOf
   AST.ExpressionBinaryOperator e -> e.typeOf
   AST.ExpressionUnaryOperator e -> e.typeOf
@@ -606,6 +607,8 @@ walkExpression idResult zonkResult = \case
     concatMap (walkExpression idResult zonkResult) te.elements
   AST.ExpressionArray ae ->
     concatMap (walkExpression idResult zonkResult) ae.elements
+  AST.ExpressionRecord re ->
+    concatMap (walkExpression idResult zonkResult . snd) re.entries
   AST.ExpressionFieldAccess fa ->
     walkExpression idResult zonkResult fa.object
   AST.ExpressionIndexAccess ia ->

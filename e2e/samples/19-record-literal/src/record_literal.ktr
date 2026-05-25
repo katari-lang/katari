@@ -1,0 +1,6 @@
+@"Demonstrates record[V] literal syntax and the record_* primitives. Builds a small record, inserts a new entry, and returns its size."
+agent main() -> integer {
+  let user = { name = "alice", age = 30 }
+  let with_city = record_set(record = user, key = "city", value = "tokyo")
+  record_size(record = with_city)
+}

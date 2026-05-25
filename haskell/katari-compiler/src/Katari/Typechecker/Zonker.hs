@@ -476,6 +476,7 @@ walkExpression = \case
   ExpressionVariable expr -> ExpressionVariable <$> walkVariableExpr expr
   ExpressionTuple expr -> ExpressionTuple <$> walkTupleExpr expr
   ExpressionArray expr -> ExpressionArray <$> walkArrayExpr expr
+  ExpressionRecord expr -> ExpressionRecord <$> walkRecordExpr expr
   ExpressionCall expr -> ExpressionCall <$> walkCallExpr expr
   ExpressionBinaryOperator expr -> ExpressionBinaryOperator <$> walkBinaryExpr expr
   ExpressionUnaryOperator expr -> ExpressionUnaryOperator <$> walkUnaryExpr expr
@@ -517,6 +518,12 @@ walkArrayExpr ArrayExpression {elements, sourceSpan, typeOf} = do
   elements' <- mapM walkExpression elements
   typeOf' <- zonkExpressionTypedata sourceSpan typeOf
   pure ArrayExpression {elements = elements', sourceSpan = sourceSpan, typeOf = typeOf'}
+
+walkRecordExpr :: RecordExpression Constrained -> Zonk (RecordExpression Zonked)
+walkRecordExpr RecordExpression {entries, sourceSpan, typeOf} = do
+  entries' <- mapM (\(lbl, e) -> (lbl,) <$> walkExpression e) entries
+  typeOf' <- zonkExpressionTypedata sourceSpan typeOf
+  pure RecordExpression {entries = entries', sourceSpan = sourceSpan, typeOf = typeOf'}
 
 walkCallExpr :: CallExpression Constrained -> Zonk (CallExpression Zonked)
 walkCallExpr CallExpression {callee, arguments, sourceSpan, typeOf} = do
