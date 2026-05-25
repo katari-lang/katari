@@ -105,6 +105,10 @@ function traceValue(
       for (const f of Object.values(v.fields))
         traceValue(f, visitScope, visitClosure);
       return;
+    case "record":
+      for (const e of Object.values(v.entries))
+        traceValue(e, visitScope, visitClosure);
+      return;
     default:
       return;
   }

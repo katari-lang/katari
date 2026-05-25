@@ -36,6 +36,7 @@ export type EncryptedValue =
       ctorId: QualifiedName;
       fields: Record<string, EncryptedValue>;
     }
+  | { kind: "record"; entries: Record<string, EncryptedValue> }
   | { kind: "closure"; closureId: ClosureId }
   | { kind: "agentLiteral"; qualifiedName: QualifiedName }
   | EncryptedSecret;
@@ -65,6 +66,13 @@ export function encryptValueTree(value: Value): EncryptedValue {
         fields[k] = encryptValueTree(v);
       }
       return { kind: "tagged", ctorId: value.ctorId, fields };
+    }
+    case "record": {
+      const entries: Record<string, EncryptedValue> = {};
+      for (const [k, v] of Object.entries(value.entries)) {
+        entries[k] = encryptValueTree(v);
+      }
+      return { kind: "record", entries };
     }
     case "secret":
       return { $envelope: encryptSecret(value.value) };
@@ -98,6 +106,13 @@ export function decryptValueTree(encrypted: EncryptedValue): Value {
         fields[k] = decryptValueTree(v);
       }
       return { kind: "tagged", ctorId: encrypted.ctorId, fields };
+    }
+    case "record": {
+      const entries: Record<string, Value> = {};
+      for (const [k, v] of Object.entries(encrypted.entries)) {
+        entries[k] = decryptValueTree(v);
+      }
+      return { kind: "record", entries };
     }
   }
 }
@@ -138,6 +153,13 @@ export function redactSecretsInEncrypted(value: EncryptedValue): Value {
         fields[k] = redactSecretsInEncrypted(v);
       }
       return { kind: "tagged", ctorId: value.ctorId, fields };
+    }
+    case "record": {
+      const entries: Record<string, Value> = {};
+      for (const [k, v] of Object.entries(value.entries)) {
+        entries[k] = redactSecretsInEncrypted(v);
+      }
+      return { kind: "record", entries };
     }
   }
 }

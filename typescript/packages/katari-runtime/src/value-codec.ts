@@ -1,10 +1,19 @@
 // Bidirectional codec between the runtime `Value` tagged union and a
-// schema-less raw JSON form. The codec is reversible by relying on the
-// `$ctor` / `$callable` discriminators the compiler emits in JSON
-// Schema:
+// schema-less raw JSON form. Decoding routes plain objects by
+// discriminator priority:
 //
-//   * Tagged values  ←→  `{$ctor: "module.name", ...fieldsRaw}`
-//   * Callables      ←→  `{$callable: "module.name" | "closure:N"}`
+//   1. `{$ctor: "...", ...fieldsRaw}`     → tagged value
+//   2. `{$callable: "module.name" | "closure:N"}` → callable
+//   3. `{$secret: "..."}` (inbound)       → refused (one-way out)
+//   4. plain object (none of the above)   → record
+//
+// Round-trip guarantee is *one-way*: `valueFromRaw(valueToRaw(v))`
+// recovers every Value variant **except** records whose keys happen
+// to coincide with a reserved discriminator. A record carrying a
+// `$ctor` key written to the wire is read back as a tagged value;
+// users should not mix reserved discriminator keys into record data.
+//
+// Other mappings:
 //   * Primitives     ←→  themselves (`5`, `"hi"`, `true`, `null`)
 //   * Arrays         ←→  arrays. Tuples share this representation
 //     (they're a single 'kind: "array"' Value variant; arity is
@@ -14,10 +23,6 @@
 // REST clients / AI tool-call results / sidecar handlers all speak this
 // raw form; the runtime adapts at the boundary using these helpers
 // instead of forcing callers to hand-write `Value` objects.
-//
-// **Schema-less round-trip guarantee**: `valueFromRaw(valueToRaw(v))`
-// equals `v` for every Value variant. Tuple and array are the same
-// Value variant at runtime, so there is no ambiguity to recover.
 
 import type { ClosureId } from "./engine/id.js";
 import type { Value } from "./engine/value.js";
@@ -81,6 +86,18 @@ export function valueToRaw(value: Value): RawValue {
       }
       return out;
     }
+    case "record": {
+      // Encode as a plain object. Reserved-discriminator keys
+      // (`$ctor` / `$callable` / `$secret`) are technically writable
+      // here, but the decoder will then misread the value as a
+      // tagged / callable / secret on the inbound side — see the
+      // module-level note about round-trip caveats.
+      const out: Record<string, RawValue> = {};
+      for (const [k, v] of Object.entries(value.entries)) {
+        out[k] = valueToRaw(v);
+      }
+      return out;
+    }
     case "closure":
       // NOTE: closure ids are machine-local + persistent-state-coupled.
       // The encoded `closure:N` string is stable WITHIN a single
@@ -137,11 +154,16 @@ export function valueFromRaw(raw: unknown): Value {
     return { kind: "array", elements: raw.map(valueFromRaw) };
   }
   const obj = raw as Record<string, unknown>;
-  if (CALLABLE_DISCRIMINATOR in obj) {
-    return decodeCallable(obj[CALLABLE_DISCRIMINATOR]);
-  }
+  // Discriminator priority (Plan D):
+  //   1. $ctor       → tagged value
+  //   2. $callable   → callable
+  //   3. $secret     → refused (one-way out-only flow)
+  //   4. (none)      → record
   if (CTOR_DISCRIMINATOR in obj) {
     return decodeTagged(obj);
+  }
+  if (CALLABLE_DISCRIMINATOR in obj) {
+    return decodeCallable(obj[CALLABLE_DISCRIMINATOR]);
   }
   if (SECRET_DISCRIMINATOR in obj) {
     // Sidecar IPC trust direction is one-way: secrets flow OUT to the
@@ -155,15 +177,7 @@ export function valueFromRaw(raw: unknown): Value {
       `valueFromRaw: refusing to decode '${SECRET_DISCRIMINATOR}' — secrets must not cross the sidecar→runtime boundary`,
     );
   }
-  // Bare object with no discriminator: every object-shaped Value in
-  // Katari is either a tagged ctor instance (carrying `$ctor`) or a
-  // callable reference (carrying `$callable`). A raw object missing
-  // both means the wire shape contradicts the schema — fail loudly so
-  // the boundary surfaces the bug instead of producing a sentinel
-  // value that pretends to be a record.
-  throw new RawValueDecodeError(
-    `valueFromRaw: object missing '${CTOR_DISCRIMINATOR}' / '${CALLABLE_DISCRIMINATOR}' discriminator: ${JSON.stringify(obj).slice(0, 80)}`,
-  );
+  return decodeRecord(obj);
 }
 
 /** Decoding error surfaced from 'valueFromRaw' for inputs that can't be
@@ -214,4 +228,20 @@ function decodeTagged(obj: Record<string, unknown>): Value {
     fields[k] = valueFromRaw(v);
   }
   return { kind: "tagged", ctorId: ctorRaw as QualifiedName, fields };
+}
+
+function decodeRecord(obj: Record<string, unknown>): Value {
+  // Null-prototype guard for the same reason as 'decodeTagged': avoid
+  // payloads that name `__proto__` / `constructor` / `prototype` from
+  // mutating Object.prototype via property assignment.
+  const entries: Record<string, Value> = Object.create(null);
+  for (const [k, v] of Object.entries(obj)) {
+    if (k === "__proto__" || k === "constructor" || k === "prototype") {
+      throw new RawValueDecodeError(
+        `valueFromRaw: forbidden record key '${k}'`,
+      );
+    }
+    entries[k] = valueFromRaw(v);
+  }
+  return { kind: "record", entries };
 }

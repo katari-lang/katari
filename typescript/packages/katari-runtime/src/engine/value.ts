@@ -22,6 +22,16 @@ export type Value =
   // unambiguous: a JSON array decodes to this variant directly.
   | { kind: "array"; elements: Value[] }
   | { kind: "tagged"; ctorId: QualifiedName; fields: Record<string, Value> }
+  // Homogeneous map from string keys to values. Distinct from `tagged`
+  // in that the key set is dynamic (no compile-time-known schema) and
+  // no constructor identity attaches to the value. Maps to the
+  // surface-level `record[K, V]` type.
+  //
+  // Wire form: a plain JSON object that carries none of `$ctor` /
+  // `$callable` / `$secret` discriminator keys. The codec (= Plan D)
+  // routes objects by discriminator priority and falls through to
+  // record when none is present.
+  | { kind: "record"; entries: Record<string, Value> }
   | { kind: "closure"; closureId: ClosureId }
   // Top-level callable reference (agent / prim / ctor / external).
   // Carries only the qualified name; the runtime resolves it through
