@@ -185,6 +185,12 @@ export class Orchestrator {
         }
 
         await core.load({ coreCheckpoints: tx.checkpoints });
+        // FfiModule keeps an in-memory escalation relay map; load()
+        // rebuilds it from the persisted rows. Without this, a
+        // CORE→FFI→CORE escalateAck arriving in a later tick than the
+        // original escalate is dropped as "unknown escalation" (the
+        // per-tick instance starts with an empty map).
+        if (sidecar !== null) await ffi.load();
 
         const ctx: TickContext = { snapshotId, api, ffi, core, bus, tx };
         const result = await fn(ctx);
