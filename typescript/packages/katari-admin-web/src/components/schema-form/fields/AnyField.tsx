@@ -69,7 +69,7 @@ export function AnyField({
   return (
     <div className="space-y-2">
       <div className="flex items-center gap-2">
-        <span className="text-[10px] uppercase tracking-wider text-subtle-foreground">
+        <span className="text-xs uppercase tracking-wider text-subtle-foreground">
           Type
         </span>
         <select

@@ -30,13 +30,11 @@ where
 
 import Control.Monad (when)
 import Data.Char (isAlpha, isAlphaNum)
-import Data.List (intercalate)
 import Data.Maybe (fromMaybe)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as TextIO
-import Data.Version (versionBranch)
+import Katari.Version (katariVersion)
 import Options.Applicative
-import qualified Paths_katari as Pkg
 import System.Directory
   ( createDirectoryIfMissing,
     doesDirectoryExist,
@@ -103,14 +101,14 @@ run opts = do
   putStrLn ("Scaffolded " <> packageName <> " at " <> targetDir)
 
 -- | The katari runtime image tag baked into the scaffolded
--- @docker-compose.yml@. Cabal stores the package version as a 4-tuple
--- (@0.1.0.0@) but the GHCR tag (= what @release-katari-runtime.yml@
--- pushes) is the 3-tuple @0.1.0@. We trim accordingly so the scaffold
--- always pins to a real, published image.
+-- @docker-compose.yml@. Always the same string as 'katariVersion'
+-- (= the build's @RELEASE_VERSION@) so that a CLI built from tag
+-- @vX.Y.Z[-pre]@ pins the matching GHCR image. Developer builds carry
+-- the literal @"0.0.0-dev"@; pinning that intentionally yields a
+-- @manifest not found@ on @docker compose up@ so dev binaries never
+-- masquerade as a real release.
 imageTag :: String
-imageTag = case take 3 (versionBranch Pkg.version) of
-  parts@[_, _, _] -> intercalate "." (map show parts)
-  _ -> "latest" -- defensive: should never hit, Cabal versions are at least 3-deep
+imageTag = katariVersion
 
 -- | Resolve @(targetDir, packageName)@ from the parsed options.
 --

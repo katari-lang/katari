@@ -26,7 +26,7 @@ export function EnvDeleteDialog({ open, onClose, target }: Props) {
       onClose();
     },
     onError: (err) => {
-      toast.error(err instanceof Error ? err.message : "Failed");
+      toast.error(err instanceof Error ? err.message : "Delete failed");
     },
   });
 
@@ -35,7 +35,6 @@ export function EnvDeleteDialog({ open, onClose, target }: Props) {
       open={open}
       onClose={onClose}
       title="Delete env entry"
-      description="This removes the key from runtime configuration immediately."
       size="sm"
     >
       <p className="text-sm text-foreground">

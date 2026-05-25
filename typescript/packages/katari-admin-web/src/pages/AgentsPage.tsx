@@ -47,9 +47,9 @@ export function AgentsPage() {
   }
 
   const { data, isLoading, isError, error } = useQuery({
-    queryKey: ["definitions", projectId, selected ?? "latest"],
+    queryKey: ["agents", projectId, selected ?? "latest"],
     queryFn: () =>
-      client.listAgentAgents({
+      client.listAgents({
         projectId: projectId as ProjectId,
         snapshotId: selected ?? undefined,
       }),
@@ -58,9 +58,9 @@ export function AgentsPage() {
 
   const visibleAgents = useMemo(() => {
     if (data === undefined) return [];
-    if (showAll || projectName === undefined) return data.definitions;
+    if (showAll || projectName === undefined) return data.agents;
     const prefix = `${projectName}.`;
-    return data.definitions.filter((d) => d.qualifiedName.startsWith(prefix));
+    return data.agents.filter((a) => a.qualifiedName.startsWith(prefix));
   }, [data, showAll, projectName]);
 
   function setSelected(next: SnapshotId | null) {
@@ -73,13 +73,14 @@ export function AgentsPage() {
   }
 
   const hiddenCount =
-    data === undefined ? 0 : data.definitions.length - visibleAgents.length;
+    data === undefined ? 0 : data.agents.length - visibleAgents.length;
 
   return (
     <div>
       <PageHeader
         title="Agents"
         description="Callable agents in the selected snapshot"
+        docs={{ slug: "concepts/agents", title: "About agents" }}
       />
       <PageContent>
         {typeof projectId === "string" && (
@@ -106,7 +107,7 @@ export function AgentsPage() {
           <p className="border border-danger/30 bg-danger/10 px-4 py-3 text-sm text-danger">
             {error instanceof Error
               ? error.message
-              : "Failed to load definitions."}
+              : "Failed to load agents."}
           </p>
         )}
         {!isLoading && !isError && data !== undefined && (
@@ -119,25 +120,25 @@ export function AgentsPage() {
               <EmptyState
                 icon={Boxes}
                 title={
-                  data.definitions.length === 0
-                    ? "No definitions in this snapshot"
-                    : "No project definitions"
+                  data.agents.length === 0
+                    ? "No agents in this snapshot"
+                    : "Only stdlib and libraries here"
                 }
                 description={
-                  data.definitions.length === 0
-                    ? "Publish a snapshot with at least one agent declaration to populate this list."
-                    : `Toggle "Show stdlib & libraries" above to see the ${data.definitions.length} entries from other packages.`
+                  data.agents.length === 0
+                    ? "Declare an agent and re-run katari apply."
+                    : `Toggle "Show stdlib & libraries" to reveal ${data.agents.length} entries from other packages.`
                 }
               />
             ) : (
               <div className="border border-border">
                 <AgentsTree
-                  definitions={visibleAgents}
-                  href={(def) => {
+                  agents={visibleAgents}
+                  href={(agent) => {
                     const search =
                       selected === null ? "" : `?snapshot=${selected}`;
-                    return `/project/${projectId}/definitions/${encodeURIComponent(
-                      def.qualifiedName,
+                    return `/project/${projectId}/agents/${encodeURIComponent(
+                      agent.qualifiedName,
                     )}${search}`;
                   }}
                 />

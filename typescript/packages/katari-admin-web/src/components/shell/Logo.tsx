@@ -3,8 +3,8 @@ import { cn } from "@/lib/cn";
 type LogoSize = "sm" | "md" | "lg";
 
 const sizeVariants: Record<LogoSize, { height: string; text: string; badge: string }> = {
-  sm: { height: "h-6", text: "text-sm", badge: "text-[10px]" },
-  md: { height: "h-7", text: "text-base", badge: "text-[11px]" },
+  sm: { height: "h-6", text: "text-sm", badge: "text-xs" },
+  md: { height: "h-7", text: "text-base", badge: "text-xs" },
   lg: { height: "h-9", text: "text-lg", badge: "text-xs" },
 };
 

@@ -13,6 +13,7 @@ import { useApiClient } from "@/contexts/ApiKeyContext";
 import { PageContent, PageHeader } from "@/components/ui/PageHeader";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
+import { CopyableId } from "@/components/ui/CopyableId";
 import { Input } from "@/components/ui/Input";
 import { Label } from "@/components/ui/Label";
 import { SpinnerOverlay } from "@/components/ui/Spinner";
@@ -22,7 +23,7 @@ import type { JsonSchema } from "@/components/schema-form/schema-utils";
 import type { ProjectId, SnapshotId } from "@/api/types";
 import type { RawValue } from "@katari-lang/runtime";
 
-export function DefinitionDetailPage() {
+export function AgentDetailPage() {
   const { projectId, qualifiedName } = useParams<{
     projectId: string;
     qualifiedName: string;
@@ -38,18 +39,29 @@ export function DefinitionDetailPage() {
       : (snapshotParam as SnapshotId);
 
   const { data, isLoading, isError, error } = useQuery({
-    queryKey: ["definitions", projectId, selectedSnapshot ?? "latest"],
+    queryKey: ["agents", projectId, selectedSnapshot ?? "latest"],
     queryFn: () =>
-      client.listAgentAgents({
+      client.listAgents({
         projectId: projectId as ProjectId,
         snapshotId: selectedSnapshot,
       }),
     enabled: typeof projectId === "string",
   });
 
-  const definition = data?.definitions.find(
-    (d) => d.qualifiedName === qualifiedName,
-  );
+  const agent = data?.agents.find((a) => a.qualifiedName === qualifiedName);
+  const resolvedSnapshotId = data?.snapshotId;
+
+  // Snapshot summary lookup — see RunDetailPage for the rationale on
+  // pulling from the cached list rather than fetching the full row.
+  const snapshotsQ = useQuery({
+    queryKey: ["snapshots", projectId],
+    queryFn: () =>
+      client.listSnapshots(projectId as ProjectId, { limit: 200 }),
+    enabled: typeof projectId === "string",
+  });
+  const snapshotMessage = snapshotsQ.data?.snapshots.find(
+    (s) => s.id === resolvedSnapshotId,
+  )?.message;
 
   // Operator-supplied run label. Empty = let the server pick a default
   // (typically `"<qualifiedName> @ HH:mm"`), so the placeholder previews
@@ -70,7 +82,7 @@ export function DefinitionDetailPage() {
       navigate(`/project/${projectId}/runs/${res.runId}`);
     },
     onError: (err) => {
-      toast.error(err instanceof Error ? err.message : "Failed to start.");
+      toast.error(err instanceof Error ? err.message : "Run failed to start");
     },
   });
 
@@ -82,7 +94,7 @@ export function DefinitionDetailPage() {
         title={
           <span className="inline-flex flex-wrap items-center gap-3">
             <Link
-              to={`/project/${projectId}/definitions${
+              to={`/project/${projectId}/agents${
                 selectedSnapshot !== undefined
                   ? `?snapshot=${selectedSnapshot}`
                   : ""
@@ -98,24 +110,22 @@ export function DefinitionDetailPage() {
             </span>
           </span>
         }
-        description={definition?.description}
+        description={agent?.description}
       />
       <PageContent>
         {isLoading && <SpinnerOverlay />}
         {isError && (
           <p className=" border border-danger/30 bg-danger/10 px-4 py-3 text-sm text-danger">
-            {error instanceof Error
-              ? error.message
-              : "Failed to load definition."}
+            {error instanceof Error ? error.message : "Failed to load agent."}
           </p>
         )}
-        {!isLoading && data !== undefined && definition === undefined && (
+        {!isLoading && data !== undefined && agent === undefined && (
           <p className=" border border-warning/30 bg-warning/10 px-4 py-3 text-sm text-warning">
-            No definition <code className="font-mono">{qualifiedName}</code> in
-            this snapshot.
+            No agent <code className="font-mono">{qualifiedName}</code> in this
+            snapshot.
           </p>
         )}
-        {definition !== undefined && (
+        {agent !== undefined && (
           <motion.div
             initial={{ opacity: 0, y: 4 }}
             animate={{ opacity: 1, y: 0 }}
@@ -138,11 +148,11 @@ export function DefinitionDetailPage() {
                       maxLength={128}
                     />
                     <p className="text-xs text-subtle-foreground">
-                      Optional. Leave blank to use the suggested default.
+                      Optional — defaults to the placeholder.
                     </p>
                   </div>
                   <SchemaForm
-                    schema={definition.parameters as JsonSchema}
+                    schema={agent.parameters as JsonSchema}
                     onSubmit={(args) =>
                       invoke.mutate(args as Record<string, RawValue>)
                     }
@@ -163,7 +173,36 @@ export function DefinitionDetailPage() {
                 </div>
               </CardContent>
             </Card>
-            <ReturnsCard returns={definition.returns} />
+            <Card>
+              <CardHeader>
+                <CardTitle>Metadata</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <dl className="space-y-2 text-sm">
+                  <Row
+                    label="ID"
+                    value={<CopyableId value={agent.qualifiedName} />}
+                  />
+                  {resolvedSnapshotId !== undefined && (
+                    <Row
+                      label="Snapshot"
+                      value={
+                        <Link
+                          to={`/project/${projectId}/agents?snapshot=${resolvedSnapshotId}`}
+                          className="text-foreground hover:underline"
+                        >
+                          {snapshotMessage ?? "—"}
+                        </Link>
+                      }
+                    />
+                  )}
+                </dl>
+              </CardContent>
+            </Card>
+            <ReturnsCard
+              returns={agent.returns}
+              className="lg:col-span-3"
+            />
           </motion.div>
         )}
       </PageContent>
@@ -182,12 +221,29 @@ function defaultRunNamePreview(qualifiedName: string | undefined): string {
   return `${qualifiedName ?? "agent"} @ ${h}:${m}`;
 }
 
-function ReturnsCard({ returns }: { returns: unknown }) {
+function Row({ label, value }: { label: string; value: React.ReactNode }) {
+  return (
+    <div className="flex items-baseline justify-between gap-3">
+      <dt className="text-xs uppercase tracking-wider text-subtle-foreground">
+        {label}
+      </dt>
+      <dd className="text-right text-foreground">{value}</dd>
+    </div>
+  );
+}
+
+function ReturnsCard({
+  returns,
+  className,
+}: {
+  returns: unknown;
+  className?: string;
+}) {
   // Default-open: operators almost always want to see the response shape
   // before invoking, so collapsing it adds a needless click.
   const [open, setOpen] = useState(true);
   return (
-    <Card>
+    <Card className={className}>
       <CardHeader>
         <button
           type="button"

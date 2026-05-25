@@ -11,9 +11,8 @@ import qualified Katari.Cli.Init as Init
 import qualified Katari.Cli.Ls as Ls
 import qualified Katari.Cli.Run as Run
 import qualified Katari.Cli.Status as Status
-import Data.Version (showVersion)
+import Katari.Version (katariVersion)
 import Options.Applicative
-import qualified Paths_katari as Pkg
 
 data Cmd
   = Init Init.Options
@@ -47,7 +46,7 @@ cmdParser =
 versionOption :: Parser (a -> a)
 versionOption =
   infoOption
-    (showVersion Pkg.version)
+    katariVersion
     ( long "version"
         <> help "Show the katari CLI version and exit"
         <> hidden

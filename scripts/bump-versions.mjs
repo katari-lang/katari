@@ -1,18 +1,19 @@
 #!/usr/bin/env node
-// Sets the `version` field on every publishable TS package to the
-// given value, and **injects** the `@katari-lang/cli` shim's
-// `optionalDependencies` so each `@katari-lang/cli-<platform>` entry
-// points at the same version.
+// Injects `@katari-lang/cli-<platform>` entries into the `@katari-lang/cli`
+// shim's `optionalDependencies`, all pinned to the given release version.
 //
 // optionalDependencies are intentionally absent from the committed
-// source manifest so that pre-first-publish `pnpm install` doesn't
-// fail trying to resolve not-yet-on-registry packages.
+// source manifest so a pre-first-publish `pnpm install` doesn't fail
+// trying to resolve not-yet-on-registry packages. This step runs in
+// the release pipeline (`release-npm.yml`) immediately before
+// `pnpm publish`.
 //
-// `workspace:*` cross-references are left as-is; `pnpm publish`
-// rewrites them on the fly using the registry-published versions of
-// the same packages.
-//
-// Skips `katari-vscode` (published as VSIX, not npm).
+// Note: this script used to also write the `version` field on every
+// publishable TS package. That responsibility has moved to
+// `scripts/stamp-version.mjs`, which is run by hand before the
+// release commit so source = artifact. The release workflow then
+// enforces the match via `scripts/verify-versions.mjs`. See
+// docs/PUBLISHING.md.
 //
 // Usage:
 //   node scripts/bump-versions.mjs --version 0.1.0
@@ -22,16 +23,6 @@ import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-
-// (workspace dir name, npm name). Directory layout is decoupled from
-// npm scope so we can rename one without churning the other.
-const PUBLISHABLE = [
-  { dir: "katari",            name: "@katari-lang/cli"        },
-  { dir: "katari-runtime",    name: "@katari-lang/runtime"    },
-  { dir: "katari-port",       name: "@katari-lang/port"       },
-  { dir: "katari-bundle",     name: "@katari-lang/bundle"     },
-  { dir: "katari-api-server", name: "@katari-lang/api-server" },
-];
 
 const PLATFORMS = ["linux-x64", "darwin-arm64"];
 
@@ -44,19 +35,28 @@ function arg(name) {
 }
 
 const version = arg("version");
+const shimPath = resolve(
+  REPO_ROOT,
+  "typescript/packages/katari/package.json",
+);
+const pkg = JSON.parse(readFileSync(shimPath, "utf8"));
 
-for (const { dir, name } of PUBLISHABLE) {
-  const pkgPath = resolve(REPO_ROOT, "typescript/packages", dir, "package.json");
-  const pkg = JSON.parse(readFileSync(pkgPath, "utf8"));
-  pkg.version = version;
-
-  if (name === "@katari-lang/cli") {
-    pkg.optionalDependencies ??= {};
-    for (const plat of PLATFORMS) {
-      pkg.optionalDependencies[`@katari-lang/cli-${plat}`] = version;
-    }
-  }
-
-  writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + "\n");
-  console.log(`bumped ${name} (${dir}) to ${version}`);
+if (pkg.version !== version) {
+  console.error(
+    `error: ${shimPath} has version ${pkg.version}, expected ${version}.\n` +
+      `       Run 'scripts/verify-versions.mjs --tag v${version}' to see` +
+      ` everything that's out of sync, then 'scripts/stamp-version.mjs' to fix.`,
+  );
+  process.exit(2);
 }
+
+pkg.optionalDependencies ??= {};
+for (const plat of PLATFORMS) {
+  pkg.optionalDependencies[`@katari-lang/cli-${plat}`] = version;
+}
+
+writeFileSync(shimPath, JSON.stringify(pkg, null, 2) + "\n");
+console.log(
+  `Injected optionalDependencies into @katari-lang/cli @ ${version} ` +
+    `(${PLATFORMS.length} platforms)`,
+);

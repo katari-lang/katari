@@ -29,6 +29,7 @@ export function EnvPage() {
       <PageHeader
         title="Environment"
         description="Global key-value store"
+        docs={{ slug: "concepts/env", title: "About the env store" }}
         actions={
           <Button onClick={() => setUpserting("new")}>
             <Plus className="size-4" />
@@ -56,7 +57,7 @@ export function EnvPage() {
                 action={
                   <Button variant="primary" onClick={() => setUpserting("new")}>
                     <Plus className="size-4" />
-                    Add your first entry
+                    Add entry
                   </Button>
                 }
               />

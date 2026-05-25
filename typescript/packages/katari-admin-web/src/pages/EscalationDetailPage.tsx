@@ -7,6 +7,7 @@ import { useApiClient } from "@/contexts/ApiKeyContext";
 import { PageContent, PageHeader } from "@/components/ui/PageHeader";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
+import { CopyableId } from "@/components/ui/CopyableId";
 import { SpinnerOverlay } from "@/components/ui/Spinner";
 import { Badge } from "@/components/ui/Badge";
 import { SchemaForm } from "@/components/schema-form/SchemaForm";
@@ -16,7 +17,12 @@ import {
   isNeverSchema,
   type JsonSchema,
 } from "@/components/schema-form/schema-utils";
-import type { EscalationId, EscalationState, ProjectId } from "@/api/types";
+import type {
+  EscalationId,
+  EscalationState,
+  ProjectId,
+  RunId,
+} from "@/api/types";
 import type { RawValue } from "@katari-lang/runtime";
 
 const stateTones: Record<EscalationState, "info" | "success" | "neutral"> = {
@@ -46,19 +52,44 @@ export function EscalationDetailPage() {
 
   const escalation = escalationQ.data?.escalation;
 
-  const definitionsQ = useQuery({
-    queryKey: ["definitions", projectId, escalation?.snapshotId ?? "latest"],
+  const agentsQ = useQuery({
+    queryKey: ["agents", projectId, escalation?.snapshotId ?? "latest"],
     queryFn: () =>
-      client.listAgentAgents({
+      client.listAgents({
         projectId: projectId as ProjectId,
         snapshotId: escalation?.snapshotId,
       }),
     enabled: typeof projectId === "string" && escalation !== undefined,
   });
 
-  const requestDef = definitionsQ.data?.definitions.find(
-    (d) => d.qualifiedName === escalation?.agentDefId,
+  const requestAgent = agentsQ.data?.agents.find(
+    (a) => a.qualifiedName === escalation?.agentDefId,
   );
+
+  // Related-resource lookups so we can show human-readable names in the
+  // Context card (= run name + snapshot message) instead of UUIDs.
+  // Both share react-query caches with other pages (RunsPage / pickers)
+  // so the cost is one in-flight request at most per page load.
+  const runQ = useQuery({
+    queryKey: ["run", escalation?.rootDelegationId],
+    queryFn: () =>
+      client.getRun(
+        projectId as ProjectId,
+        escalation!.rootDelegationId as RunId,
+      ),
+    enabled:
+      typeof projectId === "string" && escalation !== undefined,
+  });
+  const snapshotsQ = useQuery({
+    queryKey: ["snapshots", projectId],
+    queryFn: () =>
+      client.listSnapshots(projectId as ProjectId, { limit: 200 }),
+    enabled: typeof projectId === "string",
+  });
+  const snapshotMessage = snapshotsQ.data?.snapshots.find(
+    (s) => s.id === escalation?.snapshotId,
+  )?.message;
+  const runName = runQ.data?.run.name;
 
   const answer = useMutation({
     mutationFn: async (value: RawValue) => {
@@ -78,7 +109,7 @@ export function EscalationDetailPage() {
       navigate(`/project/${projectId}/escalations`);
     },
     onError: (err) => {
-      toast.error(err instanceof Error ? err.message : "Failed.");
+      toast.error(err instanceof Error ? err.message : "Answer failed");
     },
   });
 
@@ -96,7 +127,7 @@ export function EscalationDetailPage() {
       );
     },
     onSuccess: () => {
-      toast.success("Cancel requested for the run");
+      toast.success("Cancel requested");
       void queryClient.invalidateQueries({ queryKey: ["escalations"] });
       void queryClient.invalidateQueries({
         queryKey: ["escalation", escalationId],
@@ -107,7 +138,7 @@ export function EscalationDetailPage() {
       }
     },
     onError: (err) => {
-      toast.error(err instanceof Error ? err.message : "Failed.");
+      toast.error(err instanceof Error ? err.message : "Cancel failed");
     },
   });
 
@@ -158,20 +189,20 @@ export function EscalationDetailPage() {
               <CardContent>
                 {escalation.state !== "open" ? (
                   <p className="text-sm text-muted-foreground">
-                    This escalation is{" "}
+                    Already{" "}
                     <span className="font-medium text-foreground">
                       {escalation.state}
-                    </span>{" "}
-                    — no further action is needed.
+                    </span>
+                    .
                   </p>
-                ) : definitionsQ.isLoading ? (
+                ) : agentsQ.isLoading ? (
                   <SpinnerOverlay />
-                ) : requestDef === undefined ? (
+                ) : requestAgent === undefined ? (
                   <p className="border border-warning/30 bg-warning/10 px-3 py-2 text-sm text-warning">
-                    Could not locate the request schema for{" "}
+                    No request schema for{" "}
                     <code className="font-mono">{escalation.agentDefId}</code>.
                   </p>
-                ) : isNeverSchema(requestDef.returns as JsonSchema) ? (
+                ) : isNeverSchema(requestAgent.returns as JsonSchema) ? (
                   // `never` return: the request was declared `-> never`,
                   // so no value can validly resume the calling thread.
                   // The only resolution is to cancel the parent run; the
@@ -179,20 +210,15 @@ export function EscalationDetailPage() {
                   // marks this escalation as `cancelled` in the same tick.
                   <div className="space-y-3">
                     <div className="border border-warning/40 bg-warning/10 px-3 py-2 text-sm text-warning">
-                      <p className="font-medium">
-                        This escalation cannot be answered.
-                      </p>
+                      <p className="font-medium">Cannot be answered.</p>
                       <p className="mt-1 text-xs">
-                        The request{" "}
                         <code className="font-mono">
                           {escalation.agentDefId}
                         </code>{" "}
-                        is declared with{" "}
+                        is declared{" "}
                         <code className="font-mono">-&gt; never</code> — no
-                        value can satisfy its return type. Resolve it by
-                        cancelling the parent run; the cancel cascade will
-                        transition this escalation to{" "}
-                        <span className="font-medium">cancelled</span>.
+                        value can satisfy it. Cancel the parent run to
+                        resolve.
                       </p>
                     </div>
                     <div className="flex justify-end gap-2">
@@ -216,7 +242,7 @@ export function EscalationDetailPage() {
                   </div>
                 ) : (
                   <SchemaForm
-                    schema={requestDef.returns as JsonSchema}
+                    schema={requestAgent.returns as JsonSchema}
                     onSubmit={(value) => answer.mutate(value as RawValue)}
                     renderActions={({ submit }) => (
                       <div className="flex justify-end gap-2 pt-2">
@@ -246,11 +272,20 @@ export function EscalationDetailPage() {
               <CardContent>
                 <dl className="space-y-3 text-sm">
                   <Row
+                    label="ID"
+                    value={<CopyableId value={escalation.id} />}
+                  />
+                  <Row
                     label="Request"
                     value={
-                      <code className="font-mono text-xs">
+                      <Link
+                        to={`/project/${projectId}/agents/${encodeURIComponent(
+                          escalation.agentDefId,
+                        )}?snapshot=${escalation.snapshotId}`}
+                        className="font-mono text-xs text-foreground hover:underline"
+                      >
                         {escalation.agentDefId}
-                      </code>
+                      </Link>
                     }
                   />
                   <Row
@@ -258,26 +293,21 @@ export function EscalationDetailPage() {
                     value={
                       <Link
                         to={`/project/${projectId}/runs/${escalation.rootDelegationId}`}
-                        className="font-mono text-xs hover:underline"
+                        className="text-foreground hover:underline"
                       >
-                        {escalation.rootDelegationId}
+                        {runName ?? "—"}
                       </Link>
-                    }
-                  />
-                  <Row
-                    label="Delegation"
-                    value={
-                      <code className="font-mono text-xs break-all">
-                        {escalation.delegationId}
-                      </code>
                     }
                   />
                   <Row
                     label="Snapshot"
                     value={
-                      <code className="font-mono text-xs break-all">
-                        {escalation.snapshotId}
-                      </code>
+                      <Link
+                        to={`/project/${projectId}/agents?snapshot=${escalation.snapshotId}`}
+                        className="text-foreground hover:underline"
+                      >
+                        {snapshotMessage ?? "—"}
+                      </Link>
                     }
                   />
                   <Row
@@ -289,7 +319,7 @@ export function EscalationDetailPage() {
             </Card>
             <Card className="lg:col-span-3">
               <CardHeader>
-                <CardTitle>Args sent by the agent</CardTitle>
+                <CardTitle>Arguments</CardTitle>
               </CardHeader>
               <CardContent>
                 <ValueViewer value={escalation.args} />
@@ -298,7 +328,7 @@ export function EscalationDetailPage() {
             {escalation.value !== undefined && (
               <Card className="lg:col-span-3">
                 <CardHeader>
-                  <CardTitle>Previously submitted answer</CardTitle>
+                  <CardTitle>Previous answer</CardTitle>
                 </CardHeader>
                 <CardContent>
                   <ValueViewer value={escalation.value} />
@@ -315,7 +345,7 @@ export function EscalationDetailPage() {
 function Row({ label, value }: { label: string; value: React.ReactNode }) {
   return (
     <div className="flex items-baseline justify-between gap-3">
-      <dt className="text-[11px] uppercase tracking-wider text-subtle-foreground">
+      <dt className="text-xs uppercase tracking-wider text-subtle-foreground">
         {label}
       </dt>
       <dd className="text-right text-foreground">{value}</dd>

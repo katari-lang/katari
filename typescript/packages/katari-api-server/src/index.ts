@@ -9,7 +9,7 @@ export {
 } from "./services/project-service.js";
 export {
   SnapshotService,
-  AgentDefinitionNotFound,
+  AgentNotFound,
 } from "./services/snapshot-service.js";
 
 export { ApiModule } from "./modules/api-module.js";

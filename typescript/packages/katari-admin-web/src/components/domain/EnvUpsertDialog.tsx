@@ -66,9 +66,7 @@ export function EnvUpsertDialog({ open, onClose, editing }: Props) {
       onClose={onClose}
       title={editing !== null ? "Edit env entry" : "Add env entry"}
       description={
-        isSecret
-          ? "Secret values are AES-256-GCM encrypted at rest."
-          : "Non-secret values are stored verbatim."
+        isSecret ? "Encrypted at rest." : "Stored as plaintext."
       }
     >
       <form
@@ -91,8 +89,8 @@ export function EnvUpsertDialog({ open, onClose, editing }: Props) {
             required
           />
           {editing !== null && (
-            <p className="text-[11px] text-subtle-foreground">
-              Key is immutable. To rename, delete and create a new entry.
+            <p className="text-xs text-subtle-foreground">
+              Key is immutable — delete the entry to rename.
             </p>
           )}
         </div>
@@ -104,7 +102,7 @@ export function EnvUpsertDialog({ open, onClose, editing }: Props) {
             onChange={(e) => setValue(e.target.value)}
             placeholder={
               editing !== null && editing.isSecret
-                ? "Enter the new secret to replace the existing one."
+                ? "New secret value (replaces the existing one)"
                 : "value"
             }
             rows={4}
@@ -117,7 +115,7 @@ export function EnvUpsertDialog({ open, onClose, editing }: Props) {
           <div>
             <Label className="cursor-pointer">Secret</Label>
             <p className="mt-0.5 text-xs text-subtle-foreground">
-              Encrypts the value at rest; reads return{" "}
+              Reads return{" "}
               <code className="font-mono">{`<redacted>`}</code>.
             </p>
           </div>

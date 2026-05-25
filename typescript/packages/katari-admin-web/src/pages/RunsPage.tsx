@@ -1,11 +1,12 @@
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { motion } from "framer-motion";
-import { Activity } from "lucide-react";
+import { Activity, ArrowRight } from "lucide-react";
 import { useApiClient } from "@/contexts/ApiKeyContext";
 import { PageContent, PageHeader } from "@/components/ui/PageHeader";
 import { SpinnerOverlay } from "@/components/ui/Spinner";
 import { EmptyState } from "@/components/ui/EmptyState";
+import { Button } from "@/components/ui/Button";
 import { Table, TBody, TD, TH, THead, TR } from "@/components/ui/Table";
 import {
   RunStatusBadge,
@@ -34,7 +35,11 @@ export function RunsPage() {
 
   return (
     <div>
-      <PageHeader title="Runs" description="Operator-launched runs" />
+      <PageHeader
+        title="Runs"
+        description="Operator-launched runs"
+        docs={{ slug: "concepts/runs", title: "About runs" }}
+      />
       <PageContent>
         {isLoading && <SpinnerOverlay />}
         {isError && (
@@ -52,7 +57,15 @@ export function RunsPage() {
               <EmptyState
                 icon={Activity}
                 title="No runs yet"
-                description="Start a run from the Agents page to populate this list."
+                description="Pick an agent to invoke and the run will land here."
+                action={
+                  <Link to={`/project/${projectId}/agents`}>
+                    <Button variant="primary" size="sm">
+                      Browse agents
+                      <ArrowRight className="size-3.5" />
+                    </Button>
+                  </Link>
+                }
               />
             ) : (
               <Table>
@@ -60,6 +73,7 @@ export function RunsPage() {
                   <TR>
                     <TH>State</TH>
                     <TH>Run</TH>
+                    <TH>Agent</TH>
                     <TH>Snapshot</TH>
                     <TH>Created</TH>
                     <TH>Updated</TH>
@@ -69,7 +83,7 @@ export function RunsPage() {
                   {data.runs.map((run) => (
                     <TR
                       key={run.id}
-                      className="cursor-pointer"
+                      className="cursor-pointer h-16"
                       onClick={() =>
                         navigate(`/project/${projectId}/runs/${run.id}`)
                       }
@@ -86,10 +100,10 @@ export function RunsPage() {
                           <div className="font-medium text-foreground">
                             {run.name}
                           </div>
-                          <div className="mt-0.5 font-mono text-[11px] text-subtle-foreground">
-                            {run.qualifiedName} · {shortId(run.id)}
-                          </div>
                         </Link>
+                      </TD>
+                      <TD className="font-mono text-xs text-muted-foreground">
+                        {run.qualifiedName}
                       </TD>
                       <TD className="font-mono text-xs text-muted-foreground">
                         {shortId(run.snapshotId)}

@@ -1,11 +1,11 @@
-// Snapshot-scoped agent-definition routes.
+// Snapshot-scoped agent routes.
 //
-// Mounted at `/project/:projectId/snapshot/:snapshotId/agent-definition`.
-// Definitions live inside a specific snapshot's schema bundle, so the
-// URL hierarchy mirrors the data model. The path segment `:snapshotId`
-// accepts the literal string `"latest"` as an alias that resolves to the
-// project's most-recent snapshot — kept for ergonomic admin / IDE
-// lookups that don't want to make two requests.
+// Mounted at `/project/:projectId/snapshot/:snapshotId/agent`. Agents
+// live inside a specific snapshot's schema bundle, so the URL hierarchy
+// mirrors the data model. The path segment `:snapshotId` accepts the
+// literal string `"latest"` as an alias that resolves to the project's
+// most-recent snapshot — kept for ergonomic admin / IDE lookups that
+// don't want to make two requests.
 
 import { Hono } from "hono";
 import {
@@ -13,7 +13,7 @@ import {
   SnapshotIdSchema,
 } from "./middleware/validation.js";
 import {
-  AgentDefinitionNotFound,
+  AgentNotFound,
   NoSnapshotForProject,
   SnapshotNotFound,
   type SnapshotService,
@@ -53,7 +53,7 @@ async function resolveSnapshotId(
   return SnapshotIdSchema.parse(raw);
 }
 
-export function buildAgentDefinitionRoutes(snapshots: SnapshotService): Hono {
+export function buildAgentRoutes(snapshots: SnapshotService): Hono {
   const app = new Hono();
 
   app.get("/", async (c) => {
@@ -61,8 +61,8 @@ export function buildAgentDefinitionRoutes(snapshots: SnapshotService): Hono {
     const rawSnapshotId = c.req.param("snapshotId") ?? "latest";
     try {
       const snapshotId = await resolveSnapshotId(snapshots, projectId, rawSnapshotId);
-      const definitions = await snapshots.listAgentDefinitions(snapshotId);
-      return c.json({ definitions, snapshotId });
+      const agents = await snapshots.listAgents(snapshotId);
+      return c.json({ agents, snapshotId });
     } catch (err) {
       if (err instanceof NoSnapshotForProject || err instanceof SnapshotNotFound) {
         return c.json({ error: err.message }, 404);
@@ -77,16 +77,13 @@ export function buildAgentDefinitionRoutes(snapshots: SnapshotService): Hono {
     const qualifiedName = parseQualifiedName(c.req.param("qualifiedName"));
     try {
       const snapshotId = await resolveSnapshotId(snapshots, projectId, rawSnapshotId);
-      const definition = await snapshots.getAgentDefinition(
-        snapshotId,
-        qualifiedName,
-      );
-      return c.json({ definition, snapshotId });
+      const agent = await snapshots.getAgent(snapshotId, qualifiedName);
+      return c.json({ agent, snapshotId });
     } catch (err) {
       if (
         err instanceof NoSnapshotForProject ||
         err instanceof SnapshotNotFound ||
-        err instanceof AgentDefinitionNotFound
+        err instanceof AgentNotFound
       ) {
         return c.json({ error: err.message }, 404);
       }

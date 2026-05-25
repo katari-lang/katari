@@ -14,7 +14,7 @@ import {
   SnapshotNotFound,
   type SnapshotService,
 } from "../services/snapshot-service.js";
-import { buildAgentDefinitionRoutes } from "./agent-definition.js";
+import { buildAgentRoutes } from "./agent.js";
 
 export function buildSnapshotRoutes(snapshots: SnapshotService): Hono {
   const app = new Hono();
@@ -22,7 +22,7 @@ export function buildSnapshotRoutes(snapshots: SnapshotService): Hono {
   // Mount nested agent router FIRST so longer paths like
   // `/:snapshotId/agent` win over the shorter `/:snapshotId`
   // catch-all below. Hono matches in registration order.
-  app.route("/:snapshotId/agent", buildAgentDefinitionRoutes(snapshots));
+  app.route("/:snapshotId/agent", buildAgentRoutes(snapshots));
 
   app.post("/", async (c) => {
     const projectId = ProjectIdSchema.parse(c.req.param("projectId"));

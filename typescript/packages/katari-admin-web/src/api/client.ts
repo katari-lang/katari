@@ -2,7 +2,7 @@
 // raises a typed ApiError on non-2xx so callers can branch on status / code.
 
 import type {
-  AgentDefinitionWire,
+  AgentWire,
   DelegationTree,
   EnvEntry,
   EscalationId,
@@ -119,23 +119,23 @@ export function createApiClient(config: ApiClientConfig) {
         `/project/${projectId}/snapshot/${snapshotId}/schema`,
       ),
 
-    // Agent definitions (snapshot-scoped). `snapshotId === "latest"` is a
+    // Agents (snapshot-scoped). `snapshotId === "latest"` is a
     // server-side alias for the project's most-recent snapshot.
-    listAgentAgents: (params: {
+    listAgents: (params: {
       projectId: ProjectId;
       snapshotId?: SnapshotId | "latest";
     }) =>
-      request<{ definitions: AgentDefinitionWire[]; snapshotId: SnapshotId }>(
+      request<{ agents: AgentWire[]; snapshotId: SnapshotId }>(
         config,
         "GET",
         `/project/${params.projectId}/snapshot/${params.snapshotId ?? "latest"}/agent`,
       ),
-    getAgentDefinition: (params: {
+    getAgent: (params: {
       projectId: ProjectId;
       snapshotId?: SnapshotId | "latest";
       qualifiedName: string;
     }) =>
-      request<{ definition: AgentDefinitionWire; snapshotId: SnapshotId }>(
+      request<{ agent: AgentWire; snapshotId: SnapshotId }>(
         config,
         "GET",
         `/project/${params.projectId}/snapshot/${params.snapshotId ?? "latest"}/agent/${encodeURIComponent(params.qualifiedName)}`,

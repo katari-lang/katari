@@ -7,16 +7,16 @@ import {
   FolderOpen,
   FileCode,
 } from "lucide-react";
-import type { AgentDefinitionWire } from "@/api/types";
+import type { AgentWire } from "@/api/types";
 
 type TreeNode =
   | { kind: "folder"; name: string; path: string; children: TreeNode[] }
-  | { kind: "leaf"; name: string; definition: AgentDefinitionWire };
+  | { kind: "leaf"; name: string; agent: AgentWire };
 
-function buildTree(defs: AgentDefinitionWire[]): TreeNode[] {
+function buildTree(agents: AgentWire[]): TreeNode[] {
   const root: TreeNode = { kind: "folder", name: "", path: "", children: [] };
-  for (const def of defs) {
-    const parts = def.qualifiedName.split(".");
+  for (const agent of agents) {
+    const parts = agent.qualifiedName.split(".");
     let cursor = root;
     for (let i = 0; i < parts.length - 1; i += 1) {
       const seg = parts[i]!;
@@ -42,7 +42,7 @@ function buildTree(defs: AgentDefinitionWire[]): TreeNode[] {
     cursor.children.push({
       kind: "leaf",
       name: parts[parts.length - 1]!,
-      definition: def,
+      agent,
     });
   }
   return sortTree(root.kind === "folder" ? root.children : []);
@@ -65,9 +65,9 @@ function sortTree(nodes: TreeNode[]): TreeNode[] {
 }
 
 type Props = {
-  definitions: AgentDefinitionWire[];
+  agents: AgentWire[];
   /** Build the per-leaf link target. */
-  href: (def: AgentDefinitionWire) => string;
+  href: (agent: AgentWire) => string;
 };
 
 // Row height matched to the rest of the admin tables (= py-2.5, ~40px
@@ -79,8 +79,8 @@ const ROW_BASE =
 // arbitrarily nested without Tailwind needing to know about it.
 const INDENT_REM = 1.25;
 
-export function AgentsTree({ definitions, href }: Props) {
-  const tree = useMemo(() => buildTree(definitions), [definitions]);
+export function AgentsTree({ agents, href }: Props) {
+  const tree = useMemo(() => buildTree(agents), [agents]);
   // Default-open every folder so the operator sees everything immediately.
   // The folder state is stored as a Set keyed by dotted path; toggling is
   // local — no need to persist.
@@ -126,7 +126,7 @@ function collectAllFolderPaths(nodes: TreeNode[]): Set<string> {
 function nodeKey(n: TreeNode): string {
   return n.kind === "folder"
     ? `f:${n.path}`
-    : `l:${n.definition.qualifiedName}`;
+    : `l:${n.agent.qualifiedName}`;
 }
 
 function TreeRow({
@@ -140,7 +140,7 @@ function TreeRow({
   depth: number;
   openSet: Set<string>;
   onToggle: (path: string) => void;
-  href: (def: AgentDefinitionWire) => string;
+  href: (def: AgentWire) => string;
 }) {
   const indent = { paddingLeft: `${depth * INDENT_REM + 0.75}rem` };
 
@@ -186,11 +186,11 @@ function TreeRow({
 
   // Leaf: file-style row with name on top + description below. Larger
   // click target than the previous single-line version.
-  const desc = node.definition.description;
+  const desc = node.agent.description;
   return (
     <li>
       <Link
-        to={href(node.definition)}
+        to={href(node.agent)}
         style={indent}
         className={`${ROW_BASE} pr-3 text-foreground`}
       >

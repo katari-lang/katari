@@ -270,7 +270,7 @@ function NodeCard({ node }: { node: DelegationTreeNode }) {
       )}
     >
       <div className="flex items-center justify-between gap-2">
-        <span className="text-[10px] uppercase tracking-wider text-subtle-foreground">
+        <span className="text-xs uppercase tracking-wider text-subtle-foreground">
           {ownerLabel}
         </span>
         <RunStatusBadge state={node.state} />
@@ -279,7 +279,7 @@ function NodeCard({ node }: { node: DelegationTreeNode }) {
         {node.qualifiedName ?? node.agentDefId}
       </div>
       {node.name !== undefined && (
-        <div className="mt-0.5 text-[11px] text-subtle-foreground">
+        <div className="mt-0.5 text-xs text-subtle-foreground">
           {node.name}
         </div>
       )}

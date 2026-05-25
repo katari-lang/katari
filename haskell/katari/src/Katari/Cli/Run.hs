@@ -138,7 +138,7 @@ resolveQualifiedNameAndArgs client projectId opts = do
       pure (qn, args)
     (Nothing, _) -> do
       (defs, _snapId) <-
-        Api.listAgentDefinitions client projectId opts.optSnapshot
+        Api.listAgents client projectId opts.optSnapshot
       case defs of
         [] -> die "no agent definitions on this snapshot (did you run `katari apply`?)"
         _ -> do
@@ -162,7 +162,7 @@ findDefinition ::
   Text ->
   IO Api.AgentDefinition
 findDefinition client projectId snap qname = do
-  (defs, _) <- Api.listAgentDefinitions client projectId snap
+  (defs, _) <- Api.listAgents client projectId snap
   case filter (\d -> d.qualifiedName == qname) defs of
     [d] -> pure d
     [] -> die ("agent '" <> Text.unpack qname <> "' not found in this snapshot")

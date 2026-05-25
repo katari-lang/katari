@@ -42,9 +42,6 @@ export function SettingsPage() {
           <Card>
             <CardHeader>
               <CardTitle>Theme</CardTitle>
-              <CardDescription>
-                Pick the system, light, or dark variant.
-              </CardDescription>
             </CardHeader>
             <CardContent>
               <div className="flex gap-2">

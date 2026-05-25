@@ -21,8 +21,35 @@ permissions:
   packages: write
 
 jobs:
+  # See release-katari.yml for the rationale — every release workflow
+  # gates on the same precheck so a misaligned tag fails before any
+  # artifact is published.
+  verify-versions:
+    name: verify version source-of-truth
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - name: Resolve tag
+        id: tag
+        shell: bash
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          tag="${INPUT_TAG:-$REF_NAME}"
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$ ]]; then
+            echo "::error::tag must match v<major>.<minor>.<patch>[-prerelease]; got '$tag'"
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+      - name: Verify versions match tag
+        run: node scripts/verify-versions.mjs --tag "${{ steps.tag.outputs.tag }}"
+
   image:
     name: build & push katari image
+    needs: verify-versions
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4

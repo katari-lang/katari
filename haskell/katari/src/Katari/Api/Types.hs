@@ -28,8 +28,8 @@ module Katari.Api.Types
     CancelRunResponse (..),
     -- * Agent definitions
     AgentDefinition (..),
-    ListAgentDefinitionsResponse (..),
-    GetAgentDefinitionResponse (..),
+    ListAgentsResponse (..),
+    GetAgentResponse (..),
     -- * Escalations
     EscalationRow (..),
     EscalationState (..),
@@ -277,15 +277,15 @@ data AgentDefinition = AgentDefinition
   deriving stock (Show, Generic)
   deriving anyclass (FromJSON, ToJSON)
 
-data ListAgentDefinitionsResponse = ListAgentDefinitionsResponse
-  { definitions :: [AgentDefinition],
+data ListAgentsResponse = ListAgentsResponse
+  { agents :: [AgentDefinition],
     snapshotId :: Text
   }
   deriving stock (Show, Generic)
   deriving anyclass (FromJSON, ToJSON)
 
-data GetAgentDefinitionResponse = GetAgentDefinitionResponse
-  { definition :: AgentDefinition,
+data GetAgentResponse = GetAgentResponse
+  { agent :: AgentDefinition,
     snapshotId :: Text
   }
   deriving stock (Show, Generic)

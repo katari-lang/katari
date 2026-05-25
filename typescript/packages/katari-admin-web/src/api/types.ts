@@ -38,7 +38,11 @@ export type Snapshot = {
   id: SnapshotId;
   projectId: ProjectId;
   irModule: unknown;
-  sidecarBundle: { entry: string; runtime: "node"; schemaVersion: number } | null;
+  sidecarBundle: {
+    entry: string;
+    runtime: "node";
+    schemaVersion: number;
+  } | null;
   schemaBundle: SchemaBundle;
   message: string;
   createdAt: string;
@@ -104,7 +108,7 @@ export type EnvEntry = {
   updatedAt: string;
 };
 
-export type AgentDefinitionWire = AgentDefinition;
+export type AgentWire = AgentDefinition;
 
 // ─── Delegation tree (live view) ──────────────────────────────────────────
 

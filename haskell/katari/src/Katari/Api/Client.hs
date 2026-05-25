@@ -23,8 +23,8 @@ module Katari.Api.Client
     listRuns,
     getRun,
     cancelRun,
-    -- * Agent definitions
-    listAgentDefinitions,
+    -- * Agents
+    listAgents,
     -- * Escalations
     listEscalations,
     answerEscalation,
@@ -168,15 +168,15 @@ cancelRun c runId = do
   pure r.run
 
 -- ---------------------------------------------------------------------------
--- Agent definitions
+-- Agents
 -- ---------------------------------------------------------------------------
 
-listAgentDefinitions :: ApiClient -> Text -> Maybe Text -> IO ([AgentDefinition], Text)
-listAgentDefinitions c projectId snapshotId = do
+listAgents :: ApiClient -> Text -> Maybe Text -> IO ([AgentDefinition], Text)
+listAgents c projectId snapshotId = do
   let sid = maybe "latest" id snapshotId
-  r :: ListAgentDefinitionsResponse <-
-    get c ("/project/" <> projectId <> "/snapshot/" <> sid <> "/agent-definition")
-  pure (r.definitions, r.snapshotId)
+  r :: ListAgentsResponse <-
+    get c ("/project/" <> projectId <> "/snapshot/" <> sid <> "/agent")
+  pure (r.agents, r.snapshotId)
 
 -- ---------------------------------------------------------------------------
 -- Escalations

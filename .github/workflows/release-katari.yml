@@ -24,8 +24,38 @@ permissions:
   contents: write
 
 jobs:
+  # Gate every other job on a single source-of-truth check: the pushed
+  # tag must match `katariVersion` (haskell/katari/src/Katari/Version.hs),
+  # the cabal version's 3-tuple prefix, and every TS workspace
+  # package.json's "version". Releases are supposed to be made from a
+  # commit produced by `scripts/stamp-version.mjs`; if the operator
+  # forgot, this fails fast before anything gets uploaded.
+  verify-versions:
+    name: verify version source-of-truth
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - name: Resolve tag
+        id: tag
+        shell: bash
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          tag="${INPUT_TAG:-$REF_NAME}"
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$ ]]; then
+            echo "::error::tag must match v<major>.<minor>.<patch>[-prerelease]; got '$tag'"
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+      - name: Verify versions match tag
+        run: node scripts/verify-versions.mjs --tag "${{ steps.tag.outputs.tag }}"
+
   build:
     name: build (${{ matrix.platform }})
+    needs: verify-versions
     strategy:
       fail-fast: false
       matrix:

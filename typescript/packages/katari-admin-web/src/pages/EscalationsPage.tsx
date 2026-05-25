@@ -53,6 +53,7 @@ export function EscalationsPage() {
       <PageHeader
         title="Escalations"
         description="Questions that need a human answer"
+        docs={{ slug: "concepts/escalations", title: "About escalations" }}
         actions={
           <div className="flex items-center border border-border">
             {stateOptions.map((opt) => (
@@ -93,8 +94,8 @@ export function EscalationsPage() {
                 title="No escalations"
                 description={
                   stateFilter === "open"
-                    ? "Pending AI → user questions will show up here."
-                    : "No escalations match this filter."
+                    ? "AI-to-user questions will appear here."
+                    : "Nothing matches this filter."
                 }
               />
             ) : (
@@ -128,7 +129,7 @@ export function EscalationsPage() {
                           <div className="font-medium text-foreground">
                             {esc.agentDefId}
                           </div>
-                          <div className="mt-0.5 font-mono text-[11px] text-subtle-foreground">
+                          <div className="mt-0.5 font-mono text-xs text-subtle-foreground">
                             {shortId(esc.id)}
                           </div>
                         </Link>

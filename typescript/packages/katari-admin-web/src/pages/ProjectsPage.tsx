@@ -17,7 +17,7 @@ export function ProjectsPage() {
 
   return (
     <div>
-      <PageHeader title="Projects" description="Manage your projects" />
+      <PageHeader title="Projects" />
       <PageContent>
         {isLoading && <SpinnerOverlay />}
         {isError && (
@@ -39,7 +39,7 @@ export function ProjectsPage() {
                     <code className="font-mono text-foreground">
                       katari apply
                     </code>{" "}
-                    to publish a snapshot — the project will appear here.
+                    to publish your first snapshot.
                   </>
                 }
               />

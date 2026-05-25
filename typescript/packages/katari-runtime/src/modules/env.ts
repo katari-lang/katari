@@ -9,13 +9,15 @@
 //
 // The 'dispatchName' on the event's agentDefId selects which handler
 // runs. Missing-key lookups raise the stdlib `req env_not_found`
-// (qualified name `prim.env_not_found`) via `escalate`, which the
-// caller's surrounding handle scope can catch.
+// (qualified name `prim.env_not_found`) via `escalate`. The caller's
+// surrounding handle scope catches it and the resulting `escalateAck`
+// is converted back into a `delegateAck` so the round-trip closes.
 //
-// **Persistence**: a single store instance shared across snapshots
-// — env entries do not belong to a snapshot's lifecycle (they
-// outlive deploys). Storage is responsible for durability; the
-// module is stateless between events.
+// **Persistence**: env entries themselves outlive snapshots (the
+// store is the source of truth). The escalation map below tracks
+// in-flight env_not_found round-trips and is intentionally
+// in-memory: a server restart while one is pending will drop it
+// (the caller's snapshot will fail to complete and be retried).
 //
 // **Secret handling**: when 'set_env' names a secret, the plaintext
 // is encrypted via 'secret-crypto.encryptSecret' before the value
@@ -27,7 +29,11 @@ import { ENV_ENDPOINT } from "./endpoints.js";
 import { encodeCoreAgentDefId, decodeFfiAgentDefId } from "../agent-def-id.js";
 import type { Endpoint } from "../engine/endpoint.js";
 import type { ExternalEvent } from "../engine/event.js";
-import { createEscalationId } from "../engine/id.js";
+import {
+  createEscalationId,
+  type DelegationId,
+  type EscalationId,
+} from "../engine/id.js";
 import type { Logger } from "../engine/logger.js";
 import type { Value } from "../engine/value.js";
 import { decryptSecret, encryptSecret } from "../secret-crypto.js";
@@ -53,11 +59,31 @@ export type EnvModuleOptions = {
   logger: Logger;
 };
 
+/**
+ * In-flight env_not_found round-trip. Created when 'handleGet' escalates
+ * because the key is missing; consumed when the matching 'escalateAck'
+ * arrives (= the handler resumed via 'next') or the caller cancels
+ * (= 'terminate').
+ */
+interface PendingEscalation {
+  delegationId: DelegationId;
+  caller: Endpoint;
+}
+
 export class EnvModule implements Module {
   readonly endpoint: Endpoint;
   private readonly store: EnvStore;
   private readonly onBusResponse: (event: ExternalEvent) => void;
   private readonly logger: Logger;
+  /**
+   * Active env_not_found escalations. Keyed by 'escalationId' so an
+   * inbound 'escalateAck' can locate its caller in O(1). The
+   * 'delegationId' field lets a 'terminate' event drop the entry
+   * via a linear scan (rare path; one delegation never has more than
+   * one in-flight escalation, so the scan is at most as long as the
+   * count of concurrently-stuck env lookups).
+   */
+  private readonly pendingEscalations = new Map<EscalationId, PendingEscalation>();
 
   constructor(opts: EnvModuleOptions) {
     this.endpoint = opts.endpoint ?? ENV_ENDPOINT;
@@ -69,43 +95,51 @@ export class EnvModule implements Module {
   // ─── Module interface ───────────────────────────────────────────────────
 
   async feed(event: ExternalEvent): Promise<{ outbound: ExternalEvent[] }> {
-    if (event.payload.kind !== "delegate") {
-      // EnvModule only responds to delegate. Other events (terminate /
-      // escalate / etc.) are not expected from CoreModule against the
-      // env endpoint; log and drop so a misconfigured caller surfaces.
-      this.logger.log("debug", "env: unexpected event kind dropped", {
-        kind: event.payload.kind,
-      });
-      return { outbound: [] };
-    }
-    const { delegationId, agentDefId, args } = event.payload;
-    const dispatchName = decodeFfiAgentDefId(agentDefId).value;
-    switch (dispatchName) {
-      case ENV_DISPATCH_GET:
-        await this.handleGet(event.from, delegationId, args, /*secret=*/ false);
+    const p = event.payload;
+    switch (p.kind) {
+      case "delegate": {
+        const dispatchName = decodeFfiAgentDefId(p.agentDefId).value;
+        switch (dispatchName) {
+          case ENV_DISPATCH_GET:
+            await this.handleGet(event.from, p.delegationId, p.args, /*secret=*/ false);
+            return { outbound: [] };
+          case ENV_DISPATCH_GET_SECRET:
+            await this.handleGet(event.from, p.delegationId, p.args, /*secret=*/ true);
+            return { outbound: [] };
+          case ENV_DISPATCH_SET:
+            await this.handleSet(event.from, p.delegationId, p.args);
+            return { outbound: [] };
+          default:
+            this.logger.log("warn", "env: unknown dispatch name", { dispatchName });
+            return { outbound: [] };
+        }
+      }
+      case "escalateAck":
+        this.handleEscalateAck(p.escalationId, p.value);
         return { outbound: [] };
-      case ENV_DISPATCH_GET_SECRET:
-        await this.handleGet(event.from, delegationId, args, /*secret=*/ true);
-        return { outbound: [] };
-      case ENV_DISPATCH_SET:
-        await this.handleSet(event.from, delegationId, args);
+      case "terminate":
+        this.handleTerminate(event.from, p.delegationId);
         return { outbound: [] };
       default:
-        this.logger.log("warn", "env: unknown dispatch name", { dispatchName });
+        // 'delegateAck' / 'terminateAck' / 'escalate' have no reverse
+        // meaning at this endpoint — drop with a debug log.
+        this.logger.log("debug", "env: unexpected event kind dropped", {
+          kind: p.kind,
+        });
         return { outbound: [] };
     }
   }
 
   /** Nothing to flush — every state update writes through to the store. */
   async persist(): Promise<void> {}
-  /** Stateless module — load is a no-op. */
+  /** Stateless across restarts — pending escalations are best-effort in-memory only. */
   async load(): Promise<void> {}
 
   // ─── Dispatch handlers ──────────────────────────────────────────────────
 
   private async handleGet(
     caller: Endpoint,
-    delegationId: import("../engine/id.js").DelegationId,
+    delegationId: DelegationId,
     args: Record<string, Value>,
     secret: boolean,
   ): Promise<void> {
@@ -143,7 +177,7 @@ export class EnvModule implements Module {
 
   private async handleSet(
     caller: Endpoint,
-    delegationId: import("../engine/id.js").DelegationId,
+    delegationId: DelegationId,
     args: Record<string, Value>,
   ): Promise<void> {
     const key = requireString(args, "key");
@@ -166,7 +200,7 @@ export class EnvModule implements Module {
 
   private respondDelegateAck(
     to: Endpoint,
-    delegationId: import("../engine/id.js").DelegationId,
+    delegationId: DelegationId,
     value: Value,
   ): void {
     this.onBusResponse({
@@ -178,33 +212,43 @@ export class EnvModule implements Module {
 
   private escalateEnvNotFound(
     to: Endpoint,
-    delegationId: import("../engine/id.js").DelegationId,
+    delegationId: DelegationId,
     key: string,
   ): void {
+    const escalationId = createEscalationId();
+    // Register the pending round-trip so the matching escalateAck can
+    // be converted into a delegateAck, and a terminate can drop it.
+    this.pendingEscalations.set(escalationId, {
+      delegationId,
+      caller: to,
+    });
     this.onBusResponse({
       from: this.endpoint,
       to,
       payload: {
         kind: "escalate",
         delegationId,
-        escalationId: createEscalationId(),
+        escalationId,
         agentDefId: encodeCoreAgentDefId({
           kind: "qname",
           value: ENV_NOT_FOUND_QNAME,
         }),
-        args: { key: { kind: "string", value: key } },
+        args: { env_key: { kind: "string", value: key } },
       },
     });
   }
 
   private escalateInvalidArgs(
     to: Endpoint,
-    delegationId: import("../engine/id.js").DelegationId,
+    delegationId: DelegationId,
     message: string,
   ): void {
     // Argument-shape problems are programmer errors at the boundary;
     // surface them via `prim.throw` so they reach the snapshot's
     // top-level error state (= the same fate as any other engine bug).
+    // No pending entry is recorded: 'throw' has no resume value, the
+    // handler chain transitions the snapshot to error and never asks
+    // us back.
     this.onBusResponse({
       from: this.endpoint,
       to,
@@ -218,6 +262,45 @@ export class EnvModule implements Module {
         }),
         args: { msg: { kind: "string", value: message } },
       },
+    });
+  }
+
+  // ─── Reverse-direction handlers ─────────────────────────────────────────
+
+  /**
+   * The handle scope above us caught 'env_not_found' and resumed with
+   * 'next <value>'. Convert the inbound escalateAck into the deferred
+   * delegateAck for the original 'get_env' / 'get_secret_env' call so
+   * the caller sees the resume value as the delegate's result.
+   */
+  private handleEscalateAck(escalationId: EscalationId, value: Value): void {
+    const entry = this.pendingEscalations.get(escalationId);
+    if (entry === undefined) {
+      this.logger.log("debug", "env: escalateAck for unknown escalation", {
+        escalationId,
+      });
+      return;
+    }
+    this.pendingEscalations.delete(escalationId);
+    this.respondDelegateAck(entry.caller, entry.delegationId, value);
+  }
+
+  /**
+   * Caller cancelled mid-escalation. Drop the pending entry (so a
+   * later escalateAck arrives at no recipient and gets logged) and
+   * ack the terminate immediately — EnvModule never has real
+   * concurrent work to wind down.
+   */
+  private handleTerminate(caller: Endpoint, delegationId: DelegationId): void {
+    for (const [escalationId, entry] of this.pendingEscalations) {
+      if (entry.delegationId === delegationId) {
+        this.pendingEscalations.delete(escalationId);
+      }
+    }
+    this.onBusResponse({
+      from: this.endpoint,
+      to: caller,
+      payload: { kind: "terminateAck", delegationId },
     });
   }
 }

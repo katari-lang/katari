@@ -1,5 +1,5 @@
 name: katari
-version: 0.1.0.0
+version: 0.0.0.0
 author: yukikurage
 license: MIT
 
@@ -21,6 +21,7 @@ library:
     - Katari.Cli.Prompt
     - Katari.Cli.Run
     - Katari.Cli.Status
+    - Katari.Version
 
 executables:
   katari:

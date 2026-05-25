@@ -140,7 +140,7 @@ schemaBundleJson mEntries =
 
 -- | Single 'SchemaEntry' → wire-format agent definition. Surface
 -- shape used by both CLI commands and consumed by AI tool-calling
--- consumers via the api-server's /agent-definition endpoints.
+-- consumers via the api-server's /agent endpoints.
 schemaEntryToAgent :: SchemaEntry -> Aeson.Value
 schemaEntryToAgent e =
   Aeson.object

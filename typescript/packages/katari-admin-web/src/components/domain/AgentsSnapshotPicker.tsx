@@ -40,7 +40,11 @@ export function AgentsSnapshotPicker({
   const snapshots = data?.snapshots ?? [];
   const resolvedSnap = snapshots.find((s) => s.id === resolvedId);
 
-  const label = selected === null ? "Latest" : shortId(selected, 8, 4);
+  const label =
+    selected === null
+      ? "Latest"
+      : (snapshots.find((s) => s.id === selected)?.message ??
+        shortId(selected));
 
   const trigger = (
     <button
@@ -50,7 +54,7 @@ export function AgentsSnapshotPicker({
       <Camera className="size-3.5 text-muted-foreground" />
       <span className="font-mono text-xs text-foreground">{label}</span>
       {resolvedSnap !== undefined && (
-        <span className="text-[11px] text-subtle-foreground">
+        <span className="text-xs text-subtle-foreground">
           {relativeTime(resolvedSnap.createdAt)}
         </span>
       )}
@@ -91,12 +95,9 @@ export function AgentsSnapshotPicker({
                     }}
                   >
                     <div className="flex-1">
-                      <div className="text-xs text-foreground">{s.message}</div>
-                      <div className="font-mono text-[11px] opacity-70">
-                        {shortId(s.id, 12, 4)}
-                      </div>
+                      <div className="text-xs">{s.message}</div>
                       <div
-                        className="mt-0.5 text-[11px] opacity-70"
+                        className="mt-0.5 text-xs opacity-70"
                         title={formatDateTime(s.createdAt)}
                       >
                         {relativeTime(s.createdAt)}

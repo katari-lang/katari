@@ -41,9 +41,7 @@ export function LoginPage() {
           setError(err.message);
         }
       } else if (err instanceof TypeError) {
-        setError(
-          "Could not reach the API server. Make sure it is running on this origin.",
-        );
+        setError("API server unreachable on this origin.");
       } else {
         setError(err instanceof Error ? err.message : "Unknown error.");
       }

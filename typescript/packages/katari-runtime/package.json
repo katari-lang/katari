@@ -1,6 +1,6 @@
 {
   "name": "@katari-lang/runtime",
-  "version": "0.1.0",
+  "version": "0.0.0-dev",
   "description": "Katari language runtime: pure execution core plus the building blocks (delegation engine, sidecar manager, IR loader) used by katari-api-server and embedded by the katari CLI.",
   "license": "MIT",
   "author": "yukikurage",

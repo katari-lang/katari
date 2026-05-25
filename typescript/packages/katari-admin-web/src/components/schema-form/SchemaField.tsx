@@ -52,7 +52,7 @@ export function SchemaField({ schema, value, onChange, name, required }: SchemaF
         <div className="flex items-baseline gap-1.5">
           <Label>{label}</Label>
           {required === true && (
-            <span className="text-[10px] uppercase tracking-wider text-danger">
+            <span className="text-xs uppercase tracking-wider text-danger">
               required
             </span>
           )}

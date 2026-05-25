@@ -7,6 +7,7 @@ import { useApiClient } from "@/contexts/ApiKeyContext";
 import { PageContent, PageHeader } from "@/components/ui/PageHeader";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
+import { CopyableId } from "@/components/ui/CopyableId";
 import { SpinnerOverlay } from "@/components/ui/Spinner";
 import {
   RunStatusBadge,
@@ -46,7 +47,7 @@ export function RunDetailPage() {
       void queryClient.invalidateQueries({ queryKey: ["runs", projectId] });
     },
     onError: (err) => {
-      toast.error(err instanceof Error ? err.message : "Failed to cancel.");
+      toast.error(err instanceof Error ? err.message : "Cancel failed");
     },
   });
 
@@ -55,6 +56,19 @@ export function RunDetailPage() {
     run !== undefined &&
     (run.state === "running" || run.state === "cancelling");
   const isLive = run !== undefined && !isTerminalState(run.state);
+
+  // Snapshot summary lookup: we show the snapshot's commit-message-like
+  // `message` rather than the UUID. Pulling from the cached snapshot
+  // list (shared with the picker on /agents) avoids fetching the full
+  // snapshot row just for one string.
+  const snapshotsQ = useQuery({
+    queryKey: ["snapshots", projectId],
+    queryFn: () =>
+      client.listSnapshots(projectId as ProjectId, { limit: 200 }),
+    enabled: typeof projectId === "string",
+  });
+  const snapshotMessage =
+    snapshotsQ.data?.snapshots.find((s) => s.id === run?.snapshotId)?.message;
 
   // Live tree polling. Only fires while the run is in flight — once the
   // run reaches a terminal state, the tree has been deleted by the
@@ -132,12 +146,7 @@ export function RunDetailPage() {
               </CardHeader>
               <CardContent>
                 <dl className="space-y-2 text-sm">
-                  <Row
-                    label="Run ID"
-                    value={
-                      <code className="font-mono text-xs">{run.id}</code>
-                    }
-                  />
+                  <Row label="ID" value={<CopyableId value={run.id} />} />
                   <Row
                     label="Name"
                     value={
@@ -147,17 +156,25 @@ export function RunDetailPage() {
                   <Row
                     label="Agent"
                     value={
-                      <code className="font-mono text-xs">
+                      <Link
+                        to={`/project/${projectId}/agents/${encodeURIComponent(
+                          run.qualifiedName,
+                        )}?snapshot=${run.snapshotId}`}
+                        className="font-mono text-xs text-foreground hover:underline"
+                      >
                         {run.qualifiedName}
-                      </code>
+                      </Link>
                     }
                   />
                   <Row
                     label="Snapshot"
                     value={
-                      <code className="font-mono text-xs">
-                        {run.snapshotId}
-                      </code>
+                      <Link
+                        to={`/project/${projectId}/agents?snapshot=${run.snapshotId}`}
+                        className="text-foreground hover:underline"
+                      >
+                        {snapshotMessage ?? "—"}
+                      </Link>
                     }
                   />
                   <Row
@@ -192,12 +209,10 @@ export function RunDetailPage() {
                   {treeQ.data !== undefined ? (
                     <DelegationTreeGraph root={treeQ.data.tree.root} />
                   ) : treeQ.isLoading ? (
-                    <p className="text-sm text-subtle-foreground">
-                      Loading tree...
-                    </p>
+                    <p className="text-sm text-subtle-foreground">Loading…</p>
                   ) : (
                     <p className="text-sm text-subtle-foreground">
-                      No in-flight delegations.
+                      No live delegations.
                     </p>
                   )}
                 </CardContent>
@@ -235,7 +250,7 @@ export function RunDetailPage() {
 function Row({ label, value }: { label: string; value: React.ReactNode }) {
   return (
     <div className="flex items-baseline justify-between gap-3">
-      <dt className="text-[11px] uppercase tracking-wider text-subtle-foreground">
+      <dt className="text-xs uppercase tracking-wider text-subtle-foreground">
         {label}
       </dt>
       <dd className="text-right text-foreground">{value}</dd>

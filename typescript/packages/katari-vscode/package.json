@@ -2,7 +2,7 @@
   "name": "katari-vscode",
   "displayName": "Katari",
   "description": "Syntax highlighting and language support for the Katari language.",
-  "version": "0.1.0",
+  "version": "0.0.0-dev",
   "private": true,
   "license": "MIT",
   "publisher": "yukikurage",
@@ -51,7 +51,9 @@
         },
         "katari.server.args": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "default": [],
           "description": "Extra command-line arguments passed to katari-lsp (useful for verbose logging flags during LSP development)."
         }

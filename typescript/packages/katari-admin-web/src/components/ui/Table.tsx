@@ -16,7 +16,7 @@ export function THead({ className, ...rest }: HTMLAttributes<HTMLTableSectionEle
   return (
     <thead
       className={cn(
-        "border-b border-border bg-muted/50 text-left text-[11px] uppercase tracking-wider text-subtle-foreground",
+        "border-b border-border bg-muted/50 text-left text-xs uppercase tracking-wider text-subtle-foreground",
         className,
       )}
       {...rest}

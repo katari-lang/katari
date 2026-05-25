@@ -134,7 +134,7 @@ export function buildApp(deps: AppDeps): Hono {
 
   // Routes reflect the data hierarchy: project owns snapshots and any
   // runtime artifact (= agents, escalations); snapshots own their
-  // compiled schema (= agent-definitions). Env is runtime-global.
+  // compiled schema (= agents). Env is runtime-global.
   app.route("/project", buildProjectRoutes(deps.projects));
   app.route(
     "/project/:projectId/snapshot",

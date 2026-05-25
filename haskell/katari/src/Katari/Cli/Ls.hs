@@ -98,7 +98,7 @@ run opts = do
       if opts.optJson then emitJson runs else mapM_ printRun runs
     TAgentDefs -> do
       pid <- requireProjectId client opts
-      (defs, snapId) <- Api.listAgentDefinitions client pid opts.optSnapshot
+      (defs, snapId) <- Api.listAgents client pid opts.optSnapshot
       if opts.optJson
         then emitJson defs
         else do

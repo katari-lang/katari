@@ -50,7 +50,7 @@ export function UnionField({
   return (
     <div className="space-y-2">
       <div className="flex items-center gap-2">
-        <span className="text-[10px] uppercase tracking-wider text-subtle-foreground">
+        <span className="text-xs uppercase tracking-wider text-subtle-foreground">
           {tagged ? "Constructor" : "Variant"}
         </span>
         <div className="w-fit min-w-48">

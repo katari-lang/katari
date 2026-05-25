@@ -25,12 +25,44 @@ permissions:
   id-token: write   # required for OIDC handshake with npm
 
 jobs:
-  publish:
-    name: publish to npm
+  # See release-katari.yml for the rationale — every release workflow
+  # gates on the same precheck so a misaligned tag fails before any
+  # artifact is published.
+  verify-versions:
+    name: verify version source-of-truth
     # workflow_run fires regardless of conclusion — gate on success.
     if: >-
       ${{ github.event_name == 'workflow_dispatch'
           || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Resolve tag
+        id: tag
+        shell: bash
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          RUN_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            tag="$INPUT_TAG"
+          else
+            tag="$RUN_BRANCH"
+          fi
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$ ]]; then
+            echo "::error::tag must match v<major>.<minor>.<patch>[-prerelease]; got '$tag'"
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.tag.outputs.tag }}
+      - name: Verify versions match tag
+        run: node scripts/verify-versions.mjs --tag "${{ steps.tag.outputs.tag }}"
+
+  publish:
+    name: publish to npm
+    needs: verify-versions
     runs-on: ubuntu-22.04
     steps:
       - name: Resolve tag
@@ -126,11 +158,15 @@ jobs:
       - name: Stage @katari-lang/cli-<platform> packages
         run: node scripts/stage-binary-packages.mjs --version "${{ steps.tag.outputs.version }}"
 
-      # Bumps versions across the publishable TS packages and injects
-      # the shim's optionalDependencies. workspace:* refs are left
-      # alone — `pnpm publish` rewrites them on the fly. Provenance is
-      # automatic under Trusted Publishing — no `--provenance` flag.
-      - name: Bump versions in TS packages
+      # The source tree's `version` fields are already at the target
+      # value (stamped by `scripts/stamp-version.mjs` before the release
+      # commit, and verified by the `verify-versions` precheck above).
+      # This step only injects the shim's `optionalDependencies` for
+      # the platform-specific binary packages — those are intentionally
+      # absent from the committed manifest. `workspace:*` refs are
+      # left alone; `pnpm publish` rewrites them on the fly.
+      # Provenance is automatic under Trusted Publishing.
+      - name: Inject @katari-lang/cli optionalDependencies
         run: node scripts/bump-versions.mjs --version "${{ steps.tag.outputs.version }}"
 
       - name: Publish library packages

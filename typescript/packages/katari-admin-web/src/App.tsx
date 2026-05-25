@@ -7,7 +7,7 @@ import { DashboardPage } from "@/pages/DashboardPage";
 import { RunsPage } from "@/pages/RunsPage";
 import { RunDetailPage } from "@/pages/RunDetailPage";
 import { AgentsPage } from "@/pages/AgentsPage";
-import { DefinitionDetailPage } from "@/pages/DefinitionDetailPage";
+import { AgentDetailPage } from "@/pages/AgentDetailPage";
 import { EscalationsPage } from "@/pages/EscalationsPage";
 import { EscalationDetailPage } from "@/pages/EscalationDetailPage";
 import { EnvPage } from "@/pages/EnvPage";
@@ -27,10 +27,10 @@ export default function App() {
               <Route index element={<DashboardPage />} />
               <Route path="runs" element={<RunsPage />} />
               <Route path="runs/:runId" element={<RunDetailPage />} />
-              <Route path="definitions" element={<AgentsPage />} />
+              <Route path="agents" element={<AgentsPage />} />
               <Route
-                path="definitions/:qualifiedName"
-                element={<DefinitionDetailPage />}
+                path="agents/:qualifiedName"
+                element={<AgentDetailPage />}
               />
               <Route path="escalations" element={<EscalationsPage />} />
               <Route

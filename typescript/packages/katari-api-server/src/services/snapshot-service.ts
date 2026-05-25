@@ -30,13 +30,13 @@ export class NoSnapshotForProject extends Error {
   }
 }
 
-export class AgentDefinitionNotFound extends Error {
+export class AgentNotFound extends Error {
   constructor(
     public readonly snapshotId: SnapshotId,
     public readonly qualifiedName: string,
   ) {
     super(
-      `agent definition ${qualifiedName} does not exist in snapshot ${snapshotId}`,
+      `agent ${qualifiedName} does not exist in snapshot ${snapshotId}`,
     );
   }
 }
@@ -118,21 +118,21 @@ export class SnapshotService {
     return latest;
   }
 
-  async listAgentDefinitions(snapshotId: SnapshotId): Promise<AgentDefinition[]> {
+  async listAgents(snapshotId: SnapshotId): Promise<AgentDefinition[]> {
     const row = await this.get(snapshotId);
     return row.schemaBundle.agents;
   }
 
-  async getAgentDefinition(
+  async getAgent(
     snapshotId: SnapshotId,
     qualifiedName: string,
   ): Promise<AgentDefinition> {
-    const defs = await this.listAgentDefinitions(snapshotId);
-    const found = defs.find(
-      (d) => formatQualifiedName(d.qualifiedName) === qualifiedName,
+    const agents = await this.listAgents(snapshotId);
+    const found = agents.find(
+      (a) => formatQualifiedName(a.qualifiedName) === qualifiedName,
     );
     if (found === undefined) {
-      throw new AgentDefinitionNotFound(snapshotId, qualifiedName);
+      throw new AgentNotFound(snapshotId, qualifiedName);
     }
     return found;
   }

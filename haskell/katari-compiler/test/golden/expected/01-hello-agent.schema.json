@@ -681,12 +681,12 @@
     "input": {
       "additionalProperties": false,
       "properties": {
-        "key": {
+        "env_key": {
           "type": "string"
         }
       },
       "required": [
-        "key"
+        "env_key"
       ],
       "type": "object"
     },
@@ -699,12 +699,12 @@
         "input": {
           "additionalProperties": false,
           "properties": {
-            "key": {
+            "env_key": {
               "type": "string"
             }
           },
           "required": [
-            "key"
+            "env_key"
           ],
           "type": "object"
         },
@@ -738,12 +738,12 @@
         "input": {
           "additionalProperties": false,
           "properties": {
-            "key": {
+            "env_key": {
               "type": "string"
             }
           },
           "required": [
-            "key"
+            "env_key"
           ],
           "type": "object"
         },
@@ -775,12 +775,12 @@
         "input": {
           "additionalProperties": false,
           "properties": {
-            "key": {
+            "env_key": {
               "type": "string"
             }
           },
           "required": [
-            "key"
+            "env_key"
           ],
           "type": "object"
         },

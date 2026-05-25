@@ -1,10 +1,14 @@
 import type { ReactNode } from "react";
 import { cn } from "@/lib/cn";
+import { HelpLink } from "@/components/ui/DocsLink";
 
 type PageHeaderProps = {
   title: ReactNode;
   description?: ReactNode;
   actions?: ReactNode;
+  /** Docs slug for the help icon. Renders next to the title and opens
+   *  the doc in a new tab. Omit on pages with no dedicated doc. */
+  docs?: { slug: string; title?: string };
   className?: string;
 };
 
@@ -12,6 +16,7 @@ export function PageHeader({
   title,
   description,
   actions,
+  docs,
   className,
 }: PageHeaderProps) {
   return (
@@ -22,9 +27,14 @@ export function PageHeader({
       )}
     >
       <div className="space-y-1">
-        <h1 className="text-2xl font-semibold tracking-tight text-highlight font-display-text">
-          {title}
-        </h1>
+        <div className="flex items-baseline gap-1">
+          <h1 className="text-2xl font-semibold tracking-tight text-highlight font-display-text">
+            {title}
+          </h1>
+          {docs !== undefined && (
+            <HelpLink slug={docs.slug} title={docs.title} />
+          )}
+        </div>
         {description !== undefined && (
           <p className="text-sm text-muted-foreground">{description}</p>
         )}

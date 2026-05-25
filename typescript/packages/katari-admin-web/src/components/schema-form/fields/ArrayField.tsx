@@ -25,7 +25,7 @@ export function ArrayField({
             key={idx}
             className="flex items-start gap-2  border border-border  p-2"
           >
-            <span className="mt-2 inline-flex h-5 min-w-5 items-center justify-center rounded bg-muted px-1.5 font-mono text-[10px] text-muted-foreground">
+            <span className="mt-2 inline-flex h-5 min-w-5 items-center justify-center rounded bg-muted px-1.5 font-mono text-xs text-muted-foreground">
               {idx}
             </span>
             <div className="flex-1">

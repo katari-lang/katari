@@ -23,7 +23,7 @@ function projectItems(projectId: string): MenuItem[] {
     { to: `/project/${projectId}`, label: "Dashboard", icon: LayoutDashboard },
     { to: `/project/${projectId}/runs`, label: "Runs", icon: Activity },
     {
-      to: `/project/${projectId}/definitions`,
+      to: `/project/${projectId}/agents`,
       label: "Agents",
       icon: Boxes,
     },
@@ -78,7 +78,7 @@ export function SidebarMenu() {
 
 function SectionLabel({ children }: { children: React.ReactNode }) {
   return (
-    <p className="px-2 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+    <p className="px-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
       {children}
     </p>
   );

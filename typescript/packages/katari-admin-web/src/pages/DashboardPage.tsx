@@ -108,7 +108,7 @@ export function DashboardPage() {
                         <span className="flex-1 truncate font-mono text-xs text-foreground">
                           {r.name ?? r.qualifiedName}
                         </span>
-                        <span className="text-[11px] text-subtle-foreground">
+                        <span className="text-xs text-subtle-foreground">
                           {relativeTime(r.createdAt)}
                         </span>
                       </Link>
@@ -150,7 +150,7 @@ export function DashboardPage() {
                         <span className="flex-1 truncate font-mono text-xs text-foreground">
                           {e.agentDefId}
                         </span>
-                        <span className="text-[11px] text-subtle-foreground">
+                        <span className="text-xs text-subtle-foreground">
                           {relativeTime(e.createdAt)}
                         </span>
                       </Link>
@@ -217,14 +217,14 @@ export function DashboardPage() {
             >
               {recentRuns.length === 0 ? (
                 <p className="text-sm text-subtle-foreground">
-                  No runs yet. Start one from the{" "}
+                  No runs yet — start one from{" "}
                   <Link
-                    to={`/project/${projectId}/definitions`}
+                    to={`/project/${projectId}/agents`}
                     className="underline"
                   >
                     Agents
-                  </Link>{" "}
-                  page.
+                  </Link>
+                  .
                 </p>
               ) : (
                 <ul className="">
@@ -238,7 +238,7 @@ export function DashboardPage() {
                         <span className="flex-1 truncate font-mono text-foreground">
                           {r.name ?? r.qualifiedName}
                         </span>
-                        <span className="text-[11px] text-subtle-foreground">
+                        <span className="text-xs text-subtle-foreground">
                           {relativeTime(r.updatedAt)}
                         </span>
                       </Link>
@@ -305,7 +305,7 @@ function DashboardCard({
 function InfoRow({ label, value }: { label: string; value: React.ReactNode }) {
   return (
     <div className="flex items-baseline justify-between gap-3">
-      <dt className="text-[11px] uppercase tracking-wider text-subtle-foreground">
+      <dt className="text-xs uppercase tracking-wider text-subtle-foreground">
         {label}
       </dt>
       <dd className="text-right text-foreground">{value}</dd>

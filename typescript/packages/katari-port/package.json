@@ -1,6 +1,6 @@
 {
   "name": "@katari-lang/port",
-  "version": "0.1.0",
+  "version": "0.0.0-dev",
   "description": "Katari user-facing FFI SDK: register ext agent handlers that run in a Katari sidecar subprocess.",
   "license": "MIT",
   "author": "yukikurage",

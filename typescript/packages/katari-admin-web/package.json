@@ -1,6 +1,6 @@
 {
   "name": "@katari-lang/admin-web",
-  "version": "0.1.0",
+  "version": "0.0.0-dev",
   "private": true,
   "description": "Web admin UI for Katari runtime: project / snapshot / agent / escalation / env management.",
   "license": "MIT",
