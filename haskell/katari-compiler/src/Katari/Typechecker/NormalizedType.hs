@@ -117,9 +117,9 @@ data LayeredType = LayeredType
     -- intersection → all fields, common field types intersected.
     objectLayer :: ObjectSlot,
     -- | Record layer. 'RecordSlotAbsent' means "no record values".
-    -- 'RecordSlotOf k v' means "homogeneous dictionaries from k-typed
-    -- keys to v-typed values". Keys are invariant (key sets are dynamic
-    -- so we can't widen or narrow the domain), values are covariant.
+    -- 'RecordSlotOf v' means "homogeneous dictionaries from string
+    -- keys to v-typed values". Keys are implicitly @string@ (wire
+    -- form is plain JSON object syntax); values are covariant.
     -- Distinct from 'ObjectSlotOf' (= static field labels).
     recordLayer :: RecordSlot
   }
@@ -174,13 +174,13 @@ data ObjectSlot where
 -- | Record slot.
 --
 --   * 'RecordSlotAbsent' — no record values inhabit this type.
---   * @'RecordSlotOf' k v@ — homogeneous dictionaries from k-typed keys
---     to v-typed values. Keys are invariant (the key set is dynamic, so
---     widening or narrowing the key type isn't sound); values are
---     covariant.
+--   * @'RecordSlotOf' v@ — homogeneous dictionaries from string keys
+--     to v-typed values. Keys are implicitly @string@ (the wire form
+--     is plain JSON object syntax, whose keys are always strings);
+--     values are covariant.
 data RecordSlot where
   RecordSlotAbsent :: RecordSlot
-  RecordSlotOf :: NormalizedType -> NormalizedType -> RecordSlot
+  RecordSlotOf :: NormalizedType -> RecordSlot
   deriving (Eq, Show)
 
 -- | Function layer.
@@ -322,8 +322,8 @@ objectBranches = \case
 recordBranches :: RecordSlot -> [SemanticType Resolved]
 recordBranches = \case
   RecordSlotAbsent -> []
-  RecordSlotOf keyType valueType ->
-    [SemanticTypeRecord (denormalise keyType) (denormalise valueType)]
+  RecordSlotOf valueType ->
+    [SemanticTypeRecord (denormalise valueType)]
 
 -- ---------------------------------------------------------------------------
 -- isNeverNT / isUnknownNT
@@ -433,10 +433,10 @@ normaliseSemantic = \case
       emptyLayered
         { objectLayer = ObjectSlotOf (Map.map normaliseSemantic fields)
         }
-  SemanticTypeRecord keyType valueType ->
+  SemanticTypeRecord valueType ->
     NormalizedTypeLayered
       emptyLayered
-        { recordLayer = RecordSlotOf (normaliseSemantic keyType) (normaliseSemantic valueType)
+        { recordLayer = RecordSlotOf (normaliseSemantic valueType)
         }
   SemanticTypeFunction parameterTypes returnType (SemanticRequest requests) ->
     let shape =
@@ -545,21 +545,14 @@ unionObjectSlot leftSlot rightSlot = case (leftSlot, rightSlot) of
     -- Width subtyping: union keeps only common fields with widened types.
     ObjectSlotOf (Map.intersectionWith unionNT leftFields rightFields)
 
--- | Union of record slots. Keys are invariant in the lattice (the key
--- set is dynamic, so we cannot soundly widen or narrow it), so we
--- union the value types and union the key types — the result is the
--- least @record[K1 ∪ K2, V1 ∪ V2]@ that contains values of both
--- sides. (Two record values whose key types are disjoint cannot
--- structurally collapse into a single record type, but the
--- product-normalisation rule forces a single slot per layer; we accept
--- that loss of precision for canonicality, matching how unions of
--- objects fold into a single 'ObjectSlot'.)
+-- | Union of record slots. Keys are implicitly @string@ at this
+-- layer; values are unioned pointwise.
 unionRecordSlot :: RecordSlot -> RecordSlot -> RecordSlot
 unionRecordSlot leftSlot rightSlot = case (leftSlot, rightSlot) of
   (RecordSlotAbsent, other) -> other
   (other, RecordSlotAbsent) -> other
-  (RecordSlotOf leftKey leftValue, RecordSlotOf rightKey rightValue) ->
-    RecordSlotOf (unionNT leftKey rightKey) (unionNT leftValue rightValue)
+  (RecordSlotOf leftValue, RecordSlotOf rightValue) ->
+    RecordSlotOf (unionNT leftValue rightValue)
 
 -- ---------------------------------------------------------------------------
 -- Intersection (greatest lower bound)
@@ -656,18 +649,14 @@ intersectObjectSlot leftSlot rightSlot = case (leftSlot, rightSlot) of
         rightOnlyFields = Map.difference rightFields leftFields
      in ObjectSlotOf (Map.unions [commonFields, leftOnlyFields, rightOnlyFields])
 
--- | Intersection of record slots. Keys are invariant; values are
--- covariant. The intersection is the largest record type contained in
--- both sides: keys intersected, values intersected. If the resulting
--- key type is empty (= 'Never') the record slot effectively contains
--- only the empty dictionary; we keep it as 'RecordSlotOf Never V' for
--- canonical comparison.
+-- | Intersection of record slots. Keys are implicitly @string@;
+-- values are intersected pointwise.
 intersectRecordSlot :: RecordSlot -> RecordSlot -> RecordSlot
 intersectRecordSlot leftSlot rightSlot = case (leftSlot, rightSlot) of
   (RecordSlotAbsent, _) -> RecordSlotAbsent
   (_, RecordSlotAbsent) -> RecordSlotAbsent
-  (RecordSlotOf leftKey leftValue, RecordSlotOf rightKey rightValue) ->
-    RecordSlotOf (intersectNT leftKey rightKey) (intersectNT leftValue rightValue)
+  (RecordSlotOf leftValue, RecordSlotOf rightValue) ->
+    RecordSlotOf (intersectNT leftValue rightValue)
 
 -- ---------------------------------------------------------------------------
 -- Subtype check
@@ -785,13 +774,11 @@ subtypeObjectSlot leftSlot rightSlot = case (leftSlot, rightSlot) of
 
 -- | @record[K1, V1] <: record[K2, V2]@ iff @K1@ and @K2@ are
 -- mutually-subtype (invariant on keys, since the key set is
--- dynamic and we can neither widen nor narrow it soundly) and
--- @V1 <: V2@ (covariant on values).
+-- @V1 <: V2@ (covariant on values; the key type is implicitly
+-- @string@ on both sides so there is nothing to compare for keys).
 subtypeRecordSlot :: RecordSlot -> RecordSlot -> Bool
 subtypeRecordSlot leftSlot rightSlot = case (leftSlot, rightSlot) of
   (RecordSlotAbsent, _) -> True
   (_, RecordSlotAbsent) -> False
-  (RecordSlotOf leftKey leftValue, RecordSlotOf rightKey rightValue) ->
-    subtypeNormalizedType leftKey rightKey
-      && subtypeNormalizedType rightKey leftKey
-      && subtypeNormalizedType leftValue rightValue
+  (RecordSlotOf leftValue, RecordSlotOf rightValue) ->
+    subtypeNormalizedType leftValue rightValue

@@ -1875,25 +1875,23 @@ parseArrayType = parseWithSpan $ do
           sourceSpan = sourceSpan
         }
 
--- | @record[K, V]@ — a homogeneous map of @K@ keys to @V@ values.
+-- | @record[V]@ — a homogeneous map from string keys to @V@ values.
 -- @record@ is matched as an identifier (same pattern as 'array') to
 -- avoid grabbing a new keyword; the surrounding @[...]@ disambiguates
--- the syntactic context.
+-- the syntactic context. Keys are implicit @string@ — the wire form
+-- is a plain JSON object whose keys are always strings.
 parseRecordType :: Parser (SyntacticType Parsed)
 parseRecordType = parseWithSpan $ do
   void $ parseKatariTokenWith $ \case
     KatariTokenIdentifier "record" -> Just ()
     _ -> Nothing
   parsePunctuation PunctuationLeftBracket
-  keyType <- parseType
-  parseComma
   valueType <- parseType
   parsePunctuation PunctuationRightBracket
   pure $ \sourceSpan ->
     TypeRecord
       RecordTypeNode
-        { keyType = keyType,
-          valueType = valueType,
+        { valueType = valueType,
           sourceSpan = sourceSpan
         }
 

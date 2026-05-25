@@ -127,17 +127,11 @@ decomposeType original leftType rightType reason = case (leftType, rightType) of
      in yield elementConstraints
   (SemanticTypeObject leftFields, SemanticTypeObject rightFields) ->
     decomposeObject leftFields rightFields reason
-  ( SemanticTypeRecord leftKey leftValue,
-    SemanticTypeRecord rightKey rightValue
-    ) ->
-      -- record[K1, V1] <: record[K2, V2] iff K1 <:> K2 (invariant on
-      -- keys) AND V1 <: V2 (covariant on values). The invariance on
-      -- keys decomposes into two constraints in opposite directions.
-      yield
-        [ TypeConstraint leftKey rightKey reason,
-          TypeConstraint rightKey leftKey reason,
-          TypeConstraint leftValue rightValue reason
-        ]
+  (SemanticTypeRecord leftValue, SemanticTypeRecord rightValue) ->
+    -- record[V1] <: record[V2] iff V1 <: V2 (covariant on values).
+    -- Keys are implicit @string@ on both sides so there is nothing
+    -- to constrain.
+    yield [TypeConstraint leftValue rightValue reason]
   (SemanticTypeData leftTypeId, SemanticTypeData rightTypeId)
     | leftTypeId == rightTypeId -> settled
     | otherwise ->
@@ -196,7 +190,7 @@ shapeKind = \case
   SemanticTypeTuple _ -> Just "tuple"
   SemanticTypeObject _ -> Just "object"
   SemanticTypeData _ -> Just "data"
-  SemanticTypeRecord _ _ -> Just "record"
+  SemanticTypeRecord _ -> Just "record"
   -- Special forms (handled by earlier cases) intentionally fall through.
   SemanticTypeVariable _ -> Nothing
   SemanticTypeUnion _ -> Nothing

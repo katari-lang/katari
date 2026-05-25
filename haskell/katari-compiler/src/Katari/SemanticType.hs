@@ -118,12 +118,12 @@ data SemanticType phase where
   -- @T \<: SemanticTypeObject {label: t_field}@). Convertible to / from
   -- JSON schema style records.
   SemanticTypeObject :: Map Text (SemanticType phase) -> SemanticType phase
-  -- | @record[K, V]@ — homogeneous map from keys of type @K@ to values
-  -- of type @V@. v0.1.0 restricts @K@ to @string@ at the Identifier
-  -- pass; the slot is kept generic for forward compatibility. Distinct
-  -- from 'SemanticTypeObject' (= statically-known field labels) — a
-  -- @record@ has a runtime-dynamic key set.
-  SemanticTypeRecord :: SemanticType phase -> SemanticType phase -> SemanticType phase
+  -- | @record[V]@ — homogeneous map from string keys to values of
+  -- type @V@. Keys are implicitly @string@ because the wire form is
+  -- plain JSON object syntax and JSON object keys are always
+  -- strings. Distinct from 'SemanticTypeObject' (= statically-known
+  -- field labels) — a @record@ has a runtime-dynamic key set.
+  SemanticTypeRecord :: SemanticType phase -> SemanticType phase
 
 deriving instance Show (SemanticType phase)
 
@@ -232,10 +232,8 @@ substituteVariable onVariable onRequest = \case
   SemanticTypeTuple elements -> SemanticTypeTuple <$> traverse (substituteVariable onVariable onRequest) elements
   SemanticTypeUnion branches -> SemanticTypeUnion <$> traverse (substituteVariable onVariable onRequest) branches
   SemanticTypeObject fields -> SemanticTypeObject <$> traverse (substituteVariable onVariable onRequest) fields
-  SemanticTypeRecord keyType valueType ->
-    SemanticTypeRecord
-      <$> substituteVariable onVariable onRequest keyType
-      <*> substituteVariable onVariable onRequest valueType
+  SemanticTypeRecord valueType ->
+    SemanticTypeRecord <$> substituteVariable onVariable onRequest valueType
   SemanticTypeNever -> pure SemanticTypeNever
   SemanticTypeUnknown -> pure SemanticTypeUnknown
   SemanticTypeFunctionAny -> pure SemanticTypeFunctionAny

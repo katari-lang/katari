@@ -45,8 +45,8 @@ renderSemanticType typeNames reqNames = render False
     render _ (ST.SemanticTypeLiteralBoolean False) = "false"
     render _ ST.SemanticTypeFunctionAny = "agent"
     render _ (ST.SemanticTypeArray inner) = "[" <> render False inner <> "]"
-    render _ (ST.SemanticTypeRecord keyType valueType) =
-      "record[" <> render False keyType <> ", " <> render False valueType <> "]"
+    render _ (ST.SemanticTypeRecord valueType) =
+      "record[" <> render False valueType <> "]"
     render _ (ST.SemanticTypeTuple xs) =
       "(" <> Text.intercalate ", " (map (render False) xs) <> ")"
     render parenthesise (ST.SemanticTypeUnion branches) =

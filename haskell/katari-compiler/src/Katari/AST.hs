@@ -729,12 +729,12 @@ data SyntacticType (phase :: Phase) where
   -- (e.g. @get_metadata@) that accept any callable (any concrete
   -- @(P) -> R with E@). Cannot be called (params unknown).
   TypeFunctionAny :: FunctionAnyTypeNode phase -> SyntacticType phase
-  -- | @record[K, V]@ — a homogeneous map from keys of type @K@ to
-  -- values of type @V@. In v0.1.0 @K@ is restricted to @string@ at
-  -- the Identifier pass; the slot is kept generic for forward
-  -- compatibility with generics (v0.2). The wire form is a plain
-  -- JSON object (no @$constructor@ / @$agent@ / @$secret@ discriminator);
-  -- the runtime reserves @$@-prefixed keys for tagged values.
+  -- | @record[V]@ — a homogeneous map from string keys to values of
+  -- type @V@. Keys are implicitly @string@ because the wire form is
+  -- a plain JSON object (whose keys are always strings).
+  -- Discriminator keys (@$constructor@ / @$agent@ / @$secret@) are
+  -- reserved for tagged-value encoding; record entries should avoid
+  -- them to keep the wire round-trip stable.
   TypeRecord :: RecordTypeNode phase -> SyntacticType phase
 
 instance HasSourceSpan (SyntacticType phase) where
@@ -803,12 +803,12 @@ newtype FunctionAnyTypeNode (phase :: Phase) = FunctionAnyTypeNode
 instance HasSourceSpan (FunctionAnyTypeNode p) where
   sourceSpanOf node = node.sourceSpan
 
--- | AST node for a @record[K, V]@ type. The key type @K@ is currently
--- constrained to @string@ at the Identifier pass; the AST keeps the
--- slot generic to give v0.2 generics a hookable shape.
+-- | AST node for a @record[V]@ type. Keys are implicitly @string@;
+-- only the value type is carried syntactically. Generics (v0.2)
+-- could extend the surface to @record[K, V]@ by adding a key field
+-- whose absence defaults to @string@.
 data RecordTypeNode (phase :: Phase) = RecordTypeNode
-  { keyType :: SyntacticType phase,
-    valueType :: SyntacticType phase,
+  { valueType :: SyntacticType phase,
     sourceSpan :: SourceSpan
   }
 
@@ -1376,11 +1376,10 @@ retagSyntacticType = \case
     TypeUnknown UnknownTypeNode {sourceSpan = sourceSpan}
   TypeFunctionAny FunctionAnyTypeNode {sourceSpan} ->
     TypeFunctionAny FunctionAnyTypeNode {sourceSpan = sourceSpan}
-  TypeRecord RecordTypeNode {keyType, valueType, sourceSpan} ->
+  TypeRecord RecordTypeNode {valueType, sourceSpan} ->
     TypeRecord
       RecordTypeNode
-        { keyType = retagSyntacticType keyType,
-          valueType = retagSyntacticType valueType,
+        { valueType = retagSyntacticType valueType,
           sourceSpan = sourceSpan
         }
 

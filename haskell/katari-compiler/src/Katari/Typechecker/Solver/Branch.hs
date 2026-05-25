@@ -131,7 +131,7 @@ isBranchableShape = \case
   SemanticTypeArray _ -> True
   SemanticTypeTuple _ -> True
   SemanticTypeObject _ -> True
-  SemanticTypeRecord _ _ -> True
+  SemanticTypeRecord _ -> True
   -- 'function' (function-top) is treated as a primitive: it has no
   -- internal structure to branch on; the constraint goes straight to
   -- bound aggregation just like @α \<: integer@ or @integer \<: α@.
@@ -301,22 +301,15 @@ narrowShape side nextTypeVariableId nextRequestVariableId shape reason = case sh
             | (fieldVar, originalField) <- zip fieldVars (Map.elems fields)
           ]
      in (narrowedShape, Set.fromList fieldConstraints, nextAfterFields, nextRequestVariableId)
-  SemanticTypeRecord keyType valueType ->
-    let (keyVar, nextAfterKey) = freshVar nextTypeVariableId
-        (valueVar, nextAfterValue) = freshVar nextAfterKey
-        narrowedShape =
-          SemanticTypeRecord
-            (SemanticTypeVariable keyVar)
-            (SemanticTypeVariable valueVar)
-        -- Keys are invariant: emit constraints in both directions so
-        -- the fresh key var ends up mutual-subtype with the original.
-        -- Values are covariant.
-        keyForward = emitCovariantType side (SemanticTypeVariable keyVar) keyType reason
-        keyBackward = emitContravariantType side (SemanticTypeVariable keyVar) keyType reason
+  SemanticTypeRecord valueType ->
+    let (valueVar, nextAfterValue) = freshVar nextTypeVariableId
+        narrowedShape = SemanticTypeRecord (SemanticTypeVariable valueVar)
+        -- Values are covariant; the key type is implicit @string@ so
+        -- it doesn't participate in the narrowed shape.
         valueConstraint =
           emitCovariantType side (SemanticTypeVariable valueVar) valueType reason
      in ( narrowedShape,
-          Set.fromList [keyForward, keyBackward, valueConstraint],
+          Set.singleton valueConstraint,
           nextAfterValue,
           nextRequestVariableId
         )
