@@ -185,6 +185,7 @@ shapeKind = \case
   SemanticTypeTuple _ -> Just "tuple"
   SemanticTypeObject _ -> Just "object"
   SemanticTypeData _ -> Just "data"
+  SemanticTypeRecord _ _ -> Just "record"
   -- Special forms (handled by earlier cases) intentionally fall through.
   SemanticTypeVariable _ -> Nothing
   SemanticTypeUnion _ -> Nothing

@@ -457,6 +457,8 @@ elaborateType = \case
   TypeNever _ -> pure SemanticTypeNever
   TypeUnknown _ -> pure SemanticTypeUnknown
   TypeFunctionAny _ -> pure SemanticTypeFunctionAny
+  TypeRecord RecordTypeNode {keyType, valueType} ->
+    SemanticTypeRecord <$> elaborateType keyType <*> elaborateType valueType
 
 -- | Map a 'PrimitiveTypeKind' to the matching 'SemanticType' constructor.
 primitiveToSemantic :: PrimitiveTypeKind -> SemanticType phase

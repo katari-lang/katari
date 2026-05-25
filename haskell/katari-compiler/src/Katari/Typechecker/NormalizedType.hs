@@ -400,6 +400,11 @@ normaliseSemantic = \case
       emptyLayered
         { objectLayer = ObjectSlotOf (Map.map normaliseSemantic fields)
         }
+  -- TODO (Phase 2c): introduce a dedicated 'recordLayer' so subtyping
+  -- of @record[K, V]@ participates in the lattice. For now we collapse
+  -- to 'Unknown' so type-level integration compiles; this loses
+  -- soundness on record-specific subtype checks until Phase 2c lands.
+  SemanticTypeRecord _ _ -> NormalizedTypeUnknown
   SemanticTypeFunction parameterTypes returnType (SemanticRequest requests) ->
     let shape =
           FunctionShape

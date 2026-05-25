@@ -115,7 +115,7 @@ primStdlibSource =
       "",
       "// Metadata.",
       "@\"Return the AI metadata of any callable value.\"",
-      "prim agent get_metadata(value: function) -> agent_metadata",
+      "prim agent get_metadata(value: agent) -> agent_metadata",
       "",
       "// Errors. `throw` is the universal recoverable-error capability:",
       "// engine prim errors, FFI-handler throws, refutable pattern misses",

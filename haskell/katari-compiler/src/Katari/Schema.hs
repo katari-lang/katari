@@ -379,6 +379,18 @@ toCore dataDefs visited = \case
   -- returns in its 'id' field.
   SemanticTypeFunction {} -> callableRefCore
   SemanticTypeFunctionAny -> callableRefCore
+  -- Records map to JSON Schema's @additionalProperties@ pattern:
+  -- a plain object whose values all match @V@'s schema. The key type
+  -- is fixed to @string@ at the Identifier pass in v0.1.0, so we
+  -- don't emit a @propertyNames@ refinement.
+  -- TODO(Phase 2): emit @additionalProperties@ as a typed schema once
+  -- the schema model supports it.
+  SemanticTypeRecord _keyType _valueType ->
+    SchemaCoreObject
+      { properties = Map.empty,
+        required = Set.empty,
+        additionalProperties = True
+      }
 
 -- | Reserved JSON-Schema property name carrying the tagged-value
 -- constructor identifier on the wire. Receivers (CLI / REST clients /

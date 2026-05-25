@@ -724,10 +724,18 @@ data SyntacticType (phase :: Phase) where
   -- consumer must narrow it before use (same idea as TypeScript's
   -- @unknown@).
   TypeUnknown :: UnknownTypeNode phase -> SyntacticType phase
-  -- | @function@ — the top of the function-type lattice. Used by
-  -- reflection-style APIs (e.g. @get_metadata@) that accept any callable
-  -- (any concrete @(P) -> R with E@). Cannot be called (params unknown).
+  -- | @agent@ (the @function@ keyword was retired) — the top of the
+  -- function-type lattice. Used by reflection-style APIs
+  -- (e.g. @get_metadata@) that accept any callable (any concrete
+  -- @(P) -> R with E@). Cannot be called (params unknown).
   TypeFunctionAny :: FunctionAnyTypeNode phase -> SyntacticType phase
+  -- | @record[K, V]@ — a homogeneous map from keys of type @K@ to
+  -- values of type @V@. In v0.1.0 @K@ is restricted to @string@ at
+  -- the Identifier pass; the slot is kept generic for forward
+  -- compatibility with generics (v0.2). The wire form is a plain
+  -- JSON object (no @$ctor@ / @$callable@ / @$secret@ discriminator);
+  -- the runtime reserves @$@-prefixed keys for tagged values.
+  TypeRecord :: RecordTypeNode phase -> SyntacticType phase
 
 instance HasSourceSpan (SyntacticType phase) where
   sourceSpanOf = \case
@@ -742,6 +750,7 @@ instance HasSourceSpan (SyntacticType phase) where
     TypeNever node -> node.sourceSpan
     TypeUnknown node -> node.sourceSpan
     TypeFunctionAny node -> node.sourceSpan
+    TypeRecord node -> node.sourceSpan
 
 -- | Which primitive type a 'PrimitiveTypeNode' carries. The five surface
 -- primitives that have a dedicated keyword.
@@ -792,6 +801,18 @@ newtype FunctionAnyTypeNode (phase :: Phase) = FunctionAnyTypeNode
   }
 
 instance HasSourceSpan (FunctionAnyTypeNode p) where
+  sourceSpanOf node = node.sourceSpan
+
+-- | AST node for a @record[K, V]@ type. The key type @K@ is currently
+-- constrained to @string@ at the Identifier pass; the AST keeps the
+-- slot generic to give v0.2 generics a hookable shape.
+data RecordTypeNode (phase :: Phase) = RecordTypeNode
+  { keyType :: SyntacticType phase,
+    valueType :: SyntacticType phase,
+    sourceSpan :: SourceSpan
+  }
+
+instance HasSourceSpan (RecordTypeNode p) where
   sourceSpanOf node = node.sourceSpan
 
 -- | AST node for a bare type name. The 'NameRef' is resolved against the
@@ -1355,6 +1376,13 @@ retagSyntacticType = \case
     TypeUnknown UnknownTypeNode {sourceSpan = sourceSpan}
   TypeFunctionAny FunctionAnyTypeNode {sourceSpan} ->
     TypeFunctionAny FunctionAnyTypeNode {sourceSpan = sourceSpan}
+  TypeRecord RecordTypeNode {keyType, valueType, sourceSpan} ->
+    TypeRecord
+      RecordTypeNode
+        { keyType = retagSyntacticType keyType,
+          valueType = retagSyntacticType valueType,
+          sourceSpan = sourceSpan
+        }
 
 -- | Change the phase tag of a 'SyntacticRequest'.
 retagSyntacticRequest ::
@@ -1591,6 +1619,10 @@ deriving instance (ShowPhase phase) => Show (FunctionTypeNode phase)
 deriving instance (EqPhase phase) => Eq (ArrayTypeNode phase)
 
 deriving instance (ShowPhase phase) => Show (ArrayTypeNode phase)
+
+deriving instance (EqPhase phase) => Eq (RecordTypeNode phase)
+
+deriving instance (ShowPhase phase) => Show (RecordTypeNode phase)
 
 deriving instance (EqPhase phase) => Eq (TupleTypeNode phase)
 

@@ -1757,6 +1757,7 @@ parseAtomicType =
       parseFunctionAnyType,
       parseLiteralType,
       try parseArrayType,
+      try parseRecordType,
       try parseFunctionType,
       parseTupleOrGroupedType,
       parseNamedOrQualifiedType
@@ -1774,10 +1775,13 @@ parseUnknownType = parseWithSpan $ do
   parseKeyword KeywordUnknown
   pure $ \sourceSpan -> TypeUnknown UnknownTypeNode {sourceSpan = sourceSpan}
 
--- | @function@ — the top of the function-type lattice (any callable).
+-- | @agent@ — the top of the function-type lattice (any callable).
+-- The same @agent@ keyword starts agent declarations / statements at
+-- the term level; type-context disambiguation happens via the parser's
+-- choice path, not the lexer.
 parseFunctionAnyType :: Parser (SyntacticType Parsed)
 parseFunctionAnyType = parseWithSpan $ do
-  parseKeyword KeywordFunction
+  parseKeyword KeywordAgent
   pure $ \sourceSpan -> TypeFunctionAny FunctionAnyTypeNode {sourceSpan = sourceSpan}
 
 -- | Literal type: @"a"@, @42@, @true@, or @false@.
@@ -1863,6 +1867,28 @@ parseArrayType = parseWithSpan $ do
     TypeArray
       ArrayTypeNode
         { elementType = elementType,
+          sourceSpan = sourceSpan
+        }
+
+-- | @record[K, V]@ — a homogeneous map of @K@ keys to @V@ values.
+-- @record@ is matched as an identifier (same pattern as 'array') to
+-- avoid grabbing a new keyword; the surrounding @[...]@ disambiguates
+-- the syntactic context.
+parseRecordType :: Parser (SyntacticType Parsed)
+parseRecordType = parseWithSpan $ do
+  void $ parseKatariTokenWith $ \case
+    KatariTokenIdentifier "record" -> Just ()
+    _ -> Nothing
+  parsePunctuation PunctuationLeftBracket
+  keyType <- parseType
+  parseComma
+  valueType <- parseType
+  parsePunctuation PunctuationRightBracket
+  pure $ \sourceSpan ->
+    TypeRecord
+      RecordTypeNode
+        { keyType = keyType,
+          valueType = valueType,
           sourceSpan = sourceSpan
         }
 

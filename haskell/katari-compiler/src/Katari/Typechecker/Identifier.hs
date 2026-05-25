@@ -1692,6 +1692,17 @@ resolveType = \case
     pure (TypeUnknown UnknownTypeNode {sourceSpan = sourceSpan})
   TypeFunctionAny FunctionAnyTypeNode {sourceSpan} ->
     pure (TypeFunctionAny FunctionAnyTypeNode {sourceSpan = sourceSpan})
+  TypeRecord RecordTypeNode {keyType, valueType, sourceSpan} -> do
+    keyType' <- resolveType keyType
+    valueType' <- resolveType valueType
+    pure
+      ( TypeRecord
+          RecordTypeNode
+            { keyType = keyType',
+              valueType = valueType',
+              sourceSpan = sourceSpan
+            }
+      )
   where
     rebuildPrimitive PrimitiveTypeNode {kind, sourceSpan} =
       PrimitiveTypeNode {kind = kind, sourceSpan = sourceSpan}
