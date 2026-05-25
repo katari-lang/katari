@@ -134,9 +134,9 @@ primStdlibSource =
       "@\"Raised when a requested env key is not present in the store. Handle to provide a default; if uncaught the snapshot transitions to the `error` state.\"",
       "request env_not_found(env_key: string) -> never",
       "@\"Look up a non-secret env entry by key. Raises `env_not_found` if the key is missing.\"",
-      "ext agent get_env(key: string) -> string with env_not_found from \"ENV:get_env\"",
+      "external get_env(key: string) -> string with env_not_found from \"ENV:get_env\"",
       "@\"Look up a secret env entry by key. The result is the disjoint `secret` type and never leaks into `print` / `to_string`. Raises `env_not_found` if the key is missing.\"",
-      "ext agent get_secret_env(key: string) -> secret with env_not_found from \"ENV:get_secret_env\"",
+      "external get_secret_env(key: string) -> secret with env_not_found from \"ENV:get_secret_env\"",
       "@\"Write an env entry. `is_secret = true` stores the value encrypted; reading it back requires `get_secret_env`.\"",
-      "ext agent set_env(key: string, value: string, is_secret: boolean) -> null from \"ENV:set_env\""
+      "external set_env(key: string, value: string, is_secret: boolean) -> null from \"ENV:set_env\""
     ]

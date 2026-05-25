@@ -140,7 +140,7 @@ agent main() -> string {
 // exercise the FFI-side `katari.delegate` path.
 
 @"Sleep for `ms` milliseconds on the host. Each call shows up as one ext-call node in the run tree for its duration."
-ext agent sleep_ms(ms: integer) -> null from "FFI:playground.sleep_ms"
+external sleep_ms(ms: integer) -> null from "FFI:playground.sleep_ms"
 
 @"Three sequential sleeps. Watch the tree: one ext node appears, finishes, then the next, etc."
 agent demo_sequential_sleeps() -> string {
@@ -164,7 +164,7 @@ agent demo_par_sleeps() -> string {
 // here to make the FFI code path visible.
 
 @"Fan out `count` parallel copies of `callback` from the ext side. Returns the number of results gathered."
-ext agent fan_out(callback: () -> string, count: integer) -> integer from "FFI:playground.fan_out"
+external fan_out(callback: () -> string, count: integer) -> integer from "FFI:playground.fan_out"
 
 @"Small CORE-side agent used as the callback in demo_ffi_fanout."
 agent slow_child() -> string {

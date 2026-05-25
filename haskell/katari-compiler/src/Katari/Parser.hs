@@ -387,7 +387,7 @@ parseSkipUntilDeclarationSync = do
       KatariTokenKeyword KeywordType -> True
       KatariTokenKeyword KeywordAgent -> True
       KatariTokenKeyword KeywordRequest -> True
-      KatariTokenKeyword KeywordExt -> True
+      KatariTokenKeyword KeywordExternal -> True
       KatariTokenKeyword KeywordData -> True
       KatariTokenPunctuation PunctuationAt -> True
       _ -> False
@@ -560,8 +560,7 @@ parseRequestDeclaration annotation = parseWithSpan $ do
 
 parseExternalAgentDeclaration :: Maybe Text -> Parser (ExternalAgentDeclaration Parsed)
 parseExternalAgentDeclaration annotation = parseWithSpan $ do
-  parseKeyword KeywordExt
-  parseKeyword KeywordAgent
+  parseKeyword KeywordExternal
   name <- parseNameRef
   parameters <- parseParameterList
   parsePunctuation PunctuationArrow
@@ -573,7 +572,7 @@ parseExternalAgentDeclaration annotation = parseWithSpan $ do
     Just pair -> pure pair
     Nothing ->
       fail $
-        "ext agent `from` clause must be of the form "
+        "external agent `from` clause must be of the form "
           <> "\"ENDPOINT:agent_def_name\" (e.g. \"FFI:my_package.greet\"); "
           <> "got \""
           <> T.unpack fromSpec

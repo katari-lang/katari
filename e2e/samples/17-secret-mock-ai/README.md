@@ -14,7 +14,7 @@ like, minus the actual HTTP socket.
   HTTP-wire surface that expects plain strings.
 * `request env_not_found` handle — recover locally from a missing key
   without escalating into the snapshot-error path.
-* User-declared `ext agent http_request(url, auth: secret) -> string`
+* User-declared `external http_request(url, auth: secret) -> string`
   — the sample's own sidecar agent. `http_request` is intentionally
   **not** part of the stdlib (it would force a sidecar implementation
   on every snapshot, even ones that don't need network access); each

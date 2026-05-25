@@ -2,7 +2,7 @@
 request scheduled() -> null
 
 @"Hand a callback to the host JS. The ext delegates it as a child agent on a tick."
-ext agent cron_impl(callback: () -> null with scheduled) -> null from "FFI:ext_cron.cron_impl"
+external cron_impl(callback: () -> null with scheduled) -> null from "FFI:ext_cron.cron_impl"
 
 @"Inner agent. Bridges the ext's callback delivery into the parent's `scheduled` cap."
 agent notify_scheduled() -> null with scheduled {

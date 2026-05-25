@@ -199,7 +199,7 @@ spec = describe "Katari.Query.Completion" $ do
         completionLabels remaining `shouldMatchList` ["age"]
       other -> expectationFailure $ "expected AnchorTyped, got: " <> show other
 
-  it "resolveDottedPath: ext agent → AnchorTyped (function)" $ do
+  it "resolveDottedPath: external → AnchorTyped (function)" $ do
     -- Regression: a user reported label completion does not work
     -- inside @cron_impl(@. Verify the ext-agent declaration's type is
     -- reachable as a SemanticTypeFunction (not Unknown / wrong shape).
@@ -209,7 +209,7 @@ spec = describe "Katari.Query.Completion" $ do
           [ "@\"Cron tick.\"",
             "request scheduled() -> null",
             "@\"Schedule a callback.\"",
-            "ext agent cron_impl(callback: () -> null with scheduled) -> null from \"FFI:lib.cron_impl\"",
+            "external cron_impl(callback: () -> null with scheduled) -> null from \"FFI:lib.cron_impl\"",
             "agent main() -> integer { 0 }"
           ]
     case resolveDottedPath idr zr "<test>" Position {line = 5, column = 26} "cron_impl" of

@@ -281,29 +281,29 @@ exhaustiveSpec = describe "exhaustiveness checker" $ do
 
 externalAgentSpec :: Spec
 externalAgentSpec = describe "external agent annotation validation" $ do
-  it "K0150: ext agent without annotation produces an error" $ do
+  it "K0150: external without annotation produces an error" $ do
     let result =
           compile
             ( singleSourceInput
-                "request http_req()\next agent fetch(url: string) -> string with http_req from \"FFI:lib.fetch\""
+                "request http_req()\nexternal fetch(url: string) -> string with http_req from \"FFI:lib.fetch\""
             )
         codes = map (.code) result.diagnostics
     codes `shouldContain` ["K0150"]
 
-  it "K0151: ext agent with empty annotation produces an error" $ do
+  it "K0151: external with empty annotation produces an error" $ do
     let result =
           compile
             ( singleSourceInput
-                "request http_req()\n@\"\"\next agent fetch(url: string) -> string with http_req from \"FFI:lib.fetch\""
+                "request http_req()\n@\"\"\nexternal fetch(url: string) -> string with http_req from \"FFI:lib.fetch\""
             )
         codes = map (.code) result.diagnostics
     codes `shouldContain` ["K0151"]
 
-  it "ext agent with non-empty annotation compiles without K0150/K0151" $ do
+  it "external with non-empty annotation compiles without K0150/K0151" $ do
     let result =
           compile
             ( singleSourceInput
-                "request http_req()\n@\"https://api.example.com\"\next agent fetch(url: string) -> string with http_req from \"FFI:lib.fetch\"\nagent main() -> string { \"ok\" }"
+                "request http_req()\n@\"https://api.example.com\"\nexternal fetch(url: string) -> string with http_req from \"FFI:lib.fetch\"\nagent main() -> string { \"ok\" }"
             )
         codes = map (.code) result.diagnostics
     filter (\c -> c == "K0150" || c == "K0151") codes `shouldBe` []
