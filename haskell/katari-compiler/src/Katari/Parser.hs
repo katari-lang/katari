@@ -607,14 +607,14 @@ splitFromSpec spec =
 -- Prim Agent
 -- ---------------------------------------------------------------------------
 
--- | @prim agent name(...) -> T [with E] [using rule_name]@ — a built-in
--- primitive declared via the surface language. Mirrors 'ExternalAgentDeclaration'
--- with an extra optional @using@ clause that names a special constraint
--- rule for the constraint generator (e.g. @numeric_join_binary@).
+-- | @primitive name(...) -> T [with E] [using rule_name]@ — a built-in
+-- primitive declared via the surface language. Mirrors
+-- 'ExternalAgentDeclaration' with an extra optional @using@ clause that
+-- names a special constraint rule for the constraint generator
+-- (e.g. @numeric_join_binary@).
 parsePrimAgentDeclaration :: Maybe Text -> Parser (PrimAgentDeclaration Parsed)
 parsePrimAgentDeclaration annotation = parseWithSpan $ do
-  parseKeyword KeywordPrim
-  parseKeyword KeywordAgent
+  parseKeyword KeywordPrimitive
   name <- parseNameRef
   parameters <- parseParameterList
   parsePunctuation PunctuationArrow

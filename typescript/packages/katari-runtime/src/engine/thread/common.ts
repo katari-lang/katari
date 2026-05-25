@@ -408,7 +408,7 @@ export function proxyAskAckToChild(
 
 /**
  * Initiate a recoverable throw from inside a running thread. Enqueues a
- * `request` ask to the parent with `reqId = "prim.throw"` and the given
+ * `request` ask to the parent with `reqId = "primitive.throw"` and the given
  * message, then returns. The ask travels through the normal handle chain:
  * a matching `handle { req throw(msg) { ... } }` catches it; if nothing
  * catches it, the root AgentThread escalates it to the API Module.
@@ -432,7 +432,7 @@ export function emitThrowEscalate(
     askId,
     askKind: {
       kind: "request",
-      reqId: "prim.throw",
+      reqId: "primitive.throw",
       args: { msg: { kind: "string", value: message } },
     },
     childCallId: t.parentCallId,

@@ -161,7 +161,7 @@ spec = describe "Katari.Query.lookupAtPosition (hover)" $ do
     case info of
       Nothing -> expectationFailure "expected hover on `throw`"
       Just h -> do
-        h.hoverQualifiedName `shouldBe` Just "prim.throw"
+        h.hoverQualifiedName `shouldBe` Just "primitive.throw"
         h.hoverType `shouldNotBe` Nothing
 
   it "literal pattern in match arm: hover returns its singleton type" $ do
@@ -198,7 +198,7 @@ spec = describe "Katari.Query.lookupAtPosition (hover)" $ do
     -- "    next with { acc = acc + v }" — position the `v` after `+`.
     -- Find the column of `v` in line 3.
     -- `v` is at column 29 on line 3 (single char). Sample col 30 (just
-    -- past `v`'s start) so the desugared `prim.add` callee's span
+    -- past `v`'s start) so the desugared `primitive.add` callee's span
     -- (which currently extends through `v`'s start position) doesn't
     -- shadow the variable hover.
     let info = lookupAtPosition r.identifierResult r.zonkResult "<test>" Position {line = 3, column = 30}

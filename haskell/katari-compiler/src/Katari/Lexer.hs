@@ -166,7 +166,7 @@ data Keyword where
   KeywordType :: Keyword
   KeywordNever :: Keyword
   KeywordUnknown :: Keyword
-  KeywordPrim :: Keyword
+  KeywordPrimitive :: Keyword
   KeywordUsing :: Keyword
   deriving (Eq, Ord, Show, Bounded, Enum)
 
@@ -603,7 +603,7 @@ lexKeywordText = \case
   KeywordType -> "type"
   KeywordNever -> "never"
   KeywordUnknown -> "unknown"
-  KeywordPrim -> "prim"
+  KeywordPrimitive -> "primitive"
   KeywordUsing -> "using"
 
 -- | Reverse lookup: surface text → 'Keyword'. Built from 'lexKeywordText' so

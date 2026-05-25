@@ -667,7 +667,7 @@ mergeSymbol newPos name existing incoming = do
 -- | Generic per-slot merge. The first existing id wins on conflict; the
 -- caller's @reportConflict@ records the duplicate-name error against it.
 -- If @existing@ and @new@ refer to the same id (e.g. a redundant
--- @import "prim"@ on top of the implicit prim injection), the merge is
+-- @import "primitive"@ on top of the implicit primitive injection), the merge is
 -- a no-op rather than a duplicate-name error.
 mergeSlot ::
   (Eq a) =>
@@ -1109,14 +1109,14 @@ buildTopLevels moduleNameToId exports moduleMap =
 
     -- Inject prim root exports into every user module's scope. Stdlib
     -- now declares prims as ordinary 'PrimAgentDeclaration' entries, so
-    -- they show up in @exports["prim"]@ via the normal export-table
+    -- they show up in @exports["primitive"]@ via the normal export-table
     -- build.
     injectPrimitives ::
       SourceSpan ->
       Map Text SymbolEntry ->
       Identifier (Map Text SymbolEntry)
     injectPrimitives moduleSourceSpan userTable = do
-      let rootExports = Map.findWithDefault Map.empty "prim" exports
+      let rootExports = Map.findWithDefault Map.empty "primitive" exports
       foldM (injectOne moduleSourceSpan) userTable (Map.toList rootExports)
 
     injectOne ::
@@ -2127,7 +2127,7 @@ resolveUnaryOperatorAsCall UnaryOperatorExpression {operator, operand, sourceSpa
 lookupPrimVariable :: Text -> Identifier (NameRefResolution Identified VariableRef)
 lookupPrimVariable primName = do
   vars <- gets (.variables)
-  let qname = QualifiedName {module_ = "prim", name = primName}
+  let qname = QualifiedName {module_ = "primitive", name = primName}
       hits =
         [ vid
           | (vid, vd) <- Map.toList vars,

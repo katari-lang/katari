@@ -81,7 +81,7 @@ function executeGetMetadata(
 
   return {
     kind: "tagged",
-    ctorId: "prim.agent_metadata",
+    ctorId: "primitive.agent_metadata",
     fields: {
       name: { kind: "string", value: agentBlock.name },
       id: { kind: "string", value: dispatchId },

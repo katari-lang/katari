@@ -35,7 +35,7 @@ for the `playground` project.
 | `demo_par_sleeps` | Tree view → three sleep nodes in flight at once via Katari `par (...)` |
 | `demo_ffi_fanout` | Tree view → ext-side `katari.delegate` fan-out (= sidecar code path) |
 
-Plus: invoke `prim.array_get` / `prim.get_field` directly from the
+Plus: invoke `primitive.array_get` / `primitive.get_field` directly from the
 Definitions page (toggle "Show stdlib & libraries") to exercise the
 **AnyField** type picker on the `unknown` argument.
 

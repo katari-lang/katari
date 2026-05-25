@@ -95,7 +95,7 @@ function applyTranslateExternal(
             kind: "escalate",
             delegationId: event.payload.delegationId,
             escalationId: createEscalationId(),
-            agentDefId: encodeCoreAgentDefId({ kind: "qname", value: "prim.throw" }),
+            agentDefId: encodeCoreAgentDefId({ kind: "qname", value: "primitive.throw" }),
             args: { msg: { kind: "string", value: err.message } },
           },
         });

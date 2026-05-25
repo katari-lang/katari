@@ -300,7 +300,7 @@ initialState =
 isThrowRequestId :: RequestId -> Map RequestId RequestData -> Bool
 isThrowRequestId rid requests = case Map.lookup rid requests of
   Just RequestData {requestQualifiedName = QualifiedName {module_, name}} ->
-    module_ == "prim" && name == "throw"
+    module_ == "primitive" && name == "throw"
   Nothing -> False
 
 initialContext ::

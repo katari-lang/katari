@@ -121,11 +121,11 @@ allDelegateValueCalls ub irMod =
       DelegateTargetValue _ <- [db.target]
   ]
 
--- | Entries excluding builtin prims (module @"prim"@). Useful for tests
+-- | Entries excluding builtin prims (module @"primitive"@). Useful for tests
 -- that want to assert on user-defined declarations only.
 userEntries :: IRModule -> [QualifiedName]
 userEntries irMod =
-  [qn | qn <- Map.keys irMod.entries, qn.module_ /= "prim"]
+  [qn | qn <- Map.keys irMod.entries, qn.module_ /= "primitive"]
 
 -- | Look up the BlockId for a primitive by name.
 primId :: Text -> IRModule -> Maybe BlockId
@@ -231,7 +231,7 @@ stage1Spec = describe "Stage 1 — literals / arithmetic" $ do
     let intLits = [d.value | d <- literalLoads ub, case d.value of LiteralValueInteger _ -> True; _ -> False]
         agentLits = [qname | StatementLoadLiteral d <- ub.statements, LiteralValueAgent qname <- [d.value]]
     intLits `shouldMatchList` [LiteralValueInteger 1, LiteralValueInteger 2]
-    agentLits `shouldContain` [QualifiedName "prim" "add"]
+    agentLits `shouldContain` [QualifiedName "primitive" "add"]
     case allDelegateValueCalls ub irMod of
       [addCall] -> do
         map (.label) addCall.arguments `shouldMatchList` ["lhs", "rhs"]
@@ -243,7 +243,7 @@ stage1Spec = describe "Stage 1 — literals / arithmetic" $ do
     errs `shouldBe` []
     let Just ub = agentBody "main" irMod
         agentLits = [qname | StatementLoadLiteral d <- ub.statements, LiteralValueAgent qname <- [d.value]]
-    agentLits `shouldContain` [QualifiedName "prim" "neg"]
+    agentLits `shouldContain` [QualifiedName "primitive" "neg"]
     case allDelegateValueCalls ub irMod of
       [c] -> do
         map (.label) c.arguments `shouldBe` ["value"]

@@ -43,12 +43,12 @@
       ],
       "type": "object"
     },
-    "name": "prim.agent_metadata",
+    "name": "primitive.agent_metadata",
     "output": {
       "additionalProperties": false,
       "properties": {
         "$constructor": {
-          "const": "prim.agent_metadata"
+          "const": "primitive.agent_metadata"
         },
         "description": {
           "type": "string"
@@ -96,7 +96,7 @@
       ],
       "type": "object"
     },
-    "name": "prim.add",
+    "name": "primitive.add",
     "output": {
       "type": "number"
     },
@@ -120,7 +120,7 @@
       ],
       "type": "object"
     },
-    "name": "prim.sub",
+    "name": "primitive.sub",
     "output": {
       "type": "number"
     },
@@ -144,7 +144,7 @@
       ],
       "type": "object"
     },
-    "name": "prim.mul",
+    "name": "primitive.mul",
     "output": {
       "type": "number"
     },
@@ -168,7 +168,7 @@
       ],
       "type": "object"
     },
-    "name": "prim.mod",
+    "name": "primitive.mod",
     "output": {
       "type": "number"
     },
@@ -192,7 +192,7 @@
       ],
       "type": "object"
     },
-    "name": "prim.div",
+    "name": "primitive.div",
     "output": {
       "type": "number"
     },
@@ -212,7 +212,7 @@
       ],
       "type": "object"
     },
-    "name": "prim.neg",
+    "name": "primitive.neg",
     "output": {
       "type": "number"
     },
@@ -232,7 +232,7 @@
       ],
       "type": "object"
     },
-    "name": "prim.abs",
+    "name": "primitive.abs",
     "output": {
       "type": "number"
     },
@@ -252,7 +252,7 @@
       ],
       "type": "object"
     },
-    "name": "prim.eq",
+    "name": "primitive.eq",
     "output": {
       "type": "boolean"
     },
@@ -272,7 +272,7 @@
       ],
       "type": "object"
     },
-    "name": "prim.ne",
+    "name": "primitive.ne",
     "output": {
       "type": "boolean"
     },
@@ -296,7 +296,7 @@
       ],
       "type": "object"
     },
-    "name": "prim.lt",
+    "name": "primitive.lt",
     "output": {
       "type": "boolean"
     },
@@ -320,7 +320,7 @@
       ],
       "type": "object"
     },
-    "name": "prim.le",
+    "name": "primitive.le",
     "output": {
       "type": "boolean"
     },
@@ -344,7 +344,7 @@
       ],
       "type": "object"
     },
-    "name": "prim.gt",
+    "name": "primitive.gt",
     "output": {
       "type": "boolean"
     },
@@ -368,7 +368,7 @@
       ],
       "type": "object"
     },
-    "name": "prim.ge",
+    "name": "primitive.ge",
     "output": {
       "type": "boolean"
     },
@@ -392,7 +392,7 @@
       ],
       "type": "object"
     },
-    "name": "prim.and",
+    "name": "primitive.and",
     "output": {
       "type": "boolean"
     },
@@ -416,7 +416,7 @@
       ],
       "type": "object"
     },
-    "name": "prim.or",
+    "name": "primitive.or",
     "output": {
       "type": "boolean"
     },
@@ -436,7 +436,7 @@
       ],
       "type": "object"
     },
-    "name": "prim.not",
+    "name": "primitive.not",
     "output": {
       "type": "boolean"
     },
@@ -460,7 +460,7 @@
       ],
       "type": "object"
     },
-    "name": "prim.concat",
+    "name": "primitive.concat",
     "output": {
       "type": "string"
     },
@@ -478,7 +478,7 @@
       ],
       "type": "object"
     },
-    "name": "prim.type_of",
+    "name": "primitive.type_of",
     "output": {
       "type": "string"
     },
@@ -496,7 +496,7 @@
       ],
       "type": "object"
     },
-    "name": "prim.to_string",
+    "name": "primitive.to_string",
     "output": {
       "type": "string"
     },
@@ -514,7 +514,7 @@
       ],
       "type": "object"
     },
-    "name": "prim.format",
+    "name": "primitive.format",
     "output": {
       "type": "string"
     },
@@ -536,7 +536,7 @@
       ],
       "type": "object"
     },
-    "name": "prim.array_get",
+    "name": "primitive.array_get",
     "output": {},
     "requests": []
   },
@@ -552,7 +552,7 @@
       ],
       "type": "object"
     },
-    "name": "prim.array_length",
+    "name": "primitive.array_length",
     "output": {
       "type": "integer"
     },
@@ -574,7 +574,7 @@
       ],
       "type": "object"
     },
-    "name": "prim.get_field",
+    "name": "primitive.get_field",
     "output": {},
     "requests": []
   },
@@ -594,7 +594,7 @@
       ],
       "type": "object"
     },
-    "name": "prim.tuple_get",
+    "name": "primitive.tuple_get",
     "output": {},
     "requests": []
   },
@@ -621,12 +621,12 @@
       ],
       "type": "object"
     },
-    "name": "prim.get_metadata",
+    "name": "primitive.get_metadata",
     "output": {
       "additionalProperties": false,
       "properties": {
         "$constructor": {
-          "const": "prim.agent_metadata"
+          "const": "primitive.agent_metadata"
         },
         "description": {
           "type": "string"
@@ -670,7 +670,7 @@
       ],
       "type": "object"
     },
-    "name": "prim.throw",
+    "name": "primitive.throw",
     "output": {
       "not": {}
     },
@@ -690,7 +690,7 @@
       ],
       "type": "object"
     },
-    "name": "prim.env_not_found",
+    "name": "primitive.env_not_found",
     "output": {
       "not": {}
     },
@@ -708,7 +708,7 @@
           ],
           "type": "object"
         },
-        "name": "prim.env_not_found",
+        "name": "primitive.env_not_found",
         "output": {
           "not": {}
         }
@@ -729,7 +729,7 @@
       ],
       "type": "object"
     },
-    "name": "prim.get_env",
+    "name": "primitive.get_env",
     "output": {
       "type": "string"
     },
@@ -747,7 +747,7 @@
           ],
           "type": "object"
         },
-        "name": "prim.env_not_found",
+        "name": "primitive.env_not_found",
         "output": {
           "not": {}
         }
@@ -768,7 +768,7 @@
       ],
       "type": "object"
     },
-    "name": "prim.get_secret_env",
+    "name": "primitive.get_secret_env",
     "output": {},
     "requests": [
       {
@@ -784,7 +784,7 @@
           ],
           "type": "object"
         },
-        "name": "prim.env_not_found",
+        "name": "primitive.env_not_found",
         "output": {
           "not": {}
         }
@@ -813,7 +813,7 @@
       ],
       "type": "object"
     },
-    "name": "prim.set_env",
+    "name": "primitive.set_env",
     "output": {
       "type": "null"
     },

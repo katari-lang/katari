@@ -483,7 +483,7 @@ export class FfiModule implements Module {
             kind: "escalate",
             delegationId: msg.delegationId,
             escalationId: createEscalationId(),
-            agentDefId: encodeCoreAgentDefId({ kind: "qname", value: "prim.throw" }),
+            agentDefId: encodeCoreAgentDefId({ kind: "qname", value: "primitive.throw" }),
             args: { msg: { kind: "string", value: msg.message } },
           },
         });

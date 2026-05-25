@@ -47,7 +47,7 @@ const ENV_DISPATCH_GET_SECRET = "get_secret_env";
 const ENV_DISPATCH_SET = "set_env";
 
 /** Qualified name of the stdlib request raised on missing-key lookup. */
-const ENV_NOT_FOUND_QNAME = "prim.env_not_found";
+const ENV_NOT_FOUND_QNAME = "primitive.env_not_found";
 
 export type EnvModuleOptions = {
   /** Self-endpoint. Defaults to {@link ENV_ENDPOINT}. */
@@ -258,7 +258,7 @@ export class EnvModule implements Module {
         escalationId: createEscalationId(),
         agentDefId: encodeCoreAgentDefId({
           kind: "qname",
-          value: "prim.throw",
+          value: "primitive.throw",
         }),
         args: { msg: { kind: "string", value: message } },
       },

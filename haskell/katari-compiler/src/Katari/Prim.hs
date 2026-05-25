@@ -1,6 +1,6 @@
 -- | Built-in primitive metadata.
 --
--- Prims are declared as ordinary @prim agent@ entries in
+-- Prims are declared as ordinary @primitive@ entries in
 -- 'Katari.Stdlib.stdlibSources'; the compiler treats them just like
 -- 'Katari.AST.ExternalAgentDeclaration' through Identifier / CG / Zonk /
 -- Lowering. The only thing this module owns is:
@@ -79,10 +79,10 @@ primSourceSpan =
     }
 
 -- | Whether @name@ is a module name reserved by the prim system. User
--- code that tries to define a module under @prim@ / @prim.*@ is
--- rejected with K0113.
+-- code that tries to define a module under @primitive@ / @primitive.*@
+-- is rejected with K0113.
 isPrimReservedModuleName :: Text -> Bool
-isPrimReservedModuleName name = name == "prim" || "prim." `T.isPrefixOf` name
+isPrimReservedModuleName name = name == "primitive" || "primitive." `T.isPrefixOf` name
 
 -- | The prim function name that implements a binary operator. The
 -- Identifier pass desugars @a \<op\> b@ into

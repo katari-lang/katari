@@ -2,7 +2,7 @@
 // `delegate` / `escalate` events.
 //
 // **Wire format**: a flat string. Either a 'QualifiedName' (e.g.
-// `"main.foo"` or `"prim.add_two_numbers"`) for top-level agents, or a
+// `"main.foo"` or `"primitive.add_two_numbers"`) for top-level agents, or a
 // `"closure:N"` prefix-form for local closures (CORE only). This shape
 // is identical to what `get_metadata` returns in its `id` field and to
 // what JSON Schema declares for `$agent`, so the same string flows

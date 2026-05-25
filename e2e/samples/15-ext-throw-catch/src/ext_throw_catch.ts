@@ -1,5 +1,5 @@
 // Ext-agent that unconditionally throws to exercise the
-// ipcDelegateError → prim.throw escalate path.
+// ipcDelegateError → primitive.throw escalate path.
 
 import katari from "@katari-lang/port";
 

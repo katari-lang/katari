@@ -289,7 +289,7 @@ dataDeclarations = describe "data declarations" $ do
         let userModuleIds =
               [ mid
                 | (mid, md) <- Map.toList res.identifiedModules,
-                  md.moduleName /= "prim"
+                  md.moduleName /= "primitive"
               ]
             userAsts =
               [ m

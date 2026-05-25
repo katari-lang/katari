@@ -18,7 +18,7 @@
         "entryBody": 58,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"description\":{\"type\":\"string\"},\"id\":{\"type\":\"string\"},\"input\":{\"type\":\"string\"},\"name\":{\"type\":\"string\"},\"output\":{\"type\":\"string\"}},\"required\":[\"description\",\"id\",\"input\",\"name\",\"output\"],\"type\":\"object\"}",
         "name": "agent_metadata",
-        "outputSchema": "{\"additionalProperties\":false,\"properties\":{\"$constructor\":{\"const\":\"prim.agent_metadata\"},\"description\":{\"type\":\"string\"},\"id\":{\"type\":\"string\"},\"input\":{\"type\":\"string\"},\"name\":{\"type\":\"string\"},\"output\":{\"type\":\"string\"}},\"required\":[\"$constructor\",\"description\",\"id\",\"input\",\"name\",\"output\"],\"type\":\"object\"}",
+        "outputSchema": "{\"additionalProperties\":false,\"properties\":{\"$constructor\":{\"const\":\"primitive.agent_metadata\"},\"description\":{\"type\":\"string\"},\"id\":{\"type\":\"string\"},\"input\":{\"type\":\"string\"},\"name\":{\"type\":\"string\"},\"output\":{\"type\":\"string\"}},\"required\":[\"$constructor\",\"description\",\"id\",\"input\",\"name\",\"output\"],\"type\":\"object\"}",
         "parameters": [
           {
             "label": "name",
@@ -41,7 +41,7 @@
             "var": 5
           }
         ],
-        "qualifiedName": "prim.agent_metadata"
+        "qualifiedName": "primitive.agent_metadata"
       },
       "kind": "blockAgent"
     },
@@ -62,7 +62,7 @@
             "var": 15
           }
         ],
-        "qualifiedName": "prim.div"
+        "qualifiedName": "primitive.div"
       },
       "kind": "blockAgent"
     },
@@ -83,7 +83,7 @@
             "var": 16
           }
         ],
-        "qualifiedName": "prim.neg"
+        "qualifiedName": "primitive.neg"
       },
       "kind": "blockAgent"
     },
@@ -104,7 +104,7 @@
             "var": 17
           }
         ],
-        "qualifiedName": "prim.abs"
+        "qualifiedName": "primitive.abs"
       },
       "kind": "blockAgent"
     },
@@ -129,7 +129,7 @@
             "var": 19
           }
         ],
-        "qualifiedName": "prim.eq"
+        "qualifiedName": "primitive.eq"
       },
       "kind": "blockAgent"
     },
@@ -154,7 +154,7 @@
             "var": 21
           }
         ],
-        "qualifiedName": "prim.ne"
+        "qualifiedName": "primitive.ne"
       },
       "kind": "blockAgent"
     },
@@ -179,7 +179,7 @@
             "var": 7
           }
         ],
-        "qualifiedName": "prim.add"
+        "qualifiedName": "primitive.add"
       },
       "kind": "blockAgent"
     },
@@ -200,7 +200,7 @@
             "var": 23
           }
         ],
-        "qualifiedName": "prim.lt"
+        "qualifiedName": "primitive.lt"
       },
       "kind": "blockAgent"
     },
@@ -225,7 +225,7 @@
             "var": 25
           }
         ],
-        "qualifiedName": "prim.le"
+        "qualifiedName": "primitive.le"
       },
       "kind": "blockAgent"
     },
@@ -250,7 +250,7 @@
             "var": 27
           }
         ],
-        "qualifiedName": "prim.gt"
+        "qualifiedName": "primitive.gt"
       },
       "kind": "blockAgent"
     },
@@ -275,7 +275,7 @@
             "var": 29
           }
         ],
-        "qualifiedName": "prim.ge"
+        "qualifiedName": "primitive.ge"
       },
       "kind": "blockAgent"
     },
@@ -300,7 +300,7 @@
             "var": 31
           }
         ],
-        "qualifiedName": "prim.and"
+        "qualifiedName": "primitive.and"
       },
       "kind": "blockAgent"
     },
@@ -329,7 +329,7 @@
             "var": 33
           }
         ],
-        "qualifiedName": "prim.or"
+        "qualifiedName": "primitive.or"
       },
       "kind": "blockAgent"
     },
@@ -350,7 +350,7 @@
             "var": 34
           }
         ],
-        "qualifiedName": "prim.not"
+        "qualifiedName": "primitive.not"
       },
       "kind": "blockAgent"
     },
@@ -375,7 +375,7 @@
             "var": 36
           }
         ],
-        "qualifiedName": "prim.concat"
+        "qualifiedName": "primitive.concat"
       },
       "kind": "blockAgent"
     },
@@ -396,7 +396,7 @@
             "var": 37
           }
         ],
-        "qualifiedName": "prim.type_of"
+        "qualifiedName": "primitive.type_of"
       },
       "kind": "blockAgent"
     },
@@ -417,7 +417,7 @@
             "var": 38
           }
         ],
-        "qualifiedName": "prim.to_string"
+        "qualifiedName": "primitive.to_string"
       },
       "kind": "blockAgent"
     },
@@ -442,7 +442,7 @@
             "var": 9
           }
         ],
-        "qualifiedName": "prim.sub"
+        "qualifiedName": "primitive.sub"
       },
       "kind": "blockAgent"
     },
@@ -459,7 +459,7 @@
             "var": 39
           }
         ],
-        "qualifiedName": "prim.format"
+        "qualifiedName": "primitive.format"
       },
       "kind": "blockAgent"
     },
@@ -484,7 +484,7 @@
             "var": 41
           }
         ],
-        "qualifiedName": "prim.array_get"
+        "qualifiedName": "primitive.array_get"
       },
       "kind": "blockAgent"
     },
@@ -505,7 +505,7 @@
             "var": 42
           }
         ],
-        "qualifiedName": "prim.array_length"
+        "qualifiedName": "primitive.array_length"
       },
       "kind": "blockAgent"
     },
@@ -530,7 +530,7 @@
             "var": 44
           }
         ],
-        "qualifiedName": "prim.get_field"
+        "qualifiedName": "primitive.get_field"
       },
       "kind": "blockAgent"
     },
@@ -555,7 +555,7 @@
             "var": 46
           }
         ],
-        "qualifiedName": "prim.tuple_get"
+        "qualifiedName": "primitive.tuple_get"
       },
       "kind": "blockAgent"
     },
@@ -573,14 +573,14 @@
         "entryBody": 51,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"value\":{\"additionalProperties\":false,\"properties\":{\"$agent\":{\"type\":\"string\"}},\"required\":[\"$agent\"],\"type\":\"object\"}},\"required\":[\"value\"],\"type\":\"object\"}",
         "name": "get_metadata",
-        "outputSchema": "{\"additionalProperties\":false,\"properties\":{\"$constructor\":{\"const\":\"prim.agent_metadata\"},\"description\":{\"type\":\"string\"},\"id\":{\"type\":\"string\"},\"input\":{\"type\":\"string\"},\"name\":{\"type\":\"string\"},\"output\":{\"type\":\"string\"}},\"required\":[\"$constructor\",\"description\",\"id\",\"input\",\"name\",\"output\"],\"type\":\"object\"}",
+        "outputSchema": "{\"additionalProperties\":false,\"properties\":{\"$constructor\":{\"const\":\"primitive.agent_metadata\"},\"description\":{\"type\":\"string\"},\"id\":{\"type\":\"string\"},\"input\":{\"type\":\"string\"},\"name\":{\"type\":\"string\"},\"output\":{\"type\":\"string\"}},\"required\":[\"$constructor\",\"description\",\"id\",\"input\",\"name\",\"output\"],\"type\":\"object\"}",
         "parameters": [
           {
             "label": "value",
             "var": 47
           }
         ],
-        "qualifiedName": "prim.get_metadata"
+        "qualifiedName": "primitive.get_metadata"
       },
       "kind": "blockAgent"
     },
@@ -601,7 +601,7 @@
             "var": 48
           }
         ],
-        "qualifiedName": "prim.throw"
+        "qualifiedName": "primitive.throw"
       },
       "kind": "blockAgent"
     },
@@ -618,7 +618,7 @@
             "var": 49
           }
         ],
-        "qualifiedName": "prim.env_not_found"
+        "qualifiedName": "primitive.env_not_found"
       },
       "kind": "blockAgent"
     },
@@ -635,7 +635,7 @@
             "var": 50
           }
         ],
-        "qualifiedName": "prim.get_env"
+        "qualifiedName": "primitive.get_env"
       },
       "kind": "blockAgent"
     },
@@ -652,7 +652,7 @@
             "var": 51
           }
         ],
-        "qualifiedName": "prim.get_secret_env"
+        "qualifiedName": "primitive.get_secret_env"
       },
       "kind": "blockAgent"
     },
@@ -677,7 +677,7 @@
             "var": 54
           }
         ],
-        "qualifiedName": "prim.set_env"
+        "qualifiedName": "primitive.set_env"
       },
       "kind": "blockAgent"
     },
@@ -701,11 +701,11 @@
       "kind": "blockUser"
     },
     "58": {
-      "body": "prim.agent_metadata",
+      "body": "primitive.agent_metadata",
       "kind": "blockConstructor"
     },
     "59": {
-      "body": "prim.throw",
+      "body": "primitive.throw",
       "kind": "blockRequest"
     },
     "6": {
@@ -725,12 +725,12 @@
             "var": 11
           }
         ],
-        "qualifiedName": "prim.mul"
+        "qualifiedName": "primitive.mul"
       },
       "kind": "blockAgent"
     },
     "60": {
-      "body": "prim.env_not_found",
+      "body": "primitive.env_not_found",
       "kind": "blockRequest"
     },
     "61": {
@@ -790,7 +790,7 @@
             "var": 13
           }
         ],
-        "qualifiedName": "prim.mod"
+        "qualifiedName": "primitive.mod"
       },
       "kind": "blockAgent"
     },
@@ -801,37 +801,37 @@
   },
   "entries": {
     "main.main": 0,
-    "prim.abs": 14,
-    "prim.add": 2,
-    "prim.agent_metadata": 1,
-    "prim.and": 28,
-    "prim.array_get": 42,
-    "prim.array_length": 44,
-    "prim.concat": 34,
-    "prim.div": 10,
-    "prim.env_not_found": 53,
-    "prim.eq": 16,
-    "prim.format": 40,
-    "prim.ge": 26,
-    "prim.get_env": 54,
-    "prim.get_field": 46,
-    "prim.get_metadata": 50,
-    "prim.get_secret_env": 55,
-    "prim.gt": 24,
-    "prim.le": 22,
-    "prim.lt": 20,
-    "prim.mod": 8,
-    "prim.mul": 6,
-    "prim.ne": 18,
-    "prim.neg": 12,
-    "prim.not": 32,
-    "prim.or": 30,
-    "prim.set_env": 56,
-    "prim.sub": 4,
-    "prim.throw": 52,
-    "prim.to_string": 38,
-    "prim.tuple_get": 48,
-    "prim.type_of": 36
+    "primitive.abs": 14,
+    "primitive.add": 2,
+    "primitive.agent_metadata": 1,
+    "primitive.and": 28,
+    "primitive.array_get": 42,
+    "primitive.array_length": 44,
+    "primitive.concat": 34,
+    "primitive.div": 10,
+    "primitive.env_not_found": 53,
+    "primitive.eq": 16,
+    "primitive.format": 40,
+    "primitive.ge": 26,
+    "primitive.get_env": 54,
+    "primitive.get_field": 46,
+    "primitive.get_metadata": 50,
+    "primitive.get_secret_env": 55,
+    "primitive.gt": 24,
+    "primitive.le": 22,
+    "primitive.lt": 20,
+    "primitive.mod": 8,
+    "primitive.mul": 6,
+    "primitive.ne": 18,
+    "primitive.neg": 12,
+    "primitive.not": 32,
+    "primitive.or": 30,
+    "primitive.set_env": 56,
+    "primitive.sub": 4,
+    "primitive.throw": 52,
+    "primitive.to_string": 38,
+    "primitive.tuple_get": 48,
+    "primitive.type_of": 36
   },
   "metadata": {
     "schemaVersion": 1
