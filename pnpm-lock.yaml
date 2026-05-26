@@ -195,6 +195,9 @@ importers:
 
   typescript/packages/katari-runtime:
     dependencies:
+      ajv:
+        specifier: ^8.20.0
+        version: 8.20.0
       denque:
         specifier: ^2.1.0
         version: 2.1.0

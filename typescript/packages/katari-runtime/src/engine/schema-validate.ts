@@ -1,230 +1,75 @@
-// Minimal JSON-Schema validator for the draft-07-ish subset that
-// `katari-compiler.Katari.Schema` emits.
+// JSON-Schema validation for `call_agent`'s input-args check (and any
+// future boundary that wants schema-driven enforcement).
 //
-// Implemented locally rather than pulling in `ajv` because:
-//   - The schema dialect is tightly scoped (= type / properties /
-//     required / additionalProperties / items / const / enum / anyOf
-//     / oneOf — no $ref, no patternProperties, no draft-2020 keywords).
-//   - The validator is on the prim hot path (call_agent); a 200-line
-//     hand-rolled walker is easier to audit for soundness and adds
-//     zero supply-chain surface.
+// Backed by AJV (draft-07 mode). The schema dialect emitted by
+// `katari-compiler.Katari.Schema` — `type` / `properties` / `required`
+// / `additionalProperties` / `items` / `const` / `enum` / `anyOf` — is
+// a straight subset, so a plain `new Ajv()` configuration works out of
+// the box without per-keyword tuning.
 //
-// If the compiler-side schema vocabulary grows beyond this subset,
-// extend the switch below — anything unrecognised currently passes
-// (= permissive) so we don't false-reject downstream usage.
+// Compiled validators are cached by **schema identity** (object
+// reference): the same per-agent input-schema is reused across calls,
+// and constructing the AJV validator function isn't trivially cheap.
+// The cache is WeakMap-keyed so swapping in a new IR snapshot lets the
+// old validators get garbage-collected together with their schemas.
 
+import { Ajv, type AnySchema, type ValidateFunction } from "ajv";
 import type { Json } from "../json.js";
+
+const ajv = new Ajv({
+  // The compiler-emitted schema vocabulary is drift-07 subset, which
+  // is AJV's default. Explicit options:
+  //   - allErrors: collect every problem (default short-circuits).
+  //   - strict: false — we don't (yet) emit '$id' / '$schema' / etc.,
+  //     and strict mode complains about that. Turn it off so our
+  //     plain schemas pass without busywork.
+  //   - useDefaults / coerceTypes are deliberately left at their
+  //     defaults (= off) since we want strict validation, not
+  //     value-mutating coercion.
+  allErrors: true,
+  strict: false,
+});
+
+const compiledCache = new WeakMap<object, ValidateFunction>();
 
 /**
  * Validate `raw` against `schema`. Returns the empty array on success;
- * otherwise an array of human-readable error messages anchored to a
- * JSON-pointer-ish path. Errors are collected (not short-circuited)
- * so a single call surfaces every problem at once.
+ * otherwise an array of human-readable error messages keyed by their
+ * JSON Pointer path (or `<root>` for whole-document failures).
+ *
+ * Compiled validators are cached per-schema-object so repeat calls
+ * with the same schema (= the same agent's input schema) reuse the
+ * already-compiled validator function.
  */
 export function validateAgainstSchema(raw: unknown, schema: Json): string[] {
-  const errors: string[] = [];
-  walk(raw, schema, "", errors);
-  return errors;
+  const validate = getValidator(schema);
+  if (validate(raw)) return [];
+  const errors = validate.errors ?? [];
+  return errors.map(formatAjvError);
 }
 
-// ─── internals ────────────────────────────────────────────────────────────
-
-function walk(
-  value: unknown,
-  schema: Json,
-  path: string,
-  errors: string[],
-): void {
-  if (!isPlainObject(schema)) {
-    // Boolean schemas: `true` accepts anything, `false` rejects.
-    if (schema === false) {
-      errors.push(`${formatPath(path)}: schema rejects all values`);
-    }
-    return;
+function getValidator(schema: Json): ValidateFunction {
+  // Boolean schemas (`true` / `false`) are valid JSON Schema. AJV
+  // accepts them too, but they can't be cached in our WeakMap since
+  // they aren't objects. Compile fresh each time — they're trivial.
+  if (typeof schema === "boolean") {
+    return ajv.compile(schema);
   }
-
-  // anyOf / oneOf collapse to "at least one branch validates".
-  const anyOf = schema["anyOf"];
-  if (Array.isArray(anyOf)) {
-    if (!anyOf.some((branch) => validateAgainstSchema(value, branch as Json).length === 0)) {
-      errors.push(`${formatPath(path)}: no anyOf branch matched`);
-    }
-    return;
+  if (schema === null) {
+    // `null` is not a legal JSON Schema document; treat it as a
+    // permissive `true` to avoid throwing on an arguably-recoverable
+    // caller bug. The caller is expected to gate on `inputSchema` being
+    // non-null at the producer side.
+    return ajv.compile(true);
   }
-  const oneOf = schema["oneOf"];
-  if (Array.isArray(oneOf)) {
-    const matches = oneOf.filter(
-      (branch) => validateAgainstSchema(value, branch as Json).length === 0,
-    );
-    if (matches.length === 0) {
-      errors.push(`${formatPath(path)}: no oneOf branch matched`);
-    } else if (matches.length > 1) {
-      errors.push(
-        `${formatPath(path)}: ${matches.length} oneOf branches matched (expected exactly 1)`,
-      );
-    }
-    return;
-  }
-
-  // `const` constrains to one literal value (structural equality).
-  if ("const" in schema) {
-    if (!deepEqualJson(value, schema["const"] as Json)) {
-      errors.push(
-        `${formatPath(path)}: expected const ${JSON.stringify(schema["const"])}, got ${JSON.stringify(value)}`,
-      );
-    }
-    return;
-  }
-  // `enum` is "value is one of N literals".
-  const enumList = schema["enum"];
-  if (Array.isArray(enumList)) {
-    if (!enumList.some((cand) => deepEqualJson(value, cand as Json))) {
-      errors.push(
-        `${formatPath(path)}: value ${JSON.stringify(value)} not in enum`,
-      );
-    }
-    return;
-  }
-
-  // `type` keyword. We accept singular strings (the compiler only emits
-  // those today); a string-array form is also legal per JSON Schema but
-  // not currently produced.
-  const typeKeyword = schema["type"];
-  if (typeof typeKeyword === "string") {
-    if (!checkType(value, typeKeyword)) {
-      errors.push(
-        `${formatPath(path)}: expected type ${typeKeyword}, got ${describeRuntimeType(value)}`,
-      );
-      return;
-    }
-  }
-
-  // Structural recursion.
-  if (typeKeyword === "object" || (typeof typeKeyword !== "string" && isPlainObject(value))) {
-    walkObject(value as Record<string, unknown>, schema, path, errors);
-    return;
-  }
-  if (typeKeyword === "array" || (typeof typeKeyword !== "string" && Array.isArray(value))) {
-    walkArray(value as unknown[], schema, path, errors);
-    return;
-  }
+  const cached = compiledCache.get(schema as object);
+  if (cached !== undefined) return cached;
+  const fresh = ajv.compile(schema as AnySchema);
+  compiledCache.set(schema as object, fresh);
+  return fresh;
 }
 
-function walkObject(
-  value: Record<string, unknown>,
-  schema: Record<string, unknown>,
-  path: string,
-  errors: string[],
-): void {
-  const properties = schema["properties"];
-  const required = schema["required"];
-  const additional = schema["additionalProperties"];
-
-  if (Array.isArray(required)) {
-    for (const key of required) {
-      if (typeof key === "string" && !(key in value)) {
-        errors.push(`${formatPath(path)}: missing required key '${key}'`);
-      }
-    }
-  }
-
-  if (isPlainObject(properties)) {
-    for (const [key, subSchema] of Object.entries(properties)) {
-      if (key in value) {
-        walk(value[key], subSchema as Json, joinPath(path, key), errors);
-      }
-    }
-  }
-
-  if (additional === false) {
-    const knownKeys = isPlainObject(properties) ? new Set(Object.keys(properties)) : new Set<string>();
-    for (const key of Object.keys(value)) {
-      if (!knownKeys.has(key)) {
-        errors.push(
-          `${formatPath(path)}: unknown key '${key}' (additionalProperties: false)`,
-        );
-      }
-    }
-  }
-}
-
-function walkArray(
-  value: unknown[],
-  schema: Record<string, unknown>,
-  path: string,
-  errors: string[],
-): void {
-  const items = schema["items"];
-  if (items === undefined) return;
-  for (let i = 0; i < value.length; i++) {
-    walk(value[i], items as Json, joinPath(path, String(i)), errors);
-  }
-}
-
-function checkType(value: unknown, type: string): boolean {
-  switch (type) {
-    case "null":
-      return value === null;
-    case "boolean":
-      return typeof value === "boolean";
-    case "integer":
-      return typeof value === "number" && Number.isInteger(value);
-    case "number":
-      return typeof value === "number" && Number.isFinite(value);
-    case "string":
-      return typeof value === "string";
-    case "array":
-      return Array.isArray(value);
-    case "object":
-      return isPlainObject(value);
-    default:
-      // Unknown keyword (e.g. a future addition): pass-through.
-      return true;
-  }
-}
-
-function describeRuntimeType(value: unknown): string {
-  if (value === null) return "null";
-  if (Array.isArray(value)) return "array";
-  if (isPlainObject(value)) return "object";
-  return typeof value;
-}
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    !Array.isArray(value)
-  );
-}
-
-function deepEqualJson(a: unknown, b: unknown): boolean {
-  if (a === b) return true;
-  if (typeof a !== typeof b) return false;
-  if (Array.isArray(a) && Array.isArray(b)) {
-    if (a.length !== b.length) return false;
-    for (let i = 0; i < a.length; i++) {
-      if (!deepEqualJson(a[i], b[i])) return false;
-    }
-    return true;
-  }
-  if (isPlainObject(a) && isPlainObject(b)) {
-    const ak = Object.keys(a);
-    const bk = Object.keys(b);
-    if (ak.length !== bk.length) return false;
-    for (const k of ak) {
-      if (!(k in b)) return false;
-      if (!deepEqualJson(a[k], b[k])) return false;
-    }
-    return true;
-  }
-  return false;
-}
-
-function joinPath(parent: string, key: string): string {
-  return parent === "" ? key : `${parent}.${key}`;
-}
-
-function formatPath(path: string): string {
-  return path === "" ? "<root>" : path;
+function formatAjvError(err: NonNullable<ValidateFunction["errors"]>[number]): string {
+  const path = err.instancePath === "" ? "<root>" : err.instancePath;
+  return `${path}: ${err.message ?? "(unknown error)"}`;
 }
