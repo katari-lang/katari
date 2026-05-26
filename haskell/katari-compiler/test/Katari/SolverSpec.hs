@@ -448,6 +448,59 @@ matchExpressions = describe "match expressions" $ do
           ]
     solverErrors `shouldBe` []
 
+  it "type-guard pattern narrows unknown -> integer inside the arm" $ do
+    -- `integer(n) => add(lhs = n, rhs = 1)` requires `n : integer` —
+    -- the pattern's narrowing must propagate to the bound variable, or
+    -- this would fail with "expected integer, found unknown".
+    (_, _, _, solverErrors) <-
+      runSolve $
+        mconcat
+          [ "agent inc(v: unknown) -> integer {\n",
+            "  match (v) {\n",
+            "    case integer(n) => { n + 1 }\n",
+            "    case _ => { 0 }\n",
+            "  }\n",
+            "}"
+          ]
+    solverErrors `shouldBe` []
+
+  it "type-guard pattern narrows unknown -> string inside the arm" $ do
+    (_, _, _, solverErrors) <-
+      runSolve $
+        mconcat
+          [ "agent show(v: unknown) -> string {\n",
+            "  match (v) {\n",
+            "    case string(s) => { s }\n",
+            "    case _ => { \"none\" }\n",
+            "  }\n",
+            "}"
+          ]
+    solverErrors `shouldBe` []
+
+  it "record pattern entries get the record's V type" $ do
+    -- `{ name = n }` against `record[string]` must give n : string.
+    (_, _, _, solverErrors) <-
+      runSolve $
+        mconcat
+          [ "agent extract(r: record[string]) -> string {\n",
+            "  match (r) {\n",
+            "    case { name = n } => { n }\n",
+            "    case _ => { \"none\" }\n",
+            "  }\n",
+            "}"
+          ]
+    solverErrors `shouldBe` []
+
+  it "record literal typechecks as record[V] with V the lub of entry types" $ do
+    (_, _, _, solverErrors) <-
+      runSolve $
+        mconcat
+          [ "agent make() -> record[unknown] {\n",
+            "  { x = 1, y = \"hi\" }\n",
+            "}"
+          ]
+    solverErrors `shouldBe` []
+
 -- ---------------------------------------------------------------------------
 -- for loops with var bindings, next/break (modifiers)
 -- ---------------------------------------------------------------------------

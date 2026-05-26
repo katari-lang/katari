@@ -88,6 +88,82 @@ describe("engine: prim builtin", () => {
       executePrim("to_string", { value: { kind: "secret", value: "x" } }),
     ).toThrow(/refusing to stringify a secret/);
   });
+
+  it("record_empty produces an empty record value", () => {
+    const r = executePrim("record_empty", {});
+    expect(r.kind).toBe("record");
+    if (r.kind === "record") expect(Object.keys(r.entries)).toEqual([]);
+  });
+
+  it("record_set inserts entries copy-on-write", () => {
+    const empty = executePrim("record_empty", {});
+    const r1 = executePrim("record_set", {
+      record: empty,
+      key: { kind: "string", value: "name" },
+      value: { kind: "string", value: "alice" },
+    });
+    expect(r1).toEqual({
+      kind: "record",
+      entries: { name: { kind: "string", value: "alice" } },
+    });
+    // Original stays empty (immutable).
+    if (empty.kind === "record") {
+      expect(Object.keys(empty.entries)).toEqual([]);
+    }
+  });
+
+  it("json_parse maps standard JSON to the expected native Value shapes", () => {
+    expect(
+      executePrim("json_parse", { text: { kind: "string", value: "null" } }),
+    ).toEqual({ kind: "null" });
+    expect(
+      executePrim("json_parse", { text: { kind: "string", value: "true" } }),
+    ).toEqual({ kind: "boolean", value: true });
+    expect(
+      executePrim("json_parse", { text: { kind: "string", value: "42" } }),
+    ).toEqual({ kind: "number", value: 42 });
+    expect(
+      executePrim("json_parse", { text: { kind: "string", value: "\"hi\"" } }),
+    ).toEqual({ kind: "string", value: "hi" });
+    expect(
+      executePrim("json_parse", { text: { kind: "string", value: "[1,2]" } }),
+    ).toEqual({
+      kind: "array",
+      elements: [
+        { kind: "number", value: 1 },
+        { kind: "number", value: 2 },
+      ],
+    });
+    const obj = executePrim("json_parse", {
+      text: { kind: "string", value: "{\"a\":1}" },
+    });
+    expect(obj.kind).toBe("record");
+    if (obj.kind === "record") {
+      expect(obj.entries).toEqual({ a: { kind: "number", value: 1 } });
+    }
+  });
+
+  it("json_parse surfaces invalid input as a recoverable error", () => {
+    expect(() =>
+      executePrim("json_parse", { text: { kind: "string", value: "{" } }),
+    ).toThrow(/invalid JSON/);
+  });
+
+  it("json_stringify is the inverse of json_parse for canonical values", () => {
+    const r = executePrim("json_parse", {
+      text: { kind: "string", value: "{\"a\":1,\"b\":[2,3]}" },
+    });
+    const s = executePrim("json_stringify", { value: r });
+    expect(s).toEqual({ kind: "string", value: "{\"a\":1,\"b\":[2,3]}" });
+  });
+
+  it("json_stringify refuses secret values (would launder taint)", () => {
+    expect(() =>
+      executePrim("json_stringify", {
+        value: { kind: "secret", value: "tok" },
+      }),
+    ).toThrow(/refusing to encode a secret/);
+  });
 });
 
 describe("engine: runner dispatches prim create without crashing", () => {

@@ -490,6 +490,33 @@ tupleAndArray = describe "tuple and array" $ do
     _ <- shouldSucceed "agent main() { (1, 2, 3) }"
     pure ()
 
+  it "parses record literal" $ do
+    _ <- shouldSucceed "agent main() { { name = \"a\", age = 30 } }"
+    pure ()
+
+  it "parses record literal with trailing comma" $ do
+    _ <- shouldSucceed "agent main() { { name = \"a\", } }"
+    pure ()
+
+  it "record literal AST carries entries with the right keys" $ do
+    m <- shouldSucceed "agent main() { { x = 1, y = 2 } }"
+    case head (decls m) of
+      DeclarationAgent a -> case a.body.returnExpression of
+        Just (ExpressionRecord r) -> map fst r.entries `shouldBe` ["x", "y"]
+        _ -> expectationFailure "expected record literal"
+      _ -> expectationFailure "expected agent"
+
+  it "distinguishes record literal from empty block" $ do
+    -- A block-shaped @{}@ stays a block; record literals require the
+    -- `ident =` lookahead. (The trailing expression here is the block's
+    -- value; a record literal would have parsed as ExpressionRecord.)
+    m <- shouldSucceed "agent main() { {} }"
+    case head (decls m) of
+      DeclarationAgent a -> case a.body.returnExpression of
+        Just (ExpressionBlock _) -> pure ()
+        _ -> expectationFailure "expected block expression, not record literal"
+      _ -> expectationFailure "expected agent"
+
 -- ---------------------------------------------------------------------------
 -- Block expression
 -- ---------------------------------------------------------------------------
@@ -1360,9 +1387,48 @@ types = describe "types" $ do
     _ <- shouldSucceed "agent main() -> mytype { null }"
     pure ()
 
+  it "parses bare agent (function-any) type" $ do
+    _ <- shouldSucceed "agent main(f: agent) { 1 }"
+    pure ()
+
+  it "bare agent yields TypeFunctionAny, not parameterised TypeFunction" $ do
+    m <- shouldSucceed "agent main(f: agent) { 1 }"
+    case head (decls m) of
+      DeclarationAgent a -> case a.parameters of
+        [pr] -> case pr.pattern of
+          PatternVariable v -> case v.typeAnnotation of
+            Just (TypeFunctionAny _) -> pure ()
+            _ -> expectationFailure "expected TypeFunctionAny"
+          _ -> expectationFailure "expected variable pattern"
+        _ -> expectationFailure "expected exactly one parameter"
+      _ -> expectationFailure "expected agent"
+
+  it "parses zero-arg agent type" $ do
+    _ <- shouldSucceed "agent main(f: agent () -> integer) { f() }"
+    pure ()
+
   it "parses agent type" $ do
     _ <- shouldSucceed "agent main(f: agent (x: integer) -> integer) { f(x = 1) }"
     pure ()
+
+  it "agent type AST captures parameter list and return type" $ do
+    m <- shouldSucceed "agent main(f: agent (x: integer) -> string) { 1 }"
+    case head (decls m) of
+      DeclarationAgent a -> case a.parameters of
+        [pr] -> case pr.pattern of
+          PatternVariable v -> case v.typeAnnotation of
+            Just (TypeFunction ft) -> do
+              length ft.parameterTypes `shouldBe` 1
+              case ft.parameterTypes of
+                [(label, _)] -> label `shouldBe` "x"
+                _ -> expectationFailure "expected one named parameter"
+              case ft.returnType of
+                TypePrimitive _ -> pure ()
+                _ -> expectationFailure "expected primitive return type"
+            _ -> expectationFailure "expected TypeFunction"
+          _ -> expectationFailure "expected variable pattern"
+        _ -> expectationFailure "expected exactly one parameter"
+      _ -> expectationFailure "expected agent"
 
   it "parses agent type with requests" $ do
     _ <-
