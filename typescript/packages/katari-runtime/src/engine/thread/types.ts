@@ -268,6 +268,57 @@ export type CtorThread = Common & {
 };
 
 /**
+ * CallAgentThread: the runtime side of the @call_agent(name, args)@
+ * primitive. Spawned in place of a PrimThread when the lowered prim
+ * leaf's name is the well-known string @"call_agent"@.
+ *
+ * Lifecycle:
+ *
+ *   1. `create` — parses the @name@ argument into a callable identity
+ *      (qualified-name agentLiteral or closure stamp), validates the
+ *      @args@ record against the resolved target's input schema, and
+ *      either:
+ *        a. emits an outbound `delegate` event for the resolved target
+ *           and stays alive waiting for the matching ack; or
+ *        b. on resolve / validation failure, raises the
+ *           @call_agent_error@ request upward (the
+ *           @pendingAskId@ field below). The thread then stays alive in
+ *           a waiting-for-cancel state, mirroring how PrimThread
+ *           handles a @PrimRaiseRequest@ throw.
+ *
+ *   2. `done` (= translated `delegateAck`) — forwards the result value
+ *      to our parent as a `done` and exits.
+ *
+ *   3. `cancel` — emits a `terminate` for any in-flight delegation and
+ *      waits for the ack. Mirrors DelegateThread.
+ *
+ *   4. Inbound `escalate` from the peer becomes an upward `ask` to our
+ *      parent (same as DelegateThread); its eventual `askAck` becomes
+ *      an outbound `escalateAck`.
+ */
+export type CallAgentThread = Common & {
+  kind: "callAgent";
+  /** Original @name@ string preserved for diagnostics + cancel path. */
+  nameStr: string;
+  /**
+   * The inner of the user-supplied @args@ record (a `record[unknown]`
+   * at the type level). Kept verbatim until @create@ runs so the
+   * resolved target's input schema can drive the per-key validation.
+   */
+  argsRecord: Record<string, Value>;
+  /**
+   * `delegationId` issued at create time when the delegate path is
+   * taken (= name resolved successfully). Unset otherwise (= the thread
+   * raised an error and is waiting for cancel).
+   */
+  delegationId?: DelegationId;
+  /** Mirror of DelegateThread.inboundEscalations. */
+  inboundEscalations: Record<AskId, EscalationId>;
+  /** AskId reserved when the thread raised @call_agent_error@. */
+  pendingAskId?: AskId;
+};
+
+/**
  * Shared shape for threads that fan out into N sibling element computations
  * and collect their results into an ordered sequence (TupleThread / ArrayThread).
  * The runtime helpers in `thread/ops/collecting.ts` operate generically on this
@@ -305,6 +356,7 @@ export type Thread =
   | RequestThread
   | DelegateThread
   | PrimThread
+  | CallAgentThread
   | CtorThread
   | TupleThread
   | ArrayThread

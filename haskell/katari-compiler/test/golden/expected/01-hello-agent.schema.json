@@ -733,6 +733,89 @@
     "requests": []
   },
   {
+    "description": "Raised by @call_agent@ when the name fails to resolve to a known callable, or the supplied args fail the target's input schema. Handle via @request call_agent_error(message) { ... }@.",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "message"
+      ],
+      "type": "object"
+    },
+    "name": "primitive.call_agent_error",
+    "output": {
+      "not": {}
+    },
+    "requests": [
+      {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "message": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "message"
+          ],
+          "type": "object"
+        },
+        "name": "primitive.call_agent_error",
+        "output": {
+          "not": {}
+        }
+      }
+    ]
+  },
+  {
+    "description": "Dynamically invoke a callable by name. @name@ is either a qualified agent name (@module.agent@) or a closure stamp (@closure:<id>@); @args@ is a record matching the target's parameter list. Raises @call_agent_error@ on unknown names or schema-invalid args.",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "args": {
+          "additionalProperties": true,
+          "properties": {},
+          "required": [],
+          "type": "object"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "args",
+        "name"
+      ],
+      "type": "object"
+    },
+    "name": "primitive.call_agent",
+    "output": {},
+    "requests": [
+      {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "message": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "message"
+          ],
+          "type": "object"
+        },
+        "name": "primitive.call_agent_error",
+        "output": {
+          "not": {}
+        }
+      }
+    ]
+  },
+  {
     "description": "Raise a recoverable runtime error. Bubbles through enclosing handle scopes until a `request throw` handler catches it; if nothing catches it the snapshot transitions to the `error` state.",
     "input": {
       "additionalProperties": false,

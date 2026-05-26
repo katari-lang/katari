@@ -87,12 +87,35 @@ export function spawnChild(ctx: StepCtx, args: SpawnArgs): ThreadId {
       blockId: args.blockId,
       pc: 0,
     }))
-    .with({ kind: "blockPrim" }, b => ({
-      ...common,
-      kind: "prim" as const,
-      primName: b.body,
-      args: args.callArgs,
-    }))
+    .with({ kind: "blockPrim" }, b => {
+      // `call_agent` needs to spawn a delegation against a runtime-
+      // resolved target plus run schema validation, which is well
+      // outside the synchronous-leaf shape PrimThread assumes. Pivot
+      // into a dedicated CallAgentThread for this one well-known name.
+      if (b.body === "call_agent") {
+        const nameArg = args.callArgs["name"];
+        const argsArg = args.callArgs["args"];
+        return {
+          ...common,
+          kind: "callAgent" as const,
+          nameStr:
+            nameArg !== undefined && nameArg.kind === "string"
+              ? nameArg.value
+              : "",
+          argsRecord:
+            argsArg !== undefined && argsArg.kind === "record"
+              ? argsArg.entries
+              : {},
+          inboundEscalations: {},
+        };
+      }
+      return {
+        ...common,
+        kind: "prim" as const,
+        primName: b.body,
+        args: args.callArgs,
+      };
+    })
     .with({ kind: "blockConstructor" }, b => ({
       ...common,
       kind: "ctor" as const,

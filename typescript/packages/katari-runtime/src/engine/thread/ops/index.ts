@@ -16,6 +16,7 @@ import type { Value } from "../../value.js";
 import type { Thread } from "../types.js";
 import { agentOps } from "./agent.js";
 import { arrayOps } from "./array.js";
+import { callAgentOps } from "./callAgent.js";
 import { ctorOps } from "./ctor.js";
 import { delegateOps } from "./delegate.js";
 import { forOps } from "./for.js";
@@ -43,6 +44,7 @@ export function dispatchCreate(ctx: StepCtx, t: Thread): void {
     .with({ kind: "request" }, x => requestOps.create(ctx, x))
     .with({ kind: "delegate" }, x => delegateOps.create(ctx, x))
     .with({ kind: "handle" }, x => handleOps.create(ctx, x))
+    .with({ kind: "callAgent" }, x => callAgentOps.create(ctx, x))
     .exhaustive();
 }
 
@@ -65,6 +67,7 @@ export function dispatchDone(
     .with({ kind: "request" }, x => requestOps.done(ctx, x, callId, value))
     .with({ kind: "delegate" }, x => delegateOps.done(ctx, x, callId, value))
     .with({ kind: "handle" }, x => handleOps.done(ctx, x, callId, value))
+    .with({ kind: "callAgent" }, x => callAgentOps.done(ctx, x, callId, value))
     .exhaustive();
 }
 
@@ -82,6 +85,7 @@ export function dispatchCancel(ctx: StepCtx, t: Thread): void {
     .with({ kind: "request" }, x => requestOps.cancel(ctx, x))
     .with({ kind: "delegate" }, x => delegateOps.cancel(ctx, x))
     .with({ kind: "handle" }, x => handleOps.cancel(ctx, x))
+    .with({ kind: "callAgent" }, x => callAgentOps.cancel(ctx, x))
     .exhaustive();
 }
 
@@ -103,6 +107,7 @@ export function dispatchCancelAck(
     .with({ kind: "request" }, x => requestOps.cancelAck(ctx, x, callId))
     .with({ kind: "delegate" }, x => delegateOps.cancelAck(ctx, x, callId))
     .with({ kind: "handle" }, x => handleOps.cancelAck(ctx, x, callId))
+    .with({ kind: "callAgent" }, x => callAgentOps.cancelAck(ctx, x, callId))
     .exhaustive();
 }
 
@@ -126,6 +131,7 @@ export function dispatchAsk(
     .with({ kind: "request" }, x => requestOps.ask(ctx, x, askId, kind, childCallId))
     .with({ kind: "delegate" }, x => delegateOps.ask(ctx, x, askId, kind, childCallId))
     .with({ kind: "handle" }, x => handleOps.ask(ctx, x, askId, kind, childCallId))
+    .with({ kind: "callAgent" }, x => callAgentOps.ask(ctx, x, askId, kind, childCallId))
     .exhaustive();
 }
 
@@ -148,5 +154,6 @@ export function dispatchAskAck(
     .with({ kind: "request" }, x => requestOps.askAck(ctx, x, askId, value))
     .with({ kind: "delegate" }, x => delegateOps.askAck(ctx, x, askId, value))
     .with({ kind: "handle" }, x => handleOps.askAck(ctx, x, askId, value))
+    .with({ kind: "callAgent" }, x => callAgentOps.askAck(ctx, x, askId, value))
     .exhaustive();
 }

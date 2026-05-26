@@ -336,4 +336,12 @@ describe("samples/ end-to-end (apply → run → verify)", () => {
       );
     },
   );
+
+  itE2E(
+    "22-call-agent: dynamic dispatch + schema validation surfaces call_agent_error on bad args",
+    async () => {
+      const result = await applyAndRun("call_agent", "22-call-agent");
+      expect(result).toMatch(/^ok=hello, alice; bad=err: /);
+    },
+  );
 });

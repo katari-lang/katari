@@ -256,15 +256,20 @@ function translateExternal(
   }
 
   if (p.kind === "delegateAck") {
-    // Look up the sender side: the DelegateThread that issued the
-    // outbound delegate. The receiver-side AgentThread (if any, for
-    // self→self) has already cleaned itself up before emitting this ack.
+    // Look up the sender side: the thread that issued the outbound
+    // delegate. Two kinds: a normal `DelegateThread` (statement call to
+    // a delegate block) or a `CallAgentThread` (the dynamic
+    // `call_agent` prim). Both follow the same finishing pattern —
+    // forward done / cancelAck and clear the pending-out entry.
     const threadId = ctx.state.pendingDelegateOut[p.delegationId] as
       | ThreadId
       | undefined;
     if (threadId === undefined) return;
     const sender = ctx.state.threads[threadId];
-    if (sender === undefined || sender.kind !== "delegate") {
+    if (
+      sender === undefined ||
+      (sender.kind !== "delegate" && sender.kind !== "callAgent")
+    ) {
       ctx.log("debug", "engine: delegateAck for non-delegate thread", { kind: sender?.kind });
       return;
     }
@@ -292,7 +297,12 @@ function translateExternal(
       | undefined;
     if (threadId === undefined) return;
     const sender = ctx.state.threads[threadId];
-    if (sender === undefined || sender.kind !== "delegate") return;
+    if (
+      sender === undefined ||
+      (sender.kind !== "delegate" && sender.kind !== "callAgent")
+    ) {
+      return;
+    }
     delete ctx.state.pendingDelegateOut[p.delegationId];
     if (sender.parent !== null && sender.parentCallId !== null) {
       ctx.enqueue({ kind: "cancelAck", target: sender.parent, callId: sender.parentCallId });
@@ -319,8 +329,11 @@ function translateExternal(
       return;
     }
     const sender = ctx.state.threads[threadId];
-    if (sender === undefined || sender.kind !== "delegate") {
-      ctx.log("debug", "engine: escalate target not a DelegateThread", {
+    if (
+      sender === undefined ||
+      (sender.kind !== "delegate" && sender.kind !== "callAgent")
+    ) {
+      ctx.log("debug", "engine: escalate target not a DelegateThread / CallAgentThread", {
         kind: sender?.kind,
       });
       return;

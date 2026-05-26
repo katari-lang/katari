@@ -1,0 +1,29 @@
+@"Returns a greeting string."
+agent greeter(name: string) -> string {
+  f"hello, ${name}"
+}
+
+@"Invoke the greeter dynamically and return whatever it produced. The handle scope catches a call_agent_error and substitutes a diagnostic string."
+agent try_call(args: record[unknown]) -> string {
+  handle {
+    request call_agent_error(message: string) {
+      break f"err: ${message}"
+    }
+  }
+  match (call_agent(name = "call_agent.greeter", args = args)) {
+    case string(s) => { s }
+    case _ => { "non-string return" }
+  }
+}
+
+@"Demonstrates dynamic dispatch + per-call schema validation via the call_agent prim."
+agent main() -> string {
+  let good_args = record.set(
+    record = record.empty(),
+    key = "name",
+    value = "alice",
+  )
+  let ok_value = try_call(args = good_args)
+  let err_value = try_call(args = record.empty())
+  f"ok=${ok_value}; bad=${err_value}"
+}

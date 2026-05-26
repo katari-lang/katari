@@ -58,7 +58,9 @@ export const primOps: ThreadOps<PrimThread> = {
   },
 
   done(_ctx, t, callId: CallId) {
-    throw new Error(`prim thread received done (callId=${callId}) — no children expected on ${t.id}`);
+    throw new Error(
+      `prim thread received done (callId=${callId}) — no children expected on ${t.id}`,
+    );
   },
 
   /**
@@ -96,10 +98,14 @@ export const primOps: ThreadOps<PrimThread> = {
    */
   askAck(ctx, t, askId, _value) {
     if (t.pendingAskId !== undefined && t.pendingAskId === askId) {
-      ctx.log("debug", "engine.prim: dropped askAck for never-returning request", {
-        threadId: t.id,
-        askId,
-      });
+      ctx.log(
+        "debug",
+        "engine.prim: dropped askAck for never-returning request",
+        {
+          threadId: t.id,
+          askId,
+        },
+      );
       return;
     }
     // Unknown askId — surface as a debug log; askIdMap forwarding
@@ -152,10 +158,7 @@ function emitPrimRaise(
 // the runtime-side dispatch identity (`closure:N` for local agents,
 // qualified name otherwise).
 
-function executeGetMetadata(
-  ctx: StepCtx,
-  args: Record<string, Value>,
-): Value {
+function executeGetMetadata(ctx: StepCtx, args: Record<string, Value>): Value {
   const value = args["value"];
   if (value === undefined) {
     throw new RecoverableEngineError(
@@ -188,10 +191,7 @@ function executeGetMetadata(
  * the qualified name (`<module>.<bare>`); for local agents it is
  * `closure:<closureId>`.
  */
-function resolveCallable(
-  ctx: StepCtx,
-  value: Value,
-): [AgentBlock, string] {
+function resolveCallable(ctx: StepCtx, value: Value): [AgentBlock, string] {
   switch (value.kind) {
     case "agentLiteral": {
       const blockId = lookupQualified(ctx, value.qualifiedName);
@@ -247,4 +247,3 @@ function requireAgentBlock(
   }
   return block.body;
 }
-
