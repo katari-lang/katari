@@ -164,7 +164,7 @@ agent demo_par_sleeps() -> string {
 // here to make the FFI code path visible.
 
 @"Fan out `count` parallel copies of `callback` from the ext side. Returns the number of results gathered."
-external fan_out(callback: () -> string, count: integer) -> integer from "FFI:playground.fan_out"
+external fan_out(callback: agent () -> string, count: integer) -> integer from "FFI:playground.fan_out"
 
 @"Small CORE-side agent used as the callback in demo_ffi_fanout."
 agent slow_child() -> string {

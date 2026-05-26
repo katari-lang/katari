@@ -628,7 +628,7 @@ higherOrderFunctions = describe "higher-order agents" $ do
     (_, _, solverResult, solverErrors) <-
       runSolve $
         mconcat
-          [ "agent caller(callback: (x: integer) -> integer) -> integer {\n",
+          [ "agent caller(callback: agent (x: integer) -> integer) -> integer {\n",
             "  return callback(x = 1)\n",
             "}"
           ]
@@ -639,7 +639,7 @@ higherOrderFunctions = describe "higher-order agents" $ do
       runSolve $
         mconcat
           [ "agent identity(n: integer) -> integer { n }\n",
-            "agent caller(cb: (n: integer) -> integer) -> integer { cb(n = 1) }\n",
+            "agent caller(cb: agent (n: integer) -> integer) -> integer { cb(n = 1) }\n",
             "agent run() -> integer { caller(cb = identity) }"
           ]
     solverErrors `shouldBe` []
@@ -799,7 +799,7 @@ illTypedRejection = describe "ill-typed program rejection" $ do
 
   -- Function-signature mismatch via annotation. Tests function shape
   -- subtyping (let contravariant in params, let covariant in return).
-  it "let f: (s: string) -> integer = some_int_to_int_agent → error" $ do
+  it "let f: agent (s: string) -> integer = some_int_to_int_agent → error" $ do
     -- 'square' has type (n: integer) -> integer. Binding to a function
     -- expecting (s: string) -> integer should fail because the parameter
     -- types are contravariantly compared (string is not a subtype of integer).
@@ -808,7 +808,7 @@ illTypedRejection = describe "ill-typed program rejection" $ do
         mconcat
           [ "agent square(n: integer) -> integer { n }\n",
             "agent caller() {\n",
-            "  let f: (s: string) -> integer = square;\n",
+            "  let f: agent (s: string) -> integer = square;\n",
             "  f(s = \"hi\")\n",
             "}"
           ]
@@ -822,7 +822,7 @@ illTypedRejection = describe "ill-typed program rejection" $ do
         mconcat
           [ "agent square(n: integer) -> integer { n }\n",
             "agent caller() {\n",
-            "  let f: (n: integer) -> string = square;\n",
+            "  let f: agent (n: integer) -> string = square;\n",
             "  f(n = 1)\n",
             "}"
           ]
@@ -851,7 +851,7 @@ illTypedRejection = describe "ill-typed program rejection" $ do
       runSolve $
         mconcat
           [ "agent square(n: integer) -> integer { n }\n",
-            "agent apply_string(cb: (s: string) -> integer) -> integer {\n",
+            "agent apply_string(cb: agent (s: string) -> integer) -> integer {\n",
             "  cb(s = \"hi\")\n",
             "}\n",
             "agent run() { apply_string(cb = square) }"
@@ -865,7 +865,7 @@ illTypedRejection = describe "ill-typed program rejection" $ do
       runSolve $
         mconcat
           [ "agent stringify() -> string { \"hi\" }\n",
-            "agent caller(cb: () -> integer) -> integer { cb() + 1 }\n",
+            "agent caller(cb: agent () -> integer) -> integer { cb() + 1 }\n",
             "agent run() -> integer { caller(cb = stringify) }"
           ]
     null solverErrors `shouldBe` False
@@ -982,7 +982,7 @@ illTypedRejection = describe "ill-typed program rejection" $ do
     (_, _, _, solverErrors) <-
       runSolve $
         mconcat
-          [ "agent makeAdder() -> (n: integer) -> integer {\n",
+          [ "agent makeAdder() -> agent (n: integer) -> integer {\n",
             "  agent inc(n: integer) -> integer { n + 1 }\n",
             "  inc\n",
             "}\n",

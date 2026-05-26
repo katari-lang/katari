@@ -4,7 +4,7 @@ agent forty_two() -> integer {
 }
 
 @"Returns the agent value of forty_two without invoking it (an agentLiteral)."
-agent pick() -> () -> integer {
+agent pick() -> agent () -> integer {
   forty_two
 }
 

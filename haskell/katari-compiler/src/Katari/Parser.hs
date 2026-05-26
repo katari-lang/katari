@@ -1864,11 +1864,10 @@ parseAtomicType =
       parsePrimitiveType PrimitiveTypeKindBoolean KeywordBoolean,
       parseNeverType,
       parseUnknownType,
-      parseFunctionAnyType,
+      parseAgentType,
       parseLiteralType,
       try parseArrayType,
       try parseRecordType,
-      try parseFunctionType,
       parseTupleOrGroupedType,
       parseNamedOrQualifiedType
     ]
@@ -1885,14 +1884,36 @@ parseUnknownType = parseWithSpan $ do
   parseKeyword KeywordUnknown
   pure $ \sourceSpan -> TypeUnknown UnknownTypeNode {sourceSpan = sourceSpan}
 
--- | @agent@ — the top of the function-type lattice (any callable).
--- The same @agent@ keyword starts agent declarations / statements at
--- the term level; type-context disambiguation happens via the parser's
--- choice path, not the lexer.
-parseFunctionAnyType :: Parser (SyntacticType Parsed)
-parseFunctionAnyType = parseWithSpan $ do
+-- | @agent@ alone — function-any (top of the callable-type lattice) —
+-- or @agent (p: T, ...) -> R [with E]@ — concrete callable type. The
+-- parser consumes @agent@ unconditionally; an optional @(@ in the
+-- next token position commits to the parameterised form, otherwise it
+-- falls back to function-any.
+--
+-- This unifies the surface: every callable type starts with @agent@
+-- (matching the declaration / statement keyword), so a reader never
+-- has to recognise a bare parenthesised parameter list as a type.
+parseAgentType :: Parser (SyntacticType Parsed)
+parseAgentType = parseWithSpan $ do
   parseKeyword KeywordAgent
-  pure $ \sourceSpan -> TypeFunctionAny FunctionAnyTypeNode {sourceSpan = sourceSpan}
+  parameterized <-
+    optional . try $ do
+      parameterTypes <- parseParenthesizedList parseFunctionTypeParameter
+      parsePunctuation PunctuationArrow
+      returnType <- parseType
+      requests <- option [] (parseKeyword KeywordWith *> parseRequests)
+      pure (parameterTypes, returnType, requests)
+  pure $ \sourceSpan -> case parameterized of
+    Nothing ->
+      TypeFunctionAny FunctionAnyTypeNode {sourceSpan = sourceSpan}
+    Just (parameterTypes, returnType, requests) ->
+      TypeFunction
+        FunctionTypeNode
+          { parameterTypes = parameterTypes,
+            returnType = returnType,
+            withRequests = requests,
+            sourceSpan = sourceSpan
+          }
 
 -- | Literal type: @"a"@, @42@, @true@, or @false@.
 -- @null@ is intentionally omitted: 'parsePrimitiveType' already handles the
@@ -1940,21 +1961,6 @@ parseNamedOrQualifiedType = parseWithSpan $ do
             target = second,
             sourceSpan = sourceSpan
           }
-
-parseFunctionType :: Parser (SyntacticType Parsed)
-parseFunctionType = parseWithSpan $ do
-  parameterTypes <- parseParenthesizedList parseFunctionTypeParameter
-  parsePunctuation PunctuationArrow
-  returnType <- parseType
-  requests <- option [] (parseKeyword KeywordWith *> parseRequests)
-  pure $ \sourceSpan ->
-    TypeFunction
-      FunctionTypeNode
-        { parameterTypes = parameterTypes,
-          returnType = returnType,
-          withRequests = requests,
-          sourceSpan = sourceSpan
-        }
 
 parseFunctionTypeParameter :: Parser (Text, SyntacticType Parsed)
 parseFunctionTypeParameter = do

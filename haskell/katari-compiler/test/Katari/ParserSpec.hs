@@ -929,10 +929,9 @@ declarations = describe "declarations" $ do
     shouldFail "type t = | a | b"
 
   it "union has lower precedence than function (parses as (a|b) -> c)" $ do
-    -- function 構文は parser:parseFunctionType で `(...) -> ret` の形なので、
-    -- bare `T -> T` は識別子1つの function 形を試みるが括弧必須でエラーする。
+    -- agent 構文は `agent (...) -> ret` の形。
     -- ここでは function を含む union が外側で union として括れることを確認する。
-    m <- shouldSucceed "type t = integer | (x: integer) -> integer"
+    m <- shouldSucceed "type t = integer | agent (x: integer) -> integer"
     case head (decls m) of
       DeclarationTypeSynonym ts -> case ts.rhs of
         TypeUnion u -> length u.branches `shouldBe` 2
@@ -1316,20 +1315,20 @@ types = describe "types" $ do
     _ <- shouldSucceed "agent main() -> mytype { null }"
     pure ()
 
-  it "parses function type" $ do
-    _ <- shouldSucceed "agent main(f: (x: integer) -> integer) { f(x = 1) }"
+  it "parses agent type" $ do
+    _ <- shouldSucceed "agent main(f: agent (x: integer) -> integer) { f(x = 1) }"
     pure ()
 
-  it "parses function type with requests" $ do
+  it "parses agent type with requests" $ do
     _ <-
       shouldSucceed
-        "agent main(f: (x: integer) -> integer with myreq) { f(x = 1) }"
+        "agent main(f: agent (x: integer) -> integer with myreq) { f(x = 1) }"
     pure ()
 
-  it "parses function type with multiple requests" $ do
+  it "parses agent type with multiple requests" $ do
     _ <-
       shouldSucceed
-        "agent main(f: (x: integer) -> integer with req1, req2) { f(x = 1) }"
+        "agent main(f: agent (x: integer) -> integer with req1, req2) { f(x = 1) }"
     pure ()
 
   it "parses never type as return type" $ do
@@ -1349,7 +1348,7 @@ types = describe "types" $ do
     pure ()
 
   it "parses never as function-parameter type in function-type position" $ do
-    _ <- shouldSucceed "agent main(f: (x: never) -> integer) { null }"
+    _ <- shouldSucceed "agent main(f: agent (x: never) -> integer) { null }"
     pure ()
 
   it "parses unknown as array element" $ do
@@ -1709,8 +1708,8 @@ arrayAndTupleTypes = describe "array and tuple types" $ do
     _ <- shouldSucceed "agent main(x: ((integer))) { 1 }"
     pure ()
 
-  it "parses function type with tuple parameter type" $ do
-    _ <- shouldSucceed "agent main(f: (p: (integer, string)) -> integer) { 1 }"
+  it "parses agent type with tuple parameter type" $ do
+    _ <- shouldSucceed "agent main(f: agent (p: (integer, string)) -> integer) { 1 }"
     pure ()
 
   it "parses empty tuple type ()" $ do
