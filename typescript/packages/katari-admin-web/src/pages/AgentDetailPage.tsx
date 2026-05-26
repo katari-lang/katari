@@ -128,13 +128,7 @@ export function AgentDetailPage() {
           >
             <Card className="lg:col-span-2">
               <CardHeader>
-                <div className="flex items-center justify-between">
-                  <CardTitle>Invoke</CardTitle>
-                  <CopyButton
-                    text={JSON.stringify(agent.parameters, null, 2)}
-                    label="Copied schema"
-                  />
-                </div>
+                <CardTitle>Invoke</CardTitle>
               </CardHeader>
               <CardContent>
                 <div className="space-y-4">
@@ -157,7 +151,13 @@ export function AgentDetailPage() {
                       invoke.mutate(args as Record<string, RawValue>)
                     }
                     renderActions={({ submit }) => (
-                      <div className="flex justify-end pt-2">
+                      <div className="flex items-center justify-between pt-2">
+                        <CopyButton
+                          text={JSON.stringify(agent.parameters, null, 2)}
+                          label="Copied schema"
+                        >
+                          Copy Schema
+                        </CopyButton>
                         <Button
                           type="button"
                           variant="primary"
@@ -228,16 +228,18 @@ function ReturnsCard({
   return (
     <Card className={className}>
       <CardHeader>
-        <div className="flex items-center justify-between">
-          <CardTitle>Returns schema</CardTitle>
-          <CopyButton
-            text={JSON.stringify(returns, null, 2)}
-            label="Copied schema"
-          />
-        </div>
+        <CardTitle>Returns schema</CardTitle>
       </CardHeader>
       <CardContent>
         <SchemaViewer schema={returns} />
+        <div className="mt-3">
+          <CopyButton
+            text={JSON.stringify(returns, null, 2)}
+            label="Copied schema"
+          >
+            Copy Schema
+          </CopyButton>
+        </div>
       </CardContent>
     </Card>
   );

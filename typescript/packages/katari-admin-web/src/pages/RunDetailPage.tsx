@@ -155,16 +155,18 @@ export function RunDetailPage() {
             <div className="grid gap-4 lg:grid-cols-3">
               <Card className="lg:col-span-2">
                 <CardHeader>
-                  <div className="flex items-center justify-between">
-                    <CardTitle>Arguments</CardTitle>
-                    <CopyButton
-                      text={JSON.stringify(run.args, null, 2)}
-                      label="Copied JSON"
-                    />
-                  </div>
+                  <CardTitle>Arguments</CardTitle>
                 </CardHeader>
                 <CardContent>
                   <ValueViewer value={run.args} projectId={projectId} />
+                  <div className="mt-3">
+                    <CopyButton
+                      text={JSON.stringify(run.args, null, 2)}
+                      label="Copied JSON"
+                    >
+                      Copy JSON
+                    </CopyButton>
+                  </div>
                 </CardContent>
               </Card>
               <Card>
@@ -306,16 +308,18 @@ export function RunDetailPage() {
                 {!isLive && run.result !== undefined && (
                   <Card>
                     <CardHeader>
-                      <div className="flex items-center justify-between">
-                        <CardTitle>Result</CardTitle>
-                        <CopyButton
-                          text={JSON.stringify(run.result, null, 2)}
-                          label="Copied JSON"
-                        />
-                      </div>
+                      <CardTitle>Result</CardTitle>
                     </CardHeader>
                     <CardContent>
                       <ValueViewer value={run.result} projectId={projectId} />
+                      <div className="mt-3">
+                        <CopyButton
+                          text={JSON.stringify(run.result, null, 2)}
+                          label="Copied JSON"
+                        >
+                          Copy JSON
+                        </CopyButton>
+                      </div>
                     </CardContent>
                   </Card>
                 )}
