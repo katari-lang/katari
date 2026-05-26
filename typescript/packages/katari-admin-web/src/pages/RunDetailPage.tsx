@@ -90,22 +90,19 @@ export function RunDetailPage() {
     },
   });
 
-  // Escalations for this run's snapshot, filtered to only those
-  // belonging to this specific run (matching rootDelegationId).
+  // Escalations for this run, filtered server-side by rootDelegationId.
   const escalationsQ = useQuery({
-    queryKey: ["escalations", projectId, run?.snapshotId, "run-detail"],
+    queryKey: ["escalations", projectId, runId, "run-detail"],
     queryFn: () =>
       client.listEscalations({
         projectId: projectId as ProjectId,
-        snapshotId: run!.snapshotId,
+        runId: runId as RunId,
       }),
-    enabled: typeof projectId === "string" && run !== undefined,
+    enabled: typeof projectId === "string" && typeof runId === "string",
     refetchInterval: isLive ? POLL_MS : false,
   });
 
-  const runEscalations = (escalationsQ.data?.escalations ?? []).filter(
-    (esc) => esc.rootDelegationId === runId,
-  );
+  const runEscalations = escalationsQ.data?.escalations ?? [];
 
   return (
     <div>

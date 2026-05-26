@@ -16,14 +16,14 @@ export function ArrayField({
   const itemSchema = schema.items ?? {};
 
   return (
-    <div className="space-y-2  border border-border bg-muted/40 p-3">
+    <div className="space-y-2 border-l-2 border-border pl-3">
       {items.length === 0 ? (
         <p className="text-xs text-subtle-foreground">No items yet.</p>
       ) : (
         items.map((item, idx) => (
           <div
             key={idx}
-            className="flex items-start gap-2  border border-border  p-2"
+            className="flex items-start gap-2"
           >
             <span className="mt-2 inline-flex h-5 min-w-5 items-center justify-center rounded bg-muted px-1.5 font-mono text-xs text-muted-foreground">
               {idx}

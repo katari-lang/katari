@@ -15,6 +15,7 @@ import {
   EscalationIdSchema,
   PaginationQuerySchema,
   ProjectIdSchema,
+  RunIdSchema,
   SnapshotIdSchema,
 } from "./middleware/validation.js";
 import { escalationRowToWire } from "../wire/agent-wire.js";
@@ -26,6 +27,7 @@ import { z } from "zod";
 const ListQuerySchema = z
   .object({
     snapshotId: SnapshotIdSchema.optional(),
+    runId: RunIdSchema.optional(),
     state: z.enum(["open", "answered", "cancelled"]).optional(),
   })
   .extend(PaginationQuerySchema.shape);
@@ -45,6 +47,7 @@ export function buildEscalationRoutes(
     const result = await storage.escalations.list({
       projectId,
       snapshotId: query.snapshotId,
+      rootDelegationId: query.runId,
       state: query.state,
       receiverEndpoint: API_ENDPOINT,
       limit: query.limit,

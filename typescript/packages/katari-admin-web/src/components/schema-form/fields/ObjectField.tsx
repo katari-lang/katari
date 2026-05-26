@@ -84,7 +84,7 @@ export function ObjectField({
   }
 
   return (
-    <div className="space-y-3 border-l border-border pl-3">
+    <div className="space-y-3 border-l-2 border-border pl-3">
       {visibleEntries.map(([key, sub]) => (
         <SchemaField
           key={key}
@@ -167,14 +167,14 @@ function DynamicKeyValueEditor({
   }
 
   return (
-    <div className="space-y-2 border border-border bg-muted/40 p-3">
+    <div className="space-y-2 border-l-2 border-border pl-3">
       {rows.length === 0 ? (
         <p className="text-xs text-subtle-foreground">No entries yet.</p>
       ) : (
         rows.map((row) => (
           <div
             key={row.id}
-            className="flex items-start gap-2 border border-border p-2"
+            className="flex items-start gap-2"
           >
             <div className="w-36 shrink-0">
               <Input

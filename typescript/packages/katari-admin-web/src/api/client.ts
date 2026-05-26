@@ -177,6 +177,7 @@ export function createApiClient(config: ApiClientConfig) {
     listEscalations: (params: {
       projectId: ProjectId;
       snapshotId?: SnapshotId;
+      runId?: RunId;
       state?: EscalationState;
       limit?: number;
       cursor?: string;
@@ -186,6 +187,7 @@ export function createApiClient(config: ApiClientConfig) {
         "GET",
         withQuery(`/project/${params.projectId}/escalation`, {
           snapshotId: params.snapshotId,
+          runId: params.runId,
           state: params.state,
           limit: params.limit,
           cursor: params.cursor,
