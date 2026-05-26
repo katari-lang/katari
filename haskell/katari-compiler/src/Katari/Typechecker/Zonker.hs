@@ -345,6 +345,29 @@ walkPattern = \case
               typeOf = typeOf'
             }
       )
+  PatternType TypePattern {typeTag, inner, sourceSpan, typeOf} -> do
+    inner' <- walkPattern inner
+    typeOf' <- zonkPatternTypedata sourceSpan typeOf
+    pure
+      ( PatternType
+          TypePattern
+            { typeTag = typeTag,
+              inner = inner',
+              sourceSpan = sourceSpan,
+              typeOf = typeOf'
+            }
+      )
+  PatternRecord RecordPattern {entries, sourceSpan, typeOf} -> do
+    entries' <- traverse (\(entryLabel, sub) -> (entryLabel,) <$> walkPattern sub) entries
+    typeOf' <- zonkPatternTypedata sourceSpan typeOf
+    pure
+      ( PatternRecord
+          RecordPattern
+            { entries = entries',
+              sourceSpan = sourceSpan,
+              typeOf = typeOf'
+            }
+      )
 
 -- | Resolve the @typeOf@ payload of a 'Constrained' pattern (a
 -- 'SemanticType Unresolved') to its 'Resolved' form for the 'Zonked'

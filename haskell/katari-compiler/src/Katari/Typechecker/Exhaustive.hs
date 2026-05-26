@@ -104,6 +104,15 @@ data CtorTag where
   CtorTagLitBool :: Bool -> CtorTag
   CtorTagNull :: CtorTag
   CtorTagTupleN :: Int -> CtorTag
+  -- | Runtime type-guard pattern (@integer(p)@, @record(p)@, etc.). Arity
+  -- is 1 (the inner pattern). The signature is never complete on its own;
+  -- a wildcard arm is required for exhaustiveness.
+  CtorTagType :: AST.TypePatternTag -> CtorTag
+  -- | Record pattern: the keys are stored sorted so two patterns over the
+  -- same key set collapse to the same tag (and one becomes redundant w.r.t.
+  -- the other). Arity equals the number of keys; sub-patterns appear in
+  -- key-sorted order. Never forms a complete signature.
+  CtorTagRecordKeys :: [Text] -> CtorTag
   deriving (Eq, Ord, Show)
 
 -- | Simplified pattern head. Variables and wildcards become 'PatHeadWildcard'.
@@ -251,7 +260,24 @@ getSubFieldTypes tag columnType idResult zonkResult = case tag of
   CtorTagTupleN _ -> case columnType of
     SemanticTypeTuple tupleTypes -> tupleTypes
     _ -> []
+  CtorTagType narrowTag -> [typePatternTagToResolved narrowTag]
+  CtorTagRecordKeys keys ->
+    let valueType = case columnType of
+          SemanticTypeRecord v -> v
+          _ -> SemanticTypeUnknown
+     in replicate (length keys) valueType
   _ -> []
+
+-- | The narrowed semantic type associated with a runtime type-guard tag.
+-- Mirrors 'typePatternTagToSemantic' but at the 'Resolved' phase.
+typePatternTagToResolved :: AST.TypePatternTag -> SemanticType Resolved
+typePatternTagToResolved = \case
+  AST.TypePatternTagInteger -> SemanticTypeInteger
+  AST.TypePatternTagNumber -> SemanticTypeNumber
+  AST.TypePatternTagString -> SemanticTypeString
+  AST.TypePatternTagBoolean -> SemanticTypeBoolean
+  AST.TypePatternTagAgent -> SemanticTypeFunctionAny
+  AST.TypePatternTagRecord -> SemanticTypeRecord SemanticTypeUnknown
 
 -- ===========================================================================
 -- Complete-signature check
@@ -308,6 +334,12 @@ tagCompatibleWithType tag ty idResult zonkResult = case ty of
           Just cd -> cd.constructorTypeId == tid
           Nothing -> False
       _ -> False
+    -- Runtime type-guard patterns are always compatible: the guard runs
+    -- at runtime against any value, narrowing from whatever the static
+    -- type is. We don't try to detect "guard against a type that's
+    -- statically impossible" — that's a separate (and tricky) check.
+    CtorTagType _ -> True
+    CtorTagRecordKeys _ -> True
 
 isCompleteSig :: [CtorTag] -> SemanticType Resolved -> IdentifierResult -> ZonkResult -> Bool
 isCompleteSig seen ty idResult zonkResult = case ty of
@@ -380,6 +412,13 @@ patternToHead = \case
               map (patternToHead . snd) $
                 sortBy (comparing ((.text) . fst)) qp.parameters
          in PatHeadCtor (CtorTagData cid) sortedSubs
+  AST.PatternType tp ->
+    PatHeadCtor (CtorTagType tp.typeTag) [patternToHead tp.inner]
+  AST.PatternRecord rp ->
+    let sortedEntries = sortBy (comparing fst) rp.entries
+        sortedKeys = map fst sortedEntries
+        sortedSubs = map (patternToHead . snd) sortedEntries
+     in PatHeadCtor (CtorTagRecordKeys sortedKeys) sortedSubs
 
 literalTag :: LiteralValue -> CtorTag
 literalTag = \case
@@ -447,6 +486,27 @@ renderPatHead idResult zonkResult = \case
      in if null subs
           then ctorName <> "()"
           else ctorName <> "(" <> Text.intercalate ", " (map (renderPatHead idResult zonkResult) subs) <> ")"
+  PatHeadCtor (CtorTagType tag) subs ->
+    typePatternTagName tag
+      <> "("
+      <> Text.intercalate ", " (map (renderPatHead idResult zonkResult) subs)
+      <> ")"
+  PatHeadCtor (CtorTagRecordKeys keys) subs ->
+    let renderedSubs = map (renderPatHead idResult zonkResult) subs
+        zipped =
+          if length keys == length renderedSubs
+            then zipWith (\k v -> k <> " = " <> v) keys renderedSubs
+            else renderedSubs -- defensive — shouldn't happen
+     in "{ " <> Text.intercalate ", " zipped <> " }"
+
+typePatternTagName :: AST.TypePatternTag -> Text
+typePatternTagName = \case
+  AST.TypePatternTagInteger -> "integer"
+  AST.TypePatternTagNumber -> "number"
+  AST.TypePatternTagString -> "string"
+  AST.TypePatternTagBoolean -> "boolean"
+  AST.TypePatternTagAgent -> "agent"
+  AST.TypePatternTagRecord -> "record"
 
 -- ===========================================================================
 -- Match checking

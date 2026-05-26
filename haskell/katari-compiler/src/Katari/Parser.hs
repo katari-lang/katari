@@ -1638,12 +1638,83 @@ parsePattern :: Parser (Pattern Parsed)
 parsePattern =
   label "pattern" $
     choice
-      [ try parseQualifiedConstructorPattern,
+      [ try parseTypePattern,
+        parseRecordPattern,
+        try parseQualifiedConstructorPattern,
         parseVariablePattern,
         parseWildcardPattern,
         parseTupleOrGroupedPattern,
         parseLiteralPattern
       ]
+
+-- | @integer(p)@ / @number(p)@ / @string(p)@ / @boolean(p)@ / @agent(p)@ /
+-- @record(p)@. Each form is a runtime type guard that narrows the matched
+-- value to the named primitive / structural family and recursively
+-- matches the inner pattern against the narrowed value.
+--
+-- Wrapped in 'try' because the leading keyword/identifier overlaps with
+-- type-annotation syntax in other pattern positions; we only commit when
+-- the @(@ follows.
+parseTypePattern :: Parser (Pattern Parsed)
+parseTypePattern = parseWithSpan $ do
+  tag <- try $ do
+    t <-
+      choice
+        [ TypePatternTagInteger <$ parseKeyword KeywordInteger,
+          TypePatternTagNumber <$ parseKeyword KeywordNumber,
+          TypePatternTagString <$ parseKeyword KeywordString,
+          TypePatternTagBoolean <$ parseKeyword KeywordBoolean,
+          TypePatternTagAgent <$ parseKeyword KeywordAgent,
+          TypePatternTagRecord <$ parseRecordTagIdentifier
+        ]
+    void $ MP.lookAhead (parsePunctuation PunctuationLeftParenthesis)
+    pure t
+  parsePunctuation PunctuationLeftParenthesis
+  innerPattern <- parsePattern
+  parsePunctuation PunctuationRightParenthesis
+  pure $ \sourceSpan ->
+    PatternType
+      TypePattern
+        { typeTag = tag,
+          inner = innerPattern,
+          sourceSpan = sourceSpan,
+          typeOf = ()
+        }
+  where
+    parseRecordTagIdentifier =
+      parseKatariTokenWith $ \case
+        KatariTokenIdentifier "record" -> Just ()
+        _ -> Nothing
+
+-- | @{ label = pat, ... }@ record pattern. Subset semantics: each listed
+-- label must be present in the subject record; other entries are ignored.
+parseRecordPattern :: Parser (Pattern Parsed)
+parseRecordPattern = do
+  -- Same lookahead trick as 'parseRecordLiteralExpression': commit only
+  -- when we see @{ identifier =@. A block-shaped @{ ... }@ never starts
+  -- with @ident =@ at the top, so this is unambiguous.
+  _ <- MP.lookAhead . try $ do
+    parsePunctuation PunctuationLeftBrace
+    _ <- parseIdentifier
+    parsePunctuation PunctuationEquals
+  parseWithSpan $ do
+    parsePunctuation PunctuationLeftBrace
+    entries <- parseRecordPatternEntry `sepEndBy1` parseComma
+    parsePunctuation PunctuationRightBrace
+    pure $ \sourceSpan ->
+      PatternRecord
+        RecordPattern
+          { entries = entries,
+            sourceSpan = sourceSpan,
+            typeOf = ()
+          }
+
+parseRecordPatternEntry :: Parser (Text, Pattern Parsed)
+parseRecordPatternEntry = do
+  entryLabel <- parseIdentifier
+  parsePunctuation PunctuationEquals
+  innerPattern <- parsePattern
+  pure (entryLabel, innerPattern)
 
 -- | @ctor(...)@ or @module.ctor(...)@. Use @try@ to peek the prefix
 -- (@Ident [.Ident]?@) plus the opening paren before committing; that way a

@@ -65,6 +65,8 @@ import Katari.AST
     Phase (Zonked),
     QualifiedConstructorPattern (..),
     QualifiedReferenceExpression (..),
+    RecordExpression (..),
+    RecordPattern (..),
     RequestDeclaration (..),
     RequestHandler (..),
     ReturnStatement (..),
@@ -75,6 +77,7 @@ import Katari.AST
     TemplateExpressionElement (..),
     TupleExpression (..),
     TuplePattern (..),
+    TypePattern (..),
     UnaryOperatorExpression (..),
     VariableExpression (..),
     VariablePattern (..),
@@ -308,6 +311,12 @@ hoverFromPattern idResult zonkResult position = \case
               hoverDefinitionSpan = Nothing,
               hoverQualifiedName = Nothing
             }
+  PatternType tp
+    | spanContains tp.sourceSpan position ->
+        hoverFromPattern idResult zonkResult position tp.inner
+  PatternRecord rp
+    | spanContains rp.sourceSpan position ->
+        listToMaybe (mapMaybe (hoverFromPattern idResult zonkResult position . snd) rp.entries)
   _ -> Nothing
 
 hoverFromVariableRef :: IdentifierResult -> ZonkResult -> NameRef Zonked VariableRef -> Maybe HoverInfo
@@ -437,6 +446,8 @@ hoverFromExpression idResult zonkResult position expression
           `orElse` hoverFromBlock idResult zonkResult position he.body
       ExpressionQualifiedReference qre ->
         hoverFromVariableRef idResult zonkResult qre.target
+      ExpressionRecord re ->
+        listToMaybe (mapMaybe (hoverFromExpression idResult zonkResult position . snd) re.entries)
       ExpressionLiteral _ -> Nothing -- fall through to generic typeOf hover
 
 -- | Fall-back hover that just surfaces an expression's inferred type.
@@ -460,6 +471,7 @@ zonkedExpressionType = \case
   ExpressionVariable e -> e.typeOf
   ExpressionTuple e -> e.typeOf
   ExpressionArray e -> e.typeOf
+  ExpressionRecord e -> e.typeOf
   ExpressionCall e -> e.typeOf
   ExpressionBinaryOperator e -> e.typeOf
   ExpressionUnaryOperator e -> e.typeOf

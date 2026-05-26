@@ -595,6 +595,14 @@ data Pattern (phase :: Phase) where
   PatternWildcard :: WildcardPattern phase -> Pattern phase
   -- | @42@ / @\"foo\"@ / @true@ — refutable; rejected in @let@-context.
   PatternLiteral :: LiteralPattern phase -> Pattern phase
+  -- | @integer(p)@ / @string(p)@ / @record(p)@ etc. — narrowing type guard.
+  -- The matched value must have the given runtime type; the inner @p@ is
+  -- then matched against the narrowed value.
+  PatternType :: TypePattern phase -> Pattern phase
+  -- | @{ label = p, ... }@ — record pattern. Matches a record value whose
+  -- entries cover at least the listed labels (subset match); each inner
+  -- pattern is matched against the corresponding record value.
+  PatternRecord :: RecordPattern phase -> Pattern phase
 
 instance HasSourceSpan (Pattern phase) where
   sourceSpanOf = \case
@@ -603,6 +611,8 @@ instance HasSourceSpan (Pattern phase) where
     PatternTuple pattern' -> pattern'.sourceSpan
     PatternWildcard pattern' -> pattern'.sourceSpan
     PatternLiteral pattern' -> pattern'.sourceSpan
+    PatternType pattern' -> pattern'.sourceSpan
+    PatternRecord pattern' -> pattern'.sourceSpan
 
 -- | @(p1, p2, ...)@ tuple pattern. Each element is matched positionally.
 data TuplePattern (phase :: Phase) = TuplePattern
@@ -687,6 +697,46 @@ data LiteralPattern (phase :: Phase) = LiteralPattern
   }
 
 instance HasSourceSpan (LiteralPattern phase) where
+  sourceSpanOf pattern' = pattern'.sourceSpan
+
+-- | Identifies which runtime type a 'TypePattern' guards against. Each
+-- tag corresponds to a primitive / structural family the runtime can
+-- check by inspecting a value's tag (no parameterisation — e.g. @record@
+-- means \"any record\", not \"@record[T]@ for a specific @T@\").
+data TypePatternTag where
+  TypePatternTagInteger :: TypePatternTag
+  TypePatternTagNumber :: TypePatternTag
+  TypePatternTagString :: TypePatternTag
+  TypePatternTagBoolean :: TypePatternTag
+  TypePatternTagAgent :: TypePatternTag
+  TypePatternTagRecord :: TypePatternTag
+
+-- | @integer(p)@ / @number(p)@ / @string(p)@ / @boolean(p)@ / @agent(p)@ /
+-- @record(p)@. Refutable — checks the runtime type tag of the subject and
+-- then matches @p@ against the narrowed value. The bound variables inside
+-- @p@ get the corresponding narrowed type (e.g. @integer(x)@ binds @x@
+-- with type @integer@).
+data TypePattern (phase :: Phase) = TypePattern
+  { typeTag :: TypePatternTag,
+    inner :: Pattern phase,
+    sourceSpan :: SourceSpan,
+    typeOf :: PatternType phase
+  }
+
+instance HasSourceSpan (TypePattern phase) where
+  sourceSpanOf pattern' = pattern'.sourceSpan
+
+-- | @{ label = p, ... }@ — subset match against a record value. Each
+-- listed @label@ must be present in the subject; its associated value is
+-- then matched against @p@. Other entries are ignored (homogeneous map
+-- semantics, mirrors how 'RecordExpression' constructs records).
+data RecordPattern (phase :: Phase) = RecordPattern
+  { entries :: [(Text, Pattern phase)],
+    sourceSpan :: SourceSpan,
+    typeOf :: PatternType phase
+  }
+
+instance HasSourceSpan (RecordPattern phase) where
   sourceSpanOf pattern' = pattern'.sourceSpan
 
 -- ---------------------------------------------------------------------------
@@ -1605,6 +1655,20 @@ deriving instance (ShowPhase phase) => Show (QualifiedConstructorPattern phase)
 deriving instance (EqPhase phase) => Eq (LiteralPattern phase)
 
 deriving instance (ShowPhase phase) => Show (LiteralPattern phase)
+
+deriving instance Eq TypePatternTag
+
+deriving instance Ord TypePatternTag
+
+deriving instance Show TypePatternTag
+
+deriving instance (EqPhase phase) => Eq (TypePattern phase)
+
+deriving instance (ShowPhase phase) => Show (TypePattern phase)
+
+deriving instance (EqPhase phase) => Eq (RecordPattern phase)
+
+deriving instance (ShowPhase phase) => Show (RecordPattern phase)
 
 deriving instance (EqPhase phase) => Eq (SyntacticType phase)
 

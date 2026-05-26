@@ -7,7 +7,7 @@
 // checks should make this unreachable.
 
 import { match, P } from "ts-pattern";
-import type { LiteralValue, MatchPattern } from "../ir/types.js";
+import type { LiteralValue, MatchPattern, TypePatternTag } from "../ir/types.js";
 import type { Value } from "./value.js";
 
 /** Returns a flat Record<varId, Value> on match, or null on miss. */
@@ -54,6 +54,40 @@ function tryMatchInto(
       }
       return true;
     })
+    .with({ kind: "matchPatternTypeGuard" }, (p) => {
+      const [tag, inner] = p.body;
+      if (!matchesTypeTag(tag, value)) return false;
+      return tryMatchInto(inner, value, bindings);
+    })
+    .with({ kind: "matchPatternRecord" }, (p) => {
+      if (value.kind !== "record") return false;
+      for (const [entryKey, sub] of p.body) {
+        const fv = value.entries[entryKey];
+        if (fv === undefined) return false;
+        if (!tryMatchInto(sub, fv, bindings)) return false;
+      }
+      return true;
+    })
+    .exhaustive();
+}
+
+// Returns true when `value`'s runtime kind matches the type-guard `tag`.
+// `integer` requires the underlying number to be integral (Number.isInteger);
+// `number` accepts any number value. The `agent` tag accepts closure /
+// agent-ref values (both `closure` and `agent` runtime kinds).
+function matchesTypeTag(tag: TypePatternTag, value: Value): boolean {
+  return match(tag)
+    .with({ kind: "typePatternTagInteger" }, () =>
+      value.kind === "number" && Number.isInteger(value.value),
+    )
+    .with({ kind: "typePatternTagNumber" }, () => value.kind === "number")
+    .with({ kind: "typePatternTagString" }, () => value.kind === "string")
+    .with({ kind: "typePatternTagBoolean" }, () => value.kind === "boolean")
+    .with(
+      { kind: "typePatternTagAgent" },
+      () => value.kind === "closure" || value.kind === "agentLiteral",
+    )
+    .with({ kind: "typePatternTagRecord" }, () => value.kind === "record")
     .exhaustive();
 }
 

@@ -1462,6 +1462,27 @@ lowerPattern = \case
     let fields = map fst pairs
         locals = concatMap snd pairs
     pure (MatchPatternConstructor ctorQName fields, locals)
+  AST.PatternType tp -> do
+    (innerPat, innerLocals) <- lowerPattern tp.inner
+    pure (MatchPatternTypeGuard (typePatternTagToIR tp.typeTag) innerPat, innerLocals)
+  AST.PatternRecord rp -> do
+    pairs <- forM rp.entries $ \(entryLabel, sub) -> do
+      (subPat, subLocals) <- lowerPattern sub
+      pure ((entryLabel, subPat), subLocals)
+    let entries = map fst pairs
+        locals = concatMap snd pairs
+    pure (MatchPatternRecord entries, locals)
+
+-- | AST→IR translation for runtime-type-pattern tags. Both enumerations
+-- have the same shape; this exists purely as a module boundary.
+typePatternTagToIR :: AST.TypePatternTag -> TypePatternTag
+typePatternTagToIR = \case
+  AST.TypePatternTagInteger -> TypePatternTagInteger
+  AST.TypePatternTagNumber -> TypePatternTagNumber
+  AST.TypePatternTagString -> TypePatternTagString
+  AST.TypePatternTagBoolean -> TypePatternTagBoolean
+  AST.TypePatternTagAgent -> TypePatternTagAgent
+  AST.TypePatternTagRecord -> TypePatternTagRecord
 
 -- | AST and IR share 'LiteralValue' (defined in 'Katari.Common'), so
 -- lowering is the identity. Kept as an alias for call sites that read

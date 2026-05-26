@@ -105,11 +105,17 @@ describe("value-codec", () => {
     expect(rt(v)).toEqual(v);
   });
 
-  it("rejects a discriminator-less object", () => {
-    // Every object-shaped Value is either a tagged ctor instance or a
-    // callable reference; a bare object means the wire violated the
-    // schema and we want to surface that at the boundary.
-    expect(() => valueFromRaw({ x: 1, y: 2 })).toThrow(RawValueDecodeError);
+  it("decodes a discriminator-less object as a record (Plan D fallback)", () => {
+    // Plan D: discriminator-less objects map to the homogeneous `record`
+    // value variant. Tagged ctor / callable / secret are routed by their
+    // respective discriminators; bare objects fall through here.
+    expect(valueFromRaw({ x: 1, y: 2 })).toEqual({
+      kind: "record",
+      entries: {
+        x: { kind: "number", value: 1 },
+        y: { kind: "number", value: 2 },
+      },
+    });
   });
 
   it("rejects malformed $agent", () => {

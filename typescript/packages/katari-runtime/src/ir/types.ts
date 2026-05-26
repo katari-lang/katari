@@ -229,7 +229,31 @@ export type MatchPattern =
       // Multi-arg GADT positional ctor → JSON array under `body`.
       body: [QualifiedName, [string, MatchPattern][]];
     }
-  | { kind: "matchPatternTuple"; body: MatchPattern[] };
+  | { kind: "matchPatternTuple"; body: MatchPattern[] }
+  | {
+      kind: "matchPatternTypeGuard";
+      // [tag, inner]: tag picks the runtime-type check (integer / record /
+      // ...); after the guard succeeds the inner pattern runs against the
+      // narrowed value.
+      body: [TypePatternTag, MatchPattern];
+    }
+  | {
+      // Subset match: each listed key must exist in the subject record,
+      // and its value must match the sub-pattern. Other entries are
+      // ignored.
+      kind: "matchPatternRecord";
+      body: [string, MatchPattern][];
+    };
+
+// Runtime-checkable type tag. JSON tag follows the same lowerHead
+// convention as the rest of the IR (sumOptions in Haskell).
+export type TypePatternTag =
+  | { kind: "typePatternTagInteger" }
+  | { kind: "typePatternTagNumber" }
+  | { kind: "typePatternTagString" }
+  | { kind: "typePatternTagBoolean" }
+  | { kind: "typePatternTagAgent" }
+  | { kind: "typePatternTagRecord" };
 
 // ─── MatchArm (irOptions → flat record) ──────────────────────────────────────
 

@@ -44,7 +44,7 @@ module Katari.Typechecker.ConstraintGenerator
   )
 where
 
-import Control.Monad (replicateM, unless)
+import Control.Monad (forM, replicateM, unless)
 import Control.Monad.Reader (ReaderT, asks, local, runReaderT)
 import Control.Monad.State.Strict (State, gets, modify, runState)
 import Control.Monad.Trans (lift)
@@ -178,6 +178,13 @@ data ReasonKind where
   -- subtype-constrained against the literal's fresh value-type var.
   ReasonKindRecordValue :: ReasonKind
   ReasonKindConstructorPattern :: ReasonKind
+  -- | Type-guard pattern (@integer(p)@ etc.) narrows the subject's type
+  -- to the named primitive / structural family. Attached to the
+  -- constraint that flows the narrowed type into the inner pattern.
+  ReasonKindTypeGuardPattern :: ReasonKind
+  -- | Record pattern's homogeneous value-type constraint: each inner
+  -- entry pattern's type must agree on the record's V.
+  ReasonKindRecordPattern :: ReasonKind
   -- | Marker for structural breakdowns that originate inside the Solver
   -- (e.g. "all branches failed") and whose syntactic source cannot be
   -- pinned down. Since Diagnostics need some span, we attach the source
@@ -879,10 +886,60 @@ walkPattern maybeSubject = \case
             },
         patternResult
       )
+  PatternType TypePattern {typeTag, inner, sourceSpan} -> do
+    -- The runtime tag narrows the matched value to a concrete primitive
+    -- / structural family. The narrowed type is the inner pattern's
+    -- subject — variables bound under @inner@ will see this type.
+    let narrowedType = typePatternTagToSemantic typeTag
+    (inner', _) <- walkPattern (Just narrowedType) inner
+    pure
+      ( PatternType
+          TypePattern
+            { typeTag = typeTag,
+              inner = inner',
+              sourceSpan = sourceSpan,
+              typeOf = narrowedType
+            },
+        narrowedType
+      )
+  PatternRecord RecordPattern {entries, sourceSpan} -> do
+    -- All listed entry-patterns must agree on a single record value type
+    -- (record[V] is homogeneous). When a subject type is known, project
+    -- its V out via the linked helper so propagation can flow inwards.
+    valueType <- case maybeSubject of
+      Just subject -> projectRecordValueTypeLinked subject sourceSpan
+      Nothing -> freshTypeVar
+    entries' <-
+      forM entries $ \(entryLabel, entryPattern) -> do
+        (entryPattern', _) <- walkPattern (Just valueType) entryPattern
+        pure (entryLabel, entryPattern')
+    let patternType = SemanticTypeRecord valueType
+    pure
+      ( PatternRecord
+          RecordPattern
+            { entries = entries',
+              sourceSpan = sourceSpan,
+              typeOf = patternType
+            },
+        patternType
+      )
   where
     walkPatternField (label, sub) = do
       (sub', subType) <- walkPattern Nothing sub
       pure ((retagNameRef label, sub'), (label.text, subType))
+
+-- | Maps a runtime-type-pattern tag to the matching 'SemanticType'.
+-- For @record(p)@ we expose the record as @record[unknown]@ — the
+-- compiler can't statically know the inner value type at a narrowing
+-- point, so @unknown@ is the most informative bound.
+typePatternTagToSemantic :: TypePatternTag -> SemanticType Unresolved
+typePatternTagToSemantic = \case
+  TypePatternTagInteger -> SemanticTypeInteger
+  TypePatternTagNumber -> SemanticTypeNumber
+  TypePatternTagString -> SemanticTypeString
+  TypePatternTagBoolean -> SemanticTypeBoolean
+  TypePatternTagAgent -> SemanticTypeFunctionAny
+  TypePatternTagRecord -> SemanticTypeRecord SemanticTypeUnknown
 
 -- | Project the component subject types from a subject type for a tuple
 -- pattern of the given arity. For union subjects, only the tuple-shaped
@@ -937,6 +994,31 @@ projectTupleSubjectTypesLinked arity subjectType sourceSpan = case subjectType o
       (SemanticTypeTuple fresh)
       subjectType
       (ConstraintReason ReasonKindMatchArm sourceSpan)
+    pure fresh
+
+-- | Project the homogeneous value type @V@ out of a record-typed
+-- subject for a record-pattern match. Mirrors
+-- 'projectTupleSubjectTypesLinked': for an unknown / variable subject,
+-- allocates a fresh value-type var and emits
+-- @record[fresh] \<: subject@ so propagation can flow the subject's
+-- eventual @V@ down into entry patterns.
+projectRecordValueTypeLinked ::
+  SemanticType Unresolved ->
+  SourceSpan ->
+  CG (SemanticType Unresolved)
+projectRecordValueTypeLinked subjectType sourceSpan = case subjectType of
+  SemanticTypeRecord v -> pure v
+  SemanticTypeUnknown -> pure SemanticTypeUnknown
+  SemanticTypeUnion branches
+    | recordValueTypes <- [v | SemanticTypeRecord v <- branches],
+      not (null recordValueTypes) ->
+        pure (unionSemantic recordValueTypes)
+  _ -> do
+    fresh <- freshTypeVar
+    addTypeConstraint
+      (SemanticTypeRecord fresh)
+      subjectType
+      (ConstraintReason ReasonKindRecordPattern sourceSpan)
     pure fresh
 
 -- ---------------------------------------------------------------------------

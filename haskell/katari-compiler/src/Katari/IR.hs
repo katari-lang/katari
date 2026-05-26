@@ -56,6 +56,7 @@ module Katari.IR
     Handler (..),
     MatchArm (..),
     MatchPattern (..),
+    TypePatternTag (..),
 
     -- * Statement
     Statement (..),
@@ -685,7 +686,36 @@ data MatchPattern where
   MatchPatternConstructor :: QualifiedName -> [(Text, MatchPattern)] -> MatchPattern
   -- | Match a tuple positionally; recurse into each element.
   MatchPatternTuple :: [MatchPattern] -> MatchPattern
+  -- | Runtime-type guard. Matches if the subject's runtime tag is
+  -- compatible with 'tag' (e.g. @integer@ requires @value.kind ===
+  -- \"number\"@ AND the number is integral); then matches @inner@
+  -- against the (narrowed) value. The tag values mirror
+  -- 'AST.TypePatternTag'.
+  MatchPatternTypeGuard :: TypePatternTag -> MatchPattern -> MatchPattern
+  -- | Match a record value (subject must be of @kind \"record\"@). Each
+  -- listed entry's key must be present in the record; its value is then
+  -- matched against the entry's sub-pattern. Other keys are ignored
+  -- (subset match — record values are heterogeneous over keys).
+  MatchPatternRecord :: [(Text, MatchPattern)] -> MatchPattern
   deriving (Eq, Show, Generic)
+
+-- | Runtime-checkable type tag used by 'MatchPatternTypeGuard'. Mirrors
+-- 'AST.TypePatternTag' (kept as a separate type so the IR is independent
+-- of the AST module).
+data TypePatternTag where
+  TypePatternTagInteger :: TypePatternTag
+  TypePatternTagNumber :: TypePatternTag
+  TypePatternTagString :: TypePatternTag
+  TypePatternTagBoolean :: TypePatternTag
+  TypePatternTagAgent :: TypePatternTag
+  TypePatternTagRecord :: TypePatternTag
+  deriving (Eq, Show, Generic)
+
+instance ToJSON TypePatternTag where
+  toJSON = genericToJSON sumOptions
+
+instance FromJSON TypePatternTag where
+  parseJSON = genericParseJSON sumOptions
 
 instance ToJSON MatchPattern where
   toJSON = genericToJSON sumOptions

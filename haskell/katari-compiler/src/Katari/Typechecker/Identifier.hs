@@ -1493,6 +1493,8 @@ resolvePattern = \case
   PatternTuple parsedPattern -> PatternTuple <$> resolveTuplePattern parsedPattern
   PatternWildcard parsedPattern -> PatternWildcard <$> resolveWildcardPattern parsedPattern
   PatternLiteral parsedPattern -> PatternLiteral <$> resolveLiteralPattern parsedPattern
+  PatternType parsedPattern -> PatternType <$> resolveTypePattern parsedPattern
+  PatternRecord parsedPattern -> PatternRecord <$> resolveRecordPattern parsedPattern
 
 resolveVariablePattern :: VariablePattern Parsed -> Identifier (VariablePattern Identified)
 resolveVariablePattern VariablePattern {..} = do
@@ -1550,6 +1552,30 @@ resolveLiteralPattern LiteralPattern {..} =
   pure
     LiteralPattern
       { value = value,
+        sourceSpan = sourceSpan,
+        typeOf = ()
+      }
+
+resolveTypePattern :: TypePattern Parsed -> Identifier (TypePattern Identified)
+resolveTypePattern TypePattern {..} = do
+  inner' <- resolvePattern inner
+  pure
+    TypePattern
+      { typeTag = typeTag,
+        inner = inner',
+        sourceSpan = sourceSpan,
+        typeOf = ()
+      }
+
+resolveRecordPattern :: RecordPattern Parsed -> Identifier (RecordPattern Identified)
+resolveRecordPattern RecordPattern {..} = do
+  entries' <-
+    mapM
+      (\(entryLabel, entryPattern) -> (entryLabel,) <$> resolvePattern entryPattern)
+      entries
+  pure
+    RecordPattern
+      { entries = entries',
         sourceSpan = sourceSpan,
         typeOf = ()
       }
@@ -2240,6 +2266,8 @@ rejectPatternAnnotations = \case
   PatternQualifiedConstructor qp ->
     mapM_ (rejectPatternAnnotations . snd) qp.parameters
   PatternLiteral _ -> pure ()
+  PatternType tp -> rejectPatternAnnotations tp.inner
+  PatternRecord rp -> mapM_ (rejectPatternAnnotations . snd) rp.entries
 
 -- | A @for@ loop. Source expressions of in-bindings are resolved in the
 -- outer scope; the patterns and var-bindings introduce a fresh frame in which
