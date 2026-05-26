@@ -9,6 +9,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { CopyableId } from "@/components/ui/CopyableId";
 import { SpinnerOverlay } from "@/components/ui/Spinner";
+import { MetadataRow } from "@/components/ui/MetadataRow";
 import {
   RunStatusBadge,
   isTerminalState,
@@ -16,6 +17,7 @@ import {
 import { DelegationTreeGraph } from "@/components/domain/DelegationTreeGraph";
 import { ValueViewer } from "@/components/domain/ValueViewer";
 import { formatDateTime } from "@/lib/format";
+import { useSnapshotMessage } from "@/hooks/useSnapshotMessage";
 import type { ProjectId, RunId } from "@/api/types";
 
 const POLL_MS = 3_000;
@@ -57,18 +59,8 @@ export function RunDetailPage() {
     (run.state === "running" || run.state === "cancelling");
   const isLive = run !== undefined && !isTerminalState(run.state);
 
-  // Snapshot summary lookup: we show the snapshot's commit-message-like
-  // `message` rather than the UUID. Pulling from the cached snapshot
-  // list (shared with the picker on /agents) avoids fetching the full
-  // snapshot row just for one string.
-  const snapshotsQ = useQuery({
-    queryKey: ["snapshots", projectId],
-    queryFn: () =>
-      client.listSnapshots(projectId as ProjectId, { limit: 200 }),
-    enabled: typeof projectId === "string",
-  });
-  const snapshotMessage =
-    snapshotsQ.data?.snapshots.find((s) => s.id === run?.snapshotId)?.message;
+  const { getMessage } = useSnapshotMessage(projectId);
+  const snapshotMessage = getMessage(run?.snapshotId);
 
   // Live tree polling. Only fires while the run is in flight — once the
   // run reaches a terminal state, the tree has been deleted by the
@@ -146,14 +138,14 @@ export function RunDetailPage() {
               </CardHeader>
               <CardContent>
                 <dl className="space-y-2 text-sm">
-                  <Row label="ID" value={<CopyableId value={run.id} />} />
-                  <Row
+                  <MetadataRow label="ID" value={<CopyableId value={run.id} />} />
+                  <MetadataRow
                     label="Name"
                     value={
                       <span className="text-foreground">{run.name}</span>
                     }
                   />
-                  <Row
+                  <MetadataRow
                     label="Agent"
                     value={
                       <Link
@@ -166,7 +158,7 @@ export function RunDetailPage() {
                       </Link>
                     }
                   />
-                  <Row
+                  <MetadataRow
                     label="Snapshot"
                     value={
                       <Link
@@ -177,16 +169,16 @@ export function RunDetailPage() {
                       </Link>
                     }
                   />
-                  <Row
+                  <MetadataRow
                     label="Started"
                     value={formatDateTime(run.createdAt)}
                   />
-                  <Row
+                  <MetadataRow
                     label="Updated"
                     value={formatDateTime(run.updatedAt)}
                   />
                   {run.cancelReason !== null && (
-                    <Row
+                    <MetadataRow
                       label="Cancel reason"
                       value={
                         <span className="text-foreground">
@@ -243,17 +235,6 @@ export function RunDetailPage() {
           </motion.div>
         )}
       </PageContent>
-    </div>
-  );
-}
-
-function Row({ label, value }: { label: string; value: React.ReactNode }) {
-  return (
-    <div className="flex items-baseline justify-between gap-3">
-      <dt className="text-xs uppercase tracking-wider text-subtle-foreground">
-        {label}
-      </dt>
-      <dd className="text-right text-foreground">{value}</dd>
     </div>
   );
 }

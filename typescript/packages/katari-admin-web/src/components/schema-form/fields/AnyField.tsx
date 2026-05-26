@@ -1,7 +1,6 @@
 import { useState } from "react";
-import { useTheme } from "next-themes";
-import Editor from "@monaco-editor/react";
 import { cn } from "@/lib/cn";
+import { JsonEditor } from "@/components/ui/JsonEditor";
 import { StringField } from "./StringField";
 import { NumberField } from "./NumberField";
 import { BooleanField } from "./BooleanField";
@@ -99,9 +98,8 @@ export function AnyField({
 }
 
 /**
- * Inline JSON editor for the "json" branch — same affordances as
- * UnknownField but kept local so AnyField doesn't import the larger
- * Monaco wrapper transitively when it's not needed.
+ * Inline JSON editor for the "json" branch — delegates to the shared
+ * JsonEditor component with the `bg-card` variant.
  */
 function AnyJsonEditor({
   value,
@@ -110,46 +108,12 @@ function AnyJsonEditor({
   value: unknown;
   onChange: (v: unknown) => void;
 }) {
-  const { resolvedTheme } = useTheme();
-  const [text, setText] = useState(() => safeStringify(value));
-  const [error, setError] = useState<string | null>(null);
-
   return (
-    <div className="space-y-1">
-      <div className="overflow-hidden border border-border bg-card">
-        <Editor
-          height="160px"
-          defaultLanguage="json"
-          theme={resolvedTheme === "dark" ? "vs-dark" : "light"}
-          value={text}
-          options={{
-            minimap: { enabled: false },
-            fontSize: 13,
-            lineNumbers: "off",
-            scrollBeyondLastLine: false,
-            wordWrap: "on",
-          }}
-          onChange={(next) => {
-            const t = next ?? "";
-            setText(t);
-            try {
-              onChange(t.trim() === "" ? null : JSON.parse(t));
-              setError(null);
-            } catch (e) {
-              setError(e instanceof Error ? e.message : "Invalid JSON");
-            }
-          }}
-        />
-      </div>
-      {error !== null && <p className="text-xs text-danger">{error}</p>}
-    </div>
+    <JsonEditor
+      value={value}
+      onChange={onChange}
+      className="bg-card"
+      fallback="{}"
+    />
   );
-}
-
-function safeStringify(v: unknown): string {
-  try {
-    return JSON.stringify(v, null, 2);
-  } catch {
-    return "{}";
-  }
 }

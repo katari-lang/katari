@@ -9,6 +9,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { CopyableId } from "@/components/ui/CopyableId";
 import { SpinnerOverlay } from "@/components/ui/Spinner";
+import { MetadataRow } from "@/components/ui/MetadataRow";
 import { Badge } from "@/components/ui/Badge";
 import { SchemaForm } from "@/components/schema-form/SchemaForm";
 import { ValueViewer } from "@/components/domain/ValueViewer";
@@ -17,6 +18,7 @@ import {
   isNeverSchema,
   type JsonSchema,
 } from "@/components/schema-form/schema-utils";
+import { useSnapshotMessage } from "@/hooks/useSnapshotMessage";
 import type {
   EscalationId,
   EscalationState,
@@ -66,10 +68,8 @@ export function EscalationDetailPage() {
     (a) => a.qualifiedName === escalation?.agentDefId,
   );
 
-  // Related-resource lookups so we can show human-readable names in the
-  // Context card (= run name + snapshot message) instead of UUIDs.
-  // Both share react-query caches with other pages (RunsPage / pickers)
-  // so the cost is one in-flight request at most per page load.
+  // Run name lookup so the Context card shows a human-readable name
+  // rather than the root-delegation UUID.
   const runQ = useQuery({
     queryKey: ["run", escalation?.rootDelegationId],
     queryFn: () =>
@@ -80,15 +80,8 @@ export function EscalationDetailPage() {
     enabled:
       typeof projectId === "string" && escalation !== undefined,
   });
-  const snapshotsQ = useQuery({
-    queryKey: ["snapshots", projectId],
-    queryFn: () =>
-      client.listSnapshots(projectId as ProjectId, { limit: 200 }),
-    enabled: typeof projectId === "string",
-  });
-  const snapshotMessage = snapshotsQ.data?.snapshots.find(
-    (s) => s.id === escalation?.snapshotId,
-  )?.message;
+  const { getMessage } = useSnapshotMessage(projectId);
+  const snapshotMessage = getMessage(escalation?.snapshotId);
   const runName = runQ.data?.run.name;
 
   const answer = useMutation({
@@ -271,11 +264,11 @@ export function EscalationDetailPage() {
               </CardHeader>
               <CardContent>
                 <dl className="space-y-3 text-sm">
-                  <Row
+                  <MetadataRow
                     label="ID"
                     value={<CopyableId value={escalation.id} />}
                   />
-                  <Row
+                  <MetadataRow
                     label="Request"
                     value={
                       <Link
@@ -288,7 +281,7 @@ export function EscalationDetailPage() {
                       </Link>
                     }
                   />
-                  <Row
+                  <MetadataRow
                     label="Run"
                     value={
                       <Link
@@ -299,7 +292,7 @@ export function EscalationDetailPage() {
                       </Link>
                     }
                   />
-                  <Row
+                  <MetadataRow
                     label="Snapshot"
                     value={
                       <Link
@@ -310,7 +303,7 @@ export function EscalationDetailPage() {
                       </Link>
                     }
                   />
-                  <Row
+                  <MetadataRow
                     label="Created"
                     value={formatDateTime(escalation.createdAt)}
                   />
@@ -338,17 +331,6 @@ export function EscalationDetailPage() {
           </motion.div>
         )}
       </PageContent>
-    </div>
-  );
-}
-
-function Row({ label, value }: { label: string; value: React.ReactNode }) {
-  return (
-    <div className="flex items-baseline justify-between gap-3">
-      <dt className="text-xs uppercase tracking-wider text-subtle-foreground">
-        {label}
-      </dt>
-      <dd className="text-right text-foreground">{value}</dd>
     </div>
   );
 }

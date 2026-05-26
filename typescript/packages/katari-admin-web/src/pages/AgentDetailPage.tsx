@@ -17,9 +17,11 @@ import { CopyableId } from "@/components/ui/CopyableId";
 import { Input } from "@/components/ui/Input";
 import { Label } from "@/components/ui/Label";
 import { SpinnerOverlay } from "@/components/ui/Spinner";
+import { MetadataRow } from "@/components/ui/MetadataRow";
 import { SchemaForm } from "@/components/schema-form/SchemaForm";
 import { ValueViewer } from "@/components/domain/ValueViewer";
 import type { JsonSchema } from "@/components/schema-form/schema-utils";
+import { useSnapshotMessage } from "@/hooks/useSnapshotMessage";
 import type { ProjectId, SnapshotId } from "@/api/types";
 import type { RawValue } from "@katari-lang/runtime";
 
@@ -51,17 +53,8 @@ export function AgentDetailPage() {
   const agent = data?.agents.find((a) => a.qualifiedName === qualifiedName);
   const resolvedSnapshotId = data?.snapshotId;
 
-  // Snapshot summary lookup — see RunDetailPage for the rationale on
-  // pulling from the cached list rather than fetching the full row.
-  const snapshotsQ = useQuery({
-    queryKey: ["snapshots", projectId],
-    queryFn: () =>
-      client.listSnapshots(projectId as ProjectId, { limit: 200 }),
-    enabled: typeof projectId === "string",
-  });
-  const snapshotMessage = snapshotsQ.data?.snapshots.find(
-    (s) => s.id === resolvedSnapshotId,
-  )?.message;
+  const { getMessage } = useSnapshotMessage(projectId);
+  const snapshotMessage = getMessage(resolvedSnapshotId);
 
   // Operator-supplied run label. Empty = let the server pick a default
   // (typically `"<qualifiedName> @ HH:mm"`), so the placeholder previews
@@ -179,12 +172,12 @@ export function AgentDetailPage() {
               </CardHeader>
               <CardContent>
                 <dl className="space-y-2 text-sm">
-                  <Row
+                  <MetadataRow
                     label="ID"
                     value={<CopyableId value={agent.qualifiedName} />}
                   />
                   {resolvedSnapshotId !== undefined && (
-                    <Row
+                    <MetadataRow
                       label="Snapshot"
                       value={
                         <Link
@@ -219,17 +212,6 @@ function defaultRunNamePreview(qualifiedName: string | undefined): string {
   const h = String(now.getHours()).padStart(2, "0");
   const m = String(now.getMinutes()).padStart(2, "0");
   return `${qualifiedName ?? "agent"} @ ${h}:${m}`;
-}
-
-function Row({ label, value }: { label: string; value: React.ReactNode }) {
-  return (
-    <div className="flex items-baseline justify-between gap-3">
-      <dt className="text-xs uppercase tracking-wider text-subtle-foreground">
-        {label}
-      </dt>
-      <dd className="text-right text-foreground">{value}</dd>
-    </div>
-  );
 }
 
 function ReturnsCard({
