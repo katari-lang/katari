@@ -12,8 +12,6 @@ module Katari.Cli.Escalation
   )
 where
 
-import qualified Data.Aeson as Aeson
-import qualified Data.ByteString.Lazy.Char8 as LC8
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Katari.Api.Client as Api
@@ -102,7 +100,7 @@ runList o = do
 runAnswer :: AnswerOptions -> IO ()
 runAnswer o = do
   client <- mkClient o.ansApiUrl
-  val <- case Aeson.eitherDecode (LC8.pack (Text.unpack o.ansValue)) of
+  val <- case Common.decodeJsonText o.ansValue of
     Right v -> pure v
     Left err -> die ("--value is not valid JSON: " <> err)
   ok <- Api.answerEscalation client o.ansId val

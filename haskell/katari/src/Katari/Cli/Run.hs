@@ -190,7 +190,7 @@ die :: String -> IO a
 die = Common.dieIn "run"
 
 decodeArgsJson :: Text -> IO (Map Text Aeson.Value)
-decodeArgsJson s = case Aeson.eitherDecode (LC8.pack (Text.unpack s)) of
+decodeArgsJson s = case Common.decodeJsonText s of
   Right (Aeson.Object o) ->
     pure (Map.fromList [(AesonKey.toText k, v) | (k, v) <- AesonKM.toList o])
   Right _ -> die "--args must be a JSON object"

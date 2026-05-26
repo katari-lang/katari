@@ -59,6 +59,18 @@ async function request<T>(
   } else {
     parsed = await res.text().catch(() => undefined);
   }
+  // Auto-logout on 401: clear the stored API key and bounce to /login
+  // so the user sees the login form instead of silent failures.
+  // Skip if we're already on /login to avoid an infinite redirect loop.
+  if (
+    res.status === 401 &&
+    typeof window !== "undefined" &&
+    window.location.pathname !== "/login"
+  ) {
+    window.localStorage.removeItem("katari-admin.apiKey");
+    window.location.href = "/login";
+  }
+
   if (!res.ok) {
     const message =
       parsed !== null && typeof parsed === "object" && "error" in parsed

@@ -38,6 +38,14 @@ export interface SubprocessSidecarOptions {
   shutdownGraceMs?: number;
 }
 
+/** Env vars that must never leak to sidecar child processes. */
+const FILTERED_ENV_KEYS = new Set([
+  "DATABASE_URL",
+  "KATARI_SECRET_KEY",
+  "KATARI_API_KEY",
+  "KATARI_DB_URL",
+]);
+
 export class SubprocessSidecar implements Sidecar {
   private child: ChildProcess | null = null;
   private rl: ReadlineInterface | null = null;
@@ -48,9 +56,12 @@ export class SubprocessSidecar implements Sidecar {
   async start(): Promise<void> {
     if (this.child !== null) return;
     const nodeBin = this.opts.nodeBin ?? process.execPath;
+    const baseEnv = Object.fromEntries(
+      Object.entries(process.env).filter(([k]) => !FILTERED_ENV_KEYS.has(k)),
+    );
     const child = spawn(nodeBin, [this.opts.bundlePath], {
       stdio: ["pipe", "pipe", "pipe"],
-      env: { ...process.env, ...this.opts.env },
+      env: { ...baseEnv, ...this.opts.env },
     });
     this.child = child;
 

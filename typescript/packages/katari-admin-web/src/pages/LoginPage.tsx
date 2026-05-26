@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from "react";
+import React, { useState } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
 import { motion } from "framer-motion";
 import { ApiError, createApiClient } from "@/api/client";
@@ -7,13 +7,6 @@ import { Logo } from "@/components/shell/Logo";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { Label } from "@/components/ui/Label";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/Card";
 
 export function LoginPage() {
   const navigate = useNavigate();
@@ -23,7 +16,7 @@ export function LoginPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  async function handleSubmit(e: FormEvent) {
+  async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     setError(null);
     setLoading(true);
@@ -31,8 +24,12 @@ export function LoginPage() {
       const client = createApiClient({ baseUrl, apiKey: apiKey.trim() });
       await client.listProjects({ limit: 1 });
       storeApiKey(apiKey.trim());
-      const redirect = new URLSearchParams(location.search).get("redirect");
-      navigate(redirect ?? "/projects", { replace: true });
+      const raw = new URLSearchParams(location.search).get("redirect");
+      const redirect =
+        raw != null && raw.startsWith("/") && !raw.startsWith("//")
+          ? raw
+          : "/projects";
+      navigate(redirect, { replace: true });
     } catch (err) {
       if (err instanceof ApiError) {
         if (err.status === 401) {

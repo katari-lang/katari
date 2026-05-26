@@ -430,7 +430,7 @@ interpolateEnv input = Text.pack . reverse <$> go (Text.unpack input) []
       case spanName rest of
         Just (name, '}' : after) ->
           go after (reverse ("${" <> name <> "}") <> acc)
-        _ -> go rest ('{' : '$' : acc)
+        _ -> go rest ('{' : '$' : '\\' : acc)
     go ('$' : '{' : rest) acc =
       case spanName rest of
         Just (name, '}' : after) -> do

@@ -20,6 +20,9 @@ dist/
 .staged/
 *.vsix
 
+# Review notes
+review/
+
 # Editor / OS
 .DS_Store
 .env

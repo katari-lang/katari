@@ -138,10 +138,15 @@ instance ToJSON JsonSchema where
                   ]
                   ++ [("examples", toJSON examples) | not (null examples)]
          in Object (coreMap <> extras)
-      -- Every SchemaCore variant's ToJSON instance produces an Object
-      -- (the JSON Schema spec requires this). If this branch is ever
-      -- reached, a SchemaCore variant was added without an Object-shaped
-      -- encoder — that's a bug, not silent metadata loss.
+      -- Unreachable: every SchemaCore constructor is either nullary
+      -- (SchemaCoreNull, SchemaCoreBoolean, etc.) or a record type
+      -- (SchemaCoreInteger, SchemaCoreString, SchemaCoreObject, ...),
+      -- and the hand-written ToJSON SchemaCore instance above maps
+      -- each one to a JSON `object [...]`. genericToJSON is not used
+      -- for SchemaCore, so the invariant is enforced by exhaustive
+      -- pattern match in that instance. If a new constructor is added
+      -- without an Object-producing clause, this error surfaces the
+      -- bug immediately rather than silently dropping metadata.
       other ->
         error
           ( "Katari.Schema: SchemaCore did not serialise to an Object — \

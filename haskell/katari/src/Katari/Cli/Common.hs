@@ -21,6 +21,9 @@ module Katari.Cli.Common
     schemaBundleJson,
     schemaEntryToAgent,
 
+    -- * JSON decoding
+    decodeJsonText,
+
     -- * Error handling
     dieIn,
     runWithApiErrors,
@@ -29,9 +32,11 @@ where
 
 import Control.Exception (catch)
 import qualified Data.Aeson as Aeson
-import Data.Aeson ((.=))
+import Data.Aeson ((.=), FromJSON)
+import qualified Data.ByteString.Lazy as LBS
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Text.Encoding as TextEnc
 import qualified Katari.Api.Client as Api
 import qualified Katari.Api.Types as Api
 import Katari.Schema (SchemaEntry (..))
@@ -173,3 +178,9 @@ runWithApiErrors subcmdName action =
           <> ": "
           <> Text.unpack body
       Api.ApiDecodeError msg -> "could not decode runtime response: " <> msg
+
+-- | Decode a JSON 'Text' into any 'FromJSON' value. Uses proper UTF-8
+-- encoding so non-ASCII characters (e.g. Japanese text) survive the
+-- round-trip.
+decodeJsonText :: FromJSON a => Text -> Either String a
+decodeJsonText = Aeson.eitherDecode . LBS.fromStrict . TextEnc.encodeUtf8

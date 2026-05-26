@@ -40,7 +40,7 @@ import qualified Language.LSP.Protocol.Types as LSP
 import qualified Language.LSP.Server as LSP
 import qualified Language.LSP.VFS as VFS
 import Control.Lens ((^.))
-import System.FilePath (isAbsolute, (</>))
+import System.FilePath (dropExtension, isAbsolute, takeFileName, (</>))
 
 -- ---------------------------------------------------------------------------
 -- Handlers
@@ -117,13 +117,17 @@ onClose st path = do
     Nothing ->
       atomically $ modifyTVar' st.orphanFiles (Map.delete path)
     Just root -> do
-      -- Drop the open-files marker; the on-disk view is still in
-      -- wsFiles (the file may have unsaved changes that we now want to
-      -- discard in favour of disk). We re-read disk lazily on the next
-      -- recompile cycle.
+      -- Drop the open-files marker AND the in-memory buffer so the
+      -- next recompile falls back to the on-disk content rather than
+      -- serving stale editor text.
       atomically $ modifyTVar' st.workspaces $ \wsMap ->
         Map.adjust
-          (\ws -> ws {wsOpenFiles = Set.delete path ws.wsOpenFiles})
+          ( \ws ->
+              ws
+                { wsOpenFiles = Set.delete path ws.wsOpenFiles,
+                  wsFiles = Map.delete path ws.wsFiles
+                }
+          )
           root
           wsMap
 
@@ -263,12 +267,7 @@ compileOneOrphan _st path txt = do
     -- module name. The orphan bucket cannot use directory-based module
     -- naming because there's no project root to relativise against.
     singletonModuleName :: FilePath -> Text
-    singletonModuleName p =
-      Text.pack
-        ( case reverse (takeWhile (/= '/') (reverse p)) of
-            base -> case break (== '.') base of
-              (stem, _) -> stem
-        )
+    singletonModuleName = Text.pack . dropExtension . takeFileName
 
 -- ---------------------------------------------------------------------------
 -- Diagnostics publishing
