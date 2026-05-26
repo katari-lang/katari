@@ -1482,7 +1482,6 @@ typePatternTagToIR = \case
   AST.TypePatternTagString -> TypePatternTagString
   AST.TypePatternTagBoolean -> TypePatternTagBoolean
   AST.TypePatternTagAgent -> TypePatternTagAgent
-  AST.TypePatternTagRecord -> TypePatternTagRecord
 
 -- | AST and IR share 'LiteralValue' (defined in 'Katari.Common'), so
 -- lowering is the identity. Kept as an alias for call sites that read

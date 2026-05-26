@@ -709,7 +709,6 @@ data TypePatternTag where
   TypePatternTagString :: TypePatternTag
   TypePatternTagBoolean :: TypePatternTag
   TypePatternTagAgent :: TypePatternTag
-  TypePatternTagRecord :: TypePatternTag
   deriving (Eq, Show, Generic)
 
 instance ToJSON TypePatternTag where

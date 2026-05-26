@@ -277,7 +277,6 @@ typePatternTagToResolved = \case
   AST.TypePatternTagString -> SemanticTypeString
   AST.TypePatternTagBoolean -> SemanticTypeBoolean
   AST.TypePatternTagAgent -> SemanticTypeFunctionAny
-  AST.TypePatternTagRecord -> SemanticTypeRecord SemanticTypeUnknown
 
 -- ===========================================================================
 -- Complete-signature check
@@ -506,7 +505,6 @@ typePatternTagName = \case
   AST.TypePatternTagString -> "string"
   AST.TypePatternTagBoolean -> "boolean"
   AST.TypePatternTagAgent -> "agent"
-  AST.TypePatternTagRecord -> "record"
 
 -- ===========================================================================
 -- Match checking

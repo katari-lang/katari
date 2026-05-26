@@ -3,7 +3,7 @@
     "0": {
       "body": {
         "description": "Returns the canonical greeting.",
-        "entryBody": 71,
+        "entryBody": 75,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{},\"required\":[],\"type\":\"object\"}",
         "name": "main",
         "outputSchema": "{\"type\":\"string\"}",
@@ -15,7 +15,7 @@
     "1": {
       "body": {
         "description": "AI metadata of a callable (name / id / description / I-O schema).",
-        "entryBody": 72,
+        "entryBody": 76,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"description\":{\"type\":\"string\"},\"id\":{\"type\":\"string\"},\"input\":{\"type\":\"string\"},\"name\":{\"type\":\"string\"},\"output\":{\"type\":\"string\"}},\"required\":[\"description\",\"id\",\"input\",\"name\",\"output\"],\"type\":\"object\"}",
         "name": "agent_metadata",
         "outputSchema": "{\"additionalProperties\":false,\"properties\":{\"$constructor\":{\"const\":\"primitive.agent_metadata\"},\"description\":{\"type\":\"string\"},\"id\":{\"type\":\"string\"},\"input\":{\"type\":\"string\"},\"name\":{\"type\":\"string\"},\"output\":{\"type\":\"string\"}},\"required\":[\"$constructor\",\"description\",\"id\",\"input\",\"name\",\"output\"],\"type\":\"object\"}",
@@ -752,92 +752,66 @@
     },
     "64": {
       "body": {
-        "description": "Return the AI metadata of any callable value.",
+        "description": "Parse a JSON-encoded string into the closest native Katari value (null / boolean / integer / number / string / array / record). Raises `throw` with a parse-error message on invalid input.",
         "entryBody": 65,
+        "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"text\":{\"type\":\"string\"}},\"required\":[\"text\"],\"type\":\"object\"}",
+        "name": "json_parse",
+        "outputSchema": "{}",
+        "parameters": [
+          {
+            "label": "text",
+            "var": 58
+          }
+        ],
+        "qualifiedName": "primitive.json_parse"
+      },
+      "kind": "blockAgent"
+    },
+    "65": {
+      "body": "json_parse",
+      "kind": "blockPrim"
+    },
+    "66": {
+      "body": {
+        "description": "Serialize a value to canonical JSON text. Refuses callables and secrets (those have no JSON representation) by raising `throw`.",
+        "entryBody": 67,
+        "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"value\":{}},\"required\":[\"value\"],\"type\":\"object\"}",
+        "name": "json_stringify",
+        "outputSchema": "{\"type\":\"string\"}",
+        "parameters": [
+          {
+            "label": "value",
+            "var": 59
+          }
+        ],
+        "qualifiedName": "primitive.json_stringify"
+      },
+      "kind": "blockAgent"
+    },
+    "67": {
+      "body": "json_stringify",
+      "kind": "blockPrim"
+    },
+    "68": {
+      "body": {
+        "description": "Return the AI metadata of any callable value.",
+        "entryBody": 69,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"value\":{\"additionalProperties\":false,\"properties\":{\"$agent\":{\"type\":\"string\"}},\"required\":[\"$agent\"],\"type\":\"object\"}},\"required\":[\"value\"],\"type\":\"object\"}",
         "name": "get_metadata",
         "outputSchema": "{\"additionalProperties\":false,\"properties\":{\"$constructor\":{\"const\":\"primitive.agent_metadata\"},\"description\":{\"type\":\"string\"},\"id\":{\"type\":\"string\"},\"input\":{\"type\":\"string\"},\"name\":{\"type\":\"string\"},\"output\":{\"type\":\"string\"}},\"required\":[\"$constructor\",\"description\",\"id\",\"input\",\"name\",\"output\"],\"type\":\"object\"}",
         "parameters": [
           {
             "label": "value",
-            "var": 58
+            "var": 60
           }
         ],
         "qualifiedName": "primitive.get_metadata"
       },
       "kind": "blockAgent"
     },
-    "65": {
+    "69": {
       "body": "get_metadata",
       "kind": "blockPrim"
-    },
-    "66": {
-      "body": {
-        "description": "Raise a recoverable runtime error. Bubbles through enclosing handle scopes until a `request throw` handler catches it; if nothing catches it the snapshot transitions to the `error` state.",
-        "entryBody": 73,
-        "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"msg\":{\"type\":\"string\"}},\"required\":[\"msg\"],\"type\":\"object\"}",
-        "name": "throw",
-        "outputSchema": "{\"not\":{}}",
-        "parameters": [
-          {
-            "label": "msg",
-            "var": 59
-          }
-        ],
-        "qualifiedName": "primitive.throw"
-      },
-      "kind": "blockAgent"
-    },
-    "67": {
-      "body": {
-        "description": "Raised when a requested env key is not present in the store. Handle to provide a default; if uncaught the snapshot transitions to the `error` state.",
-        "entryBody": 74,
-        "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"env_key\":{\"type\":\"string\"}},\"required\":[\"env_key\"],\"type\":\"object\"}",
-        "name": "env_not_found",
-        "outputSchema": "{\"not\":{}}",
-        "parameters": [
-          {
-            "label": "env_key",
-            "var": 60
-          }
-        ],
-        "qualifiedName": "primitive.env_not_found"
-      },
-      "kind": "blockAgent"
-    },
-    "68": {
-      "body": {
-        "description": "Look up a non-secret env entry by key. Raises `env_not_found` if the key is missing.",
-        "entryBody": 75,
-        "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"key\":{\"type\":\"string\"}},\"required\":[\"key\"],\"type\":\"object\"}",
-        "name": "get_env",
-        "outputSchema": "{\"type\":\"string\"}",
-        "parameters": [
-          {
-            "label": "key",
-            "var": 61
-          }
-        ],
-        "qualifiedName": "primitive.get_env"
-      },
-      "kind": "blockAgent"
-    },
-    "69": {
-      "body": {
-        "description": "Look up a secret env entry by key. The result is the disjoint `secret` type and never leaks into `print` / `to_string`. Raises `env_not_found` if the key is missing.",
-        "entryBody": 76,
-        "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"key\":{\"type\":\"string\"}},\"required\":[\"key\"],\"type\":\"object\"}",
-        "name": "get_secret_env",
-        "outputSchema": "{}",
-        "parameters": [
-          {
-            "label": "key",
-            "var": 62
-          }
-        ],
-        "qualifiedName": "primitive.get_secret_env"
-      },
-      "kind": "blockAgent"
     },
     "7": {
       "body": "mul",
@@ -845,30 +819,98 @@
     },
     "70": {
       "body": {
-        "description": "Write an env entry. `is_secret = true` stores the value encrypted; reading it back requires `get_secret_env`.",
+        "description": "Raise a recoverable runtime error. Bubbles through enclosing handle scopes until a `request throw` handler catches it; if nothing catches it the snapshot transitions to the `error` state.",
         "entryBody": 77,
+        "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"msg\":{\"type\":\"string\"}},\"required\":[\"msg\"],\"type\":\"object\"}",
+        "name": "throw",
+        "outputSchema": "{\"not\":{}}",
+        "parameters": [
+          {
+            "label": "msg",
+            "var": 61
+          }
+        ],
+        "qualifiedName": "primitive.throw"
+      },
+      "kind": "blockAgent"
+    },
+    "71": {
+      "body": {
+        "description": "Raised when a requested env key is not present in the store. Handle to provide a default; if uncaught the snapshot transitions to the `error` state.",
+        "entryBody": 78,
+        "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"env_key\":{\"type\":\"string\"}},\"required\":[\"env_key\"],\"type\":\"object\"}",
+        "name": "env_not_found",
+        "outputSchema": "{\"not\":{}}",
+        "parameters": [
+          {
+            "label": "env_key",
+            "var": 62
+          }
+        ],
+        "qualifiedName": "primitive.env_not_found"
+      },
+      "kind": "blockAgent"
+    },
+    "72": {
+      "body": {
+        "description": "Look up a non-secret env entry by key. Raises `env_not_found` if the key is missing.",
+        "entryBody": 79,
+        "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"key\":{\"type\":\"string\"}},\"required\":[\"key\"],\"type\":\"object\"}",
+        "name": "get_env",
+        "outputSchema": "{\"type\":\"string\"}",
+        "parameters": [
+          {
+            "label": "key",
+            "var": 63
+          }
+        ],
+        "qualifiedName": "primitive.get_env"
+      },
+      "kind": "blockAgent"
+    },
+    "73": {
+      "body": {
+        "description": "Look up a secret env entry by key. The result is the disjoint `secret` type and never leaks into `print` / `to_string`. Raises `env_not_found` if the key is missing.",
+        "entryBody": 80,
+        "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"key\":{\"type\":\"string\"}},\"required\":[\"key\"],\"type\":\"object\"}",
+        "name": "get_secret_env",
+        "outputSchema": "{}",
+        "parameters": [
+          {
+            "label": "key",
+            "var": 64
+          }
+        ],
+        "qualifiedName": "primitive.get_secret_env"
+      },
+      "kind": "blockAgent"
+    },
+    "74": {
+      "body": {
+        "description": "Write an env entry. `is_secret = true` stores the value encrypted; reading it back requires `get_secret_env`.",
+        "entryBody": 81,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"is_secret\":{\"type\":\"boolean\"},\"key\":{\"type\":\"string\"},\"value\":{\"type\":\"string\"}},\"required\":[\"is_secret\",\"key\",\"value\"],\"type\":\"object\"}",
         "name": "set_env",
         "outputSchema": "{\"type\":\"null\"}",
         "parameters": [
           {
             "label": "key",
-            "var": 63
+            "var": 65
           },
           {
             "label": "value",
-            "var": 64
+            "var": 66
           },
           {
             "label": "is_secret",
-            "var": 65
+            "var": 67
           }
         ],
         "qualifiedName": "primitive.set_env"
       },
       "kind": "blockAgent"
     },
-    "71": {
+    "75": {
       "body": {
         "parameters": [],
         "statements": [
@@ -887,47 +929,23 @@
       },
       "kind": "blockUser"
     },
-    "72": {
+    "76": {
       "body": "primitive.agent_metadata",
       "kind": "blockConstructor"
     },
-    "73": {
+    "77": {
       "body": "primitive.throw",
       "kind": "blockRequest"
     },
-    "74": {
+    "78": {
       "body": "primitive.env_not_found",
       "kind": "blockRequest"
     },
-    "75": {
+    "79": {
       "body": {
         "target": {
           "body": {
             "dispatchName": "get_env",
-            "endpoint": "ENV"
-          },
-          "kind": "delegateTargetExternal"
-        }
-      },
-      "kind": "blockDelegate"
-    },
-    "76": {
-      "body": {
-        "target": {
-          "body": {
-            "dispatchName": "get_secret_env",
-            "endpoint": "ENV"
-          },
-          "kind": "delegateTargetExternal"
-        }
-      },
-      "kind": "blockDelegate"
-    },
-    "77": {
-      "body": {
-        "target": {
-          "body": {
-            "dispatchName": "set_env",
             "endpoint": "ENV"
           },
           "kind": "delegateTargetExternal"
@@ -956,6 +974,30 @@
       },
       "kind": "blockAgent"
     },
+    "80": {
+      "body": {
+        "target": {
+          "body": {
+            "dispatchName": "get_secret_env",
+            "endpoint": "ENV"
+          },
+          "kind": "delegateTargetExternal"
+        }
+      },
+      "kind": "blockDelegate"
+    },
+    "81": {
+      "body": {
+        "target": {
+          "body": {
+            "dispatchName": "set_env",
+            "endpoint": "ENV"
+          },
+          "kind": "delegateTargetExternal"
+        }
+      },
+      "kind": "blockDelegate"
+    },
     "9": {
       "body": "mod",
       "kind": "blockPrim"
@@ -971,15 +1013,17 @@
     "primitive.array_length": 44,
     "primitive.concat": 34,
     "primitive.div": 10,
-    "primitive.env_not_found": 67,
+    "primitive.env_not_found": 71,
     "primitive.eq": 16,
     "primitive.format": 40,
     "primitive.ge": 26,
-    "primitive.get_env": 68,
+    "primitive.get_env": 72,
     "primitive.get_field": 46,
-    "primitive.get_metadata": 64,
-    "primitive.get_secret_env": 69,
+    "primitive.get_metadata": 68,
+    "primitive.get_secret_env": 73,
     "primitive.gt": 24,
+    "primitive.json_parse": 64,
+    "primitive.json_stringify": 66,
     "primitive.le": 22,
     "primitive.lt": 20,
     "primitive.mod": 8,
@@ -995,9 +1039,9 @@
     "primitive.record_remove": 56,
     "primitive.record_set": 54,
     "primitive.record_size": 62,
-    "primitive.set_env": 70,
+    "primitive.set_env": 74,
     "primitive.sub": 4,
-    "primitive.throw": 66,
+    "primitive.throw": 70,
     "primitive.to_string": 38,
     "primitive.tuple_get": 48,
     "primitive.type_of": 36
@@ -1068,22 +1112,26 @@
       "61": "prim:record_has:leaf",
       "62": "prim:record_size:agent",
       "63": "prim:record_size:leaf",
-      "64": "prim:get_metadata:agent",
-      "65": "prim:get_metadata:leaf",
-      "66": "throw:agent",
-      "67": "env_not_found:agent",
-      "68": "get_env:agent",
-      "69": "get_secret_env:agent",
+      "64": "prim:json_parse:agent",
+      "65": "prim:json_parse:leaf",
+      "66": "prim:json_stringify:agent",
+      "67": "prim:json_stringify:leaf",
+      "68": "prim:get_metadata:agent",
+      "69": "prim:get_metadata:leaf",
       "7": "prim:mul:leaf",
-      "70": "set_env:agent",
-      "71": "main.body",
-      "72": "agent_metadata:ctor",
-      "73": "throw:request",
-      "74": "env_not_found:request",
-      "75": "get_env:external",
-      "76": "get_secret_env:external",
-      "77": "set_env:external",
+      "70": "throw:agent",
+      "71": "env_not_found:agent",
+      "72": "get_env:agent",
+      "73": "get_secret_env:agent",
+      "74": "set_env:agent",
+      "75": "main.body",
+      "76": "agent_metadata:ctor",
+      "77": "throw:request",
+      "78": "env_not_found:request",
+      "79": "get_env:external",
       "8": "prim:mod:agent",
+      "80": "get_secret_env:external",
+      "81": "set_env:external",
       "9": "prim:mod:leaf"
     },
     "varNames": {}

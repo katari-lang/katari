@@ -4,7 +4,7 @@ agent describe(value: unknown) -> string {
     case integer(n) => { f"int:${to_string(value = n)}" }
     case string(s) => { f"str:${s}" }
     case boolean(b) => { f"bool:${to_string(value = b)}" }
-    case record({ name = string(n) }) => { f"user:${n}" }
+    case { name = string(n) } => { f"user:${n}" }
     case _ => { "other" }
   }
 }

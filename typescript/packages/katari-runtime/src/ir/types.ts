@@ -246,14 +246,15 @@ export type MatchPattern =
     };
 
 // Runtime-checkable type tag. Encoded as a bare camelCase string on the
-// wire (Haskell `enumOptions` — same convention as `ExitKind`).
+// wire (Haskell `enumOptions` — same convention as `ExitKind`). Record
+// values have no tag here; record patterns (`{ label = pat, ... }`)
+// cover both the type-check and field extraction in one form.
 export type TypePatternTag =
   | "typePatternTagInteger"
   | "typePatternTagNumber"
   | "typePatternTagString"
   | "typePatternTagBoolean"
-  | "typePatternTagAgent"
-  | "typePatternTagRecord";
+  | "typePatternTagAgent";
 
 // ─── MatchArm (irOptions → flat record) ──────────────────────────────────────
 

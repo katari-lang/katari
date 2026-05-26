@@ -1664,8 +1664,7 @@ parseTypePattern = parseWithSpan $ do
           TypePatternTagNumber <$ parseKeyword KeywordNumber,
           TypePatternTagString <$ parseKeyword KeywordString,
           TypePatternTagBoolean <$ parseKeyword KeywordBoolean,
-          TypePatternTagAgent <$ parseKeyword KeywordAgent,
-          TypePatternTagRecord <$ parseRecordTagIdentifier
+          TypePatternTagAgent <$ parseKeyword KeywordAgent
         ]
     void $ MP.lookAhead (parsePunctuation PunctuationLeftParenthesis)
     pure t
@@ -1680,11 +1679,6 @@ parseTypePattern = parseWithSpan $ do
           sourceSpan = sourceSpan,
           typeOf = ()
         }
-  where
-    parseRecordTagIdentifier =
-      parseKatariTokenWith $ \case
-        KatariTokenIdentifier "record" -> Just ()
-        _ -> Nothing
 
 -- | @{ label = pat, ... }@ record pattern. Subset semantics: each listed
 -- label must be present in the subject record; other entries are ignored.

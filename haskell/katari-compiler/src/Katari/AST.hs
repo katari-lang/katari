@@ -701,15 +701,16 @@ instance HasSourceSpan (LiteralPattern phase) where
 
 -- | Identifies which runtime type a 'TypePattern' guards against. Each
 -- tag corresponds to a primitive / structural family the runtime can
--- check by inspecting a value's tag (no parameterisation — e.g. @record@
--- means \"any record\", not \"@record[T]@ for a specific @T@\").
+-- check by inspecting a value's tag. Record values have no tag here —
+-- a record pattern @{ label = pat, ... }@ already covers both the
+-- \"is record?\" check and field extraction, so a separate @record(p)@
+-- type guard would be pure duplication.
 data TypePatternTag where
   TypePatternTagInteger :: TypePatternTag
   TypePatternTagNumber :: TypePatternTag
   TypePatternTagString :: TypePatternTag
   TypePatternTagBoolean :: TypePatternTag
   TypePatternTagAgent :: TypePatternTag
-  TypePatternTagRecord :: TypePatternTag
 
 -- | @integer(p)@ / @number(p)@ / @string(p)@ / @boolean(p)@ / @agent(p)@ /
 -- @record(p)@. Refutable — checks the runtime type tag of the subject and

@@ -939,7 +939,6 @@ typePatternTagToSemantic = \case
   TypePatternTagString -> SemanticTypeString
   TypePatternTagBoolean -> SemanticTypeBoolean
   TypePatternTagAgent -> SemanticTypeFunctionAny
-  TypePatternTagRecord -> SemanticTypeRecord SemanticTypeUnknown
 
 -- | Project the component subject types from a subject type for a tuple
 -- pattern of the given arity. For union subjects, only the tuple-shaped

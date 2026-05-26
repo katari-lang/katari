@@ -1295,6 +1295,51 @@ patterns = describe "patterns" $ do
     _ <- shouldSucceed "agent foo(input = _: integer) -> integer { 0 }"
     pure ()
 
+  it "parses type-guard pattern integer(x)" $ do
+    _ <-
+      shouldSucceed
+        "agent main(v: unknown) { match (v) { case integer(n) => { n } case _ => { 0 } } }"
+    pure ()
+
+  it "parses type-guard pattern agent(f)" $ do
+    _ <-
+      shouldSucceed
+        "agent main(v: unknown) { match (v) { case agent(f) => { 1 } case _ => { 0 } } }"
+    pure ()
+
+  it "parses record pattern with single label" $ do
+    _ <-
+      shouldSucceed
+        "agent main(v: unknown) { match (v) { case { name = n } => { n } case _ => { 0 } } }"
+    pure ()
+
+  it "parses record pattern with multiple labels" $ do
+    _ <-
+      shouldSucceed $
+        mconcat
+          [ "agent main(v: unknown) {",
+            "  match (v) {",
+            "    case { name = string(s), age = integer(a) } => { s }",
+            "    case _ => { \"none\" }",
+            "  }",
+            "}"
+          ]
+    pure ()
+
+  it "record pattern AST carries entries with the right keys" $ do
+    m <-
+      shouldSucceed
+        "agent main(v: unknown) { match (v) { case { name = n, age = a } => { n } case _ => { \"x\" } } }"
+    case head (decls m) of
+      DeclarationAgent a -> case a.body.returnExpression of
+        Just (ExpressionMatch me) -> case me.cases of
+          (arm : _) -> case arm.pattern of
+            PatternRecord rp -> map fst rp.entries `shouldBe` ["name", "age"]
+            _ -> expectationFailure "expected record pattern"
+          _ -> expectationFailure "expected at least one case"
+        _ -> expectationFailure "expected match"
+      _ -> expectationFailure "expected agent"
+
 -- ---------------------------------------------------------------------------
 -- Types
 -- ---------------------------------------------------------------------------

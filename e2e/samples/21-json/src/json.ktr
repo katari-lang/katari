@@ -1,7 +1,7 @@
 @"Round-trips a small JSON object: parse -> extract -> re-encode."
 agent extract_name(payload: unknown) -> string {
   match (payload) {
-    case record({ name = string(n) }) => { n }
+    case { name = string(n) } => { n }
     case _ => { "unknown" }
   }
 }

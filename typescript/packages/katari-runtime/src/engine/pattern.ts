@@ -88,7 +88,6 @@ function matchesTypeTag(tag: TypePatternTag, value: Value): boolean {
       "typePatternTagAgent",
       () => value.kind === "closure" || value.kind === "agentLiteral",
     )
-    .with("typePatternTagRecord", () => value.kind === "record")
     .exhaustive();
 }
 

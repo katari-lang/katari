@@ -779,6 +779,42 @@
     "requests": []
   },
   {
+    "description": "Parse a JSON-encoded string into the closest native Katari value (null / boolean / integer / number / string / array / record). Raises `throw` with a parse-error message on invalid input.",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "text"
+      ],
+      "type": "object"
+    },
+    "name": "primitive.json_parse",
+    "output": {},
+    "requests": []
+  },
+  {
+    "description": "Serialize a value to canonical JSON text. Refuses callables and secrets (those have no JSON representation) by raising `throw`.",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "value": {}
+      },
+      "required": [
+        "value"
+      ],
+      "type": "object"
+    },
+    "name": "primitive.json_stringify",
+    "output": {
+      "type": "string"
+    },
+    "requests": []
+  },
+  {
     "description": "Return the AI metadata of any callable value.",
     "input": {
       "additionalProperties": false,
