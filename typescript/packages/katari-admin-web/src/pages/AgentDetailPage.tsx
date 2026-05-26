@@ -19,7 +19,8 @@ import { Label } from "@/components/ui/Label";
 import { SpinnerOverlay } from "@/components/ui/Spinner";
 import { MetadataRow } from "@/components/ui/MetadataRow";
 import { SchemaForm } from "@/components/schema-form/SchemaForm";
-import { ValueViewer } from "@/components/domain/ValueViewer";
+import { SchemaViewer } from "@/components/domain/SchemaViewer";
+import { CopyButton } from "@/components/ui/CopyButton";
 import type { JsonSchema } from "@/components/schema-form/schema-utils";
 import { useSnapshotMessage } from "@/hooks/useSnapshotMessage";
 import type { ProjectId, SnapshotId } from "@/api/types";
@@ -127,7 +128,13 @@ export function AgentDetailPage() {
           >
             <Card className="lg:col-span-2">
               <CardHeader>
-                <CardTitle>Invoke</CardTitle>
+                <div className="flex items-center justify-between">
+                  <CardTitle>Invoke</CardTitle>
+                  <CopyButton
+                    text={JSON.stringify(agent.parameters, null, 2)}
+                    label="Copied schema"
+                  />
+                </div>
               </CardHeader>
               <CardContent>
                 <div className="space-y-4">
@@ -239,7 +246,7 @@ function ReturnsCard({
       </CardHeader>
       {open && (
         <CardContent>
-          <ValueViewer value={returns} />
+          <SchemaViewer schema={returns} />
         </CardContent>
       )}
     </Card>

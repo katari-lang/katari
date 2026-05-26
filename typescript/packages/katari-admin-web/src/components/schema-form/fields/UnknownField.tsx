@@ -1,9 +1,9 @@
-import { JsonEditor } from "@/components/ui/JsonEditor";
+import { AnyField } from "./AnyField";
 
 /**
  * Fallback for schemas we don't fully model (oneOf / anyOf / unknown
- * shapes). Operator types raw JSON; we parse on every keystroke and
- * surface parse errors inline.
+ * shapes). Delegates to AnyField which provides a type-selector UI
+ * instead of raw JSON editing.
  */
 export function UnknownField({
   value,
@@ -12,11 +12,5 @@ export function UnknownField({
   value: unknown;
   onChange: (v: unknown) => void;
 }) {
-  return (
-    <JsonEditor
-      value={value}
-      onChange={onChange}
-      className="border-border-strong"
-    />
-  );
+  return <AnyField value={value} onChange={onChange} />;
 }

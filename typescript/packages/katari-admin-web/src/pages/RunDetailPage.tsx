@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import { motion } from "framer-motion";
 import { ArrowLeft, ArrowRight, Ban } from "lucide-react";
 import toast from "react-hot-toast";
@@ -26,11 +26,12 @@ import type { EscalationState, ProjectId, RunId } from "@/api/types";
 
 const POLL_MS = 3_000;
 
-const escalationTones: Record<EscalationState, "info" | "success" | "neutral"> = {
-  open: "info",
-  answered: "success",
-  cancelled: "neutral",
-};
+const escalationTones: Record<EscalationState, "info" | "success" | "neutral"> =
+  {
+    open: "info",
+    answered: "success",
+    cancelled: "neutral",
+  };
 
 export function RunDetailPage() {
   const { projectId, runId } = useParams<{
@@ -39,6 +40,7 @@ export function RunDetailPage() {
   }>();
   const client = useApiClient();
   const queryClient = useQueryClient();
+  const navigate = useNavigate();
 
   const { data, isLoading, isError, error } = useQuery({
     queryKey: ["run", runId],
@@ -258,16 +260,28 @@ export function RunDetailPage() {
                   </THead>
                   <TBody>
                     {runEscalations.map((esc) => (
-                      <TR key={esc.id}>
+                      <TR
+                        key={esc.id}
+                        className="cursor-pointer h-16"
+                        onClick={() =>
+                          navigate(
+                            `/project/${projectId}/escalations/${esc.id}`,
+                          )
+                        }
+                      >
                         <TD>
                           <Badge tone={escalationTones[esc.state]}>
                             {esc.state}
                           </Badge>
                         </TD>
                         <TD>
-                          <span className="font-mono text-xs text-foreground">
+                          <Link
+                            to={`/project/${projectId}/escalations/${esc.id}`}
+                            className="font-mono text-xs text-foreground hover:underline"
+                            onClick={(e) => e.stopPropagation()}
+                          >
                             {esc.agentDefId}
-                          </span>
+                          </Link>
                         </TD>
                         <TD
                           className="text-xs text-muted-foreground"

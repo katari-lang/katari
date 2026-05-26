@@ -21,11 +21,8 @@ export function ArrayField({
         <p className="text-xs text-subtle-foreground">No items yet.</p>
       ) : (
         items.map((item, idx) => (
-          <div
-            key={idx}
-            className="flex items-start gap-2"
-          >
-            <span className="mt-2 inline-flex h-5 min-w-5 items-center justify-center rounded bg-muted px-1.5 font-mono text-xs text-muted-foreground">
+          <div key={idx} className="flex items-start gap-2">
+            <span className="mt-2 inline-flex h-5 min-w-5 items-center justify-center rounded px-1 font-mono text-xs text-muted-foreground">
               {idx}
             </span>
             <div className="flex-1">
