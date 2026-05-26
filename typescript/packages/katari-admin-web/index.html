@@ -27,8 +27,12 @@
     </script>
     <style>
       /* Prevent white flash: set background before CSS loads */
-      html { background-color: #fafaf9; }
-      html.dark { background-color: #0c0a09; }
+      html {
+        background-color: oklch(0.966 0.007 67.76);
+      }
+      html.dark {
+        background-color: oklch(0.233 0.015 279.54);
+      }
     </style>
   </head>
   <body class="bg-background text-foreground">

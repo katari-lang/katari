@@ -12,17 +12,25 @@ import { Dialog, DialogFooter } from "@/components/ui/Dialog";
 import { CopyableId } from "@/components/ui/CopyableId";
 import { SpinnerOverlay } from "@/components/ui/Spinner";
 import { MetadataRow } from "@/components/ui/MetadataRow";
+import { Badge } from "@/components/ui/Badge";
+import { Table, TBody, TD, TH, THead, TR } from "@/components/ui/Table";
 import {
   RunStatusBadge,
   isTerminalState,
 } from "@/components/domain/RunStatusBadge";
 import { DelegationTreeGraph } from "@/components/domain/DelegationTreeGraph";
 import { ValueViewer } from "@/components/domain/ValueViewer";
-import { formatDateTime } from "@/lib/format";
+import { formatDateTime, relativeTime } from "@/lib/format";
 import { useSnapshotMessage } from "@/hooks/useSnapshotMessage";
-import type { ProjectId, RunId } from "@/api/types";
+import type { EscalationState, ProjectId, RunId } from "@/api/types";
 
 const POLL_MS = 3_000;
+
+const escalationTones: Record<EscalationState, "info" | "success" | "neutral"> = {
+  open: "info",
+  answered: "success",
+  cancelled: "neutral",
+};
 
 export function RunDetailPage() {
   const { projectId, runId } = useParams<{
@@ -81,6 +89,23 @@ export function RunDetailPage() {
       return isTerminalState(root.state) ? false : POLL_MS;
     },
   });
+
+  // Escalations for this run's snapshot, filtered to only those
+  // belonging to this specific run (matching rootDelegationId).
+  const escalationsQ = useQuery({
+    queryKey: ["escalations", projectId, run?.snapshotId, "run-detail"],
+    queryFn: () =>
+      client.listEscalations({
+        projectId: projectId as ProjectId,
+        snapshotId: run!.snapshotId,
+      }),
+    enabled: typeof projectId === "string" && run !== undefined,
+    refetchInterval: isLive ? POLL_MS : false,
+  });
+
+  const runEscalations = (escalationsQ.data?.escalations ?? []).filter(
+    (esc) => esc.rootDelegationId === runId,
+  );
 
   return (
     <div>
@@ -210,14 +235,64 @@ export function RunDetailPage() {
               </Card>
             </div>
 
-            {/* Escalations link */}
-            <Link
-              to={`/project/${projectId}/escalations?snapshotId=${run.snapshotId}`}
-              className="group inline-flex items-center gap-1.5 text-sm text-subtle-foreground hover:text-foreground transition-colors"
-            >
-              View escalations for this snapshot
-              <ArrowRight className="size-3.5 transition-transform group-hover:translate-x-0.5" />
-            </Link>
+            {/* Escalations */}
+            <div>
+              <div className="mb-2 flex items-center gap-2">
+                <h3 className="text-sm font-medium text-foreground">
+                  Escalations
+                </h3>
+                <Badge tone="neutral">{runEscalations.length}</Badge>
+              </div>
+              {escalationsQ.isLoading ? (
+                <p className="text-sm text-subtle-foreground">Loading...</p>
+              ) : runEscalations.length === 0 ? (
+                <p className="text-sm text-subtle-foreground">
+                  No escalations.
+                </p>
+              ) : (
+                <Table>
+                  <THead>
+                    <TR>
+                      <TH>State</TH>
+                      <TH>Agent</TH>
+                      <TH>Created</TH>
+                      <TH>Action</TH>
+                    </TR>
+                  </THead>
+                  <TBody>
+                    {runEscalations.map((esc) => (
+                      <TR key={esc.id}>
+                        <TD>
+                          <Badge tone={escalationTones[esc.state]}>
+                            {esc.state}
+                          </Badge>
+                        </TD>
+                        <TD>
+                          <span className="font-mono text-xs text-foreground">
+                            {esc.agentDefId}
+                          </span>
+                        </TD>
+                        <TD
+                          className="text-xs text-muted-foreground"
+                          title={formatDateTime(esc.createdAt)}
+                        >
+                          {relativeTime(esc.createdAt)}
+                        </TD>
+                        <TD>
+                          <Link
+                            to={`/project/${projectId}/escalations/${esc.id}`}
+                            className="group inline-flex items-center gap-1 text-xs text-subtle-foreground hover:text-foreground transition-colors"
+                          >
+                            View
+                            <ArrowRight className="size-3 transition-transform group-hover:translate-x-0.5" />
+                          </Link>
+                        </TD>
+                      </TR>
+                    ))}
+                  </TBody>
+                </Table>
+              )}
+            </div>
 
             {/* Delegation tree */}
             {isLive && (

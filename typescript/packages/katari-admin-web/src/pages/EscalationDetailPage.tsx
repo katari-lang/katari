@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { motion } from "framer-motion";
@@ -7,6 +8,7 @@ import { useApiClient } from "@/contexts/ApiKeyContext";
 import { PageContent, PageHeader } from "@/components/ui/PageHeader";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
+import { Dialog, DialogFooter } from "@/components/ui/Dialog";
 import { CopyableId } from "@/components/ui/CopyableId";
 import { SpinnerOverlay } from "@/components/ui/Spinner";
 import { MetadataRow } from "@/components/ui/MetadataRow";
@@ -79,6 +81,8 @@ export function EscalationDetailPage() {
       ),
     enabled: typeof projectId === "string" && escalation !== undefined,
   });
+  const [cancelDialogOpen, setCancelDialogOpen] = useState(false);
+
   const { getMessage } = useSnapshotMessage(projectId);
   const snapshotMessage = getMessage(escalation?.snapshotId);
   const runName = runQ.data?.run.name;
@@ -223,7 +227,7 @@ export function EscalationDetailPage() {
                       <Button
                         type="button"
                         variant="danger"
-                        onClick={() => cancelRun.mutate()}
+                        onClick={() => setCancelDialogOpen(true)}
                         loading={cancelRun.isPending}
                       >
                         <Ban className="size-4" />
@@ -324,6 +328,38 @@ export function EscalationDetailPage() {
           </motion.div>
         )}
       </PageContent>
+      <Dialog
+        open={cancelDialogOpen}
+        onClose={() => setCancelDialogOpen(false)}
+        title="Cancel run"
+        description="Canceling will kill the run and all its delegations. This action cannot be undone."
+        size="sm"
+      >
+        <p className="text-sm text-foreground">
+          Are you sure you want to cancel the run{" "}
+          <code className="font-mono">{runName ?? escalation?.rootDelegationId}</code>?
+          All active delegations under this run will be terminated.
+        </p>
+        <DialogFooter>
+          <Button
+            variant="secondary"
+            onClick={() => setCancelDialogOpen(false)}
+          >
+            Keep running
+          </Button>
+          <Button
+            variant="danger"
+            loading={cancelRun.isPending}
+            onClick={() => {
+              cancelRun.mutate(undefined, {
+                onSettled: () => setCancelDialogOpen(false),
+              });
+            }}
+          >
+            Cancel run
+          </Button>
+        </DialogFooter>
+      </Dialog>
     </div>
   );
 }
