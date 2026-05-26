@@ -46,8 +46,9 @@ cmdParser =
 versionOption :: Parser (a -> a)
 versionOption =
   infoOption
-    katariVersion
+    ("katari v" <> katariVersion)
     ( long "version"
+        <> short 'v'
         <> help "Show the katari CLI version and exit"
         <> hidden
     )
@@ -59,7 +60,7 @@ main = do
       ( info
           (cmdParser <**> versionOption <**> helper)
           ( fullDesc
-              <> header "katari — DSL for orchestrating AI agents"
+              <> header ("katari v" <> katariVersion <> " — DSL for orchestrating AI agents")
               <> progDesc "Project + Runtime CLI. Use `katari <subcommand> --help` for details."
           )
       )

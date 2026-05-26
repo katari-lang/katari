@@ -32,6 +32,7 @@ export function buildSnapshotRoutes(snapshots: SnapshotService): Hono {
       irModule: body.irModule as IRModule,
       sidecarBundle: body.sidecarBundle ?? null,
       schemaBundle: body.schemaBundle as SchemaBundle,
+      message: body.message,
     });
     return c.json({ snapshotId }, 201);
   });

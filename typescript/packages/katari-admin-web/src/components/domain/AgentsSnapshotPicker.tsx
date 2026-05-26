@@ -9,6 +9,7 @@ import {
 } from "@/components/ui/Dropdown";
 import { shortId, relativeTime, formatDateTime } from "@/lib/format";
 import { Button } from "@/components/ui/Button";
+import { CopyableId } from "@/components/ui/CopyableId";
 import type { ProjectId, SnapshotId } from "@/api/types";
 
 type Props = {
@@ -96,11 +97,18 @@ export function AgentsSnapshotPicker({
                   >
                     <div className="flex-1">
                       <div className="text-xs">{s.message}</div>
-                      <div
-                        className="mt-0.5 text-xs opacity-70"
-                        title={formatDateTime(s.createdAt)}
-                      >
-                        {relativeTime(s.createdAt)}
+                      <div className="mt-0.5 flex items-center gap-2">
+                        <CopyableId
+                          value={s.id}
+                          display={shortId(s.id)}
+                          className="text-subtle-foreground"
+                        />
+                        <span
+                          className="text-xs opacity-70"
+                          title={formatDateTime(s.createdAt)}
+                        >
+                          {relativeTime(s.createdAt)}
+                        </span>
                       </div>
                     </div>
                     {s.id === selected && <Check className="size-4" />}

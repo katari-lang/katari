@@ -170,12 +170,19 @@ export function RunDetailPage() {
                     <MetadataRow
                       label="Snapshot"
                       value={
-                        <Link
-                          to={`/project/${projectId}/agents?snapshot=${run.snapshotId}`}
-                          className="text-foreground hover:underline"
-                        >
-                          {snapshotMessage ?? "—"}
-                        </Link>
+                        <span className="flex items-center gap-2">
+                          <Link
+                            to={`/project/${projectId}/agents?snapshot=${run.snapshotId}`}
+                            className="text-foreground hover:underline"
+                          >
+                            {snapshotMessage ?? "—"}
+                          </Link>
+                          <CopyableId
+                            value={run.snapshotId}
+                            display={run.snapshotId.slice(0, 8)}
+                            className="text-subtle-foreground"
+                          />
+                        </span>
                       }
                     />
                     <MetadataRow
