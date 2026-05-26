@@ -25,6 +25,7 @@ import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (catMaybes)
 import Data.Text (Text)
+import Data.Text qualified as Text
 import Data.Word (Word32)
 import Katari.AST (Phase (Zonked))
 import Katari.AST qualified as AST
@@ -548,6 +549,17 @@ registerCallable nameRef sourceSpan action = case nameRef.resolution of
   Just variableId -> action variableId
   Nothing -> recordError (LoweringErrorUnresolvedVariable sourceSpan nameRef.text)
 
+-- | Build the runtime dispatch name for a primitive declaration. Prims
+-- in the root @primitive@ module keep their bare name (e.g. @to_string@,
+-- @add@); prims in sub-modules @primitive.json@ / @primitive.record@
+-- get a user-visible qualified name (@json.parse@, @record.get@) so the
+-- runtime's @executePrim@ dispatch can route by namespace.
+primDispatchName :: Text -> Text -> Text
+primDispatchName moduleName declName =
+  case Text.stripPrefix "primitive." moduleName of
+    Just suffix -> suffix <> "." <> declName
+    Nothing -> declName
+
 -- | Walk all declarations, registering each top-level agent / req / ext /
 -- ctor's @VariableId → BlockId@ mapping. Bodies are filled in by
 -- 'lowerAllDeclarations'.
@@ -601,14 +613,22 @@ registerDeclarationKinds zonkResult =
           -- user agent body's lowering, since compile-internal desugar
           -- sites (e.g. field access → 'get_field') look it up by bare
           -- name via 'primBlockId'.
+          --
+          -- Sub-module qualification: prims declared inside
+          -- @primitive.json@ / @primitive.record@ etc. are dispatched
+          -- on the runtime by their user-visible qualified name
+          -- (@json.parse@, @record.get@, …). The root @primitive@
+          -- module keeps bare names so internal desugar sites
+          -- (@get_field@, arithmetic) stay unchanged.
+          let primName = primDispatchName moduleName decl.name.text
           agentBlk <- reserveBlockId (Just decl.name.text)
           leafBlk <- freshBlockId
           recordBlock
             leafBlk
-            (BlockPrim decl.name.text)
-            (Just ("prim:" <> decl.name.text <> ":leaf"))
+            (BlockPrim primName)
+            (Just ("prim:" <> primName <> ":leaf"))
           modify $ \state ->
-            state {lsPrimBlockIds = Map.insert decl.name.text leafBlk state.lsPrimBlockIds}
+            state {lsPrimBlockIds = Map.insert primName leafBlk state.lsPrimBlockIds}
           recordTopLevelCallable variableId moduleName decl.name.text agentBlk
       AST.DeclarationData decl ->
         registerCallable decl.name decl.sourceSpan $ \variableId -> do
@@ -636,13 +656,20 @@ registerDeclarationKinds zonkResult =
 
 lowerAllDeclarations :: ZonkResult -> Lower (Map Text BlockId)
 lowerAllDeclarations zonkResult = do
-  pairs <- concat <$> mapM lowerModule (Map.elems zonkResult.zonkedModules)
+  pairs <- concat <$> mapM lowerModule (Map.toList zonkResult.zonkedModules)
   pure (Map.fromList pairs)
   where
-    lowerModule m = catMaybes <$> mapM lowerDeclaration m.declarations
+    lowerModule (moduleId, m) = do
+      moduleName <- case Map.lookup moduleId zonkResult.zonkedModuleNames of
+        Just name -> pure name
+        Nothing ->
+          throwError $
+            Internal.internalErrorNoSpan
+              "lowerAllDeclarations: ModuleId not in zonkedModuleNames"
+      catMaybes <$> mapM (lowerDeclaration moduleName) m.declarations
 
-    lowerDeclaration :: AST.Declaration Zonked -> Lower (Maybe (Text, BlockId))
-    lowerDeclaration = \case
+    lowerDeclaration :: Text -> AST.Declaration Zonked -> Lower (Maybe (Text, BlockId))
+    lowerDeclaration moduleName = \case
       AST.DeclarationAgent decl -> resolveDecl decl.name $ \_variableId blockId -> do
         lowerAgentDeclaration decl blockId
         pure (Just (decl.name.text, blockId))
@@ -715,16 +742,20 @@ lowerAllDeclarations zonkResult = do
         qname <- requireAgentQName "DeclarationPrimAgent" decl.name.text agentBlk
         let paramLabels = map (.label) decl.parameters
             labelsAndAnnotations = [(pb.label, pb.annotation) | pb <- decl.parameters]
+            primName = primDispatchName moduleName decl.name.text
         -- The leaf was pre-registered in 'registerDeclarationKinds' so any
         -- user agent's body could resolve compile-internal prim calls
-        -- (e.g. @get_field@) regardless of declaration order.
+        -- (e.g. @get_field@) regardless of declaration order. Sub-module
+        -- prims are keyed by their qualified dispatch name (e.g.
+        -- @json.parse@) so that root prims like @get_field@ stay
+        -- collision-free with same-tail names in sub-modules.
         innerBlk <-
-          gets (Map.lookup decl.name.text . (.lsPrimBlockIds)) >>= \case
+          gets (Map.lookup primName . (.lsPrimBlockIds)) >>= \case
             Just b -> pure b
             Nothing ->
               throwError
                 ( Internal.internalErrorNoSpan
-                    ("DeclarationPrimAgent: leaf for '" <> decl.name.text <> "' missing from lsPrimBlockIds")
+                    ("DeclarationPrimAgent: leaf for '" <> primName <> "' missing from lsPrimBlockIds")
                 )
         (inputSchema, outputSchema) <- schemasForVariable variableId labelsAndAnnotations
         writeWrapperAgent

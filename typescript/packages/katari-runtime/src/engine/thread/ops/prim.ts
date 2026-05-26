@@ -1,20 +1,27 @@
-// PrimThread ops. Leaf node — `create` runs the prim synchronously and
-// emits `done` to the parent. No children, no asks, no cancel cascade.
+// PrimThread ops. Leaf node — `create` runs the prim synchronously and:
+//
+//   - on normal return: emits `done` to the parent and the thread
+//     terminates naturally (no state retained).
+//   - on `RecoverableEngineError`: bubbles up via the universal
+//     `primitive.throw` capability (see `emitThrowEscalate`).
+//   - on `PrimRaiseRequest`: emits an `ask` for the specific
+//     never-returning request the prim chose to raise (e.g.
+//     `json_parse_error`), and the thread enters a "waiting-for-cancel"
+//     state. The handler that catches the request must `break` out of
+//     its enclosing handle scope, which initiates the cancel cascade
+//     that finally reaches us; on `cancel` we immediately ack and exit.
+//     If somehow an `askAck` comes back instead (the request type is
+//     `-> never`, so this shouldn't happen), we drop it defensively.
 
-import type { CallId } from "../../id.js";
-import { executePrim } from "../../prim.js";
+import type { AskId, CallId } from "../../id.js";
+import { executePrim, PrimRaiseRequest } from "../../prim.js";
 import { RecoverableEngineError } from "../../errors.js";
 import type { StepCtx } from "../../step-ctx.js";
 import type { Value } from "../../value.js";
 import type { AgentBlock, BlockId, QualifiedName } from "../../../ir/types.js";
 import type { PrimThread, Thread } from "../types.js";
-import { emitThrowEscalate } from "../common.js";
-import {
-  defaultAskAckProxy,
-  defaultAskProxy,
-  defaultCancel,
-  defaultCancelAckUnexpected,
-} from "./defaults.js";
+import { allocAskId, deleteThread, emitThrowEscalate } from "../common.js";
+import { defaultAskProxy } from "./defaults.js";
 import type { ThreadOps } from "./types.js";
 
 export const primOps: ThreadOps<PrimThread> = {
@@ -30,6 +37,10 @@ export const primOps: ThreadOps<PrimThread> = {
           ? executeGetMetadata(ctx, t.args)
           : executePrim(t.primName, t.args);
     } catch (err) {
+      if (err instanceof PrimRaiseRequest) {
+        emitPrimRaise(ctx, t, err);
+        return;
+      }
       if (err instanceof RecoverableEngineError) {
         emitThrowEscalate(ctx, t as Thread, err.message);
         return;
@@ -50,13 +61,88 @@ export const primOps: ThreadOps<PrimThread> = {
     throw new Error(`prim thread received done (callId=${callId}) — no children expected on ${t.id}`);
   },
 
-  cancel: (ctx, t) => defaultCancel<PrimThread>(ctx, t as PrimThread),
-  cancelAck: defaultCancelAckUnexpected,
+  /**
+   * Cancel hits us either in the cascade triggered by a `break` out of
+   * the handle scope that caught our raise, or as part of an unrelated
+   * tree teardown. Either way we have no children and nothing to clean
+   * up — ack immediately and remove the thread.
+   */
+  cancel(ctx, t) {
+    if (t.parent !== null && t.parentCallId !== null) {
+      ctx.enqueue({
+        kind: "cancelAck",
+        target: t.parent,
+        callId: t.parentCallId,
+      });
+    }
+    deleteThread(ctx, t.id);
+  },
+
+  cancelAck(_ctx, t, callId) {
+    throw new Error(
+      `engine.prim: PrimThread ${t.id} received unexpected cancelAck (callId=${callId}) — no children expected`,
+    );
+  },
+
   ask: (ctx, t, askId, kind, childCallId) =>
     defaultAskProxy<PrimThread>(ctx, t as PrimThread, askId, kind, childCallId),
-  askAck: (ctx, t, askId, value) =>
-    defaultAskAckProxy<PrimThread>(ctx, t as PrimThread, askId, value),
+
+  /**
+   * After a `PrimRaiseRequest` we emit one upward `ask` and never
+   * expect a meaningful reply — every request a prim raises today has
+   * static return type `never`, so the handler that catches it must
+   * `break` rather than `next`. If an `askAck` slips through anyway
+   * (e.g. a future relaxation of the rule), drop it as a noop.
+   */
+  askAck(ctx, t, askId, _value) {
+    if (t.pendingAskId !== undefined && t.pendingAskId === askId) {
+      ctx.log("debug", "engine.prim: dropped askAck for never-returning request", {
+        threadId: t.id,
+        askId,
+      });
+      return;
+    }
+    // Unknown askId — surface as a debug log; askIdMap forwarding
+    // doesn't apply because PrimThread has no children.
+    ctx.log("debug", "engine.prim: askAck with no matching pending ask", {
+      threadId: t.id,
+      askId,
+    });
+  },
 };
+
+/**
+ * Convert a `PrimRaiseRequest` into an upward `ask` event of kind
+ * `request`. Mirrors `emitThrowEscalate` but parameterised on the
+ * request id + args the prim chose. The thread is left alive with
+ * `pendingAskId` set so the upcoming cancel cascade can ack cleanly.
+ */
+function emitPrimRaise(
+  ctx: StepCtx,
+  t: PrimThread,
+  err: PrimRaiseRequest,
+): void {
+  if (t.parent === null || t.parentCallId === null) {
+    ctx.log("warn", "engine.prim: raise at root thread with no parent", {
+      threadId: t.id,
+      reqId: err.reqId,
+    });
+    return;
+  }
+  const askId: AskId = allocAskId(t as Thread);
+  t.pendingAskId = askId;
+  ctx.enqueue({
+    kind: "ask",
+    target: t.parent,
+    askId,
+    askKind: {
+      kind: "request",
+      reqId: err.reqId,
+      args: { ...err.args },
+    },
+    childCallId: t.parentCallId,
+  });
+}
 
 // ─── get_metadata ──────────────────────────────────────────────────────────
 //

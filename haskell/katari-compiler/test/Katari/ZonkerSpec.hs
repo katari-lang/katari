@@ -426,10 +426,11 @@ defensiveFallback = describe "defensive fallback for Solver bug" $ do
     let (zr, zonkErrs) = zonk idResult cg (mkPartialSolverResult [] [])
     -- 少なくとも 1 つは ZonkErrorMissingTypeVar が出る
     any isMissingTypeVar zonkErrs `shouldBe` True
-    -- AST 自体は生成されている。stdlib の 'prim' モジュールが
+    -- AST 自体は生成されている。stdlib モジュール群
+    -- ('primitive' + 'primitive.json' + 'primitive.record') が
     -- 'Compile.identifyWithStdlib' により追加されるので、ユーザ "main"
-    -- とあわせて 2 つ。
-    Map.size zr.zonkedModules `shouldBe` 2
+    -- とあわせて 4 つ。
+    Map.size zr.zonkedModules `shouldBe` 4
   where
     isMissingTypeVar = \case
       ZonkErrorMissingTypeVar _ _ -> True

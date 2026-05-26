@@ -121,11 +121,15 @@ allDelegateValueCalls ub irMod =
       DelegateTargetValue _ <- [db.target]
   ]
 
--- | Entries excluding builtin prims (module @"primitive"@). Useful for tests
--- that want to assert on user-defined declarations only.
+-- | Entries excluding builtin prims (the @"primitive"@ family of modules).
+-- Useful for tests that want to assert on user-defined declarations only.
 userEntries :: IRModule -> [QualifiedName]
 userEntries irMod =
-  [qn | qn <- Map.keys irMod.entries, qn.module_ /= "primitive"]
+  [ qn
+    | qn <- Map.keys irMod.entries,
+      qn.module_ /= "primitive",
+      not ("primitive." `Text.isPrefixOf` qn.module_)
+  ]
 
 -- | Look up the BlockId for a primitive by name.
 primId :: Text -> IRModule -> Maybe BlockId

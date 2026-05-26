@@ -599,222 +599,6 @@
     "requests": []
   },
   {
-    "description": "Construct an empty record.",
-    "input": {
-      "additionalProperties": false,
-      "properties": {},
-      "required": [],
-      "type": "object"
-    },
-    "name": "primitive.record_empty",
-    "output": {
-      "additionalProperties": true,
-      "properties": {},
-      "required": [],
-      "type": "object"
-    },
-    "requests": []
-  },
-  {
-    "description": "Retrieve a record entry by key. Returns null when the key is absent.",
-    "input": {
-      "additionalProperties": false,
-      "properties": {
-        "key": {
-          "type": "string"
-        },
-        "record": {
-          "additionalProperties": true,
-          "properties": {},
-          "required": [],
-          "type": "object"
-        }
-      },
-      "required": [
-        "key",
-        "record"
-      ],
-      "type": "object"
-    },
-    "name": "primitive.record_get",
-    "output": {},
-    "requests": []
-  },
-  {
-    "description": "Insert or replace an entry, returning a fresh record (records are immutable).",
-    "input": {
-      "additionalProperties": false,
-      "properties": {
-        "key": {
-          "type": "string"
-        },
-        "record": {
-          "additionalProperties": true,
-          "properties": {},
-          "required": [],
-          "type": "object"
-        },
-        "value": {}
-      },
-      "required": [
-        "key",
-        "record",
-        "value"
-      ],
-      "type": "object"
-    },
-    "name": "primitive.record_set",
-    "output": {
-      "additionalProperties": true,
-      "properties": {},
-      "required": [],
-      "type": "object"
-    },
-    "requests": []
-  },
-  {
-    "description": "Remove an entry by key. Returns the record unchanged when the key is absent.",
-    "input": {
-      "additionalProperties": false,
-      "properties": {
-        "key": {
-          "type": "string"
-        },
-        "record": {
-          "additionalProperties": true,
-          "properties": {},
-          "required": [],
-          "type": "object"
-        }
-      },
-      "required": [
-        "key",
-        "record"
-      ],
-      "type": "object"
-    },
-    "name": "primitive.record_remove",
-    "output": {
-      "additionalProperties": true,
-      "properties": {},
-      "required": [],
-      "type": "object"
-    },
-    "requests": []
-  },
-  {
-    "description": "List the keys present in the record (insertion order is not guaranteed).",
-    "input": {
-      "additionalProperties": false,
-      "properties": {
-        "record": {
-          "additionalProperties": true,
-          "properties": {},
-          "required": [],
-          "type": "object"
-        }
-      },
-      "required": [
-        "record"
-      ],
-      "type": "object"
-    },
-    "name": "primitive.record_keys",
-    "output": {
-      "items": {
-        "type": "string"
-      },
-      "type": "array"
-    },
-    "requests": []
-  },
-  {
-    "description": "True if the record carries an entry under the given key.",
-    "input": {
-      "additionalProperties": false,
-      "properties": {
-        "key": {
-          "type": "string"
-        },
-        "record": {
-          "additionalProperties": true,
-          "properties": {},
-          "required": [],
-          "type": "object"
-        }
-      },
-      "required": [
-        "key",
-        "record"
-      ],
-      "type": "object"
-    },
-    "name": "primitive.record_has",
-    "output": {
-      "type": "boolean"
-    },
-    "requests": []
-  },
-  {
-    "description": "Number of entries in the record.",
-    "input": {
-      "additionalProperties": false,
-      "properties": {
-        "record": {
-          "additionalProperties": true,
-          "properties": {},
-          "required": [],
-          "type": "object"
-        }
-      },
-      "required": [
-        "record"
-      ],
-      "type": "object"
-    },
-    "name": "primitive.record_size",
-    "output": {
-      "type": "integer"
-    },
-    "requests": []
-  },
-  {
-    "description": "Parse a JSON-encoded string into the closest native Katari value (null / boolean / integer / number / string / array / record). Raises `throw` with a parse-error message on invalid input.",
-    "input": {
-      "additionalProperties": false,
-      "properties": {
-        "text": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "text"
-      ],
-      "type": "object"
-    },
-    "name": "primitive.json_parse",
-    "output": {},
-    "requests": []
-  },
-  {
-    "description": "Serialize a value to canonical JSON text. Refuses callables and secrets (those have no JSON representation) by raising `throw`.",
-    "input": {
-      "additionalProperties": false,
-      "properties": {
-        "value": {}
-      },
-      "required": [
-        "value"
-      ],
-      "type": "object"
-    },
-    "name": "primitive.json_stringify",
-    "output": {
-      "type": "string"
-    },
-    "requests": []
-  },
-  {
     "description": "Return the AI metadata of any callable value.",
     "input": {
       "additionalProperties": false,
@@ -1032,6 +816,1250 @@
     "name": "primitive.set_env",
     "output": {
       "type": "null"
+    },
+    "requests": []
+  },
+  {
+    "description": "JSON null. The unit-shaped variant of the `json` union.",
+    "input": {
+      "additionalProperties": false,
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "name": "primitive.json_null",
+    "output": {
+      "additionalProperties": false,
+      "properties": {
+        "$constructor": {
+          "const": "primitive.json_null"
+        }
+      },
+      "required": [
+        "$constructor"
+      ],
+      "type": "object"
+    },
+    "requests": []
+  },
+  {
+    "description": "JSON boolean.",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "value": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "value"
+      ],
+      "type": "object"
+    },
+    "name": "primitive.json_boolean",
+    "output": {
+      "additionalProperties": false,
+      "properties": {
+        "$constructor": {
+          "const": "primitive.json_boolean"
+        },
+        "value": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "$constructor",
+        "value"
+      ],
+      "type": "object"
+    },
+    "requests": []
+  },
+  {
+    "description": "JSON integral number. Distinct from `json_number` so that round-trips through `parse` -> `stringify` preserve integer-vs-fractional form.",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "value": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "value"
+      ],
+      "type": "object"
+    },
+    "name": "primitive.json_integer",
+    "output": {
+      "additionalProperties": false,
+      "properties": {
+        "$constructor": {
+          "const": "primitive.json_integer"
+        },
+        "value": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "$constructor",
+        "value"
+      ],
+      "type": "object"
+    },
+    "requests": []
+  },
+  {
+    "description": "JSON non-integral number.",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "value": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "value"
+      ],
+      "type": "object"
+    },
+    "name": "primitive.json_number",
+    "output": {
+      "additionalProperties": false,
+      "properties": {
+        "$constructor": {
+          "const": "primitive.json_number"
+        },
+        "value": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "$constructor",
+        "value"
+      ],
+      "type": "object"
+    },
+    "requests": []
+  },
+  {
+    "description": "JSON string.",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "value": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "value"
+      ],
+      "type": "object"
+    },
+    "name": "primitive.json_string",
+    "output": {
+      "additionalProperties": false,
+      "properties": {
+        "$constructor": {
+          "const": "primitive.json_string"
+        },
+        "value": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "$constructor",
+        "value"
+      ],
+      "type": "object"
+    },
+    "requests": []
+  },
+  {
+    "description": "JSON array of further `json` values.",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "items": {
+          "items": {
+            "anyOf": [
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "$constructor": {
+                    "const": "primitive.json_null"
+                  }
+                },
+                "required": [
+                  "$constructor"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "$constructor": {
+                    "const": "primitive.json_boolean"
+                  },
+                  "value": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "$constructor",
+                  "value"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "$constructor": {
+                    "const": "primitive.json_integer"
+                  },
+                  "value": {
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "$constructor",
+                  "value"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "$constructor": {
+                    "const": "primitive.json_number"
+                  },
+                  "value": {
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "$constructor",
+                  "value"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "$constructor": {
+                    "const": "primitive.json_string"
+                  },
+                  "value": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "$constructor",
+                  "value"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "$constructor": {
+                    "const": "primitive.json_array"
+                  },
+                  "items": {
+                    "items": {
+                      "anyOf": [
+                        {
+                          "additionalProperties": false,
+                          "properties": {
+                            "$constructor": {
+                              "const": "primitive.json_null"
+                            }
+                          },
+                          "required": [
+                            "$constructor"
+                          ],
+                          "type": "object"
+                        },
+                        {
+                          "additionalProperties": false,
+                          "properties": {
+                            "$constructor": {
+                              "const": "primitive.json_boolean"
+                            },
+                            "value": {
+                              "type": "boolean"
+                            }
+                          },
+                          "required": [
+                            "$constructor",
+                            "value"
+                          ],
+                          "type": "object"
+                        },
+                        {
+                          "additionalProperties": false,
+                          "properties": {
+                            "$constructor": {
+                              "const": "primitive.json_integer"
+                            },
+                            "value": {
+                              "type": "integer"
+                            }
+                          },
+                          "required": [
+                            "$constructor",
+                            "value"
+                          ],
+                          "type": "object"
+                        },
+                        {
+                          "additionalProperties": false,
+                          "properties": {
+                            "$constructor": {
+                              "const": "primitive.json_number"
+                            },
+                            "value": {
+                              "type": "number"
+                            }
+                          },
+                          "required": [
+                            "$constructor",
+                            "value"
+                          ],
+                          "type": "object"
+                        },
+                        {
+                          "additionalProperties": false,
+                          "properties": {
+                            "$constructor": {
+                              "const": "primitive.json_string"
+                            },
+                            "value": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "$constructor",
+                            "value"
+                          ],
+                          "type": "object"
+                        },
+                        {},
+                        {
+                          "additionalProperties": false,
+                          "properties": {
+                            "$constructor": {
+                              "const": "primitive.json_object"
+                            },
+                            "entries": {
+                              "additionalProperties": true,
+                              "properties": {},
+                              "required": [],
+                              "type": "object"
+                            }
+                          },
+                          "required": [
+                            "$constructor",
+                            "entries"
+                          ],
+                          "type": "object"
+                        }
+                      ]
+                    },
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "$constructor",
+                  "items"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "$constructor": {
+                    "const": "primitive.json_object"
+                  },
+                  "entries": {
+                    "additionalProperties": true,
+                    "properties": {},
+                    "required": [],
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "$constructor",
+                  "entries"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "items"
+      ],
+      "type": "object"
+    },
+    "name": "primitive.json_array",
+    "output": {
+      "additionalProperties": false,
+      "properties": {
+        "$constructor": {
+          "const": "primitive.json_array"
+        },
+        "items": {
+          "items": {
+            "anyOf": [
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "$constructor": {
+                    "const": "primitive.json_null"
+                  }
+                },
+                "required": [
+                  "$constructor"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "$constructor": {
+                    "const": "primitive.json_boolean"
+                  },
+                  "value": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "$constructor",
+                  "value"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "$constructor": {
+                    "const": "primitive.json_integer"
+                  },
+                  "value": {
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "$constructor",
+                  "value"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "$constructor": {
+                    "const": "primitive.json_number"
+                  },
+                  "value": {
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "$constructor",
+                  "value"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "$constructor": {
+                    "const": "primitive.json_string"
+                  },
+                  "value": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "$constructor",
+                  "value"
+                ],
+                "type": "object"
+              },
+              {},
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "$constructor": {
+                    "const": "primitive.json_object"
+                  },
+                  "entries": {
+                    "additionalProperties": true,
+                    "properties": {},
+                    "required": [],
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "$constructor",
+                  "entries"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "$constructor",
+        "items"
+      ],
+      "type": "object"
+    },
+    "requests": []
+  },
+  {
+    "description": "JSON object: a record (homogeneous string-keyed map) of further `json` values.",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "entries": {
+          "additionalProperties": true,
+          "properties": {},
+          "required": [],
+          "type": "object"
+        }
+      },
+      "required": [
+        "entries"
+      ],
+      "type": "object"
+    },
+    "name": "primitive.json_object",
+    "output": {
+      "additionalProperties": false,
+      "properties": {
+        "$constructor": {
+          "const": "primitive.json_object"
+        },
+        "entries": {
+          "additionalProperties": true,
+          "properties": {},
+          "required": [],
+          "type": "object"
+        }
+      },
+      "required": [
+        "$constructor",
+        "entries"
+      ],
+      "type": "object"
+    },
+    "requests": []
+  },
+  {
+    "description": "Raised by `json.parse` when the input text is not valid JSON. Handle via `request json_parse_error(message) { ... }`.",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "message"
+      ],
+      "type": "object"
+    },
+    "name": "primitive.json_parse_error",
+    "output": {
+      "not": {}
+    },
+    "requests": [
+      {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "message": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "message"
+          ],
+          "type": "object"
+        },
+        "name": "primitive.json_parse_error",
+        "output": {
+          "not": {}
+        }
+      }
+    ]
+  },
+  {
+    "description": "Parse a JSON-encoded string into a `json` value. Raises `json_parse_error` on malformed input.",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "text"
+      ],
+      "type": "object"
+    },
+    "name": "primitive.json.parse",
+    "output": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "$constructor": {
+              "const": "primitive.json_null"
+            }
+          },
+          "required": [
+            "$constructor"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "$constructor": {
+              "const": "primitive.json_boolean"
+            },
+            "value": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "$constructor",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "$constructor": {
+              "const": "primitive.json_integer"
+            },
+            "value": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "$constructor",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "$constructor": {
+              "const": "primitive.json_number"
+            },
+            "value": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "$constructor",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "$constructor": {
+              "const": "primitive.json_string"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "$constructor",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "$constructor": {
+              "const": "primitive.json_array"
+            },
+            "items": {
+              "items": {
+                "anyOf": [
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "$constructor": {
+                        "const": "primitive.json_null"
+                      }
+                    },
+                    "required": [
+                      "$constructor"
+                    ],
+                    "type": "object"
+                  },
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "$constructor": {
+                        "const": "primitive.json_boolean"
+                      },
+                      "value": {
+                        "type": "boolean"
+                      }
+                    },
+                    "required": [
+                      "$constructor",
+                      "value"
+                    ],
+                    "type": "object"
+                  },
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "$constructor": {
+                        "const": "primitive.json_integer"
+                      },
+                      "value": {
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "$constructor",
+                      "value"
+                    ],
+                    "type": "object"
+                  },
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "$constructor": {
+                        "const": "primitive.json_number"
+                      },
+                      "value": {
+                        "type": "number"
+                      }
+                    },
+                    "required": [
+                      "$constructor",
+                      "value"
+                    ],
+                    "type": "object"
+                  },
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "$constructor": {
+                        "const": "primitive.json_string"
+                      },
+                      "value": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "$constructor",
+                      "value"
+                    ],
+                    "type": "object"
+                  },
+                  {},
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "$constructor": {
+                        "const": "primitive.json_object"
+                      },
+                      "entries": {
+                        "additionalProperties": true,
+                        "properties": {},
+                        "required": [],
+                        "type": "object"
+                      }
+                    },
+                    "required": [
+                      "$constructor",
+                      "entries"
+                    ],
+                    "type": "object"
+                  }
+                ]
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "$constructor",
+            "items"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "$constructor": {
+              "const": "primitive.json_object"
+            },
+            "entries": {
+              "additionalProperties": true,
+              "properties": {},
+              "required": [],
+              "type": "object"
+            }
+          },
+          "required": [
+            "$constructor",
+            "entries"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "requests": [
+      {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "message": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "message"
+          ],
+          "type": "object"
+        },
+        "name": "primitive.json_parse_error",
+        "output": {
+          "not": {}
+        }
+      }
+    ]
+  },
+  {
+    "description": "Serialize a `json` value to canonical JSON text. The static type rules out closures / secrets / arbitrary tagged values, so this primitive is total (no runtime error path).",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "value": {
+          "anyOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "$constructor": {
+                  "const": "primitive.json_null"
+                }
+              },
+              "required": [
+                "$constructor"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "$constructor": {
+                  "const": "primitive.json_boolean"
+                },
+                "value": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "$constructor",
+                "value"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "$constructor": {
+                  "const": "primitive.json_integer"
+                },
+                "value": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "$constructor",
+                "value"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "$constructor": {
+                  "const": "primitive.json_number"
+                },
+                "value": {
+                  "type": "number"
+                }
+              },
+              "required": [
+                "$constructor",
+                "value"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "$constructor": {
+                  "const": "primitive.json_string"
+                },
+                "value": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "$constructor",
+                "value"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "$constructor": {
+                  "const": "primitive.json_array"
+                },
+                "items": {
+                  "items": {
+                    "anyOf": [
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "$constructor": {
+                            "const": "primitive.json_null"
+                          }
+                        },
+                        "required": [
+                          "$constructor"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "$constructor": {
+                            "const": "primitive.json_boolean"
+                          },
+                          "value": {
+                            "type": "boolean"
+                          }
+                        },
+                        "required": [
+                          "$constructor",
+                          "value"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "$constructor": {
+                            "const": "primitive.json_integer"
+                          },
+                          "value": {
+                            "type": "integer"
+                          }
+                        },
+                        "required": [
+                          "$constructor",
+                          "value"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "$constructor": {
+                            "const": "primitive.json_number"
+                          },
+                          "value": {
+                            "type": "number"
+                          }
+                        },
+                        "required": [
+                          "$constructor",
+                          "value"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "$constructor": {
+                            "const": "primitive.json_string"
+                          },
+                          "value": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "$constructor",
+                          "value"
+                        ],
+                        "type": "object"
+                      },
+                      {},
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "$constructor": {
+                            "const": "primitive.json_object"
+                          },
+                          "entries": {
+                            "additionalProperties": true,
+                            "properties": {},
+                            "required": [],
+                            "type": "object"
+                          }
+                        },
+                        "required": [
+                          "$constructor",
+                          "entries"
+                        ],
+                        "type": "object"
+                      }
+                    ]
+                  },
+                  "type": "array"
+                }
+              },
+              "required": [
+                "$constructor",
+                "items"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "$constructor": {
+                  "const": "primitive.json_object"
+                },
+                "entries": {
+                  "additionalProperties": true,
+                  "properties": {},
+                  "required": [],
+                  "type": "object"
+                }
+              },
+              "required": [
+                "$constructor",
+                "entries"
+              ],
+              "type": "object"
+            }
+          ]
+        }
+      },
+      "required": [
+        "value"
+      ],
+      "type": "object"
+    },
+    "name": "primitive.json.stringify",
+    "output": {
+      "type": "string"
+    },
+    "requests": []
+  },
+  {
+    "description": "Construct an empty record.",
+    "input": {
+      "additionalProperties": false,
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "name": "primitive.record.empty",
+    "output": {
+      "additionalProperties": true,
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "requests": []
+  },
+  {
+    "description": "Retrieve a record entry by key. Returns null when the key is absent.",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "key": {
+          "type": "string"
+        },
+        "record": {
+          "additionalProperties": true,
+          "properties": {},
+          "required": [],
+          "type": "object"
+        }
+      },
+      "required": [
+        "key",
+        "record"
+      ],
+      "type": "object"
+    },
+    "name": "primitive.record.get",
+    "output": {},
+    "requests": []
+  },
+  {
+    "description": "Insert or replace an entry, returning a fresh record (records are immutable).",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "key": {
+          "type": "string"
+        },
+        "record": {
+          "additionalProperties": true,
+          "properties": {},
+          "required": [],
+          "type": "object"
+        },
+        "value": {}
+      },
+      "required": [
+        "key",
+        "record",
+        "value"
+      ],
+      "type": "object"
+    },
+    "name": "primitive.record.set",
+    "output": {
+      "additionalProperties": true,
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "requests": []
+  },
+  {
+    "description": "Remove an entry by key. Returns the record unchanged when the key is absent.",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "key": {
+          "type": "string"
+        },
+        "record": {
+          "additionalProperties": true,
+          "properties": {},
+          "required": [],
+          "type": "object"
+        }
+      },
+      "required": [
+        "key",
+        "record"
+      ],
+      "type": "object"
+    },
+    "name": "primitive.record.remove",
+    "output": {
+      "additionalProperties": true,
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "requests": []
+  },
+  {
+    "description": "List the keys present in the record (insertion order is not guaranteed).",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "record": {
+          "additionalProperties": true,
+          "properties": {},
+          "required": [],
+          "type": "object"
+        }
+      },
+      "required": [
+        "record"
+      ],
+      "type": "object"
+    },
+    "name": "primitive.record.keys",
+    "output": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "requests": []
+  },
+  {
+    "description": "True if the record carries an entry under the given key.",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "key": {
+          "type": "string"
+        },
+        "record": {
+          "additionalProperties": true,
+          "properties": {},
+          "required": [],
+          "type": "object"
+        }
+      },
+      "required": [
+        "key",
+        "record"
+      ],
+      "type": "object"
+    },
+    "name": "primitive.record.has",
+    "output": {
+      "type": "boolean"
+    },
+    "requests": []
+  },
+  {
+    "description": "Number of entries in the record.",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "record": {
+          "additionalProperties": true,
+          "properties": {},
+          "required": [],
+          "type": "object"
+        }
+      },
+      "required": [
+        "record"
+      ],
+      "type": "object"
+    },
+    "name": "primitive.record.size",
+    "output": {
+      "type": "integer"
     },
     "requests": []
   }

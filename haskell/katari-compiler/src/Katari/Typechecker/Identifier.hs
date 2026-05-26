@@ -1091,9 +1091,20 @@ buildTopLevels moduleNameToId exports moduleMap =
     buildOne (currentModuleName, parsedModule) = do
       let ownExports = Map.findWithDefault Map.empty currentModuleName exports
       base <-
-        if Prim.isPrimReservedModuleName currentModuleName
+        -- The root @primitive@ module skips the prim injection (it
+        -- can't inject itself into itself). @primitive.X@ sub-modules
+        -- DO get the root's flat exports (so they can reference @json@
+        -- / @json_parse_error@ etc.) — but they intentionally do NOT
+        -- get sibling sub-module aliases auto-injected, otherwise a
+        -- parameter named e.g. @record@ inside @primitive.record@
+        -- would shadow its own module alias and trip K0101.
+        if currentModuleName == "primitive"
           then pure ownExports
-          else injectPrimitives parsedModule.sourceSpan ownExports
+          else
+            injectPrimitives
+              (Prim.isPrimReservedModuleName currentModuleName)
+              parsedModule.sourceSpan
+              ownExports
       table <- foldM addImport base parsedModule.declarations
       pure (currentModuleName, table)
 
@@ -1101,13 +1112,49 @@ buildTopLevels moduleNameToId exports moduleMap =
     -- now declares prims as ordinary 'PrimAgentDeclaration' entries, so
     -- they show up in @exports["primitive"]@ via the normal export-table
     -- build.
+    --
+    -- After the root exports, also inject @primitive.X@ sub-modules as
+    -- module aliases under their tail name @X@ — so users can write
+    -- @json.parse(...)@ / @record.get(...)@ without an explicit
+    -- @import primitive.json as json@ statement. Conflicts surface as
+    -- 'ErrorPrimitiveConflict' the same way root-export collisions do.
     injectPrimitives ::
+      Bool ->
       SourceSpan ->
       Map Text SymbolEntry ->
       Identifier (Map Text SymbolEntry)
-    injectPrimitives moduleSourceSpan userTable = do
+    injectPrimitives isStdlibSubModule moduleSourceSpan userTable = do
       let rootExports = Map.findWithDefault Map.empty "primitive" exports
-      foldM (injectOne moduleSourceSpan) userTable (Map.toList rootExports)
+      base <- foldM (injectOne moduleSourceSpan) userTable (Map.toList rootExports)
+      if isStdlibSubModule
+        then pure base
+        else foldM (injectSubModule moduleSourceSpan) base (Map.toList moduleNameToId)
+
+    injectSubModule ::
+      SourceSpan ->
+      Map Text SymbolEntry ->
+      (Text, ModuleId) ->
+      Identifier (Map Text SymbolEntry)
+    injectSubModule moduleSourceSpan table (fullName, mid) =
+      case T.stripPrefix "primitive." fullName of
+        Nothing -> pure table
+        -- Only one dot allowed: nested sub-sub-modules (if ever added)
+        -- would risk shadow collisions and are intentionally not
+        -- auto-injected by tail.
+        Just tail_
+          | T.any (== '.') tail_ -> pure table
+          | otherwise ->
+              -- Merge into the table: the tail name @json@ may already
+              -- exist as a type (e.g. the @type json = …@ synonym
+              -- exported by the root @primitive@ module). The two
+              -- namespaces — type vs module — are independent slots, so
+              -- 'insertSymbolEntry' fills the @moduleSymbol@ slot
+              -- without clobbering @typeSymbol@.
+              insertSymbolEntry
+                moduleSourceSpan
+                tail_
+                (singletonModule mid)
+                table
 
     injectOne ::
       SourceSpan ->

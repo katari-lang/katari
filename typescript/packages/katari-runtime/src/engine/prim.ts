@@ -1,5 +1,16 @@
 // Built-in primitive registry. Pure functions: `(args) => Value`.
 //
+// Two failure modes:
+//   - `RecoverableEngineError` — generic recoverable error; bubbles up
+//     as the universal `primitive.throw` request (see
+//     `emitThrowEscalate`).
+//   - `PrimRaiseRequest` — the prim wants to surface a specific
+//     never-returning request (e.g. `json_parse_error`). The PrimThread
+//     emits an `ask` of that request upward; whatever handler catches
+//     it must `break` out of its enclosing handle scope, which in turn
+//     cancels this thread. If no handler catches, the ask escalates to
+//     the API Module and terminates the run.
+//
 // Bad arguments raise `RecoverableEngineError` so a single agent's mistake
 // doesn't poison the version. Adding a prim here means coordinating with
 // the Haskell side's `Katari.Builtins` registry — names must match.
@@ -7,7 +18,29 @@
 import { match, P } from "ts-pattern";
 import { RecoverableEngineError } from "./errors.js";
 import { valueToRaw } from "../value-codec.js";
+import type { QualifiedName } from "../ir/types.js";
 import type { Value } from "./value.js";
+
+/**
+ * Thrown by a primitive to raise a specific (never-returning) request
+ * instead of returning a value. The PrimThread catches this and emits
+ * the corresponding `ask` upward; this thread then waits in a
+ * "running, but emitted-an-ask" state until the cancel cascade from
+ * whatever handler caught the request reaches it.
+ *
+ * Use for failure modes that should be statically visible in the prim's
+ * type (`with foo_error` clause) — generic recoverable errors should
+ * stay with `RecoverableEngineError`.
+ */
+export class PrimRaiseRequest extends Error {
+  readonly reqId: QualifiedName;
+  readonly args: Record<string, Value>;
+  constructor(reqId: QualifiedName, args: Record<string, Value>) {
+    super(`prim raised request '${reqId}'`);
+    this.reqId = reqId;
+    this.args = args;
+  }
+}
 
 export function executePrim(name: string, args: Record<string, Value>): Value {
   switch (name) {
@@ -144,34 +177,34 @@ export function executePrim(name: string, args: Record<string, Value>): Value {
       }
       throw new RecoverableEngineError("prim get_field: invalid args");
     }
-    case "record_empty": {
+    case "record.empty": {
       return { kind: "record", entries: Object.create(null) };
     }
-    case "record_get": {
+    case "record.get": {
       const r = req(args, "record"), key = req(args, "key");
       if (r.kind !== "record") {
         throw new RecoverableEngineError(
-          `prim record_get: first argument must be a record, got ${r.kind}`,
+          `prim record.get: first argument must be a record, got ${r.kind}`,
         );
       }
       if (key.kind !== "string") {
         throw new RecoverableEngineError(
-          `prim record_get: key must be a string, got ${key.kind}`,
+          `prim record.get: key must be a string, got ${key.kind}`,
         );
       }
       const v = r.entries[key.value];
       return v === undefined ? { kind: "null" } : v;
     }
-    case "record_set": {
+    case "record.set": {
       const r = req(args, "record"), key = req(args, "key"), value = req(args, "value");
       if (r.kind !== "record") {
         throw new RecoverableEngineError(
-          `prim record_set: first argument must be a record, got ${r.kind}`,
+          `prim record.set: first argument must be a record, got ${r.kind}`,
         );
       }
       if (key.kind !== "string") {
         throw new RecoverableEngineError(
-          `prim record_set: key must be a string, got ${key.kind}`,
+          `prim record.set: key must be a string, got ${key.kind}`,
         );
       }
       const next: Record<string, Value> = Object.create(null);
@@ -181,16 +214,16 @@ export function executePrim(name: string, args: Record<string, Value>): Value {
       next[key.value] = value;
       return { kind: "record", entries: next };
     }
-    case "record_remove": {
+    case "record.remove": {
       const r = req(args, "record"), key = req(args, "key");
       if (r.kind !== "record") {
         throw new RecoverableEngineError(
-          `prim record_remove: first argument must be a record, got ${r.kind}`,
+          `prim record.remove: first argument must be a record, got ${r.kind}`,
         );
       }
       if (key.kind !== "string") {
         throw new RecoverableEngineError(
-          `prim record_remove: key must be a string, got ${key.kind}`,
+          `prim record.remove: key must be a string, got ${key.kind}`,
         );
       }
       if (!(key.value in r.entries)) return r;
@@ -200,11 +233,11 @@ export function executePrim(name: string, args: Record<string, Value>): Value {
       }
       return { kind: "record", entries: next };
     }
-    case "record_keys": {
+    case "record.keys": {
       const r = req(args, "record");
       if (r.kind !== "record") {
         throw new RecoverableEngineError(
-          `prim record_keys: argument must be a record, got ${r.kind}`,
+          `prim record.keys: argument must be a record, got ${r.kind}`,
         );
       }
       const keys = Object.keys(r.entries).map(
@@ -212,34 +245,34 @@ export function executePrim(name: string, args: Record<string, Value>): Value {
       );
       return { kind: "array", elements: keys };
     }
-    case "record_has": {
+    case "record.has": {
       const r = req(args, "record"), key = req(args, "key");
       if (r.kind !== "record") {
         throw new RecoverableEngineError(
-          `prim record_has: first argument must be a record, got ${r.kind}`,
+          `prim record.has: first argument must be a record, got ${r.kind}`,
         );
       }
       if (key.kind !== "string") {
         throw new RecoverableEngineError(
-          `prim record_has: key must be a string, got ${key.kind}`,
+          `prim record.has: key must be a string, got ${key.kind}`,
         );
       }
       return { kind: "boolean", value: key.value in r.entries };
     }
-    case "record_size": {
+    case "record.size": {
       const r = req(args, "record");
       if (r.kind !== "record") {
         throw new RecoverableEngineError(
-          `prim record_size: argument must be a record, got ${r.kind}`,
+          `prim record.size: argument must be a record, got ${r.kind}`,
         );
       }
       return { kind: "number", value: Object.keys(r.entries).length };
     }
-    case "json_parse": {
+    case "json.parse": {
       const text = req(args, "text");
       if (text.kind !== "string") {
         throw new RecoverableEngineError(
-          `prim json_parse: argument must be a string, got ${text.kind}`,
+          `prim json.parse: argument must be a string, got ${text.kind}`,
         );
       }
       let parsed: unknown;
@@ -247,13 +280,15 @@ export function executePrim(name: string, args: Record<string, Value>): Value {
         parsed = JSON.parse(text.value);
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
-        throw new RecoverableEngineError(`prim json_parse: invalid JSON: ${msg}`);
+        throw new PrimRaiseRequest("primitive.json_parse_error", {
+          message: { kind: "string", value: `invalid JSON: ${msg}` },
+        });
       }
-      return jsonToValue(parsed);
+      return jsonToTagged(parsed);
     }
-    case "json_stringify": {
+    case "json.stringify": {
       const value = req(args, "value");
-      const raw = valueToJsonRaw(value);
+      const raw = jsonTaggedToRaw(value);
       return { kind: "string", value: JSON.stringify(raw) };
     }
     default:
@@ -261,70 +296,132 @@ export function executePrim(name: string, args: Record<string, Value>): Value {
   }
 }
 
-// JSON → Value: maps standard JSON shapes to native Katari runtime
-// values. Integral numbers stay as integers (no separate runtime
-// distinction; type-pattern `integer(x)` checks via Number.isInteger).
-// Objects become records (homogeneous map; the discriminator-routing
-// done at the wire boundary doesn't apply here — we're past it).
-function jsonToValue(raw: unknown): Value {
-  if (raw === null) return { kind: "null" };
-  if (typeof raw === "boolean") return { kind: "boolean", value: raw };
-  if (typeof raw === "number") return { kind: "number", value: raw };
-  if (typeof raw === "string") return { kind: "string", value: raw };
+// Qualified-name constants for the `json` data constructors that live
+// in the root `primitive` module. Kept here (rather than fed in from
+// IR) because these are well-known stdlib types and the codec needs
+// exact ctorId strings to construct / destructure tagged values.
+const JSON_NULL_QNAME = "primitive.json_null";
+const JSON_BOOLEAN_QNAME = "primitive.json_boolean";
+const JSON_INTEGER_QNAME = "primitive.json_integer";
+const JSON_NUMBER_QNAME = "primitive.json_number";
+const JSON_STRING_QNAME = "primitive.json_string";
+const JSON_ARRAY_QNAME = "primitive.json_array";
+const JSON_OBJECT_QNAME = "primitive.json_object";
+
+// Parsed JSON → tagged `json` value. The runtime wraps each JSON shape
+// in its matching `primitive.json_*` constructor; the user pattern-
+// matches on those names to discriminate. Integral numbers go to
+// `json_integer` and fractional numbers to `json_number` so that a
+// stringify-after-parse round-trip preserves the integer-vs-fractional
+// form on the wire.
+function jsonToTagged(raw: unknown): Value {
+  if (raw === null) {
+    return { kind: "tagged", ctorId: JSON_NULL_QNAME, fields: {} };
+  }
+  if (typeof raw === "boolean") {
+    return {
+      kind: "tagged",
+      ctorId: JSON_BOOLEAN_QNAME,
+      fields: { value: { kind: "boolean", value: raw } },
+    };
+  }
+  if (typeof raw === "number") {
+    const ctorId = Number.isInteger(raw) ? JSON_INTEGER_QNAME : JSON_NUMBER_QNAME;
+    return {
+      kind: "tagged",
+      ctorId,
+      fields: { value: { kind: "number", value: raw } },
+    };
+  }
+  if (typeof raw === "string") {
+    return {
+      kind: "tagged",
+      ctorId: JSON_STRING_QNAME,
+      fields: { value: { kind: "string", value: raw } },
+    };
+  }
   if (Array.isArray(raw)) {
-    return { kind: "array", elements: raw.map(jsonToValue) };
+    return {
+      kind: "tagged",
+      ctorId: JSON_ARRAY_QNAME,
+      fields: {
+        items: { kind: "array", elements: raw.map(jsonToTagged) },
+      },
+    };
   }
   if (typeof raw === "object") {
     const entries: Record<string, Value> = Object.create(null);
     for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
-      entries[k] = jsonToValue(v);
+      entries[k] = jsonToTagged(v);
     }
-    return { kind: "record", entries };
+    return {
+      kind: "tagged",
+      ctorId: JSON_OBJECT_QNAME,
+      fields: { entries: { kind: "record", entries } },
+    };
   }
   throw new RecoverableEngineError(
-    `prim json_parse: unexpected JSON value of type ${typeof raw}`,
+    `prim json.parse: unexpected JSON value of type ${typeof raw}`,
   );
 }
 
-// Value → JSON: only values with a canonical JSON representation. The
-// Plan D wire codec (`$constructor` / `$agent` / `$secret`) is **not**
-// applied here — `json_stringify` is for user-visible JSON output, not
-// the internal wire format. Closures, agent literals, secrets, and
-// tagged values (data ctors) have no JSON shape, so they're rejected.
-function valueToJsonRaw(value: Value): unknown {
-  switch (value.kind) {
-    case "null":
+// Tagged `json` value → JSON-encodable raw. The compiler's `json` type
+// rules out non-json values statically so there is no runtime "unknown
+// shape" path: any value that lands here is one of the seven
+// `primitive.json_*` constructors. Defensive checks remain so a
+// compiler bug doesn't silently corrupt the output.
+function jsonTaggedToRaw(value: Value): unknown {
+  if (value.kind !== "tagged") {
+    throw new RecoverableEngineError(
+      `prim json.stringify: expected a json value, got ${value.kind} (compiler invariant violated)`,
+    );
+  }
+  switch (value.ctorId) {
+    case JSON_NULL_QNAME:
       return null;
-    case "boolean":
-      return value.value;
-    case "number":
-      return value.value;
-    case "string":
-      return value.value;
-    case "array":
-      return value.elements.map(valueToJsonRaw);
-    case "record": {
+    case JSON_BOOLEAN_QNAME: {
+      const f = value.fields["value"];
+      if (f?.kind !== "boolean") {
+        throw new RecoverableEngineError("prim json.stringify: json_boolean.value is not a boolean");
+      }
+      return f.value;
+    }
+    case JSON_INTEGER_QNAME:
+    case JSON_NUMBER_QNAME: {
+      const f = value.fields["value"];
+      if (f?.kind !== "number") {
+        throw new RecoverableEngineError(`prim json.stringify: ${value.ctorId}.value is not a number`);
+      }
+      return f.value;
+    }
+    case JSON_STRING_QNAME: {
+      const f = value.fields["value"];
+      if (f?.kind !== "string") {
+        throw new RecoverableEngineError("prim json.stringify: json_string.value is not a string");
+      }
+      return f.value;
+    }
+    case JSON_ARRAY_QNAME: {
+      const items = value.fields["items"];
+      if (items?.kind !== "array") {
+        throw new RecoverableEngineError("prim json.stringify: json_array.items is not an array");
+      }
+      return items.elements.map(jsonTaggedToRaw);
+    }
+    case JSON_OBJECT_QNAME: {
+      const entries = value.fields["entries"];
+      if (entries?.kind !== "record") {
+        throw new RecoverableEngineError("prim json.stringify: json_object.entries is not a record");
+      }
       const out: Record<string, unknown> = {};
-      for (const [k, v] of Object.entries(value.entries)) {
-        out[k] = valueToJsonRaw(v);
+      for (const [k, v] of Object.entries(entries.entries)) {
+        out[k] = jsonTaggedToRaw(v);
       }
       return out;
     }
-    case "tagged":
+    default:
       throw new RecoverableEngineError(
-        `prim json_stringify: cannot encode constructor '${value.ctorId}' as JSON`,
-      );
-    case "closure":
-      throw new RecoverableEngineError(
-        "prim json_stringify: cannot encode a closure as JSON",
-      );
-    case "agentLiteral":
-      throw new RecoverableEngineError(
-        "prim json_stringify: cannot encode an agent reference as JSON",
-      );
-    case "secret":
-      throw new RecoverableEngineError(
-        "prim json_stringify: refusing to encode a secret value as JSON (would launder taint)",
+        `prim json.stringify: unknown json constructor '${value.ctorId}' (compiler invariant violated)`,
       );
   }
 }

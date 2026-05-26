@@ -250,6 +250,15 @@ export type PrimThread = Common & {
   kind: "prim";
   primName: string;
   args: Record<string, Value>;
+  /**
+   * Set after the prim raised a custom request (e.g. `json_parse_error`)
+   * and the corresponding `ask` was emitted upward. The thread stays
+   * alive in a "waiting for cancel" state — for `-> never` requests no
+   * `askAck` is expected, but if one ever arrives we drop it as a
+   * defensive noop. The cancel cascade from whatever handler caught the
+   * request is what actually terminates this thread.
+   */
+  pendingAskId?: AskId;
 };
 
 export type CtorThread = Common & {

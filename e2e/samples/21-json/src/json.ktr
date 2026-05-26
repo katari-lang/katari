@@ -1,15 +1,20 @@
 @"Round-trips a small JSON object: parse -> extract -> re-encode."
-agent extract_name(payload: unknown) -> string {
+agent extract_name(payload: json) -> string {
   match (payload) {
-    case { name = string(n) } => { n }
+    case json_object(entries = e) => {
+      match (record.get(record = e, key = "name")) {
+        case json_string(value = s) => { s }
+        case _ => { "unknown" }
+      }
+    }
     case _ => { "unknown" }
   }
 }
 
 agent main() -> string {
   let original = "{\"name\":\"alice\",\"age\":30}"
-  let parsed = json_parse(text = original)
+  let parsed = json.parse(text = original)
   let name = extract_name(payload = parsed)
-  let echoed = json_stringify(value = parsed)
+  let echoed = json.stringify(value = parsed)
   f"name=${name}; echo=${echoed}"
 }

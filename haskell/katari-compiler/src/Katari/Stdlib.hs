@@ -33,7 +33,11 @@ import Data.Text qualified as Text
 -- stdlib snippets.
 stdlibSources :: Map Text Text
 stdlibSources =
-  Map.singleton "primitive" primStdlibSource
+  Map.fromList
+    [ ("primitive", primStdlibSource),
+      ("primitive.json", jsonStdlibSource),
+      ("primitive.record", recordStdlibSource)
+    ]
 
 -- | The set of module names occupied by 'stdlibSources'. Identifier
 -- skips its K0113 \"reserved prim module\" check for these names since
@@ -114,35 +118,6 @@ primStdlibSource =
       "@\"Retrieve a tuple element by positional index.\"",
       "primitive tuple_get(tuple: unknown, index: integer) -> unknown",
       "",
-      "// Record operations (homogeneous map; keys are strings).",
-      "@\"Construct an empty record.\"",
-      "primitive record_empty() -> record[unknown]",
-      "@\"Retrieve a record entry by key. Returns null when the key is absent.\"",
-      "primitive record_get(record: record[unknown], key: string) -> unknown",
-      "@\"Insert or replace an entry, returning a fresh record (records are immutable).\"",
-      "primitive record_set(record: record[unknown], key: string, value: unknown) -> record[unknown]",
-      "@\"Remove an entry by key. Returns the record unchanged when the key is absent.\"",
-      "primitive record_remove(record: record[unknown], key: string) -> record[unknown]",
-      "@\"List the keys present in the record (insertion order is not guaranteed).\"",
-      "primitive record_keys(record: record[unknown]) -> array[string]",
-      "@\"True if the record carries an entry under the given key.\"",
-      "primitive record_has(record: record[unknown], key: string) -> boolean",
-      "@\"Number of entries in the record.\"",
-      "primitive record_size(record: record[unknown]) -> integer",
-      "",
-      "// JSON. `json_parse` accepts any RFC-8259 JSON text and returns the",
-      "// closest matching native Katari value — JSON objects become",
-      "// records, arrays become arrays, numbers become integers when",
-      "// representable. Invalid input raises the recoverable `throw` cap",
-      "// so callers can recover with `request throw(msg) { ... }`.",
-      "// `json_stringify` is the inverse: any Katari value that has a",
-      "// pure JSON representation (no closures / agents / secrets) goes",
-      "// out as canonical JSON text.",
-      "@\"Parse a JSON-encoded string into the closest native Katari value (null / boolean / integer / number / string / array / record). Raises `throw` with a parse-error message on invalid input.\"",
-      "primitive json_parse(text: string) -> unknown",
-      "@\"Serialize a value to canonical JSON text. Refuses callables and secrets (those have no JSON representation) by raising `throw`.\"",
-      "primitive json_stringify(value: unknown) -> string",
-      "",
       "// Metadata.",
       "@\"Return the AI metadata of any callable value.\"",
       "primitive get_metadata(value: agent) -> agent_metadata",
@@ -168,5 +143,68 @@ primStdlibSource =
       "@\"Look up a secret env entry by key. The result is the disjoint `secret` type and never leaks into `print` / `to_string`. Raises `env_not_found` if the key is missing.\"",
       "external get_secret_env(key: string) -> secret with env_not_found from \"ENV:get_secret_env\"",
       "@\"Write an env entry. `is_secret = true` stores the value encrypted; reading it back requires `get_secret_env`.\"",
-      "external set_env(key: string, value: string, is_secret: boolean) -> null from \"ENV:set_env\""
+      "external set_env(key: string, value: string, is_secret: boolean) -> null from \"ENV:set_env\"",
+      "",
+      "// JSON data model. `json` is the union of the 7 RFC-8259 JSON value",
+      "// shapes; `primitive.json.parse` and `.stringify` exchange it across",
+      "// the wire. Constructors stay flat in the root `primitive` module",
+      "// (auto-injected) so users can write `case json_array(items = xs) =>`",
+      "// without qualification; the parse / stringify functions live in the",
+      "// `primitive.json` sub-module and are called as `json.parse(...)`.",
+      "@\"JSON null. The unit-shaped variant of the `json` union.\"",
+      "data json_null()",
+      "@\"JSON boolean.\"",
+      "data json_boolean(value: boolean)",
+      "@\"JSON integral number. Distinct from `json_number` so that round-trips through `parse` -> `stringify` preserve integer-vs-fractional form.\"",
+      "data json_integer(value: integer)",
+      "@\"JSON non-integral number.\"",
+      "data json_number(value: number)",
+      "@\"JSON string.\"",
+      "data json_string(value: string)",
+      "@\"JSON array of further `json` values.\"",
+      "data json_array(items: array[json])",
+      "@\"JSON object: a record (homogeneous string-keyed map) of further `json` values.\"",
+      "data json_object(entries: record[json])",
+      "// The standard JSON value union. Recursive via `json_array` /",
+      "// `json_object`; pattern-match on the seven constructors to discriminate.",
+      "type json = json_null | json_boolean | json_integer | json_number | json_string | json_array | json_object",
+      "@\"Raised by `json.parse` when the input text is not valid JSON. Handle via `request json_parse_error(message) { ... }`.\"",
+      "request json_parse_error(message: string) -> never"
+    ]
+
+-- | The @primitive.json@ sub-module source. Exposes JSON parse /
+-- stringify, accessed by users as @json.parse(...)@ / @json.stringify(...)@.
+-- The @json@ data union and the @json_parse_error@ request live in the
+-- root @primitive@ module (auto-injected as flat names) so that
+-- match-arm constructor patterns stay unqualified.
+jsonStdlibSource :: Text
+jsonStdlibSource =
+  Text.unlines
+    [ "@\"Parse a JSON-encoded string into a `json` value. Raises `json_parse_error` on malformed input.\"",
+      "primitive parse(text: string) -> json with json_parse_error",
+      "@\"Serialize a `json` value to canonical JSON text. The static type rules out closures / secrets / arbitrary tagged values, so this primitive is total (no runtime error path).\"",
+      "primitive stringify(value: json) -> string"
+    ]
+
+-- | The @primitive.record@ sub-module source. Users call these as
+-- @record.empty()@, @record.get(...)@, etc. The flat @record[V]@ type
+-- name is unaffected — it's a type-position keyword recognised by the
+-- parser independent of the value-namespace module alias.
+recordStdlibSource :: Text
+recordStdlibSource =
+  Text.unlines
+    [ "@\"Construct an empty record.\"",
+      "primitive empty() -> record[unknown]",
+      "@\"Retrieve a record entry by key. Returns null when the key is absent.\"",
+      "primitive get(record: record[unknown], key: string) -> unknown",
+      "@\"Insert or replace an entry, returning a fresh record (records are immutable).\"",
+      "primitive set(record: record[unknown], key: string, value: unknown) -> record[unknown]",
+      "@\"Remove an entry by key. Returns the record unchanged when the key is absent.\"",
+      "primitive remove(record: record[unknown], key: string) -> record[unknown]",
+      "@\"List the keys present in the record (insertion order is not guaranteed).\"",
+      "primitive keys(record: record[unknown]) -> array[string]",
+      "@\"True if the record carries an entry under the given key.\"",
+      "primitive has(record: record[unknown], key: string) -> boolean",
+      "@\"Number of entries in the record.\"",
+      "primitive size(record: record[unknown]) -> integer"
     ]

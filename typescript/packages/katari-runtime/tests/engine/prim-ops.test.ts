@@ -19,6 +19,7 @@ import {
   type PrimThread,
 } from "../../src/engine/index.js";
 import { executePrim, valueEquals } from "../../src/engine/prim.js";
+import type { Value } from "../../src/engine/value.js";
 
 describe("engine: prim builtin", () => {
   it("computes arithmetic", () => {
@@ -36,8 +37,8 @@ describe("engine: prim builtin", () => {
   });
 
   it("structural equality", () => {
-    const a = { kind: "array", elements: [num1(1), num1(2)] } as const;
-    const b = { kind: "array", elements: [num1(1), num1(2)] } as const;
+    const a: Value = { kind: "array", elements: [num1(1), num1(2)] };
+    const b: Value = { kind: "array", elements: [num1(1), num1(2)] };
     expect(valueEquals(a, b)).toBe(true);
   });
 
@@ -89,15 +90,15 @@ describe("engine: prim builtin", () => {
     ).toThrow(/refusing to stringify a secret/);
   });
 
-  it("record_empty produces an empty record value", () => {
-    const r = executePrim("record_empty", {});
+  it("record.empty produces an empty record value", () => {
+    const r = executePrim("record.empty", {});
     expect(r.kind).toBe("record");
     if (r.kind === "record") expect(Object.keys(r.entries)).toEqual([]);
   });
 
-  it("record_set inserts entries copy-on-write", () => {
-    const empty = executePrim("record_empty", {});
-    const r1 = executePrim("record_set", {
+  it("record.set inserts entries copy-on-write", () => {
+    const empty = executePrim("record.empty", {});
+    const r1 = executePrim("record.set", {
       record: empty,
       key: { kind: "string", value: "name" },
       value: { kind: "string", value: "alice" },
@@ -112,57 +113,68 @@ describe("engine: prim builtin", () => {
     }
   });
 
-  it("json_parse maps standard JSON to the expected native Value shapes", () => {
+  it("json.parse wraps each JSON shape in its `primitive.json_*` constructor", () => {
     expect(
-      executePrim("json_parse", { text: { kind: "string", value: "null" } }),
-    ).toEqual({ kind: "null" });
-    expect(
-      executePrim("json_parse", { text: { kind: "string", value: "true" } }),
-    ).toEqual({ kind: "boolean", value: true });
-    expect(
-      executePrim("json_parse", { text: { kind: "string", value: "42" } }),
-    ).toEqual({ kind: "number", value: 42 });
-    expect(
-      executePrim("json_parse", { text: { kind: "string", value: "\"hi\"" } }),
-    ).toEqual({ kind: "string", value: "hi" });
-    expect(
-      executePrim("json_parse", { text: { kind: "string", value: "[1,2]" } }),
+      executePrim("json.parse", { text: { kind: "string", value: "null" } }),
     ).toEqual({
-      kind: "array",
-      elements: [
-        { kind: "number", value: 1 },
-        { kind: "number", value: 2 },
-      ],
+      kind: "tagged",
+      ctorId: "primitive.json_null",
+      fields: {},
     });
-    const obj = executePrim("json_parse", {
-      text: { kind: "string", value: "{\"a\":1}" },
+    expect(
+      executePrim("json.parse", { text: { kind: "string", value: "true" } }),
+    ).toEqual({
+      kind: "tagged",
+      ctorId: "primitive.json_boolean",
+      fields: { value: { kind: "boolean", value: true } },
     });
-    expect(obj.kind).toBe("record");
-    if (obj.kind === "record") {
-      expect(obj.entries).toEqual({ a: { kind: "number", value: 1 } });
-    }
+    expect(
+      executePrim("json.parse", { text: { kind: "string", value: "42" } }),
+    ).toEqual({
+      kind: "tagged",
+      ctorId: "primitive.json_integer",
+      fields: { value: { kind: "number", value: 42 } },
+    });
+    expect(
+      executePrim("json.parse", { text: { kind: "string", value: "3.5" } }),
+    ).toEqual({
+      kind: "tagged",
+      ctorId: "primitive.json_number",
+      fields: { value: { kind: "number", value: 3.5 } },
+    });
+    expect(
+      executePrim("json.parse", { text: { kind: "string", value: "\"hi\"" } }),
+    ).toEqual({
+      kind: "tagged",
+      ctorId: "primitive.json_string",
+      fields: { value: { kind: "string", value: "hi" } },
+    });
   });
 
-  it("json_parse surfaces invalid input as a recoverable error", () => {
+  it("json.parse raises a `json_parse_error` request on malformed input", () => {
     expect(() =>
-      executePrim("json_parse", { text: { kind: "string", value: "{" } }),
-    ).toThrow(/invalid JSON/);
+      executePrim("json.parse", { text: { kind: "string", value: "{" } }),
+    ).toThrow(/raised request 'primitive.json_parse_error'/);
   });
 
-  it("json_stringify is the inverse of json_parse for canonical values", () => {
-    const r = executePrim("json_parse", {
+  it("json.stringify is the inverse of json.parse for canonical values", () => {
+    const r = executePrim("json.parse", {
       text: { kind: "string", value: "{\"a\":1,\"b\":[2,3]}" },
     });
-    const s = executePrim("json_stringify", { value: r });
+    const s = executePrim("json.stringify", { value: r });
     expect(s).toEqual({ kind: "string", value: "{\"a\":1,\"b\":[2,3]}" });
   });
 
-  it("json_stringify refuses secret values (would launder taint)", () => {
+  it("json.stringify is total over `json` values (no secret refusal path)", () => {
+    // `json` is structurally restricted to the seven json_* ctors, so
+    // there's no secret or closure can reach stringify by typing. The
+    // defensive check still fires if a non-json tagged value slips
+    // through (compiler bug), so verify that path too.
     expect(() =>
-      executePrim("json_stringify", {
+      executePrim("json.stringify", {
         value: { kind: "secret", value: "tok" },
       }),
-    ).toThrow(/refusing to encode a secret/);
+    ).toThrow(/expected a json value, got secret/);
   });
 });
 
@@ -186,7 +198,6 @@ describe("engine: runner dispatches prim create without crashing", () => {
       scopeId,
       status: "running",
       children: {},
-      handlers: {},
       nextCallId: 0 as CallId,
       nextAskId: 0 as AskId,
       askIdMap: {},
