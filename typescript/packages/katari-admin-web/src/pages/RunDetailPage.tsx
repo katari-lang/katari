@@ -1,8 +1,8 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { Link, useParams } from "react-router-dom";
 import { motion } from "framer-motion";
-import { ArrowLeft, ArrowRight, Ban } from "lucide-react";
+import { ArrowLeft, Ban } from "lucide-react";
 import toast from "react-hot-toast";
 import { useApiClient } from "@/contexts/ApiKeyContext";
 import { PageContent, PageHeader } from "@/components/ui/PageHeader";
@@ -14,7 +14,6 @@ import { CopyButton } from "@/components/ui/CopyButton";
 import { SpinnerOverlay } from "@/components/ui/Spinner";
 import { MetadataRow } from "@/components/ui/MetadataRow";
 import { Badge } from "@/components/ui/Badge";
-import { Table, TBody, TD, TH, THead, TR } from "@/components/ui/Table";
 import {
   RunStatusBadge,
   isTerminalState,
@@ -41,7 +40,6 @@ export function RunDetailPage() {
   }>();
   const client = useApiClient();
   const queryClient = useQueryClient();
-  const navigate = useNavigate();
 
   const { data, isLoading, isError, error } = useQuery({
     queryKey: ["run", runId],
@@ -241,70 +239,52 @@ export function RunDetailPage() {
               </Card>
             </div>
 
-            {/* Escalations + Result/Tree side by side */}
-            <div className="grid gap-4 lg:grid-cols-[1fr_2fr]">
-              {/* Escalations (narrow column) */}
-              <div>
-                <div className="mb-2 flex items-center gap-2">
-                  <h3 className="text-sm font-medium text-foreground">
-                    Escalations
-                  </h3>
-                  <Badge tone="neutral">{runEscalations.length}</Badge>
-                </div>
-                {escalationsQ.isLoading ? (
-                  <p className="text-sm text-subtle-foreground">Loading...</p>
-                ) : runEscalations.length === 0 ? (
-                  <p className="text-sm text-subtle-foreground">
-                    No escalations.
-                  </p>
-                ) : (
-                  <Table>
-                    <THead>
-                      <TR>
-                        <TH>State</TH>
-                        <TH>Agent</TH>
-                        <TH>Created</TH>
-                      </TR>
-                    </THead>
-                    <TBody>
+            {/* Escalations + Tree/Result side by side */}
+            <div className="grid gap-4 lg:grid-cols-[minmax(200px,1fr)_2fr] items-start">
+              {/* Escalations (compact list) */}
+              <Card>
+                <CardHeader>
+                  <div className="flex items-center gap-2">
+                    <CardTitle>Escalations</CardTitle>
+                    <Badge tone="neutral">{runEscalations.length}</Badge>
+                  </div>
+                </CardHeader>
+                <CardContent>
+                  {escalationsQ.isLoading ? (
+                    <p className="text-sm text-subtle-foreground">Loading…</p>
+                  ) : runEscalations.length === 0 ? (
+                    <p className="text-sm text-subtle-foreground">
+                      No escalations.
+                    </p>
+                  ) : (
+                    <ul className="space-y-1">
                       {runEscalations.map((esc) => (
-                        <TR
-                          key={esc.id}
-                          className="cursor-pointer h-16"
-                          onClick={() =>
-                            navigate(
-                              `/project/${projectId}/escalations/${esc.id}`,
-                            )
-                          }
-                        >
-                          <TD>
+                        <li key={esc.id} className="px-2 py-1.5 hover:bg-muted">
+                          <Link
+                            to={`/project/${projectId}/escalations/${esc.id}`}
+                            className="flex items-center gap-2"
+                          >
                             <Badge tone={escalationTones[esc.state]}>
                               {esc.state}
                             </Badge>
-                          </TD>
-                          <TD>
-                            <Link
-                              to={`/project/${projectId}/escalations/${esc.id}`}
-                              className="font-mono text-xs text-foreground hover:underline"
-                              onClick={(e) => e.stopPropagation()}
-                            >
+                            <span className="flex-1 truncate font-mono text-xs text-foreground">
                               {esc.agentDefId}
-                            </Link>
-                          </TD>
-                          <TD
-                            className="text-xs text-muted-foreground"
-                            title={formatDateTime(esc.createdAt)}
-                          >
-                            {relativeTime(esc.createdAt)}
-                          </TD>
-                        </TR>
+                            </span>
+                            <span
+                              className="text-xs text-subtle-foreground"
+                              title={formatDateTime(esc.createdAt)}
+                            >
+                              {relativeTime(esc.createdAt)}
+                            </span>
+                          </Link>
+                        </li>
                       ))}
-                    </TBody>
-                  </Table>
-                )}
-              </div>
+                    </ul>
+                  )}
+                </CardContent>
+              </Card>
 
-              {/* Delegation tree / Result (wide column) */}
+              {/* Tree / Result (wide column) */}
               <div className="flex flex-col gap-4">
                 {isLive && (
                   <div>
@@ -314,7 +294,7 @@ export function RunDetailPage() {
                     {treeQ.data !== undefined ? (
                       <DelegationTreeGraph root={treeQ.data.tree.root} />
                     ) : treeQ.isLoading ? (
-                      <p className="text-sm text-subtle-foreground">Loading...</p>
+                      <p className="text-sm text-subtle-foreground">Loading…</p>
                     ) : (
                       <p className="text-sm text-subtle-foreground">
                         No live delegations.
