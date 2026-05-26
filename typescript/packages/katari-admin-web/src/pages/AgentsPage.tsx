@@ -105,9 +105,7 @@ export function AgentsPage() {
         {isLoading && <SpinnerOverlay />}
         {isError && (
           <p className="border border-danger/30 bg-danger/10 px-4 py-3 text-sm text-danger">
-            {error instanceof Error
-              ? error.message
-              : "Failed to load agents."}
+            {error instanceof Error ? error.message : "Failed to load agents."}
           </p>
         )}
         {!isLoading && !isError && data !== undefined && (
