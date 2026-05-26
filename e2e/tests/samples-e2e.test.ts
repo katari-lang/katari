@@ -326,4 +326,14 @@ describe("samples/ end-to-end (apply → run → verify)", () => {
       );
     },
   );
+
+  itE2E(
+    "21-json: json_parse + record pattern + json_stringify round-trip a JSON object",
+    async () => {
+      const result = await applyAndRun("json", "21-json");
+      expect(result).toBe(
+        'name=alice; echo={"name":"alice","age":30}',
+      );
+    },
+  );
 });

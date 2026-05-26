@@ -235,8 +235,97 @@ export function executePrim(name: string, args: Record<string, Value>): Value {
       }
       return { kind: "number", value: Object.keys(r.entries).length };
     }
+    case "json_parse": {
+      const text = req(args, "text");
+      if (text.kind !== "string") {
+        throw new RecoverableEngineError(
+          `prim json_parse: argument must be a string, got ${text.kind}`,
+        );
+      }
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(text.value);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        throw new RecoverableEngineError(`prim json_parse: invalid JSON: ${msg}`);
+      }
+      return jsonToValue(parsed);
+    }
+    case "json_stringify": {
+      const value = req(args, "value");
+      const raw = valueToJsonRaw(value);
+      return { kind: "string", value: JSON.stringify(raw) };
+    }
     default:
       throw new RecoverableEngineError(`unknown prim: ${name}`);
+  }
+}
+
+// JSON → Value: maps standard JSON shapes to native Katari runtime
+// values. Integral numbers stay as integers (no separate runtime
+// distinction; type-pattern `integer(x)` checks via Number.isInteger).
+// Objects become records (homogeneous map; the discriminator-routing
+// done at the wire boundary doesn't apply here — we're past it).
+function jsonToValue(raw: unknown): Value {
+  if (raw === null) return { kind: "null" };
+  if (typeof raw === "boolean") return { kind: "boolean", value: raw };
+  if (typeof raw === "number") return { kind: "number", value: raw };
+  if (typeof raw === "string") return { kind: "string", value: raw };
+  if (Array.isArray(raw)) {
+    return { kind: "array", elements: raw.map(jsonToValue) };
+  }
+  if (typeof raw === "object") {
+    const entries: Record<string, Value> = Object.create(null);
+    for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+      entries[k] = jsonToValue(v);
+    }
+    return { kind: "record", entries };
+  }
+  throw new RecoverableEngineError(
+    `prim json_parse: unexpected JSON value of type ${typeof raw}`,
+  );
+}
+
+// Value → JSON: only values with a canonical JSON representation. The
+// Plan D wire codec (`$constructor` / `$agent` / `$secret`) is **not**
+// applied here — `json_stringify` is for user-visible JSON output, not
+// the internal wire format. Closures, agent literals, secrets, and
+// tagged values (data ctors) have no JSON shape, so they're rejected.
+function valueToJsonRaw(value: Value): unknown {
+  switch (value.kind) {
+    case "null":
+      return null;
+    case "boolean":
+      return value.value;
+    case "number":
+      return value.value;
+    case "string":
+      return value.value;
+    case "array":
+      return value.elements.map(valueToJsonRaw);
+    case "record": {
+      const out: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(value.entries)) {
+        out[k] = valueToJsonRaw(v);
+      }
+      return out;
+    }
+    case "tagged":
+      throw new RecoverableEngineError(
+        `prim json_stringify: cannot encode constructor '${value.ctorId}' as JSON`,
+      );
+    case "closure":
+      throw new RecoverableEngineError(
+        "prim json_stringify: cannot encode a closure as JSON",
+      );
+    case "agentLiteral":
+      throw new RecoverableEngineError(
+        "prim json_stringify: cannot encode an agent reference as JSON",
+      );
+    case "secret":
+      throw new RecoverableEngineError(
+        "prim json_stringify: refusing to encode a secret value as JSON (would launder taint)",
+      );
   }
 }
 
