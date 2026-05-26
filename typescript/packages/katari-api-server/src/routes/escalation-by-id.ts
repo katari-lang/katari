@@ -13,11 +13,11 @@ import {
   EscalationIdSchema,
 } from "./middleware/validation.js";
 import { escalationRowToWire } from "../wire/agent-wire.js";
-import type { Orchestrator } from "../orchestrator.js";
+import type { ApiServerOrchestrator } from "../orchestrator.js";
 import type { Storage } from "../storage/types.js";
 
 export function buildEscalationByIdRoutes(
-  orchestrator: Orchestrator,
+  orchestrator: ApiServerOrchestrator,
   storage: Storage,
 ): Hono {
   const app = new Hono();

@@ -8,7 +8,7 @@ import { ZodError } from "zod";
 import type { Storage } from "../storage/types.js";
 import type { ProjectService } from "../services/project-service.js";
 import type { SnapshotService } from "../services/snapshot-service.js";
-import type { Orchestrator } from "../orchestrator.js";
+import type { ApiServerOrchestrator } from "../orchestrator.js";
 import { buildRunRoutes } from "./run.js";
 import { buildRunByIdRoutes } from "./run-by-id.js";
 import { buildRunTreeRoutes } from "./run-tree.js";
@@ -30,7 +30,7 @@ export type AppDeps = {
   storage: Storage;
   projects: ProjectService;
   snapshots: SnapshotService;
-  orchestrator: Orchestrator;
+  orchestrator: ApiServerOrchestrator;
   logger: Logger;
   /**
    * `null` = auth disabled (`KATARI_API_KEY=disabled`, dev only).

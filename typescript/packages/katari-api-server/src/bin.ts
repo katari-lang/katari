@@ -17,7 +17,7 @@ import {
   type Sidecar,
 } from "@katari-lang/runtime";
 import { buildMetrics } from "./metrics.js";
-import { Orchestrator } from "./orchestrator.js";
+import { createApiServerOrchestrator } from "./orchestrator-adapter.js";
 import { recoverOnBoot } from "./recovery.js";
 import { buildApp } from "./routes/app.js";
 import { ProjectService } from "./services/project-service.js";
@@ -87,7 +87,7 @@ const sidecarManager = new SidecarManager<SnapshotId>(
 
 const projects = new ProjectService(storage, logger);
 const snapshots = new SnapshotService(storage, logger);
-const orchestrator = new Orchestrator(storage, sidecarManager, logger);
+const orchestrator = createApiServerOrchestrator(storage, sidecarManager, logger);
 
 await recoverOnBoot(storage, orchestrator, logger);
 

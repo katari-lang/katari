@@ -24,7 +24,7 @@
 // The wire is still pre-publish, so there's no protocolVersion field.
 // Readers fail-fast on unknown `type` values.
 
-import type { RawValue } from "@katari-lang/runtime";
+import type { RawValue } from "@katari-lang/types";
 
 export type ParentToChild =
   | {

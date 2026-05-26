@@ -28,6 +28,12 @@ import type { ClosureId } from "./engine/id.js";
 import type { Value } from "./engine/value.js";
 import type { QualifiedName } from "./ir/types.js";
 
+// Re-export the canonical RawValue type from @katari-lang/types for
+// backward compatibility — consumers that import from this module
+// (`@katari-lang/runtime/value-codec`) continue to get the type.
+export type { RawValue } from "@katari-lang/types";
+import type { RawValue } from "@katari-lang/types";
+
 /** Discriminator key for the constructor identity of a tagged value. */
 export const CTOR_DISCRIMINATOR = "$constructor";
 
@@ -40,17 +46,6 @@ export const CALLABLE_DISCRIMINATOR = "$agent";
  * forbidden on the inbound side (sidecar must not return credentials
  * up to the runtime). For storage, see 'value-tree-walk'. */
 export const SECRET_DISCRIMINATOR = "$secret";
-
-/** Raw value: a JSON-shaped subset (numbers, strings, booleans, null,
- * arrays, objects). Object shapes carrying a `$constructor` / `$agent`
- * discriminator are decoded into the corresponding 'Value' variant. */
-export type RawValue =
-  | number
-  | string
-  | boolean
-  | null
-  | RawValue[]
-  | { [key: string]: RawValue };
 
 /**
  * Encode a runtime 'Value' to its raw JSON form. The encoding is

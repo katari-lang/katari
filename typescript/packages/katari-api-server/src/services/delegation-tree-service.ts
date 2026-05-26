@@ -7,7 +7,7 @@
 
 import type { DelegationId } from "@katari-lang/runtime";
 import { redactSecretsInEncrypted, valueToRaw } from "@katari-lang/runtime";
-import type { RawValue } from "@katari-lang/runtime";
+import type { RawValue } from "@katari-lang/types";
 import type {
   DelegationRow,
   ProjectId,

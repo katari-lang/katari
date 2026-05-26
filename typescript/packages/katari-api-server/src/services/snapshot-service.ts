@@ -2,11 +2,13 @@
 //
 // Called directly by the upload endpoint at `apply` time. `latest` resolution is also here.
 
-import type {
-  AgentDefinition,
-  IRModule,
-  Logger,
-  SchemaBundle,
+import {
+  SnapshotNotFound,
+  NoSnapshotForProject,
+  type AgentDefinition,
+  type IRModule,
+  type Logger,
+  type SchemaBundle,
 } from "@katari-lang/runtime";
 import type {
   ListOptions,
@@ -18,17 +20,8 @@ import type {
   Storage,
 } from "../storage/types.js";
 
-export class SnapshotNotFound extends Error {
-  constructor(public readonly snapshotId: SnapshotId) {
-    super(`snapshot ${snapshotId} does not exist`);
-  }
-}
-
-export class NoSnapshotForProject extends Error {
-  constructor(public readonly projectId: ProjectId) {
-    super(`no snapshot exists for project ${projectId}`);
-  }
-}
+// Re-export so existing callers keep working.
+export { SnapshotNotFound, NoSnapshotForProject };
 
 export class AgentNotFound extends Error {
   constructor(

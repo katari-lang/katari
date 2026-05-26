@@ -17,18 +17,9 @@ import type { AgentDefId } from "../agent-def-id.js";
 import type { DelegationId } from "../engine/id.js";
 import type { RawValue } from "../value-codec.js";
 
-/**
- * Bundled sidecar source. v1 is a single ESM string (esbuild output)
- * that the runtime writes to a temp file and launches with `node`. The
- * bundle is expected to import `katari-port` and call
- * `__startSidecar()` at the very end of evaluation.
- */
-export type SidecarBundle = {
-  /** Bundled JS source. The runtime writes this to a temp file and `node` it. */
-  entry: string;
-  runtime: "node";
-  schemaVersion: 1;
-};
+// Re-export the canonical SidecarBundle type from @katari-lang/types
+// for backward compatibility.
+export type { SidecarBundle } from "@katari-lang/types";
 
 // ─── IPC protocol (11 message variants, all `ipc`-prefixed) ────────────────
 

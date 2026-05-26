@@ -13,7 +13,7 @@ import {
   valueToRaw,
   type EncryptedValue,
 } from "@katari-lang/runtime";
-import type { RawValue } from "@katari-lang/runtime";
+import type { RawValue } from "@katari-lang/types";
 import type {
   DelegationRow,
   EscalationRow,

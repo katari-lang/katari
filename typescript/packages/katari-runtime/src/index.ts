@@ -204,3 +204,24 @@ export type {
 } from "./sidecar/store.js";
 
 export type { EnvStore, EnvEntry } from "./sidecar/env-store.js";
+
+// ─── Orchestrator ─────────────────────────────────────────────────────────
+
+export {
+  Orchestrator,
+  SnapshotNotFound,
+  NoSnapshotForProject,
+  recoverOnBoot,
+} from "./orchestrator/index.js";
+
+export type {
+  TickContext,
+  RecoveryOptions,
+  OrchestratorSnapshotId,
+  OrchestratorProjectId,
+  OrchestratorStorage,
+  ResolvedSnapshot,
+  ApiLikeModule,
+  TickModules,
+  TickModulesFactory,
+} from "./orchestrator/index.js";

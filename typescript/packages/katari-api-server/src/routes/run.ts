@@ -19,7 +19,7 @@ import {
   StartRunSchema,
 } from "./middleware/validation.js";
 import { runAuditRowToWire } from "../wire/agent-wire.js";
-import type { Orchestrator } from "../orchestrator.js";
+import type { ApiServerOrchestrator } from "../orchestrator.js";
 import { z } from "zod";
 
 const RunListQuerySchema = z
@@ -30,7 +30,7 @@ const RunListQuerySchema = z
   .merge(PaginationQuerySchema);
 
 export function buildRunRoutes(
-  orchestrator: Orchestrator,
+  orchestrator: ApiServerOrchestrator,
   storage: import("../storage/types.js").Storage,
 ): Hono {
   const app = new Hono();

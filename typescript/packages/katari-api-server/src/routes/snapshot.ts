@@ -2,7 +2,7 @@
 // a project (= mounted under `/project/:projectId/snapshot`).
 
 import { Hono } from "hono";
-import type { IRModule, SchemaBundle } from "@katari-lang/runtime";
+import type { IRModule, SchemaBundle } from "@katari-lang/types";
 import {
   PaginationQuerySchema,
   ProjectIdSchema,

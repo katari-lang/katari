@@ -17,10 +17,11 @@ import {
 import type { Block, VarId } from "katari-runtime/dist/ir/types.js";
 import {
   InMemoryStorage,
-  Orchestrator,
   ProjectService,
   SnapshotService,
   buildApp,
+  createApiServerOrchestrator,
+  type ApiServerOrchestrator,
   type AppDeps,
 } from "../src/index.js";
 import type { SnapshotId } from "../src/storage/types.js";
@@ -149,7 +150,7 @@ export function noOpSidecarBundle(): SidecarBundle {
 export type TestHarness = {
   storage: InMemoryStorage;
   app: Hono;
-  orchestrator: Orchestrator;
+  orchestrator: ApiServerOrchestrator;
   shutdown: () => Promise<void>;
 };
 
@@ -181,7 +182,7 @@ export function buildTestHarness(opts?: {
     },
     noopLogger,
   );
-  const orchestrator = new Orchestrator(storage, sidecarManager, noopLogger);
+  const orchestrator = createApiServerOrchestrator(storage, sidecarManager, noopLogger);
   const projects = new ProjectService(storage, noopLogger);
   const snapshots = new SnapshotService(storage, noopLogger);
   const deps: AppDeps = {

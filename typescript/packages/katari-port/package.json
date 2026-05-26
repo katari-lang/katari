@@ -26,12 +26,11 @@
     "build": "tsc",
     "test": "vitest run --passWithNoTests"
   },
-  "peerDependencies": {
-    "@katari-lang/runtime": "workspace:*"
+  "dependencies": {
+    "@katari-lang/types": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
-    "@katari-lang/runtime": "workspace:*",
     "typescript": "^5.7.0",
     "vitest": "^3.0.0"
   }

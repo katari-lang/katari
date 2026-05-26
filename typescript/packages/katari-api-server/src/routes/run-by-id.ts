@@ -11,11 +11,11 @@
 import { Hono } from "hono";
 import { RunIdSchema } from "./middleware/validation.js";
 import { runAuditRowToWire } from "../wire/agent-wire.js";
-import type { Orchestrator } from "../orchestrator.js";
+import type { ApiServerOrchestrator } from "../orchestrator.js";
 import type { Storage } from "../storage/types.js";
 
 export function buildRunByIdRoutes(
-  orchestrator: Orchestrator,
+  orchestrator: ApiServerOrchestrator,
   storage: Storage,
 ): Hono {
   const app = new Hono();

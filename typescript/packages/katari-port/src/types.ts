@@ -1,6 +1,6 @@
 // Public types for user code that imports katari-port.
 
-import type { RawValue } from "@katari-lang/runtime";
+import type { RawValue } from "@katari-lang/types";
 
 /** Context handed to a user-provided agent handler at delegate time. */
 export interface AgentContext {

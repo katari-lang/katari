@@ -44,7 +44,7 @@ importers:
         version: 3.2.4(@types/debug@4.1.13)(@types/node@22.19.18)(jiti@2.7.0)(lightningcss@1.32.0)(tsx@4.22.3)
 
   typescript/packages/katari:
-    dependencies:
+    optionalDependencies:
       '@katari-lang/bundle':
         specifier: workspace:*
         version: link:../katari-bundle
@@ -136,6 +136,9 @@ importers:
       '@katari-lang/runtime':
         specifier: workspace:*
         version: link:../katari-runtime
+      '@katari-lang/types':
+        specifier: workspace:*
+        version: link:../katari-types
       async-mutex:
         specifier: ^0.5.0
         version: 0.5.0
@@ -191,10 +194,11 @@ importers:
         version: 5.9.3
 
   typescript/packages/katari-port:
-    devDependencies:
-      '@katari-lang/runtime':
+    dependencies:
+      '@katari-lang/types':
         specifier: workspace:*
-        version: link:../katari-runtime
+        version: link:../katari-types
+    devDependencies:
       '@types/node':
         specifier: ^22.0.0
         version: 22.19.18
@@ -207,6 +211,9 @@ importers:
 
   typescript/packages/katari-runtime:
     dependencies:
+      '@katari-lang/types':
+        specifier: workspace:*
+        version: link:../katari-types
       ajv:
         specifier: ^8.20.0
         version: 8.20.0
@@ -229,6 +236,12 @@ importers:
       vitest:
         specifier: ^3.0.0
         version: 3.2.4(@types/debug@4.1.13)(@types/node@22.19.18)(jiti@2.7.0)(lightningcss@1.32.0)(tsx@4.22.3)
+
+  typescript/packages/katari-types:
+    devDependencies:
+      typescript:
+        specifier: ^5.7.0
+        version: 5.9.3
 
   typescript/packages/katari-vscode:
     dependencies:

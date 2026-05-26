@@ -71,11 +71,33 @@ function collectBinDirs(startFile) {
   return dirs;
 }
 
+// Verify that @katari-lang/bundle is available. It is an
+// optionalDependency — users who don't use sidecar don't need it, but
+// commands that do (e.g. `katari apply`) will fail opaquely if the
+// katari-bundle executable is missing. Surface a clear message early.
+let bundleAvailable = false;
+try {
+  require.resolve("@katari-lang/bundle");
+  bundleAvailable = true;
+} catch {
+  // Package not installed — will warn below after PATH setup.
+}
+
 const env = { ...process.env };
 const binDirs = collectBinDirs(fileURLToPath(import.meta.url));
 if (binDirs.length > 0) {
   env.PATH = [...binDirs, env.PATH ?? ""].filter(Boolean).join(delimiter);
 }
+
+if (!bundleAvailable) {
+  env.KATARI_BUNDLE_MISSING = "1";
+}
+
+// If @katari-lang/bundle is not installed and the user runs a command
+// that needs it, the Haskell binary will fail to locate `katari-bundle`
+// on PATH. We detect this by checking the exit code after spawn and
+// printing a helpful message. We also expose KATARI_BUNDLE_MISSING so
+// the binary can surface the hint itself in the future.
 
 const child = spawn(binaryPath, process.argv.slice(2), {
   stdio: "inherit",
@@ -95,6 +117,13 @@ child.on("close", (code, signal) => {
   if (signal) {
     process.kill(process.pid, signal);
   } else {
+    if (code !== 0 && !bundleAvailable) {
+      console.error(
+        "\nkatari: hint: @katari-lang/bundle is not installed.\n" +
+          "If this command requires sidecar bundling, install it with:\n" +
+          "  pnpm add @katari-lang/bundle\n",
+      );
+    }
     process.exit(code ?? 1);
   }
 });

@@ -23,6 +23,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@katari-lang/types": "workspace:*",
     "ajv": "^8.20.0",
     "denque": "^2.1.0",
     "ts-pattern": "^5.9.0",

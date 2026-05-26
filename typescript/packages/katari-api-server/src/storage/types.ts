@@ -24,11 +24,13 @@ import type {
   EncryptedValue,
   EscalationId,
   EngineCheckpoint,
+  AgentDefId,
+} from "@katari-lang/runtime";
+import type {
   IRModule,
   SchemaBundle,
   SidecarBundle,
-  AgentDefId,
-} from "@katari-lang/runtime";
+} from "@katari-lang/types";
 
 export type { DelegationId, EscalationId, SidecarBundle };
 

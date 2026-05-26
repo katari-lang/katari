@@ -2,7 +2,9 @@
 
 export { buildApp, type AppDeps } from "./routes/app.js";
 
-export { Orchestrator, SnapshotNotFound } from "./orchestrator.js";
+export { Orchestrator, SnapshotNotFound, NoSnapshotForProject } from "./orchestrator.js";
+export { createApiServerOrchestrator, ApiServerOrchestrator } from "./orchestrator-adapter.js";
+export type { ApiServerTickContext } from "./orchestrator-adapter.js";
 export {
   ProjectService,
   ProjectNotFound,
@@ -12,8 +14,8 @@ export {
   AgentNotFound,
 } from "./services/snapshot-service.js";
 
-export { ApiModule } from "./modules/api-module.js";
-export { StorageFfiStore } from "./modules/ffi-store.js";
+export { ApiModule } from "./adapters/api-module.js";
+export { StorageFfiStore } from "./adapters/ffi-store.js";
 
 // Runtime-provided abstractions re-exported for convenience.
 export {

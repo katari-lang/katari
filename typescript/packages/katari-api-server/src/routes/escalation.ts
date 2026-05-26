@@ -18,7 +18,7 @@ import {
   SnapshotIdSchema,
 } from "./middleware/validation.js";
 import { escalationRowToWire } from "../wire/agent-wire.js";
-import type { Orchestrator } from "../orchestrator.js";
+import type { ApiServerOrchestrator } from "../orchestrator.js";
 import { API_ENDPOINT } from "@katari-lang/runtime";
 import type { Storage } from "../storage/types.js";
 import { z } from "zod";
@@ -31,7 +31,7 @@ const ListQuerySchema = z
   .merge(PaginationQuerySchema);
 
 export function buildEscalationRoutes(
-  orchestrator: Orchestrator,
+  orchestrator: ApiServerOrchestrator,
   storage: Storage,
 ): Hono {
   const app = new Hono();
