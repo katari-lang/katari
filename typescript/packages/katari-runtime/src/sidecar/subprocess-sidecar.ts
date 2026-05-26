@@ -13,6 +13,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { createInterface, type Interface as ReadlineInterface } from "node:readline";
 import type { Logger } from "../engine/logger.js";
 import type { Sidecar } from "./sidecar.js";
+import { childToParentSchema } from "./child-to-parent-schema.js";
 import type { ChildToParent, ParentToChild } from "./types.js";
 
 export interface SubprocessSidecarOptions {
@@ -218,16 +219,20 @@ function parseChildLine(
   logger: Logger,
 ): ChildToParent | null {
   if (line.length === 0) return null;
-  let msg: ChildToParent;
+  let raw: unknown;
   try {
-    msg = JSON.parse(line) as ChildToParent;
+    raw = JSON.parse(line);
   } catch {
     logger.log("error", `sidecar: bad JSON from child: ${line}`);
     return null;
   }
-  if (typeof msg !== "object" || msg === null) {
-    logger.log("error", `sidecar: non-object message from child: ${line}`);
+  const result = childToParentSchema.safeParse(raw);
+  if (!result.success) {
+    logger.log(
+      "error",
+      `sidecar: invalid IPC message from child: ${result.error.message}`,
+    );
     return null;
   }
-  return msg;
+  return result.data;
 }

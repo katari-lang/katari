@@ -1,13 +1,6 @@
-import {
-  cloneElement,
-  isValidElement,
-  useEffect,
-  useRef,
-  useState,
-  type ReactElement,
-  type ReactNode,
-} from "react";
-import { AnimatePresence, motion } from "framer-motion";
+import { useState } from "react";
+import * as DropdownMenuPrimitive from "@radix-ui/react-dropdown-menu";
+import type { ReactElement, ReactNode } from "react";
 import { cn } from "@/lib/cn";
 
 type DropdownProps = {
@@ -18,68 +11,33 @@ type DropdownProps = {
 };
 
 /**
- * Lightweight dropdown: pass a trigger element + a render function that
- * receives a `close` callback. Click-outside / Escape / route change close
- * it; nothing fancier than that. Swap for Radix if we hit accessibility
- * gaps.
+ * Dropdown built on Radix UI DropdownMenu for proper accessibility
+ * (focus trap, ARIA, keyboard navigation). API is kept compatible
+ * with the previous hand-rolled implementation.
  */
 export function Dropdown({ trigger, children, align = "start", className }: DropdownProps) {
   const [open, setOpen] = useState(false);
-  const containerRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    function onClick(e: MouseEvent) {
-      if (
-        containerRef.current !== null &&
-        !containerRef.current.contains(e.target as Node)
-      ) {
-        setOpen(false);
-      }
-    }
-    function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") setOpen(false);
-    }
-    document.addEventListener("mousedown", onClick);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onClick);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [open]);
-
-  if (!isValidElement(trigger)) {
-    throw new Error("Dropdown: trigger must be a valid React element");
-  }
-
-  const triggerWithHandler = cloneElement(trigger, {
-    onClick: (e: React.MouseEvent) => {
-      trigger.props.onClick?.(e);
-      setOpen((o) => !o);
-    },
-  });
 
   return (
-    <div ref={containerRef} className="relative">
-      {triggerWithHandler}
-      <AnimatePresence>
-        {open && (
-          <motion.div
-            initial={{ opacity: 0, y: -4, scale: 0.97 }}
-            animate={{ opacity: 1, y: 0, scale: 1 }}
-            exit={{ opacity: 0, y: -4, scale: 0.97 }}
-            transition={{ duration: 0.12, ease: "easeOut" }}
-            className={cn(
-              "absolute z-50 mt-2 min-w-56 overflow-hidden border border-border bg-background ",
-              align === "end" ? "right-0" : "left-0",
-              className,
-            )}
-          >
-            {children(() => setOpen(false))}
-          </motion.div>
-        )}
-      </AnimatePresence>
-    </div>
+    <DropdownMenuPrimitive.Root open={open} onOpenChange={setOpen}>
+      <DropdownMenuPrimitive.Trigger asChild>
+        {trigger}
+      </DropdownMenuPrimitive.Trigger>
+      <DropdownMenuPrimitive.Portal>
+        <DropdownMenuPrimitive.Content
+          align={align}
+          sideOffset={8}
+          className={cn(
+            "z-50 min-w-56 overflow-hidden border border-border bg-background",
+            "data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-[0.97]",
+            "data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-[0.97]",
+            className,
+          )}
+        >
+          {children(() => setOpen(false))}
+        </DropdownMenuPrimitive.Content>
+      </DropdownMenuPrimitive.Portal>
+    </DropdownMenuPrimitive.Root>
   );
 }
 
@@ -95,30 +53,33 @@ export function DropdownItem({
   children: ReactNode;
 }) {
   return (
-    <button
-      type="button"
-      onClick={onSelect}
+    <DropdownMenuPrimitive.Item
+      onSelect={(e) => {
+        e.preventDefault();
+        onSelect?.();
+      }}
       className={cn(
-        "flex w-full items-center gap-2 px-3 py-2 text-left text-sm transition-colors hover:cursor-pointer",
+        "flex w-full items-center gap-2 px-3 py-2 text-left text-sm outline-none transition-colors hover:cursor-pointer",
+        "data-[highlighted]:bg-muted",
         active === true
           ? "bg-accent text-accent-foreground"
-          : "text-foreground hover:bg-muted",
+          : "text-foreground",
         className,
       )}
     >
       {children}
-    </button>
+    </DropdownMenuPrimitive.Item>
   );
 }
 
 export function DropdownDivider() {
-  return <div className="my-1 border-t border-border" />;
+  return <DropdownMenuPrimitive.Separator className="my-1 border-t border-border" />;
 }
 
 export function DropdownLabel({ children }: { children: ReactNode }) {
   return (
-    <div className="px-3 pt-2 pb-1 text-xs uppercase tracking-wider text-subtle-foreground">
+    <DropdownMenuPrimitive.Label className="px-3 pt-2 pb-1 text-xs uppercase tracking-wider text-subtle-foreground">
       {children}
-    </div>
+    </DropdownMenuPrimitive.Label>
   );
 }

@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useParams } from "react-router-dom";
 import { motion } from "framer-motion";
@@ -7,6 +8,7 @@ import { useApiClient } from "@/contexts/ApiKeyContext";
 import { PageContent, PageHeader } from "@/components/ui/PageHeader";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
+import { Dialog, DialogFooter } from "@/components/ui/Dialog";
 import { CopyableId } from "@/components/ui/CopyableId";
 import { SpinnerOverlay } from "@/components/ui/Spinner";
 import { MetadataRow } from "@/components/ui/MetadataRow";
@@ -52,6 +54,8 @@ export function RunDetailPage() {
       toast.error(err instanceof Error ? err.message : "Cancel failed");
     },
   });
+
+  const [cancelDialogOpen, setCancelDialogOpen] = useState(false);
 
   const run = data?.run;
   const canCancel =
@@ -101,7 +105,7 @@ export function RunDetailPage() {
           canCancel ? (
             <Button
               variant="danger"
-              onClick={() => cancel.mutate()}
+              onClick={() => setCancelDialogOpen(true)}
               loading={cancel.isPending}
             >
               <Ban className="size-4" />
@@ -235,6 +239,34 @@ export function RunDetailPage() {
           </motion.div>
         )}
       </PageContent>
+      <Dialog
+        open={cancelDialogOpen}
+        onClose={() => setCancelDialogOpen(false)}
+        title="Cancel run"
+        description="This will kill all child delegations. This action cannot be undone."
+        size="sm"
+      >
+        <p className="text-sm text-foreground">
+          Are you sure you want to cancel{" "}
+          <code className="font-mono">{run?.name ?? runId}</code>?
+        </p>
+        <DialogFooter>
+          <Button variant="secondary" onClick={() => setCancelDialogOpen(false)}>
+            Keep running
+          </Button>
+          <Button
+            variant="danger"
+            loading={cancel.isPending}
+            onClick={() => {
+              cancel.mutate(undefined, {
+                onSettled: () => setCancelDialogOpen(false),
+              });
+            }}
+          >
+            Cancel run
+          </Button>
+        </DialogFooter>
+      </Dialog>
     </div>
   );
 }

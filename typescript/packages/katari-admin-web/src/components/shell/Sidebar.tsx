@@ -1,18 +1,40 @@
 import { Globe } from "lucide-react";
+import { cn } from "@/lib/cn";
 import { SidebarProjectSwitcher } from "./SidebarProjectSwitcher";
 import { SidebarMenu } from "./SidebarMenu";
 
-export function Sidebar() {
+type SidebarProps = {
+  open: boolean;
+  onClose: () => void;
+};
+
+export function Sidebar({ open, onClose }: SidebarProps) {
   return (
-    <aside className="sticky top-14 flex h-[calc(100vh-3.5rem)] w-64 shrink-0 flex-col">
-      <div className="p-3">
-        <SidebarProjectSwitcher />
-      </div>
-      <div className="flex-1 overflow-y-auto">
-        <SidebarMenu />
-      </div>
-      <SidebarFooter />
-    </aside>
+    <>
+      {/* Backdrop overlay -- mobile only */}
+      {open && (
+        <div
+          className="fixed inset-0 z-40 bg-katari-950/30 backdrop-blur-sm md:hidden"
+          onClick={onClose}
+        />
+      )}
+
+      <aside
+        className={cn(
+          "fixed top-14 z-40 flex h-[calc(100vh-3.5rem)] w-64 shrink-0 flex-col bg-background transition-transform duration-200",
+          "md:sticky md:translate-x-0",
+          open ? "translate-x-0" : "-translate-x-full",
+        )}
+      >
+        <div className="p-3">
+          <SidebarProjectSwitcher />
+        </div>
+        <div className="flex-1 overflow-y-auto">
+          <SidebarMenu />
+        </div>
+        <SidebarFooter />
+      </aside>
+    </>
   );
 }
 

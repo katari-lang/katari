@@ -42,7 +42,7 @@ import qualified Language.LSP.Protocol.Types as LSP
 import qualified Language.LSP.Server as LSP
 import qualified Language.LSP.VFS as VFS
 import Control.Lens ((^.))
-import System.FilePath (dropExtension, isAbsolute, takeFileName, (</>))
+import System.FilePath (dropExtension, isAbsolute, takeDirectory, takeFileName, (</>))
 
 -- ---------------------------------------------------------------------------
 -- Handlers
@@ -341,15 +341,40 @@ handleOne ::
 handleOne st (LSP.FileEvent uri changeType) =
   case LSP.uriToFilePath uri of
     Nothing -> pure ()
-    Just path -> case changeType of
-      LSP.FileChangeType_Deleted -> do
-        -- Clear the published diagnostics for this file so the editor
-        -- drops its markers; then recompile the enclosing workspace
-        -- so the next compile picks up the now-missing module.
-        LSP.sendNotification LSP.SMethod_TextDocumentPublishDiagnostics $
-          LSP.PublishDiagnosticsParams uri Nothing []
-        scheduleRecompile st path
-      LSP.FileChangeType_Created -> scheduleRecompile st path
-      LSP.FileChangeType_Changed -> scheduleRecompile st path
-      _ -> pure ()
+    Just path
+      -- When katari.toml is created, changed, or deleted, evict the
+      -- workspace entry so that 'ensureWorkspaceLoaded' re-reads it
+      -- on the next operation. Also invalidate the project-root cache
+      -- so files previously classified as "orphan" (or belonging to
+      -- the old workspace shape) get a fresh lookup.
+      | takeFileName path == Project.configFilename -> do
+          let root = takeDirectory path
+          liftIO $ atomically $ do
+            modifyTVar' st.workspaces (Map.delete root)
+            modifyTVar' st.projectRootCache (Map.delete root)
+          -- Re-load the workspace eagerly (if the toml still exists)
+          -- and trigger a full recompile so diagnostics update.
+          case changeType of
+            LSP.FileChangeType_Deleted -> do
+              LSP.sendNotification LSP.SMethod_TextDocumentPublishDiagnostics $
+                LSP.PublishDiagnosticsParams uri Nothing []
+            _ -> liftIO $ ensureWorkspaceLoaded st root
+          -- Pick an arbitrary .ktr path inside this workspace so
+          -- scheduleRecompile routes to RecompileWorkspace root.
+          -- If no .ktr files are tracked yet, use the toml path
+          -- itself (scheduleRecompile will classify it as orphan,
+          -- which is harmless — the real recompile comes from open
+          -- files triggering ensureWorkspaceLoaded later).
+          scheduleRecompile st path
+      | otherwise -> case changeType of
+          LSP.FileChangeType_Deleted -> do
+            -- Clear the published diagnostics for this file so the editor
+            -- drops its markers; then recompile the enclosing workspace
+            -- so the next compile picks up the now-missing module.
+            LSP.sendNotification LSP.SMethod_TextDocumentPublishDiagnostics $
+              LSP.PublishDiagnosticsParams uri Nothing []
+            scheduleRecompile st path
+          LSP.FileChangeType_Created -> scheduleRecompile st path
+          LSP.FileChangeType_Changed -> scheduleRecompile st path
+          _ -> pure ()
 

@@ -166,6 +166,14 @@ body {
 }
 
 /* Pulled-up scrollbar styling so dark / light feels consistent. */
+
+/* Firefox */
+* {
+  scrollbar-color: var(--border-strong) transparent;
+  scrollbar-width: thin;
+}
+
+/* Webkit (Chrome, Safari, Edge) */
 ::-webkit-scrollbar {
   width: 10px;
   height: 10px;

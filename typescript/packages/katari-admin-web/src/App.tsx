@@ -1,6 +1,7 @@
 import { Navigate, Outlet, Route, Routes, useLocation } from "react-router-dom";
 import { ApiKeyProvider, useApiKey } from "@/contexts/ApiKeyContext";
 import { AppShell } from "@/components/shell/AppShell";
+import { ErrorBoundary } from "@/components/shell/ErrorBoundary";
 import { LoginPage } from "@/pages/LoginPage";
 import { ProjectsPage } from "@/pages/ProjectsPage";
 import { DashboardPage } from "@/pages/DashboardPage";
@@ -16,6 +17,7 @@ import { PlaceholderPage } from "@/pages/PlaceholderPage";
 
 export default function App() {
   return (
+    <ErrorBoundary>
     <ApiKeyProvider>
       <Routes>
         <Route path="/login" element={<LoginPage />} />
@@ -45,6 +47,7 @@ export default function App() {
         </Route>
       </Routes>
     </ApiKeyProvider>
+    </ErrorBoundary>
   );
 }
 

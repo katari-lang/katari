@@ -1,5 +1,5 @@
-import { AnimatePresence, motion } from "framer-motion";
-import { useEffect, type ReactNode } from "react";
+import * as DialogPrimitive from "@radix-ui/react-dialog";
+import type { ReactNode } from "react";
 import { X } from "lucide-react";
 import { cn } from "@/lib/cn";
 
@@ -28,73 +28,51 @@ export function Dialog({
   className,
   size = "md",
 }: DialogProps) {
-  useEffect(() => {
-    if (!open) return;
-    function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") onClose();
-    }
-    document.addEventListener("keydown", onKey);
-    document.body.style.overflow = "hidden";
-    return () => {
-      document.removeEventListener("keydown", onKey);
-      document.body.style.overflow = "";
-    };
-  }, [open, onClose]);
-
   return (
-    <AnimatePresence>
-      {open && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            transition={{ duration: 0.12 }}
-            onClick={onClose}
-            className="absolute inset-0 bg-katari-950/30 backdrop-blur-sm"
-          />
-          <motion.div
-            initial={{ opacity: 0, scale: 0.96, y: 8 }}
-            animate={{ opacity: 1, scale: 1, y: 0 }}
-            exit={{ opacity: 0, scale: 0.96, y: 8 }}
-            transition={{ duration: 0.14, ease: "easeOut" }}
-            className={cn(
-              // Floating element: bg + border-strong on hover-equivalent
-              // "strong" border to lift from the backdrop blur, no shadow.
-              "relative w-full overflow-hidden border border-border-strong bg-background",
-              sizeClasses[size],
-              className,
-            )}
-            role="dialog"
-            aria-modal="true"
-          >
-            {(title !== undefined || description !== undefined) && (
-              <div className="flex items-start gap-2 border-b border-border p-5">
-                <div className="flex-1">
-                  {title !== undefined && (
-                    <h2 className="text-lg font-semibold text-foreground">
-                      {title}
-                    </h2>
-                  )}
-                  {description !== undefined && (
-                    <p className="mt-1 text-sm text-muted-foreground">{description}</p>
-                  )}
-                </div>
-                <button
-                  type="button"
-                  onClick={onClose}
-                  className="inline-flex h-8 w-8 items-center justify-center text-muted-foreground transition-colors hover:bg-muted hover:text-foreground hover:cursor-pointer"
-                  aria-label="Close dialog"
-                >
-                  <X className="size-4" />
-                </button>
+    <DialogPrimitive.Root open={open} onOpenChange={(isOpen) => { if (!isOpen) onClose(); }}>
+      <DialogPrimitive.Portal>
+        <DialogPrimitive.Overlay
+          className="fixed inset-0 z-50 bg-katari-950/30 backdrop-blur-sm data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=closed]:animate-out data-[state=closed]:fade-out-0"
+        />
+        <DialogPrimitive.Content
+          className={cn(
+            "fixed top-1/2 left-1/2 z-50 w-full -translate-x-1/2 -translate-y-1/2",
+            "overflow-hidden border border-border-strong bg-background",
+            "data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-[0.96] data-[state=open]:slide-in-from-left-1/2 data-[state=open]:slide-in-from-top-[48%]",
+            "data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-[0.96] data-[state=closed]:slide-out-to-left-1/2 data-[state=closed]:slide-out-to-top-[48%]",
+            sizeClasses[size],
+            className,
+          )}
+        >
+          {(title !== undefined || description !== undefined) && (
+            <div className="flex items-start gap-2 border-b border-border p-5">
+              <div className="flex-1">
+                {title !== undefined && (
+                  <DialogPrimitive.Title className="text-lg font-semibold text-foreground">
+                    {title}
+                  </DialogPrimitive.Title>
+                )}
+                {description !== undefined && (
+                  <DialogPrimitive.Description className="mt-1 text-sm text-muted-foreground">
+                    {description}
+                  </DialogPrimitive.Description>
+                )}
               </div>
-            )}
-            <div className="p-5">{children}</div>
-          </motion.div>
-        </div>
-      )}
-    </AnimatePresence>
+              <DialogPrimitive.Close
+                className="inline-flex h-8 w-8 items-center justify-center text-muted-foreground transition-colors hover:bg-muted hover:text-foreground hover:cursor-pointer"
+                aria-label="Close dialog"
+              >
+                <X className="size-4" />
+              </DialogPrimitive.Close>
+            </div>
+          )}
+          {title === undefined && description === undefined && (
+            <DialogPrimitive.Title className="sr-only">Dialog</DialogPrimitive.Title>
+          )}
+          <div className="p-5">{children}</div>
+        </DialogPrimitive.Content>
+      </DialogPrimitive.Portal>
+    </DialogPrimitive.Root>
   );
 }
 

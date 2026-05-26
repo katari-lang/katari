@@ -8,7 +8,6 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { MarkdownContent } from "@/components/ui/MarkdownContent";
-import { SpinnerOverlay } from "@/components/ui/Spinner";
 import {
   RunStatusBadge,
   isTerminalState,
@@ -71,8 +70,15 @@ export function DashboardPage() {
         }
       />
       <PageContent>
-        {projectQ.isLoading && <SpinnerOverlay />}
-        {!projectQ.isLoading && (
+        {(projectQ.isLoading || runsQ.isLoading || escalationsQ.isLoading || snapshotQ.isLoading) && (
+          <div className="grid gap-4 lg:grid-cols-2 xl:grid-cols-3">
+            <SkeletonCard lines={3} />
+            <SkeletonCard lines={3} />
+            <SkeletonCard lines={4} />
+            <SkeletonCard lines={5} className="lg:col-span-2 xl:col-span-3" />
+          </div>
+        )}
+        {!projectQ.isLoading && !runsQ.isLoading && !escalationsQ.isLoading && !snapshotQ.isLoading && (
           <motion.div
             initial={{ opacity: 0, y: 4 }}
             animate={{ opacity: 1, y: 0 }}
@@ -310,5 +316,26 @@ function InfoRow({ label, value }: { label: string; value: React.ReactNode }) {
       </dt>
       <dd className="text-right text-foreground">{value}</dd>
     </div>
+  );
+}
+
+function SkeletonCard({ lines, className }: { lines: number; className?: string }) {
+  return (
+    <Card className={className}>
+      <CardHeader>
+        <div className="h-5 w-32 animate-pulse bg-muted" />
+      </CardHeader>
+      <CardContent>
+        <div className="space-y-3">
+          {Array.from({ length: lines }, (_, index) => (
+            <div
+              key={index}
+              className="h-4 animate-pulse bg-muted"
+              style={{ width: `${60 + ((index * 17) % 30)}%` }}
+            />
+          ))}
+        </div>
+      </CardContent>
+    </Card>
   );
 }

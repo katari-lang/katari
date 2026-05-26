@@ -1,6 +1,7 @@
+import * as SelectPrimitive from "@radix-ui/react-select";
 import { Check, ChevronDown } from "lucide-react";
 import type { ReactNode } from "react";
-import { Dropdown, DropdownItem } from "./Dropdown";
+import { cn } from "@/lib/cn";
 
 export type SelectMenuOption = {
   /** Stable key for React + selected-state comparison. */
@@ -12,9 +13,9 @@ export type SelectMenuOption = {
 };
 
 /**
- * Styled drop-down for picking one value from a small/medium option list.
- * Wraps `Dropdown` + `DropdownItem` so callers don't have to wire the
- * trigger button styling each time.
+ * Styled select menu built on Radix UI Select for proper accessibility
+ * (keyboard navigation, ARIA). API is kept compatible with the previous
+ * implementation.
  */
 export function SelectMenu({
   value,
@@ -27,37 +28,52 @@ export function SelectMenu({
   onChange: (key: string) => void;
   placeholder?: string;
 }) {
-  const selected = options.find((o) => o.key === value);
-  const trigger = (
-    <button
-      type="button"
-      className="inline-flex h-9 w-full items-center justify-between gap-2 border border-border bg-transparent px-3 text-sm text-foreground transition-colors hover:bg-muted hover:cursor-pointer hover:border-border-strong focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-    >
-      <span className="truncate">
-        {selected !== undefined ? selected.label : (placeholder ?? "Select…")}
-      </span>
-      <ChevronDown className="size-4 shrink-0 text-muted-foreground" />
-    </button>
-  );
   return (
-    <Dropdown trigger={trigger} className="w-full">
-      {(close) => (
-        <div className="max-h-80 overflow-y-auto">
-          {options.map((opt) => (
-            <DropdownItem
-              key={opt.key}
-              active={opt.key === value}
-              onSelect={() => {
-                close();
-                onChange(opt.key);
-              }}
-            >
-              <div className="flex-1 truncate">{opt.detail ?? opt.label}</div>
-              {opt.key === value && <Check className="size-4 shrink-0" />}
-            </DropdownItem>
-          ))}
-        </div>
-      )}
-    </Dropdown>
+    <SelectPrimitive.Root value={value} onValueChange={onChange}>
+      <SelectPrimitive.Trigger
+        className="inline-flex h-9 w-full items-center justify-between gap-2 border border-border bg-transparent px-3 text-sm text-foreground transition-colors hover:bg-muted hover:cursor-pointer hover:border-border-strong focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      >
+        <SelectPrimitive.Value placeholder={placeholder ?? "Select..."} />
+        <SelectPrimitive.Icon>
+          <ChevronDown className="size-4 shrink-0 text-muted-foreground" />
+        </SelectPrimitive.Icon>
+      </SelectPrimitive.Trigger>
+      <SelectPrimitive.Portal>
+        <SelectPrimitive.Content
+          position="popper"
+          sideOffset={4}
+          className={cn(
+            "z-50 max-h-80 w-[var(--radix-select-trigger-width)] overflow-hidden border border-border bg-background",
+            "data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-[0.97]",
+            "data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-[0.97]",
+          )}
+        >
+          <SelectPrimitive.Viewport className="max-h-80 overflow-y-auto">
+            {options.map((opt) => (
+              <SelectPrimitive.Item
+                key={opt.key}
+                value={opt.key}
+                className={cn(
+                  "flex w-full items-center gap-2 px-3 py-2 text-left text-sm outline-none transition-colors hover:cursor-pointer",
+                  "data-[highlighted]:bg-muted",
+                  opt.key === value
+                    ? "bg-accent text-accent-foreground"
+                    : "text-foreground",
+                )}
+              >
+                <SelectPrimitive.ItemText>
+                  {opt.detail ?? opt.label}
+                </SelectPrimitive.ItemText>
+                {opt.key === value && (
+                  <SelectPrimitive.ItemIndicator>
+                    <Check className="size-4 shrink-0" />
+                  </SelectPrimitive.ItemIndicator>
+                )}
+              </SelectPrimitive.Item>
+            ))}
+          </SelectPrimitive.Viewport>
+        </SelectPrimitive.Content>
+      </SelectPrimitive.Portal>
+    </SelectPrimitive.Root>
   );
 }

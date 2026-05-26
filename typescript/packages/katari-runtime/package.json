@@ -25,7 +25,8 @@
   "dependencies": {
     "ajv": "^8.20.0",
     "denque": "^2.1.0",
-    "ts-pattern": "^5.9.0"
+    "ts-pattern": "^5.9.0",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

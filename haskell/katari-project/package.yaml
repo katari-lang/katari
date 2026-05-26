@@ -26,6 +26,7 @@ tests:
       - Katari.Project.ConfigSpec
       - Katari.Project.DiscoverySpec
       - Katari.Project.LockfileSpec
+      - Katari.Project.ResolveSpec
       - Katari.Project.SnapshotSpec
     dependencies:
       - katari-project
