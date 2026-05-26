@@ -28,7 +28,7 @@ const ListQuerySchema = z
     snapshotId: SnapshotIdSchema.optional(),
     state: z.enum(["open", "answered", "cancelled"]).optional(),
   })
-  .merge(PaginationQuerySchema);
+  .extend(PaginationQuerySchema.shape);
 
 export function buildEscalationRoutes(
   orchestrator: ApiServerOrchestrator,
@@ -42,15 +42,19 @@ export function buildEscalationRoutes(
     // Filter by `receiverEndpoint = API_ENDPOINT` so the operator-facing
     // list never accidentally surfaces FFI-relay escalations (= those
     // are internal plumbing, not questions a human should answer).
-    const list = await storage.escalations.list({
+    const result = await storage.escalations.list({
       projectId,
       snapshotId: query.snapshotId,
       state: query.state,
       receiverEndpoint: API_ENDPOINT,
       limit: query.limit,
       offset: query.offset,
+      cursor: query.cursor,
     });
-    return c.json({ escalations: list.map(escalationRowToWire) });
+    return c.json({
+      escalations: result.items.map(escalationRowToWire),
+      nextCursor: result.nextCursor,
+    });
   });
 
   app.get("/:escalationId", async (c) => {

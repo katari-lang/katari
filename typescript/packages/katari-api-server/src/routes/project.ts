@@ -25,8 +25,8 @@ export function buildProjectRoutes(projects: ProjectService): Hono {
 
   app.get("/", async (c) => {
     const query = PaginationQuerySchema.parse(c.req.query());
-    const list = await projects.list(query);
-    return c.json({ projects: list });
+    const result = await projects.list(query);
+    return c.json({ projects: result.items, nextCursor: result.nextCursor });
   });
 
   app.get("/:projectId", async (c) => {

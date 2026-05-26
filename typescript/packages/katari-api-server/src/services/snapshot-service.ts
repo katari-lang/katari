@@ -12,6 +12,7 @@ import {
 } from "@katari-lang/runtime";
 import type {
   ListOptions,
+  ListResult,
   ProjectId,
   SidecarBundle,
   Snapshot,
@@ -84,7 +85,7 @@ export class SnapshotService {
     return { snapshotId };
   }
 
-  list(filter?: { projectId?: ProjectId } & ListOptions): Promise<SnapshotSummary[]> {
+  list(filter?: { projectId?: ProjectId } & ListOptions): Promise<ListResult<SnapshotSummary>> {
     return this.storage.snapshots.list(filter);
   }
 

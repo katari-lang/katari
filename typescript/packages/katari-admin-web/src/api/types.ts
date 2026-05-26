@@ -110,6 +110,14 @@ export type EnvEntry = {
 
 export type AgentWire = AgentDefinition;
 
+/**
+ * Generic paginated response. Server returns `nextCursor: null` when
+ * there are no more items.
+ */
+export type PaginatedResponse<K extends string, T> = {
+  [key in K]: T[];
+} & { nextCursor: string | null };
+
 // ─── Delegation tree (live view) ──────────────────────────────────────────
 
 export type DelegationTreeNode = {

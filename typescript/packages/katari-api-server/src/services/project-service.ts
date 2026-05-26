@@ -4,6 +4,7 @@
 import type { Logger } from "@katari-lang/runtime";
 import type {
   ListOptions,
+  ListResult,
   Project,
   ProjectId,
   Storage,
@@ -33,7 +34,7 @@ export class ProjectService {
     return project;
   }
 
-  list(options?: ListOptions): Promise<Project[]> {
+  list(options?: ListOptions): Promise<ListResult<Project>> {
     return this.storage.projects.list(options);
   }
 

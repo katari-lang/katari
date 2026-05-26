@@ -30,6 +30,7 @@ import type {
   FfiPendingEscalation,
   FfiPendingEscalationRepo,
   ListOptions,
+  ListResult,
   Project,
   ProjectId,
   ProjectRepo,
@@ -44,6 +45,7 @@ import type {
   Storage,
   UpsertProjectInput,
 } from "./types.js";
+import { decodeCursor, encodeCursor } from "../cursor.js";
 
 function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
@@ -56,6 +58,50 @@ function clampLimit(requested: number | undefined): number {
   if (requested === undefined) return DEFAULT_LIMIT;
   if (!Number.isFinite(requested) || requested <= 0) return DEFAULT_LIMIT;
   return Math.min(MAX_LIMIT, Math.floor(requested));
+}
+
+/**
+ * Apply cursor-based pagination to a pre-sorted array. Returns
+ * `{ items, nextCursor }`. The caller must ensure `all` is already
+ * sorted in the desired order.
+ *
+ * `comparator` defines how cursor position is located:
+ *   - For DESC order: items whose `(createdAt, id)` is lexicographically
+ *     LESS than the cursor are "after" the cursor in the result set.
+ *   - For ASC order: items whose `(createdAt, id)` is lexicographically
+ *     GREATER than the cursor are "after" the cursor in the result set.
+ */
+function paginateWithCursor<T extends { createdAt: string }>(
+  all: T[],
+  options: ListOptions | undefined,
+  idFn: (item: T) => string,
+  order: "asc" | "desc",
+): ListResult<T> {
+  const limit = clampLimit(options?.limit);
+  const cursor = options?.cursor !== undefined ? decodeCursor(options.cursor) : null;
+  let start = 0;
+  if (cursor !== null) {
+    start = all.findIndex((item) => {
+      const id = idFn(item);
+      if (order === "desc") {
+        return item.createdAt < cursor.createdAt ||
+          (item.createdAt === cursor.createdAt && id < cursor.id);
+      }
+      return item.createdAt > cursor.createdAt ||
+        (item.createdAt === cursor.createdAt && id > cursor.id);
+    });
+    if (start === -1) start = all.length;
+  }
+  const page = all.slice(start, start + limit + 1);
+  const hasMore = page.length > limit;
+  const items = hasMore ? page.slice(0, limit) : page;
+  const last = items[items.length - 1];
+  return {
+    items: items.map(clone),
+    nextCursor: hasMore && last !== undefined
+      ? encodeCursor(last.createdAt, idFn(last))
+      : null,
+  };
 }
 
 // ─── Repos ─────────────────────────────────────────────────────────────────
@@ -94,11 +140,12 @@ class InMemoryProjectRepo implements ProjectRepo {
     return clone(project);
   }
 
-  async list(options?: ListOptions): Promise<Project[]> {
-    const all = [...this.rows.values()];
-    const offset = Math.max(0, options?.offset ?? 0);
-    const limit = clampLimit(options?.limit);
-    return all.slice(offset, offset + limit).map(clone);
+  async list(options?: ListOptions): Promise<ListResult<Project>> {
+    const all = [...this.rows.values()].sort((a, b) =>
+      a.createdAt > b.createdAt ? -1 : a.createdAt < b.createdAt ? 1 :
+        a.id > b.id ? -1 : a.id < b.id ? 1 : 0,
+    );
+    return paginateWithCursor(all, options, (p) => p.id, "desc");
   }
 
   async get(id: ProjectId): Promise<Project | null> {
@@ -153,21 +200,22 @@ class InMemorySnapshotRepo implements SnapshotRepo {
 
   async list(
     filter?: { projectId?: ProjectId } & ListOptions,
-  ): Promise<SnapshotSummary[]> {
+  ): Promise<ListResult<SnapshotSummary>> {
     let all = [...this.rows.values()];
     if (filter?.projectId !== undefined) {
       all = all.filter((r) => r.projectId === filter.projectId);
     }
-    const offset = Math.max(0, filter?.offset ?? 0);
-    const limit = clampLimit(filter?.limit);
-    return all
-      .slice(offset, offset + limit)
-      .map((r) => ({
-        id: r.id,
-        projectId: r.projectId,
-        message: r.message,
-        createdAt: r.createdAt,
-      }));
+    all.sort((a, b) =>
+      a.createdAt > b.createdAt ? -1 : a.createdAt < b.createdAt ? 1 :
+        a.id > b.id ? -1 : a.id < b.id ? 1 : 0,
+    );
+    const summaries = all.map((r) => ({
+      id: r.id,
+      projectId: r.projectId,
+      message: r.message,
+      createdAt: r.createdAt,
+    }));
+    return paginateWithCursor(summaries, filter, (s) => s.id, "desc");
   }
 
   async latest(projectId: ProjectId): Promise<SnapshotId | null> {
@@ -234,7 +282,7 @@ class InMemoryDelegationRepo implements DelegationRepo {
       parentDelegationId?: DelegationId;
       state?: DelegationState;
     } & ListOptions,
-  ): Promise<DelegationRow[]> {
+  ): Promise<ListResult<DelegationRow>> {
     let all = [...this.rows.values()];
     if (filter?.projectId !== undefined) {
       const want = filter.projectId;
@@ -258,11 +306,10 @@ class InMemoryDelegationRepo implements DelegationRepo {
       all = all.filter((r) => r.state === filter.state);
     }
     all.sort((a, b) =>
-      a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0,
+      a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 :
+        a.id < b.id ? -1 : a.id > b.id ? 1 : 0,
     );
-    const offset = Math.max(0, filter?.offset ?? 0);
-    const limit = clampLimit(filter?.limit);
-    return all.slice(offset, offset + limit).map(clone);
+    return paginateWithCursor(all, filter, (r) => r.id, "asc");
   }
 
   async setState(
@@ -348,7 +395,7 @@ class InMemoryEscalationRepo implements EscalationRepo {
       delegationId?: DelegationId;
       state?: EscalationState;
     } & ListOptions,
-  ): Promise<EscalationRow[]> {
+  ): Promise<ListResult<EscalationRow>> {
     let all = [...this.rows.values()];
     if (filter?.projectId !== undefined) {
       const want = filter.projectId;
@@ -373,11 +420,10 @@ class InMemoryEscalationRepo implements EscalationRepo {
       all = all.filter((r) => r.state === filter.state);
     }
     all.sort((a, b) =>
-      a.createdAt > b.createdAt ? -1 : a.createdAt < b.createdAt ? 1 : 0,
+      a.createdAt > b.createdAt ? -1 : a.createdAt < b.createdAt ? 1 :
+        a.id > b.id ? -1 : a.id < b.id ? 1 : 0,
     );
-    const offset = Math.max(0, filter?.offset ?? 0);
-    const limit = clampLimit(filter?.limit);
-    return all.slice(offset, offset + limit).map(clone);
+    return paginateWithCursor(all, filter, (r) => r.id, "desc");
   }
 
   async setAnswered(
@@ -432,7 +478,7 @@ class InMemoryRunsAuditRepo implements RunsAuditRepo {
       snapshotId?: SnapshotId;
       state?: RunsAuditState;
     } & ListOptions,
-  ): Promise<RunsAuditRow[]> {
+  ): Promise<ListResult<RunsAuditRow>> {
     let all = [...this.rows.values()];
     if (filter?.projectId !== undefined) {
       const want = filter.projectId;
@@ -445,11 +491,10 @@ class InMemoryRunsAuditRepo implements RunsAuditRepo {
       all = all.filter((r) => r.state === filter.state);
     }
     all.sort((a, b) =>
-      a.createdAt > b.createdAt ? -1 : a.createdAt < b.createdAt ? 1 : 0,
+      a.createdAt > b.createdAt ? -1 : a.createdAt < b.createdAt ? 1 :
+        a.id > b.id ? -1 : a.id < b.id ? 1 : 0,
     );
-    const offset = Math.max(0, filter?.offset ?? 0);
-    const limit = clampLimit(filter?.limit);
-    return all.slice(offset, offset + limit).map(clone);
+    return paginateWithCursor(all, filter, (r) => r.id, "desc");
   }
 
   async setState(

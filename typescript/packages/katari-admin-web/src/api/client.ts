@@ -87,15 +87,15 @@ export function createApiClient(config: ApiClientConfig) {
     healthz: () => request<string>(config, "GET", "/healthz"),
 
     // Projects
-    listProjects: (params?: { limit?: number; offset?: number }) =>
-      request<{ projects: Project[] }>(config, "GET", withQuery("/project", params)),
+    listProjects: (params?: { limit?: number; cursor?: string }) =>
+      request<{ projects: Project[]; nextCursor: string | null }>(config, "GET", withQuery("/project", params)),
     getProject: (id: ProjectId) => request<{ project: Project }>(config, "GET", `/project/${id}`),
     getProjectByName: (name: string) =>
       request<{ project: Project }>(config, "GET", `/project/by-name/${encodeURIComponent(name)}`),
 
     // Snapshots (mounted under /project/:projectId/snapshot)
-    listSnapshots: (projectId: ProjectId, params?: { limit?: number; offset?: number }) =>
-      request<{ snapshots: SnapshotSummary[] }>(
+    listSnapshots: (projectId: ProjectId, params?: { limit?: number; cursor?: string }) =>
+      request<{ snapshots: SnapshotSummary[]; nextCursor: string | null }>(
         config,
         "GET",
         withQuery(`/project/${projectId}/snapshot`, params),
@@ -140,16 +140,16 @@ export function createApiClient(config: ApiClientConfig) {
       snapshotId?: SnapshotId;
       state?: RunState;
       limit?: number;
-      offset?: number;
+      cursor?: string;
     }) =>
-      request<{ runs: RunRowWire[] }>(
+      request<{ runs: RunRowWire[]; nextCursor: string | null }>(
         config,
         "GET",
         withQuery(`/project/${params.projectId}/run`, {
           snapshotId: params.snapshotId,
           state: params.state,
           limit: params.limit,
-          offset: params.offset,
+          cursor: params.cursor,
         }),
       ),
     getRun: (projectId: ProjectId, id: RunId) =>
@@ -179,16 +179,16 @@ export function createApiClient(config: ApiClientConfig) {
       snapshotId?: SnapshotId;
       state?: EscalationState;
       limit?: number;
-      offset?: number;
+      cursor?: string;
     }) =>
-      request<{ escalations: EscalationWire[] }>(
+      request<{ escalations: EscalationWire[]; nextCursor: string | null }>(
         config,
         "GET",
         withQuery(`/project/${params.projectId}/escalation`, {
           snapshotId: params.snapshotId,
           state: params.state,
           limit: params.limit,
-          offset: params.offset,
+          cursor: params.cursor,
         }),
       ),
     getEscalation: (projectId: ProjectId, id: EscalationId) =>

@@ -35,6 +35,7 @@ import type {
   FfiPendingEscalation,
   FfiPendingEscalationRepo,
   ListOptions,
+  ListResult,
   Project,
   ProjectId,
   ProjectRepo,
@@ -49,6 +50,7 @@ import type {
   Storage,
   UpsertProjectInput,
 } from "./types.js";
+import { decodeCursor, encodeCursor } from "../cursor.js";
 
 type Sql = ReturnType<typeof postgres>;
 
@@ -162,16 +164,33 @@ class PgProjectRepo implements ProjectRepo {
     return dbToProject(rows[0]!);
   }
 
-  async list(options?: ListOptions): Promise<Project[]> {
+  async list(options?: ListOptions): Promise<ListResult<Project>> {
     const limit = clampLimit(options?.limit);
-    const offset = clampOffset(options?.offset);
-    const rows = await this.sql<DbProjectRow[]>`
-      SELECT id, name, description, readme, created_at
-      FROM projects
-      ORDER BY created_at DESC
-      LIMIT ${limit} OFFSET ${offset}
-    `;
-    return rows.map(dbToProject);
+    const cursor = options?.cursor !== undefined ? decodeCursor(options.cursor) : null;
+    const fetchCount = limit + 1;
+    const rows = cursor !== null
+      ? await this.sql<DbProjectRow[]>`
+          SELECT id, name, description, readme, created_at
+          FROM projects
+          WHERE (created_at, id) < (${cursor.createdAt}, ${cursor.id})
+          ORDER BY created_at DESC, id DESC
+          LIMIT ${fetchCount}
+        `
+      : await this.sql<DbProjectRow[]>`
+          SELECT id, name, description, readme, created_at
+          FROM projects
+          ORDER BY created_at DESC, id DESC
+          LIMIT ${fetchCount}
+        `;
+    const hasMore = rows.length > limit;
+    const items = (hasMore ? rows.slice(0, limit) : rows).map(dbToProject);
+    const last = items[items.length - 1];
+    return {
+      items,
+      nextCursor: hasMore && last !== undefined
+        ? encodeCursor(last.createdAt, last.id)
+        : null,
+    };
   }
 
   async get(id: ProjectId): Promise<Project | null> {
@@ -260,34 +279,46 @@ class PgSnapshotRepo implements SnapshotRepo {
 
   async list(
     filter?: { projectId?: ProjectId } & ListOptions,
-  ): Promise<SnapshotSummary[]> {
+  ): Promise<ListResult<SnapshotSummary>> {
     const limit = clampLimit(filter?.limit);
-    const offset = clampOffset(filter?.offset);
-    const rows =
-      filter?.projectId !== undefined
-        ? await this.sql<
-            { id: string; project_id: string; message: string; created_at: Date }[]
-          >`
-            SELECT id, project_id, message, created_at
-            FROM snapshots
-            WHERE project_id = ${filter.projectId}
-            ORDER BY created_at DESC
-            LIMIT ${limit} OFFSET ${offset}
-          `
-        : await this.sql<
-            { id: string; project_id: string; message: string; created_at: Date }[]
-          >`
-            SELECT id, project_id, message, created_at
-            FROM snapshots
-            ORDER BY created_at DESC
-            LIMIT ${limit} OFFSET ${offset}
-          `;
-    return rows.map((r) => ({
+    const cursor = filter?.cursor !== undefined ? decodeCursor(filter.cursor) : null;
+    const fetchCount = limit + 1;
+    const sql = this.sql;
+    const projectFilter = filter?.projectId !== undefined
+      ? sql`project_id = ${filter.projectId}`
+      : null;
+    const cursorFilter = cursor !== null
+      ? sql`(created_at, id) < (${cursor.createdAt}, ${cursor.id})`
+      : null;
+    const pieces = [projectFilter, cursorFilter].filter(
+      (p): p is NonNullable<typeof p> => p !== null,
+    );
+    const whereClause = pieces.length === 0
+      ? sql``
+      : sql`WHERE ${pieces.reduce((acc, p, i) => i === 0 ? p : sql`${acc} AND ${p}`)}`;
+    const rows = await sql<
+      { id: string; project_id: string; message: string; created_at: Date }[]
+    >`
+      SELECT id, project_id, message, created_at
+      FROM snapshots
+      ${whereClause}
+      ORDER BY created_at DESC, id DESC
+      LIMIT ${fetchCount}
+    `;
+    const hasMore = rows.length > limit;
+    const items = (hasMore ? rows.slice(0, limit) : rows).map((r) => ({
       id: r.id as SnapshotId,
       projectId: r.project_id as ProjectId,
       message: r.message,
       createdAt: r.created_at.toISOString(),
     }));
+    const last = items[items.length - 1];
+    return {
+      items,
+      nextCursor: hasMore && last !== undefined
+        ? encodeCursor(last.createdAt, last.id)
+        : null,
+    };
   }
 
   async latest(projectId: ProjectId): Promise<SnapshotId | null> {
@@ -430,9 +461,10 @@ class PgDelegationRepo implements DelegationRepo {
       parentDelegationId?: DelegationId;
       state?: DelegationState;
     } & ListOptions,
-  ): Promise<DelegationRow[]> {
+  ): Promise<ListResult<DelegationRow>> {
     const limit = clampLimit(filter?.limit);
-    const offset = clampOffset(filter?.offset);
+    const cursor = filter?.cursor !== undefined ? decodeCursor(filter.cursor) : null;
+    const fetchCount = limit + 1;
     const sql = this.sql;
     const joinClause =
       filter?.projectId !== undefined
@@ -455,6 +487,9 @@ class PgDelegationRepo implements DelegationRepo {
         ? sql`d.parent_delegation_id = ${filter.parentDelegationId}`
         : null,
       filter?.state !== undefined ? sql`d.state = ${filter.state}` : null,
+      cursor !== null
+        ? sql`(d.created_at, d.id) > (${cursor.createdAt}, ${cursor.id})`
+        : null,
     ]);
     const rows = await sql<DbDelegationRow[]>`
       SELECT d.id, d.root_delegation_id, d.parent_delegation_id, d.snapshot_id,
@@ -463,9 +498,17 @@ class PgDelegationRepo implements DelegationRepo {
       FROM delegations d
       ${joinClause}
       ${whereClause}
-      ORDER BY d.created_at ASC, d.id ASC LIMIT ${limit} OFFSET ${offset}
+      ORDER BY d.created_at ASC, d.id ASC LIMIT ${fetchCount}
     `;
-    return rows.map(dbToDelegationRow);
+    const hasMore = rows.length > limit;
+    const items = (hasMore ? rows.slice(0, limit) : rows).map(dbToDelegationRow);
+    const last = items[items.length - 1];
+    return {
+      items,
+      nextCursor: hasMore && last !== undefined
+        ? encodeCursor(last.createdAt, last.id)
+        : null,
+    };
   }
 
   async setState(
@@ -586,9 +629,10 @@ class PgEscalationRepo implements EscalationRepo {
       delegationId?: DelegationId;
       state?: EscalationState;
     } & ListOptions,
-  ): Promise<EscalationRow[]> {
+  ): Promise<ListResult<EscalationRow>> {
     const limit = clampLimit(filter?.limit);
-    const offset = clampOffset(filter?.offset);
+    const cursor = filter?.cursor !== undefined ? decodeCursor(filter.cursor) : null;
+    const fetchCount = limit + 1;
     const sql = this.sql;
     const joinClause =
       filter?.projectId !== undefined
@@ -614,6 +658,9 @@ class PgEscalationRepo implements EscalationRepo {
         ? sql`e.delegation_id = ${filter.delegationId}`
         : null,
       filter?.state !== undefined ? sql`e.state = ${filter.state}` : null,
+      cursor !== null
+        ? sql`(e.created_at, e.id) < (${cursor.createdAt}, ${cursor.id})`
+        : null,
     ]);
     const rows = await sql<DbEscalationRow[]>`
       SELECT e.id, e.delegation_id, e.root_delegation_id, e.snapshot_id,
@@ -621,9 +668,17 @@ class PgEscalationRepo implements EscalationRepo {
       FROM escalations e
       ${joinClause}
       ${whereClause}
-      ORDER BY e.created_at DESC LIMIT ${limit} OFFSET ${offset}
+      ORDER BY e.created_at DESC, e.id DESC LIMIT ${fetchCount}
     `;
-    return rows.map(dbToEscalationRow);
+    const hasMore = rows.length > limit;
+    const items = (hasMore ? rows.slice(0, limit) : rows).map(dbToEscalationRow);
+    const last = items[items.length - 1];
+    return {
+      items,
+      nextCursor: hasMore && last !== undefined
+        ? encodeCursor(last.createdAt, last.id)
+        : null,
+    };
   }
 
   async setAnswered(
@@ -723,9 +778,10 @@ class PgRunsAuditRepo implements RunsAuditRepo {
       snapshotId?: SnapshotId;
       state?: RunsAuditState;
     } & ListOptions,
-  ): Promise<RunsAuditRow[]> {
+  ): Promise<ListResult<RunsAuditRow>> {
     const limit = clampLimit(filter?.limit);
-    const offset = clampOffset(filter?.offset);
+    const cursor = filter?.cursor !== undefined ? decodeCursor(filter.cursor) : null;
+    const fetchCount = limit + 1;
     const sql = this.sql;
     const joinClause =
       filter?.projectId !== undefined
@@ -739,6 +795,9 @@ class PgRunsAuditRepo implements RunsAuditRepo {
         ? sql`r.snapshot_id = ${filter.snapshotId}`
         : null,
       filter?.state !== undefined ? sql`r.state = ${filter.state}` : null,
+      cursor !== null
+        ? sql`(r.created_at, r.id) < (${cursor.createdAt}, ${cursor.id})`
+        : null,
     ]);
     const rows = await sql<DbRunsAuditRow[]>`
       SELECT r.id, r.snapshot_id, r.name, r.qualified_name, r.args, r.state, r.cancel_reason,
@@ -746,9 +805,17 @@ class PgRunsAuditRepo implements RunsAuditRepo {
       FROM runs_audit r
       ${joinClause}
       ${whereClause}
-      ORDER BY r.created_at DESC LIMIT ${limit} OFFSET ${offset}
+      ORDER BY r.created_at DESC, r.id DESC LIMIT ${fetchCount}
     `;
-    return rows.map(dbToRunsAuditRow);
+    const hasMore = rows.length > limit;
+    const items = (hasMore ? rows.slice(0, limit) : rows).map(dbToRunsAuditRow);
+    const last = items[items.length - 1];
+    return {
+      items,
+      nextCursor: hasMore && last !== undefined
+        ? encodeCursor(last.createdAt, last.id)
+        : null,
+    };
   }
 
   async setState(

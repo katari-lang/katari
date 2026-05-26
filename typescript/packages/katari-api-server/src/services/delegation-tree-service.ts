@@ -80,7 +80,7 @@ export class DelegationTreeService {
         throw new RunNotFound(runId);
       }
     }
-    const flat = await this.storage.delegations.list({
+    const { items: flat } = await this.storage.delegations.list({
       rootDelegationId: runId,
       limit: 500,
     });

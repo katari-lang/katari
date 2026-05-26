@@ -27,7 +27,7 @@ const RunListQuerySchema = z
     snapshotId: SnapshotIdSchema.optional(),
     state: RunStateSchema.optional(),
   })
-  .merge(PaginationQuerySchema);
+  .extend(PaginationQuerySchema.shape);
 
 export function buildRunRoutes(
   orchestrator: ApiServerOrchestrator,
@@ -62,14 +62,18 @@ export function buildRunRoutes(
   app.get("/", async (c) => {
     const projectId = ProjectIdSchema.parse(c.req.param("projectId"));
     const query = RunListQuerySchema.parse(c.req.query());
-    const rows = await storage.runsAudit.list({
+    const result = await storage.runsAudit.list({
       projectId,
       snapshotId: query.snapshotId,
       state: query.state,
       limit: query.limit,
       offset: query.offset,
+      cursor: query.cursor,
     });
-    return c.json({ runs: rows.map(runAuditRowToWire) });
+    return c.json({
+      runs: result.items.map(runAuditRowToWire),
+      nextCursor: result.nextCursor,
+    });
   });
 
   app.get("/:runId", async (c) => {

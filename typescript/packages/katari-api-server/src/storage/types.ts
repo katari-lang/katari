@@ -96,7 +96,7 @@ export interface ProjectRepo {
   /** Idempotent on `name`. Description / readme are overwritten when
    *  provided so the toml-driven reconciler model holds. */
   upsertProject(input: UpsertProjectInput): Promise<Project>;
-  list(options?: ListOptions): Promise<Project[]>;
+  list(options?: ListOptions): Promise<ListResult<Project>>;
   get(id: ProjectId): Promise<Project | null>;
   getByName(name: string): Promise<Project | null>;
   /** Throws via FK when snapshots are still attached. */
@@ -136,7 +136,7 @@ export interface SnapshotRepo {
   get(id: SnapshotId): Promise<Snapshot | null>;
   list(
     filter?: { projectId?: ProjectId } & ListOptions,
-  ): Promise<SnapshotSummary[]>;
+  ): Promise<ListResult<SnapshotSummary>>;
   /** Latest snapshot id within a project. `null` if empty. */
   latest(projectId: ProjectId): Promise<SnapshotId | null>;
   delete(id: SnapshotId): Promise<boolean>;
@@ -199,7 +199,7 @@ export interface DelegationRepo {
       parentDelegationId?: DelegationId;
       state?: DelegationState;
     } & ListOptions,
-  ): Promise<DelegationRow[]>;
+  ): Promise<ListResult<DelegationRow>>;
   /**
    * State transition with optional optimistic check. Returns true if a row
    * was updated.
@@ -259,7 +259,7 @@ export interface EscalationRepo {
       delegationId?: DelegationId;
       state?: EscalationState;
     } & ListOptions,
-  ): Promise<EscalationRow[]>;
+  ): Promise<ListResult<EscalationRow>>;
   setAnswered(id: EscalationId, value: EncryptedValue): Promise<boolean>;
   /**
    * Mark every open escalation in a root subtree as `cancelled`. Called by
@@ -309,7 +309,7 @@ export interface RunsAuditRepo {
       snapshotId?: SnapshotId;
       state?: RunsAuditState;
     } & ListOptions,
-  ): Promise<RunsAuditRow[]>;
+  ): Promise<ListResult<RunsAuditRow>>;
   setState(
     id: DelegationId,
     patch: {
@@ -408,6 +408,20 @@ export interface EnvEntryRepo {
 export type ListOptions = {
   limit?: number;
   offset?: number;
+  /** Opaque cursor from a previous `ListResult.nextCursor`. When
+   *  provided, `offset` is ignored and the query resumes from the
+   *  position encoded in the cursor. */
+  cursor?: string;
+};
+
+/**
+ * Paginated list response. Repos that support cursor-based pagination
+ * return this instead of a bare array. `nextCursor` is `null` when
+ * there are no more items.
+ */
+export type ListResult<T> = {
+  items: T[];
+  nextCursor: string | null;
 };
 
 // ─── Storage facade ────────────────────────────────────────────────────────

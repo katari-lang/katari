@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
+import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { motion } from "framer-motion";
 import { MessageCircleQuestion } from "lucide-react";
 import { useApiClient } from "@/contexts/ApiKeyContext";
@@ -14,6 +14,7 @@ import { relativeTime, formatDateTime } from "@/lib/format";
 import type { EscalationState, ProjectId } from "@/api/types";
 
 const POLL_MS = 3_000;
+const PAGE_SIZE = 50;
 
 const stateOptions: { value: EscalationState | "all"; label: string }[] = [
   { value: "open", label: "Open" },
@@ -36,23 +37,36 @@ export function EscalationsPage() {
   );
   const navigate = useNavigate();
 
-  const { data, isLoading, isError, error } = useQuery({
+  const {
+    data,
+    isLoading,
+    isError,
+    error,
+    fetchNextPage,
+    hasNextPage,
+    isFetchingNextPage,
+  } = useInfiniteQuery({
     queryKey: ["escalations", projectId, stateFilter],
-    queryFn: () =>
+    queryFn: ({ pageParam }) =>
       client.listEscalations({
         projectId: projectId as ProjectId,
         state: stateFilter === "all" ? undefined : stateFilter,
-        limit: 200,
+        limit: PAGE_SIZE,
+        cursor: pageParam ?? undefined,
       }),
+    initialPageParam: null as string | null,
+    getNextPageParam: (lastPage) => lastPage.nextCursor,
     enabled: typeof projectId === "string",
     refetchInterval: stateFilter === "open" ? POLL_MS : false,
   });
+
+  const escalations = data?.pages.flatMap((p) => p.escalations) ?? [];
 
   // Run name lookup so the table can show the run a question was raised
   // from by name rather than a delegation UUID. Cache is shared with
   // RunsPage so visiting that page beforehand makes this free.
   const runsQ = useQuery({
-    queryKey: ["runs", projectId],
+    queryKey: ["runs-lookup", projectId],
     queryFn: () =>
       client.listRuns({ projectId: projectId as ProjectId, limit: 200 }),
     enabled: typeof projectId === "string",
@@ -101,7 +115,7 @@ export function EscalationsPage() {
             animate={{ opacity: 1 }}
             transition={{ duration: 0.15 }}
           >
-            {data.escalations.length === 0 ? (
+            {escalations.length === 0 ? (
               <EmptyState
                 icon={MessageCircleQuestion}
                 title="No escalations"
@@ -112,55 +126,69 @@ export function EscalationsPage() {
                 }
               />
             ) : (
-              <Table>
-                <THead>
-                  <TR>
-                    <TH>State</TH>
-                    <TH>Request</TH>
-                    <TH>Run</TH>
-                    <TH>Created</TH>
-                  </TR>
-                </THead>
-                <TBody>
-                  {data.escalations.map((esc) => (
-                    <TR
-                      key={esc.id}
-                      className="cursor-pointer"
-                      onClick={() =>
-                        navigate(`/project/${projectId}/escalations/${esc.id}`)
-                      }
-                    >
-                      <TD>
-                        <Badge tone={stateTones[esc.state]}>{esc.state}</Badge>
-                      </TD>
-                      <TD>
-                        <Link
-                          to={`/project/${projectId}/escalations/${esc.id}`}
-                          className="block font-medium text-foreground hover:underline"
-                          onClick={(e) => e.stopPropagation()}
-                        >
-                          {esc.agentDefId}
-                        </Link>
-                      </TD>
-                      <TD className="text-xs text-muted-foreground">
-                        <Link
-                          to={`/project/${projectId}/runs/${esc.rootDelegationId}`}
-                          className="hover:underline hover:text-foreground"
-                          onClick={(e) => e.stopPropagation()}
-                        >
-                          {runNameById.get(esc.rootDelegationId) ?? "—"}
-                        </Link>
-                      </TD>
-                      <TD
-                        className="text-xs text-muted-foreground"
-                        title={formatDateTime(esc.createdAt)}
-                      >
-                        {relativeTime(esc.createdAt)}
-                      </TD>
+              <>
+                <Table>
+                  <THead>
+                    <TR>
+                      <TH>State</TH>
+                      <TH>Request</TH>
+                      <TH>Run</TH>
+                      <TH>Created</TH>
                     </TR>
-                  ))}
-                </TBody>
-              </Table>
+                  </THead>
+                  <TBody>
+                    {escalations.map((esc) => (
+                      <TR
+                        key={esc.id}
+                        className="cursor-pointer"
+                        onClick={() =>
+                          navigate(`/project/${projectId}/escalations/${esc.id}`)
+                        }
+                      >
+                        <TD>
+                          <Badge tone={stateTones[esc.state]}>{esc.state}</Badge>
+                        </TD>
+                        <TD>
+                          <Link
+                            to={`/project/${projectId}/escalations/${esc.id}`}
+                            className="block font-medium text-foreground hover:underline"
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            {esc.agentDefId}
+                          </Link>
+                        </TD>
+                        <TD className="text-xs text-muted-foreground">
+                          <Link
+                            to={`/project/${projectId}/runs/${esc.rootDelegationId}`}
+                            className="hover:underline hover:text-foreground"
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            {runNameById.get(esc.rootDelegationId) ?? "—"}
+                          </Link>
+                        </TD>
+                        <TD
+                          className="text-xs text-muted-foreground"
+                          title={formatDateTime(esc.createdAt)}
+                        >
+                          {relativeTime(esc.createdAt)}
+                        </TD>
+                      </TR>
+                    ))}
+                  </TBody>
+                </Table>
+                {hasNextPage && (
+                  <div className="mt-4 flex justify-center">
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      loading={isFetchingNextPage}
+                      onClick={() => fetchNextPage()}
+                    >
+                      Load more
+                    </Button>
+                  </div>
+                )}
+              </>
             )}
           </motion.div>
         )}

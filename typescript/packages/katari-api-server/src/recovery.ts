@@ -25,7 +25,7 @@ export async function recoverOnBoot(
       // Re-issue terminate for runs in `cancelling`. Group by snapshotId so
       // all runs for the same snapshot are processed in a single tick (= one
       // lock acquisition + one checkpoint round-trip instead of N).
-      const cancellingRuns = await storage.runsAudit.list({
+      const { items: cancellingRuns } = await storage.runsAudit.list({
         state: "cancelling",
         limit: 500,
       });

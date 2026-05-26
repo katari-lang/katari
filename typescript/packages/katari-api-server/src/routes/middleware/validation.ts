@@ -64,6 +64,9 @@ const RawValueSchema: z.ZodType<unknown> = z.lazy(() =>
 export const PaginationQuerySchema = z.object({
   limit: z.coerce.number().int().positive().max(500).optional(),
   offset: z.coerce.number().int().nonnegative().optional(),
+  /** Opaque cursor from a previous paginated response. When provided,
+   *  `offset` is ignored. */
+  cursor: z.string().min(1).optional(),
 });
 
 // ─── Project / Snapshot ────────────────────────────────────────────────────

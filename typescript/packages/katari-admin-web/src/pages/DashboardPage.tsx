@@ -28,7 +28,7 @@ export function DashboardPage() {
   });
 
   const runsQ = useQuery({
-    queryKey: ["runs", projectId],
+    queryKey: ["dashboard-runs", projectId],
     queryFn: () =>
       client.listRuns({ projectId: projectId as ProjectId, limit: 200 }),
     enabled: typeof projectId === "string",

@@ -39,8 +39,8 @@ export function buildSnapshotRoutes(snapshots: SnapshotService): Hono {
   app.get("/", async (c) => {
     const projectId = ProjectIdSchema.parse(c.req.param("projectId"));
     const query = PaginationQuerySchema.parse(c.req.query());
-    const list = await snapshots.list({ projectId, ...query });
-    return c.json({ snapshots: list });
+    const result = await snapshots.list({ projectId, ...query });
+    return c.json({ snapshots: result.items, nextCursor: result.nextCursor });
   });
 
   app.get("/latest", async (c) => {
