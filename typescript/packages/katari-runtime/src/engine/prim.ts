@@ -17,7 +17,7 @@
 
 import { match, P } from "ts-pattern";
 import { RecoverableEngineError } from "./errors.js";
-import { valueToRaw } from "../value-codec.js";
+import { RawValueDecodeError, valueFromRaw, valueToRaw } from "../value-codec.js";
 import type { QualifiedName } from "../ir/types.js";
 import type { Value } from "./value.js";
 
@@ -127,6 +127,33 @@ export function executePrim(name: string, args: Record<string, Value>): Value {
         );
       }
       return { kind: "string", value: JSON.stringify(valueToRaw(v)) };
+    }
+    case "from_string": {
+      const text = req(args, "text");
+      if (text.kind !== "string") {
+        throw new RecoverableEngineError(
+          `prim from_string: argument must be a string, got ${text.kind}`,
+        );
+      }
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(text.value);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        throw new PrimRaiseRequest("primitive.from_string_error", {
+          message: { kind: "string", value: `invalid JSON: ${msg}` },
+        });
+      }
+      try {
+        return valueFromRaw(parsed);
+      } catch (e) {
+        if (e instanceof RawValueDecodeError) {
+          throw new PrimRaiseRequest("primitive.from_string_error", {
+            message: { kind: "string", value: e.message },
+          });
+        }
+        throw e;
+      }
     }
     case "format": {
       // Taint-aware unary format (via `using fstring_join`). Pass

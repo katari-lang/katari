@@ -3,7 +3,7 @@
     "0": {
       "body": {
         "description": "Returns the canonical greeting.",
-        "entryBody": 83,
+        "entryBody": 86,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{},\"required\":[],\"type\":\"object\"}",
         "name": "main",
         "outputSchema": "{\"type\":\"string\"}",
@@ -15,7 +15,7 @@
     "1": {
       "body": {
         "description": "AI metadata of a callable (name / id / description / I-O schema).",
-        "entryBody": 84,
+        "entryBody": 87,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"description\":{\"type\":\"string\"},\"id\":{\"type\":\"string\"},\"input\":{\"type\":\"string\"},\"name\":{\"type\":\"string\"},\"output\":{\"type\":\"string\"}},\"required\":[\"description\",\"id\",\"input\",\"name\",\"output\"],\"type\":\"object\"}",
         "name": "agent_metadata",
         "outputSchema": "{\"additionalProperties\":false,\"properties\":{\"$constructor\":{\"const\":\"primitive.agent_metadata\"},\"description\":{\"type\":\"string\"},\"id\":{\"type\":\"string\"},\"input\":{\"type\":\"string\"},\"name\":{\"type\":\"string\"},\"output\":{\"type\":\"string\"}},\"required\":[\"$constructor\",\"description\",\"id\",\"input\",\"name\",\"output\"],\"type\":\"object\"}",
@@ -65,6 +65,14 @@
         "qualifiedName": "primitive.div"
       },
       "kind": "blockAgent"
+    },
+    "100": {
+      "body": "primitive.json_object",
+      "kind": "blockConstructor"
+    },
+    "101": {
+      "body": "primitive.json_parse_error",
+      "kind": "blockRequest"
     },
     "11": {
       "body": "div",
@@ -406,7 +414,7 @@
     },
     "38": {
       "body": {
-        "description": "Serialize any value to its canonical JSON string (strings get quoted; round-trips with @from_string@ when added).",
+        "description": "Serialize any value to its canonical wire-format string (Plan D — strings get quoted, tagged values get their @$constructor@ discriminator). Inverse: @from_string@.",
         "entryBody": 39,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"value\":{}},\"required\":[\"value\"],\"type\":\"object\"}",
         "name": "to_string",
@@ -448,282 +456,274 @@
     },
     "40": {
       "body": {
+        "description": "Raised by @from_string@ when the input cannot be decoded as a canonical wire-format value (invalid JSON, illegal discriminator combinations, etc.). Handle via @request from_string_error(message) { ... }@.",
+        "entryBody": 88,
+        "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"message\":{\"type\":\"string\"}},\"required\":[\"message\"],\"type\":\"object\"}",
+        "name": "from_string_error",
+        "outputSchema": "{\"not\":{}}",
+        "parameters": [
+          {
+            "label": "message",
+            "var": 39
+          }
+        ],
+        "qualifiedName": "primitive.from_string_error"
+      },
+      "kind": "blockAgent"
+    },
+    "41": {
+      "body": {
+        "description": "Parse a wire-format string (produced by @to_string@) back into a value. Raises @from_string_error@ on malformed input.",
+        "entryBody": 42,
+        "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"text\":{\"type\":\"string\"}},\"required\":[\"text\"],\"type\":\"object\"}",
+        "name": "from_string",
+        "outputSchema": "{}",
+        "parameters": [
+          {
+            "label": "text",
+            "var": 40
+          }
+        ],
+        "qualifiedName": "primitive.from_string"
+      },
+      "kind": "blockAgent"
+    },
+    "42": {
+      "body": "from_string",
+      "kind": "blockPrim"
+    },
+    "43": {
+      "body": {
         "description": "Format a value for f-string interpolation. Accepts string or secret only (taint-aware: secret yields secret); other types must be converted via @to_string@ first.",
-        "entryBody": 41,
+        "entryBody": 44,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"value\":{}},\"required\":[\"value\"],\"type\":\"object\"}",
         "name": "format",
         "outputSchema": "{\"type\":\"string\"}",
         "parameters": [
           {
             "label": "value",
-            "var": 39
+            "var": 41
           }
         ],
         "qualifiedName": "primitive.format"
       },
       "kind": "blockAgent"
     },
-    "41": {
+    "44": {
       "body": "format",
       "kind": "blockPrim"
     },
-    "42": {
+    "45": {
       "body": {
         "description": "Retrieve the element at @index@.",
-        "entryBody": 43,
+        "entryBody": 46,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"array\":{},\"index\":{\"type\":\"integer\"}},\"required\":[\"array\",\"index\"],\"type\":\"object\"}",
         "name": "array_get",
         "outputSchema": "{}",
         "parameters": [
           {
             "label": "array",
-            "var": 40
+            "var": 42
           },
           {
             "label": "index",
-            "var": 41
+            "var": 43
           }
         ],
         "qualifiedName": "primitive.array_get"
       },
       "kind": "blockAgent"
     },
-    "43": {
+    "46": {
       "body": "array_get",
       "kind": "blockPrim"
     },
-    "44": {
+    "47": {
       "body": {
         "description": "Length of an array.",
-        "entryBody": 45,
+        "entryBody": 48,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"array\":{}},\"required\":[\"array\"],\"type\":\"object\"}",
         "name": "array_length",
         "outputSchema": "{\"type\":\"integer\"}",
         "parameters": [
           {
             "label": "array",
-            "var": 42
+            "var": 44
           }
         ],
         "qualifiedName": "primitive.array_length"
       },
       "kind": "blockAgent"
     },
-    "45": {
+    "48": {
       "body": "array_length",
       "kind": "blockPrim"
     },
-    "46": {
+    "49": {
       "body": {
         "description": "Retrieve a tagged-value field by name.",
-        "entryBody": 47,
+        "entryBody": 50,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"field\":{\"type\":\"string\"},\"object\":{}},\"required\":[\"field\",\"object\"],\"type\":\"object\"}",
         "name": "get_field",
         "outputSchema": "{}",
         "parameters": [
           {
             "label": "object",
-            "var": 43
+            "var": 45
           },
           {
             "label": "field",
-            "var": 44
+            "var": 46
           }
         ],
         "qualifiedName": "primitive.get_field"
       },
       "kind": "blockAgent"
     },
-    "47": {
+    "5": {
+      "body": "sub",
+      "kind": "blockPrim"
+    },
+    "50": {
       "body": "get_field",
       "kind": "blockPrim"
     },
-    "48": {
+    "51": {
       "body": {
         "description": "Retrieve a tuple element by positional index.",
-        "entryBody": 49,
+        "entryBody": 52,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"index\":{\"type\":\"integer\"},\"tuple\":{}},\"required\":[\"index\",\"tuple\"],\"type\":\"object\"}",
         "name": "tuple_get",
         "outputSchema": "{}",
         "parameters": [
           {
             "label": "tuple",
-            "var": 45
+            "var": 47
           },
           {
             "label": "index",
-            "var": 46
+            "var": 48
           }
         ],
         "qualifiedName": "primitive.tuple_get"
       },
       "kind": "blockAgent"
     },
-    "49": {
+    "52": {
       "body": "tuple_get",
       "kind": "blockPrim"
     },
-    "5": {
-      "body": "sub",
-      "kind": "blockPrim"
-    },
-    "50": {
+    "53": {
       "body": {
         "description": "Return the AI metadata of any callable value.",
-        "entryBody": 51,
+        "entryBody": 54,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"value\":{\"additionalProperties\":false,\"properties\":{\"$agent\":{\"type\":\"string\"}},\"required\":[\"$agent\"],\"type\":\"object\"}},\"required\":[\"value\"],\"type\":\"object\"}",
         "name": "get_metadata",
         "outputSchema": "{\"additionalProperties\":false,\"properties\":{\"$constructor\":{\"const\":\"primitive.agent_metadata\"},\"description\":{\"type\":\"string\"},\"id\":{\"type\":\"string\"},\"input\":{\"type\":\"string\"},\"name\":{\"type\":\"string\"},\"output\":{\"type\":\"string\"}},\"required\":[\"$constructor\",\"description\",\"id\",\"input\",\"name\",\"output\"],\"type\":\"object\"}",
         "parameters": [
           {
             "label": "value",
-            "var": 47
+            "var": 49
           }
         ],
         "qualifiedName": "primitive.get_metadata"
       },
       "kind": "blockAgent"
     },
-    "51": {
+    "54": {
       "body": "get_metadata",
       "kind": "blockPrim"
     },
-    "52": {
+    "55": {
       "body": {
         "description": "Raise a recoverable runtime error. Bubbles through enclosing handle scopes until a `request throw` handler catches it; if nothing catches it the snapshot transitions to the `error` state.",
-        "entryBody": 85,
+        "entryBody": 89,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"msg\":{\"type\":\"string\"}},\"required\":[\"msg\"],\"type\":\"object\"}",
         "name": "throw",
         "outputSchema": "{\"not\":{}}",
         "parameters": [
           {
             "label": "msg",
-            "var": 48
+            "var": 50
           }
         ],
         "qualifiedName": "primitive.throw"
       },
       "kind": "blockAgent"
     },
-    "53": {
+    "56": {
       "body": {
         "description": "Raised when a requested env key is not present in the store. Handle to provide a default; if uncaught the snapshot transitions to the `error` state.",
-        "entryBody": 86,
+        "entryBody": 90,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"env_key\":{\"type\":\"string\"}},\"required\":[\"env_key\"],\"type\":\"object\"}",
         "name": "env_not_found",
         "outputSchema": "{\"not\":{}}",
         "parameters": [
           {
             "label": "env_key",
-            "var": 49
+            "var": 51
           }
         ],
         "qualifiedName": "primitive.env_not_found"
       },
       "kind": "blockAgent"
     },
-    "54": {
+    "57": {
       "body": {
         "description": "Look up a non-secret env entry by key. Raises `env_not_found` if the key is missing.",
-        "entryBody": 87,
+        "entryBody": 91,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"key\":{\"type\":\"string\"}},\"required\":[\"key\"],\"type\":\"object\"}",
         "name": "get_env",
         "outputSchema": "{\"type\":\"string\"}",
         "parameters": [
           {
             "label": "key",
-            "var": 50
+            "var": 52
           }
         ],
         "qualifiedName": "primitive.get_env"
       },
       "kind": "blockAgent"
     },
-    "55": {
+    "58": {
       "body": {
         "description": "Look up a secret env entry by key. The result is the disjoint `secret` type and never leaks into `print` / `to_string`. Raises `env_not_found` if the key is missing.",
-        "entryBody": 88,
+        "entryBody": 92,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"key\":{\"type\":\"string\"}},\"required\":[\"key\"],\"type\":\"object\"}",
         "name": "get_secret_env",
         "outputSchema": "{}",
         "parameters": [
           {
             "label": "key",
-            "var": 51
+            "var": 53
           }
         ],
         "qualifiedName": "primitive.get_secret_env"
       },
       "kind": "blockAgent"
     },
-    "56": {
+    "59": {
       "body": {
         "description": "Write an env entry. `is_secret = true` stores the value encrypted; reading it back requires `get_secret_env`.",
-        "entryBody": 89,
+        "entryBody": 93,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"is_secret\":{\"type\":\"boolean\"},\"key\":{\"type\":\"string\"},\"value\":{\"type\":\"string\"}},\"required\":[\"is_secret\",\"key\",\"value\"],\"type\":\"object\"}",
         "name": "set_env",
         "outputSchema": "{\"type\":\"null\"}",
         "parameters": [
           {
             "label": "key",
-            "var": 52
-          },
-          {
-            "label": "value",
-            "var": 53
-          },
-          {
-            "label": "is_secret",
             "var": 54
-          }
-        ],
-        "qualifiedName": "primitive.set_env"
-      },
-      "kind": "blockAgent"
-    },
-    "57": {
-      "body": {
-        "description": "JSON null. The unit-shaped variant of the `json` union.",
-        "entryBody": 90,
-        "inputSchema": "{\"additionalProperties\":false,\"properties\":{},\"required\":[],\"type\":\"object\"}",
-        "name": "json_null",
-        "outputSchema": "{\"additionalProperties\":false,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_null\"}},\"required\":[\"$constructor\"],\"type\":\"object\"}",
-        "parameters": [],
-        "qualifiedName": "primitive.json_null"
-      },
-      "kind": "blockAgent"
-    },
-    "58": {
-      "body": {
-        "description": "JSON boolean.",
-        "entryBody": 91,
-        "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"value\":{\"type\":\"boolean\"}},\"required\":[\"value\"],\"type\":\"object\"}",
-        "name": "json_boolean",
-        "outputSchema": "{\"additionalProperties\":false,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_boolean\"},\"value\":{\"type\":\"boolean\"}},\"required\":[\"$constructor\",\"value\"],\"type\":\"object\"}",
-        "parameters": [
+          },
           {
             "label": "value",
             "var": 55
-          }
-        ],
-        "qualifiedName": "primitive.json_boolean"
-      },
-      "kind": "blockAgent"
-    },
-    "59": {
-      "body": {
-        "description": "JSON integral number. Distinct from `json_number` so that round-trips through `parse` -> `stringify` preserve integer-vs-fractional form.",
-        "entryBody": 92,
-        "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"value\":{\"type\":\"integer\"}},\"required\":[\"value\"],\"type\":\"object\"}",
-        "name": "json_integer",
-        "outputSchema": "{\"additionalProperties\":false,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_integer\"},\"value\":{\"type\":\"integer\"}},\"required\":[\"$constructor\",\"value\"],\"type\":\"object\"}",
-        "parameters": [
+          },
           {
-            "label": "value",
+            "label": "is_secret",
             "var": 56
           }
         ],
-        "qualifiedName": "primitive.json_integer"
+        "qualifiedName": "primitive.set_env"
       },
       "kind": "blockAgent"
     },
@@ -750,135 +750,185 @@
     },
     "60": {
       "body": {
-        "description": "JSON non-integral number.",
-        "entryBody": 93,
-        "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"value\":{\"type\":\"number\"}},\"required\":[\"value\"],\"type\":\"object\"}",
-        "name": "json_number",
-        "outputSchema": "{\"additionalProperties\":false,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_number\"},\"value\":{\"type\":\"number\"}},\"required\":[\"$constructor\",\"value\"],\"type\":\"object\"}",
+        "description": "JSON null. The unit-shaped variant of the `json` union.",
+        "entryBody": 94,
+        "inputSchema": "{\"additionalProperties\":false,\"properties\":{},\"required\":[],\"type\":\"object\"}",
+        "name": "json_null",
+        "outputSchema": "{\"additionalProperties\":false,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_null\"}},\"required\":[\"$constructor\"],\"type\":\"object\"}",
+        "parameters": [],
+        "qualifiedName": "primitive.json_null"
+      },
+      "kind": "blockAgent"
+    },
+    "61": {
+      "body": {
+        "description": "JSON boolean.",
+        "entryBody": 95,
+        "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"value\":{\"type\":\"boolean\"}},\"required\":[\"value\"],\"type\":\"object\"}",
+        "name": "json_boolean",
+        "outputSchema": "{\"additionalProperties\":false,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_boolean\"},\"value\":{\"type\":\"boolean\"}},\"required\":[\"$constructor\",\"value\"],\"type\":\"object\"}",
         "parameters": [
           {
             "label": "value",
             "var": 57
           }
         ],
-        "qualifiedName": "primitive.json_number"
+        "qualifiedName": "primitive.json_boolean"
       },
       "kind": "blockAgent"
     },
-    "61": {
+    "62": {
       "body": {
-        "description": "JSON string.",
-        "entryBody": 94,
-        "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"value\":{\"type\":\"string\"}},\"required\":[\"value\"],\"type\":\"object\"}",
-        "name": "json_string",
-        "outputSchema": "{\"additionalProperties\":false,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_string\"},\"value\":{\"type\":\"string\"}},\"required\":[\"$constructor\",\"value\"],\"type\":\"object\"}",
+        "description": "JSON integral number. Distinct from `json_number` so that round-trips through `parse` -> `stringify` preserve integer-vs-fractional form.",
+        "entryBody": 96,
+        "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"value\":{\"type\":\"integer\"}},\"required\":[\"value\"],\"type\":\"object\"}",
+        "name": "json_integer",
+        "outputSchema": "{\"additionalProperties\":false,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_integer\"},\"value\":{\"type\":\"integer\"}},\"required\":[\"$constructor\",\"value\"],\"type\":\"object\"}",
         "parameters": [
           {
             "label": "value",
             "var": 58
           }
         ],
+        "qualifiedName": "primitive.json_integer"
+      },
+      "kind": "blockAgent"
+    },
+    "63": {
+      "body": {
+        "description": "JSON non-integral number.",
+        "entryBody": 97,
+        "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"value\":{\"type\":\"number\"}},\"required\":[\"value\"],\"type\":\"object\"}",
+        "name": "json_number",
+        "outputSchema": "{\"additionalProperties\":false,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_number\"},\"value\":{\"type\":\"number\"}},\"required\":[\"$constructor\",\"value\"],\"type\":\"object\"}",
+        "parameters": [
+          {
+            "label": "value",
+            "var": 59
+          }
+        ],
+        "qualifiedName": "primitive.json_number"
+      },
+      "kind": "blockAgent"
+    },
+    "64": {
+      "body": {
+        "description": "JSON string.",
+        "entryBody": 98,
+        "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"value\":{\"type\":\"string\"}},\"required\":[\"value\"],\"type\":\"object\"}",
+        "name": "json_string",
+        "outputSchema": "{\"additionalProperties\":false,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_string\"},\"value\":{\"type\":\"string\"}},\"required\":[\"$constructor\",\"value\"],\"type\":\"object\"}",
+        "parameters": [
+          {
+            "label": "value",
+            "var": 60
+          }
+        ],
         "qualifiedName": "primitive.json_string"
       },
       "kind": "blockAgent"
     },
-    "62": {
+    "65": {
       "body": {
         "description": "JSON array of further `json` values.",
-        "entryBody": 95,
+        "entryBody": 99,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"items\":{\"items\":{\"anyOf\":[{\"additionalProperties\":false,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_null\"}},\"required\":[\"$constructor\"],\"type\":\"object\"},{\"additionalProperties\":false,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_boolean\"},\"value\":{\"type\":\"boolean\"}},\"required\":[\"$constructor\",\"value\"],\"type\":\"object\"},{\"additionalProperties\":false,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_integer\"},\"value\":{\"type\":\"integer\"}},\"required\":[\"$constructor\",\"value\"],\"type\":\"object\"},{\"additionalProperties\":false,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_number\"},\"value\":{\"type\":\"number\"}},\"required\":[\"$constructor\",\"value\"],\"type\":\"object\"},{\"additionalProperties\":false,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_string\"},\"value\":{\"type\":\"string\"}},\"required\":[\"$constructor\",\"value\"],\"type\":\"object\"},{\"additionalProperties\":false,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_array\"},\"items\":{\"items\":{\"anyOf\":[{\"additionalProperties\":false,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_null\"}},\"required\":[\"$constructor\"],\"type\":\"object\"},{\"additionalProperties\":false,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_boolean\"},\"value\":{\"type\":\"boolean\"}},\"required\":[\"$constructor\",\"value\"],\"type\":\"object\"},{\"additionalProperties\":false,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_integer\"},\"value\":{\"type\":\"integer\"}},\"required\":[\"$constructor\",\"value\"],\"type\":\"object\"},{\"additionalProperties\":false,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_number\"},\"value\":{\"type\":\"number\"}},\"required\":[\"$constructor\",\"value\"],\"type\":\"object\"},{\"additionalProperties\":false,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_string\"},\"value\":{\"type\":\"string\"}},\"required\":[\"$constructor\",\"value\"],\"type\":\"object\"},{},{\"additionalProperties\":false,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_object\"},\"entries\":{\"additionalProperties\":true,\"properties\":{},\"required\":[],\"type\":\"object\"}},\"required\":[\"$constructor\",\"entries\"],\"type\":\"object\"}]},\"type\":\"array\"}},\"required\":[\"$constructor\",\"items\"],\"type\":\"object\"},{\"additionalProperties\":false,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_object\"},\"entries\":{\"additionalProperties\":true,\"properties\":{},\"required\":[],\"type\":\"object\"}},\"required\":[\"$constructor\",\"entries\"],\"type\":\"object\"}]},\"type\":\"array\"}},\"required\":[\"items\"],\"type\":\"object\"}",
         "name": "json_array",
         "outputSchema": "{\"additionalProperties\":false,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_array\"},\"items\":{\"items\":{\"anyOf\":[{\"additionalProperties\":false,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_null\"}},\"required\":[\"$constructor\"],\"type\":\"object\"},{\"additionalProperties\":false,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_boolean\"},\"value\":{\"type\":\"boolean\"}},\"required\":[\"$constructor\",\"value\"],\"type\":\"object\"},{\"additionalProperties\":false,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_integer\"},\"value\":{\"type\":\"integer\"}},\"required\":[\"$constructor\",\"value\"],\"type\":\"object\"},{\"additionalProperties\":false,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_number\"},\"value\":{\"type\":\"number\"}},\"required\":[\"$constructor\",\"value\"],\"type\":\"object\"},{\"additionalProperties\":false,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_string\"},\"value\":{\"type\":\"string\"}},\"required\":[\"$constructor\",\"value\"],\"type\":\"object\"},{},{\"additionalProperties\":false,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_object\"},\"entries\":{\"additionalProperties\":true,\"properties\":{},\"required\":[],\"type\":\"object\"}},\"required\":[\"$constructor\",\"entries\"],\"type\":\"object\"}]},\"type\":\"array\"}},\"required\":[\"$constructor\",\"items\"],\"type\":\"object\"}",
         "parameters": [
           {
             "label": "items",
-            "var": 59
+            "var": 61
           }
         ],
         "qualifiedName": "primitive.json_array"
       },
       "kind": "blockAgent"
     },
-    "63": {
+    "66": {
       "body": {
         "description": "JSON object: a record (homogeneous string-keyed map) of further `json` values.",
-        "entryBody": 96,
+        "entryBody": 100,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"entries\":{\"additionalProperties\":true,\"properties\":{},\"required\":[],\"type\":\"object\"}},\"required\":[\"entries\"],\"type\":\"object\"}",
         "name": "json_object",
         "outputSchema": "{\"additionalProperties\":false,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_object\"},\"entries\":{\"additionalProperties\":true,\"properties\":{},\"required\":[],\"type\":\"object\"}},\"required\":[\"$constructor\",\"entries\"],\"type\":\"object\"}",
         "parameters": [
           {
             "label": "entries",
-            "var": 60
+            "var": 62
           }
         ],
         "qualifiedName": "primitive.json_object"
       },
       "kind": "blockAgent"
     },
-    "64": {
+    "67": {
       "body": {
         "description": "Raised by `json.parse` when the input text is not valid JSON. Handle via `request json_parse_error(message) { ... }`.",
-        "entryBody": 97,
+        "entryBody": 101,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"message\":{\"type\":\"string\"}},\"required\":[\"message\"],\"type\":\"object\"}",
         "name": "json_parse_error",
         "outputSchema": "{\"not\":{}}",
         "parameters": [
           {
             "label": "message",
-            "var": 61
+            "var": 63
           }
         ],
         "qualifiedName": "primitive.json_parse_error"
       },
       "kind": "blockAgent"
     },
-    "65": {
+    "68": {
       "body": {
         "description": "Parse a JSON-encoded string into a `json` value. Raises `json_parse_error` on malformed input.",
-        "entryBody": 66,
+        "entryBody": 69,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"text\":{\"type\":\"string\"}},\"required\":[\"text\"],\"type\":\"object\"}",
         "name": "parse",
         "outputSchema": "{\"anyOf\":[{\"additionalProperties\":false,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_null\"}},\"required\":[\"$constructor\"],\"type\":\"object\"},{\"additionalProperties\":false,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_boolean\"},\"value\":{\"type\":\"boolean\"}},\"required\":[\"$constructor\",\"value\"],\"type\":\"object\"},{\"additionalProperties\":false,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_integer\"},\"value\":{\"type\":\"integer\"}},\"required\":[\"$constructor\",\"value\"],\"type\":\"object\"},{\"additionalProperties\":false,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_number\"},\"value\":{\"type\":\"number\"}},\"required\":[\"$constructor\",\"value\"],\"type\":\"object\"},{\"additionalProperties\":false,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_string\"},\"value\":{\"type\":\"string\"}},\"required\":[\"$constructor\",\"value\"],\"type\":\"object\"},{\"additionalProperties\":false,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_array\"},\"items\":{\"items\":{\"anyOf\":[{\"additionalProperties\":false,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_null\"}},\"required\":[\"$constructor\"],\"type\":\"object\"},{\"additionalProperties\":false,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_boolean\"},\"value\":{\"type\":\"boolean\"}},\"required\":[\"$constructor\",\"value\"],\"type\":\"object\"},{\"additionalProperties\":false,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_integer\"},\"value\":{\"type\":\"integer\"}},\"required\":[\"$constructor\",\"value\"],\"type\":\"object\"},{\"additionalProperties\":false,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_number\"},\"value\":{\"type\":\"number\"}},\"required\":[\"$constructor\",\"value\"],\"type\":\"object\"},{\"additionalProperties\":false,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_string\"},\"value\":{\"type\":\"string\"}},\"required\":[\"$constructor\",\"value\"],\"type\":\"object\"},{},{\"additionalProperties\":false,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_object\"},\"entries\":{\"additionalProperties\":true,\"properties\":{},\"required\":[],\"type\":\"object\"}},\"required\":[\"$constructor\",\"entries\"],\"type\":\"object\"}]},\"type\":\"array\"}},\"required\":[\"$constructor\",\"items\"],\"type\":\"object\"},{\"additionalProperties\":false,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_object\"},\"entries\":{\"additionalProperties\":true,\"properties\":{},\"required\":[],\"type\":\"object\"}},\"required\":[\"$constructor\",\"entries\"],\"type\":\"object\"}]}",
         "parameters": [
           {
             "label": "text",
-            "var": 62
+            "var": 64
           }
         ],
         "qualifiedName": "primitive.json.parse"
       },
       "kind": "blockAgent"
     },
-    "66": {
+    "69": {
       "body": "json.parse",
       "kind": "blockPrim"
     },
-    "67": {
+    "7": {
+      "body": "mul",
+      "kind": "blockPrim"
+    },
+    "70": {
       "body": {
         "description": "Serialize a `json` value to canonical JSON text. The static type rules out closures / secrets / arbitrary tagged values, so this primitive is total (no runtime error path).",
-        "entryBody": 68,
+        "entryBody": 71,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"value\":{\"anyOf\":[{\"additionalProperties\":false,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_null\"}},\"required\":[\"$constructor\"],\"type\":\"object\"},{\"additionalProperties\":false,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_boolean\"},\"value\":{\"type\":\"boolean\"}},\"required\":[\"$constructor\",\"value\"],\"type\":\"object\"},{\"additionalProperties\":false,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_integer\"},\"value\":{\"type\":\"integer\"}},\"required\":[\"$constructor\",\"value\"],\"type\":\"object\"},{\"additionalProperties\":false,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_number\"},\"value\":{\"type\":\"number\"}},\"required\":[\"$constructor\",\"value\"],\"type\":\"object\"},{\"additionalProperties\":false,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_string\"},\"value\":{\"type\":\"string\"}},\"required\":[\"$constructor\",\"value\"],\"type\":\"object\"},{\"additionalProperties\":false,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_array\"},\"items\":{\"items\":{\"anyOf\":[{\"additionalProperties\":false,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_null\"}},\"required\":[\"$constructor\"],\"type\":\"object\"},{\"additionalProperties\":false,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_boolean\"},\"value\":{\"type\":\"boolean\"}},\"required\":[\"$constructor\",\"value\"],\"type\":\"object\"},{\"additionalProperties\":false,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_integer\"},\"value\":{\"type\":\"integer\"}},\"required\":[\"$constructor\",\"value\"],\"type\":\"object\"},{\"additionalProperties\":false,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_number\"},\"value\":{\"type\":\"number\"}},\"required\":[\"$constructor\",\"value\"],\"type\":\"object\"},{\"additionalProperties\":false,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_string\"},\"value\":{\"type\":\"string\"}},\"required\":[\"$constructor\",\"value\"],\"type\":\"object\"},{},{\"additionalProperties\":false,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_object\"},\"entries\":{\"additionalProperties\":true,\"properties\":{},\"required\":[],\"type\":\"object\"}},\"required\":[\"$constructor\",\"entries\"],\"type\":\"object\"}]},\"type\":\"array\"}},\"required\":[\"$constructor\",\"items\"],\"type\":\"object\"},{\"additionalProperties\":false,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_object\"},\"entries\":{\"additionalProperties\":true,\"properties\":{},\"required\":[],\"type\":\"object\"}},\"required\":[\"$constructor\",\"entries\"],\"type\":\"object\"}]}},\"required\":[\"value\"],\"type\":\"object\"}",
         "name": "stringify",
         "outputSchema": "{\"type\":\"string\"}",
         "parameters": [
           {
             "label": "value",
-            "var": 63
+            "var": 65
           }
         ],
         "qualifiedName": "primitive.json.stringify"
       },
       "kind": "blockAgent"
     },
-    "68": {
+    "71": {
       "body": "json.stringify",
       "kind": "blockPrim"
     },
-    "69": {
+    "72": {
       "body": {
         "description": "Construct an empty record.",
-        "entryBody": 70,
+        "entryBody": 73,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{},\"required\":[],\"type\":\"object\"}",
         "name": "empty",
         "outputSchema": "{\"additionalProperties\":true,\"properties\":{},\"required\":[],\"type\":\"object\"}",
@@ -887,46 +937,17 @@
       },
       "kind": "blockAgent"
     },
-    "7": {
-      "body": "mul",
-      "kind": "blockPrim"
-    },
-    "70": {
+    "73": {
       "body": "record.empty",
       "kind": "blockPrim"
     },
-    "71": {
+    "74": {
       "body": {
         "description": "Retrieve a record entry by key. Returns null when the key is absent.",
-        "entryBody": 72,
+        "entryBody": 75,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"key\":{\"type\":\"string\"},\"record\":{\"additionalProperties\":true,\"properties\":{},\"required\":[],\"type\":\"object\"}},\"required\":[\"key\",\"record\"],\"type\":\"object\"}",
         "name": "get",
         "outputSchema": "{}",
-        "parameters": [
-          {
-            "label": "record",
-            "var": 64
-          },
-          {
-            "label": "key",
-            "var": 65
-          }
-        ],
-        "qualifiedName": "primitive.record.get"
-      },
-      "kind": "blockAgent"
-    },
-    "72": {
-      "body": "record.get",
-      "kind": "blockPrim"
-    },
-    "73": {
-      "body": {
-        "description": "Insert or replace an entry, returning a fresh record (records are immutable).",
-        "entryBody": 74,
-        "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"key\":{\"type\":\"string\"},\"record\":{\"additionalProperties\":true,\"properties\":{},\"required\":[],\"type\":\"object\"},\"value\":{}},\"required\":[\"key\",\"record\",\"value\"],\"type\":\"object\"}",
-        "name": "set",
-        "outputSchema": "{\"additionalProperties\":true,\"properties\":{},\"required\":[],\"type\":\"object\"}",
         "parameters": [
           {
             "label": "record",
@@ -935,86 +956,69 @@
           {
             "label": "key",
             "var": 67
+          }
+        ],
+        "qualifiedName": "primitive.record.get"
+      },
+      "kind": "blockAgent"
+    },
+    "75": {
+      "body": "record.get",
+      "kind": "blockPrim"
+    },
+    "76": {
+      "body": {
+        "description": "Insert or replace an entry, returning a fresh record (records are immutable).",
+        "entryBody": 77,
+        "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"key\":{\"type\":\"string\"},\"record\":{\"additionalProperties\":true,\"properties\":{},\"required\":[],\"type\":\"object\"},\"value\":{}},\"required\":[\"key\",\"record\",\"value\"],\"type\":\"object\"}",
+        "name": "set",
+        "outputSchema": "{\"additionalProperties\":true,\"properties\":{},\"required\":[],\"type\":\"object\"}",
+        "parameters": [
+          {
+            "label": "record",
+            "var": 68
+          },
+          {
+            "label": "key",
+            "var": 69
           },
           {
             "label": "value",
-            "var": 68
+            "var": 70
           }
         ],
         "qualifiedName": "primitive.record.set"
       },
       "kind": "blockAgent"
     },
-    "74": {
+    "77": {
       "body": "record.set",
       "kind": "blockPrim"
     },
-    "75": {
+    "78": {
       "body": {
         "description": "Remove an entry by key. Returns the record unchanged when the key is absent.",
-        "entryBody": 76,
+        "entryBody": 79,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"key\":{\"type\":\"string\"},\"record\":{\"additionalProperties\":true,\"properties\":{},\"required\":[],\"type\":\"object\"}},\"required\":[\"key\",\"record\"],\"type\":\"object\"}",
         "name": "remove",
         "outputSchema": "{\"additionalProperties\":true,\"properties\":{},\"required\":[],\"type\":\"object\"}",
         "parameters": [
           {
             "label": "record",
-            "var": 69
+            "var": 71
           },
           {
             "label": "key",
-            "var": 70
+            "var": 72
           }
         ],
         "qualifiedName": "primitive.record.remove"
       },
       "kind": "blockAgent"
     },
-    "76": {
+    "79": {
       "body": "record.remove",
       "kind": "blockPrim"
-    },
-    "77": {
-      "body": {
-        "description": "List the keys present in the record (insertion order is not guaranteed).",
-        "entryBody": 78,
-        "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"record\":{\"additionalProperties\":true,\"properties\":{},\"required\":[],\"type\":\"object\"}},\"required\":[\"record\"],\"type\":\"object\"}",
-        "name": "keys",
-        "outputSchema": "{\"items\":{\"type\":\"string\"},\"type\":\"array\"}",
-        "parameters": [
-          {
-            "label": "record",
-            "var": 71
-          }
-        ],
-        "qualifiedName": "primitive.record.keys"
-      },
-      "kind": "blockAgent"
-    },
-    "78": {
-      "body": "record.keys",
-      "kind": "blockPrim"
-    },
-    "79": {
-      "body": {
-        "description": "True if the record carries an entry under the given key.",
-        "entryBody": 80,
-        "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"key\":{\"type\":\"string\"},\"record\":{\"additionalProperties\":true,\"properties\":{},\"required\":[],\"type\":\"object\"}},\"required\":[\"key\",\"record\"],\"type\":\"object\"}",
-        "name": "has",
-        "outputSchema": "{\"type\":\"boolean\"}",
-        "parameters": [
-          {
-            "label": "record",
-            "var": 72
-          },
-          {
-            "label": "key",
-            "var": 73
-          }
-        ],
-        "qualifiedName": "primitive.record.has"
-      },
-      "kind": "blockAgent"
     },
     "8": {
       "body": {
@@ -1038,31 +1042,73 @@
       "kind": "blockAgent"
     },
     "80": {
+      "body": {
+        "description": "List the keys present in the record (insertion order is not guaranteed).",
+        "entryBody": 81,
+        "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"record\":{\"additionalProperties\":true,\"properties\":{},\"required\":[],\"type\":\"object\"}},\"required\":[\"record\"],\"type\":\"object\"}",
+        "name": "keys",
+        "outputSchema": "{\"items\":{\"type\":\"string\"},\"type\":\"array\"}",
+        "parameters": [
+          {
+            "label": "record",
+            "var": 73
+          }
+        ],
+        "qualifiedName": "primitive.record.keys"
+      },
+      "kind": "blockAgent"
+    },
+    "81": {
+      "body": "record.keys",
+      "kind": "blockPrim"
+    },
+    "82": {
+      "body": {
+        "description": "True if the record carries an entry under the given key.",
+        "entryBody": 83,
+        "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"key\":{\"type\":\"string\"},\"record\":{\"additionalProperties\":true,\"properties\":{},\"required\":[],\"type\":\"object\"}},\"required\":[\"key\",\"record\"],\"type\":\"object\"}",
+        "name": "has",
+        "outputSchema": "{\"type\":\"boolean\"}",
+        "parameters": [
+          {
+            "label": "record",
+            "var": 74
+          },
+          {
+            "label": "key",
+            "var": 75
+          }
+        ],
+        "qualifiedName": "primitive.record.has"
+      },
+      "kind": "blockAgent"
+    },
+    "83": {
       "body": "record.has",
       "kind": "blockPrim"
     },
-    "81": {
+    "84": {
       "body": {
         "description": "Number of entries in the record.",
-        "entryBody": 82,
+        "entryBody": 85,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"record\":{\"additionalProperties\":true,\"properties\":{},\"required\":[],\"type\":\"object\"}},\"required\":[\"record\"],\"type\":\"object\"}",
         "name": "size",
         "outputSchema": "{\"type\":\"integer\"}",
         "parameters": [
           {
             "label": "record",
-            "var": 74
+            "var": 76
           }
         ],
         "qualifiedName": "primitive.record.size"
       },
       "kind": "blockAgent"
     },
-    "82": {
+    "85": {
       "body": "record.size",
       "kind": "blockPrim"
     },
-    "83": {
+    "86": {
       "body": {
         "parameters": [],
         "statements": [
@@ -1081,19 +1127,27 @@
       },
       "kind": "blockUser"
     },
-    "84": {
+    "87": {
       "body": "primitive.agent_metadata",
       "kind": "blockConstructor"
     },
-    "85": {
+    "88": {
+      "body": "primitive.from_string_error",
+      "kind": "blockRequest"
+    },
+    "89": {
       "body": "primitive.throw",
       "kind": "blockRequest"
     },
-    "86": {
+    "9": {
+      "body": "mod",
+      "kind": "blockPrim"
+    },
+    "90": {
       "body": "primitive.env_not_found",
       "kind": "blockRequest"
     },
-    "87": {
+    "91": {
       "body": {
         "target": {
           "body": {
@@ -1105,7 +1159,7 @@
       },
       "kind": "blockDelegate"
     },
-    "88": {
+    "92": {
       "body": {
         "target": {
           "body": {
@@ -1117,7 +1171,7 @@
       },
       "kind": "blockDelegate"
     },
-    "89": {
+    "93": {
       "body": {
         "target": {
           "body": {
@@ -1129,41 +1183,29 @@
       },
       "kind": "blockDelegate"
     },
-    "9": {
-      "body": "mod",
-      "kind": "blockPrim"
-    },
-    "90": {
+    "94": {
       "body": "primitive.json_null",
       "kind": "blockConstructor"
     },
-    "91": {
+    "95": {
       "body": "primitive.json_boolean",
       "kind": "blockConstructor"
     },
-    "92": {
+    "96": {
       "body": "primitive.json_integer",
       "kind": "blockConstructor"
     },
-    "93": {
+    "97": {
       "body": "primitive.json_number",
       "kind": "blockConstructor"
     },
-    "94": {
+    "98": {
       "body": "primitive.json_string",
       "kind": "blockConstructor"
     },
-    "95": {
+    "99": {
       "body": "primitive.json_array",
       "kind": "blockConstructor"
-    },
-    "96": {
-      "body": "primitive.json_object",
-      "kind": "blockConstructor"
-    },
-    "97": {
-      "body": "primitive.json_parse_error",
-      "kind": "blockRequest"
     }
   },
   "entries": {
@@ -1172,29 +1214,31 @@
     "primitive.add": 2,
     "primitive.agent_metadata": 1,
     "primitive.and": 28,
-    "primitive.array_get": 42,
-    "primitive.array_length": 44,
+    "primitive.array_get": 45,
+    "primitive.array_length": 47,
     "primitive.concat": 34,
     "primitive.div": 10,
-    "primitive.env_not_found": 53,
+    "primitive.env_not_found": 56,
     "primitive.eq": 16,
-    "primitive.format": 40,
+    "primitive.format": 43,
+    "primitive.from_string": 41,
+    "primitive.from_string_error": 40,
     "primitive.ge": 26,
-    "primitive.get_env": 54,
-    "primitive.get_field": 46,
-    "primitive.get_metadata": 50,
-    "primitive.get_secret_env": 55,
+    "primitive.get_env": 57,
+    "primitive.get_field": 49,
+    "primitive.get_metadata": 53,
+    "primitive.get_secret_env": 58,
     "primitive.gt": 24,
-    "primitive.json.parse": 65,
-    "primitive.json.stringify": 67,
-    "primitive.json_array": 62,
-    "primitive.json_boolean": 58,
-    "primitive.json_integer": 59,
-    "primitive.json_null": 57,
-    "primitive.json_number": 60,
-    "primitive.json_object": 63,
-    "primitive.json_parse_error": 64,
-    "primitive.json_string": 61,
+    "primitive.json.parse": 68,
+    "primitive.json.stringify": 70,
+    "primitive.json_array": 65,
+    "primitive.json_boolean": 61,
+    "primitive.json_integer": 62,
+    "primitive.json_null": 60,
+    "primitive.json_number": 63,
+    "primitive.json_object": 66,
+    "primitive.json_parse_error": 67,
+    "primitive.json_string": 64,
     "primitive.le": 22,
     "primitive.lt": 20,
     "primitive.mod": 8,
@@ -1203,18 +1247,18 @@
     "primitive.neg": 12,
     "primitive.not": 32,
     "primitive.or": 30,
-    "primitive.record.empty": 69,
-    "primitive.record.get": 71,
-    "primitive.record.has": 79,
-    "primitive.record.keys": 77,
-    "primitive.record.remove": 75,
-    "primitive.record.set": 73,
-    "primitive.record.size": 81,
-    "primitive.set_env": 56,
+    "primitive.record.empty": 72,
+    "primitive.record.get": 74,
+    "primitive.record.has": 82,
+    "primitive.record.keys": 80,
+    "primitive.record.remove": 78,
+    "primitive.record.set": 76,
+    "primitive.record.size": 84,
+    "primitive.set_env": 59,
     "primitive.sub": 4,
-    "primitive.throw": 52,
+    "primitive.throw": 55,
     "primitive.to_string": 38,
-    "primitive.tuple_get": 48,
+    "primitive.tuple_get": 51,
     "primitive.type_of": 36
   },
   "metadata": {
@@ -1225,6 +1269,8 @@
       "0": "main",
       "1": "agent_metadata:agent",
       "10": "prim:div:agent",
+      "100": "json_object:ctor",
+      "101": "json_parse_error:request",
       "11": "prim:div:leaf",
       "12": "prim:neg:agent",
       "13": "prim:neg:leaf",
@@ -1257,69 +1303,71 @@
       "38": "prim:to_string:agent",
       "39": "prim:to_string:leaf",
       "4": "prim:sub:agent",
-      "40": "prim:format:agent",
-      "41": "prim:format:leaf",
-      "42": "prim:array_get:agent",
-      "43": "prim:array_get:leaf",
-      "44": "prim:array_length:agent",
-      "45": "prim:array_length:leaf",
-      "46": "prim:get_field:agent",
-      "47": "prim:get_field:leaf",
-      "48": "prim:tuple_get:agent",
-      "49": "prim:tuple_get:leaf",
+      "40": "from_string_error:agent",
+      "41": "prim:from_string:agent",
+      "42": "prim:from_string:leaf",
+      "43": "prim:format:agent",
+      "44": "prim:format:leaf",
+      "45": "prim:array_get:agent",
+      "46": "prim:array_get:leaf",
+      "47": "prim:array_length:agent",
+      "48": "prim:array_length:leaf",
+      "49": "prim:get_field:agent",
       "5": "prim:sub:leaf",
-      "50": "prim:get_metadata:agent",
-      "51": "prim:get_metadata:leaf",
-      "52": "throw:agent",
-      "53": "env_not_found:agent",
-      "54": "get_env:agent",
-      "55": "get_secret_env:agent",
-      "56": "set_env:agent",
-      "57": "json_null:agent",
-      "58": "json_boolean:agent",
-      "59": "json_integer:agent",
+      "50": "prim:get_field:leaf",
+      "51": "prim:tuple_get:agent",
+      "52": "prim:tuple_get:leaf",
+      "53": "prim:get_metadata:agent",
+      "54": "prim:get_metadata:leaf",
+      "55": "throw:agent",
+      "56": "env_not_found:agent",
+      "57": "get_env:agent",
+      "58": "get_secret_env:agent",
+      "59": "set_env:agent",
       "6": "prim:mul:agent",
-      "60": "json_number:agent",
-      "61": "json_string:agent",
-      "62": "json_array:agent",
-      "63": "json_object:agent",
-      "64": "json_parse_error:agent",
-      "65": "prim:parse:agent",
-      "66": "prim:json.parse:leaf",
-      "67": "prim:stringify:agent",
-      "68": "prim:json.stringify:leaf",
-      "69": "prim:empty:agent",
+      "60": "json_null:agent",
+      "61": "json_boolean:agent",
+      "62": "json_integer:agent",
+      "63": "json_number:agent",
+      "64": "json_string:agent",
+      "65": "json_array:agent",
+      "66": "json_object:agent",
+      "67": "json_parse_error:agent",
+      "68": "prim:parse:agent",
+      "69": "prim:json.parse:leaf",
       "7": "prim:mul:leaf",
-      "70": "prim:record.empty:leaf",
-      "71": "prim:get:agent",
-      "72": "prim:record.get:leaf",
-      "73": "prim:set:agent",
-      "74": "prim:record.set:leaf",
-      "75": "prim:remove:agent",
-      "76": "prim:record.remove:leaf",
-      "77": "prim:keys:agent",
-      "78": "prim:record.keys:leaf",
-      "79": "prim:has:agent",
+      "70": "prim:stringify:agent",
+      "71": "prim:json.stringify:leaf",
+      "72": "prim:empty:agent",
+      "73": "prim:record.empty:leaf",
+      "74": "prim:get:agent",
+      "75": "prim:record.get:leaf",
+      "76": "prim:set:agent",
+      "77": "prim:record.set:leaf",
+      "78": "prim:remove:agent",
+      "79": "prim:record.remove:leaf",
       "8": "prim:mod:agent",
-      "80": "prim:record.has:leaf",
-      "81": "prim:size:agent",
-      "82": "prim:record.size:leaf",
-      "83": "main.body",
-      "84": "agent_metadata:ctor",
-      "85": "throw:request",
-      "86": "env_not_found:request",
-      "87": "get_env:external",
-      "88": "get_secret_env:external",
-      "89": "set_env:external",
+      "80": "prim:keys:agent",
+      "81": "prim:record.keys:leaf",
+      "82": "prim:has:agent",
+      "83": "prim:record.has:leaf",
+      "84": "prim:size:agent",
+      "85": "prim:record.size:leaf",
+      "86": "main.body",
+      "87": "agent_metadata:ctor",
+      "88": "from_string_error:request",
+      "89": "throw:request",
       "9": "prim:mod:leaf",
-      "90": "json_null:ctor",
-      "91": "json_boolean:ctor",
-      "92": "json_integer:ctor",
-      "93": "json_number:ctor",
-      "94": "json_string:ctor",
-      "95": "json_array:ctor",
-      "96": "json_object:ctor",
-      "97": "json_parse_error:request"
+      "90": "env_not_found:request",
+      "91": "get_env:external",
+      "92": "get_secret_env:external",
+      "93": "set_env:external",
+      "94": "json_null:ctor",
+      "95": "json_boolean:ctor",
+      "96": "json_integer:ctor",
+      "97": "json_number:ctor",
+      "98": "json_string:ctor",
+      "99": "json_array:ctor"
     },
     "varNames": {}
   }
