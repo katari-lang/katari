@@ -66,7 +66,7 @@ export function AnyField({
   }
 
   return (
-    <div className="space-y-2">
+    <div className="space-y-1.5 border-l-2 border-border pl-3">
       <div className="flex items-center gap-2">
         <span className="text-xs uppercase tracking-wider text-subtle-foreground">
           Type
@@ -75,7 +75,7 @@ export function AnyField({
           value={kind}
           onChange={(e) => selectKind(e.target.value as AnyKind)}
           className={cn(
-            "h-8 border border-border bg-transparent px-2 text-xs text-foreground transition-colors",
+            "h-7 border-b border-border bg-transparent px-1 text-xs text-foreground transition-colors",
             "hover:border-border-strong focus-visible:outline-none focus-visible:border-ring",
           )}
         >

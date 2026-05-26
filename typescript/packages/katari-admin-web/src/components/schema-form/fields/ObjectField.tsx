@@ -167,24 +167,29 @@ function DynamicKeyValueEditor({
   }
 
   return (
-    <div className="space-y-2 border-l-2 border-border pl-3">
+    <div className="space-y-4 border-l-2 border-border pl-3">
       {rows.length === 0 ? (
         <p className="text-xs text-subtle-foreground">No entries yet.</p>
       ) : (
         rows.map((row) => (
-          <div
-            key={row.id}
-            className="flex items-start gap-2"
-          >
-            <div className="w-36 shrink-0">
+          <div key={row.id} className="space-y-1.5">
+            <div className="flex items-center gap-2">
               <Input
                 value={row.key}
                 onChange={(e) => renameKey(row.id, e.target.value)}
                 placeholder="key"
-                className="h-8 text-xs font-mono"
+                className="h-8 flex-1 text-xs font-mono"
               />
+              <button
+                type="button"
+                onClick={() => removeRow(row.id)}
+                className="inline-flex h-7 w-7 shrink-0 items-center justify-center text-subtle-foreground transition-colors hover:bg-danger/10 hover:text-danger hover:cursor-pointer"
+                aria-label={`Remove entry ${row.key}`}
+              >
+                <Trash2 className="size-3.5" />
+              </button>
             </div>
-            <div className="flex-1">
+            <div className="pl-2">
               {valueSchema === true ? (
                 <AnyField
                   value={value[row.key]}
@@ -198,14 +203,6 @@ function DynamicKeyValueEditor({
                 />
               )}
             </div>
-            <button
-              type="button"
-              onClick={() => removeRow(row.id)}
-              className="mt-1 inline-flex h-7 w-7 items-center justify-center text-subtle-foreground transition-colors hover:bg-danger/10 hover:text-danger hover:cursor-pointer"
-              aria-label={`Remove entry ${row.key}`}
-            >
-              <Trash2 className="size-3.5" />
-            </button>
           </div>
         ))
       )}

@@ -176,3 +176,7 @@ agent slow_child() -> string {
 agent demo_ffi_fanout() -> integer {
   fan_out(callback = slow_child, count = 3)
 }
+
+agent demo_array_length(arr: array[integer]) -> integer {
+  array_length(arr)
+}
