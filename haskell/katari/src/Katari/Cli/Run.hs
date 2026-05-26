@@ -14,7 +14,6 @@ module Katari.Cli.Run
   )
 where
 
-import Control.Applicative ((<|>))
 import Control.Concurrent (threadDelay)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Encode.Pretty as Pretty

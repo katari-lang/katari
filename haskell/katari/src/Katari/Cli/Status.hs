@@ -83,12 +83,7 @@ renderResultPreview = \case
           else Text.take (limit - 1) s <> "…"
 
 renderState :: Api.RunState -> Text
-renderState = \case
-  Api.RunRunning -> "running"
-  Api.RunCancelling -> "cancelling"
-  Api.RunCancelled -> "cancelled"
-  Api.RunSucceeded -> "succeeded"
-  Api.RunError -> "error"
+renderState = Api.runStateText
 
 renderJsonOneLine :: Aeson.Value -> Text
 renderJsonOneLine v = decodeUtf8 (LBS.toStrict (Aeson.encode v))

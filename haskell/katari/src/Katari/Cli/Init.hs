@@ -29,10 +29,10 @@ module Katari.Cli.Init
 where
 
 import Control.Monad (when)
-import Data.Char (isAlpha, isAlphaNum)
 import Data.Maybe (fromMaybe)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as TextIO
+import Katari.Project.Config (isValidPackageName)
 import Katari.Version (katariVersion)
 import Options.Applicative
 import System.Directory
@@ -138,19 +138,12 @@ directoryHasEntries path = do
   hasSrc <- doesDirectoryExist (path </> "src")
   pure (hasToml || hasSrc)
 
--- | Validate that a string is a legal Katari identifier (matches the
--- check 'Katari.Project.Resolve' performs on package names).
+-- | Validate that a string is a legal Katari identifier. Delegates to
+-- 'Katari.Project.Config.isValidPackageName' for the actual check.
 validateName :: String -> Maybe String
 validateName name
-  | null name = Just "package name cannot be empty"
-  | not (validHead (head name)) =
-      Just "package name must start with a letter or underscore"
-  | not (all validChar name) =
-      Just "package name may only contain letters, digits, and underscores"
-  | otherwise = Nothing
-  where
-    validChar c = isAlphaNum c || c == '_'
-    validHead c = isAlpha c || c == '_'
+  | isValidPackageName (Text.pack name) = Nothing
+  | otherwise = Just "package name must match [A-Za-z_][A-Za-z0-9_]*"
 
 -- | Write @path@ with @contents@ unless something already exists there.
 -- Existing files are left alone (= partial scaffolds are idempotent).

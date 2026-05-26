@@ -16,6 +16,7 @@ import {
   createEscalationId,
 } from "../id.js";
 import { encodeCoreAgentDefId } from "../../agent-def-id.js";
+import type { Block, BlockId } from "../../ir/types.js";
 import type { Scope } from "../scope.js";
 import type { StepCtx } from "../step-ctx.js";
 import type { Value } from "../value.js";
@@ -467,6 +468,29 @@ export function setValueInScope(
 ): void {
   const sc = getScope(ctx, scopeId);
   sc.values[varId] = value as Value;
+}
+
+/**
+ * Write `Record<label, Value>` into a freshly-spawned child's scope by
+ * looking up the called block's parameter VarIds. Shared between
+ * UserThread and HandleThread ops.
+ */
+export function writeArgsIntoChildScope(
+  ctx: StepCtx,
+  childId: ThreadId,
+  blockId: BlockId,
+  args: Record<string, Value>,
+): void {
+  const b = ctx.state.irModule.blocks[String(blockId)] as Block | undefined;
+  if (b === undefined || b.kind !== "blockUser") return;
+  const child = ctx.state.threads[childId];
+  if (child === undefined) return;
+  for (const param of b.body.parameters) {
+    const v = args[param.label];
+    if (v !== undefined) {
+      setValueInScope(ctx, child.scopeId, param.var, v);
+    }
+  }
 }
 
 // Hard upper bound on scope-chain depth to catch corrupt checkpoints

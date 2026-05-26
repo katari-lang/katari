@@ -30,6 +30,7 @@ import Katari.LSP.State
     WorkspaceState (..),
     findProjectRootCached,
     snapshotWorkspaceSources,
+    wsFileTexts,
   )
 import Katari.SourceSpan (SourceSpan (..))
 import Katari.Query (buildOccurrenceIndex)
@@ -225,16 +226,7 @@ recompileWorkspace st root = do
     Just ws -> do
       let input = snapshotWorkspaceSources ws
           result = Compile.compile input
-          -- Diagnostics + LSP filePath → text map share the same view:
-          -- merge disk content from the assembly with buffer overrides.
-          fileTexts =
-            Map.union
-              ws.wsFiles
-              ( Map.fromList
-                  [ (entry.sourcePath, entry.sourceText)
-                    | entry <- Map.elems ws.wsAssembly.sources
-                  ]
-              )
+          fileTexts = wsFileTexts ws
       liftIO $
         atomically $
           modifyTVar' st.workspaces $

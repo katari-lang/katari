@@ -33,7 +33,7 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Void (Void, absurd)
 import Katari.AST
-import Katari.Common (LiteralValue (..))
+import Katari.Common (LiteralValue (..), TypePatternTag (..))
 import Katari.Diagnostic (Diagnostic, diagnosticError)
 import Katari.Lexer
   ( KatariToken (..),

@@ -39,7 +39,6 @@ import Control.Monad (foldM)
 import Data.Maybe (isJust, mapMaybe)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -49,9 +48,12 @@ import Katari.Project.Config
     OverrideSource (..),
     PackageSection (..),
     ProjectConfig (..),
+    isValidPackageName,
     loadKatariToml,
   )
 import Katari.Project.Discovery (SourceEntry (..), configFilename, scanSources)
+import Network.HTTP.Client (Manager)
+import Network.HTTP.Client.TLS (newTlsManager)
 import System.Directory (canonicalizePath, doesFileExist)
 import System.FilePath (isAbsolute, (</>))
 
@@ -196,6 +198,7 @@ renderConfigError = \case
 -- @[package].name@ is informational and may include hyphens.
 loadResolvedProject :: FilePath -> IO (Either ResolveError ResolvedProject)
 loadResolvedProject rootDir = do
+  manager <- newTlsManager
   canonicalRoot <- canonicalizePath rootDir
   rootRes <- loadOnePackage canonicalRoot
   case rootRes of
@@ -208,12 +211,6 @@ loadResolvedProject rootDir = do
             any
               (\n -> not (Map.member n cfg.overrides))
               deps.dependenciesPackages
-      -- Lockfile is the SSoT when present: it pins every snapshot dep
-      -- to a (repo, ref, sha) triple, so the registry snapshot URL
-      -- doesn't need to be reachable for reproducible builds. When the
-      -- lockfile is missing we fall back to the registry snapshot
-      -- (= first-time resolution) and a fresh lockfile is written by
-      -- the caller after success.
       lockExists <- doesFileExist lockPath
       mResolved <-
         if lockExists
@@ -228,14 +225,14 @@ loadResolvedProject rootDir = do
               then case deps.dependenciesRegistry of
                 Nothing -> pure (Right (Nothing, Nothing))
                 Just url -> do
-                  r <- Snapshot.loadSnapshotFromUrl url deps.dependenciesSnapshot
+                  r <- Snapshot.loadSnapshotFromUrlWith manager url deps.dependenciesSnapshot
                   case r of
                     Left e -> pure (Left (ResolveSnapshotError e))
                     Right s -> pure (Right (Just s, Nothing))
               else pure (Right (Nothing, Nothing))
       case mResolved of
         Left e -> pure (Left e)
-        Right (msnap, mlock) -> walkDeps msnap mlock rootPkg
+        Right (msnap, mlock) -> walkDeps manager msnap mlock rootPkg
 
 -- | Project the @snapshot@-source entries of a 'Lock.Lockfile' into a
 -- synthetic 'Snapshot.Snapshot'. Path / git overrides are ignored here
@@ -275,11 +272,12 @@ data DepSource
   deriving (Show)
 
 walkDeps ::
+  Manager ->
   Maybe Snapshot.Snapshot ->
   Maybe Lock.Lockfile ->
   ResolvedPackage ->
   IO (Either ResolveError ResolvedProject)
-walkDeps mSnap mLock rootPkg =
+walkDeps manager mSnap mLock rootPkg =
   case depEntries mSnap mLock rootPkg of
     Left err -> pure (Left err)
     Right entries -> go Set.empty Map.empty (initialQueue entries rootPkg.packageRoot)
@@ -339,7 +337,7 @@ walkDeps mSnap mLock rootPkg =
     resolveGit depName url rev expectedSha visited accDeps rest = do
       cache <- Cache.defaultCachePaths
       Cache.ensureCacheDirs cache
-      fetchRes <- Fetch.fetchGitTarball cache depName (Fetch.GitRef url rev)
+      fetchRes <- Fetch.fetchGitTarball manager cache depName (Fetch.GitRef url rev)
       case fetchRes of
         Left err ->
           pure
@@ -446,19 +444,8 @@ resolveDepDir parentRoot depPath
 
 validatePackageName :: Text -> Maybe ResolveError
 validatePackageName name
-  | Text.null name = Just (ResolveInvalidPackageName name)
-  | Text.all validChar name && validHead (Text.head name) = Nothing
+  | isValidPackageName name = Nothing
   | otherwise = Just (ResolveInvalidPackageName name)
-  where
-    -- Matches [A-Za-z_][A-Za-z0-9_]*, in sync with the error message
-    -- shown to users (= the user-facing contract) and with the
-    -- duplicated check in 'Katari.Cli.Init.validateName'. A common
-    -- helper would be cleaner; tracked as a future cleanup.
-    validChar c = isAlpha c || isDigit c || c == '_'
-    validHead c = isAlpha c || c == '_'
-
-    isAlpha c = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
-    isDigit c = c >= '0' && c <= '9'
 
 -- ===========================================================================
 -- Assembly

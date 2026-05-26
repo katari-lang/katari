@@ -15,6 +15,12 @@ module Katari.Common
 
     -- * Literal values
     LiteralValue (..),
+
+    -- * Pattern tags
+    TypePatternTag (..),
+
+    -- * Aeson helpers
+    lowerHead,
   )
 where
 
@@ -134,6 +140,31 @@ commonSumOptions =
       omitNothingFields = True
     }
 
+-- | Runtime-checkable type tag used by type-guard patterns. Shared between
+-- the AST ('Katari.AST.TypePattern') and the IR ('Katari.IR.MatchPatternTypeGuard').
+data TypePatternTag where
+  TypePatternTagInteger :: TypePatternTag
+  TypePatternTagNumber :: TypePatternTag
+  TypePatternTagString :: TypePatternTag
+  TypePatternTagBoolean :: TypePatternTag
+  TypePatternTagAgent :: TypePatternTag
+  deriving (Eq, Ord, Show, Generic)
+
+instance ToJSON TypePatternTag where
+  toJSON = genericToJSON enumOptions
+
+instance FromJSON TypePatternTag where
+  parseJSON = genericParseJSON enumOptions
+
+enumOptions :: Options
+enumOptions =
+  defaultOptions
+    { sumEncoding = UntaggedValue,
+      allNullaryToStringTag = True,
+      constructorTagModifier = lowerHead
+    }
+
 lowerHead :: String -> String
-lowerHead [] = []
-lowerHead (c : cs) = toLower c : cs
+lowerHead = \case
+  [] -> []
+  (c : cs) -> toLower c : cs

@@ -34,13 +34,13 @@ import qualified Data.Text.Encoding as TE
 import Katari.Project.Cache (CachePaths, packageDir)
 import Network.HTTP.Client
   ( HttpException,
+    Manager,
     httpLbs,
     parseRequest,
     responseBody,
     responseStatus,
   )
 import qualified Network.HTTP.Client as HTTP
-import Network.HTTP.Client.TLS (newTlsManager)
 import Network.HTTP.Types.Status (statusCode)
 import System.Directory
   ( createDirectoryIfMissing,
@@ -70,14 +70,15 @@ data FetchError
 -- absolute path of the extracted dir AND the hex SHA-256 of the
 -- downloaded tarball (suitable for storing in the lockfile).
 fetchGitTarball ::
+  Manager ->
   CachePaths ->
-  Text -> -- dep name (= used as the cache-dir prefix)
+  Text ->
   GitRef ->
   IO (Either FetchError (FilePath, Text))
-fetchGitTarball cache name ref =
+fetchGitTarball manager cache name ref =
   case archiveUrl ref of
     Left err -> pure (Left err)
-    Right url -> doFetch cache name url
+    Right url -> doFetch manager cache name url
 
 archiveUrl :: GitRef -> Either FetchError Text
 archiveUrl GitRef {gitUrl, gitRev} =
@@ -94,11 +95,8 @@ archiveUrl GitRef {gitUrl, gitRev} =
       Just s -> s
       Nothing -> u
 
-doFetch :: CachePaths -> Text -> Text -> IO (Either FetchError (FilePath, Text))
-doFetch cache name url = do
-  -- Download into a temp tarball so a partial network failure can't
-  -- leave us with a half-extracted cache entry.
-  manager <- newTlsManager
+doFetch :: Manager -> CachePaths -> Text -> Text -> IO (Either FetchError (FilePath, Text))
+doFetch manager cache name url = do
   reqRes <- try (parseRequest (Text.unpack url)) :: IO (Either IOException HTTP.Request)
   case reqRes of
     Left err -> pure (Left (FetchHttpError url (Text.pack (show err))))

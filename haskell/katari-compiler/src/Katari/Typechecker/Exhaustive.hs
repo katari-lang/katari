@@ -32,7 +32,7 @@ import Data.Text (Text)
 import Data.Text qualified as Text
 import Katari.AST (NameRef (..), Zonked)
 import Katari.AST qualified as AST
-import Katari.Common (LiteralValue (..))
+import Katari.Common (LiteralValue (..), TypePatternTag (..))
 import Katari.Diagnostic (Diagnostic, diagnosticError, diagnosticWarning)
 import Katari.Id
   ( ConstructorId,
@@ -107,7 +107,7 @@ data CtorTag where
   -- | Runtime type-guard pattern (@integer(p)@, @record(p)@, etc.). Arity
   -- is 1 (the inner pattern). The signature is never complete on its own;
   -- a wildcard arm is required for exhaustiveness.
-  CtorTagType :: AST.TypePatternTag -> CtorTag
+  CtorTagType :: TypePatternTag -> CtorTag
   -- | Record pattern: the keys are stored sorted so two patterns over the
   -- same key set collapse to the same tag (and one becomes redundant w.r.t.
   -- the other). Arity equals the number of keys; sub-patterns appear in
@@ -270,13 +270,13 @@ getSubFieldTypes tag columnType idResult zonkResult = case tag of
 
 -- | The narrowed semantic type associated with a runtime type-guard tag.
 -- Mirrors 'typePatternTagToSemantic' but at the 'Resolved' phase.
-typePatternTagToResolved :: AST.TypePatternTag -> SemanticType Resolved
+typePatternTagToResolved :: TypePatternTag -> SemanticType Resolved
 typePatternTagToResolved = \case
-  AST.TypePatternTagInteger -> SemanticTypeInteger
-  AST.TypePatternTagNumber -> SemanticTypeNumber
-  AST.TypePatternTagString -> SemanticTypeString
-  AST.TypePatternTagBoolean -> SemanticTypeBoolean
-  AST.TypePatternTagAgent -> SemanticTypeFunctionAny
+  TypePatternTagInteger -> SemanticTypeInteger
+  TypePatternTagNumber -> SemanticTypeNumber
+  TypePatternTagString -> SemanticTypeString
+  TypePatternTagBoolean -> SemanticTypeBoolean
+  TypePatternTagAgent -> SemanticTypeFunctionAny
 
 -- ===========================================================================
 -- Complete-signature check
@@ -498,13 +498,13 @@ renderPatHead idResult zonkResult = \case
             else renderedSubs -- defensive — shouldn't happen
      in "{ " <> Text.intercalate ", " zipped <> " }"
 
-typePatternTagName :: AST.TypePatternTag -> Text
+typePatternTagName :: TypePatternTag -> Text
 typePatternTagName = \case
-  AST.TypePatternTagInteger -> "integer"
-  AST.TypePatternTagNumber -> "number"
-  AST.TypePatternTagString -> "string"
-  AST.TypePatternTagBoolean -> "boolean"
-  AST.TypePatternTagAgent -> "agent"
+  TypePatternTagInteger -> "integer"
+  TypePatternTagNumber -> "number"
+  TypePatternTagString -> "string"
+  TypePatternTagBoolean -> "boolean"
+  TypePatternTagAgent -> "agent"
 
 -- ===========================================================================
 -- Match checking

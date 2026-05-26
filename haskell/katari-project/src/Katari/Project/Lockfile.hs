@@ -42,19 +42,14 @@ where
 
 import Control.Exception (IOException, try)
 import Data.Bifunctor (first)
-import qualified Data.HashMap.Strict as HashMap
-import Data.List.NonEmpty (NonEmpty (..))
-import qualified Data.List.NonEmpty as NonEmpty
 import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as TextIO
+import Katari.Project.Toml (extractNestedTables)
 import qualified Toml
 import Toml (TomlCodec, (.=))
-import qualified Toml.Type.PrefixTree as Toml
-import qualified Toml.Type.Key as Toml
-import qualified Toml.Type.TOML as Toml
 import qualified Validation
 
 -- | Conventional filename, sibling to @katari.toml@.
@@ -177,27 +172,7 @@ parseLockfile path raw = do
 extractLockedPackages ::
   FilePath -> Toml.TOML -> Either LockfileError (Map Text RawLockedPackage)
 extractLockedPackages path toml =
-  case HashMap.lookup packagesPiece (Toml.tomlTables toml) of
-    Nothing -> Right Map.empty
-    Just tree -> Map.fromList <$> walk tree
-  where
-    packagesPiece = Toml.Piece "packages"
-
-    walk = \case
-      Toml.Leaf fullKey sub ->
-        case dropPrefix fullKey of
-          Nothing -> Right []
-          Just name -> do
-            lp <- decodeLockedPackage path name sub
-            Right [(name, lp)]
-      Toml.Branch _ _ children ->
-        concat <$> traverse walk (HashMap.elems children)
-
-    dropPrefix :: Toml.Key -> Maybe Text
-    dropPrefix key = case NonEmpty.toList (Toml.unKey key) of
-      Toml.Piece "packages" : rest@(_ : _) ->
-        Just (Text.intercalate "." [p | Toml.Piece p <- rest])
-      _ -> Nothing
+  extractNestedTables "packages" (decodeLockedPackage path) toml
 
 decodeLockedPackage ::
   FilePath -> Text -> Toml.TOML -> Either LockfileError RawLockedPackage

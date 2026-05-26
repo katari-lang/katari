@@ -34,6 +34,7 @@ import {
   emitThrowEscalate,
   lookupValue,
   setValueInScope,
+  writeArgsIntoChildScope,
 } from "../common.js";
 import type { Thread, UserThread } from "../types.js";
 import {
@@ -239,7 +240,7 @@ function pushCallEvent(
     callArgs: args,
     scopeMode,
   });
-  writeArgsIntoChildScope(ctx, childId, block, args);
+  writeArgsIntoChildScope(ctx, childId, call.block as BlockId, args);
 }
 
 function isStructuralBlock(kind: Block["kind"]): boolean {
@@ -333,25 +334,3 @@ function emitAskUpwards(
   });
 }
 
-/**
- * The caller (this UserThread) just spawned a child via spawnChild;
- * the child's scope is a fresh empty scope. Walk the called block's
- * parameter list and copy the call args into the child's scope under
- * each parameter's VarId.
- */
-function writeArgsIntoChildScope(
-  ctx: StepCtx,
-  childId: ThreadId,
-  calledBlock: Block,
-  args: Record<string, Value>,
-): void {
-  if (calledBlock.kind !== "blockUser") return;
-  const child = ctx.state.threads[childId];
-  if (child === undefined) return;
-  for (const param of calledBlock.body.parameters) {
-    const v = args[param.label];
-    if (v !== undefined) {
-      setValueInScope(ctx, child.scopeId, param.var, v);
-    }
-  }
-}

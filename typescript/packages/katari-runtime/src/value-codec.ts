@@ -207,6 +207,18 @@ function decodeCallable(rawId: unknown): Value {
   return { kind: "agentLiteral", qualifiedName: rawId as QualifiedName };
 }
 
+/** Reject `__proto__` / `constructor` / `prototype` keys that could
+ *  pollute Object.prototype when written into a record. */
+function assertSafeKeys(obj: Record<string, unknown>): void {
+  for (const k of Object.keys(obj)) {
+    if (k === "__proto__" || k === "constructor" || k === "prototype") {
+      throw new RawValueDecodeError(
+        `valueFromRaw: forbidden key '${k}'`,
+      );
+    }
+  }
+}
+
 function decodeTagged(obj: Record<string, unknown>): Value {
   const ctorRaw = obj[CTOR_DISCRIMINATOR];
   if (typeof ctorRaw !== "string") {
@@ -214,33 +226,22 @@ function decodeTagged(obj: Record<string, unknown>): Value {
       `valueFromRaw: $constructor must be a string, got ${typeof ctorRaw}`,
     );
   }
+  assertSafeKeys(obj);
   // Use a null-prototype object so a hostile payload carrying
   // `__proto__` / `constructor` / `prototype` can't reach
   // Object.prototype via the `fields` record.
   const fields: Record<string, Value> = Object.create(null);
   for (const [k, v] of Object.entries(obj)) {
     if (k === CTOR_DISCRIMINATOR) continue;
-    if (k === "__proto__" || k === "constructor" || k === "prototype") {
-      throw new RawValueDecodeError(
-        `valueFromRaw: forbidden tagged field name '${k}'`,
-      );
-    }
     fields[k] = valueFromRaw(v);
   }
   return { kind: "tagged", ctorId: ctorRaw as QualifiedName, fields };
 }
 
 function decodeRecord(obj: Record<string, unknown>): Value {
-  // Null-prototype guard for the same reason as 'decodeTagged': avoid
-  // payloads that name `__proto__` / `constructor` / `prototype` from
-  // mutating Object.prototype via property assignment.
+  assertSafeKeys(obj);
   const entries: Record<string, Value> = Object.create(null);
   for (const [k, v] of Object.entries(obj)) {
-    if (k === "__proto__" || k === "constructor" || k === "prototype") {
-      throw new RawValueDecodeError(
-        `valueFromRaw: forbidden record key '${k}'`,
-      );
-    }
     entries[k] = valueFromRaw(v);
   }
   return { kind: "record", entries };

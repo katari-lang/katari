@@ -84,13 +84,12 @@ import Data.Aeson
     genericParseJSON,
     genericToJSON,
   )
-import Data.Char (toLower)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 import Data.Word (Word32)
 import GHC.Generics (Generic)
-import Katari.Common (LiteralValue (..), QualifiedName (..), renderQualifiedName)
+import Katari.Common (LiteralValue (..), QualifiedName (..), TypePatternTag (..), lowerHead, renderQualifiedName)
 
 -- ===========================================================================
 -- Identifiers
@@ -689,8 +688,7 @@ data MatchPattern where
   -- | Runtime-type guard. Matches if the subject's runtime tag is
   -- compatible with 'tag' (e.g. @integer@ requires @value.kind ===
   -- \"number\"@ AND the number is integral); then matches @inner@
-  -- against the (narrowed) value. The tag values mirror
-  -- 'AST.TypePatternTag'.
+  -- against the (narrowed) value.
   MatchPatternTypeGuard :: TypePatternTag -> MatchPattern -> MatchPattern
   -- | Match a record value (subject must be of @kind \"record\"@). Each
   -- listed entry's key must be present in the record; its value is then
@@ -698,24 +696,6 @@ data MatchPattern where
   -- (subset match — record values are heterogeneous over keys).
   MatchPatternRecord :: [(Text, MatchPattern)] -> MatchPattern
   deriving (Eq, Show, Generic)
-
--- | Runtime-checkable type tag used by 'MatchPatternTypeGuard'. Mirrors
--- 'AST.TypePatternTag' (kept as a separate type so the IR is independent
--- of the AST module). Encoded as a bare camelCase string via 'enumOptions'
--- (every constructor is nullary).
-data TypePatternTag where
-  TypePatternTagInteger :: TypePatternTag
-  TypePatternTagNumber :: TypePatternTag
-  TypePatternTagString :: TypePatternTag
-  TypePatternTagBoolean :: TypePatternTag
-  TypePatternTagAgent :: TypePatternTag
-  deriving (Eq, Show, Generic)
-
-instance ToJSON TypePatternTag where
-  toJSON = genericToJSON enumOptions
-
-instance FromJSON TypePatternTag where
-  parseJSON = genericParseJSON enumOptions
 
 instance ToJSON MatchPattern where
   toJSON = genericToJSON sumOptions
@@ -784,11 +764,6 @@ irOptions =
     { fieldLabelModifier = id,
       omitNothingFields = True
     }
-
--- | Lower the first character of a string (PascalCase → camelCase).
-lowerHead :: String -> String
-lowerHead [] = []
-lowerHead (c : cs) = toLower c : cs
 
 -- | TaggedObject options for record-style sums. Constructor names are
 -- lowercased at the head (camelCase), e.g. @"statementCall"@, @"matchPatternAny"@.

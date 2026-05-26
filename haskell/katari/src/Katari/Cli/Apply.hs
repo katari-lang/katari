@@ -89,18 +89,37 @@ optionsParser =
 
 run :: Options -> IO ()
 run opts = do
-  -- 1. Find project + load config.
+  -- 1. Find project + resolve dependencies (once).
   start <- maybe getCurrentDirectory pure opts.optProjectRoot
   mRoot <- Project.findProjectRoot start
   rootDir <- case mRoot of
     Just r -> pure r
     Nothing -> die "no katari.toml found in this or any parent directory"
-  cfg <- loadCfg (rootDir </> Project.configFilename)
+  resolved <- do
+    rpRes <- Project.loadResolvedProject rootDir
+    case rpRes of
+      Left err -> die (Text.unpack (Project.renderResolveError err))
+      Right rp -> pure rp
+  assembly <- case Project.assembleProject resolved of
+    Left err -> die (Text.unpack (Project.renderResolveError err))
+    Right a -> pure a
+  let cfg = resolved.rootPackage.packageConfig
+      sources =
+        Map.map
+          ( \e ->
+              Compile.SourceEntry
+                { Compile.filePath = e.sourcePath,
+                  Compile.sourceText = e.sourceText
+                }
+          )
+          assembly.sources
+      fileTexts =
+        Map.fromList
+          [ (e.sourcePath, e.sourceText) | e <- Map.elems assembly.sources
+          ]
 
-  -- 2. Compile via the shared loader.
-  (input, fileTexts) <-
-    Check.loadProject (Check.Options {optProjectRoot = Just rootDir})
-  let result = Compile.compile input
+  -- 2. Compile.
+  let result = Compile.compile Compile.CompileInput {Compile.sources = sources}
   Check.emitDiagnostics fileTexts result.diagnostics
   if hasErrors result.diagnostics
     then exitWith (ExitFailure 1)
@@ -109,8 +128,8 @@ run opts = do
     Just ir -> pure ir
     Nothing -> dieInternal "compile produced no IR module despite clean diagnostics"
 
-  -- 3. Bundle ext-agent siblings.
-  packages <- gatherSourceRoots rootDir
+  -- 3. Bundle ext-agent siblings (reuse the already-resolved packages).
+  let packages = packagesFromResolved resolved
   sidecarBundle <- runKatariBundle packages
 
   -- 4. Talk to the runtime.
@@ -118,17 +137,7 @@ run opts = do
       projectName = case opts.optProjectName of
         Just n -> n
         Nothing -> cfg.packageSection.packageName
-  -- Apply has a cfg already loaded, so we shortcut the URL resolution
-  -- here instead of going through `Common.resolveApiClient` (which
-  -- would re-walk to the project root). Auth still comes from env.
-  let apiUrl = case opts.optApiUrl of
-        Just u -> u
-        Nothing -> cfg.runtimeSection.runtimeUrl
-  auth <- Api.apiAuthFromEnv
-  client <- Api.newApiClient apiUrl auth
-  -- README is picked up from a sibling `README.md` so operators get GitHub-
-  -- style automatic discovery without an extra toml knob. Missing file =
-  -- `Nothing` (clears the field server-side, keeping the toml/disk as SSoT).
+  client <- Common.resolveApiClient "apply" opts.optApiUrl
   readme <- readSiblingReadme rootDir
   project <-
     Api.upsertProject
@@ -178,13 +187,6 @@ dieInternal msg = do
   hPutStrLn stderr ("katari apply: internal error: " <> msg)
   exitWith (ExitFailure 70)
 
-loadCfg :: FilePath -> IO Project.ProjectConfig
-loadCfg path = do
-  r <- Project.loadKatariToml path
-  case r of
-    Right c -> pure c
-    Left err -> die ("config: " <> show err)
-
 -- | Read @README.md@ next to @katari.toml@ if it exists. Any IO failure
 -- (missing file, permission error, decode failure) → 'Nothing', which
 -- the server interprets as "clear the readme field". We deliberately do
@@ -209,28 +211,20 @@ data BundlePackage = BundlePackage
     sourceRoot :: FilePath
   }
 
--- | Resolve every package's @[sidecar].sourceRoots@ (falling back to
--- @[compile].src@) and return @(packageName, absoluteSourceRoot)@
--- pairs. @katari-bundle@ uses the package name as the bundle's
--- registry prefix.
-gatherSourceRoots :: FilePath -> IO [BundlePackage]
-gatherSourceRoots rootDir = do
-  rpRes <- Project.loadResolvedProject rootDir
-  case rpRes of
-    Left err -> die ("resolve: " <> Text.unpack (Project.renderResolveError err))
-    Right rp ->
-      pure
-        [ BundlePackage
-            { packageName = p.packageConfig.packageSection.packageName,
-              sourceRoot = p.packageRoot </> resolveSrc p.packageConfig
-            }
-          | p <- rp.rootPackage : Map.elems rp.depPackages
-        ]
+-- | Extract @(packageName, sourceRoot)@ pairs from an already-resolved
+-- project. Avoids a redundant 'loadResolvedProject' call.
+packagesFromResolved :: Project.ResolvedProject -> [BundlePackage]
+packagesFromResolved resolved =
+  [ BundlePackage
+      { packageName = p.packageConfig.packageSection.packageName,
+        sourceRoot = p.packageRoot </> resolveSrc p.packageConfig
+      }
+    | p <- resolved.rootPackage : Map.elems resolved.depPackages
+  ]
   where
-    resolveSrc c =
-      case c.sidecarSection of
-        Just s | (r : _) <- filter (not . null) s.sidecarSourceRoots -> r
-        _ -> c.packageSection.packageSrc
+    resolveSrc c = case c.sidecarSection of
+      Just s | (r : _) <- filter (not . null) s.sidecarSourceRoots -> r
+      _ -> c.packageSection.packageSrc
 
 -- | Spawn @katari-bundle@ with one @--package \<name\>=\<path\>@ flag
 -- per package and decode its JSON output.

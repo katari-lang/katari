@@ -16,6 +16,7 @@ library:
     - Katari.Project.ModuleName
     - Katari.Project.Resolve
     - Katari.Project.Snapshot
+    - Katari.Project.Toml
 
 tests:
   katari-project-test:

@@ -18,24 +18,23 @@ module Katari.Project.Snapshot
     SnapshotPackage (..),
     SnapshotError (..),
     parseSnapshot,
-    loadSnapshotFromUrl,
+    loadSnapshotFromUrlWith,
   )
 where
 
 import Control.Exception (IOException, try)
 import Data.Bifunctor (first)
 import qualified Data.ByteString.Lazy as LBS
-import qualified Data.HashMap.Strict as HashMap
-import Data.List.NonEmpty (NonEmpty (..))
-import qualified Data.List.NonEmpty as NonEmpty
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TE
 import qualified Data.Text.IO as TextIO
+import Katari.Project.Toml (extractNestedTables)
 import Network.HTTP.Client
   ( HttpException,
+    Manager,
     Request,
     Response,
     httpLbs,
@@ -43,14 +42,10 @@ import Network.HTTP.Client
     responseBody,
     responseStatus,
   )
-import Network.HTTP.Client.TLS (newTlsManager)
 import Network.HTTP.Types.Status (statusCode)
 import System.Directory (doesFileExist)
 import qualified Toml
 import Toml (TomlCodec, (.=))
-import qualified Toml.Type.PrefixTree as Toml
-import qualified Toml.Type.Key as Toml
-import qualified Toml.Type.TOML as Toml
 import qualified Validation
 
 data Snapshot = Snapshot
@@ -127,27 +122,7 @@ parseSnapshot path raw = do
 
 extractPackages :: FilePath -> Toml.TOML -> Either SnapshotError (Map Text RawSnapshotPackage)
 extractPackages path toml =
-  case HashMap.lookup packagesPiece (Toml.tomlTables toml) of
-    Nothing -> Right Map.empty
-    Just tree -> Map.fromList <$> walk tree
-  where
-    packagesPiece = Toml.Piece "packages"
-
-    walk = \case
-      Toml.Leaf fullKey sub ->
-        case dropPrefix fullKey of
-          Nothing -> Right []
-          Just name -> do
-            pkg <- decodePackage path name sub
-            Right [(name, pkg)]
-      Toml.Branch _ _ children ->
-        concat <$> traverse walk (HashMap.elems children)
-
-    dropPrefix :: Toml.Key -> Maybe Text
-    dropPrefix key = case NonEmpty.toList (Toml.unKey key) of
-      Toml.Piece "packages" : rest@(_ : _) ->
-        Just (Text.intercalate "." [p | Toml.Piece p <- rest])
-      _ -> Nothing
+  extractNestedTables "packages" (decodePackage path) toml
 
 decodePackage :: FilePath -> Text -> Toml.TOML -> Either SnapshotError RawSnapshotPackage
 decodePackage path name sub =
@@ -196,19 +171,17 @@ validateOnePackage path name RawSnapshotPackage {..} = do
 --   * @file:\/\/\/abs\/path\/to\/registry@ — registry root; @version@
 --     selects @\<registry>\/package-sets\/\<version>.toml@.
 --   * @https:\/\/...@ — HTTP GET (TLS via 'Network.HTTP.Client.TLS').
-loadSnapshotFromUrl ::
+loadSnapshotFromUrlWith ::
+  Manager ->
   Text ->
   Maybe Text ->
   IO (Either SnapshotError Snapshot)
-loadSnapshotFromUrl url mVersion =
+loadSnapshotFromUrlWith manager url mVersion =
   case Text.stripPrefix "file://" url of
     Just rest -> loadFromFile (Text.unpack rest) mVersion
     Nothing
-      | "https://" `Text.isPrefixOf` url -> loadFromHttp url mVersion
+      | "https://" `Text.isPrefixOf` url -> loadFromHttp manager url mVersion
       | "http://" `Text.isPrefixOf` url ->
-          -- Plaintext registries would let a MITM swap the snapshot pin
-          -- (and thus the sha256 we verify tarballs against). Refuse
-          -- outright; users must use TLS or a local file:// mirror.
           pure (Left (SnapshotUnsupportedUrl ("http:// snapshot URLs are not supported (use https:// or file://): " <> url)))
       | otherwise -> pure (Left (SnapshotUnsupportedUrl url))
 
@@ -240,15 +213,14 @@ loadFromFile path mVersion = do
             )
         Right raw -> pure (parseSnapshot target raw)
 
-loadFromHttp :: Text -> Maybe Text -> IO (Either SnapshotError Snapshot)
-loadFromHttp url mVersion = do
+loadFromHttp :: Manager -> Text -> Maybe Text -> IO (Either SnapshotError Snapshot)
+loadFromHttp manager url mVersion = do
   let target =
         if ".toml" `Text.isSuffixOf` url
           then url
           else case mVersion of
             Just v -> url <> "/package-sets/" <> v <> ".toml"
             Nothing -> url
-  manager <- newTlsManager
   reqRes <- try (parseRequest (Text.unpack target)) :: IO (Either IOException Request)
   case reqRes of
     Left err -> pure (Left (SnapshotHttpError target (Text.pack (show err))))

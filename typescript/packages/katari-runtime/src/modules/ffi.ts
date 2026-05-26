@@ -506,11 +506,12 @@ export class FfiModule implements Module {
         // Ext is starting a CORE-side child. Persist the child row
         // (parentExtDelegationId pointing at the ext call) and push a
         // delegate event on the bus toward CORE.
+        const convertedArgs = argsFromRaw(msg.args);
         await this.store.insertDelegation({
           delegationId: msg.delegationId,
           peerEndpoint: this.endpoint, // ack comes back to us
           agentDefId: msg.agentDefId,
-          args: encryptValueRecord(argsFromRaw(msg.args)),
+          args: encryptValueRecord(convertedArgs),
           state: "running",
           createdAt: new Date().toISOString(),
           parentExtDelegationId: msg.parentDelegationId,
@@ -522,7 +523,7 @@ export class FfiModule implements Module {
             kind: "delegate",
             delegationId: msg.delegationId,
             agentDefId: msg.agentDefId,
-            args: argsFromRaw(msg.args),
+            args: convertedArgs,
           },
         });
         return;

@@ -26,10 +26,11 @@ import type {
   EngineCheckpoint,
   IRModule,
   SchemaBundle,
+  SidecarBundle,
   AgentDefId,
 } from "@katari-lang/runtime";
 
-export type { DelegationId, EscalationId };
+export type { DelegationId, EscalationId, SidecarBundle };
 
 // ─── Brands ────────────────────────────────────────────────────────────────
 
@@ -101,18 +102,6 @@ export interface ProjectRepo {
 }
 
 // ─── Snapshot (= deploy unit) ──────────────────────────────────────────────
-
-/**
- * Sidecar bundle attached to a snapshot. `null` means the snapshot uses
- * no FFI (= `BlockExternal` blocks reach a sidecar that errors on every
- * invoke). `entry` is the bundled JS source string (CLI bundles it via
- * esbuild before upload). Mirrors `katari-runtime/src/sidecar/types.ts`.
- */
-export type SidecarBundle = {
-  entry: string;
-  runtime: "node";
-  schemaVersion: 1;
-};
 
 export type Snapshot = {
   id: SnapshotId;

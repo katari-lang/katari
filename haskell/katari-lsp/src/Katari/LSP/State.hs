@@ -15,6 +15,7 @@ module Katari.LSP.State
     WorkspaceState (..),
     newServerState,
     snapshotWorkspaceSources,
+    wsFileTexts,
     lookupCompileResult,
     workspaceFileTexts,
     findProjectRootCached,
@@ -159,6 +160,19 @@ lookupCompileResult st path = do
         Just (txt, r)
     Nothing -> pure Nothing
 
+-- | Pure projection: @path → text@ for every file in a workspace, with
+-- the editor buffer overlay applied. Buffer entries win over disk
+-- content from the assembly so unsaved edits are reflected.
+wsFileTexts :: WorkspaceState -> Map FilePath Text
+wsFileTexts ws =
+  Map.union
+    ws.wsFiles
+    ( Map.fromList
+        [ (entry.sourcePath, entry.sourceText)
+          | entry <- Map.elems ws.wsAssembly.sources
+        ]
+    )
+
 -- | Map @path → text@ for every file in the enclosing workspace, with
 -- the editor buffer overlay applied. Handlers that follow cross-file
 -- references (find-definition, find-references) need the full map so
@@ -173,12 +187,4 @@ workspaceFileTexts st path = do
       wsMap <- readTVarIO st.workspaces
       case Map.lookup root wsMap of
         Nothing -> pure Map.empty
-        Just ws ->
-          let diskTexts =
-                Map.fromList
-                  [ (entry.sourcePath, entry.sourceText)
-                    | entry <- Map.elems ws.wsAssembly.sources
-                  ]
-           in -- Buffer overlay wins per-file, so unsaved edits show up
-              -- in any UTF-16 conversion downstream.
-              pure (Map.union ws.wsFiles diskTexts)
+        Just ws -> pure (wsFileTexts ws)

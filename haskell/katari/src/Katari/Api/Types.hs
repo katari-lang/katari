@@ -20,6 +20,7 @@ module Katari.Api.Types
     -- * Runs (= operator-launched root delegations)
     RunRow (..),
     RunState (..),
+    runStateText,
     CancelReason (..),
     StartRunRequest (..),
     StartRunResponse (..),
@@ -163,6 +164,14 @@ data RunState
   | RunError
   deriving stock (Show, Eq)
 
+runStateText :: RunState -> Text
+runStateText = \case
+  RunRunning -> "running"
+  RunCancelling -> "cancelling"
+  RunCancelled -> "cancelled"
+  RunSucceeded -> "succeeded"
+  RunError -> "error"
+
 instance FromJSON RunState where
   parseJSON = withText "RunState" $ \t -> case t of
     "running" -> pure RunRunning
@@ -173,12 +182,7 @@ instance FromJSON RunState where
     _ -> fail ("unknown run state: " <> Text.unpack t)
 
 instance ToJSON RunState where
-  toJSON = \case
-    RunRunning -> "running"
-    RunCancelling -> "cancelling"
-    RunCancelled -> "cancelled"
-    RunSucceeded -> "succeeded"
-    RunError -> "error"
+  toJSON = toJSON . runStateText
 
 data CancelReason
   = CancelReasonUser

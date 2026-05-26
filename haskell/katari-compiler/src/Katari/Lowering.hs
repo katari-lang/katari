@@ -1493,7 +1493,7 @@ lowerPattern = \case
     pure (MatchPatternConstructor ctorQName fields, locals)
   AST.PatternType tp -> do
     (innerPat, innerLocals) <- lowerPattern tp.inner
-    pure (MatchPatternTypeGuard (typePatternTagToIR tp.typeTag) innerPat, innerLocals)
+    pure (MatchPatternTypeGuard tp.typeTag innerPat, innerLocals)
   AST.PatternRecord rp -> do
     pairs <- forM rp.entries $ \(entryLabel, sub) -> do
       (subPat, subLocals) <- lowerPattern sub
@@ -1501,16 +1501,6 @@ lowerPattern = \case
     let entries = map fst pairs
         locals = concatMap snd pairs
     pure (MatchPatternRecord entries, locals)
-
--- | AST→IR translation for runtime-type-pattern tags. Both enumerations
--- have the same shape; this exists purely as a module boundary.
-typePatternTagToIR :: AST.TypePatternTag -> TypePatternTag
-typePatternTagToIR = \case
-  AST.TypePatternTagInteger -> TypePatternTagInteger
-  AST.TypePatternTagNumber -> TypePatternTagNumber
-  AST.TypePatternTagString -> TypePatternTagString
-  AST.TypePatternTagBoolean -> TypePatternTagBoolean
-  AST.TypePatternTagAgent -> TypePatternTagAgent
 
 -- | Build a child block for a match arm body. The given locals (from
 -- pattern bindings) are added to the Reader scope before lowering the

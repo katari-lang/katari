@@ -47,26 +47,22 @@ module Katari.Project.Config
     parseKatariToml,
     loadKatariToml,
     interpolateEnv,
+    isValidPackageName,
   )
 where
 
 import Control.Exception (IOException, try)
 import Data.Bifunctor (first)
 import Data.Char (isAlpha, isAlphaNum)
-import qualified Data.HashMap.Strict as HashMap
-import Data.List.NonEmpty (NonEmpty (..))
-import qualified Data.List.NonEmpty as NonEmpty
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as TextIO
+import Katari.Project.Toml (extractNestedTables)
 import qualified Toml
 import Toml (TomlCodec, (.=))
-import qualified Toml.Type.PrefixTree as Toml
-import qualified Toml.Type.Key as Toml
-import qualified Toml.Type.TOML as Toml
 import qualified Validation
 import System.Environment (lookupEnv)
 
@@ -239,44 +235,11 @@ rawDependenciesCodec =
 
 -- ===========================================================================
 -- Manual extraction of [overrides.X] from the raw TOML AST.
---
--- tomland's @tableMap@ enumerates the keys under a prefix but does not
--- recurse into nested @[prefix.name]@ sub-tables — it only opens the
--- single @[prefix]@ table and decodes its scalar keys. Our schema uses
--- nested sections (more idiomatic TOML), so we walk
--- 'Toml.tomlTables' for @overrides.X@ entries manually.
 -- ===========================================================================
 
 extractOverrides :: FilePath -> Toml.TOML -> Either ConfigError (Map Text RawOverride)
 extractOverrides path toml =
-  case HashMap.lookup overridesPiece ((Toml.tomlTables toml)) of
-    Nothing -> Right Map.empty
-    Just tree -> Map.fromList <$> walk tree
-  where
-    overridesPiece :: Toml.Piece
-    overridesPiece = Toml.Piece "overrides"
-
-    walk :: Toml.PrefixTree Toml.TOML -> Either ConfigError [(Text, RawOverride)]
-    walk = \case
-      Toml.Leaf fullKey sub ->
-        case dropOverridesPrefix fullKey of
-          Nothing -> Right []
-          Just name -> do
-            ov <- decodeOverride path name sub
-            Right [(name, ov)]
-      Toml.Branch _ _ children ->
-        concat
-          <$> traverse walk (HashMap.elems (children))
-
-    -- Strip the leading "overrides" piece from a fully-qualified key like
-    -- @overrides.my_fork@ and rejoin the rest with dots. Returns 'Nothing'
-    -- if the key doesn't start with @overrides.@ or has no sub-pieces.
-    dropOverridesPrefix :: Toml.Key -> Maybe Text
-    dropOverridesPrefix key =
-      case NonEmpty.toList (Toml.unKey key) of
-        Toml.Piece "overrides" : rest@(_ : _) ->
-          Just (Text.intercalate "." [p | Toml.Piece p <- rest])
-        _ -> Nothing
+  extractNestedTables "overrides" (decodeOverride path) toml
 
 decodeOverride :: FilePath -> Text -> Toml.TOML -> Either ConfigError RawOverride
 decodeOverride path name sub =
@@ -413,6 +376,21 @@ validateOverride path RawOverride {..} =
             path
             "[overrides.X] must specify either 'path = \"...\"' or 'git = \"...\" ref = \"...\"'"
         )
+
+-- ===========================================================================
+-- Package name validation
+-- ===========================================================================
+
+-- | A package name is valid when it matches @[A-Za-z_][A-Za-z0-9_]*@.
+isValidPackageName :: Text -> Bool
+isValidPackageName name
+  | Text.null name = False
+  | otherwise = validHead (Text.head name) && Text.all validChar name
+  where
+    validChar c = isAlphaPackage c || isDigitPackage c || c == '_'
+    validHead c = isAlphaPackage c || c == '_'
+    isAlphaPackage c = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
+    isDigitPackage c = c >= '0' && c <= '9'
 
 -- ===========================================================================
 -- Env interpolation

@@ -247,7 +247,7 @@ parsedStdlibModules = fst (parseSources stdlibEntries)
   where
     stdlibEntries =
       Map.mapWithKey
-        (\moduleName src -> SourceEntry ("<stdlib:" <> show moduleName <> ">") src)
+        (\moduleName src -> SourceEntry ("<stdlib:" <> Text.unpack moduleName <> ">") src)
         Stdlib.stdlibSources
 
 -- | Test-facing helper: run 'identify' against a user-module map with

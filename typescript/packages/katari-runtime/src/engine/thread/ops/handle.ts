@@ -35,6 +35,7 @@ import {
   lookupValue,
   proxyAskToParent,
   setValueInScope,
+  writeArgsIntoChildScope,
 } from "../common.js";
 import type {
   ChildRole,
@@ -349,26 +350,4 @@ function enterCancellingForResult(
   beginCancel(ctx, t);
 }
 
-/**
- * Mirror of the helper in user.ts: write Record<label, Value> into a
- * freshly-spawned child's scope by looking up the called block's param
- * VarIds. Inlined here to avoid a cross-file import.
- */
-function writeArgsIntoChildScope(
-  ctx: StepCtx,
-  childId: ThreadId,
-  blockId: BlockId,
-  args: Record<string, Value>,
-): void {
-  const b = ctx.state.irModule.blocks[String(blockId)] as Block | undefined;
-  if (b === undefined || b.kind !== "blockUser") return;
-  const child = ctx.state.threads[childId];
-  if (child === undefined) return;
-  for (const param of b.body.parameters) {
-    const v = args[param.label];
-    if (v !== undefined) {
-      setValueInScope(ctx, child.scopeId, param.var, v);
-    }
-  }
-}
 

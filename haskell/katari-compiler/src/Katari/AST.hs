@@ -23,7 +23,7 @@ module Katari.AST where
 
 import Data.Kind (Type)
 import Data.Text (Text)
-import Katari.Common (LiteralValue (..))
+import Katari.Common (LiteralValue (..), TypePatternTag (..))
 import Katari.Id
   ( ConstructorId,
     ModuleId,
@@ -698,19 +698,6 @@ data LiteralPattern (phase :: Phase) = LiteralPattern
 
 instance HasSourceSpan (LiteralPattern phase) where
   sourceSpanOf pattern' = pattern'.sourceSpan
-
--- | Identifies which runtime type a 'TypePattern' guards against. Each
--- tag corresponds to a primitive / structural family the runtime can
--- check by inspecting a value's tag. Record values have no tag here —
--- a record pattern @{ label = pat, ... }@ already covers both the
--- \"is record?\" check and field extraction, so a separate @record(p)@
--- type guard would be pure duplication.
-data TypePatternTag where
-  TypePatternTagInteger :: TypePatternTag
-  TypePatternTagNumber :: TypePatternTag
-  TypePatternTagString :: TypePatternTag
-  TypePatternTagBoolean :: TypePatternTag
-  TypePatternTagAgent :: TypePatternTag
 
 -- | @integer(p)@ / @number(p)@ / @string(p)@ / @boolean(p)@ / @agent(p)@ /
 -- @record(p)@. Refutable — checks the runtime type tag of the subject and
@@ -1656,12 +1643,6 @@ deriving instance (ShowPhase phase) => Show (QualifiedConstructorPattern phase)
 deriving instance (EqPhase phase) => Eq (LiteralPattern phase)
 
 deriving instance (ShowPhase phase) => Show (LiteralPattern phase)
-
-deriving instance Eq TypePatternTag
-
-deriving instance Ord TypePatternTag
-
-deriving instance Show TypePatternTag
 
 deriving instance (EqPhase phase) => Eq (TypePattern phase)
 
