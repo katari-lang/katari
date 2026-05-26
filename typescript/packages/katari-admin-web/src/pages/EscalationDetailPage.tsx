@@ -77,8 +77,7 @@ export function EscalationDetailPage() {
         projectId as ProjectId,
         escalation!.rootDelegationId as RunId,
       ),
-    enabled:
-      typeof projectId === "string" && escalation !== undefined,
+    enabled: typeof projectId === "string" && escalation !== undefined,
   });
   const { getMessage } = useSnapshotMessage(projectId);
   const snapshotMessage = getMessage(escalation?.snapshotId);
@@ -210,8 +209,7 @@ export function EscalationDetailPage() {
                         </code>{" "}
                         is declared{" "}
                         <code className="font-mono">-&gt; never</code> — no
-                        value can satisfy it. Cancel the parent run to
-                        resolve.
+                        value can satisfy it. Cancel the parent run to resolve.
                       </p>
                     </div>
                     <div className="flex justify-end gap-2">
@@ -239,11 +237,6 @@ export function EscalationDetailPage() {
                     onSubmit={(value) => answer.mutate(value as RawValue)}
                     renderActions={({ submit }) => (
                       <div className="flex justify-end gap-2 pt-2">
-                        <Link to={`/project/${projectId}/escalations`}>
-                          <Button type="button" variant="secondary">
-                            Cancel
-                          </Button>
-                        </Link>
                         <Button
                           type="button"
                           variant="primary"

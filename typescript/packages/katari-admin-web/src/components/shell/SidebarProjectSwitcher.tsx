@@ -17,7 +17,7 @@ export function SidebarProjectSwitcher() {
   const navigate = useNavigate();
 
   const { data } = useQuery({
-    queryKey: ["projects"],
+    queryKey: ["projects", "sidebar"],
     queryFn: () => client.listProjects({ limit: 200 }),
     enabled: apiKey !== null,
   });

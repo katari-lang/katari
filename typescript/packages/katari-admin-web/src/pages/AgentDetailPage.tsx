@@ -132,7 +132,7 @@ export function AgentDetailPage() {
               <CardContent>
                 <div className="space-y-4">
                   <div className="space-y-1.5">
-                    <Label htmlFor="run-name">Name</Label>
+                    <Label htmlFor="run-name">Run name</Label>
                     <Input
                       id="run-name"
                       value={runName}
@@ -192,10 +192,7 @@ export function AgentDetailPage() {
                 </dl>
               </CardContent>
             </Card>
-            <ReturnsCard
-              returns={agent.returns}
-              className="lg:col-span-3"
-            />
+            <ReturnsCard returns={agent.returns} className="lg:col-span-3" />
           </motion.div>
         )}
       </PageContent>

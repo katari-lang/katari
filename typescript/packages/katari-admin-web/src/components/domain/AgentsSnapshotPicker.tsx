@@ -52,7 +52,7 @@ export function AgentsSnapshotPicker({
       className="inline-flex items-center gap-2  border border-border px-3 py-2 text-sm transition-colors hover:bg-muted hover:cursor-pointer"
     >
       <Camera className="size-3.5 text-muted-foreground" />
-      <span className="font-mono text-xs text-foreground">{label}</span>
+      <span className="text-xs text-foreground">{label}</span>
       {resolvedSnap !== undefined && (
         <span className="text-xs text-subtle-foreground">
           {relativeTime(resolvedSnap.createdAt)}

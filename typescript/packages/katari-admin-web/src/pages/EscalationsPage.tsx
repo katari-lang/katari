@@ -46,7 +46,7 @@ export function EscalationsPage() {
     hasNextPage,
     isFetchingNextPage,
   } = useInfiniteQuery({
-    queryKey: ["escalations", projectId, stateFilter],
+    queryKey: ["escalations", projectId, stateFilter, "infinite"],
     queryFn: ({ pageParam }) =>
       client.listEscalations({
         projectId: projectId as ProjectId,
@@ -140,13 +140,17 @@ export function EscalationsPage() {
                     {escalations.map((esc) => (
                       <TR
                         key={esc.id}
-                        className="cursor-pointer"
+                        className="cursor-pointer h-16"
                         onClick={() =>
-                          navigate(`/project/${projectId}/escalations/${esc.id}`)
+                          navigate(
+                            `/project/${projectId}/escalations/${esc.id}`,
+                          )
                         }
                       >
                         <TD>
-                          <Badge tone={stateTones[esc.state]}>{esc.state}</Badge>
+                          <Badge tone={stateTones[esc.state]}>
+                            {esc.state}
+                          </Badge>
                         </TD>
                         <TD>
                           <Link

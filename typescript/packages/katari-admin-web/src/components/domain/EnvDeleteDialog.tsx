@@ -31,12 +31,7 @@ export function EnvDeleteDialog({ open, onClose, target }: Props) {
   });
 
   return (
-    <Dialog
-      open={open}
-      onClose={onClose}
-      title="Delete env entry"
-      size="sm"
-    >
+    <Dialog open={open} onClose={onClose} title="Delete env entry" size="sm">
       <p className="text-sm text-foreground">
         Delete <code className="font-mono">{target?.key}</code>?
       </p>

@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useParams } from "react-router-dom";
 import { motion } from "framer-motion";
-import { ArrowLeft, Ban } from "lucide-react";
+import { ArrowLeft, ArrowRight, Ban } from "lucide-react";
 import toast from "react-hot-toast";
 import { useApiClient } from "@/contexts/ApiKeyContext";
 import { PageContent, PageHeader } from "@/components/ui/PageHeader";
@@ -72,9 +72,9 @@ export function RunDetailPage() {
   // would just return an empty tree.
   const treeQ = useQuery({
     queryKey: ["run-tree", runId],
-    queryFn: () =>
-      client.getRunTree(projectId as ProjectId, runId as RunId),
-    enabled: typeof projectId === "string" && typeof runId === "string" && isLive,
+    queryFn: () => client.getRunTree(projectId as ProjectId, runId as RunId),
+    enabled:
+      typeof projectId === "string" && typeof runId === "string" && isLive,
     refetchInterval: (query) => {
       const root = query.state.data?.tree.root;
       if (root === undefined) return POLL_MS;
@@ -95,7 +95,7 @@ export function RunDetailPage() {
               <span className="text-sm font-normal">Runs</span>
             </Link>
             <span className="text-subtle-foreground text-sm">/</span>
-            <span className="font-mono text-base text-foreground">
+            <span className="text-base text-foreground">
               {run?.name ?? runId}
             </span>
             {run !== undefined && <RunStatusBadge state={run.state} />}
@@ -126,96 +126,113 @@ export function RunDetailPage() {
             initial={{ opacity: 0, y: 4 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.2 }}
-            className="grid gap-4 lg:grid-cols-3"
+            className="flex flex-col gap-4"
           >
-            <Card className="lg:col-span-2">
-              <CardHeader>
-                <CardTitle>Arguments</CardTitle>
-              </CardHeader>
-              <CardContent>
-                <ValueViewer value={run.args} />
-              </CardContent>
-            </Card>
-            <Card>
-              <CardHeader>
-                <CardTitle>Metadata</CardTitle>
-              </CardHeader>
-              <CardContent>
-                <dl className="space-y-2 text-sm">
-                  <MetadataRow label="ID" value={<CopyableId value={run.id} />} />
-                  <MetadataRow
-                    label="Name"
-                    value={
-                      <span className="text-foreground">{run.name}</span>
-                    }
-                  />
-                  <MetadataRow
-                    label="Agent"
-                    value={
-                      <Link
-                        to={`/project/${projectId}/agents/${encodeURIComponent(
-                          run.qualifiedName,
-                        )}?snapshot=${run.snapshotId}`}
-                        className="font-mono text-xs text-foreground hover:underline"
-                      >
-                        {run.qualifiedName}
-                      </Link>
-                    }
-                  />
-                  <MetadataRow
-                    label="Snapshot"
-                    value={
-                      <Link
-                        to={`/project/${projectId}/agents?snapshot=${run.snapshotId}`}
-                        className="text-foreground hover:underline"
-                      >
-                        {snapshotMessage ?? "—"}
-                      </Link>
-                    }
-                  />
-                  <MetadataRow
-                    label="Started"
-                    value={formatDateTime(run.createdAt)}
-                  />
-                  <MetadataRow
-                    label="Updated"
-                    value={formatDateTime(run.updatedAt)}
-                  />
-                  {run.cancelReason !== null && (
-                    <MetadataRow
-                      label="Cancel reason"
-                      value={
-                        <span className="text-foreground">
-                          {run.cancelReason === "user"
-                            ? "user-initiated"
-                            : "child error"}
-                        </span>
-                      }
-                    />
-                  )}
-                </dl>
-              </CardContent>
-            </Card>
-            {isLive && (
-              <Card className="lg:col-span-3">
+            {/* Metadata + Arguments */}
+            <div className="grid gap-4 lg:grid-cols-3">
+              <Card className="lg:col-span-2">
                 <CardHeader>
-                  <CardTitle>Delegation tree</CardTitle>
+                  <CardTitle>Arguments</CardTitle>
                 </CardHeader>
                 <CardContent>
-                  {treeQ.data !== undefined ? (
-                    <DelegationTreeGraph root={treeQ.data.tree.root} />
-                  ) : treeQ.isLoading ? (
-                    <p className="text-sm text-subtle-foreground">Loading…</p>
-                  ) : (
-                    <p className="text-sm text-subtle-foreground">
-                      No live delegations.
-                    </p>
-                  )}
+                  <ValueViewer value={run.args} />
                 </CardContent>
               </Card>
+              <Card>
+                <CardHeader>
+                  <CardTitle>Metadata</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <dl className="space-y-2 text-sm">
+                    <MetadataRow
+                      label="ID"
+                      value={<CopyableId value={run.id} />}
+                    />
+                    <MetadataRow
+                      label="Name"
+                      value={
+                        <span className="text-foreground">{run.name}</span>
+                      }
+                    />
+                    <MetadataRow
+                      label="Agent"
+                      value={
+                        <Link
+                          to={`/project/${projectId}/agents/${encodeURIComponent(
+                            run.qualifiedName,
+                          )}?snapshot=${run.snapshotId}`}
+                          className="font-mono text-xs text-foreground hover:underline"
+                        >
+                          {run.qualifiedName}
+                        </Link>
+                      }
+                    />
+                    <MetadataRow
+                      label="Snapshot"
+                      value={
+                        <Link
+                          to={`/project/${projectId}/agents?snapshot=${run.snapshotId}`}
+                          className="text-foreground hover:underline"
+                        >
+                          {snapshotMessage ?? "—"}
+                        </Link>
+                      }
+                    />
+                    <MetadataRow
+                      label="Started"
+                      value={formatDateTime(run.createdAt)}
+                    />
+                    <MetadataRow
+                      label="Updated"
+                      value={formatDateTime(run.updatedAt)}
+                    />
+                    {run.cancelReason !== null && (
+                      <MetadataRow
+                        label="Cancel reason"
+                        value={
+                          <span className="text-foreground">
+                            {run.cancelReason === "user"
+                              ? "user-initiated"
+                              : "child error"}
+                          </span>
+                        }
+                      />
+                    )}
+                  </dl>
+                </CardContent>
+              </Card>
+            </div>
+
+            {/* Escalations link */}
+            <Link
+              to={`/project/${projectId}/escalations?snapshotId=${run.snapshotId}`}
+              className="group inline-flex items-center gap-1.5 text-sm text-subtle-foreground hover:text-foreground transition-colors"
+            >
+              View escalations for this snapshot
+              <ArrowRight className="size-3.5 transition-transform group-hover:translate-x-0.5" />
+            </Link>
+
+            {/* Delegation tree */}
+            {isLive && (
+              <div>
+                <h3 className="mb-2 text-sm font-medium text-foreground">
+                  Delegation tree
+                </h3>
+                {treeQ.data !== undefined ? (
+                  <DelegationTreeGraph root={treeQ.data.tree.root} />
+                ) : treeQ.isLoading ? (
+                  <p className="text-sm text-subtle-foreground">Loading…</p>
+                ) : (
+                  <p className="text-sm text-subtle-foreground">
+                    No live delegations.
+                  </p>
+                )}
+              </div>
             )}
+
+            {/* Result */}
             {!isLive && run.result !== undefined && (
-              <Card className="lg:col-span-3">
+              <Card>
                 <CardHeader>
                   <CardTitle>Result</CardTitle>
                 </CardHeader>
@@ -224,13 +241,15 @@ export function RunDetailPage() {
                 </CardContent>
               </Card>
             )}
+
+            {/* Error */}
             {run.errorMessage !== undefined && run.errorMessage !== "" && (
-              <Card className="lg:col-span-3 border-danger/30">
+              <Card className="border-danger/30">
                 <CardHeader>
                   <CardTitle className="text-danger">Error</CardTitle>
                 </CardHeader>
                 <CardContent>
-                  <pre className="overflow-auto  border border-danger/30 bg-danger/5 p-3 text-xs text-danger">
+                  <pre className="overflow-auto border border-danger/30 bg-danger/5 p-3 text-xs text-danger">
                     {run.errorMessage}
                   </pre>
                 </CardContent>
@@ -251,7 +270,10 @@ export function RunDetailPage() {
           <code className="font-mono">{run?.name ?? runId}</code>?
         </p>
         <DialogFooter>
-          <Button variant="secondary" onClick={() => setCancelDialogOpen(false)}>
+          <Button
+            variant="secondary"
+            onClick={() => setCancelDialogOpen(false)}
+          >
             Keep running
           </Button>
           <Button

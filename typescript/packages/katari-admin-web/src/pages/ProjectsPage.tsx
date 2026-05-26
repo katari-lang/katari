@@ -22,7 +22,7 @@ export function ProjectsPage() {
     hasNextPage,
     isFetchingNextPage,
   } = useInfiniteQuery({
-    queryKey: ["projects"],
+    queryKey: ["projects", "infinite"],
     queryFn: ({ pageParam }) =>
       client.listProjects({
         limit: PAGE_SIZE,

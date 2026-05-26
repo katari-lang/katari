@@ -21,7 +21,7 @@ export function ValueViewer({
   return (
     <pre
       className={cn(
-        "max-h-96 overflow-auto  border border-border bg-muted p-3 text-xs leading-relaxed font-mono",
+        "max-h-96 overflow-auto border border-border bg-muted p-3 text-xs leading-relaxed font-mono",
         className,
       )}
     >

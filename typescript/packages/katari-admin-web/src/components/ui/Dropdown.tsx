@@ -15,7 +15,12 @@ type DropdownProps = {
  * (focus trap, ARIA, keyboard navigation). API is kept compatible
  * with the previous hand-rolled implementation.
  */
-export function Dropdown({ trigger, children, align = "start", className }: DropdownProps) {
+export function Dropdown({
+  trigger,
+  children,
+  align = "start",
+  className,
+}: DropdownProps) {
   const [open, setOpen] = useState(false);
 
   return (
@@ -60,10 +65,9 @@ export function DropdownItem({
       }}
       className={cn(
         "flex w-full items-center gap-2 px-3 py-2 text-left text-sm outline-none transition-colors hover:cursor-pointer",
-        "data-[highlighted]:bg-muted",
         active === true
           ? "bg-accent text-accent-foreground"
-          : "text-foreground",
+          : "text-foreground data-highlighted:bg-muted",
         className,
       )}
     >
@@ -73,7 +77,9 @@ export function DropdownItem({
 }
 
 export function DropdownDivider() {
-  return <DropdownMenuPrimitive.Separator className="my-1 border-t border-border" />;
+  return (
+    <DropdownMenuPrimitive.Separator className="my-1 border-t border-border" />
+  );
 }
 
 export function DropdownLabel({ children }: { children: ReactNode }) {
