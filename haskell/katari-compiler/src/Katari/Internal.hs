@@ -1,15 +1,4 @@
--- | Helpers for compiler-invariant violations.
---
--- These produce 'K9999' 'Diagnostic' values that callers thread through
--- their existing error-collection mechanism (e.g. 'MonadError' /
--- @[Diagnostic]@ accumulator). No call site panics; if an invariant is
--- violated, downstream phases produce a partial result and the
--- diagnostic surfaces in 'CompileResult.diagnostics'.
---
--- This is the OSS Production-Ready replacement for the previous version
--- of this module, which called 'error' directly. Long-running embedders
--- (LSP / playground) can now recover from compiler bugs without
--- crashing the host process.
+-- | Helpers for compiler-invariant violations ('K9999' diagnostics).
 module Katari.Internal
   ( internalError,
     internalErrorNoSpan,

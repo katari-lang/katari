@@ -120,8 +120,8 @@ data RawLockedPackage = RawLockedPackage
   }
 
 -- | Codec for the @[lock]@ block only. @[packages.X]@ entries are
--- extracted from the raw 'Toml.TOML' AST by 'extractLockedPackages'
--- since tomland's @tableMap@ doesn't reliably decode nested sections.
+-- extracted via 'extractLockedPackages'.
+-- See 'Katari.Project.Toml' for details on the tomland workaround.
 rawLockfileCodec :: TomlCodec RawLockfile
 rawLockfileCodec =
   RawLockfile

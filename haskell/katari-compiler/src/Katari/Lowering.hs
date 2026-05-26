@@ -533,15 +533,6 @@ recordVarBlockId :: VariableId -> BlockId -> Lower ()
 recordVarBlockId variableId blockId =
   modify (\state -> state {lsTopLevelBlocks = Map.insert variableId blockId state.lsTopLevelBlocks})
 
--- Closure capture for local agents is handled by the runtime: a local
--- agent's body block runs with the parent scope visible (the runtime
--- consults a scope chain when resolving locals). Lowering therefore
--- preserves the outer 'localVars' Reader frame when entering a local
--- agent's body, and emits no per-block capture metadata. This is sound
--- because agent-side references to a state var read its current value
--- (state vars are only mutated inside @req@ handlers via @next@, which
--- a local agent cannot do without entering a different scope).
-
 -- | Run @action@ with the resolved 'VariableId' from a top-level callable
 -- declaration name. If the name didn't resolve (parser/identifier left an
 -- 'Nothing' marker), record a Lowering error and skip.

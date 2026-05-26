@@ -1,12 +1,6 @@
 -- | Phase-independent value types shared between the AST and the IR.
 --
--- 'Katari.Common' sits at the same layer as 'Katari.SourceSpan' / 'Katari.Id':
--- it is imported by both 'Katari.AST' and 'Katari.IR' and depends on neither.
--- Until this module existed, 'QualifiedName' and 'LiteralValue' had two
--- definitions each (one per layer), which made them noisy in @grep@ and
--- IDE completion. The IR's flavour wins for both: structured record fields
--- and JSON tagged-object encoding, which is what the runtime actually
--- consumes.
+-- Imported by both 'Katari.AST' and 'Katari.IR'; depends on neither.
 module Katari.Common
   ( -- * Qualified names
     QualifiedName (..),

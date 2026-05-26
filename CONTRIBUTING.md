@@ -13,9 +13,22 @@ stack test       # unit + property + golden tests
 For the runtime side:
 
 ```sh
-cd ts
-pnpm install     # pnpm v9 required
+cd typescript
+pnpm install     # pnpm v11 (pinned via packageManager in root package.json)
 pnpm -r run build
+```
+
+### Running tests
+
+```sh
+# Haskell
+stack test
+
+# TypeScript
+cd typescript && pnpm -r run test
+
+# End-to-end (requires a running runtime — see README.md)
+cd e2e && pnpm test
 ```
 
 ## Workflow

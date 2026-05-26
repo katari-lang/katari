@@ -121,7 +121,7 @@ resolveTarget opts = do
   targetDir <- case opts.optDir of
     Just dir -> do
       exists <- doesDirectoryExist dir
-      nonEmpty <- if exists then directoryHasEntries dir else pure False
+      nonEmpty <- if exists then hasKatariProject dir else pure False
       when nonEmpty $ do
         hPutStrLn stderr ("katari init: refusing to scaffold into non-empty directory '" <> dir <> "'")
         exitWith (ExitFailure 2)
@@ -130,10 +130,10 @@ resolveTarget opts = do
   let derivedName = takeFileName (dropTrailingPathSeparator targetDir)
   pure (targetDir, fromMaybe derivedName opts.optName)
 
-directoryHasEntries :: FilePath -> IO Bool
-directoryHasEntries path = do
-  -- We treat "has any file at all" as non-empty so that we don't clobber
-  -- an existing project. A future flag could relax this.
+-- | Check whether a directory already contains a Katari project
+-- (i.e. has @katari.toml@ or a @src/@ subdirectory).
+hasKatariProject :: FilePath -> IO Bool
+hasKatariProject path = do
   hasToml <- doesFileExist (path </> "katari.toml")
   hasSrc <- doesDirectoryExist (path </> "src")
   pure (hasToml || hasSrc)

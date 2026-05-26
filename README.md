@@ -40,6 +40,10 @@ stack build
 stack test
 
 # TypeScript (pnpm v11 — pinned via packageManager)
+# Either from root (npm scripts delegate to pnpm):
+npm run build:ts
+
+# Or directly:
 cd typescript
 pnpm install
 pnpm -r run build
@@ -128,6 +132,15 @@ The full registry lives in [`haskell/katari-compiler/CHANGELOG.md`](haskell/kata
 
 See [`examples/self-host/`](examples/self-host) for a `docker compose`
 quickstart for self-hosting.
+
+## Directory notes
+
+**`e2e/samples/`** — numbered sample projects (e.g. `01-hello`, `03-data-and-match`)
+that double as end-to-end test fixtures. Each sample is a self-contained Katari
+project exercising a specific language feature.
+
+**`scripts/`** — release tooling (version bumping, binary staging, npm publish
+bootstrap). See each script's header for usage.
 
 ## Licence
 

@@ -71,11 +71,7 @@ data SnapshotError
 
 -- ---------------------------------------------------------------------------
 -- Raw codec + post-parse validation
---
--- tomland's @tableMap@ silently drops entries whose inner codec fails
--- to decode (e.g. a [packages.X] table missing a required field). To
--- get a hard "this entry is malformed" error we read every inner field
--- as @Maybe@ and validate after the parse.
+-- See Katari.Project.Toml for details on the tomland workaround.
 -- ---------------------------------------------------------------------------
 
 data RawSnapshot = RawSnapshot
@@ -89,10 +85,8 @@ data RawSnapshotPackage = RawSnapshotPackage
     rawSha :: Maybe Text
   }
 
--- | Codec for the top-level scalars only. The @[packages.X]@ nested
--- tables are extracted from the raw 'Toml.TOML' AST by
--- 'extractPackages' because tomland's @tableMap@ does not reliably
--- decode nested sections.
+-- | Codec for the top-level scalars only. @[packages.X]@ nested
+-- tables are extracted via 'extractPackages'.
 rawSnapshotCodec :: TomlCodec RawSnapshot
 rawSnapshotCodec =
   RawSnapshot

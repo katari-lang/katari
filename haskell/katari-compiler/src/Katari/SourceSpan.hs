@@ -12,10 +12,8 @@ module Katari.SourceSpan where
 import Data.Aeson (FromJSON, ToJSON)
 import GHC.Generics (Generic)
 
--- | A point in a source file, 1-indexed by both line and column.
--- Columns count Unicode code points (not bytes, not UTF-16 code units),
--- so the LSP layer must transcode from UTF-16 offsets at the boundary.
--- Used to anchor diagnostic spans, hover queries, and reference lookups.
+-- | A point in a source file, 1-indexed. Columns count Unicode code
+-- points (not bytes, not UTF-16 code units).
 data Position = Position
   { line :: Int,
     column :: Int

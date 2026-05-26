@@ -193,11 +193,7 @@ data RawOverride = RawOverride
 -- ===========================================================================
 
 -- | Codec for everything EXCEPT [overrides.X] sub-tables.
---
--- tomland's @tableMap@ does not reliably decode nested
--- @[overrides.\<name>]@ sections (it sees the prefix entry but
--- doesn't drill into the leaf), so we read those manually via
--- 'extractOverrides' against the raw 'Toml.TOML' AST after parsing.
+-- See 'Katari.Project.Toml' for details on the tomland workaround.
 rawConfigCodec :: TomlCodec RawConfig
 rawConfigCodec =
   RawConfig
@@ -400,29 +396,44 @@ isValidPackageName name
 -- ===========================================================================
 
 interpolateEnv :: Text -> IO Text
-interpolateEnv input = Text.pack . reverse <$> go (Text.unpack input) []
+interpolateEnv input = go input mempty
   where
-    go :: String -> String -> IO String
-    go [] acc = pure acc
-    go ('\\' : '$' : '{' : rest) acc =
-      case spanName rest of
-        Just (name, '}' : after) ->
-          go after (reverse ("${" <> name <> "}") <> acc)
-        _ -> go rest ('{' : '$' : '\\' : acc)
-    go ('$' : '{' : rest) acc =
-      case spanName rest of
-        Just (name, '}' : after) -> do
-          val <- lookupEnv name
-          go after (reverse (fromMaybe "" val) <> acc)
-        _ -> go rest ('{' : '$' : acc)
-    go (c : rest) acc = go rest (c : acc)
+    go :: Text -> Text -> IO Text
+    go remaining acc
+      | Text.null remaining = pure acc
+      | otherwise =
+          let (before, after) = Text.breakOn "${" remaining
+           in if Text.null after
+                then pure (acc <> remaining)
+                else
+                  -- Check for escaped \${
+                  if not (Text.null before) && Text.last before == '\\'
+                    then case spanNameText (Text.drop 2 after) of
+                      Just (name, rest) ->
+                        go rest (acc <> Text.init before <> "${" <> name <> "}")
+                      Nothing ->
+                        go (Text.drop 2 after) (acc <> before)
+                    else case spanNameText (Text.drop 2 after) of
+                      Just (name, rest) -> do
+                        val <- lookupEnv (Text.unpack name)
+                        go rest (acc <> before <> Text.pack (fromMaybe "" val))
+                      Nothing ->
+                        go (Text.drop 2 after) (acc <> before <> "${")
 
-    spanName :: String -> Maybe (String, String)
-    spanName s = case span isVarChar s of
-      ([], _) -> Nothing
-      (name@(h : _), t)
-        | isAlphaOrUnder h -> Just (name, t)
-        | otherwise -> Nothing
+    -- | Try to consume @VARNAME}@ from the front of the text, returning
+    -- @(name, textAfterClosingBrace)@ on success.
+    spanNameText :: Text -> Maybe (Text, Text)
+    spanNameText text =
+      let (name, rest) = Text.span isVarChar text
+       in if Text.null name
+            then Nothing
+            else case Text.uncons name of
+              Just (h, _)
+                | isAlphaOrUnder h ->
+                    case Text.uncons rest of
+                      Just ('}', after) -> Just (name, after)
+                      _ -> Nothing
+              _ -> Nothing
 
     isVarChar c = isAlphaNum c || c == '_'
     isAlphaOrUnder c = isAlpha c || c == '_'

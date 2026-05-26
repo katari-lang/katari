@@ -1,17 +1,4 @@
--- | @katari apply@ — compile, bundle, upload.
---
--- Flow:
---
---   1. Locate the project + load its 'Project.ProjectConfig'
---      (to read @[api].url@ and the package name).
---   2. Run 'Compile.compile' on the assembled sources.
---   3. Spawn @katari-bundle@ to walk every package's @src/@ for
---      @ext-agent@ JS/TS siblings and produce a single ESM bundle.
---   4. @upsertProject@ + @uploadSnapshot@ via 'Katari.Api.Client'.
---
--- @katari-bundle@ is located via @$KATARI_BUNDLE_BIN@ first, then the
--- bare @katari-bundle@ on @PATH@. If the env var points at a @.js@
--- file we invoke it through @node@.
+-- | @katari apply@ — compile, bundle, and upload a snapshot.
 module Katari.Cli.Apply
   ( Options (..),
     optionsParser,

@@ -1,12 +1,4 @@
--- | Thin Haskell HTTP wrapper around the katari-api-server.
---
--- Mirrors the TypeScript SSoT at
--- @typescript/packages/katari-cli/src/services/api-client.ts@. Builds
--- on @http-client@ + @aeson@; HTTPS is handled by @http-client-tls@.
---
--- Errors are surfaced as 'ApiError'. The HTTP status is included so
--- callers can distinguish (404 → "not found") from (5xx → "server
--- problem") without parsing the message string.
+-- | HTTP client for the katari-api-server.
 module Katari.Api.Client
   ( ApiClient (..),
     ApiError (..),
