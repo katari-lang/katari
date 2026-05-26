@@ -3,7 +3,6 @@ import {
   ReactFlow,
   Background,
   Controls,
-  MiniMap,
   type Node,
   type Edge,
   type NodeProps,
@@ -146,11 +145,6 @@ export function DelegationTreeGraph({ root }: { root: DelegationTreeNode }) {
         <Controls
           showInteractive={false}
           className="!border-border !bg-background !shadow-none [&>button]:!border-border [&>button]:!bg-background [&>button]:!rounded-none"
-        />
-        <MiniMap
-          nodeColor="var(--color-border)"
-          maskColor="var(--color-background)"
-          className="!border-border !bg-background !rounded-none !shadow-none"
         />
       </ReactFlow>
     </div>

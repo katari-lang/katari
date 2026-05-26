@@ -6,7 +6,7 @@ import {
   useSearchParams,
 } from "react-router-dom";
 import { motion } from "framer-motion";
-import { ArrowLeft, Play, ChevronDown, ChevronRight } from "lucide-react";
+import { ArrowLeft, Play } from "lucide-react";
 import toast from "react-hot-toast";
 import { useState } from "react";
 import { useApiClient } from "@/contexts/ApiKeyContext";
@@ -225,30 +225,20 @@ function ReturnsCard({
   returns: unknown;
   className?: string;
 }) {
-  // Default-open: operators almost always want to see the response shape
-  // before invoking, so collapsing it adds a needless click.
-  const [open, setOpen] = useState(true);
   return (
     <Card className={className}>
       <CardHeader>
-        <button
-          type="button"
-          onClick={() => setOpen((o) => !o)}
-          className="flex items-center justify-between gap-2 text-left hover:cursor-pointer"
-        >
+        <div className="flex items-center justify-between">
           <CardTitle>Returns schema</CardTitle>
-          {open ? (
-            <ChevronDown className="size-4 text-muted-foreground" />
-          ) : (
-            <ChevronRight className="size-4 text-muted-foreground" />
-          )}
-        </button>
+          <CopyButton
+            text={JSON.stringify(returns, null, 2)}
+            label="Copied schema"
+          />
+        </div>
       </CardHeader>
-      {open && (
-        <CardContent>
-          <SchemaViewer schema={returns} />
-        </CardContent>
-      )}
+      <CardContent>
+        <SchemaViewer schema={returns} />
+      </CardContent>
     </Card>
   );
 }

@@ -10,6 +10,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Dialog, DialogFooter } from "@/components/ui/Dialog";
 import { CopyableId } from "@/components/ui/CopyableId";
+import { CopyButton } from "@/components/ui/CopyButton";
 import { SpinnerOverlay } from "@/components/ui/Spinner";
 import { MetadataRow } from "@/components/ui/MetadataRow";
 import { Badge } from "@/components/ui/Badge";
@@ -156,10 +157,16 @@ export function RunDetailPage() {
             <div className="grid gap-4 lg:grid-cols-3">
               <Card className="lg:col-span-2">
                 <CardHeader>
-                  <CardTitle>Arguments</CardTitle>
+                  <div className="flex items-center justify-between">
+                    <CardTitle>Arguments</CardTitle>
+                    <CopyButton
+                      text={JSON.stringify(run.args, null, 2)}
+                      label="Copied JSON"
+                    />
+                  </div>
                 </CardHeader>
                 <CardContent>
-                  <ValueViewer value={run.args} />
+                  <ValueViewer value={run.args} projectId={projectId} />
                 </CardContent>
               </Card>
               <Card>
@@ -234,106 +241,106 @@ export function RunDetailPage() {
               </Card>
             </div>
 
-            {/* Escalations */}
-            <div>
-              <div className="mb-2 flex items-center gap-2">
-                <h3 className="text-sm font-medium text-foreground">
-                  Escalations
-                </h3>
-                <Badge tone="neutral">{runEscalations.length}</Badge>
-              </div>
-              {escalationsQ.isLoading ? (
-                <p className="text-sm text-subtle-foreground">Loading...</p>
-              ) : runEscalations.length === 0 ? (
-                <p className="text-sm text-subtle-foreground">
-                  No escalations.
-                </p>
-              ) : (
-                <Table>
-                  <THead>
-                    <TR>
-                      <TH>State</TH>
-                      <TH>Agent</TH>
-                      <TH>Created</TH>
-                      <TH>Action</TH>
-                    </TR>
-                  </THead>
-                  <TBody>
-                    {runEscalations.map((esc) => (
-                      <TR
-                        key={esc.id}
-                        className="cursor-pointer h-16"
-                        onClick={() =>
-                          navigate(
-                            `/project/${projectId}/escalations/${esc.id}`,
-                          )
-                        }
-                      >
-                        <TD>
-                          <Badge tone={escalationTones[esc.state]}>
-                            {esc.state}
-                          </Badge>
-                        </TD>
-                        <TD>
-                          <Link
-                            to={`/project/${projectId}/escalations/${esc.id}`}
-                            className="font-mono text-xs text-foreground hover:underline"
-                            onClick={(e) => e.stopPropagation()}
-                          >
-                            {esc.agentDefId}
-                          </Link>
-                        </TD>
-                        <TD
-                          className="text-xs text-muted-foreground"
-                          title={formatDateTime(esc.createdAt)}
-                        >
-                          {relativeTime(esc.createdAt)}
-                        </TD>
-                        <TD>
-                          <Link
-                            to={`/project/${projectId}/escalations/${esc.id}`}
-                            className="group inline-flex items-center gap-1 text-xs text-subtle-foreground hover:text-foreground transition-colors"
-                          >
-                            View
-                            <ArrowRight className="size-3 transition-transform group-hover:translate-x-0.5" />
-                          </Link>
-                        </TD>
-                      </TR>
-                    ))}
-                  </TBody>
-                </Table>
-              )}
-            </div>
-
-            {/* Delegation tree */}
-            {isLive && (
+            {/* Escalations + Result/Tree side by side */}
+            <div className="grid gap-4 lg:grid-cols-[1fr_2fr]">
+              {/* Escalations (narrow column) */}
               <div>
-                <h3 className="mb-2 text-sm font-medium text-foreground">
-                  Delegation tree
-                </h3>
-                {treeQ.data !== undefined ? (
-                  <DelegationTreeGraph root={treeQ.data.tree.root} />
-                ) : treeQ.isLoading ? (
-                  <p className="text-sm text-subtle-foreground">Loading…</p>
-                ) : (
+                <div className="mb-2 flex items-center gap-2">
+                  <h3 className="text-sm font-medium text-foreground">
+                    Escalations
+                  </h3>
+                  <Badge tone="neutral">{runEscalations.length}</Badge>
+                </div>
+                {escalationsQ.isLoading ? (
+                  <p className="text-sm text-subtle-foreground">Loading...</p>
+                ) : runEscalations.length === 0 ? (
                   <p className="text-sm text-subtle-foreground">
-                    No live delegations.
+                    No escalations.
                   </p>
+                ) : (
+                  <Table>
+                    <THead>
+                      <TR>
+                        <TH>State</TH>
+                        <TH>Agent</TH>
+                        <TH>Created</TH>
+                      </TR>
+                    </THead>
+                    <TBody>
+                      {runEscalations.map((esc) => (
+                        <TR
+                          key={esc.id}
+                          className="cursor-pointer h-16"
+                          onClick={() =>
+                            navigate(
+                              `/project/${projectId}/escalations/${esc.id}`,
+                            )
+                          }
+                        >
+                          <TD>
+                            <Badge tone={escalationTones[esc.state]}>
+                              {esc.state}
+                            </Badge>
+                          </TD>
+                          <TD>
+                            <Link
+                              to={`/project/${projectId}/escalations/${esc.id}`}
+                              className="font-mono text-xs text-foreground hover:underline"
+                              onClick={(e) => e.stopPropagation()}
+                            >
+                              {esc.agentDefId}
+                            </Link>
+                          </TD>
+                          <TD
+                            className="text-xs text-muted-foreground"
+                            title={formatDateTime(esc.createdAt)}
+                          >
+                            {relativeTime(esc.createdAt)}
+                          </TD>
+                        </TR>
+                      ))}
+                    </TBody>
+                  </Table>
                 )}
               </div>
-            )}
 
-            {/* Result */}
-            {!isLive && run.result !== undefined && (
-              <Card>
-                <CardHeader>
-                  <CardTitle>Result</CardTitle>
-                </CardHeader>
-                <CardContent>
-                  <ValueViewer value={run.result} />
-                </CardContent>
-              </Card>
-            )}
+              {/* Delegation tree / Result (wide column) */}
+              <div className="flex flex-col gap-4">
+                {isLive && (
+                  <div>
+                    <h3 className="mb-2 text-sm font-medium text-foreground">
+                      Delegation tree
+                    </h3>
+                    {treeQ.data !== undefined ? (
+                      <DelegationTreeGraph root={treeQ.data.tree.root} />
+                    ) : treeQ.isLoading ? (
+                      <p className="text-sm text-subtle-foreground">Loading...</p>
+                    ) : (
+                      <p className="text-sm text-subtle-foreground">
+                        No live delegations.
+                      </p>
+                    )}
+                  </div>
+                )}
+
+                {!isLive && run.result !== undefined && (
+                  <Card>
+                    <CardHeader>
+                      <div className="flex items-center justify-between">
+                        <CardTitle>Result</CardTitle>
+                        <CopyButton
+                          text={JSON.stringify(run.result, null, 2)}
+                          label="Copied JSON"
+                        />
+                      </div>
+                    </CardHeader>
+                    <CardContent>
+                      <ValueViewer value={run.result} projectId={projectId} />
+                    </CardContent>
+                  </Card>
+                )}
+              </div>
+            </div>
 
             {/* Error */}
             {run.errorMessage !== undefined && run.errorMessage !== "" && (

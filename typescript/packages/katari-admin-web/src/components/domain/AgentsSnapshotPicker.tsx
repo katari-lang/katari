@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { Camera, Check, History } from "lucide-react";
+import { cn } from "@/lib/cn";
 import { useApiClient } from "@/contexts/ApiKeyContext";
 import {
   Dropdown,
@@ -101,10 +102,13 @@ export function AgentsSnapshotPicker({
                         <CopyableId
                           value={s.id}
                           display={shortId(s.id)}
-                          className="text-subtle-foreground"
+                          className={s.id === selected ? "text-foreground" : "text-subtle-foreground"}
                         />
                         <span
-                          className="text-xs opacity-70"
+                          className={cn(
+                            "text-xs",
+                            s.id === selected ? "text-foreground" : "opacity-70",
+                          )}
                           title={formatDateTime(s.createdAt)}
                         >
                           {relativeTime(s.createdAt)}

@@ -1,5 +1,4 @@
 import { cn } from "@/lib/cn";
-import { CopyButton } from "@/components/ui/CopyButton";
 
 type Schema = Record<string, unknown>;
 
@@ -33,12 +32,6 @@ export function SchemaViewer({
 
   return (
     <div className={cn("relative", className)}>
-      <div className="absolute top-0 right-0">
-        <CopyButton
-          text={JSON.stringify(schema, null, 2)}
-          label="Copied schema"
-        />
-      </div>
       <SchemaNode schema={schemaObj} />
     </div>
   );
@@ -48,7 +41,7 @@ function TypeBadge({ children, className }: { children: React.ReactNode; classNa
   return (
     <span
       className={cn(
-        "border border-border px-1.5 py-0.5 text-xs font-mono",
+        "text-xs font-mono text-muted-foreground",
         className,
       )}
     >
@@ -78,7 +71,7 @@ function SchemaNode({ schema }: { schema: Schema }) {
   if (isNeverSchema(schema)) {
     return (
       <div>
-        <TypeBadge className="border-warning/40 text-warning">never</TypeBadge>
+        <TypeBadge className="text-warning">never</TypeBadge>
         {description !== null && <Description text={description} />}
       </div>
     );
@@ -93,12 +86,14 @@ function SchemaNode({ schema }: { schema: Schema }) {
       <div>
         <span className="text-xs font-medium text-muted-foreground">one of</span>
         {description !== null && <Description text={description} />}
-        <div className="space-y-2 mt-2">
-          {branches.map((branch, index) => (
-            <div key={index} className="border-l-2 border-border pl-3">
-              <SchemaNode schema={branch} />
-            </div>
-          ))}
+        <div className="border-l-2 border-border mt-2">
+          <div className="space-y-2 pl-3">
+            {branches.map((branch, index) => (
+              <div key={index}>
+                <SchemaNode schema={branch} />
+              </div>
+            ))}
+          </div>
         </div>
       </div>
     );
@@ -132,7 +127,7 @@ function SchemaNode({ schema }: { schema: Schema }) {
 
   const type = singleType(schema);
 
-  // object
+  // object — check for $constructor const pattern
   if (type === "object") {
     const properties = typeof schema.properties === "object" && schema.properties !== null
       ? schema.properties as Record<string, Schema>
@@ -141,27 +136,41 @@ function SchemaNode({ schema }: { schema: Schema }) {
       Array.isArray(schema.required) ? schema.required as string[] : [],
     );
 
+    // Detect $constructor with const value
+    const constructorSchema = properties?.$constructor;
+    const constructorName =
+      constructorSchema !== undefined && constructorSchema.const !== undefined && typeof constructorSchema.const === "string"
+        ? constructorSchema.const
+        : null;
+
+    const typeLabel = constructorName ?? "object";
+    const displayProperties = properties !== null
+      ? Object.entries(properties).filter(([key]) => constructorName !== null ? key !== "$constructor" : true)
+      : [];
+
     return (
       <div>
-        <TypeBadge>object</TypeBadge>
+        <TypeBadge>{typeLabel}</TypeBadge>
         {description !== null && <Description text={description} />}
-        {properties !== null && Object.keys(properties).length > 0 && (
-          <div className="space-y-2 mt-2">
-            {Object.entries(properties).map(([key, propSchema]) => (
-              <div key={key} className="border-l-2 border-border pl-3">
-                <div className="flex items-baseline gap-1.5">
-                  <span className="text-sm font-medium text-foreground">{key}</span>
-                  {requiredSet.has(key) && <RequiredBadge />}
+        {displayProperties.length > 0 && (
+          <div className="border-l-2 border-border mt-2">
+            <div className="space-y-2 pl-3">
+              {displayProperties.map(([key, propSchema]) => (
+                <div key={key}>
+                  <div className="flex items-baseline gap-1.5">
+                    <span className="text-sm font-medium text-foreground">{key}</span>
+                    {requiredSet.has(key) && <RequiredBadge />}
+                  </div>
+                  <div className="mt-1">
+                    <SchemaNode schema={propSchema} />
+                  </div>
                 </div>
-                <div className="mt-1">
-                  <SchemaNode schema={propSchema} />
-                </div>
-              </div>
-            ))}
+              ))}
+            </div>
           </div>
         )}
-        {(properties === null || Object.keys(properties).length === 0) && (
-          <span className="text-xs font-mono text-subtle-foreground ml-1.5">{"{}"}</span>
+        {displayProperties.length === 0 && (
+          <span className="text-xs italic text-subtle-foreground ml-1.5">Empty object</span>
         )}
       </div>
     );
@@ -181,17 +190,19 @@ function SchemaNode({ schema }: { schema: Schema }) {
         <TypeBadge>array</TypeBadge>
         {description !== null && <Description text={description} />}
         {prefixItems !== null && prefixItems.length > 0 && (
-          <div className="space-y-2 mt-2">
-            {prefixItems.map((itemSchema, index) => (
-              <div key={index} className="border-l-2 border-border pl-3">
-                <span className="inline-flex items-center px-1.5 py-0.5 text-xs font-mono text-muted-foreground bg-muted mb-1">
-                  {index}
-                </span>
-                <div className="mt-1">
-                  <SchemaNode schema={itemSchema} />
+          <div className="border-l-2 border-border mt-2">
+            <div className="space-y-2 pl-3">
+              {prefixItems.map((itemSchema, index) => (
+                <div key={index}>
+                  <span className="inline-flex items-center px-1.5 py-0.5 text-xs font-mono text-muted-foreground bg-muted mb-1">
+                    {index}
+                  </span>
+                  <div className="mt-1">
+                    <SchemaNode schema={itemSchema} />
+                  </div>
                 </div>
-              </div>
-            ))}
+              ))}
+            </div>
           </div>
         )}
         {items !== null && prefixItems === null && (

@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
+import { Link } from "react-router-dom";
+import { Lock } from "lucide-react";
 import { cn } from "@/lib/cn";
-import { CopyButton } from "@/components/ui/CopyButton";
 
 /**
  * Structured read-only viewer for JSON values. Renders a SchemaForm-like
@@ -10,9 +11,12 @@ import { CopyButton } from "@/components/ui/CopyButton";
 export function ValueViewer({
   value,
   className,
+  projectId,
 }: {
   value: unknown;
   className?: string;
+  /** When provided, $callable qualified names become links to the agent page. */
+  projectId?: string;
 }) {
   if (value === undefined) {
     return <span className="text-subtle-foreground italic">undefined</span>;
@@ -20,18 +24,18 @@ export function ValueViewer({
 
   return (
     <div className={cn("relative", className)}>
-      <div className="absolute top-0 right-0">
-        <CopyButton
-          text={JSON.stringify(value, null, 2)}
-          label="Copied JSON"
-        />
-      </div>
-      <ValueNode value={value} />
+      <ValueNode value={value} projectId={projectId} />
     </div>
   );
 }
 
-function ValueNode({ value }: { value: unknown }) {
+function ValueNode({
+  value,
+  projectId,
+}: {
+  value: unknown;
+  projectId?: string;
+}) {
   if (value === null) {
     return <span className="text-xs font-mono italic text-subtle-foreground">null</span>;
   }
@@ -66,7 +70,7 @@ function ValueNode({ value }: { value: unknown }) {
   if (Array.isArray(value)) {
     if (value.length === 0) {
       return (
-        <span className="text-xs font-mono text-subtle-foreground">[]</span>
+        <span className="text-xs italic text-subtle-foreground">Empty array</span>
       );
     }
     return (
@@ -77,7 +81,7 @@ function ValueNode({ value }: { value: unknown }) {
               {index}
             </span>
             <div className="mt-1">
-              <ValueNode value={item} />
+              <ValueNode value={item} projectId={projectId} />
             </div>
           </div>
         ))}
@@ -86,22 +90,74 @@ function ValueNode({ value }: { value: unknown }) {
   }
 
   if (typeof value === "object") {
-    const entries = Object.entries(value as Record<string, unknown>);
+    const record = value as Record<string, unknown>;
+    const entries = Object.entries(record);
+
     if (entries.length === 0) {
       return (
-        <span className="text-xs font-mono text-subtle-foreground">{"{}"}</span>
+        <span className="text-xs italic text-subtle-foreground">Empty object</span>
       );
     }
+
+    // $secret handling: show a lock badge in danger color
+    if ("$secret" in record) {
+      return (
+        <span
+          className="inline-flex items-center gap-1 bg-danger/15 px-1.5 py-0.5 text-xs font-mono text-danger"
+          title="This value carries the secret type."
+        >
+          <Lock className="size-3" />
+          secret
+        </span>
+      );
+    }
+
+    // $constructor handling: show constructor name as type label,
+    // filter $constructor from properties list
+    const constructorName =
+      typeof record.$constructor === "string" ? record.$constructor : null;
+    const displayEntries = constructorName !== null
+      ? entries.filter(([key]) => key !== "$constructor")
+      : entries;
+
+    // $callable handling: render as link if it looks like a qualified name
+    const callableName =
+      typeof record.$callable === "string" ? record.$callable : null;
+
     return (
       <div className="space-y-2">
-        {entries.map(([key, val]) => (
-          <div key={key} className="border-l-2 border-border pl-3">
-            <span className="text-sm font-medium text-foreground">{key}</span>
+        {constructorName !== null && (
+          <span className="text-xs font-mono font-medium text-muted-foreground">
+            {constructorName}
+          </span>
+        )}
+        {callableName !== null && (
+          <div className="border-l-2 border-border pl-3">
+            <span className="text-sm font-medium text-foreground">$callable</span>
             <div className="mt-1">
-              <ValueNode value={val} />
+              {callableName.includes(".") && projectId !== undefined ? (
+                <Link
+                  to={`/project/${projectId}/agents/${encodeURIComponent(callableName)}`}
+                  className="text-xs font-mono text-foreground hover:underline"
+                >
+                  {callableName}
+                </Link>
+              ) : (
+                <span className="text-xs font-mono text-foreground">{callableName}</span>
+              )}
             </div>
           </div>
-        ))}
+        )}
+        {displayEntries
+          .filter(([key]) => key !== "$callable")
+          .map(([key, val]) => (
+            <div key={key} className="border-l-2 border-border pl-3">
+              <span className="text-sm font-medium text-foreground">{key}</span>
+              <div className="mt-1">
+                <ValueNode value={val} projectId={projectId} />
+              </div>
+            </div>
+          ))}
       </div>
     );
   }

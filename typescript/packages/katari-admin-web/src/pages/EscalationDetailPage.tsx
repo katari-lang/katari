@@ -312,7 +312,7 @@ export function EscalationDetailPage() {
                 <CardTitle>Arguments</CardTitle>
               </CardHeader>
               <CardContent>
-                <ValueViewer value={escalation.args} />
+                <ValueViewer value={escalation.args} projectId={projectId} />
               </CardContent>
             </Card>
             {escalation.value !== undefined && (
@@ -321,7 +321,7 @@ export function EscalationDetailPage() {
                   <CardTitle>Previous answer</CardTitle>
                 </CardHeader>
                 <CardContent>
-                  <ValueViewer value={escalation.value} />
+                  <ValueViewer value={escalation.value} projectId={projectId} />
                 </CardContent>
               </Card>
             )}
