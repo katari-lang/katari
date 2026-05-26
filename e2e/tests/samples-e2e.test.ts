@@ -305,4 +305,25 @@ describe("samples/ end-to-end (apply → run → verify)", () => {
       );
     },
   );
+
+  itE2E(
+    "19-record-literal: { name = ..., age = ... } + record_set + record_size returns 3",
+    async () => {
+      const result = await applyAndRun("record-literal", "19-record-literal");
+      expect(result).toBe(3);
+    },
+  );
+
+  itE2E(
+    "20-pattern-narrowing: integer/string/boolean/record type guards + record pattern narrow `unknown`",
+    async () => {
+      const result = await applyAndRun(
+        "pattern-narrowing",
+        "20-pattern-narrowing",
+      );
+      expect(result).toBe(
+        "int:42 | str:hello | bool:true | user:alice | other",
+      );
+    },
+  );
 });

@@ -1,0 +1,19 @@
+@"Demonstrates runtime type-guard patterns (integer(x), string(x), ...) and record patterns ({ label = pat, ... }) inside match arms."
+agent describe(value: unknown) -> string {
+  match (value) {
+    case integer(n) => { f"int:${to_string(value = n)}" }
+    case string(s) => { f"str:${s}" }
+    case boolean(b) => { f"bool:${to_string(value = b)}" }
+    case record({ name = string(n) }) => { f"user:${n}" }
+    case _ => { "other" }
+  }
+}
+
+agent main() -> string {
+  let a = describe(value = 42)
+  let b = describe(value = "hello")
+  let c = describe(value = true)
+  let d = describe(value = { name = "alice", age = 30 })
+  let e = describe(value = null)
+  f"${a} | ${b} | ${c} | ${d} | ${e}"
+}

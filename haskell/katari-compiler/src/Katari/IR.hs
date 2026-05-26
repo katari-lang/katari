@@ -701,7 +701,8 @@ data MatchPattern where
 
 -- | Runtime-checkable type tag used by 'MatchPatternTypeGuard'. Mirrors
 -- 'AST.TypePatternTag' (kept as a separate type so the IR is independent
--- of the AST module).
+-- of the AST module). Encoded as a bare camelCase string via 'enumOptions'
+-- (every constructor is nullary).
 data TypePatternTag where
   TypePatternTagInteger :: TypePatternTag
   TypePatternTagNumber :: TypePatternTag
@@ -712,10 +713,10 @@ data TypePatternTag where
   deriving (Eq, Show, Generic)
 
 instance ToJSON TypePatternTag where
-  toJSON = genericToJSON sumOptions
+  toJSON = genericToJSON enumOptions
 
 instance FromJSON TypePatternTag where
-  parseJSON = genericParseJSON sumOptions
+  parseJSON = genericParseJSON enumOptions
 
 instance ToJSON MatchPattern where
   toJSON = genericToJSON sumOptions

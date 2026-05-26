@@ -245,15 +245,15 @@ export type MatchPattern =
       body: [string, MatchPattern][];
     };
 
-// Runtime-checkable type tag. JSON tag follows the same lowerHead
-// convention as the rest of the IR (sumOptions in Haskell).
+// Runtime-checkable type tag. Encoded as a bare camelCase string on the
+// wire (Haskell `enumOptions` — same convention as `ExitKind`).
 export type TypePatternTag =
-  | { kind: "typePatternTagInteger" }
-  | { kind: "typePatternTagNumber" }
-  | { kind: "typePatternTagString" }
-  | { kind: "typePatternTagBoolean" }
-  | { kind: "typePatternTagAgent" }
-  | { kind: "typePatternTagRecord" };
+  | "typePatternTagInteger"
+  | "typePatternTagNumber"
+  | "typePatternTagString"
+  | "typePatternTagBoolean"
+  | "typePatternTagAgent"
+  | "typePatternTagRecord";
 
 // ─── MatchArm (irOptions → flat record) ──────────────────────────────────────
 

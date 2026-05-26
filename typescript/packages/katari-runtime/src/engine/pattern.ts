@@ -74,20 +74,21 @@ function tryMatchInto(
 // Returns true when `value`'s runtime kind matches the type-guard `tag`.
 // `integer` requires the underlying number to be integral (Number.isInteger);
 // `number` accepts any number value. The `agent` tag accepts closure /
-// agent-ref values (both `closure` and `agent` runtime kinds).
+// agent-ref values (both `closure` and `agentLiteral` runtime kinds).
 function matchesTypeTag(tag: TypePatternTag, value: Value): boolean {
   return match(tag)
-    .with({ kind: "typePatternTagInteger" }, () =>
-      value.kind === "number" && Number.isInteger(value.value),
-    )
-    .with({ kind: "typePatternTagNumber" }, () => value.kind === "number")
-    .with({ kind: "typePatternTagString" }, () => value.kind === "string")
-    .with({ kind: "typePatternTagBoolean" }, () => value.kind === "boolean")
     .with(
-      { kind: "typePatternTagAgent" },
+      "typePatternTagInteger",
+      () => value.kind === "number" && Number.isInteger(value.value),
+    )
+    .with("typePatternTagNumber", () => value.kind === "number")
+    .with("typePatternTagString", () => value.kind === "string")
+    .with("typePatternTagBoolean", () => value.kind === "boolean")
+    .with(
+      "typePatternTagAgent",
       () => value.kind === "closure" || value.kind === "agentLiteral",
     )
-    .with({ kind: "typePatternTagRecord" }, () => value.kind === "record")
+    .with("typePatternTagRecord", () => value.kind === "record")
     .exhaustive();
 }
 
