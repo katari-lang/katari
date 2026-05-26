@@ -10,7 +10,7 @@ import {
   RunIdSchema,
 } from "./middleware/validation.js";
 import {
-  DelegationTreeService,
+  type DelegationTreeService,
   RunNotFound,
 } from "../services/delegation-tree-service.js";
 

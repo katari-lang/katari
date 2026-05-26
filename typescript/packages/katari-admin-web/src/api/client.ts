@@ -52,7 +52,7 @@ async function request<T>(
     headers,
     body: body === undefined ? undefined : JSON.stringify(body),
   });
-  let parsed: unknown = undefined;
+  let parsed: unknown;
   const contentType = res.headers.get("content-type") ?? "";
   if (contentType.includes("application/json")) {
     parsed = await res.json().catch(() => undefined);
@@ -76,36 +76,20 @@ export function createApiClient(config: ApiClientConfig) {
 
     // Projects
     listProjects: (params?: { limit?: number; offset?: number }) =>
-      request<{ projects: Project[] }>(
-        config,
-        "GET",
-        withQuery("/project", params),
-      ),
-    getProject: (id: ProjectId) =>
-      request<{ project: Project }>(config, "GET", `/project/${id}`),
+      request<{ projects: Project[] }>(config, "GET", withQuery("/project", params)),
+    getProject: (id: ProjectId) => request<{ project: Project }>(config, "GET", `/project/${id}`),
     getProjectByName: (name: string) =>
-      request<{ project: Project }>(
-        config,
-        "GET",
-        `/project/by-name/${encodeURIComponent(name)}`,
-      ),
+      request<{ project: Project }>(config, "GET", `/project/by-name/${encodeURIComponent(name)}`),
 
     // Snapshots (mounted under /project/:projectId/snapshot)
-    listSnapshots: (
-      projectId: ProjectId,
-      params?: { limit?: number; offset?: number },
-    ) =>
+    listSnapshots: (projectId: ProjectId, params?: { limit?: number; offset?: number }) =>
       request<{ snapshots: SnapshotSummary[] }>(
         config,
         "GET",
         withQuery(`/project/${projectId}/snapshot`, params),
       ),
     getSnapshotLatest: (projectId: ProjectId) =>
-      request<{ snapshot: Snapshot }>(
-        config,
-        "GET",
-        `/project/${projectId}/snapshot/latest`,
-      ),
+      request<{ snapshot: Snapshot }>(config, "GET", `/project/${projectId}/snapshot/latest`),
     getSnapshot: (projectId: ProjectId, snapshotId: SnapshotId) =>
       request<{ snapshot: Snapshot }>(
         config,
@@ -121,10 +105,7 @@ export function createApiClient(config: ApiClientConfig) {
 
     // Agents (snapshot-scoped). `snapshotId === "latest"` is a
     // server-side alias for the project's most-recent snapshot.
-    listAgents: (params: {
-      projectId: ProjectId;
-      snapshotId?: SnapshotId | "latest";
-    }) =>
+    listAgents: (params: { projectId: ProjectId; snapshotId?: SnapshotId | "latest" }) =>
       request<{ agents: AgentWire[]; snapshotId: SnapshotId }>(
         config,
         "GET",
@@ -160,18 +141,10 @@ export function createApiClient(config: ApiClientConfig) {
         }),
       ),
     getRun: (projectId: ProjectId, id: RunId) =>
-      request<{ run: RunRowWire }>(
-        config,
-        "GET",
-        `/project/${projectId}/run/${id}`,
-      ),
+      request<{ run: RunRowWire }>(config, "GET", `/project/${projectId}/run/${id}`),
     /** Live delegation tree rooted at `runId`. Polled by the run detail page. */
     getRunTree: (projectId: ProjectId, runId: RunId) =>
-      request<{ tree: DelegationTree }>(
-        config,
-        "GET",
-        `/project/${projectId}/run/${runId}/tree`,
-      ),
+      request<{ tree: DelegationTree }>(config, "GET", `/project/${projectId}/run/${runId}/tree`),
     startRun: (input: {
       projectId: ProjectId;
       snapshotId?: SnapshotId;
@@ -179,23 +152,14 @@ export function createApiClient(config: ApiClientConfig) {
       name?: string | null;
       args: Record<string, RawValue>;
     }) =>
-      request<{ runId: RunId }>(
-        config,
-        "POST",
-        `/project/${input.projectId}/run`,
-        {
-          snapshotId: input.snapshotId,
-          qualifiedName: input.qualifiedName,
-          name: input.name ?? null,
-          args: input.args,
-        },
-      ),
+      request<{ runId: RunId }>(config, "POST", `/project/${input.projectId}/run`, {
+        snapshotId: input.snapshotId,
+        qualifiedName: input.qualifiedName,
+        name: input.name ?? null,
+        args: input.args,
+      }),
     cancelRun: (projectId: ProjectId, id: RunId) =>
-      request<{ run: RunRowWire }>(
-        config,
-        "POST",
-        `/project/${projectId}/run/${id}/cancel`,
-      ),
+      request<{ run: RunRowWire }>(config, "POST", `/project/${projectId}/run/${id}/cancel`),
 
     // Escalations (project-scoped).
     listEscalations: (params: {
@@ -221,30 +185,18 @@ export function createApiClient(config: ApiClientConfig) {
         "GET",
         `/project/${projectId}/escalation/${id}`,
       ),
-    answerEscalation: (
-      projectId: ProjectId,
-      id: EscalationId,
-      value: RawValue,
-    ) =>
-      request<{ ok: boolean }>(
-        config,
-        "POST",
-        `/project/${projectId}/escalation/${id}/ack`,
-        { value },
-      ),
+    answerEscalation: (projectId: ProjectId, id: EscalationId, value: RawValue) =>
+      request<{ ok: boolean }>(config, "POST", `/project/${projectId}/escalation/${id}/ack`, {
+        value,
+      }),
 
     // Env
     listEnv: () => request<{ entries: EnvEntry[] }>(config, "GET", "/env"),
-    getEnv: (key: string) =>
-      request<EnvEntry>(config, "GET", `/env/${encodeURIComponent(key)}`),
+    getEnv: (key: string) => request<EnvEntry>(config, "GET", `/env/${encodeURIComponent(key)}`),
     upsertEnv: (entry: { key: string; value: string; isSecret: boolean }) =>
       request<{ ok: boolean }>(config, "PUT", "/env", entry),
     deleteEnv: (key: string) =>
-      request<{ ok: boolean }>(
-        config,
-        "DELETE",
-        `/env/${encodeURIComponent(key)}`,
-      ),
+      request<{ ok: boolean }>(config, "DELETE", `/env/${encodeURIComponent(key)}`),
   };
 }
 

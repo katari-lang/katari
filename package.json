@@ -16,12 +16,16 @@
     "clean:ts": "pnpm -r exec -- rm -rf dist",
     "fmt:hs": "find haskell -name '*.hs' -not -path '*/.stack-work/*' -print0 | xargs -0 -r stack exec --package ormolu -- ormolu --mode inplace",
     "lint:hs": "hlint haskell",
+    "fmt:ts": "pnpm biome format --write .",
+    "lint:ts": "pnpm biome lint .",
+    "check:ts": "pnpm biome ci .",
     "watch:hs": "stack build --file-watch",
     "cli": "stack run katari --",
     "lsp": "stack run katari-lsp",
     "dev": "docker compose up -d --wait db && concurrently --kill-others-on-fail --names api,web --prefix-colors magenta,green \"pnpm --filter @katari-lang/api-server dev\" \"pnpm --filter @katari-lang/admin-web dev\""
   },
   "devDependencies": {
+    "@biomejs/biome": "^2.4.15",
     "concurrently": "^9.1.0"
   }
 }

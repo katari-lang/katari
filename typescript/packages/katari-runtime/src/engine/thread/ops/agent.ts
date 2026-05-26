@@ -23,7 +23,7 @@ import type {
 import type { CallId } from "../../id.js";
 import { spawnChild } from "../../spawn.js";
 import type { StepCtx } from "../../step-ctx.js";
-import { type Value } from "../../value.js";
+import type { Value } from "../../value.js";
 import {
   beginCancel,
   commonRemoveChild,

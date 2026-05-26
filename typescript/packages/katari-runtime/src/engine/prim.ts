@@ -515,7 +515,7 @@ export function valueEquals(a: Value, b: Value): boolean {
       const xk = Object.keys(x.fields), yk = Object.keys(y.fields);
       if (xk.length !== yk.length) return false;
       for (const k of xk) {
-        if (!Object.prototype.hasOwnProperty.call(y.fields, k)) return false;
+        if (!Object.hasOwn(y.fields, k)) return false;
         if (!valueEquals(x.fields[k]!, y.fields[k]!)) return false;
       }
       return true;

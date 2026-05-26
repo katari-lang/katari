@@ -96,7 +96,7 @@ function bindOnce(
   varId: number,
   value: Value,
 ): void {
-  if (Object.prototype.hasOwnProperty.call(bindings, varId)) {
+  if (Object.hasOwn(bindings, varId)) {
     throw new Error(
       `engine.pattern: VarId ${varId} bound more than once in one pattern (linear-pattern violation; compiler bug)`,
     );

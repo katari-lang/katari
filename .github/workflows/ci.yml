@@ -1,0 +1,139 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  haskell:
+    name: haskell (build + test)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: haskell-actions/setup@v2
+        id: setup
+        with:
+          ghc-version: "9.6.7"
+          enable-stack: true
+          stack-version: latest
+
+      - name: Resolve cache key inputs
+        id: cache-key
+        shell: bash
+        run: |
+          echo "snapshot=$(grep '^snapshot:' stack.yaml | awk '{print $2}')" >> "$GITHUB_OUTPUT"
+
+      - name: Cache ~/.stack
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.setup.outputs.stack-root }}
+          key: ${{ runner.os }}-stack-${{ steps.cache-key.outputs.snapshot }}-${{ hashFiles('stack.yaml', 'stack.yaml.lock', 'haskell/**/package.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-stack-${{ steps.cache-key.outputs.snapshot }}-
+
+      - name: Cache .stack-work
+        uses: actions/cache@v4
+        with:
+          path: |
+            .stack-work
+            haskell/*/.stack-work
+          key: ${{ runner.os }}-stackwork-${{ steps.cache-key.outputs.snapshot }}-${{ hashFiles('haskell/**/*.hs', 'haskell/**/package.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-stackwork-${{ steps.cache-key.outputs.snapshot }}-
+
+      - name: Build
+        run: stack build --fast
+
+      - name: Test
+        run: stack test --fast
+
+      - name: Lint
+        run: hlint haskell
+
+  typescript:
+    name: typescript (build + test + lint)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+
+      - uses: pnpm/action-setup@v4
+
+      - name: pnpm install
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm -r --filter "./typescript/packages/*" run build
+
+      - name: Lint
+        run: pnpm biome lint .
+
+      - name: Typecheck (admin-web)
+        run: pnpm --filter @katari-lang/admin-web typecheck
+
+      - name: Test
+        run: pnpm -r run test
+
+  e2e:
+    name: e2e
+    needs: [haskell, typescript]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: haskell-actions/setup@v2
+        id: setup
+        with:
+          ghc-version: "9.6.7"
+          enable-stack: true
+          stack-version: latest
+
+      - name: Resolve cache key inputs
+        id: cache-key
+        shell: bash
+        run: |
+          echo "snapshot=$(grep '^snapshot:' stack.yaml | awk '{print $2}')" >> "$GITHUB_OUTPUT"
+
+      - name: Cache ~/.stack
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.setup.outputs.stack-root }}
+          key: ${{ runner.os }}-stack-${{ steps.cache-key.outputs.snapshot }}-${{ hashFiles('stack.yaml', 'stack.yaml.lock', 'haskell/**/package.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-stack-${{ steps.cache-key.outputs.snapshot }}-
+
+      - name: Cache .stack-work
+        uses: actions/cache@v4
+        with:
+          path: |
+            .stack-work
+            haskell/*/.stack-work
+          key: ${{ runner.os }}-stackwork-${{ steps.cache-key.outputs.snapshot }}-${{ hashFiles('haskell/**/*.hs', 'haskell/**/package.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-stackwork-${{ steps.cache-key.outputs.snapshot }}-
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+
+      - uses: pnpm/action-setup@v4
+
+      - name: pnpm install
+        run: pnpm install --frozen-lockfile
+
+      - name: Build (Haskell)
+        run: stack build --fast
+
+      - name: Build (TypeScript)
+        run: pnpm -r --filter "./typescript/packages/*" run build
+
+      - name: Run e2e tests
+        run: pnpm --filter e2e test
