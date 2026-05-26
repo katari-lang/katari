@@ -68,9 +68,6 @@ run opts = do
       LBS.writeFile outputPath (encodePretty (buildBundleJson result.irModule result.schemaEntries))
       putStrLn ("Wrote " <> outputPath)
 
--- | Shape kept compatible with the legacy @katari-compiler@ binary.
--- The schema-bundle inner shape is shared with 'Katari.Cli.Apply' via
--- 'Common.schemaBundleJson' so the two paths can't drift.
 buildBundleJson :: Maybe IRModule -> Maybe [SchemaEntry] -> Value
 buildBundleJson mIr mEntries =
   object

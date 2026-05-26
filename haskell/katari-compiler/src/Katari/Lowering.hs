@@ -954,15 +954,13 @@ lowerSimpleAgent blockId name paramVars prelude blk description inputSchema outp
         [] -> Nothing
 
 -- | Lower a 'RequestHandler' to a 'BlockUser'. The handler body inherits
--- the handle scope (state vars are directly accessible). Only req args
--- are passed via 'parameters'. The body's trailing value is treated as
--- an implicit @break@; an explicit 'StatementExit ExitKindBreak' is
--- appended if the body completes normally.
---
--- @stateLocals@ is the @(VariableId, VarId)@ map already in scope via
--- 'withLocals'; it is passed here only so the caller's intent is explicit.
-lowerHandler :: [(VariableId, VarId)] -> AST.RequestHandler Zonked -> Lower Handler
-lowerHandler _stateLocals hr = do
+-- the handle scope (state vars are directly accessible via 'withLocals'
+-- in the enclosing 'lowerHandleExpr'). Only req args are passed via
+-- 'parameters'. The body's trailing value is treated as an implicit
+-- @break@; an explicit 'StatementExit ExitKindBreak' is appended if
+-- the body completes normally.
+lowerHandler :: AST.RequestHandler Zonked -> Lower Handler
+lowerHandler hr = do
   reqQName <- case hr.name.resolution of
     Just identRequestId -> do
       idResult <- asks (.identifierResult)
@@ -1469,7 +1467,7 @@ lowerPattern = \case
       recordError (LoweringErrorUnresolvedVariable vp.sourceSpan vp.name.text)
       pure (MatchPatternAny, [])
   AST.PatternWildcard _ -> pure (MatchPatternAny, [])
-  AST.PatternLiteral lp -> pure (MatchPatternLiteral (literalValueToIR lp.value), [])
+  AST.PatternLiteral lp -> pure (MatchPatternLiteral lp.value, [])
   AST.PatternTuple tp -> do
     (subs, localss) <- mapAndUnzipM lowerPattern tp.elements
     pure (MatchPatternTuple subs, concat localss)
@@ -1513,12 +1511,6 @@ typePatternTagToIR = \case
   AST.TypePatternTagString -> TypePatternTagString
   AST.TypePatternTagBoolean -> TypePatternTagBoolean
   AST.TypePatternTagAgent -> TypePatternTagAgent
-
--- | AST and IR share 'LiteralValue' (defined in 'Katari.Common'), so
--- lowering is the identity. Kept as an alias for call sites that read
--- as a phase boundary.
-literalValueToIR :: LiteralValue -> LiteralValue
-literalValueToIR = id
 
 -- | Build a child block for a match arm body. The given locals (from
 -- pattern bindings) are added to the Reader scope before lowering the
@@ -1774,7 +1766,7 @@ lowerHandleExpr handleExpr = do
       (BlockUser (defaultUserBlock {statements = bodyStatements, trailing = bodyTrailing}))
       Nothing
     -- Handlers.
-    handlerList <- mapM (lowerHandler stateLocals) handleExpr.handlers
+    handlerList <- mapM lowerHandler handleExpr.handlers
     -- Then clause.
     thenBlockId <- lowerThenClause handleExpr.thenClause
     -- Record BlockHandle and call it.
@@ -1825,7 +1817,7 @@ emitLoadLiteral literalValue = do
 
 -- | Lower an 'AST.LiteralExpression' as an 'StatementLoadLiteral'.
 lowerLiteral :: AST.LiteralExpression Zonked -> Lower VarId
-lowerLiteral lit = emitLoadLiteral (literalValueToIR lit.value)
+lowerLiteral lit = emitLoadLiteral lit.value
 
 -- | Lower an 'AST.VariableExpression'. Result depends on whether the
 -- referenced 'VariableId' is a local binding (just return its IR var) or

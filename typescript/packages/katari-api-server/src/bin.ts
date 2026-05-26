@@ -166,5 +166,3 @@ process.on("uncaughtException", (err) => {
   });
   process.exit(1);
 });
-
-void metrics; // metrics surface kept for routes/app.ts probes

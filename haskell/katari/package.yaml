@@ -18,7 +18,6 @@ library:
     - Katari.Cli.Escalation
     - Katari.Cli.Init
     - Katari.Cli.Ls
-    - Katari.Cli.Prompt
     - Katari.Cli.Run
     - Katari.Cli.Status
     - Katari.Version

@@ -37,7 +37,7 @@ if (!supported.has(key)) {
   process.exit(1);
 }
 
-const exe = process.platform === "win32" ? "katari.exe" : "katari";
+const exe = "katari";
 const pkg = `@katari-lang/cli-${key}/bin/${exe}`;
 
 let binaryPath;

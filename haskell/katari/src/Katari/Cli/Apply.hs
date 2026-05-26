@@ -22,6 +22,7 @@ where
 import Control.Exception (IOException, try)
 import Data.Aeson qualified as Aeson
 import Data.ByteString.Lazy.Char8 qualified as LC8
+import Data.List (isSuffixOf)
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 import Data.Text qualified as Text
@@ -238,7 +239,7 @@ runKatariBundle packages = do
   mEnv <- lookupEnv "KATARI_BUNDLE_BIN"
   let (cmd, prefixArgs) = case mEnv of
         Just envCmd
-          | ".js" `endsWith` envCmd -> ("node", [envCmd])
+          | ".js" `isSuffixOf` envCmd -> ("node", [envCmd])
           | otherwise -> (envCmd, [])
         Nothing -> ("katari-bundle", [])
       args =
@@ -259,8 +260,6 @@ runKatariBundle packages = do
     ExitSuccess -> case Aeson.eitherDecode (LC8.pack stdout) of
       Left err -> die ("katari-bundle returned unparseable JSON: " <> err)
       Right (resp :: BundleResponse) -> pure resp.bundle
-  where
-    endsWith suffix s = drop (length s - length suffix) s == suffix
 
 -- | Wire shape of @katari-bundle@'s stdout.
 data BundleResponse = BundleResponse {bundle :: Maybe Api.SidecarBundle}

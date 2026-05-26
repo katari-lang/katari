@@ -14,9 +14,11 @@ where
 
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Encode.Pretty as AesonPretty
+import qualified Data.ByteString.Lazy as LBS
 import qualified Data.ByteString.Lazy.Char8 as LC8
 import Data.Text (Text)
 import qualified Data.Text as Text
+import Data.Text.Encoding (decodeUtf8)
 import qualified Katari.Api.Client as Api
 import qualified Katari.Api.Types as Api
 import Katari.Cli.Common (resolveApiClient)
@@ -89,7 +91,4 @@ renderState = \case
   Api.RunError -> "error"
 
 renderJsonOneLine :: Aeson.Value -> Text
-renderJsonOneLine v =
-  -- aeson's compact encoding has no trailing newline and uses ":" + " "
-  -- after keys, which is the densest single-line form we ship.
-  Text.pack (LC8.unpack (Aeson.encode v))
+renderJsonOneLine v = decodeUtf8 (LBS.toStrict (Aeson.encode v))

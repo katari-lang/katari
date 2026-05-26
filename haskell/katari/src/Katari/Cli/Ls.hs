@@ -79,7 +79,7 @@ optionsParser =
 
 run :: Options -> IO ()
 run opts = do
-  client <- mkClient opts
+  client <- Common.resolveApiClient "ls" opts.optApiUrl
   case opts.optTarget of
     TProjects -> do
       ps <- Api.listProjects client
@@ -111,9 +111,6 @@ run opts = do
 
 die :: String -> IO a
 die = Common.dieIn "ls"
-
-mkClient :: Options -> IO Api.ApiClient
-mkClient opts = Common.resolveApiClient "ls" opts.optApiUrl
 
 requireProjectId :: Api.ApiClient -> Options -> IO Text
 requireProjectId c opts = case opts.optProject of

@@ -23,15 +23,10 @@ import {
   ExternalEventBus,
   FFI_ENDPOINT,
   FfiModule,
-  valueFromRaw,
   type ChildToParent,
-  type ExternalEvent,
   type Logger,
-  type RawValue,
-  type SidecarBundle,
   type SidecarManager,
   type Sidecar,
-  type Value,
 } from "@katari-lang/runtime";
 import { ApiModule } from "./modules/api-module.js";
 import { StorageEnvStore } from "./modules/env-store.js";
@@ -326,12 +321,3 @@ function makeNoOpFfi(): FfiModule {
   } as unknown as FfiModule;
 }
 
-/** Lift the sidecar-side raw `args` map into the bus's internal `Value`
- * shape. Used when forwarding a sidecar `escalate` into the bus. */
-function argsRawToValue(
-  args: Record<string, RawValue>,
-): Record<string, Value> {
-  const out: Record<string, Value> = {};
-  for (const [k, v] of Object.entries(args)) out[k] = valueFromRaw(v);
-  return out;
-}

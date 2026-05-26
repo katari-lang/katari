@@ -8,7 +8,6 @@ language: GHC2021
 library:
   source-dirs: src
   exposed-modules:
-    - Katari
     - Katari.AST
     - Katari.Common
     - Katari.Id

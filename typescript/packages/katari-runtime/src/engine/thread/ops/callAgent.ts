@@ -21,16 +21,16 @@
 // Inbound asks (escalates from the peer) are forwarded upward as
 // `ask` events to our parent, mirroring DelegateThread.
 
-import { encodeCoreAgentDefId, encodeFfiAgentDefId, type AgentDefId } from "../../../agent-def-id.js";
+import { encodeCoreAgentDefId, type AgentDefId } from "../../../agent-def-id.js";
 import type { AgentBlock, BlockId, QualifiedName } from "../../../ir/types.js";
 import type { Endpoint } from "../../endpoint.js";
-import { createDelegationId, type AskId, type CallId, type ClosureId, type EscalationId } from "../../id.js";
+import { createDelegationId, type AskId, type ClosureId } from "../../id.js";
 import { validateAgainstSchema } from "../../schema-validate.js";
 import type { StepCtx } from "../../step-ctx.js";
 import { valueToRaw } from "../../../value-codec.js";
 import type { Value } from "../../value.js";
 import type { CallAgentThread, Thread } from "../types.js";
-import { allocAskId, deleteThread, popAskForward } from "../common.js";
+import { allocAskId, deleteThread } from "../common.js";
 import { defaultAskAckProxy, defaultCancelAckUnexpected } from "./defaults.js";
 import type { ThreadOps } from "./types.js";
 import type { Json } from "../../../json.js";
@@ -126,7 +126,7 @@ export const callAgentOps: ThreadOps<CallAgentThread> = {
    * runner into a direct upward ask to our parent, bypassing us. Any
    * ask reaching us is an invariant violation.
    */
-  ask(_ctx, t, askId) {
+  ask(_ctx, _t, askId) {
     throw new Error(
       `callAgent thread received ask (askId=${askId}) — CallAgentThread has no children`,
     );
@@ -158,7 +158,6 @@ export const callAgentOps: ThreadOps<CallAgentThread> = {
       return;
     }
     defaultAskAckProxy<CallAgentThread>(ctx, t as CallAgentThread, askId, value);
-    void popAskForward; // satisfy unused-imports check
   },
 };
 
@@ -310,8 +309,3 @@ function raiseCallAgentError(
   });
 }
 
-// Suppress unused-imports check for the type re-exports used in the
-// `Resolved` discriminated union above (TS can otherwise mark them as
-// unused even though they're referenced inside the type alias).
-void (null as unknown as EscalationId);
-void (null as unknown as CallId);

@@ -90,7 +90,7 @@ run = \case
 
 runList :: ListOptions -> IO ()
 runList o = do
-  client <- mkClient o.listApiUrl
+  client <- Common.resolveApiClient "escalation" o.listApiUrl
   pid <- case o.listProject of
     Just name -> resolveProjectId client name
     Nothing -> die "katari escalation list: --project NAME required"
@@ -99,7 +99,7 @@ runList o = do
 
 runAnswer :: AnswerOptions -> IO ()
 runAnswer o = do
-  client <- mkClient o.ansApiUrl
+  client <- Common.resolveApiClient "escalation" o.ansApiUrl
   val <- case Common.decodeJsonText o.ansValue of
     Right v -> pure v
     Left err -> die ("--value is not valid JSON: " <> err)
@@ -114,9 +114,6 @@ runAnswer o = do
 
 die :: String -> IO a
 die = Common.dieIn "escalation"
-
-mkClient :: Maybe Text -> IO Api.ApiClient
-mkClient = Common.resolveApiClient "escalation"
 
 resolveProjectId :: Api.ApiClient -> Text -> IO Text
 resolveProjectId = Common.resolveProjectId "escalation"

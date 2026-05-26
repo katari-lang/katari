@@ -16,7 +16,6 @@ library:
     - Katari.LSP.Handlers.Definition
     - Katari.LSP.Handlers.References
     - Katari.LSP.Handlers.Completion
-    - Katari.LSP.Handlers.Diagnostics
 
 executables:
   katari-lsp:
