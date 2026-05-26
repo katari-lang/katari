@@ -7,6 +7,9 @@ language: GHC2021
 
 library:
   source-dirs: src
+  # Internal library — no external package depends on these modules.
+  # They are exposed only because the katari executable and tests
+  # (which depend on this library) need to import them.
   exposed-modules:
     - Katari.Api.Client
     - Katari.Api.Types

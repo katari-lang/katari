@@ -333,8 +333,9 @@ export class ApiModule implements Module {
         delegationId,
       });
     }
-    // The live row is gone (= terminal); the audit row remains.
-    await this.tx.delegations.delete(delegationId);
+    // Delete the entire delegation tree (root + all children) so no
+    // orphan child rows linger after the run completes.
+    await this.tx.delegations.deleteAllUnderRoot(delegationId);
   }
 
   private async handleTerminateAck(delegationId: DelegationId): Promise<void> {
@@ -350,6 +351,6 @@ export class ApiModule implements Module {
         completedAt: new Date().toISOString(),
       });
     }
-    await this.tx.delegations.delete(delegationId);
+    await this.tx.delegations.deleteAllUnderRoot(delegationId);
   }
 }

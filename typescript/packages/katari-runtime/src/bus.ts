@@ -32,7 +32,7 @@ export type RegisteredModule = {
 export class ExternalEventBus {
   private readonly modules = new Map<Endpoint, RegisteredModule>();
   private readonly queue: ExternalEvent[] = [];
-  private draining = false;
+  private drainPromise: Promise<void> | null = null;
 
   constructor(private readonly logger: Logger) {}
 
@@ -57,29 +57,29 @@ export class ExternalEventBus {
 
   /**
    * Drain the queue until it is empty. If new events are pushed during a
-   * drain, the same loop keeps processing them. Re-entrant calls return
-   * immediately (= reentrant safe).
+   * drain, the same loop keeps processing them. Re-entrant calls wait for
+   * the in-progress drain to finish (shared promise).
    */
   async drain(): Promise<void> {
-    if (this.draining) return;
-    this.draining = true;
-    try {
-      while (this.queue.length > 0) {
-        const event = this.queue.shift()!;
-        const target = this.modules.get(event.to);
-        if (target === undefined) {
-          this.logger.log("warn", "bus: no module for endpoint; dropping event", {
-            from: event.from,
-            to: event.to,
-            kind: event.payload.kind,
-          });
-          continue;
-        }
-        const { outbound } = await target.module.feed(event);
-        for (const ev of outbound) this.queue.push(ev);
+    if (this.drainPromise !== null) return this.drainPromise;
+    this.drainPromise = this.doDrain();
+    try { await this.drainPromise; } finally { this.drainPromise = null; }
+  }
+
+  private async doDrain(): Promise<void> {
+    while (this.queue.length > 0) {
+      const event = this.queue.shift()!;
+      const target = this.modules.get(event.to);
+      if (target === undefined) {
+        this.logger.log("warn", "bus: no module for endpoint; dropping event", {
+          from: event.from,
+          to: event.to,
+          kind: event.payload.kind,
+        });
+        continue;
       }
-    } finally {
-      this.draining = false;
+      const { outbound } = await target.module.feed(event);
+      for (const ev of outbound) this.queue.push(ev);
     }
   }
 

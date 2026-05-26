@@ -27,6 +27,10 @@ module Katari.Schema
 
     -- * Top-level builder
     buildSchemas,
+
+    -- * Wire-format helpers
+    schemaBundleJson,
+    schemaEntryToAgent,
   )
 where
 
@@ -568,3 +572,30 @@ buildRequestRef dataDefs idResult zonkResult requestId = do
         input = plain inputCore,
         output = toJsonSchema dataDefs Set.empty returnType
       }
+
+-- ===========================================================================
+-- Wire-format helpers
+-- ===========================================================================
+
+-- | The on-the-wire schema-bundle JSON shape that both @katari apply@
+-- and @katari build@ produce. Shared here so the two output paths
+-- can't drift apart (= snapshot upload uses this shape; build emits
+-- it nested under @"schemaBundle"@ in the local IR-bundle file).
+schemaBundleJson :: Maybe [SchemaEntry] -> Value
+schemaBundleJson mEntries =
+  object
+    [ "schemaVersion" .= (1 :: Int),
+      "agents" .= maybe ([] :: [Value]) (map schemaEntryToAgent) mEntries
+    ]
+
+-- | Single 'SchemaEntry' to wire-format agent definition. Surface
+-- shape used by both CLI commands and consumed by AI tool-calling
+-- consumers via the api-server's @/agent@ endpoints.
+schemaEntryToAgent :: SchemaEntry -> Value
+schemaEntryToAgent SchemaEntry {..} =
+  object
+    [ "qualifiedName" .= name,
+      "parameters" .= input,
+      "returns" .= output,
+      "description" .= description
+    ]

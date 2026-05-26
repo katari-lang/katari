@@ -305,6 +305,14 @@ class InMemoryDelegationRepo implements DelegationRepo {
     return this.rows.delete(id);
   }
 
+  async deleteAllUnderRoot(rootDelegationId: DelegationId): Promise<void> {
+    for (const row of this.rows.values()) {
+      if (row.rootDelegationId === rootDelegationId) {
+        this.rows.delete(row.id);
+      }
+    }
+  }
+
   async listLiveSnapshotIds(): Promise<SnapshotId[]> {
     const ids = new Set<SnapshotId>();
     for (const row of this.rows.values()) {

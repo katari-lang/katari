@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { SchemaField } from "../SchemaField";
 import type { JsonSchema } from "../schema-utils";
 
@@ -25,22 +25,29 @@ export function ObjectField({
   const required = new Set(schema.required ?? []);
   const entries = Object.entries(properties);
 
+  // Keep a ref to the latest obj and onChange so the effect below can
+  // read them without listing them as dependencies (which would cause
+  // the effect to re-fire on every value change and fight user edits).
+  const objRef = useRef(obj);
+  objRef.current = obj;
+  const onChangeRef = useRef(onChange);
+  onChangeRef.current = onChange;
+
   // Auto-inject const values. If schemaInitialValue already set them on
   // first mount this is a no-op; needed when value comes from elsewhere
   // (e.g. a parent UnionField swapped branches without seeding).
   useEffect(() => {
-    let patched = obj;
+    const currentObj = objRef.current;
+    const constEntries = Object.entries(schema.properties ?? {});
+    let patched = currentObj;
     let dirty = false;
-    for (const [key, sub] of entries) {
+    for (const [key, sub] of constEntries) {
       if (sub.const !== undefined && patched[key] !== sub.const) {
         patched = { ...patched, [key]: sub.const };
         dirty = true;
       }
     }
-    if (dirty) onChange(patched);
-    // Intentionally only run when the schema's const set changes; running
-    // on every value change would fight user edits.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    if (dirty) onChangeRef.current(patched);
   }, [schema]);
 
   // Hide const properties from the rendered form — they're auto-set.

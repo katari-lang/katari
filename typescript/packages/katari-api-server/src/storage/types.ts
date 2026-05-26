@@ -211,6 +211,8 @@ export interface DelegationRepo {
   markAllUnderRootAsCancelling(rootDelegationId: DelegationId): Promise<void>;
   /** Drop the row at terminal ack (= success or cancel-complete). */
   delete(id: DelegationId): Promise<boolean>;
+  /** Delete every row in a root subtree (root + all children). */
+  deleteAllUnderRoot(rootDelegationId: DelegationId): Promise<void>;
   /** Snapshot ids that still own at least one live delegation. */
   listLiveSnapshotIds(): Promise<SnapshotId[]>;
 }

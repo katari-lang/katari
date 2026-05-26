@@ -284,12 +284,14 @@ booleanBranches values
   | otherwise = SemanticTypeLiteralBoolean <$> Set.toList values
 
 nullBranches :: Bool -> [SemanticType Resolved]
-nullBranches True = [SemanticTypeNull]
-nullBranches False = []
+nullBranches = \case
+  True -> [SemanticTypeNull]
+  False -> []
 
 secretBranches :: Bool -> [SemanticType Resolved]
-secretBranches True = [SemanticTypeSecret]
-secretBranches False = []
+secretBranches = \case
+  True -> [SemanticTypeSecret]
+  False -> []
 
 functionBranches :: FunctionSlot -> [SemanticType Resolved]
 functionBranches = \case

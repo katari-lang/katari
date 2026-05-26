@@ -50,11 +50,17 @@ import Data.Aeson
     omitNothingFields,
     withText,
   )
+import qualified Data.Aeson as Aeson
 import Data.Map.Strict (Map)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import GHC.Generics (Generic)
-import Katari.IR (IRModule)
+
+-- | Shared Aeson options that drop @Nothing@ fields from the wire
+-- representation. Used by request types whose optional fields should
+-- appear as absent (not @null@) on the wire.
+optionalFieldOptions :: Aeson.Options
+optionalFieldOptions = defaultOptions {omitNothingFields = True}
 
 -- ---------------------------------------------------------------------------
 -- Projects
@@ -126,7 +132,7 @@ data SidecarBundle = SidecarBundle
   deriving anyclass (FromJSON, ToJSON)
 
 data UploadSnapshotRequest = UploadSnapshotRequest
-  { irModule :: IRModule,
+  { irModule :: Value,
     sidecarBundle :: Maybe SidecarBundle,
     -- | @{ schemaVersion, agents: [...] }@ — we don't parse it on the
     -- Haskell side beyond round-tripping bytes, so a raw 'Value' is
@@ -144,7 +150,7 @@ instance FromJSON UploadSnapshotRequest where
 -- | Drop @message: null@ when 'Nothing' so the api-server's Zod schema
 -- accepts an absent field rather than an explicit null.
 instance ToJSON UploadSnapshotRequest where
-  toJSON = genericToJSON defaultOptions {omitNothingFields = True}
+  toJSON = genericToJSON optionalFieldOptions
 
 newtype UploadSnapshotResponse = UploadSnapshotResponse
   { snapshotId :: Text
@@ -242,7 +248,7 @@ instance FromJSON StartRunRequest where
 -- api-server's Zod schema accepts these as @optional()@ (absent) but
 -- not as @null@ in some shapes.
 instance ToJSON StartRunRequest where
-  toJSON = genericToJSON defaultOptions {omitNothingFields = True}
+  toJSON = genericToJSON optionalFieldOptions
 
 newtype StartRunResponse = StartRunResponse
   { runId :: Text

@@ -31,53 +31,54 @@ renderSemanticType ::
 renderSemanticType typeNames reqNames = render False
   where
     render :: Bool -> ST.SemanticType ST.Resolved -> Text
-    render _ ST.SemanticTypeNever = "never"
-    render _ ST.SemanticTypeUnknown = "unknown"
-    render _ ST.SemanticTypeNull = "null"
-    render _ ST.SemanticTypeInteger = "integer"
-    render _ ST.SemanticTypeNumber = "number"
-    render _ ST.SemanticTypeString = "string"
-    render _ ST.SemanticTypeSecret = "secret"
-    render _ ST.SemanticTypeBoolean = "boolean"
-    render _ (ST.SemanticTypeLiteralInteger n) = Text.pack (show n)
-    render _ (ST.SemanticTypeLiteralString s) = "\"" <> s <> "\""
-    render _ (ST.SemanticTypeLiteralBoolean True) = "true"
-    render _ (ST.SemanticTypeLiteralBoolean False) = "false"
-    render _ ST.SemanticTypeFunctionAny = "agent"
-    render _ (ST.SemanticTypeArray inner) = "[" <> render False inner <> "]"
-    render _ (ST.SemanticTypeRecord valueType) =
-      "record[" <> render False valueType <> "]"
-    render _ (ST.SemanticTypeTuple xs) =
-      "(" <> Text.intercalate ", " (map (render False) xs) <> ")"
-    render parenthesise (ST.SemanticTypeUnion branches) =
-      let body = Text.intercalate " | " (map (render True) branches)
-       in if parenthesise then "(" <> body <> ")" else body
-    render _ (ST.SemanticTypeData typeId) =
-      case Map.lookup typeId typeNames of
-        Just name -> name
-        Nothing -> "<data:" <> Text.pack (show typeId) <> ">"
-    render _ (ST.SemanticTypeObject fields) =
-      "{ "
-        <> Text.intercalate
-          ", "
-          [k <> ": " <> render False v | (k, v) <- Map.toAscList fields]
-        <> " }"
-    render parenthesise (ST.SemanticTypeFunction parameters returnType effects) =
-      let parameterText =
-            Text.intercalate
-              ", "
-              [k <> ": " <> render False v | (k, v) <- Map.toAscList parameters]
-          effectsText = renderSemanticRequest reqNames effects
-          body =
-            "("
-              <> parameterText
-              <> ") -> "
-              <> render True returnType
-              <> ( if Text.null effectsText
-                     then ""
-                     else " with " <> effectsText
-                 )
-       in if parenthesise then "(" <> body <> ")" else body
+    render parenthesise semanticType = case semanticType of
+      ST.SemanticTypeNever -> "never"
+      ST.SemanticTypeUnknown -> "unknown"
+      ST.SemanticTypeNull -> "null"
+      ST.SemanticTypeInteger -> "integer"
+      ST.SemanticTypeNumber -> "number"
+      ST.SemanticTypeString -> "string"
+      ST.SemanticTypeSecret -> "secret"
+      ST.SemanticTypeBoolean -> "boolean"
+      ST.SemanticTypeLiteralInteger n -> Text.pack (show n)
+      ST.SemanticTypeLiteralString s -> "\"" <> s <> "\""
+      ST.SemanticTypeLiteralBoolean True -> "true"
+      ST.SemanticTypeLiteralBoolean False -> "false"
+      ST.SemanticTypeFunctionAny -> "agent"
+      ST.SemanticTypeArray inner -> "[" <> render False inner <> "]"
+      ST.SemanticTypeRecord valueType ->
+        "record[" <> render False valueType <> "]"
+      ST.SemanticTypeTuple xs ->
+        "(" <> Text.intercalate ", " (map (render False) xs) <> ")"
+      ST.SemanticTypeUnion branches ->
+        let body = Text.intercalate " | " (map (render True) branches)
+         in if parenthesise then "(" <> body <> ")" else body
+      ST.SemanticTypeData typeId ->
+        case Map.lookup typeId typeNames of
+          Just name -> name
+          Nothing -> "<data:" <> Text.pack (show typeId) <> ">"
+      ST.SemanticTypeObject fields ->
+        "{ "
+          <> Text.intercalate
+            ", "
+            [k <> ": " <> render False v | (k, v) <- Map.toAscList fields]
+          <> " }"
+      ST.SemanticTypeFunction parameters returnType effects ->
+        let parameterText =
+              Text.intercalate
+                ", "
+                [k <> ": " <> render False v | (k, v) <- Map.toAscList parameters]
+            effectsText = renderSemanticRequest reqNames effects
+            body =
+              "("
+                <> parameterText
+                <> ") -> "
+                <> render True returnType
+                <> ( if Text.null effectsText
+                       then ""
+                       else " with " <> effectsText
+                   )
+         in if parenthesise then "(" <> body <> ")" else body
 
 -- | Render a 'SemanticRequest' as @{a, b, c}@. Empty requests render
 -- to the empty string (caller decides whether to elide a leading

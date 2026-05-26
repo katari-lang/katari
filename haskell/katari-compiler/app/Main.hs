@@ -31,7 +31,7 @@ import Katari.IR (IRModule)
 import Katari.Project.Discovery qualified as Project
 import Katari.Project.ModuleName qualified as Project
 import Katari.Project.Resolve qualified as Project
-import Katari.Schema (SchemaEntry (..))
+import Katari.Schema (SchemaEntry (..), schemaEntryToAgent)
 import Options.Applicative
 import System.Directory (doesDirectoryExist, doesFileExist)
 import System.Exit (ExitCode (..), exitWith)
@@ -218,22 +218,6 @@ buildBundleJson mIr mEntries =
             "agents" .= maybe ([] :: [Value]) (map schemaEntryToAgent) mEntries
           ]
     ]
-
--- | Translate `SchemaEntry` (Haskell) → `AgentDefinition` (TS shape):
--- drops the internal `requests` field, renames `input` / `output` to
--- `parameters` / `returns`, and emits `qualifiedName` as a flat dotted
--- string (already in `SchemaEntry.name`).
-schemaEntryToAgent :: SchemaEntry -> Value
-schemaEntryToAgent e =
-  object
-    ( [ "qualifiedName" .= e.name,
-        "parameters" .= e.input,
-        "returns" .= e.output
-      ]
-        <> case e.description of
-          Just d -> ["description" .= d]
-          Nothing -> []
-    )
 
 writeOut :: OutTarget -> Value -> IO ()
 writeOut OutStdout v = LBS.putStr (encodePretty v)

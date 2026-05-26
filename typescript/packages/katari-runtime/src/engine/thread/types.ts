@@ -344,8 +344,12 @@ export type RecordThread = Common & CollectingBase & {
   kind: "record";
 };
 
-/** Union of every variant that uses the `CollectingBase` shape. */
-export type CollectingThread = TupleThread | ArrayThread | RecordThread;
+/**
+ * Union of every variant that goes through the shared collecting ops
+ * (`collecting.ts`). RecordThread uses `CollectingBase` for its shape but
+ * has its own ops (`record.ts`) — it is intentionally excluded here.
+ */
+export type CollectingThread = TupleThread | ArrayThread;
 
 export type Thread =
   | AgentThread

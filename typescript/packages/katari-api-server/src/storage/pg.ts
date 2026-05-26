@@ -500,6 +500,13 @@ class PgDelegationRepo implements DelegationRepo {
     return result.count > 0;
   }
 
+  async deleteAllUnderRoot(rootDelegationId: DelegationId): Promise<void> {
+    await this.sql`
+      DELETE FROM delegations
+      WHERE root_delegation_id = ${rootDelegationId}
+    `;
+  }
+
   async listLiveSnapshotIds(): Promise<SnapshotId[]> {
     const rows = await this.sql<{ snapshot_id: string }[]>`
       SELECT DISTINCT snapshot_id FROM delegations

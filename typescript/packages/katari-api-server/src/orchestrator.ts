@@ -50,7 +50,7 @@ export { NoSnapshotForProject, SnapshotNotFound };
 export type TickContext = {
   snapshotId: SnapshotId;
   api: ApiModule;
-  ffi: FfiModule;
+  ffi: FfiModule | null;
   core: CoreModule;
   bus: ExternalEventBus;
   tx: Storage;
@@ -152,7 +152,7 @@ export class Orchestrator {
         // Pass FfiModule a scope-bound FfiStore + the corresponding sidecar.
         // For snapshots without a sidecar, don't register the ffi module itself.
         const sidecar = this.sidecarFor(snapshotId);
-        let ffi: FfiModule;
+        let ffi: FfiModule | null = null;
         if (sidecar !== null) {
           const store = new StorageFfiStore(tx, snapshotId);
           ffi = new FfiModule({
@@ -169,9 +169,8 @@ export class Orchestrator {
             { name: "env", module: env },
           ]);
         } else {
-          // Prepare an empty placeholder for snapshots without FFI (= type
-          // satisfaction). If a delegate arrives, the bus emits a "no module" warn.
-          ffi = makeNoOpFfi();
+          // No sidecar — skip FfiModule registration. If a delegate
+          // arrives addressed to FFI, the bus emits a "no module" warning.
           bus.registerAll([
             { name: "api", module: api },
             { name: "core", module: core },
@@ -185,7 +184,7 @@ export class Orchestrator {
         // CORE→FFI→CORE escalateAck arriving in a later tick than the
         // original escalate is dropped as "unknown escalation" (the
         // per-tick instance starts with an empty map).
-        if (sidecar !== null) await ffi.load();
+        if (ffi !== null) await ffi.load();
 
         const ctx: TickContext = { snapshotId, api, ffi, core, bus, tx };
         const result = await fn(ctx);
@@ -232,7 +231,9 @@ export class Orchestrator {
           // handler invocation). Here we drop synchronous sidecar
           // responses; the real responses come back asynchronously
           // through `setMessageHandler`.
-          onSidecarResponse: () => {},
+          onSidecarResponse: () => {
+            this.logger.log("warn", "sidecar response received during recovery — discarding");
+          },
         });
         await ffi.recoverInflight();
       });
@@ -250,6 +251,13 @@ export class Orchestrator {
     // and pushes the resulting bus events; bus.drain() then runs the
     // engine + downstream modules to completion.
     await this.tick(snapshotId, async (ctx) => {
+      if (ctx.ffi === null) {
+        this.logger.log("error", "orchestrator: sidecar message for snapshot without FfiModule", {
+          snapshotId,
+          type: msg.type,
+        });
+        return;
+      }
       await ctx.ffi.dispatchSidecarMessage(msg);
     }).catch((err) => {
       // A failed tick on a sidecar message means the originating
@@ -297,27 +305,4 @@ export class Orchestrator {
   }
 }
 
-// ─── Helpers ───────────────────────────────────────────────────────────────
-
-function makeNoOpFfi(): FfiModule {
-  // Used when a snapshot has no sidecar bundle. delegations are still
-  // routed via `bus.registerAll` minus `ffi`, so this object SHOULD
-  // never be invoked. Returning `{} as FfiModule` would crash with
-  // "x is not a function" on any accidental call. Throw a clear error
-  // instead so a registration bug surfaces with a useful message.
-  const thrower =
-    (method: string): ((...args: unknown[]) => never) =>
-    () => {
-      throw new Error(
-        `orchestrator: FfiModule.${method} called on a sidecar-less snapshot — this is a registration bug`,
-      );
-    };
-  return {
-    feed: thrower("feed"),
-    persist: thrower("persist"),
-    load: thrower("load"),
-    recoverInflight: thrower("recoverInflight"),
-    dispatchSidecarMessage: thrower("dispatchSidecarMessage"),
-  } as unknown as FfiModule;
-}
 

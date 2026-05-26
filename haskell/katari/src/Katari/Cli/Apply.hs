@@ -152,7 +152,7 @@ run opts = do
       client
       project.id
       Api.UploadSnapshotRequest
-        { Api.irModule = irModule,
+        { Api.irModule = Aeson.toJSON irModule,
           Api.sidecarBundle = sidecarBundle,
           Api.schemaBundle = schemaJson,
           Api.message = opts.optMessage

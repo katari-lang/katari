@@ -84,7 +84,6 @@ archiveUrl :: GitRef -> Either FetchError Text
 archiveUrl GitRef {gitUrl, gitRev} =
   let stripped = stripTrailingSlash (stripDotGit gitUrl)
    in if "https://github.com/" `Text.isPrefixOf` stripped
-            || "http://github.com/" `Text.isPrefixOf` stripped
         then Right (stripped <> "/archive/" <> gitRev <> ".tar.gz")
         else Left (FetchInvalidHost gitUrl)
   where

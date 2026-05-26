@@ -11,7 +11,7 @@
 
 import type { Logger } from "@katari-lang/runtime";
 import type { Orchestrator } from "./orchestrator.js";
-import type { Storage } from "./storage/types.js";
+import type { SnapshotId, Storage } from "./storage/types.js";
 
 export async function recoverOnBoot(
   storage: Storage,
@@ -20,21 +20,31 @@ export async function recoverOnBoot(
 ): Promise<void> {
   await orchestrator.recoverOnBoot();
 
-  // Re-issue terminate for runs in `cancelling`. These rows live in
-  // `runs_audit` (ApiModule's persistent log). Page through them snapshot
-  // by snapshot so a long backlog doesn't all land on one tick.
+  // Re-issue terminate for runs in `cancelling`. Group by snapshotId so
+  // all runs for the same snapshot are processed in a single tick (= one
+  // lock acquisition + one checkpoint round-trip instead of N).
   const cancellingRuns = await storage.runsAudit.list({
     state: "cancelling",
     limit: 500,
   });
+  const bySnapshot = new Map<SnapshotId, typeof cancellingRuns>();
   for (const run of cancellingRuns) {
+    const existing = bySnapshot.get(run.snapshotId) ?? [];
+    existing.push(run);
+    bySnapshot.set(run.snapshotId, existing);
+  }
+  for (const [snapshotId, runs] of bySnapshot) {
     try {
-      await orchestrator.tick(run.snapshotId, async (ctx) => {
-        await ctx.api.cancelRun({ bus: ctx.bus, runId: run.id });
+      await orchestrator.tick(snapshotId, async (ctx) => {
+        for (const run of runs) {
+          await ctx.api.cancelRun({ bus: ctx.bus, runId: run.id });
+        }
       });
     } catch (err) {
+      const runIds = runs.map((r) => r.id);
       logger.log("warn", "recovery: failed to re-issue terminate", {
-        runId: run.id,
+        snapshotId,
+        runIds,
         err: err instanceof Error ? err.message : String(err),
       });
     }

@@ -84,6 +84,13 @@ export function DelegationTreeGraph({ root }: { root: DelegationTreeNode }) {
   >(null);
   const [isPanning, setIsPanning] = useState(false);
 
+  // Keep mutable refs for values the pan handlers need so the effect
+  // only re-registers when isPanning toggles (not on every zoom / resize).
+  const scaleRef = useRef(scale);
+  scaleRef.current = scale;
+  const contentSizeRef = useRef(contentSize);
+  contentSizeRef.current = contentSize;
+
   const onMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
     if ((e.target as HTMLElement).closest("button") !== null) return;
     panStart.current = {
@@ -103,7 +110,7 @@ export function DelegationTreeGraph({ root }: { root: DelegationTreeNode }) {
       if (start === null) return;
       const nextX = start.px + (e.clientX - start.x);
       const nextY = start.py + (e.clientY - start.y);
-      setPan(clampPan(nextX, nextY, contentSize, scale, viewportRef.current));
+      setPan(clampPan(nextX, nextY, contentSizeRef.current, scaleRef.current, viewportRef.current));
     };
     const onUp = () => {
       setIsPanning(false);
@@ -115,7 +122,7 @@ export function DelegationTreeGraph({ root }: { root: DelegationTreeNode }) {
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
     };
-  }, [isPanning, contentSize, scale]);
+  }, [isPanning]);
 
   return (
     <div className="relative">

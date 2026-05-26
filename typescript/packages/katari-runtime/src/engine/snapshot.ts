@@ -99,14 +99,10 @@ export function deserialize(
 // ─── Secret encryption at the storage boundary ─────────────────────────────
 
 /**
- * The storage-side counterpart of 'EngineCheckpoint'. Structurally
- * identical to 'EngineCheckpoint' except every nested 'Value' has
- * been replaced by 'EncryptedValue' (= 'secret' variants are now
- * '$envelope' ciphertext blobs).
- *
- * Treated as opaque by storage: the type is exported only so the
- * CoreModule persistor signature can express "produces the encrypted
- * form" / "expects the encrypted form" at the call sites.
+ * Nominal marker for checkpoints whose secret values have been encrypted.
+ * Currently structurally identical to EngineCheckpoint — the encryption
+ * guarantee is enforced at runtime by walkValuesInTree, not by the type
+ * system. A branded type should replace this in v0.2.0.
  */
 export type EncryptedEngineCheckpoint = Omit<EngineCheckpoint, never>;
 

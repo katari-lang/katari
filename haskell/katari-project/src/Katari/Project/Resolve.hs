@@ -132,6 +132,9 @@ data ResolveError
     ResolveSnapshotShaMismatch Text Text Text
   | -- | @katari.lock@ exists but failed to parse.
     ResolveLockfileError Lock.LockfileError
+  | -- | Internal invariant violation during lockfile generation. Should
+    -- never be reached in normal operation; indicates a resolver bug.
+    ResolveInternalError Text
   deriving (Show)
 
 -- | Render a 'ResolveError' as a user-facing message. CLI commands
@@ -177,6 +180,8 @@ renderResolveError = \case
       <> "  actual   " <> actual
   ResolveLockfileError e ->
     "lockfile: " <> Text.pack (show e)
+  ResolveInternalError msg ->
+    "internal error: " <> msg
 
 renderConfigError :: ConfigError -> Text
 renderConfigError = \case
@@ -332,6 +337,7 @@ walkDeps manager mSnap mLock rootPkg =
                               let visited' = Set.insert depName visited
                                   accDeps' = Map.insert depName pkg accDeps
                                   transitive = initialQueue innerEntries pkg.packageRoot
+                                  -- DFS: process transitive deps before remaining siblings
                                in go visited' accDeps' (transitive <> rest)
 
     resolveGit depName url rev expectedSha visited accDeps rest = do
@@ -380,6 +386,7 @@ walkDeps manager mSnap mLock rootPkg =
                         visited' = Set.insert depName visited
                         accDeps' = Map.insert depName pinned accDeps
                         transitive = initialQueue innerEntries pinned.packageRoot
+                        -- DFS: process transitive deps before remaining siblings
                      in go visited' accDeps' (transitive <> rest)
 
 -- | Resolve a package's @[dependencies].packages@ list into concrete
@@ -511,23 +518,28 @@ assembleProject rp = do
 --   * Git overrides: resolved tarball sha256.
 --   * Snapshot-resolved deps: the snapshot's (repo, ref, sha256)
 --     triple (sha taken from the actual download).
-lockfileFromResolved :: ResolvedProject -> Lock.Lockfile
-lockfileFromResolved rp =
-  Lock.Lockfile
-    { Lock.lockVersion = 1,
-      Lock.lockSnapshot =
-        rp.rootPackage.packageConfig.dependenciesSection.dependenciesSnapshot,
-      Lock.lockPackages =
-        Map.fromList
-          [ ( depName,
+lockfileFromResolved :: ResolvedProject -> Either ResolveError Lock.Lockfile
+lockfileFromResolved rp = do
+  packages <-
+    traverse
+      ( \(depName, pkg) -> do
+          source <- lockedSourceFor depName rp pkg
+          pure
+            ( depName,
               Lock.LockedPackage
                 { Lock.lockedName = depName,
-                  Lock.lockedSource = lockedSourceFor depName rp pkg
+                  Lock.lockedSource = source
                 }
             )
-            | (depName, pkg) <- Map.toList rp.depPackages
-          ]
-    }
+      )
+      (Map.toList rp.depPackages)
+  pure
+    Lock.Lockfile
+      { Lock.lockVersion = 1,
+        Lock.lockSnapshot =
+          rp.rootPackage.packageConfig.dependenciesSection.dependenciesSnapshot,
+        Lock.lockPackages = Map.fromList packages
+      }
 
 -- | Translate a resolved dep into a 'Lock.LockedSource'. The walker
 -- has already populated 'packageSha' for any fetch (= git override or
@@ -537,31 +549,36 @@ lockfileFromResolved rp =
 -- pin on a non-overridden dep) raises 'error': writing a corrupt
 -- lockfile silently is strictly worse than crashing here, because the
 -- bad lockfile would then be accepted as authoritative on the next run.
-lockedSourceFor :: Text -> ResolvedProject -> ResolvedPackage -> Lock.LockedSource
+lockedSourceFor :: Text -> ResolvedProject -> ResolvedPackage -> Either ResolveError Lock.LockedSource
 lockedSourceFor depName rp pkg =
   case Map.lookup depName rp.rootPackage.packageConfig.overrides of
-    Just (OverridePath p) -> Lock.LockedPath {Lock.pathLocation = p}
+    Just (OverridePath p) -> Right Lock.LockedPath {Lock.pathLocation = p}
     Just (OverrideGit url rev) -> case pkg.packageSha of
       Just sha ->
-        Lock.LockedGit {Lock.gitRepoUrl = url, Lock.gitRev = rev, Lock.gitSha = sha}
+        Right Lock.LockedGit {Lock.gitRepoUrl = url, Lock.gitRev = rev, Lock.gitSha = sha}
       Nothing ->
-        error
-          ( "lockedSourceFor: git override '"
-              <> Text.unpack depName
-              <> "' has no recorded sha — this is a resolver bug"
+        Left
+          ( ResolveInternalError
+              ( "lockedSourceFor: git override '"
+                  <> depName
+                  <> "' has no recorded sha — this is a resolver bug"
+              )
           )
     Nothing -> case (pkg.packageSnapshotPin, pkg.packageSha) of
       (Just (repo, ref), Just sha) ->
-        Lock.LockedSnapshot
-          { Lock.snapshotRepo = repo,
-            Lock.snapshotRef = ref,
-            Lock.snapshotSha = sha
-          }
+        Right
+          Lock.LockedSnapshot
+            { Lock.snapshotRepo = repo,
+              Lock.snapshotRef = ref,
+              Lock.snapshotSha = sha
+            }
       _ ->
-        error
-          ( "lockedSourceFor: snapshot dep '"
-              <> Text.unpack depName
-              <> "' has no recorded (repo, ref, sha) — this is a resolver bug"
+        Left
+          ( ResolveInternalError
+              ( "lockedSourceFor: snapshot dep '"
+                  <> depName
+                  <> "' has no recorded (repo, ref, sha) — this is a resolver bug"
+              )
           )
 
 -- | Returns the first module key in @sources@ whose path is not under

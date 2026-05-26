@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import type { ProjectId } from "@/api/types";
 import { useCurrentProjectId } from "./useCurrentProjectId";
 
@@ -14,13 +14,17 @@ const STORAGE_LAST_PROJECT = "katari-admin.lastProjectId";
 export function useStickyProjectId(): ProjectId | null {
   const current = useCurrentProjectId();
 
+  const [stored, setStored] = useState<ProjectId | null>(() => {
+    if (typeof window === "undefined") return null;
+    const value = window.localStorage.getItem(STORAGE_LAST_PROJECT);
+    return value === null ? null : (value as ProjectId);
+  });
+
   useEffect(() => {
     if (current === null) return;
     window.localStorage.setItem(STORAGE_LAST_PROJECT, current);
+    setStored(current);
   }, [current]);
 
-  if (current !== null) return current;
-  if (typeof window === "undefined") return null;
-  const stored = window.localStorage.getItem(STORAGE_LAST_PROJECT);
-  return stored === null ? null : (stored as ProjectId);
+  return current ?? stored;
 }

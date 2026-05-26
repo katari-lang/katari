@@ -41,9 +41,10 @@ export function AgentsPage() {
   const showAll = showAllParam === "1" || showAllParam === "true";
 
   function setShowAll(next: boolean) {
-    if (next) params.set("showAll", "1");
-    else params.delete("showAll");
-    setParams(params);
+    const nextParams = new URLSearchParams(params);
+    if (next) nextParams.set("showAll", "1");
+    else nextParams.delete("showAll");
+    setParams(nextParams);
   }
 
   const { data, isLoading, isError, error } = useQuery({
@@ -64,12 +65,13 @@ export function AgentsPage() {
   }, [data, showAll, projectName]);
 
   function setSelected(next: SnapshotId | null) {
+    const nextParams = new URLSearchParams(params);
     if (next === null) {
-      params.delete("snapshot");
+      nextParams.delete("snapshot");
     } else {
-      params.set("snapshot", next);
+      nextParams.set("snapshot", next);
     }
-    setParams(params);
+    setParams(nextParams);
   }
 
   const hiddenCount =
