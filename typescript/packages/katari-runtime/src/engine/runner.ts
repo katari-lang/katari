@@ -10,7 +10,6 @@
 // removed from `state.threads` are dropped silently with a debug log
 // (matches the previous engine's behaviour).
 
-import { match } from "ts-pattern";
 import { EntryNotFoundError, RecoverableEngineError } from "./errors.js";
 import type { Event, InternalEventPayload } from "./event.js";
 import { isInternal } from "./event.js";
@@ -112,14 +111,18 @@ function step(
   ctx: ReturnType<typeof makeStepCtx>,
   ev: InternalEventPayload,
 ): void {
-  match(ev)
-    .with({ kind: "create" }, e => onCreate(ctx, e))
-    .with({ kind: "done" }, e => onDone(ctx, e))
-    .with({ kind: "cancel" }, e => onCancel(ctx, e))
-    .with({ kind: "cancelAck" }, e => onCancelAck(ctx, e))
-    .with({ kind: "ask" }, e => onAsk(ctx, e))
-    .with({ kind: "askAck" }, e => onAskAck(ctx, e))
-    .exhaustive();
+  switch (ev.kind) {
+    case "create":    return onCreate(ctx, ev);
+    case "done":      return onDone(ctx, ev);
+    case "cancel":    return onCancel(ctx, ev);
+    case "cancelAck": return onCancelAck(ctx, ev);
+    case "ask":       return onAsk(ctx, ev);
+    case "askAck":    return onAskAck(ctx, ev);
+    default: {
+      const _exhaustive: never = ev;
+      throw new Error(`engine: unrecognized internal event kind: ${(_exhaustive as InternalEventPayload).kind}`);
+    }
+  }
 }
 
 // `create` event: the spawning code already wrote the Thread record into

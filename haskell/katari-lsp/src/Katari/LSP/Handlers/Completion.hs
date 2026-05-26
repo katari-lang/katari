@@ -27,6 +27,8 @@ import Data.Maybe (fromMaybe)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
+import Data.Vector (Vector)
+import qualified Data.Vector as Vector
 import Katari.Compile (CompileResult (..))
 import Katari.LSP.Convert (lspPositionToKatari)
 import Katari.LSP.State (ServerState, lookupCompileResult)
@@ -48,9 +50,9 @@ completionHandler st =
         mResult <- liftIO (lookupCompileResult st path)
         case mResult of
           Nothing -> responder (Right (LSP.InR (LSP.InR LSP.Null)))
-          Just (txt, result) -> do
+          Just (txt, lineVec, result) -> do
             let kPos = lspPositionToKatari txt pos
-                lineText = currentLine txt pos
+                lineText = currentLine lineVec pos
                 prefix = Text.take (fromIntegral (pos ^. L.character)) lineText
                 items = dispatch result path kPos prefix
                 lspItems = map toLspItem items
@@ -204,15 +206,14 @@ isIdentChar c = isAlphaNum c || c == '_'
 -- Helpers
 -- ---------------------------------------------------------------------------
 
--- | The line text up to the end of the file's last line; LSP positions
--- are 0-indexed.
-currentLine :: Text -> LSP.Position -> Text
-currentLine fileText (LSP.Position lineLsp _) =
-  let ls = Text.lines fileText
-      ix = fromIntegral lineLsp
-   in case drop ix ls of
-        (l : _) -> l
-        [] -> ""
+-- | The line text at the given LSP position, using the pre-split line
+-- vector for O(1) indexing. LSP positions are 0-indexed.
+currentLine :: Vector Text -> LSP.Position -> Text
+currentLine lineVec (LSP.Position lineLsp _) =
+  let ix = fromIntegral lineLsp
+   in case lineVec Vector.!? ix of
+        Just line -> line
+        Nothing -> ""
 
 -- ---------------------------------------------------------------------------
 -- LSP item construction

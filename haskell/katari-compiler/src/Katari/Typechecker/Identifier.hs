@@ -843,12 +843,14 @@ lookupModuleExportSlot getSlot moduleId name = do
 -- We only need to protect operator-targeted names — other prim names
 -- (e.g. @get_metadata@) can be safely shadowed since they have no
 -- syntactic-sugar reliance.
+operatorPrimNameSet :: Set Text
+operatorPrimNameSet =
+  Set.fromList $
+    [Prim.binaryOperatorPrimName op | op <- [minBound .. maxBound]]
+      ++ [Prim.unaryOperatorPrimName op | op <- [minBound .. maxBound]]
+
 isShadowingPrim :: Text -> Identifier Bool
-isShadowingPrim name = pure (name `elem` operatorPrimNames)
-  where
-    operatorPrimNames =
-      [Prim.binaryOperatorPrimName op | op <- [minBound .. maxBound]]
-        ++ [Prim.unaryOperatorPrimName op | op <- [minBound .. maxBound]]
+isShadowingPrim name = pure (Set.member name operatorPrimNameSet)
 
 -- ---------------------------------------------------------------------------
 -- NameRef helpers

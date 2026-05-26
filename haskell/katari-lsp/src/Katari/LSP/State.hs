@@ -20,6 +20,7 @@ module Katari.LSP.State
     workspaceFileTexts,
     findProjectRootCached,
     RecompileTarget (..),
+    textToLineVector,
   )
 where
 
@@ -30,6 +31,9 @@ import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
 import Data.Set (Set)
 import Data.Text (Text)
+import qualified Data.Text as Text
+import Data.Vector (Vector)
+import qualified Data.Vector as Vector
 import Katari.Compile (CompileInput (..), CompileResult, SourceEntry (..))
 import qualified Katari.Project.Config as Project
 import qualified Katari.Project.Discovery as Project
@@ -52,6 +56,10 @@ data WorkspaceState = WorkspaceState
     wsFiles :: Map FilePath Text,
     -- | File paths currently open in the editor.
     wsOpenFiles :: Set FilePath,
+    -- | Pre-split line cache per file path. Populated alongside
+    -- 'wsFiles' so hover / completion can index lines in O(1)
+    -- instead of re-running 'Text.lines' on every request.
+    wsLineCache :: Map FilePath (Vector Text),
     wsLastResult :: Maybe CompileResult,
     wsOccIndex :: Maybe OccurrenceIndex
   }
@@ -139,8 +147,11 @@ findProjectRootCached st path = do
 
 -- | Most recent successful compile result for the file at @path@. Looks
 -- up the enclosing workspace; returns 'Nothing' for orphan files (the
--- v1 server does not cache per-file orphan compiles).
-lookupCompileResult :: ServerState -> FilePath -> IO (Maybe (Text, CompileResult))
+-- v1 server does not cache per-file orphan compiles). The returned
+-- 'Vector Text' is the pre-split line cache for the file (built when
+-- the file is opened / changed); 'Nothing' when only disk content is
+-- available (= the file was never opened in the editor).
+lookupCompileResult :: ServerState -> FilePath -> IO (Maybe (Text, Vector Text, CompileResult))
 lookupCompileResult st path = do
   mRoot <- findProjectRootCached st path
   case mRoot of
@@ -149,15 +160,17 @@ lookupCompileResult st path = do
       pure $ do
         ws <- Map.lookup root wsMap
         r <- ws.wsLastResult
-        -- The text comes from the buffer overlay if present, otherwise
-        -- from the disk-loaded assembly.
         let buffered = Map.lookup path ws.wsFiles
             disk = do
               modName <- Map.lookup path ws.wsModuleByPath
               entry <- Map.lookup modName ws.wsAssembly.sources
               Just entry.sourceText
+            cachedLines = Map.lookup path ws.wsLineCache
         txt <- buffered <|> disk
-        Just (txt, r)
+        let lineVec = case cachedLines of
+              Just vec -> vec
+              Nothing -> textToLineVector txt
+        Just (txt, lineVec, r)
     Nothing -> pure Nothing
 
 -- | Pure projection: @path → text@ for every file in a workspace, with
@@ -188,3 +201,7 @@ workspaceFileTexts st path = do
       case Map.lookup root wsMap of
         Nothing -> pure Map.empty
         Just ws -> pure (wsFileTexts ws)
+
+-- | Split file text into a 'Vector' of lines for O(1) indexing.
+textToLineVector :: Text -> Vector Text
+textToLineVector = Vector.fromList . Text.lines

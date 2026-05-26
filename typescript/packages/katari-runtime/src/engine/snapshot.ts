@@ -75,11 +75,13 @@ export function deserialize(
       `engine.checkpoint: unsupported schemaVersion ${snap.schemaVersion}`,
     );
   }
+  const threads = structuredClone(snap.threads);
+  const scopes = structuredClone(snap.scopes);
   return {
     selfEndpoint: snap.selfEndpoint as State["selfEndpoint"],
     irModule,
-    threads: structuredClone(snap.threads),
-    scopes: structuredClone(snap.scopes),
+    threads,
+    scopes,
     closures: structuredClone(snap.closures),
     nextClosureId: snap.nextClosureId,
     delegations: structuredClone(snap.delegations),
@@ -89,6 +91,8 @@ export function deserialize(
     ffiTargetEndpoint: snap.ffiTargetEndpoint as State["ffiTargetEndpoint"],
     envTargetEndpoint: snap.envTargetEndpoint as State["envTargetEndpoint"],
     lastGcScopeCount: snap.lastGcScopeCount,
+    scopeCount: Object.keys(scopes).length,
+    threadCount: Object.keys(threads).length,
   };
 }
 

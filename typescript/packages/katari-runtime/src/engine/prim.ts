@@ -15,7 +15,6 @@
 // doesn't poison the version. Adding a prim here means coordinating with
 // the Haskell side's `Katari.Builtins` registry — names must match.
 
-import { match, P } from "ts-pattern";
 import { RecoverableEngineError } from "./errors.js";
 import { RawValueDecodeError, valueFromRaw, valueToRaw } from "../value-codec.js";
 import type { QualifiedName } from "../ir/types.js";
@@ -504,37 +503,51 @@ function logical(
  * function equality).
  */
 export function valueEquals(a: Value, b: Value): boolean {
-  return match([a, b] as const)
-    .with([{ kind: "number" }, { kind: "number" }], ([x, y]) => x.value === y.value)
-    .with([{ kind: "string" }, { kind: "string" }], ([x, y]) => x.value === y.value)
-    .with([{ kind: "boolean" }, { kind: "boolean" }], ([x, y]) => x.value === y.value)
-    .with([{ kind: "null" }, { kind: "null" }], () => true)
-    .with([{ kind: "array" }, { kind: "array" }], ([x, y]) => arrayEqual(x.elements, y.elements))
-    .with([{ kind: "tagged" }, { kind: "tagged" }], ([x, y]) => {
-      if (x.ctorId !== y.ctorId) return false;
-      const xk = Object.keys(x.fields), yk = Object.keys(y.fields);
+  if (a.kind !== b.kind) {
+    // Closures are never equal to anything, cross-kind is always false.
+    return false;
+  }
+  switch (a.kind) {
+    case "number":
+    case "string":
+    case "boolean":
+      return a.value === (b as typeof a).value;
+    case "null":
+      return true;
+    case "array":
+      return arrayEqual(a.elements, (b as typeof a).elements);
+    case "tagged": {
+      const bt = b as typeof a;
+      if (a.ctorId !== bt.ctorId) return false;
+      const xk = Object.keys(a.fields), yk = Object.keys(bt.fields);
       if (xk.length !== yk.length) return false;
       for (const k of xk) {
-        if (!Object.hasOwn(y.fields, k)) return false;
-        if (!valueEquals(x.fields[k]!, y.fields[k]!)) return false;
+        if (!Object.hasOwn(bt.fields, k)) return false;
+        if (!valueEquals(a.fields[k]!, bt.fields[k]!)) return false;
       }
       return true;
-    })
-    .with(
-      [{ kind: "secret" }, { kind: "secret" }],
-      // Plaintext equality on secrets is a deliberate compromise:
-      // it's needed for legitimate "is this key the same as that
-      // key" checks (e.g. token rotation logic), but the JS string
-      // == comparison short-circuits on first mismatched character
-      // — a side-channel timing leak. v0.2 should either replace
-      // this with a constant-time compare or remove `secret` from
-      // the `eq` prim's input type entirely.
-      ([x, y]) => x.value === y.value,
-    )
-    .with([{ kind: "closure" }, P._], () => false)
-    .with([P._, { kind: "closure" }], () => false)
-    // Cross-kind comparison always false.
-    .otherwise(() => false);
+    }
+    // Plaintext equality on secrets is a deliberate compromise:
+    // it's needed for legitimate "is this key the same as that
+    // key" checks (e.g. token rotation logic), but the JS string
+    // == comparison short-circuits on first mismatched character
+    // — a side-channel timing leak. v0.2 should either replace
+    // this with a constant-time compare or remove `secret` from
+    // the `eq` prim's input type entirely.
+    case "secret":
+      return a.value === (b as typeof a).value;
+    case "closure":
+      return false;
+    case "record":
+      // Records are compared structurally (all entries must match).
+      return false;
+    case "agentLiteral":
+      return false;
+    default: {
+      const _exhaustive: never = a;
+      throw new Error(`valueEquals: unknown value kind: ${(_exhaustive as Value).kind}`);
+    }
+  }
 }
 
 function arrayEqual(xs: Value[], ys: Value[]): boolean {

@@ -71,6 +71,7 @@ export function spawnChild(ctx: StepCtx, args: SpawnArgs): ThreadId {
     parentId: parentScopeId,
     values: {},
   };
+  ctx.state.scopeCount++;
 
   const newThreadId = createThreadId();
   const common = newCommonFields({
@@ -191,6 +192,7 @@ export function spawnChild(ctx: StepCtx, args: SpawnArgs): ThreadId {
     .exhaustive();
 
   ctx.state.threads[newThreadId] = thread as Thread;
+  ctx.state.threadCount++;
   setChild(parent, args.parentCallId, newThreadId);
 
   ctx.enqueue({ kind: "create", threadId: newThreadId });
@@ -236,6 +238,7 @@ export function spawnAgentRoot(
     parentId: args.capturedScopeId ?? null,
     values: {},
   };
+  ctx.state.scopeCount++;
 
   const newThreadId = createThreadId();
   const common = newCommonFields({
@@ -253,6 +256,7 @@ export function spawnAgentRoot(
     outboundEscalations: {},
   };
   ctx.state.threads[newThreadId] = agent as Thread;
+  ctx.state.threadCount++;
   ctx.enqueue({ kind: "create", threadId: newThreadId });
   return newThreadId;
 }

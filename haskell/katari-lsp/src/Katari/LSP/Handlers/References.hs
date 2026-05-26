@@ -35,7 +35,7 @@ referencesHandler st =
         mResult <- liftIO (lookupCompileResult st path)
         mWsOcc <- liftIO (lookupOccIndex st path)
         case (mResult, mWsOcc) of
-          (Just (txt, result), Just occ) -> do
+          (Just (txt, _lineVec, result), Just occ) -> do
             let kPos = lspPositionToKatari txt pos
                 mRef =
                   Query.identifyAtPosition

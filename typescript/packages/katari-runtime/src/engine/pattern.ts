@@ -6,7 +6,6 @@
 // surfaced as Error so the host poisons. The compiler's K0291 / K0301
 // checks should make this unreachable.
 
-import { match, P } from "ts-pattern";
 import type { LiteralValue, MatchPattern, TypePatternTag } from "../ir/types.js";
 import type { Value } from "./value.js";
 
@@ -24,15 +23,16 @@ function tryMatchInto(
   value: Value,
   bindings: Record<number, Value>,
 ): boolean {
-  return match(pattern)
-    .with({ kind: "matchPatternAny" }, () => true)
-    .with({ kind: "matchPatternVariable" }, (p) => {
-      bindOnce(bindings, p.body, value);
+  switch (pattern.kind) {
+    case "matchPatternAny":
       return true;
-    })
-    .with({ kind: "matchPatternLiteral" }, (p) => matchLiteral(p.body, value))
-    .with({ kind: "matchPatternConstructor" }, (p) => {
-      const [ctorQName, fieldPatterns] = p.body;
+    case "matchPatternVariable":
+      bindOnce(bindings, pattern.body, value);
+      return true;
+    case "matchPatternLiteral":
+      return matchLiteral(pattern.body, value);
+    case "matchPatternConstructor": {
+      const [ctorQName, fieldPatterns] = pattern.body;
       if (value.kind !== "tagged" || value.ctorId !== ctorQName) return false;
       for (const [fieldName, fieldPattern] of fieldPatterns) {
         const fv = value.fields[fieldName];
@@ -40,35 +40,39 @@ function tryMatchInto(
         if (!tryMatchInto(fieldPattern, fv, bindings)) return false;
       }
       return true;
-    })
-    .with({ kind: "matchPatternTuple" }, (p) => {
+    }
+    case "matchPatternTuple": {
       // Tuples are stored as arrays at runtime; the pattern enforces
       // exact arity (matching the static type's tuple length, which
       // the solver already pins via 'tuple arity mismatch' / K0220).
       if (value.kind !== "array") return false;
-      if (value.elements.length !== p.body.length) return false;
-      for (let i = 0; i < p.body.length; i++) {
-        const sp = p.body[i]!;
+      if (value.elements.length !== pattern.body.length) return false;
+      for (let i = 0; i < pattern.body.length; i++) {
+        const sp = pattern.body[i]!;
         const sv = value.elements[i]!;
         if (!tryMatchInto(sp, sv, bindings)) return false;
       }
       return true;
-    })
-    .with({ kind: "matchPatternTypeGuard" }, (p) => {
-      const [tag, inner] = p.body;
+    }
+    case "matchPatternTypeGuard": {
+      const [tag, inner] = pattern.body;
       if (!matchesTypeTag(tag, value)) return false;
       return tryMatchInto(inner, value, bindings);
-    })
-    .with({ kind: "matchPatternRecord" }, (p) => {
+    }
+    case "matchPatternRecord": {
       if (value.kind !== "record") return false;
-      for (const [entryKey, sub] of p.body) {
+      for (const [entryKey, sub] of pattern.body) {
         const fv = value.entries[entryKey];
         if (fv === undefined) return false;
         if (!tryMatchInto(sub, fv, bindings)) return false;
       }
       return true;
-    })
-    .exhaustive();
+    }
+    default: {
+      const _exhaustive: never = pattern;
+      throw new Error(`engine.pattern: unknown pattern kind: ${(_exhaustive as MatchPattern).kind}`);
+    }
+  }
 }
 
 // Returns true when `value`'s runtime kind matches the type-guard `tag`.
@@ -76,19 +80,22 @@ function tryMatchInto(
 // `number` accepts any number value. The `agent` tag accepts closure /
 // agent-ref values (both `closure` and `agentLiteral` runtime kinds).
 function matchesTypeTag(tag: TypePatternTag, value: Value): boolean {
-  return match(tag)
-    .with(
-      "typePatternTagInteger",
-      () => value.kind === "number" && Number.isInteger(value.value),
-    )
-    .with("typePatternTagNumber", () => value.kind === "number")
-    .with("typePatternTagString", () => value.kind === "string")
-    .with("typePatternTagBoolean", () => value.kind === "boolean")
-    .with(
-      "typePatternTagAgent",
-      () => value.kind === "closure" || value.kind === "agentLiteral",
-    )
-    .exhaustive();
+  switch (tag) {
+    case "typePatternTagInteger":
+      return value.kind === "number" && Number.isInteger(value.value);
+    case "typePatternTagNumber":
+      return value.kind === "number";
+    case "typePatternTagString":
+      return value.kind === "string";
+    case "typePatternTagBoolean":
+      return value.kind === "boolean";
+    case "typePatternTagAgent":
+      return value.kind === "closure" || value.kind === "agentLiteral";
+    default: {
+      const _exhaustive: never = tag;
+      throw new Error(`engine.pattern: unknown type pattern tag: ${_exhaustive}`);
+    }
+  }
 }
 
 function bindOnce(
@@ -105,12 +112,23 @@ function bindOnce(
 }
 
 export function matchLiteral(literal: LiteralValue, value: Value): boolean {
-  return match([literal, value] as const)
-    .with([{ kind: "literalValueInteger" }, { kind: "number" }], ([l, v]) => v.value === l.integer)
-    .with([{ kind: "literalValueNumber" }, { kind: "number" }], ([l, v]) => v.value === l.number)
-    .with([{ kind: "literalValueString" }, { kind: "string" }], ([l, v]) => v.value === l.string)
-    .with([{ kind: "literalValueBoolean" }, { kind: "boolean" }], ([l, v]) => v.value === l.boolean)
-    .with([{ kind: "literalValueNull" }, { kind: "null" }], () => true)
-    .with([P._, P._], () => false)
-    .exhaustive();
+  switch (literal.kind) {
+    case "literalValueInteger":
+      return value.kind === "number" && value.value === literal.integer;
+    case "literalValueNumber":
+      return value.kind === "number" && value.value === literal.number;
+    case "literalValueString":
+      return value.kind === "string" && value.value === literal.string;
+    case "literalValueBoolean":
+      return value.kind === "boolean" && value.value === literal.boolean;
+    case "literalValueNull":
+      return value.kind === "null";
+    case "literalValueAgent":
+      // Agent literals are not used in pattern matching positions.
+      return false;
+    default: {
+      const _exhaustive: never = literal;
+      throw new Error(`engine.pattern: unknown literal kind: ${(_exhaustive as LiteralValue).kind}`);
+    }
+  }
 }

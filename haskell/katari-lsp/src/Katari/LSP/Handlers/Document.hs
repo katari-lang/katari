@@ -30,6 +30,7 @@ import Katari.LSP.State
     WorkspaceState (..),
     findProjectRootCached,
     snapshotWorkspaceSources,
+    textToLineVector,
     wsFileTexts,
   )
 import Katari.SourceSpan (SourceSpan (..))
@@ -91,6 +92,7 @@ onOpen st path txt = do
           ( \ws ->
               ws
                 { wsFiles = Map.insert path txt ws.wsFiles,
+                  wsLineCache = Map.insert path (textToLineVector txt) ws.wsLineCache,
                   wsOpenFiles = Set.insert path ws.wsOpenFiles
                 }
           )
@@ -106,7 +108,11 @@ onChange st path txt = do
     Just root ->
       atomically $ modifyTVar' st.workspaces $ \wsMap ->
         Map.adjust
-          ( \ws -> ws {wsFiles = Map.insert path txt ws.wsFiles}
+          ( \ws ->
+              ws
+                { wsFiles = Map.insert path txt ws.wsFiles,
+                  wsLineCache = Map.insert path (textToLineVector txt) ws.wsLineCache
+                }
           )
           root
           wsMap
@@ -126,7 +132,8 @@ onClose st path = do
           ( \ws ->
               ws
                 { wsOpenFiles = Set.delete path ws.wsOpenFiles,
-                  wsFiles = Map.delete path ws.wsFiles
+                  wsFiles = Map.delete path ws.wsFiles,
+                  wsLineCache = Map.delete path ws.wsLineCache
                 }
           )
           root
@@ -172,6 +179,7 @@ ensureWorkspaceLoaded st root = do
                           wsAssembly = assembly,
                           wsModuleByPath = moduleByPath,
                           wsFiles = Map.empty,
+                          wsLineCache = Map.empty,
                           wsOpenFiles = Set.empty,
                           wsLastResult = Nothing,
                           wsOccIndex = Nothing

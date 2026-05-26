@@ -163,6 +163,10 @@ data LowerState = LowerState
     -- top-level callables are registered; surfaces in
     -- 'IRModule.entries'.
     lsEntries :: Map QualifiedName BlockId,
+    -- | Reverse of 'lsEntries': BlockId → QualifiedName. Maintained in
+    -- sync with 'lsEntries' so reverse lookups are O(log n) instead of
+    -- O(n) scans.
+    lsBlockQNames :: Map BlockId QualifiedName,
     -- | Prim bare name → leaf 'BlockPrim' 'BlockId'. Populated when a
     -- 'DeclarationPrimAgent' is lowered; read by 'primBlockId' for
     -- compiler-internal desugar sites that emit direct 'StatementCall'
@@ -186,6 +190,7 @@ initialLowerState =
       lsTopLevelBlocks = Map.empty,
       lsTopLevelQNames = Map.empty,
       lsEntries = Map.empty,
+      lsBlockQNames = Map.empty,
       lsPrimBlockIds = Map.empty,
       lsCurrentEmitted = [],
       lsErrors = []
@@ -651,6 +656,7 @@ registerDeclarationKinds zonkResult =
       modify $ \state ->
         state
           { lsEntries = Map.insert qualifiedName blockId state.lsEntries,
+            lsBlockQNames = Map.insert blockId qualifiedName state.lsBlockQNames,
             lsTopLevelQNames = Map.insert variableId qualifiedName state.lsTopLevelQNames
           }
 
@@ -790,10 +796,10 @@ lowerAllDeclarations zonkResult = do
     -- 'recordTopLevelCallable' / 'registerPrimitives').
     requireAgentQName :: Text -> Text -> BlockId -> Lower QualifiedName
     requireAgentQName ctx declName agentBlk = do
-      entries <- gets (.lsEntries)
-      case [qn | (qn, bid) <- Map.toList entries, bid == agentBlk] of
-        (qn : _) -> pure qn
-        [] ->
+      blockQNames <- gets (.lsBlockQNames)
+      case Map.lookup agentBlk blockQNames of
+        Just qn -> pure qn
+        Nothing ->
           throwError
             ( Internal.internalErrorNoSpan
                 (ctx <> ": '" <> declName <> "' agent slot not in lsEntries")
@@ -931,8 +937,8 @@ lowerSimpleAgent blockId name paramVars prelude blk description inputSchema outp
   -- lsEntries (top-level agents are pre-registered with their qname).
   -- Local / nested agents use a synthetic name; the runtime never reads
   -- AgentBlock.qualifiedName for dispatch, only for debug output.
-  entries <- gets (.lsEntries)
-  let qname = case findQNameForBlock blockId entries of
+  blockQNames <- gets (.lsBlockQNames)
+  let qname = case Map.lookup blockId blockQNames of
         Just qn -> qn
         Nothing -> QualifiedName "<local>" name
       agent =
@@ -946,12 +952,6 @@ lowerSimpleAgent blockId name paramVars prelude blk description inputSchema outp
             outputSchema = outputSchema
           }
   recordBlock blockId (BlockAgent agent) (Just name)
-  where
-    findQNameForBlock :: BlockId -> Map QualifiedName BlockId -> Maybe QualifiedName
-    findQNameForBlock target entries =
-      case [qn | (qn, bid) <- Map.toList entries, bid == target] of
-        (qn : _) -> Just qn
-        [] -> Nothing
 
 -- | Lower a 'RequestHandler' to a 'BlockUser'. The handler body inherits
 -- the handle scope (state vars are directly accessible via 'withLocals'

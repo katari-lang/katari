@@ -42,6 +42,7 @@ export function requireThread(ctx: StepCtx, id: ThreadId): Thread {
 
 export function deleteThread(ctx: StepCtx, id: ThreadId): void {
   delete ctx.state.threads[id];
+  ctx.state.threadCount--;
 }
 
 // ─── Children bookkeeping ──────────────────────────────────────────────────
@@ -457,6 +458,7 @@ export function createScope(
 ): Scope {
   const sc: Scope = { id, parentId, values: {} };
   ctx.state.scopes[id] = sc as Scope;
+  ctx.state.scopeCount++;
   return ctx.state.scopes[id] as Scope;
 }
 

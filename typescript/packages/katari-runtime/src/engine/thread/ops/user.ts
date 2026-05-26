@@ -138,6 +138,7 @@ function runStatements(
     threadId: t.id,
   });
   delete ctx.state.threads[t.id];
+  ctx.state.threadCount--;
 }
 
 type StatementOutcome = "advance" | "wait";

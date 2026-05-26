@@ -92,4 +92,8 @@ export type State = {
   envTargetEndpoint: Endpoint;
   /** Scope count at the most recent GC pass. Used by the GC trigger heuristic. */
   lastGcScopeCount: number;
+  /** Tracked counter for `Object.keys(scopes).length`. Maintained by spawn / GC. */
+  scopeCount: number;
+  /** Tracked counter for `Object.keys(threads).length`. Maintained by spawn / deleteThread. */
+  threadCount: number;
 };

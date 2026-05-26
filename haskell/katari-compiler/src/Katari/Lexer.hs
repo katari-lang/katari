@@ -47,6 +47,8 @@ import Control.Monad.State.Strict
 import Data.Char (chr)
 import Data.List.NonEmpty qualified as NE
 import Data.Proxy (Proxy (..))
+import Data.Map.Strict (Map)
+import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Void (Void)
@@ -606,10 +608,15 @@ lexKeywordText = \case
   KeywordPrimitive -> "primitive"
   KeywordUsing -> "using"
 
--- | Reverse lookup: surface text → 'Keyword'. Built from 'lexKeywordText' so
--- adding a new keyword only requires extending the single table above.
+-- | Top-level map from surface keyword text to 'Keyword'. Built once from
+-- 'lexKeywordText' so adding a new keyword only requires extending the
+-- single table above.
+keywordMap :: Map Text Keyword
+keywordMap = Map.fromList [(lexKeywordText keyword, keyword) | keyword <- [minBound .. maxBound]]
+
+-- | Reverse lookup: surface text → 'Keyword'. O(log n) via 'keywordMap'.
 lexKeywordOf :: Text -> Maybe Keyword
-lexKeywordOf name = lookup name [(lexKeywordText keyword, keyword) | keyword <- [minBound .. maxBound]]
+lexKeywordOf = (`Map.lookup` keywordMap)
 
 -- | Punctuation or operator (excluding `{` and `}` which are handled in
 -- lexBrace). Multi-char KatariTokens are tried before their shorter prefixes.

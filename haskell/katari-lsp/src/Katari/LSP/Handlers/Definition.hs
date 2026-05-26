@@ -29,7 +29,7 @@ definitionHandler st =
         mResult <- liftIO (lookupCompileResult st path)
         case mResult of
           Nothing -> responder (Right (LSP.InR (LSP.InR LSP.Null)))
-          Just (txt, result) -> do
+          Just (txt, _lineVec, result) -> do
             let kPos = lspPositionToKatari txt pos
                 mSpan =
                   Query.findDefinition

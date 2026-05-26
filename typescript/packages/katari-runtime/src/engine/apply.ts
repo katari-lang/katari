@@ -48,6 +48,8 @@ export function createState(
     ffiTargetEndpoint: options.ffiEndpoint ?? DEFAULT_FFI_ENDPOINT,
     envTargetEndpoint: options.envEndpoint ?? DEFAULT_ENV_ENDPOINT,
     lastGcScopeCount: 0,
+    scopeCount: 0,
+    threadCount: 0,
   };
 }
 

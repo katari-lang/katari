@@ -149,6 +149,7 @@ function finishWithValue(
   if (t.parent === null) {
     emitAgentRootCompletion(ctx, t, value);
     delete ctx.state.threads[t.id];
+    ctx.state.threadCount--;
     return;
   }
   ctx.enqueue({
@@ -158,6 +159,7 @@ function finishWithValue(
     value,
   });
   delete ctx.state.threads[t.id];
+  ctx.state.threadCount--;
 }
 
 /**

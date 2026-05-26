@@ -30,9 +30,8 @@ const GC_MIN_DELTA = 32;
  *     `lastGcScopeCount * GROWTH_FACTOR + MIN_DELTA`
  */
 export function shouldGc(state: State): boolean {
-  const scopeCount = Object.keys(state.scopes).length;
-  if (Object.keys(state.threads).length === 0) return scopeCount > 0;
-  return scopeCount > state.lastGcScopeCount * GC_GROWTH_FACTOR + GC_MIN_DELTA;
+  if (state.threadCount === 0) return state.scopeCount > 0;
+  return state.scopeCount > state.lastGcScopeCount * GC_GROWTH_FACTOR + GC_MIN_DELTA;
 }
 
 /** Mutate the Immer draft to remove unreachable scopes + closures. */
@@ -86,7 +85,8 @@ export function collectGarbage(state: State): void {
     }
   }
 
-  state.lastGcScopeCount = Object.keys(state.scopes).length;
+  state.scopeCount = reachableScopes.size;
+  state.lastGcScopeCount = reachableScopes.size;
 }
 
 function traceValue(
