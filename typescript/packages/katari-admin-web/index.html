@@ -12,6 +12,24 @@
       href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@300;400;500&family=DM+Sans:wght@200;300;400;500;600;700&family=Lexend:wght@200..700&family=Lexend+Tera:wght@900&family=Noto+Sans+JP:wght@200;300;400;500;600;700&display=swap"
     />
     <title>Katari Admin</title>
+    <script>
+      // Apply theme class before React mounts to prevent FOUC.
+      // Mirrors next-themes' storage key ("theme") and logic.
+      (function () {
+        var stored = localStorage.getItem("theme");
+        var prefersDark =
+          window.matchMedia &&
+          window.matchMedia("(prefers-color-scheme: dark)").matches;
+        if (stored === "dark" || (stored !== "light" && prefersDark)) {
+          document.documentElement.classList.add("dark");
+        }
+      })();
+    </script>
+    <style>
+      /* Prevent white flash: set background before CSS loads */
+      html { background-color: #fafaf9; }
+      html.dark { background-color: #0c0a09; }
+    </style>
   </head>
   <body class="bg-background text-foreground">
     <div id="root"></div>
