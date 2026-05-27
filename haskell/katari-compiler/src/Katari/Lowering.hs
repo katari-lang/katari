@@ -1,3 +1,6 @@
+{-# LANGUAGE DuplicateRecordFields #-}
+{-# OPTIONS_GHC -Wno-ambiguous-fields #-}
+
 -- | Per-module lowering: Zonked AST → IR fragments.
 --
 -- Each module is lowered in complete isolation (its own BlockId/VarId
@@ -13,18 +16,20 @@ module Katari.Lowering
   )
 where
 
-import Data.Aeson (FromJSON (..), ToJSON (..), defaultOptions, genericParseJSON, genericToJSON)
-import GHC.Generics (Generic)
 import Control.Monad (foldM, forM, mapAndUnzipM)
 import Control.Monad.Except (ExceptT, runExceptT, throwError)
 import Control.Monad.Reader (ReaderT, asks, local, runReaderT)
 import Control.Monad.State.Strict (State, gets, modify, runState)
+import Data.Aeson (FromJSON (..), ToJSON (..), defaultOptions, genericParseJSON, genericToJSON)
+import Data.Bifunctor (Bifunctor (..))
+import Data.Foldable (for_)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (catMaybes)
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Word (Word32)
+import GHC.Generics (Generic)
 import Katari.AST (Phase (Zonked))
 import Katari.AST qualified as AST
 import Katari.Diagnostic (Diagnostic, diagnosticError)
@@ -277,26 +282,6 @@ resolveAsValue canBeLocal resolution sourceSpan nameText hint = case resolution 
           recordError (LoweringErrorUnresolvedVariable sourceSpan nameText)
           freshVarId Nothing
 
--- | Resolve a variable to its same-module BlockId (for declaration
--- body lowering). Only looks up lsTopLevelBlocks — cross-module
--- references go through 'resolveAsValue' instead.
-resolveLocalBlockId ::
-  AST.NameRefResolution Zonked AST.VariableRef ->
-  SourceSpan ->
-  Text ->
-  Lower (Maybe BlockId)
-resolveLocalBlockId resolution sourceSpan nameText = case resolution of
-  Nothing -> do
-    recordError (LoweringErrorUnresolvedVariable sourceSpan nameText)
-    pure Nothing
-  Just variableResolution -> do
-    maybeBlockId <- gets (Map.lookup variableResolution . (.lsTopLevelBlocks))
-    case maybeBlockId of
-      Just blockId -> pure (Just blockId)
-      Nothing -> do
-        recordError (LoweringErrorUnresolvedVariable sourceSpan nameText)
-        pure Nothing
-
 -- | Emit a call to a primitive via the standard delegate path
 -- (LiteralValueAgent → DelegateTargetValue). The prim is resolved by
 -- QualifiedName at runtime through IRModule.entries, so no cross-module
@@ -450,17 +435,18 @@ lowerModule idResult zonkResult moduleName moduleAST =
    in case result of
         Left diagnostic -> (Left diagnostic, errors)
         Right () ->
-          ( Right ModuleLoweringResult
-              { mlrBlocks = finalState.lsBlocks,
-                mlrEntries = finalState.lsEntries,
-                mlrNameTable =
-                  NameTable
-                    { varNames = finalState.lsVarNames,
-                      blockNames = finalState.lsBlockNames
-                    },
-                mlrBlockCount = finalState.lsNextBlockId,
-                mlrVarCount = finalState.lsNextVarId
-              },
+          ( Right
+              ModuleLoweringResult
+                { mlrBlocks = finalState.lsBlocks,
+                  mlrEntries = finalState.lsEntries,
+                  mlrNameTable =
+                    NameTable
+                      { varNames = finalState.lsVarNames,
+                        blockNames = finalState.lsBlockNames
+                      },
+                  mlrBlockCount = finalState.lsNextBlockId,
+                  mlrVarCount = finalState.lsNextVarId
+                },
             errors
           )
 
@@ -509,9 +495,10 @@ mergeModuleLowerings fragments =
                     ]
               }
           (restBlocks, restEntries, restNameTable) =
-            go (blockOffset + fragment.mlrBlockCount)
-               (varOffset + fragment.mlrVarCount)
-               rest
+            go
+              (blockOffset + fragment.mlrBlockCount)
+              (varOffset + fragment.mlrVarCount)
+              rest
        in ( Map.union offsetBlocks restBlocks,
             Map.union offsetEntries restEntries,
             NameTable
@@ -748,9 +735,7 @@ resolveDeclaration ::
 resolveDeclaration nameRef action = case nameRef.resolution of
   Just variableResolution -> do
     maybeBlockId <- gets (Map.lookup variableResolution . (.lsTopLevelBlocks))
-    case maybeBlockId of
-      Just blockId -> action variableResolution blockId
-      Nothing -> pure ()
+    for_ maybeBlockId (action variableResolution)
   Nothing -> pure ()
 
 -- | Phase 1 invariant: every reserved agent slot has exactly one
@@ -816,14 +801,13 @@ lookupRequestQName = \case
 -- Produces a 'BlockAgent' wrapper that catches @return@ and references
 -- an inner 'BlockUser' body.
 lowerAgentDeclaration :: AST.AgentDeclaration Zonked -> BlockId -> Lower ()
-lowerAgentDeclaration decl blockId = do
+lowerAgentDeclaration decl =
   lowerAgentLike
     decl.name.text
     decl.name.resolution
     decl.annotation
     decl.parameters
     decl.body
-    blockId
 
 -- | Shared lowering shape for any \"agent-like\" callable: a top-level
 -- 'AgentDeclaration', or a local 'AgentStatement'. Allocates param
@@ -1239,8 +1223,8 @@ lowerTemplate templateExpression = do
   case vars of
     [] -> emitLoadLiteral (LiteralValueString "")
     [single] -> stringify single
-    (first : rest) -> do
-      initVar <- stringify first
+    (firstVarId : rest) -> do
+      initVar <- stringify firstVarId
       foldM concatStep initVar rest
   where
     stringify v = emitPrimCall "format" [Arg "value" v]
@@ -1740,89 +1724,100 @@ offsetVarId (VarId base) (VarId original) = VarId (base + original)
 offsetBlockInBlock :: (BlockId -> BlockId) -> (VarId -> VarId) -> Block -> Block
 offsetBlockInBlock offsetB offsetV = \case
   BlockAgent agent ->
-    BlockAgent agent
-      { parameters = map (offsetParam offsetV) agent.parameters,
-        entryBody = offsetB agent.entryBody
-      }
+    BlockAgent
+      agent
+        { parameters = map (offsetParam offsetV) agent.parameters,
+          entryBody = offsetB agent.entryBody
+        }
   BlockUser user ->
-    BlockUser user
-      { parameters = map (offsetParam offsetV) user.parameters,
-        statements = map (offsetStatement offsetB offsetV) user.statements,
-        trailing = fmap offsetV user.trailing
-      }
+    BlockUser
+      user
+        { parameters = map (offsetParam offsetV) user.parameters,
+          statements = map (offsetStatement offsetB offsetV) user.statements,
+          trailing = fmap offsetV user.trailing
+        }
   BlockPrim name -> BlockPrim name
   BlockRequest qname -> BlockRequest qname
   BlockConstructor qname -> BlockConstructor qname
   BlockDelegate delegate ->
-    BlockDelegate delegate
-      { target = case delegate.target of
-          DelegateTargetExternal ext -> DelegateTargetExternal ext
-          DelegateTargetValue varId -> DelegateTargetValue (offsetV varId)
-      }
+    BlockDelegate
+      delegate
+        { target = case delegate.target of
+            DelegateTargetExternal ext -> DelegateTargetExternal ext
+            DelegateTargetValue varId -> DelegateTargetValue (offsetV varId)
+            DelegateTargetInternal internal -> DelegateTargetInternal internal
+        }
   BlockMatch matchBlock ->
-    BlockMatch matchBlock
-      { subject = offsetV matchBlock.subject,
-        arms = map (offsetArm offsetB offsetV) matchBlock.arms,
-        defaultArm = fmap offsetB matchBlock.defaultArm
-      }
+    BlockMatch
+      matchBlock
+        { subject = offsetV matchBlock.subject,
+          arms = map (offsetArm offsetB offsetV) matchBlock.arms,
+          defaultArm = fmap offsetB matchBlock.defaultArm
+        }
   BlockFor forBlock ->
-    BlockFor forBlock
-      { iters = map (\(element, source) -> (offsetV element, offsetV source)) forBlock.iters,
-        stateInits = map (\(body, initial) -> (offsetV body, offsetV initial)) forBlock.stateInits,
-        bodyBlock = offsetB forBlock.bodyBlock,
-        thenBlock = fmap offsetB forBlock.thenBlock
-      }
+    BlockFor
+      forBlock
+        { iters = map (Data.Bifunctor.bimap offsetV offsetV) forBlock.iters,
+          stateInits = map (Data.Bifunctor.bimap offsetV offsetV) forBlock.stateInits,
+          bodyBlock = offsetB forBlock.bodyBlock,
+          thenBlock = fmap offsetB forBlock.thenBlock
+        }
   BlockHandle handleBlock ->
-    BlockHandle handleBlock
-      { stateInits = map (\(body, initial) -> (offsetV body, offsetV initial)) handleBlock.stateInits,
-        body = offsetB handleBlock.body,
-        handlers = map (offsetHandler offsetB) handleBlock.handlers,
-        thenBlock = fmap offsetB handleBlock.thenBlock
-      }
+    BlockHandle
+      handleBlock
+        { stateInits = map (Data.Bifunctor.bimap offsetV offsetV) handleBlock.stateInits,
+          body = offsetB handleBlock.body,
+          handlers = map (offsetHandler offsetB) handleBlock.handlers,
+          thenBlock = fmap offsetB handleBlock.thenBlock
+        }
   BlockTuple tupleBlock ->
-    BlockTuple tupleBlock { elements = map offsetB tupleBlock.elements }
+    BlockTuple tupleBlock {elements = map offsetB tupleBlock.elements}
   BlockArray arrayBlock ->
-    BlockArray arrayBlock { elements = map offsetB arrayBlock.elements }
-  BlockRecord recordBlock ->
-    BlockRecord recordBlock { entries = map (\(label, blockId) -> (label, offsetB blockId)) recordBlock.entries }
+    BlockArray arrayBlock {elements = map offsetB arrayBlock.elements}
+  BlockRecord block ->
+    BlockRecord block {entries = map (second offsetB) block.entries}
 
 offsetParam :: (VarId -> VarId) -> Param -> Param
-offsetParam offsetV param = param { var = offsetV param.var }
+offsetParam offsetV param = param {var = offsetV param.var}
 
 offsetStatement :: (BlockId -> BlockId) -> (VarId -> VarId) -> Statement -> Statement
 offsetStatement offsetB offsetV = \case
   StatementCall callData ->
-    StatementCall callData
-      { block = offsetB callData.block,
-        arguments = map (offsetArg offsetV) callData.arguments,
-        output = fmap offsetV callData.output
-      }
+    StatementCall
+      callData
+        { block = offsetB callData.block,
+          arguments = map (offsetArg offsetV) callData.arguments,
+          output = fmap offsetV callData.output
+        }
   StatementMakeClosure closureData ->
-    StatementMakeClosure closureData
-      { output = offsetV closureData.output,
-        block = offsetB closureData.block
-      }
+    StatementMakeClosure
+      closureData
+        { output = offsetV closureData.output,
+          block = offsetB closureData.block
+        }
   StatementLoadLiteral loadData ->
-    StatementLoadLiteral loadData { output = offsetV loadData.output }
+    StatementLoadLiteral loadData {output = offsetV loadData.output}
   StatementExit exitData ->
-    StatementExit exitData { value = offsetV exitData.value }
+    StatementExit exitData {value = offsetV exitData.value}
   StatementCont contData ->
-    StatementCont contData
-      { value = fmap offsetV contData.value,
-        modifiers = map (\(target, newVal) -> (offsetV target, offsetV newVal)) contData.modifiers
-      }
+    StatementCont
+      contData
+        { value = fmap offsetV contData.value,
+          modifiers = map (Data.Bifunctor.bimap offsetV offsetV) contData.modifiers
+        }
   StatementBindPattern bindData ->
-    StatementBindPattern bindData
-      { source = offsetV bindData.source,
-        pattern = offsetMatchPattern offsetV bindData.pattern
-      }
+    StatementBindPattern
+      bindData
+        { source = offsetV bindData.source,
+          pattern = offsetMatchPattern offsetV bindData.pattern
+        }
 
 offsetArg :: (VarId -> VarId) -> Arg -> Arg
-offsetArg offsetV arg = arg { var = offsetV arg.var }
+offsetArg offsetV arg = arg {var = offsetV arg.var}
 
 offsetArm :: (BlockId -> BlockId) -> (VarId -> VarId) -> MatchArm -> MatchArm
 offsetArm offsetB offsetV arm =
-  arm { pattern = offsetMatchPattern offsetV arm.pattern, body = offsetB arm.body }
+  arm {pattern = offsetMatchPattern offsetV arm.pattern, body = offsetB arm.body}
 
 offsetMatchPattern :: (VarId -> VarId) -> MatchPattern -> MatchPattern
 offsetMatchPattern offsetV = \case
@@ -1830,14 +1825,14 @@ offsetMatchPattern offsetV = \case
   MatchPatternVariable varId -> MatchPatternVariable (offsetV varId)
   MatchPatternLiteral literal -> MatchPatternLiteral literal
   MatchPatternConstructor qname fields ->
-    MatchPatternConstructor qname (map (\(label, pat) -> (label, offsetMatchPattern offsetV pat)) fields)
+    MatchPatternConstructor qname (map (Data.Bifunctor.second (offsetMatchPattern offsetV)) fields)
   MatchPatternTuple elements ->
     MatchPatternTuple (map (offsetMatchPattern offsetV) elements)
   MatchPatternTypeGuard tag inner ->
     MatchPatternTypeGuard tag (offsetMatchPattern offsetV inner)
   MatchPatternRecord entries ->
-    MatchPatternRecord (map (\(label, pat) -> (label, offsetMatchPattern offsetV pat)) entries)
+    MatchPatternRecord (map (Data.Bifunctor.second (offsetMatchPattern offsetV)) entries)
 
 offsetHandler :: (BlockId -> BlockId) -> Handler -> Handler
 offsetHandler offsetB handler =
-  handler { handlerBody = offsetB handler.handlerBody }
+  handler {handlerBody = offsetB handler.handlerBody}

@@ -22,22 +22,21 @@ where
 import Control.Lens ((^.))
 import Control.Monad.IO.Class (liftIO)
 import Data.Char (isAlphaNum)
-import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
-import qualified Data.Set as Set
+import Data.Set qualified as Set
 import Data.Text (Text)
-import qualified Data.Text as Text
+import Data.Text qualified as Text
 import Data.Vector (Vector)
-import qualified Data.Vector as Vector
+import Data.Vector qualified as Vector
 import Katari.Compile (CompileResult (..))
 import Katari.LSP.Convert (lspPositionToKatari)
 import Katari.LSP.State (ServerState, lookupCompileResult)
-import qualified Katari.Query.Completion as Comp
-import qualified Katari.SourceSpan as K
-import qualified Language.LSP.Protocol.Lens as L
-import qualified Language.LSP.Protocol.Message as LSP
-import qualified Language.LSP.Protocol.Types as LSP
-import qualified Language.LSP.Server as LSP
+import Katari.Query.Completion qualified as Comp
+import Katari.SourceSpan qualified as K
+import Language.LSP.Protocol.Lens qualified as L
+import Language.LSP.Protocol.Message qualified as LSP
+import Language.LSP.Protocol.Types qualified as LSP
+import Language.LSP.Server qualified as LSP
 
 completionHandler :: ServerState -> LSP.Handlers (LSP.LspM ())
 completionHandler st =
@@ -164,6 +163,7 @@ findOuterOpenParen :: Text -> Maybe (Int, Char)
 findOuterOpenParen t =
   let chars = Text.unpack t
       indexed = zip [0 ..] chars
+      go :: [(Int, Char)] -> Int -> Maybe (Int, Char)
       go [] _depth = Nothing
       go ((i, c) : rest) depth
         | c == ')' = go rest (depth + 1)

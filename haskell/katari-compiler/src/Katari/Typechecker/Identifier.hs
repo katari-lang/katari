@@ -580,14 +580,6 @@ registerModule :: Text -> ModuleData -> Identifier ()
 registerModule moduleName moduleData =
   modify $ \state -> state {modules = Map.insert moduleName moduleData state.modules}
 
-freshRequestId :: QualifiedName -> RequestData -> Identifier RequestId
-freshRequestId qualifiedName requestData = do
-  state <- get
-  let requestId = RequestId state.nextRequestId
-      patched = requestData {requestId = requestId}
-  put state {nextRequestId = state.nextRequestId + 1, requests = Map.insert qualifiedName patched state.requests}
-  pure requestId
-
 freshConstructorId :: QualifiedName -> ConstructorData -> Identifier ConstructorId
 freshConstructorId qualifiedName constructorData = do
   state <- get
@@ -1296,14 +1288,6 @@ resolveBareVariable nameRef =
     Just resolution -> pure (Just resolution)
     Nothing -> do
       emitError (ErrorUndefinedName nameRef.sourceSpan nameRef.text)
-      pure Nothing
-
-resolveModuleRef :: NameRef Parsed ModuleRef -> Identifier (NameRefResolution Identified ModuleRef)
-resolveModuleRef nameRef =
-  lookupModule nameRef.text >>= \case
-    Just moduleName -> pure (Just moduleName)
-    Nothing -> do
-      emitError (ErrorNotAModule nameRef.sourceSpan nameRef.text)
       pure Nothing
 
 -- | Resolve @[module.]name@ as a request reference (handler position). The
@@ -2289,7 +2273,6 @@ data ModuleIdentifyResult = ModuleIdentifyResult
 --
 -- The caller must supply:
 --
---   * @trustedStdlibNames@ — module names the compiler owns (for K0113 skip).
 --   * @allExportNames@ — every module's export names (from 'scanExportNames'),
 --     used for import validation (does the target module export this name?).
 --   * @processedExportTables@ — full export tables of already-identified
@@ -2300,7 +2283,6 @@ data ModuleIdentifyResult = ModuleIdentifyResult
 --   * @inputState@ — the 'IdentifierState' to start from. The caller threads
 --     this forward across sequential module identifications.
 identifyModule ::
-  Set Text ->
   Map Text (Set Text) ->
   Map Text (Map Text SymbolEntry) ->
   Set Text ->
@@ -2308,7 +2290,7 @@ identifyModule ::
   Text ->
   Module Parsed ->
   ModuleIdentifyResult
-identifyModule trustedStdlibNames _allExportNames processedExportTables allModuleNames inputState currentModuleName parsedModule =
+identifyModule _allExportNames processedExportTables allModuleNames inputState currentModuleName parsedModule =
   let ((identifiedModuleAST, exportTable, topLevelTable), finalState) =
         runIdentifierFrom inputState $ do
           -- Phase B: build export table for this module.
@@ -2340,19 +2322,39 @@ identifyModule trustedStdlibNames _allExportNames processedExportTables allModul
 
     addDeclaration moduleName table = \case
       DeclarationAgent declaration ->
-        registerVariableDecl moduleName table declaration.name declaration.annotation
+        registerVariableDecl
+          moduleName
+          table
+          declaration.name
+          declaration.annotation
           (parameterBindingsToAnnotationPairs declaration.parameters)
       DeclarationRequest declaration ->
-        registerRequestDecl moduleName table declaration.name declaration.annotation
+        registerRequestDecl
+          moduleName
+          table
+          declaration.name
+          declaration.annotation
           declaration.parameters
       DeclarationExternalAgent declaration ->
-        registerVariableDecl moduleName table declaration.name declaration.annotation
+        registerVariableDecl
+          moduleName
+          table
+          declaration.name
+          declaration.annotation
           (parameterBindingsToAnnotationPairs declaration.parameters)
       DeclarationPrimAgent declaration ->
-        registerVariableDecl moduleName table declaration.name declaration.annotation
+        registerVariableDecl
+          moduleName
+          table
+          declaration.name
+          declaration.annotation
           (parameterBindingsToAnnotationPairs declaration.parameters)
       DeclarationData declaration ->
-        registerDataDecl moduleName table declaration.name declaration.annotation
+        registerDataDecl
+          moduleName
+          table
+          declaration.name
+          declaration.annotation
           (dataParametersToAnnotationPairs declaration.parameters)
       DeclarationTypeSynonym declaration -> registerTypeOnly moduleName table declaration.name
       DeclarationImport _ -> pure table
@@ -2388,15 +2390,6 @@ identifyModule trustedStdlibNames _allExportNames processedExportTables allModul
             variableAnnotation = annotation,
             variableParameterAnnotations = parameterAnnotations
           }
-      requestId <-
-        freshRequestId
-          qualifiedName
-          RequestData
-            { requestId = RequestId 0, -- placeholder, overwritten below
-              requestSourceSpan = name.sourceSpan,
-              requestParameterAnnotations =
-                Map.fromList parameterAnnotations
-            }
       let entry =
             emptySymbolEntry
               { variableSymbol = Just (ResolvedTopLevel qualifiedName),
@@ -2601,12 +2594,14 @@ identify ::
 identify trustedStdlibNames moduleMap =
   let -- Phase 0: detect import cycles (emitted as errors, but processing
       -- continues on the acyclic portion).
-      ((), cycleState) = runIdentifier $
-        for_ (findImportCycles moduleMap) (emitImportCycleError moduleMap)
+      ((), cycleState) =
+        runIdentifier $
+          for_ (findImportCycles moduleMap) (emitImportCycleError moduleMap)
 
       -- Phase A: register all modules.
-      ((), phaseAState) = runIdentifierFrom cycleState $
-        registerAllModules trustedStdlibNames moduleMap
+      ((), phaseAState) =
+        runIdentifierFrom cycleState $
+          registerAllModules trustedStdlibNames moduleMap
 
       allModuleNames = Map.keysSet moduleMap
 
@@ -2620,7 +2615,6 @@ identify trustedStdlibNames moduleMap =
           Just parsedModule ->
             let moduleResult =
                   identifyModule
-                    trustedStdlibNames
                     allExportNames
                     exports
                     allModuleNames
@@ -2684,7 +2678,6 @@ identify trustedStdlibNames moduleMap =
           allExports
    in (result, reverse finalState.errors)
 
-
 -- ---------------------------------------------------------------------------
 -- Incremental identification
 -- ---------------------------------------------------------------------------
@@ -2717,12 +2710,14 @@ identifyIncremental ::
   (IdentifierResult, [IdentifierError])
 identifyIncremental trustedStdlibNames moduleMap cachedModules =
   let -- Phase 0: detect import cycles.
-      ((), cycleState) = runIdentifier $
-        for_ (findImportCycles moduleMap) (emitImportCycleError moduleMap)
+      ((), cycleState) =
+        runIdentifier $
+          for_ (findImportCycles moduleMap) (emitImportCycleError moduleMap)
 
       -- Phase A: register all modules.
-      ((), phaseAState) = runIdentifierFrom cycleState $
-        registerAllModules trustedStdlibNames moduleMap
+      ((), phaseAState) =
+        runIdentifierFrom cycleState $
+          registerAllModules trustedStdlibNames moduleMap
 
       allModuleNames = Map.keysSet moduleMap
       allExportNames = Map.map scanExportNames moduleMap
@@ -2730,18 +2725,19 @@ identifyIncremental trustedStdlibNames moduleMap cachedModules =
       stepModuleIncremental (asts, exports, topLevels, state) moduleName =
         case Map.lookup moduleName cachedModules of
           Just cached ->
-            let injectedState = state
-                  { variables = Map.union cached.cidVariables state.variables,
-                    types = Map.union cached.cidTypes state.types,
-                    requests = Map.union cached.cidRequests state.requests,
-                    constructors = Map.union cached.cidConstructors state.constructors,
-                    modules = Map.insert moduleName cached.cidModuleData state.modules,
-                    capturedScopeFrames = cached.cidScopeFrames ++ state.capturedScopeFrames,
-                    nextTypeId = max state.nextTypeId cached.cidNextTypeId,
-                    nextRequestId = max state.nextRequestId cached.cidNextRequestId,
-                    nextConstructorId = max state.nextConstructorId cached.cidNextConstructorId,
-                    nextLocalVarId = max state.nextLocalVarId cached.cidNextLocalVarId
-                  }
+            let injectedState =
+                  state
+                    { variables = Map.union cached.cidVariables state.variables,
+                      types = Map.union cached.cidTypes state.types,
+                      requests = Map.union cached.cidRequests state.requests,
+                      constructors = Map.union cached.cidConstructors state.constructors,
+                      modules = Map.insert moduleName cached.cidModuleData state.modules,
+                      capturedScopeFrames = cached.cidScopeFrames ++ state.capturedScopeFrames,
+                      nextTypeId = max state.nextTypeId cached.cidNextTypeId,
+                      nextRequestId = max state.nextRequestId cached.cidNextRequestId,
+                      nextConstructorId = max state.nextConstructorId cached.cidNextConstructorId,
+                      nextLocalVarId = max state.nextLocalVarId cached.cidNextLocalVarId
+                    }
              in ( Map.insert moduleName cached.cidIdentifiedAST asts,
                   Map.insert moduleName cached.cidExportTable exports,
                   Map.insert moduleName cached.cidTopLevel topLevels,
@@ -2753,7 +2749,6 @@ identifyIncremental trustedStdlibNames moduleMap cachedModules =
               Just parsedModule ->
                 let moduleResult =
                       identifyModule
-                        trustedStdlibNames
                         allExportNames
                         exports
                         allModuleNames

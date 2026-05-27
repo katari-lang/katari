@@ -61,7 +61,6 @@ import Katari.SourceSpan (Position (..), SourceSpan (..))
 import Katari.Typechecker.ConstraintGenerator (ConstraintGenResult (..))
 import Katari.Typechecker.Identifier
   ( IdentifierResult (..),
-    ModuleData (..),
     VariableData (..),
   )
 import Katari.Typechecker.NormalizedType (denormalise)

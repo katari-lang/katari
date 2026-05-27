@@ -58,7 +58,6 @@ import Data.Map.Strict qualified as Map
 import Data.Maybe (mapMaybe)
 import Data.Set (Set)
 import Data.Set qualified as Set
-import Data.Text (Text)
 import Data.Text qualified as T
 import Katari.Diagnostic (Diagnostic, diagnosticError)
 import Katari.Id ()

@@ -11,22 +11,20 @@ where
 
 import Control.Lens ((^.))
 import Control.Monad.IO.Class (liftIO)
-import qualified Data.Text as Text
 import Data.Text (Text)
+import Data.Text qualified as Text
 import Data.Vector (Vector)
-import qualified Data.Vector as Vector
+import Data.Vector qualified as Vector
 import Katari.Compile (CompileResult (..))
-import Katari.Id (QualifiedName (..))
 import Katari.LSP.Convert (lspPositionToKatari)
 import Katari.LSP.State (ServerState, lookupCompileResult)
-import qualified Katari.Query as Query
+import Katari.Query qualified as Query
 import Katari.SemanticType.Render (renderSemanticType)
 import Katari.SourceSpan (Position (..), SourceSpan (..))
-import Katari.Typechecker.Identifier (IdentifierResult (..), RequestData (..), TypeData (..))
-import qualified Language.LSP.Protocol.Lens as L
-import qualified Language.LSP.Protocol.Message as LSP
-import qualified Language.LSP.Protocol.Types as LSP
-import qualified Language.LSP.Server as LSP
+import Language.LSP.Protocol.Lens qualified as L
+import Language.LSP.Protocol.Message qualified as LSP
+import Language.LSP.Protocol.Types qualified as LSP
+import Language.LSP.Server qualified as LSP
 
 hoverHandler :: ServerState -> LSP.Handlers (LSP.LspM ())
 hoverHandler st =

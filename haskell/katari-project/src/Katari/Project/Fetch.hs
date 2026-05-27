@@ -20,17 +20,18 @@ module Katari.Project.Fetch
   )
 where
 
-import qualified Codec.Archive.Tar as Tar
-import qualified Codec.Archive.Tar.Check as Tar
-import qualified Codec.Compression.GZip as GZip
+import Codec.Archive.Tar qualified as Tar
+import Codec.Archive.Tar.Check qualified as Tar
+import Codec.Compression.GZip qualified as GZip
 import Control.Exception (Exception, IOException, SomeException, try)
 import Crypto.Hash (Digest, SHA256, hash)
 import Data.ByteArray.Encoding (Base (Base16), convertToBase)
 import Data.ByteString (ByteString)
-import qualified Data.ByteString.Lazy as LBS
+import Data.ByteString.Lazy qualified as LBS
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
-import qualified Data.Text as Text
-import qualified Data.Text.Encoding as TE
+import Data.Text qualified as Text
+import Data.Text.Encoding qualified as TE
 import Katari.Project.Cache (CachePaths, packageDir)
 import Network.HTTP.Client
   ( HttpException,
@@ -40,7 +41,7 @@ import Network.HTTP.Client
     responseBody,
     responseStatus,
   )
-import qualified Network.HTTP.Client as HTTP
+import Network.HTTP.Client qualified as HTTP
 import Network.HTTP.Types.Status (statusCode)
 import System.Directory
   ( createDirectoryIfMissing,
@@ -87,12 +88,8 @@ archiveUrl GitRef {gitUrl, gitRev} =
         then Right (stripped <> "/archive/" <> gitRev <> ".tar.gz")
         else Left (FetchInvalidHost gitUrl)
   where
-    stripDotGit u = case Text.stripSuffix ".git" u of
-      Just s -> s
-      Nothing -> u
-    stripTrailingSlash u = case Text.stripSuffix "/" u of
-      Just s -> s
-      Nothing -> u
+    stripDotGit u = fromMaybe u (Text.stripSuffix ".git" u)
+    stripTrailingSlash u = fromMaybe u (Text.stripSuffix "/" u)
 
 doFetch :: Manager -> CachePaths -> Text -> Text -> IO (Either FetchError (FilePath, Text))
 doFetch manager cache name url = do
@@ -154,8 +151,8 @@ extractInto target body = withSystemTempDirectory "katari-fetch" $ \tmp -> do
     Left err ->
       pure (Left (FetchTarballError (Text.pack (show err))))
     Right () -> do
-      entries <- listDirectory stagingDir
-      case entries of
+      directoryEntries <- listDirectory stagingDir
+      case directoryEntries of
         [single] -> do
           -- GitHub archives wrap everything in a top-level
           -- @REPO-\<short>@ directory; flatten it.

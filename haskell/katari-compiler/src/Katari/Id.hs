@@ -29,7 +29,6 @@ module Katari.Id
   )
 where
 
-import Data.Text (Text)
 import Katari.Common (QualifiedName (..), renderQualifiedName)
 
 -- | How a variable reference was resolved by the Identifier phase.

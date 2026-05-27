@@ -56,13 +56,11 @@ import Data.Map.Strict qualified as Map
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
-import Data.Text qualified as T
 import Katari.AST
 import Katari.Common (LiteralValue (..), TypePatternTag (..))
 import Katari.Diagnostic (Diagnostic, diagnosticError)
 import Katari.Id
-  ( LocalVarId (..),
-    QualifiedName (..),
+  ( QualifiedName (..),
     VariableResolution (..),
   )
 import Katari.Prim (PrimRule (..))

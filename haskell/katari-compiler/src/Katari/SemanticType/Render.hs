@@ -15,7 +15,7 @@ import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as Text
-import Katari.Common (QualifiedName (..), renderQualifiedName)
+import Katari.Common (QualifiedName (..))
 import Katari.SemanticType qualified as ST
 
 renderSemanticType ::

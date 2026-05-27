@@ -23,16 +23,9 @@ module Katari.AST where
 
 import Data.Kind (Type)
 import Data.Text (Text)
-import Katari.Common (LiteralValue (..), TypePatternTag (..))
-import Katari.Common (QualifiedName)
+import Katari.Common (LiteralValue (..), QualifiedName, TypePatternTag (..))
 import Katari.Id
-  ( ConstructorId,
-    LocalVarId,
-    ModuleId,
-    RequestId,
-    TypeId,
-    VariableId,
-    VariableResolution (..),
+  ( VariableResolution (..),
   )
 import Katari.SemanticType (Resolved, SemanticType, Unresolved)
 import Katari.SourceSpan (HasSourceSpan (..), SourceSpan)

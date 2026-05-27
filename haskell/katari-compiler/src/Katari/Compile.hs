@@ -82,7 +82,7 @@ import Katari.Typechecker.Identifier
 import Katari.Typechecker.Identifier qualified as Identifier
 import Katari.Typechecker.ImportGraph (topologicalSort)
 import Katari.Typechecker.ModuleInterface (ModuleInterface (..), extractModuleInterface)
-import Katari.Typechecker.ScopeIndex (ScopeFrame (..), ScopeIndex (..), emptyScopeIndex)
+import Katari.Typechecker.ScopeIndex (ScopeFrame (..), ScopeIndex (..))
 import Katari.Typechecker.Solver (SolverResult (..), solve)
 import Katari.Typechecker.Solver qualified as Solver
 import Katari.Typechecker.Zonker (ZonkResult (..), zonk)
@@ -170,10 +170,10 @@ compile input =
       -- Cache hit: source hash matches.
       cacheHitModules =
         Map.filterWithKey
-          (\moduleName cached ->
-            case Map.lookup moduleName sourceHashes of
-              Just sourceHash -> sourceHash == cached.cacheSourceHash
-              Nothing -> False
+          ( \moduleName cached ->
+              case Map.lookup moduleName sourceHashes of
+                Just sourceHash -> sourceHash == cached.cacheSourceHash
+                Nothing -> False
           )
           input.cache
       cacheHitNames = Map.keysSet cacheHitModules
@@ -186,11 +186,11 @@ compile input =
       -- Build skeleton parsed modules from cache (for import graph).
       cachedSkeletonParsed =
         Map.map
-          (\cached ->
-            Module
-              { declarations = map DeclarationImport (extractImportDeclarations cached.cacheIdentifiedAST),
-                sourceSpan = cached.cacheModuleData.moduleSourceSpan
-              }
+          ( \cached ->
+              Module
+                { declarations = map DeclarationImport (extractImportDeclarations cached.cacheIdentifiedAST),
+                  sourceSpan = cached.cacheModuleData.moduleSourceSpan
+                }
           )
           cacheHitModules
       allParsed = Map.union freshParsed cachedSkeletonParsed
@@ -198,22 +198,22 @@ compile input =
       -- Phase 2: Identify (incremental).
       cachedIdentifierData =
         Map.map
-          (\cached ->
-            Identifier.CachedIdentifierData
-              { Identifier.cidVariables = cached.cacheIdentifierVariables,
-                Identifier.cidTypes = cached.cacheIdentifierTypes,
-                Identifier.cidRequests = cached.cacheIdentifierRequests,
-                Identifier.cidConstructors = cached.cacheIdentifierConstructors,
-                Identifier.cidModuleData = cached.cacheModuleData,
-                Identifier.cidExportTable = cached.cacheModuleExports,
-                Identifier.cidTopLevel = cached.cacheModuleTopLevel,
-                Identifier.cidIdentifiedAST = cached.cacheIdentifiedAST,
-                Identifier.cidScopeFrames = cached.cacheScopeFrames,
-                Identifier.cidNextTypeId = 0,
-                Identifier.cidNextRequestId = 0,
-                Identifier.cidNextConstructorId = 0,
-                Identifier.cidNextLocalVarId = 0
-              }
+          ( \cached ->
+              Identifier.CachedIdentifierData
+                { Identifier.cidVariables = cached.cacheIdentifierVariables,
+                  Identifier.cidTypes = cached.cacheIdentifierTypes,
+                  Identifier.cidRequests = cached.cacheIdentifierRequests,
+                  Identifier.cidConstructors = cached.cacheIdentifierConstructors,
+                  Identifier.cidModuleData = cached.cacheModuleData,
+                  Identifier.cidExportTable = cached.cacheModuleExports,
+                  Identifier.cidTopLevel = cached.cacheModuleTopLevel,
+                  Identifier.cidIdentifiedAST = cached.cacheIdentifiedAST,
+                  Identifier.cidScopeFrames = cached.cacheScopeFrames,
+                  Identifier.cidNextTypeId = 0,
+                  Identifier.cidNextRequestId = 0,
+                  Identifier.cidNextConstructorId = 0,
+                  Identifier.cidNextLocalVarId = 0
+                }
           )
           cacheHitModules
       (idResult, idErrors) =
@@ -266,10 +266,11 @@ compile input =
                   Map.map (.cacheLoweringResult) cacheHitModules
                 freshResults =
                   Map.fromList
-                    ( parMap rseq
-                        (\(moduleName, moduleAST) ->
-                          let (result, errors) = lowerModule idResult mergedZonkResult moduleName moduleAST
-                           in (moduleName, (result, errors))
+                    ( parMap
+                        rseq
+                        ( \(moduleName, moduleAST) ->
+                            let (result, errors) = lowerModule idResult mergedZonkResult moduleName moduleAST
+                             in (moduleName, (result, errors))
                         )
                         [ (moduleName, moduleAST)
                           | (moduleName, moduleAST) <- Map.toList mergedZonkResult.zonkedModules,
@@ -306,9 +307,14 @@ compile input =
       allDiags = preLowerDiags <> loweringDiags
 
       -- Build updated cache.
-      freshCache = buildFreshCacheEntries
-        sourceHashes idResult typecheckCache loweringResults
-        freshSchemaEntries cacheMissNames freshParsed
+      freshCache =
+        buildFreshCacheEntries
+          sourceHashes
+          idResult
+          typecheckCache
+          loweringResults
+          freshSchemaEntries
+          cacheMissNames
       updatedCacheMap = Map.union freshCache cacheHitModules
 
       logs =
@@ -457,7 +463,7 @@ typecheckOneModule idResult sourceHashes inputCache accumulator moduleName =
         _ -> False
    in if cacheHit
         then applyCacheToResult moduleName cachedEntry
-        else recompileModuleToResult idResult moduleName sourceHashes accumulator
+        else recompileModuleToResult idResult moduleName accumulator
 
 applyCacheToResult ::
   Text ->
@@ -474,13 +480,14 @@ applyCacheToResult moduleName cachedEntry =
           mtrSolverResult = SolverResult {typeSubstitution = Map.empty, requestSubstitution = Map.empty},
           mtrDiagnostics = [],
           mtrLogs = [],
-          mtrCacheEntry = TypecheckCacheEntry
-            { tceInterface = ModuleInterface {exportedTypes = Map.empty},
-              tceIdentified = Module {declarations = [], sourceSpan = emptySrcSpan},
-              tceZonkedModule = Module {declarations = [], sourceSpan = emptySrcSpan},
-              tceZonkedTypeEnv = Map.empty,
-              tceDiagnostics = []
-            },
+          mtrCacheEntry =
+            TypecheckCacheEntry
+              { tceInterface = ModuleInterface {exportedTypes = Map.empty},
+                tceIdentified = Module {declarations = [], sourceSpan = emptySrcSpan},
+                tceZonkedModule = Module {declarations = [], sourceSpan = emptySrcSpan},
+                tceZonkedTypeEnv = Map.empty,
+                tceDiagnostics = []
+              },
           mtrIsCacheHit = True
         }
     Just cached ->
@@ -492,23 +499,23 @@ applyCacheToResult moduleName cachedEntry =
           mtrSolverResult = SolverResult {typeSubstitution = Map.empty, requestSubstitution = Map.empty},
           mtrDiagnostics = cached.cacheDiagnostics,
           mtrLogs = [],
-          mtrCacheEntry = TypecheckCacheEntry
-            { tceInterface = cached.cacheInterface,
-              tceIdentified = cached.cacheIdentifiedAST,
-              tceZonkedModule = cached.cacheZonkedModule,
-              tceZonkedTypeEnv = cached.cacheZonkedTypeEnv,
-              tceDiagnostics = cached.cacheDiagnostics
-            },
+          mtrCacheEntry =
+            TypecheckCacheEntry
+              { tceInterface = cached.cacheInterface,
+                tceIdentified = cached.cacheIdentifiedAST,
+                tceZonkedModule = cached.cacheZonkedModule,
+                tceZonkedTypeEnv = cached.cacheZonkedTypeEnv,
+                tceDiagnostics = cached.cacheDiagnostics
+              },
           mtrIsCacheHit = True
         }
 
 recompileModuleToResult ::
   IdentifierResult ->
   Text ->
-  Map ModuleName Int ->
   TypecheckAccumulator ->
   ModuleTypecheckResult
-recompileModuleToResult idResult moduleName sourceHashes accumulator =
+recompileModuleToResult idResult moduleName accumulator =
   let moduleAST = Map.lookup moduleName idResult.moduleASTs
       nonAgentQualifiedNames = case moduleAST of
         Just ast -> collectNonAgentQualifiedNames moduleName ast
@@ -634,7 +641,8 @@ typecheckOneSCC idResult moduleName accumulator sccQualifiedNames =
       zonkDiags = map Zonker.toDiagnostic zonkErrors
       sccInterface = extractSCCInterface sccQualifiedNames zonkResult_.zonkedTypeEnvironment
       knownResolutions =
-        Set.map ResolvedTopLevel
+        Set.map
+          ResolvedTopLevel
           (Map.keysSet (Map.intersection idResult.identifiedVariables accumulator.accImportedTypes))
       ownedTypeEnvironment =
         Map.withoutKeys zonkResult_.zonkedTypeEnvironment knownResolutions
@@ -775,7 +783,7 @@ identifyWithStdlib userMods =
 -- skeleton building).
 extractImportDeclarations :: Module Identified -> [ImportDeclaration]
 extractImportDeclarations moduleAST =
-  [ importDecl | DeclarationImport importDecl <- moduleAST.declarations ]
+  [importDecl | DeclarationImport importDecl <- moduleAST.declarations]
 
 -- | Build schema entries for cache-miss modules only.
 buildSchemasForModules ::
@@ -802,14 +810,13 @@ buildFreshCacheEntries ::
   Map ModuleName ModuleLoweringResult ->
   [SchemaEntry] ->
   Set.Set Text ->
-  Map ModuleName (Module Parsed) ->
   Map ModuleName ModuleCache
-buildFreshCacheEntries sourceHashes idResult typecheckCache loweringResults schemaEntries_ cacheMissNames_ parsedModules =
+buildFreshCacheEntries sourceHashes idResult typecheckCache loweringResults schemaEntries_ cacheMissNames_ =
   let schemaByModule =
         foldl'
-          (\accumulator entry ->
-            let moduleName = schemaEntryModule entry
-             in Map.insertWith (++) moduleName [entry] accumulator
+          ( \accumulator entry ->
+              let moduleName = schemaEntryModule entry
+               in Map.insertWith (++) moduleName [entry] accumulator
           )
           Map.empty
           schemaEntries_
@@ -822,53 +829,56 @@ buildFreshCacheEntries sourceHashes idResult typecheckCache loweringResults sche
             mlrVarCount = 0
           }
    in Map.fromSet
-        (\moduleName ->
-          let tce = Map.findWithDefault
-                (TypecheckCacheEntry
-                  { tceInterface = ModuleInterface {exportedTypes = Map.empty},
-                    tceIdentified = Module {declarations = [], sourceSpan = emptySrcSpan},
-                    tceZonkedModule = Module {declarations = [], sourceSpan = emptySrcSpan},
-                    tceZonkedTypeEnv = Map.empty,
-                    tceDiagnostics = []
-                  })
-                moduleName
-                typecheckCache
-              moduleVariables =
-                Map.filterWithKey (\qualifiedName _ -> qualifiedName.module_ == moduleName) idResult.identifiedVariables
-              moduleTypes =
-                Map.filterWithKey (\qualifiedName _ -> qualifiedName.module_ == moduleName) idResult.identifiedTypes
-              moduleRequests =
-                Map.filterWithKey (\qualifiedName _ -> qualifiedName.module_ == moduleName) idResult.identifiedRequests
-              moduleConstructors =
-                Map.filterWithKey (\qualifiedName _ -> qualifiedName.module_ == moduleName) idResult.identifiedConstructors
-              moduleData = Map.findWithDefault
-                (ModuleData {moduleSourceSpan = emptySrcSpan})
-                moduleName
-                idResult.identifiedModules
-              moduleExports = Map.findWithDefault Map.empty moduleName idResult.moduleExports
-              moduleTopLevel = Map.findWithDefault Map.empty moduleName idResult.moduleVisibleSymbols
-              moduleScopeFrames =
-                case Map.lookup (moduleSourceFilePath moduleName idResult) idResult.scopeIndex.framesByFile of
-                  Just frames -> [(f.frameSpan, f.frameSymbols) | f <- frames]
-                  Nothing -> []
-           in ModuleCache
-                { cacheSourceHash = Map.findWithDefault 0 moduleName sourceHashes,
-                  cacheIdentifierVariables = moduleVariables,
-                  cacheIdentifierTypes = moduleTypes,
-                  cacheIdentifierRequests = moduleRequests,
-                  cacheIdentifierConstructors = moduleConstructors,
-                  cacheModuleData = moduleData,
-                  cacheModuleExports = moduleExports,
-                  cacheModuleTopLevel = moduleTopLevel,
-                  cacheScopeFrames = moduleScopeFrames,
-                  cacheIdentifiedAST = tce.tceIdentified,
-                  cacheInterface = tce.tceInterface,
-                  cacheZonkedModule = tce.tceZonkedModule,
-                  cacheZonkedTypeEnv = tce.tceZonkedTypeEnv,
-                  cacheLoweringResult = Map.findWithDefault emptyLoweringResult moduleName loweringResults,
-                  cacheSchemaEntries = Map.findWithDefault [] moduleName schemaByModule,
-                  cacheDiagnostics = tce.tceDiagnostics
-                }
+        ( \moduleName ->
+            let tce =
+                  Map.findWithDefault
+                    ( TypecheckCacheEntry
+                        { tceInterface = ModuleInterface {exportedTypes = Map.empty},
+                          tceIdentified = Module {declarations = [], sourceSpan = emptySrcSpan},
+                          tceZonkedModule = Module {declarations = [], sourceSpan = emptySrcSpan},
+                          tceZonkedTypeEnv = Map.empty,
+                          tceDiagnostics = []
+                        }
+                    )
+                    moduleName
+                    typecheckCache
+                moduleVariables =
+                  Map.filterWithKey (\qualifiedName _ -> qualifiedName.module_ == moduleName) idResult.identifiedVariables
+                moduleTypes =
+                  Map.filterWithKey (\qualifiedName _ -> qualifiedName.module_ == moduleName) idResult.identifiedTypes
+                moduleRequests =
+                  Map.filterWithKey (\qualifiedName _ -> qualifiedName.module_ == moduleName) idResult.identifiedRequests
+                moduleConstructors =
+                  Map.filterWithKey (\qualifiedName _ -> qualifiedName.module_ == moduleName) idResult.identifiedConstructors
+                moduleData =
+                  Map.findWithDefault
+                    (ModuleData {moduleSourceSpan = emptySrcSpan})
+                    moduleName
+                    idResult.identifiedModules
+                moduleExports = Map.findWithDefault Map.empty moduleName idResult.moduleExports
+                moduleTopLevel = Map.findWithDefault Map.empty moduleName idResult.moduleVisibleSymbols
+                moduleScopeFrames =
+                  case Map.lookup (moduleSourceFilePath moduleName idResult) idResult.scopeIndex.framesByFile of
+                    Just frames -> [(f.frameSpan, f.frameSymbols) | f <- frames]
+                    Nothing -> []
+             in ModuleCache
+                  { cacheSourceHash = Map.findWithDefault 0 moduleName sourceHashes,
+                    cacheIdentifierVariables = moduleVariables,
+                    cacheIdentifierTypes = moduleTypes,
+                    cacheIdentifierRequests = moduleRequests,
+                    cacheIdentifierConstructors = moduleConstructors,
+                    cacheModuleData = moduleData,
+                    cacheModuleExports = moduleExports,
+                    cacheModuleTopLevel = moduleTopLevel,
+                    cacheScopeFrames = moduleScopeFrames,
+                    cacheIdentifiedAST = tce.tceIdentified,
+                    cacheInterface = tce.tceInterface,
+                    cacheZonkedModule = tce.tceZonkedModule,
+                    cacheZonkedTypeEnv = tce.tceZonkedTypeEnv,
+                    cacheLoweringResult = Map.findWithDefault emptyLoweringResult moduleName loweringResults,
+                    cacheSchemaEntries = Map.findWithDefault [] moduleName schemaByModule,
+                    cacheDiagnostics = tce.tceDiagnostics
+                  }
         )
         cacheMissNames_
 
