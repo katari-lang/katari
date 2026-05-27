@@ -29,7 +29,7 @@ import Data.Map.Strict (Map)
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
-import Katari.Id (RequestId)
+import Katari.Common (QualifiedName)
 import Katari.SemanticType
   ( RequestVariableId,
     Resolved,
@@ -60,7 +60,7 @@ import Katari.Typechecker.NormalizedType
 -- NormalizedTypeUnknown / the empty set.
 data SolverResult = SolverResult
   { typeSubstitution :: Map TypeVariableId NormalizedType,
-    requestSubstitution :: Map RequestVariableId (Set RequestId)
+    requestSubstitution :: Map RequestVariableId (Set QualifiedName)
   }
   deriving (Show)
 

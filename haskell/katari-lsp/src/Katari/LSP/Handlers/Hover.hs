@@ -44,12 +44,12 @@ hoverHandler st =
                 info = Query.lookupAtPosition result.identifierResult result.zonkResult path kPos
             case info of
               Nothing -> responder (Right (LSP.InR LSP.Null))
-              Just h -> responder (Right (LSP.InL (mkHover result.identifierResult lineVec h)))
+              Just h -> responder (Right (LSP.InL (mkHover lineVec h)))
 
-mkHover :: IdentifierResult -> Vector Text -> Query.HoverInfo -> LSP.Hover
-mkHover idResult lineVec h =
+mkHover :: Vector Text -> Query.HoverInfo -> LSP.Hover
+mkHover lineVec h =
   LSP.Hover
-    { LSP._contents = LSP.InL (markup (renderHover idResult lineVec h)),
+    { LSP._contents = LSP.InL (markup (renderHover lineVec h)),
       LSP._range = Nothing
     }
   where
@@ -60,15 +60,12 @@ mkHover idResult lineVec h =
 -- second line. The @snippet@ is the source-text slice for the
 -- @hoverNameSpan@ — i.e. exactly what the user is hovering on
 -- (variable name, parameter, literal, or whole expression).
-renderHover :: IdentifierResult -> Vector Text -> Query.HoverInfo -> Text
-renderHover idResult lineVec h =
+renderHover :: Vector Text -> Query.HoverInfo -> Text
+renderHover lineVec h =
   let snippet = sliceSpan lineVec h.hoverNameSpan
       typeText = case h.hoverType of
         Nothing -> ""
-        Just t ->
-          let typeNames = fmap (.typeQualifiedName.name) idResult.identifiedTypes
-              reqNames = fmap (.requestQualifiedName.name) idResult.identifiedRequests
-           in renderSemanticType typeNames reqNames t
+        Just t -> renderSemanticType t
       headerLine =
         if Text.null typeText
           then snippet

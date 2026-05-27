@@ -87,14 +87,8 @@ hasError predicate = \case
 lookupTypeByName :: Text -> IdentifierResult -> Maybe TypeData
 lookupTypeByName name res =
   fmap snd
-    . find (\(_, typeData) -> typeBareName typeData == name)
+    . find (\(qualifiedName, _) -> qualifiedName.name == name)
     $ Map.toList res.identifiedTypes
-  where
-    typeBareName :: TypeData -> Text
-    typeBareName td = bareNameOfQualified td.typeQualifiedName
-
-    bareNameOfQualified :: QualifiedName -> Text
-    bareNameOfQualified qn = qn.name
 
 -- | Accessor for the (phase-parameterised) synonym RHS field. Wrapping the
 -- access in a fixed-result function avoids the @metadata0@ ambiguity that
@@ -264,12 +258,10 @@ dataDeclarations = describe "data declarations" $ do
         typeNameRefResolution = head (collectDataTypeNameRefResolutiondata mainModule)
         widgetTypeQName =
           head
-            [ td.typeQualifiedName
-              | (_tid, td) <- Map.toList res.identifiedTypes,
-                bareNameOf td.typeQualifiedName == "widget"
+            [ qualifiedName
+              | (qualifiedName, _td) <- Map.toList res.identifiedTypes,
+                qualifiedName.name == "widget"
             ]
-        bareNameOf :: QualifiedName -> Text
-        bareNameOf qn = qn.name
     case typeNameRefResolution of
       Just qname -> qname `shouldBe` widgetTypeQName
       Nothing ->
@@ -286,24 +278,24 @@ dataDeclarations = describe "data declarations" $ do
       Right res -> do
         -- Filter out stdlib modules ('prim') so the assertion only counts
         -- the user-declared `data foo` instances.
-        let userModuleIds =
-              [ mid
-                | (mid, md) <- Map.toList res.identifiedModules,
-                  md.moduleName /= "primitive"
+        let userModuleNames =
+              [ moduleName
+                | (moduleName, _md) <- Map.toList res.identifiedModules,
+                  moduleName /= ("primitive" :: Text)
               ]
             userAsts =
               [ m
-                | mid <- userModuleIds,
-                  Just m <- [Map.lookup mid res.moduleASTs]
+                | moduleName <- userModuleNames,
+                  Just m <- [Map.lookup moduleName res.moduleASTs]
               ]
-            typeIds =
-              [ tid
+            typeQNames =
+              [ qualifiedName
                 | m <- userAsts,
                   metadata <- collectDataTypeNameRefResolutiondata m,
-                  Just tid <- [metadata]
+                  Just qualifiedName <- [metadata]
               ]
-        length typeIds `shouldBe` 2
-        (head typeIds == typeIds !! 1) `shouldBe` False
+        length typeQNames `shouldBe` 2
+        (head typeQNames == typeQNames !! 1) `shouldBe` False
 
 -- ---------------------------------------------------------------------------
 -- Type synonyms / literal types / union types

@@ -66,7 +66,7 @@ export function AnyField({
   }
 
   return (
-    <div className="space-y-1.5 border-l-2 border-border pl-3">
+    <div className="space-y-1.5">
       <div className="flex items-center gap-2">
         <span className="text-xs uppercase tracking-wider text-subtle-foreground">
           Type
@@ -171,7 +171,10 @@ function DataField({
                 </button>
               </div>
               <div className="pl-2">
-                <AnyField value={val} onChange={(v) => changeFieldValue(key, v)} />
+                <AnyField
+                  value={val}
+                  onChange={(v) => changeFieldValue(key, v)}
+                />
               </div>
             </div>
           ))

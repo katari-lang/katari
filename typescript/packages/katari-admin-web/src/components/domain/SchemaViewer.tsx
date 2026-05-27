@@ -18,9 +18,10 @@ export function SchemaViewer({
     return <span className="text-xs text-subtle-foreground italic">none</span>;
   }
 
-  const schemaObj = typeof schema === "object" && !Array.isArray(schema)
-    ? (schema as Schema)
-    : null;
+  const schemaObj =
+    typeof schema === "object" && !Array.isArray(schema)
+      ? (schema as Schema)
+      : null;
 
   if (schemaObj === null) {
     return (
@@ -37,14 +38,15 @@ export function SchemaViewer({
   );
 }
 
-function TypeBadge({ children, className }: { children: React.ReactNode; className?: string }) {
+function TypeBadge({
+  children,
+  className,
+}: {
+  children: React.ReactNode;
+  className?: string;
+}) {
   return (
-    <span
-      className={cn(
-        "text-xs font-mono text-muted-foreground",
-        className,
-      )}
-    >
+    <span className={cn("text-xs font-mono text-muted-foreground", className)}>
       {children}
     </span>
   );
@@ -59,13 +61,12 @@ function RequiredBadge() {
 }
 
 function Description({ text }: { text: string }) {
-  return (
-    <p className="text-xs text-subtle-foreground mt-0.5">{text}</p>
-  );
+  return <p className="text-xs text-subtle-foreground mt-0.5">{text}</p>;
 }
 
 function SchemaNode({ schema }: { schema: Schema }) {
-  const description = typeof schema.description === "string" ? schema.description : null;
+  const description =
+    typeof schema.description === "string" ? schema.description : null;
 
   // never: empty anyOf / oneOf
   if (isNeverSchema(schema)) {
@@ -78,13 +79,15 @@ function SchemaNode({ schema }: { schema: Schema }) {
   }
 
   // anyOf / oneOf union
-  const anyOf = Array.isArray(schema.anyOf) ? schema.anyOf as Schema[] : null;
-  const oneOf = Array.isArray(schema.oneOf) ? schema.oneOf as Schema[] : null;
+  const anyOf = Array.isArray(schema.anyOf) ? (schema.anyOf as Schema[]) : null;
+  const oneOf = Array.isArray(schema.oneOf) ? (schema.oneOf as Schema[]) : null;
   const branches = anyOf ?? oneOf;
   if (branches !== null && branches.length > 0) {
     return (
       <div>
-        <span className="text-xs font-medium text-muted-foreground">one of</span>
+        <span className="text-xs font-medium text-muted-foreground">
+          one of
+        </span>
         {description !== null && <Description text={description} />}
         <div className="border-l-2 border-border mt-2">
           <div className="space-y-2 pl-3">
@@ -103,7 +106,9 @@ function SchemaNode({ schema }: { schema: Schema }) {
   if (Array.isArray(schema.enum) && schema.enum.length > 0) {
     return (
       <div>
-        <span className="text-xs font-medium text-muted-foreground mr-1.5">enum</span>
+        <span className="text-xs font-medium text-muted-foreground mr-1.5">
+          enum
+        </span>
         <span className="inline-flex flex-wrap items-center gap-1">
           {(schema.enum as unknown[]).map((value, index) => (
             <TypeBadge key={index}>{JSON.stringify(value)}</TypeBadge>
@@ -118,7 +123,9 @@ function SchemaNode({ schema }: { schema: Schema }) {
   if (schema.const !== undefined) {
     return (
       <div>
-        <span className="text-xs font-medium text-muted-foreground mr-1.5">const</span>
+        <span className="text-xs font-medium text-muted-foreground mr-1.5">
+          const
+        </span>
         <TypeBadge>{JSON.stringify(schema.const)}</TypeBadge>
         {description !== null && <Description text={description} />}
       </div>
@@ -129,44 +136,56 @@ function SchemaNode({ schema }: { schema: Schema }) {
 
   // object — check for $constructor const pattern
   if (type === "object") {
-    const properties = typeof schema.properties === "object" && schema.properties !== null
-      ? schema.properties as Record<string, Schema>
-      : null;
+    const properties =
+      typeof schema.properties === "object" && schema.properties !== null
+        ? (schema.properties as Record<string, Schema>)
+        : null;
     const requiredSet = new Set(
-      Array.isArray(schema.required) ? schema.required as string[] : [],
+      Array.isArray(schema.required) ? (schema.required as string[]) : [],
     );
 
     // Detect $constructor with const value
     const constructorSchema = properties?.$constructor;
     const constructorName =
-      constructorSchema !== undefined && constructorSchema.const !== undefined && typeof constructorSchema.const === "string"
+      constructorSchema !== undefined &&
+      constructorSchema.const !== undefined &&
+      typeof constructorSchema.const === "string"
         ? constructorSchema.const
         : null;
 
-    const displayProperties = properties !== null
-      ? Object.entries(properties).filter(([key]) => constructorName !== null ? key !== "$constructor" : true)
-      : [];
-    const hasAdditional = schema.additionalProperties !== undefined && schema.additionalProperties !== false;
+    const displayProperties =
+      properties !== null
+        ? Object.entries(properties).filter(([key]) =>
+            constructorName !== null ? key !== "$constructor" : true,
+          )
+        : [];
+    const hasAdditional =
+      schema.additionalProperties !== undefined &&
+      schema.additionalProperties !== false;
     const isRecord = displayProperties.length === 0 && hasAdditional;
     const typeLabel = constructorName ?? (isRecord ? "record" : "object");
-    const additionalSchema = typeof schema.additionalProperties === "object" && schema.additionalProperties !== null
-      ? schema.additionalProperties as Schema
-      : null;
+    const additionalSchema =
+      typeof schema.additionalProperties === "object" &&
+      schema.additionalProperties !== null
+        ? (schema.additionalProperties as Schema)
+        : null;
 
     return (
       <div>
         <TypeBadge>{typeLabel}</TypeBadge>
         {description !== null && <Description text={description} />}
         {displayProperties.length > 0 && (
-          <div className="border-l-2 border-border mt-2">
+          <div className="border-l-2 border-border mt-1">
             <div className="space-y-2 pl-3">
               {displayProperties.map(([key, propSchema]) => (
                 <div key={key}>
                   <div className="flex items-baseline gap-1.5">
-                    <span className="text-sm font-medium text-foreground">{key}</span>
+                    <span className="text-sm font-medium text-foreground">
+                      {key}
+                    </span>
                     {requiredSet.has(key) && <RequiredBadge />}
                   </div>
-                  <div className="mt-1">
+                  <div>
                     <SchemaNode schema={propSchema} />
                   </div>
                 </div>
@@ -185,7 +204,9 @@ function SchemaNode({ schema }: { schema: Schema }) {
           </div>
         )}
         {displayProperties.length === 0 && !isRecord && (
-          <span className="text-xs italic text-subtle-foreground ml-1.5">Empty object</span>
+          <span className="text-xs italic text-subtle-foreground ml-1.5">
+            Empty object
+          </span>
         )}
       </div>
     );
@@ -193,11 +214,14 @@ function SchemaNode({ schema }: { schema: Schema }) {
 
   // array
   if (type === "array") {
-    const items = typeof schema.items === "object" && schema.items !== null && !Array.isArray(schema.items)
-      ? schema.items as Schema
-      : null;
+    const items =
+      typeof schema.items === "object" &&
+      schema.items !== null &&
+      !Array.isArray(schema.items)
+        ? (schema.items as Schema)
+        : null;
     const prefixItems = Array.isArray(schema.prefixItems)
-      ? schema.prefixItems as Schema[]
+      ? (schema.prefixItems as Schema[])
       : null;
 
     return (
@@ -243,7 +267,9 @@ function SchemaNode({ schema }: { schema: Schema }) {
   }
 
   // Unknown / empty schema (= "any")
-  const keys = Object.keys(schema).filter((k) => k !== "description" && k !== "title" && k !== "default");
+  const keys = Object.keys(schema).filter(
+    (k) => k !== "description" && k !== "title" && k !== "default",
+  );
   if (keys.length === 0) {
     return (
       <div>
@@ -277,7 +303,11 @@ function singleType(schema: Schema): string | undefined {
 
 function isNeverSchema(schema: Schema): boolean {
   // `not: {}` is the canonical never
-  if (typeof schema.not === "object" && schema.not !== null && Object.keys(schema.not).length === 0) {
+  if (
+    typeof schema.not === "object" &&
+    schema.not !== null &&
+    Object.keys(schema.not).length === 0
+  ) {
     return true;
   }
   // empty anyOf / oneOf = never

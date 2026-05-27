@@ -64,14 +64,12 @@ export function ObjectField({
 
   // Dynamic key-value editor for `record` type: empty `properties` with
   // `additionalProperties` enabled.
-  const hasAdditional = schema.additionalProperties !== undefined && schema.additionalProperties !== false;
+  const hasAdditional =
+    schema.additionalProperties !== undefined &&
+    schema.additionalProperties !== false;
   if (visibleEntries.length === 0 && hasAdditional) {
     return (
-      <DynamicKeyValueEditor
-        schema={schema}
-        value={obj}
-        onChange={onChange}
-      />
+      <DynamicKeyValueEditor schema={schema} value={obj} onChange={onChange} />
     );
   }
 
@@ -106,6 +104,16 @@ export function ObjectField({
  * object shape is entirely dynamic (`additionalProperties: true` or
  * `additionalProperties: <schema>`).
  */
+type Row = { id: number; key: string; value: unknown };
+
+function rowsToObject(rows: Row[]): Record<string, unknown> {
+  const obj: Record<string, unknown> = {};
+  for (const row of rows) {
+    if (row.key !== "") obj[row.key] = row.value;
+  }
+  return obj;
+}
+
 function DynamicKeyValueEditor({
   schema,
   value,
@@ -115,55 +123,40 @@ function DynamicKeyValueEditor({
   value: Record<string, unknown>;
   onChange: (v: unknown) => void;
 }) {
-  // Resolve the value schema: `true` → unconstrained (AnyField),
-  // object → use it as JsonSchema for each value.
   const additionalProps = schema.additionalProperties;
   const valueSchema: JsonSchema | true =
     typeof additionalProps === "object" && additionalProps !== null
       ? (additionalProps as JsonSchema)
       : true;
 
-  // Track insertion order so React keys stay stable across renames.
-  // Each entry gets a monotonic id that never changes even when the
-  // key is edited.
-  const [rows, setRows] = useState<{ id: number; key: string }[]>(() =>
-    Object.keys(value).map((key, idx) => ({ id: idx, key })),
+  const [rows, setRows] = useState<Row[]>(() =>
+    Object.entries(value).map(([key, val], idx) => ({
+      id: idx,
+      key,
+      value: val,
+    })),
   );
   const nextId = useRef(Object.keys(value).length);
 
-  function addRow() {
-    const id = nextId.current++;
-    const newKey = "";
-    const updated = [...rows, { id, key: newKey }];
+  function update(updated: Row[]) {
     setRows(updated);
-    onChange({ ...value, [newKey]: null });
+    onChange(rowsToObject(updated));
+  }
+
+  function addRow() {
+    update([...rows, { id: nextId.current++, key: "", value: null }]);
   }
 
   function removeRow(id: number) {
-    const row = rows.find((r) => r.id === id);
-    if (row === undefined) return;
-    const updated = rows.filter((r) => r.id !== id);
-    setRows(updated);
-    const next = { ...value };
-    delete next[row.key];
-    onChange(next);
+    update(rows.filter((r) => r.id !== id));
   }
 
   function renameKey(id: number, newKey: string) {
-    const row = rows.find((r) => r.id === id);
-    if (row === undefined) return;
-    const oldKey = row.key;
-    setRows(rows.map((r) => (r.id === id ? { ...r, key: newKey } : r)));
-    const next: Record<string, unknown> = {};
-    for (const r of rows) {
-      const k = r.id === id ? newKey : r.key;
-      next[k] = value[r.id === id ? oldKey : r.key];
-    }
-    onChange(next);
+    update(rows.map((r) => (r.id === id ? { ...r, key: newKey } : r)));
   }
 
-  function changeValue(key: string, v: unknown) {
-    onChange({ ...value, [key]: v });
+  function changeValue(id: number, v: unknown) {
+    update(rows.map((r) => (r.id === id ? { ...r, value: v } : r)));
   }
 
   return (
@@ -192,26 +185,21 @@ function DynamicKeyValueEditor({
             <div className="pl-2">
               {valueSchema === true ? (
                 <AnyField
-                  value={value[row.key]}
-                  onChange={(v) => changeValue(row.key, v)}
+                  value={row.value}
+                  onChange={(v) => changeValue(row.id, v)}
                 />
               ) : (
                 <SchemaField
                   schema={valueSchema}
-                  value={value[row.key]}
-                  onChange={(v) => changeValue(row.key, v)}
+                  value={row.value}
+                  onChange={(v) => changeValue(row.id, v)}
                 />
               )}
             </div>
           </div>
         ))
       )}
-      <Button
-        type="button"
-        variant="secondary"
-        size="sm"
-        onClick={addRow}
-      >
+      <Button type="button" variant="secondary" size="sm" onClick={addRow}>
         <Plus className="size-3.5" />
         Add field
       </Button>

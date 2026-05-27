@@ -61,13 +61,8 @@ import Katari.AST
 import Katari.Common (LiteralValue (..), TypePatternTag (..))
 import Katari.Diagnostic (Diagnostic, diagnosticError)
 import Katari.Id
-  ( ConstructorId,
-    LocalVarId (..),
-    ModuleId,
+  ( LocalVarId (..),
     QualifiedName (..),
-    RequestId,
-    TypeId (..),
-    VariableId (..),
     VariableResolution (..),
   )
 import Katari.Prim (PrimRule (..))
@@ -200,33 +195,28 @@ data ReasonKind where
 -- | Errors emitted by the constraint generator itself (separate from solver
 -- errors). Currently the only failure mode is a cyclic type synonym.
 data ConstraintError
-  = ConstraintErrorTypeSynonymCycle SourceSpan TypeId
+  = ConstraintErrorTypeSynonymCycle SourceSpan QualifiedName
   deriving (Eq, Show)
 
 -- | Convert a 'ConstraintError' to a unified 'Diagnostic'. Codes
--- K0200-K0219 are reserved for the constraint generator. The name map
--- (= 'TypeId' → user-declared name) lets us print
--- /"cyclic type synonym 'Foo'"/ instead of /"cyclic type synonym (TypeId 7)"/.
-toDiagnostic :: Map TypeId Text -> ConstraintError -> Diagnostic
-toDiagnostic typeNames = \case
-  ConstraintErrorTypeSynonymCycle sourceSpan tid@(TypeId rawId) ->
+-- K0200-K0219 are reserved for the constraint generator.
+toDiagnostic :: ConstraintError -> Diagnostic
+toDiagnostic = \case
+  ConstraintErrorTypeSynonymCycle sourceSpan qualifiedName ->
     diagnosticError
       "K0200"
-      ( "cyclic type synonym "
-          <> case Map.lookup tid typeNames of
-            Just n -> "'" <> n <> "'"
-            Nothing -> "(TypeId " <> T.pack (show rawId) <> ")"
-      )
+      ("cyclic type synonym '" <> qualifiedName.name <> "'")
       sourceSpan
 
 -- ===========================================================================
 -- Result
 -- ===========================================================================
 
--- | Type environment: maps each 'VariableId' (allocated by the Identifier
--- pass) to the 'SemanticType' Unresolved that the constraint generator
--- assigned to it.
-type TypeEnvironment = Map VariableId (SemanticType Unresolved)
+-- | Type environment: maps each 'VariableResolution' to the
+-- 'SemanticType' 'Unresolved' that the constraint generator assigned to it.
+-- Top-level variables use 'ResolvedTopLevel', local variables use
+-- 'ResolvedLocal'.
+type TypeEnvironment = Map VariableResolution (SemanticType Unresolved)
 
 -- | High-water marks of fresh-id supplies left over from constraint
 -- generation. The Solver consumes these to allocate further fresh
@@ -244,7 +234,7 @@ data VariableSupply = VariableSupply
 -- discharge, and the next-id supply so the solver can keep allocating
 -- fresh variables consistently.
 data ConstraintGenResult = ConstraintGenResult
-  { constrainedModules :: Map ModuleId (Module Constrained),
+  { constrainedModules :: Map Text (Module Constrained),
     typeEnvironment :: TypeEnvironment,
     constraints :: Set Constraint,
     variableSupply :: VariableSupply
@@ -264,15 +254,11 @@ data ConstraintState = ConstraintState
   }
 
 data ConstraintContext = ConstraintContext
-  { contextIdentifiedTypes :: Map TypeId TypeData,
-    contextIdentifiedRequests :: Map RequestId RequestData,
-    contextIdentifiedConstructors :: Map ConstructorId ConstructorData,
-    contextVariablesByQName :: Map QualifiedName VariableId,
-    contextTypesByQName :: Map QualifiedName TypeId,
-    contextRequestsByQName :: Map QualifiedName RequestId,
-    contextConstructorsByQName :: Map QualifiedName ConstructorId,
-    contextRequestOfVariable :: Map VariableId RequestId,
-    contextSynonymVisited :: Set TypeId,
+  { contextIdentifiedTypes :: Map QualifiedName TypeData,
+    contextIdentifiedRequests :: Map QualifiedName RequestData,
+    contextIdentifiedConstructors :: Map QualifiedName ConstructorData,
+    contextIdentifiedVariables :: Map QualifiedName VariableData,
+    contextSynonymVisited :: Set QualifiedName,
     contextEnclosingReturn :: Maybe TypeVariableId,
     contextEnclosingRequests :: Maybe RequestVariableId,
     contextEnclosingForBreak :: Maybe TypeVariableId,
@@ -293,40 +279,26 @@ initialState =
       stateErrors = []
     }
 
--- | Does the given 'RequestId' point at the stdlib-provided
--- @prim.throw@ request? Used to special-case the universal
--- recoverable-error capability throughout the constraint generator
--- so callers never need a @with throw@ annotation.
-isThrowRequestId :: RequestId -> Map RequestId RequestData -> Bool
-isThrowRequestId rid requests = case Map.lookup rid requests of
-  Just RequestData {requestQualifiedName = QualifiedName {module_, name}} ->
-    module_ == "primitive" && name == "throw"
-  Nothing -> False
+-- | Is the given request the stdlib-provided @prim.throw@? Used to
+-- special-case the universal recoverable-error capability so callers
+-- never need a @with throw@ annotation.
+isThrowRequest :: QualifiedName -> Bool
+isThrowRequest qualifiedName =
+  qualifiedName.module_ == "primitive" && qualifiedName.name == "throw"
 
 initialContext ::
-  Map TypeId TypeData ->
-  Map RequestId RequestData ->
-  Map ConstructorId ConstructorData ->
-  Map QualifiedName VariableId ->
-  Map QualifiedName TypeId ->
-  Map QualifiedName RequestId ->
-  Map QualifiedName ConstructorId ->
+  Map QualifiedName TypeData ->
+  Map QualifiedName RequestData ->
+  Map QualifiedName ConstructorData ->
+  Map QualifiedName VariableData ->
   Map QualifiedName PrimRule ->
   ConstraintContext
-initialContext types requests constructors variablesByQName typesByQName requestsByQName constructorsByQName primRules =
+initialContext types requests constructors variables primRules =
   ConstraintContext
     { contextIdentifiedTypes = types,
       contextIdentifiedRequests = requests,
       contextIdentifiedConstructors = constructors,
-      contextVariablesByQName = variablesByQName,
-      contextTypesByQName = typesByQName,
-      contextRequestsByQName = requestsByQName,
-      contextConstructorsByQName = constructorsByQName,
-      contextRequestOfVariable =
-        Map.fromList
-          [ (rd.requestVariableId, rid)
-            | (rid, rd) <- Map.toList requests
-          ],
+      contextIdentifiedVariables = variables,
       contextSynonymVisited = Set.empty,
       contextEnclosingReturn = Nothing,
       contextEnclosingRequests = Nothing,
@@ -355,21 +327,21 @@ freshRequestVariableId = lift $ do
   modify $ \state -> state {stateNextRequestVariableId = current + 1}
   pure (RequestVariableId current)
 
-bindVariable :: VariableId -> SemanticType Unresolved -> CG ()
-bindVariable variableId semanticType = lift . modify $ \s ->
-  s {stateTypeEnvironment = Map.insert variableId semanticType s.stateTypeEnvironment}
+bindVariable :: VariableResolution -> SemanticType Unresolved -> CG ()
+bindVariable resolution semanticType = lift . modify $ \s ->
+  s {stateTypeEnvironment = Map.insert resolution semanticType s.stateTypeEnvironment}
 
--- | Look up a 'VariableId' in the type environment. Phase A binds every
--- VariableId in 'IdentifierResult.identifiedVariables', so this should
--- always hit. Defensive fallback: allocate a fresh type var and bind it.
-lookupVariable :: VariableId -> CG (SemanticType Unresolved)
-lookupVariable variableId = do
-  existing <- lift $ gets (Map.lookup variableId . (.stateTypeEnvironment))
+-- | Look up a 'VariableResolution' in the type environment. Phase A binds
+-- every top-level variable; locals are bound when encountered. Defensive
+-- fallback: allocate a fresh type var and bind it.
+lookupVariable :: VariableResolution -> CG (SemanticType Unresolved)
+lookupVariable resolution = do
+  existing <- lift $ gets (Map.lookup resolution . (.stateTypeEnvironment))
   case existing of
     Just t -> pure t
     Nothing -> do
       fresh <- freshTypeVar
-      bindVariable variableId fresh
+      bindVariable resolution fresh
       pure fresh
 
 addTypeConstraint ::
@@ -434,9 +406,9 @@ withHandleScope :: TypeVariableId -> TypeVariableId -> CG a -> CG a
 withHandleScope resultTv nextTv = local $ \c ->
   c {contextEnclosingHandleBreak = Just resultTv, contextEnclosingHandleNext = Just nextTv}
 
-withSynonymVisit :: TypeId -> CG a -> CG a
-withSynonymVisit tid = local $ \c ->
-  c {contextSynonymVisited = Set.insert tid c.contextSynonymVisited}
+withSynonymVisit :: QualifiedName -> CG a -> CG a
+withSynonymVisit qualifiedName = local $ \c ->
+  c {contextSynonymVisited = Set.insert qualifiedName c.contextSynonymVisited}
 
 -- ===========================================================================
 -- Type elaboration (SyntacticType Identified -> SemanticType Unresolved)
@@ -502,23 +474,19 @@ literalValueToSemantic = \case
 resolveTypeRef :: NameRef Identified TypeRef -> CG (SemanticType Unresolved)
 resolveTypeRef nameRef = case nameRef.resolution of
   Just qualifiedName -> do
-    maybeTid <- asks (Map.lookup qualifiedName . (.contextTypesByQName))
-    case maybeTid of
-      Nothing -> freshTypeVar
-      Just tid -> do
-        types <- asks (.contextIdentifiedTypes)
-        case Map.lookup tid types of
-          Just TypeData {typeSynonymRhs = Just rhs} -> do
-            visited <- asks (.contextSynonymVisited)
-            if Set.member tid visited
-              then do
-                emitError (ConstraintErrorTypeSynonymCycle nameRef.sourceSpan tid)
-                freshTypeVar
-              else withSynonymVisit tid (elaborateType rhs)
-          Just TypeData {typeSynonymRhs = Nothing} ->
-            pure (SemanticTypeData tid)
-          Nothing ->
+    types <- asks (.contextIdentifiedTypes)
+    case Map.lookup qualifiedName types of
+      Just TypeData {typeSynonymRhs = Just rhs} -> do
+        visited <- asks (.contextSynonymVisited)
+        if Set.member qualifiedName visited
+          then do
+            emitError (ConstraintErrorTypeSynonymCycle nameRef.sourceSpan qualifiedName)
             freshTypeVar
+          else withSynonymVisit qualifiedName (elaborateType rhs)
+      Just TypeData {typeSynonymRhs = Nothing} ->
+        pure (SemanticTypeData qualifiedName)
+      Nothing ->
+        freshTypeVar
   Nothing -> freshTypeVar
 
 -- | Elaborate a list of @with@-clause request references into a single
@@ -526,13 +494,13 @@ resolveTypeRef nameRef = case nameRef.resolution of
 -- only for inference, not for explicit annotations).
 elaborateRequestList :: [SyntacticRequest Identified] -> CG (SemanticRequest Unresolved)
 elaborateRequestList syntacticRequests = do
-  requestsByQName <- asks (.contextRequestsByQName)
+  requests <- asks (.contextIdentifiedRequests)
   pure
     ( SemanticRequest
         ( Set.fromList
-            [ SemanticRequestElementConcrete requestId
+            [ SemanticRequestElementConcrete qualifiedName
               | SyntacticRequest {name = NameRef {resolution = Just qualifiedName}} <- syntacticRequests,
-                Just requestId <- [Map.lookup qualifiedName requestsByQName]
+                Just _requestData <- [Map.lookup qualifiedName requests]
             ]
         )
     )
@@ -547,15 +515,15 @@ elaborateOptionalRequests = traverse elaborateRequestList
 -- Phase A: allocate type vars for every VariableId
 -- ===========================================================================
 
--- | Walk @identifiedVariables@ once and bind each id to a fresh type
--- variable. Done before any constraint generation so forward references and
--- mutual recursion just work.
+-- | Walk @identifiedVariables@ once and bind each QualifiedName to a fresh
+-- type variable. Done before any constraint generation so forward references
+-- and mutual recursion just work.
 allocateAllVariables :: IdentifierResult -> CG ()
 allocateAllVariables result = mapM_ allocate (Map.keys result.identifiedVariables)
   where
-    allocate vid = do
+    allocate qualifiedName = do
       tv <- freshTypeVar
-      bindVariable vid tv
+      bindVariable (ResolvedTopLevel qualifiedName) tv
 
 -- ===========================================================================
 -- Phase B: walk modules, declarations, statements, expressions, patterns
@@ -636,25 +604,19 @@ walkRequestDecl RequestDeclaration {annotation, name, requestName, parameters, r
   (parameters', paramSig) <- walkParameterListForSignature parameters
   retSemantic <- elaborateType returnType
   -- The request's signature includes itself in its request set (a @req foo@
-  -- raises @foo@). Identifier issued a 'RequestId' alongside the call-side
-  -- 'VariableId' for this declaration; we translate via 'contextRequestOfVariable'.
-  maybeVid <- variableIdOfName name
-  reqId <- case maybeVid of
-    Nothing -> pure Nothing
-    Just vid -> asks (Map.lookup vid . (.contextRequestOfVariable))
+  -- raises @foo@). The request shares the same QualifiedName as the variable.
+  let maybeReqQName = requestName.resolution
   -- Special-case: `throw` is the universal recoverable-error capability.
   -- Its signature carries an *empty* request set so callers never need to
   -- write `with throw` — every agent can raise it implicitly. Handlers
   -- still catch it through the regular `req throw(msg) { ... }` form
-  -- because the RequestId is unchanged; we only suppress the effect-set
+  -- because the QualifiedName is unchanged; we only suppress the effect-set
   -- contribution at the signature level.
-  isThrow <- case reqId of
-    Just rid -> asks (isThrowRequestId rid . (.contextIdentifiedRequests))
-    Nothing -> pure False
+  let isThrow = maybe False isThrowRequest maybeReqQName
   let signatureEff =
         if isThrow
           then emptyRequest
-          else maybe emptyRequest singletonRequest reqId
+          else maybe emptyRequest singletonRequest maybeReqQName
       signature = SemanticTypeFunction paramSig retSemantic signatureEff
   addEqTypeConstraint signature tReq (ConstraintReason ReasonKindRequestSignature sourceSpan)
   pure
@@ -709,14 +671,14 @@ walkPrimAgentDecl PrimAgentDeclaration {annotation, name, parameters, returnType
 walkDataDecl :: DataDeclaration Identified -> CG (DataDeclaration Constrained)
 walkDataDecl DataDeclaration {annotation, name, typeName, constructorName, parameters, sourceSpan} = do
   tCtor <- variableTypeFromName name
-  tid <- case typeName.resolution of
-    Nothing -> pure Nothing
-    Just qualifiedName -> asks (Map.lookup qualifiedName . (.contextTypesByQName))
   fields <- mapM elaborateDataParameter parameters
-  let signature =
+  let returnType = case typeName.resolution of
+        Nothing -> SemanticTypeUnknown
+        Just qualifiedName -> SemanticTypeData qualifiedName
+      signature =
         SemanticTypeFunction
           (Map.fromList fields)
-          (maybe SemanticTypeUnknown SemanticTypeData tid)
+          returnType
           emptyRequest
   addEqTypeConstraint signature tCtor (ConstraintReason ReasonKindDataConstructorSignature sourceSpan)
   parameters' <- mapM walkDataParameter parameters
@@ -808,11 +770,7 @@ walkPattern maybeSubject = \case
     tx <- case maybeSubject of
       Just subject -> do
         case name.resolution of
-          Just resolution -> do
-            maybeVid <- resolveVariableId resolution
-            case maybeVid of
-              Just vid -> bindVariable vid subject
-              Nothing -> pure ()
+          Just resolution -> bindVariable resolution subject
           Nothing -> pure ()
         pure subject
       Nothing -> variableTypeFromName name
@@ -1155,8 +1113,7 @@ walkRequestHandler handlerBodyRequestVariable wholeBlockId RequestHandler {modul
   (parameters', paramSig) <- walkParameterListForSignature parameters
   retSemantic <- elaborateOrFresh returnType
   retTvId <- freshReturnTypeVar retSemantic
-  requestsByQName <- asks (.contextRequestsByQName)
-  let handlerReqId = name.resolution >>= (`Map.lookup` requestsByQName)
+  let handlerReqQName = name.resolution
   -- Handler body walks under e4 (the dedicated handler-request var) and the
   -- handle scope. 'next e' resumes the original request call, so 'e' is
   -- constrained against retTvId (= the next-tv); 'break e' targets
@@ -1177,7 +1134,7 @@ walkRequestHandler handlerBodyRequestVariable wholeBlockId RequestHandler {modul
         SemanticTypeFunction
           paramSig
           retSemantic
-          (maybe emptyRequest singletonRequest handlerReqId)
+          (maybe emptyRequest singletonRequest handlerReqQName)
   -- subtype only (handler is a re-assignment of the underlying req)
   addTypeConstraint handlerSignature tHandled (ConstraintReason ReasonKindRequestHandlerSignature sourceSpan)
   pure
@@ -1562,7 +1519,7 @@ walkUnaryExpr UnaryOperatorExpression {sourceSpan} = do
 -- follow-up; the operator-survival case only fires on a real bug.
 emitInternalError :: SourceSpan -> Text -> CG ()
 emitInternalError sourceSpan _msg =
-  emitError (ConstraintErrorTypeSynonymCycle sourceSpan (TypeId (-1)))
+  emitError (ConstraintErrorTypeSynonymCycle sourceSpan (QualifiedName "" "<internal>"))
 
 walkIfExpr :: IfExpression Identified -> CG (Expression Constrained)
 walkIfExpr IfExpression {condition, thenBlock, elseBlock, sourceSpan} = do
@@ -1726,12 +1683,10 @@ walkHandleExpr HandleExpression {parallel, stateVariables, handlers, thenClause,
   handlers' <- mapM (walkRequestHandler handlerBodyRequestVariable wholeBlockId) handlers
 
   -- Request constraints
-  handlerRequestsByQName <- asks (.contextRequestsByQName)
   let handledRequestIds =
         Set.fromList
-          [ SemanticRequestElementConcrete requestId
-            | RequestHandler {name = NameRef {resolution = Just qualifiedName}} <- handlers,
-              Just requestId <- [Map.lookup qualifiedName handlerRequestsByQName]
+          [ SemanticRequestElementConcrete qualifiedName
+            | RequestHandler {name = NameRef {resolution = Just qualifiedName}} <- handlers
           ]
   let enclosingRequest = maybe emptyRequest singletonRequestVariable enclosingRequestVariable
       handledRequest = SemanticRequest handledRequestIds
@@ -1898,52 +1853,22 @@ walkQualifiedReferenceExpr QualifiedReferenceExpression {moduleQualifier, target
 variableTypeFromName :: NameRef Identified VariableRef -> CG (SemanticType Unresolved)
 variableTypeFromName nameRef = case nameRef.resolution of
   Nothing -> freshTypeVar
-  Just resolution -> do
-    maybeVid <- resolveVariableId resolution
-    maybe freshTypeVar lookupVariable maybeVid
+  Just resolution -> lookupVariable resolution
 
-resolveVariableId :: VariableResolution -> CG (Maybe VariableId)
-resolveVariableId = \case
-  ResolvedTopLevel qualifiedName -> asks (Map.lookup qualifiedName . (.contextVariablesByQName))
-  ResolvedLocal (LocalVarId localId) -> pure (Just (VariableId localId))
-
-variableIdOfName :: NameRef Identified VariableRef -> CG (Maybe VariableId)
-variableIdOfName nameRef = case nameRef.resolution of
-  Nothing -> pure Nothing
-  Just resolution -> resolveVariableId resolution
-
--- | Type of a 'req' declaration's call-side, looked up via the request id.
--- Each 'RequestId' has a known corresponding 'VariableId'
--- ('requestVariableId'); we read the type out of 'stateTypeEnvironment'
--- through that. Unresolved request references fall back to a fresh type
--- variable (Identifier already reported the failure).
+-- | Type of a 'req' declaration's call-side, looked up via the request's
+-- 'QualifiedName' in the type environment. The request and its callable
+-- share the same 'QualifiedName', so we look up 'ResolvedTopLevel qname'.
 requestTypeFromName :: NameRef Identified RequestRef -> CG (SemanticType Unresolved)
 requestTypeFromName nameRef = case nameRef.resolution of
   Nothing -> freshTypeVar
-  Just qualifiedName -> do
-    maybeRid <- asks (Map.lookup qualifiedName . (.contextRequestsByQName))
-    case maybeRid of
-      Nothing -> freshTypeVar
-      Just rid -> do
-        requestData <- asks (Map.lookup rid . (.contextIdentifiedRequests))
-        case requestData of
-          Just rd -> lookupVariable rd.requestVariableId
-          Nothing -> freshTypeVar
+  Just qualifiedName -> lookupVariable (ResolvedTopLevel qualifiedName)
 
 constructorTypeFromName ::
   NameRef Identified ConstructorRef ->
   CG (SemanticType Unresolved)
 constructorTypeFromName nameRef = case nameRef.resolution of
   Nothing -> freshTypeVar
-  Just qualifiedName -> do
-    maybeCid <- asks (Map.lookup qualifiedName . (.contextConstructorsByQName))
-    case maybeCid of
-      Nothing -> freshTypeVar
-      Just cid -> do
-        ctorData <- asks (Map.lookup cid . (.contextIdentifiedConstructors))
-        case ctorData of
-          Just cd -> lookupVariable cd.constructorVariableId
-          Nothing -> freshTypeVar
+  Just qualifiedName -> lookupVariable (ResolvedTopLevel qualifiedName)
 
 -- | If the optional type annotation is present, elaborate it; otherwise
 -- allocate a fresh type variable so the solver can infer it.
@@ -2004,13 +1929,12 @@ generateConstraintsForModule ::
   Map QualifiedName (SemanticType Resolved) ->
   IdentifierResult ->
   Text ->
-  ModuleId ->
   (ConstraintGenResult, [ConstraintError])
-generateConstraintsForModule importedTypes result targetModuleName targetModuleId =
+generateConstraintsForModule importedTypes result targetModuleName =
   case runState (runReaderT action context) initialState of
     (constrainedModule, finalState) ->
       ( ConstraintGenResult
-          { constrainedModules = Map.singleton targetModuleId constrainedModule,
+          { constrainedModules = Map.singleton targetModuleName constrainedModule,
             typeEnvironment = finalState.stateTypeEnvironment,
             constraints = finalState.stateConstraints,
             variableSupply =
@@ -2025,7 +1949,7 @@ generateConstraintsForModule importedTypes result targetModuleName targetModuleI
     context = buildContext result
     action = do
       allocateVariablesForModule importedTypes targetModuleName result
-      case Map.lookup targetModuleId result.moduleASTs of
+      case Map.lookup targetModuleName result.moduleASTs of
         Just moduleAST -> walkModule moduleAST
         Nothing -> pure Module {declarations = [], sourceSpan = emptySrcSpan}
     emptySrcSpan =
@@ -2050,14 +1974,14 @@ generateConstraintsForModule importedTypes result targetModuleName targetModuleI
 generateConstraintsForSCC ::
   Map QualifiedName (SemanticType Resolved) ->
   IdentifierResult ->
-  ModuleId ->
+  Text ->
   Set QualifiedName ->
   (ConstraintGenResult, [ConstraintError])
-generateConstraintsForSCC knownTypes result targetModuleId sccQualifiedNames =
+generateConstraintsForSCC knownTypes result targetModuleName sccQualifiedNames =
   case runState (runReaderT action context) initialState of
     (constrainedDeclarations, finalState) ->
       ( ConstraintGenResult
-          { constrainedModules = Map.singleton targetModuleId (Module {declarations = constrainedDeclarations, sourceSpan = moduleSpan}),
+          { constrainedModules = Map.singleton targetModuleName (Module {declarations = constrainedDeclarations, sourceSpan = moduleSpan}),
             typeEnvironment = finalState.stateTypeEnvironment,
             constraints = finalState.stateConstraints,
             variableSupply =
@@ -2070,12 +1994,12 @@ generateConstraintsForSCC knownTypes result targetModuleId sccQualifiedNames =
       )
   where
     context = buildContext result
-    moduleSpan = case Map.lookup targetModuleId result.moduleASTs of
+    moduleSpan = case Map.lookup targetModuleName result.moduleASTs of
       Just moduleAST -> moduleAST.sourceSpan
       Nothing -> emptySrcSpan
     action = do
       allocateVariablesForSCC knownTypes sccQualifiedNames result
-      case Map.lookup targetModuleId result.moduleASTs of
+      case Map.lookup targetModuleName result.moduleASTs of
         Just moduleAST -> walkDeclarationsForSCC sccQualifiedNames moduleAST.declarations
         Nothing -> pure []
     emptySrcSpan =
@@ -2130,20 +2054,17 @@ allocateVariablesForModule ::
 allocateVariablesForModule importedTypes targetModuleName result =
   mapM_ allocate (Map.toList result.identifiedVariables)
   where
-    allocate (variableId, variableData) =
-      case variableData.variableQualifiedName of
-        Just qualifiedName
-          | Just resolvedType <- Map.lookup qualifiedName importedTypes ->
-              bindVariable variableId (liftResolvedToUnresolved resolvedType)
-          | qualifiedName.module_ == targetModuleName -> do
-              fresh <- freshTypeVar
-              bindVariable variableId fresh
-          | otherwise -> pure ()
-        Nothing -> pure ()
+    allocate (qualifiedName, _variableData) =
+      let resolution = ResolvedTopLevel qualifiedName
+       in case Map.lookup qualifiedName importedTypes of
+            Just resolvedType ->
+              bindVariable resolution (liftResolvedToUnresolved resolvedType)
+            Nothing
+              | qualifiedName.module_ == targetModuleName -> do
+                  fresh <- freshTypeVar
+                  bindVariable resolution fresh
+              | otherwise -> pure ()
 
--- | Like 'allocateVariablesForModule' but for a single SCC. Variables
--- in @knownTypes@ are pre-bound as concrete; variables whose
--- 'QualifiedName' is in @sccQualifiedNames@ get fresh type variables.
 allocateVariablesForSCC ::
   Map QualifiedName (SemanticType Resolved) ->
   Set QualifiedName ->
@@ -2152,16 +2073,16 @@ allocateVariablesForSCC ::
 allocateVariablesForSCC knownTypes sccQualifiedNames result =
   mapM_ allocate (Map.toList result.identifiedVariables)
   where
-    allocate (variableId, variableData) =
-      case variableData.variableQualifiedName of
-        Just qualifiedName
-          | Just resolvedType <- Map.lookup qualifiedName knownTypes ->
-              bindVariable variableId (liftResolvedToUnresolved resolvedType)
-          | Set.member qualifiedName sccQualifiedNames -> do
-              fresh <- freshTypeVar
-              bindVariable variableId fresh
-          | otherwise -> pure ()
-        Nothing -> pure ()
+    allocate (qualifiedName, _variableData) =
+      let resolution = ResolvedTopLevel qualifiedName
+       in case Map.lookup qualifiedName knownTypes of
+            Just resolvedType ->
+              bindVariable resolution (liftResolvedToUnresolved resolvedType)
+            Nothing
+              | Set.member qualifiedName sccQualifiedNames -> do
+                  fresh <- freshTypeVar
+                  bindVariable resolution fresh
+              | otherwise -> pure ()
 
 buildContext :: IdentifierResult -> ConstraintContext
 buildContext result =
@@ -2169,16 +2090,12 @@ buildContext result =
     result.identifiedTypes
     result.identifiedRequests
     result.identifiedConstructors
-    result.topLevelVariablesByQName
-    result.typesByQName
-    result.requestsByQName
-    result.constructorsByQName
+    result.identifiedVariables
     primRules
   where
     primRules =
       Map.fromList
         [ (qualifiedName, rule)
-          | (_variableId, variableData) <- Map.toList result.identifiedVariables,
-            Just rule <- [variableData.variablePrimRule],
-            Just qualifiedName <- [variableData.variableQualifiedName]
+          | (qualifiedName, variableData) <- Map.toList result.identifiedVariables,
+            Just rule <- [variableData.variablePrimRule]
         ]

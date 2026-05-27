@@ -11,24 +11,17 @@ module Katari.SemanticType.Render
   )
 where
 
-import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as Text
-import Katari.Id (RequestId, TypeId)
+import Katari.Common (QualifiedName (..), renderQualifiedName)
 import Katari.SemanticType qualified as ST
 
--- | @typeNames@ resolves user-declared 'TypeId's to surface names.
--- @reqNames@ resolves request 'VariableId's to surface names. Both can
--- be empty if the caller does not have those tables handy — the
--- renderer falls back to a placeholder.
 renderSemanticType ::
-  Map TypeId Text ->
-  Map RequestId Text ->
   ST.SemanticType ST.Resolved ->
   Text
-renderSemanticType typeNames reqNames = render False
+renderSemanticType = render False
   where
     render :: Bool -> ST.SemanticType ST.Resolved -> Text
     render parenthesise semanticType = case semanticType of
@@ -53,10 +46,7 @@ renderSemanticType typeNames reqNames = render False
       ST.SemanticTypeUnion branches ->
         let body = Text.intercalate " | " (map (render True) branches)
          in if parenthesise then "(" <> body <> ")" else body
-      ST.SemanticTypeData typeId ->
-        case Map.lookup typeId typeNames of
-          Just name -> name
-          Nothing -> "<data:" <> Text.pack (show typeId) <> ">"
+      ST.SemanticTypeData qualifiedName -> qualifiedName.name
       ST.SemanticTypeObject fields ->
         "{ "
           <> Text.intercalate
@@ -68,7 +58,7 @@ renderSemanticType typeNames reqNames = render False
               Text.intercalate
                 ", "
                 [k <> ": " <> render False v | (k, v) <- Map.toAscList parameters]
-            effectsText = renderSemanticRequest reqNames effects
+            effectsText = renderSemanticRequest effects
             body =
               "("
                 <> parameterText
@@ -84,10 +74,9 @@ renderSemanticType typeNames reqNames = render False
 -- to the empty string (caller decides whether to elide a leading
 -- @with@).
 renderSemanticRequest ::
-  Map RequestId Text ->
   ST.SemanticRequest ST.Resolved ->
   Text
-renderSemanticRequest reqNames (ST.SemanticRequest elements) =
+renderSemanticRequest (ST.SemanticRequest elements) =
   let names = [renderElem e | e <- Set.toAscList elements]
    in if null names
         then ""
@@ -95,7 +84,4 @@ renderSemanticRequest reqNames (ST.SemanticRequest elements) =
   where
     renderElem :: ST.SemanticRequestElement ST.Resolved -> Text
     renderElem = \case
-      ST.SemanticRequestElementConcrete rid ->
-        case Map.lookup rid reqNames of
-          Just n -> n
-          Nothing -> "<req:" <> Text.pack (show rid) <> ">"
+      ST.SemanticRequestElementConcrete qualifiedName -> qualifiedName.name

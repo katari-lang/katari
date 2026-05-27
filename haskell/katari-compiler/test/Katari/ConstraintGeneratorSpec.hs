@@ -2,14 +2,14 @@ module Katari.ConstraintGeneratorSpec (spec) where
 
 import Data.List (find)
 import Data.Map.Strict qualified as Map
+import Data.Maybe (mapMaybe)
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Katari.Id
-  ( QualifiedName (QualifiedName),
-    RequestId,
-    TypeId,
-    VariableId,
+  ( QualifiedName (..),
+    VariableResolution (..),
   )
+import Katari.Typechecker.ScopeIndex (ScopeFrame (..), ScopeIndex (..))
 import Katari.Lexer qualified as Lexer
 import Katari.Parser qualified as Parser
 import Katari.SemanticType
@@ -17,6 +17,7 @@ import Katari.Typechecker.ConstraintGenerator
 import Katari.Typechecker.Identifier
   ( IdentifierResult (..),
     RequestData (RequestData),
+    SymbolEntry (..),
     TypeData (..),
     VariableData (..),
     identify,
@@ -79,28 +80,29 @@ requestConstraints ::
 requestConstraints result =
   [(lhs, rhs) | RequestConstraint {requestLhs = lhs, requestRhs = rhs} <- Set.toList result.constraints]
 
--- | Find the VariableId for a given source name.
-variableIdOf :: Text -> IdentifierResult -> Maybe VariableId
-variableIdOf name result =
-  fst <$> find ((== name) . (.variableName) . snd) (Map.toList result.identifiedVariables)
+-- | Find the VariableResolution for a named binding. Searches top-level
+-- identifiedVariables first, then falls back to scanning the scopeIndex
+-- for local variables (parameters, let bindings, match arm bindings).
+variableResolutionOf :: Text -> IdentifierResult -> Maybe VariableResolution
+variableResolutionOf name result =
+  case (ResolvedTopLevel . fst) <$> find ((== name) . (.variableName) . snd) (Map.toList result.identifiedVariables) of
+    Just resolution -> Just resolution
+    Nothing ->
+      -- Search all scope frames for a local variable with this name.
+      let allFrames = concatMap snd (Map.toList result.scopeIndex.framesByFile)
+          candidates = mapMaybe (\frame -> Map.lookup name frame.frameSymbols >>= (.variableSymbol)) allFrames
+       in case candidates of
+            (resolution : _) -> Just resolution
+            [] -> Nothing
 
--- | Look up the 'RequestId' that corresponds to a given call-side
--- 'VariableId'. Used to populate request-set assertions in tests where the
--- request lookup is keyed by request id.
-requestIdOfVariable :: VariableId -> IdentifierResult -> RequestId
-requestIdOfVariable vid result =
-  head
-    [ rid
-      | (rid, rd) <- Map.toList result.identifiedRequests,
-        requestVariableIdOf rd == vid
-    ]
-  where
-    requestVariableIdOf :: RequestData -> VariableId
-    requestVariableIdOf (RequestData _ _ v _) = v
+-- | Find the QualifiedName for a named request declaration.
+requestQNameOf :: Text -> IdentifierResult -> Maybe QualifiedName
+requestQNameOf name result =
+  fst <$> find (\(qn, _) -> qn.name == name) (Map.toList result.identifiedRequests)
 
 -- | Lookup the type variable assigned to a named variable.
 typeVarOf :: Text -> ConstraintGenResult -> IdentifierResult -> Maybe (SemanticType Unresolved)
-typeVarOf name cg ir = variableIdOf name ir >>= \vid -> Map.lookup vid cg.typeEnvironment
+typeVarOf name cg ir = variableResolutionOf name ir >>= \vid -> Map.lookup vid cg.typeEnvironment
 
 -- | True if any type constraint has the given lhs.
 hasTypeConstraintLhs ::
@@ -123,8 +125,8 @@ hasRequestConstraint ::
   Bool
 hasRequestConstraint p cg = any (uncurry p) (requestConstraints cg)
 
--- | Extract concrete RequestId elements from a SemanticRequest.
-concreteRequests :: SemanticRequest phase -> Set.Set RequestId
+-- | Extract concrete QualifiedName elements from a SemanticRequest.
+concreteRequests :: SemanticRequest phase -> Set.Set QualifiedName
 concreteRequests (SemanticRequest elements) =
   Set.fromList [r | SemanticRequestElementConcrete r <- Set.toList elements]
 
@@ -196,13 +198,13 @@ multipleModules = describe "multiple modules" $ do
           cgErrors `shouldBe` []
           -- 同じ helper VariableId に対して typeEnvironment に entry が一つだけ
           -- (= 同一 type var が両 module で参照されている)
-          let helperVid =
+          let helperEntry =
                 find
                   ((== ("helper" :: Text)) . (.variableName) . snd)
                   (Map.toList result.identifiedVariables)
-          case helperVid of
-            Just (vid, _) ->
-              Map.member vid cg.typeEnvironment `shouldBe` True
+          case helperEntry of
+            Just (qualifiedName, _) ->
+              Map.member (ResolvedTopLevel qualifiedName) cg.typeEnvironment `shouldBe` True
             Nothing -> expectationFailure "expected helper variable in identified vars"
 
 -- ---------------------------------------------------------------------------
@@ -652,18 +654,17 @@ constraintContents = describe "constraint contents" $ do
 
   it "request declaration produces signature with self-request" $ do
     (cg, _, ir) <- runOneWithIdentifier "request fetch() -> string"
-    case (variableIdOf "fetch" ir, typeVarOf "fetch" cg ir) of
-      (Just fetchVid, Just tFetch) ->
-        let fetchReqId = requestIdOfVariable fetchVid ir
-         in cg
-              `shouldSatisfy` hasTypeConstraint
-                ( \l r -> case l of
-                    SemanticTypeFunction _ ret eff ->
-                      ret == SemanticTypeString
-                        && Set.member fetchReqId (concreteRequests eff)
-                        && r == tFetch
-                    _ -> False
-                )
+    case (requestQNameOf "fetch" ir, typeVarOf "fetch" cg ir) of
+      (Just fetchQName, Just tFetch) ->
+        cg
+          `shouldSatisfy` hasTypeConstraint
+            ( \l r -> case l of
+                SemanticTypeFunction _ ret eff ->
+                  ret == SemanticTypeString
+                    && Set.member fetchQName (concreteRequests eff)
+                    && r == tFetch
+                _ -> False
+            )
       _ -> expectationFailure "fetch not in identifier output / env"
 
   it "data ctor signature is pure (emptyRequest) and returns SemanticTypeData" $ do
@@ -707,16 +708,15 @@ constraintContents = describe "constraint contents" $ do
             "  fetch()\n",
             "}"
           ]
-    case variableIdOf "fetch" ir of
+    case requestQNameOf "fetch" ir of
       Nothing -> expectationFailure "fetch not in identifier output"
-      Just fetchVid ->
+      Just fetchQName ->
         -- innerEff <: outerEff ∪ {fetch}
         -- rhs.requestReqs に fetch が含まれている request constraint が存在
-        let fetchReqId = requestIdOfVariable fetchVid ir
-         in cg
-              `shouldSatisfy` hasRequestConstraint
-                ( \_ rhs -> Set.member fetchReqId (concreteRequests rhs)
-                )
+        cg
+          `shouldSatisfy` hasRequestConstraint
+            ( \_ rhs -> Set.member fetchQName (concreteRequests rhs)
+            )
 
   it "if branches both flow into the same result type var" $ do
     (cg, _) <- runOne "agent foo() { if (true) { 1 } else { 2 } }"
@@ -793,33 +793,28 @@ dataNameClash = describe "cross-module data name clash" $ do
           (result, []) -> do
             let (cg, cgErrors) = generateConstraints result
             cgErrors `shouldBe` []
-            -- 各モジュールの "foo" type に発行された TypeId を集める。
-            let fooTypeIds =
-                  [ tid
-                    | (tid, td) <- Map.toList result.identifiedTypes,
-                      typeNameOf td == "foo"
+            -- 各モジュールの "foo" type に発行された QualifiedName を集める。
+            let fooTypeQNames =
+                  [ qualifiedName
+                    | (qualifiedName, _td) <- Map.toList result.identifiedTypes,
+                      qualifiedName.name == "foo"
                   ]
-            length fooTypeIds `shouldBe` 2
-            -- どちらの TypeId も SemanticTypeData として制約に出現するはず。
+            length fooTypeQNames `shouldBe` 2
+            -- どちらの QualifiedName も SemanticTypeData として制約に出現するはず。
             -- (リファクタ前は両方が SemanticTypeUnknown に degrade していた)
-            let usedTids = Set.fromList (concatMap (collectDataTids . snd) (typeConstraints cg))
-            (head fooTypeIds `Set.member` usedTids) `shouldBe` True
-            (fooTypeIds !! 1 `Set.member` usedTids) `shouldBe` True
+            let usedQNames = Set.fromList (concatMap (collectDataQNames . snd) (typeConstraints cg))
+            (head fooTypeQNames `Set.member` usedQNames) `shouldBe` True
+            (fooTypeQNames !! 1 `Set.member` usedQNames) `shouldBe` True
   where
-    -- Bare name extracted from the qualified name (TypeData no longer
-    -- carries a separate @typeName@ field).
-    typeNameOf :: TypeData -> Text
-    typeNameOf td = case td.typeQualifiedName of
-      QualifiedName _ n -> n
-    collectDataTids :: SemanticType Unresolved -> [TypeId]
-    collectDataTids = \case
-      SemanticTypeData tid -> [tid]
+    collectDataQNames :: SemanticType Unresolved -> [QualifiedName]
+    collectDataQNames = \case
+      SemanticTypeData qualifiedName -> [qualifiedName]
       SemanticTypeFunction params returnType _ ->
-        concatMap collectDataTids (Map.elems params) <> collectDataTids returnType
-      SemanticTypeArray elementType -> collectDataTids elementType
-      SemanticTypeTuple elementTypes -> concatMap collectDataTids elementTypes
-      SemanticTypeUnion branches -> concatMap collectDataTids branches
-      SemanticTypeObject fields -> concatMap collectDataTids (Map.elems fields)
+        concatMap collectDataQNames (Map.elems params) <> collectDataQNames returnType
+      SemanticTypeArray elementType -> collectDataQNames elementType
+      SemanticTypeTuple elementTypes -> concatMap collectDataQNames elementTypes
+      SemanticTypeUnion branches -> concatMap collectDataQNames branches
+      SemanticTypeObject fields -> concatMap collectDataQNames (Map.elems fields)
       _ -> []
 
 -- ---------------------------------------------------------------------------

@@ -57,7 +57,7 @@ import Data.Map.Strict qualified as Map
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
-import Katari.Id (RequestId, TypeId)
+import Katari.Common (QualifiedName)
 import Katari.SemanticType (Resolved, SemanticRequest (..), SemanticRequestElement (..), SemanticType (..))
 
 -- ---------------------------------------------------------------------------
@@ -107,9 +107,9 @@ data LayeredType = LayeredType
     -- of that arity inhabit this type. Per arity the per-position types
     -- are stored as a list.
     tupleLayer :: Map Int [NormalizedType],
-    -- | Set of @data@ type ids that inhabit this type. Empty means no
-    -- @data@ values.
-    dataLayer :: Set TypeId,
+    -- | Set of @data@ type qualified names that inhabit this type. Empty
+    -- means no @data@ values.
+    dataLayer :: Set QualifiedName,
     -- | Structural object layer. 'ObjectSlotAbsent' means "no object values"
     -- (distinguishable from "object with all-empty fields"). Per Katari's
     -- product-normalisation rule, all object shapes in a union collapse
@@ -205,7 +205,7 @@ data FunctionSlot where
 data FunctionShape = FunctionShape
   { parameters :: Map Text NormalizedType,
     returnType :: NormalizedType,
-    requests :: Set RequestId
+    requests :: Set QualifiedName
   }
   deriving (Eq, Show)
 
@@ -313,7 +313,7 @@ arrayBranches = \case
 tupleBranches :: Map Int [NormalizedType] -> [SemanticType Resolved]
 tupleBranches = fmap (SemanticTypeTuple . fmap denormalise . snd) . Map.toList
 
-dataBranches :: Set TypeId -> [SemanticType Resolved]
+dataBranches :: Set QualifiedName -> [SemanticType Resolved]
 dataBranches = fmap SemanticTypeData . Set.toList
 
 objectBranches :: ObjectSlot -> [SemanticType Resolved]

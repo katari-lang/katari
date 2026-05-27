@@ -145,19 +145,20 @@ export function AgentDetailPage() {
                       Optional — defaults to the placeholder.
                     </p>
                   </div>
+                  <Label className="mb-2">Arguments</Label>
+                  <CopyButton
+                    text={JSON.stringify(agent.parameters, null, 2)}
+                    label="Copied schema"
+                  >
+                    Copy Schema
+                  </CopyButton>
                   <SchemaForm
                     schema={agent.parameters as JsonSchema}
                     onSubmit={(args) =>
                       invoke.mutate(args as Record<string, RawValue>)
                     }
                     renderActions={({ submit }) => (
-                      <div className="flex items-center justify-between pt-2">
-                        <CopyButton
-                          text={JSON.stringify(agent.parameters, null, 2)}
-                          label="Copied schema"
-                        >
-                          Copy Schema
-                        </CopyButton>
+                      <div className="flex items-center justify-end pt-2">
                         <Button
                           type="button"
                           variant="primary"
@@ -231,8 +232,7 @@ function ReturnsCard({
         <CardTitle>Returns schema</CardTitle>
       </CardHeader>
       <CardContent>
-        <SchemaViewer schema={returns} />
-        <div className="mt-3">
+        <div className="mb-1">
           <CopyButton
             text={JSON.stringify(returns, null, 2)}
             label="Copied schema"
@@ -240,6 +240,7 @@ function ReturnsCard({
             Copy Schema
           </CopyButton>
         </div>
+        <SchemaViewer schema={returns} />
       </CardContent>
     </Card>
   );

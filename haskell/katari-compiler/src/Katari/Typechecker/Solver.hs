@@ -61,7 +61,7 @@ import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
 import Katari.Diagnostic (Diagnostic, diagnosticError)
-import Katari.Id (RequestId, TypeId)
+import Katari.Id ()
 import Katari.SemanticType
   ( RequestVariableId (..),
     Resolved,
@@ -531,8 +531,8 @@ totalise upperLimit toKey def given =
 -- them — primitive types render fine without; data names degrade to a
 -- placeholder. Production call sites (= 'Katari.Compile') populate
 -- both maps so diagnostics print e.g. /"expected `User`, found `Int`"/.
-toDiagnostic :: Map TypeId Text -> Map RequestId Text -> SolverError -> Diagnostic
-toDiagnostic typeNames reqNames = \case
+toDiagnostic :: SolverError -> Diagnostic
+toDiagnostic = \case
   -- (left ⊑ right): the user's "expected" type is the supertype on the
   -- RIGHT (= what the context required); the "found" type is the
   -- subtype on the LEFT (= what was actually produced).
@@ -570,5 +570,5 @@ toDiagnostic typeNames reqNames = \case
       ("structural type mismatch: " <> msg)
       (sourceSpanOf reason)
   where
-    renderTy = STR.renderSemanticType typeNames reqNames
+    renderTy = STR.renderSemanticType
     renderReason r = T.pack (show r.kind)

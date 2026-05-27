@@ -7,7 +7,7 @@ where
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
-import Katari.Id (QualifiedName (..), VariableId)
+import Katari.Id (QualifiedName (..), VariableResolution (..))
 import Katari.SemanticType (Resolved, SemanticType)
 import Katari.Typechecker.Identifier (VariableData (..))
 
@@ -18,17 +18,16 @@ data ModuleInterface = ModuleInterface
 
 extractModuleInterface ::
   Text ->
-  Map VariableId VariableData ->
-  Map VariableId (SemanticType Resolved) ->
+  Map QualifiedName VariableData ->
+  Map VariableResolution (SemanticType Resolved) ->
   ModuleInterface
 extractModuleInterface moduleName variables typeEnvironment =
   ModuleInterface
     { exportedTypes =
         Map.fromList
           [ (qualifiedName, resolvedType)
-            | (variableId, variableData) <- Map.toList variables,
-              Just qualifiedName <- [variableData.variableQualifiedName],
+            | (qualifiedName, _variableData) <- Map.toList variables,
               qualifiedName.module_ == moduleName,
-              Just resolvedType <- [Map.lookup variableId typeEnvironment]
+              Just resolvedType <- [Map.lookup (ResolvedTopLevel qualifiedName) typeEnvironment]
           ]
     }

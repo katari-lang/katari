@@ -26,7 +26,7 @@ where
 import Data.List (nubBy, sortBy)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (catMaybes, mapMaybe)
+import Data.Maybe (catMaybes, listToMaybe, mapMaybe)
 import Data.Ord (comparing)
 import Data.Text (Text)
 import Data.Text qualified as Text
@@ -36,10 +36,7 @@ import Katari.Common (LiteralValue (..), TypePatternTag (..))
 import Katari.Diagnostic (Diagnostic, diagnosticError, diagnosticWarning)
 import Katari.Id
   ( ConstructorId,
-    LocalVarId (..),
     QualifiedName (..),
-    TypeId,
-    VariableId (..),
     VariableResolution (..),
   )
 import Katari.SemanticType
@@ -52,17 +49,6 @@ import Katari.Typechecker.Identifier
     IdentifierResult (..),
   )
 import Katari.Typechecker.Zonker (ZonkResult (..))
-
--- ===========================================================================
--- Variable resolution helper
--- ===========================================================================
-
--- | Convert a 'VariableResolution' to the legacy 'VariableId' used internally
--- by 'zonkedTypeEnvironment' and 'identifiedVariables'.
-resolveVariableId :: IdentifierResult -> VariableResolution -> Maybe VariableId
-resolveVariableId idResult = \case
-  ResolvedTopLevel qualifiedName -> Map.lookup qualifiedName idResult.topLevelVariablesByQName
-  ResolvedLocal (LocalVarId n) -> Just (VariableId n)
 
 -- ===========================================================================
 -- Error type
@@ -263,10 +249,10 @@ defaultCtx context = context {columnTypes = drop 1 context.columnTypes}
 getSubFieldTypes :: CtorTag -> SemanticType Resolved -> IdentifierResult -> ZonkResult -> [SemanticType Resolved]
 getSubFieldTypes tag columnType idResult zonkResult = case tag of
   CtorTagData cid ->
-    case Map.lookup cid idResult.identifiedConstructors of
+    case lookupConstructorByIdent cid idResult of
       Nothing -> []
-      Just cd ->
-        case Map.lookup cd.constructorVariableId zonkResult.zonkedTypeEnvironment of
+      Just (qualifiedName, _) ->
+        case Map.lookup (ResolvedTopLevel qualifiedName) zonkResult.zonkedTypeEnvironment of
           Just (SemanticTypeFunction parameters _ _) ->
             map snd (Map.toAscList parameters)
           _ -> []
@@ -342,8 +328,8 @@ tagCompatibleWithType tag ty idResult zonkResult = case ty of
       _ -> False
     CtorTagData cid -> case ty of
       SemanticTypeData tid ->
-        case Map.lookup cid idResult.identifiedConstructors of
-          Just cd -> cd.constructorTypeId == tid
+        case lookupConstructorByIdent cid idResult of
+          Just (_, cd) -> cd.constructorTypeQName == tid
           Nothing -> False
       _ -> False
     -- Runtime type-guard patterns are always compatible: the guard runs
@@ -382,21 +368,33 @@ isCompleteSig seen ty idResult zonkResult = case ty of
     False -- Integer, Number, String, Array, Object, Unknown: infinite domain
 
 -- ===========================================================================
+-- Constructor lookup by ConstructorId
+-- ===========================================================================
+
+-- | Reverse-lookup a 'ConstructorId' in 'identifiedConstructors'. The map is
+-- keyed by 'QualifiedName', so we do a linear scan. This is only used during
+-- witness rendering and compatibility checks (small maps, infrequent).
+lookupConstructorByIdent :: ConstructorId -> IdentifierResult -> Maybe (QualifiedName, ConstructorData)
+lookupConstructorByIdent cid idResult =
+  listToMaybe
+    [(qualifiedName, cd) | (qualifiedName, cd) <- Map.toList idResult.identifiedConstructors, cd.constructorId == cid]
+
+-- ===========================================================================
 -- Constructor enumeration helpers
 -- ===========================================================================
 
 -- | All constructors of a data type, with their arities.
-ctorsOfType :: IdentifierResult -> ZonkResult -> TypeId -> [(ConstructorId, Int)]
-ctorsOfType idResult zonkResult typeId =
-  [ (cid, lookupCtorArity zonkResult cd.constructorVariableId)
-    | (cid, cd) <- Map.toList idResult.identifiedConstructors,
-      cd.constructorTypeId == typeId
+ctorsOfType :: IdentifierResult -> ZonkResult -> QualifiedName -> [(ConstructorId, Int)]
+ctorsOfType idResult zonkResult typeQName =
+  [ (cd.constructorId, lookupCtorArity zonkResult qualifiedName)
+    | (qualifiedName, cd) <- Map.toList idResult.identifiedConstructors,
+      cd.constructorTypeQName == typeQName
   ]
 
 -- | Arity of a constructor from its function-type signature.
-lookupCtorArity :: ZonkResult -> VariableId -> Int
-lookupCtorArity zonkResult varId =
-  case Map.lookup varId zonkResult.zonkedTypeEnvironment of
+lookupCtorArity :: ZonkResult -> QualifiedName -> Int
+lookupCtorArity zonkResult qualifiedName =
+  case Map.lookup (ResolvedTopLevel qualifiedName) zonkResult.zonkedTypeEnvironment of
     Just (SemanticTypeFunction parameters _ _) -> Map.size parameters
     _ -> 0
 
@@ -420,13 +418,13 @@ patternToHead idResult = \case
         -- Unresolved ctor: treat as wildcard (Identifier error already emitted)
         PatHeadWildcard
       Just qualifiedName ->
-        case Map.lookup qualifiedName idResult.constructorsByQName of
+        case Map.lookup qualifiedName idResult.identifiedConstructors of
           Nothing -> PatHeadWildcard
-          Just cid ->
+          Just cd ->
             let sortedSubs =
                   map (patternToHead idResult . snd) $
                     sortBy (comparing ((.text) . fst)) qp.parameters
-             in PatHeadCtor (CtorTagData cid) sortedSubs
+             in PatHeadCtor (CtorTagData cd.constructorId) sortedSubs
   AST.PatternType tp ->
     PatHeadCtor (CtorTagType tp.typeTag) [patternToHead idResult tp.inner]
   AST.PatternRecord rp ->
@@ -495,8 +493,8 @@ renderPatHead idResult zonkResult = \case
       <> ")"
       <> if null subs then Text.pack (" {tuple/" <> show n <> "}") else ""
   PatHeadCtor (CtorTagData cid) subs ->
-    let ctorName = case Map.lookup cid idResult.identifiedConstructors of
-          Just cd -> cd.constructorQualifiedName.name
+    let ctorName = case lookupConstructorByIdent cid idResult of
+          Just (qualifiedName, _) -> qualifiedName.name
           Nothing -> "?"
      in if null subs
           then ctorName <> "()"
@@ -605,10 +603,10 @@ walkAgentBody ::
 walkAgentBody idResult zonkResult maybeResolution parameters block =
   paramErrors ++ walkBlock idResult zonkResult block
   where
-    paramErrors = case maybeResolution >>= resolveVariableId idResult of
+    paramErrors = case maybeResolution of
       Nothing -> []
-      Just varId ->
-        case Map.lookup varId zonkResult.zonkedTypeEnvironment of
+      Just variableResolution ->
+        case Map.lookup variableResolution zonkResult.zonkedTypeEnvironment of
           Just (SemanticTypeFunction paramTypes _ _) ->
             concatMap (checkParam idResult zonkResult paramTypes) parameters
           _ -> []

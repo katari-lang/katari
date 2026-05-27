@@ -84,13 +84,7 @@ import Katari.AST
     WildcardPattern (..),
   )
 import Katari.Id
-  ( ConstructorId,
-    LocalVarId (..),
-    ModuleId,
-    QualifiedName,
-    RequestId,
-    TypeId,
-    VariableId (..),
+  ( QualifiedName,
     VariableResolution (..),
     renderQualifiedName,
   )
@@ -99,7 +93,6 @@ import Katari.SourceSpan (HasSourceSpan (..), Position (..), SourceSpan (..), sp
 import Katari.Typechecker.Identifier
   ( ConstructorData (..),
     IdentifierResult (..),
-    ModuleData (..),
     RequestData (..),
     TypeData (..),
     VariableData (..),
@@ -147,11 +140,11 @@ lookupAtPosition idResult zonkResult filePath position = do
 -- | Pre-built index of every name-reference occurrence in all modules.
 -- Build once after compilation, then query cheaply with 'findReferences'.
 data OccurrenceIndex = OccurrenceIndex
-  { variableOccurrences :: Map VariableId [SourceSpan],
-    typeOccurrences :: Map TypeId [SourceSpan],
-    moduleOccurrences :: Map ModuleId [SourceSpan],
-    requestOccurrences :: Map RequestId [SourceSpan],
-    constructorOccurrences :: Map ConstructorId [SourceSpan]
+  { variableOccurrences :: Map VariableResolution [SourceSpan],
+    typeOccurrences :: Map QualifiedName [SourceSpan],
+    moduleOccurrences :: Map Text [SourceSpan],
+    requestOccurrences :: Map QualifiedName [SourceSpan],
+    constructorOccurrences :: Map QualifiedName [SourceSpan]
   }
   deriving (Show)
 
@@ -181,11 +174,11 @@ collectModuleOccurrences idResult moduleData index =
 
 -- | Which resolved identifier sits at a source position.
 data ResolvedReference where
-  ResolvedReferenceVariable :: VariableId -> ResolvedReference
-  ResolvedReferenceType :: TypeId -> ResolvedReference
-  ResolvedReferenceModule :: ModuleId -> ResolvedReference
-  ResolvedReferenceRequest :: RequestId -> ResolvedReference
-  ResolvedReferenceConstructor :: ConstructorId -> ResolvedReference
+  ResolvedReferenceVariable :: VariableResolution -> ResolvedReference
+  ResolvedReferenceType :: QualifiedName -> ResolvedReference
+  ResolvedReferenceModule :: Text -> ResolvedReference
+  ResolvedReferenceRequest :: QualifiedName -> ResolvedReference
+  ResolvedReferenceConstructor :: QualifiedName -> ResolvedReference
   deriving (Eq, Show)
 
 -- | Identify which resolved identifier (if any) sits at a source position.
@@ -197,31 +190,33 @@ identifyAtPosition idResult zonkResult filePath position = do
 -- | All occurrence spans of a resolved identifier (uses 'OccurrenceIndex').
 findReferences :: OccurrenceIndex -> ResolvedReference -> [SourceSpan]
 findReferences index = \case
-  ResolvedReferenceVariable variableId ->
-    Map.findWithDefault [] variableId index.variableOccurrences
-  ResolvedReferenceType typeId ->
-    Map.findWithDefault [] typeId index.typeOccurrences
-  ResolvedReferenceModule moduleId ->
-    Map.findWithDefault [] moduleId index.moduleOccurrences
-  ResolvedReferenceRequest requestId ->
-    Map.findWithDefault [] requestId index.requestOccurrences
-  ResolvedReferenceConstructor constructorId ->
-    Map.findWithDefault [] constructorId index.constructorOccurrences
+  ResolvedReferenceVariable variableResolution ->
+    Map.findWithDefault [] variableResolution index.variableOccurrences
+  ResolvedReferenceType qualifiedName ->
+    Map.findWithDefault [] qualifiedName index.typeOccurrences
+  ResolvedReferenceModule moduleName ->
+    Map.findWithDefault [] moduleName index.moduleOccurrences
+  ResolvedReferenceRequest qualifiedName ->
+    Map.findWithDefault [] qualifiedName index.requestOccurrences
+  ResolvedReferenceConstructor qualifiedName ->
+    Map.findWithDefault [] qualifiedName index.constructorOccurrences
 
 -- | Definition span of the symbol at a position, if it can be resolved.
 findDefinition :: IdentifierResult -> ZonkResult -> FilePath -> Position -> Maybe SourceSpan
 findDefinition idResult zonkResult filePath position = do
   resolvedRef <- identifyAtPosition idResult zonkResult filePath position
   case resolvedRef of
-    ResolvedReferenceVariable variableId ->
-      fmap (.variableSourceSpan) (Map.lookup variableId idResult.identifiedVariables)
-    ResolvedReferenceType typeId ->
-      fmap (.typeSourceSpan) (Map.lookup typeId idResult.identifiedTypes)
+    ResolvedReferenceVariable variableResolution -> case variableResolution of
+      ResolvedTopLevel qualifiedName ->
+        fmap (.variableSourceSpan) (Map.lookup qualifiedName idResult.identifiedVariables)
+      ResolvedLocal _ -> Nothing
+    ResolvedReferenceType qualifiedName ->
+      fmap (.typeSourceSpan) (Map.lookup qualifiedName idResult.identifiedTypes)
     ResolvedReferenceModule _ -> Nothing
-    ResolvedReferenceRequest requestId ->
-      fmap (.requestSourceSpan) (Map.lookup requestId idResult.identifiedRequests)
-    ResolvedReferenceConstructor constructorId ->
-      fmap (.constructorSourceSpan) (Map.lookup constructorId idResult.identifiedConstructors)
+    ResolvedReferenceRequest qualifiedName ->
+      fmap (.requestSourceSpan) (Map.lookup qualifiedName idResult.identifiedRequests)
+    ResolvedReferenceConstructor qualifiedName ->
+      fmap (.constructorSourceSpan) (Map.lookup qualifiedName idResult.identifiedConstructors)
 
 -- ===========================================================================
 -- Internal: module lookup
@@ -230,28 +225,6 @@ findDefinition idResult zonkResult filePath position = do
 findModuleByFilePath :: IdentifierResult -> ZonkResult -> FilePath -> Maybe (Module Zonked)
 findModuleByFilePath _ zonkResult filePath =
   listToMaybe [m | m <- Map.elems zonkResult.zonkedModules, m.sourceSpan.filePath == filePath]
-
--- ===========================================================================
--- Internal: resolution helpers
--- ===========================================================================
-
--- | Convert a 'VariableResolution' to the legacy 'VariableId' used internally
--- by 'zonkedTypeEnvironment' and 'identifiedVariables'.
-resolveVariableId :: IdentifierResult -> VariableResolution -> Maybe VariableId
-resolveVariableId idResult = \case
-  ResolvedTopLevel qualifiedName -> Map.lookup qualifiedName idResult.topLevelVariablesByQName
-  ResolvedLocal (LocalVarId n) -> Just (VariableId n)
-
--- | Convert a 'QualifiedName' (from RequestRef resolution) to the legacy
--- 'RequestId' used internally by 'identifiedRequests'.
-resolveRequestId :: IdentifierResult -> QualifiedName -> Maybe RequestId
-resolveRequestId idResult qualifiedName = Map.lookup qualifiedName idResult.requestsByQName
-
--- | Convert a module name 'Text' (from ModuleRef resolution) to the legacy
--- 'ModuleId' used internally by 'identifiedModules'.
-resolveModuleId :: IdentifierResult -> Text -> Maybe ModuleId
-resolveModuleId idResult moduleName =
-  listToMaybe [moduleId | (moduleId, moduleData) <- Map.toList idResult.identifiedModules, moduleData.moduleName == moduleName]
 
 -- ===========================================================================
 -- Internal: hover extraction
@@ -348,10 +321,10 @@ hoverFromPattern idResult zonkResult position = \case
 hoverFromVariableRef :: IdentifierResult -> ZonkResult -> NameRef Zonked VariableRef -> Maybe HoverInfo
 hoverFromVariableRef idResult zonkResult nameRef = do
   variableResolution <- nameRef.resolution
-  variableId <- resolveVariableId idResult variableResolution
-  let semanticType = Map.lookup variableId zonkResult.zonkedTypeEnvironment
-      variableData = Map.lookup variableId idResult.identifiedVariables
-      qualifiedName = variableData >>= (.variableQualifiedName)
+  let semanticType = Map.lookup variableResolution zonkResult.zonkedTypeEnvironment
+      (variableData, qualifiedName) = case variableResolution of
+        ResolvedTopLevel qn -> (Map.lookup qn idResult.identifiedVariables, Just qn)
+        ResolvedLocal _ -> (Nothing, Nothing)
   pure
     HoverInfo
       { hoverType = semanticType,
@@ -419,16 +392,17 @@ hoverFromExpression idResult zonkResult position expression
   where
     specific = case expression of
       ExpressionVariable ve ->
-        let maybeVarId = ve.name.resolution >>= resolveVariableId idResult
-            semanticType = maybeVarId >>= \vid -> Map.lookup vid zonkResult.zonkedTypeEnvironment
-            variableData = maybeVarId >>= \vid -> Map.lookup vid idResult.identifiedVariables
+        let maybeResolution = ve.name.resolution
+            semanticType = maybeResolution >>= \vr -> Map.lookup vr zonkResult.zonkedTypeEnvironment
+            (variableData, qualifiedName) = case maybeResolution of
+              Just (ResolvedTopLevel qn) -> (Map.lookup qn idResult.identifiedVariables, Just qn)
+              _ -> (Nothing, Nothing)
          in Just
               HoverInfo
                 { hoverType = semanticType,
                   hoverNameSpan = ve.name.sourceSpan,
                   hoverDefinitionSpan = fmap (.variableSourceSpan) variableData,
-                  hoverQualifiedName =
-                    variableData >>= (.variableQualifiedName) >>= Just . renderQualifiedName
+                  hoverQualifiedName = fmap renderQualifiedName qualifiedName
                 }
       ExpressionCall ce ->
         hoverFromExpression idResult zonkResult position ce.callee
@@ -560,8 +534,8 @@ hoverFromRequestHandler idResult zonkResult position handler
   | otherwise = Nothing
 
 -- | Hover for the @name@ on @req <name>(...)@ inside a handle block.
--- Looks up the request's call-side type via 'RequestData.requestVariableId'
--- and surfaces it together with the qualified name.
+-- Looks up the request's call-side type via the type environment and
+-- surfaces it together with the qualified name.
 hoverFromRequestNameRef ::
   IdentifierResult ->
   ZonkResult ->
@@ -572,16 +546,14 @@ hoverFromRequestNameRef idResult zonkResult position nameRef
   | not (spanContains nameRef.sourceSpan position) = Nothing
   | otherwise = do
       qualifiedName <- nameRef.resolution
-      requestId <- resolveRequestId idResult qualifiedName
-      requestData <- Map.lookup requestId idResult.identifiedRequests
-      let variableId = requestData.requestVariableId
-          semanticType = Map.lookup variableId zonkResult.zonkedTypeEnvironment
+      requestData <- Map.lookup qualifiedName idResult.identifiedRequests
+      let semanticType = Map.lookup (ResolvedTopLevel qualifiedName) zonkResult.zonkedTypeEnvironment
       pure
         HoverInfo
           { hoverType = semanticType,
             hoverNameSpan = nameRef.sourceSpan,
             hoverDefinitionSpan = Just requestData.requestSourceSpan,
-            hoverQualifiedName = Just (renderQualifiedName requestData.requestQualifiedName)
+            hoverQualifiedName = Just (renderQualifiedName qualifiedName)
           }
 
 hoverFromTemplateElement :: IdentifierResult -> ZonkResult -> Position -> TemplateElement Zonked -> Maybe HoverInfo
@@ -614,9 +586,9 @@ refFromDeclaration idResult position = \case
   _ -> Nothing
 
 refFromVariableNameRef :: IdentifierResult -> Position -> NameRef Zonked VariableRef -> Maybe ResolvedReference
-refFromVariableNameRef idResult position nameRef
+refFromVariableNameRef _idResult position nameRef
   | spanContains nameRef.sourceSpan position =
-      nameRef.resolution >>= resolveVariableId idResult >>= Just . ResolvedReferenceVariable
+      fmap ResolvedReferenceVariable nameRef.resolution
   | otherwise = Nothing
 
 refFromBlock :: IdentifierResult -> Position -> Block Zonked -> Maybe ResolvedReference
@@ -668,7 +640,7 @@ refFromExpression idResult position expression
   | otherwise = case expression of
       ExpressionVariable ve
         | spanContains ve.name.sourceSpan position ->
-            ve.name.resolution >>= resolveVariableId idResult >>= Just . ResolvedReferenceVariable
+            fmap ResolvedReferenceVariable ve.name.resolution
       ExpressionCall ce ->
         refFromExpression idResult position ce.callee
           `orElse` listToMaybe (mapMaybe (refFromExpression idResult position . (.value)) ce.arguments)
@@ -713,9 +685,9 @@ refFromExpression idResult position expression
           `orElse` refFromBlock idResult position he.body
       ExpressionQualifiedReference qre
         | spanContains qre.target.sourceSpan position ->
-            qre.target.resolution >>= resolveVariableId idResult >>= Just . ResolvedReferenceVariable
+            fmap ResolvedReferenceVariable qre.target.resolution
         | spanContains qre.moduleQualifier.sourceSpan position ->
-            qre.moduleQualifier.resolution >>= resolveModuleId idResult >>= Just . ResolvedReferenceModule
+            fmap ResolvedReferenceModule qre.moduleQualifier.resolution
       _ -> Nothing
 
 refFromForVarBinding :: IdentifierResult -> Position -> ForVarBinding Zonked -> Maybe ResolvedReference
@@ -862,21 +834,21 @@ collectTemplateElementOccurrences idResult = \case
   TemplateElementExpression element -> collectExpressionOccurrences idResult element.value
 
 addModuleOccurrence :: IdentifierResult -> NameRef Zonked ModuleRef -> OccurrenceIndex -> OccurrenceIndex
-addModuleOccurrence idResult nameRef index = case nameRef.resolution >>= resolveModuleId idResult of
+addModuleOccurrence _idResult nameRef index = case nameRef.resolution of
   Nothing -> index
-  Just moduleId ->
+  Just moduleName ->
     index
       { moduleOccurrences =
-          Map.insertWith (<>) moduleId [nameRef.sourceSpan] index.moduleOccurrences
+          Map.insertWith (<>) moduleName [nameRef.sourceSpan] index.moduleOccurrences
       }
 
 addVariableOccurrence :: IdentifierResult -> NameRef Zonked VariableRef -> OccurrenceIndex -> OccurrenceIndex
-addVariableOccurrence idResult nameRef index = case nameRef.resolution >>= resolveVariableId idResult of
+addVariableOccurrence _idResult nameRef index = case nameRef.resolution of
   Nothing -> index
-  Just variableId ->
+  Just variableResolution ->
     index
       { variableOccurrences =
-          Map.insertWith (<>) variableId [nameRef.sourceSpan] index.variableOccurrences
+          Map.insertWith (<>) variableResolution [nameRef.sourceSpan] index.variableOccurrences
       }
 
 -- ===========================================================================

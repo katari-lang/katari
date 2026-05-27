@@ -71,7 +71,7 @@ import Katari.AST
     retagSyntacticType,
   )
 import Katari.Diagnostic (Diagnostic, hasErrors)
-import Katari.Id (ModuleId, QualifiedName (..), RequestId, TypeId, VariableId, VariableResolution (..))
+import Katari.Id (QualifiedName (..), VariableResolution (..))
 import Katari.SourceSpan (Position (..), SourceSpan (..))
 import Katari.IR (IRModule)
 import Katari.Lexer as Lexer
@@ -87,7 +87,7 @@ import Katari.Typechecker.ConstraintGenerator (generateConstraintsForSCC)
 import Katari.Typechecker.ConstraintGenerator qualified as CG
 import Katari.Typechecker.Exhaustive (checkExhaustive)
 import Katari.Typechecker.Exhaustive qualified as Exhaustive
-import Katari.Typechecker.Identifier (IdentifierResult (..), identify)
+import Katari.Typechecker.Identifier (IdentifierResult (..), RequestData (..), TypeData (..), identify)
 import Katari.Typechecker.Identifier qualified as Identifier
 import Katari.Typechecker.ImportGraph (topologicalSort)
 import Katari.Typechecker.Solver (SolverResult (..), solve)
@@ -154,7 +154,7 @@ data ModuleCache = ModuleCache
     cacheInterface :: ModuleInterface,
     cacheIdentified :: Module Identified,
     cacheZonkedModule :: Module Zonked,
-    cacheZonkedTypeEnv :: Map VariableId (SemanticType Resolved),
+    cacheZonkedTypeEnv :: Map VariableResolution (SemanticType Resolved),
     cacheDiagnostics :: [Diagnostic]
   }
   deriving (Show)
@@ -239,24 +239,6 @@ compile input =
       (idResult, idErrors) = identify Stdlib.stdlibModuleNames parsed
       idDiags = map Identifier.toDiagnostic idErrors
 
-      -- Name maps for diagnostic rendering.
-      solverTypeNames =
-        Map.map
-          (qname . (.typeQualifiedName))
-          idResult.identifiedTypes
-      solverReqNames =
-        Map.map
-          (qname . (.requestQualifiedName))
-          idResult.identifiedRequests
-      qname (QualifiedName _ qualifiedNameComponent) = qualifiedNameComponent
-
-      -- Build module name → ModuleId reverse map.
-      moduleIdByName =
-        Map.fromList
-          [ (moduleData.moduleName, moduleId)
-            | (moduleId, moduleData) <- Map.toList idResult.identifiedModules
-          ]
-
       -- Compute topological order from parsed modules.
       stdlibModuleNames =
         [ moduleName
@@ -282,7 +264,7 @@ compile input =
 
       -- Per-module typecheck loop (emits per-module / per-SCC logs).
       (mergedSolverResult, mergedZonkResult, typecheckDiags, typecheckLogs, newCache) =
-        typecheckModules idResult solverTypeNames solverReqNames moduleIdByName moduleOrder sourceHashes input.cache
+        typecheckModules idResult moduleOrder sourceHashes input.cache
 
       -- NOTE (speculative lowering): In the current pure pipeline,
       -- typechecking must complete before lowering because Lowering reads
@@ -339,9 +321,9 @@ compile input =
 
 data TypecheckAccumulator = TypecheckAccumulator
   { accImportedTypes :: Map QualifiedName (SemanticType Resolved),
-    accZonkedModules :: Map ModuleId (Module Zonked),
-    accZonkedModuleNames :: Map ModuleId Text,
-    accZonkedTypeEnvironment :: Map VariableId (SemanticType Resolved),
+    accZonkedModules :: Map Text (Module Zonked),
+    accZonkedModuleNames :: Map Text Text,
+    accZonkedTypeEnvironment :: Map VariableResolution (SemanticType Resolved),
     accSolverResult :: SolverResult,
     accDiagnostics :: [Diagnostic],
     accSCCDeclarations :: Map QualifiedName (Declaration Zonked),
@@ -352,14 +334,11 @@ data TypecheckAccumulator = TypecheckAccumulator
 
 typecheckModules ::
   IdentifierResult ->
-  Map TypeId Text ->
-  Map RequestId Text ->
-  Map Text ModuleId ->
   [Text] ->
   Map ModuleName Int ->
   Map ModuleName ModuleCache ->
   (SolverResult, ZonkResult, [Diagnostic], [CompileLog], Map ModuleName ModuleCache)
-typecheckModules idResult solverTypeNames solverReqNames moduleIdByName moduleOrder sourceHashes inputCache =
+typecheckModules idResult moduleOrder sourceHashes inputCache =
   let initial =
         TypecheckAccumulator
           { accImportedTypes = Map.empty,
@@ -375,7 +354,7 @@ typecheckModules idResult solverTypeNames solverReqNames moduleIdByName moduleOr
           }
       final =
         foldl'
-          (typecheckOneModule idResult solverTypeNames solverReqNames moduleIdByName sourceHashes inputCache)
+          (typecheckOneModule idResult sourceHashes inputCache)
           initial
           moduleOrder
       mergedZonkResult =
@@ -393,43 +372,36 @@ typecheckModules idResult solverTypeNames solverReqNames moduleIdByName moduleOr
 
 typecheckOneModule ::
   IdentifierResult ->
-  Map TypeId Text ->
-  Map RequestId Text ->
-  Map Text ModuleId ->
   Map ModuleName Int ->
   Map ModuleName ModuleCache ->
   TypecheckAccumulator ->
   Text ->
   TypecheckAccumulator
-typecheckOneModule idResult solverTypeNames solverReqNames moduleIdByName sourceHashes inputCache accumulator moduleName =
-  case Map.lookup moduleName moduleIdByName of
-    Nothing -> accumulator
-    Just moduleId ->
-      let currentHash = Map.lookup moduleName sourceHashes
-          cachedEntry = Map.lookup moduleName inputCache
-          cacheHit = case (currentHash, cachedEntry) of
-            (Just sourceHash, Just cached) ->
-              accumulator.accAllPriorCacheValid && sourceHash == cached.cacheSourceHash
-            _ -> False
-       in if cacheHit
-            then applyCache moduleId moduleName cachedEntry accumulator
-            else recompileModule idResult solverTypeNames solverReqNames moduleId moduleName sourceHashes accumulator
+typecheckOneModule idResult sourceHashes inputCache accumulator moduleName =
+  let currentHash = Map.lookup moduleName sourceHashes
+      cachedEntry = Map.lookup moduleName inputCache
+      cacheHit = case (currentHash, cachedEntry) of
+        (Just sourceHash, Just cached) ->
+          accumulator.accAllPriorCacheValid && sourceHash == cached.cacheSourceHash
+        _ -> False
+   in if cacheHit
+        then applyCache moduleName cachedEntry accumulator
+        else recompileModule idResult moduleName sourceHashes accumulator
 
 applyCache ::
-  ModuleId ->
   Text ->
   Maybe ModuleCache ->
   TypecheckAccumulator ->
   TypecheckAccumulator
-applyCache moduleId moduleName cachedEntry accumulator =
+applyCache moduleName cachedEntry accumulator =
   case cachedEntry of
     Nothing -> accumulator
     Just cached ->
       let cachedInterface = cached.cacheInterface.exportedTypes
        in accumulator
             { accImportedTypes = Map.union accumulator.accImportedTypes cachedInterface,
-              accZonkedModules = Map.insert moduleId cached.cacheZonkedModule accumulator.accZonkedModules,
-              accZonkedModuleNames = Map.insert moduleId moduleName accumulator.accZonkedModuleNames,
+              accZonkedModules = Map.insert moduleName cached.cacheZonkedModule accumulator.accZonkedModules,
+              accZonkedModuleNames = Map.insert moduleName moduleName accumulator.accZonkedModuleNames,
               accZonkedTypeEnvironment = Map.union accumulator.accZonkedTypeEnvironment cached.cacheZonkedTypeEnv,
               accDiagnostics = accumulator.accDiagnostics <> cached.cacheDiagnostics,
               accSCCDeclarations = Map.empty,
@@ -439,15 +411,12 @@ applyCache moduleId moduleName cachedEntry accumulator =
 
 recompileModule ::
   IdentifierResult ->
-  Map TypeId Text ->
-  Map RequestId Text ->
-  ModuleId ->
   Text ->
   Map ModuleName Int ->
   TypecheckAccumulator ->
   TypecheckAccumulator
-recompileModule idResult solverTypeNames solverReqNames moduleId moduleName sourceHashes accumulator =
-  let moduleAST = Map.lookup moduleId idResult.moduleASTs
+recompileModule idResult moduleName sourceHashes accumulator =
+  let moduleAST = Map.lookup moduleName idResult.moduleASTs
       -- Non-agent declarations (data, request, external, prim) have fully
       -- explicit type signatures and no outgoing call edges, so they can
       -- be processed in a single batch before the agent SCC loop. This
@@ -474,7 +443,7 @@ recompileModule idResult solverTypeNames solverReqNames moduleId moduleName sour
       indexedSCCs = zip [1 ..] allSCCs
       typecheckIndexedSCC accum (sccIndex, scc) =
         let logged = accum {accLogs = accum.accLogs <> [CompileLogTypechecking moduleName sccIndex totalSCCs]}
-         in typecheckOneSCC idResult solverTypeNames solverReqNames moduleId logged scc
+         in typecheckOneSCC idResult moduleName logged scc
       sccAccumulator = foldl' typecheckIndexedSCC accumulator indexedSCCs
       assembledModule = case moduleAST of
         Just identifiedModule -> assembleZonkedModule identifiedModule sccAccumulator.accSCCDeclarations
@@ -500,8 +469,8 @@ recompileModule idResult solverTypeNames solverReqNames moduleId moduleName sour
               drop (length accumulator.accDiagnostics) sccAccumulator.accDiagnostics
           }
    in sccAccumulator
-        { accZonkedModules = Map.insert moduleId assembledModule sccAccumulator.accZonkedModules,
-          accZonkedModuleNames = Map.insert moduleId moduleName sccAccumulator.accZonkedModuleNames,
+        { accZonkedModules = Map.insert moduleName assembledModule sccAccumulator.accZonkedModules,
+          accZonkedModuleNames = Map.insert moduleName moduleName sccAccumulator.accZonkedModuleNames,
           accSCCDeclarations = Map.empty,
           accUpdatedCache = Map.insert moduleName newCacheEntry accumulator.accUpdatedCache,
           accAllPriorCacheValid = False
@@ -543,49 +512,40 @@ collectNonAgentQualifiedNames moduleName moduleAST =
 moduleOwnedTypeEnvironment ::
   IdentifierResult ->
   Map QualifiedName (SemanticType Resolved) ->
-  Map VariableId (SemanticType Resolved) ->
-  Map VariableId (SemanticType Resolved)
+  Map VariableResolution (SemanticType Resolved) ->
+  Map VariableResolution (SemanticType Resolved)
 moduleOwnedTypeEnvironment idResult importedTypes fullTypeEnvironment =
-  let knownVariableIds =
+  let knownResolutions =
         Map.keysSet
-          ( Map.filter
-              ( \variableData -> case variableData.variableQualifiedName of
-                  Just qualifiedName -> Map.member qualifiedName importedTypes
-                  Nothing -> False
+          ( Map.filterWithKey
+              ( \variableResolution _ty -> case variableResolution of
+                  ResolvedTopLevel qualifiedName -> Map.member qualifiedName importedTypes
+                  ResolvedLocal _ -> False
               )
-              idResult.identifiedVariables
+              fullTypeEnvironment
           )
-   in Map.withoutKeys fullTypeEnvironment knownVariableIds
+   in Map.withoutKeys fullTypeEnvironment knownResolutions
 
 typecheckOneSCC ::
   IdentifierResult ->
-  Map TypeId Text ->
-  Map RequestId Text ->
-  ModuleId ->
+  Text ->
   TypecheckAccumulator ->
   Set.Set QualifiedName ->
   TypecheckAccumulator
-typecheckOneSCC idResult solverTypeNames solverReqNames moduleId accumulator sccQualifiedNames =
-  let (cgResult, cgErrors) = generateConstraintsForSCC accumulator.accImportedTypes idResult moduleId sccQualifiedNames
-      cgDiags = map (CG.toDiagnostic solverTypeNames) cgErrors
+typecheckOneSCC idResult moduleName accumulator sccQualifiedNames =
+  let (cgResult, cgErrors) = generateConstraintsForSCC accumulator.accImportedTypes idResult moduleName sccQualifiedNames
+      cgDiags = map CG.toDiagnostic cgErrors
       (solverResult_, solverErrors) = solve cgResult
-      solverDiags = map (Solver.toDiagnostic solverTypeNames solverReqNames) solverErrors
+      solverDiags = map Solver.toDiagnostic solverErrors
       (zonkResult_, zonkErrors) = zonk idResult cgResult solverResult_
       zonkDiags = map Zonker.toDiagnostic zonkErrors
-      sccInterface = extractSCCInterface sccQualifiedNames idResult.identifiedVariables zonkResult_.zonkedTypeEnvironment
-      knownVariableIds =
-        Map.keysSet
-          ( Map.filter
-              ( \variableData -> case variableData.variableQualifiedName of
-                  Just qualifiedName ->
-                    Map.member qualifiedName accumulator.accImportedTypes
-                  Nothing -> False
-              )
-              idResult.identifiedVariables
-          )
+      sccInterface = extractSCCInterface sccQualifiedNames zonkResult_.zonkedTypeEnvironment
+      knownResolutions =
+        Set.map ResolvedTopLevel
+          (Map.keysSet (Map.intersection idResult.identifiedVariables accumulator.accImportedTypes))
       ownedTypeEnvironment =
-        Map.withoutKeys zonkResult_.zonkedTypeEnvironment knownVariableIds
-      sccDeclarations = case Map.lookup moduleId zonkResult_.zonkedModules of
+        Map.withoutKeys zonkResult_.zonkedTypeEnvironment knownResolutions
+      sccDeclarations = case Map.lookup moduleName zonkResult_.zonkedModules of
         Just sccModule -> sccModule.declarations
         Nothing -> []
       sccDeclMap = foldl' indexDeclaration accumulator.accSCCDeclarations sccDeclarations
@@ -608,16 +568,13 @@ typecheckOneSCC idResult solverTypeNames solverReqNames moduleId accumulator scc
 
 extractSCCInterface ::
   Set.Set QualifiedName ->
-  Map VariableId Identifier.VariableData ->
-  Map VariableId (SemanticType Resolved) ->
+  Map VariableResolution (SemanticType Resolved) ->
   Map QualifiedName (SemanticType Resolved)
-extractSCCInterface sccQualifiedNames variables typeEnvironment =
+extractSCCInterface sccQualifiedNames typeEnvironment =
   Map.fromList
     [ (qualifiedName, resolvedType)
-      | (variableId, variableData) <- Map.toList variables,
-        Just qualifiedName <- [variableData.variableQualifiedName],
-        Set.member qualifiedName sccQualifiedNames,
-        Just resolvedType <- [Map.lookup variableId typeEnvironment]
+      | qualifiedName <- Set.toList sccQualifiedNames,
+        Just resolvedType <- [Map.lookup (ResolvedTopLevel qualifiedName) typeEnvironment]
     ]
 
 indexDeclaration ::

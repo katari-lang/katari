@@ -158,8 +158,7 @@ export function RunDetailPage() {
                   <CardTitle>Arguments</CardTitle>
                 </CardHeader>
                 <CardContent>
-                  <ValueViewer value={run.args} projectId={projectId} />
-                  <div className="mt-3">
+                  <div className="mb-1">
                     <CopyButton
                       text={JSON.stringify(run.args, null, 2)}
                       label="Copied JSON"
@@ -167,6 +166,7 @@ export function RunDetailPage() {
                       Copy JSON
                     </CopyButton>
                   </div>
+                  <ValueViewer value={run.args} projectId={projectId} />
                 </CardContent>
               </Card>
               <Card>
@@ -208,11 +208,6 @@ export function RunDetailPage() {
                           >
                             {snapshotMessage ?? "—"}
                           </Link>
-                          <CopyableId
-                            value={run.snapshotId}
-                            display={run.snapshotId.slice(0, 8)}
-                            className="text-subtle-foreground"
-                          />
                         </span>
                       }
                     />
@@ -311,15 +306,15 @@ export function RunDetailPage() {
                       <CardTitle>Result</CardTitle>
                     </CardHeader>
                     <CardContent>
-                      <ValueViewer value={run.result} projectId={projectId} />
-                      <div className="mt-3">
+                      <div className="mb-1">
                         <CopyButton
-                          text={JSON.stringify(run.result, null, 2)}
+                          text={JSON.stringify(run.args, null, 2)}
                           label="Copied JSON"
                         >
                           Copy JSON
                         </CopyButton>
                       </div>
+                      <ValueViewer value={run.result} projectId={projectId} />
                     </CardContent>
                   </Card>
                 )}

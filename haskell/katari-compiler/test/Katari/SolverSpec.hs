@@ -2,6 +2,7 @@ module Katari.SolverSpec (spec) where
 
 import Data.List (find)
 import Data.Map.Strict qualified as Map
+import Data.Maybe (mapMaybe)
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Katari.Lexer qualified as Lexer
@@ -16,11 +17,13 @@ import Katari.Typechecker.ConstraintGenerator
     VariableSupply (..),
     generateConstraints,
   )
-import Katari.Id (VariableId)
+import Katari.Id (VariableResolution (..))
 import Katari.Typechecker.Identifier
   ( IdentifierResult (..),
+    SymbolEntry (..),
     VariableData (..),
   )
+import Katari.Typechecker.ScopeIndex (ScopeFrame (..), ScopeIndex (..))
 import Katari.Typechecker.NormalizedType
   ( ArraySlot (..),
     FunctionSlot (..),
@@ -53,9 +56,19 @@ runSolve source =
          in pure (idResult, cgResult, solverResult, solverErrors)
       (_, errors) -> fail ("identify failure: " ++ show errors)
 
-variableIdOf :: Text -> IdentifierResult -> Maybe VariableId
-variableIdOf name result =
-  fst <$> find ((== name) . (.variableName) . snd) (Map.toList result.identifiedVariables)
+-- | Find the VariableResolution for a named binding. Searches top-level
+-- identifiedVariables first, then falls back to scanning the scopeIndex
+-- for local variables (parameters, let bindings, match arm bindings).
+variableResolutionOf :: Text -> IdentifierResult -> Maybe VariableResolution
+variableResolutionOf name result =
+  case (ResolvedTopLevel . fst) <$> find ((== name) . (.variableName) . snd) (Map.toList result.identifiedVariables) of
+    Just resolution -> Just resolution
+    Nothing ->
+      let allFrames = concatMap snd (Map.toList result.scopeIndex.framesByFile)
+          candidates = mapMaybe (\frame -> Map.lookup name frame.frameSymbols >>= (.variableSymbol)) allFrames
+       in case candidates of
+            (resolution : _) -> Just resolution
+            [] -> Nothing
 
 -- | The 'NormalizedType' that the solver assigned to the type variable
 -- recorded in the identifier's typeEnvironment for a given source name.
@@ -66,8 +79,8 @@ inferredTypeOf ::
   SolverResult ->
   Maybe NormalizedType
 inferredTypeOf name idResult cgResult solverResult = do
-  variableId <- variableIdOf name idResult
-  semanticType <- Map.lookup variableId cgResult.typeEnvironment
+  variableResolution <- variableResolutionOf name idResult
+  semanticType <- Map.lookup variableResolution cgResult.typeEnvironment
   case extractTypeVariableId semanticType of
     Just typeVarId -> Map.lookup typeVarId solverResult.typeSubstitution
     Nothing -> Nothing

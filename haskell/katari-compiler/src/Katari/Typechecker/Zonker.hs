@@ -45,8 +45,7 @@ import Data.Text qualified as Text
 import Katari.AST
 import Katari.Diagnostic (Diagnostic, diagnosticError)
 import Katari.Id
-  ( ModuleId,
-    VariableId,
+  ( VariableResolution (..),
   )
 import Katari.SemanticType
   ( RequestVariableId (..),
@@ -79,11 +78,9 @@ import Katari.Typechecker.Solver (SolverResult (..))
 -- ===========================================================================
 
 data ZonkResult = ZonkResult
-  { zonkedModules :: Map ModuleId (Module Zonked),
-    -- | 'ModuleId' → module name (dotted text). 'Katari.Lowering' looks
-    -- this up when populating 'QualifiedName.module_'.
-    zonkedModuleNames :: Map ModuleId Text,
-    zonkedTypeEnvironment :: Map VariableId (SemanticType Resolved)
+  { zonkedModules :: Map Text (Module Zonked),
+    zonkedModuleNames :: Map Text Text,
+    zonkedTypeEnvironment :: Map VariableResolution (SemanticType Resolved)
   }
   deriving (Show)
 
@@ -779,15 +776,18 @@ zonk idResult cgResult solverResult =
       result =
         ZonkResult
           { zonkedModules = modulesResult,
-            zonkedModuleNames = Map.map (.moduleName) idResult.identifiedModules,
+            zonkedModuleNames = Map.mapWithKey (\moduleName _ -> moduleName) idResult.identifiedModules,
             zonkedTypeEnvironment = envResult
           }
    in (result, reverse errs)
   where
-    zonkEnvEntry idResult_ variableId t =
-      let sourceSpan = case Map.lookup variableId idResult_.identifiedVariables of
-            Just vd -> vd.variableSourceSpan
-            Nothing -> placeholderSpan
+    zonkEnvEntry idResult_ resolution t =
+      let sourceSpan = case resolution of
+            ResolvedTopLevel qualifiedName ->
+              case Map.lookup qualifiedName idResult_.identifiedVariables of
+                Just variableData -> variableData.variableSourceSpan
+                Nothing -> placeholderSpan
+            ResolvedLocal _ -> placeholderSpan
        in zonkType sourceSpan t
     placeholderSpan =
       SrcSpan

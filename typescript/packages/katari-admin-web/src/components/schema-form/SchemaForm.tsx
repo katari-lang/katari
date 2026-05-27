@@ -135,9 +135,7 @@ function validateSchema(
         }
       } else if (schema.items !== undefined) {
         for (let i = 0; i < value.length; i++) {
-          errors.push(
-            ...validateSchema(schema.items, value[i], `${at}[${i}]`),
-          );
+          errors.push(...validateSchema(schema.items, value[i], `${at}[${i}]`));
         }
       }
       break;

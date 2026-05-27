@@ -37,7 +37,11 @@ function ValueNode({
   projectId?: string;
 }) {
   if (value === null) {
-    return <span className="text-xs font-mono italic text-subtle-foreground">null</span>;
+    return (
+      <span className="text-xs font-mono italic text-subtle-foreground">
+        null
+      </span>
+    );
   }
 
   if (typeof value === "boolean") {
@@ -45,9 +49,7 @@ function ValueNode({
       <span
         className={cn(
           "inline-flex items-center px-1.5 py-0.5 text-xs font-mono font-medium",
-          value
-            ? "bg-success/15 text-success"
-            : "bg-danger/15 text-danger",
+          value ? "bg-success/15 text-success" : "bg-danger/15 text-danger",
         )}
       >
         {String(value)}
@@ -57,9 +59,7 @@ function ValueNode({
 
   if (typeof value === "number") {
     return (
-      <span className="text-xs font-mono text-highlight">
-        {String(value)}
-      </span>
+      <span className="text-xs font-mono text-highlight">{String(value)}</span>
     );
   }
 
@@ -70,7 +70,9 @@ function ValueNode({
   if (Array.isArray(value)) {
     if (value.length === 0) {
       return (
-        <span className="text-xs italic text-subtle-foreground">Empty array</span>
+        <span className="text-xs italic text-subtle-foreground">
+          Empty array
+        </span>
       );
     }
     return (
@@ -95,7 +97,9 @@ function ValueNode({
 
     if (entries.length === 0) {
       return (
-        <span className="text-xs italic text-subtle-foreground">Empty object</span>
+        <span className="text-xs italic text-subtle-foreground">
+          Empty object
+        </span>
       );
     }
 
@@ -116,9 +120,10 @@ function ValueNode({
     // filter $constructor from properties list
     const constructorName =
       typeof record.$constructor === "string" ? record.$constructor : null;
-    const displayEntries = constructorName !== null
-      ? entries.filter(([key]) => key !== "$constructor")
-      : entries;
+    const displayEntries =
+      constructorName !== null
+        ? entries.filter(([key]) => key !== "$constructor")
+        : entries;
 
     // $callable handling: render as link if it looks like a qualified name
     const callableName =
@@ -133,7 +138,9 @@ function ValueNode({
         )}
         {callableName !== null && (
           <div className="border-l-2 border-border pl-3">
-            <span className="text-sm font-medium text-foreground">$callable</span>
+            <span className="text-sm font-medium text-foreground">
+              $callable
+            </span>
             <div className="mt-1">
               {callableName.includes(".") && projectId !== undefined ? (
                 <Link
@@ -143,30 +150,34 @@ function ValueNode({
                   {callableName}
                 </Link>
               ) : (
-                <span className="text-xs font-mono text-foreground">{callableName}</span>
+                <span className="text-xs font-mono text-foreground">
+                  {callableName}
+                </span>
               )}
             </div>
           </div>
         )}
-        {displayEntries
-          .filter(([key]) => key !== "$callable")
-          .map(([key, val]) => (
-            <div key={key} className="border-l-2 border-border pl-3">
-              <span className="text-sm font-medium text-foreground">{key}</span>
-              <div className="mt-1">
-                <ValueNode value={val} projectId={projectId} />
+        <div className="border-l-2 border-border pl-3 mt-2">
+          {displayEntries
+            .filter(([key]) => key !== "$callable")
+            .map(([key, val]) => (
+              <div key={key}>
+                <span className="text-sm font-medium text-foreground">
+                  {key}
+                </span>
+                <div className="mt-1">
+                  <ValueNode value={val} projectId={projectId} />
+                </div>
               </div>
-            </div>
-          ))}
+            ))}
+        </div>
       </div>
     );
   }
 
   // Fallback for unexpected types
   return (
-    <span className="text-xs font-mono text-foreground">
-      {String(value)}
-    </span>
+    <span className="text-xs font-mono text-foreground">{String(value)}</span>
   );
 }
 
@@ -200,7 +211,11 @@ function highlightRedactedInline(text: string): ReactNode[] {
   const pattern = /<redacted:[0-9a-f]{8}>|<redacted>/g;
   const parts: ReactNode[] = [];
   let lastIndex = 0;
-  for (let match = pattern.exec(text); match !== null; match = pattern.exec(text)) {
+  for (
+    let match = pattern.exec(text);
+    match !== null;
+    match = pattern.exec(text)
+  ) {
     if (match.index > lastIndex) {
       parts.push(text.slice(lastIndex, match.index));
     }

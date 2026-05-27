@@ -6,12 +6,16 @@ import { cn } from "@/lib/cn";
 type Props = {
   text: string;
   label?: string;
-  /** When provided, renders a ghost button with text instead of icon-only. */
   children?: React.ReactNode;
   className?: string;
 };
 
-export function CopyButton({ text, label = "Copied", children, className }: Props) {
+export function CopyButton({
+  text,
+  label = "Copied",
+  children,
+  className,
+}: Props) {
   const [copied, setCopied] = useState(false);
 
   async function copy() {
@@ -31,7 +35,7 @@ export function CopyButton({ text, label = "Copied", children, className }: Prop
         type="button"
         onClick={copy}
         className={cn(
-          "inline-flex items-center gap-1.5 px-2 py-1 text-xs text-subtle-foreground transition-colors hover:text-foreground hover:bg-muted hover:cursor-pointer",
+          "inline-flex items-center gap-1.5 text-xs text-subtle-foreground transition-opacity hover:opacity-80 cursor-pointer",
           className,
         )}
       >
