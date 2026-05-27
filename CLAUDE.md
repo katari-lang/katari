@@ -1,5 +1,7 @@
 # KATARI プロジェクト
 
+**Do not use agents**
+
 KATARI 言語のコンパイラ・ランタイム・LSP の実装リポジトリ。
 
 ## プロジェクト構成
@@ -39,6 +41,7 @@ cd typescript && pnpm install && pnpm -r run build
 `packageManager` フィールドで `pnpm@11.1.3` を pin。
 
 注意:
+
 - pnpm 11 はデフォルトで `minimumReleaseAge` (~14h) を強制するため、
   公開直後の dep が lockfile に入っていると install が止まる。
   当面 `pnpm-workspace.yaml` で 0 に緩めている。
