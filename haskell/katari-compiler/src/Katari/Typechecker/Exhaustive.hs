@@ -26,7 +26,7 @@ where
 import Data.List (nubBy, sortBy)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (catMaybes, listToMaybe, mapMaybe)
+import Data.Maybe (catMaybes, mapMaybe)
 import Data.Ord (comparing)
 import Data.Text (Text)
 import Data.Text qualified as Text
@@ -35,8 +35,7 @@ import Katari.AST qualified as AST
 import Katari.Common (LiteralValue (..), TypePatternTag (..))
 import Katari.Diagnostic (Diagnostic, diagnosticError, diagnosticWarning)
 import Katari.Id
-  ( ConstructorId,
-    QualifiedName (..),
+  ( QualifiedName (..),
     VariableResolution (..),
   )
 import Katari.SemanticType
@@ -96,7 +95,7 @@ toDiagnostic = \case
 
 -- | Head constructor tag.
 data CtorTag where
-  CtorTagData :: ConstructorId -> CtorTag
+  CtorTagData :: QualifiedName -> CtorTag
   CtorTagLitInt :: Integer -> CtorTag
   CtorTagLitNum :: Double -> CtorTag
   CtorTagLitStr :: Text -> CtorTag
@@ -249,14 +248,11 @@ defaultCtx context = context {columnTypes = drop 1 context.columnTypes}
 -- for literal / null tags (arity 0) and tuples (handled separately).
 getSubFieldTypes :: CtorTag -> SemanticType Resolved -> IdentifierResult -> ZonkResult -> [SemanticType Resolved]
 getSubFieldTypes tag columnType idResult zonkResult = case tag of
-  CtorTagData cid ->
-    case lookupConstructorByIdent cid idResult of
-      Nothing -> []
-      Just (qualifiedName, _) ->
-        case Map.lookup (ResolvedTopLevel qualifiedName) zonkResult.zonkedTypeEnvironment of
-          Just (SemanticTypeFunction parameters _ _) ->
-            map snd (Map.toAscList parameters)
-          _ -> []
+  CtorTagData qualifiedName ->
+    case Map.lookup (ResolvedTopLevel qualifiedName) zonkResult.zonkedTypeEnvironment of
+      Just (SemanticTypeFunction parameters _ _) ->
+        map snd (Map.toAscList parameters)
+      _ -> []
   CtorTagTupleN _ -> case columnType of
     SemanticTypeTuple tupleTypes -> tupleTypes
     _ -> []
@@ -327,10 +323,10 @@ tagCompatibleWithType tag ty idResult zonkResult = case ty of
     CtorTagTupleN n -> case ty of
       SemanticTypeTuple es -> length es == n
       _ -> False
-    CtorTagData cid -> case ty of
+    CtorTagData qualifiedName -> case ty of
       SemanticTypeData tid ->
-        case lookupConstructorByIdent cid idResult of
-          Just (_, cd) -> cd.constructorTypeQName == tid
+        case Map.lookup qualifiedName idResult.identifiedConstructors of
+          Just cd -> cd.constructorTypeQName == tid
           Nothing -> False
       _ -> False
     -- Runtime type-guard patterns are always compatible: the guard runs
@@ -355,10 +351,10 @@ isCompleteSig seen ty idResult zonkResult = case ty of
   SemanticTypeTuple tupleTypes ->
     CtorTagTupleN (length tupleTypes) `elem` seen
   SemanticTypeData tid ->
-    let ctorIds = [cid | (cid, _) <- ctorsOfType idResult zonkResult tid]
-        seenCtorIds = [cid | CtorTagData cid <- seen]
-     in null ctorIds -- vacuously complete (no constructors)
-          || all (`elem` seenCtorIds) ctorIds
+    let ctorQNames = [qualifiedName | (qualifiedName, _) <- ctorsOfType idResult zonkResult tid]
+        seenQNames = [qualifiedName | CtorTagData qualifiedName <- seen]
+     in null ctorQNames
+          || all (`elem` seenQNames) ctorQNames
   SemanticTypeUnion branches ->
     -- Complete iff every branch is completely covered.
     not (null branches)
@@ -369,25 +365,12 @@ isCompleteSig seen ty idResult zonkResult = case ty of
     False -- Integer, Number, String, Array, Object, Unknown: infinite domain
 
 -- ===========================================================================
--- Constructor lookup by ConstructorId
--- ===========================================================================
-
--- | Reverse-lookup a 'ConstructorId' in 'identifiedConstructors'. The map is
--- keyed by 'QualifiedName', so we do a linear scan. This is only used during
--- witness rendering and compatibility checks (small maps, infrequent).
-lookupConstructorByIdent :: ConstructorId -> IdentifierResult -> Maybe (QualifiedName, ConstructorData)
-lookupConstructorByIdent cid idResult =
-  listToMaybe
-    [(qualifiedName, cd) | (qualifiedName, cd) <- Map.toList idResult.identifiedConstructors, cd.constructorId == cid]
-
--- ===========================================================================
 -- Constructor enumeration helpers
 -- ===========================================================================
 
--- | All constructors of a data type, with their arities.
-ctorsOfType :: IdentifierResult -> ZonkResult -> QualifiedName -> [(ConstructorId, Int)]
+ctorsOfType :: IdentifierResult -> ZonkResult -> QualifiedName -> [(QualifiedName, Int)]
 ctorsOfType idResult zonkResult typeQName =
-  [ (cd.constructorId, lookupCtorArity zonkResult qualifiedName)
+  [ (qualifiedName, lookupCtorArity zonkResult qualifiedName)
     | (qualifiedName, cd) <- Map.toList idResult.identifiedConstructors,
       cd.constructorTypeQName == typeQName
   ]
@@ -421,11 +404,11 @@ patternToHead idResult = \case
       Just qualifiedName ->
         case Map.lookup qualifiedName idResult.identifiedConstructors of
           Nothing -> PatHeadWildcard
-          Just cd ->
+          Just _cd ->
             let sortedSubs =
                   map (patternToHead idResult . snd) $
                     sortBy (comparing ((.text) . fst)) qp.parameters
-             in PatHeadCtor (CtorTagData cd.constructorId) sortedSubs
+             in PatHeadCtor (CtorTagData qualifiedName) sortedSubs
   AST.PatternType tp ->
     PatHeadCtor (CtorTagType tp.typeTag) [patternToHead idResult tp.inner]
   AST.PatternRecord rp ->
@@ -493,10 +476,8 @@ renderPatHead idResult zonkResult = \case
       <> Text.intercalate ", " (map (renderPatHead idResult zonkResult) subs)
       <> ")"
       <> if null subs then Text.pack (" {tuple/" <> show n <> "}") else ""
-  PatHeadCtor (CtorTagData cid) subs ->
-    let ctorName = case lookupConstructorByIdent cid idResult of
-          Just (qualifiedName, _) -> qualifiedName.name
-          Nothing -> "?"
+  PatHeadCtor (CtorTagData qualifiedName) subs ->
+    let ctorName = qualifiedName.name
      in if null subs
           then ctorName <> "()"
           else ctorName <> "(" <> Text.intercalate ", " (map (renderPatHead idResult zonkResult) subs) <> ")"

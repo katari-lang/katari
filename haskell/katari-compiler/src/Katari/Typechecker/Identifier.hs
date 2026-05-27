@@ -580,6 +580,11 @@ registerModule :: Text -> ModuleData -> Identifier ()
 registerModule moduleName moduleData =
   modify $ \state -> state {modules = Map.insert moduleName moduleData state.modules}
 
+registerRequest :: QualifiedName -> RequestData -> Identifier ()
+registerRequest qualifiedName requestData =
+  modify $ \state ->
+    state {requests = Map.insert qualifiedName requestData state.requests}
+
 freshConstructorId :: QualifiedName -> ConstructorData -> Identifier ConstructorId
 freshConstructorId qualifiedName constructorData = do
   state <- get
@@ -2389,6 +2394,13 @@ identifyModule _allExportNames processedExportTables allModuleNames inputState c
             variablePrimRule = Nothing,
             variableAnnotation = annotation,
             variableParameterAnnotations = parameterAnnotations
+          }
+      registerRequest
+        qualifiedName
+        RequestData
+          { requestId = RequestId 0,
+            requestSourceSpan = name.sourceSpan,
+            requestParameterAnnotations = Map.fromList parameterAnnotations
           }
       let entry =
             emptySymbolEntry

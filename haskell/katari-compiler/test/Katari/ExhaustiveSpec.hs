@@ -45,7 +45,7 @@ runExhaustive source = do
 
 -- | True iff @diags@ contains at least one error / warning with the given code.
 hasCode :: Text -> [Diagnostic] -> Bool
-hasCode code = any (\d -> d . code == code)
+hasCode code = any (\d -> d.code == code)
 
 -- ---------------------------------------------------------------------------
 -- Spec
