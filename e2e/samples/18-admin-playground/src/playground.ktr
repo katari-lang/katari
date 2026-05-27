@@ -110,12 +110,12 @@ agent tuple_nested(t: (point, string, boolean)) -> string {
 
 @"Array of integers. Tests ArrayField add/remove."
 agent array_length_int(arr: array[integer]) -> integer {
-  array_length(arr)
+  array_length(array = arr)
 }
 
 @"Array of data ctors. Tests nested array + data ctor input."
 agent array_of_points(points: array[point]) -> integer {
-  array_length(points)
+  array_length(array = points)
 }
 
 // ─── Record ─────────────────────────────────────────────────────────
@@ -129,7 +129,7 @@ agent record_echo(r: record[string]) -> record[string] { r }
 
 @"Array of unions. Tests ArrayField + UnionField nesting."
 agent nested_array_union(items: array[ok | err]) -> integer {
-  array_length(items)
+  array_length(array = items)
 }
 
 @"Record of arrays. Tests DynamicKeyValueEditor + ArrayField nesting."
