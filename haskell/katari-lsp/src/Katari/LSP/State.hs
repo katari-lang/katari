@@ -111,7 +111,7 @@ newServerState = do
 -- changes.
 snapshotWorkspaceSources :: WorkspaceState -> CompileInput
 snapshotWorkspaceSources ws =
-  CompileInput {sources = Map.map applyBuffer ws.wsAssembly.sources}
+  CompileInput {sources = Map.map applyBuffer ws.wsAssembly.sources, cache = Map.empty}
   where
     applyBuffer entry =
       case Map.lookup entry.sourcePath ws.wsFiles of

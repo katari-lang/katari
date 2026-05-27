@@ -16,7 +16,8 @@ prepare src =
       { C.sources =
           Map.singleton
             "main"
-            C.SourceEntry {C.filePath = "<test>", C.sourceText = src}
+            C.SourceEntry {C.filePath = "<test>", C.sourceText = src},
+        C.cache = Map.empty
       }
 
 spec :: Spec

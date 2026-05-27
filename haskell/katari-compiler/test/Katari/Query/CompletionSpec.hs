@@ -33,7 +33,8 @@ prepare src = do
             { C.sources =
                 Map.singleton
                   "main"
-                  C.SourceEntry {C.filePath = "<test>", C.sourceText = src}
+                  C.SourceEntry {C.filePath = "<test>", C.sourceText = src},
+              C.cache = Map.empty
             }
   -- Both fields are always populated by compile.
   case (result.identifierResult, result.zonkResult) of
@@ -48,7 +49,8 @@ prepareMulti sources = do
                 Map.fromList
                   [ (name, C.SourceEntry {C.filePath = path, C.sourceText = src})
                     | (name, path, src) <- sources
-                  ]
+                  ],
+              C.cache = Map.empty
             }
   pure (result.identifierResult, result.zonkResult)
 

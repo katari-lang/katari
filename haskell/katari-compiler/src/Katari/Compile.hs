@@ -36,6 +36,7 @@ module Katari.Compile
     CompileInput (..),
     CompileResult (..),
     CompileLog (..),
+    ModuleCache (..),
 
     -- * Entry
     compile,
@@ -48,6 +49,7 @@ module Katari.Compile
 where
 
 import Data.Foldable (foldl')
+import Data.Hashable (hash)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
@@ -78,6 +80,7 @@ import Katari.Parser qualified as Parser
 import Katari.Schema (SchemaEntry, buildSchemas)
 import Katari.SemanticType (Resolved, SemanticType)
 import Katari.Stdlib qualified as Stdlib
+import Katari.Typechecker.ModuleInterface (ModuleInterface (..), extractModuleInterface)
 import Katari.Typechecker.AgentGraph (agentSCCs)
 import Katari.Typechecker.ConstraintGenerator (generateConstraintsForSCC)
 import Katari.Typechecker.ConstraintGenerator qualified as CG
@@ -115,7 +118,7 @@ data SourceEntry = SourceEntry
 -- merging packages, resolving dependencies, and locating @.ktr@ files
 -- happens upstream (in @katari-project@), and the result is handed to
 -- the compiler as a flat 'Map' so the entire pipeline stays pure.
-newtype CompileInput = CompileInput
+data CompileInput = CompileInput
   { -- | Module name → source entry. The map is treated as the complete
     -- world: any module not present here is "missing" from the
     -- compiler's point of view.
@@ -128,7 +131,30 @@ newtype CompileInput = CompileInput
     -- is package-agnostic and just does name lookup; the embedder
     -- (= @katari-project@) is responsible for assembling sources
     -- from all reachable packages.
-    sources :: Map ModuleName SourceEntry
+    sources :: Map ModuleName SourceEntry,
+    -- | Optional per-module compilation cache from a previous
+    -- 'compile' invocation. Pass 'Map.empty' for a fresh compile.
+    -- When supplied, modules whose source hash matches and whose
+    -- upstream interfaces are unchanged are skipped (their cached
+    -- type environment and diagnostics are reused). The cache is
+    -- keyed by module name.
+    cache :: Map ModuleName ModuleCache
+  }
+  deriving (Show)
+
+-- | Per-module compilation cache entry. Stores everything needed to
+-- skip recompilation of an unchanged module: the source hash for
+-- staleness detection, the module interface for downstream
+-- invalidation, and the typechecking products (identified AST, zonked
+-- module, type environment, diagnostics) that would otherwise be
+-- recomputed.
+data ModuleCache = ModuleCache
+  { cacheSourceHash :: Int,
+    cacheInterface :: ModuleInterface,
+    cacheIdentified :: Module Identified,
+    cacheZonkedModule :: Module Zonked,
+    cacheZonkedTypeEnv :: Map VariableId (SemanticType Resolved),
+    cacheDiagnostics :: [Diagnostic]
   }
   deriving (Show)
 
@@ -172,7 +198,12 @@ data CompileResult = CompileResult
     -- | Structured compile log, one entry per phase boundary. Purely
     -- additive: callers may ignore this field. Useful for CLI / LSP
     -- progress indicators.
-    compileLogs :: [CompileLog]
+    compileLogs :: [CompileLog],
+    -- | Updated per-module cache. Feed this back as
+    -- 'CompileInput.cache' on the next invocation to enable
+    -- incremental compilation. Keyed by module name (same namespace
+    -- as 'CompileInput.sources').
+    updatedCache :: Map ModuleName ModuleCache
   }
 
 -- ===========================================================================
@@ -191,7 +222,7 @@ data CompileResult = CompileResult
 -- import Data.Map.Strict qualified as Map
 --
 -- let src    = "agent hello() -> string { return \\"hello\\" }"
---     input  = CompileInput { sources = Map.singleton "main" (SourceEntry "main.ktr" src) }
+--     input  = CompileInput { sources = Map.singleton "main" (SourceEntry "main.ktr" src), cache = Map.empty }
 --     result = compile input
 -- null (diagnostics result)  -- True  (no errors)
 -- isJust (irModule result)   -- True  (IR was emitted)
@@ -244,9 +275,13 @@ compile input =
         ]
       moduleOrder = sortedStdlibNames ++ processedUserNames ++ remainingUserNames
 
+      -- Compute per-module source hashes for cache invalidation.
+      sourceHashes =
+        Map.map (\entry -> hash entry.sourceText) mergedSources
+
       -- Per-module typecheck loop (emits per-module / per-SCC logs).
-      (mergedSolverResult, mergedZonkResult, typecheckDiags, typecheckLogs) =
-        typecheckModules idResult solverTypeNames solverReqNames moduleIdByName moduleOrder
+      (mergedSolverResult, mergedZonkResult, typecheckDiags, typecheckLogs, newCache) =
+        typecheckModules idResult solverTypeNames solverReqNames moduleIdByName moduleOrder sourceHashes input.cache
 
       -- NOTE (speculative lowering): In the current pure pipeline,
       -- typechecking must complete before lowering because Lowering reads
@@ -293,7 +328,8 @@ compile input =
           identifierResult = idResult,
           solverResult = mergedSolverResult,
           zonkResult = mergedZonkResult,
-          compileLogs = logs
+          compileLogs = logs,
+          updatedCache = newCache
         }
 
 -- ===========================================================================
@@ -308,7 +344,9 @@ data TypecheckAccumulator = TypecheckAccumulator
     accSolverResult :: SolverResult,
     accDiagnostics :: [Diagnostic],
     accSCCDeclarations :: Map QualifiedName (Declaration Zonked),
-    accLogs :: [CompileLog]
+    accLogs :: [CompileLog],
+    accUpdatedCache :: Map ModuleName ModuleCache,
+    accAllPriorCacheValid :: Bool
   }
 
 typecheckModules ::
@@ -317,8 +355,10 @@ typecheckModules ::
   Map RequestId Text ->
   Map Text ModuleId ->
   [Text] ->
-  (SolverResult, ZonkResult, [Diagnostic], [CompileLog])
-typecheckModules idResult solverTypeNames solverReqNames moduleIdByName moduleOrder =
+  Map ModuleName Int ->
+  Map ModuleName ModuleCache ->
+  (SolverResult, ZonkResult, [Diagnostic], [CompileLog], Map ModuleName ModuleCache)
+typecheckModules idResult solverTypeNames solverReqNames moduleIdByName moduleOrder sourceHashes inputCache =
   let initial =
         TypecheckAccumulator
           { accImportedTypes = Map.empty,
@@ -328,47 +368,124 @@ typecheckModules idResult solverTypeNames solverReqNames moduleIdByName moduleOr
             accSolverResult = SolverResult {typeSubstitution = Map.empty, requestSubstitution = Map.empty},
             accDiagnostics = [],
             accSCCDeclarations = Map.empty,
-            accLogs = []
+            accLogs = [],
+            accUpdatedCache = Map.empty,
+            accAllPriorCacheValid = True
           }
-      final = foldl' (typecheckOneModule idResult solverTypeNames solverReqNames moduleIdByName) initial moduleOrder
+      final =
+        foldl'
+          (typecheckOneModule idResult solverTypeNames solverReqNames moduleIdByName sourceHashes inputCache)
+          initial
+          moduleOrder
       mergedZonkResult =
         ZonkResult
           { zonkedModules = final.accZonkedModules,
             zonkedModuleNames = final.accZonkedModuleNames,
             zonkedTypeEnvironment = final.accZonkedTypeEnvironment
           }
-   in (final.accSolverResult, mergedZonkResult, final.accDiagnostics, final.accLogs)
+   in ( final.accSolverResult,
+        mergedZonkResult,
+        final.accDiagnostics,
+        final.accLogs,
+        final.accUpdatedCache
+      )
 
 typecheckOneModule ::
   IdentifierResult ->
   Map TypeId Text ->
   Map RequestId Text ->
   Map Text ModuleId ->
+  Map ModuleName Int ->
+  Map ModuleName ModuleCache ->
   TypecheckAccumulator ->
   Text ->
   TypecheckAccumulator
-typecheckOneModule idResult solverTypeNames solverReqNames moduleIdByName accumulator moduleName =
+typecheckOneModule idResult solverTypeNames solverReqNames moduleIdByName sourceHashes inputCache accumulator moduleName =
   case Map.lookup moduleName moduleIdByName of
     Nothing -> accumulator
     Just moduleId ->
-      let moduleAST = Map.lookup moduleId idResult.moduleASTs
-          sccs = case moduleAST of
-            Just ast -> agentSCCs moduleName ast
-            Nothing -> []
-          totalSCCs = length sccs
-          indexedSCCs = zip [1 ..] sccs
-          typecheckIndexedSCC accum (sccIndex, scc) =
-            let logged = accum {accLogs = accum.accLogs <> [CompileLogTypechecking moduleName sccIndex totalSCCs]}
-             in typecheckOneSCC idResult solverTypeNames solverReqNames moduleId logged scc
-          sccAccumulator = foldl' typecheckIndexedSCC accumulator indexedSCCs
-          assembledModule = case moduleAST of
-            Just identifiedModule -> assembleZonkedModule identifiedModule sccAccumulator.accSCCDeclarations
-            Nothing -> Module {declarations = [], sourceSpan = emptySrcSpan}
-       in sccAccumulator
-            { accZonkedModules = Map.insert moduleId assembledModule sccAccumulator.accZonkedModules,
-              accZonkedModuleNames = Map.insert moduleId moduleName sccAccumulator.accZonkedModuleNames,
-              accSCCDeclarations = Map.empty
+      let currentHash = Map.lookup moduleName sourceHashes
+          cachedEntry = Map.lookup moduleName inputCache
+          cacheHit = case (currentHash, cachedEntry) of
+            (Just sourceHash, Just cached) ->
+              accumulator.accAllPriorCacheValid && sourceHash == cached.cacheSourceHash
+            _ -> False
+       in if cacheHit
+            then applyCache moduleId moduleName cachedEntry accumulator
+            else recompileModule idResult solverTypeNames solverReqNames moduleId moduleName sourceHashes accumulator
+
+applyCache ::
+  ModuleId ->
+  Text ->
+  Maybe ModuleCache ->
+  TypecheckAccumulator ->
+  TypecheckAccumulator
+applyCache moduleId moduleName cachedEntry accumulator =
+  case cachedEntry of
+    Nothing -> accumulator
+    Just cached ->
+      let cachedInterface = cached.cacheInterface.exportedTypes
+       in accumulator
+            { accImportedTypes = Map.union accumulator.accImportedTypes cachedInterface,
+              accZonkedModules = Map.insert moduleId cached.cacheZonkedModule accumulator.accZonkedModules,
+              accZonkedModuleNames = Map.insert moduleId moduleName accumulator.accZonkedModuleNames,
+              accZonkedTypeEnvironment = Map.union accumulator.accZonkedTypeEnvironment cached.cacheZonkedTypeEnv,
+              accDiagnostics = accumulator.accDiagnostics <> cached.cacheDiagnostics,
+              accSCCDeclarations = Map.empty,
+              accUpdatedCache = Map.insert moduleName cached accumulator.accUpdatedCache,
+              accAllPriorCacheValid = True
             }
+
+recompileModule ::
+  IdentifierResult ->
+  Map TypeId Text ->
+  Map RequestId Text ->
+  ModuleId ->
+  Text ->
+  Map ModuleName Int ->
+  TypecheckAccumulator ->
+  TypecheckAccumulator
+recompileModule idResult solverTypeNames solverReqNames moduleId moduleName sourceHashes accumulator =
+  let moduleAST = Map.lookup moduleId idResult.moduleASTs
+      sccs = case moduleAST of
+        Just ast -> agentSCCs moduleName ast
+        Nothing -> []
+      totalSCCs = length sccs
+      indexedSCCs = zip [1 ..] sccs
+      typecheckIndexedSCC accum (sccIndex, scc) =
+        let logged = accum {accLogs = accum.accLogs <> [CompileLogTypechecking moduleName sccIndex totalSCCs]}
+         in typecheckOneSCC idResult solverTypeNames solverReqNames moduleId logged scc
+      sccAccumulator = foldl' typecheckIndexedSCC accumulator indexedSCCs
+      assembledModule = case moduleAST of
+        Just identifiedModule -> assembleZonkedModule identifiedModule sccAccumulator.accSCCDeclarations
+        Nothing -> Module {declarations = [], sourceSpan = emptySrcSpan}
+      moduleInterface =
+        extractModuleInterface
+          moduleName
+          idResult.identifiedVariables
+          sccAccumulator.accZonkedTypeEnvironment
+      moduleTypeEnv = moduleOwnedTypeEnvironment idResult accumulator.accImportedTypes sccAccumulator.accZonkedTypeEnvironment
+      newCacheEntry =
+        ModuleCache
+          { cacheSourceHash = case Map.lookup moduleName sourceHashes of
+              Just sourceHash -> sourceHash
+              Nothing -> 0,
+            cacheInterface = moduleInterface,
+            cacheIdentified = case moduleAST of
+              Just ast -> ast
+              Nothing -> Module {declarations = [], sourceSpan = emptySrcSpan},
+            cacheZonkedModule = assembledModule,
+            cacheZonkedTypeEnv = moduleTypeEnv,
+            cacheDiagnostics =
+              drop (length accumulator.accDiagnostics) sccAccumulator.accDiagnostics
+          }
+   in sccAccumulator
+        { accZonkedModules = Map.insert moduleId assembledModule sccAccumulator.accZonkedModules,
+          accZonkedModuleNames = Map.insert moduleId moduleName sccAccumulator.accZonkedModuleNames,
+          accSCCDeclarations = Map.empty,
+          accUpdatedCache = Map.insert moduleName newCacheEntry accumulator.accUpdatedCache,
+          accAllPriorCacheValid = False
+        }
   where
     emptySrcSpan =
       SrcSpan
@@ -376,6 +493,23 @@ typecheckOneModule idResult solverTypeNames solverReqNames moduleIdByName accumu
           start = Position {line = 0, column = 0},
           end = Position {line = 0, column = 0}
         }
+
+moduleOwnedTypeEnvironment ::
+  IdentifierResult ->
+  Map QualifiedName (SemanticType Resolved) ->
+  Map VariableId (SemanticType Resolved) ->
+  Map VariableId (SemanticType Resolved)
+moduleOwnedTypeEnvironment idResult importedTypes fullTypeEnvironment =
+  let knownVariableIds =
+        Map.keysSet
+          ( Map.filter
+              ( \variableData -> case variableData.variableQualifiedName of
+                  Just qualifiedName -> Map.member qualifiedName importedTypes
+                  Nothing -> False
+              )
+              idResult.identifiedVariables
+          )
+   in Map.withoutKeys fullTypeEnvironment knownVariableIds
 
 typecheckOneSCC ::
   IdentifierResult ->
@@ -421,7 +555,9 @@ typecheckOneSCC idResult solverTypeNames solverReqNames moduleId accumulator scc
               },
           accDiagnostics = accumulator.accDiagnostics <> cgDiags <> solverDiags <> zonkDiags,
           accSCCDeclarations = sccDeclMap,
-          accLogs = accumulator.accLogs
+          accLogs = accumulator.accLogs,
+          accUpdatedCache = accumulator.accUpdatedCache,
+          accAllPriorCacheValid = accumulator.accAllPriorCacheValid
         }
 
 extractSCCInterface ::

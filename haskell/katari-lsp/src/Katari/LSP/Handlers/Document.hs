@@ -260,7 +260,7 @@ compileOneOrphan :: ServerState -> FilePath -> Text -> LSP.LspM () ()
 compileOneOrphan _st path txt = do
   let entry = Compile.SourceEntry {Compile.filePath = path, Compile.sourceText = txt}
       sources = Map.singleton (singletonModuleName path) entry
-      result = Compile.compile (Compile.CompileInput {Compile.sources = sources})
+      result = Compile.compile (Compile.CompileInput {Compile.sources = sources, Compile.cache = Map.empty})
   publishWorkspaceDiagnostics (Map.singleton path txt) result.diagnostics
   where
     -- Strip the trailing @.ktr@ extension and treat the basename as the

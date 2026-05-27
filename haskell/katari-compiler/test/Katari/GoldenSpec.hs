@@ -60,7 +60,7 @@ goldenCase path = describe ("compiling " <> takeBaseName path) $ do
             { filePath = path,
               sourceText = sourceText
             }
-        input = CompileInput {sources = Map.singleton "main" entry}
+        input = CompileInput {sources = Map.singleton "main" entry, cache = Map.empty}
     pure (compile input, sourceText)
 
   let (compiled, sourceText) = result

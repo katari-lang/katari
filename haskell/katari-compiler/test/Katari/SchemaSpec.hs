@@ -182,7 +182,7 @@ descriptionEndToEndSpec = describe "annotation → description (end-to-end)" $ d
         \agent show(@\"the point\" p: Point) -> string {\n\
         \  \"\"\n\
         \}"
-      result = compile CompileInput {sources = Map.singleton "main" SourceEntry {filePath = "main", sourceText = src}}
+      result = compile CompileInput {sources = Map.singleton "main" SourceEntry {filePath = "main", sourceText = src}, cache = Map.empty}
       entries :: [SchemaEntry]
       entries = case result.schemaEntries of
         Just es -> es

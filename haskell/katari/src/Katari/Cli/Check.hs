@@ -93,7 +93,7 @@ loadProject opts = do
                   Map.fromList
                     [ (e.sourcePath, e.sourceText) | e <- Map.elems assembly.sources
                     ]
-            pure (Compile.CompileInput {Compile.sources = sources}, fileTexts)
+            pure (Compile.CompileInput {Compile.sources = sources, Compile.cache = Map.empty}, fileTexts)
 
 emitDiagnostics :: Map FilePath Text -> [Diagnostic] -> IO ()
 emitDiagnostics fileTexts ds = do

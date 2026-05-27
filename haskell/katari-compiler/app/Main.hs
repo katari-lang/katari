@@ -151,7 +151,7 @@ loadCompileInput inputs = do
         Right input -> pure input
     Nothing -> do
       flatSources <- Map.unions <$> traverse loadFlatPath inputs
-      pure CompileInput {sources = flatSources}
+      pure CompileInput {sources = flatSources, cache = Map.empty}
   where
     firstProjectRoot :: [FilePath] -> IO (Maybe FilePath)
     firstProjectRoot [] = pure Nothing
@@ -174,10 +174,10 @@ loadCompileInput inputs = do
     loadFromProject [] = pure (Right emptyCompileInput)
 
     emptyCompileInput :: CompileInput
-    emptyCompileInput = CompileInput {sources = Map.empty}
+    emptyCompileInput = CompileInput {sources = Map.empty, cache = Map.empty}
 
     toCompileInput :: Project.ProjectAssembly -> CompileInput
-    toCompileInput a = CompileInput {sources = Map.map toCompilerEntry a.sources}
+    toCompileInput a = CompileInput {sources = Map.map toCompilerEntry a.sources, cache = Map.empty}
 
     loadFlatPath :: FilePath -> IO (Map Text.Text SourceEntry)
     loadFlatPath p = do

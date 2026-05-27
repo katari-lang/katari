@@ -101,7 +101,8 @@ compileDeterminism =
                           { filePath = "<property>",
                             sourceText = sourceText
                           }
-                      )
+                      ),
+                  cache = Map.empty
                 }
             r1 = compile mkInput
             r2 = compile mkInput

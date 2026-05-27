@@ -14,7 +14,7 @@ import Katari.Typechecker.Identifier (VariableData (..))
 data ModuleInterface = ModuleInterface
   { exportedTypes :: Map QualifiedName (SemanticType Resolved)
   }
-  deriving (Show)
+  deriving (Eq, Show)
 
 extractModuleInterface ::
   Text ->
