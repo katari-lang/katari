@@ -27,7 +27,6 @@ import Katari.Typechecker.Identifier
   ( IdentifierResult (..),
     RequestData,
     VariableData (..),
-    identify,
   )
 import Katari.Typechecker.Identifier qualified as Identifier
 import Katari.Typechecker.NormalizedType

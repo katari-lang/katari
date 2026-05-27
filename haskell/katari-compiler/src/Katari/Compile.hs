@@ -30,7 +30,8 @@ module Katari.Compile
 where
 
 import Control.Parallel.Strategies (parMap, rseq)
-import Data.Foldable (foldl')
+import Control.Monad.State.Strict (execState, modify)
+import Data.Foldable (foldl', for_)
 import Data.Hashable (hash)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
@@ -72,17 +73,18 @@ import Katari.Typechecker.Exhaustive qualified as Exhaustive
 import Katari.Typechecker.Identifier
   ( ConstructorData (..),
     IdentifierResult (..),
+    IdentifierState (..),
     ModuleData (..),
+    ModuleIdentifyResult (..),
     RequestData (..),
     SymbolEntry (..),
     TypeData (..),
     VariableData (..),
-    identify,
   )
 import Katari.Typechecker.Identifier qualified as Identifier
-import Katari.Typechecker.ImportGraph (topologicalSort)
+import Katari.Typechecker.ImportGraph (findImportCycles, topologicalSort)
+import Katari.Typechecker.ScopeIndex (ScopeFrame (..), ScopeIndex (..), buildScopeIndex)
 import Katari.Typechecker.ModuleInterface (ModuleInterface (..), extractModuleInterface)
-import Katari.Typechecker.ScopeIndex (ScopeFrame (..), ScopeIndex (..))
 import Katari.Typechecker.Solver (SolverResult (..), solve)
 import Katari.Typechecker.Solver qualified as Solver
 import Katari.Typechecker.Zonker (ZonkResult (..), zonk)
@@ -195,28 +197,8 @@ compile input =
           cacheHitModules
       allParsed = Map.union freshParsed cachedSkeletonParsed
 
-      -- Phase 2: Identify (incremental).
-      cachedIdentifierData =
-        Map.map
-          ( \cached ->
-              Identifier.CachedIdentifierData
-                { Identifier.cidVariables = cached.cacheIdentifierVariables,
-                  Identifier.cidTypes = cached.cacheIdentifierTypes,
-                  Identifier.cidRequests = cached.cacheIdentifierRequests,
-                  Identifier.cidConstructors = cached.cacheIdentifierConstructors,
-                  Identifier.cidModuleData = cached.cacheModuleData,
-                  Identifier.cidExportTable = cached.cacheModuleExports,
-                  Identifier.cidTopLevel = cached.cacheModuleTopLevel,
-                  Identifier.cidIdentifiedAST = cached.cacheIdentifiedAST,
-                  Identifier.cidScopeFrames = cached.cacheScopeFrames,
-                  Identifier.cidNextLocalVarId = 0
-                }
-          )
-          cacheHitModules
-      (idResult, idErrors) =
-        if Map.null cachedIdentifierData
-          then identify Stdlib.stdlibModuleNames allParsed
-          else Identifier.identifyIncremental Stdlib.stdlibModuleNames allParsed cachedIdentifierData
+      -- Phase 2: Identify (per-module, topological order).
+      (idResult, idErrors) = runIdentify Stdlib.stdlibModuleNames allParsed cacheHitModules
       idDiags = map Identifier.toDiagnostic idErrors
 
       -- Compute topological levels.
@@ -770,7 +752,117 @@ identifyWithStdlib ::
   Map ModuleName (Module Parsed) ->
   (IdentifierResult, [Identifier.IdentifierError])
 identifyWithStdlib userMods =
-  identify Stdlib.stdlibModuleNames (Map.union userMods parsedStdlibModules)
+  runIdentify Stdlib.stdlibModuleNames (Map.union userMods parsedStdlibModules) Map.empty
+
+-- ===========================================================================
+-- Identifier orchestration
+-- ===========================================================================
+
+type IdentifyAccum =
+  ( Map Text (Module Identified),
+    Map Text (Map Text SymbolEntry),
+    Map Text (Map Text SymbolEntry),
+    IdentifierState
+  )
+
+runIdentify ::
+  Set.Set Text ->
+  Map Text (Module Parsed) ->
+  Map ModuleName ModuleCache ->
+  (IdentifierResult, [Identifier.IdentifierError])
+runIdentify trustedStdlibNames moduleMap cachedModules =
+  let ((), cycleState) =
+        Identifier.runIdentifier $
+          for_ (findImportCycles moduleMap) (Identifier.emitImportCycleError moduleMap)
+
+      ((), phaseAState) =
+        Identifier.runIdentifierFrom cycleState $
+          Identifier.registerAllModules trustedStdlibNames moduleMap
+
+      allModuleNames = Map.keysSet moduleMap
+      allExportNames = Map.map Identifier.scanExportNames moduleMap
+
+      stepFresh :: IdentifyAccum -> Text -> IdentifyAccum
+      stepFresh (asts, exports, topLevels, state) moduleName =
+        case Map.lookup moduleName moduleMap of
+          Nothing -> (asts, exports, topLevels, state)
+          Just parsedModule ->
+            let moduleResult =
+                  Identifier.identifyModule
+                    allExportNames
+                    exports
+                    allModuleNames
+                    state
+                    moduleName
+                    parsedModule
+             in ( Map.insert moduleName moduleResult.identifiedAST asts,
+                  Map.insert moduleName moduleResult.moduleExportTable exports,
+                  Map.insert moduleName moduleResult.moduleTopLevel topLevels,
+                  moduleResult.moduleState
+                )
+
+      stepCachedOrFresh :: IdentifyAccum -> Text -> IdentifyAccum
+      stepCachedOrFresh accumulator@(asts, exports, topLevels, state) moduleName =
+        case Map.lookup moduleName cachedModules of
+          Just cached ->
+            let injectedState =
+                  state
+                    { variables = Map.union cached.cacheIdentifierVariables state.variables,
+                      types = Map.union cached.cacheIdentifierTypes state.types,
+                      requests = Map.union cached.cacheIdentifierRequests state.requests,
+                      constructors = Map.union cached.cacheIdentifierConstructors state.constructors,
+                      modules = Map.insert moduleName cached.cacheModuleData state.modules,
+                      capturedScopeFrames = cached.cacheScopeFrames ++ state.capturedScopeFrames
+                    }
+             in ( Map.insert moduleName cached.cacheIdentifiedAST asts,
+                  Map.insert moduleName cached.cacheModuleExports exports,
+                  Map.insert moduleName cached.cacheModuleTopLevel topLevels,
+                  injectedState
+                )
+          Nothing -> stepFresh accumulator moduleName
+
+      stdlibModuleNames =
+        [ moduleName
+          | moduleName <- Map.keys moduleMap,
+            Set.member moduleName trustedStdlibNames
+        ]
+      sortedStdlibNames =
+        filter (== "primitive") stdlibModuleNames
+          ++ filter (/= "primitive") stdlibModuleNames
+      (stdlibASTs, stdlibExports, stdlibTopLevels, stdlibState) =
+        foldl' stepCachedOrFresh (Map.empty, Map.empty, Map.empty, phaseAState) sortedStdlibNames
+
+      userModuleMap = Map.filterWithKey (\moduleName _ -> not (Set.member moduleName trustedStdlibNames)) moduleMap
+      levels = topologicalSort userModuleMap
+      (acyclicASTs, acyclicExports, acyclicTopLevels, acyclicState) =
+        foldl'
+          (\accumulator level -> foldl' stepCachedOrFresh accumulator (Set.toList level))
+          (stdlibASTs, stdlibExports, stdlibTopLevels, stdlibState)
+          levels
+
+      processedModuleNames = Map.keysSet acyclicASTs
+      remainingModuleNames =
+        [ moduleName
+          | moduleName <- Map.keys moduleMap,
+            not (Set.member moduleName processedModuleNames)
+        ]
+      (allASTs, allExports, allTopLevels, finalState) =
+        foldl' stepCachedOrFresh (acyclicASTs, acyclicExports, acyclicTopLevels, acyclicState) remainingModuleNames
+
+      capturedFrames =
+        [ScopeFrame {frameSpan = sp, frameSymbols = sym} | (sp, sym) <- finalState.capturedScopeFrames]
+      result =
+        Identifier.mkIdentifierResult
+          finalState.modules
+          finalState.variables
+          finalState.types
+          finalState.requests
+          finalState.constructors
+          allASTs
+          (buildScopeIndex capturedFrames)
+          allTopLevels
+          allExports
+   in (result, reverse finalState.errors)
 
 -- ===========================================================================
 -- Helpers
