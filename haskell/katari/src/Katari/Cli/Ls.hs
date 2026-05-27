@@ -13,15 +13,15 @@ module Katari.Cli.Ls
   )
 where
 
-import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.Encode.Pretty as Pretty
-import qualified Data.ByteString.Lazy.Char8 as LC8
+import Data.Aeson qualified as Aeson
+import Data.Aeson.Encode.Pretty qualified as Pretty
+import Data.ByteString.Lazy.Char8 qualified as LC8
 import Data.Text (Text)
-import qualified Data.Text as Text
-import qualified Katari.Api.Client as Api
-import qualified Katari.Api.Types as Api
-import qualified Katari.Cli.Common as Common
-import qualified Katari.Cli.Status as Status
+import Data.Text qualified as Text
+import Katari.Api.Client qualified as Api
+import Katari.Api.Types qualified as Api
+import Katari.Cli.Common qualified as Common
+import Katari.Cli.Status qualified as Status
 import Options.Applicative
 
 data Target
@@ -117,7 +117,7 @@ requireProjectId c opts = case opts.optProject of
   Just name -> Common.resolveProjectId "ls" c name
   Nothing -> die "this target requires --project NAME"
 
-emitJson :: Aeson.ToJSON a => a -> IO ()
+emitJson :: (Aeson.ToJSON a) => a -> IO ()
 emitJson = LC8.putStrLn . Pretty.encodePretty
 
 printProject :: Api.Project -> IO ()

@@ -52,9 +52,10 @@ topologicalSort modules = go (Map.keysSet modules) Set.empty
       | Set.null ready = []
       | otherwise = ready : go (remaining Set.\\ ready) (processed `Set.union` ready)
       where
-        ready = Set.filter
-          (\m -> Set.isSubsetOf (Map.findWithDefault Set.empty m deps) processed)
-          remaining
+        ready =
+          Set.filter
+            (\m -> Set.isSubsetOf (Map.findWithDefault Set.empty m deps) processed)
+            remaining
 
 importsOf :: Module Parsed -> Set ModuleName
 importsOf m =

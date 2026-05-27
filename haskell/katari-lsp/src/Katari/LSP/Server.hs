@@ -13,9 +13,9 @@ import Katari.LSP.Handlers.Document (documentHandlers, watchedFilesHandler)
 import Katari.LSP.Handlers.Hover (hoverHandler)
 import Katari.LSP.Handlers.References (referencesHandler)
 import Katari.LSP.State (newServerState)
-import qualified Language.LSP.Protocol.Message as LSP
-import qualified Language.LSP.Protocol.Types as LSP
-import qualified Language.LSP.Server as LSP
+import Language.LSP.Protocol.Message qualified as LSP
+import Language.LSP.Protocol.Types qualified as LSP
+import Language.LSP.Server qualified as LSP
 
 runServer :: IO Int
 runServer = do
@@ -43,7 +43,8 @@ runServer = do
               LSP.notificationHandler LSP.SMethod_SetTrace $ \_ -> pure (),
               LSP.notificationHandler LSP.SMethod_CancelRequest $ \_ -> pure (),
               LSP.notificationHandler LSP.SMethod_TextDocumentDidSave $ \_ -> pure (),
-              LSP.notificationHandler LSP.SMethod_WorkspaceDidChangeWatchedFiles
+              LSP.notificationHandler
+                LSP.SMethod_WorkspaceDidChangeWatchedFiles
                 (watchedFilesHandler st)
             ],
         LSP.interpretHandler = \env -> LSP.Iso (LSP.runLspT env) liftIO,

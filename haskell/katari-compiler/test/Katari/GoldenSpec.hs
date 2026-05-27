@@ -13,6 +13,7 @@
 -- @git diff@ before committing.
 module Katari.GoldenSpec (spec) where
 
+import Control.Monad (when)
 import Data.Aeson qualified as Aeson
 import Data.Aeson.Encode.Pretty qualified as Aeson
 import Data.ByteString.Lazy qualified as ByteStringLazy
@@ -140,8 +141,9 @@ absentGolden expectedPath = do
     Just "1" -> pure () -- accept-mode never asserts absence
     _ -> do
       exists <- doesFileExist expectedPath
-      Control.Monad.when exists $ expectationFailure
-            ( "unexpected golden file present: "
-                <> expectedPath
-                <> " (the pipeline no longer produces this artefact for the case)"
-            )
+      when exists $
+        expectationFailure
+          ( "unexpected golden file present: "
+              <> expectedPath
+              <> " (the pipeline no longer produces this artefact for the case)"
+          )

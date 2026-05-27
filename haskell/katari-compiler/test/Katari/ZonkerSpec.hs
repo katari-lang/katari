@@ -6,6 +6,8 @@ import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Katari.AST
+import Katari.Compile qualified as Compile
+import Katari.Id (LocalVarId (..), QualifiedName (..), VariableResolution (..))
 import Katari.Lexer qualified as Lexer
 import Katari.Parser qualified as Parser
 import Katari.SemanticType
@@ -21,7 +23,6 @@ import Katari.Typechecker.ConstraintGenerator
     VariableSupply (..),
     generateConstraints,
   )
-import Katari.Id (LocalVarId (..), QualifiedName (..), VariableResolution (..))
 import Katari.Typechecker.Identifier
   ( IdentifierResult (..),
     RequestData,
@@ -47,7 +48,6 @@ import Katari.Typechecker.Zonker
     ZonkResult (..),
     zonk,
   )
-import Katari.Compile qualified as Compile
 import Test.Hspec
 
 -- ---------------------------------------------------------------------------
@@ -60,11 +60,11 @@ pipeline :: Text -> IO (IdentifierResult, ConstraintGenResult)
 pipeline src =
   let (stream, _) = Lexer.lex "<test>" src
       (parsed, parseErrors) = Parser.parse "<test>" stream
-  in case parseErrors of
-    (_:_) -> fail ("parse failure: " ++ show parseErrors)
-    [] -> case Compile.identifyWithStdlib (Map.singleton "main" parsed) of
-      (idResult, []) -> let (cg, _) = generateConstraints idResult in pure (idResult, cg)
-      (_, errs) -> fail ("identify failure: " ++ show errs)
+   in case parseErrors of
+        (_ : _) -> fail ("parse failure: " ++ show parseErrors)
+        [] -> case Compile.identifyWithStdlib (Map.singleton "main" parsed) of
+          (idResult, []) -> let (cg, _) = generateConstraints idResult in pure (idResult, cg)
+          (_, errs) -> fail ("identify failure: " ++ show errs)
 
 -- | Build a 'SolverResult' that satisfies the Solver totality contract for the
 -- given 'ConstraintGenResult'. Every TypeVariableId / RequestVariableId allocated by

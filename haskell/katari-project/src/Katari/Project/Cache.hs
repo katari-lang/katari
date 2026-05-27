@@ -21,7 +21,7 @@ module Katari.Project.Cache
 where
 
 import Data.Text (Text)
-import qualified Data.Text as Text
+import Data.Text qualified as Text
 import System.Directory (createDirectoryIfMissing)
 import System.FilePath ((</>))
 

@@ -5,6 +5,8 @@ import Data.Map.Strict qualified as Map
 import Data.Maybe (mapMaybe)
 import Data.Set qualified as Set
 import Data.Text (Text)
+import Katari.Compile qualified as Compile
+import Katari.Id (VariableResolution (..))
 import Katari.Lexer qualified as Lexer
 import Katari.Parser qualified as Parser
 import Katari.SemanticType
@@ -17,13 +19,11 @@ import Katari.Typechecker.ConstraintGenerator
     VariableSupply (..),
     generateConstraints,
   )
-import Katari.Id (VariableResolution (..))
 import Katari.Typechecker.Identifier
   ( IdentifierResult (..),
     SymbolEntry (..),
     VariableData (..),
   )
-import Katari.Typechecker.ScopeIndex (ScopeFrame (..), ScopeIndex (..))
 import Katari.Typechecker.NormalizedType
   ( ArraySlot (..),
     FunctionSlot (..),
@@ -33,10 +33,10 @@ import Katari.Typechecker.NormalizedType
     ObjectSlot (..),
     StringSlot (..),
   )
+import Katari.Typechecker.ScopeIndex (ScopeFrame (..), ScopeIndex (..))
 import Katari.Typechecker.Solver (SolverResult (..), solve)
 import Katari.Typechecker.Solver qualified as Solver
 import Katari.Typechecker.Zonker (zonk)
-import Katari.Compile qualified as Compile
 import Test.Hspec
 
 -- ---------------------------------------------------------------------------
@@ -47,14 +47,14 @@ runSolve :: Text -> IO (IdentifierResult, ConstraintGenResult, SolverResult, [So
 runSolve source =
   let (stream, _) = Lexer.lex "<test>" source
       (parsed, parseErrors) = Parser.parse "<test>" stream
-  in case parseErrors of
-    (_:_) -> fail ("parse failure: " ++ show parseErrors)
-    [] -> case Compile.identifyWithStdlib (Map.singleton "main" parsed) of
-      (idResult, []) ->
-        let (cgResult, _) = generateConstraints idResult
-            (solverResult, solverErrors) = solve cgResult
-         in pure (idResult, cgResult, solverResult, solverErrors)
-      (_, errors) -> fail ("identify failure: " ++ show errors)
+   in case parseErrors of
+        (_ : _) -> fail ("parse failure: " ++ show parseErrors)
+        [] -> case Compile.identifyWithStdlib (Map.singleton "main" parsed) of
+          (idResult, []) ->
+            let (cgResult, _) = generateConstraints idResult
+                (solverResult, solverErrors) = solve cgResult
+             in pure (idResult, cgResult, solverResult, solverErrors)
+          (_, errors) -> fail ("identify failure: " ++ show errors)
 
 -- | Find the VariableResolution for a named binding. Searches top-level
 -- identifiedVariables first, then falls back to scanning the scopeIndex

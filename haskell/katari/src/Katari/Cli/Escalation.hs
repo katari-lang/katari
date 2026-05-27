@@ -13,10 +13,10 @@ module Katari.Cli.Escalation
 where
 
 import Data.Text (Text)
-import qualified Data.Text as Text
-import qualified Katari.Api.Client as Api
-import qualified Katari.Api.Types as Api
-import qualified Katari.Cli.Common as Common
+import Data.Text qualified as Text
+import Katari.Api.Client qualified as Api
+import Katari.Api.Types qualified as Api
+import Katari.Cli.Common qualified as Common
 import Options.Applicative
 
 data Options

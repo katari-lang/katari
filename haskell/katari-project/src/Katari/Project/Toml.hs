@@ -10,15 +10,15 @@ module Katari.Project.Toml
   )
 where
 
-import qualified Data.HashMap.Strict as HashMap
-import qualified Data.List.NonEmpty as NonEmpty
+import Data.HashMap.Strict qualified as HashMap
+import Data.List.NonEmpty qualified as NonEmpty
 import Data.Map.Strict (Map)
-import qualified Data.Map.Strict as Map
+import Data.Map.Strict qualified as Map
 import Data.Text (Text)
-import qualified Data.Text as Text
-import qualified Toml.Type.Key as Toml
-import qualified Toml.Type.PrefixTree as Toml
-import qualified Toml.Type.TOML as Toml
+import Data.Text qualified as Text
+import Toml.Type.Key qualified as Toml
+import Toml.Type.PrefixTree qualified as Toml
+import Toml.Type.TOML qualified as Toml
 
 -- | Walk every nested sub-table under @sectionName@ in the raw TOML
 -- AST, decode each leaf via @decodeSub@, and collect the results into
@@ -50,6 +50,7 @@ extractNestedTables sectionName decodeSub toml =
 
     dropSectionPrefix :: Toml.Key -> Maybe Text
     dropSectionPrefix key = case NonEmpty.toList (Toml.unKey key) of
-      Toml.Piece p : rest@(_ : _) | p == sectionName ->
-        Just (Text.intercalate "." [piece | Toml.Piece piece <- rest])
+      Toml.Piece p : rest@(_ : _)
+        | p == sectionName ->
+            Just (Text.intercalate "." [piece | Toml.Piece piece <- rest])
       _ -> Nothing

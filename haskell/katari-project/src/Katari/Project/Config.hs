@@ -55,16 +55,16 @@ import Control.Exception (IOException, try)
 import Data.Bifunctor (first)
 import Data.Char (isAlpha, isAlphaNum)
 import Data.Map.Strict (Map)
-import qualified Data.Map.Strict as Map
+import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
-import qualified Data.Text as Text
-import qualified Data.Text.IO as TextIO
+import Data.Text qualified as Text
+import Data.Text.IO qualified as TextIO
 import Katari.Project.Toml (extractNestedTables)
-import qualified Toml
-import Toml (TomlCodec, (.=))
-import qualified Validation
 import System.Environment (lookupEnv)
+import Toml (TomlCodec, (.=))
+import Toml qualified
+import Validation qualified
 
 -- ===========================================================================
 -- Data types (post-validation)
@@ -360,8 +360,10 @@ validateOverride :: FilePath -> RawOverride -> Either ConfigError OverrideSource
 validateOverride path RawOverride {..} =
   case (rawOverridePath, rawOverrideGit, rawOverrideRef) of
     (Just p, Nothing, _) | not (null p) -> Right (OverridePath p)
-    (Nothing, Just u, Just r) | not (Text.null u), not (Text.null r) ->
-      Right OverrideGit {gitUrl = u, gitRev = r}
+    (Nothing, Just u, Just r)
+      | not (Text.null u),
+        not (Text.null r) ->
+          Right OverrideGit {gitUrl = u, gitRev = r}
     (Just _, Just _, _) ->
       Left (ConfigValidationError path "[overrides.X] must use 'path' XOR 'git', not both")
     (Nothing, Just _, Nothing) ->
@@ -405,8 +407,8 @@ interpolateEnv input = go input mempty
           let (before, after) = Text.breakOn "${" remaining
            in if Text.null after
                 then pure (acc <> remaining)
-                else
-                  -- Check for escaped \${
+                else -- Check for escaped \${
+
                   if not (Text.null before) && Text.last before == '\\'
                     then case spanNameText (Text.drop 2 after) of
                       Just (name, rest) ->
@@ -420,7 +422,7 @@ interpolateEnv input = go input mempty
                       Nothing ->
                         go (Text.drop 2 after) (acc <> before <> "${")
 
-    -- | Try to consume @VARNAME}@ from the front of the text, returning
+    -- \| Try to consume @VARNAME}@ from the front of the text, returning
     -- @(name, textAfterClosingBrace)@ on success.
     spanNameText :: Text -> Maybe (Text, Text)
     spanNameText text =

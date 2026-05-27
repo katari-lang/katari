@@ -12,7 +12,6 @@
 module Katari.DiagnosticSpec (spec) where
 
 import Data.Aeson qualified as Aeson
-import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 import Data.Text qualified as T
 import Katari.Diagnostic

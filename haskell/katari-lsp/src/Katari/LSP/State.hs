@@ -27,17 +27,17 @@ where
 import Control.Applicative ((<|>))
 import Control.Concurrent (ThreadId)
 import Control.Concurrent.STM (TVar, atomically, modifyTVar', newTVarIO, readTVarIO)
-import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
+import Data.Map.Strict qualified as Map
 import Data.Set (Set)
 import Data.Text (Text)
-import qualified Data.Text as Text
+import Data.Text qualified as Text
 import Data.Vector (Vector)
-import qualified Data.Vector as Vector
+import Data.Vector qualified as Vector
 import Katari.Compile (CompileInput (..), CompileResult, ModuleCache, SourceEntry (..))
-import qualified Katari.Project.Config as Project
-import qualified Katari.Project.Discovery as Project
-import qualified Katari.Project.Resolve as Project
+import Katari.Project.Config qualified as Project
+import Katari.Project.Discovery qualified as Project
+import Katari.Project.Resolve qualified as Project
 import Katari.Query (OccurrenceIndex)
 
 data WorkspaceState = WorkspaceState
@@ -73,8 +73,10 @@ data WorkspaceState = WorkspaceState
 -- @"orphan:" <> path@ scheme) so the dispatch in 'recompileNow' is
 -- exhaustive at the type level.
 data RecompileTarget
-  = RecompileWorkspace FilePath  -- ^ Workspace root containing katari.toml.
-  | RecompileOrphan FilePath     -- ^ Single .ktr file outside any project.
+  = -- | Workspace root containing katari.toml.
+    RecompileWorkspace FilePath
+  | -- | Single .ktr file outside any project.
+    RecompileOrphan FilePath
   deriving (Eq, Ord, Show)
 
 data ServerState = ServerState

@@ -177,6 +177,7 @@ useful context matrix@(PatMatrix rows) testRow = case (rows, testRow) of
         sigma = headsOf matrix
      in if isCompleteSig (map fst sigma) columnType context.identifierResult context.zonkResult
           then -- complete signature: recurse on each specialisation
+
             any
               ( \(tag, arity) ->
                   let freshWilds = replicate arity PatHeadWildcard

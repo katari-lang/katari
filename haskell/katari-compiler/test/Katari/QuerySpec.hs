@@ -1,11 +1,11 @@
 module Katari.QuerySpec (spec) where
 
-import qualified Data.Map.Strict as Map
+import Data.Map.Strict qualified as Map
 import Data.Text (Text)
-import qualified Data.Text as Text
-import qualified Katari.Compile as C
+import Data.Text qualified as Text
+import Katari.Compile qualified as C
 import Katari.Query (HoverInfo (..), lookupAtPosition)
-import qualified Katari.SemanticType as ST
+import Katari.SemanticType qualified as ST
 import Katari.SourceSpan (Position (..))
 import Test.Hspec
 

@@ -1,21 +1,23 @@
 module Katari.Query.CompletionSpec (spec) where
 
 import Data.List (find)
-import qualified Data.Map.Strict as Map
+import Data.Map.Strict qualified as Map
 import Data.Maybe (listToMaybe)
-import qualified Data.Set as Set
+import Data.Set qualified as Set
 import Data.Text (Text)
-import qualified Data.Text as Text
-import qualified Katari.Compile as Compile
-import Katari.Typechecker.Identifier
-    ( SymbolEntry(..), IdentifierResult(..) )
-import qualified Katari.Lexer as Lexer
-import qualified Katari.Parser as Parser
+import Data.Text qualified as Text
+import Katari.Compile qualified as C
+import Katari.Compile qualified as Compile
+import Katari.Lexer qualified as Lexer
+import Katari.Parser qualified as Parser
 import Katari.Query.Completion
 import Katari.SemanticType (SemanticType (..), emptyRequest)
 import Katari.SourceSpan (Position (..))
+import Katari.Typechecker.Identifier
+  ( IdentifierResult (..),
+    SymbolEntry (..),
+  )
 import Katari.Typechecker.Zonker (ZonkResult (..))
-import qualified Katari.Compile as C
 import Test.Hspec
 
 -- ---------------------------------------------------------------------------

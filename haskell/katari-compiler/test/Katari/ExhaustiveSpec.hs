@@ -279,4 +279,3 @@ validPatterns = describe "well-typed exhaustive matches produce no Exhaustive di
             "}"
           ]
     diags `shouldBe` []
-

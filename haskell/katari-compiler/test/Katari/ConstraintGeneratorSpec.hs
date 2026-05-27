@@ -5,25 +5,22 @@ import Data.Map.Strict qualified as Map
 import Data.Maybe (mapMaybe)
 import Data.Set qualified as Set
 import Data.Text (Text)
+import Katari.Compile qualified as Compile
+import Katari.Diagnostic (Diagnostic, hasErrors)
 import Katari.Id
   ( QualifiedName (..),
     VariableResolution (..),
   )
-import Katari.Typechecker.ScopeIndex (ScopeFrame (..), ScopeIndex (..))
 import Katari.Lexer qualified as Lexer
 import Katari.Parser qualified as Parser
 import Katari.SemanticType
 import Katari.Typechecker.ConstraintGenerator
 import Katari.Typechecker.Identifier
   ( IdentifierResult (..),
-    RequestData (RequestData),
     SymbolEntry (..),
-    TypeData (..),
     VariableData (..),
-    identify,
   )
-import Katari.Compile qualified as Compile
-import Katari.Diagnostic (Diagnostic, hasErrors)
+import Katari.Typechecker.ScopeIndex (ScopeFrame (..), ScopeIndex (..))
 import Test.Hspec
 
 -- ---------------------------------------------------------------------------
@@ -42,13 +39,13 @@ runOneWithIdentifier :: Text -> IO (ConstraintGenResult, [ConstraintError], Iden
 runOneWithIdentifier src =
   let (stream, _) = Lexer.lex "<test>" src
       (parsed, parseErrors) = Parser.parse "<test>" stream
-  in case parseErrors of
-    (_:_) -> fail ("parse failure: " ++ show parseErrors)
-    [] -> case Compile.identifyWithStdlib (Map.singleton "main" parsed) of
-      (result, []) ->
-        let (cg, errs) = generateConstraints result
-         in pure (cg, errs, result)
-      (_, errs) -> fail ("identify failure: " ++ show errs)
+   in case parseErrors of
+        (_ : _) -> fail ("parse failure: " ++ show parseErrors)
+        [] -> case Compile.identifyWithStdlib (Map.singleton "main" parsed) of
+          (result, []) ->
+            let (cg, errs) = generateConstraints result
+             in pure (cg, errs, result)
+          (_, errs) -> fail ("identify failure: " ++ show errs)
 
 -- | Run the full compile pipeline (parse → identify → CG → solve → zonk →
 -- lower) on a single "main" module and return all diagnostics. Unlike
@@ -59,8 +56,7 @@ compileOne src =
   let entry = Compile.SourceEntry {filePath = "<test>", sourceText = src}
       input = Compile.CompileInput {sources = Map.singleton "main" entry, cache = Map.empty}
       result = Compile.compile input
-  in pure result.diagnostics
-
+   in pure result.diagnostics
 
 countTypeConstraints :: ConstraintGenResult -> Int
 countTypeConstraints result =
@@ -190,7 +186,7 @@ multipleModules = describe "multiple modules" $ do
         (mainStream, _) = Lexer.lex "<test>" main_
         (mainMod, mainErrors) = Parser.parse "<test>" mainStream
     case libErrors ++ mainErrors of
-      (_:_) -> expectationFailure ("parse: " ++ show (libErrors ++ mainErrors))
+      (_ : _) -> expectationFailure ("parse: " ++ show (libErrors ++ mainErrors))
       [] -> case Compile.identifyWithStdlib (Map.fromList [("lib", libMod), ("main", mainMod)]) of
         (_, e : es) -> expectationFailure ("identify errors: " ++ show (e : es))
         (result, []) -> do
@@ -361,19 +357,20 @@ whereBlocks = describe "handle blocks" $ do
     countRequestConstraints cg `shouldSatisfy` (> 0)
 
   it "request handler with request annotation is rejected by parser" $ do
-    let (stream, _) = Lexer.lex "<test>" $
-          mconcat
-            [ "request fetch() -> string\n",
-              "agent main() -> string {\n",
-              "  handle {\n",
-              "    request fetch() -> string with bar { \"ok\" }\n",
-              "  }\n",
-              "  fetch()\n",
-              "}"
-            ]
+    let (stream, _) =
+          Lexer.lex "<test>" $
+            mconcat
+              [ "request fetch() -> string\n",
+                "agent main() -> string {\n",
+                "  handle {\n",
+                "    request fetch() -> string with bar { \"ok\" }\n",
+                "  }\n",
+                "  fetch()\n",
+                "}"
+              ]
         (_, parseErrors) = Parser.parse "<test>" stream
     case parseErrors of
-      (_:_) -> pure () -- parse error expected
+      (_ : _) -> pure () -- parse error expected
       [] -> expectationFailure "expected parse failure for handler with-clause"
 
   it "handler break value flows to a type variable (handle-result)" $ do
@@ -786,7 +783,7 @@ dataNameClash = describe "cross-module data name clash" $ do
         (streamB, _) = Lexer.lex "<test>" modB
         (parsedB, errorsB) = Parser.parse "<test>" streamB
     case errorsA ++ errorsB of
-      (_:_) -> expectationFailure ("parse: " ++ show (errorsA ++ errorsB))
+      (_ : _) -> expectationFailure ("parse: " ++ show (errorsA ++ errorsB))
       [] ->
         case Compile.identifyWithStdlib (Map.fromList [("a", parsedA), ("b", parsedB)]) of
           (_, e : es) -> expectationFailure ("identify errors: " ++ show (e : es))

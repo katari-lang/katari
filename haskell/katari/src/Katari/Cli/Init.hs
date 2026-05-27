@@ -30,8 +30,8 @@ where
 
 import Control.Monad (when)
 import Data.Maybe (fromMaybe)
-import qualified Data.Text as Text
-import qualified Data.Text.IO as TextIO
+import Data.Text qualified as Text
+import Data.Text.IO qualified as TextIO
 import Katari.Project.Config (isValidPackageName)
 import Katari.Version (katariVersion)
 import Options.Applicative

@@ -31,17 +31,17 @@ module Katari.Cli.Common
 where
 
 import Control.Exception (catch)
-import qualified Data.Aeson as Aeson
 import Data.Aeson (FromJSON)
-import qualified Data.ByteString.Lazy as LBS
+import Data.Aeson qualified as Aeson
+import Data.ByteString.Lazy qualified as LBS
 import Data.Text (Text)
-import qualified Data.Text as Text
-import qualified Data.Text.Encoding as TextEnc
-import qualified Katari.Api.Client as Api
-import qualified Katari.Api.Types as Api
+import Data.Text qualified as Text
+import Data.Text.Encoding qualified as TextEnc
+import Katari.Api.Client qualified as Api
+import Katari.Api.Types qualified as Api
+import Katari.Project.Config qualified as Project
+import Katari.Project.Discovery qualified as Project
 import Katari.Schema (schemaBundleJson, schemaEntryToAgent)
-import qualified Katari.Project.Config as Project
-import qualified Katari.Project.Discovery as Project
 import System.Directory (getCurrentDirectory)
 import System.Environment (lookupEnv)
 import System.Exit (ExitCode (..), exitWith)
@@ -159,5 +159,5 @@ runWithApiErrors subcmdName action =
 -- | Decode a JSON 'Text' into any 'FromJSON' value. Uses proper UTF-8
 -- encoding so non-ASCII characters (e.g. Japanese text) survive the
 -- round-trip.
-decodeJsonText :: FromJSON a => Text -> Either String a
+decodeJsonText :: (FromJSON a) => Text -> Either String a
 decodeJsonText = Aeson.eitherDecode . LBS.fromStrict . TextEnc.encodeUtf8

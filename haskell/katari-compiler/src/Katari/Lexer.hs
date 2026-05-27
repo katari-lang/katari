@@ -46,9 +46,9 @@ import Control.Monad.State.Strict
   )
 import Data.Char (chr)
 import Data.List.NonEmpty qualified as NE
-import Data.Proxy (Proxy (..))
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
+import Data.Proxy (Proxy (..))
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Void (Void)

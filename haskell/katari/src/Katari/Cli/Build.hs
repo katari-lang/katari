@@ -12,14 +12,14 @@ module Katari.Cli.Build
   )
 where
 
-import qualified Data.Aeson as Aeson
 import Data.Aeson (Value (..), object, (.=))
+import Data.Aeson qualified as Aeson
 import Data.Aeson.Encode.Pretty (encodePretty)
-import qualified Data.ByteString.Lazy as LBS
-import qualified Katari.Cli.Check as Check
-import qualified Katari.Cli.Common as Common
-import qualified Katari.Cli.CompileCache as CompileCache
-import qualified Katari.Compile as Compile
+import Data.ByteString.Lazy qualified as LBS
+import Katari.Cli.Check qualified as Check
+import Katari.Cli.Common qualified as Common
+import Katari.Cli.CompileCache qualified as CompileCache
+import Katari.Compile qualified as Compile
 import Katari.Diagnostic (hasErrors)
 import Katari.IR (IRModule)
 import Katari.Project.Cache qualified as Cache

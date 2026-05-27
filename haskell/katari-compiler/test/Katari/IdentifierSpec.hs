@@ -2,17 +2,15 @@ module Katari.IdentifierSpec (spec) where
 
 import Data.Either (isLeft, isRight)
 import Data.List (find)
-import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (isJust, isNothing)
-import Data.Set qualified as Set
+import Data.Maybe (isNothing)
 import Data.Text (Text)
 import Katari.AST
+import Katari.Compile qualified as Compile
 import Katari.Id (QualifiedName (..))
 import Katari.Lexer qualified as Lexer
 import Katari.Parser qualified as Parser
 import Katari.Typechecker.Identifier
-import Katari.Compile qualified as Compile
 import Test.Hspec
 
 -- ---------------------------------------------------------------------------
@@ -24,9 +22,9 @@ parseOne :: Text -> IO (Module Parsed)
 parseOne src =
   let (stream, _) = Lexer.lex "<test>" src
       (parsed, parseErrors) = Parser.parse "<test>" stream
-  in case parseErrors of
-    (_:_) -> fail ("parse failure: " ++ show parseErrors)
-    [] -> pure parsed
+   in case parseErrors of
+        (_ : _) -> fail ("parse failure: " ++ show parseErrors)
+        [] -> pure parsed
 
 -- | Run identify on a single module named "main".
 --
@@ -48,9 +46,9 @@ identifyMany sources = do
       ( \(name, src) ->
           let (stream, _) = Lexer.lex "<test>" src
               (parsed, parseErrors) = Parser.parse "<test>" stream
-          in case parseErrors of
-            (_:_) -> fail ("parse failure for " ++ show name ++ ": " ++ show parseErrors)
-            [] -> pure (name, parsed)
+           in case parseErrors of
+                (_ : _) -> fail ("parse failure for " ++ show name ++ ": " ++ show parseErrors)
+                [] -> pure (name, parsed)
       )
       sources
   pure $ case Compile.identifyWithStdlib (Map.fromList parsedList) of

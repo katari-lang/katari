@@ -1,18 +1,20 @@
 module Katari.Project.ResolveSpec (spec) where
 
 import Data.Map.Strict (Map)
-import qualified Data.Map.Strict as Map
+import Data.Map.Strict qualified as Map
 import Data.Text (Text)
-import qualified Data.Text as Text
-import qualified Data.Text.IO as TextIO
+import Data.Text qualified as Text
+import Data.Text.IO qualified as TextIO
 import Katari.Project.Config
-    ( isValidPackageName,
-      DependenciesSection(..),
-      OverrideSource(..),
-      PackageSection(..),
-      ProjectConfig(..),
-      RuntimeSection(..),
-      SidecarSection(..) )
+  ( DependenciesSection (..),
+    OverrideSource (..),
+    PackageSection (..),
+    ProjectConfig (..),
+    RuntimeSection (..),
+    SidecarSection (..),
+    isValidPackageName,
+  )
+import Katari.Project.Discovery (SourceEntry (..))
 import Katari.Project.Resolve
   ( ProjectAssembly (..),
     ResolveError (..),
@@ -22,7 +24,6 @@ import Katari.Project.Resolve
     loadResolvedProject,
     renderResolveError,
   )
-import Katari.Project.Discovery (SourceEntry (..))
 import System.Directory (createDirectoryIfMissing)
 import System.FilePath ((</>))
 import System.IO.Temp (withSystemTempDirectory)

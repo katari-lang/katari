@@ -12,11 +12,13 @@ module Katari.Api.Types
     UpsertProjectRequest (..),
     UpsertProjectResponse (..),
     ListProjectsResponse (..),
+
     -- * Snapshots
     SnapshotSummary (..),
     UploadSnapshotRequest (..),
     UploadSnapshotResponse (..),
     SidecarBundle (..),
+
     -- * Runs (= operator-launched root delegations)
     RunRow (..),
     RunState (..),
@@ -27,10 +29,12 @@ module Katari.Api.Types
     GetRunResponse (..),
     ListRunsResponse (..),
     CancelRunResponse (..),
+
     -- * Agent definitions
     AgentDefinition (..),
     ListAgentsResponse (..),
     GetAgentResponse (..),
+
     -- * Escalations
     EscalationRow (..),
     EscalationState (..),
@@ -50,10 +54,10 @@ import Data.Aeson
     omitNothingFields,
     withText,
   )
-import qualified Data.Aeson as Aeson
+import Data.Aeson qualified as Aeson
 import Data.Map.Strict (Map)
 import Data.Text (Text)
-import qualified Data.Text as Text
+import Data.Text qualified as Text
 import GHC.Generics (Generic)
 
 -- | Shared Aeson options that drop @Nothing@ fields from the wire

@@ -8,6 +8,7 @@ module Katari.Cli.Check
   ( Options (..),
     optionsParser,
     run,
+
     -- * Shared helpers (used by 'Katari.Cli.Build')
     loadProject,
     emitDiagnostics,
@@ -16,17 +17,17 @@ module Katari.Cli.Check
 where
 
 import Data.Map.Strict (Map)
-import qualified Data.Map.Strict as Map
+import Data.Map.Strict qualified as Map
 import Data.Text (Text)
-import qualified Data.Text.IO as TextIO
-import qualified Katari.Cli.CompileCache as CompileCache
-import qualified Katari.Compile as Compile
+import Data.Text qualified as Text
+import Data.Text.IO qualified as TextIO
+import Katari.Cli.CompileCache qualified as CompileCache
+import Katari.Compile qualified as Compile
 import Katari.Diagnostic (Diagnostic, Severity (..), filterAtLeast, hasErrors)
 import Katari.Diagnostic.Render (renderDiagnostics, renderDiagnosticsAnsi)
-import qualified Data.Text as Text
 import Katari.Project.Cache qualified as Cache
-import qualified Katari.Project.Discovery as Project
-import qualified Katari.Project.Resolve as Project
+import Katari.Project.Discovery qualified as Project
+import Katari.Project.Resolve qualified as Project
 import Options.Applicative
 import System.Directory (getCurrentDirectory)
 import System.Environment (lookupEnv)

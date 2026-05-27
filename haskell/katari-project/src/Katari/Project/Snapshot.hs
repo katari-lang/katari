@@ -24,13 +24,13 @@ where
 
 import Control.Exception (IOException, try)
 import Data.Bifunctor (first)
-import qualified Data.ByteString.Lazy as LBS
+import Data.ByteString.Lazy qualified as LBS
 import Data.Map.Strict (Map)
-import qualified Data.Map.Strict as Map
+import Data.Map.Strict qualified as Map
 import Data.Text (Text)
-import qualified Data.Text as Text
-import qualified Data.Text.Encoding as TE
-import qualified Data.Text.IO as TextIO
+import Data.Text qualified as Text
+import Data.Text.Encoding qualified as TE
+import Data.Text.IO qualified as TextIO
 import Katari.Project.Toml (extractNestedTables)
 import Network.HTTP.Client
   ( HttpException,
@@ -44,9 +44,9 @@ import Network.HTTP.Client
   )
 import Network.HTTP.Types.Status (statusCode)
 import System.Directory (doesFileExist)
-import qualified Toml
 import Toml (TomlCodec, (.=))
-import qualified Validation
+import Toml qualified
+import Validation qualified
 
 data Snapshot = Snapshot
   { snapshotCompilerVersion :: Maybe Text,

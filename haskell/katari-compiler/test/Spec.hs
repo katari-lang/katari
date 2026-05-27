@@ -1,17 +1,17 @@
 import Katari.CompileSpec qualified as CompileSpec
 import Katari.ConstraintGeneratorSpec qualified as ConstraintGeneratorSpec
 import Katari.DiagnosticSpec qualified as DiagnosticSpec
+import Katari.ExhaustiveSpec qualified as ExhaustiveSpec
 import Katari.GoldenSpec qualified as GoldenSpec
-import Katari.PropertySpec qualified as PropertySpec
 import Katari.IRSpec qualified as IRSpec
 import Katari.IdentifierSpec qualified as IdentifierSpec
 import Katari.LoweringSpec qualified as LoweringSpec
 import Katari.ParserSpec qualified as ParserSpec
+import Katari.PropertySpec qualified as PropertySpec
 import Katari.Query.CompletionSpec qualified as CompletionSpec
 import Katari.QuerySpec qualified as QuerySpec
 import Katari.SchemaSpec qualified as SchemaSpec
 import Katari.ScopeIndexSpec qualified as ScopeIndexSpec
-import Katari.ExhaustiveSpec qualified as ExhaustiveSpec
 import Katari.SolverSpec qualified as SolverSpec
 import Katari.ZonkerSpec qualified as ZonkerSpec
 import Test.Hspec

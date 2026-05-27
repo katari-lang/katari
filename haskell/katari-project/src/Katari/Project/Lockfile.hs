@@ -42,15 +42,15 @@ where
 
 import Control.Exception (IOException, try)
 import Data.Bifunctor (first)
-import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
+import Data.Map.Strict qualified as Map
 import Data.Text (Text)
-import qualified Data.Text as Text
-import qualified Data.Text.IO as TextIO
+import Data.Text qualified as Text
+import Data.Text.IO qualified as TextIO
 import Katari.Project.Toml (extractNestedTables)
-import qualified Toml
 import Toml (TomlCodec, (.=))
-import qualified Validation
+import Toml qualified
+import Validation qualified
 
 -- | Conventional filename, sibling to @katari.toml@.
 lockfileFilename :: FilePath

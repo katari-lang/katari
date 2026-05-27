@@ -12,11 +12,11 @@ import Control.Monad.IO.Class (liftIO)
 import Katari.Compile (CompileResult (..))
 import Katari.LSP.Convert (katariSpanToLspLocation, lspPositionToKatari)
 import Katari.LSP.State (ServerState, lookupCompileResult, workspaceFileTexts)
-import qualified Katari.Query as Query
-import qualified Language.LSP.Protocol.Lens as L
-import qualified Language.LSP.Protocol.Message as LSP
-import qualified Language.LSP.Protocol.Types as LSP
-import qualified Language.LSP.Server as LSP
+import Katari.Query qualified as Query
+import Language.LSP.Protocol.Lens qualified as L
+import Language.LSP.Protocol.Message qualified as LSP
+import Language.LSP.Protocol.Types qualified as LSP
+import Language.LSP.Server qualified as LSP
 
 definitionHandler :: ServerState -> LSP.Handlers (LSP.LspM ())
 definitionHandler st =

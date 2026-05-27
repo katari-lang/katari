@@ -6,21 +6,22 @@ module Katari.Cli.Status
   ( Options (..),
     optionsParser,
     run,
+
     -- * Reused by Cli.Ls / Cli.Run
     renderRunDetailed,
     renderResultPreview,
   )
 where
 
-import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.Encode.Pretty as AesonPretty
-import qualified Data.ByteString.Lazy as LBS
-import qualified Data.ByteString.Lazy.Char8 as LC8
+import Data.Aeson qualified as Aeson
+import Data.Aeson.Encode.Pretty qualified as AesonPretty
+import Data.ByteString.Lazy qualified as LBS
+import Data.ByteString.Lazy.Char8 qualified as LC8
 import Data.Text (Text)
-import qualified Data.Text as Text
+import Data.Text qualified as Text
 import Data.Text.Encoding (decodeUtf8)
-import qualified Katari.Api.Client as Api
-import qualified Katari.Api.Types as Api
+import Katari.Api.Client qualified as Api
+import Katari.Api.Types qualified as Api
 import Katari.Cli.Common (resolveApiClient)
 import Options.Applicative
 

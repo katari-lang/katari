@@ -1,7 +1,7 @@
 module Katari.Project.SnapshotSpec (spec) where
 
-import qualified Data.Map.Strict as Map
-import qualified Data.Text as Text
+import Data.Map.Strict qualified as Map
+import Data.Text qualified as Text
 import Katari.Project.Snapshot
 import Test.Hspec
 
