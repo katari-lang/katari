@@ -50,27 +50,20 @@ resolveVarToQName moduleName nameRef = case nameRef.resolution of
     | qualifiedName.module_ == moduleName -> [qualifiedName]
   _ -> []
 
--- | Collect intra-module dependencies referenced anywhere in a
--- declaration: body expressions, type annotations, constructor
--- patterns, and request references.
+-- | Collect intra-module call-graph dependencies referenced in a
+-- declaration. Only 'VariableRef' edges are included (agent A calls
+-- agent B). Type references, constructor references, and request
+-- references are excluded because their types are fully determined by
+-- their declarations (no inference needed), so they cannot form
+-- genuine mutual-recursion cycles with agents.
 declarationDependencies :: Text -> Declaration Identified -> Set QualifiedName
 declarationDependencies moduleName = \case
   DeclarationAgent declaration ->
     collectFromParameterBindings declaration.parameters
-      <> collectFromOptionalType declaration.returnType
-      <> collectFromOptionalRequests declaration.withRequests
       <> collectFromBlock declaration.body
-  DeclarationRequest declaration ->
-    collectFromParameterBindings declaration.parameters
-      <> collectFromSyntacticType declaration.returnType
-  DeclarationExternalAgent declaration ->
-    collectFromParameterBindings declaration.parameters
-      <> collectFromSyntacticType declaration.returnType
-      <> collectFromRequests declaration.withRequests
-  DeclarationPrimAgent declaration ->
-    collectFromParameterBindings declaration.parameters
-      <> collectFromSyntacticType declaration.returnType
-      <> collectFromRequests declaration.withRequests
+  DeclarationRequest _ -> Set.empty
+  DeclarationExternalAgent _ -> Set.empty
+  DeclarationPrimAgent _ -> Set.empty
   DeclarationData _ -> Set.empty
   DeclarationTypeSynonym _ -> Set.empty
   DeclarationImport _ -> Set.empty
@@ -85,50 +78,6 @@ declarationDependencies moduleName = \case
         | isLocal qualifiedName -> Set.singleton qualifiedName
       _ -> Set.empty
 
-    collectFromConstructorRef :: NameRef Identified ConstructorRef -> Set QualifiedName
-    collectFromConstructorRef nameRef = case nameRef.resolution of
-      Just qualifiedName
-        | isLocal qualifiedName -> Set.singleton qualifiedName
-      _ -> Set.empty
-
-    collectFromTypeRef :: NameRef Identified TypeRef -> Set QualifiedName
-    collectFromTypeRef nameRef = case nameRef.resolution of
-      Just qualifiedName
-        | isLocal qualifiedName -> Set.singleton qualifiedName
-      _ -> Set.empty
-
-    collectFromSyntacticType :: SyntacticType Identified -> Set QualifiedName
-    collectFromSyntacticType = \case
-      TypePrimitive _ -> Set.empty
-      TypeName TypeNameNode {name} -> collectFromTypeRef name
-      TypeQualified QualifiedTypeNode {target} -> collectFromTypeRef target
-      TypeFunction FunctionTypeNode {parameterTypes, returnType, withRequests} ->
-        Set.unions (map (collectFromSyntacticType . snd) parameterTypes)
-          <> collectFromSyntacticType returnType
-          <> collectFromRequests withRequests
-      TypeArray ArrayTypeNode {elementType} -> collectFromSyntacticType elementType
-      TypeTuple TupleTypeNode {elementTypes} -> Set.unions (map collectFromSyntacticType elementTypes)
-      TypeUnion TypeUnionNode {branches} -> Set.unions (map collectFromSyntacticType branches)
-      TypeLiteral _ -> Set.empty
-      TypeNever _ -> Set.empty
-      TypeUnknown _ -> Set.empty
-      TypeFunctionAny _ -> Set.empty
-      TypeRecord RecordTypeNode {valueType} -> collectFromSyntacticType valueType
-
-    collectFromOptionalType :: Maybe (SyntacticType Identified) -> Set QualifiedName
-    collectFromOptionalType = maybe Set.empty collectFromSyntacticType
-
-    collectFromRequests :: [SyntacticRequest Identified] -> Set QualifiedName
-    collectFromRequests = Set.unions . map collectFromRequest
-
-    collectFromOptionalRequests :: Maybe [SyntacticRequest Identified] -> Set QualifiedName
-    collectFromOptionalRequests = maybe Set.empty collectFromRequests
-
-    collectFromRequest :: SyntacticRequest Identified -> Set QualifiedName
-    collectFromRequest SyntacticRequest {name} = case name.resolution of
-      Just qualifiedName | isLocal qualifiedName -> Set.singleton qualifiedName
-      _ -> Set.empty
-
     collectFromBlock :: Block Identified -> Set QualifiedName
     collectFromBlock Block {statements, returnExpression} =
       Set.unions (map collectFromStatement statements)
@@ -140,8 +89,6 @@ declarationDependencies moduleName = \case
         collectFromPattern statement.pattern <> collectFromExpression statement.value
       StatementAgent statement ->
         collectFromParameterBindings statement.parameters
-          <> collectFromOptionalType statement.returnType
-          <> collectFromOptionalRequests statement.withRequests
           <> collectFromBlock statement.body
       StatementReturn statement -> collectFromExpression statement.value
       StatementExpression expression -> collectFromExpression expression
@@ -181,7 +128,7 @@ declarationDependencies moduleName = \case
       ExpressionBlock expression -> collectFromBlock expression.block
       ExpressionHandle expression ->
         Set.unions (map collectFromStateVariable expression.stateVariables)
-          <> Set.unions (map collectFromRequestHandler expression.handlers)
+          <> Set.unions (map collectFromHandlerBody expression.handlers)
           <> maybe Set.empty collectFromThenClause expression.thenClause
           <> collectFromBlock expression.body
       ExpressionParTuple expression -> Set.unions (map collectFromExpression expression.elements)
@@ -197,12 +144,11 @@ declarationDependencies moduleName = \case
 
     collectFromPattern :: Pattern Identified -> Set QualifiedName
     collectFromPattern = \case
-      PatternVariable VariablePattern {typeAnnotation} -> collectFromOptionalType typeAnnotation
+      PatternVariable _ -> Set.empty
       PatternQualifiedConstructor pattern' ->
-        collectFromConstructorRef pattern'.constructorName
-          <> Set.unions (map (collectFromPattern . snd) pattern'.parameters)
+        Set.unions (map (collectFromPattern . snd) pattern'.parameters)
       PatternTuple pattern' -> Set.unions (map collectFromPattern pattern'.elements)
-      PatternWildcard WildcardPattern {typeAnnotation} -> collectFromOptionalType typeAnnotation
+      PatternWildcard _ -> Set.empty
       PatternLiteral _ -> Set.empty
       PatternType pattern' -> collectFromPattern pattern'.inner
       PatternRecord pattern' -> Set.unions (map (collectFromPattern . snd) pattern'.entries)
@@ -217,14 +163,11 @@ declarationDependencies moduleName = \case
     collectFromModifier modifier = collectFromExpression modifier.value
 
     collectFromStateVariable :: StateVariableBinding Identified -> Set QualifiedName
-    collectFromStateVariable binding =
-      collectFromOptionalType binding.typeAnnotation
-        <> collectFromExpression binding.initial
+    collectFromStateVariable binding = collectFromExpression binding.initial
 
-    collectFromRequestHandler :: RequestHandler Identified -> Set QualifiedName
-    collectFromRequestHandler handler =
+    collectFromHandlerBody :: RequestHandler Identified -> Set QualifiedName
+    collectFromHandlerBody handler =
       collectFromParameterBindings handler.parameters
-        <> collectFromOptionalType handler.returnType
         <> collectFromBlock handler.body
 
     collectFromThenClause :: (Maybe (Pattern Identified), Block Identified) -> Set QualifiedName
@@ -237,9 +180,7 @@ declarationDependencies moduleName = \case
       collectFromPattern binding.pattern <> collectFromExpression binding.source
 
     collectFromForVarBinding :: ForVarBinding Identified -> Set QualifiedName
-    collectFromForVarBinding binding =
-      collectFromOptionalType binding.typeAnnotation
-        <> collectFromExpression binding.initial
+    collectFromForVarBinding binding = collectFromExpression binding.initial
 
     collectFromCaseArm :: CaseArm Identified -> Set QualifiedName
     collectFromCaseArm arm =

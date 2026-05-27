@@ -62,6 +62,7 @@ import Katari.AST
     ExternalAgentDeclaration (..),
     Module (..),
     NameRef (..),
+    NameRefKind (VariableRef),
     Phase (Identified, Parsed, Zonked),
     PrimAgentDeclaration (..),
     RequestDeclaration (..),
@@ -447,11 +448,30 @@ recompileModule ::
   TypecheckAccumulator
 recompileModule idResult solverTypeNames solverReqNames moduleId moduleName sourceHashes accumulator =
   let moduleAST = Map.lookup moduleId idResult.moduleASTs
-      sccs = case moduleAST of
+      -- Non-agent declarations (data, request, external, prim) have fully
+      -- explicit type signatures and no outgoing call edges, so they can
+      -- be processed in a single batch before the agent SCC loop. This
+      -- guarantees their resolved types are available as known facts when
+      -- agents that reference them are typechecked.
+      nonAgentQualifiedNames = case moduleAST of
+        Just ast -> collectNonAgentQualifiedNames moduleName ast
+        Nothing -> Set.empty
+      agentSCCsRaw = case moduleAST of
         Just ast -> agentSCCs moduleName ast
         Nothing -> []
-      totalSCCs = length sccs
-      indexedSCCs = zip [1 ..] sccs
+      -- Filter out non-agent declarations from the SCC list — they are
+      -- pre-processed above.
+      agentOnlySCCs =
+        [ Set.difference scc nonAgentQualifiedNames
+          | scc <- agentSCCsRaw,
+            let filtered = Set.difference scc nonAgentQualifiedNames,
+            not (Set.null filtered)
+        ]
+      allSCCs =
+        (if Set.null nonAgentQualifiedNames then [] else [nonAgentQualifiedNames])
+          <> agentOnlySCCs
+      totalSCCs = length allSCCs
+      indexedSCCs = zip [1 ..] allSCCs
       typecheckIndexedSCC accum (sccIndex, scc) =
         let logged = accum {accLogs = accum.accLogs <> [CompileLogTypechecking moduleName sccIndex totalSCCs]}
          in typecheckOneSCC idResult solverTypeNames solverReqNames moduleId logged scc
@@ -493,6 +513,32 @@ recompileModule idResult solverTypeNames solverReqNames moduleId moduleName sour
           start = Position {line = 0, column = 0},
           end = Position {line = 0, column = 0}
         }
+
+-- | Collect the 'QualifiedName's of all non-agent declarations in a
+-- module. These are data, request, external-agent, and prim-agent
+-- declarations whose types are fully determined by their explicit
+-- signatures (no inference needed). They are pre-processed as a
+-- single batch before the agent SCC loop.
+collectNonAgentQualifiedNames :: Text -> Module Identified -> Set.Set QualifiedName
+collectNonAgentQualifiedNames moduleName moduleAST =
+  Set.fromList (concatMap extractQualifiedName moduleAST.declarations)
+  where
+    extractQualifiedName :: Declaration Identified -> [QualifiedName]
+    extractQualifiedName = \case
+      DeclarationRequest declaration -> resolveToLocal declaration.name
+      DeclarationExternalAgent declaration -> resolveToLocal declaration.name
+      DeclarationPrimAgent declaration -> resolveToLocal declaration.name
+      DeclarationData declaration -> resolveToLocal declaration.name
+      DeclarationAgent _ -> []
+      DeclarationTypeSynonym _ -> []
+      DeclarationImport _ -> []
+      DeclarationError _ -> []
+
+    resolveToLocal :: NameRef Identified VariableRef -> [QualifiedName]
+    resolveToLocal nameRef = case nameRef.resolution of
+      Just (ResolvedTopLevel qualifiedName)
+        | qualifiedName.module_ == moduleName -> [qualifiedName]
+      _ -> []
 
 moduleOwnedTypeEnvironment ::
   IdentifierResult ->
