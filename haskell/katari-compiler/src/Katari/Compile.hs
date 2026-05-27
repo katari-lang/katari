@@ -26,6 +26,7 @@ module Katari.Compile
     parseSources,
     parsedStdlibModules,
     identifyWithStdlib,
+    generateConstraintsAll,
   )
 where
 
@@ -66,7 +67,7 @@ import Katari.SemanticType (Resolved, SemanticType)
 import Katari.SourceSpan (Position (..), SourceSpan (..))
 import Katari.Stdlib qualified as Stdlib
 import Katari.Typechecker.AgentGraph (agentSCCs)
-import Katari.Typechecker.ConstraintGenerator (generateConstraintsForSCC)
+import Katari.Typechecker.ConstraintGenerator (ConstraintGenResult (..), VariableSupply (..), generateConstraintsForSCC)
 import Katari.Typechecker.ConstraintGenerator qualified as CG
 import Katari.Typechecker.Exhaustive (checkExhaustive)
 import Katari.Typechecker.Exhaustive qualified as Exhaustive
@@ -753,6 +754,11 @@ identifyWithStdlib ::
   (IdentifierResult, [Identifier.IdentifierError])
 identifyWithStdlib userMods =
   runIdentify Stdlib.stdlibModuleNames (Map.union userMods parsedStdlibModules) Map.empty
+
+generateConstraintsAll ::
+  IdentifierResult ->
+  (ConstraintGenResult, [CG.ConstraintError])
+generateConstraintsAll = CG.generateConstraints
 
 -- ===========================================================================
 -- Identifier orchestration

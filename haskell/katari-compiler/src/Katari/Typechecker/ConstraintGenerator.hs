@@ -41,7 +41,6 @@ module Katari.Typechecker.ConstraintGenerator
 
     -- * Entry point
     generateConstraints,
-    generateConstraintsForModule,
     generateConstraintsForSCC,
   )
 where
@@ -513,15 +512,36 @@ elaborateOptionalRequests = traverse elaborateRequestList
 -- Phase A: allocate type vars for every VariableId
 -- ===========================================================================
 
--- | Walk @identifiedVariables@ once and bind each QualifiedName to a fresh
--- type variable. Done before any constraint generation so forward references
--- and mutual recursion just work.
 allocateAllVariables :: IdentifierResult -> CG ()
 allocateAllVariables result = mapM_ allocate (Map.keys result.identifiedVariables)
   where
     allocate qualifiedName = do
       tv <- freshTypeVar
       bindVariable (ResolvedTopLevel qualifiedName) tv
+
+generateConstraints :: IdentifierResult -> (ConstraintGenResult, [ConstraintError])
+generateConstraints result = case runState (runReaderT action context) initialState of
+  (modulesPair, finalState) ->
+    ( ConstraintGenResult
+        { constrainedModules = Map.fromList modulesPair,
+          typeEnvironment = finalState.stateTypeEnvironment,
+          constraints = finalState.stateConstraints,
+          variableSupply =
+            VariableSupply
+              { typeVarSupply = finalState.stateNextTypeVariableId,
+                requestVarSupply = finalState.stateNextRequestVariableId
+              }
+        },
+      finalState.stateErrors
+    )
+  where
+    context = buildContext result
+    action = do
+      allocateAllVariables result
+      mapM walkOne (Map.toList result.moduleASTs)
+    walkOne (mid, mod') = do
+      mod'' <- walkModule mod'
+      pure (mid, mod'')
 
 -- ===========================================================================
 -- Phase B: walk modules, declarations, statements, expressions, patterns
@@ -1888,74 +1908,6 @@ freshReturnTypeVar = \case
 -- ===========================================================================
 -- Entry point
 -- ===========================================================================
-
--- | Run constraint generation over an 'IdentifierResult' (which may contain
--- multiple modules). All variables across all modules are allocated a type
--- variable in Phase A, then declarations are walked in Phase B to emit
--- constraints and produce the @Constrained@-phase ASTs.
-generateConstraints :: IdentifierResult -> (ConstraintGenResult, [ConstraintError])
-generateConstraints result = case runState (runReaderT action context) initialState of
-  (modulesPair, finalState) ->
-    ( ConstraintGenResult
-        { constrainedModules = Map.fromList modulesPair,
-          typeEnvironment = finalState.stateTypeEnvironment,
-          constraints = finalState.stateConstraints,
-          variableSupply =
-            VariableSupply
-              { typeVarSupply = finalState.stateNextTypeVariableId,
-                requestVarSupply = finalState.stateNextRequestVariableId
-              }
-        },
-      finalState.stateErrors
-    )
-  where
-    context = buildContext result
-    action = do
-      allocateAllVariables result
-      mapM walkOne (Map.toList result.moduleASTs)
-    walkOne (mid, mod') = do
-      mod'' <- walkModule mod'
-      pure (mid, mod'')
-
--- | Run constraint generation for a single module. Variables whose
--- 'QualifiedName' appears in @importedTypes@ are pre-bound to the
--- imported resolved type (lifted to 'Unresolved') instead of
--- allocating a fresh type variable. Only the specified module's AST is
--- walked; the returned 'ConstraintGenResult' contains a single entry
--- in 'constrainedModules'.
-generateConstraintsForModule ::
-  Map QualifiedName (SemanticType Resolved) ->
-  IdentifierResult ->
-  Text ->
-  (ConstraintGenResult, [ConstraintError])
-generateConstraintsForModule importedTypes result targetModuleName =
-  case runState (runReaderT action context) initialState of
-    (constrainedModule, finalState) ->
-      ( ConstraintGenResult
-          { constrainedModules = Map.singleton targetModuleName constrainedModule,
-            typeEnvironment = finalState.stateTypeEnvironment,
-            constraints = finalState.stateConstraints,
-            variableSupply =
-              VariableSupply
-                { typeVarSupply = finalState.stateNextTypeVariableId,
-                  requestVarSupply = finalState.stateNextRequestVariableId
-                }
-          },
-        finalState.stateErrors
-      )
-  where
-    context = buildContext result
-    action = do
-      allocateVariablesForModule importedTypes targetModuleName result
-      case Map.lookup targetModuleName result.moduleASTs of
-        Just moduleAST -> walkModule moduleAST
-        Nothing -> pure Module {declarations = [], sourceSpan = emptySrcSpan}
-    emptySrcSpan =
-      SrcSpan
-        { filePath = "",
-          start = Position {line = 0, column = 0},
-          end = Position {line = 0, column = 0}
-        }
 
 -- | Run constraint generation for a single SCC within a module.
 -- Variables whose 'QualifiedName' appears in @knownTypes@ (imported

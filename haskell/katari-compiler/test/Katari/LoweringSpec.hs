@@ -18,7 +18,7 @@ import Katari.Lexer qualified as Lexer
 import Katari.Lowering (LoweringError (..), lowerModule, mergeModuleLowerings)
 import Katari.Parser qualified as Parser
 import Katari.SemanticType (RequestVariableId (..), TypeVariableId (..))
-import Katari.Typechecker.ConstraintGenerator (ConstraintGenResult (..), VariableSupply (..), generateConstraints)
+import Katari.Typechecker.ConstraintGenerator (ConstraintGenResult (..), VariableSupply (..))
 import Katari.Typechecker.NormalizedType (NormalizedType (..))
 import Katari.Typechecker.Solver (SolverResult (..))
 import Katari.Typechecker.Zonker (ZonkResult (..), zonk)
@@ -38,7 +38,7 @@ lowerSource src =
         (_ : _) -> fail ("parse failure: " ++ show parseErrors)
         [] -> case Compile.identifyWithStdlib (Map.singleton "main" parsed) of
           (idResult, []) -> do
-            let (cg, _) = generateConstraints idResult
+            let (cg, _) = Compile.generateConstraintsAll idResult
                 solver =
                   SolverResult
                     { typeSubstitution =

@@ -21,7 +21,6 @@ import Katari.SemanticType
 import Katari.Typechecker.ConstraintGenerator
   ( ConstraintGenResult (..),
     VariableSupply (..),
-    generateConstraints,
   )
 import Katari.Typechecker.Identifier
   ( IdentifierResult (..),
@@ -62,7 +61,7 @@ pipeline src =
    in case parseErrors of
         (_ : _) -> fail ("parse failure: " ++ show parseErrors)
         [] -> case Compile.identifyWithStdlib (Map.singleton "main" parsed) of
-          (idResult, []) -> let (cg, _) = generateConstraints idResult in pure (idResult, cg)
+          (idResult, []) -> let (cg, _) = Compile.generateConstraintsAll idResult in pure (idResult, cg)
           (_, errs) -> fail ("identify failure: " ++ show errs)
 
 -- | Build a 'SolverResult' that satisfies the Solver totality contract for the

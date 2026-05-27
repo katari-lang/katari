@@ -16,7 +16,7 @@ import Katari.Compile qualified as Compile
 import Katari.Diagnostic (Diagnostic (..))
 import Katari.Lexer qualified as Lexer
 import Katari.Parser qualified as Parser
-import Katari.Typechecker.ConstraintGenerator (generateConstraints)
+import Katari.Compile qualified as Compile
 import Katari.Typechecker.Exhaustive (checkExhaustive, toDiagnostic)
 import Katari.Typechecker.Solver (solve)
 import Katari.Typechecker.Zonker (zonk)
@@ -36,7 +36,7 @@ runExhaustive source = do
     (_ : _) -> fail ("parse failure: " ++ show parseErrors)
     [] -> case Compile.identifyWithStdlib (Map.singleton "main" parsed) of
       (idResult, []) -> do
-        let (cgResult, _) = generateConstraints idResult
+        let (cgResult, _) = Compile.generateConstraintsAll idResult
             (solverResult, _) = solve cgResult
             (zonkResult, _) = zonk idResult cgResult solverResult
             exhaustiveErrors = checkExhaustive idResult zonkResult
