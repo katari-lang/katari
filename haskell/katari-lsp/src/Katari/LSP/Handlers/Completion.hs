@@ -184,7 +184,7 @@ collectUsedLabels inside =
         (lhs, _) ->
           let trimmed = Text.strip lhs
               ident = Text.takeWhile isIdentChar trimmed
-           in if Text.null ident || ident /= trimmed then [] else [ident]
+           in ([ident | not (Text.null ident || ident /= trimmed)])
 
 -- | Split @t@ on @sep@ at outer-level (= ignore commas inside nested
 -- parens / brackets). Used to safely tokenise a partial argument
@@ -211,9 +211,7 @@ isIdentChar c = isAlphaNum c || c == '_'
 currentLine :: Vector Text -> LSP.Position -> Text
 currentLine lineVec (LSP.Position lineLsp _) =
   let ix = fromIntegral lineLsp
-   in case lineVec Vector.!? ix of
-        Just line -> line
-        Nothing -> ""
+   in fromMaybe "" (lineVec Vector.!? ix)
 
 -- ---------------------------------------------------------------------------
 -- LSP item construction

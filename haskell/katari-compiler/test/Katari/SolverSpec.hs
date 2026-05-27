@@ -61,7 +61,7 @@ runSolve source =
 -- for local variables (parameters, let bindings, match arm bindings).
 variableResolutionOf :: Text -> IdentifierResult -> Maybe VariableResolution
 variableResolutionOf name result =
-  case (ResolvedTopLevel . fst) <$> find ((== name) . (.variableName) . snd) (Map.toList result.identifiedVariables) of
+  case ResolvedTopLevel . fst <$> find ((== name) . (.variableName) . snd) (Map.toList result.identifiedVariables) of
     Just resolution -> Just resolution
     Nothing ->
       let allFrames = concatMap snd (Map.toList result.scopeIndex.framesByFile)

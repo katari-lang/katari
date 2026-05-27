@@ -110,7 +110,7 @@ isUndefName (ErrorUndefinedName _ _) = True
 isUndefName _ = False
 
 isUndefQual :: IdentifierError -> Bool
-isUndefQual (ErrorUndefinedQualified _ _ _) = True
+isUndefQual (ErrorUndefinedQualified {}) = True
 isUndefQual _ = False
 
 isNotAType :: IdentifierError -> Bool
@@ -118,7 +118,7 @@ isNotAType (ErrorNotAType _ _) = True
 isNotAType _ = False
 
 isDup :: IdentifierError -> Bool
-isDup (ErrorDuplicateName _ _ _) = True
+isDup (ErrorDuplicateName {}) = True
 isDup _ = False
 
 isShadow :: IdentifierError -> Bool
@@ -138,7 +138,7 @@ isMissingMod (ErrorImportModuleNotFound _ _) = True
 isMissingMod _ = False
 
 isMissingName :: IdentifierError -> Bool
-isMissingName (ErrorImportNameNotFound _ _ _) = True
+isMissingName (ErrorImportNameNotFound {}) = True
 isMissingName _ = False
 
 isImportCycle :: IdentifierError -> Bool
@@ -814,9 +814,4 @@ unresolvedMetadata = describe "unresolved metadata" $ do
 -- Avoid unused-import warnings.
 _unused :: ()
 _unused =
-  const
-    ()
-    ( isJust,
-      isNothing :: Maybe Int -> Bool,
-      Map.size :: Map Int Int -> Int
-    )
+  ()

@@ -28,7 +28,7 @@ simpleToJson :: SemanticType Resolved -> JsonSchema
 simpleToJson = toJsonSchema Map.empty Set.empty
 
 shouldHaveCore :: SemanticType Resolved -> SchemaCore -> Expectation
-shouldHaveCore t expected = (simpleToJson t).core `shouldBe` expected
+shouldHaveCore t expected = simpleToJson t.core `shouldBe` expected
 
 findEntry :: Text -> [SchemaEntry] -> Maybe SchemaEntry
 findEntry n = find (\e -> e.name == n)
@@ -61,7 +61,7 @@ toJsonSchemaSpec = describe "toJsonSchema (SemanticType -> JsonSchema)" $ do
     SemanticTypeLiteralBoolean True `shouldHaveCore` SchemaCoreConst {value = Bool True}
 
   it "arrays nest the element schema under 'items'" $ do
-    let core = (simpleToJson (SemanticTypeArray SemanticTypeInteger)).core
+    let core = simpleToJson (SemanticTypeArray SemanticTypeInteger).core
     case core of
       SchemaCoreArray {items} ->
         items.core `shouldBe` SchemaCoreInteger {minimum = Nothing, maximum = Nothing}
@@ -69,7 +69,7 @@ toJsonSchemaSpec = describe "toJsonSchema (SemanticType -> JsonSchema)" $ do
 
   it "tuples become SchemaCoreTuple with prefixItems" $ do
     let t = SemanticTypeTuple [SemanticTypeBoolean, SemanticTypeInteger]
-        core = (simpleToJson t).core
+        core = simpleToJson t.core
     case core of
       SchemaCoreTuple {prefixItems} ->
         map (.core) prefixItems
@@ -83,7 +83,7 @@ toJsonSchemaSpec = describe "toJsonSchema (SemanticType -> JsonSchema)" $ do
               [ ("name", SemanticTypeString),
                 ("age", SemanticTypeInteger)
               ]
-    case (simpleToJson t).core of
+    case simpleToJson t.core of
       SchemaCoreObject {properties, required, additionalProperties} -> do
         Map.keysSet properties `shouldBe` Set.fromList ["age", "name"]
         required `shouldBe` Set.fromList ["age", "name"]
@@ -96,7 +96,7 @@ toJsonSchemaSpec = describe "toJsonSchema (SemanticType -> JsonSchema)" $ do
             Map.empty
             SemanticTypeNull
             (SemanticRequest Set.empty)
-    case (simpleToJson t).core of
+    case simpleToJson t.core of
       SchemaCoreObject {properties, required, additionalProperties} -> do
         Map.keys properties `shouldBe` ["$agent"]
         required `shouldBe` Set.singleton "$agent"
@@ -112,7 +112,7 @@ unionCompactionSpec = describe "union compaction" $ do
               SemanticTypeLiteralString "green",
               SemanticTypeLiteralString "blue"
             ]
-    case (simpleToJson t).core of
+    case simpleToJson t.core of
       SchemaCoreString {schemaEnum} -> schemaEnum `shouldBe` ["red", "green", "blue"]
       other -> expectationFailure ("expected SchemaCoreString enum, got: " <> show other)
 
@@ -122,7 +122,7 @@ unionCompactionSpec = describe "union compaction" $ do
             [ SemanticTypeLiteralString "ok",
               SemanticTypeNull
             ]
-    case (simpleToJson t).core of
+    case simpleToJson t.core of
       SchemaCoreUnion {anyOf} -> length anyOf `shouldBe` 2
       other -> expectationFailure ("expected SchemaCoreUnion, got: " <> show other)
 

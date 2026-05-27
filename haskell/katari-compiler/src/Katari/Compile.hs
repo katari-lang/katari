@@ -1,34 +1,15 @@
 -- | Pure orchestration entry point for the Katari compiler.
 --
--- Embedders (@katari-project@, @katari-lsp@, the playground, test
--- harnesses) call 'compile' with an in-memory map of source texts and
--- receive an 'IRModule' + @[SchemaEntry]@ + a unified 'Diagnostic' stream.
--- This module performs **no** I\/O: all file system / @katari.toml@
--- handling lives in @katari-project@.
---
--- Pipeline:
+-- Each phase exposes a per-module function; this module calls them in
+-- the right order and manages the incremental cache.
 --
 -- @
--- parseSources
---   → identify         -- emits import-cycle (K0110) and missing-import (K0107)
---                      --   diagnostics in addition to name-resolution errors
---   → for each module in topological order:
---       agentSCCs              -- split declarations into SCC groups
---       for each SCC in dependency order:
---         generateConstraintsForSCC  -- per-SCC CG with known types
---         → solve                    -- per-SCC solving
---         → zonk                     -- per-SCC zonking
---         → accumulate resolved types for downstream SCCs
---       assembleZonkedModule   -- merge SCC results into full Module Zonked
---   → lower            -- → IRModule (pure, whole-program)
---   → buildSchemas     -- → [SchemaEntry] (independent of lower; reads ZonkResult)
+-- parseSources (parallel, cache-miss only)
+--   → identify (per module, topological order)
+--   → typecheck (per module, SCC per module, parallel within topo level)
+--   → lower (per module, fully parallel)
+--   → schema (per module, fully parallel)
 -- @
---
--- 'compile' never aborts on errors: each phase produces diagnostics that
--- are merged into 'CompileResult.diagnostics'. If any error-severity
--- diagnostic is present, downstream artefacts ('irModule',
--- 'schemaEntries') are returned as 'Nothing' to make the failure mode
--- explicit at the type level.
 module Katari.Compile
   ( -- * Inputs / outputs
     ModuleName,
@@ -61,6 +42,7 @@ import Katari.AST
     DataDeclaration (..),
     Declaration (..),
     ExternalAgentDeclaration (..),
+    ImportDeclaration (..),
     Module (..),
     NameRef (..),
     NameRefKind (VariableRef),
@@ -72,25 +54,35 @@ import Katari.AST
     retagSyntacticType,
   )
 import Katari.Diagnostic (Diagnostic, hasErrors)
+import Katari.IR qualified
 import Katari.Id (QualifiedName (..), VariableResolution (..))
-import Katari.SourceSpan (Position (..), SourceSpan (..))
-import Katari.IR (IRModule)
-import Katari.Lexer as Lexer
-import Katari.Lowering (lowerProgram)
+import Katari.Lexer qualified as Lexer
+import Katari.Lowering (ModuleLoweringResult (..), lowerModule, mergeModuleLowerings)
 import Katari.Lowering qualified as Lowering
 import Katari.Parser qualified as Parser
-import Katari.Schema (SchemaEntry, buildSchemas)
+import Katari.Schema (SchemaEntry (..), buildSchemas)
 import Katari.SemanticType (Resolved, SemanticType)
+import Katari.SourceSpan (Position (..), SourceSpan (..))
 import Katari.Stdlib qualified as Stdlib
-import Katari.Typechecker.ModuleInterface (ModuleInterface (..), extractModuleInterface)
 import Katari.Typechecker.AgentGraph (agentSCCs)
 import Katari.Typechecker.ConstraintGenerator (generateConstraintsForSCC)
 import Katari.Typechecker.ConstraintGenerator qualified as CG
 import Katari.Typechecker.Exhaustive (checkExhaustive)
 import Katari.Typechecker.Exhaustive qualified as Exhaustive
-import Katari.Typechecker.Identifier (IdentifierResult (..), identify)
+import Katari.Typechecker.Identifier
+  ( ConstructorData (..),
+    IdentifierResult (..),
+    ModuleData (..),
+    RequestData (..),
+    SymbolEntry (..),
+    TypeData (..),
+    VariableData (..),
+    identify,
+  )
 import Katari.Typechecker.Identifier qualified as Identifier
 import Katari.Typechecker.ImportGraph (topologicalSort)
+import Katari.Typechecker.ModuleInterface (ModuleInterface (..), extractModuleInterface)
+import Katari.Typechecker.ScopeIndex (ScopeFrame (..), ScopeIndex (..), emptyScopeIndex)
 import Katari.Typechecker.Solver (SolverResult (..), solve)
 import Katari.Typechecker.Solver qualified as Solver
 import Katari.Typechecker.Zonker (ZonkResult (..), zonk)
@@ -100,68 +92,47 @@ import Katari.Typechecker.Zonker qualified as Zonker
 -- Input / output
 -- ===========================================================================
 
--- | Dot-separated module path ("foo.bar.baz"). The compiler treats this
--- as an opaque key; the file-system mapping is the embedder's
--- responsibility.
 type ModuleName = Text
 
--- | One entry per source file.
--- The compiler assumes no relationship whatsoever between 'filePath' and
--- 'moduleName'. 'filePath' is the real file path used by diagnostic spans
--- and the Query layer.
 data SourceEntry = SourceEntry
   { filePath :: FilePath,
     sourceText :: Text
   }
   deriving (Show)
 
--- | Input bundle for 'compile'. Carries the full set of modules the
--- compiler should treat as in scope. The compiler is package-agnostic:
--- merging packages, resolving dependencies, and locating @.ktr@ files
--- happens upstream (in @katari-project@), and the result is handed to
--- the compiler as a flat 'Map' so the entire pipeline stays pure.
 data CompileInput = CompileInput
-  { -- | Module name → source entry. The map is treated as the complete
-    -- world: any module not present here is "missing" from the
-    -- compiler's point of view.
-    --
-    -- Module names are derived from file paths by the embedder (= the
-    -- relative path under the package's @src/@ root, dot-joined). By
-    -- convention every file in a package @P@ lives under @src\/P.ktr@
-    -- or @src\/P\/...@, so module keys are naturally
-    -- package-qualified (e.g. @P@, @P.helpers@). The compiler itself
-    -- is package-agnostic and just does name lookup; the embedder
-    -- (= @katari-project@) is responsible for assembling sources
-    -- from all reachable packages.
-    sources :: Map ModuleName SourceEntry,
-    -- | Optional per-module compilation cache from a previous
-    -- 'compile' invocation. Pass 'Map.empty' for a fresh compile.
-    -- When supplied, modules whose source hash matches and whose
-    -- upstream interfaces are unchanged are skipped (their cached
-    -- type environment and diagnostics are reused). The cache is
-    -- keyed by module name.
+  { sources :: Map ModuleName SourceEntry,
     cache :: Map ModuleName ModuleCache
   }
   deriving (Show)
 
--- | Per-module compilation cache entry. Stores everything needed to
--- skip recompilation of an unchanged module: the source hash for
--- staleness detection, the module interface for downstream
--- invalidation, and the typechecking products (identified AST, zonked
--- module, type environment, diagnostics) that would otherwise be
--- recomputed.
+-- | Per-module compilation cache. Stores only the outputs needed to
+-- skip ALL compilation phases on cache hit.
 data ModuleCache = ModuleCache
   { cacheSourceHash :: Int,
+    -- Identifier output (needed for downstream modules' identify)
+    cacheIdentifierVariables :: Map QualifiedName VariableData,
+    cacheIdentifierTypes :: Map QualifiedName TypeData,
+    cacheIdentifierRequests :: Map QualifiedName RequestData,
+    cacheIdentifierConstructors :: Map QualifiedName ConstructorData,
+    cacheModuleData :: ModuleData,
+    cacheModuleExports :: Map Text SymbolEntry,
+    cacheModuleTopLevel :: Map Text SymbolEntry,
+    cacheScopeFrames :: [(SourceSpan, Map Text SymbolEntry)],
+    cacheIdentifiedAST :: Module Identified,
+    -- Typecheck output
     cacheInterface :: ModuleInterface,
-    cacheIdentified :: Module Identified,
     cacheZonkedModule :: Module Zonked,
     cacheZonkedTypeEnv :: Map VariableResolution (SemanticType Resolved),
+    -- IR output
+    cacheLoweringResult :: ModuleLoweringResult,
+    -- Schema output
+    cacheSchemaEntries :: [SchemaEntry],
+    -- Diagnostics
     cacheDiagnostics :: [Diagnostic]
   }
   deriving (Show)
 
--- | Structured progress log emitted at each phase boundary. Callers
--- (CLI, LSP, playground) can render these to show compile progress.
 data CompileLog where
   CompileLogParsing :: CompileLog
   CompileLogIdentifying :: CompileLog
@@ -171,40 +142,14 @@ data CompileLog where
   CompileLogComplete :: CompileLog
   deriving (Show)
 
--- | Output of 'compile'. The 'diagnostics' field is the single source of
--- truth for success / failure; the @Maybe@-wrapped artefacts ('irModule',
--- 'schemaEntries') are convenience hints that mirror @not (hasErrors
--- diagnostics)@. The non-@Maybe@ intermediate-phase results
--- ('identifierResult', 'solverResult', 'zonkResult') are always returned
--- so LSP / CLI tooling can serve partial information (hover, completion,
--- agent listing) even when the program fails to compile end-to-end.
 data CompileResult = CompileResult
-  { -- | The lowered IR. 'Nothing' if any error-severity diagnostic was
-    -- raised before lowering succeeded.
-    irModule :: Maybe IRModule,
-    -- | API-surface schema entries for AI tool calling and runtime validation.
-    -- 'Nothing' under the same condition as 'irModule'.
+  { irModule :: Maybe Katari.IR.IRModule,
     schemaEntries :: Maybe [SchemaEntry],
-    -- | Unified diagnostic stream, ordered roughly by phase
-    -- (parse → identify → constrain → solve → zonk → lower).
     diagnostics :: [Diagnostic],
-    -- | Name resolution result. Always returned so LSP / CLI can list
-    -- agents, detect unused declarations, and perform qualified-name
-    -- lookup without re-running the compiler.
     identifierResult :: IdentifierResult,
-    -- | Solver output for LSP type-on-hover. Always returned (even when
-    -- diagnostics are present) so the editor can show partial results.
     solverResult :: SolverResult,
-    -- | Zonker output for LSP type-on-hover. Always returned.
     zonkResult :: ZonkResult,
-    -- | Structured compile log, one entry per phase boundary. Purely
-    -- additive: callers may ignore this field. Useful for CLI / LSP
-    -- progress indicators.
     compileLogs :: [CompileLog],
-    -- | Updated per-module cache. Feed this back as
-    -- 'CompileInput.cache' on the next invocation to enable
-    -- incremental compilation. Keyed by module name (same namespace
-    -- as 'CompileInput.sources').
     updatedCache :: Map ModuleName ModuleCache
   }
 
@@ -212,23 +157,6 @@ data CompileResult = CompileResult
 -- Top-level entry
 -- ===========================================================================
 
--- | Compile a set of in-memory sources to IR + schema. Pure (no I\/O).
---
--- The result's @diagnostics@ list is the single source of truth for
--- failure: callers should branch on @hasErrors diagnostics@ rather than
--- on the @Maybe@ payloads.
---
--- Example:
---
--- @
--- import Data.Map.Strict qualified as Map
---
--- let src    = "agent hello() -> string { return \\"hello\\" }"
---     input  = CompileInput { sources = Map.singleton "main" (SourceEntry "main.ktr" src), cache = Map.empty }
---     result = compile input
--- null (diagnostics result)  -- True  (no errors)
--- isJust (irModule result)   -- True  (IR was emitted)
--- @
 compile :: CompileInput -> CompileResult
 compile input =
   let stdlibEntries =
@@ -236,23 +164,77 @@ compile input =
           (\moduleName src -> SourceEntry ("<stdlib:" <> Text.unpack moduleName <> ">") src)
           Stdlib.stdlibSources
       mergedSources = Map.union input.sources stdlibEntries
-      (parsed, parseDiags) = parseSources mergedSources
-      (idResult, idErrors) = identify Stdlib.stdlibModuleNames parsed
+
+      sourceHashes = Map.map (\entry -> hash entry.sourceText) mergedSources
+
+      -- Cache hit: source hash matches.
+      cacheHitModules =
+        Map.filterWithKey
+          (\moduleName cached ->
+            case Map.lookup moduleName sourceHashes of
+              Just sourceHash -> sourceHash == cached.cacheSourceHash
+              Nothing -> False
+          )
+          input.cache
+      cacheHitNames = Map.keysSet cacheHitModules
+      cacheMissNames = Set.difference (Map.keysSet mergedSources) cacheHitNames
+
+      -- Phase 1: Parse (cache-miss only).
+      cacheMissSources = Map.restrictKeys mergedSources cacheMissNames
+      (freshParsed, parseDiags) = parseSources cacheMissSources
+
+      -- Build skeleton parsed modules from cache (for import graph).
+      cachedSkeletonParsed =
+        Map.map
+          (\cached ->
+            Module
+              { declarations = map DeclarationImport (extractImportDeclarations cached.cacheIdentifiedAST),
+                sourceSpan = cached.cacheModuleData.moduleSourceSpan
+              }
+          )
+          cacheHitModules
+      allParsed = Map.union freshParsed cachedSkeletonParsed
+
+      -- Phase 2: Identify (incremental).
+      cachedIdentifierData =
+        Map.map
+          (\cached ->
+            Identifier.CachedIdentifierData
+              { Identifier.cidVariables = cached.cacheIdentifierVariables,
+                Identifier.cidTypes = cached.cacheIdentifierTypes,
+                Identifier.cidRequests = cached.cacheIdentifierRequests,
+                Identifier.cidConstructors = cached.cacheIdentifierConstructors,
+                Identifier.cidModuleData = cached.cacheModuleData,
+                Identifier.cidExportTable = cached.cacheModuleExports,
+                Identifier.cidTopLevel = cached.cacheModuleTopLevel,
+                Identifier.cidIdentifiedAST = cached.cacheIdentifiedAST,
+                Identifier.cidScopeFrames = cached.cacheScopeFrames,
+                Identifier.cidNextTypeId = 0,
+                Identifier.cidNextRequestId = 0,
+                Identifier.cidNextConstructorId = 0,
+                Identifier.cidNextLocalVarId = 0
+              }
+          )
+          cacheHitModules
+      (idResult, idErrors) =
+        if Map.null cachedIdentifierData
+          then identify Stdlib.stdlibModuleNames allParsed
+          else Identifier.identifyIncremental Stdlib.stdlibModuleNames allParsed cachedIdentifierData
       idDiags = map Identifier.toDiagnostic idErrors
 
-      -- Compute topological levels from parsed modules.
+      -- Compute topological levels.
       stdlibModuleSet =
         Set.fromList
           [ moduleName
-            | moduleName <- Map.keys parsed,
+            | moduleName <- Map.keys allParsed,
               Set.member moduleName Stdlib.stdlibModuleNames
           ]
       primitiveSingleton = Set.singleton "primitive"
       otherStdlibModules = Set.delete "primitive" stdlibModuleSet
       stdlibLevels =
-        (if Set.member "primitive" stdlibModuleSet then [primitiveSingleton] else [])
-          ++ (if Set.null otherStdlibModules then [] else [otherStdlibModules])
-      userModuleMap = Map.filterWithKey (\moduleName _ -> not (Set.member moduleName Stdlib.stdlibModuleNames)) parsed
+        ([primitiveSingleton | Set.member "primitive" stdlibModuleSet])
+          ++ ([otherStdlibModules | not (Set.null otherStdlibModules)])
+      userModuleMap = Map.filterWithKey (\moduleName _ -> not (Set.member moduleName Stdlib.stdlibModuleNames)) allParsed
       userLevels = topologicalSort userModuleMap
       remainingUserNames =
         Set.fromList
@@ -263,26 +245,11 @@ compile input =
       moduleLevels =
         stdlibLevels
           ++ userLevels
-          ++ (if Set.null remainingUserNames then [] else [remainingUserNames])
+          ++ ([remainingUserNames | not (Set.null remainingUserNames)])
 
-      -- Compute per-module source hashes for cache invalidation.
-      sourceHashes =
-        Map.map (\entry -> hash entry.sourceText) mergedSources
-
-      -- Per-module typecheck loop (emits per-module / per-SCC logs).
-      -- Modules at the same topological level are sparked in parallel
-      -- via 'parMap rseq'; inter-level ordering is sequential.
-      (mergedSolverResult, mergedZonkResult, typecheckDiags, typecheckLogs, newCache) =
+      -- Phase 3: Typecheck (per-module, SCC, parallel within level).
+      (mergedSolverResult, mergedZonkResult, typecheckDiags, typecheckLogs, typecheckCache) =
         typecheckModules idResult moduleLevels sourceHashes input.cache
-
-      -- NOTE (speculative lowering): In the current pure pipeline,
-      -- typechecking must complete before lowering because Lowering reads
-      -- ZonkResult (for schema computation inside AgentBlock). The
-      -- pipeline structure is designed so that a future version can
-      -- introduce `par` / `pseq` to evaluate typechecking and a
-      -- schema-free lowering pass concurrently; the schema decoration
-      -- would then be applied as a post-pass once ZonkResult is
-      -- available. For v0.1.0 the sequential structure is sufficient.
 
       exhaustiveDiags = map Exhaustive.toDiagnostic (checkExhaustive idResult mergedZonkResult)
       preLowerDiags =
@@ -290,28 +257,65 @@ compile input =
           <> idDiags
           <> typecheckDiags
           <> exhaustiveDiags
-      -- Only error-level diagnostics suppress IR emission; warnings pass
-      -- through so callers get a usable IR + warnings in the same result.
       shouldLower = not (hasErrors preLowerDiags)
-      (loweredIR, loweringDiags)
+
+      -- Phase 4: Lower (per-module, fully parallel).
+      (loweringResults, loweringDiags)
         | shouldLower =
-            let (eitherIR, errs) = lowerProgram idResult mergedZonkResult
-                structuralDiags = map Lowering.toDiagnostic errs
-             in case eitherIR of
-                  Right ir -> (Just ir, structuralDiags)
-                  Left internalDiag -> (Nothing, structuralDiags <> [internalDiag])
-        | otherwise = (Nothing, [])
-      shouldEmitArtefacts =
-        shouldLower && not (hasErrors loweringDiags)
-      schema = if shouldEmitArtefacts then Just (buildSchemas idResult mergedZonkResult) else Nothing
-      finalIR = if shouldEmitArtefacts then loweredIR else Nothing
+            let cachedResults =
+                  Map.map (.cacheLoweringResult) cacheHitModules
+                freshResults =
+                  Map.fromList
+                    ( parMap rseq
+                        (\(moduleName, moduleAST) ->
+                          let (result, errors) = lowerModule idResult mergedZonkResult moduleName moduleAST
+                           in (moduleName, (result, errors))
+                        )
+                        [ (moduleName, moduleAST)
+                          | (moduleName, moduleAST) <- Map.toList mergedZonkResult.zonkedModules,
+                            Set.member moduleName cacheMissNames
+                        ]
+                    )
+                freshOk =
+                  Map.map (fst) freshResults
+                freshErrors =
+                  concatMap (snd) (Map.elems freshResults)
+                freshDiags = map Lowering.toDiagnostic freshErrors
+                allResults = Map.union cachedResults (Map.mapMaybe eitherToMaybe freshOk)
+             in (allResults, freshDiags)
+        | otherwise = (Map.empty, [])
+
+      shouldEmitArtefacts = shouldLower && not (hasErrors loweringDiags)
+
+      finalIR
+        | shouldEmitArtefacts =
+            Just (mergeModuleLowerings (Map.elems loweringResults))
+        | otherwise = Nothing
+
+      -- Phase 5: Schema (per-module, parallel).
+      cachedSchemaEntries = concatMap (.cacheSchemaEntries) (Map.elems cacheHitModules)
+      freshSchemaEntries =
+        if shouldEmitArtefacts
+          then buildSchemasForModules idResult mergedZonkResult cacheMissNames
+          else []
+      schema =
+        if shouldEmitArtefacts
+          then Just (cachedSchemaEntries <> freshSchemaEntries)
+          else Nothing
+
       allDiags = preLowerDiags <> loweringDiags
+
+      -- Build updated cache.
+      freshCache = buildFreshCacheEntries
+        sourceHashes idResult typecheckCache loweringResults
+        freshSchemaEntries cacheMissNames freshParsed
+      updatedCacheMap = Map.union freshCache cacheHitModules
 
       logs =
         [CompileLogParsing, CompileLogIdentifying]
           <> typecheckLogs
-          <> (if shouldLower then [CompileLogLowering] else [])
-          <> (if shouldEmitArtefacts then [CompileLogSchemaGeneration] else [])
+          <> ([CompileLogLowering | shouldLower])
+          <> ([CompileLogSchemaGeneration | shouldEmitArtefacts])
           <> [CompileLogComplete]
    in CompileResult
         { irModule = finalIR,
@@ -321,12 +325,25 @@ compile input =
           solverResult = mergedSolverResult,
           zonkResult = mergedZonkResult,
           compileLogs = logs,
-          updatedCache = newCache
+          updatedCache = updatedCacheMap
         }
+
+eitherToMaybe :: Either a b -> Maybe b
+eitherToMaybe = \case
+  Left _ -> Nothing
+  Right x -> Just x
 
 -- ===========================================================================
 -- Per-module typecheck loop
 -- ===========================================================================
+
+data TypecheckCacheEntry = TypecheckCacheEntry
+  { tceInterface :: ModuleInterface,
+    tceIdentified :: Module Identified,
+    tceZonkedModule :: Module Zonked,
+    tceZonkedTypeEnv :: Map VariableResolution (SemanticType Resolved),
+    tceDiagnostics :: [Diagnostic]
+  }
 
 data TypecheckAccumulator = TypecheckAccumulator
   { accImportedTypes :: Map QualifiedName (SemanticType Resolved),
@@ -337,12 +354,10 @@ data TypecheckAccumulator = TypecheckAccumulator
     accDiagnostics :: [Diagnostic],
     accSCCDeclarations :: Map QualifiedName (Declaration Zonked),
     accLogs :: [CompileLog],
-    accUpdatedCache :: Map ModuleName ModuleCache,
+    accUpdatedCache :: Map ModuleName TypecheckCacheEntry,
     accAllPriorCacheValid :: Bool
   }
 
--- | Per-module typecheck result. Produced independently by each module
--- in a topological level, then merged into the accumulator.
 data ModuleTypecheckResult = ModuleTypecheckResult
   { mtrModuleName :: Text,
     mtrImportedTypes :: Map QualifiedName (SemanticType Resolved),
@@ -351,7 +366,7 @@ data ModuleTypecheckResult = ModuleTypecheckResult
     mtrSolverResult :: SolverResult,
     mtrDiagnostics :: [Diagnostic],
     mtrLogs :: [CompileLog],
-    mtrCacheEntry :: ModuleCache,
+    mtrCacheEntry :: TypecheckCacheEntry,
     mtrIsCacheHit :: Bool
   }
 
@@ -360,7 +375,7 @@ typecheckModules ::
   [Set.Set Text] ->
   Map ModuleName Int ->
   Map ModuleName ModuleCache ->
-  (SolverResult, ZonkResult, [Diagnostic], [CompileLog], Map ModuleName ModuleCache)
+  (SolverResult, ZonkResult, [Diagnostic], [CompileLog], Map ModuleName TypecheckCacheEntry)
 typecheckModules idResult moduleLevels sourceHashes inputCache =
   let initial =
         TypecheckAccumulator
@@ -389,9 +404,6 @@ typecheckModules idResult moduleLevels sourceHashes inputCache =
         final.accUpdatedCache
       )
 
--- | Process one topological level. Modules within a level have no
--- inter-dependencies, so they are sparked in parallel via 'parMap'.
--- Results are merged into the accumulator before the next level.
 typecheckLevel ::
   IdentifierResult ->
   Map ModuleName Int ->
@@ -408,7 +420,6 @@ typecheckLevel idResult sourceHashes inputCache accumulator level =
           moduleNames
    in foldl' mergeModuleResult accumulator results
 
--- | Merge a single module's typecheck result into the accumulator.
 mergeModuleResult ::
   TypecheckAccumulator ->
   ModuleTypecheckResult ->
@@ -430,8 +441,6 @@ mergeModuleResult accumulator result =
       accAllPriorCacheValid = accumulator.accAllPriorCacheValid && result.mtrIsCacheHit
     }
 
--- | Typecheck one module, producing an independent result. Reads the
--- accumulator for imported types but does not mutate it.
 typecheckOneModule ::
   IdentifierResult ->
   Map ModuleName Int ->
@@ -465,13 +474,12 @@ applyCacheToResult moduleName cachedEntry =
           mtrSolverResult = SolverResult {typeSubstitution = Map.empty, requestSubstitution = Map.empty},
           mtrDiagnostics = [],
           mtrLogs = [],
-          mtrCacheEntry = ModuleCache
-            { cacheSourceHash = 0,
-              cacheInterface = ModuleInterface {exportedTypes = Map.empty},
-              cacheIdentified = Module {declarations = [], sourceSpan = emptySrcSpan},
-              cacheZonkedModule = Module {declarations = [], sourceSpan = emptySrcSpan},
-              cacheZonkedTypeEnv = Map.empty,
-              cacheDiagnostics = []
+          mtrCacheEntry = TypecheckCacheEntry
+            { tceInterface = ModuleInterface {exportedTypes = Map.empty},
+              tceIdentified = Module {declarations = [], sourceSpan = emptySrcSpan},
+              tceZonkedModule = Module {declarations = [], sourceSpan = emptySrcSpan},
+              tceZonkedTypeEnv = Map.empty,
+              tceDiagnostics = []
             },
           mtrIsCacheHit = True
         }
@@ -484,7 +492,13 @@ applyCacheToResult moduleName cachedEntry =
           mtrSolverResult = SolverResult {typeSubstitution = Map.empty, requestSubstitution = Map.empty},
           mtrDiagnostics = cached.cacheDiagnostics,
           mtrLogs = [],
-          mtrCacheEntry = cached,
+          mtrCacheEntry = TypecheckCacheEntry
+            { tceInterface = cached.cacheInterface,
+              tceIdentified = cached.cacheIdentifiedAST,
+              tceZonkedModule = cached.cacheZonkedModule,
+              tceZonkedTypeEnv = cached.cacheZonkedTypeEnv,
+              tceDiagnostics = cached.cacheDiagnostics
+            },
           mtrIsCacheHit = True
         }
 
@@ -509,14 +523,10 @@ recompileModuleToResult idResult moduleName sourceHashes accumulator =
             not (Set.null filtered)
         ]
       allSCCs =
-        (if Set.null nonAgentQualifiedNames then [] else [nonAgentQualifiedNames])
+        ([nonAgentQualifiedNames | not (Set.null nonAgentQualifiedNames)])
           <> agentOnlySCCs
       totalSCCs = length allSCCs
       indexedSCCs = zip [1 ..] allSCCs
-      -- The SCC loop starts with a clean accumulator that inherits
-      -- imported types from prior levels but has empty module-local
-      -- fields. This ensures the produced result contains only this
-      -- module's contributions.
       sccInitial =
         accumulator
           { accZonkedModules = Map.empty,
@@ -543,17 +553,14 @@ recompileModuleToResult idResult moduleName sourceHashes accumulator =
           sccAccumulator.accZonkedTypeEnvironment
       moduleTypeEnv = moduleOwnedTypeEnvironment accumulator.accImportedTypes sccAccumulator.accZonkedTypeEnvironment
       newCacheEntry =
-        ModuleCache
-          { cacheSourceHash = case Map.lookup moduleName sourceHashes of
-              Just sourceHash -> sourceHash
-              Nothing -> 0,
-            cacheInterface = moduleInterface,
-            cacheIdentified = case moduleAST of
+        TypecheckCacheEntry
+          { tceInterface = moduleInterface,
+            tceIdentified = case moduleAST of
               Just ast -> ast
               Nothing -> Module {declarations = [], sourceSpan = emptySrcSpan},
-            cacheZonkedModule = assembledModule,
-            cacheZonkedTypeEnv = moduleTypeEnv,
-            cacheDiagnostics = sccAccumulator.accDiagnostics
+            tceZonkedModule = assembledModule,
+            tceZonkedTypeEnv = moduleTypeEnv,
+            tceDiagnostics = sccAccumulator.accDiagnostics
           }
    in ModuleTypecheckResult
         { mtrModuleName = moduleName,
@@ -575,11 +582,6 @@ emptySrcSpan =
       end = Position {line = 0, column = 0}
     }
 
--- | Collect the 'QualifiedName's of all non-agent declarations in a
--- module. These are data, request, external-agent, and prim-agent
--- declarations whose types are fully determined by their explicit
--- signatures (no inference needed). They are pre-processed as a
--- single batch before the agent SCC loop.
 collectNonAgentQualifiedNames :: Text -> Module Identified -> Set.Set QualifiedName
 collectNonAgentQualifiedNames moduleName moduleAST =
   Set.fromList (concatMap extractQualifiedName moduleAST.declarations)
@@ -732,7 +734,6 @@ retagNonCallableDeclaration = \case
         }
   DeclarationImport declaration -> DeclarationImport declaration
   DeclarationError sourceSpan -> DeclarationError sourceSpan
-  -- Callable declarations should never reach here; if they do, leave as error sentinel.
   _ -> DeclarationError placeholderSpan
     where
       placeholderSpan = SrcSpan {filePath = "", start = Position {line = 0, column = 0}, end = Position {line = 0, column = 0}}
@@ -741,10 +742,6 @@ retagNonCallableDeclaration = \case
 -- Parse helper
 -- ===========================================================================
 
--- | Parse every source in the input map. Each 'SourceEntry' carries the
--- real 'FilePath' that is embedded into error spans; the compiler makes
--- no assumption about the relationship between a 'ModuleName' and its
--- 'FilePath'.
 parseSources :: Map ModuleName SourceEntry -> (Map ModuleName (Module Parsed), [Diagnostic])
 parseSources sources =
   let parseEntry (modName, entry) =
@@ -756,10 +753,6 @@ parseSources sources =
       diags = concatMap snd parsedEntries
    in (modules, diags)
 
--- | Parse 'Stdlib.stdlibSources' and produce a 'Map ModuleName (Module Parsed)'
--- ready for merging into an Identifier-pass input. Parse errors are
--- ignored here (the stdlib source is compiler-managed; if it fails to
--- parse, that's a compiler bug, not a user issue).
 parsedStdlibModules :: Map ModuleName (Module Parsed)
 parsedStdlibModules = fst (parseSources stdlibEntries)
   where
@@ -768,12 +761,127 @@ parsedStdlibModules = fst (parseSources stdlibEntries)
         (\moduleName src -> SourceEntry ("<stdlib:" <> Text.unpack moduleName <> ">") src)
         Stdlib.stdlibSources
 
--- | Test-facing helper: run 'identify' against a user-module map with
--- 'parsedStdlibModules' merged in and 'Stdlib.stdlibModuleNames' marked
--- as trusted. Mirrors what 'compile' does internally so unit tests don't
--- have to repeat the boilerplate.
 identifyWithStdlib ::
   Map ModuleName (Module Parsed) ->
   (IdentifierResult, [Identifier.IdentifierError])
 identifyWithStdlib userMods =
   identify Stdlib.stdlibModuleNames (Map.union userMods parsedStdlibModules)
+
+-- ===========================================================================
+-- Helpers
+-- ===========================================================================
+
+-- | Extract import declarations from an Identified module (for cache
+-- skeleton building).
+extractImportDeclarations :: Module Identified -> [ImportDeclaration]
+extractImportDeclarations moduleAST =
+  [ importDecl | DeclarationImport importDecl <- moduleAST.declarations ]
+
+-- | Build schema entries for cache-miss modules only.
+buildSchemasForModules ::
+  IdentifierResult ->
+  ZonkResult ->
+  Set.Set Text ->
+  [SchemaEntry]
+buildSchemasForModules idResult zonkResult_ moduleNames =
+  let filteredVariables =
+        Map.filterWithKey
+          (\qualifiedName _ -> Set.member qualifiedName.module_ moduleNames)
+          idResult.identifiedVariables
+      filteredIdResult = idResult {identifiedVariables = filteredVariables}
+   in buildSchemas filteredIdResult zonkResult_
+
+-- ===========================================================================
+-- Cache construction
+-- ===========================================================================
+
+buildFreshCacheEntries ::
+  Map ModuleName Int ->
+  IdentifierResult ->
+  Map ModuleName TypecheckCacheEntry ->
+  Map ModuleName ModuleLoweringResult ->
+  [SchemaEntry] ->
+  Set.Set Text ->
+  Map ModuleName (Module Parsed) ->
+  Map ModuleName ModuleCache
+buildFreshCacheEntries sourceHashes idResult typecheckCache loweringResults schemaEntries_ cacheMissNames_ parsedModules =
+  let schemaByModule =
+        foldl'
+          (\accumulator entry ->
+            let moduleName = schemaEntryModule entry
+             in Map.insertWith (++) moduleName [entry] accumulator
+          )
+          Map.empty
+          schemaEntries_
+      emptyLoweringResult =
+        ModuleLoweringResult
+          { mlrBlocks = Map.empty,
+            mlrEntries = Map.empty,
+            mlrNameTable = Katari.IR.emptyNameTable,
+            mlrBlockCount = 0,
+            mlrVarCount = 0
+          }
+   in Map.fromSet
+        (\moduleName ->
+          let tce = Map.findWithDefault
+                (TypecheckCacheEntry
+                  { tceInterface = ModuleInterface {exportedTypes = Map.empty},
+                    tceIdentified = Module {declarations = [], sourceSpan = emptySrcSpan},
+                    tceZonkedModule = Module {declarations = [], sourceSpan = emptySrcSpan},
+                    tceZonkedTypeEnv = Map.empty,
+                    tceDiagnostics = []
+                  })
+                moduleName
+                typecheckCache
+              moduleVariables =
+                Map.filterWithKey (\qualifiedName _ -> qualifiedName.module_ == moduleName) idResult.identifiedVariables
+              moduleTypes =
+                Map.filterWithKey (\qualifiedName _ -> qualifiedName.module_ == moduleName) idResult.identifiedTypes
+              moduleRequests =
+                Map.filterWithKey (\qualifiedName _ -> qualifiedName.module_ == moduleName) idResult.identifiedRequests
+              moduleConstructors =
+                Map.filterWithKey (\qualifiedName _ -> qualifiedName.module_ == moduleName) idResult.identifiedConstructors
+              moduleData = Map.findWithDefault
+                (ModuleData {moduleSourceSpan = emptySrcSpan})
+                moduleName
+                idResult.identifiedModules
+              moduleExports = Map.findWithDefault Map.empty moduleName idResult.moduleExports
+              moduleTopLevel = Map.findWithDefault Map.empty moduleName idResult.moduleVisibleSymbols
+              moduleScopeFrames =
+                case Map.lookup (moduleSourceFilePath moduleName idResult) idResult.scopeIndex.framesByFile of
+                  Just frames -> [(f.frameSpan, f.frameSymbols) | f <- frames]
+                  Nothing -> []
+           in ModuleCache
+                { cacheSourceHash = Map.findWithDefault 0 moduleName sourceHashes,
+                  cacheIdentifierVariables = moduleVariables,
+                  cacheIdentifierTypes = moduleTypes,
+                  cacheIdentifierRequests = moduleRequests,
+                  cacheIdentifierConstructors = moduleConstructors,
+                  cacheModuleData = moduleData,
+                  cacheModuleExports = moduleExports,
+                  cacheModuleTopLevel = moduleTopLevel,
+                  cacheScopeFrames = moduleScopeFrames,
+                  cacheIdentifiedAST = tce.tceIdentified,
+                  cacheInterface = tce.tceInterface,
+                  cacheZonkedModule = tce.tceZonkedModule,
+                  cacheZonkedTypeEnv = tce.tceZonkedTypeEnv,
+                  cacheLoweringResult = Map.findWithDefault emptyLoweringResult moduleName loweringResults,
+                  cacheSchemaEntries = Map.findWithDefault [] moduleName schemaByModule,
+                  cacheDiagnostics = tce.tceDiagnostics
+                }
+        )
+        cacheMissNames_
+
+schemaEntryModule :: SchemaEntry -> Text
+schemaEntryModule (SchemaEntry {name = entryName}) =
+  let parts = Text.splitOn "." entryName
+   in case parts of
+        [] -> ""
+        [single] -> single
+        _ -> Text.intercalate "." (init parts)
+
+moduleSourceFilePath :: Text -> IdentifierResult -> FilePath
+moduleSourceFilePath moduleName idResult =
+  case Map.lookup moduleName idResult.identifiedModules of
+    Just moduleData_ -> moduleData_.moduleSourceSpan.filePath
+    Nothing -> ""

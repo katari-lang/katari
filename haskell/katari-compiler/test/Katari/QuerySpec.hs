@@ -9,7 +9,7 @@ import qualified Katari.SemanticType as ST
 import Katari.SourceSpan (Position (..))
 import Test.Hspec
 
-prepare :: Text -> (C.CompileResult)
+prepare :: Text -> C.CompileResult
 prepare src =
   C.compile
     C.CompileInput

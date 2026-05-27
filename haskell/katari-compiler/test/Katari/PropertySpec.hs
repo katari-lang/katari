@@ -14,7 +14,7 @@ import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Hedgehog (Gen, forAll, tripping, (===))
-import Hedgehog qualified as Hedgehog
+import Hedgehog qualified
 import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range qualified as Range
 import Katari.Common (LiteralValue (..), QualifiedName (..), parseQualifiedName, renderQualifiedName)

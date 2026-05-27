@@ -341,7 +341,7 @@ walkDeps manager mSnap mLock rootPkg =
                                in go visited' accDeps' (transitive <> rest)
 
     resolveGit depName url rev expectedSha visited accDeps rest = do
-      cache <- Cache.defaultCachePaths
+      let cache = Cache.projectCachePaths rootPkg.packageRoot
       Cache.ensureCacheDirs cache
       fetchRes <- Fetch.fetchGitTarball manager cache depName (Fetch.GitRef url rev)
       case fetchRes of

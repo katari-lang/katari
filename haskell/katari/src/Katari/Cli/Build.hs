@@ -18,9 +18,11 @@ import Data.Aeson.Encode.Pretty (encodePretty)
 import qualified Data.ByteString.Lazy as LBS
 import qualified Katari.Cli.Check as Check
 import qualified Katari.Cli.Common as Common
+import qualified Katari.Cli.CompileCache as CompileCache
 import qualified Katari.Compile as Compile
 import Katari.Diagnostic (hasErrors)
 import Katari.IR (IRModule)
+import Katari.Project.Cache qualified as Cache
 import Katari.Schema (SchemaEntry (..))
 import Options.Applicative
 import System.Directory (createDirectoryIfMissing)
@@ -49,17 +51,19 @@ optionsParser =
           ( long "out"
               <> short 'o'
               <> metavar "FILE"
-              <> help "Output path for the JSON bundle (default: dist/bundle.json)"
+              <> help "Output path for the JSON bundle (default: .katari/dist/bundle.json)"
           )
       )
 
 run :: Options -> IO ()
 run opts = do
-  (input, fileTexts) <- Check.loadProject (Check.Options {optProjectRoot = opts.optProjectRoot})
+  (root, input, fileTexts) <- Check.loadProject (Check.Options {optProjectRoot = opts.optProjectRoot})
   let result = Compile.compile input
       outputPath = case opts.optOut of
         Just p -> p
-        Nothing -> "dist/bundle.json"
+        Nothing -> root <> "/.katari/dist/bundle.json"
+  Cache.ensureCacheDirs (Cache.projectCachePaths root)
+  CompileCache.saveDiskCache root (CompileCache.toDiskCache result.updatedCache)
   Check.emitDiagnostics fileTexts result.diagnostics
   if hasErrors result.diagnostics
     then exitWith (ExitFailure 1)

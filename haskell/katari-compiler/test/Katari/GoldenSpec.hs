@@ -140,11 +140,8 @@ absentGolden expectedPath = do
     Just "1" -> pure () -- accept-mode never asserts absence
     _ -> do
       exists <- doesFileExist expectedPath
-      if exists
-        then
-          expectationFailure
+      Control.Monad.when exists $ expectationFailure
             ( "unexpected golden file present: "
                 <> expectedPath
                 <> " (the pipeline no longer produces this artefact for the case)"
             )
-        else pure ()

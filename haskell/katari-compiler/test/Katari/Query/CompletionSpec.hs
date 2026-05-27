@@ -7,13 +7,13 @@ import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Katari.Compile as Compile
-import Katari.Typechecker.Identifier (SymbolEntry (..))
+import Katari.Typechecker.Identifier
+    ( SymbolEntry(..), IdentifierResult(..) )
 import qualified Katari.Lexer as Lexer
 import qualified Katari.Parser as Parser
 import Katari.Query.Completion
 import Katari.SemanticType (SemanticType (..), emptyRequest)
 import Katari.SourceSpan (Position (..))
-import Katari.Typechecker.Identifier (IdentifierResult (..))
 import Katari.Typechecker.Zonker (ZonkResult (..))
 import qualified Katari.Compile as C
 import Test.Hspec

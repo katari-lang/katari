@@ -106,7 +106,7 @@ runZonkTotal src = do
 -- | Find the VariableResolution for a named top-level binding.
 variableResolutionOf :: Text -> IdentifierResult -> Maybe VariableResolution
 variableResolutionOf name result =
-  (ResolvedTopLevel . fst) <$> find ((== name) . (.variableName) . snd) (Map.toList result.identifiedVariables)
+  ResolvedTopLevel . fst <$> find ((== name) . (.variableName) . snd) (Map.toList result.identifiedVariables)
 
 -- | Collect all expression metadata 'SemanticType Resolved' values reachable
 -- from a Zonked module body. Used to spot-check inferred types.

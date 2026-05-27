@@ -132,7 +132,7 @@ addVarEdge from to graph
 -- until no new edges appear. The graph is sparse and small (= a few
 -- hundred vars per module), so the naive fixpoint terminates quickly.
 transitiveClosure :: VarGraph -> VarGraph
-transitiveClosure graph = go graph
+transitiveClosure = go
   where
     go g =
       let next = step g

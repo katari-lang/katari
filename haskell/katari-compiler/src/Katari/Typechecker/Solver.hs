@@ -228,7 +228,7 @@ solveLoop state worklist
 -- 'stSubst', the var's bounds entry dropped, and inconsistent pins
 -- (= 'epInconsistent') push a 'SolverErrorBoundsConflict' for diagnostics.
 applyEagerPins :: [Bounds.EagerPin] -> SolveState -> SolveState
-applyEagerPins pins = flip (foldr applyOne) pins
+applyEagerPins = flip (foldr applyOne)
   where
     applyOne pin acc =
       let value = ntToUnresolved pin.epValue

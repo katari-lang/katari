@@ -36,16 +36,22 @@ where
 
 import Control.Monad (join)
 import Data.Aeson
-  ( Options (..),
+  ( FromJSON (..),
+    Options (..),
     ToJSON (..),
     Value (..),
     defaultOptions,
     encode,
+    genericParseJSON,
     genericToJSON,
     object,
+    withObject,
+    (.:),
+    (.:?),
     (.=),
   )
 import Data.Aeson.KeyMap qualified as KeyMap
+import Data.Aeson.Types qualified
 import Data.ByteString.Lazy qualified as LazyByteString
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
@@ -101,6 +107,9 @@ data SchemaEntry = SchemaEntry
 instance ToJSON SchemaEntry where
   toJSON = genericToJSON schemaOptions
 
+instance FromJSON SchemaEntry where
+  parseJSON = genericParseJSON schemaOptions
+
 -- | Schema for a single request type that an agent may raise.
 data RequestSchemaRef = RequestSchemaRef
   { name :: Text,
@@ -111,6 +120,9 @@ data RequestSchemaRef = RequestSchemaRef
 
 instance ToJSON RequestSchemaRef where
   toJSON = genericToJSON schemaOptions
+
+instance FromJSON RequestSchemaRef where
+  parseJSON = genericParseJSON schemaOptions
 
 -- ===========================================================================
 -- JsonSchema types
@@ -155,6 +167,14 @@ instance ToJSON JsonSchema where
             \this is a compiler bug. Got: "
               <> show other
           )
+
+instance FromJSON JsonSchema where
+  parseJSON = withObject "JsonSchema" $ \obj -> do
+    title <- obj .:? "title"
+    description <- obj .:? "description"
+    examples <- maybe [] id <$> obj .:? "examples"
+    core <- parseJSON (Object obj)
+    pure JsonSchema {core, title, description, examples}
 
 -- | The structural part of a 'JsonSchema'. Serialises to valid JSON Schema
 -- Draft 2020-12 keywords (e.g. @{"type":"integer"}@, @{"anyOf":[...]}@).
@@ -212,6 +232,47 @@ instance ToJSON SchemaCore where
     SchemaCoreUnion {anyOf} -> object ["anyOf" .= anyOf]
     SchemaCoreUnknown -> Object KeyMap.empty
     SchemaCoreNever -> object ["not" .= Object KeyMap.empty]
+
+instance FromJSON SchemaCore where
+  parseJSON = withObject "SchemaCore" $ \obj -> do
+    mNot <- obj .:? "not"
+    case mNot of
+      Just (Object _) -> pure SchemaCoreNever
+      _ -> do
+        mAnyOf <- obj .:? "anyOf"
+        case mAnyOf of
+          Just xs -> pure SchemaCoreUnion {anyOf = xs}
+          Nothing -> do
+            mConst <- obj .:? "const"
+            case mConst of
+              Just v -> pure SchemaCoreConst {value = v}
+              Nothing -> do
+                mType <- obj .:? "type" :: Data.Aeson.Types.Parser (Maybe Text)
+                case mType of
+                  Just "null" -> pure SchemaCoreNull
+                  Just "boolean" -> pure SchemaCoreBoolean
+                  Just "integer" -> do
+                    mn <- obj .:? "minimum"
+                    mx <- obj .:? "maximum"
+                    pure SchemaCoreInteger {minimum = mn, maximum = mx}
+                  Just "number" -> pure SchemaCoreNumber
+                  Just "string" -> do
+                    mEnum <- obj .:? "enum"
+                    pure SchemaCoreString {schemaEnum = maybe [] id mEnum}
+                  Just "array" -> do
+                    mItems <- obj .:? "items"
+                    mPrefix <- obj .:? "prefixItems"
+                    case mPrefix of
+                      Just ps -> pure SchemaCoreTuple {prefixItems = ps}
+                      Nothing -> case mItems of
+                        Just i -> pure SchemaCoreArray {items = i}
+                        Nothing -> pure SchemaCoreArray {items = plain SchemaCoreUnknown}
+                  Just "object" -> do
+                    props <- maybe Map.empty id <$> obj .:? "properties"
+                    req <- maybe Set.empty Set.fromList <$> obj .:? "required"
+                    addl <- maybe False id <$> obj .:? "additionalProperties"
+                    pure SchemaCoreObject {properties = props, required = req, additionalProperties = addl}
+                  _ -> pure SchemaCoreUnknown
 
 -- ===========================================================================
 -- Aeson option helpers

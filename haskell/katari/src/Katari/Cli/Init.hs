@@ -270,7 +270,8 @@ envExampleTemplate =
 gitignoreTemplate :: String
 gitignoreTemplate =
   unlines
-    [ ".env",
+    [ ".katari/",
+      ".env",
       "node_modules/"
     ]
 

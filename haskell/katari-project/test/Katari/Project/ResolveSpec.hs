@@ -5,7 +5,14 @@ import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as TextIO
-import Katari.Project.Config (isValidPackageName)
+import Katari.Project.Config
+    ( isValidPackageName,
+      DependenciesSection(..),
+      OverrideSource(..),
+      PackageSection(..),
+      ProjectConfig(..),
+      RuntimeSection(..),
+      SidecarSection(..) )
 import Katari.Project.Resolve
   ( ProjectAssembly (..),
     ResolveError (..),
@@ -14,14 +21,6 @@ import Katari.Project.Resolve
     assembleProject,
     loadResolvedProject,
     renderResolveError,
-  )
-import Katari.Project.Config
-  ( DependenciesSection (..),
-    OverrideSource (..),
-    PackageSection (..),
-    ProjectConfig (..),
-    RuntimeSection (..),
-    SidecarSection (..),
   )
 import Katari.Project.Discovery (SourceEntry (..))
 import System.Directory (createDirectoryIfMissing)

@@ -14,7 +14,7 @@ import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Text.IO qualified as TextIO
 import Katari.IR
-import Katari.Lowering (LoweringError (..), lowerProgram)
+import Katari.Lowering (LoweringError (..), lowerModule, mergeModuleLowerings)
 import Katari.Lexer qualified as Lexer
 import Katari.Parser qualified as Parser
 import Katari.SemanticType (RequestVariableId (..), TypeVariableId (..))
@@ -22,7 +22,7 @@ import Katari.Typechecker.ConstraintGenerator (ConstraintGenResult (..), Variabl
 import Katari.Typechecker.Identifier (identify)
 import Katari.Typechecker.NormalizedType (NormalizedType (..))
 import Katari.Typechecker.Solver (SolverResult (..))
-import Katari.Typechecker.Zonker (zonk)
+import Katari.Typechecker.Zonker (ZonkResult (..), zonk)
 import System.Directory (listDirectory)
 import System.FilePath ((</>))
 import Katari.Compile qualified as Compile
@@ -51,10 +51,21 @@ lowerSource src =
                     Map.fromList [(RequestVariableId i, Set.empty) | i <- [0 .. cg.variableSupply.requestVarSupply - 1]]
                 }
             (zr, _) = zonk idResult cg solver
-        case lowerProgram idResult zr of
-          (Right ir, errs) -> pure (ir, errs)
-          (Left internalDiag, _) ->
-            fail ("lowering hit internal compiler error: " ++ show internalDiag)
+        let allResults =
+              [ case lowerModule idResult zr moduleName moduleAST of
+                  (Right mlr, errs) -> Right (mlr, errs)
+                  (Left internalDiag, _) -> Left internalDiag
+                | (moduleName, moduleAST) <- Map.toList zr.zonkedModules
+              ]
+            failures = [d | Left d <- allResults]
+            successes = [r | Right r <- allResults]
+        case failures of
+          (d:_) -> fail ("lowering hit internal compiler error: " ++ show d)
+          [] ->
+            let mlrs = map fst successes
+                errs = concatMap snd successes
+                ir = mergeModuleLowerings mlrs
+             in pure (ir, errs)
       (_, errs) -> fail ("identify failure: " ++ show errs)
 
 -- ===========================================================================

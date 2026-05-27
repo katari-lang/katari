@@ -11,6 +11,7 @@ module Katari.Cli.Check
     -- * Shared helpers (used by 'Katari.Cli.Build')
     loadProject,
     emitDiagnostics,
+    findProjectRoot,
   )
 where
 
@@ -18,10 +19,12 @@ import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text.IO as TextIO
+import qualified Katari.Cli.CompileCache as CompileCache
 import qualified Katari.Compile as Compile
 import Katari.Diagnostic (Diagnostic, Severity (..), filterAtLeast, hasErrors)
 import Katari.Diagnostic.Render (renderDiagnostics, renderDiagnosticsAnsi)
 import qualified Data.Text as Text
+import Katari.Project.Cache qualified as Cache
 import qualified Katari.Project.Discovery as Project
 import qualified Katari.Project.Resolve as Project
 import Options.Applicative
@@ -50,8 +53,10 @@ optionsParser =
 
 run :: Options -> IO ()
 run opts = do
-  (input, fileTexts) <- loadProject opts
+  (root, input, fileTexts) <- loadProject opts
   let result = Compile.compile input
+  Cache.ensureCacheDirs (Cache.projectCachePaths root)
+  CompileCache.saveDiskCache root (CompileCache.toDiskCache result.updatedCache)
   emitDiagnostics fileTexts result.diagnostics
   if hasErrors result.diagnostics
     then exitWith (ExitFailure 1)
@@ -61,39 +66,45 @@ run opts = do
 -- Helpers (shared with build)
 -- ---------------------------------------------------------------------------
 
-loadProject :: Options -> IO (Compile.CompileInput, Map FilePath Text)
-loadProject opts = do
+findProjectRoot :: Options -> IO FilePath
+findProjectRoot opts = do
   start <- maybe getCurrentDirectory pure opts.optProjectRoot
   mRoot <- Project.findProjectRoot start
   case mRoot of
     Nothing -> do
-      hPutStrLn stderr "katari check: no katari.toml found in this or any parent directory"
+      hPutStrLn stderr "katari: no katari.toml found in this or any parent directory"
       exitWith (ExitFailure 2)
-    Just root -> do
-      rpRes <- Project.loadResolvedProject root
-      case rpRes of
-        Left err -> do
-          hPutStrLn stderr ("katari check: " <> Text.unpack (Project.renderResolveError err))
-          exitWith (ExitFailure 2)
-        Right resolved -> case Project.assembleProject resolved of
-          Left err -> do
-            hPutStrLn stderr ("katari check: " <> Text.unpack (Project.renderResolveError err))
-            exitWith (ExitFailure 2)
-          Right assembly -> do
-            let sources =
-                  Map.map
-                    ( \e ->
-                        Compile.SourceEntry
-                          { Compile.filePath = e.sourcePath,
-                            Compile.sourceText = e.sourceText
-                          }
-                    )
-                    assembly.sources
-                fileTexts =
-                  Map.fromList
-                    [ (e.sourcePath, e.sourceText) | e <- Map.elems assembly.sources
-                    ]
-            pure (Compile.CompileInput {Compile.sources = sources, Compile.cache = Map.empty}, fileTexts)
+    Just root -> pure root
+
+loadProject :: Options -> IO (FilePath, Compile.CompileInput, Map FilePath Text)
+loadProject opts = do
+  root <- findProjectRoot opts
+  rpRes <- Project.loadResolvedProject root
+  case rpRes of
+    Left err -> do
+      hPutStrLn stderr ("katari: " <> Text.unpack (Project.renderResolveError err))
+      exitWith (ExitFailure 2)
+    Right resolved -> case Project.assembleProject resolved of
+      Left err -> do
+        hPutStrLn stderr ("katari: " <> Text.unpack (Project.renderResolveError err))
+        exitWith (ExitFailure 2)
+      Right assembly -> do
+        diskCache <- CompileCache.loadDiskCache root
+        let sources =
+              Map.map
+                ( \e ->
+                    Compile.SourceEntry
+                      { Compile.filePath = e.sourcePath,
+                        Compile.sourceText = e.sourceText
+                      }
+                )
+                assembly.sources
+            fileTexts =
+              Map.fromList
+                [ (e.sourcePath, e.sourceText) | e <- Map.elems assembly.sources
+                ]
+            cache = CompileCache.applyDiskCache diskCache
+        pure (root, Compile.CompileInput {Compile.sources = sources, Compile.cache = cache}, fileTexts)
 
 emitDiagnostics :: Map FilePath Text -> [Diagnostic] -> IO ()
 emitDiagnostics fileTexts ds = do

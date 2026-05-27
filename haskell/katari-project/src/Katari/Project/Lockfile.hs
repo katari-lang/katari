@@ -171,8 +171,7 @@ parseLockfile path raw = do
 
 extractLockedPackages ::
   FilePath -> Toml.TOML -> Either LockfileError (Map Text RawLockedPackage)
-extractLockedPackages path toml =
-  extractNestedTables "packages" (decodeLockedPackage path) toml
+extractLockedPackages path = extractNestedTables "packages" (decodeLockedPackage path)
 
 decodeLockedPackage ::
   FilePath -> Text -> Toml.TOML -> Either LockfileError RawLockedPackage

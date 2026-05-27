@@ -181,7 +181,7 @@ completionsAt idResult zonkResult filePath position =
 -- | Locate the module name that owns @filePath@. Mirrors the same lookup
 -- used by hover / def-jump (= scan zonked modules by sourceSpan).
 findModuleIdByFilePath :: IdentifierResult -> ZonkResult -> FilePath -> Maybe Text
-findModuleIdByFilePath _ zonkResult filePath = findModuleNameByFilePath zonkResult filePath
+findModuleIdByFilePath _ = findModuleNameByFilePath
 
 findModuleNameByFilePath :: ZonkResult -> FilePath -> Maybe Text
 findModuleNameByFilePath zonkResult filePath =

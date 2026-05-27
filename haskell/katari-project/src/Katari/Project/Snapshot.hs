@@ -115,8 +115,7 @@ parseSnapshot path raw = do
   validateSnapshot path (rs {rawPackages = pkgs})
 
 extractPackages :: FilePath -> Toml.TOML -> Either SnapshotError (Map Text RawSnapshotPackage)
-extractPackages path toml =
-  extractNestedTables "packages" (decodePackage path) toml
+extractPackages path = extractNestedTables "packages" (decodePackage path)
 
 decodePackage :: FilePath -> Text -> Toml.TOML -> Either SnapshotError RawSnapshotPackage
 decodePackage path name sub =

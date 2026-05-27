@@ -39,9 +39,13 @@ module Katari.Typechecker.Identifier
     scanExportNames,
     declaredNames,
     ModuleIdentifyResult (..),
-    IdentifierState,
+    IdentifierState (..),
     initialIdentifierState,
     identifyModule,
+
+    -- * Incremental identification
+    CachedIdentifierData (..),
+    identifyIncremental,
   )
 where
 
@@ -2664,6 +2668,131 @@ identify trustedStdlibNames moduleMap =
         ]
       (allASTs, allExports, allTopLevels, finalState) =
         foldl' stepModule (acyclicASTs, acyclicExports, acyclicTopLevels, acyclicState) remainingModuleNames
+
+      capturedFrames =
+        [ScopeFrame {frameSpan = sp, frameSymbols = sym} | (sp, sym) <- finalState.capturedScopeFrames]
+      result =
+        mkIdentifierResult
+          finalState.modules
+          finalState.variables
+          finalState.types
+          finalState.requests
+          finalState.constructors
+          allASTs
+          (buildScopeIndex capturedFrames)
+          allTopLevels
+          allExports
+   in (result, reverse finalState.errors)
+
+
+-- ---------------------------------------------------------------------------
+-- Incremental identification
+-- ---------------------------------------------------------------------------
+
+-- | Cached identifier data for a single module.
+data CachedIdentifierData = CachedIdentifierData
+  { cidVariables :: Map QualifiedName VariableData,
+    cidTypes :: Map QualifiedName TypeData,
+    cidRequests :: Map QualifiedName RequestData,
+    cidConstructors :: Map QualifiedName ConstructorData,
+    cidModuleData :: ModuleData,
+    cidExportTable :: Map Text SymbolEntry,
+    cidTopLevel :: Map Text SymbolEntry,
+    cidIdentifiedAST :: Module Identified,
+    cidScopeFrames :: [(SourceSpan, Map Text SymbolEntry)],
+    cidNextTypeId :: Int,
+    cidNextRequestId :: Int,
+    cidNextConstructorId :: Int,
+    cidNextLocalVarId :: Int
+  }
+  deriving (Show)
+
+-- | Incremental variant of 'identify'. For modules present in
+-- @cachedModules@, their cached identifier data is injected directly
+-- without re-running name resolution.
+identifyIncremental ::
+  Set Text ->
+  Map Text (Module Parsed) ->
+  Map Text CachedIdentifierData ->
+  (IdentifierResult, [IdentifierError])
+identifyIncremental trustedStdlibNames moduleMap cachedModules =
+  let -- Phase 0: detect import cycles.
+      ((), cycleState) = runIdentifier $
+        for_ (findImportCycles moduleMap) (emitImportCycleError moduleMap)
+
+      -- Phase A: register all modules.
+      ((), phaseAState) = runIdentifierFrom cycleState $
+        registerAllModules trustedStdlibNames moduleMap
+
+      allModuleNames = Map.keysSet moduleMap
+      allExportNames = Map.map scanExportNames moduleMap
+
+      stepModuleIncremental (asts, exports, topLevels, state) moduleName =
+        case Map.lookup moduleName cachedModules of
+          Just cached ->
+            let injectedState = state
+                  { variables = Map.union cached.cidVariables state.variables,
+                    types = Map.union cached.cidTypes state.types,
+                    requests = Map.union cached.cidRequests state.requests,
+                    constructors = Map.union cached.cidConstructors state.constructors,
+                    modules = Map.insert moduleName cached.cidModuleData state.modules,
+                    capturedScopeFrames = cached.cidScopeFrames ++ state.capturedScopeFrames,
+                    nextTypeId = max state.nextTypeId cached.cidNextTypeId,
+                    nextRequestId = max state.nextRequestId cached.cidNextRequestId,
+                    nextConstructorId = max state.nextConstructorId cached.cidNextConstructorId,
+                    nextLocalVarId = max state.nextLocalVarId cached.cidNextLocalVarId
+                  }
+             in ( Map.insert moduleName cached.cidIdentifiedAST asts,
+                  Map.insert moduleName cached.cidExportTable exports,
+                  Map.insert moduleName cached.cidTopLevel topLevels,
+                  injectedState
+                )
+          Nothing ->
+            case Map.lookup moduleName moduleMap of
+              Nothing -> (asts, exports, topLevels, state)
+              Just parsedModule ->
+                let moduleResult =
+                      identifyModule
+                        trustedStdlibNames
+                        allExportNames
+                        exports
+                        allModuleNames
+                        state
+                        moduleName
+                        parsedModule
+                 in ( Map.insert moduleName moduleResult.identifiedAST asts,
+                      Map.insert moduleName moduleResult.moduleExportTable exports,
+                      Map.insert moduleName moduleResult.moduleTopLevel topLevels,
+                      moduleResult.moduleState
+                    )
+
+      stdlibModuleNames =
+        [ moduleName
+          | moduleName <- Map.keys moduleMap,
+            Set.member moduleName trustedStdlibNames
+        ]
+      sortedStdlibNames =
+        filter (== "primitive") stdlibModuleNames
+          ++ filter (/= "primitive") stdlibModuleNames
+      (stdlibASTs, stdlibExports, stdlibTopLevels, stdlibState) =
+        foldl' stepModuleIncremental (Map.empty, Map.empty, Map.empty, phaseAState) sortedStdlibNames
+
+      userModuleMap = Map.filterWithKey (\moduleName _ -> not (Set.member moduleName trustedStdlibNames)) moduleMap
+      levels = topologicalSort userModuleMap
+      (acyclicASTs, acyclicExports, acyclicTopLevels, acyclicState) =
+        foldl'
+          (\accumulator level -> foldl' stepModuleIncremental accumulator (Set.toList level))
+          (stdlibASTs, stdlibExports, stdlibTopLevels, stdlibState)
+          levels
+
+      processedModuleNames = Map.keysSet acyclicASTs
+      remainingModuleNames =
+        [ moduleName
+          | moduleName <- Map.keys moduleMap,
+            not (Set.member moduleName processedModuleNames)
+        ]
+      (allASTs, allExports, allTopLevels, finalState) =
+        foldl' stepModuleIncremental (acyclicASTs, acyclicExports, acyclicTopLevels, acyclicState) remainingModuleNames
 
       capturedFrames =
         [ScopeFrame {frameSpan = sp, frameSymbols = sym} | (sp, sym) <- finalState.capturedScopeFrames]
