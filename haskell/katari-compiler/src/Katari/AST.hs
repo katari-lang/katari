@@ -24,12 +24,15 @@ module Katari.AST where
 import Data.Kind (Type)
 import Data.Text (Text)
 import Katari.Common (LiteralValue (..), TypePatternTag (..))
+import Katari.Common (QualifiedName)
 import Katari.Id
   ( ConstructorId,
+    LocalVarId,
     ModuleId,
     RequestId,
     TypeId,
     VariableId,
+    VariableResolution (..),
   )
 import Katari.SemanticType (Resolved, SemanticType, Unresolved)
 import Katari.SourceSpan (HasSourceSpan (..), SourceSpan)
@@ -85,12 +88,12 @@ type data Phase where
 -- 'Parsed' phase carries no resolution information yet.
 type family NameRefResolution (phase :: Phase) (nameRefKind :: NameRefKind) :: Type where
   NameRefResolution Parsed _ = ()
-  NameRefResolution _ VariableRef = Maybe VariableId
-  NameRefResolution _ TypeRef = Maybe TypeId
-  NameRefResolution _ ModuleRef = Maybe ModuleId
+  NameRefResolution _ VariableRef = Maybe VariableResolution
+  NameRefResolution _ TypeRef = Maybe QualifiedName
+  NameRefResolution _ ModuleRef = Maybe Text
   NameRefResolution _ LabelRef = ()
-  NameRefResolution _ RequestRef = Maybe RequestId
-  NameRefResolution _ ConstructorRef = Maybe ConstructorId
+  NameRefResolution _ RequestRef = Maybe QualifiedName
+  NameRefResolution _ ConstructorRef = Maybe QualifiedName
 
 -- | Expression node type metadata. Closed family: all four phases are
 -- enumerated here. 'Parsed' / 'Identified' carry no type information;

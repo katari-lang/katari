@@ -36,9 +36,11 @@ import Katari.Common (LiteralValue (..), TypePatternTag (..))
 import Katari.Diagnostic (Diagnostic, diagnosticError, diagnosticWarning)
 import Katari.Id
   ( ConstructorId,
+    LocalVarId (..),
     QualifiedName (..),
     TypeId,
-    VariableId,
+    VariableId (..),
+    VariableResolution (..),
   )
 import Katari.SemanticType
   ( Resolved,
@@ -50,6 +52,17 @@ import Katari.Typechecker.Identifier
     IdentifierResult (..),
   )
 import Katari.Typechecker.Zonker (ZonkResult (..))
+
+-- ===========================================================================
+-- Variable resolution helper
+-- ===========================================================================
+
+-- | Convert a 'VariableResolution' to the legacy 'VariableId' used internally
+-- by 'zonkedTypeEnvironment' and 'identifiedVariables'.
+resolveVariableId :: IdentifierResult -> VariableResolution -> Maybe VariableId
+resolveVariableId idResult = \case
+  ResolvedTopLevel qualifiedName -> Map.lookup qualifiedName idResult.topLevelVariablesByQName
+  ResolvedLocal (LocalVarId n) -> Just (VariableId n)
 
 -- ===========================================================================
 -- Error type
@@ -394,29 +407,32 @@ lookupCtorArity zonkResult varId =
 -- | Convert an AST 'AST.Pattern Zonked' to a 'PatHead'. Field patterns for
 -- data constructors are sorted alphabetically by label to ensure consistent
 -- column ordering across all rows.
-patternToHead :: AST.Pattern Zonked -> PatHead
-patternToHead = \case
+patternToHead :: IdentifierResult -> AST.Pattern Zonked -> PatHead
+patternToHead idResult = \case
   AST.PatternVariable _ -> PatHeadWildcard
   AST.PatternWildcard _ -> PatHeadWildcard
   AST.PatternLiteral lp -> PatHeadCtor (literalTag lp.value) []
   AST.PatternTuple tp ->
-    PatHeadCtor (CtorTagTupleN (length tp.elements)) (map patternToHead tp.elements)
+    PatHeadCtor (CtorTagTupleN (length tp.elements)) (map (patternToHead idResult) tp.elements)
   AST.PatternQualifiedConstructor qp ->
     case qp.constructorName.resolution of
       Nothing ->
         -- Unresolved ctor: treat as wildcard (Identifier error already emitted)
         PatHeadWildcard
-      Just cid ->
-        let sortedSubs =
-              map (patternToHead . snd) $
-                sortBy (comparing ((.text) . fst)) qp.parameters
-         in PatHeadCtor (CtorTagData cid) sortedSubs
+      Just qualifiedName ->
+        case Map.lookup qualifiedName idResult.constructorsByQName of
+          Nothing -> PatHeadWildcard
+          Just cid ->
+            let sortedSubs =
+                  map (patternToHead idResult . snd) $
+                    sortBy (comparing ((.text) . fst)) qp.parameters
+             in PatHeadCtor (CtorTagData cid) sortedSubs
   AST.PatternType tp ->
-    PatHeadCtor (CtorTagType tp.typeTag) [patternToHead tp.inner]
+    PatHeadCtor (CtorTagType tp.typeTag) [patternToHead idResult tp.inner]
   AST.PatternRecord rp ->
     let sortedEntries = sortBy (comparing fst) rp.entries
         sortedKeys = map fst sortedEntries
-        sortedSubs = map (patternToHead . snd) sortedEntries
+        sortedSubs = map (patternToHead idResult . snd) sortedEntries
      in PatHeadCtor (CtorTagRecordKeys sortedKeys) sortedSubs
 
 literalTag :: LiteralValue -> CtorTag
@@ -515,7 +531,7 @@ checkMatch idResult zonkResult me =
   let subjectType = getExpressionType me.subject
       context = TypeCtx {columnTypes = [subjectType], identifierResult = idResult, zonkResult = zonkResult}
       arms = me.cases
-      armHeads = map (\arm -> patternToHead arm.pattern) arms
+      armHeads = map (\arm -> patternToHead idResult arm.pattern) arms
       armRows = [PatRow [h] arm.sourceSpan | (arm, h) <- zip arms armHeads]
       matrix = PatMatrix armRows
       -- Non-exhaustiveness: is there a value not covered by any arm?
@@ -544,7 +560,7 @@ checkIrrefutable ::
   SemanticType Resolved ->
   [ExhaustiveError]
 checkIrrefutable idResult zonkResult pattern subjectType =
-  let headPat = patternToHead pattern
+  let headPat = patternToHead idResult pattern
       context = TypeCtx {columnTypes = [subjectType], identifierResult = idResult, zonkResult = zonkResult}
       sourceSpan = sourceSpanOf pattern
       row = PatRow [headPat] sourceSpan
@@ -582,14 +598,14 @@ walkDeclaration idResult zonkResult = \case
 walkAgentBody ::
   IdentifierResult ->
   ZonkResult ->
-  Maybe VariableId ->
+  Maybe VariableResolution ->
   [AST.ParameterBinding Zonked] ->
   AST.Block Zonked ->
   [ExhaustiveError]
-walkAgentBody idResult zonkResult maybeVarId parameters block =
+walkAgentBody idResult zonkResult maybeResolution parameters block =
   paramErrors ++ walkBlock idResult zonkResult block
   where
-    paramErrors = case maybeVarId of
+    paramErrors = case maybeResolution >>= resolveVariableId idResult of
       Nothing -> []
       Just varId ->
         case Map.lookup varId zonkResult.zonkedTypeEnvironment of

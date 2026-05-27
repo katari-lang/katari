@@ -51,11 +51,13 @@ import Katari.AST
 import Katari.Diagnostic (Diagnostic (..), DiagnosticNote (..), diagnosticError)
 import Katari.Id
   ( ConstructorId (..),
+    LocalVarId (..),
     ModuleId (..),
     QualifiedName (..),
     RequestId (..),
     TypeId (..),
     VariableId (..),
+    VariableResolution (..),
   )
 import Katari.Internal qualified as Internal
 import Katari.Prim (PrimRule)
@@ -724,7 +726,8 @@ bindLocalVariable nameRef = do
         }
   modifyResolveContext $ \currentContext ->
     currentContext {scopeStack = insertInnermost name variableId currentContext.scopeStack}
-  pure (identifiedNameRef (Just variableId) nameRef)
+  let VariableId rawId = variableId
+  pure (identifiedNameRef (Just (ResolvedLocal (LocalVarId rawId))) nameRef)
   where
     -- Module bindings only ever appear in the top-level frame (imports are
     -- top-level only), but we walk the full stack defensively so that the
@@ -808,6 +811,75 @@ lookupRequest = lookupSlot (.requestSymbol)
 
 lookupConstructor :: Text -> Identifier (Maybe ConstructorId)
 lookupConstructor = lookupSlot (.constructorSymbol)
+
+-- | Convert a 'VariableId' to the new 'VariableResolution' by looking up
+-- whether the variable is top-level (has a 'QualifiedName') or local.
+variableIdToResolution :: VariableId -> Identifier VariableResolution
+variableIdToResolution variableId@(VariableId rawId) = do
+  variableData <- gets (Map.lookup variableId . (.variables))
+  pure $ case variableData >>= (.variableQualifiedName) of
+    Just qualifiedName -> ResolvedTopLevel qualifiedName
+    Nothing -> ResolvedLocal (LocalVarId rawId)
+
+-- | Look up the 'QualifiedName' for a 'TypeId' from the internal state.
+typeIdToQualifiedName :: TypeId -> Identifier QualifiedName
+typeIdToQualifiedName typeId = do
+  typeData <- gets (Map.lookup typeId . (.types))
+  case typeData of
+    Just td -> pure td.typeQualifiedName
+    Nothing -> pure QualifiedName {module_ = "", name = ""}
+
+-- | Look up the module name 'Text' for a 'ModuleId' from the internal state.
+moduleIdToName :: ModuleId -> Identifier Text
+moduleIdToName moduleId = do
+  moduleData <- gets (Map.lookup moduleId . (.modules))
+  case moduleData of
+    Just md -> pure md.moduleName
+    Nothing -> pure ""
+
+-- | Look up the 'QualifiedName' for a 'RequestId' from the internal state.
+requestIdToQualifiedName :: RequestId -> Identifier QualifiedName
+requestIdToQualifiedName requestId = do
+  requestData <- gets (Map.lookup requestId . (.requests))
+  case requestData of
+    Just rd -> pure rd.requestQualifiedName
+    Nothing -> pure QualifiedName {module_ = "", name = ""}
+
+-- | Look up the 'QualifiedName' for a 'ConstructorId' from the internal state.
+constructorIdToQualifiedName :: ConstructorId -> Identifier QualifiedName
+constructorIdToQualifiedName constructorId = do
+  constructorData <- gets (Map.lookup constructorId . (.constructors))
+  case constructorData of
+    Just cd -> pure cd.constructorQualifiedName
+    Nothing -> pure QualifiedName {module_ = "", name = ""}
+
+-- | Look up a variable by name and convert to the new resolution type.
+lookupVariableResolution :: Text -> Identifier (Maybe VariableResolution)
+lookupVariableResolution name = do
+  lookupVariable name >>= \case
+    Just variableId -> Just <$> variableIdToResolution variableId
+    Nothing -> pure Nothing
+
+-- | Look up a type by name and convert to the new resolution type.
+lookupTypeResolution :: Text -> Identifier (Maybe QualifiedName)
+lookupTypeResolution name = do
+  lookupType name >>= \case
+    Just typeId -> Just <$> typeIdToQualifiedName typeId
+    Nothing -> pure Nothing
+
+-- | Look up a request by name and convert to the new resolution type.
+lookupRequestResolution :: Text -> Identifier (Maybe QualifiedName)
+lookupRequestResolution name = do
+  lookupRequest name >>= \case
+    Just requestId -> Just <$> requestIdToQualifiedName requestId
+    Nothing -> pure Nothing
+
+-- | Look up a constructor by name and convert to the new resolution type.
+lookupConstructorResolution :: Text -> Identifier (Maybe QualifiedName)
+lookupConstructorResolution name = do
+  lookupConstructor name >>= \case
+    Just constructorId -> Just <$> constructorIdToQualifiedName constructorId
+    Nothing -> pure Nothing
 
 -- | Look up the variable slot of @name@ in the export table of @moduleId@.
 lookupModuleExportVariable :: ModuleId -> Text -> Identifier (Maybe VariableId)
@@ -1315,18 +1387,18 @@ resolveDeclaration = \case
 -- emitted a duplicate-name error), record an unresolved marker rather than
 -- inventing a sentinel id.
 liftSignatureVariable :: NameRef Parsed VariableRef -> Identifier (NameRef Identified VariableRef)
-liftSignatureVariable = liftSignature lookupVariable
+liftSignatureVariable = liftSignature lookupVariableResolution
 
 -- | Counterpart of 'liftSignatureVariable' for type signatures (enum / data
 -- type role / type synonym name).
 liftSignatureType :: NameRef Parsed TypeRef -> Identifier (NameRef Identified TypeRef)
-liftSignatureType = liftSignature lookupType
+liftSignatureType = liftSignature lookupTypeResolution
 
 liftSignatureRequest :: NameRef Parsed RequestRef -> Identifier (NameRef Identified RequestRef)
-liftSignatureRequest = liftSignature lookupRequest
+liftSignatureRequest = liftSignature lookupRequestResolution
 
 liftSignatureConstructor :: NameRef Parsed ConstructorRef -> Identifier (NameRef Identified ConstructorRef)
-liftSignatureConstructor = liftSignature lookupConstructor
+liftSignatureConstructor = liftSignature lookupConstructorResolution
 
 -- | Shared lookup-and-wrap helper for signature-position 'NameRef's.
 -- Phase B has already issued the id; here we just look it up and tag the
@@ -1428,13 +1500,15 @@ resolvePrimAgent PrimAgentDeclaration {..} = do
       Nothing -> do
         emitError (ErrorUnknownPrimRule sourceSpan ruleName)
         pure Nothing
-  case name'.resolution of
-    Just vid -> modify $ \s ->
+  -- Look up the VariableId internally to patch the VariableData.
+  maybeVariableId <- lookupVariable name.text
+  case maybeVariableId of
+    Just variableId -> modify $ \s ->
       s
         { variables =
             Map.adjust
               (\vd -> vd {variablePrimRule = primRule})
-              vid
+              variableId
               s.variables
         }
     Nothing -> pure ()
@@ -1493,7 +1567,9 @@ resolveTypeSynonym ::
 resolveTypeSynonym TypeSynonymDeclaration {..} = do
   name' <- liftSignatureType name
   rhs' <- resolveType rhs
-  case name'.resolution of
+  -- Look up the TypeId internally to patch the TypeData.
+  maybeTypeId <- lookupType name.text
+  case maybeTypeId of
     Just typeId -> updateTypeSynonymRhs typeId rhs'
     Nothing -> pure ()
   pure
@@ -1638,7 +1714,7 @@ resolveRecordPattern RecordPattern {..} = do
 resolveBareVariable :: NameRef Parsed VariableRef -> Identifier (NameRefResolution Identified VariableRef)
 resolveBareVariable nameRef =
   lookupVariable nameRef.text >>= \case
-    Just variableId -> pure (Just variableId)
+    Just variableId -> Just <$> variableIdToResolution variableId
     Nothing -> do
       emitError (ErrorUndefinedName nameRef.sourceSpan nameRef.text)
       pure Nothing
@@ -1646,7 +1722,9 @@ resolveBareVariable nameRef =
 resolveModuleRef :: NameRef Parsed ModuleRef -> Identifier (NameRefResolution Identified ModuleRef)
 resolveModuleRef nameRef =
   lookupModule nameRef.text >>= \case
-    Just moduleId -> pure (Just moduleId)
+    Just moduleId -> do
+      moduleName <- moduleIdToName moduleId
+      pure (Just moduleName)
     Nothing -> do
       emitError (ErrorNotAModule nameRef.sourceSpan nameRef.text)
       pure Nothing
@@ -1664,8 +1742,13 @@ resolveQualifiedRequestRef = \cases
     metadata <- resolveBareRequest nameRef
     pure (Nothing, identifiedNameRef metadata nameRef)
   (Just moduleRef) nameRef -> do
-    moduleMetadata <- resolveModuleRef moduleRef
-    metadata <- case moduleMetadata of
+    maybeModuleId <- lookupModule moduleRef.text
+    moduleMetadata <- case maybeModuleId of
+      Just moduleId -> Just <$> moduleIdToName moduleId
+      Nothing -> do
+        emitError (ErrorNotAModule moduleRef.sourceSpan moduleRef.text)
+        pure Nothing
+    metadata <- case maybeModuleId of
       Just moduleId -> resolveQualifiedRequest moduleId moduleRef.text nameRef
       Nothing -> pure Nothing
     pure
@@ -1676,7 +1759,7 @@ resolveQualifiedRequestRef = \cases
 resolveBareRequest :: NameRef Parsed RequestRef -> Identifier (NameRefResolution Identified RequestRef)
 resolveBareRequest nameRef =
   lookupRequest nameRef.text >>= \case
-    Just rid -> pure (Just rid)
+    Just requestId -> Just <$> requestIdToQualifiedName requestId
     Nothing -> do
       -- Distinguish "name does not exist" from "name exists but is not a
       -- request". The former is a generic K0102, the latter K0108.
@@ -1692,7 +1775,7 @@ resolveQualifiedRequest ::
   Identifier (NameRefResolution Identified RequestRef)
 resolveQualifiedRequest moduleId qualifierName nameRef =
   lookupModuleExportRequest moduleId nameRef.text >>= \case
-    Just rid -> pure (Just rid)
+    Just requestId -> Just <$> requestIdToQualifiedName requestId
     Nothing -> do
       emitError (ErrorUndefinedQualified nameRef.sourceSpan qualifierName nameRef.text)
       pure Nothing
@@ -1709,8 +1792,13 @@ resolveQualifiedConstructorRef = \cases
     metadata <- resolveBareConstructor nameRef
     pure (Nothing, identifiedNameRef metadata nameRef)
   (Just moduleRef) nameRef -> do
-    moduleMetadata <- resolveModuleRef moduleRef
-    metadata <- case moduleMetadata of
+    maybeModuleId <- lookupModule moduleRef.text
+    moduleMetadata <- case maybeModuleId of
+      Just moduleId -> Just <$> moduleIdToName moduleId
+      Nothing -> do
+        emitError (ErrorNotAModule moduleRef.sourceSpan moduleRef.text)
+        pure Nothing
+    metadata <- case maybeModuleId of
       Just moduleId -> resolveQualifiedConstructor moduleId moduleRef.text nameRef
       Nothing -> pure Nothing
     pure
@@ -1723,7 +1811,7 @@ resolveBareConstructor ::
   Identifier (NameRefResolution Identified ConstructorRef)
 resolveBareConstructor nameRef =
   lookupConstructor nameRef.text >>= \case
-    Just cid -> pure (Just cid)
+    Just constructorId -> Just <$> constructorIdToQualifiedName constructorId
     Nothing -> do
       lookupVariable nameRef.text >>= \case
         Just _ -> emitError (ErrorNotAConstructor nameRef.sourceSpan nameRef.text)
@@ -1737,7 +1825,7 @@ resolveQualifiedConstructor ::
   Identifier (NameRefResolution Identified ConstructorRef)
 resolveQualifiedConstructor moduleId qualifierName nameRef =
   lookupModuleExportConstructor moduleId nameRef.text >>= \case
-    Just cid -> pure (Just cid)
+    Just constructorId -> Just <$> constructorIdToQualifiedName constructorId
     Nothing -> do
       emitError (ErrorUndefinedQualified nameRef.sourceSpan qualifierName nameRef.text)
       pure Nothing
@@ -1784,7 +1872,7 @@ resolveTypeName :: TypeNameNode Parsed -> Identifier (TypeNameNode Identified)
 resolveTypeName TypeNameNode {name, sourceSpan} = do
   metadata <-
     lookupType name.text >>= \case
-      Just typeId -> pure (Just typeId)
+      Just typeId -> Just <$> typeIdToQualifiedName typeId
       Nothing -> do
         emitError (ErrorNotAType name.sourceSpan name.text)
         pure Nothing
@@ -1796,11 +1884,17 @@ resolveTypeName TypeNameNode {name, sourceSpan} = do
 
 resolveQualifiedType :: QualifiedTypeNode Parsed -> Identifier (QualifiedTypeNode Identified)
 resolveQualifiedType QualifiedTypeNode {qualifier, target, sourceSpan} = do
-  moduleMetadata <- resolveModuleRef qualifier
-  typeMetadata <- case moduleMetadata of
+  -- We still need the ModuleId internally for the export table lookup.
+  maybeModuleId <- lookupModule qualifier.text
+  moduleMetadata <- case maybeModuleId of
+    Just moduleId -> Just <$> moduleIdToName moduleId
+    Nothing -> do
+      emitError (ErrorNotAModule qualifier.sourceSpan qualifier.text)
+      pure Nothing
+  typeMetadata <- case maybeModuleId of
     Just moduleId ->
       lookupModuleExportType moduleId target.text >>= \case
-        Just typeId -> pure (Just typeId)
+        Just typeId -> Just <$> typeIdToQualifiedName typeId
         Nothing -> do
           emitError (ErrorUndefinedQualified target.sourceSpan qualifier.text target.text)
           pure Nothing
@@ -2193,15 +2287,15 @@ resolveUnaryOperatorAsCall UnaryOperatorExpression {operator, operand, sourceSpa
 -- present in 'Prim.primDefinitions') and are surfaced as a K9999.
 lookupPrimVariable :: Text -> Identifier (NameRefResolution Identified VariableRef)
 lookupPrimVariable primName = do
+  let qualifiedName = QualifiedName {module_ = "primitive", name = primName}
   vars <- gets (.variables)
-  let qname = QualifiedName {module_ = "primitive", name = primName}
-      hits =
-        [ vid
-          | (vid, vd) <- Map.toList vars,
-            vd.variableQualifiedName == Just qname
+  let hits =
+        [ ()
+          | (_variableId, variableData) <- Map.toList vars,
+            variableData.variableQualifiedName == Just qualifiedName
         ]
   case hits of
-    (vid : _) -> pure (Just vid)
+    (_ : _) -> pure (Just (ResolvedTopLevel qualifiedName))
     [] -> do
       emitError $
         ErrorInternal $
@@ -2488,9 +2582,10 @@ resolveFieldChainHead ::
 resolveFieldChainHead headRef labels totalSpan = do
   maybeVariableId <- lookupVariable headRef.text
   case maybeVariableId of
-    Just variableId ->
+    Just variableId -> do
       -- Head is a variable: keep the whole chain as field access.
-      pure (rebuildFieldAccessChain (varExpr (Just variableId)) labels)
+      resolution <- variableIdToResolution variableId
+      pure (rebuildFieldAccessChain (varExpr (Just resolution)) labels)
     Nothing -> do
       maybeModuleId <- lookupModule headRef.text
       case maybeModuleId of
@@ -2541,10 +2636,11 @@ resolveModuleQualifiedChain moduleId moduleRef labels totalSpan =
     (target : remainingLabels) -> do
       maybeVariableId <- lookupModuleExportVariable moduleId target.text
       variableMetadata <- case maybeVariableId of
-        Just variableId -> pure (Just variableId)
+        Just variableId -> Just <$> variableIdToResolution variableId
         Nothing -> do
           emitError (ErrorUndefinedQualified target.sourceSpan moduleRef.text target.text)
           pure Nothing
+      moduleName <- moduleIdToName moduleId
       let qualifiedReferenceSpan =
             SrcSpan
               { filePath = totalSpan.filePath,
@@ -2562,7 +2658,7 @@ resolveModuleQualifiedChain moduleId moduleRef labels totalSpan =
             NameRef
               { text = moduleRef.text,
                 sourceSpan = moduleRef.sourceSpan,
-                resolution = Just moduleId
+                resolution = Just moduleName
               }
           qualifiedReference =
             ExpressionQualifiedReference

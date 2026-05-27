@@ -259,19 +259,19 @@ dataDeclarations = describe "data declarations" $ do
           [ "data widget(w: integer)\n",
             "agent main() { widget(w = 1) }"
           ]
-    -- AST 上の typeName.metadata と identifiedTypes 側の TypeId が一致することを確認。
+    -- AST 上の typeName.resolution と identifiedTypes 側の QualifiedName が一致することを確認。
     let mainModule = head (Map.elems res.moduleASTs)
         typeNameRefResolution = head (collectDataTypeNameRefResolutiondata mainModule)
-        widgetTypeId =
+        widgetTypeQName =
           head
-            [ tid
-              | (tid, td) <- Map.toList res.identifiedTypes,
+            [ td.typeQualifiedName
+              | (_tid, td) <- Map.toList res.identifiedTypes,
                 bareNameOf td.typeQualifiedName == "widget"
             ]
         bareNameOf :: QualifiedName -> Text
         bareNameOf qn = qn.name
     case typeNameRefResolution of
-      Just tid -> tid `shouldBe` widgetTypeId
+      Just qname -> qname `shouldBe` widgetTypeQName
       Nothing ->
         expectationFailure "data declaration typeName resolved as Unresolved"
 

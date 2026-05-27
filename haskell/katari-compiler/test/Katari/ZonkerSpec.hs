@@ -21,7 +21,7 @@ import Katari.Typechecker.ConstraintGenerator
     VariableSupply (..),
     generateConstraints,
   )
-import Katari.Id (RequestId, VariableId)
+import Katari.Id (LocalVarId (..), RequestId, VariableId (..), VariableResolution (..))
 import Katari.Typechecker.Identifier
   ( IdentifierResult (..),
     RequestData,
@@ -296,7 +296,10 @@ basicZonk = describe "basic zonk" $ do
         Just fooVid = variableIdOf "foo" idResult
         names = [decl.name | DeclarationAgent decl <- mainModule.declarations]
         fooMeta = head [ref.resolution | ref <- names, ref.text == "foo"]
-    fooMeta `shouldBe` Just fooVid
+        resolveVarId = \case
+          ResolvedTopLevel qn -> Map.lookup qn idResult.topLevelVariablesByQName
+          ResolvedLocal (LocalVarId n) -> Just (VariableId n)
+    (fooMeta >>= resolveVarId) `shouldBe` Just fooVid
 
 -- ---------------------------------------------------------------------------
 -- TypeVar substitution

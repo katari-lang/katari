@@ -60,11 +60,13 @@ import Katari.Common (LiteralValue (..), TypePatternTag (..))
 import Katari.Diagnostic (Diagnostic, diagnosticError)
 import Katari.Id
   ( ConstructorId,
+    LocalVarId (..),
     ModuleId,
     QualifiedName (..),
     RequestId,
     TypeId (..),
-    VariableId,
+    VariableId (..),
+    VariableResolution (..),
   )
 import Katari.Prim (PrimRule (..))
 import Katari.SemanticType
@@ -261,35 +263,20 @@ data ConstraintState = ConstraintState
 
 data ConstraintContext = ConstraintContext
   { contextIdentifiedTypes :: Map TypeId TypeData,
-    -- | Reverse map for the 'RequestId' / 'ConstructorId' namespaces:
-    -- given a request or constructor id, find the call-side 'VariableId'
-    -- whose type lives in 'stateTypeEnvironment'. Populated from
-    -- 'IdentifierResult.identifiedRequests' / 'identifiedConstructors'.
     contextIdentifiedRequests :: Map RequestId RequestData,
     contextIdentifiedConstructors :: Map ConstructorId ConstructorData,
-    -- | Forward cross-link: 'VariableId' → 'RequestId'. Built from the
-    -- 'requestVariableId' fields of 'identifiedRequests' so the request
-    -- declaration walker can populate the singleton request for @req foo@'s
-    -- own signature without re-walking the AST.
+    contextVariablesByQName :: Map QualifiedName VariableId,
+    contextTypesByQName :: Map QualifiedName TypeId,
+    contextRequestsByQName :: Map QualifiedName RequestId,
+    contextConstructorsByQName :: Map QualifiedName ConstructorId,
     contextRequestOfVariable :: Map VariableId RequestId,
-    -- | For cycle detection
     contextSynonymVisited :: Set TypeId,
     contextEnclosingReturn :: Maybe TypeVariableId,
     contextEnclosingRequests :: Maybe RequestVariableId,
     contextEnclosingForBreak :: Maybe TypeVariableId,
-    -- | The type of the entire @block + where + then@ expression. @break e@
-    -- inside a request handler flows into this variable (skipping the then
-    -- clause).
     contextEnclosingHandleBreak :: Maybe TypeVariableId,
-    -- | The "resume" type variable for the innermost enclosing request
-    -- handler. @next e@ inside a handler body flows into this. There is at
-    -- most one in scope: 'NextStatement' is a lexically-scoped construct and
-    -- always refers to the innermost handler.
     contextEnclosingHandleNext :: Maybe TypeVariableId,
-    -- | Prim constraint-rule lookup, indexed by 'VariableId'. Populated
-    -- from 'IdentifierResult.primitiveRulesByVariableId' at the
-    -- pipeline entry. Empty for non-prim variables.
-    contextPrimRules :: Map VariableId PrimRule
+    contextPrimRules :: Map QualifiedName PrimRule
   }
 
 type CG = ReaderT ConstraintContext (State ConstraintState)
@@ -318,13 +305,21 @@ initialContext ::
   Map TypeId TypeData ->
   Map RequestId RequestData ->
   Map ConstructorId ConstructorData ->
-  Map VariableId PrimRule ->
+  Map QualifiedName VariableId ->
+  Map QualifiedName TypeId ->
+  Map QualifiedName RequestId ->
+  Map QualifiedName ConstructorId ->
+  Map QualifiedName PrimRule ->
   ConstraintContext
-initialContext types requests constructors primRules =
+initialContext types requests constructors variablesByQName typesByQName requestsByQName constructorsByQName primRules =
   ConstraintContext
     { contextIdentifiedTypes = types,
       contextIdentifiedRequests = requests,
       contextIdentifiedConstructors = constructors,
+      contextVariablesByQName = variablesByQName,
+      contextTypesByQName = typesByQName,
+      contextRequestsByQName = requestsByQName,
+      contextConstructorsByQName = constructorsByQName,
       contextRequestOfVariable =
         Map.fromList
           [ (rd.requestVariableId, rid)
@@ -504,33 +499,38 @@ literalValueToSemantic = \case
 -- synonyms on the fly with cycle detection.
 resolveTypeRef :: NameRef Identified TypeRef -> CG (SemanticType Unresolved)
 resolveTypeRef nameRef = case nameRef.resolution of
-  Just tid -> do
-    types <- asks (.contextIdentifiedTypes)
-    case Map.lookup tid types of
-      Just TypeData {typeSynonymRhs = Just rhs} -> do
-        visited <- asks (.contextSynonymVisited)
-        if Set.member tid visited
-          then do
-            emitError (ConstraintErrorTypeSynonymCycle nameRef.sourceSpan tid)
+  Just qualifiedName -> do
+    maybeTid <- asks (Map.lookup qualifiedName . (.contextTypesByQName))
+    case maybeTid of
+      Nothing -> freshTypeVar
+      Just tid -> do
+        types <- asks (.contextIdentifiedTypes)
+        case Map.lookup tid types of
+          Just TypeData {typeSynonymRhs = Just rhs} -> do
+            visited <- asks (.contextSynonymVisited)
+            if Set.member tid visited
+              then do
+                emitError (ConstraintErrorTypeSynonymCycle nameRef.sourceSpan tid)
+                freshTypeVar
+              else withSynonymVisit tid (elaborateType rhs)
+          Just TypeData {typeSynonymRhs = Nothing} ->
+            pure (SemanticTypeData tid)
+          Nothing ->
             freshTypeVar
-          else withSynonymVisit tid (elaborateType rhs)
-      Just TypeData {typeSynonymRhs = Nothing} ->
-        pure (SemanticTypeData tid)
-      Nothing ->
-        -- Identifier should have populated all entries; fall back defensively.
-        freshTypeVar
   Nothing -> freshTypeVar
 
 -- | Elaborate a list of @with@-clause request references into a single
 -- request set (concrete VariableIds; request type variables come into play
 -- only for inference, not for explicit annotations).
 elaborateRequestList :: [SyntacticRequest Identified] -> CG (SemanticRequest Unresolved)
-elaborateRequestList requests = do
+elaborateRequestList syntacticRequests = do
+  requestsByQName <- asks (.contextRequestsByQName)
   pure
     ( SemanticRequest
         ( Set.fromList
             [ SemanticRequestElementConcrete requestId
-              | SyntacticRequest {name = NameRef {resolution = Just requestId}} <- requests
+              | SyntacticRequest {name = NameRef {resolution = Just qualifiedName}} <- syntacticRequests,
+                Just requestId <- [Map.lookup qualifiedName requestsByQName]
             ]
         )
     )
@@ -636,7 +636,8 @@ walkRequestDecl RequestDeclaration {annotation, name, requestName, parameters, r
   -- The request's signature includes itself in its request set (a @req foo@
   -- raises @foo@). Identifier issued a 'RequestId' alongside the call-side
   -- 'VariableId' for this declaration; we translate via 'contextRequestOfVariable'.
-  reqId <- case variableIdOfName name of
+  maybeVid <- variableIdOfName name
+  reqId <- case maybeVid of
     Nothing -> pure Nothing
     Just vid -> asks (Map.lookup vid . (.contextRequestOfVariable))
   -- Special-case: `throw` is the universal recoverable-error capability.
@@ -706,10 +707,9 @@ walkPrimAgentDecl PrimAgentDeclaration {annotation, name, parameters, returnType
 walkDataDecl :: DataDeclaration Identified -> CG (DataDeclaration Constrained)
 walkDataDecl DataDeclaration {annotation, name, typeName, constructorName, parameters, sourceSpan} = do
   tCtor <- variableTypeFromName name
-  -- The TypeId of a data declaration is held directly by the AST. Only on
-  -- the @Unresolved@ side (parse / identify errors) is it @Nothing@, in
-  -- which case we fall back to @SemanticTypeUnknown@.
-  let tid = typeName.resolution
+  tid <- case typeName.resolution of
+    Nothing -> pure Nothing
+    Just qualifiedName -> asks (Map.lookup qualifiedName . (.contextTypesByQName))
   fields <- mapM elaborateDataParameter parameters
   let signature =
         SemanticTypeFunction
@@ -806,7 +806,11 @@ walkPattern maybeSubject = \case
     tx <- case maybeSubject of
       Just subject -> do
         case name.resolution of
-          Just vid -> bindVariable vid subject
+          Just resolution -> do
+            maybeVid <- resolveVariableId resolution
+            case maybeVid of
+              Just vid -> bindVariable vid subject
+              Nothing -> pure ()
           Nothing -> pure ()
         pure subject
       Nothing -> variableTypeFromName name
@@ -1149,9 +1153,8 @@ walkRequestHandler handlerBodyRequestVariable wholeBlockId RequestHandler {modul
   (parameters', paramSig) <- walkParameterListForSignature parameters
   retSemantic <- elaborateOrFresh returnType
   retTvId <- freshReturnTypeVar retSemantic
-  -- Handler's signature carries the handled request as its sole request, so
-  -- the underlying req's signature is a supertype.
-  let handlerReqId = name.resolution
+  requestsByQName <- asks (.contextRequestsByQName)
+  let handlerReqId = name.resolution >>= (`Map.lookup` requestsByQName)
   -- Handler body walks under e4 (the dedicated handler-request var) and the
   -- handle scope. 'next e' resumes the original request call, so 'e' is
   -- constrained against retTvId (= the next-tv); 'break e' targets
@@ -1400,8 +1403,8 @@ walkCallExpr CallExpression {callee, arguments, sourceSpan} = do
   -- so subtype-flavoured operator typing (e.g. @1 + 2 : Integer@) is
   -- preserved.
   primRule <- case callee' of
-    ExpressionVariable VariableExpression {name = NameRef {resolution = Just vid}} ->
-      asks (Map.lookup vid . (.contextPrimRules))
+    ExpressionVariable VariableExpression {name = NameRef {resolution = Just (ResolvedTopLevel qualifiedName)}} ->
+      asks (Map.lookup qualifiedName . (.contextPrimRules))
     _ -> pure Nothing
   resultType <- case primRule of
     Just rule | rule /= PrimRuleSimple -> applyPrimRule rule arguments' sourceSpan
@@ -1721,10 +1724,12 @@ walkHandleExpr HandleExpression {parallel, stateVariables, handlers, thenClause,
   handlers' <- mapM (walkRequestHandler handlerBodyRequestVariable wholeBlockId) handlers
 
   -- Request constraints
+  handlerRequestsByQName <- asks (.contextRequestsByQName)
   let handledRequestIds =
         Set.fromList
           [ SemanticRequestElementConcrete requestId
-            | RequestHandler {name = NameRef {resolution = Just requestId}} <- handlers
+            | RequestHandler {name = NameRef {resolution = Just qualifiedName}} <- handlers,
+              Just requestId <- [Map.lookup qualifiedName handlerRequestsByQName]
           ]
   let enclosingRequest = maybe emptyRequest singletonRequestVariable enclosingRequestVariable
       handledRequest = SemanticRequest handledRequestIds
@@ -1889,10 +1894,21 @@ walkQualifiedReferenceExpr QualifiedReferenceExpression {moduleQualifier, target
 -- Unresolved references get a fresh type variable (Identifier already
 -- reported the original error).
 variableTypeFromName :: NameRef Identified VariableRef -> CG (SemanticType Unresolved)
-variableTypeFromName nameRef = maybe freshTypeVar lookupVariable nameRef.resolution
+variableTypeFromName nameRef = case nameRef.resolution of
+  Nothing -> freshTypeVar
+  Just resolution -> do
+    maybeVid <- resolveVariableId resolution
+    maybe freshTypeVar lookupVariable maybeVid
 
-variableIdOfName :: NameRef Identified VariableRef -> Maybe VariableId
-variableIdOfName nameRef = nameRef.resolution
+resolveVariableId :: VariableResolution -> CG (Maybe VariableId)
+resolveVariableId = \case
+  ResolvedTopLevel qualifiedName -> asks (Map.lookup qualifiedName . (.contextVariablesByQName))
+  ResolvedLocal (LocalVarId localId) -> pure (Just (VariableId localId))
+
+variableIdOfName :: NameRef Identified VariableRef -> CG (Maybe VariableId)
+variableIdOfName nameRef = case nameRef.resolution of
+  Nothing -> pure Nothing
+  Just resolution -> resolveVariableId resolution
 
 -- | Type of a 'req' declaration's call-side, looked up via the request id.
 -- Each 'RequestId' has a known corresponding 'VariableId'
@@ -1902,24 +1918,30 @@ variableIdOfName nameRef = nameRef.resolution
 requestTypeFromName :: NameRef Identified RequestRef -> CG (SemanticType Unresolved)
 requestTypeFromName nameRef = case nameRef.resolution of
   Nothing -> freshTypeVar
-  Just rid -> do
-    requestData <- asks (Map.lookup rid . (.contextIdentifiedRequests))
-    case requestData of
-      Just rd -> lookupVariable rd.requestVariableId
+  Just qualifiedName -> do
+    maybeRid <- asks (Map.lookup qualifiedName . (.contextRequestsByQName))
+    case maybeRid of
       Nothing -> freshTypeVar
+      Just rid -> do
+        requestData <- asks (Map.lookup rid . (.contextIdentifiedRequests))
+        case requestData of
+          Just rd -> lookupVariable rd.requestVariableId
+          Nothing -> freshTypeVar
 
--- | Type of a 'data' declaration's constructor-function side, looked up
--- via the constructor id. Same plumbing as 'requestTypeFromName'.
 constructorTypeFromName ::
   NameRef Identified ConstructorRef ->
   CG (SemanticType Unresolved)
 constructorTypeFromName nameRef = case nameRef.resolution of
   Nothing -> freshTypeVar
-  Just cid -> do
-    ctorData <- asks (Map.lookup cid . (.contextIdentifiedConstructors))
-    case ctorData of
-      Just cd -> lookupVariable cd.constructorVariableId
+  Just qualifiedName -> do
+    maybeCid <- asks (Map.lookup qualifiedName . (.contextConstructorsByQName))
+    case maybeCid of
       Nothing -> freshTypeVar
+      Just cid -> do
+        ctorData <- asks (Map.lookup cid . (.contextIdentifiedConstructors))
+        case ctorData of
+          Just cd -> lookupVariable cd.constructorVariableId
+          Nothing -> freshTypeVar
 
 -- | If the optional type annotation is present, elaborate it; otherwise
 -- allocate a fresh type variable so the solver can infer it.
@@ -1967,14 +1989,17 @@ generateConstraints result = case runState (runReaderT action context) initialSt
         result.identifiedTypes
         result.identifiedRequests
         result.identifiedConstructors
+        result.topLevelVariablesByQName
+        result.typesByQName
+        result.requestsByQName
+        result.constructorsByQName
         primRules
-    -- Reconstruct the prim-rule lookup from every 'VariableData' that
-    -- the Identifier pass marked with a 'variablePrimRule'.
     primRules =
       Map.fromList
-        [ (vid, rule)
+        [ (qualifiedName, rule)
           | (vid, vd) <- Map.toList result.identifiedVariables,
-            Just rule <- [vd.variablePrimRule]
+            Just rule <- [vd.variablePrimRule],
+            Just qualifiedName <- [vd.variableQualifiedName]
         ]
     action = do
       allocateAllVariables result

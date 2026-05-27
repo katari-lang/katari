@@ -261,6 +261,13 @@ lookupLocal variableId = asks (Map.lookup variableId . (.localVars))
 -- Variable resolution
 -- ===========================================================================
 
+-- | Convert a 'VariableResolution' to the legacy 'VariableId' used internally
+-- by the lowering maps ('localVars', 'lsTopLevelBlocks', 'lsTopLevelQNames').
+variableResolutionToId :: IdentifierResult -> Id.VariableResolution -> Maybe VariableId
+variableResolutionToId idResult = \case
+  Id.ResolvedTopLevel qualifiedName -> Map.lookup qualifiedName idResult.topLevelVariablesByQName
+  Id.ResolvedLocal (Id.LocalVarId n) -> Just (Id.VariableId n)
+
 -- | Outcome of resolving a variable reference. An error has already been
 -- recorded via 'recordError' before 'ResolvedVarUnresolved' is returned.
 data ResolvedVar where
@@ -280,17 +287,23 @@ resolveVariable canBeLocal resolution sourceSpan nameText = case resolution of
   Nothing -> do
     recordError (LoweringErrorUnresolvedVariable sourceSpan nameText)
     pure ResolvedVarUnresolved
-  Just variableId -> do
-    mLocal <- if canBeLocal then lookupLocal variableId else pure Nothing
-    case mLocal of
-      Just irVar -> pure (ResolvedVarLocal irVar)
+  Just variableResolution -> do
+    idResult <- asks (.identifierResult)
+    case variableResolutionToId idResult variableResolution of
       Nothing -> do
-        maybeBlockId <- gets (Map.lookup variableId . (.lsTopLevelBlocks))
-        case maybeBlockId of
-          Just blockId -> pure (ResolvedVarTopLevel blockId)
+        recordError (LoweringErrorUnresolvedVariable sourceSpan nameText)
+        pure ResolvedVarUnresolved
+      Just variableId -> do
+        mLocal <- if canBeLocal then lookupLocal variableId else pure Nothing
+        case mLocal of
+          Just irVar -> pure (ResolvedVarLocal irVar)
           Nothing -> do
-            recordError (LoweringErrorUnresolvedVariable sourceSpan nameText)
-            pure ResolvedVarUnresolved
+            maybeBlockId <- gets (Map.lookup variableId . (.lsTopLevelBlocks))
+            case maybeBlockId of
+              Just blockId -> pure (ResolvedVarTopLevel blockId)
+              Nothing -> do
+                recordError (LoweringErrorUnresolvedVariable sourceSpan nameText)
+                pure ResolvedVarUnresolved
 
 -- | Resolve a variable reference in 'value' context: locals pass through,
 -- top-level callables emit a 'StatementLoadLiteral' carrying a
@@ -328,15 +341,24 @@ topLevelQNameForResolution ::
   Lower QualifiedName
 topLevelQNameForResolution resolution sourceSpan nameText =
   case resolution of
-    Just variableId -> do
-      mQname <- gets (Map.lookup variableId . (.lsTopLevelQNames))
-      case mQname of
-        Just qname -> pure qname
+    Just variableResolution -> do
+      idResult <- asks (.identifierResult)
+      case variableResolutionToId idResult variableResolution of
+        Just variableId -> do
+          mQname <- gets (Map.lookup variableId . (.lsTopLevelQNames))
+          case mQname of
+            Just qname -> pure qname
+            Nothing ->
+              throwError
+                ( Internal.internalError
+                    sourceSpan
+                    ("topLevelQNameForResolution: top-level callable '" <> nameText <> "' missing from lsTopLevelQNames")
+                )
         Nothing ->
           throwError
             ( Internal.internalError
                 sourceSpan
-                ("topLevelQNameForResolution: top-level callable '" <> nameText <> "' missing from lsTopLevelQNames")
+                ("topLevelQNameForResolution: callable '" <> nameText <> "' could not resolve VariableResolution to VariableId")
             )
     Nothing ->
       throwError
@@ -542,7 +564,11 @@ registerCallable ::
   (VariableId -> Lower ()) ->
   Lower ()
 registerCallable nameRef sourceSpan action = case nameRef.resolution of
-  Just variableId -> action variableId
+  Just variableResolution -> do
+    idResult <- asks (.identifierResult)
+    case variableResolutionToId idResult variableResolution of
+      Just variableId -> action variableId
+      Nothing -> recordError (LoweringErrorUnresolvedVariable sourceSpan nameRef.text)
   Nothing -> recordError (LoweringErrorUnresolvedVariable sourceSpan nameRef.text)
 
 -- | Build the runtime dispatch name for a primitive declaration. Prims
@@ -775,10 +801,14 @@ lowerAllDeclarations zonkResult = do
       (VariableId -> BlockId -> Lower (Maybe (Text, BlockId))) ->
       Lower (Maybe (Text, BlockId))
     resolveDecl nameRef action = case nameRef.resolution of
-      Just variableId -> do
-        maybeBlockId <- gets (Map.lookup variableId . (.lsTopLevelBlocks))
-        case maybeBlockId of
-          Just blockId -> action variableId blockId
+      Just variableResolution -> do
+        idResult <- asks (.identifierResult)
+        case variableResolutionToId idResult variableResolution of
+          Just variableId -> do
+            maybeBlockId <- gets (Map.lookup variableId . (.lsTopLevelBlocks))
+            case maybeBlockId of
+              Just blockId -> action variableId blockId
+              Nothing -> pure Nothing
           Nothing -> pure Nothing
       Nothing -> pure Nothing
 
@@ -845,13 +875,16 @@ lowerAllDeclarations zonkResult = do
 -- Produces a 'BlockAgent' wrapper that catches @return@ and references
 -- an inner 'BlockUser' body.
 lowerAgentDeclaration :: AST.AgentDeclaration Zonked -> BlockId -> Lower ()
-lowerAgentDeclaration decl =
+lowerAgentDeclaration decl blockId = do
+  idResult <- asks (.identifierResult)
+  let maybeVariableId = decl.name.resolution >>= variableResolutionToId idResult
   lowerAgentLike
     decl.name.text
-    decl.name.resolution
+    maybeVariableId
     decl.annotation
     decl.parameters
     decl.body
+    blockId
 
 -- | Shared lowering shape for any \"agent-like\" callable: a top-level
 -- 'AgentDeclaration', or a local 'AgentStatement'. Allocates param
@@ -953,13 +986,7 @@ lowerSimpleAgent blockId name paramVars prelude blk description inputSchema outp
 lowerHandler :: AST.RequestHandler Zonked -> Lower Handler
 lowerHandler hr = do
   reqQName <- case hr.name.resolution of
-    Just identRequestId -> do
-      idResult <- asks (.identifierResult)
-      case Map.lookup identRequestId idResult.identifiedRequests of
-        Just rd -> pure rd.requestQualifiedName
-        Nothing -> do
-          recordError (LoweringErrorUnresolvedVariable hr.sourceSpan hr.name.text)
-          pure (QualifiedName "<unresolved>" hr.name.text)
+    Just qualifiedName -> pure qualifiedName
     Nothing -> do
       recordError (LoweringErrorUnresolvedVariable hr.sourceSpan hr.name.text)
       pure (QualifiedName "<unresolved>" hr.name.text)
@@ -1095,19 +1122,25 @@ lowerBlockInto blk = go blk.statements
       Nothing -> do
         recordError (LoweringErrorUnresolvedVariable stmt.sourceSpan stmt.name.text)
         go rest
-      Just variableId -> do
-        blockId <- freshBlockId
-        var <- freshVarId (Just stmt.name.text)
-        withLocals [(variableId, var)] $ do
-          lowerAgentLike
-            stmt.name.text
-            (Just variableId)
-            stmt.annotation
-            stmt.parameters
-            stmt.body
-            blockId
-          emit (StatementMakeClosure MakeClosureData {output = var, block = blockId})
-          go rest
+      Just variableResolution -> do
+        idResult <- asks (.identifierResult)
+        case variableResolutionToId idResult variableResolution of
+          Nothing -> do
+            recordError (LoweringErrorUnresolvedVariable stmt.sourceSpan stmt.name.text)
+            go rest
+          Just variableId -> do
+            blockId <- freshBlockId
+            var <- freshVarId (Just stmt.name.text)
+            withLocals [(variableId, var)] $ do
+              lowerAgentLike
+                stmt.name.text
+                (Just variableId)
+                stmt.annotation
+                stmt.parameters
+                stmt.body
+                blockId
+              emit (StatementMakeClosure MakeClosureData {output = var, block = blockId})
+              go rest
     go (stmt : rest) = do
       exited <- lowerStmt stmt
       if exited then pure Nothing else go rest
@@ -1165,10 +1198,16 @@ lowerModifier :: AST.Modifier Zonked -> Lower (VarId, VarId)
 lowerModifier m = do
   newValue <- lowerExpr m.value
   targetVar <- case m.name.resolution of
-    Just variableId -> do
-      mLocal <- lookupLocal variableId
-      case mLocal of
-        Just v -> pure v
+    Just variableResolution -> do
+      idResult <- asks (.identifierResult)
+      case variableResolutionToId idResult variableResolution of
+        Just variableId -> do
+          mLocal <- lookupLocal variableId
+          case mLocal of
+            Just v -> pure v
+            Nothing -> do
+              recordError (LoweringErrorUnresolvedVariable m.sourceSpan m.name.text)
+              freshVarId Nothing
         Nothing -> do
           recordError (LoweringErrorUnresolvedVariable m.sourceSpan m.name.text)
           freshVarId Nothing
@@ -1451,9 +1490,15 @@ lowerMatchArm arm = do
 lowerPattern :: AST.Pattern Zonked -> Lower (MatchPattern, [(VariableId, VarId)])
 lowerPattern = \case
   AST.PatternVariable vp -> case vp.name.resolution of
-    Just variableId -> do
-      var <- freshVarId (Just vp.name.text)
-      pure (MatchPatternVariable var, [(variableId, var)])
+    Just variableResolution -> do
+      idResult <- asks (.identifierResult)
+      case variableResolutionToId idResult variableResolution of
+        Just variableId -> do
+          var <- freshVarId (Just vp.name.text)
+          pure (MatchPatternVariable var, [(variableId, var)])
+        Nothing -> do
+          recordError (LoweringErrorUnresolvedVariable vp.sourceSpan vp.name.text)
+          pure (MatchPatternAny, [])
     Nothing -> do
       recordError (LoweringErrorUnresolvedVariable vp.sourceSpan vp.name.text)
       pure (MatchPatternAny, [])
@@ -1464,14 +1509,7 @@ lowerPattern = \case
     pure (MatchPatternTuple subs, concat localss)
   AST.PatternQualifiedConstructor qp -> do
     ctorQName <- case qp.constructorName.resolution of
-      Just identCtorId -> do
-        idResult <- asks (.identifierResult)
-        case Map.lookup identCtorId idResult.identifiedConstructors of
-          Just cd -> pure cd.constructorQualifiedName
-          Nothing -> do
-            recordError
-              (LoweringErrorUnresolvedVariable qp.sourceSpan qp.constructorName.text)
-            pure (QualifiedName "<unresolved>" qp.constructorName.text)
+      Just qualifiedName -> pure qualifiedName
       Nothing -> do
         recordError
           (LoweringErrorUnresolvedVariable qp.sourceSpan qp.constructorName.text)
@@ -1584,9 +1622,15 @@ lowerForStates bindings = do
       let nameRef = binding.name
       initVar <- lowerExpr binding.initial
       case nameRef.resolution of
-        Just variableId -> do
-          bodyVar <- freshVarId (Just nameRef.text)
-          pure (Just ((bodyVar, initVar), [(variableId, bodyVar)]))
+        Just variableResolution -> do
+          idResult <- asks (.identifierResult)
+          case variableResolutionToId idResult variableResolution of
+            Just variableId -> do
+              bodyVar <- freshVarId (Just nameRef.text)
+              pure (Just ((bodyVar, initVar), [(variableId, bodyVar)]))
+            Nothing -> do
+              recordError (LoweringErrorUnresolvedVariable binding.sourceSpan nameRef.text)
+              pure Nothing
         Nothing -> do
           recordError (LoweringErrorUnresolvedVariable binding.sourceSpan nameRef.text)
           pure Nothing
@@ -1781,9 +1825,16 @@ lowerHandleExpr handleExpr = do
     mkHandleStateInit svb = do
       initVar <- lowerExpr svb.initial
       case svb.name.resolution of
-        Just variableId -> do
-          bodyVar <- freshVarId (Just svb.name.text)
-          pure (Just variableId, bodyVar, initVar)
+        Just variableResolution -> do
+          idResult <- asks (.identifierResult)
+          case variableResolutionToId idResult variableResolution of
+            Just variableId -> do
+              bodyVar <- freshVarId (Just svb.name.text)
+              pure (Just variableId, bodyVar, initVar)
+            Nothing -> do
+              recordError (LoweringErrorUnresolvedVariable svb.sourceSpan svb.name.text)
+              bodyVar <- freshVarId Nothing
+              pure (Nothing, bodyVar, initVar)
         Nothing -> do
           recordError (LoweringErrorUnresolvedVariable svb.sourceSpan svb.name.text)
           bodyVar <- freshVarId Nothing

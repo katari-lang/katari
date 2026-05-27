@@ -63,10 +63,12 @@ import Katari.AST
     NameRef (..),
   )
 import Katari.Id
-  ( QualifiedName,
+  ( LocalVarId (..),
+    QualifiedName,
     RequestId,
     TypeId,
-    VariableId,
+    VariableId (..),
+    VariableResolution (..),
     renderQualifiedName,
   )
 import Katari.SemanticType
@@ -267,6 +269,13 @@ data DataFieldInfo = DataFieldInfo
 -- | Maps each data type's 'TypeId' to its qname + per-field info.
 type DataDefs = Map TypeId DataInfo
 
+-- | Convert a 'VariableResolution' to the legacy 'VariableId' used internally
+-- by 'identifiedVariables' and 'zonkedTypeEnvironment'.
+resolveVariableId :: IdentifierResult -> VariableResolution -> Maybe VariableId
+resolveVariableId idResult = \case
+  ResolvedTopLevel qualifiedName -> Map.lookup qualifiedName idResult.topLevelVariablesByQName
+  ResolvedLocal (LocalVarId n) -> Just (VariableId n)
+
 -- | Build 'DataDefs' from the Zonked output. Each @data@ declaration
 -- contributes one entry: its 'TypeId' maps to the constructor qname,
 -- field types (from 'zonkedTypeEnvironment'), and per-field
@@ -281,7 +290,8 @@ buildDataDefs idResult zonkResult =
               DeclarationData dataDecl <- m.declarations,
               let annotations =
                     Map.fromList [(p.name, p.annotation) | p <- dataDecl.parameters],
-              Just variableId <- [dataDecl.name.resolution],
+              Just variableResolution <- [dataDecl.name.resolution],
+              Just variableId <- [resolveVariableId idResult variableResolution],
               Just variableData <-
                 [ Map.lookup
                     variableId
