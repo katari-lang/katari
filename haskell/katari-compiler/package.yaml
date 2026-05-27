@@ -108,6 +108,7 @@ dependencies:
   - hashable
   - safe
   - vector
+  - parallel
 
 default-extensions:
   - DataKinds

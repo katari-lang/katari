@@ -182,7 +182,8 @@ ensureWorkspaceLoaded st root = do
                           wsLineCache = Map.empty,
                           wsOpenFiles = Set.empty,
                           wsLastResult = Nothing,
-                          wsOccIndex = Nothing
+                          wsOccIndex = Nothing,
+                          wsCompileCache = Map.empty
                         }
                 atomically $ modifyTVar' st.workspaces (Map.insert root ws)
 
@@ -243,7 +244,8 @@ recompileWorkspace st root = do
                   w
                     { wsLastResult = Just result,
                       wsOccIndex =
-                        Just (buildOccurrenceIndex result.identifierResult result.zonkResult)
+                        Just (buildOccurrenceIndex result.identifierResult result.zonkResult),
+                      wsCompileCache = result.updatedCache
                     }
               )
               root

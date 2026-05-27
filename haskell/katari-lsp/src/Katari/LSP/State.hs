@@ -34,7 +34,7 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Vector (Vector)
 import qualified Data.Vector as Vector
-import Katari.Compile (CompileInput (..), CompileResult, SourceEntry (..))
+import Katari.Compile (CompileInput (..), CompileResult, ModuleCache, SourceEntry (..))
 import qualified Katari.Project.Config as Project
 import qualified Katari.Project.Discovery as Project
 import qualified Katari.Project.Resolve as Project
@@ -61,7 +61,11 @@ data WorkspaceState = WorkspaceState
     -- instead of re-running 'Text.lines' on every request.
     wsLineCache :: Map FilePath (Vector Text),
     wsLastResult :: Maybe CompileResult,
-    wsOccIndex :: Maybe OccurrenceIndex
+    wsOccIndex :: Maybe OccurrenceIndex,
+    -- | Per-module compilation cache from the most recent compile.
+    -- Fed back into the next 'CompileInput' so unchanged modules
+    -- skip typechecking (in-memory incremental compilation).
+    wsCompileCache :: Map Text ModuleCache
   }
 
 -- | What 'scheduleRecompile' will compile when its debounce fires.
@@ -111,7 +115,7 @@ newServerState = do
 -- changes.
 snapshotWorkspaceSources :: WorkspaceState -> CompileInput
 snapshotWorkspaceSources ws =
-  CompileInput {sources = Map.map applyBuffer ws.wsAssembly.sources, cache = Map.empty}
+  CompileInput {sources = Map.map applyBuffer ws.wsAssembly.sources, cache = ws.wsCompileCache}
   where
     applyBuffer entry =
       case Map.lookup entry.sourcePath ws.wsFiles of

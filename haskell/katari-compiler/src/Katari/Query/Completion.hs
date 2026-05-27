@@ -52,9 +52,7 @@ import Katari.SourceSpan (Position, SourceSpan (..))
 import Katari.Typechecker.Identifier
   ( ConstructorData (..),
     IdentifierResult (..),
-    RequestData (..),
     SymbolEntry (..),
-    TypeData (..),
   )
 import Katari.Typechecker.ScopeIndex qualified as Scope
 import Katari.Typechecker.Zonker (ZonkResult (..))
