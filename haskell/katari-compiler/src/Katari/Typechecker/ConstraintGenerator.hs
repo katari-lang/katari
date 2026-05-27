@@ -42,6 +42,7 @@ module Katari.Typechecker.ConstraintGenerator
     -- * Entry point
     generateConstraints,
     generateConstraintsForModule,
+    generateConstraintsForSCC,
   )
 where
 
@@ -2034,6 +2035,87 @@ generateConstraintsForModule importedTypes result targetModuleName targetModuleI
           end = Position {line = 0, column = 0}
         }
 
+-- | Run constraint generation for a single SCC within a module.
+-- Variables whose 'QualifiedName' appears in @knownTypes@ (imported
+-- types from other modules plus resolved types from upstream SCCs in
+-- the same module) are pre-bound to the resolved type. Only variables
+-- whose 'QualifiedName' is in @sccQualifiedNames@ get fresh type
+-- variables; the rest are left unbound (CG's 'lookupVariable'
+-- allocates on demand).
+--
+-- Only declarations whose name belongs to @sccQualifiedNames@ are
+-- walked; other declarations are skipped. The returned
+-- 'constrainedModules' contains a partial module with only the SCC's
+-- walked declarations.
+generateConstraintsForSCC ::
+  Map QualifiedName (SemanticType Resolved) ->
+  IdentifierResult ->
+  ModuleId ->
+  Set QualifiedName ->
+  (ConstraintGenResult, [ConstraintError])
+generateConstraintsForSCC knownTypes result targetModuleId sccQualifiedNames =
+  case runState (runReaderT action context) initialState of
+    (constrainedDeclarations, finalState) ->
+      ( ConstraintGenResult
+          { constrainedModules = Map.singleton targetModuleId (Module {declarations = constrainedDeclarations, sourceSpan = moduleSpan}),
+            typeEnvironment = finalState.stateTypeEnvironment,
+            constraints = finalState.stateConstraints,
+            variableSupply =
+              VariableSupply
+                { typeVarSupply = finalState.stateNextTypeVariableId,
+                  requestVarSupply = finalState.stateNextRequestVariableId
+                }
+          },
+        finalState.stateErrors
+      )
+  where
+    context = buildContext result
+    moduleSpan = case Map.lookup targetModuleId result.moduleASTs of
+      Just moduleAST -> moduleAST.sourceSpan
+      Nothing -> emptySrcSpan
+    action = do
+      allocateVariablesForSCC knownTypes sccQualifiedNames result
+      case Map.lookup targetModuleId result.moduleASTs of
+        Just moduleAST -> walkDeclarationsForSCC sccQualifiedNames moduleAST.declarations
+        Nothing -> pure []
+    emptySrcSpan =
+      SrcSpan
+        { filePath = "",
+          start = Position {line = 0, column = 0},
+          end = Position {line = 0, column = 0}
+        }
+
+-- | Walk only declarations belonging to the SCC. Data declarations
+-- are included when their QualifiedName is in the SCC set (they form
+-- singleton SCCs). Type synonyms and imports are skipped (they emit
+-- no constraints and are handled separately during module assembly).
+walkDeclarationsForSCC :: Set QualifiedName -> [Declaration Identified] -> CG [Declaration Constrained]
+walkDeclarationsForSCC sccQualifiedNames = go
+  where
+    go [] = pure []
+    go (declaration : rest) = case declarationInSCC declaration of
+      Just True -> do
+        walked <- walkDeclaration declaration
+        remaining <- go rest
+        pure (walked : remaining)
+      _ -> go rest
+
+    declarationInSCC :: Declaration Identified -> Maybe Bool
+    declarationInSCC = \case
+      DeclarationAgent declaration -> Just (nameInSCC declaration.name)
+      DeclarationRequest declaration -> Just (nameInSCC declaration.name)
+      DeclarationExternalAgent declaration -> Just (nameInSCC declaration.name)
+      DeclarationPrimAgent declaration -> Just (nameInSCC declaration.name)
+      DeclarationData declaration -> Just (nameInSCC declaration.name)
+      DeclarationTypeSynonym _ -> Nothing
+      DeclarationImport _ -> Nothing
+      DeclarationError _ -> Nothing
+
+    nameInSCC :: NameRef Identified VariableRef -> Bool
+    nameInSCC nameRef = case nameRef.resolution of
+      Just (ResolvedTopLevel qualifiedName) -> Set.member qualifiedName sccQualifiedNames
+      _ -> False
+
 -- | Pre-bind imported variables to their resolved types (lifted to
 -- 'Unresolved'), and allocate fresh type variables for top-level
 -- variables owned by the target module. Local variables and
@@ -2054,6 +2136,28 @@ allocateVariablesForModule importedTypes targetModuleName result =
           | Just resolvedType <- Map.lookup qualifiedName importedTypes ->
               bindVariable variableId (liftResolvedToUnresolved resolvedType)
           | qualifiedName.module_ == targetModuleName -> do
+              fresh <- freshTypeVar
+              bindVariable variableId fresh
+          | otherwise -> pure ()
+        Nothing -> pure ()
+
+-- | Like 'allocateVariablesForModule' but for a single SCC. Variables
+-- in @knownTypes@ are pre-bound as concrete; variables whose
+-- 'QualifiedName' is in @sccQualifiedNames@ get fresh type variables.
+allocateVariablesForSCC ::
+  Map QualifiedName (SemanticType Resolved) ->
+  Set QualifiedName ->
+  IdentifierResult ->
+  CG ()
+allocateVariablesForSCC knownTypes sccQualifiedNames result =
+  mapM_ allocate (Map.toList result.identifiedVariables)
+  where
+    allocate (variableId, variableData) =
+      case variableData.variableQualifiedName of
+        Just qualifiedName
+          | Just resolvedType <- Map.lookup qualifiedName knownTypes ->
+              bindVariable variableId (liftResolvedToUnresolved resolvedType)
+          | Set.member qualifiedName sccQualifiedNames -> do
               fresh <- freshTypeVar
               bindVariable variableId fresh
           | otherwise -> pure ()

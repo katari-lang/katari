@@ -13,10 +13,13 @@
 --   → identify         -- emits import-cycle (K0110) and missing-import (K0107)
 --                      --   diagnostics in addition to name-resolution errors
 --   → for each module in topological order:
---       generateConstraintsForModule  -- per-module CG with imported types
---       → solve                       -- per-module solving
---       → zonk                        -- per-module zonking
---       → extractModuleInterface      -- export resolved types for downstream
+--       agentSCCs              -- split declarations into SCC groups
+--       for each SCC in dependency order:
+--         generateConstraintsForSCC  -- per-SCC CG with known types
+--         → solve                    -- per-SCC solving
+--         → zonk                     -- per-SCC zonking
+--         → accumulate resolved types for downstream SCCs
+--       assembleZonkedModule   -- merge SCC results into full Module Zonked
 --   → lower            -- → IRModule (pure, whole-program)
 --   → buildSchemas     -- → [SchemaEntry] (independent of lower; reads ZonkResult)
 -- @
@@ -49,10 +52,23 @@ import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as Text
-import Katari.AST (Module, Phase (Parsed, Zonked))
-import Katari.Common qualified as Common
+import Katari.AST
+  ( AgentDeclaration (..),
+    DataDeclaration (..),
+    Declaration (..),
+    ExternalAgentDeclaration (..),
+    Module (..),
+    NameRef (..),
+    Phase (Identified, Parsed, Zonked),
+    PrimAgentDeclaration (..),
+    RequestDeclaration (..),
+    TypeSynonymDeclaration (..),
+    retagNameRef,
+    retagSyntacticType,
+  )
 import Katari.Diagnostic (Diagnostic, hasErrors)
-import Katari.Id (ModuleId, QualifiedName (..), RequestId, TypeId, VariableId)
+import Katari.Id (ModuleId, QualifiedName (..), RequestId, TypeId, VariableId, VariableResolution (..))
+import Katari.SourceSpan (Position (..), SourceSpan (..))
 import Katari.IR (IRModule)
 import Katari.Lexer as Lexer
 import Katari.Lowering (lowerProgram)
@@ -61,14 +77,14 @@ import Katari.Parser qualified as Parser
 import Katari.Schema (SchemaEntry, buildSchemas)
 import Katari.SemanticType (Resolved, SemanticType)
 import Katari.Stdlib qualified as Stdlib
-import Katari.Typechecker.ConstraintGenerator (generateConstraintsForModule)
+import Katari.Typechecker.AgentGraph (agentSCCs)
+import Katari.Typechecker.ConstraintGenerator (generateConstraintsForSCC)
 import Katari.Typechecker.ConstraintGenerator qualified as CG
 import Katari.Typechecker.Exhaustive (checkExhaustive)
 import Katari.Typechecker.Exhaustive qualified as Exhaustive
 import Katari.Typechecker.Identifier (IdentifierResult (..), identify)
 import Katari.Typechecker.Identifier qualified as Identifier
 import Katari.Typechecker.ImportGraph (topologicalSort)
-import Katari.Typechecker.ModuleInterface (ModuleInterface (..), extractModuleInterface)
 import Katari.Typechecker.Solver (SolverResult (..), solve)
 import Katari.Typechecker.Solver qualified as Solver
 import Katari.Typechecker.Zonker (ZonkResult (..), zonk)
@@ -184,7 +200,7 @@ compile input =
         Map.map
           (qname . (.requestQualifiedName))
           idResult.identifiedRequests
-      qname (Common.QualifiedName _ qualifiedNameComponent) = qualifiedNameComponent
+      qname (QualifiedName _ qualifiedNameComponent) = qualifiedNameComponent
 
       -- Build module name → ModuleId reverse map.
       moduleIdByName =
@@ -255,7 +271,8 @@ data TypecheckAccumulator = TypecheckAccumulator
     accZonkedModuleNames :: Map ModuleId Text,
     accZonkedTypeEnvironment :: Map VariableId (SemanticType Resolved),
     accSolverResult :: SolverResult,
-    accDiagnostics :: [Diagnostic]
+    accDiagnostics :: [Diagnostic],
+    accSCCDeclarations :: Map QualifiedName (Declaration Zonked)
   }
 
 typecheckModules ::
@@ -273,7 +290,8 @@ typecheckModules idResult solverTypeNames solverReqNames moduleIdByName moduleOr
             accZonkedModuleNames = Map.empty,
             accZonkedTypeEnvironment = Map.empty,
             accSolverResult = SolverResult {typeSubstitution = Map.empty, requestSubstitution = Map.empty},
-            accDiagnostics = []
+            accDiagnostics = [],
+            accSCCDeclarations = Map.empty
           }
       final = foldl' (typecheckOneModule idResult solverTypeNames solverReqNames moduleIdByName) initial moduleOrder
       mergedZonkResult =
@@ -296,37 +314,155 @@ typecheckOneModule idResult solverTypeNames solverReqNames moduleIdByName accumu
   case Map.lookup moduleName moduleIdByName of
     Nothing -> accumulator
     Just moduleId ->
-      let (cgResult, cgErrors) = generateConstraintsForModule accumulator.accImportedTypes idResult moduleName moduleId
-          cgDiags = map (CG.toDiagnostic solverTypeNames) cgErrors
-          (solverResult_, solverErrors) = solve cgResult
-          solverDiags = map (Solver.toDiagnostic solverTypeNames solverReqNames) solverErrors
-          (zonkResult_, zonkErrors) = zonk idResult cgResult solverResult_
-          zonkDiags = map Zonker.toDiagnostic zonkErrors
-          interface = extractModuleInterface moduleName idResult.identifiedVariables zonkResult_.zonkedTypeEnvironment
-          importedVariableIds =
-            Map.keysSet
-              ( Map.filter
-                  ( \variableData -> case variableData.variableQualifiedName of
-                      Just qualifiedName ->
-                        Map.member qualifiedName accumulator.accImportedTypes
-                      Nothing -> False
-                  )
-                  idResult.identifiedVariables
-              )
-          ownedTypeEnvironment =
-            Map.withoutKeys zonkResult_.zonkedTypeEnvironment importedVariableIds
-       in TypecheckAccumulator
-            { accImportedTypes = Map.union accumulator.accImportedTypes interface.exportedTypes,
-              accZonkedModules = Map.union accumulator.accZonkedModules zonkResult_.zonkedModules,
-              accZonkedModuleNames = Map.union accumulator.accZonkedModuleNames zonkResult_.zonkedModuleNames,
-              accZonkedTypeEnvironment = Map.union accumulator.accZonkedTypeEnvironment ownedTypeEnvironment,
-              accSolverResult =
-                SolverResult
-                  { typeSubstitution = Map.union solverResult_.typeSubstitution accumulator.accSolverResult.typeSubstitution,
-                    requestSubstitution = Map.union solverResult_.requestSubstitution accumulator.accSolverResult.requestSubstitution
-                  },
-              accDiagnostics = accumulator.accDiagnostics <> cgDiags <> solverDiags <> zonkDiags
+      let moduleAST = Map.lookup moduleId idResult.moduleASTs
+          sccs = case moduleAST of
+            Just ast -> agentSCCs moduleName ast
+            Nothing -> []
+          sccAccumulator = foldl' (typecheckOneSCC idResult solverTypeNames solverReqNames moduleId) accumulator sccs
+          assembledModule = case moduleAST of
+            Just identifiedModule -> assembleZonkedModule identifiedModule sccAccumulator.accSCCDeclarations
+            Nothing -> Module {declarations = [], sourceSpan = emptySrcSpan}
+       in sccAccumulator
+            { accZonkedModules = Map.insert moduleId assembledModule sccAccumulator.accZonkedModules,
+              accZonkedModuleNames = Map.insert moduleId moduleName sccAccumulator.accZonkedModuleNames,
+              accSCCDeclarations = Map.empty
             }
+  where
+    emptySrcSpan =
+      SrcSpan
+        { filePath = "",
+          start = Position {line = 0, column = 0},
+          end = Position {line = 0, column = 0}
+        }
+
+typecheckOneSCC ::
+  IdentifierResult ->
+  Map TypeId Text ->
+  Map RequestId Text ->
+  ModuleId ->
+  TypecheckAccumulator ->
+  Set.Set QualifiedName ->
+  TypecheckAccumulator
+typecheckOneSCC idResult solverTypeNames solverReqNames moduleId accumulator sccQualifiedNames =
+  let (cgResult, cgErrors) = generateConstraintsForSCC accumulator.accImportedTypes idResult moduleId sccQualifiedNames
+      cgDiags = map (CG.toDiagnostic solverTypeNames) cgErrors
+      (solverResult_, solverErrors) = solve cgResult
+      solverDiags = map (Solver.toDiagnostic solverTypeNames solverReqNames) solverErrors
+      (zonkResult_, zonkErrors) = zonk idResult cgResult solverResult_
+      zonkDiags = map Zonker.toDiagnostic zonkErrors
+      sccInterface = extractSCCInterface sccQualifiedNames idResult.identifiedVariables zonkResult_.zonkedTypeEnvironment
+      knownVariableIds =
+        Map.keysSet
+          ( Map.filter
+              ( \variableData -> case variableData.variableQualifiedName of
+                  Just qualifiedName ->
+                    Map.member qualifiedName accumulator.accImportedTypes
+                  Nothing -> False
+              )
+              idResult.identifiedVariables
+          )
+      ownedTypeEnvironment =
+        Map.withoutKeys zonkResult_.zonkedTypeEnvironment knownVariableIds
+      sccDeclarations = case Map.lookup moduleId zonkResult_.zonkedModules of
+        Just sccModule -> sccModule.declarations
+        Nothing -> []
+      sccDeclMap = foldl' indexDeclaration accumulator.accSCCDeclarations sccDeclarations
+   in TypecheckAccumulator
+        { accImportedTypes = Map.union accumulator.accImportedTypes sccInterface,
+          accZonkedModules = accumulator.accZonkedModules,
+          accZonkedModuleNames = accumulator.accZonkedModuleNames,
+          accZonkedTypeEnvironment = Map.union accumulator.accZonkedTypeEnvironment ownedTypeEnvironment,
+          accSolverResult =
+            SolverResult
+              { typeSubstitution = Map.union solverResult_.typeSubstitution accumulator.accSolverResult.typeSubstitution,
+                requestSubstitution = Map.union solverResult_.requestSubstitution accumulator.accSolverResult.requestSubstitution
+              },
+          accDiagnostics = accumulator.accDiagnostics <> cgDiags <> solverDiags <> zonkDiags,
+          accSCCDeclarations = sccDeclMap
+        }
+
+extractSCCInterface ::
+  Set.Set QualifiedName ->
+  Map VariableId Identifier.VariableData ->
+  Map VariableId (SemanticType Resolved) ->
+  Map QualifiedName (SemanticType Resolved)
+extractSCCInterface sccQualifiedNames variables typeEnvironment =
+  Map.fromList
+    [ (qualifiedName, resolvedType)
+      | (variableId, variableData) <- Map.toList variables,
+        Just qualifiedName <- [variableData.variableQualifiedName],
+        Set.member qualifiedName sccQualifiedNames,
+        Just resolvedType <- [Map.lookup variableId typeEnvironment]
+    ]
+
+indexDeclaration ::
+  Map QualifiedName (Declaration Zonked) ->
+  Declaration Zonked ->
+  Map QualifiedName (Declaration Zonked)
+indexDeclaration declarationMap declaration = case declarationQualifiedName declaration of
+  Just qualifiedName -> Map.insert qualifiedName declaration declarationMap
+  Nothing -> declarationMap
+
+declarationQualifiedName :: Declaration Zonked -> Maybe QualifiedName
+declarationQualifiedName = \case
+  DeclarationAgent AgentDeclaration {name = NameRef {resolution}} -> resolveToQName resolution
+  DeclarationRequest RequestDeclaration {name = NameRef {resolution}} -> resolveToQName resolution
+  DeclarationExternalAgent ExternalAgentDeclaration {name = NameRef {resolution}} -> resolveToQName resolution
+  DeclarationPrimAgent PrimAgentDeclaration {name = NameRef {resolution}} -> resolveToQName resolution
+  DeclarationData DataDeclaration {name = NameRef {resolution}} -> resolveToQName resolution
+  DeclarationTypeSynonym _ -> Nothing
+  DeclarationImport _ -> Nothing
+  DeclarationError _ -> Nothing
+
+assembleZonkedModule ::
+  Module Identified ->
+  Map QualifiedName (Declaration Zonked) ->
+  Module Zonked
+assembleZonkedModule identifiedModule sccDeclarationMap =
+  Module
+    { declarations =
+        map
+          ( \declaration -> case identifiedDeclQName declaration of
+              Just qualifiedName -> case Map.lookup qualifiedName sccDeclarationMap of
+                Just zonkedDeclaration -> zonkedDeclaration
+                Nothing -> retagNonCallableDeclaration declaration
+              Nothing -> retagNonCallableDeclaration declaration
+          )
+          identifiedModule.declarations,
+      sourceSpan = identifiedModule.sourceSpan
+    }
+
+identifiedDeclQName :: Declaration Identified -> Maybe QualifiedName
+identifiedDeclQName = \case
+  DeclarationAgent AgentDeclaration {name = NameRef {resolution}} -> resolveToQName resolution
+  DeclarationRequest RequestDeclaration {name = NameRef {resolution}} -> resolveToQName resolution
+  DeclarationExternalAgent ExternalAgentDeclaration {name = NameRef {resolution}} -> resolveToQName resolution
+  DeclarationPrimAgent PrimAgentDeclaration {name = NameRef {resolution}} -> resolveToQName resolution
+  DeclarationData DataDeclaration {name = NameRef {resolution}} -> resolveToQName resolution
+  DeclarationTypeSynonym _ -> Nothing
+  DeclarationImport _ -> Nothing
+  DeclarationError _ -> Nothing
+
+resolveToQName :: Maybe VariableResolution -> Maybe QualifiedName
+resolveToQName = \case
+  Just (ResolvedTopLevel qualifiedName) -> Just qualifiedName
+  _ -> Nothing
+
+retagNonCallableDeclaration :: Declaration Identified -> Declaration Zonked
+retagNonCallableDeclaration = \case
+  DeclarationTypeSynonym TypeSynonymDeclaration {name, rhs, sourceSpan} ->
+    DeclarationTypeSynonym
+      TypeSynonymDeclaration
+        { name = retagNameRef name,
+          rhs = retagSyntacticType rhs,
+          sourceSpan = sourceSpan
+        }
+  DeclarationImport declaration -> DeclarationImport declaration
+  DeclarationError sourceSpan -> DeclarationError sourceSpan
+  -- Callable declarations should never reach here; if they do, leave as error sentinel.
+  _ -> DeclarationError placeholderSpan
+    where
+      placeholderSpan = SrcSpan {filePath = "", start = Position {line = 0, column = 0}, end = Position {line = 0, column = 0}}
 
 -- ===========================================================================
 -- Parse helper
