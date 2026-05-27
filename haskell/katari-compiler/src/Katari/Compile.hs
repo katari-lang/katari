@@ -35,6 +35,7 @@ module Katari.Compile
     SourceEntry (..),
     CompileInput (..),
     CompileResult (..),
+    CompileLog (..),
 
     -- * Entry
     compile,
@@ -131,6 +132,17 @@ newtype CompileInput = CompileInput
   }
   deriving (Show)
 
+-- | Structured progress log emitted at each phase boundary. Callers
+-- (CLI, LSP, playground) can render these to show compile progress.
+data CompileLog where
+  CompileLogParsing :: CompileLog
+  CompileLogIdentifying :: CompileLog
+  CompileLogTypechecking :: Text -> Int -> Int -> CompileLog
+  CompileLogLowering :: CompileLog
+  CompileLogSchemaGeneration :: CompileLog
+  CompileLogComplete :: CompileLog
+  deriving (Show)
+
 -- | Output of 'compile'. The 'diagnostics' field is the single source of
 -- truth for success / failure; the @Maybe@-wrapped artefacts ('irModule',
 -- 'schemaEntries') are convenience hints that mirror @not (hasErrors
@@ -156,7 +168,11 @@ data CompileResult = CompileResult
     -- diagnostics are present) so the editor can show partial results.
     solverResult :: SolverResult,
     -- | Zonker output for LSP type-on-hover. Always returned.
-    zonkResult :: ZonkResult
+    zonkResult :: ZonkResult,
+    -- | Structured compile log, one entry per phase boundary. Purely
+    -- additive: callers may ignore this field. Useful for CLI / LSP
+    -- progress indicators.
+    compileLogs :: [CompileLog]
   }
 
 -- ===========================================================================
@@ -228,9 +244,18 @@ compile input =
         ]
       moduleOrder = sortedStdlibNames ++ processedUserNames ++ remainingUserNames
 
-      -- Per-module typecheck loop.
-      (mergedSolverResult, mergedZonkResult, typecheckDiags) =
+      -- Per-module typecheck loop (emits per-module / per-SCC logs).
+      (mergedSolverResult, mergedZonkResult, typecheckDiags, typecheckLogs) =
         typecheckModules idResult solverTypeNames solverReqNames moduleIdByName moduleOrder
+
+      -- NOTE (speculative lowering): In the current pure pipeline,
+      -- typechecking must complete before lowering because Lowering reads
+      -- ZonkResult (for schema computation inside AgentBlock). The
+      -- pipeline structure is designed so that a future version can
+      -- introduce `par` / `pseq` to evaluate typechecking and a
+      -- schema-free lowering pass concurrently; the schema decoration
+      -- would then be applied as a post-pass once ZonkResult is
+      -- available. For v0.1.0 the sequential structure is sufficient.
 
       exhaustiveDiags = map Exhaustive.toDiagnostic (checkExhaustive idResult mergedZonkResult)
       preLowerDiags =
@@ -238,6 +263,8 @@ compile input =
           <> idDiags
           <> typecheckDiags
           <> exhaustiveDiags
+      -- Only error-level diagnostics suppress IR emission; warnings pass
+      -- through so callers get a usable IR + warnings in the same result.
       shouldLower = not (hasErrors preLowerDiags)
       (loweredIR, loweringDiags)
         | shouldLower =
@@ -252,13 +279,21 @@ compile input =
       schema = if shouldEmitArtefacts then Just (buildSchemas idResult mergedZonkResult) else Nothing
       finalIR = if shouldEmitArtefacts then loweredIR else Nothing
       allDiags = preLowerDiags <> loweringDiags
+
+      logs =
+        [CompileLogParsing, CompileLogIdentifying]
+          <> typecheckLogs
+          <> (if shouldLower then [CompileLogLowering] else [])
+          <> (if shouldEmitArtefacts then [CompileLogSchemaGeneration] else [])
+          <> [CompileLogComplete]
    in CompileResult
         { irModule = finalIR,
           schemaEntries = schema,
           diagnostics = allDiags,
           identifierResult = idResult,
           solverResult = mergedSolverResult,
-          zonkResult = mergedZonkResult
+          zonkResult = mergedZonkResult,
+          compileLogs = logs
         }
 
 -- ===========================================================================
@@ -272,7 +307,8 @@ data TypecheckAccumulator = TypecheckAccumulator
     accZonkedTypeEnvironment :: Map VariableId (SemanticType Resolved),
     accSolverResult :: SolverResult,
     accDiagnostics :: [Diagnostic],
-    accSCCDeclarations :: Map QualifiedName (Declaration Zonked)
+    accSCCDeclarations :: Map QualifiedName (Declaration Zonked),
+    accLogs :: [CompileLog]
   }
 
 typecheckModules ::
@@ -281,7 +317,7 @@ typecheckModules ::
   Map RequestId Text ->
   Map Text ModuleId ->
   [Text] ->
-  (SolverResult, ZonkResult, [Diagnostic])
+  (SolverResult, ZonkResult, [Diagnostic], [CompileLog])
 typecheckModules idResult solverTypeNames solverReqNames moduleIdByName moduleOrder =
   let initial =
         TypecheckAccumulator
@@ -291,7 +327,8 @@ typecheckModules idResult solverTypeNames solverReqNames moduleIdByName moduleOr
             accZonkedTypeEnvironment = Map.empty,
             accSolverResult = SolverResult {typeSubstitution = Map.empty, requestSubstitution = Map.empty},
             accDiagnostics = [],
-            accSCCDeclarations = Map.empty
+            accSCCDeclarations = Map.empty,
+            accLogs = []
           }
       final = foldl' (typecheckOneModule idResult solverTypeNames solverReqNames moduleIdByName) initial moduleOrder
       mergedZonkResult =
@@ -300,7 +337,7 @@ typecheckModules idResult solverTypeNames solverReqNames moduleIdByName moduleOr
             zonkedModuleNames = final.accZonkedModuleNames,
             zonkedTypeEnvironment = final.accZonkedTypeEnvironment
           }
-   in (final.accSolverResult, mergedZonkResult, final.accDiagnostics)
+   in (final.accSolverResult, mergedZonkResult, final.accDiagnostics, final.accLogs)
 
 typecheckOneModule ::
   IdentifierResult ->
@@ -318,7 +355,12 @@ typecheckOneModule idResult solverTypeNames solverReqNames moduleIdByName accumu
           sccs = case moduleAST of
             Just ast -> agentSCCs moduleName ast
             Nothing -> []
-          sccAccumulator = foldl' (typecheckOneSCC idResult solverTypeNames solverReqNames moduleId) accumulator sccs
+          totalSCCs = length sccs
+          indexedSCCs = zip [1 ..] sccs
+          typecheckIndexedSCC accum (sccIndex, scc) =
+            let logged = accum {accLogs = accum.accLogs <> [CompileLogTypechecking moduleName sccIndex totalSCCs]}
+             in typecheckOneSCC idResult solverTypeNames solverReqNames moduleId logged scc
+          sccAccumulator = foldl' typecheckIndexedSCC accumulator indexedSCCs
           assembledModule = case moduleAST of
             Just identifiedModule -> assembleZonkedModule identifiedModule sccAccumulator.accSCCDeclarations
             Nothing -> Module {declarations = [], sourceSpan = emptySrcSpan}
@@ -378,7 +420,8 @@ typecheckOneSCC idResult solverTypeNames solverReqNames moduleId accumulator scc
                 requestSubstitution = Map.union solverResult_.requestSubstitution accumulator.accSolverResult.requestSubstitution
               },
           accDiagnostics = accumulator.accDiagnostics <> cgDiags <> solverDiags <> zonkDiags,
-          accSCCDeclarations = sccDeclMap
+          accSCCDeclarations = sccDeclMap,
+          accLogs = accumulator.accLogs
         }
 
 extractSCCInterface ::
