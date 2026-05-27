@@ -1,83 +1,5 @@
 [
   {
-    "description": "A two-element point in 2-D space.",
-    "input": {
-      "additionalProperties": false,
-      "properties": {
-        "x": {
-          "type": "integer"
-        },
-        "y": {
-          "type": "integer"
-        }
-      },
-      "required": [
-        "x",
-        "y"
-      ],
-      "type": "object"
-    },
-    "name": "main.point",
-    "output": {
-      "additionalProperties": false,
-      "properties": {
-        "$constructor": {
-          "const": "main.point"
-        },
-        "x": {
-          "type": "integer"
-        },
-        "y": {
-          "type": "integer"
-        }
-      },
-      "required": [
-        "$constructor",
-        "x",
-        "y"
-      ],
-      "type": "object"
-    },
-    "requests": []
-  },
-  {
-    "description": "Returns the x-coordinate of a point.",
-    "input": {
-      "additionalProperties": false,
-      "properties": {
-        "p": {
-          "additionalProperties": false,
-          "properties": {
-            "$constructor": {
-              "const": "main.point"
-            },
-            "x": {
-              "type": "integer"
-            },
-            "y": {
-              "type": "integer"
-            }
-          },
-          "required": [
-            "$constructor",
-            "x",
-            "y"
-          ],
-          "type": "object"
-        }
-      },
-      "required": [
-        "p"
-      ],
-      "type": "object"
-    },
-    "name": "main.project_x",
-    "output": {
-      "type": "integer"
-    },
-    "requests": []
-  },
-  {
     "description": "AI metadata of a callable (name / id / description / I-O schema).",
     "input": {
       "additionalProperties": false,
@@ -2285,6 +2207,84 @@
       "type": "object"
     },
     "name": "primitive.record.size",
+    "output": {
+      "type": "integer"
+    },
+    "requests": []
+  },
+  {
+    "description": "A two-element point in 2-D space.",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "x": {
+          "type": "integer"
+        },
+        "y": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "x",
+        "y"
+      ],
+      "type": "object"
+    },
+    "name": "main.point",
+    "output": {
+      "additionalProperties": false,
+      "properties": {
+        "$constructor": {
+          "const": "main.point"
+        },
+        "x": {
+          "type": "integer"
+        },
+        "y": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "$constructor",
+        "x",
+        "y"
+      ],
+      "type": "object"
+    },
+    "requests": []
+  },
+  {
+    "description": "Returns the x-coordinate of a point.",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "p": {
+          "additionalProperties": false,
+          "properties": {
+            "$constructor": {
+              "const": "main.point"
+            },
+            "x": {
+              "type": "integer"
+            },
+            "y": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "$constructor",
+            "x",
+            "y"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "p"
+      ],
+      "type": "object"
+    },
+    "name": "main.project_x",
     "output": {
       "type": "integer"
     },

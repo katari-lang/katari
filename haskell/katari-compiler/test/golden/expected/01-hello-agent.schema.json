@@ -1,19 +1,5 @@
 [
   {
-    "description": "Returns the canonical greeting.",
-    "input": {
-      "additionalProperties": false,
-      "properties": {},
-      "required": [],
-      "type": "object"
-    },
-    "name": "main.main",
-    "output": {
-      "type": "string"
-    },
-    "requests": []
-  },
-  {
     "description": "AI metadata of a callable (name / id / description / I-O schema).",
     "input": {
       "additionalProperties": false,
@@ -2223,6 +2209,20 @@
     "name": "primitive.record.size",
     "output": {
       "type": "integer"
+    },
+    "requests": []
+  },
+  {
+    "description": "Returns the canonical greeting.",
+    "input": {
+      "additionalProperties": false,
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "name": "main.main",
+    "output": {
+      "type": "string"
     },
     "requests": []
   }
