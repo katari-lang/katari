@@ -143,10 +143,15 @@ function SchemaNode({ schema }: { schema: Schema }) {
         ? constructorSchema.const
         : null;
 
-    const typeLabel = constructorName ?? "object";
     const displayProperties = properties !== null
       ? Object.entries(properties).filter(([key]) => constructorName !== null ? key !== "$constructor" : true)
       : [];
+    const hasAdditional = schema.additionalProperties !== undefined && schema.additionalProperties !== false;
+    const isRecord = displayProperties.length === 0 && hasAdditional;
+    const typeLabel = constructorName ?? (isRecord ? "record" : "object");
+    const additionalSchema = typeof schema.additionalProperties === "object" && schema.additionalProperties !== null
+      ? schema.additionalProperties as Schema
+      : null;
 
     return (
       <div>
@@ -169,7 +174,17 @@ function SchemaNode({ schema }: { schema: Schema }) {
             </div>
           </div>
         )}
-        {displayProperties.length === 0 && (
+        {isRecord && additionalSchema !== null && (
+          <div className="border-l-2 border-border mt-2">
+            <div className="pl-3">
+              <span className="text-xs text-muted-foreground">values</span>
+              <div className="mt-1">
+                <SchemaNode schema={additionalSchema} />
+              </div>
+            </div>
+          </div>
+        )}
+        {displayProperties.length === 0 && !isRecord && (
           <span className="text-xs italic text-subtle-foreground ml-1.5">Empty object</span>
         )}
       </div>
