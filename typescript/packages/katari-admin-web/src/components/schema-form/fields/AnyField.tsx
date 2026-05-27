@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Plus, Trash2 } from "lucide-react";
-import { cn } from "@/lib/cn";
 import { Input } from "@/components/ui/Input";
+import { SelectMenu } from "@/components/ui/SelectMenu";
 import { Button } from "@/components/ui/Button";
 import { StringField } from "./StringField";
 import { NumberField } from "./NumberField";
@@ -71,20 +71,12 @@ export function AnyField({
         <span className="text-xs uppercase tracking-wider text-subtle-foreground">
           Type
         </span>
-        <select
+        <SelectMenu
           value={kind}
-          onChange={(e) => selectKind(e.target.value as AnyKind)}
-          className={cn(
-            "h-7 border-b border-border bg-transparent px-1 text-xs text-foreground transition-colors",
-            "hover:border-border-strong focus-visible:outline-none focus-visible:border-ring",
-          )}
-        >
-          {ALL_KINDS.map((k) => (
-            <option key={k} value={k}>
-              {KIND_LABELS[k]}
-            </option>
-          ))}
-        </select>
+          onChange={(v) => selectKind(v as AnyKind)}
+          options={ALL_KINDS.map((k) => ({ key: k, label: KIND_LABELS[k] }))}
+          placeholder="Select type"
+        />
       </div>
       {kind === "string" && <StringField value={value} onChange={onChange} />}
       {kind === "number" && (
