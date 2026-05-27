@@ -55,6 +55,10 @@ data PrimRule
     -- statically rejecting integer / boolean f-string interpolation
     -- (the user must @to_string(n)@ them first).
     PrimRuleFstringJoin
+  | -- | @array : array[T], index : integer@ — result is @T@. Extracts
+    -- the element type from the array argument so the return type is
+    -- precise rather than collapsing to @unknown@.
+    PrimRuleArrayGet
   deriving (Eq, Show)
 
 -- | Decode a surface @using <name>@ identifier into a 'PrimRule', or
@@ -65,6 +69,7 @@ parsePrimRule = \case
   "numeric_join_binary" -> Just PrimRuleNumericJoinBinary
   "numeric_join_unary" -> Just PrimRuleNumericJoinUnary
   "fstring_join" -> Just PrimRuleFstringJoin
+  "array_get" -> Just PrimRuleArrayGet
   _ -> Nothing
 
 -- | Sentinel source span for synthetic prim nodes (used by operator

@@ -601,7 +601,10 @@
     "input": {
       "additionalProperties": false,
       "properties": {
-        "array": {},
+        "array": {
+          "items": {},
+          "type": "array"
+        },
         "index": {
           "type": "integer"
         }
@@ -621,7 +624,10 @@
     "input": {
       "additionalProperties": false,
       "properties": {
-        "array": {}
+        "array": {
+          "items": {},
+          "type": "array"
+        }
       },
       "required": [
         "array"

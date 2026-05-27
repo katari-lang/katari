@@ -574,7 +574,7 @@
       "body": {
         "description": "Retrieve the element at @index@.",
         "entryBody": 47,
-        "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"array\":{},\"index\":{\"type\":\"integer\"}},\"required\":[\"array\",\"index\"],\"type\":\"object\"}",
+        "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"array\":{\"items\":{},\"type\":\"array\"},\"index\":{\"type\":\"integer\"}},\"required\":[\"array\",\"index\"],\"type\":\"object\"}",
         "name": "array_get",
         "outputSchema": "{}",
         "parameters": [
@@ -599,7 +599,7 @@
       "body": {
         "description": "Length of an array.",
         "entryBody": 49,
-        "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"array\":{}},\"required\":[\"array\"],\"type\":\"object\"}",
+        "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"array\":{\"items\":{},\"type\":\"array\"}},\"required\":[\"array\"],\"type\":\"object\"}",
         "name": "array_length",
         "outputSchema": "{\"type\":\"integer\"}",
         "parameters": [

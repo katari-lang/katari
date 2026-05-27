@@ -1499,6 +1499,14 @@ applyPrimRule rule arguments sourceSpan =
             )
             arguments
           pure resultType
+        PrimRuleArrayGet -> do
+          let reason = ConstraintReason ReasonKindCallArgument sourceSpan
+              array_ = Map.findWithDefault SemanticTypeUnknown "array" bag
+              index_ = Map.findWithDefault SemanticTypeUnknown "index" bag
+          resultType <- freshTypeVar
+          addTypeConstraint index_ SemanticTypeInteger reason
+          addTypeConstraint array_ (SemanticTypeArray resultType) reason
+          pure resultType
         PrimRuleSimple ->
           -- Caller filters PrimRuleSimple before invoking applyPrimRule.
           pure SemanticTypeUnknown
