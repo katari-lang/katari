@@ -26,6 +26,8 @@ import Data.Foldable (for_)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (catMaybes)
+import Data.Set (Set)
+import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Word (Word32)
@@ -104,25 +106,11 @@ data LowerEnv = LowerEnv
     -- @let@ / function param / pattern / local agent. Top-level callable
     -- resolution uses 'lsTopLevelBlocks' separately.
     localVars :: Map Id.VariableResolution VarId,
-    -- | Identifier-pass output. Lowering needs the symbol tables
-    -- (@identifiedRequests@ / @identifiedConstructors@) for both id
-    -- enumeration (IR.RequestId/IR.ConstructorId allocation) and call-site reverse lookup.
     identifierResult :: IdentifierResult,
-    -- | Zonker-pass output. Lowering reads
-    -- 'zonkedTypeEnvironment' at each agent / wrapper construction site
-    -- to compute the per-agent input/output JSON Schemas for
-    -- 'AgentBlock'.
     zonkResult :: ZonkResult,
-    -- | Pre-built 'DataDefs' for inline expansion of 'SemanticTypeData'
-    -- references when computing 'AgentBlock' schemas. Built once at
-    -- 'lowerProgram' entry from 'zonkResult'.
     dataDefs :: Schema.DataDefs,
-    -- | Inverse of 'identifierResult.identifiedRequests', precomputed once
-    -- at 'lowerProgram' entry so per-call-site lookups are O(log n) rather
-    -- than O(n).
-    requestByVariable :: Map Id.QualifiedName Id.RequestId,
-    -- | Inverse of 'identifierResult.identifiedConstructors'. See above.
-    constructorByVariable :: Map Id.QualifiedName Id.ConstructorId
+    requestNames :: Set Id.QualifiedName,
+    constructorNames :: Set Id.QualifiedName
   }
 
 initialLowerEnv :: IdentifierResult -> ZonkResult -> LowerEnv
@@ -132,16 +120,8 @@ initialLowerEnv idResult zonk =
       identifierResult = idResult,
       zonkResult = zonk,
       dataDefs = Schema.buildDataDefs idResult zonk,
-      requestByVariable =
-        Map.fromList
-          [ (qualifiedName, requestData.requestId)
-            | (qualifiedName, requestData) <- Map.toList idResult.identifiedRequests
-          ],
-      constructorByVariable =
-        Map.fromList
-          [ (qualifiedName, constructorData.constructorId)
-            | (qualifiedName, constructorData) <- Map.toList idResult.identifiedConstructors
-          ]
+      requestNames = Map.keysSet idResult.identifiedRequests,
+      constructorNames = Map.keysSet idResult.identifiedConstructors
     }
 
 data LowerState = LowerState
@@ -759,13 +739,13 @@ requireAgentQName context declName agentBlk = do
 lookupConstructorQName :: Id.VariableResolution -> Lower QualifiedName
 lookupConstructorQName = \case
   Id.ResolvedTopLevel qualifiedName -> do
-    inverse <- asks (.constructorByVariable)
-    case Map.lookup qualifiedName inverse of
-      Just _identCid -> pure qualifiedName
-      Nothing ->
+    known <- asks (.constructorNames)
+    if Set.member qualifiedName known
+      then pure qualifiedName
+      else
         throwError
           ( Internal.internalErrorNoSpan
-              "lookupConstructorQName: QualifiedName not in constructorByVariable"
+              "lookupConstructorQName: QualifiedName not in constructorNames"
           )
   Id.ResolvedLocal _ ->
     throwError
@@ -779,13 +759,13 @@ lookupConstructorQName = \case
 lookupRequestQName :: Id.VariableResolution -> Lower QualifiedName
 lookupRequestQName = \case
   Id.ResolvedTopLevel qualifiedName -> do
-    inverse <- asks (.requestByVariable)
-    case Map.lookup qualifiedName inverse of
-      Just _requestId -> pure qualifiedName
-      Nothing ->
+    known <- asks (.requestNames)
+    if Set.member qualifiedName known
+      then pure qualifiedName
+      else
         throwError
           ( Internal.internalErrorNoSpan
-              "lookupRequestQName: QualifiedName not in requestByVariable"
+              "lookupRequestQName: QualifiedName not in requestNames"
           )
   Id.ResolvedLocal _ ->
     throwError

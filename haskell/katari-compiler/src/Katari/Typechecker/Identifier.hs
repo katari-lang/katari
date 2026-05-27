@@ -62,11 +62,8 @@ import Data.Text qualified as T
 import Katari.AST
 import Katari.Diagnostic (Diagnostic (..), DiagnosticNote (..), diagnosticError)
 import Katari.Id
-  ( ConstructorId (..),
-    LocalVarId (..),
+  ( LocalVarId (..),
     QualifiedName (..),
-    RequestId (..),
-    TypeId (..),
     VariableResolution (..),
   )
 import Katari.Internal qualified as Internal
@@ -193,12 +190,7 @@ data VariableData = VariableData
 -- in 'IdentifierResult.identifiedTypes'. The 'typeId' is the semantic
 -- identifier used by 'SemanticTypeData' and the constraint solver.
 data TypeData = TypeData
-  { typeId :: TypeId,
-    typeSourceSpan :: SourceSpan,
-    -- | For type synonyms, the resolved RHS expression. @Nothing@ for
-    -- @data@ declarations. Populated in Phase D after the synonym body
-    -- has been resolved; the constraint generator's elaboration phase
-    -- expands synonyms by looking up this field.
+  { typeSourceSpan :: SourceSpan,
     typeSynonymRhs :: Maybe (SyntacticType Identified)
   }
   deriving (Eq, Show)
@@ -210,10 +202,7 @@ data TypeData = TypeData
 -- 'QualifiedName' (via 'ResolvedTopLevel'), so no separate variable
 -- pointer is needed.
 data RequestData = RequestData
-  { requestId :: RequestId,
-    requestSourceSpan :: SourceSpan,
-    -- | Per-parameter annotation text, keyed by external call label.
-    -- Used by Schema generation to populate JSON Schema @description@ fields.
+  { requestSourceSpan :: SourceSpan,
     requestParameterAnnotations :: Map Text (Maybe Text)
   }
   deriving (Eq, Show)
@@ -224,8 +213,7 @@ data RequestData = RequestData
 -- the IR. 'constructorTypeQName' points to the corresponding data type's
 -- 'QualifiedName' so downstream phases can recover the data type.
 data ConstructorData = ConstructorData
-  { constructorId :: ConstructorId,
-    constructorSourceSpan :: SourceSpan,
+  { constructorSourceSpan :: SourceSpan,
     constructorTypeQName :: QualifiedName
   }
   deriving (Eq, Show)
@@ -476,15 +464,8 @@ toDiagnostic = \case
 -- Identifier monad
 -- ---------------------------------------------------------------------------
 
--- | Identifier-pass state: counters for semantic IDs (TypeId, RequestId,
--- ConstructorId) that still need global uniqueness for the type system,
--- plus a per-module local-variable counter. Maps are keyed by
--- 'QualifiedName' (top-level) or 'Text' (modules).
 data IdentifierState = IdentifierState
-  { nextTypeId :: Int,
-    nextRequestId :: Int,
-    nextConstructorId :: Int,
-    nextLocalVarId :: Int,
+  { nextLocalVarId :: Int,
     variables :: Map QualifiedName VariableData,
     types :: Map QualifiedName TypeData,
     modules :: Map Text ModuleData,
@@ -526,10 +507,7 @@ runIdentifier = runIdentifierFrom initialIdentifierState
 initialIdentifierState :: IdentifierState
 initialIdentifierState =
   IdentifierState
-    { nextTypeId = 0,
-      nextRequestId = 0,
-      nextConstructorId = 0,
-      nextLocalVarId = 0,
+    { nextLocalVarId = 0,
       variables = Map.empty,
       types = Map.empty,
       modules = Map.empty,
@@ -563,18 +541,14 @@ freshLocalVarId = do
   put state {nextLocalVarId = state.nextLocalVarId + 1}
   pure localVarId
 
-freshTypeId :: QualifiedName -> TypeData -> Identifier TypeId
-freshTypeId qualifiedName typeData = do
+registerType :: QualifiedName -> TypeData -> Identifier ()
+registerType qualifiedName typeData = do
   existingTypes <- gets (.types)
   case Map.lookup qualifiedName existingTypes of
     Just existing ->
       emitError (ErrorDuplicateName typeData.typeSourceSpan qualifiedName.name existing.typeSourceSpan)
     Nothing -> pure ()
-  state <- get
-  let typeId = TypeId state.nextTypeId
-      patched = typeData {typeId = typeId}
-  put state {nextTypeId = state.nextTypeId + 1, types = Map.insert qualifiedName patched state.types}
-  pure typeId
+  modify $ \state -> state {types = Map.insert qualifiedName typeData state.types}
 
 registerModule :: Text -> ModuleData -> Identifier ()
 registerModule moduleName moduleData =
@@ -585,17 +559,10 @@ registerRequest qualifiedName requestData =
   modify $ \state ->
     state {requests = Map.insert qualifiedName requestData state.requests}
 
-freshConstructorId :: QualifiedName -> ConstructorData -> Identifier ConstructorId
-freshConstructorId qualifiedName constructorData = do
-  state <- get
-  let constructorId = ConstructorId state.nextConstructorId
-      patched = constructorData {constructorId = constructorId}
-  put
-    state
-      { nextConstructorId = state.nextConstructorId + 1,
-        constructors = Map.insert qualifiedName patched state.constructors
-      }
-  pure constructorId
+registerConstructor :: QualifiedName -> ConstructorData -> Identifier ()
+registerConstructor qualifiedName constructorData =
+  modify $ \state ->
+    state {constructors = Map.insert qualifiedName constructorData state.constructors}
 
 emitError :: IdentifierError -> Identifier ()
 emitError newError = modify $ \state -> state {errors = newError : state.errors}
@@ -2398,8 +2365,7 @@ identifyModule _allExportNames processedExportTables allModuleNames inputState c
       registerRequest
         qualifiedName
         RequestData
-          { requestId = RequestId 0,
-            requestSourceSpan = name.sourceSpan,
+          { requestSourceSpan = name.sourceSpan,
             requestParameterAnnotations = Map.fromList parameterAnnotations
           }
       let entry =
@@ -2411,14 +2377,12 @@ identifyModule _allExportNames processedExportTables allModuleNames inputState c
 
     registerTypeOnly moduleName table name = do
       let qualifiedName = qnameOf moduleName name
-      _typeId <-
-        freshTypeId
-          qualifiedName
-          TypeData
-            { typeId = TypeId 0, -- placeholder, overwritten by freshTypeId
-              typeSourceSpan = name.sourceSpan,
-              typeSynonymRhs = Nothing
-            }
+      registerType
+        qualifiedName
+        TypeData
+          { typeSourceSpan = name.sourceSpan,
+            typeSynonymRhs = Nothing
+          }
       insertSymbolEntry name.sourceSpan name.text (singletonType qualifiedName) table
 
     registerDataDecl moduleName table name annotation parameterAnnotations = do
@@ -2432,22 +2396,18 @@ identifyModule _allExportNames processedExportTables allModuleNames inputState c
             variableAnnotation = annotation,
             variableParameterAnnotations = parameterAnnotations
           }
-      _typeId <-
-        freshTypeId
-          qualifiedName
-          TypeData
-            { typeId = TypeId 0, -- placeholder, overwritten by freshTypeId
-              typeSourceSpan = name.sourceSpan,
-              typeSynonymRhs = Nothing
-            }
-      _constructorId <-
-        freshConstructorId
-          qualifiedName
-          ConstructorData
-            { constructorId = ConstructorId 0, -- placeholder, overwritten by freshConstructorId
-              constructorSourceSpan = name.sourceSpan,
-              constructorTypeQName = qualifiedName
-            }
+      registerType
+        qualifiedName
+        TypeData
+          { typeSourceSpan = name.sourceSpan,
+            typeSynonymRhs = Nothing
+          }
+      registerConstructor
+        qualifiedName
+        ConstructorData
+          { constructorSourceSpan = name.sourceSpan,
+            constructorTypeQName = qualifiedName
+          }
       let entry =
             emptySymbolEntry
               { variableSymbol = Just (ResolvedTopLevel qualifiedName),
@@ -2705,9 +2665,6 @@ data CachedIdentifierData = CachedIdentifierData
     cidTopLevel :: Map Text SymbolEntry,
     cidIdentifiedAST :: Module Identified,
     cidScopeFrames :: [(SourceSpan, Map Text SymbolEntry)],
-    cidNextTypeId :: Int,
-    cidNextRequestId :: Int,
-    cidNextConstructorId :: Int,
     cidNextLocalVarId :: Int
   }
   deriving (Show)
@@ -2745,9 +2702,6 @@ identifyIncremental trustedStdlibNames moduleMap cachedModules =
                       constructors = Map.union cached.cidConstructors state.constructors,
                       modules = Map.insert moduleName cached.cidModuleData state.modules,
                       capturedScopeFrames = cached.cidScopeFrames ++ state.capturedScopeFrames,
-                      nextTypeId = max state.nextTypeId cached.cidNextTypeId,
-                      nextRequestId = max state.nextRequestId cached.cidNextRequestId,
-                      nextConstructorId = max state.nextConstructorId cached.cidNextConstructorId,
                       nextLocalVarId = max state.nextLocalVarId cached.cidNextLocalVarId
                     }
              in ( Map.insert moduleName cached.cidIdentifiedAST asts,

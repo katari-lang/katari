@@ -18,10 +18,7 @@ module Katari.Id
 
     -- * Legacy ID types (being phased out — use QualifiedName for top-level)
     VariableId (..),
-    TypeId (..),
     ModuleId (..),
-    RequestId (..),
-    ConstructorId (..),
 
     -- * Re-exports from Common
     QualifiedName (..),
@@ -53,22 +50,7 @@ newtype LocalVarId = LocalVarId Int
 newtype VariableId = VariableId Int
   deriving (Eq, Ord, Show)
 
--- | Unique id in the type namespace (legacy — being replaced by
--- 'QualifiedName').
-newtype TypeId = TypeId Int
-  deriving (Eq, Ord, Show)
-
 -- | Unique id in the module namespace (legacy — being replaced by
 -- 'ModuleName' / 'Text').
 newtype ModuleId = ModuleId Int
-  deriving (Eq, Ord, Show)
-
--- | Unique id in the request namespace (legacy — being replaced by
--- 'QualifiedName').
-newtype RequestId = RequestId Int
-  deriving (Eq, Ord, Show)
-
--- | Unique id in the data-constructor namespace (legacy — being replaced by
--- 'QualifiedName').
-newtype ConstructorId = ConstructorId Int
   deriving (Eq, Ord, Show)

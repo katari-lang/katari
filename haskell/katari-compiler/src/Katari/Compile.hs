@@ -209,9 +209,6 @@ compile input =
                   Identifier.cidTopLevel = cached.cacheModuleTopLevel,
                   Identifier.cidIdentifiedAST = cached.cacheIdentifiedAST,
                   Identifier.cidScopeFrames = cached.cacheScopeFrames,
-                  Identifier.cidNextTypeId = 0,
-                  Identifier.cidNextRequestId = 0,
-                  Identifier.cidNextConstructorId = 0,
                   Identifier.cidNextLocalVarId = 0
                 }
           )
