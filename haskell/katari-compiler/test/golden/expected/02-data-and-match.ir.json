@@ -639,52 +639,50 @@
     },
     "50": {
       "body": {
-        "description": "Retrieve a tagged-value field by name.",
         "entryBody": 51,
-        "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"field\":{\"type\":\"string\"},\"object\":{}},\"required\":[\"field\",\"object\"],\"type\":\"object\"}",
-        "name": "get_field",
-        "outputSchema": "{}",
-        "parameters": [
-          {
-            "label": "object",
-            "var": 50
-          },
-          {
-            "label": "field",
-            "var": 51
-          }
-        ],
-        "qualifiedName": "primitive.get_field"
-      },
-      "kind": "blockAgent"
-    },
-    "51": {
-      "body": "get_field",
-      "kind": "blockPrim"
-    },
-    "52": {
-      "body": {
-        "description": "Retrieve a tuple element by positional index.",
-        "entryBody": 53,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"index\":{\"type\":\"integer\"},\"tuple\":{}},\"required\":[\"index\",\"tuple\"],\"type\":\"object\"}",
         "name": "tuple_get",
         "outputSchema": "{}",
         "parameters": [
           {
             "label": "tuple",
-            "var": 52
+            "var": 50
           },
           {
             "label": "index",
-            "var": 53
+            "var": 51
           }
         ],
         "qualifiedName": "primitive.tuple_get"
       },
       "kind": "blockAgent"
     },
-    "53": {
+    "51": {
       "body": "tuple_get",
+      "kind": "blockPrim"
+    },
+    "52": {
+      "body": {
+        "entryBody": 53,
+        "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"field\":{\"type\":\"string\"},\"object\":{}},\"required\":[\"field\",\"object\"],\"type\":\"object\"}",
+        "name": "get_field",
+        "outputSchema": "{}",
+        "parameters": [
+          {
+            "label": "object",
+            "var": 52
+          },
+          {
+            "label": "field",
+            "var": 53
+          }
+        ],
+        "qualifiedName": "primitive.get_field"
+      },
+      "kind": "blockAgent"
+    },
+    "53": {
+      "body": "get_field",
       "kind": "blockPrim"
     },
     "54": {
@@ -1357,7 +1355,7 @@
     "primitive.from_string_error": 41,
     "primitive.ge": 27,
     "primitive.get_env": 61,
-    "primitive.get_field": 50,
+    "primitive.get_field": 52,
     "primitive.get_metadata": 54,
     "primitive.get_secret_env": 62,
     "primitive.gt": 25,
@@ -1390,7 +1388,7 @@
     "primitive.sub": 5,
     "primitive.throw": 59,
     "primitive.to_string": 39,
-    "primitive.tuple_get": 52,
+    "primitive.tuple_get": 50,
     "primitive.type_of": 37
   },
   "metadata": {
@@ -1454,10 +1452,10 @@
       "48": "prim:array_length:agent",
       "49": "prim:array_length:leaf",
       "5": "prim:sub:agent",
-      "50": "prim:get_field:agent",
-      "51": "prim:get_field:leaf",
-      "52": "prim:tuple_get:agent",
-      "53": "prim:tuple_get:leaf",
+      "50": "prim:tuple_get:agent",
+      "51": "prim:tuple_get:leaf",
+      "52": "prim:get_field:agent",
+      "53": "prim:get_field:leaf",
       "54": "prim:get_metadata:agent",
       "55": "prim:get_metadata:leaf",
       "56": "call_agent_error:agent",

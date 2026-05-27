@@ -641,27 +641,6 @@
     "requests": []
   },
   {
-    "description": "Retrieve a tagged-value field by name.",
-    "input": {
-      "additionalProperties": false,
-      "properties": {
-        "field": {
-          "type": "string"
-        },
-        "object": {}
-      },
-      "required": [
-        "field",
-        "object"
-      ],
-      "type": "object"
-    },
-    "name": "primitive.get_field",
-    "output": {},
-    "requests": []
-  },
-  {
-    "description": "Retrieve a tuple element by positional index.",
     "input": {
       "additionalProperties": false,
       "properties": {
@@ -677,6 +656,25 @@
       "type": "object"
     },
     "name": "primitive.tuple_get",
+    "output": {},
+    "requests": []
+  },
+  {
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "field": {
+          "type": "string"
+        },
+        "object": {}
+      },
+      "required": [
+        "field",
+        "object"
+      ],
+      "type": "object"
+    },
+    "name": "primitive.get_field",
     "output": {},
     "requests": []
   },
