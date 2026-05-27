@@ -58,7 +58,6 @@ data point(
 agent data_input(p: point) -> integer {
   match (p) {
     case point(x = xv, y = yv) => { xv + yv }
-    case _ => { 0 }
   }
 }
 
@@ -77,7 +76,6 @@ agent union_input(r: ok | err) -> string {
   match (r) {
     case ok(n = v) => { f"ok: ${to_string(value = v)}" }
     case err(message = m) => { f"err: ${m}" }
-    case _ => { "unexpected" }
   }
 }
 
@@ -96,7 +94,6 @@ agent tuple_input(t: (integer, string)) -> string {
   match (t) {
     case (0, s) => { f"zero with ${s}" }
     case (n, s) => { f"${to_string(value = n)} with ${s}" }
-    case _ => { "unexpected" }
   }
 }
 
@@ -106,7 +103,6 @@ agent tuple_nested(t: (point, string, boolean)) -> string {
     case (point(x = xv, y = yv), label, flag) => {
       f"(${to_string(value = xv)},${to_string(value = yv)}) ${label} ${to_string(value = flag)}"
     }
-    case _ => { "unexpected" }
   }
 }
 
@@ -148,11 +144,9 @@ agent nested_union_tuple(input: wrapped_pair | wrapped_single) -> string {
     case wrapped_pair(pair = t) => {
       match (t) {
         case (n, s) => { f"pair: ${to_string(value = n)} ${s}" }
-        case _ => { "unexpected" }
       }
     }
     case wrapped_single(value = v) => { f"single: ${to_string(value = v)}" }
-    case _ => { "unexpected" }
   }
 }
 

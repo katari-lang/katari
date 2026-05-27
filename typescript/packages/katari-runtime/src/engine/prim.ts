@@ -190,6 +190,36 @@ export function executePrim(name: string, args: Record<string, Value>): Value {
       }
       throw new RecoverableEngineError("prim tuple_get: invalid args");
     }
+    case "array_get": {
+      const array = args["array"], index = args["index"];
+      if (array?.kind === "array" && index?.kind === "number") {
+        if (!Number.isInteger(index.value) || index.value < 0) {
+          throw new RecoverableEngineError(
+            `prim array_get: index must be a non-negative integer, got ${index.value}`,
+          );
+        }
+        const elem = array.elements[index.value];
+        if (elem === undefined) {
+          throw new RecoverableEngineError("prim array_get: index out of bounds");
+        }
+        return elem;
+      }
+      throw new RecoverableEngineError("prim array_get: invalid args");
+    }
+    case "array_length": {
+      const array = args["array"];
+      if (array?.kind === "array") {
+        return { kind: "number", value: array.elements.length };
+      }
+      throw new RecoverableEngineError("prim array_length: argument must be an array");
+    }
+    case "type_of": {
+      const value = args["value"];
+      if (value === undefined) {
+        throw new RecoverableEngineError("prim type_of: missing arg");
+      }
+      return { kind: "string", value: value.kind };
+    }
     case "get_field": {
       const value = args["object"], field = args["field"];
       if (value?.kind === "tagged" && field?.kind === "string") {
