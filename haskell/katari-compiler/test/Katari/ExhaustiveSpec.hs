@@ -1,3 +1,5 @@
+{-# LANGUAGE ImportQualifiedPost #-}
+
 -- | Tests for 'Katari.Typechecker.Exhaustive'.
 --
 -- The Exhaustive pass is the canonical place where Katari catches "this
@@ -18,7 +20,7 @@ import Katari.Typechecker.ConstraintGenerator (generateConstraints)
 import Katari.Typechecker.Exhaustive (checkExhaustive, toDiagnostic)
 import Katari.Typechecker.Solver (solve)
 import Katari.Typechecker.Zonker (zonk)
-import Test.Hspec
+import Test.Hspec (Spec, describe, it, shouldBe)
 
 -- ---------------------------------------------------------------------------
 -- Pipeline helper
@@ -43,7 +45,7 @@ runExhaustive source = do
 
 -- | True iff @diags@ contains at least one error / warning with the given code.
 hasCode :: Text -> [Diagnostic] -> Bool
-hasCode code = any (\d -> d.code == code)
+hasCode code = any (\d -> d . code == code)
 
 -- ---------------------------------------------------------------------------
 -- Spec
