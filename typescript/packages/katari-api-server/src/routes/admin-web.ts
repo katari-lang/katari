@@ -52,7 +52,7 @@ function buildAdminStatic(distPath: string): MiddlewareHandler {
     if (!path.startsWith("/admin")) return next();
     // /admin and /admin/ both serve the SPA shell.
     const sub = path === "/admin" || path === "/admin/" ? "/index.html" : path.slice("/admin".length);
-    const target = resolve(absDist, "." + sub);
+    const target = resolve(absDist, `.${sub}`);
     if (!target.startsWith(absDist)) {
       return c.notFound();
     }

@@ -82,7 +82,7 @@ for (const { key, os, cpu } of PLATFORMS) {
 
   writeFileSync(
     resolve(pkgDir, "package.json"),
-    JSON.stringify(pkg, null, 2) + "\n",
+    `${JSON.stringify(pkg, null, 2)}\n`,
   );
 
   writeFileSync(

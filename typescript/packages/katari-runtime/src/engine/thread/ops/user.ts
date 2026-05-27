@@ -22,7 +22,7 @@ import type {
   UserBlock,
   VarId,
 } from "../../../ir/types.js";
-import type { CallId, ScopeId, ThreadId } from "../../id.js";
+import type { CallId, ScopeId, } from "../../id.js";
 import type { AskKind, ModMap } from "../../event.js";
 import { tryMatch } from "../../pattern.js";
 import { spawnChild } from "../../spawn.js";

@@ -191,7 +191,7 @@ export function SchemaForm({
           </ul>
         </div>
       )}
-      {renderActions !== undefined && renderActions({ submit, value })}
+      {renderActions?.({ submit, value })}
     </form>
   );
 }

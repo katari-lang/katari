@@ -74,7 +74,7 @@ export function AgentsPage() {
     setParams(nextParams);
   }
 
-  const hiddenCount =
+  const _hiddenCount =
     data === undefined ? 0 : data.agents.length - visibleAgents.length;
 
   return (

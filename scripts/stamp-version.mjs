@@ -61,7 +61,7 @@ console.log(`Stamped katari version to ${version} (cabal: ${cabalVersion})`);
 console.log(`  - haskell/katari/src/Katari/Version.hs`);
 console.log(`  - haskell/katari/package.yaml`);
 for (const p of tsFiles) {
-  console.log(`  - ${p.replace(REPO_ROOT + "/", "")}`);
+  console.log(`  - ${p.replace(`${REPO_ROOT}/`, "")}`);
 }
 
 function stampVersionHs(version) {
@@ -106,5 +106,5 @@ function tsPackageJsons() {
 function stampPackageJson(path, version) {
   const pkg = JSON.parse(readFileSync(path, "utf8"));
   pkg.version = version;
-  writeFileSync(path, JSON.stringify(pkg, null, 2) + "\n");
+  writeFileSync(path, `${JSON.stringify(pkg, null, 2)}\n`);
 }

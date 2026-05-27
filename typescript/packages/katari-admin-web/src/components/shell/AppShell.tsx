@@ -5,12 +5,12 @@ import { Sidebar } from "./Sidebar";
 
 export function AppShell({ children }: { children: ReactNode }) {
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const location = useLocation();
+  const _location = useLocation();
 
   // Close sidebar on route change (mobile)
   useEffect(() => {
     setSidebarOpen(false);
-  }, [location.pathname]);
+  }, []);
 
   return (
     <div className="flex min-h-screen flex-col">

@@ -92,10 +92,10 @@ async function main(): Promise<void> {
   try {
     const result = await bundleSidecar({ packages: args.packages });
     if (result === null) {
-      process.stdout.write(JSON.stringify({ bundle: null, modules: [] }) + "\n");
+      process.stdout.write(`${JSON.stringify({ bundle: null, modules: [] })}\n`);
     } else {
       process.stdout.write(
-        JSON.stringify({ bundle: result.bundle, modules: result.modules }) + "\n",
+        `${JSON.stringify({ bundle: result.bundle, modules: result.modules })}\n`,
       );
     }
   } catch (err) {

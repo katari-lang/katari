@@ -101,7 +101,7 @@ export function EnvUpsertDialog({ open, onClose, editing }: Props) {
             value={value}
             onChange={(e) => setValue(e.target.value)}
             placeholder={
-              editing !== null && editing.isSecret
+              editing?.isSecret
                 ? "New secret value (replaces the existing one)"
                 : "value"
             }

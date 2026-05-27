@@ -200,8 +200,7 @@ function highlightRedactedInline(text: string): ReactNode[] {
   const pattern = /<redacted:[0-9a-f]{8}>|<redacted>/g;
   const parts: ReactNode[] = [];
   let lastIndex = 0;
-  let match: RegExpExecArray | null;
-  while ((match = pattern.exec(text)) !== null) {
+  for (let match = pattern.exec(text); match !== null; match = pattern.exec(text)) {
     if (match.index > lastIndex) {
       parts.push(text.slice(lastIndex, match.index));
     }

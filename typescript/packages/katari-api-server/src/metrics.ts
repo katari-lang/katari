@@ -108,7 +108,7 @@ export class MetricRegistry {
   }
 
   render(): string {
-    return this.metrics.map((m) => m.render()).join("\n") + "\n";
+    return `${this.metrics.map((m) => m.render()).join("\n")}\n`;
   }
 }
 

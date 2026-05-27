@@ -4,7 +4,6 @@
 // Closures capture a scopeId; the GC traces those refs through Value to
 // keep captured scopes alive.
 
-import type { VarId } from "../ir/types.js";
 import type { ScopeId } from "./id.js";
 import type { Value } from "./value.js";
 

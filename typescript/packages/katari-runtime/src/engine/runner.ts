@@ -13,7 +13,7 @@
 import { EntryNotFoundError, RecoverableEngineError } from "./errors.js";
 import type { Event, InternalEventPayload } from "./event.js";
 import { isInternal } from "./event.js";
-import type { CallId, ThreadId, AskId } from "./id.js";
+import type { ThreadId, AskId } from "./id.js";
 import { createEscalationId } from "./id.js";
 import { spawnAgentRoot } from "./spawn.js";
 import { decodeCoreAgentDefId, encodeCoreAgentDefId } from "../agent-def-id.js";
@@ -112,12 +112,12 @@ function step(
   ev: InternalEventPayload,
 ): void {
   switch (ev.kind) {
-    case "create":    return onCreate(ctx, ev);
-    case "done":      return onDone(ctx, ev);
-    case "cancel":    return onCancel(ctx, ev);
-    case "cancelAck": return onCancelAck(ctx, ev);
-    case "ask":       return onAsk(ctx, ev);
-    case "askAck":    return onAskAck(ctx, ev);
+    case "create":    onCreate(ctx, ev); break;
+    case "done":      onDone(ctx, ev); break;
+    case "cancel":    onCancel(ctx, ev); break;
+    case "cancelAck": onCancelAck(ctx, ev); break;
+    case "ask":       onAsk(ctx, ev); break;
+    case "askAck":    onAskAck(ctx, ev); break;
     default: {
       const _exhaustive: never = ev;
       throw new Error(`engine: unrecognized internal event kind: ${(_exhaustive as InternalEventPayload).kind}`);

@@ -47,8 +47,7 @@ export function ProjectsPage() {
           </p>
         )}
         {!isLoading && !isError && data !== undefined && (
-          <>
-            {projects.length === 0 ? (
+          projects.length === 0 ? (
               <EmptyState
                 icon={Folder}
                 title="No projects yet"
@@ -102,8 +101,7 @@ export function ProjectsPage() {
                   </div>
                 )}
               </>
-            )}
-          </>
+            )
         )}
       </PageContent>
     </div>

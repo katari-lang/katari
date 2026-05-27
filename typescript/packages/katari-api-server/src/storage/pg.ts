@@ -91,7 +91,7 @@ function clampLimit(requested: number | undefined): number {
   return Math.min(MAX_LIMIT, Math.floor(requested));
 }
 
-function clampOffset(requested: number | undefined): number {
+function _clampOffset(requested: number | undefined): number {
   if (requested === undefined || !Number.isFinite(requested) || requested < 0) {
     return 0;
   }

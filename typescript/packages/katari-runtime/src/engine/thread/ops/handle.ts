@@ -23,7 +23,7 @@
 // children, finishCancelling emits `done` with `pendingReturn`.
 
 import type { Block, BlockId, HandleBlock, QualifiedName } from "../../../ir/types.js";
-import type { AskId, CallId, ThreadId } from "../../id.js";
+import type { AskId, CallId, } from "../../id.js";
 import { spawnChild } from "../../spawn.js";
 import type { StepCtx } from "../../step-ctx.js";
 import type { Value } from "../../value.js";
@@ -38,10 +38,8 @@ import {
   writeArgsIntoChildScope,
 } from "../common.js";
 import type {
-  ChildRole,
   HandleThread,
   PendingAction,
-  PostCancelAction,
 } from "../types.js";
 import {
   defaultAskAckProxy,

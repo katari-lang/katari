@@ -6,7 +6,6 @@ import {
   MessageCircleQuestion,
   KeyRound,
   Settings,
-  Bot,
 } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { useStickyProjectId } from "@/lib/useStickyProjectId";

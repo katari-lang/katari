@@ -68,7 +68,7 @@ export async function bundleSidecar(
 
   const moduleWrapPlugin = makeModuleWrapPlugin(entries);
 
-  let result;
+  let result: Awaited<ReturnType<typeof build>> | undefined;
   try {
     result = await build({
       stdin: {

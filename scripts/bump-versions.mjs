@@ -55,7 +55,7 @@ for (const plat of PLATFORMS) {
   pkg.optionalDependencies[`@katari-lang/cli-${plat}`] = version;
 }
 
-writeFileSync(shimPath, JSON.stringify(pkg, null, 2) + "\n");
+writeFileSync(shimPath, `${JSON.stringify(pkg, null, 2)}\n`);
 console.log(
   `Injected optionalDependencies into @katari-lang/cli @ ${version} ` +
     `(${PLATFORMS.length} platforms)`,

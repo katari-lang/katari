@@ -24,7 +24,7 @@ import {
   proxyAskToParent,
   setValueInScope,
 } from "../common.js";
-import type { ForThread, PostCancelAction } from "../types.js";
+import type { ForThread, } from "../types.js";
 import {
   defaultAskAckProxy,
   defaultCancel,

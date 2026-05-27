@@ -1,4 +1,5 @@
-import React, { useState } from "react";
+import type React from "react";
+import { useState } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
 import { motion } from "framer-motion";
 import { ApiError, createApiClient } from "@/api/client";
@@ -26,7 +27,7 @@ export function LoginPage() {
       storeApiKey(apiKey.trim());
       const raw = new URLSearchParams(location.search).get("redirect");
       const redirect =
-        raw != null && raw.startsWith("/") && !raw.startsWith("//")
+        raw?.startsWith("/") && !raw.startsWith("//")
           ? raw
           : "/projects";
       navigate(redirect, { replace: true });

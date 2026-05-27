@@ -26,7 +26,7 @@ import type { ThreadOps } from "./types.js";
 
 export const primOps: ThreadOps<PrimThread> = {
   create(ctx, t) {
-    let value;
+    let value: Value | undefined;
     try {
       // `get_metadata` needs the IR module + closures table to resolve a
       // callable Value back to its `AgentBlock`. Branch here rather than

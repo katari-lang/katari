@@ -1,6 +1,5 @@
 // TupleThread ops. Wraps the shared collecting logic.
 
-import type { CallId } from "../../id.js";
 import { commonRemoveChild } from "../common.js";
 import type { TupleThread } from "../types.js";
 import { collectingCreate, collectingDone } from "./collecting.js";
