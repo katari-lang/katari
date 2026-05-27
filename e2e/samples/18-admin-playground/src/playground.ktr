@@ -1,29 +1,41 @@
-// Admin UI form playground.
+// Admin UI test playground.
 //
-// Each agent here exercises a different SchemaForm shape. Apply this
-// snapshot, then click through them in /admin/.../definitions.
+// Each agent exercises a different type / SchemaForm / ValueViewer shape.
+// Apply this snapshot, then click through them in /admin.
+//
+// Organised by type category so reviewers can verify coverage at a glance.
 
-// === Primitives ===
+// ─── Primitives ─────────────────────────────────────────────────────
 
-@"Single string param - exercises StringField."
-agent echo_string(@"The text to echo back, prefixed with 'echo: '." text: string) -> string { f"echo: ${text}" }
+@"String input and output."
+agent prim_string(text: string) -> string { f"echo: ${text}" }
 
-@"Single integer param - exercises NumberField (integer)."
-agent double_int(@"Any integer. The result is n + n." n: integer) -> integer { n + n }
+@"Integer input. Returns n * 2."
+agent prim_integer(n: integer) -> integer { n + n }
 
-@"Single number param - exercises NumberField."
-agent halve(@"The number to divide by two." value: number) -> number { value / 2 }
+@"Number (float) input. Returns value / 2."
+agent prim_number(value: number) -> number { value / 2 }
 
-@"Single boolean param - exercises BooleanField (toggle)."
-agent flip(@"The flag to invert." flag: boolean) -> boolean { not(value = flag) }
+@"Boolean input. Returns the inverse."
+agent prim_boolean(flag: boolean) -> boolean { not(value = flag) }
 
-// === Multi-parameter agent (= each parameter independently annotated) ===
+@"Null-returning agent. Input is ignored."
+agent prim_null(ignored: string) -> null { null }
 
-@"Greets a person - exercises per-parameter descriptions on the invoke form."
-agent greet(
-  @"The greeter's name; appears verbatim in the result."
+// ─── Literal types ──────────────────────────────────────────────────
+
+@"String literal union → EnumField dropdown."
+agent literal_string_union(color: "red" | "green" | "blue") -> string {
+  f"painted ${color}"
+}
+
+// ─── Multi-parameter ────────────────────────────────────────────────
+
+@"Multiple params with per-parameter descriptions."
+agent multi_param(
+  @"The greeter's name."
   name: string,
-  @"Style of greeting prefix to use."
+  @"Greeting style."
   style: "casual" | "formal"
 ) -> string {
   match (style) {
@@ -32,151 +44,183 @@ agent greet(
   }
 }
 
-// === Data ctor (object form) ===
+// ─── Data constructors ──────────────────────────────────────────────
 
 @"A 2-D point."
 data point(
-  @"Horizontal coordinate (rightward positive)."
+  @"Horizontal coordinate."
   x: integer,
-  @"Vertical coordinate (downward positive)."
+  @"Vertical coordinate."
   y: integer
 )
 
-@"Takes a point - exercises ObjectField with auto-hidden $constructor."
-agent point_sum(p: point) -> integer {
+@"Takes a data ctor input. ObjectField with auto-hidden $constructor."
+agent data_input(p: point) -> integer {
   match (p) {
     case point(x = xv, y = yv) => { xv + yv }
+    case _ => { 0 }
   }
 }
 
-// === Tuple ===
-
-@"Takes a 2-tuple - exercises TupleField with mixed element types."
-agent describe_pair(t: (integer, string)) -> string {
-  match (t) {
-    case (0, s) => { f"zero with ${s}" }
-    case (n, s) => { f"${to_string(value = n)} with ${s}" }
-  }
-}
-
-// === Data ctor returns (single and tagged-union) ===
-
-@"A success-shaped result."
+@"Returns a data ctor value."
 data ok(n: integer)
-
-@"Builds an ok value - exercises tagged-data return rendering on the Returns card."
-agent build_ok(n: integer) -> ok { ok(n = n) }
-
-@"A failure shape."
+@"Error variant."
 data err(message: string)
 
-@"Tagged-union ARGUMENT (not return) - tests admin's tagged-union dropdown on the invoke form."
-agent describe_result(r: ok | err) -> string {
+@"Returns a data ctor. Tests ValueViewer $constructor rendering."
+agent data_output(n: integer) -> ok { ok(n = n) }
+
+// ─── Tagged union (data ctor union) ─────────────────────────────────
+
+@"Tagged-union INPUT. Tests UnionField dropdown on invoke form."
+agent union_input(r: ok | err) -> string {
   match (r) {
     case ok(n = v) => { f"ok: ${to_string(value = v)}" }
     case err(message = m) => { f"err: ${m}" }
+    case _ => { "unexpected" }
   }
 }
 
-@"Tagged-union RETURN - exercises bound-pair solver path for union upper bounds."
-agent maybe_fail(should_fail: boolean) -> ok | err {
+@"Tagged-union RETURN. Tests ValueViewer union rendering."
+agent union_output(should_fail: boolean) -> ok | err {
   match (should_fail) {
     case true => { err(message = "intentional failure") }
     case _    => { ok(n = 42) }
   }
 }
 
-@"String-literal union - admin should render EnumField (= dropdown of red/green/blue)."
-agent paint(color: "red" | "green" | "blue") -> string {
-  f"painted ${color}"
+// ─── Tuple ──────────────────────────────────────────────────────────
+
+@"2-tuple input. Tests TupleField with mixed element types."
+agent tuple_input(t: (integer, string)) -> string {
+  match (t) {
+    case (0, s) => { f"zero with ${s}" }
+    case (n, s) => { f"${to_string(value = n)} with ${s}" }
+    case _ => { "unexpected" }
+  }
 }
 
-// === Escalation: regular request ===
+@"3-tuple with nested data. Tests nested tuple rendering."
+agent tuple_nested(t: (point, string, boolean)) -> string {
+  match (t) {
+    case (point(x = xv, y = yv), label, flag) => {
+      f"(${to_string(value = xv)},${to_string(value = yv)}) ${label} ${to_string(value = flag)}"
+    }
+    case _ => { "unexpected" }
+  }
+}
 
-@"Operator-answerable prompt."
-request ask(@"Question the operator should answer. Free-form text." prompt: string) -> string
+// ─── Array ──────────────────────────────────────────────────────────
 
-@"Calls ask() with no surrounding handler - surfaces as an open escalation in admin."
-agent ask_name() -> string with ask {
+@"Array of integers. Tests ArrayField add/remove."
+agent array_length_int(arr: array[integer]) -> integer {
+  array_length(arr)
+}
+
+@"Array of data ctors. Tests nested array + data ctor input."
+agent array_of_points(points: array[point]) -> integer {
+  array_length(points)
+}
+
+// ─── Record ─────────────────────────────────────────────────────────
+
+@"Record (dynamic key-value map). Tests DynamicKeyValueEditor."
+agent record_echo(r: record[string]) -> record[string] { r }
+
+// (Katari doesn't have anonymous object literals — named fields use data ctors)
+
+// ─── Nested combinations ────────────────────────────────────────────
+
+@"Array of unions. Tests ArrayField + UnionField nesting."
+agent nested_array_union(items: array[ok | err]) -> integer {
+  array_length(items)
+}
+
+@"Record of arrays. Tests DynamicKeyValueEditor + ArrayField nesting."
+agent nested_record_array(groups: record[array[integer]]) -> record[array[integer]] { groups }
+
+@"Union containing tuple. Deep nesting test."
+data wrapped_pair(pair: (integer, string))
+data wrapped_single(value: integer)
+
+agent nested_union_tuple(input: wrapped_pair | wrapped_single) -> string {
+  match (input) {
+    case wrapped_pair(pair = t) => {
+      match (t) {
+        case (n, s) => { f"pair: ${to_string(value = n)} ${s}" }
+        case _ => { "unexpected" }
+      }
+    }
+    case wrapped_single(value = v) => { f"single: ${to_string(value = v)}" }
+    case _ => { "unexpected" }
+  }
+}
+
+// ─── Escalation ─────────────────────────────────────────────────────
+
+@"Answerable request. Tests escalation answer form."
+request ask(@"Question for the operator." prompt: string) -> string
+
+@"Calls ask(). Creates an open escalation."
+agent escalation_ask() -> string with ask {
   let name = ask(prompt = "What's your name?")
   f"hello, ${name}"
 }
 
-@"Boolean-returning request - escalation answer form renders a BooleanField toggle."
-request confirm(@"Yes/no question to display in the escalation UI." prompt: string) -> boolean
+@"Boolean request. Tests BooleanField in escalation answer."
+request confirm(@"Yes/no question." prompt: string) -> boolean
 
-@"Drives one confirm() call."
-agent check_proceed() -> string with confirm {
+@"Calls confirm(). Tests boolean escalation."
+agent escalation_confirm() -> string with confirm {
   match (confirm(prompt = "Proceed?")) {
     case true => { "proceeded" }
     case _    => { "user said no" }
   }
 }
 
-// === Escalation: never request (tests the never UX) ===
-
-@"A request declared with never. Cannot be answered with a value."
+@"Never-returning request. Tests the never escalation UX."
 request fatal(reason: string) -> never
 
-@"Raises a never-returning request - escalation page shows the never UX."
-agent trigger_never() -> string with fatal {
-  fatal(reason = "this demo can never receive a meaningful answer")
+@"Raises fatal. Shows never-type escalation page."
+agent escalation_never() -> string with fatal {
+  fatal(reason = "this can never receive an answer")
   "unreachable"
 }
 
-// === Entry ===
+// ─── Delegation tree demos ──────────────────────────────────────────
 
-@"Default no-arg entry point."
-agent main() -> string {
-  "playground"
-}
-
-// === Tree-view demos (host-side sleep via sidecar) ===
-//
-// These give the admin's run tree view something visibly in-flight to
-// render. `sleep_ms` blocks the ext for the requested duration; the
-// agents below combine it with Katari's built-in `parallel (...)` to get
-// parallel delegations under the same root, and with `fan_out` to also
-// exercise the FFI-side `katari.delegate` path.
-
-@"Sleep for `ms` milliseconds on the host. Each call shows up as one ext-call node in the run tree for its duration."
+@"Sleep for ms milliseconds on the host side."
 external sleep_ms(ms: integer) -> null from "FFI:playground.sleep_ms"
 
-@"Three sequential sleeps. Watch the tree: one ext node appears, finishes, then the next, etc."
-agent demo_sequential_sleeps() -> string {
+@"Sequential sleeps. Tree shows one ext node at a time."
+agent tree_sequential() -> string {
   sleep_ms(ms = 2000)
   sleep_ms(ms = 2000)
   sleep_ms(ms = 2000)
-  "three sleeps done"
+  "done"
 }
 
-@"Three parallel sleeps via `parallel (...)`. The tree shows three ext nodes in flight at once under the run root."
-agent demo_par_sleeps() -> string {
+@"Parallel sleeps. Tree shows three ext nodes simultaneously."
+agent tree_parallel() -> string {
   let _ = parallel (sleep_ms(ms = 3000), sleep_ms(ms = 5000), sleep_ms(ms = 7000))
-  "three parallel sleeps done"
+  "done"
 }
 
-// === FFI-side parallelism (= ext-spawned children) ===
-//
-// Mostly to exercise the `katari.delegate` path on the sidecar side
-// (= ext-spawned child delegations, recorded under the ext call in the
-// tree). Pure-Katari `parallel` above is the cleaner way to fan out; this is
-// here to make the FFI code path visible.
-
-@"Fan out `count` parallel copies of `callback` from the ext side. Returns the number of results gathered."
+@"FFI-side fan out. Tests ext-spawned child delegations in tree."
 external fan_out(callback: agent () -> string, count: integer) -> integer from "FFI:playground.fan_out"
 
-@"Small CORE-side agent used as the callback in demo_ffi_fanout."
+@"Slow child for fan_out."
 agent slow_child() -> string {
   sleep_ms(ms = 3000)
   "ok"
 }
 
-@"Fans out three slow_child copies via the ext. Tree: fan_out ext call + three CORE-side children running concurrently."
-agent demo_ffi_fanout() -> integer {
+@"Fans out three slow_child via ext. Tests FFI delegation tree."
+agent tree_ffi_fanout() -> integer {
   fan_out(callback = slow_child, count = 3)
 }
 
-agent demo_array_length(arr: array[integer]) -> integer {
-  array_length(arr)
-}
+// ─── Entry ──────────────────────────────────────────────────────────
+
+@"Default entry point."
+agent main() -> string { "playground ready" }

@@ -30,9 +30,7 @@ export function SelectMenu({
 }) {
   return (
     <SelectPrimitive.Root value={value} onValueChange={onChange}>
-      <SelectPrimitive.Trigger
-        className="inline-flex h-9 w-full items-center justify-between gap-2 border border-border bg-transparent px-3 text-sm text-foreground transition-colors hover:bg-muted hover:cursor-pointer hover:border-border-strong focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-      >
+      <SelectPrimitive.Trigger className="inline-flex h-9 w-full items-center justify-between gap-2 border border-border bg-transparent px-3 text-sm text-foreground transition-colors hover:bg-muted hover:cursor-pointer hover:border-border-strong focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
         <SelectPrimitive.Value placeholder={placeholder ?? "Select..."} />
         <SelectPrimitive.Icon>
           <ChevronDown className="size-4 shrink-0 text-muted-foreground" />
@@ -43,7 +41,7 @@ export function SelectMenu({
           position="popper"
           sideOffset={4}
           className={cn(
-            "z-50 max-h-80 w-[var(--radix-select-trigger-width)] overflow-hidden border border-border bg-background",
+            "z-50 max-h-80 w-(--radix-select-trigger-width) overflow-hidden border border-border bg-background",
             "data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-[0.97]",
             "data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-[0.97]",
           )}
@@ -55,10 +53,9 @@ export function SelectMenu({
                 value={opt.key}
                 className={cn(
                   "flex w-full items-center gap-2 px-3 py-2 text-left text-sm outline-none transition-colors hover:cursor-pointer",
-                  "data-[highlighted]:bg-muted",
                   opt.key === value
                     ? "bg-accent text-accent-foreground"
-                    : "text-foreground",
+                    : "text-foreground data-highlighted:bg-muted",
                 )}
               >
                 <SelectPrimitive.ItemText>
