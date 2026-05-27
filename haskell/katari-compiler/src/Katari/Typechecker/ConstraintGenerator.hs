@@ -41,6 +41,7 @@ module Katari.Typechecker.ConstraintGenerator
 
     -- * Entry point
     generateConstraints,
+    generateConstraintsForModule,
   )
 where
 
@@ -1984,26 +1985,96 @@ generateConstraints result = case runState (runReaderT action context) initialSt
       finalState.stateErrors
     )
   where
-    context =
-      initialContext
-        result.identifiedTypes
-        result.identifiedRequests
-        result.identifiedConstructors
-        result.topLevelVariablesByQName
-        result.typesByQName
-        result.requestsByQName
-        result.constructorsByQName
-        primRules
-    primRules =
-      Map.fromList
-        [ (qualifiedName, rule)
-          | (vid, vd) <- Map.toList result.identifiedVariables,
-            Just rule <- [vd.variablePrimRule],
-            Just qualifiedName <- [vd.variableQualifiedName]
-        ]
+    context = buildContext result
     action = do
       allocateAllVariables result
       mapM walkOne (Map.toList result.moduleASTs)
     walkOne (mid, mod') = do
       mod'' <- walkModule mod'
       pure (mid, mod'')
+
+-- | Run constraint generation for a single module. Variables whose
+-- 'QualifiedName' appears in @importedTypes@ are pre-bound to the
+-- imported resolved type (lifted to 'Unresolved') instead of
+-- allocating a fresh type variable. Only the specified module's AST is
+-- walked; the returned 'ConstraintGenResult' contains a single entry
+-- in 'constrainedModules'.
+generateConstraintsForModule ::
+  Map QualifiedName (SemanticType Resolved) ->
+  IdentifierResult ->
+  Text ->
+  ModuleId ->
+  (ConstraintGenResult, [ConstraintError])
+generateConstraintsForModule importedTypes result targetModuleName targetModuleId =
+  case runState (runReaderT action context) initialState of
+    (constrainedModule, finalState) ->
+      ( ConstraintGenResult
+          { constrainedModules = Map.singleton targetModuleId constrainedModule,
+            typeEnvironment = finalState.stateTypeEnvironment,
+            constraints = finalState.stateConstraints,
+            variableSupply =
+              VariableSupply
+                { typeVarSupply = finalState.stateNextTypeVariableId,
+                  requestVarSupply = finalState.stateNextRequestVariableId
+                }
+          },
+        finalState.stateErrors
+      )
+  where
+    context = buildContext result
+    action = do
+      allocateVariablesForModule importedTypes targetModuleName result
+      case Map.lookup targetModuleId result.moduleASTs of
+        Just moduleAST -> walkModule moduleAST
+        Nothing -> pure Module {declarations = [], sourceSpan = emptySrcSpan}
+    emptySrcSpan =
+      SrcSpan
+        { filePath = "",
+          start = Position {line = 0, column = 0},
+          end = Position {line = 0, column = 0}
+        }
+
+-- | Pre-bind imported variables to their resolved types (lifted to
+-- 'Unresolved'), and allocate fresh type variables for top-level
+-- variables owned by the target module. Local variables and
+-- variables from other unprocessed modules are left unbound; the
+-- CG's 'lookupVariable' allocates fresh type vars for them on demand
+-- when they are actually referenced during the AST walk.
+allocateVariablesForModule ::
+  Map QualifiedName (SemanticType Resolved) ->
+  Text ->
+  IdentifierResult ->
+  CG ()
+allocateVariablesForModule importedTypes targetModuleName result =
+  mapM_ allocate (Map.toList result.identifiedVariables)
+  where
+    allocate (variableId, variableData) =
+      case variableData.variableQualifiedName of
+        Just qualifiedName
+          | Just resolvedType <- Map.lookup qualifiedName importedTypes ->
+              bindVariable variableId (liftResolvedToUnresolved resolvedType)
+          | qualifiedName.module_ == targetModuleName -> do
+              fresh <- freshTypeVar
+              bindVariable variableId fresh
+          | otherwise -> pure ()
+        Nothing -> pure ()
+
+buildContext :: IdentifierResult -> ConstraintContext
+buildContext result =
+  initialContext
+    result.identifiedTypes
+    result.identifiedRequests
+    result.identifiedConstructors
+    result.topLevelVariablesByQName
+    result.typesByQName
+    result.requestsByQName
+    result.constructorsByQName
+    primRules
+  where
+    primRules =
+      Map.fromList
+        [ (qualifiedName, rule)
+          | (_variableId, variableData) <- Map.toList result.identifiedVariables,
+            Just rule <- [variableData.variablePrimRule],
+            Just qualifiedName <- [variableData.variableQualifiedName]
+        ]

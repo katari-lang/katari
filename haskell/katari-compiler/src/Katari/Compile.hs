@@ -12,10 +12,12 @@
 -- parseSources
 --   → identify         -- emits import-cycle (K0110) and missing-import (K0107)
 --                      --   diagnostics in addition to name-resolution errors
---   → generateConstraints
---   → solve
---   → zonk
---   → lower            -- → IRModule (pure)
+--   → for each module in topological order:
+--       generateConstraintsForModule  -- per-module CG with imported types
+--       → solve                       -- per-module solving
+--       → zonk                        -- per-module zonking
+--       → extractModuleInterface      -- export resolved types for downstream
+--   → lower            -- → IRModule (pure, whole-program)
 --   → buildSchemas     -- → [SchemaEntry] (independent of lower; reads ZonkResult)
 -- @
 --
@@ -41,26 +43,32 @@ module Katari.Compile
   )
 where
 
+import Data.Foldable (foldl')
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
+import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as Text
-import Katari.AST (Module, Phase (Parsed))
+import Katari.AST (Module, Phase (Parsed, Zonked))
 import Katari.Common qualified as Common
 import Katari.Diagnostic (Diagnostic, hasErrors)
+import Katari.Id (ModuleId, QualifiedName (..), RequestId, TypeId, VariableId)
 import Katari.IR (IRModule)
 import Katari.Lexer as Lexer
 import Katari.Lowering (lowerProgram)
 import Katari.Lowering qualified as Lowering
 import Katari.Parser qualified as Parser
 import Katari.Schema (SchemaEntry, buildSchemas)
+import Katari.SemanticType (Resolved, SemanticType)
 import Katari.Stdlib qualified as Stdlib
-import Katari.Typechecker.ConstraintGenerator (generateConstraints)
+import Katari.Typechecker.ConstraintGenerator (generateConstraintsForModule)
 import Katari.Typechecker.ConstraintGenerator qualified as CG
 import Katari.Typechecker.Exhaustive (checkExhaustive)
 import Katari.Typechecker.Exhaustive qualified as Exhaustive
-import Katari.Typechecker.Identifier (IdentifierResult, identify)
+import Katari.Typechecker.Identifier (IdentifierResult (..), identify)
 import Katari.Typechecker.Identifier qualified as Identifier
+import Katari.Typechecker.ImportGraph (topologicalSort)
+import Katari.Typechecker.ModuleInterface (ModuleInterface (..), extractModuleInterface)
 import Katari.Typechecker.Solver (SolverResult (..), solve)
 import Katari.Typechecker.Solver qualified as Solver
 import Katari.Typechecker.Zonker (ZonkResult (..), zonk)
@@ -162,19 +170,12 @@ compile input =
         Map.mapWithKey
           (\moduleName src -> SourceEntry ("<stdlib:" <> Text.unpack moduleName <> ">") src)
           Stdlib.stdlibSources
-      -- User sources win on overlap so that a user-facing error
-      -- (K0113 reserved-name conflict) still surfaces if someone
-      -- defines a module called @prim@ themselves.
       mergedSources = Map.union input.sources stdlibEntries
       (parsed, parseDiags) = parseSources mergedSources
       (idResult, idErrors) = identify Stdlib.stdlibModuleNames parsed
       idDiags = map Identifier.toDiagnostic idErrors
-      (cgResult, cgErrors) = generateConstraints idResult
-      cgDiags = map (CG.toDiagnostic solverTypeNames) cgErrors
-      (solverResult_, solverErrors) = solve cgResult
-      -- Type / request name maps let Solver.toDiagnostic render
-      -- user-facing surface names (= `User`, `Greet`) instead of
-      -- internal ids (= `<TypeId 7>`) inside K0220/K0221/K0222.
+
+      -- Name maps for diagnostic rendering.
       solverTypeNames =
         Map.map
           (qname . (.typeQualifiedName))
@@ -183,23 +184,48 @@ compile input =
         Map.map
           (qname . (.requestQualifiedName))
           idResult.identifiedRequests
-      qname (Common.QualifiedName _ n) = n
-      solverDiags =
-        map (Solver.toDiagnostic solverTypeNames solverReqNames) solverErrors
-      (zonkResult_, zonkErrors) = zonk idResult cgResult solverResult_
-      zonkDiags = map Zonker.toDiagnostic zonkErrors
-      exhaustiveDiags = map Exhaustive.toDiagnostic (checkExhaustive idResult zonkResult_)
+      qname (Common.QualifiedName _ qualifiedNameComponent) = qualifiedNameComponent
+
+      -- Build module name → ModuleId reverse map.
+      moduleIdByName =
+        Map.fromList
+          [ (moduleData.moduleName, moduleId)
+            | (moduleId, moduleData) <- Map.toList idResult.identifiedModules
+          ]
+
+      -- Compute topological order from parsed modules.
+      stdlibModuleNames =
+        [ moduleName
+          | moduleName <- Map.keys parsed,
+            Set.member moduleName Stdlib.stdlibModuleNames
+        ]
+      sortedStdlibNames =
+        filter (== "primitive") stdlibModuleNames
+          ++ filter (/= "primitive") stdlibModuleNames
+      userModuleMap = Map.filterWithKey (\moduleName _ -> not (Set.member moduleName Stdlib.stdlibModuleNames)) parsed
+      userLevels = topologicalSort userModuleMap
+      processedUserNames = concatMap Set.toList userLevels
+      remainingUserNames =
+        [ moduleName
+          | moduleName <- Map.keys userModuleMap,
+            not (Set.member moduleName (Set.unions userLevels))
+        ]
+      moduleOrder = sortedStdlibNames ++ processedUserNames ++ remainingUserNames
+
+      -- Per-module typecheck loop.
+      (mergedSolverResult, mergedZonkResult, typecheckDiags) =
+        typecheckModules idResult solverTypeNames solverReqNames moduleIdByName moduleOrder
+
+      exhaustiveDiags = map Exhaustive.toDiagnostic (checkExhaustive idResult mergedZonkResult)
       preLowerDiags =
         parseDiags
           <> idDiags
-          <> cgDiags
-          <> solverDiags
-          <> zonkDiags
+          <> typecheckDiags
           <> exhaustiveDiags
       shouldLower = not (hasErrors preLowerDiags)
       (loweredIR, loweringDiags)
         | shouldLower =
-            let (eitherIR, errs) = lowerProgram idResult zonkResult_
+            let (eitherIR, errs) = lowerProgram idResult mergedZonkResult
                 structuralDiags = map Lowering.toDiagnostic errs
              in case eitherIR of
                   Right ir -> (Just ir, structuralDiags)
@@ -207,7 +233,7 @@ compile input =
         | otherwise = (Nothing, [])
       shouldEmitArtefacts =
         shouldLower && not (hasErrors loweringDiags)
-      schema = if shouldEmitArtefacts then Just (buildSchemas idResult zonkResult_) else Nothing
+      schema = if shouldEmitArtefacts then Just (buildSchemas idResult mergedZonkResult) else Nothing
       finalIR = if shouldEmitArtefacts then loweredIR else Nothing
       allDiags = preLowerDiags <> loweringDiags
    in CompileResult
@@ -215,9 +241,92 @@ compile input =
           schemaEntries = schema,
           diagnostics = allDiags,
           identifierResult = idResult,
-          solverResult = solverResult_,
-          zonkResult = zonkResult_
+          solverResult = mergedSolverResult,
+          zonkResult = mergedZonkResult
         }
+
+-- ===========================================================================
+-- Per-module typecheck loop
+-- ===========================================================================
+
+data TypecheckAccumulator = TypecheckAccumulator
+  { accImportedTypes :: Map QualifiedName (SemanticType Resolved),
+    accZonkedModules :: Map ModuleId (Module Zonked),
+    accZonkedModuleNames :: Map ModuleId Text,
+    accZonkedTypeEnvironment :: Map VariableId (SemanticType Resolved),
+    accSolverResult :: SolverResult,
+    accDiagnostics :: [Diagnostic]
+  }
+
+typecheckModules ::
+  IdentifierResult ->
+  Map TypeId Text ->
+  Map RequestId Text ->
+  Map Text ModuleId ->
+  [Text] ->
+  (SolverResult, ZonkResult, [Diagnostic])
+typecheckModules idResult solverTypeNames solverReqNames moduleIdByName moduleOrder =
+  let initial =
+        TypecheckAccumulator
+          { accImportedTypes = Map.empty,
+            accZonkedModules = Map.empty,
+            accZonkedModuleNames = Map.empty,
+            accZonkedTypeEnvironment = Map.empty,
+            accSolverResult = SolverResult {typeSubstitution = Map.empty, requestSubstitution = Map.empty},
+            accDiagnostics = []
+          }
+      final = foldl' (typecheckOneModule idResult solverTypeNames solverReqNames moduleIdByName) initial moduleOrder
+      mergedZonkResult =
+        ZonkResult
+          { zonkedModules = final.accZonkedModules,
+            zonkedModuleNames = final.accZonkedModuleNames,
+            zonkedTypeEnvironment = final.accZonkedTypeEnvironment
+          }
+   in (final.accSolverResult, mergedZonkResult, final.accDiagnostics)
+
+typecheckOneModule ::
+  IdentifierResult ->
+  Map TypeId Text ->
+  Map RequestId Text ->
+  Map Text ModuleId ->
+  TypecheckAccumulator ->
+  Text ->
+  TypecheckAccumulator
+typecheckOneModule idResult solverTypeNames solverReqNames moduleIdByName accumulator moduleName =
+  case Map.lookup moduleName moduleIdByName of
+    Nothing -> accumulator
+    Just moduleId ->
+      let (cgResult, cgErrors) = generateConstraintsForModule accumulator.accImportedTypes idResult moduleName moduleId
+          cgDiags = map (CG.toDiagnostic solverTypeNames) cgErrors
+          (solverResult_, solverErrors) = solve cgResult
+          solverDiags = map (Solver.toDiagnostic solverTypeNames solverReqNames) solverErrors
+          (zonkResult_, zonkErrors) = zonk idResult cgResult solverResult_
+          zonkDiags = map Zonker.toDiagnostic zonkErrors
+          interface = extractModuleInterface moduleName idResult.identifiedVariables zonkResult_.zonkedTypeEnvironment
+          importedVariableIds =
+            Map.keysSet
+              ( Map.filter
+                  ( \variableData -> case variableData.variableQualifiedName of
+                      Just qualifiedName ->
+                        Map.member qualifiedName accumulator.accImportedTypes
+                      Nothing -> False
+                  )
+                  idResult.identifiedVariables
+              )
+          ownedTypeEnvironment =
+            Map.withoutKeys zonkResult_.zonkedTypeEnvironment importedVariableIds
+       in TypecheckAccumulator
+            { accImportedTypes = Map.union accumulator.accImportedTypes interface.exportedTypes,
+              accZonkedModules = Map.union accumulator.accZonkedModules zonkResult_.zonkedModules,
+              accZonkedModuleNames = Map.union accumulator.accZonkedModuleNames zonkResult_.zonkedModuleNames,
+              accZonkedTypeEnvironment = Map.union accumulator.accZonkedTypeEnvironment ownedTypeEnvironment,
+              accSolverResult =
+                SolverResult
+                  { typeSubstitution = Map.union solverResult_.typeSubstitution accumulator.accSolverResult.typeSubstitution,
+                    requestSubstitution = Map.union solverResult_.requestSubstitution accumulator.accSolverResult.requestSubstitution
+                  },
+              accDiagnostics = accumulator.accDiagnostics <> cgDiags <> solverDiags <> zonkDiags
+            }
 
 -- ===========================================================================
 -- Parse helper

@@ -30,6 +30,7 @@ library:
     - Katari.Typechecker.Solver.Request
     - Katari.Typechecker.Solver.Internal
     - Katari.Typechecker.Solver.Substitution
+    - Katari.Typechecker.ModuleInterface
     - Katari.Typechecker.Zonker
     - Katari.Typechecker.Exhaustive
     - Katari.IR
