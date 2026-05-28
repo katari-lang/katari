@@ -106,7 +106,7 @@ run opts = do
           ]
 
   -- 2. Compile.
-  let result = Compile.compile Compile.CompileInput {Compile.sources = sources, Compile.cache = Map.empty}
+  result <- Compile.compile (\_ -> pure ()) Compile.CompileInput {Compile.sources = sources, Compile.cache = Map.empty}
   Check.emitDiagnostics fileTexts result.diagnostics
   if hasErrors result.diagnostics
     then exitWith (ExitFailure 1)

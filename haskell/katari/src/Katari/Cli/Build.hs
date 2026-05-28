@@ -58,8 +58,8 @@ optionsParser =
 run :: Options -> IO ()
 run opts = do
   (root, input, fileTexts) <- Check.loadProject (Check.Options {optProjectRoot = opts.optProjectRoot})
-  let result = Compile.compile input
-      outputPath = case opts.optOut of
+  result <- Compile.compile (\_ -> pure ()) input
+  let outputPath = case opts.optOut of
         Just p -> p
         Nothing -> root <> "/.katari/dist/bundle.json"
   Cache.ensureCacheDirs (Cache.projectCachePaths root)

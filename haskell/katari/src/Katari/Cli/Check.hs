@@ -55,7 +55,7 @@ optionsParser =
 run :: Options -> IO ()
 run opts = do
   (root, input, fileTexts) <- loadProject opts
-  let result = Compile.compile input
+  result <- Compile.compile (\_ -> pure ()) input
   Cache.ensureCacheDirs (Cache.projectCachePaths root)
   CompileCache.saveDiskCache root (CompileCache.toDiskCache result.updatedCache)
   emitDiagnostics fileTexts result.diagnostics

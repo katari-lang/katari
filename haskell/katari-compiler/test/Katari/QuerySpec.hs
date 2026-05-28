@@ -11,7 +11,7 @@ import Test.Hspec
 
 prepare :: Text -> C.CompileResult
 prepare src =
-  C.compile
+  C.compileSync
     C.CompileInput
       { C.sources =
           Map.singleton

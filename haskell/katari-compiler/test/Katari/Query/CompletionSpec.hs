@@ -30,7 +30,7 @@ import Test.Hspec
 prepare :: Text -> IO (IdentifierResult, ZonkResult)
 prepare src = do
   let result =
-        C.compile
+        C.compileSync
           C.CompileInput
             { C.sources =
                 Map.singleton
@@ -45,7 +45,7 @@ prepare src = do
 prepareMulti :: [(Text, FilePath, Text)] -> IO (IdentifierResult, ZonkResult)
 prepareMulti sources = do
   let result =
-        C.compile
+        C.compileSync
           C.CompileInput
             { C.sources =
                 Map.fromList

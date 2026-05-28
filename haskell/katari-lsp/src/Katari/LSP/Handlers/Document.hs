@@ -234,7 +234,8 @@ recompileWorkspace st root = do
     Nothing -> pure ()
     Just ws -> do
       let input = snapshotWorkspaceSources ws
-          result = Compile.compile input
+      result <- liftIO $ Compile.compile (\_ -> pure ()) input
+      let
           fileTexts = wsFileTexts ws
       liftIO $
         atomically $
@@ -262,7 +263,7 @@ compileOneOrphan :: ServerState -> FilePath -> Text -> LSP.LspM () ()
 compileOneOrphan _st path txt = do
   let entry = Compile.SourceEntry {Compile.filePath = path, Compile.sourceText = txt}
       sources = Map.singleton (singletonModuleName path) entry
-      result = Compile.compile (Compile.CompileInput {Compile.sources = sources, Compile.cache = Map.empty})
+  result <- liftIO $ Compile.compile (\_ -> pure ()) (Compile.CompileInput {Compile.sources = sources, Compile.cache = Map.empty})
   publishWorkspaceDiagnostics (Map.singleton path txt) result.diagnostics
   where
     -- Strip the trailing @.ktr@ extension and treat the basename as the

@@ -46,7 +46,7 @@ spec = describe "Katari.Compile" $ do
 happyPathSpec :: Spec
 happyPathSpec = describe "well-formed single-module input" $ do
   it "produces an IRModule and schema entries for a trivial agent" $ do
-    let result = compile (singleSourceInput "agent main() { 42 }")
+    let result = compileSync (singleSourceInput "agent main() { 42 }")
     hasErrors result.diagnostics `shouldBe` False
     isJust result.irModule `shouldBe` True
     isJust result.schemaEntries `shouldBe` True
@@ -63,7 +63,7 @@ happyPathSpec = describe "well-formed single-module input" $ do
               "  xs[0]\n",
               "}\n"
             ]
-    let result = compile (singleSourceInput src)
+    let result = compileSync (singleSourceInput src)
     hasErrors result.diagnostics `shouldBe` False
     isJust result.irModule `shouldBe` True
 
@@ -78,7 +78,7 @@ happyPathSpec = describe "well-formed single-module input" $ do
               "  )\n",
               "}\n"
             ]
-    let result = compile (singleSourceInput src)
+    let result = compileSync (singleSourceInput src)
     hasErrors result.diagnostics `shouldBe` False
     isJust result.irModule `shouldBe` True
 
@@ -91,7 +91,7 @@ happyPathSpec = describe "well-formed single-module input" $ do
               "  } then { null }\n",
               "}\n"
             ]
-    let result = compile (singleSourceInput src)
+    let result = compileSync (singleSourceInput src)
     hasErrors result.diagnostics `shouldBe` False
     isJust result.irModule `shouldBe` True
 
@@ -102,7 +102,7 @@ happyPathSpec = describe "well-formed single-module input" $ do
               "  return\n",
               "}\n"
             ]
-    let result = compile (singleSourceInput src)
+    let result = compileSync (singleSourceInput src)
     hasErrors result.diagnostics `shouldBe` False
     isJust result.irModule `shouldBe` True
 
@@ -124,7 +124,7 @@ happyPathSpec = describe "well-formed single-module input" $ do
               "  }\n",
               "}\n"
             ]
-    let result = compile (singleSourceInput src)
+    let result = compileSync (singleSourceInput src)
     hasErrors result.diagnostics `shouldBe` False
     isJust result.irModule `shouldBe` True
 
@@ -146,20 +146,20 @@ happyPathSpec = describe "well-formed single-module input" $ do
               "  } then { 0 }\n",
               "}"
             ]
-    let result = compile (singleSourceInput src)
+    let result = compileSync (singleSourceInput src)
     hasErrors result.diagnostics `shouldBe` False
     isJust result.irModule `shouldBe` True
 
 errorPathSpec :: Spec
 errorPathSpec = describe "ill-formed input" $ do
   it "returns parse-error diagnostics and no IR for a syntax error" $ do
-    let result = compile (singleSourceInput "agent main() {")
+    let result = compileSync (singleSourceInput "agent main() {")
     hasErrors result.diagnostics `shouldBe` True
     isNothing result.irModule `shouldBe` True
     isNothing result.schemaEntries `shouldBe` True
 
   it "carries each diagnostic's code in the K#### range" $ do
-    let result = compile (singleSourceInput "agent main() {")
+    let result = compileSync (singleSourceInput "agent main() {")
         codes = map (.code) result.diagnostics
     -- All codes must start with 'K'.
     all (\c -> not (null (show c)) && head (show c) == '"') codes `shouldBe` True
@@ -168,7 +168,7 @@ multiModuleSpec :: Spec
 multiModuleSpec = describe "multi-module input" $ do
   it "flags imports of modules not present in the source map" $ do
     let result =
-          compile
+          compileSync
             ( singleSourceInput
                 "import { foo } from missing\nagent main() { 1 }"
             )
@@ -180,7 +180,7 @@ multiModuleSpec = describe "multi-module input" $ do
     -- Even a no-op multi-module setup: two modules with no cross-imports
     -- should both compile without diagnostics.
     let result =
-          compile
+          compileSync
             ( multiSourceInput
                 [ ("util", "agent helper() { 1 }"),
                   ("main", "agent main() { 2 }")
@@ -208,7 +208,7 @@ exhaustiveSpec = describe "exhaustiveness checker" $ do
           \    }\n\
           \  }\n\
           \}"
-        result = compile (singleSourceInput src)
+        result = compileSync (singleSourceInput src)
         codes = map (.code) result.diagnostics
     codes `shouldContain` ["K0290"]
 
@@ -225,7 +225,7 @@ exhaustiveSpec = describe "exhaustiveness checker" $ do
           \    }\n\
           \  }\n\
           \}"
-        result = compile (singleSourceInput src)
+        result = compileSync (singleSourceInput src)
         codes = map (.code) result.diagnostics
     codes `shouldContain` ["K0290"]
 
@@ -241,7 +241,7 @@ exhaustiveSpec = describe "exhaustiveness checker" $ do
           \    }\n\
           \  }\n\
           \}"
-        result = compile (singleSourceInput src)
+        result = compileSync (singleSourceInput src)
         codes = map (.code) result.diagnostics
     codes `shouldContain` ["K0292"]
 
@@ -255,7 +255,7 @@ exhaustiveSpec = describe "exhaustiveness checker" $ do
           \  let None() = x\n\
           \  0\n\
           \}"
-        result = compile (singleSourceInput src)
+        result = compileSync (singleSourceInput src)
         codes = map (.code) result.diagnostics
     codes `shouldContain` ["K0291"]
 
@@ -275,7 +275,7 @@ exhaustiveSpec = describe "exhaustiveness checker" $ do
           \    }\n\
           \  }\n\
           \}"
-        result = compile (singleSourceInput src)
+        result = compileSync (singleSourceInput src)
         exhaustiveCodes = filter (\c -> c == "K0290" || c == "K0291" || c == "K0292") (map (.code) result.diagnostics)
     exhaustiveCodes `shouldBe` []
 
@@ -287,7 +287,7 @@ externalAgentSpec :: Spec
 externalAgentSpec = describe "external agent annotation validation" $ do
   it "K0150: external without annotation produces an error" $ do
     let result =
-          compile
+          compileSync
             ( singleSourceInput
                 "request http_req()\nexternal fetch(url: string) -> string with http_req from \"FFI:lib.fetch\""
             )
@@ -296,7 +296,7 @@ externalAgentSpec = describe "external agent annotation validation" $ do
 
   it "K0151: external with empty annotation produces an error" $ do
     let result =
-          compile
+          compileSync
             ( singleSourceInput
                 "request http_req()\n@\"\"\nexternal fetch(url: string) -> string with http_req from \"FFI:lib.fetch\""
             )
@@ -305,7 +305,7 @@ externalAgentSpec = describe "external agent annotation validation" $ do
 
   it "external with non-empty annotation compiles without K0150/K0151" $ do
     let result =
-          compile
+          compileSync
             ( singleSourceInput
                 "request http_req()\n@\"https://api.example.com\"\nexternal fetch(url: string) -> string with http_req from \"FFI:lib.fetch\"\nagent main() -> string { \"ok\" }"
             )
@@ -327,7 +327,7 @@ recursiveDataSpec = describe "recursive data type" $ do
           \  let xs: List = Cons(head = 1, tail = Nil())\n\
           \  0\n\
           \}"
-        result = compile (singleSourceInput src)
+        result = compileSync (singleSourceInput src)
     hasErrors result.diagnostics `shouldBe` False
     isJust result.irModule `shouldBe` True
 
@@ -337,7 +337,7 @@ recursiveDataSpec = describe "recursive data type" $ do
           \data Nil()\n\
           \type List = Cons | Nil\n\
           \agent main() -> integer { 0 }"
-        result = compile (singleSourceInput src)
+        result = compileSync (singleSourceInput src)
     case result.irModule of
       Nothing -> expectationFailure "expected irModule but got Nothing"
       Just ir ->

@@ -27,12 +27,13 @@ module Katari.Compile
     parsedStdlibModules,
     identifyWithStdlib,
     generateConstraintsAll,
+    compileSync,
   )
 where
 
 import Control.Parallel.Strategies (parMap, rseq)
-import Control.Monad.State.Strict (execState, modify)
 import Data.Foldable (foldl', for_)
+import System.IO.Unsafe (unsafePerformIO)
 import Data.Hashable (hash)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
@@ -150,9 +151,7 @@ data CompileResult = CompileResult
     schemaEntries :: Maybe [SchemaEntry],
     diagnostics :: [Diagnostic],
     identifierResult :: IdentifierResult,
-    solverResult :: SolverResult,
     zonkResult :: ZonkResult,
-    compileLogs :: [CompileLog],
     updatedCache :: Map ModuleName ModuleCache
   }
 
@@ -160,17 +159,14 @@ data CompileResult = CompileResult
 -- Top-level entry
 -- ===========================================================================
 
-compile :: CompileInput -> CompileResult
-compile input =
+compile :: (CompileLog -> IO ()) -> CompileInput -> IO CompileResult
+compile emitLog input = do
   let stdlibEntries =
         Map.mapWithKey
           (\moduleName src -> SourceEntry ("<stdlib:" <> Text.unpack moduleName <> ">") src)
           Stdlib.stdlibSources
       mergedSources = Map.union input.sources stdlibEntries
-
       sourceHashes = Map.map (\entry -> hash entry.sourceText) mergedSources
-
-      -- Cache hit: source hash matches.
       cacheHitModules =
         Map.filterWithKey
           ( \moduleName cached ->
@@ -182,11 +178,9 @@ compile input =
       cacheHitNames = Map.keysSet cacheHitModules
       cacheMissNames = Set.difference (Map.keysSet mergedSources) cacheHitNames
 
-      -- Phase 1: Parse (cache-miss only).
-      cacheMissSources = Map.restrictKeys mergedSources cacheMissNames
+  emitLog CompileLogParsing
+  let cacheMissSources = Map.restrictKeys mergedSources cacheMissNames
       (freshParsed, parseDiags) = parseSources cacheMissSources
-
-      -- Build skeleton parsed modules from cache (for import graph).
       cachedSkeletonParsed =
         Map.map
           ( \cached ->
@@ -198,12 +192,11 @@ compile input =
           cacheHitModules
       allParsed = Map.union freshParsed cachedSkeletonParsed
 
-      -- Phase 2: Identify (per-module, topological order).
-      (idResult, idErrors) = runIdentify Stdlib.stdlibModuleNames allParsed cacheHitModules
+  emitLog CompileLogIdentifying
+  let (idResult, idErrors) = runIdentify Stdlib.stdlibModuleNames allParsed cacheHitModules
       idDiags = map Identifier.toDiagnostic idErrors
 
-      -- Compute topological levels.
-      stdlibModuleSet =
+  let stdlibModuleSet =
         Set.fromList
           [ moduleName
             | moduleName <- Map.keys allParsed,
@@ -227,11 +220,11 @@ compile input =
           ++ userLevels
           ++ ([remainingUserNames | not (Set.null remainingUserNames)])
 
-      -- Phase 3: Typecheck (per-module, SCC, parallel within level).
-      (mergedSolverResult, mergedZonkResult, typecheckDiags, typecheckLogs, typecheckCache) =
+  let (_mergedSolverResult, mergedZonkResult, typecheckDiags, typecheckLogs, typecheckCache) =
         typecheckModules idResult moduleLevels sourceHashes input.cache
+  for_ typecheckLogs emitLog
 
-      exhaustiveDiags = map Exhaustive.toDiagnostic (checkExhaustive idResult mergedZonkResult)
+  let exhaustiveDiags = map Exhaustive.toDiagnostic (checkExhaustive idResult mergedZonkResult)
       preLowerDiags =
         parseDiags
           <> idDiags
@@ -239,8 +232,8 @@ compile input =
           <> exhaustiveDiags
       shouldLower = not (hasErrors preLowerDiags)
 
-      -- Phase 4: Lower (per-module, fully parallel).
-      (loweringResults, loweringDiags)
+  emitLog CompileLogLowering
+  let (loweringResults, loweringDiags)
         | shouldLower =
             let cachedResults =
                   Map.map (.cacheLoweringResult) cacheHitModules
@@ -257,24 +250,20 @@ compile input =
                             Set.member moduleName cacheMissNames
                         ]
                     )
-                freshOk =
-                  Map.map (fst) freshResults
-                freshErrors =
-                  concatMap (snd) (Map.elems freshResults)
+                freshOk = Map.map fst freshResults
+                freshErrors = concatMap snd (Map.elems freshResults)
                 freshDiags = map Lowering.toDiagnostic freshErrors
                 allResults = Map.union cachedResults (Map.mapMaybe eitherToMaybe freshOk)
              in (allResults, freshDiags)
         | otherwise = (Map.empty, [])
 
       shouldEmitArtefacts = shouldLower && not (hasErrors loweringDiags)
-
       finalIR
-        | shouldEmitArtefacts =
-            Just (mergeModuleLowerings (Map.elems loweringResults))
+        | shouldEmitArtefacts = Just (mergeModuleLowerings (Map.elems loweringResults))
         | otherwise = Nothing
 
-      -- Phase 5: Schema (per-module, parallel).
-      cachedSchemaEntries = concatMap (.cacheSchemaEntries) (Map.elems cacheHitModules)
+  emitLog CompileLogSchemaGeneration
+  let cachedSchemaEntries = concatMap (.cacheSchemaEntries) (Map.elems cacheHitModules)
       freshSchemaEntries =
         if shouldEmitArtefacts
           then buildSchemasForModules idResult mergedZonkResult cacheMissNames
@@ -286,7 +275,6 @@ compile input =
 
       allDiags = preLowerDiags <> loweringDiags
 
-      -- Build updated cache.
       freshCache =
         buildFreshCacheEntries
           sourceHashes
@@ -297,22 +285,16 @@ compile input =
           cacheMissNames
       updatedCacheMap = Map.union freshCache cacheHitModules
 
-      logs =
-        [CompileLogParsing, CompileLogIdentifying]
-          <> typecheckLogs
-          <> ([CompileLogLowering | shouldLower])
-          <> ([CompileLogSchemaGeneration | shouldEmitArtefacts])
-          <> [CompileLogComplete]
-   in CompileResult
-        { irModule = finalIR,
-          schemaEntries = schema,
-          diagnostics = allDiags,
-          identifierResult = idResult,
-          solverResult = mergedSolverResult,
-          zonkResult = mergedZonkResult,
-          compileLogs = logs,
-          updatedCache = updatedCacheMap
-        }
+  emitLog CompileLogComplete
+  pure
+    CompileResult
+      { irModule = finalIR,
+        schemaEntries = schema,
+        diagnostics = allDiags,
+        identifierResult = idResult,
+        zonkResult = mergedZonkResult,
+        updatedCache = updatedCacheMap
+      }
 
 eitherToMaybe :: Either a b -> Maybe b
 eitherToMaybe = \case
@@ -759,6 +741,9 @@ generateConstraintsAll ::
   IdentifierResult ->
   (ConstraintGenResult, [CG.ConstraintError])
 generateConstraintsAll = CG.generateConstraints
+
+compileSync :: CompileInput -> CompileResult
+compileSync input = unsafePerformIO $ compile (const (pure ())) input
 
 -- ===========================================================================
 -- Identifier orchestration

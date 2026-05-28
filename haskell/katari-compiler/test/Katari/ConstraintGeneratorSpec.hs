@@ -55,7 +55,7 @@ compileOne :: Text -> IO [Diagnostic]
 compileOne src =
   let entry = Compile.SourceEntry {filePath = "<test>", sourceText = src}
       input = Compile.CompileInput {sources = Map.singleton "main" entry, cache = Map.empty}
-      result = Compile.compile input
+      result = Compile.compileSync input
    in pure result.diagnostics
 
 countTypeConstraints :: ConstraintGenResult -> Int

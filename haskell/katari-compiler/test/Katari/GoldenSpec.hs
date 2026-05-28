@@ -27,7 +27,7 @@ import Katari.Compile
   ( CompileInput (..),
     CompileResult (..),
     SourceEntry (..),
-    compile,
+    compileSync,
   )
 import Katari.Diagnostic (Diagnostic)
 import Katari.Diagnostic.Render (renderDiagnostic)
@@ -62,7 +62,7 @@ goldenCase path = describe ("compiling " <> takeBaseName path) $ do
               sourceText = sourceText
             }
         input = CompileInput {sources = Map.singleton "main" entry, cache = Map.empty}
-    pure (compile input, sourceText)
+    pure (compileSync input, sourceText)
 
   let (compiled, sourceText) = result
       baseName = takeBaseName path

@@ -22,7 +22,7 @@ import Katari.Compile
   ( CompileInput (..),
     CompileResult (..),
     SourceEntry (..),
-    compile,
+    compileSync,
   )
 import Katari.IR
   ( BlockId (..),
@@ -104,8 +104,8 @@ compileDeterminism =
                       ),
                   cache = Map.empty
                 }
-            r1 = compile mkInput
-            r2 = compile mkInput
+            r1 = compileSync mkInput
+            r2 = compileSync mkInput
         -- Compare the externally-observable parts (Aeson works around
         -- the ZonkResult / SolverResult / IdentifierResult lacking Eq).
         Aeson.toJSON r1.irModule === Aeson.toJSON r2.irModule
