@@ -139,22 +139,21 @@ data ModuleCache = ModuleCache
   deriving (Show)
 
 data CompileLog where
-  CompileLogParsing :: CompileLog
-  CompileLogIdentifying :: CompileLog
-  CompileLogTypechecking :: Text -> Int -> Int -> CompileLog
-  CompileLogLowering :: CompileLog
-  CompileLogSchemaGeneration :: CompileLog
+  CompileLogParsing :: ModuleName -> CompileLog
+  CompileLogIdentifying :: ModuleName -> CompileLog
+  CompileLogTypechecking :: ModuleName -> CompileLog
+  CompileLogLowering :: ModuleName -> CompileLog
+  CompileLogSchemaGeneration :: ModuleName -> CompileLog
   CompileLogComplete :: CompileLog
   deriving (Show)
 
 renderCompileLog :: CompileLog -> Text
 renderCompileLog = \case
-  CompileLogParsing -> "[parsing]"
-  CompileLogIdentifying -> "[identifying]"
-  CompileLogTypechecking moduleName sccIndex totalSCCs ->
-    "[typechecking " <> moduleName <> " (" <> Text.pack (show sccIndex) <> "/" <> Text.pack (show totalSCCs) <> ")]"
-  CompileLogLowering -> "[lowering]"
-  CompileLogSchemaGeneration -> "[schema]"
+  CompileLogParsing moduleName -> "[parsing] " <> moduleName
+  CompileLogIdentifying moduleName -> "[identifying] " <> moduleName
+  CompileLogTypechecking moduleName -> "[typechecking] " <> moduleName
+  CompileLogLowering moduleName -> "[lowering] " <> moduleName
+  CompileLogSchemaGeneration moduleName -> "[schema] " <> moduleName
   CompileLogComplete -> "[done]"
 
 data CompileResult = CompileResult
@@ -189,7 +188,7 @@ compile emitLog input = do
       cacheHitNames = Map.keysSet cacheHitModules
       cacheMissNames = Set.difference (Map.keysSet mergedSources) cacheHitNames
 
-  emitLog CompileLogParsing
+  for_ (Set.toList cacheMissNames) (emitLog . CompileLogParsing)
   let cacheMissSources = Map.restrictKeys mergedSources cacheMissNames
       (freshParsed, parseDiags) = parseSources cacheMissSources
       cachedSkeletonParsed =
@@ -203,7 +202,7 @@ compile emitLog input = do
           cacheHitModules
       allParsed = Map.union freshParsed cachedSkeletonParsed
 
-  emitLog CompileLogIdentifying
+  for_ (Set.toList cacheMissNames) (emitLog . CompileLogIdentifying)
   let (idResult, idErrors) = runIdentify Stdlib.stdlibModuleNames allParsed cacheHitModules
       idDiags = map Identifier.toDiagnostic idErrors
 
@@ -243,7 +242,12 @@ compile emitLog input = do
           <> exhaustiveDiags
       shouldLower = not (hasErrors preLowerDiags)
 
-  emitLog CompileLogLowering
+  let freshLowerInputs =
+        [ (moduleName, moduleAST)
+          | (moduleName, moduleAST) <- Map.toList mergedZonkResult.zonkedModules,
+            Set.member moduleName cacheMissNames
+        ]
+  for_ (map fst freshLowerInputs) (emitLog . CompileLogLowering)
   let (loweringResults, loweringDiags)
         | shouldLower =
             let cachedResults =
@@ -256,10 +260,7 @@ compile emitLog input = do
                             let (result, errors) = lowerModule idResult mergedZonkResult moduleName moduleAST
                              in (moduleName, (result, errors))
                         )
-                        [ (moduleName, moduleAST)
-                          | (moduleName, moduleAST) <- Map.toList mergedZonkResult.zonkedModules,
-                            Set.member moduleName cacheMissNames
-                        ]
+                        freshLowerInputs
                     )
                 freshOk = Map.map fst freshResults
                 freshErrors = concatMap snd (Map.elems freshResults)
@@ -273,7 +274,7 @@ compile emitLog input = do
         | shouldEmitArtefacts = Just (mergeModuleLowerings (Map.elems loweringResults))
         | otherwise = Nothing
 
-  emitLog CompileLogSchemaGeneration
+  for_ (Set.toList cacheMissNames) (emitLog . CompileLogSchemaGeneration)
   let cachedSchemaEntries = concatMap (.cacheSchemaEntries) (Map.elems cacheHitModules)
       freshSchemaEntries =
         if shouldEmitArtefacts
@@ -514,10 +515,13 @@ recompileModuleToResult idResult moduleName accumulator =
             accUpdatedCache = Map.empty,
             accAllPriorCacheValid = accumulator.accAllPriorCacheValid
           }
-      typecheckIndexedSCC accum (sccIndex, scc) =
-        let logged = accum {accLogs = accum.accLogs <> [CompileLogTypechecking moduleName sccIndex totalSCCs]}
-         in typecheckOneSCC idResult moduleName logged scc
-      sccAccumulator = foldl' typecheckIndexedSCC sccInitial indexedSCCs
+      typecheckIndexedSCC accum (_sccIndex, scc) =
+        typecheckOneSCC idResult moduleName accum scc
+      sccAccumulator =
+        ( foldl' typecheckIndexedSCC sccInitial indexedSCCs
+        )
+          { accLogs = [CompileLogTypechecking moduleName]
+          }
       assembledModule = case moduleAST of
         Just identifiedModule -> assembleZonkedModule identifiedModule sccAccumulator.accSCCDeclarations
         Nothing -> Module {declarations = [], sourceSpan = emptySrcSpan}
