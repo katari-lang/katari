@@ -54,6 +54,7 @@ import Katari.Lexer qualified as Lexer
 import Katari.Lowering (ModuleLoweringResult (..), lowerModule, mergeModuleLowerings)
 import Katari.Lowering qualified as Lowering
 import Katari.Parser qualified as Parser
+import Katari.Query qualified as Query
 import Katari.Schema
   ( DataDefs,
     SchemaContext (..),
@@ -154,8 +155,9 @@ data CompileResult = CompileResult
   { irModule :: Maybe Katari.IR.IRModule,
     schemaEntries :: Maybe [SchemaEntry],
     diagnostics :: [Diagnostic],
-    identifierResult :: IdentifierResult,
-    zonkResult :: ZonkResult,
+    -- | Pre-built input for the query layer (hover / completion / etc.).
+    -- Owned by 'Katari.Query'; the orchestrator only fills it in.
+    querySnapshot :: Query.QuerySnapshot,
     updatedCache :: Map ModuleName ModuleCache
   }
 
@@ -333,8 +335,7 @@ compile emitLog input = do
       { irModule = finalIR,
         schemaEntries = schema,
         diagnostics = allDiags,
-        identifierResult = idResult,
-        zonkResult = mergedZonkResult,
+        querySnapshot = Query.buildQuerySnapshot idResult mergedZonkResult,
         updatedCache = updatedCacheMap
       }
 

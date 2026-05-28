@@ -39,7 +39,7 @@ prepare src = do
                   C.SourceEntry {C.filePath = "<test>", C.sourceText = src},
               C.cache = Map.empty
             }
-  pure (Query.buildQuerySnapshot result.identifierResult result.zonkResult)
+  pure result.querySnapshot
 
 prepareMulti :: [(Text, FilePath, Text)] -> IO Query.QuerySnapshot
 prepareMulti sources = do
@@ -53,7 +53,7 @@ prepareMulti sources = do
                   ],
               C.cache = Map.empty
             }
-  pure (Query.buildQuerySnapshot result.identifierResult result.zonkResult)
+  pure result.querySnapshot
 
 completionLabels :: [CompletionItem] -> [Text]
 completionLabels = map (.ciLabel)

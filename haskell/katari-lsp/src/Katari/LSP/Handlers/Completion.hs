@@ -71,7 +71,7 @@ dispatch ::
   [Comp.CompletionItem]
 dispatch result path kPos prefix = fromMaybe fallback specialised
   where
-    snap = Query.buildQuerySnapshot result.identifierResult result.zonkResult
+    snap = result.querySnapshot
 
     fallback = Comp.completionsAt snap path kPos
 

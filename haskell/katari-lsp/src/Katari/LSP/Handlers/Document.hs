@@ -246,7 +246,7 @@ recompileWorkspace st root = do
                   w
                     { wsLastResult = Just result,
                       wsOccIndex =
-                        Just (buildOccurrenceIndex (Query.buildQuerySnapshot result.identifierResult result.zonkResult)),
+                        Just (buildOccurrenceIndex result.querySnapshot),
                       wsCompileCache = result.updatedCache
                     }
               )
