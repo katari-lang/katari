@@ -31,6 +31,7 @@ import Data.Vector qualified as Vector
 import Katari.Compile (CompileResult (..))
 import Katari.LSP.Convert (lspPositionToKatari)
 import Katari.LSP.State (ServerState, lookupCompileResult)
+import Katari.Query qualified as Query
 import Katari.Query.Completion qualified as Comp
 import Katari.SourceSpan qualified as K
 import Language.LSP.Protocol.Lens qualified as L
@@ -70,45 +71,22 @@ dispatch ::
   [Comp.CompletionItem]
 dispatch result path kPos prefix = fromMaybe fallback specialised
   where
-    fallback =
-      Comp.completionsAt
-        result.identifierResult
-        result.zonkResult
-        path
-        kPos
+    snap = Query.buildQuerySnapshot result.identifierResult result.zonkResult
+
+    fallback = Comp.completionsAt snap path kPos
 
     specialised = memberCompletion <> labelCompletion
 
     memberCompletion = do
       lhsPath <- detectMemberPrefix prefix
-      anchor <-
-        Comp.resolveDottedPath
-          result.identifierResult
-          result.zonkResult
-          path
-          kPos
-          lhsPath
+      anchor <- Comp.resolveDottedPath snap path kPos lhsPath
       Just $ case anchor of
-        Comp.AnchorModule mid ->
-          Comp.completionsOfModule
-            result.identifierResult
-            result.zonkResult
-            mid
-        Comp.AnchorTyped ty ->
-          Comp.completionsOfFields
-            result.identifierResult
-            result.zonkResult
-            ty
+        Comp.AnchorModule mid -> Comp.completionsOfModule snap mid
+        Comp.AnchorTyped ty -> Comp.completionsOfFields snap ty
 
     labelCompletion = do
       (callablePath, usedLabels) <- detectLabelContext prefix
-      anchor <-
-        Comp.resolveDottedPath
-          result.identifierResult
-          result.zonkResult
-          path
-          kPos
-          callablePath
+      anchor <- Comp.resolveDottedPath snap path kPos callablePath
       case anchor of
         Comp.AnchorTyped ty ->
           Just (Comp.completionsOfCallLabels ty usedLabels)

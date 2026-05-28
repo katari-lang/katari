@@ -31,12 +31,8 @@ definitionHandler st =
           Nothing -> responder (Right (LSP.InR (LSP.InR LSP.Null)))
           Just (txt, _lineVec, result) -> do
             let kPos = lspPositionToKatari txt pos
-                mSpan =
-                  Query.findDefinition
-                    result.identifierResult
-                    result.zonkResult
-                    path
-                    kPos
+                snap = Query.buildQuerySnapshot result.identifierResult result.zonkResult
+                mSpan = Query.findDefinition snap path kPos
             case mSpan of
               Nothing -> responder (Right (LSP.InR (LSP.InR LSP.Null)))
               Just span_ -> do

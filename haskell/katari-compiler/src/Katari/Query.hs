@@ -5,7 +5,11 @@
 -- compiler. All positions are code-point based (LSP layer converts UTF-16
 -- offsets before calling here).
 module Katari.Query
-  ( -- * Hover
+  ( -- * Snapshot (input for all queries)
+    QuerySnapshot (..),
+    buildQuerySnapshot,
+
+    -- * Hover
     HoverInfo (..),
     lookupAtPosition,
 
@@ -100,6 +104,24 @@ import Katari.Typechecker.Identifier
 import Katari.Typechecker.Zonker (ZonkResult (..), lookupTopLevelType, lookupTypeInModule)
 
 -- ===========================================================================
+-- Snapshot: bundled input for hover / completion / reference queries
+-- ===========================================================================
+
+-- | Cross-module data the query layer needs to answer a single
+-- request. Constructed by the orchestrator from per-module compile
+-- artifacts and held by the LSP / CLI tooling for as long as those
+-- artifacts are valid.
+data QuerySnapshot = QuerySnapshot
+  { identifierResult :: IdentifierResult,
+    zonkResult :: ZonkResult
+  }
+
+-- | Build a 'QuerySnapshot' from a compile's identifier and zonk
+-- outputs.
+buildQuerySnapshot :: IdentifierResult -> ZonkResult -> QuerySnapshot
+buildQuerySnapshot idr zr = QuerySnapshot {identifierResult = idr, zonkResult = zr}
+
+-- ===========================================================================
 -- Hover
 -- ===========================================================================
 
@@ -128,8 +150,10 @@ data HoverInfo = HoverInfo
 -- -- info :: Maybe HoverInfo
 -- -- Just (HoverInfo {hoverType = Just ..., hoverNameSpan = ..., ...})
 -- @
-lookupAtPosition :: IdentifierResult -> ZonkResult -> FilePath -> Position -> Maybe HoverInfo
-lookupAtPosition idResult zonkResult filePath position = do
+lookupAtPosition :: QuerySnapshot -> FilePath -> Position -> Maybe HoverInfo
+lookupAtPosition snap filePath position = do
+  let idResult = snap.identifierResult
+      zonkResult = snap.zonkResult
   (moduleName, moduleData) <- findModuleByFilePath idResult zonkResult filePath
   listToMaybe (mapMaybe (hoverFromDeclaration idResult zonkResult moduleName position) moduleData.declarations)
 
@@ -158,11 +182,14 @@ emptyOccurrenceIndex =
       constructorOccurrences = Map.empty
     }
 
--- | Walk all modules in 'ZonkResult' and collect every name-reference
+-- | Walk all modules in the snapshot and collect every name-reference
 -- occurrence grouped by its resolved identifier.
-buildOccurrenceIndex :: IdentifierResult -> ZonkResult -> OccurrenceIndex
-buildOccurrenceIndex idResult zonkResult =
-  foldr (collectModuleOccurrences idResult) emptyOccurrenceIndex (Map.elems zonkResult.zonkedModules)
+buildOccurrenceIndex :: QuerySnapshot -> OccurrenceIndex
+buildOccurrenceIndex snap =
+  foldr
+    (collectModuleOccurrences snap.identifierResult)
+    emptyOccurrenceIndex
+    (Map.elems snap.zonkResult.zonkedModules)
 
 collectModuleOccurrences :: IdentifierResult -> Module Zonked -> OccurrenceIndex -> OccurrenceIndex
 collectModuleOccurrences idResult moduleData index =
@@ -182,10 +209,10 @@ data ResolvedReference where
   deriving (Eq, Show)
 
 -- | Identify which resolved identifier (if any) sits at a source position.
-identifyAtPosition :: IdentifierResult -> ZonkResult -> FilePath -> Position -> Maybe ResolvedReference
-identifyAtPosition idResult zonkResult filePath position = do
-  (_, moduleData) <- findModuleByFilePath idResult zonkResult filePath
-  listToMaybe (mapMaybe (refFromDeclaration idResult position) moduleData.declarations)
+identifyAtPosition :: QuerySnapshot -> FilePath -> Position -> Maybe ResolvedReference
+identifyAtPosition snap filePath position = do
+  (_, moduleData) <- findModuleByFilePath snap.identifierResult snap.zonkResult filePath
+  listToMaybe (mapMaybe (refFromDeclaration snap.identifierResult position) moduleData.declarations)
 
 -- | All occurrence spans of a resolved identifier (uses 'OccurrenceIndex').
 findReferences :: OccurrenceIndex -> ResolvedReference -> [SourceSpan]
@@ -202,9 +229,10 @@ findReferences index = \case
     Map.findWithDefault [] qualifiedName index.constructorOccurrences
 
 -- | Definition span of the symbol at a position, if it can be resolved.
-findDefinition :: IdentifierResult -> ZonkResult -> FilePath -> Position -> Maybe SourceSpan
-findDefinition idResult zonkResult filePath position = do
-  resolvedRef <- identifyAtPosition idResult zonkResult filePath position
+findDefinition :: QuerySnapshot -> FilePath -> Position -> Maybe SourceSpan
+findDefinition snap filePath position = do
+  let idResult = snap.identifierResult
+  resolvedRef <- identifyAtPosition snap filePath position
   case resolvedRef of
     ResolvedReferenceVariable variableResolution -> case variableResolution of
       ResolvedTopLevel qualifiedName ->

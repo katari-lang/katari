@@ -35,6 +35,7 @@ import Katari.Project.Config qualified as Project
 import Katari.Project.Discovery qualified as Project
 import Katari.Project.Resolve qualified as Project
 import Katari.Query (buildOccurrenceIndex)
+import Katari.Query qualified as Query
 import Katari.SourceSpan (SourceSpan (..))
 import Language.LSP.Protocol.Lens qualified as L
 import Language.LSP.Protocol.Message qualified as LSP
@@ -245,7 +246,7 @@ recompileWorkspace st root = do
                   w
                     { wsLastResult = Just result,
                       wsOccIndex =
-                        Just (buildOccurrenceIndex result.identifierResult result.zonkResult),
+                        Just (buildOccurrenceIndex (Query.buildQuerySnapshot result.identifierResult result.zonkResult)),
                       wsCompileCache = result.updatedCache
                     }
               )

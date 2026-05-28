@@ -37,12 +37,8 @@ referencesHandler st =
         case (mResult, mWsOcc) of
           (Just (txt, _lineVec, result), Just occ) -> do
             let kPos = lspPositionToKatari txt pos
-                mRef =
-                  Query.identifyAtPosition
-                    result.identifierResult
-                    result.zonkResult
-                    path
-                    kPos
+                snap = Query.buildQuerySnapshot result.identifierResult result.zonkResult
+                mRef = Query.identifyAtPosition snap path kPos
             case mRef of
               Nothing -> responder (Right (LSP.InR LSP.Null))
               Just ref -> do

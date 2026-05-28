@@ -36,6 +36,8 @@ module Katari.Query.Completion
   )
 where
 
+import Katari.Query (QuerySnapshot (..))
+
 import Control.Monad (foldM)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
@@ -93,12 +95,11 @@ data CompletionItem = CompletionItem
 -- duplicate labels collapsed to the most-specific kind. The result is
 -- in display order, suitable for handing straight back to the LSP.
 completionsAt ::
-  IdentifierResult ->
-  ZonkResult ->
+  QuerySnapshot ->
   FilePath ->
   Position ->
   [CompletionItem]
-completionsAt idResult zonkResult filePath position =
+completionsAt snap filePath position =
   let localItems = localsAt
       topLevelItems = case currentModule of
         Nothing -> []
@@ -107,6 +108,8 @@ completionsAt idResult zonkResult filePath position =
            in concatMap symbolEntryToItems (Map.toList visible)
    in mergeByLabel (localItems ++ topLevelItems)
   where
+    idResult = snap.identifierResult
+    zonkResult = snap.zonkResult
     currentModule = findModuleNameByFilePath zonkResult filePath
     renderType = renderSemanticType
 
@@ -187,8 +190,8 @@ completionsAt idResult zonkResult filePath position =
 
 -- | Locate the module name that owns @filePath@. Mirrors the same lookup
 -- used by hover / def-jump (= scan zonked modules by sourceSpan).
-findModuleIdByFilePath :: IdentifierResult -> ZonkResult -> FilePath -> Maybe Text
-findModuleIdByFilePath _ = findModuleNameByFilePath
+findModuleIdByFilePath :: QuerySnapshot -> FilePath -> Maybe Text
+findModuleIdByFilePath snap = findModuleNameByFilePath snap.zonkResult
 
 findModuleNameByFilePath :: ZonkResult -> FilePath -> Maybe Text
 findModuleNameByFilePath zonkResult filePath =
@@ -220,13 +223,12 @@ data CompletionAnchor
 -- (= unknown name, segment not found, intermediate value of an
 -- unrecognised shape).
 resolveDottedPath ::
-  IdentifierResult ->
-  ZonkResult ->
+  QuerySnapshot ->
   FilePath ->
   Position ->
   Text ->
   Maybe CompletionAnchor
-resolveDottedPath idResult zonkResult filePath position dotted = do
+resolveDottedPath snap filePath position dotted = do
   let segs = filter (not . Text.null) (Text.splitOn "." dotted)
   case segs of
     [] -> Nothing
@@ -234,6 +236,9 @@ resolveDottedPath idResult zonkResult filePath position dotted = do
       root <- resolveRoot rootSeg
       foldM (stepAnchor idResult zonkResult) root rest
   where
+    idResult = snap.identifierResult
+    zonkResult = snap.zonkResult
+
     resolveRoot :: Text -> Maybe CompletionAnchor
     resolveRoot name = resolveLocal name `orElse` resolveModuleScoped name
 
@@ -335,12 +340,13 @@ unionOfTypes = \case
 -- | Completion items for the public surface of @moduleId@: every
 -- exported agent / req / data ctor / type. Used for @alias.@.
 completionsOfModule ::
-  IdentifierResult ->
-  ZonkResult ->
+  QuerySnapshot ->
   Text ->
   [CompletionItem]
-completionsOfModule idResult zonkResult moduleName =
-  let exports = Map.findWithDefault Map.empty moduleName idResult.moduleExports
+completionsOfModule snap moduleName =
+  let idResult = snap.identifierResult
+      zonkResult = snap.zonkResult
+      exports = Map.findWithDefault Map.empty moduleName idResult.moduleExports
       entryToItems (name, entry) =
         catMaybes
           [ entry.variableSymbol >>= mkVariableItemFor idResult zonkResult name,
@@ -357,13 +363,26 @@ completionsOfModule idResult zonkResult moduleName =
 --     field set (= safe: only labels present in /all/ branches are offered).
 --   * Anything else — empty list.
 completionsOfFields ::
-  IdentifierResult ->
-  ZonkResult ->
+  QuerySnapshot ->
   SemTy ->
   [CompletionItem]
-completionsOfFields idResult zonkResult ty =
-  let renderType = renderSemanticType
+completionsOfFields snap ty =
+  let idResult = snap.identifierResult
+      zonkResult = snap.zonkResult
+      renderType = renderSemanticType
       fields = fieldsOf ty
+      fieldsOf :: SemTy -> Map Text SemTy
+      fieldsOf = \case
+        SemanticTypeData typeId ->
+          fromMaybe Map.empty (dataConstructorParameters idResult zonkResult typeId)
+        SemanticTypeObject m -> m
+        SemanticTypeUnion branches ->
+          let perBranch = map fieldsOf branches
+              common label = all (Map.member label) perBranch
+              allLabels = Set.unions (map Map.keysSet perBranch)
+              unionFor label = unionOfTypes [m Map.! label | m <- perBranch]
+           in Map.fromList [(label, unionFor label) | label <- Set.toList allLabels, common label]
+        _ -> Map.empty
    in [ CompletionItem
           { ciLabel = label,
             ciKind = CKLocalVariable,
@@ -372,19 +391,6 @@ completionsOfFields idResult zonkResult ty =
           }
         | (label, fieldTy) <- Map.toAscList fields
       ]
-  where
-    fieldsOf :: SemTy -> Map Text SemTy
-    fieldsOf = \case
-      SemanticTypeData typeId ->
-        fromMaybe Map.empty (dataConstructorParameters idResult zonkResult typeId)
-      SemanticTypeObject m -> m
-      SemanticTypeUnion branches ->
-        let perBranch = map fieldsOf branches
-            common label = all (Map.member label) perBranch
-            allLabels = Set.unions (map Map.keysSet perBranch)
-            unionFor label = unionOfTypes [m Map.! label | m <- perBranch]
-         in Map.fromList [(label, unionFor label) | label <- Set.toList allLabels, common label]
-      _ -> Map.empty
 
 -- | Call-argument labels reachable via @(@ on a value of @ty@.
 -- Handles:

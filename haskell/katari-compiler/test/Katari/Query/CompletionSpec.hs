@@ -10,6 +10,7 @@ import Katari.Compile qualified as C
 import Katari.Compile qualified as Compile
 import Katari.Lexer qualified as Lexer
 import Katari.Parser qualified as Parser
+import Katari.Query qualified as Query
 import Katari.Query.Completion
 import Katari.SemanticType (SemanticType (..), emptyRequest)
 import Katari.SourceSpan (Position (..))
@@ -27,7 +28,7 @@ import Test.Hspec
 -- | Compile a single-module program and return the IdentifierResult +
 -- ZonkResult. Fails the test if compilation produced any error-severity
 -- diagnostic.
-prepare :: Text -> IO (IdentifierResult, ZonkResult)
+prepare :: Text -> IO Query.QuerySnapshot
 prepare src = do
   let result =
         C.compileSync
@@ -38,11 +39,9 @@ prepare src = do
                   C.SourceEntry {C.filePath = "<test>", C.sourceText = src},
               C.cache = Map.empty
             }
-  -- Both fields are always populated by compile.
-  case (result.identifierResult, result.zonkResult) of
-    (idr, zr) -> pure (idr, zr)
+  pure (Query.buildQuerySnapshot result.identifierResult result.zonkResult)
 
-prepareMulti :: [(Text, FilePath, Text)] -> IO (IdentifierResult, ZonkResult)
+prepareMulti :: [(Text, FilePath, Text)] -> IO Query.QuerySnapshot
 prepareMulti sources = do
   let result =
         C.compileSync
@@ -54,7 +53,7 @@ prepareMulti sources = do
                   ],
               C.cache = Map.empty
             }
-  pure (result.identifierResult, result.zonkResult)
+  pure (Query.buildQuerySnapshot result.identifierResult result.zonkResult)
 
 completionLabels :: [CompletionItem] -> [Text]
 completionLabels = map (.ciLabel)
@@ -72,19 +71,19 @@ spec = describe "Katari.Query.Completion" $ do
     -- agent foo(name = name: string) -> string {
     --   name   <- cursor here, completion should offer "name"
     -- }
-    (idr, zr) <- prepare "agent foo(name = name: string) -> string {\n  name\n}\n"
-    let items = completionsAt idr zr "<test>" Position {line = 2, column = 3}
+    snap <- prepare "agent foo(name = name: string) -> string {\n  name\n}\n"
+    let items = completionsAt snap "<test>" Position {line = 2, column = 3}
     completionLabels items `shouldSatisfy` ("name" `elem`)
 
   it "marks a parameter binding as a local variable" $ do
-    (idr, zr) <- prepare "agent foo(name = name: string) -> string {\n  name\n}\n"
-    let items = completionsAt idr zr "<test>" Position {line = 2, column = 3}
+    snap <- prepare "agent foo(name = name: string) -> string {\n  name\n}\n"
+    let items = completionsAt snap "<test>" Position {line = 2, column = 3}
     fmap (.ciKind) (findLabel "name" items) `shouldBe` Just CKLocalVariable
 
   it "offers top-level callables from anywhere in the module" $ do
     -- 'helper' is a top-level agent — completion at any position in
     -- the file should include it.
-    (idr, zr) <-
+    snap <-
       prepare $
         Text.unlines
           [ "agent helper() -> integer { 1 }",
@@ -92,12 +91,12 @@ spec = describe "Katari.Query.Completion" $ do
             "  0",
             "}"
           ]
-    let items = completionsAt idr zr "<test>" Position {line = 3, column = 3}
+    let items = completionsAt snap "<test>" Position {line = 3, column = 3}
     completionLabels items `shouldSatisfy` ("helper" `elem`)
     fmap (.ciKind) (findLabel "helper" items) `shouldBe` Just CKAgent
 
   it "offers data constructors and types" $ do
-    (idr, zr) <-
+    snap <-
       prepare $
         Text.unlines
           [ "data Point(x: integer, y: integer)",
@@ -105,7 +104,7 @@ spec = describe "Katari.Query.Completion" $ do
             "  0",
             "}"
           ]
-    let items = completionsAt idr zr "<test>" Position {line = 3, column = 3}
+    let items = completionsAt snap "<test>" Position {line = 3, column = 3}
     let pointItems = filter (\ci -> ci.ciLabel == "Point") items
     -- mergeByLabel keeps one (it picks the constructor over the type).
     pointItems `shouldNotBe` []
@@ -115,16 +114,16 @@ spec = describe "Katari.Query.Completion" $ do
     -- helper.ktr defines a top-level agent `secret`. main.ktr does
     -- NOT import it. Completion at a position in main.ktr must NOT
     -- offer `secret`.
-    (idr, zr) <-
+    snap <-
       prepareMulti
         [ ("helper", "<helper>", "agent secret() -> integer { 0 }\n"),
           ("main", "<main>", "agent main() -> integer { 0 }\n")
         ]
-    let items = completionsAt idr zr "<main>" Position {line = 1, column = 27}
+    let items = completionsAt snap "<main>" Position {line = 1, column = 27}
     completionLabels items `shouldSatisfy` notElem "secret"
 
   it "offers names brought in by `import { ... } from other`" $ do
-    (idr, zr) <-
+    snap <-
       prepareMulti
         [ ("helper", "<helper>", "agent friend() -> integer { 0 }\n"),
           ( "main",
@@ -135,12 +134,12 @@ spec = describe "Katari.Query.Completion" $ do
               ]
           )
         ]
-    let items = completionsAt idr zr "<main>" Position {line = 2, column = 27}
+    let items = completionsAt snap "<main>" Position {line = 2, column = 27}
     completionLabels items `shouldSatisfy` ("friend" `elem`)
     fmap (.ciKind) (findLabel "friend" items) `shouldBe` Just CKAgent
 
   it "offers a module alias as CKModule for `import other as alias`" $ do
-    (idr, zr) <-
+    snap <-
       prepareMulti
         [ ("helper", "<helper>", "agent friend() -> integer { 0 }\n"),
           ( "main",
@@ -151,7 +150,7 @@ spec = describe "Katari.Query.Completion" $ do
               ]
           )
         ]
-    let items = completionsAt idr zr "<main>" Position {line = 2, column = 27}
+    let items = completionsAt snap "<main>" Position {line = 2, column = 27}
     -- The alias `h` should appear as a module; `friend` (= the
     -- aliased module's member) should NOT appear bare.
     completionLabels items `shouldSatisfy` ("h" `elem`)
@@ -159,7 +158,7 @@ spec = describe "Katari.Query.Completion" $ do
     completionLabels items `shouldSatisfy` notElem "friend"
 
   it "resolveDottedPath: alias → AnchorModule; completionsOfModule lists exports" $ do
-    (idr, zr) <-
+    snap <-
       prepareMulti
         [ ( "helper",
             "<helper>",
@@ -177,9 +176,9 @@ spec = describe "Katari.Query.Completion" $ do
               ]
           )
         ]
-    case resolveDottedPath idr zr "<main>" Position {line = 2, column = 27} "h" of
+    case resolveDottedPath snap "<main>" Position {line = 2, column = 27} "h" of
       Just (AnchorModule helperId) -> do
-        let items = completionsOfModule idr zr helperId
+        let items = completionsOfModule snap helperId
         completionLabels items `shouldSatisfy` ("friend" `elem`)
         completionLabels items `shouldSatisfy` ("buddy" `elem`)
         completionLabels items `shouldSatisfy` ("Pair" `elem`)
@@ -188,14 +187,14 @@ spec = describe "Katari.Query.Completion" $ do
       other -> expectationFailure $ "expected AnchorModule, got: " <> show other
 
   it "resolveDottedPath: bare callable name → AnchorTyped (function); label completion via type" $ do
-    (idr, zr) <-
+    snap <-
       prepare
         ( Text.unlines
             [ "agent greet(name = name: string, age = age: integer) -> string { name }",
               "agent main() -> string { greet(name = \"x\", age = 0) }"
             ]
         )
-    case resolveDottedPath idr zr "<test>" Position {line = 2, column = 26} "greet" of
+    case resolveDottedPath snap "<test>" Position {line = 2, column = 26} "greet" of
       Just (AnchorTyped ty) -> do
         let items = completionsOfCallLabels ty Set.empty
         completionLabels items `shouldMatchList` ["name", "age"]
@@ -207,7 +206,7 @@ spec = describe "Katari.Query.Completion" $ do
     -- Regression: a user reported label completion does not work
     -- inside @cron_impl(@. Verify the ext-agent declaration's type is
     -- reachable as a SemanticTypeFunction (not Unknown / wrong shape).
-    (idr, zr) <-
+    snap <-
       prepare $
         Text.unlines
           [ "@\"Cron tick.\"",
@@ -216,7 +215,7 @@ spec = describe "Katari.Query.Completion" $ do
             "external cron_impl(callback: agent () -> null with scheduled) -> null from \"FFI:lib.cron_impl\"",
             "agent main() -> integer { 0 }"
           ]
-    case resolveDottedPath idr zr "<test>" Position {line = 5, column = 26} "cron_impl" of
+    case resolveDottedPath snap "<test>" Position {line = 5, column = 26} "cron_impl" of
       Just (AnchorTyped ty) -> do
         let items = completionsOfCallLabels ty Set.empty
         completionLabels items `shouldMatchList` ["callback"]
@@ -224,7 +223,7 @@ spec = describe "Katari.Query.Completion" $ do
         expectationFailure $ "expected AnchorTyped for `cron_impl`, got: " <> show other
 
   it "resolveDottedPath: local variable bound to data value → field completion" $ do
-    (idr, zr) <-
+    snap <-
       prepare $
         Text.unlines
           [ "data Point(x: integer, y: string)",
@@ -234,15 +233,15 @@ spec = describe "Katari.Query.Completion" $ do
             "}"
           ]
     -- Cursor on line 4 col 3 (just past `let p = ...` so `p` is in scope).
-    case resolveDottedPath idr zr "<test>" Position {line = 4, column = 3} "p" of
+    case resolveDottedPath snap "<test>" Position {line = 4, column = 3} "p" of
       Just (AnchorTyped ty) -> do
-        let items = completionsOfFields idr zr ty
+        let items = completionsOfFields snap ty
         completionLabels items `shouldMatchList` ["x", "y"]
       other ->
         expectationFailure $ "expected AnchorTyped for data value `p`, got: " <> show other
 
   it "resolveDottedPath: qualified callable `mod.func` → AnchorTyped (function)" $ do
-    (idr, zr) <-
+    snap <-
       prepareMulti
         [ ( "helper",
             "<helper>",
@@ -256,7 +255,7 @@ spec = describe "Katari.Query.Completion" $ do
               ]
           )
         ]
-    case resolveDottedPath idr zr "<main>" Position {line = 2, column = 27} "h.greet" of
+    case resolveDottedPath snap "<main>" Position {line = 2, column = 27} "h.greet" of
       Just (AnchorTyped ty) -> do
         let items = completionsOfCallLabels ty Set.empty
         completionLabels items `shouldMatchList` ["name"]
@@ -284,13 +283,13 @@ spec = describe "Katari.Query.Completion" $ do
     completionLabels items `shouldMatchList` ["name"]
 
   it "ciDetail renders the actual semantic type (no <type> placeholder)" $ do
-    (idr, zr) <-
+    snap <-
       prepare $
         Text.unlines
           [ "agent helper() -> integer { 1 }",
             "agent main() -> integer { 0 }"
           ]
-    let items = completionsAt idr zr "<test>" Position {line = 2, column = 26}
+    let items = completionsAt snap "<test>" Position {line = 2, column = 26}
     case findLabel "helper" items of
       Just ci -> do
         ci.ciDetail `shouldNotBe` Just "<type>"

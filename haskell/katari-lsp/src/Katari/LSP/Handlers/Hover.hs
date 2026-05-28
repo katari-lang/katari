@@ -39,7 +39,8 @@ hoverHandler st =
           Nothing -> responder (Right (LSP.InR LSP.Null))
           Just (txt, lineVec, result) -> do
             let kPos = lspPositionToKatari txt pos
-                info = Query.lookupAtPosition result.identifierResult result.zonkResult path kPos
+                snap = Query.buildQuerySnapshot result.identifierResult result.zonkResult
+                info = Query.lookupAtPosition snap path kPos
             case info of
               Nothing -> responder (Right (LSP.InR LSP.Null))
               Just h -> responder (Right (LSP.InL (mkHover lineVec h)))
