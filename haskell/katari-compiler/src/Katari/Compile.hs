@@ -111,29 +111,35 @@ data CompileInput = CompileInput
   }
   deriving (Show)
 
--- | Per-module compilation cache. Stores only the outputs needed to
--- skip ALL compilation phases on cache hit.
+-- | Per-module compilation cache. Stores just enough to (a) skip the
+-- module's own compile on a cache hit and (b) let downstream modules
+-- typecheck, lower, and schema-generate against this module without
+-- re-parsing or re-identifying it.
+--
+-- Notably absent: full Identified / Zonked ASTs. The query layer can't
+-- answer hover / references queries on cache-hit modules until they're
+-- recompiled (e.g. on next file change).
 data ModuleCache = ModuleCache
   { cacheSourceHash :: Int,
-    -- Identifier output (needed for downstream modules' identify)
+    -- | Imports of the original module, used to rebuild the import
+    -- skeleton needed for the dependency graph.
+    cacheImports :: [ImportDeclaration],
+    -- For downstream identify:
+    cacheModuleData :: ModuleData,
+    cacheModuleExports :: Map Text SymbolEntry,
+    cacheModuleTopLevel :: Map Text SymbolEntry,
     cacheIdentifierVariables :: Map QualifiedName VariableData,
     cacheIdentifierTypes :: Map QualifiedName TypeData,
     cacheIdentifierRequests :: Map QualifiedName RequestData,
     cacheIdentifierConstructors :: Map QualifiedName ConstructorData,
-    cacheModuleData :: ModuleData,
-    cacheModuleExports :: Map Text SymbolEntry,
-    cacheModuleTopLevel :: Map Text SymbolEntry,
-    cacheScopeFrames :: [(SourceSpan, Map Text SymbolEntry)],
-    cacheIdentifiedAST :: Module Identified,
-    -- Typecheck output
+    -- For downstream typecheck:
     cacheInterface :: ModuleInterface,
-    cacheZonkedModule :: Module Zonked,
-    cacheZonkedTypeEnv :: Map VariableResolution (SemanticType Resolved),
-    -- IR output
+    -- For downstream lower/schema's DataDefs construction:
+    cacheDataAnnotations :: Map QualifiedName (Map Text (Maybe Text)),
+    -- For the final bundle:
     cacheLoweringResult :: ModuleLoweringResult,
-    -- Schema output
     cacheSchemaEntries :: [SchemaEntry],
-    -- Diagnostics
+    -- Diagnostics this module emitted in its previous compile:
     cacheDiagnostics :: [Diagnostic]
   }
   deriving (Show)
@@ -196,7 +202,7 @@ compile emitLog input = do
         Map.map
           ( \cached ->
               Module
-                { declarations = map DeclarationImport (extractImportDeclarations cached.cacheIdentifiedAST),
+                { declarations = map DeclarationImport cached.cacheImports,
                   sourceSpan = cached.cacheModuleData.moduleSourceSpan
                 }
           )
@@ -372,11 +378,11 @@ eitherToMaybe = \case
 -- Per-module Async typecheck pipeline
 -- ===========================================================================
 
+-- | What each typecheck task hands back to the final-cache assembler.
+-- Holds only what's needed to construct a 'ModuleCache' downstream.
 data TypecheckCacheEntry = TypecheckCacheEntry
   { tceInterface :: ModuleInterface,
-    tceIdentified :: Module Identified,
-    tceZonkedModule :: Module Zonked,
-    tceZonkedTypeEnv :: Map VariableResolution (SemanticType Resolved),
+    tceDataAnnotations :: Map QualifiedName (Map Text (Maybe Text)),
     tceDiagnostics :: [Diagnostic]
   }
 
@@ -446,15 +452,12 @@ runTypecheckTask emitLog idResult moduleName cached sourceHash depTasks = do
       emitLog (CompileLogTypechecking moduleName)
       let importedTypes = Map.unions (map (.taskExportedTypes) depResults)
           result = Typechecker.typecheckModule idResult importedTypes moduleName
-          identifiedAST = case Map.lookup moduleName idResult.moduleASTs of
-            Just ast -> ast
-            Nothing -> Module {declarations = [], sourceSpan = emptySrcSpan}
+          dataAnnotations =
+            collectDataAnnotations idResult.identifiedVariables result.zonkedModule
           newCacheEntry =
             TypecheckCacheEntry
               { tceInterface = result.moduleInterface,
-                tceIdentified = identifiedAST,
-                tceZonkedModule = result.zonkedModule,
-                tceZonkedTypeEnv = result.localTypeEnv,
+                tceDataAnnotations = dataAnnotations,
                 tceDiagnostics = result.diagnostics
               }
       pure
@@ -472,16 +475,16 @@ typecheckFromCache :: ModuleName -> ModuleCache -> TypecheckTaskResult
 typecheckFromCache moduleName c =
   TypecheckTaskResult
     { taskModuleName = moduleName,
-      taskZonkedModule = c.cacheZonkedModule,
-      taskTypeEnvironment = c.cacheZonkedTypeEnv,
+      -- Cache-hit modules contribute no zonked AST / local typeEnv to the
+      -- result — only their exported types matter for downstream phases.
+      taskZonkedModule = Module {declarations = [], sourceSpan = emptySrcSpan},
+      taskTypeEnvironment = Map.empty,
       taskExportedTypes = c.cacheInterface.exportedTypes,
       taskDiagnostics = c.cacheDiagnostics,
       taskCacheEntry =
         TypecheckCacheEntry
           { tceInterface = c.cacheInterface,
-            tceIdentified = c.cacheIdentifiedAST,
-            tceZonkedModule = c.cacheZonkedModule,
-            tceZonkedTypeEnv = c.cacheZonkedTypeEnv,
+            tceDataAnnotations = c.cacheDataAnnotations,
             tceDiagnostics = c.cacheDiagnostics
           },
       taskIsCacheHit = True
@@ -588,16 +591,18 @@ runIdentify trustedStdlibNames moduleMap cachedModules =
       stepCachedOrFresh accumulator@(asts, exports, topLevels, state) moduleName =
         case Map.lookup moduleName cachedModules of
           Just cached ->
+            -- Cached modules don't restore an Identified AST or scope
+            -- frames — the LSP layer can't answer hover / scope queries
+            -- on a cache-hit module until it's recompiled.
             let injectedState =
                   state
                     { variables = Map.union cached.cacheIdentifierVariables state.variables,
                       types = Map.union cached.cacheIdentifierTypes state.types,
                       requests = Map.union cached.cacheIdentifierRequests state.requests,
                       constructors = Map.union cached.cacheIdentifierConstructors state.constructors,
-                      modules = Map.insert moduleName cached.cacheModuleData state.modules,
-                      capturedScopeFrames = cached.cacheScopeFrames ++ state.capturedScopeFrames
+                      modules = Map.insert moduleName cached.cacheModuleData state.modules
                     }
-             in ( Map.insert moduleName cached.cacheIdentifiedAST asts,
+             in ( asts,
                   Map.insert moduleName cached.cacheModuleExports exports,
                   Map.insert moduleName cached.cacheModuleTopLevel topLevels,
                   injectedState
@@ -712,9 +717,7 @@ buildFreshCacheEntries sourceHashes idResult typecheckCache loweringResults sche
                   Map.findWithDefault
                     ( TypecheckCacheEntry
                         { tceInterface = ModuleInterface {exportedTypes = Map.empty},
-                          tceIdentified = Module {declarations = [], sourceSpan = emptySrcSpan},
-                          tceZonkedModule = Module {declarations = [], sourceSpan = emptySrcSpan},
-                          tceZonkedTypeEnv = Map.empty,
+                          tceDataAnnotations = Map.empty,
                           tceDiagnostics = []
                         }
                     )
@@ -735,12 +738,12 @@ buildFreshCacheEntries sourceHashes idResult typecheckCache loweringResults sche
                     idResult.identifiedModules
                 moduleExports = Map.findWithDefault Map.empty moduleName idResult.moduleExports
                 moduleTopLevel = Map.findWithDefault Map.empty moduleName idResult.moduleVisibleSymbols
-                moduleScopeFrames =
-                  case Map.lookup (moduleSourceFilePath moduleName idResult) idResult.scopeIndex.framesByFile of
-                    Just frames -> [(f.frameSpan, f.frameSymbols) | f <- frames]
-                    Nothing -> []
+                moduleImports = case Map.lookup moduleName idResult.moduleASTs of
+                  Just ast -> extractImportDeclarations ast
+                  Nothing -> []
              in ModuleCache
                   { cacheSourceHash = Map.findWithDefault 0 moduleName sourceHashes,
+                    cacheImports = moduleImports,
                     cacheIdentifierVariables = moduleVariables,
                     cacheIdentifierTypes = moduleTypes,
                     cacheIdentifierRequests = moduleRequests,
@@ -748,11 +751,8 @@ buildFreshCacheEntries sourceHashes idResult typecheckCache loweringResults sche
                     cacheModuleData = moduleData,
                     cacheModuleExports = moduleExports,
                     cacheModuleTopLevel = moduleTopLevel,
-                    cacheScopeFrames = moduleScopeFrames,
-                    cacheIdentifiedAST = tce.tceIdentified,
                     cacheInterface = tce.tceInterface,
-                    cacheZonkedModule = tce.tceZonkedModule,
-                    cacheZonkedTypeEnv = tce.tceZonkedTypeEnv,
+                    cacheDataAnnotations = tce.tceDataAnnotations,
                     cacheLoweringResult = Map.findWithDefault emptyLoweringResult moduleName loweringResults,
                     cacheSchemaEntries = Map.findWithDefault [] moduleName schemaByModule,
                     cacheDiagnostics = tce.tceDiagnostics

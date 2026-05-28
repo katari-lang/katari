@@ -112,6 +112,7 @@ applyDiskCache (DiskCache entries) =
     toModuleCache entry =
       ModuleCache
         { cacheSourceHash = entry.sourceHash,
+          cacheImports = [],
           cacheIdentifierVariables = Map.empty,
           cacheIdentifierTypes = Map.empty,
           cacheIdentifierRequests = Map.empty,
@@ -119,11 +120,8 @@ applyDiskCache (DiskCache entries) =
           cacheModuleData = ModuleData {moduleSourceSpan = emptySpan},
           cacheModuleExports = Map.empty,
           cacheModuleTopLevel = Map.empty,
-          cacheScopeFrames = [],
-          cacheIdentifiedAST = AST.Module {declarations = [], sourceSpan = emptySpan},
           cacheInterface = ModuleInterface {exportedTypes = Map.empty},
-          cacheZonkedModule = AST.Module {declarations = [], sourceSpan = emptySpan},
-          cacheZonkedTypeEnv = Map.empty,
+          cacheDataAnnotations = Map.empty,
           cacheLoweringResult = entry.loweringResult,
           cacheSchemaEntries = entry.schemaEntries,
           cacheDiagnostics = entry.diagnostics
