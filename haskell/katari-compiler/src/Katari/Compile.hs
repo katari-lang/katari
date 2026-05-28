@@ -32,7 +32,11 @@ module Katari.Compile
   )
 where
 
+import Control.Concurrent.Async (Async, async, wait)
+import Control.Monad (when)
 import Control.Parallel.Strategies (parMap, rseq)
+import Data.IORef (modifyIORef', newIORef, readIORef)
+import Data.Maybe (mapMaybe)
 import Data.Foldable (foldl', for_)
 import Data.Hashable (hash)
 import Data.Map.Strict (Map)
@@ -44,6 +48,7 @@ import System.IO.Unsafe (unsafePerformIO)
 import Katari.AST
   ( Declaration (..),
     ImportDeclaration (..),
+    ImportKind (..),
     Module (..),
     Phase (Identified, Parsed, Zonked),
   )
@@ -202,6 +207,7 @@ compile emitLog input = do
   let (idResult, idErrors) = runIdentify Stdlib.stdlibModuleNames allParsed cacheHitModules
       idDiags = map Identifier.toDiagnostic idErrors
 
+  -- Compute topological order + direct deps for the Async pipeline.
   let stdlibModuleSet =
         Set.fromList
           [ moduleName
@@ -225,10 +231,28 @@ compile emitLog input = do
         stdlibLevels
           ++ userLevels
           ++ ([remainingUserNames | not (Set.null remainingUserNames)])
+      orderedModules = concatMap Set.toList moduleLevels
+      directDeps =
+        Map.map
+          ( \m ->
+              [ depName
+                | DeclarationImport imp <- m.declarations,
+                  let depName = importedModuleName imp,
+                  Map.member depName allParsed
+              ]
+          )
+          allParsed
 
-  let (mergedZonkResult, typecheckDiags, typecheckLogs, typecheckCache) =
-        typecheckModules idResult moduleLevels sourceHashes input.cache
-  for_ typecheckLogs emitLog
+  -- Per-module Async typecheck. Each module's task waits for its direct
+  -- imports' tasks before running.
+  (mergedZonkResult, typecheckDiags, typecheckCache) <-
+    typecheckModulesAsync
+      emitLog
+      idResult
+      orderedModules
+      directDeps
+      sourceHashes
+      input.cache
 
   let exhaustiveEnv =
         ExhaustiveEnv
@@ -345,7 +369,7 @@ eitherToMaybe = \case
   Right x -> Just x
 
 -- ===========================================================================
--- Per-module typecheck loop
+-- Per-module Async typecheck pipeline
 -- ===========================================================================
 
 data TypecheckCacheEntry = TypecheckCacheEntry
@@ -356,176 +380,117 @@ data TypecheckCacheEntry = TypecheckCacheEntry
     tceDiagnostics :: [Diagnostic]
   }
 
-data TypecheckAccumulator = TypecheckAccumulator
-  { accImportedTypes :: Map QualifiedName (SemanticType Resolved),
-    accZonkedModules :: Map Text (Module Zonked),
-    accZonkedTypeEnvironment :: Map Text (Map VariableResolution (SemanticType Resolved)),
-    accDiagnostics :: [Diagnostic],
-    accLogs :: [CompileLog],
-    accUpdatedCache :: Map ModuleName TypecheckCacheEntry,
-    accAllPriorCacheValid :: Bool
+-- | Per-module typecheck task output. Each Async task produces one of
+-- these; downstream tasks @wait@ for their imports' results and read
+-- 'exportedTypes' to feed into their own typecheck call.
+data TypecheckTaskResult = TypecheckTaskResult
+  { taskModuleName :: Text,
+    taskZonkedModule :: Module Zonked,
+    taskTypeEnvironment :: Map VariableResolution (SemanticType Resolved),
+    taskExportedTypes :: Map QualifiedName (SemanticType Resolved),
+    taskDiagnostics :: [Diagnostic],
+    taskCacheEntry :: TypecheckCacheEntry,
+    taskIsCacheHit :: Bool
   }
 
-data ModuleTypecheckResult = ModuleTypecheckResult
-  { mtrModuleName :: Text,
-    mtrImportedTypes :: Map QualifiedName (SemanticType Resolved),
-    mtrZonkedModule :: Module Zonked,
-    mtrTypeEnvironment :: Map VariableResolution (SemanticType Resolved),
-    mtrDiagnostics :: [Diagnostic],
-    mtrLogs :: [CompileLog],
-    mtrCacheEntry :: TypecheckCacheEntry,
-    mtrIsCacheHit :: Bool
-  }
-
-typecheckModules ::
+typecheckModulesAsync ::
+  (CompileLog -> IO ()) ->
   IdentifierResult ->
-  [Set.Set Text] ->
+  [ModuleName] ->
+  Map ModuleName [ModuleName] ->
   Map ModuleName Int ->
   Map ModuleName ModuleCache ->
-  (ZonkResult, [Diagnostic], [CompileLog], Map ModuleName TypecheckCacheEntry)
-typecheckModules idResult moduleLevels sourceHashes inputCache =
-  let initial =
-        TypecheckAccumulator
-          { accImportedTypes = Map.empty,
-            accZonkedModules = Map.empty,
-            accZonkedTypeEnvironment = Map.empty,
-            accDiagnostics = [],
-            accLogs = [],
-            accUpdatedCache = Map.empty,
-            accAllPriorCacheValid = True
-          }
-      final = foldl' (typecheckLevel idResult sourceHashes inputCache) initial moduleLevels
+  IO (ZonkResult, [Diagnostic], Map ModuleName TypecheckCacheEntry)
+typecheckModulesAsync emitLog idResult orderedModules directDeps sourceHashes inputCache = do
+  tasksRef <- newIORef Map.empty
+  for_ orderedModules $ \modName -> do
+    existing <- readIORef tasksRef
+    let depTasks =
+          mapMaybe (`Map.lookup` existing) (Map.findWithDefault [] modName directDeps)
+        cached = Map.lookup modName inputCache
+        sourceHash = Map.findWithDefault 0 modName sourceHashes
+    task <-
+      async (runTypecheckTask emitLog idResult modName cached sourceHash depTasks)
+    modifyIORef' tasksRef (Map.insert modName task)
+  tasks <- readIORef tasksRef
+  results <- traverse wait tasks
+
+  let zonkedModules' = Map.map (.taskZonkedModule) results
+      zonkedTypeEnv' = Map.map (.taskTypeEnvironment) results
       mergedZonkResult =
         ZonkResult
-          { zonkedModules = final.accZonkedModules,
-            zonkedTypeEnvironment = final.accZonkedTypeEnvironment
+          { zonkedModules = zonkedModules',
+            zonkedTypeEnvironment = zonkedTypeEnv'
           }
-   in ( mergedZonkResult,
-        final.accDiagnostics,
-        final.accLogs,
-        final.accUpdatedCache
-      )
+      diagnostics' = concatMap (.taskDiagnostics) (Map.elems results)
+      cache' = Map.map (.taskCacheEntry) results
+  pure (mergedZonkResult, diagnostics', cache')
 
-typecheckLevel ::
+runTypecheckTask ::
+  (CompileLog -> IO ()) ->
   IdentifierResult ->
-  Map ModuleName Int ->
-  Map ModuleName ModuleCache ->
-  TypecheckAccumulator ->
-  Set.Set Text ->
-  TypecheckAccumulator
-typecheckLevel idResult sourceHashes inputCache accumulator level =
-  let moduleNames = Set.toList level
-      results =
-        parMap
-          rseq
-          (typecheckOneModule idResult sourceHashes inputCache accumulator)
-          moduleNames
-   in foldl' mergeModuleResult accumulator results
+  ModuleName ->
+  Maybe ModuleCache ->
+  Int ->
+  [Async TypecheckTaskResult] ->
+  IO TypecheckTaskResult
+runTypecheckTask emitLog idResult moduleName cached sourceHash depTasks = do
+  depResults <- mapM wait depTasks
+  let allDepsCacheHit = all (.taskIsCacheHit) depResults
+      cacheValid = case cached of
+        Just c -> allDepsCacheHit && c.cacheSourceHash == sourceHash
+        Nothing -> False
+  case cached of
+    Just c | cacheValid -> pure (typecheckFromCache moduleName c)
+    _ -> do
+      emitLog (CompileLogTypechecking moduleName)
+      let importedTypes = Map.unions (map (.taskExportedTypes) depResults)
+          result = Typechecker.typecheckModule idResult importedTypes moduleName
+          identifiedAST = case Map.lookup moduleName idResult.moduleASTs of
+            Just ast -> ast
+            Nothing -> Module {declarations = [], sourceSpan = emptySrcSpan}
+          newCacheEntry =
+            TypecheckCacheEntry
+              { tceInterface = result.moduleInterface,
+                tceIdentified = identifiedAST,
+                tceZonkedModule = result.zonkedModule,
+                tceZonkedTypeEnv = result.localTypeEnv,
+                tceDiagnostics = result.diagnostics
+              }
+      pure
+        TypecheckTaskResult
+          { taskModuleName = moduleName,
+            taskZonkedModule = result.zonkedModule,
+            taskTypeEnvironment = result.localTypeEnv,
+            taskExportedTypes = result.moduleInterface.exportedTypes,
+            taskDiagnostics = result.diagnostics,
+            taskCacheEntry = newCacheEntry,
+            taskIsCacheHit = False
+          }
 
-mergeModuleResult ::
-  TypecheckAccumulator ->
-  ModuleTypecheckResult ->
-  TypecheckAccumulator
-mergeModuleResult accumulator result =
-  accumulator
-    { accImportedTypes = Map.union accumulator.accImportedTypes result.mtrImportedTypes,
-      accZonkedModules = Map.insert result.mtrModuleName result.mtrZonkedModule accumulator.accZonkedModules,
-      accZonkedTypeEnvironment = Map.insert result.mtrModuleName result.mtrTypeEnvironment accumulator.accZonkedTypeEnvironment,
-      accDiagnostics = accumulator.accDiagnostics <> result.mtrDiagnostics,
-      accLogs = accumulator.accLogs <> result.mtrLogs,
-      accUpdatedCache = Map.insert result.mtrModuleName result.mtrCacheEntry accumulator.accUpdatedCache,
-      accAllPriorCacheValid = accumulator.accAllPriorCacheValid && result.mtrIsCacheHit
+typecheckFromCache :: ModuleName -> ModuleCache -> TypecheckTaskResult
+typecheckFromCache moduleName c =
+  TypecheckTaskResult
+    { taskModuleName = moduleName,
+      taskZonkedModule = c.cacheZonkedModule,
+      taskTypeEnvironment = c.cacheZonkedTypeEnv,
+      taskExportedTypes = c.cacheInterface.exportedTypes,
+      taskDiagnostics = c.cacheDiagnostics,
+      taskCacheEntry =
+        TypecheckCacheEntry
+          { tceInterface = c.cacheInterface,
+            tceIdentified = c.cacheIdentifiedAST,
+            tceZonkedModule = c.cacheZonkedModule,
+            tceZonkedTypeEnv = c.cacheZonkedTypeEnv,
+            tceDiagnostics = c.cacheDiagnostics
+          },
+      taskIsCacheHit = True
     }
 
-typecheckOneModule ::
-  IdentifierResult ->
-  Map ModuleName Int ->
-  Map ModuleName ModuleCache ->
-  TypecheckAccumulator ->
-  Text ->
-  ModuleTypecheckResult
-typecheckOneModule idResult sourceHashes inputCache accumulator moduleName =
-  let currentHash = Map.lookup moduleName sourceHashes
-      cachedEntry = Map.lookup moduleName inputCache
-      cacheHit = case (currentHash, cachedEntry) of
-        (Just sourceHash, Just cached) ->
-          accumulator.accAllPriorCacheValid && sourceHash == cached.cacheSourceHash
-        _ -> False
-   in if cacheHit
-        then applyCacheToResult moduleName cachedEntry
-        else recompileModuleToResult idResult moduleName accumulator
-
-applyCacheToResult ::
-  Text ->
-  Maybe ModuleCache ->
-  ModuleTypecheckResult
-applyCacheToResult moduleName cachedEntry =
-  case cachedEntry of
-    Nothing ->
-      ModuleTypecheckResult
-        { mtrModuleName = moduleName,
-          mtrImportedTypes = Map.empty,
-          mtrZonkedModule = Module {declarations = [], sourceSpan = emptySrcSpan},
-          mtrTypeEnvironment = Map.empty,
-          mtrDiagnostics = [],
-          mtrLogs = [],
-          mtrCacheEntry =
-            TypecheckCacheEntry
-              { tceInterface = ModuleInterface {exportedTypes = Map.empty},
-                tceIdentified = Module {declarations = [], sourceSpan = emptySrcSpan},
-                tceZonkedModule = Module {declarations = [], sourceSpan = emptySrcSpan},
-                tceZonkedTypeEnv = Map.empty,
-                tceDiagnostics = []
-              },
-          mtrIsCacheHit = True
-        }
-    Just cached ->
-      ModuleTypecheckResult
-        { mtrModuleName = moduleName,
-          mtrImportedTypes = cached.cacheInterface.exportedTypes,
-          mtrZonkedModule = cached.cacheZonkedModule,
-          mtrTypeEnvironment = cached.cacheZonkedTypeEnv,
-          mtrDiagnostics = cached.cacheDiagnostics,
-          mtrLogs = [],
-          mtrCacheEntry =
-            TypecheckCacheEntry
-              { tceInterface = cached.cacheInterface,
-                tceIdentified = cached.cacheIdentifiedAST,
-                tceZonkedModule = cached.cacheZonkedModule,
-                tceZonkedTypeEnv = cached.cacheZonkedTypeEnv,
-                tceDiagnostics = cached.cacheDiagnostics
-              },
-          mtrIsCacheHit = True
-        }
-
-recompileModuleToResult ::
-  IdentifierResult ->
-  Text ->
-  TypecheckAccumulator ->
-  ModuleTypecheckResult
-recompileModuleToResult idResult moduleName accumulator =
-  let result = Typechecker.typecheckModule idResult accumulator.accImportedTypes moduleName
-      identifiedAST = case Map.lookup moduleName idResult.moduleASTs of
-        Just ast -> ast
-        Nothing -> Module {declarations = [], sourceSpan = emptySrcSpan}
-      newCacheEntry =
-        TypecheckCacheEntry
-          { tceInterface = result.moduleInterface,
-            tceIdentified = identifiedAST,
-            tceZonkedModule = result.zonkedModule,
-            tceZonkedTypeEnv = result.localTypeEnv,
-            tceDiagnostics = result.diagnostics
-          }
-   in ModuleTypecheckResult
-        { mtrModuleName = moduleName,
-          mtrImportedTypes = result.moduleInterface.exportedTypes,
-          mtrZonkedModule = result.zonkedModule,
-          mtrTypeEnvironment = result.localTypeEnv,
-          mtrDiagnostics = result.diagnostics,
-          mtrLogs = [CompileLogTypechecking moduleName],
-          mtrCacheEntry = newCacheEntry,
-          mtrIsCacheHit = False
-        }
+importedModuleName :: ImportDeclaration -> Text
+importedModuleName imp = case imp.kind of
+  ImportNames {moduleName = m} -> m
+  ImportModule {moduleName = m} -> m
 
 emptySrcSpan :: SourceSpan
 emptySrcSpan =
