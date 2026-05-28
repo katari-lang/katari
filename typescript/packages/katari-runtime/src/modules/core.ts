@@ -26,19 +26,16 @@ import type { Logger } from "../engine/logger.js";
 import {
   decryptCheckpoint,
   deserialize,
+  type EncryptedEngineCheckpoint,
   encryptCheckpoint,
   serialize,
-  type EncryptedEngineCheckpoint,
 } from "../engine/snapshot.js";
 import type { State } from "../engine/state.js";
 import type { Thread } from "../engine/thread/types.js";
-import { encryptValueRecord } from "../value-secret-codec.js";
-import type { Module } from "../module.js";
 import type { IRModule } from "../ir/types.js";
-import {
-  NULL_DELEGATION_STORE,
-  type DelegationStore,
-} from "./delegation-store.js";
+import type { Module } from "../module.js";
+import { encryptValueRecord } from "../value-secret-codec.js";
+import { type DelegationStore, NULL_DELEGATION_STORE } from "./delegation-store.js";
 
 /**
  * Storage interface that the CoreModule depends on. The host (api-server)
@@ -52,10 +49,7 @@ import {
  */
 export interface CoreCheckpointStore {
   get(snapshotId: string): Promise<EncryptedEngineCheckpoint | null>;
-  upsert(
-    snapshotId: string,
-    checkpoint: EncryptedEngineCheckpoint,
-  ): Promise<void>;
+  upsert(snapshotId: string, checkpoint: EncryptedEngineCheckpoint): Promise<void>;
 }
 
 export type CoreModuleOptions = {
@@ -95,10 +89,7 @@ export class CoreModule implements Module<CoreTx> {
     // Inbound terminal acks resolve a delegation we previously issued;
     // delete the audit row BEFORE applyEvent so a sub-delegate emitted
     // during apply (if any) doesn't race the parent's row delete.
-    if (
-      event.payload.kind === "delegateAck"
-      || event.payload.kind === "terminateAck"
-    ) {
+    if (event.payload.kind === "delegateAck" || event.payload.kind === "terminateAck") {
       await this.delegationStore.delete(event.payload.delegationId);
     }
 
@@ -131,9 +122,10 @@ export class CoreModule implements Module<CoreTx> {
 
   async load(tx: CoreTx): Promise<void> {
     const encrypted = await tx.coreCheckpoints.get(this.snapshotId);
-    this.state = encrypted !== null
-      ? deserialize(this.irModule, decryptCheckpoint(encrypted))
-      : createState(this.irModule, { selfEndpoint: this.endpoint });
+    this.state =
+      encrypted !== null
+        ? deserialize(this.irModule, decryptCheckpoint(encrypted))
+        : createState(this.irModule, { selfEndpoint: this.endpoint });
   }
 
   /** Read-only access for tests / debug. */
@@ -154,14 +146,11 @@ export class CoreModule implements Module<CoreTx> {
     ev: ExternalEvent,
     payload: Extract<ExternalEvent["payload"], { kind: "delegate" }>,
   ): Promise<void> {
-    const parentDelegationId = this.findEnclosingAgentDelegation(
-      payload.delegationId,
-    );
+    const parentDelegationId = this.findEnclosingAgentDelegation(payload.delegationId);
     const rootDelegationId =
       parentDelegationId === null
         ? payload.delegationId
-        : ((await this.delegationStore.getRoot(parentDelegationId))
-            ?? payload.delegationId);
+        : ((await this.delegationStore.getRoot(parentDelegationId)) ?? payload.delegationId);
     const now = new Date().toISOString();
     await this.delegationStore.insert({
       id: payload.delegationId,
@@ -185,9 +174,7 @@ export class CoreModule implements Module<CoreTx> {
    * at the engine root, which shouldn't normally happen for CORE-issued
    * outbound delegates).
    */
-  private findEnclosingAgentDelegation(
-    delegationId: DelegationId,
-  ): DelegationId | null {
+  private findEnclosingAgentDelegation(delegationId: DelegationId): DelegationId | null {
     const senderThreadId = this.state.pendingDelegateOut[delegationId];
     if (senderThreadId === undefined) return null;
     let cursor: Thread | undefined = this.state.threads[senderThreadId];

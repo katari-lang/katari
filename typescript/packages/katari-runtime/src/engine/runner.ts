@@ -10,20 +10,15 @@
 // removed from `state.threads` are dropped silently with a debug log
 // (matches the previous engine's behaviour).
 
+import { decodeCoreAgentDefId, encodeCoreAgentDefId } from "../agent-def-id.js";
 import { EntryNotFoundError, RecoverableEngineError } from "./errors.js";
 import type { Event, InternalEventPayload } from "./event.js";
 import { isInternal } from "./event.js";
-import type { ThreadId, AskId } from "./id.js";
+import type { AskId, ThreadId } from "./id.js";
 import { createEscalationId } from "./id.js";
 import { spawnAgentRoot } from "./spawn.js";
-import { decodeCoreAgentDefId, encodeCoreAgentDefId } from "../agent-def-id.js";
 import type { State } from "./state.js";
-import {
-  emptyBuffers,
-  makeStepCtx,
-  type StepBuffers,
-} from "./step-ctx.js";
-import type { Thread } from "./thread/types.js";
+import { emptyBuffers, makeStepCtx, type StepBuffers } from "./step-ctx.js";
 import {
   dispatchAsk,
   dispatchAskAck,
@@ -32,6 +27,7 @@ import {
   dispatchCreate,
   dispatchDone,
 } from "./thread/ops/index.js";
+import type { Thread } from "./thread/types.js";
 
 /**
  * Process a single inbound event against `state` and drain only the
@@ -74,10 +70,7 @@ export function drive(
  * Run `translateExternal` against the live state. Recoverable errors
  * raised inside translation are recorded; anything else propagates.
  */
-function applyTranslateExternal(
-  ctx: ReturnType<typeof makeStepCtx>,
-  event: Event,
-): void {
+function applyTranslateExternal(ctx: ReturnType<typeof makeStepCtx>, event: Event): void {
   try {
     translateExternal(ctx, event);
   } catch (err) {
@@ -107,20 +100,31 @@ function applyTranslateExternal(
 
 // ─── Single-step dispatch ──────────────────────────────────────────────────
 
-function step(
-  ctx: ReturnType<typeof makeStepCtx>,
-  ev: InternalEventPayload,
-): void {
+function step(ctx: ReturnType<typeof makeStepCtx>, ev: InternalEventPayload): void {
   switch (ev.kind) {
-    case "create":    onCreate(ctx, ev); break;
-    case "done":      onDone(ctx, ev); break;
-    case "cancel":    onCancel(ctx, ev); break;
-    case "cancelAck": onCancelAck(ctx, ev); break;
-    case "ask":       onAsk(ctx, ev); break;
-    case "askAck":    onAskAck(ctx, ev); break;
+    case "create":
+      onCreate(ctx, ev);
+      break;
+    case "done":
+      onDone(ctx, ev);
+      break;
+    case "cancel":
+      onCancel(ctx, ev);
+      break;
+    case "cancelAck":
+      onCancelAck(ctx, ev);
+      break;
+    case "ask":
+      onAsk(ctx, ev);
+      break;
+    case "askAck":
+      onAskAck(ctx, ev);
+      break;
     default: {
       const _exhaustive: never = ev;
-      throw new Error(`engine: unrecognized internal event kind: ${(_exhaustive as InternalEventPayload).kind}`);
+      throw new Error(
+        `engine: unrecognized internal event kind: ${(_exhaustive as InternalEventPayload).kind}`,
+      );
     }
   }
 }
@@ -133,9 +137,7 @@ function onCreate(
 ): void {
   const t = ctx.state.threads[ev.threadId] as Thread | undefined;
   if (t === undefined) {
-    throw new Error(
-      `engine: create event for ${ev.threadId} but no thread record present`,
-    );
+    throw new Error(`engine: create event for ${ev.threadId} but no thread record present`);
   }
   dispatchCreate(ctx, t);
 }
@@ -225,10 +227,7 @@ function onAskAck(
  * Anything addressed elsewhere (`event.to !== selfEndpoint`) is dropped
  * with a debug log — the runner only consumes its own inbound events.
  */
-function translateExternal(
-  ctx: ReturnType<typeof makeStepCtx>,
-  event: Event,
-): void {
+function translateExternal(ctx: ReturnType<typeof makeStepCtx>, event: Event): void {
   if (event.to !== ctx.state.selfEndpoint) {
     ctx.log("debug", "engine: external event dropped (to !== self)", {
       kind: event.payload.kind,
@@ -264,15 +263,10 @@ function translateExternal(
     // a delegate block) or a `CallAgentThread` (the dynamic
     // `call_agent` prim). Both follow the same finishing pattern —
     // forward done / cancelAck and clear the pending-out entry.
-    const threadId = ctx.state.pendingDelegateOut[p.delegationId] as
-      | ThreadId
-      | undefined;
+    const threadId = ctx.state.pendingDelegateOut[p.delegationId] as ThreadId | undefined;
     if (threadId === undefined) return;
     const sender = ctx.state.threads[threadId];
-    if (
-      sender === undefined ||
-      (sender.kind !== "delegate" && sender.kind !== "callAgent")
-    ) {
+    if (sender === undefined || (sender.kind !== "delegate" && sender.kind !== "callAgent")) {
       ctx.log("debug", "engine: delegateAck for non-delegate thread", { kind: sender?.kind });
       return;
     }
@@ -295,15 +289,10 @@ function translateExternal(
   }
 
   if (p.kind === "terminateAck") {
-    const threadId = ctx.state.pendingDelegateOut[p.delegationId] as
-      | ThreadId
-      | undefined;
+    const threadId = ctx.state.pendingDelegateOut[p.delegationId] as ThreadId | undefined;
     if (threadId === undefined) return;
     const sender = ctx.state.threads[threadId];
-    if (
-      sender === undefined ||
-      (sender.kind !== "delegate" && sender.kind !== "callAgent")
-    ) {
+    if (sender === undefined || (sender.kind !== "delegate" && sender.kind !== "callAgent")) {
       return;
     }
     delete ctx.state.pendingDelegateOut[p.delegationId];
@@ -322,9 +311,7 @@ function translateExternal(
     // ask bubbling upward through that thread's parent chain — the same
     // path a request statement takes locally. The escalateAck round-trip
     // matches via `DelegateThread.inboundEscalations[askId]`.
-    const threadId = ctx.state.pendingDelegateOut[p.delegationId] as
-      | ThreadId
-      | undefined;
+    const threadId = ctx.state.pendingDelegateOut[p.delegationId] as ThreadId | undefined;
     if (threadId === undefined) {
       ctx.log("debug", "engine: escalate for unknown delegationId", {
         delegationId: p.delegationId,
@@ -332,10 +319,7 @@ function translateExternal(
       return;
     }
     const sender = ctx.state.threads[threadId];
-    if (
-      sender === undefined ||
-      (sender.kind !== "delegate" && sender.kind !== "callAgent")
-    ) {
+    if (sender === undefined || (sender.kind !== "delegate" && sender.kind !== "callAgent")) {
       ctx.log("debug", "engine: escalate target not a DelegateThread / CallAgentThread", {
         kind: sender?.kind,
       });
@@ -353,10 +337,9 @@ function translateExternal(
     // ReqId via IRModule.entries when it's a qname-encoded request;
     // closure-encoded escalates have no handle-scope dispatch and fall
     // back to a sentinel handled only by reqId-0 fallback handlers.
-    const ownAskId = (sender.nextAskId as number) as import("./id.js").AskId;
+    const ownAskId = sender.nextAskId as number as import("./id.js").AskId;
     sender.nextAskId = ((sender.nextAskId as number) + 1) as import("./id.js").AskId;
-    sender.inboundEscalations[ownAskId] =
-      p.escalationId as import("./id.js").EscalationId;
+    sender.inboundEscalations[ownAskId] = p.escalationId as import("./id.js").EscalationId;
     // NOTE on the global owner index: do NOT write 'escalationOwners'
     // here. In a CORE→CORE round-trip the same escalationId is
     // registered first by 'emitEscalateUpward' on the SENDER thread
@@ -388,18 +371,14 @@ function translateExternal(
     // originally issued the outbound escalate via emitEscalateUpward).
     // `outboundEscalations[escalationId]` gives the askId we need to use
     // when constructing the askAck — direct lookup, no linear scan.
-    const ownerId =
-      ctx.state.escalationOwners[p.escalationId];
+    const ownerId = ctx.state.escalationOwners[p.escalationId];
     if (ownerId !== undefined) {
       const t = ctx.state.threads[ownerId];
       if (t !== undefined && t.kind === "agent") {
-        const askId =
-          t.outboundEscalations[p.escalationId];
+        const askId = t.outboundEscalations[p.escalationId];
         if (askId !== undefined) {
           delete t.outboundEscalations[p.escalationId];
-          delete ctx.state.escalationOwners[
-            p.escalationId
-          ];
+          delete ctx.state.escalationOwners[p.escalationId];
           ctx.enqueue({
             kind: "askAck",
             target: t.id,
@@ -504,4 +483,3 @@ function resolveRequestReqId(
   }
   return decoded.value;
 }
-

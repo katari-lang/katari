@@ -29,12 +29,7 @@ export function JsonEditor({
 
   return (
     <div className="space-y-1">
-      <div
-        className={cn(
-          "overflow-hidden border border-border",
-          className,
-        )}
-      >
+      <div className={cn("overflow-hidden border border-border", className)}>
         <Editor
           height={height}
           defaultLanguage="json"

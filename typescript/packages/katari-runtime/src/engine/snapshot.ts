@@ -20,11 +20,8 @@
 // decrypts after load; storage just sees an opaque JSON blob.
 
 import type { IRModule } from "../ir/types.js";
+import { decryptValueTree, encryptValueTree } from "../value-secret-codec.js";
 import type { State } from "./state.js";
-import {
-  decryptValueTree,
-  encryptValueTree,
-} from "../value-secret-codec.js";
 
 export type EngineCheckpoint = {
   /**
@@ -66,14 +63,9 @@ export function serialize(state: State): EngineCheckpoint {
   };
 }
 
-export function deserialize(
-  irModule: IRModule,
-  snap: EngineCheckpoint,
-): State {
+export function deserialize(irModule: IRModule, snap: EngineCheckpoint): State {
   if (snap.schemaVersion !== 1) {
-    throw new Error(
-      `engine.checkpoint: unsupported schemaVersion ${snap.schemaVersion}`,
-    );
+    throw new Error(`engine.checkpoint: unsupported schemaVersion ${snap.schemaVersion}`);
   }
   const threads = structuredClone(snap.threads);
   const scopes = structuredClone(snap.scopes);
@@ -129,20 +121,15 @@ const VALUE_KIND_TAGS: ReadonlySet<string> = new Set([
  * has been replaced by the storage-only 'EncryptedSecret' envelope.
  * Idempotent on checkpoints that have no secrets.
  */
-export function encryptCheckpoint(
-  checkpoint: EngineCheckpoint,
-): EncryptedEngineCheckpoint {
-  return walkValuesInTree(checkpoint, encryptValueTree) as
-    EncryptedEngineCheckpoint;
+export function encryptCheckpoint(checkpoint: EngineCheckpoint): EncryptedEngineCheckpoint {
+  return walkValuesInTree(checkpoint, encryptValueTree) as EncryptedEngineCheckpoint;
 }
 
 /**
  * Inverse of 'encryptCheckpoint'. Throws via 'secret-crypto' if any
  * envelope fails AES-GCM authentication (= tampering or wrong key).
  */
-export function decryptCheckpoint(
-  encrypted: EncryptedEngineCheckpoint,
-): EngineCheckpoint {
+export function decryptCheckpoint(encrypted: EncryptedEngineCheckpoint): EngineCheckpoint {
   return walkValuesInTree(encrypted, decryptValueTree) as EngineCheckpoint;
 }
 
@@ -182,8 +169,8 @@ function walkValuesInTree(
   // checkpoint that mixes plaintext and encrypted nodes (e.g. an
   // already-encrypted checkpoint re-encrypted) still round-trips.
   if (
-    (typeof obj.kind === "string" && VALUE_KIND_TAGS.has(obj.kind))
-    || typeof obj.$envelope === "string"
+    (typeof obj.kind === "string" && VALUE_KIND_TAGS.has(obj.kind)) ||
+    typeof obj.$envelope === "string"
   ) {
     return transform(obj);
   }

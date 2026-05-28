@@ -8,12 +8,7 @@
 import type { DelegationId } from "@katari-lang/runtime";
 import { redactSecretsInEncrypted, valueToRaw } from "@katari-lang/runtime";
 import type { RawValue } from "@katari-lang/types";
-import type {
-  DelegationRow,
-  ProjectId,
-  RunsAuditRow,
-  Storage,
-} from "../storage/types.js";
+import type { DelegationRow, ProjectId, RunsAuditRow, Storage } from "../storage/types.js";
 
 /**
  * Wire shape for one tree node. Owner is the Module currently running
@@ -68,10 +63,7 @@ export class DelegationTreeService {
    * Authorization: when `projectId` is provided, asserts the audit row
    * belongs to that project; otherwise lets the caller verify.
    */
-  async getTree(
-    runId: DelegationId,
-    projectId?: ProjectId,
-  ): Promise<DelegationTree> {
+  async getTree(runId: DelegationId, projectId?: ProjectId): Promise<DelegationTree> {
     const audit = await this.storage.runsAudit.get(runId);
     if (audit === null) throw new RunNotFound(runId);
     if (projectId !== undefined) {
@@ -103,8 +95,7 @@ function buildTree(
   const childrenOf = new Map<DelegationId | "__root__", DelegationRow[]>();
   for (const row of flat) {
     byId.set(row.id, row);
-    const key: DelegationId | "__root__" =
-      row.parentDelegationId ?? "__root__";
+    const key: DelegationId | "__root__" = row.parentDelegationId ?? "__root__";
     const bucket = childrenOf.get(key);
     if (bucket === undefined) childrenOf.set(key, [row]);
     else bucket.push(row);
@@ -112,9 +103,7 @@ function buildTree(
 
   // Sort siblings by createdAt for deterministic UI rendering.
   for (const bucket of childrenOf.values()) {
-    bucket.sort((a, b) =>
-      a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0,
-    );
+    bucket.sort((a, b) => (a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0));
   }
 
   // Root node draws state from audit (terminal-aware) and other fields
@@ -133,15 +122,11 @@ function buildTree(
     cancelReason: audit.cancelReason,
     args: redactArgs(audit.args),
     result:
-      audit.result === undefined
-        ? undefined
-        : valueToRaw(redactSecretsInEncrypted(audit.result)),
+      audit.result === undefined ? undefined : valueToRaw(redactSecretsInEncrypted(audit.result)),
     errorMessage: audit.errorMessage,
     createdAt: audit.createdAt,
     updatedAt: audit.updatedAt,
-    children: (childrenOf.get(rootId) ?? []).map((c) =>
-      buildLiveNode(c, childrenOf),
-    ),
+    children: (childrenOf.get(rootId) ?? []).map((c) => buildLiveNode(c, childrenOf)),
   };
 }
 
@@ -155,17 +140,14 @@ function buildLiveNode(
     rootDelegationId: row.rootDelegationId,
     callerEndpoint: row.callerEndpoint,
     ownerEndpoint: row.ownerEndpoint,
-    agentDefId: typeof row.agentDefId === "string"
-      ? row.agentDefId
-      : JSON.stringify(row.agentDefId),
+    agentDefId:
+      typeof row.agentDefId === "string" ? row.agentDefId : JSON.stringify(row.agentDefId),
     qualifiedName: extractQualifiedName(row.agentDefId),
     state: row.state,
     args: redactArgs(row.args),
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
-    children: (childrenOf.get(row.id) ?? []).map((c) =>
-      buildLiveNode(c, childrenOf),
-    ),
+    children: (childrenOf.get(row.id) ?? []).map((c) => buildLiveNode(c, childrenOf)),
   };
 }
 

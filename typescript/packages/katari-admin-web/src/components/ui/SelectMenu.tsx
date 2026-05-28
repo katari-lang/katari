@@ -58,9 +58,7 @@ export function SelectMenu({
                     : "text-foreground data-highlighted:bg-muted",
                 )}
               >
-                <SelectPrimitive.ItemText>
-                  {opt.detail ?? opt.label}
-                </SelectPrimitive.ItemText>
+                <SelectPrimitive.ItemText>{opt.detail ?? opt.label}</SelectPrimitive.ItemText>
                 {opt.key === value && (
                   <SelectPrimitive.ItemIndicator>
                     <Check className="size-4 shrink-0" />

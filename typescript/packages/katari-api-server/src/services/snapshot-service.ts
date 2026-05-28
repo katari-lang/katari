@@ -3,12 +3,12 @@
 // Called directly by the upload endpoint at `apply` time. `latest` resolution is also here.
 
 import {
-  SnapshotNotFound,
-  NoSnapshotForProject,
   type AgentDefinition,
   type IRModule,
   type Logger,
+  NoSnapshotForProject,
   type SchemaBundle,
+  SnapshotNotFound,
 } from "@katari-lang/runtime";
 import type {
   ListOptions,
@@ -22,16 +22,14 @@ import type {
 } from "../storage/types.js";
 
 // Re-export so existing callers keep working.
-export { SnapshotNotFound, NoSnapshotForProject };
+export { NoSnapshotForProject, SnapshotNotFound };
 
 export class AgentNotFound extends Error {
   constructor(
     public readonly snapshotId: SnapshotId,
     public readonly qualifiedName: string,
   ) {
-    super(
-      `agent ${qualifiedName} does not exist in snapshot ${snapshotId}`,
-    );
+    super(`agent ${qualifiedName} does not exist in snapshot ${snapshotId}`);
   }
 }
 
@@ -100,10 +98,7 @@ export class SnapshotService {
    * snapshotId is provided it's returned as-is; otherwise the latest
    * snapshot for the project is used.
    */
-  async resolve(input: {
-    projectId: ProjectId;
-    snapshotId?: SnapshotId;
-  }): Promise<SnapshotId> {
+  async resolve(input: { projectId: ProjectId; snapshotId?: SnapshotId }): Promise<SnapshotId> {
     if (input.snapshotId !== undefined) return input.snapshotId;
     const latest = await this.storage.snapshots.latest(input.projectId);
     if (latest === null) {
@@ -117,14 +112,9 @@ export class SnapshotService {
     return row.schemaBundle.agents;
   }
 
-  async getAgent(
-    snapshotId: SnapshotId,
-    qualifiedName: string,
-  ): Promise<AgentDefinition> {
+  async getAgent(snapshotId: SnapshotId, qualifiedName: string): Promise<AgentDefinition> {
     const agents = await this.listAgents(snapshotId);
-    const found = agents.find(
-      (a) => formatQualifiedName(a.qualifiedName) === qualifiedName,
-    );
+    const found = agents.find((a) => formatQualifiedName(a.qualifiedName) === qualifiedName);
     if (found === undefined) {
       throw new AgentNotFound(snapshotId, qualifiedName);
     }

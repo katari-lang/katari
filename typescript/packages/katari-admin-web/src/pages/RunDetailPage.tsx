@@ -1,37 +1,33 @@
-import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link, useParams } from "react-router-dom";
 import { motion } from "framer-motion";
 import { ArrowLeft, Ban } from "lucide-react";
+import { useState } from "react";
 import toast from "react-hot-toast";
-import { useApiClient } from "@/contexts/ApiKeyContext";
-import { PageContent, PageHeader } from "@/components/ui/PageHeader";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/Card";
+import { Link, useParams } from "react-router-dom";
+import type { EscalationState, ProjectId, RunId } from "@/api/types";
+import { DelegationTreeGraph } from "@/components/domain/DelegationTreeGraph";
+import { isTerminalState, RunStatusBadge } from "@/components/domain/RunStatusBadge";
+import { ValueViewer } from "@/components/domain/ValueViewer";
+import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
-import { Dialog, DialogFooter } from "@/components/ui/Dialog";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/Card";
 import { CopyableId } from "@/components/ui/CopyableId";
 import { CopyButton } from "@/components/ui/CopyButton";
-import { SpinnerOverlay } from "@/components/ui/Spinner";
+import { Dialog, DialogFooter } from "@/components/ui/Dialog";
 import { MetadataRow } from "@/components/ui/MetadataRow";
-import { Badge } from "@/components/ui/Badge";
-import {
-  RunStatusBadge,
-  isTerminalState,
-} from "@/components/domain/RunStatusBadge";
-import { DelegationTreeGraph } from "@/components/domain/DelegationTreeGraph";
-import { ValueViewer } from "@/components/domain/ValueViewer";
-import { formatDateTime, relativeTime } from "@/lib/format";
+import { PageContent, PageHeader } from "@/components/ui/PageHeader";
+import { SpinnerOverlay } from "@/components/ui/Spinner";
+import { useApiClient } from "@/contexts/ApiKeyContext";
 import { useSnapshotMessage } from "@/hooks/useSnapshotMessage";
-import type { EscalationState, ProjectId, RunId } from "@/api/types";
+import { formatDateTime, relativeTime } from "@/lib/format";
 
 const POLL_MS = 3_000;
 
-const escalationTones: Record<EscalationState, "info" | "success" | "neutral"> =
-  {
-    open: "info",
-    answered: "success",
-    cancelled: "neutral",
-  };
+const escalationTones: Record<EscalationState, "info" | "success" | "neutral"> = {
+  open: "info",
+  answered: "success",
+  cancelled: "neutral",
+};
 
 export function RunDetailPage() {
   const { projectId, runId } = useParams<{
@@ -46,8 +42,7 @@ export function RunDetailPage() {
     queryFn: () => client.getRun(projectId as ProjectId, runId as RunId),
     enabled: typeof projectId === "string" && typeof runId === "string",
     refetchInterval: (query) =>
-      query.state.data !== undefined &&
-      !isTerminalState(query.state.data.run.state)
+      query.state.data !== undefined && !isTerminalState(query.state.data.run.state)
         ? POLL_MS
         : false,
   });
@@ -67,9 +62,7 @@ export function RunDetailPage() {
   const [cancelDialogOpen, setCancelDialogOpen] = useState(false);
 
   const run = data?.run;
-  const canCancel =
-    run !== undefined &&
-    (run.state === "running" || run.state === "cancelling");
+  const canCancel = run !== undefined && (run.state === "running" || run.state === "cancelling");
   const isLive = run !== undefined && !isTerminalState(run.state);
 
   const { getMessage } = useSnapshotMessage(projectId);
@@ -82,8 +75,7 @@ export function RunDetailPage() {
   const treeQ = useQuery({
     queryKey: ["run-tree", runId],
     queryFn: () => client.getRunTree(projectId as ProjectId, runId as RunId),
-    enabled:
-      typeof projectId === "string" && typeof runId === "string" && isLive,
+    enabled: typeof projectId === "string" && typeof runId === "string" && isLive,
     refetchInterval: (query) => {
       const root = query.state.data?.tree.root;
       if (root === undefined) return POLL_MS;
@@ -118,9 +110,7 @@ export function RunDetailPage() {
               <span className="text-sm font-normal">Runs</span>
             </Link>
             <span className="text-subtle-foreground text-sm">/</span>
-            <span className="text-base text-foreground">
-              {run?.name ?? runId}
-            </span>
+            <span className="text-base text-foreground">{run?.name ?? runId}</span>
             {run !== undefined && <RunStatusBadge state={run.state} />}
           </span>
         }
@@ -159,10 +149,7 @@ export function RunDetailPage() {
                 </CardHeader>
                 <CardContent>
                   <div className="mb-1">
-                    <CopyButton
-                      text={JSON.stringify(run.args, null, 2)}
-                      label="Copied JSON"
-                    >
+                    <CopyButton text={JSON.stringify(run.args, null, 2)} label="Copied JSON">
                       Copy JSON
                     </CopyButton>
                   </div>
@@ -175,15 +162,10 @@ export function RunDetailPage() {
                 </CardHeader>
                 <CardContent>
                   <dl className="space-y-2 text-sm">
-                    <MetadataRow
-                      label="ID"
-                      value={<CopyableId value={run.id} />}
-                    />
+                    <MetadataRow label="ID" value={<CopyableId value={run.id} />} />
                     <MetadataRow
                       label="Name"
-                      value={
-                        <span className="text-foreground">{run.name}</span>
-                      }
+                      value={<span className="text-foreground">{run.name}</span>}
                     />
                     <MetadataRow
                       label="Agent"
@@ -211,22 +193,14 @@ export function RunDetailPage() {
                         </span>
                       }
                     />
-                    <MetadataRow
-                      label="Started"
-                      value={formatDateTime(run.createdAt)}
-                    />
-                    <MetadataRow
-                      label="Updated"
-                      value={formatDateTime(run.updatedAt)}
-                    />
+                    <MetadataRow label="Started" value={formatDateTime(run.createdAt)} />
+                    <MetadataRow label="Updated" value={formatDateTime(run.updatedAt)} />
                     {run.cancelReason !== null && (
                       <MetadataRow
                         label="Cancel reason"
                         value={
                           <span className="text-foreground">
-                            {run.cancelReason === "user"
-                              ? "user-initiated"
-                              : "child error"}
+                            {run.cancelReason === "user" ? "user-initiated" : "child error"}
                           </span>
                         }
                       />
@@ -250,9 +224,7 @@ export function RunDetailPage() {
                   {escalationsQ.isLoading ? (
                     <p className="text-sm text-subtle-foreground">Loading…</p>
                   ) : runEscalations.length === 0 ? (
-                    <p className="text-sm text-subtle-foreground">
-                      No escalations.
-                    </p>
+                    <p className="text-sm text-subtle-foreground">No escalations.</p>
                   ) : (
                     <ul className="space-y-1">
                       {runEscalations.map((esc) => (
@@ -261,9 +233,7 @@ export function RunDetailPage() {
                             to={`/project/${projectId}/escalations/${esc.id}`}
                             className="flex items-center gap-2"
                           >
-                            <Badge tone={escalationTones[esc.state]}>
-                              {esc.state}
-                            </Badge>
+                            <Badge tone={escalationTones[esc.state]}>{esc.state}</Badge>
                             <span className="flex-1 truncate font-mono text-xs text-foreground">
                               {esc.agentDefId}
                             </span>
@@ -285,17 +255,13 @@ export function RunDetailPage() {
               <div className="flex flex-col gap-4">
                 {isLive && (
                   <div>
-                    <h3 className="mb-2 text-sm font-medium text-foreground">
-                      Delegation tree
-                    </h3>
+                    <h3 className="mb-2 text-sm font-medium text-foreground">Delegation tree</h3>
                     {treeQ.data !== undefined ? (
                       <DelegationTreeGraph root={treeQ.data.tree.root} />
                     ) : treeQ.isLoading ? (
                       <p className="text-sm text-subtle-foreground">Loading…</p>
                     ) : (
-                      <p className="text-sm text-subtle-foreground">
-                        No live delegations.
-                      </p>
+                      <p className="text-sm text-subtle-foreground">No live delegations.</p>
                     )}
                   </div>
                 )}
@@ -307,10 +273,7 @@ export function RunDetailPage() {
                     </CardHeader>
                     <CardContent>
                       <div className="mb-1">
-                        <CopyButton
-                          text={JSON.stringify(run.args, null, 2)}
-                          label="Copied JSON"
-                        >
+                        <CopyButton text={JSON.stringify(run.args, null, 2)} label="Copied JSON">
                           Copy JSON
                         </CopyButton>
                       </div>
@@ -345,14 +308,10 @@ export function RunDetailPage() {
         size="sm"
       >
         <p className="text-sm text-foreground">
-          Are you sure you want to cancel{" "}
-          <code className="font-mono">{run?.name ?? runId}</code>?
+          Are you sure you want to cancel <code className="font-mono">{run?.name ?? runId}</code>?
         </p>
         <DialogFooter>
-          <Button
-            variant="secondary"
-            onClick={() => setCancelDialogOpen(false)}
-          >
+          <Button variant="secondary" onClick={() => setCancelDialogOpen(false)}>
             Keep running
           </Button>
           <Button

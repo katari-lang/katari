@@ -12,8 +12,8 @@
 // go via `ctx.emit` / `ctx.recordError` / `ctx.log`. Internal events go via
 // `ctx.enqueue`.
 
-import type { AskId, CallId } from "../../id.js";
 import type { AskKind } from "../../event.js";
+import type { AskId, CallId } from "../../id.js";
 import type { StepCtx } from "../../step-ctx.js";
 import type { Value } from "../../value.js";
 import type { Thread } from "../types.js";
@@ -38,13 +38,7 @@ export type ThreadOps<T extends Thread> = {
    *
    * Kind-specific data (value, args, mods, reqId) lives on `askKind`.
    */
-  ask(
-    ctx: StepCtx,
-    t: T,
-    askId: AskId,
-    askKind: AskKind,
-    childCallId: CallId,
-  ): void;
+  ask(ctx: StepCtx, t: T, askId: AskId, askKind: AskKind, childCallId: CallId): void;
   /**
    * An askAck addressed to this thread arrived. Typically forwarded via
    * `proxyAskAckToChild`; variants that originate asks (RequestThread)

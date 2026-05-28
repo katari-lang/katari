@@ -1,20 +1,12 @@
 import { useCallback, useMemo, useState } from "react";
 import { SchemaField } from "./SchemaField";
-import {
-  schemaInitialValue,
-  singleType,
-  unionBranches,
-  type JsonSchema,
-} from "./schema-utils";
+import { type JsonSchema, schemaInitialValue, singleType, unionBranches } from "./schema-utils";
 
 type SchemaFormProps = {
   schema: JsonSchema;
   onSubmit: (value: unknown) => void;
   submitLabel?: string;
-  renderActions?: (ctx: {
-    submit: () => void;
-    value: unknown;
-  }) => React.ReactNode;
+  renderActions?: (ctx: { submit: () => void; value: unknown }) => React.ReactNode;
 };
 
 // ---------------------------------------------------------------------------
@@ -23,11 +15,7 @@ type SchemaFormProps = {
 
 /** Validate `value` against `schema`. Returns an array of human-readable
  * error strings (empty = valid). Covers the subset Katari actually emits. */
-function validateSchema(
-  schema: JsonSchema,
-  value: unknown,
-  path = "",
-): string[] {
+function validateSchema(schema: JsonSchema, value: unknown, path = ""): string[] {
   const errors: string[] = [];
   const at = path || "root";
 
@@ -50,9 +38,7 @@ function validateSchema(
   // anyOf / oneOf
   const branches = unionBranches(schema);
   if (branches !== null) {
-    const branchValid = branches.some(
-      (b) => validateSchema(b, value, path).length === 0,
-    );
+    const branchValid = branches.some((b) => validateSchema(b, value, path).length === 0);
     if (!branchValid) {
       errors.push(`${at}: value does not match any branch of the union`);
     }
@@ -109,9 +95,7 @@ function validateSchema(
       const properties = schema.properties ?? {};
       for (const [key, sub] of Object.entries(properties)) {
         if (obj[key] !== undefined) {
-          errors.push(
-            ...validateSchema(sub, obj[key], path ? `${path}.${key}` : key),
-          );
+          errors.push(...validateSchema(sub, obj[key], path ? `${path}.${key}` : key));
         }
       }
       break;
@@ -124,13 +108,7 @@ function validateSchema(
       if (Array.isArray(schema.prefixItems)) {
         for (let i = 0; i < schema.prefixItems.length; i++) {
           if (i < value.length) {
-            errors.push(
-              ...validateSchema(
-                schema.prefixItems[i]!,
-                value[i],
-                `${at}[${i}]`,
-              ),
-            );
+            errors.push(...validateSchema(schema.prefixItems[i]!, value[i], `${at}[${i}]`));
           }
         }
       } else if (schema.items !== undefined) {
@@ -155,11 +133,7 @@ function validateSchema(
  * schema (escalation answers are typed by the request's return type,
  * which is often a primitive).
  */
-export function SchemaForm({
-  schema,
-  onSubmit,
-  renderActions,
-}: SchemaFormProps) {
+export function SchemaForm({ schema, onSubmit, renderActions }: SchemaFormProps) {
   const initial = useMemo<unknown>(() => schemaInitialValue(schema), [schema]);
   const [value, setValue] = useState<unknown>(initial);
   const [validationErrors, setValidationErrors] = useState<string[]>([]);

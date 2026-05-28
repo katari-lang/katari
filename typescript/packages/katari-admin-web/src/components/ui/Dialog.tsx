@@ -1,6 +1,6 @@
 import * as DialogPrimitive from "@radix-ui/react-dialog";
-import type { ReactNode } from "react";
 import { X } from "lucide-react";
+import type { ReactNode } from "react";
 import { cn } from "@/lib/cn";
 
 type DialogProps = {
@@ -70,9 +70,7 @@ export function Dialog({
             </div>
           )}
           {title === undefined && description === undefined && (
-            <DialogPrimitive.Title className="sr-only">
-              Dialog
-            </DialogPrimitive.Title>
+            <DialogPrimitive.Title className="sr-only">Dialog</DialogPrimitive.Title>
           )}
           <div className="p-5">{children}</div>
         </DialogPrimitive.Content>
@@ -82,7 +80,5 @@ export function Dialog({
 }
 
 export function DialogFooter({ children }: { children: ReactNode }) {
-  return (
-    <div className="mt-4 flex items-center justify-end gap-2">{children}</div>
-  );
+  return <div className="mt-4 flex items-center justify-end gap-2">{children}</div>;
 }

@@ -1,24 +1,16 @@
-import { Link, useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { motion } from "framer-motion";
-import {
-  Activity,
-  ArrowRight,
-  BookOpen,
-  MessageCircleQuestion,
-} from "lucide-react";
-import { useApiClient } from "@/contexts/ApiKeyContext";
-import { PageContent, PageHeader } from "@/components/ui/PageHeader";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/Card";
+import { Activity, ArrowRight, BookOpen, MessageCircleQuestion } from "lucide-react";
+import { Link, useParams } from "react-router-dom";
+import type { ProjectId } from "@/api/types";
+import { isTerminalState, RunStatusBadge } from "@/components/domain/RunStatusBadge";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/Card";
 import { MarkdownContent } from "@/components/ui/MarkdownContent";
-import {
-  RunStatusBadge,
-  isTerminalState,
-} from "@/components/domain/RunStatusBadge";
+import { PageContent, PageHeader } from "@/components/ui/PageHeader";
+import { useApiClient } from "@/contexts/ApiKeyContext";
 import { formatDateTime, relativeTime, shortId } from "@/lib/format";
-import type { ProjectId } from "@/api/types";
 
 const POLL_MS = 3_000;
 
@@ -34,13 +26,10 @@ export function DashboardPage() {
 
   const runsQ = useQuery({
     queryKey: ["dashboard-runs", projectId],
-    queryFn: () =>
-      client.listRuns({ projectId: projectId as ProjectId, limit: 200 }),
+    queryFn: () => client.listRuns({ projectId: projectId as ProjectId, limit: 200 }),
     enabled: typeof projectId === "string",
     refetchInterval: (query) =>
-      (query.state.data?.runs ?? []).some((r) => !isTerminalState(r.state))
-        ? POLL_MS
-        : false,
+      (query.state.data?.runs ?? []).some((r) => !isTerminalState(r.state)) ? POLL_MS : false,
   });
 
   const escalationsQ = useQuery({
@@ -108,9 +97,7 @@ export function DashboardPage() {
                 }
               >
                 {liveRuns.length === 0 ? (
-                  <p className="text-sm text-subtle-foreground">
-                    No active runs.
-                  </p>
+                  <p className="text-sm text-subtle-foreground">No active runs.</p>
                 ) : (
                   <ul className="space-y-1.5">
                     {liveRuns.map((r) => (
@@ -147,16 +134,11 @@ export function DashboardPage() {
                 }
               >
                 {openEscalations.length === 0 ? (
-                  <p className="text-sm text-subtle-foreground">
-                    No open escalations.
-                  </p>
+                  <p className="text-sm text-subtle-foreground">No open escalations.</p>
                 ) : (
                   <ul className="space-y-1.5">
                     {openEscalations.map((e) => (
-                      <li
-                        key={e.id}
-                        className=" px-2 py-1.5 text-sm hover:bg-muted"
-                      >
+                      <li key={e.id} className=" px-2 py-1.5 text-sm hover:bg-muted">
                         <Link
                           to={`/project/${projectId}/escalations/${e.id}`}
                           className="flex items-center gap-2"
@@ -181,11 +163,7 @@ export function DashboardPage() {
                     <InfoRow
                       label="Created"
                       value={
-                        <span
-                          title={formatDateTime(
-                            projectQ.data.project.createdAt,
-                          )}
-                        >
+                        <span title={formatDateTime(projectQ.data.project.createdAt)}>
                           {relativeTime(projectQ.data.project.createdAt)}
                         </span>
                       }
@@ -204,11 +182,7 @@ export function DashboardPage() {
                       <InfoRow
                         label="Snapshot age"
                         value={
-                          <span
-                            title={formatDateTime(
-                              snapshotQ.data.snapshot.createdAt,
-                            )}
-                          >
+                          <span title={formatDateTime(snapshotQ.data.snapshot.createdAt)}>
                             {relativeTime(snapshotQ.data.snapshot.createdAt)}
                           </span>
                         }
@@ -235,10 +209,7 @@ export function DashboardPage() {
                 {recentRuns.length === 0 ? (
                   <p className="text-sm text-subtle-foreground">
                     No runs yet — start one from{" "}
-                    <Link
-                      to={`/project/${projectId}/agents`}
-                      className="underline"
-                    >
+                    <Link to={`/project/${projectId}/agents`} className="underline">
                       Agents
                     </Link>
                     .
@@ -312,9 +283,7 @@ function DashboardCard({
         </div>
       </CardHeader>
       <CardContent>{children}</CardContent>
-      {footer !== undefined && (
-        <div className="flex justify-end px-3 py-2">{footer}</div>
-      )}
+      {footer !== undefined && <div className="flex justify-end px-3 py-2">{footer}</div>}
     </Card>
   );
 }
@@ -322,21 +291,13 @@ function DashboardCard({
 function InfoRow({ label, value }: { label: string; value: React.ReactNode }) {
   return (
     <div className="flex items-baseline justify-between gap-3">
-      <dt className="text-xs uppercase tracking-wider text-subtle-foreground">
-        {label}
-      </dt>
+      <dt className="text-xs uppercase tracking-wider text-subtle-foreground">{label}</dt>
       <dd className="text-right text-foreground">{value}</dd>
     </div>
   );
 }
 
-function SkeletonCard({
-  lines,
-  className,
-}: {
-  lines: number;
-  className?: string;
-}) {
+function SkeletonCard({ lines, className }: { lines: number; className?: string }) {
   return (
     <Card className={className}>
       <CardHeader>

@@ -39,9 +39,7 @@ function loadKey(): Buffer {
     throw new SecretCryptoError(`${KEY_ENV} is not valid hex`);
   }
   if (key.length !== 32) {
-    throw new SecretCryptoError(
-      `${KEY_ENV} must decode to 32 bytes (256 bits), got ${key.length}`,
-    );
+    throw new SecretCryptoError(`${KEY_ENV} must decode to 32 bytes (256 bits), got ${key.length}`);
   }
   return key;
 }
@@ -64,16 +62,9 @@ export function resetKeyCacheForTesting(): void {
 export function encryptSecret(plaintext: string): string {
   const iv = randomBytes(IV_LENGTH);
   const cipher = createCipheriv(ALGORITHM, getKey(), iv);
-  const encrypted = Buffer.concat([
-    cipher.update(plaintext, "utf8"),
-    cipher.final(),
-  ]);
+  const encrypted = Buffer.concat([cipher.update(plaintext, "utf8"), cipher.final()]);
   const tag = cipher.getAuthTag();
-  return (
-    iv.toString("base64") +
-    ":" +
-    Buffer.concat([encrypted, tag]).toString("base64")
-  );
+  return `${iv.toString("base64")}:${Buffer.concat([encrypted, tag]).toString("base64")}`;
 }
 
 /** Decrypt the IV-prefixed wire form. Throws on tampering / wrong key. */
@@ -84,24 +75,17 @@ export function decryptSecret(wire: string): string {
   }
   const iv = Buffer.from(wire.slice(0, colon), "base64");
   if (iv.length !== IV_LENGTH) {
-    throw new SecretCryptoError(
-      `decryptSecret: IV must be ${IV_LENGTH} bytes, got ${iv.length}`,
-    );
+    throw new SecretCryptoError(`decryptSecret: IV must be ${IV_LENGTH} bytes, got ${iv.length}`);
   }
   const body = Buffer.from(wire.slice(colon + 1), "base64");
   if (body.length < TAG_LENGTH) {
-    throw new SecretCryptoError(
-      `decryptSecret: ciphertext shorter than auth tag`,
-    );
+    throw new SecretCryptoError(`decryptSecret: ciphertext shorter than auth tag`);
   }
   const tag = body.subarray(body.length - TAG_LENGTH);
   const encrypted = body.subarray(0, body.length - TAG_LENGTH);
   const decipher = createDecipheriv(ALGORITHM, getKey(), iv);
   decipher.setAuthTag(tag);
-  return Buffer.concat([
-    decipher.update(encrypted),
-    decipher.final(),
-  ]).toString("utf8");
+  return Buffer.concat([decipher.update(encrypted), decipher.final()]).toString("utf8");
 }
 
 export class SecretCryptoError extends Error {

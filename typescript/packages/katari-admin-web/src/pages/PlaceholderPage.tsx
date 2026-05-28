@@ -13,9 +13,7 @@ export function PlaceholderPage({ title, hint }: { title: string; hint?: string 
     >
       <Construction className="size-10 text-subtle-foreground" />
       <h1 className="text-2xl font-semibold text-foreground">{title}</h1>
-      {hint !== undefined && (
-        <p className="max-w-md text-sm text-muted-foreground">{hint}</p>
-      )}
+      {hint !== undefined && <p className="max-w-md text-sm text-muted-foreground">{hint}</p>}
     </motion.div>
   );
 }

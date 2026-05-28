@@ -21,19 +21,19 @@
 // Inbound asks (escalates from the peer) are forwarded upward as
 // `ask` events to our parent, mirroring DelegateThread.
 
-import { encodeCoreAgentDefId, type AgentDefId } from "../../../agent-def-id.js";
+import { type AgentDefId, encodeCoreAgentDefId } from "../../../agent-def-id.js";
 import type { AgentBlock, BlockId, QualifiedName } from "../../../ir/types.js";
+import type { Json } from "../../../json.js";
+import { valueToRaw } from "../../../value-codec.js";
 import type { Endpoint } from "../../endpoint.js";
-import { createDelegationId, type AskId, type ClosureId } from "../../id.js";
+import { type AskId, type ClosureId, createDelegationId } from "../../id.js";
 import { validateAgainstSchema } from "../../schema-validate.js";
 import type { StepCtx } from "../../step-ctx.js";
-import { valueToRaw } from "../../../value-codec.js";
 import type { Value } from "../../value.js";
-import type { CallAgentThread, Thread } from "../types.js";
 import { allocAskId, deleteThread } from "../common.js";
+import type { CallAgentThread, Thread } from "../types.js";
 import { defaultAskAckProxy, defaultCancelAckUnexpected } from "./defaults.js";
 import type { ThreadOps } from "./types.js";
-import type { Json } from "../../../json.js";
 
 export const callAgentOps: ThreadOps<CallAgentThread> = {
   create(ctx, t) {
@@ -240,11 +240,7 @@ function resolveTarget(ctx: StepCtx, t: CallAgentThread): Resolved {
   };
 }
 
-function requireAgentBlock(
-  ctx: StepCtx,
-  blockId: BlockId,
-  hint: string,
-): AgentBlock | null {
+function requireAgentBlock(ctx: StepCtx, blockId: BlockId, hint: string): AgentBlock | null {
   const block = ctx.state.irModule.blocks[String(blockId)];
   if (block === undefined) {
     ctx.log("warn", "callAgent: block missing from irModule.blocks", {
@@ -259,10 +255,7 @@ function requireAgentBlock(
   return block.body;
 }
 
-function validateArgs(
-  argsRecord: Record<string, Value>,
-  agentBlock: AgentBlock,
-): string[] {
+function validateArgs(argsRecord: Record<string, Value>, agentBlock: AgentBlock): string[] {
   let schema: Json;
   try {
     schema = JSON.parse(agentBlock.inputSchema) as Json;
@@ -280,11 +273,7 @@ function validateArgs(
   return validateAgainstSchema(rawArgs, schema);
 }
 
-function raiseCallAgentError(
-  ctx: StepCtx,
-  t: CallAgentThread,
-  message: string,
-): void {
+function raiseCallAgentError(ctx: StepCtx, t: CallAgentThread, message: string): void {
   if (t.parent === null || t.parentCallId === null) {
     ctx.log("warn", "engine.callAgent: error at root thread with no parent", {
       threadId: t.id,
@@ -308,4 +297,3 @@ function raiseCallAgentError(
     childCallId: t.parentCallId,
   });
 }
-

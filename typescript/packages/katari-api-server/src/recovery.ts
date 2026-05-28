@@ -6,10 +6,7 @@
 // same behaviour as ApiModule.cancelRun again so the cancel cascade
 // resumes even across a process restart.
 
-import {
-  recoverOnBoot as runtimeRecoverOnBoot,
-  type Logger,
-} from "@katari-lang/runtime";
+import { type Logger, recoverOnBoot as runtimeRecoverOnBoot } from "@katari-lang/runtime";
 import type { ApiServerOrchestrator } from "./orchestrator-adapter.js";
 import type { SnapshotId, Storage } from "./storage/types.js";
 

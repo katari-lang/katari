@@ -1,11 +1,11 @@
-import { useState, useRef, useEffect } from "react";
-import { useNavigate } from "react-router-dom";
 import { LogOut, User } from "lucide-react";
-import { cn } from "@/lib/cn";
+import { useEffect, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { useApiKey } from "@/contexts/ApiKeyContext";
+import { cn } from "@/lib/cn";
 
 export function UserMenu() {
-  const { apiKey, baseUrl, clear } = useApiKey();
+  const { apiKey, clear } = useApiKey();
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   const navigate = useNavigate();
@@ -24,9 +24,7 @@ export function UserMenu() {
   if (apiKey === null) return null;
 
   const masked =
-    apiKey.length <= 8
-      ? "•".repeat(apiKey.length)
-      : `${apiKey.slice(0, 4)}…${apiKey.slice(-4)}`;
+    apiKey.length <= 8 ? "•".repeat(apiKey.length) : `${apiKey.slice(0, 4)}…${apiKey.slice(-4)}`;
 
   return (
     <div ref={ref} className="relative">
@@ -42,15 +40,11 @@ export function UserMenu() {
         className={cn(
           "absolute right-0 mt-2 w-72 border border-border bg-background",
           "origin-top-right transition-all",
-          open
-            ? "scale-100 opacity-100"
-            : "pointer-events-none scale-95 opacity-0",
+          open ? "scale-100 opacity-100" : "pointer-events-none scale-95 opacity-0",
         )}
       >
         <div className="p-3">
-          <div className="text-xs uppercase tracking-wider text-subtle-foreground">
-            API key
-          </div>
+          <div className="text-xs uppercase tracking-wider text-subtle-foreground">API key</div>
           <div className="mt-1 font-mono text-xs text-foreground">{masked}</div>
         </div>
         <button

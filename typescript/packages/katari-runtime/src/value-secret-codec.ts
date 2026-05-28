@@ -13,10 +13,10 @@
 // 'Value' discriminant check ('$envelope' is not a 'kind: "secret"'),
 // so the type system catches "forgot to decrypt" at compile time.
 
-import { decryptSecret, encryptSecret } from "./secret-crypto.js";
-import type { Value } from "./engine/value.js";
 import type { ClosureId } from "./engine/id.js";
+import type { Value } from "./engine/value.js";
 import type { QualifiedName } from "./ir/types.js";
+import { decryptSecret, encryptSecret } from "./secret-crypto.js";
 
 /** Storage-form replacement for the 'secret' Value variant. Carries
  * the AES-GCM-encrypted wire form produced by 'secret-crypto'. */
@@ -173,9 +173,7 @@ function redactPlaceholder(source: string): string {
 }
 
 /** Convenience: encrypt every Value in a `Record<string, Value>` map. */
-export function encryptValueRecord(
-  args: Record<string, Value>,
-): Record<string, EncryptedValue> {
+export function encryptValueRecord(args: Record<string, Value>): Record<string, EncryptedValue> {
   const out: Record<string, EncryptedValue> = {};
   for (const [k, v] of Object.entries(args)) {
     out[k] = encryptValueTree(v);
@@ -184,9 +182,7 @@ export function encryptValueRecord(
 }
 
 /** Convenience: decrypt every EncryptedValue in a record map. */
-export function decryptValueRecord(
-  args: Record<string, EncryptedValue>,
-): Record<string, Value> {
+export function decryptValueRecord(args: Record<string, EncryptedValue>): Record<string, Value> {
   const out: Record<string, Value> = {};
   for (const [k, v] of Object.entries(args)) {
     out[k] = decryptValueTree(v);

@@ -1,13 +1,7 @@
 import { useMemo, useState } from "react";
-import { SchemaField } from "../SchemaField";
-import {
-  branchLabel,
-  isTaggedUnion,
-  schemaInitialValue,
-  taggedCtorOf,
-  type JsonSchema,
-} from "../schema-utils";
 import { SelectMenu } from "@/components/ui/SelectMenu";
+import { SchemaField } from "../SchemaField";
+import { branchLabel, type JsonSchema, schemaInitialValue, taggedCtorOf } from "../schema-utils";
 
 /**
  * Generic union picker. Renders a dropdown of branch labels plus the
@@ -27,14 +21,9 @@ export function UnionField({
   value: unknown;
   onChange: (v: unknown) => void;
 }) {
-  const tagged = useMemo(() => isTaggedUnion(branches), [branches]);
-
   // Initial branch: if value carries a $constructor tag matching one branch,
   // use that. Otherwise default to the first.
-  const initialIdx = useMemo(
-    () => detectBranch(value, branches),
-    [value, branches],
-  );
+  const initialIdx = useMemo(() => detectBranch(value, branches), [value, branches]);
   const [branchIdx, setBranchIdx] = useState(initialIdx);
 
   function selectBranch(idx: number) {
@@ -42,10 +31,7 @@ export function UnionField({
     onChange(schemaInitialValue(branches[idx]!));
   }
 
-  const labels = useMemo(
-    () => branches.map((b, i) => branchLabel(b, i)),
-    [branches],
-  );
+  const labels = useMemo(() => branches.map((b, i) => branchLabel(b, i)), [branches]);
 
   return (
     <div className="space-y-2">
@@ -58,11 +44,7 @@ export function UnionField({
           />
         </div>
       </div>
-      <SchemaField
-        schema={branches[branchIdx]!}
-        value={value}
-        onChange={onChange}
-      />
+      <SchemaField schema={branches[branchIdx]!} value={value} onChange={onChange} />
     </div>
   );
 }

@@ -16,8 +16,8 @@
 //                                             cannot represent -rcN)
 //   - typescript/packages/*/package.json     (every workspace pkg)
 
-import { readFileSync, readdirSync, statSync } from "node:fs";
-import { resolve, dirname, join, relative } from "node:path";
+import { readdirSync, readFileSync, statSync } from "node:fs";
+import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");

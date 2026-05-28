@@ -39,23 +39,20 @@
 // Note: 1 FfiModule = 1 sidecar = 1 snapshot scope. `ffiStore` must be an
 // instance already bound to that scope (= constructed by the storage layer).
 
-import { CORE_ENDPOINT, FFI_ENDPOINT } from "./endpoints.js";
-import type { ExternalEvent } from "../engine/event.js";
-import { createEscalationId, type DelegationId, type EscalationId } from "../engine/id.js";
 import { encodeCoreAgentDefId } from "../agent-def-id.js";
 import type { Endpoint } from "../engine/endpoint.js";
+import type { ExternalEvent } from "../engine/event.js";
+import { createEscalationId, type DelegationId, type EscalationId } from "../engine/id.js";
 import type { Logger } from "../engine/logger.js";
 import type { Value } from "../engine/value.js";
-import { valueFromRaw, valueToRaw } from "../value-codec.js";
-import type { RawValue } from "../value-codec.js";
-import {
-  decryptValueRecord,
-  encryptValueRecord,
-} from "../value-secret-codec.js";
 import type { Module } from "../module.js";
 import type { Sidecar } from "../sidecar/sidecar.js";
 import type { FfiStore } from "../sidecar/store.js";
 import type { ChildToParent } from "../sidecar/types.js";
+import type { RawValue } from "../value-codec.js";
+import { valueFromRaw, valueToRaw } from "../value-codec.js";
+import { decryptValueRecord, encryptValueRecord } from "../value-secret-codec.js";
+import { CORE_ENDPOINT, FFI_ENDPOINT } from "./endpoints.js";
 
 export type FfiModuleOptions = {
   /**
@@ -260,9 +257,13 @@ export class FfiModule implements Module {
       // The delegation was already removed (e.g. ipcDelegateError consumed it
       // before CORE's cancel cascade reached us). Immediately ack so the
       // DelegateThread on the CORE side can finish its cancellation.
-      this.logger.log("debug", "ffi: terminate for unknown delegation — sending immediate terminateAck", {
-        delegationId,
-      });
+      this.logger.log(
+        "debug",
+        "ffi: terminate for unknown delegation — sending immediate terminateAck",
+        {
+          delegationId,
+        },
+      );
       this.onSidecarResponse({
         from: this.endpoint,
         to: event.from,
@@ -281,9 +282,7 @@ export class FfiModule implements Module {
    * completed successfully. Look up the child row from the store and send
    * `ipcChildDelegateAck` to the sidecar of the parent ext call.
    */
-  private async handleInboundChildDelegateAck(
-    event: ExternalEvent,
-  ): Promise<void> {
+  private async handleInboundChildDelegateAck(event: ExternalEvent): Promise<void> {
     if (event.payload.kind !== "delegateAck") return;
     const { delegationId, value } = event.payload;
     const row = await this.store.getDelegation(delegationId);
@@ -313,9 +312,7 @@ export class FfiModule implements Module {
    * `from: CORE, to: FFI, kind: terminateAck` — cancel of ext-spawned
    * child agent completed.
    */
-  private async handleInboundChildTerminateAck(
-    event: ExternalEvent,
-  ): Promise<void> {
+  private async handleInboundChildTerminateAck(event: ExternalEvent): Promise<void> {
     if (event.payload.kind !== "terminateAck") return;
     const { delegationId } = event.payload;
     const row = await this.store.getDelegation(delegationId);
@@ -361,16 +358,12 @@ export class FfiModule implements Module {
       return;
     }
     if (childRow.parentExtDelegationId === null) {
-      this.logger.log(
-        "warn",
-        "ffi: escalate from non-child delegation (dropping)",
-        { delegationId },
-      );
+      this.logger.log("warn", "ffi: escalate from non-child delegation (dropping)", {
+        delegationId,
+      });
       return;
     }
-    const parentRow = await this.store.getDelegation(
-      childRow.parentExtDelegationId,
-    );
+    const parentRow = await this.store.getDelegation(childRow.parentExtDelegationId);
     if (parentRow === null) {
       this.logger.log("debug", "ffi: escalate parent already gone", {
         delegationId,
@@ -551,9 +544,7 @@ export class FfiModule implements Module {
   }
 
   /** Look up the pending delegation, return its peer, and delete the record. */
-  private async consumePendingDelegationPeer(
-    delegationId: DelegationId,
-  ): Promise<Endpoint | null> {
+  private async consumePendingDelegationPeer(delegationId: DelegationId): Promise<Endpoint | null> {
     const row = await this.store.getDelegation(delegationId);
     if (row === null) {
       this.logger.log("debug", "ffi: response for unknown delegationId", {

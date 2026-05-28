@@ -1,6 +1,7 @@
 // Typed wrapper around fetch. Pulls baseUrl / apiKey from ApiKeyContext and
 // raises a typed ApiError on non-2xx so callers can branch on status / code.
 
+import type { RawValue, SchemaBundle } from "@katari-lang/runtime";
 import type {
   AgentWire,
   DelegationTree,
@@ -17,7 +18,6 @@ import type {
   SnapshotId,
   SnapshotSummary,
 } from "./types";
-import type { RawValue, SchemaBundle } from "@katari-lang/runtime";
 
 export class ApiError extends Error {
   status: number;
@@ -88,7 +88,11 @@ export function createApiClient(config: ApiClientConfig) {
 
     // Projects
     listProjects: (params?: { limit?: number; cursor?: string }) =>
-      request<{ projects: Project[]; nextCursor: string | null }>(config, "GET", withQuery("/project", params)),
+      request<{ projects: Project[]; nextCursor: string | null }>(
+        config,
+        "GET",
+        withQuery("/project", params),
+      ),
     getProject: (id: ProjectId) => request<{ project: Project }>(config, "GET", `/project/${id}`),
     getProjectByName: (name: string) =>
       request<{ project: Project }>(config, "GET", `/project/by-name/${encodeURIComponent(name)}`),

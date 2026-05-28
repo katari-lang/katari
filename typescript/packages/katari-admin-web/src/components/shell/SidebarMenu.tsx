@@ -1,15 +1,15 @@
-import { NavLink } from "react-router-dom";
 import {
-  LayoutDashboard,
   Activity,
   Boxes,
-  MessageCircleQuestion,
   KeyRound,
+  LayoutDashboard,
+  MessageCircleQuestion,
   Settings,
 } from "lucide-react";
+import type { ComponentType, SVGProps } from "react";
+import { NavLink } from "react-router-dom";
 import { cn } from "@/lib/cn";
 import { useStickyProjectId } from "@/lib/useStickyProjectId";
-import type { ComponentType, SVGProps } from "react";
 
 type MenuItem = {
   to: string;
@@ -54,11 +54,7 @@ export function SidebarMenu() {
         ) : (
           <ul>
             {projectMenu.map((item) => (
-              <MenuLink
-                key={item.to}
-                item={item}
-                end={item.to === `/project/${projectId}`}
-              />
+              <MenuLink key={item.to} item={item} end={item.to === `/project/${projectId}`} />
             ))}
           </ul>
         )}

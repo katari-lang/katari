@@ -26,8 +26,8 @@
 // (`bump-versions.mjs`) so the source tree's lockfile stays installable
 // before the first publish.
 
-import { readFileSync, writeFileSync, readdirSync, statSync } from "node:fs";
-import { resolve, dirname, join } from "node:path";
+import { readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -67,8 +67,7 @@ for (const p of tsFiles) {
 function stampVersionHs(version) {
   const path = resolve(REPO_ROOT, "haskell/katari/src/Katari/Version.hs");
   const src = readFileSync(path, "utf8");
-  const re =
-    /(katariVersion :: String\nkatariVersion = )"[^"]*"( -- KATARI_VERSION)/;
+  const re = /(katariVersion :: String\nkatariVersion = )"[^"]*"( -- KATARI_VERSION)/;
   if (!re.test(src)) {
     console.error(`error: KATARI_VERSION sentinel not found in ${path}`);
     process.exit(2);

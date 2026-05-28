@@ -1,14 +1,14 @@
-import { useEffect, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useState } from "react";
 import toast from "react-hot-toast";
-import { useApiClient } from "@/contexts/ApiKeyContext";
-import { Dialog, DialogFooter } from "@/components/ui/Dialog";
+import type { EnvEntry } from "@/api/types";
 import { Button } from "@/components/ui/Button";
+import { Dialog, DialogFooter } from "@/components/ui/Dialog";
 import { Input } from "@/components/ui/Input";
-import { TextArea } from "@/components/ui/TextArea";
 import { Label } from "@/components/ui/Label";
 import { Switch } from "@/components/ui/Switch";
-import type { EnvEntry } from "@/api/types";
+import { TextArea } from "@/components/ui/TextArea";
+import { useApiClient } from "@/contexts/ApiKeyContext";
 
 type Props = {
   open: boolean;
@@ -94,9 +94,7 @@ export function EnvUpsertDialog({ open, onClose, editing }: Props) {
             value={value}
             onChange={(e) => setValue(e.target.value)}
             placeholder={
-              editing?.isSecret
-                ? "New secret value (replaces the existing one)"
-                : "value"
+              editing?.isSecret ? "New secret value (replaces the existing one)" : "value"
             }
             rows={4}
             autoComplete="off"
@@ -111,11 +109,7 @@ export function EnvUpsertDialog({ open, onClose, editing }: Props) {
               Reads return <code className="font-mono">{`<redacted>`}</code>.
             </p>
           </div>
-          <Switch
-            checked={isSecret}
-            onChange={setIsSecret}
-            ariaLabel="Mark as secret"
-          />
+          <Switch checked={isSecret} onChange={setIsSecret} ariaLabel="Mark as secret" />
         </div>
         {error !== null && (
           <p className=" border border-danger/30 bg-danger/10 px-3 py-2 text-sm text-danger">

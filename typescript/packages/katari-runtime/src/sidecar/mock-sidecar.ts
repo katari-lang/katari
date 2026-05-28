@@ -9,9 +9,9 @@
 // keyed by its fully-qualified name (e.g. `"main.fetchUrl"`).
 
 import type { Logger } from "../engine/logger.js";
+import type { RawValue } from "../value-codec.js";
 import type { Sidecar } from "./sidecar.js";
 import type { ChildToParent, ParentToChild } from "./types.js";
-import type { RawValue } from "../value-codec.js";
 
 /**
  * Test handler signature. Receives the same shape as a real ext-agent
@@ -32,10 +32,7 @@ export interface MockSidecarOptions {
 
 export class MockSidecar implements Sidecar {
   private readonly handlers = new Map<string, MockAgentHandler>();
-  private readonly inflight = new Map<
-    string,
-    { ctrl: AbortController; terminating: boolean }
-  >();
+  private readonly inflight = new Map<string, { ctrl: AbortController; terminating: boolean }>();
   private cb: ((msg: ChildToParent) => void) | null = null;
   private readonly logger: Logger;
 
@@ -111,10 +108,7 @@ export class MockSidecar implements Sidecar {
    * the subprocess sidecar when its handler vanishes).
    */
   private runHandlerInBackground(
-    msg: Extract<
-      ParentToChild,
-      { type: "ipcDelegate" | "ipcDelegateRestarted" }
-    >,
+    msg: Extract<ParentToChild, { type: "ipcDelegate" | "ipcDelegateRestarted" }>,
     isRestored: boolean,
   ): void {
     this.handleDelegate(msg, isRestored).catch((err: unknown) => {
@@ -126,10 +120,7 @@ export class MockSidecar implements Sidecar {
   }
 
   private async handleDelegate(
-    msg: Extract<
-      ParentToChild,
-      { type: "ipcDelegate" | "ipcDelegateRestarted" }
-    >,
+    msg: Extract<ParentToChild, { type: "ipcDelegate" | "ipcDelegateRestarted" }>,
     isRestored: boolean,
   ): Promise<void> {
     // AgentDefId is documented as a flat dotted-name string on the
@@ -184,4 +175,3 @@ export class MockSidecar implements Sidecar {
     });
   }
 }
-

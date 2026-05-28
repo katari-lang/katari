@@ -1,10 +1,10 @@
-import { useEffect, useRef, useState } from "react";
 import { Plus, Trash2 } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { SchemaField } from "../SchemaField";
-import { AnyField } from "./AnyField";
 import type { JsonSchema } from "../schema-utils";
+import { AnyField } from "./AnyField";
 
 /**
  * Object form: one field per `properties` entry. Const-typed properties
@@ -27,9 +27,7 @@ export function ObjectField({
   value: unknown;
   onChange: (v: unknown) => void;
 }) {
-  const obj = (
-    value !== null && typeof value === "object" ? value : {}
-  ) as Record<string, unknown>;
+  const obj = (value !== null && typeof value === "object" ? value : {}) as Record<string, unknown>;
   const properties = schema.properties ?? {};
   const required = new Set(schema.required ?? []);
   const entries = Object.entries(properties);
@@ -65,12 +63,9 @@ export function ObjectField({
   // Dynamic key-value editor for `record` type: empty `properties` with
   // `additionalProperties` enabled.
   const hasAdditional =
-    schema.additionalProperties !== undefined &&
-    schema.additionalProperties !== false;
+    schema.additionalProperties !== undefined && schema.additionalProperties !== false;
   if (visibleEntries.length === 0 && hasAdditional) {
-    return (
-      <DynamicKeyValueEditor schema={schema} value={obj} onChange={onChange} />
-    );
+    return <DynamicKeyValueEditor schema={schema} value={obj} onChange={onChange} />;
   }
 
   if (visibleEntries.length === 0) {
@@ -186,10 +181,7 @@ function DynamicKeyValueEditor({
               </div>
               <div className="pl-2">
                 {valueSchema === true ? (
-                  <AnyField
-                    value={row.value}
-                    onChange={(v) => changeValue(row.id, v)}
-                  />
+                  <AnyField value={row.value} onChange={(v) => changeValue(row.id, v)} />
                 ) : (
                   <SchemaField
                     schema={valueSchema}

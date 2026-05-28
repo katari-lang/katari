@@ -5,54 +5,52 @@
 // runtime dependencies so that lightweight consumers like `katari-port`
 // can depend on just this package instead of the full runtime.
 
-export type { Json } from "./json.js";
-
-export type { RawValue } from "./raw-value.js";
-
-export {
-  splitQualifiedName,
-  joinQualifiedName,
-} from "./ir.js";
 export type {
-  BlockId,
-  VarId,
-  QualifiedName,
-  IRMetadata,
-  IRModule,
-  NameTable,
-  ExitKind,
-  ContKind,
-  Param,
-  Handler,
-  UserBlock,
   AgentBlock,
+  Arg,
+  ArrayBlock,
+  BindPatternData,
   Block,
+  BlockId,
+  CallData,
+  ContData,
+  ContKind,
   DelegateBlock,
   DelegateTarget,
+  ExitData,
+  ExitKind,
   ExternalDispatch,
-  Arg,
-  LiteralValue,
-  MatchPattern,
-  TypePatternTag,
-  MatchArm,
-  CallData,
-  MakeClosureData,
-  LoadLiteralData,
-  MatchBlock,
   ForBlock,
   HandleBlock,
-  TupleBlock,
-  ArrayBlock,
+  Handler,
+  IRMetadata,
+  IRModule,
+  LiteralValue,
+  LoadLiteralData,
+  MakeClosureData,
+  MatchArm,
+  MatchBlock,
+  MatchPattern,
+  NameTable,
+  Param,
+  QualifiedName,
   RecordBlock,
-  ExitData,
-  ContData,
-  BindPatternData,
   Statement,
+  TupleBlock,
+  TypePatternTag,
+  UserBlock,
+  VarId,
 } from "./ir.js";
+export {
+  joinQualifiedName,
+  splitQualifiedName,
+} from "./ir.js";
+export type { Json } from "./json.js";
+export type { RawValue } from "./raw-value.js";
 
 export type {
-  JsonSchema,
   AgentDefinition,
+  JsonSchema,
   SchemaBundle,
 } from "./schema.js";
 

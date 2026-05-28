@@ -6,9 +6,8 @@
 // with tx + snapshotId bound). The runtime caller never touches
 // snapshotId; it's implicit in the binding.
 
-import type { DelegationStore, DelegationStoreRow } from "@katari-lang/runtime";
-import type { DelegationId } from "@katari-lang/runtime";
-import type { Storage, SnapshotId } from "../storage/types.js";
+import type { DelegationId, DelegationStore, DelegationStoreRow } from "@katari-lang/runtime";
+import type { SnapshotId, Storage } from "../storage/types.js";
 
 export class StorageDelegationStore implements DelegationStore {
   constructor(

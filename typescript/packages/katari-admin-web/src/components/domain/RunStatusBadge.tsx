@@ -1,7 +1,10 @@
-import { Badge } from "@/components/ui/Badge";
 import type { RunState } from "@/api/types";
+import { Badge } from "@/components/ui/Badge";
 
-const labels: Record<RunState, { tone: "info" | "warning" | "neutral" | "success" | "danger"; label: string }> = {
+const labels: Record<
+  RunState,
+  { tone: "info" | "warning" | "neutral" | "success" | "danger"; label: string }
+> = {
   running: { tone: "info", label: "running" },
   cancelling: { tone: "warning", label: "cancelling" },
   cancelled: { tone: "neutral", label: "cancelled" },

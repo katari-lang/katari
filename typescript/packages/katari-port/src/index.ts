@@ -14,16 +14,10 @@
 
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
-import { stdin, stdout, stderr, exit } from "node:process";
+import { exit, stderr, stdin, stdout } from "node:process";
 import { createInterface } from "node:readline";
 import type { ChildToParent, ParentToChild } from "./protocol.js";
-import type {
-  AgentContext,
-  AgentHandler,
-  DelegateOptions,
-  KatariPort,
-  RawValue,
-} from "./types.js";
+import type { AgentContext, AgentHandler, DelegateOptions, KatariPort, RawValue } from "./types.js";
 
 // ─── Registry + inflight state ─────────────────────────────────────────────
 
@@ -88,10 +82,7 @@ declare global {
   var __withModule: (qname: string, body: () => void) => void;
 }
 
-(globalThis as Record<string, unknown>).__withModule = (
-  qname: string,
-  body: () => void,
-): void => {
+(globalThis as Record<string, unknown>).__withModule = (qname: string, body: () => void): void => {
   const prev = currentModuleQname;
   currentModuleQname = qname;
   try {
@@ -118,7 +109,8 @@ const formatConsoleArgs = (args: readonly unknown[]): string =>
     })
     .join(" ");
 
-const redirectConsole = (tag: string): ((...args: unknown[]) => void) =>
+const redirectConsole =
+  (tag: string): ((...args: unknown[]) => void) =>
   (...args: unknown[]) => {
     stderr.write(`[${tag}] ${formatConsoleArgs(args)}\n`);
   };
@@ -141,8 +133,7 @@ const send = (msg: ChildToParent): void => {
 // stack drift" warnings.
 
 const delegationContext = new AsyncLocalStorage<string>();
-const currentDelegationId = (): string | null =>
-  delegationContext.getStore() ?? null;
+const currentDelegationId = (): string | null => delegationContext.getStore() ?? null;
 
 function generateChildDelegationId(): string {
   // Cryptographically random v4 UUID. The delegation id is used as a
@@ -169,14 +160,10 @@ async function delegateChild(
   }
   const parentDelegationId = currentDelegationId();
   if (parentDelegationId === null) {
-    throw new Error(
-      "katari.delegate: must be called from inside a katari.agent handler",
-    );
+    throw new Error("katari.delegate: must be called from inside a katari.agent handler");
   }
   if (!started) {
-    throw new Error(
-      "katari.delegate: sidecar not started — wait for __startSidecar()",
-    );
+    throw new Error("katari.delegate: sidecar not started — wait for __startSidecar()");
   }
   const childId = generateChildDelegationId();
   return new Promise<RawValue>((resolve, reject) => {
@@ -252,10 +239,7 @@ function settlePendingChild(
 }
 
 async function handleDelegate(
-  msg: Extract<
-    ParentToChild,
-    { type: "ipcDelegate" | "ipcDelegateRestarted" }
-  >,
+  msg: Extract<ParentToChild, { type: "ipcDelegate" | "ipcDelegateRestarted" }>,
   isRestored: boolean,
 ): Promise<void> {
   const handler = registry.get(msg.agentDefId);
@@ -393,6 +377,7 @@ export const __startSidecar = (): void => {
 };
 
 export default katari;
+export type { ChildToParent, ParentToChild } from "./protocol.js";
 export type {
   AgentContext,
   AgentHandler,
@@ -400,4 +385,3 @@ export type {
   KatariPort,
   RawValue,
 } from "./types.js";
-export type { ParentToChild, ChildToParent } from "./protocol.js";

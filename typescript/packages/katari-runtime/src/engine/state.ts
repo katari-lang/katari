@@ -17,13 +17,7 @@
 import type { IRModule } from "../ir/types.js";
 import type { ClosureRecord } from "./closure.js";
 import type { Endpoint } from "./endpoint.js";
-import type {
-  ClosureId,
-  DelegationId,
-  EscalationId,
-  ScopeId,
-  ThreadId,
-} from "./id.js";
+import type { ClosureId, DelegationId, EscalationId, ScopeId, ThreadId } from "./id.js";
 import type { Scope } from "./scope.js";
 import type { Thread } from "./thread/types.js";
 

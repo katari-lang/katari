@@ -31,9 +31,7 @@ export type RecoveryOptions = {
   extraRecovery?: () => Promise<void>;
 };
 
-export async function recoverOnBoot(
-  options: RecoveryOptions,
-): Promise<void> {
+export async function recoverOnBoot(options: RecoveryOptions): Promise<void> {
   await options.orchestrator.recoverOnBoot();
   if (options.extraRecovery !== undefined) {
     await options.extraRecovery();

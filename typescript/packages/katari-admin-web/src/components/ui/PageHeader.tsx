@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
-import { cn } from "@/lib/cn";
 import { HelpLink } from "@/components/ui/DocsLink";
+import { cn } from "@/lib/cn";
 
 type PageHeaderProps = {
   title: ReactNode;
@@ -12,13 +12,7 @@ type PageHeaderProps = {
   className?: string;
 };
 
-export function PageHeader({
-  title,
-  description,
-  actions,
-  docs,
-  className,
-}: PageHeaderProps) {
+export function PageHeader({ title, description, actions, docs, className }: PageHeaderProps) {
   return (
     <header
       className={cn(
@@ -31,27 +25,17 @@ export function PageHeader({
           <h1 className="text-2xl font-semibold tracking-tight text-highlight font-display-text">
             {title}
           </h1>
-          {docs !== undefined && (
-            <HelpLink slug={docs.slug} title={docs.title} />
-          )}
+          {docs !== undefined && <HelpLink slug={docs.slug} title={docs.title} />}
         </div>
         {description !== undefined && (
           <p className="text-sm text-muted-foreground">{description}</p>
         )}
       </div>
-      {actions !== undefined && (
-        <div className="flex items-center gap-2">{actions}</div>
-      )}
+      {actions !== undefined && <div className="flex items-center gap-2">{actions}</div>}
     </header>
   );
 }
 
-export function PageContent({
-  children,
-  className,
-}: {
-  children: ReactNode;
-  className?: string;
-}) {
+export function PageContent({ children, className }: { children: ReactNode; className?: string }) {
   return <div className={cn("p-6", className)}>{children}</div>;
 }

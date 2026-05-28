@@ -13,11 +13,11 @@ import {
   CoreModule,
   ENV_ENDPOINT,
   EnvModule,
+  type ExternalEventBus,
   FFI_ENDPOINT,
   FfiModule,
-  Orchestrator,
-  type ExternalEventBus,
   type Logger,
+  Orchestrator,
   type OrchestratorStorage,
   type ParentToChild,
   type ResolvedSnapshot,
@@ -27,14 +27,10 @@ import {
   type TickModulesFactory,
 } from "@katari-lang/runtime";
 import { ApiModule } from "./adapters/api-module.js";
+import { StorageDelegationStore } from "./adapters/delegation-store.js";
 import { StorageEnvStore } from "./adapters/env-store.js";
 import { StorageFfiStore } from "./adapters/ffi-store.js";
-import { StorageDelegationStore } from "./adapters/delegation-store.js";
-import type {
-  ProjectId,
-  SnapshotId,
-  Storage,
-} from "./storage/types.js";
+import type { ProjectId, SnapshotId, Storage } from "./storage/types.js";
 
 // ─── Api-server-specific TickContext ───────────────────────────────────────
 
@@ -62,26 +58,17 @@ export type ApiServerTickContext = TickContext<SnapshotId> & {
  * creates it); the wrapper only adjusts the TypeScript types.
  */
 export class ApiServerOrchestrator {
-  constructor(
-    private readonly inner: Orchestrator<SnapshotId, ProjectId>,
-  ) {}
+  constructor(private readonly inner: Orchestrator<SnapshotId, ProjectId>) {}
 
-  async tick<T>(
-    snapshotId: SnapshotId,
-    fn: (ctx: ApiServerTickContext) => Promise<T>,
-  ): Promise<T> {
-    return this.inner.tick(snapshotId, (ctx) =>
-      fn(ctx as ApiServerTickContext),
-    );
+  async tick<T>(snapshotId: SnapshotId, fn: (ctx: ApiServerTickContext) => Promise<T>): Promise<T> {
+    return this.inner.tick(snapshotId, (ctx) => fn(ctx as ApiServerTickContext));
   }
 
   async tickResolved<T>(
     input: { projectId: ProjectId; snapshotId?: SnapshotId | undefined },
     fn: (ctx: ApiServerTickContext) => Promise<T>,
   ): Promise<T> {
-    return this.inner.tickResolved(input, (ctx) =>
-      fn(ctx as ApiServerTickContext),
-    );
+    return this.inner.tickResolved(input, (ctx) => fn(ctx as ApiServerTickContext));
   }
 
   async recoverOnBoot(): Promise<void> {
@@ -111,9 +98,7 @@ export function createApiServerOrchestrator(
   const adapter = buildStorageAdapter(storage, txRef);
   const factory = buildTickModulesFactory(txRef, sidecarManager);
 
-  const inner = new Orchestrator<SnapshotId, ProjectId>(
-    adapter, factory, sidecarManager, logger,
-  );
+  const inner = new Orchestrator<SnapshotId, ProjectId>(adapter, factory, sidecarManager, logger);
   return new ApiServerOrchestrator(inner);
 }
 

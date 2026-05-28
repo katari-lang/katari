@@ -7,28 +7,16 @@ type Schema = Record<string, unknown>;
  * structured tree with type badges and border-l indentation for
  * nested properties.
  */
-export function SchemaViewer({
-  schema,
-  className,
-}: {
-  schema: unknown;
-  className?: string;
-}) {
+export function SchemaViewer({ schema, className }: { schema: unknown; className?: string }) {
   if (schema === undefined || schema === null) {
     return <span className="text-xs text-subtle-foreground italic">none</span>;
   }
 
   const schemaObj =
-    typeof schema === "object" && !Array.isArray(schema)
-      ? (schema as Schema)
-      : null;
+    typeof schema === "object" && !Array.isArray(schema) ? (schema as Schema) : null;
 
   if (schemaObj === null) {
-    return (
-      <span className="text-xs font-mono text-foreground">
-        {JSON.stringify(schema)}
-      </span>
-    );
+    return <span className="text-xs font-mono text-foreground">{JSON.stringify(schema)}</span>;
   }
 
   return (
@@ -38,26 +26,14 @@ export function SchemaViewer({
   );
 }
 
-function TypeBadge({
-  children,
-  className,
-}: {
-  children: React.ReactNode;
-  className?: string;
-}) {
+function TypeBadge({ children, className }: { children: React.ReactNode; className?: string }) {
   return (
-    <span className={cn("text-xs font-mono text-muted-foreground", className)}>
-      {children}
-    </span>
+    <span className={cn("text-xs font-mono text-muted-foreground", className)}>{children}</span>
   );
 }
 
 function RequiredBadge() {
-  return (
-    <span className="text-xs uppercase tracking-wider text-danger font-medium">
-      required
-    </span>
-  );
+  return <span className="text-xs uppercase tracking-wider text-danger font-medium">required</span>;
 }
 
 function Description({ text }: { text: string }) {
@@ -65,8 +41,7 @@ function Description({ text }: { text: string }) {
 }
 
 function SchemaNode({ schema }: { schema: Schema }) {
-  const description =
-    typeof schema.description === "string" ? schema.description : null;
+  const description = typeof schema.description === "string" ? schema.description : null;
 
   // never: empty anyOf / oneOf
   if (isNeverSchema(schema)) {
@@ -86,9 +61,7 @@ function SchemaNode({ schema }: { schema: Schema }) {
     return (
       <div>
         {description !== null && <Description text={description} />}
-        <span className="text-xs font-medium text-muted-foreground">
-          one of
-        </span>
+        <span className="text-xs font-medium text-muted-foreground">one of</span>
         <div className="border-l border-border mt-2">
           <div className="space-y-2 pl-3">
             {branches.map((branch, index) => (
@@ -106,9 +79,7 @@ function SchemaNode({ schema }: { schema: Schema }) {
   if (Array.isArray(schema.enum) && schema.enum.length > 0) {
     return (
       <div>
-        <span className="text-xs font-medium text-muted-foreground mr-1.5">
-          enum
-        </span>
+        <span className="text-xs font-medium text-muted-foreground mr-1.5">enum</span>
         {description !== null && <Description text={description} />}
         <span className="inline-flex flex-wrap items-center gap-1">
           {(schema.enum as unknown[]).map((value, index) => (
@@ -123,9 +94,7 @@ function SchemaNode({ schema }: { schema: Schema }) {
   if (schema.const !== undefined) {
     return (
       <div>
-        <span className="text-xs font-medium text-muted-foreground mr-1.5">
-          const
-        </span>
+        <span className="text-xs font-medium text-muted-foreground mr-1.5">const</span>
         {description !== null && <Description text={description} />}
         <TypeBadge>{JSON.stringify(schema.const)}</TypeBadge>
       </div>
@@ -160,13 +129,11 @@ function SchemaNode({ schema }: { schema: Schema }) {
           )
         : [];
     const hasAdditional =
-      schema.additionalProperties !== undefined &&
-      schema.additionalProperties !== false;
+      schema.additionalProperties !== undefined && schema.additionalProperties !== false;
     const isRecord = displayProperties.length === 0 && hasAdditional;
     const typeLabel = constructorName ?? (isRecord ? "record" : "object");
     const additionalSchema =
-      typeof schema.additionalProperties === "object" &&
-      schema.additionalProperties !== null
+      typeof schema.additionalProperties === "object" && schema.additionalProperties !== null
         ? (schema.additionalProperties as Schema)
         : null;
 
@@ -180,9 +147,7 @@ function SchemaNode({ schema }: { schema: Schema }) {
               {displayProperties.map(([key, propSchema]) => (
                 <div key={key}>
                   <div className="flex items-baseline gap-1.5">
-                    <span className="text-sm font-medium text-foreground">
-                      {key}
-                    </span>
+                    <span className="text-sm font-medium text-foreground">{key}</span>
                     {requiredSet.has(key) && <RequiredBadge />}
                   </div>
                   <div>
@@ -204,9 +169,7 @@ function SchemaNode({ schema }: { schema: Schema }) {
           </div>
         )}
         {displayProperties.length === 0 && !isRecord && (
-          <span className="text-xs italic text-subtle-foreground ml-1.5">
-            Empty object
-          </span>
+          <span className="text-xs italic text-subtle-foreground ml-1.5">Empty object</span>
         )}
       </div>
     );
@@ -215,14 +178,10 @@ function SchemaNode({ schema }: { schema: Schema }) {
   // array
   if (type === "array") {
     const items =
-      typeof schema.items === "object" &&
-      schema.items !== null &&
-      !Array.isArray(schema.items)
+      typeof schema.items === "object" && schema.items !== null && !Array.isArray(schema.items)
         ? (schema.items as Schema)
         : null;
-    const prefixItems = Array.isArray(schema.prefixItems)
-      ? (schema.prefixItems as Schema[])
-      : null;
+    const prefixItems = Array.isArray(schema.prefixItems) ? (schema.prefixItems as Schema[]) : null;
 
     return (
       <div>

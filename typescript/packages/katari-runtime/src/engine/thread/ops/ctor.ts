@@ -26,7 +26,9 @@ export const ctorOps: ThreadOps<CtorThread> = {
   },
 
   done(_ctx, t, callId: CallId) {
-    throw new Error(`ctor thread received done (callId=${callId}) — no children expected on ${t.id}`);
+    throw new Error(
+      `ctor thread received done (callId=${callId}) — no children expected on ${t.id}`,
+    );
   },
 
   cancel: (ctx, t) => defaultCancel<CtorThread>(ctx, t as CtorThread),

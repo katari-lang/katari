@@ -32,19 +32,13 @@ export function activate(context: vscode.ExtensionContext): void {
     },
   };
 
-  client = new LanguageClient(
-    "katari",
-    "Katari Language Server",
-    serverOptions,
-    clientOptions,
-  );
+  client = new LanguageClient("katari", "Katari Language Server", serverOptions, clientOptions);
 
   // Surface start failures to the user immediately. Without this,
   // a missing `katari-lsp` binary fails silently and only the Output
   // panel hints at the cause — too easy to miss when first installing.
   client.start().catch((err: unknown) => {
-    const message =
-      err instanceof Error ? err.message : String(err);
+    const message = err instanceof Error ? err.message : String(err);
     void vscode.window.showErrorMessage(
       `Katari Language Server failed to start: ${message}. Check 'katari.server.path' (currently '${serverPath}') and make sure katari-lsp is installed.`,
     );

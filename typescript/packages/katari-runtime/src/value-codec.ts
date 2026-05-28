@@ -32,6 +32,7 @@ import type { QualifiedName } from "./ir/types.js";
 // backward compatibility — consumers that import from this module
 // (`@katari-lang/runtime/value-codec`) continue to get the type.
 export type { RawValue } from "@katari-lang/types";
+
 import type { RawValue } from "@katari-lang/types";
 
 /** Discriminator key for the constructor identity of a tagged value. */
@@ -129,9 +130,7 @@ export function valueFromRaw(raw: unknown): Value {
   switch (typeof raw) {
     case "number":
       if (!Number.isFinite(raw)) {
-        throw new RawValueDecodeError(
-          `valueFromRaw: non-finite number ${raw}`,
-        );
+        throw new RawValueDecodeError(`valueFromRaw: non-finite number ${raw}`);
       }
       return { kind: "number", value: raw };
     case "string":
@@ -141,9 +140,7 @@ export function valueFromRaw(raw: unknown): Value {
     case "object":
       break;
     default:
-      throw new RawValueDecodeError(
-        `valueFromRaw: cannot decode '${typeof raw}' value`,
-      );
+      throw new RawValueDecodeError(`valueFromRaw: cannot decode '${typeof raw}' value`);
   }
   if (Array.isArray(raw)) {
     return { kind: "array", elements: raw.map(valueFromRaw) };
@@ -186,16 +183,12 @@ export class RawValueDecodeError extends Error {
 
 function decodeCallable(rawId: unknown): Value {
   if (typeof rawId !== "string") {
-    throw new RawValueDecodeError(
-      `valueFromRaw: $agent must be a string, got ${typeof rawId}`,
-    );
+    throw new RawValueDecodeError(`valueFromRaw: $agent must be a string, got ${typeof rawId}`);
   }
   if (rawId.startsWith("closure:")) {
     const n = Number(rawId.slice("closure:".length));
     if (!Number.isInteger(n) || n < 0) {
-      throw new RawValueDecodeError(
-        `valueFromRaw: malformed closure callable '${rawId}'`,
-      );
+      throw new RawValueDecodeError(`valueFromRaw: malformed closure callable '${rawId}'`);
     }
     return { kind: "closure", closureId: n as ClosureId };
   }
@@ -207,9 +200,7 @@ function decodeCallable(rawId: unknown): Value {
 function assertSafeKeys(obj: Record<string, unknown>): void {
   for (const k of Object.keys(obj)) {
     if (k === "__proto__" || k === "constructor" || k === "prototype") {
-      throw new RawValueDecodeError(
-        `valueFromRaw: forbidden key '${k}'`,
-      );
+      throw new RawValueDecodeError(`valueFromRaw: forbidden key '${k}'`);
     }
   }
 }

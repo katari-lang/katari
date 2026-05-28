@@ -1,26 +1,22 @@
 import { Label } from "@/components/ui/Label";
-import {
-  isNeverSchema,
-  singleType,
-  unionBranches,
-  type JsonSchema,
-} from "./schema-utils";
+import { isNeverSchema, type JsonSchema, singleType, unionBranches } from "./schema-utils";
 
 const METADATA_KEYS = new Set(["description", "title", "default"]);
 
 function isEmptySchema(schema: JsonSchema): boolean {
   return Object.keys(schema).every((k) => METADATA_KEYS.has(k));
 }
-import { StringField } from "./fields/StringField";
-import { NumberField } from "./fields/NumberField";
+
+import { AnyField } from "./fields/AnyField";
+import { ArrayField } from "./fields/ArrayField";
 import { BooleanField } from "./fields/BooleanField";
 import { EnumField } from "./fields/EnumField";
 import { NullField } from "./fields/NullField";
+import { NumberField } from "./fields/NumberField";
 import { ObjectField } from "./fields/ObjectField";
-import { ArrayField } from "./fields/ArrayField";
+import { StringField } from "./fields/StringField";
 import { TupleField } from "./fields/TupleField";
 import { UnionField } from "./fields/UnionField";
-import { AnyField } from "./fields/AnyField";
 import { UnknownField } from "./fields/UnknownField";
 
 type SchemaFieldProps = {
@@ -52,9 +48,7 @@ export function SchemaField({ schema, value, onChange, name, required }: SchemaF
         <div className="flex items-baseline gap-1.5">
           <Label>{label}</Label>
           {required === true && (
-            <span className="text-xs uppercase tracking-wider text-danger">
-              required
-            </span>
+            <span className="text-xs uppercase tracking-wider text-danger">required</span>
           )}
         </div>
       )}
@@ -66,11 +60,7 @@ export function SchemaField({ schema, value, onChange, name, required }: SchemaF
   );
 }
 
-function renderInner(
-  schema: JsonSchema,
-  value: unknown,
-  onChange: (v: unknown) => void,
-) {
+function renderInner(schema: JsonSchema, value: unknown, onChange: (v: unknown) => void) {
   // `unknown` (= empty schema, or schema with only metadata keys like
   // `description` / `title`): no type constraint. Render the AnyField
   // type picker rather than dropping straight to a JSON editor.
@@ -85,8 +75,7 @@ function renderInner(
   if (isNeverSchema(schema)) {
     return (
       <div className="border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-warning">
-        This field's type is <code className="font-mono">never</code> — no
-        value can satisfy it.
+        This field's type is <code className="font-mono">never</code> — no value can satisfy it.
       </div>
     );
   }

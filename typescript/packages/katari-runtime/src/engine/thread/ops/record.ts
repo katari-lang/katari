@@ -58,19 +58,12 @@ function getBlock(ctx: StepCtx, blockId: BlockId): RecordBlock {
     throw new Error(`engine.record: block ${blockId} not found`);
   }
   if (b.kind !== "blockRecord") {
-    throw new Error(
-      `engine.record: block ${blockId} is not a record (got ${b.kind})`,
-    );
+    throw new Error(`engine.record: block ${blockId} is not a record (got ${b.kind})`);
   }
   return b.body;
 }
 
-function spawnEntry(
-  ctx: StepCtx,
-  t: RecordThread,
-  index: number,
-  blockId: BlockId,
-): void {
+function spawnEntry(ctx: StepCtx, t: RecordThread, index: number, blockId: BlockId): void {
   spawnChild(ctx, {
     parentId: t.id,
     parentCallId: index as CallId,

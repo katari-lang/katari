@@ -38,10 +38,7 @@ const DEFAULT_PUBLIC_PREFIXES: string[] = [
  * empty / undefined is rejected as a programming error since the
  * boot path is responsible for filtering those out.
  */
-export function buildAuthMiddleware(
-  apiKey: string,
-  options: AuthOptions = {},
-): MiddlewareHandler {
+export function buildAuthMiddleware(apiKey: string, options: AuthOptions = {}): MiddlewareHandler {
   if (apiKey === "") {
     throw new Error(
       "buildAuthMiddleware: apiKey must be a non-empty string; bin.ts should have rejected an unset KATARI_API_KEY before reaching this point",

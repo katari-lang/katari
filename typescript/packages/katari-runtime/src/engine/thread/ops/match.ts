@@ -8,17 +8,12 @@
 //
 // onChildDone: forward the arm body's value as our own done.
 
-import type { CallId } from "../../id.js";
 import type { Block, BlockId, MatchBlock } from "../../../ir/types.js";
+import type { CallId } from "../../id.js";
 import { tryMatch } from "../../pattern.js";
 import { spawnChild } from "../../spawn.js";
 import type { StepCtx } from "../../step-ctx.js";
-import {
-  commonRemoveChild,
-  emitThrowEscalate,
-  lookupValue,
-  setValueInScope,
-} from "../common.js";
+import { commonRemoveChild, emitThrowEscalate, lookupValue, setValueInScope } from "../common.js";
 import type { MatchThread, Thread } from "../types.js";
 import {
   defaultAskAckProxy,
@@ -90,4 +85,3 @@ function spawnArm(ctx: StepCtx, t: MatchThread, blockId: BlockId): void {
     scopeMode: { mode: "inline", parentScopeId: t.scopeId },
   });
 }
-

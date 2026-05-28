@@ -15,8 +15,8 @@
 // lets each impl declare the type it needs, and the bus handles it as
 // `Module<unknown>` (= safe because dispatch doesn't inspect tx contents).
 
-import type { ExternalEvent } from "./engine/event.js";
 import type { Endpoint } from "./engine/endpoint.js";
+import type { ExternalEvent } from "./engine/event.js";
 
 export interface Module<Tx = unknown> {
   /** Self-identifier. The bus routes by `event.to === endpoint`. */

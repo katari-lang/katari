@@ -14,16 +14,9 @@
 // the outbound `delegate` event and waits for `delegateAck`. UserThread
 // itself stays uniform — no special agent-call statement variant.
 
-import type {
-  Block,
-  BlockId,
-  CallData,
-  Statement,
-  UserBlock,
-  VarId,
-} from "../../../ir/types.js";
-import type { CallId, ScopeId, } from "../../id.js";
+import type { Block, BlockId, CallData, Statement, UserBlock, VarId } from "../../../ir/types.js";
 import type { AskKind, ModMap } from "../../event.js";
+import type { CallId, ScopeId } from "../../id.js";
 import { tryMatch } from "../../pattern.js";
 import { spawnChild } from "../../spawn.js";
 import type { StepCtx } from "../../step-ctx.js";
@@ -97,11 +90,7 @@ function getUserBlock(ctx: StepCtx, blockId: BlockId): UserBlock {
   return b.body;
 }
 
-function runStatements(
-  ctx: StepCtx,
-  t: UserThread,
-  block: UserBlock,
-): void {
+function runStatements(ctx: StepCtx, t: UserThread, block: UserBlock): void {
   const statements = block.statements;
 
   while (t.pc < statements.length) {
@@ -122,9 +111,8 @@ function runStatements(
   // UserThreads are never roots in the new design (AgentThread always
   // wraps); if parent is null, the test scaffolding spawned us directly
   // and we just disappear.
-  const value = block.trailing !== undefined
-    ? lookupValue(ctx, t.scopeId, block.trailing)
-    : NULL_VALUE;
+  const value =
+    block.trailing !== undefined ? lookupValue(ctx, t.scopeId, block.trailing) : NULL_VALUE;
   if (t.parent !== null && t.parentCallId !== null) {
     ctx.enqueue({
       kind: "done",
@@ -143,11 +131,7 @@ function runStatements(
 
 type StatementOutcome = "advance" | "wait";
 
-function handleStatement(
-  ctx: StepCtx,
-  t: UserThread,
-  stmt: Statement,
-): StatementOutcome {
+function handleStatement(ctx: StepCtx, t: UserThread, stmt: Statement): StatementOutcome {
   switch (stmt.kind) {
     case "statementCall": {
       const callId = t.pc as CallId;
@@ -202,9 +186,8 @@ function handleStatement(
       return "wait";
     }
     case "statementCont": {
-      const value = stmt.body.value !== undefined
-        ? lookupValue(ctx, t.scopeId, stmt.body.value)
-        : NULL_VALUE;
+      const value =
+        stmt.body.value !== undefined ? lookupValue(ctx, t.scopeId, stmt.body.value) : NULL_VALUE;
       const mods = resolveModifiers(ctx, t.scopeId, stmt.body.modifiers);
       const askKind = contKindToAsk(stmt.body.contKind, value, mods);
       emitAskUpwards(ctx, t, askKind);
@@ -220,12 +203,7 @@ function handleStatement(
   }
 }
 
-function pushCallEvent(
-  ctx: StepCtx,
-  t: UserThread,
-  callId: CallId,
-  call: CallData,
-): void {
+function pushCallEvent(ctx: StepCtx, t: UserThread, callId: CallId, call: CallData): void {
   const args = resolveArgs(ctx, t.scopeId, call);
   const block = ctx.state.irModule.blocks[String(call.block)] as Block | undefined;
   if (block === undefined) {
@@ -262,11 +240,7 @@ function isStructuralBlock(kind: Block["kind"]): boolean {
   }
 }
 
-function resolveArgs(
-  ctx: StepCtx,
-  scopeId: ScopeId,
-  call: CallData,
-): Record<string, Value> {
+function resolveArgs(ctx: StepCtx, scopeId: ScopeId, call: CallData): Record<string, Value> {
   const out: Record<string, Value> = {};
   for (const arg of call.arguments) {
     out[arg.label] = lookupValue(ctx, scopeId, arg.var);
@@ -274,11 +248,7 @@ function resolveArgs(
   return out;
 }
 
-function resolveModifiers(
-  ctx: StepCtx,
-  scopeId: ScopeId,
-  mods: [VarId, VarId][],
-): ModMap {
+function resolveModifiers(ctx: StepCtx, scopeId: ScopeId, mods: [VarId, VarId][]): ModMap {
   const out: ModMap = {};
   for (const [target, source] of mods) {
     out[target] = lookupValue(ctx, scopeId, source);
@@ -286,10 +256,7 @@ function resolveModifiers(
   return out;
 }
 
-function exitKindToAsk(
-  kind: import("../../../ir/types.js").ExitKind,
-  value: Value,
-): AskKind {
+function exitKindToAsk(kind: import("../../../ir/types.js").ExitKind, value: Value): AskKind {
   switch (kind) {
     case "exitKindReturn":
       return { kind: "return", value };
@@ -313,11 +280,7 @@ function contKindToAsk(
   }
 }
 
-function emitAskUpwards(
-  ctx: StepCtx,
-  t: UserThread,
-  askKind: AskKind,
-): void {
+function emitAskUpwards(ctx: StepCtx, t: UserThread, askKind: AskKind): void {
   if (t.parent === null) {
     ctx.log("warn", "engine.user: ask issued from a parentless UserThread; ignoring", {
       threadId: t.id,
@@ -334,4 +297,3 @@ function emitAskUpwards(
     childCallId: t.parentCallId!,
   });
 }
-

@@ -11,17 +11,17 @@
 // The bundle imports katari-port (= IPC client) and registers
 // `katari.agent("extGreet", ...)` from main.ts.
 
-import { afterEach, describe, expect, it } from "vitest";
 import { resolve } from "node:path";
 import { bundleSidecar } from "@katari-lang/bundle";
 import {
-  loadSubprocessSidecar,
-  noopLogger,
   type AgentDefId,
   type ChildToParent,
   type DelegationId,
+  loadSubprocessSidecar,
+  noopLogger,
   type Sidecar,
 } from "@katari-lang/runtime";
+import { afterEach, describe, expect, it } from "vitest";
 
 const SAMPLE_ROOT = resolve(__dirname, "../samples/11-ext-agent/src");
 const CRON_SAMPLE_ROOT = resolve(__dirname, "../samples/12-ext-cron/src");
@@ -64,26 +64,21 @@ describe("SubprocessSidecar — real Node subprocess", () => {
       delegationId: "delegation-1" as DelegationId,
       // The bundle's __withModule plugin prefixes the agent name with
       // the file's module qname; ext_agent.ts → "ext_agent".
-      agentDefId: "ext_agent.extGreet" as unknown as Parameters<
-        Sidecar["send"]
-      >[0] extends { agentDefId: infer A }
+      agentDefId: "ext_agent.extGreet" as unknown as Parameters<Sidecar["send"]>[0] extends {
+        agentDefId: infer A;
+      }
         ? A
         : never,
       args: { name: "world" },
     });
 
     const deadline = Date.now() + 5000;
-    while (
-      Date.now() < deadline &&
-      !received.some((m) => m.type === "ipcDelegateAck")
-    ) {
+    while (Date.now() < deadline && !received.some((m) => m.type === "ipcDelegateAck")) {
       await new Promise((r) => setTimeout(r, 20));
     }
     const ack = received.find((m) => m.type === "ipcDelegateAck");
     if (ack === undefined || ack.type !== "ipcDelegateAck") {
-      throw new Error(
-        `no ipcDelegateAck within timeout (received: ${JSON.stringify(received)})`,
-      );
+      throw new Error(`no ipcDelegateAck within timeout (received: ${JSON.stringify(received)})`);
     }
     expect(ack.value).toBe("hello, world");
   });
@@ -118,17 +113,12 @@ describe("SubprocessSidecar — real Node subprocess", () => {
 
     // Wait for the ext to emit ipcChildDelegate.
     const childDeadline = Date.now() + 5000;
-    while (
-      Date.now() < childDeadline &&
-      !received.some((m) => m.type === "ipcChildDelegate")
-    ) {
+    while (Date.now() < childDeadline && !received.some((m) => m.type === "ipcChildDelegate")) {
       await new Promise((r) => setTimeout(r, 20));
     }
     const childDelegate = received.find((m) => m.type === "ipcChildDelegate");
     if (childDelegate === undefined || childDelegate.type !== "ipcChildDelegate") {
-      throw new Error(
-        `no ipcChildDelegate within timeout (received: ${JSON.stringify(received)})`,
-      );
+      throw new Error(`no ipcChildDelegate within timeout (received: ${JSON.stringify(received)})`);
     }
     expect(childDelegate.agentDefId).toBe("ext_cron.notify_scheduled");
     expect(childDelegate.parentDelegationId).toBe("cron-delegation-1");
@@ -147,19 +137,12 @@ describe("SubprocessSidecar — real Node subprocess", () => {
     });
 
     const termDeadline = Date.now() + 5000;
-    while (
-      Date.now() < termDeadline &&
-      !received.some((m) => m.type === "ipcTerminateAck")
-    ) {
+    while (Date.now() < termDeadline && !received.some((m) => m.type === "ipcTerminateAck")) {
       await new Promise((r) => setTimeout(r, 20));
     }
-    const terminateAck = received.find(
-      (m) => m.type === "ipcTerminateAck",
-    );
+    const terminateAck = received.find((m) => m.type === "ipcTerminateAck");
     if (terminateAck === undefined) {
-      throw new Error(
-        `no ipcTerminateAck within timeout (received: ${JSON.stringify(received)})`,
-      );
+      throw new Error(`no ipcTerminateAck within timeout (received: ${JSON.stringify(received)})`);
     }
     expect(terminateAck.type).toBe("ipcTerminateAck");
   });

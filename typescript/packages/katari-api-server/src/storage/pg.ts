@@ -7,8 +7,6 @@
 // orchestrator holds the snapshot's lock during one request's engine
 // work and releases on commit.
 
-import postgres from "postgres";
-import { v7 as uuidv7 } from "uuid";
 import type {
   AgentDefId,
   DelegationId,
@@ -19,6 +17,9 @@ import type {
   Json,
   SchemaBundle,
 } from "@katari-lang/runtime";
+import postgres from "postgres";
+import { v7 as uuidv7 } from "uuid";
+import { decodeCursor, encodeCursor } from "../cursor.js";
 import type {
   CancelReason,
   DelegationRepo,
@@ -50,7 +51,6 @@ import type {
   Storage,
   UpsertProjectInput,
 } from "./types.js";
-import { decodeCursor, encodeCursor } from "../cursor.js";
 
 type Sql = ReturnType<typeof postgres>;
 
@@ -103,17 +103,10 @@ function _clampOffset(requested: number | undefined): number {
  * clause. Used by every list() that has 4+ optional filter dimensions —
  * the alternative (one big if/else tree) was unmaintainable.
  */
-function composeWhere(
-  sql: Sql,
-  pieces: ReadonlyArray<ReturnType<Sql> | null>,
-): ReturnType<Sql> {
-  const kept = pieces.filter(
-    (p): p is NonNullable<typeof p> => p !== null,
-  );
+function composeWhere(sql: Sql, pieces: ReadonlyArray<ReturnType<Sql> | null>): ReturnType<Sql> {
+  const kept = pieces.filter((p): p is NonNullable<typeof p> => p !== null);
   if (kept.length === 0) return sql``;
-  return sql`WHERE ${kept.reduce((acc, p, i) =>
-    i === 0 ? p : sql`${acc} AND ${p}`,
-  )}`;
+  return sql`WHERE ${kept.reduce((acc, p, i) => (i === 0 ? p : sql`${acc} AND ${p}`))}`;
 }
 
 // ─── Project ───────────────────────────────────────────────────────────────
@@ -168,15 +161,16 @@ class PgProjectRepo implements ProjectRepo {
     const limit = clampLimit(options?.limit);
     const cursor = options?.cursor !== undefined ? decodeCursor(options.cursor) : null;
     const fetchCount = limit + 1;
-    const rows = cursor !== null
-      ? await this.sql<DbProjectRow[]>`
+    const rows =
+      cursor !== null
+        ? await this.sql<DbProjectRow[]>`
           SELECT id, name, description, readme, created_at
           FROM projects
           WHERE (created_at, id) < (${cursor.createdAt}, ${cursor.id})
           ORDER BY created_at DESC, id DESC
           LIMIT ${fetchCount}
         `
-      : await this.sql<DbProjectRow[]>`
+        : await this.sql<DbProjectRow[]>`
           SELECT id, name, description, readme, created_at
           FROM projects
           ORDER BY created_at DESC, id DESC
@@ -187,9 +181,7 @@ class PgProjectRepo implements ProjectRepo {
     const last = items[items.length - 1];
     return {
       items,
-      nextCursor: hasMore && last !== undefined
-        ? encodeCursor(last.createdAt, last.id)
-        : null,
+      nextCursor: hasMore && last !== undefined ? encodeCursor(last.createdAt, last.id) : null,
     };
   }
 
@@ -212,8 +204,7 @@ class PgProjectRepo implements ProjectRepo {
   }
 
   async delete(id: ProjectId): Promise<boolean> {
-    const result =
-      await this.sql`DELETE FROM projects WHERE id = ${id}`;
+    const result = await this.sql`DELETE FROM projects WHERE id = ${id}`;
     return result.count > 0;
   }
 }
@@ -247,9 +238,7 @@ class PgSnapshotRepo implements SnapshotRepo {
         ${id},
         ${input.projectId},
         ${this.sql.json(asJson(input.irModule))},
-        ${input.sidecarBundle === null
-          ? null
-          : this.sql.json(asJson(input.sidecarBundle))},
+        ${input.sidecarBundle === null ? null : this.sql.json(asJson(input.sidecarBundle))},
         ${this.sql.json(asJson(input.schemaBundle))},
         ${input.message},
         now()
@@ -284,21 +273,18 @@ class PgSnapshotRepo implements SnapshotRepo {
     const cursor = filter?.cursor !== undefined ? decodeCursor(filter.cursor) : null;
     const fetchCount = limit + 1;
     const sql = this.sql;
-    const projectFilter = filter?.projectId !== undefined
-      ? sql`project_id = ${filter.projectId}`
-      : null;
-    const cursorFilter = cursor !== null
-      ? sql`(created_at, id) < (${cursor.createdAt}, ${cursor.id})`
-      : null;
+    const projectFilter =
+      filter?.projectId !== undefined ? sql`project_id = ${filter.projectId}` : null;
+    const cursorFilter =
+      cursor !== null ? sql`(created_at, id) < (${cursor.createdAt}, ${cursor.id})` : null;
     const pieces = [projectFilter, cursorFilter].filter(
       (p): p is NonNullable<typeof p> => p !== null,
     );
-    const whereClause = pieces.length === 0
-      ? sql``
-      : sql`WHERE ${pieces.reduce((acc, p, i) => i === 0 ? p : sql`${acc} AND ${p}`)}`;
-    const rows = await sql<
-      { id: string; project_id: string; message: string; created_at: Date }[]
-    >`
+    const whereClause =
+      pieces.length === 0
+        ? sql``
+        : sql`WHERE ${pieces.reduce((acc, p, i) => (i === 0 ? p : sql`${acc} AND ${p}`))}`;
+    const rows = await sql<{ id: string; project_id: string; message: string; created_at: Date }[]>`
       SELECT id, project_id, message, created_at
       FROM snapshots
       ${whereClause}
@@ -315,9 +301,7 @@ class PgSnapshotRepo implements SnapshotRepo {
     const last = items[items.length - 1];
     return {
       items,
-      nextCursor: hasMore && last !== undefined
-        ? encodeCursor(last.createdAt, last.id)
-        : null,
+      nextCursor: hasMore && last !== undefined ? encodeCursor(last.createdAt, last.id) : null,
     };
   }
 
@@ -332,7 +316,7 @@ class PgSnapshotRepo implements SnapshotRepo {
       ORDER BY created_at DESC, id DESC
       LIMIT 1
     `;
-    return rows[0]?.id as SnapshotId | undefined ?? null;
+    return (rows[0]?.id as SnapshotId | undefined) ?? null;
   }
 
   async delete(id: SnapshotId): Promise<boolean> {
@@ -346,10 +330,7 @@ class PgSnapshotRepo implements SnapshotRepo {
 class PgEngineCheckpointRepo implements EngineCheckpointRepo {
   constructor(private readonly sql: Sql) {}
 
-  async upsert(
-    snapshotId: SnapshotId,
-    checkpoint: EngineCheckpoint,
-  ): Promise<void> {
+  async upsert(snapshotId: SnapshotId, checkpoint: EngineCheckpoint): Promise<void> {
     await this.sql`
       INSERT INTO engine_checkpoints (snapshot_id, checkpoint, updated_at)
       VALUES (${snapshotId}, ${this.sql.json(asJson(checkpoint))}, now())
@@ -374,9 +355,9 @@ class PgEngineCheckpointRepo implements EngineCheckpointRepo {
     // yet" so the engine boots a fresh state and overwrites it on
     // persist.
     if (
-      typeof checkpoint === "object"
-      && !Array.isArray(checkpoint)
-      && (checkpoint as { schemaVersion?: unknown }).schemaVersion === undefined
+      typeof checkpoint === "object" &&
+      !Array.isArray(checkpoint) &&
+      (checkpoint as { schemaVersion?: unknown }).schemaVersion === undefined
     ) {
       return null;
     }
@@ -409,9 +390,7 @@ function dbToDelegationRow(row: DbDelegationRow): DelegationRow {
     id: row.id as DelegationId,
     rootDelegationId: row.root_delegation_id as DelegationId,
     parentDelegationId:
-      row.parent_delegation_id === null
-        ? null
-        : (row.parent_delegation_id as DelegationId),
+      row.parent_delegation_id === null ? null : (row.parent_delegation_id as DelegationId),
     snapshotId: row.snapshot_id as SnapshotId,
     callerEndpoint: row.caller_endpoint,
     ownerEndpoint: row.owner_endpoint,
@@ -467,16 +446,10 @@ class PgDelegationRepo implements DelegationRepo {
     const fetchCount = limit + 1;
     const sql = this.sql;
     const joinClause =
-      filter?.projectId !== undefined
-        ? sql`JOIN snapshots s ON s.id = d.snapshot_id`
-        : sql``;
+      filter?.projectId !== undefined ? sql`JOIN snapshots s ON s.id = d.snapshot_id` : sql``;
     const whereClause = composeWhere(sql, [
-      filter?.projectId !== undefined
-        ? sql`s.project_id = ${filter.projectId}`
-        : null,
-      filter?.snapshotId !== undefined
-        ? sql`d.snapshot_id = ${filter.snapshotId}`
-        : null,
+      filter?.projectId !== undefined ? sql`s.project_id = ${filter.projectId}` : null,
+      filter?.snapshotId !== undefined ? sql`d.snapshot_id = ${filter.snapshotId}` : null,
       filter?.callerEndpoint !== undefined
         ? sql`d.caller_endpoint = ${filter.callerEndpoint}`
         : null,
@@ -487,9 +460,7 @@ class PgDelegationRepo implements DelegationRepo {
         ? sql`d.parent_delegation_id = ${filter.parentDelegationId}`
         : null,
       filter?.state !== undefined ? sql`d.state = ${filter.state}` : null,
-      cursor !== null
-        ? sql`(d.created_at, d.id) > (${cursor.createdAt}, ${cursor.id})`
-        : null,
+      cursor !== null ? sql`(d.created_at, d.id) > (${cursor.createdAt}, ${cursor.id})` : null,
     ]);
     const rows = await sql<DbDelegationRow[]>`
       SELECT d.id, d.root_delegation_id, d.parent_delegation_id, d.snapshot_id,
@@ -505,9 +476,7 @@ class PgDelegationRepo implements DelegationRepo {
     const last = items[items.length - 1];
     return {
       items,
-      nextCursor: hasMore && last !== undefined
-        ? encodeCursor(last.createdAt, last.id)
-        : null,
+      nextCursor: hasMore && last !== undefined ? encodeCursor(last.createdAt, last.id) : null,
     };
   }
 
@@ -516,21 +485,20 @@ class PgDelegationRepo implements DelegationRepo {
     state: DelegationState,
     options?: { expectedState?: DelegationState },
   ): Promise<boolean> {
-    const result = options?.expectedState !== undefined
-      ? await this.sql`
+    const result =
+      options?.expectedState !== undefined
+        ? await this.sql`
           UPDATE delegations SET state = ${state}, updated_at = now()
           WHERE id = ${id} AND state = ${options.expectedState}
         `
-      : await this.sql`
+        : await this.sql`
           UPDATE delegations SET state = ${state}, updated_at = now()
           WHERE id = ${id}
         `;
     return result.count > 0;
   }
 
-  async markAllUnderRootAsCancelling(
-    rootDelegationId: DelegationId,
-  ): Promise<void> {
+  async markAllUnderRootAsCancelling(rootDelegationId: DelegationId): Promise<void> {
     await this.sql`
       UPDATE delegations
       SET state = 'cancelling', updated_at = now()
@@ -635,16 +603,10 @@ class PgEscalationRepo implements EscalationRepo {
     const fetchCount = limit + 1;
     const sql = this.sql;
     const joinClause =
-      filter?.projectId !== undefined
-        ? sql`JOIN snapshots s ON s.id = e.snapshot_id`
-        : sql``;
+      filter?.projectId !== undefined ? sql`JOIN snapshots s ON s.id = e.snapshot_id` : sql``;
     const whereClause = composeWhere(sql, [
-      filter?.projectId !== undefined
-        ? sql`s.project_id = ${filter.projectId}`
-        : null,
-      filter?.snapshotId !== undefined
-        ? sql`e.snapshot_id = ${filter.snapshotId}`
-        : null,
+      filter?.projectId !== undefined ? sql`s.project_id = ${filter.projectId}` : null,
+      filter?.snapshotId !== undefined ? sql`e.snapshot_id = ${filter.snapshotId}` : null,
       filter?.callerEndpoint !== undefined
         ? sql`e.caller_endpoint = ${filter.callerEndpoint}`
         : null,
@@ -654,13 +616,9 @@ class PgEscalationRepo implements EscalationRepo {
       filter?.rootDelegationId !== undefined
         ? sql`e.root_delegation_id = ${filter.rootDelegationId}`
         : null,
-      filter?.delegationId !== undefined
-        ? sql`e.delegation_id = ${filter.delegationId}`
-        : null,
+      filter?.delegationId !== undefined ? sql`e.delegation_id = ${filter.delegationId}` : null,
       filter?.state !== undefined ? sql`e.state = ${filter.state}` : null,
-      cursor !== null
-        ? sql`(e.created_at, e.id) < (${cursor.createdAt}, ${cursor.id})`
-        : null,
+      cursor !== null ? sql`(e.created_at, e.id) < (${cursor.createdAt}, ${cursor.id})` : null,
     ]);
     const rows = await sql<DbEscalationRow[]>`
       SELECT e.id, e.delegation_id, e.root_delegation_id, e.snapshot_id,
@@ -675,16 +633,11 @@ class PgEscalationRepo implements EscalationRepo {
     const last = items[items.length - 1];
     return {
       items,
-      nextCursor: hasMore && last !== undefined
-        ? encodeCursor(last.createdAt, last.id)
-        : null,
+      nextCursor: hasMore && last !== undefined ? encodeCursor(last.createdAt, last.id) : null,
     };
   }
 
-  async setAnswered(
-    id: EscalationId,
-    value: EncryptedValue,
-  ): Promise<boolean> {
+  async setAnswered(id: EscalationId, value: EncryptedValue): Promise<boolean> {
     const result = await this.sql`
       UPDATE escalations
       SET state = 'answered', value = ${this.sql.json(asJson(value))}
@@ -693,9 +646,7 @@ class PgEscalationRepo implements EscalationRepo {
     return result.count > 0;
   }
 
-  async cancelAllUnderRoot(
-    rootDelegationId: DelegationId,
-  ): Promise<void> {
+  async cancelAllUnderRoot(rootDelegationId: DelegationId): Promise<void> {
     await this.sql`
       UPDATE escalations
       SET state = 'cancelled'
@@ -739,8 +690,7 @@ function dbToRunsAuditRow(row: DbRunsAuditRow): RunsAuditRow {
     errorMessage: row.error_message === null ? undefined : row.error_message,
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),
-    completedAt:
-      row.completed_at === null ? undefined : row.completed_at.toISOString(),
+    completedAt: row.completed_at === null ? undefined : row.completed_at.toISOString(),
   };
 }
 
@@ -784,20 +734,12 @@ class PgRunsAuditRepo implements RunsAuditRepo {
     const fetchCount = limit + 1;
     const sql = this.sql;
     const joinClause =
-      filter?.projectId !== undefined
-        ? sql`JOIN snapshots s ON s.id = r.snapshot_id`
-        : sql``;
+      filter?.projectId !== undefined ? sql`JOIN snapshots s ON s.id = r.snapshot_id` : sql``;
     const whereClause = composeWhere(sql, [
-      filter?.projectId !== undefined
-        ? sql`s.project_id = ${filter.projectId}`
-        : null,
-      filter?.snapshotId !== undefined
-        ? sql`r.snapshot_id = ${filter.snapshotId}`
-        : null,
+      filter?.projectId !== undefined ? sql`s.project_id = ${filter.projectId}` : null,
+      filter?.snapshotId !== undefined ? sql`r.snapshot_id = ${filter.snapshotId}` : null,
       filter?.state !== undefined ? sql`r.state = ${filter.state}` : null,
-      cursor !== null
-        ? sql`(r.created_at, r.id) < (${cursor.createdAt}, ${cursor.id})`
-        : null,
+      cursor !== null ? sql`(r.created_at, r.id) < (${cursor.createdAt}, ${cursor.id})` : null,
     ]);
     const rows = await sql<DbRunsAuditRow[]>`
       SELECT r.id, r.snapshot_id, r.name, r.qualified_name, r.args, r.state, r.cancel_reason,
@@ -812,9 +754,7 @@ class PgRunsAuditRepo implements RunsAuditRepo {
     const last = items[items.length - 1];
     return {
       items,
-      nextCursor: hasMore && last !== undefined
-        ? encodeCursor(last.createdAt, last.id)
-        : null,
+      nextCursor: hasMore && last !== undefined ? encodeCursor(last.createdAt, last.id) : null,
     };
   }
 
@@ -830,9 +770,7 @@ class PgRunsAuditRepo implements RunsAuditRepo {
   ): Promise<boolean> {
     // Sparse-patch SET clause composition. Each provided field becomes
     // one `col = value` fragment; we always update `updated_at = now()`.
-    const sets: ReturnType<Sql>[] = [
-      this.sql`state = ${patch.state}`,
-    ];
+    const sets: ReturnType<Sql>[] = [this.sql`state = ${patch.state}`];
     if (patch.cancelReason !== undefined) {
       sets.push(this.sql`cancel_reason = ${patch.cancelReason}`);
     }
@@ -846,9 +784,7 @@ class PgRunsAuditRepo implements RunsAuditRepo {
       sets.push(this.sql`completed_at = ${patch.completedAt}`);
     }
     sets.push(this.sql`updated_at = now()`);
-    const setSql = sets.reduce(
-      (acc, cur, i) => (i === 0 ? cur : this.sql`${acc}, ${cur}`),
-    );
+    const setSql = sets.reduce((acc, cur, i) => (i === 0 ? cur : this.sql`${acc}, ${cur}`));
     const result = await this.sql`
       UPDATE runs_audit SET ${setSql} WHERE id = ${id}
     `;
@@ -906,10 +842,7 @@ class PgFfiPendingDelegationRepo implements FfiPendingDelegationRepo {
     };
   }
 
-  async setState(
-    delegationId: DelegationId,
-    state: "running" | "cancelling",
-  ): Promise<boolean> {
+  async setState(delegationId: DelegationId, state: "running" | "cancelling"): Promise<boolean> {
     const result = await this.sql`
       UPDATE ffi_pending_delegations SET state = ${state} WHERE delegation_id = ${delegationId}
     `;
@@ -954,9 +887,7 @@ class PgFfiPendingDelegationRepo implements FfiPendingDelegationRepo {
     }));
   }
 
-  async listChildrenOf(
-    parentDelegationId: DelegationId,
-  ): Promise<FfiPendingDelegation[]> {
+  async listChildrenOf(parentDelegationId: DelegationId): Promise<FfiPendingDelegation[]> {
     const rows = await this.sql<
       {
         delegation_id: string;
@@ -1086,11 +1017,7 @@ class PgEnvEntryRepo implements EnvEntryRepo {
     };
   }
 
-  async upsert(row: {
-    key: string;
-    value: string;
-    isSecret: boolean;
-  }): Promise<void> {
+  async upsert(row: { key: string; value: string; isSecret: boolean }): Promise<void> {
     await this.sql`
       INSERT INTO env_entries (key, value, is_secret, updated_at)
       VALUES (${row.key}, ${row.value}, ${row.isSecret}, now())
@@ -1168,11 +1095,7 @@ export class PostgresStorage implements Storage {
     return runInTx(this.sql, fn) as Promise<T>;
   }
 
-  async withSnapshotLock<T>(
-    tx: Storage,
-    snapshotId: SnapshotId,
-    fn: () => Promise<T>,
-  ): Promise<T> {
+  async withSnapshotLock<T>(tx: Storage, snapshotId: SnapshotId, fn: () => Promise<T>): Promise<T> {
     const inner = (tx as PostgresStorage).sql;
     await acquireSnapshotAdvisoryLock(inner, snapshotId);
     return fn();
@@ -1185,13 +1108,8 @@ export class PostgresStorage implements Storage {
 
 // ─── Transaction helper ────────────────────────────────────────────────────
 
-function runInTx<T>(
-  sqlHandle: Sql,
-  fn: (tx: Storage) => Promise<T>,
-): Promise<T> {
-  const begin = (sqlHandle as unknown as { begin: typeof sqlHandle.begin })
-    .begin
-    .bind(sqlHandle);
+function runInTx<T>(sqlHandle: Sql, fn: (tx: Storage) => Promise<T>): Promise<T> {
+  const begin = (sqlHandle as unknown as { begin: typeof sqlHandle.begin }).begin.bind(sqlHandle);
   return begin(async (txSql) => {
     const innerSql = txSql as unknown as Sql;
     const txStorage: Storage = {
@@ -1229,9 +1147,6 @@ function runInTx<T>(
  * are 2^-64-ish and harmless (= two unrelated snapshots would briefly
  * serialise) so we don't bother with a longer key.
  */
-async function acquireSnapshotAdvisoryLock(
-  sql: Sql,
-  snapshotId: string,
-): Promise<void> {
+async function acquireSnapshotAdvisoryLock(sql: Sql, snapshotId: string): Promise<void> {
   await sql`SELECT pg_advisory_xact_lock(hashtextextended(${snapshotId}, 0))`;
 }

@@ -2,16 +2,11 @@
 // into their own ops record and override only the methods that need
 // variant-specific behaviour.
 
-import type { AskId, CallId } from "../../id.js";
 import type { AskKind } from "../../event.js";
+import type { AskId, CallId } from "../../id.js";
 import type { StepCtx } from "../../step-ctx.js";
 import type { Value } from "../../value.js";
-import {
-  beginCancel,
-  commonRemoveChild,
-  proxyAskAckToChild,
-  proxyAskToParent,
-} from "../common.js";
+import { beginCancel, commonRemoveChild, proxyAskAckToChild, proxyAskToParent } from "../common.js";
 import type { Thread } from "../types.js";
 
 /**
@@ -19,10 +14,7 @@ import type { Thread } from "../types.js";
  * Almost every variant uses this directly; `DelegateThread` overrides
  * to emit an outbound terminate first.
  */
-export function defaultCancel<T extends Thread>(
-  ctx: StepCtx,
-  t: T,
-): void {
+export function defaultCancel<T extends Thread>(ctx: StepCtx, t: T): void {
   beginCancel(ctx, t);
 }
 
@@ -70,9 +62,7 @@ export function defaultCancelAckUnexpected<T extends Thread>(
 ): void {
   if (commonRemoveChild(ctx, t as unknown as Thread, callId)) {
     // Parent is running and the child went away unexpectedly.
-    throw new Error(
-      `engine: ${t.kind} thread received unexpected cancelAck (callId=${callId})`,
-    );
+    throw new Error(`engine: ${t.kind} thread received unexpected cancelAck (callId=${callId})`);
   }
   // Otherwise: parent was cancelling (or child stale). commonRemoveChild
   // already advanced the cascade.

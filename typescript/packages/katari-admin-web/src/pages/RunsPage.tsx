@@ -1,20 +1,17 @@
-import { Link, useNavigate, useParams } from "react-router-dom";
 import { useInfiniteQuery } from "@tanstack/react-query";
 import { motion } from "framer-motion";
 import { Activity, ArrowRight } from "lucide-react";
-import { useApiClient } from "@/contexts/ApiKeyContext";
+import { Link, useNavigate, useParams } from "react-router-dom";
+import type { ProjectId } from "@/api/types";
+import { isTerminalState, RunStatusBadge } from "@/components/domain/RunStatusBadge";
+import { Button } from "@/components/ui/Button";
+import { EmptyState } from "@/components/ui/EmptyState";
 import { PageContent, PageHeader } from "@/components/ui/PageHeader";
 import { SpinnerOverlay } from "@/components/ui/Spinner";
-import { EmptyState } from "@/components/ui/EmptyState";
-import { Button } from "@/components/ui/Button";
 import { Table, TBody, TD, TH, THead, TR } from "@/components/ui/Table";
-import {
-  RunStatusBadge,
-  isTerminalState,
-} from "@/components/domain/RunStatusBadge";
-import { formatDateTime, relativeTime } from "@/lib/format";
+import { useApiClient } from "@/contexts/ApiKeyContext";
 import { useSnapshotMessage } from "@/hooks/useSnapshotMessage";
-import type { ProjectId } from "@/api/types";
+import { formatDateTime, relativeTime } from "@/lib/format";
 
 const POLL_MS = 3_000;
 const PAGE_SIZE = 50;
@@ -23,33 +20,24 @@ export function RunsPage() {
   const { projectId } = useParams<{ projectId: string }>();
   const client = useApiClient();
   const navigate = useNavigate();
-  const {
-    data,
-    isLoading,
-    isError,
-    error,
-    fetchNextPage,
-    hasNextPage,
-    isFetchingNextPage,
-  } = useInfiniteQuery({
-    queryKey: ["runs", projectId],
-    queryFn: ({ pageParam }) =>
-      client.listRuns({
-        projectId: projectId as ProjectId,
-        limit: PAGE_SIZE,
-        cursor: pageParam ?? undefined,
-      }),
-    initialPageParam: null as string | null,
-    getNextPageParam: (lastPage) => lastPage.nextCursor,
-    enabled: typeof projectId === "string",
-    refetchInterval: (query) => {
-      const pages = query.state.data?.pages ?? [];
-      const anyLive = pages.some((p) =>
-        p.runs.some((r) => !isTerminalState(r.state)),
-      );
-      return anyLive ? POLL_MS : false;
-    },
-  });
+  const { data, isLoading, isError, error, fetchNextPage, hasNextPage, isFetchingNextPage } =
+    useInfiniteQuery({
+      queryKey: ["runs", projectId],
+      queryFn: ({ pageParam }) =>
+        client.listRuns({
+          projectId: projectId as ProjectId,
+          limit: PAGE_SIZE,
+          cursor: pageParam ?? undefined,
+        }),
+      initialPageParam: null as string | null,
+      getNextPageParam: (lastPage) => lastPage.nextCursor,
+      enabled: typeof projectId === "string",
+      refetchInterval: (query) => {
+        const pages = query.state.data?.pages ?? [];
+        const anyLive = pages.some((p) => p.runs.some((r) => !isTerminalState(r.state)));
+        return anyLive ? POLL_MS : false;
+      },
+    });
 
   const runs = data?.pages.flatMap((p) => p.runs) ?? [];
 
@@ -107,9 +95,7 @@ export function RunsPage() {
                       <TR
                         key={run.id}
                         className="cursor-pointer h-16"
-                        onClick={() =>
-                          navigate(`/project/${projectId}/runs/${run.id}`)
-                        }
+                        onClick={() => navigate(`/project/${projectId}/runs/${run.id}`)}
                       >
                         <TD>
                           <RunStatusBadge state={run.state} />
@@ -120,9 +106,7 @@ export function RunsPage() {
                             className="block hover:underline"
                             onClick={(e) => e.stopPropagation()}
                           >
-                            <div className="font-medium text-foreground">
-                              {run.name}
-                            </div>
+                            <div className="font-medium text-foreground">{run.name}</div>
                           </Link>
                         </TD>
                         <TD className="font-mono text-xs text-muted-foreground">

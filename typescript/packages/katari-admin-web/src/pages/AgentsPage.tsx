@@ -1,15 +1,15 @@
-import { useMemo } from "react";
-import { useParams, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { motion } from "framer-motion";
 import { Boxes } from "lucide-react";
-import { useApiClient } from "@/contexts/ApiKeyContext";
-import { PageContent, PageHeader } from "@/components/ui/PageHeader";
-import { SpinnerOverlay } from "@/components/ui/Spinner";
-import { EmptyState } from "@/components/ui/EmptyState";
+import { useMemo } from "react";
+import { useParams, useSearchParams } from "react-router-dom";
+import type { ProjectId, SnapshotId } from "@/api/types";
 import { AgentsSnapshotPicker } from "@/components/domain/AgentsSnapshotPicker";
 import { AgentsTree } from "@/components/domain/AgentsTree";
-import type { ProjectId, SnapshotId } from "@/api/types";
+import { EmptyState } from "@/components/ui/EmptyState";
+import { PageContent, PageHeader } from "@/components/ui/PageHeader";
+import { SpinnerOverlay } from "@/components/ui/Spinner";
+import { useApiClient } from "@/contexts/ApiKeyContext";
 
 export function AgentsPage() {
   const { projectId } = useParams<{ projectId: string }>();
@@ -18,9 +18,7 @@ export function AgentsPage() {
 
   const snapshotParam = params.get("snapshot");
   const selected: SnapshotId | null =
-    snapshotParam === null || snapshotParam === "latest"
-      ? null
-      : (snapshotParam as SnapshotId);
+    snapshotParam === null || snapshotParam === "latest" ? null : (snapshotParam as SnapshotId);
 
   // Project name is used as a qualified-name prefix filter so the tree
   // defaults to "what this project actually defines". stdlib (`prim.*`)
@@ -74,8 +72,7 @@ export function AgentsPage() {
     setParams(nextParams);
   }
 
-  const _hiddenCount =
-    data === undefined ? 0 : data.agents.length - visibleAgents.length;
+  const _hiddenCount = data === undefined ? 0 : data.agents.length - visibleAgents.length;
 
   return (
     <div>
@@ -135,8 +132,7 @@ export function AgentsPage() {
                 <AgentsTree
                   agents={visibleAgents}
                   href={(agent) => {
-                    const search =
-                      selected === null ? "" : `?snapshot=${selected}`;
+                    const search = selected === null ? "" : `?snapshot=${selected}`;
                     return `/project/${projectId}/agents/${encodeURIComponent(
                       agent.qualifiedName,
                     )}${search}`;

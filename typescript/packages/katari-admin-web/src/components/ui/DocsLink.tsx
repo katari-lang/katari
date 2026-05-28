@@ -1,7 +1,7 @@
 import { CircleHelp } from "lucide-react";
 import type { ReactNode } from "react";
-import { docsUrl } from "@/lib/docs";
 import { cn } from "@/lib/cn";
+import { docsUrl } from "@/lib/docs";
 
 type HelpLinkProps = {
   /** Docs slug (without version prefix), e.g. `"concepts/agents"`. */

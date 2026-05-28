@@ -10,12 +10,7 @@ type Props = {
   className?: string;
 };
 
-export function CopyButton({
-  text,
-  label = "Copied",
-  children,
-  className,
-}: Props) {
+export function CopyButton({ text, label = "Copied", children, className }: Props) {
   const [copied, setCopied] = useState(false);
 
   async function copy() {
@@ -39,11 +34,7 @@ export function CopyButton({
           className,
         )}
       >
-        {copied ? (
-          <Check className="size-3.5 text-success" />
-        ) : (
-          <Copy className="size-3.5" />
-        )}
+        {copied ? <Check className="size-3.5 text-success" /> : <Copy className="size-3.5" />}
         {children}
       </button>
     );
@@ -59,11 +50,7 @@ export function CopyButton({
         className,
       )}
     >
-      {copied ? (
-        <Check className="size-3.5 text-success" />
-      ) : (
-        <Copy className="size-3.5" />
-      )}
+      {copied ? <Check className="size-3.5 text-success" /> : <Copy className="size-3.5" />}
     </button>
   );
 }

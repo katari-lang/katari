@@ -4,7 +4,7 @@
 // re-exports everything for backward compatibility.
 
 export type {
-  JsonSchema,
   AgentDefinition,
+  JsonSchema,
   SchemaBundle,
 } from "@katari-lang/types";

@@ -20,17 +20,13 @@
 //                         can show "Run X succeeded with result Y".
 
 import type {
+  AgentDefId,
   DelegationId,
   EncryptedValue,
-  EscalationId,
   EngineCheckpoint,
-  AgentDefId,
+  EscalationId,
 } from "@katari-lang/runtime";
-import type {
-  IRModule,
-  SchemaBundle,
-  SidecarBundle,
-} from "@katari-lang/types";
+import type { IRModule, SchemaBundle, SidecarBundle } from "@katari-lang/types";
 
 export type { DelegationId, EscalationId, SidecarBundle };
 
@@ -58,12 +54,7 @@ export type EscalationState = "open" | "answered" | "cancelled";
  *   - cancelled:  `terminateAck` after a user-initiated cancel (`cancelReason='user'`)
  *   - error:      `terminateAck` after a child-throw cascade   (`cancelReason='error'`)
  */
-export type RunsAuditState =
-  | "running"
-  | "cancelling"
-  | "cancelled"
-  | "error"
-  | "succeeded";
+export type RunsAuditState = "running" | "cancelling" | "cancelled" | "error" | "succeeded";
 
 export type CancelReason = "user" | "error";
 
@@ -134,9 +125,7 @@ export interface SnapshotRepo {
     message: string;
   }): Promise<SnapshotId>;
   get(id: SnapshotId): Promise<Snapshot | null>;
-  list(
-    filter?: { projectId?: ProjectId } & ListOptions,
-  ): Promise<ListResult<SnapshotSummary>>;
+  list(filter?: { projectId?: ProjectId } & ListOptions): Promise<ListResult<SnapshotSummary>>;
   /** Latest snapshot id within a project. `null` if empty. */
   latest(projectId: ProjectId): Promise<SnapshotId | null>;
   delete(id: SnapshotId): Promise<boolean>;
@@ -354,15 +343,10 @@ export type FfiPendingDelegation = {
 export interface FfiPendingDelegationRepo {
   insert(row: FfiPendingDelegation): Promise<void>;
   get(delegationId: DelegationId): Promise<FfiPendingDelegation | null>;
-  setState(
-    delegationId: DelegationId,
-    state: "running" | "cancelling",
-  ): Promise<boolean>;
+  setState(delegationId: DelegationId, state: "running" | "cancelling"): Promise<boolean>;
   delete(delegationId: DelegationId): Promise<boolean>;
   listBySnapshot(snapshotId: SnapshotId): Promise<FfiPendingDelegation[]>;
-  listChildrenOf(
-    parentDelegationId: DelegationId,
-  ): Promise<FfiPendingDelegation[]>;
+  listChildrenOf(parentDelegationId: DelegationId): Promise<FfiPendingDelegation[]>;
 }
 
 export type FfiPendingEscalation = {
@@ -457,11 +441,7 @@ export interface Storage {
    * `withSnapshotLock` MUST be called inside `withTransaction` so the
    * advisory lock is bound to the surrounding tx lifetime.
    */
-  withSnapshotLock<T>(
-    tx: Storage,
-    snapshotId: SnapshotId,
-    fn: () => Promise<T>,
-  ): Promise<T>;
+  withSnapshotLock<T>(tx: Storage, snapshotId: SnapshotId, fn: () => Promise<T>): Promise<T>;
 
   close?(): Promise<void>;
 }

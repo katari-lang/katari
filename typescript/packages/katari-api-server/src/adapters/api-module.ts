@@ -19,22 +19,19 @@ import {
   API_ENDPOINT,
   CORE_ENDPOINT,
   createDelegationId,
+  type ExternalEvent,
   encodeCoreAgentDefId,
   encryptValueRecord,
   encryptValueTree,
-  type ExternalEvent,
   type Logger,
   type Module,
   type Value,
 } from "@katari-lang/runtime";
 
 const THROW_AGENT_DEF_ID = encodeCoreAgentDefId({ kind: "qname", value: "prim.throw" });
+
 import type { DelegationId, EscalationId } from "@katari-lang/runtime";
-import type {
-  RunsAuditRow,
-  Storage,
-  SnapshotId,
-} from "../storage/types.js";
+import type { RunsAuditRow, SnapshotId, Storage } from "../storage/types.js";
 
 /** Default `run.name` used when the caller omits one. Format pairs the
  *  agent qualified name with a wall-clock time, so the run is identifiable
@@ -95,10 +92,7 @@ export class ApiModule implements Module {
 
       case "escalate":
         if (event.payload.agentDefId === THROW_AGENT_DEF_ID) {
-          return await this.handleThrowEscalate(
-            event.payload.delegationId,
-            event.payload.args,
-          );
+          return await this.handleThrowEscalate(event.payload.delegationId, event.payload.args);
         }
         await this.recordEscalation({
           from: event.from,
@@ -257,9 +251,7 @@ export class ApiModule implements Module {
   ): Promise<{ outbound: ExternalEvent[] }> {
     const msgValue = args["msg"];
     const message =
-      msgValue !== undefined && msgValue.kind === "string"
-        ? msgValue.value
-        : "runtime error";
+      msgValue !== undefined && msgValue.kind === "string" ? msgValue.value : "runtime error";
 
     const liveRow = await this.tx.delegations.get(delegationId);
     const rootId = liveRow?.rootDelegationId ?? delegationId;
@@ -313,10 +305,7 @@ export class ApiModule implements Module {
     });
   }
 
-  private async completeRun(
-    delegationId: DelegationId,
-    value: Value,
-  ): Promise<void> {
+  private async completeRun(delegationId: DelegationId, value: Value): Promise<void> {
     // Audit row update only happens if this was an operator-launched
     // root. delegateAcks for child delegations don't reach the API
     // module (they're owned by CORE / FFI), but we guard with a lookup
@@ -344,8 +333,7 @@ export class ApiModule implements Module {
     // `cancelling`. user → cancelled, error → error.
     const auditRow = await this.tx.runsAudit.get(delegationId);
     if (auditRow !== null) {
-      const finalState =
-        auditRow.cancelReason === "error" ? "error" : "cancelled";
+      const finalState = auditRow.cancelReason === "error" ? "error" : "cancelled";
       await this.tx.runsAudit.setState(delegationId, {
         state: finalState,
         completedAt: new Date().toISOString(),

@@ -13,14 +13,14 @@
 //     If somehow an `askAck` comes back instead (the request type is
 //     `-> never`, so this shouldn't happen), we drop it defensively.
 
+import type { AgentBlock, BlockId, QualifiedName } from "../../../ir/types.js";
+import { RecoverableEngineError } from "../../errors.js";
 import type { AskId, CallId } from "../../id.js";
 import { executePrim, PrimRaiseRequest } from "../../prim.js";
-import { RecoverableEngineError } from "../../errors.js";
 import type { StepCtx } from "../../step-ctx.js";
 import type { Value } from "../../value.js";
-import type { AgentBlock, BlockId, QualifiedName } from "../../../ir/types.js";
-import type { PrimThread, Thread } from "../types.js";
 import { allocAskId, deleteThread, emitThrowEscalate } from "../common.js";
+import type { PrimThread, Thread } from "../types.js";
 import { defaultAskProxy } from "./defaults.js";
 import type { ThreadOps } from "./types.js";
 
@@ -98,14 +98,10 @@ export const primOps: ThreadOps<PrimThread> = {
    */
   askAck(ctx, t, askId, _value) {
     if (t.pendingAskId !== undefined && t.pendingAskId === askId) {
-      ctx.log(
-        "debug",
-        "engine.prim: dropped askAck for never-returning request",
-        {
-          threadId: t.id,
-          askId,
-        },
-      );
+      ctx.log("debug", "engine.prim: dropped askAck for never-returning request", {
+        threadId: t.id,
+        askId,
+      });
       return;
     }
     // Unknown askId — surface as a debug log; askIdMap forwarding
@@ -123,11 +119,7 @@ export const primOps: ThreadOps<PrimThread> = {
  * request id + args the prim chose. The thread is left alive with
  * `pendingAskId` set so the upcoming cancel cascade can ack cleanly.
  */
-function emitPrimRaise(
-  ctx: StepCtx,
-  t: PrimThread,
-  err: PrimRaiseRequest,
-): void {
+function emitPrimRaise(ctx: StepCtx, t: PrimThread, err: PrimRaiseRequest): void {
   if (t.parent === null || t.parentCallId === null) {
     ctx.log("warn", "engine.prim: raise at root thread with no parent", {
       threadId: t.id,
@@ -161,9 +153,7 @@ function emitPrimRaise(
 function executeGetMetadata(ctx: StepCtx, args: Record<string, Value>): Value {
   const value = args["value"];
   if (value === undefined) {
-    throw new RecoverableEngineError(
-      "prim get_metadata: missing argument 'value'",
-    );
+    throw new RecoverableEngineError("prim get_metadata: missing argument 'value'");
   }
 
   const [agentBlock, dispatchId] = resolveCallable(ctx, value);
@@ -195,10 +185,7 @@ function resolveCallable(ctx: StepCtx, value: Value): [AgentBlock, string] {
   switch (value.kind) {
     case "agentLiteral": {
       const blockId = lookupQualified(ctx, value.qualifiedName);
-      return [
-        requireAgentBlock(ctx, blockId, value.qualifiedName),
-        value.qualifiedName,
-      ];
+      return [requireAgentBlock(ctx, blockId, value.qualifiedName), value.qualifiedName];
     }
     case "closure": {
       const record = ctx.state.closures[value.closureId];
@@ -222,18 +209,12 @@ function resolveCallable(ctx: StepCtx, value: Value): [AgentBlock, string] {
 function lookupQualified(ctx: StepCtx, qname: QualifiedName): BlockId {
   const blockId = ctx.state.irModule.entries[qname];
   if (blockId === undefined) {
-    throw new RecoverableEngineError(
-      `prim get_metadata: '${qname}' not found in irModule.entries`,
-    );
+    throw new RecoverableEngineError(`prim get_metadata: '${qname}' not found in irModule.entries`);
   }
   return blockId;
 }
 
-function requireAgentBlock(
-  ctx: StepCtx,
-  blockId: BlockId,
-  hint: string,
-): AgentBlock {
+function requireAgentBlock(ctx: StepCtx, blockId: BlockId, hint: string): AgentBlock {
   const block = ctx.state.irModule.blocks[String(blockId)];
   if (block === undefined) {
     throw new RecoverableEngineError(

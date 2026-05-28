@@ -19,7 +19,7 @@
 //   node scripts/bump-versions.mjs --version 0.1.0
 
 import { readFileSync, writeFileSync } from "node:fs";
-import { resolve, dirname } from "node:path";
+import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -35,10 +35,7 @@ function arg(name) {
 }
 
 const version = arg("version");
-const shimPath = resolve(
-  REPO_ROOT,
-  "typescript/packages/katari/package.json",
-);
+const shimPath = resolve(REPO_ROOT, "typescript/packages/katari/package.json");
 const pkg = JSON.parse(readFileSync(shimPath, "utf8"));
 
 if (pkg.version !== version) {

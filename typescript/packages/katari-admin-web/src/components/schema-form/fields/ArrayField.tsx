@@ -1,7 +1,7 @@
 import { Plus, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { SchemaField } from "../SchemaField";
-import { schemaInitialValue, type JsonSchema } from "../schema-utils";
+import { type JsonSchema, schemaInitialValue } from "../schema-utils";
 
 export function ArrayField({
   schema,

@@ -84,10 +84,7 @@ export class Histogram {
   }
 
   render(): string {
-    const lines: string[] = [
-      `# HELP ${this.name} ${this.help}`,
-      `# TYPE ${this.name} histogram`,
-    ];
+    const lines: string[] = [`# HELP ${this.name} ${this.help}`, `# TYPE ${this.name} histogram`];
     for (let i = 0; i < this.buckets.length; i++) {
       lines.push(`${this.name}_bucket{le="${this.buckets[i]}"} ${this.counts[i]}`);
     }

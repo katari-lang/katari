@@ -5,8 +5,6 @@
 // (api-server core) only knows this interface and can be swapped with the
 // Postgres impl.
 
-import { v7 as uuidv7 } from "uuid";
-import { Mutex } from "async-mutex";
 import type {
   DelegationId,
   EncryptedValue,
@@ -15,6 +13,9 @@ import type {
   IRModule,
   SchemaBundle,
 } from "@katari-lang/runtime";
+import { Mutex } from "async-mutex";
+import { v7 as uuidv7 } from "uuid";
+import { decodeCursor, encodeCursor } from "../cursor.js";
 import type {
   DelegationRepo,
   DelegationRow,
@@ -45,7 +46,6 @@ import type {
   Storage,
   UpsertProjectInput,
 } from "./types.js";
-import { decodeCursor, encodeCursor } from "../cursor.js";
 
 function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
@@ -84,11 +84,14 @@ function paginateWithCursor<T extends { createdAt: string }>(
     start = all.findIndex((item) => {
       const id = idFn(item);
       if (order === "desc") {
-        return item.createdAt < cursor.createdAt ||
-          (item.createdAt === cursor.createdAt && id < cursor.id);
+        return (
+          item.createdAt < cursor.createdAt ||
+          (item.createdAt === cursor.createdAt && id < cursor.id)
+        );
       }
-      return item.createdAt > cursor.createdAt ||
-        (item.createdAt === cursor.createdAt && id > cursor.id);
+      return (
+        item.createdAt > cursor.createdAt || (item.createdAt === cursor.createdAt && id > cursor.id)
+      );
     });
     if (start === -1) start = all.length;
   }
@@ -98,9 +101,7 @@ function paginateWithCursor<T extends { createdAt: string }>(
   const last = items[items.length - 1];
   return {
     items: items.map(clone),
-    nextCursor: hasMore && last !== undefined
-      ? encodeCursor(last.createdAt, idFn(last))
-      : null,
+    nextCursor: hasMore && last !== undefined ? encodeCursor(last.createdAt, idFn(last)) : null,
   };
 }
 
@@ -119,8 +120,7 @@ class InMemoryProjectRepo implements ProjectRepo {
         // `undefined` = "leave as-is", `null` = "clear".
         const next: Project = {
           ...row,
-          description:
-            input.description === undefined ? row.description : input.description,
+          description: input.description === undefined ? row.description : input.description,
           readme: input.readme === undefined ? row.readme : input.readme,
         };
         this.rows.set(existingId, next);
@@ -142,8 +142,15 @@ class InMemoryProjectRepo implements ProjectRepo {
 
   async list(options?: ListOptions): Promise<ListResult<Project>> {
     const all = [...this.rows.values()].sort((a, b) =>
-      a.createdAt > b.createdAt ? -1 : a.createdAt < b.createdAt ? 1 :
-        a.id > b.id ? -1 : a.id < b.id ? 1 : 0,
+      a.createdAt > b.createdAt
+        ? -1
+        : a.createdAt < b.createdAt
+          ? 1
+          : a.id > b.id
+            ? -1
+            : a.id < b.id
+              ? 1
+              : 0,
     );
     return paginateWithCursor(all, options, (p) => p.id, "desc");
   }
@@ -184,8 +191,7 @@ class InMemorySnapshotRepo implements SnapshotRepo {
       id,
       projectId: input.projectId,
       irModule: clone(input.irModule),
-      sidecarBundle:
-        input.sidecarBundle !== null ? clone(input.sidecarBundle) : null,
+      sidecarBundle: input.sidecarBundle !== null ? clone(input.sidecarBundle) : null,
       schemaBundle: clone(input.schemaBundle),
       message: input.message,
       createdAt: new Date().toISOString(),
@@ -206,8 +212,15 @@ class InMemorySnapshotRepo implements SnapshotRepo {
       all = all.filter((r) => r.projectId === filter.projectId);
     }
     all.sort((a, b) =>
-      a.createdAt > b.createdAt ? -1 : a.createdAt < b.createdAt ? 1 :
-        a.id > b.id ? -1 : a.id < b.id ? 1 : 0,
+      a.createdAt > b.createdAt
+        ? -1
+        : a.createdAt < b.createdAt
+          ? 1
+          : a.id > b.id
+            ? -1
+            : a.id < b.id
+              ? 1
+              : 0,
     );
     const summaries = all.map((r) => ({
       id: r.id,
@@ -260,9 +273,7 @@ class InMemoryDelegationRepo implements DelegationRepo {
    * Snapshot → project lookup. Injected at construction so the
    * `projectId` filter on `list` can scope cross-snapshot.
    */
-  constructor(
-    private readonly projectIdOfSnapshot: (id: SnapshotId) => ProjectId | null,
-  ) {}
+  constructor(private readonly projectIdOfSnapshot: (id: SnapshotId) => ProjectId | null) {}
 
   async insert(row: DelegationRow): Promise<void> {
     this.rows.set(row.id, clone(row));
@@ -298,16 +309,21 @@ class InMemoryDelegationRepo implements DelegationRepo {
       all = all.filter((r) => r.rootDelegationId === filter.rootDelegationId);
     }
     if (filter?.parentDelegationId !== undefined) {
-      all = all.filter(
-        (r) => r.parentDelegationId === filter.parentDelegationId,
-      );
+      all = all.filter((r) => r.parentDelegationId === filter.parentDelegationId);
     }
     if (filter?.state !== undefined) {
       all = all.filter((r) => r.state === filter.state);
     }
     all.sort((a, b) =>
-      a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 :
-        a.id < b.id ? -1 : a.id > b.id ? 1 : 0,
+      a.createdAt < b.createdAt
+        ? -1
+        : a.createdAt > b.createdAt
+          ? 1
+          : a.id < b.id
+            ? -1
+            : a.id > b.id
+              ? 1
+              : 0,
     );
     return paginateWithCursor(all, filter, (r) => r.id, "asc");
   }
@@ -319,10 +335,7 @@ class InMemoryDelegationRepo implements DelegationRepo {
   ): Promise<boolean> {
     const row = this.rows.get(id);
     if (row === undefined) return false;
-    if (
-      options?.expectedState !== undefined &&
-      row.state !== options.expectedState
-    ) {
+    if (options?.expectedState !== undefined && row.state !== options.expectedState) {
       return false;
     }
     this.rows.set(id, {
@@ -333,9 +346,7 @@ class InMemoryDelegationRepo implements DelegationRepo {
     return true;
   }
 
-  async markAllUnderRootAsCancelling(
-    rootDelegationId: DelegationId,
-  ): Promise<void> {
+  async markAllUnderRootAsCancelling(rootDelegationId: DelegationId): Promise<void> {
     const now = new Date().toISOString();
     for (const row of this.rows.values()) {
       if (row.rootDelegationId !== rootDelegationId) continue;
@@ -372,9 +383,7 @@ class InMemoryDelegationRepo implements DelegationRepo {
 class InMemoryEscalationRepo implements EscalationRepo {
   rows = new Map<EscalationId, EscalationRow>();
 
-  constructor(
-    private readonly projectIdOfSnapshot: (id: SnapshotId) => ProjectId | null,
-  ) {}
+  constructor(private readonly projectIdOfSnapshot: (id: SnapshotId) => ProjectId | null) {}
 
   async insert(row: EscalationRow): Promise<void> {
     this.rows.set(row.id, clone(row));
@@ -420,16 +429,20 @@ class InMemoryEscalationRepo implements EscalationRepo {
       all = all.filter((r) => r.state === filter.state);
     }
     all.sort((a, b) =>
-      a.createdAt > b.createdAt ? -1 : a.createdAt < b.createdAt ? 1 :
-        a.id > b.id ? -1 : a.id < b.id ? 1 : 0,
+      a.createdAt > b.createdAt
+        ? -1
+        : a.createdAt < b.createdAt
+          ? 1
+          : a.id > b.id
+            ? -1
+            : a.id < b.id
+              ? 1
+              : 0,
     );
     return paginateWithCursor(all, filter, (r) => r.id, "desc");
   }
 
-  async setAnswered(
-    id: EscalationId,
-    value: EncryptedValue,
-  ): Promise<boolean> {
+  async setAnswered(id: EscalationId, value: EncryptedValue): Promise<boolean> {
     const row = this.rows.get(id);
     if (row === undefined) return false;
     if (row.state !== "open") return false;
@@ -441,9 +454,7 @@ class InMemoryEscalationRepo implements EscalationRepo {
     return true;
   }
 
-  async cancelAllUnderRoot(
-    rootDelegationId: DelegationId,
-  ): Promise<void> {
+  async cancelAllUnderRoot(rootDelegationId: DelegationId): Promise<void> {
     for (const row of this.rows.values()) {
       if (row.rootDelegationId !== rootDelegationId) continue;
       if (row.state !== "open") continue;
@@ -459,9 +470,7 @@ class InMemoryEscalationRepo implements EscalationRepo {
 class InMemoryRunsAuditRepo implements RunsAuditRepo {
   rows = new Map<DelegationId, RunsAuditRow>();
 
-  constructor(
-    private readonly projectIdOfSnapshot: (id: SnapshotId) => ProjectId | null,
-  ) {}
+  constructor(private readonly projectIdOfSnapshot: (id: SnapshotId) => ProjectId | null) {}
 
   async insert(row: RunsAuditRow): Promise<void> {
     this.rows.set(row.id, clone(row));
@@ -491,8 +500,15 @@ class InMemoryRunsAuditRepo implements RunsAuditRepo {
       all = all.filter((r) => r.state === filter.state);
     }
     all.sort((a, b) =>
-      a.createdAt > b.createdAt ? -1 : a.createdAt < b.createdAt ? 1 :
-        a.id > b.id ? -1 : a.id < b.id ? 1 : 0,
+      a.createdAt > b.createdAt
+        ? -1
+        : a.createdAt < b.createdAt
+          ? 1
+          : a.id > b.id
+            ? -1
+            : a.id < b.id
+              ? 1
+              : 0,
     );
     return paginateWithCursor(all, filter, (r) => r.id, "desc");
   }
@@ -535,10 +551,7 @@ class InMemoryFfiPendingDelegationRepo implements FfiPendingDelegationRepo {
     return row !== undefined ? clone(row) : null;
   }
 
-  async setState(
-    delegationId: DelegationId,
-    state: "running" | "cancelling",
-  ): Promise<boolean> {
+  async setState(delegationId: DelegationId, state: "running" | "cancelling"): Promise<boolean> {
     const row = this.rows.get(delegationId);
     if (row === undefined) return false;
     this.rows.set(delegationId, { ...row, state });
@@ -550,14 +563,10 @@ class InMemoryFfiPendingDelegationRepo implements FfiPendingDelegationRepo {
   }
 
   async listBySnapshot(snapshotId: SnapshotId): Promise<FfiPendingDelegation[]> {
-    return [...this.rows.values()]
-      .filter((r) => r.snapshotId === snapshotId)
-      .map(clone);
+    return [...this.rows.values()].filter((r) => r.snapshotId === snapshotId).map(clone);
   }
 
-  async listChildrenOf(
-    parentDelegationId: DelegationId,
-  ): Promise<FfiPendingDelegation[]> {
+  async listChildrenOf(parentDelegationId: DelegationId): Promise<FfiPendingDelegation[]> {
     return [...this.rows.values()]
       .filter((r) => r.parentExtDelegationId === parentDelegationId)
       .map(clone);
@@ -581,9 +590,7 @@ class InMemoryFfiPendingEscalationRepo implements FfiPendingEscalationRepo {
   }
 
   async listBySnapshot(snapshotId: SnapshotId): Promise<FfiPendingEscalation[]> {
-    return [...this.rows.values()]
-      .filter((r) => r.snapshotId === snapshotId)
-      .map(clone);
+    return [...this.rows.values()].filter((r) => r.snapshotId === snapshotId).map(clone);
   }
 }
 
@@ -594,11 +601,7 @@ class InMemoryEnvEntryRepo implements EnvEntryRepo {
     return this.rows.get(key) ?? null;
   }
 
-  async upsert(row: {
-    key: string;
-    value: string;
-    isSecret: boolean;
-  }): Promise<void> {
+  async upsert(row: { key: string; value: string; isSecret: boolean }): Promise<void> {
     this.rows.set(row.key, { ...row, updatedAt: new Date().toISOString() });
   }
 
@@ -607,9 +610,7 @@ class InMemoryEnvEntryRepo implements EnvEntryRepo {
   }
 
   async list(): Promise<EnvEntryRow[]> {
-    return [...this.rows.values()].sort((a, b) =>
-      a.key < b.key ? -1 : a.key > b.key ? 1 : 0,
-    );
+    return [...this.rows.values()].sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
   }
 }
 
@@ -648,11 +649,11 @@ export class InMemoryStorage implements Storage {
     }
   }
 
-   /**
-    * Serialize concurrency via a per-snapshot Mutex. tx is not used; the
-    * Mutex alone guarantees serialization (the Postgres version uses the
-    * equivalent of `SELECT ... FOR UPDATE`).
-    */
+  /**
+   * Serialize concurrency via a per-snapshot Mutex. tx is not used; the
+   * Mutex alone guarantees serialization (the Postgres version uses the
+   * equivalent of `SELECT ... FOR UPDATE`).
+   */
   async withSnapshotLock<T>(
     _tx: Storage,
     snapshotId: SnapshotId,

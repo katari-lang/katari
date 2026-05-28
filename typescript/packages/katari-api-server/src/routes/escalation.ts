@@ -7,9 +7,13 @@
 // ApiModule.feed; when the operator views this list and answers, an
 // `escalateAck` flows on the bus and the delegation thread resumes.
 
-import { Hono } from "hono";
-import { valueFromRaw } from "@katari-lang/runtime";
 import type { EscalationId } from "@katari-lang/runtime";
+import { API_ENDPOINT, valueFromRaw } from "@katari-lang/runtime";
+import { Hono } from "hono";
+import { z } from "zod";
+import type { ApiServerOrchestrator } from "../orchestrator.js";
+import type { Storage } from "../storage/types.js";
+import { escalationRowToWire } from "../wire/agent-wire.js";
 import {
   AnswerEscalationSchema,
   EscalationIdSchema,
@@ -18,11 +22,6 @@ import {
   RunIdSchema,
   SnapshotIdSchema,
 } from "./middleware/validation.js";
-import { escalationRowToWire } from "../wire/agent-wire.js";
-import type { ApiServerOrchestrator } from "../orchestrator.js";
-import { API_ENDPOINT } from "@katari-lang/runtime";
-import type { Storage } from "../storage/types.js";
-import { z } from "zod";
 
 const ListQuerySchema = z
   .object({
@@ -32,10 +31,7 @@ const ListQuerySchema = z
   })
   .extend(PaginationQuerySchema.shape);
 
-export function buildEscalationRoutes(
-  orchestrator: ApiServerOrchestrator,
-  storage: Storage,
-): Hono {
+export function buildEscalationRoutes(orchestrator: ApiServerOrchestrator, storage: Storage): Hono {
   const app = new Hono();
 
   app.get("/", async (c) => {
@@ -61,9 +57,7 @@ export function buildEscalationRoutes(
   });
 
   app.get("/:escalationId", async (c) => {
-    const escalationId = EscalationIdSchema.parse(
-      c.req.param("escalationId"),
-    ) as EscalationId;
+    const escalationId = EscalationIdSchema.parse(c.req.param("escalationId")) as EscalationId;
     const escalation = await storage.escalations.get(escalationId);
     if (escalation === null) {
       return c.json({ error: "escalation not found" }, 404);
@@ -72,19 +66,14 @@ export function buildEscalationRoutes(
   });
 
   app.post("/:escalationId/ack", async (c) => {
-    const escalationId = EscalationIdSchema.parse(
-      c.req.param("escalationId"),
-    ) as EscalationId;
+    const escalationId = EscalationIdSchema.parse(c.req.param("escalationId")) as EscalationId;
     const body = AnswerEscalationSchema.parse(await c.req.json());
     const escalation = await storage.escalations.get(escalationId);
     if (escalation === null) {
       return c.json({ error: "escalation not found" }, 404);
     }
     if (escalation.state !== "open") {
-      return c.json(
-        { error: `escalation already ${escalation.state}` },
-        409,
-      );
+      return c.json({ error: `escalation already ${escalation.state}` }, 409);
     }
     const decoded = valueFromRaw(body.value);
     const result = await orchestrator.tick(escalation.snapshotId, async (ctx) => {

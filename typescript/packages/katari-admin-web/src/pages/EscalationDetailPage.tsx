@@ -1,33 +1,25 @@
-import { useState } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import type { RawValue } from "@katari-lang/runtime";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { motion } from "framer-motion";
 import { ArrowLeft, Ban } from "lucide-react";
+import { useState } from "react";
 import toast from "react-hot-toast";
-import { useApiClient } from "@/contexts/ApiKeyContext";
-import { PageContent, PageHeader } from "@/components/ui/PageHeader";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/Card";
-import { Button } from "@/components/ui/Button";
-import { Dialog, DialogFooter } from "@/components/ui/Dialog";
-import { CopyableId } from "@/components/ui/CopyableId";
-import { SpinnerOverlay } from "@/components/ui/Spinner";
-import { MetadataRow } from "@/components/ui/MetadataRow";
-import { Badge } from "@/components/ui/Badge";
-import { SchemaForm } from "@/components/schema-form/SchemaForm";
+import { Link, useNavigate, useParams } from "react-router-dom";
+import type { EscalationId, EscalationState, ProjectId, RunId } from "@/api/types";
 import { ValueViewer } from "@/components/domain/ValueViewer";
-import { formatDateTime } from "@/lib/format";
-import {
-  isNeverSchema,
-  type JsonSchema,
-} from "@/components/schema-form/schema-utils";
+import { SchemaForm } from "@/components/schema-form/SchemaForm";
+import { isNeverSchema, type JsonSchema } from "@/components/schema-form/schema-utils";
+import { Badge } from "@/components/ui/Badge";
+import { Button } from "@/components/ui/Button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/Card";
+import { CopyableId } from "@/components/ui/CopyableId";
+import { Dialog, DialogFooter } from "@/components/ui/Dialog";
+import { MetadataRow } from "@/components/ui/MetadataRow";
+import { PageContent, PageHeader } from "@/components/ui/PageHeader";
+import { SpinnerOverlay } from "@/components/ui/Spinner";
+import { useApiClient } from "@/contexts/ApiKeyContext";
 import { useSnapshotMessage } from "@/hooks/useSnapshotMessage";
-import type {
-  EscalationId,
-  EscalationState,
-  ProjectId,
-  RunId,
-} from "@/api/types";
-import type { RawValue } from "@katari-lang/runtime";
+import { formatDateTime } from "@/lib/format";
 
 const stateTones: Record<EscalationState, "info" | "success" | "neutral"> = {
   open: "info",
@@ -46,11 +38,7 @@ export function EscalationDetailPage() {
 
   const escalationQ = useQuery({
     queryKey: ["escalation", escalationId],
-    queryFn: () =>
-      client.getEscalation(
-        projectId as ProjectId,
-        escalationId as EscalationId,
-      ),
+    queryFn: () => client.getEscalation(projectId as ProjectId, escalationId as EscalationId),
     enabled: typeof projectId === "string" && typeof escalationId === "string",
   });
 
@@ -66,19 +54,13 @@ export function EscalationDetailPage() {
     enabled: typeof projectId === "string" && escalation !== undefined,
   });
 
-  const requestAgent = agentsQ.data?.agents.find(
-    (a) => a.qualifiedName === escalation?.agentDefId,
-  );
+  const requestAgent = agentsQ.data?.agents.find((a) => a.qualifiedName === escalation?.agentDefId);
 
   // Run name lookup so the Context card shows a human-readable name
   // rather than the root-delegation UUID.
   const runQ = useQuery({
     queryKey: ["run", escalation?.rootDelegationId],
-    queryFn: () =>
-      client.getRun(
-        projectId as ProjectId,
-        escalation!.rootDelegationId as RunId,
-      ),
+    queryFn: () => client.getRun(projectId as ProjectId, escalation!.rootDelegationId as RunId),
     enabled: typeof projectId === "string" && escalation !== undefined,
   });
   const [cancelDialogOpen, setCancelDialogOpen] = useState(false);
@@ -90,11 +72,7 @@ export function EscalationDetailPage() {
   const answer = useMutation({
     mutationFn: async (value: RawValue) => {
       if (escalation === undefined) throw new Error("No escalation");
-      await client.answerEscalation(
-        projectId as ProjectId,
-        escalation.id,
-        value,
-      );
+      await client.answerEscalation(projectId as ProjectId, escalation.id, value);
     },
     onSuccess: () => {
       toast.success("Escalation answered");
@@ -117,10 +95,7 @@ export function EscalationDetailPage() {
   const cancelRun = useMutation({
     mutationFn: async () => {
       if (escalation === undefined) throw new Error("No escalation");
-      await client.cancelRun(
-        projectId as ProjectId,
-        escalation.rootDelegationId,
-      );
+      await client.cancelRun(projectId as ProjectId, escalation.rootDelegationId);
     },
     onSuccess: () => {
       toast.success("Cancel requested");
@@ -155,9 +130,7 @@ export function EscalationDetailPage() {
               {escalation?.agentDefId ?? escalationId}
             </span>
             {escalation !== undefined && (
-              <Badge tone={stateTones[escalation.state]}>
-                {escalation.state}
-              </Badge>
+              <Badge tone={stateTones[escalation.state]}>{escalation.state}</Badge>
             )}
           </span>
         }
@@ -185,18 +158,14 @@ export function EscalationDetailPage() {
               <CardContent>
                 {escalation.state !== "open" ? (
                   <p className="text-sm text-muted-foreground">
-                    Already{" "}
-                    <span className="font-medium text-foreground">
-                      {escalation.state}
-                    </span>
-                    .
+                    Already <span className="font-medium text-foreground">{escalation.state}</span>.
                   </p>
                 ) : agentsQ.isLoading ? (
                   <SpinnerOverlay />
                 ) : requestAgent === undefined ? (
                   <p className="border border-warning/30 bg-warning/10 px-3 py-2 text-sm text-warning">
-                    No request schema for{" "}
-                    <code className="font-mono">{escalation.agentDefId}</code>.
+                    No request schema for <code className="font-mono">{escalation.agentDefId}</code>
+                    .
                   </p>
                 ) : isNeverSchema(requestAgent.returns as JsonSchema) ? (
                   // `never` return: the request was declared `-> never`,
@@ -208,18 +177,13 @@ export function EscalationDetailPage() {
                     <div className="border border-warning/40 bg-warning/10 px-3 py-2 text-sm text-warning">
                       <p className="font-medium">Cannot be answered.</p>
                       <p className="mt-1 text-xs">
-                        <code className="font-mono">
-                          {escalation.agentDefId}
-                        </code>{" "}
-                        is declared{" "}
-                        <code className="font-mono">-&gt; never</code> — no
-                        value can satisfy it. Cancel the parent run to resolve.
+                        <code className="font-mono">{escalation.agentDefId}</code> is declared{" "}
+                        <code className="font-mono">-&gt; never</code> — no value can satisfy it.
+                        Cancel the parent run to resolve.
                       </p>
                     </div>
                     <div className="flex justify-end gap-2">
-                      <Link
-                        to={`/project/${projectId}/runs/${escalation.rootDelegationId}`}
-                      >
+                      <Link to={`/project/${projectId}/runs/${escalation.rootDelegationId}`}>
                         <Button type="button" variant="secondary">
                           Open run
                         </Button>
@@ -261,10 +225,7 @@ export function EscalationDetailPage() {
               </CardHeader>
               <CardContent>
                 <dl className="space-y-3 text-sm">
-                  <MetadataRow
-                    label="ID"
-                    value={<CopyableId value={escalation.id} />}
-                  />
+                  <MetadataRow label="ID" value={<CopyableId value={escalation.id} />} />
                   <MetadataRow
                     label="Request"
                     value={
@@ -300,10 +261,7 @@ export function EscalationDetailPage() {
                       </Link>
                     }
                   />
-                  <MetadataRow
-                    label="Created"
-                    value={formatDateTime(escalation.createdAt)}
-                  />
+                  <MetadataRow label="Created" value={formatDateTime(escalation.createdAt)} />
                 </dl>
               </CardContent>
             </Card>
@@ -337,14 +295,11 @@ export function EscalationDetailPage() {
       >
         <p className="text-sm text-foreground">
           Are you sure you want to cancel the run{" "}
-          <code className="font-mono">{runName ?? escalation?.rootDelegationId}</code>?
-          All active delegations under this run will be terminated.
+          <code className="font-mono">{runName ?? escalation?.rootDelegationId}</code>? All active
+          delegations under this run will be terminated.
         </p>
         <DialogFooter>
-          <Button
-            variant="secondary"
-            onClick={() => setCancelDialogOpen(false)}
-          >
+          <Button variant="secondary" onClick={() => setCancelDialogOpen(false)}>
             Keep running
           </Button>
           <Button
