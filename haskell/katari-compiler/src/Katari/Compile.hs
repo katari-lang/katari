@@ -316,7 +316,6 @@ data TypecheckCacheEntry = TypecheckCacheEntry
 data TypecheckAccumulator = TypecheckAccumulator
   { accImportedTypes :: Map QualifiedName (SemanticType Resolved),
     accZonkedModules :: Map Text (Module Zonked),
-    accZonkedModuleNames :: Map Text Text,
     accZonkedTypeEnvironment :: Map VariableResolution (SemanticType Resolved),
     accSolverResult :: SolverResult,
     accDiagnostics :: [Diagnostic],
@@ -349,7 +348,6 @@ typecheckModules idResult moduleLevels sourceHashes inputCache =
         TypecheckAccumulator
           { accImportedTypes = Map.empty,
             accZonkedModules = Map.empty,
-            accZonkedModuleNames = Map.empty,
             accZonkedTypeEnvironment = Map.empty,
             accSolverResult = SolverResult {typeSubstitution = Map.empty, requestSubstitution = Map.empty},
             accDiagnostics = [],
@@ -362,7 +360,6 @@ typecheckModules idResult moduleLevels sourceHashes inputCache =
       mergedZonkResult =
         ZonkResult
           { zonkedModules = final.accZonkedModules,
-            zonkedModuleNames = final.accZonkedModuleNames,
             zonkedTypeEnvironment = final.accZonkedTypeEnvironment
           }
    in ( final.accSolverResult,
@@ -396,7 +393,6 @@ mergeModuleResult accumulator result =
   accumulator
     { accImportedTypes = Map.union accumulator.accImportedTypes result.mtrImportedTypes,
       accZonkedModules = Map.insert result.mtrModuleName result.mtrZonkedModule accumulator.accZonkedModules,
-      accZonkedModuleNames = Map.insert result.mtrModuleName result.mtrModuleName accumulator.accZonkedModuleNames,
       accZonkedTypeEnvironment = Map.union accumulator.accZonkedTypeEnvironment result.mtrTypeEnvironment,
       accSolverResult =
         SolverResult
@@ -499,7 +495,6 @@ recompileModuleToResult idResult moduleName accumulator =
       sccInitial =
         accumulator
           { accZonkedModules = Map.empty,
-            accZonkedModuleNames = Map.empty,
             accZonkedTypeEnvironment = accumulator.accZonkedTypeEnvironment,
             accSolverResult = SolverResult {typeSubstitution = Map.empty, requestSubstitution = Map.empty},
             accDiagnostics = [],
@@ -615,7 +610,6 @@ typecheckOneSCC idResult moduleName accumulator sccQualifiedNames =
    in TypecheckAccumulator
         { accImportedTypes = Map.union accumulator.accImportedTypes sccInterface,
           accZonkedModules = accumulator.accZonkedModules,
-          accZonkedModuleNames = accumulator.accZonkedModuleNames,
           accZonkedTypeEnvironment = Map.union accumulator.accZonkedTypeEnvironment ownedTypeEnvironment,
           accSolverResult =
             SolverResult

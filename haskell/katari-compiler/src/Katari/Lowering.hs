@@ -433,10 +433,8 @@ lowerModule idResult zonkResult moduleName moduleAST =
 -- | Internal: lower one module (register + lower bodies).
 lowerModuleM :: Text -> AST.Module Zonked -> Lower ()
 lowerModuleM moduleName moduleAST = do
-  zonkResult <- asks (.zonkResult)
-  let resolvedModuleName = Map.findWithDefault moduleName moduleName zonkResult.zonkedModuleNames
-  mapM_ (registerDecl resolvedModuleName) moduleAST.declarations
-  mapM_ (lowerOneDeclaration resolvedModuleName) moduleAST.declarations
+  mapM_ (registerDecl moduleName) moduleAST.declarations
+  mapM_ (lowerOneDeclaration moduleName) moduleAST.declarations
 
 -- | Merge per-module IR fragments into a single 'IRModule'. BlockIds
 -- and VarIds are offset so they don't collide across modules.

@@ -78,7 +78,6 @@ import Katari.Typechecker.Solver (SolverResult (..))
 
 data ZonkResult = ZonkResult
   { zonkedModules :: Map Text (Module Zonked),
-    zonkedModuleNames :: Map Text Text,
     zonkedTypeEnvironment :: Map VariableResolution (SemanticType Resolved)
   }
   deriving (Show)
@@ -775,7 +774,6 @@ zonk idResult cgResult solverResult =
       result =
         ZonkResult
           { zonkedModules = modulesResult,
-            zonkedModuleNames = Map.mapWithKey (\moduleName _ -> moduleName) idResult.identifiedModules,
             zonkedTypeEnvironment = envResult
           }
    in (result, reverse errs)
