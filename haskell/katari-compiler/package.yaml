@@ -34,6 +34,7 @@ library:
     - Katari.Typechecker.ModuleInterface
     - Katari.Typechecker.Zonker
     - Katari.Typechecker.Exhaustive
+    - Katari.Typechecker
     - Katari.IR
     - Katari.Lowering
     - Katari.Schema
