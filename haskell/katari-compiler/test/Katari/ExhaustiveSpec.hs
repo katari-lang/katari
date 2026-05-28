@@ -14,12 +14,13 @@ import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 import Katari.Compile qualified as Compile
 import Katari.Diagnostic (Diagnostic (..))
+import Katari.Id (VariableResolution (..))
 import Katari.Lexer qualified as Lexer
 import Katari.Parser qualified as Parser
-import Katari.Compile qualified as Compile
-import Katari.Typechecker.Exhaustive (checkExhaustive, toDiagnostic)
+import Katari.Typechecker.Exhaustive (ExhaustiveEnv (..), checkExhaustiveModule, toDiagnostic)
+import Katari.Typechecker.Identifier (IdentifierResult (..))
 import Katari.Typechecker.Solver (solve)
-import Katari.Typechecker.Zonker (zonk)
+import Katari.Typechecker.Zonker (ZonkResult (..), zonk)
 import Test.Hspec (Spec, describe, it, shouldBe)
 
 -- ---------------------------------------------------------------------------
@@ -39,8 +40,24 @@ runExhaustive source = do
         let (cgResult, _) = Compile.generateConstraintsAll idResult
             (solverResult, _) = solve cgResult
             (zonkResult, _) = zonk "main" idResult cgResult solverResult
-            exhaustiveErrors = checkExhaustive idResult zonkResult
-        pure (map toDiagnostic exhaustiveErrors)
+            topLevels =
+              Map.fromList
+                [ (qn, ty)
+                  | (_, perMod) <- Map.toList zonkResult.zonkedTypeEnvironment,
+                    (ResolvedTopLevel qn, ty) <- Map.toList perMod
+                ]
+            errorsAcross =
+              concat
+                [ checkExhaustiveModule
+                    ExhaustiveEnv
+                      { constructors = idResult.identifiedConstructors,
+                        topLevelTypes = topLevels,
+                        localTypeEnv = Map.findWithDefault Map.empty moduleName zonkResult.zonkedTypeEnvironment
+                      }
+                    moduleAST
+                  | (moduleName, moduleAST) <- Map.toList zonkResult.zonkedModules
+                ]
+        pure (map toDiagnostic errorsAcross)
       (_, errs) -> fail ("identify failure: " ++ show errs)
 
 -- | True iff @diags@ contains at least one error / warning with the given code.

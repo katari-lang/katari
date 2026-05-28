@@ -61,7 +61,7 @@ import Katari.Stdlib qualified as Stdlib
 import Katari.Typechecker qualified as Typechecker
 import Katari.Typechecker.ConstraintGenerator (ConstraintGenResult (..), VariableSupply (..))
 import Katari.Typechecker.ConstraintGenerator qualified as CG
-import Katari.Typechecker.Exhaustive (checkExhaustive)
+import Katari.Typechecker.Exhaustive (ExhaustiveEnv (..), checkExhaustiveModule)
 import Katari.Typechecker.Exhaustive qualified as Exhaustive
 import Katari.Typechecker.Identifier
   ( ConstructorData (..),
@@ -221,7 +221,25 @@ compile emitLog input = do
         typecheckModules idResult moduleLevels sourceHashes input.cache
   for_ typecheckLogs emitLog
 
-  let exhaustiveDiags = map Exhaustive.toDiagnostic (checkExhaustive idResult mergedZonkResult)
+  let exhaustiveEnv =
+        ExhaustiveEnv
+          { constructors = idResult.identifiedConstructors,
+            topLevelTypes =
+              Map.fromList
+                [ (qualifiedName, ty)
+                  | (_, perModuleEnv) <- Map.toList mergedZonkResult.zonkedTypeEnvironment,
+                    (ResolvedTopLevel qualifiedName, ty) <- Map.toList perModuleEnv
+                ],
+            localTypeEnv = Map.empty -- replaced per module below
+          }
+      exhaustiveDiags =
+        concat
+          [ map Exhaustive.toDiagnostic $
+              checkExhaustiveModule
+                exhaustiveEnv {localTypeEnv = Map.findWithDefault Map.empty moduleName mergedZonkResult.zonkedTypeEnvironment}
+                moduleAST
+            | (moduleName, moduleAST) <- Map.toList mergedZonkResult.zonkedModules
+          ]
       preLowerDiags =
         parseDiags
           <> idDiags
