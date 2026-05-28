@@ -7,11 +7,12 @@ import Katari.Compile qualified as C
 import Katari.Query (HoverInfo (..), lookupAtPosition)
 import Katari.SemanticType qualified as ST
 import Katari.SourceSpan (Position (..))
+import Katari.TestSupport (compileSync)
 import Test.Hspec
 
 prepare :: Text -> C.CompileResult
 prepare src =
-  C.compileSync
+  compileSync
     C.CompileInput
       { C.sources =
           Map.singleton

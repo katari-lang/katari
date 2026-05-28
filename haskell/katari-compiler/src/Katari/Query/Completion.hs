@@ -36,7 +36,7 @@ module Katari.Query.Completion
   )
 where
 
-import Katari.Query (QuerySnapshot (..))
+import Katari.Query (QuerySnapshot (..), lookupTopLevelType, lookupTypeInModule)
 
 import Control.Monad (foldM)
 import Data.Map.Strict (Map)
@@ -53,11 +53,9 @@ import Katari.SemanticType.Render (renderSemanticType)
 import Katari.SourceSpan (Position, SourceSpan (..))
 import Katari.Typechecker.Identifier
   ( ConstructorData (..),
-    IdentifierResult (..),
     SymbolEntry (..),
   )
 import Katari.Typechecker.ScopeIndex qualified as Scope
-import Katari.Typechecker.Zonker (ZonkResult (..), lookupTopLevelType, lookupTypeInModule)
 
 -- | Convenience alias for the resolved semantic type used in
 -- label / member completion signatures.
@@ -104,20 +102,18 @@ completionsAt snap filePath position =
       topLevelItems = case currentModule of
         Nothing -> []
         Just moduleName ->
-          let visible = Map.findWithDefault Map.empty moduleName idResult.moduleVisibleSymbols
+          let visible = Map.findWithDefault Map.empty moduleName snap.visibleSymbols
            in concatMap symbolEntryToItems (Map.toList visible)
    in mergeByLabel (localItems ++ topLevelItems)
   where
-    idResult = snap.identifierResult
-    zonkResult = snap.zonkResult
-    currentModule = findModuleNameByFilePath zonkResult filePath
+    currentModule = findModuleNameByFilePath snap filePath
     renderType = renderSemanticType
 
     -- Locals: walk the scope chain at position. Each frame is flattened
     -- with innermost first (= inner shadows outer on collisions).
     localsAt :: [CompletionItem]
     localsAt =
-      let frames = Scope.scopeAt idResult.scopeIndex filePath position
+      let frames = Scope.scopeAt snap.scopeIndex filePath position
        in concatMap symbolEntryToItems (Map.toList (Map.unions frames))
 
     -- A scope-level SymbolEntry may carry multiple slots (e.g. a data
@@ -134,16 +130,16 @@ completionsAt snap filePath position =
 
     lookupTypeHere :: VariableResolution -> Maybe (SemanticType Resolved)
     lookupTypeHere variableResolution = case (currentModule, variableResolution) of
-      (_, ResolvedTopLevel qualifiedName) -> lookupTopLevelType qualifiedName zonkResult
-      (Just moduleName, ResolvedLocal _) -> lookupTypeInModule moduleName variableResolution zonkResult
+      (_, ResolvedTopLevel qualifiedName) -> lookupTopLevelType qualifiedName snap
+      (Just moduleName, ResolvedLocal _) -> lookupTypeInModule moduleName variableResolution snap
       _ -> Nothing
 
     mkVariableItem :: Text -> VariableResolution -> Maybe CompletionItem
     mkVariableItem name variableResolution = case variableResolution of
       ResolvedTopLevel qualifiedName -> do
-        _vdata <- Map.lookup qualifiedName idResult.identifiedVariables
-        let isCtor = Map.member qualifiedName idResult.identifiedConstructors
-            isReq = Map.member qualifiedName idResult.identifiedRequests
+        _vdata <- Map.lookup qualifiedName snap.variables
+        let isCtor = Map.member qualifiedName snap.constructors
+            isReq = Map.member qualifiedName snap.requests
             kind
               | isCtor = CKConstructor
               | isReq = CKRequest
@@ -168,7 +164,7 @@ completionsAt snap filePath position =
 
     mkTypeItem :: Text -> QualifiedName -> Maybe CompletionItem
     mkTypeItem name qualifiedName = do
-      _ <- Map.lookup qualifiedName idResult.identifiedTypes
+      _ <- Map.lookup qualifiedName snap.types
       pure
         CompletionItem
           { ciLabel = name,
@@ -179,7 +175,7 @@ completionsAt snap filePath position =
 
     mkModuleItem :: Text -> Text -> Maybe CompletionItem
     mkModuleItem name moduleName = do
-      _ <- Map.lookup moduleName idResult.identifiedModules
+      _ <- Map.lookup moduleName snap.modules
       pure
         CompletionItem
           { ciLabel = name,
@@ -191,13 +187,13 @@ completionsAt snap filePath position =
 -- | Locate the module name that owns @filePath@. Mirrors the same lookup
 -- used by hover / def-jump (= scan zonked modules by sourceSpan).
 findModuleIdByFilePath :: QuerySnapshot -> FilePath -> Maybe Text
-findModuleIdByFilePath snap = findModuleNameByFilePath snap.zonkResult
+findModuleIdByFilePath = findModuleNameByFilePath
 
-findModuleNameByFilePath :: ZonkResult -> FilePath -> Maybe Text
-findModuleNameByFilePath zonkResult filePath =
+findModuleNameByFilePath :: QuerySnapshot -> FilePath -> Maybe Text
+findModuleNameByFilePath snap filePath =
   listToMaybe
     [ moduleName
-      | (moduleName, m :: Module Zonked) <- Map.toList zonkResult.zonkedModules,
+      | (moduleName, m :: Module Zonked) <- Map.toList snap.zonkedModules,
         m.sourceSpan.filePath == filePath
     ]
 
@@ -234,25 +230,23 @@ resolveDottedPath snap filePath position dotted = do
     [] -> Nothing
     (rootSeg : rest) -> do
       root <- resolveRoot rootSeg
-      foldM (stepAnchor idResult zonkResult) root rest
+      foldM (stepAnchor snap) root rest
   where
-    idResult = snap.identifierResult
-    zonkResult = snap.zonkResult
 
     resolveRoot :: Text -> Maybe CompletionAnchor
     resolveRoot name = resolveLocal name `orElse` resolveModuleScoped name
 
     -- Locals (via ScopeIndex) — innermost shadows outer.
     resolveLocal name = do
-      let frames = Scope.scopeAt idResult.scopeIndex filePath position
+      let frames = Scope.scopeAt snap.scopeIndex filePath position
           merged = Map.unions frames
       entry <- Map.lookup name merged
       anchorFromEntry entry
 
     -- Module-level visibility (= imports + own decls + auto-injected).
     resolveModuleScoped name = do
-      moduleName <- findModuleNameByFilePath zonkResult filePath
-      visible <- Map.lookup moduleName idResult.moduleVisibleSymbols
+      moduleName <- findModuleNameByFilePath snap filePath
+      visible <- Map.lookup moduleName snap.visibleSymbols
       entry <- Map.lookup name visible
       anchorFromEntry entry
 
@@ -263,47 +257,43 @@ resolveDottedPath snap filePath position dotted = do
 
     variableAnchor :: VariableResolution -> Maybe CompletionAnchor
     variableAnchor variableResolution = case variableResolution of
-      ResolvedTopLevel qualifiedName -> AnchorTyped <$> lookupTopLevelType qualifiedName zonkResult
+      ResolvedTopLevel qualifiedName -> AnchorTyped <$> lookupTopLevelType qualifiedName snap
       ResolvedLocal _ -> do
-        moduleName <- findModuleNameByFilePath zonkResult filePath
-        AnchorTyped <$> lookupTypeInModule moduleName variableResolution zonkResult
+        moduleName <- findModuleNameByFilePath snap filePath
+        AnchorTyped <$> lookupTypeInModule moduleName variableResolution snap
 
 -- | Walk one path segment forward from an existing anchor.
 stepAnchor ::
-  IdentifierResult ->
-  ZonkResult ->
+  QuerySnapshot ->
   CompletionAnchor ->
   Text ->
   Maybe CompletionAnchor
-stepAnchor idResult zonkResult anchor segment = case anchor of
+stepAnchor snap anchor segment = case anchor of
   AnchorModule moduleName -> do
-    exports <- Map.lookup moduleName idResult.moduleExports
+    exports <- Map.lookup moduleName snap.exports
     entry <- Map.lookup segment exports
     (AnchorModule <$> entry.moduleSymbol)
       `orElse` ( entry.variableSymbol
                    >>= \case
                      ResolvedTopLevel qualifiedName ->
-                       AnchorTyped <$> lookupTopLevelType qualifiedName zonkResult
+                       AnchorTyped <$> lookupTopLevelType qualifiedName snap
                      ResolvedLocal _ -> Nothing
                )
-  AnchorTyped ty -> AnchorTyped <$> fieldTypeOf idResult zonkResult ty segment
+  AnchorTyped ty -> AnchorTyped <$> fieldTypeOf snap ty segment
 
--- | Project a single field out of a value-side semantic type. Mirrors
--- the dispatch table 'completionsOfFields' uses, but returns the
--- field's type rather than building completion items.
+-- | Project a single field out of a value-side semantic type.
 fieldTypeOf ::
-  IdentifierResult ->
-  ZonkResult ->
+  QuerySnapshot ->
   SemTy ->
   Text ->
   Maybe SemTy
-fieldTypeOf idResult zonkResult ty field = case ty of
+fieldTypeOf snap ty field = case ty of
   SemanticTypeData typeId -> do
-    parameters <- dataConstructorParameters idResult zonkResult typeId
+    parameters <- dataConstructorParameters snap typeId
     Map.lookup field parameters
   SemanticTypeObject fields -> Map.lookup field fields
   SemanticTypeUnion branches -> do
-    let projected = mapMaybe (\branch -> fieldTypeOf idResult zonkResult branch field) branches
+    let projected = mapMaybe (\branch -> fieldTypeOf snap branch field) branches
     if length projected == length branches
       then Just (unionOfTypes projected)
       else Nothing
@@ -312,18 +302,17 @@ fieldTypeOf idResult zonkResult ty field = case ty of
 -- | Field map of the constructor that produces values of @typeQName@:
 -- the @x: integer, y: string@ portion of @data Foo(x: integer, y: string)@.
 dataConstructorParameters ::
-  IdentifierResult ->
-  ZonkResult ->
+  QuerySnapshot ->
   QualifiedName ->
   Maybe (Map Text SemTy)
-dataConstructorParameters idResult zonkResult typeQName = do
+dataConstructorParameters snap typeQName = do
   (ctorQName, _cdata) <-
     listToMaybe
       [ (qualifiedName, c)
-        | (qualifiedName, c) <- Map.toList idResult.identifiedConstructors,
+        | (qualifiedName, c) <- Map.toList snap.constructors,
           c.constructorTypeQName == typeQName
       ]
-  ctorType <- lookupTopLevelType ctorQName zonkResult
+  ctorType <- lookupTopLevelType ctorQName snap
   case ctorType of
     SemanticTypeFunction parameters _ _ -> Just parameters
     _ -> Nothing
@@ -344,14 +333,12 @@ completionsOfModule ::
   Text ->
   [CompletionItem]
 completionsOfModule snap moduleName =
-  let idResult = snap.identifierResult
-      zonkResult = snap.zonkResult
-      exports = Map.findWithDefault Map.empty moduleName idResult.moduleExports
+  let exports = Map.findWithDefault Map.empty moduleName snap.exports
       entryToItems (name, entry) =
         catMaybes
-          [ entry.variableSymbol >>= mkVariableItemFor idResult zonkResult name,
-            entry.typeSymbol >>= mkTypeItemFor idResult name,
-            entry.moduleSymbol >>= mkModuleItemFor idResult name
+          [ entry.variableSymbol >>= mkVariableItemFor snap name,
+            entry.typeSymbol >>= mkTypeItemFor snap name,
+            entry.moduleSymbol >>= mkModuleItemFor snap name
           ]
    in mergeByLabel (concatMap entryToItems (Map.toList exports))
 
@@ -367,14 +354,12 @@ completionsOfFields ::
   SemTy ->
   [CompletionItem]
 completionsOfFields snap ty =
-  let idResult = snap.identifierResult
-      zonkResult = snap.zonkResult
-      renderType = renderSemanticType
+  let renderType = renderSemanticType
       fields = fieldsOf ty
       fieldsOf :: SemTy -> Map Text SemTy
       fieldsOf = \case
         SemanticTypeData typeId ->
-          fromMaybe Map.empty (dataConstructorParameters idResult zonkResult typeId)
+          fromMaybe Map.empty (dataConstructorParameters snap typeId)
         SemanticTypeObject m -> m
         SemanticTypeUnion branches ->
           let perBranch = map fieldsOf branches
@@ -429,22 +414,21 @@ completionsOfCallLabels ty usedLabels =
 -- ---------------------------------------------------------------------------
 
 mkVariableItemFor ::
-  IdentifierResult ->
-  ZonkResult ->
+  QuerySnapshot ->
   Text ->
   VariableResolution ->
   Maybe CompletionItem
-mkVariableItemFor idResult zonkResult name variableResolution = case variableResolution of
+mkVariableItemFor snap name variableResolution = case variableResolution of
   ResolvedTopLevel qualifiedName -> do
-    _vdata <- Map.lookup qualifiedName idResult.identifiedVariables
-    let isCtor = Map.member qualifiedName idResult.identifiedConstructors
-        isReq = Map.member qualifiedName idResult.identifiedRequests
+    _vdata <- Map.lookup qualifiedName snap.variables
+    let isCtor = Map.member qualifiedName snap.constructors
+        isReq = Map.member qualifiedName snap.requests
         kind
           | isCtor = CKConstructor
           | isReq = CKRequest
           | otherwise = CKAgent
         renderType = renderSemanticType
-        detail = fmap renderType (lookupTopLevelType qualifiedName zonkResult)
+        detail = fmap renderType (lookupTopLevelType qualifiedName snap)
     pure
       CompletionItem
         { ciLabel = name,
@@ -462,12 +446,12 @@ mkVariableItemFor idResult zonkResult name variableResolution = case variableRes
         }
 
 mkTypeItemFor ::
-  IdentifierResult ->
+  QuerySnapshot ->
   Text ->
   QualifiedName ->
   Maybe CompletionItem
-mkTypeItemFor idResult name qualifiedName = do
-  _ <- Map.lookup qualifiedName idResult.identifiedTypes
+mkTypeItemFor snap name qualifiedName = do
+  _ <- Map.lookup qualifiedName snap.types
   pure
     CompletionItem
       { ciLabel = name,
@@ -477,12 +461,12 @@ mkTypeItemFor idResult name qualifiedName = do
       }
 
 mkModuleItemFor ::
-  IdentifierResult ->
+  QuerySnapshot ->
   Text ->
   Text ->
   Maybe CompletionItem
-mkModuleItemFor idResult name moduleName = do
-  _ <- Map.lookup moduleName idResult.identifiedModules
+mkModuleItemFor snap name moduleName = do
+  _ <- Map.lookup moduleName snap.modules
   pure
     CompletionItem
       { ciLabel = name,

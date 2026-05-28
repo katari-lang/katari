@@ -12,8 +12,9 @@ import Data.Maybe (isJust, listToMaybe)
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as Text
-import Katari.Compile qualified as Compile
 import Katari.Id qualified as Id
+import Katari.TestSupport (ZonkResult (..), zonkAll)
+import Katari.TestSupport qualified as TestSupport
 import Katari.IR
 import Katari.Lexer qualified as Lexer
 import Katari.Lowering (LowerContext (..), LoweringError (..), lowerModule, mergeModuleLowerings)
@@ -24,7 +25,6 @@ import Katari.Typechecker.ConstraintGenerator (ConstraintGenResult (..), Variabl
 import Katari.Typechecker.Identifier (IdentifierResult (..))
 import Katari.Typechecker.NormalizedType (NormalizedType (..))
 import Katari.Typechecker.Solver (SolverResult (..))
-import Katari.Typechecker.Zonker (ZonkResult (..), zonk)
 import Test.Hspec
 
 -- ===========================================================================
@@ -39,9 +39,9 @@ lowerSource src =
       (parsed, parseErrors) = Parser.parse "<test>" stream
    in case parseErrors of
         (_ : _) -> fail ("parse failure: " ++ show parseErrors)
-        [] -> case Compile.identifyWithStdlib (Map.singleton "main" parsed) of
+        [] -> case TestSupport.identifyWithStdlib (Map.singleton "main" parsed) of
           (idResult, []) -> do
-            let (cg, _) = Compile.generateConstraintsAll idResult
+            let (cg, _) = TestSupport.generateConstraintsAll idResult
                 solver =
                   SolverResult
                     { typeSubstitution =
@@ -49,7 +49,7 @@ lowerSource src =
                       requestSubstitution =
                         Map.fromList [(RequestVariableId i, Set.empty) | i <- [0 .. cg.variableSupply.requestVarSupply - 1]]
                     }
-                (zr, _) = zonk "main" idResult cg solver
+                (zr, _) = zonkAll "main" idResult cg solver
                 topLevels =
                   Map.fromList
                     [ (qn, ty)

@@ -82,7 +82,7 @@ export function ObjectField({
   }
 
   return (
-    <div className="space-y-3 border-l-2 border-border pl-3">
+    <div className="space-y-3 border-l border-border pl-3">
       {visibleEntries.map(([key, sub]) => (
         <SchemaField
           key={key}
@@ -160,49 +160,52 @@ function DynamicKeyValueEditor({
   }
 
   return (
-    <div className="space-y-4 border-l-2 border-border pl-3">
-      {rows.length === 0 ? (
-        <p className="text-xs text-subtle-foreground">No entries yet.</p>
-      ) : (
-        rows.map((row) => (
-          <div key={row.id} className="space-y-1.5">
-            <div className="flex items-center gap-2">
-              <Input
-                value={row.key}
-                onChange={(e) => renameKey(row.id, e.target.value)}
-                placeholder="key"
-                className="h-8 flex-1 text-xs font-mono"
-              />
-              <button
-                type="button"
-                onClick={() => removeRow(row.id)}
-                className="inline-flex h-7 w-7 shrink-0 items-center justify-center text-subtle-foreground transition-colors hover:bg-danger/10 hover:text-danger hover:cursor-pointer"
-                aria-label={`Remove entry ${row.key}`}
-              >
-                <Trash2 className="size-3.5" />
-              </button>
-            </div>
-            <div className="pl-2">
-              {valueSchema === true ? (
-                <AnyField
-                  value={row.value}
-                  onChange={(v) => changeValue(row.id, v)}
+    <div>
+      <span className="text-xs font-mono text-muted-foreground">record</span>
+      <div className="space-y-4 border-l border-border pl-3">
+        {rows.length === 0 ? (
+          <p className="text-xs text-subtle-foreground pt-2">No entries yet.</p>
+        ) : (
+          rows.map((row) => (
+            <div key={row.id} className="space-y-1.5">
+              <div className="flex items-start gap-2">
+                <Input
+                  value={row.key}
+                  onChange={(e) => renameKey(row.id, e.target.value)}
+                  placeholder="key"
+                  className="h-8 text-xs font-mono max-w-48 w-full"
                 />
-              ) : (
-                <SchemaField
-                  schema={valueSchema}
-                  value={row.value}
-                  onChange={(v) => changeValue(row.id, v)}
-                />
-              )}
+                <button
+                  type="button"
+                  onClick={() => removeRow(row.id)}
+                  className="inline-flex h-7 w-7 shrink-0 items-center justify-center text-subtle-foreground transition-colors hover:bg-danger/10 hover:text-danger hover:cursor-pointer"
+                  aria-label={`Remove entry ${row.key}`}
+                >
+                  <Trash2 className="size-3.5" />
+                </button>
+              </div>
+              <div className="pl-2">
+                {valueSchema === true ? (
+                  <AnyField
+                    value={row.value}
+                    onChange={(v) => changeValue(row.id, v)}
+                  />
+                ) : (
+                  <SchemaField
+                    schema={valueSchema}
+                    value={row.value}
+                    onChange={(v) => changeValue(row.id, v)}
+                  />
+                )}
+              </div>
             </div>
-          </div>
-        ))
-      )}
-      <Button type="button" variant="secondary" size="sm" onClick={addRow}>
-        <Plus className="size-3.5" />
-        Add field
-      </Button>
+          ))
+        )}
+        <Button type="button" variant="secondary" size="sm" onClick={addRow}>
+          <Plus className="size-3.5" />
+          Add field
+        </Button>
+      </div>
     </div>
   );
 }

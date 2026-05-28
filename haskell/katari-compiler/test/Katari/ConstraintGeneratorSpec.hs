@@ -7,6 +7,7 @@ import Data.Set qualified as Set
 import Data.Text (Text)
 import Katari.Compile qualified as Compile
 import Katari.Diagnostic (Diagnostic, hasErrors)
+import Katari.TestSupport qualified as TestSupport
 import Katari.Id
   ( QualifiedName (..),
     VariableResolution (..),
@@ -41,9 +42,9 @@ runOneWithIdentifier src =
       (parsed, parseErrors) = Parser.parse "<test>" stream
    in case parseErrors of
         (_ : _) -> fail ("parse failure: " ++ show parseErrors)
-        [] -> case Compile.identifyWithStdlib (Map.singleton "main" parsed) of
+        [] -> case TestSupport.identifyWithStdlib (Map.singleton "main" parsed) of
           (result, []) ->
-            let (cg, errs) = Compile.generateConstraintsAll result
+            let (cg, errs) = TestSupport.generateConstraintsAll result
              in pure (cg, errs, result)
           (_, errs) -> fail ("identify failure: " ++ show errs)
 
@@ -55,7 +56,7 @@ compileOne :: Text -> IO [Diagnostic]
 compileOne src =
   let entry = Compile.SourceEntry {filePath = "<test>", sourceText = src}
       input = Compile.CompileInput {sources = Map.singleton "main" entry, cache = Map.empty}
-      result = Compile.compileSync input
+      result = TestSupport.compileSync input
    in pure result.diagnostics
 
 countTypeConstraints :: ConstraintGenResult -> Int
@@ -187,10 +188,10 @@ multipleModules = describe "multiple modules" $ do
         (mainMod, mainErrors) = Parser.parse "<test>" mainStream
     case libErrors ++ mainErrors of
       (_ : _) -> expectationFailure ("parse: " ++ show (libErrors ++ mainErrors))
-      [] -> case Compile.identifyWithStdlib (Map.fromList [("lib", libMod), ("main", mainMod)]) of
+      [] -> case TestSupport.identifyWithStdlib (Map.fromList [("lib", libMod), ("main", mainMod)]) of
         (_, e : es) -> expectationFailure ("identify errors: " ++ show (e : es))
         (result, []) -> do
-          let (cg, cgErrors) = Compile.generateConstraintsAll result
+          let (cg, cgErrors) = TestSupport.generateConstraintsAll result
           cgErrors `shouldBe` []
           -- 同じ helper VariableId に対して typeEnvironment に entry が一つだけ
           -- (= 同一 type var が両 module で参照されている)
@@ -785,10 +786,10 @@ dataNameClash = describe "cross-module data name clash" $ do
     case errorsA ++ errorsB of
       (_ : _) -> expectationFailure ("parse: " ++ show (errorsA ++ errorsB))
       [] ->
-        case Compile.identifyWithStdlib (Map.fromList [("a", parsedA), ("b", parsedB)]) of
+        case TestSupport.identifyWithStdlib (Map.fromList [("a", parsedA), ("b", parsedB)]) of
           (_, e : es) -> expectationFailure ("identify errors: " ++ show (e : es))
           (result, []) -> do
-            let (cg, cgErrors) = Compile.generateConstraintsAll result
+            let (cg, cgErrors) = TestSupport.generateConstraintsAll result
             cgErrors `shouldBe` []
             -- 各モジュールの "foo" type に発行された QualifiedName を集める。
             let fooTypeQNames =

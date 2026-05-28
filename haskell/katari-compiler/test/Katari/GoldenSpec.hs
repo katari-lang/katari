@@ -27,8 +27,8 @@ import Katari.Compile
   ( CompileInput (..),
     CompileResult (..),
     SourceEntry (..),
-    compileSync,
   )
+import Katari.TestSupport (compileSync)
 import Katari.Diagnostic (Diagnostic)
 import Katari.Diagnostic.Render (renderDiagnostic)
 import System.Directory (doesFileExist, listDirectory)

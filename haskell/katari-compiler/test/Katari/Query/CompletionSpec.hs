@@ -7,31 +7,24 @@ import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Katari.Compile qualified as C
-import Katari.Compile qualified as Compile
-import Katari.Lexer qualified as Lexer
-import Katari.Parser qualified as Parser
 import Katari.Query qualified as Query
 import Katari.Query.Completion
 import Katari.SemanticType (SemanticType (..), emptyRequest)
 import Katari.SourceSpan (Position (..))
-import Katari.Typechecker.Identifier
-  ( IdentifierResult (..),
-    SymbolEntry (..),
-  )
-import Katari.Typechecker.Zonker (ZonkResult (..))
+import Katari.TestSupport (compileSync)
 import Test.Hspec
 
 -- ---------------------------------------------------------------------------
 -- Helpers
 -- ---------------------------------------------------------------------------
 
--- | Compile a single-module program and return the IdentifierResult +
--- ZonkResult. Fails the test if compilation produced any error-severity
--- diagnostic.
+-- | Compile a single-module program and return the resulting
+-- 'QuerySnapshot'. Fails the test if compilation produced any
+-- error-severity diagnostic.
 prepare :: Text -> IO Query.QuerySnapshot
 prepare src = do
   let result =
-        C.compileSync
+        compileSync
           C.CompileInput
             { C.sources =
                 Map.singleton
@@ -44,7 +37,7 @@ prepare src = do
 prepareMulti :: [(Text, FilePath, Text)] -> IO Query.QuerySnapshot
 prepareMulti sources = do
   let result =
-        C.compileSync
+        compileSync
           C.CompileInput
             { C.sources =
                 Map.fromList

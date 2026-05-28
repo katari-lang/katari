@@ -22,29 +22,20 @@ module Katari.Compile
 
     -- * Entry
     compile,
-
-    -- * Helpers (exposed for testing)
-    parseSources,
-    parsedStdlibModules,
-    identifyWithStdlib,
-    generateConstraintsAll,
-    compileSync,
   )
 where
 
 import Control.Concurrent.Async (Async, async, wait)
-import Control.Monad (when)
 import Control.Parallel.Strategies (parMap, rseq)
-import Data.IORef (modifyIORef', newIORef, readIORef)
-import Data.Maybe (mapMaybe)
 import Data.Foldable (foldl', for_)
 import Data.Hashable (hash)
+import Data.IORef (modifyIORef', newIORef, readIORef)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
+import Data.Maybe (mapMaybe)
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as Text
-import System.IO.Unsafe (unsafePerformIO)
 import Katari.AST
   ( Declaration (..),
     ImportDeclaration (..),
@@ -59,6 +50,7 @@ import Katari.Lexer qualified as Lexer
 import Katari.Lowering (ModuleLoweringResult (..), lowerModule, mergeModuleLowerings)
 import Katari.Lowering qualified as Lowering
 import Katari.Parser qualified as Parser
+import Katari.Prim (PrimRule)
 import Katari.Query qualified as Query
 import Katari.Schema
   ( DataDefs,
@@ -71,9 +63,7 @@ import Katari.Schema
 import Katari.SemanticType (Resolved, SemanticType)
 import Katari.SourceSpan (Position (..), SourceSpan (..))
 import Katari.Stdlib qualified as Stdlib
-import Katari.Typechecker qualified as Typechecker
-import Katari.Typechecker.ConstraintGenerator (ConstraintGenResult (..), VariableSupply (..))
-import Katari.Typechecker.ConstraintGenerator qualified as CG
+import Katari.Typechecker (ModuleTypecheckResult (..), TypecheckSubject (..), typecheckModule)
 import Katari.Typechecker.Exhaustive (ExhaustiveEnv (..), checkExhaustiveModule)
 import Katari.Typechecker.Exhaustive qualified as Exhaustive
 import Katari.Typechecker.Identifier
@@ -90,8 +80,7 @@ import Katari.Typechecker.Identifier
 import Katari.Typechecker.Identifier qualified as Identifier
 import Katari.Typechecker.ImportGraph (findImportCycles, topologicalSort)
 import Katari.Typechecker.ModuleInterface (ModuleInterface (..))
-import Katari.Typechecker.ScopeIndex (ScopeFrame (..), ScopeIndex (..), buildScopeIndex)
-import Katari.Typechecker.Zonker (ZonkResult (..))
+import Katari.Typechecker.ScopeIndex (ScopeFrame (..), buildScopeIndex)
 
 -- ===========================================================================
 -- Input / output
@@ -251,10 +240,14 @@ compile emitLog input = do
 
   -- Per-module Async typecheck. Each module's task waits for its direct
   -- imports' tasks before running.
-  (mergedZonkResult, typecheckDiags, typecheckCache) <-
+  let primRules = Map.mapMaybe (.variablePrimRule) idResult.identifiedVariables
+      knownRequests = Map.keysSet idResult.identifiedRequests
+  (zonkedModulesMap, typeEnvMap, typecheckDiags, typecheckCache) <-
     typecheckModulesAsync
       emitLog
       idResult
+      primRules
+      knownRequests
       orderedModules
       directDeps
       sourceHashes
@@ -266,7 +259,7 @@ compile emitLog input = do
             topLevelTypes =
               Map.fromList
                 [ (qualifiedName, ty)
-                  | (_, perModuleEnv) <- Map.toList mergedZonkResult.zonkedTypeEnvironment,
+                  | (_, perModuleEnv) <- Map.toList typeEnvMap,
                     (ResolvedTopLevel qualifiedName, ty) <- Map.toList perModuleEnv
                 ],
             localTypeEnv = Map.empty -- replaced per module below
@@ -275,9 +268,9 @@ compile emitLog input = do
         concat
           [ map Exhaustive.toDiagnostic $
               checkExhaustiveModule
-                exhaustiveEnv {localTypeEnv = Map.findWithDefault Map.empty moduleName mergedZonkResult.zonkedTypeEnvironment}
+                (exhaustiveEnv :: ExhaustiveEnv) {localTypeEnv = Map.findWithDefault Map.empty moduleName typeEnvMap}
                 moduleAST
-            | (moduleName, moduleAST) <- Map.toList mergedZonkResult.zonkedModules
+            | (moduleName, moduleAST) <- Map.toList zonkedModulesMap
           ]
       preLowerDiags =
         parseDiags
@@ -288,14 +281,14 @@ compile emitLog input = do
 
   let freshLowerInputs =
         [ (moduleName, moduleAST)
-          | (moduleName, moduleAST) <- Map.toList mergedZonkResult.zonkedModules,
+          | (moduleName, moduleAST) <- Map.toList zonkedModulesMap,
             Set.member moduleName cacheMissNames
         ]
   for_ (map fst freshLowerInputs) (emitLog . CompileLogLowering)
   let dataAnnotations =
         Map.unions
           [ collectDataAnnotations idResult.identifiedVariables m
-            | m <- Map.elems mergedZonkResult.zonkedModules
+            | m <- Map.elems zonkedModulesMap
           ]
       mergedDataDefs =
         buildDataDefs
@@ -306,7 +299,7 @@ compile emitLog input = do
         Lowering.LowerContext
           { Lowering.topLevelTypes = exhaustiveEnv.topLevelTypes,
             Lowering.dataDefs = mergedDataDefs,
-            Lowering.requestNames = Map.keysSet idResult.identifiedRequests,
+            Lowering.requestNames = knownRequests,
             Lowering.constructorNames = Map.keysSet idResult.identifiedConstructors
           }
   let (loweringResults, loweringDiags)
@@ -318,7 +311,7 @@ compile emitLog input = do
                     ( parMap
                         rseq
                         ( \(moduleName, moduleAST) ->
-                            let localEnv = Map.findWithDefault Map.empty moduleName mergedZonkResult.zonkedTypeEnvironment
+                            let localEnv = Map.findWithDefault Map.empty moduleName typeEnvMap
                                 (result, errors) = lowerModule lowerContext moduleName localEnv moduleAST
                              in (moduleName, (result, errors))
                         )
@@ -365,7 +358,19 @@ compile emitLog input = do
       { irModule = finalIR,
         schemaEntries = schema,
         diagnostics = allDiags,
-        querySnapshot = Query.buildQuerySnapshot idResult mergedZonkResult,
+        querySnapshot =
+          Query.QuerySnapshot
+            { Query.variables = idResult.identifiedVariables,
+              Query.types = idResult.identifiedTypes,
+              Query.requests = idResult.identifiedRequests,
+              Query.constructors = idResult.identifiedConstructors,
+              Query.modules = idResult.identifiedModules,
+              Query.scopeIndex = idResult.scopeIndex,
+              Query.visibleSymbols = idResult.moduleVisibleSymbols,
+              Query.exports = idResult.moduleExports,
+              Query.zonkedModules = zonkedModulesMap,
+              Query.typeEnv = typeEnvMap
+            },
         updatedCache = updatedCacheMap
       }
 
@@ -402,12 +407,19 @@ data TypecheckTaskResult = TypecheckTaskResult
 typecheckModulesAsync ::
   (CompileLog -> IO ()) ->
   IdentifierResult ->
+  Map QualifiedName PrimRule ->
+  Set.Set QualifiedName ->
   [ModuleName] ->
   Map ModuleName [ModuleName] ->
   Map ModuleName Int ->
   Map ModuleName ModuleCache ->
-  IO (ZonkResult, [Diagnostic], Map ModuleName TypecheckCacheEntry)
-typecheckModulesAsync emitLog idResult orderedModules directDeps sourceHashes inputCache = do
+  IO
+    ( Map ModuleName (Module Zonked),
+      Map ModuleName (Map VariableResolution (SemanticType Resolved)),
+      [Diagnostic],
+      Map ModuleName TypecheckCacheEntry
+    )
+typecheckModulesAsync emitLog idResult primRules knownRequests orderedModules directDeps sourceHashes inputCache = do
   tasksRef <- newIORef Map.empty
   for_ orderedModules $ \modName -> do
     existing <- readIORef tasksRef
@@ -416,31 +428,32 @@ typecheckModulesAsync emitLog idResult orderedModules directDeps sourceHashes in
         cached = Map.lookup modName inputCache
         sourceHash = Map.findWithDefault 0 modName sourceHashes
     task <-
-      async (runTypecheckTask emitLog idResult modName cached sourceHash depTasks)
+      async (runTypecheckTask emitLog idResult primRules knownRequests modName cached sourceHash depTasks)
     modifyIORef' tasksRef (Map.insert modName task)
   tasks <- readIORef tasksRef
   results <- traverse wait tasks
 
-  let zonkedModules' = Map.map (.taskZonkedModule) results
-      zonkedTypeEnv' = Map.map (.taskTypeEnvironment) results
-      mergedZonkResult =
-        ZonkResult
-          { zonkedModules = zonkedModules',
-            zonkedTypeEnvironment = zonkedTypeEnv'
-          }
+  let -- Cache-hit modules contribute an empty placeholder module; drop
+      -- them from the zonked-module map so downstream phases see only
+      -- freshly typechecked ASTs.
+      freshResults = Map.filter (not . (.taskIsCacheHit)) results
+      zonkedModules' = Map.map (.taskZonkedModule) freshResults
+      typeEnv' = Map.map (.taskTypeEnvironment) freshResults
       diagnostics' = concatMap (.taskDiagnostics) (Map.elems results)
       cache' = Map.map (.taskCacheEntry) results
-  pure (mergedZonkResult, diagnostics', cache')
+  pure (zonkedModules', typeEnv', diagnostics', cache')
 
 runTypecheckTask ::
   (CompileLog -> IO ()) ->
   IdentifierResult ->
+  Map QualifiedName PrimRule ->
+  Set.Set QualifiedName ->
   ModuleName ->
   Maybe ModuleCache ->
   Int ->
   [Async TypecheckTaskResult] ->
   IO TypecheckTaskResult
-runTypecheckTask emitLog idResult moduleName cached sourceHash depTasks = do
+runTypecheckTask emitLog idResult primRules knownRequests moduleName cached sourceHash depTasks = do
   depResults <- mapM wait depTasks
   let allDepsCacheHit = all (.taskIsCacheHit) depResults
       cacheValid = case cached of
@@ -451,7 +464,31 @@ runTypecheckTask emitLog idResult moduleName cached sourceHash depTasks = do
     _ -> do
       emitLog (CompileLogTypechecking moduleName)
       let importedTypes = Map.unions (map (.taskExportedTypes) depResults)
-          result = Typechecker.typecheckModule idResult importedTypes moduleName
+          moduleAST =
+            Map.findWithDefault
+              Module {declarations = [], sourceSpan = emptySrcSpan}
+              moduleName
+              idResult.moduleASTs
+          ownVariables =
+            Map.filterWithKey
+              (\qualifiedName _ -> qualifiedName.module_ == moduleName)
+              idResult.identifiedVariables
+          ownConstructors =
+            Map.filterWithKey
+              (\qualifiedName _ -> qualifiedName.module_ == moduleName)
+              idResult.identifiedConstructors
+          subject =
+            TypecheckSubject
+              { moduleName = moduleName,
+                moduleAST = moduleAST,
+                ownVariables = ownVariables,
+                typeData = idResult.identifiedTypes,
+                knownRequests = knownRequests,
+                ownConstructors = ownConstructors,
+                primRules = primRules,
+                importedTypes = importedTypes
+              }
+          result = typecheckModule subject
           dataAnnotations =
             collectDataAnnotations idResult.identifiedVariables result.zonkedModule
           newCacheEntry =
@@ -517,28 +554,6 @@ parseSources sources =
       modules = Map.fromList (map fst parsedEntries)
       diags = concatMap snd parsedEntries
    in (modules, diags)
-
-parsedStdlibModules :: Map ModuleName (Module Parsed)
-parsedStdlibModules = fst (parseSources stdlibEntries)
-  where
-    stdlibEntries =
-      Map.mapWithKey
-        (\moduleName src -> SourceEntry ("<stdlib:" <> Text.unpack moduleName <> ">") src)
-        Stdlib.stdlibSources
-
-identifyWithStdlib ::
-  Map ModuleName (Module Parsed) ->
-  (IdentifierResult, [Identifier.IdentifierError])
-identifyWithStdlib userMods =
-  runIdentify Stdlib.stdlibModuleNames (Map.union userMods parsedStdlibModules) Map.empty
-
-generateConstraintsAll ::
-  IdentifierResult ->
-  (ConstraintGenResult, [CG.ConstraintError])
-generateConstraintsAll = CG.generateConstraints
-
-compileSync :: CompileInput -> CompileResult
-compileSync input = unsafePerformIO $ compile (const (pure ())) input
 
 -- ===========================================================================
 -- Identifier orchestration
@@ -768,8 +783,3 @@ schemaEntryModule (SchemaEntry {name = entryName}) =
         [single] -> single
         _ -> Text.intercalate "." (init parts)
 
-moduleSourceFilePath :: Text -> IdentifierResult -> FilePath
-moduleSourceFilePath moduleName idResult =
-  case Map.lookup moduleName idResult.identifiedModules of
-    Just moduleData_ -> moduleData_.moduleSourceSpan.filePath
-    Nothing -> ""

@@ -40,7 +40,6 @@ module Katari.Typechecker.ConstraintGenerator
     toDiagnostic,
 
     -- * Entry point
-    generateConstraints,
     generateConstraintsForSCC,
   )
 where
@@ -49,6 +48,7 @@ import Control.Monad (forM, replicateM, unless)
 import Control.Monad.Reader (ReaderT, asks, local, runReaderT)
 import Control.Monad.State.Strict (State, gets, modify, runState)
 import Control.Monad.Trans (lift)
+import Data.Foldable (for_)
 import Data.List (transpose)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
@@ -66,11 +66,7 @@ import Katari.Prim (PrimRule (..))
 import Katari.SemanticType
 import Katari.SourceSpan
 import Katari.Typechecker.Identifier
-  ( ConstructorData (..),
-    IdentifierResult (..),
-    RequestData (..),
-    TypeData (..),
-    VariableData (..),
+  ( TypeData (..),
   )
 
 -- The 'Constrained' phase reuses the 'NameRefResolution Constrained s' family for
@@ -252,9 +248,7 @@ data ConstraintState = ConstraintState
 
 data ConstraintContext = ConstraintContext
   { contextIdentifiedTypes :: Map QualifiedName TypeData,
-    contextIdentifiedRequests :: Map QualifiedName RequestData,
-    contextIdentifiedConstructors :: Map QualifiedName ConstructorData,
-    contextIdentifiedVariables :: Map QualifiedName VariableData,
+    contextKnownRequests :: Set QualifiedName,
     contextSynonymVisited :: Set QualifiedName,
     contextEnclosingReturn :: Maybe TypeVariableId,
     contextEnclosingRequests :: Maybe RequestVariableId,
@@ -285,17 +279,13 @@ isThrowRequest qualifiedName =
 
 initialContext ::
   Map QualifiedName TypeData ->
-  Map QualifiedName RequestData ->
-  Map QualifiedName ConstructorData ->
-  Map QualifiedName VariableData ->
+  Set QualifiedName ->
   Map QualifiedName PrimRule ->
   ConstraintContext
-initialContext types requests constructors variables primRules =
+initialContext types requests primRules =
   ConstraintContext
     { contextIdentifiedTypes = types,
-      contextIdentifiedRequests = requests,
-      contextIdentifiedConstructors = constructors,
-      contextIdentifiedVariables = variables,
+      contextKnownRequests = requests,
       contextSynonymVisited = Set.empty,
       contextEnclosingReturn = Nothing,
       contextEnclosingRequests = Nothing,
@@ -491,13 +481,13 @@ resolveTypeRef nameRef = case nameRef.resolution of
 -- only for inference, not for explicit annotations).
 elaborateRequestList :: [SyntacticRequest Identified] -> CG (SemanticRequest Unresolved)
 elaborateRequestList syntacticRequests = do
-  requests <- asks (.contextIdentifiedRequests)
+  requests <- asks (.contextKnownRequests)
   pure
     ( SemanticRequest
         ( Set.fromList
             [ SemanticRequestElementConcrete qualifiedName
               | SyntacticRequest {name = NameRef {resolution = Just qualifiedName}} <- syntacticRequests,
-                Just _requestData <- [Map.lookup qualifiedName requests]
+                Set.member qualifiedName requests
             ]
         )
     )
@@ -507,41 +497,6 @@ elaborateRequestList syntacticRequests = do
 -- to allocate a fresh request variable in that case.
 elaborateOptionalRequests :: Maybe [SyntacticRequest Identified] -> CG (Maybe (SemanticRequest Unresolved))
 elaborateOptionalRequests = traverse elaborateRequestList
-
--- ===========================================================================
--- Phase A: allocate type vars for every VariableId
--- ===========================================================================
-
-allocateAllVariables :: IdentifierResult -> CG ()
-allocateAllVariables result = mapM_ allocate (Map.keys result.identifiedVariables)
-  where
-    allocate qualifiedName = do
-      tv <- freshTypeVar
-      bindVariable (ResolvedTopLevel qualifiedName) tv
-
-generateConstraints :: IdentifierResult -> (ConstraintGenResult, [ConstraintError])
-generateConstraints result = case runState (runReaderT action context) initialState of
-  (modulesPair, finalState) ->
-    ( ConstraintGenResult
-        { constrainedModules = Map.fromList modulesPair,
-          typeEnvironment = finalState.stateTypeEnvironment,
-          constraints = finalState.stateConstraints,
-          variableSupply =
-            VariableSupply
-              { typeVarSupply = finalState.stateNextTypeVariableId,
-                requestVarSupply = finalState.stateNextRequestVariableId
-              }
-        },
-      finalState.stateErrors
-    )
-  where
-    context = buildContext result
-    action = do
-      allocateAllVariables result
-      mapM walkOne (Map.toList result.moduleASTs)
-    walkOne (mid, mod') = do
-      mod'' <- walkModule mod'
-      pure (mid, mod'')
 
 -- ===========================================================================
 -- Phase B: walk modules, declarations, statements, expressions, patterns
@@ -1922,16 +1877,33 @@ freshReturnTypeVar = \case
 -- 'constrainedModules' contains a partial module with only the SCC's
 -- walked declarations.
 generateConstraintsForSCC ::
+  -- | Imported types: top-level qnames whose resolved type came from a
+  -- previously-typechecked module / upstream SCC. The CG pre-binds these
+  -- so cross-module name references resolve.
   Map QualifiedName (SemanticType Resolved) ->
-  IdentifierResult ->
+  -- | Module being walked.
   Text ->
+  -- | The module's AST; only declarations in the SCC are walked.
+  Module Identified ->
+  -- | Top-level qnames the SCC owns; CG allocates fresh type variables
+  -- for them.
   Set QualifiedName ->
+  -- | All reachable type declarations (used to look up type-synonym RHS).
+  Map QualifiedName TypeData ->
+  -- | All reachable request qnames (used as the membership filter when
+  -- elaborating @with@-clauses).
+  Set QualifiedName ->
+  -- | All reachable prim rules (qname → 'PrimRule').
+  Map QualifiedName PrimRule ->
   (ConstraintGenResult, [ConstraintError])
-generateConstraintsForSCC knownTypes result targetModuleName sccQualifiedNames =
+generateConstraintsForSCC knownTypes moduleName moduleAST sccQualifiedNames types requests primRules =
   case runState (runReaderT action context) initialState of
     (constrainedDeclarations, finalState) ->
       ( ConstraintGenResult
-          { constrainedModules = Map.singleton targetModuleName (Module {declarations = constrainedDeclarations, sourceSpan = moduleSpan}),
+          { constrainedModules =
+              Map.singleton
+                moduleName
+                (Module {declarations = constrainedDeclarations, sourceSpan = moduleAST.sourceSpan}),
             typeEnvironment = finalState.stateTypeEnvironment,
             constraints = finalState.stateConstraints,
             variableSupply =
@@ -1943,21 +1915,14 @@ generateConstraintsForSCC knownTypes result targetModuleName sccQualifiedNames =
         finalState.stateErrors
       )
   where
-    context = buildContext result
-    moduleSpan = case Map.lookup targetModuleName result.moduleASTs of
-      Just moduleAST -> moduleAST.sourceSpan
-      Nothing -> emptySrcSpan
+    context = initialContext types requests primRules
     action = do
-      allocateVariablesForSCC knownTypes sccQualifiedNames result
-      case Map.lookup targetModuleName result.moduleASTs of
-        Just moduleAST -> walkDeclarationsForSCC sccQualifiedNames moduleAST.declarations
-        Nothing -> pure []
-    emptySrcSpan =
-      SrcSpan
-        { filePath = "",
-          start = Position {line = 0, column = 0},
-          end = Position {line = 0, column = 0}
-        }
+      for_ (Map.toList knownTypes) $ \(qualifiedName, resolvedType) ->
+        bindVariable (ResolvedTopLevel qualifiedName) (liftResolvedToUnresolved resolvedType)
+      for_ (Set.toList sccQualifiedNames) $ \qualifiedName -> do
+        fresh <- freshTypeVar
+        bindVariable (ResolvedTopLevel qualifiedName) fresh
+      walkDeclarationsForSCC sccQualifiedNames moduleAST.declarations
 
 -- | Walk only declarations belonging to the SCC. Data declarations
 -- are included when their QualifiedName is in the SCC set (they form
@@ -1990,62 +1955,4 @@ walkDeclarationsForSCC sccQualifiedNames = go
       Just (ResolvedTopLevel qualifiedName) -> Set.member qualifiedName sccQualifiedNames
       _ -> False
 
--- | Pre-bind imported variables to their resolved types (lifted to
--- 'Unresolved'), and allocate fresh type variables for top-level
--- variables owned by the target module. Local variables and
--- variables from other unprocessed modules are left unbound; the
--- CG's 'lookupVariable' allocates fresh type vars for them on demand
--- when they are actually referenced during the AST walk.
-allocateVariablesForModule ::
-  Map QualifiedName (SemanticType Resolved) ->
-  Text ->
-  IdentifierResult ->
-  CG ()
-allocateVariablesForModule importedTypes targetModuleName result =
-  mapM_ allocate (Map.toList result.identifiedVariables)
-  where
-    allocate (qualifiedName, _variableData) =
-      let resolution = ResolvedTopLevel qualifiedName
-       in case Map.lookup qualifiedName importedTypes of
-            Just resolvedType ->
-              bindVariable resolution (liftResolvedToUnresolved resolvedType)
-            Nothing
-              | qualifiedName.module_ == targetModuleName -> do
-                  fresh <- freshTypeVar
-                  bindVariable resolution fresh
-              | otherwise -> pure ()
 
-allocateVariablesForSCC ::
-  Map QualifiedName (SemanticType Resolved) ->
-  Set QualifiedName ->
-  IdentifierResult ->
-  CG ()
-allocateVariablesForSCC knownTypes sccQualifiedNames result =
-  mapM_ allocate (Map.toList result.identifiedVariables)
-  where
-    allocate (qualifiedName, _variableData) =
-      let resolution = ResolvedTopLevel qualifiedName
-       in case Map.lookup qualifiedName knownTypes of
-            Just resolvedType ->
-              bindVariable resolution (liftResolvedToUnresolved resolvedType)
-            Nothing
-              | Set.member qualifiedName sccQualifiedNames -> do
-                  fresh <- freshTypeVar
-                  bindVariable resolution fresh
-              | otherwise -> pure ()
-
-buildContext :: IdentifierResult -> ConstraintContext
-buildContext result =
-  initialContext
-    result.identifiedTypes
-    result.identifiedRequests
-    result.identifiedConstructors
-    result.identifiedVariables
-    primRules
-  where
-    primRules =
-      Map.fromList
-        [ (qualifiedName, rule)
-          | (qualifiedName, variableData) <- Map.toList result.identifiedVariables,
-            Just rule <- [variableData.variablePrimRule]
-        ]

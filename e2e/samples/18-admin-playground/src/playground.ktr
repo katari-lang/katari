@@ -135,6 +135,9 @@ agent nested_array_union(items: array[ok | err]) -> integer {
 @"Record of arrays. Tests DynamicKeyValueEditor + ArrayField nesting."
 agent nested_record_array(groups: record[array[integer]]) -> record[array[integer]] { groups }
 
+@"Echo of Array"
+agent echo_array(ints: array[integer]) -> array[integer] { ints }
+
 @"Union containing tuple. Deep nesting test."
 data wrapped_pair(pair: (integer, string))
 data wrapped_single(value: integer)

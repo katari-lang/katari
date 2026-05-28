@@ -5,7 +5,7 @@ import { cn } from "@/lib/cn";
 
 /**
  * Structured read-only viewer for JSON values. Renders a SchemaForm-like
- * tree with border-l-2 indentation for nesting. Redacted secret
+ * tree with border-l indentation for nesting. Redacted secret
  * placeholders (`<redacted:hash8>`) are highlighted in the danger tone.
  */
 export function ValueViewer({
@@ -76,17 +76,20 @@ function ValueNode({
       );
     }
     return (
-      <div className="space-y-2">
-        {value.map((item, index) => (
-          <div key={index} className="border-l-2 border-border pl-3">
-            <span className="inline-flex items-center px-1.5 py-0.5 text-xs font-mono text-muted-foreground bg-muted mb-1">
-              {index}
-            </span>
-            <div className="mt-1">
+      <div className="flex flex-col space-y-2">
+        <span className="text-xs font-mono font-medium text-muted-foreground">
+          array
+        </span>
+        <div className="space-y-4 border-l border-border">
+          {value.map((item, index) => (
+            <div key={index} className="pl-3 flex flex-col gap-2 items-start">
+              <span className="inline-flex items-center px-1.5 h-5 text-xs font-mono text-muted-foreground bg-muted">
+                {index}
+              </span>
               <ValueNode value={item} projectId={projectId} />
             </div>
-          </div>
-        ))}
+          ))}
+        </div>
       </div>
     );
   }
@@ -130,14 +133,18 @@ function ValueNode({
       typeof record.$callable === "string" ? record.$callable : null;
 
     return (
-      <div className="space-y-2">
-        {constructorName !== null && (
+      <div className="flex flex-col space-y-2">
+        {constructorName !== null ? (
           <span className="text-xs font-mono font-medium text-muted-foreground">
             {constructorName}
           </span>
+        ) : (
+          <span className="text-xs font-mono font-medium text-muted-foreground">
+            record
+          </span>
         )}
         {callableName !== null && (
-          <div className="border-l-2 border-border pl-3">
+          <div className="border-l border-border pl-3">
             <span className="text-sm font-medium text-foreground">
               $callable
             </span>
@@ -157,17 +164,15 @@ function ValueNode({
             </div>
           </div>
         )}
-        <div className="border-l-2 border-border pl-3 mt-2">
+        <div className="border-l border-border pl-3">
           {displayEntries
             .filter(([key]) => key !== "$callable")
             .map(([key, val]) => (
-              <div key={key}>
+              <div key={key} className="flex flex-col gap-2">
                 <span className="text-sm font-medium text-foreground">
                   {key}
                 </span>
-                <div className="mt-1">
-                  <ValueNode value={val} projectId={projectId} />
-                </div>
+                <ValueNode value={val} projectId={projectId} />
               </div>
             ))}
         </div>

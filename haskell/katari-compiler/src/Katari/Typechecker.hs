@@ -2,15 +2,14 @@
 -- solving, and zonking for a single module's SCCs and aggregates the
 -- results.
 --
--- 'typecheckModule' is the only public entry point. It takes the
--- module's identified AST, an 'IdentifierResult' covering the module
--- itself and its transitive imports (used by the constraint generator
--- to look up cross-module names), and a map of imported types
--- (resolved exports of the dependencies). It returns the zonked module,
--- the module's local type environment, the public module interface,
--- and the collected diagnostics.
+-- 'typecheckModule' is the only public entry point. The caller supplies
+-- everything the typechecker needs (the module's AST, its own
+-- variables, the cross-module type / request / prim tables, and the
+-- imported resolved types from upstream modules) via a
+-- 'TypecheckSubject' — no aggregated phase-output types are required.
 module Katari.Typechecker
-  ( ModuleTypecheckResult (..),
+  ( TypecheckSubject (..),
+    ModuleTypecheckResult (..),
     typecheckModule,
   )
 where
@@ -38,52 +37,67 @@ import Katari.AST
   )
 import Katari.Diagnostic (Diagnostic)
 import Katari.Id (QualifiedName (..), VariableResolution (..))
+import Katari.Prim (PrimRule)
 import Katari.SemanticType (Resolved, SemanticType)
 import Katari.SourceSpan (Position (..), SourceSpan (..))
 import Katari.Typechecker.AgentGraph (agentSCCs)
 import Katari.Typechecker.ConstraintGenerator (generateConstraintsForSCC)
 import Katari.Typechecker.ConstraintGenerator qualified as CG
-import Katari.Typechecker.Identifier (IdentifierResult (..))
+import Katari.Typechecker.Identifier
+  ( ConstructorData (..),
+    TypeData (..),
+    VariableData (..),
+  )
 import Katari.Typechecker.ModuleInterface (ModuleInterface (..), extractModuleInterface)
 import Katari.Typechecker.Solver (solve)
 import Katari.Typechecker.Solver qualified as Solver
-import Katari.Typechecker.Zonker (ZonkResult (..), zonk)
+import Katari.Typechecker.Zonker (ModuleZonkResult (..), zonk)
 import Katari.Typechecker.Zonker qualified as Zonker
 
--- | Per-module typecheck output. Together with the module's
--- 'ModuleIdentifyResult' and (optionally) its 'ModuleLoweringResult'
--- this is the complete per-module artifact set produced by the
--- compiler pipeline.
+-- | Everything 'typecheckModule' needs about one module's input. The
+-- caller (compile orchestrator) assembles this from per-module
+-- identify outputs + the module's transitive imports.
+data TypecheckSubject = TypecheckSubject
+  { moduleName :: Text,
+    moduleAST :: Module Identified,
+    -- | The module's own top-level variables. Used by 'extractModuleInterface'
+    -- to compute the public-facing exported types.
+    ownVariables :: Map QualifiedName VariableData,
+    -- | All type declarations reachable from this module's signatures
+    -- (own + transitive imports). Used by the CG to resolve type
+    -- synonyms.
+    typeData :: Map QualifiedName TypeData,
+    -- | All request qualified names reachable from this module. Used
+    -- by the CG as the membership filter when elaborating @with@-clauses.
+    knownRequests :: Set QualifiedName,
+    -- | Constructors used to extract type information for data
+    -- declarations belonging to the module. Currently consumed only
+    -- for downstream cache construction (Compile reads this back).
+    ownConstructors :: Map QualifiedName ConstructorData,
+    -- | Prim rules reachable from this module. CG looks up call sites
+    -- against this map to specialise prim behaviour.
+    primRules :: Map QualifiedName PrimRule,
+    -- | Resolved types coming from already-typechecked dependencies.
+    importedTypes :: Map QualifiedName (SemanticType Resolved)
+  }
+
+-- | Per-module typecheck output.
 data ModuleTypecheckResult = ModuleTypecheckResult
   { zonkedModule :: Module Zonked,
-    -- | Type environment restricted to this module's own bindings
-    -- (locals + own top-level). 'ResolvedLocal' entries here are
-    -- guaranteed not to collide with other modules' locals.
+    -- | The module's own type environment (locals + own top-level).
+    -- @ResolvedLocal@ entries are guaranteed not to collide with other
+    -- modules' locals.
     localTypeEnv :: Map VariableResolution (SemanticType Resolved),
-    -- | The exported top-level types — the public interface other
-    -- modules see during their own typecheck.
+    -- | The exported top-level types — what other modules see during
+    -- their own typecheck.
     moduleInterface :: ModuleInterface,
     diagnostics :: [Diagnostic]
   }
 
--- | Typecheck a single module. The constraint generator needs to look
--- up identifiers from this module and from its transitive imports; the
--- caller is responsible for supplying an 'IdentifierResult' that covers
--- exactly that range. @importedTypes@ carries the resolved types that
--- have already been typechecked in dependencies (top-level only).
-typecheckModule ::
-  IdentifierResult ->
-  Map QualifiedName (SemanticType Resolved) ->
-  Text ->
-  ModuleTypecheckResult
-typecheckModule idResult importedTypes moduleName =
-  let moduleAST = Map.lookup moduleName idResult.moduleASTs
-      nonAgentQNames = case moduleAST of
-        Just ast -> collectNonAgentQualifiedNames moduleName ast
-        Nothing -> Set.empty
-      agentSCCsRaw = case moduleAST of
-        Just ast -> agentSCCs moduleName ast
-        Nothing -> []
+typecheckModule :: TypecheckSubject -> ModuleTypecheckResult
+typecheckModule subject =
+  let nonAgentQNames = collectNonAgentQualifiedNames subject.moduleName subject.moduleAST
+      agentSCCsRaw = agentSCCs subject.moduleName subject.moduleAST
       agentOnlySCCs =
         [ filtered
           | scc <- agentSCCsRaw,
@@ -96,22 +110,20 @@ typecheckModule idResult importedTypes moduleName =
 
       initial =
         SCCAccumulator
-          { sccImportedTypes = importedTypes,
+          { sccImportedTypes = subject.importedTypes,
             sccTypeEnv = Map.empty,
             sccDeclarations = Map.empty,
             sccDiagnostics = []
           }
-      final = foldl' (runOneSCC idResult moduleName) initial allSCCs
+      final = foldl' (runOneSCC subject) initial allSCCs
 
-      assembledModule = case moduleAST of
-        Just ast -> assembleZonkedModule ast final.sccDeclarations
-        Nothing -> Module {declarations = [], sourceSpan = emptySrcSpan}
+      assembledModule = assembleZonkedModule subject.moduleAST final.sccDeclarations
       moduleInterface_ =
         extractModuleInterface
-          moduleName
-          idResult.identifiedVariables
+          subject.moduleName
+          subject.ownVariables
           final.sccTypeEnv
-      ownedTypeEnv = removeImported importedTypes final.sccTypeEnv
+      ownedTypeEnv = removeImported subject.importedTypes final.sccTypeEnv
    in ModuleTypecheckResult
         { zonkedModule = assembledModule,
           localTypeEnv = ownedTypeEnv,
@@ -131,29 +143,33 @@ data SCCAccumulator = SCCAccumulator
   }
 
 runOneSCC ::
-  IdentifierResult ->
-  Text ->
+  TypecheckSubject ->
   SCCAccumulator ->
   Set QualifiedName ->
   SCCAccumulator
-runOneSCC idResult moduleName accum sccQNames =
+runOneSCC subject accum sccQNames =
   let (cgResult, cgErrors) =
-        generateConstraintsForSCC accum.sccImportedTypes idResult moduleName sccQNames
+        generateConstraintsForSCC
+          accum.sccImportedTypes
+          subject.moduleName
+          subject.moduleAST
+          sccQNames
+          subject.typeData
+          subject.knownRequests
+          subject.primRules
       cgDiags = map CG.toDiagnostic cgErrors
       (solverResult, solverErrors) = solve cgResult
       solverDiags = map Solver.toDiagnostic solverErrors
-      (zonkResult_, zonkErrors) = zonk moduleName idResult cgResult solverResult
+      (zonkOut, zonkErrors) = zonk subject.ownVariables cgResult solverResult
       zonkDiags = map Zonker.toDiagnostic zonkErrors
-      sccLocalEnv = Map.findWithDefault Map.empty moduleName zonkResult_.zonkedTypeEnvironment
+      sccLocalEnv = zonkOut.zonkedTypeEnv
       sccInterface = extractSCCInterface sccQNames sccLocalEnv
       knownResolutions =
         Set.map
           ResolvedTopLevel
-          (Map.keysSet (Map.intersection idResult.identifiedVariables accum.sccImportedTypes))
+          (Map.keysSet (Map.intersection subject.ownVariables accum.sccImportedTypes))
       ownedSCCEnv = Map.withoutKeys sccLocalEnv knownResolutions
-      sccDecls = case Map.lookup moduleName zonkResult_.zonkedModules of
-        Just sccModule -> sccModule.declarations
-        Nothing -> []
+      sccDecls = zonkOut.zonkedModule.declarations
    in SCCAccumulator
         { sccImportedTypes = Map.union accum.sccImportedTypes sccInterface,
           sccTypeEnv = Map.union accum.sccTypeEnv ownedSCCEnv,

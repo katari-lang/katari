@@ -31,6 +31,7 @@ library:
     - Katari.Typechecker.Solver.Internal
     - Katari.Typechecker.Solver.Substitution
     - Katari.Typechecker.AgentGraph
+    - Katari.Typechecker.ImportGraph
     - Katari.Typechecker.ModuleInterface
     - Katari.Typechecker.Zonker
     - Katari.Typechecker.Exhaustive
@@ -53,6 +54,7 @@ tests:
       - Katari.ConstraintGeneratorSpec
       - Katari.ZonkerSpec
       - Katari.SolverSpec
+      - Katari.ExhaustiveSpec
       - Katari.IRSpec
       - Katari.LoweringSpec
       - Katari.DiagnosticSpec
@@ -63,6 +65,7 @@ tests:
       - Katari.ScopeIndexSpec
       - Katari.Query.CompletionSpec
       - Katari.QuerySpec
+      - Katari.TestSupport
     dependencies:
       - katari-compiler
       - hspec

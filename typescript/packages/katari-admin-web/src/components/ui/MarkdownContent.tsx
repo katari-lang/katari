@@ -51,12 +51,16 @@ const components = {
       {...props}
     />
   ),
-  p: (props: ComponentProps<"p">) => <p className="mt-4 leading-7" {...props} />,
+  p: (props: ComponentProps<"p">) => (
+    <p className="mt-4 leading-7" {...props} />
+  ),
   a: ({ href, ...rest }: ComponentProps<"a">) => (
     <a
       href={href}
       target={href?.startsWith("http") === true ? "_blank" : undefined}
-      rel={href?.startsWith("http") === true ? "noreferrer noopener" : undefined}
+      rel={
+        href?.startsWith("http") === true ? "noreferrer noopener" : undefined
+      }
       className="font-medium text-foreground underline underline-offset-4 hover:text-highlight"
       {...rest}
     />
@@ -70,7 +74,7 @@ const components = {
   li: (props: ComponentProps<"li">) => <li className="leading-7" {...props} />,
   blockquote: (props: ComponentProps<"blockquote">) => (
     <blockquote
-      className="mt-6 border-l-2 border-border-strong pl-4 italic text-muted-foreground"
+      className="mt-6 border-l border-border-strong pl-4 italic text-muted-foreground"
       {...props}
     />
   ),
@@ -101,7 +105,8 @@ const components = {
   // intentionally don't add wrapper styling to that nested `code` so
   // the `pre` styling above owns the box.
   code: ({ className, children, ...rest }: ComponentProps<"code">) => {
-    const isBlock = typeof className === "string" && className.includes("language-");
+    const isBlock =
+      typeof className === "string" && className.includes("language-");
     if (isBlock) {
       return (
         <code className={className} {...rest}>

@@ -5,8 +5,8 @@ import Data.Map.Strict qualified as Map
 import Data.Maybe (mapMaybe)
 import Data.Set qualified as Set
 import Data.Text (Text)
-import Katari.Compile qualified as Compile
 import Katari.Id (VariableResolution (..))
+import Katari.TestSupport qualified as TestSupport
 import Katari.Lexer qualified as Lexer
 import Katari.Parser qualified as Parser
 import Katari.SemanticType
@@ -35,7 +35,6 @@ import Katari.Typechecker.NormalizedType
 import Katari.Typechecker.ScopeIndex (ScopeFrame (..), ScopeIndex (..))
 import Katari.Typechecker.Solver (SolverResult (..), solve)
 import Katari.Typechecker.Solver qualified as Solver
-import Katari.Typechecker.Zonker (zonk)
 import Test.Hspec
 
 -- ---------------------------------------------------------------------------
@@ -48,9 +47,9 @@ runSolve source =
       (parsed, parseErrors) = Parser.parse "<test>" stream
    in case parseErrors of
         (_ : _) -> fail ("parse failure: " ++ show parseErrors)
-        [] -> case Compile.identifyWithStdlib (Map.singleton "main" parsed) of
+        [] -> case TestSupport.identifyWithStdlib (Map.singleton "main" parsed) of
           (idResult, []) ->
-            let (cgResult, _) = Compile.generateConstraintsAll idResult
+            let (cgResult, _) = TestSupport.generateConstraintsAll idResult
                 (solverResult, solverErrors) = solve cgResult
              in pure (idResult, cgResult, solverResult, solverErrors)
           (_, errors) -> fail ("identify failure: " ++ show errors)
@@ -237,7 +236,7 @@ endToEndZonk :: Spec
 endToEndZonk = describe "end-to-end pipeline (Solver -> Zonker)" $ do
   it "Zonker over a real Solver result has no zonkErrors on a basic program" $ do
     (idResult, cgResult, solverResult, _solverErrors) <- runSolve "agent foo() { 42 }"
-    let (_zonkResult, zonkErrors) = zonk "main" idResult cgResult solverResult
+    let (_zonkResult, zonkErrors) = TestSupport.zonkAll "main" idResult cgResult solverResult
     zonkErrors `shouldBe` []
 
   it "totality is sufficient for Zonker even on programs with let / if" $ do
@@ -249,7 +248,7 @@ endToEndZonk = describe "end-to-end pipeline (Solver -> Zonker)" $ do
             "  x\n",
             "}"
           ]
-    let (_zonkResult, zonkErrors) = zonk "main" idResult cgResult solverResult
+    let (_zonkResult, zonkErrors) = TestSupport.zonkAll "main" idResult cgResult solverResult
     zonkErrors `shouldBe` []
 
 -- ---------------------------------------------------------------------------

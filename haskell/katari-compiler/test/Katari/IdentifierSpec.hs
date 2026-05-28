@@ -6,10 +6,10 @@ import Data.Map.Strict qualified as Map
 import Data.Maybe (isNothing)
 import Data.Text (Text)
 import Katari.AST
-import Katari.Compile qualified as Compile
 import Katari.Id (QualifiedName (..))
 import Katari.Lexer qualified as Lexer
 import Katari.Parser qualified as Parser
+import Katari.TestSupport qualified as TestSupport
 import Katari.Typechecker.Identifier
 import Test.Hspec
 
@@ -34,7 +34,7 @@ parseOne src =
 identifyOne :: Text -> IO (Either [IdentifierError] IdentifierResult)
 identifyOne src = do
   m <- parseOne src
-  pure $ case Compile.identifyWithStdlib (Map.singleton "main" m) of
+  pure $ case TestSupport.identifyWithStdlib (Map.singleton "main" m) of
     (r, []) -> Right r
     (_, es) -> Left es
 
@@ -51,7 +51,7 @@ identifyMany sources = do
                 [] -> pure (name, parsed)
       )
       sources
-  pure $ case Compile.identifyWithStdlib (Map.fromList parsedList) of
+  pure $ case TestSupport.identifyWithStdlib (Map.fromList parsedList) of
     (r, []) -> Right r
     (_, es) -> Left es
 

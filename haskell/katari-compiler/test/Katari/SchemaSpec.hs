@@ -8,7 +8,8 @@ import Data.List (find)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.Text (Text)
-import Katari.Compile (CompileInput (..), CompileResult (..), SourceEntry (..), compileSync)
+import Katari.Compile (CompileInput (..), CompileResult (..), SourceEntry (..))
+import Katari.TestSupport (compileSync)
 import Katari.Diagnostic (Diagnostic (..))
 import Katari.Schema
 import Katari.SemanticType

@@ -4,7 +4,7 @@ type Schema = Record<string, unknown>;
 
 /**
  * Visual display for JSON Schema objects. Renders the schema as a
- * structured tree with type badges and border-l-2 indentation for
+ * structured tree with type badges and border-l indentation for
  * nested properties.
  */
 export function SchemaViewer({
@@ -72,8 +72,8 @@ function SchemaNode({ schema }: { schema: Schema }) {
   if (isNeverSchema(schema)) {
     return (
       <div>
-        <TypeBadge className="text-warning">never</TypeBadge>
         {description !== null && <Description text={description} />}
+        <TypeBadge className="text-warning">never</TypeBadge>
       </div>
     );
   }
@@ -85,11 +85,11 @@ function SchemaNode({ schema }: { schema: Schema }) {
   if (branches !== null && branches.length > 0) {
     return (
       <div>
+        {description !== null && <Description text={description} />}
         <span className="text-xs font-medium text-muted-foreground">
           one of
         </span>
-        {description !== null && <Description text={description} />}
-        <div className="border-l-2 border-border mt-2">
+        <div className="border-l border-border mt-2">
           <div className="space-y-2 pl-3">
             {branches.map((branch, index) => (
               <div key={index}>
@@ -109,12 +109,12 @@ function SchemaNode({ schema }: { schema: Schema }) {
         <span className="text-xs font-medium text-muted-foreground mr-1.5">
           enum
         </span>
+        {description !== null && <Description text={description} />}
         <span className="inline-flex flex-wrap items-center gap-1">
           {(schema.enum as unknown[]).map((value, index) => (
             <TypeBadge key={index}>{JSON.stringify(value)}</TypeBadge>
           ))}
         </span>
-        {description !== null && <Description text={description} />}
       </div>
     );
   }
@@ -126,8 +126,8 @@ function SchemaNode({ schema }: { schema: Schema }) {
         <span className="text-xs font-medium text-muted-foreground mr-1.5">
           const
         </span>
-        <TypeBadge>{JSON.stringify(schema.const)}</TypeBadge>
         {description !== null && <Description text={description} />}
+        <TypeBadge>{JSON.stringify(schema.const)}</TypeBadge>
       </div>
     );
   }
@@ -172,10 +172,10 @@ function SchemaNode({ schema }: { schema: Schema }) {
 
     return (
       <div>
-        <TypeBadge>{typeLabel}</TypeBadge>
         {description !== null && <Description text={description} />}
+        <TypeBadge>{typeLabel}</TypeBadge>
         {displayProperties.length > 0 && (
-          <div className="border-l-2 border-border mt-1">
+          <div className="border-l border-border mt-1">
             <div className="space-y-2 pl-3">
               {displayProperties.map(([key, propSchema]) => (
                 <div key={key}>
@@ -194,7 +194,7 @@ function SchemaNode({ schema }: { schema: Schema }) {
           </div>
         )}
         {isRecord && additionalSchema !== null && (
-          <div className="border-l-2 border-border mt-2">
+          <div className="border-l border-border mt-2">
             <div className="pl-3">
               <span className="text-xs text-muted-foreground">values</span>
               <div className="mt-1">
@@ -226,10 +226,10 @@ function SchemaNode({ schema }: { schema: Schema }) {
 
     return (
       <div>
-        <TypeBadge>array</TypeBadge>
         {description !== null && <Description text={description} />}
+        <TypeBadge>array</TypeBadge>
         {prefixItems !== null && prefixItems.length > 0 && (
-          <div className="border-l-2 border-border mt-2">
+          <div className="border-l border-border mt-2">
             <div className="space-y-2 pl-3">
               {prefixItems.map((itemSchema, index) => (
                 <div key={index}>
@@ -245,9 +245,9 @@ function SchemaNode({ schema }: { schema: Schema }) {
           </div>
         )}
         {items !== null && prefixItems === null && (
-          <div className="border-l-2 border-border pl-3 mt-2">
+          <div className="border-l border-border pl-3 mt-1">
             <span className="text-xs text-muted-foreground">items</span>
-            <div className="mt-1">
+            <div>
               <SchemaNode schema={items} />
             </div>
           </div>
@@ -260,21 +260,21 @@ function SchemaNode({ schema }: { schema: Schema }) {
   if (type !== undefined) {
     return (
       <div>
-        <TypeBadge>{type}</TypeBadge>
         {description !== null && <Description text={description} />}
+        <TypeBadge>{type}</TypeBadge>
       </div>
     );
   }
 
-  // Unknown / empty schema (= "any")
+  // Unknown / empty schema (= "unknown")
   const keys = Object.keys(schema).filter(
     (k) => k !== "description" && k !== "title" && k !== "default",
   );
   if (keys.length === 0) {
     return (
       <div>
-        <TypeBadge className="text-subtle-foreground">any</TypeBadge>
         {description !== null && <Description text={description} />}
+        <TypeBadge className="text-subtle-foreground">unknown</TypeBadge>
       </div>
     );
   }

@@ -142,7 +142,7 @@ export function AgentDetailPage() {
                       maxLength={128}
                     />
                     <p className="text-xs text-subtle-foreground">
-                      Optional — defaults to the placeholder.
+                      Optional
                     </p>
                   </div>
                   <Label className="mb-2">Arguments</Label>

@@ -22,8 +22,8 @@
 --     @SemanticType Resolved@ directly. The construction side enforces
 --     @requestVars = Set.empty@ for any 'SemanticRequest' Resolved.
 module Katari.Typechecker.Zonker
-  ( -- * Result
-    ZonkResult (..),
+  ( -- * Per-module zonk output
+    ModuleZonkResult (..),
     ZonkError (..),
 
     -- * Diagnostics
@@ -31,10 +31,6 @@ module Katari.Typechecker.Zonker
 
     -- * Entry
     zonk,
-
-    -- * Type environment lookup
-    lookupTopLevelType,
-    lookupTypeInModule,
   )
 where
 
@@ -64,10 +60,7 @@ import Katari.SemanticType
   )
 import Katari.SourceSpan (Position (..), SourceSpan (..))
 import Katari.Typechecker.ConstraintGenerator (ConstraintGenResult (..))
-import Katari.Typechecker.Identifier
-  ( IdentifierResult (..),
-    VariableData (..),
-  )
+import Katari.Typechecker.Identifier (VariableData (..))
 import Katari.Typechecker.NormalizedType (denormalise)
 import Katari.Typechecker.Solver (SolverResult (..))
 
@@ -81,32 +74,15 @@ import Katari.Typechecker.Solver (SolverResult (..))
 -- Result types
 -- ===========================================================================
 
-data ZonkResult = ZonkResult
-  { zonkedModules :: Map Text (Module Zonked),
-    -- | Type environment partitioned by module. Each module owns the
-    -- 'VariableResolution' keys that arose during its own identification:
-    -- 'ResolvedLocal' entries are scoped to that module, and 'ResolvedTopLevel'
-    -- entries live under the module that declared the qualified name.
-    zonkedTypeEnvironment :: Map Text (Map VariableResolution (SemanticType Resolved))
+-- | Per-module zonk output. Holds the SCC's zonked declarations and
+-- the local type environment for the same SCC. The caller (typechecker
+-- orchestration) accumulates these across SCCs into the module's full
+-- output.
+data ModuleZonkResult = ModuleZonkResult
+  { zonkedModule :: Module Zonked,
+    zonkedTypeEnv :: Map VariableResolution (SemanticType Resolved)
   }
   deriving (Show)
-
--- | Lookup a top-level qualified name's resolved type.
-lookupTopLevelType :: QualifiedName -> ZonkResult -> Maybe (SemanticType Resolved)
-lookupTopLevelType qualifiedName zonkResult =
-  Map.lookup qualifiedName.module_ zonkResult.zonkedTypeEnvironment
-    >>= Map.lookup (ResolvedTopLevel qualifiedName)
-
--- | Lookup a 'VariableResolution' in the context of a given module.
--- 'ResolvedLocal' entries are searched in @currentModule@'s map;
--- 'ResolvedTopLevel' entries are looked up in the declaring module.
-lookupTypeInModule :: Text -> VariableResolution -> ZonkResult -> Maybe (SemanticType Resolved)
-lookupTypeInModule currentModule variableResolution zonkResult =
-  case variableResolution of
-    ResolvedTopLevel qualifiedName -> lookupTopLevelType qualifiedName zonkResult
-    ResolvedLocal _ ->
-      Map.lookup currentModule zonkResult.zonkedTypeEnvironment
-        >>= Map.lookup variableResolution
 
 data ZonkError where
   ZonkErrorMissingTypeVar :: SourceSpan -> TypeVariableId -> ZonkError
@@ -793,24 +769,39 @@ walkParArrayExpr ParArrayExpression {elements, sourceSpan, typeOf} = do
 -- single module. The resulting 'zonkedTypeEnvironment' carries one entry
 -- (keyed by @moduleName@) so per-module ZonkResults can be merged with
 -- 'Map.union' downstream.
-zonk :: Text -> IdentifierResult -> ConstraintGenResult -> SolverResult -> (ZonkResult, [ZonkError])
-zonk moduleName idResult cgResult solverResult =
+-- | Zonk one SCC's constrained AST + type environment against the
+-- Solver's substitutions. Returns the zonked module + the SCC's
+-- resolved type environment. @variables@ is a (qname → 'VariableData')
+-- map covering anything that might appear as 'ResolvedTopLevel' in the
+-- environment — used only to attach source spans to type-substitution
+-- errors.
+zonk ::
+  Map QualifiedName VariableData ->
+  ConstraintGenResult ->
+  SolverResult ->
+  (ModuleZonkResult, [ZonkError])
+zonk variables cgResult solverResult =
   let action =
         (,)
           <$> traverse walkModule cgResult.constrainedModules
-          <*> Map.traverseWithKey (zonkEnvEntry idResult) cgResult.typeEnvironment
+          <*> Map.traverseWithKey zonkEnvEntry cgResult.typeEnvironment
       ((modulesResult, envResult), errs) = runState (runReaderT action solverResult) []
+      -- generateConstraintsForSCC always returns a single-entry map, so
+      -- there's exactly one zonked module to pull out.
+      zonkedModule_ = case Map.elems modulesResult of
+        (m : _) -> m
+        [] -> Module {declarations = [], sourceSpan = placeholderSpan}
       result =
-        ZonkResult
-          { zonkedModules = modulesResult,
-            zonkedTypeEnvironment = Map.singleton moduleName envResult
+        ModuleZonkResult
+          { zonkedModule = zonkedModule_,
+            zonkedTypeEnv = envResult
           }
    in (result, reverse errs)
   where
-    zonkEnvEntry idResult_ resolution t =
+    zonkEnvEntry resolution t =
       let sourceSpan = case resolution of
             ResolvedTopLevel qualifiedName ->
-              case Map.lookup qualifiedName idResult_.identifiedVariables of
+              case Map.lookup qualifiedName variables of
                 Just variableData -> variableData.variableSourceSpan
                 Nothing -> placeholderSpan
             ResolvedLocal _ -> placeholderSpan

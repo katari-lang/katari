@@ -29,11 +29,14 @@ export function Dialog({
   size = "md",
 }: DialogProps) {
   return (
-    <DialogPrimitive.Root open={open} onOpenChange={(isOpen) => { if (!isOpen) onClose(); }}>
+    <DialogPrimitive.Root
+      open={open}
+      onOpenChange={(isOpen) => {
+        if (!isOpen) onClose();
+      }}
+    >
       <DialogPrimitive.Portal>
-        <DialogPrimitive.Overlay
-          className="fixed inset-0 z-50 bg-katari-950/30 backdrop-blur-sm data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=closed]:animate-out data-[state=closed]:fade-out-0"
-        />
+        <DialogPrimitive.Overlay className="fixed inset-0 z-50 bg-katari-950/30 backdrop-blur-sm data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=closed]:animate-out data-[state=closed]:fade-out-0" />
         <DialogPrimitive.Content
           className={cn(
             "fixed top-1/2 left-1/2 z-50 w-full -translate-x-1/2 -translate-y-1/2",
@@ -45,7 +48,7 @@ export function Dialog({
           )}
         >
           {(title !== undefined || description !== undefined) && (
-            <div className="flex items-start gap-2 border-b border-border p-5">
+            <div className="flex items-start gap-2 p-5">
               <div className="flex-1">
                 {title !== undefined && (
                   <DialogPrimitive.Title className="text-lg font-semibold text-foreground">
@@ -67,7 +70,9 @@ export function Dialog({
             </div>
           )}
           {title === undefined && description === undefined && (
-            <DialogPrimitive.Title className="sr-only">Dialog</DialogPrimitive.Title>
+            <DialogPrimitive.Title className="sr-only">
+              Dialog
+            </DialogPrimitive.Title>
           )}
           <div className="p-5">{children}</div>
         </DialogPrimitive.Content>
@@ -77,5 +82,7 @@ export function Dialog({
 }
 
 export function DialogFooter({ children }: { children: ReactNode }) {
-  return <div className="mt-4 flex items-center justify-end gap-2">{children}</div>;
+  return (
+    <div className="mt-4 flex items-center justify-end gap-2">{children}</div>
+  );
 }

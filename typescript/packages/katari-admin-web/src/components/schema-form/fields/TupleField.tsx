@@ -26,10 +26,10 @@ export function TupleField({
   }
 
   return (
-    <div className="space-y-2 border-l border-border p-3">
+    <div className="space-y-3 border-l border-border pl-3">
       {positions.map((sub, idx) => (
-        <div key={idx} className="flex items-start gap-2">
-          <span className="mt-2 inline-flex h-5 min-w-5 items-center justify-center px-1 font-mono text-xs">
+        <div key={idx} className="flex flex-col items-start gap-2">
+          <span className="inline-flex items-center justify-center font-mono text-xs px-1.5 h-5 bg-muted">
             {idx}
           </span>
           <div className="flex-1">

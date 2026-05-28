@@ -148,7 +148,7 @@ function DataField({
           className="h-8 text-xs font-mono"
         />
       </div>
-      <div className="space-y-3 border-l-2 border-border pl-3">
+      <div className="space-y-3 border-l border-border pl-3">
         {fields.length === 0 ? (
           <p className="text-xs italic text-subtle-foreground">No fields.</p>
         ) : (

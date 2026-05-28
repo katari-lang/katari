@@ -12,15 +12,15 @@ module Katari.ExhaustiveSpec (spec) where
 
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
-import Katari.Compile qualified as Compile
 import Katari.Diagnostic (Diagnostic (..))
 import Katari.Id (VariableResolution (..))
 import Katari.Lexer qualified as Lexer
 import Katari.Parser qualified as Parser
+import Katari.TestSupport (ZonkResult (..), zonkAll)
+import Katari.TestSupport qualified as TestSupport
 import Katari.Typechecker.Exhaustive (ExhaustiveEnv (..), checkExhaustiveModule, toDiagnostic)
 import Katari.Typechecker.Identifier (IdentifierResult (..))
 import Katari.Typechecker.Solver (solve)
-import Katari.Typechecker.Zonker (ZonkResult (..), zonk)
 import Test.Hspec (Spec, describe, it, shouldBe)
 
 -- ---------------------------------------------------------------------------
@@ -35,11 +35,11 @@ runExhaustive source = do
       (parsed, parseErrors) = Parser.parse "<test>" stream
   case parseErrors of
     (_ : _) -> fail ("parse failure: " ++ show parseErrors)
-    [] -> case Compile.identifyWithStdlib (Map.singleton "main" parsed) of
+    [] -> case TestSupport.identifyWithStdlib (Map.singleton "main" parsed) of
       (idResult, []) -> do
-        let (cgResult, _) = Compile.generateConstraintsAll idResult
+        let (cgResult, _) = TestSupport.generateConstraintsAll idResult
             (solverResult, _) = solve cgResult
-            (zonkResult, _) = zonk "main" idResult cgResult solverResult
+            (zonkResult, _) = zonkAll "main" idResult cgResult solverResult
             topLevels =
               Map.fromList
                 [ (qn, ty)

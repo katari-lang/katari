@@ -65,9 +65,7 @@ export function EnvUpsertDialog({ open, onClose, editing }: Props) {
       open={open}
       onClose={onClose}
       title={editing !== null ? "Edit env entry" : "Add env entry"}
-      description={
-        isSecret ? "Encrypted at rest." : "Stored as plaintext."
-      }
+      description={isSecret ? "Encrypted at rest." : "Stored as plaintext."}
     >
       <form
         onSubmit={(e) => {
@@ -83,16 +81,11 @@ export function EnvUpsertDialog({ open, onClose, editing }: Props) {
             value={key}
             onChange={(e) => setKey(e.target.value)}
             disabled={editing !== null}
-            placeholder="OPENAI_API_KEY"
+            placeholder="ENV_KEY"
             autoComplete="off"
             spellCheck={false}
             required
           />
-          {editing !== null && (
-            <p className="text-xs text-subtle-foreground">
-              Key is immutable — delete the entry to rename.
-            </p>
-          )}
         </div>
         <div className="space-y-1.5">
           <Label htmlFor="env-value">Value</Label>
@@ -115,8 +108,7 @@ export function EnvUpsertDialog({ open, onClose, editing }: Props) {
           <div>
             <Label className="cursor-pointer">Secret</Label>
             <p className="mt-0.5 text-xs text-subtle-foreground">
-              Reads return{" "}
-              <code className="font-mono">{`<redacted>`}</code>.
+              Reads return <code className="font-mono">{`<redacted>`}</code>.
             </p>
           </div>
           <Switch

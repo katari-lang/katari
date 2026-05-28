@@ -5,30 +5,11 @@
 module Katari.CompileSpec (spec) where
 
 import Data.Aeson qualified as Aeson
-import Data.Map.Strict qualified as Map
 import Data.Maybe (isJust, isNothing)
-import Data.Text (Text, unpack)
 import Katari.Compile
 import Katari.Diagnostic (Diagnostic (..), hasErrors)
+import Katari.TestSupport (compileSync, multiSourceInput, singleSourceInput)
 import Test.Hspec
-
--- ===========================================================================
--- Helpers
--- ===========================================================================
-
-singleSourceInput :: Text -> CompileInput
-singleSourceInput src =
-  CompileInput
-    { sources = Map.singleton "main" SourceEntry {filePath = "main", sourceText = src},
-      cache = Map.empty
-    }
-
-multiSourceInput :: [(Text, Text)] -> CompileInput
-multiSourceInput pairs =
-  CompileInput
-    { sources = Map.fromList [(modName, SourceEntry {filePath = unpack modName, sourceText = src}) | (modName, src) <- pairs],
-      cache = Map.empty
-    }
 
 -- ===========================================================================
 -- Spec

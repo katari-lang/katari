@@ -12,6 +12,7 @@
 // "registration" from "activation" lets tooling (tests, linters, `tsc`)
 // import the package safely without commandeering stdin / stdout.
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import { stdin, stdout, stderr, exit } from "node:process";
 import { createInterface } from "node:readline";
@@ -131,13 +132,17 @@ const send = (msg: ChildToParent): void => {
 //
 // When a handler calls `katari.delegate(...)`, we need to know which
 // delegationId the child belongs to so the parent side can find the
-// owning ext call. We thread the current delegation id through a stack
-// (handlers can compose, e.g. a handler that awaits another handler's
-// helper, although ext handlers don't typically nest beyond one level).
+// owning ext call. We thread this through `AsyncLocalStorage` so each
+// handler's async chain sees exactly its own delegationId — even when
+// multiple handlers run concurrently (e.g. parallel fan_out where N
+// sleep / IO handlers interleave). A naive global stack would let one
+// handler's `katari.delegate(...)` attribute its child to the wrong
+// parent, and unwound out-of-order pop()s logged spurious "delegation
+// stack drift" warnings.
 
-const delegationStack: string[] = [];
+const delegationContext = new AsyncLocalStorage<string>();
 const currentDelegationId = (): string | null =>
-  delegationStack.length === 0 ? null : delegationStack[delegationStack.length - 1]!;
+  delegationContext.getStore() ?? null;
 
 function generateChildDelegationId(): string {
   // Cryptographically random v4 UUID. The delegation id is used as a
@@ -267,7 +272,6 @@ async function handleDelegate(
     terminating: false,
   };
   inflight.set(msg.delegationId, entry);
-  delegationStack.push(msg.delegationId);
   const ctx: AgentContext = {
     args: msg.args,
     delegationId: msg.delegationId,
@@ -277,21 +281,11 @@ async function handleDelegate(
   let value: RawValue | null = null;
   let error: unknown = null;
   try {
-    value = await handler(ctx);
+    value = await delegationContext.run(msg.delegationId, () => handler(ctx));
   } catch (err) {
     error = err;
   } finally {
     inflight.delete(msg.delegationId);
-    const top = delegationStack.pop();
-    if (top !== msg.delegationId) {
-      // Should never happen because handlers don't nest, but log so we
-      // notice if it ever does.
-      stderr.write(
-        `[katari-port] delegation stack drift: popped ${String(
-          top,
-        )} expected ${msg.delegationId}\n`,
-      );
-    }
   }
   if (entry.terminating) {
     // The handler may have thrown DURING the termination window. We

@@ -22,8 +22,8 @@ import Katari.Compile
   ( CompileInput (..),
     CompileResult (..),
     SourceEntry (..),
-    compileSync,
   )
+import Katari.TestSupport (compileSync)
 import Katari.IR
   ( BlockId (..),
     VarId (..),
