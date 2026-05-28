@@ -17,6 +17,7 @@ module Katari.Compile
     CompileInput (..),
     CompileResult (..),
     CompileLog (..),
+    renderCompileLog,
     ModuleCache (..),
 
     -- * Entry
@@ -145,6 +146,16 @@ data CompileLog where
   CompileLogSchemaGeneration :: CompileLog
   CompileLogComplete :: CompileLog
   deriving (Show)
+
+renderCompileLog :: CompileLog -> Text
+renderCompileLog = \case
+  CompileLogParsing -> "[parsing]"
+  CompileLogIdentifying -> "[identifying]"
+  CompileLogTypechecking moduleName sccIndex totalSCCs ->
+    "[typechecking " <> moduleName <> " (" <> Text.pack (show sccIndex) <> "/" <> Text.pack (show totalSCCs) <> ")]"
+  CompileLogLowering -> "[lowering]"
+  CompileLogSchemaGeneration -> "[schema]"
+  CompileLogComplete -> "[done]"
 
 data CompileResult = CompileResult
   { irModule :: Maybe Katari.IR.IRModule,

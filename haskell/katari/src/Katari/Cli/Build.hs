@@ -16,6 +16,7 @@ import Data.Aeson (Value (..), object, (.=))
 import Data.Aeson qualified as Aeson
 import Data.Aeson.Encode.Pretty (encodePretty)
 import Data.ByteString.Lazy qualified as LBS
+import Data.Text.IO qualified as TextIO
 import Katari.Cli.Check qualified as Check
 import Katari.Cli.Common qualified as Common
 import Katari.Cli.CompileCache qualified as CompileCache
@@ -28,6 +29,7 @@ import Options.Applicative
 import System.Directory (createDirectoryIfMissing)
 import System.Exit (ExitCode (..), exitWith)
 import System.FilePath (takeDirectory)
+import System.IO (stderr)
 
 data Options = Options
   { optProjectRoot :: Maybe FilePath,
@@ -58,7 +60,7 @@ optionsParser =
 run :: Options -> IO ()
 run opts = do
   (root, input, fileTexts) <- Check.loadProject (Check.Options {optProjectRoot = opts.optProjectRoot})
-  result <- Compile.compile (\_ -> pure ()) input
+  result <- Compile.compile (TextIO.hPutStrLn stderr . Compile.renderCompileLog) input
   let outputPath = case opts.optOut of
         Just p -> p
         Nothing -> root <> "/.katari/dist/bundle.json"
