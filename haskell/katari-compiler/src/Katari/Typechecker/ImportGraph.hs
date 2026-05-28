@@ -5,6 +5,7 @@ module Katari.Typechecker.ImportGraph
   ( findImportCycles,
     topologicalSort,
     importsOf,
+    importModuleName,
   )
 where
 

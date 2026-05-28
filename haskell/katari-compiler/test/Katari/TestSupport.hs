@@ -14,6 +14,7 @@ module Katari.TestSupport
     parseModule,
 
     -- * Identifier aggregation
+    IdentifierResult (..),
     identifyAll,
     identifyWithStdlib,
 
@@ -45,7 +46,7 @@ import Katari.Compile
     compile,
   )
 import Katari.Id (QualifiedName (..), VariableResolution (..))
-import Katari.SourceSpan (Position (..), SourceSpan (..))
+import Katari.SourceSpan (emptySourceSpan)
 import Katari.Lexer qualified as Lexer
 import Katari.Parser qualified as Parser
 import Katari.SemanticType (Resolved, SemanticType)
@@ -57,20 +58,23 @@ import Katari.Typechecker.ConstraintGenerator
     generateConstraintsForSCC,
   )
 import Katari.Typechecker.Identifier
-  ( IdentifierError,
-    IdentifierResult (..),
+  ( ConstructorData,
+    IdentifierError,
     IdentifierState (..),
+    ModuleData,
     ModuleIdentifyResult (..),
+    RequestData,
     SymbolEntry,
+    TypeData,
     VariableData (..),
     emitImportCycleError,
     identifyModule,
-    mkIdentifierResult,
     registerAllModules,
     runIdentifier,
     runIdentifierFrom,
     scanExportNames,
   )
+import Katari.Typechecker.ScopeIndex (ScopeIndex)
 import Katari.Typechecker.ImportGraph (findImportCycles, topologicalSort)
 import Katari.Typechecker.ScopeIndex (ScopeFrame (..), buildScopeIndex)
 import Katari.Typechecker.Solver (SolverResult)
@@ -130,10 +134,29 @@ parseModule path src =
 -- Identifier aggregation
 -- ===========================================================================
 
+-- | Test-local replica of the legacy aggregated @IdentifierResult@. The
+-- library itself no longer exposes this whole-program view (it ships
+-- per-module results via 'ModuleIdentifyResult'); the test suite still
+-- finds the aggregated shape convenient, so we rebuild it here from
+-- per-module data inside 'identifyAll'.
+data IdentifierResult = IdentifierResult
+  { identifiedModules :: Map Text ModuleData,
+    identifiedVariables :: Map QualifiedName VariableData,
+    identifiedTypes :: Map QualifiedName TypeData,
+    identifiedRequests :: Map QualifiedName RequestData,
+    identifiedConstructors :: Map QualifiedName ConstructorData,
+    moduleASTs :: Map Text (Module Identified),
+    scopeIndex :: ScopeIndex SymbolEntry,
+    moduleVisibleSymbols :: Map Text (Map Text SymbolEntry),
+    moduleExports :: Map Text (Map Text SymbolEntry)
+  }
+  deriving (Show)
+
 type IdentifyAccum =
   ( Map Text (Module Identified),
     Map Text (Map Text SymbolEntry),
     Map Text (Map Text SymbolEntry),
+    [ScopeFrame SymbolEntry],
     IdentifierState
   )
 
@@ -158,9 +181,9 @@ identifyAll trustedStdlibNames moduleMap =
       allExportNames = Map.map scanExportNames moduleMap
 
       stepFresh :: IdentifyAccum -> Text -> IdentifyAccum
-      stepFresh (asts, exports, topLevels, state) moduleName =
+      stepFresh (asts, exports, topLevels, frames, state) moduleName =
         case Map.lookup moduleName moduleMap of
-          Nothing -> (asts, exports, topLevels, state)
+          Nothing -> (asts, exports, topLevels, frames, state)
           Just parsedModule ->
             let moduleResult =
                   identifyModule
@@ -173,6 +196,7 @@ identifyAll trustedStdlibNames moduleMap =
              in ( Map.insert moduleName moduleResult.identifiedAST asts,
                   Map.insert moduleName moduleResult.moduleExportTable exports,
                   Map.insert moduleName moduleResult.moduleTopLevel topLevels,
+                  frames <> moduleResult.moduleScopeFrames,
                   moduleResult.moduleState
                 )
 
@@ -184,18 +208,19 @@ identifyAll trustedStdlibNames moduleMap =
       sortedStdlibNames =
         filter (== "primitive") stdlibModuleNames
           ++ filter (/= "primitive") stdlibModuleNames
-      (stdlibASTs, stdlibExports, stdlibTopLevels, stdlibState) =
-        foldl' stepFresh (Map.empty, Map.empty, Map.empty, phaseAState) sortedStdlibNames
+      initialAccum = (Map.empty, Map.empty, Map.empty, [], phaseAState)
+      (stdlibASTs, stdlibExports, stdlibTopLevels, stdlibFrames, stdlibState) =
+        foldl' stepFresh initialAccum sortedStdlibNames
 
       userModuleMap =
         Map.filterWithKey
           (\moduleName _ -> not (Set.member moduleName trustedStdlibNames))
           moduleMap
       levels = topologicalSort userModuleMap
-      (acyclicASTs, acyclicExports, acyclicTopLevels, acyclicState) =
+      (acyclicASTs, acyclicExports, acyclicTopLevels, acyclicFrames, acyclicState) =
         foldl'
           (\accumulator level -> foldl' stepFresh accumulator (Set.toList level))
-          (stdlibASTs, stdlibExports, stdlibTopLevels, stdlibState)
+          (stdlibASTs, stdlibExports, stdlibTopLevels, stdlibFrames, stdlibState)
           levels
 
       processedModuleNames = Map.keysSet acyclicASTs
@@ -204,24 +229,24 @@ identifyAll trustedStdlibNames moduleMap =
           | moduleName <- Map.keys moduleMap,
             not (Set.member moduleName processedModuleNames)
         ]
-      (allASTs, allExports, allTopLevels, finalState) =
-        foldl' stepFresh (acyclicASTs, acyclicExports, acyclicTopLevels, acyclicState) remainingModuleNames
+      (allASTs, allExports, allTopLevels, allFrames, finalState) =
+        foldl'
+          stepFresh
+          (acyclicASTs, acyclicExports, acyclicTopLevels, acyclicFrames, acyclicState)
+          remainingModuleNames
 
-      capturedFrames =
-        [ ScopeFrame {frameSpan = sp, frameSymbols = sym}
-          | (sp, sym) <- finalState.capturedScopeFrames
-        ]
       result =
-        mkIdentifierResult
-          finalState.modules
-          finalState.variables
-          finalState.types
-          finalState.requests
-          finalState.constructors
-          allASTs
-          (buildScopeIndex capturedFrames)
-          allTopLevels
-          allExports
+        IdentifierResult
+          { identifiedModules = finalState.modules,
+            identifiedVariables = finalState.variables,
+            identifiedTypes = finalState.types,
+            identifiedRequests = finalState.requests,
+            identifiedConstructors = finalState.constructors,
+            moduleASTs = allASTs,
+            scopeIndex = buildScopeIndex allFrames,
+            moduleVisibleSymbols = allTopLevels,
+            moduleExports = allExports
+          }
    in (result, reverse finalState.errors)
 
 -- | Convenience wrapper: union the user-supplied modules with the parsed
@@ -247,7 +272,7 @@ generateConstraintsForModule ::
 generateConstraintsForModule moduleName idResult =
   let moduleAST =
         Map.findWithDefault
-          (Module {declarations = [], sourceSpan = emptySrcSpan})
+          (Module {declarations = [], sourceSpan = emptySourceSpan})
           moduleName
           idResult.moduleASTs
       sccQNames =
@@ -260,7 +285,6 @@ generateConstraintsForModule moduleName idResult =
       primRules = Map.mapMaybe (.variablePrimRule) idResult.identifiedVariables
    in generateConstraintsForSCC
         Map.empty
-        moduleName
         moduleAST
         sccQNames
         idResult.identifiedTypes
@@ -283,7 +307,10 @@ generateConstraintsAll idResult =
       perModule = map (`generateConstraintsForModule` idResult) userModuleNames
       mergedConstraints = Set.unions (map ((.constraints) . fst) perModule)
       mergedEnv = Map.unions (map ((.typeEnvironment) . fst) perModule)
-      mergedModules = Map.unions (map ((.constrainedModules) . fst) perModule)
+      mergedDeclarations = concatMap ((.declarations) . (.constrainedModule) . fst) perModule
+      mergedSourceSpan = case perModule of
+        ((firstResult, _) : _) -> firstResult.constrainedModule.sourceSpan
+        [] -> emptySourceSpan
       mergedErrors = concatMap snd perModule
       finalSupply = case perModule of
         [] ->
@@ -291,20 +318,13 @@ generateConstraintsAll idResult =
         ((firstResult, _) : _) -> firstResult.variableSupply
       result =
         ConstraintGenResult
-          { constrainedModules = mergedModules,
+          { constrainedModule =
+              Module {declarations = mergedDeclarations, sourceSpan = mergedSourceSpan},
             typeEnvironment = mergedEnv,
             constraints = mergedConstraints,
             variableSupply = finalSupply
           }
    in (result, mergedErrors)
-
-emptySrcSpan :: SourceSpan
-emptySrcSpan =
-  SrcSpan
-    { filePath = "",
-      start = Position {line = 0, column = 0},
-      end = Position {line = 0, column = 0}
-    }
 
 -- ===========================================================================
 -- Zonker aggregation

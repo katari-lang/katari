@@ -22,7 +22,7 @@ import Katari.Parser qualified as Parser
 import Katari.Schema qualified as Schema
 import Katari.SemanticType (RequestVariableId (..), TypeVariableId (..))
 import Katari.Typechecker.ConstraintGenerator (ConstraintGenResult (..), VariableSupply (..))
-import Katari.Typechecker.Identifier (IdentifierResult (..))
+import Katari.TestSupport (IdentifierResult (..))
 import Katari.Typechecker.NormalizedType (NormalizedType (..))
 import Katari.Typechecker.Solver (SolverResult (..))
 import Test.Hspec

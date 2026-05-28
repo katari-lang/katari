@@ -26,7 +26,6 @@ module Katari.Typechecker.Identifier
     TypeData (..),
     RequestData (..),
     ConstructorData (..),
-    IdentifierResult (..),
     IdentifierError (..),
 
     -- * Diagnostics
@@ -40,7 +39,6 @@ module Katari.Typechecker.Identifier
     initialIdentifierState,
     identifyModule,
     registerAllModules,
-    mkIdentifierResult,
     runIdentifier,
     runIdentifierFrom,
     emitImportCycleError,
@@ -69,7 +67,7 @@ import Katari.Prim (PrimRule)
 import Katari.Prim qualified as Prim
 import Katari.SourceSpan (HasSourceSpan (..), SourceSpan (..))
 import Katari.Typechecker.ImportGraph (findImportCycles, topologicalSort)
-import Katari.Typechecker.ScopeIndex (ScopeFrame (..), ScopeIndex, buildScopeIndex)
+import Katari.Typechecker.ScopeIndex (ScopeFrame (..))
 
 -- ---------------------------------------------------------------------------
 -- Identified GADT
@@ -215,63 +213,6 @@ data ConstructorData = ConstructorData
     constructorTypeQName :: QualifiedName
   }
   deriving (Eq, Show)
-
--- | Result of a successful Identifier pass. The Identified ASTs live in
--- 'moduleASTs' rather than nested inside 'ModuleData' so the State monad never
--- has to hold a placeholder AST that gets overwritten later.
---
--- All maps are keyed by their natural identifiers: 'QualifiedName' for
--- top-level declarations, 'Text' (module name) for modules.
-data IdentifierResult = IdentifierResult
-  { identifiedModules :: Map Text ModuleData,
-    identifiedVariables :: Map QualifiedName VariableData,
-    identifiedTypes :: Map QualifiedName TypeData,
-    identifiedRequests :: Map QualifiedName RequestData,
-    identifiedConstructors :: Map QualifiedName ConstructorData,
-    moduleASTs :: Map Text (Module Identified),
-    -- | Per-position scope index captured during resolution. The LSP /
-    -- completion query layer consumes this to answer "what symbols are
-    -- visible at this position?". See 'Katari.Typechecker.ScopeIndex'.
-    scopeIndex :: ScopeIndex SymbolEntry,
-    -- | Per-module bare-name visibility: own top-level declarations +
-    -- named imports + automatic stdlib injections + aliases brought
-    -- in by @import ... as alias@. Used by completion to scope
-    -- suggestions to what the user can actually reference by bare
-    -- name from inside the module. Members reachable only through a
-    -- module alias (= @prim.add@) are intentionally excluded; consumers
-    -- handle those via member-style completion after a @.@.
-    moduleVisibleSymbols :: Map Text (Map Text SymbolEntry),
-    -- | Per-module export table: every name reachable through
-    -- @<module>.<name>@ from outside (= member-completion source).
-    -- Keyed by module name.
-    moduleExports :: Map Text (Map Text SymbolEntry)
-  }
-  deriving (Show)
-
--- | Smart constructor for 'IdentifierResult'.
-mkIdentifierResult ::
-  Map Text ModuleData ->
-  Map QualifiedName VariableData ->
-  Map QualifiedName TypeData ->
-  Map QualifiedName RequestData ->
-  Map QualifiedName ConstructorData ->
-  Map Text (Module Identified) ->
-  ScopeIndex SymbolEntry ->
-  Map Text (Map Text SymbolEntry) ->
-  Map Text (Map Text SymbolEntry) ->
-  IdentifierResult
-mkIdentifierResult modules variables types requests constructors asts scopeIdx visibleSymbols exports =
-  IdentifierResult
-    { identifiedModules = modules,
-      identifiedVariables = variables,
-      identifiedTypes = types,
-      identifiedRequests = requests,
-      identifiedConstructors = constructors,
-      moduleASTs = asts,
-      scopeIndex = scopeIdx,
-      moduleVisibleSymbols = visibleSymbols,
-      moduleExports = exports
-    }
 
 -- ---------------------------------------------------------------------------
 -- Errors
@@ -473,7 +414,7 @@ data IdentifierState = IdentifierState
     resolveContext :: ResolveContext,
     -- | Captured (span, innermost-frame-symbols) pairs. Each
     -- 'withScopeFrameAt' invocation pushes one entry on exit. The
-    -- raw list is folded into a 'ScopeIndex' by 'mkIdentifierResult'.
+    -- raw list is grouped into a 'ScopeIndex' by the caller.
     capturedScopeFrames :: [(SourceSpan, Map Text SymbolEntry)]
   }
 
@@ -2229,10 +2170,22 @@ declaredNames = \case
 -- state (including all counters, variable/type/request/constructor maps,
 -- errors, and scope frames). The caller threads the state forward to the
 -- next module to keep IDs monotonically unique.
+-- | Result of identifying one module. The per-module @module*@ maps
+-- ('moduleVariables' / 'moduleTypes' / ...) hold only entries owned by
+-- @currentModuleName@ — they are extracted from the accumulated
+-- 'IdentifierState' so the caller can assemble cross-module views
+-- (e.g. 'Katari.Query.QuerySnapshot') without re-filtering.
 data ModuleIdentifyResult = ModuleIdentifyResult
   { identifiedAST :: Module Identified,
+    moduleData :: ModuleData,
+    moduleVariables :: Map QualifiedName VariableData,
+    moduleTypes :: Map QualifiedName TypeData,
+    moduleRequests :: Map QualifiedName RequestData,
+    moduleConstructors :: Map QualifiedName ConstructorData,
     moduleExportTable :: Map Text SymbolEntry,
     moduleTopLevel :: Map Text SymbolEntry,
+    moduleScopeFrames :: [ScopeFrame SymbolEntry],
+    moduleNewErrors :: [IdentifierError],
     moduleState :: IdentifierState
   }
 
@@ -2278,10 +2231,51 @@ identifyModule _allExportNames processedExportTables allModuleNames inputState c
                   }
           identifiedAST' <- withResolveContext context (resolveModuleAST parsedModule)
           pure (identifiedAST', thisExportTable, thisTopLevel)
+
+      ownedQName :: QualifiedName -> Bool
+      ownedQName qualifiedName = qualifiedName.module_ == currentModuleName
+
+      ownedVariables = Map.filterWithKey (\qname _ -> ownedQName qname) finalState.variables
+      ownedTypes = Map.filterWithKey (\qname _ -> ownedQName qname) finalState.types
+      ownedRequests = Map.filterWithKey (\qname _ -> ownedQName qname) finalState.requests
+      ownedConstructors = Map.filterWithKey (\qname _ -> ownedQName qname) finalState.constructors
+      moduleDataValue =
+        Map.findWithDefault
+          (ModuleData {moduleSourceSpan = parsedModule.sourceSpan})
+          currentModuleName
+          finalState.modules
+
+      -- Frames captured during this module's resolution: delta against
+      -- the input state.
+      previousFrames = inputState.capturedScopeFrames
+      previousFrameCount = length previousFrames
+      newFrames =
+        take
+          (length finalState.capturedScopeFrames - previousFrameCount)
+          finalState.capturedScopeFrames
+      moduleFrames =
+        [ ScopeFrame {frameSpan = sp, frameSymbols = sym}
+          | (sp, sym) <- newFrames
+        ]
+
+      previousErrorCount = length inputState.errors
+      newErrors =
+        reverse
+          ( take
+              (length finalState.errors - previousErrorCount)
+              finalState.errors
+          )
    in ModuleIdentifyResult
         { identifiedAST = identifiedModuleAST,
+          moduleData = moduleDataValue,
+          moduleVariables = ownedVariables,
+          moduleTypes = ownedTypes,
+          moduleRequests = ownedRequests,
+          moduleConstructors = ownedConstructors,
           moduleExportTable = exportTable,
           moduleTopLevel = topLevelTable,
+          moduleScopeFrames = moduleFrames,
+          moduleNewErrors = newErrors,
           moduleState = finalState
         }
   where

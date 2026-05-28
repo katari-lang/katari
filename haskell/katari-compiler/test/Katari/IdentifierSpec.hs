@@ -9,6 +9,7 @@ import Katari.AST
 import Katari.Id (QualifiedName (..))
 import Katari.Lexer qualified as Lexer
 import Katari.Parser qualified as Parser
+import Katari.TestSupport (IdentifierResult (..))
 import Katari.TestSupport qualified as TestSupport
 import Katari.Typechecker.Identifier
 import Test.Hspec

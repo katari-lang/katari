@@ -23,7 +23,8 @@
 --     request set is constrained to be a subset of @outer ∪ handled-reqs@.
 --   * 'CG' never traverses the AST a second time to "collect" structural
 --     information. Anything CG needs that isn't immediately visible at a
---     node lives in 'IdentifierResult' and is read locally.
+--     node is supplied up-front in 'ConstraintContext' (type / request
+--     tables, prim rules) and looked up locally.
 module Katari.Typechecker.ConstraintGenerator
   ( -- * Constraint and reason
     Constraint (..),
@@ -220,14 +221,14 @@ data VariableSupply = VariableSupply
   }
   deriving (Eq, Show)
 
--- | Output of the constraint-generation pass. Carries the phase-advanced
--- AST ('Constrained' phase, with each expression / pattern annotated by
--- an unresolved 'SemanticType'), the seeded type environment, the
--- accumulated subtype / effect 'Constraint' set the solver must
--- discharge, and the next-id supply so the solver can keep allocating
--- fresh variables consistently.
+-- | Output of the constraint-generation pass for a single SCC of a
+-- single module. Carries the SCC's phase-advanced AST ('Constrained'
+-- phase, with each expression / pattern annotated by an unresolved
+-- 'SemanticType'), the seeded type environment, the accumulated subtype
+-- / effect 'Constraint' set the solver must discharge, and the next-id
+-- supply so the solver can keep allocating fresh variables consistently.
 data ConstraintGenResult = ConstraintGenResult
-  { constrainedModules :: Map Text (Module Constrained),
+  { constrainedModule :: Module Constrained,
     typeEnvironment :: TypeEnvironment,
     constraints :: Set Constraint,
     variableSupply :: VariableSupply
@@ -1874,15 +1875,13 @@ freshReturnTypeVar = \case
 --
 -- Only declarations whose name belongs to @sccQualifiedNames@ are
 -- walked; other declarations are skipped. The returned
--- 'constrainedModules' contains a partial module with only the SCC's
--- walked declarations.
+-- 'constrainedModule' is a partial module with only the SCC's walked
+-- declarations.
 generateConstraintsForSCC ::
   -- | Imported types: top-level qnames whose resolved type came from a
   -- previously-typechecked module / upstream SCC. The CG pre-binds these
   -- so cross-module name references resolve.
   Map QualifiedName (SemanticType Resolved) ->
-  -- | Module being walked.
-  Text ->
   -- | The module's AST; only declarations in the SCC are walked.
   Module Identified ->
   -- | Top-level qnames the SCC owns; CG allocates fresh type variables
@@ -1896,14 +1895,12 @@ generateConstraintsForSCC ::
   -- | All reachable prim rules (qname → 'PrimRule').
   Map QualifiedName PrimRule ->
   (ConstraintGenResult, [ConstraintError])
-generateConstraintsForSCC knownTypes moduleName moduleAST sccQualifiedNames types requests primRules =
+generateConstraintsForSCC knownTypes moduleAST sccQualifiedNames types requests primRules =
   case runState (runReaderT action context) initialState of
     (constrainedDeclarations, finalState) ->
       ( ConstraintGenResult
-          { constrainedModules =
-              Map.singleton
-                moduleName
-                (Module {declarations = constrainedDeclarations, sourceSpan = moduleAST.sourceSpan}),
+          { constrainedModule =
+              Module {declarations = constrainedDeclarations, sourceSpan = moduleAST.sourceSpan},
             typeEnvironment = finalState.stateTypeEnvironment,
             constraints = finalState.stateConstraints,
             variableSupply =

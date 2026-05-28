@@ -28,6 +28,7 @@ import Katari.AST
     Module (..),
     NameRef (..),
     NameRefKind (VariableRef),
+    NameRefResolution,
     Phase (Identified, Zonked),
     PrimAgentDeclaration (..),
     RequestDeclaration (..),
@@ -39,13 +40,12 @@ import Katari.Diagnostic (Diagnostic)
 import Katari.Id (QualifiedName (..), VariableResolution (..))
 import Katari.Prim (PrimRule)
 import Katari.SemanticType (Resolved, SemanticType)
-import Katari.SourceSpan (Position (..), SourceSpan (..))
+import Katari.SourceSpan (emptySourceSpan)
 import Katari.Typechecker.AgentGraph (agentSCCs)
 import Katari.Typechecker.ConstraintGenerator (generateConstraintsForSCC)
 import Katari.Typechecker.ConstraintGenerator qualified as CG
 import Katari.Typechecker.Identifier
-  ( ConstructorData (..),
-    TypeData (..),
+  ( TypeData (..),
     VariableData (..),
   )
 import Katari.Typechecker.ModuleInterface (ModuleInterface (..), extractModuleInterface)
@@ -70,10 +70,6 @@ data TypecheckSubject = TypecheckSubject
     -- | All request qualified names reachable from this module. Used
     -- by the CG as the membership filter when elaborating @with@-clauses.
     knownRequests :: Set QualifiedName,
-    -- | Constructors used to extract type information for data
-    -- declarations belonging to the module. Currently consumed only
-    -- for downstream cache construction (Compile reads this back).
-    ownConstructors :: Map QualifiedName ConstructorData,
     -- | Prim rules reachable from this module. CG looks up call sites
     -- against this map to specialise prim behaviour.
     primRules :: Map QualifiedName PrimRule,
@@ -151,7 +147,6 @@ runOneSCC subject accum sccQNames =
   let (cgResult, cgErrors) =
         generateConstraintsForSCC
           accum.sccImportedTypes
-          subject.moduleName
           subject.moduleAST
           sccQNames
           subject.typeData
@@ -164,15 +159,15 @@ runOneSCC subject accum sccQNames =
       zonkDiags = map Zonker.toDiagnostic zonkErrors
       sccLocalEnv = zonkOut.zonkedTypeEnv
       sccInterface = extractSCCInterface sccQNames sccLocalEnv
-      knownResolutions =
-        Set.map
-          ResolvedTopLevel
-          (Map.keysSet (Map.intersection subject.ownVariables accum.sccImportedTypes))
-      ownedSCCEnv = Map.withoutKeys sccLocalEnv knownResolutions
       sccDecls = zonkOut.zonkedModule.declarations
-   in SCCAccumulator
+   in -- Previously-processed SCC entries reappear in 'sccLocalEnv' (the
+      -- CG seeds them from 'knownTypes' so cross-SCC references resolve)
+      -- but always with the same resolved type, so 'Map.union' is safe:
+      -- duplicate keys read back the identical value, and the SCC owns
+      -- whatever new locals it introduced.
+      SCCAccumulator
         { sccImportedTypes = Map.union accum.sccImportedTypes sccInterface,
-          sccTypeEnv = Map.union accum.sccTypeEnv ownedSCCEnv,
+          sccTypeEnv = Map.union accum.sccTypeEnv sccLocalEnv,
           sccDeclarations = foldl' indexDeclaration accum.sccDeclarations sccDecls,
           sccDiagnostics = accum.sccDiagnostics <> cgDiags <> solverDiags <> zonkDiags
         }
@@ -237,19 +232,15 @@ indexDeclaration declarationMap declaration = case declarationQName declaration 
   Just qualifiedName -> Map.insert qualifiedName declaration declarationMap
   Nothing -> declarationMap
 
-declarationQName :: Declaration Zonked -> Maybe QualifiedName
+-- | Phase-parametric extraction of the top-level 'QualifiedName' a
+-- declaration introduces. The phases the typechecker bridges ('Identified'
+-- and 'Zonked') share the same @Maybe VariableResolution@ shape for
+-- 'VariableRef' resolution, so one function covers both.
+declarationQName ::
+  (NameRefResolution phase VariableRef ~ Maybe VariableResolution) =>
+  Declaration phase ->
+  Maybe QualifiedName
 declarationQName = \case
-  DeclarationAgent AgentDeclaration {name = NameRef {resolution}} -> resolveTopLevel resolution
-  DeclarationRequest RequestDeclaration {name = NameRef {resolution}} -> resolveTopLevel resolution
-  DeclarationExternalAgent ExternalAgentDeclaration {name = NameRef {resolution}} -> resolveTopLevel resolution
-  DeclarationPrimAgent PrimAgentDeclaration {name = NameRef {resolution}} -> resolveTopLevel resolution
-  DeclarationData DataDeclaration {name = NameRef {resolution}} -> resolveTopLevel resolution
-  DeclarationTypeSynonym _ -> Nothing
-  DeclarationImport _ -> Nothing
-  DeclarationError _ -> Nothing
-
-identifiedDeclQName :: Declaration Identified -> Maybe QualifiedName
-identifiedDeclQName = \case
   DeclarationAgent AgentDeclaration {name = NameRef {resolution}} -> resolveTopLevel resolution
   DeclarationRequest RequestDeclaration {name = NameRef {resolution}} -> resolveTopLevel resolution
   DeclarationExternalAgent ExternalAgentDeclaration {name = NameRef {resolution}} -> resolveTopLevel resolution
@@ -272,7 +263,7 @@ assembleZonkedModule identifiedModule sccDeclarationMap =
   Module
     { declarations =
         map
-          ( \declaration -> case identifiedDeclQName declaration of
+          ( \declaration -> case declarationQName declaration of
               Just qualifiedName -> case Map.lookup qualifiedName sccDeclarationMap of
                 Just zonkedDeclaration -> zonkedDeclaration
                 Nothing -> retagNonCallableDeclaration declaration
@@ -282,6 +273,11 @@ assembleZonkedModule identifiedModule sccDeclarationMap =
       sourceSpan = identifiedModule.sourceSpan
     }
 
+-- | Retag declarations the SCC pipeline doesn't process (type synonyms,
+-- imports, parse errors). Callable kinds (agent / request / external /
+-- prim / data) reach this only via 'assembleZonkedModule' bypass paths;
+-- they are handled by looking the matching zonked declaration out of
+-- 'sccDeclarationMap' instead.
 retagNonCallableDeclaration :: Declaration Identified -> Declaration Zonked
 retagNonCallableDeclaration = \case
   DeclarationTypeSynonym TypeSynonymDeclaration {name, rhs, sourceSpan} ->
@@ -293,12 +289,10 @@ retagNonCallableDeclaration = \case
         }
   DeclarationImport declaration -> DeclarationImport declaration
   DeclarationError sourceSpan -> DeclarationError sourceSpan
-  _ -> DeclarationError emptySrcSpan
-
-emptySrcSpan :: SourceSpan
-emptySrcSpan =
-  SrcSpan
-    { filePath = "",
-      start = Position {line = 0, column = 0},
-      end = Position {line = 0, column = 0}
-    }
+  DeclarationAgent _ -> internalError
+  DeclarationRequest _ -> internalError
+  DeclarationExternalAgent _ -> internalError
+  DeclarationPrimAgent _ -> internalError
+  DeclarationData _ -> internalError
+  where
+    internalError = DeclarationError emptySourceSpan

@@ -15,10 +15,10 @@ import Katari.Id
 import Katari.Lexer qualified as Lexer
 import Katari.Parser qualified as Parser
 import Katari.SemanticType
+import Katari.TestSupport (IdentifierResult (..))
 import Katari.Typechecker.ConstraintGenerator
 import Katari.Typechecker.Identifier
-  ( IdentifierResult (..),
-    SymbolEntry (..),
+  ( SymbolEntry (..),
     VariableData (..),
   )
 import Katari.Typechecker.ScopeIndex (ScopeFrame (..), ScopeIndex (..))

@@ -18,9 +18,9 @@ import Katari.Typechecker.ConstraintGenerator
   ( ConstraintGenResult (..),
     VariableSupply (..),
   )
+import Katari.TestSupport (IdentifierResult (..))
 import Katari.Typechecker.Identifier
-  ( IdentifierResult (..),
-    SymbolEntry (..),
+  ( SymbolEntry (..),
     VariableData (..),
   )
 import Katari.Typechecker.NormalizedType

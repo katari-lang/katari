@@ -39,7 +39,6 @@ import Data.Text qualified as Text
 import Katari.AST
   ( Declaration (..),
     ImportDeclaration (..),
-    ImportKind (..),
     Module (..),
     Phase (Identified, Parsed, Zonked),
   )
@@ -61,14 +60,13 @@ import Katari.Schema
     collectDataAnnotations,
   )
 import Katari.SemanticType (Resolved, SemanticType)
-import Katari.SourceSpan (Position (..), SourceSpan (..))
+import Katari.SourceSpan (emptySourceSpan)
 import Katari.Stdlib qualified as Stdlib
 import Katari.Typechecker (ModuleTypecheckResult (..), TypecheckSubject (..), typecheckModule)
 import Katari.Typechecker.Exhaustive (ExhaustiveEnv (..), checkExhaustiveModule)
 import Katari.Typechecker.Exhaustive qualified as Exhaustive
 import Katari.Typechecker.Identifier
   ( ConstructorData (..),
-    IdentifierResult (..),
     IdentifierState (..),
     ModuleData (..),
     ModuleIdentifyResult (..),
@@ -78,9 +76,9 @@ import Katari.Typechecker.Identifier
     VariableData (..),
   )
 import Katari.Typechecker.Identifier qualified as Identifier
-import Katari.Typechecker.ImportGraph (findImportCycles, topologicalSort)
+import Katari.Typechecker.ImportGraph (findImportCycles, importModuleName, topologicalSort)
 import Katari.Typechecker.ModuleInterface (ModuleInterface (..))
-import Katari.Typechecker.ScopeIndex (ScopeFrame (..), buildScopeIndex)
+import Katari.Typechecker.ScopeIndex (ScopeFrame (..), ScopeIndex, buildScopeIndex)
 
 -- ===========================================================================
 -- Input / output
@@ -199,8 +197,8 @@ compile emitLog input = do
       allParsed = Map.union freshParsed cachedSkeletonParsed
 
   for_ (Set.toList cacheMissNames) (emitLog . CompileLogIdentifying)
-  let (idResult, idErrors) = runIdentify Stdlib.stdlibModuleNames allParsed cacheHitModules
-      idDiags = map Identifier.toDiagnostic idErrors
+  let idAggregate = runIdentify Stdlib.stdlibModuleNames allParsed cacheHitModules
+      idDiags = map Identifier.toDiagnostic idAggregate.aggErrors
 
   -- Compute topological order + direct deps for the Async pipeline.
   let stdlibModuleSet =
@@ -232,7 +230,7 @@ compile emitLog input = do
           ( \m ->
               [ depName
                 | DeclarationImport imp <- m.declarations,
-                  let depName = importedModuleName imp,
+                  let depName = importModuleName imp.kind,
                   Map.member depName allParsed
               ]
           )
@@ -240,12 +238,12 @@ compile emitLog input = do
 
   -- Per-module Async typecheck. Each module's task waits for its direct
   -- imports' tasks before running.
-  let primRules = Map.mapMaybe (.variablePrimRule) idResult.identifiedVariables
-      knownRequests = Map.keysSet idResult.identifiedRequests
+  let primRules = Map.mapMaybe (.variablePrimRule) idAggregate.aggVariables
+      knownRequests = Map.keysSet idAggregate.aggRequests
   (zonkedModulesMap, typeEnvMap, typecheckDiags, typecheckCache) <-
     typecheckModulesAsync
       emitLog
-      idResult
+      idAggregate
       primRules
       knownRequests
       orderedModules
@@ -255,7 +253,7 @@ compile emitLog input = do
 
   let exhaustiveEnv =
         ExhaustiveEnv
-          { constructors = idResult.identifiedConstructors,
+          { constructors = idAggregate.aggConstructors,
             topLevelTypes =
               Map.fromList
                 [ (qualifiedName, ty)
@@ -287,12 +285,12 @@ compile emitLog input = do
   for_ (map fst freshLowerInputs) (emitLog . CompileLogLowering)
   let dataAnnotations =
         Map.unions
-          [ collectDataAnnotations idResult.identifiedVariables m
+          [ collectDataAnnotations idAggregate.aggVariables m
             | m <- Map.elems zonkedModulesMap
           ]
       mergedDataDefs =
         buildDataDefs
-          idResult.identifiedConstructors
+          idAggregate.aggConstructors
           exhaustiveEnv.topLevelTypes
           dataAnnotations
       lowerContext =
@@ -300,7 +298,7 @@ compile emitLog input = do
           { Lowering.topLevelTypes = exhaustiveEnv.topLevelTypes,
             Lowering.dataDefs = mergedDataDefs,
             Lowering.requestNames = knownRequests,
-            Lowering.constructorNames = Map.keysSet idResult.identifiedConstructors
+            Lowering.constructorNames = Map.keysSet idAggregate.aggConstructors
           }
   let (loweringResults, loweringDiags)
         | shouldLower =
@@ -333,7 +331,7 @@ compile emitLog input = do
   let cachedSchemaEntries = concatMap (.cacheSchemaEntries) (Map.elems cacheHitModules)
       freshSchemaEntries =
         if shouldEmitArtefacts
-          then buildSchemasForModules idResult mergedDataDefs exhaustiveEnv.topLevelTypes cacheMissNames
+          then buildSchemasForModules idAggregate mergedDataDefs exhaustiveEnv.topLevelTypes cacheMissNames
           else []
       schema =
         if shouldEmitArtefacts
@@ -345,7 +343,7 @@ compile emitLog input = do
       freshCache =
         buildFreshCacheEntries
           sourceHashes
-          idResult
+          idAggregate
           typecheckCache
           loweringResults
           freshSchemaEntries
@@ -360,14 +358,14 @@ compile emitLog input = do
         diagnostics = allDiags,
         querySnapshot =
           Query.QuerySnapshot
-            { Query.variables = idResult.identifiedVariables,
-              Query.types = idResult.identifiedTypes,
-              Query.requests = idResult.identifiedRequests,
-              Query.constructors = idResult.identifiedConstructors,
-              Query.modules = idResult.identifiedModules,
-              Query.scopeIndex = idResult.scopeIndex,
-              Query.visibleSymbols = idResult.moduleVisibleSymbols,
-              Query.exports = idResult.moduleExports,
+            { Query.variables = idAggregate.aggVariables,
+              Query.types = idAggregate.aggTypes,
+              Query.requests = idAggregate.aggRequests,
+              Query.constructors = idAggregate.aggConstructors,
+              Query.modules = idAggregate.aggModules,
+              Query.scopeIndex = idAggregate.aggScopeIndex,
+              Query.visibleSymbols = idAggregate.aggTopLevelTables,
+              Query.exports = idAggregate.aggExportTables,
               Query.zonkedModules = zonkedModulesMap,
               Query.typeEnv = typeEnvMap
             },
@@ -406,7 +404,7 @@ data TypecheckTaskResult = TypecheckTaskResult
 
 typecheckModulesAsync ::
   (CompileLog -> IO ()) ->
-  IdentifierResult ->
+  IdentifyAggregate ->
   Map QualifiedName PrimRule ->
   Set.Set QualifiedName ->
   [ModuleName] ->
@@ -419,7 +417,7 @@ typecheckModulesAsync ::
       [Diagnostic],
       Map ModuleName TypecheckCacheEntry
     )
-typecheckModulesAsync emitLog idResult primRules knownRequests orderedModules directDeps sourceHashes inputCache = do
+typecheckModulesAsync emitLog idAggregate primRules knownRequests orderedModules directDeps sourceHashes inputCache = do
   tasksRef <- newIORef Map.empty
   for_ orderedModules $ \modName -> do
     existing <- readIORef tasksRef
@@ -428,7 +426,7 @@ typecheckModulesAsync emitLog idResult primRules knownRequests orderedModules di
         cached = Map.lookup modName inputCache
         sourceHash = Map.findWithDefault 0 modName sourceHashes
     task <-
-      async (runTypecheckTask emitLog idResult primRules knownRequests modName cached sourceHash depTasks)
+      async (runTypecheckTask emitLog idAggregate primRules knownRequests modName cached sourceHash depTasks)
     modifyIORef' tasksRef (Map.insert modName task)
   tasks <- readIORef tasksRef
   results <- traverse wait tasks
@@ -445,7 +443,7 @@ typecheckModulesAsync emitLog idResult primRules knownRequests orderedModules di
 
 runTypecheckTask ::
   (CompileLog -> IO ()) ->
-  IdentifierResult ->
+  IdentifyAggregate ->
   Map QualifiedName PrimRule ->
   Set.Set QualifiedName ->
   ModuleName ->
@@ -453,7 +451,7 @@ runTypecheckTask ::
   Int ->
   [Async TypecheckTaskResult] ->
   IO TypecheckTaskResult
-runTypecheckTask emitLog idResult primRules knownRequests moduleName cached sourceHash depTasks = do
+runTypecheckTask emitLog idAggregate primRules knownRequests moduleName cached sourceHash depTasks = do
   depResults <- mapM wait depTasks
   let allDepsCacheHit = all (.taskIsCacheHit) depResults
       cacheValid = case cached of
@@ -466,31 +464,26 @@ runTypecheckTask emitLog idResult primRules knownRequests moduleName cached sour
       let importedTypes = Map.unions (map (.taskExportedTypes) depResults)
           moduleAST =
             Map.findWithDefault
-              Module {declarations = [], sourceSpan = emptySrcSpan}
+              Module {declarations = [], sourceSpan = emptySourceSpan}
               moduleName
-              idResult.moduleASTs
+              idAggregate.aggASTs
           ownVariables =
             Map.filterWithKey
               (\qualifiedName _ -> qualifiedName.module_ == moduleName)
-              idResult.identifiedVariables
-          ownConstructors =
-            Map.filterWithKey
-              (\qualifiedName _ -> qualifiedName.module_ == moduleName)
-              idResult.identifiedConstructors
+              idAggregate.aggVariables
           subject =
             TypecheckSubject
               { moduleName = moduleName,
                 moduleAST = moduleAST,
                 ownVariables = ownVariables,
-                typeData = idResult.identifiedTypes,
+                typeData = idAggregate.aggTypes,
                 knownRequests = knownRequests,
-                ownConstructors = ownConstructors,
                 primRules = primRules,
                 importedTypes = importedTypes
               }
           result = typecheckModule subject
           dataAnnotations =
-            collectDataAnnotations idResult.identifiedVariables result.zonkedModule
+            collectDataAnnotations idAggregate.aggVariables result.zonkedModule
           newCacheEntry =
             TypecheckCacheEntry
               { tceInterface = result.moduleInterface,
@@ -514,7 +507,7 @@ typecheckFromCache moduleName c =
     { taskModuleName = moduleName,
       -- Cache-hit modules contribute no zonked AST / local typeEnv to the
       -- result — only their exported types matter for downstream phases.
-      taskZonkedModule = Module {declarations = [], sourceSpan = emptySrcSpan},
+      taskZonkedModule = Module {declarations = [], sourceSpan = emptySourceSpan},
       taskTypeEnvironment = Map.empty,
       taskExportedTypes = c.cacheInterface.exportedTypes,
       taskDiagnostics = c.cacheDiagnostics,
@@ -525,19 +518,6 @@ typecheckFromCache moduleName c =
             tceDiagnostics = c.cacheDiagnostics
           },
       taskIsCacheHit = True
-    }
-
-importedModuleName :: ImportDeclaration -> Text
-importedModuleName imp = case imp.kind of
-  ImportNames {moduleName = m} -> m
-  ImportModule {moduleName = m} -> m
-
-emptySrcSpan :: SourceSpan
-emptySrcSpan =
-  SrcSpan
-    { filePath = "",
-      start = Position {line = 0, column = 0},
-      end = Position {line = 0, column = 0}
     }
 
 -- ===========================================================================
@@ -559,10 +539,30 @@ parseSources sources =
 -- Identifier orchestration
 -- ===========================================================================
 
+-- | Aggregated identifier output. Holds whole-program maps assembled
+-- from the per-module 'ModuleIdentifyResult' values plus the threaded
+-- 'IdentifierState' (for variable / type / request / constructor /
+-- module metadata that accumulates across modules). Used internally by
+-- 'compile' to fan results out to typecheck, cache construction, and
+-- the query layer.
+data IdentifyAggregate = IdentifyAggregate
+  { aggVariables :: Map QualifiedName VariableData,
+    aggTypes :: Map QualifiedName TypeData,
+    aggRequests :: Map QualifiedName RequestData,
+    aggConstructors :: Map QualifiedName ConstructorData,
+    aggModules :: Map Text ModuleData,
+    aggASTs :: Map Text (Module Identified),
+    aggExportTables :: Map Text (Map Text SymbolEntry),
+    aggTopLevelTables :: Map Text (Map Text SymbolEntry),
+    aggScopeIndex :: ScopeIndex SymbolEntry,
+    aggErrors :: [Identifier.IdentifierError]
+  }
+
 type IdentifyAccum =
   ( Map Text (Module Identified),
     Map Text (Map Text SymbolEntry),
     Map Text (Map Text SymbolEntry),
+    [ScopeFrame SymbolEntry],
     IdentifierState
   )
 
@@ -570,7 +570,7 @@ runIdentify ::
   Set.Set Text ->
   Map Text (Module Parsed) ->
   Map ModuleName ModuleCache ->
-  (IdentifierResult, [Identifier.IdentifierError])
+  IdentifyAggregate
 runIdentify trustedStdlibNames moduleMap cachedModules =
   let ((), cycleState) =
         Identifier.runIdentifier $
@@ -584,9 +584,9 @@ runIdentify trustedStdlibNames moduleMap cachedModules =
       allExportNames = Map.map Identifier.scanExportNames moduleMap
 
       stepFresh :: IdentifyAccum -> Text -> IdentifyAccum
-      stepFresh (asts, exports, topLevels, state) moduleName =
+      stepFresh (asts, exports, topLevels, frames, state) moduleName =
         case Map.lookup moduleName moduleMap of
-          Nothing -> (asts, exports, topLevels, state)
+          Nothing -> (asts, exports, topLevels, frames, state)
           Just parsedModule ->
             let moduleResult =
                   Identifier.identifyModule
@@ -599,11 +599,12 @@ runIdentify trustedStdlibNames moduleMap cachedModules =
              in ( Map.insert moduleName moduleResult.identifiedAST asts,
                   Map.insert moduleName moduleResult.moduleExportTable exports,
                   Map.insert moduleName moduleResult.moduleTopLevel topLevels,
+                  frames <> moduleResult.moduleScopeFrames,
                   moduleResult.moduleState
                 )
 
       stepCachedOrFresh :: IdentifyAccum -> Text -> IdentifyAccum
-      stepCachedOrFresh accumulator@(asts, exports, topLevels, state) moduleName =
+      stepCachedOrFresh accumulator@(asts, exports, topLevels, frames, state) moduleName =
         case Map.lookup moduleName cachedModules of
           Just cached ->
             -- Cached modules don't restore an Identified AST or scope
@@ -620,6 +621,7 @@ runIdentify trustedStdlibNames moduleMap cachedModules =
              in ( asts,
                   Map.insert moduleName cached.cacheModuleExports exports,
                   Map.insert moduleName cached.cacheModuleTopLevel topLevels,
+                  frames,
                   injectedState
                 )
           Nothing -> stepFresh accumulator moduleName
@@ -632,15 +634,16 @@ runIdentify trustedStdlibNames moduleMap cachedModules =
       sortedStdlibNames =
         filter (== "primitive") stdlibModuleNames
           ++ filter (/= "primitive") stdlibModuleNames
-      (stdlibASTs, stdlibExports, stdlibTopLevels, stdlibState) =
-        foldl' stepCachedOrFresh (Map.empty, Map.empty, Map.empty, phaseAState) sortedStdlibNames
+      initialAccum = (Map.empty, Map.empty, Map.empty, [], phaseAState)
+      (stdlibASTs, stdlibExports, stdlibTopLevels, stdlibFrames, stdlibState) =
+        foldl' stepCachedOrFresh initialAccum sortedStdlibNames
 
       userModuleMap = Map.filterWithKey (\moduleName _ -> not (Set.member moduleName trustedStdlibNames)) moduleMap
       levels = topologicalSort userModuleMap
-      (acyclicASTs, acyclicExports, acyclicTopLevels, acyclicState) =
+      (acyclicASTs, acyclicExports, acyclicTopLevels, acyclicFrames, acyclicState) =
         foldl'
           (\accumulator level -> foldl' stepCachedOrFresh accumulator (Set.toList level))
-          (stdlibASTs, stdlibExports, stdlibTopLevels, stdlibState)
+          (stdlibASTs, stdlibExports, stdlibTopLevels, stdlibFrames, stdlibState)
           levels
 
       processedModuleNames = Map.keysSet acyclicASTs
@@ -649,23 +652,23 @@ runIdentify trustedStdlibNames moduleMap cachedModules =
           | moduleName <- Map.keys moduleMap,
             not (Set.member moduleName processedModuleNames)
         ]
-      (allASTs, allExports, allTopLevels, finalState) =
-        foldl' stepCachedOrFresh (acyclicASTs, acyclicExports, acyclicTopLevels, acyclicState) remainingModuleNames
-
-      capturedFrames =
-        [ScopeFrame {frameSpan = sp, frameSymbols = sym} | (sp, sym) <- finalState.capturedScopeFrames]
-      result =
-        Identifier.mkIdentifierResult
-          finalState.modules
-          finalState.variables
-          finalState.types
-          finalState.requests
-          finalState.constructors
-          allASTs
-          (buildScopeIndex capturedFrames)
-          allTopLevels
-          allExports
-   in (result, reverse finalState.errors)
+      (allASTs, allExports, allTopLevels, allFrames, finalState) =
+        foldl'
+          stepCachedOrFresh
+          (acyclicASTs, acyclicExports, acyclicTopLevels, acyclicFrames, acyclicState)
+          remainingModuleNames
+   in IdentifyAggregate
+        { aggVariables = finalState.variables,
+          aggTypes = finalState.types,
+          aggRequests = finalState.requests,
+          aggConstructors = finalState.constructors,
+          aggModules = finalState.modules,
+          aggASTs = allASTs,
+          aggExportTables = allExports,
+          aggTopLevelTables = allTopLevels,
+          aggScopeIndex = buildScopeIndex allFrames,
+          aggErrors = reverse finalState.errors
+        }
 
 -- ===========================================================================
 -- Helpers
@@ -679,22 +682,22 @@ extractImportDeclarations moduleAST =
 
 -- | Build schema entries for cache-miss modules only.
 buildSchemasForModules ::
-  IdentifierResult ->
+  IdentifyAggregate ->
   DataDefs ->
   Map QualifiedName (SemanticType Resolved) ->
   Set.Set Text ->
   [SchemaEntry]
-buildSchemasForModules idResult mergedDataDefs topLevelTypes moduleNames =
+buildSchemasForModules idAggregate mergedDataDefs topLevelTypes moduleNames =
   let ctx =
         SchemaContext
           { dataDefs = mergedDataDefs,
             topLevelTypes = topLevelTypes,
-            requestData = idResult.identifiedRequests
+            requestData = idAggregate.aggRequests
           }
       filteredVariables =
         Map.filterWithKey
           (\qualifiedName _ -> Set.member qualifiedName.module_ moduleNames)
-          idResult.identifiedVariables
+          idAggregate.aggVariables
    in buildModuleSchemas ctx filteredVariables
 
 -- ===========================================================================
@@ -703,13 +706,13 @@ buildSchemasForModules idResult mergedDataDefs topLevelTypes moduleNames =
 
 buildFreshCacheEntries ::
   Map ModuleName Int ->
-  IdentifierResult ->
+  IdentifyAggregate ->
   Map ModuleName TypecheckCacheEntry ->
   Map ModuleName ModuleLoweringResult ->
   [SchemaEntry] ->
   Set.Set Text ->
   Map ModuleName ModuleCache
-buildFreshCacheEntries sourceHashes idResult typecheckCache loweringResults schemaEntries_ cacheMissNames_ =
+buildFreshCacheEntries sourceHashes idAggregate typecheckCache loweringResults schemaEntries_ cacheMissNames_ =
   let schemaByModule =
         foldl'
           ( \accumulator entry ->
@@ -739,21 +742,21 @@ buildFreshCacheEntries sourceHashes idResult typecheckCache loweringResults sche
                     moduleName
                     typecheckCache
                 moduleVariables =
-                  Map.filterWithKey (\qualifiedName _ -> qualifiedName.module_ == moduleName) idResult.identifiedVariables
+                  Map.filterWithKey (\qualifiedName _ -> qualifiedName.module_ == moduleName) idAggregate.aggVariables
                 moduleTypes =
-                  Map.filterWithKey (\qualifiedName _ -> qualifiedName.module_ == moduleName) idResult.identifiedTypes
+                  Map.filterWithKey (\qualifiedName _ -> qualifiedName.module_ == moduleName) idAggregate.aggTypes
                 moduleRequests =
-                  Map.filterWithKey (\qualifiedName _ -> qualifiedName.module_ == moduleName) idResult.identifiedRequests
+                  Map.filterWithKey (\qualifiedName _ -> qualifiedName.module_ == moduleName) idAggregate.aggRequests
                 moduleConstructors =
-                  Map.filterWithKey (\qualifiedName _ -> qualifiedName.module_ == moduleName) idResult.identifiedConstructors
+                  Map.filterWithKey (\qualifiedName _ -> qualifiedName.module_ == moduleName) idAggregate.aggConstructors
                 moduleData =
                   Map.findWithDefault
-                    (ModuleData {moduleSourceSpan = emptySrcSpan})
+                    (ModuleData {moduleSourceSpan = emptySourceSpan})
                     moduleName
-                    idResult.identifiedModules
-                moduleExports = Map.findWithDefault Map.empty moduleName idResult.moduleExports
-                moduleTopLevel = Map.findWithDefault Map.empty moduleName idResult.moduleVisibleSymbols
-                moduleImports = case Map.lookup moduleName idResult.moduleASTs of
+                    idAggregate.aggModules
+                moduleExports = Map.findWithDefault Map.empty moduleName idAggregate.aggExportTables
+                moduleTopLevel = Map.findWithDefault Map.empty moduleName idAggregate.aggTopLevelTables
+                moduleImports = case Map.lookup moduleName idAggregate.aggASTs of
                   Just ast -> extractImportDeclarations ast
                   Nothing -> []
              in ModuleCache

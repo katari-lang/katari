@@ -1,12 +1,13 @@
 -- | Typechecker phase 4: Zonk — bakes the Solver's substitution results
 -- into the AST.
 --
--- Input  : 'IdentifierResult' (for looking up VariableData / TypeData /
---          ModuleData from the Identifier stage), 'ConstraintGenResult'
---          (Constrained AST and 'typeEnvironment'), 'SolverResult'
---          (substitution maps).
--- Output : 'ZonkResult' — Zonked AST, resolved type environment, and an
---          error set for detecting Solver-contract violations.
+-- Input  : @variables@ (per-module 'VariableData' map, used only for
+--          source-span attribution on substitution-miss errors),
+--          'ConstraintGenResult' (Constrained AST and type environment
+--          for this SCC), 'SolverResult' (substitution maps).
+-- Output : 'ModuleZonkResult' — the SCC's Zonked AST + resolved type
+--          environment, plus an error list for detecting Solver-contract
+--          violations.
 --
 -- Design assumptions:
 --
@@ -40,7 +41,6 @@ import Control.Monad.Trans (lift)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
-import Data.Text (Text)
 import Data.Text qualified as Text
 import Katari.AST
 import Katari.Diagnostic (Diagnostic, diagnosticError)
@@ -58,7 +58,7 @@ import Katari.SemanticType
     Unresolved,
     substituteVariable,
   )
-import Katari.SourceSpan (Position (..), SourceSpan (..))
+import Katari.SourceSpan (SourceSpan, emptySourceSpan)
 import Katari.Typechecker.ConstraintGenerator (ConstraintGenResult (..))
 import Katari.Typechecker.Identifier (VariableData (..))
 import Katari.Typechecker.NormalizedType (denormalise)
@@ -128,18 +128,9 @@ recordZonkError err = lift (modify (err :))
 
 -- | Zonk a 'SemanticType Unresolved' to 'SemanticType Resolved'. Variables
 -- are looked up in the solver's type substitution; structural recursion is
--- delegated to 'traverseSemanticChildren' (the bulk of what used to be a
+-- delegated to 'substituteVariable' (the bulk of what used to be a
 -- 14-case @\\case@).
 zonkType :: SourceSpan -> SemanticType Unresolved -> Zonk (SemanticType Resolved)
--- zonkType sourceSpan = \case
---   SemanticTypeVariable typeVar -> do
---     solverResult <- ask
---     case Map.lookup typeVar solverResult.typeSubstitution of
---       Just normalizedType -> pure (denormalise normalizedType)
---       Nothing -> do
---         recordZonkError (ZonkErrorMissingTypeVar sourceSpan typeVar)
---         pure SemanticTypeUnknown
---   t -> traverseSemanticChildren (zonkType sourceSpan) (zonkRequest sourceSpan) t
 zonkType sourceSpan =
   substituteVariable
     ( \typeVar -> do
@@ -765,10 +756,6 @@ walkParArrayExpr ParArrayExpression {elements, sourceSpan, typeOf} = do
 -- Entry point
 -- ===========================================================================
 
--- | Run zonking over the constrained AST and the type environment for a
--- single module. The resulting 'zonkedTypeEnvironment' carries one entry
--- (keyed by @moduleName@) so per-module ZonkResults can be merged with
--- 'Map.union' downstream.
 -- | Zonk one SCC's constrained AST + type environment against the
 -- Solver's substitutions. Returns the zonked module + the SCC's
 -- resolved type environment. @variables@ is a (qname → 'VariableData')
@@ -783,14 +770,9 @@ zonk ::
 zonk variables cgResult solverResult =
   let action =
         (,)
-          <$> traverse walkModule cgResult.constrainedModules
+          <$> walkModule cgResult.constrainedModule
           <*> Map.traverseWithKey zonkEnvEntry cgResult.typeEnvironment
-      ((modulesResult, envResult), errs) = runState (runReaderT action solverResult) []
-      -- generateConstraintsForSCC always returns a single-entry map, so
-      -- there's exactly one zonked module to pull out.
-      zonkedModule_ = case Map.elems modulesResult of
-        (m : _) -> m
-        [] -> Module {declarations = [], sourceSpan = placeholderSpan}
+      ((zonkedModule_, envResult), errs) = runState (runReaderT action solverResult) []
       result =
         ModuleZonkResult
           { zonkedModule = zonkedModule_,
@@ -803,12 +785,6 @@ zonk variables cgResult solverResult =
             ResolvedTopLevel qualifiedName ->
               case Map.lookup qualifiedName variables of
                 Just variableData -> variableData.variableSourceSpan
-                Nothing -> placeholderSpan
-            ResolvedLocal _ -> placeholderSpan
+                Nothing -> emptySourceSpan
+            ResolvedLocal _ -> emptySourceSpan
        in zonkType sourceSpan t
-    placeholderSpan =
-      SrcSpan
-        { filePath = "",
-          start = Position {line = 0, column = 0},
-          end = Position {line = 0, column = 0}
-        }

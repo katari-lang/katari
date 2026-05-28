@@ -23,9 +23,9 @@ import Katari.Typechecker.ConstraintGenerator
   ( ConstraintGenResult (..),
     VariableSupply (..),
   )
+import Katari.TestSupport (IdentifierResult (..))
 import Katari.Typechecker.Identifier
-  ( IdentifierResult (..),
-    RequestData,
+  ( RequestData,
     VariableData (..),
   )
 import Katari.Typechecker.Identifier qualified as Identifier
