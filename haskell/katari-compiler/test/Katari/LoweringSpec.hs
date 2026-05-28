@@ -56,10 +56,15 @@ lowerSource src =
                       | (_, perMod) <- Map.toList zr.zonkedTypeEnvironment,
                         (Id.ResolvedTopLevel qn, ty) <- Map.toList perMod
                     ]
+                annotations =
+                  Map.unions
+                    [ Schema.collectDataAnnotations idResult.identifiedVariables m
+                      | m <- Map.elems zr.zonkedModules
+                    ]
                 lowerCtx =
                   LowerContext
                     { topLevelTypes = topLevels,
-                      dataDefs = Schema.buildDataDefs idResult zr,
+                      dataDefs = Schema.buildDataDefs idResult.identifiedConstructors topLevels annotations,
                       requestNames = Map.keysSet idResult.identifiedRequests,
                       constructorNames = Map.keysSet idResult.identifiedConstructors
                     }

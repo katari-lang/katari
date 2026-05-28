@@ -54,8 +54,14 @@ import Katari.Lexer qualified as Lexer
 import Katari.Lowering (ModuleLoweringResult (..), lowerModule, mergeModuleLowerings)
 import Katari.Lowering qualified as Lowering
 import Katari.Parser qualified as Parser
-import Katari.Schema (SchemaEntry (..), buildSchemas)
-import Katari.Schema qualified as Schema
+import Katari.Schema
+  ( DataDefs,
+    SchemaContext (..),
+    SchemaEntry (..),
+    buildDataDefs,
+    buildModuleSchemas,
+    collectDataAnnotations,
+  )
 import Katari.SemanticType (Resolved, SemanticType)
 import Katari.SourceSpan (Position (..), SourceSpan (..))
 import Katari.Stdlib qualified as Stdlib
@@ -254,10 +260,20 @@ compile emitLog input = do
             Set.member moduleName cacheMissNames
         ]
   for_ (map fst freshLowerInputs) (emitLog . CompileLogLowering)
-  let lowerContext =
+  let dataAnnotations =
+        Map.unions
+          [ collectDataAnnotations idResult.identifiedVariables m
+            | m <- Map.elems mergedZonkResult.zonkedModules
+          ]
+      mergedDataDefs =
+        buildDataDefs
+          idResult.identifiedConstructors
+          exhaustiveEnv.topLevelTypes
+          dataAnnotations
+      lowerContext =
         Lowering.LowerContext
           { Lowering.topLevelTypes = exhaustiveEnv.topLevelTypes,
-            Lowering.dataDefs = Schema.buildDataDefs idResult mergedZonkResult,
+            Lowering.dataDefs = mergedDataDefs,
             Lowering.requestNames = Map.keysSet idResult.identifiedRequests,
             Lowering.constructorNames = Map.keysSet idResult.identifiedConstructors
           }
@@ -292,7 +308,7 @@ compile emitLog input = do
   let cachedSchemaEntries = concatMap (.cacheSchemaEntries) (Map.elems cacheHitModules)
       freshSchemaEntries =
         if shouldEmitArtefacts
-          then buildSchemasForModules idResult mergedZonkResult cacheMissNames
+          then buildSchemasForModules idResult mergedDataDefs exhaustiveEnv.topLevelTypes cacheMissNames
           else []
       schema =
         if shouldEmitArtefacts
@@ -678,16 +694,22 @@ extractImportDeclarations moduleAST =
 -- | Build schema entries for cache-miss modules only.
 buildSchemasForModules ::
   IdentifierResult ->
-  ZonkResult ->
+  DataDefs ->
+  Map QualifiedName (SemanticType Resolved) ->
   Set.Set Text ->
   [SchemaEntry]
-buildSchemasForModules idResult zonkResult_ moduleNames =
-  let filteredVariables =
+buildSchemasForModules idResult mergedDataDefs topLevelTypes moduleNames =
+  let ctx =
+        SchemaContext
+          { dataDefs = mergedDataDefs,
+            topLevelTypes = topLevelTypes,
+            requestData = idResult.identifiedRequests
+          }
+      filteredVariables =
         Map.filterWithKey
           (\qualifiedName _ -> Set.member qualifiedName.module_ moduleNames)
           idResult.identifiedVariables
-      filteredIdResult = idResult {identifiedVariables = filteredVariables}
-   in buildSchemas filteredIdResult zonkResult_
+   in buildModuleSchemas ctx filteredVariables
 
 -- ===========================================================================
 -- Cache construction
