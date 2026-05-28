@@ -55,6 +55,7 @@ import Katari.Lowering (ModuleLoweringResult (..), lowerModule, mergeModuleLower
 import Katari.Lowering qualified as Lowering
 import Katari.Parser qualified as Parser
 import Katari.Schema (SchemaEntry (..), buildSchemas)
+import Katari.Schema qualified as Schema
 import Katari.SemanticType (Resolved, SemanticType)
 import Katari.SourceSpan (Position (..), SourceSpan (..))
 import Katari.Stdlib qualified as Stdlib
@@ -253,6 +254,13 @@ compile emitLog input = do
             Set.member moduleName cacheMissNames
         ]
   for_ (map fst freshLowerInputs) (emitLog . CompileLogLowering)
+  let lowerContext =
+        Lowering.LowerContext
+          { Lowering.topLevelTypes = exhaustiveEnv.topLevelTypes,
+            Lowering.dataDefs = Schema.buildDataDefs idResult mergedZonkResult,
+            Lowering.requestNames = Map.keysSet idResult.identifiedRequests,
+            Lowering.constructorNames = Map.keysSet idResult.identifiedConstructors
+          }
   let (loweringResults, loweringDiags)
         | shouldLower =
             let cachedResults =
@@ -262,7 +270,8 @@ compile emitLog input = do
                     ( parMap
                         rseq
                         ( \(moduleName, moduleAST) ->
-                            let (result, errors) = lowerModule idResult mergedZonkResult moduleName moduleAST
+                            let localEnv = Map.findWithDefault Map.empty moduleName mergedZonkResult.zonkedTypeEnvironment
+                                (result, errors) = lowerModule lowerContext moduleName localEnv moduleAST
                              in (moduleName, (result, errors))
                         )
                         freshLowerInputs

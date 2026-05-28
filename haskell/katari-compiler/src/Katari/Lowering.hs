@@ -8,7 +8,8 @@
 -- collects the per-module fragments and merges them with
 -- 'mergeModuleLowerings', which offsets all IDs to avoid collisions.
 module Katari.Lowering
-  ( lowerModule,
+  ( LowerContext (..),
+    lowerModule,
     ModuleLoweringResult (..),
     mergeModuleLowerings,
     LoweringError (..),
@@ -18,7 +19,7 @@ where
 
 import Control.Monad (foldM, forM, mapAndUnzipM)
 import Control.Monad.Except (ExceptT, runExceptT, throwError)
-import Control.Monad.Reader (ReaderT, asks, local, runReaderT)
+import Control.Monad.Reader (ReaderT, ask, asks, local, runReaderT)
 import Control.Monad.State.Strict (State, gets, modify, runState)
 import Data.Aeson (FromJSON (..), ToJSON (..), defaultOptions, genericParseJSON, genericToJSON)
 import Data.Bifunctor (Bifunctor (..))
@@ -41,8 +42,7 @@ import Katari.Internal qualified as Internal
 import Katari.Schema qualified as Schema
 import Katari.SemanticType (Resolved, SemanticType (..))
 import Katari.SourceSpan (SourceSpan)
-import Katari.Typechecker.Identifier (ConstructorData (..), IdentifierResult (..), RequestData (..))
-import Katari.Typechecker.Zonker (ZonkResult (..), lookupTypeInModule)
+import Katari.Typechecker.Identifier (ConstructorData (..), RequestData (..))
 
 -- ===========================================================================
 -- Errors
@@ -101,32 +101,41 @@ toDiagnostic = \case
 --     block is finalized (@runWithFreshBuffer@).
 -- ===========================================================================
 
-data LowerEnv = LowerEnv
-  { -- | Local bindings: @VariableResolution → IR's VarId@ introduced by
-    -- @let@ / function param / pattern / local agent. Top-level callable
-    -- resolution uses 'lsTopLevelBlocks' separately.
-    localVars :: Map Id.VariableResolution VarId,
-    -- | The module currently being lowered. Needed to disambiguate
-    -- 'ResolvedLocal' lookups against 'ZonkResult.zonkedTypeEnvironment'
-    -- (which is partitioned per module).
-    currentModule :: Text,
-    identifierResult :: IdentifierResult,
-    zonkResult :: ZonkResult,
+-- | Cross-module context needed by Lowering: types and data
+-- declarations reachable from this module (own + transitive imports).
+-- Built once by the orchestrator and reused across the module's
+-- compilation.
+data LowerContext = LowerContext
+  { topLevelTypes :: Map Id.QualifiedName (SemanticType Resolved),
     dataDefs :: Schema.DataDefs,
     requestNames :: Set Id.QualifiedName,
     constructorNames :: Set Id.QualifiedName
   }
 
-initialLowerEnv :: Text -> IdentifierResult -> ZonkResult -> LowerEnv
-initialLowerEnv moduleName idResult zonk =
+data LowerEnv = LowerEnv
+  { -- | Local bindings: @VariableResolution → IR's VarId@ introduced by
+    -- @let@ / function param / pattern / local agent. Top-level callable
+    -- resolution uses 'lsTopLevelBlocks' separately.
+    localVars :: Map Id.VariableResolution VarId,
+    currentModule :: Text,
+    -- | The current module's own type environment (locals + own top-level).
+    localTypeEnv :: Map Id.VariableResolution (SemanticType Resolved),
+    topLevelTypes :: Map Id.QualifiedName (SemanticType Resolved),
+    dataDefs :: Schema.DataDefs,
+    requestNames :: Set Id.QualifiedName,
+    constructorNames :: Set Id.QualifiedName
+  }
+
+initialLowerEnv :: LowerContext -> Text -> Map Id.VariableResolution (SemanticType Resolved) -> LowerEnv
+initialLowerEnv ctx moduleName moduleLocalTypeEnv =
   LowerEnv
     { localVars = Map.empty,
       currentModule = moduleName,
-      identifierResult = idResult,
-      zonkResult = zonk,
-      dataDefs = Schema.buildDataDefs idResult zonk,
-      requestNames = Map.keysSet idResult.identifiedRequests,
-      constructorNames = Map.keysSet idResult.identifiedConstructors
+      localTypeEnv = moduleLocalTypeEnv,
+      topLevelTypes = ctx.topLevelTypes,
+      dataDefs = ctx.dataDefs,
+      requestNames = ctx.requestNames,
+      constructorNames = ctx.constructorNames
     }
 
 data LowerState = LowerState
@@ -338,9 +347,11 @@ schemasForVariable ::
   [(Text, Maybe Text)] ->
   Lower (Text, Text)
 schemasForVariable variableResolution labelsAndAnnotations = do
-  zr <- asks (.zonkResult)
-  curMod <- asks (.currentModule)
-  case lookupTypeInModule curMod variableResolution zr of
+  env <- ask
+  let resolved = case variableResolution of
+        Id.ResolvedTopLevel qualifiedName -> Map.lookup qualifiedName env.topLevelTypes
+        Id.ResolvedLocal _ -> Map.lookup variableResolution env.localTypeEnv
+  case resolved of
     Just functionType -> schemasForFunctionType functionType labelsAndAnnotations
     Nothing -> pure ("{}", "{}")
 
@@ -406,13 +417,13 @@ instance FromJSON ModuleLoweringResult where
 -- | Lower one module in complete isolation (BlockId/VarId counters
 -- start from 0). Returns the IR fragment and any structural errors.
 lowerModule ::
-  IdentifierResult ->
-  ZonkResult ->
+  LowerContext ->
   Text ->
+  Map Id.VariableResolution (SemanticType Resolved) ->
   AST.Module Zonked ->
   (Either Diagnostic ModuleLoweringResult, [LoweringError])
-lowerModule idResult zonkResult moduleName moduleAST =
-  let env = initialLowerEnv moduleName idResult zonkResult
+lowerModule ctx moduleName moduleLocalTypeEnv moduleAST =
+  let env = initialLowerEnv ctx moduleName moduleLocalTypeEnv
       (result, finalState) =
         runState
           (runReaderT (runExceptT (lowerModuleM moduleName moduleAST)) env)

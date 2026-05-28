@@ -13,12 +13,15 @@ import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Katari.Compile qualified as Compile
+import Katari.Id qualified as Id
 import Katari.IR
 import Katari.Lexer qualified as Lexer
-import Katari.Lowering (LoweringError (..), lowerModule, mergeModuleLowerings)
+import Katari.Lowering (LowerContext (..), LoweringError (..), lowerModule, mergeModuleLowerings)
 import Katari.Parser qualified as Parser
+import Katari.Schema qualified as Schema
 import Katari.SemanticType (RequestVariableId (..), TypeVariableId (..))
 import Katari.Typechecker.ConstraintGenerator (ConstraintGenResult (..), VariableSupply (..))
+import Katari.Typechecker.Identifier (IdentifierResult (..))
 import Katari.Typechecker.NormalizedType (NormalizedType (..))
 import Katari.Typechecker.Solver (SolverResult (..))
 import Katari.Typechecker.Zonker (ZonkResult (..), zonk)
@@ -47,10 +50,24 @@ lowerSource src =
                         Map.fromList [(RequestVariableId i, Set.empty) | i <- [0 .. cg.variableSupply.requestVarSupply - 1]]
                     }
                 (zr, _) = zonk "main" idResult cg solver
+                topLevels =
+                  Map.fromList
+                    [ (qn, ty)
+                      | (_, perMod) <- Map.toList zr.zonkedTypeEnvironment,
+                        (Id.ResolvedTopLevel qn, ty) <- Map.toList perMod
+                    ]
+                lowerCtx =
+                  LowerContext
+                    { topLevelTypes = topLevels,
+                      dataDefs = Schema.buildDataDefs idResult zr,
+                      requestNames = Map.keysSet idResult.identifiedRequests,
+                      constructorNames = Map.keysSet idResult.identifiedConstructors
+                    }
             let allResults =
-                  [ case lowerModule idResult zr moduleName moduleAST of
-                      (Right mlr, errs) -> Right (mlr, errs)
-                      (Left internalDiag, _) -> Left internalDiag
+                  [ let localEnv = Map.findWithDefault Map.empty moduleName zr.zonkedTypeEnvironment
+                     in case lowerModule lowerCtx moduleName localEnv moduleAST of
+                          (Right mlr, errs) -> Right (mlr, errs)
+                          (Left internalDiag, _) -> Left internalDiag
                     | (moduleName, moduleAST) <- Map.toList zr.zonkedModules
                   ]
                 failures = [d | Left d <- allResults]
