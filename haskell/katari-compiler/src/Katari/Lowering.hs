@@ -42,7 +42,7 @@ import Katari.Schema qualified as Schema
 import Katari.SemanticType (Resolved, SemanticType (..))
 import Katari.SourceSpan (SourceSpan)
 import Katari.Typechecker.Identifier (ConstructorData (..), IdentifierResult (..), RequestData (..))
-import Katari.Typechecker.Zonker (ZonkResult (..))
+import Katari.Typechecker.Zonker (ZonkResult (..), lookupTypeInModule)
 
 -- ===========================================================================
 -- Errors
@@ -106,6 +106,10 @@ data LowerEnv = LowerEnv
     -- @let@ / function param / pattern / local agent. Top-level callable
     -- resolution uses 'lsTopLevelBlocks' separately.
     localVars :: Map Id.VariableResolution VarId,
+    -- | The module currently being lowered. Needed to disambiguate
+    -- 'ResolvedLocal' lookups against 'ZonkResult.zonkedTypeEnvironment'
+    -- (which is partitioned per module).
+    currentModule :: Text,
     identifierResult :: IdentifierResult,
     zonkResult :: ZonkResult,
     dataDefs :: Schema.DataDefs,
@@ -113,10 +117,11 @@ data LowerEnv = LowerEnv
     constructorNames :: Set Id.QualifiedName
   }
 
-initialLowerEnv :: IdentifierResult -> ZonkResult -> LowerEnv
-initialLowerEnv idResult zonk =
+initialLowerEnv :: Text -> IdentifierResult -> ZonkResult -> LowerEnv
+initialLowerEnv moduleName idResult zonk =
   LowerEnv
     { localVars = Map.empty,
+      currentModule = moduleName,
       identifierResult = idResult,
       zonkResult = zonk,
       dataDefs = Schema.buildDataDefs idResult zonk,
@@ -334,7 +339,8 @@ schemasForVariable ::
   Lower (Text, Text)
 schemasForVariable variableResolution labelsAndAnnotations = do
   zr <- asks (.zonkResult)
-  case Map.lookup variableResolution zr.zonkedTypeEnvironment of
+  curMod <- asks (.currentModule)
+  case lookupTypeInModule curMod variableResolution zr of
     Just functionType -> schemasForFunctionType functionType labelsAndAnnotations
     Nothing -> pure ("{}", "{}")
 
@@ -406,7 +412,7 @@ lowerModule ::
   AST.Module Zonked ->
   (Either Diagnostic ModuleLoweringResult, [LoweringError])
 lowerModule idResult zonkResult moduleName moduleAST =
-  let env = initialLowerEnv idResult zonkResult
+  let env = initialLowerEnv moduleName idResult zonkResult
       (result, finalState) =
         runState
           (runReaderT (runExceptT (lowerModuleM moduleName moduleAST)) env)

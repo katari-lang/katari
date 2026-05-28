@@ -84,7 +84,7 @@ import Katari.Typechecker.Identifier
     RequestData (..),
     VariableData (..),
   )
-import Katari.Typechecker.Zonker (ZonkResult (..))
+import Katari.Typechecker.Zonker (ZonkResult (..), lookupTopLevelType)
 
 -- ===========================================================================
 -- Output types
@@ -367,10 +367,7 @@ buildDataDefs idResult zonkResult =
                     ctorQName
                     annotationsByQName,
             Just (SemanticTypeFunction fieldTypes _ _) <-
-              [ Map.lookup
-                  (ResolvedTopLevel ctorQName)
-                  zonkResult.zonkedTypeEnvironment
-              ]
+              [lookupTopLevelType ctorQName zonkResult]
         ]
 
 -- ===========================================================================
@@ -531,7 +528,7 @@ buildVariableEntry ::
   Maybe SchemaEntry
 buildVariableEntry dataDefs idResult zonkResult (qualifiedName, variableData) = do
   SemanticTypeFunction paramTypes returnType requestSet <-
-    Map.lookup (ResolvedTopLevel qualifiedName) zonkResult.zonkedTypeEnvironment
+    lookupTopLevelType qualifiedName zonkResult
   let inputSchema =
         buildInputObject dataDefs paramTypes variableData.variableParameterAnnotations
       requestRefs = buildRequestRefs dataDefs idResult zonkResult requestSet
@@ -605,7 +602,7 @@ buildRequestRef :: DataDefs -> IdentifierResult -> ZonkResult -> QualifiedName -
 buildRequestRef dataDefs idResult zonkResult qualifiedName = do
   rd <- Map.lookup qualifiedName idResult.identifiedRequests
   SemanticTypeFunction paramTypes returnType _ <-
-    Map.lookup (ResolvedTopLevel qualifiedName) zonkResult.zonkedTypeEnvironment
+    lookupTopLevelType qualifiedName zonkResult
   let inputCore =
         SchemaCoreObject
           { properties =

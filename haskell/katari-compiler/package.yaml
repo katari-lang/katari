@@ -92,6 +92,8 @@ dependencies:
   - safe
   - vector
   - parallel
+  - async
+  - stm
 
 default-extensions:
   - DataKinds

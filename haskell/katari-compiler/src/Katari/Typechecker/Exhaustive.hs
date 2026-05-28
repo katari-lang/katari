@@ -47,7 +47,7 @@ import Katari.Typechecker.Identifier
   ( ConstructorData (..),
     IdentifierResult (..),
   )
-import Katari.Typechecker.Zonker (ZonkResult (..))
+import Katari.Typechecker.Zonker (ZonkResult (..), lookupTopLevelType, lookupTypeInModule)
 
 -- ===========================================================================
 -- Error type
@@ -249,7 +249,7 @@ defaultCtx context = context {columnTypes = drop 1 context.columnTypes}
 getSubFieldTypes :: CtorTag -> SemanticType Resolved -> IdentifierResult -> ZonkResult -> [SemanticType Resolved]
 getSubFieldTypes tag columnType idResult zonkResult = case tag of
   CtorTagData qualifiedName ->
-    case Map.lookup (ResolvedTopLevel qualifiedName) zonkResult.zonkedTypeEnvironment of
+    case lookupTopLevelType qualifiedName zonkResult of
       Just (SemanticTypeFunction parameters _ _) ->
         map snd (Map.toAscList parameters)
       _ -> []
@@ -378,7 +378,7 @@ ctorsOfType idResult zonkResult typeQName =
 -- | Arity of a constructor from its function-type signature.
 lookupCtorArity :: ZonkResult -> QualifiedName -> Int
 lookupCtorArity zonkResult qualifiedName =
-  case Map.lookup (ResolvedTopLevel qualifiedName) zonkResult.zonkedTypeEnvironment of
+  case lookupTopLevelType qualifiedName zonkResult of
     Just (SemanticTypeFunction parameters _ _) -> Map.size parameters
     _ -> 0
 
@@ -557,15 +557,18 @@ checkIrrefutable idResult zonkResult pattern subjectType =
 -- | Entry point: walk all Zonked modules and collect exhaustiveness errors.
 checkExhaustive :: IdentifierResult -> ZonkResult -> [ExhaustiveError]
 checkExhaustive idResult zonkResult =
-  concatMap (walkModule idResult zonkResult) (Map.elems zonkResult.zonkedModules)
+  concatMap
+    (\(moduleName, m) -> walkModule idResult zonkResult moduleName m)
+    (Map.toList zonkResult.zonkedModules)
 
-walkModule :: IdentifierResult -> ZonkResult -> AST.Module Zonked -> [ExhaustiveError]
-walkModule idResult zonkResult m = concatMap (walkDeclaration idResult zonkResult) m.declarations
+walkModule :: IdentifierResult -> ZonkResult -> Text -> AST.Module Zonked -> [ExhaustiveError]
+walkModule idResult zonkResult moduleName m =
+  concatMap (walkDeclaration idResult zonkResult moduleName) m.declarations
 
-walkDeclaration :: IdentifierResult -> ZonkResult -> AST.Declaration Zonked -> [ExhaustiveError]
-walkDeclaration idResult zonkResult = \case
+walkDeclaration :: IdentifierResult -> ZonkResult -> Text -> AST.Declaration Zonked -> [ExhaustiveError]
+walkDeclaration idResult zonkResult moduleName = \case
   AST.DeclarationAgent decl ->
-    walkAgentBody idResult zonkResult decl.name.resolution decl.parameters decl.body
+    walkAgentBody idResult zonkResult moduleName decl.name.resolution decl.parameters decl.body
   AST.DeclarationRequest _ -> []
   AST.DeclarationExternalAgent _ -> []
   AST.DeclarationPrimAgent _ -> []
@@ -578,17 +581,18 @@ walkDeclaration idResult zonkResult = \case
 walkAgentBody ::
   IdentifierResult ->
   ZonkResult ->
+  Text ->
   Maybe VariableResolution ->
   [AST.ParameterBinding Zonked] ->
   AST.Block Zonked ->
   [ExhaustiveError]
-walkAgentBody idResult zonkResult maybeResolution parameters block =
-  paramErrors ++ walkBlock idResult zonkResult block
+walkAgentBody idResult zonkResult moduleName maybeResolution parameters block =
+  paramErrors ++ walkBlock idResult zonkResult moduleName block
   where
     paramErrors = case maybeResolution of
       Nothing -> []
       Just variableResolution ->
-        case Map.lookup variableResolution zonkResult.zonkedTypeEnvironment of
+        case lookupTypeInModule moduleName variableResolution zonkResult of
           Just (SemanticTypeFunction paramTypes _ _) ->
             concatMap (checkParam idResult zonkResult paramTypes) parameters
           _ -> []
@@ -604,98 +608,98 @@ checkParam idResult zonkResult paramTypes pb =
   let paramType = Map.findWithDefault SemanticTypeUnknown pb.label paramTypes
    in checkIrrefutable idResult zonkResult pb.pattern paramType
 
-walkBlock :: IdentifierResult -> ZonkResult -> AST.Block Zonked -> [ExhaustiveError]
-walkBlock idResult zonkResult block =
-  concatMap (walkStatement idResult zonkResult) block.statements
-    ++ maybe [] (walkExpression idResult zonkResult) block.returnExpression
+walkBlock :: IdentifierResult -> ZonkResult -> Text -> AST.Block Zonked -> [ExhaustiveError]
+walkBlock idResult zonkResult moduleName block =
+  concatMap (walkStatement idResult zonkResult moduleName) block.statements
+    ++ maybe [] (walkExpression idResult zonkResult moduleName) block.returnExpression
 
-walkHandler :: IdentifierResult -> ZonkResult -> AST.RequestHandler Zonked -> [ExhaustiveError]
-walkHandler idResult zonkResult rh = walkBlock idResult zonkResult rh.body
+walkHandler :: IdentifierResult -> ZonkResult -> Text -> AST.RequestHandler Zonked -> [ExhaustiveError]
+walkHandler idResult zonkResult moduleName rh = walkBlock idResult zonkResult moduleName rh.body
 
-walkStatement :: IdentifierResult -> ZonkResult -> AST.Statement Zonked -> [ExhaustiveError]
-walkStatement idResult zonkResult = \case
+walkStatement :: IdentifierResult -> ZonkResult -> Text -> AST.Statement Zonked -> [ExhaustiveError]
+walkStatement idResult zonkResult moduleName = \case
   AST.StatementLet ls ->
-    walkExpression idResult zonkResult ls.value
+    walkExpression idResult zonkResult moduleName ls.value
       ++ checkIrrefutable idResult zonkResult ls.pattern (getExpressionType ls.value)
   AST.StatementAgent ls ->
-    walkAgentBody idResult zonkResult ls.name.resolution ls.parameters ls.body
+    walkAgentBody idResult zonkResult moduleName ls.name.resolution ls.parameters ls.body
   AST.StatementReturn rs ->
-    walkExpression idResult zonkResult rs.value
+    walkExpression idResult zonkResult moduleName rs.value
   AST.StatementNext ns ->
-    walkExpression idResult zonkResult ns.value
-      ++ concatMap (walkExpression idResult zonkResult . (.value)) ns.modifiers
+    walkExpression idResult zonkResult moduleName ns.value
+      ++ concatMap (walkExpression idResult zonkResult moduleName . (.value)) ns.modifiers
   AST.StatementBreak bs ->
-    walkExpression idResult zonkResult bs.value
+    walkExpression idResult zonkResult moduleName bs.value
   AST.StatementForBreak fbs ->
-    walkExpression idResult zonkResult fbs.value
+    walkExpression idResult zonkResult moduleName fbs.value
   AST.StatementExpression expr ->
-    walkExpression idResult zonkResult expr
+    walkExpression idResult zonkResult moduleName expr
   AST.StatementForNext _ -> []
   AST.StatementError _ -> []
 
-walkExpression :: IdentifierResult -> ZonkResult -> AST.Expression Zonked -> [ExhaustiveError]
-walkExpression idResult zonkResult = \case
+walkExpression :: IdentifierResult -> ZonkResult -> Text -> AST.Expression Zonked -> [ExhaustiveError]
+walkExpression idResult zonkResult moduleName = \case
   AST.ExpressionMatch me ->
-    walkExpression idResult zonkResult me.subject
-      ++ concatMap (walkBlock idResult zonkResult . (.body)) me.cases
+    walkExpression idResult zonkResult moduleName me.subject
+      ++ concatMap (walkBlock idResult zonkResult moduleName . (.body)) me.cases
       ++ checkMatch idResult zonkResult me
   AST.ExpressionFor fe ->
-    concatMap (walkForInBinding idResult zonkResult) fe.inBindings
-      ++ concatMap (walkExpression idResult zonkResult . (.initial)) fe.varBindings
-      ++ walkBlock idResult zonkResult fe.body
-      ++ maybe [] (walkBlock idResult zonkResult) fe.thenBlock
+    concatMap (walkForInBinding idResult zonkResult moduleName) fe.inBindings
+      ++ concatMap (walkExpression idResult zonkResult moduleName . (.initial)) fe.varBindings
+      ++ walkBlock idResult zonkResult moduleName fe.body
+      ++ maybe [] (walkBlock idResult zonkResult moduleName) fe.thenBlock
   AST.ExpressionIf ie ->
-    walkExpression idResult zonkResult ie.condition
-      ++ walkBlock idResult zonkResult ie.thenBlock
-      ++ maybe [] (walkBlock idResult zonkResult) ie.elseBlock
+    walkExpression idResult zonkResult moduleName ie.condition
+      ++ walkBlock idResult zonkResult moduleName ie.thenBlock
+      ++ maybe [] (walkBlock idResult zonkResult moduleName) ie.elseBlock
   AST.ExpressionBlock be ->
-    walkBlock idResult zonkResult be.block
+    walkBlock idResult zonkResult moduleName be.block
   AST.ExpressionCall ce ->
-    walkExpression idResult zonkResult ce.callee
-      ++ concatMap (walkExpression idResult zonkResult . (.value)) ce.arguments
+    walkExpression idResult zonkResult moduleName ce.callee
+      ++ concatMap (walkExpression idResult zonkResult moduleName . (.value)) ce.arguments
   AST.ExpressionBinaryOperator be ->
-    walkExpression idResult zonkResult be.left ++ walkExpression idResult zonkResult be.right
+    walkExpression idResult zonkResult moduleName be.left ++ walkExpression idResult zonkResult moduleName be.right
   AST.ExpressionUnaryOperator ue ->
-    walkExpression idResult zonkResult ue.operand
+    walkExpression idResult zonkResult moduleName ue.operand
   AST.ExpressionTuple te ->
-    concatMap (walkExpression idResult zonkResult) te.elements
+    concatMap (walkExpression idResult zonkResult moduleName) te.elements
   AST.ExpressionArray ae ->
-    concatMap (walkExpression idResult zonkResult) ae.elements
+    concatMap (walkExpression idResult zonkResult moduleName) ae.elements
   AST.ExpressionRecord re ->
-    concatMap (walkExpression idResult zonkResult . snd) re.entries
+    concatMap (walkExpression idResult zonkResult moduleName . snd) re.entries
   AST.ExpressionFieldAccess fa ->
-    walkExpression idResult zonkResult fa.object
+    walkExpression idResult zonkResult moduleName fa.object
   AST.ExpressionIndexAccess ia ->
-    walkExpression idResult zonkResult ia.array ++ walkExpression idResult zonkResult ia.index
+    walkExpression idResult zonkResult moduleName ia.array ++ walkExpression idResult zonkResult moduleName ia.index
   AST.ExpressionTemplate te ->
-    concatMap (walkTemplateElement idResult zonkResult) te.elements
+    concatMap (walkTemplateElement idResult zonkResult moduleName) te.elements
   AST.ExpressionHandle he ->
-    concatMap (walkHandler idResult zonkResult) he.handlers
+    concatMap (walkHandler idResult zonkResult moduleName) he.handlers
       ++ maybe
         []
         ( \(maybePattern, thenBlock) ->
             maybe [] (\pat -> checkIrrefutable idResult zonkResult pat SemanticTypeUnknown) maybePattern
-              ++ walkBlock idResult zonkResult thenBlock
+              ++ walkBlock idResult zonkResult moduleName thenBlock
         )
         he.thenClause
-      ++ walkBlock idResult zonkResult he.body
+      ++ walkBlock idResult zonkResult moduleName he.body
   AST.ExpressionParTuple pte ->
-    concatMap (walkExpression idResult zonkResult) pte.elements
+    concatMap (walkExpression idResult zonkResult moduleName) pte.elements
   AST.ExpressionParArray pae ->
-    concatMap (walkExpression idResult zonkResult) pae.elements
+    concatMap (walkExpression idResult zonkResult moduleName) pae.elements
   AST.ExpressionLiteral _ -> []
   AST.ExpressionVariable _ -> []
   AST.ExpressionQualifiedReference _ -> []
 
-walkForInBinding :: IdentifierResult -> ZonkResult -> AST.ForInBinding Zonked -> [ExhaustiveError]
-walkForInBinding idResult zonkResult fib =
-  walkExpression idResult zonkResult fib.source
+walkForInBinding :: IdentifierResult -> ZonkResult -> Text -> AST.ForInBinding Zonked -> [ExhaustiveError]
+walkForInBinding idResult zonkResult moduleName fib =
+  walkExpression idResult zonkResult moduleName fib.source
     ++ let elemType = case getExpressionType fib.source of
              SemanticTypeArray t -> t
              _ -> SemanticTypeUnknown
         in checkIrrefutable idResult zonkResult fib.pattern elemType
 
-walkTemplateElement :: IdentifierResult -> ZonkResult -> AST.TemplateElement Zonked -> [ExhaustiveError]
-walkTemplateElement idResult zonkResult = \case
+walkTemplateElement :: IdentifierResult -> ZonkResult -> Text -> AST.TemplateElement Zonked -> [ExhaustiveError]
+walkTemplateElement idResult zonkResult moduleName = \case
   AST.TemplateElementString _ -> []
-  AST.TemplateElementExpression ee -> walkExpression idResult zonkResult ee.value
+  AST.TemplateElementExpression ee -> walkExpression idResult zonkResult moduleName ee.value

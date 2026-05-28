@@ -31,6 +31,10 @@ module Katari.Typechecker.Zonker
 
     -- * Entry
     zonk,
+
+    -- * Type environment lookup
+    lookupTopLevelType,
+    lookupTypeInModule,
   )
 where
 
@@ -44,6 +48,7 @@ import Data.Text (Text)
 import Data.Text qualified as Text
 import Katari.AST
 import Katari.Diagnostic (Diagnostic, diagnosticError)
+import Katari.Common (QualifiedName (..))
 import Katari.Id
   ( VariableResolution (..),
   )
@@ -78,9 +83,30 @@ import Katari.Typechecker.Solver (SolverResult (..))
 
 data ZonkResult = ZonkResult
   { zonkedModules :: Map Text (Module Zonked),
-    zonkedTypeEnvironment :: Map VariableResolution (SemanticType Resolved)
+    -- | Type environment partitioned by module. Each module owns the
+    -- 'VariableResolution' keys that arose during its own identification:
+    -- 'ResolvedLocal' entries are scoped to that module, and 'ResolvedTopLevel'
+    -- entries live under the module that declared the qualified name.
+    zonkedTypeEnvironment :: Map Text (Map VariableResolution (SemanticType Resolved))
   }
   deriving (Show)
+
+-- | Lookup a top-level qualified name's resolved type.
+lookupTopLevelType :: QualifiedName -> ZonkResult -> Maybe (SemanticType Resolved)
+lookupTopLevelType qualifiedName zonkResult =
+  Map.lookup qualifiedName.module_ zonkResult.zonkedTypeEnvironment
+    >>= Map.lookup (ResolvedTopLevel qualifiedName)
+
+-- | Lookup a 'VariableResolution' in the context of a given module.
+-- 'ResolvedLocal' entries are searched in @currentModule@'s map;
+-- 'ResolvedTopLevel' entries are looked up in the declaring module.
+lookupTypeInModule :: Text -> VariableResolution -> ZonkResult -> Maybe (SemanticType Resolved)
+lookupTypeInModule currentModule variableResolution zonkResult =
+  case variableResolution of
+    ResolvedTopLevel qualifiedName -> lookupTopLevelType qualifiedName zonkResult
+    ResolvedLocal _ ->
+      Map.lookup currentModule zonkResult.zonkedTypeEnvironment
+        >>= Map.lookup variableResolution
 
 data ZonkError where
   ZonkErrorMissingTypeVar :: SourceSpan -> TypeVariableId -> ZonkError
@@ -763,9 +789,12 @@ walkParArrayExpr ParArrayExpression {elements, sourceSpan, typeOf} = do
 -- Entry point
 -- ===========================================================================
 
--- | Run zonking over the constrained AST and the type environment.
-zonk :: IdentifierResult -> ConstraintGenResult -> SolverResult -> (ZonkResult, [ZonkError])
-zonk idResult cgResult solverResult =
+-- | Run zonking over the constrained AST and the type environment for a
+-- single module. The resulting 'zonkedTypeEnvironment' carries one entry
+-- (keyed by @moduleName@) so per-module ZonkResults can be merged with
+-- 'Map.union' downstream.
+zonk :: Text -> IdentifierResult -> ConstraintGenResult -> SolverResult -> (ZonkResult, [ZonkError])
+zonk moduleName idResult cgResult solverResult =
   let action =
         (,)
           <$> traverse walkModule cgResult.constrainedModules
@@ -774,7 +803,7 @@ zonk idResult cgResult solverResult =
       result =
         ZonkResult
           { zonkedModules = modulesResult,
-            zonkedTypeEnvironment = envResult
+            zonkedTypeEnvironment = Map.singleton moduleName envResult
           }
    in (result, reverse errs)
   where

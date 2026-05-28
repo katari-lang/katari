@@ -237,7 +237,7 @@ endToEndZonk :: Spec
 endToEndZonk = describe "end-to-end pipeline (Solver -> Zonker)" $ do
   it "Zonker over a real Solver result has no zonkErrors on a basic program" $ do
     (idResult, cgResult, solverResult, _solverErrors) <- runSolve "agent foo() { 42 }"
-    let (_zonkResult, zonkErrors) = zonk idResult cgResult solverResult
+    let (_zonkResult, zonkErrors) = zonk "main" idResult cgResult solverResult
     zonkErrors `shouldBe` []
 
   it "totality is sufficient for Zonker even on programs with let / if" $ do
@@ -249,7 +249,7 @@ endToEndZonk = describe "end-to-end pipeline (Solver -> Zonker)" $ do
             "  x\n",
             "}"
           ]
-    let (_zonkResult, zonkErrors) = zonk idResult cgResult solverResult
+    let (_zonkResult, zonkErrors) = zonk "main" idResult cgResult solverResult
     zonkErrors `shouldBe` []
 
 -- ---------------------------------------------------------------------------

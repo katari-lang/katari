@@ -38,7 +38,7 @@ runExhaustive source = do
       (idResult, []) -> do
         let (cgResult, _) = Compile.generateConstraintsAll idResult
             (solverResult, _) = solve cgResult
-            (zonkResult, _) = zonk idResult cgResult solverResult
+            (zonkResult, _) = zonk "main" idResult cgResult solverResult
             exhaustiveErrors = checkExhaustive idResult zonkResult
         pure (map toDiagnostic exhaustiveErrors)
       (_, errs) -> fail ("identify failure: " ++ show errs)

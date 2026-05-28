@@ -55,7 +55,7 @@ import Katari.Typechecker.Identifier
     SymbolEntry (..),
   )
 import Katari.Typechecker.ScopeIndex qualified as Scope
-import Katari.Typechecker.Zonker (ZonkResult (..))
+import Katari.Typechecker.Zonker (ZonkResult (..), lookupTopLevelType, lookupTypeInModule)
 
 -- | Convenience alias for the resolved semantic type used in
 -- label / member completion signatures.
@@ -100,13 +100,14 @@ completionsAt ::
   [CompletionItem]
 completionsAt idResult zonkResult filePath position =
   let localItems = localsAt
-      topLevelItems = case findModuleNameByFilePath zonkResult filePath of
+      topLevelItems = case currentModule of
         Nothing -> []
         Just moduleName ->
           let visible = Map.findWithDefault Map.empty moduleName idResult.moduleVisibleSymbols
            in concatMap symbolEntryToItems (Map.toList visible)
    in mergeByLabel (localItems ++ topLevelItems)
   where
+    currentModule = findModuleNameByFilePath zonkResult filePath
     renderType = renderSemanticType
 
     -- Locals: walk the scope chain at position. Each frame is flattened
@@ -128,6 +129,12 @@ completionsAt idResult zonkResult filePath position =
           entry.moduleSymbol >>= mkModuleItem name
         ]
 
+    lookupTypeHere :: VariableResolution -> Maybe (SemanticType Resolved)
+    lookupTypeHere variableResolution = case (currentModule, variableResolution) of
+      (_, ResolvedTopLevel qualifiedName) -> lookupTopLevelType qualifiedName zonkResult
+      (Just moduleName, ResolvedLocal _) -> lookupTypeInModule moduleName variableResolution zonkResult
+      _ -> Nothing
+
     mkVariableItem :: Text -> VariableResolution -> Maybe CompletionItem
     mkVariableItem name variableResolution = case variableResolution of
       ResolvedTopLevel qualifiedName -> do
@@ -138,7 +145,7 @@ completionsAt idResult zonkResult filePath position =
               | isCtor = CKConstructor
               | isReq = CKRequest
               | otherwise = CKAgent
-            detail = fmap renderType (Map.lookup variableResolution zonkResult.zonkedTypeEnvironment)
+            detail = fmap renderType (lookupTypeHere variableResolution)
         pure
           CompletionItem
             { ciLabel = name,
@@ -147,7 +154,7 @@ completionsAt idResult zonkResult filePath position =
               ciDoc = Nothing
             }
       ResolvedLocal _ ->
-        let detail = fmap renderType (Map.lookup variableResolution zonkResult.zonkedTypeEnvironment)
+        let detail = fmap renderType (lookupTypeHere variableResolution)
          in pure
               CompletionItem
                 { ciLabel = name,
@@ -250,7 +257,11 @@ resolveDottedPath idResult zonkResult filePath position dotted = do
         `orElse` (entry.variableSymbol >>= variableAnchor)
 
     variableAnchor :: VariableResolution -> Maybe CompletionAnchor
-    variableAnchor variableResolution = AnchorTyped <$> Map.lookup variableResolution zonkResult.zonkedTypeEnvironment
+    variableAnchor variableResolution = case variableResolution of
+      ResolvedTopLevel qualifiedName -> AnchorTyped <$> lookupTopLevelType qualifiedName zonkResult
+      ResolvedLocal _ -> do
+        moduleName <- findModuleNameByFilePath zonkResult filePath
+        AnchorTyped <$> lookupTypeInModule moduleName variableResolution zonkResult
 
 -- | Walk one path segment forward from an existing anchor.
 stepAnchor ::
@@ -265,7 +276,10 @@ stepAnchor idResult zonkResult anchor segment = case anchor of
     entry <- Map.lookup segment exports
     (AnchorModule <$> entry.moduleSymbol)
       `orElse` ( entry.variableSymbol
-                   >>= \variableResolution -> AnchorTyped <$> Map.lookup variableResolution zonkResult.zonkedTypeEnvironment
+                   >>= \case
+                     ResolvedTopLevel qualifiedName ->
+                       AnchorTyped <$> lookupTopLevelType qualifiedName zonkResult
+                     ResolvedLocal _ -> Nothing
                )
   AnchorTyped ty -> AnchorTyped <$> fieldTypeOf idResult zonkResult ty segment
 
@@ -304,7 +318,7 @@ dataConstructorParameters idResult zonkResult typeQName = do
         | (qualifiedName, c) <- Map.toList idResult.identifiedConstructors,
           c.constructorTypeQName == typeQName
       ]
-  ctorType <- Map.lookup (ResolvedTopLevel ctorQName) zonkResult.zonkedTypeEnvironment
+  ctorType <- lookupTopLevelType ctorQName zonkResult
   case ctorType of
     SemanticTypeFunction parameters _ _ -> Just parameters
     _ -> Nothing
@@ -424,7 +438,7 @@ mkVariableItemFor idResult zonkResult name variableResolution = case variableRes
           | isReq = CKRequest
           | otherwise = CKAgent
         renderType = renderSemanticType
-        detail = fmap renderType (Map.lookup variableResolution zonkResult.zonkedTypeEnvironment)
+        detail = fmap renderType (lookupTopLevelType qualifiedName zonkResult)
     pure
       CompletionItem
         { ciLabel = name,
@@ -433,15 +447,13 @@ mkVariableItemFor idResult zonkResult name variableResolution = case variableRes
           ciDoc = Nothing
         }
   ResolvedLocal _ ->
-    let renderType = renderSemanticType
-        detail = fmap renderType (Map.lookup variableResolution zonkResult.zonkedTypeEnvironment)
-     in pure
-          CompletionItem
-            { ciLabel = name,
-              ciKind = CKLocalVariable,
-              ciDetail = detail,
-              ciDoc = Nothing
-            }
+    pure
+      CompletionItem
+        { ciLabel = name,
+          ciKind = CKLocalVariable,
+          ciDetail = Nothing,
+          ciDoc = Nothing
+        }
 
 mkTypeItemFor ::
   IdentifierResult ->

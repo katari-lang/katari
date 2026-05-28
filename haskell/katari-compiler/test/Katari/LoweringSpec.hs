@@ -46,7 +46,7 @@ lowerSource src =
                       requestSubstitution =
                         Map.fromList [(RequestVariableId i, Set.empty) | i <- [0 .. cg.variableSupply.requestVarSupply - 1]]
                     }
-                (zr, _) = zonk idResult cg solver
+                (zr, _) = zonk "main" idResult cg solver
             let allResults =
                   [ case lowerModule idResult zr moduleName moduleAST of
                       (Right mlr, errs) -> Right (mlr, errs)
