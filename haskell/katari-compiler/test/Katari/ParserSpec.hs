@@ -27,9 +27,9 @@ parse src =
   let (stream, lexErrors) = Lexer.lex "<test>" src
       (parsed, parseErrors) = Parser.parse "<test>" stream
       allDiags = map Lexer.toDiagnostic lexErrors <> map Parser.toDiagnostic parseErrors
-  in case allDiags of
-       [] -> Right parsed
-       errs -> Left errs
+   in case allDiags of
+        [] -> Right parsed
+        errs -> Left errs
 
 -- | Flatten diagnostics into a string for substring matching.
 -- Only used inside 'shouldFailWith'; do not use this for new tests.
@@ -1719,17 +1719,18 @@ sameLineBlockKeyword = describe "same-line block keyword rule" $ do
 
   it "rejects then (handle) on the line after }" $ do
     shouldFailWith
-      (mconcat
-        [ "agent main() {\n",
-          "  handle {\n",
-          "    request get() { next 1; }\n",
-          "  }\n",
-          "  then (x) {\n",
-          "    x\n",
-          "  }\n",
-          "  result\n",
-          "}"
-        ])
+      ( mconcat
+          [ "agent main() {\n",
+            "  handle {\n",
+            "    request get() { next 1; }\n",
+            "  }\n",
+            "  then (x) {\n",
+            "    x\n",
+            "  }\n",
+            "  result\n",
+            "}"
+          ]
+      )
       "must be on the same line as the preceding '}'"
 
   it "accepts else on the same line as }" $ do

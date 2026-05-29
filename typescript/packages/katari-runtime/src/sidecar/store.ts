@@ -9,8 +9,8 @@
 // another snapshot) is structurally prevented.
 
 import type { AgentDefId } from "../agent-def-id.js";
-import type { DelegationId, EscalationId } from "../engine/id.js";
 import type { Endpoint } from "../engine/endpoint.js";
+import type { DelegationId, EscalationId } from "../engine/id.js";
 import type { EncryptedValue } from "../value-secret-codec.js";
 
 /**
@@ -58,10 +58,7 @@ export interface FfiStore {
   // ─── Pending delegations ──────────────────────────────────────────────
   insertDelegation(row: FfiPendingDelegation): Promise<void>;
   getDelegation(id: DelegationId): Promise<FfiPendingDelegation | null>;
-  setDelegationState(
-    id: DelegationId,
-    state: "running" | "cancelling",
-  ): Promise<boolean>;
+  setDelegationState(id: DelegationId, state: "running" | "cancelling"): Promise<boolean>;
   deleteDelegation(id: DelegationId): Promise<boolean>;
   /** Return all rows in scope, for `ipcDelegateRestarted` send + child terminate fire on startup. */
   listDelegations(): Promise<FfiPendingDelegation[]>;

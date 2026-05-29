@@ -14,7 +14,7 @@ import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Hedgehog (Gen, forAll, tripping, (===))
-import Hedgehog qualified as Hedgehog
+import Hedgehog qualified
 import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range qualified as Range
 import Katari.Common (LiteralValue (..), QualifiedName (..), parseQualifiedName, renderQualifiedName)
@@ -22,8 +22,8 @@ import Katari.Compile
   ( CompileInput (..),
     CompileResult (..),
     SourceEntry (..),
-    compile,
   )
+import Katari.TestSupport (compileSync)
 import Katari.IR
   ( BlockId (..),
     VarId (..),
@@ -101,10 +101,11 @@ compileDeterminism =
                           { filePath = "<property>",
                             sourceText = sourceText
                           }
-                      )
+                      ),
+                  cache = Map.empty
                 }
-            r1 = compile mkInput
-            r2 = compile mkInput
+            r1 = compileSync mkInput
+            r2 = compileSync mkInput
         -- Compare the externally-observable parts (Aeson works around
         -- the ZonkResult / SolverResult / IdentifierResult lacking Eq).
         Aeson.toJSON r1.irModule === Aeson.toJSON r2.irModule

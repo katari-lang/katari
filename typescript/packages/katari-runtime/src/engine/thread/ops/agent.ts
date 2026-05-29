@@ -15,11 +15,7 @@
 //   - `cancel`     incoming external terminate; cancel body, no
 //                  pendingReturn, finishCancelling emits terminateAck
 
-import type {
-  AgentBlock,
-  Block,
-  BlockId,
-} from "../../../ir/types.js";
+import type { AgentBlock, Block, BlockId } from "../../../ir/types.js";
 import type { CallId } from "../../id.js";
 import { spawnChild } from "../../spawn.js";
 import type { StepCtx } from "../../step-ctx.js";
@@ -34,10 +30,7 @@ import {
   setValueInScope,
 } from "../common.js";
 import type { AgentThread } from "../types.js";
-import {
-  defaultAskAckProxy,
-  defaultCancel,
-} from "./defaults.js";
+import { defaultAskAckProxy, defaultCancel } from "./defaults.js";
 import type { ThreadOps } from "./types.js";
 
 const BODY_CALL_ID = 0 as CallId;
@@ -72,9 +65,7 @@ export const agentOps: ThreadOps<AgentThread> = {
       return;
     }
     // We don't expect any other children.
-    throw new Error(
-      `engine.agent: unexpected done from non-body child (callId=${callId})`,
-    );
+    throw new Error(`engine.agent: unexpected done from non-body child (callId=${callId})`);
   },
 
   cancel: (ctx, t) => defaultCancel<AgentThread>(ctx, t as AgentThread),
@@ -141,11 +132,7 @@ function getAgentBlock(ctx: StepCtx, blockId: BlockId): AgentBlock {
  *     `delegationId` allocated in spawnChild is not registered in
  *     `state.delegations` and is never looked up.
  */
-function finishWithValue(
-  ctx: StepCtx,
-  t: AgentThread,
-  value: Value,
-): void {
+function finishWithValue(ctx: StepCtx, t: AgentThread, value: Value): void {
   if (t.parent === null) {
     emitAgentRootCompletion(ctx, t, value);
     delete ctx.state.threads[t.id];
@@ -167,11 +154,7 @@ function finishWithValue(
  * the body. finishCancelling reads pendingReturn back when no children
  * remain and emits delegateAck.
  */
-function catchReturn(
-  ctx: StepCtx,
-  t: AgentThread,
-  value: Value,
-): void {
+function catchReturn(ctx: StepCtx, t: AgentThread, value: Value): void {
   if (t.status === "cancelling") return;
   t.pendingReturn = value;
   if (!hasChildren(t)) {

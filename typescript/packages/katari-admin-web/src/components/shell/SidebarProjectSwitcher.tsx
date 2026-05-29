@@ -1,14 +1,9 @@
 import { useQuery } from "@tanstack/react-query";
-import { useNavigate } from "react-router-dom";
 import { Check, ChevronsUpDown, Folder } from "lucide-react";
+import { useNavigate } from "react-router-dom";
+import { Dropdown, DropdownDivider, DropdownItem, DropdownLabel } from "@/components/ui/Dropdown";
 import { useApiClient, useApiKey } from "@/contexts/ApiKeyContext";
 import { useStickyProjectId } from "@/lib/useStickyProjectId";
-import {
-  Dropdown,
-  DropdownDivider,
-  DropdownItem,
-  DropdownLabel,
-} from "@/components/ui/Dropdown";
 
 export function SidebarProjectSwitcher() {
   const { apiKey } = useApiKey();
@@ -31,9 +26,7 @@ export function SidebarProjectSwitcher() {
       className="flex w-full items-center gap-2 border border-border bg-transparent px-2.5 py-2 text-left text-sm transition-colors hover:bg-muted hover:border-border-strong hover:cursor-pointer"
     >
       <Folder className="size-4 shrink-0 text-muted-foreground" />
-      <span className="flex-1 truncate text-foreground">
-        {current?.name ?? "All projects"}
-      </span>
+      <span className="flex-1 truncate text-foreground">{current?.name ?? "All projects"}</span>
       <ChevronsUpDown className="size-3.5 shrink-0 text-subtle-foreground" />
     </button>
   );
@@ -44,9 +37,7 @@ export function SidebarProjectSwitcher() {
         <div>
           <DropdownLabel>Switch project</DropdownLabel>
           {projects.length === 0 ? (
-            <div className="px-3 py-3 text-xs text-subtle-foreground">
-              No projects yet.
-            </div>
+            <div className="px-3 py-3 text-xs text-subtle-foreground">No projects yet.</div>
           ) : (
             <div className="max-h-72 overflow-y-auto">
               {projects.map((p) => (

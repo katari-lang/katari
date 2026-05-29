@@ -18,6 +18,7 @@ library:
     - Katari.Cli.Cancel
     - Katari.Cli.Check
     - Katari.Cli.Common
+    - Katari.Cli.CompileCache
     - Katari.Cli.Escalation
     - Katari.Cli.Init
     - Katari.Cli.Ls

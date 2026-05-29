@@ -2,7 +2,7 @@
 -- temp directory and asserts the produced files.
 module Katari.Cli.InitSpec (spec) where
 
-import qualified Katari.Cli.Init as Init
+import Katari.Cli.Init qualified as Init
 import System.Directory (doesDirectoryExist, doesFileExist, withCurrentDirectory)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>))

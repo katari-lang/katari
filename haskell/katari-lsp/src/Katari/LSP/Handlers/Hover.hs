@@ -11,22 +11,20 @@ where
 
 import Control.Lens ((^.))
 import Control.Monad.IO.Class (liftIO)
-import qualified Data.Text as Text
 import Data.Text (Text)
+import Data.Text qualified as Text
 import Data.Vector (Vector)
-import qualified Data.Vector as Vector
+import Data.Vector qualified as Vector
 import Katari.Compile (CompileResult (..))
-import Katari.Id (QualifiedName (..))
 import Katari.LSP.Convert (lspPositionToKatari)
 import Katari.LSP.State (ServerState, lookupCompileResult)
-import qualified Katari.Query as Query
+import Katari.Query qualified as Query
 import Katari.SemanticType.Render (renderSemanticType)
 import Katari.SourceSpan (Position (..), SourceSpan (..))
-import Katari.Typechecker.Identifier (IdentifierResult (..), RequestData (..), TypeData (..))
-import qualified Language.LSP.Protocol.Lens as L
-import qualified Language.LSP.Protocol.Message as LSP
-import qualified Language.LSP.Protocol.Types as LSP
-import qualified Language.LSP.Server as LSP
+import Language.LSP.Protocol.Lens qualified as L
+import Language.LSP.Protocol.Message qualified as LSP
+import Language.LSP.Protocol.Types qualified as LSP
+import Language.LSP.Server qualified as LSP
 
 hoverHandler :: ServerState -> LSP.Handlers (LSP.LspM ())
 hoverHandler st =
@@ -41,34 +39,29 @@ hoverHandler st =
           Nothing -> responder (Right (LSP.InR LSP.Null))
           Just (txt, lineVec, result) -> do
             let kPos = lspPositionToKatari txt pos
-                info = Query.lookupAtPosition result.identifierResult result.zonkResult path kPos
+                info = Query.lookupAtPosition result.querySnapshot path kPos
             case info of
               Nothing -> responder (Right (LSP.InR LSP.Null))
-              Just h -> responder (Right (LSP.InL (mkHover result.identifierResult lineVec h)))
+              Just h -> responder (Right (LSP.InL (mkHover lineVec h)))
 
-mkHover :: IdentifierResult -> Vector Text -> Query.HoverInfo -> LSP.Hover
-mkHover idResult lineVec h =
+mkHover :: Vector Text -> Query.HoverInfo -> LSP.Hover
+mkHover lineVec h =
   LSP.Hover
-    { LSP._contents = LSP.InL (markup (renderHover idResult lineVec h)),
+    { LSP._contents = LSP.InL (markup (renderHover lineVec h)),
       LSP._range = Nothing
     }
   where
-    markup t = LSP.MarkupContent LSP.MarkupKind_Markdown t
+    markup = LSP.MarkupContent LSP.MarkupKind_Markdown
 
 -- | Render a hover as a fenced @katari@ Markdown block of the form
 -- @snippet : type@, followed by the qualified name (when present) on a
 -- second line. The @snippet@ is the source-text slice for the
 -- @hoverNameSpan@ — i.e. exactly what the user is hovering on
 -- (variable name, parameter, literal, or whole expression).
-renderHover :: IdentifierResult -> Vector Text -> Query.HoverInfo -> Text
-renderHover idResult lineVec h =
+renderHover :: Vector Text -> Query.HoverInfo -> Text
+renderHover lineVec h =
   let snippet = sliceSpan lineVec h.hoverNameSpan
-      typeText = case h.hoverType of
-        Nothing -> ""
-        Just t ->
-          let typeNames = fmap (.typeQualifiedName.name) idResult.identifiedTypes
-              reqNames = fmap (.requestQualifiedName.name) idResult.identifiedRequests
-           in renderSemanticType typeNames reqNames t
+      typeText = maybe "" renderSemanticType h.hoverType
       headerLine =
         if Text.null typeText
           then snippet

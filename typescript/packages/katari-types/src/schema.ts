@@ -8,8 +8,8 @@
 //
 // If the Haskell SchemaBundle layout changes, update this file to match.
 
-import type { Json } from "./json.js";
 import type { QualifiedName } from "./ir.js";
+import type { Json } from "./json.js";
 
 /**
  * A JSON Schema document (RFC draft-07-ish). Treated as opaque JSON at

@@ -1,6 +1,6 @@
-import { useState } from "react";
 import * as DropdownMenuPrimitive from "@radix-ui/react-dropdown-menu";
 import type { ReactElement, ReactNode } from "react";
+import { useState } from "react";
 import { cn } from "@/lib/cn";
 
 type DropdownProps = {
@@ -15,19 +15,12 @@ type DropdownProps = {
  * (focus trap, ARIA, keyboard navigation). API is kept compatible
  * with the previous hand-rolled implementation.
  */
-export function Dropdown({
-  trigger,
-  children,
-  align = "start",
-  className,
-}: DropdownProps) {
+export function Dropdown({ trigger, children, align = "start", className }: DropdownProps) {
   const [open, setOpen] = useState(false);
 
   return (
     <DropdownMenuPrimitive.Root open={open} onOpenChange={setOpen}>
-      <DropdownMenuPrimitive.Trigger asChild>
-        {trigger}
-      </DropdownMenuPrimitive.Trigger>
+      <DropdownMenuPrimitive.Trigger asChild>{trigger}</DropdownMenuPrimitive.Trigger>
       <DropdownMenuPrimitive.Portal>
         <DropdownMenuPrimitive.Content
           align={align}
@@ -77,9 +70,7 @@ export function DropdownItem({
 }
 
 export function DropdownDivider() {
-  return (
-    <DropdownMenuPrimitive.Separator className="my-1 border-t border-border" />
-  );
+  return <DropdownMenuPrimitive.Separator className="my-1 border-t border-border" />;
 }
 
 export function DropdownLabel({ children }: { children: ReactNode }) {

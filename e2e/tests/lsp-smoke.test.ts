@@ -15,11 +15,11 @@
 // trivial enough to roll inline, and we keep the e2e package's
 // dependency surface small.
 
-import { describe, expect, it, afterEach } from "vitest";
-import { spawn, type ChildProcessWithoutNullStreams, spawnSync } from "node:child_process";
-import { resolve } from "node:path";
+import { type ChildProcessWithoutNullStreams, spawn, spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { afterEach, describe, expect, it } from "vitest";
 
 const SAMPLES_ROOT = resolve(__dirname, "../samples");
 
@@ -273,49 +273,46 @@ describe("katari-lsp smoke", () => {
     },
   );
 
-  itLsp(
-    "hover on a literal shows its inferred type",
-    async () => {
-      // 01-hello/src/hello.ktr line 3: `  "hello, world"` — hovering
-      // anywhere inside the string literal should return its
-      // inferred type (a string literal type), not Null.
-      const client = new LspClient(RESOLVED!);
-      active = client;
-      await client.request("initialize", {
-        processId: process.pid,
-        rootUri: pathToFileURL(resolve(SAMPLES_ROOT, "01-hello")).toString(),
-        capabilities: {},
-      });
-      client.notify("initialized", {});
+  itLsp("hover on a literal shows its inferred type", async () => {
+    // 01-hello/src/hello.ktr line 3: `  "hello, world"` — hovering
+    // anywhere inside the string literal should return its
+    // inferred type (a string literal type), not Null.
+    const client = new LspClient(RESOLVED!);
+    active = client;
+    await client.request("initialize", {
+      processId: process.pid,
+      rootUri: pathToFileURL(resolve(SAMPLES_ROOT, "01-hello")).toString(),
+      capabilities: {},
+    });
+    client.notify("initialized", {});
 
-      const mainPath = resolve(SAMPLES_ROOT, "01-hello/src/hello.ktr");
-      const text = readFileSync(mainPath, "utf8");
-      client.notify("textDocument/didOpen", {
-        textDocument: {
-          uri: pathToFileURL(mainPath).toString(),
-          languageId: "katari",
-          version: 1,
-          text,
-        },
-      });
-      await delay(800);
+    const mainPath = resolve(SAMPLES_ROOT, "01-hello/src/hello.ktr");
+    const text = readFileSync(mainPath, "utf8");
+    client.notify("textDocument/didOpen", {
+      textDocument: {
+        uri: pathToFileURL(mainPath).toString(),
+        languageId: "katari",
+        version: 1,
+        text,
+      },
+    });
+    await delay(800);
 
-      // Line 3, char 5: somewhere inside the string literal "hello, world".
-      const reply = await client.request("textDocument/hover", {
-        textDocument: { uri: pathToFileURL(mainPath).toString() },
-        position: { line: 2, character: 5 },
-      });
-      expect(reply.result).not.toBeNull();
-      const value = reply.result?.contents?.value as string | undefined;
-      expect(value).toBeDefined();
-      // The renderer should produce something containing the literal
-      // value (or its type "string"). Either way it must NOT be the
-      // old "<type>" placeholder, and it must NOT leak the agent
-      // qualified name.
-      expect(value).not.toContain("<type>");
-      expect(value).not.toContain("main.main");
-    },
-  );
+    // Line 3, char 5: somewhere inside the string literal "hello, world".
+    const reply = await client.request("textDocument/hover", {
+      textDocument: { uri: pathToFileURL(mainPath).toString() },
+      position: { line: 2, character: 5 },
+    });
+    expect(reply.result).not.toBeNull();
+    const value = reply.result?.contents?.value as string | undefined;
+    expect(value).toBeDefined();
+    // The renderer should produce something containing the literal
+    // value (or its type "string"). Either way it must NOT be the
+    // old "<type>" placeholder, and it must NOT leak the agent
+    // qualified name.
+    expect(value).not.toContain("<type>");
+    expect(value).not.toContain("main.main");
+  });
 
   // -------------------------------------------------------------------
   // definition / references / completion / diagnostics
@@ -403,7 +400,7 @@ describe("katari-lsp smoke", () => {
       context: { triggerKind: 2, triggerCharacter: "(" },
     });
     const items = (
-      Array.isArray(reply.result) ? reply.result : reply.result?.items ?? []
+      Array.isArray(reply.result) ? reply.result : (reply.result?.items ?? [])
     ) as Array<{ label: string }>;
     const labels = items.map((i) => i.label);
     expect(labels).toContain("a");
@@ -420,9 +417,7 @@ describe("katari-lsp smoke", () => {
     });
     client.notify("initialized", {});
 
-    const uri = pathToFileURL(
-      resolve(SAMPLES_ROOT, "02-arithmetic/src/arithmetic.ktr"),
-    ).toString();
+    const uri = pathToFileURL(resolve(SAMPLES_ROOT, "02-arithmetic/src/arithmetic.ktr")).toString();
 
     // Open with a broken source (missing closing brace).
     const broken = "agent main() -> integer {\n  1\n";

@@ -115,11 +115,13 @@ branchType nextTV nextRV leftType rightType reason =
               | branch <- branches
             ]
     -- α <: composite (LHS is var, RHS has structure).
-    (SemanticTypeVariable α, _) | isBranchableShape rightType ->
-      Just (branchVar LeftVar nextTV nextRV α rightType reason)
+    (SemanticTypeVariable α, _)
+      | isBranchableShape rightType ->
+          Just (branchVar LeftVar nextTV nextRV α rightType reason)
     -- composite <: α (RHS is var, LHS has structure).
-    (_, SemanticTypeVariable α) | isBranchableShape leftType ->
-      Just (branchVar RightVar nextTV nextRV α leftType reason)
+    (_, SemanticTypeVariable α)
+      | isBranchableShape leftType ->
+          Just (branchVar RightVar nextTV nextRV α leftType reason)
     _ -> Nothing
 
 -- | True iff the shape has internal structure that warrants branching.
@@ -332,4 +334,3 @@ freshVars nextTypeVariableId count =
   let (typeVarId, nextAfterFirst) = freshVar nextTypeVariableId
       (remaining, nextAfterAll) = freshVars nextAfterFirst (count - 1)
    in (typeVarId : remaining, nextAfterAll)
-

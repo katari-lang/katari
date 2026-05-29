@@ -1,12 +1,5 @@
-import {
-  createContext,
-  useCallback,
-  useContext,
-  useMemo,
-  useState,
-  type ReactNode,
-} from "react";
-import { createApiClient, type ApiClient } from "@/api/client";
+import { createContext, type ReactNode, useCallback, useContext, useMemo, useState } from "react";
+import { type ApiClient, createApiClient } from "@/api/client";
 
 const STORAGE_KEY = "katari-admin.apiKey";
 
@@ -70,9 +63,7 @@ export function ApiKeyProvider({ children }: { children: ReactNode }) {
     [apiKey, baseUrl, client, setApiKey, clear],
   );
 
-  return (
-    <ApiKeyContext.Provider value={value}>{children}</ApiKeyContext.Provider>
-  );
+  return <ApiKeyContext.Provider value={value}>{children}</ApiKeyContext.Provider>;
 }
 
 export function useApiKey(): ApiKeyContextValue {

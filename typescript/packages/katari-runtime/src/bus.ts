@@ -15,10 +15,10 @@
 // are confined to the engine-side internal queue. They do not flow through
 // the bus.
 
-import type { ExternalEvent } from "./engine/event.js";
 import type { Endpoint } from "./engine/endpoint.js";
-import type { Module } from "./module.js";
+import type { ExternalEvent } from "./engine/event.js";
 import type { Logger } from "./engine/logger.js";
+import type { Module } from "./module.js";
 
 export type RegisteredModule = {
   /** Display name for logs / debugging. */
@@ -39,9 +39,7 @@ export class ExternalEventBus {
   /** Register a module. A helper for bulk-registering an `(name, module)` array is also provided. */
   register(entry: RegisteredModule): void {
     if (this.modules.has(entry.module.endpoint)) {
-      throw new Error(
-        `bus: duplicate module endpoint ${entry.module.endpoint}`,
-      );
+      throw new Error(`bus: duplicate module endpoint ${entry.module.endpoint}`);
     }
     this.modules.set(entry.module.endpoint, entry);
   }
@@ -63,7 +61,11 @@ export class ExternalEventBus {
   async drain(): Promise<void> {
     if (this.drainPromise !== null) return this.drainPromise;
     this.drainPromise = this.doDrain();
-    try { await this.drainPromise; } finally { this.drainPromise = null; }
+    try {
+      await this.drainPromise;
+    } finally {
+      this.drainPromise = null;
+    }
   }
 
   private async doDrain(): Promise<void> {

@@ -13,8 +13,8 @@
 //     N CORE-side children in flight simultaneously — that's the
 //     visualization payoff (sequential calls only ever show one node).
 
-import katari from "@katari-lang/port";
 import type { RawValue } from "@katari-lang/port";
+import katari from "@katari-lang/port";
 
 katari.agent("sleep_ms", async ({ args, signal }) => {
   const ms = args["ms"] as number;
@@ -43,9 +43,7 @@ katari.agent("fan_out", async ({ args, signal }) => {
         ? callbackRaw.$agent
         : null;
   if (callable === null) {
-    throw new Error(
-      `fan_out: callback must be a callable, got ${JSON.stringify(callbackRaw)}`,
-    );
+    throw new Error(`fan_out: callback must be a callable, got ${JSON.stringify(callbackRaw)}`);
   }
   const count = args["count"] as number;
   // Spawn `count` independent child delegations on the CORE side and
@@ -61,9 +59,7 @@ katari.agent("fan_out", async ({ args, signal }) => {
   return results.length;
 });
 
-function isCallableEnvelope(
-  v: RawValue,
-): v is { $agent: string } {
+function isCallableEnvelope(v: RawValue): v is { $agent: string } {
   return (
     typeof v === "object" &&
     v !== null &&

@@ -7,9 +7,12 @@
 // UI can show "succeeded with result X" or "cancelled (error)" after
 // the engine has cleared its in-flight state.
 
-import { Hono } from "hono";
-import { valueFromRaw } from "@katari-lang/runtime";
 import type { Value } from "@katari-lang/runtime";
+import { valueFromRaw } from "@katari-lang/runtime";
+import { Hono } from "hono";
+import { z } from "zod";
+import type { ApiServerOrchestrator } from "../orchestrator.js";
+import { runAuditRowToWire } from "../wire/agent-wire.js";
 import {
   PaginationQuerySchema,
   ProjectIdSchema,
@@ -18,9 +21,6 @@ import {
   SnapshotIdSchema,
   StartRunSchema,
 } from "./middleware/validation.js";
-import { runAuditRowToWire } from "../wire/agent-wire.js";
-import type { ApiServerOrchestrator } from "../orchestrator.js";
-import { z } from "zod";
 
 const RunListQuerySchema = z
   .object({
@@ -94,11 +94,7 @@ export function buildRunRoutes(
     // Short-circuit terminal states: re-running the orchestrator tick on
     // a finished run would needlessly allocate a tx, spin up the sidecar,
     // and reload engine state. The audit state already reflects the answer.
-    if (
-      row.state === "cancelled" ||
-      row.state === "succeeded" ||
-      row.state === "error"
-    ) {
+    if (row.state === "cancelled" || row.state === "succeeded" || row.state === "error") {
       return c.json({ run: runAuditRowToWire(row) });
     }
     const refreshed = await orchestrator.tick(row.snapshotId, async (ctx) => {

@@ -1,14 +1,14 @@
 module Katari.ScopeIndexSpec (spec) where
 
-import qualified Data.Map.Strict as Map
-import qualified Data.Set as Set
+import Data.Map.Strict qualified as Map
+import Data.Set qualified as Set
 import Data.Text (Text)
-import qualified Data.Text as Text
-import qualified Katari.Compile as Compile
-import qualified Katari.Lexer as Lexer
-import qualified Katari.Parser as Parser
+import Data.Text qualified as Text
+import Katari.Compile (CompileInput (..), CompileResult (..), SourceEntry (..))
+import Katari.Query (QuerySnapshot (..))
 import Katari.SourceSpan (Position (..))
-import Katari.Typechecker.Identifier (IdentifierResult (..), SymbolEntry (..))
+import Katari.TestSupport (compileSync)
+import Katari.Typechecker.Identifier (SymbolEntry (..))
 import Katari.Typechecker.ScopeIndex (scopeAt)
 import Test.Hspec
 
@@ -16,18 +16,22 @@ import Test.Hspec
 -- Helpers
 -- ---------------------------------------------------------------------------
 
-identify :: Text -> IO IdentifierResult
+identify :: Text -> IO QuerySnapshot
 identify src = do
-  let (stream, _) = Lexer.lex "<test>" src
-      (parsed, parseErrs) = Parser.parse "<test>" stream
-  case parseErrs of
-    (_ : _) -> fail $ "parse failure: " <> show parseErrs
-    [] -> case Compile.identifyWithStdlib (Map.singleton "main" parsed) of
-      (r, _) -> pure r
+  let result =
+        compileSync
+          CompileInput
+            { sources =
+                Map.singleton
+                  "main"
+                  SourceEntry {filePath = "<test>", sourceText = src},
+              cache = Map.empty
+            }
+  pure result.querySnapshot
 
-namesVisibleAt :: IdentifierResult -> Position -> [Text]
-namesVisibleAt r pos =
-  let frames = scopeAt r.scopeIndex "<test>" pos
+namesVisibleAt :: QuerySnapshot -> Position -> [Text]
+namesVisibleAt snap pos =
+  let frames = scopeAt snap.scopeIndex "<test>" pos
       combined = Map.unions frames
    in Set.toAscList (Set.fromList (Map.keys combined))
 

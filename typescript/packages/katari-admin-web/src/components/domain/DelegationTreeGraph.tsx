@@ -1,19 +1,19 @@
-import { useMemo, useCallback } from "react";
 import {
-  ReactFlow,
   Background,
   Controls,
-  type Node,
   type Edge,
-  type NodeProps,
   Handle,
+  type Node,
+  type NodeProps,
   Position,
+  ReactFlow,
 } from "@xyflow/react";
 import dagre from "dagre";
+import { useCallback, useMemo } from "react";
 import "@xyflow/react/dist/style.css";
+import type { DelegationTreeNode } from "@/api/types";
 import { cn } from "@/lib/cn";
 import { RunStatusBadge } from "./RunStatusBadge";
-import type { DelegationTreeNode } from "@/api/types";
 
 const NODE_WIDTH = 280;
 const NODE_HEIGHT = 80;
@@ -49,9 +49,7 @@ function DelegationNode({ data }: NodeProps<Node<DelegationNodeData>>) {
           {node.qualifiedName ?? node.agentDefId}
         </div>
         {node.name !== undefined && (
-          <div className="mt-0.5 truncate text-xs text-subtle-foreground">
-            {node.name}
-          </div>
+          <div className="mt-0.5 truncate text-xs text-subtle-foreground">{node.name}</div>
         )}
       </div>
       <Handle type="source" position={Position.Bottom} className="!bg-border !border-0 !w-2 !h-1" />

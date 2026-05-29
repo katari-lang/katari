@@ -9,15 +9,12 @@
 // single-entity lookups.
 
 import { Hono } from "hono";
-import { RunIdSchema } from "./middleware/validation.js";
-import { runAuditRowToWire } from "../wire/agent-wire.js";
 import type { ApiServerOrchestrator } from "../orchestrator.js";
 import type { Storage } from "../storage/types.js";
+import { runAuditRowToWire } from "../wire/agent-wire.js";
+import { RunIdSchema } from "./middleware/validation.js";
 
-export function buildRunByIdRoutes(
-  orchestrator: ApiServerOrchestrator,
-  storage: Storage,
-): Hono {
+export function buildRunByIdRoutes(orchestrator: ApiServerOrchestrator, storage: Storage): Hono {
   const app = new Hono();
 
   app.get("/:runId", async (c) => {
@@ -35,11 +32,7 @@ export function buildRunByIdRoutes(
     if (row === null) {
       return c.json({ error: `run ${runId} not found` }, 404);
     }
-    if (
-      row.state === "cancelled" ||
-      row.state === "succeeded" ||
-      row.state === "error"
-    ) {
+    if (row.state === "cancelled" || row.state === "succeeded" || row.state === "error") {
       return c.json({ run: runAuditRowToWire(row) });
     }
     const refreshed = await orchestrator.tick(row.snapshotId, async (ctx) => {

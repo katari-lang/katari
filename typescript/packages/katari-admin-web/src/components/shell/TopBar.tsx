@@ -1,5 +1,5 @@
-import { Link } from "react-router-dom";
 import { Menu } from "lucide-react";
+import { Link } from "react-router-dom";
 import { Logo } from "./Logo";
 import { ThemeToggle } from "./ThemeToggle";
 import { UserMenu } from "./UserMenu";
@@ -20,10 +20,7 @@ export function TopBar({ onMenuToggle }: TopBarProps) {
         >
           <Menu className="size-5" />
         </button>
-        <Link
-          to="/"
-          className="flex items-center transition-opacity hover:opacity-80"
-        >
+        <Link to="/" className="flex items-center transition-opacity hover:opacity-80">
           <Logo size="md" />
         </Link>
         <div className="ml-auto flex items-center gap-2">

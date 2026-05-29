@@ -1,7 +1,7 @@
 module Main (main) where
 
 import Katari.LSP.Server (runServer)
-import System.Exit (exitWith, ExitCode (..))
+import System.Exit (ExitCode (..), exitWith)
 
 main :: IO ()
 main = do

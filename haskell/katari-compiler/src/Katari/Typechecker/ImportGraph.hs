@@ -3,6 +3,9 @@
 -- @import@ declarations of each module.
 module Katari.Typechecker.ImportGraph
   ( findImportCycles,
+    topologicalSort,
+    importsOf,
+    importModuleName,
   )
 where
 
@@ -36,6 +39,24 @@ findImportCycles modules =
             | (name, m) <- Map.toList modules
           ]
   ]
+
+-- | Compute a topological ordering of the module graph, grouped into
+-- parallel levels. Each inner set contains modules whose dependencies
+-- are all in earlier levels, so they can be processed in parallel.
+-- Cyclic modules are excluded (reject them via 'findImportCycles' first).
+topologicalSort :: Map ModuleName (Module Parsed) -> [Set ModuleName]
+topologicalSort modules = go (Map.keysSet modules) Set.empty
+  where
+    deps = Map.map (\m -> importsOf m `Set.intersection` Map.keysSet modules) modules
+    go remaining processed
+      | Set.null remaining = []
+      | Set.null ready = []
+      | otherwise = ready : go (remaining Set.\\ ready) (processed `Set.union` ready)
+      where
+        ready =
+          Set.filter
+            (\m -> Set.isSubsetOf (Map.findWithDefault Set.empty m deps) processed)
+            remaining
 
 importsOf :: Module Parsed -> Set ModuleName
 importsOf m =

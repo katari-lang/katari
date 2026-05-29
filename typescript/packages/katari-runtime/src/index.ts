@@ -9,219 +9,205 @@
 
 export {
   applyEvent,
-  createState,
-  endpoint,
-  NULL_VALUE,
-  literalToValue,
-  isInternal,
-  emptyResult,
-  serialize,
-  deserialize,
-  collectGarbage,
-  shouldGc,
-  EntryNotFoundError,
-  IrrecoverableEngineError,
-  RecoverableEngineError,
   buildConsoleLogger,
+  collectGarbage,
   consoleLogger,
-  noopLogger,
   createDelegationId,
   createEscalationId,
   createScopeId,
+  createState,
   createThreadId,
+  deserialize,
+  EntryNotFoundError,
+  emptyResult,
+  endpoint,
+  IrrecoverableEngineError,
+  isInternal,
+  literalToValue,
+  NULL_VALUE,
+  noopLogger,
+  RecoverableEngineError,
+  serialize,
+  shouldGc,
 } from "./engine/index.js";
 
 // ─── Engine types ──────────────────────────────────────────────────────────
 
 export type {
-  Endpoint,
+  AgentThread,
+  ArrayThread,
   AskId,
-  CallId,
-  DelegationId,
-  EscalationId,
-  ScopeId,
-  ThreadId,
-  Value,
-  Value as EngineValue,
-  Scope,
-  Scope as EngineScope,
+  AskIdMap,
   AskKind,
+  CallId,
+  ChildRole,
+  CtorThread,
+  DelegateThread,
+  DelegationId,
+  Endpoint,
+  EngineCheckpoint,
+  EscalationId,
   Event,
   Event as EngineEvent,
   EventPayload,
   ExternalEventPayload,
-  InternalEventPayload,
-  ModMap,
-  Thread,
-  Thread as EngineThread,
-  ThreadKind,
-  ThreadStatus,
-  AskIdMap,
-  AgentThread,
-  UserThread,
-  HandleThread,
   ForThread,
+  HandleThread,
+  InternalEventPayload,
+  LogEntry,
+  Logger,
+  LogLevel,
   MatchThread,
-  RequestThread,
-  DelegateThread,
-  PrimThread,
-  CtorThread,
-  TupleThread,
-  ArrayThread,
-  ChildRole,
+  ModMap,
   PendingAction,
   PostCancelAction,
-  State,
-  State as EngineState,
-  LogEntry,
-  LogLevel,
-  Logger,
+  PrimThread,
+  RequestThread,
   Result,
   Result as EngineResult,
-  EngineCheckpoint,
+  Scope,
+  Scope as EngineScope,
+  ScopeId,
+  State,
+  State as EngineState,
+  Thread,
+  Thread as EngineThread,
+  ThreadId,
+  ThreadKind,
+  ThreadStatus,
+  TupleThread,
+  UserThread,
+  Value,
+  Value as EngineValue,
 } from "./engine/index.js";
 
 // ─── IR + schema types (Haskell mirror) ────────────────────────────────────
 
+export type { AgentDefinition, JsonSchema, SchemaBundle } from "./ir/schema.js";
 export type {
-  IRModule,
   BlockId,
+  IRModule,
   QualifiedName,
 } from "./ir/types.js";
-export type { SchemaBundle, AgentDefinition, JsonSchema } from "./ir/schema.js";
 export type { Json } from "./json.js";
 
 // ─── Raw ↔ Value codec (REST / sidecar / CLI boundary) ────────────────────
 
+export type { RawValue } from "./value-codec.js";
 export {
+  CALLABLE_DISCRIMINATOR,
+  CTOR_DISCRIMINATOR,
+  RawValueDecodeError,
+  SECRET_DISCRIMINATOR,
   valueFromRaw,
   valueToRaw,
-  RawValueDecodeError,
-  CTOR_DISCRIMINATOR,
-  CALLABLE_DISCRIMINATOR,
-  SECRET_DISCRIMINATOR,
 } from "./value-codec.js";
-export type { RawValue } from "./value-codec.js";
 
 // ─── Secret crypto + Value ↔ EncryptedValue (storage boundary) ────────────
 
 export {
-  encryptSecret,
   decryptSecret,
-  SecretCryptoError,
+  encryptSecret,
   resetKeyCacheForTesting,
+  SecretCryptoError,
 } from "./secret-crypto.js";
-
+export type { EncryptedSecret, EncryptedValue } from "./value-secret-codec.js";
 export {
-  encryptValueTree,
+  decryptValueRecord,
   decryptValueTree,
   encryptValueRecord,
-  decryptValueRecord,
+  encryptValueTree,
   redactSecretsInEncrypted,
 } from "./value-secret-codec.js";
-export type { EncryptedValue, EncryptedSecret } from "./value-secret-codec.js";
 
 // ─── Agent def id (cross-module opaque) ────────────────────────────────────
 
-export {
-  encodeCoreAgentDefId,
-  decodeCoreAgentDefId,
-  encodeFfiAgentDefId,
-  decodeFfiAgentDefId,
-} from "./agent-def-id.js";
 export type {
   AgentDefId,
   CoreAgentDefId,
   FfiAgentDefId,
 } from "./agent-def-id.js";
+export {
+  decodeCoreAgentDefId,
+  decodeFfiAgentDefId,
+  encodeCoreAgentDefId,
+  encodeFfiAgentDefId,
+} from "./agent-def-id.js";
 
 // ─── 3-module + bus abstraction ────────────────────────────────────────────
 
-export type { Module } from "./module.js";
-export { ExternalEventBus } from "./bus.js";
 export type { RegisteredModule } from "./bus.js";
+export { ExternalEventBus } from "./bus.js";
 export type { ExternalEvent } from "./engine/event.js";
-
-export { CoreModule } from "./modules/core.js";
+export type { Module } from "./module.js";
 export type {
   CoreCheckpointStore,
   CoreModuleOptions,
 } from "./modules/core.js";
-
-export {
-  NULL_DELEGATION_STORE,
-} from "./modules/delegation-store.js";
+export { CoreModule } from "./modules/core.js";
 export type {
   DelegationStore,
   DelegationStoreRow,
 } from "./modules/delegation-store.js";
-
-export { FfiModule } from "./modules/ffi.js";
-export type { FfiModuleOptions } from "./modules/ffi.js";
-
-export { EnvModule } from "./modules/env.js";
-export type { EnvModuleOptions } from "./modules/env.js";
-
+export { NULL_DELEGATION_STORE } from "./modules/delegation-store.js";
 export {
   API_ENDPOINT,
   CORE_ENDPOINT,
-  FFI_ENDPOINT,
   ENV_ENDPOINT,
+  FFI_ENDPOINT,
 } from "./modules/endpoints.js";
+export type { EnvModuleOptions } from "./modules/env.js";
+
+export { EnvModule } from "./modules/env.js";
+export type { FfiModuleOptions } from "./modules/ffi.js";
+export { FfiModule } from "./modules/ffi.js";
 
 // ─── Sidecar (FFI runner ↔ subprocess IPC) ─────────────────────────────────
 
-export type {
-  SidecarBundle,
-  ParentToChild,
-  ChildToParent,
-} from "./sidecar/types.js";
-
-export type { Sidecar } from "./sidecar/sidecar.js";
-
-export { SubprocessSidecar } from "./sidecar/subprocess-sidecar.js";
-export type { SubprocessSidecarOptions } from "./sidecar/subprocess-sidecar.js";
-
-export { MockSidecar } from "./sidecar/mock-sidecar.js";
+export type { LoadSubprocessSidecarOptions } from "./sidecar/bundle-loader.js";
+export { loadSubprocessSidecar } from "./sidecar/bundle-loader.js";
+export type { EnvEntry, EnvStore } from "./sidecar/env-store.js";
 export type {
   MockAgentHandler,
   MockSidecarOptions,
 } from "./sidecar/mock-sidecar.js";
 
-export { loadSubprocessSidecar } from "./sidecar/bundle-loader.js";
-export type { LoadSubprocessSidecarOptions } from "./sidecar/bundle-loader.js";
-
-export { SidecarManager } from "./sidecar/sidecar-manager.js";
+export { MockSidecar } from "./sidecar/mock-sidecar.js";
+export type { Sidecar } from "./sidecar/sidecar.js";
 export type {
   SidecarFactory,
   SidecarMessageHandler,
 } from "./sidecar/sidecar-manager.js";
-
+export { SidecarManager } from "./sidecar/sidecar-manager.js";
 export type {
-  FfiStore,
   FfiPendingDelegation,
   FfiPendingEscalation,
+  FfiStore,
 } from "./sidecar/store.js";
-
-export type { EnvStore, EnvEntry } from "./sidecar/env-store.js";
+export type { SubprocessSidecarOptions } from "./sidecar/subprocess-sidecar.js";
+export { SubprocessSidecar } from "./sidecar/subprocess-sidecar.js";
+export type {
+  ChildToParent,
+  ParentToChild,
+  SidecarBundle,
+} from "./sidecar/types.js";
 
 // ─── Orchestrator ─────────────────────────────────────────────────────────
 
-export {
-  Orchestrator,
-  SnapshotNotFound,
-  NoSnapshotForProject,
-  recoverOnBoot,
-} from "./orchestrator/index.js";
-
 export type {
-  TickContext,
-  RecoveryOptions,
-  OrchestratorSnapshotId,
-  OrchestratorProjectId,
-  OrchestratorStorage,
-  ResolvedSnapshot,
   ApiLikeModule,
+  OrchestratorProjectId,
+  OrchestratorSnapshotId,
+  OrchestratorStorage,
+  RecoveryOptions,
+  ResolvedSnapshot,
+  TickContext,
   TickModules,
   TickModulesFactory,
+} from "./orchestrator/index.js";
+export {
+  NoSnapshotForProject,
+  Orchestrator,
+  recoverOnBoot,
+  SnapshotNotFound,
 } from "./orchestrator/index.js";

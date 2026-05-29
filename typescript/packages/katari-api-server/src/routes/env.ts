@@ -11,9 +11,9 @@
 // — this happens inside the tick that processes set_env, so the
 // host-side process must have the key configured.
 
+import { encryptSecret } from "@katari-lang/runtime";
 import { Hono } from "hono";
 import { z } from "zod";
-import { encryptSecret } from "@katari-lang/runtime";
 import type { Storage } from "../storage/types.js";
 
 const KEY_PATTERN = /^[A-Za-z0-9_.-]+$/;
@@ -24,7 +24,10 @@ const KeyParamSchema = z.string().min(1).max(256).regex(KEY_PATTERN, {
 
 const UpsertBodySchema = z.object({
   key: KeyParamSchema,
-  value: z.string().min(0).max(64 * 1024),
+  value: z
+    .string()
+    .min(0)
+    .max(64 * 1024),
   isSecret: z.boolean(),
 });
 
@@ -71,9 +74,7 @@ export function buildEnvRoutes(storage: Storage): Hono {
   // own encryption boundary for `set_env`.
   app.put("/", async (c) => {
     const body = UpsertBodySchema.parse(await c.req.json());
-    const storedValue = body.isSecret
-      ? encryptSecret(body.value)
-      : body.value;
+    const storedValue = body.isSecret ? encryptSecret(body.value) : body.value;
     await storage.envEntries.upsert({
       key: body.key,
       value: storedValue,

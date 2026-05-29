@@ -12,10 +12,10 @@
 // host layer is expected to translate those into internal `create` /
 // `done` / etc. events before feeding them to the engine.
 
-import { CORE_ENDPOINT, endpoint, type Endpoint } from "./endpoint.js";
+import type { IRModule } from "../ir/types.js";
+import { CORE_ENDPOINT, type Endpoint, endpoint } from "./endpoint.js";
 import type { Event } from "./event.js";
 import { collectGarbage, shouldGc } from "./gc.js";
-import type { IRModule } from "../ir/types.js";
 import type { Result } from "./result.js";
 import { drive } from "./runner.js";
 import type { State } from "./state.js";

@@ -2,17 +2,16 @@ module Katari.IdentifierSpec (spec) where
 
 import Data.Either (isLeft, isRight)
 import Data.List (find)
-import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (isJust, isNothing)
-import Data.Set qualified as Set
+import Data.Maybe (isNothing)
 import Data.Text (Text)
 import Katari.AST
 import Katari.Id (QualifiedName (..))
 import Katari.Lexer qualified as Lexer
 import Katari.Parser qualified as Parser
+import Katari.TestSupport (IdentifierResult (..))
+import Katari.TestSupport qualified as TestSupport
 import Katari.Typechecker.Identifier
-import Katari.Compile qualified as Compile
 import Test.Hspec
 
 -- ---------------------------------------------------------------------------
@@ -24,9 +23,9 @@ parseOne :: Text -> IO (Module Parsed)
 parseOne src =
   let (stream, _) = Lexer.lex "<test>" src
       (parsed, parseErrors) = Parser.parse "<test>" stream
-  in case parseErrors of
-    (_:_) -> fail ("parse failure: " ++ show parseErrors)
-    [] -> pure parsed
+   in case parseErrors of
+        (_ : _) -> fail ("parse failure: " ++ show parseErrors)
+        [] -> pure parsed
 
 -- | Run identify on a single module named "main".
 --
@@ -36,7 +35,7 @@ parseOne src =
 identifyOne :: Text -> IO (Either [IdentifierError] IdentifierResult)
 identifyOne src = do
   m <- parseOne src
-  pure $ case Compile.identifyWithStdlib (Map.singleton "main" m) of
+  pure $ case TestSupport.identifyWithStdlib (Map.singleton "main" m) of
     (r, []) -> Right r
     (_, es) -> Left es
 
@@ -48,12 +47,12 @@ identifyMany sources = do
       ( \(name, src) ->
           let (stream, _) = Lexer.lex "<test>" src
               (parsed, parseErrors) = Parser.parse "<test>" stream
-          in case parseErrors of
-            (_:_) -> fail ("parse failure for " ++ show name ++ ": " ++ show parseErrors)
-            [] -> pure (name, parsed)
+           in case parseErrors of
+                (_ : _) -> fail ("parse failure for " ++ show name ++ ": " ++ show parseErrors)
+                [] -> pure (name, parsed)
       )
       sources
-  pure $ case Compile.identifyWithStdlib (Map.fromList parsedList) of
+  pure $ case TestSupport.identifyWithStdlib (Map.fromList parsedList) of
     (r, []) -> Right r
     (_, es) -> Left es
 
@@ -87,14 +86,8 @@ hasError predicate = \case
 lookupTypeByName :: Text -> IdentifierResult -> Maybe TypeData
 lookupTypeByName name res =
   fmap snd
-    . find (\(_, typeData) -> typeBareName typeData == name)
+    . find (\(qualifiedName, _) -> qualifiedName.name == name)
     $ Map.toList res.identifiedTypes
-  where
-    typeBareName :: TypeData -> Text
-    typeBareName td = bareNameOfQualified td.typeQualifiedName
-
-    bareNameOfQualified :: QualifiedName -> Text
-    bareNameOfQualified qn = qn.name
 
 -- | Accessor for the (phase-parameterised) synonym RHS field. Wrapping the
 -- access in a fixed-result function avoids the @metadata0@ ambiguity that
@@ -116,7 +109,7 @@ isUndefName (ErrorUndefinedName _ _) = True
 isUndefName _ = False
 
 isUndefQual :: IdentifierError -> Bool
-isUndefQual (ErrorUndefinedQualified _ _ _) = True
+isUndefQual (ErrorUndefinedQualified {}) = True
 isUndefQual _ = False
 
 isNotAType :: IdentifierError -> Bool
@@ -124,7 +117,7 @@ isNotAType (ErrorNotAType _ _) = True
 isNotAType _ = False
 
 isDup :: IdentifierError -> Bool
-isDup (ErrorDuplicateName _ _ _) = True
+isDup (ErrorDuplicateName {}) = True
 isDup _ = False
 
 isShadow :: IdentifierError -> Bool
@@ -144,7 +137,7 @@ isMissingMod (ErrorImportModuleNotFound _ _) = True
 isMissingMod _ = False
 
 isMissingName :: IdentifierError -> Bool
-isMissingName (ErrorImportNameNotFound _ _ _) = True
+isMissingName (ErrorImportNameNotFound {}) = True
 isMissingName _ = False
 
 isImportCycle :: IdentifierError -> Bool
@@ -259,19 +252,17 @@ dataDeclarations = describe "data declarations" $ do
           [ "data widget(w: integer)\n",
             "agent main() { widget(w = 1) }"
           ]
-    -- AST 上の typeName.metadata と identifiedTypes 側の TypeId が一致することを確認。
+    -- AST 上の typeName.resolution と identifiedTypes 側の QualifiedName が一致することを確認。
     let mainModule = head (Map.elems res.moduleASTs)
         typeNameRefResolution = head (collectDataTypeNameRefResolutiondata mainModule)
-        widgetTypeId =
+        widgetTypeQName =
           head
-            [ tid
-              | (tid, td) <- Map.toList res.identifiedTypes,
-                bareNameOf td.typeQualifiedName == "widget"
+            [ qualifiedName
+              | (qualifiedName, _td) <- Map.toList res.identifiedTypes,
+                qualifiedName.name == "widget"
             ]
-        bareNameOf :: QualifiedName -> Text
-        bareNameOf qn = qn.name
     case typeNameRefResolution of
-      Just tid -> tid `shouldBe` widgetTypeId
+      Just qname -> qname `shouldBe` widgetTypeQName
       Nothing ->
         expectationFailure "data declaration typeName resolved as Unresolved"
 
@@ -286,24 +277,24 @@ dataDeclarations = describe "data declarations" $ do
       Right res -> do
         -- Filter out stdlib modules ('prim') so the assertion only counts
         -- the user-declared `data foo` instances.
-        let userModuleIds =
-              [ mid
-                | (mid, md) <- Map.toList res.identifiedModules,
-                  md.moduleName /= "primitive"
+        let userModuleNames =
+              [ moduleName
+                | (moduleName, _md) <- Map.toList res.identifiedModules,
+                  moduleName /= ("primitive" :: Text)
               ]
             userAsts =
               [ m
-                | mid <- userModuleIds,
-                  Just m <- [Map.lookup mid res.moduleASTs]
+                | moduleName <- userModuleNames,
+                  Just m <- [Map.lookup moduleName res.moduleASTs]
               ]
-            typeIds =
-              [ tid
+            typeQNames =
+              [ qualifiedName
                 | m <- userAsts,
                   metadata <- collectDataTypeNameRefResolutiondata m,
-                  Just tid <- [metadata]
+                  Just qualifiedName <- [metadata]
               ]
-        length typeIds `shouldBe` 2
-        (head typeIds == typeIds !! 1) `shouldBe` False
+        length typeQNames `shouldBe` 2
+        (head typeQNames == typeQNames !! 1) `shouldBe` False
 
 -- ---------------------------------------------------------------------------
 -- Type synonyms / literal types / union types
@@ -822,9 +813,4 @@ unresolvedMetadata = describe "unresolved metadata" $ do
 -- Avoid unused-import warnings.
 _unused :: ()
 _unused =
-  const
-    ()
-    ( isJust,
-      isNothing :: Maybe Int -> Bool,
-      Map.size :: Map Int Int -> Int
-    )
+  ()

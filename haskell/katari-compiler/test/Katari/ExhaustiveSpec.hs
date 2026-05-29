@@ -1,3 +1,5 @@
+{-# LANGUAGE ImportQualifiedPost #-}
+
 -- | Tests for 'Katari.Typechecker.Exhaustive'.
 --
 -- The Exhaustive pass is the canonical place where Katari catches "this
@@ -10,15 +12,15 @@ module Katari.ExhaustiveSpec (spec) where
 
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
-import Katari.Compile qualified as Compile
 import Katari.Diagnostic (Diagnostic (..))
+import Katari.Id (VariableResolution (..))
 import Katari.Lexer qualified as Lexer
 import Katari.Parser qualified as Parser
-import Katari.Typechecker.ConstraintGenerator (generateConstraints)
-import Katari.Typechecker.Exhaustive (checkExhaustive, toDiagnostic)
+import Katari.TestSupport (IdentifierResult (..), ZonkResult (..), zonkAll)
+import Katari.TestSupport qualified as TestSupport
+import Katari.Typechecker.Exhaustive (ExhaustiveEnv (..), checkExhaustiveModule, toDiagnostic)
 import Katari.Typechecker.Solver (solve)
-import Katari.Typechecker.Zonker (zonk)
-import Test.Hspec
+import Test.Hspec (Spec, describe, it, shouldBe)
 
 -- ---------------------------------------------------------------------------
 -- Pipeline helper
@@ -32,13 +34,29 @@ runExhaustive source = do
       (parsed, parseErrors) = Parser.parse "<test>" stream
   case parseErrors of
     (_ : _) -> fail ("parse failure: " ++ show parseErrors)
-    [] -> case Compile.identifyWithStdlib (Map.singleton "main" parsed) of
+    [] -> case TestSupport.identifyWithStdlib (Map.singleton "main" parsed) of
       (idResult, []) -> do
-        let (cgResult, _) = generateConstraints idResult
+        let (cgResult, _) = TestSupport.generateConstraintsAll idResult
             (solverResult, _) = solve cgResult
-            (zonkResult, _) = zonk idResult cgResult solverResult
-            exhaustiveErrors = checkExhaustive idResult zonkResult
-        pure (map toDiagnostic exhaustiveErrors)
+            (zonkResult, _) = zonkAll "main" idResult cgResult solverResult
+            topLevels =
+              Map.fromList
+                [ (qn, ty)
+                  | (_, perMod) <- Map.toList zonkResult.zonkedTypeEnvironment,
+                    (ResolvedTopLevel qn, ty) <- Map.toList perMod
+                ]
+            errorsAcross =
+              concat
+                [ checkExhaustiveModule
+                    ExhaustiveEnv
+                      { constructors = idResult.identifiedConstructors,
+                        topLevelTypes = topLevels,
+                        localTypeEnv = Map.findWithDefault Map.empty moduleName zonkResult.zonkedTypeEnvironment
+                      }
+                    moduleAST
+                  | (moduleName, moduleAST) <- Map.toList zonkResult.zonkedModules
+                ]
+        pure (map toDiagnostic errorsAcross)
       (_, errs) -> fail ("identify failure: " ++ show errs)
 
 -- | True iff @diags@ contains at least one error / warning with the given code.
@@ -279,4 +297,3 @@ validPatterns = describe "well-typed exhaustive matches produce no Exhaustive di
             "}"
           ]
     diags `shouldBe` []
-

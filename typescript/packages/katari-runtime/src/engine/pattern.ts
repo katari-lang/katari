@@ -10,10 +10,7 @@ import type { LiteralValue, MatchPattern, TypePatternTag } from "../ir/types.js"
 import type { Value } from "./value.js";
 
 /** Returns a flat Record<varId, Value> on match, or null on miss. */
-export function tryMatch(
-  pattern: MatchPattern,
-  value: Value,
-): Record<number, Value> | null {
+export function tryMatch(pattern: MatchPattern, value: Value): Record<number, Value> | null {
   const bindings: Record<number, Value> = {};
   return tryMatchInto(pattern, value, bindings) ? bindings : null;
 }
@@ -70,7 +67,9 @@ function tryMatchInto(
     }
     default: {
       const _exhaustive: never = pattern;
-      throw new Error(`engine.pattern: unknown pattern kind: ${(_exhaustive as MatchPattern).kind}`);
+      throw new Error(
+        `engine.pattern: unknown pattern kind: ${(_exhaustive as MatchPattern).kind}`,
+      );
     }
   }
 }
@@ -98,11 +97,7 @@ function matchesTypeTag(tag: TypePatternTag, value: Value): boolean {
   }
 }
 
-function bindOnce(
-  bindings: Record<number, Value>,
-  varId: number,
-  value: Value,
-): void {
+function bindOnce(bindings: Record<number, Value>, varId: number, value: Value): void {
   if (Object.hasOwn(bindings, varId)) {
     throw new Error(
       `engine.pattern: VarId ${varId} bound more than once in one pattern (linear-pattern violation; compiler bug)`,
@@ -128,7 +123,9 @@ export function matchLiteral(literal: LiteralValue, value: Value): boolean {
       return false;
     default: {
       const _exhaustive: never = literal;
-      throw new Error(`engine.pattern: unknown literal kind: ${(_exhaustive as LiteralValue).kind}`);
+      throw new Error(
+        `engine.pattern: unknown literal kind: ${(_exhaustive as LiteralValue).kind}`,
+      );
     }
   }
 }

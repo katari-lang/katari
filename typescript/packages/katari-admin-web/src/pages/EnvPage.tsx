@@ -1,18 +1,18 @@
-import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { motion } from "framer-motion";
-import { Plus, Pencil, Trash2, KeyRound, ShieldCheck } from "lucide-react";
-import { useApiClient } from "@/contexts/ApiKeyContext";
-import { PageContent, PageHeader } from "@/components/ui/PageHeader";
-import { SpinnerOverlay } from "@/components/ui/Spinner";
-import { EmptyState } from "@/components/ui/EmptyState";
-import { Table, TBody, TD, TH, THead, TR } from "@/components/ui/Table";
+import { KeyRound, Pencil, Plus, ShieldCheck, Trash2 } from "lucide-react";
+import { useState } from "react";
+import type { EnvEntry } from "@/api/types";
+import { EnvDeleteDialog } from "@/components/domain/EnvDeleteDialog";
+import { EnvUpsertDialog } from "@/components/domain/EnvUpsertDialog";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
-import { EnvUpsertDialog } from "@/components/domain/EnvUpsertDialog";
-import { EnvDeleteDialog } from "@/components/domain/EnvDeleteDialog";
+import { EmptyState } from "@/components/ui/EmptyState";
+import { PageContent, PageHeader } from "@/components/ui/PageHeader";
+import { SpinnerOverlay } from "@/components/ui/Spinner";
+import { Table, TBody, TD, TH, THead, TR } from "@/components/ui/Table";
+import { useApiClient } from "@/contexts/ApiKeyContext";
 import { formatDateTime, relativeTime } from "@/lib/format";
-import type { EnvEntry } from "@/api/types";
 
 export function EnvPage() {
   const client = useApiClient();
@@ -76,9 +76,7 @@ export function EnvPage() {
                     <TR key={entry.key}>
                       <TD>
                         <div className="flex items-center gap-2">
-                          <span className="font-mono text-foreground">
-                            {entry.key}
-                          </span>
+                          <span className="font-mono text-foreground">{entry.key}</span>
                           {entry.isSecret && (
                             <Badge tone="warning">
                               <ShieldCheck className="size-3" />

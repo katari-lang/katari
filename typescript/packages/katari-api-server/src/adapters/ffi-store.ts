@@ -5,6 +5,7 @@
 // `ffi_pending_delegations` / `ffi_pending_escalations` tables
 // (`Storage.ffiDelegations` / `Storage.ffiEscalations` repo).
 
+import type { DelegationId, Endpoint, EscalationId } from "@katari-lang/runtime";
 import {
   CORE_ENDPOINT,
   FFI_ENDPOINT,
@@ -12,12 +13,11 @@ import {
   type FfiPendingEscalation,
   type FfiStore,
 } from "@katari-lang/runtime";
-import type { DelegationId, EscalationId, Endpoint } from "@katari-lang/runtime";
 import type {
-  Storage,
-  SnapshotId,
   FfiPendingDelegation as DbDelegation,
   FfiPendingEscalation as DbEscalation,
+  SnapshotId,
+  Storage,
 } from "../storage/types.js";
 
 export class StorageFfiStore implements FfiStore {
@@ -46,9 +46,9 @@ export class StorageFfiStore implements FfiStore {
     // emitted the outbound `delegate(CORE → FFI)`, so we deliberately
     // skip those here to avoid PK collisions.
     if (row.parentExtDelegationId !== null) {
-      const parentRoot = (await this.storage.delegations.get(
-        row.parentExtDelegationId,
-      ))?.rootDelegationId ?? row.delegationId;
+      const parentRoot =
+        (await this.storage.delegations.get(row.parentExtDelegationId))?.rootDelegationId ??
+        row.delegationId;
       await this.storage.delegations.insert({
         id: row.delegationId,
         rootDelegationId: parentRoot,
@@ -71,10 +71,7 @@ export class StorageFfiStore implements FfiStore {
     return toRuntimeDelegation(row);
   }
 
-  async setDelegationState(
-    id: DelegationId,
-    state: "running" | "cancelling",
-  ): Promise<boolean> {
+  async setDelegationState(id: DelegationId, state: "running" | "cancelling"): Promise<boolean> {
     // Mirror the state into the unified `delegations` row for ext-
     // spawned children (= rows we own). For inbound rows we don't own,
     // setState in the unified table is a no-op (= the row's writer is
@@ -94,19 +91,13 @@ export class StorageFfiStore implements FfiStore {
   }
 
   async listDelegations(): Promise<FfiPendingDelegation[]> {
-    const rows = await this.storage.ffiDelegations.listBySnapshot(
-      this.snapshotId,
-    );
+    const rows = await this.storage.ffiDelegations.listBySnapshot(this.snapshotId);
     return rows.map(toRuntimeDelegation);
   }
 
-  async listChildrenOf(
-    parentId: DelegationId,
-  ): Promise<FfiPendingDelegation[]> {
+  async listChildrenOf(parentId: DelegationId): Promise<FfiPendingDelegation[]> {
     const rows = await this.storage.ffiDelegations.listChildrenOf(parentId);
-    return rows
-      .filter((r) => r.snapshotId === this.snapshotId)
-      .map(toRuntimeDelegation);
+    return rows.filter((r) => r.snapshotId === this.snapshotId).map(toRuntimeDelegation);
   }
 
   // ─── Escalations ────────────────────────────────────────────────────────
@@ -134,9 +125,7 @@ export class StorageFfiStore implements FfiStore {
   }
 
   async listEscalations(): Promise<FfiPendingEscalation[]> {
-    const rows = await this.storage.ffiEscalations.listBySnapshot(
-      this.snapshotId,
-    );
+    const rows = await this.storage.ffiEscalations.listBySnapshot(this.snapshotId);
     return rows.map(toRuntimeEscalation);
   }
 }

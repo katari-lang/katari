@@ -11,18 +11,17 @@ module Katari.LSP.Handlers.Document
 where
 
 import Control.Concurrent (forkIO, killThread, threadDelay)
-import Control.Concurrent.STM (atomically, readTVar, readTVarIO, writeTVar, modifyTVar')
+import Control.Concurrent.STM (atomically, modifyTVar', readTVar, readTVarIO)
+import Control.Lens ((^.))
 import Control.Monad.IO.Class (liftIO)
-import qualified Data.Map.Strict as Map
+import Data.Foldable (for_)
 import Data.Map.Strict (Map)
-import qualified Data.Set as Set
-import qualified Data.Text as Text
+import Data.Map.Strict qualified as Map
+import Data.Set qualified as Set
 import Data.Text (Text)
-import qualified Katari.Compile as Compile
+import Data.Text qualified as Text
+import Katari.Compile qualified as Compile
 import Katari.Diagnostic (Diagnostic (..), Severity (..))
-import qualified Katari.Project.Config as Project
-import qualified Katari.Project.Discovery as Project
-import qualified Katari.Project.Resolve as Project
 import Katari.LSP.Convert (katariSpanToLspRange)
 import Katari.LSP.State
   ( RecompileTarget (..),
@@ -33,16 +32,18 @@ import Katari.LSP.State
     textToLineVector,
     wsFileTexts,
   )
-import Katari.SourceSpan (SourceSpan (..))
+import Katari.Project.Config qualified as Project
+import Katari.Project.Discovery qualified as Project
+import Katari.Project.Resolve qualified as Project
 import Katari.Query (buildOccurrenceIndex)
-import qualified Language.LSP.Protocol.Lens as L
-import qualified Language.LSP.Protocol.Message as LSP
-import qualified System.IO
-import qualified Language.LSP.Protocol.Types as LSP
-import qualified Language.LSP.Server as LSP
-import qualified Language.LSP.VFS as VFS
-import Control.Lens ((^.))
-import System.FilePath (dropExtension, isAbsolute, takeDirectory, takeFileName, (</>))
+import Katari.SourceSpan (SourceSpan (..))
+import Language.LSP.Protocol.Lens qualified as L
+import Language.LSP.Protocol.Message qualified as LSP
+import Language.LSP.Protocol.Types qualified as LSP
+import Language.LSP.Server qualified as LSP
+import Language.LSP.VFS qualified as VFS
+import System.FilePath (dropExtension, takeDirectory, takeFileName, (</>))
+import System.IO qualified
 
 -- ---------------------------------------------------------------------------
 -- Handlers
@@ -56,16 +57,16 @@ documentHandlers st =
             txt = msg ^. L.params . L.textDocument . L.text
         case LSP.uriToFilePath uri of
           Nothing -> pure ()
-          Just path -> liftIO (onOpen st path txt) >> scheduleRecompile st path
-    , LSP.notificationHandler LSP.SMethod_TextDocumentDidChange $ \msg -> do
+          Just path -> liftIO (onOpen st path txt) >> scheduleRecompile st path,
+      LSP.notificationHandler LSP.SMethod_TextDocumentDidChange $ \msg -> do
         let uri = msg ^. L.params . L.textDocument . L.uri
         mvfs <- LSP.getVirtualFile (LSP.toNormalizedUri uri)
         case (LSP.uriToFilePath uri, mvfs) of
           (Just path, Just vfs) -> do
             let txt = VFS.virtualFileText vfs
             liftIO (onChange st path txt) >> scheduleRecompile st path
-          _ -> pure ()
-    , LSP.notificationHandler LSP.SMethod_TextDocumentDidClose $ \msg -> do
+          _ -> pure (),
+      LSP.notificationHandler LSP.SMethod_TextDocumentDidClose $ \msg -> do
         let uri = msg ^. L.params . L.textDocument . L.uri
         case LSP.uriToFilePath uri of
           Nothing -> pure ()
@@ -182,7 +183,8 @@ ensureWorkspaceLoaded st root = do
                           wsLineCache = Map.empty,
                           wsOpenFiles = Set.empty,
                           wsLastResult = Nothing,
-                          wsOccIndex = Nothing
+                          wsOccIndex = Nothing,
+                          wsCompileCache = Map.empty
                         }
                 atomically $ modifyTVar' st.workspaces (Map.insert root ws)
 
@@ -210,9 +212,7 @@ scheduleRecompile st path = do
     prevTimer <- atomically $ do
       timers <- readTVar st.debounceTimers
       pure (Map.lookup target timers)
-    case prevTimer of
-      Just tid -> killThread tid
-      Nothing -> pure ()
+    for_ prevTimer killThread
     newTid <- forkIO $ do
       threadDelay debounceUs
       LSP.runLspT env (recompileNow st target)
@@ -233,8 +233,8 @@ recompileWorkspace st root = do
     Nothing -> pure ()
     Just ws -> do
       let input = snapshotWorkspaceSources ws
-          result = Compile.compile input
-          fileTexts = wsFileTexts ws
+      result <- liftIO $ Compile.compile (\_ -> pure ()) input
+      let fileTexts = wsFileTexts ws
       liftIO $
         atomically $
           modifyTVar' st.workspaces $
@@ -243,7 +243,8 @@ recompileWorkspace st root = do
                   w
                     { wsLastResult = Just result,
                       wsOccIndex =
-                        Just (buildOccurrenceIndex result.identifierResult result.zonkResult)
+                        Just (buildOccurrenceIndex result.querySnapshot),
+                      wsCompileCache = result.updatedCache
                     }
               )
               root
@@ -252,15 +253,15 @@ recompileWorkspace st root = do
 recompileOrphan :: ServerState -> FilePath -> LSP.LspM () ()
 recompileOrphan st path = do
   files <- liftIO (readTVarIO st.orphanFiles)
-  case Map.lookup path files of
-    Just txt -> compileOneOrphan st path txt
-    Nothing -> pure ()
+  Data.Foldable.for_
+    (Map.lookup path files)
+    (compileOneOrphan st path)
 
 compileOneOrphan :: ServerState -> FilePath -> Text -> LSP.LspM () ()
 compileOneOrphan _st path txt = do
   let entry = Compile.SourceEntry {Compile.filePath = path, Compile.sourceText = txt}
       sources = Map.singleton (singletonModuleName path) entry
-      result = Compile.compile (Compile.CompileInput {Compile.sources = sources})
+  result <- liftIO $ Compile.compile (\_ -> pure ()) (Compile.CompileInput {Compile.sources = sources, Compile.cache = Map.empty})
   publishWorkspaceDiagnostics (Map.singleton path txt) result.diagnostics
   where
     -- Strip the trailing @.ktr@ extension and treat the basename as the
@@ -276,7 +277,8 @@ compileOneOrphan _st path txt = do
 publishWorkspaceDiagnostics :: Map FilePath Text -> [Diagnostic] -> LSP.LspM () ()
 publishWorkspaceDiagnostics fileTexts diags = do
   let grouped =
-        Map.fromListWith (<>)
+        Map.fromListWith
+          (<>)
           [(d.span.filePath, [d]) | d <- diags, d.severity /= SeverityHint]
       -- Always emit an entry for every file we know about so the editor
       -- clears stale diagnostics when problems disappear.
@@ -355,7 +357,7 @@ handleOne st (LSP.FileEvent uri changeType) =
           -- Re-load the workspace eagerly (if the toml still exists)
           -- and trigger a full recompile so diagnostics update.
           case changeType of
-            LSP.FileChangeType_Deleted -> do
+            LSP.FileChangeType_Deleted ->
               LSP.sendNotification LSP.SMethod_TextDocumentPublishDiagnostics $
                 LSP.PublishDiagnosticsParams uri Nothing []
             _ -> liftIO $ ensureWorkspaceLoaded st root
@@ -376,5 +378,3 @@ handleOne st (LSP.FileEvent uri changeType) =
             scheduleRecompile st path
           LSP.FileChangeType_Created -> scheduleRecompile st path
           LSP.FileChangeType_Changed -> scheduleRecompile st path
-          _ -> pure ()
-

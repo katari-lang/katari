@@ -1,13 +1,10 @@
-import type { HTMLAttributes, ThHTMLAttributes, TdHTMLAttributes } from "react";
+import type { HTMLAttributes, TdHTMLAttributes, ThHTMLAttributes } from "react";
 import { cn } from "@/lib/cn";
 
 export function Table({ className, ...rest }: HTMLAttributes<HTMLTableElement>) {
   return (
     <div className="overflow-x-auto border border-border">
-      <table
-        className={cn("w-full border-collapse text-sm", className)}
-        {...rest}
-      />
+      <table className={cn("w-full border-collapse text-sm", className)} {...rest} />
     </div>
   );
 }
@@ -29,12 +26,7 @@ export function TBody({ className, ...rest }: HTMLAttributes<HTMLTableSectionEle
 }
 
 export function TR({ className, ...rest }: HTMLAttributes<HTMLTableRowElement>) {
-  return (
-    <tr
-      className={cn("transition-colors hover:bg-muted/40", className)}
-      {...rest}
-    />
-  );
+  return <tr className={cn("transition-colors hover:bg-muted/40", className)} {...rest} />;
 }
 
 export function TH({ className, ...rest }: ThHTMLAttributes<HTMLTableCellElement>) {

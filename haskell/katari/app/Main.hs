@@ -1,16 +1,16 @@
 -- | Entry point for the @katari@ binary.
 module Main (main) where
 
-import qualified Katari.Cli.Apply as Apply
-import qualified Katari.Cli.Build as Build
-import qualified Katari.Cli.Cancel as Cancel
-import qualified Katari.Cli.Check as Check
-import qualified Katari.Cli.Common as Common
-import qualified Katari.Cli.Escalation as Escalation
-import qualified Katari.Cli.Init as Init
-import qualified Katari.Cli.Ls as Ls
-import qualified Katari.Cli.Run as Run
-import qualified Katari.Cli.Status as Status
+import Katari.Cli.Apply qualified as Apply
+import Katari.Cli.Build qualified as Build
+import Katari.Cli.Cancel qualified as Cancel
+import Katari.Cli.Check qualified as Check
+import Katari.Cli.Common qualified as Common
+import Katari.Cli.Escalation qualified as Escalation
+import Katari.Cli.Init qualified as Init
+import Katari.Cli.Ls qualified as Ls
+import Katari.Cli.Run qualified as Run
+import Katari.Cli.Status qualified as Status
 import Katari.Version (katariVersion)
 import Options.Applicative
 

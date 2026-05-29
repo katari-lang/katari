@@ -8,18 +8,18 @@
 import { match } from "ts-pattern";
 import type { Block, BlockId } from "../ir/types.js";
 import {
+  type CallId,
   createDelegationId,
   createScopeId,
   createThreadId,
-  type CallId,
   type DelegationId,
   type ScopeId,
   type ThreadId,
 } from "./id.js";
 import type { StepCtx } from "./step-ctx.js";
-import type { Value } from "./value.js";
 import { newCommonFields, setChild } from "./thread/common.js";
 import type { Thread } from "./thread/types.js";
+import type { Value } from "./value.js";
 
 /**
  * Decide where the freshly-allocated child scope's parentId should point.
@@ -63,8 +63,8 @@ export function spawnChild(ctx: StepCtx, args: SpawnArgs): ThreadId {
   const newScopeId = createScopeId();
   const parentScopeId = match(args.scopeMode)
     .with({ mode: "isolated" }, () => null as ScopeId | null)
-    .with({ mode: "inline" }, m => m.parentScopeId)
-    .with({ mode: "captured" }, m => m.capturedScopeId)
+    .with({ mode: "inline" }, (m) => m.parentScopeId)
+    .with({ mode: "captured" }, (m) => m.capturedScopeId)
     .exhaustive();
   ctx.state.scopes[newScopeId] = {
     id: newScopeId,
@@ -88,7 +88,7 @@ export function spawnChild(ctx: StepCtx, args: SpawnArgs): ThreadId {
       blockId: args.blockId,
       pc: 0,
     }))
-    .with({ kind: "blockPrim" }, b => {
+    .with({ kind: "blockPrim" }, (b) => {
       // `call_agent` needs to spawn a delegation against a runtime-
       // resolved target plus run schema validation, which is well
       // outside the synchronous-leaf shape PrimThread assumes. Pivot
@@ -99,14 +99,8 @@ export function spawnChild(ctx: StepCtx, args: SpawnArgs): ThreadId {
         return {
           ...common,
           kind: "callAgent" as const,
-          nameStr:
-            nameArg !== undefined && nameArg.kind === "string"
-              ? nameArg.value
-              : "",
-          argsRecord:
-            argsArg !== undefined && argsArg.kind === "record"
-              ? argsArg.entries
-              : {},
+          nameStr: nameArg !== undefined && nameArg.kind === "string" ? nameArg.value : "",
+          argsRecord: argsArg !== undefined && argsArg.kind === "record" ? argsArg.entries : {},
           inboundEscalations: {},
         };
       }
@@ -117,7 +111,7 @@ export function spawnChild(ctx: StepCtx, args: SpawnArgs): ThreadId {
         args: args.callArgs,
       };
     })
-    .with({ kind: "blockConstructor" }, b => ({
+    .with({ kind: "blockConstructor" }, (b) => ({
       ...common,
       kind: "ctor" as const,
       ctorId: b.body,
@@ -174,7 +168,7 @@ export function spawnChild(ctx: StepCtx, args: SpawnArgs): ThreadId {
       collected: {},
       nextIndex: 0,
     }))
-    .with({ kind: "blockRequest" }, b => ({
+    .with({ kind: "blockRequest" }, (b) => ({
       ...common,
       kind: "request" as const,
       reqId: b.body,
@@ -221,10 +215,7 @@ export type SpawnAgentRootArgs = {
  * (which spawns the body UserThread). Returns the new ThreadId so the
  * caller can register it under `state.delegations`.
  */
-export function spawnAgentRoot(
-  ctx: StepCtx,
-  args: SpawnAgentRootArgs,
-): ThreadId {
+export function spawnAgentRoot(ctx: StepCtx, args: SpawnAgentRootArgs): ThreadId {
   const block = ctx.state.irModule.blocks[String(args.blockId)] as Block | undefined;
   if (block === undefined || block.kind !== "blockAgent") {
     throw new Error(

@@ -8,7 +8,7 @@ where
 import Control.Concurrent.STM (readTVarIO)
 import Control.Lens ((^.))
 import Control.Monad.IO.Class (liftIO)
-import qualified Data.Map.Strict as Map
+import Data.Map.Strict qualified as Map
 import Katari.Compile (CompileResult (..))
 import Katari.LSP.Convert (katariSpanToLspLocation, lspPositionToKatari)
 import Katari.LSP.State
@@ -18,11 +18,11 @@ import Katari.LSP.State
     lookupCompileResult,
     workspaceFileTexts,
   )
-import qualified Katari.Query as Query
-import qualified Language.LSP.Protocol.Lens as L
-import qualified Language.LSP.Protocol.Message as LSP
-import qualified Language.LSP.Protocol.Types as LSP
-import qualified Language.LSP.Server as LSP
+import Katari.Query qualified as Query
+import Language.LSP.Protocol.Lens qualified as L
+import Language.LSP.Protocol.Message qualified as LSP
+import Language.LSP.Protocol.Types qualified as LSP
+import Language.LSP.Server qualified as LSP
 
 referencesHandler :: ServerState -> LSP.Handlers (LSP.LspM ())
 referencesHandler st =
@@ -37,12 +37,7 @@ referencesHandler st =
         case (mResult, mWsOcc) of
           (Just (txt, _lineVec, result), Just occ) -> do
             let kPos = lspPositionToKatari txt pos
-                mRef =
-                  Query.identifyAtPosition
-                    result.identifierResult
-                    result.zonkResult
-                    path
-                    kPos
+                mRef = Query.identifyAtPosition result.querySnapshot path kPos
             case mRef of
               Nothing -> responder (Right (LSP.InR LSP.Null))
               Just ref -> do

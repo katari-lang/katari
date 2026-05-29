@@ -8,17 +8,9 @@
 // replaces every `$envelope` with a deterministic `<redacted:...>`
 // placeholder before 'valueToRaw' produces the flat wire shape.
 
-import {
-  redactSecretsInEncrypted,
-  valueToRaw,
-  type EncryptedValue,
-} from "@katari-lang/runtime";
+import { type EncryptedValue, redactSecretsInEncrypted, valueToRaw } from "@katari-lang/runtime";
 import type { RawValue } from "@katari-lang/types";
-import type {
-  DelegationRow,
-  EscalationRow,
-  RunsAuditRow,
-} from "../storage/types.js";
+import type { DelegationRow, EscalationRow, RunsAuditRow } from "../storage/types.js";
 
 // ─── Live delegation ───────────────────────────────────────────────────────
 
@@ -44,10 +36,7 @@ export function runAuditRowToWire(row: RunsAuditRow): RunAuditRowWire {
   return {
     ...row,
     args: redactArgs(row.args),
-    result:
-      row.result === undefined
-        ? undefined
-        : valueToRaw(redactSecretsInEncrypted(row.result)),
+    result: row.result === undefined ? undefined : valueToRaw(redactSecretsInEncrypted(row.result)),
   };
 }
 
@@ -62,18 +51,13 @@ export function escalationRowToWire(row: EscalationRow): EscalationRowWire {
   return {
     ...row,
     args: redactArgs(row.args),
-    value:
-      row.value === undefined
-        ? undefined
-        : valueToRaw(redactSecretsInEncrypted(row.value)),
+    value: row.value === undefined ? undefined : valueToRaw(redactSecretsInEncrypted(row.value)),
   };
 }
 
 // ─── Internal ──────────────────────────────────────────────────────────────
 
-function redactArgs(
-  args: Record<string, EncryptedValue>,
-): Record<string, RawValue> {
+function redactArgs(args: Record<string, EncryptedValue>): Record<string, RawValue> {
   const out: Record<string, RawValue> = {};
   for (const [k, v] of Object.entries(args)) {
     out[k] = valueToRaw(redactSecretsInEncrypted(v));

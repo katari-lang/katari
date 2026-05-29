@@ -1,9 +1,9 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import toast from "react-hot-toast";
-import { useApiClient } from "@/contexts/ApiKeyContext";
-import { Dialog, DialogFooter } from "@/components/ui/Dialog";
-import { Button } from "@/components/ui/Button";
 import type { EnvEntry } from "@/api/types";
+import { Button } from "@/components/ui/Button";
+import { Dialog, DialogFooter } from "@/components/ui/Dialog";
+import { useApiClient } from "@/contexts/ApiKeyContext";
 
 type Props = {
   open: boolean;
@@ -39,11 +39,7 @@ export function EnvDeleteDialog({ open, onClose, target }: Props) {
         <Button variant="secondary" onClick={onClose}>
           Cancel
         </Button>
-        <Button
-          variant="danger"
-          onClick={() => mutation.mutate()}
-          loading={mutation.isPending}
-        >
+        <Button variant="danger" onClick={() => mutation.mutate()} loading={mutation.isPending}>
           Delete
         </Button>
       </DialogFooter>

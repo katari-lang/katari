@@ -15,9 +15,9 @@
 // doesn't poison the version. Adding a prim here means coordinating with
 // the Haskell side's `Katari.Builtins` registry — names must match.
 
-import { RecoverableEngineError } from "./errors.js";
-import { RawValueDecodeError, valueFromRaw, valueToRaw } from "../value-codec.js";
 import type { QualifiedName } from "../ir/types.js";
+import { RawValueDecodeError, valueFromRaw, valueToRaw } from "../value-codec.js";
+import { RecoverableEngineError } from "./errors.js";
 import type { Value } from "./value.js";
 
 /**
@@ -99,16 +99,15 @@ export function executePrim(name: string, args: Record<string, Value>): Value {
       // The type system has already narrowed each argument to
       // string ∪ secret at compile time; at runtime we just observe
       // which variant landed.
-      const lhs = args["lhs"], rhs = args["rhs"];
+      const lhs = args["lhs"],
+        rhs = args["rhs"];
       if (
         (lhs?.kind === "string" || lhs?.kind === "secret") &&
         (rhs?.kind === "string" || rhs?.kind === "secret")
       ) {
         const joined = lhs.value + rhs.value;
         const tainted = lhs.kind === "secret" || rhs.kind === "secret";
-        return tainted
-          ? { kind: "secret", value: joined }
-          : { kind: "string", value: joined };
+        return tainted ? { kind: "secret", value: joined } : { kind: "string", value: joined };
       }
       throw new RecoverableEngineError("prim concat: invalid args");
     }
@@ -172,7 +171,8 @@ export function executePrim(name: string, args: Record<string, Value>): Value {
       // static type system already distinguishes the two. This prim
       // and 'array_get' share an implementation; both dispatch on the
       // single 'array' Value variant.
-      const tuple = args["tuple"], index = args["index"];
+      const tuple = args["tuple"],
+        index = args["index"];
       if (tuple?.kind === "array" && index?.kind === "number") {
         // Reject fractional / negative indices loudly rather than
         // silently falling into the "out of bounds" branch — `t[1.5]`
@@ -191,7 +191,8 @@ export function executePrim(name: string, args: Record<string, Value>): Value {
       throw new RecoverableEngineError("prim tuple_get: invalid args");
     }
     case "array_get": {
-      const array = args["array"], index = args["index"];
+      const array = args["array"],
+        index = args["index"];
       if (array?.kind === "array" && index?.kind === "number") {
         if (!Number.isInteger(index.value) || index.value < 0) {
           throw new RecoverableEngineError(
@@ -221,13 +222,12 @@ export function executePrim(name: string, args: Record<string, Value>): Value {
       return { kind: "string", value: value.kind };
     }
     case "get_field": {
-      const value = args["object"], field = args["field"];
+      const value = args["object"],
+        field = args["field"];
       if (value?.kind === "tagged" && field?.kind === "string") {
         const v = value.fields[field.value];
         if (v === undefined) {
-          throw new RecoverableEngineError(
-            `prim get_field: field ${field.value} not found`,
-          );
+          throw new RecoverableEngineError(`prim get_field: field ${field.value} not found`);
         }
         return v;
       }
@@ -237,31 +237,30 @@ export function executePrim(name: string, args: Record<string, Value>): Value {
       return { kind: "record", entries: Object.create(null) };
     }
     case "record.get": {
-      const r = req(args, "record"), key = req(args, "key");
+      const r = req(args, "record"),
+        key = req(args, "key");
       if (r.kind !== "record") {
         throw new RecoverableEngineError(
           `prim record.get: first argument must be a record, got ${r.kind}`,
         );
       }
       if (key.kind !== "string") {
-        throw new RecoverableEngineError(
-          `prim record.get: key must be a string, got ${key.kind}`,
-        );
+        throw new RecoverableEngineError(`prim record.get: key must be a string, got ${key.kind}`);
       }
       const v = r.entries[key.value];
       return v === undefined ? { kind: "null" } : v;
     }
     case "record.set": {
-      const r = req(args, "record"), key = req(args, "key"), value = req(args, "value");
+      const r = req(args, "record"),
+        key = req(args, "key"),
+        value = req(args, "value");
       if (r.kind !== "record") {
         throw new RecoverableEngineError(
           `prim record.set: first argument must be a record, got ${r.kind}`,
         );
       }
       if (key.kind !== "string") {
-        throw new RecoverableEngineError(
-          `prim record.set: key must be a string, got ${key.kind}`,
-        );
+        throw new RecoverableEngineError(`prim record.set: key must be a string, got ${key.kind}`);
       }
       const next: Record<string, Value> = Object.create(null);
       for (const [k, v] of Object.entries(r.entries)) {
@@ -271,7 +270,8 @@ export function executePrim(name: string, args: Record<string, Value>): Value {
       return { kind: "record", entries: next };
     }
     case "record.remove": {
-      const r = req(args, "record"), key = req(args, "key");
+      const r = req(args, "record"),
+        key = req(args, "key");
       if (r.kind !== "record") {
         throw new RecoverableEngineError(
           `prim record.remove: first argument must be a record, got ${r.kind}`,
@@ -296,22 +296,19 @@ export function executePrim(name: string, args: Record<string, Value>): Value {
           `prim record.keys: argument must be a record, got ${r.kind}`,
         );
       }
-      const keys = Object.keys(r.entries).map(
-        (k): Value => ({ kind: "string", value: k }),
-      );
+      const keys = Object.keys(r.entries).map((k): Value => ({ kind: "string", value: k }));
       return { kind: "array", elements: keys };
     }
     case "record.has": {
-      const r = req(args, "record"), key = req(args, "key");
+      const r = req(args, "record"),
+        key = req(args, "key");
       if (r.kind !== "record") {
         throw new RecoverableEngineError(
           `prim record.has: first argument must be a record, got ${r.kind}`,
         );
       }
       if (key.kind !== "string") {
-        throw new RecoverableEngineError(
-          `prim record.has: key must be a string, got ${key.kind}`,
-        );
+        throw new RecoverableEngineError(`prim record.has: key must be a string, got ${key.kind}`);
       }
       return { kind: "boolean", value: key.value in r.entries };
     }
@@ -416,9 +413,7 @@ function jsonToTagged(raw: unknown): Value {
       fields: { entries: { kind: "record", entries } },
     };
   }
-  throw new RecoverableEngineError(
-    `prim json.parse: unexpected JSON value of type ${typeof raw}`,
-  );
+  throw new RecoverableEngineError(`prim json.parse: unexpected JSON value of type ${typeof raw}`);
 }
 
 // Tagged `json` value → JSON-encodable raw. The compiler's `json` type
@@ -438,7 +433,9 @@ function jsonTaggedToRaw(value: Value): unknown {
     case JSON_BOOLEAN_QNAME: {
       const f = value.fields["value"];
       if (f?.kind !== "boolean") {
-        throw new RecoverableEngineError("prim json.stringify: json_boolean.value is not a boolean");
+        throw new RecoverableEngineError(
+          "prim json.stringify: json_boolean.value is not a boolean",
+        );
       }
       return f.value;
     }
@@ -446,7 +443,9 @@ function jsonTaggedToRaw(value: Value): unknown {
     case JSON_NUMBER_QNAME: {
       const f = value.fields["value"];
       if (f?.kind !== "number") {
-        throw new RecoverableEngineError(`prim json.stringify: ${value.ctorId}.value is not a number`);
+        throw new RecoverableEngineError(
+          `prim json.stringify: ${value.ctorId}.value is not a number`,
+        );
       }
       return f.value;
     }
@@ -467,7 +466,9 @@ function jsonTaggedToRaw(value: Value): unknown {
     case JSON_OBJECT_QNAME: {
       const entries = value.fields["entries"];
       if (entries?.kind !== "record") {
-        throw new RecoverableEngineError("prim json.stringify: json_object.entries is not a record");
+        throw new RecoverableEngineError(
+          "prim json.stringify: json_object.entries is not a record",
+        );
       }
       const out: Record<string, unknown> = {};
       for (const [k, v] of Object.entries(entries.entries)) {
@@ -497,7 +498,8 @@ function arith(
   args: Record<string, Value>,
   op: (a: number, b: number) => number,
 ): Value {
-  const lhs = args["lhs"], rhs = args["rhs"];
+  const lhs = args["lhs"],
+    rhs = args["rhs"];
   if (lhs?.kind === "number" && rhs?.kind === "number") {
     return { kind: "number", value: op(lhs.value, rhs.value) };
   }
@@ -509,7 +511,8 @@ function cmp(
   args: Record<string, Value>,
   op: (a: number, b: number) => boolean,
 ): Value {
-  const lhs = args["lhs"], rhs = args["rhs"];
+  const lhs = args["lhs"],
+    rhs = args["rhs"];
   if (lhs?.kind === "number" && rhs?.kind === "number") {
     return { kind: "boolean", value: op(lhs.value, rhs.value) };
   }
@@ -521,7 +524,8 @@ function logical(
   args: Record<string, Value>,
   op: (a: boolean, b: boolean) => boolean,
 ): Value {
-  const lhs = args["lhs"], rhs = args["rhs"];
+  const lhs = args["lhs"],
+    rhs = args["rhs"];
   if (lhs?.kind === "boolean" && rhs?.kind === "boolean") {
     return { kind: "boolean", value: op(lhs.value, rhs.value) };
   }
@@ -549,7 +553,8 @@ export function valueEquals(a: Value, b: Value): boolean {
     case "tagged": {
       const bt = b as typeof a;
       if (a.ctorId !== bt.ctorId) return false;
-      const xk = Object.keys(a.fields), yk = Object.keys(bt.fields);
+      const xk = Object.keys(a.fields),
+        yk = Object.keys(bt.fields);
       if (xk.length !== yk.length) return false;
       for (const k of xk) {
         if (!Object.hasOwn(bt.fields, k)) return false;
@@ -587,4 +592,3 @@ function arrayEqual(xs: Value[], ys: Value[]): boolean {
   }
   return true;
 }
-

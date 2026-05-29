@@ -1,29 +1,31 @@
 module Katari.QuerySpec (spec) where
 
-import qualified Data.Map.Strict as Map
+import Data.Map.Strict qualified as Map
 import Data.Text (Text)
-import qualified Data.Text as Text
-import qualified Katari.Compile as C
+import Data.Text qualified as Text
+import Katari.Compile qualified as C
 import Katari.Query (HoverInfo (..), lookupAtPosition)
-import qualified Katari.SemanticType as ST
+import Katari.SemanticType qualified as ST
 import Katari.SourceSpan (Position (..))
+import Katari.TestSupport (compileSync)
 import Test.Hspec
 
-prepare :: Text -> (C.CompileResult)
+prepare :: Text -> C.CompileResult
 prepare src =
-  C.compile
+  compileSync
     C.CompileInput
       { C.sources =
           Map.singleton
             "main"
-            C.SourceEntry {C.filePath = "<test>", C.sourceText = src}
+            C.SourceEntry {C.filePath = "<test>", C.sourceText = src},
+        C.cache = Map.empty
       }
 
 spec :: Spec
 spec = describe "Katari.Query.lookupAtPosition (hover)" $ do
   it "returns hover for the agent name" $ do
     let r = prepare "agent main() -> integer {\n  42\n}\n"
-    let info = lookupAtPosition r.identifierResult r.zonkResult "<test>" Position {line = 1, column = 9}
+    let info = lookupAtPosition r.querySnapshot "<test>" Position {line = 1, column = 9}
     info `shouldSatisfy` isJust
     case info of
       Just h -> h.hoverQualifiedName `shouldBe` Just "main.main"
@@ -34,7 +36,7 @@ spec = describe "Katari.Query.lookupAtPosition (hover)" $ do
     -- a Hover with the literal's type (no qualified name).
     let r = prepare "agent main() -> integer {\n  42\n}\n"
     -- Katari positions are 1-indexed: line 2 col 3 = the `4` in 42.
-    let info = lookupAtPosition r.identifierResult r.zonkResult "<test>" Position {line = 2, column = 3}
+    let info = lookupAtPosition r.querySnapshot "<test>" Position {line = 2, column = 3}
     case info of
       Just h -> do
         h.hoverType `shouldNotBe` Nothing
@@ -56,7 +58,7 @@ spec = describe "Katari.Query.lookupAtPosition (hover)" $ do
     let r = prepare src
     -- Look up `n`'s VariableId by qualifying `nameRef.resolution`. The
     -- pattern's name span is at (line 3, column 11).
-    let info = lookupAtPosition r.identifierResult r.zonkResult "<test>" Position {line = 3, column = 11}
+    let info = lookupAtPosition r.querySnapshot "<test>" Position {line = 3, column = 11}
     case info >>= (.hoverType) of
       Just ST.SemanticTypeInteger -> pure ()
       other ->
@@ -85,7 +87,7 @@ spec = describe "Katari.Query.lookupAtPosition (hover)" $ do
             ]
     let r = prepare src
     -- Line 3 col 11 = the `n` token (line is `    case (n, s) ...`).
-    let info = lookupAtPosition r.identifierResult r.zonkResult "<test>" Position {line = 3, column = 11}
+    let info = lookupAtPosition r.querySnapshot "<test>" Position {line = 3, column = 11}
     case info >>= (.hoverType) of
       Just ST.SemanticTypeString ->
         expectationFailure "hover on `n` regressed to sibling pattern's type"
@@ -111,7 +113,7 @@ spec = describe "Katari.Query.lookupAtPosition (hover)" $ do
     -- "    case Circle(r = v)"
     -- 12345678901234567890123
     --      ^col 5 = c       ^col 22 = v
-    let info = lookupAtPosition r.identifierResult r.zonkResult "<test>" Position {line = 4, column = 22}
+    let info = lookupAtPosition r.querySnapshot "<test>" Position {line = 4, column = 22}
     case info >>= (.hoverType) of
       Just ST.SemanticTypeInteger -> pure ()
       other ->
@@ -134,7 +136,7 @@ spec = describe "Katari.Query.lookupAtPosition (hover)" $ do
     -- "    case Wrapper(inner = (x, y)) => { x }"
     --     1234567890123456789012345678901234567890
     --                                   ^col 26 = x
-    let info = lookupAtPosition r.identifierResult r.zonkResult "<test>" Position {line = 4, column = 27}
+    let info = lookupAtPosition r.querySnapshot "<test>" Position {line = 4, column = 27}
     case info >>= (.hoverType) of
       Just ST.SemanticTypeInteger -> pure ()
       other ->
@@ -157,7 +159,7 @@ spec = describe "Katari.Query.lookupAtPosition (hover)" $ do
     let r = prepare src
     -- "    request throw(msg = msg: string) {" — `throw` starts at col 13 on
     -- line 3 (4-space indent + "request " (8 chars)).
-    let info = lookupAtPosition r.identifierResult r.zonkResult "<test>" Position {line = 3, column = 14}
+    let info = lookupAtPosition r.querySnapshot "<test>" Position {line = 3, column = 14}
     case info of
       Nothing -> expectationFailure "expected hover on `throw`"
       Just h -> do
@@ -176,7 +178,7 @@ spec = describe "Katari.Query.lookupAtPosition (hover)" $ do
             ]
     let r = prepare src
     -- "    case 0 => ..." — `0` is at col 10 on line 3.
-    let info = lookupAtPosition r.identifierResult r.zonkResult "<test>" Position {line = 3, column = 10}
+    let info = lookupAtPosition r.querySnapshot "<test>" Position {line = 3, column = 10}
     case info >>= (.hoverType) of
       Just (ST.SemanticTypeLiteralInteger 0) -> pure ()
       other ->
@@ -201,7 +203,7 @@ spec = describe "Katari.Query.lookupAtPosition (hover)" $ do
     -- past `v`'s start) so the desugared `primitive.add` callee's span
     -- (which currently extends through `v`'s start position) doesn't
     -- shadow the variable hover.
-    let info = lookupAtPosition r.identifierResult r.zonkResult "<test>" Position {line = 3, column = 30}
+    let info = lookupAtPosition r.querySnapshot "<test>" Position {line = 3, column = 30}
     case info >>= (.hoverType) of
       Just ST.SemanticTypeUnknown ->
         expectationFailure "for-loop variable `v` should not be unknown"
@@ -219,7 +221,7 @@ spec = describe "Katari.Query.lookupAtPosition (hover)" $ do
               "}"
             ]
     let r = prepare src
-    let info = lookupAtPosition r.identifierResult r.zonkResult "<test>" Position {line = 3, column = 6}
+    let info = lookupAtPosition r.querySnapshot "<test>" Position {line = 3, column = 6}
     case info of
       Just _ -> pure ()
       Nothing -> expectationFailure "expected literal hover at (3, 6) to return Just"

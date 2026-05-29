@@ -18,13 +18,7 @@
 
 import type { AgentDefId } from "../agent-def-id.js";
 import type { Endpoint } from "./endpoint.js";
-import type {
-  AskId,
-  CallId,
-  DelegationId,
-  EscalationId,
-  ThreadId,
-} from "./id.js";
+import type { AskId, CallId, DelegationId, EscalationId, ThreadId } from "./id.js";
 import type { Value } from "./value.js";
 
 // ─── External payloads (3 module + 6 event protocol) ───────────────────────
@@ -187,9 +181,7 @@ export type ExternalEvent = {
 };
 
 /** Type guard: is this event one the engine can dispatch internally? */
-export function isInternal(
-  payload: EventPayload,
-): payload is InternalEventPayload {
+export function isInternal(payload: EventPayload): payload is InternalEventPayload {
   switch (payload.kind) {
     case "create":
     case "done":

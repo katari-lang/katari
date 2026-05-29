@@ -9,7 +9,6 @@ import type { AskId, CallId } from "../../id.js";
 import type { StepCtx } from "../../step-ctx.js";
 import type { Value } from "../../value.js";
 import type { Thread, ThreadKind } from "../types.js";
-import type { ThreadOps } from "./types.js";
 import { agentOps } from "./agent.js";
 import { arrayOps } from "./array.js";
 import { callAgentOps } from "./callAgent.js";
@@ -19,9 +18,10 @@ import { forOps } from "./for.js";
 import { handleOps } from "./handle.js";
 import { matchOps } from "./match.js";
 import { primOps } from "./prim.js";
-import { requestOps } from "./request.js";
 import { recordOps } from "./record.js";
+import { requestOps } from "./request.js";
 import { tupleOps } from "./tuple.js";
+import type { ThreadOps } from "./types.js";
 import { userOps } from "./user.js";
 
 // ─── Lookup table ─────────────────────────────────────────────────────────
@@ -64,7 +64,13 @@ export function dispatchCancelAck(ctx: StepCtx, t: Thread, callId: CallId): void
   getOps(t).cancelAck(ctx, t, callId);
 }
 
-export function dispatchAsk(ctx: StepCtx, t: Thread, askId: AskId, kind: AskKind, childCallId: CallId): void {
+export function dispatchAsk(
+  ctx: StepCtx,
+  t: Thread,
+  askId: AskId,
+  kind: AskKind,
+  childCallId: CallId,
+): void {
   getOps(t).ask(ctx, t, askId, kind, childCallId);
 }
 

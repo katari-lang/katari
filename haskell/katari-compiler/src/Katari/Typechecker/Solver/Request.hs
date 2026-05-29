@@ -1,14 +1,14 @@
 -- | Request-constraint solver.
 --
 -- Request constraints have the form @e1 \<: e2@ where each request is a
--- 'SemanticRequest' = (Set RequestVariableId, Set RequestId). The semantics:
+-- 'SemanticRequest' = (Set RequestVariableId, Set QualifiedName). The semantics:
 --
 -- > contents(e) = requestsOf(e.requestVars) ∪ e.requestReqs
 -- > e1 <: e2  iff  contents(e1) ⊆ contents(e2)
 --
 -- Solving:
 --
---   * Each 'RequestVariableId' has a current "value" (a 'Set RequestId') that
+--   * Each 'RequestVariableId' has a current "value" (a 'Set QualifiedName') that
 --     accumulates the concrete requests it must include.
 --   * For each constraint @e1 \<: e2@, propagate any concrete request in
 --     @e1@ that does not appear in @e2@'s concrete part to @e2@'s request
@@ -25,7 +25,7 @@ import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Set (Set)
 import Data.Set qualified as Set
-import Katari.Id (RequestId)
+import Katari.Common (QualifiedName)
 import Katari.SemanticType
   ( RequestVariableId,
     SemanticRequest (..),
@@ -42,7 +42,7 @@ import Katari.Typechecker.Solver.Internal
 -- usage patterns).
 solveRequestConstraints ::
   Set Constraint ->
-  (Map RequestVariableId (Set RequestId), [SolverError])
+  (Map RequestVariableId (Set QualifiedName), [SolverError])
 solveRequestConstraints constraints =
   let allRequestVars = collectRequestVars constraints
       initialAssignment =
@@ -67,8 +67,8 @@ fixpoint step current =
 -- accumulated value with the contributions inferred from the LHS.
 propagateOnce ::
   Set Constraint ->
-  Map RequestVariableId (Set RequestId) ->
-  Map RequestVariableId (Set RequestId)
+  Map RequestVariableId (Set QualifiedName) ->
+  Map RequestVariableId (Set QualifiedName)
 propagateOnce constraints initial = foldr (applyConstraint initial) initial constraints
   where
     applyConstraint _ constraint accumulator = case constraint of
@@ -78,8 +78,8 @@ propagateOnce constraints initial = foldr (applyConstraint initial) initial cons
     propagate ::
       SemanticRequest phase ->
       SemanticRequest phase ->
-      Map RequestVariableId (Set RequestId) ->
-      Map RequestVariableId (Set RequestId)
+      Map RequestVariableId (Set QualifiedName) ->
+      Map RequestVariableId (Set QualifiedName)
     propagate (SemanticRequest leftRequestElements) (SemanticRequest rightRequestElements) assignment =
       let leftConcreteRequestIds =
             Set.unions $

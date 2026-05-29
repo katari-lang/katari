@@ -13,6 +13,7 @@
 -- @git diff@ before committing.
 module Katari.GoldenSpec (spec) where
 
+import Control.Monad (when)
 import Data.Aeson qualified as Aeson
 import Data.Aeson.Encode.Pretty qualified as Aeson
 import Data.ByteString.Lazy qualified as ByteStringLazy
@@ -26,8 +27,8 @@ import Katari.Compile
   ( CompileInput (..),
     CompileResult (..),
     SourceEntry (..),
-    compile,
   )
+import Katari.TestSupport (compileSync)
 import Katari.Diagnostic (Diagnostic)
 import Katari.Diagnostic.Render (renderDiagnostic)
 import System.Directory (doesFileExist, listDirectory)
@@ -60,8 +61,8 @@ goldenCase path = describe ("compiling " <> takeBaseName path) $ do
             { filePath = path,
               sourceText = sourceText
             }
-        input = CompileInput {sources = Map.singleton "main" entry}
-    pure (compile input, sourceText)
+        input = CompileInput {sources = Map.singleton "main" entry, cache = Map.empty}
+    pure (compileSync input, sourceText)
 
   let (compiled, sourceText) = result
       baseName = takeBaseName path
@@ -140,11 +141,9 @@ absentGolden expectedPath = do
     Just "1" -> pure () -- accept-mode never asserts absence
     _ -> do
       exists <- doesFileExist expectedPath
-      if exists
-        then
-          expectationFailure
-            ( "unexpected golden file present: "
-                <> expectedPath
-                <> " (the pipeline no longer produces this artefact for the case)"
-            )
-        else pure ()
+      when exists $
+        expectationFailure
+          ( "unexpected golden file present: "
+              <> expectedPath
+              <> " (the pipeline no longer produces this artefact for the case)"
+          )

@@ -25,7 +25,7 @@ import Data.Map.Strict (Map)
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
-import Katari.Id (RequestId, TypeId)
+import Katari.Common (QualifiedName (..))
 
 -- ---------------------------------------------------------------------------
 -- Phase markers
@@ -111,7 +111,7 @@ data SemanticType phase where
   SemanticTypeUnion :: [SemanticType phase] -> SemanticType phase
   -- | Reference to a @data@ declaration. Generics are not supported, so no
   -- parameter list.
-  SemanticTypeData :: TypeId -> SemanticType phase
+  SemanticTypeData :: QualifiedName -> SemanticType phase
   -- | Structural object type with named fields. Not surfaced in the
   -- syntactic AST: synthesised by the constraint generator for "has field"
   -- constraints (e.g. field access on data values is encoded as
@@ -175,7 +175,7 @@ deriving instance Ord (SemanticRequest phase)
 -- only.
 data SemanticRequestElement phase where
   SemanticRequestElementVariable :: RequestVariableId -> SemanticRequestElement Unresolved
-  SemanticRequestElementConcrete :: RequestId -> SemanticRequestElement phase
+  SemanticRequestElementConcrete :: QualifiedName -> SemanticRequestElement phase
 
 deriving instance Show (SemanticRequestElement phase)
 
@@ -191,7 +191,7 @@ emptyRequest = SemanticRequest Set.empty
 -- | A request set containing exactly one concrete request. Used when
 -- the constraint generator records that a particular call site triggers
 -- a specific declared @req@.
-singletonRequest :: RequestId -> SemanticRequest phase
+singletonRequest :: QualifiedName -> SemanticRequest phase
 singletonRequest requestId = SemanticRequest (Set.singleton (SemanticRequestElementConcrete requestId))
 
 -- | A request set containing exactly one row-variable placeholder.

@@ -5,26 +5,23 @@ import type { Logger } from "@katari-lang/runtime";
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { ZodError } from "zod";
-import type { Storage } from "../storage/types.js";
+import type { AppMetrics } from "../metrics.js";
+import type { ApiServerOrchestrator } from "../orchestrator.js";
+import { DelegationTreeService } from "../services/delegation-tree-service.js";
 import type { ProjectService } from "../services/project-service.js";
 import type { SnapshotService } from "../services/snapshot-service.js";
-import type { ApiServerOrchestrator } from "../orchestrator.js";
-import { buildRunRoutes } from "./run.js";
-import { buildRunByIdRoutes } from "./run-by-id.js";
-import { buildRunTreeRoutes } from "./run-tree.js";
-import { DelegationTreeService } from "../services/delegation-tree-service.js";
+import type { Storage } from "../storage/types.js";
+import { mountAdminWeb } from "./admin-web.js";
 import { buildEnvRoutes } from "./env.js";
 import { buildEscalationRoutes } from "./escalation.js";
 import { buildEscalationByIdRoutes } from "./escalation-by-id.js";
-import { buildProjectRoutes } from "./project.js";
-import { buildSnapshotRoutes } from "./snapshot.js";
 import { buildAuthMiddleware } from "./middleware/auth.js";
-import { mountAdminWeb } from "./admin-web.js";
-import {
-  buildRateLimitMiddleware,
-  type RateLimitOptions,
-} from "./middleware/rate-limit.js";
-import type { AppMetrics } from "../metrics.js";
+import { buildRateLimitMiddleware, type RateLimitOptions } from "./middleware/rate-limit.js";
+import { buildProjectRoutes } from "./project.js";
+import { buildRunRoutes } from "./run.js";
+import { buildRunByIdRoutes } from "./run-by-id.js";
+import { buildRunTreeRoutes } from "./run-tree.js";
+import { buildSnapshotRoutes } from "./snapshot.js";
 
 export type AppDeps = {
   storage: Storage;
@@ -68,8 +65,7 @@ export function buildApp(deps: AppDeps): Hono {
     "*",
     bodyLimit({
       maxSize: BODY_LIMIT_BYTES,
-      onError: (c) =>
-        c.json({ error: "request body too large (limit: 10 MB)" }, 413),
+      onError: (c) => c.json({ error: "request body too large (limit: 10 MB)" }, 413),
     }),
   );
 
@@ -136,19 +132,10 @@ export function buildApp(deps: AppDeps): Hono {
   // runtime artifact (= agents, escalations); snapshots own their
   // compiled schema (= agents). Env is runtime-global.
   app.route("/project", buildProjectRoutes(deps.projects));
-  app.route(
-    "/project/:projectId/snapshot",
-    buildSnapshotRoutes(deps.snapshots),
-  );
+  app.route("/project/:projectId/snapshot", buildSnapshotRoutes(deps.snapshots));
   const treeService = new DelegationTreeService(deps.storage);
-  app.route(
-    "/project/:projectId/run",
-    buildRunRoutes(deps.orchestrator, deps.storage),
-  );
-  app.route(
-    "/project/:projectId/run/:runId/tree",
-    buildRunTreeRoutes(treeService),
-  );
+  app.route("/project/:projectId/run", buildRunRoutes(deps.orchestrator, deps.storage));
+  app.route("/project/:projectId/run/:runId/tree", buildRunTreeRoutes(treeService));
   app.route(
     "/project/:projectId/escalation",
     buildEscalationRoutes(deps.orchestrator, deps.storage),
@@ -156,10 +143,7 @@ export function buildApp(deps: AppDeps): Hono {
   // Flat single-entity aliases for the CLI / scripts that already hold a
   // UUID and don't need the navigation hierarchy.
   app.route("/run", buildRunByIdRoutes(deps.orchestrator, deps.storage));
-  app.route(
-    "/escalation",
-    buildEscalationByIdRoutes(deps.orchestrator, deps.storage),
-  );
+  app.route("/escalation", buildEscalationByIdRoutes(deps.orchestrator, deps.storage));
   app.route("/env", buildEnvRoutes(deps.storage));
 
   return app;

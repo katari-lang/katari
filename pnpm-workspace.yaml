@@ -8,9 +8,10 @@ packages:
 #   - keytar builds a native node-keytar binding (Azure auth in vsce)
 #   - @vscode/vsce-sign runs its sign-tool installer
 allowBuilds:
-  '@vscode/vsce-sign': true
+  "@vscode/vsce-sign": true
   esbuild: true
   keytar: true
+  simple-git-hooks: true
 
 # pnpm 11 enforces minimumReleaseAge (~14h default) on every lockfile
 # entry. Transitive deps of @vscode/vsce (the Azure msal* chain) update

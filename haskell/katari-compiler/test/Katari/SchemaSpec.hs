@@ -8,7 +8,8 @@ import Data.List (find)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.Text (Text)
-import Katari.Compile (CompileInput (..), CompileResult (..), SourceEntry (..), compile)
+import Katari.Compile (CompileInput (..), CompileResult (..), SourceEntry (..))
+import Katari.TestSupport (compileSync)
 import Katari.Diagnostic (Diagnostic (..))
 import Katari.Schema
 import Katari.SemanticType
@@ -24,11 +25,11 @@ import Test.Hspec
 
 -- | Call 'toJsonSchema' without data-type expansion (suitable for tests
 -- that don't involve 'SemanticTypeData').
-simpleToJson :: SemanticType Resolved -> JsonSchema
-simpleToJson = toJsonSchema Map.empty Set.empty
+simpleToJson :: SemanticType Resolved -> SchemaCore
+simpleToJson t = (toJsonSchema Map.empty Set.empty t).core
 
 shouldHaveCore :: SemanticType Resolved -> SchemaCore -> Expectation
-shouldHaveCore t expected = (simpleToJson t).core `shouldBe` expected
+shouldHaveCore t expected = simpleToJson t `shouldBe` expected
 
 findEntry :: Text -> [SchemaEntry] -> Maybe SchemaEntry
 findEntry n = find (\e -> e.name == n)
@@ -43,6 +44,7 @@ spec = describe "Katari.Schema" $ do
   unionCompactionSpec
   schemaCoreJsonSpec
   descriptionEndToEndSpec
+  secretGuardSpec
 
 toJsonSchemaSpec :: Spec
 toJsonSchemaSpec = describe "toJsonSchema (SemanticType -> JsonSchema)" $ do
@@ -61,7 +63,7 @@ toJsonSchemaSpec = describe "toJsonSchema (SemanticType -> JsonSchema)" $ do
     SemanticTypeLiteralBoolean True `shouldHaveCore` SchemaCoreConst {value = Bool True}
 
   it "arrays nest the element schema under 'items'" $ do
-    let core = (simpleToJson (SemanticTypeArray SemanticTypeInteger)).core
+    let core = simpleToJson (SemanticTypeArray SemanticTypeInteger)
     case core of
       SchemaCoreArray {items} ->
         items.core `shouldBe` SchemaCoreInteger {minimum = Nothing, maximum = Nothing}
@@ -69,7 +71,7 @@ toJsonSchemaSpec = describe "toJsonSchema (SemanticType -> JsonSchema)" $ do
 
   it "tuples become SchemaCoreTuple with prefixItems" $ do
     let t = SemanticTypeTuple [SemanticTypeBoolean, SemanticTypeInteger]
-        core = (simpleToJson t).core
+        core = simpleToJson t
     case core of
       SchemaCoreTuple {prefixItems} ->
         map (.core) prefixItems
@@ -83,7 +85,7 @@ toJsonSchemaSpec = describe "toJsonSchema (SemanticType -> JsonSchema)" $ do
               [ ("name", SemanticTypeString),
                 ("age", SemanticTypeInteger)
               ]
-    case (simpleToJson t).core of
+    case simpleToJson t of
       SchemaCoreObject {properties, required, additionalProperties} -> do
         Map.keysSet properties `shouldBe` Set.fromList ["age", "name"]
         required `shouldBe` Set.fromList ["age", "name"]
@@ -96,7 +98,7 @@ toJsonSchemaSpec = describe "toJsonSchema (SemanticType -> JsonSchema)" $ do
             Map.empty
             SemanticTypeNull
             (SemanticRequest Set.empty)
-    case (simpleToJson t).core of
+    case simpleToJson t of
       SchemaCoreObject {properties, required, additionalProperties} -> do
         Map.keys properties `shouldBe` ["$agent"]
         required `shouldBe` Set.singleton "$agent"
@@ -112,7 +114,7 @@ unionCompactionSpec = describe "union compaction" $ do
               SemanticTypeLiteralString "green",
               SemanticTypeLiteralString "blue"
             ]
-    case (simpleToJson t).core of
+    case simpleToJson t of
       SchemaCoreString {schemaEnum} -> schemaEnum `shouldBe` ["red", "green", "blue"]
       other -> expectationFailure ("expected SchemaCoreString enum, got: " <> show other)
 
@@ -122,7 +124,7 @@ unionCompactionSpec = describe "union compaction" $ do
             [ SemanticTypeLiteralString "ok",
               SemanticTypeNull
             ]
-    case (simpleToJson t).core of
+    case simpleToJson t of
       SchemaCoreUnion {anyOf} -> length anyOf `shouldBe` 2
       other -> expectationFailure ("expected SchemaCoreUnion, got: " <> show other)
 
@@ -172,6 +174,25 @@ schemaCoreJsonSpec = describe "SchemaCore JSON output (valid JSON Schema)" $ do
 -- Phase 17: annotation → description end-to-end
 -- ===========================================================================
 
+secretGuardSpec :: Spec
+secretGuardSpec = describe "secret credential guard" $ do
+  let src =
+        "agent withSecret(s = s: secret) -> string { \"ok\" }\n\
+        \agent plain(n = n: integer) -> integer { n }"
+      result =
+        compileSync
+          CompileInput
+            { sources = Map.singleton "main" SourceEntry {filePath = "main", sourceText = src},
+              cache = Map.empty
+            }
+      entries = case result.schemaEntries of
+        Just es -> es
+        Nothing -> error ("compile failed: " <> show (map (.code) result.diagnostics))
+  it "hides a callable with a secret parameter from the schema bundle" $
+    findEntry "main.withSecret" entries `shouldBe` Nothing
+  it "keeps non-secret callables in the bundle" $
+    fmap (.name) (findEntry "main.plain" entries) `shouldBe` Just "main.plain"
+
 descriptionEndToEndSpec :: Spec
 descriptionEndToEndSpec = describe "annotation → description (end-to-end)" $ do
   let src =
@@ -182,8 +203,8 @@ descriptionEndToEndSpec = describe "annotation → description (end-to-end)" $ d
         \agent show(@\"the point\" p: Point) -> string {\n\
         \  \"\"\n\
         \}"
-      result = compile CompileInput {sources = Map.singleton "main" SourceEntry {filePath = "main", sourceText = src}}
-      entries :: [SchemaEntry]
+  let result = compileSync CompileInput {sources = Map.singleton "main" SourceEntry {filePath = "main", sourceText = src}, cache = Map.empty}
+  let entries :: [SchemaEntry]
       entries = case result.schemaEntries of
         Just es -> es
         Nothing -> error ("compile failed: " <> show (map (.code) result.diagnostics))

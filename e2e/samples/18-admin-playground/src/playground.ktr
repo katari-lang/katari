@@ -55,7 +55,7 @@ data point(
 )
 
 @"Takes a data ctor input. ObjectField with auto-hidden $constructor."
-agent data_input(p: point) -> integer {
+agent data_input(@"point of input" p: point) -> integer {
   match (p) {
     case point(x = xv, y = yv) => { xv + yv }
   }
@@ -67,7 +67,7 @@ data ok(n: integer)
 data err(message: string)
 
 @"Returns a data ctor. Tests ValueViewer $constructor rendering."
-agent data_output(n: integer) -> ok { ok(n = n) }
+agent data_output(n: integer) -> point { point(x = n, y = n * 2) }
 
 // ─── Tagged union (data ctor union) ─────────────────────────────────
 
@@ -134,6 +134,9 @@ agent nested_array_union(items: array[ok | err]) -> integer {
 
 @"Record of arrays. Tests DynamicKeyValueEditor + ArrayField nesting."
 agent nested_record_array(groups: record[array[integer]]) -> record[array[integer]] { groups }
+
+@"Echo of Array"
+agent echo_array(ints: array[integer]) -> array[integer] { ints }
 
 @"Union containing tuple. Deep nesting test."
 data wrapped_pair(pair: (integer, string))

@@ -2,8 +2,11 @@ module Katari.SolverSpec (spec) where
 
 import Data.List (find)
 import Data.Map.Strict qualified as Map
+import Data.Maybe (mapMaybe)
 import Data.Set qualified as Set
 import Data.Text (Text)
+import Katari.Id (VariableResolution (..))
+import Katari.TestSupport qualified as TestSupport
 import Katari.Lexer qualified as Lexer
 import Katari.Parser qualified as Parser
 import Katari.SemanticType
@@ -14,11 +17,10 @@ import Katari.SemanticType
 import Katari.Typechecker.ConstraintGenerator
   ( ConstraintGenResult (..),
     VariableSupply (..),
-    generateConstraints,
   )
-import Katari.Id (VariableId)
+import Katari.TestSupport (IdentifierResult (..))
 import Katari.Typechecker.Identifier
-  ( IdentifierResult (..),
+  ( SymbolEntry (..),
     VariableData (..),
   )
 import Katari.Typechecker.NormalizedType
@@ -30,10 +32,9 @@ import Katari.Typechecker.NormalizedType
     ObjectSlot (..),
     StringSlot (..),
   )
+import Katari.Typechecker.ScopeIndex (ScopeFrame (..), ScopeIndex (..))
 import Katari.Typechecker.Solver (SolverResult (..), solve)
 import Katari.Typechecker.Solver qualified as Solver
-import Katari.Typechecker.Zonker (zonk)
-import Katari.Compile qualified as Compile
 import Test.Hspec
 
 -- ---------------------------------------------------------------------------
@@ -44,18 +45,28 @@ runSolve :: Text -> IO (IdentifierResult, ConstraintGenResult, SolverResult, [So
 runSolve source =
   let (stream, _) = Lexer.lex "<test>" source
       (parsed, parseErrors) = Parser.parse "<test>" stream
-  in case parseErrors of
-    (_:_) -> fail ("parse failure: " ++ show parseErrors)
-    [] -> case Compile.identifyWithStdlib (Map.singleton "main" parsed) of
-      (idResult, []) ->
-        let (cgResult, _) = generateConstraints idResult
-            (solverResult, solverErrors) = solve cgResult
-         in pure (idResult, cgResult, solverResult, solverErrors)
-      (_, errors) -> fail ("identify failure: " ++ show errors)
+   in case parseErrors of
+        (_ : _) -> fail ("parse failure: " ++ show parseErrors)
+        [] -> case TestSupport.identifyWithStdlib (Map.singleton "main" parsed) of
+          (idResult, []) ->
+            let (cgResult, _) = TestSupport.generateConstraintsAll idResult
+                (solverResult, solverErrors) = solve cgResult
+             in pure (idResult, cgResult, solverResult, solverErrors)
+          (_, errors) -> fail ("identify failure: " ++ show errors)
 
-variableIdOf :: Text -> IdentifierResult -> Maybe VariableId
-variableIdOf name result =
-  fst <$> find ((== name) . (.variableName) . snd) (Map.toList result.identifiedVariables)
+-- | Find the VariableResolution for a named binding. Searches top-level
+-- identifiedVariables first, then falls back to scanning the scopeIndex
+-- for local variables (parameters, let bindings, match arm bindings).
+variableResolutionOf :: Text -> IdentifierResult -> Maybe VariableResolution
+variableResolutionOf name result =
+  case ResolvedTopLevel . fst <$> find ((== name) . (.variableName) . snd) (Map.toList result.identifiedVariables) of
+    Just resolution -> Just resolution
+    Nothing ->
+      let allFrames = concatMap snd (Map.toList result.scopeIndex.framesByFile)
+          candidates = mapMaybe (\frame -> Map.lookup name frame.frameSymbols >>= (.variableSymbol)) allFrames
+       in case candidates of
+            (resolution : _) -> Just resolution
+            [] -> Nothing
 
 -- | The 'NormalizedType' that the solver assigned to the type variable
 -- recorded in the identifier's typeEnvironment for a given source name.
@@ -66,8 +77,8 @@ inferredTypeOf ::
   SolverResult ->
   Maybe NormalizedType
 inferredTypeOf name idResult cgResult solverResult = do
-  variableId <- variableIdOf name idResult
-  semanticType <- Map.lookup variableId cgResult.typeEnvironment
+  variableResolution <- variableResolutionOf name idResult
+  semanticType <- Map.lookup variableResolution cgResult.typeEnvironment
   case extractTypeVariableId semanticType of
     Just typeVarId -> Map.lookup typeVarId solverResult.typeSubstitution
     Nothing -> Nothing
@@ -225,7 +236,7 @@ endToEndZonk :: Spec
 endToEndZonk = describe "end-to-end pipeline (Solver -> Zonker)" $ do
   it "Zonker over a real Solver result has no zonkErrors on a basic program" $ do
     (idResult, cgResult, solverResult, _solverErrors) <- runSolve "agent foo() { 42 }"
-    let (_zonkResult, zonkErrors) = zonk idResult cgResult solverResult
+    let (_zonkResult, zonkErrors) = TestSupport.zonkAll "main" idResult cgResult solverResult
     zonkErrors `shouldBe` []
 
   it "totality is sufficient for Zonker even on programs with let / if" $ do
@@ -237,7 +248,7 @@ endToEndZonk = describe "end-to-end pipeline (Solver -> Zonker)" $ do
             "  x\n",
             "}"
           ]
-    let (_zonkResult, zonkErrors) = zonk idResult cgResult solverResult
+    let (_zonkResult, zonkErrors) = TestSupport.zonkAll "main" idResult cgResult solverResult
     zonkErrors `shouldBe` []
 
 -- ---------------------------------------------------------------------------

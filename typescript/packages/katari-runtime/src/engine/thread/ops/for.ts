@@ -11,8 +11,8 @@
 // with state-var modifiers) asks. Other asks bubble up.
 
 import type { ForBlock } from "../../../ir/types.js";
-import type { CallId } from "../../id.js";
 import type { ModMap } from "../../event.js";
+import type { CallId } from "../../id.js";
 import { spawnChild } from "../../spawn.js";
 import type { StepCtx } from "../../step-ctx.js";
 import { NULL_VALUE, type Value } from "../../value.js";
@@ -24,11 +24,8 @@ import {
   proxyAskToParent,
   setValueInScope,
 } from "../common.js";
-import type { ForThread, } from "../types.js";
-import {
-  defaultAskAckProxy,
-  defaultCancel,
-} from "./defaults.js";
+import type { ForThread } from "../types.js";
+import { defaultAskAckProxy, defaultCancel } from "./defaults.js";
 import type { ThreadOps } from "./types.js";
 
 export const forOps: ThreadOps<ForThread> = {
@@ -124,9 +121,7 @@ export const forOps: ThreadOps<ForThread> = {
     }
     delete t.postCancelActions[callId];
     if (action.kind !== "finish") {
-      throw new Error(
-        `engine.for: unexpected postCancelAction.kind=${action.kind} on ${t.id}`,
-      );
+      throw new Error(`engine.for: unexpected postCancelAction.kind=${action.kind} on ${t.id}`);
     }
     // "finish" here for ForThread means "advance to next iteration".
     const block = getForBlock(ctx, t.blockId);
@@ -149,13 +144,7 @@ export const forOps: ThreadOps<ForThread> = {
       handleNextFor(ctx, t as ForThread, kind.mods, childCallId);
       return;
     }
-    proxyAskToParent(
-      ctx,
-      t as ForThread,
-      childCallId,
-      askId,
-      kind,
-    );
+    proxyAskToParent(ctx, t as ForThread, childCallId, askId, kind);
   },
 
   askAck: (ctx, t, askId, value) =>
@@ -271,11 +260,7 @@ function spawnParallelBody(
   }
 }
 
-function emitForDone(
-  ctx: StepCtx,
-  t: ForThread,
-  value: Value,
-): void {
+function emitForDone(ctx: StepCtx, t: ForThread, value: Value): void {
   const block = getForBlock(ctx, t.blockId);
   if (block.thenBlock !== undefined) {
     const thenCallId = allocCallId(t);
@@ -299,11 +284,7 @@ function emitForDone(
   }
 }
 
-function handleBreakFor(
-  ctx: StepCtx,
-  t: ForThread,
-  value: Value,
-): void {
+function handleBreakFor(ctx: StepCtx, t: ForThread, value: Value): void {
   if (t.status === "cancelling") return;
   t.pendingReturn = value;
   beginCancel(ctx, t);
@@ -331,4 +312,3 @@ function handleNextFor(
   t.postCancelActions[childCallId] = { kind: "finish" };
   ctx.enqueue({ kind: "cancel", target: childId });
 }
-

@@ -38,12 +38,7 @@ export function CopyableId({ value, display, className }: Props) {
   }
 
   return (
-    <span
-      className={cn(
-        "inline-flex items-center gap-1.5 font-mono text-xs",
-        className,
-      )}
-    >
+    <span className={cn("inline-flex items-center gap-1.5 font-mono text-xs", className)}>
       <code className="break-all text-foreground">{display ?? value}</code>
       <button
         type="button"
@@ -52,11 +47,7 @@ export function CopyableId({ value, display, className }: Props) {
         title={value}
         className="inline-flex shrink-0 items-center justify-center text-subtle-foreground transition-colors hover:text-foreground hover:cursor-pointer"
       >
-        {copied ? (
-          <Check className="size-3.5 text-success" />
-        ) : (
-          <Copy className="size-3.5" />
-        )}
+        {copied ? <Check className="size-3.5 text-success" /> : <Copy className="size-3.5" />}
       </button>
     </span>
   );

@@ -23,7 +23,7 @@
 // children, finishCancelling emits `done` with `pendingReturn`.
 
 import type { Block, BlockId, HandleBlock, QualifiedName } from "../../../ir/types.js";
-import type { AskId, CallId, } from "../../id.js";
+import type { AskId, CallId } from "../../id.js";
 import { spawnChild } from "../../spawn.js";
 import type { StepCtx } from "../../step-ctx.js";
 import type { Value } from "../../value.js";
@@ -37,14 +37,8 @@ import {
   setValueInScope,
   writeArgsIntoChildScope,
 } from "../common.js";
-import type {
-  HandleThread,
-  PendingAction,
-} from "../types.js";
-import {
-  defaultAskAckProxy,
-  defaultCancel,
-} from "./defaults.js";
+import type { HandleThread, PendingAction } from "../types.js";
+import { defaultAskAckProxy, defaultCancel } from "./defaults.js";
 import type { ThreadOps } from "./types.js";
 
 export const handleOps: ThreadOps<HandleThread> = {
@@ -111,16 +105,12 @@ export const handleOps: ThreadOps<HandleThread> = {
     const action = t.postCancelActions[callId];
     if (action === undefined) {
       // Untracked targeted cancel — likely a logic error, throw.
-      throw new Error(
-        `engine.handle: cancelAck without postCancelAction (callId=${callId})`,
-      );
+      throw new Error(`engine.handle: cancelAck without postCancelAction (callId=${callId})`);
     }
     delete t.postCancelActions[callId];
 
     if (action.kind !== "askComplete") {
-      throw new Error(
-        `engine.handle: unexpected postCancelAction.kind=${action.kind}`,
-      );
+      throw new Error(`engine.handle: unexpected postCancelAction.kind=${action.kind}`);
     }
 
     // Fire askAck back to the proxy chain that delivered the original
@@ -152,7 +142,7 @@ export const handleOps: ThreadOps<HandleThread> = {
     // request: catch if we own the reqId, else proxy.
     if (kind.kind === "request") {
       const block = getHandleBlock(ctx, t.blockId);
-      if (block.handlers.find(h => h.request === kind.reqId) !== undefined) {
+      if (block.handlers.find((h) => h.request === kind.reqId) !== undefined) {
         const action: PendingAction = {
           kind: "ask",
           reqId: kind.reqId,
@@ -241,11 +231,7 @@ function isBusy(t: HandleThread): boolean {
   return false;
 }
 
-function runAction(
-  ctx: StepCtx,
-  t: HandleThread,
-  action: PendingAction,
-): void {
+function runAction(ctx: StepCtx, t: HandleThread, action: PendingAction): void {
   switch (action.kind) {
     case "ask":
       spawnHandlerBody(ctx, t, action.reqId, action.args, action.askId, action.askerCallId);
@@ -265,7 +251,7 @@ function spawnHandlerBody(
   askerCallId: CallId,
 ): void {
   const block = getHandleBlock(ctx, t.blockId);
-  const handler = block.handlers.find(h => h.request === reqId);
+  const handler = block.handlers.find((h) => h.request === reqId);
   if (handler === undefined) {
     throw new Error(`engine.handle: no handler for reqId ${reqId} (post-catch)`);
   }
@@ -290,11 +276,7 @@ function spawnHandlerBody(
   writeArgsIntoChildScope(ctx, childId, handler.handlerBody, args);
 }
 
-function spawnThenClauseOrFinish(
-  ctx: StepCtx,
-  t: HandleThread,
-  mainResultValue: Value,
-): void {
+function spawnThenClauseOrFinish(ctx: StepCtx, t: HandleThread, mainResultValue: Value): void {
   const block = getHandleBlock(ctx, t.blockId);
   if (block.thenBlock === undefined) {
     // No then clause — main's result is our value directly. Finish via
@@ -317,21 +299,13 @@ function spawnThenClauseOrFinish(
   writeArgsIntoChildScope(ctx, childId, block.thenBlock, { value: mainResultValue });
 }
 
-function handleBreak(
-  ctx: StepCtx,
-  t: HandleThread,
-  value: Value,
-): void {
+function handleBreak(ctx: StepCtx, t: HandleThread, value: Value): void {
   if (t.status === "cancelling") return;
   t.pendingReturn = value;
   beginCancel(ctx, t);
 }
 
-function enterCancellingForResult(
-  ctx: StepCtx,
-  t: HandleThread,
-  value: Value,
-): void {
+function enterCancellingForResult(ctx: StepCtx, t: HandleThread, value: Value): void {
   if (t.status === "cancelling") return;
   t.pendingReturn = value;
   if (!hasChildren(t)) {
@@ -347,5 +321,3 @@ function enterCancellingForResult(
   }
   beginCancel(ctx, t);
 }
-
-

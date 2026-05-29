@@ -1,6 +1,6 @@
 module Katari.Project.DiscoverySpec (spec) where
 
-import qualified Data.Map.Strict as Map
+import Data.Map.Strict qualified as Map
 import Katari.Project.Config
   ( DependenciesSection (..),
     PackageSection (..),

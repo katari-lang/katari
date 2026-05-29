@@ -48,6 +48,17 @@ mkSourceSpan path p1 p2
   | p1 <= p2 = SrcSpan {filePath = path, start = p1, end = p2}
   | otherwise = SrcSpan {filePath = path, start = p2, end = p1}
 
+-- | A zero-extent span at @\"\":(0,0)\"@. Used as a placeholder when
+-- constructing AST / cache stubs that have no genuine syntactic origin
+-- (e.g. cache-hit module skeletons, fallback declarations).
+emptySourceSpan :: SourceSpan
+emptySourceSpan =
+  SrcSpan
+    { filePath = "",
+      start = Position {line = 0, column = 0},
+      end = Position {line = 0, column = 0}
+    }
+
 -- | Generic accessor for nodes that carry a source span. Implemented
 -- uniformly by record-shaped nodes and by GADT sum types.
 class HasSourceSpan node where

@@ -12,11 +12,11 @@
 // The bundle ends with `__startSidecar()` to hand stdio control over to
 // katari-port.
 
-import { build, type Plugin } from "esbuild";
-import { init as initLexer, parse as parseLexer } from "es-module-lexer";
 import { readdir, readFile, stat } from "node:fs/promises";
 import { extname, join } from "node:path";
 import type { SidecarBundle } from "@katari-lang/runtime";
+import { init as initLexer, parse as parseLexer } from "es-module-lexer";
+import { build, type Plugin } from "esbuild";
 
 export class BundleError extends Error {
   constructor(message: string) {
@@ -58,9 +58,7 @@ export interface BundleResult {
  * runtime). Each package is allowed at most one `.ts` / `.js` file under
  * its source root; more than one is a hard error.
  */
-export async function bundleSidecar(
-  opts: BundleOptions,
-): Promise<BundleResult | null> {
+export async function bundleSidecar(opts: BundleOptions): Promise<BundleResult | null> {
   const entries = await collectSiblingEntries(opts.packages);
   if (entries.length === 0) return null;
 
@@ -88,9 +86,7 @@ export async function bundleSidecar(
     });
   } catch (err) {
     throw new BundleError(
-      `failed to bundle sidecar: ${
-        err instanceof Error ? err.message : String(err)
-      }`,
+      `failed to bundle sidecar: ${err instanceof Error ? err.message : String(err)}`,
     );
   }
   if (result.outputFiles === undefined || result.outputFiles.length === 0) {
@@ -122,9 +118,7 @@ interface SiblingEntry {
  * are silently skipped — they're katari-only). Throws when a package
  * has more than one `.ts` / `.js` file under its source root.
  */
-async function collectSiblingEntries(
-  packages: BundlePackage[],
-): Promise<SiblingEntry[]> {
+async function collectSiblingEntries(packages: BundlePackage[]): Promise<SiblingEntry[]> {
   const out: SiblingEntry[] = [];
   for (const pkg of packages) {
     const exists = await pathExists(pkg.sourceRoot);
@@ -161,9 +155,7 @@ async function walkSidecars(root: string): Promise<string[]> {
   for (const p of jsFiles) {
     const key = noExtKey(p);
     if (byBasename.has(key)) {
-      throw new BundleError(
-        `both ${byBasename.get(key)!} and ${p} exist — keep only one`,
-      );
+      throw new BundleError(`both ${byBasename.get(key)!} and ${p} exist — keep only one`);
     }
     byBasename.set(key, p);
   }
@@ -212,8 +204,8 @@ function renderSyntheticEntry(entries: SiblingEntry[]): string {
   // the file body so katari.agent(name, ...) registers under
   // `<qname>.<name>`.
   const importLines = entries
-    .map((e, idx) =>
-      `import "${escapeJsonPath(e.siblingPath)}";  // module ${idx}: ${e.moduleQname}`,
+    .map(
+      (e, idx) => `import "${escapeJsonPath(e.siblingPath)}";  // module ${idx}: ${e.moduleQname}`,
     )
     .join("\n");
 
@@ -239,9 +231,7 @@ function escapeJsonPath(s: string): string {
 // stay outside the wrapper (ESM rules them illegal inside a function).
 
 function makeModuleWrapPlugin(entries: SiblingEntry[]): Plugin {
-  const pathToQname = new Map(
-    entries.map((e) => [e.siblingPath, e.moduleQname] as const),
-  );
+  const pathToQname = new Map(entries.map((e) => [e.siblingPath, e.moduleQname] as const));
   return {
     name: "katari-module-wrap",
     setup(build) {

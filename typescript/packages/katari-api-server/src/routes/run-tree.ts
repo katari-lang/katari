@@ -5,14 +5,8 @@
 // run is in flight to drive the tree visualization.
 
 import { Hono } from "hono";
-import {
-  ProjectIdSchema,
-  RunIdSchema,
-} from "./middleware/validation.js";
-import {
-  type DelegationTreeService,
-  RunNotFound,
-} from "../services/delegation-tree-service.js";
+import { type DelegationTreeService, RunNotFound } from "../services/delegation-tree-service.js";
+import { ProjectIdSchema, RunIdSchema } from "./middleware/validation.js";
 
 export function buildRunTreeRoutes(treeService: DelegationTreeService): Hono {
   const app = new Hono();

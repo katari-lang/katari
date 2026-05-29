@@ -1,20 +1,14 @@
-import { useState } from "react";
-import { useNavigate } from "react-router-dom";
-import { useTheme } from "next-themes";
-import toast from "react-hot-toast";
 import { Monitor, Moon, Sun } from "lucide-react";
-import { useApiKey } from "@/contexts/ApiKeyContext";
-import { PageContent, PageHeader } from "@/components/ui/PageHeader";
-import {
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-  CardDescription,
-} from "@/components/ui/Card";
+import { useTheme } from "next-themes";
+import { useState } from "react";
+import toast from "react-hot-toast";
+import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/Button";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/Card";
 import { Input } from "@/components/ui/Input";
 import { Label } from "@/components/ui/Label";
+import { PageContent, PageHeader } from "@/components/ui/PageHeader";
+import { useApiKey } from "@/contexts/ApiKeyContext";
 import { cn } from "@/lib/cn";
 
 export function SettingsPage() {

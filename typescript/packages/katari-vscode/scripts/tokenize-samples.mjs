@@ -101,10 +101,10 @@ const samples = [
     ],
   },
   {
-    name: "handle + req",
-    source: 'req fetch_answer() -> integer\nagent main() -> integer {\n  handle {\n    req fetch_answer() { 42 }\n  }\n  fetch_answer()\n}\n',
+    name: "handle + request",
+    source: 'request fetch_answer() -> integer\nagent main() -> integer {\n  handle {\n    request fetch_answer() { 42 }\n  }\n  fetch_answer()\n}\n',
     checks: [
-      ["req", "keyword.declaration", "req keyword"],
+      ["request", "keyword.declaration", "request keyword"],
       ["handle", "keyword.control", "handle keyword"],
       ["42", "constant.numeric", "integer literal"],
     ],
@@ -133,12 +133,12 @@ const samples = [
     ],
   },
   {
-    name: "ext agent",
-    source: 'ext agent http_get(url: string) -> string with { req http() }\n',
+    name: "external agent",
+    source: 'external http_get(url: string) -> string from "FFI:net.http_get"\n',
     checks: [
-      ["ext", "storage.modifier.external", "ext modifier"],
-      ["agent", "keyword.declaration.agent", "agent keyword in ext"],
+      ["external", "storage.modifier.external", "external modifier"],
       ["http_get", "entity.name.function", "external agent name"],
+      ["from", "keyword.declaration", "from keyword"],
     ],
   },
 ];

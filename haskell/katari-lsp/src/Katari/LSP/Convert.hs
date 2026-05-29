@@ -15,14 +15,14 @@ where
 
 import Data.Char (ord)
 import Data.Map.Strict (Map)
-import qualified Data.Map.Strict as Map
+import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
-import qualified Data.Text as Text
+import Data.Text qualified as Text
 import Data.Vector (Vector)
-import qualified Data.Vector as Vector
-import qualified Katari.SourceSpan as K
-import qualified Language.LSP.Protocol.Types as LSP
+import Data.Vector qualified as Vector
+import Katari.SourceSpan qualified as K
+import Language.LSP.Protocol.Types qualified as LSP
 
 -- | Convert an LSP @Position@ (UTF-16 column) into a Katari 'K.Position'
 -- (code-point column). Needs the source text of the file so it can walk

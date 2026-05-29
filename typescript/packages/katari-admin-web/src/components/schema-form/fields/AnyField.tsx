@@ -1,12 +1,12 @@
-import { useState } from "react";
 import { Plus, Trash2 } from "lucide-react";
+import { useState } from "react";
+import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { SelectMenu } from "@/components/ui/SelectMenu";
-import { Button } from "@/components/ui/Button";
-import { StringField } from "./StringField";
-import { NumberField } from "./NumberField";
 import { BooleanField } from "./BooleanField";
 import { NullField } from "./NullField";
+import { NumberField } from "./NumberField";
+import { StringField } from "./StringField";
 
 type AnyKind = "string" | "number" | "boolean" | "null" | "data";
 
@@ -51,13 +51,7 @@ function initial(kind: AnyKind): unknown {
   }
 }
 
-export function AnyField({
-  value,
-  onChange,
-}: {
-  value: unknown;
-  onChange: (v: unknown) => void;
-}) {
+export function AnyField({ value, onChange }: { value: unknown; onChange: (v: unknown) => void }) {
   const [kind, setKind] = useState<AnyKind>(() => detect(value));
 
   function selectKind(next: AnyKind) {
@@ -66,11 +60,9 @@ export function AnyField({
   }
 
   return (
-    <div className="space-y-1.5 border-l-2 border-border pl-3">
+    <div className="space-y-1.5">
       <div className="flex items-center gap-2">
-        <span className="text-xs uppercase tracking-wider text-subtle-foreground">
-          Type
-        </span>
+        <span className="text-xs uppercase tracking-wider text-subtle-foreground">Type</span>
         <SelectMenu
           value={kind}
           onChange={(v) => selectKind(v as AnyKind)}
@@ -79,9 +71,7 @@ export function AnyField({
         />
       </div>
       {kind === "string" && <StringField value={value} onChange={onChange} />}
-      {kind === "number" && (
-        <NumberField value={value} onChange={onChange} schema={{}} />
-      )}
+      {kind === "number" && <NumberField value={value} onChange={onChange} schema={{}} />}
       {kind === "boolean" && <BooleanField value={value} onChange={onChange} />}
       {kind === "null" && <NullField />}
       {kind === "data" && <DataField value={value} onChange={onChange} />}
@@ -89,20 +79,13 @@ export function AnyField({
   );
 }
 
-function DataField({
-  value,
-  onChange,
-}: {
-  value: unknown;
-  onChange: (v: unknown) => void;
-}) {
+function DataField({ value, onChange }: { value: unknown; onChange: (v: unknown) => void }) {
   const obj =
     value !== null && typeof value === "object" && !Array.isArray(value)
       ? (value as Record<string, unknown>)
       : { $constructor: "" };
 
-  const constructorName =
-    typeof obj.$constructor === "string" ? obj.$constructor : "";
+  const constructorName = typeof obj.$constructor === "string" ? obj.$constructor : "";
 
   const fields = Object.entries(obj).filter(([k]) => k !== "$constructor");
 
@@ -148,7 +131,7 @@ function DataField({
           className="h-8 text-xs font-mono"
         />
       </div>
-      <div className="space-y-3 border-l-2 border-border pl-3">
+      <div className="space-y-3 border-l border-border pl-3">
         {fields.length === 0 ? (
           <p className="text-xs italic text-subtle-foreground">No fields.</p>
         ) : (

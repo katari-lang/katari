@@ -15,22 +15,23 @@ module Katari.Cli.Run
 where
 
 import Control.Concurrent (threadDelay)
-import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.Encode.Pretty as Pretty
-import qualified Data.Aeson.Key as AesonKey
-import qualified Data.Aeson.KeyMap as AesonKM
-import qualified Data.ByteString.Lazy.Char8 as LC8
+import Data.Aeson qualified as Aeson
+import Data.Aeson.Encode.Pretty qualified as Pretty
+import Data.Aeson.Key qualified as AesonKey
+import Data.Aeson.KeyMap qualified as AesonKM
+import Data.ByteString.Lazy.Char8 qualified as LC8
+import Data.Char (isAsciiUpper)
 import Data.Map.Strict (Map)
-import qualified Data.Map.Strict as Map
-import qualified Data.Scientific as Scientific
+import Data.Map.Strict qualified as Map
+import Data.Scientific qualified as Scientific
 import Data.Text (Text)
-import qualified Data.Text as Text
-import qualified Data.Vector as Vector
-import qualified Katari.Api.Client as Api
-import qualified Katari.Api.Types as Api
-import qualified Katari.Cli.Common as Common
-import qualified Katari.Project.Config as Project
-import qualified Katari.Cli.Status as Status
+import Data.Text qualified as Text
+import Data.Vector qualified as Vector
+import Katari.Api.Client qualified as Api
+import Katari.Api.Types qualified as Api
+import Katari.Cli.Common qualified as Common
+import Katari.Cli.Status qualified as Status
+import Katari.Project.Config qualified as Project
 import Options.Applicative
 import System.Exit (ExitCode (..), exitWith)
 import System.IO (hFlush, hPutStr, hPutStrLn, stderr, stdout)
@@ -266,7 +267,7 @@ promptYesNo title defaultValue = do
   where
     trim = dropWhile (== ' ') . reverse . dropWhile (== ' ') . reverse
     toLowerAscii c
-      | c >= 'A' && c <= 'Z' = toEnum (fromEnum c + 32)
+      | isAsciiUpper c = toEnum (fromEnum c + 32)
       | otherwise = c
 
 promptForSchema :: [Text] -> Aeson.Value -> IO Aeson.Value

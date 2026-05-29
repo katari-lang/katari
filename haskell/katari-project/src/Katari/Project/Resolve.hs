@@ -30,18 +30,14 @@ module Katari.Project.Resolve
   )
 where
 
-import qualified Katari.Project.Cache as Cache
-import qualified Katari.Project.Fetch as Fetch
-import qualified Katari.Project.Lockfile as Lock
-import qualified Katari.Project.Snapshot as Snapshot
-
 import Control.Monad (foldM)
-import Data.Maybe (isJust, mapMaybe)
 import Data.Map.Strict (Map)
-import qualified Data.Map.Strict as Map
-import qualified Data.Set as Set
+import Data.Map.Strict qualified as Map
+import Data.Maybe (isJust, mapMaybe)
+import Data.Set qualified as Set
 import Data.Text (Text)
-import qualified Data.Text as Text
+import Data.Text qualified as Text
+import Katari.Project.Cache qualified as Cache
 import Katari.Project.Config
   ( ConfigError (..),
     DependenciesSection (..),
@@ -52,6 +48,9 @@ import Katari.Project.Config
     loadKatariToml,
   )
 import Katari.Project.Discovery (SourceEntry (..), configFilename, scanSources)
+import Katari.Project.Fetch qualified as Fetch
+import Katari.Project.Lockfile qualified as Lock
+import Katari.Project.Snapshot qualified as Snapshot
 import Network.HTTP.Client (Manager)
 import Network.HTTP.Client.TLS (newTlsManager)
 import System.Directory (canonicalizePath, doesFileExist)
@@ -148,36 +147,56 @@ renderResolveError = \case
   ResolveCycle chain ->
     "dependency cycle: " <> Text.intercalate " → " chain
   ResolveMissingConfig name path ->
-    "dependency '" <> name <> "' at " <> Text.pack path
+    "dependency '"
+      <> name
+      <> "' at "
+      <> Text.pack path
       <> " has no katari.toml"
   ResolveAmbiguousDep name a b ->
-    "dependency '" <> name <> "' resolved to two different paths: "
-      <> Text.pack a <> " vs " <> Text.pack b
+    "dependency '"
+      <> name
+      <> "' resolved to two different paths: "
+      <> Text.pack a
+      <> " vs "
+      <> Text.pack b
   ResolveInvalidPackageName name ->
-    "invalid package name '" <> name
+    "invalid package name '"
+      <> name
       <> "' (must match [A-Za-z_][A-Za-z0-9_]*)"
   ResolveModuleCollision m ->
     "module '" <> m <> "' is contributed by two reachable packages"
   ResolveOutOfNamespace pkg m ->
-    "package '" <> pkg <> "' contains a source file whose module name '"
-      <> m <> "' is outside the package's namespace"
+    "package '"
+      <> pkg
+      <> "' contains a source file whose module name '"
+      <> m
+      <> "' is outside the package's namespace"
   ResolveDepNameMismatch declared actual ->
-    "dependency declared as '" <> declared
+    "dependency declared as '"
+      <> declared
       <> "' but [package].name in the dep's katari.toml is '"
-      <> actual <> "'"
+      <> actual
+      <> "'"
   ResolveUnresolvedDependency name ->
-    "dependency '" <> name
+    "dependency '"
+      <> name
       <> "' is not in the snapshot and has no [overrides] entry"
   ResolveLockfileOutOfDate name ->
-    "dependency '" <> name
+    "dependency '"
+      <> name
       <> "' is in katari.toml but not in katari.lock; run `katari update`"
       <> " (or delete katari.lock and re-run) to refresh the lockfile"
   ResolveSnapshotError e ->
     "snapshot: " <> Text.pack (show e)
   ResolveSnapshotShaMismatch name expected actual ->
-    "dependency '" <> name <> "' download sha256 mismatch:\n"
-      <> "  expected " <> expected <> "\n"
-      <> "  actual   " <> actual
+    "dependency '"
+      <> name
+      <> "' download sha256 mismatch:\n"
+      <> "  expected "
+      <> expected
+      <> "\n"
+      <> "  actual   "
+      <> actual
   ResolveLockfileError e ->
     "lockfile: " <> Text.pack (show e)
   ResolveInternalError msg ->
@@ -267,13 +286,13 @@ lockfileToSnapshot lock =
 -- @[overrides]@ entries with snapshot lookups.
 data DepSource
   = DSPath FilePath
-  | DSGit Text Text (Maybe Text)
-  -- ^ url, rev, expected sha256 from the lockfile if known. The first
-  -- resolution after writing a git override has no expected sha; the
-  -- lockfile records it so subsequent resolutions verify the download.
-  | DSSnapshotGit Text Text Text
-  -- ^ url, rev, expected sha256 (= sha is the registry's pin; verified
-  -- against the actual download).
+  | -- | url, rev, expected sha256 from the lockfile if known. The first
+    -- resolution after writing a git override has no expected sha; the
+    -- lockfile records it so subsequent resolutions verify the download.
+    DSGit Text Text (Maybe Text)
+  | -- | url, rev, expected sha256 (= sha is the registry's pin; verified
+    -- against the actual download).
+    DSSnapshotGit Text Text Text
   deriving (Show)
 
 walkDeps ::
@@ -337,11 +356,11 @@ walkDeps manager mSnap mLock rootPkg =
                               let visited' = Set.insert depName visited
                                   accDeps' = Map.insert depName pkg accDeps
                                   transitive = initialQueue innerEntries pkg.packageRoot
-                                  -- DFS: process transitive deps before remaining siblings
-                               in go visited' accDeps' (transitive <> rest)
+                               in -- DFS: process transitive deps before remaining siblings
+                                  go visited' accDeps' (transitive <> rest)
 
     resolveGit depName url rev expectedSha visited accDeps rest = do
-      cache <- Cache.defaultCachePaths
+      let cache = Cache.projectCachePaths rootPkg.packageRoot
       Cache.ensureCacheDirs cache
       fetchRes <- Fetch.fetchGitTarball manager cache depName (Fetch.GitRef url rev)
       case fetchRes of
@@ -386,8 +405,8 @@ walkDeps manager mSnap mLock rootPkg =
                         visited' = Set.insert depName visited
                         accDeps' = Map.insert depName pinned accDeps
                         transitive = initialQueue innerEntries pinned.packageRoot
-                        -- DFS: process transitive deps before remaining siblings
-                     in go visited' accDeps' (transitive <> rest)
+                     in -- DFS: process transitive deps before remaining siblings
+                        go visited' accDeps' (transitive <> rest)
 
 -- | Resolve a package's @[dependencies].packages@ list into concrete
 -- 'DepSource' values. Path / git overrides (from @[overrides.X]@) win
@@ -405,8 +424,9 @@ depEntries mSnap mLock pkg =
       Just (OverridePath p) -> Right (name, DSPath p)
       Just (OverrideGit url rev) -> Right (name, DSGit url rev (gitShaFromLock name))
       Nothing -> case mSnap of
-        Just snap | Just sp <- Map.lookup name snap.snapshotPackages ->
-          Right (name, DSSnapshotGit sp.repo sp.ref sp.sha)
+        Just snap
+          | Just sp <- Map.lookup name snap.snapshotPackages ->
+              Right (name, DSSnapshotGit sp.repo sp.ref sp.sha)
         _ | isJust mLock -> Left (ResolveLockfileOutOfDate name)
         _ -> Left (ResolveUnresolvedDependency name)
 

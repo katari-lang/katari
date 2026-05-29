@@ -5,19 +5,29 @@
 //
 // The key challenge is that `TickModulesFactory.build()` is called inside
 // `withTransaction`, so the modules need a tx-scoped Storage handle. We
-// solve this with a `txRef` that `withTransaction` swaps to the current tx
-// before calling into the Orchestrator's inner function.
+// thread it via `AsyncLocalStorage`: `withTransaction` calls `run(tx,
+// ...)`, and `factory.build` reads `getStore()`. A previous implementation
+// used a shared `{ current: tx }` ref — that broke under concurrent ticks
+// (= the second tick to enter `withTransaction` overwrote the first
+// tick's tx; the first tick's modules then sent queries on the second
+// tick's pg connection, which was already blocked on the advisory-lock
+// acquire that only the first tick could release → cross-tick deadlock,
+// 10-connection pool exhausted, every HTTP request hung).
+//
+// `AsyncLocalStorage.run(tx, fn)` scopes `tx` to `fn`'s async chain only,
+// so concurrent ticks each see their own tx.
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import {
   CORE_ENDPOINT,
   CoreModule,
   ENV_ENDPOINT,
   EnvModule,
+  type ExternalEventBus,
   FFI_ENDPOINT,
   FfiModule,
-  Orchestrator,
-  type ExternalEventBus,
   type Logger,
+  Orchestrator,
   type OrchestratorStorage,
   type ParentToChild,
   type ResolvedSnapshot,
@@ -27,14 +37,10 @@ import {
   type TickModulesFactory,
 } from "@katari-lang/runtime";
 import { ApiModule } from "./adapters/api-module.js";
+import { StorageDelegationStore } from "./adapters/delegation-store.js";
 import { StorageEnvStore } from "./adapters/env-store.js";
 import { StorageFfiStore } from "./adapters/ffi-store.js";
-import { StorageDelegationStore } from "./adapters/delegation-store.js";
-import type {
-  ProjectId,
-  SnapshotId,
-  Storage,
-} from "./storage/types.js";
+import type { ProjectId, SnapshotId, Storage } from "./storage/types.js";
 
 // ─── Api-server-specific TickContext ───────────────────────────────────────
 
@@ -62,26 +68,17 @@ export type ApiServerTickContext = TickContext<SnapshotId> & {
  * creates it); the wrapper only adjusts the TypeScript types.
  */
 export class ApiServerOrchestrator {
-  constructor(
-    private readonly inner: Orchestrator<SnapshotId, ProjectId>,
-  ) {}
+  constructor(private readonly inner: Orchestrator<SnapshotId, ProjectId>) {}
 
-  async tick<T>(
-    snapshotId: SnapshotId,
-    fn: (ctx: ApiServerTickContext) => Promise<T>,
-  ): Promise<T> {
-    return this.inner.tick(snapshotId, (ctx) =>
-      fn(ctx as ApiServerTickContext),
-    );
+  async tick<T>(snapshotId: SnapshotId, fn: (ctx: ApiServerTickContext) => Promise<T>): Promise<T> {
+    return this.inner.tick(snapshotId, (ctx) => fn(ctx as ApiServerTickContext));
   }
 
   async tickResolved<T>(
     input: { projectId: ProjectId; snapshotId?: SnapshotId | undefined },
     fn: (ctx: ApiServerTickContext) => Promise<T>,
   ): Promise<T> {
-    return this.inner.tickResolved(input, (ctx) =>
-      fn(ctx as ApiServerTickContext),
-    );
+    return this.inner.tickResolved(input, (ctx) => fn(ctx as ApiServerTickContext));
   }
 
   async recoverOnBoot(): Promise<void> {
@@ -103,17 +100,16 @@ export function createApiServerOrchestrator(
   sidecarManager: SidecarManager<SnapshotId>,
   logger: Logger,
 ): ApiServerOrchestrator {
-  // Shared mutable ref. `withTransaction` swaps this to the tx-scoped
-  // Storage before calling the inner function; `factory.build()` reads
-  // it to construct modules with the right handle.
-  const txRef = { current: storage };
+  // Per-tick tx threaded via AsyncLocalStorage so concurrent ticks don't
+  // clobber each other's tx (see file header). Reads outside any tick
+  // fall back to the non-tx-scoped top-level `storage`.
+  const txStore = new AsyncLocalStorage<Storage>();
+  const currentTx = (): Storage => txStore.getStore() ?? storage;
 
-  const adapter = buildStorageAdapter(storage, txRef);
-  const factory = buildTickModulesFactory(txRef, sidecarManager);
+  const adapter = buildStorageAdapter(storage, txStore);
+  const factory = buildTickModulesFactory(currentTx, sidecarManager);
 
-  const inner = new Orchestrator<SnapshotId, ProjectId>(
-    adapter, factory, sidecarManager, logger,
-  );
+  const inner = new Orchestrator<SnapshotId, ProjectId>(adapter, factory, sidecarManager, logger);
   return new ApiServerOrchestrator(inner);
 }
 
@@ -121,49 +117,43 @@ export function createApiServerOrchestrator(
 
 function buildStorageAdapter(
   storage: Storage,
-  txRef: { current: Storage },
+  txStore: AsyncLocalStorage<Storage>,
 ): OrchestratorStorage<SnapshotId, ProjectId> {
   const self: OrchestratorStorage<SnapshotId, ProjectId> = {
     async withTransaction<T>(
       fn: (tx: OrchestratorStorage<SnapshotId, ProjectId>) => Promise<T>,
     ): Promise<T> {
       return storage.withTransaction(async (tx) => {
-        const prev = txRef.current;
-        txRef.current = tx;
-        try {
-          const txAdapter: OrchestratorStorage<SnapshotId, ProjectId> = {
-            // Nested transactions reuse the same adapter shape.
-            withTransaction: self.withTransaction,
+        const txAdapter: OrchestratorStorage<SnapshotId, ProjectId> = {
+          // Nested transactions reuse the same adapter shape.
+          withTransaction: self.withTransaction,
 
-            async withSnapshotLock<T2>(
-              _txArg: OrchestratorStorage<SnapshotId, ProjectId>,
-              snapshotId: SnapshotId,
-              fn2: () => Promise<T2>,
-            ): Promise<T2> {
-              return tx.withSnapshotLock(tx, snapshotId, fn2);
-            },
+          async withSnapshotLock<T2>(
+            _txArg: OrchestratorStorage<SnapshotId, ProjectId>,
+            snapshotId: SnapshotId,
+            fn2: () => Promise<T2>,
+          ): Promise<T2> {
+            return tx.withSnapshotLock(tx, snapshotId, fn2);
+          },
 
-            async getSnapshot(id: SnapshotId) {
-              const snap = await tx.snapshots.get(id);
-              if (snap === null) return null;
-              return {
-                irModule: snap.irModule,
-                sidecarBundle: snap.sidecarBundle,
-              };
-            },
+          async getSnapshot(id: SnapshotId) {
+            const snap = await tx.snapshots.get(id);
+            if (snap === null) return null;
+            return {
+              irModule: snap.irModule,
+              sidecarBundle: snap.sidecarBundle,
+            };
+          },
 
-            async latestSnapshot(projectId: ProjectId) {
-              return tx.snapshots.latest(projectId);
-            },
+          async latestSnapshot(projectId: ProjectId) {
+            return tx.snapshots.latest(projectId);
+          },
 
-            async listLiveSnapshotIds() {
-              return tx.delegations.listLiveSnapshotIds();
-            },
-          };
-          return fn(txAdapter);
-        } finally {
-          txRef.current = prev;
-        }
+          async listLiveSnapshotIds() {
+            return tx.delegations.listLiveSnapshotIds();
+          },
+        };
+        return txStore.run(tx, () => fn(txAdapter));
       });
     },
 
@@ -199,7 +189,7 @@ function buildStorageAdapter(
 // ─── Internal: TickModulesFactory ─────────────────────────────────────────
 
 function buildTickModulesFactory(
-  txRef: { current: Storage },
+  currentTx: () => Storage,
   sidecarManager: SidecarManager<SnapshotId>,
 ): TickModulesFactory<SnapshotId> {
   return {
@@ -209,7 +199,7 @@ function buildTickModulesFactory(
       logger: Logger;
       bus: ExternalEventBus;
     }): TickModules {
-      const tx = txRef.current;
+      const tx = currentTx();
       const { snapshotId, snapshot, logger, bus } = opts;
 
       const core = new CoreModule({

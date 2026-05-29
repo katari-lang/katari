@@ -14,11 +14,11 @@ where
 
 import Control.Monad (filterM)
 import Data.Map.Strict (Map)
-import qualified Data.Map.Strict as Map
-import qualified Data.Set as Set
+import Data.Map.Strict qualified as Map
+import Data.Set qualified as Set
 import Data.Text (Text)
-import qualified Data.Text as Text
-import qualified Data.Text.IO as TextIO
+import Data.Text qualified as Text
+import Data.Text.IO qualified as TextIO
 import Katari.Project.Config (PackageSection (..), ProjectConfig (..))
 import Katari.Project.ModuleName (moduleNameFromRelativePath)
 import System.Directory

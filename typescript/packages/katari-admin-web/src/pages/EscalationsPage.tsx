@@ -1,17 +1,17 @@
-import { useState } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { motion } from "framer-motion";
 import { MessageCircleQuestion } from "lucide-react";
-import { useApiClient } from "@/contexts/ApiKeyContext";
-import { PageContent, PageHeader } from "@/components/ui/PageHeader";
-import { SpinnerOverlay } from "@/components/ui/Spinner";
-import { EmptyState } from "@/components/ui/EmptyState";
-import { Table, TBody, TD, TH, THead, TR } from "@/components/ui/Table";
+import { useState } from "react";
+import { Link, useNavigate, useParams } from "react-router-dom";
+import type { EscalationState, ProjectId } from "@/api/types";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
-import { relativeTime, formatDateTime } from "@/lib/format";
-import type { EscalationState, ProjectId } from "@/api/types";
+import { EmptyState } from "@/components/ui/EmptyState";
+import { PageContent, PageHeader } from "@/components/ui/PageHeader";
+import { SpinnerOverlay } from "@/components/ui/Spinner";
+import { Table, TBody, TD, TH, THead, TR } from "@/components/ui/Table";
+import { useApiClient } from "@/contexts/ApiKeyContext";
+import { formatDateTime, relativeTime } from "@/lib/format";
 
 const POLL_MS = 3_000;
 const PAGE_SIZE = 50;
@@ -32,33 +32,24 @@ const stateTones: Record<EscalationState, "info" | "success" | "neutral"> = {
 export function EscalationsPage() {
   const { projectId } = useParams<{ projectId: string }>();
   const client = useApiClient();
-  const [stateFilter, setStateFilter] = useState<EscalationState | "all">(
-    "open",
-  );
+  const [stateFilter, setStateFilter] = useState<EscalationState | "all">("open");
   const navigate = useNavigate();
 
-  const {
-    data,
-    isLoading,
-    isError,
-    error,
-    fetchNextPage,
-    hasNextPage,
-    isFetchingNextPage,
-  } = useInfiniteQuery({
-    queryKey: ["escalations", projectId, stateFilter, "infinite"],
-    queryFn: ({ pageParam }) =>
-      client.listEscalations({
-        projectId: projectId as ProjectId,
-        state: stateFilter === "all" ? undefined : stateFilter,
-        limit: PAGE_SIZE,
-        cursor: pageParam ?? undefined,
-      }),
-    initialPageParam: null as string | null,
-    getNextPageParam: (lastPage) => lastPage.nextCursor,
-    enabled: typeof projectId === "string",
-    refetchInterval: stateFilter === "open" ? POLL_MS : false,
-  });
+  const { data, isLoading, isError, error, fetchNextPage, hasNextPage, isFetchingNextPage } =
+    useInfiniteQuery({
+      queryKey: ["escalations", projectId, stateFilter, "infinite"],
+      queryFn: ({ pageParam }) =>
+        client.listEscalations({
+          projectId: projectId as ProjectId,
+          state: stateFilter === "all" ? undefined : stateFilter,
+          limit: PAGE_SIZE,
+          cursor: pageParam ?? undefined,
+        }),
+      initialPageParam: null as string | null,
+      getNextPageParam: (lastPage) => lastPage.nextCursor,
+      enabled: typeof projectId === "string",
+      refetchInterval: stateFilter === "open" ? POLL_MS : false,
+    });
 
   const escalations = data?.pages.flatMap((p) => p.escalations) ?? [];
 
@@ -67,13 +58,10 @@ export function EscalationsPage() {
   // RunsPage so visiting that page beforehand makes this free.
   const runsQ = useQuery({
     queryKey: ["runs-lookup", projectId],
-    queryFn: () =>
-      client.listRuns({ projectId: projectId as ProjectId, limit: 200 }),
+    queryFn: () => client.listRuns({ projectId: projectId as ProjectId, limit: 200 }),
     enabled: typeof projectId === "string",
   });
-  const runNameById = new Map(
-    (runsQ.data?.runs ?? []).map((r) => [r.id, r.name]),
-  );
+  const runNameById = new Map((runsQ.data?.runs ?? []).map((r) => [r.id, r.name]));
 
   return (
     <div>
@@ -104,9 +92,7 @@ export function EscalationsPage() {
         {isLoading && <SpinnerOverlay />}
         {isError && (
           <p className="border border-danger/30 bg-danger/10 px-4 py-3 text-sm text-danger">
-            {error instanceof Error
-              ? error.message
-              : "Failed to load escalations."}
+            {error instanceof Error ? error.message : "Failed to load escalations."}
           </p>
         )}
         {!isLoading && !isError && data !== undefined && (
@@ -141,16 +127,10 @@ export function EscalationsPage() {
                       <TR
                         key={esc.id}
                         className="cursor-pointer h-16"
-                        onClick={() =>
-                          navigate(
-                            `/project/${projectId}/escalations/${esc.id}`,
-                          )
-                        }
+                        onClick={() => navigate(`/project/${projectId}/escalations/${esc.id}`)}
                       >
                         <TD>
-                          <Badge tone={stateTones[esc.state]}>
-                            {esc.state}
-                          </Badge>
+                          <Badge tone={stateTones[esc.state]}>{esc.state}</Badge>
                         </TD>
                         <TD>
                           <Link

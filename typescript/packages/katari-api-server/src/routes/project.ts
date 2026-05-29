@@ -4,15 +4,12 @@
 // If a project with the same name exists, return it (idempotent).
 
 import { Hono } from "hono";
+import { ProjectNotFound, type ProjectService } from "../services/project-service.js";
 import {
   CreateProjectSchema,
   PaginationQuerySchema,
   ProjectIdSchema,
 } from "./middleware/validation.js";
-import {
-  ProjectNotFound,
-  type ProjectService,
-} from "../services/project-service.js";
 
 export function buildProjectRoutes(projects: ProjectService): Hono {
   const app = new Hono();

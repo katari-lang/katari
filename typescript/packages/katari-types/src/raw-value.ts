@@ -6,10 +6,4 @@
 /** Raw value: a JSON-shaped subset (numbers, strings, booleans, null,
  * arrays, objects). Object shapes carrying a `$constructor` / `$agent`
  * discriminator are decoded into the corresponding 'Value' variant. */
-export type RawValue =
-  | number
-  | string
-  | boolean
-  | null
-  | RawValue[]
-  | { [key: string]: RawValue };
+export type RawValue = number | string | boolean | null | RawValue[] | { [key: string]: RawValue };

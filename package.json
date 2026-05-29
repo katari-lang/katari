@@ -2,9 +2,9 @@
   "private": true,
   "packageManager": "pnpm@11.1.3",
   "scripts": {
+    "prepare": "simple-git-hooks",
     "build": "npm run build:hs && npm run build:ts",
     "build:hs": "stack build",
-    "build:compiler": "stack build katari-compiler",
     "build:cli": "stack build katari",
     "build:lsp": "stack build katari-lsp",
     "build:ts": "pnpm -r --filter \"./typescript/packages/*\" run build",
@@ -15,7 +15,7 @@
     "clean:hs": "stack clean",
     "clean:ts": "pnpm -r exec -- rm -rf dist",
     "fmt:hs": "find haskell -name '*.hs' -not -path '*/.stack-work/*' -print0 | xargs -0 -r stack exec --package ormolu -- ormolu --mode inplace",
-    "lint:hs": "hlint haskell",
+    "lint:hs": "stack build --fast",
     "fmt:ts": "pnpm biome format --write .",
     "lint:ts": "pnpm biome lint .",
     "check:ts": "pnpm biome ci .",
@@ -26,6 +26,10 @@
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.15",
-    "concurrently": "^9.1.0"
+    "concurrently": "^9.1.0",
+    "simple-git-hooks": "^2.11.1"
+  },
+  "simple-git-hooks": {
+    "pre-commit": "./scripts/pre-commit.sh"
   }
 }

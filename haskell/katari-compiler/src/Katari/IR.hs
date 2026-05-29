@@ -101,8 +101,9 @@ newtype BlockId = BlockId Word32
   deriving stock (Eq, Ord, Show)
   deriving newtype (ToJSON, FromJSON, ToJSONKey, FromJSONKey)
 
--- | IR-level variable identifier. Distinct from AST 'VariableId'; Lowering
--- allocates a fresh 'VarId' for each occurrence that needs an IR slot.
+-- | IR-level variable identifier. Distinct from the AST's
+-- 'Katari.Id.VariableResolution'; Lowering allocates a fresh 'VarId' for
+-- each occurrence that needs an IR slot.
 newtype VarId = VarId Word32
   deriving stock (Eq, Ord, Show)
   deriving newtype (ToJSON, FromJSON, ToJSONKey, FromJSONKey)

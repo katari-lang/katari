@@ -10,11 +10,11 @@ import { fileURLToPath } from "node:url";
 import { serve } from "@hono/node-server";
 import {
   buildConsoleLogger,
-  loadSubprocessSidecar,
-  SidecarManager,
-  type LogLevel,
   type Logger,
+  type LogLevel,
+  loadSubprocessSidecar,
   type Sidecar,
+  SidecarManager,
 } from "@katari-lang/runtime";
 import { buildMetrics } from "./metrics.js";
 import { createApiServerOrchestrator } from "./orchestrator-adapter.js";
@@ -94,8 +94,7 @@ await recoverOnBoot(storage, orchestrator, logger);
 // Admin web SPA: serve from $KATARI_ADMIN_WEB_DIST if set (= the built
 // `dist/` directory). When unset, the runtime works fine without a UI.
 const adminWebDistPath =
-  process.env.KATARI_ADMIN_WEB_DIST !== undefined &&
-  process.env.KATARI_ADMIN_WEB_DIST !== ""
+  process.env.KATARI_ADMIN_WEB_DIST !== undefined && process.env.KATARI_ADMIN_WEB_DIST !== ""
     ? process.env.KATARI_ADMIN_WEB_DIST
     : null;
 
@@ -128,16 +127,14 @@ const shutdown = (signal: string): void => {
       await sidecarManager.shutdown();
     } catch (sidecarErr) {
       logger.log("error", "sidecarManager.shutdown error", {
-        error:
-          sidecarErr instanceof Error ? sidecarErr.message : String(sidecarErr),
+        error: sidecarErr instanceof Error ? sidecarErr.message : String(sidecarErr),
       });
     }
     try {
       await storage.close?.();
     } catch (closeErr) {
       logger.log("error", "storage.close error", {
-        error:
-          closeErr instanceof Error ? closeErr.message : String(closeErr),
+        error: closeErr instanceof Error ? closeErr.message : String(closeErr),
       });
     }
     logger.log("info", "shutdown complete");

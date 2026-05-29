@@ -6,27 +6,25 @@
 module Katari.LoweringSpec (spec) where
 
 import Control.Exception (SomeException, try)
-import Data.List (find)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (isJust, listToMaybe)
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as Text
-import Data.Text.IO qualified as TextIO
 import Katari.IR
-import Katari.Lowering (LoweringError (..), lowerProgram)
+import Katari.Id qualified as Id
 import Katari.Lexer qualified as Lexer
+import Katari.Lowering (LowerContext (..), LoweringError (..), lowerModule, mergeModuleLowerings)
 import Katari.Parser qualified as Parser
+import Katari.Schema qualified as Schema
 import Katari.SemanticType (RequestVariableId (..), TypeVariableId (..))
-import Katari.Typechecker.ConstraintGenerator (ConstraintGenResult (..), VariableSupply (..), generateConstraints)
-import Katari.Typechecker.Identifier (identify)
+import Katari.TestSupport (IdentifierResult (..), ZonkResult (..), zonkAll)
+import Katari.TestSupport qualified as TestSupport
+import Katari.Typechecker.ConstraintGenerator (ConstraintGenResult (..), VariableSupply (..))
 import Katari.Typechecker.NormalizedType (NormalizedType (..))
 import Katari.Typechecker.Solver (SolverResult (..))
-import Katari.Typechecker.Zonker (zonk)
-import System.Directory (listDirectory)
-import System.FilePath ((</>))
-import Katari.Compile qualified as Compile
 import Test.Hspec
+import Data.Either (lefts, rights)
 
 -- ===========================================================================
 -- Pipeline helper: source → IR
@@ -38,24 +36,54 @@ lowerSource :: Text -> IO (IRModule, [LoweringError])
 lowerSource src =
   let (stream, _) = Lexer.lex "<test>" src
       (parsed, parseErrors) = Parser.parse "<test>" stream
-  in case parseErrors of
-    (_:_) -> fail ("parse failure: " ++ show parseErrors)
-    [] -> case Compile.identifyWithStdlib (Map.singleton "main" parsed) of
-      (idResult, []) -> do
-        let (cg, _) = generateConstraints idResult
-            solver =
-              SolverResult
-                { typeSubstitution =
-                    Map.fromList [(TypeVariableId i, NormalizedTypeUnknown) | i <- [0 .. cg.variableSupply.typeVarSupply - 1]],
-                  requestSubstitution =
-                    Map.fromList [(RequestVariableId i, Set.empty) | i <- [0 .. cg.variableSupply.requestVarSupply - 1]]
-                }
-            (zr, _) = zonk idResult cg solver
-        case lowerProgram idResult zr of
-          (Right ir, errs) -> pure (ir, errs)
-          (Left internalDiag, _) ->
-            fail ("lowering hit internal compiler error: " ++ show internalDiag)
-      (_, errs) -> fail ("identify failure: " ++ show errs)
+   in case parseErrors of
+        (_ : _) -> fail ("parse failure: " ++ show parseErrors)
+        [] -> case TestSupport.identifyWithStdlib (Map.singleton "main" parsed) of
+          (idResult, []) -> do
+            let (cg, _) = TestSupport.generateConstraintsAll idResult
+                solver =
+                  SolverResult
+                    { typeSubstitution =
+                        Map.fromList [(TypeVariableId i, NormalizedTypeUnknown) | i <- [0 .. cg.variableSupply.typeVarSupply - 1]],
+                      requestSubstitution =
+                        Map.fromList [(RequestVariableId i, Set.empty) | i <- [0 .. cg.variableSupply.requestVarSupply - 1]]
+                    }
+                (zr, _) = zonkAll "main" idResult cg solver
+                topLevels =
+                  Map.fromList
+                    [ (qn, ty)
+                      | (_, perMod) <- Map.toList zr.zonkedTypeEnvironment,
+                        (Id.ResolvedTopLevel qn, ty) <- Map.toList perMod
+                    ]
+                annotations =
+                  Map.unions
+                    [ Schema.collectDataAnnotations idResult.identifiedVariables m
+                      | m <- Map.elems zr.zonkedModules
+                    ]
+                lowerCtx =
+                  LowerContext
+                    { topLevelTypes = topLevels,
+                      dataDefs = Schema.buildDataDefs idResult.identifiedConstructors topLevels annotations,
+                      requestNames = Map.keysSet idResult.identifiedRequests,
+                      constructorNames = Map.keysSet idResult.identifiedConstructors
+                    }
+            let allResults =
+                  [ let localEnv = Map.findWithDefault Map.empty moduleName zr.zonkedTypeEnvironment
+                     in case lowerModule lowerCtx moduleName localEnv moduleAST of
+                          (Right mlr, errs) -> Right (mlr, errs)
+                          (Left internalDiag, _) -> Left internalDiag
+                    | (moduleName, moduleAST) <- Map.toList zr.zonkedModules
+                  ]
+                failures = lefts allResults
+                successes = rights allResults
+            case failures of
+              (d : _) -> fail ("lowering hit internal compiler error: " ++ show d)
+              [] ->
+                let mlrs = map fst successes
+                    errs = concatMap snd successes
+                    ir = mergeModuleLowerings mlrs
+                 in pure (ir, errs)
+          (_, errs) -> fail ("identify failure: " ++ show errs)
 
 -- ===========================================================================
 -- Spec
@@ -131,15 +159,6 @@ userEntries irMod =
       not ("primitive." `Text.isPrefixOf` qn.module_)
   ]
 
--- | Look up the BlockId for a primitive by name.
-primId :: Text -> IRModule -> Maybe BlockId
-primId primName irMod =
-  fst
-    <$> find (matchPrim primName . snd) (Map.toList irMod.blocks)
-  where
-    matchPrim wanted (BlockPrim primName) = primName == wanted
-    matchPrim _ _ = False
-
 -- | Extract the StatementCall statements from a UserBlock body.
 calls :: UserBlock -> [CallData]
 calls ub = [d | StatementCall d <- ub.statements]
@@ -173,24 +192,6 @@ calledMatchBlocks ub irMod =
     | StatementCall c <- ub.statements,
       let block = c.block,
       Just mb <- [matchBlockOf block irMod]
-  ]
-
--- | Find all BlockFor blocks that are called from a UserBlock.
-calledForBlocks :: UserBlock -> IRModule -> [ForBlock]
-calledForBlocks ub irMod =
-  [ fb
-    | StatementCall c <- ub.statements,
-      let block = c.block,
-      Just fb <- [forBlockOf block irMod]
-  ]
-
--- | Find all BlockHandle blocks that are called from a UserBlock.
-calledHandleBlocks :: UserBlock -> IRModule -> [HandleBlock]
-calledHandleBlocks ub irMod =
-  [ hb
-    | StatementCall c <- ub.statements,
-      let block = c.block,
-      Just hb <- [handleBlockOf block irMod]
   ]
 
 spec :: Spec
@@ -1055,10 +1056,11 @@ stage8Spec = describe "Stage 8 \8212 edge cases" $ do
   it "10000 sequential let bindings lower without stack overflow" $ do
     let depth = 10000 :: Int
         letLines =
-          [ "  let x" <> Text.pack (show i)
+          [ "  let x"
+              <> Text.pack (show i)
               <> " = "
               <> if i == 0 then "0" else "x" <> Text.pack (show (i - 1))
-          | i <- [0 .. depth - 1]
+            | i <- [0 .. depth - 1]
           ]
         src =
           Text.unlines $

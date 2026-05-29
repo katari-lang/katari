@@ -1,11 +1,11 @@
+import { Lock } from "lucide-react";
 import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
-import { Lock } from "lucide-react";
 import { cn } from "@/lib/cn";
 
 /**
  * Structured read-only viewer for JSON values. Renders a SchemaForm-like
- * tree with border-l-2 indentation for nesting. Redacted secret
+ * tree with border-l indentation for nesting. Redacted secret
  * placeholders (`<redacted:hash8>`) are highlighted in the danger tone.
  */
 export function ValueViewer({
@@ -29,13 +29,7 @@ export function ValueViewer({
   );
 }
 
-function ValueNode({
-  value,
-  projectId,
-}: {
-  value: unknown;
-  projectId?: string;
-}) {
+function ValueNode({ value, projectId }: { value: unknown; projectId?: string }) {
   if (value === null) {
     return <span className="text-xs font-mono italic text-subtle-foreground">null</span>;
   }
@@ -45,9 +39,7 @@ function ValueNode({
       <span
         className={cn(
           "inline-flex items-center px-1.5 py-0.5 text-xs font-mono font-medium",
-          value
-            ? "bg-success/15 text-success"
-            : "bg-danger/15 text-danger",
+          value ? "bg-success/15 text-success" : "bg-danger/15 text-danger",
         )}
       >
         {String(value)}
@@ -56,11 +48,7 @@ function ValueNode({
   }
 
   if (typeof value === "number") {
-    return (
-      <span className="text-xs font-mono text-highlight">
-        {String(value)}
-      </span>
-    );
+    return <span className="text-xs font-mono text-highlight">{String(value)}</span>;
   }
 
   if (typeof value === "string") {
@@ -69,22 +57,21 @@ function ValueNode({
 
   if (Array.isArray(value)) {
     if (value.length === 0) {
-      return (
-        <span className="text-xs italic text-subtle-foreground">Empty array</span>
-      );
+      return <span className="text-xs italic text-subtle-foreground">Empty array</span>;
     }
     return (
-      <div className="space-y-2">
-        {value.map((item, index) => (
-          <div key={index} className="border-l-2 border-border pl-3">
-            <span className="inline-flex items-center px-1.5 py-0.5 text-xs font-mono text-muted-foreground bg-muted mb-1">
-              {index}
-            </span>
-            <div className="mt-1">
+      <div className="flex flex-col space-y-2">
+        <span className="text-xs font-mono font-medium text-muted-foreground">array</span>
+        <div className="space-y-4 border-l border-border">
+          {value.map((item, index) => (
+            <div key={index} className="pl-3 flex flex-col gap-2 items-start">
+              <span className="inline-flex items-center px-1.5 h-5 text-xs font-mono text-muted-foreground bg-muted">
+                {index}
+              </span>
               <ValueNode value={item} projectId={projectId} />
             </div>
-          </div>
-        ))}
+          ))}
+        </div>
       </div>
     );
   }
@@ -94,9 +81,7 @@ function ValueNode({
     const entries = Object.entries(record);
 
     if (entries.length === 0) {
-      return (
-        <span className="text-xs italic text-subtle-foreground">Empty object</span>
-      );
+      return <span className="text-xs italic text-subtle-foreground">Empty object</span>;
     }
 
     // $secret handling: show a lock badge in danger color
@@ -114,25 +99,24 @@ function ValueNode({
 
     // $constructor handling: show constructor name as type label,
     // filter $constructor from properties list
-    const constructorName =
-      typeof record.$constructor === "string" ? record.$constructor : null;
-    const displayEntries = constructorName !== null
-      ? entries.filter(([key]) => key !== "$constructor")
-      : entries;
+    const constructorName = typeof record.$constructor === "string" ? record.$constructor : null;
+    const displayEntries =
+      constructorName !== null ? entries.filter(([key]) => key !== "$constructor") : entries;
 
     // $callable handling: render as link if it looks like a qualified name
-    const callableName =
-      typeof record.$callable === "string" ? record.$callable : null;
+    const callableName = typeof record.$callable === "string" ? record.$callable : null;
 
     return (
-      <div className="space-y-2">
-        {constructorName !== null && (
+      <div className="flex flex-col space-y-2">
+        {constructorName !== null ? (
           <span className="text-xs font-mono font-medium text-muted-foreground">
             {constructorName}
           </span>
+        ) : (
+          <span className="text-xs font-mono font-medium text-muted-foreground">record</span>
         )}
         {callableName !== null && (
-          <div className="border-l-2 border-border pl-3">
+          <div className="border-l border-border pl-3">
             <span className="text-sm font-medium text-foreground">$callable</span>
             <div className="mt-1">
               {callableName.includes(".") && projectId !== undefined ? (
@@ -148,26 +132,22 @@ function ValueNode({
             </div>
           </div>
         )}
-        {displayEntries
-          .filter(([key]) => key !== "$callable")
-          .map(([key, val]) => (
-            <div key={key} className="border-l-2 border-border pl-3">
-              <span className="text-sm font-medium text-foreground">{key}</span>
-              <div className="mt-1">
+        <div className="border-l border-border pl-3">
+          {displayEntries
+            .filter(([key]) => key !== "$callable")
+            .map(([key, val]) => (
+              <div key={key} className="flex flex-col gap-2">
+                <span className="text-sm font-medium text-foreground">{key}</span>
                 <ValueNode value={val} projectId={projectId} />
               </div>
-            </div>
-          ))}
+            ))}
+        </div>
       </div>
     );
   }
 
   // Fallback for unexpected types
-  return (
-    <span className="text-xs font-mono text-foreground">
-      {String(value)}
-    </span>
-  );
+  return <span className="text-xs font-mono text-foreground">{String(value)}</span>;
 }
 
 const REDACTED_PATTERN = /^<redacted:[0-9a-f]{8}>$|^<redacted>$/;

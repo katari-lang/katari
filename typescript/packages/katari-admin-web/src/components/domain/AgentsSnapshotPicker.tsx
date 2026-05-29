@@ -1,17 +1,12 @@
 import { useQuery } from "@tanstack/react-query";
 import { Camera, Check, History } from "lucide-react";
-import { cn } from "@/lib/cn";
-import { useApiClient } from "@/contexts/ApiKeyContext";
-import {
-  Dropdown,
-  DropdownDivider,
-  DropdownItem,
-  DropdownLabel,
-} from "@/components/ui/Dropdown";
-import { shortId, relativeTime, formatDateTime } from "@/lib/format";
+import type { ProjectId, SnapshotId } from "@/api/types";
 import { Button } from "@/components/ui/Button";
 import { CopyableId } from "@/components/ui/CopyableId";
-import type { ProjectId, SnapshotId } from "@/api/types";
+import { Dropdown, DropdownDivider, DropdownItem, DropdownLabel } from "@/components/ui/Dropdown";
+import { useApiClient } from "@/contexts/ApiKeyContext";
+import { cn } from "@/lib/cn";
+import { formatDateTime, relativeTime, shortId } from "@/lib/format";
 
 type Props = {
   projectId: ProjectId;
@@ -28,12 +23,7 @@ type Props = {
  * or the one chosen). Showing both lets the user see "you're viewing
  * snap_abc — which is also currently the latest".
  */
-export function AgentsSnapshotPicker({
-  projectId,
-  selected,
-  resolvedId,
-  onSelect,
-}: Props) {
+export function AgentsSnapshotPicker({ projectId, selected, resolvedId, onSelect }: Props) {
   const client = useApiClient();
   const { data } = useQuery({
     queryKey: ["snapshots", projectId],
@@ -45,8 +35,7 @@ export function AgentsSnapshotPicker({
   const label =
     selected === null
       ? "Latest"
-      : (snapshots.find((s) => s.id === selected)?.message ??
-        shortId(selected));
+      : (snapshots.find((s) => s.id === selected)?.message ?? shortId(selected));
 
   const trigger = (
     <button
@@ -82,9 +71,7 @@ export function AgentsSnapshotPicker({
             </DropdownItem>
             <DropdownDivider />
             {snapshots.length === 0 ? (
-              <p className="px-3 py-3 text-xs text-subtle-foreground">
-                No snapshots.
-              </p>
+              <p className="px-3 py-3 text-xs text-subtle-foreground">No snapshots.</p>
             ) : (
               <div className="max-h-80 overflow-y-auto">
                 {snapshots.map((s) => (
@@ -102,7 +89,9 @@ export function AgentsSnapshotPicker({
                         <CopyableId
                           value={s.id}
                           display={shortId(s.id)}
-                          className={s.id === selected ? "text-foreground" : "text-subtle-foreground"}
+                          className={
+                            s.id === selected ? "text-foreground" : "text-subtle-foreground"
+                          }
                         />
                         <span
                           className={cn(

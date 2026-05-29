@@ -11,18 +11,8 @@
 // **never** mutated in place after construction; engine code produces a
 // new Thread record (via Immer or explicit spread) when state changes.
 
-import type {
-  BlockId,
-  QualifiedName,
-} from "../../ir/types.js";
-import type {
-  AskId,
-  CallId,
-  DelegationId,
-  EscalationId,
-  ScopeId,
-  ThreadId,
-} from "../id.js";
+import type { BlockId, QualifiedName } from "../../ir/types.js";
+import type { AskId, CallId, DelegationId, EscalationId, ScopeId, ThreadId } from "../id.js";
 import type { Value } from "../value.js";
 
 // ─── Common ────────────────────────────────────────────────────────────────
@@ -332,17 +322,20 @@ type CollectingBase = {
   nextIndex: number;
 };
 
-export type TupleThread = Common & CollectingBase & {
-  kind: "tuple";
-};
+export type TupleThread = Common &
+  CollectingBase & {
+    kind: "tuple";
+  };
 
-export type ArrayThread = Common & CollectingBase & {
-  kind: "array";
-};
+export type ArrayThread = Common &
+  CollectingBase & {
+    kind: "array";
+  };
 
-export type RecordThread = Common & CollectingBase & {
-  kind: "record";
-};
+export type RecordThread = Common &
+  CollectingBase & {
+    kind: "record";
+  };
 
 /**
  * Union of every variant that goes through the shared collecting ops

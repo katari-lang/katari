@@ -1,30 +1,25 @@
+import type { RawValue } from "@katari-lang/runtime";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import {
-  Link,
-  useNavigate,
-  useParams,
-  useSearchParams,
-} from "react-router-dom";
 import { motion } from "framer-motion";
 import { ArrowLeft, Play } from "lucide-react";
-import toast from "react-hot-toast";
 import { useState } from "react";
-import { useApiClient } from "@/contexts/ApiKeyContext";
-import { PageContent, PageHeader } from "@/components/ui/PageHeader";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/Card";
+import toast from "react-hot-toast";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
+import type { ProjectId, SnapshotId } from "@/api/types";
+import { SchemaViewer } from "@/components/domain/SchemaViewer";
+import { SchemaForm } from "@/components/schema-form/SchemaForm";
+import type { JsonSchema } from "@/components/schema-form/schema-utils";
 import { Button } from "@/components/ui/Button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/Card";
 import { CopyableId } from "@/components/ui/CopyableId";
+import { CopyButton } from "@/components/ui/CopyButton";
 import { Input } from "@/components/ui/Input";
 import { Label } from "@/components/ui/Label";
-import { SpinnerOverlay } from "@/components/ui/Spinner";
 import { MetadataRow } from "@/components/ui/MetadataRow";
-import { SchemaForm } from "@/components/schema-form/SchemaForm";
-import { SchemaViewer } from "@/components/domain/SchemaViewer";
-import { CopyButton } from "@/components/ui/CopyButton";
-import type { JsonSchema } from "@/components/schema-form/schema-utils";
+import { PageContent, PageHeader } from "@/components/ui/PageHeader";
+import { SpinnerOverlay } from "@/components/ui/Spinner";
+import { useApiClient } from "@/contexts/ApiKeyContext";
 import { useSnapshotMessage } from "@/hooks/useSnapshotMessage";
-import type { ProjectId, SnapshotId } from "@/api/types";
-import type { RawValue } from "@katari-lang/runtime";
 
 export function AgentDetailPage() {
   const { projectId, qualifiedName } = useParams<{
@@ -89,9 +84,7 @@ export function AgentDetailPage() {
           <span className="inline-flex flex-wrap items-center gap-3">
             <Link
               to={`/project/${projectId}/agents${
-                selectedSnapshot !== undefined
-                  ? `?snapshot=${selectedSnapshot}`
-                  : ""
+                selectedSnapshot !== undefined ? `?snapshot=${selectedSnapshot}` : ""
               }`}
               className="inline-flex items-center gap-1 text-muted-foreground hover:text-foreground"
             >
@@ -99,9 +92,7 @@ export function AgentDetailPage() {
               <span className="text-sm font-normal">Agents</span>
             </Link>
             <span className="text-subtle-foreground text-sm">/</span>
-            <span className="break-all font-mono text-base text-foreground">
-              {qualifiedName}
-            </span>
+            <span className="break-all font-mono text-base text-foreground">{qualifiedName}</span>
           </span>
         }
         description={agent?.description}
@@ -115,8 +106,7 @@ export function AgentDetailPage() {
         )}
         {!isLoading && data !== undefined && agent === undefined && (
           <p className=" border border-warning/30 bg-warning/10 px-4 py-3 text-sm text-warning">
-            No agent <code className="font-mono">{qualifiedName}</code> in this
-            snapshot.
+            No agent <code className="font-mono">{qualifiedName}</code> in this snapshot.
           </p>
         )}
         {agent !== undefined && (
@@ -141,23 +131,20 @@ export function AgentDetailPage() {
                       placeholder={namePlaceholder}
                       maxLength={128}
                     />
-                    <p className="text-xs text-subtle-foreground">
-                      Optional — defaults to the placeholder.
-                    </p>
+                    <p className="text-xs text-subtle-foreground">Optional</p>
                   </div>
+                  <Label className="mb-2">Arguments</Label>
+                  <CopyButton
+                    text={JSON.stringify(agent.parameters, null, 2)}
+                    label="Copied schema"
+                  >
+                    Copy Schema
+                  </CopyButton>
                   <SchemaForm
                     schema={agent.parameters as JsonSchema}
-                    onSubmit={(args) =>
-                      invoke.mutate(args as Record<string, RawValue>)
-                    }
+                    onSubmit={(args) => invoke.mutate(args as Record<string, RawValue>)}
                     renderActions={({ submit }) => (
-                      <div className="flex items-center justify-between pt-2">
-                        <CopyButton
-                          text={JSON.stringify(agent.parameters, null, 2)}
-                          label="Copied schema"
-                        >
-                          Copy Schema
-                        </CopyButton>
+                      <div className="flex items-center justify-end pt-2">
                         <Button
                           type="button"
                           variant="primary"
@@ -179,10 +166,7 @@ export function AgentDetailPage() {
               </CardHeader>
               <CardContent>
                 <dl className="space-y-2 text-sm">
-                  <MetadataRow
-                    label="ID"
-                    value={<CopyableId value={agent.qualifiedName} />}
-                  />
+                  <MetadataRow label="ID" value={<CopyableId value={agent.qualifiedName} />} />
                   {resolvedSnapshotId !== undefined && (
                     <MetadataRow
                       label="Snapshot"
@@ -218,28 +202,19 @@ function defaultRunNamePreview(qualifiedName: string | undefined): string {
   return `${qualifiedName ?? "agent"} @ ${h}:${m}`;
 }
 
-function ReturnsCard({
-  returns,
-  className,
-}: {
-  returns: unknown;
-  className?: string;
-}) {
+function ReturnsCard({ returns, className }: { returns: unknown; className?: string }) {
   return (
     <Card className={className}>
       <CardHeader>
         <CardTitle>Returns schema</CardTitle>
       </CardHeader>
       <CardContent>
-        <SchemaViewer schema={returns} />
-        <div className="mt-3">
-          <CopyButton
-            text={JSON.stringify(returns, null, 2)}
-            label="Copied schema"
-          >
+        <div className="mb-1">
+          <CopyButton text={JSON.stringify(returns, null, 2)} label="Copied schema">
             Copy Schema
           </CopyButton>
         </div>
+        <SchemaViewer schema={returns} />
       </CardContent>
     </Card>
   );

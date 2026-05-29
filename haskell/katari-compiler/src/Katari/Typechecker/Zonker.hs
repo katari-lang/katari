@@ -1,12 +1,13 @@
 -- | Typechecker phase 4: Zonk — bakes the Solver's substitution results
 -- into the AST.
 --
--- Input  : 'IdentifierResult' (for looking up VariableData / TypeData /
---          ModuleData from the Identifier stage), 'ConstraintGenResult'
---          (Constrained AST and 'typeEnvironment'), 'SolverResult'
---          (substitution maps).
--- Output : 'ZonkResult' — Zonked AST, resolved type environment, and an
---          error set for detecting Solver-contract violations.
+-- Input  : @variables@ (per-module 'VariableData' map, used only for
+--          source-span attribution on substitution-miss errors),
+--          'ConstraintGenResult' (Constrained AST and type environment
+--          for this SCC), 'SolverResult' (substitution maps).
+-- Output : 'ModuleZonkResult' — the SCC's Zonked AST + resolved type
+--          environment, plus an error list for detecting Solver-contract
+--          violations.
 --
 -- Design assumptions:
 --
@@ -22,8 +23,8 @@
 --     @SemanticType Resolved@ directly. The construction side enforces
 --     @requestVars = Set.empty@ for any 'SemanticRequest' Resolved.
 module Katari.Typechecker.Zonker
-  ( -- * Result
-    ZonkResult (..),
+  ( -- * Per-module zonk output
+    ModuleZonkResult (..),
     ZonkError (..),
 
     -- * Diagnostics
@@ -40,13 +41,12 @@ import Control.Monad.Trans (lift)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
-import Data.Text (Text)
 import Data.Text qualified as Text
 import Katari.AST
 import Katari.Diagnostic (Diagnostic, diagnosticError)
+import Katari.Common (QualifiedName (..))
 import Katari.Id
-  ( ModuleId,
-    VariableId,
+  ( VariableResolution (..),
   )
 import Katari.SemanticType
   ( RequestVariableId (..),
@@ -58,13 +58,9 @@ import Katari.SemanticType
     Unresolved,
     substituteVariable,
   )
-import Katari.SourceSpan (Position (..), SourceSpan (..))
+import Katari.SourceSpan (SourceSpan, emptySourceSpan)
 import Katari.Typechecker.ConstraintGenerator (ConstraintGenResult (..))
-import Katari.Typechecker.Identifier
-  ( IdentifierResult (..),
-    ModuleData (..),
-    VariableData (..),
-  )
+import Katari.Typechecker.Identifier (VariableData (..))
 import Katari.Typechecker.NormalizedType (denormalise)
 import Katari.Typechecker.Solver (SolverResult (..))
 
@@ -78,12 +74,13 @@ import Katari.Typechecker.Solver (SolverResult (..))
 -- Result types
 -- ===========================================================================
 
-data ZonkResult = ZonkResult
-  { zonkedModules :: Map ModuleId (Module Zonked),
-    -- | 'ModuleId' → module name (dotted text). 'Katari.Lowering' looks
-    -- this up when populating 'QualifiedName.module_'.
-    zonkedModuleNames :: Map ModuleId Text,
-    zonkedTypeEnvironment :: Map VariableId (SemanticType Resolved)
+-- | Per-module zonk output. Holds the SCC's zonked declarations and
+-- the local type environment for the same SCC. The caller (typechecker
+-- orchestration) accumulates these across SCCs into the module's full
+-- output.
+data ModuleZonkResult = ModuleZonkResult
+  { zonkedModule :: Module Zonked,
+    zonkedTypeEnv :: Map VariableResolution (SemanticType Resolved)
   }
   deriving (Show)
 
@@ -131,18 +128,9 @@ recordZonkError err = lift (modify (err :))
 
 -- | Zonk a 'SemanticType Unresolved' to 'SemanticType Resolved'. Variables
 -- are looked up in the solver's type substitution; structural recursion is
--- delegated to 'traverseSemanticChildren' (the bulk of what used to be a
+-- delegated to 'substituteVariable' (the bulk of what used to be a
 -- 14-case @\\case@).
 zonkType :: SourceSpan -> SemanticType Unresolved -> Zonk (SemanticType Resolved)
--- zonkType sourceSpan = \case
---   SemanticTypeVariable typeVar -> do
---     solverResult <- ask
---     case Map.lookup typeVar solverResult.typeSubstitution of
---       Just normalizedType -> pure (denormalise normalizedType)
---       Nothing -> do
---         recordZonkError (ZonkErrorMissingTypeVar sourceSpan typeVar)
---         pure SemanticTypeUnknown
---   t -> traverseSemanticChildren (zonkType sourceSpan) (zonkRequest sourceSpan) t
 zonkType sourceSpan =
   substituteVariable
     ( \typeVar -> do
@@ -291,7 +279,7 @@ walkParameter ParameterBinding {annotation, label, pattern, sourceSpan} = do
 walkPattern :: Pattern Constrained -> Zonk (Pattern Zonked)
 walkPattern = \case
   PatternVariable VariablePattern {name, typeAnnotation, sourceSpan, typeOf} -> do
-    typeOf' <- zonkPatternTypedata sourceSpan typeOf
+    typeOf' <- zonkType sourceSpan typeOf
     pure
       ( PatternVariable
           VariablePattern
@@ -302,7 +290,7 @@ walkPattern = \case
             }
       )
   PatternWildcard WildcardPattern {typeAnnotation, sourceSpan, typeOf} -> do
-    typeOf' <- zonkPatternTypedata sourceSpan typeOf
+    typeOf' <- zonkType sourceSpan typeOf
     pure
       ( PatternWildcard
           WildcardPattern
@@ -312,7 +300,7 @@ walkPattern = \case
             }
       )
   PatternLiteral LiteralPattern {value, sourceSpan, typeOf} -> do
-    typeOf' <- zonkPatternTypedata sourceSpan typeOf
+    typeOf' <- zonkType sourceSpan typeOf
     pure
       ( PatternLiteral
           LiteralPattern
@@ -323,7 +311,7 @@ walkPattern = \case
       )
   PatternTuple TuplePattern {elements, sourceSpan, typeOf} -> do
     elements' <- mapM walkPattern elements
-    typeOf' <- zonkPatternTypedata sourceSpan typeOf
+    typeOf' <- zonkType sourceSpan typeOf
     pure
       ( PatternTuple
           TuplePattern
@@ -334,7 +322,7 @@ walkPattern = \case
       )
   PatternQualifiedConstructor QualifiedConstructorPattern {moduleQualifier, constructorName, parameters, sourceSpan, typeOf} -> do
     parameters' <- traverse (\(label, sub) -> (,) (retagNameRef label) <$> walkPattern sub) parameters
-    typeOf' <- zonkPatternTypedata sourceSpan typeOf
+    typeOf' <- zonkType sourceSpan typeOf
     pure
       ( PatternQualifiedConstructor
           QualifiedConstructorPattern
@@ -347,7 +335,7 @@ walkPattern = \case
       )
   PatternType TypePattern {typeTag, inner, sourceSpan, typeOf} -> do
     inner' <- walkPattern inner
-    typeOf' <- zonkPatternTypedata sourceSpan typeOf
+    typeOf' <- zonkType sourceSpan typeOf
     pure
       ( PatternType
           TypePattern
@@ -359,7 +347,7 @@ walkPattern = \case
       )
   PatternRecord RecordPattern {entries, sourceSpan, typeOf} -> do
     entries' <- traverse (\(entryLabel, sub) -> (entryLabel,) <$> walkPattern sub) entries
-    typeOf' <- zonkPatternTypedata sourceSpan typeOf
+    typeOf' <- zonkType sourceSpan typeOf
     pure
       ( PatternRecord
           RecordPattern
@@ -368,18 +356,6 @@ walkPattern = \case
               typeOf = typeOf'
             }
       )
-
--- | Resolve the @typeOf@ payload of a 'Constrained' pattern (a
--- 'SemanticType Unresolved') to its 'Resolved' form for the 'Zonked'
--- phase. Type-family equations make the input and output types align.
-zonkPatternTypedata :: SourceSpan -> SemanticType Unresolved -> Zonk (SemanticType Resolved)
-zonkPatternTypedata = zonkType
-
--- | Same as 'zonkPatternTypedata' but for expression nodes; kept as a
--- separate name so that future divergence (different propagation rules)
--- doesn't ripple through call sites.
-zonkExpressionTypedata :: SourceSpan -> SemanticType Unresolved -> Zonk (SemanticType Resolved)
-zonkExpressionTypedata = zonkType
 
 -- ---------------------------------------------------------------------------
 -- Block / where / state vars / handlers
@@ -517,12 +493,12 @@ walkExpression = \case
 
 walkLiteralExpr :: LiteralExpression Constrained -> Zonk (LiteralExpression Zonked)
 walkLiteralExpr LiteralExpression {value, sourceSpan, typeOf} = do
-  typeOf' <- zonkExpressionTypedata sourceSpan typeOf
+  typeOf' <- zonkType sourceSpan typeOf
   pure LiteralExpression {value = value, sourceSpan = sourceSpan, typeOf = typeOf'}
 
 walkVariableExpr :: VariableExpression Constrained -> Zonk (VariableExpression Zonked)
 walkVariableExpr VariableExpression {name, sourceSpan, typeOf} = do
-  typeOf' <- zonkExpressionTypedata sourceSpan typeOf
+  typeOf' <- zonkType sourceSpan typeOf
   pure
     VariableExpression
       { name = retagNameRef name,
@@ -533,26 +509,26 @@ walkVariableExpr VariableExpression {name, sourceSpan, typeOf} = do
 walkTupleExpr :: TupleExpression Constrained -> Zonk (TupleExpression Zonked)
 walkTupleExpr TupleExpression {elements, sourceSpan, typeOf} = do
   elements' <- mapM walkExpression elements
-  typeOf' <- zonkExpressionTypedata sourceSpan typeOf
+  typeOf' <- zonkType sourceSpan typeOf
   pure TupleExpression {elements = elements', sourceSpan = sourceSpan, typeOf = typeOf'}
 
 walkArrayExpr :: ArrayExpression Constrained -> Zonk (ArrayExpression Zonked)
 walkArrayExpr ArrayExpression {elements, sourceSpan, typeOf} = do
   elements' <- mapM walkExpression elements
-  typeOf' <- zonkExpressionTypedata sourceSpan typeOf
+  typeOf' <- zonkType sourceSpan typeOf
   pure ArrayExpression {elements = elements', sourceSpan = sourceSpan, typeOf = typeOf'}
 
 walkRecordExpr :: RecordExpression Constrained -> Zonk (RecordExpression Zonked)
 walkRecordExpr RecordExpression {entries, sourceSpan, typeOf} = do
   entries' <- mapM (\(lbl, e) -> (lbl,) <$> walkExpression e) entries
-  typeOf' <- zonkExpressionTypedata sourceSpan typeOf
+  typeOf' <- zonkType sourceSpan typeOf
   pure RecordExpression {entries = entries', sourceSpan = sourceSpan, typeOf = typeOf'}
 
 walkCallExpr :: CallExpression Constrained -> Zonk (CallExpression Zonked)
 walkCallExpr CallExpression {callee, arguments, sourceSpan, typeOf} = do
   callee' <- walkExpression callee
   arguments' <- mapM walkCallArgument arguments
-  typeOf' <- zonkExpressionTypedata sourceSpan typeOf
+  typeOf' <- zonkType sourceSpan typeOf
   pure
     CallExpression
       { callee = callee',
@@ -575,7 +551,7 @@ walkBinaryExpr :: BinaryOperatorExpression Constrained -> Zonk (BinaryOperatorEx
 walkBinaryExpr BinaryOperatorExpression {operator, left, right, sourceSpan, typeOf} = do
   left' <- walkExpression left
   right' <- walkExpression right
-  typeOf' <- zonkExpressionTypedata sourceSpan typeOf
+  typeOf' <- zonkType sourceSpan typeOf
   pure
     BinaryOperatorExpression
       { operator = operator,
@@ -588,7 +564,7 @@ walkBinaryExpr BinaryOperatorExpression {operator, left, right, sourceSpan, type
 walkUnaryExpr :: UnaryOperatorExpression Constrained -> Zonk (UnaryOperatorExpression Zonked)
 walkUnaryExpr UnaryOperatorExpression {operator, operand, sourceSpan, typeOf} = do
   operand' <- walkExpression operand
-  typeOf' <- zonkExpressionTypedata sourceSpan typeOf
+  typeOf' <- zonkType sourceSpan typeOf
   pure
     UnaryOperatorExpression
       { operator = operator,
@@ -602,7 +578,7 @@ walkIfExpr IfExpression {condition, thenBlock, elseBlock, sourceSpan, typeOf} = 
   condition' <- walkExpression condition
   thenBlock' <- walkBlock thenBlock
   elseBlock' <- traverse walkBlock elseBlock
-  typeOf' <- zonkExpressionTypedata sourceSpan typeOf
+  typeOf' <- zonkType sourceSpan typeOf
   pure
     IfExpression
       { condition = condition',
@@ -616,7 +592,7 @@ walkMatchExpr :: MatchExpression Constrained -> Zonk (MatchExpression Zonked)
 walkMatchExpr MatchExpression {subject, cases, sourceSpan, typeOf} = do
   subject' <- walkExpression subject
   cases' <- mapM walkCaseArm cases
-  typeOf' <- zonkExpressionTypedata sourceSpan typeOf
+  typeOf' <- zonkType sourceSpan typeOf
   pure
     MatchExpression
       { subject = subject',
@@ -637,7 +613,7 @@ walkForExpr ForExpression {parallel, inBindings, varBindings, body, thenBlock, s
   varBindings' <- mapM walkForVarBinding varBindings
   body' <- walkBlock body
   thenBlock' <- traverse walkBlock thenBlock
-  typeOf' <- zonkExpressionTypedata sourceSpan typeOf
+  typeOf' <- zonkType sourceSpan typeOf
   pure
     ForExpression
       { parallel = parallel,
@@ -669,13 +645,13 @@ walkForVarBinding ForVarBinding {name, typeAnnotation, initial, sourceSpan} = do
 walkBlockExpr :: BlockExpression Constrained -> Zonk (BlockExpression Zonked)
 walkBlockExpr BlockExpression {block, sourceSpan, typeOf} = do
   block' <- walkBlock block
-  typeOf' <- zonkExpressionTypedata sourceSpan typeOf
+  typeOf' <- zonkType sourceSpan typeOf
   pure BlockExpression {block = block', sourceSpan = sourceSpan, typeOf = typeOf'}
 
 walkFieldAccessExpr :: FieldAccessExpression Constrained -> Zonk (FieldAccessExpression Zonked)
 walkFieldAccessExpr FieldAccessExpression {object, fieldName, sourceSpan, typeOf} = do
   object' <- walkExpression object
-  typeOf' <- zonkExpressionTypedata sourceSpan typeOf
+  typeOf' <- zonkType sourceSpan typeOf
   pure
     FieldAccessExpression
       { object = object',
@@ -688,7 +664,7 @@ walkIndexAccessExpr :: IndexAccessExpression Constrained -> Zonk (IndexAccessExp
 walkIndexAccessExpr IndexAccessExpression {array, index, sourceSpan, typeOf} = do
   array' <- walkExpression array
   index' <- walkExpression index
-  typeOf' <- zonkExpressionTypedata sourceSpan typeOf
+  typeOf' <- zonkType sourceSpan typeOf
   pure
     IndexAccessExpression
       { array = array',
@@ -700,7 +676,7 @@ walkIndexAccessExpr IndexAccessExpression {array, index, sourceSpan, typeOf} = d
 walkTemplateExpr :: TemplateExpression Constrained -> Zonk (TemplateExpression Zonked)
 walkTemplateExpr TemplateExpression {elements, sourceSpan, typeOf} = do
   elements' <- mapM walkTemplateElement elements
-  typeOf' <- zonkExpressionTypedata sourceSpan typeOf
+  typeOf' <- zonkType sourceSpan typeOf
   pure
     TemplateExpression
       { elements = elements',
@@ -718,7 +694,7 @@ walkTemplateElement = \case
 
 walkQualifiedReferenceExpr :: QualifiedReferenceExpression Constrained -> Zonk (QualifiedReferenceExpression Zonked)
 walkQualifiedReferenceExpr QualifiedReferenceExpression {moduleQualifier, target, sourceSpan, typeOf} = do
-  typeOf' <- zonkExpressionTypedata sourceSpan typeOf
+  typeOf' <- zonkType sourceSpan typeOf
   pure
     QualifiedReferenceExpression
       { moduleQualifier = retagNameRef moduleQualifier,
@@ -740,7 +716,7 @@ walkHandleExpr HandleExpression {parallel, stateVariables, handlers, thenClause,
       )
       thenClause
   body' <- walkBlock body
-  typeOf' <- zonkExpressionTypedata sourceSpan typeOf
+  typeOf' <- zonkType sourceSpan typeOf
   pure
     HandleExpression
       { parallel = parallel,
@@ -755,43 +731,48 @@ walkHandleExpr HandleExpression {parallel, stateVariables, handlers, thenClause,
 walkParTupleExpr :: ParTupleExpression Constrained -> Zonk (ParTupleExpression Zonked)
 walkParTupleExpr ParTupleExpression {elements, sourceSpan, typeOf} = do
   elements' <- mapM walkExpression elements
-  typeOf' <- zonkExpressionTypedata sourceSpan typeOf
+  typeOf' <- zonkType sourceSpan typeOf
   pure ParTupleExpression {elements = elements', sourceSpan = sourceSpan, typeOf = typeOf'}
 
 walkParArrayExpr :: ParArrayExpression Constrained -> Zonk (ParArrayExpression Zonked)
 walkParArrayExpr ParArrayExpression {elements, sourceSpan, typeOf} = do
   elements' <- mapM walkExpression elements
-  typeOf' <- zonkExpressionTypedata sourceSpan typeOf
+  typeOf' <- zonkType sourceSpan typeOf
   pure ParArrayExpression {elements = elements', sourceSpan = sourceSpan, typeOf = typeOf'}
 
 -- ===========================================================================
 -- Entry point
 -- ===========================================================================
 
--- | Run zonking over the constrained AST and the type environment.
-zonk :: IdentifierResult -> ConstraintGenResult -> SolverResult -> (ZonkResult, [ZonkError])
-zonk idResult cgResult solverResult =
+-- | Zonk one SCC's constrained AST + type environment against the
+-- Solver's substitutions. Returns the zonked module + the SCC's
+-- resolved type environment. @variables@ is a (qname → 'VariableData')
+-- map covering anything that might appear as 'ResolvedTopLevel' in the
+-- environment — used only to attach source spans to type-substitution
+-- errors.
+zonk ::
+  Map QualifiedName VariableData ->
+  ConstraintGenResult ->
+  SolverResult ->
+  (ModuleZonkResult, [ZonkError])
+zonk variables cgResult solverResult =
   let action =
         (,)
-          <$> traverse walkModule cgResult.constrainedModules
-          <*> Map.traverseWithKey (zonkEnvEntry idResult) cgResult.typeEnvironment
-      ((modulesResult, envResult), errs) = runState (runReaderT action solverResult) []
+          <$> walkModule cgResult.constrainedModule
+          <*> Map.traverseWithKey zonkEnvEntry cgResult.typeEnvironment
+      ((zonkedModule_, envResult), errs) = runState (runReaderT action solverResult) []
       result =
-        ZonkResult
-          { zonkedModules = modulesResult,
-            zonkedModuleNames = Map.map (.moduleName) idResult.identifiedModules,
-            zonkedTypeEnvironment = envResult
+        ModuleZonkResult
+          { zonkedModule = zonkedModule_,
+            zonkedTypeEnv = envResult
           }
    in (result, reverse errs)
   where
-    zonkEnvEntry idResult_ variableId t =
-      let sourceSpan = case Map.lookup variableId idResult_.identifiedVariables of
-            Just vd -> vd.variableSourceSpan
-            Nothing -> placeholderSpan
+    zonkEnvEntry resolution t =
+      let sourceSpan = case resolution of
+            ResolvedTopLevel qualifiedName ->
+              case Map.lookup qualifiedName variables of
+                Just variableData -> variableData.variableSourceSpan
+                Nothing -> emptySourceSpan
+            ResolvedLocal _ -> emptySourceSpan
        in zonkType sourceSpan t
-    placeholderSpan =
-      SrcSpan
-        { filePath = "",
-          start = Position {line = 0, column = 0},
-          end = Position {line = 0, column = 0}
-        }

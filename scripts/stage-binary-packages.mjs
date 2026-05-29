@@ -80,10 +80,7 @@ for (const { key, os, cpu } of PLATFORMS) {
     files: ["bin", "README.md"],
   };
 
-  writeFileSync(
-    resolve(pkgDir, "package.json"),
-    `${JSON.stringify(pkg, null, 2)}\n`,
-  );
+  writeFileSync(resolve(pkgDir, "package.json"), `${JSON.stringify(pkg, null, 2)}\n`);
 
   writeFileSync(
     resolve(pkgDir, "README.md"),

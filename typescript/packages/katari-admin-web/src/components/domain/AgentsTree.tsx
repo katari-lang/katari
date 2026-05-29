@@ -1,12 +1,6 @@
+import { ChevronDown, ChevronRight, FileCode, Folder, FolderOpen } from "lucide-react";
 import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import {
-  ChevronDown,
-  ChevronRight,
-  Folder,
-  FolderOpen,
-  FileCode,
-} from "lucide-react";
 import type { AgentWire } from "@/api/types";
 
 type TreeNode =
@@ -23,8 +17,7 @@ function buildTree(agents: AgentWire[]): TreeNode[] {
       let next =
         cursor.kind === "folder"
           ? cursor.children.find(
-              (c): c is TreeNode & { kind: "folder" } =>
-                c.kind === "folder" && c.name === seg,
+              (c): c is TreeNode & { kind: "folder" } => c.kind === "folder" && c.name === seg,
             )
           : undefined;
       if (next === undefined) {
@@ -50,18 +43,11 @@ function buildTree(agents: AgentWire[]): TreeNode[] {
 
 // Folders first (alpha), then leaves (alpha). Matches file-explorer norms.
 function sortTree(nodes: TreeNode[]): TreeNode[] {
-  const folders = nodes.filter(
-    (n): n is TreeNode & { kind: "folder" } => n.kind === "folder",
-  );
-  const leaves = nodes.filter(
-    (n): n is TreeNode & { kind: "leaf" } => n.kind === "leaf",
-  );
+  const folders = nodes.filter((n): n is TreeNode & { kind: "folder" } => n.kind === "folder");
+  const leaves = nodes.filter((n): n is TreeNode & { kind: "leaf" } => n.kind === "leaf");
   folders.sort((a, b) => a.name.localeCompare(b.name));
   leaves.sort((a, b) => a.name.localeCompare(b.name));
-  return [
-    ...folders.map((f) => ({ ...f, children: sortTree(f.children) })),
-    ...leaves,
-  ];
+  return [...folders.map((f) => ({ ...f, children: sortTree(f.children) })), ...leaves];
 }
 
 type Props = {
@@ -196,13 +182,9 @@ function TreeRow({
         <span className="inline-block size-4 shrink-0" aria-hidden />
         <FileCode className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
         <div className="flex min-w-0 flex-1 flex-col">
-          <span className="truncate font-mono text-foreground">
-            {node.name}
-          </span>
+          <span className="truncate font-mono text-foreground">{node.name}</span>
           {desc !== undefined && desc !== "" && (
-            <span className="mt-0.5 truncate text-xs text-muted-foreground">
-              {desc}
-            </span>
+            <span className="mt-0.5 truncate text-xs text-muted-foreground">{desc}</span>
           )}
         </div>
       </Link>

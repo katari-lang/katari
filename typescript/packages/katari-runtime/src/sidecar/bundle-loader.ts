@@ -7,8 +7,8 @@
 // bundle to disk under `os.tmpdir()` and pass the path to `spawn`.
 // Cleanup is wired to `Sidecar.shutdown()` via the `onShutdown` hook.
 
-import { tmpdir } from "node:os";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Logger } from "../engine/logger.js";
 import type { Sidecar } from "./sidecar.js";
@@ -24,9 +24,7 @@ export interface LoadSubprocessSidecarOptions {
   env?: Record<string, string>;
 }
 
-export async function loadSubprocessSidecar(
-  opts: LoadSubprocessSidecarOptions,
-): Promise<Sidecar> {
+export async function loadSubprocessSidecar(opts: LoadSubprocessSidecarOptions): Promise<Sidecar> {
   const dir = await mkdtemp(join(tmpdir(), "katari-sidecar-"));
   const bundlePath = join(dir, "sidecar.mjs");
   await writeFile(bundlePath, opts.bundle.entry, "utf8");

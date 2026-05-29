@@ -8,22 +8,27 @@ module Katari.Cli.Check
   ( Options (..),
     optionsParser,
     run,
+
     -- * Shared helpers (used by 'Katari.Cli.Build')
     loadProject,
     emitDiagnostics,
+    findProjectRoot,
   )
 where
 
+import Control.Monad (when)
 import Data.Map.Strict (Map)
-import qualified Data.Map.Strict as Map
+import Data.Map.Strict qualified as Map
 import Data.Text (Text)
-import qualified Data.Text.IO as TextIO
-import qualified Katari.Compile as Compile
+import Data.Text qualified as Text
+import Data.Text.IO qualified as TextIO
+import Katari.Cli.CompileCache qualified as CompileCache
+import Katari.Compile qualified as Compile
 import Katari.Diagnostic (Diagnostic, Severity (..), filterAtLeast, hasErrors)
 import Katari.Diagnostic.Render (renderDiagnostics, renderDiagnosticsAnsi)
-import qualified Data.Text as Text
-import qualified Katari.Project.Discovery as Project
-import qualified Katari.Project.Resolve as Project
+import Katari.Project.Cache qualified as Cache
+import Katari.Project.Discovery qualified as Project
+import Katari.Project.Resolve qualified as Project
 import Options.Applicative
 import System.Directory (getCurrentDirectory)
 import System.Environment (lookupEnv)
@@ -50,50 +55,56 @@ optionsParser =
 
 run :: Options -> IO ()
 run opts = do
-  (input, fileTexts) <- loadProject opts
-  let result = Compile.compile input
+  (root, input, fileTexts) <- loadProject opts
+  result <- Compile.compile (TextIO.hPutStrLn stderr . Compile.renderCompileLog) input
+  Cache.ensureCacheDirs (Cache.projectCachePaths root)
+  CompileCache.saveDiskCache root (CompileCache.toDiskCache result.updatedCache)
   emitDiagnostics fileTexts result.diagnostics
-  if hasErrors result.diagnostics
-    then exitWith (ExitFailure 1)
-    else pure ()
+  when (hasErrors result.diagnostics) $ exitWith (ExitFailure 1)
 
 -- ---------------------------------------------------------------------------
 -- Helpers (shared with build)
 -- ---------------------------------------------------------------------------
 
-loadProject :: Options -> IO (Compile.CompileInput, Map FilePath Text)
-loadProject opts = do
+findProjectRoot :: Options -> IO FilePath
+findProjectRoot opts = do
   start <- maybe getCurrentDirectory pure opts.optProjectRoot
   mRoot <- Project.findProjectRoot start
   case mRoot of
     Nothing -> do
-      hPutStrLn stderr "katari check: no katari.toml found in this or any parent directory"
+      hPutStrLn stderr "katari: no katari.toml found in this or any parent directory"
       exitWith (ExitFailure 2)
-    Just root -> do
-      rpRes <- Project.loadResolvedProject root
-      case rpRes of
-        Left err -> do
-          hPutStrLn stderr ("katari check: " <> Text.unpack (Project.renderResolveError err))
-          exitWith (ExitFailure 2)
-        Right resolved -> case Project.assembleProject resolved of
-          Left err -> do
-            hPutStrLn stderr ("katari check: " <> Text.unpack (Project.renderResolveError err))
-            exitWith (ExitFailure 2)
-          Right assembly -> do
-            let sources =
-                  Map.map
-                    ( \e ->
-                        Compile.SourceEntry
-                          { Compile.filePath = e.sourcePath,
-                            Compile.sourceText = e.sourceText
-                          }
-                    )
-                    assembly.sources
-                fileTexts =
-                  Map.fromList
-                    [ (e.sourcePath, e.sourceText) | e <- Map.elems assembly.sources
-                    ]
-            pure (Compile.CompileInput {Compile.sources = sources}, fileTexts)
+    Just root -> pure root
+
+loadProject :: Options -> IO (FilePath, Compile.CompileInput, Map FilePath Text)
+loadProject opts = do
+  root <- findProjectRoot opts
+  rpRes <- Project.loadResolvedProject root
+  case rpRes of
+    Left err -> do
+      hPutStrLn stderr ("katari: " <> Text.unpack (Project.renderResolveError err))
+      exitWith (ExitFailure 2)
+    Right resolved -> case Project.assembleProject resolved of
+      Left err -> do
+        hPutStrLn stderr ("katari: " <> Text.unpack (Project.renderResolveError err))
+        exitWith (ExitFailure 2)
+      Right assembly -> do
+        diskCache <- CompileCache.loadDiskCache root
+        let sources =
+              Map.map
+                ( \e ->
+                    Compile.SourceEntry
+                      { Compile.filePath = e.sourcePath,
+                        Compile.sourceText = e.sourceText
+                      }
+                )
+                assembly.sources
+            fileTexts =
+              Map.fromList
+                [ (e.sourcePath, e.sourceText) | e <- Map.elems assembly.sources
+                ]
+            cache = CompileCache.applyDiskCache diskCache
+        pure (root, Compile.CompileInput {Compile.sources = sources, Compile.cache = cache}, fileTexts)
 
 emitDiagnostics :: Map FilePath Text -> [Diagnostic] -> IO ()
 emitDiagnostics fileTexts ds = do

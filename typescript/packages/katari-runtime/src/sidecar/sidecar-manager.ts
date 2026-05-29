@@ -10,7 +10,7 @@
 
 import type { Logger } from "../engine/logger.js";
 import type { Sidecar } from "./sidecar.js";
-import type { SidecarBundle, ChildToParent, ParentToChild } from "./types.js";
+import type { ChildToParent, ParentToChild, SidecarBundle } from "./types.js";
 
 /**
  * Factory that creates Sidecar instances.
@@ -31,10 +31,7 @@ export type SidecarFactory<TKey> = (
  * Callback for receiving one child->parent message from a sidecar.
  * In api-server, the orchestrator uses this to "start a new tick".
  */
-export type SidecarMessageHandler<TKey> = (
-  key: TKey,
-  msg: ChildToParent,
-) => Promise<void>;
+export type SidecarMessageHandler<TKey> = (key: TKey, msg: ChildToParent) => Promise<void>;
 
 export class SidecarManager<TKey> {
   private readonly sidecars = new Map<string, Sidecar>();
@@ -50,10 +47,7 @@ export class SidecarManager<TKey> {
     this.handler = handler;
   }
 
-  async ensureStarted(input: {
-    key: TKey;
-    bundle: SidecarBundle | null;
-  }): Promise<void> {
+  async ensureStarted(input: { key: TKey; bundle: SidecarBundle | null }): Promise<void> {
     const k = this.keyToString(input.key);
     if (this.sidecars.has(k)) return;
     const sidecar = await this.factory(input.key, input.bundle, this.logger);
@@ -85,9 +79,7 @@ export class SidecarManager<TKey> {
   async send(key: TKey, msg: ParentToChild): Promise<void> {
     const sidecar = this.sidecars.get(this.keyToString(key));
     if (sidecar === undefined) {
-      throw new Error(
-        `sidecar-manager: no live sidecar for key ${this.keyToString(key)}`,
-      );
+      throw new Error(`sidecar-manager: no live sidecar for key ${this.keyToString(key)}`);
     }
     await sidecar.send(msg);
   }

@@ -102,12 +102,10 @@ function traceValue(
       for (const e of v.elements) traceValue(e, visitScope, visitClosure);
       return;
     case "tagged":
-      for (const f of Object.values(v.fields))
-        traceValue(f, visitScope, visitClosure);
+      for (const f of Object.values(v.fields)) traceValue(f, visitScope, visitClosure);
       return;
     case "record":
-      for (const e of Object.values(v.entries))
-        traceValue(e, visitScope, visitClosure);
+      for (const e of Object.values(v.entries)) traceValue(e, visitScope, visitClosure);
       return;
     default:
       return;

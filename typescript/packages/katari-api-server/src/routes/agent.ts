@@ -8,10 +8,7 @@
 // don't want to make two requests.
 
 import { Hono } from "hono";
-import {
-  ProjectIdSchema,
-  SnapshotIdSchema,
-} from "./middleware/validation.js";
+import { z } from "zod";
 import {
   AgentNotFound,
   NoSnapshotForProject,
@@ -19,7 +16,7 @@ import {
   type SnapshotService,
 } from "../services/snapshot-service.js";
 import type { ProjectId, SnapshotId } from "../storage/types.js";
-import { z } from "zod";
+import { ProjectIdSchema, SnapshotIdSchema } from "./middleware/validation.js";
 
 // QualifiedName wire format: dotted module path + leaf identifier
 // (e.g. "tools.http.fetch"). We accept letters, digits, underscores,
@@ -30,8 +27,7 @@ const QualifiedNameSchema = z
   .min(1)
   .max(256)
   .regex(/^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$/, {
-    message:
-      "qualifiedName must be a dotted identifier path (e.g. 'tools.http.fetch')",
+    message: "qualifiedName must be a dotted identifier path (e.g. 'tools.http.fetch')",
   });
 
 function parseQualifiedName(raw: string | undefined): string {

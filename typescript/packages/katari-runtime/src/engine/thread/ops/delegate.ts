@@ -16,20 +16,14 @@
 // Inbound `escalate` from the peer is converted into an upward ask to
 // the parent; the eventual `askAck` becomes an outbound `escalateAck`.
 
+import { encodeCoreAgentDefId, encodeFfiAgentDefId } from "../../../agent-def-id.js";
 import type { Block, BlockId, DelegateBlock } from "../../../ir/types.js";
-import type { CallId } from "../../id.js";
 import type { Endpoint } from "../../endpoint.js";
-import type { DelegateThread } from "../types.js";
-import {
-  defaultAskAckProxy,
-  defaultCancelAckUnexpected,
-} from "./defaults.js";
-import {
-  encodeCoreAgentDefId,
-  encodeFfiAgentDefId,
-} from "../../../agent-def-id.js";
-import { lookupValue } from "../common.js";
+import type { CallId } from "../../id.js";
 import type { StepCtx } from "../../step-ctx.js";
+import { lookupValue } from "../common.js";
+import type { DelegateThread } from "../types.js";
+import { defaultAskAckProxy, defaultCancelAckUnexpected } from "./defaults.js";
 import type { ThreadOps } from "./types.js";
 
 export const delegateOps: ThreadOps<DelegateThread> = {
@@ -114,18 +108,12 @@ function getDelegateBlock(ctx: StepCtx, blockId: BlockId): DelegateBlock {
     throw new Error(`engine.delegate: block ${blockId} not found`);
   }
   if (b.kind !== "blockDelegate") {
-    throw new Error(
-      `engine.delegate: block ${blockId} is not blockDelegate (${b.kind})`,
-    );
+    throw new Error(`engine.delegate: block ${blockId} is not blockDelegate (${b.kind})`);
   }
   return b.body;
 }
 
-function emitInitialDelegate(
-  ctx: StepCtx,
-  t: DelegateThread,
-  block: DelegateBlock,
-): void {
+function emitInitialDelegate(ctx: StepCtx, t: DelegateThread, block: DelegateBlock): void {
   // Register on the sender side so inbound delegateAck / terminateAck
   // can be routed back here.
   ctx.state.pendingDelegateOut[t.delegationId] = t.id;
@@ -224,10 +212,7 @@ function resolveTarget(
  * recompute it. For value targets the runtime value must still be alive
  * in the scope chain (cancel happens before the thread exits).
  */
-function peerEndpointForDelegate(
-  ctx: StepCtx,
-  t: DelegateThread,
-): Endpoint {
+function peerEndpointForDelegate(ctx: StepCtx, t: DelegateThread): Endpoint {
   const block = getDelegateBlock(ctx, t.blockId);
   return resolveTarget(ctx, t, block).peer;
 }

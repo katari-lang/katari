@@ -1,13 +1,13 @@
+import { motion } from "framer-motion";
 import type React from "react";
 import { useState } from "react";
-import { useNavigate, useLocation } from "react-router-dom";
-import { motion } from "framer-motion";
+import { useLocation, useNavigate } from "react-router-dom";
 import { ApiError, createApiClient } from "@/api/client";
-import { useApiKey } from "@/contexts/ApiKeyContext";
 import { Logo } from "@/components/shell/Logo";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { Label } from "@/components/ui/Label";
+import { useApiKey } from "@/contexts/ApiKeyContext";
 
 export function LoginPage() {
   const navigate = useNavigate();
@@ -26,10 +26,7 @@ export function LoginPage() {
       await client.listProjects({ limit: 1 });
       storeApiKey(apiKey.trim());
       const raw = new URLSearchParams(location.search).get("redirect");
-      const redirect =
-        raw?.startsWith("/") && !raw.startsWith("//")
-          ? raw
-          : "/projects";
+      const redirect = raw?.startsWith("/") && !raw.startsWith("//") ? raw : "/projects";
       navigate(redirect, { replace: true });
     } catch (err) {
       if (err instanceof ApiError) {
@@ -79,12 +76,7 @@ export function LoginPage() {
               {error}
             </p>
           )}
-          <Button
-            type="submit"
-            variant="primary"
-            loading={loading}
-            className="w-full"
-          >
+          <Button type="submit" variant="primary" loading={loading} className="w-full">
             Sign in
           </Button>
         </form>

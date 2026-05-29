@@ -47,10 +47,7 @@ export function emptyBuffers(): StepBuffers {
 }
 
 /** Build a StepCtx that backs onto the given state + buffers. */
-export function makeStepCtx(
-  state: State,
-  buffers: StepBuffers,
-): StepCtx {
+export function makeStepCtx(state: State, buffers: StepBuffers): StepCtx {
   return {
     state,
     enqueue(event) {

@@ -6,13 +6,13 @@
 // Skipped when the katari binary is not available — local runs need
 // `stack install katari` first. CI sets KATARI_BIN explicitly.
 
-import { beforeAll, describe, expect, it, afterEach } from "vitest";
-import { resolve } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
+import { resolve } from "node:path";
 import { startHttpHarness } from "@katari-lang/api-server/tests/helpers.js";
-import { encryptSecret, resetKeyCacheForTesting } from "@katari-lang/runtime";
 import type { MockAgentHandler, RawValue } from "@katari-lang/runtime";
+import { encryptSecret, resetKeyCacheForTesting } from "@katari-lang/runtime";
+import { afterEach, beforeAll, describe, expect, it } from "vitest";
 
 // Crypto key for secret-bearing samples. Set before any harness boots so
 // that the api-server side can encrypt / decrypt env entries; the key
@@ -144,17 +144,7 @@ async function applyAndRun(
   // schema prompt which can't read from this subprocess's closed
   // stdin.)
   const runR = await runKatari(
-    [
-      "run",
-      `${pkg}.main`,
-      "--api-url",
-      harness.url,
-      "--project",
-      pkg,
-      "--args",
-      "{}",
-      "--wait",
-    ],
+    ["run", `${pkg}.main`, "--api-url", harness.url, "--project", pkg, "--args", "{}", "--wait"],
     sampleRoot,
   );
   if (runR.status !== 0) {
@@ -218,13 +208,10 @@ describe("samples/ end-to-end (apply → run → verify)", () => {
     },
   );
 
-  itE2E(
-    "09-req-handler: three ticks under a stateful handler sum to 6",
-    async () => {
-      const result = await applyAndRun("req-handler", "09-req-handler");
-      expect(result).toBe(6);
-    },
-  );
+  itE2E("09-req-handler: three ticks under a stateful handler sum to 6", async () => {
+    const result = await applyAndRun("req-handler", "09-req-handler");
+    expect(result).toBe(6);
+  });
 
   itE2E(
     "10-tuple-pattern: (integer, string) tuple destructured via match returns '42 with hello'",
@@ -277,21 +264,16 @@ describe("samples/ end-to-end (apply → run → verify)", () => {
     },
   );
 
-  itE2E(
-    "16-multi-package: dep `list_utils` doubles 6 to 12 across packages",
-    async () => {
-      const result = await applyAndRun("multi-package", "16-multi-package");
-      expect(result).toBe(12);
-    },
-  );
+  itE2E("16-multi-package: dep `list_utils` doubles 6 to 12 across packages", async () => {
+    const result = await applyAndRun("multi-package", "16-multi-package");
+    expect(result).toBe(12);
+  });
 
   itE2E(
     "17-secret-mock-ai: get_secret_env → http_request roundtrip preserves the secret value across the FFI boundary",
     async () => {
       const result = await applyAndRun("secret-mock-ai", "17-secret-mock-ai", {
-        envEntries: [
-          { key: "MOCK_KEY", value: "test_token_123", isSecret: true },
-        ],
+        envEntries: [{ key: "MOCK_KEY", value: "test_token_123", isSecret: true }],
         handlers: {
           "secret_mock_ai.http_request": async ({ args }) => {
             const url = args["url"] as string;
@@ -300,9 +282,7 @@ describe("samples/ end-to-end (apply → run → verify)", () => {
           },
         },
       });
-      expect(result).toBe(
-        "GET https://example.com/echo (auth=test_token_123)",
-      );
+      expect(result).toBe("GET https://example.com/echo (auth=test_token_123)");
     },
   );
 
@@ -317,13 +297,8 @@ describe("samples/ end-to-end (apply → run → verify)", () => {
   itE2E(
     "20-pattern-narrowing: integer/string/boolean/record type guards + record pattern narrow `unknown`",
     async () => {
-      const result = await applyAndRun(
-        "pattern-narrowing",
-        "20-pattern-narrowing",
-      );
-      expect(result).toBe(
-        "int:42 | str:hello | bool:true | user:alice | other",
-      );
+      const result = await applyAndRun("pattern-narrowing", "20-pattern-narrowing");
+      expect(result).toBe("int:42 | str:hello | bool:true | user:alice | other");
     },
   );
 
@@ -331,9 +306,7 @@ describe("samples/ end-to-end (apply → run → verify)", () => {
     "21-json: json_parse + record pattern + json_stringify round-trip a JSON object",
     async () => {
       const result = await applyAndRun("json", "21-json");
-      expect(result).toBe(
-        'name=alice; echo={"name":"alice","age":30}',
-      );
+      expect(result).toBe('name=alice; echo={"name":"alice","age":30}');
     },
   );
 

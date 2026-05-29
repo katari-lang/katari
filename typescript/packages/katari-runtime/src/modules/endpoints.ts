@@ -8,7 +8,7 @@
 // redeclared) so the engine's `createState` default and the public
 // host-facing constant can never drift apart.
 
-import { CORE_ENDPOINT, endpoint, type Endpoint } from "../engine/endpoint.js";
+import { CORE_ENDPOINT, type Endpoint, endpoint } from "../engine/endpoint.js";
 
 export { CORE_ENDPOINT };
 export const API_ENDPOINT: Endpoint = endpoint("api://main");

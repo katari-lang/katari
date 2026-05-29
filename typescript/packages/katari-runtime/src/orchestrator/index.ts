@@ -1,21 +1,20 @@
 // Barrel exports for the orchestrator module.
 
+export type { TickContext } from "./orchestrator.js";
 export {
+  NoSnapshotForProject,
   Orchestrator,
   SnapshotNotFound,
-  NoSnapshotForProject,
 } from "./orchestrator.js";
-export type { TickContext } from "./orchestrator.js";
-
-export { recoverOnBoot } from "./recovery.js";
 export type { RecoveryOptions } from "./recovery.js";
+export { recoverOnBoot } from "./recovery.js";
 
 export type {
-  OrchestratorSnapshotId,
+  ApiLikeModule,
   OrchestratorProjectId,
+  OrchestratorSnapshotId,
   OrchestratorStorage,
   ResolvedSnapshot,
-  ApiLikeModule,
   TickModules,
   TickModulesFactory,
 } from "./types.js";

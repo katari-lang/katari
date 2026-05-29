@@ -1,20 +1,20 @@
 // Snapshot routes: upload / list / get / latest / schema. All scoped to
 // a project (= mounted under `/project/:projectId/snapshot`).
 
-import { Hono } from "hono";
 import type { IRModule, SchemaBundle } from "@katari-lang/types";
-import {
-  PaginationQuerySchema,
-  ProjectIdSchema,
-  SnapshotIdSchema,
-  UploadSnapshotSchema,
-} from "./middleware/validation.js";
+import { Hono } from "hono";
 import {
   NoSnapshotForProject,
   SnapshotNotFound,
   type SnapshotService,
 } from "../services/snapshot-service.js";
 import { buildAgentRoutes } from "./agent.js";
+import {
+  PaginationQuerySchema,
+  ProjectIdSchema,
+  SnapshotIdSchema,
+  UploadSnapshotSchema,
+} from "./middleware/validation.js";
 
 export function buildSnapshotRoutes(snapshots: SnapshotService): Hono {
   const app = new Hono();
@@ -51,10 +51,7 @@ export function buildSnapshotRoutes(snapshots: SnapshotService): Hono {
       const snapshot = await snapshots.get(snapshotId);
       return c.json({ snapshot });
     } catch (err) {
-      if (
-        err instanceof NoSnapshotForProject ||
-        err instanceof SnapshotNotFound
-      ) {
+      if (err instanceof NoSnapshotForProject || err instanceof SnapshotNotFound) {
         return c.json({ error: err.message }, 404);
       }
       throw err;

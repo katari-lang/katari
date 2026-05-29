@@ -2,27 +2,26 @@ module Katari.ConstraintGeneratorSpec (spec) where
 
 import Data.List (find)
 import Data.Map.Strict qualified as Map
+import Data.Maybe (mapMaybe)
 import Data.Set qualified as Set
 import Data.Text (Text)
+import Katari.Compile qualified as Compile
+import Katari.Diagnostic (Diagnostic, hasErrors)
+import Katari.TestSupport qualified as TestSupport
 import Katari.Id
-  ( QualifiedName (QualifiedName),
-    RequestId,
-    TypeId,
-    VariableId,
+  ( QualifiedName (..),
+    VariableResolution (..),
   )
 import Katari.Lexer qualified as Lexer
 import Katari.Parser qualified as Parser
 import Katari.SemanticType
+import Katari.TestSupport (IdentifierResult (..))
 import Katari.Typechecker.ConstraintGenerator
 import Katari.Typechecker.Identifier
-  ( IdentifierResult (..),
-    RequestData (RequestData),
-    TypeData (..),
+  ( SymbolEntry (..),
     VariableData (..),
-    identify,
   )
-import Katari.Compile qualified as Compile
-import Katari.Diagnostic (Diagnostic, hasErrors)
+import Katari.Typechecker.ScopeIndex (ScopeFrame (..), ScopeIndex (..))
 import Test.Hspec
 
 -- ---------------------------------------------------------------------------
@@ -41,13 +40,13 @@ runOneWithIdentifier :: Text -> IO (ConstraintGenResult, [ConstraintError], Iden
 runOneWithIdentifier src =
   let (stream, _) = Lexer.lex "<test>" src
       (parsed, parseErrors) = Parser.parse "<test>" stream
-  in case parseErrors of
-    (_:_) -> fail ("parse failure: " ++ show parseErrors)
-    [] -> case Compile.identifyWithStdlib (Map.singleton "main" parsed) of
-      (result, []) ->
-        let (cg, errs) = generateConstraints result
-         in pure (cg, errs, result)
-      (_, errs) -> fail ("identify failure: " ++ show errs)
+   in case parseErrors of
+        (_ : _) -> fail ("parse failure: " ++ show parseErrors)
+        [] -> case TestSupport.identifyWithStdlib (Map.singleton "main" parsed) of
+          (result, []) ->
+            let (cg, errs) = TestSupport.generateConstraintsAll result
+             in pure (cg, errs, result)
+          (_, errs) -> fail ("identify failure: " ++ show errs)
 
 -- | Run the full compile pipeline (parse → identify → CG → solve → zonk →
 -- lower) on a single "main" module and return all diagnostics. Unlike
@@ -56,10 +55,9 @@ runOneWithIdentifier src =
 compileOne :: Text -> IO [Diagnostic]
 compileOne src =
   let entry = Compile.SourceEntry {filePath = "<test>", sourceText = src}
-      input = Compile.CompileInput {sources = Map.singleton "main" entry}
-      result = Compile.compile input
-  in pure result.diagnostics
-
+      input = Compile.CompileInput {sources = Map.singleton "main" entry, cache = Map.empty}
+      result = TestSupport.compileSync input
+   in pure result.diagnostics
 
 countTypeConstraints :: ConstraintGenResult -> Int
 countTypeConstraints result =
@@ -79,28 +77,29 @@ requestConstraints ::
 requestConstraints result =
   [(lhs, rhs) | RequestConstraint {requestLhs = lhs, requestRhs = rhs} <- Set.toList result.constraints]
 
--- | Find the VariableId for a given source name.
-variableIdOf :: Text -> IdentifierResult -> Maybe VariableId
-variableIdOf name result =
-  fst <$> find ((== name) . (.variableName) . snd) (Map.toList result.identifiedVariables)
+-- | Find the VariableResolution for a named binding. Searches top-level
+-- identifiedVariables first, then falls back to scanning the scopeIndex
+-- for local variables (parameters, let bindings, match arm bindings).
+variableResolutionOf :: Text -> IdentifierResult -> Maybe VariableResolution
+variableResolutionOf name result =
+  case ResolvedTopLevel . fst <$> find ((== name) . (.variableName) . snd) (Map.toList result.identifiedVariables) of
+    Just resolution -> Just resolution
+    Nothing ->
+      -- Search all scope frames for a local variable with this name.
+      let allFrames = concatMap snd (Map.toList result.scopeIndex.framesByFile)
+          candidates = mapMaybe (\frame -> Map.lookup name frame.frameSymbols >>= (.variableSymbol)) allFrames
+       in case candidates of
+            (resolution : _) -> Just resolution
+            [] -> Nothing
 
--- | Look up the 'RequestId' that corresponds to a given call-side
--- 'VariableId'. Used to populate request-set assertions in tests where the
--- request lookup is keyed by request id.
-requestIdOfVariable :: VariableId -> IdentifierResult -> RequestId
-requestIdOfVariable vid result =
-  head
-    [ rid
-      | (rid, rd) <- Map.toList result.identifiedRequests,
-        requestVariableIdOf rd == vid
-    ]
-  where
-    requestVariableIdOf :: RequestData -> VariableId
-    requestVariableIdOf (RequestData _ _ v _) = v
+-- | Find the QualifiedName for a named request declaration.
+requestQNameOf :: Text -> IdentifierResult -> Maybe QualifiedName
+requestQNameOf name result =
+  fst <$> find (\(qn, _) -> qn.name == name) (Map.toList result.identifiedRequests)
 
 -- | Lookup the type variable assigned to a named variable.
 typeVarOf :: Text -> ConstraintGenResult -> IdentifierResult -> Maybe (SemanticType Unresolved)
-typeVarOf name cg ir = variableIdOf name ir >>= \vid -> Map.lookup vid cg.typeEnvironment
+typeVarOf name cg ir = variableResolutionOf name ir >>= \vid -> Map.lookup vid cg.typeEnvironment
 
 -- | True if any type constraint has the given lhs.
 hasTypeConstraintLhs ::
@@ -123,8 +122,8 @@ hasRequestConstraint ::
   Bool
 hasRequestConstraint p cg = any (uncurry p) (requestConstraints cg)
 
--- | Extract concrete RequestId elements from a SemanticRequest.
-concreteRequests :: SemanticRequest phase -> Set.Set RequestId
+-- | Extract concrete QualifiedName elements from a SemanticRequest.
+concreteRequests :: SemanticRequest phase -> Set.Set QualifiedName
 concreteRequests (SemanticRequest elements) =
   Set.fromList [r | SemanticRequestElementConcrete r <- Set.toList elements]
 
@@ -188,21 +187,21 @@ multipleModules = describe "multiple modules" $ do
         (mainStream, _) = Lexer.lex "<test>" main_
         (mainMod, mainErrors) = Parser.parse "<test>" mainStream
     case libErrors ++ mainErrors of
-      (_:_) -> expectationFailure ("parse: " ++ show (libErrors ++ mainErrors))
-      [] -> case Compile.identifyWithStdlib (Map.fromList [("lib", libMod), ("main", mainMod)]) of
+      (_ : _) -> expectationFailure ("parse: " ++ show (libErrors ++ mainErrors))
+      [] -> case TestSupport.identifyWithStdlib (Map.fromList [("lib", libMod), ("main", mainMod)]) of
         (_, e : es) -> expectationFailure ("identify errors: " ++ show (e : es))
         (result, []) -> do
-          let (cg, cgErrors) = generateConstraints result
+          let (cg, cgErrors) = TestSupport.generateConstraintsAll result
           cgErrors `shouldBe` []
           -- 同じ helper VariableId に対して typeEnvironment に entry が一つだけ
           -- (= 同一 type var が両 module で参照されている)
-          let helperVid =
+          let helperEntry =
                 find
                   ((== ("helper" :: Text)) . (.variableName) . snd)
                   (Map.toList result.identifiedVariables)
-          case helperVid of
-            Just (vid, _) ->
-              Map.member vid cg.typeEnvironment `shouldBe` True
+          case helperEntry of
+            Just (qualifiedName, _) ->
+              Map.member (ResolvedTopLevel qualifiedName) cg.typeEnvironment `shouldBe` True
             Nothing -> expectationFailure "expected helper variable in identified vars"
 
 -- ---------------------------------------------------------------------------
@@ -359,19 +358,20 @@ whereBlocks = describe "handle blocks" $ do
     countRequestConstraints cg `shouldSatisfy` (> 0)
 
   it "request handler with request annotation is rejected by parser" $ do
-    let (stream, _) = Lexer.lex "<test>" $
-          mconcat
-            [ "request fetch() -> string\n",
-              "agent main() -> string {\n",
-              "  handle {\n",
-              "    request fetch() -> string with bar { \"ok\" }\n",
-              "  }\n",
-              "  fetch()\n",
-              "}"
-            ]
+    let (stream, _) =
+          Lexer.lex "<test>" $
+            mconcat
+              [ "request fetch() -> string\n",
+                "agent main() -> string {\n",
+                "  handle {\n",
+                "    request fetch() -> string with bar { \"ok\" }\n",
+                "  }\n",
+                "  fetch()\n",
+                "}"
+              ]
         (_, parseErrors) = Parser.parse "<test>" stream
     case parseErrors of
-      (_:_) -> pure () -- parse error expected
+      (_ : _) -> pure () -- parse error expected
       [] -> expectationFailure "expected parse failure for handler with-clause"
 
   it "handler break value flows to a type variable (handle-result)" $ do
@@ -652,18 +652,17 @@ constraintContents = describe "constraint contents" $ do
 
   it "request declaration produces signature with self-request" $ do
     (cg, _, ir) <- runOneWithIdentifier "request fetch() -> string"
-    case (variableIdOf "fetch" ir, typeVarOf "fetch" cg ir) of
-      (Just fetchVid, Just tFetch) ->
-        let fetchReqId = requestIdOfVariable fetchVid ir
-         in cg
-              `shouldSatisfy` hasTypeConstraint
-                ( \l r -> case l of
-                    SemanticTypeFunction _ ret eff ->
-                      ret == SemanticTypeString
-                        && Set.member fetchReqId (concreteRequests eff)
-                        && r == tFetch
-                    _ -> False
-                )
+    case (requestQNameOf "fetch" ir, typeVarOf "fetch" cg ir) of
+      (Just fetchQName, Just tFetch) ->
+        cg
+          `shouldSatisfy` hasTypeConstraint
+            ( \l r -> case l of
+                SemanticTypeFunction _ ret eff ->
+                  ret == SemanticTypeString
+                    && Set.member fetchQName (concreteRequests eff)
+                    && r == tFetch
+                _ -> False
+            )
       _ -> expectationFailure "fetch not in identifier output / env"
 
   it "data ctor signature is pure (emptyRequest) and returns SemanticTypeData" $ do
@@ -707,16 +706,15 @@ constraintContents = describe "constraint contents" $ do
             "  fetch()\n",
             "}"
           ]
-    case variableIdOf "fetch" ir of
+    case requestQNameOf "fetch" ir of
       Nothing -> expectationFailure "fetch not in identifier output"
-      Just fetchVid ->
+      Just fetchQName ->
         -- innerEff <: outerEff ∪ {fetch}
         -- rhs.requestReqs に fetch が含まれている request constraint が存在
-        let fetchReqId = requestIdOfVariable fetchVid ir
-         in cg
-              `shouldSatisfy` hasRequestConstraint
-                ( \_ rhs -> Set.member fetchReqId (concreteRequests rhs)
-                )
+        cg
+          `shouldSatisfy` hasRequestConstraint
+            ( \_ rhs -> Set.member fetchQName (concreteRequests rhs)
+            )
 
   it "if branches both flow into the same result type var" $ do
     (cg, _) <- runOne "agent foo() { if (true) { 1 } else { 2 } }"
@@ -786,40 +784,35 @@ dataNameClash = describe "cross-module data name clash" $ do
         (streamB, _) = Lexer.lex "<test>" modB
         (parsedB, errorsB) = Parser.parse "<test>" streamB
     case errorsA ++ errorsB of
-      (_:_) -> expectationFailure ("parse: " ++ show (errorsA ++ errorsB))
+      (_ : _) -> expectationFailure ("parse: " ++ show (errorsA ++ errorsB))
       [] ->
-        case Compile.identifyWithStdlib (Map.fromList [("a", parsedA), ("b", parsedB)]) of
+        case TestSupport.identifyWithStdlib (Map.fromList [("a", parsedA), ("b", parsedB)]) of
           (_, e : es) -> expectationFailure ("identify errors: " ++ show (e : es))
           (result, []) -> do
-            let (cg, cgErrors) = generateConstraints result
+            let (cg, cgErrors) = TestSupport.generateConstraintsAll result
             cgErrors `shouldBe` []
-            -- 各モジュールの "foo" type に発行された TypeId を集める。
-            let fooTypeIds =
-                  [ tid
-                    | (tid, td) <- Map.toList result.identifiedTypes,
-                      typeNameOf td == "foo"
+            -- 各モジュールの "foo" type に発行された QualifiedName を集める。
+            let fooTypeQNames =
+                  [ qualifiedName
+                    | (qualifiedName, _td) <- Map.toList result.identifiedTypes,
+                      qualifiedName.name == "foo"
                   ]
-            length fooTypeIds `shouldBe` 2
-            -- どちらの TypeId も SemanticTypeData として制約に出現するはず。
+            length fooTypeQNames `shouldBe` 2
+            -- どちらの QualifiedName も SemanticTypeData として制約に出現するはず。
             -- (リファクタ前は両方が SemanticTypeUnknown に degrade していた)
-            let usedTids = Set.fromList (concatMap (collectDataTids . snd) (typeConstraints cg))
-            (head fooTypeIds `Set.member` usedTids) `shouldBe` True
-            (fooTypeIds !! 1 `Set.member` usedTids) `shouldBe` True
+            let usedQNames = Set.fromList (concatMap (collectDataQNames . snd) (typeConstraints cg))
+            (head fooTypeQNames `Set.member` usedQNames) `shouldBe` True
+            (fooTypeQNames !! 1 `Set.member` usedQNames) `shouldBe` True
   where
-    -- Bare name extracted from the qualified name (TypeData no longer
-    -- carries a separate @typeName@ field).
-    typeNameOf :: TypeData -> Text
-    typeNameOf td = case td.typeQualifiedName of
-      QualifiedName _ n -> n
-    collectDataTids :: SemanticType Unresolved -> [TypeId]
-    collectDataTids = \case
-      SemanticTypeData tid -> [tid]
+    collectDataQNames :: SemanticType Unresolved -> [QualifiedName]
+    collectDataQNames = \case
+      SemanticTypeData qualifiedName -> [qualifiedName]
       SemanticTypeFunction params returnType _ ->
-        concatMap collectDataTids (Map.elems params) <> collectDataTids returnType
-      SemanticTypeArray elementType -> collectDataTids elementType
-      SemanticTypeTuple elementTypes -> concatMap collectDataTids elementTypes
-      SemanticTypeUnion branches -> concatMap collectDataTids branches
-      SemanticTypeObject fields -> concatMap collectDataTids (Map.elems fields)
+        concatMap collectDataQNames (Map.elems params) <> collectDataQNames returnType
+      SemanticTypeArray elementType -> collectDataQNames elementType
+      SemanticTypeTuple elementTypes -> concatMap collectDataQNames elementTypes
+      SemanticTypeUnion branches -> concatMap collectDataQNames branches
+      SemanticTypeObject fields -> concatMap collectDataQNames (Map.elems fields)
       _ -> []
 
 -- ---------------------------------------------------------------------------

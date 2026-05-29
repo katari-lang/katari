@@ -32,7 +32,9 @@ export const requestOps: ThreadOps<RequestThread> = {
    * RequestThread has no children; receiving `done` is invariant violation.
    */
   done(_ctx, t, callId) {
-    throw new Error(`request thread received done (callId=${callId}) — no children expected on ${t.id}`);
+    throw new Error(
+      `request thread received done (callId=${callId}) — no children expected on ${t.id}`,
+    );
   },
 
   cancel: (ctx, t) => defaultCancel<RequestThread>(ctx, t as RequestThread),
@@ -54,9 +56,7 @@ export const requestOps: ThreadOps<RequestThread> = {
    */
   askAck(ctx, t, askId, value) {
     if (t.pendingAskId === undefined) {
-      throw new Error(
-        `engine.request: askAck on RequestThread ${t.id} without pending ask`,
-      );
+      throw new Error(`engine.request: askAck on RequestThread ${t.id} without pending ask`);
     }
     if (t.pendingAskId !== askId) {
       throw new Error(

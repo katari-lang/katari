@@ -13,12 +13,10 @@ import { spawnChild } from "../../spawn.js";
 import type { StepCtx } from "../../step-ctx.js";
 import type { Value } from "../../value.js";
 import type { CollectingThread } from "../types.js";
+
 type CollectingBlock = TupleBlock | ArrayBlock;
 
-export function collectingCreate(
-  ctx: StepCtx,
-  t: CollectingThread,
-): void {
+export function collectingCreate(ctx: StepCtx, t: CollectingThread): void {
   const block = getBlock(ctx, t.blockId);
   const elements = block.elements;
 
@@ -78,12 +76,7 @@ function getBlock(ctx: StepCtx, blockId: BlockId): CollectingBlock {
   return b.body;
 }
 
-function spawnElement(
-  ctx: StepCtx,
-  t: CollectingThread,
-  index: number,
-  blockId: BlockId,
-): void {
+function spawnElement(ctx: StepCtx, t: CollectingThread, index: number, blockId: BlockId): void {
   spawnChild(ctx, {
     parentId: t.id,
     parentCallId: index as CallId,
@@ -93,11 +86,7 @@ function spawnElement(
   });
 }
 
-function finishCollecting(
-  ctx: StepCtx,
-  t: CollectingThread,
-  totalLen: number,
-): void {
+function finishCollecting(ctx: StepCtx, t: CollectingThread, totalLen: number): void {
   const elements: Value[] = [];
   for (let i = 0; i < totalLen; i++) {
     const v = t.collected[i as CallId] as Value | undefined;
@@ -109,11 +98,7 @@ function finishCollecting(
   emitDone(ctx, t, elements);
 }
 
-function emitDone(
-  ctx: StepCtx,
-  t: CollectingThread,
-  elements: Value[],
-): void {
+function emitDone(ctx: StepCtx, t: CollectingThread, elements: Value[]): void {
   if (t.parent === null || t.parentCallId === null) return;
   // Tuples and arrays share one runtime Value variant. The TupleThread
   // vs ArrayThread distinction only affects the IR-level evaluation

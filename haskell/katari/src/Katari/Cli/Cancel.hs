@@ -7,9 +7,9 @@ module Katari.Cli.Cancel
 where
 
 import Data.Text (Text)
-import qualified Data.Text as Text
-import qualified Katari.Api.Client as Api
-import qualified Katari.Api.Types as Api
+import Data.Text qualified as Text
+import Katari.Api.Client qualified as Api
+import Katari.Api.Types qualified as Api
 import Katari.Cli.Common (resolveApiClient)
 import Options.Applicative
 

@@ -4,19 +4,24 @@ module Katari.Api.Client
     ApiError (..),
     newApiClient,
     apiAuthFromEnv,
+
     -- * Projects
     upsertProject,
     listProjects,
+
     -- * Snapshots
     uploadSnapshot,
     listSnapshots,
+
     -- * Runs
     startRun,
     listRuns,
     getRun,
     cancelRun,
+
     -- * Agents
     listAgents,
+
     -- * Escalations
     listEscalations,
     answerEscalation,
@@ -24,14 +29,14 @@ module Katari.Api.Client
 where
 
 import Control.Exception (Exception, throwIO, try)
-import System.Environment (lookupEnv)
-import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.Key as AesonKey
-import qualified Data.Aeson.KeyMap as AesonKM
-import qualified Data.ByteString.Lazy as LBS
+import Data.Aeson qualified as Aeson
+import Data.Aeson.Key qualified as AesonKey
+import Data.Aeson.KeyMap qualified as AesonKM
+import Data.ByteString.Lazy qualified as LBS
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
-import qualified Data.Text as Text
-import qualified Data.Text.Encoding as TextEnc
+import Data.Text qualified as Text
+import Data.Text.Encoding qualified as TextEnc
 import GHC.Generics (Generic)
 import Katari.Api.Types
 import Network.HTTP.Client
@@ -47,10 +52,11 @@ import Network.HTTP.Client
     responseBody,
     responseStatus,
   )
-import qualified Network.HTTP.Client as HC
+import Network.HTTP.Client qualified as HC
 import Network.HTTP.Client.TLS (newTlsManager)
 import Network.HTTP.Types.Status (statusCode)
-import qualified Network.HTTP.Types.URI as HttpUri
+import Network.HTTP.Types.URI qualified as HttpUri
+import System.Environment (lookupEnv)
 
 -- ---------------------------------------------------------------------------
 -- Client + errors
@@ -165,7 +171,7 @@ cancelRun c runId = do
 
 listAgents :: ApiClient -> Text -> Maybe Text -> IO ([AgentDefinition], Text)
 listAgents c projectId snapshotId = do
-  let sid = maybe "latest" id snapshotId
+  let sid = fromMaybe "latest" snapshotId
   r :: ListAgentsResponse <-
     get c ("/project/" <> projectId <> "/snapshot/" <> sid <> "/agent")
   pure (r.agents, r.snapshotId)
@@ -201,14 +207,14 @@ answerEscalation c escalationId v = do
 -- HTTP primitives
 -- ---------------------------------------------------------------------------
 
-get :: Aeson.FromJSON a => ApiClient -> Text -> IO a
+get :: (Aeson.FromJSON a) => ApiClient -> Text -> IO a
 get c path = request c "GET" path Nothing
 
 post :: (Aeson.ToJSON req, Aeson.FromJSON res) => ApiClient -> Text -> req -> IO res
 post c path req = request c "POST" path (Just (Aeson.encode req))
 
 request ::
-  Aeson.FromJSON res =>
+  (Aeson.FromJSON res) =>
   ApiClient -> -- client
   Text -> -- HTTP method
   Text -> -- request path (with leading '/')

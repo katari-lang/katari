@@ -23,7 +23,8 @@
 --     request set is constrained to be a subset of @outer ∪ handled-reqs@.
 --   * 'CG' never traverses the AST a second time to "collect" structural
 --     information. Anything CG needs that isn't immediately visible at a
---     node lives in 'IdentifierResult' and is read locally.
+--     node is supplied up-front in 'ConstraintContext' (type / request
+--     tables, prim rules) and looked up locally.
 module Katari.Typechecker.ConstraintGenerator
   ( -- * Constraint and reason
     Constraint (..),
@@ -40,7 +41,7 @@ module Katari.Typechecker.ConstraintGenerator
     toDiagnostic,
 
     -- * Entry point
-    generateConstraints,
+    generateConstraintsForSCC,
   )
 where
 
@@ -48,33 +49,25 @@ import Control.Monad (forM, replicateM, unless)
 import Control.Monad.Reader (ReaderT, asks, local, runReaderT)
 import Control.Monad.State.Strict (State, gets, modify, runState)
 import Control.Monad.Trans (lift)
+import Data.Foldable (for_)
 import Data.List (transpose)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
-import Data.Text qualified as T
 import Katari.AST
 import Katari.Common (LiteralValue (..), TypePatternTag (..))
 import Katari.Diagnostic (Diagnostic, diagnosticError)
 import Katari.Id
-  ( ConstructorId,
-    ModuleId,
-    QualifiedName (..),
-    RequestId,
-    TypeId (..),
-    VariableId,
+  ( QualifiedName (..),
+    VariableResolution (..),
   )
 import Katari.Prim (PrimRule (..))
 import Katari.SemanticType
 import Katari.SourceSpan
 import Katari.Typechecker.Identifier
-  ( ConstructorData (..),
-    IdentifierResult (..),
-    RequestData (..),
-    TypeData (..),
-    VariableData (..),
+  ( TypeData (..),
   )
 
 -- The 'Constrained' phase reuses the 'NameRefResolution Constrained s' family for
@@ -196,33 +189,28 @@ data ReasonKind where
 -- | Errors emitted by the constraint generator itself (separate from solver
 -- errors). Currently the only failure mode is a cyclic type synonym.
 data ConstraintError
-  = ConstraintErrorTypeSynonymCycle SourceSpan TypeId
+  = ConstraintErrorTypeSynonymCycle SourceSpan QualifiedName
   deriving (Eq, Show)
 
 -- | Convert a 'ConstraintError' to a unified 'Diagnostic'. Codes
--- K0200-K0219 are reserved for the constraint generator. The name map
--- (= 'TypeId' → user-declared name) lets us print
--- /"cyclic type synonym 'Foo'"/ instead of /"cyclic type synonym (TypeId 7)"/.
-toDiagnostic :: Map TypeId Text -> ConstraintError -> Diagnostic
-toDiagnostic typeNames = \case
-  ConstraintErrorTypeSynonymCycle sourceSpan tid@(TypeId rawId) ->
+-- K0200-K0219 are reserved for the constraint generator.
+toDiagnostic :: ConstraintError -> Diagnostic
+toDiagnostic = \case
+  ConstraintErrorTypeSynonymCycle sourceSpan qualifiedName ->
     diagnosticError
       "K0200"
-      ( "cyclic type synonym "
-          <> case Map.lookup tid typeNames of
-            Just n -> "'" <> n <> "'"
-            Nothing -> "(TypeId " <> T.pack (show rawId) <> ")"
-      )
+      ("cyclic type synonym '" <> qualifiedName.name <> "'")
       sourceSpan
 
 -- ===========================================================================
 -- Result
 -- ===========================================================================
 
--- | Type environment: maps each 'VariableId' (allocated by the Identifier
--- pass) to the 'SemanticType' Unresolved that the constraint generator
--- assigned to it.
-type TypeEnvironment = Map VariableId (SemanticType Unresolved)
+-- | Type environment: maps each 'VariableResolution' to the
+-- 'SemanticType' 'Unresolved' that the constraint generator assigned to it.
+-- Top-level variables use 'ResolvedTopLevel', local variables use
+-- 'ResolvedLocal'.
+type TypeEnvironment = Map VariableResolution (SemanticType Unresolved)
 
 -- | High-water marks of fresh-id supplies left over from constraint
 -- generation. The Solver consumes these to allocate further fresh
@@ -233,14 +221,14 @@ data VariableSupply = VariableSupply
   }
   deriving (Eq, Show)
 
--- | Output of the constraint-generation pass. Carries the phase-advanced
--- AST ('Constrained' phase, with each expression / pattern annotated by
--- an unresolved 'SemanticType'), the seeded type environment, the
--- accumulated subtype / effect 'Constraint' set the solver must
--- discharge, and the next-id supply so the solver can keep allocating
--- fresh variables consistently.
+-- | Output of the constraint-generation pass for a single SCC of a
+-- single module. Carries the SCC's phase-advanced AST ('Constrained'
+-- phase, with each expression / pattern annotated by an unresolved
+-- 'SemanticType'), the seeded type environment, the accumulated subtype
+-- / effect 'Constraint' set the solver must discharge, and the next-id
+-- supply so the solver can keep allocating fresh variables consistently.
 data ConstraintGenResult = ConstraintGenResult
-  { constrainedModules :: Map ModuleId (Module Constrained),
+  { constrainedModule :: Module Constrained,
     typeEnvironment :: TypeEnvironment,
     constraints :: Set Constraint,
     variableSupply :: VariableSupply
@@ -260,36 +248,15 @@ data ConstraintState = ConstraintState
   }
 
 data ConstraintContext = ConstraintContext
-  { contextIdentifiedTypes :: Map TypeId TypeData,
-    -- | Reverse map for the 'RequestId' / 'ConstructorId' namespaces:
-    -- given a request or constructor id, find the call-side 'VariableId'
-    -- whose type lives in 'stateTypeEnvironment'. Populated from
-    -- 'IdentifierResult.identifiedRequests' / 'identifiedConstructors'.
-    contextIdentifiedRequests :: Map RequestId RequestData,
-    contextIdentifiedConstructors :: Map ConstructorId ConstructorData,
-    -- | Forward cross-link: 'VariableId' → 'RequestId'. Built from the
-    -- 'requestVariableId' fields of 'identifiedRequests' so the request
-    -- declaration walker can populate the singleton request for @req foo@'s
-    -- own signature without re-walking the AST.
-    contextRequestOfVariable :: Map VariableId RequestId,
-    -- | For cycle detection
-    contextSynonymVisited :: Set TypeId,
+  { contextIdentifiedTypes :: Map QualifiedName TypeData,
+    contextKnownRequests :: Set QualifiedName,
+    contextSynonymVisited :: Set QualifiedName,
     contextEnclosingReturn :: Maybe TypeVariableId,
     contextEnclosingRequests :: Maybe RequestVariableId,
     contextEnclosingForBreak :: Maybe TypeVariableId,
-    -- | The type of the entire @block + where + then@ expression. @break e@
-    -- inside a request handler flows into this variable (skipping the then
-    -- clause).
     contextEnclosingHandleBreak :: Maybe TypeVariableId,
-    -- | The "resume" type variable for the innermost enclosing request
-    -- handler. @next e@ inside a handler body flows into this. There is at
-    -- most one in scope: 'NextStatement' is a lexically-scoped construct and
-    -- always refers to the innermost handler.
     contextEnclosingHandleNext :: Maybe TypeVariableId,
-    -- | Prim constraint-rule lookup, indexed by 'VariableId'. Populated
-    -- from 'IdentifierResult.primitiveRulesByVariableId' at the
-    -- pipeline entry. Empty for non-prim variables.
-    contextPrimRules :: Map VariableId PrimRule
+    contextPrimRules :: Map QualifiedName PrimRule
   }
 
 type CG = ReaderT ConstraintContext (State ConstraintState)
@@ -304,32 +271,22 @@ initialState =
       stateErrors = []
     }
 
--- | Does the given 'RequestId' point at the stdlib-provided
--- @prim.throw@ request? Used to special-case the universal
--- recoverable-error capability throughout the constraint generator
--- so callers never need a @with throw@ annotation.
-isThrowRequestId :: RequestId -> Map RequestId RequestData -> Bool
-isThrowRequestId rid requests = case Map.lookup rid requests of
-  Just RequestData {requestQualifiedName = QualifiedName {module_, name}} ->
-    module_ == "primitive" && name == "throw"
-  Nothing -> False
+-- | Is the given request the stdlib-provided @prim.throw@? Used to
+-- special-case the universal recoverable-error capability so callers
+-- never need a @with throw@ annotation.
+isThrowRequest :: QualifiedName -> Bool
+isThrowRequest qualifiedName =
+  qualifiedName.module_ == "primitive" && qualifiedName.name == "throw"
 
 initialContext ::
-  Map TypeId TypeData ->
-  Map RequestId RequestData ->
-  Map ConstructorId ConstructorData ->
-  Map VariableId PrimRule ->
+  Map QualifiedName TypeData ->
+  Set QualifiedName ->
+  Map QualifiedName PrimRule ->
   ConstraintContext
-initialContext types requests constructors primRules =
+initialContext types requests primRules =
   ConstraintContext
     { contextIdentifiedTypes = types,
-      contextIdentifiedRequests = requests,
-      contextIdentifiedConstructors = constructors,
-      contextRequestOfVariable =
-        Map.fromList
-          [ (rd.requestVariableId, rid)
-            | (rid, rd) <- Map.toList requests
-          ],
+      contextKnownRequests = requests,
       contextSynonymVisited = Set.empty,
       contextEnclosingReturn = Nothing,
       contextEnclosingRequests = Nothing,
@@ -358,21 +315,21 @@ freshRequestVariableId = lift $ do
   modify $ \state -> state {stateNextRequestVariableId = current + 1}
   pure (RequestVariableId current)
 
-bindVariable :: VariableId -> SemanticType Unresolved -> CG ()
-bindVariable variableId semanticType = lift . modify $ \s ->
-  s {stateTypeEnvironment = Map.insert variableId semanticType s.stateTypeEnvironment}
+bindVariable :: VariableResolution -> SemanticType Unresolved -> CG ()
+bindVariable resolution semanticType = lift . modify $ \s ->
+  s {stateTypeEnvironment = Map.insert resolution semanticType s.stateTypeEnvironment}
 
--- | Look up a 'VariableId' in the type environment. Phase A binds every
--- VariableId in 'IdentifierResult.identifiedVariables', so this should
--- always hit. Defensive fallback: allocate a fresh type var and bind it.
-lookupVariable :: VariableId -> CG (SemanticType Unresolved)
-lookupVariable variableId = do
-  existing <- lift $ gets (Map.lookup variableId . (.stateTypeEnvironment))
+-- | Look up a 'VariableResolution' in the type environment. Phase A binds
+-- every top-level variable; locals are bound when encountered. Defensive
+-- fallback: allocate a fresh type var and bind it.
+lookupVariable :: VariableResolution -> CG (SemanticType Unresolved)
+lookupVariable resolution = do
+  existing <- lift $ gets (Map.lookup resolution . (.stateTypeEnvironment))
   case existing of
     Just t -> pure t
     Nothing -> do
       fresh <- freshTypeVar
-      bindVariable variableId fresh
+      bindVariable resolution fresh
       pure fresh
 
 addTypeConstraint ::
@@ -437,9 +394,9 @@ withHandleScope :: TypeVariableId -> TypeVariableId -> CG a -> CG a
 withHandleScope resultTv nextTv = local $ \c ->
   c {contextEnclosingHandleBreak = Just resultTv, contextEnclosingHandleNext = Just nextTv}
 
-withSynonymVisit :: TypeId -> CG a -> CG a
-withSynonymVisit tid = local $ \c ->
-  c {contextSynonymVisited = Set.insert tid c.contextSynonymVisited}
+withSynonymVisit :: QualifiedName -> CG a -> CG a
+withSynonymVisit qualifiedName = local $ \c ->
+  c {contextSynonymVisited = Set.insert qualifiedName c.contextSynonymVisited}
 
 -- ===========================================================================
 -- Type elaboration (SyntacticType Identified -> SemanticType Unresolved)
@@ -504,20 +461,19 @@ literalValueToSemantic = \case
 -- synonyms on the fly with cycle detection.
 resolveTypeRef :: NameRef Identified TypeRef -> CG (SemanticType Unresolved)
 resolveTypeRef nameRef = case nameRef.resolution of
-  Just tid -> do
+  Just qualifiedName -> do
     types <- asks (.contextIdentifiedTypes)
-    case Map.lookup tid types of
+    case Map.lookup qualifiedName types of
       Just TypeData {typeSynonymRhs = Just rhs} -> do
         visited <- asks (.contextSynonymVisited)
-        if Set.member tid visited
+        if Set.member qualifiedName visited
           then do
-            emitError (ConstraintErrorTypeSynonymCycle nameRef.sourceSpan tid)
+            emitError (ConstraintErrorTypeSynonymCycle nameRef.sourceSpan qualifiedName)
             freshTypeVar
-          else withSynonymVisit tid (elaborateType rhs)
+          else withSynonymVisit qualifiedName (elaborateType rhs)
       Just TypeData {typeSynonymRhs = Nothing} ->
-        pure (SemanticTypeData tid)
+        pure (SemanticTypeData qualifiedName)
       Nothing ->
-        -- Identifier should have populated all entries; fall back defensively.
         freshTypeVar
   Nothing -> freshTypeVar
 
@@ -525,12 +481,14 @@ resolveTypeRef nameRef = case nameRef.resolution of
 -- request set (concrete VariableIds; request type variables come into play
 -- only for inference, not for explicit annotations).
 elaborateRequestList :: [SyntacticRequest Identified] -> CG (SemanticRequest Unresolved)
-elaborateRequestList requests = do
+elaborateRequestList syntacticRequests = do
+  requests <- asks (.contextKnownRequests)
   pure
     ( SemanticRequest
         ( Set.fromList
-            [ SemanticRequestElementConcrete requestId
-              | SyntacticRequest {name = NameRef {resolution = Just requestId}} <- requests
+            [ SemanticRequestElementConcrete qualifiedName
+              | SyntacticRequest {name = NameRef {resolution = Just qualifiedName}} <- syntacticRequests,
+                Set.member qualifiedName requests
             ]
         )
     )
@@ -542,31 +500,12 @@ elaborateOptionalRequests :: Maybe [SyntacticRequest Identified] -> CG (Maybe (S
 elaborateOptionalRequests = traverse elaborateRequestList
 
 -- ===========================================================================
--- Phase A: allocate type vars for every VariableId
--- ===========================================================================
-
--- | Walk @identifiedVariables@ once and bind each id to a fresh type
--- variable. Done before any constraint generation so forward references and
--- mutual recursion just work.
-allocateAllVariables :: IdentifierResult -> CG ()
-allocateAllVariables result = mapM_ allocate (Map.keys result.identifiedVariables)
-  where
-    allocate vid = do
-      tv <- freshTypeVar
-      bindVariable vid tv
-
--- ===========================================================================
 -- Phase B: walk modules, declarations, statements, expressions, patterns
 -- ===========================================================================
 
 -- ---------------------------------------------------------------------------
--- Module / declaration
+-- Declaration
 -- ---------------------------------------------------------------------------
-
-walkModule :: Module Identified -> CG (Module Constrained)
-walkModule Module {declarations, sourceSpan} = do
-  declarations' <- mapM walkDeclaration declarations
-  pure Module {declarations = declarations', sourceSpan = sourceSpan}
 
 walkDeclaration :: Declaration Identified -> CG (Declaration Constrained)
 walkDeclaration = \case
@@ -634,24 +573,19 @@ walkRequestDecl RequestDeclaration {annotation, name, requestName, parameters, r
   (parameters', paramSig) <- walkParameterListForSignature parameters
   retSemantic <- elaborateType returnType
   -- The request's signature includes itself in its request set (a @req foo@
-  -- raises @foo@). Identifier issued a 'RequestId' alongside the call-side
-  -- 'VariableId' for this declaration; we translate via 'contextRequestOfVariable'.
-  reqId <- case variableIdOfName name of
-    Nothing -> pure Nothing
-    Just vid -> asks (Map.lookup vid . (.contextRequestOfVariable))
+  -- raises @foo@). The request shares the same QualifiedName as the variable.
+  let maybeReqQName = requestName.resolution
   -- Special-case: `throw` is the universal recoverable-error capability.
   -- Its signature carries an *empty* request set so callers never need to
   -- write `with throw` — every agent can raise it implicitly. Handlers
   -- still catch it through the regular `req throw(msg) { ... }` form
-  -- because the RequestId is unchanged; we only suppress the effect-set
+  -- because the QualifiedName is unchanged; we only suppress the effect-set
   -- contribution at the signature level.
-  isThrow <- case reqId of
-    Just rid -> asks (isThrowRequestId rid . (.contextIdentifiedRequests))
-    Nothing -> pure False
+  let isThrow = maybe False isThrowRequest maybeReqQName
   let signatureEff =
         if isThrow
           then emptyRequest
-          else maybe emptyRequest singletonRequest reqId
+          else maybe emptyRequest singletonRequest maybeReqQName
       signature = SemanticTypeFunction paramSig retSemantic signatureEff
   addEqTypeConstraint signature tReq (ConstraintReason ReasonKindRequestSignature sourceSpan)
   pure
@@ -706,15 +640,12 @@ walkPrimAgentDecl PrimAgentDeclaration {annotation, name, parameters, returnType
 walkDataDecl :: DataDeclaration Identified -> CG (DataDeclaration Constrained)
 walkDataDecl DataDeclaration {annotation, name, typeName, constructorName, parameters, sourceSpan} = do
   tCtor <- variableTypeFromName name
-  -- The TypeId of a data declaration is held directly by the AST. Only on
-  -- the @Unresolved@ side (parse / identify errors) is it @Nothing@, in
-  -- which case we fall back to @SemanticTypeUnknown@.
-  let tid = typeName.resolution
   fields <- mapM elaborateDataParameter parameters
-  let signature =
+  let returnType = maybe SemanticTypeUnknown SemanticTypeData typeName.resolution
+      signature =
         SemanticTypeFunction
           (Map.fromList fields)
-          (maybe SemanticTypeUnknown SemanticTypeData tid)
+          returnType
           emptyRequest
   addEqTypeConstraint signature tCtor (ConstraintReason ReasonKindDataConstructorSignature sourceSpan)
   parameters' <- mapM walkDataParameter parameters
@@ -806,7 +737,7 @@ walkPattern maybeSubject = \case
     tx <- case maybeSubject of
       Just subject -> do
         case name.resolution of
-          Just vid -> bindVariable vid subject
+          Just resolution -> bindVariable resolution subject
           Nothing -> pure ()
         pure subject
       Nothing -> variableTypeFromName name
@@ -1149,9 +1080,7 @@ walkRequestHandler handlerBodyRequestVariable wholeBlockId RequestHandler {modul
   (parameters', paramSig) <- walkParameterListForSignature parameters
   retSemantic <- elaborateOrFresh returnType
   retTvId <- freshReturnTypeVar retSemantic
-  -- Handler's signature carries the handled request as its sole request, so
-  -- the underlying req's signature is a supertype.
-  let handlerReqId = name.resolution
+  let handlerReqQName = name.resolution
   -- Handler body walks under e4 (the dedicated handler-request var) and the
   -- handle scope. 'next e' resumes the original request call, so 'e' is
   -- constrained against retTvId (= the next-tv); 'break e' targets
@@ -1172,7 +1101,7 @@ walkRequestHandler handlerBodyRequestVariable wholeBlockId RequestHandler {modul
         SemanticTypeFunction
           paramSig
           retSemantic
-          (maybe emptyRequest singletonRequest handlerReqId)
+          (maybe emptyRequest singletonRequest handlerReqQName)
   -- subtype only (handler is a re-assignment of the underlying req)
   addTypeConstraint handlerSignature tHandled (ConstraintReason ReasonKindRequestHandlerSignature sourceSpan)
   pure
@@ -1400,8 +1329,8 @@ walkCallExpr CallExpression {callee, arguments, sourceSpan} = do
   -- so subtype-flavoured operator typing (e.g. @1 + 2 : Integer@) is
   -- preserved.
   primRule <- case callee' of
-    ExpressionVariable VariableExpression {name = NameRef {resolution = Just vid}} ->
-      asks (Map.lookup vid . (.contextPrimRules))
+    ExpressionVariable VariableExpression {name = NameRef {resolution = Just (ResolvedTopLevel qualifiedName)}} ->
+      asks (Map.lookup qualifiedName . (.contextPrimRules))
     _ -> pure Nothing
   resultType <- case primRule of
     Just rule | rule /= PrimRuleSimple -> applyPrimRule rule arguments' sourceSpan
@@ -1557,7 +1486,7 @@ walkUnaryExpr UnaryOperatorExpression {sourceSpan} = do
 -- follow-up; the operator-survival case only fires on a real bug.
 emitInternalError :: SourceSpan -> Text -> CG ()
 emitInternalError sourceSpan _msg =
-  emitError (ConstraintErrorTypeSynonymCycle sourceSpan (TypeId (-1)))
+  emitError (ConstraintErrorTypeSynonymCycle sourceSpan (QualifiedName "" "<internal>"))
 
 walkIfExpr :: IfExpression Identified -> CG (Expression Constrained)
 walkIfExpr IfExpression {condition, thenBlock, elseBlock, sourceSpan} = do
@@ -1723,8 +1652,8 @@ walkHandleExpr HandleExpression {parallel, stateVariables, handlers, thenClause,
   -- Request constraints
   let handledRequestIds =
         Set.fromList
-          [ SemanticRequestElementConcrete requestId
-            | RequestHandler {name = NameRef {resolution = Just requestId}} <- handlers
+          [ SemanticRequestElementConcrete qualifiedName
+            | RequestHandler {name = NameRef {resolution = Just qualifiedName}} <- handlers
           ]
   let enclosingRequest = maybe emptyRequest singletonRequestVariable enclosingRequestVariable
       handledRequest = SemanticRequest handledRequestIds
@@ -1891,35 +1820,20 @@ walkQualifiedReferenceExpr QualifiedReferenceExpression {moduleQualifier, target
 variableTypeFromName :: NameRef Identified VariableRef -> CG (SemanticType Unresolved)
 variableTypeFromName nameRef = maybe freshTypeVar lookupVariable nameRef.resolution
 
-variableIdOfName :: NameRef Identified VariableRef -> Maybe VariableId
-variableIdOfName nameRef = nameRef.resolution
-
--- | Type of a 'req' declaration's call-side, looked up via the request id.
--- Each 'RequestId' has a known corresponding 'VariableId'
--- ('requestVariableId'); we read the type out of 'stateTypeEnvironment'
--- through that. Unresolved request references fall back to a fresh type
--- variable (Identifier already reported the failure).
+-- | Type of a 'req' declaration's call-side, looked up via the request's
+-- 'QualifiedName' in the type environment. The request and its callable
+-- share the same 'QualifiedName', so we look up 'ResolvedTopLevel qname'.
 requestTypeFromName :: NameRef Identified RequestRef -> CG (SemanticType Unresolved)
 requestTypeFromName nameRef = case nameRef.resolution of
   Nothing -> freshTypeVar
-  Just rid -> do
-    requestData <- asks (Map.lookup rid . (.contextIdentifiedRequests))
-    case requestData of
-      Just rd -> lookupVariable rd.requestVariableId
-      Nothing -> freshTypeVar
+  Just qualifiedName -> lookupVariable (ResolvedTopLevel qualifiedName)
 
--- | Type of a 'data' declaration's constructor-function side, looked up
--- via the constructor id. Same plumbing as 'requestTypeFromName'.
 constructorTypeFromName ::
   NameRef Identified ConstructorRef ->
   CG (SemanticType Unresolved)
 constructorTypeFromName nameRef = case nameRef.resolution of
   Nothing -> freshTypeVar
-  Just cid -> do
-    ctorData <- asks (Map.lookup cid . (.contextIdentifiedConstructors))
-    case ctorData of
-      Just cd -> lookupVariable cd.constructorVariableId
-      Nothing -> freshTypeVar
+  Just qualifiedName -> lookupVariable (ResolvedTopLevel qualifiedName)
 
 -- | If the optional type annotation is present, elaborate it; otherwise
 -- allocate a fresh type variable so the solver can infer it.
@@ -1942,43 +1856,89 @@ freshReturnTypeVar = \case
 -- Entry point
 -- ===========================================================================
 
--- | Run constraint generation over an 'IdentifierResult' (which may contain
--- multiple modules). All variables across all modules are allocated a type
--- variable in Phase A, then declarations are walked in Phase B to emit
--- constraints and produce the @Constrained@-phase ASTs.
-generateConstraints :: IdentifierResult -> (ConstraintGenResult, [ConstraintError])
-generateConstraints result = case runState (runReaderT action context) initialState of
-  (modulesPair, finalState) ->
-    ( ConstraintGenResult
-        { constrainedModules = Map.fromList modulesPair,
-          typeEnvironment = finalState.stateTypeEnvironment,
-          constraints = finalState.stateConstraints,
-          variableSupply =
-            VariableSupply
-              { typeVarSupply = finalState.stateNextTypeVariableId,
-                requestVarSupply = finalState.stateNextRequestVariableId
-              }
-        },
-      finalState.stateErrors
-    )
+-- | Run constraint generation for a single SCC within a module.
+-- Variables whose 'QualifiedName' appears in @knownTypes@ (imported
+-- types from other modules plus resolved types from upstream SCCs in
+-- the same module) are pre-bound to the resolved type. Only variables
+-- whose 'QualifiedName' is in @sccQualifiedNames@ get fresh type
+-- variables; the rest are left unbound (CG's 'lookupVariable'
+-- allocates on demand).
+--
+-- Only declarations whose name belongs to @sccQualifiedNames@ are
+-- walked; other declarations are skipped. The returned
+-- 'constrainedModule' is a partial module with only the SCC's walked
+-- declarations.
+generateConstraintsForSCC ::
+  -- | Imported types: top-level qnames whose resolved type came from a
+  -- previously-typechecked module / upstream SCC. The CG pre-binds these
+  -- so cross-module name references resolve.
+  Map QualifiedName (SemanticType Resolved) ->
+  -- | The module's AST; only declarations in the SCC are walked.
+  Module Identified ->
+  -- | Top-level qnames the SCC owns; CG allocates fresh type variables
+  -- for them.
+  Set QualifiedName ->
+  -- | All reachable type declarations (used to look up type-synonym RHS).
+  Map QualifiedName TypeData ->
+  -- | All reachable request qnames (used as the membership filter when
+  -- elaborating @with@-clauses).
+  Set QualifiedName ->
+  -- | All reachable prim rules (qname → 'PrimRule').
+  Map QualifiedName PrimRule ->
+  (ConstraintGenResult, [ConstraintError])
+generateConstraintsForSCC knownTypes moduleAST sccQualifiedNames types requests primRules =
+  case runState (runReaderT action context) initialState of
+    (constrainedDeclarations, finalState) ->
+      ( ConstraintGenResult
+          { constrainedModule =
+              Module {declarations = constrainedDeclarations, sourceSpan = moduleAST.sourceSpan},
+            typeEnvironment = finalState.stateTypeEnvironment,
+            constraints = finalState.stateConstraints,
+            variableSupply =
+              VariableSupply
+                { typeVarSupply = finalState.stateNextTypeVariableId,
+                  requestVarSupply = finalState.stateNextRequestVariableId
+                }
+          },
+        finalState.stateErrors
+      )
   where
-    context =
-      initialContext
-        result.identifiedTypes
-        result.identifiedRequests
-        result.identifiedConstructors
-        primRules
-    -- Reconstruct the prim-rule lookup from every 'VariableData' that
-    -- the Identifier pass marked with a 'variablePrimRule'.
-    primRules =
-      Map.fromList
-        [ (vid, rule)
-          | (vid, vd) <- Map.toList result.identifiedVariables,
-            Just rule <- [vd.variablePrimRule]
-        ]
+    context = initialContext types requests primRules
     action = do
-      allocateAllVariables result
-      mapM walkOne (Map.toList result.moduleASTs)
-    walkOne (mid, mod') = do
-      mod'' <- walkModule mod'
-      pure (mid, mod'')
+      for_ (Map.toList knownTypes) $ \(qualifiedName, resolvedType) ->
+        bindVariable (ResolvedTopLevel qualifiedName) (liftResolvedToUnresolved resolvedType)
+      for_ (Set.toList sccQualifiedNames) $ \qualifiedName -> do
+        fresh <- freshTypeVar
+        bindVariable (ResolvedTopLevel qualifiedName) fresh
+      walkDeclarationsForSCC sccQualifiedNames moduleAST.declarations
+
+-- | Walk only declarations belonging to the SCC. Data declarations
+-- are included when their QualifiedName is in the SCC set (they form
+-- singleton SCCs). Type synonyms and imports are skipped (they emit
+-- no constraints and are handled separately during module assembly).
+walkDeclarationsForSCC :: Set QualifiedName -> [Declaration Identified] -> CG [Declaration Constrained]
+walkDeclarationsForSCC sccQualifiedNames = go
+  where
+    go [] = pure []
+    go (declaration : rest) = case declarationInSCC declaration of
+      Just True -> do
+        walked <- walkDeclaration declaration
+        remaining <- go rest
+        pure (walked : remaining)
+      _ -> go rest
+
+    declarationInSCC :: Declaration Identified -> Maybe Bool
+    declarationInSCC = \case
+      DeclarationAgent declaration -> Just (nameInSCC declaration.name)
+      DeclarationRequest declaration -> Just (nameInSCC declaration.name)
+      DeclarationExternalAgent declaration -> Just (nameInSCC declaration.name)
+      DeclarationPrimAgent declaration -> Just (nameInSCC declaration.name)
+      DeclarationData declaration -> Just (nameInSCC declaration.name)
+      DeclarationTypeSynonym _ -> Nothing
+      DeclarationImport _ -> Nothing
+      DeclarationError _ -> Nothing
+
+    nameInSCC :: NameRef Identified VariableRef -> Bool
+    nameInSCC nameRef = case nameRef.resolution of
+      Just (ResolvedTopLevel qualifiedName) -> Set.member qualifiedName sccQualifiedNames
+      _ -> False

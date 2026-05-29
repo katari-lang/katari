@@ -12,20 +12,24 @@ module Katari.Cli.Build
   )
 where
 
-import qualified Data.Aeson as Aeson
 import Data.Aeson (Value (..), object, (.=))
+import Data.Aeson qualified as Aeson
 import Data.Aeson.Encode.Pretty (encodePretty)
-import qualified Data.ByteString.Lazy as LBS
-import qualified Katari.Cli.Check as Check
-import qualified Katari.Cli.Common as Common
-import qualified Katari.Compile as Compile
+import Data.ByteString.Lazy qualified as LBS
+import Data.Text.IO qualified as TextIO
+import Katari.Cli.Check qualified as Check
+import Katari.Cli.Common qualified as Common
+import Katari.Cli.CompileCache qualified as CompileCache
+import Katari.Compile qualified as Compile
 import Katari.Diagnostic (hasErrors)
 import Katari.IR (IRModule)
+import Katari.Project.Cache qualified as Cache
 import Katari.Schema (SchemaEntry (..))
 import Options.Applicative
 import System.Directory (createDirectoryIfMissing)
 import System.Exit (ExitCode (..), exitWith)
 import System.FilePath (takeDirectory)
+import System.IO (stderr)
 
 data Options = Options
   { optProjectRoot :: Maybe FilePath,
@@ -49,17 +53,19 @@ optionsParser =
           ( long "out"
               <> short 'o'
               <> metavar "FILE"
-              <> help "Output path for the JSON bundle (default: dist/bundle.json)"
+              <> help "Output path for the JSON bundle (default: .katari/dist/bundle.json)"
           )
       )
 
 run :: Options -> IO ()
 run opts = do
-  (input, fileTexts) <- Check.loadProject (Check.Options {optProjectRoot = opts.optProjectRoot})
-  let result = Compile.compile input
-      outputPath = case opts.optOut of
+  (root, input, fileTexts) <- Check.loadProject (Check.Options {optProjectRoot = opts.optProjectRoot})
+  result <- Compile.compile (TextIO.hPutStrLn stderr . Compile.renderCompileLog) input
+  let outputPath = case opts.optOut of
         Just p -> p
-        Nothing -> "dist/bundle.json"
+        Nothing -> root <> "/.katari/dist/bundle.json"
+  Cache.ensureCacheDirs (Cache.projectCachePaths root)
+  CompileCache.saveDiskCache root (CompileCache.toDiskCache result.updatedCache)
   Check.emitDiagnostics fileTexts result.diagnostics
   if hasErrors result.diagnostics
     then exitWith (ExitFailure 1)

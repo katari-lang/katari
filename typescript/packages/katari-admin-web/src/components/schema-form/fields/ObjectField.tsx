@@ -1,10 +1,10 @@
-import { useEffect, useRef, useState } from "react";
 import { Plus, Trash2 } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { SchemaField } from "../SchemaField";
-import { AnyField } from "./AnyField";
 import type { JsonSchema } from "../schema-utils";
+import { AnyField } from "./AnyField";
 
 /**
  * Object form: one field per `properties` entry. Const-typed properties
@@ -27,9 +27,7 @@ export function ObjectField({
   value: unknown;
   onChange: (v: unknown) => void;
 }) {
-  const obj = (
-    value !== null && typeof value === "object" ? value : {}
-  ) as Record<string, unknown>;
+  const obj = (value !== null && typeof value === "object" ? value : {}) as Record<string, unknown>;
   const properties = schema.properties ?? {};
   const required = new Set(schema.required ?? []);
   const entries = Object.entries(properties);
@@ -64,15 +62,10 @@ export function ObjectField({
 
   // Dynamic key-value editor for `record` type: empty `properties` with
   // `additionalProperties` enabled.
-  const hasAdditional = schema.additionalProperties !== undefined && schema.additionalProperties !== false;
+  const hasAdditional =
+    schema.additionalProperties !== undefined && schema.additionalProperties !== false;
   if (visibleEntries.length === 0 && hasAdditional) {
-    return (
-      <DynamicKeyValueEditor
-        schema={schema}
-        value={obj}
-        onChange={onChange}
-      />
-    );
+    return <DynamicKeyValueEditor schema={schema} value={obj} onChange={onChange} />;
   }
 
   if (visibleEntries.length === 0) {
@@ -84,7 +77,7 @@ export function ObjectField({
   }
 
   return (
-    <div className="space-y-3 border-l-2 border-border pl-3">
+    <div className="space-y-3 border-l border-border pl-3">
       {visibleEntries.map(([key, sub]) => (
         <SchemaField
           key={key}
@@ -106,6 +99,16 @@ export function ObjectField({
  * object shape is entirely dynamic (`additionalProperties: true` or
  * `additionalProperties: <schema>`).
  */
+type Row = { id: number; key: string; value: unknown };
+
+function rowsToObject(rows: Row[]): Record<string, unknown> {
+  const obj: Record<string, unknown> = {};
+  for (const row of rows) {
+    if (row.key !== "") obj[row.key] = row.value;
+  }
+  return obj;
+}
+
 function DynamicKeyValueEditor({
   schema,
   value,
@@ -115,106 +118,86 @@ function DynamicKeyValueEditor({
   value: Record<string, unknown>;
   onChange: (v: unknown) => void;
 }) {
-  // Resolve the value schema: `true` → unconstrained (AnyField),
-  // object → use it as JsonSchema for each value.
   const additionalProps = schema.additionalProperties;
   const valueSchema: JsonSchema | true =
     typeof additionalProps === "object" && additionalProps !== null
       ? (additionalProps as JsonSchema)
       : true;
 
-  // Track insertion order so React keys stay stable across renames.
-  // Each entry gets a monotonic id that never changes even when the
-  // key is edited.
-  const [rows, setRows] = useState<{ id: number; key: string }[]>(() =>
-    Object.keys(value).map((key, idx) => ({ id: idx, key })),
+  const [rows, setRows] = useState<Row[]>(() =>
+    Object.entries(value).map(([key, val], idx) => ({
+      id: idx,
+      key,
+      value: val,
+    })),
   );
   const nextId = useRef(Object.keys(value).length);
 
-  function addRow() {
-    const id = nextId.current++;
-    const newKey = "";
-    const updated = [...rows, { id, key: newKey }];
+  function update(updated: Row[]) {
     setRows(updated);
-    onChange({ ...value, [newKey]: null });
+    onChange(rowsToObject(updated));
+  }
+
+  function addRow() {
+    update([...rows, { id: nextId.current++, key: "", value: null }]);
   }
 
   function removeRow(id: number) {
-    const row = rows.find((r) => r.id === id);
-    if (row === undefined) return;
-    const updated = rows.filter((r) => r.id !== id);
-    setRows(updated);
-    const next = { ...value };
-    delete next[row.key];
-    onChange(next);
+    update(rows.filter((r) => r.id !== id));
   }
 
   function renameKey(id: number, newKey: string) {
-    const row = rows.find((r) => r.id === id);
-    if (row === undefined) return;
-    const oldKey = row.key;
-    setRows(rows.map((r) => (r.id === id ? { ...r, key: newKey } : r)));
-    const next: Record<string, unknown> = {};
-    for (const r of rows) {
-      const k = r.id === id ? newKey : r.key;
-      next[k] = value[r.id === id ? oldKey : r.key];
-    }
-    onChange(next);
+    update(rows.map((r) => (r.id === id ? { ...r, key: newKey } : r)));
   }
 
-  function changeValue(key: string, v: unknown) {
-    onChange({ ...value, [key]: v });
+  function changeValue(id: number, v: unknown) {
+    update(rows.map((r) => (r.id === id ? { ...r, value: v } : r)));
   }
 
   return (
-    <div className="space-y-4 border-l-2 border-border pl-3">
-      {rows.length === 0 ? (
-        <p className="text-xs text-subtle-foreground">No entries yet.</p>
-      ) : (
-        rows.map((row) => (
-          <div key={row.id} className="space-y-1.5">
-            <div className="flex items-center gap-2">
-              <Input
-                value={row.key}
-                onChange={(e) => renameKey(row.id, e.target.value)}
-                placeholder="key"
-                className="h-8 flex-1 text-xs font-mono"
-              />
-              <button
-                type="button"
-                onClick={() => removeRow(row.id)}
-                className="inline-flex h-7 w-7 shrink-0 items-center justify-center text-subtle-foreground transition-colors hover:bg-danger/10 hover:text-danger hover:cursor-pointer"
-                aria-label={`Remove entry ${row.key}`}
-              >
-                <Trash2 className="size-3.5" />
-              </button>
-            </div>
-            <div className="pl-2">
-              {valueSchema === true ? (
-                <AnyField
-                  value={value[row.key]}
-                  onChange={(v) => changeValue(row.key, v)}
+    <div>
+      <span className="text-xs font-mono text-muted-foreground">record</span>
+      <div className="space-y-4 border-l border-border pl-3">
+        {rows.length === 0 ? (
+          <p className="text-xs text-subtle-foreground pt-2">No entries yet.</p>
+        ) : (
+          rows.map((row) => (
+            <div key={row.id} className="space-y-1.5">
+              <div className="flex items-start gap-2">
+                <Input
+                  value={row.key}
+                  onChange={(e) => renameKey(row.id, e.target.value)}
+                  placeholder="key"
+                  className="h-8 text-xs font-mono max-w-48 w-full"
                 />
-              ) : (
-                <SchemaField
-                  schema={valueSchema}
-                  value={value[row.key]}
-                  onChange={(v) => changeValue(row.key, v)}
-                />
-              )}
+                <button
+                  type="button"
+                  onClick={() => removeRow(row.id)}
+                  className="inline-flex h-7 w-7 shrink-0 items-center justify-center text-subtle-foreground transition-colors hover:bg-danger/10 hover:text-danger hover:cursor-pointer"
+                  aria-label={`Remove entry ${row.key}`}
+                >
+                  <Trash2 className="size-3.5" />
+                </button>
+              </div>
+              <div className="pl-2">
+                {valueSchema === true ? (
+                  <AnyField value={row.value} onChange={(v) => changeValue(row.id, v)} />
+                ) : (
+                  <SchemaField
+                    schema={valueSchema}
+                    value={row.value}
+                    onChange={(v) => changeValue(row.id, v)}
+                  />
+                )}
+              </div>
             </div>
-          </div>
-        ))
-      )}
-      <Button
-        type="button"
-        variant="secondary"
-        size="sm"
-        onClick={addRow}
-      >
-        <Plus className="size-3.5" />
-        Add field
-      </Button>
+          ))
+        )}
+        <Button type="button" variant="secondary" size="sm" onClick={addRow}>
+          <Plus className="size-3.5" />
+          Add field
+        </Button>
+      </div>
     </div>
   );
 }

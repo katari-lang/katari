@@ -21,10 +21,10 @@
 
 import { ExternalEventBus } from "../bus.js";
 import type { Logger } from "../engine/logger.js";
+import type { CoreModule } from "../modules/core.js";
+import type { FfiModule } from "../modules/ffi.js";
 import type { SidecarManager } from "../sidecar/sidecar-manager.js";
 import type { ChildToParent } from "../sidecar/types.js";
-import type { FfiModule } from "../modules/ffi.js";
-import type { CoreModule } from "../modules/core.js";
 import type {
   ApiLikeModule,
   OrchestratorProjectId,
@@ -34,9 +34,7 @@ import type {
   TickModulesFactory,
 } from "./types.js";
 
-export type TickContext<
-  SnapshotId extends OrchestratorSnapshotId = OrchestratorSnapshotId,
-> = {
+export type TickContext<SnapshotId extends OrchestratorSnapshotId = OrchestratorSnapshotId> = {
   snapshotId: SnapshotId;
   api: ApiLikeModule;
   ffi: FfiModule | null;
@@ -74,24 +72,19 @@ export class Orchestrator<
     private readonly sidecarManager: SidecarManager<SnapshotId>,
     private readonly logger: Logger,
   ) {
-    sidecarManager.setMessageHandler((snapshotId, msg) =>
-      this.onSidecarMessage(snapshotId, msg),
-    );
+    sidecarManager.setMessageHandler((snapshotId, msg) => this.onSidecarMessage(snapshotId, msg));
   }
 
   async tick<T>(
     snapshotId: SnapshotId,
     fn: (ctx: TickContext<SnapshotId>) => Promise<T>,
   ): Promise<T> {
-    return this.runTick(
-      async (tx) => {
-        const sid = snapshotId;
-        const snapshot = await tx.getSnapshot(sid);
-        if (snapshot === null) throw new SnapshotNotFound(sid);
-        return { snapshotId: sid, snapshot };
-      },
-      fn,
-    );
+    return this.runTick(async (tx) => {
+      const sid = snapshotId;
+      const snapshot = await tx.getSnapshot(sid);
+      if (snapshot === null) throw new SnapshotNotFound(sid);
+      return { snapshotId: sid, snapshot };
+    }, fn);
   }
 
   /**
@@ -105,26 +98,21 @@ export class Orchestrator<
     input: { projectId: ProjectId; snapshotId?: SnapshotId | undefined },
     fn: (ctx: TickContext<SnapshotId>) => Promise<T>,
   ): Promise<T> {
-    return this.runTick(
-      async (tx) => {
-        let sid = input.snapshotId;
-        if (sid === undefined) {
-          const latest = await tx.latestSnapshot(input.projectId);
-          if (latest === null) throw new NoSnapshotForProject(input.projectId);
-          sid = latest;
-        }
-        const snapshot = await tx.getSnapshot(sid);
-        if (snapshot === null) throw new SnapshotNotFound(sid);
-        return { snapshotId: sid, snapshot };
-      },
-      fn,
-    );
+    return this.runTick(async (tx) => {
+      let sid = input.snapshotId;
+      if (sid === undefined) {
+        const latest = await tx.latestSnapshot(input.projectId);
+        if (latest === null) throw new NoSnapshotForProject(input.projectId);
+        sid = latest;
+      }
+      const snapshot = await tx.getSnapshot(sid);
+      if (snapshot === null) throw new SnapshotNotFound(sid);
+      return { snapshotId: sid, snapshot };
+    }, fn);
   }
 
   private async runTick<T>(
-    resolveSnapshot: (
-      tx: OrchestratorStorage<SnapshotId, ProjectId>,
-    ) => Promise<{
+    resolveSnapshot: (tx: OrchestratorStorage<SnapshotId, ProjectId>) => Promise<{
       snapshotId: SnapshotId;
       snapshot: ResolvedSnapshot;
     }>,
@@ -133,7 +121,6 @@ export class Orchestrator<
     return this.storage.withTransaction(async (tx) => {
       const { snapshotId, snapshot } = await resolveSnapshot(tx);
       return tx.withSnapshotLock(tx, snapshotId, async () => {
-
         // Make sure the sidecar process exists (idempotent).
         await this.sidecarManager.ensureStarted({
           key: snapshotId,
@@ -225,10 +212,7 @@ export class Orchestrator<
 
   // ─── Sidecar message handler ────────────────────────────────────────────
 
-  private async onSidecarMessage(
-    snapshotId: SnapshotId,
-    msg: ChildToParent,
-  ): Promise<void> {
+  private async onSidecarMessage(snapshotId: SnapshotId, msg: ChildToParent): Promise<void> {
     await this.tick(snapshotId, async (ctx) => {
       if (ctx.ffi === null) {
         this.logger.log("error", "orchestrator: sidecar message for snapshot without FfiModule", {
@@ -239,8 +223,7 @@ export class Orchestrator<
       }
       await ctx.ffi.dispatchSidecarMessage(msg);
     }).catch((err) => {
-      const delegationId =
-        "delegationId" in msg ? msg.delegationId : "(none)";
+      const delegationId = "delegationId" in msg ? msg.delegationId : "(none)";
       this.logger.log("error", "orchestrator: tick failed for sidecar message", {
         snapshotId,
         type: msg.type,

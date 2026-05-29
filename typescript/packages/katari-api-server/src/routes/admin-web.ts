@@ -14,8 +14,8 @@
 import { existsSync } from "node:fs";
 import { readFile, stat } from "node:fs/promises";
 import { extname, resolve } from "node:path";
-import type { Hono, MiddlewareHandler } from "hono";
 import type { Logger } from "@katari-lang/runtime";
+import type { Hono, MiddlewareHandler } from "hono";
 
 const CONTENT_TYPES: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
@@ -51,7 +51,8 @@ function buildAdminStatic(distPath: string): MiddlewareHandler {
     const path = url.pathname;
     if (!path.startsWith("/admin")) return next();
     // /admin and /admin/ both serve the SPA shell.
-    const sub = path === "/admin" || path === "/admin/" ? "/index.html" : path.slice("/admin".length);
+    const sub =
+      path === "/admin" || path === "/admin/" ? "/index.html" : path.slice("/admin".length);
     const target = resolve(absDist, `.${sub}`);
     if (!target.startsWith(absDist)) {
       return c.notFound();
@@ -85,11 +86,7 @@ function buildAdminStatic(distPath: string): MiddlewareHandler {
  * (with a warning) when the dist path is missing — keeps boot working
  * for deployments that don't ship the UI.
  */
-export function mountAdminWeb(
-  app: Hono,
-  distPath: string | null,
-  logger: Logger,
-): void {
+export function mountAdminWeb(app: Hono, distPath: string | null, logger: Logger): void {
   if (distPath === null) return;
   if (!existsSync(resolve(distPath, "index.html"))) {
     logger.log("warn", "admin web dist path has no index.html; skipping mount", {

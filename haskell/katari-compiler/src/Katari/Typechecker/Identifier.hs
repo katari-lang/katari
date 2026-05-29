@@ -26,23 +26,30 @@ module Katari.Typechecker.Identifier
     TypeData (..),
     RequestData (..),
     ConstructorData (..),
-    IdentifierResult (..),
     IdentifierError (..),
 
     -- * Diagnostics
     toDiagnostic,
 
-    -- * Entry point
-    identify,
+    -- * Per-module identification
+    ModuleIdentifyResult (..),
+    IdentifierState (..),
+    initialIdentifierState,
+    identifyModule,
+    runIdentifier,
+    runIdentifierFrom,
+
+    -- * Import-cycle detection
+    importCycleErrors,
   )
 where
 
 import Control.Monad (foldM, when)
 import Control.Monad.State.Strict (State, get, gets, modify, put, runState)
-import Data.Foldable (foldl', for_)
+import Data.Foldable (foldl')
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (catMaybes, isJust)
+import Data.Maybe (isJust)
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
@@ -50,28 +57,24 @@ import Data.Text qualified as T
 import Katari.AST
 import Katari.Diagnostic (Diagnostic (..), DiagnosticNote (..), diagnosticError)
 import Katari.Id
-  ( ConstructorId (..),
-    ModuleId (..),
+  ( LocalVarId (..),
     QualifiedName (..),
-    RequestId (..),
-    TypeId (..),
-    VariableId (..),
+    VariableResolution (..),
   )
 import Katari.Internal qualified as Internal
 import Katari.Prim (PrimRule)
 import Katari.Prim qualified as Prim
 import Katari.SourceSpan (HasSourceSpan (..), SourceSpan (..))
 import Katari.Typechecker.ImportGraph (findImportCycles)
-import Katari.Typechecker.ScopeIndex (ScopeFrame (..), ScopeIndex, buildScopeIndex)
+import Katari.Typechecker.ScopeIndex (ScopeFrame (..))
 
 -- ---------------------------------------------------------------------------
 -- Identified GADT
 --
--- Stable identifier types ('VariableId' / 'TypeId' / 'ModuleId') live in
--- 'Katari.Id' so that 'Katari.AST' and
--- 'Katari.Typechecker.SemanticType' can both depend on them without circular
--- imports. They are re-exported below for backward compatibility with
--- existing call sites.
+-- Top-level declarations are identified by 'QualifiedName' and local
+-- bindings by 'LocalVarId' (both wrapped in 'VariableResolution'). These
+-- live in 'Katari.Id' so that 'Katari.AST' and 'Katari.SemanticType' can
+-- both depend on them without a circular import.
 -- ---------------------------------------------------------------------------
 
 -- | Metadata carried by the AST after the Identifier pass.
@@ -112,11 +115,11 @@ import Katari.Typechecker.ScopeIndex (ScopeFrame (..), ScopeIndex, buildScopeInd
 -- @requestSymbol@; both reject names that resolve only to a regular
 -- @variableSymbol@.
 data SymbolEntry = SymbolEntry
-  { variableSymbol :: Maybe VariableId,
-    typeSymbol :: Maybe TypeId,
-    moduleSymbol :: Maybe ModuleId,
-    requestSymbol :: Maybe RequestId,
-    constructorSymbol :: Maybe ConstructorId
+  { variableSymbol :: Maybe VariableResolution,
+    typeSymbol :: Maybe QualifiedName,
+    moduleSymbol :: Maybe Text,
+    requestSymbol :: Maybe QualifiedName,
+    constructorSymbol :: Maybe QualifiedName
   }
   deriving (Eq, Show)
 
@@ -130,174 +133,84 @@ emptySymbolEntry =
       constructorSymbol = Nothing
     }
 
-singletonVariable :: VariableId -> SymbolEntry
-singletonVariable variableId = emptySymbolEntry {variableSymbol = Just variableId}
+singletonVariable :: VariableResolution -> SymbolEntry
+singletonVariable resolution = emptySymbolEntry {variableSymbol = Just resolution}
 
-singletonType :: TypeId -> SymbolEntry
-singletonType typeId = emptySymbolEntry {typeSymbol = Just typeId}
+singletonType :: QualifiedName -> SymbolEntry
+singletonType qualifiedName = emptySymbolEntry {typeSymbol = Just qualifiedName}
 
-singletonModule :: ModuleId -> SymbolEntry
-singletonModule moduleId = emptySymbolEntry {moduleSymbol = Just moduleId}
+singletonModule :: Text -> SymbolEntry
+singletonModule moduleName = emptySymbolEntry {moduleSymbol = Just moduleName}
 
 -- ---------------------------------------------------------------------------
 -- Result tables
 -- ---------------------------------------------------------------------------
 
--- | Identifier-pass metadata for one module. Keyed by 'ModuleId' in
--- 'IdentifierResult.identifiedModules'; lets later phases (and the
--- LSP) recover the dotted module name and the file-level source span
--- for go-to-definition / hover on a module identifier.
+-- | Identifier-pass metadata for one module. Keyed by module name ('Text')
+-- in 'IdentifierResult.identifiedModules'; lets later phases (and the
+-- LSP) recover the file-level source span for go-to-definition / hover
+-- on a module identifier.
 data ModuleData = ModuleData
-  { moduleName :: Text,
-    moduleSourceSpan :: SourceSpan
+  { moduleSourceSpan :: SourceSpan
   }
   deriving (Eq, Show)
 
--- | A 'VariableId' covers both top-level callables (agent / req / ext / ctor's
--- value side) and local variables (let / pattern bind / param). Top-level
--- bindings carry @Just@ a 'QualifiedName'; locals carry @Nothing@.
+-- | Metadata for a top-level callable (agent / req / ext / ctor's value side).
+-- Keyed by 'QualifiedName' in 'IdentifierResult.identifiedVariables'. Local
+-- variables are not stored in this map (they use 'LocalVarId' only).
 data VariableData = VariableData
   { variableName :: Text,
-    variableQualifiedName :: Maybe QualifiedName,
     variableSourceSpan :: SourceSpan,
-    -- | Set on the 'VariableId' issued for a 'DeclarationPrimAgent' when its
+    -- | Set on the variable issued for a 'DeclarationPrimAgent' when its
     -- @using@ clause names a known 'PrimRule'. Read by the constraint
     -- generator to apply operand-aware return typing at call sites.
     -- 'Nothing' for ordinary variables and prims without a @using@ clause.
     variablePrimRule :: Maybe PrimRule,
     -- | The @\@"..."@ annotation on the top-level declaration that
-    -- introduced this variable, or 'Nothing' for local bindings / decls
-    -- without an annotation. Schema generation reads this directly so it
-    -- can be decl-kind-agnostic (every top-level callable, regardless of
-    -- whether it was @agent@ / @ext agent@ / @prim agent@ / @req@ / @data@,
+    -- introduced this variable, or 'Nothing' for decls without an
+    -- annotation. Schema generation reads this directly so it can be
+    -- decl-kind-agnostic (every top-level callable, regardless of whether
+    -- it was @agent@ / @ext agent@ / @prim agent@ / @req@ / @data@,
     -- exposes its annotation here).
     variableAnnotation :: Maybe Text,
     -- | Per-parameter @\@"..."@ annotations in source order. Empty for
-    -- local bindings and parameter-less decls. Schema generation maps
-    -- these to the JSON Schema @description@ field on each property.
+    -- parameter-less decls. Schema generation maps these to the JSON
+    -- Schema @description@ field on each property.
     variableParameterAnnotations :: [(Text, Maybe Text)]
   }
   deriving (Eq, Show)
 
--- | A 'TypeId' is always issued for a top-level declaration (data / type
--- synonym), so the qualified name is always present.
+-- | Metadata for a type (data / type synonym). Keyed by 'QualifiedName'
+-- in 'IdentifierResult.identifiedTypes'. The 'typeId' is the semantic
+-- identifier used by 'SemanticTypeData' and the constraint solver.
 data TypeData = TypeData
-  { typeQualifiedName :: QualifiedName,
-    typeSourceSpan :: SourceSpan,
-    -- | For type synonyms, the resolved RHS expression. @Nothing@ for
-    -- @data@ declarations. Populated in Phase D after the synonym body
-    -- has been resolved; the constraint generator's elaboration phase
-    -- expands synonyms by looking up this field.
+  { typeSourceSpan :: SourceSpan,
     typeSynonymRhs :: Maybe (SyntacticType Identified)
   }
   deriving (Eq, Show)
 
--- | A 'RequestId' identifies a @req@ declaration. Always top-level.
--- 'requestVariableId' points back to the call-side 'VariableId' issued for
--- the same declaration so that downstream phases (constraint generator,
--- lowering) can read the request's signature type via the shared type
--- environment without re-resolving by name.
+-- | Metadata for a @req@ declaration. Keyed by 'QualifiedName' in
+-- 'IdentifierResult.identifiedRequests'. The 'requestId' is the semantic
+-- identifier used by 'SemanticRequest' and the constraint solver. The
+-- request's call-side type lives in the type environment under the same
+-- 'QualifiedName' (via 'ResolvedTopLevel'), so no separate variable
+-- pointer is needed.
 data RequestData = RequestData
-  { requestQualifiedName :: QualifiedName,
-    requestSourceSpan :: SourceSpan,
-    -- | Request Id -> Variable Id
-    requestVariableId :: VariableId,
-    -- | Per-parameter annotation text, keyed by external call label.
-    -- Used by Schema generation to populate JSON Schema @description@ fields.
+  { requestSourceSpan :: SourceSpan,
     requestParameterAnnotations :: Map Text (Maybe Text)
   }
   deriving (Eq, Show)
 
--- | A 'ConstructorId' identifies the constructor side of a @data@ declaration.
--- Always top-level. 'constructorTypeId' points back to the corresponding
--- 'TypeId' so that downstream phases can recover the type that this
--- constructor builds without re-walking the AST. 'constructorVariableId'
--- points to the call-side 'VariableId' (the @Foo(...)@ usage), giving access
--- to the constructor function's signature type.
+-- | Metadata for a data constructor. Keyed by 'QualifiedName' in
+-- 'IdentifierResult.identifiedConstructors'. The 'constructorId' is the
+-- semantic identifier used by 'CtorTag' in exhaustiveness checking and
+-- the IR. 'constructorTypeQName' points to the corresponding data type's
+-- 'QualifiedName' so downstream phases can recover the data type.
 data ConstructorData = ConstructorData
-  { constructorQualifiedName :: QualifiedName,
-    constructorSourceSpan :: SourceSpan,
-    constructorTypeId :: TypeId,
-    constructorVariableId :: VariableId
+  { constructorSourceSpan :: SourceSpan,
+    constructorTypeQName :: QualifiedName
   }
   deriving (Eq, Show)
-
--- | Result of a successful Identifier pass. The Identified ASTs live in
--- 'moduleASTs' rather than nested inside 'ModuleData' so the State monad never
--- has to hold a placeholder AST that gets overwritten later.
---
--- The reverse maps (@*ByQName@) let downstream phases look up an id by its
--- qualified name without scanning the full forward map. They cover top-level
--- bindings only — local variables are not addressable by qualified name.
--- Use 'mkIdentifierResult' rather than constructing directly.
-data IdentifierResult = IdentifierResult
-  { identifiedModules :: Map ModuleId ModuleData,
-    identifiedVariables :: Map VariableId VariableData,
-    identifiedTypes :: Map TypeId TypeData,
-    identifiedRequests :: Map RequestId RequestData,
-    identifiedConstructors :: Map ConstructorId ConstructorData,
-    moduleASTs :: Map ModuleId (Module Identified),
-    -- Reverse maps (qualified name → id) for top-level lookups.
-    topLevelVariablesByQName :: Map QualifiedName VariableId,
-    typesByQName :: Map QualifiedName TypeId,
-    requestsByQName :: Map QualifiedName RequestId,
-    constructorsByQName :: Map QualifiedName ConstructorId,
-    -- | Per-position scope index captured during resolution. The LSP /
-    -- completion query layer consumes this to answer "what symbols are
-    -- visible at this position?". See 'Katari.Typechecker.ScopeIndex'.
-    scopeIndex :: ScopeIndex SymbolEntry,
-    -- | Per-module bare-name visibility: own top-level declarations +
-    -- named imports + automatic stdlib injections + aliases brought
-    -- in by @import ... as alias@. Used by completion to scope
-    -- suggestions to what the user can actually reference by bare
-    -- name from inside the module. Members reachable only through a
-    -- module alias (= @prim.add@) are intentionally excluded; consumers
-    -- handle those via member-style completion after a @.@.
-    moduleVisibleSymbols :: Map ModuleId (Map Text SymbolEntry),
-    -- | Per-module export table: every name reachable through
-    -- @<module>.<name>@ from outside (= member-completion source).
-    -- Keyed by 'ModuleId'.
-    moduleExports :: Map ModuleId (Map Text SymbolEntry)
-  }
-  deriving (Show)
-
--- | Smart constructor for 'IdentifierResult'. Builds all reverse maps
--- automatically from the forward maps, ensuring consistency.
-mkIdentifierResult ::
-  Map ModuleId ModuleData ->
-  Map VariableId VariableData ->
-  Map TypeId TypeData ->
-  Map RequestId RequestData ->
-  Map ConstructorId ConstructorData ->
-  Map ModuleId (Module Identified) ->
-  ScopeIndex SymbolEntry ->
-  Map ModuleId (Map Text SymbolEntry) ->
-  Map ModuleId (Map Text SymbolEntry) ->
-  IdentifierResult
-mkIdentifierResult modules variables types requests constructors asts scopeIdx visibleSymbols exportsByModuleId =
-  IdentifierResult
-    { identifiedModules = modules,
-      identifiedVariables = variables,
-      identifiedTypes = types,
-      identifiedRequests = requests,
-      identifiedConstructors = constructors,
-      moduleASTs = asts,
-      topLevelVariablesByQName =
-        Map.fromList
-          [ (qualifiedName, variableId)
-            | (variableId, variableData) <- Map.toList variables,
-              Just qualifiedName <- [variableData.variableQualifiedName]
-          ],
-      typesByQName =
-        Map.fromList [(typeData.typeQualifiedName, typeId) | (typeId, typeData) <- Map.toList types],
-      requestsByQName =
-        Map.fromList [(requestData.requestQualifiedName, requestId) | (requestId, requestData) <- Map.toList requests],
-      constructorsByQName =
-        Map.fromList [(constructorData.constructorQualifiedName, constructorId) | (constructorId, constructorData) <- Map.toList constructors],
-      scopeIndex = scopeIdx,
-      moduleVisibleSymbols = visibleSymbols,
-      moduleExports = exportsByModuleId
-    }
 
 -- ---------------------------------------------------------------------------
 -- Errors
@@ -488,26 +401,18 @@ toDiagnostic = \case
 -- Identifier monad
 -- ---------------------------------------------------------------------------
 
--- | Identifier-pass state: counters for the five id namespaces, the
--- materialized id → original-data maps, qualified-name reverse maps, the
--- accumulated error list, and the per-module resolve context (only meaningful
--- during Phase D; populated with a dummy in earlier phases).
 data IdentifierState = IdentifierState
-  { nextVariableId :: Int,
-    nextTypeId :: Int,
-    nextModuleId :: Int,
-    nextRequestId :: Int,
-    nextConstructorId :: Int,
-    variables :: Map VariableId VariableData,
-    types :: Map TypeId TypeData,
-    modules :: Map ModuleId ModuleData,
-    requests :: Map RequestId RequestData,
-    constructors :: Map ConstructorId ConstructorData,
+  { nextLocalVarId :: Int,
+    variables :: Map QualifiedName VariableData,
+    types :: Map QualifiedName TypeData,
+    modules :: Map Text ModuleData,
+    requests :: Map QualifiedName RequestData,
+    constructors :: Map QualifiedName ConstructorData,
     errors :: [IdentifierError],
     resolveContext :: ResolveContext,
     -- | Captured (span, innermost-frame-symbols) pairs. Each
     -- 'withScopeFrameAt' invocation pushes one entry on exit. The
-    -- raw list is folded into a 'ScopeIndex' by 'mkIdentifierResult'.
+    -- raw list is grouped into a 'ScopeIndex' by the caller.
     capturedScopeFrames :: [(SourceSpan, Map Text SymbolEntry)]
   }
 
@@ -521,7 +426,7 @@ data IdentifierState = IdentifierState
 -- naturally accommodate locally-scoped imports if added later.
 data ResolveContext = ResolveContext
   { scopeStack :: [Map Text SymbolEntry], -- innermost first; last element = top-level
-    moduleExports :: Map ModuleId (Map Text SymbolEntry)
+    moduleExports :: Map Text (Map Text SymbolEntry)
   }
 
 emptyResolveContext :: ResolveContext
@@ -534,67 +439,63 @@ emptyResolveContext =
 type Identifier a = State IdentifierState a
 
 runIdentifier :: Identifier a -> (a, IdentifierState)
-runIdentifier action = runState action initialState
-  where
-    initialState =
-      IdentifierState
-        { nextVariableId = 0,
-          nextTypeId = 0,
-          nextModuleId = 0,
-          nextRequestId = 0,
-          nextConstructorId = 0,
-          variables = Map.empty,
-          types = Map.empty,
-          modules = Map.empty,
-          requests = Map.empty,
-          constructors = Map.empty,
-          errors = [],
-          resolveContext = emptyResolveContext,
-          capturedScopeFrames = []
-        }
+runIdentifier = runIdentifierFrom initialIdentifierState
+
+initialIdentifierState :: IdentifierState
+initialIdentifierState =
+  IdentifierState
+    { nextLocalVarId = 0,
+      variables = Map.empty,
+      types = Map.empty,
+      modules = Map.empty,
+      requests = Map.empty,
+      constructors = Map.empty,
+      errors = [],
+      resolveContext = emptyResolveContext,
+      capturedScopeFrames = []
+    }
+
+runIdentifierFrom :: IdentifierState -> Identifier a -> (a, IdentifierState)
+runIdentifierFrom state action = runState action state
 
 -- ---------------------------------------------------------------------------
 -- ID issuing helpers
 -- ---------------------------------------------------------------------------
 
-freshVariableId :: VariableData -> Identifier VariableId
-freshVariableId variableData = do
+registerTopLevelVariable :: QualifiedName -> VariableData -> Identifier ()
+registerTopLevelVariable qualifiedName variableData = do
   state <- get
-  let variableId = VariableId state.nextVariableId
-  put state {nextVariableId = state.nextVariableId + 1, variables = Map.insert variableId variableData state.variables}
-  pure variableId
+  case Map.lookup qualifiedName state.variables of
+    Just existing ->
+      emitError (ErrorDuplicateName variableData.variableSourceSpan qualifiedName.name existing.variableSourceSpan)
+    Nothing -> pure ()
+  modify $ \state' -> state' {variables = Map.insert qualifiedName variableData state'.variables}
 
-freshTypeId :: TypeData -> Identifier TypeId
-freshTypeId typeData = do
+freshLocalVarId :: Identifier LocalVarId
+freshLocalVarId = do
   state <- get
-  let typeId = TypeId state.nextTypeId
-  put state {nextTypeId = state.nextTypeId + 1, types = Map.insert typeId typeData state.types}
-  pure typeId
+  let localVarId = LocalVarId state.nextLocalVarId
+  put state {nextLocalVarId = state.nextLocalVarId + 1}
+  pure localVarId
 
-freshModuleId :: ModuleData -> Identifier ModuleId
-freshModuleId moduleData = do
-  state <- get
-  let moduleId = ModuleId state.nextModuleId
-  put state {nextModuleId = state.nextModuleId + 1, modules = Map.insert moduleId moduleData state.modules}
-  pure moduleId
+registerType :: QualifiedName -> TypeData -> Identifier ()
+registerType qualifiedName typeData = do
+  existingTypes <- gets (.types)
+  case Map.lookup qualifiedName existingTypes of
+    Just existing ->
+      emitError (ErrorDuplicateName typeData.typeSourceSpan qualifiedName.name existing.typeSourceSpan)
+    Nothing -> pure ()
+  modify $ \state -> state {types = Map.insert qualifiedName typeData state.types}
 
-freshRequestId :: RequestData -> Identifier RequestId
-freshRequestId requestData = do
-  state <- get
-  let requestId = RequestId state.nextRequestId
-  put state {nextRequestId = state.nextRequestId + 1, requests = Map.insert requestId requestData state.requests}
-  pure requestId
+registerRequest :: QualifiedName -> RequestData -> Identifier ()
+registerRequest qualifiedName requestData =
+  modify $ \state ->
+    state {requests = Map.insert qualifiedName requestData state.requests}
 
-freshConstructorId :: ConstructorData -> Identifier ConstructorId
-freshConstructorId constructorData = do
-  state <- get
-  let constructorId = ConstructorId state.nextConstructorId
-  put
-    state
-      { nextConstructorId = state.nextConstructorId + 1,
-        constructors = Map.insert constructorId constructorData state.constructors
-      }
-  pure constructorId
+registerConstructor :: QualifiedName -> ConstructorData -> Identifier ()
+registerConstructor qualifiedName constructorData =
+  modify $ \state ->
+    state {constructors = Map.insert qualifiedName constructorData state.constructors}
 
 emitError :: IdentifierError -> Identifier ()
 emitError newError = modify $ \state -> state {errors = newError : state.errors}
@@ -639,20 +540,28 @@ mergeSymbol newPos name existing incoming = do
         constructorSymbol = mergedConstructor
       }
   where
-    reportFrom ::
-      (Ord k) =>
-      (IdentifierState -> Map k v) ->
-      (v -> SourceSpan) ->
-      k ->
-      Identifier ()
-    reportFrom getMap getSpan xId = do
-      maybeSpan <- gets (fmap getSpan . Map.lookup xId . getMap)
+    reportFromVariable :: VariableResolution -> Identifier ()
+    reportFromVariable = \case
+      ResolvedTopLevel qualifiedName -> do
+        maybeSpan <- gets (fmap (.variableSourceSpan) . Map.lookup qualifiedName . (.variables))
+        maybe (pure ()) (emitError . ErrorDuplicateName newPos name) maybeSpan
+      ResolvedLocal _ -> pure ()
+    reportFromType :: QualifiedName -> Identifier ()
+    reportFromType qualifiedName = do
+      maybeSpan <- gets (fmap (.typeSourceSpan) . Map.lookup qualifiedName . (.types))
       maybe (pure ()) (emitError . ErrorDuplicateName newPos name) maybeSpan
-    reportFromVariable = reportFrom (.variables) (.variableSourceSpan)
-    reportFromType = reportFrom (.types) (.typeSourceSpan)
-    reportFromModule = reportFrom (.modules) (.moduleSourceSpan)
-    reportFromRequest = reportFrom (.requests) (.requestSourceSpan)
-    reportFromConstructor = reportFrom (.constructors) (.constructorSourceSpan)
+    reportFromModule :: Text -> Identifier ()
+    reportFromModule moduleName = do
+      maybeSpan <- gets (fmap (.moduleSourceSpan) . Map.lookup moduleName . (.modules))
+      maybe (pure ()) (emitError . ErrorDuplicateName newPos name) maybeSpan
+    reportFromRequest :: QualifiedName -> Identifier ()
+    reportFromRequest qualifiedName = do
+      maybeSpan <- gets (fmap (.requestSourceSpan) . Map.lookup qualifiedName . (.requests))
+      maybe (pure ()) (emitError . ErrorDuplicateName newPos name) maybeSpan
+    reportFromConstructor :: QualifiedName -> Identifier ()
+    reportFromConstructor qualifiedName = do
+      maybeSpan <- gets (fmap (.constructorSourceSpan) . Map.lookup qualifiedName . (.constructors))
+      maybe (pure ()) (emitError . ErrorDuplicateName newPos name) maybeSpan
 
 -- | Generic per-slot merge. The first existing id wins on conflict; the
 -- caller's @reportConflict@ records the duplicate-name error against it.
@@ -712,19 +621,11 @@ bindLocalVariable nameRef = do
   primShadow <- isShadowingPrim name
   when primShadow $
     emitError (ErrorShadowNonVariable nameRef.sourceSpan name)
-  variableId <-
-    freshVariableId
-      VariableData
-        { variableName = name,
-          variableQualifiedName = Nothing,
-          variableSourceSpan = nameRef.sourceSpan,
-          variablePrimRule = Nothing,
-          variableAnnotation = Nothing,
-          variableParameterAnnotations = []
-        }
+  localVarId <- freshLocalVarId
+  let resolution = ResolvedLocal localVarId
   modifyResolveContext $ \currentContext ->
-    currentContext {scopeStack = insertInnermost name variableId currentContext.scopeStack}
-  pure (identifiedNameRef (Just variableId) nameRef)
+    currentContext {scopeStack = insertInnermost name resolution currentContext.scopeStack}
+  pure (identifiedNameRef (Just resolution) nameRef)
   where
     -- Module bindings only ever appear in the top-level frame (imports are
     -- top-level only), but we walk the full stack defensively so that the
@@ -733,9 +634,9 @@ bindLocalVariable nameRef = do
     -- Local scope frames contain only variable bindings (type and module
     -- declarations are top-level only), so overwriting the entire SymbolEntry
     -- with singletonVariable is safe and does not discard other slots.
-    insertInnermost insertName variableId = \case
-      [] -> [Map.singleton insertName (singletonVariable variableId)]
-      (innermost : remaining) -> Map.insert insertName (singletonVariable variableId) innermost : remaining
+    insertInnermost insertName resolution = \case
+      [] -> [Map.singleton insertName (singletonVariable resolution)]
+      (innermost : remaining) -> Map.insert insertName (singletonVariable resolution) innermost : remaining
 
 -- | Push a fresh empty frame, run the action, then pop the frame.
 -- Right before popping, snapshot the innermost frame together with the
@@ -794,44 +695,48 @@ lookupSlot getSlot name = do
       Just entry | Just slot <- getSlot entry -> Just slot
       _ -> walk remaining
 
-lookupVariable :: Text -> Identifier (Maybe VariableId)
+lookupVariable :: Text -> Identifier (Maybe VariableResolution)
 lookupVariable = lookupSlot (.variableSymbol)
 
-lookupType :: Text -> Identifier (Maybe TypeId)
+lookupType :: Text -> Identifier (Maybe QualifiedName)
 lookupType = lookupSlot (.typeSymbol)
 
-lookupModule :: Text -> Identifier (Maybe ModuleId)
+lookupModule :: Text -> Identifier (Maybe Text)
 lookupModule = lookupSlot (.moduleSymbol)
 
-lookupRequest :: Text -> Identifier (Maybe RequestId)
+lookupRequest :: Text -> Identifier (Maybe QualifiedName)
 lookupRequest = lookupSlot (.requestSymbol)
 
-lookupConstructor :: Text -> Identifier (Maybe ConstructorId)
+lookupConstructor :: Text -> Identifier (Maybe QualifiedName)
 lookupConstructor = lookupSlot (.constructorSymbol)
 
--- | Look up the variable slot of @name@ in the export table of @moduleId@.
-lookupModuleExportVariable :: ModuleId -> Text -> Identifier (Maybe VariableId)
+-- | Look up a variable by name, returning its resolution directly.
+lookupVariableResolution :: Text -> Identifier (Maybe VariableResolution)
+lookupVariableResolution = lookupVariable
+
+-- | Look up the variable slot of @name@ in the export table of @moduleName@.
+lookupModuleExportVariable :: Text -> Text -> Identifier (Maybe VariableResolution)
 lookupModuleExportVariable = lookupModuleExportSlot (.variableSymbol)
 
--- | Look up the type slot of @name@ in the export table of @moduleId@.
-lookupModuleExportType :: ModuleId -> Text -> Identifier (Maybe TypeId)
+-- | Look up the type slot of @name@ in the export table of @moduleName@.
+lookupModuleExportType :: Text -> Text -> Identifier (Maybe QualifiedName)
 lookupModuleExportType = lookupModuleExportSlot (.typeSymbol)
 
-lookupModuleExportRequest :: ModuleId -> Text -> Identifier (Maybe RequestId)
+lookupModuleExportRequest :: Text -> Text -> Identifier (Maybe QualifiedName)
 lookupModuleExportRequest = lookupModuleExportSlot (.requestSymbol)
 
-lookupModuleExportConstructor :: ModuleId -> Text -> Identifier (Maybe ConstructorId)
+lookupModuleExportConstructor :: Text -> Text -> Identifier (Maybe QualifiedName)
 lookupModuleExportConstructor = lookupModuleExportSlot (.constructorSymbol)
 
 lookupModuleExportSlot ::
   (SymbolEntry -> Maybe a) ->
-  ModuleId ->
+  Text ->
   Text ->
   Identifier (Maybe a)
-lookupModuleExportSlot getSlot moduleId name = do
+lookupModuleExportSlot getSlot moduleName name = do
   context <- gets (.resolveContext)
   pure $ do
-    table <- Map.lookup moduleId context.moduleExports
+    table <- Map.lookup moduleName context.moduleExports
     entry <- Map.lookup name table
     getSlot entry
 
@@ -868,379 +773,8 @@ labelRef :: NameRef Parsed LabelRef -> NameRef Identified LabelRef
 labelRef = identifiedNameRef ()
 
 -- ---------------------------------------------------------------------------
--- Phase 0: import cycle reporting
+-- Module-name helper
 -- ---------------------------------------------------------------------------
-
--- | Emit an 'ErrorImportCycle' for one cycle returned by 'findImportCycles'.
--- The diagnostic span is taken from the first module in the cycle (every
--- name in the cycle is guaranteed to be present in @moduleMap@ because
--- 'findImportCycles' constructs the graph from that same map).
-emitImportCycleError :: Map Text (Module Parsed) -> [Text] -> Identifier ()
-emitImportCycleError moduleMap = \case
-  [] -> pure ()
-  cycle_@(m : _) ->
-    case Map.lookup m moduleMap of
-      Just module_ -> emitError (ErrorImportCycle module_.sourceSpan cycle_)
-      Nothing -> pure ()
-
--- ---------------------------------------------------------------------------
--- Phase 0': prim namespace preregistration
--- ---------------------------------------------------------------------------
-
--- ---------------------------------------------------------------------------
--- Phase A: assign ModuleIds
--- ---------------------------------------------------------------------------
-
--- | Allocate a 'ModuleId' for each input module. The Identified AST is built
--- separately in Phase D and stored in the result, so no placeholder is needed
--- here. User-defined modules under the reserved @prim@ / @prim.*@ namespace
--- are flagged with 'ErrorReservedPrimitiveModule' (K0113); a 'ModuleId' is
--- still allocated so downstream phases can keep walking, but the prim
--- injection skips those modules.
---
--- @trustedStdlibNames@ holds module names that the compiler itself owns
--- (see 'Katari.Stdlib'); K0113 is skipped for them.
-assignModuleIds :: Set Text -> Map Text (Module Parsed) -> Identifier (Map Text ModuleId)
-assignModuleIds trustedStdlibNames moduleMap =
-  Map.fromList <$> mapM allocate (Map.toList moduleMap)
-  where
-    allocate (moduleName, parsedModule) = do
-      when
-        ( Prim.isPrimReservedModuleName moduleName
-            && not (Set.member moduleName trustedStdlibNames)
-        )
-        $ emitError (ErrorReservedPrimitiveModule parsedModule.sourceSpan moduleName)
-      moduleId <-
-        freshModuleId
-          ModuleData
-            { moduleName = moduleName,
-              moduleSourceSpan = parsedModule.sourceSpan
-            }
-      pure (moduleName, moduleId)
-
--- ---------------------------------------------------------------------------
--- Phase B: build per-module export tables
--- ---------------------------------------------------------------------------
-
--- | Walk each module's top-level declarations and build a
--- @Map Text SymbolEntry@ representing what the module exports.
--- agent / req / ext-agent → variableSymbol; data → variableSymbol + typeSymbol
--- under the same name; type synonym → typeSymbol.
-buildExports :: Map Text (Module Parsed) -> Identifier (Map Text (Map Text SymbolEntry))
-buildExports moduleMap =
-  Map.fromList <$> mapM buildOne (Map.toList moduleMap)
-  where
-    buildOne (moduleName, parsedModule) = do
-      table <- foldM (addDeclaration moduleName) Map.empty parsedModule.declarations
-      pure (moduleName, table)
-
-    addDeclaration moduleName table = \case
-      DeclarationAgent declaration ->
-        registerVariable moduleName table declaration.name declaration.annotation
-          (parameterBindingsToAnnotationPairs declaration.parameters)
-      DeclarationRequest declaration ->
-        registerRequest moduleName table declaration.name declaration.annotation
-          declaration.parameters
-      DeclarationExternalAgent declaration ->
-        registerVariable moduleName table declaration.name declaration.annotation
-          (parameterBindingsToAnnotationPairs declaration.parameters)
-      DeclarationPrimAgent declaration ->
-        registerVariable moduleName table declaration.name declaration.annotation
-          (parameterBindingsToAnnotationPairs declaration.parameters)
-      -- A data declaration occupies the variable slot (constructor function),
-      -- the type slot (the data type), AND the constructor slot (the
-      -- constructor identity used by match patterns). All three live under
-      -- the same name and are issued together.
-      DeclarationData declaration ->
-        registerData moduleName table declaration.name declaration.annotation
-          (dataParametersToAnnotationPairs declaration.parameters)
-      DeclarationTypeSynonym declaration -> registerTypeOnly moduleName table declaration.name
-      DeclarationImport _ -> pure table -- handled in Phase C
-      -- Recovery sentinel: do not occupy any slot. References that would have
-      -- pointed here will fall through to ErrorUndefinedName.
-      DeclarationError _ -> pure table
-
-    qnameOf moduleName name = QualifiedName {module_ = moduleName, name = name.text}
-
-    -- Type inferred — local where-bindings can't easily reference the
-    -- phase-polymorphic AST types without extra imports / extensions.
-    parameterBindingsToAnnotationPairs ps = [(p.label, p.annotation) | p <- ps]
-    dataParametersToAnnotationPairs ps = [(p.name, p.annotation) | p <- ps]
-
-    registerVariable moduleName table name annotation parameterAnnotations = do
-      let qualifiedName = qnameOf moduleName name
-      variableId <-
-        freshVariableId
-          VariableData
-            { variableName = name.text,
-              variableQualifiedName = Just qualifiedName,
-              variableSourceSpan = name.sourceSpan,
-              variablePrimRule = Nothing,
-              variableAnnotation = annotation,
-              variableParameterAnnotations = parameterAnnotations
-            }
-      insertSymbolEntry name.sourceSpan name.text (singletonVariable variableId) table
-
-    -- @req foo@ issues both a 'VariableId' (callable side: @foo(...)@) and a
-    -- 'RequestId' (handler-target / request-set side).
-    registerRequest moduleName table name annotation parameters = do
-      let qualifiedName = qnameOf moduleName name
-          parameterAnnotations = parameterBindingsToAnnotationPairs parameters
-      variableId <-
-        freshVariableId
-          VariableData
-            { variableName = name.text,
-              variableQualifiedName = Just qualifiedName,
-              variableSourceSpan = name.sourceSpan,
-              variablePrimRule = Nothing,
-              variableAnnotation = annotation,
-              variableParameterAnnotations = parameterAnnotations
-            }
-      requestId <-
-        freshRequestId
-          RequestData
-            { requestQualifiedName = qualifiedName,
-              requestSourceSpan = name.sourceSpan,
-              requestVariableId = variableId,
-              requestParameterAnnotations =
-                Map.fromList parameterAnnotations
-            }
-      let entry =
-            emptySymbolEntry
-              { variableSymbol = Just variableId,
-                requestSymbol = Just requestId
-              }
-      insertSymbolEntry name.sourceSpan name.text entry table
-
-    registerTypeOnly moduleName table name = do
-      let qualifiedName = qnameOf moduleName name
-      typeId <-
-        freshTypeId
-          TypeData
-            { typeQualifiedName = qualifiedName,
-              typeSourceSpan = name.sourceSpan,
-              typeSynonymRhs = Nothing
-            }
-      insertSymbolEntry name.sourceSpan name.text (singletonType typeId) table
-
-    -- @data Foo(...)@ issues 'VariableId' (constructor function), 'TypeId'
-    -- (the data type), and 'ConstructorId' (the constructor identity used by
-    -- match patterns).
-    registerData moduleName table name annotation parameterAnnotations = do
-      let qualifiedName = qnameOf moduleName name
-      variableId <-
-        freshVariableId
-          VariableData
-            { variableName = name.text,
-              variableQualifiedName = Just qualifiedName,
-              variableSourceSpan = name.sourceSpan,
-              variablePrimRule = Nothing,
-              variableAnnotation = annotation,
-              variableParameterAnnotations = parameterAnnotations
-            }
-      typeId <-
-        freshTypeId
-          TypeData
-            { typeQualifiedName = qualifiedName,
-              typeSourceSpan = name.sourceSpan,
-              typeSynonymRhs = Nothing
-            }
-      constructorId <-
-        freshConstructorId
-          ConstructorData
-            { constructorQualifiedName = qualifiedName,
-              constructorSourceSpan = name.sourceSpan,
-              constructorTypeId = typeId,
-              constructorVariableId = variableId
-            }
-      let entry =
-            emptySymbolEntry
-              { variableSymbol = Just variableId,
-                typeSymbol = Just typeId,
-                constructorSymbol = Just constructorId
-              }
-      insertSymbolEntry name.sourceSpan name.text entry table
-
--- ---------------------------------------------------------------------------
--- Phase C: build per-module top-level scope by resolving imports
--- ---------------------------------------------------------------------------
-
--- | Merge a module's own declarations with the symbols brought in by its
--- import statements to produce a flat @Map Text SymbolEntry@ for use as the
--- top-level frame.
---
--- Prim injection: every user module additionally receives
---
---   * the full export table of the @prim@ root module flat-injected
---     under its bare names (named-import semantics);
---   * each @prim.\<sub\>@ as a module alias under its last segment
---     (qualified-import semantics).
---
--- Collisions with user-defined names are reported as
--- 'ErrorPrimitiveConflict' (K0112) and the prim entry is silently
--- dropped — the user's definition keeps the slot so the rest of the
--- pipeline can keep walking. Modules under the reserved @prim@ /
--- @prim.*@ namespace skip the injection (they are themselves the prim
--- modules, or the user is colliding and K0113 already fired).
-buildTopLevels ::
-  Map Text ModuleId ->
-  Map Text (Map Text SymbolEntry) ->
-  Map Text (Module Parsed) ->
-  Identifier (Map Text (Map Text SymbolEntry))
-buildTopLevels moduleNameToId exports moduleMap =
-  Map.fromList <$> mapM buildOne (Map.toList moduleMap)
-  where
-    buildOne (currentModuleName, parsedModule) = do
-      let ownExports = Map.findWithDefault Map.empty currentModuleName exports
-      base <-
-        -- The root @primitive@ module skips the prim injection (it
-        -- can't inject itself into itself). @primitive.X@ sub-modules
-        -- DO get the root's flat exports (so they can reference @json@
-        -- / @json_parse_error@ etc.) — but they intentionally do NOT
-        -- get sibling sub-module aliases auto-injected, otherwise a
-        -- parameter named e.g. @record@ inside @primitive.record@
-        -- would shadow its own module alias and trip K0101.
-        if currentModuleName == "primitive"
-          then pure ownExports
-          else
-            injectPrimitives
-              (Prim.isPrimReservedModuleName currentModuleName)
-              parsedModule.sourceSpan
-              ownExports
-      table <- foldM addImport base parsedModule.declarations
-      pure (currentModuleName, table)
-
-    -- Inject prim root exports into every user module's scope. Stdlib
-    -- now declares prims as ordinary 'PrimAgentDeclaration' entries, so
-    -- they show up in @exports["primitive"]@ via the normal export-table
-    -- build.
-    --
-    -- After the root exports, also inject @primitive.X@ sub-modules as
-    -- module aliases under their tail name @X@ — so users can write
-    -- @json.parse(...)@ / @record.get(...)@ without an explicit
-    -- @import primitive.json as json@ statement. Conflicts surface as
-    -- 'ErrorPrimitiveConflict' the same way root-export collisions do.
-    injectPrimitives ::
-      Bool ->
-      SourceSpan ->
-      Map Text SymbolEntry ->
-      Identifier (Map Text SymbolEntry)
-    injectPrimitives isStdlibSubModule moduleSourceSpan userTable = do
-      let rootExports = Map.findWithDefault Map.empty "primitive" exports
-      base <- foldM (injectOne moduleSourceSpan) userTable (Map.toList rootExports)
-      if isStdlibSubModule
-        then pure base
-        else foldM (injectSubModule moduleSourceSpan) base (Map.toList moduleNameToId)
-
-    injectSubModule ::
-      SourceSpan ->
-      Map Text SymbolEntry ->
-      (Text, ModuleId) ->
-      Identifier (Map Text SymbolEntry)
-    injectSubModule moduleSourceSpan table (fullName, mid) =
-      case T.stripPrefix "primitive." fullName of
-        Nothing -> pure table
-        -- Only one dot allowed: nested sub-sub-modules (if ever added)
-        -- would risk shadow collisions and are intentionally not
-        -- auto-injected by tail.
-        Just tail_
-          | T.any (== '.') tail_ -> pure table
-          | otherwise ->
-              -- Merge into the table: the tail name @json@ may already
-              -- exist as a type (e.g. the @type json = …@ synonym
-              -- exported by the root @primitive@ module). The two
-              -- namespaces — type vs module — are independent slots, so
-              -- 'insertSymbolEntry' fills the @moduleSymbol@ slot
-              -- without clobbering @typeSymbol@.
-              insertSymbolEntry
-                moduleSourceSpan
-                tail_
-                (singletonModule mid)
-                table
-
-    injectOne ::
-      SourceSpan ->
-      Map Text SymbolEntry ->
-      (Text, SymbolEntry) ->
-      Identifier (Map Text SymbolEntry)
-    injectOne moduleSourceSpan table (name, primEntry) =
-      case Map.lookup name table of
-        Just _ -> do
-          emitError (ErrorPrimitiveConflict moduleSourceSpan name)
-          pure table
-        Nothing -> pure (Map.insert name primEntry table)
-
-    addImport table = \case
-      DeclarationImport importDeclaration -> resolveImport table importDeclaration
-      _ -> pure table
-
-    resolveImport table importDeclaration =
-      case importDeclaration.kind of
-        ImportModule {moduleName, alias} ->
-          resolveImportModule importDeclaration.sourceSpan moduleName alias table
-        ImportNames {items, moduleName} ->
-          resolveImportNames importDeclaration.sourceSpan moduleName items table
-
-    resolveImportModule importPos written maybeAlias table =
-      case Map.lookup written moduleNameToId of
-        Nothing -> do
-          emitError (ErrorImportModuleNotFound importPos written)
-          pure table
-        Just targetModuleId -> do
-          let bindName = case maybeAlias of
-                Just aliasName -> aliasName
-                Nothing -> moduleNameTail written
-          insertSymbolEntry importPos bindName (singletonModule targetModuleId) table
-
-    resolveImportNames importPos written items table =
-      case Map.lookup written moduleNameToId of
-        Nothing -> do
-          emitError (ErrorImportModuleNotFound importPos written)
-          pure table
-        Just _ -> do
-          let targetModuleExports = Map.findWithDefault Map.empty written exports
-          foldM (addImportItem importPos written targetModuleExports) table items
-
-    addImportItem importPos targetModuleName targetModuleExports table item =
-      case Map.lookup item.name targetModuleExports of
-        Nothing -> do
-          emitError (ErrorImportNameNotFound importPos item.name targetModuleName)
-          pure table
-        Just entry ->
-          case item.kind of
-            -- @import { foo }@ — pulls in both the variable and type slots
-            -- under the source name. Lets a data-shaped name (variable + type
-            -- under one identifier) be imported in one go. At least one slot
-            -- must exist on the source side.
-            -- Bring in every value-side slot under the source name.
-            -- @data Foo()@ exports variable + type + constructor; @req foo@
-            -- exports variable + request; agent / ext exports variable only.
-            ImportItemValue
-              | isJust entry.variableSymbol
-                  || isJust entry.typeSymbol
-                  || isJust entry.requestSymbol
-                  || isJust entry.constructorSymbol ->
-                  insertSymbolEntry
-                    importPos
-                    item.name
-                    SymbolEntry
-                      { variableSymbol = entry.variableSymbol,
-                        typeSymbol = entry.typeSymbol,
-                        moduleSymbol = Nothing,
-                        requestSymbol = entry.requestSymbol,
-                        constructorSymbol = entry.constructorSymbol
-                      }
-                    table
-              | otherwise -> do
-                  emitError (ErrorImportNameNotFound importPos item.name targetModuleName)
-                  pure table
-            -- @import { type foo }@ — pulls in only the type slot.
-            ImportItemType -> case entry.typeSymbol of
-              Nothing -> do
-                emitError (ErrorImportNameNotFound importPos item.name targetModuleName)
-                pure table
-              Just typeId ->
-                insertSymbolEntry importPos item.name (singletonType typeId) table
 
 -- | Extract @"module"@ from @"path.to.module"@. Returns the empty string if
 -- given an empty input (the parser should never produce one, but this guards
@@ -1252,39 +786,8 @@ moduleNameTail path =
     (lastSegment : _) -> lastSegment
 
 -- ---------------------------------------------------------------------------
--- Phase D: convert each module body into an Identified AST
+-- Phase D: resolve a single module's AST
 -- ---------------------------------------------------------------------------
-
--- | Resolve all module bodies into Identified ASTs. Sets up a fresh
--- 'ResolveContext' per module (top-level frame seeded from the module's own
--- declarations + import results) and returns a @ModuleId -> Module Identified@
--- map directly, avoiding the placeholder-then-overwrite pattern.
-resolveModule ::
-  Map Text (Map Text SymbolEntry) ->
-  Map Text ModuleId ->
-  Map Text (Map Text SymbolEntry) ->
-  Map Text (Module Parsed) ->
-  Identifier (Map ModuleId (Module Identified))
-resolveModule topLevels moduleNameToId exports moduleMap = do
-  -- Re-key moduleExports by ModuleId for convenient qualified lookup.
-  let exportsById =
-        Map.fromList
-          [ (moduleId, Map.findWithDefault Map.empty moduleName exports)
-            | (moduleName, moduleId) <- Map.toList moduleNameToId
-          ]
-  -- Build (ModuleId, Module Identified) pairs and assemble a Map at the end.
-  pairs <- mapM (resolveOne exportsById) (Map.toList moduleMap)
-  pure (Map.fromList (catMaybes pairs))
-  where
-    resolveOne exportsById (currentModuleName, parsedModule) = do
-      let topLevelFrame = Map.findWithDefault Map.empty currentModuleName topLevels
-          context =
-            ResolveContext
-              { scopeStack = [topLevelFrame],
-                moduleExports = exportsById
-              }
-      identifiedModule <- withResolveContext context (resolveModuleAST parsedModule)
-      pure (fmap (,identifiedModule) (Map.lookup currentModuleName moduleNameToId))
 
 resolveModuleAST :: Module Parsed -> Identifier (Module Identified)
 resolveModuleAST parsedModule = do
@@ -1315,7 +818,7 @@ resolveDeclaration = \case
 -- emitted a duplicate-name error), record an unresolved marker rather than
 -- inventing a sentinel id.
 liftSignatureVariable :: NameRef Parsed VariableRef -> Identifier (NameRef Identified VariableRef)
-liftSignatureVariable = liftSignature lookupVariable
+liftSignatureVariable = liftSignature lookupVariableResolution
 
 -- | Counterpart of 'liftSignatureVariable' for type signatures (enum / data
 -- type role / type synonym name).
@@ -1428,16 +931,18 @@ resolvePrimAgent PrimAgentDeclaration {..} = do
       Nothing -> do
         emitError (ErrorUnknownPrimRule sourceSpan ruleName)
         pure Nothing
-  case name'.resolution of
-    Just vid -> modify $ \s ->
+  -- Look up the QualifiedName internally to patch the VariableData.
+  maybeResolution <- lookupVariable name.text
+  case maybeResolution of
+    Just (ResolvedTopLevel qualifiedName) -> modify $ \s ->
       s
         { variables =
             Map.adjust
               (\vd -> vd {variablePrimRule = primRule})
-              vid
+              qualifiedName
               s.variables
         }
-    Nothing -> pure ()
+    _ -> pure ()
   withScopeFrameAt sourceSpan $ do
     parameters' <- mapM resolveParameter parameters
     returnType' <- resolveType returnType
@@ -1493,8 +998,10 @@ resolveTypeSynonym ::
 resolveTypeSynonym TypeSynonymDeclaration {..} = do
   name' <- liftSignatureType name
   rhs' <- resolveType rhs
-  case name'.resolution of
-    Just typeId -> updateTypeSynonymRhs typeId rhs'
+  -- Look up the QualifiedName internally to patch the TypeData.
+  maybeQualifiedName <- lookupType name.text
+  case maybeQualifiedName of
+    Just qualifiedName -> updateTypeSynonymRhs qualifiedName rhs'
     Nothing -> pure ()
   pure
     TypeSynonymDeclaration
@@ -1506,13 +1013,13 @@ resolveTypeSynonym TypeSynonymDeclaration {..} = do
 -- | Patch the @typeSynonymRhs@ field of an existing 'TypeData' entry. Phase B
 -- creates the entry with @Nothing@; Phase D fills in the resolved RHS once the
 -- type expression has been processed.
-updateTypeSynonymRhs :: TypeId -> SyntacticType Identified -> Identifier ()
-updateTypeSynonymRhs typeId rhs = modify $ \state ->
+updateTypeSynonymRhs :: QualifiedName -> SyntacticType Identified -> Identifier ()
+updateTypeSynonymRhs qualifiedName rhs = modify $ \state ->
   state
     { types =
         Map.adjust
           (\typeData -> typeData {typeSynonymRhs = Just rhs})
-          typeId
+          qualifiedName
           state.types
     }
 
@@ -1638,17 +1145,9 @@ resolveRecordPattern RecordPattern {..} = do
 resolveBareVariable :: NameRef Parsed VariableRef -> Identifier (NameRefResolution Identified VariableRef)
 resolveBareVariable nameRef =
   lookupVariable nameRef.text >>= \case
-    Just variableId -> pure (Just variableId)
+    Just resolution -> pure (Just resolution)
     Nothing -> do
       emitError (ErrorUndefinedName nameRef.sourceSpan nameRef.text)
-      pure Nothing
-
-resolveModuleRef :: NameRef Parsed ModuleRef -> Identifier (NameRefResolution Identified ModuleRef)
-resolveModuleRef nameRef =
-  lookupModule nameRef.text >>= \case
-    Just moduleId -> pure (Just moduleId)
-    Nothing -> do
-      emitError (ErrorNotAModule nameRef.sourceSpan nameRef.text)
       pure Nothing
 
 -- | Resolve @[module.]name@ as a request reference (handler position). The
@@ -1664,9 +1163,14 @@ resolveQualifiedRequestRef = \cases
     metadata <- resolveBareRequest nameRef
     pure (Nothing, identifiedNameRef metadata nameRef)
   (Just moduleRef) nameRef -> do
-    moduleMetadata <- resolveModuleRef moduleRef
-    metadata <- case moduleMetadata of
-      Just moduleId -> resolveQualifiedRequest moduleId moduleRef.text nameRef
+    maybeModuleName <- lookupModule moduleRef.text
+    moduleMetadata <- case maybeModuleName of
+      Just _ -> pure (Just moduleRef.text)
+      Nothing -> do
+        emitError (ErrorNotAModule moduleRef.sourceSpan moduleRef.text)
+        pure Nothing
+    metadata <- case maybeModuleName of
+      Just moduleName -> resolveQualifiedRequest moduleName moduleRef.text nameRef
       Nothing -> pure Nothing
     pure
       ( Just (identifiedNameRef moduleMetadata moduleRef),
@@ -1676,7 +1180,7 @@ resolveQualifiedRequestRef = \cases
 resolveBareRequest :: NameRef Parsed RequestRef -> Identifier (NameRefResolution Identified RequestRef)
 resolveBareRequest nameRef =
   lookupRequest nameRef.text >>= \case
-    Just rid -> pure (Just rid)
+    Just qualifiedName -> pure (Just qualifiedName)
     Nothing -> do
       -- Distinguish "name does not exist" from "name exists but is not a
       -- request". The former is a generic K0102, the latter K0108.
@@ -1686,13 +1190,13 @@ resolveBareRequest nameRef =
       pure Nothing
 
 resolveQualifiedRequest ::
-  ModuleId ->
+  Text ->
   Text ->
   NameRef Parsed RequestRef ->
   Identifier (NameRefResolution Identified RequestRef)
-resolveQualifiedRequest moduleId qualifierName nameRef =
-  lookupModuleExportRequest moduleId nameRef.text >>= \case
-    Just rid -> pure (Just rid)
+resolveQualifiedRequest moduleName qualifierName nameRef =
+  lookupModuleExportRequest moduleName nameRef.text >>= \case
+    Just qualifiedName -> pure (Just qualifiedName)
     Nothing -> do
       emitError (ErrorUndefinedQualified nameRef.sourceSpan qualifierName nameRef.text)
       pure Nothing
@@ -1709,9 +1213,14 @@ resolveQualifiedConstructorRef = \cases
     metadata <- resolveBareConstructor nameRef
     pure (Nothing, identifiedNameRef metadata nameRef)
   (Just moduleRef) nameRef -> do
-    moduleMetadata <- resolveModuleRef moduleRef
-    metadata <- case moduleMetadata of
-      Just moduleId -> resolveQualifiedConstructor moduleId moduleRef.text nameRef
+    maybeModuleName <- lookupModule moduleRef.text
+    moduleMetadata <- case maybeModuleName of
+      Just _ -> pure (Just moduleRef.text)
+      Nothing -> do
+        emitError (ErrorNotAModule moduleRef.sourceSpan moduleRef.text)
+        pure Nothing
+    metadata <- case maybeModuleName of
+      Just moduleName -> resolveQualifiedConstructor moduleName moduleRef.text nameRef
       Nothing -> pure Nothing
     pure
       ( Just (identifiedNameRef moduleMetadata moduleRef),
@@ -1723,7 +1232,7 @@ resolveBareConstructor ::
   Identifier (NameRefResolution Identified ConstructorRef)
 resolveBareConstructor nameRef =
   lookupConstructor nameRef.text >>= \case
-    Just cid -> pure (Just cid)
+    Just qualifiedName -> pure (Just qualifiedName)
     Nothing -> do
       lookupVariable nameRef.text >>= \case
         Just _ -> emitError (ErrorNotAConstructor nameRef.sourceSpan nameRef.text)
@@ -1731,13 +1240,13 @@ resolveBareConstructor nameRef =
       pure Nothing
 
 resolveQualifiedConstructor ::
-  ModuleId ->
+  Text ->
   Text ->
   NameRef Parsed ConstructorRef ->
   Identifier (NameRefResolution Identified ConstructorRef)
-resolveQualifiedConstructor moduleId qualifierName nameRef =
-  lookupModuleExportConstructor moduleId nameRef.text >>= \case
-    Just cid -> pure (Just cid)
+resolveQualifiedConstructor moduleName qualifierName nameRef =
+  lookupModuleExportConstructor moduleName nameRef.text >>= \case
+    Just qualifiedName -> pure (Just qualifiedName)
     Nothing -> do
       emitError (ErrorUndefinedQualified nameRef.sourceSpan qualifierName nameRef.text)
       pure Nothing
@@ -1784,7 +1293,7 @@ resolveTypeName :: TypeNameNode Parsed -> Identifier (TypeNameNode Identified)
 resolveTypeName TypeNameNode {name, sourceSpan} = do
   metadata <-
     lookupType name.text >>= \case
-      Just typeId -> pure (Just typeId)
+      Just qualifiedName -> pure (Just qualifiedName)
       Nothing -> do
         emitError (ErrorNotAType name.sourceSpan name.text)
         pure Nothing
@@ -1796,11 +1305,16 @@ resolveTypeName TypeNameNode {name, sourceSpan} = do
 
 resolveQualifiedType :: QualifiedTypeNode Parsed -> Identifier (QualifiedTypeNode Identified)
 resolveQualifiedType QualifiedTypeNode {qualifier, target, sourceSpan} = do
-  moduleMetadata <- resolveModuleRef qualifier
-  typeMetadata <- case moduleMetadata of
-    Just moduleId ->
-      lookupModuleExportType moduleId target.text >>= \case
-        Just typeId -> pure (Just typeId)
+  maybeModuleName <- lookupModule qualifier.text
+  moduleMetadata <- case maybeModuleName of
+    Just _ -> pure (Just qualifier.text)
+    Nothing -> do
+      emitError (ErrorNotAModule qualifier.sourceSpan qualifier.text)
+      pure Nothing
+  typeMetadata <- case maybeModuleName of
+    Just moduleName ->
+      lookupModuleExportType moduleName target.text >>= \case
+        Just qualifiedName -> pure (Just qualifiedName)
         Nothing -> do
           emitError (ErrorUndefinedQualified target.sourceSpan qualifier.text target.text)
           pure Nothing
@@ -2153,7 +1667,7 @@ resolveCallArgument CallArgument {label, value, sourceSpan} = do
 -- | Desugar a binary operator into a call to the matching root prim.
 -- @a \<op\> b@ becomes @add(lhs=a, rhs=b)@ (or whichever prim matches
 -- 'binaryOperatorPrimName'). The synthesised callee 'NameRef' carries
--- the prim's pre-allocated 'VariableId' so the constraint generator
+-- the prim's pre-allocated 'VariableResolution' so the constraint generator
 -- and lowering can dispatch as if the user wrote @add(...)@ directly.
 resolveBinaryOperatorAsCall ::
   BinaryOperatorExpression Parsed -> Identifier (Expression Identified)
@@ -2187,26 +1701,23 @@ resolveUnaryOperatorAsCall UnaryOperatorExpression {operator, operand, sourceSpa
           (sourceSpanOf operand').start
   pure (mkPrimCall primName metadata sourceSpan operatorSpan [("value", operand')])
 
--- | Look up a root prim's 'VariableId' from the preregistered map.
+-- | Look up a root prim's 'VariableResolution' from the preregistered map.
 -- Missing entries indicate a compiler bug (every operator name in
 -- 'Prim.binaryOperatorPrimName' / 'Prim.unaryOperatorPrimName' must be
 -- present in 'Prim.primDefinitions') and are surfaced as a K9999.
 lookupPrimVariable :: Text -> Identifier (NameRefResolution Identified VariableRef)
-lookupPrimVariable primName = do
-  vars <- gets (.variables)
-  let qname = QualifiedName {module_ = "primitive", name = primName}
-      hits =
-        [ vid
-          | (vid, vd) <- Map.toList vars,
-            vd.variableQualifiedName == Just qname
-        ]
-  case hits of
-    (vid : _) -> pure (Just vid)
-    [] -> do
+lookupPrimVariable primName =
+  -- Operator desugaring runs inside the module body, where the root prims
+  -- have been flat-injected into the top-level scope. Resolve through the
+  -- scope (not a global variable registry) so per-module identification
+  -- sees the prim even though it lives in another module's variable map.
+  lookupVariable primName >>= \case
+    Just resolution -> pure (Just resolution)
+    Nothing -> do
       emitError $
         ErrorInternal $
           Internal.internalErrorNoSpan
-            ("Identifier: prim '" <> primName <> "' missing from registry (compiler bug)")
+            ("Identifier: prim '" <> primName <> "' not in scope (compiler bug)")
       pure Nothing
 
 -- | Build a synthesised 'ExpressionCall' targeting a root prim.
@@ -2486,15 +1997,15 @@ resolveFieldChainHead ::
   SourceSpan ->
   Identifier (Expression Identified)
 resolveFieldChainHead headRef labels totalSpan = do
-  maybeVariableId <- lookupVariable headRef.text
-  case maybeVariableId of
-    Just variableId ->
+  maybeResolution <- lookupVariable headRef.text
+  case maybeResolution of
+    Just resolution -> do
       -- Head is a variable: keep the whole chain as field access.
-      pure (rebuildFieldAccessChain (varExpr (Just variableId)) labels)
+      pure (rebuildFieldAccessChain (varExpr (Just resolution)) labels)
     Nothing -> do
-      maybeModuleId <- lookupModule headRef.text
-      case maybeModuleId of
-        Just moduleId -> resolveModuleQualifiedChain moduleId headRef labels totalSpan
+      maybeModuleName <- lookupModule headRef.text
+      case maybeModuleName of
+        Just moduleName -> resolveModuleQualifiedChain moduleName headRef labels totalSpan
         Nothing -> do
           -- Undefined: emit error and tag the head as Unresolved so downstream
           -- phases can see that resolution failed.
@@ -2512,12 +2023,12 @@ resolveFieldChainHead headRef labels totalSpan = do
 -- | A @module . ...@ chain. The first label is folded into a
 -- 'QualifiedReferenceExpression'; any remaining labels become field accesses.
 resolveModuleQualifiedChain ::
-  ModuleId ->
+  Text ->
   NameRef Parsed VariableRef ->
   [NameRef Parsed LabelRef] ->
   SourceSpan ->
   Identifier (Expression Identified)
-resolveModuleQualifiedChain moduleId moduleRef labels totalSpan =
+resolveModuleQualifiedChain moduleName moduleRef labels totalSpan =
   case labels of
     -- The only call site is 'resolveFieldChainHead', which itself is only
     -- reached via 'resolveFieldAccess' on an 'ExpressionFieldAccess' — that
@@ -2539,9 +2050,9 @@ resolveModuleQualifiedChain moduleId moduleRef labels totalSpan =
               typeOf = ()
             }
     (target : remainingLabels) -> do
-      maybeVariableId <- lookupModuleExportVariable moduleId target.text
-      variableMetadata <- case maybeVariableId of
-        Just variableId -> pure (Just variableId)
+      maybeResolution <- lookupModuleExportVariable moduleName target.text
+      variableMetadata <- case maybeResolution of
+        Just resolution -> pure (Just resolution)
         Nothing -> do
           emitError (ErrorUndefinedQualified target.sourceSpan moduleRef.text target.text)
           pure Nothing
@@ -2562,7 +2073,7 @@ resolveModuleQualifiedChain moduleId moduleRef labels totalSpan =
             NameRef
               { text = moduleRef.text,
                 sourceSpan = moduleRef.sourceSpan,
-                resolution = Just moduleId
+                resolution = Just moduleName
               }
           qualifiedReference =
             ExpressionQualifiedReference
@@ -2575,49 +2086,363 @@ resolveModuleQualifiedChain moduleId moduleRef labels totalSpan =
       pure (rebuildFieldAccessChain qualifiedReference remainingLabels)
 
 -- ---------------------------------------------------------------------------
--- Entry point
+-- Per-module identification
 -- ---------------------------------------------------------------------------
 
--- | Entry point. Runs the four phases over a set of modules and returns
--- both a (possibly partial) 'IdentifierResult' and any accumulated errors.
+-- | Result of identifying one module independently. Because identification
+-- runs from a fresh state, every @module*@ map holds only entries owned by
+-- this module; the caller unions them across modules to build cross-module
+-- views (e.g. 'Katari.Query.QuerySnapshot') without re-filtering.
+data ModuleIdentifyResult = ModuleIdentifyResult
+  { identifiedAST :: Module Identified,
+    moduleData :: ModuleData,
+    moduleVariables :: Map QualifiedName VariableData,
+    moduleTypes :: Map QualifiedName TypeData,
+    moduleRequests :: Map QualifiedName RequestData,
+    moduleConstructors :: Map QualifiedName ConstructorData,
+    moduleExportTable :: Map Text SymbolEntry,
+    moduleTopLevel :: Map Text SymbolEntry,
+    moduleScopeFrames :: [ScopeFrame SymbolEntry],
+    moduleNewErrors :: [IdentifierError]
+  }
+
+-- | Identify a single module independently, from a fresh 'IdentifierState'
+-- (the local-variable counter starts at 0). Runs the reserved-namespace
+-- check (K0113), builds the export table, builds the top-level scope (own
+-- exports + imports + prim injection), and resolves names in the body.
 --
--- The result is *always* produced — unresolved references show up as
--- @IdentifiedUnresolved*@ markers in the AST, allowing downstream phases
--- (e.g. type inference) to continue with a fresh type variable instead of
--- aborting on the first name-resolution failure. Callers that want the
--- old fail-fast behaviour can branch on @null errors@.
-identify ::
+-- The caller supplies:
+--
+--   * @allModuleData@ — every module's 'ModuleData' (file span), so a
+--     duplicate-name clash against an imported module name can cite its span.
+--   * @depExportTables@ — export tables of the modules this one depends on
+--     (its imports + the @primitive@ root); the module's own exports are
+--     added internally for qualified self-references.
+--   * @allModuleNames@ — every module name, for import-existence validation.
+--   * @trustedStdlibNames@ — compiler-owned modules exempt from K0113.
+--
+-- Because the state is fresh, every entry in the returned maps belongs to
+-- this module, so no cross-module filtering is needed.
+identifyModule ::
+  Map Text ModuleData ->
+  Map Text (Map Text SymbolEntry) ->
   Set Text ->
-  Map Text (Module Parsed) ->
-  (IdentifierResult, [IdentifierError])
-identify trustedStdlibNames moduleMap =
-  let ((asts, topLevels, allExports, allModuleIds), finalState) =
-        runIdentifier $ do
-          for_ (findImportCycles moduleMap) (emitImportCycleError moduleMap)
-          allModuleIds' <- assignModuleIds trustedStdlibNames moduleMap
-          allExports' <- buildExports moduleMap
-          topLevels' <- buildTopLevels allModuleIds' allExports' moduleMap
-          asts' <- resolveModule topLevels' allModuleIds' allExports' moduleMap
-          pure (asts', topLevels', allExports', allModuleIds')
-      capturedFrames =
-        [ScopeFrame {frameSpan = sp, frameSymbols = sym} | (sp, sym) <- finalState.capturedScopeFrames]
-      -- Per-module bare-name visibility, keyed by ModuleId. `topLevels`
-      -- / `allExports` are keyed by module name string; reproject onto
-      -- the assigned ModuleIds.
-      reprojectByModuleId table =
-        Map.fromList
-          [ (moduleId, Map.findWithDefault Map.empty moduleName table)
-            | (moduleName, moduleId) <- Map.toList allModuleIds
-          ]
-      result =
-        mkIdentifierResult
-          finalState.modules
-          finalState.variables
-          finalState.types
-          finalState.requests
-          finalState.constructors
-          asts
-          (buildScopeIndex capturedFrames)
-          (reprojectByModuleId topLevels)
-          (reprojectByModuleId allExports)
-   in (result, reverse finalState.errors)
+  Set Text ->
+  Text ->
+  Module Parsed ->
+  ModuleIdentifyResult
+identifyModule allModuleData depExportTables allModuleNames trustedStdlibNames currentModuleName parsedModule =
+  let ((identifiedModuleAST, exportTable, topLevelTable), finalState) =
+        runIdentifierFrom (initialIdentifierState {modules = allModuleData}) $ do
+          -- Reserved @prim@ / @prim.*@ namespace check (K0113), own module only.
+          when
+            ( Prim.isPrimReservedModuleName currentModuleName
+                && not (Set.member currentModuleName trustedStdlibNames)
+            )
+            $ emitError (ErrorReservedPrimitiveModule parsedModule.sourceSpan currentModuleName)
+          -- Phase B: build export table for this module.
+          thisExportTable <- buildModuleExports currentModuleName parsedModule
+          -- Phase C: build top-level scope (own exports + imports + prim injection).
+          thisTopLevel <- buildModuleTopLevel allModuleNames depExportTables currentModuleName parsedModule thisExportTable
+          -- Phase D: resolve names in the body. The module's own exports are
+          -- visible alongside its dependencies (qualified self-references).
+          let allExportsWithSelf = Map.insert currentModuleName thisExportTable depExportTables
+              context =
+                ResolveContext
+                  { scopeStack = [thisTopLevel],
+                    moduleExports = allExportsWithSelf
+                  }
+          identifiedAST' <- withResolveContext context (resolveModuleAST parsedModule)
+          pure (identifiedAST', thisExportTable, thisTopLevel)
+      moduleFrames =
+        [ ScopeFrame {frameSpan = sp, frameSymbols = sym}
+          | (sp, sym) <- finalState.capturedScopeFrames
+        ]
+   in ModuleIdentifyResult
+        { identifiedAST = identifiedModuleAST,
+          moduleData =
+            Map.findWithDefault
+              (ModuleData {moduleSourceSpan = parsedModule.sourceSpan})
+              currentModuleName
+              allModuleData,
+          moduleVariables = finalState.variables,
+          moduleTypes = finalState.types,
+          moduleRequests = finalState.requests,
+          moduleConstructors = finalState.constructors,
+          moduleExportTable = exportTable,
+          moduleTopLevel = topLevelTable,
+          moduleScopeFrames = moduleFrames,
+          moduleNewErrors = reverse finalState.errors
+        }
+  where
+    -- Phase B for a single module: walk declarations and build the export table.
+    buildModuleExports :: Text -> Module Parsed -> Identifier (Map Text SymbolEntry)
+    buildModuleExports moduleName moduleAST =
+      foldM (addDeclaration moduleName) Map.empty moduleAST.declarations
+
+    addDeclaration moduleName table = \case
+      DeclarationAgent declaration ->
+        registerVariableDecl
+          moduleName
+          table
+          declaration.name
+          declaration.annotation
+          (parameterBindingsToAnnotationPairs declaration.parameters)
+      DeclarationRequest declaration ->
+        registerRequestDecl
+          moduleName
+          table
+          declaration.name
+          declaration.annotation
+          declaration.parameters
+      DeclarationExternalAgent declaration ->
+        registerVariableDecl
+          moduleName
+          table
+          declaration.name
+          declaration.annotation
+          (parameterBindingsToAnnotationPairs declaration.parameters)
+      DeclarationPrimAgent declaration ->
+        registerVariableDecl
+          moduleName
+          table
+          declaration.name
+          declaration.annotation
+          (parameterBindingsToAnnotationPairs declaration.parameters)
+      DeclarationData declaration ->
+        registerDataDecl
+          moduleName
+          table
+          declaration.name
+          declaration.annotation
+          (dataParametersToAnnotationPairs declaration.parameters)
+      DeclarationTypeSynonym declaration -> registerTypeOnly moduleName table declaration.name
+      DeclarationImport _ -> pure table
+      DeclarationError _ -> pure table
+
+    qnameOf moduleName name = QualifiedName {module_ = moduleName, name = name.text}
+
+    parameterBindingsToAnnotationPairs ps = [(p.label, p.annotation) | p <- ps]
+    dataParametersToAnnotationPairs ps = [(p.name, p.annotation) | p <- ps]
+
+    registerVariableDecl moduleName table name annotation parameterAnnotations = do
+      let qualifiedName = qnameOf moduleName name
+      registerTopLevelVariable
+        qualifiedName
+        VariableData
+          { variableName = name.text,
+            variableSourceSpan = name.sourceSpan,
+            variablePrimRule = Nothing,
+            variableAnnotation = annotation,
+            variableParameterAnnotations = parameterAnnotations
+          }
+      insertSymbolEntry name.sourceSpan name.text (singletonVariable (ResolvedTopLevel qualifiedName)) table
+
+    registerRequestDecl moduleName table name annotation parameters = do
+      let qualifiedName = qnameOf moduleName name
+          parameterAnnotations = parameterBindingsToAnnotationPairs parameters
+      registerTopLevelVariable
+        qualifiedName
+        VariableData
+          { variableName = name.text,
+            variableSourceSpan = name.sourceSpan,
+            variablePrimRule = Nothing,
+            variableAnnotation = annotation,
+            variableParameterAnnotations = parameterAnnotations
+          }
+      registerRequest
+        qualifiedName
+        RequestData
+          { requestSourceSpan = name.sourceSpan,
+            requestParameterAnnotations = Map.fromList parameterAnnotations
+          }
+      let entry =
+            emptySymbolEntry
+              { variableSymbol = Just (ResolvedTopLevel qualifiedName),
+                requestSymbol = Just qualifiedName
+              }
+      insertSymbolEntry name.sourceSpan name.text entry table
+
+    registerTypeOnly moduleName table name = do
+      let qualifiedName = qnameOf moduleName name
+      registerType
+        qualifiedName
+        TypeData
+          { typeSourceSpan = name.sourceSpan,
+            typeSynonymRhs = Nothing
+          }
+      insertSymbolEntry name.sourceSpan name.text (singletonType qualifiedName) table
+
+    registerDataDecl moduleName table name annotation parameterAnnotations = do
+      let qualifiedName = qnameOf moduleName name
+      registerTopLevelVariable
+        qualifiedName
+        VariableData
+          { variableName = name.text,
+            variableSourceSpan = name.sourceSpan,
+            variablePrimRule = Nothing,
+            variableAnnotation = annotation,
+            variableParameterAnnotations = parameterAnnotations
+          }
+      registerType
+        qualifiedName
+        TypeData
+          { typeSourceSpan = name.sourceSpan,
+            typeSynonymRhs = Nothing
+          }
+      registerConstructor
+        qualifiedName
+        ConstructorData
+          { constructorSourceSpan = name.sourceSpan,
+            constructorTypeQName = qualifiedName
+          }
+      let entry =
+            emptySymbolEntry
+              { variableSymbol = Just (ResolvedTopLevel qualifiedName),
+                typeSymbol = Just qualifiedName,
+                constructorSymbol = Just qualifiedName
+              }
+      insertSymbolEntry name.sourceSpan name.text entry table
+
+    -- Phase C for a single module: merge own exports + imports + prim injection.
+    buildModuleTopLevel ::
+      Set Text ->
+      Map Text (Map Text SymbolEntry) ->
+      Text ->
+      Module Parsed ->
+      Map Text SymbolEntry ->
+      Identifier (Map Text SymbolEntry)
+    buildModuleTopLevel moduleNames allExports modName moduleAST ownExports = do
+      base <-
+        if modName == "primitive"
+          then pure ownExports
+          else
+            injectPrimitives
+              (Prim.isPrimReservedModuleName modName)
+              moduleAST.sourceSpan
+              ownExports
+              moduleNames
+              allExports
+      foldM (addImport moduleNames allExports) base moduleAST.declarations
+
+    injectPrimitives ::
+      Bool ->
+      SourceSpan ->
+      Map Text SymbolEntry ->
+      Set Text ->
+      Map Text (Map Text SymbolEntry) ->
+      Identifier (Map Text SymbolEntry)
+    injectPrimitives isStdlibSubModule moduleSourceSpan userTable moduleNames allExports = do
+      let rootExports = Map.findWithDefault Map.empty "primitive" allExports
+      base <- foldM (injectOne moduleSourceSpan) userTable (Map.toList rootExports)
+      if isStdlibSubModule
+        then pure base
+        else foldM (injectSubModule moduleSourceSpan) base (Set.toList moduleNames)
+
+    injectSubModule ::
+      SourceSpan ->
+      Map Text SymbolEntry ->
+      Text ->
+      Identifier (Map Text SymbolEntry)
+    injectSubModule moduleSourceSpan table fullName =
+      case T.stripPrefix "primitive." fullName of
+        Nothing -> pure table
+        Just tail_
+          | T.any (== '.') tail_ -> pure table
+          | otherwise ->
+              insertSymbolEntry
+                moduleSourceSpan
+                tail_
+                (singletonModule fullName)
+                table
+
+    injectOne ::
+      SourceSpan ->
+      Map Text SymbolEntry ->
+      (Text, SymbolEntry) ->
+      Identifier (Map Text SymbolEntry)
+    injectOne moduleSourceSpan table (name, primEntry) =
+      case Map.lookup name table of
+        Just _ -> do
+          emitError (ErrorPrimitiveConflict moduleSourceSpan name)
+          pure table
+        Nothing -> pure (Map.insert name primEntry table)
+
+    addImport moduleNames allExports table = \case
+      DeclarationImport importDeclaration -> resolveImport moduleNames allExports table importDeclaration
+      _ -> pure table
+
+    resolveImport moduleNames allExports table importDeclaration =
+      case importDeclaration.kind of
+        ImportModule {moduleName, alias} ->
+          resolveImportModule moduleNames importDeclaration.sourceSpan moduleName alias table
+        ImportNames {items, moduleName} ->
+          resolveImportNames moduleNames allExports importDeclaration.sourceSpan moduleName items table
+
+    resolveImportModule moduleNames importPos written maybeAlias table =
+      if not (Set.member written moduleNames)
+        then do
+          emitError (ErrorImportModuleNotFound importPos written)
+          pure table
+        else do
+          let bindName = case maybeAlias of
+                Just aliasName -> aliasName
+                Nothing -> moduleNameTail written
+          insertSymbolEntry importPos bindName (singletonModule written) table
+
+    resolveImportNames moduleNames allExports importPos written items table =
+      if not (Set.member written moduleNames)
+        then do
+          emitError (ErrorImportModuleNotFound importPos written)
+          pure table
+        else do
+          let targetModuleExports = Map.findWithDefault Map.empty written allExports
+          foldM (addImportItem importPos written targetModuleExports) table items
+
+    addImportItem importPos targetModuleName targetModuleExports table item =
+      case Map.lookup item.name targetModuleExports of
+        Nothing -> do
+          emitError (ErrorImportNameNotFound importPos item.name targetModuleName)
+          pure table
+        Just entry ->
+          case item.kind of
+            ImportItemValue
+              | isJust entry.variableSymbol
+                  || isJust entry.typeSymbol
+                  || isJust entry.requestSymbol
+                  || isJust entry.constructorSymbol ->
+                  insertSymbolEntry
+                    importPos
+                    item.name
+                    SymbolEntry
+                      { variableSymbol = entry.variableSymbol,
+                        typeSymbol = entry.typeSymbol,
+                        moduleSymbol = Nothing,
+                        requestSymbol = entry.requestSymbol,
+                        constructorSymbol = entry.constructorSymbol
+                      }
+                    table
+              | otherwise -> do
+                  emitError (ErrorImportNameNotFound importPos item.name targetModuleName)
+                  pure table
+            ImportItemType -> case entry.typeSymbol of
+              Nothing -> do
+                emitError (ErrorImportNameNotFound importPos item.name targetModuleName)
+                pure table
+              Just qualifiedName ->
+                insertSymbolEntry importPos item.name (singletonType qualifiedName) table
+
+-- ---------------------------------------------------------------------------
+-- Import-cycle detection
+-- ---------------------------------------------------------------------------
+
+-- | Report an 'ErrorImportCycle' for each cycle in the import graph. The
+-- diagnostic span is taken from the first module in the cycle.
+importCycleErrors :: Map Text (Module Parsed) -> [IdentifierError]
+importCycleErrors moduleMap =
+  [ ErrorImportCycle module_.sourceSpan cycle_
+  | cycle_ <- findImportCycles moduleMap,
+    firstName : _ <- [cycle_],
+    Just module_ <- [Map.lookup firstName moduleMap]
+  ]
+

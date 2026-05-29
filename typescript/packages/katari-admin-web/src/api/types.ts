@@ -3,7 +3,7 @@
 // than importing from @katari-lang/api-server) keeps this package
 // browser-only with no server dependencies.
 
-import type { RawValue, SchemaBundle, AgentDefinition } from "@katari-lang/runtime";
+import type { AgentDefinition, RawValue, SchemaBundle } from "@katari-lang/runtime";
 
 export type ProjectId = string;
 export type SnapshotId = string;
@@ -54,12 +54,7 @@ export type Snapshot = {
  * the `runs_audit` table and survive the live `delegations` row being
  * deleted on the terminal ack.
  */
-export type RunState =
-  | "running"
-  | "cancelling"
-  | "cancelled"
-  | "succeeded"
-  | "error";
+export type RunState = "running" | "cancelling" | "cancelled" | "succeeded" | "error";
 
 export type CancelReason = "user" | "error";
 

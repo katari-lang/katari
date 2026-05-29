@@ -30,8 +30,12 @@ library:
     - Katari.Typechecker.Solver.Request
     - Katari.Typechecker.Solver.Internal
     - Katari.Typechecker.Solver.Substitution
+    - Katari.Typechecker.AgentGraph
+    - Katari.Typechecker.ImportGraph
+    - Katari.Typechecker.ModuleInterface
     - Katari.Typechecker.Zonker
     - Katari.Typechecker.Exhaustive
+    - Katari.Typechecker
     - Katari.IR
     - Katari.Lowering
     - Katari.Schema
@@ -39,23 +43,6 @@ library:
     - Katari.Query
     - Katari.Query.Completion
     - Katari.SourceSpan
-
-executables:
-  katari-compiler:
-    main: Main.hs
-    source-dirs: app
-    dependencies:
-      - katari-compiler
-      - katari-project
-      - optparse-applicative
-      - aeson
-      - aeson-pretty
-      - bytestring
-      - text
-      - containers
-      - directory
-      - filepath
-      - mtl
 
 tests:
   katari-compiler-test:
@@ -67,6 +54,7 @@ tests:
       - Katari.ConstraintGeneratorSpec
       - Katari.ZonkerSpec
       - Katari.SolverSpec
+      - Katari.ExhaustiveSpec
       - Katari.IRSpec
       - Katari.LoweringSpec
       - Katari.DiagnosticSpec
@@ -77,6 +65,7 @@ tests:
       - Katari.ScopeIndexSpec
       - Katari.Query.CompletionSpec
       - Katari.QuerySpec
+      - Katari.TestSupport
     dependencies:
       - katari-compiler
       - hspec
@@ -103,8 +92,12 @@ dependencies:
   - aeson
   - prettyprinter
   - prettyprinter-ansi-terminal
+  - hashable
   - safe
   - vector
+  - parallel
+  - async
+  - stm
 
 default-extensions:
   - DataKinds

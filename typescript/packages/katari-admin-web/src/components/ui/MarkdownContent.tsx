@@ -28,10 +28,7 @@ export function MarkdownContent({ source, className }: Props) {
 
 const components = {
   h1: (props: ComponentProps<"h1">) => (
-    <h1
-      className="mt-8 scroll-mt-24 text-3xl font-bold tracking-tight first:mt-0"
-      {...props}
-    />
+    <h1 className="mt-8 scroll-mt-24 text-3xl font-bold tracking-tight first:mt-0" {...props} />
   ),
   h2: (props: ComponentProps<"h2">) => (
     <h2
@@ -40,16 +37,10 @@ const components = {
     />
   ),
   h3: (props: ComponentProps<"h3">) => (
-    <h3
-      className="mt-8 scroll-mt-24 text-xl font-semibold tracking-tight first:mt-0"
-      {...props}
-    />
+    <h3 className="mt-8 scroll-mt-24 text-xl font-semibold tracking-tight first:mt-0" {...props} />
   ),
   h4: (props: ComponentProps<"h4">) => (
-    <h4
-      className="mt-6 scroll-mt-24 text-lg font-semibold tracking-tight first:mt-0"
-      {...props}
-    />
+    <h4 className="mt-6 scroll-mt-24 text-lg font-semibold tracking-tight first:mt-0" {...props} />
   ),
   p: (props: ComponentProps<"p">) => <p className="mt-4 leading-7" {...props} />,
   a: ({ href, ...rest }: ComponentProps<"a">) => (
@@ -70,32 +61,22 @@ const components = {
   li: (props: ComponentProps<"li">) => <li className="leading-7" {...props} />,
   blockquote: (props: ComponentProps<"blockquote">) => (
     <blockquote
-      className="mt-6 border-l-2 border-border-strong pl-4 italic text-muted-foreground"
+      className="mt-6 border-l border-border-strong pl-4 italic text-muted-foreground"
       {...props}
     />
   ),
-  hr: (props: ComponentProps<"hr">) => (
-    <hr className="my-8 border-border" {...props} />
-  ),
+  hr: (props: ComponentProps<"hr">) => <hr className="my-8 border-border" {...props} />,
   table: (props: ComponentProps<"table">) => (
     <div className="my-6 overflow-x-auto">
       <table className="w-full text-sm" {...props} />
     </div>
   ),
   th: (props: ComponentProps<"th">) => (
-    <th
-      className="border border-border bg-muted px-3 py-2 text-left font-semibold"
-      {...props}
-    />
+    <th className="border border-border bg-muted px-3 py-2 text-left font-semibold" {...props} />
   ),
-  td: (props: ComponentProps<"td">) => (
-    <td className="border border-border px-3 py-2" {...props} />
-  ),
+  td: (props: ComponentProps<"td">) => <td className="border border-border px-3 py-2" {...props} />,
   pre: (props: ComponentProps<"pre">) => (
-    <pre
-      className="my-4 overflow-x-auto border border-border bg-muted/40 p-3 text-xs"
-      {...props}
-    />
+    <pre className="my-4 overflow-x-auto border border-border bg-muted/40 p-3 text-xs" {...props} />
   ),
   // Inline code only — fenced blocks come through `pre > code` and we
   // intentionally don't add wrapper styling to that nested `code` so

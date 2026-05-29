@@ -9,11 +9,11 @@
 // The bundle is built by the Katari CLI and links katari-port, which
 // owns the child-side end of the protocol.
 
-import { spawn, type ChildProcess } from "node:child_process";
+import { type ChildProcess, spawn } from "node:child_process";
 import { createInterface, type Interface as ReadlineInterface } from "node:readline";
 import type { Logger } from "../engine/logger.js";
-import type { Sidecar } from "./sidecar.js";
 import { childToParentSchema } from "./child-to-parent-schema.js";
+import type { Sidecar } from "./sidecar.js";
 import type { ChildToParent, ParentToChild } from "./types.js";
 
 export interface SubprocessSidecarOptions {
@@ -102,13 +102,7 @@ export class SubprocessSidecar implements Sidecar {
           settle(() => resolve());
         } else {
           clearTimeout(timer);
-          settle(() =>
-            reject(
-              new Error(
-                `subprocess sidecar: expected "ready", got ${msg.type}`,
-              ),
-            ),
-          );
+          settle(() => reject(new Error(`subprocess sidecar: expected "ready", got ${msg.type}`)));
         }
       };
       this.rl?.on("line", onLine);
@@ -119,9 +113,7 @@ export class SubprocessSidecar implements Sidecar {
       const onExit = (code: number | null): void => {
         clearTimeout(timer);
         settle(() =>
-          reject(
-            new Error(`subprocess sidecar: child exited during start (code=${code})`),
-          ),
+          reject(new Error(`subprocess sidecar: child exited during start (code=${code})`)),
         );
       };
       child.once("exit", onExit);
@@ -214,10 +206,7 @@ export class SubprocessSidecar implements Sidecar {
   }
 }
 
-function parseChildLine(
-  line: string,
-  logger: Logger,
-): ChildToParent | null {
+function parseChildLine(line: string, logger: Logger): ChildToParent | null {
   if (line.length === 0) return null;
   let raw: unknown;
   try {
@@ -228,10 +217,7 @@ function parseChildLine(
   }
   const result = childToParentSchema.safeParse(raw);
   if (!result.success) {
-    logger.log(
-      "error",
-      `sidecar: invalid IPC message from child: ${result.error.message}`,
-    );
+    logger.log("error", `sidecar: invalid IPC message from child: ${result.error.message}`);
     return null;
   }
   return result.data;

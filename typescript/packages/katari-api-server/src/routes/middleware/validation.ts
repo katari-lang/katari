@@ -1,12 +1,7 @@
 // Zod-backed request validators.
 
 import { z } from "zod";
-import type {
-  DelegationId,
-  EscalationId,
-  ProjectId,
-  SnapshotId,
-} from "../../storage/types.js";
+import type { DelegationId, EscalationId, ProjectId, SnapshotId } from "../../storage/types.js";
 
 // ─── Branded id schemas ────────────────────────────────────────────────────
 
@@ -79,7 +74,11 @@ export const CreateProjectSchema = z.object({
   /** README markdown body — typically the contents of `README.md` next
    *  to `katari.toml`. Capped at 256 KB so a stray binary file can't
    *  blow up the row. */
-  readme: z.string().max(256 * 1024).nullable().optional(),
+  readme: z
+    .string()
+    .max(256 * 1024)
+    .nullable()
+    .optional(),
 });
 export type CreateProjectInput = z.infer<typeof CreateProjectSchema>;
 
@@ -130,13 +129,7 @@ export type UploadSnapshotInput = z.infer<typeof UploadSnapshotSchema>;
  * Live delegation rows only carry `running | cancelling`; the terminal
  * states (`cancelled / succeeded / error`) live in `runs_audit`.
  */
-export const RunStateSchema = z.enum([
-  "running",
-  "cancelling",
-  "cancelled",
-  "succeeded",
-  "error",
-]);
+export const RunStateSchema = z.enum(["running", "cancelling", "cancelled", "succeeded", "error"]);
 export type RunStateInput = z.infer<typeof RunStateSchema>;
 
 // Project comes from the URL path (`/project/:projectId/run`); the body

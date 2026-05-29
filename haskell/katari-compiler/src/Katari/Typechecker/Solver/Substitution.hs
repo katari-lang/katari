@@ -25,7 +25,7 @@ import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Set (Set)
 import Data.Set qualified as Set
-import Katari.Id (RequestId)
+import Katari.Common (QualifiedName)
 import Katari.SemanticType
   ( RequestVariableId,
     SemanticRequest (..),
@@ -66,7 +66,7 @@ applySubstType substitution =
 -- @e_var@ alive after type vars are pinned, and 'semanticToConcrete' rejects
 -- the value (forcing the downstream to fall back to NormalizedTypeUnknown).
 applyRequestSubstToType ::
-  Map RequestVariableId (Set RequestId) ->
+  Map RequestVariableId (Set QualifiedName) ->
   SemanticType Unresolved ->
   SemanticType Unresolved
 applyRequestSubstToType requestSubstitution =

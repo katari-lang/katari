@@ -18,7 +18,7 @@
 // The Haskell `katari apply` spawns this binary with stdio piped so
 // the produced bundle bytes never round-trip through the filesystem.
 
-import { bundleSidecar, BundleError, type BundlePackage } from "./index.js";
+import { BundleError, type BundlePackage, bundleSidecar } from "./index.js";
 
 interface ParsedArgs {
   packages: BundlePackage[];

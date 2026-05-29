@@ -8,23 +8,13 @@
 // lives in the per-variant ops file. This module hosts the common code
 // that each op delegates into.
 
-import {
-  type AskId,
-  type CallId,
-  type ScopeId,
-  type ThreadId,
-  createEscalationId,
-} from "../id.js";
 import { encodeCoreAgentDefId } from "../../agent-def-id.js";
 import type { Block, BlockId } from "../../ir/types.js";
+import { type AskId, type CallId, createEscalationId, type ScopeId, type ThreadId } from "../id.js";
 import type { Scope } from "../scope.js";
 import type { StepCtx } from "../step-ctx.js";
 import type { Value } from "../value.js";
-import type {
-  AskIdMap,
-  Thread,
-  ThreadStatus,
-} from "./types.js";
+import type { AskIdMap, Thread, ThreadStatus } from "./types.js";
 
 // ─── Thread lookups ────────────────────────────────────────────────────────
 
@@ -217,11 +207,7 @@ export function emitAgentRootCompletion(
  * Common bookkeeping when the parent receives done/cancelAck for a child.
  * Returns true if the variant-specific handler should run.
  */
-export function commonRemoveChild(
-  ctx: StepCtx,
-  parent: Thread,
-  callId: CallId,
-): boolean {
+export function commonRemoveChild(ctx: StepCtx, parent: Thread, callId: CallId): boolean {
   const childId = deleteChild(parent, callId);
   if (childId === undefined) {
     // Stale event — the child was already cleaned up, e.g. by a cascade
@@ -283,11 +269,10 @@ export function emitEscalateUpward(
   // unification in Phase 2.A), so we ship it as the escalate's
   // 'agentDefId' directly. The receiver decodes it and pumps an upward
   // request ask carrying the same qname.
-  const wireId: import("../../agent-def-id.js").AgentDefId =
-    encodeCoreAgentDefId({
-      kind: "qname",
-      value: askKind.reqId,
-    });
+  const wireId: import("../../agent-def-id.js").AgentDefId = encodeCoreAgentDefId({
+    kind: "qname",
+    value: askKind.reqId,
+  });
   ctx.emit({
     from: ctx.state.selfEndpoint,
     to: peer,
@@ -362,12 +347,7 @@ export function proxyAskToParent(
  * Default proxy behavior for askAck: look up the forwarding entry and
  * forward the ack down to the child that originally asked.
  */
-export function proxyAskAckToChild(
-  ctx: StepCtx,
-  t: Thread,
-  ownAskId: AskId,
-  value: Value,
-): void {
+export function proxyAskAckToChild(ctx: StepCtx, t: Thread, ownAskId: AskId, value: Value): void {
   const entry = popAskForward(t, ownAskId);
   if (entry === undefined) {
     ctx.log("debug", "engine: askAck without forward record (stale)", {
@@ -415,11 +395,7 @@ export function proxyAskAckToChild(
  * a matching `handle { req throw(msg) { ... } }` catches it; if nothing
  * catches it, the root AgentThread escalates it to the API Module.
  */
-export function emitThrowEscalate(
-  ctx: StepCtx,
-  t: Thread,
-  message: string,
-): void {
+export function emitThrowEscalate(ctx: StepCtx, t: Thread, message: string): void {
   if (t.parent === null || t.parentCallId === null) {
     ctx.log("warn", "engine: throw escalate at root thread with no parent", {
       threadId: t.id,
@@ -451,23 +427,14 @@ export function getScope(ctx: StepCtx, id: ScopeId): Scope {
   return sc as Scope;
 }
 
-export function createScope(
-  ctx: StepCtx,
-  id: ScopeId,
-  parentId: ScopeId | null,
-): Scope {
+export function createScope(ctx: StepCtx, id: ScopeId, parentId: ScopeId | null): Scope {
   const sc: Scope = { id, parentId, values: {} };
   ctx.state.scopes[id] = sc as Scope;
   ctx.state.scopeCount++;
   return ctx.state.scopes[id] as Scope;
 }
 
-export function setValueInScope(
-  ctx: StepCtx,
-  scopeId: ScopeId,
-  varId: number,
-  value: Value,
-): void {
+export function setValueInScope(ctx: StepCtx, scopeId: ScopeId, varId: number, value: Value): void {
   const sc = getScope(ctx, scopeId);
   sc.values[varId] = value as Value;
 }
@@ -502,11 +469,7 @@ export function writeArgsIntoChildScope(
 // fail loudly than spin in an infinite walk.
 const MAX_SCOPE_DEPTH = 1000;
 
-export function lookupValue(
-  ctx: StepCtx,
-  scopeId: ScopeId,
-  varId: number,
-): Value {
+export function lookupValue(ctx: StepCtx, scopeId: ScopeId, varId: number): Value {
   let cur: ScopeId | null = scopeId;
   let depth = 0;
   while (cur !== null) {

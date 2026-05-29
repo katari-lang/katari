@@ -6,9 +6,9 @@
 // When the bucket fills (`tokens === 0` and the refill clock hasn't
 // granted enough new tokens), the request is rejected with 429.
 
+import type { Logger } from "@katari-lang/runtime";
 import type { MiddlewareHandler } from "hono";
 import { LRUCache } from "lru-cache";
-import type { Logger } from "@katari-lang/runtime";
 
 export type RateLimitOptions = {
   /** Maximum tokens (= burst capacity) per IP. */
@@ -54,9 +54,7 @@ type Bucket = {
  * the limiter degenerates to a global cap. That's acceptable for the
  * single-tenant use cases this repo targets.
  */
-export function buildRateLimitMiddleware(
-  options: RateLimitOptions,
-): MiddlewareHandler {
+export function buildRateLimitMiddleware(options: RateLimitOptions): MiddlewareHandler {
   const buckets = new LRUCache<string, Bucket>({
     max: options.maxClients ?? 10_000,
   });

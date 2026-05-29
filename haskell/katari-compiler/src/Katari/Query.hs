@@ -5,7 +5,14 @@
 -- compiler. All positions are code-point based (LSP layer converts UTF-16
 -- offsets before calling here).
 module Katari.Query
-  ( -- * Hover
+  ( -- * Snapshot (input for all queries)
+    QuerySnapshot (..),
+
+    -- * Type environment lookup
+    lookupTopLevelType,
+    lookupTypeInModule,
+
+    -- * Hover
     HoverInfo (..),
     lookupAtPosition,
 
@@ -84,23 +91,56 @@ import Katari.AST
     WildcardPattern (..),
   )
 import Katari.Id
-  ( ConstructorId,
-    ModuleId,
-    RequestId,
-    TypeId,
-    VariableId,
+  ( QualifiedName (..),
+    VariableResolution (..),
     renderQualifiedName,
   )
 import Katari.SemanticType (Resolved, SemanticType)
 import Katari.SourceSpan (HasSourceSpan (..), Position (..), SourceSpan (..), spanContains)
 import Katari.Typechecker.Identifier
   ( ConstructorData (..),
-    IdentifierResult (..),
+    ModuleData,
     RequestData (..),
+    SymbolEntry,
     TypeData (..),
     VariableData (..),
   )
-import Katari.Typechecker.Zonker (ZonkResult (..))
+import Katari.Typechecker.ScopeIndex (ScopeIndex)
+
+-- ===========================================================================
+-- Snapshot: bundled input for hover / completion / reference queries
+-- ===========================================================================
+
+-- | Cross-module data the query layer needs to answer a single
+-- request. Each field is independently sourced from per-module compile
+-- artifacts; the snapshot is built once and reused for the lifetime of
+-- those artifacts (e.g. by the LSP between recompiles).
+data QuerySnapshot = QuerySnapshot
+  { variables :: Map QualifiedName VariableData,
+    types :: Map QualifiedName TypeData,
+    requests :: Map QualifiedName RequestData,
+    constructors :: Map QualifiedName ConstructorData,
+    modules :: Map Text ModuleData,
+    scopeIndex :: ScopeIndex SymbolEntry,
+    visibleSymbols :: Map Text (Map Text SymbolEntry),
+    exports :: Map Text (Map Text SymbolEntry),
+    zonkedModules :: Map Text (Module Zonked),
+    typeEnv :: Map Text (Map VariableResolution (SemanticType Resolved))
+  }
+
+-- | Look up a top-level qualified name's resolved type.
+lookupTopLevelType :: QualifiedName -> QuerySnapshot -> Maybe (SemanticType Resolved)
+lookupTopLevelType qualifiedName snap =
+  Map.lookup qualifiedName.module_ snap.typeEnv
+    >>= Map.lookup (ResolvedTopLevel qualifiedName)
+
+-- | Look up a 'VariableResolution' in the context of a specific module.
+lookupTypeInModule :: Text -> VariableResolution -> QuerySnapshot -> Maybe (SemanticType Resolved)
+lookupTypeInModule currentModule variableResolution snap =
+  case variableResolution of
+    ResolvedTopLevel qualifiedName -> lookupTopLevelType qualifiedName snap
+    ResolvedLocal _ ->
+      Map.lookup currentModule snap.typeEnv >>= Map.lookup variableResolution
 
 -- ===========================================================================
 -- Hover
@@ -131,10 +171,10 @@ data HoverInfo = HoverInfo
 -- -- info :: Maybe HoverInfo
 -- -- Just (HoverInfo {hoverType = Just ..., hoverNameSpan = ..., ...})
 -- @
-lookupAtPosition :: IdentifierResult -> ZonkResult -> FilePath -> Position -> Maybe HoverInfo
-lookupAtPosition idResult zonkResult filePath position = do
-  moduleData <- findModuleByFilePath idResult zonkResult filePath
-  listToMaybe (mapMaybe (hoverFromDeclaration idResult zonkResult position) moduleData.declarations)
+lookupAtPosition :: QuerySnapshot -> FilePath -> Position -> Maybe HoverInfo
+lookupAtPosition snap filePath position = do
+  (moduleName, moduleData) <- findModuleByFilePath snap filePath
+  listToMaybe (mapMaybe (hoverFromDeclaration snap moduleName position) moduleData.declarations)
 
 -- ===========================================================================
 -- Occurrence index
@@ -143,11 +183,11 @@ lookupAtPosition idResult zonkResult filePath position = do
 -- | Pre-built index of every name-reference occurrence in all modules.
 -- Build once after compilation, then query cheaply with 'findReferences'.
 data OccurrenceIndex = OccurrenceIndex
-  { variableOccurrences :: Map VariableId [SourceSpan],
-    typeOccurrences :: Map TypeId [SourceSpan],
-    moduleOccurrences :: Map ModuleId [SourceSpan],
-    requestOccurrences :: Map RequestId [SourceSpan],
-    constructorOccurrences :: Map ConstructorId [SourceSpan]
+  { variableOccurrences :: Map VariableResolution [SourceSpan],
+    typeOccurrences :: Map QualifiedName [SourceSpan],
+    moduleOccurrences :: Map Text [SourceSpan],
+    requestOccurrences :: Map QualifiedName [SourceSpan],
+    constructorOccurrences :: Map QualifiedName [SourceSpan]
   }
   deriving (Show)
 
@@ -161,11 +201,11 @@ emptyOccurrenceIndex =
       constructorOccurrences = Map.empty
     }
 
--- | Walk all modules in 'ZonkResult' and collect every name-reference
+-- | Walk all modules in the snapshot and collect every name-reference
 -- occurrence grouped by its resolved identifier.
-buildOccurrenceIndex :: IdentifierResult -> ZonkResult -> OccurrenceIndex
-buildOccurrenceIndex _ zonkResult =
-  foldr collectModuleOccurrences emptyOccurrenceIndex (Map.elems zonkResult.zonkedModules)
+buildOccurrenceIndex :: QuerySnapshot -> OccurrenceIndex
+buildOccurrenceIndex snap =
+  foldr collectModuleOccurrences emptyOccurrenceIndex (Map.elems snap.zonkedModules)
 
 collectModuleOccurrences :: Module Zonked -> OccurrenceIndex -> OccurrenceIndex
 collectModuleOccurrences moduleData index =
@@ -177,122 +217,119 @@ collectModuleOccurrences moduleData index =
 
 -- | Which resolved identifier sits at a source position.
 data ResolvedReference where
-  ResolvedReferenceVariable :: VariableId -> ResolvedReference
-  ResolvedReferenceType :: TypeId -> ResolvedReference
-  ResolvedReferenceModule :: ModuleId -> ResolvedReference
-  ResolvedReferenceRequest :: RequestId -> ResolvedReference
-  ResolvedReferenceConstructor :: ConstructorId -> ResolvedReference
+  ResolvedReferenceVariable :: VariableResolution -> ResolvedReference
+  ResolvedReferenceType :: QualifiedName -> ResolvedReference
+  ResolvedReferenceModule :: Text -> ResolvedReference
+  ResolvedReferenceRequest :: QualifiedName -> ResolvedReference
+  ResolvedReferenceConstructor :: QualifiedName -> ResolvedReference
   deriving (Eq, Show)
 
 -- | Identify which resolved identifier (if any) sits at a source position.
-identifyAtPosition :: IdentifierResult -> ZonkResult -> FilePath -> Position -> Maybe ResolvedReference
-identifyAtPosition idResult zonkResult filePath position = do
-  moduleData <- findModuleByFilePath idResult zonkResult filePath
+identifyAtPosition :: QuerySnapshot -> FilePath -> Position -> Maybe ResolvedReference
+identifyAtPosition snap filePath position = do
+  (_, moduleData) <- findModuleByFilePath snap filePath
   listToMaybe (mapMaybe (refFromDeclaration position) moduleData.declarations)
 
 -- | All occurrence spans of a resolved identifier (uses 'OccurrenceIndex').
 findReferences :: OccurrenceIndex -> ResolvedReference -> [SourceSpan]
 findReferences index = \case
-  ResolvedReferenceVariable variableId ->
-    Map.findWithDefault [] variableId index.variableOccurrences
-  ResolvedReferenceType typeId ->
-    Map.findWithDefault [] typeId index.typeOccurrences
-  ResolvedReferenceModule moduleId ->
-    Map.findWithDefault [] moduleId index.moduleOccurrences
-  ResolvedReferenceRequest requestId ->
-    Map.findWithDefault [] requestId index.requestOccurrences
-  ResolvedReferenceConstructor constructorId ->
-    Map.findWithDefault [] constructorId index.constructorOccurrences
+  ResolvedReferenceVariable variableResolution ->
+    Map.findWithDefault [] variableResolution index.variableOccurrences
+  ResolvedReferenceType qualifiedName ->
+    Map.findWithDefault [] qualifiedName index.typeOccurrences
+  ResolvedReferenceModule moduleName ->
+    Map.findWithDefault [] moduleName index.moduleOccurrences
+  ResolvedReferenceRequest qualifiedName ->
+    Map.findWithDefault [] qualifiedName index.requestOccurrences
+  ResolvedReferenceConstructor qualifiedName ->
+    Map.findWithDefault [] qualifiedName index.constructorOccurrences
 
 -- | Definition span of the symbol at a position, if it can be resolved.
-findDefinition :: IdentifierResult -> ZonkResult -> FilePath -> Position -> Maybe SourceSpan
-findDefinition idResult zonkResult filePath position = do
-  resolvedRef <- identifyAtPosition idResult zonkResult filePath position
+findDefinition :: QuerySnapshot -> FilePath -> Position -> Maybe SourceSpan
+findDefinition snap filePath position = do
+  resolvedRef <- identifyAtPosition snap filePath position
   case resolvedRef of
-    ResolvedReferenceVariable variableId ->
-      fmap (.variableSourceSpan) (Map.lookup variableId idResult.identifiedVariables)
-    ResolvedReferenceType typeId ->
-      fmap (.typeSourceSpan) (Map.lookup typeId idResult.identifiedTypes)
+    ResolvedReferenceVariable variableResolution -> case variableResolution of
+      ResolvedTopLevel qualifiedName ->
+        fmap (.variableSourceSpan) (Map.lookup qualifiedName snap.variables)
+      ResolvedLocal _ -> Nothing
+    ResolvedReferenceType qualifiedName ->
+      fmap (.typeSourceSpan) (Map.lookup qualifiedName snap.types)
     ResolvedReferenceModule _ -> Nothing
-    ResolvedReferenceRequest requestId ->
-      fmap (.requestSourceSpan) (Map.lookup requestId idResult.identifiedRequests)
-    ResolvedReferenceConstructor constructorId ->
-      fmap (.constructorSourceSpan) (Map.lookup constructorId idResult.identifiedConstructors)
+    ResolvedReferenceRequest qualifiedName ->
+      fmap (.requestSourceSpan) (Map.lookup qualifiedName snap.requests)
+    ResolvedReferenceConstructor qualifiedName ->
+      fmap (.constructorSourceSpan) (Map.lookup qualifiedName snap.constructors)
 
 -- ===========================================================================
 -- Internal: module lookup
 -- ===========================================================================
 
-findModuleByFilePath :: IdentifierResult -> ZonkResult -> FilePath -> Maybe (Module Zonked)
-findModuleByFilePath _ zonkResult filePath =
-  listToMaybe [m | m <- Map.elems zonkResult.zonkedModules, m.sourceSpan.filePath == filePath]
+findModuleByFilePath :: QuerySnapshot -> FilePath -> Maybe (Text, Module Zonked)
+findModuleByFilePath snap filePath =
+  listToMaybe
+    [ (moduleName, m)
+      | (moduleName, m) <- Map.toList snap.zonkedModules,
+        m.sourceSpan.filePath == filePath
+    ]
 
 -- ===========================================================================
 -- Internal: hover extraction
 -- ===========================================================================
 
-hoverFromDeclaration :: IdentifierResult -> ZonkResult -> Position -> Declaration Zonked -> Maybe HoverInfo
-hoverFromDeclaration idResult zonkResult position = \case
+hoverFromDeclaration :: QuerySnapshot -> Text -> Position -> Declaration Zonked -> Maybe HoverInfo
+hoverFromDeclaration snap moduleName position = \case
   DeclarationAgent decl
     | spanContains decl.sourceSpan position ->
-        -- Body / parameter hover takes priority. Only fall back to the
-        -- agent name's hover when the cursor is literally on the
-        -- agent name; otherwise we leak the agent's hover into
-        -- arbitrary positions inside the body.
-        hoverFromBlock idResult zonkResult position decl.body
+        hoverFromBlock snap moduleName position decl.body
           `orElse` listToMaybe
-            (mapMaybe (hoverFromParameter idResult zonkResult position) decl.parameters)
-          `orElse` ifPositionOnName decl.name (hoverFromVariableRef idResult zonkResult decl.name)
+            (mapMaybe (hoverFromParameter snap moduleName position) decl.parameters)
+          `orElse` ifPositionOnName decl.name (hoverFromVariableRef snap moduleName decl.name)
   DeclarationRequest decl
     | spanContains decl.sourceSpan position ->
-        listToMaybe (mapMaybe (hoverFromParameter idResult zonkResult position) decl.parameters)
-          `orElse` ifPositionOnName decl.name (hoverFromVariableRef idResult zonkResult decl.name)
+        listToMaybe (mapMaybe (hoverFromParameter snap moduleName position) decl.parameters)
+          `orElse` ifPositionOnName decl.name (hoverFromVariableRef snap moduleName decl.name)
   DeclarationExternalAgent decl
     | spanContains decl.sourceSpan position ->
-        listToMaybe (mapMaybe (hoverFromParameter idResult zonkResult position) decl.parameters)
-          `orElse` ifPositionOnName decl.name (hoverFromVariableRef idResult zonkResult decl.name)
+        listToMaybe (mapMaybe (hoverFromParameter snap moduleName position) decl.parameters)
+          `orElse` ifPositionOnName decl.name (hoverFromVariableRef snap moduleName decl.name)
   DeclarationData decl
     | spanContains decl.sourceSpan position ->
-        ifPositionOnName decl.name (hoverFromVariableRef idResult zonkResult decl.name)
+        ifPositionOnName decl.name (hoverFromVariableRef snap moduleName decl.name)
   _ -> Nothing
   where
     ifPositionOnName :: NameRef Zonked s -> Maybe a -> Maybe a
     ifPositionOnName nameRef value =
       if spanContains nameRef.sourceSpan position then value else Nothing
 
--- | Hover for a parameter's binding name (e.g. the @name@ in
--- @agent foo(name = name: string)@).
 hoverFromParameter ::
-  IdentifierResult ->
-  ZonkResult ->
+  QuerySnapshot ->
+  Text ->
   Position ->
   ParameterBinding Zonked ->
   Maybe HoverInfo
-hoverFromParameter idResult zonkResult position param =
+hoverFromParameter snap moduleName position param =
   if spanContains param.sourceSpan position
-    then hoverFromPattern idResult zonkResult position param.pattern
+    then hoverFromPattern snap moduleName position param.pattern
     else Nothing
 
--- | Hover for a pattern node — currently only the @VariablePattern@
--- case is meaningful (binding name → variable hover). Recurses into
--- composite patterns so destructured binders show up too.
 hoverFromPattern ::
-  IdentifierResult ->
-  ZonkResult ->
+  QuerySnapshot ->
+  Text ->
   Position ->
   Pattern Zonked ->
   Maybe HoverInfo
-hoverFromPattern idResult zonkResult position = \case
+hoverFromPattern snap moduleName position = \case
   PatternVariable vp
     | spanContains vp.name.sourceSpan position ->
-        hoverFromVariableRef idResult zonkResult vp.name
+        hoverFromVariableRef snap moduleName vp.name
   PatternTuple tp
     | spanContains tp.sourceSpan position ->
-        listToMaybe (mapMaybe (hoverFromPattern idResult zonkResult position) tp.elements)
+        listToMaybe (mapMaybe (hoverFromPattern snap moduleName position) tp.elements)
   PatternQualifiedConstructor qp
     | spanContains qp.sourceSpan position ->
         listToMaybe
-          (mapMaybe (hoverFromPattern idResult zonkResult position . snd) qp.parameters)
+          (mapMaybe (hoverFromPattern snap moduleName position . snd) qp.parameters)
   PatternLiteral lp
     | spanContains lp.sourceSpan position ->
         Just
@@ -313,18 +350,19 @@ hoverFromPattern idResult zonkResult position = \case
             }
   PatternType tp
     | spanContains tp.sourceSpan position ->
-        hoverFromPattern idResult zonkResult position tp.inner
+        hoverFromPattern snap moduleName position tp.inner
   PatternRecord rp
     | spanContains rp.sourceSpan position ->
-        listToMaybe (mapMaybe (hoverFromPattern idResult zonkResult position . snd) rp.entries)
+        listToMaybe (mapMaybe (hoverFromPattern snap moduleName position . snd) rp.entries)
   _ -> Nothing
 
-hoverFromVariableRef :: IdentifierResult -> ZonkResult -> NameRef Zonked VariableRef -> Maybe HoverInfo
-hoverFromVariableRef idResult zonkResult nameRef = do
-  variableId <- nameRef.resolution
-  let semanticType = Map.lookup variableId zonkResult.zonkedTypeEnvironment
-      variableData = Map.lookup variableId idResult.identifiedVariables
-      qualifiedName = variableData >>= (.variableQualifiedName)
+hoverFromVariableRef :: QuerySnapshot -> Text -> NameRef Zonked VariableRef -> Maybe HoverInfo
+hoverFromVariableRef snap moduleName nameRef = do
+  variableResolution <- nameRef.resolution
+  let semanticType = lookupTypeInModule moduleName variableResolution snap
+      (variableData, qualifiedName) = case variableResolution of
+        ResolvedTopLevel qn -> (Map.lookup qn snap.variables, Just qn)
+        ResolvedLocal _ -> (Nothing, Nothing)
   pure
     HoverInfo
       { hoverType = semanticType,
@@ -333,122 +371,118 @@ hoverFromVariableRef idResult zonkResult nameRef = do
         hoverQualifiedName = fmap renderQualifiedName qualifiedName
       }
 
-hoverFromBlock :: IdentifierResult -> ZonkResult -> Position -> Block Zonked -> Maybe HoverInfo
-hoverFromBlock idResult zonkResult position block
+hoverFromBlock :: QuerySnapshot -> Text -> Position -> Block Zonked -> Maybe HoverInfo
+hoverFromBlock snap moduleName position block
   | spanContains block.sourceSpan position =
-      listToMaybe (mapMaybe (hoverFromStatement idResult zonkResult position) block.statements)
-        `orElse` (block.returnExpression >>= hoverFromExpression idResult zonkResult position)
+      listToMaybe (mapMaybe (hoverFromStatement snap moduleName position) block.statements)
+        `orElse` (block.returnExpression >>= hoverFromExpression snap moduleName position)
   | otherwise = Nothing
 
-hoverFromStatement :: IdentifierResult -> ZonkResult -> Position -> Statement Zonked -> Maybe HoverInfo
-hoverFromStatement idResult zonkResult position = \case
+hoverFromStatement :: QuerySnapshot -> Text -> Position -> Statement Zonked -> Maybe HoverInfo
+hoverFromStatement snap moduleName position = \case
   StatementLet letStatement
     | spanContains letStatement.sourceSpan position ->
-        -- Try the LHS pattern first (hover on a freshly-bound name
-        -- shows the variable's inferred type), then the RHS.
-        hoverFromPattern idResult zonkResult position letStatement.pattern
-          `orElse` hoverFromExpression idResult zonkResult position letStatement.value
+        hoverFromPattern snap moduleName position letStatement.pattern
+          `orElse` hoverFromExpression snap moduleName position letStatement.value
   StatementExpression expression
     | spanContains (sourceSpanOf expression) position ->
-        hoverFromExpression idResult zonkResult position expression
+        hoverFromExpression snap moduleName position expression
   StatementAgent agentStatement
     | spanContains agentStatement.sourceSpan position ->
-        hoverFromBlock idResult zonkResult position agentStatement.body
+        hoverFromBlock snap moduleName position agentStatement.body
   StatementReturn returnStatement
     | spanContains returnStatement.sourceSpan position ->
-        hoverFromExpression idResult zonkResult position returnStatement.value
+        hoverFromExpression snap moduleName position returnStatement.value
   StatementBreak breakStatement
     | spanContains breakStatement.sourceSpan position ->
-        hoverFromExpression idResult zonkResult position breakStatement.value
+        hoverFromExpression snap moduleName position breakStatement.value
   StatementNext nextStatement
     | spanContains nextStatement.sourceSpan position ->
-        hoverFromExpression idResult zonkResult position nextStatement.value
-          `orElse` listToMaybe (mapMaybe (hoverFromModifier idResult zonkResult position) nextStatement.modifiers)
+        hoverFromExpression snap moduleName position nextStatement.value
+          `orElse` listToMaybe (mapMaybe (hoverFromModifier snap moduleName position) nextStatement.modifiers)
   StatementForBreak ForBreakStatement {value, sourceSpan}
     | spanContains sourceSpan position ->
-        hoverFromExpression idResult zonkResult position value
+        hoverFromExpression snap moduleName position value
   StatementForNext ForNextStatement {modifiers, sourceSpan}
     | spanContains sourceSpan position ->
-        listToMaybe (mapMaybe (hoverFromModifier idResult zonkResult position) modifiers)
+        listToMaybe (mapMaybe (hoverFromModifier snap moduleName position) modifiers)
   _ -> Nothing
 
-hoverFromModifier :: IdentifierResult -> ZonkResult -> Position -> Modifier Zonked -> Maybe HoverInfo
-hoverFromModifier idResult zonkResult position modifier
+hoverFromModifier :: QuerySnapshot -> Text -> Position -> Modifier Zonked -> Maybe HoverInfo
+hoverFromModifier snap moduleName position modifier
   | spanContains modifier.sourceSpan position =
-      hoverFromExpression idResult zonkResult position modifier.value
+      hoverFromExpression snap moduleName position modifier.value
         `orElse` if spanContains modifier.name.sourceSpan position
-          then hoverFromVariableRef idResult zonkResult modifier.name
+          then hoverFromVariableRef snap moduleName modifier.name
           else Nothing
   | otherwise = Nothing
 
-hoverFromExpression :: IdentifierResult -> ZonkResult -> Position -> Expression Zonked -> Maybe HoverInfo
-hoverFromExpression idResult zonkResult position expression
+hoverFromExpression :: QuerySnapshot -> Text -> Position -> Expression Zonked -> Maybe HoverInfo
+hoverFromExpression snap moduleName position expression
   | not (spanContains (sourceSpanOf expression) position) = Nothing
-  -- Try the most-specific (= innermost) hover first; fall back to the
-  -- enclosing expression's inferred type if no inner node matched.
-  -- This ensures variable references win when both apply, while still
-  -- giving every expression position a meaningful hover.
   | otherwise = specific `orElse` Just (genericExpressionHover expression)
   where
     specific = case expression of
       ExpressionVariable ve ->
-        let semanticType = ve.name.resolution >>= \vid -> Map.lookup vid zonkResult.zonkedTypeEnvironment
-            variableData = ve.name.resolution >>= \vid -> Map.lookup vid idResult.identifiedVariables
+        let maybeResolution = ve.name.resolution
+            semanticType = maybeResolution >>= \vr -> lookupTypeInModule moduleName vr snap
+            (variableData, qualifiedName) = case maybeResolution of
+              Just (ResolvedTopLevel qn) -> (Map.lookup qn snap.variables, Just qn)
+              _ -> (Nothing, Nothing)
          in Just
               HoverInfo
                 { hoverType = semanticType,
                   hoverNameSpan = ve.name.sourceSpan,
                   hoverDefinitionSpan = fmap (.variableSourceSpan) variableData,
-                  hoverQualifiedName =
-                    variableData >>= (.variableQualifiedName) >>= Just . renderQualifiedName
+                  hoverQualifiedName = fmap renderQualifiedName qualifiedName
                 }
       ExpressionCall ce ->
-        hoverFromExpression idResult zonkResult position ce.callee
-          `orElse` listToMaybe (mapMaybe (hoverFromExpression idResult zonkResult position . (.value)) ce.arguments)
+        hoverFromExpression snap moduleName position ce.callee
+          `orElse` listToMaybe (mapMaybe (hoverFromExpression snap moduleName position . (.value)) ce.arguments)
       ExpressionBinaryOperator be ->
-        hoverFromExpression idResult zonkResult position be.left
-          `orElse` hoverFromExpression idResult zonkResult position be.right
+        hoverFromExpression snap moduleName position be.left
+          `orElse` hoverFromExpression snap moduleName position be.right
       ExpressionUnaryOperator ue ->
-        hoverFromExpression idResult zonkResult position ue.operand
+        hoverFromExpression snap moduleName position ue.operand
       ExpressionIf ie ->
-        hoverFromExpression idResult zonkResult position ie.condition
-          `orElse` hoverFromBlock idResult zonkResult position ie.thenBlock
-          `orElse` (ie.elseBlock >>= hoverFromBlock idResult zonkResult position)
+        hoverFromExpression snap moduleName position ie.condition
+          `orElse` hoverFromBlock snap moduleName position ie.thenBlock
+          `orElse` (ie.elseBlock >>= hoverFromBlock snap moduleName position)
       ExpressionMatch me ->
-        hoverFromExpression idResult zonkResult position me.subject
-          `orElse` listToMaybe (mapMaybe (hoverFromCaseArm idResult zonkResult position) me.cases)
+        hoverFromExpression snap moduleName position me.subject
+          `orElse` listToMaybe (mapMaybe (hoverFromCaseArm snap moduleName position) me.cases)
       ExpressionFor fe ->
-        listToMaybe (mapMaybe (hoverFromExpression idResult zonkResult position . (.source)) fe.inBindings)
-          `orElse` listToMaybe (mapMaybe (hoverFromForVarBinding idResult zonkResult position) fe.varBindings)
-          `orElse` hoverFromBlock idResult zonkResult position fe.body
-          `orElse` (fe.thenBlock >>= hoverFromBlock idResult zonkResult position)
+        listToMaybe (mapMaybe (hoverFromExpression snap moduleName position . (.source)) fe.inBindings)
+          `orElse` listToMaybe (mapMaybe (hoverFromForVarBinding snap moduleName position) fe.varBindings)
+          `orElse` hoverFromBlock snap moduleName position fe.body
+          `orElse` (fe.thenBlock >>= hoverFromBlock snap moduleName position)
       ExpressionBlock be ->
-        hoverFromBlock idResult zonkResult position be.block
+        hoverFromBlock snap moduleName position be.block
       ExpressionTuple te ->
-        listToMaybe (mapMaybe (hoverFromExpression idResult zonkResult position) te.elements)
+        listToMaybe (mapMaybe (hoverFromExpression snap moduleName position) te.elements)
       ExpressionArray ae ->
-        listToMaybe (mapMaybe (hoverFromExpression idResult zonkResult position) ae.elements)
+        listToMaybe (mapMaybe (hoverFromExpression snap moduleName position) ae.elements)
       ExpressionParTuple pte ->
-        listToMaybe (mapMaybe (hoverFromExpression idResult zonkResult position) pte.elements)
+        listToMaybe (mapMaybe (hoverFromExpression snap moduleName position) pte.elements)
       ExpressionParArray pae ->
-        listToMaybe (mapMaybe (hoverFromExpression idResult zonkResult position) pae.elements)
+        listToMaybe (mapMaybe (hoverFromExpression snap moduleName position) pae.elements)
       ExpressionFieldAccess fae ->
-        hoverFromExpression idResult zonkResult position fae.object
+        hoverFromExpression snap moduleName position fae.object
       ExpressionIndexAccess iae ->
-        hoverFromExpression idResult zonkResult position iae.array
-          `orElse` hoverFromExpression idResult zonkResult position iae.index
+        hoverFromExpression snap moduleName position iae.array
+          `orElse` hoverFromExpression snap moduleName position iae.index
       ExpressionTemplate te ->
-        listToMaybe (mapMaybe (hoverFromTemplateElement idResult zonkResult position) te.elements)
+        listToMaybe (mapMaybe (hoverFromTemplateElement snap moduleName position) te.elements)
       ExpressionHandle he ->
-        listToMaybe (mapMaybe (hoverFromStateVariable idResult zonkResult position) he.stateVariables)
-          `orElse` listToMaybe (mapMaybe (hoverFromRequestHandler idResult zonkResult position) he.handlers)
-          `orElse` (he.thenClause >>= hoverFromBlock idResult zonkResult position . snd)
-          `orElse` hoverFromBlock idResult zonkResult position he.body
+        listToMaybe (mapMaybe (hoverFromStateVariable snap moduleName position) he.stateVariables)
+          `orElse` listToMaybe (mapMaybe (hoverFromRequestHandler snap moduleName position) he.handlers)
+          `orElse` (he.thenClause >>= hoverFromBlock snap moduleName position . snd)
+          `orElse` hoverFromBlock snap moduleName position he.body
       ExpressionQualifiedReference qre ->
-        hoverFromVariableRef idResult zonkResult qre.target
+        hoverFromVariableRef snap moduleName qre.target
       ExpressionRecord re ->
-        listToMaybe (mapMaybe (hoverFromExpression idResult zonkResult position . snd) re.entries)
-      ExpressionLiteral _ -> Nothing -- fall through to generic typeOf hover
+        listToMaybe (mapMaybe (hoverFromExpression snap moduleName position . snd) re.entries)
+      ExpressionLiteral _ -> Nothing
 
 -- | Fall-back hover that just surfaces an expression's inferred type.
 -- Used when no more-specific child hover matched. Carries no qualified
@@ -490,77 +524,68 @@ zonkedExpressionType = \case
 -- | Walk a match-case arm: try the pattern bindings first (so hover on
 -- a bound name shows that name's inferred type), then the body block.
 hoverFromCaseArm ::
-  IdentifierResult ->
-  ZonkResult ->
+  QuerySnapshot ->
+  Text ->
   Position ->
   CaseArm Zonked ->
   Maybe HoverInfo
-hoverFromCaseArm idResult zonkResult position arm
+hoverFromCaseArm snap moduleName position arm
   | spanContains arm.sourceSpan position =
-      hoverFromPattern idResult zonkResult position arm.pattern
-        `orElse` hoverFromBlock idResult zonkResult position arm.body
+      hoverFromPattern snap moduleName position arm.pattern
+        `orElse` hoverFromBlock snap moduleName position arm.body
   | otherwise = Nothing
 
-hoverFromForVarBinding :: IdentifierResult -> ZonkResult -> Position -> ForVarBinding Zonked -> Maybe HoverInfo
-hoverFromForVarBinding idResult zonkResult position binding
+hoverFromForVarBinding :: QuerySnapshot -> Text -> Position -> ForVarBinding Zonked -> Maybe HoverInfo
+hoverFromForVarBinding snap moduleName position binding
   | spanContains binding.sourceSpan position =
-      hoverFromExpression idResult zonkResult position binding.initial
+      hoverFromExpression snap moduleName position binding.initial
         `orElse` if spanContains binding.name.sourceSpan position
-          then hoverFromVariableRef idResult zonkResult binding.name
+          then hoverFromVariableRef snap moduleName binding.name
           else Nothing
   | otherwise = Nothing
 
-hoverFromStateVariable :: IdentifierResult -> ZonkResult -> Position -> StateVariableBinding Zonked -> Maybe HoverInfo
-hoverFromStateVariable idResult zonkResult position binding
+hoverFromStateVariable :: QuerySnapshot -> Text -> Position -> StateVariableBinding Zonked -> Maybe HoverInfo
+hoverFromStateVariable snap moduleName position binding
   | spanContains binding.sourceSpan position =
-      hoverFromExpression idResult zonkResult position binding.initial
+      hoverFromExpression snap moduleName position binding.initial
         `orElse` if spanContains binding.name.sourceSpan position
-          then hoverFromVariableRef idResult zonkResult binding.name
+          then hoverFromVariableRef snap moduleName binding.name
           else Nothing
   | otherwise = Nothing
 
-hoverFromRequestHandler :: IdentifierResult -> ZonkResult -> Position -> RequestHandler Zonked -> Maybe HoverInfo
-hoverFromRequestHandler idResult zonkResult position handler
+hoverFromRequestHandler :: QuerySnapshot -> Text -> Position -> RequestHandler Zonked -> Maybe HoverInfo
+hoverFromRequestHandler snap moduleName position handler
   | spanContains handler.sourceSpan position =
-      -- Try parameter bindings first (handler params bind names that
-      -- might be hovered), then the handler body, then fall back to
-      -- the req-name itself when the cursor is on the @req <name>@
-      -- token.
-      listToMaybe (mapMaybe (hoverFromParameter idResult zonkResult position) handler.parameters)
-        `orElse` hoverFromBlock idResult zonkResult position handler.body
-        `orElse` hoverFromRequestNameRef idResult zonkResult position handler.name
+      listToMaybe (mapMaybe (hoverFromParameter snap moduleName position) handler.parameters)
+        `orElse` hoverFromBlock snap moduleName position handler.body
+        `orElse` hoverFromRequestNameRef snap position handler.name
   | otherwise = Nothing
 
--- | Hover for the @name@ on @req <name>(...)@ inside a handle block.
--- Looks up the request's call-side type via 'RequestData.requestVariableId'
--- and surfaces it together with the qualified name.
 hoverFromRequestNameRef ::
-  IdentifierResult ->
-  ZonkResult ->
+  QuerySnapshot ->
   Position ->
   NameRef Zonked RequestRef ->
   Maybe HoverInfo
-hoverFromRequestNameRef idResult zonkResult position nameRef
+hoverFromRequestNameRef snap position nameRef
   | not (spanContains nameRef.sourceSpan position) = Nothing
   | otherwise = do
-      requestId <- nameRef.resolution
-      requestData <- Map.lookup requestId idResult.identifiedRequests
-      let variableId = requestData.requestVariableId
-          semanticType = Map.lookup variableId zonkResult.zonkedTypeEnvironment
+      qualifiedName <- nameRef.resolution
+      requestData <- Map.lookup qualifiedName snap.requests
+      let semanticType = lookupTopLevelType qualifiedName snap
       pure
         HoverInfo
           { hoverType = semanticType,
             hoverNameSpan = nameRef.sourceSpan,
             hoverDefinitionSpan = Just requestData.requestSourceSpan,
-            hoverQualifiedName = Just (renderQualifiedName requestData.requestQualifiedName)
+            hoverQualifiedName = Just (renderQualifiedName qualifiedName)
           }
 
-hoverFromTemplateElement :: IdentifierResult -> ZonkResult -> Position -> TemplateElement Zonked -> Maybe HoverInfo
-hoverFromTemplateElement idResult zonkResult position = \case
+hoverFromTemplateElement :: QuerySnapshot -> Text -> Position -> TemplateElement Zonked -> Maybe HoverInfo
+hoverFromTemplateElement snap moduleName position = \case
   TemplateElementString _ -> Nothing
   TemplateElementExpression element
     | spanContains element.sourceSpan position ->
-        hoverFromExpression idResult zonkResult position element.value
+        hoverFromExpression snap moduleName position element.value
     | otherwise -> Nothing
 
 -- ===========================================================================
@@ -785,7 +810,7 @@ collectExpressionOccurrences expression index = case expression of
   ExpressionMatch me ->
     collectExpressionOccurrences
       me.subject
-      (foldr (collectBlockOccurrences . (.body)) index me.cases)
+      (foldr (\caseArm -> collectBlockOccurrences caseArm.body) index me.cases)
   ExpressionFor fe ->
     let withInBindings = foldr (collectExpressionOccurrences . (.source)) index fe.inBindings
         withVarBindings = foldr collectForVarBindingOccurrences withInBindings fe.varBindings
@@ -809,8 +834,8 @@ collectExpressionOccurrences expression index = case expression of
     foldr collectTemplateElementOccurrences index te.elements
   ExpressionHandle he ->
     let withState = foldr collectStateVariableOccurrences index he.stateVariables
-        withHandlers = foldr (collectBlockOccurrences . (.body)) withState he.handlers
-        withThen = maybe withHandlers ((`collectBlockOccurrences` withHandlers) . snd) he.thenClause
+        withHandlers = foldr (\handler -> collectBlockOccurrences handler.body) withState he.handlers
+        withThen = maybe withHandlers (\(_, thenBlock) -> collectBlockOccurrences thenBlock withHandlers) he.thenClause
      in collectBlockOccurrences he.body withThen
   ExpressionQualifiedReference qre ->
     addModuleOccurrence qre.moduleQualifier (addVariableOccurrence qre.target index)
@@ -832,19 +857,19 @@ collectTemplateElementOccurrences = \case
 addModuleOccurrence :: NameRef Zonked ModuleRef -> OccurrenceIndex -> OccurrenceIndex
 addModuleOccurrence nameRef index = case nameRef.resolution of
   Nothing -> index
-  Just moduleId ->
+  Just moduleName ->
     index
       { moduleOccurrences =
-          Map.insertWith (<>) moduleId [nameRef.sourceSpan] index.moduleOccurrences
+          Map.insertWith (<>) moduleName [nameRef.sourceSpan] index.moduleOccurrences
       }
 
 addVariableOccurrence :: NameRef Zonked VariableRef -> OccurrenceIndex -> OccurrenceIndex
 addVariableOccurrence nameRef index = case nameRef.resolution of
   Nothing -> index
-  Just variableId ->
+  Just variableResolution ->
     index
       { variableOccurrences =
-          Map.insertWith (<>) variableId [nameRef.sourceSpan] index.variableOccurrences
+          Map.insertWith (<>) variableResolution [nameRef.sourceSpan] index.variableOccurrences
       }
 
 -- ===========================================================================

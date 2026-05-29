@@ -25,20 +25,16 @@
 // decrypt inside the module so the storage layer never sees
 // plaintext credentials.
 
-import { ENV_ENDPOINT } from "./endpoints.js";
-import { encodeCoreAgentDefId, decodeFfiAgentDefId } from "../agent-def-id.js";
+import { decodeFfiAgentDefId, encodeCoreAgentDefId } from "../agent-def-id.js";
 import type { Endpoint } from "../engine/endpoint.js";
 import type { ExternalEvent } from "../engine/event.js";
-import {
-  createEscalationId,
-  type DelegationId,
-  type EscalationId,
-} from "../engine/id.js";
+import { createEscalationId, type DelegationId, type EscalationId } from "../engine/id.js";
 import type { Logger } from "../engine/logger.js";
 import type { Value } from "../engine/value.js";
-import { decryptSecret, encryptSecret } from "../secret-crypto.js";
 import type { Module } from "../module.js";
+import { decryptSecret, encryptSecret } from "../secret-crypto.js";
 import type { EnvStore } from "../sidecar/env-store.js";
+import { ENV_ENDPOINT } from "./endpoints.js";
 
 /** Reserved env dispatch names that EnvModule recognises on inbound
  * delegates. Anything else is logged and dropped. */
@@ -198,11 +194,7 @@ export class EnvModule implements Module {
 
   // ─── Response emitters ──────────────────────────────────────────────────
 
-  private respondDelegateAck(
-    to: Endpoint,
-    delegationId: DelegationId,
-    value: Value,
-  ): void {
+  private respondDelegateAck(to: Endpoint, delegationId: DelegationId, value: Value): void {
     this.onBusResponse({
       from: this.endpoint,
       to,
@@ -210,11 +202,7 @@ export class EnvModule implements Module {
     });
   }
 
-  private escalateEnvNotFound(
-    to: Endpoint,
-    delegationId: DelegationId,
-    key: string,
-  ): void {
+  private escalateEnvNotFound(to: Endpoint, delegationId: DelegationId, key: string): void {
     const escalationId = createEscalationId();
     // Register the pending round-trip so the matching escalateAck can
     // be converted into a delegateAck, and a terminate can drop it.
@@ -238,11 +226,7 @@ export class EnvModule implements Module {
     });
   }
 
-  private escalateInvalidArgs(
-    to: Endpoint,
-    delegationId: DelegationId,
-    message: string,
-  ): void {
+  private escalateInvalidArgs(to: Endpoint, delegationId: DelegationId, message: string): void {
     // Argument-shape problems are programmer errors at the boundary;
     // surface them via `prim.throw` so they reach the snapshot's
     // top-level error state (= the same fate as any other engine bug).
@@ -305,18 +289,12 @@ export class EnvModule implements Module {
   }
 }
 
-function requireString(
-  args: Record<string, Value>,
-  name: string,
-): string | null {
+function requireString(args: Record<string, Value>, name: string): string | null {
   const v = args[name];
   return v !== undefined && v.kind === "string" ? v.value : null;
 }
 
-function requireBoolean(
-  args: Record<string, Value>,
-  name: string,
-): boolean | null {
+function requireBoolean(args: Record<string, Value>, name: string): boolean | null {
   const v = args[name];
   return v !== undefined && v.kind === "boolean" ? v.value : null;
 }

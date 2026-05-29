@@ -6,6 +6,7 @@ import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Katari.AST
+import Katari.Id (QualifiedName (..), VariableResolution (..))
 import Katari.Lexer qualified as Lexer
 import Katari.Parser qualified as Parser
 import Katari.SemanticType
@@ -16,17 +17,15 @@ import Katari.SemanticType
     SemanticType (..),
     TypeVariableId (..),
   )
+import Katari.TestSupport (IdentifierResult (..), ZonkResult (..), zonkAll)
+import Katari.TestSupport qualified as TestSupport
 import Katari.Typechecker.ConstraintGenerator
   ( ConstraintGenResult (..),
     VariableSupply (..),
-    generateConstraints,
   )
-import Katari.Id (RequestId, VariableId)
 import Katari.Typechecker.Identifier
-  ( IdentifierResult (..),
-    RequestData,
+  ( RequestData,
     VariableData (..),
-    identify,
   )
 import Katari.Typechecker.Identifier qualified as Identifier
 import Katari.Typechecker.NormalizedType
@@ -42,12 +41,7 @@ import Katari.Typechecker.NormalizedType
     emptyLayered,
   )
 import Katari.Typechecker.Solver (SolverResult (..))
-import Katari.Typechecker.Zonker
-  ( ZonkError (..),
-    ZonkResult (..),
-    zonk,
-  )
-import Katari.Compile qualified as Compile
+import Katari.Typechecker.Zonker (ZonkError (..))
 import Test.Hspec
 
 -- ---------------------------------------------------------------------------
@@ -60,11 +54,11 @@ pipeline :: Text -> IO (IdentifierResult, ConstraintGenResult)
 pipeline src =
   let (stream, _) = Lexer.lex "<test>" src
       (parsed, parseErrors) = Parser.parse "<test>" stream
-  in case parseErrors of
-    (_:_) -> fail ("parse failure: " ++ show parseErrors)
-    [] -> case Compile.identifyWithStdlib (Map.singleton "main" parsed) of
-      (idResult, []) -> let (cg, _) = generateConstraints idResult in pure (idResult, cg)
-      (_, errs) -> fail ("identify failure: " ++ show errs)
+   in case parseErrors of
+        (_ : _) -> fail ("parse failure: " ++ show parseErrors)
+        [] -> case TestSupport.identifyWithStdlib (Map.singleton "main" parsed) of
+          (idResult, []) -> let (cg, _) = TestSupport.generateConstraintsAll idResult in pure (idResult, cg)
+          (_, errs) -> fail ("identify failure: " ++ show errs)
 
 -- | Build a 'SolverResult' that satisfies the Solver totality contract for the
 -- given 'ConstraintGenResult'. Every TypeVariableId / RequestVariableId allocated by
@@ -73,7 +67,7 @@ pipeline src =
 mkTotalSolverResult ::
   ConstraintGenResult ->
   [(TypeVariableId, NormalizedType)] ->
-  [(RequestVariableId, Set RequestId)] ->
+  [(RequestVariableId, Set QualifiedName)] ->
   SolverResult
 mkTotalSolverResult cg typeOverrides requestOverrides =
   SolverResult
@@ -89,7 +83,7 @@ mkTotalSolverResult cg typeOverrides requestOverrides =
 -- exercise the defensive Zonker fallback path.
 mkPartialSolverResult ::
   [(TypeVariableId, NormalizedType)] ->
-  [(RequestVariableId, Set RequestId)] ->
+  [(RequestVariableId, Set QualifiedName)] ->
   SolverResult
 mkPartialSolverResult ts es =
   SolverResult
@@ -101,12 +95,12 @@ mkPartialSolverResult ts es =
 runZonkTotal :: Text -> IO (ZonkResult, [ZonkError])
 runZonkTotal src = do
   (idResult, cg) <- pipeline src
-  pure (zonk idResult cg (mkTotalSolverResult cg [] []))
+  pure (zonkAll "main" idResult cg (mkTotalSolverResult cg [] []))
 
--- | Find the VariableId for a named binding.
-variableIdOf :: Text -> IdentifierResult -> Maybe VariableId
-variableIdOf name result =
-  fst <$> find ((== name) . (.variableName) . snd) (Map.toList result.identifiedVariables)
+-- | Find the VariableResolution for a named top-level binding.
+variableResolutionOf :: Text -> IdentifierResult -> Maybe VariableResolution
+variableResolutionOf name result =
+  ResolvedTopLevel . fst <$> find ((== name) . (.variableName) . snd) (Map.toList result.identifiedVariables)
 
 -- | Collect all expression metadata 'SemanticType Resolved' values reachable
 -- from a Zonked module body. Used to spot-check inferred types.
@@ -289,11 +283,11 @@ basicZonk = describe "basic zonk" $ do
     SemanticTypeLiteralString "hello" `elem` expressionTypes mod_ `shouldBe` True
 
   it "Identifier ids carry through Zonked AST" $ do
-    -- foo の VariableId が ZonkedVariable に乗ってきて、id が一致している。
+    -- foo の VariableResolution が ZonkedVariable に乗ってきて、id が一致している。
     (idResult, cg) <- pipeline "agent foo() { 0 }"
-    let (zr, _zonkErrs) = zonk idResult cg (mkTotalSolverResult cg [] [])
+    let (zr, _zonkErrs) = zonkAll "main" idResult cg (mkTotalSolverResult cg [] [])
         mainModule = soleModule zr
-        Just fooVid = variableIdOf "foo" idResult
+        Just fooVid = variableResolutionOf "foo" idResult
         names = [decl.name | DeclarationAgent decl <- mainModule.declarations]
         fooMeta = head [ref.resolution | ref <- names, ref.text == "foo"]
     fooMeta `shouldBe` Just fooVid
@@ -313,7 +307,7 @@ typeVarSubstitution = describe "type var substitution" $ do
           [ (TypeVariableId i, NormalizedTypeLayered emptyLayered {numberLayer = NumberSlotInteger})
             | i <- [0 .. cg.variableSupply.typeVarSupply - 1]
           ]
-        (zr, _zonkErrs) = zonk idResult cg (mkTotalSolverResult cg allInt [])
+        (zr, _zonkErrs) = zonkAll "main" idResult cg (mkTotalSolverResult cg allInt [])
         mod_ = soleModule zr
     -- expression 由来の metadata は全て SemanticTypeInteger に解決される
     -- (ただし Constructor 由来の literal e.g. SemanticTypeLiteralInteger は常駐)
@@ -346,10 +340,10 @@ requestSubstitutionSpec = describe "request substitution" $ do
     -- requestVars = empty、requestReqs ⊇ {fetch} になることを確認。
     let src = "request fetch() -> string\nagent app() { 0 }"
     (idResult, cg) <- pipeline src
-    let Just fetchVid = variableIdOf "fetch" idResult
-        Just appVid = variableIdOf "app" idResult
-        Just (SemanticTypeVariable tApp) = Map.lookup appVid cg.typeEnvironment
-        fetchReqId = head [rid | (rid, rd) <- Map.toList idResult.identifiedRequests, rd.requestVariableId == fetchVid]
+    let Just fetchRes = variableResolutionOf "fetch" idResult
+        Just appRes = variableResolutionOf "app" idResult
+        Just (SemanticTypeVariable tApp) = Map.lookup appRes cg.typeEnvironment
+        fetchReqQName = head [qualifiedName | (qualifiedName, _rd) <- Map.toList idResult.identifiedRequests, ResolvedTopLevel qualifiedName == fetchRes]
         appFnNT =
           NormalizedTypeLayered
             emptyLayered
@@ -360,13 +354,14 @@ requestSubstitutionSpec = describe "request substitution" $ do
                         returnType =
                           NormalizedTypeLayered
                             emptyLayered {numberLayer = NumberSlotLiterals (Set.singleton 0)},
-                        requests = Set.singleton fetchReqId
+                        requests = Set.singleton fetchReqQName
                       }
               }
-        (zr, zonkErrs) = zonk idResult cg (mkTotalSolverResult cg [(tApp, appFnNT)] [])
-    case Map.lookup appVid zr.zonkedTypeEnvironment of
+        (zr, zonkErrs) = zonkAll "main" idResult cg (mkTotalSolverResult cg [(tApp, appFnNT)] [])
+        mainEnv = Map.findWithDefault Map.empty "main" zr.zonkedTypeEnvironment
+    case Map.lookup appRes mainEnv of
       Just (SemanticTypeFunction _ _ eff) ->
-        eff `shouldBe` SemanticRequest (Set.singleton (SemanticRequestElementConcrete fetchReqId))
+        eff `shouldBe` SemanticRequest (Set.singleton (SemanticRequestElementConcrete fetchReqQName))
       other -> expectationFailure ("app not bound to function type: " ++ show other)
     zonkErrs `shouldBe` []
 
@@ -376,18 +371,29 @@ requestSubstitutionSpec = describe "request substitution" $ do
 
 typeEnvironmentZonk :: Spec
 typeEnvironmentZonk = describe "type environment zonk" $ do
-  it "zonkedTypeEnvironment contains entry for every identifier variable" $ do
+  it "zonkedTypeEnvironment contains an entry for every top-level variable owned by the zonked module" $ do
     (idResult, cg) <- pipeline "agent foo() { 0 }"
-    let (zr, _zonkErrs) = zonk idResult cg (mkTotalSolverResult cg [] [])
-    Map.keysSet zr.zonkedTypeEnvironment
-      `shouldBe` Map.keysSet idResult.identifiedVariables
+    let (zr, _zonkErrs) = zonkAll "main" idResult cg (mkTotalSolverResult cg [] [])
+    -- zonkAll is per-module: it only zonks "main", so the resulting
+    -- env covers main's own ResolvedTopLevel entries. stdlib top-level
+    -- vars are intentionally absent (they would be produced by their
+    -- own per-module zonk passes).
+    let mainOwnedKeys =
+          Set.fromList
+            [ ResolvedTopLevel qualifiedName
+              | qualifiedName <- Map.keys idResult.identifiedVariables,
+                qualifiedName.module_ == "main"
+            ]
+    let allKeys = Set.unions (map Map.keysSet (Map.elems zr.zonkedTypeEnvironment))
+    mainOwnedKeys `Set.isSubsetOf` allKeys
+      `shouldBe` True
 
   it "every entry has a Resolved (no SemanticTypeVariable) type" $ do
     -- SemanticTypeVariable は Resolved phase では型レベルで構築不能なので、
     -- 型がついていれば自動的に保証されるが、念のため Show 文字列に
     -- "SemanticTypeVariable" が含まれていないことを spot check。
     (zr, zonkErrs) <- runZonkTotal "agent foo() { 0 }"
-    let strs = map show (Map.elems zr.zonkedTypeEnvironment)
+    let strs = map show (concatMap Map.elems (Map.elems zr.zonkedTypeEnvironment))
     any (\s -> "SemanticTypeVariable" `elem` words s) strs `shouldBe` False
 
 -- ---------------------------------------------------------------------------
@@ -423,14 +429,12 @@ defensiveFallback = describe "defensive fallback for Solver bug" $ do
   it "missing TypeVar entry: ZonkErrorMissingTypeVar is recorded and node defaults to Unknown" $ do
     (idResult, cg) <- pipeline "agent foo() { foo() }"
     -- 完全に空の substitution → 全 TypeVar が miss
-    let (zr, zonkErrs) = zonk idResult cg (mkPartialSolverResult [] [])
+    let (zr, zonkErrs) = zonkAll "main" idResult cg (mkPartialSolverResult [] [])
     -- 少なくとも 1 つは ZonkErrorMissingTypeVar が出る
     any isMissingTypeVar zonkErrs `shouldBe` True
-    -- AST 自体は生成されている。stdlib モジュール群
-    -- ('primitive' + 'primitive.json' + 'primitive.record') が
-    -- 'Compile.identifyWithStdlib' により追加されるので、ユーザ "main"
-    -- とあわせて 4 つ。
-    Map.size zr.zonkedModules `shouldBe` 4
+    -- AST 自体は生成されている。zonkAll は per-module なので main
+    -- モジュール 1 つ分だけが zonk される。
+    Map.size zr.zonkedModules `shouldBe` 1
   where
     isMissingTypeVar = \case
       ZonkErrorMissingTypeVar _ _ -> True
