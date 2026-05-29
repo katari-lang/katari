@@ -20,6 +20,7 @@ import Data.Aeson.Encode.Pretty qualified as Pretty
 import Data.Aeson.Key qualified as AesonKey
 import Data.Aeson.KeyMap qualified as AesonKM
 import Data.ByteString.Lazy.Char8 qualified as LC8
+import Data.Char (isAsciiUpper)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Scientific qualified as Scientific
@@ -266,7 +267,7 @@ promptYesNo title defaultValue = do
   where
     trim = dropWhile (== ' ') . reverse . dropWhile (== ' ') . reverse
     toLowerAscii c
-      | c >= 'A' && c <= 'Z' = toEnum (fromEnum c + 32)
+      | isAsciiUpper c = toEnum (fromEnum c + 32)
       | otherwise = c
 
 promptForSchema :: [Text] -> Aeson.Value -> IO Aeson.Value

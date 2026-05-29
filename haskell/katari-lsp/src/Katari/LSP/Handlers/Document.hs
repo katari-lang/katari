@@ -14,6 +14,7 @@ import Control.Concurrent (forkIO, killThread, threadDelay)
 import Control.Concurrent.STM (atomically, modifyTVar', readTVar, readTVarIO)
 import Control.Lens ((^.))
 import Control.Monad.IO.Class (liftIO)
+import Data.Foldable (for_)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
@@ -35,7 +36,6 @@ import Katari.Project.Config qualified as Project
 import Katari.Project.Discovery qualified as Project
 import Katari.Project.Resolve qualified as Project
 import Katari.Query (buildOccurrenceIndex)
-import Katari.Query qualified as Query
 import Katari.SourceSpan (SourceSpan (..))
 import Language.LSP.Protocol.Lens qualified as L
 import Language.LSP.Protocol.Message qualified as LSP
@@ -212,9 +212,7 @@ scheduleRecompile st path = do
     prevTimer <- atomically $ do
       timers <- readTVar st.debounceTimers
       pure (Map.lookup target timers)
-    case prevTimer of
-      Just tid -> killThread tid
-      Nothing -> pure ()
+    for_ prevTimer killThread
     newTid <- forkIO $ do
       threadDelay debounceUs
       LSP.runLspT env (recompileNow st target)
@@ -236,8 +234,7 @@ recompileWorkspace st root = do
     Just ws -> do
       let input = snapshotWorkspaceSources ws
       result <- liftIO $ Compile.compile (\_ -> pure ()) input
-      let
-          fileTexts = wsFileTexts ws
+      let fileTexts = wsFileTexts ws
       liftIO $
         atomically $
           modifyTVar' st.workspaces $
@@ -256,9 +253,9 @@ recompileWorkspace st root = do
 recompileOrphan :: ServerState -> FilePath -> LSP.LspM () ()
 recompileOrphan st path = do
   files <- liftIO (readTVarIO st.orphanFiles)
-  case Map.lookup path files of
-    Just txt -> compileOneOrphan st path txt
-    Nothing -> pure ()
+  Data.Foldable.for_
+    (Map.lookup path files)
+    (compileOneOrphan st path)
 
 compileOneOrphan :: ServerState -> FilePath -> Text -> LSP.LspM () ()
 compileOneOrphan _st path txt = do
@@ -360,7 +357,7 @@ handleOne st (LSP.FileEvent uri changeType) =
           -- Re-load the workspace eagerly (if the toml still exists)
           -- and trigger a full recompile so diagnostics update.
           case changeType of
-            LSP.FileChangeType_Deleted -> do
+            LSP.FileChangeType_Deleted ->
               LSP.sendNotification LSP.SMethod_TextDocumentPublishDiagnostics $
                 LSP.PublishDiagnosticsParams uri Nothing []
             _ -> liftIO $ ensureWorkspaceLoaded st root

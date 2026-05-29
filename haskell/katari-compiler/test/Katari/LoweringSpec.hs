@@ -6,26 +6,25 @@
 module Katari.LoweringSpec (spec) where
 
 import Control.Exception (SomeException, try)
-import Data.List (find)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (isJust, listToMaybe)
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as Text
-import Katari.Id qualified as Id
-import Katari.TestSupport (ZonkResult (..), zonkAll)
-import Katari.TestSupport qualified as TestSupport
 import Katari.IR
+import Katari.Id qualified as Id
 import Katari.Lexer qualified as Lexer
 import Katari.Lowering (LowerContext (..), LoweringError (..), lowerModule, mergeModuleLowerings)
 import Katari.Parser qualified as Parser
 import Katari.Schema qualified as Schema
 import Katari.SemanticType (RequestVariableId (..), TypeVariableId (..))
+import Katari.TestSupport (IdentifierResult (..), ZonkResult (..), zonkAll)
+import Katari.TestSupport qualified as TestSupport
 import Katari.Typechecker.ConstraintGenerator (ConstraintGenResult (..), VariableSupply (..))
-import Katari.TestSupport (IdentifierResult (..))
 import Katari.Typechecker.NormalizedType (NormalizedType (..))
 import Katari.Typechecker.Solver (SolverResult (..))
 import Test.Hspec
+import Data.Either (lefts, rights)
 
 -- ===========================================================================
 -- Pipeline helper: source → IR
@@ -75,8 +74,8 @@ lowerSource src =
                           (Left internalDiag, _) -> Left internalDiag
                     | (moduleName, moduleAST) <- Map.toList zr.zonkedModules
                   ]
-                failures = [d | Left d <- allResults]
-                successes = [r | Right r <- allResults]
+                failures = lefts allResults
+                successes = rights allResults
             case failures of
               (d : _) -> fail ("lowering hit internal compiler error: " ++ show d)
               [] ->

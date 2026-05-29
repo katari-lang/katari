@@ -16,6 +16,7 @@ module Katari.Cli.Check
   )
 where
 
+import Control.Monad (when)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
@@ -59,9 +60,7 @@ run opts = do
   Cache.ensureCacheDirs (Cache.projectCachePaths root)
   CompileCache.saveDiskCache root (CompileCache.toDiskCache result.updatedCache)
   emitDiagnostics fileTexts result.diagnostics
-  if hasErrors result.diagnostics
-    then exitWith (ExitFailure 1)
-    else pure ()
+  when (hasErrors result.diagnostics) $ exitWith (ExitFailure 1)
 
 -- ---------------------------------------------------------------------------
 -- Helpers (shared with build)

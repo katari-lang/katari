@@ -22,8 +22,11 @@ agentSCCs moduleName moduleAST =
       edges =
         [ (qualifiedName, qualifiedName, Set.toList dependencies)
           | declaration <- declarations,
-            qualifiedName <- declarationQualifiedName moduleName declaration,
-            let dependencies = Set.intersection declSet (declarationDependencies moduleName declaration)
+            let dependencies =
+                  Set.intersection
+                    declSet
+                    (declarationDependencies moduleName declaration),
+            qualifiedName <- declarationQualifiedName moduleName declaration
         ]
       sccs = stronglyConnComp edges
    in map sccToSet sccs

@@ -6,11 +6,9 @@ import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Katari.AST
-import Katari.Id (LocalVarId (..), QualifiedName (..), VariableResolution (..))
+import Katari.Id (QualifiedName (..), VariableResolution (..))
 import Katari.Lexer qualified as Lexer
 import Katari.Parser qualified as Parser
-import Katari.TestSupport qualified as TestSupport
-import Katari.TestSupport (ZonkResult (..), zonkAll)
 import Katari.SemanticType
   ( RequestVariableId (..),
     Resolved,
@@ -19,11 +17,12 @@ import Katari.SemanticType
     SemanticType (..),
     TypeVariableId (..),
   )
+import Katari.TestSupport (IdentifierResult (..), ZonkResult (..), zonkAll)
+import Katari.TestSupport qualified as TestSupport
 import Katari.Typechecker.ConstraintGenerator
   ( ConstraintGenResult (..),
     VariableSupply (..),
   )
-import Katari.TestSupport (IdentifierResult (..))
 import Katari.Typechecker.Identifier
   ( RequestData,
     VariableData (..),

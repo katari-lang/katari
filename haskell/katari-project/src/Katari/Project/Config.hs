@@ -53,7 +53,7 @@ where
 
 import Control.Exception (IOException, try)
 import Data.Bifunctor (first)
-import Data.Char (isAlpha, isAlphaNum)
+import Data.Char (isAlpha, isAlphaNum, isAsciiLower, isAsciiUpper, isDigit)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe)
@@ -234,8 +234,7 @@ rawDependenciesCodec =
 -- ===========================================================================
 
 extractOverrides :: FilePath -> Toml.TOML -> Either ConfigError (Map Text RawOverride)
-extractOverrides path toml =
-  extractNestedTables "overrides" (decodeOverride path) toml
+extractOverrides path = extractNestedTables "overrides" (decodeOverride path)
 
 decodeOverride :: FilePath -> Text -> Toml.TOML -> Either ConfigError RawOverride
 decodeOverride path name sub =
@@ -387,8 +386,8 @@ isValidPackageName name
   where
     validChar c = isAlphaPackage c || isDigitPackage c || c == '_'
     validHead c = isAlphaPackage c || c == '_'
-    isAlphaPackage c = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
-    isDigitPackage c = c >= '0' && c <= '9'
+    isAlphaPackage c = isAsciiUpper c || isAsciiLower c
+    isDigitPackage = isDigit
 
 -- ===========================================================================
 -- Env interpolation
@@ -408,7 +407,6 @@ interpolateEnv input = go input mempty
            in if Text.null after
                 then pure (acc <> remaining)
                 else -- Check for escaped \${
-
                   if not (Text.null before) && Text.last before == '\\'
                     then case spanNameText (Text.drop 2 after) of
                       Just (name, rest) ->

@@ -33,6 +33,7 @@ import Data.Aeson qualified as Aeson
 import Data.Aeson.Key qualified as AesonKey
 import Data.Aeson.KeyMap qualified as AesonKM
 import Data.ByteString.Lazy qualified as LBS
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as TextEnc
@@ -170,7 +171,7 @@ cancelRun c runId = do
 
 listAgents :: ApiClient -> Text -> Maybe Text -> IO ([AgentDefinition], Text)
 listAgents c projectId snapshotId = do
-  let sid = maybe "latest" id snapshotId
+  let sid = fromMaybe "latest" snapshotId
   r :: ListAgentsResponse <-
     get c ("/project/" <> projectId <> "/snapshot/" <> sid <> "/agent")
   pure (r.agents, r.snapshotId)

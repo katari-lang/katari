@@ -17,6 +17,7 @@ import Data.Aeson qualified as Aeson
 import Data.Aeson.Encode.Pretty qualified as AesonPretty
 import Data.ByteString.Lazy qualified as LBS
 import Data.ByteString.Lazy.Char8 qualified as LC8
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Text.Encoding (decodeUtf8)
@@ -56,7 +57,7 @@ renderRunDetailed :: Api.RunRow -> Text
 renderRunDetailed row =
   Text.unlines
     [ "Run       " <> row.id,
-      "Name      " <> maybe "(unnamed)" id row.name,
+      "Name      " <> fromMaybe "(unnamed)" row.name,
       "Qname     " <> row.qualifiedName,
       "State     " <> renderState row.state,
       "Args      " <> renderJsonOneLine (Aeson.toJSON row.args),

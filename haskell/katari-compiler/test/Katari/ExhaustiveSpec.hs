@@ -16,9 +16,8 @@ import Katari.Diagnostic (Diagnostic (..))
 import Katari.Id (VariableResolution (..))
 import Katari.Lexer qualified as Lexer
 import Katari.Parser qualified as Parser
-import Katari.TestSupport (ZonkResult (..), zonkAll)
+import Katari.TestSupport (IdentifierResult (..), ZonkResult (..), zonkAll)
 import Katari.TestSupport qualified as TestSupport
-import Katari.TestSupport (IdentifierResult (..))
 import Katari.Typechecker.Exhaustive (ExhaustiveEnv (..), checkExhaustiveModule, toDiagnostic)
 import Katari.Typechecker.Solver (solve)
 import Test.Hspec (Spec, describe, it, shouldBe)

@@ -641,9 +641,7 @@ walkDataDecl :: DataDeclaration Identified -> CG (DataDeclaration Constrained)
 walkDataDecl DataDeclaration {annotation, name, typeName, constructorName, parameters, sourceSpan} = do
   tCtor <- variableTypeFromName name
   fields <- mapM elaborateDataParameter parameters
-  let returnType = case typeName.resolution of
-        Nothing -> SemanticTypeUnknown
-        Just qualifiedName -> SemanticTypeData qualifiedName
+  let returnType = maybe SemanticTypeUnknown SemanticTypeData typeName.resolution
       signature =
         SemanticTypeFunction
           (Map.fromList fields)
@@ -1820,9 +1818,7 @@ walkQualifiedReferenceExpr QualifiedReferenceExpression {moduleQualifier, target
 -- Unresolved references get a fresh type variable (Identifier already
 -- reported the original error).
 variableTypeFromName :: NameRef Identified VariableRef -> CG (SemanticType Unresolved)
-variableTypeFromName nameRef = case nameRef.resolution of
-  Nothing -> freshTypeVar
-  Just resolution -> lookupVariable resolution
+variableTypeFromName nameRef = maybe freshTypeVar lookupVariable nameRef.resolution
 
 -- | Type of a 'req' declaration's call-side, looked up via the request's
 -- 'QualifiedName' in the type environment. The request and its callable
@@ -1946,5 +1942,3 @@ walkDeclarationsForSCC sccQualifiedNames = go
     nameInSCC nameRef = case nameRef.resolution of
       Just (ResolvedTopLevel qualifiedName) -> Set.member qualifiedName sccQualifiedNames
       _ -> False
-
-

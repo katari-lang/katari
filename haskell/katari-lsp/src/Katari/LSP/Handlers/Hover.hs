@@ -51,7 +51,7 @@ mkHover lineVec h =
       LSP._range = Nothing
     }
   where
-    markup t = LSP.MarkupContent LSP.MarkupKind_Markdown t
+    markup = LSP.MarkupContent LSP.MarkupKind_Markdown
 
 -- | Render a hover as a fenced @katari@ Markdown block of the form
 -- @snippet : type@, followed by the qualified name (when present) on a
@@ -61,9 +61,7 @@ mkHover lineVec h =
 renderHover :: Vector Text -> Query.HoverInfo -> Text
 renderHover lineVec h =
   let snippet = sliceSpan lineVec h.hoverNameSpan
-      typeText = case h.hoverType of
-        Nothing -> ""
-        Just t -> renderSemanticType t
+      typeText = maybe "" renderSemanticType h.hoverType
       headerLine =
         if Text.null typeText
           then snippet

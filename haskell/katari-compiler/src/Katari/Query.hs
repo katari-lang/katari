@@ -760,8 +760,8 @@ collectDeclarationOccurrences declaration index = case declaration of
 
 collectBlockOccurrences :: Block Zonked -> OccurrenceIndex -> OccurrenceIndex
 collectBlockOccurrences block index =
-  let withStatements = foldr (collectStatementOccurrences) index block.statements
-   in maybe withStatements (\expression -> collectExpressionOccurrences expression withStatements) block.returnExpression
+  let withStatements = foldr collectStatementOccurrences index block.statements
+   in maybe withStatements (`collectExpressionOccurrences` withStatements) block.returnExpression
 
 collectStatementOccurrences :: Statement Zonked -> OccurrenceIndex -> OccurrenceIndex
 collectStatementOccurrences statement index = case statement of
@@ -776,11 +776,11 @@ collectStatementOccurrences statement index = case statement of
   StatementBreak breakStatement ->
     collectExpressionOccurrences breakStatement.value index
   StatementNext nextStatement ->
-    foldr (collectModifierOccurrences) (collectExpressionOccurrences nextStatement.value index) nextStatement.modifiers
+    foldr collectModifierOccurrences (collectExpressionOccurrences nextStatement.value index) nextStatement.modifiers
   StatementForBreak ForBreakStatement {value} ->
     collectExpressionOccurrences value index
   StatementForNext ForNextStatement {modifiers} ->
-    foldr (collectModifierOccurrences) index modifiers
+    foldr collectModifierOccurrences index modifiers
   _ -> index
 
 collectModifierOccurrences :: Modifier Zonked -> OccurrenceIndex -> OccurrenceIndex
@@ -805,7 +805,7 @@ collectExpressionOccurrences expression index = case expression of
       ie.condition
       ( collectBlockOccurrences
           ie.thenBlock
-          (maybe index (\block -> collectBlockOccurrences block index) ie.elseBlock)
+          (maybe index (`collectBlockOccurrences` index) ie.elseBlock)
       )
   ExpressionMatch me ->
     collectExpressionOccurrences
@@ -813,27 +813,27 @@ collectExpressionOccurrences expression index = case expression of
       (foldr (\caseArm -> collectBlockOccurrences caseArm.body) index me.cases)
   ExpressionFor fe ->
     let withInBindings = foldr (collectExpressionOccurrences . (.source)) index fe.inBindings
-        withVarBindings = foldr (collectForVarBindingOccurrences) withInBindings fe.varBindings
+        withVarBindings = foldr collectForVarBindingOccurrences withInBindings fe.varBindings
         withBody = collectBlockOccurrences fe.body withVarBindings
-     in maybe withBody (\thenBlock -> collectBlockOccurrences thenBlock withBody) fe.thenBlock
+     in maybe withBody (`collectBlockOccurrences` withBody) fe.thenBlock
   ExpressionBlock be ->
     collectBlockOccurrences be.block index
   ExpressionTuple te ->
-    foldr (collectExpressionOccurrences) index te.elements
+    foldr collectExpressionOccurrences index te.elements
   ExpressionArray ae ->
-    foldr (collectExpressionOccurrences) index ae.elements
+    foldr collectExpressionOccurrences index ae.elements
   ExpressionParTuple pte ->
-    foldr (collectExpressionOccurrences) index pte.elements
+    foldr collectExpressionOccurrences index pte.elements
   ExpressionParArray pae ->
-    foldr (collectExpressionOccurrences) index pae.elements
+    foldr collectExpressionOccurrences index pae.elements
   ExpressionFieldAccess fae ->
     collectExpressionOccurrences fae.object index
   ExpressionIndexAccess iae ->
     collectExpressionOccurrences iae.array (collectExpressionOccurrences iae.index index)
   ExpressionTemplate te ->
-    foldr (collectTemplateElementOccurrences) index te.elements
+    foldr collectTemplateElementOccurrences index te.elements
   ExpressionHandle he ->
-    let withState = foldr (collectStateVariableOccurrences) index he.stateVariables
+    let withState = foldr collectStateVariableOccurrences index he.stateVariables
         withHandlers = foldr (\handler -> collectBlockOccurrences handler.body) withState he.handlers
         withThen = maybe withHandlers (\(_, thenBlock) -> collectBlockOccurrences thenBlock withHandlers) he.thenClause
      in collectBlockOccurrences he.body withThen

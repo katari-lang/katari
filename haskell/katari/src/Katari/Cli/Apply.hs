@@ -7,10 +7,12 @@ module Katari.Cli.Apply
 where
 
 import Control.Exception (IOException, try)
+import Control.Monad (when)
 import Data.Aeson qualified as Aeson
 import Data.ByteString.Lazy.Char8 qualified as LC8
 import Data.List (isSuffixOf)
 import Data.Map.Strict qualified as Map
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Text.IO qualified as TextIO
@@ -108,9 +110,7 @@ run opts = do
   -- 2. Compile.
   result <- Compile.compile (TextIO.hPutStrLn stderr . Compile.renderCompileLog) Compile.CompileInput {Compile.sources = sources, Compile.cache = Map.empty}
   Check.emitDiagnostics fileTexts result.diagnostics
-  if hasErrors result.diagnostics
-    then exitWith (ExitFailure 1)
-    else pure ()
+  when (hasErrors result.diagnostics) $ exitWith (ExitFailure 1)
   irModule <- case result.irModule of
     Just ir -> pure ir
     Nothing -> dieInternal "compile produced no IR module despite clean diagnostics"
@@ -121,9 +121,10 @@ run opts = do
 
   -- 4. Talk to the runtime.
   let schemaJson = Common.schemaBundleJson result.schemaEntries
-      projectName = case opts.optProjectName of
-        Just n -> n
-        Nothing -> cfg.packageSection.packageName
+      projectName =
+        fromMaybe
+          cfg.packageSection.packageName
+          opts.optProjectName
   client <- Common.resolveApiClient "apply" opts.optApiUrl
   readme <- readSiblingReadme rootDir
   project <-

@@ -56,7 +56,7 @@ import Data.Aeson.Types qualified
 import Data.ByteString.Lazy qualified as LazyByteString
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (catMaybes, mapMaybe)
+import Data.Maybe (catMaybes, fromMaybe, mapMaybe)
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
@@ -172,7 +172,7 @@ instance FromJSON JsonSchema where
   parseJSON = withObject "JsonSchema" $ \obj -> do
     title <- obj .:? "title"
     description <- obj .:? "description"
-    examples <- maybe [] id <$> obj .:? "examples"
+    examples <- fromMaybe [] <$> obj .:? "examples"
     core <- parseJSON (Object obj)
     pure JsonSchema {core, title, description, examples}
 
@@ -258,7 +258,7 @@ instance FromJSON SchemaCore where
                   Just "number" -> pure SchemaCoreNumber
                   Just "string" -> do
                     mEnum <- obj .:? "enum"
-                    pure SchemaCoreString {schemaEnum = maybe [] id mEnum}
+                    pure SchemaCoreString {schemaEnum = fromMaybe [] mEnum}
                   Just "array" -> do
                     mItems <- obj .:? "items"
                     mPrefix <- obj .:? "prefixItems"
@@ -268,9 +268,9 @@ instance FromJSON SchemaCore where
                         Just i -> pure SchemaCoreArray {items = i}
                         Nothing -> pure SchemaCoreArray {items = plain SchemaCoreUnknown}
                   Just "object" -> do
-                    props <- maybe Map.empty id <$> obj .:? "properties"
+                    props <- fromMaybe Map.empty <$> obj .:? "properties"
                     req <- maybe Set.empty Set.fromList <$> obj .:? "required"
-                    addl <- maybe False id <$> obj .:? "additionalProperties"
+                    addl <- fromMaybe False <$> obj .:? "additionalProperties"
                     pure SchemaCoreObject {properties = props, required = req, additionalProperties = addl}
                   _ -> pure SchemaCoreUnknown
 
