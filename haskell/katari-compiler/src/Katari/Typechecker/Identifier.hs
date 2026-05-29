@@ -32,16 +32,15 @@ module Katari.Typechecker.Identifier
     toDiagnostic,
 
     -- * Per-module identification
-    scanExportNames,
-    declaredNames,
     ModuleIdentifyResult (..),
     IdentifierState (..),
     initialIdentifierState,
     identifyModule,
-    registerAllModules,
     runIdentifier,
     runIdentifierFrom,
-    emitImportCycleError,
+
+    -- * Import-cycle detection
+    importCycleErrors,
   )
 where
 
@@ -66,17 +65,16 @@ import Katari.Internal qualified as Internal
 import Katari.Prim (PrimRule)
 import Katari.Prim qualified as Prim
 import Katari.SourceSpan (HasSourceSpan (..), SourceSpan (..))
-import Katari.Typechecker.ImportGraph (findImportCycles, topologicalSort)
+import Katari.Typechecker.ImportGraph (findImportCycles)
 import Katari.Typechecker.ScopeIndex (ScopeFrame (..))
 
 -- ---------------------------------------------------------------------------
 -- Identified GADT
 --
--- Stable identifier types ('VariableId' / 'TypeId' / 'ModuleId') live in
--- 'Katari.Id' so that 'Katari.AST' and
--- 'Katari.Typechecker.SemanticType' can both depend on them without circular
--- imports. They are re-exported below for backward compatibility with
--- existing call sites.
+-- Top-level declarations are identified by 'QualifiedName' and local
+-- bindings by 'LocalVarId' (both wrapped in 'VariableResolution'). These
+-- live in 'Katari.Id' so that 'Katari.AST' and 'Katari.SemanticType' can
+-- both depend on them without a circular import.
 -- ---------------------------------------------------------------------------
 
 -- | Metadata carried by the AST after the Identifier pass.
@@ -799,15 +797,13 @@ emitImportCycleError moduleMap = \case
 -- ---------------------------------------------------------------------------
 
 -- ---------------------------------------------------------------------------
--- Phase A: assign ModuleIds
+-- Module registration
 -- ---------------------------------------------------------------------------
 
--- | Allocate a 'ModuleId' for each input module. The Identified AST is built
--- separately in Phase D and stored in the result, so no placeholder is needed
--- here. User-defined modules under the reserved @prim@ / @prim.*@ namespace
--- are flagged with 'ErrorReservedPrimitiveModule' (K0113); a 'ModuleId' is
--- still allocated so downstream phases can keep walking, but the prim
--- injection skips those modules.
+-- | Register each input module's 'ModuleData' (its file-level source span).
+-- User-defined modules under the reserved @prim@ / @prim.*@ namespace are
+-- flagged with 'ErrorReservedPrimitiveModule' (K0113) but still registered,
+-- so downstream phases can keep walking; the prim injection skips them.
 --
 -- @trustedStdlibNames@ holds module names that the compiler itself owns
 -- (see 'Katari.Stdlib'); K0113 is skipped for them.
@@ -1718,7 +1714,7 @@ resolveCallArgument CallArgument {label, value, sourceSpan} = do
 -- | Desugar a binary operator into a call to the matching root prim.
 -- @a \<op\> b@ becomes @add(lhs=a, rhs=b)@ (or whichever prim matches
 -- 'binaryOperatorPrimName'). The synthesised callee 'NameRef' carries
--- the prim's pre-allocated 'VariableId' so the constraint generator
+-- the prim's pre-allocated 'VariableResolution' so the constraint generator
 -- and lowering can dispatch as if the user wrote @add(...)@ directly.
 resolveBinaryOperatorAsCall ::
   BinaryOperatorExpression Parsed -> Identifier (Expression Identified)
@@ -1752,21 +1748,23 @@ resolveUnaryOperatorAsCall UnaryOperatorExpression {operator, operand, sourceSpa
           (sourceSpanOf operand').start
   pure (mkPrimCall primName metadata sourceSpan operatorSpan [("value", operand')])
 
--- | Look up a root prim's 'VariableId' from the preregistered map.
+-- | Look up a root prim's 'VariableResolution' from the preregistered map.
 -- Missing entries indicate a compiler bug (every operator name in
 -- 'Prim.binaryOperatorPrimName' / 'Prim.unaryOperatorPrimName' must be
 -- present in 'Prim.primDefinitions') and are surfaced as a K9999.
 lookupPrimVariable :: Text -> Identifier (NameRefResolution Identified VariableRef)
-lookupPrimVariable primName = do
-  let qualifiedName = QualifiedName {module_ = "primitive", name = primName}
-  vars <- gets (.variables)
-  case Map.lookup qualifiedName vars of
-    Just _ -> pure (Just (ResolvedTopLevel qualifiedName))
+lookupPrimVariable primName =
+  -- Operator desugaring runs inside the module body, where the root prims
+  -- have been flat-injected into the top-level scope. Resolve through the
+  -- scope (not a global variable registry) so per-module identification
+  -- sees the prim even though it lives in another module's variable map.
+  lookupVariable primName >>= \case
+    Just resolution -> pure (Just resolution)
     Nothing -> do
       emitError $
         ErrorInternal $
           Internal.internalErrorNoSpan
-            ("Identifier: prim '" <> primName <> "' missing from registry (compiler bug)")
+            ("Identifier: prim '" <> primName <> "' not in scope (compiler bug)")
       pure Nothing
 
 -- | Build a synthesised 'ExpressionCall' targeting a root prim.
@@ -2135,46 +2133,13 @@ resolveModuleQualifiedChain moduleName moduleRef labels totalSpan =
       pure (rebuildFieldAccessChain qualifiedReference remainingLabels)
 
 -- ---------------------------------------------------------------------------
--- Export name scanning (lightweight pre-pass)
--- ---------------------------------------------------------------------------
-
--- | Scan a module's declarations to extract the names it exports.
--- No IDs are allocated; this is a fast pre-pass for import validation.
-scanExportNames :: Module Parsed -> Set Text
-scanExportNames parsedModule =
-  Set.fromList
-    [ name
-      | declaration <- parsedModule.declarations,
-        name <- declaredNames declaration
-    ]
-
--- | Extract the bare name(s) declared by a single declaration.
--- Import declarations and error sentinels declare no names.
-declaredNames :: Declaration Parsed -> [Text]
-declaredNames = \case
-  DeclarationAgent declaration -> [declaration.name.text]
-  DeclarationRequest declaration -> [declaration.name.text]
-  DeclarationExternalAgent declaration -> [declaration.name.text]
-  DeclarationPrimAgent declaration -> [declaration.name.text]
-  DeclarationData declaration -> [declaration.name.text]
-  DeclarationTypeSynonym declaration -> [declaration.name.text]
-  DeclarationImport _ -> []
-  DeclarationError _ -> []
-
--- ---------------------------------------------------------------------------
 -- Per-module identification
 -- ---------------------------------------------------------------------------
 
--- | Result of identifying a single module. Contains the identified AST, the
--- full export table (with resolved IDs), and the accumulated identifier
--- state (including all counters, variable/type/request/constructor maps,
--- errors, and scope frames). The caller threads the state forward to the
--- next module to keep IDs monotonically unique.
--- | Result of identifying one module. The per-module @module*@ maps
--- ('moduleVariables' / 'moduleTypes' / ...) hold only entries owned by
--- @currentModuleName@ — they are extracted from the accumulated
--- 'IdentifierState' so the caller can assemble cross-module views
--- (e.g. 'Katari.Query.QuerySnapshot') without re-filtering.
+-- | Result of identifying one module independently. Because identification
+-- runs from a fresh state, every @module*@ map holds only entries owned by
+-- this module; the caller unions them across modules to build cross-module
+-- views (e.g. 'Katari.Query.QuerySnapshot') without re-filtering.
 data ModuleIdentifyResult = ModuleIdentifyResult
   { identifiedAST :: Module Identified,
     moduleData :: ModuleData,
@@ -2185,45 +2150,50 @@ data ModuleIdentifyResult = ModuleIdentifyResult
     moduleExportTable :: Map Text SymbolEntry,
     moduleTopLevel :: Map Text SymbolEntry,
     moduleScopeFrames :: [ScopeFrame SymbolEntry],
-    moduleNewErrors :: [IdentifierError],
-    moduleState :: IdentifierState
+    moduleNewErrors :: [IdentifierError]
   }
 
--- | Identify a single module independently. Runs Phases A (module ID
--- assignment for this module only), B (export table build), C (top-level
--- scope build from own exports + imports + prim injection), and D (name
--- resolution in the module body).
+-- | Identify a single module independently, from a fresh 'IdentifierState'
+-- (the local-variable counter starts at 0). Runs the reserved-namespace
+-- check (K0113), builds the export table, builds the top-level scope (own
+-- exports + imports + prim injection), and resolves names in the body.
 --
--- The caller must supply:
+-- The caller supplies:
 --
---   * @allExportNames@ — every module's export names (from 'scanExportNames'),
---     used for import validation (does the target module export this name?).
---   * @processedExportTables@ — full export tables of already-identified
---     modules (keyed by module name). Used for qualified name resolution and
---     import resolution in Phase C/D.
---   * @allModuleIds@ — module name to 'ModuleId' for every module. The caller
---     must pre-allocate these (Phase A) before calling 'identifyModule'.
---   * @inputState@ — the 'IdentifierState' to start from. The caller threads
---     this forward across sequential module identifications.
+--   * @allModuleData@ — every module's 'ModuleData' (file span), so a
+--     duplicate-name clash against an imported module name can cite its span.
+--   * @depExportTables@ — export tables of the modules this one depends on
+--     (its imports + the @primitive@ root); the module's own exports are
+--     added internally for qualified self-references.
+--   * @allModuleNames@ — every module name, for import-existence validation.
+--   * @trustedStdlibNames@ — compiler-owned modules exempt from K0113.
+--
+-- Because the state is fresh, every entry in the returned maps belongs to
+-- this module, so no cross-module filtering is needed.
 identifyModule ::
-  Map Text (Set Text) ->
+  Map Text ModuleData ->
   Map Text (Map Text SymbolEntry) ->
   Set Text ->
-  IdentifierState ->
+  Set Text ->
   Text ->
   Module Parsed ->
   ModuleIdentifyResult
-identifyModule _allExportNames processedExportTables allModuleNames inputState currentModuleName parsedModule =
+identifyModule allModuleData depExportTables allModuleNames trustedStdlibNames currentModuleName parsedModule =
   let ((identifiedModuleAST, exportTable, topLevelTable), finalState) =
-        runIdentifierFrom inputState $ do
+        runIdentifierFrom (initialIdentifierState {modules = allModuleData}) $ do
+          -- Reserved @prim@ / @prim.*@ namespace check (K0113), own module only.
+          when
+            ( Prim.isPrimReservedModuleName currentModuleName
+                && not (Set.member currentModuleName trustedStdlibNames)
+            )
+            $ emitError (ErrorReservedPrimitiveModule parsedModule.sourceSpan currentModuleName)
           -- Phase B: build export table for this module.
           thisExportTable <- buildModuleExports currentModuleName parsedModule
           -- Phase C: build top-level scope (own exports + imports + prim injection).
-          thisTopLevel <- buildModuleTopLevel allModuleNames processedExportTables currentModuleName parsedModule thisExportTable
-          -- Phase D: resolve names in the module body.
-          -- Include the current module's own exports alongside already-processed
-          -- modules so that qualified self-references work.
-          let allExportsWithSelf = Map.insert currentModuleName thisExportTable processedExportTables
+          thisTopLevel <- buildModuleTopLevel allModuleNames depExportTables currentModuleName parsedModule thisExportTable
+          -- Phase D: resolve names in the body. The module's own exports are
+          -- visible alongside its dependencies (qualified self-references).
+          let allExportsWithSelf = Map.insert currentModuleName thisExportTable depExportTables
               context =
                 ResolveContext
                   { scopeStack = [thisTopLevel],
@@ -2231,52 +2201,25 @@ identifyModule _allExportNames processedExportTables allModuleNames inputState c
                   }
           identifiedAST' <- withResolveContext context (resolveModuleAST parsedModule)
           pure (identifiedAST', thisExportTable, thisTopLevel)
-
-      ownedQName :: QualifiedName -> Bool
-      ownedQName qualifiedName = qualifiedName.module_ == currentModuleName
-
-      ownedVariables = Map.filterWithKey (\qname _ -> ownedQName qname) finalState.variables
-      ownedTypes = Map.filterWithKey (\qname _ -> ownedQName qname) finalState.types
-      ownedRequests = Map.filterWithKey (\qname _ -> ownedQName qname) finalState.requests
-      ownedConstructors = Map.filterWithKey (\qname _ -> ownedQName qname) finalState.constructors
-      moduleDataValue =
-        Map.findWithDefault
-          (ModuleData {moduleSourceSpan = parsedModule.sourceSpan})
-          currentModuleName
-          finalState.modules
-
-      -- Frames captured during this module's resolution: delta against
-      -- the input state.
-      previousFrames = inputState.capturedScopeFrames
-      previousFrameCount = length previousFrames
-      newFrames =
-        take
-          (length finalState.capturedScopeFrames - previousFrameCount)
-          finalState.capturedScopeFrames
       moduleFrames =
         [ ScopeFrame {frameSpan = sp, frameSymbols = sym}
-          | (sp, sym) <- newFrames
+          | (sp, sym) <- finalState.capturedScopeFrames
         ]
-
-      previousErrorCount = length inputState.errors
-      newErrors =
-        reverse
-          ( take
-              (length finalState.errors - previousErrorCount)
-              finalState.errors
-          )
    in ModuleIdentifyResult
         { identifiedAST = identifiedModuleAST,
-          moduleData = moduleDataValue,
-          moduleVariables = ownedVariables,
-          moduleTypes = ownedTypes,
-          moduleRequests = ownedRequests,
-          moduleConstructors = ownedConstructors,
+          moduleData =
+            Map.findWithDefault
+              (ModuleData {moduleSourceSpan = parsedModule.sourceSpan})
+              currentModuleName
+              allModuleData,
+          moduleVariables = finalState.variables,
+          moduleTypes = finalState.types,
+          moduleRequests = finalState.requests,
+          moduleConstructors = finalState.constructors,
           moduleExportTable = exportTable,
           moduleTopLevel = topLevelTable,
           moduleScopeFrames = moduleFrames,
-          moduleNewErrors = newErrors,
-          moduleState = finalState
+          moduleNewErrors = reverse finalState.errors
         }
   where
     -- Phase B for a single module: walk declarations and build the export table.
@@ -2535,4 +2478,18 @@ identifyModule _allExportNames processedExportTables allModuleNames inputState c
                 pure table
               Just qualifiedName ->
                 insertSymbolEntry importPos item.name (singletonType qualifiedName) table
+
+-- ---------------------------------------------------------------------------
+-- Import-cycle detection
+-- ---------------------------------------------------------------------------
+
+-- | Report an 'ErrorImportCycle' for each cycle in the import graph. The
+-- diagnostic span is taken from the first module in the cycle.
+importCycleErrors :: Map Text (Module Parsed) -> [IdentifierError]
+importCycleErrors moduleMap =
+  [ ErrorImportCycle module_.sourceSpan cycle_
+  | cycle_ <- findImportCycles moduleMap,
+    firstName : _ <- [cycle_],
+    Just module_ <- [Map.lookup firstName moduleMap]
+  ]
 

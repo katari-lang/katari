@@ -504,13 +504,8 @@ elaborateOptionalRequests = traverse elaborateRequestList
 -- ===========================================================================
 
 -- ---------------------------------------------------------------------------
--- Module / declaration
+-- Declaration
 -- ---------------------------------------------------------------------------
-
-walkModule :: Module Identified -> CG (Module Constrained)
-walkModule Module {declarations, sourceSpan} = do
-  declarations' <- mapM walkDeclaration declarations
-  pure Module {declarations = declarations', sourceSpan = sourceSpan}
 
 walkDeclaration :: Declaration Identified -> CG (Declaration Constrained)
 walkDeclaration = \case

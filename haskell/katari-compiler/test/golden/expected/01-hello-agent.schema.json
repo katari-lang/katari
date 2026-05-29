@@ -615,43 +615,6 @@
     "requests": []
   },
   {
-    "description": "Look up a secret env entry by key. The result is the disjoint `secret` type and never leaks into `print` / `to_string`. Raises `env_not_found` if the key is missing.",
-    "input": {
-      "additionalProperties": false,
-      "properties": {
-        "key": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "key"
-      ],
-      "type": "object"
-    },
-    "name": "primitive.get_secret_env",
-    "output": {},
-    "requests": [
-      {
-        "input": {
-          "additionalProperties": false,
-          "properties": {
-            "env_key": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "env_key"
-          ],
-          "type": "object"
-        },
-        "name": "primitive.env_not_found",
-        "output": {
-          "not": {}
-        }
-      }
-    ]
-  },
-  {
     "description": "Greater than.",
     "input": {
       "additionalProperties": false,

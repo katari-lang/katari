@@ -1,8 +1,8 @@
--- | Test-local helpers. The library itself only exposes per-module step
--- functions (@identifyModule@, @generateConstraintsForSCC@, @zonk@) and
--- the IO entry point @compile@. This module re-creates the legacy
--- whole-program aggregation expected by older phase-specific tests by
--- driving the per-module APIs directly.
+-- | Test-local helpers. The library exposes the per-module step functions
+-- (@identifyModule@, @generateConstraintsForSCC@, @zonk@), the whole-program
+-- @identifyProgram@, and the IO entry point @compile@. This module adds the
+-- legacy aggregated shapes that older phase-specific tests expect by driving
+-- the real APIs directly — no duplicated orchestration.
 module Katari.TestSupport
   ( -- * compile sugar
     compileSync,
@@ -28,28 +28,26 @@ module Katari.TestSupport
   )
 where
 
-import Data.Foldable (foldl', for_)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text, unpack)
 import Data.Text qualified as Text
-import Katari.AST
-  ( Module (..),
-    Phase (Identified, Parsed, Zonked),
-  )
+import Katari.AST (Module (..), Phase (Identified, Parsed, Zonked))
 import Katari.Compile
   ( CompileInput (..),
     CompileResult,
+    IdentifyResult (..),
     SourceEntry (..),
     compile,
+    identifyProgram,
   )
 import Katari.Id (QualifiedName (..), VariableResolution (..))
-import Katari.SourceSpan (emptySourceSpan)
 import Katari.Lexer qualified as Lexer
 import Katari.Parser qualified as Parser
 import Katari.SemanticType (Resolved, SemanticType)
+import Katari.SourceSpan (emptySourceSpan)
 import Katari.Stdlib qualified as Stdlib
 import Katari.Typechecker.ConstraintGenerator
   ( ConstraintError,
@@ -60,23 +58,13 @@ import Katari.Typechecker.ConstraintGenerator
 import Katari.Typechecker.Identifier
   ( ConstructorData,
     IdentifierError,
-    IdentifierState (..),
     ModuleData,
-    ModuleIdentifyResult (..),
     RequestData,
     SymbolEntry,
     TypeData,
     VariableData (..),
-    emitImportCycleError,
-    identifyModule,
-    registerAllModules,
-    runIdentifier,
-    runIdentifierFrom,
-    scanExportNames,
   )
-import Katari.Typechecker.ScopeIndex (ScopeIndex)
-import Katari.Typechecker.ImportGraph (findImportCycles, topologicalSort)
-import Katari.Typechecker.ScopeIndex (ScopeFrame (..), buildScopeIndex)
+import Katari.Typechecker.ScopeIndex (ScopeIndex, buildScopeIndex)
 import Katari.Typechecker.Solver (SolverResult)
 import Katari.Typechecker.Zonker (ModuleZonkResult (..), ZonkError, zonk)
 import System.IO.Unsafe (unsafePerformIO)
@@ -91,10 +79,7 @@ compileSync input = unsafePerformIO (compile (const (pure ())) input)
 singleSourceInput :: Text -> CompileInput
 singleSourceInput src =
   CompileInput
-    { sources =
-        Map.singleton
-          "main"
-          SourceEntry {filePath = "main", sourceText = src},
+    { sources = Map.singleton "main" SourceEntry {filePath = "main", sourceText = src},
       cache = Map.empty
     }
 
@@ -134,11 +119,9 @@ parseModule path src =
 -- Identifier aggregation
 -- ===========================================================================
 
--- | Test-local replica of the legacy aggregated @IdentifierResult@. The
--- library itself no longer exposes this whole-program view (it ships
--- per-module results via 'ModuleIdentifyResult'); the test suite still
--- finds the aggregated shape convenient, so we rebuild it here from
--- per-module data inside 'identifyAll'.
+-- | Test-local replica of the legacy aggregated identifier view. The library
+-- ships per-module results; tests still find the aggregated shape convenient,
+-- so we reshape 'identifyProgram''s output here.
 data IdentifierResult = IdentifierResult
   { identifiedModules :: Map Text ModuleData,
     identifiedVariables :: Map QualifiedName VariableData,
@@ -152,108 +135,29 @@ data IdentifierResult = IdentifierResult
   }
   deriving (Show)
 
-type IdentifyAccum =
-  ( Map Text (Module Identified),
-    Map Text (Map Text SymbolEntry),
-    Map Text (Map Text SymbolEntry),
-    [ScopeFrame SymbolEntry],
-    IdentifierState
-  )
-
--- | Run the identifier across every module in topological order. Mirrors
--- the orchestration buried inside 'Katari.Compile.compile' (without
--- cache support); duplicated here so the test suite can exercise
--- identifier output without going through the IO entry point.
-identifyAll ::
-  Set Text ->
-  Map Text (Module Parsed) ->
-  (IdentifierResult, [IdentifierError])
+-- | Run the whole-program identifier and reshape its output into the legacy
+-- 'IdentifierResult'. Delegates to the real 'identifyProgram' — this is the
+-- exact orchestration the compiler uses, so tests exercise the production
+-- path rather than a duplicate.
+identifyAll :: Set Text -> Map Text (Module Parsed) -> (IdentifierResult, [IdentifierError])
 identifyAll trustedStdlibNames moduleMap =
-  let ((), cycleState) =
-        runIdentifier $
-          for_ (findImportCycles moduleMap) (emitImportCycleError moduleMap)
-
-      ((), phaseAState) =
-        runIdentifierFrom cycleState $
-          registerAllModules trustedStdlibNames moduleMap
-
-      allModuleNames = Map.keysSet moduleMap
-      allExportNames = Map.map scanExportNames moduleMap
-
-      stepFresh :: IdentifyAccum -> Text -> IdentifyAccum
-      stepFresh (asts, exports, topLevels, frames, state) moduleName =
-        case Map.lookup moduleName moduleMap of
-          Nothing -> (asts, exports, topLevels, frames, state)
-          Just parsedModule ->
-            let moduleResult =
-                  identifyModule
-                    allExportNames
-                    exports
-                    allModuleNames
-                    state
-                    moduleName
-                    parsedModule
-             in ( Map.insert moduleName moduleResult.identifiedAST asts,
-                  Map.insert moduleName moduleResult.moduleExportTable exports,
-                  Map.insert moduleName moduleResult.moduleTopLevel topLevels,
-                  frames <> moduleResult.moduleScopeFrames,
-                  moduleResult.moduleState
-                )
-
-      stdlibModuleNames =
-        [ moduleName
-          | moduleName <- Map.keys moduleMap,
-            Set.member moduleName trustedStdlibNames
-        ]
-      sortedStdlibNames =
-        filter (== "primitive") stdlibModuleNames
-          ++ filter (/= "primitive") stdlibModuleNames
-      initialAccum = (Map.empty, Map.empty, Map.empty, [], phaseAState)
-      (stdlibASTs, stdlibExports, stdlibTopLevels, stdlibFrames, stdlibState) =
-        foldl' stepFresh initialAccum sortedStdlibNames
-
-      userModuleMap =
-        Map.filterWithKey
-          (\moduleName _ -> not (Set.member moduleName trustedStdlibNames))
-          moduleMap
-      levels = topologicalSort userModuleMap
-      (acyclicASTs, acyclicExports, acyclicTopLevels, acyclicFrames, acyclicState) =
-        foldl'
-          (\accumulator level -> foldl' stepFresh accumulator (Set.toList level))
-          (stdlibASTs, stdlibExports, stdlibTopLevels, stdlibFrames, stdlibState)
-          levels
-
-      processedModuleNames = Map.keysSet acyclicASTs
-      remainingModuleNames =
-        [ moduleName
-          | moduleName <- Map.keys moduleMap,
-            not (Set.member moduleName processedModuleNames)
-        ]
-      (allASTs, allExports, allTopLevels, allFrames, finalState) =
-        foldl'
-          stepFresh
-          (acyclicASTs, acyclicExports, acyclicTopLevels, acyclicFrames, acyclicState)
-          remainingModuleNames
-
+  let idResult = identifyProgram trustedStdlibNames moduleMap
       result =
         IdentifierResult
-          { identifiedModules = finalState.modules,
-            identifiedVariables = finalState.variables,
-            identifiedTypes = finalState.types,
-            identifiedRequests = finalState.requests,
-            identifiedConstructors = finalState.constructors,
-            moduleASTs = allASTs,
-            scopeIndex = buildScopeIndex allFrames,
-            moduleVisibleSymbols = allTopLevels,
-            moduleExports = allExports
+          { identifiedModules = idResult.modules,
+            identifiedVariables = idResult.variables,
+            identifiedTypes = idResult.types,
+            identifiedRequests = idResult.requests,
+            identifiedConstructors = idResult.constructors,
+            moduleASTs = idResult.asts,
+            scopeIndex = buildScopeIndex idResult.scopeFrames,
+            moduleVisibleSymbols = idResult.topLevelTables,
+            moduleExports = idResult.exportTables
           }
-   in (result, reverse finalState.errors)
+   in (result, idResult.errors)
 
--- | Convenience wrapper: union the user-supplied modules with the parsed
--- stdlib and run 'identifyAll'.
-identifyWithStdlib ::
-  Map Text (Module Parsed) ->
-  (IdentifierResult, [IdentifierError])
+-- | Union the user-supplied modules with the parsed stdlib and run 'identifyAll'.
+identifyWithStdlib :: Map Text (Module Parsed) -> (IdentifierResult, [IdentifierError])
 identifyWithStdlib userMods =
   identifyAll Stdlib.stdlibModuleNames (Map.union userMods parsedStdlibModules)
 
@@ -262,9 +166,7 @@ identifyWithStdlib userMods =
 -- ===========================================================================
 
 -- | Run constraint generation over @moduleName@ treating every top-level
--- qname declared in that module as a single SCC. Enough for single-module
--- pipeline tests; multi-module tests typically only care about the user
--- module being focused on.
+-- qname it declares as a single SCC. Enough for single-module pipeline tests.
 generateConstraintsForModule ::
   Text ->
   IdentifierResult ->
@@ -291,10 +193,8 @@ generateConstraintsForModule moduleName idResult =
         knownRequests
         primRules
 
--- | Constraint-gen over every user-defined module (i.e. anything not
--- in 'Stdlib.stdlibModuleNames'), merging the per-module results into
--- one whole-program-shaped 'ConstraintGenResult'. Used by phase-level
--- tests that want to assert against the legacy whole-program shape.
+-- | Constraint-gen over every user-defined module, merged into one
+-- whole-program-shaped 'ConstraintGenResult' for phase-level tests.
 generateConstraintsAll ::
   IdentifierResult ->
   (ConstraintGenResult, [ConstraintError])
@@ -313,8 +213,7 @@ generateConstraintsAll idResult =
         [] -> emptySourceSpan
       mergedErrors = concatMap snd perModule
       finalSupply = case perModule of
-        [] ->
-          VariableSupply {typeVarSupply = 0, requestVarSupply = 0}
+        [] -> VariableSupply {typeVarSupply = 0, requestVarSupply = 0}
         ((firstResult, _) : _) -> firstResult.variableSupply
       result =
         ConstraintGenResult
@@ -338,8 +237,8 @@ data ZonkResult = ZonkResult
   }
   deriving (Show)
 
--- | Run the per-module zonker for @moduleName@ and wrap the result in
--- the legacy 'ZonkResult' shape with a single-entry map.
+-- | Run the per-module zonker for @moduleName@ and wrap the result in the
+-- legacy 'ZonkResult' shape with a single-entry map.
 zonkAll ::
   Text ->
   IdentifierResult ->

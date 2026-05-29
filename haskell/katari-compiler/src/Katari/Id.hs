@@ -16,10 +16,6 @@ module Katari.Id
     VariableResolution (..),
     LocalVarId (..),
 
-    -- * Legacy ID types (being phased out — use QualifiedName for top-level)
-    VariableId (..),
-    ModuleId (..),
-
     -- * Re-exports from Common
     QualifiedName (..),
     renderQualifiedName,
@@ -42,15 +38,4 @@ data VariableResolution
 -- local bindings (let, parameters, for variables). The counter starts at 0
 -- for each module independently — no global state is needed.
 newtype LocalVarId = LocalVarId Int
-  deriving (Eq, Ord, Show)
-
--- | Unique id in the value namespace (legacy — being replaced by
--- 'VariableResolution'). Still used internally by some phases during the
--- transition.
-newtype VariableId = VariableId Int
-  deriving (Eq, Ord, Show)
-
--- | Unique id in the module namespace (legacy — being replaced by
--- 'ModuleName' / 'Text').
-newtype ModuleId = ModuleId Int
   deriving (Eq, Ord, Show)

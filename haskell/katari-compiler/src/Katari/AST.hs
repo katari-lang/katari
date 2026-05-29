@@ -69,10 +69,10 @@ type data Phase where
   -- resolution metadata as 'Identified', but expression / pattern nodes
   -- also carry semantic type information (see 'ExpressionType' / 'PatternType').
   Constrained :: Phase
-  -- | Zoning complete: same shape as 'Constrained', but all identifiers are
-  -- replaced with their final IR ids (e.g. 'VariableId'), and all type
-  -- information is fully elaborated (no remaining references to AST-level
-  -- types).
+  -- | Zonking complete: same name resolution as 'Constrained' (still
+  -- 'VariableResolution' / 'QualifiedName'), but every expression / pattern's
+  -- @typeOf@ is now a fully-resolved 'SemanticType' with no remaining
+  -- unification variables. IR-level ids are assigned later, by Lowering.
   Zonked :: Phase
 
 -- | NameRef resolution metadata for a given phase + symbol kind. After
@@ -311,9 +311,9 @@ instance HasSourceSpan (PrimAgentDeclaration phase) where
 -- type namespace (data type). The Parser produces both from the same
 -- identifier token (sharing text and sourceSpan), and the Identifier phase
 -- resolves each independently, filling the resolution with a kind-specific
--- id (VariableId / TypeId). Later phases (ConstraintGenerator onward) can
--- read the TypeId directly from the AST, so no name-text cross lookup is
--- needed.
+-- id ('VariableResolution' for the value side, 'QualifiedName' for the type
+-- side). Later phases (ConstraintGenerator onward) read these directly from
+-- the AST, so no name-text cross lookup is needed.
 data DataDeclaration (phase :: Phase) = DataDeclaration
   { annotation :: Maybe Text,
     name :: NameRef phase VariableRef,

@@ -1,15 +1,22 @@
--- | Pure orchestration entry point for the Katari compiler.
+-- | Orchestration entry point for the Katari compiler.
 --
--- Each phase exposes a per-module function; this module calls them in
--- the right order and manages the incremental cache.
+-- Each phase exposes a per-module function; this module sequences them:
 --
 -- @
--- parseSources (parallel, cache-miss only)
---   → identify (per module, topological order)
---   → typecheck (per module, SCC per module, parallel within topo level)
---   → lower (per module, fully parallel)
---   → schema (per module, fully parallel)
+-- parseSources           (all modules, parallel)
+--   → identifyProgram       (all modules, dependency order, fresh per-module state)
+--   → typecheckModulesAsync (all modules, Async by dependency order)
+--   → exhaustiveness        (all modules)
+--   → lowering / schema     (only invalidated modules recompute; the rest
+--                            are restored from 'ModuleCache')
 -- @
+--
+-- The incremental cache covers only the heavy back end (lowering + schema).
+-- The front end (parse / identify / typecheck) is cheap and runs every time,
+-- so a module's diagnostics and hover/type info are always current. A
+-- module's lowering/schema is reused from cache only when it is /valid/: its
+-- own source is unchanged AND none of its transitive import dependencies
+-- changed (so its zonked AST — hence its IR — is guaranteed identical).
 module Katari.Compile
   ( -- * Inputs / outputs
     ModuleName,
@@ -22,17 +29,22 @@ module Katari.Compile
 
     -- * Entry
     compile,
+
+    -- * Identify orchestration (exposed for the test suite)
+    IdentifyResult (..),
+    identifyProgram,
   )
 where
 
 import Control.Concurrent.Async (Async, async, wait)
 import Control.Parallel.Strategies (parMap, rseq)
-import Data.Foldable (foldl', for_)
+import Data.Foldable (for_)
 import Data.Hashable (hash)
 import Data.IORef (modifyIORef', newIORef, readIORef)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (mapMaybe)
+import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as Text
@@ -46,15 +58,14 @@ import Katari.Diagnostic (Diagnostic, hasErrors)
 import Katari.IR qualified
 import Katari.Id (QualifiedName (..), VariableResolution (..))
 import Katari.Lexer qualified as Lexer
-import Katari.Lowering (ModuleLoweringResult (..), lowerModule, mergeModuleLowerings)
+import Katari.Lowering (ModuleLoweringResult, lowerModule, mergeModuleLowerings)
 import Katari.Lowering qualified as Lowering
 import Katari.Parser qualified as Parser
 import Katari.Prim (PrimRule)
 import Katari.Query qualified as Query
 import Katari.Schema
-  ( DataDefs,
-    SchemaContext (..),
-    SchemaEntry (..),
+  ( SchemaContext (..),
+    SchemaEntry,
     buildDataDefs,
     buildModuleSchemas,
     collectDataAnnotations,
@@ -66,19 +77,19 @@ import Katari.Typechecker (ModuleTypecheckResult (..), TypecheckSubject (..), ty
 import Katari.Typechecker.Exhaustive (ExhaustiveEnv (..), checkExhaustiveModule)
 import Katari.Typechecker.Exhaustive qualified as Exhaustive
 import Katari.Typechecker.Identifier
-  ( ConstructorData (..),
-    IdentifierState (..),
+  ( ConstructorData,
     ModuleData (..),
-    ModuleIdentifyResult (..),
-    RequestData (..),
-    SymbolEntry (..),
-    TypeData (..),
+    RequestData,
+    SymbolEntry,
+    TypeData,
     VariableData (..),
+    identifyModule,
+    importCycleErrors,
   )
 import Katari.Typechecker.Identifier qualified as Identifier
-import Katari.Typechecker.ImportGraph (findImportCycles, importModuleName, topologicalSort)
+import Katari.Typechecker.ImportGraph (importModuleName, topologicalSort)
 import Katari.Typechecker.ModuleInterface (ModuleInterface (..))
-import Katari.Typechecker.ScopeIndex (ScopeFrame (..), ScopeIndex, buildScopeIndex)
+import Katari.Typechecker.ScopeIndex (ScopeFrame (..), buildScopeIndex)
 
 -- ===========================================================================
 -- Input / output
@@ -98,36 +109,15 @@ data CompileInput = CompileInput
   }
   deriving (Show)
 
--- | Per-module compilation cache. Stores just enough to (a) skip the
--- module's own compile on a cache hit and (b) let downstream modules
--- typecheck, lower, and schema-generate against this module without
--- re-parsing or re-identifying it.
---
--- Notably absent: full Identified / Zonked ASTs. The query layer can't
--- answer hover / references queries on cache-hit modules until they're
--- recompiled (e.g. on next file change).
+-- | Per-module back-end cache. Holds only the lowering / schema outputs (the
+-- expensive artefacts); identify / typecheck always rerun, so nothing from
+-- the front end is stored. A cached entry is reused for a module only when
+-- that module is /valid/ (source + transitive deps unchanged).
 data ModuleCache = ModuleCache
   { cacheSourceHash :: Int,
-    -- | Imports of the original module, used to rebuild the import
-    -- skeleton needed for the dependency graph.
-    cacheImports :: [ImportDeclaration],
-    -- For downstream identify:
-    cacheModuleData :: ModuleData,
-    cacheModuleExports :: Map Text SymbolEntry,
-    cacheModuleTopLevel :: Map Text SymbolEntry,
-    cacheIdentifierVariables :: Map QualifiedName VariableData,
-    cacheIdentifierTypes :: Map QualifiedName TypeData,
-    cacheIdentifierRequests :: Map QualifiedName RequestData,
-    cacheIdentifierConstructors :: Map QualifiedName ConstructorData,
-    -- For downstream typecheck:
-    cacheInterface :: ModuleInterface,
-    -- For downstream lower/schema's DataDefs construction:
-    cacheDataAnnotations :: Map QualifiedName (Map Text (Maybe Text)),
-    -- For the final bundle:
     cacheLoweringResult :: ModuleLoweringResult,
     cacheSchemaEntries :: [SchemaEntry],
-    -- Diagnostics this module emitted in its previous compile:
-    cacheDiagnostics :: [Diagnostic]
+    cacheLoweringDiagnostics :: [Diagnostic]
   }
   deriving (Show)
 
@@ -171,61 +161,20 @@ compile emitLog input = do
           Stdlib.stdlibSources
       mergedSources = Map.union input.sources stdlibEntries
       sourceHashes = Map.map (\entry -> hash entry.sourceText) mergedSources
-      cacheHitModules =
-        Map.filterWithKey
-          ( \moduleName cached ->
-              case Map.lookup moduleName sourceHashes of
-                Just sourceHash -> sourceHash == cached.cacheSourceHash
-                Nothing -> False
-          )
-          input.cache
-      cacheHitNames = Map.keysSet cacheHitModules
-      cacheMissNames = Set.difference (Map.keysSet mergedSources) cacheHitNames
 
-  for_ (Set.toList cacheMissNames) (emitLog . CompileLogParsing)
-  let cacheMissSources = Map.restrictKeys mergedSources cacheMissNames
-      (freshParsed, parseDiags) = parseSources cacheMissSources
-      cachedSkeletonParsed =
-        Map.map
-          ( \cached ->
-              Module
-                { declarations = map DeclarationImport cached.cacheImports,
-                  sourceSpan = cached.cacheModuleData.moduleSourceSpan
-                }
-          )
-          cacheHitModules
-      allParsed = Map.union freshParsed cachedSkeletonParsed
+  -- Parse every module. The front end is cheap and the full AST is needed
+  -- for identify / typecheck regardless of cache state.
+  for_ (Map.keys mergedSources) (emitLog . CompileLogParsing)
+  let (allParsed, parseDiags) = parseSources mergedSources
 
-  for_ (Set.toList cacheMissNames) (emitLog . CompileLogIdentifying)
-  let idAggregate = runIdentify Stdlib.stdlibModuleNames allParsed cacheHitModules
-      idDiags = map Identifier.toDiagnostic idAggregate.aggErrors
+  -- Identify every module from fresh per-module state.
+  for_ (Map.keys allParsed) (emitLog . CompileLogIdentifying)
+  let idResult = identifyProgram Stdlib.stdlibModuleNames allParsed
+      idDiags = map Identifier.toDiagnostic idResult.errors
 
-  -- Compute topological order + direct deps for the Async pipeline.
-  let stdlibModuleSet =
-        Set.fromList
-          [ moduleName
-            | moduleName <- Map.keys allParsed,
-              Set.member moduleName Stdlib.stdlibModuleNames
-          ]
-      primitiveSingleton = Set.singleton "primitive"
-      otherStdlibModules = Set.delete "primitive" stdlibModuleSet
-      stdlibLevels =
-        ([primitiveSingleton | Set.member "primitive" stdlibModuleSet])
-          ++ ([otherStdlibModules | not (Set.null otherStdlibModules)])
-      userModuleMap = Map.filterWithKey (\moduleName _ -> not (Set.member moduleName Stdlib.stdlibModuleNames)) allParsed
-      userLevels = topologicalSort userModuleMap
-      remainingUserNames =
-        Set.fromList
-          [ moduleName
-            | moduleName <- Map.keys userModuleMap,
-              not (Set.member moduleName (Set.unions userLevels))
-          ]
-      moduleLevels =
-        stdlibLevels
-          ++ userLevels
-          ++ ([remainingUserNames | not (Set.null remainingUserNames)])
-      orderedModules = concatMap Set.toList moduleLevels
-      directDeps =
+  -- Intra-program direct import deps (drives the typecheck pipeline order
+  -- and the lowering/schema cache invalidation).
+  let directDeps =
         Map.map
           ( \m ->
               [ depName
@@ -235,120 +184,143 @@ compile emitLog input = do
               ]
           )
           allParsed
+      orderedModules = compilationOrder Stdlib.stdlibModuleNames allParsed
 
-  -- Per-module Async typecheck. Each module's task waits for its direct
-  -- imports' tasks before running.
-  let primRules = Map.mapMaybe (.variablePrimRule) idAggregate.aggVariables
-      knownRequests = Map.keysSet idAggregate.aggRequests
-  (zonkedModulesMap, typeEnvMap, typecheckDiags, typecheckCache) <-
-    typecheckModulesAsync
-      emitLog
-      idAggregate
-      primRules
-      knownRequests
-      orderedModules
-      directDeps
-      sourceHashes
-      input.cache
+  -- Typecheck every module (per-module, Async; each task waits for its
+  -- direct imports' tasks so cross-module types are available).
+  let primRules = Map.mapMaybe (.variablePrimRule) idResult.variables
+      knownRequests = Map.keysSet idResult.requests
+  (zonkedModulesMap, typeEnvMap, typecheckDiags) <-
+    typecheckModulesAsync emitLog idResult primRules knownRequests orderedModules directDeps
 
-  let exhaustiveEnv =
-        ExhaustiveEnv
-          { constructors = idAggregate.aggConstructors,
-            topLevelTypes =
-              Map.fromList
-                [ (qualifiedName, ty)
-                  | (_, perModuleEnv) <- Map.toList typeEnvMap,
-                    (ResolvedTopLevel qualifiedName, ty) <- Map.toList perModuleEnv
-                ],
-            localTypeEnv = Map.empty -- replaced per module below
-          }
+  -- Exhaustiveness.
+  let topLevelTypes =
+        Map.fromList
+          [ (qualifiedName, ty)
+            | perModuleEnv <- Map.elems typeEnvMap,
+              (ResolvedTopLevel qualifiedName, ty) <- Map.toList perModuleEnv
+          ]
       exhaustiveDiags =
         concat
           [ map Exhaustive.toDiagnostic $
               checkExhaustiveModule
-                (exhaustiveEnv :: ExhaustiveEnv) {localTypeEnv = Map.findWithDefault Map.empty moduleName typeEnvMap}
+                ExhaustiveEnv
+                  { constructors = idResult.constructors,
+                    topLevelTypes = topLevelTypes,
+                    localTypeEnv = Map.findWithDefault Map.empty moduleName typeEnvMap
+                  }
                 moduleAST
             | (moduleName, moduleAST) <- Map.toList zonkedModulesMap
           ]
-      preLowerDiags =
-        parseDiags
-          <> idDiags
-          <> typecheckDiags
-          <> exhaustiveDiags
+      preLowerDiags = parseDiags <> idDiags <> typecheckDiags <> exhaustiveDiags
       shouldLower = not (hasErrors preLowerDiags)
 
-  let freshLowerInputs =
-        [ (moduleName, moduleAST)
-          | (moduleName, moduleAST) <- Map.toList zonkedModulesMap,
-            Set.member moduleName cacheMissNames
-        ]
-  for_ (map fst freshLowerInputs) (emitLog . CompileLogLowering)
+  -- Back-end cache invalidation: a module is invalid if its source changed
+  -- (or it has no cache entry), or transitively if it imports an invalid
+  -- module. Valid modules reuse their cached lowering/schema.
+  let changedModules =
+        Set.fromList
+          [ moduleName
+            | moduleName <- Map.keys allParsed,
+              case Map.lookup moduleName input.cache of
+                Just cached -> Map.findWithDefault 0 moduleName sourceHashes /= cached.cacheSourceHash
+                Nothing -> True
+          ]
+      invalidModules = invalidClosure directDeps changedModules
+      reuseFromCache moduleName =
+        not (Set.member moduleName invalidModules) && Map.member moduleName input.cache
+
+  -- Lowering: cached modules restore their fragment; the rest lower fresh
+  -- (in parallel).
   let dataAnnotations =
         Map.unions
-          [ collectDataAnnotations idAggregate.aggVariables m
+          [ collectDataAnnotations idResult.variables m
             | m <- Map.elems zonkedModulesMap
           ]
-      mergedDataDefs =
-        buildDataDefs
-          idAggregate.aggConstructors
-          exhaustiveEnv.topLevelTypes
-          dataAnnotations
+      mergedDataDefs = buildDataDefs idResult.constructors topLevelTypes dataAnnotations
       lowerContext =
         Lowering.LowerContext
-          { Lowering.topLevelTypes = exhaustiveEnv.topLevelTypes,
+          { Lowering.topLevelTypes = topLevelTypes,
             Lowering.dataDefs = mergedDataDefs,
             Lowering.requestNames = knownRequests,
-            Lowering.constructorNames = Map.keysSet idAggregate.aggConstructors
+            Lowering.constructorNames = Map.keysSet idResult.constructors
           }
-  let (loweringResults, loweringDiags)
+      freshLowerInputs =
+        [ (moduleName, moduleAST)
+          | (moduleName, moduleAST) <- Map.toList zonkedModulesMap,
+            not (reuseFromCache moduleName)
+        ]
+  for_ (map fst freshLowerInputs) (emitLog . CompileLogLowering)
+  let perModuleLowering
         | shouldLower =
-            let cachedResults =
-                  Map.map (.cacheLoweringResult) cacheHitModules
-                freshResults =
+            let cachedLowering =
+                  Map.fromList
+                    [ (moduleName, (Right cached.cacheLoweringResult, cached.cacheLoweringDiagnostics))
+                      | moduleName <- Map.keys zonkedModulesMap,
+                        reuseFromCache moduleName,
+                        Just cached <- [Map.lookup moduleName input.cache]
+                    ]
+                freshLowering =
                   Map.fromList
                     ( parMap
                         rseq
                         ( \(moduleName, moduleAST) ->
                             let localEnv = Map.findWithDefault Map.empty moduleName typeEnvMap
                                 (result, errors) = lowerModule lowerContext moduleName localEnv moduleAST
-                             in (moduleName, (result, errors))
+                             in (moduleName, (result, map Lowering.toDiagnostic errors))
                         )
                         freshLowerInputs
                     )
-                freshOk = Map.map fst freshResults
-                freshErrors = concatMap snd (Map.elems freshResults)
-                freshDiags = map Lowering.toDiagnostic freshErrors
-                allResults = Map.union cachedResults (Map.mapMaybe eitherToMaybe freshOk)
-             in (allResults, freshDiags)
-        | otherwise = (Map.empty, [])
+             in Map.union cachedLowering freshLowering
+        | otherwise = Map.empty
+      loweringResults = Map.mapMaybe (eitherToMaybe . fst) perModuleLowering
+      loweringDiags = concatMap snd (Map.elems perModuleLowering)
 
       shouldEmitArtefacts = shouldLower && not (hasErrors loweringDiags)
       finalIR
         | shouldEmitArtefacts = Just (mergeModuleLowerings (Map.elems loweringResults))
         | otherwise = Nothing
 
-  for_ (Set.toList cacheMissNames) (emitLog . CompileLogSchemaGeneration)
-  let cachedSchemaEntries = concatMap (.cacheSchemaEntries) (Map.elems cacheHitModules)
-      freshSchemaEntries =
-        if shouldEmitArtefacts
-          then buildSchemasForModules idAggregate mergedDataDefs exhaustiveEnv.topLevelTypes cacheMissNames
-          else []
-      schema =
-        if shouldEmitArtefacts
-          then Just (cachedSchemaEntries <> freshSchemaEntries)
-          else Nothing
+  -- Schema: same valid/invalid split as lowering.
+  for_ (map fst freshLowerInputs) (emitLog . CompileLogSchemaGeneration)
+  let schemaContext =
+        SchemaContext
+          { dataDefs = mergedDataDefs,
+            topLevelTypes = topLevelTypes,
+            requestData = idResult.requests
+          }
+      schemaByModule
+        | shouldEmitArtefacts =
+            Map.fromList
+              [ ( moduleName,
+                  if reuseFromCache moduleName
+                    then maybe [] (.cacheSchemaEntries) (Map.lookup moduleName input.cache)
+                    else buildModuleSchemas schemaContext (moduleOwned moduleName idResult.variables)
+                )
+                | moduleName <- Map.keys zonkedModulesMap
+              ]
+        | otherwise = Map.empty
+      schema
+        | shouldEmitArtefacts = Just (concat (Map.elems schemaByModule))
+        | otherwise = Nothing
 
       allDiags = preLowerDiags <> loweringDiags
 
-      freshCache =
-        buildFreshCacheEntries
-          sourceHashes
-          idAggregate
-          typecheckCache
-          loweringResults
-          freshSchemaEntries
-          cacheMissNames
-      updatedCacheMap = Map.union freshCache cacheHitModules
+      -- Refresh the cache for every successfully-lowered module (keeps both
+      -- freshly-built and restored fragments, so the next run's valid set is
+      -- correct).
+      updatedCache =
+        Map.fromList
+          [ ( moduleName,
+              ModuleCache
+                { cacheSourceHash = Map.findWithDefault 0 moduleName sourceHashes,
+                  cacheLoweringResult = loweringResult,
+                  cacheSchemaEntries = Map.findWithDefault [] moduleName schemaByModule,
+                  cacheLoweringDiagnostics = maybe [] snd (Map.lookup moduleName perModuleLowering)
+                }
+            )
+            | (moduleName, loweringResult) <- Map.toList loweringResults
+          ]
 
   emitLog CompileLogComplete
   pure
@@ -358,18 +330,18 @@ compile emitLog input = do
         diagnostics = allDiags,
         querySnapshot =
           Query.QuerySnapshot
-            { Query.variables = idAggregate.aggVariables,
-              Query.types = idAggregate.aggTypes,
-              Query.requests = idAggregate.aggRequests,
-              Query.constructors = idAggregate.aggConstructors,
-              Query.modules = idAggregate.aggModules,
-              Query.scopeIndex = idAggregate.aggScopeIndex,
-              Query.visibleSymbols = idAggregate.aggTopLevelTables,
-              Query.exports = idAggregate.aggExportTables,
+            { Query.variables = idResult.variables,
+              Query.types = idResult.types,
+              Query.requests = idResult.requests,
+              Query.constructors = idResult.constructors,
+              Query.modules = idResult.modules,
+              Query.scopeIndex = buildScopeIndex idResult.scopeFrames,
+              Query.visibleSymbols = idResult.topLevelTables,
+              Query.exports = idResult.exportTables,
               Query.zonkedModules = zonkedModulesMap,
               Query.typeEnv = typeEnvMap
             },
-        updatedCache = updatedCacheMap
+        updatedCache = updatedCache
       }
 
 eitherToMaybe :: Either a b -> Maybe b
@@ -377,151 +349,12 @@ eitherToMaybe = \case
   Left _ -> Nothing
   Right x -> Just x
 
--- ===========================================================================
--- Per-module Async typecheck pipeline
--- ===========================================================================
-
--- | What each typecheck task hands back to the final-cache assembler.
--- Holds only what's needed to construct a 'ModuleCache' downstream.
-data TypecheckCacheEntry = TypecheckCacheEntry
-  { tceInterface :: ModuleInterface,
-    tceDataAnnotations :: Map QualifiedName (Map Text (Maybe Text)),
-    tceDiagnostics :: [Diagnostic]
-  }
-
--- | Per-module typecheck task output. Each Async task produces one of
--- these; downstream tasks @wait@ for their imports' results and read
--- 'exportedTypes' to feed into their own typecheck call.
-data TypecheckTaskResult = TypecheckTaskResult
-  { taskModuleName :: Text,
-    taskZonkedModule :: Module Zonked,
-    taskTypeEnvironment :: Map VariableResolution (SemanticType Resolved),
-    taskExportedTypes :: Map QualifiedName (SemanticType Resolved),
-    taskDiagnostics :: [Diagnostic],
-    taskCacheEntry :: TypecheckCacheEntry,
-    taskIsCacheHit :: Bool
-  }
-
-typecheckModulesAsync ::
-  (CompileLog -> IO ()) ->
-  IdentifyAggregate ->
-  Map QualifiedName PrimRule ->
-  Set.Set QualifiedName ->
-  [ModuleName] ->
-  Map ModuleName [ModuleName] ->
-  Map ModuleName Int ->
-  Map ModuleName ModuleCache ->
-  IO
-    ( Map ModuleName (Module Zonked),
-      Map ModuleName (Map VariableResolution (SemanticType Resolved)),
-      [Diagnostic],
-      Map ModuleName TypecheckCacheEntry
-    )
-typecheckModulesAsync emitLog idAggregate primRules knownRequests orderedModules directDeps sourceHashes inputCache = do
-  tasksRef <- newIORef Map.empty
-  for_ orderedModules $ \modName -> do
-    existing <- readIORef tasksRef
-    let depTasks =
-          mapMaybe (`Map.lookup` existing) (Map.findWithDefault [] modName directDeps)
-        cached = Map.lookup modName inputCache
-        sourceHash = Map.findWithDefault 0 modName sourceHashes
-    task <-
-      async (runTypecheckTask emitLog idAggregate primRules knownRequests modName cached sourceHash depTasks)
-    modifyIORef' tasksRef (Map.insert modName task)
-  tasks <- readIORef tasksRef
-  results <- traverse wait tasks
-
-  let -- Cache-hit modules contribute an empty placeholder module; drop
-      -- them from the zonked-module map so downstream phases see only
-      -- freshly typechecked ASTs.
-      freshResults = Map.filter (not . (.taskIsCacheHit)) results
-      zonkedModules' = Map.map (.taskZonkedModule) freshResults
-      typeEnv' = Map.map (.taskTypeEnvironment) freshResults
-      diagnostics' = concatMap (.taskDiagnostics) (Map.elems results)
-      cache' = Map.map (.taskCacheEntry) results
-  pure (zonkedModules', typeEnv', diagnostics', cache')
-
-runTypecheckTask ::
-  (CompileLog -> IO ()) ->
-  IdentifyAggregate ->
-  Map QualifiedName PrimRule ->
-  Set.Set QualifiedName ->
-  ModuleName ->
-  Maybe ModuleCache ->
-  Int ->
-  [Async TypecheckTaskResult] ->
-  IO TypecheckTaskResult
-runTypecheckTask emitLog idAggregate primRules knownRequests moduleName cached sourceHash depTasks = do
-  depResults <- mapM wait depTasks
-  let allDepsCacheHit = all (.taskIsCacheHit) depResults
-      cacheValid = case cached of
-        Just c -> allDepsCacheHit && c.cacheSourceHash == sourceHash
-        Nothing -> False
-  case cached of
-    Just c | cacheValid -> pure (typecheckFromCache moduleName c)
-    _ -> do
-      emitLog (CompileLogTypechecking moduleName)
-      let importedTypes = Map.unions (map (.taskExportedTypes) depResults)
-          moduleAST =
-            Map.findWithDefault
-              Module {declarations = [], sourceSpan = emptySourceSpan}
-              moduleName
-              idAggregate.aggASTs
-          ownVariables =
-            Map.filterWithKey
-              (\qualifiedName _ -> qualifiedName.module_ == moduleName)
-              idAggregate.aggVariables
-          subject =
-            TypecheckSubject
-              { moduleName = moduleName,
-                moduleAST = moduleAST,
-                ownVariables = ownVariables,
-                typeData = idAggregate.aggTypes,
-                knownRequests = knownRequests,
-                primRules = primRules,
-                importedTypes = importedTypes
-              }
-          result = typecheckModule subject
-          dataAnnotations =
-            collectDataAnnotations idAggregate.aggVariables result.zonkedModule
-          newCacheEntry =
-            TypecheckCacheEntry
-              { tceInterface = result.moduleInterface,
-                tceDataAnnotations = dataAnnotations,
-                tceDiagnostics = result.diagnostics
-              }
-      pure
-        TypecheckTaskResult
-          { taskModuleName = moduleName,
-            taskZonkedModule = result.zonkedModule,
-            taskTypeEnvironment = result.localTypeEnv,
-            taskExportedTypes = result.moduleInterface.exportedTypes,
-            taskDiagnostics = result.diagnostics,
-            taskCacheEntry = newCacheEntry,
-            taskIsCacheHit = False
-          }
-
-typecheckFromCache :: ModuleName -> ModuleCache -> TypecheckTaskResult
-typecheckFromCache moduleName c =
-  TypecheckTaskResult
-    { taskModuleName = moduleName,
-      -- Cache-hit modules contribute no zonked AST / local typeEnv to the
-      -- result — only their exported types matter for downstream phases.
-      taskZonkedModule = Module {declarations = [], sourceSpan = emptySourceSpan},
-      taskTypeEnvironment = Map.empty,
-      taskExportedTypes = c.cacheInterface.exportedTypes,
-      taskDiagnostics = c.cacheDiagnostics,
-      taskCacheEntry =
-        TypecheckCacheEntry
-          { tceInterface = c.cacheInterface,
-            tceDataAnnotations = c.cacheDataAnnotations,
-            tceDiagnostics = c.cacheDiagnostics
-          },
-      taskIsCacheHit = True
-    }
+-- | The top-level variables owned by @moduleName@.
+moduleOwned :: ModuleName -> Map QualifiedName a -> Map QualifiedName a
+moduleOwned moduleName = Map.filterWithKey (\qualifiedName _ -> qualifiedName.module_ == moduleName)
 
 -- ===========================================================================
--- Parse helper
+-- Parse
 -- ===========================================================================
 
 parseSources :: Map ModuleName SourceEntry -> (Map ModuleName (Module Parsed), [Diagnostic])
@@ -536,253 +369,177 @@ parseSources sources =
    in (modules, diags)
 
 -- ===========================================================================
--- Identifier orchestration
+-- Identify orchestration
 -- ===========================================================================
 
--- | Aggregated identifier output. Holds whole-program maps assembled
--- from the per-module 'ModuleIdentifyResult' values plus the threaded
--- 'IdentifierState' (for variable / type / request / constructor /
--- module metadata that accumulates across modules). Used internally by
--- 'compile' to fan results out to typecheck, cache construction, and
--- the query layer.
-data IdentifyAggregate = IdentifyAggregate
-  { aggVariables :: Map QualifiedName VariableData,
-    aggTypes :: Map QualifiedName TypeData,
-    aggRequests :: Map QualifiedName RequestData,
-    aggConstructors :: Map QualifiedName ConstructorData,
-    aggModules :: Map Text ModuleData,
-    aggASTs :: Map Text (Module Identified),
-    aggExportTables :: Map Text (Map Text SymbolEntry),
-    aggTopLevelTables :: Map Text (Map Text SymbolEntry),
-    aggScopeIndex :: ScopeIndex SymbolEntry,
-    aggErrors :: [Identifier.IdentifierError]
+-- | Whole-program identifier output, assembled by unioning the per-module
+-- 'Identifier.ModuleIdentifyResult' values. Fans out to typecheck, lowering,
+-- schema, and the query layer.
+data IdentifyResult = IdentifyResult
+  { variables :: Map QualifiedName VariableData,
+    types :: Map QualifiedName TypeData,
+    requests :: Map QualifiedName RequestData,
+    constructors :: Map QualifiedName ConstructorData,
+    modules :: Map Text ModuleData,
+    asts :: Map Text (Module Identified),
+    exportTables :: Map Text (Map Text SymbolEntry),
+    topLevelTables :: Map Text (Map Text SymbolEntry),
+    scopeFrames :: [ScopeFrame SymbolEntry],
+    errors :: [Identifier.IdentifierError]
   }
 
-type IdentifyAccum =
-  ( Map Text (Module Identified),
-    Map Text (Map Text SymbolEntry),
-    Map Text (Map Text SymbolEntry),
-    [ScopeFrame SymbolEntry],
-    IdentifierState
-  )
-
-runIdentify ::
-  Set.Set Text ->
-  Map Text (Module Parsed) ->
-  Map ModuleName ModuleCache ->
-  IdentifyAggregate
-runIdentify trustedStdlibNames moduleMap cachedModules =
-  let ((), cycleState) =
-        Identifier.runIdentifier $
-          for_ (findImportCycles moduleMap) (Identifier.emitImportCycleError moduleMap)
-
-      ((), phaseAState) =
-        Identifier.runIdentifierFrom cycleState $
-          Identifier.registerAllModules trustedStdlibNames moduleMap
-
-      allModuleNames = Map.keysSet moduleMap
-      allExportNames = Map.map Identifier.scanExportNames moduleMap
-
-      stepFresh :: IdentifyAccum -> Text -> IdentifyAccum
-      stepFresh (asts, exports, topLevels, frames, state) moduleName =
-        case Map.lookup moduleName moduleMap of
-          Nothing -> (asts, exports, topLevels, frames, state)
-          Just parsedModule ->
-            let moduleResult =
-                  Identifier.identifyModule
-                    allExportNames
-                    exports
-                    allModuleNames
-                    state
-                    moduleName
-                    parsedModule
-             in ( Map.insert moduleName moduleResult.identifiedAST asts,
-                  Map.insert moduleName moduleResult.moduleExportTable exports,
-                  Map.insert moduleName moduleResult.moduleTopLevel topLevels,
-                  frames <> moduleResult.moduleScopeFrames,
-                  moduleResult.moduleState
-                )
-
-      stepCachedOrFresh :: IdentifyAccum -> Text -> IdentifyAccum
-      stepCachedOrFresh accumulator@(asts, exports, topLevels, frames, state) moduleName =
-        case Map.lookup moduleName cachedModules of
-          Just cached ->
-            -- Cached modules don't restore an Identified AST or scope
-            -- frames — the LSP layer can't answer hover / scope queries
-            -- on a cache-hit module until it's recompiled.
-            let injectedState =
-                  state
-                    { variables = Map.union cached.cacheIdentifierVariables state.variables,
-                      types = Map.union cached.cacheIdentifierTypes state.types,
-                      requests = Map.union cached.cacheIdentifierRequests state.requests,
-                      constructors = Map.union cached.cacheIdentifierConstructors state.constructors,
-                      modules = Map.insert moduleName cached.cacheModuleData state.modules
-                    }
-             in ( asts,
-                  Map.insert moduleName cached.cacheModuleExports exports,
-                  Map.insert moduleName cached.cacheModuleTopLevel topLevels,
-                  frames,
-                  injectedState
-                )
-          Nothing -> stepFresh accumulator moduleName
-
-      stdlibModuleNames =
-        [ moduleName
-          | moduleName <- Map.keys moduleMap,
-            Set.member moduleName trustedStdlibNames
-        ]
-      sortedStdlibNames =
-        filter (== "primitive") stdlibModuleNames
-          ++ filter (/= "primitive") stdlibModuleNames
-      initialAccum = (Map.empty, Map.empty, Map.empty, [], phaseAState)
-      (stdlibASTs, stdlibExports, stdlibTopLevels, stdlibFrames, stdlibState) =
-        foldl' stepCachedOrFresh initialAccum sortedStdlibNames
-
-      userModuleMap = Map.filterWithKey (\moduleName _ -> not (Set.member moduleName trustedStdlibNames)) moduleMap
-      levels = topologicalSort userModuleMap
-      (acyclicASTs, acyclicExports, acyclicTopLevels, acyclicFrames, acyclicState) =
-        foldl'
-          (\accumulator level -> foldl' stepCachedOrFresh accumulator (Set.toList level))
-          (stdlibASTs, stdlibExports, stdlibTopLevels, stdlibFrames, stdlibState)
-          levels
-
-      processedModuleNames = Map.keysSet acyclicASTs
-      remainingModuleNames =
-        [ moduleName
-          | moduleName <- Map.keys moduleMap,
-            not (Set.member moduleName processedModuleNames)
-        ]
-      (allASTs, allExports, allTopLevels, allFrames, finalState) =
-        foldl'
-          stepCachedOrFresh
-          (acyclicASTs, acyclicExports, acyclicTopLevels, acyclicFrames, acyclicState)
-          remainingModuleNames
-   in IdentifyAggregate
-        { aggVariables = finalState.variables,
-          aggTypes = finalState.types,
-          aggRequests = finalState.requests,
-          aggConstructors = finalState.constructors,
-          aggModules = finalState.modules,
-          aggASTs = allASTs,
-          aggExportTables = allExports,
-          aggTopLevelTables = allTopLevels,
-          aggScopeIndex = buildScopeIndex allFrames,
-          aggErrors = reverse finalState.errors
+-- | Identify every module from fresh per-module state and aggregate the
+-- results. Modules are visited in dependency order (see 'compilationOrder')
+-- so each sees its dependencies' export tables, which are threaded forward.
+-- Import cycles are reported up front; tangled modules are still identified
+-- (best effort) after the acyclic ones.
+identifyProgram :: Set Text -> Map Text (Module Parsed) -> IdentifyResult
+identifyProgram trustedStdlibNames moduleMap =
+  let allModuleNames = Map.keysSet moduleMap
+      allModuleData = Map.map (\m -> ModuleData {moduleSourceSpan = m.sourceSpan}) moduleMap
+      identifyOne depExports moduleName =
+        ( moduleName,
+          identifyModule allModuleData depExports allModuleNames trustedStdlibNames moduleName (moduleMap Map.! moduleName)
+        )
+      -- Modules within a level are mutually independent (every dependency is
+      -- in an earlier level), so identify them in parallel; export tables
+      -- accumulate between levels.
+      runLevels _ [] = []
+      runLevels depExports (level : rest) =
+        let levelResults = parMap rseq (identifyOne depExports) level
+            depExports' =
+              Map.union depExports (Map.fromList [(m, r.moduleExportTable) | (m, r) <- levelResults])
+         in levelResults ++ runLevels depExports' rest
+      results = runLevels Map.empty (compilationLevels trustedStdlibNames moduleMap)
+   in IdentifyResult
+        { variables = Map.unions [result.moduleVariables | (_, result) <- results],
+          types = Map.unions [result.moduleTypes | (_, result) <- results],
+          requests = Map.unions [result.moduleRequests | (_, result) <- results],
+          constructors = Map.unions [result.moduleConstructors | (_, result) <- results],
+          modules = Map.fromList [(name, result.moduleData) | (name, result) <- results],
+          asts = Map.fromList [(name, result.identifiedAST) | (name, result) <- results],
+          exportTables = Map.fromList [(name, result.moduleExportTable) | (name, result) <- results],
+          topLevelTables = Map.fromList [(name, result.moduleTopLevel) | (name, result) <- results],
+          scopeFrames = concat [result.moduleScopeFrames | (_, result) <- results],
+          errors =
+            importCycleErrors moduleMap
+              ++ concat [result.moduleNewErrors | (_, result) <- results]
         }
 
+-- | Dependency-ordered /levels/: @primitive@ first, then the rest of the
+-- trusted stdlib, then user modules grouped into topological levels, then
+-- any leftover (import-cycle) modules. Modules within a level have no
+-- dependency on one another, so identification processes a level in parallel.
+compilationLevels :: Set Text -> Map Text (Module Parsed) -> [[Text]]
+compilationLevels trustedStdlibNames moduleMap =
+  let stdlibNames = [m | m <- Map.keys moduleMap, Set.member m trustedStdlibNames]
+      primLevel = filter (== "primitive") stdlibNames
+      otherStdlib = filter (/= "primitive") stdlibNames
+      userModuleMap = Map.filterWithKey (\m _ -> not (Set.member m trustedStdlibNames)) moduleMap
+      userLevels = map Set.toList (topologicalSort userModuleMap)
+      placed = Set.fromList (primLevel ++ otherStdlib ++ concat userLevels)
+      leftover = [m | m <- Map.keys moduleMap, not (Set.member m placed)]
+   in filter (not . null) ([primLevel, otherStdlib] ++ userLevels ++ [leftover])
+
+-- | Flat dependency order (= 'compilationLevels' concatenated), used by the
+-- typecheck pipeline where each task waits on its imports individually.
+compilationOrder :: Set Text -> Map Text (Module Parsed) -> [Text]
+compilationOrder trustedStdlibNames moduleMap = concat (compilationLevels trustedStdlibNames moduleMap)
+
 -- ===========================================================================
--- Helpers
+-- Per-module Async typecheck pipeline
 -- ===========================================================================
 
--- | Extract import declarations from an Identified module (for cache
--- skeleton building).
-extractImportDeclarations :: Module Identified -> [ImportDeclaration]
-extractImportDeclarations moduleAST =
-  [importDecl | DeclarationImport importDecl <- moduleAST.declarations]
+-- | Per-module typecheck task output. Downstream tasks @wait@ for their
+-- imports' results and read 'taskExportedTypes' to feed their own typecheck.
+data TypecheckTaskResult = TypecheckTaskResult
+  { taskZonkedModule :: Module Zonked,
+    taskTypeEnvironment :: Map VariableResolution (SemanticType Resolved),
+    taskExportedTypes :: Map QualifiedName (SemanticType Resolved),
+    taskDiagnostics :: [Diagnostic]
+  }
 
--- | Build schema entries for cache-miss modules only.
-buildSchemasForModules ::
-  IdentifyAggregate ->
-  DataDefs ->
-  Map QualifiedName (SemanticType Resolved) ->
-  Set.Set Text ->
-  [SchemaEntry]
-buildSchemasForModules idAggregate mergedDataDefs topLevelTypes moduleNames =
-  let ctx =
-        SchemaContext
-          { dataDefs = mergedDataDefs,
-            topLevelTypes = topLevelTypes,
-            requestData = idAggregate.aggRequests
+typecheckModulesAsync ::
+  (CompileLog -> IO ()) ->
+  IdentifyResult ->
+  Map QualifiedName PrimRule ->
+  Set QualifiedName ->
+  [ModuleName] ->
+  Map ModuleName [ModuleName] ->
+  IO
+    ( Map ModuleName (Module Zonked),
+      Map ModuleName (Map VariableResolution (SemanticType Resolved)),
+      [Diagnostic]
+    )
+typecheckModulesAsync emitLog idResult primRules knownRequests orderedModules directDeps = do
+  tasksRef <- newIORef Map.empty
+  for_ orderedModules $ \modName -> do
+    existing <- readIORef tasksRef
+    let depTasks = mapMaybe (`Map.lookup` existing) (Map.findWithDefault [] modName directDeps)
+    task <- async (runTypecheckTask emitLog idResult primRules knownRequests modName depTasks)
+    modifyIORef' tasksRef (Map.insert modName task)
+  tasks <- readIORef tasksRef
+  results <- traverse wait tasks
+  pure
+    ( Map.map (.taskZonkedModule) results,
+      Map.map (.taskTypeEnvironment) results,
+      concatMap (.taskDiagnostics) (Map.elems results)
+    )
+
+runTypecheckTask ::
+  (CompileLog -> IO ()) ->
+  IdentifyResult ->
+  Map QualifiedName PrimRule ->
+  Set QualifiedName ->
+  ModuleName ->
+  [Async TypecheckTaskResult] ->
+  IO TypecheckTaskResult
+runTypecheckTask emitLog idResult primRules knownRequests moduleName depTasks = do
+  depResults <- mapM wait depTasks
+  emitLog (CompileLogTypechecking moduleName)
+  let importedTypes = Map.unions (map (.taskExportedTypes) depResults)
+      moduleAST =
+        Map.findWithDefault
+          Module {declarations = [], sourceSpan = emptySourceSpan}
+          moduleName
+          idResult.asts
+      subject =
+        TypecheckSubject
+          { moduleName = moduleName,
+            moduleAST = moduleAST,
+            ownVariables = moduleOwned moduleName idResult.variables,
+            typeData = idResult.types,
+            knownRequests = knownRequests,
+            primRules = primRules,
+            importedTypes = importedTypes
           }
-      filteredVariables =
-        Map.filterWithKey
-          (\qualifiedName _ -> Set.member qualifiedName.module_ moduleNames)
-          idAggregate.aggVariables
-   in buildModuleSchemas ctx filteredVariables
+      result = typecheckModule subject
+  pure
+    TypecheckTaskResult
+      { taskZonkedModule = result.zonkedModule,
+        taskTypeEnvironment = result.localTypeEnv,
+        taskExportedTypes = result.moduleInterface.exportedTypes,
+        taskDiagnostics = result.diagnostics
+      }
 
 -- ===========================================================================
--- Cache construction
+-- Cache invalidation
 -- ===========================================================================
 
-buildFreshCacheEntries ::
-  Map ModuleName Int ->
-  IdentifyAggregate ->
-  Map ModuleName TypecheckCacheEntry ->
-  Map ModuleName ModuleLoweringResult ->
-  [SchemaEntry] ->
-  Set.Set Text ->
-  Map ModuleName ModuleCache
-buildFreshCacheEntries sourceHashes idAggregate typecheckCache loweringResults schemaEntries_ cacheMissNames_ =
-  let schemaByModule =
-        foldl'
-          ( \accumulator entry ->
-              let moduleName = schemaEntryModule entry
-               in Map.insertWith (++) moduleName [entry] accumulator
-          )
-          Map.empty
-          schemaEntries_
-      emptyLoweringResult =
-        ModuleLoweringResult
-          { mlrBlocks = Map.empty,
-            mlrEntries = Map.empty,
-            mlrNameTable = Katari.IR.emptyNameTable,
-            mlrBlockCount = 0,
-            mlrVarCount = 0
-          }
-   in Map.fromSet
-        ( \moduleName ->
-            let tce =
-                  Map.findWithDefault
-                    ( TypecheckCacheEntry
-                        { tceInterface = ModuleInterface {exportedTypes = Map.empty},
-                          tceDataAnnotations = Map.empty,
-                          tceDiagnostics = []
-                        }
-                    )
-                    moduleName
-                    typecheckCache
-                moduleVariables =
-                  Map.filterWithKey (\qualifiedName _ -> qualifiedName.module_ == moduleName) idAggregate.aggVariables
-                moduleTypes =
-                  Map.filterWithKey (\qualifiedName _ -> qualifiedName.module_ == moduleName) idAggregate.aggTypes
-                moduleRequests =
-                  Map.filterWithKey (\qualifiedName _ -> qualifiedName.module_ == moduleName) idAggregate.aggRequests
-                moduleConstructors =
-                  Map.filterWithKey (\qualifiedName _ -> qualifiedName.module_ == moduleName) idAggregate.aggConstructors
-                moduleData =
-                  Map.findWithDefault
-                    (ModuleData {moduleSourceSpan = emptySourceSpan})
-                    moduleName
-                    idAggregate.aggModules
-                moduleExports = Map.findWithDefault Map.empty moduleName idAggregate.aggExportTables
-                moduleTopLevel = Map.findWithDefault Map.empty moduleName idAggregate.aggTopLevelTables
-                moduleImports = case Map.lookup moduleName idAggregate.aggASTs of
-                  Just ast -> extractImportDeclarations ast
-                  Nothing -> []
-             in ModuleCache
-                  { cacheSourceHash = Map.findWithDefault 0 moduleName sourceHashes,
-                    cacheImports = moduleImports,
-                    cacheIdentifierVariables = moduleVariables,
-                    cacheIdentifierTypes = moduleTypes,
-                    cacheIdentifierRequests = moduleRequests,
-                    cacheIdentifierConstructors = moduleConstructors,
-                    cacheModuleData = moduleData,
-                    cacheModuleExports = moduleExports,
-                    cacheModuleTopLevel = moduleTopLevel,
-                    cacheInterface = tce.tceInterface,
-                    cacheDataAnnotations = tce.tceDataAnnotations,
-                    cacheLoweringResult = Map.findWithDefault emptyLoweringResult moduleName loweringResults,
-                    cacheSchemaEntries = Map.findWithDefault [] moduleName schemaByModule,
-                    cacheDiagnostics = tce.tceDiagnostics
-                  }
-        )
-        cacheMissNames_
-
-schemaEntryModule :: SchemaEntry -> Text
-schemaEntryModule (SchemaEntry {name = entryName}) =
-  let parts = Text.splitOn "." entryName
-   in case parts of
-        [] -> ""
-        [single] -> single
-        _ -> Text.intercalate "." (init parts)
-
+-- | Grow @changed@ to its transitive closure under "imports an invalid
+-- module": a module is invalid if it (directly or indirectly) imports any
+-- changed module. Used to decide which modules must re-lower / re-schema.
+invalidClosure :: Map ModuleName [ModuleName] -> Set ModuleName -> Set ModuleName
+invalidClosure directDeps = grow
+  where
+    grow current =
+      let next =
+            Set.union
+              current
+              ( Set.fromList
+                  [ moduleName
+                    | (moduleName, deps) <- Map.toList directDeps,
+                      any (`Set.member` current) deps
+                  ]
+              )
+       in if Set.size next == Set.size current then current else grow next

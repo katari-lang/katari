@@ -392,12 +392,11 @@ toCore dataDefs visited = \case
   SemanticTypeInteger -> SchemaCoreInteger {minimum = Nothing, maximum = Nothing}
   SemanticTypeNumber -> SchemaCoreNumber
   SemanticTypeString -> SchemaCoreString {schemaEnum = []}
-  -- 'secret' should not surface in AI tool-calling schemas; the AI must
-  -- not be allowed to inspect credential values. Callers (e.g. the
-  -- schema-bundle builder) should reject any callable whose param /
-  -- result mentions @secret@ before reaching here. We fall back to
-  -- 'SchemaCoreUnknown' as a defensive no-op (= maximally permissive)
-  -- so a stray path doesn't crash; the proper guard belongs upstream.
+  -- 'secret' must not surface in AI tool-calling schemas; the AI must not
+  -- inspect credential shapes. 'buildVariableEntry' already drops any
+  -- callable whose param / result mentions @secret@, so this branch is
+  -- unreachable on the bundle path. Kept as a defensive no-op (maximally
+  -- permissive 'SchemaCoreUnknown') so a stray internal call can't crash.
   SemanticTypeSecret -> SchemaCoreUnknown
   SemanticTypeLiteralInteger n -> SchemaCoreConst {value = toJSON n}
   SemanticTypeLiteralString s -> SchemaCoreConst {value = toJSON s}
@@ -542,17 +541,47 @@ buildVariableEntry ::
 buildVariableEntry ctx (qualifiedName, variableData) = do
   SemanticTypeFunction paramTypes returnType requestSet <-
     Map.lookup qualifiedName ctx.topLevelTypes
-  let inputSchema =
-        buildInputObject ctx.dataDefs paramTypes variableData.variableParameterAnnotations
-      requestRefs = buildRequestRefs ctx requestSet
-  pure
-    SchemaEntry
-      { name = renderQualifiedName qualifiedName,
-        description = variableData.variableAnnotation,
-        input = inputSchema,
-        output = toJsonSchema ctx.dataDefs Set.empty returnType,
-        requests = requestRefs
-      }
+  -- Credential (secret) types must never surface in an AI tool-calling
+  -- schema — the AI must not be able to inspect credential shapes. Drop any
+  -- callable whose parameters or result mention @secret@ (directly or
+  -- transitively through a data field). The callable stays callable in the
+  -- IR; only its schema is withheld from the bundle.
+  if any (mentionsSecret ctx.dataDefs Set.empty) (returnType : Map.elems paramTypes)
+    then Nothing
+    else
+      pure
+        SchemaEntry
+          { name = renderQualifiedName qualifiedName,
+            description = variableData.variableAnnotation,
+            input = buildInputObject ctx.dataDefs paramTypes variableData.variableParameterAnnotations,
+            output = toJsonSchema ctx.dataDefs Set.empty returnType,
+            requests = buildRequestRefs ctx requestSet
+          }
+
+-- | Does a resolved type mention 'SemanticTypeSecret' anywhere — directly
+-- or transitively through a 'SemanticTypeData' field? Used to keep
+-- credential-typed callables out of the AI tool-calling schema bundle.
+-- @visited@ breaks cycles in recursive data types.
+mentionsSecret :: DataDefs -> Set QualifiedName -> SemanticType Resolved -> Bool
+mentionsSecret dataDefs visited = \case
+  SemanticTypeSecret -> True
+  SemanticTypeArray element -> recurse element
+  SemanticTypeTuple elements -> any recurse elements
+  SemanticTypeUnion branches -> any recurse branches
+  SemanticTypeObject fields -> any recurse (Map.elems fields)
+  SemanticTypeRecord valueType -> recurse valueType
+  SemanticTypeFunction parameters returnType _ ->
+    any recurse (Map.elems parameters) || recurse returnType
+  SemanticTypeData qualifiedName
+    | Set.member qualifiedName visited -> False
+    | Just info <- Map.lookup qualifiedName dataDefs ->
+        any
+          (mentionsSecret dataDefs (Set.insert qualifiedName visited) . (.fieldType))
+          (Map.elems info.dataFields)
+    | otherwise -> False
+  _ -> False
+  where
+    recurse = mentionsSecret dataDefs visited
 
 -- | Build a JSON Schema object describing the input parameters of any
 -- callable. Lowering-facing variant of 'paramObject' that takes the raw

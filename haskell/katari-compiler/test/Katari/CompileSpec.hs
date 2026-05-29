@@ -5,6 +5,7 @@
 module Katari.CompileSpec (spec) where
 
 import Data.Aeson qualified as Aeson
+import Data.Map.Strict qualified as Map
 import Data.Maybe (isJust, isNothing)
 import Katari.Compile
 import Katari.Diagnostic (Diagnostic (..), hasErrors)
@@ -20,6 +21,7 @@ spec = describe "Katari.Compile" $ do
   happyPathSpec
   errorPathSpec
   multiModuleSpec
+  incrementalCacheSpec
   exhaustiveSpec
   externalAgentSpec
   recursiveDataSpec
@@ -169,6 +171,37 @@ multiModuleSpec = describe "multi-module input" $ do
             )
     hasErrors result.diagnostics `shouldBe` False
     isJust result.irModule `shouldBe` True
+
+-- ===========================================================================
+-- Incremental cache soundness (dependency change invalidation)
+-- ===========================================================================
+
+incrementalCacheSpec :: Spec
+incrementalCacheSpec = describe "incremental cache" $ do
+  it "preserves a cache-hit module's diagnostics when only its dependency's body changed" $ do
+    -- modb exports foo() -> integer. moda imports foo and (wrongly) returns
+    -- its result where a string is expected, so moda has a type error that
+    -- depends only on foo's *signature*, not its body. Editing modb's body
+    -- (same signature) must NOT make moda's error disappear: moda's own
+    -- source is unchanged.
+    let modaSrc =
+          "import { foo } from modb\n\
+          \agent useA() -> string { foo() }"
+        mkInput modbBody priorCache =
+          CompileInput
+            { sources =
+                Map.fromList
+                  [ ("moda", SourceEntry {filePath = "moda", sourceText = modaSrc}),
+                    ("modb", SourceEntry {filePath = "modb", sourceText = modbBody})
+                  ],
+              cache = priorCache
+            }
+        result1 = compileSync (mkInput "agent foo() -> integer { 1 }" Map.empty)
+        result2 = compileSync (mkInput "agent foo() -> integer { 2 }" result1.updatedCache)
+    -- Pass 1: moda is freshly compiled and its type error is reported.
+    hasErrors result1.diagnostics `shouldBe` True
+    -- Pass 2: moda's source is unchanged so its error must still be present.
+    hasErrors result2.diagnostics `shouldBe` True
 
 -- ===========================================================================
 -- Exhaustiveness diagnostics (K0290 / K0291 / K0292)

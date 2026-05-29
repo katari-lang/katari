@@ -279,7 +279,7 @@ walkParameter ParameterBinding {annotation, label, pattern, sourceSpan} = do
 walkPattern :: Pattern Constrained -> Zonk (Pattern Zonked)
 walkPattern = \case
   PatternVariable VariablePattern {name, typeAnnotation, sourceSpan, typeOf} -> do
-    typeOf' <- zonkPatternTypedata sourceSpan typeOf
+    typeOf' <- zonkType sourceSpan typeOf
     pure
       ( PatternVariable
           VariablePattern
@@ -290,7 +290,7 @@ walkPattern = \case
             }
       )
   PatternWildcard WildcardPattern {typeAnnotation, sourceSpan, typeOf} -> do
-    typeOf' <- zonkPatternTypedata sourceSpan typeOf
+    typeOf' <- zonkType sourceSpan typeOf
     pure
       ( PatternWildcard
           WildcardPattern
@@ -300,7 +300,7 @@ walkPattern = \case
             }
       )
   PatternLiteral LiteralPattern {value, sourceSpan, typeOf} -> do
-    typeOf' <- zonkPatternTypedata sourceSpan typeOf
+    typeOf' <- zonkType sourceSpan typeOf
     pure
       ( PatternLiteral
           LiteralPattern
@@ -311,7 +311,7 @@ walkPattern = \case
       )
   PatternTuple TuplePattern {elements, sourceSpan, typeOf} -> do
     elements' <- mapM walkPattern elements
-    typeOf' <- zonkPatternTypedata sourceSpan typeOf
+    typeOf' <- zonkType sourceSpan typeOf
     pure
       ( PatternTuple
           TuplePattern
@@ -322,7 +322,7 @@ walkPattern = \case
       )
   PatternQualifiedConstructor QualifiedConstructorPattern {moduleQualifier, constructorName, parameters, sourceSpan, typeOf} -> do
     parameters' <- traverse (\(label, sub) -> (,) (retagNameRef label) <$> walkPattern sub) parameters
-    typeOf' <- zonkPatternTypedata sourceSpan typeOf
+    typeOf' <- zonkType sourceSpan typeOf
     pure
       ( PatternQualifiedConstructor
           QualifiedConstructorPattern
@@ -335,7 +335,7 @@ walkPattern = \case
       )
   PatternType TypePattern {typeTag, inner, sourceSpan, typeOf} -> do
     inner' <- walkPattern inner
-    typeOf' <- zonkPatternTypedata sourceSpan typeOf
+    typeOf' <- zonkType sourceSpan typeOf
     pure
       ( PatternType
           TypePattern
@@ -347,7 +347,7 @@ walkPattern = \case
       )
   PatternRecord RecordPattern {entries, sourceSpan, typeOf} -> do
     entries' <- traverse (\(entryLabel, sub) -> (entryLabel,) <$> walkPattern sub) entries
-    typeOf' <- zonkPatternTypedata sourceSpan typeOf
+    typeOf' <- zonkType sourceSpan typeOf
     pure
       ( PatternRecord
           RecordPattern
@@ -356,18 +356,6 @@ walkPattern = \case
               typeOf = typeOf'
             }
       )
-
--- | Resolve the @typeOf@ payload of a 'Constrained' pattern (a
--- 'SemanticType Unresolved') to its 'Resolved' form for the 'Zonked'
--- phase. Type-family equations make the input and output types align.
-zonkPatternTypedata :: SourceSpan -> SemanticType Unresolved -> Zonk (SemanticType Resolved)
-zonkPatternTypedata = zonkType
-
--- | Same as 'zonkPatternTypedata' but for expression nodes; kept as a
--- separate name so that future divergence (different propagation rules)
--- doesn't ripple through call sites.
-zonkExpressionTypedata :: SourceSpan -> SemanticType Unresolved -> Zonk (SemanticType Resolved)
-zonkExpressionTypedata = zonkType
 
 -- ---------------------------------------------------------------------------
 -- Block / where / state vars / handlers
@@ -505,12 +493,12 @@ walkExpression = \case
 
 walkLiteralExpr :: LiteralExpression Constrained -> Zonk (LiteralExpression Zonked)
 walkLiteralExpr LiteralExpression {value, sourceSpan, typeOf} = do
-  typeOf' <- zonkExpressionTypedata sourceSpan typeOf
+  typeOf' <- zonkType sourceSpan typeOf
   pure LiteralExpression {value = value, sourceSpan = sourceSpan, typeOf = typeOf'}
 
 walkVariableExpr :: VariableExpression Constrained -> Zonk (VariableExpression Zonked)
 walkVariableExpr VariableExpression {name, sourceSpan, typeOf} = do
-  typeOf' <- zonkExpressionTypedata sourceSpan typeOf
+  typeOf' <- zonkType sourceSpan typeOf
   pure
     VariableExpression
       { name = retagNameRef name,
@@ -521,26 +509,26 @@ walkVariableExpr VariableExpression {name, sourceSpan, typeOf} = do
 walkTupleExpr :: TupleExpression Constrained -> Zonk (TupleExpression Zonked)
 walkTupleExpr TupleExpression {elements, sourceSpan, typeOf} = do
   elements' <- mapM walkExpression elements
-  typeOf' <- zonkExpressionTypedata sourceSpan typeOf
+  typeOf' <- zonkType sourceSpan typeOf
   pure TupleExpression {elements = elements', sourceSpan = sourceSpan, typeOf = typeOf'}
 
 walkArrayExpr :: ArrayExpression Constrained -> Zonk (ArrayExpression Zonked)
 walkArrayExpr ArrayExpression {elements, sourceSpan, typeOf} = do
   elements' <- mapM walkExpression elements
-  typeOf' <- zonkExpressionTypedata sourceSpan typeOf
+  typeOf' <- zonkType sourceSpan typeOf
   pure ArrayExpression {elements = elements', sourceSpan = sourceSpan, typeOf = typeOf'}
 
 walkRecordExpr :: RecordExpression Constrained -> Zonk (RecordExpression Zonked)
 walkRecordExpr RecordExpression {entries, sourceSpan, typeOf} = do
   entries' <- mapM (\(lbl, e) -> (lbl,) <$> walkExpression e) entries
-  typeOf' <- zonkExpressionTypedata sourceSpan typeOf
+  typeOf' <- zonkType sourceSpan typeOf
   pure RecordExpression {entries = entries', sourceSpan = sourceSpan, typeOf = typeOf'}
 
 walkCallExpr :: CallExpression Constrained -> Zonk (CallExpression Zonked)
 walkCallExpr CallExpression {callee, arguments, sourceSpan, typeOf} = do
   callee' <- walkExpression callee
   arguments' <- mapM walkCallArgument arguments
-  typeOf' <- zonkExpressionTypedata sourceSpan typeOf
+  typeOf' <- zonkType sourceSpan typeOf
   pure
     CallExpression
       { callee = callee',
@@ -563,7 +551,7 @@ walkBinaryExpr :: BinaryOperatorExpression Constrained -> Zonk (BinaryOperatorEx
 walkBinaryExpr BinaryOperatorExpression {operator, left, right, sourceSpan, typeOf} = do
   left' <- walkExpression left
   right' <- walkExpression right
-  typeOf' <- zonkExpressionTypedata sourceSpan typeOf
+  typeOf' <- zonkType sourceSpan typeOf
   pure
     BinaryOperatorExpression
       { operator = operator,
@@ -576,7 +564,7 @@ walkBinaryExpr BinaryOperatorExpression {operator, left, right, sourceSpan, type
 walkUnaryExpr :: UnaryOperatorExpression Constrained -> Zonk (UnaryOperatorExpression Zonked)
 walkUnaryExpr UnaryOperatorExpression {operator, operand, sourceSpan, typeOf} = do
   operand' <- walkExpression operand
-  typeOf' <- zonkExpressionTypedata sourceSpan typeOf
+  typeOf' <- zonkType sourceSpan typeOf
   pure
     UnaryOperatorExpression
       { operator = operator,
@@ -590,7 +578,7 @@ walkIfExpr IfExpression {condition, thenBlock, elseBlock, sourceSpan, typeOf} = 
   condition' <- walkExpression condition
   thenBlock' <- walkBlock thenBlock
   elseBlock' <- traverse walkBlock elseBlock
-  typeOf' <- zonkExpressionTypedata sourceSpan typeOf
+  typeOf' <- zonkType sourceSpan typeOf
   pure
     IfExpression
       { condition = condition',
@@ -604,7 +592,7 @@ walkMatchExpr :: MatchExpression Constrained -> Zonk (MatchExpression Zonked)
 walkMatchExpr MatchExpression {subject, cases, sourceSpan, typeOf} = do
   subject' <- walkExpression subject
   cases' <- mapM walkCaseArm cases
-  typeOf' <- zonkExpressionTypedata sourceSpan typeOf
+  typeOf' <- zonkType sourceSpan typeOf
   pure
     MatchExpression
       { subject = subject',
@@ -625,7 +613,7 @@ walkForExpr ForExpression {parallel, inBindings, varBindings, body, thenBlock, s
   varBindings' <- mapM walkForVarBinding varBindings
   body' <- walkBlock body
   thenBlock' <- traverse walkBlock thenBlock
-  typeOf' <- zonkExpressionTypedata sourceSpan typeOf
+  typeOf' <- zonkType sourceSpan typeOf
   pure
     ForExpression
       { parallel = parallel,
@@ -657,13 +645,13 @@ walkForVarBinding ForVarBinding {name, typeAnnotation, initial, sourceSpan} = do
 walkBlockExpr :: BlockExpression Constrained -> Zonk (BlockExpression Zonked)
 walkBlockExpr BlockExpression {block, sourceSpan, typeOf} = do
   block' <- walkBlock block
-  typeOf' <- zonkExpressionTypedata sourceSpan typeOf
+  typeOf' <- zonkType sourceSpan typeOf
   pure BlockExpression {block = block', sourceSpan = sourceSpan, typeOf = typeOf'}
 
 walkFieldAccessExpr :: FieldAccessExpression Constrained -> Zonk (FieldAccessExpression Zonked)
 walkFieldAccessExpr FieldAccessExpression {object, fieldName, sourceSpan, typeOf} = do
   object' <- walkExpression object
-  typeOf' <- zonkExpressionTypedata sourceSpan typeOf
+  typeOf' <- zonkType sourceSpan typeOf
   pure
     FieldAccessExpression
       { object = object',
@@ -676,7 +664,7 @@ walkIndexAccessExpr :: IndexAccessExpression Constrained -> Zonk (IndexAccessExp
 walkIndexAccessExpr IndexAccessExpression {array, index, sourceSpan, typeOf} = do
   array' <- walkExpression array
   index' <- walkExpression index
-  typeOf' <- zonkExpressionTypedata sourceSpan typeOf
+  typeOf' <- zonkType sourceSpan typeOf
   pure
     IndexAccessExpression
       { array = array',
@@ -688,7 +676,7 @@ walkIndexAccessExpr IndexAccessExpression {array, index, sourceSpan, typeOf} = d
 walkTemplateExpr :: TemplateExpression Constrained -> Zonk (TemplateExpression Zonked)
 walkTemplateExpr TemplateExpression {elements, sourceSpan, typeOf} = do
   elements' <- mapM walkTemplateElement elements
-  typeOf' <- zonkExpressionTypedata sourceSpan typeOf
+  typeOf' <- zonkType sourceSpan typeOf
   pure
     TemplateExpression
       { elements = elements',
@@ -706,7 +694,7 @@ walkTemplateElement = \case
 
 walkQualifiedReferenceExpr :: QualifiedReferenceExpression Constrained -> Zonk (QualifiedReferenceExpression Zonked)
 walkQualifiedReferenceExpr QualifiedReferenceExpression {moduleQualifier, target, sourceSpan, typeOf} = do
-  typeOf' <- zonkExpressionTypedata sourceSpan typeOf
+  typeOf' <- zonkType sourceSpan typeOf
   pure
     QualifiedReferenceExpression
       { moduleQualifier = retagNameRef moduleQualifier,
@@ -728,7 +716,7 @@ walkHandleExpr HandleExpression {parallel, stateVariables, handlers, thenClause,
       )
       thenClause
   body' <- walkBlock body
-  typeOf' <- zonkExpressionTypedata sourceSpan typeOf
+  typeOf' <- zonkType sourceSpan typeOf
   pure
     HandleExpression
       { parallel = parallel,
@@ -743,13 +731,13 @@ walkHandleExpr HandleExpression {parallel, stateVariables, handlers, thenClause,
 walkParTupleExpr :: ParTupleExpression Constrained -> Zonk (ParTupleExpression Zonked)
 walkParTupleExpr ParTupleExpression {elements, sourceSpan, typeOf} = do
   elements' <- mapM walkExpression elements
-  typeOf' <- zonkExpressionTypedata sourceSpan typeOf
+  typeOf' <- zonkType sourceSpan typeOf
   pure ParTupleExpression {elements = elements', sourceSpan = sourceSpan, typeOf = typeOf'}
 
 walkParArrayExpr :: ParArrayExpression Constrained -> Zonk (ParArrayExpression Zonked)
 walkParArrayExpr ParArrayExpression {elements, sourceSpan, typeOf} = do
   elements' <- mapM walkExpression elements
-  typeOf' <- zonkExpressionTypedata sourceSpan typeOf
+  typeOf' <- zonkType sourceSpan typeOf
   pure ParArrayExpression {elements = elements', sourceSpan = sourceSpan, typeOf = typeOf'}
 
 -- ===========================================================================

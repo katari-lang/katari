@@ -22,14 +22,10 @@ import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 import GHC.Generics (Generic)
-import Katari.AST qualified as AST
 import Katari.Compile (ModuleCache (..))
 import Katari.Diagnostic (Diagnostic)
-import Katari.Lowering (ModuleLoweringResult (..))
+import Katari.Lowering (ModuleLoweringResult)
 import Katari.Schema (SchemaEntry)
-import Katari.SourceSpan (Position (..), SourceSpan (..))
-import Katari.Typechecker.Identifier (ModuleData (..))
-import Katari.Typechecker.ModuleInterface (ModuleInterface (..))
 import System.Directory (doesFileExist)
 
 -- | On-disk cache for all modules.
@@ -96,7 +92,7 @@ toDiskCache updatedCache =
                 { sourceHash = mc.cacheSourceHash,
                   loweringResult = mc.cacheLoweringResult,
                   schemaEntries = mc.cacheSchemaEntries,
-                  diagnostics = mc.cacheDiagnostics
+                  diagnostics = mc.cacheLoweringDiagnostics
                 }
           )
           updatedCache
@@ -112,24 +108,7 @@ applyDiskCache (DiskCache entries) =
     toModuleCache entry =
       ModuleCache
         { cacheSourceHash = entry.sourceHash,
-          cacheImports = [],
-          cacheIdentifierVariables = Map.empty,
-          cacheIdentifierTypes = Map.empty,
-          cacheIdentifierRequests = Map.empty,
-          cacheIdentifierConstructors = Map.empty,
-          cacheModuleData = ModuleData {moduleSourceSpan = emptySpan},
-          cacheModuleExports = Map.empty,
-          cacheModuleTopLevel = Map.empty,
-          cacheInterface = ModuleInterface {exportedTypes = Map.empty},
-          cacheDataAnnotations = Map.empty,
           cacheLoweringResult = entry.loweringResult,
           cacheSchemaEntries = entry.schemaEntries,
-          cacheDiagnostics = entry.diagnostics
-        }
-
-    emptySpan =
-      SrcSpan
-        { filePath = "",
-          start = Position {line = 0, column = 0},
-          end = Position {line = 0, column = 0}
+          cacheLoweringDiagnostics = entry.diagnostics
         }

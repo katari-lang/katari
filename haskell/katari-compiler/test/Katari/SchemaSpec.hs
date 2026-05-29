@@ -44,6 +44,7 @@ spec = describe "Katari.Schema" $ do
   unionCompactionSpec
   schemaCoreJsonSpec
   descriptionEndToEndSpec
+  secretGuardSpec
 
 toJsonSchemaSpec :: Spec
 toJsonSchemaSpec = describe "toJsonSchema (SemanticType -> JsonSchema)" $ do
@@ -172,6 +173,25 @@ schemaCoreJsonSpec = describe "SchemaCore JSON output (valid JSON Schema)" $ do
 -- ===========================================================================
 -- Phase 17: annotation → description end-to-end
 -- ===========================================================================
+
+secretGuardSpec :: Spec
+secretGuardSpec = describe "secret credential guard" $ do
+  let src =
+        "agent withSecret(s = s: secret) -> string { \"ok\" }\n\
+        \agent plain(n = n: integer) -> integer { n }"
+      result =
+        compileSync
+          CompileInput
+            { sources = Map.singleton "main" SourceEntry {filePath = "main", sourceText = src},
+              cache = Map.empty
+            }
+      entries = case result.schemaEntries of
+        Just es -> es
+        Nothing -> error ("compile failed: " <> show (map (.code) result.diagnostics))
+  it "hides a callable with a secret parameter from the schema bundle" $
+    findEntry "main.withSecret" entries `shouldBe` Nothing
+  it "keeps non-secret callables in the bundle" $
+    fmap (.name) (findEntry "main.plain" entries) `shouldBe` Just "main.plain"
 
 descriptionEndToEndSpec :: Spec
 descriptionEndToEndSpec = describe "annotation → description (end-to-end)" $ do
