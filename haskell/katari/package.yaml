@@ -30,11 +30,6 @@ executables:
   katari:
     main: Main.hs
     source-dirs: app
-    # -threaded + -N let the per-module identify (parMap) and typecheck
-    # (Async) pipelines actually run on multiple cores.
-    ghc-options:
-      - -threaded
-      - -with-rtsopts=-N
     dependencies:
       - katari
       - optparse-applicative

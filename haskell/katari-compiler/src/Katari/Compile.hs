@@ -36,14 +36,11 @@ module Katari.Compile
   )
 where
 
-import Control.Concurrent.Async (Async, async, wait)
-import Control.Parallel.Strategies (parMap, rseq)
+import Control.Monad (foldM)
 import Data.Foldable (for_)
 import Data.Hashable (hash)
-import Data.IORef (modifyIORef', newIORef, readIORef)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (mapMaybe)
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
@@ -186,12 +183,13 @@ compile emitLog input = do
           allParsed
       orderedModules = compilationOrder Stdlib.stdlibModuleNames allParsed
 
-  -- Typecheck every module (per-module, Async; each task waits for its
-  -- direct imports' tasks so cross-module types are available).
+  -- Typecheck every module in dependency order (each module only needs its
+  -- imports' interfaces). Parallelisable one topological level at a time;
+  -- see the note on parallelism in 'typecheckModules'.
   let primRules = Map.mapMaybe (.variablePrimRule) idResult.variables
       knownRequests = Map.keysSet idResult.requests
   (zonkedModulesMap, typeEnvMap, typecheckDiags) <-
-    typecheckModulesAsync emitLog idResult primRules knownRequests orderedModules directDeps
+    typecheckModules emitLog idResult primRules knownRequests orderedModules directDeps
 
   -- Exhaustiveness.
   let topLevelTypes =
@@ -230,8 +228,7 @@ compile emitLog input = do
       reuseFromCache moduleName =
         not (Set.member moduleName invalidModules) && Map.member moduleName input.cache
 
-  -- Lowering: cached modules restore their fragment; the rest lower fresh
-  -- (in parallel).
+  -- Lowering: cached modules restore their fragment; the rest lower fresh.
   let dataAnnotations =
         Map.unions
           [ collectDataAnnotations idResult.variables m
@@ -260,10 +257,12 @@ compile emitLog input = do
                         reuseFromCache moduleName,
                         Just cached <- [Map.lookup moduleName input.cache]
                     ]
+                -- Per-module and independent: this 'map' could become a
+                -- 'parMap' once 'ModuleLoweringResult' has an NFData instance
+                -- to force the work onto worker threads. Sequential for now.
                 freshLowering =
                   Map.fromList
-                    ( parMap
-                        rseq
+                    ( map
                         ( \(moduleName, moduleAST) ->
                             let localEnv = Map.findWithDefault Map.empty moduleName typeEnvMap
                                 (result, errors) = lowerModule lowerContext moduleName localEnv moduleAST
@@ -402,11 +401,13 @@ identifyProgram trustedStdlibNames moduleMap =
           identifyModule allModuleData depExports allModuleNames trustedStdlibNames moduleName (moduleMap Map.! moduleName)
         )
       -- Modules within a level are mutually independent (every dependency is
-      -- in an earlier level), so identify them in parallel; export tables
-      -- accumulate between levels.
+      -- in an earlier level), so a level is embarrassingly parallel: this
+      -- 'map' could become a 'parMap' once 'ModuleIdentifyResult' has an
+      -- NFData instance to force the work onto worker threads. Export tables
+      -- accumulate between levels. Sequential for now.
       runLevels _ [] = []
       runLevels depExports (level : rest) =
-        let levelResults = parMap rseq (identifyOne depExports) level
+        let levelResults = map (identifyOne depExports) level
             depExports' =
               Map.union depExports (Map.fromList [(m, r.moduleExportTable) | (m, r) <- levelResults])
          in levelResults ++ runLevels depExports' rest
@@ -447,11 +448,11 @@ compilationOrder :: Set Text -> Map Text (Module Parsed) -> [Text]
 compilationOrder trustedStdlibNames moduleMap = concat (compilationLevels trustedStdlibNames moduleMap)
 
 -- ===========================================================================
--- Per-module Async typecheck pipeline
+-- Per-module typecheck pipeline
 -- ===========================================================================
 
--- | Per-module typecheck task output. Downstream tasks @wait@ for their
--- imports' results and read 'taskExportedTypes' to feed their own typecheck.
+-- | Per-module typecheck output. Each module reads its imports'
+-- 'taskExportedTypes' to seed its own typecheck.
 data TypecheckTaskResult = TypecheckTaskResult
   { taskZonkedModule :: Module Zonked,
     taskTypeEnvironment :: Map VariableResolution (SemanticType Resolved),
@@ -459,7 +460,16 @@ data TypecheckTaskResult = TypecheckTaskResult
     taskDiagnostics :: [Diagnostic]
   }
 
-typecheckModulesAsync ::
+-- | Typecheck every module in dependency order, threading each module's
+-- exported types forward so its importers can read them.
+--
+-- A module needs only its direct imports' interfaces, so this is
+-- parallelisable one topological level at a time (see 'compilationLevels')
+-- via Async + an NFData instance that forces the per-module work onto worker
+-- threads. Kept sequential for now: without forcing, parMap/Async evaluate
+-- only to WHNF and leave the heavy inference as thunks for the main thread,
+-- so the parallelism would not pay off.
+typecheckModules ::
   (CompileLog -> IO ()) ->
   IdentifyResult ->
   Map QualifiedName PrimRule ->
@@ -471,34 +481,36 @@ typecheckModulesAsync ::
       Map ModuleName (Map VariableResolution (SemanticType Resolved)),
       [Diagnostic]
     )
-typecheckModulesAsync emitLog idResult primRules knownRequests orderedModules directDeps = do
-  tasksRef <- newIORef Map.empty
-  for_ orderedModules $ \modName -> do
-    existing <- readIORef tasksRef
-    let depTasks = mapMaybe (`Map.lookup` existing) (Map.findWithDefault [] modName directDeps)
-    task <- async (runTypecheckTask emitLog idResult primRules knownRequests modName depTasks)
-    modifyIORef' tasksRef (Map.insert modName task)
-  tasks <- readIORef tasksRef
-  results <- traverse wait tasks
+typecheckModules emitLog idResult primRules knownRequests orderedModules directDeps = do
+  (_, results) <- foldM step (Map.empty, Map.empty) orderedModules
   pure
     ( Map.map (.taskZonkedModule) results,
       Map.map (.taskTypeEnvironment) results,
       concatMap (.taskDiagnostics) (Map.elems results)
     )
+  where
+    step (exportedSoFar, acc) moduleName = do
+      emitLog (CompileLogTypechecking moduleName)
+      let importedTypes =
+            Map.unions
+              [ Map.findWithDefault Map.empty depName exportedSoFar
+                | depName <- Map.findWithDefault [] moduleName directDeps
+              ]
+          result = typecheckOne idResult primRules knownRequests moduleName importedTypes
+      pure
+        ( Map.insert moduleName result.taskExportedTypes exportedSoFar,
+          Map.insert moduleName result acc
+        )
 
-runTypecheckTask ::
-  (CompileLog -> IO ()) ->
+typecheckOne ::
   IdentifyResult ->
   Map QualifiedName PrimRule ->
   Set QualifiedName ->
   ModuleName ->
-  [Async TypecheckTaskResult] ->
-  IO TypecheckTaskResult
-runTypecheckTask emitLog idResult primRules knownRequests moduleName depTasks = do
-  depResults <- mapM wait depTasks
-  emitLog (CompileLogTypechecking moduleName)
-  let importedTypes = Map.unions (map (.taskExportedTypes) depResults)
-      moduleAST =
+  Map QualifiedName (SemanticType Resolved) ->
+  TypecheckTaskResult
+typecheckOne idResult primRules knownRequests moduleName importedTypes =
+  let moduleAST =
         Map.findWithDefault
           Module {declarations = [], sourceSpan = emptySourceSpan}
           moduleName
@@ -514,13 +526,12 @@ runTypecheckTask emitLog idResult primRules knownRequests moduleName depTasks = 
             importedTypes = importedTypes
           }
       result = typecheckModule subject
-  pure
-    TypecheckTaskResult
-      { taskZonkedModule = result.zonkedModule,
-        taskTypeEnvironment = result.localTypeEnv,
-        taskExportedTypes = result.moduleInterface.exportedTypes,
-        taskDiagnostics = result.diagnostics
-      }
+   in TypecheckTaskResult
+        { taskZonkedModule = result.zonkedModule,
+          taskTypeEnvironment = result.localTypeEnv,
+          taskExportedTypes = result.moduleInterface.exportedTypes,
+          taskDiagnostics = result.diagnostics
+        }
 
 -- ===========================================================================
 -- Cache invalidation

@@ -46,7 +46,7 @@ where
 
 import Control.Monad (foldM, when)
 import Control.Monad.State.Strict (State, get, gets, modify, put, runState)
-import Data.Foldable (foldl', for_)
+import Data.Foldable (foldl')
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (isJust)
@@ -487,10 +487,6 @@ registerType qualifiedName typeData = do
     Nothing -> pure ()
   modify $ \state -> state {types = Map.insert qualifiedName typeData state.types}
 
-registerModule :: Text -> ModuleData -> Identifier ()
-registerModule moduleName moduleData =
-  modify $ \state -> state {modules = Map.insert moduleName moduleData state.modules}
-
 registerRequest :: QualifiedName -> RequestData -> Identifier ()
 registerRequest qualifiedName requestData =
   modify $ \state ->
@@ -777,51 +773,8 @@ labelRef :: NameRef Parsed LabelRef -> NameRef Identified LabelRef
 labelRef = identifiedNameRef ()
 
 -- ---------------------------------------------------------------------------
--- Phase 0: import cycle reporting
+-- Module-name helper
 -- ---------------------------------------------------------------------------
-
--- | Emit an 'ErrorImportCycle' for one cycle returned by 'findImportCycles'.
--- The diagnostic span is taken from the first module in the cycle (every
--- name in the cycle is guaranteed to be present in @moduleMap@ because
--- 'findImportCycles' constructs the graph from that same map).
-emitImportCycleError :: Map Text (Module Parsed) -> [Text] -> Identifier ()
-emitImportCycleError moduleMap = \case
-  [] -> pure ()
-  cycle_@(m : _) ->
-    case Map.lookup m moduleMap of
-      Just module_ -> emitError (ErrorImportCycle module_.sourceSpan cycle_)
-      Nothing -> pure ()
-
--- ---------------------------------------------------------------------------
--- Phase 0': prim namespace preregistration
--- ---------------------------------------------------------------------------
-
--- ---------------------------------------------------------------------------
--- Module registration
--- ---------------------------------------------------------------------------
-
--- | Register each input module's 'ModuleData' (its file-level source span).
--- User-defined modules under the reserved @prim@ / @prim.*@ namespace are
--- flagged with 'ErrorReservedPrimitiveModule' (K0113) but still registered,
--- so downstream phases can keep walking; the prim injection skips them.
---
--- @trustedStdlibNames@ holds module names that the compiler itself owns
--- (see 'Katari.Stdlib'); K0113 is skipped for them.
-registerAllModules :: Set Text -> Map Text (Module Parsed) -> Identifier ()
-registerAllModules trustedStdlibNames moduleMap =
-  mapM_ registerOne (Map.toList moduleMap)
-  where
-    registerOne (moduleName, parsedModule) = do
-      when
-        ( Prim.isPrimReservedModuleName moduleName
-            && not (Set.member moduleName trustedStdlibNames)
-        )
-        $ emitError (ErrorReservedPrimitiveModule parsedModule.sourceSpan moduleName)
-      registerModule
-        moduleName
-        ModuleData
-          { moduleSourceSpan = parsedModule.sourceSpan
-          }
 
 -- | Extract @"module"@ from @"path.to.module"@. Returns the empty string if
 -- given an empty input (the parser should never produce one, but this guards
