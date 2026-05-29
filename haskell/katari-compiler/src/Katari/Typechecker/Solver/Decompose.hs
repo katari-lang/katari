@@ -182,6 +182,7 @@ shapeKind = \case
   SemanticTypeString -> Just "string"
   SemanticTypeLiteralString _ -> Just "string"
   SemanticTypeSecret -> Just "secret"
+  SemanticTypeFile -> Just "file"
   SemanticTypeBoolean -> Just "boolean"
   SemanticTypeLiteralBoolean _ -> Just "boolean"
   SemanticTypeFunction {} -> Just "function"

@@ -398,6 +398,12 @@ toCore dataDefs visited = \case
   -- unreachable on the bundle path. Kept as a defensive no-op (maximally
   -- permissive 'SchemaCoreUnknown') so a stray internal call can't crash.
   SemanticTypeSecret -> SchemaCoreUnknown
+  -- 'file' is carried on the wire as a value reference @{"$ref": {...},
+  -- "as": "file", "hash": ..., "size": ...}@ (a blob handle). The AI
+  -- cannot produce a file inline; file params are supplied by
+  -- orchestration. The schema documents the reference shape for
+  -- validation of runtime-passed refs.
+  SemanticTypeFile -> fileRefCore
   SemanticTypeLiteralInteger n -> SchemaCoreConst {value = toJSON n}
   SemanticTypeLiteralString s -> SchemaCoreConst {value = toJSON s}
   SemanticTypeLiteralBoolean b -> SchemaCoreConst {value = toJSON b}
@@ -479,6 +485,27 @@ callableRefCore =
           (plain SchemaCoreString {schemaEnum = []}),
       required = Set.singleton callableDiscriminatorKey,
       additionalProperties = False
+    }
+
+-- | Reserved JSON-Schema property name carrying a value reference (blob
+-- handle) for @file@ values.
+fileRefDiscriminatorKey :: Text
+fileRefDiscriminatorKey = "$ref"
+
+-- | Schema for a @file@ value reference: the @"$ref"@ handle object plus
+-- @as@ / @hash@ / @size@ metadata. See docs/2026-05-30-value-and-streaming.md §11.
+fileRefCore :: SchemaCore
+fileRefCore =
+  SchemaCoreObject
+    { properties =
+        Map.fromList
+          [ (fileRefDiscriminatorKey, plain SchemaCoreUnknown),
+            ("as", plain SchemaCoreConst {value = toJSON ("file" :: Text)}),
+            ("hash", plain SchemaCoreString {schemaEnum = []}),
+            ("size", plain SchemaCoreInteger {minimum = Nothing, maximum = Nothing})
+          ],
+      required = Set.fromList [fileRefDiscriminatorKey, "as", "hash"],
+      additionalProperties = True
     }
 
 -- | Compact a union of string-literal types into a single string-enum

@@ -165,6 +165,7 @@ data Keyword where
   KeywordNumber :: Keyword
   KeywordString :: Keyword
   KeywordSecret :: Keyword
+  KeywordFile :: Keyword
   KeywordType :: Keyword
   KeywordNever :: Keyword
   KeywordUnknown :: Keyword
@@ -602,6 +603,7 @@ lexKeywordText = \case
   KeywordNumber -> "number"
   KeywordString -> "string"
   KeywordSecret -> "secret"
+  KeywordFile -> "file"
   KeywordType -> "type"
   KeywordNever -> "never"
   KeywordUnknown -> "unknown"
@@ -950,6 +952,7 @@ insertVirtualSemicolons = go (0 :: Int) Nothing
       KatariTokenKeyword KeywordBoolean -> True
       KatariTokenKeyword KeywordNumber -> True
       KatariTokenKeyword KeywordString -> True
+      KatariTokenKeyword KeywordFile -> True
       KatariTokenKeyword KeywordNever -> True
       KatariTokenKeyword KeywordUnknown -> True
       KatariTokenPunctuation PunctuationRightParenthesis -> True

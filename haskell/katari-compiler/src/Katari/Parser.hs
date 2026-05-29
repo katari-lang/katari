@@ -1855,6 +1855,7 @@ parseAtomicType =
       parsePrimitiveType PrimitiveTypeKindNumber KeywordNumber,
       parsePrimitiveType PrimitiveTypeKindString KeywordString,
       parsePrimitiveType PrimitiveTypeKindSecret KeywordSecret,
+      parsePrimitiveType PrimitiveTypeKindFile KeywordFile,
       parsePrimitiveType PrimitiveTypeKindBoolean KeywordBoolean,
       parseNeverType,
       parseUnknownType,
