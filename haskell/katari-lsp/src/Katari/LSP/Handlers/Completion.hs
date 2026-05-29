@@ -31,7 +31,6 @@ import Data.Vector qualified as Vector
 import Katari.Compile (CompileResult (..))
 import Katari.LSP.Convert (lspPositionToKatari)
 import Katari.LSP.State (ServerState, lookupCompileResult)
-import Katari.Query qualified as Query
 import Katari.Query.Completion qualified as Comp
 import Katari.SourceSpan qualified as K
 import Language.LSP.Protocol.Lens qualified as L

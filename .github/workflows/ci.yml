@@ -20,7 +20,7 @@ jobs:
         with:
           ghc-version: "9.6.7"
           enable-stack: true
-          stack-version: latest
+          stack-version: "3.7.1"
 
       - name: Resolve cache key inputs
         id: cache-key
@@ -32,9 +32,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ steps.setup.outputs.stack-root }}
-          key: ${{ runner.os }}-stack-${{ steps.cache-key.outputs.snapshot }}-${{ hashFiles('stack.yaml', 'stack.yaml.lock', 'haskell/**/package.yaml') }}
+          key: ${{ runner.os }}-stack-v2-${{ steps.cache-key.outputs.snapshot }}-${{ hashFiles('stack.yaml', 'stack.yaml.lock', 'haskell/**/package.yaml') }}
           restore-keys: |
-            ${{ runner.os }}-stack-${{ steps.cache-key.outputs.snapshot }}-
+            ${{ runner.os }}-stack-v2-${{ steps.cache-key.outputs.snapshot }}-
 
       - name: Cache .stack-work
         uses: actions/cache@v4
@@ -42,9 +42,9 @@ jobs:
           path: |
             .stack-work
             haskell/*/.stack-work
-          key: ${{ runner.os }}-stackwork-${{ steps.cache-key.outputs.snapshot }}-${{ hashFiles('haskell/**/*.hs', 'haskell/**/package.yaml') }}
+          key: ${{ runner.os }}-stackwork-v2-${{ steps.cache-key.outputs.snapshot }}-${{ hashFiles('haskell/**/*.hs', 'haskell/**/package.yaml') }}
           restore-keys: |
-            ${{ runner.os }}-stackwork-${{ steps.cache-key.outputs.snapshot }}-
+            ${{ runner.os }}-stackwork-v2-${{ steps.cache-key.outputs.snapshot }}-
 
       - name: Build
         run: stack build --fast
@@ -96,7 +96,7 @@ jobs:
         with:
           ghc-version: "9.6.7"
           enable-stack: true
-          stack-version: latest
+          stack-version: "3.7.1"
 
       - name: Resolve cache key inputs
         id: cache-key
@@ -108,9 +108,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ steps.setup.outputs.stack-root }}
-          key: ${{ runner.os }}-stack-${{ steps.cache-key.outputs.snapshot }}-${{ hashFiles('stack.yaml', 'stack.yaml.lock', 'haskell/**/package.yaml') }}
+          key: ${{ runner.os }}-stack-v2-${{ steps.cache-key.outputs.snapshot }}-${{ hashFiles('stack.yaml', 'stack.yaml.lock', 'haskell/**/package.yaml') }}
           restore-keys: |
-            ${{ runner.os }}-stack-${{ steps.cache-key.outputs.snapshot }}-
+            ${{ runner.os }}-stack-v2-${{ steps.cache-key.outputs.snapshot }}-
 
       - name: Cache .stack-work
         uses: actions/cache@v4
@@ -118,9 +118,9 @@ jobs:
           path: |
             .stack-work
             haskell/*/.stack-work
-          key: ${{ runner.os }}-stackwork-${{ steps.cache-key.outputs.snapshot }}-${{ hashFiles('haskell/**/*.hs', 'haskell/**/package.yaml') }}
+          key: ${{ runner.os }}-stackwork-v2-${{ steps.cache-key.outputs.snapshot }}-${{ hashFiles('haskell/**/*.hs', 'haskell/**/package.yaml') }}
           restore-keys: |
-            ${{ runner.os }}-stackwork-${{ steps.cache-key.outputs.snapshot }}-
+            ${{ runner.os }}-stackwork-v2-${{ steps.cache-key.outputs.snapshot }}-
 
       - uses: actions/setup-node@v4
         with:
