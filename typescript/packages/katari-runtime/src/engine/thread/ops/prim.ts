@@ -18,7 +18,7 @@ import { RecoverableEngineError } from "../../errors.js";
 import type { AskId, CallId } from "../../id.js";
 import { executePrim, PrimRaiseRequest } from "../../prim.js";
 import type { StepCtx } from "../../step-ctx.js";
-import type { Value } from "../../value.js";
+import { mkString, type Value } from "../../value.js";
 import { allocAskId, deleteThread, emitThrowEscalate } from "../common.js";
 import type { PrimThread, Thread } from "../types.js";
 import { defaultAskProxy } from "./defaults.js";
@@ -162,14 +162,11 @@ function executeGetMetadata(ctx: StepCtx, args: Record<string, Value>): Value {
     kind: "tagged",
     ctorId: "primitive.agent_metadata",
     fields: {
-      name: { kind: "string", value: agentBlock.name },
-      id: { kind: "string", value: dispatchId },
-      description: {
-        kind: "string",
-        value: agentBlock.description ?? "",
-      },
-      input: { kind: "string", value: agentBlock.inputSchema },
-      output: { kind: "string", value: agentBlock.outputSchema },
+      name: mkString(agentBlock.name),
+      id: mkString(dispatchId),
+      description: mkString(agentBlock.description ?? ""),
+      input: mkString(agentBlock.inputSchema),
+      output: mkString(agentBlock.outputSchema),
     },
   };
 }

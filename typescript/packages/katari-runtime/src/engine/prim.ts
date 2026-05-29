@@ -18,7 +18,7 @@
 import type { QualifiedName } from "../ir/types.js";
 import { RawValueDecodeError, valueFromRaw, valueToRaw } from "../value-codec.js";
 import { RecoverableEngineError } from "./errors.js";
-import type { Value } from "./value.js";
+import { type BytesRep, inlineText, mkSecret, mkString, type Value } from "./value.js";
 
 /**
  * Thrown by a primitive to raise a specific (never-returning) request
@@ -105,9 +105,9 @@ export function executePrim(name: string, args: Record<string, Value>): Value {
         (lhs?.kind === "string" || lhs?.kind === "secret") &&
         (rhs?.kind === "string" || rhs?.kind === "secret")
       ) {
-        const joined = lhs.value + rhs.value;
+        const joined = inlineText(lhs) + inlineText(rhs);
         const tainted = lhs.kind === "secret" || rhs.kind === "secret";
-        return tainted ? { kind: "secret", value: joined } : { kind: "string", value: joined };
+        return tainted ? mkSecret(joined) : mkString(joined);
       }
       throw new RecoverableEngineError("prim concat: invalid args");
     }
@@ -124,7 +124,7 @@ export function executePrim(name: string, args: Record<string, Value>): Value {
           "prim to_string: refusing to stringify a secret value (would launder taint)",
         );
       }
-      return { kind: "string", value: JSON.stringify(valueToRaw(v)) };
+      return mkString(JSON.stringify(valueToRaw(v)));
     }
     case "from_string": {
       const text = req(args, "text");
@@ -135,11 +135,11 @@ export function executePrim(name: string, args: Record<string, Value>): Value {
       }
       let parsed: unknown;
       try {
-        parsed = JSON.parse(text.value);
+        parsed = JSON.parse(inlineText(text));
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         throw new PrimRaiseRequest("primitive.from_string_error", {
-          message: { kind: "string", value: `invalid JSON: ${msg}` },
+          message: mkString(`invalid JSON: ${msg}`),
         });
       }
       try {
@@ -147,7 +147,7 @@ export function executePrim(name: string, args: Record<string, Value>): Value {
       } catch (e) {
         if (e instanceof RawValueDecodeError) {
           throw new PrimRaiseRequest("primitive.from_string_error", {
-            message: { kind: "string", value: e.message },
+            message: mkString(e.message),
           });
         }
         throw e;
@@ -219,15 +219,16 @@ export function executePrim(name: string, args: Record<string, Value>): Value {
       if (value === undefined) {
         throw new RecoverableEngineError("prim type_of: missing arg");
       }
-      return { kind: "string", value: value.kind };
+      return mkString(value.kind);
     }
     case "get_field": {
       const value = args["object"],
         field = args["field"];
       if (value?.kind === "tagged" && field?.kind === "string") {
-        const v = value.fields[field.value];
+        const fieldName = inlineText(field);
+        const v = value.fields[fieldName];
         if (v === undefined) {
-          throw new RecoverableEngineError(`prim get_field: field ${field.value} not found`);
+          throw new RecoverableEngineError(`prim get_field: field ${fieldName} not found`);
         }
         return v;
       }
@@ -247,7 +248,7 @@ export function executePrim(name: string, args: Record<string, Value>): Value {
       if (key.kind !== "string") {
         throw new RecoverableEngineError(`prim record.get: key must be a string, got ${key.kind}`);
       }
-      const v = r.entries[key.value];
+      const v = r.entries[inlineText(key)];
       return v === undefined ? { kind: "null" } : v;
     }
     case "record.set": {
@@ -266,7 +267,7 @@ export function executePrim(name: string, args: Record<string, Value>): Value {
       for (const [k, v] of Object.entries(r.entries)) {
         next[k] = v;
       }
-      next[key.value] = value;
+      next[inlineText(key)] = value;
       return { kind: "record", entries: next };
     }
     case "record.remove": {
@@ -282,10 +283,11 @@ export function executePrim(name: string, args: Record<string, Value>): Value {
           `prim record.remove: key must be a string, got ${key.kind}`,
         );
       }
-      if (!(key.value in r.entries)) return r;
+      const removeKey = inlineText(key);
+      if (!(removeKey in r.entries)) return r;
       const next: Record<string, Value> = Object.create(null);
       for (const [k, v] of Object.entries(r.entries)) {
-        if (k !== key.value) next[k] = v;
+        if (k !== removeKey) next[k] = v;
       }
       return { kind: "record", entries: next };
     }
@@ -296,7 +298,7 @@ export function executePrim(name: string, args: Record<string, Value>): Value {
           `prim record.keys: argument must be a record, got ${r.kind}`,
         );
       }
-      const keys = Object.keys(r.entries).map((k): Value => ({ kind: "string", value: k }));
+      const keys = Object.keys(r.entries).map((k): Value => mkString(k));
       return { kind: "array", elements: keys };
     }
     case "record.has": {
@@ -310,7 +312,7 @@ export function executePrim(name: string, args: Record<string, Value>): Value {
       if (key.kind !== "string") {
         throw new RecoverableEngineError(`prim record.has: key must be a string, got ${key.kind}`);
       }
-      return { kind: "boolean", value: key.value in r.entries };
+      return { kind: "boolean", value: inlineText(key) in r.entries };
     }
     case "record.size": {
       const r = req(args, "record");
@@ -330,11 +332,11 @@ export function executePrim(name: string, args: Record<string, Value>): Value {
       }
       let parsed: unknown;
       try {
-        parsed = JSON.parse(text.value);
+        parsed = JSON.parse(inlineText(text));
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         throw new PrimRaiseRequest("primitive.json_parse_error", {
-          message: { kind: "string", value: `invalid JSON: ${msg}` },
+          message: mkString(`invalid JSON: ${msg}`),
         });
       }
       return jsonToTagged(parsed);
@@ -342,7 +344,7 @@ export function executePrim(name: string, args: Record<string, Value>): Value {
     case "json.stringify": {
       const value = req(args, "value");
       const raw = jsonTaggedToRaw(value);
-      return { kind: "string", value: JSON.stringify(raw) };
+      return mkString(JSON.stringify(raw));
     }
     default:
       throw new RecoverableEngineError(`unknown prim: ${name}`);
@@ -390,7 +392,7 @@ function jsonToTagged(raw: unknown): Value {
     return {
       kind: "tagged",
       ctorId: JSON_STRING_QNAME,
-      fields: { value: { kind: "string", value: raw } },
+      fields: { value: mkString(raw) },
     };
   }
   if (Array.isArray(raw)) {
@@ -454,7 +456,7 @@ function jsonTaggedToRaw(value: Value): unknown {
       if (f?.kind !== "string") {
         throw new RecoverableEngineError("prim json.stringify: json_string.value is not a string");
       }
-      return f.value;
+      return inlineText(f);
     }
     case JSON_ARRAY_QNAME: {
       const items = value.fields["items"];
@@ -543,9 +545,13 @@ export function valueEquals(a: Value, b: Value): boolean {
   }
   switch (a.kind) {
     case "number":
-    case "string":
     case "boolean":
       return a.value === (b as typeof a).value;
+    case "string":
+      return bytesContentEqual(a.rep, (b as typeof a).rep);
+    case "file":
+      // file identity = (module, id). Content is irrelevant.
+      return a.rep.id === (b as typeof a).rep.id && a.rep.module === (b as typeof a).rep.module;
     case "null":
       return true;
     case "array":
@@ -570,7 +576,7 @@ export function valueEquals(a: Value, b: Value): boolean {
     // this with a constant-time compare or remove `secret` from
     // the `eq` prim's input type entirely.
     case "secret":
-      return a.value === (b as typeof a).value;
+      return bytesContentEqual(a.rep, (b as typeof a).rep);
     case "closure":
       return false;
     case "record":
@@ -583,6 +589,18 @@ export function valueEquals(a: Value, b: Value): boolean {
       throw new Error(`valueEquals: unknown value kind: ${(_exhaustive as Value).kind}`);
     }
   }
+}
+
+/**
+ * Content equality for byte-sequence reps (string / secret). Both inline →
+ * text equality; both ref → hash equality. v0.1.0 produces only inline reps,
+ * so the mixed inline/ref case is unreachable here; it requires the async
+ * materialize path (Phase D) and throws if hit early.
+ */
+function bytesContentEqual(a: BytesRep, b: BytesRep): boolean {
+  if (a.kind === "inline" && b.kind === "inline") return a.text === b.text;
+  if (a.kind === "ref" && b.kind === "ref") return a.hash === b.hash;
+  throw new Error("valueEquals: mixed inline/ref content equality requires materialize (Phase D)");
 }
 
 function arrayEqual(xs: Value[], ys: Value[]): boolean {

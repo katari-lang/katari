@@ -7,7 +7,7 @@
 // checks should make this unreachable.
 
 import type { LiteralValue, MatchPattern, TypePatternTag } from "../ir/types.js";
-import type { Value } from "./value.js";
+import { tryInlineString, type Value } from "./value.js";
 
 /** Returns a flat Record<varId, Value> on match, or null on miss. */
 export function tryMatch(pattern: MatchPattern, value: Value): Record<number, Value> | null {
@@ -113,7 +113,7 @@ export function matchLiteral(literal: LiteralValue, value: Value): boolean {
     case "literalValueNumber":
       return value.kind === "number" && value.value === literal.number;
     case "literalValueString":
-      return value.kind === "string" && value.value === literal.string;
+      return value.kind === "string" && tryInlineString(value) === literal.string;
     case "literalValueBoolean":
       return value.kind === "boolean" && value.value === literal.boolean;
     case "literalValueNull":

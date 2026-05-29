@@ -1,53 +1,114 @@
-// Runtime Value type. Identical in shape to the previous machine/value.ts
-// except that closure values are now machine-local id references into
-// `state.closures` (the actual block / captured scope live there). Reasons:
-//   - agent-call-via-closure dispatch needs an opaque id to pass around
-//   - GC can collect closures when no Value still references the id
-//   - keeps Value purely structural, no captured state inside the type
+// Runtime Value type.
+//
+// Design (v0.1.0 value-model rewrite — see docs/2026-05-30-value-and-streaming.md):
+//   - Byte-sequence kinds (`string` / `file` / `secret`) carry a `rep`
+//     (`BytesRep`) instead of an inline `value`. `BytesRep` is either an
+//     inline UTF-8 text or a content-addressed `ref` to a blob.
+//   - v0.1.0 only ever produces the `inline` rep (no storage / promotion
+//     yet). `file` always uses a ref by design, so file values do not
+//     exist until the value store lands (Phase B). `secret` is inline-only
+//     in v0.1.0.
+//   - `ref` carries the owner module + id + content hash/size. `project`
+//     is NOT on the ref (ambient context). v0.1.0 refs are always
+//     `complete` (building/streaming is v0.2).
+//
+// closure values are machine-local id references into `state.closures`;
+// agentLiteral carries only the qualified name (the snapshot axis is
+// added in the per-project-module phase, Phase E).
 
 import type { LiteralValue, QualifiedName } from "../ir/types.js";
 import type { ClosureId } from "./id.js";
 
+/** Owner module of a value reference. `project` is ambient (not carried). */
+export type RefModule = "core" | "ffi" | "api";
+
+/**
+ * Content-addressed reference to a blob. v0.1.0 refs are always complete
+ * (hash/size known). The bytes live in the value store; this is just the
+ * handle. See docs/2026-05-30-value-and-streaming.md §3.
+ */
+export type RefRep = {
+  kind: "ref";
+  module: RefModule;
+  id: string;
+  /** Content hash (complete). Used for dedup + equality. */
+  hash: string;
+  size: number;
+  contentType?: string;
+};
+
+/**
+ * Storage state of a byte sequence: inline UTF-8 text, or a ref to a blob.
+ * file is always a ref (no inline); string/secret are inline in v0.1.0.
+ */
+export type BytesRep = { kind: "inline"; text: string } | RefRep;
+
 export type Value =
   | { kind: "number"; value: number }
-  | { kind: "string"; value: string }
   | { kind: "boolean"; value: boolean }
   | { kind: "null" }
-  // Tuples and arrays share one runtime variant — they're both
-  // ordered sequences of 'Value's. The static type system enforces
-  // arity / homogeneity at compile time; the runtime needs neither
-  // distinction nor a length check beyond what pattern matching
-  // imposes ('MatchPatternTuple' checks 'elements.length' against
-  // the pattern arity). This also makes the raw-JSON boundary
-  // unambiguous: a JSON array decodes to this variant directly.
+  // Byte sequences. `string` is UTF-8 text; `file` is opaque bytes (always
+  // a ref); `secret` is an opaque credential (inline-only in v0.1.0).
+  | { kind: "string"; rep: BytesRep }
+  | { kind: "file"; rep: RefRep }
+  | { kind: "secret"; rep: BytesRep }
+  // Tuples and arrays share one runtime variant — both ordered sequences
+  // of 'Value's. The static type system enforces arity / homogeneity at
+  // compile time. A JSON array decodes to this variant directly.
   | { kind: "array"; elements: Value[] }
   | { kind: "tagged"; ctorId: QualifiedName; fields: Record<string, Value> }
-  // Homogeneous map from string keys to values. Distinct from `tagged`
-  // in that the key set is dynamic (no compile-time-known schema) and
-  // no constructor identity attaches to the value. Maps to the
-  // surface-level `record[K, V]` type.
-  //
-  // Wire form: a plain JSON object that carries none of `$constructor` /
-  // `$agent` / `$secret` discriminator keys. The codec (= Plan D)
-  // routes objects by discriminator priority and falls through to
-  // record when none is present.
+  // Homogeneous map from string keys to values (surface `record[K, V]`).
   | { kind: "record"; entries: Record<string, Value> }
   | { kind: "closure"; closureId: ClosureId }
   // Top-level callable reference (agent / prim / ctor / external).
-  // Carries only the qualified name; the runtime resolves it through
-  // IRModule.entries on dispatch. Distinct from `closure` in that it
-  // captures no lexical scope — GC reachability is bounded by the
-  // value alone.
-  | { kind: "agentLiteral"; qualifiedName: QualifiedName }
-  // Opaque credential string. Disjoint from `string` at the type
-  // level (the type system rejects `print(secret)` and friends);
-  // the runtime keeps the plaintext in-process so taint propagation
-  // through f-string / `format` / `concat` can preserve secrecy
-  // dynamically. Secrets cross the sidecar boundary as plaintext
-  // (sidecar IPC is a same-host trust assumption — see value-codec
-  // for the wire shape) and cross the storage boundary encrypted
-  // via 'value-tree-walk' + 'secret-crypto'.
-  | { kind: "secret"; value: string };
+  | { kind: "agentLiteral"; qualifiedName: QualifiedName };
+
+// ─── Byte-sequence helpers ──────────────────────────────────────────────────
+//
+// v0.1.0 byte sequences are inline-only at construction. These helpers keep
+// the (many) call sites terse and centralise the rep handling so the Phase D
+// materialize path (ref → fetch) has one place to grow.
+
+/** Construct an inline `string` value. */
+export function mkString(text: string): Value {
+  return { kind: "string", rep: { kind: "inline", text } };
+}
+
+/** Construct an inline `secret` value. */
+export function mkSecret(text: string): Value {
+  return { kind: "secret", rep: { kind: "inline", text } };
+}
+
+/** True for `string` / `secret` / `file` (the byte-sequence kinds). */
+export function isBytesValue(
+  v: Value,
+): v is Extract<Value, { kind: "string" | "secret" | "file" }> {
+  return v.kind === "string" || v.kind === "secret" || v.kind === "file";
+}
+
+/**
+ * Read the inline UTF-8 text of a `string` / `secret` value.
+ *
+ * v0.1.0: byte-sequence values are always inline, so this is total for
+ * string/secret. Once refs exist (Phase B/D) callers that may see a ref
+ * must use the async materialize path instead; this helper throws on a
+ * ref so the gap surfaces loudly rather than silently mis-reading.
+ */
+export function inlineText(v: Value): string {
+  if (v.kind !== "string" && v.kind !== "secret") {
+    throw new Error(`inlineText: expected string/secret, got ${v.kind}`);
+  }
+  if (v.rep.kind !== "inline") {
+    throw new Error("inlineText: value is a ref (not yet materializable — Phase D)");
+  }
+  return v.rep.text;
+}
+
+/** Like 'inlineText' but returns null for non-string / non-inline values. */
+export function tryInlineString(v: Value): string | null {
+  if (v.kind === "string" && v.rep.kind === "inline") return v.rep.text;
+  return null;
+}
 
 /** Convert an IR LiteralValue to a runtime Value. */
 export function literalToValue(literal: LiteralValue): Value {
@@ -57,7 +118,7 @@ export function literalToValue(literal: LiteralValue): Value {
     case "literalValueNumber":
       return { kind: "number", value: literal.number };
     case "literalValueString":
-      return { kind: "string", value: literal.string };
+      return mkString(literal.string);
     case "literalValueBoolean":
       return { kind: "boolean", value: literal.boolean };
     case "literalValueNull":
@@ -70,8 +131,5 @@ export function literalToValue(literal: LiteralValue): Value {
 /**
  * Singleton null value. Frozen so accidental mutation by any consumer
  * cannot corrupt every other null reference in the system.
- *
- * Immer treats this as auto-frozen too, so it remains immutable across
- * `produce` boundaries.
  */
 export const NULL_VALUE: Value = Object.freeze({ kind: "null" }) as Value;

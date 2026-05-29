@@ -25,6 +25,7 @@ import {
   encryptValueTree,
   type Logger,
   type Module,
+  tryInlineString,
   type Value,
 } from "@katari-lang/runtime";
 
@@ -250,8 +251,7 @@ export class ApiModule implements Module {
     args: Record<string, Value>,
   ): Promise<{ outbound: ExternalEvent[] }> {
     const msgValue = args["msg"];
-    const message =
-      msgValue !== undefined && msgValue.kind === "string" ? msgValue.value : "runtime error";
+    const message = (msgValue !== undefined && tryInlineString(msgValue)) || "runtime error";
 
     const liveRow = await this.tx.delegations.get(delegationId);
     const rootId = liveRow?.rootDelegationId ?? delegationId;

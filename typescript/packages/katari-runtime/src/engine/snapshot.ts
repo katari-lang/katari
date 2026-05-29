@@ -105,6 +105,7 @@ export type EncryptedEngineCheckpoint = Omit<EngineCheckpoint, never>;
 const VALUE_KIND_TAGS: ReadonlySet<string> = new Set([
   "number",
   "string",
+  "file",
   "boolean",
   "null",
   "array",

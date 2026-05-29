@@ -44,7 +44,7 @@ import type { Endpoint } from "../engine/endpoint.js";
 import type { ExternalEvent } from "../engine/event.js";
 import { createEscalationId, type DelegationId, type EscalationId } from "../engine/id.js";
 import type { Logger } from "../engine/logger.js";
-import type { Value } from "../engine/value.js";
+import { mkString, type Value } from "../engine/value.js";
 import type { Module } from "../module.js";
 import type { Sidecar } from "../sidecar/sidecar.js";
 import type { FfiStore } from "../sidecar/store.js";
@@ -477,7 +477,7 @@ export class FfiModule implements Module {
             delegationId: msg.delegationId,
             escalationId: createEscalationId(),
             agentDefId: encodeCoreAgentDefId({ kind: "qname", value: "primitive.throw" }),
-            args: { msg: { kind: "string", value: msg.message } },
+            args: { msg: mkString(msg.message) },
           },
         });
         return;

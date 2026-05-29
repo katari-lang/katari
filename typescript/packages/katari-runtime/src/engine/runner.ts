@@ -28,6 +28,7 @@ import {
   dispatchDone,
 } from "./thread/ops/index.js";
 import type { Thread } from "./thread/types.js";
+import { mkString } from "./value.js";
 
 /**
  * Process a single inbound event against `state` and drain only the
@@ -88,7 +89,7 @@ function applyTranslateExternal(ctx: ReturnType<typeof makeStepCtx>, event: Even
             delegationId: event.payload.delegationId,
             escalationId: createEscalationId(),
             agentDefId: encodeCoreAgentDefId({ kind: "qname", value: "primitive.throw" }),
-            args: { msg: { kind: "string", value: err.message } },
+            args: { msg: mkString(err.message) },
           },
         });
       }

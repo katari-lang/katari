@@ -30,7 +30,7 @@ import type { Endpoint } from "../engine/endpoint.js";
 import type { ExternalEvent } from "../engine/event.js";
 import { createEscalationId, type DelegationId, type EscalationId } from "../engine/id.js";
 import type { Logger } from "../engine/logger.js";
-import type { Value } from "../engine/value.js";
+import { mkSecret, mkString, tryInlineString, type Value } from "../engine/value.js";
 import type { Module } from "../module.js";
 import { decryptSecret, encryptSecret } from "../secret-crypto.js";
 import type { EnvStore } from "../sidecar/env-store.js";
@@ -165,9 +165,7 @@ export class EnvModule implements Module {
       this.escalateEnvNotFound(caller, delegationId, key);
       return;
     }
-    const value: Value = secret
-      ? { kind: "secret", value: decryptSecret(entry.value) }
-      : { kind: "string", value: entry.value };
+    const value: Value = secret ? mkSecret(decryptSecret(entry.value)) : mkString(entry.value);
     this.respondDelegateAck(caller, delegationId, value);
   }
 
@@ -221,7 +219,7 @@ export class EnvModule implements Module {
           kind: "qname",
           value: ENV_NOT_FOUND_QNAME,
         }),
-        args: { env_key: { kind: "string", value: key } },
+        args: { env_key: mkString(key) },
       },
     });
   }
@@ -244,7 +242,7 @@ export class EnvModule implements Module {
           kind: "qname",
           value: "primitive.throw",
         }),
-        args: { msg: { kind: "string", value: message } },
+        args: { msg: mkString(message) },
       },
     });
   }
@@ -291,7 +289,7 @@ export class EnvModule implements Module {
 
 function requireString(args: Record<string, Value>, name: string): string | null {
   const v = args[name];
-  return v !== undefined && v.kind === "string" ? v.value : null;
+  return v !== undefined ? tryInlineString(v) : null;
 }
 
 function requireBoolean(args: Record<string, Value>, name: string): boolean | null {

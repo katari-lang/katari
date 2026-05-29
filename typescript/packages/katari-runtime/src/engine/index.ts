@@ -63,5 +63,13 @@ export type {
   TupleThread,
   UserThread,
 } from "./thread/types.js";
-export type { Value } from "./value.js";
-export { literalToValue, NULL_VALUE } from "./value.js";
+export type { BytesRep, RefModule, RefRep, Value } from "./value.js";
+export {
+  inlineText,
+  isBytesValue,
+  literalToValue,
+  mkSecret,
+  mkString,
+  NULL_VALUE,
+  tryInlineString,
+} from "./value.js";
