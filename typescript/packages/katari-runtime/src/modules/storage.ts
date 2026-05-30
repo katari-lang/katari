@@ -8,7 +8,6 @@
 // facade, so the runtime stays backend-agnostic.
 
 import type { ProjectIndexStore, ShardStore } from "../engine/shard.js";
-import type { EnvStore } from "../sidecar/env-store.js";
 import type { ValueStore } from "../storage/value-store.js";
 import type { DelegationStore } from "./delegation-store.js";
 
@@ -30,13 +29,4 @@ export interface CoreTxStores {
  *  yields the tx-scoped {@link CoreTxStores}. */
 export interface CoreStorage {
   withTransaction<T>(fn: (tx: CoreTxStores) => Promise<T>): Promise<T>;
-}
-
-// ─── ENV ─────────────────────────────────────────────────────────────────
-
-/** Transaction provider for EnvModule. Each env operation runs in its own
- *  short tx (env feeds are single-op), so the impl may also be a thin
- *  per-op wrapper rather than a real multi-op tx. */
-export interface EnvStorage {
-  withTransaction<T>(fn: (env: EnvStore) => Promise<T>): Promise<T>;
 }

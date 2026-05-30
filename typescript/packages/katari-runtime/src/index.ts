@@ -201,7 +201,7 @@ export type { FfiModuleOptions } from "./modules/ffi.js";
 export { FfiModule } from "./modules/ffi.js";
 export type { FfiLaneBackend } from "./modules/ffi-mux.js";
 export { FfiMux } from "./modules/ffi-mux.js";
-export type { CoreStorage, CoreTxStores, EnvStorage } from "./modules/storage.js";
+export type { CoreStorage, CoreTxStores } from "./modules/storage.js";
 
 // ─── Warm per-project actor (Phase E) ──────────────────────────────────────
 

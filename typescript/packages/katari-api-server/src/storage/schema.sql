@@ -60,11 +60,15 @@ CREATE TABLE IF NOT EXISTS engine_checkpoints (
 -- `root_delegation_id` is denormalised so the tree query for an entire
 -- run is one indexed lookup (`WHERE root_delegation_id = ?`) rather than
 -- a recursive CTE walking parent links.
+-- `project_id` (not snapshot_id): a delegation is a katari-protocol entity
+-- scoped to a project. Which code version (snapshot) a delegation runs is
+-- module-private state (CORE: engine_shards.current_snapshot; FFI: its own
+-- tables) and deliberately does NOT live on this protocol table.
 CREATE TABLE IF NOT EXISTS delegations (
   id                   UUID PRIMARY KEY,
   root_delegation_id   UUID NOT NULL,
   parent_delegation_id UUID,
-  snapshot_id          UUID NOT NULL REFERENCES snapshots(id) ON DELETE CASCADE,
+  project_id           UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
   caller_endpoint      TEXT NOT NULL,
   owner_endpoint       TEXT NOT NULL,
   agent_def_id         JSONB NOT NULL,
@@ -77,8 +81,8 @@ CREATE INDEX IF NOT EXISTS delegations_root_idx
   ON delegations (root_delegation_id);
 CREATE INDEX IF NOT EXISTS delegations_parent_idx
   ON delegations (parent_delegation_id);
-CREATE INDEX IF NOT EXISTS delegations_snapshot_state_idx
-  ON delegations (snapshot_id, state);
+CREATE INDEX IF NOT EXISTS delegations_project_state_idx
+  ON delegations (project_id, state);
 CREATE INDEX IF NOT EXISTS delegations_caller_root_idx
   ON delegations (caller_endpoint, root_delegation_id);
 
@@ -90,7 +94,7 @@ CREATE TABLE IF NOT EXISTS escalations (
   id                  UUID PRIMARY KEY,
   delegation_id       UUID NOT NULL,
   root_delegation_id  UUID NOT NULL,
-  snapshot_id         UUID NOT NULL REFERENCES snapshots(id) ON DELETE CASCADE,
+  project_id          UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
   caller_endpoint     TEXT NOT NULL,
   receiver_endpoint   TEXT NOT NULL,
   agent_def_id        JSONB NOT NULL,
@@ -103,8 +107,8 @@ CREATE INDEX IF NOT EXISTS escalations_delegation_idx
   ON escalations (delegation_id);
 CREATE INDEX IF NOT EXISTS escalations_root_idx
   ON escalations (root_delegation_id);
-CREATE INDEX IF NOT EXISTS escalations_snapshot_state_idx
-  ON escalations (snapshot_id, state);
+CREATE INDEX IF NOT EXISTS escalations_project_state_idx
+  ON escalations (project_id, state);
 CREATE INDEX IF NOT EXISTS escalations_receiver_state_idx
   ON escalations (receiver_endpoint, state);
 

@@ -1,18 +1,18 @@
-// Storage-backed `DelegationStore` implementation. Adapter between the
-// runtime-side audit interface and the api-server's unified `delegations`
-// table.
+// Storage-backed `DelegationStore` adapter — CoreModule's audit sink for the
+// unified `delegations` table.
 //
-// One instance = one snapshot scope (constructed inside orchestrator.tick
-// with tx + snapshotId bound). The runtime caller never touches
-// snapshotId; it's implicit in the binding.
+// Constructed inside CoreModule's per-quantum transaction (the `storage` handle
+// is that tx), bound to the project. The delegation is a katari-protocol entity
+// scoped to a project; which snapshot the issuing shard runs is CORE-private
+// state (engine_shards.current_snapshot) and is deliberately NOT written here.
 
 import type { DelegationId, DelegationStore, DelegationStoreRow } from "@katari-lang/runtime";
-import type { SnapshotId, Storage } from "../storage/types.js";
+import type { ProjectId, Storage } from "../storage/types.js";
 
 export class StorageDelegationStore implements DelegationStore {
   constructor(
     private readonly storage: Storage,
-    private readonly snapshotId: SnapshotId,
+    private readonly projectId: ProjectId,
   ) {}
 
   async insert(row: DelegationStoreRow): Promise<void> {
@@ -20,7 +20,7 @@ export class StorageDelegationStore implements DelegationStore {
       id: row.id,
       rootDelegationId: row.rootDelegationId,
       parentDelegationId: row.parentDelegationId,
-      snapshotId: this.snapshotId,
+      projectId: this.projectId,
       callerEndpoint: row.callerEndpoint,
       ownerEndpoint: row.ownerEndpoint,
       agentDefId: row.agentDefId,

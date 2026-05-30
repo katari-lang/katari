@@ -19,11 +19,10 @@ export {
   SidecarManager,
   SubprocessSidecar,
 } from "@katari-lang/runtime";
+export type { ApiServerActorContext, ApiServerModules } from "./actor-host.js";
+export { ApiServerActorHost, createApiServerHost } from "./actor-host.js";
 export { ApiModule } from "./adapters/api-module.js";
 export { StorageFfiStore } from "./adapters/ffi-store.js";
-export { NoSnapshotForProject, Orchestrator, SnapshotNotFound } from "./orchestrator.js";
-export type { ApiServerTickContext } from "./orchestrator-adapter.js";
-export { ApiServerOrchestrator, createApiServerOrchestrator } from "./orchestrator-adapter.js";
 export { recoverOnBoot } from "./recovery.js";
 export { type AppDeps, buildApp } from "./routes/app.js";
 export {

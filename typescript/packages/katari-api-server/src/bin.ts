@@ -16,8 +16,8 @@ import {
   type Sidecar,
   SidecarManager,
 } from "@katari-lang/runtime";
+import { createApiServerHost } from "./actor-host.js";
 import { buildMetrics } from "./metrics.js";
-import { createApiServerOrchestrator } from "./orchestrator-adapter.js";
 import { recoverOnBoot } from "./recovery.js";
 import { buildApp } from "./routes/app.js";
 import { ProjectService } from "./services/project-service.js";
@@ -87,9 +87,9 @@ const sidecarManager = new SidecarManager<SnapshotId>(
 
 const projects = new ProjectService(storage, logger);
 const snapshots = new SnapshotService(storage, logger);
-const orchestrator = createApiServerOrchestrator(storage, sidecarManager, logger);
+const host = createApiServerHost(storage, sidecarManager, logger);
 
-await recoverOnBoot(storage, orchestrator, logger);
+await recoverOnBoot(storage, host, logger);
 
 // Admin web SPA: serve from $KATARI_ADMIN_WEB_DIST if set (= the built
 // `dist/` directory). When unset, the runtime works fine without a UI.
@@ -102,7 +102,7 @@ const app = buildApp({
   storage,
   projects,
   snapshots,
-  orchestrator,
+  host,
   logger,
   apiKey: authDisabled ? null : apiKey,
   metrics,

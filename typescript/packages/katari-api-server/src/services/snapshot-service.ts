@@ -2,14 +2,7 @@
 //
 // Called directly by the upload endpoint at `apply` time. `latest` resolution is also here.
 
-import {
-  type AgentDefinition,
-  type IRModule,
-  type Logger,
-  NoSnapshotForProject,
-  type SchemaBundle,
-  SnapshotNotFound,
-} from "@katari-lang/runtime";
+import type { AgentDefinition, IRModule, Logger, SchemaBundle } from "@katari-lang/runtime";
 import type {
   ListOptions,
   ListResult,
@@ -21,8 +14,23 @@ import type {
   Storage,
 } from "../storage/types.js";
 
-// Re-export so existing callers keep working.
-export { NoSnapshotForProject, SnapshotNotFound };
+// Snapshot-resolution errors live here (the runtime no longer owns a
+// snapshot-aware orchestrator). ApiModule re-imports them for its run-start
+// resolution path.
+
+/** Thrown when an explicit snapshot id does not exist. */
+export class SnapshotNotFound extends Error {
+  constructor(public readonly snapshotId: string) {
+    super(`snapshot ${snapshotId} does not exist`);
+  }
+}
+
+/** Thrown when a project has no snapshot to default to. */
+export class NoSnapshotForProject extends Error {
+  constructor(public readonly projectId: string) {
+    super(`no snapshot exists for project ${projectId}`);
+  }
+}
 
 export class AgentNotFound extends Error {
   constructor(

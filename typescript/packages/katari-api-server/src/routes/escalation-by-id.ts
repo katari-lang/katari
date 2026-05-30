@@ -8,15 +8,12 @@
 import type { EscalationId } from "@katari-lang/runtime";
 import { valueFromRaw } from "@katari-lang/runtime";
 import { Hono } from "hono";
-import type { ApiServerOrchestrator } from "../orchestrator.js";
+import type { ApiServerActorHost } from "../actor-host.js";
 import type { Storage } from "../storage/types.js";
 import { escalationRowToWire } from "../wire/agent-wire.js";
 import { AnswerEscalationSchema, EscalationIdSchema } from "./middleware/validation.js";
 
-export function buildEscalationByIdRoutes(
-  orchestrator: ApiServerOrchestrator,
-  storage: Storage,
-): Hono {
+export function buildEscalationByIdRoutes(host: ApiServerActorHost, storage: Storage): Hono {
   const app = new Hono();
 
   app.get("/:escalationId", async (c) => {
@@ -39,13 +36,9 @@ export function buildEscalationByIdRoutes(
       return c.json({ error: `escalation already ${escalation.state}` }, 409);
     }
     const decoded = valueFromRaw(body.value);
-    const result = await orchestrator.tick(escalation.snapshotId, async (ctx) => {
-      return ctx.api.answerEscalation({
-        bus: ctx.bus,
-        escalationId,
-        value: decoded,
-      });
-    });
+    const result = await host.runForProject(escalation.projectId, ({ bus, modules }) =>
+      modules.api.answerEscalation({ bus, escalationId, value: decoded }),
+    );
     return c.json({ ok: result.ok });
   });
 

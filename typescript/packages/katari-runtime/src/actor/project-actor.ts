@@ -41,15 +41,20 @@ export class ProjectActor<M extends ProjectActorModules = ProjectActorModules> {
   readonly modules: M;
   private readonly queue = new SerialQueue();
 
-  constructor(logger: Logger, modules: M) {
+  /**
+   * @param buildModules builds the module bundle given the actor's bus — the
+   *        bus must exist first because ENV / FFI capture it as their
+   *        `onBusResponse` (the route back into the drain for async work).
+   */
+  constructor(logger: Logger, buildModules: (bus: ExternalEventBus) => M) {
     this.bus = new ExternalEventBus(logger);
-    this.modules = modules;
+    this.modules = buildModules(this.bus);
     const entries = [
-      { name: "api", module: modules.api },
-      { name: "core", module: modules.core },
-      { name: "env", module: modules.env },
+      { name: "api", module: this.modules.api },
+      { name: "core", module: this.modules.core },
+      { name: "env", module: this.modules.env },
     ];
-    if (modules.ffi !== null) entries.push({ name: "ffi", module: modules.ffi });
+    if (this.modules.ffi !== null) entries.push({ name: "ffi", module: this.modules.ffi });
     this.bus.registerAll(entries);
   }
 

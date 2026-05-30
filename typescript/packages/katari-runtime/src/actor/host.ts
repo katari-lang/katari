@@ -8,6 +8,7 @@
 // concrete host package (api-server) via the `buildModules` factory and its own
 // sidecar message routing.
 
+import type { ExternalEventBus } from "../bus.js";
 import type { Logger } from "../engine/logger.js";
 import {
   ProjectActor,
@@ -19,12 +20,13 @@ export class ProjectActorHost<M extends ProjectActorModules = ProjectActorModule
   private readonly actors = new Map<string, ProjectActor<M>>();
 
   /**
-   * @param buildModules constructs the warm module bundle for a project. Called
+   * @param buildModules constructs the warm module bundle for a project, given
+   *        the actor's bus (ENV / FFI capture it as `onBusResponse`). Called
    *        once per project (the modules then live as long as the host). Module
-   *        state loads lazily inside the first `feed`, so this is synchronous.
+   *        state loads lazily inside the first `feed`.
    */
   constructor(
-    private readonly buildModules: (projectId: string) => M,
+    private readonly buildModules: (projectId: string, bus: ExternalEventBus) => M,
     private readonly logger: Logger,
   ) {}
 
@@ -32,7 +34,7 @@ export class ProjectActorHost<M extends ProjectActorModules = ProjectActorModule
   forProject(projectId: string): ProjectActor<M> {
     let actor = this.actors.get(projectId);
     if (actor === undefined) {
-      actor = new ProjectActor<M>(this.logger, this.buildModules(projectId));
+      actor = new ProjectActor<M>(this.logger, (bus) => this.buildModules(projectId, bus));
       this.actors.set(projectId, actor);
     }
     return actor;

@@ -5,8 +5,8 @@ import type { Logger } from "@katari-lang/runtime";
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { ZodError } from "zod";
+import type { ApiServerActorHost } from "../actor-host.js";
 import type { AppMetrics } from "../metrics.js";
-import type { ApiServerOrchestrator } from "../orchestrator.js";
 import { DelegationTreeService } from "../services/delegation-tree-service.js";
 import type { ProjectService } from "../services/project-service.js";
 import type { SnapshotService } from "../services/snapshot-service.js";
@@ -29,7 +29,7 @@ export type AppDeps = {
   storage: Storage;
   projects: ProjectService;
   snapshots: SnapshotService;
-  orchestrator: ApiServerOrchestrator;
+  host: ApiServerActorHost;
   logger: Logger;
   /**
    * `null` = auth disabled (`KATARI_API_KEY=disabled`, dev only).
@@ -136,16 +136,13 @@ export function buildApp(deps: AppDeps): Hono {
   app.route("/project", buildProjectRoutes(deps.projects));
   app.route("/project/:projectId/snapshot", buildSnapshotRoutes(deps.snapshots));
   const treeService = new DelegationTreeService(deps.storage);
-  app.route("/project/:projectId/run", buildRunRoutes(deps.orchestrator, deps.storage));
+  app.route("/project/:projectId/run", buildRunRoutes(deps.host, deps.storage));
   app.route("/project/:projectId/run/:runId/tree", buildRunTreeRoutes(treeService));
-  app.route(
-    "/project/:projectId/escalation",
-    buildEscalationRoutes(deps.orchestrator, deps.storage),
-  );
+  app.route("/project/:projectId/escalation", buildEscalationRoutes(deps.host, deps.storage));
   // Flat single-entity aliases for the CLI / scripts that already hold a
   // UUID and don't need the navigation hierarchy.
-  app.route("/run", buildRunByIdRoutes(deps.orchestrator, deps.storage));
-  app.route("/escalation", buildEscalationByIdRoutes(deps.orchestrator, deps.storage));
+  app.route("/run", buildRunByIdRoutes(deps.host, deps.storage));
+  app.route("/escalation", buildEscalationByIdRoutes(deps.host, deps.storage));
   app.route("/env", buildEnvRoutes(deps.storage));
   // Katari Protocol data plane (read-only value consume). Production is
   // module-internal; only fetch / range / state are exposed here.

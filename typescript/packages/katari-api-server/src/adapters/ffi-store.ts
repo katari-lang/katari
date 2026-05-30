@@ -16,6 +16,7 @@ import {
 import type {
   FfiPendingDelegation as DbDelegation,
   FfiPendingEscalation as DbEscalation,
+  ProjectId,
   SnapshotId,
   Storage,
 } from "../storage/types.js";
@@ -24,6 +25,8 @@ export class StorageFfiStore implements FfiStore {
   constructor(
     private readonly storage: Storage,
     private readonly snapshotId: SnapshotId,
+    /** Project the unified `delegations` mirror rows belong to. */
+    private readonly projectId: ProjectId,
   ) {}
 
   // ─── Delegations ────────────────────────────────────────────────────────
@@ -53,7 +56,7 @@ export class StorageFfiStore implements FfiStore {
         id: row.delegationId,
         rootDelegationId: parentRoot,
         parentDelegationId: row.parentExtDelegationId,
-        snapshotId: this.snapshotId,
+        projectId: this.projectId,
         callerEndpoint: FFI_ENDPOINT,
         ownerEndpoint: CORE_ENDPOINT,
         agentDefId: row.agentDefId,

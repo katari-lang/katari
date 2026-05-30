@@ -1,53 +1,39 @@
-// Boot recovery wrapper.
+// Boot recovery.
 //
-// Uses the runtime's `recoverOnBoot` with an api-server-specific
-// `extraRecovery` step: re-inject terminate for runs that were stopped
-// in the `cancelling` state. This makes the Orchestrator invoke the
-// same behaviour as ApiModule.cancelRun again so the cancel cascade
-// resumes even across a process restart.
+//   1. host.recoverOnBoot() — respawn sidecars + notify in-flight ext
+//      delegations for every snapshot that still owns FFI work.
+//   2. Re-issue terminate for runs left in the `cancelling` state, so the
+//      cancel cascade resumes across a process restart (same effect as
+//      ApiModule.cancelRun being called again).
 
-import { type Logger, recoverOnBoot as runtimeRecoverOnBoot } from "@katari-lang/runtime";
-import type { ApiServerOrchestrator } from "./orchestrator-adapter.js";
-import type { SnapshotId, Storage } from "./storage/types.js";
+import type { Logger } from "@katari-lang/runtime";
+import type { ApiServerActorHost } from "./actor-host.js";
+import type { Storage } from "./storage/types.js";
 
 export async function recoverOnBoot(
   storage: Storage,
-  orchestrator: ApiServerOrchestrator,
+  host: ApiServerActorHost,
   logger: Logger,
 ): Promise<void> {
-  await runtimeRecoverOnBoot({
-    orchestrator,
-    logger,
-    extraRecovery: async () => {
-      // Re-issue terminate for runs in `cancelling`. Group by snapshotId so
-      // all runs for the same snapshot are processed in a single tick (= one
-      // lock acquisition + one checkpoint round-trip instead of N).
-      const { items: cancellingRuns } = await storage.runsAudit.list({
-        state: "cancelling",
-        limit: 500,
-      });
-      const bySnapshot = new Map<SnapshotId, typeof cancellingRuns>();
-      for (const run of cancellingRuns) {
-        const existing = bySnapshot.get(run.snapshotId) ?? [];
-        existing.push(run);
-        bySnapshot.set(run.snapshotId, existing);
-      }
-      for (const [snapshotId, runs] of bySnapshot) {
-        try {
-          await orchestrator.tick(snapshotId, async (ctx) => {
-            for (const run of runs) {
-              await ctx.api.cancelRun({ bus: ctx.bus, runId: run.id });
-            }
-          });
-        } catch (err) {
-          const runIds = runs.map((r) => r.id);
-          logger.log("warn", "recovery: failed to re-issue terminate", {
-            snapshotId,
-            runIds,
-            err: err instanceof Error ? err.message : String(err),
-          });
-        }
-      }
-    },
+  await host.recoverOnBoot();
+
+  const { items: cancellingRuns } = await storage.runsAudit.list({
+    state: "cancelling",
+    limit: 500,
   });
+  for (const run of cancellingRuns) {
+    try {
+      // A run is bound to a snapshot in runs_audit; resolve its project.
+      const snap = await storage.snapshots.get(run.snapshotId);
+      if (snap === null) continue;
+      await host.runForProject(snap.projectId, ({ bus, modules }) =>
+        modules.api.cancelRun({ bus, runId: run.id }),
+      );
+    } catch (err) {
+      logger.log("warn", "recovery: failed to re-issue terminate", {
+        runId: run.id,
+        err: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
 }

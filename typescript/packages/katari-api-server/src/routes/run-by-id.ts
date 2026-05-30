@@ -9,12 +9,12 @@
 // single-entity lookups.
 
 import { Hono } from "hono";
-import type { ApiServerOrchestrator } from "../orchestrator.js";
+import type { ApiServerActorHost } from "../actor-host.js";
 import type { Storage } from "../storage/types.js";
 import { runAuditRowToWire } from "../wire/agent-wire.js";
 import { RunIdSchema } from "./middleware/validation.js";
 
-export function buildRunByIdRoutes(orchestrator: ApiServerOrchestrator, storage: Storage): Hono {
+export function buildRunByIdRoutes(host: ApiServerActorHost, storage: Storage): Hono {
   const app = new Hono();
 
   app.get("/:runId", async (c) => {
@@ -35,8 +35,14 @@ export function buildRunByIdRoutes(orchestrator: ApiServerOrchestrator, storage:
     if (row.state === "cancelled" || row.state === "succeeded" || row.state === "error") {
       return c.json({ run: runAuditRowToWire(row) });
     }
-    const refreshed = await orchestrator.tick(row.snapshotId, async (ctx) => {
-      const result = await ctx.api.cancelRun({ bus: ctx.bus, runId });
+    // The flat route has no project in the URL — derive it from the run's
+    // snapshot (a run is bound to a snapshot in runs_audit).
+    const snap = await storage.snapshots.get(row.snapshotId);
+    if (snap === null) {
+      return c.json({ error: `run ${runId} not found` }, 404);
+    }
+    const refreshed = await host.runForProject(snap.projectId, async ({ bus, modules }) => {
+      const result = await modules.api.cancelRun({ bus, runId });
       return result.row;
     });
     return c.json({ run: runAuditRowToWire(refreshed ?? row) });

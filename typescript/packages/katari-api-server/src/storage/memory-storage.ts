@@ -271,12 +271,6 @@ class InMemoryEngineCheckpointRepo implements EngineCheckpointRepo {
 class InMemoryDelegationRepo implements DelegationRepo {
   rows = new Map<DelegationId, DelegationRow>();
 
-  /**
-   * Snapshot → project lookup. Injected at construction so the
-   * `projectId` filter on `list` can scope cross-snapshot.
-   */
-  constructor(private readonly projectIdOfSnapshot: (id: SnapshotId) => ProjectId | null) {}
-
   async insert(row: DelegationRow): Promise<void> {
     this.rows.set(row.id, clone(row));
   }
@@ -289,7 +283,6 @@ class InMemoryDelegationRepo implements DelegationRepo {
   async list(
     filter?: {
       projectId?: ProjectId;
-      snapshotId?: SnapshotId;
       callerEndpoint?: string;
       rootDelegationId?: DelegationId;
       parentDelegationId?: DelegationId;
@@ -298,11 +291,7 @@ class InMemoryDelegationRepo implements DelegationRepo {
   ): Promise<ListResult<DelegationRow>> {
     let all = [...this.rows.values()];
     if (filter?.projectId !== undefined) {
-      const want = filter.projectId;
-      all = all.filter((r) => this.projectIdOfSnapshot(r.snapshotId) === want);
-    }
-    if (filter?.snapshotId !== undefined) {
-      all = all.filter((r) => r.snapshotId === filter.snapshotId);
+      all = all.filter((r) => r.projectId === filter.projectId);
     }
     if (filter?.callerEndpoint !== undefined) {
       all = all.filter((r) => r.callerEndpoint === filter.callerEndpoint);
@@ -372,20 +361,10 @@ class InMemoryDelegationRepo implements DelegationRepo {
       }
     }
   }
-
-  async listLiveSnapshotIds(): Promise<SnapshotId[]> {
-    const ids = new Set<SnapshotId>();
-    for (const row of this.rows.values()) {
-      ids.add(row.snapshotId);
-    }
-    return [...ids];
-  }
 }
 
 class InMemoryEscalationRepo implements EscalationRepo {
   rows = new Map<EscalationId, EscalationRow>();
-
-  constructor(private readonly projectIdOfSnapshot: (id: SnapshotId) => ProjectId | null) {}
 
   async insert(row: EscalationRow): Promise<void> {
     this.rows.set(row.id, clone(row));
@@ -399,7 +378,6 @@ class InMemoryEscalationRepo implements EscalationRepo {
   async list(
     filter?: {
       projectId?: ProjectId;
-      snapshotId?: SnapshotId;
       callerEndpoint?: string;
       receiverEndpoint?: string;
       rootDelegationId?: DelegationId;
@@ -409,11 +387,7 @@ class InMemoryEscalationRepo implements EscalationRepo {
   ): Promise<ListResult<EscalationRow>> {
     let all = [...this.rows.values()];
     if (filter?.projectId !== undefined) {
-      const want = filter.projectId;
-      all = all.filter((r) => this.projectIdOfSnapshot(r.snapshotId) === want);
-    }
-    if (filter?.snapshotId !== undefined) {
-      all = all.filter((r) => r.snapshotId === filter.snapshotId);
+      all = all.filter((r) => r.projectId === filter.projectId);
     }
     if (filter?.callerEndpoint !== undefined) {
       all = all.filter((r) => r.callerEndpoint === filter.callerEndpoint);
@@ -573,6 +547,12 @@ class InMemoryFfiPendingDelegationRepo implements FfiPendingDelegationRepo {
       .filter((r) => r.parentExtDelegationId === parentDelegationId)
       .map(clone);
   }
+
+  async listLiveSnapshotIds(): Promise<SnapshotId[]> {
+    const ids = new Set<SnapshotId>();
+    for (const row of this.rows.values()) ids.add(row.snapshotId);
+    return [...ids];
+  }
 }
 
 class InMemoryFfiPendingEscalationRepo implements FfiPendingEscalationRepo {
@@ -627,8 +607,8 @@ export class InMemoryStorage implements Storage {
   // every list() call.
   private readonly projectIdOfSnapshot = (id: SnapshotId): ProjectId | null =>
     this.snapshots.rows.get(id)?.projectId ?? null;
-  readonly delegations = new InMemoryDelegationRepo(this.projectIdOfSnapshot);
-  readonly escalations = new InMemoryEscalationRepo(this.projectIdOfSnapshot);
+  readonly delegations = new InMemoryDelegationRepo();
+  readonly escalations = new InMemoryEscalationRepo();
   readonly runsAudit = new InMemoryRunsAuditRepo(this.projectIdOfSnapshot);
   readonly ffiDelegations = new InMemoryFfiPendingDelegationRepo();
   readonly ffiEscalations = new InMemoryFfiPendingEscalationRepo();
