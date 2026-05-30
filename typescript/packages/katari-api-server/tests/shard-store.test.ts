@@ -43,7 +43,7 @@ describe("ShardStore", () => {
       checkpoint: checkpoint("s1"),
     });
     const got = await store.get(PROJECT, "s1");
-    expect(got).toEqual(checkpoint("s1"));
+    expect(got).toEqual({ checkpoint: checkpoint("s1"), currentSnapshot: "snap-1" });
     expect(await store.get(PROJECT, "missing")).toBeNull();
   });
 

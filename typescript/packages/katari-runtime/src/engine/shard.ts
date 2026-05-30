@@ -55,8 +55,11 @@ export type ActiveShard = { shardId: ShardId; currentSnapshot: string };
  * checkpoint per snapshot). The exchanged payload is the **encrypted** shard
  * state; storage never sees plaintext secrets. Keyed by (projectId, shardId).
  */
+/** A loaded shard: its encrypted state + which code version it runs. */
+export type LoadedShard = { checkpoint: EncryptedEngineCheckpoint; currentSnapshot: string };
+
 export interface ShardStore {
-  get(projectId: string, shardId: ShardId): Promise<EncryptedEngineCheckpoint | null>;
+  get(projectId: string, shardId: ShardId): Promise<LoadedShard | null>;
   upsert(input: {
     projectId: string;
     shardId: ShardId;

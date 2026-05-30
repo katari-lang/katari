@@ -146,6 +146,9 @@ export class ApiModule implements Module {
       agentDefId: encodeCoreAgentDefId({
         kind: "qname",
         value: input.qualifiedName,
+        // CORE agent → snapshot-dependent target: stamp the run's version so
+        // CORE starts the agent on the right snapshot's IR.
+        snapshot: this.snapshotId,
       }),
       args: encryptedArgs,
       state: "running",

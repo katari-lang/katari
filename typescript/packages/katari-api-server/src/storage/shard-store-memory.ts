@@ -5,6 +5,7 @@
 import type {
   ActiveShard,
   EncryptedEngineCheckpoint,
+  LoadedShard,
   ProjectIndex,
   ProjectIndexStore,
   ShardId,
@@ -29,9 +30,11 @@ const shardKey = (projectId: string, shardId: ShardId): string => `${projectId}|
 export class InMemoryShardStore implements ShardStore {
   rows = new Map<string, ShardRow>();
 
-  async get(projectId: string, shardId: ShardId): Promise<EncryptedEngineCheckpoint | null> {
+  async get(projectId: string, shardId: ShardId): Promise<LoadedShard | null> {
     const row = this.rows.get(shardKey(projectId, shardId));
-    return row !== undefined ? clone(row.checkpoint) : null;
+    return row !== undefined
+      ? { checkpoint: clone(row.checkpoint), currentSnapshot: row.currentSnapshot }
+      : null;
   }
 
   async upsert(input: {

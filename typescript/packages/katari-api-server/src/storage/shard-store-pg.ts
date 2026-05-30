@@ -7,6 +7,7 @@
 import type {
   ActiveShard,
   EncryptedEngineCheckpoint,
+  LoadedShard,
   ProjectIndex,
   ProjectIndexStore,
   ShardId,
@@ -26,12 +27,15 @@ function asJson(value: unknown): never {
 export class PgShardStore implements ShardStore {
   constructor(private readonly sql: Sql) {}
 
-  async get(projectId: string, shardId: ShardId): Promise<EncryptedEngineCheckpoint | null> {
-    const rows = await this.sql<{ payload: EncryptedEngineCheckpoint }[]>`
-      SELECT payload FROM engine_shards
+  async get(projectId: string, shardId: ShardId): Promise<LoadedShard | null> {
+    const rows = await this.sql<{ payload: EncryptedEngineCheckpoint; current_snapshot: string }[]>`
+      SELECT payload, current_snapshot FROM engine_shards
       WHERE project_id = ${projectId} AND shard_id = ${shardId}
     `;
-    return rows[0]?.payload ?? null;
+    const row = rows[0];
+    return row !== undefined
+      ? { checkpoint: row.payload, currentSnapshot: row.current_snapshot }
+      : null;
   }
 
   async upsert(input: {

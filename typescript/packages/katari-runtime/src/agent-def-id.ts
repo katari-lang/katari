@@ -37,14 +37,25 @@ export type AgentDefId = string & { readonly __brand: "AgentDefId" };
 /** CORE module knows two flavours: a top-level callable's qname, or an
  * engine-allocated closure id. */
 export type CoreAgentDefId =
-  | { kind: "qname"; value: QualifiedName }
+  | { kind: "qname"; value: QualifiedName; snapshot?: string }
   | { kind: "closure"; value: ClosureId };
+
+// `@` separates a qname from the snapshot it runs on. Safe: `@` appears in
+// neither qname segments (`[A-Za-z_][A-Za-z0-9_]*`), snapshot UUIDs, nor the
+// `closure:` prefix. snapshot is a CORE/FFI-private axis carried INSIDE the
+// (otherwise opaque-to-the-bus) agent def id, not as a protocol field — CORE
+// stamps the issuing shard's `currentSnapshot` on a delegate target and reads
+// it back to pick the new shard's IR. The compiled schema / get_metadata id
+// is the bare qname (no `@`); decode treats a missing `@` as "no snapshot".
+const SNAPSHOT_SEP = "@";
 
 export function encodeCoreAgentDefId(value: CoreAgentDefId): AgentDefId {
   if (value.kind === "closure") {
     return (CLOSURE_PREFIX + String(value.value)) as AgentDefId;
   }
-  return value.value as AgentDefId;
+  return (
+    value.snapshot !== undefined ? `${value.value}${SNAPSHOT_SEP}${value.snapshot}` : value.value
+  ) as AgentDefId;
 }
 
 export function decodeCoreAgentDefId(id: AgentDefId): CoreAgentDefId {
@@ -59,6 +70,10 @@ export function decodeCoreAgentDefId(id: AgentDefId): CoreAgentDefId {
     }
     return { kind: "closure", value: n as ClosureId };
   }
+  const at = s.indexOf(SNAPSHOT_SEP);
+  if (at >= 0) {
+    return { kind: "qname", value: s.slice(0, at), snapshot: s.slice(at + 1) };
+  }
   return { kind: "qname", value: s };
 }
 
@@ -69,10 +84,12 @@ export function decodeCoreAgentDefId(id: AgentDefId): CoreAgentDefId {
 // uses for the qname case; the decoder simply rejects anything that
 // looks like a closure prefix as a fast invariant check.
 
-export type FfiAgentDefId = { kind: "qname"; value: QualifiedName };
+export type FfiAgentDefId = { kind: "qname"; value: QualifiedName; snapshot?: string };
 
 export function encodeFfiAgentDefId(value: FfiAgentDefId): AgentDefId {
-  return value.value as AgentDefId;
+  return (
+    value.snapshot !== undefined ? `${value.value}${SNAPSHOT_SEP}${value.snapshot}` : value.value
+  ) as AgentDefId;
 }
 
 export function decodeFfiAgentDefId(id: AgentDefId): FfiAgentDefId {
@@ -84,6 +101,10 @@ export function decodeFfiAgentDefId(id: AgentDefId): FfiAgentDefId {
     throw new Error(
       `agent-def-id: FFI received a closure-form AgentDefId (${JSON.stringify(s)}); FFI agents are dispatched by qname only`,
     );
+  }
+  const at = s.indexOf(SNAPSHOT_SEP);
+  if (at >= 0) {
+    return { kind: "qname", value: s.slice(0, at), snapshot: s.slice(at + 1) };
   }
   return { kind: "qname", value: s };
 }

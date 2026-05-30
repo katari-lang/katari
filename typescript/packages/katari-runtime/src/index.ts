@@ -66,6 +66,7 @@ export type {
   ForThread,
   HandleThread,
   InternalEventPayload,
+  LoadedShard,
   LogEntry,
   Logger,
   LogLevel,

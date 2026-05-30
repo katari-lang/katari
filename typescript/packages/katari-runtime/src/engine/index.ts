@@ -42,6 +42,7 @@ export { emptyResult } from "./result.js";
 export type { Scope } from "./scope.js";
 export type {
   ActiveShard,
+  LoadedShard,
   ProjectIndex,
   ProjectIndexStore,
   ShardId,
