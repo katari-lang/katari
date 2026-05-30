@@ -40,6 +40,56 @@ async function materializeText(rep: BytesRep, materialize: Materialize): Promise
   return new TextDecoder().decode(await materialize(rep));
 }
 
+/** Read a `string` / `secret` Value's text, materializing a ref if needed. */
+async function materializeValueText(v: Value, materialize: Materialize): Promise<string> {
+  if (v.kind !== "string" && v.kind !== "secret") {
+    throw new RecoverableEngineError(`expected string/secret, got ${v.kind}`);
+  }
+  return materializeText(v.rep, materialize);
+}
+
+/**
+ * Deep-materialize: replace every `string` ref nested in `value` with its
+ * inline form so a subsequent `valueToRaw` / `jsonTaggedToRaw` produces the
+ * real content rather than a `$ref` envelope. Used by `to_string` /
+ * `json.stringify`, which serialize a whole value tree. `file` stays a ref
+ * (it has no text form); `secret` stays as-is (callers reject it upstream).
+ */
+async function materializeValueDeep(value: Value, materialize: Materialize): Promise<Value> {
+  switch (value.kind) {
+    case "string":
+      return value.rep.kind === "ref"
+        ? mkString(new TextDecoder().decode(await materialize(value.rep)))
+        : value;
+    case "array":
+      return {
+        kind: "array",
+        elements: await Promise.all(
+          value.elements.map((e) => materializeValueDeep(e, materialize)),
+        ),
+      };
+    case "tagged":
+      return {
+        kind: "tagged",
+        ctorId: value.ctorId,
+        fields: await deepFields(value.fields, materialize),
+      };
+    case "record":
+      return { kind: "record", entries: await deepFields(value.entries, materialize) };
+    default:
+      return value;
+  }
+}
+
+async function deepFields(
+  fields: Record<string, Value>,
+  materialize: Materialize,
+): Promise<Record<string, Value>> {
+  const out: Record<string, Value> = {};
+  for (const [k, v] of Object.entries(fields)) out[k] = await materializeValueDeep(v, materialize);
+  return out;
+}
+
 /**
  * Thrown by a primitive to raise a specific (never-returning) request
  * instead of returning a value. The PrimThread catches this and emits
@@ -154,7 +204,7 @@ export async function executePrim(
           "prim to_string: refusing to stringify a secret value (would launder taint)",
         );
       }
-      return mkString(JSON.stringify(valueToRaw(v)));
+      return mkString(JSON.stringify(valueToRaw(await materializeValueDeep(v, materialize))));
     }
     case "from_string": {
       const text = req(args, "text");
@@ -165,7 +215,7 @@ export async function executePrim(
       }
       let parsed: unknown;
       try {
-        parsed = JSON.parse(inlineText(text));
+        parsed = JSON.parse(await materializeValueText(text, materialize));
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         throw new PrimRaiseRequest("primitive.from_string_error", {
@@ -255,7 +305,7 @@ export async function executePrim(
       const value = args["object"],
         field = args["field"];
       if (value?.kind === "tagged" && field?.kind === "string") {
-        const fieldName = inlineText(field);
+        const fieldName = await materializeValueText(field, materialize);
         const v = value.fields[fieldName];
         if (v === undefined) {
           throw new RecoverableEngineError(`prim get_field: field ${fieldName} not found`);
@@ -278,7 +328,7 @@ export async function executePrim(
       if (key.kind !== "string") {
         throw new RecoverableEngineError(`prim record.get: key must be a string, got ${key.kind}`);
       }
-      const v = r.entries[inlineText(key)];
+      const v = r.entries[await materializeValueText(key, materialize)];
       return v === undefined ? { kind: "null" } : v;
     }
     case "record.set": {
@@ -297,7 +347,7 @@ export async function executePrim(
       for (const [k, v] of Object.entries(r.entries)) {
         next[k] = v;
       }
-      next[inlineText(key)] = value;
+      next[await materializeValueText(key, materialize)] = value;
       return { kind: "record", entries: next };
     }
     case "record.remove": {
@@ -313,7 +363,7 @@ export async function executePrim(
           `prim record.remove: key must be a string, got ${key.kind}`,
         );
       }
-      const removeKey = inlineText(key);
+      const removeKey = await materializeValueText(key, materialize);
       if (!(removeKey in r.entries)) return r;
       const next: Record<string, Value> = Object.create(null);
       for (const [k, v] of Object.entries(r.entries)) {
@@ -342,7 +392,10 @@ export async function executePrim(
       if (key.kind !== "string") {
         throw new RecoverableEngineError(`prim record.has: key must be a string, got ${key.kind}`);
       }
-      return { kind: "boolean", value: inlineText(key) in r.entries };
+      return {
+        kind: "boolean",
+        value: (await materializeValueText(key, materialize)) in r.entries,
+      };
     }
     case "record.size": {
       const r = req(args, "record");
@@ -362,7 +415,7 @@ export async function executePrim(
       }
       let parsed: unknown;
       try {
-        parsed = JSON.parse(inlineText(text));
+        parsed = JSON.parse(await materializeValueText(text, materialize));
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         throw new PrimRaiseRequest("primitive.json_parse_error", {
@@ -373,7 +426,7 @@ export async function executePrim(
     }
     case "json.stringify": {
       const value = req(args, "value");
-      const raw = jsonTaggedToRaw(value);
+      const raw = jsonTaggedToRaw(await materializeValueDeep(value, materialize));
       return mkString(JSON.stringify(raw));
     }
     default:
