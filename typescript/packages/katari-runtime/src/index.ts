@@ -181,7 +181,7 @@ export type { RegisteredModule } from "./bus.js";
 export { ExternalEventBus } from "./bus.js";
 export type { ExternalEvent } from "./engine/event.js";
 export type { Module } from "./module.js";
-export type { CoreModuleOptions, CoreTx } from "./modules/core.js";
+export type { CoreModuleOptions } from "./modules/core.js";
 export { CoreModule } from "./modules/core.js";
 export type {
   DelegationStore,
@@ -199,6 +199,19 @@ export type { EnvModuleOptions } from "./modules/env.js";
 export { EnvModule } from "./modules/env.js";
 export type { FfiModuleOptions } from "./modules/ffi.js";
 export { FfiModule } from "./modules/ffi.js";
+export type { FfiLaneBackend } from "./modules/ffi-mux.js";
+export { FfiMux } from "./modules/ffi-mux.js";
+export type { CoreStorage, CoreTxStores, EnvStorage } from "./modules/storage.js";
+
+// ─── Warm per-project actor (Phase E) ──────────────────────────────────────
+
+export { ProjectActorHost } from "./actor/host.js";
+export type {
+  ProjectActorContext,
+  ProjectActorModules,
+} from "./actor/project-actor.js";
+export { ProjectActor } from "./actor/project-actor.js";
+export { SerialQueue } from "./actor/serial-queue.js";
 
 // ─── Sidecar (FFI runner ↔ subprocess IPC) ─────────────────────────────────
 
@@ -229,23 +242,3 @@ export type {
   ParentToChild,
   SidecarBundle,
 } from "./sidecar/types.js";
-
-// ─── Orchestrator ─────────────────────────────────────────────────────────
-
-export type {
-  ApiLikeModule,
-  OrchestratorProjectId,
-  OrchestratorSnapshotId,
-  OrchestratorStorage,
-  RecoveryOptions,
-  ResolvedSnapshot,
-  TickContext,
-  TickModules,
-  TickModulesFactory,
-} from "./orchestrator/index.js";
-export {
-  NoSnapshotForProject,
-  Orchestrator,
-  recoverOnBoot,
-  SnapshotNotFound,
-} from "./orchestrator/index.js";

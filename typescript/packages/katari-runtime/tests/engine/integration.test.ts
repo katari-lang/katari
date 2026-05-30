@@ -219,24 +219,29 @@ describe("engine integration: end-to-end via external delegate", () => {
     const delegationId = createDelegationId();
     const apiOutbound: Event[] = [];
 
-    // Test wires: a CoreModule (= the engine) registered with a bus, plus
+    // Test wires: a warm CoreModule (= the engine) registered with a bus, plus
     // a tiny stub API module that just collects outbound delegateAck events.
     const { CoreModule } = await import("../../src/modules/core.js");
     const { ExternalEventBus } = await import("../../src/bus.js");
     const { noopLogger } = await import("../../src/engine/logger.js");
+    const { NULL_DELEGATION_STORE } = await import("../../src/modules/delegation-store.js");
 
-    // Minimal in-memory shard / index stores. Within a single bus.drain the
-    // CoreModule keeps the index + shards warm in memory, so these are only
-    // exercised for the new-delegate `get` (→ null → fresh shard).
-    const shards = new Map<string, unknown>();
+    // Minimal in-memory shard / index stores behind a CoreStorage. Within a
+    // single bus.drain the CoreModule keeps the index + shards warm in memory,
+    // so the store is only exercised for the new-delegate `get` (→ null → fresh
+    // shard) and the per-quantum upsert / delete.
+    const shards = new Map<string, { checkpoint: unknown; currentSnapshot: string }>();
+    let storedIndex: unknown = null;
     const shardStore = {
-      // biome-ignore lint/suspicious/noExplicitAny: test stub
-      async get(p: string, id: string): Promise<any> {
+      async get(p: string, id: string) {
         return shards.get(`${p}|${id}`) ?? null;
       },
       // biome-ignore lint/suspicious/noExplicitAny: test stub
       async upsert(input: any): Promise<void> {
-        shards.set(`${input.projectId}|${input.shardId}`, input.checkpoint);
+        shards.set(`${input.projectId}|${input.shardId}`, {
+          checkpoint: input.checkpoint,
+          currentSnapshot: input.currentSnapshot,
+        });
       },
       async delete(p: string, id: string): Promise<void> {
         shards.delete(`${p}|${id}`);
@@ -246,21 +251,31 @@ describe("engine integration: end-to-end via external delegate", () => {
       },
     };
     const projectIndexStore = {
-      // biome-ignore lint/suspicious/noExplicitAny: test stub
-      async get(): Promise<any> {
-        return null;
+      async get() {
+        return storedIndex;
       },
-      async upsert(): Promise<void> {},
+      async upsert(_p: string, idx: unknown): Promise<void> {
+        storedIndex = idx;
+      },
+    };
+    const storage = {
+      // biome-ignore lint/suspicious/noExplicitAny: test stub
+      async withTransaction(fn: any): Promise<any> {
+        return fn({
+          shards: shardStore,
+          projectIndex: projectIndexStore,
+          values: null,
+          delegations: NULL_DELEGATION_STORE,
+        });
+      },
     };
 
     const core = new CoreModule({
-      endpoint: CORE_ENDPOINT,
-      snapshotId: "test-snap",
-      irModule: module,
-      logger: noopLogger,
       projectId: "test-proj",
-      shardStore,
-      projectIndexStore,
+      // biome-ignore lint/suspicious/noExplicitAny: test stub
+      storage: storage as any,
+      getIR: async () => module,
+      logger: noopLogger,
     });
 
     const apiStub = {
@@ -284,9 +299,13 @@ describe("engine integration: end-to-end via external delegate", () => {
       to: CORE_ENDPOINT,
       payload: {
         kind: "delegate",
+        // Stamp the snapshot, as the API module does for a real run — every
+        // shard-creating delegate target is stamped (CORE reads it to pick the
+        // new shard's IR). main's shard then stamps its child (helper) too.
         agentDefId: encodeCoreAgentDefId({
           kind: "qname",
           value: "main",
+          snapshot: "test-snap",
         }),
         args: {},
         delegationId,

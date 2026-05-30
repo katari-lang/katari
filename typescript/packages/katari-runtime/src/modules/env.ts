@@ -126,11 +126,6 @@ export class EnvModule implements Module {
     }
   }
 
-  /** Nothing to flush — every state update writes through to the store. */
-  async persist(): Promise<void> {}
-  /** Stateless across restarts — pending escalations are best-effort in-memory only. */
-  async load(): Promise<void> {}
-
   // ─── Dispatch handlers ──────────────────────────────────────────────────
 
   private async handleGet(

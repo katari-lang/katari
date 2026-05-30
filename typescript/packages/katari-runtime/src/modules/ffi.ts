@@ -145,14 +145,11 @@ export class FfiModule implements Module {
     }
   }
 
-  /** State is fully written through to the store, so persist is a no-op. */
-  async persist(): Promise<void> {}
-
   /**
-   * Rebuild the in-memory escalation relay map from the persistent
-   * store. Called by the orchestrator at the start of every tick that
-   * uses this FfiModule. Idempotent — repopulating an already-populated
-   * map yields the same entries.
+   * Rebuild the in-memory escalation relay map from the persistent store.
+   * Called by {@link FfiMux} once when it creates this lane (and on boot
+   * recovery). Idempotent — repopulating an already-populated map yields the
+   * same entries. Not part of the {@link Module} interface; the lane owns it.
    */
   async load(): Promise<void> {
     const rows = await this.store.listEscalations();

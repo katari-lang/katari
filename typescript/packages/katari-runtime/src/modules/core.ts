@@ -1,12 +1,20 @@
-// CoreModule: adapts the engine into the Module interface, sharded per agent.
+// CoreModule: the engine as a warm, self-contained, per-project module.
 //
-// Phase E splits the flat per-snapshot State into per-agent-instance shards: a
-// shard IS a State scoped to one agent (its threads / scopes / closures + its
-// own local routing maps). CoreModule holds the shards it touches this tick
-// (loaded on demand) plus the project-local index that maps a delegation /
-// escalation id to the shard that must handle an event. All cross-shard
-// routing reduces to an index lookup (docs/2026-05-30-phase-e-actor-host.md
-// §2/§3, verified against the engine's escalate path):
+// Phase E makes CORE a warm per-project actor that owns its own transaction
+// and persistence — no host-driven load/persist tick anymore. The flat
+// per-snapshot State is split into per-agent-instance shards (a shard IS a
+// State scoped to one agent: its threads / scopes / closures + its own local
+// routing maps). CoreModule holds, warm in memory across quanta:
+//
+//   - `shardCache`   — the shards it has touched (a shard stays resident until
+//                      it completes; the DB is a write-through mirror)
+//   - `projectIndex` — the project-local routing table mapping a delegation /
+//                      escalation id to the shard that must handle an event
+//   - `irCache`      — snapshot → IR (a shard runs the version in its
+//                      `currentSnapshot`; getIR resolves it once, memoized)
+//
+// All cross-shard routing reduces to an index lookup (docs/2026-05-30-phase-e-
+// actor-host.md §2/§3, verified against the engine's escalate path):
 //
 //   delegate      → new shard (shardId = the new delegation id)
 //   delegateAck   → index.pendingDelegateOut[delegationId]
@@ -15,12 +23,17 @@
 //   escalate      → index.pendingDelegateOut[delegationId]   (the delegate issuer)
 //   escalateAck   → index.escalationOwners[escalationId]
 //
-// load() restores the lightweight project index; shard bodies load on demand
-// in feed(); persist() writes back dirty shards (with persist-time string
-// promotion), deletes completed ones (no replay → no retention), and saves the
-// index. The store handles are the tick's tx-scoped ones, injected at
-// construction, so feed() — which the Module interface gives no tx — can still
-// load shards within the tick's transaction.
+// One `feed` is one quantum: open a tx, route, load-on-miss (cache otherwise),
+// apply, persist the touched shard (with persist-time string promotion) or
+// delete it if it completed, write back the index — then commit. The project
+// actor serializes feeds per project, so the warm caches need no internal
+// locking; per-shard concurrency is a later mutex-granularity change.
+//
+// The snapshot a shard runs is CORE-private state: it lives in the shard's
+// `currentSnapshot` (and `engine_shards.current_snapshot`), NOT on the
+// protocol `delegations` table. An inbound delegate carries the version to run
+// on inside its (bus-opaque) agent def id; CORE reads it to pick the new
+// shard's IR and stamps it back onto outbound CORE/FFI delegate targets.
 
 import { agentDefIdSnapshot, stampAgentDefIdSnapshot } from "../agent-def-id.js";
 import { applyEvent, createState } from "../engine/apply.js";
@@ -28,13 +41,7 @@ import { CORE_ENDPOINT, type Endpoint } from "../engine/endpoint.js";
 import type { ExternalEvent } from "../engine/event.js";
 import type { DelegationId } from "../engine/id.js";
 import type { Logger } from "../engine/logger.js";
-import {
-  emptyProjectIndex,
-  type ProjectIndex,
-  type ProjectIndexStore,
-  type ShardId,
-  type ShardStore,
-} from "../engine/shard.js";
+import { emptyProjectIndex, type ProjectIndex, type ShardId } from "../engine/shard.js";
 import {
   DEFAULT_PROMOTE_THRESHOLD_BYTES,
   decryptCheckpoint,
@@ -52,86 +59,155 @@ import type { Module } from "../module.js";
 import type { ValueStore } from "../storage/value-store.js";
 import { encryptValueRecord } from "../value-secret-codec.js";
 import { type DelegationStore, NULL_DELEGATION_STORE } from "./delegation-store.js";
+import type { CoreStorage, CoreTxStores } from "./storage.js";
 
 export type CoreModuleOptions = {
-  endpoint: Endpoint;
-  /** Which snapshot's IR this module runs. Shards it creates record this as their currentSnapshot. */
-  snapshotId: string;
-  irModule: IRModule;
-  logger: Logger;
+  /** Self endpoint (default {@link CORE_ENDPOINT}). New shards adopt it. */
+  endpoint?: Endpoint;
   /** Project the shards belong to (value refs + shard storage are project-scoped). */
   projectId: string;
-  /** Per-agent shard checkpoints. Tick-tx-scoped (injected so feed can load on demand). */
-  shardStore: ShardStore;
-  /** Project-local routing index store. Tick-tx-scoped. */
-  projectIndexStore: ProjectIndexStore;
-  /**
-   * Audit sink for outbound delegate events. Defaults to a no-op store
-   * so tests that don't exercise the tree view don't have to provide a
-   * backing table.
-   */
-  delegationStore?: DelegationStore;
-  /**
-   * Value store for persist-time promotion (inline string → ref) and for
-   * materializing ref bytes during a quantum. Omitted → no promotion,
-   * inline only (refs never appear, so the materialize path is dormant).
-   */
-  valueStore?: ValueStore;
-  /** Byte threshold above which an inline string is promoted to a ref. */
-  promotionThreshold?: number;
+  /** Transaction provider — CoreModule opens one tx per quantum. */
+  storage: CoreStorage;
   /**
    * Resolve a snapshot id to its IR. A shard runs the version recorded in its
-   * `currentSnapshot`; the host provides this so one CoreModule can run agents
-   * across snapshots (per-project module). Defaults to the single `irModule`.
+   * `currentSnapshot`; the host backs this with the snapshots table so one
+   * CoreModule runs agents across snapshots. Memoized internally.
    */
-  getIR?: (snapshot: string) => IRModule;
+  getIR: (snapshot: string) => Promise<IRModule>;
+  logger: Logger;
+  /** Byte threshold above which an inline string is promoted to a ref. */
+  promotionThreshold?: number;
 };
 
-/** Tx shape CoreModule.persist / load expect — empty: the stores are held. */
-export type CoreTx = Record<string, never>;
+type ShardEntry = { state: State; currentSnapshot: string };
 
-type ShardEntry = { state: State; dirty: boolean; currentSnapshot: string };
-
-export class CoreModule implements Module<CoreTx> {
+export class CoreModule implements Module {
   readonly endpoint: Endpoint;
-  private readonly snapshotId: string;
-  private readonly irModule: IRModule;
-  private readonly logger: Logger;
   private readonly projectId: string;
-  private readonly shardStore: ShardStore;
-  private readonly projectIndexStore: ProjectIndexStore;
-  private readonly delegationStore: DelegationStore;
-  private readonly valueStore: ValueStore | null;
+  private readonly storage: CoreStorage;
+  private readonly getIRFn: (snapshot: string) => Promise<IRModule>;
+  private readonly logger: Logger;
   private readonly promotionThreshold: number;
-  private readonly getIR: (snapshot: string) => IRModule;
 
-  /** Shards touched this tick (loaded on demand, persisted at tick end). */
-  private shardCache = new Map<ShardId, ShardEntry>();
-  /** Shards whose root completed this tick — deleted on persist. */
-  private completedShards = new Set<ShardId>();
-  /** Project routing index (loaded in load, written in persist). */
+  /** Shards resident in memory (warm across quanta; DB is a write-through mirror). */
+  private readonly shardCache = new Map<ShardId, ShardEntry>();
+  /** Project routing index (warm; lazily loaded, written through every quantum). */
   private projectIndex: ProjectIndex = emptyProjectIndex();
+  private indexLoaded = false;
+  /** snapshot → IR memo. */
+  private readonly irCache = new Map<string, IRModule>();
 
   constructor(opts: CoreModuleOptions) {
-    this.endpoint = opts.endpoint;
-    this.snapshotId = opts.snapshotId;
-    this.irModule = opts.irModule;
-    this.logger = opts.logger;
+    this.endpoint = opts.endpoint ?? CORE_ENDPOINT;
     this.projectId = opts.projectId;
-    this.shardStore = opts.shardStore;
-    this.projectIndexStore = opts.projectIndexStore;
-    this.delegationStore = opts.delegationStore ?? NULL_DELEGATION_STORE;
-    this.valueStore = opts.valueStore ?? null;
+    this.storage = opts.storage;
+    this.getIRFn = opts.getIR;
+    this.logger = opts.logger;
     this.promotionThreshold = opts.promotionThreshold ?? DEFAULT_PROMOTE_THRESHOLD_BYTES;
-    this.getIR = opts.getIR ?? (() => opts.irModule);
+  }
+
+  async feed(event: ExternalEvent): Promise<{ outbound: ExternalEvent[] }> {
+    return this.storage.withTransaction(async (tx) => {
+      await this.ensureIndex(tx);
+
+      if (event.payload.kind === "delegateAck" || event.payload.kind === "terminateAck") {
+        // Drop the audit row BEFORE applyEvent so a sub-delegate emitted during
+        // apply doesn't race the parent's row delete.
+        await tx.delegations.delete(event.payload.delegationId);
+      }
+
+      const shardId = this.routeToShard(event);
+      if (shardId === undefined) {
+        this.logger.log("debug", "core: event for unknown shard, dropping", {
+          kind: event.payload.kind,
+        });
+        return { outbound: [] };
+      }
+      // An inbound CORE delegate carries the version to run on in its agent def
+      // id; a new shard adopts it. (Un-stamped delegates are an invariant
+      // violation in production — every delegate target is stamped by API /
+      // CORE / FFI — so getOrLoadShard rejects them loudly.)
+      const delegateSnapshot =
+        event.payload.kind === "delegate"
+          ? agentDefIdSnapshot(event.payload.agentDefId)
+          : undefined;
+      const shard = await this.getOrLoadShard(
+        tx,
+        shardId,
+        event.payload.kind === "delegate",
+        delegateSnapshot,
+      );
+      if (shard === null) {
+        this.logger.log("debug", "core: no shard for event, dropping", {
+          kind: event.payload.kind,
+          shardId,
+        });
+        return { outbound: [] };
+      }
+
+      const result = await applyEvent(shard.state, event, this.makeFetchRef(tx.values));
+      shard.state = result.state;
+      for (const log of result.logs) {
+        this.logger.log(log.level, log.message, log.context);
+      }
+
+      this.reconcileIndex(shardId, shard.state);
+      // A shard with no live threads has finished — delete it (no replay → no
+      // retention) and purge its index entries.
+      if (shard.state.threadCount === 0) {
+        this.shardCache.delete(shardId);
+        this.purgeIndexForShard(shardId);
+        await tx.shards.delete(this.projectId, shardId);
+      } else {
+        await this.persistShard(tx, shardId, shard.state, shard.currentSnapshot);
+      }
+      await tx.projectIndex.upsert(this.projectId, this.projectIndex);
+
+      const outbound = result.outbound as ExternalEvent[];
+      for (const ev of outbound) {
+        if (ev.payload.kind === "delegate") {
+          // The agent def id is the only identifier that loads versioned code
+          // on the receiver, so it carries the issuing shard's snapshot — but
+          // ONLY for snapshot-dependent modules (CORE agents run versioned IR,
+          // FFI picks the per-snapshot sidecar). ENV / API are snapshot-
+          // independent (common builtins / run management) → left bare.
+          // Closures inherit their enclosing scope (stamp passes them through).
+          const toSnapshotDependent =
+            ev.to === shard.state.selfEndpoint || ev.to === shard.state.ffiTargetEndpoint;
+          if (toSnapshotDependent) {
+            ev.payload.agentDefId = stampAgentDefIdSnapshot(
+              ev.payload.agentDefId,
+              shard.currentSnapshot,
+            );
+          }
+          await this.persistOutboundDelegate(tx.delegations, shard.state, ev, ev.payload);
+        }
+      }
+      return { outbound };
+    });
+  }
+
+  // ─── Warm-state helpers ─────────────────────────────────────────────────
+
+  private async ensureIndex(tx: CoreTxStores): Promise<void> {
+    if (this.indexLoaded) return;
+    this.projectIndex = (await tx.projectIndex.get(this.projectId)) ?? emptyProjectIndex();
+    this.indexLoaded = true;
+  }
+
+  private async resolveIR(snapshot: string): Promise<IRModule> {
+    const cached = this.irCache.get(snapshot);
+    if (cached !== undefined) return cached;
+    const ir = await this.getIRFn(snapshot);
+    this.irCache.set(snapshot, ir);
+    return ir;
   }
 
   /** Fetch a ref's bytes — threaded into applyEvent so concat / format / etc.
-   *  can materialize ref operands. Null when no value store is wired. */
-  private get fetchRef(): RefFetcher | undefined {
-    const valueStore = this.valueStore;
-    const projectId = this.projectId;
+   *  can materialize ref operands. `undefined` when no value store is wired. */
+  private makeFetchRef(valueStore: ValueStore | null): RefFetcher | undefined {
     if (valueStore === null) return undefined;
+    const projectId = this.projectId;
     return async (rep: RefRep): Promise<Uint8Array> => {
       const bytes = await valueStore.fetch(projectId, rep.module, rep.id);
       if (bytes === null) {
@@ -139,92 +215,6 @@ export class CoreModule implements Module<CoreTx> {
       }
       return bytes;
     };
-  }
-
-  async feed(event: ExternalEvent): Promise<{ outbound: ExternalEvent[] }> {
-    if (event.payload.kind === "delegateAck" || event.payload.kind === "terminateAck") {
-      // Drop the audit row BEFORE applyEvent so a sub-delegate emitted during
-      // apply doesn't race the parent's row delete.
-      await this.delegationStore.delete(event.payload.delegationId);
-    }
-
-    const shardId = this.routeToShard(event);
-    if (shardId === undefined) {
-      this.logger.log("debug", "core: event for unknown shard, dropping", {
-        kind: event.payload.kind,
-      });
-      return { outbound: [] };
-    }
-    // An inbound CORE delegate carries the version to run on in its agent def
-    // id (a closure / un-stamped one falls back to this module's snapshot).
-    const delegateSnapshot =
-      event.payload.kind === "delegate" ? agentDefIdSnapshot(event.payload.agentDefId) : undefined;
-    const shard = await this.getOrLoadShard(
-      shardId,
-      event.payload.kind === "delegate",
-      delegateSnapshot,
-    );
-    if (shard === null) {
-      this.logger.log("debug", "core: no shard for event, dropping", {
-        kind: event.payload.kind,
-        shardId,
-      });
-      return { outbound: [] };
-    }
-
-    const result = await applyEvent(shard.state, event, this.fetchRef);
-    shard.state = result.state;
-    shard.dirty = true;
-    for (const log of result.logs) {
-      this.logger.log(log.level, log.message, log.context);
-    }
-
-    this.reconcileIndex(shardId, shard.state);
-    // A shard with no live threads has finished — delete it on persist and
-    // purge its index entries (no replay → no retention).
-    if (shard.state.threadCount === 0) {
-      this.completedShards.add(shardId);
-      this.shardCache.delete(shardId);
-      this.purgeIndexForShard(shardId);
-    }
-
-    const outbound = result.outbound as ExternalEvent[];
-    for (const ev of outbound) {
-      if (ev.payload.kind === "delegate") {
-        // The agent def id is the only identifier that loads versioned code on
-        // the receiver, so it carries the issuing shard's snapshot — but ONLY
-        // for snapshot-dependent modules (CORE agents run versioned IR, FFI
-        // picks the per-snapshot sidecar). ENV / API are snapshot-independent
-        // (common builtins / run management) → left bare. Closures inherit.
-        const toSnapshotDependent =
-          ev.to === shard.state.selfEndpoint || ev.to === shard.state.ffiTargetEndpoint;
-        if (toSnapshotDependent) {
-          ev.payload.agentDefId = stampAgentDefIdSnapshot(
-            ev.payload.agentDefId,
-            shard.currentSnapshot,
-          );
-        }
-        await this.persistOutboundDelegate(shard.state, ev, ev.payload);
-      }
-    }
-    return { outbound };
-  }
-
-  async load(_tx: CoreTx): Promise<void> {
-    this.shardCache = new Map();
-    this.completedShards = new Set();
-    this.projectIndex = (await this.projectIndexStore.get(this.projectId)) ?? emptyProjectIndex();
-  }
-
-  async persist(_tx: CoreTx): Promise<void> {
-    for (const [shardId, entry] of this.shardCache) {
-      if (!entry.dirty) continue;
-      await this.persistShard(shardId, entry.state, entry.currentSnapshot);
-    }
-    for (const shardId of this.completedShards) {
-      await this.shardStore.delete(this.projectId, shardId);
-    }
-    await this.projectIndexStore.upsert(this.projectId, this.projectIndex);
   }
 
   // ─── Shard load / route / persist ──────────────────────────────────────
@@ -249,33 +239,37 @@ export class CoreModule implements Module<CoreTx> {
   }
 
   private async getOrLoadShard(
+    tx: CoreTxStores,
     shardId: ShardId,
     isDelegate: boolean,
     delegateSnapshot: string | undefined,
   ): Promise<ShardEntry | null> {
     const cached = this.shardCache.get(shardId);
     if (cached !== undefined) return cached;
-    const loaded = await this.shardStore.get(this.projectId, shardId);
+    const loaded = await tx.shards.get(this.projectId, shardId);
     if (loaded !== null) {
+      const ir = await this.resolveIR(loaded.currentSnapshot);
       const entry: ShardEntry = {
-        state: deserialize(
-          this.getIR(loaded.currentSnapshot),
-          decryptCheckpoint(loaded.checkpoint),
-        ),
-        dirty: false,
+        state: deserialize(ir, decryptCheckpoint(loaded.checkpoint)),
         currentSnapshot: loaded.currentSnapshot,
       };
       this.shardCache.set(shardId, entry);
       return entry;
     }
     if (isDelegate) {
-      // New agent instance: the version comes from the delegate's agentDefId
-      // (a closure / un-stamped delegate falls back to this module's snapshot).
-      const snapshot = delegateSnapshot ?? this.snapshotId;
+      if (delegateSnapshot === undefined) {
+        // Every delegate target is stamped (API root / CORE child / FFI child).
+        // An un-stamped one is a closure delegated across shards — a known gap
+        // (the closure record lives in the issuer's shard) reserved for the
+        // by-value `captures` mechanism. Fail loudly rather than guess an IR.
+        throw new Error(
+          `core: un-stamped delegate ${shardId} — cannot resolve the snapshot to run (closure cross-shard delegation is unsupported)`,
+        );
+      }
+      const ir = await this.resolveIR(delegateSnapshot);
       const entry: ShardEntry = {
-        state: createState(this.getIR(snapshot), { selfEndpoint: this.endpoint }),
-        dirty: false,
-        currentSnapshot: snapshot,
+        state: createState(ir, { selfEndpoint: this.endpoint }),
+        currentSnapshot: delegateSnapshot,
       };
       this.shardCache.set(shardId, entry);
       return entry;
@@ -284,6 +278,7 @@ export class CoreModule implements Module<CoreTx> {
   }
 
   private async persistShard(
+    tx: CoreTxStores,
     shardId: ShardId,
     state: State,
     currentSnapshot: string,
@@ -293,10 +288,14 @@ export class CoreModule implements Module<CoreTx> {
     // conversation out of the shard checkpoint.
     const checkpoint = serialize(state);
     const promoted =
-      this.valueStore !== null
-        ? await promoteCheckpoint(checkpoint, this.promoteText, this.promotionThreshold)
+      tx.values !== null
+        ? await promoteCheckpoint(
+            checkpoint,
+            this.makePromoteText(tx.values),
+            this.promotionThreshold,
+          )
         : checkpoint;
-    await this.shardStore.upsert({
+    await tx.shards.upsert({
       projectId: this.projectId,
       shardId,
       currentSnapshot,
@@ -306,16 +305,18 @@ export class CoreModule implements Module<CoreTx> {
   }
 
   /** Promote one inline string to an owner=core ref by writing its bytes. */
-  private promoteText = async (text: string): Promise<RefRep> => {
-    const valueStore = this.valueStore as ValueStore;
-    const result = await valueStore.putComplete({
-      projectId: this.projectId,
-      owner: "core",
-      bytes: new TextEncoder().encode(text),
-      semanticKind: "string",
-    });
-    return { kind: "ref", module: "core", id: result.id, hash: result.hash, size: result.size };
-  };
+  private makePromoteText(valueStore: ValueStore): (text: string) => Promise<RefRep> {
+    const projectId = this.projectId;
+    return async (text: string): Promise<RefRep> => {
+      const result = await valueStore.putComplete({
+        projectId,
+        owner: "core",
+        bytes: new TextEncoder().encode(text),
+        semanticKind: "string",
+      });
+      return { kind: "ref", module: "core", id: result.id, hash: result.hash, size: result.size };
+    };
+  }
 
   // ─── Project index reconciliation ──────────────────────────────────────
 
@@ -339,7 +340,7 @@ export class CoreModule implements Module<CoreTx> {
     }
   }
 
-  /** Shard state for tests / debug. `undefined` if not loaded this tick. */
+  /** Shard state for tests / debug. `undefined` if not resident. */
   shardState(shardId: ShardId): State | undefined {
     return this.shardCache.get(shardId)?.state;
   }
@@ -352,6 +353,7 @@ export class CoreModule implements Module<CoreTx> {
   // ─── Audit helpers ─────────────────────────────────────────────────────
 
   private async persistOutboundDelegate(
+    delegations: DelegationStore,
     state: State,
     ev: ExternalEvent,
     payload: Extract<ExternalEvent["payload"], { kind: "delegate" }>,
@@ -360,9 +362,9 @@ export class CoreModule implements Module<CoreTx> {
     const rootDelegationId =
       parentDelegationId === null
         ? payload.delegationId
-        : ((await this.delegationStore.getRoot(parentDelegationId)) ?? payload.delegationId);
+        : ((await delegations.getRoot(parentDelegationId)) ?? payload.delegationId);
     const now = new Date().toISOString();
-    await this.delegationStore.insert({
+    await delegations.insert({
       id: payload.delegationId,
       rootDelegationId,
       parentDelegationId,
@@ -406,3 +408,6 @@ function findEnclosingAgentDelegation(
   }
   return null;
 }
+
+/** Backwards-compatible alias — the audit store is unused by default. */
+export { NULL_DELEGATION_STORE };
