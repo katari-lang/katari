@@ -140,6 +140,7 @@ function buildStorageAdapter(
             const snap = await tx.snapshots.get(id);
             if (snap === null) return null;
             return {
+              projectId: snap.projectId,
               irModule: snap.irModule,
               sidecarBundle: snap.sidecarBundle,
             };
@@ -169,6 +170,7 @@ function buildStorageAdapter(
       const snap = await storage.snapshots.get(id);
       if (snap === null) return null;
       return {
+        projectId: snap.projectId,
         irModule: snap.irModule,
         sidecarBundle: snap.sidecarBundle,
       };
@@ -208,6 +210,11 @@ function buildTickModulesFactory(
         irModule: snapshot.irModule,
         logger,
         delegationStore: new StorageDelegationStore(tx, snapshotId),
+        // Persist-time promotion: large inline strings in CORE state are
+        // written to the (tx-scoped) value store as owner=core refs so the
+        // checkpoint stays small. projectId scopes the refs.
+        projectId: snapshot.projectId,
+        valueStore: tx.values,
       });
 
       const api = new ApiModule({ snapshotId, tx, logger });

@@ -22,6 +22,7 @@
 import type { IRModule } from "../ir/types.js";
 import { decryptValueTree, encryptValueTree } from "../value-secret-codec.js";
 import type { State } from "./state.js";
+import type { RefRep } from "./value.js";
 
 export type EngineCheckpoint = {
   /**
@@ -180,4 +181,76 @@ function walkValuesInTree(
     out[k] = walkValuesInTree(v, transform);
   }
   return out;
+}
+
+// ─── Persist-time promotion (inline string → content-addressed ref) ─────────
+//
+// The motivating problem: a large `string` (e.g. an accumulated AI
+// conversation) sits inline in CORE state and is copied to the DB on every
+// persist, bloating the checkpoint. Promotion writes the bytes once to the
+// value store and replaces the inline rep with a `ref`, so the checkpoint
+// carries only a small handle. On reload the value is a ref; `==` / `match`
+// compare by hash (no fetch) and `concat` / `format` materialize on demand
+// (Phase E0) — so promotion is observationally transparent (E-design
+// invariant #8).
+//
+// Only `string` inline reps over a byte threshold are promoted. `secret` stays
+// inline (secret refs are unsupported in v0.1.0); `file` is already a ref;
+// already-ref strings pass through unchanged (so a value promoted once keeps a
+// stable ref id across persists rather than churning a new ref each time).
+
+/** Writes bytes to the value store and returns the resulting ref. Injected. */
+export type PromoteFn = (text: string) => Promise<RefRep>;
+
+/** Default 4 KiB: below this an inline string is cheap to keep in the checkpoint. */
+export const DEFAULT_PROMOTE_THRESHOLD_BYTES = 4096;
+
+function inlineTextOverThreshold(
+  rep: unknown,
+  threshold: number,
+): rep is { kind: "inline"; text: string } {
+  return (
+    typeof rep === "object" &&
+    rep !== null &&
+    (rep as { kind?: unknown }).kind === "inline" &&
+    typeof (rep as { text?: unknown }).text === "string" &&
+    Buffer.byteLength((rep as { text: string }).text, "utf8") > threshold
+  );
+}
+
+async function promoteInTree(
+  node: unknown,
+  promote: PromoteFn,
+  threshold: number,
+): Promise<unknown> {
+  if (node === null || typeof node !== "object") return node;
+  if (Array.isArray(node)) {
+    return Promise.all(node.map((n) => promoteInTree(n, promote, threshold)));
+  }
+  const obj = node as Record<string, unknown>;
+  // A `string` Value whose inline text exceeds the threshold → promote.
+  if (obj.kind === "string" && inlineTextOverThreshold(obj.rep, threshold)) {
+    return { kind: "string", rep: await promote((obj.rep as { text: string }).text) };
+  }
+  // Everything else (non-Value structure, composite Values, secret/file/ref
+  // strings, small strings) recurses structurally so nested strings promote.
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(obj)) {
+    out[k] = await promoteInTree(v, promote, threshold);
+  }
+  return out;
+}
+
+/**
+ * Promote every large inline `string` in a checkpoint to a content-addressed
+ * ref via `promote`. Returns a structurally-equivalent checkpoint. Run BEFORE
+ * `encryptCheckpoint` at persist time (promotion handles strings, encryption
+ * handles the remaining secrets — disjoint concerns).
+ */
+export async function promoteCheckpoint(
+  checkpoint: EngineCheckpoint,
+  promote: PromoteFn,
+  threshold: number = DEFAULT_PROMOTE_THRESHOLD_BYTES,
+): Promise<EngineCheckpoint> {
+  return (await promoteInTree(checkpoint, promote, threshold)) as EngineCheckpoint;
 }

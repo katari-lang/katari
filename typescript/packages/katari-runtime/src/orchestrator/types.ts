@@ -37,6 +37,8 @@ export type OrchestratorProjectId = string;
 
 /** The subset of a snapshot row the Orchestrator needs to build modules. */
 export type ResolvedSnapshot = {
+  /** Project the snapshot belongs to (= ambient scope for value refs). */
+  projectId: string;
   irModule: IRModule;
   sidecarBundle: SidecarBundle | null;
 };
