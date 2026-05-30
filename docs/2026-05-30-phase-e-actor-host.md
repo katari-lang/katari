@@ -335,3 +335,54 @@ E は engine 全体に波及するため、**各 step を既存 e2e (22 sample) 
 4. **per-project module factory の DI**: 現 `TickModulesFactory` (per-tick) を per-actor factory に。
    storage tx の貼り方 (module 毎 tx) を adapter でどう表現するか
 ```
+
+## 14. 改訂 (2026-05-30 後半): Module 自己完結モデル
+
+設計議論の結果、host / bus / Module の責務を以下に確定した。E0/E1/E2-shard は landing 済み
+(async engine / promotion / per-agent shard)。本節は **host 層 (E2 残り)** の最終形。
+
+### 3 層の責務
+
+- **Module** = 独立実体。katari-protocol (`feed` = 6 events) + **ドメイン機能 (file/run/...) を
+  method として内包**。**自分で tx を張り、自分で直列化する**。warm (常駐)。root storage を保持し、
+  feed / method 毎に tx を開く (= 1 quantum 1 tx、cross-module atomic は捨て delegation table で
+  eventual consistency)。
+- **bus** = pure router。`event.to` で `Module.feed` に dispatch するだけ。tx も lock も持たない。
+- **host** = 各 Module の **薄い proxy**。やるのは「外部 trigger (HTTP / sidecar / timer) →
+  該当 Module の method を叩く」+ bus を回すだけ。**tx も直列化も持たない**。
+
+旧 `Orchestrator.tick` の「1 request = 1 tx + 1 snapshot lock で drain 全体を包む」は廃止
+(= §1 で批判した癒着)。
+
+### 直列化 = Module の責務 (host ではない)
+
+host が proxy で直列化しないので、同 project の concurrent 入力 → concurrent feed になりうる。
+**CORE は内部に per-project mutex** を持って自己直列化する (in-memory、single-process)。
+per-shard 並行化 (v0.2) は **この mutex の粒度を per-shard に変える CORE 内部変更だけ** で済む
+(host / bus 不変)。`withSnapshotLock` は廃止。
+
+### Module 構成
+
+- **CoreModule**: warm。`shardCache` + `projectIndex` を in-memory に warm 保持 + per-project
+  mutex。`feed` は mutex → `storage.withTransaction` → (index で route → shard load →
+  applyEvent → reconcile → dirty shard を promote+persist → completed を delete) → commit。
+  crash で in-memory が飛んでも DB から reload。
+- **ApiModule**: protocol `feed` (delegate/escalate) + **domain method** (`startRun` / `cancelRun`
+  / `uploadFile` / `listFiles` / `deleteFile` / `answerEscalation` / `deploySnapshot` / `setEnv`
+  / ...) を内包。各 method が自分の tx を張る。REST route は **proxy** (route → ApiModule method)。
+- **FfiModule / EnvModule**: 同様に feed が自分の tx を張る。warm。
+
+### host (ProjectActorHost)
+
+```
+ProjectActorHost
+  - Map<projectId, ProjectActor>          (warm、遅延 reactivate)
+  - ProjectActor = warm bus + warm 4 module (+ per-project mutex は CORE 内)
+  - 外部 trigger → 該当 project の actor を取得 → Module method を proxy 呼び出し → bus drain
+  - tx も lock も持たない (Module が各自で)
+```
+
+### Module interface の簡素化
+
+`feed(event)` のみ (各自 tx)。旧 `load(tx)` / `persist(tx)` (host が tx を渡す) は廃止。warm な
+Module は起動時/初回 feed で DB から自分の state を hydrate し、feed 毎に自分の tx で persist。
