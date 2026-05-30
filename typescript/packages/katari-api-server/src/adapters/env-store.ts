@@ -11,19 +11,25 @@
 // concerned.
 
 import type { EnvEntry, EnvStore } from "@katari-lang/runtime";
-import type { Storage } from "../storage/types.js";
+import type { ProjectId, Storage } from "../storage/types.js";
 
 export class StorageEnvStore implements EnvStore {
-  constructor(private readonly storage: Storage) {}
+  // Bound to one project: the actor-host builds a fresh store per project, so
+  // the EnvModule's stdlib builtins read/write only that project's env space.
+  constructor(
+    private readonly storage: Storage,
+    private readonly projectId: ProjectId,
+  ) {}
 
   async get(key: string): Promise<EnvEntry | null> {
-    const row = await this.storage.envEntries.get(key);
+    const row = await this.storage.envEntries.get(this.projectId, key);
     if (row === null) return null;
     return { key: row.key, value: row.value, isSecret: row.isSecret };
   }
 
   async upsert(entry: EnvEntry): Promise<void> {
     await this.storage.envEntries.upsert({
+      projectId: this.projectId,
       key: entry.key,
       value: entry.value,
       isSecret: entry.isSecret,
@@ -31,11 +37,11 @@ export class StorageEnvStore implements EnvStore {
   }
 
   async delete(key: string): Promise<boolean> {
-    return this.storage.envEntries.delete(key);
+    return this.storage.envEntries.delete(this.projectId, key);
   }
 
   async list(): Promise<EnvEntry[]> {
-    const rows = await this.storage.envEntries.list();
+    const rows = await this.storage.envEntries.list(this.projectId);
     return rows.map((r) => ({
       key: r.key,
       value: r.value,

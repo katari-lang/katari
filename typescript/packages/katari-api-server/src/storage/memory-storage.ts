@@ -577,22 +577,43 @@ class InMemoryFfiPendingEscalationRepo implements FfiPendingEscalationRepo {
 }
 
 class InMemoryEnvEntryRepo implements EnvEntryRepo {
+  // Keyed by `${projectId} ${key}` so one project's env can't shadow
+  // another's. A space can't appear in a project UUID, so the prefix scan
+  // in `list` is unambiguous.
   rows = new Map<string, EnvEntryRow>();
 
-  async get(key: string): Promise<EnvEntryRow | null> {
-    return this.rows.get(key) ?? null;
+  private static composite(projectId: ProjectId, key: string): string {
+    return `${projectId} ${key}`;
   }
 
-  async upsert(row: { key: string; value: string; isSecret: boolean }): Promise<void> {
-    this.rows.set(row.key, { ...row, updatedAt: new Date().toISOString() });
+  async get(projectId: ProjectId, key: string): Promise<EnvEntryRow | null> {
+    return this.rows.get(InMemoryEnvEntryRepo.composite(projectId, key)) ?? null;
   }
 
-  async delete(key: string): Promise<boolean> {
-    return this.rows.delete(key);
+  async upsert(row: {
+    projectId: ProjectId;
+    key: string;
+    value: string;
+    isSecret: boolean;
+  }): Promise<void> {
+    this.rows.set(InMemoryEnvEntryRepo.composite(row.projectId, row.key), {
+      key: row.key,
+      value: row.value,
+      isSecret: row.isSecret,
+      updatedAt: new Date().toISOString(),
+    });
   }
 
-  async list(): Promise<EnvEntryRow[]> {
-    return [...this.rows.values()].sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+  async delete(projectId: ProjectId, key: string): Promise<boolean> {
+    return this.rows.delete(InMemoryEnvEntryRepo.composite(projectId, key));
+  }
+
+  async list(projectId: ProjectId): Promise<EnvEntryRow[]> {
+    const prefix = `${projectId} `;
+    return [...this.rows.entries()]
+      .filter(([k]) => k.startsWith(prefix))
+      .map(([, row]) => row)
+      .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
   }
 }
 

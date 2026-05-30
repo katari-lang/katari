@@ -15,7 +15,7 @@
 --                          root delegations. Stays even after the live row in
 --                          `delegations` is deleted, so the "Runs" page can show
 --                          terminal states + results + cancel reason.
---   - env_entries        : runtime-wide env store (shared across snapshots).
+--   - env_entries        : per-project env store (shared across a project's snapshots).
 
 -- Pre-v0.1.0 prototype tables that have been absorbed into the unified
 -- `delegations` / `escalations` / `runs_audit` design. Dropped here so a
@@ -194,15 +194,19 @@ CREATE TABLE IF NOT EXISTS ffi_pending_escalations (
 CREATE INDEX IF NOT EXISTS ffi_pending_escalations_snapshot_idx
   ON ffi_pending_escalations (snapshot_id);
 
--- Runtime-wide env store. Shared across snapshots. `value` holds plaintext
--- for non-secret entries and AES-GCM ciphertext for secret entries; the
--- EnvModule encrypts/decrypts at its boundary so storage never sees
--- plaintext credentials.
+-- Per-project env store. Each project owns its own key/value space (an env
+-- is part of a project's runtime config, not a global), keyed by
+-- (project_id, key). Shared across that project's snapshots — env outlives
+-- any single deploy. `value` holds plaintext for non-secret entries and
+-- AES-GCM ciphertext for secret entries; the EnvModule encrypts/decrypts at
+-- its boundary so storage never sees plaintext credentials.
 CREATE TABLE IF NOT EXISTS env_entries (
-  key        TEXT PRIMARY KEY,
+  project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  key        TEXT NOT NULL,
   value      TEXT NOT NULL,
   is_secret  BOOLEAN NOT NULL DEFAULT FALSE,
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (project_id, key)
 );
 
 -- ─── Value store: 3-layer byte-sequence storage ─────────────────────────────

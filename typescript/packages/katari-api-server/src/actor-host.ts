@@ -122,7 +122,7 @@ export class ApiServerActorHost {
     const api = new ApiModule({ projectId, storage, logger });
 
     const env = new EnvModule({
-      store: new StorageEnvStore(storage),
+      store: new StorageEnvStore(storage, projectId),
       logger,
       onBusResponse: (event) => bus.push(event),
     });

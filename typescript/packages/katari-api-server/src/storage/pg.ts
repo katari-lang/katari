@@ -997,12 +997,12 @@ class PgFfiPendingEscalationRepo implements FfiPendingEscalationRepo {
 class PgEnvEntryRepo implements EnvEntryRepo {
   constructor(private readonly sql: Sql) {}
 
-  async get(key: string): Promise<EnvEntryRow | null> {
+  async get(projectId: ProjectId, key: string): Promise<EnvEntryRow | null> {
     const rows = await this.sql<
       { key: string; value: string; is_secret: boolean; updated_at: Date }[]
     >`
       SELECT key, value, is_secret, updated_at
-      FROM env_entries WHERE key = ${key}
+      FROM env_entries WHERE project_id = ${projectId} AND key = ${key}
     `;
     const row = rows[0];
     if (row === undefined) return null;
@@ -1014,27 +1014,34 @@ class PgEnvEntryRepo implements EnvEntryRepo {
     };
   }
 
-  async upsert(row: { key: string; value: string; isSecret: boolean }): Promise<void> {
+  async upsert(row: {
+    projectId: ProjectId;
+    key: string;
+    value: string;
+    isSecret: boolean;
+  }): Promise<void> {
     await this.sql`
-      INSERT INTO env_entries (key, value, is_secret, updated_at)
-      VALUES (${row.key}, ${row.value}, ${row.isSecret}, now())
-      ON CONFLICT (key) DO UPDATE
+      INSERT INTO env_entries (project_id, key, value, is_secret, updated_at)
+      VALUES (${row.projectId}, ${row.key}, ${row.value}, ${row.isSecret}, now())
+      ON CONFLICT (project_id, key) DO UPDATE
         SET value = EXCLUDED.value,
             is_secret = EXCLUDED.is_secret,
             updated_at = now()
     `;
   }
 
-  async delete(key: string): Promise<boolean> {
-    const result = await this.sql`DELETE FROM env_entries WHERE key = ${key}`;
+  async delete(projectId: ProjectId, key: string): Promise<boolean> {
+    const result = await this
+      .sql`DELETE FROM env_entries WHERE project_id = ${projectId} AND key = ${key}`;
     return result.count > 0;
   }
 
-  async list(): Promise<EnvEntryRow[]> {
+  async list(projectId: ProjectId): Promise<EnvEntryRow[]> {
     const rows = await this.sql<
       { key: string; value: string; is_secret: boolean; updated_at: Date }[]
     >`
-      SELECT key, value, is_secret, updated_at FROM env_entries ORDER BY key
+      SELECT key, value, is_secret, updated_at FROM env_entries
+      WHERE project_id = ${projectId} ORDER BY key
     `;
     return rows.map((r) => ({
       key: r.key,

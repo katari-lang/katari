@@ -1,6 +1,8 @@
-// Env-entry CRUD routes. Operators / web-UI use these to manage the
-// key/value store backing EnvModule's stdlib builtins
-// ('get_env' / 'get_secret_env' / 'set_env').
+// Per-project env-entry CRUD routes. Operators / web-UI use these to manage
+// the key/value store backing EnvModule's stdlib builtins
+// ('get_env' / 'get_secret_env' / 'set_env'). Mounted at
+// `/project/:projectId/env`: each project owns its own env space, matching
+// the per-project EnvModule the actor-host wires.
 //
 // Security surface: this endpoint is the **only** way for an
 // outside-the-runtime caller to view env metadata. Secret values are
@@ -15,6 +17,7 @@ import { encryptSecret } from "@katari-lang/runtime";
 import { Hono } from "hono";
 import { z } from "zod";
 import type { Storage } from "../storage/types.js";
+import { ProjectIdSchema } from "./middleware/validation.js";
 
 const KEY_PATTERN = /^[A-Za-z0-9_.-]+$/;
 
@@ -40,7 +43,8 @@ export function buildEnvRoutes(storage: Storage): Hono {
   // placeholder; the row's `isSecret` flag tells the caller whether
   // the original value would have been encrypted.
   app.get("/", async (c) => {
-    const rows = await storage.envEntries.list();
+    const projectId = ProjectIdSchema.parse(c.req.param("projectId"));
+    const rows = await storage.envEntries.list(projectId);
     return c.json({
       entries: rows.map((r) => ({
         key: r.key,
@@ -55,8 +59,9 @@ export function buildEnvRoutes(storage: Storage): Hono {
   // placeholder rather than the plaintext (or ciphertext, which would
   // be useless to clients).
   app.get("/:key", async (c) => {
+    const projectId = ProjectIdSchema.parse(c.req.param("projectId"));
     const key = KeyParamSchema.parse(c.req.param("key"));
-    const row = await storage.envEntries.get(key);
+    const row = await storage.envEntries.get(projectId, key);
     if (row === null) {
       return c.json({ error: "env entry not found" }, 404);
     }
@@ -73,9 +78,11 @@ export function buildEnvRoutes(storage: Storage): Hono {
   // secret values before they reach storage, matching the EnvModule's
   // own encryption boundary for `set_env`.
   app.put("/", async (c) => {
+    const projectId = ProjectIdSchema.parse(c.req.param("projectId"));
     const body = UpsertBodySchema.parse(await c.req.json());
     const storedValue = body.isSecret ? encryptSecret(body.value) : body.value;
     await storage.envEntries.upsert({
+      projectId,
       key: body.key,
       value: storedValue,
       isSecret: body.isSecret,
@@ -86,8 +93,9 @@ export function buildEnvRoutes(storage: Storage): Hono {
   // Delete an entry by key. 404 when the key was already absent so
   // callers can distinguish "removed" from "no-op".
   app.delete("/:key", async (c) => {
+    const projectId = ProjectIdSchema.parse(c.req.param("projectId"));
     const key = KeyParamSchema.parse(c.req.param("key"));
-    const ok = await storage.envEntries.delete(key);
+    const ok = await storage.envEntries.delete(projectId, key);
     if (!ok) {
       return c.json({ error: "env entry not found" }, 404);
     }

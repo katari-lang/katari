@@ -379,10 +379,10 @@ export interface FfiPendingEscalationRepo {
 
 // ─── Env entries ──────────────────────────────────────────────────────────
 //
-// Key/value store backing EnvModule. Shared across snapshots (env
-// outlives any single deploy). Secret entries hold AES-GCM ciphertext
-// produced by the EnvModule; the storage layer sees only opaque
-// strings.
+// Per-project key/value store backing EnvModule. Each project owns its own
+// env space (keyed by project_id); shared across that project's snapshots
+// (env outlives any single deploy). Secret entries hold AES-GCM ciphertext
+// produced by the EnvModule; the storage layer sees only opaque strings.
 
 export type EnvEntryRow = {
   key: string;
@@ -392,10 +392,15 @@ export type EnvEntryRow = {
 };
 
 export interface EnvEntryRepo {
-  get(key: string): Promise<EnvEntryRow | null>;
-  upsert(row: { key: string; value: string; isSecret: boolean }): Promise<void>;
-  delete(key: string): Promise<boolean>;
-  list(): Promise<EnvEntryRow[]>;
+  get(projectId: ProjectId, key: string): Promise<EnvEntryRow | null>;
+  upsert(row: {
+    projectId: ProjectId;
+    key: string;
+    value: string;
+    isSecret: boolean;
+  }): Promise<void>;
+  delete(projectId: ProjectId, key: string): Promise<boolean>;
+  list(projectId: ProjectId): Promise<EnvEntryRow[]>;
 }
 
 // ─── Pagination ────────────────────────────────────────────────────────────
