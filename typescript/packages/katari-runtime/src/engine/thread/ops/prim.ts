@@ -188,10 +188,14 @@ function resolveCallable(ctx: StepCtx, value: Value): [AgentBlock, string] {
     }
     case "closure": {
       if (!("closureId" in value)) {
-        // A content-ref closure must be materialized into the shard before
-        // its metadata is available (Phase E / #5, not yet wired).
+        // A content-ref closure (one that arrived from another shard) carries
+        // its body block inside a value-store blob, not in this shard's
+        // closures table. Introspecting it WITHOUT invoking it would need an
+        // async blob fetch from here (the sync metadata path can't); invoking
+        // it materializes it. So get_metadata on a not-yet-invoked cross-shard
+        // closure is unsupported in v0.1.0 — invoke it instead.
         throw new RecoverableEngineError(
-          "prim get_metadata: content-ref closure not yet materializable",
+          "prim get_metadata: cannot introspect a cross-shard closure ref without invoking it (v0.1.0)",
         );
       }
       const record = ctx.state.closures[value.closureId];
