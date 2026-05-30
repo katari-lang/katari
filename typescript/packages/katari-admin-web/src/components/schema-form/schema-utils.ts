@@ -44,6 +44,18 @@ export function unionBranches(schema: JsonSchema): JsonSchema[] | null {
   return null;
 }
 
+/** True if the schema is Katari's `file` value-reference shape: an object
+ * with `as: {const: "file"}` plus a `$ref` property (Schema.hs `fileRefCore`).
+ * Such a field is filled by picking / uploading a file, not by typing JSON. */
+export function isFileRefSchema(schema: JsonSchema): boolean {
+  if (singleType(schema) !== "object") return false;
+  const props = schema.properties;
+  if (props === undefined) return false;
+  const as = props.as;
+  if (as === undefined || as.const !== "file") return false;
+  return props.$ref !== undefined;
+}
+
 /** True if the schema looks like Katari's tagged-data shape: an object
  * with a `$constructor: {const: "<qname>"}` property. */
 export function taggedCtorOf(schema: JsonSchema): string | null {
@@ -100,6 +112,10 @@ export function schemaInitialValue(schema: JsonSchema): unknown {
 
   const branches = unionBranches(schema);
   if (branches !== null) return schemaInitialValue(branches[0]!);
+
+  // A `file` field starts empty (= no file picked); the operator selects or
+  // uploads one. Don't synthesize a half-built `$ref` object.
+  if (isFileRefSchema(schema)) return null;
 
   const type = singleType(schema);
   switch (type) {

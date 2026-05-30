@@ -9,6 +9,7 @@ import type {
   EscalationId,
   EscalationState,
   EscalationWire,
+  FileWire,
   Project,
   ProjectId,
   RunId,
@@ -208,14 +209,63 @@ export function createApiClient(config: ApiClientConfig) {
         value,
       }),
 
-    // Env
-    listEnv: () => request<{ entries: EnvEntry[] }>(config, "GET", "/env"),
-    getEnv: (key: string) => request<EnvEntry>(config, "GET", `/env/${encodeURIComponent(key)}`),
-    upsertEnv: (entry: { key: string; value: string; isSecret: boolean }) =>
-      request<{ ok: boolean }>(config, "PUT", "/env", entry),
-    deleteEnv: (key: string) =>
-      request<{ ok: boolean }>(config, "DELETE", `/env/${encodeURIComponent(key)}`),
+    // Env (per-project; mounted under /project/:projectId/env).
+    listEnv: (projectId: ProjectId) =>
+      request<{ entries: EnvEntry[] }>(config, "GET", `/project/${projectId}/env`),
+    getEnv: (projectId: ProjectId, key: string) =>
+      request<EnvEntry>(config, "GET", `/project/${projectId}/env/${encodeURIComponent(key)}`),
+    upsertEnv: (projectId: ProjectId, entry: { key: string; value: string; isSecret: boolean }) =>
+      request<{ ok: boolean }>(config, "PUT", `/project/${projectId}/env`, entry),
+    deleteEnv: (projectId: ProjectId, key: string) =>
+      request<{ ok: boolean }>(
+        config,
+        "DELETE",
+        `/project/${projectId}/env/${encodeURIComponent(key)}`,
+      ),
+
+    // Files (persistent api_files; mounted under /project/:projectId/file).
+    listFiles: (projectId: ProjectId) =>
+      request<{ files: FileWire[] }>(config, "GET", `/project/${projectId}/file`),
+    /** Upload raw bytes. The body is the file itself; the display name +
+     *  content type ride the query / Content-Type so the JSON `request`
+     *  helper is bypassed for this one binary path. */
+    uploadFile: (projectId: ProjectId, file: File) => uploadBytes(config, projectId, file),
+    deleteFile: (projectId: ProjectId, id: string) =>
+      request<{ ok: boolean }>(config, "DELETE", `/project/${projectId}/file/${id}`),
   };
+}
+
+/** Binary upload path (not JSON), kept out of `request` so that stays
+ *  JSON-only. Mirrors `request`'s auth + 401 handling. */
+async function uploadBytes(
+  config: ApiClientConfig,
+  projectId: ProjectId,
+  file: File,
+): Promise<{ file: FileWire }> {
+  const name = file.name !== "" ? `?name=${encodeURIComponent(file.name)}` : "";
+  const url = `${config.baseUrl.replace(/\/$/, "")}/project/${projectId}/file${name}`;
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${config.apiKey}`,
+  };
+  if (file.type !== "") headers["content-type"] = file.type;
+  const res = await fetch(url, { method: "POST", headers, body: file });
+  const parsed = (await res.json().catch(() => undefined)) as unknown;
+  if (
+    res.status === 401 &&
+    typeof window !== "undefined" &&
+    window.location.pathname !== "/login"
+  ) {
+    window.localStorage.removeItem("katari-admin.apiKey");
+    window.location.href = "/login";
+  }
+  if (!res.ok) {
+    const message =
+      parsed !== null && typeof parsed === "object" && "error" in parsed
+        ? String((parsed as { error: unknown }).error)
+        : `upload failed with ${res.status}`;
+    throw new ApiError(res.status, parsed, message);
+  }
+  return parsed as { file: FileWire };
 }
 
 export type ApiClient = ReturnType<typeof createApiClient>;

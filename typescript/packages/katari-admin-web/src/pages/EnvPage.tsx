@@ -13,22 +13,25 @@ import { SpinnerOverlay } from "@/components/ui/Spinner";
 import { Table, TBody, TD, TH, THead, TR } from "@/components/ui/Table";
 import { useApiClient } from "@/contexts/ApiKeyContext";
 import { formatDateTime, relativeTime } from "@/lib/format";
+import { useCurrentProjectId } from "@/lib/useCurrentProjectId";
 
 export function EnvPage() {
   const client = useApiClient();
+  const projectId = useCurrentProjectId();
   const [upserting, setUpserting] = useState<EnvEntry | "new" | null>(null);
   const [deleting, setDeleting] = useState<EnvEntry | null>(null);
 
   const { data, isLoading, isError, error } = useQuery({
-    queryKey: ["env"],
-    queryFn: () => client.listEnv(),
+    queryKey: ["env", projectId],
+    queryFn: () => client.listEnv(projectId!),
+    enabled: projectId !== null,
   });
 
   return (
     <div>
       <PageHeader
         title="Environment"
-        description="Global key-value store"
+        description="Per-project key-value store"
         docs={{ slug: "concepts/env", title: "About the env store" }}
         actions={
           <Button onClick={() => setUpserting("new")}>
@@ -130,16 +133,22 @@ export function EnvPage() {
           </motion.div>
         )}
       </PageContent>
-      <EnvUpsertDialog
-        open={upserting !== null}
-        onClose={() => setUpserting(null)}
-        editing={upserting === "new" || upserting === null ? null : upserting}
-      />
-      <EnvDeleteDialog
-        open={deleting !== null}
-        onClose={() => setDeleting(null)}
-        target={deleting}
-      />
+      {projectId !== null && (
+        <>
+          <EnvUpsertDialog
+            projectId={projectId}
+            open={upserting !== null}
+            onClose={() => setUpserting(null)}
+            editing={upserting === "new" || upserting === null ? null : upserting}
+          />
+          <EnvDeleteDialog
+            projectId={projectId}
+            open={deleting !== null}
+            onClose={() => setDeleting(null)}
+            target={deleting}
+          />
+        </>
+      )}
     </div>
   );
 }

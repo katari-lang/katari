@@ -1,6 +1,12 @@
 import { useCallback, useMemo, useState } from "react";
 import { SchemaField } from "./SchemaField";
-import { type JsonSchema, schemaInitialValue, singleType, unionBranches } from "./schema-utils";
+import {
+  isFileRefSchema,
+  type JsonSchema,
+  schemaInitialValue,
+  singleType,
+  unionBranches,
+} from "./schema-utils";
 
 type SchemaFormProps = {
   schema: JsonSchema;
@@ -31,6 +37,16 @@ function validateSchema(schema: JsonSchema, value: unknown, path = ""): string[]
   if (Array.isArray(schema.enum)) {
     if (!schema.enum.some((e) => e === value)) {
       errors.push(`${at}: value must be one of ${JSON.stringify(schema.enum)}`);
+    }
+    return errors;
+  }
+
+  // file ref: the FileField yields the `$ref` envelope or null. Validate
+  // "a file is picked" rather than recursing into the object's $ref/hash/size
+  // (which the picker fills atomically), so the message stays operator-facing.
+  if (isFileRefSchema(schema)) {
+    if (value === null || typeof value !== "object" || !("$ref" in value)) {
+      return [`${at}: select a file`];
     }
     return errors;
   }

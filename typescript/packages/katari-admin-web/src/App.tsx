@@ -8,6 +8,7 @@ import { DashboardPage } from "@/pages/DashboardPage";
 import { EnvPage } from "@/pages/EnvPage";
 import { EscalationDetailPage } from "@/pages/EscalationDetailPage";
 import { EscalationsPage } from "@/pages/EscalationsPage";
+import { FilesPage } from "@/pages/FilesPage";
 import { LoginPage } from "@/pages/LoginPage";
 import { PlaceholderPage } from "@/pages/PlaceholderPage";
 import { ProjectsPage } from "@/pages/ProjectsPage";
@@ -33,8 +34,9 @@ export default function App() {
                 <Route path="agents/:qualifiedName" element={<AgentDetailPage />} />
                 <Route path="escalations" element={<EscalationsPage />} />
                 <Route path="escalations/:escalationId" element={<EscalationDetailPage />} />
+                <Route path="files" element={<FilesPage />} />
+                <Route path="env" element={<EnvPage />} />
               </Route>
-              <Route path="/env" element={<EnvPage />} />
               <Route path="/settings" element={<SettingsPage />} />
               <Route path="*" element={<PlaceholderPage title="Not found" />} />
             </Route>

@@ -103,6 +103,28 @@ export type EnvEntry = {
   updatedAt: string;
 };
 
+/** The `$ref as:file` envelope a `file`-typed argument expects. Built
+ *  server-side (the client never needs to know a file's storage module),
+ *  so it drops straight into a run's args as a `RawValue`. */
+export type FileRef = {
+  $ref: { module: "api"; id: string };
+  as: "file";
+  hash: string;
+  size: number;
+  contentType?: string;
+};
+
+/** A persistent project file (`api_files`) plus its ready-to-use ref. */
+export type FileWire = {
+  id: string;
+  hash: string;
+  size: number;
+  contentType?: string;
+  displayName?: string;
+  createdAt: string;
+  ref: FileRef;
+};
+
 export type AgentWire = AgentDefinition;
 
 /**

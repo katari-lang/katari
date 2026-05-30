@@ -1,6 +1,7 @@
 import {
   Activity,
   Boxes,
+  FolderOpen,
   KeyRound,
   LayoutDashboard,
   MessageCircleQuestion,
@@ -31,13 +32,12 @@ function projectItems(projectId: string): MenuItem[] {
       label: "Escalations",
       icon: MessageCircleQuestion,
     },
+    { to: `/project/${projectId}/files`, label: "Files", icon: FolderOpen },
+    { to: `/project/${projectId}/env`, label: "Env", icon: KeyRound },
   ];
 }
 
-const globalItems: MenuItem[] = [
-  { to: "/env", label: "Env", icon: KeyRound },
-  { to: "/settings", label: "Settings", icon: Settings },
-];
+const globalItems: MenuItem[] = [{ to: "/settings", label: "Settings", icon: Settings }];
 
 export function SidebarMenu() {
   const projectId = useStickyProjectId();

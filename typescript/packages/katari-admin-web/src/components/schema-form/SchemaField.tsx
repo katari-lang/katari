@@ -1,5 +1,11 @@
 import { Label } from "@/components/ui/Label";
-import { isNeverSchema, type JsonSchema, singleType, unionBranches } from "./schema-utils";
+import {
+  isFileRefSchema,
+  isNeverSchema,
+  type JsonSchema,
+  singleType,
+  unionBranches,
+} from "./schema-utils";
 
 const METADATA_KEYS = new Set(["description", "title", "default"]);
 
@@ -11,6 +17,7 @@ import { AnyField } from "./fields/AnyField";
 import { ArrayField } from "./fields/ArrayField";
 import { BooleanField } from "./fields/BooleanField";
 import { EnumField } from "./fields/EnumField";
+import { FileField } from "./fields/FileField";
 import { NullField } from "./fields/NullField";
 import { NumberField } from "./fields/NumberField";
 import { ObjectField } from "./fields/ObjectField";
@@ -100,6 +107,12 @@ function renderInner(schema: JsonSchema, value: unknown, onChange: (v: unknown) 
   const branches = unionBranches(schema);
   if (branches !== null) {
     return <UnionField branches={branches} value={value} onChange={onChange} />;
+  }
+
+  // `file` value reference: a picker, not a JSON object editor. Must come
+  // before the generic object dispatch since the file ref IS an object.
+  if (isFileRefSchema(schema)) {
+    return <FileField value={value} onChange={onChange} />;
   }
 
   const type = singleType(schema);

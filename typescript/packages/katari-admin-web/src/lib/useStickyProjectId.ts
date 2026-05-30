@@ -7,9 +7,9 @@ const STORAGE_LAST_PROJECT = "katari-admin.lastProjectId";
 /**
  * Like {@link useCurrentProjectId}, but persists the last seen project to
  * localStorage and returns it when the current URL is outside any project
- * (= /env, /settings, /projects). This keeps the sidebar's "selected
- * project" indicator stable while operators navigate to runtime-global
- * pages, so they don't lose context.
+ * (= /settings, /projects). This keeps the sidebar's "selected project"
+ * indicator stable while operators navigate to runtime-global pages, so
+ * they don't lose context.
  */
 export function useStickyProjectId(): ProjectId | null {
   const current = useCurrentProjectId();

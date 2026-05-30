@@ -3,8 +3,8 @@ import type { ProjectId } from "@/api/types";
 
 /**
  * Pull the active projectId out of the URL. Returns null when the route
- * sits outside the `/project/:projectId/...` branch (= /projects, /env,
- * /settings, /login).
+ * sits outside the `/project/:projectId/...` branch (= /projects, /settings,
+ * /login).
  */
 export function useCurrentProjectId(): ProjectId | null {
   const match = useMatch("/project/:projectId/*");

@@ -1,7 +1,7 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import toast from "react-hot-toast";
-import type { EnvEntry } from "@/api/types";
+import type { EnvEntry, ProjectId } from "@/api/types";
 import { Button } from "@/components/ui/Button";
 import { Dialog, DialogFooter } from "@/components/ui/Dialog";
 import { Input } from "@/components/ui/Input";
@@ -11,6 +11,7 @@ import { TextArea } from "@/components/ui/TextArea";
 import { useApiClient } from "@/contexts/ApiKeyContext";
 
 type Props = {
+  projectId: ProjectId;
   open: boolean;
   onClose: () => void;
   /** When given, the dialog enters "edit" mode (key locked). */
@@ -19,7 +20,7 @@ type Props = {
 
 const KEY_PATTERN = /^[A-Za-z0-9_.-]+$/;
 
-export function EnvUpsertDialog({ open, onClose, editing }: Props) {
+export function EnvUpsertDialog({ projectId, open, onClose, editing }: Props) {
   const client = useApiClient();
   const queryClient = useQueryClient();
   const [key, setKey] = useState("");
@@ -46,11 +47,11 @@ export function EnvUpsertDialog({ open, onClose, editing }: Props) {
       if (!KEY_PATTERN.test(key)) {
         throw new Error("Key must match [A-Za-z0-9_.-]+");
       }
-      await client.upsertEnv({ key, value, isSecret });
+      await client.upsertEnv(projectId, { key, value, isSecret });
     },
     onSuccess: () => {
       toast.success(editing !== null ? "Entry updated" : "Entry created");
-      void queryClient.invalidateQueries({ queryKey: ["env"] });
+      void queryClient.invalidateQueries({ queryKey: ["env", projectId] });
       onClose();
     },
     onError: (err) => {
