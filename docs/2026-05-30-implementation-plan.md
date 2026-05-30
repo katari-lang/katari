@@ -166,6 +166,11 @@ ref で受けて fetch → 値検証)。
 **完了基準**: 複数 agent 並走サンプル + per-shard write 確認、 既存 e2e 全 regression なし。
 **risk**: engine 全体に波及。 着手前に詳細設計 doc を別途書く。 段階導入も検討。
 
+> **詳細設計**: [phase-e-actor-host](2026-05-30-phase-e-actor-host.md) に実装手順を起こした
+> (現コード実測 → shard/index 分割 → async quantum → actor host → multi-snapshot+sidecar env)。
+> 段階導入 E0 (async engine、D-async 合流) → E1 (shard storage) → E2 (actor host) →
+> E3 (multi-snapshot + sidecar env、C 残り合流) の 4 sub-phase。Phase C / D の残りはここに収束。
+
 ## Phase F: Frontend / API module / admin web
 
 **対象**: `api-server/routes/run.ts` 他, `katari-admin-web/`。
@@ -215,6 +220,7 @@ cascade test、 crash recovery test。
 
 1. **Phase A から着手**。 Value rewrite が全ドミノの起点
 2. **Phase E は着手前に詳細設計 doc を書く** (= engine 全体に波及、 invariant を固める)
+   → 完了: [phase-e-actor-host](2026-05-30-phase-e-actor-host.md)
 3. C / D は B 完了後に並列可。 F は E 後半から並走可。 G は最後、 H は G と並走可
 4. 各 Phase で既存 e2e サンプルの regression を確認しながら進める
 5. 「最小変更」 は気にしない。 ideal な形に overwrite する (= user 0、 migration 不要)
