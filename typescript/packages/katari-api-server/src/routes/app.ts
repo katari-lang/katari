@@ -22,6 +22,7 @@ import { buildRunRoutes } from "./run.js";
 import { buildRunByIdRoutes } from "./run-by-id.js";
 import { buildRunTreeRoutes } from "./run-tree.js";
 import { buildSnapshotRoutes } from "./snapshot.js";
+import { buildValueRoutes } from "./value.js";
 
 export type AppDeps = {
   storage: Storage;
@@ -145,6 +146,9 @@ export function buildApp(deps: AppDeps): Hono {
   app.route("/run", buildRunByIdRoutes(deps.orchestrator, deps.storage));
   app.route("/escalation", buildEscalationByIdRoutes(deps.orchestrator, deps.storage));
   app.route("/env", buildEnvRoutes(deps.storage));
+  // Katari Protocol data plane (read-only value consume). Production is
+  // module-internal; only fetch / range / state are exposed here.
+  app.route("/project/:projectId/value", buildValueRoutes(deps.storage));
 
   return app;
 }
