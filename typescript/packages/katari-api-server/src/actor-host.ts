@@ -47,6 +47,15 @@ export type ApiServerModules = {
 
 export type ApiServerActorContext = ProjectActorContext<ApiServerModules>;
 
+/** Katari Protocol coordinates a spawned sidecar needs to call back into this
+ *  api-server's data plane (produce / consume / persist). */
+export type SidecarProtocolCoords = {
+  /** Base URL of this api-server (e.g. http://127.0.0.1:8000). */
+  baseUrl: string;
+  /** Bearer token (= the api key) the sidecar presents on protocol calls. */
+  token: string;
+};
+
 export class ApiServerActorHost {
   private readonly host: ProjectActorHost<ApiServerModules>;
 
@@ -54,6 +63,7 @@ export class ApiServerActorHost {
     private readonly storage: Storage,
     private readonly sidecarManager: SidecarManager<SnapshotId>,
     private readonly logger: Logger,
+    private readonly protocol: SidecarProtocolCoords,
   ) {
     this.host = new ProjectActorHost<ApiServerModules>(
       (projectId, bus) => this.buildModules(projectId as ProjectId, bus),
@@ -125,12 +135,24 @@ export class ApiServerActorHost {
   private ffiBackend(projectId: ProjectId): FfiLaneBackend {
     const storage = this.storage;
     const sidecarManager = this.sidecarManager;
+    const protocol = this.protocol;
     return {
       async ensureSidecar(snapshot: string): Promise<boolean> {
         const snap = await storage.snapshots.get(snapshot as SnapshotId);
+        // The sidecar runs user ext code; it reaches our value data plane via
+        // the Katari Protocol env (katari-port reads these). PROJECT_ID is
+        // per-project; OWNER=ffi tags refs the ext produces. The api key flows
+        // as PROTOCOL_TOKEN (a distinct name, so the subprocess env filter that
+        // strips KATARI_API_KEY does not also strip this).
         await sidecarManager.ensureStarted({
           key: snapshot as SnapshotId,
           bundle: snap?.sidecarBundle ?? null,
+          env: {
+            KATARI_PROTOCOL_URL: protocol.baseUrl,
+            KATARI_PROTOCOL_TOKEN: protocol.token,
+            KATARI_PROJECT_ID: projectId,
+            KATARI_SIDECAR_OWNER: "ffi",
+          },
         });
         return sidecarManager.hasSidecar(snapshot as SnapshotId);
       },
@@ -203,6 +225,7 @@ export function createApiServerHost(
   storage: Storage,
   sidecarManager: SidecarManager<SnapshotId>,
   logger: Logger,
+  protocol: SidecarProtocolCoords,
 ): ApiServerActorHost {
-  return new ApiServerActorHost(storage, sidecarManager, logger);
+  return new ApiServerActorHost(storage, sidecarManager, logger, protocol);
 }

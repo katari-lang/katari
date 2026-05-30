@@ -25,6 +25,9 @@ export type SidecarFactory<TKey> = (
   key: TKey,
   bundle: SidecarBundle | null,
   logger: Logger,
+  /** Per-start env for the child (Katari Protocol coordinates: URL / token /
+   *  project / owner). `undefined` for factories that don't spawn a process. */
+  env: Record<string, string> | undefined,
 ) => Promise<Sidecar | null> | Sidecar | null;
 
 /**
@@ -47,10 +50,14 @@ export class SidecarManager<TKey> {
     this.handler = handler;
   }
 
-  async ensureStarted(input: { key: TKey; bundle: SidecarBundle | null }): Promise<void> {
+  async ensureStarted(input: {
+    key: TKey;
+    bundle: SidecarBundle | null;
+    env?: Record<string, string>;
+  }): Promise<void> {
     const k = this.keyToString(input.key);
     if (this.sidecars.has(k)) return;
-    const sidecar = await this.factory(input.key, input.bundle, this.logger);
+    const sidecar = await this.factory(input.key, input.bundle, this.logger, input.env);
     if (sidecar === null) {
       this.logger.log("debug", "sidecar factory returned null", { key: k });
       return;

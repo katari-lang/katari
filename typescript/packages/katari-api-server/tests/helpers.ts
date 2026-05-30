@@ -133,7 +133,10 @@ export function buildTestHarness(opts?: {
     },
     noopLogger,
   );
-  const host = createApiServerHost(storage, sidecarManager, noopLogger);
+  const host = createApiServerHost(storage, sidecarManager, noopLogger, {
+    baseUrl: "http://127.0.0.1:0",
+    token: "test-token",
+  });
   const projects = new ProjectService(storage, noopLogger);
   const snapshots = new SnapshotService(storage, noopLogger);
   const deps: AppDeps = {
