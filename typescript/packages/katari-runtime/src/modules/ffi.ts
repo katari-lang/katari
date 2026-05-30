@@ -43,6 +43,7 @@ import {
   encodeCoreAgentDefId,
   stampAgentDefIdSnapshot,
   stripAgentDefIdSnapshot,
+  THROW_REQUEST_QNAME,
 } from "../agent-def-id.js";
 import type { Endpoint } from "../engine/endpoint.js";
 import type { ExternalEvent } from "../engine/event.js";
@@ -494,7 +495,7 @@ export class FfiModule implements Module {
             kind: "escalate",
             delegationId: msg.delegationId,
             escalationId: createEscalationId(),
-            agentDefId: encodeCoreAgentDefId({ kind: "qname", value: "primitive.throw" }),
+            agentDefId: encodeCoreAgentDefId({ kind: "qname", value: THROW_REQUEST_QNAME }),
             args: { msg: mkString(msg.message) },
           },
         });

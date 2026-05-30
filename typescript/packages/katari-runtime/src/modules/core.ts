@@ -118,6 +118,22 @@ export class CoreModule implements Module {
 
       const shardId = this.routeToShard(event);
       if (shardId === undefined) {
+        // A terminate for a delegation with no live shard = it already
+        // finished (e.g. a root whose entry was missing errored before
+        // spawning). Ack immediately so the canceller (a DelegateThread, or
+        // the API run via terminateAck → terminal `error`) can settle, rather
+        // than waiting forever for a shard that will never reply.
+        if (event.payload.kind === "terminate") {
+          return {
+            outbound: [
+              {
+                from: this.endpoint,
+                to: event.from,
+                payload: { kind: "terminateAck", delegationId: event.payload.delegationId },
+              },
+            ],
+          };
+        }
         this.logger.log("debug", "core: event for unknown shard, dropping", {
           kind: event.payload.kind,
         });
@@ -145,7 +161,17 @@ export class CoreModule implements Module {
         return { outbound: [] };
       }
 
-      const result = await applyEvent(shard.state, event, this.makeFetchRef(tx.values));
+      let result: Awaited<ReturnType<typeof applyEvent>>;
+      try {
+        result = await applyEvent(shard.state, event, this.makeFetchRef(tx.values));
+      } catch (err) {
+        // applyEvent mutates state in place, so an irrecoverable throw leaves
+        // this warm shard half-mutated. Evict it (the per-feed tx will roll
+        // back) so the next feed reloads a clean copy from the DB rather than
+        // reusing the poisoned in-memory state.
+        this.shardCache.delete(shardId);
+        throw err;
+      }
       shard.state = result.state;
       for (const log of result.logs) {
         this.logger.log(log.level, log.message, log.context);

@@ -26,6 +26,20 @@ import type { QualifiedName } from "./ir/types.js";
 const CLOSURE_PREFIX = "closure:";
 
 /**
+ * Qualified name of the language built-in `throw` request. This is Katari
+ * language vocabulary (the compiler lowers `throw` / a handle scope's
+ * `req throw` to this qname — see ConstraintGenerator: module `primitive`,
+ * name `throw`), so every layer that raises or relays an error escalate
+ * (engine runner, FFI sidecar error, ENV arg error) and the boundary that
+ * detects an UNHANDLED throw (ApiModule) must agree on it. Centralised here as
+ * the single source of truth: the previous scattered string literals had
+ * drifted (`prim.throw` on the API side never matched the emitted
+ * `primitive.throw`, so unhandled throws were silently recorded as open
+ * escalations instead of failing the run).
+ */
+export const THROW_REQUEST_QNAME = "primitive.throw";
+
+/**
  * Opaque agent identifier handled by the bus / middle layer. Only the
  * receiving module decodes it. Wire format is a flat string
  * (JSON-serializable / structuredClone-safe).

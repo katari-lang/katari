@@ -2,15 +2,21 @@
 //
 // The runner doesn't know about Thread variants; it dispatches each event
 // to the per-method routing in `thread/ops/index.ts`. State is mutated in
-// place: every tick creates a fresh `CoreModule` instance and reloads
-// state from the DB at tick start, so half-modified state from a thrown
-// op is discarded with the instance (tx rollback handles the DB side).
+// place. An irrecoverable throw mid-drain therefore leaves the State
+// half-mutated: the per-feed tx rolls back the DB side, and CoreModule
+// evicts the poisoned shard from its warm cache so the next feed reloads a
+// clean copy from the (rolled-back) DB. (Recoverable errors never reach
+// here — `applyTranslateExternal` converts them into a throw escalate.)
 //
 // Stale-event semantics: events targeting a thread that was already
 // removed from `state.threads` are dropped silently with a debug log
 // (matches the previous engine's behaviour).
 
-import { decodeCoreAgentDefId, encodeCoreAgentDefId } from "../agent-def-id.js";
+import {
+  decodeCoreAgentDefId,
+  encodeCoreAgentDefId,
+  THROW_REQUEST_QNAME,
+} from "../agent-def-id.js";
 import { EntryNotFoundError, RecoverableEngineError } from "./errors.js";
 import type { Event, InternalEventPayload } from "./event.js";
 import { isInternal } from "./event.js";
@@ -89,7 +95,7 @@ function applyTranslateExternal(ctx: ReturnType<typeof makeStepCtx>, event: Even
             kind: "escalate",
             delegationId: event.payload.delegationId,
             escalationId: createEscalationId(),
-            agentDefId: encodeCoreAgentDefId({ kind: "qname", value: "primitive.throw" }),
+            agentDefId: encodeCoreAgentDefId({ kind: "qname", value: THROW_REQUEST_QNAME }),
             args: { msg: mkString(err.message) },
           },
         });

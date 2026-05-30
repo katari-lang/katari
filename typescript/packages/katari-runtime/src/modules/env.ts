@@ -25,7 +25,7 @@
 // decrypt inside the module so the storage layer never sees
 // plaintext credentials.
 
-import { decodeFfiAgentDefId, encodeCoreAgentDefId } from "../agent-def-id.js";
+import { decodeFfiAgentDefId, encodeCoreAgentDefId, THROW_REQUEST_QNAME } from "../agent-def-id.js";
 import type { Endpoint } from "../engine/endpoint.js";
 import type { ExternalEvent } from "../engine/event.js";
 import { createEscalationId, type DelegationId, type EscalationId } from "../engine/id.js";
@@ -235,7 +235,7 @@ export class EnvModule implements Module {
         escalationId: createEscalationId(),
         agentDefId: encodeCoreAgentDefId({
           kind: "qname",
-          value: "primitive.throw",
+          value: THROW_REQUEST_QNAME,
         }),
         args: { msg: mkString(message) },
       },

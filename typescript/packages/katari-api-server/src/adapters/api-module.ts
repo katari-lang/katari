@@ -25,11 +25,15 @@ import {
   encryptValueTree,
   type Logger,
   type Module,
+  THROW_REQUEST_QNAME,
   tryInlineString,
   type Value,
 } from "@katari-lang/runtime";
 
-const THROW_AGENT_DEF_ID = encodeCoreAgentDefId({ kind: "qname", value: "prim.throw" });
+// The unhandled-throw escalate's id. Was a hand-typed `prim.throw` that never
+// matched the emitted `primitive.throw`, so throws slipped through as open
+// escalations; now derived from the runtime's single source of truth.
+const THROW_AGENT_DEF_ID = encodeCoreAgentDefId({ kind: "qname", value: THROW_REQUEST_QNAME });
 
 import type { DelegationId, EscalationId } from "@katari-lang/runtime";
 import { NoSnapshotForProject, SnapshotNotFound } from "../services/snapshot-service.js";

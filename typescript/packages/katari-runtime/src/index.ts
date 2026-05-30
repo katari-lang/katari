@@ -173,6 +173,7 @@ export {
   encodeFfiAgentDefId,
   stampAgentDefIdSnapshot,
   stripAgentDefIdSnapshot,
+  THROW_REQUEST_QNAME,
 } from "./agent-def-id.js";
 
 // ─── 3-module + bus abstraction ────────────────────────────────────────────
