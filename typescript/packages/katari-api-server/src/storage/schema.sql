@@ -46,9 +46,28 @@ CREATE TABLE IF NOT EXISTS snapshots (
 CREATE INDEX IF NOT EXISTS snapshots_project_created_idx
   ON snapshots (project_id, created_at DESC);
 
-CREATE TABLE IF NOT EXISTS engine_checkpoints (
-  snapshot_id UUID PRIMARY KEY REFERENCES snapshots(id) ON DELETE CASCADE,
-  checkpoint  JSONB NOT NULL,
+-- Per-agent-instance shard: the encrypted engine checkpoint for one warm CORE
+-- shard, keyed by (project_id, shard_id). `current_snapshot` records which code
+-- version the instance runs (RESTRICT: a snapshot in use by a live shard cannot
+-- be deleted). Completed shards are physically DELETEd. Replaces the old
+-- per-snapshot `engine_checkpoints` (warm per-project actor model).
+CREATE TABLE IF NOT EXISTS engine_shards (
+  project_id        UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  shard_id          TEXT NOT NULL,
+  current_snapshot  UUID NOT NULL REFERENCES snapshots(id),
+  payload           JSONB NOT NULL,
+  status            TEXT NOT NULL,
+  updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (project_id, shard_id)
+);
+CREATE INDEX IF NOT EXISTS engine_shards_project_status_idx
+  ON engine_shards (project_id, status);
+
+-- Per-project routing index (delegation / escalation id -> shard). One JSONB
+-- row per project; the CoreModule keeps it warm in memory and writes through.
+CREATE TABLE IF NOT EXISTS project_index (
+  project_id  UUID PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+  payload     JSONB NOT NULL,
   updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
