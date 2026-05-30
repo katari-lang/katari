@@ -243,6 +243,7 @@ function buildTickModulesFactory(
         const store = new StorageFfiStore(tx, snapshotId);
         ffi = new FfiModule({
           endpoint: FFI_ENDPOINT,
+          snapshotId,
           sidecar,
           store,
           logger,

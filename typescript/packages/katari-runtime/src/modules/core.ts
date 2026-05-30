@@ -22,7 +22,7 @@
 // construction, so feed() — which the Module interface gives no tx — can still
 // load shards within the tick's transaction.
 
-import { type AgentDefId, decodeCoreAgentDefId, encodeCoreAgentDefId } from "../agent-def-id.js";
+import { agentDefIdSnapshot, stampAgentDefIdSnapshot } from "../agent-def-id.js";
 import { applyEvent, createState } from "../engine/apply.js";
 import { CORE_ENDPOINT, type Endpoint } from "../engine/endpoint.js";
 import type { ExternalEvent } from "../engine/event.js";
@@ -158,9 +158,7 @@ export class CoreModule implements Module<CoreTx> {
     // An inbound CORE delegate carries the version to run on in its agent def
     // id (a closure / un-stamped one falls back to this module's snapshot).
     const delegateSnapshot =
-      event.payload.kind === "delegate"
-        ? decodeDelegateSnapshot(event.payload.agentDefId)
-        : undefined;
+      event.payload.kind === "delegate" ? agentDefIdSnapshot(event.payload.agentDefId) : undefined;
     const shard = await this.getOrLoadShard(
       shardId,
       event.payload.kind === "delegate",
@@ -201,7 +199,7 @@ export class CoreModule implements Module<CoreTx> {
         const toSnapshotDependent =
           ev.to === shard.state.selfEndpoint || ev.to === shard.state.ffiTargetEndpoint;
         if (toSnapshotDependent) {
-          ev.payload.agentDefId = stampDelegateSnapshot(
+          ev.payload.agentDefId = stampAgentDefIdSnapshot(
             ev.payload.agentDefId,
             shard.currentSnapshot,
           );
@@ -390,29 +388,6 @@ function syncIndexMap(
   for (const key of Object.keys(indexMap)) {
     if (indexMap[key] === shardId && !(key in stateMap)) delete indexMap[key];
   }
-}
-
-/**
- * Decode the version an inbound CORE delegate's target runs on. The agent def
- * id is the one identifier that loads versioned code on the receiver, so a
- * CORE/FFI agent (qname-form) carries the snapshot; a closure / un-stamped
- * delegate has none (the caller falls back to the module's snapshot).
- */
-function decodeDelegateSnapshot(agentDefId: AgentDefId): string | undefined {
-  const decoded = decodeCoreAgentDefId(agentDefId);
-  return decoded.kind === "qname" ? decoded.snapshot : undefined;
-}
-
-/**
- * Stamp the issuing shard's version on a snapshot-dependent (CORE / FFI)
- * delegate target's agent def id. qname-form (an agent) carries it; closures
- * inherit (left bare). CORE and FFI qname encodings are identical, so the CORE
- * path serves both.
- */
-function stampDelegateSnapshot(agentDefId: AgentDefId, snapshot: string): AgentDefId {
-  const decoded = decodeCoreAgentDefId(agentDefId);
-  if (decoded.kind === "closure") return agentDefId;
-  return encodeCoreAgentDefId({ ...decoded, snapshot });
 }
 
 /** Walk from the DelegateThread that owns `delegationId` up to the enclosing

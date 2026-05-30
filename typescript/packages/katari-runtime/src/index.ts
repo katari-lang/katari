@@ -166,10 +166,13 @@ export type {
   FfiAgentDefId,
 } from "./agent-def-id.js";
 export {
+  agentDefIdSnapshot,
   decodeCoreAgentDefId,
   decodeFfiAgentDefId,
   encodeCoreAgentDefId,
   encodeFfiAgentDefId,
+  stampAgentDefIdSnapshot,
+  stripAgentDefIdSnapshot,
 } from "./agent-def-id.js";
 
 // ─── 3-module + bus abstraction ────────────────────────────────────────────

@@ -108,3 +108,38 @@ export function decodeFfiAgentDefId(id: AgentDefId): FfiAgentDefId {
   }
   return { kind: "qname", value: s };
 }
+
+// ─── Snapshot stamp helpers (shared by CORE + FFI) ─────────────────────────
+//
+// The CORE and FFI qname encodings are byte-identical (`qname` or
+// `qname@snapshot`), so these three helpers operate on the flat string via
+// the CORE decoder (the only one that also understands `closure:`). They are
+// the single place that knows "the snapshot rides inside the agent def id":
+//   - CORE stamps the issuing shard's snapshot on an outbound delegate target.
+//   - FFI strips it before talking to the sidecar (whose handler registry is
+//     keyed by the bare qname — the sidecar already IS the right snapshot's
+//     code) and stamps its own snapshot on a CORE child the ext spawns.
+// Closures never carry a snapshot (they run in the enclosing scope), so all
+// three pass a closure id through unchanged.
+
+/** The snapshot a snapshot-dependent delegate target runs on, or `undefined`
+ *  for a bare qname / closure. */
+export function agentDefIdSnapshot(id: AgentDefId): string | undefined {
+  const decoded = decodeCoreAgentDefId(id);
+  return decoded.kind === "qname" ? decoded.snapshot : undefined;
+}
+
+/** The agent def id with any snapshot stamp removed (bare qname / closure). */
+export function stripAgentDefIdSnapshot(id: AgentDefId): AgentDefId {
+  const decoded = decodeCoreAgentDefId(id);
+  if (decoded.kind === "closure") return id;
+  return encodeCoreAgentDefId({ kind: "qname", value: decoded.value });
+}
+
+/** Stamp `snapshot` onto a snapshot-dependent (CORE / FFI) delegate target.
+ *  qname-form carries it; a closure is returned unchanged. */
+export function stampAgentDefIdSnapshot(id: AgentDefId, snapshot: string): AgentDefId {
+  const decoded = decodeCoreAgentDefId(id);
+  if (decoded.kind === "closure") return id;
+  return encodeCoreAgentDefId({ kind: "qname", value: decoded.value, snapshot });
+}
