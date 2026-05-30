@@ -390,5 +390,12 @@ export type {
   KatariPort,
   RawValue,
 } from "./types.js";
-export type { FetchLike, ValueApi, ValueClientConfig } from "./value.js";
+export type {
+  FetchLike,
+  ProduceAs,
+  ProduceHandle,
+  ProduceOptions,
+  ValueApi,
+  ValueClientConfig,
+} from "./value.js";
 export { createValueClient } from "./value.js";
