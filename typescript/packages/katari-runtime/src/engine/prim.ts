@@ -18,7 +18,7 @@
 import type { QualifiedName } from "../ir/types.js";
 import { RawValueDecodeError, valueFromRaw, valueToRaw } from "../value-codec.js";
 import { RecoverableEngineError } from "./errors.js";
-import { type BytesRep, inlineText, mkSecret, mkString, type Value } from "./value.js";
+import { bytesContentEqual, inlineText, mkSecret, mkString, type Value } from "./value.js";
 
 /**
  * Thrown by a primitive to raise a specific (never-returning) request
@@ -589,18 +589,6 @@ export function valueEquals(a: Value, b: Value): boolean {
       throw new Error(`valueEquals: unknown value kind: ${(_exhaustive as Value).kind}`);
     }
   }
-}
-
-/**
- * Content equality for byte-sequence reps (string / secret). Both inline →
- * text equality; both ref → hash equality. v0.1.0 produces only inline reps,
- * so the mixed inline/ref case is unreachable here; it requires the async
- * materialize path (Phase D) and throws if hit early.
- */
-function bytesContentEqual(a: BytesRep, b: BytesRep): boolean {
-  if (a.kind === "inline" && b.kind === "inline") return a.text === b.text;
-  if (a.kind === "ref" && b.kind === "ref") return a.hash === b.hash;
-  throw new Error("valueEquals: mixed inline/ref content equality requires materialize (Phase D)");
 }
 
 function arrayEqual(xs: Value[], ys: Value[]): boolean {

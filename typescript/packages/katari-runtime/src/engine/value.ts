@@ -17,6 +17,7 @@
 // added in the per-project-module phase, Phase E).
 
 import type { LiteralValue, QualifiedName } from "../ir/types.js";
+import { hashText } from "../storage/hash.js";
 import type { ClosureId } from "./id.js";
 
 /** Owner module of a value reference. `project` is ambient (not carried). */
@@ -108,6 +109,33 @@ export function inlineText(v: Value): string {
 export function tryInlineString(v: Value): string | null {
   if (v.kind === "string" && v.rep.kind === "inline") return v.rep.text;
   return null;
+}
+
+// ─── Content addressing (metadata-only, no fetch) ───────────────────────────
+//
+// `string` / `secret` equality and `match` against string literals compare
+// CONTENT, but never need the bytes: an inline rep hashes its own UTF-8 text
+// and a ref carries its precomputed hash, so a hash comparison settles it
+// without touching the value store. (Combining ops — concat / format — DO need
+// the bytes; those await `materializeBytes` once the async quantum lands.)
+
+/** Content hash of a byte-sequence rep. Inline → hash its text; ref → its hash. */
+export function bytesHash(rep: BytesRep): string {
+  return rep.kind === "inline" ? hashText(rep.text) : rep.hash;
+}
+
+/**
+ * Content equality of two byte-sequence reps. Both inline is a direct text
+ * compare; any ref involved falls back to hash equality. No fetch.
+ */
+export function bytesContentEqual(a: BytesRep, b: BytesRep): boolean {
+  if (a.kind === "inline" && b.kind === "inline") return a.text === b.text;
+  return bytesHash(a) === bytesHash(b);
+}
+
+/** Whether a byte-sequence rep equals a known inline text (match literals). No fetch. */
+export function bytesEqualsText(rep: BytesRep, text: string): boolean {
+  return rep.kind === "inline" ? rep.text === text : rep.hash === hashText(text);
 }
 
 /** Convert an IR LiteralValue to a runtime Value. */

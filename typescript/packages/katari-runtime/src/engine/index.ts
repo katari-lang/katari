@@ -65,6 +65,9 @@ export type {
 } from "./thread/types.js";
 export type { BytesRep, RefModule, RefRep, Value } from "./value.js";
 export {
+  bytesContentEqual,
+  bytesEqualsText,
+  bytesHash,
   inlineText,
   isBytesValue,
   literalToValue,

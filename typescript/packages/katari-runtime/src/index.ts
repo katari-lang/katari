@@ -10,6 +10,9 @@
 export {
   applyEvent,
   buildConsoleLogger,
+  bytesContentEqual,
+  bytesEqualsText,
+  bytesHash,
   collectGarbage,
   consoleLogger,
   createDelegationId,
