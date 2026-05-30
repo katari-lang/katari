@@ -437,6 +437,14 @@ function resolveDelegateTarget(
     }
     return { blockId, capturedScopeId: null };
   }
+  if (decoded.kind === "closureRef") {
+    // CORE materializes a closure-ref delegate into a local closure (rewriting
+    // the target to closure:N) BEFORE applyEvent — so the engine must never see
+    // one. Reaching here is a host-side invariant violation.
+    throw new Error(
+      `engine.runner: closure-ref delegate ${delegationId} reached the engine unmaterialized (CORE must materialize it first)`,
+    );
+  }
   // kind === "closure"
   const record = ctx.state.closures[decoded.value];
   if (record === undefined) {

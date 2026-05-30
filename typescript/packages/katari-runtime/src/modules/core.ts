@@ -35,8 +35,21 @@
 // on inside its (bus-opaque) agent def id; CORE reads it to pick the new
 // shard's IR and stamps it back onto outbound CORE/FFI delegate targets.
 
-import { agentDefIdSnapshot, stampAgentDefIdSnapshot } from "../agent-def-id.js";
+import {
+  agentDefIdClosureRef,
+  agentDefIdSnapshot,
+  decodeCoreAgentDefId,
+  encodeCoreAgentDefId,
+  stampAgentDefIdSnapshot,
+} from "../agent-def-id.js";
 import { applyEvent, createState } from "../engine/apply.js";
+import {
+  decodeClosureBlob,
+  materializeClosure,
+  type PutClosureBytes,
+  serializeClosure,
+  serializeClosuresInValue,
+} from "../engine/closure-codec.js";
 import { CORE_ENDPOINT, type Endpoint } from "../engine/endpoint.js";
 import type { ExternalEvent } from "../engine/event.js";
 import type { DelegationId } from "../engine/id.js";
@@ -80,6 +93,7 @@ export type CoreModuleOptions = {
 };
 
 type ShardEntry = { state: State; currentSnapshot: string };
+type DelegatePayload = Extract<ExternalEvent["payload"], { kind: "delegate" }>;
 
 export class CoreModule implements Module {
   readonly endpoint: Endpoint;
@@ -140,19 +154,13 @@ export class CoreModule implements Module {
         return { outbound: [] };
       }
       // An inbound CORE delegate carries the version to run on in its agent def
-      // id; a new shard adopts it. (Un-stamped delegates are an invariant
-      // violation in production — every delegate target is stamped by API /
-      // CORE / FFI — so getOrLoadShard rejects them loudly.)
-      const delegateSnapshot =
-        event.payload.kind === "delegate"
-          ? agentDefIdSnapshot(event.payload.agentDefId)
-          : undefined;
-      const shard = await this.getOrLoadShard(
-        tx,
-        shardId,
-        event.payload.kind === "delegate",
-        delegateSnapshot,
-      );
+      // id; a new shard adopts it. A closure-ref target instead materializes its
+      // captured env from the value store (the snapshot rides in the blob).
+      // (Un-stamped qname delegates are an invariant violation in production —
+      // every such target is stamped by API / CORE / FFI — so getOrLoadShard
+      // rejects them loudly.)
+      const delegatePayload = event.payload.kind === "delegate" ? event.payload : undefined;
+      const shard = await this.getOrLoadShard(tx, shardId, delegatePayload);
       if (shard === null) {
         this.logger.log("debug", "core: no shard for event, dropping", {
           kind: event.payload.kind,
@@ -192,12 +200,22 @@ export class CoreModule implements Module {
       const outbound = result.outbound as ExternalEvent[];
       for (const ev of outbound) {
         if (ev.payload.kind === "delegate") {
+          // Freeze any escaping machine-local closure (the target or an arg)
+          // into a content ref BEFORE it crosses the bus — the receiving shard
+          // cannot resolve the issuer's local closure id space. Done first so
+          // the snapshot stamp below sees the final (closure-ref) target.
+          await this.serializeOutboundClosures(
+            tx.values,
+            ev.payload,
+            shard.state,
+            shard.currentSnapshot,
+          );
           // The agent def id is the only identifier that loads versioned code
           // on the receiver, so it carries the issuing shard's snapshot — but
           // ONLY for snapshot-dependent modules (CORE agents run versioned IR,
           // FFI picks the per-snapshot sidecar). ENV / API are snapshot-
-          // independent (common builtins / run management) → left bare.
-          // Closures inherit their enclosing scope (stamp passes them through).
+          // independent (common builtins / run management) → left bare. A
+          // closure ref carries its snapshot in its blob (stamp is a no-op).
           const toSnapshotDependent =
             ev.to === shard.state.selfEndpoint || ev.to === shard.state.ffiTargetEndpoint;
           if (toSnapshotDependent) {
@@ -267,8 +285,7 @@ export class CoreModule implements Module {
   private async getOrLoadShard(
     tx: CoreTxStores,
     shardId: ShardId,
-    isDelegate: boolean,
-    delegateSnapshot: string | undefined,
+    delegatePayload: DelegatePayload | undefined,
   ): Promise<ShardEntry | null> {
     const cached = this.shardCache.get(shardId);
     if (cached !== undefined) return cached;
@@ -282,25 +299,87 @@ export class CoreModule implements Module {
       this.shardCache.set(shardId, entry);
       return entry;
     }
-    if (isDelegate) {
-      if (delegateSnapshot === undefined) {
-        // Every delegate target is stamped (API root / CORE child / FFI child).
-        // An un-stamped one is a closure delegated across shards — a known gap
-        // (the closure record lives in the issuer's shard) reserved for the
-        // by-value `captures` mechanism. Fail loudly rather than guess an IR.
-        throw new Error(
-          `core: un-stamped delegate ${shardId} — cannot resolve the snapshot to run (closure cross-shard delegation is unsupported)`,
-        );
+    if (delegatePayload === undefined) return null;
+
+    // A closure that escaped its home shard: materialize its frozen captured
+    // env into a fresh shard, then rewrite the target to the new (local)
+    // closure id so the standard closure:N dispatch runs the body
+    // (runner.resolveDelegateTarget). The snapshot rides inside the blob.
+    const closureRef = agentDefIdClosureRef(delegatePayload.agentDefId);
+    if (closureRef !== undefined) {
+      if (tx.values === null) {
+        throw new Error("core: closure-ref delegate but no value store wired to materialize it");
       }
-      const ir = await this.resolveIR(delegateSnapshot);
-      const entry: ShardEntry = {
-        state: createState(ir, { selfEndpoint: this.endpoint }),
-        currentSnapshot: delegateSnapshot,
-      };
+      const content = decodeClosureBlob(await this.fetchClosureBytes(tx.values, closureRef));
+      const ir = await this.resolveIR(content.snapshot);
+      const state = createState(ir, { selfEndpoint: this.endpoint });
+      const newClosureId = materializeClosure(content, state);
+      delegatePayload.agentDefId = encodeCoreAgentDefId({ kind: "closure", value: newClosureId });
+      const entry: ShardEntry = { state, currentSnapshot: content.snapshot };
       this.shardCache.set(shardId, entry);
       return entry;
     }
-    return null;
+
+    // A qname target: every one is stamped (API root / CORE child / FFI child).
+    // An un-stamped one is an invariant violation — fail loudly, don't guess.
+    const delegateSnapshot = agentDefIdSnapshot(delegatePayload.agentDefId);
+    if (delegateSnapshot === undefined) {
+      throw new Error(`core: un-stamped delegate ${shardId} — cannot resolve the snapshot to run`);
+    }
+    const ir = await this.resolveIR(delegateSnapshot);
+    const entry: ShardEntry = {
+      state: createState(ir, { selfEndpoint: this.endpoint }),
+      currentSnapshot: delegateSnapshot,
+    };
+    this.shardCache.set(shardId, entry);
+    return entry;
+  }
+
+  /** Freeze every escaping machine-local closure in an outbound delegate (its
+   *  target id and every arg) into a content ref. The receiver cannot resolve
+   *  the issuer's local closure id space, so a closure crosses as a blob ref. */
+  private async serializeOutboundClosures(
+    valueStore: ValueStore | null,
+    payload: DelegatePayload,
+    state: State,
+    snapshot: string,
+  ): Promise<void> {
+    const putBytes = this.makePutClosureBytes(valueStore);
+    const decoded = decodeCoreAgentDefId(payload.agentDefId);
+    if (decoded.kind === "closure") {
+      const ref = await serializeClosure(state, decoded.value, snapshot, putBytes);
+      payload.agentDefId = encodeCoreAgentDefId({ kind: "closureRef", ref });
+    }
+    for (const [label, value] of Object.entries(payload.args)) {
+      payload.args[label] = await serializeClosuresInValue(value, state, snapshot, putBytes);
+    }
+  }
+
+  /** A closure-blob writer (owner = core, semanticKind = closure). Throws if no
+   *  value store is wired AND a closure actually needs freezing. */
+  private makePutClosureBytes(valueStore: ValueStore | null): PutClosureBytes {
+    const projectId = this.projectId;
+    return async (bytes: Uint8Array): Promise<RefRep> => {
+      if (valueStore === null) {
+        throw new Error("core: a closure is crossing a shard boundary but no value store is wired");
+      }
+      const result = await valueStore.putComplete({
+        projectId,
+        owner: "core",
+        bytes,
+        semanticKind: "closure",
+      });
+      return { kind: "ref", module: "core", id: result.id, hash: result.hash, size: result.size };
+    };
+  }
+
+  /** Fetch a closure blob's bytes; throws if the ref is missing. */
+  private async fetchClosureBytes(valueStore: ValueStore, ref: RefRep): Promise<Uint8Array> {
+    const bytes = await valueStore.fetch(this.projectId, ref.module, ref.id);
+    if (bytes === null) {
+      throw new Error(`core: closure blob ${ref.module}/${ref.id} not found in value store`);
+    }
+    return bytes;
   }
 
   private async persistShard(

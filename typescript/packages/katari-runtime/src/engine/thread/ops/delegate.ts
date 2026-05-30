@@ -191,18 +191,18 @@ function resolveTarget(
         };
       }
       if (value.kind === "closure") {
-        if (!("closureId" in value)) {
-          // A content-ref closure as a delegate target = an escaped closure
-          // being invoked; it must be materialized into this shard first
-          // (Phase E / #5, not yet wired through delegate).
-          throw new Error("engine.delegate: content-ref closure target not yet materializable");
+        // A closure is always dispatched on CORE (its body is CORE code). The
+        // in-shard form carries the closure id; an escaped (content-ref) closure
+        // carries its ref — CORE materializes it into a fresh shard on inbound.
+        if ("closureId" in value) {
+          return {
+            peer: ctx.state.selfEndpoint,
+            agentDefId: encodeCoreAgentDefId({ kind: "closure", value: value.closureId }),
+          };
         }
         return {
           peer: ctx.state.selfEndpoint,
-          agentDefId: encodeCoreAgentDefId({
-            kind: "closure",
-            value: value.closureId,
-          }),
+          agentDefId: encodeCoreAgentDefId({ kind: "closureRef", ref: value.ref }),
         };
       }
       throw new Error(

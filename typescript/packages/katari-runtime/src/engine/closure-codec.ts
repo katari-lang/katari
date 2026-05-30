@@ -104,7 +104,8 @@ export async function serializeClosure(
         selfVar = varId;
         continue;
       }
-      values[varId] = await promoteValueClosures(value, state, closureId, snapshot, putBytes);
+      // Inside a captured scope a secret would be frozen plaintext → reject.
+      values[varId] = await promoteValueClosures(value, state, closureId, snapshot, putBytes, true);
     }
     scopes.push({ id: cursor, parentId: scope.parentId, values });
     cursor = scope.parentId;
@@ -174,7 +175,26 @@ export function materializeClosure(content: SerializedClosure, state: State): Cl
   return newClosureId;
 }
 
+/**
+ * Serialize every machine-local closure inside a Value to a content ref — used
+ * for closures passed as a delegate arg / return that cross the bus. A
+ * top-level `secret` here is fine (it is encrypted at the wire boundary like any
+ * other), so unlike a captured-scope walk this does NOT reject secrets; a secret
+ * INSIDE a nested closure's scope is still rejected by serializeClosure.
+ */
+export function serializeClosuresInValue(
+  value: Value,
+  state: State,
+  snapshot: string,
+  putBytes: PutClosureBytes,
+): Promise<Value> {
+  return promoteValueClosures(value, state, NO_SELF, snapshot, putBytes, false);
+}
+
 // ─── helpers ─────────────────────────────────────────────────────────────────
+
+/** Sentinel self id that never matches a real closure id (ids are ≥ 0). */
+const NO_SELF = -1 as ClosureId;
 
 function isSelfClosure(value: Value, closureId: ClosureId): boolean {
   return value.kind === "closure" && "closureId" in value && value.closureId === closureId;
@@ -183,7 +203,9 @@ function isSelfClosure(value: Value, closureId: ClosureId): boolean {
 /**
  * Replace every machine-local closure reachable inside a Value with its
  * content-addressed ref (recursively serialized). Non-closure leaves pass
- * through unchanged; containers recurse. A captured `secret` is refused.
+ * through unchanged; containers recurse. `rejectSecret` is set when walking a
+ * closure's captured scope (a secret there would be frozen plaintext); it is
+ * unset for top-level args (where a secret is fine).
  */
 async function promoteValueClosures(
   value: Value,
@@ -191,6 +213,7 @@ async function promoteValueClosures(
   selfId: ClosureId,
   snapshot: string,
   putBytes: PutClosureBytes,
+  rejectSecret: boolean,
 ): Promise<Value> {
   switch (value.kind) {
     case "closure": {
@@ -204,29 +227,46 @@ async function promoteValueClosures(
       return { kind: "closure", ref };
     }
     case "secret":
-      throw new Error(
-        "serializeClosure: closure captures a secret — unsupported in v0.1.0 (would persist plaintext at rest)",
-      );
+      if (rejectSecret) {
+        throw new Error(
+          "serializeClosure: closure captures a secret — unsupported in v0.1.0 (would persist plaintext at rest)",
+        );
+      }
+      return value;
     case "array":
       return {
         kind: "array",
         elements: await Promise.all(
           value.elements.map((element) =>
-            promoteValueClosures(element, state, selfId, snapshot, putBytes),
+            promoteValueClosures(element, state, selfId, snapshot, putBytes, rejectSecret),
           ),
         ),
       };
     case "tagged": {
       const fields: Record<string, Value> = {};
       for (const [label, field] of Object.entries(value.fields)) {
-        fields[label] = await promoteValueClosures(field, state, selfId, snapshot, putBytes);
+        fields[label] = await promoteValueClosures(
+          field,
+          state,
+          selfId,
+          snapshot,
+          putBytes,
+          rejectSecret,
+        );
       }
       return { kind: "tagged", ctorId: value.ctorId, fields };
     }
     case "record": {
       const entries: Record<string, Value> = {};
       for (const [key, entry] of Object.entries(value.entries)) {
-        entries[key] = await promoteValueClosures(entry, state, selfId, snapshot, putBytes);
+        entries[key] = await promoteValueClosures(
+          entry,
+          state,
+          selfId,
+          snapshot,
+          putBytes,
+          rejectSecret,
+        );
       }
       return { kind: "record", entries };
     }

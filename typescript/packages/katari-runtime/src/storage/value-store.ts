@@ -26,8 +26,10 @@ import type { RefModule } from "../engine/value.js";
 /** Producer of an ephemeral ref. (`api` is the persistent-file path instead.) */
 export type EphemeralOwner = "core" | "ffi";
 
-/** Which byte-sequence kind a ref / blob carries. */
-export type ValueSemanticKind = "string" | "file" | "secret";
+/** Which byte-sequence kind a ref / blob carries. `closure` is a serialized
+ *  closure env (an internal node holding nested refs — Phase G GC opens it to
+ *  trace them; the others are leaves). */
+export type ValueSemanticKind = "string" | "file" | "secret" | "closure";
 
 /**
  * v0.1.0 ref lifecycle. `building` / `cancelled` (observable streaming) are
