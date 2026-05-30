@@ -23,6 +23,7 @@ import { buildRunByIdRoutes } from "./run-by-id.js";
 import { buildRunTreeRoutes } from "./run-tree.js";
 import { buildSnapshotRoutes } from "./snapshot.js";
 import { buildValueRoutes } from "./value.js";
+import { buildValueProduceRoutes } from "./value-produce.js";
 
 export type AppDeps = {
   storage: Storage;
@@ -149,6 +150,9 @@ export function buildApp(deps: AppDeps): Hono {
   // Katari Protocol data plane (read-only value consume). Production is
   // module-internal; only fetch / range / state are exposed here.
   app.route("/project/:projectId/value", buildValueRoutes(deps.storage));
+  // Module-internal produce (FFI / CORE): bytes → ephemeral ref, and
+  // ephemeral → persistent promote. Separate from the read-only data plane.
+  app.route("/project/:projectId/value", buildValueProduceRoutes(deps.storage));
 
   return app;
 }
