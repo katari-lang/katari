@@ -16,6 +16,7 @@ import type {
   IRModule,
   Json,
   SchemaBundle,
+  ValueStore,
 } from "@katari-lang/runtime";
 import postgres from "postgres";
 import { v7 as uuidv7 } from "uuid";
@@ -51,6 +52,7 @@ import type {
   Storage,
   UpsertProjectInput,
 } from "./types.js";
+import { PgValueStore } from "./value-store-pg.js";
 
 type Sql = ReturnType<typeof postgres>;
 
@@ -1060,6 +1062,7 @@ export class PostgresStorage implements Storage {
   readonly ffiDelegations: FfiPendingDelegationRepo;
   readonly ffiEscalations: FfiPendingEscalationRepo;
   readonly envEntries: EnvEntryRepo;
+  readonly values: ValueStore;
 
   private constructor(private readonly sql: Sql) {
     this.projects = new PgProjectRepo(sql);
@@ -1071,6 +1074,7 @@ export class PostgresStorage implements Storage {
     this.ffiDelegations = new PgFfiPendingDelegationRepo(sql);
     this.ffiEscalations = new PgFfiPendingEscalationRepo(sql);
     this.envEntries = new PgEnvEntryRepo(sql);
+    this.values = new PgValueStore(sql);
   }
 
   static create(databaseUrl: string): PostgresStorage {
@@ -1122,6 +1126,7 @@ function runInTx<T>(sqlHandle: Sql, fn: (tx: Storage) => Promise<T>): Promise<T>
       ffiDelegations: new PgFfiPendingDelegationRepo(innerSql),
       ffiEscalations: new PgFfiPendingEscalationRepo(innerSql),
       envEntries: new PgEnvEntryRepo(innerSql),
+      values: new PgValueStore(innerSql),
       withTransaction: (innerFn) => runInTx(innerSql, innerFn),
       withSnapshotLock: async (_innerTx, snapshotId, body) => {
         await acquireSnapshotAdvisoryLock(innerSql, snapshotId);

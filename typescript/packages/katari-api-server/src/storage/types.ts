@@ -25,10 +25,11 @@ import type {
   EncryptedValue,
   EngineCheckpoint,
   EscalationId,
+  ValueStore,
 } from "@katari-lang/runtime";
 import type { IRModule, SchemaBundle, SidecarBundle } from "@katari-lang/types";
 
-export type { DelegationId, EscalationId, SidecarBundle };
+export type { DelegationId, EscalationId, SidecarBundle, ValueStore };
 
 // ─── Brands ────────────────────────────────────────────────────────────────
 
@@ -421,6 +422,8 @@ export interface Storage {
   ffiDelegations: FfiPendingDelegationRepo;
   ffiEscalations: FfiPendingEscalationRepo;
   envEntries: EnvEntryRepo;
+  /** 3-layer byte-sequence storage (refs / files / blobs). */
+  values: ValueStore;
 
   /**
    * Run `fn` inside a backend-native transaction. The `tx` argument exposes

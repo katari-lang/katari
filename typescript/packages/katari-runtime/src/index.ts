@@ -89,6 +89,24 @@ export type {
   Value as EngineValue,
 } from "./engine/index.js";
 
+// ─── Storage: value store (3-layer byte-sequence storage) ──────────────────
+
+export { hashBytes, hashText } from "./storage/hash.js";
+export type {
+  CreateFileInput,
+  EphemeralOwner,
+  FileRecord,
+  OpenInput,
+  ProduceHandle,
+  ProduceResult,
+  PutInput,
+  RefState,
+  ValueRefState,
+  ValueSemanticKind,
+  ValueStore,
+} from "./storage/value-store.js";
+export { MAX_PRODUCE_BYTES } from "./storage/value-store.js";
+
 // ─── IR + schema types (Haskell mirror) ────────────────────────────────────
 
 export type { AgentDefinition, JsonSchema, SchemaBundle } from "./ir/schema.js";

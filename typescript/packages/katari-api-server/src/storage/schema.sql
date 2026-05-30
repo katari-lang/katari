@@ -181,3 +181,75 @@ CREATE TABLE IF NOT EXISTS env_entries (
   is_secret  BOOLEAN NOT NULL DEFAULT FALSE,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- ─── Value store: 3-layer byte-sequence storage ─────────────────────────────
+--
+-- All byte sequences (`string` / `file` / `secret`) are content-addressed.
+-- Three layers mirror the run / delegation "persistent record + freeable
+-- resource" split (D30):
+--   - value_refs        : ephemeral CORE/FFI intermediate values. Owned by a
+--                         shard, reclaimed by reachability GC.
+--   - api_files         : persistent API-owned records (= user-managed files).
+--                         Not traversal-GC'd; deleted only on explicit request.
+--   - value_blobs(+chunks): project-wide content-addressed bytes (the dedup
+--                         unit). Both layers reference a blob by hash; a
+--                         refcount frees it at zero.
+-- `ref = a module's handle, blob = the file's bytes.`
+--
+-- Project-scoped via `project_id` (a value's identity is (module, id); the
+-- project is ambient — D24). See docs/2026-05-30-storage-schema-and-api.md §2.
+
+-- (a) ephemeral ref: CORE/FFI intermediate values. reachability GC target.
+CREATE TABLE IF NOT EXISTS value_refs (
+  project_id        UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  owner_module      TEXT NOT NULL,             -- 'core' | 'ffi'
+  id                UUID NOT NULL,
+  state             TEXT NOT NULL,             -- v0.1.0: 'complete' | 'errored'
+  semantic_kind     TEXT NOT NULL,             -- 'string' | 'file' | 'secret'
+  owner_instance_id UUID,                      -- bound shard (instance-end sweep)
+  hash              TEXT,                       -- -> value_blobs.hash (null while errored)
+  size              BIGINT,
+  content_type      TEXT,
+  error_message     TEXT,
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (project_id, owner_module, id)
+);
+CREATE INDEX IF NOT EXISTS value_refs_instance_idx ON value_refs (owner_instance_id);
+CREATE INDEX IF NOT EXISTS value_refs_hash_idx     ON value_refs (project_id, hash);
+
+-- (b) persistent file: API-owned record (= runs_audit's positioning). Outside
+-- reachability GC; survives until the user deletes it. A file value carries
+-- ref(module=api, id=<this id>).
+CREATE TABLE IF NOT EXISTS api_files (
+  project_id    UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  id            UUID NOT NULL,
+  hash          TEXT NOT NULL,                 -- -> value_blobs.hash
+  size          BIGINT NOT NULL,
+  content_type  TEXT,
+  display_name  TEXT,                          -- UI label (= original file name)
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (project_id, id)
+);
+CREATE INDEX IF NOT EXISTS api_files_hash_idx ON api_files (project_id, hash);
+
+-- (c) shared blob: project-wide content-addressed bytes (the dedup unit).
+-- ref_count = (reachable value_refs) + (api_files) referencing this hash; 0 =>
+-- physical delete. Bytes are held in fixed-size chunks so large files stream;
+-- producing buffers in host memory and writes chunks once at close (no
+-- per-chunk DB write — D32). Observable `building` is v0.2.
+CREATE TABLE IF NOT EXISTS value_blobs (
+  project_id        UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  hash              TEXT NOT NULL,
+  total_size        BIGINT NOT NULL,
+  ref_count         INTEGER NOT NULL DEFAULT 0,
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+  last_accessed_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (project_id, hash)
+);
+CREATE TABLE IF NOT EXISTS value_blob_chunks (
+  project_id   UUID NOT NULL,
+  hash         TEXT NOT NULL,
+  chunk_index  INTEGER NOT NULL,
+  bytes        BYTEA NOT NULL,
+  PRIMARY KEY (project_id, hash, chunk_index)
+);

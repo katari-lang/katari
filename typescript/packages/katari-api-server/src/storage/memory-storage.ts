@@ -46,6 +46,7 @@ import type {
   Storage,
   UpsertProjectInput,
 } from "./types.js";
+import { InMemoryValueStore } from "./value-store-memory.js";
 
 function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
@@ -631,6 +632,7 @@ export class InMemoryStorage implements Storage {
   readonly ffiDelegations = new InMemoryFfiPendingDelegationRepo();
   readonly ffiEscalations = new InMemoryFfiPendingEscalationRepo();
   readonly envEntries = new InMemoryEnvEntryRepo();
+  readonly values = new InMemoryValueStore();
 
   /** Per-snapshot mutex map for `withSnapshotLock` (= in-memory version of a row lock). */
   private readonly snapshotMutexes = new Map<SnapshotId, Mutex>();
@@ -681,6 +683,11 @@ export class InMemoryStorage implements Storage {
       ffiDelegationsRows: new Map(this.ffiDelegations.rows),
       ffiEscalationsRows: new Map(this.ffiEscalations.rows),
       envEntriesRows: new Map(this.envEntries.rows),
+      // Blobs are content-addressed and immutable, so a shallow Map copy is a
+      // valid rollback target (inserts/deletes revert; bytes never mutate).
+      valueRefsRows: new Map(this.values.refs),
+      valueFilesRows: new Map(this.values.files),
+      valueBlobsRows: new Map(this.values.blobs),
     };
   }
 
@@ -695,6 +702,9 @@ export class InMemoryStorage implements Storage {
     this.ffiDelegations.rows = snap.ffiDelegationsRows;
     this.ffiEscalations.rows = snap.ffiEscalationsRows;
     this.envEntries.rows = snap.envEntriesRows;
+    this.values.refs = snap.valueRefsRows;
+    this.values.files = snap.valueFilesRows;
+    this.values.blobs = snap.valueBlobsRows;
   }
 }
 
@@ -709,4 +719,7 @@ type TxSnapshot = {
   ffiDelegationsRows: Map<DelegationId, FfiPendingDelegation>;
   ffiEscalationsRows: Map<EscalationId, FfiPendingEscalation>;
   envEntriesRows: Map<string, EnvEntryRow>;
+  valueRefsRows: InMemoryValueStore["refs"];
+  valueFilesRows: InMemoryValueStore["files"];
+  valueBlobsRows: InMemoryValueStore["blobs"];
 };
