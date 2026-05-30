@@ -210,10 +210,13 @@ function buildTickModulesFactory(
         irModule: snapshot.irModule,
         logger,
         delegationStore: new StorageDelegationStore(tx, snapshotId),
-        // Persist-time promotion: large inline strings in CORE state are
-        // written to the (tx-scoped) value store as owner=core refs so the
-        // checkpoint stays small. projectId scopes the refs.
+        // Per-agent shards + project index (tx-scoped, so feed can load on
+        // demand within the tick's transaction). projectId scopes shards +
+        // value refs; persist-time promotion writes large strings to the
+        // value store as owner=core refs so checkpoints stay small.
         projectId: snapshot.projectId,
+        shardStore: tx.shards,
+        projectIndexStore: tx.projectIndex,
         valueStore: tx.values,
       });
 
@@ -247,7 +250,7 @@ function buildTickModulesFactory(
         });
       }
 
-      return { core, api, ffi, env, checkpoints: tx.checkpoints };
+      return { core, api, ffi, env };
     },
   };
 }

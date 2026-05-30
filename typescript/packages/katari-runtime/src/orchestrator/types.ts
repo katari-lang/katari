@@ -16,7 +16,7 @@ import type { ExternalEventBus } from "../bus.js";
 import type { Logger } from "../engine/logger.js";
 import type { IRModule } from "../ir/types.js";
 import type { Module } from "../module.js";
-import type { CoreCheckpointStore, CoreModule } from "../modules/core.js";
+import type { CoreModule } from "../modules/core.js";
 import type { EnvModule } from "../modules/env.js";
 import type { FfiModule } from "../modules/ffi.js";
 import type { SidecarBundle } from "../sidecar/types.js";
@@ -68,8 +68,6 @@ export type TickModules = {
   api: ApiLikeModule;
   ffi: FfiModule | null;
   env: EnvModule;
-  /** The checkpoint store scoped to this tick's transaction. */
-  checkpoints: CoreCheckpointStore;
 };
 
 /**

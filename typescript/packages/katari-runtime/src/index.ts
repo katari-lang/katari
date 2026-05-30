@@ -177,10 +177,7 @@ export type { RegisteredModule } from "./bus.js";
 export { ExternalEventBus } from "./bus.js";
 export type { ExternalEvent } from "./engine/event.js";
 export type { Module } from "./module.js";
-export type {
-  CoreCheckpointStore,
-  CoreModuleOptions,
-} from "./modules/core.js";
+export type { CoreModuleOptions, CoreTx } from "./modules/core.js";
 export { CoreModule } from "./modules/core.js";
 export type {
   DelegationStore,

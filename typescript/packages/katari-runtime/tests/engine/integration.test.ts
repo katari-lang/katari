@@ -225,11 +225,42 @@ describe("engine integration: end-to-end via external delegate", () => {
     const { ExternalEventBus } = await import("../../src/bus.js");
     const { noopLogger } = await import("../../src/engine/logger.js");
 
+    // Minimal in-memory shard / index stores. Within a single bus.drain the
+    // CoreModule keeps the index + shards warm in memory, so these are only
+    // exercised for the new-delegate `get` (→ null → fresh shard).
+    const shards = new Map<string, unknown>();
+    const shardStore = {
+      // biome-ignore lint/suspicious/noExplicitAny: test stub
+      async get(p: string, id: string): Promise<any> {
+        return shards.get(`${p}|${id}`) ?? null;
+      },
+      // biome-ignore lint/suspicious/noExplicitAny: test stub
+      async upsert(input: any): Promise<void> {
+        shards.set(`${input.projectId}|${input.shardId}`, input.checkpoint);
+      },
+      async delete(p: string, id: string): Promise<void> {
+        shards.delete(`${p}|${id}`);
+      },
+      async listActive(): Promise<never[]> {
+        return [];
+      },
+    };
+    const projectIndexStore = {
+      // biome-ignore lint/suspicious/noExplicitAny: test stub
+      async get(): Promise<any> {
+        return null;
+      },
+      async upsert(): Promise<void> {},
+    };
+
     const core = new CoreModule({
       endpoint: CORE_ENDPOINT,
       snapshotId: "test-snap",
       irModule: module,
       logger: noopLogger,
+      projectId: "test-proj",
+      shardStore,
+      projectIndexStore,
     });
 
     const apiStub = {
@@ -272,12 +303,12 @@ describe("engine integration: end-to-end via external delegate", () => {
     if (apiAck && apiAck.payload.kind === "delegateAck") {
       expect(apiAck.payload.value).toEqual({ kind: "number", value: 7 });
     }
-    // CORE state cleaned up: no leftover delegations or threads.
-    const coreState = core.currentState;
-    expect(Object.keys(coreState.delegations).length).toBe(0);
-    expect(Object.keys(coreState.pendingDelegateOut).length).toBe(0);
-    expect(Object.keys(coreState.delegationSenders).length).toBe(0);
-    expect(Object.keys(coreState.threads).length).toBe(0);
+    // Sharded cleanup: both agent shards completed and were deleted, so the
+    // routing index is fully purged (no leftover delegations / escalations).
+    const index = core.currentProjectIndex;
+    expect(Object.keys(index.delegations).length).toBe(0);
+    expect(Object.keys(index.pendingDelegateOut).length).toBe(0);
+    expect(Object.keys(index.escalationOwners).length).toBe(0);
   });
 
   it("terminate before completion: cancel cascade + terminateAck outbound", async () => {

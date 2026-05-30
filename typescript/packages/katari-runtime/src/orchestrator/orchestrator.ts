@@ -152,7 +152,7 @@ export class Orchestrator<
           ]);
         }
 
-        await modules.core.load({ coreCheckpoints: modules.checkpoints });
+        await modules.core.load({});
         // FfiModule keeps an in-memory escalation relay map; load()
         // rebuilds it from the persisted rows. Without this, a
         // CORE->FFI->CORE escalateAck arriving in a later tick than the
@@ -172,7 +172,7 @@ export class Orchestrator<
 
         await bus.drain();
 
-        await modules.core.persist({ coreCheckpoints: modules.checkpoints });
+        await modules.core.persist({});
 
         return result;
       });
