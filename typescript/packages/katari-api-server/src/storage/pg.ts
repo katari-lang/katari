@@ -15,12 +15,15 @@ import type {
   EscalationId,
   IRModule,
   Json,
+  ProjectIndexStore,
   SchemaBundle,
+  ShardStore,
   ValueStore,
 } from "@katari-lang/runtime";
 import postgres from "postgres";
 import { v7 as uuidv7 } from "uuid";
 import { decodeCursor, encodeCursor } from "../cursor.js";
+import { PgProjectIndexStore, PgShardStore } from "./shard-store-pg.js";
 import type {
   CancelReason,
   DelegationRepo,
@@ -1063,6 +1066,8 @@ export class PostgresStorage implements Storage {
   readonly ffiEscalations: FfiPendingEscalationRepo;
   readonly envEntries: EnvEntryRepo;
   readonly values: ValueStore;
+  readonly shards: ShardStore;
+  readonly projectIndex: ProjectIndexStore;
 
   private constructor(private readonly sql: Sql) {
     this.projects = new PgProjectRepo(sql);
@@ -1075,6 +1080,8 @@ export class PostgresStorage implements Storage {
     this.ffiEscalations = new PgFfiPendingEscalationRepo(sql);
     this.envEntries = new PgEnvEntryRepo(sql);
     this.values = new PgValueStore(sql);
+    this.shards = new PgShardStore(sql);
+    this.projectIndex = new PgProjectIndexStore(sql);
   }
 
   static create(databaseUrl: string): PostgresStorage {
@@ -1127,6 +1134,8 @@ function runInTx<T>(sqlHandle: Sql, fn: (tx: Storage) => Promise<T>): Promise<T>
       ffiEscalations: new PgFfiPendingEscalationRepo(innerSql),
       envEntries: new PgEnvEntryRepo(innerSql),
       values: new PgValueStore(innerSql),
+      shards: new PgShardStore(innerSql),
+      projectIndex: new PgProjectIndexStore(innerSql),
       withTransaction: (innerFn) => runInTx(innerSql, innerFn),
       withSnapshotLock: async (_innerTx, snapshotId, body) => {
         await acquireSnapshotAdvisoryLock(innerSql, snapshotId);

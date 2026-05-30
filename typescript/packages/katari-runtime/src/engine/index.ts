@@ -40,7 +40,16 @@ export { buildConsoleLogger, consoleLogger, noopLogger } from "./logger.js";
 export type { Result } from "./result.js";
 export { emptyResult } from "./result.js";
 export type { Scope } from "./scope.js";
-export type { EngineCheckpoint } from "./snapshot.js";
+export type {
+  ActiveShard,
+  ProjectIndex,
+  ProjectIndexStore,
+  ShardId,
+  ShardStatus,
+  ShardStore,
+} from "./shard.js";
+export { emptyProjectIndex } from "./shard.js";
+export type { EncryptedEngineCheckpoint, EngineCheckpoint } from "./snapshot.js";
 export { deserialize, serialize } from "./snapshot.js";
 export type { State } from "./state.js";
 export type {

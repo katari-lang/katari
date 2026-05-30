@@ -16,6 +16,7 @@ import type {
 import { Mutex } from "async-mutex";
 import { v7 as uuidv7 } from "uuid";
 import { decodeCursor, encodeCursor } from "../cursor.js";
+import { InMemoryProjectIndexStore, InMemoryShardStore } from "./shard-store-memory.js";
 import type {
   DelegationRepo,
   DelegationRow,
@@ -633,6 +634,8 @@ export class InMemoryStorage implements Storage {
   readonly ffiEscalations = new InMemoryFfiPendingEscalationRepo();
   readonly envEntries = new InMemoryEnvEntryRepo();
   readonly values = new InMemoryValueStore();
+  readonly shards = new InMemoryShardStore();
+  readonly projectIndex = new InMemoryProjectIndexStore();
 
   /** Per-snapshot mutex map for `withSnapshotLock` (= in-memory version of a row lock). */
   private readonly snapshotMutexes = new Map<SnapshotId, Mutex>();
@@ -688,6 +691,8 @@ export class InMemoryStorage implements Storage {
       valueRefsRows: new Map(this.values.refs),
       valueFilesRows: new Map(this.values.files),
       valueBlobsRows: new Map(this.values.blobs),
+      shardRows: new Map(this.shards.rows),
+      projectIndexRows: new Map(this.projectIndex.rows),
     };
   }
 
@@ -705,6 +710,8 @@ export class InMemoryStorage implements Storage {
     this.values.refs = snap.valueRefsRows;
     this.values.files = snap.valueFilesRows;
     this.values.blobs = snap.valueBlobsRows;
+    this.shards.rows = snap.shardRows;
+    this.projectIndex.rows = snap.projectIndexRows;
   }
 }
 
@@ -722,4 +729,6 @@ type TxSnapshot = {
   valueRefsRows: InMemoryValueStore["refs"];
   valueFilesRows: InMemoryValueStore["files"];
   valueBlobsRows: InMemoryValueStore["blobs"];
+  shardRows: InMemoryShardStore["rows"];
+  projectIndexRows: InMemoryProjectIndexStore["rows"];
 };

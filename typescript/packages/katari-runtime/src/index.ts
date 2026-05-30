@@ -22,6 +22,7 @@ export {
   createThreadId,
   deserialize,
   EntryNotFoundError,
+  emptyProjectIndex,
   emptyResult,
   endpoint,
   IrrecoverableEngineError,
@@ -42,6 +43,7 @@ export {
 // ─── Engine types ──────────────────────────────────────────────────────────
 
 export type {
+  ActiveShard,
   AgentThread,
   ArrayThread,
   AskId,
@@ -53,6 +55,7 @@ export type {
   CtorThread,
   DelegateThread,
   DelegationId,
+  EncryptedEngineCheckpoint,
   Endpoint,
   EngineCheckpoint,
   EscalationId,
@@ -71,6 +74,8 @@ export type {
   PendingAction,
   PostCancelAction,
   PrimThread,
+  ProjectIndex,
+  ProjectIndexStore,
   RefModule,
   RefRep,
   RequestThread,
@@ -79,6 +84,9 @@ export type {
   Scope,
   Scope as EngineScope,
   ScopeId,
+  ShardId,
+  ShardStatus,
+  ShardStore,
   State,
   State as EngineState,
   Thread,

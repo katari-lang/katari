@@ -25,11 +25,20 @@ import type {
   EncryptedValue,
   EngineCheckpoint,
   EscalationId,
+  ProjectIndexStore,
+  ShardStore,
   ValueStore,
 } from "@katari-lang/runtime";
 import type { IRModule, SchemaBundle, SidecarBundle } from "@katari-lang/types";
 
-export type { DelegationId, EscalationId, SidecarBundle, ValueStore };
+export type {
+  DelegationId,
+  EscalationId,
+  ProjectIndexStore,
+  ShardStore,
+  SidecarBundle,
+  ValueStore,
+};
 
 // ─── Brands ────────────────────────────────────────────────────────────────
 
@@ -424,6 +433,10 @@ export interface Storage {
   envEntries: EnvEntryRepo;
   /** 3-layer byte-sequence storage (refs / files / blobs). */
   values: ValueStore;
+  /** Per-agent engine shards (Phase E). Replaces `checkpoints` once CORE shards. */
+  shards: ShardStore;
+  /** Project-local routing index for shards (Phase E). */
+  projectIndex: ProjectIndexStore;
 
   /**
    * Run `fn` inside a backend-native transaction. The `tx` argument exposes
