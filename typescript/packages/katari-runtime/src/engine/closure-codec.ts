@@ -23,11 +23,18 @@
 // the closure's own ref, so a self-call simply re-materializes (a fresh shard per
 // recursion level). No self-cycle in the blob.
 //
-// Secrets: a captured `secret` would land in the blob in plaintext (the blob is
-// not checkpoint-encrypted). v0.1.0 refuses it loudly rather than leak; closure-
-// captured secrets are a documented gap (revisit with Phase G).
+// Secrets: a captured `secret` is encrypted in the blob exactly as the shard
+// checkpoint encrypts secrets (`encryptValueTree` → AES-GCM `$envelope`), so a
+// closure can safely hold credentials — at rest it is ciphertext, in memory
+// (after materialize) it is decrypted. The random AES nonce means a secret-
+// bearing blob does not content-dedup, which is fine (the ref is a uuid handle).
+//
+// Metadata: the body block's compiled schema (name / description / input /
+// output) is denormalized into the blob so the closure is self-describing —
+// get_metadata reads it without re-resolving the block against an IR.
 
-import type { BlockId } from "../ir/types.js";
+import type { Block, BlockId } from "../ir/types.js";
+import { decryptValueTree, type EncryptedValue, encryptValueTree } from "../value-secret-codec.js";
 import type { ClosureId, ScopeId } from "./id.js";
 import { createScopeId } from "./id.js";
 import type { Scope } from "./scope.js";
@@ -38,16 +45,26 @@ import type { RefRep, Value } from "./value.js";
  *  CoreModule (owner = core, semanticKind = "closure"). */
 export type PutClosureBytes = (bytes: Uint8Array) => Promise<RefRep>;
 
+/** Self-describing schema carried in the blob (the body BlockAgent's compiled
+ *  metadata). Lets get_metadata answer without re-resolving the block. */
+export type ClosureMetadata = {
+  name: string;
+  description?: string;
+  inputSchema: string;
+  outputSchema: string;
+};
+
 /** One captured scope, frozen for transport. Ids are the issuer's (string
- *  UUIDs); materialize remaps them to fresh ids in the receiving shard. */
+ *  UUIDs); materialize remaps them to fresh ids. Values are `EncryptedValue`
+ *  (a captured `secret` → `$envelope`); everything else passes through. */
 type SerializedScope = {
   id: string;
   parentId: string | null;
-  values: Record<number, Value>;
+  values: Record<number, EncryptedValue>;
 };
 
 /** The full frozen closure: body block + the snapshot its code lives in + its
- *  captured scope chain. Stored as the bytes of one value-store blob. */
+ *  captured scope chain + its self-describing metadata. One value-store blob. */
 export type SerializedClosure = {
   v: 1;
   blockId: BlockId;
@@ -58,6 +75,8 @@ export type SerializedClosure = {
   capturedScopeId: string;
   /** Var the closure binds itself to (recursion); materialize re-binds it. */
   selfVar: number;
+  /** Compiled schema of the body block (denormalized for get_metadata). */
+  metadata: ClosureMetadata;
 };
 
 /** Inputs to {@link serializeClosure}. */
@@ -75,10 +94,11 @@ export type SerializeClosureInput = {
 };
 
 /**
- * Freeze a closure (its body block + captured scope chain) into a content blob
- * and return its ref. Closures captured in the scope are already refs (no nested
- * serialization). A captured secret is refused. The blob is written via
- * `putBytes` BEFORE the ref is returned, so the ref is never dangling.
+ * Freeze a closure (its body block + captured scope chain + its compiled
+ * metadata) into a content blob and return its ref. Closures captured in the
+ * scope are already refs (no nested serialization); captured secrets are
+ * encrypted. The blob is written via `putBytes` BEFORE the ref is returned, so
+ * the ref is never dangling.
  */
 export async function serializeClosure(
   state: State,
@@ -96,12 +116,12 @@ export async function serializeClosure(
     if (scope === undefined) {
       throw new Error(`serializeClosure: scope ${cursor} missing`);
     }
-    const values: Record<number, Value> = {};
+    const values: Record<number, EncryptedValue> = {};
     for (const [varKey, value] of Object.entries(scope.values)) {
       if (value === undefined) continue;
-      // A captured secret would be frozen plaintext in the blob — refuse it.
-      assertNoSecret(value);
-      values[Number(varKey)] = value;
+      // Encrypt captured secrets (AES-GCM $envelope) so the blob holds no
+      // plaintext credential at rest; non-secret values pass through unchanged.
+      values[Number(varKey)] = encryptValueTree(value);
     }
     scopes.push({ id: cursor, parentId: scope.parentId, values });
     cursor = scope.parentId;
@@ -113,6 +133,7 @@ export async function serializeClosure(
     scopes,
     capturedScopeId: input.scopeId,
     selfVar: input.selfVar,
+    metadata: agentBlockMetadata(state, input.blockId),
   };
   const bytes = new TextEncoder().encode(JSON.stringify(content));
   return input.putBytes(bytes);
@@ -152,7 +173,13 @@ export function materializeClosure(
   for (const s of content.scopes) {
     const freshId = idMap.get(s.id)!;
     const parentId = s.parentId === null ? null : (idMap.get(s.parentId) ?? null);
-    state.scopes[freshId] = { id: freshId, parentId, values: { ...s.values } };
+    const values: Record<number, Value> = {};
+    for (const [varKey, enc] of Object.entries(s.values)) {
+      // Reverse the at-rest encryption — captured secrets come back to plaintext
+      // Values in this shard's in-memory scope (like a loaded checkpoint).
+      values[Number(varKey)] = decryptValueTree(enc);
+    }
+    state.scopes[freshId] = { id: freshId, parentId, values };
     state.scopeCount++;
   }
   const capturedRoot = idMap.get(content.capturedScopeId);
@@ -177,24 +204,18 @@ export function materializeClosure(
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
-/** Throw if a `secret` Value is reachable inside `value` (closures must not
- *  freeze secrets to a value-store blob in plaintext). */
-function assertNoSecret(value: Value): void {
-  switch (value.kind) {
-    case "secret":
-      throw new Error(
-        "serializeClosure: closure captures a secret — unsupported in v0.1.0 (would persist plaintext at rest)",
-      );
-    case "array":
-      for (const element of value.elements) assertNoSecret(element);
-      return;
-    case "tagged":
-      for (const field of Object.values(value.fields)) assertNoSecret(field);
-      return;
-    case "record":
-      for (const entry of Object.values(value.entries)) assertNoSecret(entry);
-      return;
-    default:
-      return;
+/** Read the body block's compiled schema for the blob (the block is a
+ *  BlockAgent — the closure's wrapper). */
+function agentBlockMetadata(state: State, blockId: BlockId): ClosureMetadata {
+  const block = state.irModule.blocks[String(blockId)] as Block | undefined;
+  if (block === undefined || block.kind !== "blockAgent") {
+    throw new Error(`serializeClosure: block ${blockId} is not a blockAgent (${block?.kind})`);
   }
+  const body = block.body;
+  return {
+    name: body.name,
+    description: body.description,
+    inputSchema: body.inputSchema,
+    outputSchema: body.outputSchema,
+  };
 }

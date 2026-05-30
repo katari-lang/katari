@@ -14,6 +14,7 @@
 //     `-> never`, so this shouldn't happen), we drop it defensively.
 
 import type { AgentBlock, BlockId, QualifiedName } from "../../../ir/types.js";
+import { decodeClosureBlob } from "../../closure-codec.js";
 import { RecoverableEngineError } from "../../errors.js";
 import type { AskId, CallId } from "../../id.js";
 import { executePrim, PrimRaiseRequest } from "../../prim.js";
@@ -36,7 +37,7 @@ export const primOps: ThreadOps<PrimThread> = {
       // deterministic content-addressed read.
       value =
         t.primName === "get_metadata"
-          ? executeGetMetadata(ctx, t.args)
+          ? await executeGetMetadata(ctx, t.args)
           : await executePrim(t.primName, t.args, ctx.materialize);
     } catch (err) {
       if (err instanceof PrimRaiseRequest) {
@@ -147,54 +148,67 @@ function emitPrimRaise(ctx: StepCtx, t: PrimThread, err: PrimRaiseRequest): void
 // ─── get_metadata ──────────────────────────────────────────────────────────
 //
 // Returns the `agent_metadata(name, id, description, input, output)` tagged
-// value for any callable. Bridges the Haskell-side static metadata embedded
-// in each `AgentBlock` (compiled-in name / description / JSON schemas) with
-// the runtime-side dispatch identity (`closure:N` for local agents,
-// qualified name otherwise).
+// value for any callable. The compiled schema comes from the `AgentBlock` for a
+// top-level callable (resolved through `IRModule.entries`), or from the
+// closure's self-describing blob for a closure ref (fetched via the injected
+// content read). Async because the closure path materializes that blob.
 
-function executeGetMetadata(ctx: StepCtx, args: Record<string, Value>): Value {
+/** The shape get_metadata projects, regardless of callable source. */
+type CallableMetadata = {
+  name: string;
+  description?: string;
+  inputSchema: string;
+  outputSchema: string;
+  /** Dispatch identity surfaced to AI tool calls (qname / closure:<hash>). */
+  id: string;
+};
+
+async function executeGetMetadata(ctx: StepCtx, args: Record<string, Value>): Promise<Value> {
   const value = args["value"];
   if (value === undefined) {
     throw new RecoverableEngineError("prim get_metadata: missing argument 'value'");
   }
-
-  const [agentBlock, dispatchId] = resolveCallable(ctx, value);
-
+  const meta = await resolveCallableMetadata(ctx, value);
   return {
     kind: "tagged",
     ctorId: "primitive.agent_metadata",
     fields: {
-      name: mkString(agentBlock.name),
-      id: mkString(dispatchId),
-      description: mkString(agentBlock.description ?? ""),
-      input: mkString(agentBlock.inputSchema),
-      output: mkString(agentBlock.outputSchema),
+      name: mkString(meta.name),
+      id: mkString(meta.id),
+      description: mkString(meta.description ?? ""),
+      input: mkString(meta.inputSchema),
+      output: mkString(meta.outputSchema),
     },
   };
 }
 
-/**
- * Resolve a runtime callable value to its `AgentBlock` plus the
- * runtime-stable id used to dispatch it. For top-level callables (incl.
- * prims / ctors / externals — all wrapped in a `BlockAgent`) the id is
- * the qualified name (`<module>.<bare>`); for local agents it is
- * `closure:<closureId>`.
- */
-function resolveCallable(ctx: StepCtx, value: Value): [AgentBlock, string] {
+async function resolveCallableMetadata(ctx: StepCtx, value: Value): Promise<CallableMetadata> {
   switch (value.kind) {
     case "agentLiteral": {
       const blockId = lookupQualified(ctx, value.qualifiedName);
-      return [requireAgentBlock(ctx, blockId, value.qualifiedName), value.qualifiedName];
+      const block = requireAgentBlock(ctx, blockId, value.qualifiedName);
+      return {
+        name: block.name,
+        description: block.description,
+        inputSchema: block.inputSchema,
+        outputSchema: block.outputSchema,
+        id: value.qualifiedName,
+      };
     }
-    case "closure":
-      // A closure value is a content ref; its body block lives inside a
-      // value-store blob, not in this shard's closures table. Introspecting it
-      // WITHOUT invoking it would need an async blob fetch from this sync
-      // metadata path; invoking it materializes it. So get_metadata on a
-      // closure is unsupported in v0.1.0 — invoke it instead.
-      throw new RecoverableEngineError(
-        "prim get_metadata: cannot introspect a closure ref without invoking it (v0.1.0)",
-      );
+    case "closure": {
+      // The closure is self-describing: its blob carries the body block's
+      // compiled schema, so we fetch + read it without resolving the block
+      // against an IR. The `id` is informational (re-dispatch is by the value).
+      const content = decodeClosureBlob(await ctx.materialize(value.ref));
+      const m = content.metadata;
+      return {
+        name: m.name,
+        description: m.description,
+        inputSchema: m.inputSchema,
+        outputSchema: m.outputSchema,
+        id: `closure:${value.ref.hash}`,
+      };
+    }
     default:
       throw new RecoverableEngineError(
         `prim get_metadata: expected callable value, got ${value.kind}`,
