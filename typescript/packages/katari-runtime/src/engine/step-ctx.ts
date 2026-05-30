@@ -17,6 +17,24 @@
 import type { Event, InternalEventPayload } from "./event.js";
 import type { LogEntry, LogLevel } from "./logger.js";
 import type { State } from "./state.js";
+import type { BytesRep, RefRep } from "./value.js";
+
+/**
+ * Fetch the bytes of a content-addressed ref. Injected by the host
+ * (ValueStore-backed) so the pure engine stays I/O-free at the type level.
+ * The fetch is a deterministic function of the content hash, so the engine
+ * remains deterministic-but-async (runtime-architecture §5).
+ */
+export type RefFetcher = (rep: RefRep) => Promise<Uint8Array>;
+
+/**
+ * Default fetcher for when no value store is wired. v0.1.0 (pre-E1) produces
+ * no refs in CORE state — promotion lands with the shard storage — so this is
+ * never actually hit; it throws loudly if a ref unexpectedly appears.
+ */
+export const noRefFetcher: RefFetcher = () => {
+  throw new Error("engine: ref materialize requested but no value store is wired");
+};
 
 export interface StepCtx {
   /** Live engine state for this step (mutated in place). */
@@ -27,6 +45,13 @@ export interface StepCtx {
   emit(event: Event): void;
   /** Append a log entry. */
   log(level: LogLevel, message: string, context?: Record<string, unknown>): void;
+  /**
+   * Materialize a byte-sequence rep to its bytes. Inline → resolved
+   * immediately; ref → fetched via the injected `RefFetcher`. Used by the
+   * content-transform prims (concat / format) that need the actual bytes;
+   * == / match / length never call this (hash / metadata only).
+   */
+  materialize(rep: BytesRep): Promise<Uint8Array>;
 }
 
 /**
@@ -47,7 +72,11 @@ export function emptyBuffers(): StepBuffers {
 }
 
 /** Build a StepCtx that backs onto the given state + buffers. */
-export function makeStepCtx(state: State, buffers: StepBuffers): StepCtx {
+export function makeStepCtx(
+  state: State,
+  buffers: StepBuffers,
+  fetchRef: RefFetcher = noRefFetcher,
+): StepCtx {
   return {
     state,
     enqueue(event) {
@@ -58,6 +87,10 @@ export function makeStepCtx(state: State, buffers: StepBuffers): StepCtx {
     },
     log(level, message, context) {
       buffers.logs.push({ level, message, context });
+    },
+    materialize(rep) {
+      if (rep.kind === "inline") return Promise.resolve(new TextEncoder().encode(rep.text));
+      return fetchRef(rep);
     },
   };
 }

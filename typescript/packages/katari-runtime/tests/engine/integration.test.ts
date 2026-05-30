@@ -63,7 +63,7 @@ function primBlock(name: string): Block {
 const API_ENDPOINT = endpoint("api://test");
 
 describe("engine integration: end-to-end via external delegate", () => {
-  it("user thread calls add(2,3); engine emits delegateAck with 5", () => {
+  it("user thread calls add(2,3); engine emits delegateAck with 5", async () => {
     const v0 = 0 as VarId;
     const v1 = 1 as VarId;
     const out = 2 as VarId;
@@ -113,7 +113,7 @@ describe("engine integration: end-to-end via external delegate", () => {
       },
     };
 
-    const result = applyEvent(state, event);
+    const result = await applyEvent(state, event);
     const ack = result.outbound.find(
       (e) => e.payload.kind === "delegateAck" && e.payload.delegationId === delegationId,
     );
@@ -126,10 +126,10 @@ describe("engine integration: end-to-end via external delegate", () => {
     expect(Object.keys(result.state.delegationSenders).length).toBe(0);
   });
 
-  it("missing entry emits a prim.throw escalate back to the sender", () => {
+  it("missing entry emits a prim.throw escalate back to the sender", async () => {
     const state = createState(ir({}, {}));
     const delegationId = createDelegationId();
-    const result = applyEvent(state, {
+    const result = await applyEvent(state, {
       from: API_ENDPOINT,
       to: CORE_ENDPOINT,
       payload: {
@@ -280,7 +280,7 @@ describe("engine integration: end-to-end via external delegate", () => {
     expect(Object.keys(coreState.threads).length).toBe(0);
   });
 
-  it("terminate before completion: cancel cascade + terminateAck outbound", () => {
+  it("terminate before completion: cancel cascade + terminateAck outbound", async () => {
     // Set up an agent that pauses on an external — call ext "wait", then
     // return its value. Because the engine's external translation
     // translates the inbound delegateAck before the agent finishes, we
@@ -320,7 +320,7 @@ describe("engine integration: end-to-end via external delegate", () => {
     const delegationId = createDelegationId();
 
     // Start the agent — it pauses on the external delegate.
-    const startResult = applyEvent(state, {
+    const startResult = await applyEvent(state, {
       from: API_ENDPOINT,
       to: CORE_ENDPOINT,
       payload: {
@@ -338,7 +338,7 @@ describe("engine integration: end-to-end via external delegate", () => {
     expect(ffiDelegate).toBeDefined();
 
     // Now terminate.
-    const cancelResult = applyEvent(startResult.state, {
+    const cancelResult = await applyEvent(startResult.state, {
       from: API_ENDPOINT,
       to: CORE_ENDPOINT,
       payload: { kind: "terminate", delegationId },

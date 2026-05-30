@@ -18,7 +18,27 @@
 import type { QualifiedName } from "../ir/types.js";
 import { RawValueDecodeError, valueFromRaw, valueToRaw } from "../value-codec.js";
 import { RecoverableEngineError } from "./errors.js";
-import { bytesContentEqual, inlineText, mkSecret, mkString, type Value } from "./value.js";
+import {
+  type BytesRep,
+  bytesContentEqual,
+  inlineText,
+  mkSecret,
+  mkString,
+  type Value,
+} from "./value.js";
+
+/** Materialize a byte-sequence rep to bytes (inline immediate, ref fetched). */
+type Materialize = (rep: BytesRep) => Promise<Uint8Array>;
+
+/**
+ * Read a byte-sequence rep as text. Inline reps return their text directly
+ * (no fetch — the common case stays cheap); refs are materialized + UTF-8
+ * decoded. Used by content-transform prims that combine string content.
+ */
+async function materializeText(rep: BytesRep, materialize: Materialize): Promise<string> {
+  if (rep.kind === "inline") return rep.text;
+  return new TextDecoder().decode(await materialize(rep));
+}
 
 /**
  * Thrown by a primitive to raise a specific (never-returning) request
@@ -41,7 +61,11 @@ export class PrimRaiseRequest extends Error {
   }
 }
 
-export function executePrim(name: string, args: Record<string, Value>): Value {
+export async function executePrim(
+  name: string,
+  args: Record<string, Value>,
+  materialize: Materialize,
+): Promise<Value> {
   switch (name) {
     case "add":
       return arith(name, args, (a, b) => a + b);
@@ -105,7 +129,13 @@ export function executePrim(name: string, args: Record<string, Value>): Value {
         (lhs?.kind === "string" || lhs?.kind === "secret") &&
         (rhs?.kind === "string" || rhs?.kind === "secret")
       ) {
-        const joined = inlineText(lhs) + inlineText(rhs);
+        // Content transform: needs the bytes. Inline operands resolve
+        // immediately; ref operands are fetched (bounded I/O within the
+        // quantum). The result is inline; persist-time promotion (Phase E1)
+        // re-refs it if large.
+        const joined =
+          (await materializeText(lhs.rep, materialize)) +
+          (await materializeText(rhs.rep, materialize));
         const tainted = lhs.kind === "secret" || rhs.kind === "secret";
         return tainted ? mkSecret(joined) : mkString(joined);
       }

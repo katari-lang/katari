@@ -48,8 +48,8 @@ function getOps(t: Thread): ThreadOps<any> {
 
 // ─── Per-method dispatch ───────────────────────────────────────────────────
 
-export function dispatchCreate(ctx: StepCtx, t: Thread): void {
-  getOps(t).create(ctx, t);
+export async function dispatchCreate(ctx: StepCtx, t: Thread): Promise<void> {
+  await getOps(t).create(ctx, t);
 }
 
 export function dispatchDone(ctx: StepCtx, t: Thread, callId: CallId, value: Value): void {

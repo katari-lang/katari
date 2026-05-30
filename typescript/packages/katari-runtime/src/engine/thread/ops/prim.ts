@@ -25,17 +25,19 @@ import { defaultAskProxy } from "./defaults.js";
 import type { ThreadOps } from "./types.js";
 
 export const primOps: ThreadOps<PrimThread> = {
-  create(ctx, t) {
+  async create(ctx, t) {
     let value: Value | undefined;
     try {
       // `get_metadata` needs the IR module + closures table to resolve a
       // callable Value back to its `AgentBlock`. Branch here rather than
-      // in the pure `executePrim` since that function intentionally has
-      // no state access.
+      // in `executePrim` since that resolution needs engine state.
+      // `executePrim` is async because content-transform prims (concat)
+      // may materialize ref bytes; `ctx.materialize` is the injected,
+      // deterministic content-addressed read.
       value =
         t.primName === "get_metadata"
           ? executeGetMetadata(ctx, t.args)
-          : executePrim(t.primName, t.args);
+          : await executePrim(t.primName, t.args, ctx.materialize);
     } catch (err) {
       if (err instanceof PrimRaiseRequest) {
         emitPrimRaise(ctx, t, err);

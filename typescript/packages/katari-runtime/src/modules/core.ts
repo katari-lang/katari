@@ -93,7 +93,9 @@ export class CoreModule implements Module<CoreTx> {
       await this.delegationStore.delete(event.payload.delegationId);
     }
 
-    const result = applyEvent(this.state, event);
+    // No `fetchRef` wired yet: CORE state holds no refs until persist-time
+    // promotion lands (Phase E1), so the default (throw-on-ref) is never hit.
+    const result = await applyEvent(this.state, event);
     this.state = result.state;
     for (const log of result.logs) {
       this.logger.log(log.level, log.message, log.context);

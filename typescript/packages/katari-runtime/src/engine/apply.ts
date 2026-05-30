@@ -19,6 +19,7 @@ import { collectGarbage, shouldGc } from "./gc.js";
 import type { Result } from "./result.js";
 import { drive } from "./runner.js";
 import type { State } from "./state.js";
+import type { RefFetcher } from "./step-ctx.js";
 
 const DEFAULT_FFI_ENDPOINT = endpoint("ext://ffi");
 const DEFAULT_ENV_ENDPOINT = endpoint("ext://env");
@@ -59,11 +60,20 @@ export function createState(
  * Process one event against `state`. Returns the new state plus the
  * accumulated outbound events and logs.
  *
- * No I/O; no logger injection. Logs accumulate in `Result.logs` and the
- * host writes them out.
+ * Async because the engine may materialize ref bytes for content-transform
+ * prims (concat / format) — a bounded, deterministic content-addressed fetch
+ * awaited inline within the quantum (runtime-architecture §5). `fetchRef` is
+ * the host's ValueStore-backed fetcher; omitted (v0.1.0 pre-promotion) it
+ * defaults to one that throws if a ref unexpectedly appears. The state
+ * transition stays deterministic: fetch is a pure function of the content
+ * hash. No logger injection; logs accumulate in `Result.logs`.
  */
-export function applyEvent(state: State, event: Event): Result {
-  const driven = drive(state, event);
+export async function applyEvent(
+  state: State,
+  event: Event,
+  fetchRef?: RefFetcher,
+): Promise<Result> {
+  const driven = await drive(state, event, fetchRef);
   // drive() mutates `state` in place and returns the same reference.
   if (shouldGc(driven.state)) {
     collectGarbage(driven.state);

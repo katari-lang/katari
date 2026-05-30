@@ -18,7 +18,7 @@ import type { AskId, ThreadId } from "./id.js";
 import { createEscalationId } from "./id.js";
 import { spawnAgentRoot } from "./spawn.js";
 import type { State } from "./state.js";
-import { emptyBuffers, makeStepCtx, type StepBuffers } from "./step-ctx.js";
+import { emptyBuffers, makeStepCtx, type RefFetcher, type StepBuffers } from "./step-ctx.js";
 import {
   dispatchAsk,
   dispatchAskAck,
@@ -43,15 +43,16 @@ import { mkString } from "./value.js";
  * `initial` may be either an external event (= one of the 6 cross-module
  * events) or an internal event (only used by tests / pre-Bus call sites).
  */
-export function drive(
+export async function drive(
   state: State,
   initial: Event,
-): {
+  fetchRef?: RefFetcher,
+): Promise<{
   state: State;
   buffers: StepBuffers;
-} {
+}> {
   const buffers = emptyBuffers();
-  const ctx = makeStepCtx(state, buffers);
+  const ctx = makeStepCtx(state, buffers, fetchRef);
 
   if (!isInternal(initial.payload)) {
     applyTranslateExternal(ctx, initial);
@@ -61,7 +62,7 @@ export function drive(
 
   while (buffers.queue.length > 0) {
     const ev = buffers.queue.shift()!;
-    step(ctx, ev);
+    await step(ctx, ev);
   }
 
   return { state, buffers };
@@ -101,10 +102,12 @@ function applyTranslateExternal(ctx: ReturnType<typeof makeStepCtx>, event: Even
 
 // ─── Single-step dispatch ──────────────────────────────────────────────────
 
-function step(ctx: ReturnType<typeof makeStepCtx>, ev: InternalEventPayload): void {
+async function step(ctx: ReturnType<typeof makeStepCtx>, ev: InternalEventPayload): Promise<void> {
   switch (ev.kind) {
     case "create":
-      onCreate(ctx, ev);
+      // Only `create` can be async (prim materialize); the other internal
+      // events spawn work via the queue rather than evaluating prims inline.
+      await onCreate(ctx, ev);
       break;
     case "done":
       onDone(ctx, ev);
@@ -132,15 +135,15 @@ function step(ctx: ReturnType<typeof makeStepCtx>, ev: InternalEventPayload): vo
 
 // `create` event: the spawning code already wrote the Thread record into
 // state.threads. Our job is just to invoke the variant's create op.
-function onCreate(
+async function onCreate(
   ctx: ReturnType<typeof makeStepCtx>,
   ev: Extract<InternalEventPayload, { kind: "create" }>,
-): void {
+): Promise<void> {
   const t = ctx.state.threads[ev.threadId] as Thread | undefined;
   if (t === undefined) {
     throw new Error(`engine: create event for ${ev.threadId} but no thread record present`);
   }
-  dispatchCreate(ctx, t);
+  await dispatchCreate(ctx, t);
 }
 
 function onDone(
