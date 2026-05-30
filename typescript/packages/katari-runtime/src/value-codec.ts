@@ -21,6 +21,7 @@
 //
 // Primitives ←→ themselves; arrays ←→ arrays (tuples share this form).
 
+import { type AgentDefId, decodeCoreAgentDefId, encodeCoreAgentDefId } from "./agent-def-id.js";
 import { mkString, type RefModule, type RefRep, type Value } from "./engine/value.js";
 import type { QualifiedName } from "./ir/types.js";
 
@@ -87,20 +88,23 @@ export function valueToRaw(value: Value): RawValue {
       return out;
     }
     case "closure":
-      // A closure is always a content-addressed ref (#5): the canonical wire
-      // form is just the `$ref` envelope (the bus carries a hash, never the
-      // env). There is no `$agent: closure:N` form — the machine-local
-      // `closure:N` dispatch id lives only inside the engine's agent def id.
-      return refToRaw(value.ref, "closure");
+      // A closure is a callable, so it serialises like one — as `$agent`,
+      // uniform with a top-level agent (#5). Its content ref is packed into
+      // the agent def id (`closureref:<...>`), exactly the handle a delegate
+      // target carries, so the value form and the dispatch id converge and the
+      // `$agent`-shaped callable schema matches without any rep-aware patching.
+      return {
+        [CALLABLE_DISCRIMINATOR]: encodeCoreAgentDefId({ kind: "closureRef", ref: value.ref }),
+      };
     case "agentLiteral":
       return { [CALLABLE_DISCRIMINATOR]: value.qualifiedName };
   }
 }
 
-/** Build the `$ref` envelope for a ref rep. `as` distinguishes how the
- *  consumer interprets the blob: a byte sequence (`string` / `file`) or a
- *  serialized closure (`closure`, #5). The store + handle are identical. */
-function refToRaw(rep: RefRep, as: "string" | "file" | "closure"): RawValue {
+/** Build the `$ref` envelope for a byte-sequence ref rep. `as` distinguishes a
+ *  UTF-8 string from opaque file bytes; the store + handle are identical.
+ *  (Closures are NOT `$ref` — they carry as `$agent`, being callables.) */
+function refToRaw(rep: RefRep, as: "string" | "file"): RawValue {
   const out: Record<string, RawValue> = {
     [REF_DISCRIMINATOR]: { module: rep.module, id: rep.id },
     as,
@@ -162,15 +166,29 @@ function decodeCallable(rawId: unknown): Value {
   if (typeof rawId !== "string") {
     throw new RawValueDecodeError(`valueFromRaw: $agent must be a string, got ${typeof rawId}`);
   }
-  if (rawId.startsWith("closure:")) {
-    // Closures cross as a `$ref` envelope, never as `$agent: closure:N` — that
-    // form was retired with the local closure value. Seeing it on the wire is a
-    // version skew / encoder bug.
+  // Both callable forms ride under `$agent` as their agent def id: a top-level
+  // agent is a bare qname; a closure is `closureref:<...>` carrying its content
+  // ref. Decode through the agent-def-id codec so the two stay in one place.
+  let decoded: ReturnType<typeof decodeCoreAgentDefId>;
+  try {
+    decoded = decodeCoreAgentDefId(rawId as AgentDefId);
+  } catch (err) {
     throw new RawValueDecodeError(
-      `valueFromRaw: '$agent: ${rawId}' — closures are $ref-encoded, not $agent`,
+      `valueFromRaw: malformed $agent '${rawId}': ${err instanceof Error ? err.message : String(err)}`,
     );
   }
-  return { kind: "agentLiteral", qualifiedName: rawId as QualifiedName };
+  switch (decoded.kind) {
+    case "closureRef":
+      return { kind: "closure", ref: decoded.ref };
+    case "closure":
+      // The in-shard `closure:N` dispatch id is engine-internal, never a wire
+      // value. Seeing it here is a version skew / encoder bug.
+      throw new RawValueDecodeError(
+        `valueFromRaw: '$agent: ${rawId}' — a local closure id is not a wire value`,
+      );
+    case "qname":
+      return { kind: "agentLiteral", qualifiedName: decoded.value };
+  }
 }
 
 function decodeRef(obj: Record<string, unknown>): Value {
@@ -186,9 +204,9 @@ function decodeRef(obj: Record<string, unknown>): Value {
     throw new RawValueDecodeError("valueFromRaw: $ref.id must be a string");
   }
   const as = obj.as;
-  if (as !== "string" && as !== "file" && as !== "closure") {
+  if (as !== "string" && as !== "file") {
     throw new RawValueDecodeError(
-      `valueFromRaw: $ref.as must be 'string'|'file'|'closure', got ${String(as)}`,
+      `valueFromRaw: $ref.as must be 'string'|'file', got ${String(as)} (closures are $agent, not $ref)`,
     );
   }
   const hash = obj.hash;
@@ -207,7 +225,6 @@ function decodeRef(obj: Record<string, unknown>): Value {
     size,
   };
   if (typeof obj.contentType === "string") rep.contentType = obj.contentType;
-  if (as === "closure") return { kind: "closure", ref: rep };
   return as === "string" ? { kind: "string", rep } : { kind: "file", rep };
 }
 

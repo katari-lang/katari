@@ -25,15 +25,17 @@ describe("value-codec", () => {
     expect(rt({ kind: "null" })).toEqual({ kind: "null" });
   });
 
-  it("round-trips a content-ref closure (#5) via the $ref `as: closure` envelope", () => {
-    // A closure is always a content-addressed ref (clean bus: just a hash). It
-    // must round-trip distinctly from a byte (string/file) ref.
+  it("round-trips a content-ref closure (#5) as a `$agent` callable handle", () => {
+    // A closure is a callable, so it serialises under `$agent` (uniform with a
+    // top-level agent) — NOT as a `$ref` envelope. Its content ref is packed
+    // into the agent def id (`closureref:<...>`), so it round-trips back to the
+    // same { kind: closure, ref } value.
     const ref = { kind: "ref", module: "core", id: "abc", hash: "h123", size: 42 } as const;
     const closure: Value = { kind: "closure", ref };
     const raw = valueToRaw(closure) as Record<string, unknown>;
-    expect(raw.$ref).toEqual({ module: "core", id: "abc" });
-    expect(raw.as).toBe("closure");
-    expect(raw.hash).toBe("h123");
+    expect(typeof raw[CALLABLE_DISCRIMINATOR]).toBe("string");
+    expect((raw[CALLABLE_DISCRIMINATOR] as string).startsWith("closureref:")).toBe(true);
+    expect(raw.$ref).toBeUndefined(); // not a $ref
     expect(rt(closure)).toEqual(closure);
   });
 

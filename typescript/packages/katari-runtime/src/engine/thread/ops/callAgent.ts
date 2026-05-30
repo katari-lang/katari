@@ -27,7 +27,7 @@ import type { Json } from "../../../json.js";
 import { valueToRaw } from "../../../value-codec.js";
 import type { Endpoint } from "../../endpoint.js";
 import { type AskId, type ClosureId, createDelegationId } from "../../id.js";
-import { validateAgainstSchema } from "../../schema-validate.js";
+import { relaxedSchemaFromString, validateAgainstSchema } from "../../schema-validate.js";
 import type { StepCtx } from "../../step-ctx.js";
 import { mkString, type Value } from "../../value.js";
 import { allocAskId, deleteThread } from "../common.js";
@@ -258,14 +258,17 @@ function requireAgentBlock(ctx: StepCtx, blockId: BlockId, hint: string): AgentB
 function validateArgs(argsRecord: Record<string, Value>, agentBlock: AgentBlock): string[] {
   let schema: Json;
   try {
-    schema = JSON.parse(agentBlock.inputSchema) as Json;
+    // Relax string nodes to also accept a `$ref as:"string"` envelope: a
+    // runtime arg may be a promoted (content-ref) string while the schema says
+    // `{type:"string"}`. Callables need no relaxation — agents and closures
+    // both serialise as `$agent`, matching the callable schema as-is.
+    schema = relaxedSchemaFromString(agentBlock.inputSchema);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     return [`failed to parse inputSchema as JSON: ${msg}`];
   }
-  // Convert each Value to its raw wire form. The schema is a plain
-  // JSON Schema document; validation operates on raw JSON, not on
-  // Value objects.
+  // Convert each Value to its raw wire form. The schema is a plain JSON Schema
+  // document; validation operates on raw JSON, not on Value objects.
   const rawArgs: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(argsRecord)) {
     rawArgs[k] = valueToRaw(v);
