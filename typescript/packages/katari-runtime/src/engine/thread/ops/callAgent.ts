@@ -29,7 +29,7 @@ import type { Endpoint } from "../../endpoint.js";
 import { type AskId, type ClosureId, createDelegationId } from "../../id.js";
 import { validateAgainstSchema } from "../../schema-validate.js";
 import type { StepCtx } from "../../step-ctx.js";
-import type { Value } from "../../value.js";
+import { mkString, type Value } from "../../value.js";
 import { allocAskId, deleteThread } from "../common.js";
 import type { CallAgentThread, Thread } from "../types.js";
 import { defaultAskAckProxy, defaultCancelAckUnexpected } from "./defaults.js";
@@ -291,7 +291,7 @@ function raiseCallAgentError(ctx: StepCtx, t: CallAgentThread, message: string):
       kind: "request",
       reqId: "primitive.call_agent_error",
       args: {
-        message: { kind: "string", value: message },
+        message: mkString(message),
       },
     },
     childCallId: t.parentCallId,

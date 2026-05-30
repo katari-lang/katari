@@ -15,11 +15,15 @@ import type {
   EscalationId,
   IRModule,
   Json,
+  ProjectIndexStore,
   SchemaBundle,
+  ShardStore,
+  ValueStore,
 } from "@katari-lang/runtime";
 import postgres from "postgres";
 import { v7 as uuidv7 } from "uuid";
 import { decodeCursor, encodeCursor } from "../cursor.js";
+import { PgProjectIndexStore, PgShardStore } from "./shard-store-pg.js";
 import type {
   CancelReason,
   DelegationRepo,
@@ -51,6 +55,7 @@ import type {
   Storage,
   UpsertProjectInput,
 } from "./types.js";
+import { PgValueStore } from "./value-store-pg.js";
 
 type Sql = ReturnType<typeof postgres>;
 
@@ -375,7 +380,7 @@ type DbDelegationRow = {
   id: string;
   root_delegation_id: string;
   parent_delegation_id: string | null;
-  snapshot_id: string;
+  project_id: string;
   caller_endpoint: string;
   owner_endpoint: string;
   agent_def_id: AgentDefId;
@@ -391,7 +396,7 @@ function dbToDelegationRow(row: DbDelegationRow): DelegationRow {
     rootDelegationId: row.root_delegation_id as DelegationId,
     parentDelegationId:
       row.parent_delegation_id === null ? null : (row.parent_delegation_id as DelegationId),
-    snapshotId: row.snapshot_id as SnapshotId,
+    projectId: row.project_id as ProjectId,
     callerEndpoint: row.caller_endpoint,
     ownerEndpoint: row.owner_endpoint,
     agentDefId: row.agent_def_id,
@@ -409,11 +414,11 @@ class PgDelegationRepo implements DelegationRepo {
     await this.sql`
       INSERT INTO delegations (
         id, root_delegation_id, parent_delegation_id,
-        snapshot_id, caller_endpoint, owner_endpoint, agent_def_id, args,
+        project_id, caller_endpoint, owner_endpoint, agent_def_id, args,
         state, created_at, updated_at
       ) VALUES (
         ${row.id}, ${row.rootDelegationId}, ${row.parentDelegationId},
-        ${row.snapshotId}, ${row.callerEndpoint}, ${row.ownerEndpoint},
+        ${row.projectId}, ${row.callerEndpoint}, ${row.ownerEndpoint},
         ${this.sql.json(asJson(row.agentDefId))},
         ${this.sql.json(asJson(row.args))},
         ${row.state}, ${row.createdAt}, ${row.updatedAt}
@@ -423,7 +428,7 @@ class PgDelegationRepo implements DelegationRepo {
 
   async get(id: DelegationId): Promise<DelegationRow | null> {
     const rows = await this.sql<DbDelegationRow[]>`
-      SELECT id, root_delegation_id, parent_delegation_id, snapshot_id,
+      SELECT id, root_delegation_id, parent_delegation_id, project_id,
              caller_endpoint, owner_endpoint, agent_def_id, args, state,
              created_at, updated_at
       FROM delegations WHERE id = ${id}
@@ -434,7 +439,6 @@ class PgDelegationRepo implements DelegationRepo {
   async list(
     filter?: {
       projectId?: ProjectId;
-      snapshotId?: SnapshotId;
       callerEndpoint?: string;
       rootDelegationId?: DelegationId;
       parentDelegationId?: DelegationId;
@@ -445,11 +449,9 @@ class PgDelegationRepo implements DelegationRepo {
     const cursor = filter?.cursor !== undefined ? decodeCursor(filter.cursor) : null;
     const fetchCount = limit + 1;
     const sql = this.sql;
-    const joinClause =
-      filter?.projectId !== undefined ? sql`JOIN snapshots s ON s.id = d.snapshot_id` : sql``;
     const whereClause = composeWhere(sql, [
-      filter?.projectId !== undefined ? sql`s.project_id = ${filter.projectId}` : null,
-      filter?.snapshotId !== undefined ? sql`d.snapshot_id = ${filter.snapshotId}` : null,
+      // project_id is a direct column now (no snapshots join).
+      filter?.projectId !== undefined ? sql`d.project_id = ${filter.projectId}` : null,
       filter?.callerEndpoint !== undefined
         ? sql`d.caller_endpoint = ${filter.callerEndpoint}`
         : null,
@@ -463,11 +465,10 @@ class PgDelegationRepo implements DelegationRepo {
       cursor !== null ? sql`(d.created_at, d.id) > (${cursor.createdAt}, ${cursor.id})` : null,
     ]);
     const rows = await sql<DbDelegationRow[]>`
-      SELECT d.id, d.root_delegation_id, d.parent_delegation_id, d.snapshot_id,
+      SELECT d.id, d.root_delegation_id, d.parent_delegation_id, d.project_id,
              d.caller_endpoint, d.owner_endpoint, d.agent_def_id, d.args, d.state,
              d.created_at, d.updated_at
       FROM delegations d
-      ${joinClause}
       ${whereClause}
       ORDER BY d.created_at ASC, d.id ASC LIMIT ${fetchCount}
     `;
@@ -517,13 +518,6 @@ class PgDelegationRepo implements DelegationRepo {
       WHERE root_delegation_id = ${rootDelegationId}
     `;
   }
-
-  async listLiveSnapshotIds(): Promise<SnapshotId[]> {
-    const rows = await this.sql<{ snapshot_id: string }[]>`
-      SELECT DISTINCT snapshot_id FROM delegations
-    `;
-    return rows.map((r) => r.snapshot_id as SnapshotId);
-  }
 }
 
 // ─── Escalations ───────────────────────────────────────────────────────────
@@ -532,7 +526,7 @@ type DbEscalationRow = {
   id: string;
   delegation_id: string;
   root_delegation_id: string;
-  snapshot_id: string;
+  project_id: string;
   caller_endpoint: string;
   receiver_endpoint: string;
   agent_def_id: AgentDefId;
@@ -547,7 +541,7 @@ function dbToEscalationRow(row: DbEscalationRow): EscalationRow {
     id: row.id as EscalationId,
     delegationId: row.delegation_id as DelegationId,
     rootDelegationId: row.root_delegation_id as DelegationId,
-    snapshotId: row.snapshot_id as SnapshotId,
+    projectId: row.project_id as ProjectId,
     callerEndpoint: row.caller_endpoint,
     receiverEndpoint: row.receiver_endpoint,
     agentDefId: row.agent_def_id,
@@ -564,10 +558,10 @@ class PgEscalationRepo implements EscalationRepo {
   async insert(row: EscalationRow): Promise<void> {
     await this.sql`
       INSERT INTO escalations (
-        id, delegation_id, root_delegation_id, snapshot_id,
+        id, delegation_id, root_delegation_id, project_id,
         caller_endpoint, receiver_endpoint, agent_def_id, args, state, value, created_at
       ) VALUES (
-        ${row.id}, ${row.delegationId}, ${row.rootDelegationId}, ${row.snapshotId},
+        ${row.id}, ${row.delegationId}, ${row.rootDelegationId}, ${row.projectId},
         ${row.callerEndpoint}, ${row.receiverEndpoint},
         ${this.sql.json(asJson(row.agentDefId))},
         ${this.sql.json(asJson(row.args))},
@@ -580,7 +574,7 @@ class PgEscalationRepo implements EscalationRepo {
 
   async get(id: EscalationId): Promise<EscalationRow | null> {
     const rows = await this.sql<DbEscalationRow[]>`
-      SELECT id, delegation_id, root_delegation_id, snapshot_id,
+      SELECT id, delegation_id, root_delegation_id, project_id,
              caller_endpoint, receiver_endpoint, agent_def_id, args, state, value, created_at
       FROM escalations WHERE id = ${id}
     `;
@@ -590,7 +584,6 @@ class PgEscalationRepo implements EscalationRepo {
   async list(
     filter?: {
       projectId?: ProjectId;
-      snapshotId?: SnapshotId;
       callerEndpoint?: string;
       receiverEndpoint?: string;
       rootDelegationId?: DelegationId;
@@ -602,11 +595,9 @@ class PgEscalationRepo implements EscalationRepo {
     const cursor = filter?.cursor !== undefined ? decodeCursor(filter.cursor) : null;
     const fetchCount = limit + 1;
     const sql = this.sql;
-    const joinClause =
-      filter?.projectId !== undefined ? sql`JOIN snapshots s ON s.id = e.snapshot_id` : sql``;
     const whereClause = composeWhere(sql, [
-      filter?.projectId !== undefined ? sql`s.project_id = ${filter.projectId}` : null,
-      filter?.snapshotId !== undefined ? sql`e.snapshot_id = ${filter.snapshotId}` : null,
+      // project_id is a direct column now (no snapshots join).
+      filter?.projectId !== undefined ? sql`e.project_id = ${filter.projectId}` : null,
       filter?.callerEndpoint !== undefined
         ? sql`e.caller_endpoint = ${filter.callerEndpoint}`
         : null,
@@ -621,10 +612,9 @@ class PgEscalationRepo implements EscalationRepo {
       cursor !== null ? sql`(e.created_at, e.id) < (${cursor.createdAt}, ${cursor.id})` : null,
     ]);
     const rows = await sql<DbEscalationRow[]>`
-      SELECT e.id, e.delegation_id, e.root_delegation_id, e.snapshot_id,
+      SELECT e.id, e.delegation_id, e.root_delegation_id, e.project_id,
              e.caller_endpoint, e.receiver_endpoint, e.agent_def_id, e.args, e.state, e.value, e.created_at
       FROM escalations e
-      ${joinClause}
       ${whereClause}
       ORDER BY e.created_at DESC, e.id DESC LIMIT ${fetchCount}
     `;
@@ -918,6 +908,13 @@ class PgFfiPendingDelegationRepo implements FfiPendingDelegationRepo {
           : (row.parent_ext_delegation_id as DelegationId),
     }));
   }
+
+  async listLiveSnapshotIds(): Promise<SnapshotId[]> {
+    const rows = await this.sql<{ snapshot_id: string }[]>`
+      SELECT DISTINCT snapshot_id FROM ffi_pending_delegations
+    `;
+    return rows.map((r) => r.snapshot_id as SnapshotId);
+  }
 }
 
 class PgFfiPendingEscalationRepo implements FfiPendingEscalationRepo {
@@ -1060,6 +1057,9 @@ export class PostgresStorage implements Storage {
   readonly ffiDelegations: FfiPendingDelegationRepo;
   readonly ffiEscalations: FfiPendingEscalationRepo;
   readonly envEntries: EnvEntryRepo;
+  readonly values: ValueStore;
+  readonly shards: ShardStore;
+  readonly projectIndex: ProjectIndexStore;
 
   private constructor(private readonly sql: Sql) {
     this.projects = new PgProjectRepo(sql);
@@ -1071,6 +1071,9 @@ export class PostgresStorage implements Storage {
     this.ffiDelegations = new PgFfiPendingDelegationRepo(sql);
     this.ffiEscalations = new PgFfiPendingEscalationRepo(sql);
     this.envEntries = new PgEnvEntryRepo(sql);
+    this.values = new PgValueStore(sql);
+    this.shards = new PgShardStore(sql);
+    this.projectIndex = new PgProjectIndexStore(sql);
   }
 
   static create(databaseUrl: string): PostgresStorage {
@@ -1122,6 +1125,9 @@ function runInTx<T>(sqlHandle: Sql, fn: (tx: Storage) => Promise<T>): Promise<T>
       ffiDelegations: new PgFfiPendingDelegationRepo(innerSql),
       ffiEscalations: new PgFfiPendingEscalationRepo(innerSql),
       envEntries: new PgEnvEntryRepo(innerSql),
+      values: new PgValueStore(innerSql),
+      shards: new PgShardStore(innerSql),
+      projectIndex: new PgProjectIndexStore(innerSql),
       withTransaction: (innerFn) => runInTx(innerSql, innerFn),
       withSnapshotLock: async (_innerTx, snapshotId, body) => {
         await acquireSnapshotAdvisoryLock(innerSql, snapshotId);

@@ -63,7 +63,7 @@ function primBlock(name: string): Block {
 const API_ENDPOINT = endpoint("api://test");
 
 describe("engine integration: end-to-end via external delegate", () => {
-  it("user thread calls add(2,3); engine emits delegateAck with 5", () => {
+  it("user thread calls add(2,3); engine emits delegateAck with 5", async () => {
     const v0 = 0 as VarId;
     const v1 = 1 as VarId;
     const out = 2 as VarId;
@@ -113,7 +113,7 @@ describe("engine integration: end-to-end via external delegate", () => {
       },
     };
 
-    const result = applyEvent(state, event);
+    const result = await applyEvent(state, event);
     const ack = result.outbound.find(
       (e) => e.payload.kind === "delegateAck" && e.payload.delegationId === delegationId,
     );
@@ -126,10 +126,10 @@ describe("engine integration: end-to-end via external delegate", () => {
     expect(Object.keys(result.state.delegationSenders).length).toBe(0);
   });
 
-  it("missing entry emits a prim.throw escalate back to the sender", () => {
+  it("missing entry emits a prim.throw escalate back to the sender", async () => {
     const state = createState(ir({}, {}));
     const delegationId = createDelegationId();
-    const result = applyEvent(state, {
+    const result = await applyEvent(state, {
       from: API_ENDPOINT,
       to: CORE_ENDPOINT,
       payload: {
@@ -219,16 +219,62 @@ describe("engine integration: end-to-end via external delegate", () => {
     const delegationId = createDelegationId();
     const apiOutbound: Event[] = [];
 
-    // Test wires: a CoreModule (= the engine) registered with a bus, plus
+    // Test wires: a warm CoreModule (= the engine) registered with a bus, plus
     // a tiny stub API module that just collects outbound delegateAck events.
     const { CoreModule } = await import("../../src/modules/core.js");
     const { ExternalEventBus } = await import("../../src/bus.js");
     const { noopLogger } = await import("../../src/engine/logger.js");
+    const { NULL_DELEGATION_STORE } = await import("../../src/modules/delegation-store.js");
+
+    // Minimal in-memory shard / index stores behind a CoreStorage. Within a
+    // single bus.drain the CoreModule keeps the index + shards warm in memory,
+    // so the store is only exercised for the new-delegate `get` (→ null → fresh
+    // shard) and the per-quantum upsert / delete.
+    const shards = new Map<string, { checkpoint: unknown; currentSnapshot: string }>();
+    let storedIndex: unknown = null;
+    const shardStore = {
+      async get(p: string, id: string) {
+        return shards.get(`${p}|${id}`) ?? null;
+      },
+      // biome-ignore lint/suspicious/noExplicitAny: test stub
+      async upsert(input: any): Promise<void> {
+        shards.set(`${input.projectId}|${input.shardId}`, {
+          checkpoint: input.checkpoint,
+          currentSnapshot: input.currentSnapshot,
+        });
+      },
+      async delete(p: string, id: string): Promise<void> {
+        shards.delete(`${p}|${id}`);
+      },
+      async listActive(): Promise<never[]> {
+        return [];
+      },
+    };
+    const projectIndexStore = {
+      async get() {
+        return storedIndex;
+      },
+      async upsert(_p: string, idx: unknown): Promise<void> {
+        storedIndex = idx;
+      },
+    };
+    const storage = {
+      // biome-ignore lint/suspicious/noExplicitAny: test stub
+      async withTransaction(fn: any): Promise<any> {
+        return fn({
+          shards: shardStore,
+          projectIndex: projectIndexStore,
+          values: null,
+          delegations: NULL_DELEGATION_STORE,
+        });
+      },
+    };
 
     const core = new CoreModule({
-      endpoint: CORE_ENDPOINT,
-      snapshotId: "test-snap",
-      irModule: module,
+      projectId: "test-proj",
+      // biome-ignore lint/suspicious/noExplicitAny: test stub
+      storage: storage as any,
+      getIR: async () => module,
       logger: noopLogger,
     });
 
@@ -253,9 +299,13 @@ describe("engine integration: end-to-end via external delegate", () => {
       to: CORE_ENDPOINT,
       payload: {
         kind: "delegate",
+        // Stamp the snapshot, as the API module does for a real run — every
+        // shard-creating delegate target is stamped (CORE reads it to pick the
+        // new shard's IR). main's shard then stamps its child (helper) too.
         agentDefId: encodeCoreAgentDefId({
           kind: "qname",
           value: "main",
+          snapshot: "test-snap",
         }),
         args: {},
         delegationId,
@@ -272,15 +322,171 @@ describe("engine integration: end-to-end via external delegate", () => {
     if (apiAck && apiAck.payload.kind === "delegateAck") {
       expect(apiAck.payload.value).toEqual({ kind: "number", value: 7 });
     }
-    // CORE state cleaned up: no leftover delegations or threads.
-    const coreState = core.currentState;
-    expect(Object.keys(coreState.delegations).length).toBe(0);
-    expect(Object.keys(coreState.pendingDelegateOut).length).toBe(0);
-    expect(Object.keys(coreState.delegationSenders).length).toBe(0);
-    expect(Object.keys(coreState.threads).length).toBe(0);
+    // Sharded cleanup: both agent shards completed and were deleted, so the
+    // routing index is fully purged (no leftover delegations / escalations).
+    const index = core.currentProjectIndex;
+    expect(Object.keys(index.delegations).length).toBe(0);
+    expect(Object.keys(index.pendingDelegateOut).length).toBe(0);
+    expect(Object.keys(index.escalationOwners).length).toBe(0);
   });
 
-  it("terminate before completion: cancel cascade + terminateAck outbound", () => {
+  it("closure crossing: main makes a local agent + invokes it across shards", async () => {
+    // main(): base = 10; inc = (local agent capturing base); out = inc(); ret out
+    // Invoking `inc` is a delegate to a runtime closure value → a NEW shard. The
+    // closure cannot carry main's local closure-id space across the bus, so CORE
+    // serializes its captured env to a value-store blob on the way out and
+    // materializes it back on the way in. The closure body returns the captured
+    // `base`, proving the env survived the round-trip.
+    const base = 0 as VarId;
+    const clos = 1 as VarId;
+    const out = 2 as VarId;
+
+    // closure body (BlockAgent → UserBlock): returns the captured `base`.
+    const closureBody = userBlock({ parameters: [], statements: [], trailing: base });
+
+    const mainBody = userBlock({
+      parameters: [],
+      statements: [
+        {
+          kind: "statementLoadLiteral",
+          body: { output: base, value: { kind: "literalValueInteger", integer: 10 } },
+        },
+        { kind: "statementMakeClosure", body: { output: clos, block: 10 } },
+        { kind: "statementCall", body: { block: 20, arguments: [], output: out } },
+      ],
+      trailing: out,
+    });
+
+    const closureDelegate: Block = {
+      kind: "blockDelegate",
+      body: { target: { kind: "delegateTargetValue", body: clos } },
+    };
+
+    const module = ir(
+      {
+        1: agentBlock("main", 2),
+        2: mainBody,
+        10: agentBlock("main.inc", 11), // the closure's BlockAgent wrapper
+        11: closureBody,
+        20: closureDelegate,
+      },
+      { main: 1 },
+    );
+
+    const { CoreModule } = await import("../../src/modules/core.js");
+    const { ExternalEventBus } = await import("../../src/bus.js");
+    const { noopLogger } = await import("../../src/engine/logger.js");
+    const { NULL_DELEGATION_STORE } = await import("../../src/modules/delegation-store.js");
+
+    const shards = new Map<string, { checkpoint: unknown; currentSnapshot: string }>();
+    let storedIndex: unknown = null;
+    // In-memory value store — only putComplete / fetch are exercised (closure
+    // blobs). Keyed by id under owner "core".
+    const blobs = new Map<string, Uint8Array>();
+    let blobCounter = 0;
+    const valueStore = {
+      // biome-ignore lint/suspicious/noExplicitAny: test stub
+      async putComplete(input: any) {
+        const id = `blob-${blobCounter++}`;
+        blobs.set(id, input.bytes);
+        return { id, hash: id, size: input.bytes.length };
+      },
+      async fetch(_p: string, _m: string, id: string) {
+        return blobs.get(id) ?? null;
+      },
+    };
+    const shardStore = {
+      async get(p: string, id: string) {
+        return shards.get(`${p}|${id}`) ?? null;
+      },
+      // biome-ignore lint/suspicious/noExplicitAny: test stub
+      async upsert(input: any): Promise<void> {
+        shards.set(`${input.projectId}|${input.shardId}`, {
+          checkpoint: input.checkpoint,
+          currentSnapshot: input.currentSnapshot,
+        });
+      },
+      async delete(p: string, id: string): Promise<void> {
+        shards.delete(`${p}|${id}`);
+      },
+      async listActive(): Promise<never[]> {
+        return [];
+      },
+    };
+    const projectIndexStore = {
+      async get() {
+        return storedIndex;
+      },
+      async upsert(_p: string, idx: unknown): Promise<void> {
+        storedIndex = idx;
+      },
+    };
+    const storage = {
+      // biome-ignore lint/suspicious/noExplicitAny: test stub
+      async withTransaction(fn: any): Promise<any> {
+        return fn({
+          shards: shardStore,
+          projectIndex: projectIndexStore,
+          values: valueStore,
+          delegations: NULL_DELEGATION_STORE,
+        });
+      },
+    };
+
+    const core = new CoreModule({
+      projectId: "test-proj",
+      // biome-ignore lint/suspicious/noExplicitAny: test stub
+      storage: storage as any,
+      getIR: async () => module,
+      logger: noopLogger,
+    });
+
+    const apiOutbound: Event[] = [];
+    const apiStub = {
+      endpoint: API_ENDPOINT,
+      async feed(event: Event) {
+        apiOutbound.push(event);
+        return { outbound: [] };
+      },
+      async persist() {},
+      async load() {},
+    };
+
+    const bus = new ExternalEventBus(noopLogger);
+    bus.registerAll([
+      { name: "core", module: core },
+      { name: "api", module: apiStub },
+    ]);
+
+    const delegationId = createDelegationId();
+    bus.push({
+      from: API_ENDPOINT,
+      to: CORE_ENDPOINT,
+      payload: {
+        kind: "delegate",
+        agentDefId: encodeCoreAgentDefId({ kind: "qname", value: "main", snapshot: "test-snap" }),
+        args: {},
+        delegationId,
+      },
+    });
+    await bus.drain();
+
+    const apiAck = apiOutbound.find(
+      (e) => e.payload.kind === "delegateAck" && e.payload.delegationId === delegationId,
+    );
+    expect(apiAck).toBeDefined();
+    if (apiAck && apiAck.payload.kind === "delegateAck") {
+      expect(apiAck.payload.value).toEqual({ kind: "number", value: 10 });
+    }
+    // A closure blob was actually written (the env crossed as a content ref).
+    expect(blobs.size).toBeGreaterThan(0);
+    // Both shards completed → routing index fully purged.
+    const index = core.currentProjectIndex;
+    expect(Object.keys(index.delegations).length).toBe(0);
+    expect(Object.keys(index.pendingDelegateOut).length).toBe(0);
+  });
+
+  it("terminate before completion: cancel cascade + terminateAck outbound", async () => {
     // Set up an agent that pauses on an external — call ext "wait", then
     // return its value. Because the engine's external translation
     // translates the inbound delegateAck before the agent finishes, we
@@ -320,7 +526,7 @@ describe("engine integration: end-to-end via external delegate", () => {
     const delegationId = createDelegationId();
 
     // Start the agent — it pauses on the external delegate.
-    const startResult = applyEvent(state, {
+    const startResult = await applyEvent(state, {
       from: API_ENDPOINT,
       to: CORE_ENDPOINT,
       payload: {
@@ -338,7 +544,7 @@ describe("engine integration: end-to-end via external delegate", () => {
     expect(ffiDelegate).toBeDefined();
 
     // Now terminate.
-    const cancelResult = applyEvent(startResult.state, {
+    const cancelResult = await applyEvent(startResult.state, {
       from: API_ENDPOINT,
       to: CORE_ENDPOINT,
       payload: { kind: "terminate", delegationId },

@@ -10,6 +10,9 @@
 export {
   applyEvent,
   buildConsoleLogger,
+  bytesContentEqual,
+  bytesEqualsText,
+  bytesHash,
   collectGarbage,
   consoleLogger,
   createDelegationId,
@@ -19,31 +22,40 @@ export {
   createThreadId,
   deserialize,
   EntryNotFoundError,
+  emptyProjectIndex,
   emptyResult,
   endpoint,
   IrrecoverableEngineError,
+  inlineText,
+  isBytesValue,
   isInternal,
   literalToValue,
+  mkSecret,
+  mkString,
   NULL_VALUE,
   noopLogger,
   RecoverableEngineError,
   serialize,
   shouldGc,
+  tryInlineString,
 } from "./engine/index.js";
 
 // ─── Engine types ──────────────────────────────────────────────────────────
 
 export type {
+  ActiveShard,
   AgentThread,
   ArrayThread,
   AskId,
   AskIdMap,
   AskKind,
+  BytesRep,
   CallId,
   ChildRole,
   CtorThread,
   DelegateThread,
   DelegationId,
+  EncryptedEngineCheckpoint,
   Endpoint,
   EngineCheckpoint,
   EscalationId,
@@ -54,6 +66,7 @@ export type {
   ForThread,
   HandleThread,
   InternalEventPayload,
+  LoadedShard,
   LogEntry,
   Logger,
   LogLevel,
@@ -62,12 +75,19 @@ export type {
   PendingAction,
   PostCancelAction,
   PrimThread,
+  ProjectIndex,
+  ProjectIndexStore,
+  RefModule,
+  RefRep,
   RequestThread,
   Result,
   Result as EngineResult,
   Scope,
   Scope as EngineScope,
   ScopeId,
+  ShardId,
+  ShardStatus,
+  ShardStore,
   State,
   State as EngineState,
   Thread,
@@ -80,6 +100,24 @@ export type {
   Value,
   Value as EngineValue,
 } from "./engine/index.js";
+
+// ─── Storage: value store (3-layer byte-sequence storage) ──────────────────
+
+export { hashBytes, hashText } from "./storage/hash.js";
+export type {
+  CreateFileInput,
+  EphemeralOwner,
+  FileRecord,
+  OpenInput,
+  ProduceHandle,
+  ProduceResult,
+  PutInput,
+  RefState,
+  ValueRefState,
+  ValueSemanticKind,
+  ValueStore,
+} from "./storage/value-store.js";
+export { MAX_PRODUCE_BYTES } from "./storage/value-store.js";
 
 // ─── IR + schema types (Haskell mirror) ────────────────────────────────────
 
@@ -128,10 +166,14 @@ export type {
   FfiAgentDefId,
 } from "./agent-def-id.js";
 export {
+  agentDefIdSnapshot,
   decodeCoreAgentDefId,
   decodeFfiAgentDefId,
   encodeCoreAgentDefId,
   encodeFfiAgentDefId,
+  stampAgentDefIdSnapshot,
+  stripAgentDefIdSnapshot,
+  THROW_REQUEST_QNAME,
 } from "./agent-def-id.js";
 
 // ─── 3-module + bus abstraction ────────────────────────────────────────────
@@ -140,10 +182,7 @@ export type { RegisteredModule } from "./bus.js";
 export { ExternalEventBus } from "./bus.js";
 export type { ExternalEvent } from "./engine/event.js";
 export type { Module } from "./module.js";
-export type {
-  CoreCheckpointStore,
-  CoreModuleOptions,
-} from "./modules/core.js";
+export type { CoreModuleOptions } from "./modules/core.js";
 export { CoreModule } from "./modules/core.js";
 export type {
   DelegationStore,
@@ -161,6 +200,19 @@ export type { EnvModuleOptions } from "./modules/env.js";
 export { EnvModule } from "./modules/env.js";
 export type { FfiModuleOptions } from "./modules/ffi.js";
 export { FfiModule } from "./modules/ffi.js";
+export type { FfiLaneBackend } from "./modules/ffi-mux.js";
+export { FfiMux } from "./modules/ffi-mux.js";
+export type { CoreStorage, CoreTxStores } from "./modules/storage.js";
+
+// ─── Warm per-project actor (Phase E) ──────────────────────────────────────
+
+export { ProjectActorHost } from "./actor/host.js";
+export type {
+  ProjectActorContext,
+  ProjectActorModules,
+} from "./actor/project-actor.js";
+export { ProjectActor } from "./actor/project-actor.js";
+export { SerialQueue } from "./actor/serial-queue.js";
 
 // ─── Sidecar (FFI runner ↔ subprocess IPC) ─────────────────────────────────
 
@@ -191,23 +243,3 @@ export type {
   ParentToChild,
   SidecarBundle,
 } from "./sidecar/types.js";
-
-// ─── Orchestrator ─────────────────────────────────────────────────────────
-
-export type {
-  ApiLikeModule,
-  OrchestratorProjectId,
-  OrchestratorSnapshotId,
-  OrchestratorStorage,
-  RecoveryOptions,
-  ResolvedSnapshot,
-  TickContext,
-  TickModules,
-  TickModulesFactory,
-} from "./orchestrator/index.js";
-export {
-  NoSnapshotForProject,
-  Orchestrator,
-  recoverOnBoot,
-  SnapshotNotFound,
-} from "./orchestrator/index.js";

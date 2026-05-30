@@ -18,7 +18,77 @@
 import type { QualifiedName } from "../ir/types.js";
 import { RawValueDecodeError, valueFromRaw, valueToRaw } from "../value-codec.js";
 import { RecoverableEngineError } from "./errors.js";
-import type { Value } from "./value.js";
+import {
+  type BytesRep,
+  bytesContentEqual,
+  inlineText,
+  mkSecret,
+  mkString,
+  type Value,
+} from "./value.js";
+
+/** Materialize a byte-sequence rep to bytes (inline immediate, ref fetched). */
+type Materialize = (rep: BytesRep) => Promise<Uint8Array>;
+
+/**
+ * Read a byte-sequence rep as text. Inline reps return their text directly
+ * (no fetch — the common case stays cheap); refs are materialized + UTF-8
+ * decoded. Used by content-transform prims that combine string content.
+ */
+async function materializeText(rep: BytesRep, materialize: Materialize): Promise<string> {
+  if (rep.kind === "inline") return rep.text;
+  return new TextDecoder().decode(await materialize(rep));
+}
+
+/** Read a `string` / `secret` Value's text, materializing a ref if needed. */
+async function materializeValueText(v: Value, materialize: Materialize): Promise<string> {
+  if (v.kind !== "string" && v.kind !== "secret") {
+    throw new RecoverableEngineError(`expected string/secret, got ${v.kind}`);
+  }
+  return materializeText(v.rep, materialize);
+}
+
+/**
+ * Deep-materialize: replace every `string` ref nested in `value` with its
+ * inline form so a subsequent `valueToRaw` / `jsonTaggedToRaw` produces the
+ * real content rather than a `$ref` envelope. Used by `to_string` /
+ * `json.stringify`, which serialize a whole value tree. `file` stays a ref
+ * (it has no text form); `secret` stays as-is (callers reject it upstream).
+ */
+async function materializeValueDeep(value: Value, materialize: Materialize): Promise<Value> {
+  switch (value.kind) {
+    case "string":
+      return value.rep.kind === "ref"
+        ? mkString(new TextDecoder().decode(await materialize(value.rep)))
+        : value;
+    case "array":
+      return {
+        kind: "array",
+        elements: await Promise.all(
+          value.elements.map((e) => materializeValueDeep(e, materialize)),
+        ),
+      };
+    case "tagged":
+      return {
+        kind: "tagged",
+        ctorId: value.ctorId,
+        fields: await deepFields(value.fields, materialize),
+      };
+    case "record":
+      return { kind: "record", entries: await deepFields(value.entries, materialize) };
+    default:
+      return value;
+  }
+}
+
+async function deepFields(
+  fields: Record<string, Value>,
+  materialize: Materialize,
+): Promise<Record<string, Value>> {
+  const out: Record<string, Value> = {};
+  for (const [k, v] of Object.entries(fields)) out[k] = await materializeValueDeep(v, materialize);
+  return out;
+}
 
 /**
  * Thrown by a primitive to raise a specific (never-returning) request
@@ -41,7 +111,11 @@ export class PrimRaiseRequest extends Error {
   }
 }
 
-export function executePrim(name: string, args: Record<string, Value>): Value {
+export async function executePrim(
+  name: string,
+  args: Record<string, Value>,
+  materialize: Materialize,
+): Promise<Value> {
   switch (name) {
     case "add":
       return arith(name, args, (a, b) => a + b);
@@ -105,9 +179,15 @@ export function executePrim(name: string, args: Record<string, Value>): Value {
         (lhs?.kind === "string" || lhs?.kind === "secret") &&
         (rhs?.kind === "string" || rhs?.kind === "secret")
       ) {
-        const joined = lhs.value + rhs.value;
+        // Content transform: needs the bytes. Inline operands resolve
+        // immediately; ref operands are fetched (bounded I/O within the
+        // quantum). The result is inline; persist-time promotion (Phase E1)
+        // re-refs it if large.
+        const joined =
+          (await materializeText(lhs.rep, materialize)) +
+          (await materializeText(rhs.rep, materialize));
         const tainted = lhs.kind === "secret" || rhs.kind === "secret";
-        return tainted ? { kind: "secret", value: joined } : { kind: "string", value: joined };
+        return tainted ? mkSecret(joined) : mkString(joined);
       }
       throw new RecoverableEngineError("prim concat: invalid args");
     }
@@ -124,7 +204,7 @@ export function executePrim(name: string, args: Record<string, Value>): Value {
           "prim to_string: refusing to stringify a secret value (would launder taint)",
         );
       }
-      return { kind: "string", value: JSON.stringify(valueToRaw(v)) };
+      return mkString(JSON.stringify(valueToRaw(await materializeValueDeep(v, materialize))));
     }
     case "from_string": {
       const text = req(args, "text");
@@ -135,11 +215,11 @@ export function executePrim(name: string, args: Record<string, Value>): Value {
       }
       let parsed: unknown;
       try {
-        parsed = JSON.parse(text.value);
+        parsed = JSON.parse(await materializeValueText(text, materialize));
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         throw new PrimRaiseRequest("primitive.from_string_error", {
-          message: { kind: "string", value: `invalid JSON: ${msg}` },
+          message: mkString(`invalid JSON: ${msg}`),
         });
       }
       try {
@@ -147,7 +227,7 @@ export function executePrim(name: string, args: Record<string, Value>): Value {
       } catch (e) {
         if (e instanceof RawValueDecodeError) {
           throw new PrimRaiseRequest("primitive.from_string_error", {
-            message: { kind: "string", value: e.message },
+            message: mkString(e.message),
           });
         }
         throw e;
@@ -219,15 +299,16 @@ export function executePrim(name: string, args: Record<string, Value>): Value {
       if (value === undefined) {
         throw new RecoverableEngineError("prim type_of: missing arg");
       }
-      return { kind: "string", value: value.kind };
+      return mkString(value.kind);
     }
     case "get_field": {
       const value = args["object"],
         field = args["field"];
       if (value?.kind === "tagged" && field?.kind === "string") {
-        const v = value.fields[field.value];
+        const fieldName = await materializeValueText(field, materialize);
+        const v = value.fields[fieldName];
         if (v === undefined) {
-          throw new RecoverableEngineError(`prim get_field: field ${field.value} not found`);
+          throw new RecoverableEngineError(`prim get_field: field ${fieldName} not found`);
         }
         return v;
       }
@@ -247,7 +328,7 @@ export function executePrim(name: string, args: Record<string, Value>): Value {
       if (key.kind !== "string") {
         throw new RecoverableEngineError(`prim record.get: key must be a string, got ${key.kind}`);
       }
-      const v = r.entries[key.value];
+      const v = r.entries[await materializeValueText(key, materialize)];
       return v === undefined ? { kind: "null" } : v;
     }
     case "record.set": {
@@ -266,7 +347,7 @@ export function executePrim(name: string, args: Record<string, Value>): Value {
       for (const [k, v] of Object.entries(r.entries)) {
         next[k] = v;
       }
-      next[key.value] = value;
+      next[await materializeValueText(key, materialize)] = value;
       return { kind: "record", entries: next };
     }
     case "record.remove": {
@@ -282,10 +363,11 @@ export function executePrim(name: string, args: Record<string, Value>): Value {
           `prim record.remove: key must be a string, got ${key.kind}`,
         );
       }
-      if (!(key.value in r.entries)) return r;
+      const removeKey = await materializeValueText(key, materialize);
+      if (!(removeKey in r.entries)) return r;
       const next: Record<string, Value> = Object.create(null);
       for (const [k, v] of Object.entries(r.entries)) {
-        if (k !== key.value) next[k] = v;
+        if (k !== removeKey) next[k] = v;
       }
       return { kind: "record", entries: next };
     }
@@ -296,7 +378,7 @@ export function executePrim(name: string, args: Record<string, Value>): Value {
           `prim record.keys: argument must be a record, got ${r.kind}`,
         );
       }
-      const keys = Object.keys(r.entries).map((k): Value => ({ kind: "string", value: k }));
+      const keys = Object.keys(r.entries).map((k): Value => mkString(k));
       return { kind: "array", elements: keys };
     }
     case "record.has": {
@@ -310,7 +392,10 @@ export function executePrim(name: string, args: Record<string, Value>): Value {
       if (key.kind !== "string") {
         throw new RecoverableEngineError(`prim record.has: key must be a string, got ${key.kind}`);
       }
-      return { kind: "boolean", value: key.value in r.entries };
+      return {
+        kind: "boolean",
+        value: (await materializeValueText(key, materialize)) in r.entries,
+      };
     }
     case "record.size": {
       const r = req(args, "record");
@@ -330,19 +415,19 @@ export function executePrim(name: string, args: Record<string, Value>): Value {
       }
       let parsed: unknown;
       try {
-        parsed = JSON.parse(text.value);
+        parsed = JSON.parse(await materializeValueText(text, materialize));
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         throw new PrimRaiseRequest("primitive.json_parse_error", {
-          message: { kind: "string", value: `invalid JSON: ${msg}` },
+          message: mkString(`invalid JSON: ${msg}`),
         });
       }
       return jsonToTagged(parsed);
     }
     case "json.stringify": {
       const value = req(args, "value");
-      const raw = jsonTaggedToRaw(value);
-      return { kind: "string", value: JSON.stringify(raw) };
+      const raw = jsonTaggedToRaw(await materializeValueDeep(value, materialize));
+      return mkString(JSON.stringify(raw));
     }
     default:
       throw new RecoverableEngineError(`unknown prim: ${name}`);
@@ -390,7 +475,7 @@ function jsonToTagged(raw: unknown): Value {
     return {
       kind: "tagged",
       ctorId: JSON_STRING_QNAME,
-      fields: { value: { kind: "string", value: raw } },
+      fields: { value: mkString(raw) },
     };
   }
   if (Array.isArray(raw)) {
@@ -454,7 +539,7 @@ function jsonTaggedToRaw(value: Value): unknown {
       if (f?.kind !== "string") {
         throw new RecoverableEngineError("prim json.stringify: json_string.value is not a string");
       }
-      return f.value;
+      return inlineText(f);
     }
     case JSON_ARRAY_QNAME: {
       const items = value.fields["items"];
@@ -543,9 +628,13 @@ export function valueEquals(a: Value, b: Value): boolean {
   }
   switch (a.kind) {
     case "number":
-    case "string":
     case "boolean":
       return a.value === (b as typeof a).value;
+    case "string":
+      return bytesContentEqual(a.rep, (b as typeof a).rep);
+    case "file":
+      // file identity = (module, id). Content is irrelevant.
+      return a.rep.id === (b as typeof a).rep.id && a.rep.module === (b as typeof a).rep.module;
     case "null":
       return true;
     case "array":
@@ -570,7 +659,7 @@ export function valueEquals(a: Value, b: Value): boolean {
     // this with a constant-time compare or remove `secret` from
     // the `eq` prim's input type entirely.
     case "secret":
-      return a.value === (b as typeof a).value;
+      return bytesContentEqual(a.rep, (b as typeof a).rep);
     case "closure":
       return false;
     case "record":

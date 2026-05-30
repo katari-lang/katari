@@ -1,8 +1,7 @@
 // Round-trip + structural tests for the raw ↔ Value codec.
 
 import { describe, expect, it } from "vitest";
-import type { Value } from "../src/engine/value.js";
-import type { ClosureId } from "../src/engine/id.js";
+import { mkSecret, mkString, type Value } from "../src/engine/value.js";
 import {
   CALLABLE_DISCRIMINATOR,
   CTOR_DISCRIMINATOR,
@@ -20,10 +19,22 @@ describe("value-codec", () => {
   it("round-trips primitive values", () => {
     expect(rt({ kind: "number", value: 0 })).toEqual({ kind: "number", value: 0 });
     expect(rt({ kind: "number", value: -3.5 })).toEqual({ kind: "number", value: -3.5 });
-    expect(rt({ kind: "string", value: "" })).toEqual({ kind: "string", value: "" });
-    expect(rt({ kind: "string", value: "hi" })).toEqual({ kind: "string", value: "hi" });
+    expect(rt(mkString(""))).toEqual(mkString(""));
+    expect(rt(mkString("hi"))).toEqual(mkString("hi"));
     expect(rt({ kind: "boolean", value: true })).toEqual({ kind: "boolean", value: true });
     expect(rt({ kind: "null" })).toEqual({ kind: "null" });
+  });
+
+  it("round-trips a content-ref closure (#5) via the $ref `as: closure` envelope", () => {
+    // A closure is always a content-addressed ref (clean bus: just a hash). It
+    // must round-trip distinctly from a byte (string/file) ref.
+    const ref = { kind: "ref", module: "core", id: "abc", hash: "h123", size: 42 } as const;
+    const closure: Value = { kind: "closure", ref };
+    const raw = valueToRaw(closure) as Record<string, unknown>;
+    expect(raw.$ref).toEqual({ module: "core", id: "abc" });
+    expect(raw.as).toBe("closure");
+    expect(raw.hash).toBe("h123");
+    expect(rt(closure)).toEqual(closure);
   });
 
   it("encodes tagged values with $constructor + fields", () => {
@@ -71,10 +82,12 @@ describe("value-codec", () => {
     expect(rt(v)).toEqual(v);
   });
 
-  it("encodes closure as $agent closure:N", () => {
-    const v: Value = { kind: "closure", closureId: 7 as ClosureId };
-    expect(valueToRaw(v)).toEqual({ [CALLABLE_DISCRIMINATOR]: "closure:7" });
-    expect(rt(v)).toEqual(v);
+  it("rejects a $agent: closure:N on inbound (closures are $ref-encoded now)", () => {
+    // The local closure value form was retired (#5); a closure never encodes as
+    // `$agent: closure:N`. If one appears on the wire it is a version skew.
+    expect(() => valueFromRaw({ [CALLABLE_DISCRIMINATOR]: "closure:7" })).toThrow(
+      RawValueDecodeError,
+    );
   });
 
   it("encodes arrays element-wise", () => {
@@ -96,10 +109,7 @@ describe("value-codec", () => {
     // The codec therefore just round-trips an array.
     const v: Value = {
       kind: "array",
-      elements: [
-        { kind: "number", value: 1 },
-        { kind: "string", value: "a" },
-      ],
+      elements: [{ kind: "number", value: 1 }, mkString("a")],
     };
     expect(valueToRaw(v)).toEqual([1, "a"]);
     expect(rt(v)).toEqual(v);
@@ -138,7 +148,7 @@ describe("value-codec", () => {
   });
 
   it("encodes a secret as { $secret: <plaintext> } on outbound wire", () => {
-    const v: Value = { kind: "secret", value: "sk-live-abc" };
+    const v: Value = mkSecret("sk-live-abc");
     expect(valueToRaw(v)).toEqual({ [SECRET_DISCRIMINATOR]: "sk-live-abc" });
   });
 

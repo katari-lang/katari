@@ -46,9 +46,28 @@ CREATE TABLE IF NOT EXISTS snapshots (
 CREATE INDEX IF NOT EXISTS snapshots_project_created_idx
   ON snapshots (project_id, created_at DESC);
 
-CREATE TABLE IF NOT EXISTS engine_checkpoints (
-  snapshot_id UUID PRIMARY KEY REFERENCES snapshots(id) ON DELETE CASCADE,
-  checkpoint  JSONB NOT NULL,
+-- Per-agent-instance shard: the encrypted engine checkpoint for one warm CORE
+-- shard, keyed by (project_id, shard_id). `current_snapshot` records which code
+-- version the instance runs (RESTRICT: a snapshot in use by a live shard cannot
+-- be deleted). Completed shards are physically DELETEd. Replaces the old
+-- per-snapshot `engine_checkpoints` (warm per-project actor model).
+CREATE TABLE IF NOT EXISTS engine_shards (
+  project_id        UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  shard_id          TEXT NOT NULL,
+  current_snapshot  UUID NOT NULL REFERENCES snapshots(id),
+  payload           JSONB NOT NULL,
+  status            TEXT NOT NULL,
+  updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (project_id, shard_id)
+);
+CREATE INDEX IF NOT EXISTS engine_shards_project_status_idx
+  ON engine_shards (project_id, status);
+
+-- Per-project routing index (delegation / escalation id -> shard). One JSONB
+-- row per project; the CoreModule keeps it warm in memory and writes through.
+CREATE TABLE IF NOT EXISTS project_index (
+  project_id  UUID PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+  payload     JSONB NOT NULL,
   updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -60,11 +79,15 @@ CREATE TABLE IF NOT EXISTS engine_checkpoints (
 -- `root_delegation_id` is denormalised so the tree query for an entire
 -- run is one indexed lookup (`WHERE root_delegation_id = ?`) rather than
 -- a recursive CTE walking parent links.
+-- `project_id` (not snapshot_id): a delegation is a katari-protocol entity
+-- scoped to a project. Which code version (snapshot) a delegation runs is
+-- module-private state (CORE: engine_shards.current_snapshot; FFI: its own
+-- tables) and deliberately does NOT live on this protocol table.
 CREATE TABLE IF NOT EXISTS delegations (
   id                   UUID PRIMARY KEY,
   root_delegation_id   UUID NOT NULL,
   parent_delegation_id UUID,
-  snapshot_id          UUID NOT NULL REFERENCES snapshots(id) ON DELETE CASCADE,
+  project_id           UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
   caller_endpoint      TEXT NOT NULL,
   owner_endpoint       TEXT NOT NULL,
   agent_def_id         JSONB NOT NULL,
@@ -77,8 +100,8 @@ CREATE INDEX IF NOT EXISTS delegations_root_idx
   ON delegations (root_delegation_id);
 CREATE INDEX IF NOT EXISTS delegations_parent_idx
   ON delegations (parent_delegation_id);
-CREATE INDEX IF NOT EXISTS delegations_snapshot_state_idx
-  ON delegations (snapshot_id, state);
+CREATE INDEX IF NOT EXISTS delegations_project_state_idx
+  ON delegations (project_id, state);
 CREATE INDEX IF NOT EXISTS delegations_caller_root_idx
   ON delegations (caller_endpoint, root_delegation_id);
 
@@ -90,7 +113,7 @@ CREATE TABLE IF NOT EXISTS escalations (
   id                  UUID PRIMARY KEY,
   delegation_id       UUID NOT NULL,
   root_delegation_id  UUID NOT NULL,
-  snapshot_id         UUID NOT NULL REFERENCES snapshots(id) ON DELETE CASCADE,
+  project_id          UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
   caller_endpoint     TEXT NOT NULL,
   receiver_endpoint   TEXT NOT NULL,
   agent_def_id        JSONB NOT NULL,
@@ -103,8 +126,8 @@ CREATE INDEX IF NOT EXISTS escalations_delegation_idx
   ON escalations (delegation_id);
 CREATE INDEX IF NOT EXISTS escalations_root_idx
   ON escalations (root_delegation_id);
-CREATE INDEX IF NOT EXISTS escalations_snapshot_state_idx
-  ON escalations (snapshot_id, state);
+CREATE INDEX IF NOT EXISTS escalations_project_state_idx
+  ON escalations (project_id, state);
 CREATE INDEX IF NOT EXISTS escalations_receiver_state_idx
   ON escalations (receiver_endpoint, state);
 
@@ -180,4 +203,76 @@ CREATE TABLE IF NOT EXISTS env_entries (
   value      TEXT NOT NULL,
   is_secret  BOOLEAN NOT NULL DEFAULT FALSE,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- ─── Value store: 3-layer byte-sequence storage ─────────────────────────────
+--
+-- All byte sequences (`string` / `file` / `secret`) are content-addressed.
+-- Three layers mirror the run / delegation "persistent record + freeable
+-- resource" split (D30):
+--   - value_refs        : ephemeral CORE/FFI intermediate values. Owned by a
+--                         shard, reclaimed by reachability GC.
+--   - api_files         : persistent API-owned records (= user-managed files).
+--                         Not traversal-GC'd; deleted only on explicit request.
+--   - value_blobs(+chunks): project-wide content-addressed bytes (the dedup
+--                         unit). Both layers reference a blob by hash; a
+--                         refcount frees it at zero.
+-- `ref = a module's handle, blob = the file's bytes.`
+--
+-- Project-scoped via `project_id` (a value's identity is (module, id); the
+-- project is ambient — D24). See docs/2026-05-30-storage-schema-and-api.md §2.
+
+-- (a) ephemeral ref: CORE/FFI intermediate values. reachability GC target.
+CREATE TABLE IF NOT EXISTS value_refs (
+  project_id        UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  owner_module      TEXT NOT NULL,             -- 'core' | 'ffi'
+  id                UUID NOT NULL,
+  state             TEXT NOT NULL,             -- v0.1.0: 'complete' | 'errored'
+  semantic_kind     TEXT NOT NULL,             -- 'string' | 'file' | 'secret'
+  owner_instance_id UUID,                      -- bound shard (instance-end sweep)
+  hash              TEXT,                       -- -> value_blobs.hash (null while errored)
+  size              BIGINT,
+  content_type      TEXT,
+  error_message     TEXT,
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (project_id, owner_module, id)
+);
+CREATE INDEX IF NOT EXISTS value_refs_instance_idx ON value_refs (owner_instance_id);
+CREATE INDEX IF NOT EXISTS value_refs_hash_idx     ON value_refs (project_id, hash);
+
+-- (b) persistent file: API-owned record (= runs_audit's positioning). Outside
+-- reachability GC; survives until the user deletes it. A file value carries
+-- ref(module=api, id=<this id>).
+CREATE TABLE IF NOT EXISTS api_files (
+  project_id    UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  id            UUID NOT NULL,
+  hash          TEXT NOT NULL,                 -- -> value_blobs.hash
+  size          BIGINT NOT NULL,
+  content_type  TEXT,
+  display_name  TEXT,                          -- UI label (= original file name)
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (project_id, id)
+);
+CREATE INDEX IF NOT EXISTS api_files_hash_idx ON api_files (project_id, hash);
+
+-- (c) shared blob: project-wide content-addressed bytes (the dedup unit).
+-- ref_count = (reachable value_refs) + (api_files) referencing this hash; 0 =>
+-- physical delete. Bytes are held in fixed-size chunks so large files stream;
+-- producing buffers in host memory and writes chunks once at close (no
+-- per-chunk DB write — D32). Observable `building` is v0.2.
+CREATE TABLE IF NOT EXISTS value_blobs (
+  project_id        UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  hash              TEXT NOT NULL,
+  total_size        BIGINT NOT NULL,
+  ref_count         INTEGER NOT NULL DEFAULT 0,
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+  last_accessed_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (project_id, hash)
+);
+CREATE TABLE IF NOT EXISTS value_blob_chunks (
+  project_id   UUID NOT NULL,
+  hash         TEXT NOT NULL,
+  chunk_index  INTEGER NOT NULL,
+  bytes        BYTEA NOT NULL,
+  PRIMARY KEY (project_id, hash, chunk_index)
 );

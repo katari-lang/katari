@@ -191,12 +191,12 @@ function resolveTarget(
         };
       }
       if (value.kind === "closure") {
+        // A closure is always a content ref dispatched on CORE (its body is CORE
+        // code). CORE materializes the ref into a fresh shard on inbound, then
+        // the standard closure:N path runs the body.
         return {
           peer: ctx.state.selfEndpoint,
-          agentDefId: encodeCoreAgentDefId({
-            kind: "closure",
-            value: value.closureId,
-          }),
+          agentDefId: encodeCoreAgentDefId({ kind: "closureRef", ref: value.ref }),
         };
       }
       throw new Error(

@@ -1,42 +1,35 @@
 // Module: core abstraction of the 3-module + 6-event symmetric design.
 //
-// API / CORE / FFI modules each implement this interface. The bus only
-// holds an (endpoint -> module) table and calls module.feed based on
-// the event's `to` field.
+// API / CORE / FFI / ENV modules each implement this interface. The bus only
+// holds an (endpoint -> module) table and calls `module.feed` based on the
+// event's `to` field.
 //
-// **Responsibility split**:
-//   - Module: processes one event addressed to itself and returns outbound.
-//             Persistence is its own job.
-//   - Bus:   queues events and dispatches based on `to` — doesn't look inside.
+// **Self-contained modules (Phase E)**: a module is a warm, per-project actor
+// that implements the katari-protocol and owns its own domain logic AND its
+// own persistence. `feed` is the only interface method: the module opens its
+// own transaction (1 quantum = 1 tx), loads what it touches, applies the
+// event, persists, and commits — all internally. There is no host-driven
+// `load` / `persist` step anymore; the host (the bus + the project actor) is a
+// thin proxy that only routes events and calls `feed`.
 //
-// The tx argument of `persist` / `load` has a different type per module impl
-// (CORE module: `{coreCheckpoints: CoreCheckpointStore}`, FFI module: no-op,
-// API module: receives a SQL tx directly). The `Module<Tx>` type parameter
-// lets each impl declare the type it needs, and the bus handles it as
-// `Module<unknown>` (= safe because dispatch doesn't inspect tx contents).
+// Serialization is the module's concern too: the CORE module is serialized
+// per-project (the project actor's serial loop) so its warm shard cache stays
+// consistent; per-shard concurrency is a later, mutex-granularity-only change.
 
 import type { Endpoint } from "./engine/endpoint.js";
 import type { ExternalEvent } from "./engine/event.js";
 
-export interface Module<Tx = unknown> {
+export interface Module {
   /** Self-identifier. The bus routes by `event.to === endpoint`. */
   readonly endpoint: Endpoint;
 
   /**
-   * Process one inbound event.
+   * Process one inbound event and return the events it produces.
    *
-   * Returns outbound events determined synchronously. Asynchronous work
-   * (e.g. FFI sidecar IPC responses) goes through a separate route
-   * (`bus.push(...)`) to continue the bus drain.
+   * The module is responsible for its own transaction + persistence: a
+   * `feed` is one self-contained quantum. Outbound events flow back through
+   * the bus; asynchronous work that can't be resolved synchronously (e.g.
+   * FFI sidecar IPC responses) is injected later via `bus.push(...)`.
    */
   feed(event: ExternalEvent): Promise<{ outbound: ExternalEvent[] }>;
-
-  /** Save state to tx. Called when bus drain completes. */
-  persist(tx: Tx): Promise<void>;
-
-  /**
-   * Restore state from tx. Called at the start of request processing.
-   * Stateless modules (e.g. the current API module) can be a no-op.
-   */
-  load(tx: Tx): Promise<void>;
 }

@@ -1,0 +1,11 @@
+@"Produce a blob from text. The host writes the bytes to the value store and returns a file ref."
+external makeBlob(text: string) -> file from "FFI:blob_echo.makeBlob"
+
+@"Read a blob's bytes back as text. The host fetches them from the data plane."
+external readBlob(blob: file) -> string from "FFI:blob_echo.readBlob"
+
+@"Round-trip a blob through the value store: produce via one ext, hold the file ref in CORE, then consume via another ext."
+agent main() -> string {
+  let blob = makeBlob(text = "hello blob")
+  readBlob(blob = blob)
+}

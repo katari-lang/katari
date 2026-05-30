@@ -40,7 +40,17 @@ export { buildConsoleLogger, consoleLogger, noopLogger } from "./logger.js";
 export type { Result } from "./result.js";
 export { emptyResult } from "./result.js";
 export type { Scope } from "./scope.js";
-export type { EngineCheckpoint } from "./snapshot.js";
+export type {
+  ActiveShard,
+  LoadedShard,
+  ProjectIndex,
+  ProjectIndexStore,
+  ShardId,
+  ShardStatus,
+  ShardStore,
+} from "./shard.js";
+export { emptyProjectIndex } from "./shard.js";
+export type { EncryptedEngineCheckpoint, EngineCheckpoint } from "./snapshot.js";
 export { deserialize, serialize } from "./snapshot.js";
 export type { State } from "./state.js";
 export type {
@@ -63,5 +73,16 @@ export type {
   TupleThread,
   UserThread,
 } from "./thread/types.js";
-export type { Value } from "./value.js";
-export { literalToValue, NULL_VALUE } from "./value.js";
+export type { BytesRep, RefModule, RefRep, Value } from "./value.js";
+export {
+  bytesContentEqual,
+  bytesEqualsText,
+  bytesHash,
+  inlineText,
+  isBytesValue,
+  literalToValue,
+  mkSecret,
+  mkString,
+  NULL_VALUE,
+  tryInlineString,
+} from "./value.js";

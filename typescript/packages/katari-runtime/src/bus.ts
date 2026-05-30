@@ -25,8 +25,8 @@ export type RegisteredModule = {
   name: string;
   // The bus only invokes `feed`; persist/load are called by the host
   // (orchestrator) directly on the typed concrete module. We carry the
-  // `Module<unknown>` shape just to express that constraint.
-  module: Module<unknown>;
+  // `Module` shape just to express that constraint.
+  module: Module;
 };
 
 export class ExternalEventBus {

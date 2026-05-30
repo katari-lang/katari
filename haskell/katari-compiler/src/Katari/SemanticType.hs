@@ -84,6 +84,12 @@ data SemanticType phase where
   -- variant for boundary-crossing concerns (redaction in logs,
   -- AES encryption in DB persistence).
   SemanticTypeSecret :: SemanticType phase
+  -- | Opaque byte sequence (@file@). Disjoint from 'SemanticTypeString'
+  -- (no subtype relation). Identity-typed: @file == file@ compares
+  -- reference identity, not content. Has no literals (cannot be pattern-
+  -- matched against a value). The runtime represents it as a value
+  -- reference (always a blob ref); the value model never inlines it.
+  SemanticTypeFile :: SemanticType phase
   SemanticTypeBoolean :: SemanticType phase
   -- Literal types: a singleton type containing exactly one value.
   SemanticTypeLiteralInteger :: Integer -> SemanticType phase
@@ -242,6 +248,7 @@ substituteVariable onVariable onRequest = \case
   SemanticTypeNumber -> pure SemanticTypeNumber
   SemanticTypeString -> pure SemanticTypeString
   SemanticTypeSecret -> pure SemanticTypeSecret
+  SemanticTypeFile -> pure SemanticTypeFile
   SemanticTypeBoolean -> pure SemanticTypeBoolean
   SemanticTypeLiteralInteger value -> pure (SemanticTypeLiteralInteger value)
   SemanticTypeLiteralString value -> pure (SemanticTypeLiteralString value)

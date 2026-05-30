@@ -19,8 +19,14 @@ import type { Value } from "../../value.js";
 import type { Thread } from "../types.js";
 
 export type ThreadOps<T extends Thread> = {
-  /** First dispatch after the thread is registered in state.threads. */
-  create(ctx: StepCtx, t: T): void;
+  /**
+   * First dispatch after the thread is registered in state.threads.
+   *
+   * May be async: the prim variant awaits content-transform materialize.
+   * Other variants stay synchronous (`void`), assignable to the union —
+   * only the dispatcher / runner `await` the result.
+   */
+  create(ctx: StepCtx, t: T): void | Promise<void>;
   /** A direct child completed normally with `value`. */
   done(ctx: StepCtx, t: T, callId: CallId, value: Value): void;
   /**

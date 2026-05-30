@@ -16,6 +16,7 @@ import type {
 import { Mutex } from "async-mutex";
 import { v7 as uuidv7 } from "uuid";
 import { decodeCursor, encodeCursor } from "../cursor.js";
+import { InMemoryProjectIndexStore, InMemoryShardStore } from "./shard-store-memory.js";
 import type {
   DelegationRepo,
   DelegationRow,
@@ -46,6 +47,7 @@ import type {
   Storage,
   UpsertProjectInput,
 } from "./types.js";
+import { InMemoryValueStore } from "./value-store-memory.js";
 
 function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
@@ -269,12 +271,6 @@ class InMemoryEngineCheckpointRepo implements EngineCheckpointRepo {
 class InMemoryDelegationRepo implements DelegationRepo {
   rows = new Map<DelegationId, DelegationRow>();
 
-  /**
-   * Snapshot → project lookup. Injected at construction so the
-   * `projectId` filter on `list` can scope cross-snapshot.
-   */
-  constructor(private readonly projectIdOfSnapshot: (id: SnapshotId) => ProjectId | null) {}
-
   async insert(row: DelegationRow): Promise<void> {
     this.rows.set(row.id, clone(row));
   }
@@ -287,7 +283,6 @@ class InMemoryDelegationRepo implements DelegationRepo {
   async list(
     filter?: {
       projectId?: ProjectId;
-      snapshotId?: SnapshotId;
       callerEndpoint?: string;
       rootDelegationId?: DelegationId;
       parentDelegationId?: DelegationId;
@@ -296,11 +291,7 @@ class InMemoryDelegationRepo implements DelegationRepo {
   ): Promise<ListResult<DelegationRow>> {
     let all = [...this.rows.values()];
     if (filter?.projectId !== undefined) {
-      const want = filter.projectId;
-      all = all.filter((r) => this.projectIdOfSnapshot(r.snapshotId) === want);
-    }
-    if (filter?.snapshotId !== undefined) {
-      all = all.filter((r) => r.snapshotId === filter.snapshotId);
+      all = all.filter((r) => r.projectId === filter.projectId);
     }
     if (filter?.callerEndpoint !== undefined) {
       all = all.filter((r) => r.callerEndpoint === filter.callerEndpoint);
@@ -370,20 +361,10 @@ class InMemoryDelegationRepo implements DelegationRepo {
       }
     }
   }
-
-  async listLiveSnapshotIds(): Promise<SnapshotId[]> {
-    const ids = new Set<SnapshotId>();
-    for (const row of this.rows.values()) {
-      ids.add(row.snapshotId);
-    }
-    return [...ids];
-  }
 }
 
 class InMemoryEscalationRepo implements EscalationRepo {
   rows = new Map<EscalationId, EscalationRow>();
-
-  constructor(private readonly projectIdOfSnapshot: (id: SnapshotId) => ProjectId | null) {}
 
   async insert(row: EscalationRow): Promise<void> {
     this.rows.set(row.id, clone(row));
@@ -397,7 +378,6 @@ class InMemoryEscalationRepo implements EscalationRepo {
   async list(
     filter?: {
       projectId?: ProjectId;
-      snapshotId?: SnapshotId;
       callerEndpoint?: string;
       receiverEndpoint?: string;
       rootDelegationId?: DelegationId;
@@ -407,11 +387,7 @@ class InMemoryEscalationRepo implements EscalationRepo {
   ): Promise<ListResult<EscalationRow>> {
     let all = [...this.rows.values()];
     if (filter?.projectId !== undefined) {
-      const want = filter.projectId;
-      all = all.filter((r) => this.projectIdOfSnapshot(r.snapshotId) === want);
-    }
-    if (filter?.snapshotId !== undefined) {
-      all = all.filter((r) => r.snapshotId === filter.snapshotId);
+      all = all.filter((r) => r.projectId === filter.projectId);
     }
     if (filter?.callerEndpoint !== undefined) {
       all = all.filter((r) => r.callerEndpoint === filter.callerEndpoint);
@@ -571,6 +547,12 @@ class InMemoryFfiPendingDelegationRepo implements FfiPendingDelegationRepo {
       .filter((r) => r.parentExtDelegationId === parentDelegationId)
       .map(clone);
   }
+
+  async listLiveSnapshotIds(): Promise<SnapshotId[]> {
+    const ids = new Set<SnapshotId>();
+    for (const row of this.rows.values()) ids.add(row.snapshotId);
+    return [...ids];
+  }
 }
 
 class InMemoryFfiPendingEscalationRepo implements FfiPendingEscalationRepo {
@@ -625,12 +607,15 @@ export class InMemoryStorage implements Storage {
   // every list() call.
   private readonly projectIdOfSnapshot = (id: SnapshotId): ProjectId | null =>
     this.snapshots.rows.get(id)?.projectId ?? null;
-  readonly delegations = new InMemoryDelegationRepo(this.projectIdOfSnapshot);
-  readonly escalations = new InMemoryEscalationRepo(this.projectIdOfSnapshot);
+  readonly delegations = new InMemoryDelegationRepo();
+  readonly escalations = new InMemoryEscalationRepo();
   readonly runsAudit = new InMemoryRunsAuditRepo(this.projectIdOfSnapshot);
   readonly ffiDelegations = new InMemoryFfiPendingDelegationRepo();
   readonly ffiEscalations = new InMemoryFfiPendingEscalationRepo();
   readonly envEntries = new InMemoryEnvEntryRepo();
+  readonly values = new InMemoryValueStore();
+  readonly shards = new InMemoryShardStore();
+  readonly projectIndex = new InMemoryProjectIndexStore();
 
   /** Per-snapshot mutex map for `withSnapshotLock` (= in-memory version of a row lock). */
   private readonly snapshotMutexes = new Map<SnapshotId, Mutex>();
@@ -681,6 +666,13 @@ export class InMemoryStorage implements Storage {
       ffiDelegationsRows: new Map(this.ffiDelegations.rows),
       ffiEscalationsRows: new Map(this.ffiEscalations.rows),
       envEntriesRows: new Map(this.envEntries.rows),
+      // Blobs are content-addressed and immutable, so a shallow Map copy is a
+      // valid rollback target (inserts/deletes revert; bytes never mutate).
+      valueRefsRows: new Map(this.values.refs),
+      valueFilesRows: new Map(this.values.files),
+      valueBlobsRows: new Map(this.values.blobs),
+      shardRows: new Map(this.shards.rows),
+      projectIndexRows: new Map(this.projectIndex.rows),
     };
   }
 
@@ -695,6 +687,11 @@ export class InMemoryStorage implements Storage {
     this.ffiDelegations.rows = snap.ffiDelegationsRows;
     this.ffiEscalations.rows = snap.ffiEscalationsRows;
     this.envEntries.rows = snap.envEntriesRows;
+    this.values.refs = snap.valueRefsRows;
+    this.values.files = snap.valueFilesRows;
+    this.values.blobs = snap.valueBlobsRows;
+    this.shards.rows = snap.shardRows;
+    this.projectIndex.rows = snap.projectIndexRows;
   }
 }
 
@@ -709,4 +706,9 @@ type TxSnapshot = {
   ffiDelegationsRows: Map<DelegationId, FfiPendingDelegation>;
   ffiEscalationsRows: Map<EscalationId, FfiPendingEscalation>;
   envEntriesRows: Map<string, EnvEntryRow>;
+  valueRefsRows: InMemoryValueStore["refs"];
+  valueFilesRows: InMemoryValueStore["files"];
+  valueBlobsRows: InMemoryValueStore["blobs"];
+  shardRows: InMemoryShardStore["rows"];
+  projectIndexRows: InMemoryProjectIndexStore["rows"];
 };

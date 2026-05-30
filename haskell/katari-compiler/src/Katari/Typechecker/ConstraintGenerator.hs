@@ -436,6 +436,7 @@ primitiveToSemantic = \case
   PrimitiveTypeKindNumber -> SemanticTypeNumber
   PrimitiveTypeKindString -> SemanticTypeString
   PrimitiveTypeKindSecret -> SemanticTypeSecret
+  PrimitiveTypeKindFile -> SemanticTypeFile
   PrimitiveTypeKindBoolean -> SemanticTypeBoolean
 
 -- | Map a 'LiteralValue' (used for both syntactic literal types and

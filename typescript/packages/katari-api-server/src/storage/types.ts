@@ -25,10 +25,20 @@ import type {
   EncryptedValue,
   EngineCheckpoint,
   EscalationId,
+  ProjectIndexStore,
+  ShardStore,
+  ValueStore,
 } from "@katari-lang/runtime";
 import type { IRModule, SchemaBundle, SidecarBundle } from "@katari-lang/types";
 
-export type { DelegationId, EscalationId, SidecarBundle };
+export type {
+  DelegationId,
+  EscalationId,
+  ProjectIndexStore,
+  ShardStore,
+  SidecarBundle,
+  ValueStore,
+};
 
 // ─── Brands ────────────────────────────────────────────────────────────────
 
@@ -154,7 +164,8 @@ export type DelegationRow = {
   rootDelegationId: DelegationId;
   /** One hop up. `null` when this row IS the root. */
   parentDelegationId: DelegationId | null;
-  snapshotId: SnapshotId;
+  /** Project the run belongs to. (Snapshot is module-private — not here.) */
+  projectId: ProjectId;
   /** Module that issued the delegate event. Owns writes for this row. */
   callerEndpoint: string;
   /** Module that runs this entity. */
@@ -182,7 +193,6 @@ export interface DelegationRepo {
   list(
     filter?: {
       projectId?: ProjectId;
-      snapshotId?: SnapshotId;
       callerEndpoint?: string;
       rootDelegationId?: DelegationId;
       parentDelegationId?: DelegationId;
@@ -204,8 +214,6 @@ export interface DelegationRepo {
   delete(id: DelegationId): Promise<boolean>;
   /** Delete every row in a root subtree (root + all children). */
   deleteAllUnderRoot(rootDelegationId: DelegationId): Promise<void>;
-  /** Snapshot ids that still own at least one live delegation. */
-  listLiveSnapshotIds(): Promise<SnapshotId[]>;
 }
 
 // ─── Escalations (= live escalation entities) ──────────────────────────────
@@ -222,7 +230,8 @@ export type EscalationRow = {
   delegationId: DelegationId;
   /** Denormalised: root of `delegationId`'s tree. */
   rootDelegationId: DelegationId;
-  snapshotId: SnapshotId;
+  /** Project the run belongs to. (Snapshot is module-private — not here.) */
+  projectId: ProjectId;
   /** Module that issued the escalate event. */
   callerEndpoint: string;
   /** Module the bus event was addressed to (= the would-be answerer). */
@@ -241,7 +250,6 @@ export interface EscalationRepo {
   list(
     filter?: {
       projectId?: ProjectId;
-      snapshotId?: SnapshotId;
       callerEndpoint?: string;
       receiverEndpoint?: string;
       rootDelegationId?: DelegationId;
@@ -347,6 +355,9 @@ export interface FfiPendingDelegationRepo {
   delete(delegationId: DelegationId): Promise<boolean>;
   listBySnapshot(snapshotId: SnapshotId): Promise<FfiPendingDelegation[]>;
   listChildrenOf(parentDelegationId: DelegationId): Promise<FfiPendingDelegation[]>;
+  /** Snapshot ids that still own at least one in-flight ext delegation —
+   *  the set whose sidecars boot recovery must respawn. */
+  listLiveSnapshotIds(): Promise<SnapshotId[]>;
 }
 
 export type FfiPendingEscalation = {
@@ -421,6 +432,12 @@ export interface Storage {
   ffiDelegations: FfiPendingDelegationRepo;
   ffiEscalations: FfiPendingEscalationRepo;
   envEntries: EnvEntryRepo;
+  /** 3-layer byte-sequence storage (refs / files / blobs). */
+  values: ValueStore;
+  /** Per-agent engine shards (Phase E). Replaces `checkpoints` once CORE shards. */
+  shards: ShardStore;
+  /** Project-local routing index for shards (Phase E). */
+  projectIndex: ProjectIndexStore;
 
   /**
    * Run `fn` inside a backend-native transaction. The `tx` argument exposes

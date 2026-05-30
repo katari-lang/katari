@@ -794,6 +794,7 @@ data PrimitiveTypeKind where
   PrimitiveTypeKindNumber :: PrimitiveTypeKind
   PrimitiveTypeKindString :: PrimitiveTypeKind
   PrimitiveTypeKindSecret :: PrimitiveTypeKind
+  PrimitiveTypeKindFile :: PrimitiveTypeKind
   PrimitiveTypeKindBoolean :: PrimitiveTypeKind
   deriving (Eq, Show)
 

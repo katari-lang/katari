@@ -11,7 +11,7 @@ import type { Value } from "@katari-lang/runtime";
 import { valueFromRaw } from "@katari-lang/runtime";
 import { Hono } from "hono";
 import { z } from "zod";
-import type { ApiServerOrchestrator } from "../orchestrator.js";
+import type { ApiServerActorHost } from "../actor-host.js";
 import { runAuditRowToWire } from "../wire/agent-wire.js";
 import {
   PaginationQuerySchema,
@@ -30,7 +30,7 @@ const RunListQuerySchema = z
   .extend(PaginationQuerySchema.shape);
 
 export function buildRunRoutes(
-  orchestrator: ApiServerOrchestrator,
+  host: ApiServerActorHost,
   storage: import("../storage/types.js").Storage,
 ): Hono {
   const app = new Hono();
@@ -42,19 +42,16 @@ export function buildRunRoutes(
     for (const [k, v] of Object.entries(body.args)) {
       argsValue[k] = valueFromRaw(v);
     }
-    // tickResolved performs the (projectId, snapshotId?) → SnapshotId
-    // resolution INSIDE the transaction so the snapshot can't be
-    // deleted between resolve and the tick acquiring its lock.
-    const result = await orchestrator.tickResolved(
-      { projectId, snapshotId: body.snapshotId },
-      async (ctx) => {
-        return ctx.api.startRun({
-          bus: ctx.bus,
-          qualifiedName: body.qualifiedName,
-          name: body.name,
-          args: argsValue,
-        });
-      },
+    // startRun resolves (projectId, snapshotId?) → SnapshotId inside its own
+    // tx, so the snapshot can't be deleted between resolve and the insert.
+    const result = await host.runForProject(projectId, ({ bus, modules }) =>
+      modules.api.startRun({
+        bus,
+        snapshotId: body.snapshotId,
+        qualifiedName: body.qualifiedName,
+        name: body.name,
+        args: argsValue,
+      }),
     );
     return c.json({ runId: result.runId }, 201);
   });
@@ -86,19 +83,19 @@ export function buildRunRoutes(
   });
 
   app.post("/:runId/cancel", async (c) => {
+    const projectId = ProjectIdSchema.parse(c.req.param("projectId"));
     const runId = RunIdSchema.parse(c.req.param("runId"));
     const row = await storage.runsAudit.get(runId);
     if (row === null) {
       return c.json({ error: `run ${runId} not found` }, 404);
     }
-    // Short-circuit terminal states: re-running the orchestrator tick on
-    // a finished run would needlessly allocate a tx, spin up the sidecar,
-    // and reload engine state. The audit state already reflects the answer.
+    // Short-circuit terminal states: re-running a quantum on a finished run
+    // would needlessly reload engine state. The audit already has the answer.
     if (row.state === "cancelled" || row.state === "succeeded" || row.state === "error") {
       return c.json({ run: runAuditRowToWire(row) });
     }
-    const refreshed = await orchestrator.tick(row.snapshotId, async (ctx) => {
-      const result = await ctx.api.cancelRun({ bus: ctx.bus, runId });
+    const refreshed = await host.runForProject(projectId, async ({ bus, modules }) => {
+      const result = await modules.api.cancelRun({ bus, runId });
       return result.row;
     });
     return c.json({ run: runAuditRowToWire(refreshed ?? row) });

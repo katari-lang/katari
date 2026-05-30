@@ -8,12 +8,12 @@
 // lives in the per-variant ops file. This module hosts the common code
 // that each op delegates into.
 
-import { encodeCoreAgentDefId } from "../../agent-def-id.js";
+import { encodeCoreAgentDefId, THROW_REQUEST_QNAME } from "../../agent-def-id.js";
 import type { Block, BlockId } from "../../ir/types.js";
 import { type AskId, type CallId, createEscalationId, type ScopeId, type ThreadId } from "../id.js";
 import type { Scope } from "../scope.js";
 import type { StepCtx } from "../step-ctx.js";
-import type { Value } from "../value.js";
+import { mkString, type Value } from "../value.js";
 import type { AskIdMap, Thread, ThreadStatus } from "./types.js";
 
 // ─── Thread lookups ────────────────────────────────────────────────────────
@@ -410,8 +410,8 @@ export function emitThrowEscalate(ctx: StepCtx, t: Thread, message: string): voi
     askId,
     askKind: {
       kind: "request",
-      reqId: "primitive.throw",
-      args: { msg: { kind: "string", value: message } },
+      reqId: THROW_REQUEST_QNAME,
+      args: { msg: mkString(message) },
     },
     childCallId: t.parentCallId,
   });

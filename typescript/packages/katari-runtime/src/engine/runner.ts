@@ -2,15 +2,21 @@
 //
 // The runner doesn't know about Thread variants; it dispatches each event
 // to the per-method routing in `thread/ops/index.ts`. State is mutated in
-// place: every tick creates a fresh `CoreModule` instance and reloads
-// state from the DB at tick start, so half-modified state from a thrown
-// op is discarded with the instance (tx rollback handles the DB side).
+// place. An irrecoverable throw mid-drain therefore leaves the State
+// half-mutated: the per-feed tx rolls back the DB side, and CoreModule
+// evicts the poisoned shard from its warm cache so the next feed reloads a
+// clean copy from the (rolled-back) DB. (Recoverable errors never reach
+// here — `applyTranslateExternal` converts them into a throw escalate.)
 //
 // Stale-event semantics: events targeting a thread that was already
 // removed from `state.threads` are dropped silently with a debug log
 // (matches the previous engine's behaviour).
 
-import { decodeCoreAgentDefId, encodeCoreAgentDefId } from "../agent-def-id.js";
+import {
+  decodeCoreAgentDefId,
+  encodeCoreAgentDefId,
+  THROW_REQUEST_QNAME,
+} from "../agent-def-id.js";
 import { EntryNotFoundError, RecoverableEngineError } from "./errors.js";
 import type { Event, InternalEventPayload } from "./event.js";
 import { isInternal } from "./event.js";
@@ -18,7 +24,13 @@ import type { AskId, ThreadId } from "./id.js";
 import { createEscalationId } from "./id.js";
 import { spawnAgentRoot } from "./spawn.js";
 import type { State } from "./state.js";
-import { emptyBuffers, makeStepCtx, type StepBuffers } from "./step-ctx.js";
+import {
+  emptyBuffers,
+  makeStepCtx,
+  type RefFetcher,
+  type RefPutter,
+  type StepBuffers,
+} from "./step-ctx.js";
 import {
   dispatchAsk,
   dispatchAskAck,
@@ -28,6 +40,7 @@ import {
   dispatchDone,
 } from "./thread/ops/index.js";
 import type { Thread } from "./thread/types.js";
+import { mkString } from "./value.js";
 
 /**
  * Process a single inbound event against `state` and drain only the
@@ -42,15 +55,17 @@ import type { Thread } from "./thread/types.js";
  * `initial` may be either an external event (= one of the 6 cross-module
  * events) or an internal event (only used by tests / pre-Bus call sites).
  */
-export function drive(
+export async function drive(
   state: State,
   initial: Event,
-): {
+  fetchRef?: RefFetcher,
+  putRef?: RefPutter,
+): Promise<{
   state: State;
   buffers: StepBuffers;
-} {
+}> {
   const buffers = emptyBuffers();
-  const ctx = makeStepCtx(state, buffers);
+  const ctx = makeStepCtx(state, buffers, fetchRef, putRef);
 
   if (!isInternal(initial.payload)) {
     applyTranslateExternal(ctx, initial);
@@ -60,7 +75,7 @@ export function drive(
 
   while (buffers.queue.length > 0) {
     const ev = buffers.queue.shift()!;
-    step(ctx, ev);
+    await step(ctx, ev);
   }
 
   return { state, buffers };
@@ -87,8 +102,8 @@ function applyTranslateExternal(ctx: ReturnType<typeof makeStepCtx>, event: Even
             kind: "escalate",
             delegationId: event.payload.delegationId,
             escalationId: createEscalationId(),
-            agentDefId: encodeCoreAgentDefId({ kind: "qname", value: "primitive.throw" }),
-            args: { msg: { kind: "string", value: err.message } },
+            agentDefId: encodeCoreAgentDefId({ kind: "qname", value: THROW_REQUEST_QNAME }),
+            args: { msg: mkString(err.message) },
           },
         });
       }
@@ -100,10 +115,12 @@ function applyTranslateExternal(ctx: ReturnType<typeof makeStepCtx>, event: Even
 
 // ─── Single-step dispatch ──────────────────────────────────────────────────
 
-function step(ctx: ReturnType<typeof makeStepCtx>, ev: InternalEventPayload): void {
+async function step(ctx: ReturnType<typeof makeStepCtx>, ev: InternalEventPayload): Promise<void> {
   switch (ev.kind) {
     case "create":
-      onCreate(ctx, ev);
+      // Only `create` can be async (prim materialize); the other internal
+      // events spawn work via the queue rather than evaluating prims inline.
+      await onCreate(ctx, ev);
       break;
     case "done":
       onDone(ctx, ev);
@@ -131,15 +148,15 @@ function step(ctx: ReturnType<typeof makeStepCtx>, ev: InternalEventPayload): vo
 
 // `create` event: the spawning code already wrote the Thread record into
 // state.threads. Our job is just to invoke the variant's create op.
-function onCreate(
+async function onCreate(
   ctx: ReturnType<typeof makeStepCtx>,
   ev: Extract<InternalEventPayload, { kind: "create" }>,
-): void {
+): Promise<void> {
   const t = ctx.state.threads[ev.threadId] as Thread | undefined;
   if (t === undefined) {
     throw new Error(`engine: create event for ${ev.threadId} but no thread record present`);
   }
-  dispatchCreate(ctx, t);
+  await dispatchCreate(ctx, t);
 }
 
 function onDone(
@@ -426,6 +443,14 @@ function resolveDelegateTarget(
       throw new EntryNotFoundError(qn, delegationId);
     }
     return { blockId, capturedScopeId: null };
+  }
+  if (decoded.kind === "closureRef") {
+    // CORE materializes a closure-ref delegate into a local closure (rewriting
+    // the target to closure:N) BEFORE applyEvent — so the engine must never see
+    // one. Reaching here is a host-side invariant violation.
+    throw new Error(
+      `engine.runner: closure-ref delegate ${delegationId} reached the engine unmaterialized (CORE must materialize it first)`,
+    );
   }
   // kind === "closure"
   const record = ctx.state.closures[decoded.value];

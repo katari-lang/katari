@@ -39,12 +39,17 @@
 // Note: 1 FfiModule = 1 sidecar = 1 snapshot scope. `ffiStore` must be an
 // instance already bound to that scope (= constructed by the storage layer).
 
-import { encodeCoreAgentDefId } from "../agent-def-id.js";
+import {
+  encodeCoreAgentDefId,
+  stampAgentDefIdSnapshot,
+  stripAgentDefIdSnapshot,
+  THROW_REQUEST_QNAME,
+} from "../agent-def-id.js";
 import type { Endpoint } from "../engine/endpoint.js";
 import type { ExternalEvent } from "../engine/event.js";
 import { createEscalationId, type DelegationId, type EscalationId } from "../engine/id.js";
 import type { Logger } from "../engine/logger.js";
-import type { Value } from "../engine/value.js";
+import { mkString, type Value } from "../engine/value.js";
 import type { Module } from "../module.js";
 import type { Sidecar } from "../sidecar/sidecar.js";
 import type { FfiStore } from "../sidecar/store.js";
@@ -60,6 +65,15 @@ export type FfiModuleOptions = {
    * If multiple FFI modules need to coexist (future), distinguish them by endpoint.
    */
   endpoint?: Endpoint;
+  /**
+   * The snapshot this FfiModule (= one sidecar) runs. Used to stamp the
+   * snapshot onto a CORE child agent the ext spawns (`ipcChildDelegate`)
+   * so CORE creates that child shard on the right IR version. Inbound
+   * delegates arrive already stamped (CORE → FFI); we strip the stamp
+   * before the sidecar sees the agent def id (its handler registry is
+   * keyed by the bare qname — the sidecar already IS this snapshot's code).
+   */
+  snapshotId: string;
   /** Sidecar corresponding to one FfiModule (per-snapshot). `null` not allowed. */
   sidecar: Sidecar;
   /** Callback to push sidecar responses onto the bus. */
@@ -76,6 +90,7 @@ interface EscalationRelayEntry {
 
 export class FfiModule implements Module {
   readonly endpoint: Endpoint;
+  private readonly snapshotId: string;
   private readonly sidecar: Sidecar;
   private readonly store: FfiStore;
   private readonly logger: Logger;
@@ -94,6 +109,7 @@ export class FfiModule implements Module {
 
   constructor(opts: FfiModuleOptions) {
     this.endpoint = opts.endpoint ?? FFI_ENDPOINT;
+    this.snapshotId = opts.snapshotId;
     this.sidecar = opts.sidecar;
     this.store = opts.store;
     this.logger = opts.logger;
@@ -130,14 +146,11 @@ export class FfiModule implements Module {
     }
   }
 
-  /** State is fully written through to the store, so persist is a no-op. */
-  async persist(): Promise<void> {}
-
   /**
-   * Rebuild the in-memory escalation relay map from the persistent
-   * store. Called by the orchestrator at the start of every tick that
-   * uses this FfiModule. Idempotent — repopulating an already-populated
-   * map yields the same entries.
+   * Rebuild the in-memory escalation relay map from the persistent store.
+   * Called by {@link FfiMux} once when it creates this lane (and on boot
+   * recovery). Idempotent — repopulating an already-populated map yields the
+   * same entries. Not part of the {@link Module} interface; the lane owns it.
    */
   async load(): Promise<void> {
     const rows = await this.store.listEscalations();
@@ -215,7 +228,13 @@ export class FfiModule implements Module {
 
   private async handleInboundDelegate(event: ExternalEvent): Promise<void> {
     if (event.payload.kind !== "delegate") return;
-    const { delegationId, agentDefId, args } = event.payload;
+    const { delegationId, args } = event.payload;
+    // CORE stamped the snapshot onto the target (`ext.qname@snapshot`) so the
+    // bus could carry it; the sidecar's handler registry is keyed by the bare
+    // qname, so we strip it here. The snapshot lives on the store row's
+    // dedicated column, so recovery (`ipcDelegateRestarted`, which re-sends
+    // `row.agentDefId`) keeps presenting the bare form to the sidecar.
+    const agentDefId = stripAgentDefIdSnapshot(event.payload.agentDefId);
     await this.store.insertDelegation({
       delegationId,
       peerEndpoint: event.from,
@@ -476,8 +495,8 @@ export class FfiModule implements Module {
             kind: "escalate",
             delegationId: msg.delegationId,
             escalationId: createEscalationId(),
-            agentDefId: encodeCoreAgentDefId({ kind: "qname", value: "primitive.throw" }),
-            args: { msg: { kind: "string", value: msg.message } },
+            agentDefId: encodeCoreAgentDefId({ kind: "qname", value: THROW_REQUEST_QNAME }),
+            args: { msg: mkString(msg.message) },
           },
         });
         return;
@@ -496,14 +515,18 @@ export class FfiModule implements Module {
         return;
       }
       case "ipcChildDelegate": {
-        // Ext is starting a CORE-side child. Persist the child row
-        // (parentExtDelegationId pointing at the ext call) and push a
-        // delegate event on the bus toward CORE.
+        // Ext is starting a CORE-side child. The sidecar names it by bare
+        // qname (the ext called `katari.delegate("some.agent", ...)` with no
+        // notion of snapshots); stamp this sidecar's snapshot so CORE creates
+        // the child shard on the matching IR version. Persist the child row
+        // (parentExtDelegationId pointing at the ext call) and push a delegate
+        // event on the bus toward CORE.
         const convertedArgs = argsFromRaw(msg.args);
+        const agentDefId = stampAgentDefIdSnapshot(msg.agentDefId, this.snapshotId);
         await this.store.insertDelegation({
           delegationId: msg.delegationId,
           peerEndpoint: this.endpoint, // ack comes back to us
-          agentDefId: msg.agentDefId,
+          agentDefId,
           args: encryptValueRecord(convertedArgs),
           state: "running",
           createdAt: new Date().toISOString(),
@@ -515,7 +538,7 @@ export class FfiModule implements Module {
           payload: {
             kind: "delegate",
             delegationId: msg.delegationId,
-            agentDefId: msg.agentDefId,
+            agentDefId,
             args: convertedArgs,
           },
         });

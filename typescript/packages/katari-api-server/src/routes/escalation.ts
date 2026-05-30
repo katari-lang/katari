@@ -11,7 +11,7 @@ import type { EscalationId } from "@katari-lang/runtime";
 import { API_ENDPOINT, valueFromRaw } from "@katari-lang/runtime";
 import { Hono } from "hono";
 import { z } from "zod";
-import type { ApiServerOrchestrator } from "../orchestrator.js";
+import type { ApiServerActorHost } from "../actor-host.js";
 import type { Storage } from "../storage/types.js";
 import { escalationRowToWire } from "../wire/agent-wire.js";
 import {
@@ -31,7 +31,7 @@ const ListQuerySchema = z
   })
   .extend(PaginationQuerySchema.shape);
 
-export function buildEscalationRoutes(orchestrator: ApiServerOrchestrator, storage: Storage): Hono {
+export function buildEscalationRoutes(host: ApiServerActorHost, storage: Storage): Hono {
   const app = new Hono();
 
   app.get("/", async (c) => {
@@ -40,9 +40,10 @@ export function buildEscalationRoutes(orchestrator: ApiServerOrchestrator, stora
     // Filter by `receiverEndpoint = API_ENDPOINT` so the operator-facing
     // list never accidentally surfaces FFI-relay escalations (= those
     // are internal plumbing, not questions a human should answer).
+    // (snapshotId is no longer a column on escalations — accepted in the
+    // query for back-compat but not used as a filter.)
     const result = await storage.escalations.list({
       projectId,
-      snapshotId: query.snapshotId,
       rootDelegationId: query.runId,
       state: query.state,
       receiverEndpoint: API_ENDPOINT,
@@ -76,13 +77,9 @@ export function buildEscalationRoutes(orchestrator: ApiServerOrchestrator, stora
       return c.json({ error: `escalation already ${escalation.state}` }, 409);
     }
     const decoded = valueFromRaw(body.value);
-    const result = await orchestrator.tick(escalation.snapshotId, async (ctx) => {
-      return ctx.api.answerEscalation({
-        bus: ctx.bus,
-        escalationId,
-        value: decoded,
-      });
-    });
+    const result = await host.runForProject(escalation.projectId, ({ bus, modules }) =>
+      modules.api.answerEscalation({ bus, escalationId, value: decoded }),
+    );
     return c.json({ ok: result.ok });
   });
 

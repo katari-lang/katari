@@ -25,6 +25,14 @@ export type State = {
   /** Identity of this engine instance. Events with `to !== selfEndpoint` are outbound. */
   selfEndpoint: Endpoint;
   irModule: IRModule;
+  /**
+   * The snapshot (code version) this shard runs. Set by the host when the
+   * shard is created / loaded. Stamped into a closure blob at make-closure so
+   * the closure can later be materialized against the right IR (the block it
+   * runs lives in this snapshot's IR). Not persisted in the checkpoint — the
+   * host re-supplies it from `engine_shards.current_snapshot` on load.
+   */
+  snapshot: string;
   /** ThreadId → Thread. */
   threads: Record<ThreadId, Thread>;
   /** ScopeId → Scope. */

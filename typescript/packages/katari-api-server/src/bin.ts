@@ -16,8 +16,8 @@ import {
   type Sidecar,
   SidecarManager,
 } from "@katari-lang/runtime";
+import { createApiServerHost } from "./actor-host.js";
 import { buildMetrics } from "./metrics.js";
-import { createApiServerOrchestrator } from "./orchestrator-adapter.js";
 import { recoverOnBoot } from "./recovery.js";
 import { buildApp } from "./routes/app.js";
 import { ProjectService } from "./services/project-service.js";
@@ -78,18 +78,32 @@ if (process.env.KATARI_AUTO_MIGRATE !== "false") {
 // subprocess. Snapshots without a bundle (= no ext agent declarations)
 // short-circuit to `null` so the orchestrator skips FFI plumbing.
 const sidecarManager = new SidecarManager<SnapshotId>(
-  async (_key, bundle, sidecarLogger: Logger): Promise<Sidecar | null> => {
+  async (
+    _key,
+    bundle,
+    sidecarLogger: Logger,
+    env: Record<string, string> | undefined,
+  ): Promise<Sidecar | null> => {
     if (bundle === null) return null;
-    return await loadSubprocessSidecar({ bundle, logger: sidecarLogger });
+    return await loadSubprocessSidecar({ bundle, logger: sidecarLogger, env });
   },
   logger,
 );
 
+// Katari Protocol coordinates the host stamps onto every spawned sidecar so the
+// ext code can reach our value data plane. The sidecar is a local subprocess,
+// so it calls back on loopback unless an explicit URL is configured (e.g. a
+// proxy). The token is the api key (required non-empty at boot above).
+const protocolBaseUrl = process.env.KATARI_PROTOCOL_URL ?? `http://127.0.0.1:${port}`;
+
 const projects = new ProjectService(storage, logger);
 const snapshots = new SnapshotService(storage, logger);
-const orchestrator = createApiServerOrchestrator(storage, sidecarManager, logger);
+const host = createApiServerHost(storage, sidecarManager, logger, {
+  baseUrl: protocolBaseUrl,
+  token: apiKey,
+});
 
-await recoverOnBoot(storage, orchestrator, logger);
+await recoverOnBoot(storage, host, logger);
 
 // Admin web SPA: serve from $KATARI_ADMIN_WEB_DIST if set (= the built
 // `dist/` directory). When unset, the runtime works fine without a UI.
@@ -102,7 +116,7 @@ const app = buildApp({
   storage,
   projects,
   snapshots,
-  orchestrator,
+  host,
   logger,
   apiKey: authDisabled ? null : apiKey,
   metrics,

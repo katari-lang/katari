@@ -25,12 +25,12 @@
 // decrypt inside the module so the storage layer never sees
 // plaintext credentials.
 
-import { decodeFfiAgentDefId, encodeCoreAgentDefId } from "../agent-def-id.js";
+import { decodeFfiAgentDefId, encodeCoreAgentDefId, THROW_REQUEST_QNAME } from "../agent-def-id.js";
 import type { Endpoint } from "../engine/endpoint.js";
 import type { ExternalEvent } from "../engine/event.js";
 import { createEscalationId, type DelegationId, type EscalationId } from "../engine/id.js";
 import type { Logger } from "../engine/logger.js";
-import type { Value } from "../engine/value.js";
+import { mkSecret, mkString, tryInlineString, type Value } from "../engine/value.js";
 import type { Module } from "../module.js";
 import { decryptSecret, encryptSecret } from "../secret-crypto.js";
 import type { EnvStore } from "../sidecar/env-store.js";
@@ -126,11 +126,6 @@ export class EnvModule implements Module {
     }
   }
 
-  /** Nothing to flush — every state update writes through to the store. */
-  async persist(): Promise<void> {}
-  /** Stateless across restarts — pending escalations are best-effort in-memory only. */
-  async load(): Promise<void> {}
-
   // ─── Dispatch handlers ──────────────────────────────────────────────────
 
   private async handleGet(
@@ -165,9 +160,7 @@ export class EnvModule implements Module {
       this.escalateEnvNotFound(caller, delegationId, key);
       return;
     }
-    const value: Value = secret
-      ? { kind: "secret", value: decryptSecret(entry.value) }
-      : { kind: "string", value: entry.value };
+    const value: Value = secret ? mkSecret(decryptSecret(entry.value)) : mkString(entry.value);
     this.respondDelegateAck(caller, delegationId, value);
   }
 
@@ -221,7 +214,7 @@ export class EnvModule implements Module {
           kind: "qname",
           value: ENV_NOT_FOUND_QNAME,
         }),
-        args: { env_key: { kind: "string", value: key } },
+        args: { env_key: mkString(key) },
       },
     });
   }
@@ -242,9 +235,9 @@ export class EnvModule implements Module {
         escalationId: createEscalationId(),
         agentDefId: encodeCoreAgentDefId({
           kind: "qname",
-          value: "primitive.throw",
+          value: THROW_REQUEST_QNAME,
         }),
-        args: { msg: { kind: "string", value: message } },
+        args: { msg: mkString(message) },
       },
     });
   }
@@ -291,7 +284,7 @@ export class EnvModule implements Module {
 
 function requireString(args: Record<string, Value>, name: string): string | null {
   const v = args[name];
-  return v !== undefined && v.kind === "string" ? v.value : null;
+  return v !== undefined ? tryInlineString(v) : null;
 }
 
 function requireBoolean(args: Record<string, Value>, name: string): boolean | null {

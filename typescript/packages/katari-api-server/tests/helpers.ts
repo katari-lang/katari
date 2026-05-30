@@ -20,8 +20,8 @@ import {
   ProjectService,
   SnapshotService,
   buildApp,
-  createApiServerOrchestrator,
-  type ApiServerOrchestrator,
+  createApiServerHost,
+  type ApiServerActorHost,
   type AppDeps,
 } from "../src/index.js";
 import type { SnapshotId } from "../src/storage/types.js";
@@ -73,55 +73,6 @@ export function literalReturnIR(literal: string, irName = "test"): IRModule {
   };
 }
 
-export function pausesOnExternalIR(irName = "test"): IRModule {
-  const blocks: Record<number, Block> = {
-    0: {
-      kind: "blockAgent",
-      body: {
-        qualifiedName: irName === "" ? "main" : `${irName}.main`,
-        parameters: [],
-        entryBody: 1,
-        name: "main",
-        description: undefined,
-        inputSchema: "{}",
-        outputSchema: "{}",
-      },
-    },
-    1: {
-      kind: "blockUser",
-      body: {
-        parameters: [],
-        statements: [
-          {
-            kind: "statementCall",
-            body: {
-              target: { kind: "callTargetBlock", block: 2 },
-              arguments: [],
-              output: 0 as VarId,
-            },
-          },
-          {
-            kind: "statementExit",
-            body: { exitKind: "exitKindReturn", value: 0 as VarId },
-          },
-        ],
-      },
-    },
-    2: {
-      kind: "blockExternal",
-      body: irName === "" ? "ext_call" : `${irName}.ext_call`,
-    },
-  };
-  return {
-    metadata: { schemaVersion: 1 },
-    blocks: Object.fromEntries(
-      Object.entries(blocks).map(([k, v]) => [k, v]),
-    ),
-    entries: { main: 0 },
-    nameTable: { varNames: {}, blockNames: {} },
-  };
-}
-
 export function trivialSchemaBundle(): SchemaBundle {
   return {
     schemaVersion: 1,
@@ -150,7 +101,7 @@ export function noOpSidecarBundle(): SidecarBundle {
 export type TestHarness = {
   storage: InMemoryStorage;
   app: Hono;
-  orchestrator: ApiServerOrchestrator;
+  host: ApiServerActorHost;
   shutdown: () => Promise<void>;
 };
 
@@ -182,14 +133,17 @@ export function buildTestHarness(opts?: {
     },
     noopLogger,
   );
-  const orchestrator = createApiServerOrchestrator(storage, sidecarManager, noopLogger);
+  const host = createApiServerHost(storage, sidecarManager, noopLogger, {
+    baseUrl: "http://127.0.0.1:0",
+    token: "test-token",
+  });
   const projects = new ProjectService(storage, noopLogger);
   const snapshots = new SnapshotService(storage, noopLogger);
   const deps: AppDeps = {
     storage,
     projects,
     snapshots,
-    orchestrator,
+    host,
     logger: noopLogger,
     apiKey: null,
     rateLimit: null,
@@ -198,7 +152,7 @@ export function buildTestHarness(opts?: {
   return {
     storage,
     app,
-    orchestrator,
+    host,
     setHandler(qname, handler) {
       handlers.set(qname, handler);
       for (const mock of liveSidecars) mock.setHandler(qname, handler);

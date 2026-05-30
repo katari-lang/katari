@@ -97,6 +97,41 @@ describe("end-to-end: project + snapshot + agent flow", () => {
     expect(body.run.result).toBe("second");
   });
 
+  it("unhandled throw (missing entry) → run reaches error, not stuck running", async () => {
+    const harness = buildTestHarness();
+    active = harness;
+    const { projectId, snapshotId } = await uploadSnapshot(
+      harness,
+      "throw-proj",
+      literalReturnIR("x"),
+      trivialSchemaBundle(),
+    );
+
+    // Start a run for an agent that doesn't exist in `entries`. CORE raises
+    // EntryNotFoundError → a `primitive.throw` escalate → ApiModule must DETECT
+    // it (the bug: it matched `prim.throw` and recorded an open escalation, so
+    // the run stayed `running` forever) → run cancels with reason=error.
+    const start = await harness.app.fetch(
+      new Request(`http://test/project/${projectId}/run`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ snapshotId, qualifiedName: "does_not_exist", args: {} }),
+      }),
+    );
+    expect(start.status).toBe(201);
+    const { runId } = (await start.json()) as { runId: string };
+
+    let state = "running";
+    for (let i = 0; i < 50 && (state === "running" || state === "cancelling"); i++) {
+      await new Promise((r) => setTimeout(r, 10));
+      const got = await harness.app.fetch(
+        new Request(`http://test/project/${projectId}/run/${runId}`),
+      );
+      state = ((await got.json()) as { run: { state: string } }).run.state;
+    }
+    expect(state).toBe("error");
+  });
+
   it("rejects POST /project/:p/snapshot without irModule", async () => {
     const harness = buildTestHarness();
     active = harness;

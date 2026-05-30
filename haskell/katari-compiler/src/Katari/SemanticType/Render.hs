@@ -32,6 +32,7 @@ renderSemanticType = render False
       ST.SemanticTypeNumber -> "number"
       ST.SemanticTypeString -> "string"
       ST.SemanticTypeSecret -> "secret"
+      ST.SemanticTypeFile -> "file"
       ST.SemanticTypeBoolean -> "boolean"
       ST.SemanticTypeLiteralInteger n -> Text.pack (show n)
       ST.SemanticTypeLiteralString s -> "\"" <> s <> "\""

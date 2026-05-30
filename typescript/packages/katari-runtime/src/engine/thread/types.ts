@@ -258,6 +258,30 @@ export type CtorThread = Common & {
 };
 
 /**
+ * MakeClosureThread: the async creation of a closure value. Spawned by a
+ * `StatementMakeClosure` (a closure literal / local agent). Its `create`
+ * serializes the captured scope chain into a value-store blob via `ctx.putBlob`
+ * and `done`s its parent with the resulting content-ref closure value. Modelled
+ * as a thread (not an inline statement) because persisting the env is async,
+ * and in this engine a step that waits is a thread — so the statement loop and
+ * `done` stay synchronous (suspension only ever happens by waiting on a child).
+ * Has no children.
+ */
+export type MakeClosureThread = Common & {
+  kind: "makeClosure";
+  /** Body block (a BlockAgent) the closure runs when invoked. */
+  blockId: BlockId;
+  /** The scope chain to capture (= the spawning thread's scope). */
+  capturedScopeId: ScopeId;
+  /**
+   * The var the closure binds itself to in its captured scope (a recursive
+   * local agent self-references through it). Recorded so materialize can
+   * re-bind it to the closure on the receiving side.
+   */
+  selfVar: number;
+};
+
+/**
  * CallAgentThread: the runtime side of the @call_agent(name, args)@
  * primitive. Spawned in place of a PrimThread when the lowered prim
  * leaf's name is the well-known string @"call_agent"@.
@@ -355,6 +379,7 @@ export type Thread =
   | PrimThread
   | CallAgentThread
   | CtorThread
+  | MakeClosureThread
   | TupleThread
   | ArrayThread
   | RecordThread;

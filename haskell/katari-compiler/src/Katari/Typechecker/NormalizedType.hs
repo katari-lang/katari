@@ -92,6 +92,9 @@ data LayeredType = LayeredType
     -- single Bool slot suffices. Disjoint from 'stringLayer' — there
     -- is no subtype relation between @secret@ and @string@.
     secretLayer :: Bool,
+    -- | Whether @file@ is inhabited. Opaque (no literals / subdivision),
+    -- so a single Bool slot suffices. Disjoint from 'stringLayer'.
+    fileLayer :: Bool,
     -- | Function layer. 'FunctionSlotAbsent' means no function values inhabit
     -- this type; 'FunctionSlotOf' carries a single function shape (with named
     -- parameters). Per Katari's product-normalisation rule, multiple
@@ -223,6 +226,7 @@ emptyLayered =
       booleanLayer = Set.empty,
       nullLayer = False,
       secretLayer = False,
+      fileLayer = False,
       functionLayer = FunctionSlotAbsent,
       arrayLayer = ArraySlotAbsent,
       tupleLayer = Map.empty,
@@ -259,6 +263,7 @@ denormaliseBranches LayeredType {..} =
       booleanBranches booleanLayer,
       nullBranches nullLayer,
       secretBranches secretLayer,
+      fileBranches fileLayer,
       functionBranches functionLayer,
       arrayBranches arrayLayer,
       tupleBranches tupleLayer,
@@ -291,6 +296,11 @@ nullBranches = \case
 secretBranches :: Bool -> [SemanticType Resolved]
 secretBranches = \case
   True -> [SemanticTypeSecret]
+  False -> []
+
+fileBranches :: Bool -> [SemanticType Resolved]
+fileBranches = \case
+  True -> [SemanticTypeFile]
   False -> []
 
 functionBranches :: FunctionSlot -> [SemanticType Resolved]
@@ -350,6 +360,7 @@ isEmptyLayered LayeredType {..} =
     && Set.null booleanLayer
     && not nullLayer
     && not secretLayer
+    && not fileLayer
     && isEmptyFunction functionLayer
     && isEmptyArray arrayLayer
     && Map.null tupleLayer
@@ -415,6 +426,8 @@ normaliseSemantic = \case
     NormalizedTypeLayered emptyLayered {stringLayer = StringSlotAny}
   SemanticTypeSecret ->
     NormalizedTypeLayered emptyLayered {secretLayer = True}
+  SemanticTypeFile ->
+    NormalizedTypeLayered emptyLayered {fileLayer = True}
   SemanticTypeLiteralInteger value ->
     NormalizedTypeLayered emptyLayered {numberLayer = NumberSlotLiterals (Set.singleton value)}
   SemanticTypeLiteralString value ->
@@ -475,6 +488,7 @@ unionLayered leftLayered rightLayered =
       booleanLayer = Set.union leftLayered.booleanLayer rightLayered.booleanLayer,
       nullLayer = leftLayered.nullLayer || rightLayered.nullLayer,
       secretLayer = leftLayered.secretLayer || rightLayered.secretLayer,
+      fileLayer = leftLayered.fileLayer || rightLayered.fileLayer,
       functionLayer = unionFunctionLayer leftLayered.functionLayer rightLayered.functionLayer,
       arrayLayer = unionArraySlot leftLayered.arrayLayer rightLayered.arrayLayer,
       tupleLayer = unionTupleLayer leftLayered.tupleLayer rightLayered.tupleLayer,
@@ -576,6 +590,7 @@ intersectLayered leftLayered rightLayered =
       booleanLayer = Set.intersection leftLayered.booleanLayer rightLayered.booleanLayer,
       nullLayer = leftLayered.nullLayer && rightLayered.nullLayer,
       secretLayer = leftLayered.secretLayer && rightLayered.secretLayer,
+      fileLayer = leftLayered.fileLayer && rightLayered.fileLayer,
       functionLayer = intersectFunctionLayer leftLayered.functionLayer rightLayered.functionLayer,
       arrayLayer = intersectArraySlot leftLayered.arrayLayer rightLayered.arrayLayer,
       tupleLayer = intersectTupleLayer leftLayered.tupleLayer rightLayered.tupleLayer,
@@ -681,6 +696,7 @@ subtypeLayered leftLayered rightLayered =
     && Set.isSubsetOf leftLayered.booleanLayer rightLayered.booleanLayer
     && (not leftLayered.nullLayer || rightLayered.nullLayer)
     && (not leftLayered.secretLayer || rightLayered.secretLayer)
+    && (not leftLayered.fileLayer || rightLayered.fileLayer)
     && subtypeFunctionLayer leftLayered.functionLayer rightLayered.functionLayer
     && subtypeArraySlot leftLayered.arrayLayer rightLayered.arrayLayer
     && subtypeTupleLayer leftLayered.tupleLayer rightLayered.tupleLayer
