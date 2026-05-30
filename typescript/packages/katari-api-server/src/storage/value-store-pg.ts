@@ -1,12 +1,21 @@
-// Postgres-backed `ValueStore`. Mirrors the in-memory impl's semantics over
-// the 3-layer schema (`value_refs` / `api_files` / `value_blobs` + chunks).
+// Postgres-backed `ValueStore`. Metadata (`value_refs` / `api_files` /
+// `value_blobs` refcount) lives in Postgres; the blob BYTES are delegated to a
+// pluggable `BlobStore` (local FS / S3 / memory — see blob-store.ts). Postgres
+// is a poor home for large binaries, so only the refcount ledger stays here.
 //
 // Blobs are content-addressed and deduped: producing the same bytes twice
-// stores one blob with `ref_count = 2`. Bytes live in fixed-size `bytea`
-// chunks so large files stream and `fetchRange` reads only the spanned
-// chunks. Each produce / file / sweep wraps its multi-statement write in a
-// (possibly nested = savepoint) transaction so a blob never leaks a refcount
-// without its referrer.
+// keeps one blob with `ref_count = 2` (and one physical object). The bytes are
+// written to the BlobStore on the FIRST ref and physically deleted only after
+// the refcount sweep drops the ledger row to zero.
+//
+// Ordering / crash-safety (v0.1.0, single POST ≤ 10 MB):
+//   - produce: the BlobStore.put runs inside the producing transaction (on
+//     first ref). A rollback after the put leaves an orphan blob, reclaimed by
+//     GC — never a dangling ref (the ref row rolls back with it).
+//   - release: the refcount decrement + ledger-row delete commit FIRST; the
+//     physical BlobStore.delete runs AFTER commit. A crash in between leaves an
+//     orphan blob (reclaimed by GC), never bytes deleted out from under a live
+//     ref.
 
 import {
   type CreateFileInput,
@@ -26,29 +35,22 @@ import {
 } from "@katari-lang/runtime";
 import type postgres from "postgres";
 import { v7 as uuidv7 } from "uuid";
+import type { BlobStore } from "./blob-store.js";
 
 type Sql = ReturnType<typeof postgres>;
 
-/** On-disk chunk size. Independent of how a producer pushed (re-chunked at close). */
-const CHUNK_SIZE = 256 * 1024;
-
-function splitChunks(bytes: Uint8Array): Buffer[] {
-  const chunks: Buffer[] = [];
-  for (let offset = 0; offset < bytes.length; offset += CHUNK_SIZE) {
-    chunks.push(Buffer.from(bytes.subarray(offset, Math.min(offset + CHUNK_SIZE, bytes.length))));
-  }
-  return chunks;
-}
-
 export class PgValueStore implements ValueStore {
-  constructor(private readonly sql: Sql) {}
+  constructor(
+    private readonly sql: Sql,
+    private readonly blobStore: BlobStore,
+  ) {}
 
   // ── blob refcount lifecycle ───────────────────────────────────────────────
 
   /**
-   * Create-or-increment the blob for `hash`. On first insert, writes the
-   * chunked bytes. Caller MUST run this inside a transaction together with
-   * inserting the referring row.
+   * Create-or-increment the blob ledger row for `hash`. On the FIRST insert,
+   * writes the bytes to the BlobStore. Caller MUST run this inside a
+   * transaction together with inserting the referring row.
    */
   private async addBlobRef(sql: Sql, projectId: string, hash: string, bytes: Uint8Array) {
     const rows = await sql<{ inserted: boolean }[]>`
@@ -60,26 +62,20 @@ export class PgValueStore implements ValueStore {
       RETURNING (xmax = 0) AS inserted
     `;
     const inserted = rows[0]?.inserted === true;
-    if (!inserted) return;
-    const chunks = splitChunks(bytes);
-    if (chunks.length === 0) return;
-    const chunkRows = chunks.map((chunkBytes, chunkIndex) => ({
-      project_id: projectId,
-      hash,
-      chunk_index: chunkIndex,
-      bytes: chunkBytes,
-    }));
-    await sql`
-      INSERT INTO value_blob_chunks ${sql(chunkRows, "project_id", "hash", "chunk_index", "bytes")}
-    `;
+    if (!inserted) return; // dedup: bytes already stored under this hash
+    await this.blobStore.put(projectId, hash, bytes);
   }
 
   /**
-   * Decrement refcounts for the given hashes (with multiplicity), then sweep
-   * any blob whose count fell to zero (rows + chunks). Caller supplies a map
-   * of hash → how many referrers were just removed.
+   * Decrement refcounts (with multiplicity), delete any ledger row that fell
+   * to zero, and RETURN those swept hashes. Pure Postgres work — the physical
+   * `BlobStore.delete` is the caller's job, AFTER the surrounding tx commits.
    */
-  private async releaseBlobs(sql: Sql, projectId: string, hashCounts: Map<string, number>) {
+  private async releaseBlobs(
+    sql: Sql,
+    projectId: string,
+    hashCounts: Map<string, number>,
+  ): Promise<string[]> {
     for (const [hash, count] of hashCounts) {
       await sql`
         UPDATE value_blobs SET ref_count = ref_count - ${count}
@@ -91,12 +87,13 @@ export class PgValueStore implements ValueStore {
       WHERE project_id = ${projectId} AND ref_count <= 0
       RETURNING hash
     `;
-    if (swept.length > 0) {
-      const hashes = swept.map((r) => r.hash);
-      await sql`
-        DELETE FROM value_blob_chunks
-        WHERE project_id = ${projectId} AND hash IN ${sql(hashes)}
-      `;
+    return swept.map((r) => r.hash);
+  }
+
+  /** Physically remove swept blobs from the BlobStore (post-commit). */
+  private async deleteBlobBytes(projectId: string, hashes: string[]): Promise<void> {
+    for (const hash of hashes) {
+      await this.blobStore.delete(projectId, hash);
     }
   }
 
@@ -276,12 +273,7 @@ export class PgValueStore implements ValueStore {
   async fetch(projectId: string, module: RefModule, id: string): Promise<Uint8Array | null> {
     const hash = await this.hashOf(projectId, module, id);
     if (hash === null) return null;
-    const rows = await this.sql<{ bytes: Buffer }[]>`
-      SELECT bytes FROM value_blob_chunks
-      WHERE project_id = ${projectId} AND hash = ${hash}
-      ORDER BY chunk_index
-    `;
-    return Buffer.concat(rows.map((r) => r.bytes));
+    return this.blobStore.get(projectId, hash);
   }
 
   async fetchRange(
@@ -293,20 +285,7 @@ export class PgValueStore implements ValueStore {
   ): Promise<Uint8Array | null> {
     const hash = await this.hashOf(projectId, module, id);
     if (hash === null) return null;
-    const start = Math.max(0, offset);
-    const end = start + Math.max(0, length);
-    const startChunk = Math.floor(start / CHUNK_SIZE);
-    const endChunk = Math.floor(Math.max(start, end - 1) / CHUNK_SIZE);
-    const rows = await this.sql<{ chunk_index: number; bytes: Buffer }[]>`
-      SELECT chunk_index, bytes FROM value_blob_chunks
-      WHERE project_id = ${projectId} AND hash = ${hash}
-        AND chunk_index BETWEEN ${startChunk} AND ${endChunk}
-      ORDER BY chunk_index
-    `;
-    if (rows.length === 0) return new Uint8Array(0);
-    const spanned = Buffer.concat(rows.map((r) => r.bytes));
-    const spanStart = startChunk * CHUNK_SIZE;
-    return spanned.subarray(start - spanStart, Math.min(spanned.length, end - spanStart));
+    return this.blobStore.getRange(projectId, hash, offset, length);
   }
 
   // ── persistent files ──────────────────────────────────────────────────────
@@ -357,17 +336,19 @@ export class PgValueStore implements ValueStore {
   }
 
   async deleteFile(projectId: string, id: string): Promise<boolean> {
-    return this.sql.begin(async (tx) => {
+    const swept = await this.sql.begin(async (tx) => {
       const sql = tx as unknown as Sql;
       const deleted = await sql<{ hash: string }[]>`
         DELETE FROM api_files WHERE project_id = ${projectId} AND id = ${id}
         RETURNING hash
       `;
       const hash = deleted[0]?.hash;
-      if (hash === undefined) return false;
-      await this.releaseBlobs(sql, projectId, new Map([[hash, 1]]));
-      return true;
+      if (hash === undefined) return null;
+      return this.releaseBlobs(sql, projectId, new Map([[hash, 1]]));
     });
+    if (swept === null) return false;
+    await this.deleteBlobBytes(projectId, swept);
+    return true;
   }
 
   async persistRef(input: {
@@ -388,7 +369,7 @@ export class PgValueStore implements ValueStore {
       const ref = refRows[0];
       if (ref === undefined || ref.hash === null || ref.size === null) return null;
       const fileId = uuidv7();
-      // Share the existing blob (refcount += 1) — no chunk rewrite.
+      // Share the existing blob (refcount += 1) — no byte rewrite.
       await sql`
         UPDATE value_blobs SET ref_count = ref_count + 1, last_accessed_at = now()
         WHERE project_id = ${input.projectId} AND hash = ${ref.hash}
@@ -417,13 +398,13 @@ export class PgValueStore implements ValueStore {
     reachable: ReadonlyArray<{ owner: EphemeralOwner; id: string }>,
   ): Promise<number> {
     const keep = new Set(reachable.map((r) => `${r.owner}|${r.id}`));
-    return this.sql.begin(async (tx) => {
+    const result = await this.sql.begin(async (tx) => {
       const sql = tx as unknown as Sql;
       const all = await sql<{ owner_module: string; id: string; hash: string | null }[]>`
         SELECT owner_module, id, hash FROM value_refs WHERE project_id = ${projectId}
       `;
       const toDelete = all.filter((r) => !keep.has(`${r.owner_module}|${r.id}`));
-      if (toDelete.length === 0) return 0;
+      if (toDelete.length === 0) return { count: 0, swept: [] as string[] };
       const hashCounts = new Map<string, number>();
       for (const row of toDelete) {
         await sql`
@@ -432,27 +413,31 @@ export class PgValueStore implements ValueStore {
         `;
         if (row.hash !== null) hashCounts.set(row.hash, (hashCounts.get(row.hash) ?? 0) + 1);
       }
-      await this.releaseBlobs(sql, projectId, hashCounts);
-      return toDelete.length;
+      const swept = await this.releaseBlobs(sql, projectId, hashCounts);
+      return { count: toDelete.length, swept };
     });
+    await this.deleteBlobBytes(projectId, result.swept);
+    return result.count;
   }
 
   async sweepInstance(projectId: string, ownerInstanceId: string): Promise<number> {
-    return this.sql.begin(async (tx) => {
+    const result = await this.sql.begin(async (tx) => {
       const sql = tx as unknown as Sql;
       const deleted = await sql<{ hash: string | null }[]>`
         DELETE FROM value_refs
         WHERE project_id = ${projectId} AND owner_instance_id = ${ownerInstanceId}
         RETURNING hash
       `;
-      if (deleted.length === 0) return 0;
+      if (deleted.length === 0) return { count: 0, swept: [] as string[] };
       const hashCounts = new Map<string, number>();
       for (const row of deleted) {
         if (row.hash !== null) hashCounts.set(row.hash, (hashCounts.get(row.hash) ?? 0) + 1);
       }
-      await this.releaseBlobs(sql, projectId, hashCounts);
-      return deleted.length;
+      const swept = await this.releaseBlobs(sql, projectId, hashCounts);
+      return { count: deleted.length, swept };
     });
+    await this.deleteBlobBytes(projectId, result.swept);
+    return result.count;
   }
 }
 

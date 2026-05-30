@@ -33,6 +33,13 @@ export {
   AgentNotFound,
   SnapshotService,
 } from "./services/snapshot-service.js";
+export type { BlobStore, S3BlobStoreOptions } from "./storage/blob-store.js";
+export {
+  createBlobStoreFromEnv,
+  InMemoryBlobStore,
+  LocalBlobStore,
+  S3BlobStore,
+} from "./storage/blob-store.js";
 export { InMemoryStorage } from "./storage/memory-storage.js";
 export { PostgresStorage } from "./storage/pg.js";
 export type {

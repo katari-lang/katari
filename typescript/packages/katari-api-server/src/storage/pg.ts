@@ -23,6 +23,7 @@ import type {
 import postgres from "postgres";
 import { v7 as uuidv7 } from "uuid";
 import { decodeCursor, encodeCursor } from "../cursor.js";
+import type { BlobStore } from "./blob-store.js";
 import { PgProjectIndexStore, PgShardStore } from "./shard-store-pg.js";
 import type {
   CancelReason,
@@ -1068,7 +1069,10 @@ export class PostgresStorage implements Storage {
   readonly shards: ShardStore;
   readonly projectIndex: ProjectIndexStore;
 
-  private constructor(private readonly sql: Sql) {
+  private constructor(
+    private readonly sql: Sql,
+    private readonly blobStore: BlobStore,
+  ) {
     this.projects = new PgProjectRepo(sql);
     this.snapshots = new PgSnapshotRepo(sql);
     this.checkpoints = new PgEngineCheckpointRepo(sql);
@@ -1078,14 +1082,14 @@ export class PostgresStorage implements Storage {
     this.ffiDelegations = new PgFfiPendingDelegationRepo(sql);
     this.ffiEscalations = new PgFfiPendingEscalationRepo(sql);
     this.envEntries = new PgEnvEntryRepo(sql);
-    this.values = new PgValueStore(sql);
+    this.values = new PgValueStore(sql, blobStore);
     this.shards = new PgShardStore(sql);
     this.projectIndex = new PgProjectIndexStore(sql);
   }
 
-  static create(databaseUrl: string): PostgresStorage {
+  static create(databaseUrl: string, blobStore: BlobStore): PostgresStorage {
     const sql = postgres(databaseUrl, { transform: { undefined: null } });
-    return new PostgresStorage(sql);
+    return new PostgresStorage(sql, blobStore);
   }
 
   /**
@@ -1102,7 +1106,7 @@ export class PostgresStorage implements Storage {
   }
 
   async withTransaction<T>(fn: (tx: Storage) => Promise<T>): Promise<T> {
-    return runInTx(this.sql, fn) as Promise<T>;
+    return runInTx(this.sql, this.blobStore, fn) as Promise<T>;
   }
 
   async withSnapshotLock<T>(tx: Storage, snapshotId: SnapshotId, fn: () => Promise<T>): Promise<T> {
@@ -1118,7 +1122,11 @@ export class PostgresStorage implements Storage {
 
 // ─── Transaction helper ────────────────────────────────────────────────────
 
-function runInTx<T>(sqlHandle: Sql, fn: (tx: Storage) => Promise<T>): Promise<T> {
+function runInTx<T>(
+  sqlHandle: Sql,
+  blobStore: BlobStore,
+  fn: (tx: Storage) => Promise<T>,
+): Promise<T> {
   const begin = (sqlHandle as unknown as { begin: typeof sqlHandle.begin }).begin.bind(sqlHandle);
   return begin(async (txSql) => {
     const innerSql = txSql as unknown as Sql;
@@ -1132,10 +1140,10 @@ function runInTx<T>(sqlHandle: Sql, fn: (tx: Storage) => Promise<T>): Promise<T>
       ffiDelegations: new PgFfiPendingDelegationRepo(innerSql),
       ffiEscalations: new PgFfiPendingEscalationRepo(innerSql),
       envEntries: new PgEnvEntryRepo(innerSql),
-      values: new PgValueStore(innerSql),
+      values: new PgValueStore(innerSql, blobStore),
       shards: new PgShardStore(innerSql),
       projectIndex: new PgProjectIndexStore(innerSql),
-      withTransaction: (innerFn) => runInTx(innerSql, innerFn),
+      withTransaction: (innerFn) => runInTx(innerSql, blobStore, innerFn),
       withSnapshotLock: async (_innerTx, snapshotId, body) => {
         await acquireSnapshotAdvisoryLock(innerSql, snapshotId);
         return body();

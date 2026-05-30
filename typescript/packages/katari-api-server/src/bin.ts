@@ -22,6 +22,7 @@ import { recoverOnBoot } from "./recovery.js";
 import { buildApp } from "./routes/app.js";
 import { ProjectService } from "./services/project-service.js";
 import { SnapshotService } from "./services/snapshot-service.js";
+import { createBlobStoreFromEnv } from "./storage/blob-store.js";
 import { PostgresStorage } from "./storage/pg.js";
 import type { SnapshotId } from "./storage/types.js";
 
@@ -55,7 +56,10 @@ if (authDisabled) {
   );
 }
 
-const storage = PostgresStorage.create(databaseUrl);
+// Blob bytes live outside Postgres in a pluggable BlobStore (S3 in prod,
+// local FS for dev). Selected from env; see createBlobStoreFromEnv.
+const blobStore = await createBlobStoreFromEnv(logger);
+const storage = PostgresStorage.create(databaseUrl, blobStore);
 const metrics = buildMetrics();
 
 if (process.env.KATARI_AUTO_MIGRATE !== "false") {

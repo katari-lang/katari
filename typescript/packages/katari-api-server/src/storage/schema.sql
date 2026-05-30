@@ -218,9 +218,10 @@ CREATE TABLE IF NOT EXISTS env_entries (
 --                         shard, reclaimed by reachability GC.
 --   - api_files         : persistent API-owned records (= user-managed files).
 --                         Not traversal-GC'd; deleted only on explicit request.
---   - value_blobs(+chunks): project-wide content-addressed bytes (the dedup
---                         unit). Both layers reference a blob by hash; a
---                         refcount frees it at zero.
+--   - value_blobs       : project-wide content-addressed refcount LEDGER (the
+--                         dedup unit). Both layers reference a blob by hash; a
+--                         refcount frees it at zero. The BYTES live in a
+--                         pluggable BlobStore (local FS / S3), not Postgres.
 -- `ref = a module's handle, blob = the file's bytes.`
 --
 -- Project-scoped via `project_id` (a value's identity is (module, id); the
@@ -259,11 +260,13 @@ CREATE TABLE IF NOT EXISTS api_files (
 );
 CREATE INDEX IF NOT EXISTS api_files_hash_idx ON api_files (project_id, hash);
 
--- (c) shared blob: project-wide content-addressed bytes (the dedup unit).
--- ref_count = (reachable value_refs) + (api_files) referencing this hash; 0 =>
--- physical delete. Bytes are held in fixed-size chunks so large files stream;
--- producing buffers in host memory and writes chunks once at close (no
--- per-chunk DB write — D32). Observable `building` is v0.2.
+-- (c) shared blob ledger: project-wide content-addressed refcount (the dedup
+-- unit). ref_count = (reachable value_refs) + (api_files) referencing this
+-- hash; 0 => the bytes are physically deleted from the BlobStore. The BYTES
+-- themselves do NOT live in Postgres — they are held by a pluggable BlobStore
+-- (local FS / S3, see blob-store.ts), keyed by (project_id, hash). Postgres is
+-- a poor home for large binaries (storage/IOPS/backup/WAL), so it keeps only
+-- this ledger. Observable `building` is v0.2.
 CREATE TABLE IF NOT EXISTS value_blobs (
   project_id        UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
   hash              TEXT NOT NULL,
@@ -272,11 +275,4 @@ CREATE TABLE IF NOT EXISTS value_blobs (
   created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
   last_accessed_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (project_id, hash)
-);
-CREATE TABLE IF NOT EXISTS value_blob_chunks (
-  project_id   UUID NOT NULL,
-  hash         TEXT NOT NULL,
-  chunk_index  INTEGER NOT NULL,
-  bytes        BYTEA NOT NULL,
-  PRIMARY KEY (project_id, hash, chunk_index)
 );
