@@ -3,7 +3,7 @@
 // discriminator priority:
 //
 //   1. `{$constructor: "...", ...fieldsRaw}`  → tagged value
-//   2. `{$agent: "module.name" | "closure:N"}` → callable
+//   2. `{$agent: "module.name" | "closureref:<ref>"}` → callable (agent / closure)
 //   3. `{$ref: {module, id}, as, hash, size}`  → value reference (string/file)
 //   4. `{$secret: "..."}` (inbound)            → refused (one-way out)
 //   5. plain object (none of the above)        → record
