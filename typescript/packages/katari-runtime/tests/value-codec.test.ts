@@ -1,8 +1,8 @@
 // Round-trip + structural tests for the raw ↔ Value codec.
 
 import { describe, expect, it } from "vitest";
-import type { Value } from "../src/engine/value.js";
 import type { ClosureId } from "../src/engine/id.js";
+import { mkSecret, mkString, type Value } from "../src/engine/value.js";
 import {
   CALLABLE_DISCRIMINATOR,
   CTOR_DISCRIMINATOR,
@@ -20,8 +20,8 @@ describe("value-codec", () => {
   it("round-trips primitive values", () => {
     expect(rt({ kind: "number", value: 0 })).toEqual({ kind: "number", value: 0 });
     expect(rt({ kind: "number", value: -3.5 })).toEqual({ kind: "number", value: -3.5 });
-    expect(rt({ kind: "string", value: "" })).toEqual({ kind: "string", value: "" });
-    expect(rt({ kind: "string", value: "hi" })).toEqual({ kind: "string", value: "hi" });
+    expect(rt(mkString(""))).toEqual(mkString(""));
+    expect(rt(mkString("hi"))).toEqual(mkString("hi"));
     expect(rt({ kind: "boolean", value: true })).toEqual({ kind: "boolean", value: true });
     expect(rt({ kind: "null" })).toEqual({ kind: "null" });
   });
@@ -96,10 +96,7 @@ describe("value-codec", () => {
     // The codec therefore just round-trips an array.
     const v: Value = {
       kind: "array",
-      elements: [
-        { kind: "number", value: 1 },
-        { kind: "string", value: "a" },
-      ],
+      elements: [{ kind: "number", value: 1 }, mkString("a")],
     };
     expect(valueToRaw(v)).toEqual([1, "a"]);
     expect(rt(v)).toEqual(v);
@@ -138,7 +135,7 @@ describe("value-codec", () => {
   });
 
   it("encodes a secret as { $secret: <plaintext> } on outbound wire", () => {
-    const v: Value = { kind: "secret", value: "sk-live-abc" };
+    const v: Value = mkSecret("sk-live-abc");
     expect(valueToRaw(v)).toEqual({ [SECRET_DISCRIMINATOR]: "sk-live-abc" });
   });
 

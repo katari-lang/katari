@@ -11,6 +11,7 @@ import {
   encryptCheckpoint,
   type EngineCheckpoint,
 } from "../src/engine/snapshot.js";
+import { mkSecret, mkString } from "../src/engine/value.js";
 import { resetKeyCacheForTesting } from "../src/secret-crypto.js";
 
 beforeAll(() => {
@@ -46,7 +47,7 @@ describe("snapshot encryption", () => {
     const base = emptyCheckpoint();
     base.scopes = {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      1: { parentId: null, values: { 7: { kind: "string", value: "x" } } } as any,
+      1: { parentId: null, values: { 7: mkString("x") } } as any,
     };
     const enc = encryptCheckpoint(base);
     expect(enc).toEqual(base);
@@ -57,7 +58,7 @@ describe("snapshot encryption", () => {
     const base = emptyCheckpoint();
     base.scopes = {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      1: { parentId: null, values: { 7: { kind: "secret", value: "abc" } } } as any,
+      1: { parentId: null, values: { 7: mkSecret("abc") } } as any,
     };
     const enc = encryptCheckpoint(base);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -78,8 +79,8 @@ describe("snapshot encryption", () => {
       99: {
         kind: "agent",
         args: {
-          auth: { kind: "secret", value: "deep-secret" },
-          url: { kind: "string", value: "https://example.com" },
+          auth: mkSecret("deep-secret"),
+          url: mkString("https://example.com"),
         },
       } as any,
     };
@@ -93,7 +94,7 @@ describe("snapshot encryption", () => {
     const base = emptyCheckpoint();
     base.scopes = {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      1: { parentId: null, values: { 7: { kind: "secret", value: "tamper" } } } as any,
+      1: { parentId: null, values: { 7: mkSecret("tamper") } } as any,
     };
     const enc = encryptCheckpoint(base);
     // Tamper with the envelope ciphertext (= flip a character in the
