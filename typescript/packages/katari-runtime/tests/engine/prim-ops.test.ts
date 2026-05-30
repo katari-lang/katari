@@ -188,6 +188,48 @@ describe("engine: runner dispatches prim create without crashing", () => {
   });
 });
 
+describe("engine: file prims", () => {
+  const fileRef: Value = {
+    kind: "file",
+    rep: { kind: "ref", module: "core", id: "f1", hash: "h1", size: 5 },
+  };
+  // Materializer that returns "hello" for the file ref above.
+  const mat = async (rep: BytesRep): Promise<Uint8Array> =>
+    rep.kind === "ref" ? new TextEncoder().encode("hello") : new TextEncoder().encode(rep.text);
+
+  it("file_to_string reads a file's bytes as a string", async () => {
+    expect(await executePrim("file_to_string", { value: fileRef }, mat)).toEqual(mkString("hello"));
+  });
+
+  it("file_to_string rejects a non-file argument", async () => {
+    await expect(executePrim("file_to_string", { value: mkString("x") }, M)).rejects.toThrow();
+  });
+
+  it("string_to_file mints a file via the put capability", async () => {
+    const captured: { kind: string; size: number }[] = [];
+    const put = async (bytes: Uint8Array, semanticKind: string) => {
+      captured.push({ kind: semanticKind, size: bytes.length });
+      return { kind: "ref" as const, module: "core" as const, id: "new", hash: "hh", size: bytes.length };
+    };
+    const result = await executePrim("string_to_file", { value: mkString("data") }, mat, put);
+    expect(result.kind).toBe("file");
+    expect(result.kind === "file" && result.rep.id).toBe("new");
+    expect(captured).toEqual([{ kind: "file", size: 4 }]); // inline "data" = 4 bytes
+  });
+
+  it("string_to_file without a put capability throws", async () => {
+    await expect(executePrim("string_to_file", { value: mkString("x") }, mat)).rejects.toThrow();
+  });
+
+  it("string_to_file refuses a secret (no laundering)", async () => {
+    const put = async () =>
+      ({ kind: "ref" as const, module: "core" as const, id: "x", hash: "h", size: 1 });
+    await expect(
+      executePrim("string_to_file", { value: mkSecret("tok") }, mat, put),
+    ).rejects.toThrow();
+  });
+});
+
 function num(a: number, b: number) {
   return { lhs: num1(a), rhs: num1(b) };
 }

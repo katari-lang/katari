@@ -38,7 +38,7 @@ export const primOps: ThreadOps<PrimThread> = {
       value =
         t.primName === "get_metadata"
           ? await executeGetMetadata(ctx, t.args)
-          : await executePrim(t.primName, t.args, ctx.materialize);
+          : await executePrim(t.primName, t.args, ctx.materialize, ctx.putBlob);
     } catch (err) {
       if (err instanceof PrimRaiseRequest) {
         emitPrimRaise(ctx, t, err);

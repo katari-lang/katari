@@ -42,11 +42,7 @@ import {
   stampAgentDefIdSnapshot,
 } from "../agent-def-id.js";
 import { applyEvent, createState } from "../engine/apply.js";
-import {
-  decodeClosureBlob,
-  materializeClosure,
-  type PutClosureBytes,
-} from "../engine/closure-codec.js";
+import { decodeClosureBlob, materializeClosure } from "../engine/closure-codec.js";
 import { CORE_ENDPOINT, type Endpoint } from "../engine/endpoint.js";
 import type { ExternalEvent } from "../engine/event.js";
 import type { DelegationId } from "../engine/id.js";
@@ -61,7 +57,7 @@ import {
   serialize,
 } from "../engine/snapshot.js";
 import type { State } from "../engine/state.js";
-import type { RefFetcher } from "../engine/step-ctx.js";
+import type { RefFetcher, RefPutter } from "../engine/step-ctx.js";
 import type { Thread } from "../engine/thread/types.js";
 import type { RefRep } from "../engine/value.js";
 import type { IRModule } from "../ir/types.js";
@@ -172,7 +168,7 @@ export class CoreModule implements Module {
           shard.state,
           event,
           this.makeFetchRef(tx.values),
-          this.makePutClosureBytes(tx.values),
+          this.makePutRef(tx.values),
         );
       } catch (err) {
         // applyEvent mutates state in place, so an irrecoverable throw leaves
@@ -332,19 +328,20 @@ export class CoreModule implements Module {
     return entry;
   }
 
-  /** A closure-blob writer (owner = core, semanticKind = closure). Throws if no
-   *  value store is wired AND a closure actually needs freezing. */
-  private makePutClosureBytes(valueStore: ValueStore | null): PutClosureBytes {
+  /** A blob writer (owner = core). Tags the produced ref with the caller's
+   *  `semanticKind` (`closure` for a captured env, `file` for `string_to_file`,
+   *  …). Throws if bytes need persisting but no value store is wired. */
+  private makePutRef(valueStore: ValueStore | null): RefPutter {
     const projectId = this.projectId;
-    return async (bytes: Uint8Array): Promise<RefRep> => {
+    return async (bytes, semanticKind): Promise<RefRep> => {
       if (valueStore === null) {
-        throw new Error("core: a closure is crossing a shard boundary but no value store is wired");
+        throw new Error("core: a blob needs persisting but no value store is wired");
       }
       const result = await valueStore.putComplete({
         projectId,
         owner: "core",
         bytes,
-        semanticKind: "closure",
+        semanticKind,
       });
       return { kind: "ref", module: "core", id: result.id, hash: result.hash, size: result.size };
     };

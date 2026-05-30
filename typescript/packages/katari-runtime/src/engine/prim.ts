@@ -18,6 +18,7 @@
 import type { QualifiedName } from "../ir/types.js";
 import { RawValueDecodeError, valueFromRaw, valueToRaw } from "../value-codec.js";
 import { RecoverableEngineError } from "./errors.js";
+import type { RefPutter } from "./step-ctx.js";
 import {
   type BytesRep,
   bytesContentEqual,
@@ -115,6 +116,9 @@ export async function executePrim(
   name: string,
   args: Record<string, Value>,
   materialize: Materialize,
+  /** Persist bytes → ref. Required only by producing prims (`string_to_file`);
+   *  omitted by callers / tests that exercise pure prims. */
+  put?: RefPutter,
 ): Promise<Value> {
   switch (name) {
     case "add":
@@ -245,6 +249,38 @@ export async function executePrim(
       throw new RecoverableEngineError(
         `prim format: argument must be string or secret, got ${v.kind}`,
       );
+    }
+    case "file_to_string": {
+      // Read a file's bytes back as a UTF-8 string. `file` is always a ref, so
+      // this materializes (fetches) the blob. The result is an inline string;
+      // persist-time promotion re-refs it if large.
+      const v = args["value"];
+      if (v?.kind !== "file") {
+        throw new RecoverableEngineError(
+          `prim file_to_string: argument must be a file, got ${v?.kind ?? "nothing"}`,
+        );
+      }
+      return mkString(new TextDecoder().decode(await materialize(v.rep)));
+    }
+    case "string_to_file": {
+      // Write a string's bytes to a new content blob and hand back a `file`
+      // value pointing at it. Rejects `secret` (the type system already
+      // narrows the param to `string`; this is defence-in-depth against
+      // laundering a credential into an opaque, re-readable file).
+      const v = args["value"];
+      if (v?.kind !== "string") {
+        throw new RecoverableEngineError(
+          `prim string_to_file: argument must be a string, got ${v?.kind ?? "nothing"}`,
+        );
+      }
+      if (put === undefined) {
+        throw new RecoverableEngineError(
+          "prim string_to_file: no value store wired (cannot mint a file)",
+        );
+      }
+      const bytes = await materialize(v.rep);
+      const rep = await put(bytes, "file");
+      return { kind: "file", rep };
     }
     case "tuple_get": {
       // Tuples are stored as arrays at runtime (see 'Value'); the

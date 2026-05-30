@@ -28,12 +28,21 @@ import type { BytesRep, RefRep } from "./value.js";
 export type RefFetcher = (rep: RefRep) => Promise<Uint8Array>;
 
 /**
+ * Which byte-sequence kind a freshly produced ref carries. Mirrors the value
+ * store's `ValueSemanticKind`; declared locally so the pure engine doesn't
+ * import the storage layer. `closure` = a serialized closure env (an internal
+ * node GC opens to trace nested refs); the others are leaves.
+ */
+export type RefSemanticKind = "string" | "file" | "secret" | "closure";
+
+/**
  * Write bytes to the content store and return their ref. Injected by the host
  * (ValueStore-backed), symmetric to {@link RefFetcher}. Used by make-closure to
- * persist a closure's captured env to a blob BEFORE handing back its ref — so a
- * ref never exists without its referent. Content-addressed ⇒ deterministic.
+ * persist a closure's captured env to a blob BEFORE handing back its ref (so a
+ * ref never exists without its referent) and by `string_to_file` to mint a file
+ * value. `semanticKind` tags the produced ref. Content-addressed ⇒ deterministic.
  */
-export type RefPutter = (bytes: Uint8Array) => Promise<RefRep>;
+export type RefPutter = (bytes: Uint8Array, semanticKind: RefSemanticKind) => Promise<RefRep>;
 
 /**
  * Default fetcher for when no value store is wired. v0.1.0 (pre-E1) produces
@@ -44,10 +53,10 @@ export const noRefFetcher: RefFetcher = () => {
   throw new Error("engine: ref materialize requested but no value store is wired");
 };
 
-/** Default putter for when no value store is wired — throws loudly if a
- *  closure crosses (make-closure needs to persist its env). */
+/** Default putter for when no value store is wired — throws loudly if bytes
+ *  need persisting (make-closure's env, or `string_to_file`). */
 export const noRefPutter: RefPutter = () => {
-  throw new Error("engine: closure persist requested but no value store is wired");
+  throw new Error("engine: blob persist requested but no value store is wired");
 };
 
 export interface StepCtx {
@@ -67,11 +76,12 @@ export interface StepCtx {
    */
   materialize(rep: BytesRep): Promise<Uint8Array>;
   /**
-   * Persist bytes to the content store and return their ref. Used by
-   * make-closure to freeze a closure's captured env into a blob. Symmetric to
+   * Persist bytes to the content store and return their ref, tagged with
+   * `semanticKind`. Used by make-closure to freeze a closure's captured env
+   * (`closure`) and by `string_to_file` to mint a `file`. Symmetric to
    * `materialize`; the write happens within the host's quantum transaction.
    */
-  putBlob(bytes: Uint8Array): Promise<RefRep>;
+  putBlob(bytes: Uint8Array, semanticKind: RefSemanticKind): Promise<RefRep>;
 }
 
 /**
@@ -113,8 +123,8 @@ export function makeStepCtx(
       if (rep.kind === "inline") return Promise.resolve(new TextEncoder().encode(rep.text));
       return fetchRef(rep);
     },
-    putBlob(bytes) {
-      return putRef(bytes);
+    putBlob(bytes, semanticKind) {
+      return putRef(bytes, semanticKind);
     },
   };
 }
