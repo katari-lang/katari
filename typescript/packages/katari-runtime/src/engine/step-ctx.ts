@@ -28,12 +28,26 @@ import type { BytesRep, RefRep } from "./value.js";
 export type RefFetcher = (rep: RefRep) => Promise<Uint8Array>;
 
 /**
+ * Write bytes to the content store and return their ref. Injected by the host
+ * (ValueStore-backed), symmetric to {@link RefFetcher}. Used by make-closure to
+ * persist a closure's captured env to a blob BEFORE handing back its ref — so a
+ * ref never exists without its referent. Content-addressed ⇒ deterministic.
+ */
+export type RefPutter = (bytes: Uint8Array) => Promise<RefRep>;
+
+/**
  * Default fetcher for when no value store is wired. v0.1.0 (pre-E1) produces
  * no refs in CORE state — promotion lands with the shard storage — so this is
  * never actually hit; it throws loudly if a ref unexpectedly appears.
  */
 export const noRefFetcher: RefFetcher = () => {
   throw new Error("engine: ref materialize requested but no value store is wired");
+};
+
+/** Default putter for when no value store is wired — throws loudly if a
+ *  closure crosses (make-closure needs to persist its env). */
+export const noRefPutter: RefPutter = () => {
+  throw new Error("engine: closure persist requested but no value store is wired");
 };
 
 export interface StepCtx {
@@ -52,6 +66,12 @@ export interface StepCtx {
    * == / match / length never call this (hash / metadata only).
    */
   materialize(rep: BytesRep): Promise<Uint8Array>;
+  /**
+   * Persist bytes to the content store and return their ref. Used by
+   * make-closure to freeze a closure's captured env into a blob. Symmetric to
+   * `materialize`; the write happens within the host's quantum transaction.
+   */
+  putBlob(bytes: Uint8Array): Promise<RefRep>;
 }
 
 /**
@@ -76,6 +96,7 @@ export function makeStepCtx(
   state: State,
   buffers: StepBuffers,
   fetchRef: RefFetcher = noRefFetcher,
+  putRef: RefPutter = noRefPutter,
 ): StepCtx {
   return {
     state,
@@ -91,6 +112,9 @@ export function makeStepCtx(
     materialize(rep) {
       if (rep.kind === "inline") return Promise.resolve(new TextEncoder().encode(rep.text));
       return fetchRef(rep);
+    },
+    putBlob(bytes) {
+      return putRef(bytes);
     },
   };
 }

@@ -1,9 +1,10 @@
-// Round-trip tests for closure serialize / materialize (#5).
+// Round-trip tests for closure serialize / materialize (#5, eager-ref).
 //
-// A closure crossing a shard boundary is frozen to a content blob and grafted
-// into the receiver with fresh scope ids. These tests exercise the three shapes
-// that matter: a plain captured chain, a self-recursive closure, and a nested
-// (non-self) closure that promotes to its own ref.
+// A closure is frozen at its literal into a content blob (its body block +
+// snapshot + captured scope chain) and grafted into a receiver with fresh scope
+// ids. Closures are always content refs, so a captured closure passes through
+// verbatim (no nested serialization). The self-reference var is re-bound to the
+// closure's own ref on materialize (recursion = re-materialize).
 
 import { describe, expect, it } from "vitest";
 import {
@@ -11,7 +12,7 @@ import {
   materializeClosure,
   serializeClosure,
 } from "../src/engine/closure-codec.js";
-import type { ClosureId, ScopeId } from "../src/engine/id.js";
+import type { ScopeId } from "../src/engine/id.js";
 import type { State } from "../src/engine/state.js";
 import { mkString, type RefRep, type Value } from "../src/engine/value.js";
 import type { BlockId } from "../src/ir/types.js";
@@ -44,11 +45,10 @@ function emptyState(): State {
 }
 
 const sid = (s: string) => s as ScopeId;
-const cid = (n: number) => n as ClosureId;
 const bid = (n: number) => n as BlockId;
 
 describe("closure-codec", () => {
-  it("round-trips a captured scope chain into a fresh shard", async () => {
+  it("round-trips a captured scope chain into a fresh shard + re-binds self", async () => {
     const issuer = emptyState();
     issuer.scopes[sid("root")] = {
       id: sid("root"),
@@ -60,18 +60,24 @@ describe("closure-codec", () => {
       parentId: sid("root"),
       values: { 2: mkString("hi") },
     };
-    issuer.closures[cid(0)] = { id: cid(0), blockId: bid(42), scopeId: sid("inner") };
 
     const { putBytes, getBytes } = makeBlobStore();
-    const ref = await serializeClosure(issuer, cid(0), "snap-1", putBytes);
+    const ref = await serializeClosure(issuer, {
+      blockId: bid(42),
+      scopeId: sid("inner"),
+      snapshot: "snap-1",
+      selfVar: 9,
+      putBytes,
+    });
     expect(ref.module).toBe("core");
 
     const content = decodeClosureBlob(await getBytes(ref));
     expect(content.blockId).toBe(42);
     expect(content.snapshot).toBe("snap-1");
+    expect(content.selfVar).toBe(9);
 
     const receiver = emptyState();
-    const newCid = materializeClosure(content, receiver);
+    const newCid = materializeClosure(content, receiver, ref);
     const record = receiver.closures[newCid];
     expect(record.blockId).toBe(42);
 
@@ -81,68 +87,39 @@ describe("closure-codec", () => {
     const root = receiver.scopes[inner.parentId!];
     expect(root.values[1]).toEqual({ kind: "number", value: 10 });
     expect(receiver.scopeCount).toBe(2);
-    // Grafted with fresh ids (not the issuer's "root" / "inner").
-    expect(record.scopeId).not.toBe("inner");
+    expect(record.scopeId).not.toBe("inner"); // grafted with a fresh id
+
+    // The self var (9) is re-bound to the closure's OWN ref (recursive
+    // self-calls re-materialize the same blob).
+    expect(inner.values[9]).toEqual({ kind: "closure", ref });
   });
 
-  it("records + re-binds a self-reference (recursive local agent)", async () => {
+  it("a captured closure ref passes through verbatim (no nested serialization)", async () => {
+    const nestedRef: RefRep = { kind: "ref", module: "core", id: "nested", hash: "hn", size: 5 };
     const issuer = emptyState();
     issuer.scopes[sid("s")] = {
       id: sid("s"),
       parentId: null,
-      values: {
-        1: { kind: "number", value: 5 },
-        2: { kind: "closure", closureId: cid(0) }, // the agent's own var → itself
-      },
+      values: { 5: { kind: "closure", ref: nestedRef } },
     };
-    issuer.closures[cid(0)] = { id: cid(0), blockId: bid(7), scopeId: sid("s") };
 
     const { putBytes, getBytes } = makeBlobStore();
-    const ref = await serializeClosure(issuer, cid(0), "snap", putBytes);
+    const ref = await serializeClosure(issuer, {
+      blockId: bid(8),
+      scopeId: sid("s"),
+      snapshot: "snap",
+      selfVar: 1,
+      putBytes,
+    });
     const content = decodeClosureBlob(await getBytes(ref));
-
-    expect(content.selfVar).toBe(2);
-    expect(content.scopes[0].values[2]).toBeUndefined(); // self binding omitted
-    expect(content.scopes[0].values[1]).toEqual({ kind: "number", value: 5 });
+    // The nested closure is already a ref — stored verbatim, only its own blob
+    // exists (one putBytes call), not a re-serialized copy.
+    expect(content.scopes[0].values[5]).toEqual({ kind: "closure", ref: nestedRef });
 
     const receiver = emptyState();
-    const newCid = materializeClosure(content, receiver);
+    const newCid = materializeClosure(content, receiver, ref);
     const sc = receiver.scopes[receiver.closures[newCid].scopeId];
-    // Self var re-bound to the NEW closure id (not the issuer's id 0).
-    expect(sc.values[2]).toEqual({ kind: "closure", closureId: newCid });
-  });
-
-  it("promotes a nested (non-self) closure to its own ref", async () => {
-    const issuer = emptyState();
-    issuer.scopes[sid("n")] = {
-      id: sid("n"),
-      parentId: null,
-      values: { 1: { kind: "number", value: 99 } },
-    };
-    issuer.closures[cid(1)] = { id: cid(1), blockId: bid(8), scopeId: sid("n") };
-    issuer.scopes[sid("o")] = {
-      id: sid("o"),
-      parentId: null,
-      values: { 5: { kind: "closure", closureId: cid(1) } },
-    };
-    issuer.closures[cid(0)] = { id: cid(0), blockId: bid(9), scopeId: sid("o") };
-    issuer.nextClosureId = 2;
-
-    const { putBytes, getBytes } = makeBlobStore();
-    const ref = await serializeClosure(issuer, cid(0), "snap", putBytes);
-    const content = decodeClosureBlob(await getBytes(ref));
-
-    const nested = content.scopes[0].values[5] as Value;
-    expect(nested.kind).toBe("closure");
-    expect("ref" in nested).toBe(true); // serialized to its own blob
-
-    const receiver = emptyState();
-    const newCid = materializeClosure(content, receiver);
-    const sc = receiver.scopes[receiver.closures[newCid].scopeId];
-    const mat = sc.values[5] as Value;
-    expect(mat.kind).toBe("closure");
-    // Stays a ref — a nested closure is materialized lazily, only when invoked.
-    expect("ref" in mat).toBe(true);
+    expect(sc.values[5]).toEqual({ kind: "closure", ref: nestedRef });
   });
 
   it("refuses to serialize a closure that captures a secret", async () => {
@@ -152,9 +129,15 @@ describe("closure-codec", () => {
       parentId: null,
       values: { 1: { kind: "secret", rep: { kind: "inline", text: "sk-live" } } },
     };
-    issuer.closures[cid(0)] = { id: cid(0), blockId: bid(1), scopeId: sid("s") };
-
     const { putBytes } = makeBlobStore();
-    await expect(serializeClosure(issuer, cid(0), "snap", putBytes)).rejects.toThrow(/secret/);
+    await expect(
+      serializeClosure(issuer, {
+        blockId: bid(1),
+        scopeId: sid("s"),
+        snapshot: "snap",
+        selfVar: 0,
+        putBytes,
+      }),
+    ).rejects.toThrow(/secret/);
   });
 });

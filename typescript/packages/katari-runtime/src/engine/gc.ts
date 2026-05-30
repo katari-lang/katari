@@ -47,14 +47,6 @@ export function collectGarbage(state: State): void {
     worklist.push(scopeId);
   };
 
-  const visitClosure = (closureId: ClosureId): void => {
-    const num = closureId;
-    if (reachableClosures.has(num)) return;
-    reachableClosures.add(num);
-    const cl = state.closures[num];
-    if (cl !== undefined) visitScope(cl.scopeId);
-  };
-
   // Roots: every live thread's scopeId.
   for (const t of Object.values(state.threads)) {
     if (t === undefined) continue;
@@ -69,7 +61,7 @@ export function collectGarbage(state: State): void {
     visitScope(sc.parentId);
 
     for (const v of Object.values(sc.values)) {
-      if (v !== undefined) traceValue(v, visitScope, visitClosure);
+      if (v !== undefined) traceValue(v, visitScope);
     }
   }
 
@@ -89,26 +81,23 @@ export function collectGarbage(state: State): void {
   state.lastGcScopeCount = reachableScopes.size;
 }
 
-function traceValue(
-  v: Value,
-  visitScope: (s: ScopeId | null) => void,
-  visitClosure: (c: ClosureId) => void,
-): void {
+function traceValue(v: Value, visitScope: (s: ScopeId | null) => void): void {
   switch (v.kind) {
     case "closure":
-      // Only a local closure references a `state.closures` entry; a
-      // content-ref closure's reachability is the value store's concern
-      // (its blob holds the captured env), collected by the value-store GC.
-      if ("closureId" in v) visitClosure(v.closureId);
+      // A closure value is a content ref — no `state.closures` entry to keep
+      // alive. Its blob's reachability is the value store's concern (Phase G
+      // GC opens it to trace nested refs). The shard-local dispatch records in
+      // `state.closures` are one-shot (consumed at spawn) and never value-
+      // referenced, so the sweep below collects them.
       return;
     case "array":
-      for (const e of v.elements) traceValue(e, visitScope, visitClosure);
+      for (const e of v.elements) traceValue(e, visitScope);
       return;
     case "tagged":
-      for (const f of Object.values(v.fields)) traceValue(f, visitScope, visitClosure);
+      for (const f of Object.values(v.fields)) traceValue(f, visitScope);
       return;
     case "record":
-      for (const e of Object.values(v.entries)) traceValue(e, visitScope, visitClosure);
+      for (const e of Object.values(v.entries)) traceValue(e, visitScope);
       return;
     default:
       return;

@@ -1,7 +1,6 @@
 // Round-trip + structural tests for the raw ↔ Value codec.
 
 import { describe, expect, it } from "vitest";
-import type { ClosureId } from "../src/engine/id.js";
 import { mkSecret, mkString, type Value } from "../src/engine/value.js";
 import {
   CALLABLE_DISCRIMINATOR,
@@ -27,9 +26,8 @@ describe("value-codec", () => {
   });
 
   it("round-trips a content-ref closure (#5) via the $ref `as: closure` envelope", () => {
-    // A closure that has crossed a shard boundary is a content-addressed ref
-    // (clean bus: just a hash). It must round-trip distinctly from a byte
-    // (string/file) ref and from a local closure id.
+    // A closure is always a content-addressed ref (clean bus: just a hash). It
+    // must round-trip distinctly from a byte (string/file) ref.
     const ref = { kind: "ref", module: "core", id: "abc", hash: "h123", size: 42 } as const;
     const closure: Value = { kind: "closure", ref };
     const raw = valueToRaw(closure) as Record<string, unknown>;
@@ -37,11 +35,6 @@ describe("value-codec", () => {
     expect(raw.as).toBe("closure");
     expect(raw.hash).toBe("h123");
     expect(rt(closure)).toEqual(closure);
-
-    // A local closure id still encodes as `$agent: closure:N` (in-shard form).
-    const local: Value = { kind: "closure", closureId: 7 as ClosureId };
-    expect(valueToRaw(local)).toEqual({ [CALLABLE_DISCRIMINATOR]: "closure:7" });
-    expect(rt(local)).toEqual(local);
   });
 
   it("encodes tagged values with $constructor + fields", () => {
@@ -89,10 +82,12 @@ describe("value-codec", () => {
     expect(rt(v)).toEqual(v);
   });
 
-  it("encodes closure as $agent closure:N", () => {
-    const v: Value = { kind: "closure", closureId: 7 as ClosureId };
-    expect(valueToRaw(v)).toEqual({ [CALLABLE_DISCRIMINATOR]: "closure:7" });
-    expect(rt(v)).toEqual(v);
+  it("rejects a $agent: closure:N on inbound (closures are $ref-encoded now)", () => {
+    // The local closure value form was retired (#5); a closure never encodes as
+    // `$agent: closure:N`. If one appears on the wire it is a version skew.
+    expect(() => valueFromRaw({ [CALLABLE_DISCRIMINATOR]: "closure:7" })).toThrow(
+      RawValueDecodeError,
+    );
   });
 
   it("encodes arrays element-wise", () => {

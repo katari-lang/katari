@@ -24,7 +24,13 @@ import type { AskId, ThreadId } from "./id.js";
 import { createEscalationId } from "./id.js";
 import { spawnAgentRoot } from "./spawn.js";
 import type { State } from "./state.js";
-import { emptyBuffers, makeStepCtx, type RefFetcher, type StepBuffers } from "./step-ctx.js";
+import {
+  emptyBuffers,
+  makeStepCtx,
+  type RefFetcher,
+  type RefPutter,
+  type StepBuffers,
+} from "./step-ctx.js";
 import {
   dispatchAsk,
   dispatchAskAck,
@@ -53,12 +59,13 @@ export async function drive(
   state: State,
   initial: Event,
   fetchRef?: RefFetcher,
+  putRef?: RefPutter,
 ): Promise<{
   state: State;
   buffers: StepBuffers;
 }> {
   const buffers = emptyBuffers();
-  const ctx = makeStepCtx(state, buffers, fetchRef);
+  const ctx = makeStepCtx(state, buffers, fetchRef, putRef);
 
   if (!isInternal(initial.payload)) {
     applyTranslateExternal(ctx, initial);

@@ -18,7 +18,7 @@ import type { Block, BlockId, CallData, Statement, UserBlock, VarId } from "../.
 import type { AskKind, ModMap } from "../../event.js";
 import type { CallId, ScopeId } from "../../id.js";
 import { tryMatch } from "../../pattern.js";
-import { spawnChild } from "../../spawn.js";
+import { spawnChild, spawnMakeClosure } from "../../spawn.js";
 import type { StepCtx } from "../../step-ctx.js";
 import { literalToValue, NULL_VALUE, type Value } from "../../value.js";
 import {
@@ -71,6 +71,9 @@ export const userOps: ThreadOps<UserThread> = {
 function outputVarOf(stmt: Statement): VarId | undefined {
   switch (stmt.kind) {
     case "statementCall":
+      return stmt.body.output;
+    case "statementMakeClosure":
+      // The MakeClosureThread `done`s the closure ref into this var.
       return stmt.body.output;
     default:
       return undefined;
@@ -144,28 +147,20 @@ function handleStatement(ctx: StepCtx, t: UserThread, stmt: Statement): Statemen
       return "advance";
     }
     case "statementMakeClosure": {
-      // Guard against integer overflow near MAX_SAFE_INTEGER. A snapshot
-      // that ran long enough to allocate 2^53 closures would start
-      // colliding on closure id, silently misrouting dispatches. Surface
-      // it as a hard engine error instead.
-      const nextId = ctx.state.nextClosureId as number;
-      if (nextId >= Number.MAX_SAFE_INTEGER) {
-        throw new Error(
-          "engine: nextClosureId exceeded MAX_SAFE_INTEGER; persistent state has run out of closure ids",
-        );
-      }
-      const closureId = nextId as import("../../id.js").ClosureId;
-      ctx.state.nextClosureId = nextId + 1;
-      ctx.state.closures[closureId] = {
-        id: closureId,
-        blockId: stmt.body.block,
-        scopeId: t.scopeId,
-      };
-      setValueInScope(ctx, t.scopeId, stmt.body.output, {
-        kind: "closure",
-        closureId,
+      // A closure literal. Spawn a MakeClosureThread (like a call): its async
+      // `create` freezes the captured scope into a content blob via ctx.putBlob
+      // and `done`s us with the resulting `{ kind: "closure", ref }`. The output
+      // var is the closure's self-reference var (recursive local agent). We wait.
+      const callId = t.pc as CallId;
+      t.pc += 1;
+      spawnMakeClosure(ctx, {
+        parentId: t.id,
+        parentCallId: callId,
+        blockId: stmt.body.block as BlockId,
+        capturedScopeId: t.scopeId,
+        selfVar: stmt.body.output,
       });
-      return "advance";
+      return "wait";
     }
     case "statementBindPattern": {
       const incoming = lookupValue(ctx, t.scopeId, stmt.body.source);

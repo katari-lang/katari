@@ -19,7 +19,7 @@ import { collectGarbage, shouldGc } from "./gc.js";
 import type { Result } from "./result.js";
 import { drive } from "./runner.js";
 import type { State } from "./state.js";
-import type { RefFetcher } from "./step-ctx.js";
+import type { RefFetcher, RefPutter } from "./step-ctx.js";
 
 const DEFAULT_FFI_ENDPOINT = endpoint("ext://ffi");
 const DEFAULT_ENV_ENDPOINT = endpoint("ext://env");
@@ -33,11 +33,14 @@ export function createState(
     selfEndpoint?: Endpoint;
     ffiEndpoint?: Endpoint;
     envEndpoint?: Endpoint;
+    /** Snapshot this shard runs. Stamped into closures created here. */
+    snapshot?: string;
   } = {},
 ): State {
   return {
     selfEndpoint: options.selfEndpoint ?? CORE_ENDPOINT,
     irModule,
+    snapshot: options.snapshot ?? "",
     threads: {},
     scopes: {},
     closures: {},
@@ -72,8 +75,9 @@ export async function applyEvent(
   state: State,
   event: Event,
   fetchRef?: RefFetcher,
+  putRef?: RefPutter,
 ): Promise<Result> {
-  const driven = await drive(state, event, fetchRef);
+  const driven = await drive(state, event, fetchRef, putRef);
   // drive() mutates `state` in place and returns the same reference.
   if (shouldGc(driven.state)) {
     collectGarbage(driven.state);

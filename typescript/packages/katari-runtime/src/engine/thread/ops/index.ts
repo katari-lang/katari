@@ -16,6 +16,7 @@ import { ctorOps } from "./ctor.js";
 import { delegateOps } from "./delegate.js";
 import { forOps } from "./for.js";
 import { handleOps } from "./handle.js";
+import { makeClosureOps } from "./make-closure.js";
 import { matchOps } from "./match.js";
 import { primOps } from "./prim.js";
 import { recordOps } from "./record.js";
@@ -40,6 +41,7 @@ const opsTable: Record<ThreadKind, ThreadOps<any>> = {
   delegate: delegateOps,
   handle: handleOps,
   callAgent: callAgentOps,
+  makeClosure: makeClosureOps,
 };
 
 function getOps(t: Thread): ThreadOps<any> {

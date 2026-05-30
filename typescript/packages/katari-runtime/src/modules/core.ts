@@ -38,7 +38,6 @@
 import {
   agentDefIdClosureRef,
   agentDefIdSnapshot,
-  decodeCoreAgentDefId,
   encodeCoreAgentDefId,
   stampAgentDefIdSnapshot,
 } from "../agent-def-id.js";
@@ -47,8 +46,6 @@ import {
   decodeClosureBlob,
   materializeClosure,
   type PutClosureBytes,
-  serializeClosure,
-  serializeClosuresInValue,
 } from "../engine/closure-codec.js";
 import { CORE_ENDPOINT, type Endpoint } from "../engine/endpoint.js";
 import type { ExternalEvent } from "../engine/event.js";
@@ -171,7 +168,12 @@ export class CoreModule implements Module {
 
       let result: Awaited<ReturnType<typeof applyEvent>>;
       try {
-        result = await applyEvent(shard.state, event, this.makeFetchRef(tx.values));
+        result = await applyEvent(
+          shard.state,
+          event,
+          this.makeFetchRef(tx.values),
+          this.makePutClosureBytes(tx.values),
+        );
       } catch (err) {
         // applyEvent mutates state in place, so an irrecoverable throw leaves
         // this warm shard half-mutated. Evict it (the per-feed tx will roll
@@ -200,16 +202,9 @@ export class CoreModule implements Module {
       const outbound = result.outbound as ExternalEvent[];
       for (const ev of outbound) {
         if (ev.payload.kind === "delegate") {
-          // Freeze any escaping machine-local closure (the target or an arg)
-          // into a content ref BEFORE it crosses the bus — the receiving shard
-          // cannot resolve the issuer's local closure id space. Done first so
-          // the snapshot stamp below sees the final (closure-ref) target.
-          await this.serializeOutboundClosures(
-            tx.values,
-            ev.payload,
-            shard.state,
-            shard.currentSnapshot,
-          );
+          // Closures are already content refs by the time they reach here
+          // (frozen at the closure literal via ctx.putBlob), so nothing to
+          // serialize at the boundary — only the snapshot stamp remains.
           // The agent def id is the only identifier that loads versioned code
           // on the receiver, so it carries the issuing shard's snapshot — but
           // ONLY for snapshot-dependent modules (CORE agents run versioned IR,
@@ -292,10 +287,10 @@ export class CoreModule implements Module {
     const loaded = await tx.shards.get(this.projectId, shardId);
     if (loaded !== null) {
       const ir = await this.resolveIR(loaded.currentSnapshot);
-      const entry: ShardEntry = {
-        state: deserialize(ir, decryptCheckpoint(loaded.checkpoint)),
-        currentSnapshot: loaded.currentSnapshot,
-      };
+      const state = deserialize(ir, decryptCheckpoint(loaded.checkpoint));
+      // The snapshot is not in the checkpoint (CORE-private) — re-supply it.
+      state.snapshot = loaded.currentSnapshot;
+      const entry: ShardEntry = { state, currentSnapshot: loaded.currentSnapshot };
       this.shardCache.set(shardId, entry);
       return entry;
     }
@@ -312,8 +307,10 @@ export class CoreModule implements Module {
       }
       const content = decodeClosureBlob(await this.fetchClosureBytes(tx.values, closureRef));
       const ir = await this.resolveIR(content.snapshot);
-      const state = createState(ir, { selfEndpoint: this.endpoint });
-      const newClosureId = materializeClosure(content, state);
+      const state = createState(ir, { selfEndpoint: this.endpoint, snapshot: content.snapshot });
+      // selfRef = the ref we materialized from, so a recursive self-call re-
+      // materializes the same blob.
+      const newClosureId = materializeClosure(content, state, closureRef);
       delegatePayload.agentDefId = encodeCoreAgentDefId({ kind: "closure", value: newClosureId });
       const entry: ShardEntry = { state, currentSnapshot: content.snapshot };
       this.shardCache.set(shardId, entry);
@@ -328,31 +325,11 @@ export class CoreModule implements Module {
     }
     const ir = await this.resolveIR(delegateSnapshot);
     const entry: ShardEntry = {
-      state: createState(ir, { selfEndpoint: this.endpoint }),
+      state: createState(ir, { selfEndpoint: this.endpoint, snapshot: delegateSnapshot }),
       currentSnapshot: delegateSnapshot,
     };
     this.shardCache.set(shardId, entry);
     return entry;
-  }
-
-  /** Freeze every escaping machine-local closure in an outbound delegate (its
-   *  target id and every arg) into a content ref. The receiver cannot resolve
-   *  the issuer's local closure id space, so a closure crosses as a blob ref. */
-  private async serializeOutboundClosures(
-    valueStore: ValueStore | null,
-    payload: DelegatePayload,
-    state: State,
-    snapshot: string,
-  ): Promise<void> {
-    const putBytes = this.makePutClosureBytes(valueStore);
-    const decoded = decodeCoreAgentDefId(payload.agentDefId);
-    if (decoded.kind === "closure") {
-      const ref = await serializeClosure(state, decoded.value, snapshot, putBytes);
-      payload.agentDefId = encodeCoreAgentDefId({ kind: "closureRef", ref });
-    }
-    for (const [label, value] of Object.entries(payload.args)) {
-      payload.args[label] = await serializeClosuresInValue(value, state, snapshot, putBytes);
-    }
   }
 
   /** A closure-blob writer (owner = core, semanticKind = closure). Throws if no

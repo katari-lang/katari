@@ -11,7 +11,6 @@
 // no secrets (a ref is just module/id/hash/size, inline string is plain
 // text), so they pass through unchanged. v0.1.0 secrets are inline-only.
 
-import type { ClosureId } from "./engine/id.js";
 import { type BytesRep, mkSecret, type RefRep, type Value } from "./engine/value.js";
 import type { QualifiedName } from "./ir/types.js";
 import { decryptSecret, encryptSecret } from "./secret-crypto.js";
@@ -29,7 +28,6 @@ export type EncryptedValue =
   | { kind: "array"; elements: EncryptedValue[] }
   | { kind: "tagged"; ctorId: QualifiedName; fields: Record<string, EncryptedValue> }
   | { kind: "record"; entries: Record<string, EncryptedValue> }
-  | { kind: "closure"; closureId: ClosureId }
   | { kind: "closure"; ref: RefRep }
   | { kind: "agentLiteral"; qualifiedName: QualifiedName }
   | EncryptedSecret;

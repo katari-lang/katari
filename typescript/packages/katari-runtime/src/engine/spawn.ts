@@ -194,6 +194,52 @@ export function spawnChild(ctx: StepCtx, args: SpawnArgs): ThreadId {
   return newThreadId;
 }
 
+// ─── MakeClosureThread (closure literal) ──────────────────────────────────
+
+export type SpawnMakeClosureArgs = {
+  parentId: ThreadId;
+  parentCallId: CallId;
+  /** Body block (BlockAgent) the closure runs. */
+  blockId: BlockId;
+  /** Scope chain to capture (= the spawning thread's scope). */
+  capturedScopeId: ScopeId;
+  /** Var the closure binds itself to (self-reference). */
+  selfVar: number;
+};
+
+/**
+ * Spawn a MakeClosureThread for a `StatementMakeClosure`. Unlike spawnChild
+ * this is not block-kind-driven (the body block is a BlockAgent, which
+ * spawnChild rejects — agents are reached only via delegation). The thread
+ * does not run statements, so it reuses the captured scope as its own scopeId
+ * (no fresh scope allocated) and just serializes it in `create`.
+ */
+export function spawnMakeClosure(ctx: StepCtx, args: SpawnMakeClosureArgs): ThreadId {
+  const parent = ctx.state.threads[args.parentId] as Thread | undefined;
+  if (parent === undefined) {
+    throw new Error(`engine.spawnMakeClosure: parent ${args.parentId} not found`);
+  }
+  const newThreadId = createThreadId();
+  const common = newCommonFields({
+    id: newThreadId,
+    parent: args.parentId,
+    parentCallId: args.parentCallId,
+    scopeId: args.capturedScopeId,
+  });
+  const thread: Thread = {
+    ...common,
+    kind: "makeClosure",
+    blockId: args.blockId,
+    capturedScopeId: args.capturedScopeId,
+    selfVar: args.selfVar,
+  };
+  ctx.state.threads[newThreadId] = thread;
+  ctx.state.threadCount++;
+  setChild(parent, args.parentCallId, newThreadId);
+  ctx.enqueue({ kind: "create", threadId: newThreadId });
+  return newThreadId;
+}
+
 // ─── AgentThread + DelegateThread (delegation boundary) ───────────────────
 
 export type SpawnAgentRootArgs = {

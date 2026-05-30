@@ -186,29 +186,15 @@ function resolveCallable(ctx: StepCtx, value: Value): [AgentBlock, string] {
       const blockId = lookupQualified(ctx, value.qualifiedName);
       return [requireAgentBlock(ctx, blockId, value.qualifiedName), value.qualifiedName];
     }
-    case "closure": {
-      if (!("closureId" in value)) {
-        // A content-ref closure (one that arrived from another shard) carries
-        // its body block inside a value-store blob, not in this shard's
-        // closures table. Introspecting it WITHOUT invoking it would need an
-        // async blob fetch from here (the sync metadata path can't); invoking
-        // it materializes it. So get_metadata on a not-yet-invoked cross-shard
-        // closure is unsupported in v0.1.0 — invoke it instead.
-        throw new RecoverableEngineError(
-          "prim get_metadata: cannot introspect a cross-shard closure ref without invoking it (v0.1.0)",
-        );
-      }
-      const record = ctx.state.closures[value.closureId];
-      if (record === undefined) {
-        throw new RecoverableEngineError(
-          `prim get_metadata: closure id ${value.closureId} not in state.closures`,
-        );
-      }
-      return [
-        requireAgentBlock(ctx, record.blockId, `closure:${value.closureId}`),
-        `closure:${value.closureId}`,
-      ];
-    }
+    case "closure":
+      // A closure value is a content ref; its body block lives inside a
+      // value-store blob, not in this shard's closures table. Introspecting it
+      // WITHOUT invoking it would need an async blob fetch from this sync
+      // metadata path; invoking it materializes it. So get_metadata on a
+      // closure is unsupported in v0.1.0 — invoke it instead.
+      throw new RecoverableEngineError(
+        "prim get_metadata: cannot introspect a closure ref without invoking it (v0.1.0)",
+      );
     default:
       throw new RecoverableEngineError(
         `prim get_metadata: expected callable value, got ${value.kind}`,

@@ -21,7 +21,6 @@
 //
 // Primitives ←→ themselves; arrays ←→ arrays (tuples share this form).
 
-import type { ClosureId } from "./engine/id.js";
 import { mkString, type RefModule, type RefRep, type Value } from "./engine/value.js";
 import type { QualifiedName } from "./ir/types.js";
 
@@ -88,14 +87,11 @@ export function valueToRaw(value: Value): RawValue {
       return out;
     }
     case "closure":
-      // Content-ref form (#5): a closure that has crossed (or is crossing) a
-      // shard boundary is a content-addressed ref to its serialized
-      // {blockId, snapshot, env} blob — the canonical wire form (clean bus:
-      // just a hash). The local-id form is in-shard only and is serialized to
-      // a ref before the true bus boundary; the `$agent: closure:N` encoding
-      // is kept for in-process round-trips / tests.
-      if ("ref" in value) return refToRaw(value.ref, "closure");
-      return { [CALLABLE_DISCRIMINATOR]: `closure:${value.closureId}` };
+      // A closure is always a content-addressed ref (#5): the canonical wire
+      // form is just the `$ref` envelope (the bus carries a hash, never the
+      // env). There is no `$agent: closure:N` form — the machine-local
+      // `closure:N` dispatch id lives only inside the engine's agent def id.
+      return refToRaw(value.ref, "closure");
     case "agentLiteral":
       return { [CALLABLE_DISCRIMINATOR]: value.qualifiedName };
   }
@@ -167,11 +163,12 @@ function decodeCallable(rawId: unknown): Value {
     throw new RawValueDecodeError(`valueFromRaw: $agent must be a string, got ${typeof rawId}`);
   }
   if (rawId.startsWith("closure:")) {
-    const n = Number(rawId.slice("closure:".length));
-    if (!Number.isInteger(n) || n < 0) {
-      throw new RawValueDecodeError(`valueFromRaw: malformed closure callable '${rawId}'`);
-    }
-    return { kind: "closure", closureId: n as ClosureId };
+    // Closures cross as a `$ref` envelope, never as `$agent: closure:N` — that
+    // form was retired with the local closure value. Seeing it on the wire is a
+    // version skew / encoder bug.
+    throw new RawValueDecodeError(
+      `valueFromRaw: '$agent: ${rawId}' — closures are $ref-encoded, not $agent`,
+    );
   }
   return { kind: "agentLiteral", qualifiedName: rawId as QualifiedName };
 }

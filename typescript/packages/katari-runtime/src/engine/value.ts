@@ -18,7 +18,6 @@
 
 import type { LiteralValue, QualifiedName } from "../ir/types.js";
 import { hashText } from "../storage/hash.js";
-import type { ClosureId } from "./id.js";
 
 /** Owner module of a value reference. `project` is ambient (not carried). */
 export type RefModule = "core" | "ffi" | "api";
@@ -60,30 +59,21 @@ export type Value =
   | { kind: "tagged"; ctorId: QualifiedName; fields: Record<string, Value> }
   // Homogeneous map from string keys to values (surface `record[K, V]`).
   | { kind: "record"; entries: Record<string, Value> }
-  // A closure has two forms (Phase E / #5 — content-addressed closures):
-  //   - `closureId`: machine-local, an index into the current shard's
-  //     `state.closures`. The form within a shard.
-  //   - `ref`:       content-addressed. The closure's body block + snapshot +
-  //     captured environment are serialized to a value-store blob; the ref is
-  //     the handle. This is the form a closure takes when it crosses a shard
-  //     boundary (an arg / return that escapes its home shard). The receiver
-  //     materializes it back into a local closure (grafting the captured env
-  //     into its own scopes). Content-addressing keeps the graph acyclic, so
-  //     the eventual GC is reference-counting (no cross-shard mark-sweep).
-  | { kind: "closure"; closureId: ClosureId }
+  // A closure is ALWAYS a content-addressed ref (Phase E / #5 — content-
+  // addressed closures). Its body block + snapshot + captured environment are
+  // serialized to a value-store blob at the closure literal (make-closure); the
+  // ref is the handle that flows everywhere. Invoking it materializes the blob
+  // into the receiving shard (grafting the captured env). Content-addressing
+  // keeps the graph acyclic, so the eventual GC is reference-counting (no
+  // cross-shard mark-sweep). There is no machine-local closure VALUE form — the
+  // shard-local dispatch record (`state.closures`) is keyed by the engine's
+  // `closure:N` agent def id, never by a Value.
   | { kind: "closure"; ref: RefRep }
   // Top-level callable reference (agent / prim / ctor / external).
   | { kind: "agentLiteral"; qualifiedName: QualifiedName };
 
 /** A closure carried by content-addressed ref (its serialized body+env blob). */
 export type ClosureValue = Extract<Value, { kind: "closure" }>;
-
-/** Narrow a closure Value to its local form (asserts it is not a content ref). */
-export function isLocalClosure(
-  value: ClosureValue,
-): value is { kind: "closure"; closureId: ClosureId } {
-  return "closureId" in value;
-}
 
 // ─── Byte-sequence helpers ──────────────────────────────────────────────────
 //

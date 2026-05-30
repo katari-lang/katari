@@ -73,6 +73,9 @@ export function deserialize(irModule: IRModule, snap: EngineCheckpoint): State {
   return {
     selfEndpoint: snap.selfEndpoint as State["selfEndpoint"],
     irModule,
+    // CORE-private (not in the checkpoint) — the host re-supplies it from
+    // engine_shards.current_snapshot right after load.
+    snapshot: "",
     threads,
     scopes,
     closures: structuredClone(snap.closures),
