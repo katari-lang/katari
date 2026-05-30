@@ -1,6 +1,7 @@
 // Public types for user code that imports katari-port.
 
 import type { RawValue } from "@katari-lang/types";
+import type { ValueApi } from "./value.js";
 
 /** Context handed to a user-provided agent handler at delegate time. */
 export interface AgentContext {
@@ -67,6 +68,15 @@ export interface KatariPort {
     args: Record<string, RawValue>,
     opts?: DelegateOptions,
   ): Promise<RawValue>;
+
+  /**
+   * Consume a byte-sequence arg (string / file) regardless of whether it
+   * arrived inline or as a `$ref`. `await katari.value.text(args.history)`
+   * yields the text whether `history` is a short inline string or a large
+   * ref fetched over the data plane.
+   */
+  value: ValueApi;
 }
 
+export type { ValueApi } from "./value.js";
 export type { RawValue };

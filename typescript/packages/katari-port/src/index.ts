@@ -18,6 +18,7 @@ import { exit, stderr, stdin, stdout } from "node:process";
 import { createInterface } from "node:readline";
 import type { ChildToParent, ParentToChild } from "./protocol.js";
 import type { AgentContext, AgentHandler, DelegateOptions, KatariPort, RawValue } from "./types.js";
+import { createValueClient } from "./value.js";
 
 // ─── Registry + inflight state ─────────────────────────────────────────────
 
@@ -73,6 +74,10 @@ const katari: KatariPort = {
   delegate(callable, args, opts) {
     return delegateChild(callable, args, opts ?? {});
   },
+  // Reads sidecar protocol env (KATARI_PROTOCOL_URL / _TOKEN / _PROJECT_ID)
+  // lazily — only when a $ref is actually fetched, so inline-only handlers
+  // (and import-time tooling) need no protocol configuration.
+  value: createValueClient(),
 };
 
 // ─── Module-qname threading (used by the CLI bundler) ──────────────────────
@@ -385,3 +390,5 @@ export type {
   KatariPort,
   RawValue,
 } from "./types.js";
+export type { FetchLike, ValueApi, ValueClientConfig } from "./value.js";
+export { createValueClient } from "./value.js";
