@@ -11,7 +11,8 @@ import katari from "@katari-lang/port";
 katari.agent("makeBlob", async ({ args }) => {
   const text = args.text as string;
   const bytes = new TextEncoder().encode(text);
-  return await katari.value.put(bytes, { contentType: "text/plain" });
+  // `as: "file"` matches the ktr `-> file` return; the default is "string".
+  return await katari.value.put(bytes, { as: "file", contentType: "text/plain" });
 });
 
 katari.agent("readBlob", async ({ args }) => {
