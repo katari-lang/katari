@@ -30,6 +30,7 @@ export type EncryptedValue =
   | { kind: "tagged"; ctorId: QualifiedName; fields: Record<string, EncryptedValue> }
   | { kind: "record"; entries: Record<string, EncryptedValue> }
   | { kind: "closure"; closureId: ClosureId }
+  | { kind: "closure"; ref: RefRep }
   | { kind: "agentLiteral"; qualifiedName: QualifiedName }
   | EncryptedSecret;
 

@@ -88,16 +88,23 @@ export function valueToRaw(value: Value): RawValue {
       return out;
     }
     case "closure":
-      // closure ids are machine-local + persistent-state-coupled; stable
-      // only within a single snapshot's lifetime. Do not persist / relay.
+      // Content-ref form (#5): a closure that has crossed (or is crossing) a
+      // shard boundary is a content-addressed ref to its serialized
+      // {blockId, snapshot, env} blob — the canonical wire form (clean bus:
+      // just a hash). The local-id form is in-shard only and is serialized to
+      // a ref before the true bus boundary; the `$agent: closure:N` encoding
+      // is kept for in-process round-trips / tests.
+      if ("ref" in value) return refToRaw(value.ref, "closure");
       return { [CALLABLE_DISCRIMINATOR]: `closure:${value.closureId}` };
     case "agentLiteral":
       return { [CALLABLE_DISCRIMINATOR]: value.qualifiedName };
   }
 }
 
-/** Build the `$ref` envelope for a ref rep. */
-function refToRaw(rep: RefRep, as: "string" | "file"): RawValue {
+/** Build the `$ref` envelope for a ref rep. `as` distinguishes how the
+ *  consumer interprets the blob: a byte sequence (`string` / `file`) or a
+ *  serialized closure (`closure`, #5). The store + handle are identical. */
+function refToRaw(rep: RefRep, as: "string" | "file" | "closure"): RawValue {
   const out: Record<string, RawValue> = {
     [REF_DISCRIMINATOR]: { module: rep.module, id: rep.id },
     as,
@@ -182,9 +189,9 @@ function decodeRef(obj: Record<string, unknown>): Value {
     throw new RawValueDecodeError("valueFromRaw: $ref.id must be a string");
   }
   const as = obj.as;
-  if (as !== "string" && as !== "file") {
+  if (as !== "string" && as !== "file" && as !== "closure") {
     throw new RawValueDecodeError(
-      `valueFromRaw: $ref.as must be 'string'|'file', got ${String(as)}`,
+      `valueFromRaw: $ref.as must be 'string'|'file'|'closure', got ${String(as)}`,
     );
   }
   const hash = obj.hash;
@@ -203,6 +210,7 @@ function decodeRef(obj: Record<string, unknown>): Value {
     size,
   };
   if (typeof obj.contentType === "string") rep.contentType = obj.contentType;
+  if (as === "closure") return { kind: "closure", ref: rep };
   return as === "string" ? { kind: "string", rep } : { kind: "file", rep };
 }
 

@@ -191,6 +191,12 @@ function resolveTarget(
         };
       }
       if (value.kind === "closure") {
+        if (!("closureId" in value)) {
+          // A content-ref closure as a delegate target = an escaped closure
+          // being invoked; it must be materialized into this shard first
+          // (Phase E / #5, not yet wired through delegate).
+          throw new Error("engine.delegate: content-ref closure target not yet materializable");
+        }
         return {
           peer: ctx.state.selfEndpoint,
           agentDefId: encodeCoreAgentDefId({

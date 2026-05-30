@@ -96,7 +96,10 @@ function traceValue(
 ): void {
   switch (v.kind) {
     case "closure":
-      visitClosure(v.closureId);
+      // Only a local closure references a `state.closures` entry; a
+      // content-ref closure's reachability is the value store's concern
+      // (its blob holds the captured env), collected by the value-store GC.
+      if ("closureId" in v) visitClosure(v.closureId);
       return;
     case "array":
       for (const e of v.elements) traceValue(e, visitScope, visitClosure);

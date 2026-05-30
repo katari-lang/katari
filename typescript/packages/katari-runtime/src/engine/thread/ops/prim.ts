@@ -187,6 +187,13 @@ function resolveCallable(ctx: StepCtx, value: Value): [AgentBlock, string] {
       return [requireAgentBlock(ctx, blockId, value.qualifiedName), value.qualifiedName];
     }
     case "closure": {
+      if (!("closureId" in value)) {
+        // A content-ref closure must be materialized into the shard before
+        // its metadata is available (Phase E / #5, not yet wired).
+        throw new RecoverableEngineError(
+          "prim get_metadata: content-ref closure not yet materializable",
+        );
+      }
       const record = ctx.state.closures[value.closureId];
       if (record === undefined) {
         throw new RecoverableEngineError(

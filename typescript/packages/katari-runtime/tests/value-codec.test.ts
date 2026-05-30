@@ -26,6 +26,24 @@ describe("value-codec", () => {
     expect(rt({ kind: "null" })).toEqual({ kind: "null" });
   });
 
+  it("round-trips a content-ref closure (#5) via the $ref `as: closure` envelope", () => {
+    // A closure that has crossed a shard boundary is a content-addressed ref
+    // (clean bus: just a hash). It must round-trip distinctly from a byte
+    // (string/file) ref and from a local closure id.
+    const ref = { kind: "ref", module: "core", id: "abc", hash: "h123", size: 42 } as const;
+    const closure: Value = { kind: "closure", ref };
+    const raw = valueToRaw(closure) as Record<string, unknown>;
+    expect(raw.$ref).toEqual({ module: "core", id: "abc" });
+    expect(raw.as).toBe("closure");
+    expect(raw.hash).toBe("h123");
+    expect(rt(closure)).toEqual(closure);
+
+    // A local closure id still encodes as `$agent: closure:N` (in-shard form).
+    const local: Value = { kind: "closure", closureId: 7 as ClosureId };
+    expect(valueToRaw(local)).toEqual({ [CALLABLE_DISCRIMINATOR]: "closure:7" });
+    expect(rt(local)).toEqual(local);
+  });
+
   it("encodes tagged values with $constructor + fields", () => {
     const v: Value = {
       kind: "tagged",
