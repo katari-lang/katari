@@ -186,6 +186,15 @@ export class S3BlobStore implements BlobStore {
       region: options.region,
       endpoint: options.endpoint,
       forcePathStyle: options.forcePathStyle,
+      // S3 API is a de-facto standard, so this works against any compatible
+      // store (R2 / B2 / Spaces / Wasabi / Scaleway / Ceph / SeaweedFS /
+      // Garage / …) — not just AWS. The one portability trap: AWS SDK v3 now
+      // adds a CRC32 checksum trailer to PutObject by default, which many
+      // compatible providers reject. Pin both to WHEN_REQUIRED so we only emit
+      // checksums where the operation truly needs them (still correct on real
+      // AWS); this is what keeps "S3-compatible" actually compatible.
+      requestChecksumCalculation: "WHEN_REQUIRED",
+      responseChecksumValidation: "WHEN_REQUIRED",
     });
     this.bucket = options.bucket;
     this.prefix = options.prefix ?? "";
