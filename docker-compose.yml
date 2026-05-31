@@ -20,9 +20,22 @@ services:
       # doesn't silently accept traffic on a broken auth path.
       - KATARI_API_KEY=${KATARI_API_KEY:?set KATARI_API_KEY in .env (copy from .env.example)}
       - KATARI_SECRET_KEY=${KATARI_SECRET_KEY:?set KATARI_SECRET_KEY in .env (copy from .env.example)}
+      # Blob bytes go to the s3mock container (S3-compatible) over the internal
+      # network, so the dockerized runtime exercises the same S3 path as prod.
+      # forcePathStyle is required for non-AWS endpoints; s3mock ignores the
+      # AWS creds but the SDK still needs some present to sign.
+      - KATARI_BLOB_STORE=s3
+      - KATARI_S3_BUCKET=katari-blobs
+      - KATARI_S3_ENDPOINT=http://s3mock:9090
+      - KATARI_S3_FORCE_PATH_STYLE=true
+      - KATARI_S3_REGION=us-east-1
+      - AWS_ACCESS_KEY_ID=s3mock
+      - AWS_SECRET_ACCESS_KEY=s3mock
     depends_on:
       db:
         condition: service_healthy
+      s3mock:
+        condition: service_started
 
   db:
     image: postgres:17-alpine
@@ -40,6 +53,19 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
+
+  # S3-compatible object store for the blob layer. adobe/s3mock is a
+  # purpose-built mock (replaces the now-defunct MinIO OSS image): it
+  # auto-creates `initialBuckets` at startup, so no init container is
+  # needed. Storage is ephemeral (in-memory) — fine for dev / CI; real
+  # deploys point KATARI_S3_* at a durable bucket instead.
+  s3mock:
+    image: adobe/s3mock
+    environment:
+      - initialBuckets=katari-blobs
+      - debug=false
+    ports:
+      - "${KATARI_S3_PORT:-9090}:9090"
 
 volumes:
   pgdata:

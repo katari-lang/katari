@@ -22,7 +22,7 @@
     "watch:hs": "stack build --file-watch",
     "cli": "stack run katari --",
     "lsp": "stack run katari-lsp",
-    "dev": "docker compose up -d --wait db && concurrently --kill-others-on-fail --names api,web --prefix-colors magenta,green \"pnpm --filter @katari-lang/api-server dev\" \"pnpm --filter @katari-lang/admin-web dev\""
+    "dev": "docker compose up -d --wait db s3mock && concurrently --kill-others-on-fail --names api,web --prefix-colors magenta,green \"pnpm --filter @katari-lang/api-server dev\" \"pnpm --filter @katari-lang/admin-web dev\""
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.15",

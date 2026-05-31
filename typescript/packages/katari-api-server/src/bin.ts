@@ -31,7 +31,10 @@ if (databaseUrl === undefined || databaseUrl === "") {
   console.error("DATABASE_URL is required");
   process.exit(1);
 }
-const port = Number(process.env.PORT ?? 8000);
+// `PORT` is what the docker runtime container sets; `KATARI_PORT` is the
+// knob in `.env` (host port mapping + the host-side `pnpm dev` listen port).
+// Fall back through both so `pnpm dev` honours KATARI_PORT.
+const port = Number(process.env.PORT ?? process.env.KATARI_PORT ?? 8000);
 
 const logLevel = (process.env.LOG_LEVEL ?? "info") as LogLevel;
 const logger = buildConsoleLogger(logLevel);
