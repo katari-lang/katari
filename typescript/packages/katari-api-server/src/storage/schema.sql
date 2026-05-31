@@ -227,23 +227,33 @@ CREATE TABLE IF NOT EXISTS env_entries (
 -- Project-scoped via `project_id` (a value's identity is (module, id); the
 -- project is ambient — D24). See docs/2026-05-30-storage-schema-and-api.md §2.
 
--- (a) ephemeral ref: CORE/FFI intermediate values. reachability GC target.
+-- (a) ephemeral ref: CORE/FFI intermediate values. GC'd by single-owner
+-- ownership (Phase G): every ref is owned by exactly one durable entity
+-- (`owner_delegation_id` — a delegation while running, or a run / escalation
+-- afterwards). Ownership only moves UP the delegation tree (no orphans, since
+-- ancestors outlive descendants), at protocol events: on a delegation's
+-- terminal the escaping refs are re-owned by the parent and the rest dropped;
+-- on escalate they transfer to the receiver. A blob is freed when its last ref
+-- is dropped (value_blobs refcount). `refs_to` is the closure adjacency (the
+-- refs a closure blob captures) so the upward move drags captures along. A
+-- crash backstop drops refs whose owner no longer exists.
 CREATE TABLE IF NOT EXISTS value_refs (
-  project_id        UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-  owner_module      TEXT NOT NULL,             -- 'core' | 'ffi'
-  id                UUID NOT NULL,
-  state             TEXT NOT NULL,             -- v0.1.0: 'complete' | 'errored'
-  semantic_kind     TEXT NOT NULL,             -- 'string' | 'file' | 'secret'
-  owner_instance_id UUID,                      -- bound shard (instance-end sweep)
-  hash              TEXT,                       -- -> value_blobs.hash (null while errored)
-  size              BIGINT,
-  content_type      TEXT,
-  error_message     TEXT,
-  created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+  project_id          UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  owner_module        TEXT NOT NULL,             -- 'core' | 'ffi'
+  id                  UUID NOT NULL,
+  state               TEXT NOT NULL,             -- v0.1.0: 'complete' | 'errored'
+  semantic_kind       TEXT NOT NULL,             -- 'string' | 'file' | 'secret' | 'closure'
+  owner_delegation_id UUID,                       -- the owning entity (delegation/run/escalation); null = unowned
+  refs_to             JSONB NOT NULL DEFAULT '[]', -- [{module,id}] refs this ref captures (closures); for the upward drag
+  hash                TEXT,                       -- -> value_blobs.hash (null while errored)
+  size                BIGINT,
+  content_type        TEXT,
+  error_message       TEXT,
+  created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (project_id, owner_module, id)
 );
-CREATE INDEX IF NOT EXISTS value_refs_instance_idx ON value_refs (owner_instance_id);
-CREATE INDEX IF NOT EXISTS value_refs_hash_idx     ON value_refs (project_id, hash);
+CREATE INDEX IF NOT EXISTS value_refs_owner_idx ON value_refs (project_id, owner_delegation_id);
+CREATE INDEX IF NOT EXISTS value_refs_hash_idx  ON value_refs (project_id, hash);
 
 -- (b) persistent file: API-owned record (= runs_audit's positioning). Outside
 -- reachability GC; survives until the user deletes it. A file value carries

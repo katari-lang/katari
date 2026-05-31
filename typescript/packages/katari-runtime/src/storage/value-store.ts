@@ -6,9 +6,12 @@
 // resource" split (D30):
 //
 //   - ephemeral ref (`value_refs`)   — CORE/FFI intermediate values. Owned by
-//                                      a shard, reclaimed by reachability GC.
+//                                      exactly one durable entity; ownership
+//                                      moves up the delegation tree and the ref
+//                                      is freed when its last owner drops it
+//                                      (single-owner GC, Phase G).
 //   - persistent file (`api_files`)  — API-owned record. User deletes it; not
-//                                      traversal-GC'd (= multi-server safe).
+//                                      ephemeral-GC'd (= multi-server safe).
 //   - shared blob (`value_blobs`)    — project-wide content-addressed bytes.
 //                                      Both layers reference it by hash; a
 //                                      refcount frees it at zero.
@@ -79,14 +82,23 @@ export interface ProduceHandle {
   abort(errorMessage: string): Promise<void>;
 }
 
+/** A value-reference handle (owner module + id) — the closure adjacency unit. */
+export type RefHandle = { module: RefModule; id: string };
+
 export type PutInput = {
   projectId: string;
   owner: EphemeralOwner;
   bytes: Uint8Array;
   semanticKind: ValueSemanticKind;
   contentType?: string;
-  /** Binds the ref to a shard; the shard's end sweeps it (`sweepInstance`). */
-  ownerInstanceId?: string;
+  /** The durable entity that owns this ref (a delegation while running, then a
+   *  run / escalation). Ownership moves up the delegation tree at protocol
+   *  events; a ref is freed when its last owner drops it. `undefined` = unowned
+   *  (not yet GC-managed). */
+  ownerDelegationId?: string;
+  /** Refs this ref internally captures (closures). The upward ownership move
+   *  follows these so a closure's captures travel with it. */
+  refsTo?: ReadonlyArray<RefHandle>;
 };
 
 export type OpenInput = Omit<PutInput, "bytes">;
@@ -136,7 +148,7 @@ export interface ValueStore {
    * Promote an ephemeral ref to a persistent file (`katari.value.persist`).
    * Creates an `api_files` record sharing the ref's blob (refcount += 1); the
    * caller rewrites the value's rep to `module: "api", id: <file id>`. The
-   * source ephemeral ref is left for normal reachability GC. `null` if the
+   * source ephemeral ref is left for its owner's normal release. `null` if the
    * source ref is unknown or not yet `complete`.
    */
   persistRef(input: {
@@ -146,16 +158,45 @@ export interface ValueStore {
     displayName?: string;
   }): Promise<FileRecord | null>;
 
-  // ── GC primitives (reachability walk itself is Phase G) ──────────────────
+  // ── ownership transitions (single-owner GC, Phase G) ─────────────────────
+  //
+  // Ownership moves UP the delegation tree at protocol events; a blob is freed
+  // when its last ref is dropped. `escapeSeed` / `seed` are the refs found in
+  // the crossing value; the store expands them transitively through `refs_to`
+  // (closure captures), restricted to refs the source entity owns.
+
   /**
-   * Delete every ephemeral ref in `projectId` whose `(owner, id)` is NOT in
-   * `reachable`, then sweep blobs that drop to refcount 0. Returns the count
-   * of refs removed. The reachable set comes from a CORE-state walk (Phase G).
+   * A ref-owning entity terminated. Within the refs owned by `ownerId`: the
+   * transitive closure (via `refs_to`) of `escapeSeed` is RE-OWNED by
+   * `toOwnerId` (the surviving owner — the parent delegation, or the entity
+   * itself for a root that becomes a persistent run). Every other ref owned by
+   * `ownerId` is DROPPED. Returns the number of blobs physically freed.
    */
-  sweepUnreachable(
+  releaseOwner(
     projectId: string,
-    reachable: ReadonlyArray<{ owner: EphemeralOwner; id: string }>,
+    ownerId: string,
+    toOwnerId: string,
+    escapeSeed: ReadonlyArray<RefHandle>,
   ): Promise<number>;
-  /** Delete every ephemeral ref bound to a dead shard, then sweep blobs. */
-  sweepInstance(projectId: string, ownerInstanceId: string): Promise<number>;
+
+  /**
+   * Escalation / borrow-up: re-own the transitive closure (via `refs_to`) of
+   * `seed` within the refs owned by `fromOwnerId` to `toOwnerId`. Nothing is
+   * dropped — the source entity keeps running.
+   */
+  transferOwnership(
+    projectId: string,
+    fromOwnerId: string,
+    toOwnerId: string,
+    seed: ReadonlyArray<RefHandle>,
+  ): Promise<void>;
+
+  /**
+   * Crash backstop. Drop every ref whose `ownerDelegationId` is non-null and
+   * NOT in `liveOwnerIds` (the union of live delegations / runs / escalations),
+   * then free blobs that hit refcount 0. Unowned refs (null owner) are left
+   * alone. Returns the number of blobs freed. Run on boot + periodically to
+   * reclaim refs whose explicit release was lost to a crash.
+   */
+  sweepRefsWithDeadOwners(projectId: string, liveOwnerIds: ReadonlySet<string>): Promise<number>;
 }

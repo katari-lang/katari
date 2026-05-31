@@ -2,3 +2,8 @@
 agent main_nested() -> string {
   "playground"
 }
+
+agent demo_file_test(input_file : file) -> string {
+  let contents = file_to_string(value = input_file);
+  return f"file contents: ${contents}"
+}

@@ -29,6 +29,9 @@ services:
       - KATARI_S3_ENDPOINT=http://s3mock:9090
       - KATARI_S3_FORCE_PATH_STYLE=true
       - KATARI_S3_REGION=us-east-1
+      # s3mock is ephemeral and its `initialBuckets` is unreliable across image
+      # versions, so have the runtime create the bucket on boot (idempotent).
+      - KATARI_S3_CREATE_BUCKET=true
       - AWS_ACCESS_KEY_ID=s3mock
       - AWS_SECRET_ACCESS_KEY=s3mock
     depends_on:
@@ -55,14 +58,10 @@ services:
       retries: 5
 
   # S3-compatible object store for the blob layer. adobe/s3mock is a
-  # purpose-built mock (replaces the now-defunct MinIO OSS image): it
-  # auto-creates `initialBuckets` at startup, so no init container is
-  # needed. Storage is ephemeral (in-memory) — fine for dev / CI; real
-  # deploys point KATARI_S3_* at a durable bucket instead.
+  # purpose-built mock (replaces the now-defunct MinIO OSS image).
   s3mock:
     image: adobe/s3mock
     environment:
-      - initialBuckets=katari-blobs
       - debug=false
     ports:
       - "${KATARI_S3_PORT:-9090}:9090"

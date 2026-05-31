@@ -112,6 +112,7 @@ export type {
   ProduceHandle,
   ProduceResult,
   PutInput,
+  RefHandle,
   RefState,
   ValueRefState,
   ValueSemanticKind,

@@ -15,6 +15,7 @@ import {
   type ProduceHandle,
   type ProduceResult,
   type PutInput,
+  type RefHandle,
   type RefModule,
   type RefState,
   type ValueRefState,
@@ -29,7 +30,8 @@ type RefRow = {
   id: string;
   state: ValueRefState;
   semanticKind: ValueSemanticKind;
-  ownerInstanceId?: string;
+  ownerDelegationId?: string;
+  refsTo: RefHandle[];
   hash: string | null;
   size: number | null;
   contentType?: string;
@@ -88,16 +90,17 @@ export class InMemoryValueStore implements ValueStore {
     this.blobs.set(key, { totalSize: bytes.length, refCount: 1, bytes: bytes.slice() });
   }
 
-  /** Decrement a blob's refcount; delete it at zero. */
-  private releaseBlobRef(projectId: string, hash: string): void {
+  /** Decrement a blob's refcount; delete it at zero. Returns true iff freed. */
+  private releaseBlobRef(projectId: string, hash: string): boolean {
     const key = blobKey(projectId, hash);
     const existing = this.blobs.get(key);
-    if (existing === undefined) return;
+    if (existing === undefined) return false;
     if (existing.refCount <= 1) {
       this.blobs.delete(key);
-      return;
+      return true;
     }
     this.blobs.set(key, { ...existing, refCount: existing.refCount - 1 });
+    return false;
   }
 
   private resolveBytes(projectId: string, hash: string): Uint8Array | null {
@@ -121,7 +124,8 @@ export class InMemoryValueStore implements ValueStore {
       id,
       state: "complete",
       semanticKind: input.semanticKind,
-      ownerInstanceId: input.ownerInstanceId,
+      ownerDelegationId: input.ownerDelegationId,
+      refsTo: [...(input.refsTo ?? [])],
       hash,
       size,
       contentType: input.contentType,
@@ -158,7 +162,8 @@ export class InMemoryValueStore implements ValueStore {
           id,
           state: "complete",
           semanticKind: input.semanticKind,
-          ownerInstanceId: input.ownerInstanceId,
+          ownerDelegationId: input.ownerDelegationId,
+          refsTo: [...(input.refsTo ?? [])],
           hash,
           size: total,
           contentType: input.contentType,
@@ -175,7 +180,8 @@ export class InMemoryValueStore implements ValueStore {
           id,
           state: "errored",
           semanticKind: input.semanticKind,
-          ownerInstanceId: input.ownerInstanceId,
+          ownerDelegationId: input.ownerDelegationId,
+          refsTo: [...(input.refsTo ?? [])],
           hash: null,
           size: null,
           contentType: input.contentType,
@@ -317,34 +323,75 @@ export class InMemoryValueStore implements ValueStore {
     return toFileRecord(row);
   }
 
-  // ── GC primitives ─────────────────────────────────────────────────────────
+  // ── ownership transitions (single-owner GC) ─────────────────────────────
 
-  async sweepUnreachable(
+  /** Transitive closure of `seed` via `refs_to`, restricted to refs owned by
+   *  `ownerId`. Returns the set of refKeys to keep/move. */
+  private expandWithinOwner(
     projectId: string,
-    reachable: ReadonlyArray<{ owner: EphemeralOwner; id: string }>,
-  ): Promise<number> {
-    const keep = new Set(reachable.map((r) => refKey(projectId, r.owner, r.id)));
-    let removed = 0;
-    for (const [key, row] of [...this.refs.entries()]) {
-      if (row.projectId !== projectId) continue;
+    ownerId: string,
+    seed: ReadonlyArray<RefHandle>,
+  ): Set<string> {
+    const keep = new Set<string>();
+    const worklist = [...seed];
+    while (worklist.length > 0) {
+      const handle = worklist.pop()!;
+      const key = refKey(projectId, handle.module, handle.id);
       if (keep.has(key)) continue;
-      this.refs.delete(key);
-      if (row.hash !== null) this.releaseBlobRef(projectId, row.hash);
-      removed += 1;
+      const row = this.refs.get(key);
+      if (row === undefined || row.ownerDelegationId !== ownerId) continue; // already higher / unknown
+      keep.add(key);
+      for (const child of row.refsTo) worklist.push(child);
     }
-    return removed;
+    return keep;
   }
 
-  async sweepInstance(projectId: string, ownerInstanceId: string): Promise<number> {
-    let removed = 0;
+  async releaseOwner(
+    projectId: string,
+    ownerId: string,
+    toOwnerId: string,
+    escapeSeed: ReadonlyArray<RefHandle>,
+  ): Promise<number> {
+    const keep = this.expandWithinOwner(projectId, ownerId, escapeSeed);
+    let freed = 0;
+    for (const [key, row] of [...this.refs.entries()]) {
+      if (row.projectId !== projectId || row.ownerDelegationId !== ownerId) continue;
+      if (keep.has(key)) {
+        this.refs.set(key, { ...row, ownerDelegationId: toOwnerId });
+      } else {
+        this.refs.delete(key);
+        if (row.hash !== null && this.releaseBlobRef(projectId, row.hash)) freed += 1;
+      }
+    }
+    return freed;
+  }
+
+  async transferOwnership(
+    projectId: string,
+    fromOwnerId: string,
+    toOwnerId: string,
+    seed: ReadonlyArray<RefHandle>,
+  ): Promise<void> {
+    const move = this.expandWithinOwner(projectId, fromOwnerId, seed);
+    for (const key of move) {
+      const row = this.refs.get(key);
+      if (row !== undefined) this.refs.set(key, { ...row, ownerDelegationId: toOwnerId });
+    }
+  }
+
+  async sweepRefsWithDeadOwners(
+    projectId: string,
+    liveOwnerIds: ReadonlySet<string>,
+  ): Promise<number> {
+    let freed = 0;
     for (const [key, row] of [...this.refs.entries()]) {
       if (row.projectId !== projectId) continue;
-      if (row.ownerInstanceId !== ownerInstanceId) continue;
+      if (row.ownerDelegationId === undefined) continue; // unowned: not GC-managed
+      if (liveOwnerIds.has(row.ownerDelegationId)) continue;
       this.refs.delete(key);
-      if (row.hash !== null) this.releaseBlobRef(projectId, row.hash);
-      removed += 1;
+      if (row.hash !== null && this.releaseBlobRef(projectId, row.hash)) freed += 1;
     }
-    return removed;
+    return freed;
   }
 }
 

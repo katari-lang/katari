@@ -2,7 +2,7 @@
 //   - produce (putComplete / open-push-close) + content-addressed dedup
 //   - consume (fetch / fetchRange / getState), including module=api files
 //   - persistent files (create / get / list / delete) + persistRef promote
-//   - GC primitives (sweepInstance / sweepUnreachable) + blob refcount sweep
+//   - single-owner GC (releaseOwner / transferOwnership / dead-owner sweep)
 //   - facade wiring + withTransaction rollback
 
 import { hashText } from "@katari-lang/runtime";
@@ -106,31 +106,32 @@ describe("ValueStore: dedup + refcount", () => {
     expect(dec((await store.fetch(PROJECT, "ffi", b.id))!)).toBe("dup");
   });
 
-  it("blob is swept only when the last referrer goes", async () => {
+  it("blob is freed only when the last referring ref drops", async () => {
     const store = new InMemoryValueStore();
     const a = await store.putComplete({
       projectId: PROJECT,
       owner: "core",
       bytes: enc("shared"),
       semanticKind: "string",
-      ownerInstanceId: "shard-A",
+      ownerDelegationId: "d-A",
     });
     await store.putComplete({
       projectId: PROJECT,
       owner: "core",
       bytes: enc("shared"),
       semanticKind: "string",
-      ownerInstanceId: "shard-B",
+      ownerDelegationId: "d-B",
     });
     expect(store.blobs.size).toBe(1);
 
-    // Sweep shard-A: one referrer remains, blob stays.
-    expect(await store.sweepInstance(PROJECT, "shard-A")).toBe(1);
+    // d-A terminates with nothing escaping: its ref drops, one referrer
+    // remains (d-B), blob stays. 0 blobs freed.
+    expect(await store.releaseOwner(PROJECT, "d-A", "parent", [])).toBe(0);
     expect(store.blobs.size).toBe(1);
     expect(await store.fetch(PROJECT, "core", a.id)).toBeNull();
 
-    // Sweep shard-B: last referrer gone, blob swept.
-    expect(await store.sweepInstance(PROJECT, "shard-B")).toBe(1);
+    // d-B terminates: last referrer gone, blob freed.
+    expect(await store.releaseOwner(PROJECT, "d-B", "parent", [])).toBe(1);
     expect(store.blobs.size).toBe(0);
   });
 });
@@ -170,6 +171,7 @@ describe("ValueStore: persistent files", () => {
       bytes: enc("promote me"),
       semanticKind: "file",
       contentType: "application/octet-stream",
+      ownerDelegationId: "d-1",
     });
     const file = await store.persistRef({
       projectId: PROJECT,
@@ -184,8 +186,9 @@ describe("ValueStore: persistent files", () => {
     expect(store.blobs.size).toBe(1);
     expect([...store.blobs.values()][0]?.refCount).toBe(2);
 
-    // Sweeping the ephemeral ref leaves the file (and blob) intact.
-    await store.sweepUnreachable(PROJECT, []);
+    // d-1 terminates (its ephemeral ref drops); the api_file still holds the
+    // blob, so it survives. 0 blobs freed.
+    expect(await store.releaseOwner(PROJECT, "d-1", "parent", [])).toBe(0);
     expect(store.blobs.size).toBe(1);
     expect(dec((await store.fetch(PROJECT, "api", file!.id))!)).toBe("promote me");
   });
@@ -196,26 +199,80 @@ describe("ValueStore: persistent files", () => {
   });
 });
 
-describe("ValueStore: reachability sweep", () => {
-  it("keeps reachable refs and removes the rest", async () => {
+describe("ValueStore: single-owner GC", () => {
+  const put = (store: InMemoryValueStore, text: string, owner: string, refsTo?: { module: "core"; id: string }[]) =>
+    store.putComplete({
+      projectId: PROJECT,
+      owner: "core",
+      bytes: enc(text),
+      semanticKind: "string",
+      ownerDelegationId: owner,
+      refsTo,
+    });
+
+  it("releaseOwner re-owns the escaping ref to the parent and drops the rest", async () => {
     const store = new InMemoryValueStore();
-    const keep = await store.putComplete({
-      projectId: PROJECT,
-      owner: "core",
-      bytes: enc("keep"),
-      semanticKind: "string",
-    });
-    const drop = await store.putComplete({
-      projectId: PROJECT,
-      owner: "core",
-      bytes: enc("drop"),
-      semanticKind: "string",
-    });
-    const removed = await store.sweepUnreachable(PROJECT, [{ owner: "core", id: keep.id }]);
-    expect(removed).toBe(1);
+    const keep = await put(store, "escapes", "child");
+    const drop = await put(store, "local", "child");
+
+    // child terminates; only `keep` is in the returned value → re-owned by
+    // parent, `drop` is collected.
+    const freed = await store.releaseOwner(PROJECT, "child", "parent", [
+      { module: "core", id: keep.id },
+    ]);
+    expect(freed).toBe(1); // `drop`'s blob
     expect(await store.fetch(PROJECT, "core", keep.id)).not.toBeNull();
     expect(await store.fetch(PROJECT, "core", drop.id)).toBeNull();
-    expect(store.blobs.size).toBe(1);
+    // `keep` is now owned by `parent` — surviving a later release of `child`.
+    expect(await store.releaseOwner(PROJECT, "child", "x", [])).toBe(0);
+    expect(await store.fetch(PROJECT, "core", keep.id)).not.toBeNull();
+  });
+
+  it("releaseOwner drags a closure's captures up with it (refs_to)", async () => {
+    const store = new InMemoryValueStore();
+    const capture = await put(store, "captured", "child");
+    // A closure-shaped ref that internally references `capture`.
+    const closure = await put(store, "closure-env", "child", [{ module: "core", id: capture.id }]);
+
+    // Only the closure is in the returned value; its capture must come along.
+    await store.releaseOwner(PROJECT, "child", "parent", [{ module: "core", id: closure.id }]);
+    // Both survive a later release of `child` (both now owned by `parent`).
+    expect(await store.releaseOwner(PROJECT, "child", "x", [])).toBe(0);
+    expect(await store.fetch(PROJECT, "core", closure.id)).not.toBeNull();
+    expect(await store.fetch(PROJECT, "core", capture.id)).not.toBeNull();
+  });
+
+  it("transferOwnership (escalate) moves refs up without dropping the rest", async () => {
+    const store = new InMemoryValueStore();
+    const escalated = await put(store, "for-parent", "child");
+    const local = await put(store, "still-local", "child");
+
+    await store.transferOwnership(PROJECT, "child", "receiver", [
+      { module: "core", id: escalated.id },
+    ]);
+    // `local` is untouched (child keeps running); releasing child drops only it.
+    expect(await store.releaseOwner(PROJECT, "child", "x", [])).toBe(1);
+    expect(await store.fetch(PROJECT, "core", local.id)).toBeNull();
+    // `escalated` is owned by `receiver` and survives.
+    expect(await store.fetch(PROJECT, "core", escalated.id)).not.toBeNull();
+  });
+
+  it("sweepRefsWithDeadOwners drops refs of dead owners, keeps live + unowned", async () => {
+    const store = new InMemoryValueStore();
+    const live = await put(store, "live-owner", "d-live");
+    const dead = await put(store, "dead-owner", "d-dead");
+    const unowned = await store.putComplete({
+      projectId: PROJECT,
+      owner: "core",
+      bytes: enc("unowned"),
+      semanticKind: "string",
+    });
+
+    const freed = await store.sweepRefsWithDeadOwners(PROJECT, new Set(["d-live"]));
+    expect(freed).toBe(1); // `dead`'s blob
+    expect(await store.fetch(PROJECT, "core", live.id)).not.toBeNull();
+    expect(await store.fetch(PROJECT, "core", dead.id)).toBeNull();
+    expect(await store.fetch(PROJECT, "core", unowned.id)).not.toBeNull(); // null-owner left alone
   });
 });
 

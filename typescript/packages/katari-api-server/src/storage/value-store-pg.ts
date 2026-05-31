@@ -27,6 +27,7 @@ import {
   type ProduceHandle,
   type ProduceResult,
   type PutInput,
+  type RefHandle,
   type RefModule,
   type RefState,
   type ValueRefState,
@@ -115,7 +116,8 @@ export class PgValueStore implements ValueStore {
         id,
         state: "complete",
         semanticKind: input.semanticKind,
-        ownerInstanceId: input.ownerInstanceId,
+        ownerDelegationId: input.ownerDelegationId,
+        refsTo: input.refsTo ?? [],
         hash,
         size,
         contentType: input.contentType,
@@ -154,7 +156,8 @@ export class PgValueStore implements ValueStore {
             id,
             state: "complete",
             semanticKind: input.semanticKind,
-            ownerInstanceId: input.ownerInstanceId,
+            ownerDelegationId: input.ownerDelegationId,
+            refsTo: input.refsTo ?? [],
             hash,
             size: total,
             contentType: input.contentType,
@@ -171,7 +174,8 @@ export class PgValueStore implements ValueStore {
           id,
           state: "errored",
           semanticKind: input.semanticKind,
-          ownerInstanceId: input.ownerInstanceId,
+          ownerDelegationId: input.ownerDelegationId,
+          refsTo: input.refsTo ?? [],
           hash: null,
           size: null,
           contentType: input.contentType,
@@ -189,7 +193,8 @@ export class PgValueStore implements ValueStore {
       id: string;
       state: ValueRefState;
       semanticKind: ValueSemanticKind;
-      ownerInstanceId?: string;
+      ownerDelegationId?: string;
+      refsTo: ReadonlyArray<RefHandle>;
       hash: string | null;
       size: number | null;
       contentType?: string;
@@ -198,12 +203,12 @@ export class PgValueStore implements ValueStore {
   ): Promise<void> {
     await sql`
       INSERT INTO value_refs
-        (project_id, owner_module, id, state, semantic_kind, owner_instance_id,
+        (project_id, owner_module, id, state, semantic_kind, owner_delegation_id, refs_to,
          hash, size, content_type, error_message)
       VALUES
         (${row.projectId}, ${row.owner}, ${row.id}, ${row.state}, ${row.semanticKind},
-         ${row.ownerInstanceId ?? null}, ${row.hash}, ${row.size}, ${row.contentType ?? null},
-         ${row.errorMessage ?? null})
+         ${row.ownerDelegationId ?? null}, ${this.sql.json([...row.refsTo]) as never},
+         ${row.hash}, ${row.size}, ${row.contentType ?? null}, ${row.errorMessage ?? null})
     `;
   }
 
@@ -391,55 +396,121 @@ export class PgValueStore implements ValueStore {
     });
   }
 
-  // ── GC primitives ─────────────────────────────────────────────────────────
+  // ── ownership transitions (single-owner GC) ─────────────────────────────
 
-  async sweepUnreachable(
+  /**
+   * Load all refs owned by `ownerId`, then BFS from `seed` through `refs_to`
+   * (staying within this owner's refs) to compute the keep/move set + the rows
+   * to drop. Pure read; the caller applies the writes in its tx.
+   */
+  private async expandOwned(
+    sql: Sql,
     projectId: string,
-    reachable: ReadonlyArray<{ owner: EphemeralOwner; id: string }>,
-  ): Promise<number> {
-    const keep = new Set(reachable.map((r) => `${r.owner}|${r.id}`));
-    const result = await this.sql.begin(async (tx) => {
-      const sql = tx as unknown as Sql;
-      const all = await sql<{ owner_module: string; id: string; hash: string | null }[]>`
-        SELECT owner_module, id, hash FROM value_refs WHERE project_id = ${projectId}
-      `;
-      const toDelete = all.filter((r) => !keep.has(`${r.owner_module}|${r.id}`));
-      if (toDelete.length === 0) return { count: 0, swept: [] as string[] };
-      const hashCounts = new Map<string, number>();
-      for (const row of toDelete) {
-        await sql`
-          DELETE FROM value_refs
-          WHERE project_id = ${projectId} AND owner_module = ${row.owner_module} AND id = ${row.id}
-        `;
-        if (row.hash !== null) hashCounts.set(row.hash, (hashCounts.get(row.hash) ?? 0) + 1);
-      }
-      const swept = await this.releaseBlobs(sql, projectId, hashCounts);
-      return { count: toDelete.length, swept };
-    });
-    await this.deleteBlobBytes(projectId, result.swept);
-    return result.count;
+    ownerId: string,
+    seed: ReadonlyArray<RefHandle>,
+  ): Promise<{ owned: OwnedRefRow[]; keep: Set<string> }> {
+    const owned = await sql<OwnedRefRow[]>`
+      SELECT owner_module, id, hash, refs_to FROM value_refs
+      WHERE project_id = ${projectId} AND owner_delegation_id = ${ownerId}
+    `;
+    const byKey = new Map(owned.map((r) => [`${r.owner_module}|${r.id}`, r]));
+    const keep = new Set<string>();
+    const worklist = seed.map((h) => `${h.module}|${h.id}`);
+    while (worklist.length > 0) {
+      const key = worklist.pop()!;
+      if (keep.has(key)) continue;
+      const row = byKey.get(key);
+      if (row === undefined) continue; // owned by someone higher / unknown
+      keep.add(key);
+      for (const child of row.refs_to) worklist.push(`${child.module}|${child.id}`);
+    }
+    return { owned, keep };
   }
 
-  async sweepInstance(projectId: string, ownerInstanceId: string): Promise<number> {
-    const result = await this.sql.begin(async (tx) => {
+  async releaseOwner(
+    projectId: string,
+    ownerId: string,
+    toOwnerId: string,
+    escapeSeed: ReadonlyArray<RefHandle>,
+  ): Promise<number> {
+    const swept = await this.sql.begin(async (tx) => {
       const sql = tx as unknown as Sql;
+      const { owned, keep } = await this.expandOwned(sql, projectId, ownerId, escapeSeed);
+      const hashCounts = new Map<string, number>();
+      for (const row of owned) {
+        const key = `${row.owner_module}|${row.id}`;
+        if (keep.has(key)) {
+          await sql`
+            UPDATE value_refs SET owner_delegation_id = ${toOwnerId}
+            WHERE project_id = ${projectId} AND owner_module = ${row.owner_module} AND id = ${row.id}
+          `;
+        } else {
+          await sql`
+            DELETE FROM value_refs
+            WHERE project_id = ${projectId} AND owner_module = ${row.owner_module} AND id = ${row.id}
+          `;
+          if (row.hash !== null) hashCounts.set(row.hash, (hashCounts.get(row.hash) ?? 0) + 1);
+        }
+      }
+      return this.releaseBlobs(sql, projectId, hashCounts);
+    });
+    await this.deleteBlobBytes(projectId, swept);
+    return swept.length;
+  }
+
+  async transferOwnership(
+    projectId: string,
+    fromOwnerId: string,
+    toOwnerId: string,
+    seed: ReadonlyArray<RefHandle>,
+  ): Promise<void> {
+    await this.sql.begin(async (tx) => {
+      const sql = tx as unknown as Sql;
+      const { keep } = await this.expandOwned(sql, projectId, fromOwnerId, seed);
+      for (const key of keep) {
+        const [owner_module, id] = key.split("|");
+        await sql`
+          UPDATE value_refs SET owner_delegation_id = ${toOwnerId}
+          WHERE project_id = ${projectId} AND owner_module = ${owner_module!} AND id = ${id!}
+        `;
+      }
+    });
+  }
+
+  async sweepRefsWithDeadOwners(
+    projectId: string,
+    liveOwnerIds: ReadonlySet<string>,
+  ): Promise<number> {
+    const swept = await this.sql.begin(async (tx) => {
+      const sql = tx as unknown as Sql;
+      const live = [...liveOwnerIds];
+      // Drop owned refs whose owner is gone. `= ANY` with an empty array is
+      // false, so when nothing is live every owned ref is swept.
       const deleted = await sql<{ hash: string | null }[]>`
         DELETE FROM value_refs
-        WHERE project_id = ${projectId} AND owner_instance_id = ${ownerInstanceId}
+        WHERE project_id = ${projectId}
+          AND owner_delegation_id IS NOT NULL
+          AND NOT (owner_delegation_id = ANY(${live as never}))
         RETURNING hash
       `;
-      if (deleted.length === 0) return { count: 0, swept: [] as string[] };
+      if (deleted.length === 0) return [] as string[];
       const hashCounts = new Map<string, number>();
       for (const row of deleted) {
         if (row.hash !== null) hashCounts.set(row.hash, (hashCounts.get(row.hash) ?? 0) + 1);
       }
-      const swept = await this.releaseBlobs(sql, projectId, hashCounts);
-      return { count: deleted.length, swept };
+      return this.releaseBlobs(sql, projectId, hashCounts);
     });
-    await this.deleteBlobBytes(projectId, result.swept);
-    return result.count;
+    await this.deleteBlobBytes(projectId, swept);
+    return swept.length;
   }
 }
+
+type OwnedRefRow = {
+  owner_module: EphemeralOwner;
+  id: string;
+  hash: string | null;
+  refs_to: RefHandle[];
+};
 
 type DbFileRow = {
   id: string;

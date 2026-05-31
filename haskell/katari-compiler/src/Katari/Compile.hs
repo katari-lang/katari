@@ -491,10 +491,26 @@ typecheckModules emitLog idResult primRules knownRequests orderedModules directD
   where
     step (exportedSoFar, acc) moduleName = do
       emitLog (CompileLogTypechecking moduleName)
-      let importedTypes =
+      let explicitImports = Map.findWithDefault [] moduleName directDeps
+          -- Ambient stdlib seeding. The @primitive@ root's prims are injected
+          -- by bare name into every module, and each @primitive.*@ sub-module
+          -- is reachable through an ambient alias (see
+          -- 'Identifier.injectPrimitives'). None of these appear in
+          -- 'directDeps' because they need no explicit @import@, so their
+          -- signatures must be seeded here. Without this, a prim / stdlib call
+          -- site resolves its callee to an unconstrained fresh type variable
+          -- (the 'lookupVariable' fallback) and the call's argument-name /
+          -- argument-type subtype check never runs — e.g. @file_to_string(foo
+          -- = ...)@ or @array_length(arr)@ typecheck despite the wrong label.
+          ambientStdlib =
+            [ stdlibName
+              | stdlibName <- Set.toList Stdlib.stdlibModuleNames,
+                stdlibName /= moduleName
+            ]
+          importedTypes =
             Map.unions
               [ Map.findWithDefault Map.empty depName exportedSoFar
-                | depName <- Map.findWithDefault [] moduleName directDeps
+                | depName <- explicitImports <> ambientStdlib
               ]
           result = typecheckOne idResult primRules knownRequests moduleName importedTypes
       pure

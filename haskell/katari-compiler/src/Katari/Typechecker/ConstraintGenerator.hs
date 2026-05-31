@@ -1347,9 +1347,12 @@ walkCallExpr CallExpression {callee, arguments, sourceSpan} = do
     )
 
 -- | Generic call constraint emission. Used when the callee is not a
--- prim, or when the prim uses 'PrimRuleSimple' (in which case the prim's
--- signature is pinned by 'bindPrimitiveTypes' and the standard call
--- subtype constraint is sufficient).
+-- prim, or when the prim uses 'PrimRuleSimple'. The callee reference
+-- carries its declared signature (own-SCC vars get a fresh var tied to
+-- their declaration; imported / ambient-stdlib callables are pre-bound to
+-- their resolved signature via 'generateConstraintsForSCC''s @knownTypes@
+-- seed), so the standard @callee \<: {args} -> result@ subtype constraint
+-- below is what enforces argument names and types.
 applyNormalCall ::
   Expression Constrained ->
   [CallArgument Constrained] ->

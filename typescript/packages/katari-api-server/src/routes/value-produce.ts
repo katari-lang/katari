@@ -43,7 +43,10 @@ export function buildValueProduceRoutes(storage: Storage): Hono {
       headerContentType !== undefined && headerContentType !== "text/plain;charset=UTF-8"
         ? headerContentType
         : undefined;
-    const ownerInstanceId = c.req.header("X-Katari-Owner-Instance") ?? undefined;
+    // The producing entity (a delegation id) that owns this ref. The FFI
+    // sidecar stamps its current ext-delegation id so the ref is owned while
+    // the handler runs (in-flight protection) and re-owned on delegateAck.
+    const ownerDelegationId = c.req.header("X-Katari-Owner-Delegation") ?? undefined;
 
     const bytes = new Uint8Array(await c.req.arrayBuffer());
     const result = await storage.values.putComplete({
@@ -52,7 +55,7 @@ export function buildValueProduceRoutes(storage: Storage): Hono {
       bytes,
       semanticKind,
       contentType,
-      ownerInstanceId,
+      ownerDelegationId,
     });
     return c.json(
       { module: owner, id: result.id, hash: result.hash, size: result.size, contentType },
