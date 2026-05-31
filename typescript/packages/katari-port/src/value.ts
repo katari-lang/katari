@@ -115,6 +115,11 @@ export type FetchLike = (
 export type ValueClientConfig = {
   env?: Record<string, string | undefined>;
   fetchImpl?: FetchLike;
+  /** The currently-running handler's delegation id, if any. A produced ref is
+   *  stamped with it as its owning entity (GC ownership): the ref stays alive
+   *  while this ext delegation runs (in-flight protection) and is re-owned by
+   *  the parent when the handler returns. Null = unstamped (e.g. tooling). */
+  currentDelegationId?: () => string | null;
 };
 
 /** A produced byte sequence's kind on the wire (`secret` is inline-only). */
@@ -228,6 +233,10 @@ export function createValueClient(config: ValueClientConfig = {}): ValueApi {
       "X-Katari-Semantic-Kind": as,
     };
     if (opts?.contentType !== undefined) headers["Content-Type"] = opts.contentType;
+    // Stamp the owning entity so the produced ref is GC-owned by the running
+    // ext delegation (in-flight protection; re-owned by the parent on ack).
+    const ownerDelegationId = config.currentDelegationId?.() ?? null;
+    if (ownerDelegationId !== null) headers["X-Katari-Owner-Delegation"] = ownerDelegationId;
     const response = await fetchImpl(url, { method: "POST", headers, body: bytes });
     if (!response.ok) {
       const detail = await response.text().catch(() => "");

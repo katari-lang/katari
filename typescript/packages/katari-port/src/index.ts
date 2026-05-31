@@ -42,6 +42,12 @@ const pendingChildren = new Map<string, PendingChild>();
 
 let currentModuleQname = "";
 
+// Currently-delegating context (see the fuller note at the use site below).
+// Defined here so the value client can read the running handler's delegation
+// id and stamp produced refs with their owning entity (GC ownership).
+const delegationContext = new AsyncLocalStorage<string>();
+const currentDelegationId = (): string | null => delegationContext.getStore() ?? null;
+
 // ─── Public API singleton ──────────────────────────────────────────────────
 
 const katari: KatariPort = {
@@ -77,7 +83,7 @@ const katari: KatariPort = {
   // Reads sidecar protocol env (KATARI_PROTOCOL_URL / _TOKEN / _PROJECT_ID)
   // lazily — only when a $ref is actually fetched, so inline-only handlers
   // (and import-time tooling) need no protocol configuration.
-  value: createValueClient(),
+  value: createValueClient({ currentDelegationId }),
 };
 
 // ─── Module-qname threading (used by the CLI bundler) ──────────────────────
@@ -136,9 +142,6 @@ const send = (msg: ChildToParent): void => {
 // handler's `katari.delegate(...)` attribute its child to the wrong
 // parent, and unwound out-of-order pop()s logged spurious "delegation
 // stack drift" warnings.
-
-const delegationContext = new AsyncLocalStorage<string>();
-const currentDelegationId = (): string | null => delegationContext.getStore() ?? null;
 
 function generateChildDelegationId(): string {
   // Cryptographically random v4 UUID. The delegation id is used as a

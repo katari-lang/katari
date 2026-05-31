@@ -8,6 +8,7 @@
 
 import type { Logger } from "@katari-lang/runtime";
 import type { ApiServerActorHost } from "./actor-host.js";
+import { GcService } from "./services/gc-service.js";
 import type { Storage } from "./storage/types.js";
 
 export async function recoverOnBoot(
@@ -16,6 +17,11 @@ export async function recoverOnBoot(
   logger: Logger,
 ): Promise<void> {
   await host.recoverOnBoot();
+
+  // Backstop blob GC: reclaim ephemeral refs whose owning entity is gone (a
+  // single-owner release lost to a crash). Safe here — boot runs before the
+  // server accepts traffic, so nothing is concurrently producing refs.
+  await new GcService(storage, logger).sweepAllProjects();
 
   const { items: cancellingRuns } = await storage.runsAudit.list({
     state: "cancelling",

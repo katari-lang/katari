@@ -14,7 +14,7 @@ import {
   type Sidecar,
   type SidecarBundle,
 } from "@katari-lang/runtime";
-import type { Block, VarId } from "katari-runtime/dist/ir/types.js";
+import type { Block, BlockId, VarId } from "katari-runtime/dist/ir/types.js";
 import {
   InMemoryStorage,
   ProjectService,
@@ -68,6 +68,60 @@ export function literalReturnIR(literal: string, irName = "test"): IRModule {
     blocks: Object.fromEntries(
       Object.entries(blocks).map(([k, v]) => [k, v]),
     ),
+    entries: { main: 0 },
+    nameTable: { varNames: {}, blockNames: {} },
+  };
+}
+
+/**
+ * IR for `agent main()` that does `let f = string_to_file("gc-bytes")` and then
+ * returns either the file `f` (escapes → owned by the run, blob survives) or the
+ * original string (file is dropped on completion → blob freed). Exercises the
+ * single-owner blob GC end-to-end.
+ */
+export function produceFileIR(returnFile: boolean): IRModule {
+  const blocks: Record<number, Block> = {
+    0: {
+      kind: "blockAgent",
+      body: {
+        qualifiedName: "main",
+        parameters: [],
+        entryBody: 1,
+        name: "main",
+        description: undefined,
+        inputSchema: "{}",
+        outputSchema: "{}",
+      },
+    },
+    1: {
+      kind: "blockUser",
+      body: {
+        parameters: [],
+        statements: [
+          {
+            kind: "statementLoadLiteral",
+            body: { output: 0 as VarId, value: { kind: "literalValueString", string: "gc-bytes" } },
+          },
+          {
+            kind: "statementCall",
+            body: {
+              block: 2 as BlockId,
+              arguments: [{ label: "value", var: 0 as VarId }],
+              output: 1 as VarId,
+            },
+          },
+          {
+            kind: "statementExit",
+            body: { exitKind: "exitKindReturn", value: (returnFile ? 1 : 0) as VarId },
+          },
+        ],
+      },
+    },
+    2: { kind: "blockPrim", body: "string_to_file" },
+  };
+  return {
+    metadata: { schemaVersion: 1 },
+    blocks: Object.fromEntries(Object.entries(blocks)),
     entries: { main: 0 },
     nameTable: { varNames: {}, blockNames: {} },
   };
