@@ -11,9 +11,36 @@ services:
       - PORT=8000
       - DATABASE_URL=postgresql://katari:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@db:5432/katari_runtime
       - LOG_LEVEL=${KATARI_LOG_LEVEL:-info}
+      # Blob storage is S3-compatible (required; no local-disk fallback). This
+      # stack ships a durable SeaweedFS store on the internal network, so it
+      # works out of the box. To use a cloud bucket instead (AWS / R2 / B2 /
+      # …), point these at it (drop KATARI_S3_ENDPOINT for real AWS, set real
+      # creds, KATARI_S3_CREATE_BUCKET=false) and remove the seaweedfs service.
+      - KATARI_S3_BUCKET=katari-blobs
+      - KATARI_S3_ENDPOINT=http://seaweedfs:8333
+      - KATARI_S3_FORCE_PATH_STYLE=true
+      - KATARI_S3_REGION=us-east-1
+      - KATARI_S3_CREATE_BUCKET=true
+      - AWS_ACCESS_KEY_ID=katari
+      - AWS_SECRET_ACCESS_KEY=katari
     depends_on:
       db:
         condition: service_healthy
+      seaweedfs:
+        condition: service_started
+
+  # Durable S3-compatible object store for the blob layer (the MinIO OSS image
+  # is defunct). Single-binary SeaweedFS running master+volume+filer+s3 in one
+  # process; data persists in the `blobdata` volume. The S3 port is NOT
+  # published — only the runtime reaches it over the internal network (same
+  # trust boundary as `db`). If you publish 8333, lock it down with an
+  # `-s3.config` identity file and matching KATARI creds above.
+  seaweedfs:
+    image: chrislusf/seaweedfs
+    restart: unless-stopped
+    command: server -s3 -dir=/data
+    volumes:
+      - blobdata:/data
 
   db:
     image: postgres:17-alpine
@@ -33,3 +60,4 @@ services:
 
 volumes:
   pgdata:
+  blobdata:

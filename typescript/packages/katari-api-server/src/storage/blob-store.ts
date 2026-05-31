@@ -6,22 +6,29 @@
 //
 // Postgres is great at the relational metadata but a poor home for large
 // binary blobs (RDS storage/IOPS/backup/WAL all balloon). So the bytes live
-// here behind a small interface, and the deploy picks the backend:
+// here behind a small interface. Katari's blob layer is **S3-compatible
+// only** — there is no on-disk fallback. That is a deliberate safety choice:
+// a silent local-disk default is the classic "deployed to ephemeral storage,
+// lost data on restart" footgun, so a missing/misconfigured blob backend is a
+// hard startup error (see `createBlobStoreFromEnv`). S3 is also the portable
+// target — it reaches every cloud (AWS / R2 / B2 / Spaces / Wasabi / …) and
+// every self-hostable store (SeaweedFS / Garage / Ceph / versitygw / …).
 //
-//   - LocalBlobStore   — files on disk. Dev / single-host with a persistent
-//                        volume. NOT for ECS (task-local disk is ephemeral).
-//   - S3BlobStore      — production (ECS uses the task IAM role; no creds in
-//                        env). Range reads map straight to S3's Range header.
+//   - S3BlobStore      — the only production backend. Real AWS uses the
+//                        default credential chain (e.g. the ECS task IAM
+//                        role); any S3-compatible store works via
+//                        KATARI_S3_ENDPOINT + forcePathStyle.
 //   - InMemoryBlobStore — tests.
+//
+// Dev / self-host both ship an S3-compatible container (adobe/s3mock for dev,
+// SeaweedFS for self-host), so "S3-only" never means "needs a cloud account".
 //
 // Blobs are content-addressed, so writes are idempotent: putting the same
 // (projectId, hash) twice is a no-op. Refcounting + the "delete at zero"
 // decision stay in Postgres (PgValueStore); this layer only does the
 // physical put / get / range / delete of the bytes.
 
-import { constants as fsConstants } from "node:fs";
-import { access, mkdir, open, readFile, rm, unlink, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 import type { Logger } from "@katari-lang/runtime";
 
 export interface BlobStore {
@@ -80,85 +87,6 @@ export class InMemoryBlobStore implements BlobStore {
   }
 }
 
-// ─── Local filesystem ─────────────────────────────────────────────────────────
-
-export class LocalBlobStore implements BlobStore {
-  constructor(private readonly root: string) {}
-
-  // Shard by a 2-char hash prefix so one project's dir doesn't accumulate a
-  // single flat directory of millions of entries.
-  private path(projectId: string, hash: string): string {
-    const shard = hash.slice(0, 2);
-    return join(this.root, projectId, shard, hash);
-  }
-
-  async put(projectId: string, hash: string, bytes: Uint8Array): Promise<void> {
-    const path = this.path(projectId, hash);
-    try {
-      await access(path, fsConstants.F_OK);
-      return; // already present — content-addressed, nothing to do
-    } catch {
-      // not present; write it
-    }
-    await mkdir(dirname(path), { recursive: true });
-    await writeFile(path, bytes);
-  }
-
-  async get(projectId: string, hash: string): Promise<Uint8Array | null> {
-    try {
-      return await readFile(this.path(projectId, hash));
-    } catch (err) {
-      if (isNotFound(err)) return null;
-      throw err;
-    }
-  }
-
-  async getRange(
-    projectId: string,
-    hash: string,
-    offset: number,
-    length: number,
-  ): Promise<Uint8Array | null> {
-    const start = Math.max(0, offset);
-    const want = Math.max(0, length);
-    if (want === 0) return new Uint8Array(0);
-    let handle: Awaited<ReturnType<typeof open>> | null = null;
-    try {
-      handle = await open(this.path(projectId, hash), "r");
-      const buffer = Buffer.alloc(want);
-      const { bytesRead } = await handle.read(buffer, 0, want, start);
-      return buffer.subarray(0, bytesRead);
-    } catch (err) {
-      if (isNotFound(err)) return null;
-      throw err;
-    } finally {
-      await handle?.close();
-    }
-  }
-
-  async delete(projectId: string, hash: string): Promise<void> {
-    try {
-      await unlink(this.path(projectId, hash));
-    } catch (err) {
-      if (!isNotFound(err)) throw err;
-    }
-  }
-
-  /** Test helper: wipe the whole root. Not part of the interface. */
-  async clear(): Promise<void> {
-    await rm(this.root, { recursive: true, force: true });
-  }
-}
-
-function isNotFound(err: unknown): boolean {
-  return (
-    typeof err === "object" &&
-    err !== null &&
-    "code" in err &&
-    (err as { code?: string }).code === "ENOENT"
-  );
-}
-
 // ─── S3 (production) ───────────────────────────────────────────────────────────
 
 export type S3BlobStoreOptions = {
@@ -202,6 +130,22 @@ export class S3BlobStore implements BlobStore {
 
   private key(projectId: string, hash: string): string {
     return `${this.prefix}${projectId}/${hash}`;
+  }
+
+  /**
+   * Ensure the bucket exists (idempotent). Used by bundled self-host stores
+   * (SeaweedFS / s3mock) where the bucket isn't pre-provisioned; cloud deploys
+   * leave KATARI_S3_CREATE_BUCKET unset and create the bucket out-of-band with
+   * their own (least-privilege) tooling. Already-exists is swallowed.
+   */
+  async ensureBucket(): Promise<void> {
+    try {
+      await this.client.send(new this.commands.CreateBucketCommand({ Bucket: this.bucket }));
+    } catch (err) {
+      const name = (err as { name?: string }).name;
+      if (name === "BucketAlreadyOwnedByYou" || name === "BucketAlreadyExists") return;
+      throw err;
+    }
   }
 
   async put(projectId: string, hash: string, bytes: Uint8Array): Promise<void> {
@@ -276,51 +220,75 @@ function isS3NotFound(err: unknown): boolean {
 // ─── Factory ───────────────────────────────────────────────────────────────────
 
 /**
- * Build the BlobStore the environment asks for:
+ * Build the (S3-compatible) BlobStore from the environment.
  *
- *   - `KATARI_BLOB_STORE=s3`    — S3 (requires `KATARI_S3_BUCKET`).
- *   - `KATARI_BLOB_STORE=local` — filesystem (`KATARI_BLOB_DIR`, default
- *                                 `./katari-data/blobs`).
- *   - unset — `s3` when `KATARI_S3_BUCKET` is present, else `local` with a
- *             loud warning (so a prod deploy that forgot the S3 config doesn't
- *             silently write to ephemeral container disk).
+ *   - `KATARI_S3_BUCKET` (required) — the bucket. Its ABSENCE is a hard error:
+ *     there is no on-disk fallback, so a misconfigured deploy fails fast at
+ *     startup instead of silently writing to ephemeral disk and losing data.
+ *   - `KATARI_S3_ENDPOINT` / `KATARI_S3_FORCE_PATH_STYLE` — point at any
+ *     S3-compatible store (SeaweedFS / R2 / B2 / s3mock / …). Omit for real AWS.
+ *   - `KATARI_S3_REGION` (or `AWS_REGION`), `KATARI_S3_PREFIX` — optional.
+ *   - `KATARI_S3_CREATE_BUCKET=true` — ensure the bucket on boot (bundled
+ *     self-host / dev stores). Cloud deploys leave it unset and pre-create the
+ *     bucket with their own least-privilege tooling.
  *
- * S3 credentials are NOT read from here: the AWS SDK's default provider chain
- * picks them up (on ECS that is the task IAM role — nothing in env).
+ * S3 credentials are read by the AWS SDK's default provider chain (env
+ * AWS_ACCESS_KEY_ID/SECRET, or on AWS the instance/task IAM role) — not here.
  */
 export async function createBlobStoreFromEnv(logger: Logger): Promise<BlobStore> {
   const explicit = process.env.KATARI_BLOB_STORE;
+  if (explicit !== undefined && explicit !== "" && explicit !== "s3") {
+    throw new Error(
+      `KATARI_BLOB_STORE='${explicit}' is not supported — Katari's blob layer is S3-compatible only. ` +
+        "Set KATARI_S3_BUCKET (+ KATARI_S3_ENDPOINT for a self-hosted store) and leave KATARI_BLOB_STORE unset or =s3.",
+    );
+  }
   const bucket = process.env.KATARI_S3_BUCKET;
-  const mode = explicit ?? (bucket !== undefined && bucket !== "" ? "s3" : "local");
+  if (bucket === undefined || bucket === "") {
+    throw new Error(
+      "blob storage is not configured: set KATARI_S3_BUCKET (S3-compatible storage is required; " +
+        "there is no local-disk fallback). For a self-hosted store also set KATARI_S3_ENDPOINT " +
+        "(e.g. http://seaweedfs:8333) + KATARI_S3_FORCE_PATH_STYLE=true; for AWS just set the bucket + region.",
+    );
+  }
 
-  if (mode === "s3") {
-    if (bucket === undefined || bucket === "") {
-      throw new Error("KATARI_BLOB_STORE=s3 requires KATARI_S3_BUCKET");
+  const s3Module = await import("@aws-sdk/client-s3");
+  const store = new S3BlobStore(
+    {
+      bucket,
+      prefix: process.env.KATARI_S3_PREFIX,
+      region: process.env.KATARI_S3_REGION ?? process.env.AWS_REGION,
+      endpoint: process.env.KATARI_S3_ENDPOINT,
+      forcePathStyle: process.env.KATARI_S3_FORCE_PATH_STYLE === "true",
+    },
+    s3Module,
+  );
+  logger.log("info", "blob store: s3", {
+    bucket,
+    endpoint: process.env.KATARI_S3_ENDPOINT ?? "(aws default)",
+    prefix: process.env.KATARI_S3_PREFIX ?? "",
+  });
+  if (process.env.KATARI_S3_CREATE_BUCKET === "true") {
+    // Bundled stores (SeaweedFS) may still be coming up on a cold
+    // `docker compose up`, so retry briefly rather than crash-looping the
+    // whole runtime on the readiness race. A genuine misconfig still surfaces
+    // (the last error is rethrown after the window).
+    const ATTEMPTS = 10;
+    for (let attempt = 1; ; attempt++) {
+      try {
+        await store.ensureBucket();
+        logger.log("info", "blob store: ensured bucket exists", { bucket });
+        break;
+      } catch (err) {
+        if (attempt >= ATTEMPTS) throw err;
+        logger.log("warn", "blob store: bucket not ready, retrying", {
+          bucket,
+          attempt,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        await sleep(1500);
+      }
     }
-    const s3Module = await import("@aws-sdk/client-s3");
-    logger.log("info", "blob store: s3", { bucket, prefix: process.env.KATARI_S3_PREFIX ?? "" });
-    return new S3BlobStore(
-      {
-        bucket,
-        prefix: process.env.KATARI_S3_PREFIX,
-        region: process.env.KATARI_S3_REGION ?? process.env.AWS_REGION,
-        endpoint: process.env.KATARI_S3_ENDPOINT,
-        forcePathStyle: process.env.KATARI_S3_FORCE_PATH_STYLE === "true",
-      },
-      s3Module,
-    );
   }
-
-  const dir = process.env.KATARI_BLOB_DIR ?? "./katari-data/blobs";
-  if (explicit !== "local") {
-    logger.log(
-      "warn",
-      `blob store: local filesystem (${dir}) — set KATARI_S3_BUCKET for durable storage. ` +
-        "Container-local disk is ephemeral; do NOT use 'local' in a stateless deploy (e.g. ECS Fargate).",
-      { dir },
-    );
-  } else {
-    logger.log("info", "blob store: local filesystem", { dir });
-  }
-  return new LocalBlobStore(dir);
+  return store;
 }

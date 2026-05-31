@@ -1,29 +1,16 @@
-// Contract tests for BlobStore, run against both the in-memory and local-FS
-// implementations (S3 needs a live endpoint, exercised separately). Both must
-// satisfy the same put/get/range/delete + idempotency semantics PgValueStore
-// relies on.
+// Contract tests for BlobStore. The S3 backend needs a live endpoint
+// (exercised against s3mock / SeaweedFS at the integration layer), so the
+// unit contract runs against InMemoryBlobStore — the same put/get/range/
+// delete + idempotency semantics PgValueStore relies on.
 
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { afterAll, describe, expect, it } from "vitest";
-import { type BlobStore, InMemoryBlobStore, LocalBlobStore } from "../src/storage/blob-store.js";
+import { describe, expect, it } from "vitest";
+import { type BlobStore, InMemoryBlobStore } from "../src/storage/blob-store.js";
 
 const PROJECT = "11111111-1111-1111-1111-111111111111";
 const enc = (s: string) => new TextEncoder().encode(s);
 const dec = (b: Uint8Array) => new TextDecoder().decode(b);
 
-const localRoot = mkdtempSync(join(tmpdir(), "katari-blob-"));
-const local = new LocalBlobStore(localRoot);
-
-afterAll(async () => {
-  await local.clear();
-});
-
-const backends: Array<[string, BlobStore]> = [
-  ["InMemoryBlobStore", new InMemoryBlobStore()],
-  ["LocalBlobStore", local],
-];
+const backends: Array<[string, BlobStore]> = [["InMemoryBlobStore", new InMemoryBlobStore()]];
 
 describe.each(backends)("BlobStore contract: %s", (_name, store) => {
   it("put then get round-trips the bytes", async () => {
