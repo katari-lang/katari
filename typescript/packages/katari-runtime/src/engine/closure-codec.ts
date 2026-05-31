@@ -39,11 +39,15 @@ import type { ClosureId, ScopeId } from "./id.js";
 import { createScopeId } from "./id.js";
 import type { Scope } from "./scope.js";
 import type { State } from "./state.js";
-import type { RefRep, Value } from "./value.js";
+import { collectRefs, type RefHandle, type RefRep, type Value } from "./value.js";
 
 /** Writes closure-blob bytes to the value store, returning the ref. Injected by
- *  CoreModule (owner = core, semanticKind = "closure"). */
-export type PutClosureBytes = (bytes: Uint8Array) => Promise<RefRep>;
+ *  CoreModule (owner = core, semanticKind = "closure"). `refsTo` are the refs
+ *  the closure captures, so GC ownership can drag them up with the closure. */
+export type PutClosureBytes = (
+  bytes: Uint8Array,
+  refsTo: ReadonlyArray<RefHandle>,
+) => Promise<RefRep>;
 
 /** Self-describing schema carried in the blob (the body BlockAgent's compiled
  *  metadata). Lets get_metadata answer without re-resolving the block. */
@@ -105,6 +109,10 @@ export async function serializeClosure(
   input: SerializeClosureInput,
 ): Promise<RefRep> {
   const scopes: SerializedScope[] = [];
+  // The refs this closure captures (file / string-ref / nested closure). The GC
+  // ownership layer records these as the closure ref's `refs_to` so that when
+  // the closure is re-owned upward its captures travel with it.
+  const refsTo: RefHandle[] = [];
   let cursor: ScopeId | null = input.scopeId;
   const seen = new Set<ScopeId>();
   while (cursor !== null) {
@@ -119,6 +127,9 @@ export async function serializeClosure(
     const values: Record<number, EncryptedValue> = {};
     for (const [varKey, value] of Object.entries(scope.values)) {
       if (value === undefined) continue;
+      // Collect captured refs from the plaintext value (before encryption —
+      // encryption only wraps `secret`, leaving file/string/closure refs as-is).
+      for (const handle of collectRefs(value)) refsTo.push(handle);
       // Encrypt captured secrets (AES-GCM $envelope) so the blob holds no
       // plaintext credential at rest; non-secret values pass through unchanged.
       values[Number(varKey)] = encryptValueTree(value);
@@ -136,7 +147,7 @@ export async function serializeClosure(
     metadata: agentBlockMetadata(state, input.blockId),
   };
   const bytes = new TextEncoder().encode(JSON.stringify(content));
-  return input.putBytes(bytes);
+  return input.putBytes(bytes, refsTo);
 }
 
 /** Parse + version-check a closure blob's bytes. */

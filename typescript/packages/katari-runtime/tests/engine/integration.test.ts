@@ -394,6 +394,15 @@ describe("engine integration: end-to-end via external delegate", () => {
       async fetch(_p: string, _m: string, id: string) {
         return blobs.get(id) ?? null;
       },
+      // GC ownership hooks — no-op for this test (it asserts closure crossing,
+      // not blob freeing; keeping every blob is the safe stub).
+      async releaseOwner() {
+        return 0;
+      },
+      async transferOwnership() {},
+      async sweepRefsWithDeadOwners() {
+        return 0;
+      },
     };
     const shardStore = {
       async get(p: string, id: string) {

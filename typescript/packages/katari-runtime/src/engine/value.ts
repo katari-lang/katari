@@ -75,6 +75,49 @@ export type Value =
 /** A closure carried by content-addressed ref (its serialized body+env blob). */
 export type ClosureValue = Extract<Value, { kind: "closure" }>;
 
+/** A value-reference handle (owner module + id) — the unit the GC ownership
+ *  layer tracks (a ref's identity, independent of its content hash). */
+export type RefHandle = { module: RefModule; id: string };
+
+/**
+ * Collect every content-ref handle reachable in `value` (a `string`/`file`
+ * carried as a ref, or a `closure`), recursing through array / tagged / record.
+ * Inline byte sequences and scalars carry no ref. Used by the GC ownership
+ * layer to find the refs a crossing value (delegateAck / escalate) carries, and
+ * the refs a closure blob captures. Duplicates are not de-duped (callers use a
+ * Set if needed).
+ */
+export function collectRefs(value: Value): RefHandle[] {
+  const out: RefHandle[] = [];
+  const walk = (v: Value): void => {
+    switch (v.kind) {
+      case "string":
+      case "secret":
+        if (v.rep.kind === "ref") out.push({ module: v.rep.module, id: v.rep.id });
+        return;
+      case "file":
+        out.push({ module: v.rep.module, id: v.rep.id });
+        return;
+      case "closure":
+        out.push({ module: v.ref.module, id: v.ref.id });
+        return;
+      case "array":
+        for (const e of v.elements) walk(e);
+        return;
+      case "tagged":
+        for (const f of Object.values(v.fields)) walk(f);
+        return;
+      case "record":
+        for (const e of Object.values(v.entries)) walk(e);
+        return;
+      default:
+        return;
+    }
+  };
+  walk(value);
+  return out;
+}
+
 // ─── Byte-sequence helpers ──────────────────────────────────────────────────
 //
 // v0.1.0 byte sequences are inline-only at construction. These helpers keep

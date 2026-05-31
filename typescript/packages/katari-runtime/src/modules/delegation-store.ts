@@ -45,6 +45,10 @@ export interface DelegationStore {
   delete(id: DelegationId): Promise<boolean>;
   /** Look up `rootDelegationId` for `id`. Used to inherit root on child insert. */
   getRoot(id: DelegationId): Promise<DelegationId | null>;
+  /** Immediate parent of `id` (`null` for a run root, or if the row is gone).
+   *  Used by GC ownership to hand a completing shard's escaping refs one level
+   *  up. */
+  getParent(id: DelegationId): Promise<DelegationId | null>;
 }
 
 /** No-op store for tests that don't care about audit. */
@@ -54,6 +58,9 @@ export const NULL_DELEGATION_STORE: DelegationStore = {
     return false;
   },
   async getRoot(): Promise<DelegationId | null> {
+    return null;
+  },
+  async getParent(): Promise<DelegationId | null> {
     return null;
   },
 };

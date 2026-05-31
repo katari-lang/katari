@@ -39,4 +39,9 @@ export class StorageDelegationStore implements DelegationStore {
     const row = await this.storage.delegations.get(id);
     return row?.rootDelegationId ?? null;
   }
+
+  async getParent(id: DelegationId): Promise<DelegationId | null> {
+    const row = await this.storage.delegations.get(id);
+    return row?.parentDelegationId ?? null;
+  }
 }

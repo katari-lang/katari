@@ -19,7 +19,7 @@ export const makeClosureOps: ThreadOps<MakeClosureThread> = {
       scopeId: t.capturedScopeId,
       snapshot: ctx.state.snapshot,
       selfVar: t.selfVar,
-      putBytes: (bytes) => ctx.putBlob(bytes, "closure"),
+      putBytes: (bytes, refsTo) => ctx.putBlob(bytes, "closure", refsTo),
     });
     if (t.parent !== null && t.parentCallId !== null) {
       ctx.enqueue({

@@ -59,7 +59,7 @@ import {
 import type { State } from "../engine/state.js";
 import type { RefFetcher, RefPutter } from "../engine/step-ctx.js";
 import type { Thread } from "../engine/thread/types.js";
-import type { RefRep } from "../engine/value.js";
+import { collectRefs, type RefRep } from "../engine/value.js";
 import type { IRModule } from "../ir/types.js";
 import type { Module } from "../module.js";
 import type { ValueStore } from "../storage/value-store.js";
@@ -168,7 +168,10 @@ export class CoreModule implements Module {
           shard.state,
           event,
           this.makeFetchRef(tx.values),
-          this.makePutRef(tx.values),
+          // Refs produced inside this shard's quantum are owned by the shard's
+          // delegation (= shardId), so the GC ownership layer hands them up /
+          // releases them at the shard's terminal.
+          this.makePutRef(tx.values, shardId),
         );
       } catch (err) {
         // applyEvent mutates state in place, so an irrecoverable throw leaves
@@ -183,10 +186,18 @@ export class CoreModule implements Module {
         this.logger.log(log.level, log.message, log.context);
       }
 
+      const outbound = result.outbound as ExternalEvent[];
+
       this.reconcileIndex(shardId, shard.state);
       // A shard with no live threads has finished — delete it (no replay → no
       // retention) and purge its index entries.
       if (shard.state.threadCount === 0) {
+        // Release this shard's owned refs (GC ownership). The refs in the
+        // outbound delegateAck escape upward → re-owned by the parent (or the
+        // shard itself for a root, which becomes the persistent run); every
+        // other ref this shard produced is dropped. A shard with no
+        // delegateAck (terminate / error) escapes nothing.
+        await this.releaseShardRefs(tx, shardId, outbound);
         this.shardCache.delete(shardId);
         this.purgeIndexForShard(shardId);
         await tx.shards.delete(this.projectId, shardId);
@@ -195,7 +206,6 @@ export class CoreModule implements Module {
       }
       await tx.projectIndex.upsert(this.projectId, this.projectIndex);
 
-      const outbound = result.outbound as ExternalEvent[];
       for (const ev of outbound) {
         if (ev.payload.kind === "delegate") {
           // Closures are already content refs by the time they reach here
@@ -330,10 +340,12 @@ export class CoreModule implements Module {
 
   /** A blob writer (owner = core). Tags the produced ref with the caller's
    *  `semanticKind` (`closure` for a captured env, `file` for `string_to_file`,
-   *  …). Throws if bytes need persisting but no value store is wired. */
-  private makePutRef(valueStore: ValueStore | null): RefPutter {
+   *  …) and the owning entity (`ownerDelegationId` = the producing shard's
+   *  delegation), so the GC ownership layer can release / hand it up at the
+   *  shard's terminal. Throws if bytes need persisting but no value store. */
+  private makePutRef(valueStore: ValueStore | null, ownerDelegationId: string): RefPutter {
     const projectId = this.projectId;
-    return async (bytes, semanticKind): Promise<RefRep> => {
+    return async (bytes, semanticKind, refsTo): Promise<RefRep> => {
       if (valueStore === null) {
         throw new Error("core: a blob needs persisting but no value store is wired");
       }
@@ -342,6 +354,8 @@ export class CoreModule implements Module {
         owner: "core",
         bytes,
         semanticKind,
+        ownerDelegationId,
+        refsTo,
       });
       return { kind: "ref", module: "core", id: result.id, hash: result.hash, size: result.size };
     };
@@ -370,7 +384,7 @@ export class CoreModule implements Module {
       tx.values !== null
         ? await promoteCheckpoint(
             checkpoint,
-            this.makePromoteText(tx.values),
+            this.makePromoteText(tx.values, shardId),
             this.promotionThreshold,
           )
         : checkpoint;
@@ -383,8 +397,34 @@ export class CoreModule implements Module {
     });
   }
 
-  /** Promote one inline string to an owner=core ref by writing its bytes. */
-  private makePromoteText(valueStore: ValueStore): (text: string) => Promise<RefRep> {
+  /**
+   * Release a completed shard's owned refs (GC ownership). The refs carried by
+   * the outbound `delegateAck` escape upward — re-owned by the shard's parent
+   * delegation, or, for a run root (no parent), kept on the shard's own id
+   * which outlives the `delegations` row in `runs_audit`. Every other ref the
+   * shard produced is dropped (its blob freed at refcount 0). A shard that ends
+   * without a `delegateAck` (terminate / unhandled throw) escapes nothing.
+   */
+  private async releaseShardRefs(
+    tx: CoreTxStores,
+    shardId: ShardId,
+    outbound: ExternalEvent[],
+  ): Promise<void> {
+    if (tx.values === null) return;
+    const ack = outbound.find((ev) => ev.payload.kind === "delegateAck");
+    const escapeSeed =
+      ack !== undefined && ack.payload.kind === "delegateAck" ? collectRefs(ack.payload.value) : [];
+    // shardId IS the delegation id (different brand, same uuid).
+    const parent = await tx.delegations.getParent(shardId as unknown as DelegationId);
+    await tx.values.releaseOwner(this.projectId, shardId, parent ?? shardId, escapeSeed);
+  }
+
+  /** Promote one inline string to an owner=core ref by writing its bytes, owned
+   *  by the promoting shard's delegation (released at the shard's terminal). */
+  private makePromoteText(
+    valueStore: ValueStore,
+    ownerDelegationId: string,
+  ): (text: string) => Promise<RefRep> {
     const projectId = this.projectId;
     return async (text: string): Promise<RefRep> => {
       const result = await valueStore.putComplete({
@@ -392,6 +432,7 @@ export class CoreModule implements Module {
         owner: "core",
         bytes: new TextEncoder().encode(text),
         semanticKind: "string",
+        ownerDelegationId,
       });
       return { kind: "ref", module: "core", id: result.id, hash: result.hash, size: result.size };
     };

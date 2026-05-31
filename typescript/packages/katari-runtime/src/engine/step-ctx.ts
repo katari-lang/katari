@@ -17,7 +17,7 @@
 import type { Event, InternalEventPayload } from "./event.js";
 import type { LogEntry, LogLevel } from "./logger.js";
 import type { State } from "./state.js";
-import type { BytesRep, RefRep } from "./value.js";
+import type { BytesRep, RefHandle, RefRep } from "./value.js";
 
 /**
  * Fetch the bytes of a content-addressed ref. Injected by the host
@@ -40,9 +40,15 @@ export type RefSemanticKind = "string" | "file" | "secret" | "closure";
  * (ValueStore-backed), symmetric to {@link RefFetcher}. Used by make-closure to
  * persist a closure's captured env to a blob BEFORE handing back its ref (so a
  * ref never exists without its referent) and by `string_to_file` to mint a file
- * value. `semanticKind` tags the produced ref. Content-addressed ⇒ deterministic.
+ * value. `semanticKind` tags the produced ref; `refsTo` are the refs this blob
+ * internally captures (a closure's captured refs) so the GC ownership layer can
+ * drag them along when the closure is re-owned. Content-addressed ⇒ deterministic.
  */
-export type RefPutter = (bytes: Uint8Array, semanticKind: RefSemanticKind) => Promise<RefRep>;
+export type RefPutter = (
+  bytes: Uint8Array,
+  semanticKind: RefSemanticKind,
+  refsTo?: ReadonlyArray<RefHandle>,
+) => Promise<RefRep>;
 
 /**
  * Default fetcher for when no value store is wired. v0.1.0 (pre-E1) produces
@@ -81,7 +87,11 @@ export interface StepCtx {
    * (`closure`) and by `string_to_file` to mint a `file`. Symmetric to
    * `materialize`; the write happens within the host's quantum transaction.
    */
-  putBlob(bytes: Uint8Array, semanticKind: RefSemanticKind): Promise<RefRep>;
+  putBlob(
+    bytes: Uint8Array,
+    semanticKind: RefSemanticKind,
+    refsTo?: ReadonlyArray<RefHandle>,
+  ): Promise<RefRep>;
 }
 
 /**
@@ -123,8 +133,8 @@ export function makeStepCtx(
       if (rep.kind === "inline") return Promise.resolve(new TextEncoder().encode(rep.text));
       return fetchRef(rep);
     },
-    putBlob(bytes, semanticKind) {
-      return putRef(bytes, semanticKind);
+    putBlob(bytes, semanticKind, refsTo) {
+      return putRef(bytes, semanticKind, refsTo);
     },
   };
 }
