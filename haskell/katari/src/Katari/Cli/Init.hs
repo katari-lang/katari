@@ -192,16 +192,23 @@ entryKtrTemplate name =
     ]
 
 -- | Local-dev compose file. Pulls the published katari runtime image
--- (pinned to the CLI's own version) and a Postgres 17 container. The
--- @db-init@ mount creates @katari_runtime@ on first boot; the runtime
--- container then applies @schema.sql@ automatically at startup (see
--- @KATARI_AUTO_MIGRATE@ in katari-api-server\/src\/bin.ts).
+-- (pinned to the CLI's own version), a Postgres 17 container, and a
+-- SeaweedFS container for S3-compatible blob storage. The @db-init@ mount
+-- creates @katari_runtime@ on first boot; the runtime container then applies
+-- @schema.sql@ automatically at startup (see @KATARI_AUTO_MIGRATE@ in
+-- katari-api-server\/src\/bin.ts).
+--
+-- Blob storage is S3-compatible only (no local-disk fallback — a
+-- misconfigured runtime fails fast rather than silently losing data), so the
+-- scaffold ships a durable SeaweedFS store wired in. To use a cloud bucket
+-- instead (AWS S3 \/ Cloudflare R2 \/ Backblaze B2 \/ …), point the runtime's
+-- @KATARI_S3_*@ at it and delete the @seaweedfs@ service.
 dockerComposeTemplate :: String -> String -> String
 dockerComposeTemplate name tag =
   unlines
     [ "# Local dev compose for the '" <> name <> "' katari project.",
-      "# Spins up the katari runtime + Postgres. Copy `.env.example` to `.env`",
-      "# before the first `docker compose up -d`.",
+      "# Spins up the katari runtime + Postgres + SeaweedFS (S3 blob store).",
+      "# Copy `.env.example` to `.env` before the first `docker compose up -d`.",
       "",
       "services:",
       "  runtime:",
@@ -215,9 +222,21 @@ dockerComposeTemplate name tag =
       "      - LOG_LEVEL=${KATARI_LOG_LEVEL:-info}",
       "      - KATARI_API_KEY=${KATARI_API_KEY:?set KATARI_API_KEY in .env (copy from .env.example)}",
       "      - KATARI_SECRET_KEY=${KATARI_SECRET_KEY:?set KATARI_SECRET_KEY in .env (copy from .env.example)}",
+      "      # Blob storage (S3-compatible, required). Defaults to the bundled",
+      "      # SeaweedFS below; repoint at a cloud bucket + delete seaweedfs to",
+      "      # switch (drop KATARI_S3_ENDPOINT + set real creds for AWS).",
+      "      - KATARI_S3_BUCKET=katari-blobs",
+      "      - KATARI_S3_ENDPOINT=http://seaweedfs:8333",
+      "      - KATARI_S3_FORCE_PATH_STYLE=true",
+      "      - KATARI_S3_REGION=us-east-1",
+      "      - KATARI_S3_CREATE_BUCKET=true",
+      "      - AWS_ACCESS_KEY_ID=katari",
+      "      - AWS_SECRET_ACCESS_KEY=katari",
       "    depends_on:",
       "      db:",
       "        condition: service_healthy",
+      "      seaweedfs:",
+      "        condition: service_started",
       "",
       "  db:",
       "    image: postgres:17-alpine",
@@ -235,8 +254,18 @@ dockerComposeTemplate name tag =
       "      timeout: 3s",
       "      retries: 5",
       "",
+      "  # Durable S3-compatible blob store (single-binary SeaweedFS). Data",
+      "  # persists in the `blobdata` volume; the S3 port is internal-only.",
+      "  seaweedfs:",
+      "    image: chrislusf/seaweedfs",
+      "    restart: unless-stopped",
+      "    command: server -s3 -dir=/data",
+      "    volumes:",
+      "      - blobdata:/data",
+      "",
       "volumes:",
-      "  pgdata:"
+      "  pgdata:",
+      "  blobdata:"
     ]
 
 envExampleTemplate :: String
