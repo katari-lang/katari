@@ -217,10 +217,16 @@ describe("samples/ end-to-end (apply → run → verify)", () => {
   });
 
   itE2E(
-    "08-metadata: get_metadata on top-level agent + local closure yields 'add_them|metadata.add_them|local_bar|closure:0'",
+    "08-metadata: get_metadata yields the agent's qname + a content-addressed closure id",
     async () => {
       const result = await applyAndRun("metadata", "08-metadata");
-      expect(result).toBe("add_them|metadata.add_them|local_bar|closure:0");
+      // A top-level agent's id is its qname; a closure's id is content-addressed
+      // (`closure:<blob-hash>`, see prim.ts executeGetMetadata) — the hash is an
+      // impl detail, so assert its shape, not the exact value.
+      expect(typeof result).toBe("string");
+      const parts = (result as string).split("|");
+      expect(parts.slice(0, 3)).toEqual(["add_them", "metadata.add_them", "local_bar"]);
+      expect(parts[3]).toMatch(/^closure:[0-9a-f]{64}$/);
     },
   );
 
