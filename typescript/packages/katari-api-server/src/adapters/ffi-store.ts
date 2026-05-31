@@ -5,18 +5,17 @@
 // `ffi_pending_delegations` / `ffi_pending_escalations` tables
 // (`Storage.ffiDelegations` / `Storage.ffiEscalations` repo).
 
-import type { DelegationId, Endpoint, EscalationId } from "@katari-lang/runtime";
-import {
-  CORE_ENDPOINT,
-  FFI_ENDPOINT,
-  type FfiPendingDelegation,
-  type FfiPendingEscalation,
-  type FfiStore,
+import type {
+  DelegationId,
+  Endpoint,
+  EscalationId,
+  FfiPendingDelegation,
+  FfiPendingEscalation,
+  FfiStore,
 } from "@katari-lang/runtime";
 import type {
   FfiPendingDelegation as DbDelegation,
   FfiPendingEscalation as DbEscalation,
-  ProjectId,
   SnapshotId,
   Storage,
 } from "../storage/types.js";
@@ -25,13 +24,15 @@ export class StorageFfiStore implements FfiStore {
   constructor(
     private readonly storage: Storage,
     private readonly snapshotId: SnapshotId,
-    /** Project the unified `delegations` mirror rows belong to. */
-    private readonly projectId: ProjectId,
   ) {}
 
   // ─── Delegations ────────────────────────────────────────────────────────
 
   async insertDelegation(row: FfiPendingDelegation): Promise<void> {
+    // FFI's private sidecar-relay row only. The protocol entity/delegation rows
+    // for ext calls + ext-spawned children are created in the entity model by
+    // the FFI module proper (see docs/2026-06-01-entity-model.md, G6); they are
+    // not mirrored from here.
     await this.storage.ffiDelegations.insert({
       delegationId: row.delegationId,
       snapshotId: this.snapshotId,
@@ -42,30 +43,6 @@ export class StorageFfiStore implements FfiStore {
       createdAt: row.createdAt,
       parentExtDelegationId: row.parentExtDelegationId,
     });
-    // Mirror ext-spawned children (= `katari.delegate(...)` from inside
-    // an ext handler) into the unified `delegations` table so the tree
-    // view shows them. Pure inbound ext calls (parentExtDelegationId
-    // === null) are already recorded by CoreModule's audit hook when it
-    // emitted the outbound `delegate(CORE → FFI)`, so we deliberately
-    // skip those here to avoid PK collisions.
-    if (row.parentExtDelegationId !== null) {
-      const parentRoot =
-        (await this.storage.delegations.get(row.parentExtDelegationId))?.rootDelegationId ??
-        row.delegationId;
-      await this.storage.delegations.insert({
-        id: row.delegationId,
-        rootDelegationId: parentRoot,
-        parentDelegationId: row.parentExtDelegationId,
-        projectId: this.projectId,
-        callerEndpoint: FFI_ENDPOINT,
-        ownerEndpoint: CORE_ENDPOINT,
-        agentDefId: row.agentDefId,
-        args: row.args,
-        state: row.state,
-        createdAt: row.createdAt,
-        updatedAt: row.createdAt,
-      });
-    }
   }
 
   async getDelegation(id: DelegationId): Promise<FfiPendingDelegation | null> {
@@ -75,21 +52,10 @@ export class StorageFfiStore implements FfiStore {
   }
 
   async setDelegationState(id: DelegationId, state: "running" | "cancelling"): Promise<boolean> {
-    // Mirror the state into the unified `delegations` row for ext-
-    // spawned children (= rows we own). For inbound rows we don't own,
-    // setState in the unified table is a no-op (= the row's writer is
-    // CoreModule, which keeps it in sync).
-    await this.storage.delegations.setState(id, state);
     return this.storage.ffiDelegations.setState(id, state);
   }
 
   async deleteDelegation(id: DelegationId): Promise<boolean> {
-    // Drop the unified `delegations` row too. It only exists for ext-
-    // spawned children (insertDelegation skipped pure-inbound ext calls)
-    // so the delete is a no-op when this id was an inbound call —
-    // exactly what we want, since CoreModule owns inbound deletion via
-    // delegateAck / terminateAck.
-    await this.storage.delegations.delete(id);
     return this.storage.ffiDelegations.delete(id);
   }
 

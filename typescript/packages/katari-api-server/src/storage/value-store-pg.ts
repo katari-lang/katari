@@ -1,34 +1,33 @@
-// Postgres-backed `ValueStore`. Metadata (`value_refs` / `api_files` /
-// `value_blobs` refcount) lives in Postgres; the blob BYTES are delegated to a
-// pluggable `BlobStore` (local FS / S3 / memory — see blob-store.ts). Postgres
-// is a poor home for large binaries, so only the refcount ledger stays here.
+// Postgres-backed `ValueStore` (Entity model). Metadata (`refs` + `value_blobs`
+// refcount ledger) lives in Postgres; the blob BYTES are delegated to a
+// pluggable `BlobStore` (local FS / S3 / memory — see blob-store.ts).
 //
-// Blobs are content-addressed and deduped: producing the same bytes twice
-// keeps one blob with `ref_count = 2` (and one physical object). The bytes are
-// written to the BlobStore on the FIRST ref and physically deleted only after
-// the refcount sweep drops the ledger row to zero.
+// Blobs are content-addressed + deduped: producing the same bytes twice keeps
+// one blob with `ref_count = 2` (one physical object). The refcount is
+// maintained by the `AFTER DELETE ON refs` trigger (schema.sql) — so deleting a
+// ref (explicitly, or by entity CASCADE) decrements automatically; this code
+// never decrements by hand. Bytes are written on the first ref and physically
+// deleted by `reapFreedBlobs` once the ledger row hits 0.
 //
-// Ordering / crash-safety (v0.1.0, single POST ≤ 10 MB):
-//   - produce: the BlobStore.put runs inside the producing transaction (on
-//     first ref). A rollback after the put leaves an orphan blob, reclaimed by
-//     GC — never a dangling ref (the ref row rolls back with it).
-//   - release: the refcount decrement + ledger-row delete commit FIRST; the
-//     physical BlobStore.delete runs AFTER commit. A crash in between leaves an
-//     orphan blob (reclaimed by GC), never bytes deleted out from under a live
-//     ref.
+// Ownership (docs/2026-06-01-entity-model.md): a ref is owned by exactly one
+// ENTITY (`owner_entity_id`), or transiently by NULL mid-ascent. `reownRefs` is
+// the one primitive behind detach / claim / persist; a delegation never owns a
+// ref. `reapFreedBlobs` reclaims zero-refcount blob bytes; `sweepDetachedRefs`
+// is the boot crash-backstop for in-transit (NULL-owner) leftovers.
 
 import {
   type CreateFileInput,
-  type EphemeralOwner,
   type FileRecord,
   hashBytes,
   MAX_PRODUCE_BYTES,
   type OpenInput,
   type ProduceHandle,
+  type ProduceModule,
   type ProduceResult,
   type PutInput,
   type RefHandle,
   type RefModule,
+  type RefOrigin,
   type RefState,
   type ValueRefState,
   type ValueSemanticKind,
@@ -50,8 +49,9 @@ export class PgValueStore implements ValueStore {
 
   /**
    * Create-or-increment the blob ledger row for `hash`. On the FIRST insert,
-   * writes the bytes to the BlobStore. Caller MUST run this inside a
-   * transaction together with inserting the referring row.
+   * writes the bytes to the BlobStore. Caller MUST run this inside a transaction
+   * together with inserting the referring ref row. (Decrement is the trigger's
+   * job — never done here.)
    */
   private async addBlobRef(sql: Sql, projectId: string, hash: string, bytes: Uint8Array) {
     const rows = await sql<{ inserted: boolean }[]>`
@@ -67,38 +67,15 @@ export class PgValueStore implements ValueStore {
     await this.blobStore.put(projectId, hash, bytes);
   }
 
-  /**
-   * Decrement refcounts (with multiplicity), delete any ledger row that fell
-   * to zero, and RETURN those swept hashes. Pure Postgres work — the physical
-   * `BlobStore.delete` is the caller's job, AFTER the surrounding tx commits.
-   */
-  private async releaseBlobs(
-    sql: Sql,
-    projectId: string,
-    hashCounts: Map<string, number>,
-  ): Promise<string[]> {
-    for (const [hash, count] of hashCounts) {
-      await sql`
-        UPDATE value_blobs SET ref_count = ref_count - ${count}
-        WHERE project_id = ${projectId} AND hash = ${hash}
-      `;
-    }
-    const swept = await sql<{ hash: string }[]>`
-      DELETE FROM value_blobs
-      WHERE project_id = ${projectId} AND ref_count <= 0
-      RETURNING hash
+  /** Increment an EXISTING blob's refcount (a new ref sharing stored bytes). */
+  private async shareBlob(sql: Sql, projectId: string, hash: string) {
+    await sql`
+      UPDATE value_blobs SET ref_count = ref_count + 1, last_accessed_at = now()
+      WHERE project_id = ${projectId} AND hash = ${hash}
     `;
-    return swept.map((r) => r.hash);
   }
 
-  /** Physically remove swept blobs from the BlobStore (post-commit). */
-  private async deleteBlobBytes(projectId: string, hashes: string[]): Promise<void> {
-    for (const hash of hashes) {
-      await this.blobStore.delete(projectId, hash);
-    }
-  }
-
-  // ── produce (ephemeral) ───────────────────────────────────────────────────
+  // ── produce ───────────────────────────────────────────────────────────────
 
   async putComplete(input: PutInput): Promise<ProduceResult> {
     if (input.bytes.length > MAX_PRODUCE_BYTES) {
@@ -112,11 +89,12 @@ export class PgValueStore implements ValueStore {
       await this.addBlobRef(sql, input.projectId, hash, input.bytes);
       await this.insertRefRow(sql, {
         projectId: input.projectId,
-        owner: input.owner,
+        module: input.owner,
         id,
+        ownerEntityId: input.ownerEntityId,
         state: "complete",
         semanticKind: input.semanticKind,
-        ownerDelegationId: input.ownerDelegationId,
+        origin: input.origin ?? "intermediate",
         refsTo: input.refsTo ?? [],
         hash,
         size,
@@ -152,11 +130,12 @@ export class PgValueStore implements ValueStore {
           await self.addBlobRef(sql, input.projectId, hash, bytes);
           await self.insertRefRow(sql, {
             projectId: input.projectId,
-            owner: input.owner,
+            module: input.owner,
             id,
+            ownerEntityId: input.ownerEntityId,
             state: "complete",
             semanticKind: input.semanticKind,
-            ownerDelegationId: input.ownerDelegationId,
+            origin: input.origin ?? "intermediate",
             refsTo: input.refsTo ?? [],
             hash,
             size: total,
@@ -170,11 +149,12 @@ export class PgValueStore implements ValueStore {
         settled = true;
         await self.insertRefRow(self.sql, {
           projectId: input.projectId,
-          owner: input.owner,
+          module: input.owner,
           id,
+          ownerEntityId: input.ownerEntityId,
           state: "errored",
           semanticKind: input.semanticKind,
-          ownerDelegationId: input.ownerDelegationId,
+          origin: input.origin ?? "intermediate",
           refsTo: input.refsTo ?? [],
           hash: null,
           size: null,
@@ -189,49 +169,35 @@ export class PgValueStore implements ValueStore {
     sql: Sql,
     row: {
       projectId: string;
-      owner: EphemeralOwner;
+      module: RefModule;
       id: string;
+      ownerEntityId?: string;
       state: ValueRefState;
       semanticKind: ValueSemanticKind;
-      ownerDelegationId?: string;
+      origin: RefOrigin;
       refsTo: ReadonlyArray<RefHandle>;
       hash: string | null;
       size: number | null;
       contentType?: string;
+      displayName?: string;
       errorMessage?: string;
     },
   ): Promise<void> {
     await sql`
-      INSERT INTO value_refs
-        (project_id, owner_module, id, state, semantic_kind, owner_delegation_id, refs_to,
-         hash, size, content_type, error_message)
+      INSERT INTO refs
+        (project_id, module, id, owner_entity_id, state, semantic_kind, origin, refs_to,
+         hash, size, content_type, display_name, error_message)
       VALUES
-        (${row.projectId}, ${row.owner}, ${row.id}, ${row.state}, ${row.semanticKind},
-         ${row.ownerDelegationId ?? null}, ${this.sql.json([...row.refsTo]) as never},
-         ${row.hash}, ${row.size}, ${row.contentType ?? null}, ${row.errorMessage ?? null})
+        (${row.projectId}, ${row.module}, ${row.id}, ${row.ownerEntityId ?? null}, ${row.state},
+         ${row.semanticKind}, ${row.origin}, ${this.sql.json([...row.refsTo]) as never},
+         ${row.hash}, ${row.size}, ${row.contentType ?? null}, ${row.displayName ?? null},
+         ${row.errorMessage ?? null})
     `;
   }
 
   // ── consume ───────────────────────────────────────────────────────────────
 
   async getState(projectId: string, module: RefModule, id: string): Promise<RefState | null> {
-    if (module === "api") {
-      const rows = await this.sql<{ hash: string; size: string; content_type: string | null }[]>`
-        SELECT hash, size, content_type FROM api_files
-        WHERE project_id = ${projectId} AND id = ${id}
-      `;
-      const row = rows[0];
-      if (row === undefined) return null;
-      return {
-        module,
-        id,
-        state: "complete",
-        semanticKind: "file",
-        hash: row.hash,
-        size: Number(row.size),
-        contentType: row.content_type ?? undefined,
-      };
-    }
     const rows = await this.sql<
       {
         state: ValueRefState;
@@ -243,8 +209,8 @@ export class PgValueStore implements ValueStore {
       }[]
     >`
       SELECT state, semantic_kind, hash, size, content_type, error_message
-      FROM value_refs
-      WHERE project_id = ${projectId} AND owner_module = ${module} AND id = ${id}
+      FROM refs
+      WHERE project_id = ${projectId} AND module = ${module} AND id = ${id}
     `;
     const row = rows[0];
     if (row === undefined) return null;
@@ -261,15 +227,9 @@ export class PgValueStore implements ValueStore {
   }
 
   private async hashOf(projectId: string, module: RefModule, id: string): Promise<string | null> {
-    if (module === "api") {
-      const rows = await this.sql<{ hash: string }[]>`
-        SELECT hash FROM api_files WHERE project_id = ${projectId} AND id = ${id}
-      `;
-      return rows[0]?.hash ?? null;
-    }
     const rows = await this.sql<{ hash: string | null }[]>`
-      SELECT hash FROM value_refs
-      WHERE project_id = ${projectId} AND owner_module = ${module} AND id = ${id}
+      SELECT hash FROM refs
+      WHERE project_id = ${projectId} AND module = ${module} AND id = ${id}
         AND state = 'complete'
     `;
     return rows[0]?.hash ?? null;
@@ -293,7 +253,7 @@ export class PgValueStore implements ValueStore {
     return this.blobStore.getRange(projectId, hash, offset, length);
   }
 
-  // ── persistent files ──────────────────────────────────────────────────────
+  // ── durable files (module = "api" refs) ─────────────────────────────────────
 
   async createFile(input: CreateFileInput): Promise<FileRecord> {
     if (input.bytes.length > MAX_PRODUCE_BYTES) {
@@ -302,16 +262,23 @@ export class PgValueStore implements ValueStore {
     const id = uuidv7();
     const hash = hashBytes(input.bytes);
     const size = input.bytes.length;
-    const createdAt = await this.sql.begin(async (tx) => {
+    await this.sql.begin(async (tx) => {
       const sql = tx as unknown as Sql;
       await this.addBlobRef(sql, input.projectId, hash, input.bytes);
-      const rows = await sql<{ created_at: Date }[]>`
-        INSERT INTO api_files (project_id, id, hash, size, content_type, display_name)
-        VALUES (${input.projectId}, ${id}, ${hash}, ${size}, ${input.contentType ?? null},
-                ${input.displayName ?? null})
-        RETURNING created_at
-      `;
-      return rows[0]?.created_at ?? new Date();
+      await this.insertRefRow(sql, {
+        projectId: input.projectId,
+        module: "api",
+        id,
+        ownerEntityId: input.ownerEntityId,
+        state: "complete",
+        semanticKind: "file",
+        origin: "user",
+        refsTo: [],
+        hash,
+        size,
+        contentType: input.contentType,
+        displayName: input.displayName,
+      });
     });
     return {
       id,
@@ -319,14 +286,15 @@ export class PgValueStore implements ValueStore {
       size,
       contentType: input.contentType,
       displayName: input.displayName,
-      createdAt: createdAt.toISOString(),
+      createdAt: new Date().toISOString(),
     };
   }
 
   async getFile(projectId: string, id: string): Promise<FileRecord | null> {
     const rows = await this.sql<DbFileRow[]>`
       SELECT id, hash, size, content_type, display_name, created_at
-      FROM api_files WHERE project_id = ${projectId} AND id = ${id}
+      FROM refs WHERE project_id = ${projectId} AND module = 'api' AND id = ${id}
+        AND state = 'complete'
     `;
     return rows[0] !== undefined ? dbToFileRecord(rows[0]) : null;
   }
@@ -334,7 +302,8 @@ export class PgValueStore implements ValueStore {
   async listFiles(projectId: string): Promise<FileRecord[]> {
     const rows = await this.sql<DbFileRow[]>`
       SELECT id, hash, size, content_type, display_name, created_at
-      FROM api_files WHERE project_id = ${projectId}
+      FROM refs WHERE project_id = ${projectId} AND module = 'api' AND origin = 'user'
+        AND state = 'complete'
       ORDER BY created_at DESC, id DESC
     `;
     return rows.map(dbToFileRecord);
@@ -343,23 +312,29 @@ export class PgValueStore implements ValueStore {
   async deleteFile(projectId: string, id: string): Promise<boolean> {
     const swept = await this.sql.begin(async (tx) => {
       const sql = tx as unknown as Sql;
-      const deleted = await sql<{ hash: string }[]>`
-        DELETE FROM api_files WHERE project_id = ${projectId} AND id = ${id}
-        RETURNING hash
+      const deleted = await sql<{ id: string }[]>`
+        DELETE FROM refs WHERE project_id = ${projectId} AND module = 'api' AND id = ${id}
+        RETURNING id
       `;
-      const hash = deleted[0]?.hash;
-      if (hash === undefined) return null;
-      return this.releaseBlobs(sql, projectId, new Map([[hash, 1]]));
+      if (deleted.length === 0) return null;
+      // The trigger decremented the blob; reap any that hit 0 (in this tx).
+      return sql<{ hash: string }[]>`
+        DELETE FROM value_blobs WHERE project_id = ${projectId} AND ref_count <= 0 RETURNING hash
+      `;
     });
     if (swept === null) return false;
-    await this.deleteBlobBytes(projectId, swept);
+    await this.deleteBlobBytes(
+      projectId,
+      swept.map((r) => r.hash),
+    );
     return true;
   }
 
   async persistRef(input: {
     projectId: string;
-    module: EphemeralOwner;
+    module: ProduceModule;
     id: string;
+    ownerEntityId: string;
     displayName?: string;
   }): Promise<FileRecord | null> {
     return this.sql.begin(async (tx) => {
@@ -367,148 +342,130 @@ export class PgValueStore implements ValueStore {
       const refRows = await sql<
         { hash: string | null; size: string | null; content_type: string | null }[]
       >`
-        SELECT hash, size, content_type FROM value_refs
-        WHERE project_id = ${input.projectId} AND owner_module = ${input.module}
+        SELECT hash, size, content_type FROM refs
+        WHERE project_id = ${input.projectId} AND module = ${input.module}
           AND id = ${input.id} AND state = 'complete'
       `;
       const ref = refRows[0];
       if (ref === undefined || ref.hash === null || ref.size === null) return null;
       const fileId = uuidv7();
-      // Share the existing blob (refcount += 1) — no byte rewrite.
-      await sql`
-        UPDATE value_blobs SET ref_count = ref_count + 1, last_accessed_at = now()
-        WHERE project_id = ${input.projectId} AND hash = ${ref.hash}
-      `;
-      const rows = await sql<{ created_at: Date }[]>`
-        INSERT INTO api_files (project_id, id, hash, size, content_type, display_name)
-        VALUES (${input.projectId}, ${fileId}, ${ref.hash}, ${ref.size}, ${ref.content_type},
-                ${input.displayName ?? null})
-        RETURNING created_at
-      `;
+      await this.shareBlob(sql, input.projectId, ref.hash); // share the blob (refcount += 1)
+      await this.insertRefRow(sql, {
+        projectId: input.projectId,
+        module: "api",
+        id: fileId,
+        ownerEntityId: input.ownerEntityId,
+        state: "complete",
+        semanticKind: "file",
+        origin: "user",
+        refsTo: [],
+        hash: ref.hash,
+        size: Number(ref.size),
+        contentType: ref.content_type ?? undefined,
+        displayName: input.displayName,
+      });
       return {
         id: fileId,
         hash: ref.hash,
         size: Number(ref.size),
         contentType: ref.content_type ?? undefined,
         displayName: input.displayName,
-        createdAt: (rows[0]?.created_at ?? new Date()).toISOString(),
+        createdAt: new Date().toISOString(),
       };
     });
   }
 
-  // ── ownership transitions (single-owner GC) ─────────────────────────────
+  // ── ownership: value-driven ascent ───────────────────────────────────────
 
   /**
-   * Load all refs owned by `ownerId`, then BFS from `seed` through `refs_to`
-   * (staying within this owner's refs) to compute the keep/move set + the rows
-   * to drop. Pure read; the caller applies the writes in its tx.
+   * BFS from `seed` through `refs_to`, restricted to refs whose current owner is
+   * `fromOwner` (an entity id, or `null` for in-transit refs). Returns the keys
+   * `module|id` to move. Pure read; the caller applies the UPDATE in its tx.
    */
   private async expandOwned(
     sql: Sql,
     projectId: string,
-    ownerId: string,
+    fromOwner: string | null,
     seed: ReadonlyArray<RefHandle>,
-  ): Promise<{ owned: OwnedRefRow[]; keep: Set<string> }> {
-    const owned = await sql<OwnedRefRow[]>`
-      SELECT owner_module, id, hash, refs_to FROM value_refs
-      WHERE project_id = ${projectId} AND owner_delegation_id = ${ownerId}
+  ): Promise<{ owned: Map<string, OwnedRefRow>; keep: Set<string> }> {
+    const ownedRows = await sql<OwnedRefRow[]>`
+      SELECT module, id, refs_to FROM refs
+      WHERE project_id = ${projectId} AND owner_entity_id IS NOT DISTINCT FROM ${fromOwner}
     `;
-    const byKey = new Map(owned.map((r) => [`${r.owner_module}|${r.id}`, r]));
+    const owned = new Map(ownedRows.map((r) => [`${r.module}|${r.id}`, r]));
     const keep = new Set<string>();
     const worklist = seed.map((h) => `${h.module}|${h.id}`);
     while (worklist.length > 0) {
       const key = worklist.pop()!;
       if (keep.has(key)) continue;
-      const row = byKey.get(key);
-      if (row === undefined) continue; // owned by someone higher / unknown
+      const row = owned.get(key);
+      if (row === undefined) continue; // owned by someone else / unknown
       keep.add(key);
       for (const child of row.refs_to) worklist.push(`${child.module}|${child.id}`);
     }
     return { owned, keep };
   }
 
-  async releaseOwner(
+  async reownRefs(
     projectId: string,
-    ownerId: string,
-    toOwnerId: string,
-    escapeSeed: ReadonlyArray<RefHandle>,
-  ): Promise<number> {
-    const swept = await this.sql.begin(async (tx) => {
-      const sql = tx as unknown as Sql;
-      const { owned, keep } = await this.expandOwned(sql, projectId, ownerId, escapeSeed);
-      const hashCounts = new Map<string, number>();
-      for (const row of owned) {
-        const key = `${row.owner_module}|${row.id}`;
-        if (keep.has(key)) {
-          await sql`
-            UPDATE value_refs SET owner_delegation_id = ${toOwnerId}
-            WHERE project_id = ${projectId} AND owner_module = ${row.owner_module} AND id = ${row.id}
-          `;
-        } else {
-          await sql`
-            DELETE FROM value_refs
-            WHERE project_id = ${projectId} AND owner_module = ${row.owner_module} AND id = ${row.id}
-          `;
-          if (row.hash !== null) hashCounts.set(row.hash, (hashCounts.get(row.hash) ?? 0) + 1);
-        }
-      }
-      return this.releaseBlobs(sql, projectId, hashCounts);
-    });
-    await this.deleteBlobBytes(projectId, swept);
-    return swept.length;
-  }
-
-  async transferOwnership(
-    projectId: string,
-    fromOwnerId: string,
-    toOwnerId: string,
+    fromOwner: string | null,
+    toOwner: string | null,
     seed: ReadonlyArray<RefHandle>,
   ): Promise<void> {
+    if (seed.length === 0) return;
     await this.sql.begin(async (tx) => {
       const sql = tx as unknown as Sql;
-      const { keep } = await this.expandOwned(sql, projectId, fromOwnerId, seed);
+      const { keep } = await this.expandOwned(sql, projectId, fromOwner, seed);
       for (const key of keep) {
-        const [owner_module, id] = key.split("|");
+        const [module, id] = key.split("|");
         await sql`
-          UPDATE value_refs SET owner_delegation_id = ${toOwnerId}
-          WHERE project_id = ${projectId} AND owner_module = ${owner_module!} AND id = ${id!}
+          UPDATE refs SET owner_entity_id = ${toOwner}
+          WHERE project_id = ${projectId} AND module = ${module!} AND id = ${id!}
         `;
       }
     });
   }
 
-  async sweepRefsWithDeadOwners(
-    projectId: string,
-    liveOwnerIds: ReadonlySet<string>,
-  ): Promise<number> {
+  async reapFreedBlobs(projectId: string): Promise<number> {
+    const swept = await this.sql<{ hash: string }[]>`
+      DELETE FROM value_blobs WHERE project_id = ${projectId} AND ref_count <= 0 RETURNING hash
+    `;
+    await this.deleteBlobBytes(
+      projectId,
+      swept.map((r) => r.hash),
+    );
+    return swept.length;
+  }
+
+  async sweepDetachedRefs(projectId: string): Promise<number> {
     const swept = await this.sql.begin(async (tx) => {
       const sql = tx as unknown as Sql;
-      const live = [...liveOwnerIds];
-      // Drop owned refs whose owner is gone. `= ANY` with an empty array is
-      // false, so when nothing is live every owned ref is swept.
-      const deleted = await sql<{ hash: string | null }[]>`
-        DELETE FROM value_refs
-        WHERE project_id = ${projectId}
-          AND owner_delegation_id IS NOT NULL
-          AND NOT (owner_delegation_id = ANY(${live as never}))
-        RETURNING hash
+      // Drop in-transit (orphaned) refs; the trigger decrements their blobs.
+      await sql`
+        DELETE FROM refs WHERE project_id = ${projectId} AND owner_entity_id IS NULL
       `;
-      if (deleted.length === 0) return [] as string[];
-      const hashCounts = new Map<string, number>();
-      for (const row of deleted) {
-        if (row.hash !== null) hashCounts.set(row.hash, (hashCounts.get(row.hash) ?? 0) + 1);
-      }
-      return this.releaseBlobs(sql, projectId, hashCounts);
+      return sql<{ hash: string }[]>`
+        DELETE FROM value_blobs WHERE project_id = ${projectId} AND ref_count <= 0 RETURNING hash
+      `;
     });
-    await this.deleteBlobBytes(projectId, swept);
+    await this.deleteBlobBytes(
+      projectId,
+      swept.map((r) => r.hash),
+    );
     return swept.length;
+  }
+
+  /** Physically remove swept blobs from the BlobStore (post-commit). */
+  private async deleteBlobBytes(projectId: string, hashes: string[]): Promise<void> {
+    for (const hash of hashes) {
+      await this.blobStore.delete(projectId, hash);
+    }
   }
 }
 
 type OwnedRefRow = {
-  owner_module: EphemeralOwner;
+  module: RefModule;
   id: string;
-  hash: string | null;
   refs_to: RefHandle[];
 };
 

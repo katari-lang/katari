@@ -9,7 +9,7 @@
 
 import type { ProjectIndexStore, ShardStore } from "../engine/shard.js";
 import type { ValueStore } from "../storage/value-store.js";
-import type { DelegationStore } from "./delegation-store.js";
+import type { EntityStore } from "./entity-store.js";
 
 // ─── CORE ──────────────────────────────────────────────────────────────────
 
@@ -17,12 +17,12 @@ import type { DelegationStore } from "./delegation-store.js";
 export interface CoreTxStores {
   /** Per-agent shard checkpoints. */
   shards: ShardStore;
-  /** Project-local routing index (delegation / escalation id → shard). */
+  /** Project-local routing index (bus id → shard E). */
   projectIndex: ProjectIndexStore;
-  /** 3-layer byte storage for persist-time promotion + ref materialization. `null` disables it. */
+  /** refs + value_blobs storage for promotion / materialization / ascent. `null` disables it. */
   values: ValueStore | null;
-  /** Audit sink for outbound delegate rows (the run tree). */
-  delegations: DelegationStore;
+  /** Execution-layer sink: entities (receiver) + delegations (issuer) + escalations (raiser). */
+  entities: EntityStore;
 }
 
 /** Transaction provider for CoreModule. The host opens a backend tx and

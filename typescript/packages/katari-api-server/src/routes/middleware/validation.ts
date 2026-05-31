@@ -1,7 +1,7 @@
 // Zod-backed request validators.
 
 import { z } from "zod";
-import type { DelegationId, EscalationId, ProjectId, SnapshotId } from "../../storage/types.js";
+import type { EscalationId, ProjectId, RunId, SnapshotId } from "../../storage/types.js";
 
 // ─── Branded id schemas ────────────────────────────────────────────────────
 
@@ -16,13 +16,13 @@ export const SnapshotIdSchema = z
   .transform((s) => s as SnapshotId);
 
 /**
- * Run id (= the root delegation's UUID). The CLI / admin UI talk about
- * "runs"; the underlying entity is a top-level delegation.
+ * Run id (= the run-root entity's UUID). The CLI / admin UI talk about
+ * "runs"; the underlying entity is the API-kept run-root.
  */
 export const RunIdSchema = z
   .string()
   .uuid()
-  .transform((s) => s as DelegationId);
+  .transform((s) => s as RunId);
 
 // Escalations are runtime-generated UUIDs (see katari-runtime); the
 // previous `min(1)` shape accepted arbitrary strings, which then broke
@@ -129,7 +129,7 @@ export type UploadSnapshotInput = z.infer<typeof UploadSnapshotSchema>;
  * Live delegation rows only carry `running | cancelling`; the terminal
  * states (`cancelled / succeeded / error`) live in `runs_audit`.
  */
-export const RunStateSchema = z.enum(["running", "cancelling", "cancelled", "succeeded", "error"]);
+export const RunStateSchema = z.enum(["running", "cancelling", "done", "error"]);
 export type RunStateInput = z.infer<typeof RunStateSchema>;
 
 // Project comes from the URL path (`/project/:projectId/run`); the body

@@ -2,24 +2,30 @@
 //
 // "The API module is not the HTTP server, it is the user": HTTP routes are thin
 // shims that call ApiModule domain methods (startRun / cancelRun /
-// answerEscalation) and the bus drains the rest. Phase E makes it a warm,
-// per-project module that owns its own transaction: each domain method + each
-// `feed` opens its own tx over the root storage (1 quantum = 1 tx).
+// answerEscalation) and the bus drains the rest. It is a warm, per-project
+// module that owns its own transaction (1 quantum = 1 tx).
 //
-// State (DB-backed):
-//   - delegations  : the live run tree (protocol entity, project-scoped — the
-//                    snapshot a delegation runs is CORE-private state, not here)
-//   - escalations  : open AI→user questions awaiting an operator reply
-//   - runs_audit   : ApiModule's OWN audit log of operator-launched roots. A
-//                    "run" is bound to a snapshot (which version was launched),
-//                    so runs_audit keeps the snapshot id — that is API-private
-//                    state, not the protocol delegations row.
+// Entity model (docs/2026-06-01-entity-model.md). The API owns the top of the
+// tree + the per-run bookkeeping:
+//   - project-root entity (module=api, id = projectId, delegation_id=null) —
+//     owns user uploads; created lazily; kept for the project's life.
+//   - run-root entity (module=api, id = E_run) — one per run; the project root
+//     issues `D_run` to summon it, and it issues `D_core` to the CORE root.
+//     Claims the run's result refs; kept as run history.
+//   - Run record (`runs`, id = E_run) — the run's management state
+//     (running/cancelling/done/error), reflecting the CORE-root child.
+//
+// The API issues the run-root + CORE-root delegations (and deletes them on their
+// acks) and claims the result value's refs to the run-root on `delegateAck`
+// (value-driven ascent). Escalations are owned by their raiser (CORE writes the
+// live row); the API only answers + audits.
 
 import {
   API_ENDPOINT,
   CORE_ENDPOINT,
   collectRefs,
   createDelegationId,
+  createEntityId,
   type ExternalEvent,
   encodeCoreAgentDefId,
   encryptValueRecord,
@@ -31,17 +37,16 @@ import {
   type Value,
 } from "@katari-lang/runtime";
 
-// The unhandled-throw escalate's id. Was a hand-typed `prim.throw` that never
-// matched the emitted `primitive.throw`, so throws slipped through as open
-// escalations; now derived from the runtime's single source of truth.
+// The unhandled-throw escalate's id, derived from the runtime's single source of
+// truth (a hand-typed string would silently never match).
 const THROW_AGENT_DEF_ID = encodeCoreAgentDefId({ kind: "qname", value: THROW_REQUEST_QNAME });
 
-import type { DelegationId, EscalationId } from "@katari-lang/runtime";
+import type { DelegationId, EntityId, EscalationId } from "@katari-lang/runtime";
+import { ensureProjectRootEntity } from "../entity-roots.js";
 import { NoSnapshotForProject, SnapshotNotFound } from "../services/snapshot-service.js";
-import type { ProjectId, RunsAuditRow, SnapshotId, Storage } from "../storage/types.js";
+import type { ProjectId, RunId, RunRow, SnapshotId, Storage } from "../storage/types.js";
 
-/** Default `run.name` — pairs the agent qname with a wall-clock time so the run
- *  is identifiable in the Runs list at a glance ("hello.main @ 15:42"). */
+/** Default `run.name` — the agent qname + wall-clock ("hello.main @ 15:42"). */
 function defaultRunName(qualifiedName: string, now: Date): string {
   const h = String(now.getHours()).padStart(2, "0");
   const m = String(now.getMinutes()).padStart(2, "0");
@@ -95,7 +100,10 @@ export class ApiModule implements Module {
         if (event.payload.agentDefId === THROW_AGENT_DEF_ID) {
           return await this.handleThrowEscalate(event.payload.delegationId, event.payload.args);
         }
-        await this.recordEscalation({ from: event.from, payload: event.payload });
+        // A user-facing capability escalate. The raiser (CORE) owns the live
+        // `escalations` row; the API records its own per-run operator view
+        // (mapping the bus `delegationId = D_core` → run — its OWN tables only).
+        await this.recordPendingEscalation(event.payload);
         return { outbound: [] };
 
       case "escalateAck":
@@ -115,8 +123,10 @@ export class ApiModule implements Module {
     qualifiedName: string;
     name: string | null;
     args: Record<string, Value>;
-  }): Promise<{ runId: DelegationId }> {
-    const delegationId = createDelegationId();
+  }): Promise<{ runId: RunId }> {
+    const runEntityId = createEntityId() as unknown as EntityId; // E_run
+    const runDelegationId = createDelegationId(); // D_run (project-root → run-root)
+    const coreDelegationId = createDelegationId(); // D_core (run-root → CORE root)
     const startedAt = new Date();
     const now = startedAt.toISOString();
     const encryptedArgs = encryptValueRecord(input.args);
@@ -126,35 +136,59 @@ export class ApiModule implements Module {
         : defaultRunName(input.qualifiedName, startedAt);
 
     // Resolve + record + enqueue in one tx so the snapshot can't vanish between
-    // resolve and insert. The root delegate is stamped with the resolved
-    // snapshot (a CORE agent → snapshot-dependent target) so CORE starts the
-    // agent on the right IR version.
+    // resolve and insert.
     const snapshotId = await this.storage.withTransaction(async (tx) => {
       const resolved = input.snapshotId ?? (await tx.snapshots.latest(this.projectId)) ?? null;
       if (resolved === null) throw new NoSnapshotForProject(this.projectId);
       if ((await tx.snapshots.get(resolved)) === null) throw new SnapshotNotFound(resolved);
 
+      const projectRoot = await this.ensureProjectRoot(tx);
+      const coreAgentDefId = encodeCoreAgentDefId({
+        kind: "qname",
+        value: input.qualifiedName,
+        snapshot: resolved,
+      });
+
+      // run-root entity (the API runs it) — the project root summons it via D_run.
       await tx.delegations.insert({
-        id: delegationId,
-        rootDelegationId: delegationId,
-        parentDelegationId: null,
+        id: runDelegationId,
         projectId: this.projectId,
-        callerEndpoint: API_ENDPOINT,
-        ownerEndpoint: CORE_ENDPOINT,
-        agentDefId: encodeCoreAgentDefId({
-          kind: "qname",
-          value: input.qualifiedName,
-          snapshot: resolved,
-        }),
+        parentEntityId: projectRoot,
+        targetModule: "api",
+        agentDefId: coreAgentDefId,
         args: encryptedArgs,
         state: "running",
         createdAt: now,
         updatedAt: now,
       });
-
-      const auditRow: RunsAuditRow = {
-        id: delegationId,
+      await tx.entities.insert({
+        id: runEntityId,
+        delegationId: runDelegationId,
+        projectId: this.projectId,
+        module: "api",
+        state: "running",
+        agentDefId: null,
+        args: encryptedArgs,
+        createdAt: now,
+        updatedAt: now,
+      });
+      // The run-root issues D_core to the CORE root.
+      await tx.delegations.insert({
+        id: coreDelegationId,
+        projectId: this.projectId,
+        parentEntityId: runEntityId,
+        targetModule: "core",
+        agentDefId: coreAgentDefId,
+        args: encryptedArgs,
+        state: "running",
+        createdAt: now,
+        updatedAt: now,
+      });
+      await tx.runs.insert({
+        id: runEntityId as unknown as RunId,
+        projectId: this.projectId,
         snapshotId: resolved,
+        coreDelegationId,
         name,
         qualifiedName: input.qualifiedName,
         args: encryptedArgs,
@@ -162,8 +196,7 @@ export class ApiModule implements Module {
         cancelReason: null,
         createdAt: now,
         updatedAt: now,
-      };
-      await tx.runsAudit.insert(auditRow);
+      });
       return resolved;
     });
 
@@ -172,7 +205,7 @@ export class ApiModule implements Module {
       to: CORE_ENDPOINT,
       payload: {
         kind: "delegate",
-        delegationId,
+        delegationId: coreDelegationId,
         agentDefId: encodeCoreAgentDefId({
           kind: "qname",
           value: input.qualifiedName,
@@ -181,31 +214,29 @@ export class ApiModule implements Module {
         args: input.args,
       },
     });
-    return { runId: delegationId };
+    return { runId: runEntityId as unknown as RunId };
   }
 
   async cancelRun(input: {
     bus: { push: (event: ExternalEvent) => void };
-    runId: DelegationId;
-  }): Promise<{ row: RunsAuditRow | null }> {
+    runId: RunId;
+  }): Promise<{ row: RunRow | null }> {
     const refreshed = await this.storage.withTransaction(async (tx) => {
-      const auditRow = await tx.runsAudit.get(input.runId);
-      if (auditRow === null) return null;
-      if (auditRow.state !== "running") return auditRow;
-
-      await tx.runsAudit.setState(input.runId, { state: "cancelling", cancelReason: "user" });
-      await tx.delegations.markAllUnderRootAsCancelling(input.runId);
-      await tx.escalations.cancelAllUnderRoot(input.runId);
-      return tx.runsAudit.get(input.runId);
+      const run = await tx.runs.get(input.runId);
+      if (run === null) return null;
+      if (run.state !== "running") return run;
+      await tx.runs.setState(input.runId, { state: "cancelling", cancelReason: "user" });
+      await tx.entities.setState(input.runId as unknown as EntityId, "cancelling");
+      return tx.runs.get(input.runId);
     });
     if (refreshed === null) return { row: null };
 
-    // Send terminate to CORE for the root only; the engine cascades the cancel
-    // through its threads and emits terminateAck.
+    // Terminate the CORE root; the engine cascades the cancel through its
+    // threads and emits terminateAck.
     input.bus.push({
       from: API_ENDPOINT,
       to: CORE_ENDPOINT,
-      payload: { kind: "terminate", delegationId: input.runId },
+      payload: { kind: "terminate", delegationId: refreshed.coreDelegationId },
     });
     return { row: refreshed };
   }
@@ -216,9 +247,14 @@ export class ApiModule implements Module {
     value: Value;
   }): Promise<{ ok: boolean }> {
     const ok = await this.storage.withTransaction((tx) =>
-      tx.escalations.setAnswered(input.escalationId, encryptValueTree(input.value)),
+      tx.runEscalationsAudit.setAnswer(
+        input.escalationId,
+        encryptValueTree(input.value),
+        new Date().toISOString(),
+      ),
     );
     if (!ok) return { ok: false };
+    // The raiser (CORE) deletes its own escalation row on escalateAck.
     input.bus.push({
       from: API_ENDPOINT,
       to: CORE_ENDPOINT,
@@ -229,29 +265,64 @@ export class ApiModule implements Module {
 
   // ─── Internal helpers ──────────────────────────────────────────────────
 
+  /** Get-or-create the project-root entity (id = projectId). */
+  private ensureProjectRoot(tx: Storage): Promise<EntityId> {
+    return ensureProjectRootEntity(tx, this.projectId);
+  }
+
+  /** Record a pending operator-facing escalation. The escalate reaches the API
+   *  with `delegationId = D_core` (each forward hop re-stamps it to the
+   *  forwarder's delegation, so the CORE root's = the run's `coreDelegationId`),
+   *  so the run resolves from the API's OWN `runs` table — no walk into CORE. */
+  private async recordPendingEscalation(
+    payload: Extract<ExternalEvent["payload"], { kind: "escalate" }>,
+  ): Promise<void> {
+    await this.storage.withTransaction(async (tx) => {
+      const run = await tx.runs.getByCoreDelegation(payload.delegationId);
+      if (run === null) {
+        this.logger.log("warn", "api: escalate for unknown run", {
+          delegationId: payload.delegationId,
+          escalationId: payload.escalationId,
+        });
+        return;
+      }
+      await tx.runEscalationsAudit.insert({
+        runId: run.id,
+        escalationId: payload.escalationId,
+        agentDefId: payload.agentDefId,
+        args: encryptValueRecord(payload.args),
+        createdAt: new Date().toISOString(),
+      });
+    });
+  }
+
   private async handleThrowEscalate(
     delegationId: DelegationId,
     args: Record<string, Value>,
   ): Promise<{ outbound: ExternalEvent[] }> {
-    const msgValue = args["msg"];
+    const msgValue = args.msg;
     const message = (msgValue !== undefined && tryInlineString(msgValue)) || "runtime error";
 
-    const rootId = await this.storage.withTransaction(async (tx) => {
-      const liveRow = await tx.delegations.get(delegationId);
-      const root = liveRow?.rootDelegationId ?? delegationId;
-      await tx.runsAudit.setState(root, {
+    // The throw reaches the API with `delegationId = D_core` (the CORE root
+    // re-stamps it on the last hop), so the run resolves from `runs` directly.
+    const coreDelegationId = await this.storage.withTransaction(async (tx) => {
+      const run = await tx.runs.getByCoreDelegation(delegationId);
+      if (run === null) return null;
+      await tx.runs.setState(run.id, {
         state: "cancelling",
         cancelReason: "error",
         errorMessage: message,
       });
-      await tx.delegations.markAllUnderRootAsCancelling(root);
-      await tx.escalations.cancelAllUnderRoot(root);
-      return root;
+      return run.coreDelegationId;
     });
+    if (coreDelegationId === null) {
+      this.logger.log("warn", "api: throw escalate for unknown run", { delegationId, message });
+      return { outbound: [] };
+    }
 
     this.logger.log("info", "api: prim.throw escalate — run cancelling", {
       delegationId,
-      rootId,
+      coreDelegationId,
       message,
     });
     return {
@@ -259,72 +330,48 @@ export class ApiModule implements Module {
         {
           from: API_ENDPOINT,
           to: CORE_ENDPOINT,
-          payload: { kind: "terminate", delegationId: rootId },
+          payload: { kind: "terminate", delegationId: coreDelegationId },
         },
       ],
     };
   }
 
-  private async recordEscalation(event: {
-    from: string;
-    payload: Extract<ExternalEvent["payload"], { kind: "escalate" }>;
-  }): Promise<void> {
-    const { delegationId, escalationId, agentDefId, args } = event.payload;
+  private async completeRun(coreDelegationId: DelegationId, value: Value): Promise<void> {
     await this.storage.withTransaction(async (tx) => {
-      const live = await tx.delegations.get(delegationId);
-      const rootId = live?.rootDelegationId ?? delegationId;
-      await tx.escalations.insert({
-        id: escalationId,
-        delegationId,
-        rootDelegationId: rootId,
-        projectId: this.projectId,
-        callerEndpoint: event.from,
-        receiverEndpoint: API_ENDPOINT,
-        agentDefId,
-        args: encryptValueRecord(args),
-        state: "open",
-        createdAt: new Date().toISOString(),
-      });
-      // GC ownership: the escalation entity (persistent until answered/cancelled)
-      // takes over any ref the escalating delegation owns in the args, so a file
-      // carried up in an escalation stays fetchable in the escalation history
-      // after the escalator's own shard has completed. transferOwnership only
-      // moves refs OWNED BY the escalator (api_files / higher-owned refs are
-      // untouched).
-      const seed = Object.values(args).flatMap((value) => collectRefs(value));
+      const run = await tx.runs.getByCoreDelegation(coreDelegationId);
+      if (run === null) {
+        this.logger.log("warn", "api: delegateAck for unknown run", { coreDelegationId });
+        await tx.delegations.delete(coreDelegationId);
+        return;
+      }
+      // Value-driven ascent: the CORE root detached the result's escaping refs
+      // (owner=NULL); claim them to the run-root (kept) so the result persists.
+      const seed = collectRefs(value);
       if (seed.length > 0) {
-        await tx.values.transferOwnership(this.projectId, delegationId, escalationId, seed);
+        await tx.values.reownRefs(this.projectId, null, run.id, seed);
       }
+      await tx.runs.setState(run.id, {
+        state: "done",
+        result: encryptValueTree(value),
+        completedAt: new Date().toISOString(),
+      });
+      // Issuer deletes the request edge now the result is in.
+      await tx.delegations.delete(coreDelegationId);
     });
   }
 
-  private async completeRun(delegationId: DelegationId, value: Value): Promise<void> {
+  private async handleTerminateAck(coreDelegationId: DelegationId): Promise<void> {
     await this.storage.withTransaction(async (tx) => {
-      const auditRow = await tx.runsAudit.get(delegationId);
-      if (auditRow !== null) {
-        await tx.runsAudit.setState(delegationId, {
-          state: "succeeded",
-          result: encryptValueTree(value),
-          completedAt: new Date().toISOString(),
-        });
-      } else {
-        this.logger.log("warn", "api: delegateAck for unknown run id", { delegationId });
-      }
-      await tx.delegations.deleteAllUnderRoot(delegationId);
-    });
-  }
-
-  private async handleTerminateAck(delegationId: DelegationId): Promise<void> {
-    await this.storage.withTransaction(async (tx) => {
-      const auditRow = await tx.runsAudit.get(delegationId);
-      if (auditRow !== null) {
-        const finalState = auditRow.cancelReason === "error" ? "error" : "cancelled";
-        await tx.runsAudit.setState(delegationId, {
-          state: finalState,
+      const run = await tx.runs.getByCoreDelegation(coreDelegationId);
+      if (run !== null) {
+        await tx.runs.setState(run.id, {
+          // The 4-state Run model has no distinct `cancelled`; a user cancel ends
+          // as `error` with cancelReason='user' (the UI labels it "cancelled").
+          state: "error",
           completedAt: new Date().toISOString(),
         });
       }
-      await tx.delegations.deleteAllUnderRoot(delegationId);
+      await tx.delegations.delete(coreDelegationId);
     });
   }
 }

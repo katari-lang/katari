@@ -1,14 +1,14 @@
 // Run-tree route. Mounted at `/project/:projectId/run/:runId/tree`.
 //
-// Returns the live delegation tree rooted at `runId`, plus its root's
-// audit state. The admin UI polls this every few seconds while the
+// Returns the live entity tree rooted at `runId`, plus the Run record's
+// terminal state. The admin UI polls this every few seconds while the
 // run is in flight to drive the tree visualization.
 
 import { Hono } from "hono";
-import { type DelegationTreeService, RunNotFound } from "../services/delegation-tree-service.js";
+import { type EntityTreeService, RunNotFound } from "../services/entity-tree-service.js";
 import { ProjectIdSchema, RunIdSchema } from "./middleware/validation.js";
 
-export function buildRunTreeRoutes(treeService: DelegationTreeService): Hono {
+export function buildRunTreeRoutes(treeService: EntityTreeService): Hono {
   const app = new Hono();
 
   app.get("/", async (c) => {

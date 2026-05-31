@@ -217,7 +217,7 @@ pollUntilDone client runId = loop (50_000 :: Int)
         done -> do
           hPutStr stderr (Text.unpack (Status.renderRunDetailed row))
           case done of
-            Api.RunSucceeded -> case row.result of
+            Api.RunDone -> case row.result of
               Just v -> LC8.putStrLn (Aeson.encode v)
               Nothing -> pure ()
             Api.RunError -> exitWith (ExitFailure 1)

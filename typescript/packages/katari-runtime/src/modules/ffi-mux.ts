@@ -24,7 +24,9 @@ import type { Module } from "../module.js";
 import type { Sidecar } from "../sidecar/sidecar.js";
 import type { FfiStore } from "../sidecar/store.js";
 import type { ChildToParent } from "../sidecar/types.js";
+import type { ValueStore } from "../storage/value-store.js";
 import { FFI_ENDPOINT } from "./endpoints.js";
+import type { EntityStore } from "./entity-store.js";
 import { FfiModule } from "./ffi.js";
 
 /**
@@ -56,6 +58,13 @@ export class FfiMux implements Module {
     private readonly backend: FfiLaneBackend,
     private readonly onBusResponse: (event: ExternalEvent) => void,
     private readonly logger: Logger,
+    /** Project-scoped execution-layer sink (FFI ext entities + the delegations
+     *  ext-spawned children are issued under). */
+    private readonly entities: EntityStore,
+    /** Project-scoped ref store (ext ref ascent on ext terminal). */
+    private readonly values: ValueStore,
+    /** Project the FFI ext entities + refs belong to. */
+    private readonly projectId: string,
   ) {}
 
   async feed(event: ExternalEvent): Promise<{ outbound: ExternalEvent[] }> {
@@ -123,8 +132,11 @@ export class FfiMux implements Module {
     const lane = new FfiModule({
       endpoint: FFI_ENDPOINT,
       snapshotId: snapshot,
+      projectId: this.projectId,
       sidecar: this.backend.sidecar(snapshot),
       store: this.backend.store(snapshot),
+      entities: this.entities,
+      values: this.values,
       logger: this.logger,
       onSidecarResponse: this.onBusResponse,
     });

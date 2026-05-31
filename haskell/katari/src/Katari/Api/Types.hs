@@ -166,11 +166,14 @@ newtype UploadSnapshotResponse = UploadSnapshotResponse
 -- Runs (= operator-launched root delegations; the "agent" entry point)
 -- ---------------------------------------------------------------------------
 
+-- | The 4 Run states of the Entity model (docs/2026-06-01-entity-model.md):
+-- @running | cancelling | done | error@. A user-initiated cancel surfaces as
+-- @error@ with @cancelReason = user@ (no distinct @cancelled@ state); the
+-- terminal success state is @done@ (was @succeeded@).
 data RunState
   = RunRunning
   | RunCancelling
-  | RunCancelled
-  | RunSucceeded
+  | RunDone
   | RunError
   deriving stock (Show, Eq)
 
@@ -178,16 +181,14 @@ runStateText :: RunState -> Text
 runStateText = \case
   RunRunning -> "running"
   RunCancelling -> "cancelling"
-  RunCancelled -> "cancelled"
-  RunSucceeded -> "succeeded"
+  RunDone -> "done"
   RunError -> "error"
 
 instance FromJSON RunState where
   parseJSON = withText "RunState" $ \t -> case t of
     "running" -> pure RunRunning
     "cancelling" -> pure RunCancelling
-    "cancelled" -> pure RunCancelled
-    "succeeded" -> pure RunSucceeded
+    "done" -> pure RunDone
     "error" -> pure RunError
     _ -> fail ("unknown run state: " <> Text.unpack t)
 

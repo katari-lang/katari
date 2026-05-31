@@ -17,7 +17,15 @@ import {
 } from "../src/agent-def-id.js";
 import type { AgentDefId } from "../src/agent-def-id.js";
 import { CORE_ENDPOINT, FFI_ENDPOINT } from "../src/modules/endpoints.js";
+import { NULL_ENTITY_STORE } from "../src/modules/entity-store.js";
 import { FfiModule } from "../src/modules/ffi.js";
+import type { ValueStore } from "../src/storage/value-store.js";
+
+// FFI only ever calls `values.reownRefs` (ext ref ascent); a no-op suffices for
+// the snapshot-boundary tests, which produce no refs.
+const NULL_VALUE_STORE = {
+  async reownRefs() {},
+} as unknown as ValueStore;
 import type { ExternalEvent } from "../src/engine/event.js";
 import { createDelegationId } from "../src/engine/id.js";
 import { noopLogger } from "../src/engine/logger.js";
@@ -90,8 +98,13 @@ function makeModule(): {
   const ffi = new FfiModule({
     endpoint: FFI_ENDPOINT,
     snapshotId: SNAP,
+    projectId: "test-proj",
     sidecar,
     store,
+    // This test asserts the snapshot-stamping boundary, not entity ownership;
+    // a no-op entity store + value store keep it focused.
+    entities: NULL_ENTITY_STORE,
+    values: NULL_VALUE_STORE,
     logger: noopLogger,
     onSidecarResponse: (event) => bus.push(event),
   });

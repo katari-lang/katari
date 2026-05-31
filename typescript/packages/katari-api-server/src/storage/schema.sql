@@ -1,27 +1,46 @@
--- katari-api-server schema (v0.1.0).
+-- katari-api-server schema (v0.1.0 — Entity model).
 --
--- Tables:
---   - projects           : top-level deploy unit (1 project = 1 app)
---   - snapshots          : a single apply's frozen (IR + sidecar JS + schema + message)
---   - engine_checkpoints : per-snapshot CORE state
---   - delegations        : live execution entities, owned by the Module that ISSUED
---                          the delegate event. One physical table; each Module's
---                          repo filters by `caller_endpoint = self`. Rows are
---                          deleted on terminal state (delegateAck / terminateAck).
---   - escalations        : live escalation entities, same ownership pattern.
---                          State terminal on answered / cancelled (= cascade from
---                          parent delegation cancel).
---   - runs_audit         : ApiModule-specific persistent log of operator-launched
---                          root delegations. Stays even after the live row in
---                          `delegations` is deleted, so the "Runs" page can show
---                          terminal states + results + cancel reason.
---   - env_entries        : per-project env store (shared across a project's snapshots).
+-- See docs/2026-06-01-entity-model.md (the SSoT). The execution layer is two
+-- records with distinct owners + nested lifetimes:
+--
+--   - delegations : the ISSUER-managed request edge. Created by the parent when
+--                   it emits a `delegate` (one row per in-flight call request),
+--                   deleted by the parent when it receives the result ack. Holds
+--                   the parent link (`parent_entity_id` = the issuer's OWN `E`)
+--                   on the issuer side; the receiver never reads it (boundary).
+--   - entities    : the RECEIVER-managed execution node (the ownership/cascade
+--                   root). Created by the child when it begins processing (mints
+--                   a fresh `id = E`) from the bus event + ambient context ALONE
+--                   (no cross-server read), deleted by the child itself on
+--                   terminal. `delegation_id = D` is the back-link the server
+--                   uses to route bus `D → E`. lifetime(delegation) ⊇
+--                   lifetime(entity); ref ascent is value-driven (see `refs`).
+--
+-- Everything hangs off entities by `owner_entity_id` / `entity_id` with FK
+-- `ON DELETE CASCADE` (the integrity backstop; normal teardown is the protocol's
+-- bottom-up self-delete). refs unify the old value_refs + api_files; escalations
+-- belong to their RAISER; the API's per-run bookkeeping is the `runs` record.
+--
+--   - refs        : a blob handle owned by an entity (string / file / secret /
+--                   closure). Unifies ephemeral CORE/FFI values AND user files.
+--   - escalations : a live capability request, owned by the entity that RAISED
+--                   it (state `open` only; terminal = the row is deleted).
+--   - runs        : the API module's per-run management record (running /
+--                   cancelling / done / error), 1:1 with a run-root entity.
+--   - run_escalations_audit : answered user-facing escalations kept under a run.
+--   - value_blobs : project-wide content-addressed refcount LEDGER (the dedup
+--                   unit). Bytes live in a pluggable BlobStore; an AFTER DELETE
+--                   trigger on `refs` keeps the refcount correct under both
+--                   explicit deletes and entity cascade.
+--   - env_entries : per-project env store (shared across a project's snapshots).
 
--- Pre-v0.1.0 prototype tables that have been absorbed into the unified
--- `delegations` / `escalations` / `runs_audit` design. Dropped here so a
--- dev environment that ran an older schema doesn't keep stale rows.
+-- Pre-Entity-model tables, dropped so a dev DB that ran an older schema doesn't
+-- keep stale rows. (Pre-release: the DB is wipeable, no migration path.)
 DROP TABLE IF EXISTS agents CASCADE;
 DROP TABLE IF EXISTS api_pending_escalations CASCADE;
+DROP TABLE IF EXISTS runs_audit CASCADE;
+DROP TABLE IF EXISTS value_refs CASCADE;
+DROP TABLE IF EXISTS api_files CASCADE;
 
 CREATE TABLE IF NOT EXISTS projects (
   id          UUID PRIMARY KEY,
@@ -47,10 +66,10 @@ CREATE INDEX IF NOT EXISTS snapshots_project_created_idx
   ON snapshots (project_id, created_at DESC);
 
 -- Per-agent-instance shard: the encrypted engine checkpoint for one warm CORE
--- shard, keyed by (project_id, shard_id). `current_snapshot` records which code
--- version the instance runs (RESTRICT: a snapshot in use by a live shard cannot
--- be deleted). Completed shards are physically DELETEd. Replaces the old
--- per-snapshot `engine_checkpoints` (warm per-project actor model).
+-- shard, keyed by (project_id, shard_id). `shard_id = E` (the CORE entity id).
+-- `current_snapshot` records which code version the instance runs (RESTRICT: a
+-- snapshot in use by a live shard cannot be deleted). Completed shards are
+-- physically DELETEd (no replay → no retention).
 CREATE TABLE IF NOT EXISTS engine_shards (
   project_id        UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
   shard_id          TEXT NOT NULL,
@@ -63,7 +82,7 @@ CREATE TABLE IF NOT EXISTS engine_shards (
 CREATE INDEX IF NOT EXISTS engine_shards_project_status_idx
   ON engine_shards (project_id, status);
 
--- Per-project routing index (delegation / escalation id -> shard). One JSONB
+-- Per-project routing index (delegation / escalation id -> shard E). One JSONB
 -- row per project; the CoreModule keeps it warm in memory and writes through.
 CREATE TABLE IF NOT EXISTS project_index (
   project_id  UUID PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
@@ -71,102 +90,143 @@ CREATE TABLE IF NOT EXISTS project_index (
   updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- Live delegation entities. One row per in-flight call frame, regardless
--- of which Module issued it. The Module that issued the delegate event
--- (= `caller_endpoint`) owns writes for this row. Terminal state =
--- physical DELETE; persistent audit lives in `runs_audit` for roots only.
+-- ─── Execution layer: entities (receiver) + delegations (issuer) ─────────────
+
+-- Entity = the execution node (ownership/cascade root). RECEIVER-managed:
+-- created when a module begins processing an inbound `delegate` (minting a fresh
+-- `id = E`), deleted by that same entity on its terminal (after ref ascent).
 --
--- `root_delegation_id` is denormalised so the tree query for an entire
--- run is one indexed lookup (`WHERE root_delegation_id = ?`) rather than
--- a recursive CTE walking parent links.
--- `project_id` (not snapshot_id): a delegation is a katari-protocol entity
--- scoped to a project. Which code version (snapshot) a delegation runs is
--- module-private state (CORE: engine_shards.current_snapshot; FFI: its own
--- tables) and deliberately does NOT live on this protocol table.
-CREATE TABLE IF NOT EXISTS delegations (
-  id                   UUID PRIMARY KEY,
-  root_delegation_id   UUID NOT NULL,
-  parent_delegation_id UUID,
-  project_id           UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-  caller_endpoint      TEXT NOT NULL,
-  owner_endpoint       TEXT NOT NULL,
-  agent_def_id         JSONB NOT NULL,
-  args                 JSONB NOT NULL,
-  state                TEXT NOT NULL,             -- 'running' | 'cancelling'
-  created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at           TIMESTAMPTZ NOT NULL DEFAULT now()
+-- CROSS-SERVER BOUNDARY: an entity stores ONLY what the receiver can know from
+-- the bus event + its ambient context — never anything that would require
+-- querying the issuer's (another server's) tables. So there is NO
+-- `parent_entity_id` / `root_entity_id` here: the parent's `E` is off-bus, and
+-- the receiver must not read the issuer's `delegations` row to learn it. The
+-- parent link lives on the issuer-side `delegations` row instead (where the
+-- issuer writes its OWN `E` locally). Ownership ascent rides the delegation `D`
+-- (see `refs`), so the child never needs the parent's `E`.
+--
+--   - `delegation_id` : the summoning `D` (from the bus; the back-link for `D →
+--                       E` routing). NULL only for the project-root entity.
+--   - `module`        : 'core' | 'ffi' | 'api' | 'env' — who runs it (self).
+--   - `state`         : 'running' | 'cancelling' (the only entity states;
+--                       'done'/'error' are the Run record's, not here).
+CREATE TABLE IF NOT EXISTS entities (
+  id            UUID PRIMARY KEY,
+  delegation_id UUID,
+  project_id    UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  module        TEXT NOT NULL,                     -- 'core' | 'ffi' | 'api' | 'env'
+  state         TEXT NOT NULL,                     -- 'running' | 'cancelling'
+  agent_def_id  JSONB,                             -- null for the project root
+  args          JSONB NOT NULL DEFAULT '{}',
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-CREATE INDEX IF NOT EXISTS delegations_root_idx
-  ON delegations (root_delegation_id);
-CREATE INDEX IF NOT EXISTS delegations_parent_idx
-  ON delegations (parent_delegation_id);
+CREATE UNIQUE INDEX IF NOT EXISTS entities_delegation_idx
+  ON entities (project_id, delegation_id) WHERE delegation_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS entities_project_state_idx
+  ON entities (project_id, state);
+
+-- Delegation = the request edge. ISSUER-managed: the parent INSERTs a row when
+-- it emits `delegate(D)` and DELETEs it when it receives the result ack
+-- (delegateAck / terminateAck). The receiver NEVER reads, writes, or deletes it
+-- (that would cross the server boundary). So lifetime(delegation) ⊇
+-- lifetime(entity): the request is born first, dies last. (It is NOT an owner of
+-- refs — ref ascent is value-driven; see `refs`.)
+--
+-- `parent_entity_id` = the issuer's OWN entity, which the issuer knows locally
+-- (the run-root for D_core; the emitting CORE shard for a sub-delegate; the
+-- project-root for the run-root's D_run). This is the parent link (the entity
+-- tree is reconstructed by joining `entities.delegation_id` ↔ `delegations.id`).
+-- `target_module` = the `to` endpoint. No `root_entity_id`: a denormalised root
+-- would require knowing an ancestor `E` (cross-server) — "all entities under a
+-- run" is a local recursive walk on `parent_entity_id`, done aggregator-side.
+CREATE TABLE IF NOT EXISTS delegations (
+  id                UUID PRIMARY KEY,              -- D
+  project_id        UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  parent_entity_id  UUID NOT NULL,                 -- the issuer's own entity (E)
+  target_module     TEXT NOT NULL,                 -- 'core' | 'ffi' | 'api' | 'env'
+  agent_def_id      JSONB NOT NULL,
+  args              JSONB NOT NULL,
+  state             TEXT NOT NULL,                 -- 'running' | 'cancelling'
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS delegations_parent_idx ON delegations (parent_entity_id);
 CREATE INDEX IF NOT EXISTS delegations_project_state_idx
   ON delegations (project_id, state);
-CREATE INDEX IF NOT EXISTS delegations_caller_root_idx
-  ON delegations (caller_endpoint, root_delegation_id);
 
--- Live escalation entities. Each row is one in-flight `escalate` event
--- raised inside a delegation, awaiting an `escalateAck`. `state =
--- cancelled` is reached only via cascade when the parent delegation
--- chain is cancelled (= no standalone cancel endpoint).
+-- Escalation = a live capability request, owned by the entity that RAISED it
+-- (the raiser is the subject + holds the delete authority; an ancestor only
+-- answers). `state` is 'open' only — answered/cancelled are both terminal = the
+-- row is deleted (the raiser self-deletes on escalateAck; cancel cascades when
+-- the raiser entity is terminated). No `handler` field (routing-decided,
+-- transient). `agent_def_id` = the requested capability / `request`. The history
+-- of answered user-facing ones lives under the run (run_escalations_audit).
 CREATE TABLE IF NOT EXISTS escalations (
-  id                  UUID PRIMARY KEY,
-  delegation_id       UUID NOT NULL,
-  root_delegation_id  UUID NOT NULL,
-  project_id          UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-  caller_endpoint     TEXT NOT NULL,
-  receiver_endpoint   TEXT NOT NULL,
-  agent_def_id        JSONB NOT NULL,
-  args                JSONB NOT NULL,
-  state               TEXT NOT NULL,              -- 'open' | 'answered' | 'cancelled'
-  value               JSONB,
-  created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-CREATE INDEX IF NOT EXISTS escalations_delegation_idx
-  ON escalations (delegation_id);
-CREATE INDEX IF NOT EXISTS escalations_root_idx
-  ON escalations (root_delegation_id);
-CREATE INDEX IF NOT EXISTS escalations_project_state_idx
-  ON escalations (project_id, state);
-CREATE INDEX IF NOT EXISTS escalations_receiver_state_idx
-  ON escalations (receiver_endpoint, state);
-
--- ApiModule's persistent audit log for operator-launched root delegations.
--- A "run" in admin/CLI UX terms is a row here. Lives independently of the
--- live `delegations` row (which is deleted on terminal state), so the
--- operator can review terminal status + result + cancel reason after the
--- bus event has cleared the live entity.
---
--- `cancel_reason` is set when transitioning to `cancelling` and persists
--- through to the terminal state, letting the terminateAck handler decide
--- between `cancelled` (= user pressed cancel) and `error` (= child threw).
-CREATE TABLE IF NOT EXISTS runs_audit (
-  id              UUID PRIMARY KEY,           -- = root delegation id
-  snapshot_id     UUID NOT NULL REFERENCES snapshots(id) ON DELETE CASCADE,
-  name            TEXT NOT NULL,
-  qualified_name  TEXT NOT NULL,
+  id              UUID PRIMARY KEY,                -- escalationId
+  entity_id       UUID NOT NULL REFERENCES entities(id) ON DELETE CASCADE,  -- raiser
+  project_id      UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  agent_def_id    JSONB NOT NULL,
   args            JSONB NOT NULL,
-  state           TEXT NOT NULL,              -- 'running' | 'cancelling' | 'cancelled' | 'error' | 'succeeded'
-  cancel_reason   TEXT,                       -- 'user' | 'error' | NULL
-  result          JSONB,
-  error_message   TEXT,
-  created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-  completed_at    TIMESTAMPTZ
+  state           TEXT NOT NULL DEFAULT 'open',    -- 'open' only
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-CREATE INDEX IF NOT EXISTS runs_audit_snapshot_idx
-  ON runs_audit (snapshot_id);
-CREATE INDEX IF NOT EXISTS runs_audit_state_idx
-  ON runs_audit (state);
-CREATE INDEX IF NOT EXISTS runs_audit_snapshot_state_created_idx
-  ON runs_audit (snapshot_id, state, created_at DESC);
+CREATE INDEX IF NOT EXISTS escalations_entity_idx ON escalations (entity_id);
+CREATE INDEX IF NOT EXISTS escalations_project_idx ON escalations (project_id);
 
--- FFI Module's private sidecar relay state. Phase 5 of the v0.1.0
--- refactor will merge these into `delegations` / `escalations`; until
--- that lands, the FFI side keeps its own tables for sidecar relay
--- bookkeeping (= ext-call inbound / ext-spawned children / escalation
--- relay map). Tree assembly therefore reads BOTH the unified tables and
--- these for a complete view.
+-- Run = the API module's per-run management record (NOT an entity state). 1:1
+-- with a run-root entity (`id = E_run`). Its state reflects the run's CHILD
+-- CORE-root delegation: 'done' on that child's delegateAck, 'error' on a throw,
+-- 'cancelling' while a cancel cascades. `core_delegation_id` = the D the run-root
+-- issued to summon the CORE root (so a delegateAck/terminateAck routes back to
+-- this run, and cancel/recovery can re-issue terminate). Kept as run history.
+CREATE TABLE IF NOT EXISTS runs (
+  id                 UUID PRIMARY KEY REFERENCES entities(id) ON DELETE CASCADE,  -- = E_run
+  project_id         UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  snapshot_id        UUID NOT NULL REFERENCES snapshots(id) ON DELETE CASCADE,
+  core_delegation_id UUID NOT NULL,                -- D_core (run-root → CORE root)
+  name               TEXT NOT NULL,
+  qualified_name     TEXT NOT NULL,
+  args               JSONB NOT NULL,
+  state              TEXT NOT NULL,                -- 'running' | 'cancelling' | 'done' | 'error'
+  cancel_reason      TEXT,                         -- 'user' | 'error' | NULL
+  result             JSONB,
+  error_message      TEXT,
+  created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+  completed_at       TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS runs_project_idx  ON runs (project_id);
+CREATE INDEX IF NOT EXISTS runs_snapshot_idx ON runs (snapshot_id);
+CREATE INDEX IF NOT EXISTS runs_state_idx    ON runs (state);
+CREATE UNIQUE INDEX IF NOT EXISTS runs_core_delegation_idx ON runs (core_delegation_id);
+CREATE INDEX IF NOT EXISTS runs_project_state_created_idx
+  ON runs (project_id, state, created_at DESC);
+
+-- The run's operator-facing escalations — both PENDING (`answer IS NULL`) and
+-- ANSWERED. The API records one when an escalate reaches it, mapping the bus
+-- `delegationId = D_core` → the run via `runs.core_delegation_id` (so the API
+-- reads only its OWN tables — no walk into CORE's entity/delegation rows). The
+-- live `escalations` row (raiser/hop-owned, for cascade) is CORE's; this is the
+-- API's per-run operator view + history. In-CORE-handled escalations never reach
+-- the API, so they aren't recorded here.
+CREATE TABLE IF NOT EXISTS run_escalations_audit (
+  run_id        UUID NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+  escalation_id UUID NOT NULL,
+  agent_def_id  JSONB NOT NULL,
+  args          JSONB NOT NULL,
+  answer        JSONB,                          -- null while pending
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  answered_at   TIMESTAMPTZ,                    -- null while pending
+  PRIMARY KEY (run_id, escalation_id)
+);
+CREATE INDEX IF NOT EXISTS run_escalations_audit_esc_idx
+  ON run_escalations_audit (escalation_id);
+
+-- FFI Module's private sidecar relay state (ext-call inbound / ext-spawned
+-- children / escalation relay map). Operational bookkeeping for the per-snapshot
+-- sidecar, distinct from the protocol entity layer; the tree assembler does not
+-- read these (entities is the SSoT for the execution tree).
 CREATE TABLE IF NOT EXISTS ffi_pending_delegations (
   delegation_id            UUID PRIMARY KEY,
   snapshot_id              UUID NOT NULL REFERENCES snapshots(id) ON DELETE CASCADE,
@@ -194,12 +254,11 @@ CREATE TABLE IF NOT EXISTS ffi_pending_escalations (
 CREATE INDEX IF NOT EXISTS ffi_pending_escalations_snapshot_idx
   ON ffi_pending_escalations (snapshot_id);
 
--- Per-project env store. Each project owns its own key/value space (an env
--- is part of a project's runtime config, not a global), keyed by
--- (project_id, key). Shared across that project's snapshots — env outlives
--- any single deploy. `value` holds plaintext for non-secret entries and
--- AES-GCM ciphertext for secret entries; the EnvModule encrypts/decrypts at
--- its boundary so storage never sees plaintext credentials.
+-- Per-project env store. Each project owns its own key/value space (keyed by
+-- project_id); shared across that project's snapshots (env outlives any single
+-- deploy). `value` holds plaintext for non-secret entries and AES-GCM ciphertext
+-- for secret entries; the EnvModule encrypts/decrypts at its boundary so storage
+-- never sees plaintext credentials.
 CREATE TABLE IF NOT EXISTS env_entries (
   project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
   key        TEXT NOT NULL,
@@ -209,74 +268,26 @@ CREATE TABLE IF NOT EXISTS env_entries (
   PRIMARY KEY (project_id, key)
 );
 
--- ─── Value store: 3-layer byte-sequence storage ─────────────────────────────
+-- ─── Value store: refs (entity-owned handles) + value_blobs (refcount ledger) ─
 --
--- All byte sequences (`string` / `file` / `secret`) are content-addressed.
--- Three layers mirror the run / delegation "persistent record + freeable
--- resource" split (D30):
---   - value_refs        : ephemeral CORE/FFI intermediate values. Owned by a
---                         shard, reclaimed by reachability GC.
---   - api_files         : persistent API-owned records (= user-managed files).
---                         Not traversal-GC'd; deleted only on explicit request.
---   - value_blobs       : project-wide content-addressed refcount LEDGER (the
---                         dedup unit). Both layers reference a blob by hash; a
---                         refcount frees it at zero. The BYTES live in a
---                         pluggable BlobStore (local FS / S3), not Postgres.
--- `ref = a module's handle, blob = the file's bytes.`
+-- All byte sequences (`string` / `file` / `secret` / `closure`) are
+-- content-addressed. Two layers:
+--   - refs        : a handle owned by exactly one entity (`owner_entity_id`).
+--                   Unifies the old ephemeral value_refs AND persistent api_files
+--                   — there is no separate file table. A ref persists iff its
+--                   owner is an entity the API keeps (a project / run root).
+--   - value_blobs : project-wide content-addressed refcount LEDGER (the dedup
+--                   unit). The BYTES live in a pluggable BlobStore (local FS /
+--                   S3), keyed by (project_id, hash); Postgres keeps only this
+--                   ledger. Freed (BlobStore delete) at refcount 0.
 --
--- Project-scoped via `project_id` (a value's identity is (module, id); the
--- project is ambient — D24). See docs/2026-05-30-storage-schema-and-api.md §2.
+-- `ref = a module's handle, blob = the file's bytes`. A blob is NAMELESS (keyed
+-- by hash, deduped); the file NAME is `refs.display_name` (ref-local metadata).
 
--- (a) ephemeral ref: CORE/FFI intermediate values. GC'd by single-owner
--- ownership (Phase G): every ref is owned by exactly one durable entity
--- (`owner_delegation_id` — a delegation while running, or a run / escalation
--- afterwards). Ownership only moves UP the delegation tree (no orphans, since
--- ancestors outlive descendants), at protocol events: on a delegation's
--- terminal the escaping refs are re-owned by the parent and the rest dropped;
--- on escalate they transfer to the receiver. A blob is freed when its last ref
--- is dropped (value_blobs refcount). `refs_to` is the closure adjacency (the
--- refs a closure blob captures) so the upward move drags captures along. A
--- crash backstop drops refs whose owner no longer exists.
-CREATE TABLE IF NOT EXISTS value_refs (
-  project_id          UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-  owner_module        TEXT NOT NULL,             -- 'core' | 'ffi'
-  id                  UUID NOT NULL,
-  state               TEXT NOT NULL,             -- v0.1.0: 'complete' | 'errored'
-  semantic_kind       TEXT NOT NULL,             -- 'string' | 'file' | 'secret' | 'closure'
-  owner_delegation_id UUID,                       -- the owning entity (delegation/run/escalation); null = unowned
-  refs_to             JSONB NOT NULL DEFAULT '[]', -- [{module,id}] refs this ref captures (closures); for the upward drag
-  hash                TEXT,                       -- -> value_blobs.hash (null while errored)
-  size                BIGINT,
-  content_type        TEXT,
-  error_message       TEXT,
-  created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
-  PRIMARY KEY (project_id, owner_module, id)
-);
-CREATE INDEX IF NOT EXISTS value_refs_owner_idx ON value_refs (project_id, owner_delegation_id);
-CREATE INDEX IF NOT EXISTS value_refs_hash_idx  ON value_refs (project_id, hash);
-
--- (b) persistent file: API-owned record (= runs_audit's positioning). Outside
--- reachability GC; survives until the user deletes it. A file value carries
--- ref(module=api, id=<this id>).
-CREATE TABLE IF NOT EXISTS api_files (
-  project_id    UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-  id            UUID NOT NULL,
-  hash          TEXT NOT NULL,                 -- -> value_blobs.hash
-  size          BIGINT NOT NULL,
-  content_type  TEXT,
-  display_name  TEXT,                          -- UI label (= original file name)
-  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
-  PRIMARY KEY (project_id, id)
-);
-CREATE INDEX IF NOT EXISTS api_files_hash_idx ON api_files (project_id, hash);
-
--- (c) shared blob ledger: project-wide content-addressed refcount (the dedup
--- unit). ref_count = (reachable value_refs) + (api_files) referencing this
--- hash; 0 => the bytes are physically deleted from the BlobStore. The BYTES
--- themselves do NOT live in Postgres — they are held by a pluggable BlobStore
--- (local FS / S3, see blob-store.ts), keyed by (project_id, hash). Postgres is
--- a poor home for large binaries (storage/IOPS/backup/WAL), so it keeps only
--- this ledger. Observable `building` is v0.2.
+-- Content-addressed refcount LEDGER. ref_count is maintained by the trigger
+-- below (incremented on produce by the value store, decremented on every ref
+-- DELETE — explicit or entity cascade). 0 => bytes are deleted from the
+-- BlobStore (post-commit). Project-scoped via (project_id, hash).
 CREATE TABLE IF NOT EXISTS value_blobs (
   project_id        UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
   hash              TEXT NOT NULL,
@@ -286,3 +297,68 @@ CREATE TABLE IF NOT EXISTS value_blobs (
   last_accessed_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (project_id, hash)
 );
+
+-- A blob handle owned by exactly one ENTITY (`owner_entity_id`, FK CASCADE: an
+-- entity delete drops its still-owned refs → trigger decrements the blob
+-- refcount). A delegation NEVER owns a ref — it is a request edge, not an owner.
+--
+-- ASCENT is value-driven, cross-server-clean (no entity-id on the bus, no
+-- child↔parent table read, no parent lookup):
+--   - a child produces refs owned by its own entity `E_child`;
+--   - on terminal it DETACHES its ESCAPING refs (the result value's, transitively
+--     via `refs_to`) by setting `owner_entity_id = NULL` (an in-transit ref,
+--     owned by nobody), then self-deletes `E_child` (the rest cascade away);
+--   - the parent, on the result ack, already HOLDS the result value — which
+--     carries the very ref handles `{module,id}` — so it CLAIMS exactly those
+--     refs (transitively via `refs_to`) by id, setting `owner_entity_id =
+--     E_parent` (its OWN entity, known locally), then deletes the delegation.
+-- The result value itself is the handoff vehicle; neither side queries the
+-- other. `owner_entity_id IS NULL` is the brief (sub-second) in-transit state;
+-- crash orphans are reaped by the boot sweep (no while-live NULL sweep). Because
+-- the FK forbids a ref pointing at a non-existent entity, there is no "dead
+-- owner" state to reconcile — NULL is the only orphan shape.
+--
+-- The wire ref is `{module, id}`; `module = 'api'` = owned by an API entity the
+-- API keeps (a user upload on the project root, a run result on the run root).
+-- `origin` is for display/filtering; `display_name` is the file name (NULL for
+-- program-/FFI-produced intermediates — names attach only at user upload).
+-- `refs_to` is the closure adjacency so the detach/claim drag captures along.
+CREATE TABLE IF NOT EXISTS refs (
+  project_id      UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  module          TEXT NOT NULL,                 -- 'core' | 'ffi' | 'api' (produce origin / wire module)
+  id              UUID NOT NULL,
+  owner_entity_id UUID REFERENCES entities(id) ON DELETE CASCADE,  -- NULL = in-transit (mid-ascent)
+  state           TEXT NOT NULL,                 -- 'complete' | 'errored'
+  semantic_kind   TEXT NOT NULL,                 -- 'string' | 'file' | 'secret' | 'closure'
+  origin          TEXT NOT NULL DEFAULT 'intermediate',  -- 'user' | 'run' | 'escalation' | 'intermediate'
+  refs_to         JSONB NOT NULL DEFAULT '[]',   -- [{module,id}] refs this ref captures (closures)
+  hash            TEXT,                          -- -> value_blobs.hash (null while errored)
+  size            BIGINT,
+  content_type    TEXT,
+  display_name    TEXT,                          -- human file name (= original upload name); null for intermediates
+  error_message   TEXT,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (project_id, module, id)
+);
+CREATE INDEX IF NOT EXISTS refs_owner_entity_idx ON refs (owner_entity_id);
+CREATE INDEX IF NOT EXISTS refs_hash_idx  ON refs (project_id, hash);
+CREATE INDEX IF NOT EXISTS refs_origin_idx ON refs (project_id, origin);
+
+-- Keep the blob refcount correct under BOTH explicit ref deletes and entity
+-- CASCADE: on every ref DELETE, decrement its blob's ref_count. (The value store
+-- increments on produce.) The physical BlobStore delete is the caller's job
+-- AFTER commit: it sweeps `value_blobs WHERE ref_count <= 0` and deletes those
+-- bytes, so this trigger never does I/O.
+CREATE OR REPLACE FUNCTION refs_decrement_blob() RETURNS trigger AS $$
+BEGIN
+  IF OLD.hash IS NOT NULL THEN
+    UPDATE value_blobs SET ref_count = ref_count - 1
+      WHERE project_id = OLD.project_id AND hash = OLD.hash;
+  END IF;
+  RETURN OLD;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS refs_after_delete ON refs;
+CREATE TRIGGER refs_after_delete AFTER DELETE ON refs
+  FOR EACH ROW EXECUTE FUNCTION refs_decrement_blob();

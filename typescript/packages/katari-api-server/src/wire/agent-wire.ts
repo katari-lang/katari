@@ -10,9 +10,14 @@
 
 import { type EncryptedValue, redactSecretsInEncrypted, valueToRaw } from "@katari-lang/runtime";
 import type { RawValue } from "@katari-lang/types";
-import type { DelegationRow, EscalationRow, RunsAuditRow } from "../storage/types.js";
+import type {
+  DelegationRow,
+  EscalationRow,
+  RunEscalationAuditRow,
+  RunRow,
+} from "../storage/types.js";
 
-// ─── Live delegation ───────────────────────────────────────────────────────
+// ─── Live delegation (request edge) ─────────────────────────────────────────
 
 export type DelegationRowWire = Omit<DelegationRow, "args"> & {
   args: Record<string, RawValue>;
@@ -25,14 +30,14 @@ export function delegationRowToWire(row: DelegationRow): DelegationRowWire {
   };
 }
 
-// ─── Run (= operator-launched root delegation, audit log) ──────────────────
+// ─── Run (the API's per-run management record) ─────────────────────────────
 
-export type RunAuditRowWire = Omit<RunsAuditRow, "args" | "result"> & {
+export type RunRowWire = Omit<RunRow, "args" | "result"> & {
   args: Record<string, RawValue>;
   result?: RawValue;
 };
 
-export function runAuditRowToWire(row: RunsAuditRow): RunAuditRowWire {
+export function runRowToWire(row: RunRow): RunRowWire {
   return {
     ...row,
     args: redactArgs(row.args),
@@ -40,18 +45,44 @@ export function runAuditRowToWire(row: RunsAuditRow): RunAuditRowWire {
   };
 }
 
-// ─── Escalation ────────────────────────────────────────────────────────────
+// ─── Escalation (raiser-owned, live) ───────────────────────────────────────
 
-export type EscalationRowWire = Omit<EscalationRow, "args" | "value"> & {
+export type EscalationRowWire = Omit<EscalationRow, "args"> & {
   args: Record<string, RawValue>;
-  value?: RawValue;
 };
 
 export function escalationRowToWire(row: EscalationRow): EscalationRowWire {
   return {
     ...row,
     args: redactArgs(row.args),
-    value: row.value === undefined ? undefined : valueToRaw(redactSecretsInEncrypted(row.value)),
+  };
+}
+
+// ─── Operator-facing escalation (the run's view; pending or answered) ──────
+
+export type RunEscalationWire = {
+  runId: string;
+  escalationId: string;
+  agentDefId: string;
+  args: Record<string, RawValue>;
+  /** `open` while awaiting an operator answer; `answered` once replied. */
+  state: "open" | "answered";
+  value?: RawValue;
+  createdAt: string;
+  answeredAt?: string;
+};
+
+export function runEscalationToWire(row: RunEscalationAuditRow): RunEscalationWire {
+  return {
+    runId: row.runId,
+    escalationId: row.escalationId,
+    agentDefId:
+      typeof row.agentDefId === "string" ? row.agentDefId : JSON.stringify(row.agentDefId),
+    args: redactArgs(row.args),
+    state: row.answer === undefined ? "open" : "answered",
+    value: row.answer === undefined ? undefined : valueToRaw(redactSecretsInEncrypted(row.answer)),
+    createdAt: row.createdAt,
+    answeredAt: row.answeredAt,
   };
 }
 

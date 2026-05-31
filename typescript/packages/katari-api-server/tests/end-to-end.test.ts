@@ -51,7 +51,7 @@ describe("end-to-end: project + snapshot + agent flow", () => {
     const body = (await got.json()) as {
       run: { state: string; result: string };
     };
-    expect(body.run.state).toBe("succeeded");
+    expect(body.run.state).toBe("done");
     // Wire format: raw JSON values (the API server converts Value→raw at
     // the boundary), so a string Value lands as just the string.
     expect(body.run.result).toBe("hello");
@@ -93,7 +93,7 @@ describe("end-to-end: project + snapshot + agent flow", () => {
     const body = (await got.json()) as {
       run: { state: string; result: string };
     };
-    expect(body.run.state).toBe("succeeded");
+    expect(body.run.state).toBe("done");
     expect(body.run.result).toBe("second");
   });
 

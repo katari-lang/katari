@@ -224,7 +224,7 @@ describe("engine integration: end-to-end via external delegate", () => {
     const { CoreModule } = await import("../../src/modules/core.js");
     const { ExternalEventBus } = await import("../../src/bus.js");
     const { noopLogger } = await import("../../src/engine/logger.js");
-    const { NULL_DELEGATION_STORE } = await import("../../src/modules/delegation-store.js");
+    const { NULL_ENTITY_STORE } = await import("../../src/modules/entity-store.js");
 
     // Minimal in-memory shard / index stores behind a CoreStorage. Within a
     // single bus.drain the CoreModule keeps the index + shards warm in memory,
@@ -265,7 +265,7 @@ describe("engine integration: end-to-end via external delegate", () => {
           shards: shardStore,
           projectIndex: projectIndexStore,
           values: null,
-          delegations: NULL_DELEGATION_STORE,
+          entities: NULL_ENTITY_STORE,
         });
       },
     };
@@ -376,7 +376,7 @@ describe("engine integration: end-to-end via external delegate", () => {
     const { CoreModule } = await import("../../src/modules/core.js");
     const { ExternalEventBus } = await import("../../src/bus.js");
     const { noopLogger } = await import("../../src/engine/logger.js");
-    const { NULL_DELEGATION_STORE } = await import("../../src/modules/delegation-store.js");
+    const { NULL_ENTITY_STORE } = await import("../../src/modules/entity-store.js");
 
     const shards = new Map<string, { checkpoint: unknown; currentSnapshot: string }>();
     let storedIndex: unknown = null;
@@ -396,11 +396,11 @@ describe("engine integration: end-to-end via external delegate", () => {
       },
       // GC ownership hooks — no-op for this test (it asserts closure crossing,
       // not blob freeing; keeping every blob is the safe stub).
-      async releaseOwner() {
+      async reownRefs() {},
+      async reapFreedBlobs() {
         return 0;
       },
-      async transferOwnership() {},
-      async sweepRefsWithDeadOwners() {
+      async sweepDetachedRefs() {
         return 0;
       },
     };
@@ -437,7 +437,7 @@ describe("engine integration: end-to-end via external delegate", () => {
           shards: shardStore,
           projectIndex: projectIndexStore,
           values: valueStore,
-          delegations: NULL_DELEGATION_STORE,
+          entities: NULL_ENTITY_STORE,
         });
       },
     };

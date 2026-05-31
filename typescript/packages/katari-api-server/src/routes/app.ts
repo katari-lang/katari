@@ -7,7 +7,7 @@ import { bodyLimit } from "hono/body-limit";
 import { ZodError } from "zod";
 import type { ApiServerActorHost } from "../actor-host.js";
 import type { AppMetrics } from "../metrics.js";
-import { DelegationTreeService } from "../services/delegation-tree-service.js";
+import { EntityTreeService } from "../services/entity-tree-service.js";
 import type { ProjectService } from "../services/project-service.js";
 import type { SnapshotService } from "../services/snapshot-service.js";
 import type { Storage } from "../storage/types.js";
@@ -137,7 +137,7 @@ export function buildApp(deps: AppDeps): Hono {
   // `/project/:projectId/...`.
   app.route("/project", buildProjectRoutes(deps.projects));
   app.route("/project/:projectId/snapshot", buildSnapshotRoutes(deps.snapshots));
-  const treeService = new DelegationTreeService(deps.storage);
+  const treeService = new EntityTreeService(deps.storage);
   app.route("/project/:projectId/run", buildRunRoutes(deps.host, deps.storage));
   app.route("/project/:projectId/run/:runId/tree", buildRunTreeRoutes(treeService));
   app.route("/project/:projectId/escalation", buildEscalationRoutes(deps.host, deps.storage));

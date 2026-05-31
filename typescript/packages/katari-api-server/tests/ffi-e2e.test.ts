@@ -136,7 +136,7 @@ describe("FFI e2e through the actor", () => {
       result = body.run.result;
     }
 
-    expect(state).toBe("succeeded");
+    expect(state).toBe("done");
     expect(result).toBe("from-ext");
   });
 });

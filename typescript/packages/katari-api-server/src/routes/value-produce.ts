@@ -43,10 +43,22 @@ export function buildValueProduceRoutes(storage: Storage): Hono {
       headerContentType !== undefined && headerContentType !== "text/plain;charset=UTF-8"
         ? headerContentType
         : undefined;
-    // The producing entity (a delegation id) that owns this ref. The FFI
-    // sidecar stamps its current ext-delegation id so the ref is owned while
-    // the handler runs (in-flight protection) and re-owned on delegateAck.
-    const ownerDelegationId = c.req.header("X-Katari-Owner-Delegation") ?? undefined;
+    // The sidecar stamps the delegation `D` it is handling; the ref-authority
+    // resolves `D → owning entity` on its OWN tables (Option 2 ascent) so the
+    // ref is entity-owned (in-flight protection + value-driven ascent), no
+    // entity id on the wire. Prefer the receiver's own entity if one exists
+    // (a CORE shard, or a future FFI ext entity); otherwise own it by the
+    // ISSUER of `D` (`delegations.parent_entity_id`) — for an ext call that is
+    // the summoning CORE shard, so the ext's produced refs belong to the caller
+    // and ascend / cascade with it (no separate FFI entity needed in v0.1.0).
+    const ownerDelegation = c.req.header("X-Katari-Owner-Delegation");
+    const ownerEntityId =
+      ownerDelegation !== undefined
+        ? ((await storage.entities.getByDelegation(projectId as never, ownerDelegation as never))
+            ?.id ??
+          (await storage.delegations.get(ownerDelegation as never))?.parentEntityId ??
+          undefined)
+        : undefined;
 
     const bytes = new Uint8Array(await c.req.arrayBuffer());
     const result = await storage.values.putComplete({
@@ -55,7 +67,7 @@ export function buildValueProduceRoutes(storage: Storage): Hono {
       bytes,
       semanticKind,
       contentType,
-      ownerDelegationId,
+      ownerEntityId,
     });
     return c.json(
       { module: owner, id: result.id, hash: result.hash, size: result.size, contentType },
@@ -71,10 +83,13 @@ export function buildValueProduceRoutes(storage: Storage): Hono {
     const raw = await c.req.text();
     const body = raw.length > 0 ? PersistBodySchema.parse(JSON.parse(raw)) : {};
 
+    // A persisted value outlives the run: own it by the project-root entity
+    // (id = projectId), which the API keeps for the project's life.
     const file = await storage.values.persistRef({
       projectId,
       module: owner,
       id,
+      ownerEntityId: projectId,
       displayName: body.displayName,
     });
     if (file === null) {

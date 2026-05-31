@@ -47,17 +47,24 @@ import {
 } from "../agent-def-id.js";
 import type { Endpoint } from "../engine/endpoint.js";
 import type { ExternalEvent } from "../engine/event.js";
-import { createEscalationId, type DelegationId, type EscalationId } from "../engine/id.js";
+import {
+  createEntityId,
+  createEscalationId,
+  type DelegationId,
+  type EscalationId,
+} from "../engine/id.js";
 import type { Logger } from "../engine/logger.js";
-import { mkString, type Value } from "../engine/value.js";
+import { collectRefs, mkString, type Value } from "../engine/value.js";
 import type { Module } from "../module.js";
 import type { Sidecar } from "../sidecar/sidecar.js";
 import type { FfiStore } from "../sidecar/store.js";
 import type { ChildToParent } from "../sidecar/types.js";
+import type { ValueStore } from "../storage/value-store.js";
 import type { RawValue } from "../value-codec.js";
 import { valueFromRaw, valueToRaw } from "../value-codec.js";
 import { decryptValueRecord, encryptValueRecord } from "../value-secret-codec.js";
 import { CORE_ENDPOINT, FFI_ENDPOINT } from "./endpoints.js";
+import type { EntityStore } from "./entity-store.js";
 
 export type FfiModuleOptions = {
   /**
@@ -74,12 +81,19 @@ export type FfiModuleOptions = {
    * keyed by the bare qname — the sidecar already IS this snapshot's code).
    */
   snapshotId: string;
+  /** Project the FFI ext entities + refs belong to (for ref ascent). */
+  projectId: string;
   /** Sidecar corresponding to one FfiModule (per-snapshot). `null` not allowed. */
   sidecar: Sidecar;
   /** Callback to push sidecar responses onto the bus. */
   onSidecarResponse: (event: ExternalEvent) => void;
   /** Persistence layer. Must be already bound to the snapshot scope. */
   store: FfiStore;
+  /** Execution-layer sink (project-scoped): the FFI ext entity each inbound
+   *  delegate mints, the delegations ext-spawned children are issued under. */
+  entities: EntityStore;
+  /** Ref store (project-scoped): ext ref ascent (detach) on ext terminal. */
+  values: ValueStore;
   logger: Logger;
 };
 
@@ -91,8 +105,11 @@ interface EscalationRelayEntry {
 export class FfiModule implements Module {
   readonly endpoint: Endpoint;
   private readonly snapshotId: string;
+  private readonly projectId: string;
   private readonly sidecar: Sidecar;
   private readonly store: FfiStore;
+  private readonly entities: EntityStore;
+  private readonly values: ValueStore;
   private readonly logger: Logger;
   private readonly onSidecarResponse: (event: ExternalEvent) => void;
   /**
@@ -110,8 +127,11 @@ export class FfiModule implements Module {
   constructor(opts: FfiModuleOptions) {
     this.endpoint = opts.endpoint ?? FFI_ENDPOINT;
     this.snapshotId = opts.snapshotId;
+    this.projectId = opts.projectId;
     this.sidecar = opts.sidecar;
     this.store = opts.store;
+    this.entities = opts.entities;
+    this.values = opts.values;
     this.logger = opts.logger;
     this.onSidecarResponse = opts.onSidecarResponse;
     // Note: we do NOT subscribe `sidecar.onMessage` here. The host
@@ -235,22 +255,35 @@ export class FfiModule implements Module {
     // dedicated column, so recovery (`ipcDelegateRestarted`, which re-sends
     // `row.agentDefId`) keeps presenting the bare form to the sidecar.
     const agentDefId = stripAgentDefIdSnapshot(event.payload.agentDefId);
+    const now = new Date().toISOString();
     await this.store.insertDelegation({
       delegationId,
       peerEndpoint: event.from,
       agentDefId,
       args: encryptValueRecord(args),
       state: "running",
-      createdAt: new Date().toISOString(),
+      createdAt: now,
       parentExtDelegationId: null,
     });
-    // The insert + send pair is not atomic across systems (the store is
-    // a DB tx scoped to the outer tick, the sidecar is a separate
-    // process). If the send throws, compensate by deleting the row we
-    // just inserted so the recovery sweep doesn't ship a
-    // `ipcDelegateRestarted` for a delegation the sidecar never heard
-    // about. The CORE caller still gets the rejection so its
-    // DelegateThread can transition to error.
+    // FFI is the receiver of this delegate → mint its ext entity from the bus
+    // event alone (receiver-mints; no cross-module read). Refs the ext produces
+    // are owned by this entity; on the ext's terminal its escaping refs ascend
+    // and the entity self-deletes (freeing the non-escaping ones eagerly).
+    const entityId = createEntityId();
+    await this.entities.insertEntity({
+      id: entityId,
+      delegationId,
+      module: "ffi",
+      agentDefId,
+      args: encryptValueRecord(args),
+      state: "running",
+      createdAt: now,
+      updatedAt: now,
+    });
+    // The insert + send pair is not atomic across systems. If the send throws,
+    // compensate by deleting the rows we just inserted so the recovery sweep
+    // doesn't ship a `ipcDelegateRestarted` for a delegation the sidecar never
+    // heard about. The CORE caller still gets the rejection.
     try {
       await this.sidecar.send({
         type: "ipcDelegate",
@@ -260,12 +293,35 @@ export class FfiModule implements Module {
       });
     } catch (err) {
       try {
+        await this.entities.deleteEntity(entityId);
         await this.store.deleteDelegation(delegationId);
       } catch {
         /* swallow cleanup error — original send error is what matters */
       }
       throw err;
     }
+  }
+
+  /**
+   * Tear down the ext entity for `delegationId` on the ext's terminal: ascend
+   * its escaping refs (the result value's, owner → NULL so the CORE caller can
+   * claim them by id) then self-delete the entity (its non-escaping refs cascade
+   * away — freed eagerly). A terminal with no result (`escapeValue = null`:
+   * error / cancel) ascends nothing → everything the ext owned cascades.
+   */
+  private async teardownExtEntity(
+    delegationId: DelegationId,
+    escapeValue: Value | null,
+  ): Promise<void> {
+    const entityId = await this.entities.entityIdForDelegation(delegationId);
+    if (entityId === null) return;
+    if (escapeValue !== null) {
+      const seed = collectRefs(escapeValue);
+      if (seed.length > 0) {
+        await this.values.reownRefs(this.projectId, entityId, null, seed);
+      }
+    }
+    await this.entities.deleteEntity(entityId);
   }
 
   private async handleInboundTerminate(event: ExternalEvent): Promise<void> {
@@ -283,6 +339,8 @@ export class FfiModule implements Module {
           delegationId,
         },
       );
+      // Best-effort: drop the ext entity if it somehow outlived its delegation.
+      await this.teardownExtEntity(delegationId, null);
       this.onSidecarResponse({
         from: this.endpoint,
         to: event.from,
@@ -319,6 +377,15 @@ export class FfiModule implements Module {
       );
       return;
     }
+    // FFI issued this child delegation (the ext called `katari.delegate`), so on
+    // its result FFI (the issuer) claims the child's escaping refs up to the
+    // parent ext entity, then deletes the request edge.
+    const extEntityId = await this.entities.entityIdForDelegation(row.parentExtDelegationId);
+    if (extEntityId !== null) {
+      const seed = collectRefs(value);
+      if (seed.length > 0) await this.values.reownRefs(this.projectId, null, extEntityId, seed);
+    }
+    await this.entities.deleteDelegation(delegationId);
     await this.store.deleteDelegation(delegationId);
     await this.sidecar.send({
       type: "ipcChildDelegateAck",
@@ -351,6 +418,8 @@ export class FfiModule implements Module {
       );
       return;
     }
+    // Issuer deletes the request edge on the child's terminal ack.
+    await this.entities.deleteDelegation(delegationId);
     await this.store.deleteDelegation(delegationId);
     await this.sidecar.send({
       type: "ipcChildTerminateAck",
@@ -467,13 +536,17 @@ export class FfiModule implements Module {
       case "ipcDelegateAck": {
         const peer = await this.consumePendingDelegationPeer(msg.delegationId);
         if (peer === null) return;
+        const value = valueFromRaw(msg.value);
+        // Detach the result's escaping refs + self-delete the ext entity BEFORE
+        // emitting, so the CORE caller can claim them by id from the value.
+        await this.teardownExtEntity(msg.delegationId, value);
         this.onSidecarResponse({
           from: this.endpoint,
           to: peer,
           payload: {
             kind: "delegateAck",
             delegationId: msg.delegationId,
-            value: valueFromRaw(msg.value),
+            value,
           },
         });
         return;
@@ -484,6 +557,8 @@ export class FfiModule implements Module {
           delegationId: msg.delegationId,
           message: msg.message,
         });
+        // The ext failed → nothing escapes; drop the ext entity (its refs cascade).
+        await this.teardownExtEntity(msg.delegationId, null);
         if (peer === null) return;
         // Route as a throw escalate so the caller can handle it via
         // `handle { req throw(msg) { ... } }` or the API Module's default
@@ -503,6 +578,8 @@ export class FfiModule implements Module {
       }
       case "ipcTerminateAck": {
         const peer = await this.consumePendingDelegationPeer(msg.delegationId);
+        // Cancelled ext → nothing escapes; drop the ext entity (refs cascade).
+        await this.teardownExtEntity(msg.delegationId, null);
         if (peer === null) return;
         this.onSidecarResponse({
           from: this.endpoint,
@@ -523,15 +600,33 @@ export class FfiModule implements Module {
         // event on the bus toward CORE.
         const convertedArgs = argsFromRaw(msg.args);
         const agentDefId = stampAgentDefIdSnapshot(msg.agentDefId, this.snapshotId);
+        const childNow = new Date().toISOString();
         await this.store.insertDelegation({
           delegationId: msg.delegationId,
           peerEndpoint: this.endpoint, // ack comes back to us
           agentDefId,
           args: encryptValueRecord(convertedArgs),
           state: "running",
-          createdAt: new Date().toISOString(),
+          createdAt: childNow,
           parentExtDelegationId: msg.parentDelegationId,
         });
+        // FFI is the issuer of this child delegation (the ext code summoned it):
+        // write the request edge with the parent ext entity as the issuer, so the
+        // child's CORE entity links into the tree and its result refs ascend to
+        // the ext entity (claimed on the child's delegateAck above).
+        const extEntityId = await this.entities.entityIdForDelegation(msg.parentDelegationId);
+        if (extEntityId !== null) {
+          await this.entities.insertDelegation({
+            id: msg.delegationId,
+            parentEntityId: extEntityId,
+            targetModule: "core",
+            agentDefId,
+            args: encryptValueRecord(convertedArgs),
+            state: "running",
+            createdAt: childNow,
+            updatedAt: childNow,
+          });
+        }
         this.onSidecarResponse({
           from: this.endpoint,
           to: CORE_ENDPOINT,

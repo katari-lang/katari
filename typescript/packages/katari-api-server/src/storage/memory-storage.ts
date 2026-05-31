@@ -9,6 +9,7 @@ import type {
   DelegationId,
   EncryptedValue,
   EngineCheckpoint,
+  EntityId,
   EscalationId,
   IRModule,
   SchemaBundle,
@@ -22,11 +23,14 @@ import type {
   DelegationRow,
   DelegationState,
   EngineCheckpointRepo,
+  EntityModule,
+  EntityRepo,
+  EntityRow,
+  EntityState,
   EnvEntryRepo,
   EnvEntryRow,
   EscalationRepo,
   EscalationRow,
-  EscalationState,
   FfiPendingDelegation,
   FfiPendingDelegationRepo,
   FfiPendingEscalation,
@@ -36,9 +40,12 @@ import type {
   Project,
   ProjectId,
   ProjectRepo,
-  RunsAuditRepo,
-  RunsAuditRow,
-  RunsAuditState,
+  RunEscalationAuditRow,
+  RunEscalationsAuditRepo,
+  RunId,
+  RunRepo,
+  RunRow,
+  RunState,
   SidecarBundle,
   Snapshot,
   SnapshotId,
@@ -268,43 +275,71 @@ class InMemoryEngineCheckpointRepo implements EngineCheckpointRepo {
   }
 }
 
-class InMemoryDelegationRepo implements DelegationRepo {
-  rows = new Map<DelegationId, DelegationRow>();
+class InMemoryEntityRepo implements EntityRepo {
+  rows = new Map<EntityId, EntityRow>();
 
-  async insert(row: DelegationRow): Promise<void> {
+  // Holds the value store + escalation repo so `delete` can simulate the FK
+  // CASCADE (drop the entity's still-owned refs + raised escalations) that the
+  // Postgres impl gets for free.
+  constructor(
+    private readonly values: InMemoryValueStore,
+    private readonly escalations: InMemoryEscalationRepo,
+  ) {}
+
+  async insert(row: EntityRow): Promise<void> {
     this.rows.set(row.id, clone(row));
   }
 
-  async get(id: DelegationId): Promise<DelegationRow | null> {
+  async get(id: EntityId): Promise<EntityRow | null> {
     const row = this.rows.get(id);
     return row !== undefined ? clone(row) : null;
+  }
+
+  async getByDelegation(
+    projectId: ProjectId,
+    delegationId: DelegationId,
+  ): Promise<EntityRow | null> {
+    for (const row of this.rows.values()) {
+      if (row.projectId === projectId && row.delegationId === delegationId) return clone(row);
+    }
+    return null;
+  }
+
+  async setState(
+    id: EntityId,
+    state: EntityState,
+    options?: { expectedState?: EntityState },
+  ): Promise<boolean> {
+    const row = this.rows.get(id);
+    if (row === undefined) return false;
+    if (options?.expectedState !== undefined && row.state !== options.expectedState) return false;
+    this.rows.set(id, { ...row, state, updatedAt: new Date().toISOString() });
+    return true;
+  }
+
+  async delete(id: EntityId): Promise<boolean> {
+    const row = this.rows.get(id);
+    if (row === undefined) return false;
+    this.rows.delete(id);
+    // FK CASCADE (simulated): drop the entity's still-owned refs + escalations.
+    this.values.deleteRefsOwnedBy(row.projectId, id);
+    for (const esc of [...this.escalations.rows.values()]) {
+      if (esc.entityId === id) this.escalations.rows.delete(esc.id);
+    }
+    return true;
   }
 
   async list(
     filter?: {
       projectId?: ProjectId;
-      callerEndpoint?: string;
-      rootDelegationId?: DelegationId;
-      parentDelegationId?: DelegationId;
-      state?: DelegationState;
+      module?: EntityModule;
+      state?: EntityState;
     } & ListOptions,
-  ): Promise<ListResult<DelegationRow>> {
+  ): Promise<ListResult<EntityRow>> {
     let all = [...this.rows.values()];
-    if (filter?.projectId !== undefined) {
-      all = all.filter((r) => r.projectId === filter.projectId);
-    }
-    if (filter?.callerEndpoint !== undefined) {
-      all = all.filter((r) => r.callerEndpoint === filter.callerEndpoint);
-    }
-    if (filter?.rootDelegationId !== undefined) {
-      all = all.filter((r) => r.rootDelegationId === filter.rootDelegationId);
-    }
-    if (filter?.parentDelegationId !== undefined) {
-      all = all.filter((r) => r.parentDelegationId === filter.parentDelegationId);
-    }
-    if (filter?.state !== undefined) {
-      all = all.filter((r) => r.state === filter.state);
-    }
+    if (filter?.projectId !== undefined) all = all.filter((r) => r.projectId === filter.projectId);
+    if (filter?.module !== undefined) all = all.filter((r) => r.module === filter.module);
+    if (filter?.state !== undefined) all = all.filter((r) => r.state === filter.state);
     all.sort((a, b) =>
       a.createdAt < b.createdAt
         ? -1
@@ -318,6 +353,19 @@ class InMemoryDelegationRepo implements DelegationRepo {
     );
     return paginateWithCursor(all, filter, (r) => r.id, "asc");
   }
+}
+
+class InMemoryDelegationRepo implements DelegationRepo {
+  rows = new Map<DelegationId, DelegationRow>();
+
+  async insert(row: DelegationRow): Promise<void> {
+    this.rows.set(row.id, clone(row));
+  }
+
+  async get(id: DelegationId): Promise<DelegationRow | null> {
+    const row = this.rows.get(id);
+    return row !== undefined ? clone(row) : null;
+  }
 
   async setState(
     id: DelegationId,
@@ -326,40 +374,40 @@ class InMemoryDelegationRepo implements DelegationRepo {
   ): Promise<boolean> {
     const row = this.rows.get(id);
     if (row === undefined) return false;
-    if (options?.expectedState !== undefined && row.state !== options.expectedState) {
-      return false;
-    }
-    this.rows.set(id, {
-      ...row,
-      state,
-      updatedAt: new Date().toISOString(),
-    });
+    if (options?.expectedState !== undefined && row.state !== options.expectedState) return false;
+    this.rows.set(id, { ...row, state, updatedAt: new Date().toISOString() });
     return true;
-  }
-
-  async markAllUnderRootAsCancelling(rootDelegationId: DelegationId): Promise<void> {
-    const now = new Date().toISOString();
-    for (const row of this.rows.values()) {
-      if (row.rootDelegationId !== rootDelegationId) continue;
-      if (row.state !== "running") continue;
-      this.rows.set(row.id, {
-        ...row,
-        state: "cancelling",
-        updatedAt: now,
-      });
-    }
   }
 
   async delete(id: DelegationId): Promise<boolean> {
     return this.rows.delete(id);
   }
 
-  async deleteAllUnderRoot(rootDelegationId: DelegationId): Promise<void> {
-    for (const row of this.rows.values()) {
-      if (row.rootDelegationId === rootDelegationId) {
-        this.rows.delete(row.id);
-      }
+  async list(
+    filter?: {
+      projectId?: ProjectId;
+      parentEntityId?: EntityId;
+      state?: DelegationState;
+    } & ListOptions,
+  ): Promise<ListResult<DelegationRow>> {
+    let all = [...this.rows.values()];
+    if (filter?.projectId !== undefined) all = all.filter((r) => r.projectId === filter.projectId);
+    if (filter?.parentEntityId !== undefined) {
+      all = all.filter((r) => r.parentEntityId === filter.parentEntityId);
     }
+    if (filter?.state !== undefined) all = all.filter((r) => r.state === filter.state);
+    all.sort((a, b) =>
+      a.createdAt < b.createdAt
+        ? -1
+        : a.createdAt > b.createdAt
+          ? 1
+          : a.id < b.id
+            ? -1
+            : a.id > b.id
+              ? 1
+              : 0,
+    );
+    return paginateWithCursor(all, filter, (r) => r.id, "asc");
   }
 }
 
@@ -375,35 +423,19 @@ class InMemoryEscalationRepo implements EscalationRepo {
     return row !== undefined ? clone(row) : null;
   }
 
+  async delete(id: EscalationId): Promise<boolean> {
+    return this.rows.delete(id);
+  }
+
   async list(
     filter?: {
       projectId?: ProjectId;
-      callerEndpoint?: string;
-      receiverEndpoint?: string;
-      rootDelegationId?: DelegationId;
-      delegationId?: DelegationId;
-      state?: EscalationState;
+      entityId?: EntityId;
     } & ListOptions,
   ): Promise<ListResult<EscalationRow>> {
     let all = [...this.rows.values()];
-    if (filter?.projectId !== undefined) {
-      all = all.filter((r) => r.projectId === filter.projectId);
-    }
-    if (filter?.callerEndpoint !== undefined) {
-      all = all.filter((r) => r.callerEndpoint === filter.callerEndpoint);
-    }
-    if (filter?.receiverEndpoint !== undefined) {
-      all = all.filter((r) => r.receiverEndpoint === filter.receiverEndpoint);
-    }
-    if (filter?.rootDelegationId !== undefined) {
-      all = all.filter((r) => r.rootDelegationId === filter.rootDelegationId);
-    }
-    if (filter?.delegationId !== undefined) {
-      all = all.filter((r) => r.delegationId === filter.delegationId);
-    }
-    if (filter?.state !== undefined) {
-      all = all.filter((r) => r.state === filter.state);
-    }
+    if (filter?.projectId !== undefined) all = all.filter((r) => r.projectId === filter.projectId);
+    if (filter?.entityId !== undefined) all = all.filter((r) => r.entityId === filter.entityId);
     all.sort((a, b) =>
       a.createdAt > b.createdAt
         ? -1
@@ -417,64 +449,39 @@ class InMemoryEscalationRepo implements EscalationRepo {
     );
     return paginateWithCursor(all, filter, (r) => r.id, "desc");
   }
-
-  async setAnswered(id: EscalationId, value: EncryptedValue): Promise<boolean> {
-    const row = this.rows.get(id);
-    if (row === undefined) return false;
-    if (row.state !== "open") return false;
-    this.rows.set(id, {
-      ...row,
-      state: "answered",
-      value: clone(value),
-    });
-    return true;
-  }
-
-  async cancelAllUnderRoot(rootDelegationId: DelegationId): Promise<void> {
-    for (const row of this.rows.values()) {
-      if (row.rootDelegationId !== rootDelegationId) continue;
-      if (row.state !== "open") continue;
-      this.rows.set(row.id, { ...row, state: "cancelled" });
-    }
-  }
-
-  async delete(id: EscalationId): Promise<boolean> {
-    return this.rows.delete(id);
-  }
 }
 
-class InMemoryRunsAuditRepo implements RunsAuditRepo {
-  rows = new Map<DelegationId, RunsAuditRow>();
+class InMemoryRunRepo implements RunRepo {
+  rows = new Map<RunId, RunRow>();
 
-  constructor(private readonly projectIdOfSnapshot: (id: SnapshotId) => ProjectId | null) {}
-
-  async insert(row: RunsAuditRow): Promise<void> {
+  async insert(row: RunRow): Promise<void> {
     this.rows.set(row.id, clone(row));
   }
 
-  async get(id: DelegationId): Promise<RunsAuditRow | null> {
+  async get(id: RunId): Promise<RunRow | null> {
     const row = this.rows.get(id);
     return row !== undefined ? clone(row) : null;
+  }
+
+  async getByCoreDelegation(coreDelegationId: DelegationId): Promise<RunRow | null> {
+    for (const row of this.rows.values()) {
+      if (row.coreDelegationId === coreDelegationId) return clone(row);
+    }
+    return null;
   }
 
   async list(
     filter?: {
       projectId?: ProjectId;
       snapshotId?: SnapshotId;
-      state?: RunsAuditState;
+      state?: RunState;
     } & ListOptions,
-  ): Promise<ListResult<RunsAuditRow>> {
+  ): Promise<ListResult<RunRow>> {
     let all = [...this.rows.values()];
-    if (filter?.projectId !== undefined) {
-      const want = filter.projectId;
-      all = all.filter((r) => this.projectIdOfSnapshot(r.snapshotId) === want);
-    }
-    if (filter?.snapshotId !== undefined) {
+    if (filter?.projectId !== undefined) all = all.filter((r) => r.projectId === filter.projectId);
+    if (filter?.snapshotId !== undefined)
       all = all.filter((r) => r.snapshotId === filter.snapshotId);
-    }
-    if (filter?.state !== undefined) {
-      all = all.filter((r) => r.state === filter.state);
-    }
+    if (filter?.state !== undefined) all = all.filter((r) => r.state === filter.state);
     all.sort((a, b) =>
       a.createdAt > b.createdAt
         ? -1
@@ -490,9 +497,9 @@ class InMemoryRunsAuditRepo implements RunsAuditRepo {
   }
 
   async setState(
-    id: DelegationId,
+    id: RunId,
     patch: {
-      state: RunsAuditState;
+      state: RunState;
       cancelReason?: import("./types.js").CancelReason | null;
       result?: EncryptedValue;
       errorMessage?: string;
@@ -501,17 +508,45 @@ class InMemoryRunsAuditRepo implements RunsAuditRepo {
   ): Promise<boolean> {
     const row = this.rows.get(id);
     if (row === undefined) return false;
-    const next: RunsAuditRow = {
-      ...row,
-      state: patch.state,
-      updatedAt: new Date().toISOString(),
-    };
+    const next: RunRow = { ...row, state: patch.state, updatedAt: new Date().toISOString() };
     if (patch.cancelReason !== undefined) next.cancelReason = patch.cancelReason;
     if (patch.result !== undefined) next.result = clone(patch.result);
     if (patch.errorMessage !== undefined) next.errorMessage = patch.errorMessage;
     if (patch.completedAt !== undefined) next.completedAt = patch.completedAt;
     this.rows.set(id, next);
     return true;
+  }
+}
+
+class InMemoryRunEscalationsAuditRepo implements RunEscalationsAuditRepo {
+  // Keyed by escalationId (globally unique per hop) so `get`/`setAnswer` are O(1).
+  rows = new Map<EscalationId, RunEscalationAuditRow>();
+
+  async insert(row: RunEscalationAuditRow): Promise<void> {
+    if (!this.rows.has(row.escalationId)) this.rows.set(row.escalationId, clone(row));
+  }
+
+  async get(escalationId: EscalationId): Promise<RunEscalationAuditRow | null> {
+    const row = this.rows.get(escalationId);
+    return row !== undefined ? clone(row) : null;
+  }
+
+  async setAnswer(
+    escalationId: EscalationId,
+    answer: EncryptedValue,
+    answeredAt: string,
+  ): Promise<boolean> {
+    const row = this.rows.get(escalationId);
+    if (row === undefined) return false;
+    this.rows.set(escalationId, { ...row, answer: clone(answer), answeredAt });
+    return true;
+  }
+
+  async list(runId: RunId): Promise<RunEscalationAuditRow[]> {
+    return [...this.rows.values()]
+      .filter((r) => r.runId === runId)
+      .sort((a, b) => (a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0))
+      .map(clone);
   }
 }
 
@@ -623,18 +658,17 @@ export class InMemoryStorage implements Storage {
   readonly projects = new InMemoryProjectRepo();
   readonly snapshots = new InMemorySnapshotRepo();
   readonly checkpoints = new InMemoryEngineCheckpointRepo();
-  // Snapshot → project lookup used by repos that filter cross-snapshot
-  // by `projectId`. Direct `.rows` access avoids the async-Promise hop on
-  // every list() call.
-  private readonly projectIdOfSnapshot = (id: SnapshotId): ProjectId | null =>
-    this.snapshots.rows.get(id)?.projectId ?? null;
-  readonly delegations = new InMemoryDelegationRepo();
+  readonly values = new InMemoryValueStore();
   readonly escalations = new InMemoryEscalationRepo();
-  readonly runsAudit = new InMemoryRunsAuditRepo(this.projectIdOfSnapshot);
+  // entities holds value-store + escalation refs so `delete` simulates the FK
+  // CASCADE (refs + raised escalations) the Postgres impl gets for free.
+  readonly entities = new InMemoryEntityRepo(this.values, this.escalations);
+  readonly delegations = new InMemoryDelegationRepo();
+  readonly runs = new InMemoryRunRepo();
+  readonly runEscalationsAudit = new InMemoryRunEscalationsAuditRepo();
   readonly ffiDelegations = new InMemoryFfiPendingDelegationRepo();
   readonly ffiEscalations = new InMemoryFfiPendingEscalationRepo();
   readonly envEntries = new InMemoryEnvEntryRepo();
-  readonly values = new InMemoryValueStore();
   readonly shards = new InMemoryShardStore();
   readonly projectIndex = new InMemoryProjectIndexStore();
 
@@ -681,16 +715,17 @@ export class InMemoryStorage implements Storage {
       projectsByName: new Map(this.projects.byName),
       snapshotsRows: new Map(this.snapshots.rows),
       checkpointsRows: new Map(this.checkpoints.rows),
+      entitiesRows: new Map(this.entities.rows),
       delegationsRows: new Map(this.delegations.rows),
       escalationsRows: new Map(this.escalations.rows),
-      runsAuditRows: new Map(this.runsAudit.rows),
+      runsRows: new Map(this.runs.rows),
+      runEscalationsAuditRows: new Map(this.runEscalationsAudit.rows),
       ffiDelegationsRows: new Map(this.ffiDelegations.rows),
       ffiEscalationsRows: new Map(this.ffiEscalations.rows),
       envEntriesRows: new Map(this.envEntries.rows),
       // Blobs are content-addressed and immutable, so a shallow Map copy is a
       // valid rollback target (inserts/deletes revert; bytes never mutate).
       valueRefsRows: new Map(this.values.refs),
-      valueFilesRows: new Map(this.values.files),
       valueBlobsRows: new Map(this.values.blobs),
       shardRows: new Map(this.shards.rows),
       projectIndexRows: new Map(this.projectIndex.rows),
@@ -702,14 +737,15 @@ export class InMemoryStorage implements Storage {
     this.projects.byName = snap.projectsByName;
     this.snapshots.rows = snap.snapshotsRows;
     this.checkpoints.rows = snap.checkpointsRows;
+    this.entities.rows = snap.entitiesRows;
     this.delegations.rows = snap.delegationsRows;
     this.escalations.rows = snap.escalationsRows;
-    this.runsAudit.rows = snap.runsAuditRows;
+    this.runs.rows = snap.runsRows;
+    this.runEscalationsAudit.rows = snap.runEscalationsAuditRows;
     this.ffiDelegations.rows = snap.ffiDelegationsRows;
     this.ffiEscalations.rows = snap.ffiEscalationsRows;
     this.envEntries.rows = snap.envEntriesRows;
     this.values.refs = snap.valueRefsRows;
-    this.values.files = snap.valueFilesRows;
     this.values.blobs = snap.valueBlobsRows;
     this.shards.rows = snap.shardRows;
     this.projectIndex.rows = snap.projectIndexRows;
@@ -721,14 +757,15 @@ type TxSnapshot = {
   projectsByName: Map<string, ProjectId>;
   snapshotsRows: Map<SnapshotId, Snapshot>;
   checkpointsRows: Map<SnapshotId, EngineCheckpoint>;
+  entitiesRows: Map<EntityId, EntityRow>;
   delegationsRows: Map<DelegationId, DelegationRow>;
   escalationsRows: Map<EscalationId, EscalationRow>;
-  runsAuditRows: Map<DelegationId, RunsAuditRow>;
+  runsRows: Map<RunId, RunRow>;
+  runEscalationsAuditRows: Map<EscalationId, RunEscalationAuditRow>;
   ffiDelegationsRows: Map<DelegationId, FfiPendingDelegation>;
   ffiEscalationsRows: Map<EscalationId, FfiPendingEscalation>;
   envEntriesRows: Map<string, EnvEntryRow>;
   valueRefsRows: InMemoryValueStore["refs"];
-  valueFilesRows: InMemoryValueStore["files"];
   valueBlobsRows: InMemoryValueStore["blobs"];
   shardRows: InMemoryShardStore["rows"];
   projectIndexRows: InMemoryProjectIndexStore["rows"];

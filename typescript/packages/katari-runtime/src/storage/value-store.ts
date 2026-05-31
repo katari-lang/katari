@@ -1,38 +1,45 @@
-// ValueStore — the 3-layer byte-sequence storage abstraction.
+// ValueStore — the content-addressed byte-sequence storage abstraction.
 //
-// Design: docs/2026-05-30-storage-schema-and-api.md §2 / §4, value-and-streaming §3.
+// Design: docs/2026-06-01-entity-model.md (Ref / Blob), docs/2026-05-30-storage-
+// schema-and-api.md §2 / §4.
 //
-// Three layers, mirroring the run / delegation "persistent record + freeable
-// resource" split (D30):
+// Two layers:
+//   - ref (`refs`)        — a blob handle owned by exactly one ENTITY
+//                           (`ownerEntityId`), or transiently by no one (NULL)
+//                           mid-ascent. Unifies the old ephemeral refs AND
+//                           persistent files: a `module = "api"` ref owned by an
+//                           entity the API keeps (project / run root) is a
+//                           durable file; a `module = "core" | "ffi"` ref owned
+//                           by an ephemeral entity is an intermediate. A delegation
+//                           never owns a ref — ascent is value-driven (the result
+//                           value carries the ref ids; the parent claims them).
+//   - blob (`value_blobs`) — project-wide content-addressed refcount ledger (the
+//                           dedup unit). Bytes live in a pluggable BlobStore; an
+//                           AFTER DELETE trigger on `refs` keeps the refcount
+//                           correct under both explicit deletes and entity cascade.
 //
-//   - ephemeral ref (`value_refs`)   — CORE/FFI intermediate values. Owned by
-//                                      exactly one durable entity; ownership
-//                                      moves up the delegation tree and the ref
-//                                      is freed when its last owner drops it
-//                                      (single-owner GC, Phase G).
-//   - persistent file (`api_files`)  — API-owned record. User deletes it; not
-//                                      ephemeral-GC'd (= multi-server safe).
-//   - shared blob (`value_blobs`)    — project-wide content-addressed bytes.
-//                                      Both layers reference it by hash; a
-//                                      refcount frees it at zero.
-//
-// `ref = a module's handle, blob = the file's bytes`. A ref/file points at a
-// blob by hash; many refs may share one blob (dedup).
+// `ref = a module's handle, blob = the file's NAMELESS bytes`. The file name is
+// `display_name` on the ref (set at user upload); blobs are nameless + deduped.
 //
 // This interface lives in the runtime (the lower layer) so engine modules can
 // consume it; `katari-api-server` provides the Postgres / in-memory impls.
-// `projectId` is a plain string here (ambient context, not a value's identity)
-// to keep the runtime decoupled from the api-server's branded ids.
+// `projectId` / `ownerEntityId` are plain strings here (ambient context / an
+// opaque id) to keep the runtime decoupled from the api-server's branded ids.
 
 import type { RefModule } from "../engine/value.js";
 
-/** Producer of an ephemeral ref. (`api` is the persistent-file path instead.) */
-export type EphemeralOwner = "core" | "ffi";
+/** The module that produced a ref (its wire module). */
+export type ProduceModule = "core" | "ffi";
 
 /** Which byte-sequence kind a ref / blob carries. `closure` is a serialized
- *  closure env (an internal node holding nested refs — Phase G GC opens it to
- *  trace them; the others are leaves). */
+ *  closure env (an internal node holding nested refs — the ascent opens it via
+ *  `refs_to` to drag captures; the others are leaves). */
 export type ValueSemanticKind = "string" | "file" | "secret" | "closure";
+
+/** Where a ref came from (display/filtering; derivable from its owner's role).
+ *  `user` = an upload on the project root; `run` = a run result; `escalation` =
+ *  persisted escalation arg; `intermediate` = program-/FFI-produced. */
+export type RefOrigin = "user" | "run" | "escalation" | "intermediate";
 
 /**
  * v0.1.0 ref lifecycle. `building` / `cancelled` (observable streaming) are
@@ -59,7 +66,7 @@ export type RefState = {
   errorMessage?: string;
 };
 
-/** A persistent project file (`api_files` row). */
+/** A durable file (a `module = "api"` ref the API keeps). */
 export type FileRecord = {
   id: string;
   hash: string;
@@ -72,8 +79,7 @@ export type FileRecord = {
 /**
  * Streaming producer handle: `open` → `pushChunk`* → `close`. Pushed bytes
  * accumulate in a host-side buffer; `close` computes the hash, dedups against
- * existing blobs, and persists in fixed-size chunks (no per-chunk DB write —
- * D32). `abort` marks the ref `errored`. A handle is single-use.
+ * existing blobs, and persists. `abort` marks the ref `errored`. Single-use.
  */
 export interface ProduceHandle {
   readonly id: string;
@@ -82,21 +88,21 @@ export interface ProduceHandle {
   abort(errorMessage: string): Promise<void>;
 }
 
-/** A value-reference handle (owner module + id) — the closure adjacency unit. */
+/** A value-reference handle (wire module + id) — the closure adjacency unit. */
 export type RefHandle = { module: RefModule; id: string };
 
 export type PutInput = {
   projectId: string;
-  owner: EphemeralOwner;
+  owner: ProduceModule;
   bytes: Uint8Array;
   semanticKind: ValueSemanticKind;
   contentType?: string;
-  /** The durable entity that owns this ref (a delegation while running, then a
-   *  run / escalation). Ownership moves up the delegation tree at protocol
-   *  events; a ref is freed when its last owner drops it. `undefined` = unowned
-   *  (not yet GC-managed). */
-  ownerDelegationId?: string;
-  /** Refs this ref internally captures (closures). The upward ownership move
+  /** The entity that owns this ref (the producing CORE/FFI entity `E`).
+   *  `undefined` = unowned (test/legacy; not entity-GC-managed). */
+  ownerEntityId?: string;
+  /** Display/filtering origin. Defaults to `intermediate`. */
+  origin?: RefOrigin;
+  /** Refs this ref internally captures (closures). The detach/claim ascent
    *  follows these so a closure's captures travel with it. */
   refsTo?: ReadonlyArray<RefHandle>;
 };
@@ -105,6 +111,8 @@ export type OpenInput = Omit<PutInput, "bytes">;
 
 export type CreateFileInput = {
   projectId: string;
+  /** The durable entity that owns this upload (normally the project root). */
+  ownerEntityId: string;
   bytes: Uint8Array;
   contentType?: string;
   displayName?: string;
@@ -118,7 +126,7 @@ export type CreateFileInput = {
 export const MAX_PRODUCE_BYTES = 100 * 1024 * 1024;
 
 export interface ValueStore {
-  // ── produce: ephemeral ref (owner = core / ffi) ──────────────────────────
+  // ── produce: a ref owned by a producing entity (core / ffi) ──────────────
   /** Produce a complete blob from bytes already in hand. */
   putComplete(input: PutInput): Promise<ProduceResult>;
   /** Open a streaming producer for a large payload (host-buffered until close). */
@@ -138,65 +146,67 @@ export interface ValueStore {
     length: number,
   ): Promise<Uint8Array | null>;
 
-  // ── persistent files (api_files) ─────────────────────────────────────────
+  // ── durable files (module = "api" refs the API keeps) ────────────────────
+  /** Create an upload: a `module = "api"` ref owned by `ownerEntityId`,
+   *  `origin = "user"`, carrying `displayName`. */
   createFile(input: CreateFileInput): Promise<FileRecord>;
   getFile(projectId: string, id: string): Promise<FileRecord | null>;
+  /** User uploads (`module = "api"`, `origin = "user"`). */
   listFiles(projectId: string): Promise<FileRecord[]>;
   deleteFile(projectId: string, id: string): Promise<boolean>;
 
   /**
-   * Promote an ephemeral ref to a persistent file (`katari.value.persist`).
-   * Creates an `api_files` record sharing the ref's blob (refcount += 1); the
-   * caller rewrites the value's rep to `module: "api", id: <file id>`. The
-   * source ephemeral ref is left for its owner's normal release. `null` if the
-   * source ref is unknown or not yet `complete`.
+   * Promote a ref to a durable file (`katari.value.persist`): create a
+   * `module = "api"` ref owned by `ownerEntityId` sharing the source ref's blob
+   * (refcount += 1); the caller rewrites the value's rep to `module: "api", id:
+   * <file id>`. The source ref is left for its owner's normal teardown. `null`
+   * if the source ref is unknown or not yet `complete`.
    */
   persistRef(input: {
     projectId: string;
-    module: EphemeralOwner;
+    module: ProduceModule;
     id: string;
+    ownerEntityId: string;
     displayName?: string;
   }): Promise<FileRecord | null>;
 
-  // ── ownership transitions (single-owner GC, Phase G) ─────────────────────
+  // ── ownership: value-driven ascent (entity model) ────────────────────────
   //
-  // Ownership moves UP the delegation tree at protocol events; a blob is freed
-  // when its last ref is dropped. `escapeSeed` / `seed` are the refs found in
-  // the crossing value; the store expands them transitively through `refs_to`
-  // (closure captures), restricted to refs the source entity owns.
+  // A ref is owned by exactly one entity, or transiently by NULL mid-ascent.
+  // `reownRefs` is the one primitive behind every transition; `seed` is expanded
+  // transitively through `refs_to` (closure captures), restricted to refs whose
+  // current owner is `fromOwner`.
+  //
+  //   - detach (child terminal):  reownRefs(p, E_child, null, escapeSeed)
+  //   - claim  (parent on ack):   reownRefs(p, null, E_parent, value's refs)
+  //   - persist escalation arg:   reownRefs(p, E_raiser, E_run, arg refs)
 
   /**
-   * A ref-owning entity terminated. Within the refs owned by `ownerId`: the
-   * transitive closure (via `refs_to`) of `escapeSeed` is RE-OWNED by
-   * `toOwnerId` (the surviving owner — the parent delegation, or the entity
-   * itself for a root that becomes a persistent run). Every other ref owned by
-   * `ownerId` is DROPPED. Returns the number of blobs physically freed.
+   * Re-own the transitive closure (via `refs_to`) of `seed` from `fromOwner` to
+   * `toOwner` (either may be `null` = unowned/in-transit). Only refs currently
+   * owned by `fromOwner` move (so a stale or shared ref is never stolen).
    */
-  releaseOwner(
+  reownRefs(
     projectId: string,
-    ownerId: string,
-    toOwnerId: string,
-    escapeSeed: ReadonlyArray<RefHandle>,
-  ): Promise<number>;
-
-  /**
-   * Escalation / borrow-up: re-own the transitive closure (via `refs_to`) of
-   * `seed` within the refs owned by `fromOwnerId` to `toOwnerId`. Nothing is
-   * dropped — the source entity keeps running.
-   */
-  transferOwnership(
-    projectId: string,
-    fromOwnerId: string,
-    toOwnerId: string,
+    fromOwner: string | null,
+    toOwner: string | null,
     seed: ReadonlyArray<RefHandle>,
   ): Promise<void>;
 
   /**
-   * Crash backstop. Drop every ref whose `ownerDelegationId` is non-null and
-   * NOT in `liveOwnerIds` (the union of live delegations / runs / escalations),
-   * then free blobs that hit refcount 0. Unowned refs (null owner) are left
-   * alone. Returns the number of blobs freed. Run on boot + periodically to
-   * reclaim refs whose explicit release was lost to a crash.
+   * Delete blob-ledger rows that fell to refcount 0 (the trigger decrements on
+   * every ref delete — explicit or entity cascade) and physically delete those
+   * bytes from the BlobStore. Returns the number of blobs freed. Safe to call at
+   * any point; run after teardown / on a timer / at boot.
    */
-  sweepRefsWithDeadOwners(projectId: string, liveOwnerIds: ReadonlySet<string>): Promise<number>;
+  reapFreedBlobs(projectId: string): Promise<number>;
+
+  /**
+   * Crash backstop. Delete every in-transit ref (`owner_entity_id IS NULL`) —
+   * these are refs detached mid-ascent whose claim was lost to a crash — then
+   * reap freed blobs. MUST run only when nothing is concurrently ascending (i.e.
+   * at boot, before traffic), since a live in-transit ref would be wrongly
+   * collected. Returns the number of blobs freed.
+   */
+  sweepDetachedRefs(projectId: string): Promise<number>;
 }

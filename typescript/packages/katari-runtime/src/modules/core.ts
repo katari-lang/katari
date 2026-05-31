@@ -1,39 +1,33 @@
 // CoreModule: the engine as a warm, self-contained, per-project module.
 //
 // Phase E makes CORE a warm per-project actor that owns its own transaction
-// and persistence — no host-driven load/persist tick anymore. The flat
-// per-snapshot State is split into per-agent-instance shards (a shard IS a
-// State scoped to one agent: its threads / scopes / closures + its own local
-// routing maps). CoreModule holds, warm in memory across quanta:
+// and persistence. The flat per-snapshot State is split into per-agent-instance
+// shards (a shard IS a State scoped to one agent: its threads / scopes /
+// closures + its own local routing maps). CoreModule holds, warm in memory:
 //
-//   - `shardCache`   — the shards it has touched (a shard stays resident until
-//                      it completes; the DB is a write-through mirror)
-//   - `projectIndex` — the project-local routing table mapping a delegation /
-//                      escalation id to the shard that must handle an event
-//   - `irCache`      — snapshot → IR (a shard runs the version in its
-//                      `currentSnapshot`; getIR resolves it once, memoized)
+//   - `shardCache`   — the shards it has touched (resident until they complete)
+//   - `projectIndex` — the project-local routing table mapping a bus id
+//                      (delegation / escalation) to the SHARD that handles it
+//   - `irCache`      — snapshot → IR
 //
-// All cross-shard routing reduces to an index lookup (docs/2026-05-30-phase-e-
-// actor-host.md §2/§3, verified against the engine's escalate path):
+// Entity model (docs/2026-06-01-entity-model.md): a shard IS an entity, keyed by
+// a freshly minted entity id `E` (shardId = E), distinct from the summoning
+// delegation `D` (which stays off the shard key and rides the bus). CORE never
+// reads another module's tables: it mints `E` and writes its `entities` row from
+// the inbound `delegate` event + ambient context ALONE. Ref ownership is
+// value-driven — a completing shard DETACHES its escaping refs (`owner = NULL`)
+// and self-deletes its entity (the rest cascade); the parent CLAIMS the result
+// value's refs to its own entity on the ack. CORE deletes only entities (its
+// own) + the delegations IT issued (on their acks); it never touches an entity
+// or delegation owned by another module.
 //
-//   delegate      → new shard (shardId = the new delegation id)
-//   delegateAck   → index.pendingDelegateOut[delegationId]
-//   terminate     → index.delegations[delegationId]
+// Routing (the warm index maps bus id → shard E):
+//   delegate      → a freshly minted shard E (the receiver mints it)
+//   delegateAck   → index.pendingDelegateOut[delegationId]   (the issuer shard)
 //   terminateAck  → index.pendingDelegateOut[delegationId]
 //   escalate      → index.pendingDelegateOut[delegationId]   (the delegate issuer)
-//   escalateAck   → index.escalationOwners[escalationId]
-//
-// One `feed` is one quantum: open a tx, route, load-on-miss (cache otherwise),
-// apply, persist the touched shard (with persist-time string promotion) or
-// delete it if it completed, write back the index — then commit. The project
-// actor serializes feeds per project, so the warm caches need no internal
-// locking; per-shard concurrency is a later mutex-granularity change.
-//
-// The snapshot a shard runs is CORE-private state: it lives in the shard's
-// `currentSnapshot` (and `engine_shards.current_snapshot`), NOT on the
-// protocol `delegations` table. An inbound delegate carries the version to run
-// on inside its (bus-opaque) agent def id; CORE reads it to pick the new
-// shard's IR and stamps it back onto outbound CORE/FFI delegate targets.
+//   terminate     → index.delegations[delegationId]          (the shard running D)
+//   escalateAck   → index.escalationOwners[escalationId]      (the raiser shard)
 
 import {
   agentDefIdClosureRef,
@@ -45,7 +39,7 @@ import { applyEvent, createState } from "../engine/apply.js";
 import { decodeClosureBlob, materializeClosure } from "../engine/closure-codec.js";
 import { CORE_ENDPOINT, type Endpoint } from "../engine/endpoint.js";
 import type { ExternalEvent } from "../engine/event.js";
-import type { DelegationId } from "../engine/id.js";
+import { createEntityId, type EntityId } from "../engine/id.js";
 import type { Logger } from "../engine/logger.js";
 import { emptyProjectIndex, type ProjectIndex, type ShardId } from "../engine/shard.js";
 import {
@@ -58,13 +52,12 @@ import {
 } from "../engine/snapshot.js";
 import type { State } from "../engine/state.js";
 import type { RefFetcher, RefPutter } from "../engine/step-ctx.js";
-import type { Thread } from "../engine/thread/types.js";
 import { collectRefs, type RefRep } from "../engine/value.js";
 import type { IRModule } from "../ir/types.js";
 import type { Module } from "../module.js";
 import type { ValueStore } from "../storage/value-store.js";
 import { encryptValueRecord } from "../value-secret-codec.js";
-import { type DelegationStore, NULL_DELEGATION_STORE } from "./delegation-store.js";
+import { type EntityModule, type EntityStore, NULL_ENTITY_STORE } from "./entity-store.js";
 import type { CoreStorage, CoreTxStores } from "./storage.js";
 
 export type CoreModuleOptions = {
@@ -116,50 +109,83 @@ export class CoreModule implements Module {
   async feed(event: ExternalEvent): Promise<{ outbound: ExternalEvent[] }> {
     return this.storage.withTransaction(async (tx) => {
       await this.ensureIndex(tx);
+      const payload = event.payload;
 
-      if (event.payload.kind === "delegateAck" || event.payload.kind === "terminateAck") {
-        // Drop the audit row BEFORE applyEvent so a sub-delegate emitted during
-        // apply doesn't race the parent's row delete.
-        await tx.delegations.delete(event.payload.delegationId);
+      // ── Issuer side: a child we delegated has reported its result ─────────
+      if (payload.kind === "delegateAck" || payload.kind === "terminateAck") {
+        if (payload.kind === "delegateAck" && tx.values !== null) {
+          // Value-driven ascent: the result value carries the escaping ref ids
+          // (the child detached them to owner=NULL); claim them to the issuing
+          // shard's entity. No child lookup, no parent id on the bus.
+          const issuerEntity = this.projectIndex.pendingDelegateOut[payload.delegationId];
+          if (issuerEntity !== undefined) {
+            const seed = collectRefs(payload.value);
+            if (seed.length > 0) {
+              await tx.values.reownRefs(this.projectId, null, issuerEntity, seed);
+            }
+          }
+        }
+        // Drop the request edge now the result is in. BEFORE applyEvent so a
+        // sub-delegate emitted during apply can't race the delete.
+        await tx.entities.deleteDelegation(payload.delegationId);
       }
 
-      const shardId = this.routeToShard(event);
+      // ── Resolve the shard: mint a fresh entity for a new delegate; else the
+      //    warm index resolves bus D → shard E ─────────────────────────────
+      const shardId =
+        payload.kind === "delegate"
+          ? (createEntityId() as unknown as ShardId)
+          : this.routeToShard(event);
       if (shardId === undefined) {
-        // A terminate for a delegation with no live shard = it already
-        // finished (e.g. a root whose entry was missing errored before
-        // spawning). Ack immediately so the canceller (a DelegateThread, or
-        // the API run via terminateAck → terminal `error`) can settle, rather
-        // than waiting forever for a shard that will never reply.
-        if (event.payload.kind === "terminate") {
+        // A terminate for a delegation with no live shard = it already finished.
+        // Ack immediately so the canceller can settle.
+        if (payload.kind === "terminate") {
           return {
             outbound: [
               {
                 from: this.endpoint,
                 to: event.from,
-                payload: { kind: "terminateAck", delegationId: event.payload.delegationId },
+                payload: { kind: "terminateAck", delegationId: payload.delegationId },
               },
             ],
           };
         }
-        this.logger.log("debug", "core: event for unknown shard, dropping", {
-          kind: event.payload.kind,
-        });
+        this.logger.log("debug", "core: event for unknown shard, dropping", { kind: payload.kind });
         return { outbound: [] };
       }
-      // An inbound CORE delegate carries the version to run on in its agent def
-      // id; a new shard adopts it. A closure-ref target instead materializes its
-      // captured env from the value store (the snapshot rides in the blob).
-      // (Un-stamped qname delegates are an invariant violation in production —
-      // every such target is stamped by API / CORE / FFI — so getOrLoadShard
-      // rejects them loudly.)
-      const delegatePayload = event.payload.kind === "delegate" ? event.payload : undefined;
+
+      const delegatePayload = payload.kind === "delegate" ? payload : undefined;
+      // Capture the requested agent def id before getOrLoadShard rewrites a
+      // closure target — the entity row records what was asked for.
+      const requestedAgentDefId = delegatePayload?.agentDefId;
       const shard = await this.getOrLoadShard(tx, shardId, delegatePayload);
       if (shard === null) {
         this.logger.log("debug", "core: no shard for event, dropping", {
-          kind: event.payload.kind,
+          kind: payload.kind,
           shardId,
         });
         return { outbound: [] };
+      }
+
+      // ── Receiver side: a freshly summoned entity begins processing — mint its
+      //    entity row from the bus event + ambient context ALONE ────────────
+      if (delegatePayload !== undefined) {
+        const now = new Date().toISOString();
+        await tx.entities.insertEntity({
+          id: shardId as unknown as EntityId,
+          delegationId: delegatePayload.delegationId,
+          module: "core",
+          agentDefId: requestedAgentDefId ?? null,
+          args: encryptValueRecord(delegatePayload.args),
+          state: "running",
+          createdAt: now,
+          updatedAt: now,
+        });
+      }
+
+      // ── Raiser side: an answered escalation — drop the raiser's own row ───
+      if (payload.kind === "escalateAck") {
+        await tx.entities.deleteEscalation(payload.escalationId);
       }
 
       let result: Awaited<ReturnType<typeof applyEvent>>;
@@ -169,15 +195,13 @@ export class CoreModule implements Module {
           event,
           this.makeFetchRef(tx.values),
           // Refs produced inside this shard's quantum are owned by the shard's
-          // delegation (= shardId), so the GC ownership layer hands them up /
-          // releases them at the shard's terminal.
+          // entity (= shardId = E); the ascent detaches/keeps them at terminal.
           this.makePutRef(tx.values, shardId),
         );
       } catch (err) {
-        // applyEvent mutates state in place, so an irrecoverable throw leaves
-        // this warm shard half-mutated. Evict it (the per-feed tx will roll
-        // back) so the next feed reloads a clean copy from the DB rather than
-        // reusing the poisoned in-memory state.
+        // applyEvent mutates state in place; an irrecoverable throw leaves this
+        // warm shard half-mutated. Evict it (the per-feed tx rolls back) so the
+        // next feed reloads a clean copy.
         this.shardCache.delete(shardId);
         throw err;
       }
@@ -189,15 +213,15 @@ export class CoreModule implements Module {
       const outbound = result.outbound as ExternalEvent[];
 
       this.reconcileIndex(shardId, shard.state);
-      // A shard with no live threads has finished — delete it (no replay → no
-      // retention) and purge its index entries.
       if (shard.state.threadCount === 0) {
-        // Release this shard's owned refs (GC ownership). The refs in the
-        // outbound delegateAck escape upward → re-owned by the parent (or the
-        // shard itself for a root, which becomes the persistent run); every
-        // other ref this shard produced is dropped. A shard with no
-        // delegateAck (terminate / error) escapes nothing.
-        await this.releaseShardRefs(tx, shardId, outbound);
+        // Terminal: detach the escaping refs (the outbound delegateAck value's,
+        // owner→NULL) so they survive the entity delete + can be claimed by the
+        // parent; then self-delete the entity (its remaining refs + raised
+        // escalations cascade away). The delegation is deleted by OUR parent on
+        // its ack — not here.
+        await this.detachEscapingRefs(tx, shardId, outbound);
+        await tx.entities.deleteEntity(shardId as unknown as EntityId);
+        if (tx.values !== null) await tx.values.reapFreedBlobs(this.projectId);
         this.shardCache.delete(shardId);
         this.purgeIndexForShard(shardId);
         await tx.shards.delete(this.projectId, shardId);
@@ -208,14 +232,9 @@ export class CoreModule implements Module {
 
       for (const ev of outbound) {
         if (ev.payload.kind === "delegate") {
-          // Closures are already content refs by the time they reach here
-          // (frozen at the closure literal via ctx.putBlob), so nothing to
-          // serialize at the boundary — only the snapshot stamp remains.
-          // The agent def id is the only identifier that loads versioned code
-          // on the receiver, so it carries the issuing shard's snapshot — but
-          // ONLY for snapshot-dependent modules (CORE agents run versioned IR,
-          // FFI picks the per-snapshot sidecar). ENV / API are snapshot-
-          // independent (common builtins / run management) → left bare. A
+          // The agent def id carries the issuing shard's snapshot — but ONLY for
+          // snapshot-dependent modules (CORE agents run versioned IR, FFI picks
+          // the per-snapshot sidecar). ENV / API are snapshot-independent. A
           // closure ref carries its snapshot in its blob (stamp is a no-op).
           const toSnapshotDependent =
             ev.to === shard.state.selfEndpoint || ev.to === shard.state.ffiTargetEndpoint;
@@ -225,7 +244,11 @@ export class CoreModule implements Module {
               shard.currentSnapshot,
             );
           }
-          await this.persistOutboundDelegate(tx.delegations, shard.state, ev, ev.payload);
+          // Issuer: write the request edge (parent = THIS shard's entity).
+          await this.writeOutboundDelegation(tx.entities, shard.state, shardId, ev, ev.payload);
+        } else if (ev.payload.kind === "escalate") {
+          // Raiser: write the live escalation (owner = THIS shard's entity).
+          await this.writeOutboundEscalation(tx.entities, shardId, ev.payload);
         }
       }
       return { outbound };
@@ -264,12 +287,11 @@ export class CoreModule implements Module {
 
   // ─── Shard load / route / persist ──────────────────────────────────────
 
-  /** The shard an event must be handled in. `undefined` = unknown id. */
+  /** The shard an event must be handled in (non-delegate; delegate mints fresh).
+   *  `undefined` = unknown id. */
   private routeToShard(event: ExternalEvent): ShardId | undefined {
     const p = event.payload;
     switch (p.kind) {
-      case "delegate":
-        return p.delegationId; // new shard, keyed by the new delegation id
       case "delegateAck":
       case "terminateAck":
       case "escalate":
@@ -302,10 +324,10 @@ export class CoreModule implements Module {
     }
     if (delegatePayload === undefined) return null;
 
-    // A closure that escaped its home shard: materialize its frozen captured
-    // env into a fresh shard, then rewrite the target to the new (local)
-    // closure id so the standard closure:N dispatch runs the body
-    // (runner.resolveDelegateTarget). The snapshot rides inside the blob.
+    // A closure that escaped its home shard: materialize its frozen captured env
+    // into a fresh shard, then rewrite the target to the new (local) closure id
+    // so the standard closure:N dispatch runs the body. The snapshot rides in
+    // the blob.
     const closureRef = agentDefIdClosureRef(delegatePayload.agentDefId);
     if (closureRef !== undefined) {
       if (tx.values === null) {
@@ -314,8 +336,6 @@ export class CoreModule implements Module {
       const content = decodeClosureBlob(await this.fetchClosureBytes(tx.values, closureRef));
       const ir = await this.resolveIR(content.snapshot);
       const state = createState(ir, { selfEndpoint: this.endpoint, snapshot: content.snapshot });
-      // selfRef = the ref we materialized from, so a recursive self-call re-
-      // materializes the same blob.
       const newClosureId = materializeClosure(content, state, closureRef);
       delegatePayload.agentDefId = encodeCoreAgentDefId({ kind: "closure", value: newClosureId });
       const entry: ShardEntry = { state, currentSnapshot: content.snapshot };
@@ -338,12 +358,10 @@ export class CoreModule implements Module {
     return entry;
   }
 
-  /** A blob writer (owner = core). Tags the produced ref with the caller's
-   *  `semanticKind` (`closure` for a captured env, `file` for `string_to_file`,
-   *  …) and the owning entity (`ownerDelegationId` = the producing shard's
-   *  delegation), so the GC ownership layer can release / hand it up at the
-   *  shard's terminal. Throws if bytes need persisting but no value store. */
-  private makePutRef(valueStore: ValueStore | null, ownerDelegationId: string): RefPutter {
+  /** A blob writer (owner = this shard's entity). Tags the produced ref with the
+   *  caller's `semanticKind` and `origin = "intermediate"`, owned by the
+   *  producing shard's entity (`ownerEntityId = shardId = E`). */
+  private makePutRef(valueStore: ValueStore | null, ownerEntityId: string): RefPutter {
     const projectId = this.projectId;
     return async (bytes, semanticKind, refsTo): Promise<RefRep> => {
       if (valueStore === null) {
@@ -354,7 +372,8 @@ export class CoreModule implements Module {
         owner: "core",
         bytes,
         semanticKind,
-        ownerDelegationId,
+        origin: "intermediate",
+        ownerEntityId,
         refsTo,
       });
       return { kind: "ref", module: "core", id: result.id, hash: result.hash, size: result.size };
@@ -377,8 +396,7 @@ export class CoreModule implements Module {
     currentSnapshot: string,
   ): Promise<void> {
     // Promote large inline strings to refs BEFORE encrypting (promotion handles
-    // strings, encryption handles secrets — disjoint). Keeps a heavy AI
-    // conversation out of the shard checkpoint.
+    // strings, encryption handles secrets — disjoint).
     const checkpoint = serialize(state);
     const promoted =
       tx.values !== null
@@ -398,32 +416,30 @@ export class CoreModule implements Module {
   }
 
   /**
-   * Release a completed shard's owned refs (GC ownership). The refs carried by
-   * the outbound `delegateAck` escape upward — re-owned by the shard's parent
-   * delegation, or, for a run root (no parent), kept on the shard's own id
-   * which outlives the `delegations` row in `runs_audit`. Every other ref the
-   * shard produced is dropped (its blob freed at refcount 0). A shard that ends
-   * without a `delegateAck` (terminate / unhandled throw) escapes nothing.
+   * Detach a completed shard's ESCAPING refs (value-driven ascent). The refs in
+   * the outbound `delegateAck` value (transitively via `refs_to`) are re-owned
+   * from this shard's entity to NULL (in-transit); the parent claims them by id
+   * from the value it receives. Every other ref the shard owns is dropped by the
+   * entity-delete cascade. A shard ending without a `delegateAck` (terminate /
+   * unhandled throw) detaches nothing → everything it owns cascades away.
    */
-  private async releaseShardRefs(
+  private async detachEscapingRefs(
     tx: CoreTxStores,
     shardId: ShardId,
     outbound: ExternalEvent[],
   ): Promise<void> {
     if (tx.values === null) return;
     const ack = outbound.find((ev) => ev.payload.kind === "delegateAck");
-    const escapeSeed =
-      ack !== undefined && ack.payload.kind === "delegateAck" ? collectRefs(ack.payload.value) : [];
-    // shardId IS the delegation id (different brand, same uuid).
-    const parent = await tx.delegations.getParent(shardId as unknown as DelegationId);
-    await tx.values.releaseOwner(this.projectId, shardId, parent ?? shardId, escapeSeed);
+    if (ack === undefined || ack.payload.kind !== "delegateAck") return;
+    const escapeSeed = collectRefs(ack.payload.value);
+    if (escapeSeed.length === 0) return;
+    await tx.values.reownRefs(this.projectId, shardId, null, escapeSeed);
   }
 
-  /** Promote one inline string to an owner=core ref by writing its bytes, owned
-   *  by the promoting shard's delegation (released at the shard's terminal). */
+  /** Promote one inline string to an owner=this-shard ref. */
   private makePromoteText(
     valueStore: ValueStore,
-    ownerDelegationId: string,
+    ownerEntityId: string,
   ): (text: string) => Promise<RefRep> {
     const projectId = this.projectId;
     return async (text: string): Promise<RefRep> => {
@@ -432,7 +448,8 @@ export class CoreModule implements Module {
         owner: "core",
         bytes: new TextEncoder().encode(text),
         semanticKind: "string",
-        ownerDelegationId,
+        origin: "intermediate",
+        ownerEntityId,
       });
       return { kind: "ref", module: "core", id: result.id, hash: result.hash, size: result.size };
     };
@@ -470,31 +487,53 @@ export class CoreModule implements Module {
     return this.projectIndex;
   }
 
-  // ─── Audit helpers ─────────────────────────────────────────────────────
+  // ─── Execution-layer writes ────────────────────────────────────────────
 
-  private async persistOutboundDelegate(
-    delegations: DelegationStore,
+  /** The module a delegate `to` endpoint targets (for the delegation's record). */
+  private moduleOf(state: State, to: Endpoint): EntityModule {
+    if (to === state.selfEndpoint) return "core";
+    if (to === state.ffiTargetEndpoint) return "ffi";
+    if (to === state.envTargetEndpoint) return "env";
+    return "api";
+  }
+
+  /** Issuer: write the request edge for a delegate this shard emitted. The
+   *  parent link is THIS shard's entity (`shardId = E`) — known locally; no
+   *  cross-module read. */
+  private async writeOutboundDelegation(
+    entities: EntityStore,
     state: State,
+    shardId: ShardId,
     ev: ExternalEvent,
     payload: Extract<ExternalEvent["payload"], { kind: "delegate" }>,
   ): Promise<void> {
-    const parentDelegationId = findEnclosingAgentDelegation(state, payload.delegationId);
-    const rootDelegationId =
-      parentDelegationId === null
-        ? payload.delegationId
-        : ((await delegations.getRoot(parentDelegationId)) ?? payload.delegationId);
     const now = new Date().toISOString();
-    await delegations.insert({
+    await entities.insertDelegation({
       id: payload.delegationId,
-      rootDelegationId,
-      parentDelegationId,
-      callerEndpoint: CORE_ENDPOINT,
-      ownerEndpoint: ev.to,
+      parentEntityId: shardId as unknown as EntityId,
+      targetModule: this.moduleOf(state, ev.to),
       agentDefId: payload.agentDefId,
       args: encryptValueRecord(payload.args),
       state: "running",
       createdAt: now,
       updatedAt: now,
+    });
+  }
+
+  /** Raiser: write the live escalation this shard emitted (owner = its entity).
+   *  Idempotent on escalationId so hop-by-hop forwarding doesn't duplicate it
+   *  (the original raiser's row wins). */
+  private async writeOutboundEscalation(
+    entities: EntityStore,
+    shardId: ShardId,
+    payload: Extract<ExternalEvent["payload"], { kind: "escalate" }>,
+  ): Promise<void> {
+    await entities.insertEscalation({
+      id: payload.escalationId,
+      entityId: shardId as unknown as EntityId,
+      agentDefId: payload.agentDefId,
+      args: encryptValueRecord(payload.args),
+      createdAt: new Date().toISOString(),
     });
   }
 }
@@ -512,22 +551,5 @@ function syncIndexMap(
   }
 }
 
-/** Walk from the DelegateThread that owns `delegationId` up to the enclosing
- *  AgentThread, returning its delegationId (= the parent in the run tree). */
-function findEnclosingAgentDelegation(
-  state: State,
-  delegationId: DelegationId,
-): DelegationId | null {
-  const senderThreadId = state.pendingDelegateOut[delegationId];
-  if (senderThreadId === undefined) return null;
-  let cursor: Thread | undefined = state.threads[senderThreadId];
-  while (cursor !== undefined) {
-    if (cursor.kind === "agent") return cursor.delegationId;
-    if (cursor.parent === null) return null;
-    cursor = state.threads[cursor.parent];
-  }
-  return null;
-}
-
-/** Backwards-compatible alias — the audit store is unused by default. */
-export { NULL_DELEGATION_STORE };
+/** Backwards-compatible alias — the entity store is unused by default. */
+export { NULL_ENTITY_STORE };

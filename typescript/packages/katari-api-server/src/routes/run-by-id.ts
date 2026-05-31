@@ -11,7 +11,7 @@
 import { Hono } from "hono";
 import type { ApiServerActorHost } from "../actor-host.js";
 import type { Storage } from "../storage/types.js";
-import { runAuditRowToWire } from "../wire/agent-wire.js";
+import { runRowToWire } from "../wire/agent-wire.js";
 import { RunIdSchema } from "./middleware/validation.js";
 
 export function buildRunByIdRoutes(host: ApiServerActorHost, storage: Storage): Hono {
@@ -19,33 +19,28 @@ export function buildRunByIdRoutes(host: ApiServerActorHost, storage: Storage): 
 
   app.get("/:runId", async (c) => {
     const runId = RunIdSchema.parse(c.req.param("runId"));
-    const row = await storage.runsAudit.get(runId);
+    const row = await storage.runs.get(runId);
     if (row === null) {
       return c.json({ error: `run ${runId} not found` }, 404);
     }
-    return c.json({ run: runAuditRowToWire(row) });
+    return c.json({ run: runRowToWire(row) });
   });
 
   app.post("/:runId/cancel", async (c) => {
     const runId = RunIdSchema.parse(c.req.param("runId"));
-    const row = await storage.runsAudit.get(runId);
+    const row = await storage.runs.get(runId);
     if (row === null) {
       return c.json({ error: `run ${runId} not found` }, 404);
     }
-    if (row.state === "cancelled" || row.state === "succeeded" || row.state === "error") {
-      return c.json({ run: runAuditRowToWire(row) });
+    if (row.state === "done" || row.state === "error") {
+      return c.json({ run: runRowToWire(row) });
     }
-    // The flat route has no project in the URL — derive it from the run's
-    // snapshot (a run is bound to a snapshot in runs_audit).
-    const snap = await storage.snapshots.get(row.snapshotId);
-    if (snap === null) {
-      return c.json({ error: `run ${runId} not found` }, 404);
-    }
-    const refreshed = await host.runForProject(snap.projectId, async ({ bus, modules }) => {
+    // The Run record carries its project directly — no snapshot join needed.
+    const refreshed = await host.runForProject(row.projectId, async ({ bus, modules }) => {
       const result = await modules.api.cancelRun({ bus, runId });
       return result.row;
     });
-    return c.json({ run: runAuditRowToWire(refreshed ?? row) });
+    return c.json({ run: runRowToWire(refreshed ?? row) });
   });
 
   return app;

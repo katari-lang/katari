@@ -12,7 +12,7 @@ import { valueFromRaw } from "@katari-lang/runtime";
 import { Hono } from "hono";
 import { z } from "zod";
 import type { ApiServerActorHost } from "../actor-host.js";
-import { runAuditRowToWire } from "../wire/agent-wire.js";
+import { runRowToWire } from "../wire/agent-wire.js";
 import {
   PaginationQuerySchema,
   ProjectIdSchema,
@@ -59,7 +59,7 @@ export function buildRunRoutes(
   app.get("/", async (c) => {
     const projectId = ProjectIdSchema.parse(c.req.param("projectId"));
     const query = RunListQuerySchema.parse(c.req.query());
-    const result = await storage.runsAudit.list({
+    const result = await storage.runs.list({
       projectId,
       snapshotId: query.snapshotId,
       state: query.state,
@@ -68,37 +68,37 @@ export function buildRunRoutes(
       cursor: query.cursor,
     });
     return c.json({
-      runs: result.items.map(runAuditRowToWire),
+      runs: result.items.map(runRowToWire),
       nextCursor: result.nextCursor,
     });
   });
 
   app.get("/:runId", async (c) => {
     const runId = RunIdSchema.parse(c.req.param("runId"));
-    const row = await storage.runsAudit.get(runId);
+    const row = await storage.runs.get(runId);
     if (row === null) {
       return c.json({ error: `run ${runId} not found` }, 404);
     }
-    return c.json({ run: runAuditRowToWire(row) });
+    return c.json({ run: runRowToWire(row) });
   });
 
   app.post("/:runId/cancel", async (c) => {
     const projectId = ProjectIdSchema.parse(c.req.param("projectId"));
     const runId = RunIdSchema.parse(c.req.param("runId"));
-    const row = await storage.runsAudit.get(runId);
+    const row = await storage.runs.get(runId);
     if (row === null) {
       return c.json({ error: `run ${runId} not found` }, 404);
     }
     // Short-circuit terminal states: re-running a quantum on a finished run
-    // would needlessly reload engine state. The audit already has the answer.
-    if (row.state === "cancelled" || row.state === "succeeded" || row.state === "error") {
-      return c.json({ run: runAuditRowToWire(row) });
+    // would needlessly reload engine state. The Run record already has the answer.
+    if (row.state === "done" || row.state === "error") {
+      return c.json({ run: runRowToWire(row) });
     }
     const refreshed = await host.runForProject(projectId, async ({ bus, modules }) => {
       const result = await modules.api.cancelRun({ bus, runId });
       return result.row;
     });
-    return c.json({ run: runAuditRowToWire(refreshed ?? row) });
+    return c.json({ run: runRowToWire(refreshed ?? row) });
   });
 
   return app;

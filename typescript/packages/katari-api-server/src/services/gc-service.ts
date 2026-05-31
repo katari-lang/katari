@@ -1,20 +1,19 @@
-// Blob GC crash backstop (Phase G recovery half).
+// Blob GC crash backstop (Entity model).
 //
-// The primary GC is incremental + single-owner: every ephemeral ref is owned
-// by exactly one durable entity (a delegation while running, then a run /
-// escalation), and CoreModule releases / hands its refs up at each shard's
-// terminal. That handles the steady state with no global scan.
+// The primary GC is structural: a ref is owned by exactly one entity (FK
+// CASCADE), and refcounts are maintained by the `refs` AFTER DELETE trigger, so
+// a completed entity's non-escaping refs are dropped + their blobs freed
+// automatically. Escaping refs ascend value-driven (detach → claim). There is no
+// "dead owner" state to reconcile — the FK forbids a ref pointing at a missing
+// entity.
 //
-// This backstop reclaims the leftovers a CRASH can produce: a ref whose owning
-// entity finished (or was force-deleted) but whose explicit release didn't run
-// because the process died mid-tick. It drops every ref whose owner is no
-// longer a live entity (delegations ∪ runs_audit ∪ escalations).
+// The only crash residue is an IN-TRANSIT ref: one a terminating child detached
+// (`owner_entity_id = NULL`) but whose parent's claim was lost to a crash. This
+// backstop drops those + reaps any blob whose refcount hit 0.
 //
-// SAFETY: it must run only when nothing is concurrently producing refs for the
-// project — otherwise a ref produced after the live-owner snapshot was taken,
-// but before the sweep's DELETE, would be wrongly collected. So it runs at BOOT
-// (before the server accepts traffic). A periodic while-live sweep would have
-// to run as a serialized quantum on the project actor; that is deferred.
+// SAFETY: a while-live ref is `NULL`-owned for sub-seconds mid-ascent, so the
+// detached-ref sweep MUST run only when nothing is concurrently ascending —
+// i.e. at BOOT, before the server accepts traffic.
 
 import type { Logger } from "@katari-lang/runtime";
 import type { ListOptions, ListResult, ProjectId, Storage } from "../storage/types.js";
@@ -29,10 +28,15 @@ export class GcService {
   async sweepAllProjects(): Promise<void> {
     for await (const projectId of this.eachProjectId()) {
       try {
-        const live = await this.liveOwnerIds(projectId);
-        const freed = await this.storage.values.sweepRefsWithDeadOwners(projectId, live);
-        if (freed > 0) {
-          this.logger.log("info", "gc: reclaimed orphaned blobs on boot", { projectId, freed });
+        // Drop crash-orphaned in-transit refs, then reap any blobs that fell to
+        // refcount 0 (here + via prior entity-cascade deletes).
+        const freed = await this.storage.values.sweepDetachedRefs(projectId);
+        const reaped = await this.storage.values.reapFreedBlobs(projectId);
+        if (freed > 0 || reaped > 0) {
+          this.logger.log("info", "gc: reclaimed orphaned blobs on boot", {
+            projectId,
+            freed: freed + reaped,
+          });
         }
       } catch (err) {
         this.logger.log("warn", "gc: project sweep failed", {
@@ -41,22 +45,6 @@ export class GcService {
         });
       }
     }
-  }
-
-  /** Every id that is still a valid ref owner: live delegations, runs (their
-   *  results outlive the delegation), and open/answered escalations. */
-  private async liveOwnerIds(projectId: ProjectId): Promise<Set<string>> {
-    const ids = new Set<string>();
-    for await (const row of pageAll((o) => this.storage.delegations.list({ projectId, ...o }))) {
-      ids.add(row.id);
-    }
-    for await (const row of pageAll((o) => this.storage.runsAudit.list({ projectId, ...o }))) {
-      ids.add(row.id);
-    }
-    for await (const row of pageAll((o) => this.storage.escalations.list({ projectId, ...o }))) {
-      ids.add(row.id);
-    }
-    return ids;
   }
 
   private async *eachProjectId(): AsyncGenerator<ProjectId> {

@@ -42,8 +42,10 @@ function findKatariBinary(): string | null {
     const r = spawnSync(explicit, ["--help"], { stdio: "ignore" });
     if (r.status === 0 || r.status === 1) return explicit;
   }
-  const onPath = spawnSync("katari", ["--help"], { stdio: "ignore" });
-  if (onPath.status === 0 || onPath.status === 1) return "katari";
+  // Prefer the freshly-BUILT binary (`stack build` updates this in-place) over
+  // any `katari` on PATH — a `stack install`ed PATH binary goes stale the moment
+  // you `stack build`, which silently ran the OLD CLI against a NEW runtime. So
+  // `stack build katari` alone is enough; no `stack install` needed.
   const stackPath = spawnSync("stack", ["path", "--local-install-root"], {
     encoding: "utf8",
     cwd: resolve(__dirname, "../.."),
@@ -54,6 +56,9 @@ function findKatariBinary(): string | null {
     const probe = spawnSync(candidate, ["--help"], { stdio: "ignore" });
     if (probe.status === 0 || probe.status === 1) return candidate;
   }
+  // Fallback: a `katari` on PATH (CI, or an explicit install).
+  const onPath = spawnSync("katari", ["--help"], { stdio: "ignore" });
+  if (onPath.status === 0 || onPath.status === 1) return "katari";
   return null;
 }
 
@@ -121,13 +126,6 @@ async function applyAndRun(
   for (const [qname, fn] of Object.entries(opts?.handlers ?? {})) {
     harness.setHandler(qname, fn);
   }
-  for (const entry of opts?.envEntries ?? []) {
-    await harness.storage.envEntries.upsert({
-      key: entry.key,
-      value: entry.isSecret ? encryptSecret(entry.value) : entry.value,
-      isSecret: entry.isSecret,
-    });
-  }
   const sampleRoot = resolve(SAMPLES_ROOT, sampleDir);
   const pkg = packageNameFromSampleDir(sampleDir);
 
@@ -137,6 +135,24 @@ async function applyAndRun(
     throw new Error(
       `katari apply failed (status=${applyR.status})\nstdout:\n${applyR.stdout}\nstderr:\n${applyR.stderr}`,
     );
+  }
+
+  // Seed env AFTER apply: env is per-project (keyed by project id), and the
+  // project only exists once `apply` has created it. Resolve it by the package
+  // name (= the project name the run targets via `--project`).
+  if ((opts?.envEntries ?? []).length > 0) {
+    const project = await harness.storage.projects.getByName(pkg);
+    if (project === null) {
+      throw new Error(`env seed: project '${pkg}' not found after apply`);
+    }
+    for (const entry of opts?.envEntries ?? []) {
+      await harness.storage.envEntries.upsert({
+        projectId: project.id,
+        key: entry.key,
+        value: entry.isSecret ? encryptSecret(entry.value) : entry.value,
+        isSecret: entry.isSecret,
+      });
+    }
   }
 
   // 2. katari run --wait (samples take no args, so pass `{}`

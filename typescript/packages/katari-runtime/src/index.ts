@@ -17,6 +17,7 @@ export {
   collectRefs,
   consoleLogger,
   createDelegationId,
+  createEntityId,
   createEscalationId,
   createScopeId,
   createState,
@@ -59,6 +60,7 @@ export type {
   EncryptedEngineCheckpoint,
   Endpoint,
   EngineCheckpoint,
+  EntityId,
   EscalationId,
   Event,
   Event as EngineEvent,
@@ -107,13 +109,14 @@ export type {
 export { hashBytes, hashText } from "./storage/hash.js";
 export type {
   CreateFileInput,
-  EphemeralOwner,
   FileRecord,
   OpenInput,
   ProduceHandle,
+  ProduceModule,
   ProduceResult,
   PutInput,
   RefHandle,
+  RefOrigin,
   RefState,
   ValueRefState,
   ValueSemanticKind,
@@ -186,17 +189,20 @@ export type { ExternalEvent } from "./engine/event.js";
 export type { Module } from "./module.js";
 export type { CoreModuleOptions } from "./modules/core.js";
 export { CoreModule } from "./modules/core.js";
-export type {
-  DelegationStore,
-  DelegationStoreRow,
-} from "./modules/delegation-store.js";
-export { NULL_DELEGATION_STORE } from "./modules/delegation-store.js";
 export {
   API_ENDPOINT,
   CORE_ENDPOINT,
   ENV_ENDPOINT,
   FFI_ENDPOINT,
 } from "./modules/endpoints.js";
+export type {
+  DelegationStoreRow,
+  EntityModule,
+  EntityStore,
+  EntityStoreRow,
+  EscalationStoreRow,
+} from "./modules/entity-store.js";
+export { NULL_ENTITY_STORE } from "./modules/entity-store.js";
 export type { EnvModuleOptions } from "./modules/env.js";
 
 export { EnvModule } from "./modules/env.js";

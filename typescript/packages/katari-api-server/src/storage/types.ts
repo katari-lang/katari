@@ -4,26 +4,27 @@
 // production binding is Postgres (`pg.ts`); tests use `memory-storage.ts`
 // for hermeticity. Adding a new backend means only implementing `Storage`.
 //
-// Conceptual model (v0.1.0):
-//   - `Project`         — top-level deploy unit (one project = one app)
-//   - `Snapshot`        — one `apply`'s frozen IR + sidecar + schema + message
-//   - `EngineCheckpoint` — frozen CORE state per-snapshot (from runtime)
-//   - `Delegation`      — one live execution entity (= in-flight call frame)
-//                         created by `delegate` event, deleted on terminal ack.
-//                         Same physical table for every Module; each Module's
-//                         repo filters by `callerEndpoint = self`.
-//   - `Escalation`      — one live escalation entity raised from inside a
-//                         delegation. State terminal on answered / cancelled
-//                         (cascade only — no standalone cancel API).
-//   - `RunsAuditRow`    — ApiModule's persistent audit log of operator-launched
-//                         root delegations. Survives terminal state so the UI
-//                         can show "Run X succeeded with result Y".
+// Conceptual model (v0.1.0 — Entity model, see docs/2026-06-01-entity-model.md):
+//   - `Project`     — top-level deploy unit (one project = one app)
+//   - `Snapshot`    — one `apply`'s frozen IR + sidecar + schema + message
+//   - `Entity`      — the RECEIVER-managed execution node (ownership/cascade
+//                     root). Minted by the module that processes a `delegate`,
+//                     self-deleted on terminal. Refs + escalations hang off it.
+//   - `Delegation`  — the ISSUER-managed request edge. Created by the parent on
+//                     `delegate` emit, deleted on the result ack. Carries the
+//                     parent link (`parentEntityId` = the issuer's OWN entity).
+//   - `Escalation`  — a live capability request, owned by the entity that RAISED
+//                     it (`state = open` only; terminal = the row is deleted).
+//   - `Run`         — the API module's per-run management record (running /
+//                     cancelling / done / error), 1:1 with a run-root entity.
+//   - `ValueStore`  — refs (entity-owned blob handles) + value_blobs ledger.
 
 import type {
   AgentDefId,
   DelegationId,
   EncryptedValue,
   EngineCheckpoint,
+  EntityId,
   EscalationId,
   ProjectIndexStore,
   ShardStore,
@@ -33,6 +34,7 @@ import type { IRModule, SchemaBundle, SidecarBundle } from "@katari-lang/types";
 
 export type {
   DelegationId,
+  EntityId,
   EscalationId,
   ProjectIndexStore,
   ShardStore,
@@ -45,26 +47,31 @@ export type {
 export type ProjectId = string & { readonly __brand: "ProjectId" };
 export type SnapshotId = string & { readonly __brand: "SnapshotId" };
 
+/** A run's id = its run-root entity id (the API keeps that entity as the run). */
+export type RunId = EntityId;
+
 // ─── States ────────────────────────────────────────────────────────────────
 
+/** The module that runs an entity (the 4 katari-protocol endpoints). */
+export type EntityModule = "core" | "ffi" | "api" | "env";
+
 /**
- * Live delegation state. Terminal (succeeded / cancelled / error) is not
- * representable here: rows are physically deleted on the terminal ack.
- * Operator-visible terminal state for root delegations lives in
- * `RunsAuditRow.state`.
+ * The only entity / delegation states. Terminal (done / error) is NOT an entity
+ * state — it lives on the `Run` record. Entity rows are physically deleted on
+ * the terminal ack (the receiver self-deletes); delegation rows on the issuer's
+ * ack-receipt.
  */
+export type EntityState = "running" | "cancelling";
 export type DelegationState = "running" | "cancelling";
 
-export type EscalationState = "open" | "answered" | "cancelled";
-
 /**
- * Operator-visible state for a "run" (= ApiModule-issued root delegation).
- * The 3 terminal states are reached via different paths:
- *   - succeeded:  `delegateAck` on the root
- *   - cancelled:  `terminateAck` after a user-initiated cancel (`cancelReason='user'`)
- *   - error:      `terminateAck` after a child-throw cascade   (`cancelReason='error'`)
+ * Operator-visible state for a run. It reflects the run's CHILD CORE-root
+ * delegation, not the run-root entity's own state:
+ *   - done:        `delegateAck` on the CORE root
+ *   - error:       a child throw cascade (`cancelReason = 'error'`)
+ *   - cancelling:  a cancel is in flight
  */
-export type RunsAuditState = "running" | "cancelling" | "cancelled" | "error" | "succeeded";
+export type RunState = "running" | "cancelling" | "done" | "error";
 
 export type CancelReason = "user" | "error";
 
@@ -149,27 +156,67 @@ export interface EngineCheckpointRepo {
   delete(snapshotId: SnapshotId): Promise<void>;
 }
 
-// ─── Delegations (= live execution entities) ───────────────────────────────
+// ─── Entities (= the execution node) ───────────────────────────────────────
 //
-// One physical `delegations` table; logical ownership is by Module. The
-// Module that issued the `delegate` event (= `callerEndpoint`) writes the
-// row, updates state, and deletes it on terminal ack. Every Module that
-// might issue a `delegate` (CORE, FFI, API) writes through this same
-// shape; EnvModule never delegates onward so it has no rows.
+// Created by the module that RECEIVES a `delegate` (it mints `E`), from the bus
+// event + ambient context alone — it never reads the issuer's tables. Carries no
+// parent/root link (those are off-server); the parent link is on the issuer-side
+// `Delegation` row. Self-deleted on terminal (its refs + escalations cascade).
+
+export type EntityRow = {
+  /** Entity identity `E`, minted by the receiver (synthetic for the project root). */
+  id: EntityId;
+  /** The summoning delegation `D` (from the bus). `null` only for the project root. */
+  delegationId: DelegationId | null;
+  projectId: ProjectId;
+  /** The module that runs this entity (self). */
+  module: EntityModule;
+  state: EntityState;
+  /** What the entity runs (from the bus). `null` for the project root. */
+  agentDefId: AgentDefId | null;
+  args: Record<string, EncryptedValue>;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export interface EntityRepo {
+  insert(row: EntityRow): Promise<void>;
+  get(id: EntityId): Promise<EntityRow | null>;
+  /** Resolve bus `D → E` (the receiver's entity for a delegation). */
+  getByDelegation(projectId: ProjectId, delegationId: DelegationId): Promise<EntityRow | null>;
+  setState(
+    id: EntityId,
+    state: EntityState,
+    options?: { expectedState?: EntityState },
+  ): Promise<boolean>;
+  /**
+   * Self-delete (terminal). Cascades the entity's still-owned refs + raised
+   * escalations (FK); the refs-delete trigger keeps blob refcounts correct.
+   * Freed bytes are reclaimed separately by `ValueStore.reapFreedBlobs`.
+   */
+  delete(id: EntityId): Promise<boolean>;
+  list(
+    filter?: {
+      projectId?: ProjectId;
+      module?: EntityModule;
+      state?: EntityState;
+    } & ListOptions,
+  ): Promise<ListResult<EntityRow>>;
+}
+
+// ─── Delegations (= the request edge) ──────────────────────────────────────
+//
+// Issuer-managed: the parent INSERTs at `delegate` emit and DELETEs on the
+// result ack. `parentEntityId` is the issuer's OWN entity (known locally). The
+// receiver never touches this row. lifetime(delegation) ⊇ lifetime(entity).
 
 export type DelegationRow = {
-  /** Entity identity. Set at delegate-event creation by the caller. */
   id: DelegationId;
-  /** Denormalised: id of the topmost ancestor (= the run root). */
-  rootDelegationId: DelegationId;
-  /** One hop up. `null` when this row IS the root. */
-  parentDelegationId: DelegationId | null;
-  /** Project the run belongs to. (Snapshot is module-private — not here.) */
   projectId: ProjectId;
-  /** Module that issued the delegate event. Owns writes for this row. */
-  callerEndpoint: string;
-  /** Module that runs this entity. */
-  ownerEndpoint: string;
+  /** The issuer's own entity `E` (the parent link; local to the issuer). */
+  parentEntityId: EntityId;
+  /** The endpoint the delegate was addressed to (which module runs the child). */
+  targetModule: EntityModule;
   agentDefId: AgentDefId;
   args: Record<string, EncryptedValue>;
   state: DelegationState;
@@ -180,115 +227,72 @@ export type DelegationRow = {
 export interface DelegationRepo {
   insert(row: DelegationRow): Promise<void>;
   get(id: DelegationId): Promise<DelegationRow | null>;
-  /**
-   * List delegations matching the filter. All filter fields are optional;
-   * supply none to retrieve every row (`tests` use this sparingly).
-   *
-   * Common patterns:
-   *   - `{ rootDelegationId }` — tree assembly for one run
-   *   - `{ callerEndpoint, rootDelegationId }` — one Module's slice of a tree
-   *   - `{ callerEndpoint, snapshotId }` — Module-local snapshot cleanup
-   *   - `{ parentDelegationId }` — direct children (FFI ext-spawn lookup)
-   */
-  list(
-    filter?: {
-      projectId?: ProjectId;
-      callerEndpoint?: string;
-      rootDelegationId?: DelegationId;
-      parentDelegationId?: DelegationId;
-      state?: DelegationState;
-    } & ListOptions,
-  ): Promise<ListResult<DelegationRow>>;
-  /**
-   * State transition with optional optimistic check. Returns true if a row
-   * was updated.
-   */
   setState(
     id: DelegationId,
     state: DelegationState,
     options?: { expectedState?: DelegationState },
   ): Promise<boolean>;
-  /** Mark every row in a root subtree as `cancelling` (where currently `running`). */
-  markAllUnderRootAsCancelling(rootDelegationId: DelegationId): Promise<void>;
-  /** Drop the row at terminal ack (= success or cancel-complete). */
   delete(id: DelegationId): Promise<boolean>;
-  /** Delete every row in a root subtree (root + all children). */
-  deleteAllUnderRoot(rootDelegationId: DelegationId): Promise<void>;
+  list(
+    filter?: {
+      projectId?: ProjectId;
+      parentEntityId?: EntityId;
+      state?: DelegationState;
+    } & ListOptions,
+  ): Promise<ListResult<DelegationRow>>;
 }
 
-// ─── Escalations (= live escalation entities) ──────────────────────────────
+// ─── Escalations (= a live capability request, raiser-owned) ───────────────
 //
-// Each row represents one in-flight `escalate` event raised inside a
-// delegation. The Module that issued the escalate event (= the originator
-// of the question, typically CORE for AI-to-user) owns the row. State
-// reaches `cancelled` only via cascade when the parent delegation chain
-// is cancelled; there is no standalone "cancel this escalation" path.
+// Owned by the entity that RAISED it (`entityId`). `state` is `open` only —
+// answered / cancelled are terminal = the row is deleted (the raiser self-deletes
+// on escalateAck; cancel cascades when the raiser entity is terminated). The
+// history of answered, user-facing ones lives under the run
+// (`run_escalations_audit`).
 
 export type EscalationRow = {
   id: EscalationId;
-  /** The delegation in which this escalation was raised. */
-  delegationId: DelegationId;
-  /** Denormalised: root of `delegationId`'s tree. */
-  rootDelegationId: DelegationId;
-  /** Project the run belongs to. (Snapshot is module-private — not here.) */
+  /** The raising entity (owner). */
+  entityId: EntityId;
   projectId: ProjectId;
-  /** Module that issued the escalate event. */
-  callerEndpoint: string;
-  /** Module the bus event was addressed to (= the would-be answerer). */
-  receiverEndpoint: string;
+  /** The requested capability / `request` (same slot a delegate uses). */
   agentDefId: AgentDefId;
   args: Record<string, EncryptedValue>;
-  state: EscalationState;
-  /** Set when state === "answered". */
-  value?: EncryptedValue;
   createdAt: string;
 };
 
 export interface EscalationRepo {
   insert(row: EscalationRow): Promise<void>;
   get(id: EscalationId): Promise<EscalationRow | null>;
+  delete(id: EscalationId): Promise<boolean>;
   list(
     filter?: {
       projectId?: ProjectId;
-      callerEndpoint?: string;
-      receiverEndpoint?: string;
-      rootDelegationId?: DelegationId;
-      delegationId?: DelegationId;
-      state?: EscalationState;
+      entityId?: EntityId;
     } & ListOptions,
   ): Promise<ListResult<EscalationRow>>;
-  setAnswered(id: EscalationId, value: EncryptedValue): Promise<boolean>;
-  /**
-   * Mark every open escalation in a root subtree as `cancelled`. Called by
-   * the cancel cascade — never invoked by single-escalation operations.
-   */
-  cancelAllUnderRoot(rootDelegationId: DelegationId): Promise<void>;
-  /** Drop the row (= used by ext-side relays that are restart-wiped). */
-  delete(id: EscalationId): Promise<boolean>;
 }
 
-// ─── Runs audit (= ApiModule persistent log) ───────────────────────────────
+// ─── Runs (= the API module's per-run management record) ───────────────────
 //
-// One row per operator-launched root delegation. Created alongside the
-// live `delegations` row in startRun; survives the live row's terminal
-// deletion to retain audit history (state / result / cancel reason).
+// 1:1 with a run-root entity (`id = E_run`). Its state reflects the run's CHILD
+// CORE-root delegation. `coreDelegationId` = the `D` the run-root issued to the
+// CORE root (so a delegateAck/terminateAck routes back here, and cancel/recovery
+// can re-issue terminate). Kept as run history.
 
-export type RunsAuditRow = {
-  /** = root delegation id. */
-  id: DelegationId;
+export type RunRow = {
+  /** = the run-root entity id `E_run`. */
+  id: RunId;
+  projectId: ProjectId;
   snapshotId: SnapshotId;
-  /** Display label. Filled with a sensible default
-   *  (`"<qualifiedName> @ HH:mm"`) by the server when the operator
-   *  omits one, so this is always a non-empty string. */
+  /** The `D` from run-root → CORE root. */
+  coreDelegationId: DelegationId;
+  /** Display label (defaulted server-side, always non-empty). */
   name: string;
   qualifiedName: string;
   args: Record<string, EncryptedValue>;
-  state: RunsAuditState;
-  /**
-   * Set on `running → cancelling`; persists through the terminal state so
-   * a UI viewer can tell "this run was cancelled by the user" vs "by an
-   * unhandled child throw".
-   */
+  state: RunState;
+  /** Set on `running → cancelling`; persists through the terminal state. */
   cancelReason: CancelReason | null;
   result?: EncryptedValue;
   errorMessage?: string;
@@ -297,38 +301,68 @@ export type RunsAuditRow = {
   completedAt?: string;
 };
 
-export interface RunsAuditRepo {
-  insert(row: RunsAuditRow): Promise<void>;
-  get(id: DelegationId): Promise<RunsAuditRow | null>;
-  list(
-    filter?: {
-      projectId?: ProjectId;
-      snapshotId?: SnapshotId;
-      state?: RunsAuditState;
-    } & ListOptions,
-  ): Promise<ListResult<RunsAuditRow>>;
+export interface RunRepo {
+  insert(row: RunRow): Promise<void>;
+  get(id: RunId): Promise<RunRow | null>;
+  /** Resolve the run that issued `coreDelegationId` (the CORE-root ack target). */
+  getByCoreDelegation(coreDelegationId: DelegationId): Promise<RunRow | null>;
   setState(
-    id: DelegationId,
+    id: RunId,
     patch: {
-      state: RunsAuditState;
+      state: RunState;
       cancelReason?: CancelReason | null;
       result?: EncryptedValue;
       errorMessage?: string;
       completedAt?: string;
     },
   ): Promise<boolean>;
+  list(
+    filter?: {
+      projectId?: ProjectId;
+      snapshotId?: SnapshotId;
+      state?: RunState;
+    } & ListOptions,
+  ): Promise<ListResult<RunRow>>;
 }
 
-// ─── FFI sidecar relay state (private to FFI Module, Phase 5 will unify) ──
+// ─── Run escalations (the API's per-run operator-facing view) ──────────────
 //
-// The FFI Runner holds a sidecar per-snapshot. Its in-memory state is only
-// the subprocess pid level; in-flight delegation / escalation rows are
-// written to these tables. On server restart, the FFI Runner reads them
-// and notifies the sidecar via `ipcDelegateRestarted`.
+// One row per escalation that reached the API (mapped to its run via the bus
+// `delegationId = D_core`). Both PENDING (`answer === undefined`) and ANSWERED.
+// The live `escalations` row (raiser-owned, for cascade) is CORE's; this is the
+// API's operator view + history, written from bus events (its OWN tables only).
+
+export type RunEscalationAuditRow = {
+  runId: RunId;
+  escalationId: EscalationId;
+  agentDefId: AgentDefId;
+  args: Record<string, EncryptedValue>;
+  /** `undefined` while pending; set on answer. */
+  answer?: EncryptedValue;
+  createdAt: string;
+  /** `undefined` while pending; set on answer. */
+  answeredAt?: string;
+};
+
+export interface RunEscalationsAuditRepo {
+  /** Record a pending operator-facing escalation (idempotent on escalationId). */
+  insert(row: RunEscalationAuditRow): Promise<void>;
+  get(escalationId: EscalationId): Promise<RunEscalationAuditRow | null>;
+  /** Set the answer (PENDING → ANSWERED). Returns false if unknown. */
+  setAnswer(
+    escalationId: EscalationId,
+    answer: EncryptedValue,
+    answeredAt: string,
+  ): Promise<boolean>;
+  list(runId: RunId): Promise<RunEscalationAuditRow[]>;
+}
+
+// ─── FFI sidecar relay state (private to FFI Module) ───────────────────────
 //
-// Phase 5 of Wave 6e merges these into the unified `delegations` /
-// `escalations` tables. Until then, they live alongside the unified
-// tables and the tree assembler reads BOTH.
+// The FFI Runner holds a sidecar per-snapshot. Its in-flight delegation /
+// escalation relay rows are written here; on restart the FFI Runner reads them
+// and notifies the sidecar. Operational bookkeeping, distinct from the protocol
+// entity layer (the tree assembler reads `entities`, not these).
 
 export type FfiPendingDelegation = {
   delegationId: DelegationId;
@@ -430,18 +464,25 @@ export interface Storage {
   projects: ProjectRepo;
   snapshots: SnapshotRepo;
   checkpoints: EngineCheckpointRepo;
+  /** The execution node (receiver-managed; ownership/cascade root). */
+  entities: EntityRepo;
+  /** The request edge (issuer-managed). */
   delegations: DelegationRepo;
+  /** Live capability requests, owned by their raiser entity. */
   escalations: EscalationRepo;
-  runsAudit: RunsAuditRepo;
-  /** Private FFI sidecar relay state. To be merged into `delegations` in Phase 5. */
+  /** The API module's per-run management records. */
+  runs: RunRepo;
+  /** Answered user-facing escalation history, kept under a run. */
+  runEscalationsAudit: RunEscalationsAuditRepo;
+  /** Private FFI sidecar relay state. */
   ffiDelegations: FfiPendingDelegationRepo;
   ffiEscalations: FfiPendingEscalationRepo;
   envEntries: EnvEntryRepo;
-  /** 3-layer byte-sequence storage (refs / files / blobs). */
+  /** refs (entity-owned blob handles) + value_blobs ledger. */
   values: ValueStore;
-  /** Per-agent engine shards (Phase E). Replaces `checkpoints` once CORE shards. */
+  /** Per-agent engine shards (keyed by entity id E). */
   shards: ShardStore;
-  /** Project-local routing index for shards (Phase E). */
+  /** Project-local routing index for shards (bus id → shard E). */
   projectIndex: ProjectIndexStore;
 
   /**
@@ -455,9 +496,6 @@ export interface Storage {
    * stateless orchestrator to serialize CORE state mutation per snapshot.
    *
    *   - Postgres: `pg_advisory_xact_lock(hashtext('snapshot:' || $1))`.
-   *               No placeholder row is required; the advisory key is
-   *               derived from the snapshot id and released automatically
-   *               at tx end.
    *   - Memory:   per-snapshot Mutex map internal to the implementation.
    *
    * `withSnapshotLock` MUST be called inside `withTransaction` so the

@@ -25,6 +25,7 @@
 import type { FileRecord } from "@katari-lang/runtime";
 import { Hono } from "hono";
 import { z } from "zod";
+import { ensureProjectRootEntity } from "../entity-roots.js";
 import type { Storage } from "../storage/types.js";
 import { ProjectIdSchema } from "./middleware/validation.js";
 
@@ -90,11 +91,11 @@ export function buildFileRoutes(storage: Storage): Hono {
     if (bytes.length === 0) {
       return c.json({ error: "upload body is empty" }, 400);
     }
-    const file = await storage.values.createFile({
-      projectId,
-      bytes,
-      contentType,
-      displayName,
+    // The upload is owned by the project-root entity (kept for the project's
+    // life). Ensure it exists, then create the file, in one tx.
+    const file = await storage.withTransaction(async (tx) => {
+      const ownerEntityId = await ensureProjectRootEntity(tx, projectId);
+      return tx.values.createFile({ projectId, ownerEntityId, bytes, contentType, displayName });
     });
     return c.json({ file: fileToWire(file) }, 201);
   });

@@ -12,6 +12,14 @@ export type DelegationId = string & { readonly __brand: "DelegationId" };
 export type EscalationId = string & { readonly __brand: "EscalationId" };
 
 /**
+ * EntityId (`E`): the identity of an execution unit (the ownership / tree key),
+ * minted by the RECEIVING side when it processes a `delegate` — distinct from
+ * the summoning `DelegationId` (`D`) and kept OFF the bus. A CORE shard is keyed
+ * by its `EntityId`; refs are owned by it. See docs/2026-06-01-entity-model.md.
+ */
+export type EntityId = string & { readonly __brand: "EntityId" };
+
+/**
  * ClosureId: machine-local identifier for a closure record stored in
  * `state.closures`. Allocated by `statementMakeClosure` execution. Closures
  * are first-class runtime objects (rather than inlined into `Value`) so
@@ -53,4 +61,8 @@ export function createDelegationId(): DelegationId {
 
 export function createEscalationId(): EscalationId {
   return crypto.randomUUID() as EscalationId;
+}
+
+export function createEntityId(): EntityId {
+  return crypto.randomUUID() as EntityId;
 }

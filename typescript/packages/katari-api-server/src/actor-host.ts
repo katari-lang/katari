@@ -32,7 +32,7 @@ import {
   type SidecarManager,
 } from "@katari-lang/runtime";
 import { ApiModule } from "./adapters/api-module.js";
-import { StorageDelegationStore } from "./adapters/delegation-store.js";
+import { StorageEntityStore } from "./adapters/entity-store.js";
 import { StorageEnvStore } from "./adapters/env-store.js";
 import { StorageFfiStore } from "./adapters/ffi-store.js";
 import type { ProjectId, SnapshotId, Storage } from "./storage/types.js";
@@ -100,7 +100,7 @@ export class ApiServerActorHost {
             shards: tx.shards,
             projectIndex: tx.projectIndex,
             values: tx.values,
-            delegations: new StorageDelegationStore(tx, projectId),
+            entities: new StorageEntityStore(tx, projectId),
           }),
         ),
     };
@@ -127,7 +127,17 @@ export class ApiServerActorHost {
       onBusResponse: (event) => bus.push(event),
     });
 
-    const ffi = new FfiMux(this.ffiBackend(projectId), (event) => bus.push(event), logger);
+    const ffi = new FfiMux(
+      this.ffiBackend(projectId),
+      (event) => bus.push(event),
+      logger,
+      // Project-scoped (root storage, non-tx like the FFI relay store): the FFI
+      // ext entities + the refs ext code produces. The lane mints an ext entity
+      // per inbound delegate and ascends its escaping refs on terminal.
+      new StorageEntityStore(storage, projectId),
+      storage.values,
+      projectId,
+    );
 
     return { core, api, env, ffi };
   }
@@ -167,7 +177,7 @@ export class ApiServerActorHost {
         };
       },
       store(snapshot: string) {
-        return new StorageFfiStore(storage, snapshot as SnapshotId, projectId);
+        return new StorageFfiStore(storage, snapshot as SnapshotId);
       },
       async delegationSnapshot(delegationId: DelegationId): Promise<string | null> {
         return (await storage.ffiDelegations.get(delegationId))?.snapshotId ?? null;

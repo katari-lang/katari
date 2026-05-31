@@ -25,12 +25,14 @@ export type {
   AskId,
   CallId,
   DelegationId,
+  EntityId,
   EscalationId,
   ScopeId,
   ThreadId,
 } from "./id.js";
 export {
   createDelegationId,
+  createEntityId,
   createEscalationId,
   createScopeId,
   createThreadId,

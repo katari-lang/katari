@@ -23,16 +23,14 @@ export async function recoverOnBoot(
   // server accepts traffic, so nothing is concurrently producing refs.
   await new GcService(storage, logger).sweepAllProjects();
 
-  const { items: cancellingRuns } = await storage.runsAudit.list({
+  const { items: cancellingRuns } = await storage.runs.list({
     state: "cancelling",
     limit: 500,
   });
   for (const run of cancellingRuns) {
     try {
-      // A run is bound to a snapshot in runs_audit; resolve its project.
-      const snap = await storage.snapshots.get(run.snapshotId);
-      if (snap === null) continue;
-      await host.runForProject(snap.projectId, ({ bus, modules }) =>
+      // The Run record carries its project directly.
+      await host.runForProject(run.projectId, ({ bus, modules }) =>
         modules.api.cancelRun({ bus, runId: run.id }),
       );
     } catch (err) {

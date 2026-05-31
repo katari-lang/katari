@@ -1,22 +1,26 @@
-// In-memory `ValueStore`. Used by tests and the memory `Storage` backend.
+// In-memory `ValueStore` (Entity model). Used by tests and the memory `Storage`
+// backend.
 //
-// Models the 3 layers as plain Maps: ephemeral `refs`, persistent `files`, and
-// content-addressed `blobs` (the dedup unit, with a refcount). Bytes are held
-// whole (chunking is a Postgres storage detail); `fetchRange` slices. See the
-// Postgres impl (`value-store-pg.ts`) for the on-disk chunked layout.
+// Models the layers as plain Maps: `refs` (entity-owned blob handles, including
+// `module = "api"` files) and `blobs` (the content-addressed dedup unit, with a
+// refcount). Mirrors the Postgres impl's semantics; here the refcount is
+// maintained in code and a blob is freed inline the moment its last ref goes
+// (so `reapFreedBlobs` is a no-op). Entity CASCADE is simulated by
+// `deleteRefsOwnedBy`, which the memory `EntityRepo.delete` calls.
 
 import {
   type CreateFileInput,
-  type EphemeralOwner,
   type FileRecord,
   hashBytes,
   MAX_PRODUCE_BYTES,
   type OpenInput,
   type ProduceHandle,
+  type ProduceModule,
   type ProduceResult,
   type PutInput,
   type RefHandle,
   type RefModule,
+  type RefOrigin,
   type RefState,
   type ValueRefState,
   type ValueSemanticKind,
@@ -26,26 +30,18 @@ import { v7 as uuidv7 } from "uuid";
 
 type RefRow = {
   projectId: string;
-  owner: EphemeralOwner;
+  module: RefModule;
   id: string;
+  ownerEntityId?: string; // undefined = in-transit (NULL owner)
   state: ValueRefState;
   semanticKind: ValueSemanticKind;
-  ownerDelegationId?: string;
+  origin: RefOrigin;
   refsTo: RefHandle[];
   hash: string | null;
   size: number | null;
   contentType?: string;
-  errorMessage?: string;
-  createdAt: string;
-};
-
-type FileRow = {
-  projectId: string;
-  id: string;
-  hash: string;
-  size: number;
-  contentType?: string;
   displayName?: string;
+  errorMessage?: string;
   createdAt: string;
 };
 
@@ -55,16 +51,15 @@ type BlobRow = {
   bytes: Uint8Array;
 };
 
-const refKey = (projectId: string, owner: string, id: string): string =>
-  `${projectId}|${owner}|${id}`;
-const fileKey = (projectId: string, id: string): string => `${projectId}|${id}`;
+const refKey = (projectId: string, module: string, id: string): string =>
+  `${projectId}|${module}|${id}`;
 const blobKey = (projectId: string, hash: string): string => `${projectId}|${hash}`;
 
-function toFileRecord(row: FileRow): FileRecord {
+function toFileRecord(row: RefRow): FileRecord {
   return {
     id: row.id,
-    hash: row.hash,
-    size: row.size,
+    hash: row.hash ?? "",
+    size: row.size ?? 0,
     contentType: row.contentType,
     displayName: row.displayName,
     createdAt: row.createdAt,
@@ -74,7 +69,6 @@ function toFileRecord(row: FileRow): FileRecord {
 export class InMemoryValueStore implements ValueStore {
   // Public so the `Storage` facade can snapshot/restore for `withTransaction`.
   refs = new Map<string, RefRow>();
-  files = new Map<string, FileRow>();
   blobs = new Map<string, BlobRow>();
 
   // ── blob refcount lifecycle ───────────────────────────────────────────────
@@ -90,17 +84,20 @@ export class InMemoryValueStore implements ValueStore {
     this.blobs.set(key, { totalSize: bytes.length, refCount: 1, bytes: bytes.slice() });
   }
 
-  /** Decrement a blob's refcount; delete it at zero. Returns true iff freed. */
-  private releaseBlobRef(projectId: string, hash: string): boolean {
+  /** Decrement a blob's refcount; free it inline at zero. */
+  private releaseBlobRef(projectId: string, hash: string | null): void {
+    if (hash === null) return;
     const key = blobKey(projectId, hash);
     const existing = this.blobs.get(key);
-    if (existing === undefined) return false;
-    if (existing.refCount <= 1) {
-      this.blobs.delete(key);
-      return true;
-    }
-    this.blobs.set(key, { ...existing, refCount: existing.refCount - 1 });
-    return false;
+    if (existing === undefined) return;
+    if (existing.refCount <= 1) this.blobs.delete(key);
+    else this.blobs.set(key, { ...existing, refCount: existing.refCount - 1 });
+  }
+
+  /** Delete a ref row and decrement its blob (the trigger's job, done in code). */
+  private deleteRef(row: RefRow): void {
+    this.refs.delete(refKey(row.projectId, row.module, row.id));
+    this.releaseBlobRef(row.projectId, row.hash);
   }
 
   private resolveBytes(projectId: string, hash: string): Uint8Array | null {
@@ -108,7 +105,11 @@ export class InMemoryValueStore implements ValueStore {
     return blob !== undefined ? blob.bytes.slice() : null;
   }
 
-  // ── produce (ephemeral) ───────────────────────────────────────────────────
+  private insertRefRow(row: RefRow): void {
+    this.refs.set(refKey(row.projectId, row.module, row.id), row);
+  }
+
+  // ── produce ───────────────────────────────────────────────────────────────
 
   async putComplete(input: PutInput): Promise<ProduceResult> {
     if (input.bytes.length > MAX_PRODUCE_BYTES) {
@@ -118,13 +119,14 @@ export class InMemoryValueStore implements ValueStore {
     const hash = hashBytes(input.bytes);
     const size = input.bytes.length;
     this.addBlobRef(input.projectId, hash, input.bytes);
-    this.refs.set(refKey(input.projectId, input.owner, id), {
+    this.insertRefRow({
       projectId: input.projectId,
-      owner: input.owner,
+      module: input.owner,
       id,
+      ownerEntityId: input.ownerEntityId,
       state: "complete",
       semanticKind: input.semanticKind,
-      ownerDelegationId: input.ownerDelegationId,
+      origin: input.origin ?? "intermediate",
       refsTo: [...(input.refsTo ?? [])],
       hash,
       size,
@@ -156,13 +158,14 @@ export class InMemoryValueStore implements ValueStore {
         const bytes = concatChunks(chunks, total);
         const hash = hashBytes(bytes);
         store.addBlobRef(input.projectId, hash, bytes);
-        store.refs.set(refKey(input.projectId, input.owner, id), {
+        store.insertRefRow({
           projectId: input.projectId,
-          owner: input.owner,
+          module: input.owner,
           id,
+          ownerEntityId: input.ownerEntityId,
           state: "complete",
           semanticKind: input.semanticKind,
-          ownerDelegationId: input.ownerDelegationId,
+          origin: input.origin ?? "intermediate",
           refsTo: [...(input.refsTo ?? [])],
           hash,
           size: total,
@@ -174,13 +177,14 @@ export class InMemoryValueStore implements ValueStore {
       async abort(errorMessage: string): Promise<void> {
         if (settled) return;
         settled = true;
-        store.refs.set(refKey(input.projectId, input.owner, id), {
+        store.insertRefRow({
           projectId: input.projectId,
-          owner: input.owner,
+          module: input.owner,
           id,
+          ownerEntityId: input.ownerEntityId,
           state: "errored",
           semanticKind: input.semanticKind,
-          ownerDelegationId: input.ownerDelegationId,
+          origin: input.origin ?? "intermediate",
           refsTo: [...(input.refsTo ?? [])],
           hash: null,
           size: null,
@@ -195,19 +199,6 @@ export class InMemoryValueStore implements ValueStore {
   // ── consume ───────────────────────────────────────────────────────────────
 
   async getState(projectId: string, module: RefModule, id: string): Promise<RefState | null> {
-    if (module === "api") {
-      const file = this.files.get(fileKey(projectId, id));
-      if (file === undefined) return null;
-      return {
-        module,
-        id,
-        state: "complete",
-        semanticKind: "file",
-        hash: file.hash,
-        size: file.size,
-        contentType: file.contentType,
-      };
-    }
     const row = this.refs.get(refKey(projectId, module, id));
     if (row === undefined) return null;
     return {
@@ -223,9 +214,6 @@ export class InMemoryValueStore implements ValueStore {
   }
 
   private hashOf(projectId: string, module: RefModule, id: string): string | null {
-    if (module === "api") {
-      return this.files.get(fileKey(projectId, id))?.hash ?? null;
-    }
     const row = this.refs.get(refKey(projectId, module, id));
     return row !== undefined && row.state === "complete" ? row.hash : null;
   }
@@ -249,7 +237,7 @@ export class InMemoryValueStore implements ValueStore {
     return bytes.slice(start, end);
   }
 
-  // ── persistent files ──────────────────────────────────────────────────────
+  // ── durable files (module = "api" refs) ─────────────────────────────────────
 
   async createFile(input: CreateFileInput): Promise<FileRecord> {
     if (input.bytes.length > MAX_PRODUCE_BYTES) {
@@ -258,44 +246,55 @@ export class InMemoryValueStore implements ValueStore {
     const id = uuidv7();
     const hash = hashBytes(input.bytes);
     this.addBlobRef(input.projectId, hash, input.bytes);
-    const row: FileRow = {
+    const row: RefRow = {
       projectId: input.projectId,
+      module: "api",
       id,
+      ownerEntityId: input.ownerEntityId,
+      state: "complete",
+      semanticKind: "file",
+      origin: "user",
+      refsTo: [],
       hash,
       size: input.bytes.length,
       contentType: input.contentType,
       displayName: input.displayName,
       createdAt: new Date().toISOString(),
     };
-    this.files.set(fileKey(input.projectId, id), row);
+    this.insertRefRow(row);
     return toFileRecord(row);
   }
 
   async getFile(projectId: string, id: string): Promise<FileRecord | null> {
-    const row = this.files.get(fileKey(projectId, id));
-    return row !== undefined ? toFileRecord(row) : null;
+    const row = this.refs.get(refKey(projectId, "api", id));
+    return row !== undefined && row.state === "complete" ? toFileRecord(row) : null;
   }
 
   async listFiles(projectId: string): Promise<FileRecord[]> {
-    return [...this.files.values()]
-      .filter((r) => r.projectId === projectId)
+    return [...this.refs.values()]
+      .filter(
+        (r) =>
+          r.projectId === projectId &&
+          r.module === "api" &&
+          r.origin === "user" &&
+          r.state === "complete",
+      )
       .sort((a, b) => (a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : 0))
       .map(toFileRecord);
   }
 
   async deleteFile(projectId: string, id: string): Promise<boolean> {
-    const key = fileKey(projectId, id);
-    const row = this.files.get(key);
+    const row = this.refs.get(refKey(projectId, "api", id));
     if (row === undefined) return false;
-    this.files.delete(key);
-    this.releaseBlobRef(projectId, row.hash);
+    this.deleteRef(row);
     return true;
   }
 
   async persistRef(input: {
     projectId: string;
-    module: EphemeralOwner;
+    module: ProduceModule;
     id: string;
+    ownerEntityId: string;
     displayName?: string;
   }): Promise<FileRecord | null> {
     const ref = this.refs.get(refKey(input.projectId, input.module, input.id));
@@ -303,33 +302,35 @@ export class InMemoryValueStore implements ValueStore {
       return null;
     }
     const id = uuidv7();
-    // Share the existing blob (refcount += 1) — no byte copy needed.
     const blob = this.blobs.get(blobKey(input.projectId, ref.hash));
     if (blob === undefined) return null;
-    this.blobs.set(blobKey(input.projectId, ref.hash), {
-      ...blob,
-      refCount: blob.refCount + 1,
-    });
-    const row: FileRow = {
+    this.blobs.set(blobKey(input.projectId, ref.hash), { ...blob, refCount: blob.refCount + 1 });
+    const row: RefRow = {
       projectId: input.projectId,
+      module: "api",
       id,
+      ownerEntityId: input.ownerEntityId,
+      state: "complete",
+      semanticKind: "file",
+      origin: "user",
+      refsTo: [],
       hash: ref.hash,
       size: ref.size,
       contentType: ref.contentType,
       displayName: input.displayName,
       createdAt: new Date().toISOString(),
     };
-    this.files.set(fileKey(input.projectId, id), row);
+    this.insertRefRow(row);
     return toFileRecord(row);
   }
 
-  // ── ownership transitions (single-owner GC) ─────────────────────────────
+  // ── ownership: value-driven ascent ───────────────────────────────────────
 
   /** Transitive closure of `seed` via `refs_to`, restricted to refs owned by
-   *  `ownerId`. Returns the set of refKeys to keep/move. */
-  private expandWithinOwner(
+   *  `fromOwner` (undefined for in-transit). Returns the refKeys to move. */
+  private expandOwned(
     projectId: string,
-    ownerId: string,
+    fromOwner: string | undefined,
     seed: ReadonlyArray<RefHandle>,
   ): Set<string> {
     const keep = new Set<string>();
@@ -339,59 +340,50 @@ export class InMemoryValueStore implements ValueStore {
       const key = refKey(projectId, handle.module, handle.id);
       if (keep.has(key)) continue;
       const row = this.refs.get(key);
-      if (row === undefined || row.ownerDelegationId !== ownerId) continue; // already higher / unknown
+      if (row === undefined || row.ownerEntityId !== fromOwner) continue;
       keep.add(key);
       for (const child of row.refsTo) worklist.push(child);
     }
     return keep;
   }
 
-  async releaseOwner(
+  async reownRefs(
     projectId: string,
-    ownerId: string,
-    toOwnerId: string,
-    escapeSeed: ReadonlyArray<RefHandle>,
-  ): Promise<number> {
-    const keep = this.expandWithinOwner(projectId, ownerId, escapeSeed);
-    let freed = 0;
-    for (const [key, row] of [...this.refs.entries()]) {
-      if (row.projectId !== projectId || row.ownerDelegationId !== ownerId) continue;
-      if (keep.has(key)) {
-        this.refs.set(key, { ...row, ownerDelegationId: toOwnerId });
-      } else {
-        this.refs.delete(key);
-        if (row.hash !== null && this.releaseBlobRef(projectId, row.hash)) freed += 1;
-      }
-    }
-    return freed;
-  }
-
-  async transferOwnership(
-    projectId: string,
-    fromOwnerId: string,
-    toOwnerId: string,
+    fromOwner: string | null,
+    toOwner: string | null,
     seed: ReadonlyArray<RefHandle>,
   ): Promise<void> {
-    const move = this.expandWithinOwner(projectId, fromOwnerId, seed);
+    if (seed.length === 0) return;
+    const move = this.expandOwned(projectId, fromOwner ?? undefined, seed);
     for (const key of move) {
       const row = this.refs.get(key);
-      if (row !== undefined) this.refs.set(key, { ...row, ownerDelegationId: toOwnerId });
+      if (row !== undefined) this.refs.set(key, { ...row, ownerEntityId: toOwner ?? undefined });
     }
   }
 
-  async sweepRefsWithDeadOwners(
-    projectId: string,
-    liveOwnerIds: ReadonlySet<string>,
-  ): Promise<number> {
+  /** Memory frees blobs inline on ref delete, so there is nothing to reap. */
+  async reapFreedBlobs(_projectId: string): Promise<number> {
+    return 0;
+  }
+
+  async sweepDetachedRefs(projectId: string): Promise<number> {
     let freed = 0;
-    for (const [key, row] of [...this.refs.entries()]) {
-      if (row.projectId !== projectId) continue;
-      if (row.ownerDelegationId === undefined) continue; // unowned: not GC-managed
-      if (liveOwnerIds.has(row.ownerDelegationId)) continue;
-      this.refs.delete(key);
-      if (row.hash !== null && this.releaseBlobRef(projectId, row.hash)) freed += 1;
+    for (const row of [...this.refs.values()]) {
+      if (row.projectId !== projectId || row.ownerEntityId !== undefined) continue;
+      const had = row.hash !== null && this.blobs.get(blobKey(projectId, row.hash))?.refCount === 1;
+      this.deleteRef(row);
+      if (had) freed += 1;
     }
     return freed;
+  }
+
+  // ── entity CASCADE (called by memory EntityRepo.delete) ──────────────────
+
+  /** Delete every ref owned by `ownerEntityId` (the FK CASCADE, in code). */
+  deleteRefsOwnedBy(projectId: string, ownerEntityId: string): void {
+    for (const row of [...this.refs.values()]) {
+      if (row.projectId === projectId && row.ownerEntityId === ownerEntityId) this.deleteRef(row);
+    }
   }
 }
 

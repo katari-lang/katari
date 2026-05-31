@@ -43,7 +43,7 @@ async function runMain(harness: TestHarness, projectId: string, snapshotId: stri
   // The actor host drains the bus synchronously, so the run is already terminal.
   const got = await harness.app.fetch(new Request(`http://test/project/${projectId}/run/${runId}`));
   const body = (await got.json()) as { run: { state: string } };
-  expect(body.run.state).toBe("succeeded");
+  expect(body.run.state).toBe("done");
   return runId;
 }
 

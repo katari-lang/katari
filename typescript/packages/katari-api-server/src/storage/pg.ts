@@ -12,6 +12,7 @@ import type {
   DelegationId,
   EncryptedValue,
   EngineCheckpoint,
+  EntityId,
   EscalationId,
   IRModule,
   Json,
@@ -31,11 +32,14 @@ import type {
   DelegationRow,
   DelegationState,
   EngineCheckpointRepo,
+  EntityModule,
+  EntityRepo,
+  EntityRow,
+  EntityState,
   EnvEntryRepo,
   EnvEntryRow,
   EscalationRepo,
   EscalationRow,
-  EscalationState,
   FfiPendingDelegation,
   FfiPendingDelegationRepo,
   FfiPendingEscalation,
@@ -45,9 +49,12 @@ import type {
   Project,
   ProjectId,
   ProjectRepo,
-  RunsAuditRepo,
-  RunsAuditRow,
-  RunsAuditState,
+  RunEscalationAuditRow,
+  RunEscalationsAuditRepo,
+  RunId,
+  RunRepo,
+  RunRow,
+  RunState,
   SidecarBundle,
   Snapshot,
   SnapshotId,
@@ -375,15 +382,139 @@ class PgEngineCheckpointRepo implements EngineCheckpointRepo {
   }
 }
 
-// ─── Delegations ───────────────────────────────────────────────────────────
+// ─── Entities (receiver-managed execution node) ────────────────────────────
+
+type DbEntityRow = {
+  id: string;
+  delegation_id: string | null;
+  project_id: string;
+  module: EntityModule;
+  state: EntityState;
+  agent_def_id: AgentDefId | null;
+  args: Record<string, EncryptedValue>;
+  created_at: Date;
+  updated_at: Date;
+};
+
+function dbToEntityRow(row: DbEntityRow): EntityRow {
+  return {
+    id: row.id as EntityId,
+    delegationId: row.delegation_id === null ? null : (row.delegation_id as DelegationId),
+    projectId: row.project_id as ProjectId,
+    module: row.module,
+    state: row.state,
+    agentDefId: row.agent_def_id,
+    args: fromStorageJson(row.args),
+    createdAt: row.created_at.toISOString(),
+    updatedAt: row.updated_at.toISOString(),
+  };
+}
+
+class PgEntityRepo implements EntityRepo {
+  constructor(private readonly sql: Sql) {}
+
+  async insert(row: EntityRow): Promise<void> {
+    await this.sql`
+      INSERT INTO entities (
+        id, delegation_id, project_id, module, state, agent_def_id, args,
+        created_at, updated_at
+      ) VALUES (
+        ${row.id}, ${row.delegationId}, ${row.projectId}, ${row.module}, ${row.state},
+        ${row.agentDefId === null ? null : this.sql.json(asJson(row.agentDefId))},
+        ${this.sql.json(asJson(row.args))},
+        ${row.createdAt}, ${row.updatedAt}
+      )
+    `;
+  }
+
+  async get(id: EntityId): Promise<EntityRow | null> {
+    const rows = await this.sql<DbEntityRow[]>`
+      SELECT id, delegation_id, project_id, module, state, agent_def_id, args,
+             created_at, updated_at
+      FROM entities WHERE id = ${id}
+    `;
+    return rows[0] !== undefined ? dbToEntityRow(rows[0]) : null;
+  }
+
+  async getByDelegation(
+    projectId: ProjectId,
+    delegationId: DelegationId,
+  ): Promise<EntityRow | null> {
+    const rows = await this.sql<DbEntityRow[]>`
+      SELECT id, delegation_id, project_id, module, state, agent_def_id, args,
+             created_at, updated_at
+      FROM entities WHERE project_id = ${projectId} AND delegation_id = ${delegationId}
+    `;
+    return rows[0] !== undefined ? dbToEntityRow(rows[0]) : null;
+  }
+
+  async setState(
+    id: EntityId,
+    state: EntityState,
+    options?: { expectedState?: EntityState },
+  ): Promise<boolean> {
+    const result =
+      options?.expectedState !== undefined
+        ? await this.sql`
+          UPDATE entities SET state = ${state}, updated_at = now()
+          WHERE id = ${id} AND state = ${options.expectedState}
+        `
+        : await this.sql`
+          UPDATE entities SET state = ${state}, updated_at = now()
+          WHERE id = ${id}
+        `;
+    return result.count > 0;
+  }
+
+  async delete(id: EntityId): Promise<boolean> {
+    // Cascades the entity's still-owned refs + raised escalations (FK); the
+    // refs-delete trigger decrements blob refcounts. Freed bytes are reaped
+    // separately by `ValueStore.reapFreedBlobs`.
+    const result = await this.sql`DELETE FROM entities WHERE id = ${id}`;
+    return result.count > 0;
+  }
+
+  async list(
+    filter?: {
+      projectId?: ProjectId;
+      module?: EntityModule;
+      state?: EntityState;
+    } & ListOptions,
+  ): Promise<ListResult<EntityRow>> {
+    const limit = clampLimit(filter?.limit);
+    const cursor = filter?.cursor !== undefined ? decodeCursor(filter.cursor) : null;
+    const fetchCount = limit + 1;
+    const sql = this.sql;
+    const whereClause = composeWhere(sql, [
+      filter?.projectId !== undefined ? sql`project_id = ${filter.projectId}` : null,
+      filter?.module !== undefined ? sql`module = ${filter.module}` : null,
+      filter?.state !== undefined ? sql`state = ${filter.state}` : null,
+      cursor !== null ? sql`(created_at, id) > (${cursor.createdAt}, ${cursor.id})` : null,
+    ]);
+    const rows = await sql<DbEntityRow[]>`
+      SELECT id, delegation_id, project_id, module, state, agent_def_id, args,
+             created_at, updated_at
+      FROM entities
+      ${whereClause}
+      ORDER BY created_at ASC, id ASC LIMIT ${fetchCount}
+    `;
+    const hasMore = rows.length > limit;
+    const items = (hasMore ? rows.slice(0, limit) : rows).map(dbToEntityRow);
+    const last = items[items.length - 1];
+    return {
+      items,
+      nextCursor: hasMore && last !== undefined ? encodeCursor(last.createdAt, last.id) : null,
+    };
+  }
+}
+
+// ─── Delegations (issuer-managed request edge) ─────────────────────────────
 
 type DbDelegationRow = {
   id: string;
-  root_delegation_id: string;
-  parent_delegation_id: string | null;
   project_id: string;
-  caller_endpoint: string;
-  owner_endpoint: string;
+  parent_entity_id: string;
+  target_module: EntityModule;
   agent_def_id: AgentDefId;
   args: Record<string, EncryptedValue>;
   state: DelegationState;
@@ -394,12 +525,9 @@ type DbDelegationRow = {
 function dbToDelegationRow(row: DbDelegationRow): DelegationRow {
   return {
     id: row.id as DelegationId,
-    rootDelegationId: row.root_delegation_id as DelegationId,
-    parentDelegationId:
-      row.parent_delegation_id === null ? null : (row.parent_delegation_id as DelegationId),
     projectId: row.project_id as ProjectId,
-    callerEndpoint: row.caller_endpoint,
-    ownerEndpoint: row.owner_endpoint,
+    parentEntityId: row.parent_entity_id as EntityId,
+    targetModule: row.target_module,
     agentDefId: row.agent_def_id,
     args: fromStorageJson(row.args),
     state: row.state,
@@ -414,12 +542,10 @@ class PgDelegationRepo implements DelegationRepo {
   async insert(row: DelegationRow): Promise<void> {
     await this.sql`
       INSERT INTO delegations (
-        id, root_delegation_id, parent_delegation_id,
-        project_id, caller_endpoint, owner_endpoint, agent_def_id, args,
+        id, project_id, parent_entity_id, target_module, agent_def_id, args,
         state, created_at, updated_at
       ) VALUES (
-        ${row.id}, ${row.rootDelegationId}, ${row.parentDelegationId},
-        ${row.projectId}, ${row.callerEndpoint}, ${row.ownerEndpoint},
+        ${row.id}, ${row.projectId}, ${row.parentEntityId}, ${row.targetModule},
         ${this.sql.json(asJson(row.agentDefId))},
         ${this.sql.json(asJson(row.args))},
         ${row.state}, ${row.createdAt}, ${row.updatedAt}
@@ -429,57 +555,11 @@ class PgDelegationRepo implements DelegationRepo {
 
   async get(id: DelegationId): Promise<DelegationRow | null> {
     const rows = await this.sql<DbDelegationRow[]>`
-      SELECT id, root_delegation_id, parent_delegation_id, project_id,
-             caller_endpoint, owner_endpoint, agent_def_id, args, state,
+      SELECT id, project_id, parent_entity_id, target_module, agent_def_id, args, state,
              created_at, updated_at
       FROM delegations WHERE id = ${id}
     `;
     return rows[0] !== undefined ? dbToDelegationRow(rows[0]) : null;
-  }
-
-  async list(
-    filter?: {
-      projectId?: ProjectId;
-      callerEndpoint?: string;
-      rootDelegationId?: DelegationId;
-      parentDelegationId?: DelegationId;
-      state?: DelegationState;
-    } & ListOptions,
-  ): Promise<ListResult<DelegationRow>> {
-    const limit = clampLimit(filter?.limit);
-    const cursor = filter?.cursor !== undefined ? decodeCursor(filter.cursor) : null;
-    const fetchCount = limit + 1;
-    const sql = this.sql;
-    const whereClause = composeWhere(sql, [
-      // project_id is a direct column now (no snapshots join).
-      filter?.projectId !== undefined ? sql`d.project_id = ${filter.projectId}` : null,
-      filter?.callerEndpoint !== undefined
-        ? sql`d.caller_endpoint = ${filter.callerEndpoint}`
-        : null,
-      filter?.rootDelegationId !== undefined
-        ? sql`d.root_delegation_id = ${filter.rootDelegationId}`
-        : null,
-      filter?.parentDelegationId !== undefined
-        ? sql`d.parent_delegation_id = ${filter.parentDelegationId}`
-        : null,
-      filter?.state !== undefined ? sql`d.state = ${filter.state}` : null,
-      cursor !== null ? sql`(d.created_at, d.id) > (${cursor.createdAt}, ${cursor.id})` : null,
-    ]);
-    const rows = await sql<DbDelegationRow[]>`
-      SELECT d.id, d.root_delegation_id, d.parent_delegation_id, d.project_id,
-             d.caller_endpoint, d.owner_endpoint, d.agent_def_id, d.args, d.state,
-             d.created_at, d.updated_at
-      FROM delegations d
-      ${whereClause}
-      ORDER BY d.created_at ASC, d.id ASC LIMIT ${fetchCount}
-    `;
-    const hasMore = rows.length > limit;
-    const items = (hasMore ? rows.slice(0, limit) : rows).map(dbToDelegationRow);
-    const last = items[items.length - 1];
-    return {
-      items,
-      nextCursor: hasMore && last !== undefined ? encodeCursor(last.createdAt, last.id) : null,
-    };
   }
 
   async setState(
@@ -500,55 +580,65 @@ class PgDelegationRepo implements DelegationRepo {
     return result.count > 0;
   }
 
-  async markAllUnderRootAsCancelling(rootDelegationId: DelegationId): Promise<void> {
-    await this.sql`
-      UPDATE delegations
-      SET state = 'cancelling', updated_at = now()
-      WHERE root_delegation_id = ${rootDelegationId} AND state = 'running'
-    `;
-  }
-
   async delete(id: DelegationId): Promise<boolean> {
     const result = await this.sql`DELETE FROM delegations WHERE id = ${id}`;
     return result.count > 0;
   }
 
-  async deleteAllUnderRoot(rootDelegationId: DelegationId): Promise<void> {
-    await this.sql`
-      DELETE FROM delegations
-      WHERE root_delegation_id = ${rootDelegationId}
+  async list(
+    filter?: {
+      projectId?: ProjectId;
+      parentEntityId?: EntityId;
+      state?: DelegationState;
+    } & ListOptions,
+  ): Promise<ListResult<DelegationRow>> {
+    const limit = clampLimit(filter?.limit);
+    const cursor = filter?.cursor !== undefined ? decodeCursor(filter.cursor) : null;
+    const fetchCount = limit + 1;
+    const sql = this.sql;
+    const whereClause = composeWhere(sql, [
+      filter?.projectId !== undefined ? sql`project_id = ${filter.projectId}` : null,
+      filter?.parentEntityId !== undefined
+        ? sql`parent_entity_id = ${filter.parentEntityId}`
+        : null,
+      filter?.state !== undefined ? sql`state = ${filter.state}` : null,
+      cursor !== null ? sql`(created_at, id) > (${cursor.createdAt}, ${cursor.id})` : null,
+    ]);
+    const rows = await sql<DbDelegationRow[]>`
+      SELECT id, project_id, parent_entity_id, target_module, agent_def_id, args, state,
+             created_at, updated_at
+      FROM delegations
+      ${whereClause}
+      ORDER BY created_at ASC, id ASC LIMIT ${fetchCount}
     `;
+    const hasMore = rows.length > limit;
+    const items = (hasMore ? rows.slice(0, limit) : rows).map(dbToDelegationRow);
+    const last = items[items.length - 1];
+    return {
+      items,
+      nextCursor: hasMore && last !== undefined ? encodeCursor(last.createdAt, last.id) : null,
+    };
   }
 }
 
-// ─── Escalations ───────────────────────────────────────────────────────────
+// ─── Escalations (raiser-owned, open only) ─────────────────────────────────
 
 type DbEscalationRow = {
   id: string;
-  delegation_id: string;
-  root_delegation_id: string;
+  entity_id: string;
   project_id: string;
-  caller_endpoint: string;
-  receiver_endpoint: string;
   agent_def_id: AgentDefId;
   args: Record<string, EncryptedValue>;
-  state: EscalationState;
-  value: EncryptedValue | null;
   created_at: Date;
 };
 
 function dbToEscalationRow(row: DbEscalationRow): EscalationRow {
   return {
     id: row.id as EscalationId,
-    delegationId: row.delegation_id as DelegationId,
-    rootDelegationId: row.root_delegation_id as DelegationId,
+    entityId: row.entity_id as EntityId,
     projectId: row.project_id as ProjectId,
-    callerEndpoint: row.caller_endpoint,
-    receiverEndpoint: row.receiver_endpoint,
     agentDefId: row.agent_def_id,
     args: fromStorageJson(row.args),
-    state: row.state,
-    value: row.value === null ? undefined : fromStorageJson(row.value),
     createdAt: row.created_at.toISOString(),
   };
 }
@@ -558,38 +648,33 @@ class PgEscalationRepo implements EscalationRepo {
 
   async insert(row: EscalationRow): Promise<void> {
     await this.sql`
-      INSERT INTO escalations (
-        id, delegation_id, root_delegation_id, project_id,
-        caller_endpoint, receiver_endpoint, agent_def_id, args, state, value, created_at
-      ) VALUES (
-        ${row.id}, ${row.delegationId}, ${row.rootDelegationId}, ${row.projectId},
-        ${row.callerEndpoint}, ${row.receiverEndpoint},
+      INSERT INTO escalations (id, entity_id, project_id, agent_def_id, args, state, created_at)
+      VALUES (
+        ${row.id}, ${row.entityId}, ${row.projectId},
         ${this.sql.json(asJson(row.agentDefId))},
         ${this.sql.json(asJson(row.args))},
-        ${row.state},
-        ${row.value === undefined ? null : this.sql.json(asJson(row.value))},
-        ${row.createdAt}
+        'open', ${row.createdAt}
       )
     `;
   }
 
   async get(id: EscalationId): Promise<EscalationRow | null> {
     const rows = await this.sql<DbEscalationRow[]>`
-      SELECT id, delegation_id, root_delegation_id, project_id,
-             caller_endpoint, receiver_endpoint, agent_def_id, args, state, value, created_at
+      SELECT id, entity_id, project_id, agent_def_id, args, created_at
       FROM escalations WHERE id = ${id}
     `;
     return rows[0] !== undefined ? dbToEscalationRow(rows[0]) : null;
   }
 
+  async delete(id: EscalationId): Promise<boolean> {
+    const result = await this.sql`DELETE FROM escalations WHERE id = ${id}`;
+    return result.count > 0;
+  }
+
   async list(
     filter?: {
       projectId?: ProjectId;
-      callerEndpoint?: string;
-      receiverEndpoint?: string;
-      rootDelegationId?: DelegationId;
-      delegationId?: DelegationId;
-      state?: EscalationState;
+      entityId?: EntityId;
     } & ListOptions,
   ): Promise<ListResult<EscalationRow>> {
     const limit = clampLimit(filter?.limit);
@@ -597,27 +682,15 @@ class PgEscalationRepo implements EscalationRepo {
     const fetchCount = limit + 1;
     const sql = this.sql;
     const whereClause = composeWhere(sql, [
-      // project_id is a direct column now (no snapshots join).
-      filter?.projectId !== undefined ? sql`e.project_id = ${filter.projectId}` : null,
-      filter?.callerEndpoint !== undefined
-        ? sql`e.caller_endpoint = ${filter.callerEndpoint}`
-        : null,
-      filter?.receiverEndpoint !== undefined
-        ? sql`e.receiver_endpoint = ${filter.receiverEndpoint}`
-        : null,
-      filter?.rootDelegationId !== undefined
-        ? sql`e.root_delegation_id = ${filter.rootDelegationId}`
-        : null,
-      filter?.delegationId !== undefined ? sql`e.delegation_id = ${filter.delegationId}` : null,
-      filter?.state !== undefined ? sql`e.state = ${filter.state}` : null,
-      cursor !== null ? sql`(e.created_at, e.id) < (${cursor.createdAt}, ${cursor.id})` : null,
+      filter?.projectId !== undefined ? sql`project_id = ${filter.projectId}` : null,
+      filter?.entityId !== undefined ? sql`entity_id = ${filter.entityId}` : null,
+      cursor !== null ? sql`(created_at, id) < (${cursor.createdAt}, ${cursor.id})` : null,
     ]);
     const rows = await sql<DbEscalationRow[]>`
-      SELECT e.id, e.delegation_id, e.root_delegation_id, e.project_id,
-             e.caller_endpoint, e.receiver_endpoint, e.agent_def_id, e.args, e.state, e.value, e.created_at
-      FROM escalations e
+      SELECT id, entity_id, project_id, agent_def_id, args, created_at
+      FROM escalations
       ${whereClause}
-      ORDER BY e.created_at DESC, e.id DESC LIMIT ${fetchCount}
+      ORDER BY created_at DESC, id DESC LIMIT ${fetchCount}
     `;
     const hasMore = rows.length > limit;
     const items = (hasMore ? rows.slice(0, limit) : rows).map(dbToEscalationRow);
@@ -627,39 +700,19 @@ class PgEscalationRepo implements EscalationRepo {
       nextCursor: hasMore && last !== undefined ? encodeCursor(last.createdAt, last.id) : null,
     };
   }
-
-  async setAnswered(id: EscalationId, value: EncryptedValue): Promise<boolean> {
-    const result = await this.sql`
-      UPDATE escalations
-      SET state = 'answered', value = ${this.sql.json(asJson(value))}
-      WHERE id = ${id} AND state = 'open'
-    `;
-    return result.count > 0;
-  }
-
-  async cancelAllUnderRoot(rootDelegationId: DelegationId): Promise<void> {
-    await this.sql`
-      UPDATE escalations
-      SET state = 'cancelled'
-      WHERE root_delegation_id = ${rootDelegationId} AND state = 'open'
-    `;
-  }
-
-  async delete(id: EscalationId): Promise<boolean> {
-    const result = await this.sql`DELETE FROM escalations WHERE id = ${id}`;
-    return result.count > 0;
-  }
 }
 
-// ─── Runs audit ────────────────────────────────────────────────────────────
+// ─── Runs (the API module's per-run management record) ─────────────────────
 
-type DbRunsAuditRow = {
+type DbRunRow = {
   id: string;
+  project_id: string;
   snapshot_id: string;
+  core_delegation_id: string;
   name: string;
   qualified_name: string;
   args: Record<string, EncryptedValue>;
-  state: RunsAuditState;
+  state: RunState;
   cancel_reason: CancelReason | null;
   result: EncryptedValue | null;
   error_message: string | null;
@@ -668,10 +721,12 @@ type DbRunsAuditRow = {
   completed_at: Date | null;
 };
 
-function dbToRunsAuditRow(row: DbRunsAuditRow): RunsAuditRow {
+function dbToRunRow(row: DbRunRow): RunRow {
   return {
-    id: row.id as DelegationId,
+    id: row.id as RunId,
+    projectId: row.project_id as ProjectId,
     snapshotId: row.snapshot_id as SnapshotId,
+    coreDelegationId: row.core_delegation_id as DelegationId,
     name: row.name,
     qualifiedName: row.qualified_name,
     args: fromStorageJson(row.args),
@@ -685,17 +740,17 @@ function dbToRunsAuditRow(row: DbRunsAuditRow): RunsAuditRow {
   };
 }
 
-class PgRunsAuditRepo implements RunsAuditRepo {
+class PgRunRepo implements RunRepo {
   constructor(private readonly sql: Sql) {}
 
-  async insert(row: RunsAuditRow): Promise<void> {
+  async insert(row: RunRow): Promise<void> {
     await this.sql`
-      INSERT INTO runs_audit (
-        id, snapshot_id, name, qualified_name, args, state, cancel_reason,
-        result, error_message, created_at, updated_at, completed_at
+      INSERT INTO runs (
+        id, project_id, snapshot_id, core_delegation_id, name, qualified_name, args,
+        state, cancel_reason, result, error_message, created_at, updated_at, completed_at
       ) VALUES (
-        ${row.id}, ${row.snapshotId}, ${row.name}, ${row.qualifiedName},
-        ${this.sql.json(asJson(row.args))},
+        ${row.id}, ${row.projectId}, ${row.snapshotId}, ${row.coreDelegationId},
+        ${row.name}, ${row.qualifiedName}, ${this.sql.json(asJson(row.args))},
         ${row.state}, ${row.cancelReason},
         ${row.result === undefined ? null : this.sql.json(asJson(row.result))},
         ${row.errorMessage ?? null},
@@ -704,44 +759,50 @@ class PgRunsAuditRepo implements RunsAuditRepo {
     `;
   }
 
-  async get(id: DelegationId): Promise<RunsAuditRow | null> {
-    const rows = await this.sql<DbRunsAuditRow[]>`
-      SELECT id, snapshot_id, name, qualified_name, args, state, cancel_reason,
-             result, error_message, created_at, updated_at, completed_at
-      FROM runs_audit WHERE id = ${id}
+  async get(id: RunId): Promise<RunRow | null> {
+    const rows = await this.sql<DbRunRow[]>`
+      SELECT id, project_id, snapshot_id, core_delegation_id, name, qualified_name, args,
+             state, cancel_reason, result, error_message, created_at, updated_at, completed_at
+      FROM runs WHERE id = ${id}
     `;
-    return rows[0] !== undefined ? dbToRunsAuditRow(rows[0]) : null;
+    return rows[0] !== undefined ? dbToRunRow(rows[0]) : null;
+  }
+
+  async getByCoreDelegation(coreDelegationId: DelegationId): Promise<RunRow | null> {
+    const rows = await this.sql<DbRunRow[]>`
+      SELECT id, project_id, snapshot_id, core_delegation_id, name, qualified_name, args,
+             state, cancel_reason, result, error_message, created_at, updated_at, completed_at
+      FROM runs WHERE core_delegation_id = ${coreDelegationId}
+    `;
+    return rows[0] !== undefined ? dbToRunRow(rows[0]) : null;
   }
 
   async list(
     filter?: {
       projectId?: ProjectId;
       snapshotId?: SnapshotId;
-      state?: RunsAuditState;
+      state?: RunState;
     } & ListOptions,
-  ): Promise<ListResult<RunsAuditRow>> {
+  ): Promise<ListResult<RunRow>> {
     const limit = clampLimit(filter?.limit);
     const cursor = filter?.cursor !== undefined ? decodeCursor(filter.cursor) : null;
     const fetchCount = limit + 1;
     const sql = this.sql;
-    const joinClause =
-      filter?.projectId !== undefined ? sql`JOIN snapshots s ON s.id = r.snapshot_id` : sql``;
     const whereClause = composeWhere(sql, [
-      filter?.projectId !== undefined ? sql`s.project_id = ${filter.projectId}` : null,
-      filter?.snapshotId !== undefined ? sql`r.snapshot_id = ${filter.snapshotId}` : null,
-      filter?.state !== undefined ? sql`r.state = ${filter.state}` : null,
-      cursor !== null ? sql`(r.created_at, r.id) < (${cursor.createdAt}, ${cursor.id})` : null,
+      filter?.projectId !== undefined ? sql`project_id = ${filter.projectId}` : null,
+      filter?.snapshotId !== undefined ? sql`snapshot_id = ${filter.snapshotId}` : null,
+      filter?.state !== undefined ? sql`state = ${filter.state}` : null,
+      cursor !== null ? sql`(created_at, id) < (${cursor.createdAt}, ${cursor.id})` : null,
     ]);
-    const rows = await sql<DbRunsAuditRow[]>`
-      SELECT r.id, r.snapshot_id, r.name, r.qualified_name, r.args, r.state, r.cancel_reason,
-             r.result, r.error_message, r.created_at, r.updated_at, r.completed_at
-      FROM runs_audit r
-      ${joinClause}
+    const rows = await sql<DbRunRow[]>`
+      SELECT id, project_id, snapshot_id, core_delegation_id, name, qualified_name, args,
+             state, cancel_reason, result, error_message, created_at, updated_at, completed_at
+      FROM runs
       ${whereClause}
-      ORDER BY r.created_at DESC, r.id DESC LIMIT ${fetchCount}
+      ORDER BY created_at DESC, id DESC LIMIT ${fetchCount}
     `;
     const hasMore = rows.length > limit;
-    const items = (hasMore ? rows.slice(0, limit) : rows).map(dbToRunsAuditRow);
+    const items = (hasMore ? rows.slice(0, limit) : rows).map(dbToRunRow);
     const last = items[items.length - 1];
     return {
       items,
@@ -750,17 +811,15 @@ class PgRunsAuditRepo implements RunsAuditRepo {
   }
 
   async setState(
-    id: DelegationId,
+    id: RunId,
     patch: {
-      state: RunsAuditState;
+      state: RunState;
       cancelReason?: CancelReason | null;
       result?: EncryptedValue;
       errorMessage?: string;
       completedAt?: string;
     },
   ): Promise<boolean> {
-    // Sparse-patch SET clause composition. Each provided field becomes
-    // one `col = value` fragment; we always update `updated_at = now()`.
     const sets: ReturnType<Sql>[] = [this.sql`state = ${patch.state}`];
     if (patch.cancelReason !== undefined) {
       sets.push(this.sql`cancel_reason = ${patch.cancelReason}`);
@@ -776,10 +835,80 @@ class PgRunsAuditRepo implements RunsAuditRepo {
     }
     sets.push(this.sql`updated_at = now()`);
     const setSql = sets.reduce((acc, cur, i) => (i === 0 ? cur : this.sql`${acc}, ${cur}`));
+    const result = await this.sql`UPDATE runs SET ${setSql} WHERE id = ${id}`;
+    return result.count > 0;
+  }
+}
+
+// ─── Run escalations audit (answered, user-facing escalations) ─────────────
+
+type DbRunEscalationAuditRow = {
+  run_id: string;
+  escalation_id: string;
+  agent_def_id: AgentDefId;
+  args: Record<string, EncryptedValue>;
+  answer: EncryptedValue | null;
+  created_at: Date;
+  answered_at: Date | null;
+};
+
+function dbToRunEscalationAuditRow(row: DbRunEscalationAuditRow): RunEscalationAuditRow {
+  return {
+    runId: row.run_id as RunId,
+    escalationId: row.escalation_id as EscalationId,
+    agentDefId: row.agent_def_id,
+    args: fromStorageJson(row.args),
+    answer: row.answer === null ? undefined : fromStorageJson(row.answer),
+    createdAt: row.created_at.toISOString(),
+    answeredAt: row.answered_at === null ? undefined : row.answered_at.toISOString(),
+  };
+}
+
+class PgRunEscalationsAuditRepo implements RunEscalationsAuditRepo {
+  constructor(private readonly sql: Sql) {}
+
+  async insert(row: RunEscalationAuditRow): Promise<void> {
+    await this.sql`
+      INSERT INTO run_escalations_audit (run_id, escalation_id, agent_def_id, args, answer, created_at, answered_at)
+      VALUES (
+        ${row.runId}, ${row.escalationId},
+        ${this.sql.json(asJson(row.agentDefId))},
+        ${this.sql.json(asJson(row.args))},
+        ${row.answer === undefined ? null : this.sql.json(asJson(row.answer))},
+        ${row.createdAt}, ${row.answeredAt ?? null}
+      )
+      ON CONFLICT (run_id, escalation_id) DO NOTHING
+    `;
+  }
+
+  async get(escalationId: EscalationId): Promise<RunEscalationAuditRow | null> {
+    const rows = await this.sql<DbRunEscalationAuditRow[]>`
+      SELECT run_id, escalation_id, agent_def_id, args, answer, created_at, answered_at
+      FROM run_escalations_audit WHERE escalation_id = ${escalationId}
+    `;
+    return rows[0] !== undefined ? dbToRunEscalationAuditRow(rows[0]) : null;
+  }
+
+  async setAnswer(
+    escalationId: EscalationId,
+    answer: EncryptedValue,
+    answeredAt: string,
+  ): Promise<boolean> {
     const result = await this.sql`
-      UPDATE runs_audit SET ${setSql} WHERE id = ${id}
+      UPDATE run_escalations_audit
+      SET answer = ${this.sql.json(asJson(answer))}, answered_at = ${answeredAt}
+      WHERE escalation_id = ${escalationId}
     `;
     return result.count > 0;
+  }
+
+  async list(runId: RunId): Promise<RunEscalationAuditRow[]> {
+    const rows = await this.sql<DbRunEscalationAuditRow[]>`
+      SELECT run_id, escalation_id, agent_def_id, args, answer, created_at, answered_at
+      FROM run_escalations_audit WHERE run_id = ${runId}
+      ORDER BY created_at ASC
+    `;
+    return rows.map(dbToRunEscalationAuditRow);
   }
 }
 
@@ -1059,9 +1188,11 @@ export class PostgresStorage implements Storage {
   readonly projects: ProjectRepo;
   readonly snapshots: SnapshotRepo;
   readonly checkpoints: EngineCheckpointRepo;
+  readonly entities: EntityRepo;
   readonly delegations: DelegationRepo;
   readonly escalations: EscalationRepo;
-  readonly runsAudit: RunsAuditRepo;
+  readonly runs: RunRepo;
+  readonly runEscalationsAudit: RunEscalationsAuditRepo;
   readonly ffiDelegations: FfiPendingDelegationRepo;
   readonly ffiEscalations: FfiPendingEscalationRepo;
   readonly envEntries: EnvEntryRepo;
@@ -1076,9 +1207,11 @@ export class PostgresStorage implements Storage {
     this.projects = new PgProjectRepo(sql);
     this.snapshots = new PgSnapshotRepo(sql);
     this.checkpoints = new PgEngineCheckpointRepo(sql);
+    this.entities = new PgEntityRepo(sql);
     this.delegations = new PgDelegationRepo(sql);
     this.escalations = new PgEscalationRepo(sql);
-    this.runsAudit = new PgRunsAuditRepo(sql);
+    this.runs = new PgRunRepo(sql);
+    this.runEscalationsAudit = new PgRunEscalationsAuditRepo(sql);
     this.ffiDelegations = new PgFfiPendingDelegationRepo(sql);
     this.ffiEscalations = new PgFfiPendingEscalationRepo(sql);
     this.envEntries = new PgEnvEntryRepo(sql);
@@ -1134,9 +1267,11 @@ function runInTx<T>(
       projects: new PgProjectRepo(innerSql),
       snapshots: new PgSnapshotRepo(innerSql),
       checkpoints: new PgEngineCheckpointRepo(innerSql),
+      entities: new PgEntityRepo(innerSql),
       delegations: new PgDelegationRepo(innerSql),
       escalations: new PgEscalationRepo(innerSql),
-      runsAudit: new PgRunsAuditRepo(innerSql),
+      runs: new PgRunRepo(innerSql),
+      runEscalationsAudit: new PgRunEscalationsAuditRepo(innerSql),
       ffiDelegations: new PgFfiPendingDelegationRepo(innerSql),
       ffiEscalations: new PgFfiPendingEscalationRepo(innerSql),
       envEntries: new PgEnvEntryRepo(innerSql),
