@@ -89,12 +89,13 @@ export function valueToRaw(value: Value): RawValue {
     }
     case "closure":
       // A closure is a callable, so it serialises like one — as `$agent`,
-      // uniform with a top-level agent (#5). Its content ref is packed into
-      // the agent def id (`closureref:<...>`), exactly the handle a delegate
-      // target carries, so the value form and the dispatch id converge and the
-      // `$agent`-shaped callable schema matches without any rep-aware patching.
+      // uniform with a top-level agent (#5). Its dispatch handle is just the
+      // content ref id (`closureref:<id>`), exactly what a delegate target
+      // carries, so the value form and the dispatch id converge (and match
+      // `get_metadata`'s `id` field). `hash`/`size` are not on the wire — they
+      // live in the ref store keyed by the id (recovered there when needed).
       return {
-        [CALLABLE_DISCRIMINATOR]: encodeCoreAgentDefId({ kind: "closureRef", ref: value.ref }),
+        [CALLABLE_DISCRIMINATOR]: encodeCoreAgentDefId({ kind: "closureRef", id: value.ref.id }),
       };
     case "agentLiteral":
       return { [CALLABLE_DISCRIMINATOR]: value.qualifiedName };
@@ -179,7 +180,14 @@ function decodeCallable(rawId: unknown): Value {
   }
   switch (decoded.kind) {
     case "closureRef":
-      return { kind: "closure", ref: decoded.ref };
+      // The wire carries only the ref id; `module` is invariably `core` and
+      // `hash`/`size` are vestigial for a closure value (dispatch + get_metadata
+      // + GC all key off `(module, id)`, and the content hash lives in the ref
+      // store keyed by the id). Reconstruct a minimal ref.
+      return {
+        kind: "closure",
+        ref: { kind: "ref", module: "core", id: decoded.id, hash: "", size: 0 },
+      };
     case "closure":
       // The in-shard `closure:N` dispatch id is engine-internal, never a wire
       // value. Seeing it here is a version skew / encoder bug.

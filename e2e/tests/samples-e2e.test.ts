@@ -217,16 +217,17 @@ describe("samples/ end-to-end (apply → run → verify)", () => {
   });
 
   itE2E(
-    "08-metadata: get_metadata yields the agent's qname + a content-addressed closure id",
+    "08-metadata: get_metadata yields the agent's qname + the closure's dispatch id",
     async () => {
       const result = await applyAndRun("metadata", "08-metadata");
-      // A top-level agent's id is its qname; a closure's id is content-addressed
-      // (`closure:<blob-hash>`, see prim.ts executeGetMetadata) — the hash is an
-      // impl detail, so assert its shape, not the exact value.
+      // A top-level agent's id is its qname; a closure's id is its dispatch
+      // handle `closureref:<ref id>` (identical to the closure value's wire form
+      // + delegate target). The ref id is a per-occurrence uuid, so assert the
+      // shape, not the exact value.
       expect(typeof result).toBe("string");
       const parts = (result as string).split("|");
       expect(parts.slice(0, 3)).toEqual(["add_them", "metadata.add_them", "local_bar"]);
-      expect(parts[3]).toMatch(/^closure:[0-9a-f]{64}$/);
+      expect(parts[3]).toMatch(/^closureref:[0-9a-f-]{36}$/);
     },
   );
 

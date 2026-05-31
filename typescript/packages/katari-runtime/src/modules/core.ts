@@ -324,19 +324,27 @@ export class CoreModule implements Module {
     }
     if (delegatePayload === undefined) return null;
 
-    // A closure that escaped its home shard: materialize its frozen captured env
-    // into a fresh shard, then rewrite the target to the new (local) closure id
-    // so the standard closure:N dispatch runs the body. The snapshot rides in
-    // the blob.
-    const closureRef = agentDefIdClosureRef(delegatePayload.agentDefId);
-    if (closureRef !== undefined) {
+    // A closure that escaped its home shard: fetch its frozen blob by `(core,
+    // id)`, materialize the captured env into a fresh shard, then rewrite the
+    // target to the new (local) closure id so the standard closure:N dispatch
+    // runs the body. The snapshot rides in the blob.
+    const closureRefId = agentDefIdClosureRef(delegatePayload.agentDefId);
+    if (closureRefId !== undefined) {
       if (tx.values === null) {
         throw new Error("core: closure-ref delegate but no value store wired to materialize it");
       }
-      const content = decodeClosureBlob(await this.fetchClosureBytes(tx.values, closureRef));
+      const bytes = await tx.values.fetch(this.projectId, "core", closureRefId);
+      if (bytes === null) {
+        throw new Error(`core: closure blob core/${closureRefId} not found in value store`);
+      }
+      const content = decodeClosureBlob(bytes);
       const ir = await this.resolveIR(content.snapshot);
       const state = createState(ir, { selfEndpoint: this.endpoint, snapshot: content.snapshot });
-      const newClosureId = materializeClosure(content, state, closureRef);
+      // The self-ref a recursive body re-dispatches by: only `(module, id)` is
+      // used downstream (dispatch / get_metadata / GC), so hash/size are left
+      // vestigial — the content hash lives in the ref store keyed by the id.
+      const selfRef: RefRep = { kind: "ref", module: "core", id: closureRefId, hash: "", size: 0 };
+      const newClosureId = materializeClosure(content, state, selfRef);
       delegatePayload.agentDefId = encodeCoreAgentDefId({ kind: "closure", value: newClosureId });
       const entry: ShardEntry = { state, currentSnapshot: content.snapshot };
       this.shardCache.set(shardId, entry);
@@ -378,15 +386,6 @@ export class CoreModule implements Module {
       });
       return { kind: "ref", module: "core", id: result.id, hash: result.hash, size: result.size };
     };
-  }
-
-  /** Fetch a closure blob's bytes; throws if the ref is missing. */
-  private async fetchClosureBytes(valueStore: ValueStore, ref: RefRep): Promise<Uint8Array> {
-    const bytes = await valueStore.fetch(this.projectId, ref.module, ref.id);
-    if (bytes === null) {
-      throw new Error(`core: closure blob ${ref.module}/${ref.id} not found in value store`);
-    }
-    return bytes;
   }
 
   private async persistShard(

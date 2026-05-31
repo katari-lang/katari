@@ -21,7 +21,6 @@
 // `closure:` prefix can never collide with a real qname.
 
 import type { ClosureId } from "./engine/id.js";
-import type { RefRep } from "./engine/value.js";
 import type { QualifiedName } from "./ir/types.js";
 
 const CLOSURE_PREFIX = "closure:";
@@ -54,13 +53,14 @@ export type AgentDefId = string & { readonly __brand: "AgentDefId" };
 // ─── CORE encoding / decoding ──────────────────────────────────────────────
 
 /** CORE module knows three flavours: a top-level callable's qname, an
- * engine-allocated (in-shard) closure id, or a content-addressed closure ref
- * (a closure crossing a shard boundary; the snapshot rides inside its blob,
- * not as a separate `@` stamp). */
+ * engine-allocated (in-shard) closure id, or a content-addressed closure ref —
+ * a closure crossing a shard boundary, identified by just its ref id (`module`
+ * is invariably `core`; `hash`/`size` live in the ref store keyed by that id,
+ * and the snapshot rides inside the blob, not as a separate `@` stamp). */
 export type CoreAgentDefId =
   | { kind: "qname"; value: QualifiedName; snapshot?: string }
   | { kind: "closure"; value: ClosureId }
-  | { kind: "closureRef"; ref: RefRep };
+  | { kind: "closureRef"; id: string };
 
 // `@` separates a qname from the snapshot it runs on. Safe: `@` appears in
 // neither qname segments (`[A-Za-z_][A-Za-z0-9_]*`), snapshot UUIDs, nor the
@@ -76,7 +76,7 @@ export function encodeCoreAgentDefId(value: CoreAgentDefId): AgentDefId {
     return (CLOSURE_PREFIX + String(value.value)) as AgentDefId;
   }
   if (value.kind === "closureRef") {
-    return (CLOSURE_REF_PREFIX + JSON.stringify(value.ref)) as AgentDefId;
+    return (CLOSURE_REF_PREFIX + value.id) as AgentDefId;
   }
   return (
     value.snapshot !== undefined ? `${value.value}${SNAPSHOT_SEP}${value.snapshot}` : value.value
@@ -89,14 +89,7 @@ export function decodeCoreAgentDefId(id: AgentDefId): CoreAgentDefId {
     throw new Error(`agent-def-id: invalid CORE encoding: ${JSON.stringify(id)}`);
   }
   if (s.startsWith(CLOSURE_REF_PREFIX)) {
-    try {
-      const ref = JSON.parse(s.slice(CLOSURE_REF_PREFIX.length)) as RefRep;
-      return { kind: "closureRef", ref };
-    } catch (err) {
-      throw new Error(
-        `agent-def-id: malformed closure ref: ${JSON.stringify(s)} (${err instanceof Error ? err.message : String(err)})`,
-      );
-    }
+    return { kind: "closureRef", id: s.slice(CLOSURE_REF_PREFIX.length) };
   }
   if (s.startsWith(CLOSURE_PREFIX)) {
     const n = Number(s.slice(CLOSURE_PREFIX.length));
@@ -180,9 +173,10 @@ export function stampAgentDefIdSnapshot(id: AgentDefId, snapshot: string): Agent
   return encodeCoreAgentDefId({ kind: "qname", value: decoded.value, snapshot });
 }
 
-/** The content ref of a closure-ref agent def id, or `undefined` for any other
- *  form. CORE uses this on an inbound delegate to decide the materialize path. */
-export function agentDefIdClosureRef(id: AgentDefId): RefRep | undefined {
+/** The ref id of a closure-ref agent def id, or `undefined` for any other form.
+ *  CORE uses this on an inbound delegate to decide the materialize path (fetch
+ *  the closure blob by `(core, id)`). */
+export function agentDefIdClosureRef(id: AgentDefId): string | undefined {
   const decoded = decodeCoreAgentDefId(id);
-  return decoded.kind === "closureRef" ? decoded.ref : undefined;
+  return decoded.kind === "closureRef" ? decoded.id : undefined;
 }

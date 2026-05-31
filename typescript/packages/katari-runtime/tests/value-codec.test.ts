@@ -27,16 +27,19 @@ describe("value-codec", () => {
 
   it("round-trips a content-ref closure (#5) as a `$agent` callable handle", () => {
     // A closure is a callable, so it serialises under `$agent` (uniform with a
-    // top-level agent) — NOT as a `$ref` envelope. Its content ref is packed
-    // into the agent def id (`closureref:<...>`), so it round-trips back to the
-    // same { kind: closure, ref } value.
+    // top-level agent) — NOT as a `$ref` envelope. The dispatch handle is just
+    // the ref id (`closureref:<id>`); `module` is invariably `core` and
+    // `hash`/`size` are vestigial (the content hash lives in the ref store keyed
+    // by the id), so the round-trip preserves the id, not hash/size.
     const ref = { kind: "ref", module: "core", id: "abc", hash: "h123", size: 42 } as const;
     const closure: Value = { kind: "closure", ref };
     const raw = valueToRaw(closure) as Record<string, unknown>;
-    expect(typeof raw[CALLABLE_DISCRIMINATOR]).toBe("string");
-    expect((raw[CALLABLE_DISCRIMINATOR] as string).startsWith("closureref:")).toBe(true);
+    expect(raw[CALLABLE_DISCRIMINATOR]).toBe("closureref:abc"); // the id, not JSON
     expect(raw.$ref).toBeUndefined(); // not a $ref
-    expect(rt(closure)).toEqual(closure);
+    expect(rt(closure)).toEqual({
+      kind: "closure",
+      ref: { kind: "ref", module: "core", id: "abc", hash: "", size: 0 },
+    });
   });
 
   it("encodes tagged values with $constructor + fields", () => {

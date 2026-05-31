@@ -13,6 +13,7 @@
 //     If somehow an `askAck` comes back instead (the request type is
 //     `-> never`, so this shouldn't happen), we drop it defensively.
 
+import { encodeCoreAgentDefId } from "../../../agent-def-id.js";
 import type { AgentBlock, BlockId, QualifiedName } from "../../../ir/types.js";
 import { decodeClosureBlob } from "../../closure-codec.js";
 import { RecoverableEngineError } from "../../errors.js";
@@ -206,7 +207,10 @@ async function resolveCallableMetadata(ctx: StepCtx, value: Value): Promise<Call
         description: m.description,
         inputSchema: m.inputSchema,
         outputSchema: m.outputSchema,
-        id: `closure:${value.ref.hash}`,
+        // The dispatch handle, identical to the closure value's wire form +
+        // delegate target — `closureref:<ref id>` (cf. a top-level agent's
+        // `id` = its qname). The ref id, not the content hash.
+        id: encodeCoreAgentDefId({ kind: "closureRef", id: value.ref.id }),
       };
     }
     default:
