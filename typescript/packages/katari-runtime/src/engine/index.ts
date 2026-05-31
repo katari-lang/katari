@@ -73,11 +73,12 @@ export type {
   TupleThread,
   UserThread,
 } from "./thread/types.js";
-export type { BytesRep, RefModule, RefRep, Value } from "./value.js";
+export type { BytesRep, RefHandle, RefModule, RefRep, Value } from "./value.js";
 export {
   bytesContentEqual,
   bytesEqualsText,
   bytesHash,
+  collectRefs,
   inlineText,
   isBytesValue,
   literalToValue,

@@ -14,6 +14,7 @@ export {
   bytesEqualsText,
   bytesHash,
   collectGarbage,
+  collectRefs,
   consoleLogger,
   createDelegationId,
   createEscalationId,

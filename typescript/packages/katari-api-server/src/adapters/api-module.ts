@@ -18,6 +18,7 @@
 import {
   API_ENDPOINT,
   CORE_ENDPOINT,
+  collectRefs,
   createDelegationId,
   type ExternalEvent,
   encodeCoreAgentDefId,
@@ -284,6 +285,16 @@ export class ApiModule implements Module {
         state: "open",
         createdAt: new Date().toISOString(),
       });
+      // GC ownership: the escalation entity (persistent until answered/cancelled)
+      // takes over any ref the escalating delegation owns in the args, so a file
+      // carried up in an escalation stays fetchable in the escalation history
+      // after the escalator's own shard has completed. transferOwnership only
+      // moves refs OWNED BY the escalator (api_files / higher-owned refs are
+      // untouched).
+      const seed = Object.values(args).flatMap((value) => collectRefs(value));
+      if (seed.length > 0) {
+        await tx.values.transferOwnership(this.projectId, delegationId, escalationId, seed);
+      }
     });
   }
 
