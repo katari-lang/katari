@@ -29,6 +29,20 @@ export type RegisteredModule = {
   module: Module;
 };
 
+/** Compact, log-friendly summary of an event (ids vary by kind). */
+function busEventContext(event: ExternalEvent): Record<string, unknown> {
+  const payload = event.payload;
+  const context: Record<string, unknown> = {
+    from: event.from,
+    to: event.to,
+    kind: payload.kind,
+  };
+  if ("delegationId" in payload) context.delegationId = payload.delegationId;
+  if ("escalationId" in payload) context.escalationId = payload.escalationId;
+  if ("agentDefId" in payload) context.agentDefId = payload.agentDefId;
+  return context;
+}
+
 export class ExternalEventBus {
   private readonly modules = new Map<Endpoint, RegisteredModule>();
   private readonly queue: ExternalEvent[] = [];
@@ -71,6 +85,7 @@ export class ExternalEventBus {
   private async doDrain(): Promise<void> {
     while (this.queue.length > 0) {
       const event = this.queue.shift()!;
+      this.logger.log("debug", "bus: event", busEventContext(event));
       const target = this.modules.get(event.to);
       if (target === undefined) {
         this.logger.log("warn", "bus: no module for endpoint; dropping event", {
