@@ -1,0 +1,14 @@
+{
+  "name": "discord-bot",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Katari example: a Discord bot (ext sidecar + agents).",
+  "type": "module",
+  "dependencies": {
+    "@katari-lang/port": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0"
+  }
+}

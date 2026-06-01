@@ -1,6 +1,7 @@
 packages:
   - "typescript/packages/*"
   - "e2e"
+  - "examples/*"
 
 # pnpm 11 requires explicit approval for postinstall scripts of new
 # deps. These are all legitimate native-binary fetches:

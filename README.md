@@ -130,8 +130,9 @@ The full registry lives in [`haskell/katari-compiler/CHANGELOG.md`](haskell/kata
 | `@katari-lang/runtime`, `@katari-lang/port`, `@katari-lang/bundle`, `@katari-lang/api-server` | npm |
 | `katari-vscode` | VSIX on GitHub Releases (Marketplace TBD) |
 
-See [`examples/self-host/`](examples/self-host) for a `docker compose`
-quickstart for self-hosting.
+`katari init` scaffolds a `docker compose` setup (runtime + Postgres +
+SeaweedFS) wired to the published GHCR image — the quickstart for
+self-hosting a project.
 
 ## Directory notes
 

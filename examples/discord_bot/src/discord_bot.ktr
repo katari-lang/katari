@@ -1,0 +1,39 @@
+@"An AI provider connection: credentials + model. Built once, shared via get_ai_client."
+data ai_client(provider: string, model: string, api_key: secret)
+
+@"The shared AI client capability (provided once at the root)."
+request get_ai_client() -> ai_client
+
+@"The current conversation session handle (its message history lives in the sidecar)."
+request get_session() -> string
+
+@"Open a fresh conversation session; the history is kept in the sidecar."
+external create_session() -> string from "FFI:discord_bot.create_session"
+
+@"Run one turn: appends the prompt to the session's history, infers, returns the reply."
+external ai_infer(client: ai_client, session: string, prompt: string) -> string from "FFI:discord_bot.ai_infer"
+
+@"Infer using the ambient AI client + session."
+agent infer(prompt: string) -> string with get_ai_client, get_session {
+  ai_infer(client = get_ai_client(), session = get_session(), prompt = prompt)
+}
+
+@"Entry: set up the AI client + a session, then run one inference."
+agent main() -> string {
+  handle {
+    request env_not_found(env_key: string) {
+      break f"missing env: ${env_key}"
+    }
+  }
+  handle (var ai = ai_client(provider = "gemini", model = "gemini-3.1-flash-lite", api_key = get_secret_env(key = "GEMINI_API_KEY"))) {
+    request get_ai_client() {
+      next ai
+    }
+  }
+  handle (var s = create_session()) {
+    request get_session() {
+      next s
+    }
+  }
+  infer(prompt = "Say hello.")
+}

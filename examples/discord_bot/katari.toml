@@ -1,0 +1,19 @@
+[package]
+name = "discord_bot"
+version = "0.1.0"
+description = ""
+
+[runtime]
+url = "http://localhost:8000"
+
+[dependencies]
+# registry = "https://github.com/katari-lang/katari-registry"
+# snapshot = "v0.1.0"
+packages = []
+
+# [overrides.my_fork]
+# path = "../my_fork"
+#
+# [overrides.upstream]
+# git = "https://github.com/..."
+# ref = "<full 40-hex commit sha>"

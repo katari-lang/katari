@@ -2,8 +2,8 @@
 # from the local tree. Reads credentials from `.env` at repo root — copy
 # `.env.example` to `.env` before first `docker compose up`.
 #
-# For self-host (uses the published GHCR image instead) see
-# `examples/self-host/docker-compose.yml`.
+# For self-host (the published GHCR image instead of a local build),
+# `katari init` scaffolds a docker-compose.yml wired to it.
 
 services:
   runtime:

@@ -46,6 +46,19 @@ importers:
         specifier: ^3.0.0
         version: 3.2.4(@types/debug@4.1.13)(@types/node@22.19.18)(jiti@2.7.0)(lightningcss@1.32.0)(tsx@4.22.3)
 
+  examples/discord_bot:
+    dependencies:
+      '@katari-lang/port':
+        specifier: workspace:*
+        version: link:../../typescript/packages/katari-port
+    devDependencies:
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.19.18
+      typescript:
+        specifier: ^5.7.0
+        version: 5.9.3
+
   typescript/packages/katari:
     optionalDependencies:
       '@katari-lang/bundle':
