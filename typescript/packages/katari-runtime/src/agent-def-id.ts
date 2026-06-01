@@ -1,16 +1,25 @@
 // AgentDefId: opaque, module-local agent identifier carried on
 // `delegate` / `escalate` events.
 //
+// **Two namespaces.** The id has an EXTERNAL form (snapshot-bearing — what
+// flows on the bus and inside an agent VALUE) and an INTERNAL form (the bare
+// user-defined name, which lives per-snapshot inside the IR and the sidecar).
+//
 // **Wire format**: a flat string, one of three CORE flavours:
-//   - a 'QualifiedName' (`"main.foo"`) — a top-level callable.
+//   - `"main.foo@<snapshot>"` — a top-level callable in its EXTERNAL form. The
+//     `@snapshot` says which IR version to run (a bare `"main.foo"` is the
+//     internal id and is ambiguous on the wire — delegating one fails). It is
+//     stamped in exactly two places: DelegateThread (a CORE/FFI delegate target)
+//     and the front-end / API entry (building the id from a name + snapshot).
 //   - `"closureref:<ref id>"` — a closure crossing a shard boundary, dispatched
-//     by its content-ref id (CORE fetches the blob + materializes it).
+//     by its content-ref id (CORE fetches the blob + materializes it; the
+//     snapshot rides inside the blob, so no `@` stamp).
 //   - `"closure:N"` — the engine-allocated in-shard dispatch id. CORE-INTERNAL
 //     only: CORE rewrites an inbound `closureref:` to this for the new shard's
 //     own dispatch; it never crosses the bus, the schema, or `get_metadata`.
 // The wire callable forms a value / `get_metadata.id` / the JSON-Schema `$agent`
-// string carry are the first two (`qname` | `closureref:<id>`) — the same string
-// flows end-to-end through CORE / FFI / API / sidecar / AI tool calls.
+// string carry are the first two (`qname@snapshot` | `closureref:<id>`) — the
+// same string flows end-to-end through CORE / FFI / API / sidecar / AI tool calls.
 //
 // **Branding**: each module owns its own opaque type wrapper around the
 // raw string. `encodeCoreAgentDefId` / `encodeFfiAgentDefId` are the
@@ -68,11 +77,11 @@ export type CoreAgentDefId =
 
 // `@` separates a qname from the snapshot it runs on. Safe: `@` appears in
 // neither qname segments (`[A-Za-z_][A-Za-z0-9_]*`), snapshot UUIDs, nor the
-// `closure:` prefix. snapshot is a CORE/FFI-private axis carried INSIDE the
-// (otherwise opaque-to-the-bus) agent def id, not as a protocol field — CORE
-// stamps the issuing shard's `currentSnapshot` on a delegate target and reads
-// it back to pick the new shard's IR. The compiled schema / get_metadata id
-// is the bare qname (no `@`); decode treats a missing `@` as "no snapshot".
+// `closure:` prefix. The snapshot is the EXTERNAL form's version axis: the
+// receiver reads it back to pick the new shard's IR. An agent VALUE / a
+// `get_metadata.id` carries it too (the value's wire `$agent` IS this string).
+// The compiled JSON-Schema `$agent` stays an open string (no enum); decode
+// treats a missing `@` as "no snapshot" (an internal-form id on the wire).
 const SNAPSHOT_SEP = "@";
 
 export function encodeCoreAgentDefId(value: CoreAgentDefId): AgentDefId {
@@ -166,15 +175,6 @@ export function stripAgentDefIdSnapshot(id: AgentDefId): AgentDefId {
   const decoded = decodeCoreAgentDefId(id);
   if (decoded.kind !== "qname") return id;
   return encodeCoreAgentDefId({ kind: "qname", value: decoded.value });
-}
-
-/** Stamp `snapshot` onto a snapshot-dependent (CORE / FFI) delegate target.
- *  qname-form carries it; a closure / closure-ref is returned unchanged (a
- *  closure ref carries its snapshot inside its blob, not as an `@` stamp). */
-export function stampAgentDefIdSnapshot(id: AgentDefId, snapshot: string): AgentDefId {
-  const decoded = decodeCoreAgentDefId(id);
-  if (decoded.kind !== "qname") return id;
-  return encodeCoreAgentDefId({ kind: "qname", value: decoded.value, snapshot });
 }
 
 /** The ref id of a closure-ref agent def id, or `undefined` for any other form.

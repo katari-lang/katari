@@ -13,8 +13,9 @@
 //     `complete` (building/streaming is v0.2).
 //
 // closure values are machine-local id references into `state.closures`;
-// agentLiteral carries only the qualified name (the snapshot axis is
-// added in the per-project-module phase, Phase E).
+// agentLiteral carries the qualified name PLUS the snapshot it resolves
+// against (the external form). The snapshot is supplied where the value is
+// created — `literalToValue` reads it from the shard's `state.snapshot`.
 
 import type { LiteralValue, QualifiedName } from "../ir/types.js";
 import { hashText } from "../storage/hash.js";
@@ -69,8 +70,15 @@ export type Value =
   // shard-local dispatch record (`state.closures`) is keyed by the engine's
   // `closure:N` agent def id, never by a Value.
   | { kind: "closure"; ref: RefRep }
-  // Top-level callable reference (agent / prim / ctor / external).
-  | { kind: "agentLiteral"; qualifiedName: QualifiedName };
+  // Top-level callable reference (agent / prim / ctor / external). An agent
+  // value is the EXTERNAL form: it carries the snapshot it resolves against
+  // (`qualifiedName@snapshot` on the wire), set when the value is born — from
+  // the shard's `state.snapshot` at a source literal, or the `@snapshot` stamp
+  // on a received wire value. The bare `qualifiedName` is the INTERNAL id used
+  // for IR-entries / dispatch lookup. `snapshot` is absent only for an
+  // internal-form value that leaked to the boundary (delegating it then fails
+  // with an un-stamped-target error — the same "not found" outcome).
+  | { kind: "agentLiteral"; qualifiedName: QualifiedName; snapshot?: string };
 
 /** A closure carried by content-addressed ref (its serialized body+env blob). */
 export type ClosureValue = Extract<Value, { kind: "closure" }>;
@@ -192,8 +200,10 @@ export function bytesEqualsText(rep: BytesRep, text: string): boolean {
   return rep.kind === "inline" ? rep.text === text : rep.hash === hashText(text);
 }
 
-/** Convert an IR LiteralValue to a runtime Value. */
-export function literalToValue(literal: LiteralValue): Value {
+/** Convert an IR LiteralValue to a runtime Value. `snapshot` is the shard's
+ *  current snapshot, stamped onto an agent literal so the value carries its
+ *  external form (`qname@snapshot`); ignored for every other literal kind. */
+export function literalToValue(literal: LiteralValue, snapshot?: string): Value {
   switch (literal.kind) {
     case "literalValueInteger":
       return { kind: "number", value: literal.integer };
@@ -206,7 +216,7 @@ export function literalToValue(literal: LiteralValue): Value {
     case "literalValueNull":
       return { kind: "null" };
     case "literalValueAgent":
-      return { kind: "agentLiteral", qualifiedName: literal.qualifiedName };
+      return { kind: "agentLiteral", qualifiedName: literal.qualifiedName, snapshot };
   }
 }
 

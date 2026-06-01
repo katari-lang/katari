@@ -141,9 +141,15 @@ function resolveTarget(
   const target = block.target;
   switch (target.kind) {
     case "delegateTargetInternal":
+      // A CORE agent: bare alone can't say which snapshot to run — stamp the
+      // issuing shard's snapshot to produce the external target form.
       return {
         peer: ctx.state.selfEndpoint,
-        agentDefId: encodeCoreAgentDefId({ kind: "qname", value: target.body }),
+        agentDefId: encodeCoreAgentDefId({
+          kind: "qname",
+          value: target.body,
+          snapshot: ctx.state.snapshot,
+        }),
       };
     case "delegateTargetExternal": {
       const { endpoint, dispatchName } = target.body;
@@ -153,11 +159,15 @@ function resolveTarget(
       // so we hand it through verbatim.
       switch (endpoint) {
         case "FFI":
+          // FFI picks the per-snapshot sidecar — stamp the issuing shard's
+          // snapshot (FfiMux routes on it; the lane then strips it for the
+          // sidecar's bare-qname handler registry).
           return {
             peer: ctx.state.ffiTargetEndpoint,
             agentDefId: encodeFfiAgentDefId({
               kind: "qname",
               value: dispatchName,
+              snapshot: ctx.state.snapshot,
             }),
           };
         case "ENV":
@@ -177,17 +187,21 @@ function resolveTarget(
     case "delegateTargetValue": {
       const value = lookupValue(ctx, t.scopeId, target.body);
       if (value.kind === "agentLiteral") {
+        // An agent value already carries its snapshot (the external form) —
+        // hand it through verbatim (no re-stamp). `qualifiedName` (the internal
+        // id) decides CORE vs FFI via the IR entries; the snapshot rides along.
         const qname = value.qualifiedName;
+        const snapshot = value.snapshot;
         const inEntries = ctx.state.irModule.entries[qname] !== undefined;
         if (inEntries) {
           return {
             peer: ctx.state.selfEndpoint,
-            agentDefId: encodeCoreAgentDefId({ kind: "qname", value: qname }),
+            agentDefId: encodeCoreAgentDefId({ kind: "qname", value: qname, snapshot }),
           };
         }
         return {
           peer: ctx.state.ffiTargetEndpoint,
-          agentDefId: encodeFfiAgentDefId({ kind: "qname", value: qname }),
+          agentDefId: encodeFfiAgentDefId({ kind: "qname", value: qname, snapshot }),
         };
       }
       if (value.kind === "closure") {

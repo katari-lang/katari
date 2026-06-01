@@ -193,7 +193,13 @@ async function resolveCallableMetadata(ctx: StepCtx, value: Value): Promise<Call
         description: block.description,
         inputSchema: block.inputSchema,
         outputSchema: block.outputSchema,
-        id: value.qualifiedName,
+        // The dispatch handle surfaced to tool calls — the external form
+        // (`qname@snapshot`), identical to the agent value's wire `$agent`.
+        id: encodeCoreAgentDefId({
+          kind: "qname",
+          value: value.qualifiedName,
+          snapshot: value.snapshot,
+        }),
       };
     }
     case "closure": {

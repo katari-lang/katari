@@ -139,8 +139,10 @@ describe("ValueStore: dedup + refcount", () => {
 describe("ValueStore: persistent files", () => {
   it("create / get / list / delete with blob sweep", async () => {
     const store = new InMemoryValueStore();
+    // Durable files are owned by the project-root entity (id === projectId).
     const file = await store.createFile({
       projectId: PROJECT,
+      ownerEntityId: PROJECT,
       bytes: enc("file-bytes"),
       contentType: "text/plain",
       displayName: "notes.txt",

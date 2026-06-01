@@ -116,7 +116,6 @@ export type {
   ProduceResult,
   PutInput,
   RefHandle,
-  RefOrigin,
   RefState,
   ValueRefState,
   ValueSemanticKind,
@@ -176,7 +175,6 @@ export {
   decodeFfiAgentDefId,
   encodeCoreAgentDefId,
   encodeFfiAgentDefId,
-  stampAgentDefIdSnapshot,
   stripAgentDefIdSnapshot,
   THROW_REQUEST_QNAME,
 } from "./agent-def-id.js";

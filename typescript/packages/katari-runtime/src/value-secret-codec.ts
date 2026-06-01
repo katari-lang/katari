@@ -29,7 +29,7 @@ export type EncryptedValue =
   | { kind: "tagged"; ctorId: QualifiedName; fields: Record<string, EncryptedValue> }
   | { kind: "record"; entries: Record<string, EncryptedValue> }
   | { kind: "closure"; ref: RefRep }
-  | { kind: "agentLiteral"; qualifiedName: QualifiedName }
+  | { kind: "agentLiteral"; qualifiedName: QualifiedName; snapshot?: string }
   | EncryptedSecret;
 
 /**

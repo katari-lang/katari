@@ -27,7 +27,6 @@ import {
   type PutInput,
   type RefHandle,
   type RefModule,
-  type RefOrigin,
   type RefState,
   type ValueRefState,
   type ValueSemanticKind,
@@ -111,7 +110,6 @@ export class PgValueStore implements ValueStore {
         ownerEntityId: input.ownerEntityId,
         state: "complete",
         semanticKind: input.semanticKind,
-        origin: input.origin ?? "intermediate",
         refsTo: input.refsTo ?? [],
         hash,
         size,
@@ -151,7 +149,6 @@ export class PgValueStore implements ValueStore {
             ownerEntityId: input.ownerEntityId,
             state: "complete",
             semanticKind: input.semanticKind,
-            origin: input.origin ?? "intermediate",
             refsTo: input.refsTo ?? [],
             hash,
             size: total,
@@ -170,7 +167,6 @@ export class PgValueStore implements ValueStore {
           ownerEntityId: input.ownerEntityId,
           state: "errored",
           semanticKind: input.semanticKind,
-          origin: input.origin ?? "intermediate",
           refsTo: input.refsTo ?? [],
           hash: null,
           size: null,
@@ -190,7 +186,6 @@ export class PgValueStore implements ValueStore {
       ownerEntityId?: string;
       state: ValueRefState;
       semanticKind: ValueSemanticKind;
-      origin: RefOrigin;
       refsTo: ReadonlyArray<RefHandle>;
       hash: string | null;
       size: number | null;
@@ -201,11 +196,11 @@ export class PgValueStore implements ValueStore {
   ): Promise<void> {
     await sql`
       INSERT INTO refs
-        (project_id, module, id, owner_entity_id, state, semantic_kind, origin, refs_to,
+        (project_id, module, id, owner_entity_id, state, semantic_kind, refs_to,
          hash, size, content_type, display_name, error_message)
       VALUES
         (${row.projectId}, ${row.module}, ${row.id}, ${row.ownerEntityId ?? null}, ${row.state},
-         ${row.semanticKind}, ${row.origin}, ${this.sql.json([...row.refsTo]) as never},
+         ${row.semanticKind}, ${this.sql.json([...row.refsTo]) as never},
          ${row.hash}, ${row.size}, ${row.contentType ?? null}, ${row.displayName ?? null},
          ${row.errorMessage ?? null})
     `;
@@ -287,7 +282,6 @@ export class PgValueStore implements ValueStore {
         ownerEntityId: input.ownerEntityId,
         state: "complete",
         semanticKind: "file",
-        origin: "user",
         refsTo: [],
         hash,
         size,
@@ -315,10 +309,13 @@ export class PgValueStore implements ValueStore {
   }
 
   async listFiles(projectId: string): Promise<FileRecord[]> {
+    // Durable project files = the `file` refs owned by the project-root entity
+    // (whose id IS the project id; see entity-roots.ts). Ownership is the single
+    // source of truth for lifetime — no separate durability flag.
     const rows = await this.sql<DbFileRow[]>`
       SELECT id, hash, size, content_type, display_name, created_at
-      FROM refs WHERE project_id = ${projectId} AND module = 'api' AND origin = 'user'
-        AND state = 'complete'
+      FROM refs WHERE project_id = ${projectId} AND owner_entity_id = ${projectId}
+        AND semantic_kind = 'file' AND state = 'complete'
       ORDER BY created_at DESC, id DESC
     `;
     return rows.map(dbToFileRecord);
@@ -370,7 +367,6 @@ export class PgValueStore implements ValueStore {
         ownerEntityId: input.ownerEntityId,
         state: "complete",
         semanticKind: "file",
-        origin: "user",
         refsTo: [],
         hash: ref.hash,
         size: Number(ref.size),

@@ -36,11 +36,6 @@ export type ProduceModule = "core" | "ffi";
  *  `refs_to` to drag captures; the others are leaves). */
 export type ValueSemanticKind = "string" | "file" | "secret" | "closure";
 
-/** Where a ref came from (display/filtering; derivable from its owner's role).
- *  `user` = an upload on the project root; `run` = a run result; `escalation` =
- *  persisted escalation arg; `intermediate` = program-/FFI-produced. */
-export type RefOrigin = "user" | "run" | "escalation" | "intermediate";
-
 /**
  * v0.1.0 ref lifecycle. `building` / `cancelled` (observable streaming) are
  * v0.2 — in v0.1.0 a ref is `complete` the moment it becomes visible.
@@ -100,8 +95,6 @@ export type PutInput = {
   /** The entity that owns this ref (the producing CORE/FFI entity `E`).
    *  `undefined` = unowned (test/legacy; not entity-GC-managed). */
   ownerEntityId?: string;
-  /** Display/filtering origin. Defaults to `intermediate`. */
-  origin?: RefOrigin;
   /** Refs this ref internally captures (closures). The detach/claim ascent
    *  follows these so a closure's captures travel with it. */
   refsTo?: ReadonlyArray<RefHandle>;
@@ -147,11 +140,11 @@ export interface ValueStore {
   ): Promise<Uint8Array | null>;
 
   // ── durable files (module = "api" refs the API keeps) ────────────────────
-  /** Create an upload: a `module = "api"` ref owned by `ownerEntityId`,
-   *  `origin = "user"`, carrying `displayName`. */
+  /** Create an upload: a `module = "api"` file ref owned by `ownerEntityId`
+   *  (the project root), carrying `displayName`. */
   createFile(input: CreateFileInput): Promise<FileRecord>;
   getFile(projectId: string, id: string): Promise<FileRecord | null>;
-  /** User uploads (`module = "api"`, `origin = "user"`). */
+  /** Durable project files = the `file` refs owned by the project-root entity. */
   listFiles(projectId: string): Promise<FileRecord[]>;
   deleteFile(projectId: string, id: string): Promise<boolean>;
 

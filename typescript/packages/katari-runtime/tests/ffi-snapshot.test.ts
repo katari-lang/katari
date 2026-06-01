@@ -136,17 +136,24 @@ describe("FfiModule snapshot boundary", () => {
     expect(store.delegations.get(delegationId)?.agentDefId).toBe("ext.tool");
   });
 
-  it("stamps this sidecar's snapshot onto a CORE child the ext spawns", async () => {
+  it("forwards the ext-provided agent value verbatim (no re-stamp)", async () => {
     const { ffi, bus, store } = makeModule();
     const parentDelegationId = createDelegationId();
     const childDelegationId = createDelegationId();
 
+    // The callable the ext passes is an agent value it received from Katari —
+    // already in external form (`qname@snapshot`). The FFI hands it through
+    // verbatim; it does NOT re-derive the snapshot from its own lane.
+    const callable = encodeCoreAgentDefId({
+      kind: "qname",
+      value: "some.agent" as QualifiedName,
+      snapshot: SNAP,
+    });
     const msg: ChildToParent = {
       type: "ipcChildDelegate",
       parentDelegationId,
       delegationId: childDelegationId,
-      // The ext names the CORE child by bare qname — no notion of snapshots.
-      agentDefId: "some.agent" as AgentDefId,
+      agentDefId: callable,
       args: {},
     };
     await ffi.dispatchSidecarMessage(msg);
@@ -154,16 +161,10 @@ describe("FfiModule snapshot boundary", () => {
     const delegate = bus.find((e) => e.payload.kind === "delegate");
     expect(delegate).toBeDefined();
     expect(delegate?.to).toBe(CORE_ENDPOINT);
-    // CORE needs the stamp to create the child shard on the matching IR.
-    const expected = encodeCoreAgentDefId({
-      kind: "qname",
-      value: "some.agent" as QualifiedName,
-      snapshot: SNAP,
-    });
     if (delegate?.payload.kind === "delegate") {
-      expect(delegate.payload.agentDefId).toBe(expected);
+      expect(delegate.payload.agentDefId).toBe(callable);
     }
-    expect(store.delegations.get(childDelegationId)?.agentDefId).toBe(expected);
+    expect(store.delegations.get(childDelegationId)?.agentDefId).toBe(callable);
   });
 
   it("leaves the throw escalate bare (a request, not a delegate target)", async () => {

@@ -143,7 +143,14 @@ function handleStatement(ctx: StepCtx, t: UserThread, stmt: Statement): Statemen
       return "wait";
     }
     case "statementLoadLiteral": {
-      setValueInScope(ctx, t.scopeId, stmt.body.output, literalToValue(stmt.body.value));
+      // An agent literal is born in the shard's snapshot — stamp it so the
+      // value carries its external (`qname@snapshot`) form.
+      setValueInScope(
+        ctx,
+        t.scopeId,
+        stmt.body.output,
+        literalToValue(stmt.body.value, ctx.state.snapshot),
+      );
       return "advance";
     }
     case "statementMakeClosure": {

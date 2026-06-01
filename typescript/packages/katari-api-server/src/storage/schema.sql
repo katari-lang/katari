@@ -320,7 +320,9 @@ CREATE TABLE IF NOT EXISTS value_blobs (
 --
 -- The wire ref is `{module, id}`; `module = 'api'` = owned by an API entity the
 -- API keeps (a user upload on the project root, a run result on the run root).
--- `origin` is for display/filtering; `display_name` is the file name (NULL for
+-- Lifetime/durability has a SINGLE source of truth: ownership. A durable project
+-- file is just a `file` ref owned by the project-root entity (id = project id) —
+-- there is no separate durability flag. `display_name` is the file name (NULL for
 -- program-/FFI-produced intermediates — names attach only at user upload).
 -- `refs_to` is the closure adjacency so the detach/claim drag captures along.
 CREATE TABLE IF NOT EXISTS refs (
@@ -330,7 +332,6 @@ CREATE TABLE IF NOT EXISTS refs (
   owner_entity_id UUID REFERENCES entities(id) ON DELETE CASCADE,  -- NULL = in-transit (mid-ascent)
   state           TEXT NOT NULL,                 -- 'complete' | 'errored'
   semantic_kind   TEXT NOT NULL,                 -- 'string' | 'file' | 'secret' | 'closure'
-  origin          TEXT NOT NULL DEFAULT 'intermediate',  -- 'user' | 'run' | 'escalation' | 'intermediate'
   refs_to         JSONB NOT NULL DEFAULT '[]',   -- [{module,id}] refs this ref captures (closures)
   hash            TEXT,                          -- -> value_blobs.hash (null while errored)
   size            BIGINT,
@@ -340,9 +341,10 @@ CREATE TABLE IF NOT EXISTS refs (
   created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (project_id, module, id)
 );
-CREATE INDEX IF NOT EXISTS refs_owner_entity_idx ON refs (owner_entity_id);
+-- (project_id, owner_entity_id) backs `listFiles` (durable files = project-root
+-- owned) and the ascent's per-owner BFS.
+CREATE INDEX IF NOT EXISTS refs_owner_entity_idx ON refs (project_id, owner_entity_id);
 CREATE INDEX IF NOT EXISTS refs_hash_idx  ON refs (project_id, hash);
-CREATE INDEX IF NOT EXISTS refs_origin_idx ON refs (project_id, origin);
 
 -- Keep the blob refcount correct under BOTH explicit ref deletes and entity
 -- CASCADE: on every ref DELETE, decrement its blob's ref_count. (The value store

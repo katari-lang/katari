@@ -98,7 +98,15 @@ export function valueToRaw(value: Value): RawValue {
         [CALLABLE_DISCRIMINATOR]: encodeCoreAgentDefId({ kind: "closureRef", id: value.ref.id }),
       };
     case "agentLiteral":
-      return { [CALLABLE_DISCRIMINATOR]: value.qualifiedName };
+      // External form: the snapshot rides in the `@snapshot` stamp (encode
+      // omits it when absent — an internal-form value that never got stamped).
+      return {
+        [CALLABLE_DISCRIMINATOR]: encodeCoreAgentDefId({
+          kind: "qname",
+          value: value.qualifiedName,
+          snapshot: value.snapshot,
+        }),
+      };
   }
 }
 
@@ -195,7 +203,9 @@ function decodeCallable(rawId: unknown): Value {
         `valueFromRaw: '$agent: ${rawId}' — a local closure id is not a wire value`,
       );
     case "qname":
-      return { kind: "agentLiteral", qualifiedName: decoded.value };
+      // Preserve the `@snapshot` stamp (the external form). A bare wire value
+      // decodes to a snapshot-less agent literal that fails at delegate.
+      return { kind: "agentLiteral", qualifiedName: decoded.value, snapshot: decoded.snapshot };
   }
 }
 

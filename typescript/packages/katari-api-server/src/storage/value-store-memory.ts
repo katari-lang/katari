@@ -20,7 +20,6 @@ import {
   type PutInput,
   type RefHandle,
   type RefModule,
-  type RefOrigin,
   type RefState,
   type ValueRefState,
   type ValueSemanticKind,
@@ -35,7 +34,6 @@ type RefRow = {
   ownerEntityId?: string; // undefined = in-transit (NULL owner)
   state: ValueRefState;
   semanticKind: ValueSemanticKind;
-  origin: RefOrigin;
   refsTo: RefHandle[];
   hash: string | null;
   size: number | null;
@@ -126,7 +124,6 @@ export class InMemoryValueStore implements ValueStore {
       ownerEntityId: input.ownerEntityId,
       state: "complete",
       semanticKind: input.semanticKind,
-      origin: input.origin ?? "intermediate",
       refsTo: [...(input.refsTo ?? [])],
       hash,
       size,
@@ -165,7 +162,6 @@ export class InMemoryValueStore implements ValueStore {
           ownerEntityId: input.ownerEntityId,
           state: "complete",
           semanticKind: input.semanticKind,
-          origin: input.origin ?? "intermediate",
           refsTo: [...(input.refsTo ?? [])],
           hash,
           size: total,
@@ -184,7 +180,6 @@ export class InMemoryValueStore implements ValueStore {
           ownerEntityId: input.ownerEntityId,
           state: "errored",
           semanticKind: input.semanticKind,
-          origin: input.origin ?? "intermediate",
           refsTo: [...(input.refsTo ?? [])],
           hash: null,
           size: null,
@@ -253,7 +248,6 @@ export class InMemoryValueStore implements ValueStore {
       ownerEntityId: input.ownerEntityId,
       state: "complete",
       semanticKind: "file",
-      origin: "user",
       refsTo: [],
       hash,
       size: input.bytes.length,
@@ -271,12 +265,14 @@ export class InMemoryValueStore implements ValueStore {
   }
 
   async listFiles(projectId: string): Promise<FileRecord[]> {
+    // Durable project files = `file` refs owned by the project-root entity
+    // (id === projectId). Ownership is the single source of truth for lifetime.
     return [...this.refs.values()]
       .filter(
         (r) =>
           r.projectId === projectId &&
-          r.module === "api" &&
-          r.origin === "user" &&
+          r.ownerEntityId === projectId &&
+          r.semanticKind === "file" &&
           r.state === "complete",
       )
       .sort((a, b) => (a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : 0))
@@ -312,7 +308,6 @@ export class InMemoryValueStore implements ValueStore {
       ownerEntityId: input.ownerEntityId,
       state: "complete",
       semanticKind: "file",
-      origin: "user",
       refsTo: [],
       hash: ref.hash,
       size: ref.size,

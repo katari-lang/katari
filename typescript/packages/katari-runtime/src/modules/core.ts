@@ -29,12 +29,7 @@
 //   terminate     → index.delegations[delegationId]          (the shard running D)
 //   escalateAck   → index.escalationOwners[escalationId]      (the raiser shard)
 
-import {
-  agentDefIdClosureRef,
-  agentDefIdSnapshot,
-  encodeCoreAgentDefId,
-  stampAgentDefIdSnapshot,
-} from "../agent-def-id.js";
+import { agentDefIdClosureRef, agentDefIdSnapshot, encodeCoreAgentDefId } from "../agent-def-id.js";
 import { applyEvent, createState } from "../engine/apply.js";
 import { decodeClosureBlob, materializeClosure } from "../engine/closure-codec.js";
 import { CORE_ENDPOINT, type Endpoint } from "../engine/endpoint.js";
@@ -232,18 +227,11 @@ export class CoreModule implements Module {
 
       for (const ev of outbound) {
         if (ev.payload.kind === "delegate") {
-          // The agent def id carries the issuing shard's snapshot — but ONLY for
-          // snapshot-dependent modules (CORE agents run versioned IR, FFI picks
-          // the per-snapshot sidecar). ENV / API are snapshot-independent. A
-          // closure ref carries its snapshot in its blob (stamp is a no-op).
-          const toSnapshotDependent =
-            ev.to === shard.state.selfEndpoint || ev.to === shard.state.ffiTargetEndpoint;
-          if (toSnapshotDependent) {
-            ev.payload.agentDefId = stampAgentDefIdSnapshot(
-              ev.payload.agentDefId,
-              shard.currentSnapshot,
-            );
-          }
+          // The delegate target is already in external form: the engine
+          // (DelegateThread) stamped the issuing shard's snapshot onto CORE/FFI
+          // targets, and an agent VALUE target carries its own snapshot. ENV is
+          // snapshot-independent (left bare), a closure ref carries its snapshot
+          // in its blob — both correct without any module-level fix-up.
           // Issuer: write the request edge (parent = THIS shard's entity).
           await this.writeOutboundDelegation(tx.entities, shard.state, shardId, ev, ev.payload);
         } else if (ev.payload.kind === "escalate") {
@@ -367,8 +355,8 @@ export class CoreModule implements Module {
   }
 
   /** A blob writer (owner = this shard's entity). Tags the produced ref with the
-   *  caller's `semanticKind` and `origin = "intermediate"`, owned by the
-   *  producing shard's entity (`ownerEntityId = shardId = E`). */
+   *  caller's `semanticKind`, owned by the producing shard's entity
+   *  (`ownerEntityId = shardId = E`). */
   private makePutRef(valueStore: ValueStore | null, ownerEntityId: string): RefPutter {
     const projectId = this.projectId;
     return async (bytes, semanticKind, refsTo): Promise<RefRep> => {
@@ -380,7 +368,6 @@ export class CoreModule implements Module {
         owner: "core",
         bytes,
         semanticKind,
-        origin: "intermediate",
         ownerEntityId,
         refsTo,
       });
@@ -447,7 +434,6 @@ export class CoreModule implements Module {
         owner: "core",
         bytes: new TextEncoder().encode(text),
         semanticKind: "string",
-        origin: "intermediate",
         ownerEntityId,
       });
       return { kind: "ref", module: "core", id: result.id, hash: result.hash, size: result.size };

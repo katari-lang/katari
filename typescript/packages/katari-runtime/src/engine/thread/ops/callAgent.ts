@@ -2,9 +2,13 @@
 // primitive.
 //
 // On create:
-//   1. Resolve @nameStr@ into a callable identity (the same dispatch handle a
-//      value carries + `get_metadata` returns):
-//      - "module.agent"    → QualifiedName, looked up in irModule.entries.
+//   1. Resolve @nameStr@ into a callable identity. @nameStr@ is always the
+//      EXTERNAL dispatch handle — exactly what `get_metadata` returns and an
+//      agent value carries on the wire (call_agent is only for an id that came
+//      through a string/RawValue; a statically-known agent is called by value):
+//      - "module.agent@snapshot" → a top-level callable. The bare qname (sans
+//        `@snapshot`) keys irModule.entries; a BARE id is rejected (it's the
+//        internal namespace — ambiguous as a wire id).
 //      - "closureref:<id>" → a content-ref closure: fetch its blob (the input
 //        schema lives there) + dispatch by the ref; CORE materializes it.
 //   2. Read the target's `AgentBlock` to get `inputSchema` (and the
@@ -23,7 +27,11 @@
 // Inbound asks (escalates from the peer) are forwarded upward as
 // `ask` events to our parent, mirroring DelegateThread.
 
-import { type AgentDefId, encodeCoreAgentDefId } from "../../../agent-def-id.js";
+import {
+  type AgentDefId,
+  decodeCoreAgentDefId,
+  encodeCoreAgentDefId,
+} from "../../../agent-def-id.js";
 import type { AgentBlock, BlockId, QualifiedName } from "../../../ir/types.js";
 import type { Json } from "../../../json.js";
 import { valueToRaw } from "../../../value-codec.js";
@@ -212,9 +220,27 @@ async function resolveTarget(ctx: StepCtx, t: CallAgentThread): Promise<Resolved
     };
   }
 
-  // Otherwise a qualified name. (The in-shard `closure:N` form is engine-internal
-  // and never a user-facing name — a closure is dispatched by `closureref:<id>`.)
-  const qname: QualifiedName = t.nameStr;
+  // Otherwise a qualified name. call_agent only ever takes an id that arrived
+  // as a string / RawValue — i.e. the EXTERNAL form, which always carries its
+  // snapshot (`qualified.name@snapshot`). A bare qname is the INTERNAL id and is
+  // rejected: a statically-known agent is dispatched by calling its (first-class)
+  // value directly — call_agent is only for an id you got as a string, which is
+  // always `get_metadata.id` (external). (The in-shard `closure:N` form is
+  // engine-internal and never a user-facing name.)
+  const decoded = decodeCoreAgentDefId(t.nameStr as AgentDefId);
+  if (decoded.kind !== "qname") {
+    return { kind: "error", message: `call_agent: '${t.nameStr}' is not an agent name` };
+  }
+  if (decoded.snapshot === undefined) {
+    return {
+      kind: "error",
+      message: `call_agent: '${t.nameStr}' is a bare name — call_agent needs the external id (\`qualified.name@snapshot\` / \`closureref:<id>\`, e.g. from get_metadata)`,
+    };
+  }
+  // The bare id (sans `@snapshot`) is the IR-entries lookup key; the snapshot
+  // rides through to the delegate target.
+  const qname: QualifiedName = decoded.value;
+  const snapshot = decoded.snapshot;
   const blockId = ctx.state.irModule.entries[qname];
   if (blockId === undefined) {
     return {
@@ -236,7 +262,7 @@ async function resolveTarget(ctx: StepCtx, t: CallAgentThread): Promise<Resolved
   return {
     kind: "ok",
     peer: ctx.state.selfEndpoint,
-    agentDefId: encodeCoreAgentDefId({ kind: "qname", value: qname }),
+    agentDefId: encodeCoreAgentDefId({ kind: "qname", value: qname, snapshot }),
     inputSchema: agentBlock.inputSchema,
   };
 }

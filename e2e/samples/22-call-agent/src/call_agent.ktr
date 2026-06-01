@@ -3,16 +3,20 @@ agent greeter(name: string) -> string {
   f"hello, ${name}"
 }
 
-@"Invoke the greeter dynamically and return whatever it produced. The handle scope catches a call_agent_error and substitutes a diagnostic string."
+@"Invoke the greeter dynamically and return whatever it produced. call_agent takes the EXTERNAL dispatch id (`qualified.name@snapshot`), which we read off get_metadata — a bare name is rejected. The handle scope catches a call_agent_error and substitutes a diagnostic string."
 agent try_call(args: record[unknown]) -> string {
   handle {
     request call_agent_error(message: string) {
       break f"err: ${message}"
     }
   }
-  match (call_agent(name = "call_agent.greeter", args = args)) {
-    case string(s) => { s }
-    case _ => { "non-string return" }
+  match (get_metadata(value = greeter)) {
+    case agent_metadata(name = _, id = id, description = _, input = _, output = _) => {
+      match (call_agent(name = id, args = args)) {
+        case string(s) => { s }
+        case _ => { "non-string return" }
+      }
+    }
   }
 }
 

@@ -41,7 +41,6 @@
 
 import {
   encodeCoreAgentDefId,
-  stampAgentDefIdSnapshot,
   stripAgentDefIdSnapshot,
   THROW_REQUEST_QNAME,
 } from "../agent-def-id.js";
@@ -592,14 +591,14 @@ export class FfiModule implements Module {
         return;
       }
       case "ipcChildDelegate": {
-        // Ext is starting a CORE-side child. The sidecar names it by bare
-        // qname (the ext called `katari.delegate("some.agent", ...)` with no
-        // notion of snapshots); stamp this sidecar's snapshot so CORE creates
-        // the child shard on the matching IR version. Persist the child row
-        // (parentExtDelegationId pointing at the ext call) and push a delegate
-        // event on the bus toward CORE.
+        // Ext is starting a CORE-side child. The callable it passed is an agent
+        // value it received from Katari — already in external form
+        // (`qname@snapshot` / `closureref:<id>`), so we hand it through
+        // verbatim (no re-stamp). A bare qname (e.g. a hand-written
+        // `katari.delegate("some.agent", ...)`) carries no snapshot and CORE
+        // rejects it as an un-stamped target — the expected "not found" outcome.
         const convertedArgs = argsFromRaw(msg.args);
-        const agentDefId = stampAgentDefIdSnapshot(msg.agentDefId, this.snapshotId);
+        const agentDefId = msg.agentDefId;
         const childNow = new Date().toISOString();
         await this.store.insertDelegation({
           delegationId: msg.delegationId,
