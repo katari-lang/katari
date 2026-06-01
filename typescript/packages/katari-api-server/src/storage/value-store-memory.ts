@@ -204,6 +204,7 @@ export class InMemoryValueStore implements ValueStore {
       hash: row.hash,
       size: row.size,
       contentType: row.contentType,
+      displayName: row.displayName,
       errorMessage: row.errorMessage,
     };
   }

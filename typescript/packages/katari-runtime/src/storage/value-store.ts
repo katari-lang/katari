@@ -58,6 +58,8 @@ export type RefState = {
   hash: string | null;
   size: number | null;
   contentType?: string;
+  /** Human file name for a `file` ref (null for unnamed intermediates). */
+  displayName?: string;
   errorMessage?: string;
 };
 

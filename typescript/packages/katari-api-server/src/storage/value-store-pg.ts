@@ -216,10 +216,11 @@ export class PgValueStore implements ValueStore {
         hash: string | null;
         size: string | null;
         content_type: string | null;
+        display_name: string | null;
         error_message: string | null;
       }[]
     >`
-      SELECT state, semantic_kind, hash, size, content_type, error_message
+      SELECT state, semantic_kind, hash, size, content_type, display_name, error_message
       FROM refs
       WHERE project_id = ${projectId} AND module = ${module} AND id = ${id}
     `;
@@ -233,6 +234,7 @@ export class PgValueStore implements ValueStore {
       hash: row.hash,
       size: row.size === null ? null : Number(row.size),
       contentType: row.content_type ?? undefined,
+      displayName: row.display_name ?? undefined,
       errorMessage: row.error_message ?? undefined,
     };
   }
