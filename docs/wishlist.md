@@ -69,3 +69,9 @@ release · **[later]** post-v0.1.0 · **[deferred]** acknowledged, no owner yet.
       not emit a `tsconfig.json` (or otherwise manage npm resources), so an ext
       author has no type-check / completion loop out of the box. The npm-side UX
       is intentionally out of scope for now; revisit later.
+- [ ] **[deferred] vitest 4 migration.** Pinned at vitest 3; the Dependabot
+      "critical" (UI-server arbitrary file read) only affects `vitest --ui`,
+      which we never run (`vitest run` only), so it's not exploitable here. The
+      4.x fix is a config migration: `workspace` / `defineWorkspace` → `projects`,
+      and `environmentMatchGlobs` / `poolMatchGlobs` were removed (per-project
+      `environment` instead). Do it when touching the test setup anyway.
