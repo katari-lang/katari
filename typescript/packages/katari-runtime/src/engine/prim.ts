@@ -279,7 +279,11 @@ export async function executePrim(
         );
       }
       const bytes = await materialize(v.rep);
-      const rep = await put(bytes, "file");
+      // The bytes are a UTF-8 string, so the file is text — tag it so the data
+      // plane serves a meaningful content type (the only other file producers,
+      // upload + FFI, declare their own; CORE-produced files would otherwise be
+      // contentless).
+      const rep = await put(bytes, "file", undefined, "text/plain; charset=utf-8");
       return { kind: "file", rep };
     }
     case "tuple_get": {

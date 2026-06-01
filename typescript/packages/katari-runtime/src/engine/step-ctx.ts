@@ -48,6 +48,7 @@ export type RefPutter = (
   bytes: Uint8Array,
   semanticKind: RefSemanticKind,
   refsTo?: ReadonlyArray<RefHandle>,
+  contentType?: string,
 ) => Promise<RefRep>;
 
 /**
@@ -91,6 +92,7 @@ export interface StepCtx {
     bytes: Uint8Array,
     semanticKind: RefSemanticKind,
     refsTo?: ReadonlyArray<RefHandle>,
+    contentType?: string,
   ): Promise<RefRep>;
 }
 
@@ -133,8 +135,8 @@ export function makeStepCtx(
       if (rep.kind === "inline") return Promise.resolve(new TextEncoder().encode(rep.text));
       return fetchRef(rep);
     },
-    putBlob(bytes, semanticKind, refsTo) {
-      return putRef(bytes, semanticKind, refsTo);
+    putBlob(bytes, semanticKind, refsTo, contentType) {
+      return putRef(bytes, semanticKind, refsTo, contentType);
     },
   };
 }

@@ -359,7 +359,7 @@ export class CoreModule implements Module {
    *  (`ownerEntityId = shardId = E`). */
   private makePutRef(valueStore: ValueStore | null, ownerEntityId: string): RefPutter {
     const projectId = this.projectId;
-    return async (bytes, semanticKind, refsTo): Promise<RefRep> => {
+    return async (bytes, semanticKind, refsTo, contentType): Promise<RefRep> => {
       if (valueStore === null) {
         throw new Error("core: a blob needs persisting but no value store is wired");
       }
@@ -370,6 +370,7 @@ export class CoreModule implements Module {
         semanticKind,
         ownerEntityId,
         refsTo,
+        contentType,
       });
       return { kind: "ref", module: "core", id: result.id, hash: result.hash, size: result.size };
     };
