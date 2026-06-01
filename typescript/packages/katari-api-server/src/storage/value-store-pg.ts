@@ -45,6 +45,24 @@ export class PgValueStore implements ValueStore {
     private readonly blobStore: BlobStore,
   ) {}
 
+  /**
+   * Run `fn` atomically. postgres.js exposes `.begin` on the ROOT sql but NOT on
+   * a transaction-scoped one (the callback arg of an outer `begin`) — calling
+   * `this.sql.begin` there throws "is not a function". So: open a fresh tx when
+   * we hold the root sql, otherwise run directly on `this.sql` (already inside
+   * the caller's tx — e.g. CoreModule.feed or a route's `withTransaction`, which
+   * provides the atomicity).
+   */
+  private inTx<T>(fn: (sql: Sql) => Promise<T>): Promise<T> {
+    const begin = (
+      this.sql as unknown as { begin?: (cb: (tx: unknown) => Promise<T>) => Promise<T> }
+    ).begin;
+    if (typeof begin === "function") {
+      return begin.call(this.sql, (tx: unknown) => fn(tx as Sql));
+    }
+    return fn(this.sql);
+  }
+
   // ── blob refcount lifecycle ───────────────────────────────────────────────
 
   /**
@@ -84,8 +102,7 @@ export class PgValueStore implements ValueStore {
     const id = uuidv7();
     const hash = hashBytes(input.bytes);
     const size = input.bytes.length;
-    await this.sql.begin(async (tx) => {
-      const sql = tx as unknown as Sql;
+    await this.inTx(async (sql) => {
       await this.addBlobRef(sql, input.projectId, hash, input.bytes);
       await this.insertRefRow(sql, {
         projectId: input.projectId,
@@ -125,8 +142,7 @@ export class PgValueStore implements ValueStore {
         settled = true;
         const bytes = concatChunks(chunks, total);
         const hash = hashBytes(bytes);
-        await self.sql.begin(async (tx) => {
-          const sql = tx as unknown as Sql;
+        await self.inTx(async (sql) => {
           await self.addBlobRef(sql, input.projectId, hash, bytes);
           await self.insertRefRow(sql, {
             projectId: input.projectId,
@@ -262,8 +278,7 @@ export class PgValueStore implements ValueStore {
     const id = uuidv7();
     const hash = hashBytes(input.bytes);
     const size = input.bytes.length;
-    await this.sql.begin(async (tx) => {
-      const sql = tx as unknown as Sql;
+    await this.inTx(async (sql) => {
       await this.addBlobRef(sql, input.projectId, hash, input.bytes);
       await this.insertRefRow(sql, {
         projectId: input.projectId,
@@ -310,8 +325,7 @@ export class PgValueStore implements ValueStore {
   }
 
   async deleteFile(projectId: string, id: string): Promise<boolean> {
-    const swept = await this.sql.begin(async (tx) => {
-      const sql = tx as unknown as Sql;
+    const swept = await this.inTx(async (sql) => {
       const deleted = await sql<{ id: string }[]>`
         DELETE FROM refs WHERE project_id = ${projectId} AND module = 'api' AND id = ${id}
         RETURNING id
@@ -337,8 +351,7 @@ export class PgValueStore implements ValueStore {
     ownerEntityId: string;
     displayName?: string;
   }): Promise<FileRecord | null> {
-    return this.sql.begin(async (tx) => {
-      const sql = tx as unknown as Sql;
+    return this.inTx(async (sql) => {
       const refRows = await sql<
         { hash: string | null; size: string | null; content_type: string | null }[]
       >`
@@ -413,8 +426,7 @@ export class PgValueStore implements ValueStore {
     seed: ReadonlyArray<RefHandle>,
   ): Promise<void> {
     if (seed.length === 0) return;
-    await this.sql.begin(async (tx) => {
-      const sql = tx as unknown as Sql;
+    await this.inTx(async (sql) => {
       const { keep } = await this.expandOwned(sql, projectId, fromOwner, seed);
       for (const key of keep) {
         const [module, id] = key.split("|");
@@ -438,8 +450,7 @@ export class PgValueStore implements ValueStore {
   }
 
   async sweepDetachedRefs(projectId: string): Promise<number> {
-    const swept = await this.sql.begin(async (tx) => {
-      const sql = tx as unknown as Sql;
+    const swept = await this.inTx(async (sql) => {
       // Drop in-transit (orphaned) refs; the trigger decrements their blobs.
       await sql`
         DELETE FROM refs WHERE project_id = ${projectId} AND owner_entity_id IS NULL
