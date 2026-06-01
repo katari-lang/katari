@@ -162,6 +162,9 @@ export class ApiServerActorHost {
             KATARI_PROTOCOL_TOKEN: protocol.token,
             KATARI_PROJECT_ID: projectId,
             KATARI_SIDECAR_OWNER: "ffi",
+            // The sidecar runs exactly one snapshot's ext code; expose it so
+            // katari.makeAgent can stamp the external agent id (qname@snapshot).
+            KATARI_SNAPSHOT_ID: snapshot,
           },
         });
         return sidecarManager.hasSidecar(snapshot as SnapshotId);

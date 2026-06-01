@@ -128,6 +128,7 @@ export class InMemoryValueStore implements ValueStore {
       hash,
       size,
       contentType: input.contentType,
+      displayName: input.displayName,
       createdAt: new Date().toISOString(),
     });
     return { id, hash, size };

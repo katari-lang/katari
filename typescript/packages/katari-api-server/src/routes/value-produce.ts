@@ -60,6 +60,12 @@ export function buildValueProduceRoutes(storage: Storage): Hono {
           undefined)
         : undefined;
 
+    // Optional human file name for a produced `file` (e.g. katari.makeFile's
+    // `name`); meaningful only for `as: file`, harmless otherwise.
+    const displayNameHeader = c.req.header("X-Katari-Display-Name");
+    const displayName =
+      displayNameHeader !== undefined && displayNameHeader !== "" ? displayNameHeader : undefined;
+
     const bytes = new Uint8Array(await c.req.arrayBuffer());
     const result = await storage.values.putComplete({
       projectId,
@@ -67,6 +73,7 @@ export function buildValueProduceRoutes(storage: Storage): Hono {
       bytes,
       semanticKind,
       contentType,
+      displayName,
       ownerEntityId,
     });
     return c.json(

@@ -114,6 +114,7 @@ export class PgValueStore implements ValueStore {
         hash,
         size,
         contentType: input.contentType,
+        displayName: input.displayName,
       });
     });
     return { id, hash, size };

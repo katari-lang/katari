@@ -94,6 +94,8 @@ export type PutInput = {
   bytes: Uint8Array;
   semanticKind: ValueSemanticKind;
   contentType?: string;
+  /** Human file name for a produced `file` (optional; null for unnamed). */
+  displayName?: string;
   /** The entity that owns this ref (the producing CORE/FFI entity `E`).
    *  `undefined` = unowned (test/legacy; not entity-GC-managed). */
   ownerEntityId?: string;
