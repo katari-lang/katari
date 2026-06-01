@@ -1,0 +1,16 @@
+@"Dispatches a LOCAL closure dynamically via its get_metadata id (a closureref:<id> handle, no UUID shown to the model directly): the AI-tool-calling round-trip name -> metadata -> id -> call_agent, for a closure."
+agent main() -> string {
+  @"A local closure, summoned by its content-ref id rather than a qname."
+  agent local_greet(name: string) -> string { f"hi ${name}" }
+
+  let m = get_metadata(value = local_greet)
+  match (m) {
+    case agent_metadata(name = _, id = cid, description = _, input = _, output = _) => {
+      let args = record.set(record = record.empty(), key = "name", value = "bob")
+      match (call_agent(name = cid, args = args)) {
+        case string(s) => { s }
+        case _ => { "non-string return" }
+      }
+    }
+  }
+}

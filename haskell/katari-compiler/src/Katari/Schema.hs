@@ -442,8 +442,8 @@ toCore dataDefs visited = \case
     | otherwise -> SchemaCoreUnknown
   -- Concrete function types and the 'function' top type are both
   -- carried on the wire as a callable reference @{"$agent":
-  -- "module.name" | "closure:N"}@. The reference is what 'get_metadata'
-  -- returns in its 'id' field.
+  -- "module.name" | "closureref:<ref id>"}@. The reference is what
+  -- 'get_metadata' returns in its 'id' field.
   SemanticTypeFunction {} -> callableRefCore
   SemanticTypeFunctionAny -> callableRefCore
   -- Records map to JSON Schema's @additionalProperties@ pattern:
@@ -468,8 +468,9 @@ ctorDiscriminatorKey = "$constructor"
 
 -- | Reserved JSON-Schema property name carrying a callable reference.
 -- The value is the same string the @get_metadata@ prim returns in its
--- @id@ field: @"module.name"@ for top-level agents or @"closure:N"@
--- for local closures.
+-- @id@ field: @"module.name"@ for top-level agents or
+-- @"closureref:<ref id>"@ for closures. (The schema declares it as an
+-- open @string@ — there is no closure enumeration.)
 callableDiscriminatorKey :: Text
 callableDiscriminatorKey = "$agent"
 

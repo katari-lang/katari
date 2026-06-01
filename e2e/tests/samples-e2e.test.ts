@@ -340,4 +340,14 @@ describe("samples/ end-to-end (apply → run → verify)", () => {
       expect(result).toMatch(/^ok=hello, alice; bad=err: /);
     },
   );
+
+  itE2E(
+    "23-call-closure: dispatch a local closure via its get_metadata id (closureref round-trip)",
+    async () => {
+      // name → metadata → `closureref:<id>` → call_agent resolves the closure
+      // blob, validates args, and runs it: the AI-tool-calling round-trip.
+      const result = await applyAndRun("call_closure", "23-call-closure");
+      expect(result).toBe("hi bob");
+    },
+  );
 });

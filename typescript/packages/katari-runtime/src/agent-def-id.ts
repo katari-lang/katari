@@ -1,12 +1,16 @@
 // AgentDefId: opaque, module-local agent identifier carried on
 // `delegate` / `escalate` events.
 //
-// **Wire format**: a flat string. Either a 'QualifiedName' (e.g.
-// `"main.foo"` or `"primitive.add_two_numbers"`) for top-level agents, or a
-// `"closure:N"` prefix-form for local closures (CORE only). This shape
-// is identical to what `get_metadata` returns in its `id` field and to
-// what JSON Schema declares for `$agent`, so the same string flows
-// end-to-end through CORE / FFI / API / sidecar / AI tool calls.
+// **Wire format**: a flat string, one of three CORE flavours:
+//   - a 'QualifiedName' (`"main.foo"`) — a top-level callable.
+//   - `"closureref:<ref id>"` — a closure crossing a shard boundary, dispatched
+//     by its content-ref id (CORE fetches the blob + materializes it).
+//   - `"closure:N"` — the engine-allocated in-shard dispatch id. CORE-INTERNAL
+//     only: CORE rewrites an inbound `closureref:` to this for the new shard's
+//     own dispatch; it never crosses the bus, the schema, or `get_metadata`.
+// The wire callable forms a value / `get_metadata.id` / the JSON-Schema `$agent`
+// string carry are the first two (`qname` | `closureref:<id>`) — the same string
+// flows end-to-end through CORE / FFI / API / sidecar / AI tool calls.
 //
 // **Branding**: each module owns its own opaque type wrapper around the
 // raw string. `encodeCoreAgentDefId` / `encodeFfiAgentDefId` are the

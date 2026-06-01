@@ -2,9 +2,11 @@
 // primitive.
 //
 // On create:
-//   1. Parse @nameStr@ into a callable identity:
-//      - "closure:<id>" → ClosureId, looked up in state.closures
-//      - "module.agent" → QualifiedName, looked up in irModule.entries
+//   1. Resolve @nameStr@ into a callable identity (the same dispatch handle a
+//      value carries + `get_metadata` returns):
+//      - "module.agent"    → QualifiedName, looked up in irModule.entries.
+//      - "closureref:<id>" → a content-ref closure: fetch its blob (the input
+//        schema lives there) + dispatch by the ref; CORE materializes it.
 //   2. Read the target's `AgentBlock` to get `inputSchema` (and the
 //      runtime endpoint — internal CORE loopback vs. external FFI).
 //   3. Validate @argsRecord@ against the inputSchema; collect all
@@ -25,25 +27,26 @@ import { type AgentDefId, encodeCoreAgentDefId } from "../../../agent-def-id.js"
 import type { AgentBlock, BlockId, QualifiedName } from "../../../ir/types.js";
 import type { Json } from "../../../json.js";
 import { valueToRaw } from "../../../value-codec.js";
+import { decodeClosureBlob } from "../../closure-codec.js";
 import type { Endpoint } from "../../endpoint.js";
-import { type AskId, type ClosureId, createDelegationId } from "../../id.js";
+import { type AskId, createDelegationId } from "../../id.js";
 import { relaxedSchemaFromString, validateAgainstSchema } from "../../schema-validate.js";
 import type { StepCtx } from "../../step-ctx.js";
-import { mkString, type Value } from "../../value.js";
+import { mkString, type RefRep, type Value } from "../../value.js";
 import { allocAskId, deleteThread } from "../common.js";
 import type { CallAgentThread, Thread } from "../types.js";
 import { defaultAskAckProxy, defaultCancelAckUnexpected } from "./defaults.js";
 import type { ThreadOps } from "./types.js";
 
 export const callAgentOps: ThreadOps<CallAgentThread> = {
-  create(ctx, t) {
-    const resolved = resolveTarget(ctx, t);
+  async create(ctx, t) {
+    const resolved = await resolveTarget(ctx, t);
     if (resolved.kind === "error") {
       raiseCallAgentError(ctx, t, resolved.message);
       return;
     }
 
-    const schemaErrors = validateArgs(t.argsRecord, resolved.agentBlock);
+    const schemaErrors = validateArgs(t.argsRecord, resolved.inputSchema);
     if (schemaErrors.length > 0) {
       raiseCallAgentError(
         ctx,
@@ -168,41 +171,38 @@ type Resolved =
       kind: "ok";
       peer: Endpoint;
       agentDefId: AgentDefId;
-      agentBlock: AgentBlock;
+      /** The target's input schema (compiled JSON Schema string) for arg
+       *  validation — from the IR for a qname, from the blob for a closure. */
+      inputSchema: string;
     }
   | { kind: "error"; message: string };
 
-function resolveTarget(ctx: StepCtx, t: CallAgentThread): Resolved {
-  const closurePrefix = "closure:";
-  if (t.nameStr.startsWith(closurePrefix)) {
-    const idStr = t.nameStr.slice(closurePrefix.length);
-    const id = Number(idStr);
-    if (!Number.isInteger(id) || id < 0) {
-      return {
-        kind: "error",
-        message: `call_agent: bad closure id in '${t.nameStr}'`,
-      };
+async function resolveTarget(ctx: StepCtx, t: CallAgentThread): Promise<Resolved> {
+  // A content-ref closure (the dispatch handle a closure value / `get_metadata`
+  // carries). Fetch its blob to read the declared input schema — the body block
+  // lives in the blob, not the IR — then dispatch by the ref id; CORE
+  // materializes it into a fresh shard on the inbound delegate.
+  const closureRefPrefix = "closureref:";
+  if (t.nameStr.startsWith(closureRefPrefix)) {
+    const refId = t.nameStr.slice(closureRefPrefix.length);
+    if (refId === "") {
+      return { kind: "error", message: `call_agent: empty closure ref in '${t.nameStr}'` };
     }
-    const closureId = id as ClosureId;
-    const record = ctx.state.closures[closureId];
-    if (record === undefined) {
+    const ref: RefRep = { kind: "ref", module: "core", id: refId, hash: "", size: 0 };
+    let inputSchema: string;
+    try {
+      inputSchema = decodeClosureBlob(await ctx.materialize(ref)).metadata.inputSchema;
+    } catch (e) {
       return {
         kind: "error",
-        message: `call_agent: closure ${closureId} not in state.closures`,
-      };
-    }
-    const agentBlock = requireAgentBlock(ctx, record.blockId, t.nameStr);
-    if (agentBlock === null) {
-      return {
-        kind: "error",
-        message: `call_agent: target '${t.nameStr}' is not an agent block`,
+        message: `call_agent: closure ref '${refId}' not resolvable: ${e instanceof Error ? e.message : String(e)}`,
       };
     }
     return {
       kind: "ok",
       peer: ctx.state.selfEndpoint,
-      agentDefId: encodeCoreAgentDefId({ kind: "closure", value: closureId }),
-      agentBlock,
+      agentDefId: encodeCoreAgentDefId({ kind: "closureRef", id: refId }),
+      inputSchema,
     };
   }
   if (t.nameStr === "") {
@@ -212,7 +212,8 @@ function resolveTarget(ctx: StepCtx, t: CallAgentThread): Resolved {
     };
   }
 
-  // Otherwise treat as qualified name.
+  // Otherwise a qualified name. (The in-shard `closure:N` form is engine-internal
+  // and never a user-facing name — a closure is dispatched by `closureref:<id>`.)
   const qname: QualifiedName = t.nameStr;
   const blockId = ctx.state.irModule.entries[qname];
   if (blockId === undefined) {
@@ -236,7 +237,7 @@ function resolveTarget(ctx: StepCtx, t: CallAgentThread): Resolved {
     kind: "ok",
     peer: ctx.state.selfEndpoint,
     agentDefId: encodeCoreAgentDefId({ kind: "qname", value: qname }),
-    agentBlock,
+    inputSchema: agentBlock.inputSchema,
   };
 }
 
@@ -255,14 +256,14 @@ function requireAgentBlock(ctx: StepCtx, blockId: BlockId, hint: string): AgentB
   return block.body;
 }
 
-function validateArgs(argsRecord: Record<string, Value>, agentBlock: AgentBlock): string[] {
+function validateArgs(argsRecord: Record<string, Value>, inputSchema: string): string[] {
   let schema: Json;
   try {
     // Relax string nodes to also accept a `$ref as:"string"` envelope: a
     // runtime arg may be a promoted (content-ref) string while the schema says
     // `{type:"string"}`. Callables need no relaxation — agents and closures
     // both serialise as `$agent`, matching the callable schema as-is.
-    schema = relaxedSchemaFromString(agentBlock.inputSchema);
+    schema = relaxedSchemaFromString(inputSchema);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     return [`failed to parse inputSchema as JSON: ${msg}`];
