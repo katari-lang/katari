@@ -132,11 +132,11 @@ function ValueNode({ value, projectId }: { value: unknown; projectId?: string })
             </div>
           </div>
         )}
-        <div className="border-l border-border pl-3">
+        <div className="border-l border-border pl-3 space-y-4">
           {displayEntries
             .filter(([key]) => key !== "$callable")
             .map(([key, val]) => (
-              <div key={key} className="flex flex-col gap-2">
+              <div key={key} className="flex flex-col gap-1">
                 <span className="text-sm font-medium text-foreground">{key}</span>
                 <ValueNode value={val} projectId={projectId} />
               </div>

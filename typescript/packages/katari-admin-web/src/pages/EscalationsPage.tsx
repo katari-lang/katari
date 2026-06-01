@@ -19,14 +19,12 @@ const PAGE_SIZE = 50;
 const stateOptions: { value: EscalationState | "all"; label: string }[] = [
   { value: "open", label: "Open" },
   { value: "answered", label: "Answered" },
-  { value: "cancelled", label: "Cancelled" },
   { value: "all", label: "All" },
 ];
 
-const stateTones: Record<EscalationState, "info" | "success" | "neutral"> = {
+const stateTones: Record<EscalationState, "info" | "success"> = {
   open: "info",
   answered: "success",
-  cancelled: "neutral",
 };
 
 export function EscalationsPage() {
@@ -125,16 +123,18 @@ export function EscalationsPage() {
                   <TBody>
                     {escalations.map((esc) => (
                       <TR
-                        key={esc.id}
+                        key={esc.escalationId}
                         className="cursor-pointer h-16"
-                        onClick={() => navigate(`/project/${projectId}/escalations/${esc.id}`)}
+                        onClick={() =>
+                          navigate(`/project/${projectId}/escalations/${esc.escalationId}`)
+                        }
                       >
                         <TD>
                           <Badge tone={stateTones[esc.state]}>{esc.state}</Badge>
                         </TD>
                         <TD>
                           <Link
-                            to={`/project/${projectId}/escalations/${esc.id}`}
+                            to={`/project/${projectId}/escalations/${esc.escalationId}`}
                             className="block font-medium text-foreground hover:underline"
                             onClick={(e) => e.stopPropagation()}
                           >
@@ -143,11 +143,11 @@ export function EscalationsPage() {
                         </TD>
                         <TD className="text-xs text-muted-foreground">
                           <Link
-                            to={`/project/${projectId}/runs/${esc.rootDelegationId}`}
+                            to={`/project/${projectId}/runs/${esc.runId}`}
                             className="hover:underline hover:text-foreground"
                             onClick={(e) => e.stopPropagation()}
                           >
-                            {runNameById.get(esc.rootDelegationId) ?? "—"}
+                            {runNameById.get(esc.runId) ?? "—"}
                           </Link>
                         </TD>
                         <TD

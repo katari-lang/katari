@@ -49,18 +49,20 @@ export type Snapshot = {
 };
 
 /**
- * Operator-visible run state. A "run" is an ApiModule-launched root
- * delegation; terminal states (`cancelled / succeeded / error`) live in
- * the `runs_audit` table and survive the live `delegations` row being
- * deleted on the terminal ack.
+ * Operator-visible run state (Entity model). A "run" is the API's per-run
+ * record; its state reflects the run's CORE-root child. Terminal is `done`
+ * (success) or `error` (a user cancel ends as `error` with cancelReason=user).
  */
-export type RunState = "running" | "cancelling" | "cancelled" | "succeeded" | "error";
+export type RunState = "running" | "cancelling" | "done" | "error";
 
 export type CancelReason = "user" | "error";
 
 export type RunRowWire = {
   id: RunId;
+  projectId: ProjectId;
   snapshotId: SnapshotId;
+  /** The `D` the run-root issued to the CORE root (internal handle). */
+  coreDelegationId: DelegationId;
   /** Display label. The server always fills a default when the operator
    *  omits one, so this is never empty. */
   name: string;
@@ -75,25 +77,24 @@ export type RunRowWire = {
   completedAt?: string;
 };
 
-export type EscalationState = "open" | "answered" | "cancelled";
+/** An operator-facing escalation is `open` (awaiting an answer) or `answered`.
+ *  (Cancelled ones are dropped — they die with their raiser entity.) */
+export type EscalationState = "open" | "answered";
 
-// Mirrors api-server's `EscalationRowWire`: see
-// typescript/packages/katari-api-server/src/wire/agent-wire.ts.
-// `agentDefId` is the flat string the issuing module knows the agent
-// by (= a qualified name for top-level agents). No `updatedAt` field —
-// the wire only carries the row's createdAt.
+// Mirrors api-server's `RunEscalationWire` (the API's per-run operator view):
+// see typescript/packages/katari-api-server/src/wire/agent-wire.ts. The live
+// `escalations` row is CORE's (raiser-owned); this is the API's record, keyed by
+// the run it belongs to. `agentDefId` is the requested capability's qname.
 export type EscalationWire = {
-  id: EscalationId;
-  delegationId: DelegationId;
-  rootDelegationId: DelegationId;
-  snapshotId: SnapshotId;
-  callerEndpoint: string;
-  receiverEndpoint: string;
+  runId: RunId;
+  escalationId: EscalationId;
   agentDefId: string;
   args: Record<string, RawValue>;
   state: EscalationState;
+  /** The answer, present once `state === "answered"`. */
   value?: RawValue;
   createdAt: string;
+  answeredAt?: string;
 };
 
 export type EnvEntry = {
@@ -135,19 +136,23 @@ export type PaginatedResponse<K extends string, T> = {
   [key in K]: T[];
 } & { nextCursor: string | null };
 
-// ─── Delegation tree (live view) ──────────────────────────────────────────
+// ─── Run tree (live entity view) ──────────────────────────────────────────
 
-export type DelegationTreeNode = {
-  delegationId: DelegationId;
-  parentDelegationId: DelegationId | null;
-  rootDelegationId: DelegationId;
-  callerEndpoint: string;
-  ownerEndpoint: string;
-  agentDefId: string;
+export type EntityModule = "core" | "ffi" | "api" | "env";
+
+// Mirrors api-server's `RunTreeNode` (entity-tree-service): the execution
+// entity forest under a run. The root node carries the Run's terminal state.
+export type RunTreeNode = {
+  entityId: string;
+  /** The summoning delegation `D` (null only for the project/run root). */
+  delegationId: string | null;
+  parentEntityId: string | null;
+  module: EntityModule;
+  agentDefId: string | null;
   qualifiedName: string | null;
-  state: "running" | "cancelling" | "cancelled" | "error" | "succeeded";
-  /** Present on the root node (= the run itself); always non-empty.
-   *  Absent on non-root delegations. */
+  /** The entity's state for inner nodes; the Run's state for the root. */
+  state: RunState;
+  /** Present on the root node (= the run itself). */
   name?: string;
   cancelReason?: CancelReason | null;
   args: Record<string, RawValue>;
@@ -155,10 +160,10 @@ export type DelegationTreeNode = {
   errorMessage?: string;
   createdAt: string;
   updatedAt: string;
-  children: DelegationTreeNode[];
+  children: RunTreeNode[];
 };
 
-export type DelegationTree = {
-  root: DelegationTreeNode;
+export type RunTree = {
+  root: RunTreeNode;
   resolvedAt: string;
 };

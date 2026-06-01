@@ -5,8 +5,8 @@ import { useState } from "react";
 import toast from "react-hot-toast";
 import { Link, useParams } from "react-router-dom";
 import type { EscalationState, ProjectId, RunId } from "@/api/types";
-import { DelegationTreeGraph } from "@/components/domain/DelegationTreeGraph";
 import { isTerminalState, RunStatusBadge } from "@/components/domain/RunStatusBadge";
+import { RunTreeGraph } from "@/components/domain/RunTreeGraph";
 import { ValueViewer } from "@/components/domain/ValueViewer";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
@@ -23,10 +23,9 @@ import { formatDateTime, relativeTime } from "@/lib/format";
 
 const POLL_MS = 3_000;
 
-const escalationTones: Record<EscalationState, "info" | "success" | "neutral"> = {
+const escalationTones: Record<EscalationState, "info" | "success"> = {
   open: "info",
   answered: "success",
-  cancelled: "neutral",
 };
 
 export function RunDetailPage() {
@@ -83,7 +82,7 @@ export function RunDetailPage() {
     },
   });
 
-  // Escalations for this run, filtered server-side by rootDelegationId.
+  // Escalations for this run, filtered server-side by runId.
   const escalationsQ = useQuery({
     queryKey: ["escalations", projectId, runId, "run-detail"],
     queryFn: () =>
@@ -111,7 +110,9 @@ export function RunDetailPage() {
             </Link>
             <span className="text-subtle-foreground text-sm">/</span>
             <span className="text-base text-foreground">{run?.name ?? runId}</span>
-            {run !== undefined && <RunStatusBadge state={run.state} />}
+            {run !== undefined && (
+              <RunStatusBadge state={run.state} cancelReason={run.cancelReason} />
+            )}
           </span>
         }
         actions={
@@ -228,9 +229,9 @@ export function RunDetailPage() {
                   ) : (
                     <ul className="space-y-1">
                       {runEscalations.map((esc) => (
-                        <li key={esc.id} className="px-2 py-1.5 hover:bg-muted">
+                        <li key={esc.escalationId} className="px-2 py-1.5 hover:bg-muted">
                           <Link
-                            to={`/project/${projectId}/escalations/${esc.id}`}
+                            to={`/project/${projectId}/escalations/${esc.escalationId}`}
                             className="flex items-center gap-2"
                           >
                             <Badge tone={escalationTones[esc.state]}>{esc.state}</Badge>
@@ -257,7 +258,7 @@ export function RunDetailPage() {
                   <div>
                     <h3 className="mb-2 text-sm font-medium text-foreground">Delegation tree</h3>
                     {treeQ.data !== undefined ? (
-                      <DelegationTreeGraph root={treeQ.data.tree.root} />
+                      <RunTreeGraph root={treeQ.data.tree.root} />
                     ) : treeQ.isLoading ? (
                       <p className="text-sm text-subtle-foreground">Loading…</p>
                     ) : (

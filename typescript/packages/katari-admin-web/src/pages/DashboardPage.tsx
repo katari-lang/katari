@@ -106,7 +106,7 @@ export function DashboardPage() {
                           to={`/project/${projectId}/runs/${r.id}`}
                           className="flex items-center gap-2  px-2 py-1.5 text-sm transition-colors hover:bg-muted"
                         >
-                          <RunStatusBadge state={r.state} />
+                          <RunStatusBadge state={r.state} cancelReason={r.cancelReason} />
                           <span className="flex-1 truncate font-mono text-xs text-foreground">
                             {r.name}
                           </span>
@@ -138,9 +138,9 @@ export function DashboardPage() {
                 ) : (
                   <ul className="space-y-1.5">
                     {openEscalations.map((e) => (
-                      <li key={e.id} className=" px-2 py-1.5 text-sm hover:bg-muted">
+                      <li key={e.escalationId} className=" px-2 py-1.5 text-sm hover:bg-muted">
                         <Link
-                          to={`/project/${projectId}/escalations/${e.id}`}
+                          to={`/project/${projectId}/escalations/${e.escalationId}`}
                           className="flex items-center gap-2"
                         >
                           <Badge tone="info">open</Badge>
@@ -222,7 +222,7 @@ export function DashboardPage() {
                           to={`/project/${projectId}/runs/${r.id}`}
                           className="flex items-center gap-3 px-2 py-2 text-sm transition-colors hover:bg-muted"
                         >
-                          <RunStatusBadge state={r.state} />
+                          <RunStatusBadge state={r.state} cancelReason={r.cancelReason} />
                           <span className="flex-1 truncate font-mono text-foreground">
                             {r.name}
                           </span>

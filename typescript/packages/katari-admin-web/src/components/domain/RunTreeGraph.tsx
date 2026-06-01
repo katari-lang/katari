@@ -11,20 +11,20 @@ import {
 import dagre from "dagre";
 import { useCallback, useMemo } from "react";
 import "@xyflow/react/dist/style.css";
-import type { DelegationTreeNode } from "@/api/types";
+import type { RunTreeNode } from "@/api/types";
 import { cn } from "@/lib/cn";
 import { RunStatusBadge } from "./RunStatusBadge";
 
 const NODE_WIDTH = 280;
 const NODE_HEIGHT = 80;
 
-type DelegationNodeData = {
-  treeNode: DelegationTreeNode;
+type RunTreeNodeData = {
+  treeNode: RunTreeNode;
 };
 
-function DelegationNode({ data }: NodeProps<Node<DelegationNodeData>>) {
+function RunTreeNodeCard({ data }: NodeProps<Node<RunTreeNodeData>>) {
   const node = data.treeNode;
-  const ownerLabel = shortEndpoint(node.ownerEndpoint);
+  const ownerLabel = node.module.toUpperCase();
   return (
     <>
       <Handle type="target" position={Position.Top} className="!bg-border !border-0 !w-2 !h-1" />
@@ -34,16 +34,15 @@ function DelegationNode({ data }: NodeProps<Node<DelegationNodeData>>) {
           node.state === "running" && "border-info/40",
           node.state === "cancelling" && "border-warning/40",
           node.state === "error" && "border-danger/40",
-          node.state === "succeeded" && "border-success/40",
-          node.state === "cancelled" && "border-border",
-          !["running", "cancelling", "error", "succeeded"].includes(node.state) && "border-border",
+          node.state === "done" && "border-success/40",
+          !["running", "cancelling", "error", "done"].includes(node.state) && "border-border",
         )}
       >
         <div className="flex items-center justify-between gap-2">
           <span className="text-xs uppercase tracking-wider text-subtle-foreground">
             {ownerLabel}
           </span>
-          <RunStatusBadge state={node.state} />
+          <RunStatusBadge state={node.state} cancelReason={node.cancelReason} />
         </div>
         <div className="mt-1 truncate font-mono text-xs text-foreground">
           {node.qualifiedName ?? node.agentDefId}
@@ -57,18 +56,18 @@ function DelegationNode({ data }: NodeProps<Node<DelegationNodeData>>) {
   );
 }
 
-const nodeTypes = { delegation: DelegationNode };
+const nodeTypes = { run: RunTreeNodeCard };
 
 function flattenTree(
-  node: DelegationTreeNode,
+  node: RunTreeNode,
   parentId: string | null,
-  nodes: Node<DelegationNodeData>[],
+  nodes: Node<RunTreeNodeData>[],
   edges: Edge[],
 ): void {
-  const id = node.delegationId;
+  const id = node.entityId;
   nodes.push({
     id,
-    type: "delegation",
+    type: "run",
     position: { x: 0, y: 0 },
     data: { treeNode: node },
   });
@@ -106,9 +105,9 @@ function layoutWithDagre(nodes: Node[], edges: Edge[]): void {
   }
 }
 
-export function DelegationTreeGraph({ root }: { root: DelegationTreeNode }) {
+export function RunTreeGraph({ root }: { root: RunTreeNode }) {
   const { nodes, edges } = useMemo(() => {
-    const nodes: Node<DelegationNodeData>[] = [];
+    const nodes: Node<RunTreeNodeData>[] = [];
     const edges: Edge[] = [];
     flattenTree(root, null, nodes, edges);
     layoutWithDagre(nodes, edges);
@@ -147,12 +146,4 @@ export function DelegationTreeGraph({ root }: { root: DelegationTreeNode }) {
       </ReactFlow>
     </div>
   );
-}
-
-function shortEndpoint(endpoint: string): string {
-  const stripped = endpoint.replace(/^(core|api|ext):\/\//, "");
-  if (endpoint.startsWith("core://")) return "CORE";
-  if (endpoint.startsWith("api://")) return "API";
-  if (endpoint.startsWith("ext://")) return stripped.toUpperCase();
-  return endpoint;
 }

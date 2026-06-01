@@ -24,7 +24,6 @@ import { formatDateTime } from "@/lib/format";
 const stateTones: Record<EscalationState, "info" | "success" | "neutral"> = {
   open: "info",
   answered: "success",
-  cancelled: "neutral",
 };
 
 export function EscalationDetailPage() {
@@ -44,35 +43,38 @@ export function EscalationDetailPage() {
 
   const escalation = escalationQ.data?.escalation;
 
+  // The escalation belongs to a run; the run carries the snapshot it was
+  // pinned to. Fetch the run first, then resolve agents/snapshot from it
+  // (the escalation row itself no longer carries a snapshot id).
+  const runQ = useQuery({
+    queryKey: ["run", escalation?.runId],
+    queryFn: () => client.getRun(projectId as ProjectId, escalation!.runId as RunId),
+    enabled: typeof projectId === "string" && escalation !== undefined,
+  });
+  const snapshotId = runQ.data?.run.snapshotId;
+  const runName = runQ.data?.run.name;
+
   const agentsQ = useQuery({
-    queryKey: ["agents", projectId, escalation?.snapshotId ?? "latest"],
+    queryKey: ["agents", projectId, snapshotId ?? "latest"],
     queryFn: () =>
       client.listAgents({
         projectId: projectId as ProjectId,
-        snapshotId: escalation?.snapshotId,
+        snapshotId,
       }),
-    enabled: typeof projectId === "string" && escalation !== undefined,
+    enabled: typeof projectId === "string" && snapshotId !== undefined,
   });
 
   const requestAgent = agentsQ.data?.agents.find((a) => a.qualifiedName === escalation?.agentDefId);
 
-  // Run name lookup so the Context card shows a human-readable name
-  // rather than the root-delegation UUID.
-  const runQ = useQuery({
-    queryKey: ["run", escalation?.rootDelegationId],
-    queryFn: () => client.getRun(projectId as ProjectId, escalation!.rootDelegationId as RunId),
-    enabled: typeof projectId === "string" && escalation !== undefined,
-  });
   const [cancelDialogOpen, setCancelDialogOpen] = useState(false);
 
   const { getMessage } = useSnapshotMessage(projectId);
-  const snapshotMessage = getMessage(escalation?.snapshotId);
-  const runName = runQ.data?.run.name;
+  const snapshotMessage = getMessage(snapshotId);
 
   const answer = useMutation({
     mutationFn: async (value: RawValue) => {
       if (escalation === undefined) throw new Error("No escalation");
-      await client.answerEscalation(projectId as ProjectId, escalation.id, value);
+      await client.answerEscalation(projectId as ProjectId, escalation.escalationId, value);
     },
     onSuccess: () => {
       toast.success("Escalation answered");
@@ -95,7 +97,7 @@ export function EscalationDetailPage() {
   const cancelRun = useMutation({
     mutationFn: async () => {
       if (escalation === undefined) throw new Error("No escalation");
-      await client.cancelRun(projectId as ProjectId, escalation.rootDelegationId);
+      await client.cancelRun(projectId as ProjectId, escalation.runId);
     },
     onSuccess: () => {
       toast.success("Cancel requested");
@@ -105,7 +107,7 @@ export function EscalationDetailPage() {
       });
       void queryClient.invalidateQueries({ queryKey: ["runs", projectId] });
       if (escalation !== undefined) {
-        navigate(`/project/${projectId}/runs/${escalation.rootDelegationId}`);
+        navigate(`/project/${projectId}/runs/${escalation.runId}`);
       }
     },
     onError: (err) => {
@@ -183,7 +185,7 @@ export function EscalationDetailPage() {
                       </p>
                     </div>
                     <div className="flex justify-end gap-2">
-                      <Link to={`/project/${projectId}/runs/${escalation.rootDelegationId}`}>
+                      <Link to={`/project/${projectId}/runs/${escalation.runId}`}>
                         <Button type="button" variant="secondary">
                           Open run
                         </Button>
@@ -225,14 +227,14 @@ export function EscalationDetailPage() {
               </CardHeader>
               <CardContent>
                 <dl className="space-y-3 text-sm">
-                  <MetadataRow label="ID" value={<CopyableId value={escalation.id} />} />
+                  <MetadataRow label="ID" value={<CopyableId value={escalation.escalationId} />} />
                   <MetadataRow
                     label="Request"
                     value={
                       <Link
                         to={`/project/${projectId}/agents/${encodeURIComponent(
                           escalation.agentDefId,
-                        )}?snapshot=${escalation.snapshotId}`}
+                        )}?snapshot=${snapshotId}`}
                         className="font-mono text-xs text-foreground hover:underline"
                       >
                         {escalation.agentDefId}
@@ -243,7 +245,7 @@ export function EscalationDetailPage() {
                     label="Run"
                     value={
                       <Link
-                        to={`/project/${projectId}/runs/${escalation.rootDelegationId}`}
+                        to={`/project/${projectId}/runs/${escalation.runId}`}
                         className="text-foreground hover:underline"
                       >
                         {runName ?? "—"}
@@ -254,7 +256,7 @@ export function EscalationDetailPage() {
                     label="Snapshot"
                     value={
                       <Link
-                        to={`/project/${projectId}/agents?snapshot=${escalation.snapshotId}`}
+                        to={`/project/${projectId}/agents?snapshot=${snapshotId}`}
                         className="text-foreground hover:underline"
                       >
                         {snapshotMessage ?? "—"}
@@ -295,8 +297,8 @@ export function EscalationDetailPage() {
       >
         <p className="text-sm text-foreground">
           Are you sure you want to cancel the run{" "}
-          <code className="font-mono">{runName ?? escalation?.rootDelegationId}</code>? All active
-          delegations under this run will be terminated.
+          <code className="font-mono">{runName ?? escalation?.runId}</code>? All active delegations
+          under this run will be terminated.
         </p>
         <DialogFooter>
           <Button variant="secondary" onClick={() => setCancelDialogOpen(false)}>

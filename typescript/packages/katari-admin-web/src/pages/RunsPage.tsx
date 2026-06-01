@@ -98,7 +98,7 @@ export function RunsPage() {
                         onClick={() => navigate(`/project/${projectId}/runs/${run.id}`)}
                       >
                         <TD>
-                          <RunStatusBadge state={run.state} />
+                          <RunStatusBadge state={run.state} cancelReason={run.cancelReason} />
                         </TD>
                         <TD>
                           <Link

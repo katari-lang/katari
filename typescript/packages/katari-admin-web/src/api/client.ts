@@ -4,7 +4,6 @@
 import type { RawValue, SchemaBundle } from "@katari-lang/runtime";
 import type {
   AgentWire,
-  DelegationTree,
   EnvEntry,
   EscalationId,
   EscalationState,
@@ -15,6 +14,7 @@ import type {
   RunId,
   RunRowWire,
   RunState,
+  RunTree,
   Snapshot,
   SnapshotId,
   SnapshotSummary,
@@ -159,9 +159,9 @@ export function createApiClient(config: ApiClientConfig) {
       ),
     getRun: (projectId: ProjectId, id: RunId) =>
       request<{ run: RunRowWire }>(config, "GET", `/project/${projectId}/run/${id}`),
-    /** Live delegation tree rooted at `runId`. Polled by the run detail page. */
+    /** Live entity tree rooted at `runId`. Polled by the run detail page. */
     getRunTree: (projectId: ProjectId, runId: RunId) =>
-      request<{ tree: DelegationTree }>(config, "GET", `/project/${projectId}/run/${runId}/tree`),
+      request<{ tree: RunTree }>(config, "GET", `/project/${projectId}/run/${runId}/tree`),
     startRun: (input: {
       projectId: ProjectId;
       snapshotId?: SnapshotId;
