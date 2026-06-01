@@ -274,7 +274,7 @@ export function RunDetailPage() {
                     </CardHeader>
                     <CardContent>
                       <div className="mb-1">
-                        <CopyButton text={JSON.stringify(run.args, null, 2)} label="Copied JSON">
+                        <CopyButton text={JSON.stringify(run.result, null, 2)} label="Copied JSON">
                           Copy JSON
                         </CopyButton>
                       </div>
