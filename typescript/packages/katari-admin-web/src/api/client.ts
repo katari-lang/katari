@@ -11,6 +11,7 @@ import type {
   FileWire,
   Project,
   ProjectId,
+  RefStateWire,
   RunId,
   RunRowWire,
   RunState,
@@ -229,10 +230,52 @@ export function createApiClient(config: ApiClientConfig) {
     /** Upload raw bytes. The body is the file itself; the display name +
      *  content type ride the query / Content-Type so the JSON `request`
      *  helper is bypassed for this one binary path. */
-    uploadFile: (projectId: ProjectId, file: File) => uploadBytes(config, projectId, file),
+    uploadFile: (projectId: ProjectId, file: File, displayName?: string) =>
+      uploadBytes(config, projectId, file, displayName),
     deleteFile: (projectId: ProjectId, id: string) =>
       request<{ ok: boolean }>(config, "DELETE", `/project/${projectId}/file/${id}`),
+
+    /** Consume-side metadata of a value ref (display name / size / type). Lets
+     *  the value viewer label a file ref by its name (the wire value carries
+     *  only the ref handle). */
+    valueState: (projectId: ProjectId, module: RefModule, id: string) =>
+      request<RefStateWire>(
+        config,
+        "GET",
+        `/project/${projectId}/value/${module}/ref/${encodeURIComponent(id)}/state`,
+      ),
+
+    /** Authenticated fetch of a value ref's bytes (data plane). Works for any
+     *  module (core / ffi / api); returns a Blob the caller turns into a
+     *  download. Kept out of `request` (binary, not JSON). */
+    valueBlob: (projectId: ProjectId, module: RefModule, id: string) =>
+      fetchValueBlob(config, projectId, module, id),
   };
+}
+
+/** Wire module owning a value ref. */
+export type RefModule = "core" | "ffi" | "api";
+
+async function fetchValueBlob(
+  config: ApiClientConfig,
+  projectId: ProjectId,
+  module: RefModule,
+  id: string,
+): Promise<Blob> {
+  const url = `${config.baseUrl.replace(/\/$/, "")}/project/${projectId}/value/${module}/ref/${encodeURIComponent(id)}`;
+  const res = await fetch(url, { headers: { Authorization: `Bearer ${config.apiKey}` } });
+  if (
+    res.status === 401 &&
+    typeof window !== "undefined" &&
+    window.location.pathname !== "/login"
+  ) {
+    window.localStorage.removeItem("katari-admin.apiKey");
+    window.location.href = "/login";
+  }
+  if (!res.ok) {
+    throw new ApiError(res.status, undefined, `value download failed with ${res.status}`);
+  }
+  return res.blob();
 }
 
 /** Binary upload path (not JSON), kept out of `request` so that stays
@@ -241,8 +284,12 @@ async function uploadBytes(
   config: ApiClientConfig,
   projectId: ProjectId,
   file: File,
+  displayName?: string,
 ): Promise<{ file: FileWire }> {
-  const name = file.name !== "" ? `?name=${encodeURIComponent(file.name)}` : "";
+  // The display name defaults to the picked file's name; an explicit override
+  // (operator typed one) wins.
+  const label = displayName !== undefined && displayName !== "" ? displayName : file.name;
+  const name = label !== "" ? `?name=${encodeURIComponent(label)}` : "";
   const url = `${config.baseUrl.replace(/\/$/, "")}/project/${projectId}/file${name}`;
   const headers: Record<string, string> = {
     Authorization: `Bearer ${config.apiKey}`,

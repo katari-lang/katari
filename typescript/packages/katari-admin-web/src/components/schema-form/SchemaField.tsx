@@ -1,5 +1,6 @@
 import { Label } from "@/components/ui/Label";
 import {
+  isCallableRefSchema,
   isFileRefSchema,
   isNeverSchema,
   type JsonSchema,
@@ -13,6 +14,7 @@ function isEmptySchema(schema: JsonSchema): boolean {
   return Object.keys(schema).every((k) => METADATA_KEYS.has(k));
 }
 
+import { AgentField } from "./fields/AgentField";
 import { AnyField } from "./fields/AnyField";
 import { ArrayField } from "./fields/ArrayField";
 import { BooleanField } from "./fields/BooleanField";
@@ -113,6 +115,13 @@ function renderInner(schema: JsonSchema, value: unknown, onChange: (v: unknown) 
   // before the generic object dispatch since the file ref IS an object.
   if (isFileRefSchema(schema)) {
     return <FileField value={value} onChange={onChange} />;
+  }
+
+  // Callable (`$agent`) reference: an agent picker, not a raw object editor.
+  // Same rationale — the callable ref IS an object, so this precedes the
+  // generic object dispatch.
+  if (isCallableRefSchema(schema)) {
+    return <AgentField value={value} onChange={onChange} />;
   }
 
   const type = singleType(schema);

@@ -1,4 +1,6 @@
 import { useCallback, useMemo, useState } from "react";
+import type { SnapshotId } from "@/api/types";
+import { SchemaFormProvider } from "./context";
 import { SchemaField } from "./SchemaField";
 import {
   isFileRefSchema,
@@ -13,6 +15,9 @@ type SchemaFormProps = {
   onSubmit: (value: unknown) => void;
   submitLabel?: string;
   renderActions?: (ctx: { submit: () => void; value: unknown }) => React.ReactNode;
+  /** The snapshot this form's run targets. Threaded to fields (an AgentField
+   *  stamps it into the external agent id). */
+  snapshotId?: SnapshotId;
 };
 
 // ---------------------------------------------------------------------------
@@ -149,7 +154,7 @@ function validateSchema(schema: JsonSchema, value: unknown, path = ""): string[]
  * schema (escalation answers are typed by the request's return type,
  * which is often a primitive).
  */
-export function SchemaForm({ schema, onSubmit, renderActions }: SchemaFormProps) {
+export function SchemaForm({ schema, onSubmit, renderActions, snapshotId }: SchemaFormProps) {
   const initial = useMemo<unknown>(() => schemaInitialValue(schema), [schema]);
   const [value, setValue] = useState<unknown>(initial);
   const [validationErrors, setValidationErrors] = useState<string[]>([]);
@@ -162,24 +167,26 @@ export function SchemaForm({ schema, onSubmit, renderActions }: SchemaFormProps)
   }, [onSubmit, value, schema]);
 
   return (
-    <form
-      onSubmit={(e) => {
-        e.preventDefault();
-        submit();
-      }}
-      className="space-y-4"
-    >
-      <SchemaField schema={schema} value={value} onChange={setValue} />
-      {validationErrors.length > 0 && (
-        <div className="border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger">
-          <ul className="list-inside list-disc space-y-0.5">
-            {validationErrors.map((error, index) => (
-              <li key={index}>{error}</li>
-            ))}
-          </ul>
-        </div>
-      )}
-      {renderActions?.({ submit, value })}
-    </form>
+    <SchemaFormProvider value={{ snapshotId }}>
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          submit();
+        }}
+        className="space-y-4"
+      >
+        <SchemaField schema={schema} value={value} onChange={setValue} />
+        {validationErrors.length > 0 && (
+          <div className="border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger">
+            <ul className="list-inside list-disc space-y-0.5">
+              {validationErrors.map((error, index) => (
+                <li key={index}>{error}</li>
+              ))}
+            </ul>
+          </div>
+        )}
+        {renderActions?.({ submit, value })}
+      </form>
+    </SchemaFormProvider>
   );
 }

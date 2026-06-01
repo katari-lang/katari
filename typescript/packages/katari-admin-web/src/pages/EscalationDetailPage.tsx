@@ -204,6 +204,7 @@ export function EscalationDetailPage() {
                 ) : (
                   <SchemaForm
                     schema={requestAgent.returns as JsonSchema}
+                    snapshotId={snapshotId}
                     onSubmit={(value) => answer.mutate(value as RawValue)}
                     renderActions={({ submit }) => (
                       <div className="flex justify-end gap-2 pt-2">

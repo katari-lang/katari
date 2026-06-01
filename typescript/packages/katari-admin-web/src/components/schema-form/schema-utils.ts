@@ -56,6 +56,16 @@ export function isFileRefSchema(schema: JsonSchema): boolean {
   return props.$ref !== undefined;
 }
 
+/** True if the schema is Katari's callable (agent / closure) reference shape:
+ * an object with a `$agent` string property (Schema.hs `callableRefCore`). Such
+ * a field is filled by picking an agent, not by typing the id. */
+export function isCallableRefSchema(schema: JsonSchema): boolean {
+  if (singleType(schema) !== "object") return false;
+  const props = schema.properties;
+  if (props === undefined) return false;
+  return props.$agent !== undefined;
+}
+
 /** True if the schema looks like Katari's tagged-data shape: an object
  * with a `$constructor: {const: "<qname>"}` property. */
 export function taggedCtorOf(schema: JsonSchema): string | null {

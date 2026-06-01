@@ -142,6 +142,7 @@ export function AgentDetailPage() {
                   </CopyButton>
                   <SchemaForm
                     schema={agent.parameters as JsonSchema}
+                    snapshotId={resolvedSnapshotId}
                     onSubmit={(args) => invoke.mutate(args as Record<string, RawValue>)}
                     renderActions={({ submit }) => (
                       <div className="flex items-center justify-end pt-2">

@@ -8,12 +8,13 @@
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { File as FileIcon, Upload } from "lucide-react";
-import { useRef } from "react";
+import { useRef, useState } from "react";
 import toast from "react-hot-toast";
 import type { FileWire, ProjectId } from "@/api/types";
 import { Button } from "@/components/ui/Button";
-import { Dialog } from "@/components/ui/Dialog";
+import { Dialog, DialogFooter } from "@/components/ui/Dialog";
 import { EmptyState } from "@/components/ui/EmptyState";
+import { Input } from "@/components/ui/Input";
 import { Spinner } from "@/components/ui/Spinner";
 import { useApiClient } from "@/contexts/ApiKeyContext";
 import { formatBytes, relativeTime } from "@/lib/format";
@@ -39,18 +40,31 @@ export function FileUploadButton({
   const client = useApiClient();
   const queryClient = useQueryClient();
   const inputRef = useRef<HTMLInputElement>(null);
+  // Picked file awaiting a display name + the (editable) name itself. The
+  // operator confirms the name before the upload fires.
+  const [pending, setPending] = useState<File | null>(null);
+  const [displayName, setDisplayName] = useState("");
 
   const upload = useMutation({
-    mutationFn: (file: File) => client.uploadFile(projectId, file),
+    mutationFn: ({ file, name }: { file: File; name: string }) =>
+      client.uploadFile(projectId, file, name),
     onSuccess: ({ file }) => {
       toast.success(`Uploaded ${file.displayName ?? file.id}`);
       void queryClient.invalidateQueries({ queryKey: filesQueryKey(projectId) });
+      setPending(null);
       onUploaded?.(file);
     },
     onError: (err) => {
       toast.error(err instanceof Error ? err.message : "Upload failed");
     },
   });
+
+  const confirm = () => {
+    if (pending === null) return;
+    const name = displayName.trim();
+    if (name === "") return;
+    upload.mutate({ file: pending, name });
+  };
 
   return (
     <>
@@ -62,18 +76,64 @@ export function FileUploadButton({
           const file = e.target.files?.[0];
           // Reset so re-selecting the same file fires `change` again.
           e.target.value = "";
-          if (file !== undefined) upload.mutate(file);
+          if (file !== undefined) {
+            setPending(file);
+            setDisplayName(file.name);
+          }
         }}
       />
-      <Button
-        type="button"
-        variant={variant}
-        loading={upload.isPending}
-        onClick={() => inputRef.current?.click()}
-      >
+      <Button type="button" variant={variant} onClick={() => inputRef.current?.click()}>
         <Upload className="size-4" />
         {label}
       </Button>
+      <Dialog
+        open={pending !== null}
+        onClose={() => {
+          if (!upload.isPending) setPending(null);
+        }}
+        title="Name this file"
+        description="The display name is how the file appears in the browser and arguments."
+        size="sm"
+      >
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            confirm();
+          }}
+          className="space-y-3"
+        >
+          <Input
+            value={displayName}
+            onChange={(e) => setDisplayName(e.target.value)}
+            placeholder="file name"
+          />
+          {pending !== null && (
+            <p className="text-xs text-subtle-foreground">
+              {formatBytes(pending.size)}
+              {pending.type !== "" ? ` · ${pending.type}` : ""}
+            </p>
+          )}
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="ghost"
+              onClick={() => setPending(null)}
+              disabled={upload.isPending}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="submit"
+              variant="primary"
+              loading={upload.isPending}
+              disabled={displayName.trim() === ""}
+            >
+              <Upload className="size-4" />
+              Upload
+            </Button>
+          </DialogFooter>
+        </form>
+      </Dialog>
     </>
   );
 }

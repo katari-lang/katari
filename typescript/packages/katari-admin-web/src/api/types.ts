@@ -115,6 +115,21 @@ export type FileRef = {
   contentType?: string;
 };
 
+/** Consume-side metadata of any value ref (data-plane `.../state`). Mirrors
+ *  api-server's `RefState`. Used to resolve a file ref's display name (the wire
+ *  value itself doesn't carry it). */
+export type RefStateWire = {
+  module: "core" | "ffi" | "api";
+  id: string;
+  state: "complete" | "errored";
+  semanticKind: "string" | "file" | "secret" | "closure";
+  hash: string | null;
+  size: number | null;
+  contentType?: string;
+  displayName?: string;
+  errorMessage?: string;
+};
+
 /** A persistent project file (`api_files`) plus its ready-to-use ref. */
 export type FileWire = {
   id: string;

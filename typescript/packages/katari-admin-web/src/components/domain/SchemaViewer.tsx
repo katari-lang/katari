@@ -113,6 +113,18 @@ function SchemaNode({ schema }: { schema: Schema }) {
       Array.isArray(schema.required) ? (schema.required as string[]) : [],
     );
 
+    // Katari reference shapes: surface the semantic type name rather than the
+    // wire machinery ($agent / $ref / as / hash / size).
+    const refType = referenceTypeOf(properties);
+    if (refType !== null) {
+      return (
+        <div>
+          {description !== null && <Description text={description} />}
+          <TypeBadge>{refType}</TypeBadge>
+        </div>
+      );
+    }
+
     // Detect $constructor with const value
     const constructorSchema = properties?.$constructor;
     const constructorName =
@@ -250,6 +262,18 @@ function SchemaNode({ schema }: { schema: Schema }) {
 
 // --- local helpers (duplicated from schema-utils to avoid coupling
 //     read-only viewer to form-field internals) ---
+
+/** The semantic type name for a Katari reference-object schema, or null.
+ *  `{$agent}` → "agent"; `{$ref, as:{const:"file"}}` → "file"; a bare `{$ref}`
+ *  → "ref". Mirrors Schema.hs `callableRefCore` / `fileRefCore`. */
+function referenceTypeOf(properties: Record<string, Schema> | null): string | null {
+  if (properties === null) return null;
+  if (properties.$agent !== undefined) return "agent";
+  if (properties.$ref !== undefined) {
+    return properties.as?.const === "file" ? "file" : "ref";
+  }
+  return null;
+}
 
 function singleType(schema: Schema): string | undefined {
   if (typeof schema.type === "string") return schema.type;
