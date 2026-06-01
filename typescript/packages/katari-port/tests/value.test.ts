@@ -126,17 +126,13 @@ describe("data plane: produce", () => {
     expect(ref.as).toBe("file");
   });
 
-  it("stamps the owning delegation when one is current", async () => {
+  it("stamps the owning delegation when ownerDelegationId is given", async () => {
     const { fetchImpl, calls } = stubFetch(
       JSON.stringify({ module: "ffi", id: "x", hash: "h", size: 1 }),
       201,
     );
-    const dp = createDataPlane({
-      env: PRODUCE_ENV,
-      fetchImpl,
-      currentDelegationId: () => "deleg-9",
-    });
-    await dp.produce(new Uint8Array([1]), { as: "string" });
+    const dp = createDataPlane({ env: PRODUCE_ENV, fetchImpl });
+    await dp.produce(new Uint8Array([1]), { as: "string", ownerDelegationId: "deleg-9" });
     expect(calls[0]?.headers?.["X-Katari-Owner-Delegation"]).toBe("deleg-9");
   });
 

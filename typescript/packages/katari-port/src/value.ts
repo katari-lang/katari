@@ -71,19 +71,23 @@ export type ProduceAs = "string" | "file";
 export type DataPlaneConfig = {
   env?: Record<string, string | undefined>;
   fetchImpl?: FetchLike;
-  /** The currently-running handler's delegation id, if any. A produced ref is
-   *  stamped with it as its owning entity (GC ownership): the ref stays alive
-   *  while this ext delegation runs, then is re-owned by the parent on ack. */
-  currentDelegationId?: () => string | null;
 };
 
 export interface DataPlane {
   /** Bytes of a `$ref` value (fetched over the data plane). */
   fetchBytes(ref: KatariRef<"string" | "file">): Promise<Uint8Array>;
-  /** Produce a complete blob → its `$ref`. */
+  /** Produce a complete blob → its `$ref`. `ownerDelegationId` is the producing
+   *  handler's delegation id: the ref is stamped with it as its owning entity
+   *  (GC ownership) — alive while that ext delegation runs, re-owned by the
+   *  parent on ack. (Passed explicitly by the caller; no ambient context.) */
   produce(
     bytes: Uint8Array,
-    opts: { as: ProduceAs; contentType?: string; displayName?: string },
+    opts: {
+      as: ProduceAs;
+      contentType?: string;
+      displayName?: string;
+      ownerDelegationId?: string | null;
+    },
   ): Promise<KatariRef<"string" | "file">>;
   /** Promote an ephemeral (core/ffi) ref to a durable api file ref. */
   persist(ref: KatariRef<"string" | "file">, opts?: { displayName?: string }): Promise<KatariFile>;
@@ -171,7 +175,7 @@ export function createDataPlane(config: DataPlaneConfig = {}): DataPlane {
       };
       if (opts.contentType !== undefined) headers["Content-Type"] = opts.contentType;
       if (opts.displayName !== undefined) headers["X-Katari-Display-Name"] = opts.displayName;
-      const ownerDelegationId = config.currentDelegationId?.() ?? null;
+      const ownerDelegationId = opts.ownerDelegationId ?? null;
       if (ownerDelegationId !== null) headers["X-Katari-Owner-Delegation"] = ownerDelegationId;
       const response = await fetchImpl(url, { method: "POST", headers, body: bytes });
       if (!response.ok) {

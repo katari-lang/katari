@@ -10,11 +10,11 @@
 import type { RawValue } from "@katari-lang/port";
 import katari from "@katari-lang/port";
 
-katari.agent("cron_impl", async ({ args, signal }) => {
-  const callback = args["callback"];
-  await katari.delegate(callback as RawValue, {});
+katari.agent("cron_impl", async (ctx) => {
+  const callback = ctx.args["callback"];
+  await ctx.delegate(callback as RawValue, {});
   return new Promise<RawValue>((_resolve, reject) => {
-    signal.addEventListener("abort", () =>
+    ctx.signal.addEventListener("abort", () =>
       reject(new Error("cron_impl: terminated by handler `break`")),
     );
   });

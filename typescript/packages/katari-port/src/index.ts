@@ -1,10 +1,11 @@
 // katari-port — user-facing FFI SDK.
 //
 // User code imports this package's default export and calls
-// `katari.agent(name, handler)` to register ext-agent implementations,
-// and `katari.delegate(callable, args, opts?)` from inside a handler
-// to start a CORE-side child agent (e.g. an AI tool call, a cron
-// notify callback, a discord-event router).
+// `katari.agent(name, handler)` to register ext-agent implementations.
+// Everything a handler does at runtime — `ctx.delegate(...)` to start a
+// CORE-side child agent (an AI tool call, a cron callback, a discord-event
+// router), `ctx.make*` / `ctx.read*` / `ctx.persist` for values — is on the
+// handler's `ctx`, since each is tied to that specific delegation.
 //
 // The IPC machinery (stdio listener, console redirect) does **not** run
 // on import — it only activates once `__startSidecar()` is invoked,
@@ -12,7 +13,6 @@
 // "registration" from "activation" lets tooling (tests, linters, `tsc`)
 // import the package safely without commandeering stdin / stdout.
 
-import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import { exit, stderr, stdin, stdout } from "node:process";
 import { createInterface } from "node:readline";
@@ -21,12 +21,9 @@ import type {
   AgentContext,
   AgentHandler,
   DelegateOptions,
-  KatariAgent,
   KatariFile,
   KatariPort,
   KatariRef,
-  KatariString,
-  MakeFileOptions,
   RawValue,
 } from "./types.js";
 import { asRef, createDataPlane } from "./value.js";
@@ -58,15 +55,11 @@ const pendingChildren = new Map<string, PendingChild>();
 
 let currentModuleQname = "";
 
-// Currently-delegating context (see the fuller note at the use site below).
-// Defined here so the value client can read the running handler's delegation
-// id and stamp produced refs with their owning entity (GC ownership).
-const delegationContext = new AsyncLocalStorage<string>();
-const currentDelegationId = (): string | null => delegationContext.getStore() ?? null;
-
 // Internal data plane (consume / produce / persist over the Katari Protocol).
-// Not exposed — the friendly make*/read* methods below are the surface.
-const dataPlane = createDataPlane({ currentDelegationId });
+// Not exposed — the friendly make*/read* methods on the handler context are
+// the surface. Each produce stamps the owning delegation explicitly (the
+// context closes over its own delegation id); there is no ambient context.
+const dataPlane = createDataPlane();
 
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
@@ -74,10 +67,6 @@ const textDecoder = new TextDecoder();
 // ─── Public API singleton ──────────────────────────────────────────────────
 
 const katari: KatariPort = {
-  get snapshotId(): string {
-    return process.env.KATARI_SNAPSHOT_ID ?? "";
-  },
-
   agent(name, handler) {
     // Module qname is set by the bundler-injected `__withModule(qname,
     // body)` wrapper. If we're called outside that wrapper, the bundle
@@ -103,60 +92,89 @@ const katari: KatariPort = {
     }
     registry.set(key, handler as AgentHandler);
   },
-
-  delegate(callable, args, opts) {
-    // Accept a KatariAgent (`{$agent}`) — typically received in args or built
-    // with makeAgent — or a bare agent-id string.
-    const agentDefId = typeof callable === "string" ? callable : callable.$agent;
-    return delegateChild(agentDefId, args, opts ?? {});
-  },
-
-  // ── construct ──────────────────────────────────────────────────────────
-  async makeString(text: string): Promise<KatariString> {
-    const bytes = textEncoder.encode(text);
-    if (bytes.length <= INLINE_STRING_MAX_BYTES) return text;
-    return dataPlane.produce(bytes, { as: "string" }) as Promise<KatariRef<"string">>;
-  },
-
-  makeFile(bytes: Uint8Array, opts?: MakeFileOptions): Promise<KatariFile> {
-    return dataPlane.produce(bytes, {
-      as: "file",
-      contentType: opts?.contentType,
-      displayName: opts?.name,
-    }) as Promise<KatariFile>;
-  },
-
-  makeAgent(qualifiedName: string): KatariAgent {
-    const snapshot = process.env.KATARI_SNAPSHOT_ID ?? "";
-    if (snapshot === "") {
-      throw new Error(
-        "katari.makeAgent: KATARI_SNAPSHOT_ID is not set — the agent id needs the sidecar's snapshot",
-      );
-    }
-    return { $agent: `${qualifiedName}@${snapshot}` };
-  },
-
-  // ── read ───────────────────────────────────────────────────────────────
-  async readString(value: KatariString | KatariFile): Promise<string> {
-    if (typeof value === "string") return value;
-    const ref = asRef(value);
-    if (ref === null) throw new Error("katari.readString: value is not a string / file (no $ref)");
-    return textDecoder.decode(await dataPlane.fetchBytes(ref));
-  },
-
-  async readBytes(value: KatariString | KatariFile): Promise<Uint8Array> {
-    if (typeof value === "string") return textEncoder.encode(value);
-    const ref = asRef(value);
-    if (ref === null) throw new Error("katari.readBytes: value is not a string / file (no $ref)");
-    return dataPlane.fetchBytes(ref);
-  },
-
-  persist(value: KatariRef<"string" | "file">, opts?: { name?: string }): Promise<KatariFile> {
-    const ref = asRef(value);
-    if (ref === null) throw new Error("katari.persist: value is not a $ref");
-    return dataPlane.persist(ref, { displayName: opts?.name });
-  },
 };
+
+// ─── Per-delegation handler context ────────────────────────────────────────
+//
+// Every operation that is tied to a specific delegation — `delegate` (which
+// parents its child) and the `make*` producers (which stamp the produced ref's
+// owning entity) — lives HERE, on the context, not on the global `katari`. The
+// context closes over its own `delegationId`, so a handler can stash `ctx` and
+// call these from a callback that fires LATER, off its own async chain (a
+// socket / emitter / timer) — the `watch_*` / subscription pattern. There is
+// no ambient (AsyncLocalStorage) state to lose when that happens.
+
+function makeContext<A>(
+  args: A,
+  delegationId: string,
+  signal: AbortSignal,
+  isRestored: boolean,
+): AgentContext<A> {
+  return {
+    args,
+    delegationId,
+    signal,
+    isRestored,
+    get snapshotId(): string {
+      return process.env.KATARI_SNAPSHOT_ID ?? "";
+    },
+
+    delegate(callable, childArgs, opts) {
+      // Accept a KatariAgent (`{$agent}`) — typically received in args or built
+      // with ctx.makeAgent — or a bare agent-id string.
+      const agentDefId = typeof callable === "string" ? callable : callable.$agent;
+      return delegateChild(agentDefId, childArgs, opts ?? {}, delegationId);
+    },
+
+    async makeString(text) {
+      const bytes = textEncoder.encode(text);
+      if (bytes.length <= INLINE_STRING_MAX_BYTES) return text;
+      return dataPlane.produce(bytes, {
+        as: "string",
+        ownerDelegationId: delegationId,
+      }) as Promise<KatariRef<"string">>;
+    },
+
+    makeFile(bytes, opts) {
+      return dataPlane.produce(bytes, {
+        as: "file",
+        contentType: opts?.contentType,
+        displayName: opts?.name,
+        ownerDelegationId: delegationId,
+      }) as Promise<KatariFile>;
+    },
+
+    makeAgent(qualifiedName) {
+      const snapshot = process.env.KATARI_SNAPSHOT_ID ?? "";
+      if (snapshot === "") {
+        throw new Error(
+          "ctx.makeAgent: KATARI_SNAPSHOT_ID is not set — the agent id needs the sidecar's snapshot",
+        );
+      }
+      return { $agent: `${qualifiedName}@${snapshot}` };
+    },
+
+    async readString(value) {
+      if (typeof value === "string") return value;
+      const ref = asRef(value);
+      if (ref === null) throw new Error("ctx.readString: value is not a string / file (no $ref)");
+      return textDecoder.decode(await dataPlane.fetchBytes(ref));
+    },
+
+    async readBytes(value) {
+      if (typeof value === "string") return textEncoder.encode(value);
+      const ref = asRef(value);
+      if (ref === null) throw new Error("ctx.readBytes: value is not a string / file (no $ref)");
+      return dataPlane.fetchBytes(ref);
+    },
+
+    persist(value, opts) {
+      const ref = asRef(value);
+      if (ref === null) throw new Error("ctx.persist: value is not a $ref");
+      return dataPlane.persist(ref, { displayName: opts?.name });
+    },
+  };
+}
 
 // ─── Module-qname threading (used by the CLI bundler) ──────────────────────
 
@@ -203,18 +221,6 @@ const send = (msg: ChildToParent): void => {
   stdoutWrite(`${JSON.stringify(msg)}\n`);
 };
 
-// ─── Currently-delegating context plumbing ─────────────────────────────────
-//
-// When a handler calls `katari.delegate(...)`, we need to know which
-// delegationId the child belongs to so the parent side can find the
-// owning ext call. We thread this through `AsyncLocalStorage` so each
-// handler's async chain sees exactly its own delegationId — even when
-// multiple handlers run concurrently (e.g. parallel fan_out where N
-// sleep / IO handlers interleave). A naive global stack would let one
-// handler's `katari.delegate(...)` attribute its child to the wrong
-// parent, and unwound out-of-order pop()s logged spurious "delegation
-// stack drift" warnings.
-
 function generateChildDelegationId(): string {
   // Cryptographically random v4 UUID. The delegation id is used as a
   // key to look up the owning ext call when the child responds; using
@@ -232,18 +238,15 @@ async function delegateChild(
   agentDefId: string,
   args: Record<string, RawValue>,
   opts: DelegateOptions,
+  parentDelegationId: string,
 ): Promise<RawValue> {
   if (typeof agentDefId !== "string" || agentDefId === "") {
     throw new Error(
-      "katari.delegate: callable must be a KatariAgent or an agent-id string (got empty / non-string)",
+      "ctx.delegate: callable must be a KatariAgent or an agent-id string (got empty / non-string)",
     );
   }
-  const parentDelegationId = currentDelegationId();
-  if (parentDelegationId === null) {
-    throw new Error("katari.delegate: must be called from inside a katari.agent handler");
-  }
   if (!started) {
-    throw new Error("katari.delegate: sidecar not started — wait for __startSidecar()");
+    throw new Error("ctx.delegate: sidecar not started — wait for __startSidecar()");
   }
   const childId = generateChildDelegationId();
   return new Promise<RawValue>((resolve, reject) => {
@@ -313,7 +316,7 @@ function settlePendingChild(
     return;
   }
   // terminate
-  const err = new Error("katari.delegate: child terminated");
+  const err = new Error("ctx.delegate: child terminated");
   (err as Error & { name: string }).name = "AbortError";
   entry.reject(err);
 }
@@ -336,16 +339,11 @@ async function handleDelegate(
     terminating: false,
   };
   inflight.set(msg.delegationId, entry);
-  const ctx: AgentContext = {
-    args: msg.args,
-    delegationId: msg.delegationId,
-    signal: entry.ctrl.signal,
-    isRestored,
-  };
+  const ctx = makeContext(msg.args, msg.delegationId, entry.ctrl.signal, isRestored);
   let value: RawValue | null = null;
   let error: unknown = null;
   try {
-    value = await delegationContext.run(msg.delegationId, () => handler(ctx));
+    value = await handler(ctx);
   } catch (err) {
     error = err;
   } finally {
@@ -395,6 +393,21 @@ export const __startSidecar = (): void => {
   started = true;
 
   stdoutWrite = stdout.write.bind(stdout);
+
+  // Safety net for errors that escape a tracked handler invocation — most
+  // importantly a `void ctx.delegate(...)` (or any async work) fired from a
+  // LATER callback (a socket / emitter / timer in a `watch_*` ext). Such a
+  // rejection has no delegation to attribute a `throw` to, so it cannot become
+  // a tree escalation; without this it vanishes silently. Surfacing it on
+  // stderr (which the host forwards as `sidecar.stderr`) at least makes it
+  // visible in the logs instead of a dead-silent no-op.
+  process.on("unhandledRejection", (reason) => {
+    const detail = reason instanceof Error ? (reason.stack ?? reason.message) : String(reason);
+    stderr.write(`[katari-port] unhandled rejection (no delegation to attribute): ${detail}\n`);
+  });
+  process.on("uncaughtException", (err) => {
+    stderr.write(`[katari-port] uncaught exception: ${err.stack ?? err.message}\n`);
+  });
 
   console.log = redirectConsole("console.log");
   console.info = redirectConsole("console.info");

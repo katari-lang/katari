@@ -49,6 +49,45 @@ export interface AgentContext<A = Record<string, RawValue>> {
   /** `true` when the runtime re-issued this delegation after a parent restart
    *  (= `ipcDelegateRestarted`). Non-idempotent handlers should throw. */
   isRestored: boolean;
+  /** The snapshot this sidecar runs (from `KATARI_SNAPSHOT_ID`). */
+  readonly snapshotId: string;
+
+  // ── operations bound to THIS delegation ────────────────────────────────
+  // These live on the context (not the global `katari`) precisely because
+  // they are tied to this specific delegation — `delegate` parents its child
+  // here, `make*` stamps produced refs as owned here. The context is a plain
+  // object, so a handler can close over it and use these from a callback that
+  // fires LATER, off its own async chain (a socket / emitter / timer) — the
+  // `watch_*` / subscription pattern. (There is no ambient context to lose.)
+
+  /**
+   * Start a CORE-side child agent and await its result. `callable` is a
+   * `KatariAgent` — typically one received in args, or built with
+   * `ctx.makeAgent(...)`. (A bare agent-id string is also accepted.)
+   */
+  delegate(
+    callable: KatariAgent | string,
+    args: Record<string, RawValue>,
+    opts?: DelegateOptions,
+  ): Promise<RawValue>;
+
+  /** A `string` value. Small text stays inline; large text is produced as a
+   *  content ref over the data plane (hence async), owned by this delegation. */
+  makeString(text: string): Promise<KatariString>;
+  /** A `file` value: produce a content ref from bytes (ephemeral — owned by
+   *  this delegation, GC'd with the run unless `persist`ed). */
+  makeFile(bytes: Uint8Array, opts?: MakeFileOptions): Promise<KatariFile>;
+  /** An agent value referencing a CORE agent by qualified name, in THIS
+   *  sidecar's snapshot (`{$agent:"qname@snapshot"}`). */
+  makeAgent(qualifiedName: string): KatariAgent;
+
+  /** UTF-8 text of a `string` / `file` value (inline → as-is; ref → fetched). */
+  readString(value: KatariString | KatariFile): Promise<string>;
+  /** Raw bytes of a `string` / `file` value (inline → encoded; ref → fetched). */
+  readBytes(value: KatariString | KatariFile): Promise<Uint8Array>;
+
+  /** Promote an ephemeral (core/ffi) ref to a durable project file. */
+  persist(value: KatariRef<"string" | "file">, opts?: { name?: string }): Promise<KatariFile>;
 }
 
 /** Async function that implements an `ext agent`. */
@@ -78,40 +117,6 @@ export interface KatariPort {
    * `katari.agent<{ doc: KatariFile }>("summarize", async (ctx) => ...)`.
    */
   agent<A = Record<string, RawValue>>(name: string, handler: AgentHandler<A>): void;
-
-  /**
-   * Start a CORE-side child agent and await its result. `callable` is a
-   * `KatariAgent` — typically one received in args, or built with
-   * `katari.makeAgent(...)`. (A bare agent-id string is also accepted.)
-   */
-  delegate(
-    callable: KatariAgent | string,
-    args: Record<string, RawValue>,
-    opts?: DelegateOptions,
-  ): Promise<RawValue>;
-
-  // ── construct values to return / pass ──────────────────────────────────
-  /** A `string` value. Small text stays inline; large text is produced as a
-   *  content ref over the data plane (hence async). */
-  makeString(text: string): Promise<KatariString>;
-  /** A `file` value: produce a content ref from bytes (ephemeral — owned by
-   *  this ext call, GC'd with the run unless `persist`ed). */
-  makeFile(bytes: Uint8Array, opts?: MakeFileOptions): Promise<KatariFile>;
-  /** An agent value referencing a CORE agent by qualified name, in THIS
-   *  sidecar's snapshot (`{$agent:"qname@snapshot"}`). */
-  makeAgent(qualifiedName: string): KatariAgent;
-
-  // ── read values received in args ───────────────────────────────────────
-  /** UTF-8 text of a `string` / `file` value (inline → as-is; ref → fetched). */
-  readString(value: KatariString | KatariFile): Promise<string>;
-  /** Raw bytes of a `string` / `file` value (inline → encoded; ref → fetched). */
-  readBytes(value: KatariString | KatariFile): Promise<Uint8Array>;
-
-  /** Promote an ephemeral (core/ffi) ref to a durable project file. */
-  persist(value: KatariRef<"string" | "file">, opts?: { name?: string }): Promise<KatariFile>;
-
-  /** The snapshot this sidecar runs (from `KATARI_SNAPSHOT_ID`). */
-  readonly snapshotId: string;
 }
 
 export type { RawValue };
