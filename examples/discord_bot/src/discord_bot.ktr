@@ -10,6 +10,9 @@ request get_discord_client() -> string
 @"The current conversation session handle (its message history lives in the sidecar)."
 request get_session() -> string
 
+@"Raised once per incoming message; the caller installs a handler to react however it likes."
+request on_message(text: string, channel_id: string) -> null
+
 @"Open a fresh conversation session; the history is kept in the sidecar."
 external create_session() -> string from "FFI:discord_bot.create_session"
 
@@ -19,29 +22,33 @@ external ai_infer(client: ai_client, session: string, prompt: string) -> string 
 @"Connect to Discord and log in; returns an opaque client handle."
 external create_discord_client(token: secret) -> string from "FFI:discord_bot.create_discord_client"
 
-@"Post a message to a channel."
-external send_message(client: string, channel_id: string, text: string) -> null from "FFI:discord_bot.send_message"
+@"Low-level: post to a channel on a given client. Prefer the send_message agent."
+external discord_send(client: string, channel_id: string, text: string) -> null from "FFI:discord_bot.discord_send"
 
-@"Listen forever on one channel; for each human message, delegate on_message with its text + channel."
-external watch_messages(client: string, channel_id: string, on_message: agent (text: string, channel_id: string) -> null with get_ai_client, get_discord_client) -> never from "FFI:discord_bot.watch_messages"
+@"Low-level: listen on a channel and deliver each message to a callback. Prefer the watch_messages agent."
+external discord_watch(client: string, channel_id: string, on_message: agent (text: string, channel_id: string) -> null with on_message) -> never from "FFI:discord_bot.discord_watch"
 
 @"Infer using the ambient AI client + session."
 agent infer(prompt: string) -> string with get_ai_client, get_session {
   ai_infer(client = get_ai_client(), session = get_session(), prompt = prompt)
 }
 
-@"Handle one incoming message: infer a reply in a fresh session, post it back."
-agent handle_message(text: string, channel_id: string) -> null with get_ai_client, get_discord_client {
-  handle (var s = create_session()) {
-    request get_session() {
-      next s
-    }
-  }
-  let reply = infer(prompt = text)
-  send_message(client = get_discord_client(), channel_id = channel_id, text = reply)
+@"Post a message to a channel using the ambient Discord client."
+agent send_message(channel_id: string, text: string) -> null with get_discord_client {
+  discord_send(client = get_discord_client(), channel_id = channel_id, text = text)
 }
 
-@"Entry: set up the AI client + Discord connection, then serve one channel forever."
+@"Bridge: turn each delivered message into an on_message request for the caller to handle."
+agent deliver(text: string, channel_id: string) -> null with on_message {
+  on_message(text = text, channel_id = channel_id)
+}
+
+@"Serve a channel forever, raising on_message for each message. Just provide the channel + a handler."
+agent watch_messages(channel_id: string) -> never with on_message, get_discord_client {
+  discord_watch(client = get_discord_client(), channel_id = channel_id, on_message = deliver)
+}
+
+@"Entry: set up the AI client + Discord connection + a session, then serve one channel forever."
 agent main(channel_id: string) -> string {
   handle {
     request env_not_found(env_key: string) {
@@ -58,5 +65,17 @@ agent main(channel_id: string) -> string {
       next discord
     }
   }
-  watch_messages(client = get_discord_client(), channel_id = channel_id, on_message = handle_message)
+  handle (var s = create_session()) {
+    request get_session() {
+      next s
+    }
+  }
+  handle {
+    request on_message(text: string, channel_id: string) {
+      let reply = infer(prompt = text)
+      send_message(channel_id = channel_id, text = reply)
+      next null
+    }
+  }
+  watch_messages(channel_id = channel_id)
 }

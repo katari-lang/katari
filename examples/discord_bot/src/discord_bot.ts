@@ -4,9 +4,10 @@
 //   - AI:      `create_session` / `ai_infer` — one conversation turn against the
 //              provider, with the message history held here in the sidecar (the
 //              language has no list-append yet, so it can't carry the history).
-//   - Discord: `create_discord_client` / `watch_messages` / `send_message` — a
-//              live gateway connection kept in the sidecar; `watch_messages`
-//              delegates a Katari agent for each human message.
+//   - Discord: `create_discord_client` / `discord_watch` / `discord_send` — a
+//              live gateway connection kept in the sidecar; `discord_watch`
+//              delegates a callback agent for each human message. (The ktr wraps
+//              these as the capability agents watch_messages / send_message.)
 //
 // Secrets (the api key, the bot token) arrive as `{ $secret: "<plaintext>" }`:
 // the sidecar is inside the runtime's trust boundary, so it legitimately holds
@@ -119,7 +120,7 @@ katari.agent<{ token: Secret }>("create_discord_client", async ({ args }) => {
 });
 
 katari.agent<{ client: KatariString; channel_id: KatariString; text: KatariString }>(
-  "send_message",
+  "discord_send",
   async (ctx) => {
     const { args } = ctx;
     const client = requireClient(await ctx.readString(args.client));
@@ -135,7 +136,7 @@ katari.agent<{ client: KatariString; channel_id: KatariString; text: KatariStrin
 );
 
 katari.agent<{ client: KatariString; channel_id: KatariString; on_message: KatariAgent }>(
-  "watch_messages",
+  "discord_watch",
   async (ctx) => {
     const { args, signal } = ctx;
     const client = requireClient(await ctx.readString(args.client));

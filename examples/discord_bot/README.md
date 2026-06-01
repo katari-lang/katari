@@ -8,16 +8,22 @@ for a reply, and posts it back — built to dogfood the language and SDK.
 - **`src/discord_bot.ktr`** — the agents.
   - `ai_client` is a `data` value (provider + model + a `secret` api key),
     handed to the whole program once through the `get_ai_client` capability.
-    The Discord connection is shared the same way via `get_discord_client`.
-  - `main` opens both, then calls `watch_messages` and serves forever.
-  - For each incoming message the ext delegates `handle_message`, which opens a
-    fresh conversation `session`, calls `infer`, and posts the reply. The
-    capabilities flow into that delegated agent automatically — `handle_message`
-    just declares `with get_ai_client, get_discord_client`.
+    The Discord connection and the conversation `session` are shared the same
+    way (`get_discord_client` / `get_session`).
+  - `watch_messages(channel_id)` serves a channel forever, raising an
+    `on_message(text, channel_id)` **request** for each message. `main` provides
+    the capabilities, then installs a `handle { request on_message(...) { ... } }`
+    that does the work — calls `infer`, posts the reply with `send_message`,
+    `next`s to keep serving. Because the session is opened once at the top, the
+    bot keeps conversation history across messages.
+  - This is the point of the request model: `watch_messages` only knows it
+    raises `on_message`; what the reaction *does* (and which capabilities it
+    needs) lives in the user's handler, not in the watch signature.
 - **`src/discord_bot.ts`** — the ext (a JS sidecar) with the thin primitives:
   the Gemini HTTP call (`ai_infer`, holding each conversation's history here),
-  and the discord.js gateway client (`create_discord_client` / `watch_messages`
-  / `send_message`).
+  and the discord.js gateway client (`create_discord_client` / `discord_watch` /
+  `discord_send`, which the ktr wraps as the capability agents `watch_messages` /
+  `send_message`).
 
 ## Setup
 
