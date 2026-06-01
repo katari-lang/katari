@@ -255,7 +255,7 @@
     "requests": []
   },
   {
-    "description": "Dynamically invoke a callable by name. @name@ is either a qualified agent name (@module.agent@) or a closure stamp (@closure:<id>@); @args@ is a record matching the target's parameter list. Raises @call_agent_error@ on unknown names or schema-invalid args.",
+    "description": "Dynamically invoke a callable by name. @name@ is the callable handle from @get_metadata@'s @id@: a qualified agent name (@module.agent@) or a closure ref (@closureref:<id>@); @args@ is a record matching the target's parameter list. Raises @call_agent_error@ on unknown names or schema-invalid args.",
     "input": {
       "additionalProperties": false,
       "properties": {
