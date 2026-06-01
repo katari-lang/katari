@@ -1,104 +1,57 @@
-// katari-port value client — the `katari.value` namespace.
+// Internal data-plane client + value-shape guards for the sidecar.
 //
-// CONSUME. A handler receives args as `Record<string, RawValue>`. A
-// byte-sequence arg (string / file) arrives either INLINE (a bare JSON string —
-// short content) or as a `$ref` envelope (large content kept in the value
-// store). This client hides that distinction: `await katari.value.text(
-// args.history)` works the same whether `history` is a 3-word inline string or
-// a 200 KB conversation fetched over the data plane. That uniformity is the
-// point — the handler "builds a Promise from whatever ref flowed in".
+// NOT the public surface — katari-port exposes friendly constructors / readers
+// (`makeString` / `makeFile` / `makeAgent` / `readString` / `readBytes` /
+// `persist`) on the `katari` singleton (see index.ts), built on top of this.
+// This module hides the Katari Protocol HTTP (auth / URL / env):
 //
-// PRODUCE. `put` / `open`→`pushChunk`→`close` POST bytes to the owner module's
-// produce endpoint and return a `$ref` to `return` from the handler; `persist`
-// promotes an ephemeral ref to a project file. Produce is host-buffered and
-// commits one complete blob (v0.1.0; observable streaming is v0.2).
+//   CONSUME: a byte-sequence arg (string / file) arrives INLINE (a bare JSON
+//   string) or as a `$ref` envelope (large content in the value store). A ref
+//   is fetched over the data plane; inline needs no protocol config.
+//   PRODUCE:  POST bytes to the owner module's produce endpoint → a `$ref`.
+//   PERSIST:  promote an ephemeral (core/ffi) ref to a durable project file.
 //
-// Both planes ride the Katari Protocol over HTTP
-// (docs/2026-05-30-storage-schema-and-api.md §4):
 //   GET  {KATARI_PROTOCOL_URL}/project/{KATARI_PROJECT_ID}/value/{module}/ref/{id}
 //   POST {KATARI_PROTOCOL_URL}/project/{KATARI_PROJECT_ID}/value/{owner}/produce
-// authenticated with the sidecar's bearer token. Inline consume needs no env;
-// only refs / produce require the protocol configuration.
+// authenticated with the sidecar's bearer token (KATARI_PROTOCOL_TOKEN).
 
 import type { RawValue } from "@katari-lang/types";
+import type { KatariAgent, KatariFile, KatariRef, KatariString, RefModule } from "./types.js";
 
-/**
- * Wire discriminator for a content-addressed reference. Mirrors
- * `REF_DISCRIMINATOR` in katari-runtime's value-codec — the `$ref` envelope is
- * `{ $ref: { module, id }, as, hash, size, contentType? }`.
- */
 const REF_DISCRIMINATOR = "$ref";
+const CALLABLE_DISCRIMINATOR = "$agent";
 
-/** A `$ref` envelope as it appears in a `RawValue`. */
-type RefEnvelope = {
-  [REF_DISCRIMINATOR]: { module: string; id: string };
-  as: "string" | "file";
-  hash: string;
-  size: number;
-  contentType?: string;
-};
+// ─── value-shape guards (public) ────────────────────────────────────────────
 
-function asRefEnvelope(value: RawValue): RefEnvelope | null {
+/** The `$ref` envelope view of a value, or null if it isn't one. */
+export function asRef(value: RawValue): KatariRef<"string" | "file"> | null {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
-  const ref = (value as Record<string, RawValue>)[REF_DISCRIMINATOR];
+  const record = value as Record<string, RawValue>;
+  const ref = record[REF_DISCRIMINATOR];
   if (typeof ref !== "object" || ref === null || Array.isArray(ref)) return null;
   const { module, id } = ref as Record<string, RawValue>;
   if (typeof module !== "string" || typeof id !== "string") return null;
-  return value as unknown as RefEnvelope;
+  if (record.as !== "string" && record.as !== "file") return null;
+  return value as unknown as KatariRef<"string" | "file">;
 }
 
-/** Produce-endpoint response = the new ref's identity + content addressing. */
-type ProduceResponse = {
-  module: string;
-  id: string;
-  hash: string;
-  size: number;
-  contentType?: string;
-};
-
-function parseProduceResponse(raw: unknown): ProduceResponse {
-  if (typeof raw !== "object" || raw === null) {
-    throw new Error("katari.value: malformed produce response (not an object)");
-  }
-  const { module, id, hash, size, contentType } = raw as Record<string, unknown>;
-  if (
-    typeof module !== "string" ||
-    typeof id !== "string" ||
-    typeof hash !== "string" ||
-    typeof size !== "number"
-  ) {
-    throw new Error("katari.value: malformed produce response (missing module/id/hash/size)");
-  }
-  return {
-    module,
-    id,
-    hash,
-    size,
-    contentType: typeof contentType === "string" ? contentType : undefined,
-  };
+/** A `file` value (always a `$ref as:file`). */
+export function isKatariFile(value: RawValue): value is KatariFile {
+  return asRef(value)?.as === "file";
 }
 
-/** Wrap a produce response into a `$ref` envelope RawValue. */
-function wrapRef(response: ProduceResponse, as: ProduceAs): RawValue {
-  const out: Record<string, RawValue> = {
-    [REF_DISCRIMINATOR]: { module: response.module, id: response.id },
-    as,
-    hash: response.hash,
-    size: response.size,
-  };
-  if (response.contentType !== undefined) out.contentType = response.contentType;
-  return out;
+/** A `string` value — inline text or a `$ref as:string`. */
+export function isKatariString(value: RawValue): value is KatariString {
+  return typeof value === "string" || asRef(value)?.as === "string";
 }
 
-function concatChunks(chunks: Uint8Array[], total: number): Uint8Array {
-  const out = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    out.set(chunk, offset);
-    offset += chunk.length;
-  }
-  return out;
+/** A callable value (agent `qname@snapshot` or `closureref:<id>`). */
+export function isKatariAgent(value: RawValue): value is KatariAgent {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  return typeof (value as Record<string, RawValue>)[CALLABLE_DISCRIMINATOR] === "string";
 }
+
+// ─── data plane (internal) ──────────────────────────────────────────────────
 
 /** Minimal `fetch` shape so tests can inject a stub. */
 export type FetchLike = (
@@ -112,60 +65,31 @@ export type FetchLike = (
   json(): Promise<unknown>;
 }>;
 
-export type ValueClientConfig = {
+/** A produced byte sequence's kind on the wire (`secret` is inline-only). */
+export type ProduceAs = "string" | "file";
+
+export type DataPlaneConfig = {
   env?: Record<string, string | undefined>;
   fetchImpl?: FetchLike;
   /** The currently-running handler's delegation id, if any. A produced ref is
    *  stamped with it as its owning entity (GC ownership): the ref stays alive
-   *  while this ext delegation runs (in-flight protection) and is re-owned by
-   *  the parent when the handler returns. Null = unstamped (e.g. tooling). */
+   *  while this ext delegation runs, then is re-owned by the parent on ack. */
   currentDelegationId?: () => string | null;
 };
 
-/** A produced byte sequence's kind on the wire (`secret` is inline-only). */
-export type ProduceAs = "string" | "file";
-
-export type ProduceOptions = {
-  /** `string` (default) or `file`. Sets the ref's `as` + semantic kind. */
-  as?: ProduceAs;
-  /** Stored alongside the blob; surfaced on fetch / file download. */
-  contentType?: string;
-};
-
-/**
- * Streaming producer handle (host-buffered → committed at `close`). v0.1.0
- * accumulates chunks in memory and produces one complete blob on `close`;
- * `abort` discards the buffer without contacting the store.
- */
-export interface ProduceHandle {
-  pushChunk(bytes: Uint8Array): void;
-  close(): Promise<RawValue>;
-  abort(): void;
+export interface DataPlane {
+  /** Bytes of a `$ref` value (fetched over the data plane). */
+  fetchBytes(ref: KatariRef<"string" | "file">): Promise<Uint8Array>;
+  /** Produce a complete blob → its `$ref`. */
+  produce(
+    bytes: Uint8Array,
+    opts: { as: ProduceAs; contentType?: string; displayName?: string },
+  ): Promise<KatariRef<"string" | "file">>;
+  /** Promote an ephemeral (core/ffi) ref to a durable api file ref. */
+  persist(ref: KatariRef<"string" | "file">, opts?: { displayName?: string }): Promise<KatariFile>;
 }
 
-/** The `katari.value` surface: consume (fetch/text/range) + produce (put/open/persist). */
-export interface ValueApi {
-  /** Raw bytes of a string / file value (inline or ref). */
-  fetch(value: RawValue): Promise<Uint8Array>;
-  /** UTF-8 text of a string / file value (inline or ref). */
-  text(value: RawValue): Promise<string>;
-  /** Bytes `[offset, offset+length)` — ranged data-plane fetch for refs. */
-  fetchRange(value: RawValue, offset: number, length: number): Promise<Uint8Array>;
-  /** Produce a complete blob; returns a `$ref` value to `return` from a handler. */
-  put(bytes: Uint8Array, opts?: ProduceOptions): Promise<RawValue>;
-  /** Open a streaming producer (host-buffered, committed on close). */
-  open(opts?: ProduceOptions): ProduceHandle;
-  /** Promote an ephemeral `$ref` to a persistent project file (`$ref` module=api). */
-  persist(value: RawValue, opts?: { displayName?: string }): Promise<RawValue>;
-}
-
-type ProtocolConfig = {
-  baseUrl: string;
-  token: string;
-  projectId: string;
-  /** Owner module (`KATARI_SIDECAR_OWNER`) — required for produce, not consume. */
-  owner: string | null;
-};
+type ProtocolConfig = { baseUrl: string; token: string; projectId: string; owner: string | null };
 
 function readConfig(env: Record<string, string | undefined>): ProtocolConfig {
   return {
@@ -185,141 +109,82 @@ function requireConfig(env: Record<string, string | undefined>): ProtocolConfig 
   ].filter((name): name is string => name !== null);
   if (missing.length > 0) {
     throw new Error(
-      `katari.value: cannot reach the data plane — missing sidecar env ${missing.join(", ")}. ` +
+      `katari: cannot reach the data plane — missing sidecar env ${missing.join(", ")}. ` +
         `(Inline values need no protocol config; only refs require it.)`,
     );
   }
   return cfg;
 }
 
-function requireProduceConfig(env: Record<string, string | undefined>): ProtocolConfig & {
-  owner: string;
-} {
-  const cfg = requireConfig(env);
-  if (cfg.owner === null || cfg.owner === "") {
-    throw new Error("katari.value: produce requires KATARI_SIDECAR_OWNER (the owner module)");
+function parseRefResponse(raw: unknown, as: ProduceAs): KatariRef<"string" | "file"> {
+  if (typeof raw !== "object" || raw === null) {
+    throw new Error("katari: malformed produce response (not an object)");
   }
-  return { ...cfg, owner: cfg.owner };
+  const { module, id, hash, size, contentType } = raw as Record<string, unknown>;
+  if (
+    typeof module !== "string" ||
+    typeof id !== "string" ||
+    typeof hash !== "string" ||
+    typeof size !== "number"
+  ) {
+    throw new Error("katari: malformed produce response (missing module/id/hash/size)");
+  }
+  const out: KatariRef<"string" | "file"> = {
+    $ref: { module: module as RefModule, id },
+    as,
+    hash,
+    size,
+  };
+  if (typeof contentType === "string") out.contentType = contentType;
+  return out;
 }
 
-export function createValueClient(config: ValueClientConfig = {}): ValueApi {
+export function createDataPlane(config: DataPlaneConfig = {}): DataPlane {
   const env = config.env ?? process.env;
   const fetchImpl = config.fetchImpl ?? (globalThis.fetch as unknown as FetchLike);
 
-  function refUrl(cfg: ProtocolConfig, ref: RefEnvelope, range?: string): string {
-    const { module, id } = ref[REF_DISCRIMINATOR];
-    const base = `${cfg.baseUrl}/project/${encodeURIComponent(cfg.projectId)}/value/${encodeURIComponent(module)}/ref/${encodeURIComponent(id)}`;
-    return range !== undefined ? `${base}?range=${range}` : base;
-  }
-
-  async function getBytes(url: string, cfg: ProtocolConfig): Promise<Uint8Array> {
-    const response = await fetchImpl(url, {
-      method: "GET",
-      headers: { Authorization: `Bearer ${cfg.token}` },
-    });
-    if (!response.ok) {
-      const detail = await response.text().catch(() => "");
-      throw new Error(`katari.value: data plane GET ${url} failed (${response.status}) ${detail}`);
-    }
-    return new Uint8Array(await response.arrayBuffer());
-  }
-
-  async function postProduce(bytes: Uint8Array, opts?: ProduceOptions): Promise<RawValue> {
-    const cfg = requireProduceConfig(env);
-    const as: ProduceAs = opts?.as ?? "string";
-    const url = `${cfg.baseUrl}/project/${encodeURIComponent(cfg.projectId)}/value/${encodeURIComponent(cfg.owner)}/produce`;
-    const headers: Record<string, string> = {
-      Authorization: `Bearer ${cfg.token}`,
-      "X-Katari-Semantic-Kind": as,
-    };
-    if (opts?.contentType !== undefined) headers["Content-Type"] = opts.contentType;
-    // Stamp the owning entity so the produced ref is GC-owned by the running
-    // ext delegation (in-flight protection; re-owned by the parent on ack).
-    const ownerDelegationId = config.currentDelegationId?.() ?? null;
-    if (ownerDelegationId !== null) headers["X-Katari-Owner-Delegation"] = ownerDelegationId;
-    const response = await fetchImpl(url, { method: "POST", headers, body: bytes });
-    if (!response.ok) {
-      const detail = await response.text().catch(() => "");
-      throw new Error(`katari.value: produce POST failed (${response.status}) ${detail}`);
-    }
-    return wrapRef(parseProduceResponse(await response.json()), as);
-  }
-
   return {
-    async fetch(value: RawValue): Promise<Uint8Array> {
-      if (typeof value === "string") return new TextEncoder().encode(value);
-      const ref = asRefEnvelope(value);
-      if (ref === null) {
-        throw new Error(
-          "katari.value.fetch: value is not a string / file (no inline text or $ref)",
-        );
-      }
+    async fetchBytes(ref): Promise<Uint8Array> {
       const cfg = requireConfig(env);
-      return getBytes(refUrl(cfg, ref), cfg);
+      const { module, id } = ref.$ref;
+      const url = `${cfg.baseUrl}/project/${encodeURIComponent(cfg.projectId)}/value/${encodeURIComponent(module)}/ref/${encodeURIComponent(id)}`;
+      const response = await fetchImpl(url, {
+        method: "GET",
+        headers: { Authorization: `Bearer ${cfg.token}` },
+      });
+      if (!response.ok) {
+        const detail = await response.text().catch(() => "");
+        throw new Error(`katari: data plane GET ${url} failed (${response.status}) ${detail}`);
+      }
+      return new Uint8Array(await response.arrayBuffer());
     },
 
-    async text(value: RawValue): Promise<string> {
-      if (typeof value === "string") return value;
-      const ref = asRefEnvelope(value);
-      if (ref === null) {
-        throw new Error("katari.value.text: value is not a string / file (no inline text or $ref)");
-      }
+    async produce(bytes, opts): Promise<KatariRef<"string" | "file">> {
       const cfg = requireConfig(env);
-      return new TextDecoder().decode(await getBytes(refUrl(cfg, ref), cfg));
-    },
-
-    async fetchRange(value: RawValue, offset: number, length: number): Promise<Uint8Array> {
-      if (offset < 0 || length < 0) {
-        throw new Error("katari.value.fetchRange: offset / length must be non-negative");
+      if (cfg.owner === null || cfg.owner === "") {
+        throw new Error("katari: produce requires KATARI_SIDECAR_OWNER (the owner module)");
       }
-      if (typeof value === "string") {
-        return new TextEncoder().encode(value).slice(offset, offset + length);
-      }
-      const ref = asRefEnvelope(value);
-      if (ref === null) {
-        throw new Error("katari.value.fetchRange: value is not a string / file");
-      }
-      const cfg = requireConfig(env);
-      const endInclusive = offset + length - 1;
-      return getBytes(refUrl(cfg, ref, `${offset}-${endInclusive}`), cfg);
-    },
-
-    put(bytes: Uint8Array, opts?: ProduceOptions): Promise<RawValue> {
-      return postProduce(bytes, opts);
-    },
-
-    open(opts?: ProduceOptions): ProduceHandle {
-      const chunks: Uint8Array[] = [];
-      let total = 0;
-      let settled = false;
-      return {
-        pushChunk(bytes: Uint8Array): void {
-          if (settled) throw new Error("katari.value: pushChunk after close/abort");
-          chunks.push(bytes.slice());
-          total += bytes.length;
-        },
-        close(): Promise<RawValue> {
-          if (settled) throw new Error("katari.value: close after close/abort");
-          settled = true;
-          return postProduce(concatChunks(chunks, total), opts);
-        },
-        abort(): void {
-          settled = true;
-          chunks.length = 0;
-        },
+      const url = `${cfg.baseUrl}/project/${encodeURIComponent(cfg.projectId)}/value/${encodeURIComponent(cfg.owner)}/produce`;
+      const headers: Record<string, string> = {
+        Authorization: `Bearer ${cfg.token}`,
+        "X-Katari-Semantic-Kind": opts.as,
       };
+      if (opts.contentType !== undefined) headers["Content-Type"] = opts.contentType;
+      if (opts.displayName !== undefined) headers["X-Katari-Display-Name"] = opts.displayName;
+      const ownerDelegationId = config.currentDelegationId?.() ?? null;
+      if (ownerDelegationId !== null) headers["X-Katari-Owner-Delegation"] = ownerDelegationId;
+      const response = await fetchImpl(url, { method: "POST", headers, body: bytes });
+      if (!response.ok) {
+        const detail = await response.text().catch(() => "");
+        throw new Error(`katari: produce POST failed (${response.status}) ${detail}`);
+      }
+      return parseRefResponse(await response.json(), opts.as);
     },
 
-    async persist(value: RawValue, opts?: { displayName?: string }): Promise<RawValue> {
-      const ref = asRefEnvelope(value);
-      if (ref === null) {
-        throw new Error("katari.value.persist: value is not a $ref");
-      }
-      const { module, id } = ref[REF_DISCRIMINATOR];
+    async persist(ref, opts): Promise<KatariFile> {
+      const { module, id } = ref.$ref;
       if (module !== "core" && module !== "ffi") {
-        throw new Error(
-          `katari.value.persist: only ephemeral (core/ffi) refs persist, got '${module}'`,
-        );
+        throw new Error(`katari.persist: only ephemeral (core/ffi) refs persist, got '${module}'`);
       }
       const cfg = requireConfig(env);
       const url = `${cfg.baseUrl}/project/${encodeURIComponent(cfg.projectId)}/value/${encodeURIComponent(module)}/ref/${encodeURIComponent(id)}/persist`;
@@ -333,10 +198,10 @@ export function createValueClient(config: ValueClientConfig = {}): ValueApi {
       });
       if (!response.ok) {
         const detail = await response.text().catch(() => "");
-        throw new Error(`katari.value: persist POST failed (${response.status}) ${detail}`);
+        throw new Error(`katari.persist: POST failed (${response.status}) ${detail}`);
       }
       // A persisted ref is an api file (opaque bytes, identity equality).
-      return wrapRef(parseProduceResponse(await response.json()), "file");
+      return parseRefResponse(await response.json(), "file") as KatariFile;
     },
   };
 }

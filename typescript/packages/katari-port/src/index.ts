@@ -17,8 +17,24 @@ import { randomUUID } from "node:crypto";
 import { exit, stderr, stdin, stdout } from "node:process";
 import { createInterface } from "node:readline";
 import type { ChildToParent, ParentToChild } from "./protocol.js";
-import type { AgentContext, AgentHandler, DelegateOptions, KatariPort, RawValue } from "./types.js";
-import { createValueClient } from "./value.js";
+import type {
+  AgentContext,
+  AgentHandler,
+  DelegateOptions,
+  KatariAgent,
+  KatariFile,
+  KatariPort,
+  KatariRef,
+  KatariString,
+  MakeFileOptions,
+  RawValue,
+} from "./types.js";
+import { asRef, createDataPlane } from "./value.js";
+
+/** Above this many UTF-8 bytes, `makeString` produces a content ref instead of
+ *  shipping the text inline over IPC. Small strings stay inline (no data-plane
+ *  round-trip); the runtime promotes them to refs later if needed. */
+const INLINE_STRING_MAX_BYTES = 16 * 1024;
 
 // ─── Registry + inflight state ─────────────────────────────────────────────
 
@@ -48,9 +64,20 @@ let currentModuleQname = "";
 const delegationContext = new AsyncLocalStorage<string>();
 const currentDelegationId = (): string | null => delegationContext.getStore() ?? null;
 
+// Internal data plane (consume / produce / persist over the Katari Protocol).
+// Not exposed — the friendly make*/read* methods below are the surface.
+const dataPlane = createDataPlane({ currentDelegationId });
+
+const textEncoder = new TextEncoder();
+const textDecoder = new TextDecoder();
+
 // ─── Public API singleton ──────────────────────────────────────────────────
 
 const katari: KatariPort = {
+  get snapshotId(): string {
+    return process.env.KATARI_SNAPSHOT_ID ?? "";
+  },
+
   agent(name, handler) {
     // Module qname is set by the bundler-injected `__withModule(qname,
     // body)` wrapper. If we're called outside that wrapper, the bundle
@@ -74,16 +101,61 @@ const katari: KatariPort = {
     if (registry.has(key)) {
       throw new Error(`katari-port: handler already registered for ${key}`);
     }
-    registry.set(key, handler);
+    registry.set(key, handler as AgentHandler);
   },
 
   delegate(callable, args, opts) {
-    return delegateChild(callable, args, opts ?? {});
+    // Accept a KatariAgent (`{$agent}`) — typically received in args or built
+    // with makeAgent — or a bare agent-id string.
+    const agentDefId = typeof callable === "string" ? callable : callable.$agent;
+    return delegateChild(agentDefId, args, opts ?? {});
   },
-  // Reads sidecar protocol env (KATARI_PROTOCOL_URL / _TOKEN / _PROJECT_ID)
-  // lazily — only when a $ref is actually fetched, so inline-only handlers
-  // (and import-time tooling) need no protocol configuration.
-  value: createValueClient({ currentDelegationId }),
+
+  // ── construct ──────────────────────────────────────────────────────────
+  async makeString(text: string): Promise<KatariString> {
+    const bytes = textEncoder.encode(text);
+    if (bytes.length <= INLINE_STRING_MAX_BYTES) return text;
+    return dataPlane.produce(bytes, { as: "string" }) as Promise<KatariRef<"string">>;
+  },
+
+  makeFile(bytes: Uint8Array, opts?: MakeFileOptions): Promise<KatariFile> {
+    return dataPlane.produce(bytes, {
+      as: "file",
+      contentType: opts?.contentType,
+      displayName: opts?.name,
+    }) as Promise<KatariFile>;
+  },
+
+  makeAgent(qualifiedName: string): KatariAgent {
+    const snapshot = process.env.KATARI_SNAPSHOT_ID ?? "";
+    if (snapshot === "") {
+      throw new Error(
+        "katari.makeAgent: KATARI_SNAPSHOT_ID is not set — the agent id needs the sidecar's snapshot",
+      );
+    }
+    return { $agent: `${qualifiedName}@${snapshot}` };
+  },
+
+  // ── read ───────────────────────────────────────────────────────────────
+  async readString(value: KatariString | KatariFile): Promise<string> {
+    if (typeof value === "string") return value;
+    const ref = asRef(value);
+    if (ref === null) throw new Error("katari.readString: value is not a string / file (no $ref)");
+    return textDecoder.decode(await dataPlane.fetchBytes(ref));
+  },
+
+  async readBytes(value: KatariString | KatariFile): Promise<Uint8Array> {
+    if (typeof value === "string") return textEncoder.encode(value);
+    const ref = asRef(value);
+    if (ref === null) throw new Error("katari.readBytes: value is not a string / file (no $ref)");
+    return dataPlane.fetchBytes(ref);
+  },
+
+  persist(value: KatariRef<"string" | "file">, opts?: { name?: string }): Promise<KatariFile> {
+    const ref = asRef(value);
+    if (ref === null) throw new Error("katari.persist: value is not a $ref");
+    return dataPlane.persist(ref, { displayName: opts?.name });
+  },
 };
 
 // ─── Module-qname threading (used by the CLI bundler) ──────────────────────
@@ -157,13 +229,13 @@ function generateChildDelegationId(): string {
 }
 
 async function delegateChild(
-  callable: RawValue,
+  agentDefId: string,
   args: Record<string, RawValue>,
   opts: DelegateOptions,
 ): Promise<RawValue> {
-  if (typeof callable !== "string") {
+  if (typeof agentDefId !== "string" || agentDefId === "") {
     throw new Error(
-      `katari.delegate: callable must be a flat-string RawValue (agent def id), got ${typeof callable}`,
+      "katari.delegate: callable must be a KatariAgent or an agent-id string (got empty / non-string)",
     );
   }
   const parentDelegationId = currentDelegationId();
@@ -203,7 +275,7 @@ async function delegateChild(
       type: "ipcChildDelegate",
       parentDelegationId,
       delegationId: childId,
-      agentDefId: callable,
+      agentDefId,
       args,
     });
   });
@@ -390,15 +462,14 @@ export type {
   AgentContext,
   AgentHandler,
   DelegateOptions,
+  KatariAgent,
+  KatariFile,
   KatariPort,
+  KatariRef,
+  KatariString,
+  MakeFileOptions,
   RawValue,
+  RefModule,
 } from "./types.js";
-export type {
-  FetchLike,
-  ProduceAs,
-  ProduceHandle,
-  ProduceOptions,
-  ValueApi,
-  ValueClientConfig,
-} from "./value.js";
-export { createValueClient } from "./value.js";
+// Value-shape guards for narrowing args.
+export { isKatariAgent, isKatariFile, isKatariString } from "./value.js";

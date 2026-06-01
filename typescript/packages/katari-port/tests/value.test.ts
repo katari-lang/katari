@@ -1,15 +1,24 @@
-// katari.value consume client tests. A stub `FetchLike` records calls so we
-// can assert the data-plane URL / auth header without a real server, plus the
-// inline fast-paths that need no protocol config at all.
+// Tests for the internal data plane + value-shape guards. A stub `FetchLike`
+// records calls so we can assert the data-plane URL / auth header / produce
+// headers without a real server.
 
 import { describe, expect, it } from "vitest";
-import { createValueClient, type FetchLike } from "../src/value.js";
+import type { KatariFile, KatariRef } from "../src/types.js";
+import {
+  asRef,
+  createDataPlane,
+  type FetchLike,
+  isKatariAgent,
+  isKatariFile,
+  isKatariString,
+} from "../src/value.js";
 
 const ENV = {
   KATARI_PROTOCOL_URL: "http://host:9000",
   KATARI_PROTOCOL_TOKEN: "tok-123",
   KATARI_PROJECT_ID: "proj-1",
 };
+const PRODUCE_ENV = { ...ENV, KATARI_SIDECAR_OWNER: "ffi" };
 
 type Call = {
   url: string;
@@ -33,153 +42,130 @@ function stubFetch(body: string, status = 200): { fetchImpl: FetchLike; calls: C
   return { fetchImpl, calls };
 }
 
-const ref = (module: string, id: string) => ({
-  $ref: { module, id },
-  as: "string" as const,
+const stringRef = (module: string, id: string): KatariRef<"string"> => ({
+  $ref: { module: module as "core" | "ffi" | "api", id },
+  as: "string",
+  hash: "h",
+  size: 5,
+});
+const fileRef = (module: string, id: string): KatariFile => ({
+  $ref: { module: module as "core" | "ffi" | "api", id },
+  as: "file",
   hash: "h",
   size: 5,
 });
 
-describe("katari.value: inline fast-path", () => {
-  it("text() returns an inline string without fetching", async () => {
-    const { fetchImpl, calls } = stubFetch("UNUSED");
-    const value = createValueClient({ env: {}, fetchImpl });
-    expect(await value.text("hello")).toBe("hello");
-    expect(calls).toHaveLength(0);
+describe("value guards", () => {
+  it("asRef recognises a $ref envelope, rejects others", () => {
+    expect(asRef(stringRef("ffi", "a"))?.$ref.id).toBe("a");
+    expect(asRef(fileRef("api", "f"))?.as).toBe("file");
+    expect(asRef("inline")).toBeNull();
+    expect(asRef(42)).toBeNull();
+    expect(asRef({ foo: "bar" })).toBeNull();
+    expect(asRef({ $agent: "x.y@s" })).toBeNull();
   });
 
-  it("fetch() encodes an inline string to UTF-8 bytes", async () => {
-    const { fetchImpl } = stubFetch("UNUSED");
-    const value = createValueClient({ env: {}, fetchImpl });
-    expect(new TextDecoder().decode(await value.fetch("héllo"))).toBe("héllo");
-  });
+  it("isKatariFile / isKatariString / isKatariAgent", () => {
+    expect(isKatariFile(fileRef("ffi", "f"))).toBe(true);
+    expect(isKatariFile(stringRef("ffi", "s"))).toBe(false);
+    expect(isKatariFile("inline")).toBe(false);
 
-  it("fetchRange() slices inline bytes locally", async () => {
-    const { fetchImpl, calls } = stubFetch("UNUSED");
-    const value = createValueClient({ env: {}, fetchImpl });
-    expect(new TextDecoder().decode(await value.fetchRange("0123456789", 2, 4))).toBe("2345");
-    expect(calls).toHaveLength(0);
+    expect(isKatariString("inline")).toBe(true);
+    expect(isKatariString(stringRef("core", "s"))).toBe(true);
+    expect(isKatariString(fileRef("core", "f"))).toBe(false);
+
+    expect(isKatariAgent({ $agent: "tools.search@snap" })).toBe(true);
+    expect(isKatariAgent({ $agent: "closureref:abc" })).toBe(true);
+    expect(isKatariAgent(stringRef("ffi", "s"))).toBe(false);
+    expect(isKatariAgent("x.y")).toBe(false);
   });
 });
 
-describe("katari.value: $ref via data plane", () => {
-  it("text() GETs the data-plane URL with the bearer token", async () => {
+describe("data plane: fetchBytes", () => {
+  it("GETs the data-plane URL with the bearer token", async () => {
     const { fetchImpl, calls } = stubFetch("fetched conversation");
-    const value = createValueClient({ env: ENV, fetchImpl });
-    expect(await value.text(ref("ffi", "abc"))).toBe("fetched conversation");
+    const dp = createDataPlane({ env: ENV, fetchImpl });
+    const bytes = await dp.fetchBytes(stringRef("ffi", "abc"));
+    expect(new TextDecoder().decode(bytes)).toBe("fetched conversation");
     expect(calls).toHaveLength(1);
     expect(calls[0]?.url).toBe("http://host:9000/project/proj-1/value/ffi/ref/abc");
     expect(calls[0]?.headers?.Authorization).toBe("Bearer tok-123");
   });
 
-  it("fetch() returns the raw bytes", async () => {
-    const { fetchImpl } = stubFetch("raw-bytes");
-    const value = createValueClient({ env: ENV, fetchImpl });
-    expect(new TextDecoder().decode(await value.fetch(ref("core", "xyz")))).toBe("raw-bytes");
-  });
-
-  it("fetchRange() appends ?range=offset-end", async () => {
-    const { fetchImpl, calls } = stubFetch("RANGE");
-    const value = createValueClient({ env: ENV, fetchImpl });
-    await value.fetchRange(ref("api", "f1"), 10, 5);
-    expect(calls[0]?.url).toBe("http://host:9000/project/proj-1/value/api/ref/f1?range=10-14");
-  });
-
   it("throws a clear error when protocol env is missing", async () => {
     const { fetchImpl } = stubFetch("UNUSED");
-    const value = createValueClient({ env: {}, fetchImpl });
-    await expect(value.text(ref("ffi", "abc"))).rejects.toThrow(/missing sidecar env/);
+    const dp = createDataPlane({ env: {}, fetchImpl });
+    await expect(dp.fetchBytes(stringRef("ffi", "abc"))).rejects.toThrow(/missing sidecar env/);
   });
 
   it("throws on a non-2xx data-plane response", async () => {
     const { fetchImpl } = stubFetch("not found", 404);
-    const value = createValueClient({ env: ENV, fetchImpl });
-    await expect(value.fetch(ref("ffi", "gone"))).rejects.toThrow(/failed \(404\)/);
+    const dp = createDataPlane({ env: ENV, fetchImpl });
+    await expect(dp.fetchBytes(fileRef("ffi", "gone"))).rejects.toThrow(/failed \(404\)/);
   });
 });
 
-describe("katari.value: type guards", () => {
-  it("rejects a non-byte-sequence RawValue", async () => {
-    const { fetchImpl } = stubFetch("UNUSED");
-    const value = createValueClient({ env: ENV, fetchImpl });
-    await expect(value.text(42)).rejects.toThrow(/not a string \/ file/);
-    await expect(value.fetch({ foo: "bar" })).rejects.toThrow(/not a string \/ file/);
-  });
-});
-
-const PRODUCE_ENV = { ...ENV, KATARI_SIDECAR_OWNER: "ffi" };
-
-function isRef(v: unknown): v is { $ref: { module: string; id: string }; as: string; size: number } {
-  return typeof v === "object" && v !== null && "$ref" in v;
-}
-
-describe("katari.value: produce", () => {
-  it("put() POSTs to the owner's produce endpoint and returns a $ref", async () => {
+describe("data plane: produce", () => {
+  it("POSTs to the owner's produce endpoint with semantic-kind / content-type / display-name", async () => {
     const { fetchImpl, calls } = stubFetch(
       JSON.stringify({ module: "ffi", id: "new-id", hash: "hh", size: 9, contentType: "image/png" }),
       201,
     );
-    const value = createValueClient({ env: PRODUCE_ENV, fetchImpl });
-    const ref = await value.put(new TextEncoder().encode("some bytes"), {
+    const dp = createDataPlane({ env: PRODUCE_ENV, fetchImpl });
+    const ref = await dp.produce(new TextEncoder().encode("some bytes"), {
       as: "file",
       contentType: "image/png",
+      displayName: "pic.png",
     });
     expect(calls[0]?.url).toBe("http://host:9000/project/proj-1/value/ffi/produce");
     expect(calls[0]?.method).toBe("POST");
     expect(calls[0]?.headers?.["X-Katari-Semantic-Kind"]).toBe("file");
     expect(calls[0]?.headers?.["Content-Type"]).toBe("image/png");
-    expect(isRef(ref) && ref.$ref).toEqual({ module: "ffi", id: "new-id" });
-    expect(isRef(ref) && ref.as).toBe("file");
+    expect(calls[0]?.headers?.["X-Katari-Display-Name"]).toBe("pic.png");
+    expect(ref.$ref).toEqual({ module: "ffi", id: "new-id" });
+    expect(ref.as).toBe("file");
   });
 
-  it("put() requires KATARI_SIDECAR_OWNER", async () => {
-    const { fetchImpl } = stubFetch(JSON.stringify({ module: "ffi", id: "x", hash: "h", size: 1 }));
-    const value = createValueClient({ env: ENV, fetchImpl });
-    await expect(value.put(new Uint8Array([1]))).rejects.toThrow(/KATARI_SIDECAR_OWNER/);
-  });
-
-  it("open() buffers chunks and produces the concatenation on close", async () => {
+  it("stamps the owning delegation when one is current", async () => {
     const { fetchImpl, calls } = stubFetch(
-      JSON.stringify({ module: "ffi", id: "streamed", hash: "h", size: 6 }),
+      JSON.stringify({ module: "ffi", id: "x", hash: "h", size: 1 }),
       201,
     );
-    const value = createValueClient({ env: PRODUCE_ENV, fetchImpl });
-    const handle = value.open({ as: "file" });
-    handle.pushChunk(new TextEncoder().encode("foo"));
-    handle.pushChunk(new TextEncoder().encode("bar"));
-    const ref = await handle.close();
-    expect(new TextDecoder().decode(calls[0]?.body as Uint8Array)).toBe("foobar");
-    expect(isRef(ref) && ref.$ref).toEqual({ module: "ffi", id: "streamed" });
+    const dp = createDataPlane({
+      env: PRODUCE_ENV,
+      fetchImpl,
+      currentDelegationId: () => "deleg-9",
+    });
+    await dp.produce(new Uint8Array([1]), { as: "string" });
+    expect(calls[0]?.headers?.["X-Katari-Owner-Delegation"]).toBe("deleg-9");
   });
 
-  it("open().abort() makes no produce call", async () => {
-    const { fetchImpl, calls } = stubFetch(JSON.stringify({ module: "ffi", id: "x", hash: "h", size: 1 }));
-    const value = createValueClient({ env: PRODUCE_ENV, fetchImpl });
-    const handle = value.open();
-    handle.pushChunk(new Uint8Array([1, 2, 3]));
-    handle.abort();
-    expect(calls).toHaveLength(0);
+  it("requires KATARI_SIDECAR_OWNER", async () => {
+    const { fetchImpl } = stubFetch(JSON.stringify({ module: "ffi", id: "x", hash: "h", size: 1 }));
+    const dp = createDataPlane({ env: ENV, fetchImpl });
+    await expect(dp.produce(new Uint8Array([1]), { as: "string" })).rejects.toThrow(
+      /KATARI_SIDECAR_OWNER/,
+    );
   });
+});
 
-  it("persist() promotes an ephemeral ref to an api file $ref", async () => {
+describe("data plane: persist", () => {
+  it("promotes an ephemeral ref to an api file $ref", async () => {
     const { fetchImpl, calls } = stubFetch(
       JSON.stringify({ module: "api", id: "file-1", hash: "h", size: 4 }),
       201,
     );
-    const value = createValueClient({ env: PRODUCE_ENV, fetchImpl });
-    const result = await value.persist(ref("ffi", "eph-1"), { displayName: "kept.bin" });
+    const dp = createDataPlane({ env: PRODUCE_ENV, fetchImpl });
+    const result = await dp.persist(fileRef("ffi", "eph-1"), { displayName: "kept.bin" });
     expect(calls[0]?.url).toBe("http://host:9000/project/proj-1/value/ffi/ref/eph-1/persist");
     expect(calls[0]?.body).toBe(JSON.stringify({ displayName: "kept.bin" }));
-    expect(isRef(result) && result.$ref).toEqual({ module: "api", id: "file-1" });
-    expect(isRef(result) && result.as).toBe("file");
+    expect(result.$ref).toEqual({ module: "api", id: "file-1" });
+    expect(result.as).toBe("file");
   });
 
-  it("persist() rejects a non-ephemeral / non-ref value", async () => {
+  it("rejects a non-ephemeral (api) ref", async () => {
     const { fetchImpl } = stubFetch("{}");
-    const value = createValueClient({ env: PRODUCE_ENV, fetchImpl });
-    await expect(value.persist("inline")).rejects.toThrow(/not a \$ref/);
-    await expect(value.persist({ $ref: { module: "api", id: "f" }, as: "file", hash: "h", size: 1 })).rejects.toThrow(
-      /only ephemeral/,
-    );
+    const dp = createDataPlane({ env: PRODUCE_ENV, fetchImpl });
+    await expect(dp.persist(fileRef("api", "f"))).rejects.toThrow(/only ephemeral/);
   });
 });

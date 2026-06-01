@@ -2,19 +2,18 @@
 //
 // `makeBlob` produces a value-store blob from text and returns a file ref;
 // `readBlob` consumes that ref back to text. Together they exercise the Katari
-// Protocol data plane end to end (katari.value.put → store → katari.value.text),
+// Protocol data plane end to end (katari.makeFile → store → katari.readString),
 // reading the protocol coordinates (URL / token / project / owner) from the env
 // the host stamps onto the sidecar.
 
-import katari from "@katari-lang/port";
+import katari, { type KatariFile } from "@katari-lang/port";
 
-katari.agent("makeBlob", async ({ args }) => {
-  const text = args.text as string;
-  const bytes = new TextEncoder().encode(text);
-  // `as: "file"` matches the ktr `-> file` return; the default is "string".
-  return await katari.value.put(bytes, { as: "file", contentType: "text/plain" });
+katari.agent<{ text: string }>("makeBlob", async ({ args }) => {
+  const bytes = new TextEncoder().encode(args.text);
+  // A `file` ref (matches the ktr `-> file` return), named + typed.
+  return await katari.makeFile(bytes, { name: "blob.txt", contentType: "text/plain" });
 });
 
-katari.agent("readBlob", async ({ args }) => {
-  return await katari.value.text(args.blob);
+katari.agent<{ blob: KatariFile }>("readBlob", async ({ args }) => {
+  return await katari.readString(args.blob);
 });
