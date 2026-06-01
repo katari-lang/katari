@@ -84,6 +84,35 @@ function asJson(value: Json): never {
 }
 
 /**
+ * Postgres `text` / `jsonb` cannot store U+0000 (NUL): a NUL anywhere in a
+ * snapshot payload (IR / schema bundle / bundled ext JS) otherwise surfaces as
+ * an opaque `unsupported Unicode escape sequence` from the driver, deep inside
+ * an insert. Scan up front and fail with the exact field + offset + context so
+ * the source is obvious. Cold path (once per apply), so the deep walk is fine.
+ */
+function assertNoNul(value: unknown, label: string): void {
+  const visit = (node: unknown, path: string): void => {
+    if (typeof node === "string") {
+      const at = node.indexOf("\u0000");
+      if (at >= 0) {
+        const context = node.slice(Math.max(0, at - 30), at + 30);
+        throw new Error(
+          `snapshot ${label}${path} contains a NUL byte (U+0000) at offset ${at}, ` +
+            `which Postgres cannot store. Context: ${JSON.stringify(context)}`,
+        );
+      }
+    } else if (Array.isArray(node)) {
+      node.forEach((element, index) => {
+        visit(element, `${path}[${index}]`);
+      });
+    } else if (node !== null && typeof node === "object") {
+      for (const [key, element] of Object.entries(node)) visit(element, `${path}.${key}`);
+    }
+  };
+  visit(value, "");
+}
+
+/**
  * Identity helper retained at the call sites that previously decrypted
  * on read. With encryption now living inside each Module's persistor,
  * storage hands back whatever JSON was persisted; the Module decrypts
@@ -244,6 +273,11 @@ class PgSnapshotRepo implements SnapshotRepo {
     schemaBundle: SchemaBundle;
     message: string;
   }): Promise<SnapshotId> {
+    // Postgres can't store NUL — surface a precise field + location instead of
+    // the driver's opaque `unsupported Unicode escape sequence` deep in INSERT.
+    assertNoNul(input.irModule, "irModule");
+    if (input.sidecarBundle !== null) assertNoNul(input.sidecarBundle, "sidecarBundle");
+    assertNoNul(input.schemaBundle, "schemaBundle");
     const id = uuidv7();
     await this.sql`
       INSERT INTO snapshots (id, project_id, ir_module, sidecar_bundle, schema_bundle, message, created_at)

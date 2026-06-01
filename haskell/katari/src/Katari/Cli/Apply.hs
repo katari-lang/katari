@@ -9,12 +9,12 @@ where
 import Control.Exception (IOException, try)
 import Control.Monad (when)
 import Data.Aeson qualified as Aeson
-import Data.ByteString.Lazy.Char8 qualified as LC8
 import Data.List (isSuffixOf)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as Text
+import Data.Text.Encoding qualified as TE
 import Data.Text.IO qualified as TextIO
 import GHC.Generics (Generic)
 import Katari.Api.Client qualified as Api
@@ -239,7 +239,10 @@ runKatariBundle packages = do
             <> stderrOut
             <> ")"
         )
-    ExitSuccess -> case Aeson.eitherDecode (LC8.pack stdout) of
+    -- The bundler emits UTF-8 JSON on stdout. Re-encode the decoded String as
+    -- UTF-8 (NOT Char8/LC8.pack, which truncates each char to its low byte —
+    -- e.g. U+2500 box-drawing comments → NUL, which Postgres then rejects).
+    ExitSuccess -> case Aeson.eitherDecodeStrict' (TE.encodeUtf8 (Text.pack stdout)) of
       Left err -> die ("katari-bundle returned unparseable JSON: " <> err)
       Right (resp :: BundleResponse) -> pure resp.bundle
 
