@@ -14,7 +14,6 @@
   },
   "dependencies": {
     "@katari-lang/runtime": "workspace:*",
-    "@monaco-editor/react": "^4.7.0",
     "@radix-ui/react-dialog": "^1.1.15",
     "@radix-ui/react-dropdown-menu": "^2.1.16",
     "@radix-ui/react-select": "^2.2.6",
