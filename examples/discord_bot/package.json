@@ -5,7 +5,8 @@
   "description": "Katari example: a Discord bot (ext sidecar + agents).",
   "type": "module",
   "dependencies": {
-    "@katari-lang/port": "workspace:*"
+    "@katari-lang/port": "workspace:*",
+    "discord.js": "^14.16.3"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

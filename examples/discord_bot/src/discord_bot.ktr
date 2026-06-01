@@ -4,6 +4,9 @@ data ai_client(provider: string, model: string, api_key: secret)
 @"The shared AI client capability (provided once at the root)."
 request get_ai_client() -> ai_client
 
+@"The live Discord gateway connection (the JS client lives in the sidecar)."
+request get_discord_client() -> string
+
 @"The current conversation session handle (its message history lives in the sidecar)."
 request get_session() -> string
 
@@ -13,13 +16,33 @@ external create_session() -> string from "FFI:discord_bot.create_session"
 @"Run one turn: appends the prompt to the session's history, infers, returns the reply."
 external ai_infer(client: ai_client, session: string, prompt: string) -> string from "FFI:discord_bot.ai_infer"
 
+@"Connect to Discord and log in; returns an opaque client handle."
+external create_discord_client(token: secret) -> string from "FFI:discord_bot.create_discord_client"
+
+@"Post a message to a channel."
+external send_message(client: string, channel_id: string, text: string) -> null from "FFI:discord_bot.send_message"
+
+@"Listen forever on one channel; for each human message, delegate on_message with its text + channel."
+external watch_messages(client: string, channel_id: string, on_message: agent (text: string, channel_id: string) -> null with get_ai_client, get_discord_client) -> never from "FFI:discord_bot.watch_messages"
+
 @"Infer using the ambient AI client + session."
 agent infer(prompt: string) -> string with get_ai_client, get_session {
   ai_infer(client = get_ai_client(), session = get_session(), prompt = prompt)
 }
 
-@"Entry: set up the AI client + a session, then run one inference."
-agent main() -> string {
+@"Handle one incoming message: infer a reply in a fresh session, post it back."
+agent handle_message(text: string, channel_id: string) -> null with get_ai_client, get_discord_client {
+  handle (var s = create_session()) {
+    request get_session() {
+      next s
+    }
+  }
+  let reply = infer(prompt = text)
+  send_message(client = get_discord_client(), channel_id = channel_id, text = reply)
+}
+
+@"Entry: set up the AI client + Discord connection, then serve one channel forever."
+agent main(channel_id: string) -> string {
   handle {
     request env_not_found(env_key: string) {
       break f"missing env: ${env_key}"
@@ -30,10 +53,10 @@ agent main() -> string {
       next ai
     }
   }
-  handle (var s = create_session()) {
-    request get_session() {
-      next s
+  handle (var discord = create_discord_client(token = get_secret_env(key = "DISCORD_TOKEN"))) {
+    request get_discord_client() {
+      next discord
     }
   }
-  infer(prompt = "Say hello.")
+  watch_messages(client = get_discord_client(), channel_id = channel_id, on_message = handle_message)
 }
