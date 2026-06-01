@@ -48,6 +48,9 @@ importers:
 
   examples/discord_bot:
     dependencies:
+      '@e2b/code-interpreter':
+        specifier: ^1.5.0
+        version: 1.5.1
       '@katari-lang/port':
         specifier: workspace:*
         version: link:../../typescript/packages/katari-port
@@ -613,6 +616,20 @@ packages:
     cpu: [x64]
     os: [win32]
 
+  '@bufbuild/protobuf@2.12.0':
+    resolution: {integrity: sha512-B/XlCaFIP8LOwzo+bz5uFzATYokcwCKQcghqnlfwSmM5eX/qTkvDBnDPs+gXtX/RyjxJ4DRikECcPJbyALA8FA==}
+
+  '@connectrpc/connect-web@2.0.0-rc.3':
+    resolution: {integrity: sha512-w88P8Lsn5CCsA7MFRl2e6oLY4J/5toiNtJns/YJrlyQaWOy3RO8pDgkz+iIkG98RPMhj2thuBvsd3Cn4DKKCkw==}
+    peerDependencies:
+      '@bufbuild/protobuf': ^2.2.0
+      '@connectrpc/connect': 2.0.0-rc.3
+
+  '@connectrpc/connect@2.0.0-rc.3':
+    resolution: {integrity: sha512-ARBt64yEyKbanyRETTjcjJuHr2YXorzQo0etyS5+P6oSeW8xEuzajA9g+zDnMcj1hlX2dQE93foIWQGfpru7gQ==}
+    peerDependencies:
+      '@bufbuild/protobuf': ^2.2.0
+
   '@discordjs/builders@1.14.1':
     resolution: {integrity: sha512-gSKkhXLqs96TCzk66VZuHHl8z2bQMJFGwrXC0f33ngK+FLNau4hU1PYny3DNJfNdSH+gVMzE85/d5FQ2BpcNwQ==}
     engines: {node: '>=16.11.0'}
@@ -640,6 +657,10 @@ packages:
   '@discordjs/ws@1.2.3':
     resolution: {integrity: sha512-wPlQDxEmlDg5IxhJPuxXr3Vy9AjYq5xCvFWGJyD7w7Np8ZGu+Mc+97LCoEc/+AYCo2IDpKioiH0/c/mj5ZR9Uw==}
     engines: {node: '>=16.11.0'}
+
+  '@e2b/code-interpreter@1.5.1':
+    resolution: {integrity: sha512-mkyKjAW2KN5Yt0R1I+1lbH3lo+W/g/1+C2lnwlitXk5wqi/g94SEO41XKdmDf5WWpKG3mnxWDR5d6S/lyjmMEw==}
+    engines: {node: '>=18'}
 
   '@esbuild/aix-ppc64@0.21.5':
     resolution: {integrity: sha512-1SDgH6ZSPTlggy1yI6+Dbkiz8xzpHJEVAlF/AM1tHPLsf5STom9rwtjE4hKAF20FfXXNTFqEYXyJNWh1GiZedQ==}
@@ -2255,6 +2276,9 @@ packages:
     resolution: {integrity: sha512-Vw8qHK3bZM9y/P10u3Vib8o/DdkvA2OtPtZvD871QKjy74Wj1WSKFILMPRPSdUSx5RFK1arlJzEtA4PkFgnbuA==}
     engines: {node: '>=18'}
 
+  compare-versions@6.1.1:
+    resolution: {integrity: sha512-4hm4VPpIecmlg59CHXnRDnqGplJFrbLG4aFEl5vl6cK1u76ws3LLvX7ikFnTDl5vo39sjWD6AaDPYodJp/NNHg==}
+
   concat-map@0.0.1:
     resolution: {integrity: sha512-/Srv4dswyQNBfohGpz9o6Yb3Gz3SrUDqBH5rTuhGR7ahtlbYKnVxw2bCFMRljaA7EXHaXZ8wsHdodFvbkhKmqg==}
 
@@ -2405,6 +2429,10 @@ packages:
   dunder-proto@1.0.1:
     resolution: {integrity: sha512-KIN/nDJBQRcXw0MLVhZE9iQHmG68qAVIBg9CqmUYjmQIhgij9U5MFvrqkUL5FbtyyzZuOeOt0zdeRe4UY7ct+A==}
     engines: {node: '>= 0.4'}
+
+  e2b@1.13.2:
+    resolution: {integrity: sha512-m8acE/MzMAJo1A57DakR2X1Sl5Mt1tcQO2aJfygNaQHLXby/4xsjF0UeJUB70jF7xntiR41pAMbZEHnkzrT9tw==}
+    engines: {node: '>=18'}
 
   ecdsa-sig-formatter@1.0.11:
     resolution: {integrity: sha512-nagl3RYrbNv6kQkeJIpt6NJZy8twLB/2vtz6yN9Z4vRKHN4/QZJIEbqohALSgwKdnksuY3k5Addp5lg8sVoVcQ==}
@@ -3199,6 +3227,12 @@ packages:
     resolution: {integrity: sha512-YgBpdJHPyQ2UE5x+hlSXcnejzAvD0b22U2OuAP+8OnlJT+PjWPxtgmGqKKc+RgTM63U9gN0YzrYc71R2WT/hTA==}
     engines: {node: '>=18'}
 
+  openapi-fetch@0.9.8:
+    resolution: {integrity: sha512-zM6elH0EZStD/gSiNlcPrzXcVQ/pZo3BDvC6CDwRDUt1dDzxlshpmQnpD6cZaJ39THaSmwVCxxRrPKNM1hHrDg==}
+
+  openapi-typescript-helpers@0.0.8:
+    resolution: {integrity: sha512-1eNjQtbfNi5Z/kFhagDIaIRj6qqDzhjNJKz8cmMW0CVdGwT6e1GLbAfgI0d28VTJa1A8jz82jm/4dG8qNoNS8g==}
+
   p-map@7.0.4:
     resolution: {integrity: sha512-tkAQEw8ysMzmkhgw8k+1U/iPhWNhykKnSk4Rd5zLoPJCuJaGRPo6YposrZgaxHKzDHdDWWZvE/Sk7hsL2X/CpQ==}
     engines: {node: '>=18'}
@@ -3261,6 +3295,9 @@ packages:
   picomatch@4.0.4:
     resolution: {integrity: sha512-QP88BAKvMam/3NxH6vj2o21R6MjxZUAd6nlwAS/pnGvN9IVLocLHxGYIzFhg6fUQ+5th6P4dv4eW9jX3DSIj7A==}
     engines: {node: '>=12'}
+
+  platform@1.3.6:
+    resolution: {integrity: sha512-fnWVljUchTro6RiCFvCXBbNhJc2NijN7oIQxbwsyL0buWJPG85v81ehlHI9fXrJsMNgTofEoWIQeClKpgxFLrg==}
 
   pluralize@2.0.0:
     resolution: {integrity: sha512-TqNZzQCD4S42De9IfnnBvILN7HAW7riLqsCyp8lgjXeysyPlX5HhqKAcJHHHb9XskE4/a+7VGC9zzx8Ls0jOAw==}
@@ -4486,6 +4523,17 @@ snapshots:
   '@biomejs/cli-win32-x64@2.4.15':
     optional: true
 
+  '@bufbuild/protobuf@2.12.0': {}
+
+  '@connectrpc/connect-web@2.0.0-rc.3(@bufbuild/protobuf@2.12.0)(@connectrpc/connect@2.0.0-rc.3(@bufbuild/protobuf@2.12.0))':
+    dependencies:
+      '@bufbuild/protobuf': 2.12.0
+      '@connectrpc/connect': 2.0.0-rc.3(@bufbuild/protobuf@2.12.0)
+
+  '@connectrpc/connect@2.0.0-rc.3(@bufbuild/protobuf@2.12.0)':
+    dependencies:
+      '@bufbuild/protobuf': 2.12.0
+
   '@discordjs/builders@1.14.1':
     dependencies:
       '@discordjs/formatters': 0.6.2
@@ -4534,6 +4582,10 @@ snapshots:
     transitivePeerDependencies:
       - bufferutil
       - utf-8-validate
+
+  '@e2b/code-interpreter@1.5.1':
+    dependencies:
+      e2b: 1.13.2
 
   '@esbuild/aix-ppc64@0.21.5':
     optional: true
@@ -5933,6 +5985,8 @@ snapshots:
 
   commander@12.1.0: {}
 
+  compare-versions@6.1.1: {}
+
   concat-map@0.0.1: {}
 
   concurrently@9.2.1:
@@ -6094,6 +6148,15 @@ snapshots:
       call-bind-apply-helpers: 1.0.2
       es-errors: 1.3.0
       gopd: 1.2.0
+
+  e2b@1.13.2:
+    dependencies:
+      '@bufbuild/protobuf': 2.12.0
+      '@connectrpc/connect': 2.0.0-rc.3(@bufbuild/protobuf@2.12.0)
+      '@connectrpc/connect-web': 2.0.0-rc.3(@bufbuild/protobuf@2.12.0)(@connectrpc/connect@2.0.0-rc.3(@bufbuild/protobuf@2.12.0))
+      compare-versions: 6.1.1
+      openapi-fetch: 0.9.8
+      platform: 1.3.6
 
   ecdsa-sig-formatter@1.0.11:
     dependencies:
@@ -7132,6 +7195,12 @@ snapshots:
       is-inside-container: 1.0.0
       wsl-utils: 0.1.0
 
+  openapi-fetch@0.9.8:
+    dependencies:
+      openapi-typescript-helpers: 0.0.8
+
+  openapi-typescript-helpers@0.0.8: {}
+
   p-map@7.0.4: {}
 
   package-json-from-dist@1.0.1: {}
@@ -7191,6 +7260,8 @@ snapshots:
   picomatch@2.3.2: {}
 
   picomatch@4.0.4: {}
+
+  platform@1.3.6: {}
 
   pluralize@2.0.0: {}
 

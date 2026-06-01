@@ -49,16 +49,32 @@ for a reply, and posts it back — built to dogfood the language and SDK.
 
    - `GEMINI_API_KEY`
    - `DISCORD_TOKEN`
+   - `E2B_API_KEY` (only needed for the Python-tool demo below)
 
 5. **Deploy and run:**
 
    ```sh
-   katari apply                          # compile + bundle the ext + upload
-   katari run discord_bot.main --args '{}'
+   katari apply                                          # compile + bundle the ext + upload
+   katari run discord_bot.main --args '{"channel_id": "<channel id>"}'
    ```
 
    `main` never returns on its own — the bot stays up until you cancel the run.
-   Message the bot in your server and it replies.
+   Message the bot in that channel and it replies.
+
+## Tool calling (run Python via e2b)
+
+`ask` lets the model call a `run_python` tool: the ext runs the tool-call
+feedback loop, dispatching the tool back into Katari (so the tool is just an
+agent — it can use capabilities, raise requests, …). `solve` is a standalone
+entry to try it without Discord:
+
+```sh
+katari run discord_bot.solve --wait \
+  --args '{"task": "Use Python to compute the sum of the first 100 primes."}'
+```
+
+Today it wires one tool (`run_python`); the loop is written list-shaped, so the
+next step is to pass an array of tools (blocked on language-side list ops).
 
 The runtime listens on `http://localhost:8000` by default; point the CLI at it
 with `--api` or `KATARI_API_URL`.
