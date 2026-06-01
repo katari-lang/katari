@@ -36,7 +36,10 @@ if (databaseUrl === undefined || databaseUrl === "") {
 // Fall back through both so `pnpm dev` honours KATARI_PORT.
 const port = Number(process.env.PORT ?? process.env.KATARI_PORT ?? 8000);
 
-const logLevel = (process.env.LOG_LEVEL ?? "info") as LogLevel;
+// `KATARI_LOG_LEVEL` is the single knob (unlike PORT / DATABASE_URL, which keep
+// their unprefixed names to honour external conventions — PaaS-injected PORT,
+// the de-facto Postgres DATABASE_URL — a log level has no such convention).
+const logLevel = (process.env.KATARI_LOG_LEVEL ?? "info") as LogLevel;
 const logger = buildConsoleLogger(logLevel);
 
 const apiKey = process.env.KATARI_API_KEY;

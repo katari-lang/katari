@@ -15,7 +15,7 @@ services:
     environment:
       - PORT=8000
       - DATABASE_URL=postgresql://katari:katari@db:5432/katari_runtime
-      - LOG_LEVEL=${KATARI_LOG_LEVEL:-info}
+      - KATARI_LOG_LEVEL=${KATARI_LOG_LEVEL:-info}
       # Auth + secret crypto. Fail loud if unset so a misconfigured deploy
       # doesn't silently accept traffic on a broken auth path.
       - KATARI_API_KEY=${KATARI_API_KEY:?set KATARI_API_KEY in .env (copy from .env.example)}

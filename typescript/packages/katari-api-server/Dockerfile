@@ -10,7 +10,7 @@
 #   KATARI_API_KEY            (required)  Bearer token; "disabled" turns auth off (dev only)
 #   KATARI_SECRET_KEY         (required)  32-byte hex; AES-GCM key for env secret encryption
 #   PORT                      (default 8000)
-#   LOG_LEVEL                 (default "info")
+#   KATARI_LOG_LEVEL          (default "info")
 #   KATARI_ADMIN_WEB_DIST     (default /app/admin-web/dist; set to "" to disable the UI)
 #
 # Apply schema.sql (shipped at /app/share/schema.sql) to your Postgres
@@ -75,7 +75,7 @@ COPY --from=builder /work/typescript/packages/katari-admin-web/dist/ /app/admin-
 
 ENV NODE_ENV=production
 ENV PORT=8000
-ENV LOG_LEVEL=info
+ENV KATARI_LOG_LEVEL=info
 ENV KATARI_ADMIN_WEB_DIST=/app/admin-web/dist
 
 EXPOSE 8000

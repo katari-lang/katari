@@ -219,7 +219,7 @@ dockerComposeTemplate name tag =
       "    environment:",
       "      - PORT=8000",
       "      - DATABASE_URL=postgresql://katari:katari@db:5432/katari_runtime",
-      "      - LOG_LEVEL=${KATARI_LOG_LEVEL:-info}",
+      "      - KATARI_LOG_LEVEL=${KATARI_LOG_LEVEL:-info}",
       "      - KATARI_API_KEY=${KATARI_API_KEY:?set KATARI_API_KEY in .env (copy from .env.example)}",
       "      - KATARI_SECRET_KEY=${KATARI_SECRET_KEY:?set KATARI_SECRET_KEY in .env (copy from .env.example)}",
       "      # Blob storage (S3-compatible, required). Defaults to the bundled",
