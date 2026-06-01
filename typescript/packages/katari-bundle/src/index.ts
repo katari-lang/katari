@@ -82,6 +82,14 @@ export async function bundleSidecar(opts: BundleOptions): Promise<BundleResult |
       write: false,
       sourcemap: false,
       treeShaking: true,
+      // The output is ESM, but bundled CommonJS deps (e.g. discord.js) call
+      // `require("node:events")` at load time. esbuild leaves those as a
+      // `__require` shim that throws in ESM ("Dynamic require of … is not
+      // supported"). Inject a real `require` via createRequire so the shim
+      // resolves built-ins / CJS deps at runtime instead of throwing.
+      banner: {
+        js: "import { createRequire as __katariCreateRequire } from 'node:module'; const require = __katariCreateRequire(import.meta.url);",
+      },
       plugins: [moduleWrapPlugin],
     });
   } catch (err) {
