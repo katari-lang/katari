@@ -37,6 +37,15 @@ release · **[later]** post-v0.1.0 · **[deferred]** acknowledged, no owner yet.
       `{ $constructor: "module.ctor", ... }` by hand — a magic string plus the
       qualified name. A helper should hide it. (We have `makeString` /
       `makeFile` / `makeAgent`, but no `makeData` / `makeTagged`.)
+- [ ] **[v0.1.0] Provider-ready tool schemas.** `get_metadata(...).input` is the
+      compiler's draft-07 JSON Schema, which is correct for runtime validation
+      but not directly consumable by LLM providers — Gemini's
+      `functionDeclarations.parameters` is a closed OpenAPI-subset proto and 400s
+      on `additionalProperties` (and would on `$schema` / `$defs` / …). The
+      discord_bot tool loop strips those by hand before the Gemini call. As tool
+      calling becomes first-class, decide where per-provider schema adaptation
+      lives (a port helper? a stdlib agent? emitted alongside the schema bundle?)
+      rather than every ext re-implementing it.
 
 ## Runtime / model
 
