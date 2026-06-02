@@ -52,6 +52,16 @@ release · **[later]** post-v0.1.0 · **[deferred]** acknowledged, no owner yet.
   - Unlocks: handler-providing combinators (`with_session` / `retry` /
     `with_timeout`), the tool-calling cleanup below, and reusable libraries over
     arbitrary effects. (`map` / `filter` / `reduce` would also want this.)
+- [ ] **[later · needs generics] First-class handler provision.** A library
+      should be able to ship a reusable handler (a state cell, a retry/timeout
+      wrapper) so a user writes `with <handler>` instead of hand-rolling the
+      `handle (var s = …) { request … }` boilerplate per capability (the
+      discord_bot session was exactly this by hand before it moved to `array`).
+      Two directions to pick between: (a) make a **handler first-class** and add a
+      `with handler` form; or (b) treat a semantic handler as a **function taking
+      a callback** and add a Gleam-style `use` binding that desugars to the
+      handle/continuation. Either way needs generics (the handler is polymorphic
+      over the body's type/effects), so it lands after that phase.
 
 ## SDK (`@katari-lang/port`)
 
