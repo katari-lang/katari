@@ -1,0 +1,26 @@
+@"Exercises the array / string / math stdlib modules; returns a summary string."
+agent main() -> string {
+  // Grow a list with array.of + array.append (the new collection pattern):
+  // xs = [3, 1, 2].
+  let xs = array.append(
+    array = array.append(array = array.of(value = 3), value = 1),
+    value = 2,
+  )
+  let len = array.length(array = xs)
+  let has1 = array.contains(array = xs, value = 1)
+  let idx2 = array.index_of(array = xs, value = 2)
+  // array.get returns the element type (here: integer), via the array_get rule.
+  let first = array.get(array = array.reverse(array = xs), index = 0)
+
+  // string.* — split / join / upper / length.
+  let words = string.split(value = "katari,is,fun", separator = ",")
+  let joined = string.join(parts = words, separator = " ")
+  let shout = string.upper(value = joined)
+  let n = string.length(value = "hello")
+
+  // math.* — abs / max / round.
+  let big = math.max(lhs = first, rhs = math.abs(value = -9))
+  let r = math.round(value = 2.5)
+
+  f"len=${to_string(value = len)} has1=${to_string(value = has1)} idx2=${to_string(value = idx2)} first=${to_string(value = first)} n=${to_string(value = n)} big=${to_string(value = big)} r=${to_string(value = r)} shout=${shout}"
+}

@@ -352,4 +352,9 @@ describe("samples/ end-to-end (apply → run → verify)", () => {
       expect(result).toBe("hi bob");
     },
   );
+
+  itE2E("24-stdlib-collections: array / string / math stdlib modules", async () => {
+    const result = await applyAndRun("stdlib_collections", "24-stdlib-collections");
+    expect(result).toBe("len=3 has1=true idx2=2 first=2 n=5 big=9 r=3 shout=KATARI IS FUN");
+  });
 });
