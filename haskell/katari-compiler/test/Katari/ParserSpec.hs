@@ -603,8 +603,12 @@ letStatement = describe "let statement" $ do
     _ <- shouldSucceed "agent main() { let _ = foo(); }"
     pure ()
 
-  it "requires semicolon" $ do
-    shouldFail "agent main() { let x = 1 }"
+  it "requires a separator between statements" $ do
+    shouldFail "agent main() { let x = 1 let y = 2 }"
+
+  it "a trailing statement needs no separator before the closing brace" $ do
+    _ <- shouldSucceed "agent main() { let x = 1 }"
+    pure ()
 
   it "let statement binds correct name" $ do
     m <- shouldSucceed "agent main() { let x = 1; }"

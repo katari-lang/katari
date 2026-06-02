@@ -839,11 +839,22 @@ parseBlockBodyWithRecovery = loop []
 parseNonExpressionStatement :: Parser (Statement Parsed)
 parseNonExpressionStatement =
   choice
-    [ StatementLet <$> parseLet <* void (some parseSemicolon),
-      StatementAgent <$> parseAgentStatement <* void (some parseSemicolon),
-      StatementReturn <$> parseReturn <* void (some parseSemicolon),
-      parseBreakOrNextStatement <* void (some parseSemicolon)
+    [ StatementLet <$> parseLet <* parseStatementEnd,
+      StatementAgent <$> parseAgentStatement <* parseStatementEnd,
+      StatementReturn <$> parseReturn <* parseStatementEnd,
+      parseBreakOrNextStatement <* parseStatementEnd
     ]
+
+-- | Terminator for a non-expression statement (let / agent / return / break /
+-- next): one or more @;@ / newlines, OR the end of the enclosing block (@}@ /
+-- EOF), consumed only by lookahead. The block-end alternative lets the last
+-- statement on a single line — e.g. @{ break x }@ — omit a trailing separator,
+-- mirroring how a trailing expression is closed by @}@ (so the two are
+-- symmetric instead of the statement form demanding a newline / @;@).
+parseStatementEnd :: Parser ()
+parseStatementEnd =
+  void (some parseSemicolon)
+    <|> MP.lookAhead (parsePunctuation PunctuationRightBrace <|> eof)
 
 -- | Koka-style handle expression. Parses the handle clause and then
 -- captures the remaining block contents as the body (continuation).
