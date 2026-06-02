@@ -59,6 +59,12 @@ data PrimRule
     -- the element type from the array argument so the return type is
     -- precise rather than collapsing to @unknown@.
     PrimRuleArrayGet
+  | -- | Result is @array[T]@ for a shared element type @T@. Arguments
+    -- labelled @array@ / @lhs@ / @rhs@ are constrained to @array[T]@,
+    -- @value@ to @T@, and @start@ / @end@ to @integer@. Used by the
+    -- growing / slicing array prims (@of@ / @append@ / @concat@ / @slice@ /
+    -- @reverse@) so the element type flows through to the result.
+    PrimRuleArrayShape
   deriving (Eq, Show)
 
 -- | Decode a surface @using <name>@ identifier into a 'PrimRule', or
@@ -70,6 +76,7 @@ parsePrimRule = \case
   "numeric_join_unary" -> Just PrimRuleNumericJoinUnary
   "fstring_join" -> Just PrimRuleFstringJoin
   "array_get" -> Just PrimRuleArrayGet
+  "array_shape" -> Just PrimRuleArrayShape
   _ -> Nothing
 
 -- | Sentinel source span for synthetic prim nodes (used by operator

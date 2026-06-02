@@ -1330,7 +1330,13 @@ walkCallExpr CallExpression {callee, arguments, sourceSpan} = do
   -- so subtype-flavoured operator typing (e.g. @1 + 2 : Integer@) is
   -- preserved.
   primRule <- case callee' of
+    -- Flat prim reference (operator desugar, or an auto-injected root prim).
     ExpressionVariable VariableExpression {name = NameRef {resolution = Just (ResolvedTopLevel qualifiedName)}} ->
+      asks (Map.lookup qualifiedName . (.contextPrimRules))
+    -- Module-qualified prim reference (e.g. @math.abs@ / @array.of@). Without
+    -- this case a rule-bearing sub-module prim falls through to the generic
+    -- call path and gets its placeholder `unknown` return instead of the rule.
+    ExpressionQualifiedReference QualifiedReferenceExpression {target = NameRef {resolution = Just (ResolvedTopLevel qualifiedName)}} ->
       asks (Map.lookup qualifiedName . (.contextPrimRules))
     _ -> pure Nothing
   resultType <- case primRule of
@@ -1440,6 +1446,21 @@ applyPrimRule rule arguments sourceSpan =
           addTypeConstraint index_ SemanticTypeInteger reason
           addTypeConstraint array_ (SemanticTypeArray resultType) reason
           pure resultType
+        PrimRuleArrayShape -> do
+          -- Result is array[T]. array / lhs / rhs args are array[T], a
+          -- value arg is T, start / end args are integer. Covers
+          -- of / append / concat / slice / reverse.
+          let reason = ConstraintReason ReasonKindCallArgument sourceSpan
+          elementType <- freshTypeVar
+          let arrayType = SemanticTypeArray elementType
+              constrainAs expected label =
+                case Map.lookup label bag of
+                  Just argType -> addTypeConstraint argType expected reason
+                  Nothing -> pure ()
+          mapM_ (constrainAs arrayType) ["array", "lhs", "rhs"]
+          constrainAs elementType "value"
+          mapM_ (constrainAs SemanticTypeInteger) ["start", "end"]
+          pure arrayType
         PrimRuleSimple ->
           -- Caller filters PrimRuleSimple before invoking applyPrimRule.
           pure SemanticTypeUnknown

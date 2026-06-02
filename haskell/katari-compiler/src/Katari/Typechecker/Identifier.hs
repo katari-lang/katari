@@ -2334,7 +2334,7 @@ identifyModule allModuleData depExportTables allModuleNames trustedStdlibNames c
       Identifier (Map Text SymbolEntry)
     injectPrimitives isStdlibSubModule moduleSourceSpan userTable moduleNames allExports = do
       let rootExports = Map.findWithDefault Map.empty "primitive" allExports
-      base <- foldM (injectOne moduleSourceSpan) userTable (Map.toList rootExports)
+      base <- foldM (injectOne isStdlibSubModule moduleSourceSpan) userTable (Map.toList rootExports)
       if isStdlibSubModule
         then pure base
         else foldM (injectSubModule moduleSourceSpan) base (Set.toList moduleNames)
@@ -2357,15 +2357,22 @@ identifyModule allModuleData depExportTables allModuleNames trustedStdlibNames c
                 table
 
     injectOne ::
+      Bool ->
       SourceSpan ->
       Map Text SymbolEntry ->
       (Text, SymbolEntry) ->
       Identifier (Map Text SymbolEntry)
-    injectOne moduleSourceSpan table (name, primEntry) =
+    injectOne isStdlibSubModule moduleSourceSpan table (name, primEntry) =
       case Map.lookup name table of
-        Just _ -> do
-          emitError (ErrorPrimitiveConflict moduleSourceSpan name)
-          pure table
+        -- A stdlib sub-module may legitimately declare a name that also
+        -- exists as a root flat prim (e.g. @primitive.array@'s @concat@ vs
+        -- the root @concat@). Its own declaration shadows the injected root
+        -- name inside its scope; only user modules are barred from this.
+        Just _
+          | isStdlibSubModule -> pure table
+          | otherwise -> do
+              emitError (ErrorPrimitiveConflict moduleSourceSpan name)
+              pure table
         Nothing -> pure (Map.insert name primEntry table)
 
     addImport moduleNames allExports table = \case

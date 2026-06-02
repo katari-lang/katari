@@ -94,12 +94,12 @@ agent solve(task: string) -> string {
       break f"missing env: ${env_key}"
     }
   }
-  handle (var ai = ai_client(provider = "gemini", model = "gemini-3.1-flash-lite", api_key = get_secret_env(key = "GEMINI_API_KEY"))) {
+  handle (var ai = ai_client(provider = "gemini", model = "gemini-3.1-flash-lite", api_key = env.get_secret(key = "GEMINI_API_KEY"))) {
     request get_ai_client() {
       next ai
     }
   }
-  handle (var e2b_key = get_secret_env(key = "E2B_API_KEY")) {
+  handle (var e2b_key = env.get_secret(key = "E2B_API_KEY")) {
     request get_e2b_key() {
       next e2b_key
     }
@@ -119,12 +119,12 @@ agent main(channel_id: string) -> string {
       break f"missing env: ${env_key}"
     }
   }
-  handle (var ai = ai_client(provider = "gemini", model = "gemini-3.1-flash-lite", api_key = get_secret_env(key = "GEMINI_API_KEY"))) {
+  handle (var ai = ai_client(provider = "gemini", model = "gemini-3.1-flash-lite", api_key = env.get_secret(key = "GEMINI_API_KEY"))) {
     request get_ai_client() {
       next ai
     }
   }
-  handle (var discord = create_discord_client(token = get_secret_env(key = "DISCORD_TOKEN"))) {
+  handle (var discord = create_discord_client(token = env.get_secret(key = "DISCORD_TOKEN"))) {
     request get_discord_client() {
       next discord
     }

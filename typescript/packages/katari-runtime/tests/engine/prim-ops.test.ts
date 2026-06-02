@@ -228,6 +228,128 @@ describe("engine: file prims", () => {
       executePrim("primitive.string_to_file", { value: mkSecret("tok") }, mat, put),
     ).rejects.toThrow();
   });
+
+  it("array.* build / query (immutable)", async () => {
+    const arr: Value = { kind: "array", elements: [num1(1), num1(2), num1(3)] };
+    expect(await executePrim("primitive.array.length", { array: arr }, M)).toEqual(num1(3));
+    expect(await executePrim("primitive.array.empty", {}, M)).toEqual({ kind: "array", elements: [] });
+    expect(await executePrim("primitive.array.of", { value: num1(9) }, M)).toEqual({
+      kind: "array",
+      elements: [num1(9)],
+    });
+    expect(await executePrim("primitive.array.append", { array: arr, value: num1(4) }, M)).toEqual({
+      kind: "array",
+      elements: [num1(1), num1(2), num1(3), num1(4)],
+    });
+    expect(
+      await executePrim(
+        "primitive.array.concat",
+        { lhs: arr, rhs: { kind: "array", elements: [num1(4)] } },
+        M,
+      ),
+    ).toEqual({ kind: "array", elements: [num1(1), num1(2), num1(3), num1(4)] });
+    expect(
+      await executePrim("primitive.array.slice", { array: arr, start: num1(1), end: num1(3) }, M),
+    ).toEqual({ kind: "array", elements: [num1(2), num1(3)] });
+    expect(await executePrim("primitive.array.reverse", { array: arr }, M)).toEqual({
+      kind: "array",
+      elements: [num1(3), num1(2), num1(1)],
+    });
+    expect(await executePrim("primitive.array.contains", { array: arr, value: num1(2) }, M)).toEqual({
+      kind: "boolean",
+      value: true,
+    });
+    expect(
+      await executePrim("primitive.array.index_of", { array: arr, value: num1(3) }, M),
+    ).toEqual(num1(2));
+    expect(
+      await executePrim("primitive.array.index_of", { array: arr, value: num1(9) }, M),
+    ).toEqual(num1(-1));
+    // source unmutated by append / concat / reverse
+    expect(arr.elements.length).toBe(3);
+  });
+
+  it("string.* counts / slices in code points (surrogate-safe)", async () => {
+    const s = mkString("héllo😀"); // h é l l o 😀 = 6 code points (😀 is 2 UTF-16 units)
+    expect(await executePrim("primitive.string.length", { value: s }, M)).toEqual(num1(6));
+    expect(
+      await executePrim("primitive.string.slice", { value: s, start: num1(0), end: num1(2) }, M),
+    ).toEqual(mkString("hé"));
+    expect(
+      await executePrim("primitive.string.slice", { value: s, start: num1(5), end: num1(6) }, M),
+    ).toEqual(mkString("😀"));
+    expect(
+      await executePrim("primitive.string.index_of", { value: s, substring: mkString("😀") }, M),
+    ).toEqual(num1(5));
+    expect(
+      await executePrim(
+        "primitive.string.index_of",
+        { value: mkString("abc"), substring: mkString("z") },
+        M,
+      ),
+    ).toEqual(num1(-1));
+    expect(
+      await executePrim(
+        "primitive.string.contains",
+        { value: mkString("hello"), substring: mkString("ell") },
+        M,
+      ),
+    ).toEqual({ kind: "boolean", value: true });
+    expect(
+      await executePrim(
+        "primitive.string.starts_with",
+        { value: mkString("hello"), prefix: mkString("he") },
+        M,
+      ),
+    ).toEqual({ kind: "boolean", value: true });
+    expect(
+      await executePrim(
+        "primitive.string.ends_with",
+        { value: mkString("hello"), suffix: mkString("lo") },
+        M,
+      ),
+    ).toEqual({ kind: "boolean", value: true });
+    expect(await executePrim("primitive.string.upper", { value: mkString("aB") }, M)).toEqual(
+      mkString("AB"),
+    );
+    expect(await executePrim("primitive.string.lower", { value: mkString("aB") }, M)).toEqual(
+      mkString("ab"),
+    );
+    expect(await executePrim("primitive.string.trim", { value: mkString("  hi  ") }, M)).toEqual(
+      mkString("hi"),
+    );
+    expect(
+      await executePrim(
+        "primitive.string.replace",
+        { value: mkString("a.b.c"), pattern: mkString("."), replacement: mkString("-") },
+        M,
+      ),
+    ).toEqual(mkString("a-b-c"));
+    expect(
+      await executePrim(
+        "primitive.string.split",
+        { value: mkString("a,b,c"), separator: mkString(",") },
+        M,
+      ),
+    ).toEqual({ kind: "array", elements: [mkString("a"), mkString("b"), mkString("c")] });
+    expect(
+      await executePrim(
+        "primitive.string.join",
+        { parts: { kind: "array", elements: [mkString("a"), mkString("b")] }, separator: mkString("-") },
+        M,
+      ),
+    ).toEqual(mkString("a-b"));
+  });
+
+  it("math.* (round ties away from zero)", async () => {
+    expect(await executePrim("primitive.math.abs", { value: num1(-5) }, M)).toEqual(num1(5));
+    expect(await executePrim("primitive.math.min", num(3, 7), M)).toEqual(num1(3));
+    expect(await executePrim("primitive.math.max", num(3, 7), M)).toEqual(num1(7));
+    expect(await executePrim("primitive.math.floor", { value: num1(2.7) }, M)).toEqual(num1(2));
+    expect(await executePrim("primitive.math.ceil", { value: num1(2.1) }, M)).toEqual(num1(3));
+    expect(await executePrim("primitive.math.round", { value: num1(2.5) }, M)).toEqual(num1(3));
+    expect(await executePrim("primitive.math.round", { value: num1(-2.5) }, M)).toEqual(num1(-3));
+  });
 });
 
 function num(a: number, b: number) {

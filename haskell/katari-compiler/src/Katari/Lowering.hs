@@ -1141,7 +1141,7 @@ lowerExpr = \case
   AST.ExpressionIndexAccess indexAccessExpr -> do
     array <- lowerExpr indexAccessExpr.array
     index <- lowerExpr indexAccessExpr.index
-    emitPrimCall "array_get" [Arg "array" array, Arg "index" index]
+    emitPrimCall "array.get" [Arg "array" array, Arg "index" index]
   AST.ExpressionTemplate templateExpr -> lowerTemplate templateExpr
   AST.ExpressionBlock blockExpr -> lowerBlockExpr blockExpr
   AST.ExpressionIf ifExpr -> lowerIfExpr ifExpr

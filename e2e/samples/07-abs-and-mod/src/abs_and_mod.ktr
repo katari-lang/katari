@@ -7,7 +7,7 @@ agent manhattan(p = pa: point, q = pb: point) -> integer {
     case point(x = x1, y = y1) => {
       match (pb) {
         case point(x = x2, y = y2) => {
-          abs(value = x1 - x2) + abs(value = y1 - y2)
+          math.abs(value = x1 - x2) + math.abs(value = y1 - y2)
         }
       }
     }

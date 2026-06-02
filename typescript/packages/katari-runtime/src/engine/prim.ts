@@ -144,11 +144,6 @@ export async function executePrim(
       if (v?.kind === "number") return { kind: "number", value: -v.value };
       throw new RecoverableEngineError("prim neg: invalid args");
     }
-    case "primitive.abs": {
-      const v = args["value"];
-      if (v?.kind === "number") return { kind: "number", value: Math.abs(v.value) };
-      throw new RecoverableEngineError("prim abs: invalid args");
-    }
     case "primitive.eq":
       return { kind: "boolean", value: valueEquals(req(args, "lhs"), req(args, "rhs")) };
     case "primitive.ne":
@@ -310,29 +305,194 @@ export async function executePrim(
       }
       throw new RecoverableEngineError("prim tuple_get: invalid args");
     }
-    case "primitive.array_get": {
+    case "primitive.array.get": {
       const array = args["array"],
         index = args["index"];
       if (array?.kind === "array" && index?.kind === "number") {
         if (!Number.isInteger(index.value) || index.value < 0) {
           throw new RecoverableEngineError(
-            `prim array_get: index must be a non-negative integer, got ${index.value}`,
+            `prim array.get: index must be a non-negative integer, got ${index.value}`,
           );
         }
         const elem = array.elements[index.value];
         if (elem === undefined) {
-          throw new RecoverableEngineError("prim array_get: index out of bounds");
+          throw new RecoverableEngineError("prim array.get: index out of bounds");
         }
         return elem;
       }
-      throw new RecoverableEngineError("prim array_get: invalid args");
+      throw new RecoverableEngineError("prim array.get: invalid args");
     }
-    case "primitive.array_length": {
-      const array = args["array"];
-      if (array?.kind === "array") {
-        return { kind: "number", value: array.elements.length };
+    case "primitive.array.length": {
+      const array = req(args, "array");
+      if (array.kind !== "array") {
+        throw new RecoverableEngineError(
+          `prim array.length: argument must be an array, got ${array.kind}`,
+        );
       }
-      throw new RecoverableEngineError("prim array_length: argument must be an array");
+      return { kind: "number", value: array.elements.length };
+    }
+    case "primitive.array.empty":
+      return { kind: "array", elements: [] };
+    case "primitive.array.of":
+      return { kind: "array", elements: [req(args, "value")] };
+    case "primitive.array.append": {
+      const array = req(args, "array");
+      if (array.kind !== "array") {
+        throw new RecoverableEngineError(
+          `prim array.append: first argument must be an array, got ${array.kind}`,
+        );
+      }
+      return { kind: "array", elements: [...array.elements, req(args, "value")] };
+    }
+    case "primitive.array.concat": {
+      const lhs = req(args, "lhs"),
+        rhs = req(args, "rhs");
+      if (lhs.kind !== "array" || rhs.kind !== "array") {
+        throw new RecoverableEngineError("prim array.concat: both arguments must be arrays");
+      }
+      return { kind: "array", elements: [...lhs.elements, ...rhs.elements] };
+    }
+    case "primitive.array.slice": {
+      const array = req(args, "array"),
+        start = req(args, "start"),
+        end = req(args, "end");
+      if (array.kind !== "array" || start.kind !== "number" || end.kind !== "number") {
+        throw new RecoverableEngineError("prim array.slice: invalid args");
+      }
+      return { kind: "array", elements: array.elements.slice(start.value, end.value) };
+    }
+    case "primitive.array.reverse": {
+      const array = req(args, "array");
+      if (array.kind !== "array") {
+        throw new RecoverableEngineError(
+          `prim array.reverse: argument must be an array, got ${array.kind}`,
+        );
+      }
+      return { kind: "array", elements: [...array.elements].reverse() };
+    }
+    case "primitive.array.contains": {
+      const array = req(args, "array");
+      if (array.kind !== "array") {
+        throw new RecoverableEngineError(
+          `prim array.contains: first argument must be an array, got ${array.kind}`,
+        );
+      }
+      const value = req(args, "value");
+      return { kind: "boolean", value: array.elements.some((e) => valueEquals(e, value)) };
+    }
+    case "primitive.array.index_of": {
+      const array = req(args, "array");
+      if (array.kind !== "array") {
+        throw new RecoverableEngineError(
+          `prim array.index_of: first argument must be an array, got ${array.kind}`,
+        );
+      }
+      const value = req(args, "value");
+      return { kind: "number", value: array.elements.findIndex((e) => valueEquals(e, value)) };
+    }
+    // ── string.* (offsets / lengths in Unicode code points, not UTF-16) ──
+    case "primitive.string.length": {
+      const s = await materializeValueText(req(args, "value"), materialize);
+      return { kind: "number", value: [...s].length };
+    }
+    case "primitive.string.slice": {
+      const s = await materializeValueText(req(args, "value"), materialize);
+      const start = req(args, "start"),
+        end = req(args, "end");
+      if (start.kind !== "number" || end.kind !== "number") {
+        throw new RecoverableEngineError("prim string.slice: start/end must be integers");
+      }
+      return mkString([...s].slice(start.value, end.value).join(""));
+    }
+    case "primitive.string.contains": {
+      const s = await materializeValueText(req(args, "value"), materialize);
+      const sub = await materializeValueText(req(args, "substring"), materialize);
+      return { kind: "boolean", value: s.includes(sub) };
+    }
+    case "primitive.string.starts_with": {
+      const s = await materializeValueText(req(args, "value"), materialize);
+      const prefix = await materializeValueText(req(args, "prefix"), materialize);
+      return { kind: "boolean", value: s.startsWith(prefix) };
+    }
+    case "primitive.string.ends_with": {
+      const s = await materializeValueText(req(args, "value"), materialize);
+      const suffix = await materializeValueText(req(args, "suffix"), materialize);
+      return { kind: "boolean", value: s.endsWith(suffix) };
+    }
+    case "primitive.string.index_of": {
+      const s = await materializeValueText(req(args, "value"), materialize);
+      const sub = await materializeValueText(req(args, "substring"), materialize);
+      const codePoints = [...s];
+      const subCodePoints = [...sub];
+      if (subCodePoints.length === 0) return { kind: "number", value: 0 };
+      for (let i = 0; i + subCodePoints.length <= codePoints.length; i++) {
+        if (codePoints.slice(i, i + subCodePoints.length).join("") === sub) {
+          return { kind: "number", value: i };
+        }
+      }
+      return { kind: "number", value: -1 };
+    }
+    case "primitive.string.upper": {
+      const s = await materializeValueText(req(args, "value"), materialize);
+      return mkString(s.toUpperCase());
+    }
+    case "primitive.string.lower": {
+      const s = await materializeValueText(req(args, "value"), materialize);
+      return mkString(s.toLowerCase());
+    }
+    case "primitive.string.trim": {
+      const s = await materializeValueText(req(args, "value"), materialize);
+      return mkString(s.trim());
+    }
+    case "primitive.string.split": {
+      const s = await materializeValueText(req(args, "value"), materialize);
+      const separator = await materializeValueText(req(args, "separator"), materialize);
+      const parts = separator === "" ? [...s] : s.split(separator);
+      return { kind: "array", elements: parts.map((part): Value => mkString(part)) };
+    }
+    case "primitive.string.join": {
+      const parts = req(args, "parts");
+      if (parts.kind !== "array") {
+        throw new RecoverableEngineError("prim string.join: parts must be an array");
+      }
+      const separator = await materializeValueText(req(args, "separator"), materialize);
+      const pieces: string[] = [];
+      for (const part of parts.elements) {
+        pieces.push(await materializeValueText(part, materialize));
+      }
+      return mkString(pieces.join(separator));
+    }
+    case "primitive.string.replace": {
+      const s = await materializeValueText(req(args, "value"), materialize);
+      const pattern = await materializeValueText(req(args, "pattern"), materialize);
+      const replacement = await materializeValueText(req(args, "replacement"), materialize);
+      return mkString(s.replaceAll(pattern, replacement));
+    }
+    // ── math.* ──
+    case "primitive.math.abs": {
+      const v = req(args, "value");
+      if (v.kind !== "number") throw new RecoverableEngineError("prim math.abs: invalid args");
+      return { kind: "number", value: Math.abs(v.value) };
+    }
+    case "primitive.math.min":
+      return arith(name, args, (a, b) => Math.min(a, b));
+    case "primitive.math.max":
+      return arith(name, args, (a, b) => Math.max(a, b));
+    case "primitive.math.floor": {
+      const v = req(args, "value");
+      if (v.kind !== "number") throw new RecoverableEngineError("prim math.floor: invalid args");
+      return { kind: "number", value: Math.floor(v.value) };
+    }
+    case "primitive.math.ceil": {
+      const v = req(args, "value");
+      if (v.kind !== "number") throw new RecoverableEngineError("prim math.ceil: invalid args");
+      return { kind: "number", value: Math.ceil(v.value) };
+    }
+    case "primitive.math.round": {
+      const v = req(args, "value");
+      if (v.kind !== "number") throw new RecoverableEngineError("prim math.round: invalid args");
+      // Ties away from zero (Math.round breaks .5 toward +Infinity).
+      return { kind: "number", value: Math.sign(v.value) * Math.round(Math.abs(v.value)) };
     }
     case "primitive.type_of": {
       const value = args["value"];

@@ -14,26 +14,6 @@
     "requests": []
   },
   {
-    "description": "Absolute value (integer when operand is integer).",
-    "input": {
-      "additionalProperties": false,
-      "properties": {
-        "value": {
-          "type": "number"
-        }
-      },
-      "required": [
-        "value"
-      ],
-      "type": "object"
-    },
-    "name": "primitive.abs",
-    "output": {
-      "type": "number"
-    },
-    "requests": []
-  },
-  {
     "description": "Add two numbers.",
     "input": {
       "additionalProperties": false,
@@ -143,50 +123,6 @@
     "name": "primitive.and",
     "output": {
       "type": "boolean"
-    },
-    "requests": []
-  },
-  {
-    "description": "Retrieve the element at @index@.",
-    "input": {
-      "additionalProperties": false,
-      "properties": {
-        "array": {
-          "items": {},
-          "type": "array"
-        },
-        "index": {
-          "type": "integer"
-        }
-      },
-      "required": [
-        "array",
-        "index"
-      ],
-      "type": "object"
-    },
-    "name": "primitive.array_get",
-    "output": {},
-    "requests": []
-  },
-  {
-    "description": "Length of an array.",
-    "input": {
-      "additionalProperties": false,
-      "properties": {
-        "array": {
-          "items": {},
-          "type": "array"
-        }
-      },
-      "required": [
-        "array"
-      ],
-      "type": "object"
-    },
-    "name": "primitive.array_length",
-    "output": {
-      "type": "integer"
     },
     "requests": []
   },
@@ -535,45 +471,6 @@
       "type": "boolean"
     },
     "requests": []
-  },
-  {
-    "description": "Look up a non-secret env entry by key. Raises `env_not_found` if the key is missing.",
-    "input": {
-      "additionalProperties": false,
-      "properties": {
-        "key": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "key"
-      ],
-      "type": "object"
-    },
-    "name": "primitive.get_env",
-    "output": {
-      "type": "string"
-    },
-    "requests": [
-      {
-        "input": {
-          "additionalProperties": false,
-          "properties": {
-            "env_key": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "env_key"
-          ],
-          "type": "object"
-        },
-        "name": "primitive.env_not_found",
-        "output": {
-          "not": {}
-        }
-      }
-    ]
   },
   {
     "input": {
@@ -1438,34 +1335,6 @@
     "requests": []
   },
   {
-    "description": "Write an env entry. `is_secret = true` stores the value encrypted; reading it back requires `get_secret_env`.",
-    "input": {
-      "additionalProperties": false,
-      "properties": {
-        "is_secret": {
-          "type": "boolean"
-        },
-        "key": {
-          "type": "string"
-        },
-        "value": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "is_secret",
-        "key",
-        "value"
-      ],
-      "type": "object"
-    },
-    "name": "primitive.set_env",
-    "output": {
-      "type": "null"
-    },
-    "requests": []
-  },
-  {
     "description": "Write a string's bytes to a new file (a persistent value reference). Rejects @secret@ (a credential must not be laundered into a re-readable file).",
     "input": {
       "additionalProperties": false,
@@ -1599,6 +1468,300 @@
     "name": "primitive.type_of",
     "output": {
       "type": "string"
+    },
+    "requests": []
+  },
+  {
+    "description": "Append @value@ to the end, returning a fresh array (arrays are immutable).",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "array": {
+          "items": {},
+          "type": "array"
+        },
+        "value": {}
+      },
+      "required": [
+        "array",
+        "value"
+      ],
+      "type": "object"
+    },
+    "name": "primitive.array.append",
+    "output": {
+      "items": {},
+      "type": "array"
+    },
+    "requests": []
+  },
+  {
+    "description": "Concatenate two arrays into a fresh array.",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "lhs": {
+          "items": {},
+          "type": "array"
+        },
+        "rhs": {
+          "items": {},
+          "type": "array"
+        }
+      },
+      "required": [
+        "lhs",
+        "rhs"
+      ],
+      "type": "object"
+    },
+    "name": "primitive.array.concat",
+    "output": {
+      "items": {},
+      "type": "array"
+    },
+    "requests": []
+  },
+  {
+    "description": "True if @value@ is structurally equal to some element.",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "array": {
+          "items": {},
+          "type": "array"
+        },
+        "value": {}
+      },
+      "required": [
+        "array",
+        "value"
+      ],
+      "type": "object"
+    },
+    "name": "primitive.array.contains",
+    "output": {
+      "type": "boolean"
+    },
+    "requests": []
+  },
+  {
+    "description": "The empty array.",
+    "input": {
+      "additionalProperties": false,
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "name": "primitive.array.empty",
+    "output": {
+      "items": {},
+      "type": "array"
+    },
+    "requests": []
+  },
+  {
+    "description": "Retrieve the element at @index@ (0-based). Raises out-of-bounds as a `throw`.",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "array": {
+          "items": {},
+          "type": "array"
+        },
+        "index": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "array",
+        "index"
+      ],
+      "type": "object"
+    },
+    "name": "primitive.array.get",
+    "output": {},
+    "requests": []
+  },
+  {
+    "description": "Index of the first element structurally equal to @value@, or -1 if absent.",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "array": {
+          "items": {},
+          "type": "array"
+        },
+        "value": {}
+      },
+      "required": [
+        "array",
+        "value"
+      ],
+      "type": "object"
+    },
+    "name": "primitive.array.index_of",
+    "output": {
+      "type": "integer"
+    },
+    "requests": []
+  },
+  {
+    "description": "Number of elements in the array.",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "array": {
+          "items": {},
+          "type": "array"
+        }
+      },
+      "required": [
+        "array"
+      ],
+      "type": "object"
+    },
+    "name": "primitive.array.length",
+    "output": {
+      "type": "integer"
+    },
+    "requests": []
+  },
+  {
+    "description": "A single-element array carrying @value@.",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "value": {}
+      },
+      "required": [
+        "value"
+      ],
+      "type": "object"
+    },
+    "name": "primitive.array.of",
+    "output": {
+      "items": {},
+      "type": "array"
+    },
+    "requests": []
+  },
+  {
+    "description": "The array reversed.",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "array": {
+          "items": {},
+          "type": "array"
+        }
+      },
+      "required": [
+        "array"
+      ],
+      "type": "object"
+    },
+    "name": "primitive.array.reverse",
+    "output": {
+      "items": {},
+      "type": "array"
+    },
+    "requests": []
+  },
+  {
+    "description": "The sub-array from @start@ (inclusive) to @end@ (exclusive), 0-based.",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "array": {
+          "items": {},
+          "type": "array"
+        },
+        "end": {
+          "type": "integer"
+        },
+        "start": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "array",
+        "end",
+        "start"
+      ],
+      "type": "object"
+    },
+    "name": "primitive.array.slice",
+    "output": {
+      "items": {},
+      "type": "array"
+    },
+    "requests": []
+  },
+  {
+    "description": "Look up a non-secret env entry by key. Raises `env_not_found` if the key is missing.",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "key": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "key"
+      ],
+      "type": "object"
+    },
+    "name": "primitive.env.get",
+    "output": {
+      "type": "string"
+    },
+    "requests": [
+      {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "env_key": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "env_key"
+          ],
+          "type": "object"
+        },
+        "name": "primitive.env_not_found",
+        "output": {
+          "not": {}
+        }
+      }
+    ]
+  },
+  {
+    "description": "Write an env entry. `is_secret = true` stores the value encrypted; reading it back requires `env.get_secret`.",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "is_secret": {
+          "type": "boolean"
+        },
+        "key": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "is_secret",
+        "key",
+        "value"
+      ],
+      "type": "object"
+    },
+    "name": "primitive.env.set",
+    "output": {
+      "type": "null"
     },
     "requests": []
   },
@@ -2086,6 +2249,134 @@
     "requests": []
   },
   {
+    "description": "Absolute value (integer when the operand is integer).",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "value": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "value"
+      ],
+      "type": "object"
+    },
+    "name": "primitive.math.abs",
+    "output": {
+      "type": "number"
+    },
+    "requests": []
+  },
+  {
+    "description": "Round up to the nearest integer.",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "value": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "value"
+      ],
+      "type": "object"
+    },
+    "name": "primitive.math.ceil",
+    "output": {
+      "type": "integer"
+    },
+    "requests": []
+  },
+  {
+    "description": "Round down to the nearest integer.",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "value": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "value"
+      ],
+      "type": "object"
+    },
+    "name": "primitive.math.floor",
+    "output": {
+      "type": "integer"
+    },
+    "requests": []
+  },
+  {
+    "description": "The larger of two numbers (integer when both are integers).",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "lhs": {
+          "type": "number"
+        },
+        "rhs": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "lhs",
+        "rhs"
+      ],
+      "type": "object"
+    },
+    "name": "primitive.math.max",
+    "output": {
+      "type": "number"
+    },
+    "requests": []
+  },
+  {
+    "description": "The smaller of two numbers (integer when both are integers).",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "lhs": {
+          "type": "number"
+        },
+        "rhs": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "lhs",
+        "rhs"
+      ],
+      "type": "object"
+    },
+    "name": "primitive.math.min",
+    "output": {
+      "type": "number"
+    },
+    "requests": []
+  },
+  {
+    "description": "Round to the nearest integer (ties away from zero).",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "value": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "value"
+      ],
+      "type": "object"
+    },
+    "name": "primitive.math.round",
+    "output": {
+      "type": "integer"
+    },
+    "requests": []
+  },
+  {
     "description": "Construct an empty record.",
     "input": {
       "additionalProperties": false,
@@ -2262,6 +2553,292 @@
     "name": "primitive.record.size",
     "output": {
       "type": "integer"
+    },
+    "requests": []
+  },
+  {
+    "description": "True if @substring@ occurs anywhere in @value@.",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "substring": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "substring",
+        "value"
+      ],
+      "type": "object"
+    },
+    "name": "primitive.string.contains",
+    "output": {
+      "type": "boolean"
+    },
+    "requests": []
+  },
+  {
+    "description": "True if @value@ ends with @suffix@.",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "suffix": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "suffix",
+        "value"
+      ],
+      "type": "object"
+    },
+    "name": "primitive.string.ends_with",
+    "output": {
+      "type": "boolean"
+    },
+    "requests": []
+  },
+  {
+    "description": "Code-point index of the first occurrence of @substring@, or -1 if absent.",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "substring": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "substring",
+        "value"
+      ],
+      "type": "object"
+    },
+    "name": "primitive.string.index_of",
+    "output": {
+      "type": "integer"
+    },
+    "requests": []
+  },
+  {
+    "description": "Join the parts with @separator@ between them.",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "parts": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "separator": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "parts",
+        "separator"
+      ],
+      "type": "object"
+    },
+    "name": "primitive.string.join",
+    "output": {
+      "type": "string"
+    },
+    "requests": []
+  },
+  {
+    "description": "Number of Unicode code points in the string.",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "value": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "value"
+      ],
+      "type": "object"
+    },
+    "name": "primitive.string.length",
+    "output": {
+      "type": "integer"
+    },
+    "requests": []
+  },
+  {
+    "description": "Lower-case the string.",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "value": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "value"
+      ],
+      "type": "object"
+    },
+    "name": "primitive.string.lower",
+    "output": {
+      "type": "string"
+    },
+    "requests": []
+  },
+  {
+    "description": "Replace every occurrence of @pattern@ with @replacement@ (literal, not a regex).",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "pattern": {
+          "type": "string"
+        },
+        "replacement": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "pattern",
+        "replacement",
+        "value"
+      ],
+      "type": "object"
+    },
+    "name": "primitive.string.replace",
+    "output": {
+      "type": "string"
+    },
+    "requests": []
+  },
+  {
+    "description": "The sub-string from @start@ (inclusive) to @end@ (exclusive), counted in code points.",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "end": {
+          "type": "integer"
+        },
+        "start": {
+          "type": "integer"
+        },
+        "value": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "end",
+        "start",
+        "value"
+      ],
+      "type": "object"
+    },
+    "name": "primitive.string.slice",
+    "output": {
+      "type": "string"
+    },
+    "requests": []
+  },
+  {
+    "description": "Split on every occurrence of @separator@. An empty separator splits into code points.",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "separator": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "separator",
+        "value"
+      ],
+      "type": "object"
+    },
+    "name": "primitive.string.split",
+    "output": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "requests": []
+  },
+  {
+    "description": "True if @value@ begins with @prefix@.",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "prefix": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "prefix",
+        "value"
+      ],
+      "type": "object"
+    },
+    "name": "primitive.string.starts_with",
+    "output": {
+      "type": "boolean"
+    },
+    "requests": []
+  },
+  {
+    "description": "Strip leading and trailing whitespace.",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "value": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "value"
+      ],
+      "type": "object"
+    },
+    "name": "primitive.string.trim",
+    "output": {
+      "type": "string"
+    },
+    "requests": []
+  },
+  {
+    "description": "Upper-case the string.",
+    "input": {
+      "additionalProperties": false,
+      "properties": {
+        "value": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "value"
+      ],
+      "type": "object"
+    },
+    "name": "primitive.string.upper",
+    "output": {
+      "type": "string"
     },
     "requests": []
   }

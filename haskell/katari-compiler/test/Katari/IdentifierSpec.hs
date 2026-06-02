@@ -405,8 +405,8 @@ importHandling = describe "imports" $ do
   it "ImportModule path's last segment is used as default bind name" $ do
     res <-
       identifyMany
-        [ ("lib.math", "agent compute() { 0 }"),
-          ("main", "import lib.math\nagent run() { math.compute() }")
+        [ ("lib.calc", "agent compute() { 0 }"),
+          ("main", "import lib.calc\nagent run() { calc.compute() }")
         ]
     res `shouldSatisfy` isRight
 

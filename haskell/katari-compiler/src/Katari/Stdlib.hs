@@ -36,7 +36,11 @@ stdlibSources =
   Map.fromList
     [ ("primitive", primStdlibSource),
       ("primitive.json", jsonStdlibSource),
-      ("primitive.record", recordStdlibSource)
+      ("primitive.record", recordStdlibSource),
+      ("primitive.array", arrayStdlibSource),
+      ("primitive.string", stringStdlibSource),
+      ("primitive.env", envStdlibSource),
+      ("primitive.math", mathStdlibSource)
     ]
 
 -- | The set of module names occupied by 'stdlibSources'. Identifier
@@ -73,8 +77,6 @@ primStdlibSource =
       "primitive div(lhs: number, rhs: number) -> number",
       "@\"Unary negate.\"",
       "primitive neg(value: number) -> number",
-      "@\"Absolute value (integer when operand is integer).\"",
-      "primitive abs(value: number) -> number using numeric_join_unary",
       "",
       "// Comparison.",
       "@\"Structural equality.\"",
@@ -111,12 +113,6 @@ primStdlibSource =
       "primitive from_string(text: string) -> unknown with from_string_error",
       "@\"Format a value for f-string interpolation. Accepts string or secret only (taint-aware: secret yields secret); other types must be converted via @to_string@ first.\"",
       "primitive format(value: unknown) -> string using fstring_join",
-      "",
-      "// Structural access.",
-      "@\"Retrieve the element at @index@.\"",
-      "primitive array_get(array: array[unknown], index: integer) -> unknown using array_get",
-      "@\"Length of an array.\"",
-      "primitive array_length(array: array[unknown]) -> integer",
       "",
       "// File <-> string conversion.",
       "@\"Read a file's bytes back as a UTF-8 string.\"",
@@ -155,19 +151,13 @@ primStdlibSource =
       "request throw(msg: string) -> never",
       "",
       "// Env access. The runtime's ENV module owns a key/value store backed",
-      "// by the project's runtime (Postgres in `katari-api-server`). Secret",
-      "// entries are returned as the disjoint `secret` type so the type",
-      "// system can prevent them from leaking into `print` / `to_string` etc.",
-      "// Missing keys surface as `env_not_found` — handle it with",
-      "// `request env_not_found(env_key) { ... }` to provide a fallback.",
+      "// by the project's runtime (Postgres in `katari-api-server`). The lookup",
+      "// functions live in the `primitive.env` sub-module (called as `env.get` /",
+      "// `env.get_secret` / `env.set`); the `env_not_found` request stays flat in",
+      "// the root module so handlers `request env_not_found(env_key) { ... }`",
+      "// stay unqualified.",
       "@\"Raised when a requested env key is not present in the store. Handle to provide a default; if uncaught the snapshot transitions to the `error` state.\"",
       "request env_not_found(env_key: string) -> never",
-      "@\"Look up a non-secret env entry by key. Raises `env_not_found` if the key is missing.\"",
-      "external get_env(key: string) -> string with env_not_found from \"ENV:get_env\"",
-      "@\"Look up a secret env entry by key. The result is the disjoint `secret` type and never leaks into `print` / `to_string`. Raises `env_not_found` if the key is missing.\"",
-      "external get_secret_env(key: string) -> secret with env_not_found from \"ENV:get_secret_env\"",
-      "@\"Write an env entry. `is_secret = true` stores the value encrypted; reading it back requires `get_secret_env`.\"",
-      "external set_env(key: string, value: string, is_secret: boolean) -> null from \"ENV:set_env\"",
       "",
       "// JSON data model. `json` is the union of the 7 RFC-8259 JSON value",
       "// shapes; `primitive.json.parse` and `.stringify` exchange it across",
@@ -231,4 +221,103 @@ recordStdlibSource =
       "primitive has(record: record[unknown], key: string) -> boolean",
       "@\"Number of entries in the record.\"",
       "primitive size(record: record[unknown]) -> integer"
+    ]
+
+-- | The @primitive.array@ sub-module source. Users call these as
+-- @array.get(...)@, @array.append(...)@, etc. The growing / transforming
+-- functions carry the @array_shape@ rule so the element type @T@ flows
+-- through (e.g. @array.append(array[string], string) -> array[string]@).
+arrayStdlibSource :: Text
+arrayStdlibSource =
+  Text.unlines
+    [ "@\"Retrieve the element at @index@ (0-based). Raises out-of-bounds as a `throw`.\"",
+      "primitive get(array: array[unknown], index: integer) -> unknown using array_get",
+      "@\"Number of elements in the array.\"",
+      "primitive length(array: array[unknown]) -> integer",
+      "@\"The empty array.\"",
+      "primitive empty() -> array[unknown]",
+      "@\"A single-element array carrying @value@.\"",
+      "primitive of(value: unknown) -> array[unknown] using array_shape",
+      "@\"Append @value@ to the end, returning a fresh array (arrays are immutable).\"",
+      "primitive append(array: array[unknown], value: unknown) -> array[unknown] using array_shape",
+      "@\"Concatenate two arrays into a fresh array.\"",
+      "primitive concat(lhs: array[unknown], rhs: array[unknown]) -> array[unknown] using array_shape",
+      "@\"The sub-array from @start@ (inclusive) to @end@ (exclusive), 0-based.\"",
+      "primitive slice(array: array[unknown], start: integer, end: integer) -> array[unknown] using array_shape",
+      "@\"The array reversed.\"",
+      "primitive reverse(array: array[unknown]) -> array[unknown] using array_shape",
+      "@\"True if @value@ is structurally equal to some element.\"",
+      "primitive contains(array: array[unknown], value: unknown) -> boolean",
+      "@\"Index of the first element structurally equal to @value@, or -1 if absent.\"",
+      "primitive index_of(array: array[unknown], value: unknown) -> integer"
+    ]
+
+-- | The @primitive.string@ sub-module source. Users call these as
+-- @string.length(...)@, @string.slice(...)@, etc. Offsets / lengths are
+-- counted in Unicode code points (the result of decoding the UTF-8 text),
+-- not UTF-16 code units. Every argument is typed @string@, so a @secret@
+-- cannot be measured or sliced (its length / contents stay disjoint).
+stringStdlibSource :: Text
+stringStdlibSource =
+  Text.unlines
+    [ "@\"Number of Unicode code points in the string.\"",
+      "primitive length(value: string) -> integer",
+      "@\"The sub-string from @start@ (inclusive) to @end@ (exclusive), counted in code points.\"",
+      "primitive slice(value: string, start: integer, end: integer) -> string",
+      "@\"True if @substring@ occurs anywhere in @value@.\"",
+      "primitive contains(value: string, substring: string) -> boolean",
+      "@\"True if @value@ begins with @prefix@.\"",
+      "primitive starts_with(value: string, prefix: string) -> boolean",
+      "@\"True if @value@ ends with @suffix@.\"",
+      "primitive ends_with(value: string, suffix: string) -> boolean",
+      "@\"Code-point index of the first occurrence of @substring@, or -1 if absent.\"",
+      "primitive index_of(value: string, substring: string) -> integer",
+      "@\"Upper-case the string.\"",
+      "primitive upper(value: string) -> string",
+      "@\"Lower-case the string.\"",
+      "primitive lower(value: string) -> string",
+      "@\"Strip leading and trailing whitespace.\"",
+      "primitive trim(value: string) -> string",
+      "@\"Split on every occurrence of @separator@. An empty separator splits into code points.\"",
+      "primitive split(value: string, separator: string) -> array[string]",
+      "@\"Join the parts with @separator@ between them.\"",
+      "primitive join(parts: array[string], separator: string) -> string",
+      "@\"Replace every occurrence of @pattern@ with @replacement@ (literal, not a regex).\"",
+      "primitive replace(value: string, pattern: string, replacement: string) -> string"
+    ]
+
+-- | The @primitive.env@ sub-module source. Users call these as
+-- @env.get(...)@ / @env.get_secret(...)@ / @env.set(...)@. They are
+-- externals routed to the runtime's ENV module; the @env_not_found@
+-- request they raise lives flat in the root @primitive@ module.
+envStdlibSource :: Text
+envStdlibSource =
+  Text.unlines
+    [ "@\"Look up a non-secret env entry by key. Raises `env_not_found` if the key is missing.\"",
+      "external get(key: string) -> string with env_not_found from \"ENV:get_env\"",
+      "@\"Look up a secret env entry by key. The result is the disjoint `secret` type and never leaks into `to_string` / f-strings. Raises `env_not_found` if the key is missing.\"",
+      "external get_secret(key: string) -> secret with env_not_found from \"ENV:get_secret_env\"",
+      "@\"Write an env entry. `is_secret = true` stores the value encrypted; reading it back requires `env.get_secret`.\"",
+      "external set(key: string, value: string, is_secret: boolean) -> null from \"ENV:set_env\""
+    ]
+
+-- | The @primitive.math@ sub-module source. Users call these as
+-- @math.abs(...)@, @math.min(...)@, etc. @abs@ / @min@ / @max@ preserve
+-- integer-ness when their operands are integers; @floor@ / @ceil@ /
+-- @round@ always narrow a number to an integer.
+mathStdlibSource :: Text
+mathStdlibSource =
+  Text.unlines
+    [ "@\"Absolute value (integer when the operand is integer).\"",
+      "primitive abs(value: number) -> number using numeric_join_unary",
+      "@\"The smaller of two numbers (integer when both are integers).\"",
+      "primitive min(lhs: number, rhs: number) -> number using numeric_join_binary",
+      "@\"The larger of two numbers (integer when both are integers).\"",
+      "primitive max(lhs: number, rhs: number) -> number using numeric_join_binary",
+      "@\"Round down to the nearest integer.\"",
+      "primitive floor(value: number) -> integer",
+      "@\"Round up to the nearest integer.\"",
+      "primitive ceil(value: number) -> integer",
+      "@\"Round to the nearest integer (ties away from zero).\"",
+      "primitive round(value: number) -> integer"
     ]
