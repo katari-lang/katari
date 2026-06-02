@@ -27,11 +27,31 @@ release · **[later]** post-v0.1.0 · **[deferred]** acknowledged, no owner yet.
       (K0021).** `request env_not_found(k) { break f"x: ${k}" }` reports
       `unexpected }`; the multi-line form parses. Suspect virtual-semicolon
       insertion at template-close immediately followed by `}`.
-- [ ] **[later] Generics (even limited).** Lets a library ship handler-providing
-      combinators — `with_session(initial, body)`, `retry(body)`,
-      `with_timeout(body)`. Without polymorphism over a body's return type these
-      can't be factored; today the discord_bot session is a hand-written state
-      cell, and the request/handle wiring is copied per capability.
+- [ ] **[v0.1.0 · big, dedicated phase] Full generics + spreading.** The single
+      mechanism behind several gaps. Spec is largely settled (user-side); this is
+      an implementation effort spanning parser → identifier → CG → **solver** →
+      zonker, so it gets its own phase, not a side-quest. Decisions captured:
+  - **Param-sig polymorphism is the core.** A function/agent is generic over its
+    parameter signature `P`, return `R`, and effect set `E`:
+    `agent<P, R, E>(P) -> R with E`. Katari's named params already *are* the
+    "object" — no separate object type, no `agent any` / `...args` rest syntax
+    needed. **Effect generics is a facet of this, not a separate ad-hoc rule** —
+    avoid the one-off `call_agent` effect-extraction / effect-only constraint.
+  - **Two agent-type annotation forms.** (1) labelled list
+    `(label: T, label2: T2, …) -> R with E` — the callable form. (2) single
+    param-type `(T) -> R with E` where `T` is usually a param-sig/object but may
+    be `never` / `unknown` / etc. — *typeable but not callable* (no label map).
+    e.g. a tools array is `array[agent(never) -> unknown with E]`.
+  - **Spreading.** Pass a record's fields as named args — types
+    `call_agent(target: agent(P) -> R with E, args: P) -> R with E` precisely.
+  - **The one inherent dynamic seam:** AI tool args are `record[unknown]`, tool
+    params are typed `P`. `call_agent` keeps `args: record[unknown]` statically
+    and **runtime-validates the record against the target's real schema** (throws
+    on mismatch). That checked cast is the only dynamic point and is correct to
+    keep — generics doesn't (and shouldn't) erase it.
+  - Unlocks: handler-providing combinators (`with_session` / `retry` /
+    `with_timeout`), the tool-calling cleanup below, and reusable libraries over
+    arbitrary effects. (`map` / `filter` / `reduce` would also want this.)
 
 ## SDK (`@katari-lang/port`)
 
@@ -49,6 +69,20 @@ release · **[later]** post-v0.1.0 · **[deferred]** acknowledged, no owner yet.
       calling becomes first-class, decide where per-provider schema adaptation
       lives (a port helper? a stdlib agent? emitted alongside the schema bundle?)
       rather than every ext re-implementing it.
+- [ ] **[later · needs full generics] Tool-calling cleanup.** Today's discord
+      `infer_with_tools` ext owns the whole tool-call loop, which forces three
+      compromises: (1) the ktr passes **both** `tools` and `tool_metas` (the ext
+      can't call `get_metadata`); (2) the loop / multi-round logic is hidden in TS,
+      not Katari; (3) the ext **delegates the tools and so actually raises their
+      effects, but its type can't say so** — `get_e2b_key` is hardcoded into the
+      array element type and isn't generic. Target shape once generics land:
+      a **thin ext** = one stateless inference step (`ai_step(client, contents,
+      schemas) -> text | tool_call`), and the **loop + dispatch in Katari** —
+      `run_tools<E>(history, tools: array[agent(args) -> string with E]) -> … with E`
+      dispatches the chosen tool by value (`call_agent` taking an agent value, not
+      a name string), so the effect `E` is recovered from the tool's static type
+      and tracked honestly. Pass just the agents (schemas derived in Katari via
+      `get_metadata`), no parallel `tool_metas`.
 
 ## Runtime / model
 
