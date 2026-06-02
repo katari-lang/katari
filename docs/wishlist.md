@@ -112,3 +112,8 @@ release · **[later]** post-v0.1.0 · **[deferred]** acknowledged, no owner yet.
       4.x fix is a config migration: `workspace` / `defineWorkspace` → `projects`,
       and `environmentMatchGlobs` / `poolMatchGlobs` were removed (per-project
       `environment` instead). Do it when touching the test setup anyway.
+- [ ] **[later] LSP hover surfaces the `@"…"` annotation.** Hover already shows a
+      node's type (`Katari.Query.lookupAtPosition`); also include the declaration's
+      `@"…"` annotation (the description carried into the schema bundle) so reading
+      an agent / request / data in the editor shows what it's *for*, not just its
+      type. The annotation is already on the AST (`annotation :: Maybe Text`).
