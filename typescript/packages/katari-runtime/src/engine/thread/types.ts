@@ -284,7 +284,7 @@ export type MakeClosureThread = Common & {
 /**
  * CallAgentThread: the runtime side of the @call_agent(name, args)@
  * primitive. Spawned in place of a PrimThread when the lowered prim
- * leaf's name is the well-known string @"call_agent"@.
+ * leaf's name is the well-known string @"primitive.call_agent"@.
  *
  * Lifecycle:
  *

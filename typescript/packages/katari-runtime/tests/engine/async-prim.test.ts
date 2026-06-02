@@ -31,27 +31,27 @@ describe("async engine: concat materialize", () => {
       if (rep.kind === "ref") calls.push(rep.id);
       return Promise.resolve(new TextEncoder().encode(rep.kind === "inline" ? rep.text : ""));
     };
-    const r = await executePrim("concat", { lhs: mkString("foo"), rhs: mkString("bar") }, materialize);
+    const r = await executePrim("primitive.concat", { lhs: mkString("foo"), rhs: mkString("bar") }, materialize);
     expect(r).toEqual(mkString("foobar"));
     expect(calls).toHaveLength(0); // inline path never calls the fetcher
   });
 
   it("fetches both ref operands and joins their content", async () => {
     const materialize = fetcher({ a: "hello ", b: "world" });
-    const r = await executePrim("concat", { lhs: strRef("a"), rhs: strRef("b") }, materialize);
+    const r = await executePrim("primitive.concat", { lhs: strRef("a"), rhs: strRef("b") }, materialize);
     expect(r).toEqual(mkString("hello world"));
   });
 
   it("mixes a ref operand with an inline one", async () => {
     const materialize = fetcher({ a: "ref-part/" });
-    const r = await executePrim("concat", { lhs: strRef("a"), rhs: mkString("inline-part") }, materialize);
+    const r = await executePrim("primitive.concat", { lhs: strRef("a"), rhs: mkString("inline-part") }, materialize);
     expect(r).toEqual(mkString("ref-part/inline-part"));
   });
 
   it("preserves secret taint across a materialized concat", async () => {
     const materialize = fetcher({ a: "plain" });
     const r = await executePrim(
-      "concat",
+      "primitive.concat",
       { lhs: strRef("a"), rhs: mkSecret("token") },
       materialize,
     );
@@ -61,7 +61,7 @@ describe("async engine: concat materialize", () => {
   it("a pure prim ignores materialize and resolves immediately", async () => {
     const materialize = fetcher({});
     const r = await executePrim(
-      "add",
+      "primitive.add",
       { lhs: { kind: "number", value: 2 }, rhs: { kind: "number", value: 3 } },
       materialize,
     );

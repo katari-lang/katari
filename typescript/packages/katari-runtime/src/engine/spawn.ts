@@ -93,7 +93,7 @@ export function spawnChild(ctx: StepCtx, args: SpawnArgs): ThreadId {
       // resolved target plus run schema validation, which is well
       // outside the synchronous-leaf shape PrimThread assumes. Pivot
       // into a dedicated CallAgentThread for this one well-known name.
-      if (b.body === "call_agent") {
+      if (b.body === "primitive.call_agent") {
         const nameArg = args.callArgs["name"];
         const argsArg = args.callArgs["args"];
         return {

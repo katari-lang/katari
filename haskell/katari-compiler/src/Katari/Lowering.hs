@@ -507,9 +507,12 @@ registerDecl :: Text -> AST.Declaration Zonked -> Lower ()
 registerDecl moduleName = \case
   -- Prim agents additionally build a leaf 'BlockPrim' and index it by
   -- dispatch name so 'lowerOneDeclaration' can wire the wrapper to it.
+  -- The dispatch name is the prim's fully-qualified name (@primitive.add@,
+  -- @primitive.record.get@) — the runtime's @executePrim@ switches on exactly
+  -- this string, with no prefix stripping on either side.
   AST.DeclarationPrimAgent decl ->
     registerCallable decl.name decl.sourceSpan $ \variableResolution -> do
-      let primName = primDispatchName moduleName decl.name.text
+      let primName = moduleName <> "." <> decl.name.text
       agentBlk <- reserveBlockId (Just decl.name.text)
       leafBlk <- freshBlockId
       recordBlock leafBlk (BlockPrim primName) (Just ("prim:" <> primName <> ":leaf"))
@@ -600,17 +603,6 @@ registerCallable nameRef sourceSpan action = case nameRef.resolution of
   Just variableResolution -> action variableResolution
   Nothing -> recordError (LoweringErrorUnresolvedVariable sourceSpan nameRef.text)
 
--- | Build the runtime dispatch name for a primitive declaration. Prims
--- in the root @primitive@ module keep their bare name (e.g. @to_string@,
--- @add@); prims in sub-modules @primitive.json@ / @primitive.record@
--- get a user-visible qualified name (@json.parse@, @record.get@) so the
--- runtime's @executePrim@ dispatch can route by namespace.
-primDispatchName :: Text -> Text -> Text
-primDispatchName moduleName declName =
-  case Text.stripPrefix "primitive." moduleName of
-    Just suffix -> suffix <> "." <> declName
-    Nothing -> declName
-
 -- | Register a top-level callable: bind the resolution to its BlockId,
 -- record its QualifiedName, and expose it in entries.
 recordTopLevelCallable :: Id.VariableResolution -> Text -> Text -> BlockId -> Lower ()
@@ -664,7 +656,7 @@ lowerOneDeclaration moduleName = \case
   AST.DeclarationPrimAgent decl ->
     lowerWrapperCallable decl.name decl.annotation [(pb.label, pb.annotation) | pb <- decl.parameters] ("prim:" <> decl.name.text) $
       \_variableResolution -> do
-        let primName = primDispatchName moduleName decl.name.text
+        let primName = moduleName <> "." <> decl.name.text
         gets (Map.lookup primName . (.lsPrimBlockIds)) >>= \case
           Just b -> pure b
           Nothing ->

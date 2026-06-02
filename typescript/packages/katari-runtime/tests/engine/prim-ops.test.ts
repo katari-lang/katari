@@ -28,17 +28,17 @@ const M = async (_rep: BytesRep): Promise<Uint8Array> => {
 
 describe("engine: prim builtin", () => {
   it("computes arithmetic", async () => {
-    expect(await executePrim("add", num(3, 4), M)).toEqual({ kind: "number", value: 7 });
-    expect(await executePrim("mul", num(3, 4), M)).toEqual({ kind: "number", value: 12 });
-    expect(await executePrim("sub", num(10, 4), M)).toEqual({ kind: "number", value: 6 });
-    expect(await executePrim("div", num(10, 4), M)).toEqual({ kind: "number", value: 2.5 });
-    expect(await executePrim("mod", num(10, 4), M)).toEqual({ kind: "number", value: 2 });
-    expect(await executePrim("neg", { value: num1(7) }, M)).toEqual({ kind: "number", value: -7 });
+    expect(await executePrim("primitive.add", num(3, 4), M)).toEqual({ kind: "number", value: 7 });
+    expect(await executePrim("primitive.mul", num(3, 4), M)).toEqual({ kind: "number", value: 12 });
+    expect(await executePrim("primitive.sub", num(10, 4), M)).toEqual({ kind: "number", value: 6 });
+    expect(await executePrim("primitive.div", num(10, 4), M)).toEqual({ kind: "number", value: 2.5 });
+    expect(await executePrim("primitive.mod", num(10, 4), M)).toEqual({ kind: "number", value: 2 });
+    expect(await executePrim("primitive.neg", { value: num1(7) }, M)).toEqual({ kind: "number", value: -7 });
   });
 
   it("compares numbers", async () => {
-    expect(await executePrim("lt", num(1, 2), M)).toEqual({ kind: "boolean", value: true });
-    expect(await executePrim("ge", num(2, 2), M)).toEqual({ kind: "boolean", value: true });
+    expect(await executePrim("primitive.lt", num(1, 2), M)).toEqual({ kind: "boolean", value: true });
+    expect(await executePrim("primitive.ge", num(2, 2), M)).toEqual({ kind: "boolean", value: true });
   });
 
   it("structural equality", () => {
@@ -48,50 +48,50 @@ describe("engine: prim builtin", () => {
   });
 
   it("fails recoverable on bad args", async () => {
-    await expect(executePrim("add", { lhs: mkString("hi"), rhs: num1(1) }, M)).rejects.toThrow(
+    await expect(executePrim("primitive.add", { lhs: mkString("hi"), rhs: num1(1) }, M)).rejects.toThrow(
       /invalid args/,
     );
   });
 
   it("concat propagates taint: string + string = string", async () => {
-    expect(await executePrim("concat", { lhs: mkString("a"), rhs: mkString("b") }, M)).toEqual(
+    expect(await executePrim("primitive.concat", { lhs: mkString("a"), rhs: mkString("b") }, M)).toEqual(
       mkString("ab"),
     );
   });
 
   it("concat propagates taint: secret + string = secret", async () => {
     expect(
-      await executePrim("concat", { lhs: mkSecret("tok"), rhs: mkString("/api") }, M),
+      await executePrim("primitive.concat", { lhs: mkSecret("tok"), rhs: mkString("/api") }, M),
     ).toEqual(mkSecret("tok/api"));
   });
 
   it("concat propagates taint: string + secret = secret", async () => {
     expect(
-      await executePrim("concat", { lhs: mkString("Bearer "), rhs: mkSecret("tok") }, M),
+      await executePrim("primitive.concat", { lhs: mkString("Bearer "), rhs: mkSecret("tok") }, M),
     ).toEqual(mkSecret("Bearer tok"));
   });
 
   it("format passes secrets through preserving the variant", async () => {
-    expect(await executePrim("format", { value: mkSecret("x") }, M)).toEqual(mkSecret("x"));
-    expect(await executePrim("format", { value: mkString("x") }, M)).toEqual(mkString("x"));
+    expect(await executePrim("primitive.format", { value: mkSecret("x") }, M)).toEqual(mkSecret("x"));
+    expect(await executePrim("primitive.format", { value: mkString("x") }, M)).toEqual(mkString("x"));
   });
 
   it("to_string refuses to launder secret taint into a plain string", async () => {
-    await expect(executePrim("to_string", { value: mkSecret("x") }, M)).rejects.toThrow(
+    await expect(executePrim("primitive.to_string", { value: mkSecret("x") }, M)).rejects.toThrow(
       /refusing to stringify a secret/,
     );
   });
 
   it("record.empty produces an empty record value", async () => {
-    const r = await executePrim("record.empty", {}, M);
+    const r = await executePrim("primitive.record.empty", {}, M);
     expect(r.kind).toBe("record");
     if (r.kind === "record") expect(Object.keys(r.entries)).toEqual([]);
   });
 
   it("record.set inserts entries copy-on-write", async () => {
-    const empty = await executePrim("record.empty", {}, M);
+    const empty = await executePrim("primitive.record.empty", {}, M);
     const r1 = await executePrim(
-      "record.set",
+      "primitive.record.set",
       { record: empty, key: mkString("name"), value: mkString("alice") },
       M,
     );
@@ -101,27 +101,27 @@ describe("engine: prim builtin", () => {
   });
 
   it("json.parse wraps each JSON shape in its `primitive.json_*` constructor", async () => {
-    expect(await executePrim("json.parse", { text: mkString("null") }, M)).toEqual({
+    expect(await executePrim("primitive.json.parse", { text: mkString("null") }, M)).toEqual({
       kind: "tagged",
       ctorId: "primitive.json_null",
       fields: {},
     });
-    expect(await executePrim("json.parse", { text: mkString("true") }, M)).toEqual({
+    expect(await executePrim("primitive.json.parse", { text: mkString("true") }, M)).toEqual({
       kind: "tagged",
       ctorId: "primitive.json_boolean",
       fields: { value: { kind: "boolean", value: true } },
     });
-    expect(await executePrim("json.parse", { text: mkString("42") }, M)).toEqual({
+    expect(await executePrim("primitive.json.parse", { text: mkString("42") }, M)).toEqual({
       kind: "tagged",
       ctorId: "primitive.json_integer",
       fields: { value: { kind: "number", value: 42 } },
     });
-    expect(await executePrim("json.parse", { text: mkString("3.5") }, M)).toEqual({
+    expect(await executePrim("primitive.json.parse", { text: mkString("3.5") }, M)).toEqual({
       kind: "tagged",
       ctorId: "primitive.json_number",
       fields: { value: { kind: "number", value: 3.5 } },
     });
-    expect(await executePrim("json.parse", { text: mkString('"hi"') }, M)).toEqual({
+    expect(await executePrim("primitive.json.parse", { text: mkString('"hi"') }, M)).toEqual({
       kind: "tagged",
       ctorId: "primitive.json_string",
       fields: { value: mkString("hi") },
@@ -129,20 +129,20 @@ describe("engine: prim builtin", () => {
   });
 
   it("json.parse raises a `json_parse_error` request on malformed input", async () => {
-    await expect(executePrim("json.parse", { text: mkString("{") }, M)).rejects.toThrow(
+    await expect(executePrim("primitive.json.parse", { text: mkString("{") }, M)).rejects.toThrow(
       /raised request 'primitive.json_parse_error'/,
     );
   });
 
   it("json.stringify is the inverse of json.parse for canonical values", async () => {
-    const r = await executePrim("json.parse", { text: mkString('{"a":1,"b":[2,3]}') }, M);
-    const s = await executePrim("json.stringify", { value: r }, M);
+    const r = await executePrim("primitive.json.parse", { text: mkString('{"a":1,"b":[2,3]}') }, M);
+    const s = await executePrim("primitive.json.stringify", { value: r }, M);
     expect(s).toEqual(mkString('{"a":1,"b":[2,3]}'));
   });
 
   it("json.stringify is total over `json` values (no secret refusal path)", async () => {
     // The defensive check fires if a non-json tagged value slips through.
-    await expect(executePrim("json.stringify", { value: mkSecret("tok") }, M)).rejects.toThrow(
+    await expect(executePrim("primitive.json.stringify", { value: mkSecret("tok") }, M)).rejects.toThrow(
       /expected a json value, got secret/,
     );
   });
@@ -198,11 +198,11 @@ describe("engine: file prims", () => {
     rep.kind === "ref" ? new TextEncoder().encode("hello") : new TextEncoder().encode(rep.text);
 
   it("file_to_string reads a file's bytes as a string", async () => {
-    expect(await executePrim("file_to_string", { value: fileRef }, mat)).toEqual(mkString("hello"));
+    expect(await executePrim("primitive.file_to_string", { value: fileRef }, mat)).toEqual(mkString("hello"));
   });
 
   it("file_to_string rejects a non-file argument", async () => {
-    await expect(executePrim("file_to_string", { value: mkString("x") }, M)).rejects.toThrow();
+    await expect(executePrim("primitive.file_to_string", { value: mkString("x") }, M)).rejects.toThrow();
   });
 
   it("string_to_file mints a file via the put capability", async () => {
@@ -211,21 +211,21 @@ describe("engine: file prims", () => {
       captured.push({ kind: semanticKind, size: bytes.length });
       return { kind: "ref" as const, module: "core" as const, id: "new", hash: "hh", size: bytes.length };
     };
-    const result = await executePrim("string_to_file", { value: mkString("data") }, mat, put);
+    const result = await executePrim("primitive.string_to_file", { value: mkString("data") }, mat, put);
     expect(result.kind).toBe("file");
     expect(result.kind === "file" && result.rep.id).toBe("new");
     expect(captured).toEqual([{ kind: "file", size: 4 }]); // inline "data" = 4 bytes
   });
 
   it("string_to_file without a put capability throws", async () => {
-    await expect(executePrim("string_to_file", { value: mkString("x") }, mat)).rejects.toThrow();
+    await expect(executePrim("primitive.string_to_file", { value: mkString("x") }, mat)).rejects.toThrow();
   });
 
   it("string_to_file refuses a secret (no laundering)", async () => {
     const put = async () =>
       ({ kind: "ref" as const, module: "core" as const, id: "x", hash: "h", size: 1 });
     await expect(
-      executePrim("string_to_file", { value: mkSecret("tok") }, mat, put),
+      executePrim("primitive.string_to_file", { value: mkSecret("tok") }, mat, put),
     ).rejects.toThrow();
   });
 });

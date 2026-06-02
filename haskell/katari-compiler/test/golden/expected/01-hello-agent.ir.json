@@ -32,7 +32,7 @@
       "kind": "blockUser"
     },
     "10": {
-      "body": "mod",
+      "body": "primitive.mod",
       "kind": "blockPrim"
     },
     "100": {
@@ -61,7 +61,7 @@
       "kind": "blockAgent"
     },
     "101": {
-      "body": "record.set",
+      "body": "primitive.record.set",
       "kind": "blockPrim"
     },
     "102": {
@@ -86,7 +86,7 @@
       "kind": "blockAgent"
     },
     "103": {
-      "body": "record.remove",
+      "body": "primitive.record.remove",
       "kind": "blockPrim"
     },
     "104": {
@@ -107,7 +107,7 @@
       "kind": "blockAgent"
     },
     "105": {
-      "body": "record.keys",
+      "body": "primitive.record.keys",
       "kind": "blockPrim"
     },
     "106": {
@@ -132,7 +132,7 @@
       "kind": "blockAgent"
     },
     "107": {
-      "body": "record.has",
+      "body": "primitive.record.has",
       "kind": "blockPrim"
     },
     "108": {
@@ -153,7 +153,7 @@
       "kind": "blockAgent"
     },
     "109": {
-      "body": "record.size",
+      "body": "primitive.record.size",
       "kind": "blockPrim"
     },
     "11": {
@@ -178,7 +178,7 @@
       "kind": "blockAgent"
     },
     "12": {
-      "body": "div",
+      "body": "primitive.div",
       "kind": "blockPrim"
     },
     "13": {
@@ -199,7 +199,7 @@
       "kind": "blockAgent"
     },
     "14": {
-      "body": "neg",
+      "body": "primitive.neg",
       "kind": "blockPrim"
     },
     "15": {
@@ -220,7 +220,7 @@
       "kind": "blockAgent"
     },
     "16": {
-      "body": "abs",
+      "body": "primitive.abs",
       "kind": "blockPrim"
     },
     "17": {
@@ -245,7 +245,7 @@
       "kind": "blockAgent"
     },
     "18": {
-      "body": "eq",
+      "body": "primitive.eq",
       "kind": "blockPrim"
     },
     "19": {
@@ -303,7 +303,7 @@
       "kind": "blockAgent"
     },
     "20": {
-      "body": "ne",
+      "body": "primitive.ne",
       "kind": "blockPrim"
     },
     "21": {
@@ -328,7 +328,7 @@
       "kind": "blockAgent"
     },
     "22": {
-      "body": "lt",
+      "body": "primitive.lt",
       "kind": "blockPrim"
     },
     "23": {
@@ -353,7 +353,7 @@
       "kind": "blockAgent"
     },
     "24": {
-      "body": "le",
+      "body": "primitive.le",
       "kind": "blockPrim"
     },
     "25": {
@@ -378,7 +378,7 @@
       "kind": "blockAgent"
     },
     "26": {
-      "body": "gt",
+      "body": "primitive.gt",
       "kind": "blockPrim"
     },
     "27": {
@@ -403,7 +403,7 @@
       "kind": "blockAgent"
     },
     "28": {
-      "body": "ge",
+      "body": "primitive.ge",
       "kind": "blockPrim"
     },
     "29": {
@@ -449,7 +449,7 @@
       "kind": "blockAgent"
     },
     "30": {
-      "body": "and",
+      "body": "primitive.and",
       "kind": "blockPrim"
     },
     "31": {
@@ -474,7 +474,7 @@
       "kind": "blockAgent"
     },
     "32": {
-      "body": "or",
+      "body": "primitive.or",
       "kind": "blockPrim"
     },
     "33": {
@@ -495,7 +495,7 @@
       "kind": "blockAgent"
     },
     "34": {
-      "body": "not",
+      "body": "primitive.not",
       "kind": "blockPrim"
     },
     "35": {
@@ -520,7 +520,7 @@
       "kind": "blockAgent"
     },
     "36": {
-      "body": "concat",
+      "body": "primitive.concat",
       "kind": "blockPrim"
     },
     "37": {
@@ -541,7 +541,7 @@
       "kind": "blockAgent"
     },
     "38": {
-      "body": "type_of",
+      "body": "primitive.type_of",
       "kind": "blockPrim"
     },
     "39": {
@@ -562,11 +562,11 @@
       "kind": "blockAgent"
     },
     "4": {
-      "body": "add",
+      "body": "primitive.add",
       "kind": "blockPrim"
     },
     "40": {
-      "body": "to_string",
+      "body": "primitive.to_string",
       "kind": "blockPrim"
     },
     "41": {
@@ -604,7 +604,7 @@
       "kind": "blockAgent"
     },
     "43": {
-      "body": "from_string",
+      "body": "primitive.from_string",
       "kind": "blockPrim"
     },
     "44": {
@@ -625,7 +625,7 @@
       "kind": "blockAgent"
     },
     "45": {
-      "body": "format",
+      "body": "primitive.format",
       "kind": "blockPrim"
     },
     "46": {
@@ -650,7 +650,7 @@
       "kind": "blockAgent"
     },
     "47": {
-      "body": "array_get",
+      "body": "primitive.array_get",
       "kind": "blockPrim"
     },
     "48": {
@@ -671,7 +671,7 @@
       "kind": "blockAgent"
     },
     "49": {
-      "body": "array_length",
+      "body": "primitive.array_length",
       "kind": "blockPrim"
     },
     "5": {
@@ -713,7 +713,7 @@
       "kind": "blockAgent"
     },
     "51": {
-      "body": "file_to_string",
+      "body": "primitive.file_to_string",
       "kind": "blockPrim"
     },
     "52": {
@@ -734,7 +734,7 @@
       "kind": "blockAgent"
     },
     "53": {
-      "body": "string_to_file",
+      "body": "primitive.string_to_file",
       "kind": "blockPrim"
     },
     "54": {
@@ -758,7 +758,7 @@
       "kind": "blockAgent"
     },
     "55": {
-      "body": "tuple_get",
+      "body": "primitive.tuple_get",
       "kind": "blockPrim"
     },
     "56": {
@@ -782,7 +782,7 @@
       "kind": "blockAgent"
     },
     "57": {
-      "body": "get_field",
+      "body": "primitive.get_field",
       "kind": "blockPrim"
     },
     "58": {
@@ -803,11 +803,11 @@
       "kind": "blockAgent"
     },
     "59": {
-      "body": "get_metadata",
+      "body": "primitive.get_metadata",
       "kind": "blockPrim"
     },
     "6": {
-      "body": "sub",
+      "body": "primitive.sub",
       "kind": "blockPrim"
     },
     "60": {
@@ -849,7 +849,7 @@
       "kind": "blockAgent"
     },
     "62": {
-      "body": "call_agent",
+      "body": "primitive.call_agent",
       "kind": "blockPrim"
     },
     "63": {
@@ -1114,7 +1114,7 @@
       "kind": "blockRequest"
     },
     "8": {
-      "body": "mul",
+      "body": "primitive.mul",
       "kind": "blockPrim"
     },
     "80": {
@@ -1228,7 +1228,7 @@
       "kind": "blockAgent"
     },
     "93": {
-      "body": "json.parse",
+      "body": "primitive.json.parse",
       "kind": "blockPrim"
     },
     "94": {
@@ -1249,7 +1249,7 @@
       "kind": "blockAgent"
     },
     "95": {
-      "body": "json.stringify",
+      "body": "primitive.json.stringify",
       "kind": "blockPrim"
     },
     "96": {
@@ -1265,7 +1265,7 @@
       "kind": "blockAgent"
     },
     "97": {
-      "body": "record.empty",
+      "body": "primitive.record.empty",
       "kind": "blockPrim"
     },
     "98": {
@@ -1290,7 +1290,7 @@
       "kind": "blockAgent"
     },
     "99": {
-      "body": "record.get",
+      "body": "primitive.record.get",
       "kind": "blockPrim"
     }
   },
@@ -1358,74 +1358,74 @@
     "blockNames": {
       "0": "main",
       "1": "main.body",
-      "10": "prim:mod:leaf",
+      "10": "prim:primitive.mod:leaf",
       "100": "prim:set:agent",
-      "101": "prim:record.set:leaf",
+      "101": "prim:primitive.record.set:leaf",
       "102": "prim:remove:agent",
-      "103": "prim:record.remove:leaf",
+      "103": "prim:primitive.record.remove:leaf",
       "104": "prim:keys:agent",
-      "105": "prim:record.keys:leaf",
+      "105": "prim:primitive.record.keys:leaf",
       "106": "prim:has:agent",
-      "107": "prim:record.has:leaf",
+      "107": "prim:primitive.record.has:leaf",
       "108": "prim:size:agent",
-      "109": "prim:record.size:leaf",
+      "109": "prim:primitive.record.size:leaf",
       "11": "prim:div:agent",
-      "12": "prim:div:leaf",
+      "12": "prim:primitive.div:leaf",
       "13": "prim:neg:agent",
-      "14": "prim:neg:leaf",
+      "14": "prim:primitive.neg:leaf",
       "15": "prim:abs:agent",
-      "16": "prim:abs:leaf",
+      "16": "prim:primitive.abs:leaf",
       "17": "prim:eq:agent",
-      "18": "prim:eq:leaf",
+      "18": "prim:primitive.eq:leaf",
       "19": "prim:ne:agent",
       "2": "agent_metadata:agent",
-      "20": "prim:ne:leaf",
+      "20": "prim:primitive.ne:leaf",
       "21": "prim:lt:agent",
-      "22": "prim:lt:leaf",
+      "22": "prim:primitive.lt:leaf",
       "23": "prim:le:agent",
-      "24": "prim:le:leaf",
+      "24": "prim:primitive.le:leaf",
       "25": "prim:gt:agent",
-      "26": "prim:gt:leaf",
+      "26": "prim:primitive.gt:leaf",
       "27": "prim:ge:agent",
-      "28": "prim:ge:leaf",
+      "28": "prim:primitive.ge:leaf",
       "29": "prim:and:agent",
       "3": "prim:add:agent",
-      "30": "prim:and:leaf",
+      "30": "prim:primitive.and:leaf",
       "31": "prim:or:agent",
-      "32": "prim:or:leaf",
+      "32": "prim:primitive.or:leaf",
       "33": "prim:not:agent",
-      "34": "prim:not:leaf",
+      "34": "prim:primitive.not:leaf",
       "35": "prim:concat:agent",
-      "36": "prim:concat:leaf",
+      "36": "prim:primitive.concat:leaf",
       "37": "prim:type_of:agent",
-      "38": "prim:type_of:leaf",
+      "38": "prim:primitive.type_of:leaf",
       "39": "prim:to_string:agent",
-      "4": "prim:add:leaf",
-      "40": "prim:to_string:leaf",
+      "4": "prim:primitive.add:leaf",
+      "40": "prim:primitive.to_string:leaf",
       "41": "from_string_error:agent",
       "42": "prim:from_string:agent",
-      "43": "prim:from_string:leaf",
+      "43": "prim:primitive.from_string:leaf",
       "44": "prim:format:agent",
-      "45": "prim:format:leaf",
+      "45": "prim:primitive.format:leaf",
       "46": "prim:array_get:agent",
-      "47": "prim:array_get:leaf",
+      "47": "prim:primitive.array_get:leaf",
       "48": "prim:array_length:agent",
-      "49": "prim:array_length:leaf",
+      "49": "prim:primitive.array_length:leaf",
       "5": "prim:sub:agent",
       "50": "prim:file_to_string:agent",
-      "51": "prim:file_to_string:leaf",
+      "51": "prim:primitive.file_to_string:leaf",
       "52": "prim:string_to_file:agent",
-      "53": "prim:string_to_file:leaf",
+      "53": "prim:primitive.string_to_file:leaf",
       "54": "prim:tuple_get:agent",
-      "55": "prim:tuple_get:leaf",
+      "55": "prim:primitive.tuple_get:leaf",
       "56": "prim:get_field:agent",
-      "57": "prim:get_field:leaf",
+      "57": "prim:primitive.get_field:leaf",
       "58": "prim:get_metadata:agent",
-      "59": "prim:get_metadata:leaf",
-      "6": "prim:sub:leaf",
+      "59": "prim:primitive.get_metadata:leaf",
+      "6": "prim:primitive.sub:leaf",
       "60": "call_agent_error:agent",
       "61": "prim:call_agent:agent",
-      "62": "prim:call_agent:leaf",
+      "62": "prim:primitive.call_agent:leaf",
       "63": "throw:agent",
       "64": "env_not_found:agent",
       "65": "get_env:agent",
@@ -1444,7 +1444,7 @@
       "77": "from_string_error:request",
       "78": "call_agent_error:request",
       "79": "throw:request",
-      "8": "prim:mul:leaf",
+      "8": "prim:primitive.mul:leaf",
       "80": "env_not_found:request",
       "81": "get_env:external",
       "82": "get_secret_env:external",
@@ -1459,13 +1459,13 @@
       "90": "json_object:ctor",
       "91": "json_parse_error:request",
       "92": "prim:parse:agent",
-      "93": "prim:json.parse:leaf",
+      "93": "prim:primitive.json.parse:leaf",
       "94": "prim:stringify:agent",
-      "95": "prim:json.stringify:leaf",
+      "95": "prim:primitive.json.stringify:leaf",
       "96": "prim:empty:agent",
-      "97": "prim:record.empty:leaf",
+      "97": "prim:primitive.record.empty:leaf",
       "98": "prim:get:agent",
-      "99": "prim:record.get:leaf"
+      "99": "prim:primitive.record.get:leaf"
     },
     "varNames": {}
   }

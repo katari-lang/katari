@@ -74,11 +74,11 @@ describe("persist promotion", () => {
     expect(repOf(ref).kind).toBe("ref");
 
     // == against an inline string of the same content: hash match, no fetch.
-    const eq = await executePrim("eq", { lhs: ref, rhs: mkString(original) }, materialize);
+    const eq = await executePrim("primitive.eq", { lhs: ref, rhs: mkString(original) }, materialize);
     expect(eq).toEqual({ kind: "boolean", value: true });
 
     // concat materializes the ref and joins.
-    const joined = await executePrim("concat", { lhs: ref, rhs: mkString("!") }, materialize);
+    const joined = await executePrim("primitive.concat", { lhs: ref, rhs: mkString("!") }, materialize);
     expect(joined).toEqual(mkString(`${original}!`));
   });
 

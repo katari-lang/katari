@@ -93,7 +93,7 @@ describe("engine integration: end-to-end via external delegate", () => {
       // Entry block: BlockAgent wrapping the body BlockUser at id 2.
       1: agentBlock("main", 2),
       2: userBlk,
-      100: primBlock("add"),
+      100: primBlock("primitive.add"),
     }, { main: 1 });
 
     const state = createState(module);

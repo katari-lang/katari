@@ -37,7 +37,7 @@ export const primOps: ThreadOps<PrimThread> = {
       // may materialize ref bytes; `ctx.materialize` is the injected,
       // deterministic content-addressed read.
       value =
-        t.primName === "get_metadata"
+        t.primName === "primitive.get_metadata"
           ? await executeGetMetadata(ctx, t.args)
           : await executePrim(t.primName, t.args, ctx.materialize, ctx.putBlob);
     } catch (err) {

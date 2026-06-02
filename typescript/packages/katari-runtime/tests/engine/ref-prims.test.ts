@@ -23,20 +23,20 @@ const strRef = (id: string): Value => ({
 describe("ref-aware content prims", () => {
   it("to_string materializes a ref string", async () => {
     const m = fetcher({ s: "hello world" });
-    const r = await executePrim("to_string", { value: strRef("s") }, m);
+    const r = await executePrim("primitive.to_string", { value: strRef("s") }, m);
     expect(r).toEqual(mkString(JSON.stringify("hello world")));
   });
 
   it("to_string materializes ref strings nested in an array", async () => {
     const m = fetcher({ a: "x", b: "y" });
     const arr: Value = { kind: "array", elements: [strRef("a"), strRef("b")] };
-    const r = await executePrim("to_string", { value: arr }, m);
+    const r = await executePrim("primitive.to_string", { value: arr }, m);
     expect(r).toEqual(mkString(JSON.stringify(["x", "y"])));
   });
 
   it("from_string materializes a ref JSON string and parses it", async () => {
     const m = fetcher({ j: '{"hello":true}' });
-    const r = await executePrim("from_string", { text: strRef("j") }, m);
+    const r = await executePrim("primitive.from_string", { text: strRef("j") }, m);
     // from_string decodes via valueFromRaw → a record value.
     expect(r.kind).toBe("record");
     if (r.kind === "record") {
@@ -47,20 +47,20 @@ describe("ref-aware content prims", () => {
   it("record.get materializes a ref key", async () => {
     const m = fetcher({ k: "name" });
     const record: Value = { kind: "record", entries: { name: mkString("ada") } };
-    const r = await executePrim("record.get", { record, key: strRef("k") }, m);
+    const r = await executePrim("primitive.record.get", { record, key: strRef("k") }, m);
     expect(r).toEqual(mkString("ada"));
   });
 
   it("record.has materializes a ref key", async () => {
     const m = fetcher({ k: "present" });
     const record: Value = { kind: "record", entries: { present: { kind: "null" } } };
-    const r = await executePrim("record.has", { record, key: strRef("k") }, m);
+    const r = await executePrim("primitive.record.has", { record, key: strRef("k") }, m);
     expect(r).toEqual({ kind: "boolean", value: true });
   });
 
   it("inline operands still work (no fetch path)", async () => {
     const m = fetcher({});
-    expect(await executePrim("to_string", { value: mkString("hi") }, m)).toEqual(
+    expect(await executePrim("primitive.to_string", { value: mkString("hi") }, m)).toEqual(
       mkString(JSON.stringify("hi")),
     );
   });

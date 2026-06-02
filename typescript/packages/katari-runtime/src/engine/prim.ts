@@ -121,56 +121,56 @@ export async function executePrim(
   put?: RefPutter,
 ): Promise<Value> {
   switch (name) {
-    case "add":
+    case "primitive.add":
       return arith(name, args, (a, b) => a + b);
-    case "sub":
+    case "primitive.sub":
       return arith(name, args, (a, b) => a - b);
-    case "mul":
+    case "primitive.mul":
       return arith(name, args, (a, b) => a * b);
-    case "div":
+    case "primitive.div":
       return arith(name, args, (a, b) => {
         if (b === 0) throw new RecoverableEngineError("prim div: division by zero");
         return a / b;
       });
-    case "mod":
+    case "primitive.mod":
       return arith(name, args, (a, b) => {
         if (b === 0) throw new RecoverableEngineError("prim mod: modulo by zero");
         // Floor mod (Python-style): result has the sign of the divisor,
         // not the dividend. JS' % truncates toward zero, so we adjust.
         return a - Math.floor(a / b) * b;
       });
-    case "neg": {
+    case "primitive.neg": {
       const v = args["value"];
       if (v?.kind === "number") return { kind: "number", value: -v.value };
       throw new RecoverableEngineError("prim neg: invalid args");
     }
-    case "abs": {
+    case "primitive.abs": {
       const v = args["value"];
       if (v?.kind === "number") return { kind: "number", value: Math.abs(v.value) };
       throw new RecoverableEngineError("prim abs: invalid args");
     }
-    case "eq":
+    case "primitive.eq":
       return { kind: "boolean", value: valueEquals(req(args, "lhs"), req(args, "rhs")) };
-    case "ne":
+    case "primitive.ne":
       return { kind: "boolean", value: !valueEquals(req(args, "lhs"), req(args, "rhs")) };
-    case "lt":
+    case "primitive.lt":
       return cmp(name, args, (a, b) => a < b);
-    case "gt":
+    case "primitive.gt":
       return cmp(name, args, (a, b) => a > b);
-    case "le":
+    case "primitive.le":
       return cmp(name, args, (a, b) => a <= b);
-    case "ge":
+    case "primitive.ge":
       return cmp(name, args, (a, b) => a >= b);
-    case "not": {
+    case "primitive.not": {
       const v = args["value"];
       if (v?.kind === "boolean") return { kind: "boolean", value: !v.value };
       throw new RecoverableEngineError("prim not: invalid args");
     }
-    case "and":
+    case "primitive.and":
       return logical(name, args, (a, b) => a && b);
-    case "or":
+    case "primitive.or":
       return logical(name, args, (a, b) => a || b);
-    case "concat": {
+    case "primitive.concat": {
       // Taint-aware concat (via the `using fstring_join` rule on
       // 'prim agent concat'): both operands must be string-or-secret,
       // and if EITHER operand is secret the result is secret too.
@@ -195,7 +195,7 @@ export async function executePrim(
       }
       throw new RecoverableEngineError("prim concat: invalid args");
     }
-    case "to_string": {
+    case "primitive.to_string": {
       const v = args["value"];
       if (v === undefined) throw new RecoverableEngineError("prim to_string: missing arg");
       // 'to_string' is the **type-erasing** stringifier: by spec it
@@ -210,7 +210,7 @@ export async function executePrim(
       }
       return mkString(JSON.stringify(valueToRaw(await materializeValueDeep(v, materialize))));
     }
-    case "from_string": {
+    case "primitive.from_string": {
       const text = req(args, "text");
       if (text.kind !== "string") {
         throw new RecoverableEngineError(
@@ -237,7 +237,7 @@ export async function executePrim(
         throw e;
       }
     }
-    case "format": {
+    case "primitive.format": {
       // Taint-aware unary format (via `using fstring_join`). Pass
       // string and secret through verbatim — preserving the variant
       // is exactly the taint-propagation rule. Other inputs were
@@ -250,7 +250,7 @@ export async function executePrim(
         `prim format: argument must be string or secret, got ${v.kind}`,
       );
     }
-    case "file_to_string": {
+    case "primitive.file_to_string": {
       // Read a file's bytes back as a UTF-8 string. `file` is always a ref, so
       // this materializes (fetches) the blob. The result is an inline string;
       // persist-time promotion re-refs it if large.
@@ -262,7 +262,7 @@ export async function executePrim(
       }
       return mkString(new TextDecoder().decode(await materialize(v.rep)));
     }
-    case "string_to_file": {
+    case "primitive.string_to_file": {
       // Write a string's bytes to a new content blob and hand back a `file`
       // value pointing at it. Rejects `secret` (the type system already
       // narrows the param to `string`; this is defence-in-depth against
@@ -286,7 +286,7 @@ export async function executePrim(
       const rep = await put(bytes, "file", undefined, "text/plain; charset=utf-8");
       return { kind: "file", rep };
     }
-    case "tuple_get": {
+    case "primitive.tuple_get": {
       // Tuples are stored as arrays at runtime (see 'Value'); the
       // static type system already distinguishes the two. This prim
       // and 'array_get' share an implementation; both dispatch on the
@@ -310,7 +310,7 @@ export async function executePrim(
       }
       throw new RecoverableEngineError("prim tuple_get: invalid args");
     }
-    case "array_get": {
+    case "primitive.array_get": {
       const array = args["array"],
         index = args["index"];
       if (array?.kind === "array" && index?.kind === "number") {
@@ -327,21 +327,21 @@ export async function executePrim(
       }
       throw new RecoverableEngineError("prim array_get: invalid args");
     }
-    case "array_length": {
+    case "primitive.array_length": {
       const array = args["array"];
       if (array?.kind === "array") {
         return { kind: "number", value: array.elements.length };
       }
       throw new RecoverableEngineError("prim array_length: argument must be an array");
     }
-    case "type_of": {
+    case "primitive.type_of": {
       const value = args["value"];
       if (value === undefined) {
         throw new RecoverableEngineError("prim type_of: missing arg");
       }
       return mkString(value.kind);
     }
-    case "get_field": {
+    case "primitive.get_field": {
       const value = args["object"],
         field = args["field"];
       if (value?.kind === "tagged" && field?.kind === "string") {
@@ -354,10 +354,10 @@ export async function executePrim(
       }
       throw new RecoverableEngineError("prim get_field: invalid args");
     }
-    case "record.empty": {
+    case "primitive.record.empty": {
       return { kind: "record", entries: Object.create(null) };
     }
-    case "record.get": {
+    case "primitive.record.get": {
       const r = req(args, "record"),
         key = req(args, "key");
       if (r.kind !== "record") {
@@ -371,7 +371,7 @@ export async function executePrim(
       const v = r.entries[await materializeValueText(key, materialize)];
       return v === undefined ? { kind: "null" } : v;
     }
-    case "record.set": {
+    case "primitive.record.set": {
       const r = req(args, "record"),
         key = req(args, "key"),
         value = req(args, "value");
@@ -390,7 +390,7 @@ export async function executePrim(
       next[await materializeValueText(key, materialize)] = value;
       return { kind: "record", entries: next };
     }
-    case "record.remove": {
+    case "primitive.record.remove": {
       const r = req(args, "record"),
         key = req(args, "key");
       if (r.kind !== "record") {
@@ -411,7 +411,7 @@ export async function executePrim(
       }
       return { kind: "record", entries: next };
     }
-    case "record.keys": {
+    case "primitive.record.keys": {
       const r = req(args, "record");
       if (r.kind !== "record") {
         throw new RecoverableEngineError(
@@ -421,7 +421,7 @@ export async function executePrim(
       const keys = Object.keys(r.entries).map((k): Value => mkString(k));
       return { kind: "array", elements: keys };
     }
-    case "record.has": {
+    case "primitive.record.has": {
       const r = req(args, "record"),
         key = req(args, "key");
       if (r.kind !== "record") {
@@ -437,7 +437,7 @@ export async function executePrim(
         value: (await materializeValueText(key, materialize)) in r.entries,
       };
     }
-    case "record.size": {
+    case "primitive.record.size": {
       const r = req(args, "record");
       if (r.kind !== "record") {
         throw new RecoverableEngineError(
@@ -446,7 +446,7 @@ export async function executePrim(
       }
       return { kind: "number", value: Object.keys(r.entries).length };
     }
-    case "json.parse": {
+    case "primitive.json.parse": {
       const text = req(args, "text");
       if (text.kind !== "string") {
         throw new RecoverableEngineError(
@@ -464,7 +464,7 @@ export async function executePrim(
       }
       return jsonToTagged(parsed);
     }
-    case "json.stringify": {
+    case "primitive.json.stringify": {
       const value = req(args, "value");
       const raw = jsonTaggedToRaw(await materializeValueDeep(value, materialize));
       return mkString(JSON.stringify(raw));
