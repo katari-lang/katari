@@ -22,6 +22,7 @@ import Katari.SemanticType
   ( Parameter (..),
     SemanticType (..),
     Unresolved,
+    liftResolvedToUnresolved,
   )
 import Katari.Typechecker.ConstraintGenerator
   ( Constraint (..),
@@ -29,6 +30,7 @@ import Katari.Typechecker.ConstraintGenerator
   )
 import Katari.Typechecker.NormalizedType
   ( DataFieldEnv,
+    denormalise,
     normaliseSemantic,
     subtypeNormalizedType,
   )
@@ -130,18 +132,24 @@ decomposeType env original leftType rightType reason = case (leftType, rightType
        in yield (requestConstraint : returnConstraint : parameterConstraints)
   (SemanticTypeArray leftElement, SemanticTypeArray rightElement) ->
     yield [TypeConstraint leftElement rightElement reason] -- covariant
-  (SemanticTypeTuple leftElements, SemanticTypeTuple rightElements) ->
-    -- Width-subtyping on positional length: missing positions filled
-    -- with 'SemanticTypeUnknown'. Allows e.g. @(int, string, bool) ⊑
-    -- (int, string)@ (= extra positions are dropped via fill).
-    let maxLen = max (length leftElements) (length rightElements)
-        padded xs = take maxLen (xs ++ repeat SemanticTypeUnknown)
-        elementConstraints =
-          zipWith
-            (\leftElement rightElement -> TypeConstraint leftElement rightElement reason)
-            (padded leftElements)
-            (padded rightElements)
-     in yield elementConstraints
+  (SemanticTypeTuple leftElements, SemanticTypeTuple rightElements)
+    -- Width-subtyping on positional length: a longer tuple refines a
+    -- shorter prefix, so the LHS must have at least as many positions as
+    -- the RHS. A shorter LHS is a hard failure — its missing positions may
+    -- be absent at runtime, so they cannot be padded with 'unknown' (which
+    -- would unsoundly accept @tuple[A] <: tuple[C, unknown]@). Extra LHS
+    -- positions are dropped by 'zipWith' truncating at the RHS length.
+    | length leftElements >= length rightElements ->
+        yield
+          [ TypeConstraint leftElement rightElement reason
+            | (leftElement, rightElement) <- zip leftElements rightElements
+          ]
+    | otherwise ->
+        Left
+          ( SolverErrorStructuralMismatch
+              reason
+              "tuple has fewer positions than required"
+          )
   (SemanticTypeObject leftFields, SemanticTypeObject rightFields) ->
     decomposeObject leftFields rightFields reason
   (SemanticTypeRecord leftValue, SemanticTypeRecord rightValue) ->
@@ -158,6 +166,31 @@ decomposeType env original leftType rightType reason = case (leftType, rightType
               (SemanticTypeData leftTypeId)
               (SemanticTypeData rightTypeId)
           )
+  -- Cross-shape subtype edges of the unified lattice: a precise / nominal
+  -- type is a subtype of its more-general counterpart, decomposed
+  -- covariantly. Reached only when the constraint is not fully concrete
+  -- (the concrete gate above already settled / rejected those via
+  -- 'subtypeNormalizedType'); here one side still carries a variable. These
+  -- MUST precede the shapeKind-mismatch rejection below — they connect
+  -- otherwise-disjoint layer kinds (data↔object, object↔record, tuple↔array).
+  (SemanticTypeData leftTypeId, SemanticTypeObject rightFields) ->
+    -- data q <: {..}: expand q to its declared object view and run object
+    -- width subtyping. Extra declared fields are dropped (vacuous via
+    -- width); a field demanded by the RHS but absent on q surfaces as
+    -- @unknown <: field@.
+    decomposeObject (dataObjectView leftTypeId) rightFields reason
+  (SemanticTypeData leftTypeId, SemanticTypeRecord rightValue) ->
+    -- data q <: record[v]: every declared field of q must be <: v.
+    yield
+      [ TypeConstraint fieldType rightValue reason
+        | fieldType <- Map.elems (dataObjectView leftTypeId)
+      ]
+  (SemanticTypeObject leftFields, SemanticTypeRecord rightValue) ->
+    -- {..} <: record[v]: every field must be <: v.
+    yield [TypeConstraint fieldType rightValue reason | fieldType <- Map.elems leftFields]
+  (SemanticTypeTuple leftElements, SemanticTypeArray rightElement) ->
+    -- [a, b, …] <: array[v]: every position must be <: v.
+    yield [TypeConstraint element rightElement reason | element <- leftElements]
   -- Cross-shape rejection: when neither side is a bare variable / union /
   -- Never / Unknown (= all those are handled by the cases above) and the
   -- two shapes live in disjoint layers (e.g., integer vs object{foo: α},
@@ -184,6 +217,13 @@ decomposeType env original leftType rightType reason = case (leftType, rightType
     settled = Right Set.empty
     keep = Right (Set.singleton original)
     yield newConstraints = Right (Set.fromList newConstraints)
+    -- The declared field object of a 'data' as 'SemanticType Unresolved',
+    -- reified from the (concrete) normalized fields the env carries. Empty
+    -- for an unknown name (treated as a fieldless object = fails any field
+    -- demand), which never happens for an in-scope data.
+    dataObjectView typeId =
+      liftResolvedToUnresolved . denormalise
+        <$> Map.findWithDefault Map.empty typeId env
 
 -- | Classify a 'SemanticType' by which NormalizedType layer it lives in.
 -- Returns 'Nothing' for types whose layer is dynamic (variables, unions,
@@ -221,21 +261,26 @@ decomposeObject ::
   ConstraintReason ->
   Either SolverError (Set Constraint)
 decomposeObject leftFields rightFields reason =
-  -- Width-subtyping covariant: union the label sets and fill missing
-  -- labels with 'SemanticTypeUnknown'. A LHS missing a label demanded
-  -- by RHS yields @unknown ⊑ RHS_field_type@ which fails
-  -- concrete-vs-concrete in the next decompose pass and surfaces an
-  -- error. RHS missing a label LHS has yields @LHS_field_type ⊑
-  -- unknown@ which is vacuous (= extra LHS fields are accepted by
-  -- width subtyping).
-  let allLabels = Map.keysSet leftFields <> Map.keysSet rightFields
-   in Right $
+  -- Width-subtyping, covariant: the LHS must carry every field the RHS
+  -- demands. A field present on the RHS but absent on the LHS is a hard
+  -- structural failure (the field may be absent at runtime) — it must NOT
+  -- be deferred as @unknown ⊑ RHS_field@, which would let an RHS field
+  -- variable widen to 'unknown' to "satisfy" the demand and unsoundly
+  -- accept @{} <: {x: t}@. Extra LHS fields are dropped (accepted) by
+  -- width.
+  case filter (`Map.notMember` leftFields) (Map.keys rightFields) of
+    (missingLabel : _) ->
+      Left
+        ( SolverErrorStructuralMismatch
+            reason
+            ("object is missing required field: " <> missingLabel)
+        )
+    [] ->
+      Right $
         Set.fromList
-          [ TypeConstraint
-              (Map.findWithDefault SemanticTypeUnknown label leftFields)
-              (Map.findWithDefault SemanticTypeUnknown label rightFields)
-              reason
-            | label <- Set.toList allLabels
+          [ TypeConstraint leftFieldType rightFieldType reason
+            | (label, rightFieldType) <- Map.toList rightFields,
+              Just leftFieldType <- [Map.lookup label leftFields]
           ]
 
 -- ===========================================================================

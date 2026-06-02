@@ -151,6 +151,7 @@ spec = do
   constraintContents
   dataNameClash
   implicitReturnReason
+  crossShapeEdges
 
 -- ---------------------------------------------------------------------------
 -- Basic agent
@@ -837,3 +838,69 @@ implicitReturnReason = describe "ReasonKindImplicitReturn vs ReasonKindReturnSta
   where
     isImplicitReturn reason = reason.kind == ReasonKindImplicitReturn
     isReturnStatement reason = reason.kind == ReasonKindReturnStatement
+
+-- ---------------------------------------------------------------------------
+-- Cross-shape subtype edges of the unified type lattice: a precise / nominal
+-- type is a subtype of its more-general counterpart. Exercised end-to-end
+-- through 'compileOne' (so the solver actually resolves the edge), using only
+-- syntax that exists today: field access for `data <: object`, `record[T]`
+-- for `data <: record`, and the `(a, b)` tuple syntax for `tuple <: array`.
+-- ---------------------------------------------------------------------------
+
+crossShapeEdges :: Spec
+crossShapeEdges = describe "cross-shape subtype edges" $ do
+  it "data <: object: field access on a data value yields its declared field type" $ do
+    -- p.x demands point <: {x: t}; the data<:object edge expands point to its
+    -- object view {x: integer, y: integer}, giving integer <: t, which matches
+    -- the integer return annotation.
+    diags <-
+      compileOne
+        "data point(x: integer, y: integer)\nagent main(p: point) -> integer { p.x }"
+    diags `shouldNotSatisfy` hasErrors
+
+  it "data <: object: a field's declared type must satisfy the demand (mismatch rejected)" $ do
+    -- point.x is integer; the return annotation string forces integer <: string.
+    diags <-
+      compileOne
+        "data point(x: integer, y: integer)\nagent main(p: point) -> string { p.x }"
+    diags `shouldSatisfy` hasErrors
+
+  it "data <: object: accessing a field the data lacks is a hard structural failure" $ do
+    -- point has no `z`; point <: {z: t} must fail (a missing field is not
+    -- padded to unknown).
+    diags <-
+      compileOne
+        "data point(x: integer)\nagent main(p: point) -> integer { p.z }"
+    diags `shouldSatisfy` hasErrors
+
+  it "data <: record: every declared field must satisfy the record value bound" $ do
+    diags <-
+      compileOne
+        "data pair(a: integer, b: integer)\nagent main(p: pair) -> record[integer] { p }"
+    diags `shouldNotSatisfy` hasErrors
+
+  it "data <: record: a field outside the record value bound is rejected" $ do
+    -- pair.b is string, not <: integer.
+    diags <-
+      compileOne
+        "data pair(a: integer, b: string)\nagent main(p: pair) -> record[integer] { p }"
+    diags `shouldSatisfy` hasErrors
+
+  it "tuple <: array: a tuple is usable as an array whose element covers all positions" $ do
+    diags <-
+      compileOne
+        "agent main(t: (integer, string)) -> array[integer | string] { t }"
+    diags `shouldNotSatisfy` hasErrors
+
+  it "tuple <: array: a position outside the array element type is rejected" $ do
+    -- the string position is not <: integer.
+    diags <-
+      compileOne
+        "agent main(t: (integer, string)) -> array[integer] { t }"
+    diags `shouldSatisfy` hasErrors
+
+  it "array </: tuple: an array is not usable where a specific tuple is demanded" $ do
+    diags <-
+      compileOne
+        "agent main(t: array[integer]) -> (integer, integer) { t }"
+    diags `shouldSatisfy` hasErrors

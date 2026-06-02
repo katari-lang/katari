@@ -72,6 +72,27 @@ release · **[later]** post-v0.1.0 · **[deferred]** acknowledged, no owner yet.
       a callback** and add a Gleam-style `use` binding that desugars to the
       handle/continuation. Either way needs generics (the handler is polymorphic
       over the body's type/effects), so it lands after that phase.
+- [ ] **[later · solver completeness, not soundness] Aggregate-narrow for a
+      variable's composite upper bounds.** With the unified type lattice, a free
+      type variable that picks up *several* var-containing composite upper bounds
+      must be narrowed against the **combined** bound, not one constraint at a
+      time. Two cases the current per-constraint narrowing gets wrong (both
+      *reject a typeable program* — never accept an ill-typed one, so this is
+      incompleteness, not unsoundness):
+  - `t <: {x: a}` **and** `t <: {y: b}` → `t` should become `{x: a, y: b}`
+    (merge all required fields), but narrowing from the first constraint pins
+    `t := {x: a'}` and the second then fails.
+  - `t <: {x: a}` **and** `t <: foo` (a `data`) → `t = foo` is a valid solution
+    (`foo <: {x: a}` via `data <: object`), but narrowing the object first pins
+    `t := {x: a'}` and `{x: a'} <: foo` necessarily fails.
+      Fix: when narrowing a variable, gather **all** its stuck composite upper
+      constraints first; if any is a `data`, narrow `t` to that `data` and emit
+      the structural requirements as `data <: object` sub-constraints; otherwise
+      merge the object/record uppers (union of required field labels) and narrow
+      to the merged shape (symmetric join on the lower side). These var-var cases
+      are rare pre-generics (they need a *free* variable at a field access;
+      monomorphic code's access subject is always concrete, so `Decompose`
+      handles it), so this is deferred behind the generics phase.
 
 ## SDK (`@katari-lang/port`)
 
