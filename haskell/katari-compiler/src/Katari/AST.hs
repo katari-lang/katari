@@ -644,19 +644,38 @@ instance HasSourceSpan (VariablePattern phase) where
   sourceSpanOf pattern' = pattern'.sourceSpan
 
 -- | A formal parameter of an agent / request / external / prim
--- declaration: @label = pattern@. The @label@ is the call-site keyword
--- (kept as bare text, per the label-namespace policy); the @pattern@
--- destructures the argument once bound.
+-- declaration: @name: type = default@. Parameters are plain bindings —
+-- the call-site keyword /is/ the binding name (label == name, no separate
+-- label-rename form), there is no destructuring (use @let@ / @match@ in
+-- the body), and an optional literal @default@ makes the parameter
+-- omittable at call sites (the runtime fills it in).
 data ParameterBinding (phase :: Phase) = ParameterBinding
   { annotation :: Maybe Text,
-    -- | External call label stays as text (per Identifier-pass policy).
-    label :: Text,
-    pattern :: Pattern phase,
+    -- | Binding name. Doubles as the call-site label (label == name.text).
+    name :: NameRef phase VariableRef,
+    -- | Optional declared type. When absent but a 'defaultValue' is
+    -- present, the parameter type is inferred as the default literal's
+    -- widened base type.
+    typeAnnotation :: Maybe (SyntacticType phase),
+    -- | Optional literal default. Its presence makes the parameter
+    -- optional (omittable at the call site).
+    defaultValue :: Maybe ParameterDefault,
     sourceSpan :: SourceSpan
   }
 
 instance HasSourceSpan (ParameterBinding phase) where
   sourceSpanOf binding = binding.sourceSpan
+
+-- | A literal default attached to a parameter. Phase-independent: it is
+-- plain data that passes through every phase unchanged (the parameter's
+-- type is recomputed from the literal wherever needed). Only literals are
+-- allowed (no computed defaults), which keeps parameters order-free and
+-- lets the value be serialised straight into the IR / JSON schema.
+data ParameterDefault = ParameterDefault
+  { value :: LiteralValue,
+    sourceSpan :: SourceSpan
+  }
+  deriving (Eq, Show)
 
 -- | Constructor pattern. Constructors are flattened into the top-level
 -- variable namespace of their owning module, so only two forms exist:

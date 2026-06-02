@@ -45,7 +45,7 @@ spec = describe "Katari.Typechecker.ScopeIndex" $ do
     -- agent foo(name: string) -> string {
     --   name   <- line 2
     -- }
-    r <- identify "agent foo(name = name: string) -> string {\n  name\n}\n"
+    r <- identify "agent foo(name: string) -> string {\n  name\n}\n"
     let visible = namesVisibleAt r Position {line = 2, column = 3}
     visible `shouldSatisfy` ("name" `elem`)
 

@@ -309,8 +309,8 @@ hoverFromParameter ::
   ParameterBinding Zonked ->
   Maybe HoverInfo
 hoverFromParameter snap moduleName position param =
-  if spanContains param.sourceSpan position
-    then hoverFromPattern snap moduleName position param.pattern
+  if spanContains param.name.sourceSpan position
+    then hoverFromVariableRef snap moduleName param.name
     else Nothing
 
 hoverFromPattern ::

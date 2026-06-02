@@ -9,7 +9,7 @@ import Data.Text qualified as Text
 import Katari.Compile qualified as C
 import Katari.Query qualified as Query
 import Katari.Query.Completion
-import Katari.SemanticType (SemanticType (..), emptyRequest)
+import Katari.SemanticType (SemanticType (..), emptyRequest, requiredParameter)
 import Katari.SourceSpan (Position (..))
 import Katari.TestSupport (compileSync)
 import Test.Hspec
@@ -61,15 +61,15 @@ findLabel lbl = find (\ci -> ci.ciLabel == lbl)
 spec :: Spec
 spec = describe "Katari.Query.Completion" $ do
   it "offers an agent parameter inside the body" $ do
-    -- agent foo(name = name: string) -> string {
+    -- agent foo(name: string) -> string {
     --   name   <- cursor here, completion should offer "name"
     -- }
-    snap <- prepare "agent foo(name = name: string) -> string {\n  name\n}\n"
+    snap <- prepare "agent foo(name: string) -> string {\n  name\n}\n"
     let items = completionsAt snap "<test>" Position {line = 2, column = 3}
     completionLabels items `shouldSatisfy` ("name" `elem`)
 
   it "marks a parameter binding as a local variable" $ do
-    snap <- prepare "agent foo(name = name: string) -> string {\n  name\n}\n"
+    snap <- prepare "agent foo(name: string) -> string {\n  name\n}\n"
     let items = completionsAt snap "<test>" Position {line = 2, column = 3}
     fmap (.ciKind) (findLabel "name" items) `shouldBe` Just CKLocalVariable
 
@@ -183,7 +183,7 @@ spec = describe "Katari.Query.Completion" $ do
     snap <-
       prepare
         ( Text.unlines
-            [ "agent greet(name = name: string, age = age: integer) -> string { name }",
+            [ "agent greet(name: string, age: integer) -> string { name }",
               "agent main() -> string { greet(name = \"x\", age = 0) }"
             ]
         )
@@ -238,7 +238,7 @@ spec = describe "Katari.Query.Completion" $ do
       prepareMulti
         [ ( "helper",
             "<helper>",
-            "agent greet(name = name: string) -> string { name }\n"
+            "agent greet(name: string) -> string { name }\n"
           ),
           ( "main",
             "<main>",
@@ -261,13 +261,15 @@ spec = describe "Katari.Query.Completion" $ do
     -- `{name}` (only label common to both branches).
     let fn1 =
           SemanticTypeFunction
-            (Map.singleton "name" SemanticTypeString)
+            (Map.singleton "name" (requiredParameter SemanticTypeString))
             SemanticTypeString
             emptyRequest
         fn2 =
           SemanticTypeFunction
             ( Map.fromList
-                [("name", SemanticTypeString), ("age", SemanticTypeInteger)]
+                [ ("name", requiredParameter SemanticTypeString),
+                  ("age", requiredParameter SemanticTypeInteger)
+                ]
             )
             SemanticTypeString
             emptyRequest

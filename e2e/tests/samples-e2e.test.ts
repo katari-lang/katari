@@ -357,4 +357,9 @@ describe("samples/ end-to-end (apply → run → verify)", () => {
     const result = await applyAndRun("stdlib_collections", "24-stdlib-collections");
     expect(result).toBe("len=3 has1=true idx2=2 first=2 n=5 big=9 r=3 shout=KATARI IS FUN");
   });
+
+  itE2E("25-default-args: omitted optional args fill defaults, passed args override", async () => {
+    const result = await applyAndRun("default_args", "25-default-args");
+    expect(result).toBe("hi ada! | hi bob? | 11 | 15");
+  });
 });

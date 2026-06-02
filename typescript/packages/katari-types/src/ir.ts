@@ -82,6 +82,12 @@ export type ContKind = "contKindNext" | "contKindForNext";
 export type Param = {
   label: string;
   var: VarId;
+  /**
+   * Literal default for an optional parameter. When the caller omits this
+   * label, the runtime binds `var` to this value instead. Omitted from the
+   * JSON (and absent here) for required parameters.
+   */
+  defaultValue?: LiteralValue;
 };
 
 /**

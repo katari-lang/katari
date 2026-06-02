@@ -48,7 +48,7 @@ import Data.Text (Text)
 import Data.Text qualified as Text
 import Katari.AST (Module (..), Phase (Zonked))
 import Katari.Id (QualifiedName (..), VariableResolution (..))
-import Katari.SemanticType (Resolved, SemanticType (..))
+import Katari.SemanticType (Parameter (..), Resolved, SemanticType (..))
 import Katari.SemanticType.Render (renderSemanticType)
 import Katari.SourceSpan (Position, SourceSpan (..))
 import Katari.Typechecker.Identifier
@@ -314,7 +314,7 @@ dataConstructorParameters snap typeQName = do
       ]
   ctorType <- lookupTopLevelType ctorQName snap
   case ctorType of
-    SemanticTypeFunction parameters _ _ -> Just parameters
+    SemanticTypeFunction parameters _ _ -> Just ((.parameterType) <$> parameters)
     _ -> Nothing
 
 -- | Smart join of multiple resolved branch types into a single

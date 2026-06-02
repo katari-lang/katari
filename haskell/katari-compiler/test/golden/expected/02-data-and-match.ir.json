@@ -25,12 +25,12 @@
       "body": {
         "description": "Returns the x-coordinate of a point.",
         "entryBody": 5,
-        "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"p\":{\"additionalProperties\":false,\"properties\":{\"$constructor\":{\"const\":\"main.point\"},\"x\":{\"type\":\"integer\"},\"y\":{\"type\":\"integer\"}},\"required\":[\"$constructor\",\"x\",\"y\"],\"type\":\"object\"}},\"required\":[\"p\"],\"type\":\"object\"}",
+        "inputSchema": "{\"additionalProperties\":false,\"properties\":{\"pt\":{\"additionalProperties\":false,\"properties\":{\"$constructor\":{\"const\":\"main.point\"},\"x\":{\"type\":\"integer\"},\"y\":{\"type\":\"integer\"}},\"required\":[\"$constructor\",\"x\",\"y\"],\"type\":\"object\"}},\"required\":[\"pt\"],\"type\":\"object\"}",
         "name": "project_x",
         "outputSchema": "{\"type\":\"integer\"}",
         "parameters": [
           {
-            "label": "p",
+            "label": "pt",
             "var": 2
           }
         ],
@@ -52,11 +52,11 @@
         "parameters": [
           {
             "label": "array",
-            "var": 77
+            "var": 76
           },
           {
             "label": "value",
-            "var": 78
+            "var": 77
           }
         ],
         "qualifiedName": "primitive.array.contains"
@@ -77,11 +77,11 @@
         "parameters": [
           {
             "label": "array",
-            "var": 79
+            "var": 78
           },
           {
             "label": "value",
-            "var": 80
+            "var": 79
           }
         ],
         "qualifiedName": "primitive.array.index_of"
@@ -102,7 +102,7 @@
         "parameters": [
           {
             "label": "key",
-            "var": 81
+            "var": 80
           }
         ],
         "qualifiedName": "primitive.env.get"
@@ -119,7 +119,7 @@
         "parameters": [
           {
             "label": "key",
-            "var": 82
+            "var": 81
           }
         ],
         "qualifiedName": "primitive.env.get_secret"
@@ -136,15 +136,15 @@
         "parameters": [
           {
             "label": "key",
-            "var": 83
+            "var": 82
           },
           {
             "label": "value",
-            "var": 84
+            "var": 83
           },
           {
             "label": "is_secret",
-            "var": 85
+            "var": 84
           }
         ],
         "qualifiedName": "primitive.env.set"
@@ -197,11 +197,11 @@
         "parameters": [
           {
             "label": "lhs",
-            "var": 15
+            "var": 14
           },
           {
             "label": "rhs",
-            "var": 16
+            "var": 15
           }
         ],
         "qualifiedName": "primitive.mul"
@@ -218,7 +218,7 @@
         "parameters": [
           {
             "label": "text",
-            "var": 86
+            "var": 85
           }
         ],
         "qualifiedName": "primitive.json.parse"
@@ -239,7 +239,7 @@
         "parameters": [
           {
             "label": "value",
-            "var": 87
+            "var": 86
           }
         ],
         "qualifiedName": "primitive.json.stringify"
@@ -260,7 +260,7 @@
         "parameters": [
           {
             "label": "value",
-            "var": 88
+            "var": 87
           }
         ],
         "qualifiedName": "primitive.math.abs"
@@ -281,11 +281,11 @@
         "parameters": [
           {
             "label": "lhs",
-            "var": 89
+            "var": 88
           },
           {
             "label": "rhs",
-            "var": 90
+            "var": 89
           }
         ],
         "qualifiedName": "primitive.math.min"
@@ -306,11 +306,11 @@
         "parameters": [
           {
             "label": "lhs",
-            "var": 91
+            "var": 90
           },
           {
             "label": "rhs",
-            "var": 92
+            "var": 91
           }
         ],
         "qualifiedName": "primitive.math.max"
@@ -335,7 +335,7 @@
         "parameters": [
           {
             "label": "value",
-            "var": 93
+            "var": 92
           }
         ],
         "qualifiedName": "primitive.math.floor"
@@ -356,7 +356,7 @@
         "parameters": [
           {
             "label": "value",
-            "var": 94
+            "var": 93
           }
         ],
         "qualifiedName": "primitive.math.ceil"
@@ -377,7 +377,7 @@
         "parameters": [
           {
             "label": "value",
-            "var": 95
+            "var": 94
           }
         ],
         "qualifiedName": "primitive.math.round"
@@ -414,11 +414,11 @@
         "parameters": [
           {
             "label": "record",
-            "var": 96
+            "var": 95
           },
           {
             "label": "key",
-            "var": 97
+            "var": 96
           }
         ],
         "qualifiedName": "primitive.record.get"
@@ -439,11 +439,11 @@
         "parameters": [
           {
             "label": "lhs",
-            "var": 17
+            "var": 16
           },
           {
             "label": "rhs",
-            "var": 18
+            "var": 17
           }
         ],
         "qualifiedName": "primitive.mod"
@@ -460,15 +460,15 @@
         "parameters": [
           {
             "label": "record",
-            "var": 98
+            "var": 97
           },
           {
             "label": "key",
-            "var": 99
+            "var": 98
           },
           {
             "label": "value",
-            "var": 100
+            "var": 99
           }
         ],
         "qualifiedName": "primitive.record.set"
@@ -489,11 +489,11 @@
         "parameters": [
           {
             "label": "record",
-            "var": 101
+            "var": 100
           },
           {
             "label": "key",
-            "var": 102
+            "var": 101
           }
         ],
         "qualifiedName": "primitive.record.remove"
@@ -514,7 +514,7 @@
         "parameters": [
           {
             "label": "record",
-            "var": 103
+            "var": 102
           }
         ],
         "qualifiedName": "primitive.record.keys"
@@ -535,11 +535,11 @@
         "parameters": [
           {
             "label": "record",
-            "var": 104
+            "var": 103
           },
           {
             "label": "key",
-            "var": 105
+            "var": 104
           }
         ],
         "qualifiedName": "primitive.record.has"
@@ -560,7 +560,7 @@
         "parameters": [
           {
             "label": "record",
-            "var": 106
+            "var": 105
           }
         ],
         "qualifiedName": "primitive.record.size"
@@ -585,7 +585,7 @@
         "parameters": [
           {
             "label": "value",
-            "var": 107
+            "var": 106
           }
         ],
         "qualifiedName": "primitive.string.length"
@@ -606,15 +606,15 @@
         "parameters": [
           {
             "label": "value",
-            "var": 108
+            "var": 107
           },
           {
             "label": "start",
-            "var": 109
+            "var": 108
           },
           {
             "label": "end",
-            "var": 110
+            "var": 109
           }
         ],
         "qualifiedName": "primitive.string.slice"
@@ -635,11 +635,11 @@
         "parameters": [
           {
             "label": "value",
-            "var": 111
+            "var": 110
           },
           {
             "label": "substring",
-            "var": 112
+            "var": 111
           }
         ],
         "qualifiedName": "primitive.string.contains"
@@ -660,11 +660,11 @@
         "parameters": [
           {
             "label": "value",
-            "var": 113
+            "var": 112
           },
           {
             "label": "prefix",
-            "var": 114
+            "var": 113
           }
         ],
         "qualifiedName": "primitive.string.starts_with"
@@ -685,11 +685,11 @@
         "parameters": [
           {
             "label": "value",
-            "var": 115
+            "var": 114
           },
           {
             "label": "suffix",
-            "var": 116
+            "var": 115
           }
         ],
         "qualifiedName": "primitive.string.ends_with"
@@ -710,11 +710,11 @@
         "parameters": [
           {
             "label": "lhs",
-            "var": 19
+            "var": 18
           },
           {
             "label": "rhs",
-            "var": 20
+            "var": 19
           }
         ],
         "qualifiedName": "primitive.div"
@@ -731,11 +731,11 @@
         "parameters": [
           {
             "label": "value",
-            "var": 117
+            "var": 116
           },
           {
             "label": "substring",
-            "var": 118
+            "var": 117
           }
         ],
         "qualifiedName": "primitive.string.index_of"
@@ -756,7 +756,7 @@
         "parameters": [
           {
             "label": "value",
-            "var": 119
+            "var": 118
           }
         ],
         "qualifiedName": "primitive.string.upper"
@@ -777,7 +777,7 @@
         "parameters": [
           {
             "label": "value",
-            "var": 120
+            "var": 119
           }
         ],
         "qualifiedName": "primitive.string.lower"
@@ -798,7 +798,7 @@
         "parameters": [
           {
             "label": "value",
-            "var": 121
+            "var": 120
           }
         ],
         "qualifiedName": "primitive.string.trim"
@@ -819,11 +819,11 @@
         "parameters": [
           {
             "label": "value",
-            "var": 122
+            "var": 121
           },
           {
             "label": "separator",
-            "var": 123
+            "var": 122
           }
         ],
         "qualifiedName": "primitive.string.split"
@@ -848,11 +848,11 @@
         "parameters": [
           {
             "label": "parts",
-            "var": 124
+            "var": 123
           },
           {
             "label": "separator",
-            "var": 125
+            "var": 124
           }
         ],
         "qualifiedName": "primitive.string.join"
@@ -873,15 +873,15 @@
         "parameters": [
           {
             "label": "value",
-            "var": 126
+            "var": 125
           },
           {
             "label": "pattern",
-            "var": 127
+            "var": 126
           },
           {
             "label": "replacement",
-            "var": 128
+            "var": 127
           }
         ],
         "qualifiedName": "primitive.string.replace"
@@ -902,7 +902,7 @@
         "parameters": [
           {
             "label": "value",
-            "var": 21
+            "var": 20
           }
         ],
         "qualifiedName": "primitive.neg"
@@ -923,11 +923,11 @@
         "parameters": [
           {
             "label": "lhs",
-            "var": 22
+            "var": 21
           },
           {
             "label": "rhs",
-            "var": 23
+            "var": 22
           }
         ],
         "qualifiedName": "primitive.eq"
@@ -952,11 +952,11 @@
         "parameters": [
           {
             "label": "lhs",
-            "var": 24
+            "var": 23
           },
           {
             "label": "rhs",
-            "var": 25
+            "var": 24
           }
         ],
         "qualifiedName": "primitive.ne"
@@ -977,11 +977,11 @@
         "parameters": [
           {
             "label": "lhs",
-            "var": 26
+            "var": 25
           },
           {
             "label": "rhs",
-            "var": 27
+            "var": 26
           }
         ],
         "qualifiedName": "primitive.lt"
@@ -1002,11 +1002,11 @@
         "parameters": [
           {
             "label": "lhs",
-            "var": 28
+            "var": 27
           },
           {
             "label": "rhs",
-            "var": 29
+            "var": 28
           }
         ],
         "qualifiedName": "primitive.le"
@@ -1027,11 +1027,11 @@
         "parameters": [
           {
             "label": "lhs",
-            "var": 30
+            "var": 29
           },
           {
             "label": "rhs",
-            "var": 31
+            "var": 30
           }
         ],
         "qualifiedName": "primitive.gt"
@@ -1052,11 +1052,11 @@
         "parameters": [
           {
             "label": "lhs",
-            "var": 32
+            "var": 31
           },
           {
             "label": "rhs",
-            "var": 33
+            "var": 32
           }
         ],
         "qualifiedName": "primitive.ge"
@@ -1067,7 +1067,7 @@
       "body": {
         "parameters": [],
         "statements": [],
-        "trailing": 4
+        "trailing": 3
       },
       "kind": "blockUser"
     },
@@ -1085,11 +1085,11 @@
         "parameters": [
           {
             "label": "lhs",
-            "var": 34
+            "var": 33
           },
           {
             "label": "rhs",
-            "var": 35
+            "var": 34
           }
         ],
         "qualifiedName": "primitive.and"
@@ -1110,11 +1110,11 @@
         "parameters": [
           {
             "label": "lhs",
-            "var": 36
+            "var": 35
           },
           {
             "label": "rhs",
-            "var": 37
+            "var": 36
           }
         ],
         "qualifiedName": "primitive.or"
@@ -1135,7 +1135,7 @@
         "parameters": [
           {
             "label": "value",
-            "var": 38
+            "var": 37
           }
         ],
         "qualifiedName": "primitive.not"
@@ -1156,11 +1156,11 @@
         "parameters": [
           {
             "label": "lhs",
-            "var": 39
+            "var": 38
           },
           {
             "label": "rhs",
-            "var": 40
+            "var": 39
           }
         ],
         "qualifiedName": "primitive.concat"
@@ -1181,7 +1181,7 @@
         "parameters": [
           {
             "label": "value",
-            "var": 41
+            "var": 40
           }
         ],
         "qualifiedName": "primitive.type_of"
@@ -1200,7 +1200,7 @@
                   [
                     "x",
                     {
-                      "body": 4,
+                      "body": 3,
                       "kind": "matchPatternVariable"
                     }
                   ],
@@ -1216,7 +1216,7 @@
             }
           }
         ],
-        "subject": 3
+        "subject": 2
       },
       "kind": "blockMatch"
     },
@@ -1234,7 +1234,7 @@
         "parameters": [
           {
             "label": "value",
-            "var": 42
+            "var": 41
           }
         ],
         "qualifiedName": "primitive.to_string"
@@ -1255,7 +1255,7 @@
         "parameters": [
           {
             "label": "message",
-            "var": 43
+            "var": 42
           }
         ],
         "qualifiedName": "primitive.from_string_error"
@@ -1272,7 +1272,7 @@
         "parameters": [
           {
             "label": "text",
-            "var": 44
+            "var": 43
           }
         ],
         "qualifiedName": "primitive.from_string"
@@ -1293,7 +1293,7 @@
         "parameters": [
           {
             "label": "value",
-            "var": 45
+            "var": 44
           }
         ],
         "qualifiedName": "primitive.format"
@@ -1314,7 +1314,7 @@
         "parameters": [
           {
             "label": "value",
-            "var": 46
+            "var": 45
           }
         ],
         "qualifiedName": "primitive.file_to_string"
@@ -1329,31 +1329,21 @@
       "body": {
         "parameters": [
           {
-            "label": "p",
+            "label": "pt",
             "var": 2
           }
         ],
         "statements": [
           {
             "body": {
-              "pattern": {
-                "body": 3,
-                "kind": "matchPatternVariable"
-              },
-              "source": 2
-            },
-            "kind": "statementBindPattern"
-          },
-          {
-            "body": {
               "arguments": [],
               "block": 4,
-              "output": 5
+              "output": 4
             },
             "kind": "statementCall"
           }
         ],
-        "trailing": 5
+        "trailing": 4
       },
       "kind": "blockUser"
     },
@@ -1367,7 +1357,7 @@
         "parameters": [
           {
             "label": "value",
-            "var": 47
+            "var": 46
           }
         ],
         "qualifiedName": "primitive.string_to_file"
@@ -1387,11 +1377,11 @@
         "parameters": [
           {
             "label": "tuple",
-            "var": 48
+            "var": 47
           },
           {
             "label": "index",
-            "var": 49
+            "var": 48
           }
         ],
         "qualifiedName": "primitive.tuple_get"
@@ -1411,11 +1401,11 @@
         "parameters": [
           {
             "label": "object",
-            "var": 50
+            "var": 49
           },
           {
             "label": "field",
-            "var": 51
+            "var": 50
           }
         ],
         "qualifiedName": "primitive.get_field"
@@ -1436,7 +1426,7 @@
         "parameters": [
           {
             "label": "value",
-            "var": 52
+            "var": 51
           }
         ],
         "qualifiedName": "primitive.get_metadata"
@@ -1457,7 +1447,7 @@
         "parameters": [
           {
             "label": "message",
-            "var": 53
+            "var": 52
           }
         ],
         "qualifiedName": "primitive.call_agent_error"
@@ -1474,11 +1464,11 @@
         "parameters": [
           {
             "label": "name",
-            "var": 54
+            "var": 53
           },
           {
             "label": "args",
-            "var": 55
+            "var": 54
           }
         ],
         "qualifiedName": "primitive.call_agent"
@@ -1495,23 +1485,23 @@
         "parameters": [
           {
             "label": "name",
-            "var": 6
+            "var": 5
           },
           {
             "label": "id",
-            "var": 7
+            "var": 6
           },
           {
             "label": "description",
-            "var": 8
+            "var": 7
           },
           {
             "label": "input",
-            "var": 9
+            "var": 8
           },
           {
             "label": "output",
-            "var": 10
+            "var": 9
           }
         ],
         "qualifiedName": "primitive.agent_metadata"
@@ -1532,7 +1522,7 @@
         "parameters": [
           {
             "label": "msg",
-            "var": 56
+            "var": 55
           }
         ],
         "qualifiedName": "primitive.throw"
@@ -1549,7 +1539,7 @@
         "parameters": [
           {
             "label": "env_key",
-            "var": 57
+            "var": 56
           }
         ],
         "qualifiedName": "primitive.env_not_found"
@@ -1578,7 +1568,7 @@
         "parameters": [
           {
             "label": "value",
-            "var": 58
+            "var": 57
           }
         ],
         "qualifiedName": "primitive.json_boolean"
@@ -1595,7 +1585,7 @@
         "parameters": [
           {
             "label": "value",
-            "var": 59
+            "var": 58
           }
         ],
         "qualifiedName": "primitive.json_integer"
@@ -1612,7 +1602,7 @@
         "parameters": [
           {
             "label": "value",
-            "var": 60
+            "var": 59
           }
         ],
         "qualifiedName": "primitive.json_number"
@@ -1629,7 +1619,7 @@
         "parameters": [
           {
             "label": "value",
-            "var": 61
+            "var": 60
           }
         ],
         "qualifiedName": "primitive.json_string"
@@ -1646,7 +1636,7 @@
         "parameters": [
           {
             "label": "items",
-            "var": 62
+            "var": 61
           }
         ],
         "qualifiedName": "primitive.json_array"
@@ -1663,7 +1653,7 @@
         "parameters": [
           {
             "label": "entries",
-            "var": 63
+            "var": 62
           }
         ],
         "qualifiedName": "primitive.json_object"
@@ -1680,11 +1670,11 @@
         "parameters": [
           {
             "label": "lhs",
-            "var": 11
+            "var": 10
           },
           {
             "label": "rhs",
-            "var": 12
+            "var": 11
           }
         ],
         "qualifiedName": "primitive.add"
@@ -1701,7 +1691,7 @@
         "parameters": [
           {
             "label": "message",
-            "var": 64
+            "var": 63
           }
         ],
         "qualifiedName": "primitive.json_parse_error"
@@ -1774,11 +1764,11 @@
         "parameters": [
           {
             "label": "array",
-            "var": 65
+            "var": 64
           },
           {
             "label": "index",
-            "var": 66
+            "var": 65
           }
         ],
         "qualifiedName": "primitive.array.get"
@@ -1799,7 +1789,7 @@
         "parameters": [
           {
             "label": "array",
-            "var": 67
+            "var": 66
           }
         ],
         "qualifiedName": "primitive.array.length"
@@ -1836,11 +1826,11 @@
         "parameters": [
           {
             "label": "lhs",
-            "var": 13
+            "var": 12
           },
           {
             "label": "rhs",
-            "var": 14
+            "var": 13
           }
         ],
         "qualifiedName": "primitive.sub"
@@ -1857,7 +1847,7 @@
         "parameters": [
           {
             "label": "value",
-            "var": 68
+            "var": 67
           }
         ],
         "qualifiedName": "primitive.array.of"
@@ -1878,11 +1868,11 @@
         "parameters": [
           {
             "label": "array",
-            "var": 69
+            "var": 68
           },
           {
             "label": "value",
-            "var": 70
+            "var": 69
           }
         ],
         "qualifiedName": "primitive.array.append"
@@ -1903,11 +1893,11 @@
         "parameters": [
           {
             "label": "lhs",
-            "var": 71
+            "var": 70
           },
           {
             "label": "rhs",
-            "var": 72
+            "var": 71
           }
         ],
         "qualifiedName": "primitive.array.concat"
@@ -1928,15 +1918,15 @@
         "parameters": [
           {
             "label": "array",
-            "var": 73
+            "var": 72
           },
           {
             "label": "start",
-            "var": 74
+            "var": 73
           },
           {
             "label": "end",
-            "var": 75
+            "var": 74
           }
         ],
         "qualifiedName": "primitive.array.slice"
@@ -1957,7 +1947,7 @@
         "parameters": [
           {
             "label": "array",
-            "var": 76
+            "var": 75
           }
         ],
         "qualifiedName": "primitive.array.reverse"
@@ -2222,8 +2212,7 @@
     },
     "varNames": {
       "2": "pt",
-      "3": "pt",
-      "4": "xv"
+      "3": "xv"
     }
   }
 }

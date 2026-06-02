@@ -154,6 +154,10 @@ data ReasonKind where
   ReasonKindStateVarAnnotation :: ReasonKind
   ReasonKindForVarAnnotation :: ReasonKind
   ReasonKindVariablePatternAnnotation :: ReasonKind
+  -- | A parameter's literal default must be a subtype of its declared
+  -- type (or, when the type is omitted, defines the parameter's type as
+  -- the literal's widened base type).
+  ReasonKindParameterDefault :: ReasonKind
   ReasonKindCallArgument :: ReasonKind
   ReasonKindBinaryOperator :: ReasonKind
   ReasonKindUnaryOperator :: ReasonKind
@@ -414,7 +418,7 @@ elaborateType = \case
     parameterEntries <- mapM (\(label, pt) -> (,) label <$> elaborateType pt) parameterTypes
     returnSemantic <- elaborateType returnType
     requests <- elaborateRequestList withRequests
-    pure (SemanticTypeFunction (Map.fromList parameterEntries) returnSemantic requests)
+    pure (SemanticTypeFunction (requiredParameter <$> Map.fromList parameterEntries) returnSemantic requests)
   TypeArray ArrayTypeNode {elementType} ->
     SemanticTypeArray <$> elaborateType elementType
   TypeTuple TupleTypeNode {elementTypes} ->
@@ -645,7 +649,7 @@ walkDataDecl DataDeclaration {annotation, name, typeName, constructorName, param
   let returnType = maybe SemanticTypeUnknown SemanticTypeData typeName.resolution
       signature =
         SemanticTypeFunction
-          (Map.fromList fields)
+          (requiredParameter <$> Map.fromList fields)
           returnType
           emptyRequest
   addEqTypeConstraint signature tCtor (ConstraintReason ReasonKindDataConstructorSignature sourceSpan)
@@ -691,22 +695,82 @@ walkDataParameter DataParameter {annotation, name, parameterType, sourceSpan} =
 -- | Walk a parameter list, returning the rebuilt 'ParameterBinding' list and
 -- a 'Map' from parameter label to inferred type, ready to drop into a
 -- 'SemanticTypeFunction' signature.
+-- | Walk a parameter list, returning the rebuilt bindings and the
+-- label-to-'Parameter' signature map. Each 'Parameter' records its type and
+-- whether it is optional (has a literal default), so the optionality rides
+-- directly inside the 'SemanticTypeFunction' parameter map — the solver
+-- then knows which parameters a caller may omit. A defaulted parameter's
+-- type is checked against / inferred from its default by
+-- 'constrainParameterType'.
 walkParameterListForSignature ::
   [ParameterBinding Identified] ->
-  CG ([ParameterBinding Constrained], Map Text (SemanticType Unresolved))
+  CG ([ParameterBinding Constrained], Map Text (Parameter Unresolved))
 walkParameterListForSignature parameters = do
-  let walkOne ParameterBinding {annotation, label, pattern, sourceSpan} = do
-        (pattern', patternType) <- walkPattern Nothing pattern
-        let rebuilt =
+  let walkOne ParameterBinding {annotation, name, typeAnnotation, defaultValue, sourceSpan} = do
+        paramType <- variableTypeFromName name
+        constrainParameterType paramType typeAnnotation defaultValue sourceSpan
+        let parameter =
+              Parameter
+                { parameterType = paramType,
+                  optional = case defaultValue of Just _ -> True; Nothing -> False
+                }
+            rebuilt =
               ParameterBinding
                 { annotation = annotation,
-                  label = label,
-                  pattern = pattern',
+                  name = retagNameRef name,
+                  typeAnnotation = fmap retagSyntacticType typeAnnotation,
+                  defaultValue = defaultValue,
                   sourceSpan = sourceSpan
                 }
-        pure (rebuilt, (label, patternType))
-  rebuilt <- mapM walkOne parameters
-  pure (map fst rebuilt, Map.fromList (map snd rebuilt))
+        pure (rebuilt, (name.text, parameter))
+  walked <- mapM walkOne parameters
+  pure (map fst walked, Map.fromList (map snd walked))
+
+-- | Constrain a parameter's inference variable from its (optional) type
+-- annotation and (optional) literal default:
+--
+--   * annotation present        → @paramType == annotation@.
+--   * default present, typed    → @literalType <: paramType@ (the default
+--     must fit the declared type — e.g. @temperature: number = 0.7@).
+--   * default present, untyped  → @paramType == widened(literal)@ (infer
+--     the parameter type as the literal's base type — @x = 2@ gives
+--     @x : integer@, never the singleton @2@).
+constrainParameterType ::
+  SemanticType Unresolved ->
+  Maybe (SyntacticType Identified) ->
+  Maybe ParameterDefault ->
+  SourceSpan ->
+  CG ()
+constrainParameterType paramType typeAnnotation defaultValue sourceSpan = do
+  annotated <- traverse elaborateType typeAnnotation
+  case annotated of
+    Just t ->
+      addEqTypeConstraint paramType t (ConstraintReason ReasonKindVariablePatternAnnotation sourceSpan)
+    Nothing -> pure ()
+  case defaultValue of
+    Nothing -> pure ()
+    Just paramDefault -> case annotated of
+      Just _ ->
+        addTypeConstraint
+          (literalValueToSemantic paramDefault.value)
+          paramType
+          (ConstraintReason ReasonKindParameterDefault sourceSpan)
+      Nothing ->
+        addEqTypeConstraint
+          paramType
+          (widenLiteralType paramDefault.value)
+          (ConstraintReason ReasonKindParameterDefault sourceSpan)
+
+-- | The widened base type of a literal (singleton literal types collapsed
+-- to their primitive). Used to infer an untyped defaulted parameter's type.
+widenLiteralType :: LiteralValue -> SemanticType phase
+widenLiteralType = \case
+  LiteralValueInteger _ -> SemanticTypeInteger
+  LiteralValueNumber _ -> SemanticTypeNumber
+  LiteralValueString _ -> SemanticTypeString
+  LiteralValueBoolean _ -> SemanticTypeBoolean
+  LiteralValueNull -> SemanticTypeNull
+  LiteralValueAgent _ -> SemanticTypeUnknown
 
 -- | Walk a 'Pattern', returning the rebuilt Constrained pattern and its
 -- inferred type (as a 'SemanticType' Unresolved). Variable bindings are
@@ -805,7 +869,7 @@ walkPattern maybeSubject = \case
         parameters' = map fst paramPairs
     patternResult <- freshTypeVar
     let synthesised =
-          SemanticTypeFunction argSig patternResult emptyRequest
+          SemanticTypeFunction (requiredParameter <$> argSig) patternResult emptyRequest
     addTypeConstraint synthesised tCtor (ConstraintReason ReasonKindConstructorPattern sourceSpan)
     pure
       ( PatternQualifiedConstructor
@@ -1374,7 +1438,7 @@ applyNormalCall callee' arguments' sourceSpan = do
   tResult <- freshTypeVar
   enclosing <- asks (.contextEnclosingRequests)
   let calleeEff = maybe emptyRequest singletonRequestVariable enclosing
-      expected = SemanticTypeFunction argSig tResult calleeEff
+      expected = SemanticTypeFunction (requiredParameter <$> argSig) tResult calleeEff
   addTypeConstraint calleeType expected (ConstraintReason ReasonKindCallArgument sourceSpan)
   pure tResult
 

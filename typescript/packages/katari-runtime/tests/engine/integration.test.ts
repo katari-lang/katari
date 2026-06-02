@@ -126,6 +126,53 @@ describe("engine integration: end-to-end via external delegate", () => {
     expect(Object.keys(result.state.delegationSenders).length).toBe(0);
   });
 
+  it("omitted optional parameter is filled from its defaultValue", async () => {
+    const x = 0 as VarId;
+    // agent echo(x: integer = 42) -> integer { x }
+    const echoAgent: Block = {
+      kind: "blockAgent",
+      body: {
+        qualifiedName: "echo",
+        parameters: [
+          { label: "x", var: x, defaultValue: { kind: "literalValueInteger", integer: 42 } },
+        ],
+        entryBody: 2,
+        name: "echo",
+        description: undefined,
+        inputSchema: "{}",
+        outputSchema: "{}",
+      },
+    };
+    const echoBody = userBlock({
+      parameters: [
+        { label: "x", var: x, defaultValue: { kind: "literalValueInteger", integer: 42 } },
+      ],
+      statements: [],
+      trailing: x,
+    });
+    const module = ir({ 1: echoAgent, 2: echoBody }, { echo: 1 });
+
+    const run = async (args: Record<string, { kind: "number"; value: number }>) => {
+      const result = await applyEvent(createState(module), {
+        from: API_ENDPOINT,
+        to: CORE_ENDPOINT,
+        payload: {
+          kind: "delegate",
+          agentDefId: encodeCoreAgentDefId({ kind: "qname", value: "echo" }),
+          args,
+          delegationId: createDelegationId(),
+        },
+      });
+      const ack = result.outbound.find((e) => e.payload.kind === "delegateAck");
+      return ack && ack.payload.kind === "delegateAck" ? ack.payload.value : undefined;
+    };
+
+    // Omitting x binds the declared default (42).
+    expect(await run({})).toEqual({ kind: "number", value: 42 });
+    // Passing x explicitly overrides the default.
+    expect(await run({ x: { kind: "number", value: 7 } })).toEqual({ kind: "number", value: 7 });
+  });
+
   it("missing entry emits a prim.throw escalate back to the sender", async () => {
     const state = createState(ir({}, {}));
     const delegationId = createDelegationId();

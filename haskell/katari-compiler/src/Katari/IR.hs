@@ -383,7 +383,12 @@ instance FromJSON UserBlock where
 -- | A label-bound param. The @label@ is what callers use in 'Arg'.
 data Param = Param
   { label :: Text,
-    var :: VarId
+    var :: VarId,
+    -- | Literal default for an optional parameter. When the caller omits
+    -- this label, the runtime binds @var@ to this value instead. 'Nothing'
+    -- for required parameters (and omitted from the JSON via
+    -- @omitNothingFields@, so non-optional params are unaffected).
+    defaultValue :: Maybe LiteralValue
   }
   deriving (Eq, Show, Generic)
 

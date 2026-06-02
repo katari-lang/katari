@@ -40,7 +40,8 @@ import Katari.Id
     VariableResolution (..),
   )
 import Katari.SemanticType
-  ( Resolved,
+  ( Parameter (..),
+    Resolved,
     SemanticType (..),
   )
 import Katari.SourceSpan (HasSourceSpan (..), SourceSpan)
@@ -54,11 +55,6 @@ data ExhaustiveEnv = ExhaustiveEnv
     topLevelTypes :: Map QualifiedName (SemanticType Resolved),
     localTypeEnv :: Map VariableResolution (SemanticType Resolved)
   }
-
-lookupResolved :: ExhaustiveEnv -> VariableResolution -> Maybe (SemanticType Resolved)
-lookupResolved env = \case
-  ResolvedTopLevel qualifiedName -> Map.lookup qualifiedName env.topLevelTypes
-  resolution@(ResolvedLocal _) -> Map.lookup resolution env.localTypeEnv
 
 -- ===========================================================================
 -- Error type
@@ -260,7 +256,7 @@ getSubFieldTypes tag columnType env = case tag of
   CtorTagData qualifiedName ->
     case Map.lookup qualifiedName env.topLevelTypes of
       Just (SemanticTypeFunction parameters _ _) ->
-        map snd (Map.toAscList parameters)
+        [parameter.parameterType | (_, parameter) <- Map.toAscList parameters]
       _ -> []
   CtorTagTupleN _ -> case columnType of
     SemanticTypeTuple tupleTypes -> tupleTypes
@@ -561,8 +557,7 @@ checkExhaustiveModule env m = concatMap (walkDeclaration env) m.declarations
 
 walkDeclaration :: ExhaustiveEnv -> AST.Declaration Zonked -> [ExhaustiveError]
 walkDeclaration env = \case
-  AST.DeclarationAgent decl ->
-    walkAgentBody env decl.name.resolution decl.parameters decl.body
+  AST.DeclarationAgent decl -> walkBlock env decl.body
   AST.DeclarationRequest _ -> []
   AST.DeclarationExternalAgent _ -> []
   AST.DeclarationPrimAgent _ -> []
@@ -570,32 +565,6 @@ walkDeclaration env = \case
   AST.DeclarationTypeSynonym _ -> []
   AST.DeclarationImport _ -> []
   AST.DeclarationError _ -> []
-
-walkAgentBody ::
-  ExhaustiveEnv ->
-  Maybe VariableResolution ->
-  [AST.ParameterBinding Zonked] ->
-  AST.Block Zonked ->
-  [ExhaustiveError]
-walkAgentBody env maybeResolution parameters block =
-  paramErrors ++ walkBlock env block
-  where
-    paramErrors = case maybeResolution of
-      Nothing -> []
-      Just variableResolution ->
-        case lookupResolved env variableResolution of
-          Just (SemanticTypeFunction paramTypes _ _) ->
-            concatMap (checkParam env paramTypes) parameters
-          _ -> []
-
-checkParam ::
-  ExhaustiveEnv ->
-  Map Text (SemanticType Resolved) ->
-  AST.ParameterBinding Zonked ->
-  [ExhaustiveError]
-checkParam env paramTypes pb =
-  let paramType = Map.findWithDefault SemanticTypeUnknown pb.label paramTypes
-   in checkIrrefutable env pb.pattern paramType
 
 walkBlock :: ExhaustiveEnv -> AST.Block Zonked -> [ExhaustiveError]
 walkBlock env block =
@@ -610,8 +579,7 @@ walkStatement env = \case
   AST.StatementLet ls ->
     walkExpression env ls.value
       ++ checkIrrefutable env ls.pattern (getExpressionType ls.value)
-  AST.StatementAgent ls ->
-    walkAgentBody env ls.name.resolution ls.parameters ls.body
+  AST.StatementAgent ls -> walkBlock env ls.body
   AST.StatementReturn rs ->
     walkExpression env rs.value
   AST.StatementNext ns ->

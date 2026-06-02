@@ -18,11 +18,21 @@ release · **[later]** post-v0.1.0 · **[deferred]** acknowledged, no owner yet.
       purpose**: prims run ~synchronously, so a slow agent callback doesn't fit
       the prim model — and `for … next with … array.append` already expresses
       them. Revisit if a real higher-order need appears (would also want generics).
-- [ ] **[v0.1.0] Default / optional arguments.** Every parameter is required and
-      labelled. A config-heavy API (an AI call with temperature / system /
-      max_tokens / …) forces every call site to pass everything, and adding a
-      parameter breaks all of them. Today's workaround is a handle-scope wrapper
-      or a record.
+- [x] **Default / optional arguments (done).** A parameter may carry a literal
+      default: `name: type = literal` (or `name = literal`, inferring the type
+      as the literal's widened base type). A defaulted parameter is *optional* —
+      call sites may omit it and the runtime fills the default; it is dropped
+      from the schema's `required`. Same machinery covers the dynamic
+      `call_agent` seam (the AI may omit optional fields). As part of this,
+      **parameters were simplified to plain bindings**: the old destructuring /
+      `label = pattern` rename forms are gone (destructure in the body with
+      `let` / `match`), so `=` uniformly means "default". Optionality lives in
+      the function type (`Parameter { type, optional }` inside the param map),
+      so it is sound across module boundaries and through union (optional only
+      if optional in *both*) / intersection (optional if optional in *either*).
+      Defaults are **literal-only** on purpose — keeping parameters order-free,
+      effect-free, and serialisable straight into the IR / JSON schema.
+      Computed / param-referencing defaults would want the generics phase.
 - [ ] **[v0.1.0] Single-line handler ending in an f-string fails to parse
       (K0021).** `request env_not_found(k) { break f"x: ${k}" }` reports
       `unexpected }`; the multi-line form parses. Suspect virtual-semicolon

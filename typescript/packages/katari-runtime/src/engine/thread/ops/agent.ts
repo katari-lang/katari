@@ -19,7 +19,7 @@ import type { AgentBlock, Block, BlockId } from "../../../ir/types.js";
 import type { CallId } from "../../id.js";
 import { spawnChild } from "../../spawn.js";
 import type { StepCtx } from "../../step-ctx.js";
-import type { Value } from "../../value.js";
+import { literalToValue, type Value } from "../../value.js";
 import {
   beginCancel,
   commonRemoveChild,
@@ -38,10 +38,21 @@ const BODY_CALL_ID = 0 as CallId;
 export const agentOps: ThreadOps<AgentThread> = {
   create(ctx, t) {
     const block = getAgentBlock(ctx, t.blockId);
+    // Fill in defaults for any optional parameter the caller omitted. The
+    // filled args are used both for the scope binding below (so an inline
+    // body sees them via the inherited scope chain) and for the entryBody's
+    // callArgs (so a leaf body — delegate / prim / request / ctor, which
+    // consumes callArgs by label — sees them too).
+    const filledArgs: Record<string, Value> = { ...t.args };
+    for (const param of block.parameters) {
+      if (filledArgs[param.label] === undefined && param.defaultValue !== undefined) {
+        filledArgs[param.label] = literalToValue(param.defaultValue, ctx.state.snapshot);
+      }
+    }
     // Bind args into our own scope by parameter label so the body
     // (inline child) can see them via the inherited scope chain.
     for (const param of block.parameters) {
-      const v = t.args[param.label];
+      const v = filledArgs[param.label];
       if (v !== undefined) {
         setValueInScope(ctx, t.scopeId, param.var, v);
       }
@@ -52,7 +63,7 @@ export const agentOps: ThreadOps<AgentThread> = {
       parentId: t.id,
       parentCallId: BODY_CALL_ID,
       blockId: block.entryBody,
-      callArgs: { ...t.args },
+      callArgs: { ...filledArgs },
       scopeMode: { mode: "inline", parentScopeId: t.scopeId },
     });
   },

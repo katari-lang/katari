@@ -76,7 +76,8 @@ import Katari.Id
     renderQualifiedName,
   )
 import Katari.SemanticType
-  ( Resolved,
+  ( Parameter (..),
+    Resolved,
     SemanticRequest (..),
     SemanticRequestElement (..),
     SemanticType (..),
@@ -358,7 +359,7 @@ buildDataDefs constructorMap topLevelTypes annotationsByQName =
           ( Map.mapWithKey
               ( \label ty ->
                   DataFieldInfo
-                    { fieldType = ty,
+                    { fieldType = ty.parameterType,
                       fieldAnnotation =
                         Map.findWithDefault Nothing label perFieldAnnotations
                     }
@@ -567,8 +568,9 @@ buildVariableEntry ::
   (QualifiedName, VariableData) ->
   Maybe SchemaEntry
 buildVariableEntry ctx (qualifiedName, variableData) = do
-  SemanticTypeFunction paramTypes returnType requestSet <-
+  SemanticTypeFunction parameters returnType requestSet <-
     Map.lookup qualifiedName ctx.topLevelTypes
+  let paramTypes = (.parameterType) <$> parameters
   -- Credential (secret) types must never surface in an AI tool-calling
   -- schema — the AI must not be able to inspect credential shapes. Drop any
   -- callable whose parameters or result mention @secret@ (directly or
@@ -581,7 +583,7 @@ buildVariableEntry ctx (qualifiedName, variableData) = do
         SchemaEntry
           { name = renderQualifiedName qualifiedName,
             description = variableData.variableAnnotation,
-            input = buildInputObject ctx.dataDefs paramTypes variableData.variableParameterAnnotations,
+            input = buildInputObject ctx.dataDefs parameters variableData.variableParameterAnnotations,
             output = toJsonSchema ctx.dataDefs Set.empty returnType,
             requests = buildRequestRefs ctx requestSet
           }
@@ -599,7 +601,7 @@ mentionsSecret dataDefs visited = \case
   SemanticTypeObject fields -> any recurse (Map.elems fields)
   SemanticTypeRecord valueType -> recurse valueType
   SemanticTypeFunction parameters returnType _ ->
-    any recurse (Map.elems parameters) || recurse returnType
+    any (recurse . (.parameterType)) (Map.elems parameters) || recurse returnType
   SemanticTypeData qualifiedName
     | Set.member qualifiedName visited -> False
     | Just info <- Map.lookup qualifiedName dataDefs ->
@@ -619,22 +621,24 @@ mentionsSecret dataDefs visited = \case
 -- direct insertion into 'AgentBlock.inputSchema'.
 buildInputObject ::
   DataDefs ->
-  Map Text (SemanticType Resolved) ->
+  Map Text (Parameter Resolved) ->
   [(Text, Maybe Text)] ->
   JsonSchema
-buildInputObject dataDefs paramTypes labelsAndAnnotations =
+buildInputObject dataDefs parameters labelsAndAnnotations =
   let annotationByLabel = Map.fromList labelsAndAnnotations
       properties =
         Map.mapWithKey
-          ( \label t ->
+          ( \label parameter ->
               let ann = Map.findWithDefault Nothing label annotationByLabel
-               in withDesc ann (toJsonSchema dataDefs Set.empty t)
+               in withDesc ann (toJsonSchema dataDefs Set.empty parameter.parameterType)
           )
-          paramTypes
+          parameters
    in plain
         ( SchemaCoreObject
             { properties = properties,
-              required = Map.keysSet paramTypes,
+              -- Optional parameters (those with a default) may be omitted by
+              -- the caller, so they are excluded from @required@.
+              required = Map.keysSet (Map.filter (not . (.optional)) parameters),
               additionalProperties = False
             }
         )
@@ -671,9 +675,10 @@ buildRequestRefs ctx (SemanticRequest elements) =
 buildRequestRef :: SchemaContext -> QualifiedName -> Maybe RequestSchemaRef
 buildRequestRef ctx qualifiedName = do
   rd <- Map.lookup qualifiedName ctx.requestData
-  SemanticTypeFunction paramTypes returnType _ <-
+  SemanticTypeFunction parameters returnType _ <-
     Map.lookup qualifiedName ctx.topLevelTypes
-  let inputCore =
+  let paramTypes = (.parameterType) <$> parameters
+      inputCore =
         SchemaCoreObject
           { properties =
               Map.mapWithKey
@@ -682,7 +687,7 @@ buildRequestRef ctx qualifiedName = do
                      in withDesc annotation (toJsonSchema ctx.dataDefs Set.empty t)
                 )
                 paramTypes,
-            required = Map.keysSet paramTypes,
+            required = Map.keysSet (Map.filter (not . (.optional)) parameters),
             additionalProperties = False
           }
   pure

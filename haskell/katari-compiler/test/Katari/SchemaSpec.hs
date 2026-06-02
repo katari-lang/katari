@@ -177,8 +177,8 @@ schemaCoreJsonSpec = describe "SchemaCore JSON output (valid JSON Schema)" $ do
 secretGuardSpec :: Spec
 secretGuardSpec = describe "secret credential guard" $ do
   let src =
-        "agent withSecret(s = s: secret) -> string { \"ok\" }\n\
-        \agent plain(n = n: integer) -> integer { n }"
+        "agent withSecret(s: secret) -> string { \"ok\" }\n\
+        \agent plain(n: integer) -> integer { n }"
       result =
         compileSync
           CompileInput

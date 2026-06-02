@@ -96,11 +96,14 @@ data SemanticType phase where
   SemanticTypeLiteralString :: Text -> SemanticType phase
   SemanticTypeLiteralBoolean :: Bool -> SemanticType phase
   -- Composite types. Function parameters are keyed by label; their order is
-  -- not significant (named-parameter calling convention). Two functions with
-  -- the same label set and pointwise-equal types are equal regardless of
-  -- the order in which the user wrote them.
+  -- not significant (named-parameter calling convention). Each 'Parameter'
+  -- carries its type and whether it is /optional/ (declared with a default):
+  -- a call site may omit an optional parameter — the runtime fills the
+  -- declared default — so the subtype rule does not demand it. Two functions
+  -- are equal when their parameters (type + optionality), return, and
+  -- effects all match.
   SemanticTypeFunction ::
-    Map Text (SemanticType phase) ->
+    Map Text (Parameter phase) ->
     SemanticType phase ->
     SemanticRequest phase ->
     SemanticType phase
@@ -136,6 +139,27 @@ deriving instance Show (SemanticType phase)
 deriving instance Eq (SemanticType phase)
 
 deriving instance Ord (SemanticType phase)
+
+-- | A single function parameter: its type plus whether it is optional
+-- (declared with a default, hence omittable at call sites). Folding
+-- optionality into the parameter map (rather than a parallel label set)
+-- keeps the invariant "every optional label has a type" by construction.
+data Parameter phase = Parameter
+  { parameterType :: SemanticType phase,
+    optional :: Bool
+  }
+
+deriving instance Show (Parameter phase)
+
+deriving instance Eq (Parameter phase)
+
+deriving instance Ord (Parameter phase)
+
+-- | A required (non-optional) parameter — the common case for synthesised
+-- function types (call-site argument signatures, agent-type annotations,
+-- constructor signatures) where optionality does not arise.
+requiredParameter :: SemanticType phase -> Parameter phase
+requiredParameter parameterType = Parameter {parameterType = parameterType, optional = False}
 
 -- | Smart constructor for 'SemanticTypeUnion'. The convention is that a
 -- union always has 0 or 2+ branches; a singleton list is flattened to its
@@ -231,7 +255,12 @@ substituteVariable onVariable onRequest = \case
   SemanticTypeVariable varId -> onVariable varId
   SemanticTypeFunction parameters returnType requests ->
     SemanticTypeFunction
-      <$> traverse (substituteVariable onVariable onRequest) parameters
+      <$> traverse
+        ( \parameter ->
+            (\substituted -> Parameter {parameterType = substituted, optional = parameter.optional})
+              <$> substituteVariable onVariable onRequest parameter.parameterType
+        )
+        parameters
       <*> substituteVariable onVariable onRequest returnType
       <*> substituteRequestVariable requests
   SemanticTypeArray element -> SemanticTypeArray <$> substituteVariable onVariable onRequest element

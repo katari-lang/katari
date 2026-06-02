@@ -45,7 +45,7 @@
     "input": {
       "additionalProperties": false,
       "properties": {
-        "p": {
+        "pt": {
           "additionalProperties": false,
           "properties": {
             "$constructor": {
@@ -67,7 +67,7 @@
         }
       },
       "required": [
-        "p"
+        "pt"
       ],
       "type": "object"
     },

@@ -159,8 +159,11 @@ declarationDependencies moduleName = \case
     collectFromParameterBindings :: [ParameterBinding Identified] -> Set QualifiedName
     collectFromParameterBindings = Set.unions . map collectFromParameterBinding
 
+    -- Parameters are plain bindings (name + optional type + literal
+    -- default); none of those reference a callable, so a parameter never
+    -- contributes an edge to the agent-dependency graph.
     collectFromParameterBinding :: ParameterBinding Identified -> Set QualifiedName
-    collectFromParameterBinding binding = collectFromPattern binding.pattern
+    collectFromParameterBinding _ = Set.empty
 
     collectFromModifier :: Modifier Identified -> Set QualifiedName
     collectFromModifier modifier = collectFromExpression modifier.value

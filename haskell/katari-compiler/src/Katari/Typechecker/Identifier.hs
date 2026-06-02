@@ -1028,13 +1028,15 @@ updateTypeSynonymRhs qualifiedName rhs = modify $ \state ->
 -- ---------------------------------------------------------------------------
 
 resolveParameter :: ParameterBinding Parsed -> Identifier (ParameterBinding Identified)
-resolveParameter ParameterBinding {..} = do
-  pattern' <- resolvePattern pattern
+resolveParameter ParameterBinding {annotation, name, typeAnnotation, defaultValue, sourceSpan} = do
+  name' <- bindLocalVariable name
+  typeAnnotation' <- traverse resolveType typeAnnotation
   pure
     ParameterBinding
       { annotation = annotation,
-        label = label,
-        pattern = pattern',
+        name = name',
+        typeAnnotation = typeAnnotation',
+        defaultValue = defaultValue,
         sourceSpan = sourceSpan
       }
 
@@ -2222,7 +2224,7 @@ identifyModule allModuleData depExportTables allModuleNames trustedStdlibNames c
 
     qnameOf moduleName name = QualifiedName {module_ = moduleName, name = name.text}
 
-    parameterBindingsToAnnotationPairs ps = [(p.label, p.annotation) | p <- ps]
+    parameterBindingsToAnnotationPairs ps = [(p.name.text, p.annotation) | p <- ps]
     dataParametersToAnnotationPairs ps = [(p.name, p.annotation) | p <- ps]
 
     registerVariableDecl moduleName table name annotation parameterAnnotations = do

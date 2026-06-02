@@ -25,6 +25,77 @@ spec = describe "Katari.Compile" $ do
   exhaustiveSpec
   externalAgentSpec
   recursiveDataSpec
+  defaultArgumentsSpec
+
+defaultArgumentsSpec :: Spec
+defaultArgumentsSpec = describe "default arguments" $ do
+  it "a defaulted parameter may be omitted at the call site" $ do
+    let src =
+          mconcat
+            [ "agent greet(name: string = \"world\") -> string { name }\n",
+              "agent main() -> string { greet() }\n"
+            ]
+    hasErrors (compileSync (singleSourceInput src)).diagnostics `shouldBe` False
+
+  it "a defaulted parameter may still be passed explicitly" $ do
+    let src =
+          mconcat
+            [ "agent greet(name: string = \"world\") -> string { name }\n",
+              "agent main() -> string { greet(name = \"bob\") }\n"
+            ]
+    hasErrors (compileSync (singleSourceInput src)).diagnostics `shouldBe` False
+
+  it "an untyped default infers the parameter type and is omittable" $ do
+    let src =
+          mconcat
+            [ "agent f(x = 2) -> integer { x }\n",
+              "agent main() -> integer { f() }\n"
+            ]
+    hasErrors (compileSync (singleSourceInput src)).diagnostics `shouldBe` False
+
+  it "a required (non-defaulted) parameter may NOT be omitted" $ do
+    let src =
+          mconcat
+            [ "agent f(x: integer) -> integer { x }\n",
+              "agent main() -> integer { f() }\n"
+            ]
+    hasErrors (compileSync (singleSourceInput src)).diagnostics `shouldBe` True
+
+  it "a default literal whose type is not a subtype of the declared type is rejected" $ do
+    let src = "agent f(x: integer = \"foo\") -> integer { x }\n"
+    hasErrors (compileSync (singleSourceInput src)).diagnostics `shouldBe` True
+
+  it "a typed optional after a required param may be omitted" $ do
+    let src =
+          mconcat
+            [ "agent bump(n: integer, by: integer = 1) -> integer { n + by }\n",
+              "agent main() -> integer { bump(n = 10) }\n"
+            ]
+    hasErrors (compileSync (singleSourceInput src)).diagnostics `shouldBe` False
+
+  it "an untyped optional after a required param may be omitted" $ do
+    let src =
+          mconcat
+            [ "agent bump(n: integer, by = 1) -> integer { n + by }\n",
+              "agent main() -> integer { bump(n = 10) }\n"
+            ]
+    hasErrors (compileSync (singleSourceInput src)).diagnostics `shouldBe` False
+
+  it "an untyped optional is omittable in a module with imports (seeded importedTypes)" $ do
+    let result =
+          compileSync
+            ( multiSourceInput
+                [ ("dep", "agent noop() -> integer { 0 }\n"),
+                  ( "main",
+                    mconcat
+                      [ "import dep\n",
+                        "agent bump(by = 1) -> integer { by }\n",
+                        "agent main() -> integer { bump() }\n"
+                      ]
+                  )
+                ]
+            )
+    hasErrors result.diagnostics `shouldBe` False
 
 happyPathSpec :: Spec
 happyPathSpec = describe "well-formed single-module input" $ do
@@ -53,7 +124,7 @@ happyPathSpec = describe "well-formed single-module input" $ do
   it "multi-line call argument list does NOT require trailing comma" $ do
     let src =
           mconcat
-            [ "agent myAdd(a = a: integer, b = b: integer) -> integer { a + b }\n",
+            [ "agent myAdd(a: integer, b: integer) -> integer { a + b }\n",
               "agent main() -> integer {\n",
               "  myAdd(\n",
               "    a = 1,\n",
@@ -99,7 +170,7 @@ happyPathSpec = describe "well-formed single-module input" $ do
             [ "data Red()\n",
               "data Green()\n",
               "data Blue()\n",
-              "agent name(c = c: Red | Green | Blue) -> string {\n",
+              "agent name(c: Red | Green | Blue) -> string {\n",
               "  match (c) {\n",
               "    case Red => { \"red\" }\n",
               "    case Green => { \"green\" }\n",

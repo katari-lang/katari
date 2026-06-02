@@ -577,27 +577,6 @@ stage3Spec = describe "Stage 3 \8212 block / let / scope" $ do
     let agentCalls = agentCallsViaValue helperVar ub irMod
     length agentCalls `shouldBe` 1
 
-  it "function parameter with tuple pattern destructures via StatementBindPattern" $ do
-    (irMod, errs) <-
-      lowerSource $
-        Text.unlines
-          [ "agent helper(pair = (a, b)) -> integer { a + b }",
-            "agent main() -> integer { helper(pair = (1, 2)) }"
-          ]
-    errs `shouldBe` []
-    -- The helper agent's user block should contain exactly one StatementBindPattern for
-    -- the tuple parameter destructure (the runtime handles the field splitting).
-    case agentBody "helper" irMod of
-      Just helperBody -> do
-        let bindPats = [d | StatementBindPattern d <- helperBody.statements]
-        length bindPats `shouldBe` 1
-        case bindPats of
-          [d] -> case d.pattern of
-            MatchPatternTuple subs -> length subs `shouldBe` 2
-            _ -> expectationFailure "expected MatchPatternTuple pattern"
-          _ -> pure ()
-      Nothing -> expectationFailure "helper agent body not found"
-
 isChildBlockCall :: CallData -> IRModule -> Bool
 isChildBlockCall c irMod = case Map.lookup c.block irMod.blocks of
   Just (BlockUser _) -> True

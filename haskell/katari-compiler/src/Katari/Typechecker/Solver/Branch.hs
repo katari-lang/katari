@@ -28,7 +28,8 @@ import Data.Map.Strict qualified as Map
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Katari.SemanticType
-  ( RequestVariableId (..),
+  ( Parameter (..),
+    RequestVariableId (..),
     SemanticRequest (..),
     SemanticType (..),
     TypeVariableId (..),
@@ -253,8 +254,8 @@ narrowShape side nextTypeVariableId nextRequestVariableId shape reason = case sh
         (requestVar, nextRequestAfter) = freshRequestVar nextRequestVariableId
         narrowedParameters =
           Map.fromList
-            [ (label, SemanticTypeVariable parameterVar)
-              | ((label, _), parameterVar) <- zip parameterEntries parameterVars
+            [ (label, Parameter {parameterType = SemanticTypeVariable parameterVar, optional = originalParameter.optional})
+              | ((label, originalParameter), parameterVar) <- zip parameterEntries parameterVars
             ]
         narrowedShape =
           SemanticTypeFunction
@@ -262,7 +263,7 @@ narrowShape side nextTypeVariableId nextRequestVariableId shape reason = case sh
             (SemanticTypeVariable returnVar)
             (singletonRequestVariable requestVar)
         parameterConstraints =
-          [ emitContravariantType side (SemanticTypeVariable parameterVar) originalParameter reason
+          [ emitContravariantType side (SemanticTypeVariable parameterVar) originalParameter.parameterType reason
             | ((_, originalParameter), parameterVar) <- zip parameterEntries parameterVars
           ]
         returnConstraint =

@@ -364,10 +364,10 @@ schemasForFunctionType ::
 schemasForFunctionType functionType labelsAndAnnotations = do
   dd <- asks (.dataDefs)
   case functionType of
-    SemanticTypeFunction paramTypes returnType _ ->
+    SemanticTypeFunction parameters returnType _ ->
       pure
         ( Schema.jsonSchemaToText
-            (Schema.buildInputObject dd paramTypes labelsAndAnnotations),
+            (Schema.buildInputObject dd parameters labelsAndAnnotations),
           Schema.jsonSchemaToText (Schema.buildOutputSchema dd returnType)
         )
     _ -> pure ("{}", "{}")
@@ -560,7 +560,8 @@ callableNameRef = \case
 writeWrapperAgent ::
   BlockId ->
   QualifiedName ->
-  [Text] ->
+  -- | per-parameter @(label, optional literal default)@ in source order
+  [(Text, Maybe LiteralValue)] ->
   BlockId ->
   Text ->
   Text ->
@@ -568,9 +569,13 @@ writeWrapperAgent ::
   Text ->
   Text ->
   Lower ()
-writeWrapperAgent agentBlk qname paramLabels innerBlk hint simpleName desc inputSchemaJson outputSchemaJson = do
-  paramVars <- mapM (\_ -> freshVarId Nothing) paramLabels
-  let wrapperParams = zipWith Param paramLabels paramVars
+writeWrapperAgent agentBlk qname paramSpecs innerBlk hint simpleName desc inputSchemaJson outputSchemaJson = do
+  paramVars <- mapM (\_ -> freshVarId Nothing) paramSpecs
+  let wrapperParams =
+        zipWith
+          (\(label, parameterDefault) var -> Param {label = label, var = var, defaultValue = parameterDefault})
+          paramSpecs
+          paramVars
   recordBlock
     agentBlk
     ( BlockAgent
@@ -625,14 +630,14 @@ lowerOneDeclaration moduleName = \case
   AST.DeclarationAgent decl -> resolveDeclaration decl.name $ \_variableResolution blockId ->
     lowerAgentDeclaration decl blockId
   AST.DeclarationData decl ->
-    lowerWrapperCallable decl.name decl.annotation [(p.name, p.annotation) | p <- decl.parameters] decl.name.text $
+    lowerWrapperCallable decl.name decl.annotation [(p.name, p.annotation, Nothing) | p <- decl.parameters] decl.name.text $
       \variableResolution -> do
         ctorQName <- lookupConstructorQName variableResolution
         innerBlk <- freshBlockId
         recordBlock innerBlk (BlockConstructor ctorQName) (Just (decl.name.text <> ":ctor"))
         pure innerBlk
   AST.DeclarationExternalAgent decl ->
-    lowerWrapperCallable decl.name decl.annotation [(pb.label, pb.annotation) | pb <- decl.parameters] decl.name.text $
+    lowerWrapperCallable decl.name decl.annotation [(pb.name.text, pb.annotation, (.value) <$> pb.defaultValue) | pb <- decl.parameters] decl.name.text $
       \_variableResolution -> do
         innerBlk <- freshBlockId
         recordBlock
@@ -647,14 +652,14 @@ lowerOneDeclaration moduleName = \case
           (Just (decl.name.text <> ":external"))
         pure innerBlk
   AST.DeclarationRequest decl ->
-    lowerWrapperCallable decl.name decl.annotation [(pb.label, pb.annotation) | pb <- decl.parameters] decl.name.text $
+    lowerWrapperCallable decl.name decl.annotation [(pb.name.text, pb.annotation, (.value) <$> pb.defaultValue) | pb <- decl.parameters] decl.name.text $
       \variableResolution -> do
         reqQName <- lookupRequestQName variableResolution
         innerBlk <- freshBlockId
         recordBlock innerBlk (BlockRequest reqQName) (Just (decl.name.text <> ":request"))
         pure innerBlk
   AST.DeclarationPrimAgent decl ->
-    lowerWrapperCallable decl.name decl.annotation [(pb.label, pb.annotation) | pb <- decl.parameters] ("prim:" <> decl.name.text) $
+    lowerWrapperCallable decl.name decl.annotation [(pb.name.text, pb.annotation, (.value) <$> pb.defaultValue) | pb <- decl.parameters] ("prim:" <> decl.name.text) $
       \_variableResolution -> do
         let primName = moduleName <> "." <> decl.name.text
         gets (Map.lookup primName . (.lsPrimBlockIds)) >>= \case
@@ -703,22 +708,23 @@ lowerWrapperCallable ::
   AST.NameRef Zonked AST.VariableRef ->
   -- | declaration annotation (@\@"..."@)
   Maybe Text ->
-  -- | per-parameter @(label, annotation)@ in source order
-  [(Text, Maybe Text)] ->
+  -- | per-parameter @(label, annotation, literal default)@ in source order
+  [(Text, Maybe Text, Maybe LiteralValue)] ->
   -- | block-name hint (@"prim:foo"@ for prims, else the bare name)
   Text ->
   -- | builds the inner leaf block, returning its 'BlockId'
   (Id.VariableResolution -> Lower BlockId) ->
   Lower ()
-lowerWrapperCallable nameRef annotation labelsAndAnnotations hint mkLeaf =
+lowerWrapperCallable nameRef annotation parameterInfos hint mkLeaf =
   resolveDeclaration nameRef $ \variableResolution agentBlk -> do
     qname <- requireAgentQName nameRef.text agentBlk
     innerBlk <- mkLeaf variableResolution
-    (inputSchema, outputSchema) <- schemasForVariable variableResolution labelsAndAnnotations
+    (inputSchema, outputSchema) <-
+      schemasForVariable variableResolution [(label, annotation') | (label, annotation', _) <- parameterInfos]
     writeWrapperAgent
       agentBlk
       qname
-      (map fst labelsAndAnnotations)
+      [(label, parameterDefault) | (label, _, parameterDefault) <- parameterInfos]
       innerBlk
       hint
       nameRef.text
@@ -804,7 +810,7 @@ lowerAgentLike name mVariableResolution description parameters body blockId = do
   paramBindings <- mapM bindParam parameters
   let paramVars = map fst paramBindings
       paramPrelude = combineParamPreludes (map snd paramBindings)
-      labelsAndAnnotations = [(pb.label, pb.annotation) | pb <- parameters]
+      labelsAndAnnotations = [(pb.name.text, pb.annotation) | pb <- parameters]
   (inputSchema, outputSchema) <- case mVariableResolution of
     Just variableResolution -> schemasForVariable variableResolution labelsAndAnnotations
     Nothing -> pure ("{}", "{}")
@@ -929,7 +935,7 @@ lowerThenClause = \case
       (statements, trailing) <- lowerBlockBody blk
       let userBlock =
             defaultUserBlock
-              { parameters = [Param {label = "value", var = paramVar}],
+              { parameters = [Param {label = "value", var = paramVar, defaultValue = Nothing}],
                 statements = statements,
                 trailing = trailing
               }
@@ -946,11 +952,15 @@ lowerThenClause = \case
 -- @(VariableResolution, VarId)@ pairs introduced.
 bindParam :: AST.ParameterBinding Zonked -> Lower (Param, Lower [(Id.VariableResolution, VarId)])
 bindParam pb = do
-  let nameHint = case pb.pattern of
-        AST.PatternVariable vp -> Just vp.name.text
-        _ -> Just pb.label
-  var <- freshVarId nameHint
-  pure (Param {label = pb.label, var = var}, destructurePattern var pb.pattern)
+  var <- freshVarId (Just pb.name.text)
+  -- Parameters are plain bindings: the variable resolves directly to the
+  -- param slot, so there is nothing to destructure — just bind the name.
+  let bindLocals = case pb.name.resolution of
+        Just variableResolution -> pure [(variableResolution, var)]
+        Nothing -> do
+          recordError (LoweringErrorUnresolvedVariable pb.sourceSpan pb.name.text)
+          pure []
+  pure (Param {label = pb.name.text, var = var, defaultValue = (.value) <$> pb.defaultValue}, bindLocals)
 
 -- | Compose multiple parameter destructuring actions into a single
 -- prelude that can be threaded into a body buffer.

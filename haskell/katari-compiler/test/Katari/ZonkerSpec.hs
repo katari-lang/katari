@@ -16,6 +16,7 @@ import Katari.SemanticType
     SemanticRequestElement (..),
     SemanticType (..),
     TypeVariableId (..),
+    requiredParameter,
   )
 import Katari.TestSupport (IdentifierResult (..), ZonkResult (..), zonkAll)
 import Katari.TestSupport qualified as TestSupport
@@ -31,6 +32,7 @@ import Katari.Typechecker.Identifier qualified as Identifier
 import Katari.Typechecker.NormalizedType
   ( ArraySlot (..),
     FunctionShape (..),
+    NormalizedParameter (..),
     FunctionSlot (..),
     LayeredType (..),
     NormalizedType (..),
@@ -254,14 +256,14 @@ denormaliseUnit = describe "denormalise" $ do
                     { parameters =
                         Map.singleton
                           "x"
-                          (NormalizedTypeLayered emptyLayered {numberLayer = NumberSlotInteger}),
+                          (NormalizedParameter {parameterType = NormalizedTypeLayered emptyLayered {numberLayer = NumberSlotInteger}, optional = False}),
                       returnType = NormalizedTypeLayered emptyLayered {stringLayer = StringSlotAny},
                       requests = Set.empty
                     }
             }
       )
       `shouldBe` SemanticTypeFunction
-        (Map.singleton "x" SemanticTypeInteger)
+        (Map.singleton "x" (requiredParameter SemanticTypeInteger))
         SemanticTypeString
         (SemanticRequest Set.empty)
 

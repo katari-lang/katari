@@ -33,6 +33,7 @@ module Katari.Typechecker.NormalizedType
     RecordSlot (..),
     FunctionSlot (..),
     FunctionShape (..),
+    NormalizedParameter (..),
 
     -- * Helpers
     emptyLayered,
@@ -58,7 +59,7 @@ import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Katari.Common (QualifiedName)
-import Katari.SemanticType (Resolved, SemanticRequest (..), SemanticRequestElement (..), SemanticType (..))
+import Katari.SemanticType (Parameter (..), Resolved, SemanticRequest (..), SemanticRequestElement (..), SemanticType (..))
 
 -- ---------------------------------------------------------------------------
 -- NormalizedType
@@ -205,8 +206,16 @@ data FunctionSlot where
 
 -- | Concrete function shape. Parameters are keyed by their label (order is
 -- not represented at this level).
+-- | A normalized function parameter: its type plus whether it is optional
+-- (declared with a default, hence omittable at call sites).
+data NormalizedParameter = NormalizedParameter
+  { parameterType :: NormalizedType,
+    optional :: Bool
+  }
+  deriving (Eq, Show)
+
 data FunctionShape = FunctionShape
-  { parameters :: Map Text NormalizedType,
+  { parameters :: Map Text NormalizedParameter,
     returnType :: NormalizedType,
     requests :: Set QualifiedName
   }
@@ -311,7 +320,10 @@ functionBranches = \case
   where
     makeFunction FunctionShape {parameters, returnType, requests} =
       SemanticTypeFunction
-        (Map.map denormalise parameters)
+        ( Map.map
+            (\normalizedParameter -> Parameter {parameterType = denormalise normalizedParameter.parameterType, optional = normalizedParameter.optional})
+            parameters
+        )
         (denormalise returnType)
         (SemanticRequest $ Set.map SemanticRequestElementConcrete requests)
 
@@ -453,10 +465,13 @@ normaliseSemantic = \case
       emptyLayered
         { recordLayer = RecordSlotOf (normaliseSemantic valueType)
         }
-  SemanticTypeFunction parameterTypes returnType (SemanticRequest requests) ->
+  SemanticTypeFunction parameterMap returnType (SemanticRequest requests) ->
     let shape =
           FunctionShape
-            { parameters = Map.map normaliseSemantic parameterTypes,
+            { parameters =
+                Map.map
+                  (\parameter -> NormalizedParameter {parameterType = normaliseSemantic parameter.parameterType, optional = parameter.optional})
+                  parameterMap,
               returnType = normaliseSemantic returnType,
               requests =
                 Set.map
@@ -540,12 +555,22 @@ unionFunctionShape :: FunctionShape -> FunctionShape -> FunctionShape
 unionFunctionShape leftShape rightShape =
   FunctionShape
     { -- contravariant in args: union of function types intersects per-label
-      -- types, and uses the union of label sets.
+      -- types (union of label sets). A common label is optional in the
+      -- union only when optional in both branches; a label present in just
+      -- one branch keeps its own optionality (Map.unionWith passes it
+      -- through), which is exactly right — it is absent from the other
+      -- branch, so omitting it stays legal there.
       parameters =
-        Map.unionWith intersectNT leftShape.parameters rightShape.parameters,
+        Map.unionWith unionParameter leftShape.parameters rightShape.parameters,
       returnType = unionNT leftShape.returnType rightShape.returnType,
       requests = Set.union leftShape.requests rightShape.requests
     }
+  where
+    unionParameter leftParameter rightParameter =
+      NormalizedParameter
+        { parameterType = intersectNT leftParameter.parameterType rightParameter.parameterType,
+          optional = leftParameter.optional && rightParameter.optional
+        }
 
 unionTupleLayer ::
   Map Int [NormalizedType] ->
@@ -642,12 +667,20 @@ intersectFunctionShape :: FunctionShape -> FunctionShape -> FunctionShape
 intersectFunctionShape leftShape rightShape =
   FunctionShape
     { -- contravariant in args: intersection of function types unions per-label
-      -- types, and uses the intersection of label sets.
+      -- types (intersection of label sets — labels present on only one side
+      -- are dropped). Dually to union, the meet takes the /more optional/
+      -- choice: a common parameter is optional when optional on either side.
       parameters =
-        Map.intersectionWith unionNT leftShape.parameters rightShape.parameters,
+        Map.intersectionWith intersectParameter leftShape.parameters rightShape.parameters,
       returnType = intersectNT leftShape.returnType rightShape.returnType,
       requests = Set.union leftShape.requests rightShape.requests
     }
+  where
+    intersectParameter leftParameter rightParameter =
+      NormalizedParameter
+        { parameterType = unionNT leftParameter.parameterType rightParameter.parameterType,
+          optional = leftParameter.optional || rightParameter.optional
+        }
 
 intersectTupleLayer ::
   Map Int [NormalizedType] ->
@@ -746,8 +779,11 @@ subtypeFunctionLayer leftSlot rightSlot = case (leftSlot, rightSlot) of
 --
 -- Rule (matching the union/intersection semantics specified by Katari):
 --
---   * Label set: @leftShape@'s labels must be a subset of @rightShape@'s.
---     (A function with fewer labels is "more general".)
+--   * Label set: @leftShape@'s /required/ labels must be a subset of
+--     @rightShape@'s. Optional labels of @leftShape@ may be absent on the
+--     right — a call site (the right side) is allowed to omit them, and an
+--     agent value with extra optional params is usable where fewer are
+--     expected. (A function with fewer required labels is "more general".)
 --   * For each label common to both sides, the parameter type is
 --     contravariant: @rightShape@'s parameter type must be a subtype of
 --     @leftShape@'s.
@@ -755,14 +791,18 @@ subtypeFunctionLayer leftSlot rightSlot = case (leftSlot, rightSlot) of
 --   * Request set is covariant (subset).
 subtypeFunctionShape :: FunctionShape -> FunctionShape -> Bool
 subtypeFunctionShape leftShape rightShape =
-  Map.keysSet leftShape.parameters `Set.isSubsetOf` Map.keysSet rightShape.parameters
+  Set.fromList requiredLeftLabels `Set.isSubsetOf` Map.keysSet rightShape.parameters
     && all checkParameter (Map.toList leftShape.parameters)
     && subtypeNormalizedType leftShape.returnType rightShape.returnType
     && Set.isSubsetOf leftShape.requests rightShape.requests
   where
-    checkParameter (label, leftType) = case Map.lookup label rightShape.parameters of
-      Just rightType -> subtypeNormalizedType rightType leftType -- contravariant
-      Nothing -> True -- guarded by keysSet subset above
+    -- Optional left labels may be absent on the right (the call omits them).
+    requiredLeftLabels =
+      [label | (label, parameter) <- Map.toList leftShape.parameters, not parameter.optional]
+    checkParameter (label, leftParameter) = case Map.lookup label rightShape.parameters of
+      Just rightParameter ->
+        subtypeNormalizedType rightParameter.parameterType leftParameter.parameterType -- contravariant
+      Nothing -> True -- optional left label absent on the right
 
 subtypeTupleLayer ::
   Map Int [NormalizedType] ->

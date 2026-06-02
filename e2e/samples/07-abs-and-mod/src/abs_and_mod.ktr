@@ -2,7 +2,7 @@
 data point(x: integer, y: integer)
 
 @"Manhattan distance between two points = |x1-x2| + |y1-y2|."
-agent manhattan(p = pa: point, q = pb: point) -> integer {
+agent manhattan(pa: point, pb: point) -> integer {
   match (pa) {
     case point(x = x1, y = y1) => {
       match (pb) {
@@ -16,6 +16,6 @@ agent manhattan(p = pa: point, q = pb: point) -> integer {
 
 @"manhattan(point(3, -4), point(-1, 2)) = |3-(-1)| + |-4-2| = 4 + 6 = 10. Also exercises 10 % 3 = 1, so result = 11."
 agent main() -> integer {
-  let d = manhattan(p = point(x = 3, y = -4), q = point(x = -1, y = 2))
+  let d = manhattan(pa = point(x = 3, y = -4), pb = point(x = -1, y = 2))
   d + d % 3
 }

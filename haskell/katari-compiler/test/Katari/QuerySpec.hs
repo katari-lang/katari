@@ -49,7 +49,7 @@ spec = describe "Katari.Query.lookupAtPosition (hover)" $ do
     -- @addTypeConstraint integer tv_n@), not `unknown`.
     let src =
           Text.unlines
-            [ "agent describe(p = p: (integer, string)) -> string {",
+            [ "agent describe(p: (integer, string)) -> string {",
               "  match (p) {",
               "    case (n, s) => { \"ok\" }",
               "  }",
@@ -79,7 +79,7 @@ spec = describe "Katari.Query.lookupAtPosition (hover)" $ do
     -- the wrong type.
     let src =
           Text.unlines
-            [ "agent describe(p = p: (integer, string)) -> string {",
+            [ "agent describe(p: (integer, string)) -> string {",
               "  match (p) {",
               "    case (n, s) => { \"ok\" }",
               "  }",
@@ -102,7 +102,7 @@ spec = describe "Katari.Query.lookupAtPosition (hover)" $ do
     let src =
           Text.unlines
             [ "data Circle(r: integer)",
-              "agent area(c = c: Circle) -> integer {",
+              "agent area(c: Circle) -> integer {",
               "  match (c) {",
               "    case Circle(r = v) => { v }",
               "  }",
@@ -126,7 +126,7 @@ spec = describe "Katari.Query.lookupAtPosition (hover)" $ do
     let src =
           Text.unlines
             [ "data Wrapper(inner: (integer, string))",
-              "agent first(w = w: Wrapper) -> integer {",
+              "agent first(w: Wrapper) -> integer {",
               "  match (w) {",
               "    case Wrapper(inner = (x, y)) => { x }",
               "  }",
@@ -148,7 +148,7 @@ spec = describe "Katari.Query.lookupAtPosition (hover)" $ do
           Text.unlines
             [ "agent main() -> string {",
               "  handle {",
-              "    request throw(msg = msg: string) {",
+              "    request throw(msg: string) {",
               "      break \"caught\"",
               "    }",
               "  }",
@@ -157,7 +157,7 @@ spec = describe "Katari.Query.lookupAtPosition (hover)" $ do
               "}"
             ]
     let r = prepare src
-    -- "    request throw(msg = msg: string) {" — `throw` starts at col 13 on
+    -- "    request throw(msg: string) {" — `throw` starts at col 13 on
     -- line 3 (4-space indent + "request " (8 chars)).
     let info = lookupAtPosition r.querySnapshot "<test>" Position {line = 3, column = 14}
     case info of
@@ -169,7 +169,7 @@ spec = describe "Katari.Query.lookupAtPosition (hover)" $ do
   it "literal pattern in match arm: hover returns its singleton type" $ do
     let src =
           Text.unlines
-            [ "agent label(n = n: integer) -> string {",
+            [ "agent label(n: integer) -> string {",
               "  match (n) {",
               "    case 0 => { \"zero\" }",
               "    case _ => { \"other\" }",

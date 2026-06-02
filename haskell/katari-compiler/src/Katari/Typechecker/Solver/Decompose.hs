@@ -19,7 +19,8 @@ import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Katari.SemanticType
-  ( SemanticType (..),
+  ( Parameter (..),
+    SemanticType (..),
     Unresolved,
   )
 import Katari.Typechecker.ConstraintGenerator
@@ -100,13 +101,26 @@ decomposeType original leftType rightType reason = case (leftType, rightType) of
       -- missing labels are checked against 'unknown' (vacuous for
       -- "missing on LHS", error-revealing for "missing on RHS where
       -- the LHS-param is concrete").
+      --
+      -- Optional exception: a label that is /optional/ on the LHS (the
+      -- callee, in a @callee ⊑ {args}@ call constraint) and /absent/ on
+      -- the RHS (the call site omitted it) generates no constraint — the
+      -- omission is legal and the runtime fills the default. Without this
+      -- the fill would emit @unknown ⊑ paramType@ and wrongly reject the
+      -- omission.
       let allLabels = Map.keysSet leftParameters <> Map.keysSet rightParameters
+          parameterTypeOf parameters label =
+            maybe SemanticTypeUnknown (.parameterType) (Map.lookup label parameters)
+          omittedOptional label =
+            maybe False (.optional) (Map.lookup label leftParameters)
+              && label `Map.notMember` rightParameters
           parameterConstraints =
             [ TypeConstraint
-                (Map.findWithDefault SemanticTypeUnknown label rightParameters)
-                (Map.findWithDefault SemanticTypeUnknown label leftParameters)
+                (parameterTypeOf rightParameters label)
+                (parameterTypeOf leftParameters label)
                 reason
-              | label <- Set.toList allLabels
+              | label <- Set.toList allLabels,
+                not (omittedOptional label)
             ]
           returnConstraint = TypeConstraint leftReturn rightReturn reason
           requestConstraint = RequestConstraint leftRequests rightRequests reason

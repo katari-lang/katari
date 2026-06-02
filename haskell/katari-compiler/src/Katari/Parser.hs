@@ -2058,33 +2058,28 @@ parseParameterList :: Parser [ParameterBinding Parsed]
 parseParameterList =
   label "parameter list" $ parseParenthesizedList parseParameterBinding
 
+-- | A parameter is a plain binding @name (: type)? (= literal)?@. There is
+-- no destructuring or label-rename form: the call-site label is always the
+-- binding name. A trailing @= literal@ supplies an optional default — once
+-- the @=@ is seen the right-hand side is committed to a literal (a
+-- non-literal there is a parse error, never a silent rename).
 parseParameterBinding :: Parser (ParameterBinding Parsed)
 parseParameterBinding = parseWithSpan $ do
   annotation <- parseAnnotation
-  (parameterLabel, parsedPattern) <- labeledParameter <|> sugarParameter
+  name <- parseNameRef
+  typeAnnotation <- optional (parsePunctuation PunctuationColon *> parseType)
+  defaultValue <- optional parseParameterDefault
   pure $ \sourceSpan ->
     ParameterBinding
       { annotation = annotation,
-        label = parameterLabel,
-        pattern = parsedPattern,
+        name = name,
+        typeAnnotation = typeAnnotation,
+        defaultValue = defaultValue,
         sourceSpan = sourceSpan
       }
-  where
-    labeledParameter = try $ do
-      parameterLabel <- parseIdentifier
-      parsePunctuation PunctuationEquals
-      parsedPattern <- parsePattern
-      pure (parameterLabel, parsedPattern)
-    sugarParameter = parseWithSpan $ do
-      name <- parseNameRef
-      typeAnnotation <- optional (parsePunctuation PunctuationColon *> parseType)
-      pure $ \patternSpan ->
-        ( name.text,
-          PatternVariable
-            VariablePattern
-              { name = name,
-                typeAnnotation = typeAnnotation,
-                sourceSpan = patternSpan,
-                typeOf = ()
-              }
-        )
+
+parseParameterDefault :: Parser ParameterDefault
+parseParameterDefault = parseWithSpan $ do
+  parsePunctuation PunctuationEquals
+  value <- parseLiteralValue
+  pure $ \sourceSpan -> ParameterDefault {value = value, sourceSpan = sourceSpan}

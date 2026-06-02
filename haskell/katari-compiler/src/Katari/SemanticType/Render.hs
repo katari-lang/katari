@@ -58,7 +58,9 @@ renderSemanticType = render False
         let parameterText =
               Text.intercalate
                 ", "
-                [k <> ": " <> render False v | (k, v) <- Map.toAscList parameters]
+                [ k <> (if parameter.optional then "?: " else ": ") <> render False parameter.parameterType
+                  | (k, parameter) <- Map.toAscList parameters
+                ]
             effectsText = renderSemanticRequest effects
             body =
               "("

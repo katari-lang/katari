@@ -808,7 +808,7 @@ dataNameClash = describe "cross-module data name clash" $ do
     collectDataQNames = \case
       SemanticTypeData qualifiedName -> [qualifiedName]
       SemanticTypeFunction params returnType _ ->
-        concatMap collectDataQNames (Map.elems params) <> collectDataQNames returnType
+        concatMap (collectDataQNames . (.parameterType)) (Map.elems params) <> collectDataQNames returnType
       SemanticTypeArray elementType -> collectDataQNames elementType
       SemanticTypeTuple elementTypes -> concatMap collectDataQNames elementTypes
       SemanticTypeUnion branches -> concatMap collectDataQNames branches

@@ -843,9 +843,19 @@ declarations = describe "declarations" $ do
     _ <- shouldSucceed "agent foo(x: integer, y: integer) -> integer { x }"
     pure ()
 
-  it "parses agent with label=pattern param" $ do
-    _ <- shouldSucceed "agent foo(input = x: integer) -> integer { x }"
+  it "rejects the old label = pattern parameter form" $
+    shouldFail "agent foo(input = x: integer) -> integer { x }"
+
+  it "parses a parameter with a literal default" $ do
+    _ <- shouldSucceed "agent foo(x: integer = 2) -> integer { x }"
     pure ()
+
+  it "parses an untyped parameter default" $ do
+    _ <- shouldSucceed "agent foo(x = 2) -> integer { x }"
+    pure ()
+
+  it "rejects a non-literal default (no silent rename)" $
+    shouldFail "agent foo(x = y) -> integer { x }"
 
   it "parses agent with requests" $ do
     _ <- shouldSucceed "agent foo() with req1, req2 { 1 }"
@@ -879,8 +889,8 @@ declarations = describe "declarations" $ do
         "agent foo(@\"x param\" x: integer, @\"y param\" y: integer) -> integer { x }"
     pure ()
 
-  it "parses agent labeled param with annotation" $ do
-    _ <- shouldSucceed "agent foo(@\"input\" input = x: integer) -> integer { x }"
+  it "parses agent param with annotation" $ do
+    _ <- shouldSucceed "agent foo(@\"input\" x: integer) -> integer { x }"
     pure ()
 
   it "parses request declaration" $ do
@@ -1322,10 +1332,6 @@ patterns = describe "patterns" $ do
           ]
     pure ()
 
-  it "parses typed wildcard in agent param" $ do
-    _ <- shouldSucceed "agent foo(input = _: integer) -> integer { 0 }"
-    pure ()
-
   it "parses type-guard pattern integer(x)" $ do
     _ <-
       shouldSucceed
@@ -1399,11 +1405,9 @@ types = describe "types" $ do
     m <- shouldSucceed "agent main(f: agent) { 1 }"
     case head (decls m) of
       DeclarationAgent a -> case a.parameters of
-        [pr] -> case pr.pattern of
-          PatternVariable v -> case v.typeAnnotation of
-            Just (TypeFunctionAny _) -> pure ()
-            _ -> expectationFailure "expected TypeFunctionAny"
-          _ -> expectationFailure "expected variable pattern"
+        [pr] -> case pr.typeAnnotation of
+          Just (TypeFunctionAny _) -> pure ()
+          _ -> expectationFailure "expected TypeFunctionAny"
         _ -> expectationFailure "expected exactly one parameter"
       _ -> expectationFailure "expected agent"
 
@@ -1419,18 +1423,16 @@ types = describe "types" $ do
     m <- shouldSucceed "agent main(f: agent (x: integer) -> string) { 1 }"
     case head (decls m) of
       DeclarationAgent a -> case a.parameters of
-        [pr] -> case pr.pattern of
-          PatternVariable v -> case v.typeAnnotation of
-            Just (TypeFunction ft) -> do
-              length ft.parameterTypes `shouldBe` 1
-              case ft.parameterTypes of
-                [(label, _)] -> label `shouldBe` "x"
-                _ -> expectationFailure "expected one named parameter"
-              case ft.returnType of
-                TypePrimitive _ -> pure ()
-                _ -> expectationFailure "expected primitive return type"
-            _ -> expectationFailure "expected TypeFunction"
-          _ -> expectationFailure "expected variable pattern"
+        [pr] -> case pr.typeAnnotation of
+          Just (TypeFunction ft) -> do
+            length ft.parameterTypes `shouldBe` 1
+            case ft.parameterTypes of
+              [(label, _)] -> label `shouldBe` "x"
+              _ -> expectationFailure "expected one named parameter"
+            case ft.returnType of
+              TypePrimitive _ -> pure ()
+              _ -> expectationFailure "expected primitive return type"
+          _ -> expectationFailure "expected TypeFunction"
         _ -> expectationFailure "expected exactly one parameter"
       _ -> expectationFailure "expected agent"
 
@@ -1774,13 +1776,11 @@ arrayAndTupleTypes = describe "array and tuple types" $ do
     m <- shouldSucceed "agent main(xs: array[integer]) { 1 }"
     case head (decls m) of
       DeclarationAgent a -> case a.parameters of
-        [p] -> case p.pattern of
-          PatternVariable v -> case v.typeAnnotation of
-            Just (TypeArray n) -> case n.elementType of
-              TypePrimitive prim -> prim.kind `shouldBe` PrimitiveTypeKindInteger
-              _ -> expectationFailure "expected primitive element type"
-            _ -> expectationFailure "expected TypeArray"
-          _ -> expectationFailure "expected variable pattern"
+        [p] -> case p.typeAnnotation of
+          Just (TypeArray n) -> case n.elementType of
+            TypePrimitive prim -> prim.kind `shouldBe` PrimitiveTypeKindInteger
+            _ -> expectationFailure "expected primitive element type"
+          _ -> expectationFailure "expected TypeArray"
         _ -> expectationFailure "expected one parameter"
       _ -> expectationFailure "expected agent"
 
@@ -1796,11 +1796,9 @@ arrayAndTupleTypes = describe "array and tuple types" $ do
     m <- shouldSucceed "agent main(p: (integer, string)) { 1 }"
     case head (decls m) of
       DeclarationAgent a -> case a.parameters of
-        [pr] -> case pr.pattern of
-          PatternVariable v -> case v.typeAnnotation of
-            Just (TypeTuple n) -> length n.elementTypes `shouldBe` 2
-            _ -> expectationFailure "expected TypeTuple"
-          _ -> expectationFailure "expected variable pattern"
+        [pr] -> case pr.typeAnnotation of
+          Just (TypeTuple n) -> length n.elementTypes `shouldBe` 2
+          _ -> expectationFailure "expected TypeTuple"
         _ -> expectationFailure "expected one parameter"
       _ -> expectationFailure "expected agent"
 
@@ -1812,11 +1810,9 @@ arrayAndTupleTypes = describe "array and tuple types" $ do
     m <- shouldSucceed "agent main(x: (integer)) { 1 }"
     case head (decls m) of
       DeclarationAgent a -> case a.parameters of
-        [pr] -> case pr.pattern of
-          PatternVariable v -> case v.typeAnnotation of
-            Just (TypePrimitive prim) -> prim.kind `shouldBe` PrimitiveTypeKindInteger
-            _ -> expectationFailure "expected grouped type to collapse to primitive"
-          _ -> expectationFailure "expected variable pattern"
+        [pr] -> case pr.typeAnnotation of
+          Just (TypePrimitive prim) -> prim.kind `shouldBe` PrimitiveTypeKindInteger
+          _ -> expectationFailure "expected grouped type to collapse to primitive"
         _ -> expectationFailure "expected one parameter"
       _ -> expectationFailure "expected agent"
 
@@ -1840,13 +1836,11 @@ arrayAndTupleTypes = describe "array and tuple types" $ do
     m <- shouldSucceed "agent main(x: math.Vector) { 1 }"
     case head (decls m) of
       DeclarationAgent a -> case a.parameters of
-        [pr] -> case pr.pattern of
-          PatternVariable v -> case v.typeAnnotation of
-            Just (TypeQualified qn) -> do
-              nameText qn.qualifier `shouldBe` "math"
-              nameText qn.target `shouldBe` "Vector"
-            _ -> expectationFailure "expected TypeQualified"
-          _ -> expectationFailure "expected variable pattern"
+        [pr] -> case pr.typeAnnotation of
+          Just (TypeQualified qn) -> do
+            nameText qn.qualifier `shouldBe` "math"
+            nameText qn.target `shouldBe` "Vector"
+          _ -> expectationFailure "expected TypeQualified"
         _ -> expectationFailure "expected one parameter"
       _ -> expectationFailure "expected agent"
 
@@ -1858,11 +1852,9 @@ arrayAndTupleTypes = describe "array and tuple types" $ do
     m <- shouldSucceed "agent main(x: Foo) { 1 }"
     case head (decls m) of
       DeclarationAgent a -> case a.parameters of
-        [pr] -> case pr.pattern of
-          PatternVariable v -> case v.typeAnnotation of
-            Just (TypeName tn) -> nameText tn.name `shouldBe` "Foo"
-            _ -> expectationFailure "expected TypeName"
-          _ -> expectationFailure "expected variable pattern"
+        [pr] -> case pr.typeAnnotation of
+          Just (TypeName tn) -> nameText tn.name `shouldBe` "Foo"
+          _ -> expectationFailure "expected TypeName"
         _ -> expectationFailure "expected one parameter"
       _ -> expectationFailure "expected agent"
 

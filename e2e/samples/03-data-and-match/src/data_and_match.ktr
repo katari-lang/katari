@@ -2,7 +2,7 @@
 data point(x: integer, y: integer)
 
 @"Sum of the x and y coordinates of a point."
-agent coord_sum(p = pt: point) -> integer {
+agent coord_sum(pt: point) -> integer {
   match (pt) {
     case point(x = xv, y = yv) => { xv + yv }
   }
@@ -10,5 +10,5 @@ agent coord_sum(p = pt: point) -> integer {
 
 @"Returns coord_sum(point(3, 4)) (= 7)."
 agent main() -> integer {
-  coord_sum(p = point(x = 3, y = 4))
+  coord_sum(pt = point(x = 3, y = 4))
 }

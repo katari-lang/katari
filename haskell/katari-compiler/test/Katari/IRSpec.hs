@@ -46,7 +46,7 @@ blockSpec = describe "Block (sum)" $ do
   it "BlockUser nests UserBlock under 'body'" $ do
     let userBlock =
           UserBlock
-            { parameters = [Param {label = "x", var = VarId 0}],
+            { parameters = [Param {label = "x", var = VarId 0, defaultValue = Nothing}],
               statements = [],
               trailing = Just (VarId 1)
             }

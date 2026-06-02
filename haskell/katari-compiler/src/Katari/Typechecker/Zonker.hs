@@ -262,13 +262,13 @@ walkDataParameter DataParameter {annotation, name, parameterType, sourceSpan} =
       }
 
 walkParameter :: ParameterBinding Constrained -> Zonk (ParameterBinding Zonked)
-walkParameter ParameterBinding {annotation, label, pattern, sourceSpan} = do
-  pattern' <- walkPattern pattern
+walkParameter ParameterBinding {annotation, name, typeAnnotation, defaultValue, sourceSpan} =
   pure
     ParameterBinding
       { annotation = annotation,
-        label = label,
-        pattern = pattern',
+        name = retagNameRef name,
+        typeAnnotation = fmap retagSyntacticType typeAnnotation,
+        defaultValue = defaultValue,
         sourceSpan = sourceSpan
       }
 
