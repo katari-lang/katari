@@ -234,6 +234,14 @@ parseIdentifier = label "identifier" $ parseKatariTokenWith $ \case
   KatariTokenIdentifier text -> Just text
   _ -> Nothing
 
+-- | Match exactly the identifier @expected@ (consumes nothing on a mismatch, so
+-- it composes in a 'choice'). Used where a built-in type name — now an ordinary
+-- identifier, not a keyword — must be recognised (e.g. type-tag patterns).
+parseSpecificIdentifier :: Text -> Parser ()
+parseSpecificIdentifier expected = parseKatariTokenWith $ \case
+  KatariTokenIdentifier text | text == expected -> Just ()
+  _ -> Nothing
+
 -- | Bare underscore — only consumed when explicitly requested (wildcard pattern).
 parseUnderscore :: Parser ()
 parseUnderscore = parseExactKatariToken KatariTokenUnderscore
@@ -1660,10 +1668,10 @@ parseTypePattern = parseWithSpan $ do
   tag <- try $ do
     t <-
       choice
-        [ TypePatternTagInteger <$ parseKeyword KeywordInteger,
-          TypePatternTagNumber <$ parseKeyword KeywordNumber,
-          TypePatternTagString <$ parseKeyword KeywordString,
-          TypePatternTagBoolean <$ parseKeyword KeywordBoolean,
+        [ TypePatternTagInteger <$ parseSpecificIdentifier "integer",
+          TypePatternTagNumber <$ parseSpecificIdentifier "number",
+          TypePatternTagString <$ parseSpecificIdentifier "string",
+          TypePatternTagBoolean <$ parseSpecificIdentifier "boolean",
           TypePatternTagAgent <$ parseKeyword KeywordAgent
         ]
     void $ MP.lookAhead (parsePunctuation PunctuationLeftParenthesis)
@@ -1850,15 +1858,11 @@ parseUnionType = parseWithSpan $ do
 parseAtomicType :: Parser (SyntacticType Parsed)
 parseAtomicType =
   choice
+    -- @null@ stays a keyword (it doubles as the null value literal). Every
+    -- other built-in type name (@integer@ / @string@ / @never@ / @unknown@ /
+    -- …) is a plain identifier resolved by 'parseNamedOrQualifiedType', exactly
+    -- like @array@ / @record@ / a user-defined type.
     [ parsePrimitiveType PrimitiveTypeKindNull KeywordNull,
-      parsePrimitiveType PrimitiveTypeKindInteger KeywordInteger,
-      parsePrimitiveType PrimitiveTypeKindNumber KeywordNumber,
-      parsePrimitiveType PrimitiveTypeKindString KeywordString,
-      parsePrimitiveType PrimitiveTypeKindSecret KeywordSecret,
-      parsePrimitiveType PrimitiveTypeKindFile KeywordFile,
-      parsePrimitiveType PrimitiveTypeKindBoolean KeywordBoolean,
-      parseNeverType,
-      parseUnknownType,
       parseAgentType,
       parseLiteralType,
       try parseArrayType,
@@ -1866,18 +1870,6 @@ parseAtomicType =
       parseTupleOrGroupedType,
       parseNamedOrQualifiedType
     ]
-
--- | @never@ — the bottom type of the lattice.
-parseNeverType :: Parser (SyntacticType Parsed)
-parseNeverType = parseWithSpan $ do
-  parseKeyword KeywordNever
-  pure $ \sourceSpan -> TypeNever NeverTypeNode {sourceSpan = sourceSpan}
-
--- | @unknown@ — the top type of the lattice.
-parseUnknownType :: Parser (SyntacticType Parsed)
-parseUnknownType = parseWithSpan $ do
-  parseKeyword KeywordUnknown
-  pure $ \sourceSpan -> TypeUnknown UnknownTypeNode {sourceSpan = sourceSpan}
 
 -- | @agent@ alone — function-any (top of the callable-type lattice) —
 -- or @agent (p: T, ...) -> R [with E]@ — concrete callable type. The
@@ -1938,17 +1930,30 @@ parsePrimitiveType primitiveKind keyword = parseWithSpan $ do
 -- parsed as a VariableRef' (the polymorphic 'parseNameRef' can produce any
 -- symbol kind, but fixing it here gives the case branches a single source
 -- type to retag from).
+-- | An unqualified identifier in type position is a built-in type if it names
+-- one (the primitive types plus @never@ / @unknown@), otherwise a user-defined
+-- type. Type names are ordinary identifiers — only the value-literal keywords
+-- (@null@) stay reserved — so the surface stays context-free and @string@ etc.
+-- double as stdlib module aliases in value position, like @array@ / @record@.
+builtinTypeName :: Text -> SourceSpan -> Maybe (SyntacticType Parsed)
+builtinTypeName name sourceSpan = case name of
+  "integer" -> prim PrimitiveTypeKindInteger
+  "number" -> prim PrimitiveTypeKindNumber
+  "string" -> prim PrimitiveTypeKindString
+  "boolean" -> prim PrimitiveTypeKindBoolean
+  "secret" -> prim PrimitiveTypeKindSecret
+  "file" -> prim PrimitiveTypeKindFile
+  "never" -> Just (TypeNever NeverTypeNode {sourceSpan = sourceSpan})
+  "unknown" -> Just (TypeUnknown UnknownTypeNode {sourceSpan = sourceSpan})
+  _ -> Nothing
+  where
+    prim kind = Just (TypePrimitive PrimitiveTypeNode {kind = kind, sourceSpan = sourceSpan})
+
 parseNamedOrQualifiedType :: Parser (SyntacticType Parsed)
 parseNamedOrQualifiedType = parseWithSpan $ do
   first <- parseNameRef :: Parser (NameRef Parsed VariableRef)
   maybeSecond <- optional (parsePunctuation PunctuationDot *> parseNameRef)
   pure $ \sourceSpan -> case maybeSecond of
-    Nothing ->
-      TypeName
-        TypeNameNode
-          { name = retagParsedNameRef first,
-            sourceSpan = sourceSpan
-          }
     Just second ->
       TypeQualified
         QualifiedTypeNode
@@ -1956,6 +1961,14 @@ parseNamedOrQualifiedType = parseWithSpan $ do
             target = second,
             sourceSpan = sourceSpan
           }
+    Nothing -> case builtinTypeName first.text sourceSpan of
+      Just builtin -> builtin
+      Nothing ->
+        TypeName
+          TypeNameNode
+            { name = retagParsedNameRef first,
+              sourceSpan = sourceSpan
+            }
 
 parseFunctionTypeParameter :: Parser (Text, SyntacticType Parsed)
 parseFunctionTypeParameter = do

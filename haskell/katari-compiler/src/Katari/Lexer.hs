@@ -160,15 +160,7 @@ data Keyword where
   KeywordFalse :: Keyword
   KeywordData :: Keyword
   KeywordIn :: Keyword
-  KeywordInteger :: Keyword
-  KeywordBoolean :: Keyword
-  KeywordNumber :: Keyword
-  KeywordString :: Keyword
-  KeywordSecret :: Keyword
-  KeywordFile :: Keyword
   KeywordType :: Keyword
-  KeywordNever :: Keyword
-  KeywordUnknown :: Keyword
   KeywordPrimitive :: Keyword
   KeywordUsing :: Keyword
   deriving (Eq, Ord, Show, Bounded, Enum)
@@ -598,15 +590,7 @@ lexKeywordText = \case
   KeywordFalse -> "false"
   KeywordData -> "data"
   KeywordIn -> "in"
-  KeywordInteger -> "integer"
-  KeywordBoolean -> "boolean"
-  KeywordNumber -> "number"
-  KeywordString -> "string"
-  KeywordSecret -> "secret"
-  KeywordFile -> "file"
   KeywordType -> "type"
-  KeywordNever -> "never"
-  KeywordUnknown -> "unknown"
   KeywordPrimitive -> "primitive"
   KeywordUsing -> "using"
 
@@ -948,13 +932,6 @@ insertVirtualSemicolons = go (0 :: Int) Nothing
       KatariTokenKeyword KeywordNull -> True
       KatariTokenKeyword KeywordTrue -> True
       KatariTokenKeyword KeywordFalse -> True
-      KatariTokenKeyword KeywordInteger -> True
-      KatariTokenKeyword KeywordBoolean -> True
-      KatariTokenKeyword KeywordNumber -> True
-      KatariTokenKeyword KeywordString -> True
-      KatariTokenKeyword KeywordFile -> True
-      KatariTokenKeyword KeywordNever -> True
-      KatariTokenKeyword KeywordUnknown -> True
       KatariTokenPunctuation PunctuationRightParenthesis -> True
       KatariTokenPunctuation PunctuationRightBracket -> True
       KatariTokenPunctuation PunctuationRightBrace -> True
