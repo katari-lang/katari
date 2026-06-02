@@ -7,20 +7,22 @@ for a reply, and posts it back — built to dogfood the language and SDK.
 
 - **`src/discord_bot.ktr`** — the agents.
   - `ai_client` is a `data` value (provider + model + a `secret` api key),
-    handed to the whole program once through the `get_ai_client` capability.
-    The Discord connection and the conversation `session` are shared the same
-    way (`get_discord_client` / `get_session`).
+    handed to the whole program once through the `get_ai_client` capability;
+    the Discord connection is shared the same way (`get_discord_client`).
   - `watch_messages(channel_id)` serves a channel forever, raising an
     `on_message(text, channel_id)` **request** for each message. `main` provides
     the capabilities, then installs a `handle { request on_message(...) { ... } }`
-    that does the work — calls `infer`, posts the reply with `send_message`,
-    `next`s to keep serving. Because the session is opened once at the top, the
-    bot keeps conversation history across messages.
+    that does the work — infers a reply, posts it with `send_message`, `next`s to
+    keep serving.
+  - The **conversation history is a Katari value**: an `array[turn]` kept in the
+    `on_message` handler's state cell (`var history`), grown with `array.append`
+    and threaded with `next ... with { history = ... }`. It lives in the language,
+    not the sidecar — long turns auto-promote to value-store refs at persist time.
   - This is the point of the request model: `watch_messages` only knows it
     raises `on_message`; what the reaction *does* (and which capabilities it
     needs) lives in the user's handler, not in the watch signature.
 - **`src/discord_bot.ts`** — the ext (a JS sidecar) with the thin primitives:
-  the Gemini HTTP call (`ai_infer`, holding each conversation's history here),
+  a **stateless** Gemini call (`ai_infer` takes the history, returns the reply),
   and the discord.js gateway client (`create_discord_client` / `discord_watch` /
   `discord_send`, which the ktr wraps as the capability agents `watch_messages` /
   `send_message`).
@@ -63,18 +65,17 @@ for a reply, and posts it back — built to dogfood the language and SDK.
 
 ## Tool calling (run Python via e2b)
 
-`ask` lets the model call a `run_python` tool: the ext runs the tool-call
-feedback loop, dispatching the tool back into Katari (so the tool is just an
-agent — it can use capabilities, raise requests, …). `solve` is a standalone
-entry to try it without Discord:
+`ask(history, tools)` takes an **array of tool agents** and lets the model call
+any of them: Katari maps `get_metadata` over the tools (a `for` loop +
+`array.append`) to build their schemas, and the ext runs the tool-call feedback
+loop, dispatching the chosen tool back into Katari (so a tool is just an agent —
+it can use capabilities, raise requests, …). `solve` is a standalone entry that
+wires one tool (`run_python`) and tries it without Discord:
 
 ```sh
 katari run discord_bot.solve --wait \
   --args '{"task": "Use Python to compute the sum of the first 100 primes."}'
 ```
-
-Today it wires one tool (`run_python`); the loop is written list-shaped, so the
-next step is to pass an array of tools (blocked on language-side list ops).
 
 The runtime listens on `http://localhost:8000` by default; point the CLI at it
 with `--api` or `KATARI_API_URL`.

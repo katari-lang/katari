@@ -232,26 +232,37 @@ function sanitizeSchemaForGemini(node: unknown): unknown {
   return node;
 }
 
+/** A `data agent_metadata(...)` value (from get_metadata) as it arrives. */
+type KatariAgentMetadata = {
+  name: KatariString;
+  description: KatariString;
+  input: KatariString;
+};
+
 katari.agent<{
   client: AiClient;
   history: RawValue;
-  tool_name: KatariString;
-  tool_description: KatariString;
-  tool_input: KatariString;
-  tool: KatariAgent;
+  tools: RawValue; // array of agent values to dispatch
+  tool_metas: RawValue; // array of agent_metadata; tool_metas[i] describes tools[i]
 }>("infer_with_tools", async (ctx) => {
   const url = geminiEndpoint(ctx.args.client);
 
-  // v0: exactly one tool. v1 = build this list from `tools: array of agent`,
-  // mapping get_metadata over each. The loop below is already list-shaped.
-  const tools: ToolSpec[] = [
-    {
-      name: await ctx.readString(ctx.args.tool_name),
-      description: await ctx.readString(ctx.args.tool_description),
-      parameters: sanitizeSchemaForGemini(JSON.parse(await ctx.readString(ctx.args.tool_input))),
-      agent: ctx.args.tool,
-    },
-  ];
+  const toolAgents = ctx.args.tools;
+  const toolMetas = ctx.args.tool_metas;
+  if (!Array.isArray(toolAgents) || !Array.isArray(toolMetas)) {
+    throw new Error("infer_with_tools: tools / tool_metas must be arrays");
+  }
+  // Zip the parallel arrays the ktr built (Katari mapped get_metadata over tools).
+  const tools: ToolSpec[] = [];
+  for (let i = 0; i < toolAgents.length; i++) {
+    const meta = toolMetas[i] as KatariAgentMetadata;
+    tools.push({
+      name: await ctx.readString(meta.name),
+      description: await ctx.readString(meta.description),
+      parameters: sanitizeSchemaForGemini(JSON.parse(await ctx.readString(meta.input))),
+      agent: toolAgents[i] as KatariAgent,
+    });
+  }
   const byName = new Map(tools.map((t) => [t.name, t]));
   const functionDeclarations = tools.map((t) => ({
     name: t.name,

@@ -36,14 +36,12 @@ agent run_python(code: string) -> string with get_e2b_key {
   e2b_exec(code = code, api_key = get_e2b_key())
 }
 
-@"Infer over the history, letting the model call a tool; the ext runs the tool-call feedback loop, dispatching the tool via delegate."
+@"Infer over the history, letting the model call any of the tools; the ext runs the tool-call feedback loop, dispatching the chosen tool via delegate. `tool_metas[i]` is `get_metadata(tools[i])` (name / description / input schema)."
 external infer_with_tools(
   client: ai_client,
   history: array[turn],
-  tool_name: string,
-  tool_description: string,
-  tool_input: string,
-  tool: agent (code: string) -> string with get_e2b_key
+  tools: array[agent (code: string) -> string with get_e2b_key],
+  tool_metas: array[agent_metadata]
 ) -> string from "FFI:discord_bot.infer_with_tools"
 
 @"Post a message to a channel using the ambient Discord client."
@@ -61,20 +59,12 @@ agent watch_messages(channel_id: string) -> never with on_message, get_discord_c
   discord_watch(client = get_discord_client(), channel_id = channel_id, on_message = deliver)
 }
 
-@"Run the tool-using model once over a history (its last turn is the user's task). The tool schema comes from get_metadata."
-agent ask(history: array[turn]) -> string with get_ai_client, get_e2b_key {
-  match (get_metadata(value = run_python)) {
-    case agent_metadata(name = tool_name, id = _, description = tool_description, input = tool_input, output = _) => {
-      infer_with_tools(
-        client = get_ai_client(),
-        history = history,
-        tool_name = tool_name,
-        tool_description = tool_description,
-        tool_input = tool_input,
-        tool = run_python,
-      )
-    }
-  }
+@"Run the tool-using model once over a history (its last turn is the user's task). Each tool's schema comes from get_metadata, mapped over the tools array."
+agent ask(history: array[turn], tools: array[agent (code: string) -> string with get_e2b_key]) -> string with get_ai_client, get_e2b_key {
+  let tool_metas = for (let t in tools, var acc = array.empty()) {
+    next with { acc = array.append(array = acc, value = get_metadata(value = t)) }
+  } then { acc }
+  infer_with_tools(client = get_ai_client(), history = history, tools = tools, tool_metas = tool_metas)
 }
 
 @"Standalone entry to test the tool loop from the CLI (no Discord): katari run discord_bot.solve --args '{\"task\": \"...\"}'."
@@ -94,7 +84,10 @@ agent solve(task: string) -> string {
       next e2b_key
     }
   }
-  ask(history = array.append(array = array.empty(), value = turn(role = "user", text = task)))
+  ask(
+    history = array.append(array = array.empty(), value = turn(role = "user", text = task)),
+    tools = array.of(value = run_python),
+  )
 }
 
 @"Entry: set up the AI client + Discord connection, then serve one channel forever, keeping the conversation history as a Katari value."
