@@ -24,12 +24,13 @@ import Katari.Typechecker.Identifier
     VariableData (..),
   )
 import Katari.Typechecker.NormalizedType
-  ( ArraySlot (..),
+  ( BareObj (..),
+    BareSeq (..),
     FunctionSlot (..),
     LayeredType (..),
+    MapSlot (..),
     NormalizedType (..),
     NumberSlot (..),
-    ObjectSlot (..),
     StringSlot (..),
   )
 import Katari.Typechecker.ScopeIndex (ScopeFrame (..), ScopeIndex (..))
@@ -822,10 +823,8 @@ isInhabited = \case
         || not (null booleanLayer)
         || nullLayer
         || hasFunction functionLayer
-        || hasArray arrayLayer
-        || not (null tupleLayer)
-        || not (null dataLayer)
-        || hasObject objectLayer
+        || hasSeq seqLayer
+        || hasMap mapLayer
     hasNumber NumberSlotInteger = True
     hasNumber NumberSlotNumber = True
     hasNumber (NumberSlotLiterals s) = not (null s)
@@ -833,10 +832,10 @@ isInhabited = \case
     hasString (StringSlotLiterals s) = not (null s)
     hasFunction FunctionSlotAbsent = False
     hasFunction (FunctionSlotOf _) = True
-    hasArray ArraySlotAbsent = False
-    hasArray (ArraySlotOf _) = True
-    hasObject ObjectSlotAbsent = False
-    hasObject (ObjectSlotOf _) = True
+    hasSeq NoSeq = False
+    hasSeq _ = True
+    hasMap (MapSlot dataFields NoObj) = not (null dataFields)
+    hasMap _ = True
 
 -- ---------------------------------------------------------------------------
 -- Ill-typed program rejection

@@ -28,15 +28,16 @@ module Katari.Typechecker.NormalizedType
     LayeredType (..),
     NumberSlot (..),
     StringSlot (..),
-    ArraySlot (..),
-    ObjectSlot (..),
-    RecordSlot (..),
+    BareSeq (..),
+    BareObj (..),
+    MapSlot (..),
     FunctionSlot (..),
     FunctionShape (..),
     NormalizedParameter (..),
 
     -- * Helpers
     emptyLayered,
+    emptyMapSlot,
     isNeverNT,
     isUnknownNT,
 
@@ -103,29 +104,12 @@ data LayeredType = LayeredType
     -- union with each common label's type intersected; intersection →
     -- label intersection with each common label's type unioned.
     functionLayer :: FunctionSlot,
-    -- | Array layer. 'ArraySlotAbsent' distinguishes "no array values" from
-    -- @ArraySlotOf (NormalizedTypeLayered emptyLayered)@ (which permits the empty-array
-    -- value @[]@).
-    arrayLayer :: ArraySlot,
-    -- | Tuple layer keyed by arity. Absence from the map means no tuples
-    -- of that arity inhabit this type. Per arity the per-position types
-    -- are stored as a list.
-    tupleLayer :: Map Int [NormalizedType],
-    -- | Set of @data@ type qualified names that inhabit this type. Empty
-    -- means no @data@ values.
-    dataLayer :: Set QualifiedName,
-    -- | Structural object layer. 'ObjectSlotAbsent' means "no object values"
-    -- (distinguishable from "object with all-empty fields"). Per Katari's
-    -- product-normalisation rule, all object shapes in a union collapse
-    -- into a single shape: union → common fields, each field type unioned;
-    -- intersection → all fields, common field types intersected.
-    objectLayer :: ObjectSlot,
-    -- | Record layer. 'RecordSlotAbsent' means "no record values".
-    -- 'RecordSlotOf v' means "homogeneous dictionaries from string
-    -- keys to v-typed values". Keys are implicitly @string@ (wire
-    -- form is plain JSON object syntax); values are covariant.
-    -- Distinct from 'ObjectSlotOf' (= static field labels).
-    recordLayer :: RecordSlot
+    -- | Sequence layer — tuple and array merged (@tuple <: array@). See
+    -- 'BareSeq'.
+    seqLayer :: BareSeq,
+    -- | Map layer — object, record and @data@ merged (@data <: object <:
+    -- record@). See 'MapSlot'.
+    mapLayer :: MapSlot
   }
   deriving (Eq, Show)
 
@@ -153,38 +137,53 @@ data StringSlot where
   StringSlotAny :: StringSlot
   deriving (Eq, Show)
 
--- | Array slot.
+-- | Sequence layer — tuple and array merged into one layer (tuples are the
+-- precise positional refinement of the homogeneous @array@: @tuple[T…] <:
+-- array[⋃T]@).
 --
---   * 'ArraySlotAbsent' — no array values inhabit this type.
---   * @'ArraySlotOf' t@ — arrays whose element type is @t@. Note that
---     @'ArraySlotOf' (NormalizedTypeLayered emptyLayered)@ is *not* equivalent to
---     'ArraySlotAbsent': it admits the empty array value @[]@.
-data ArraySlot where
-  ArraySlotAbsent :: ArraySlot
-  ArraySlotOf :: NormalizedType -> ArraySlot
+--   * 'NoSeq' — no sequence values inhabit this type.
+--   * @'Tuple' ts@ — a single canonical tuple of per-position element types.
+--     Tuples are structural (like objects, with positions as labels), so a
+--     union collapses to the common prefix (the shorter length, positions
+--     unioned) and an intersection extends to all positions (the longer
+--     length, common positions intersected). Width subtyping: a longer tuple
+--     is a subtype of a shorter prefix.
+--   * @'Array' t@ — homogeneous arrays of element type @t@; the top of the
+--     layer (absorbs all tuples on union). @'Array' (NormalizedTypeLayered
+--     emptyLayered)@ still admits the empty array value @[]@.
+data BareSeq
+  = NoSeq
+  | Tuple [NormalizedType]
+  | Array NormalizedType
   deriving (Eq, Show)
 
--- | Object slot.
+-- | The structural (non-nominal) part of the map layer.
 --
---   * 'ObjectSlotAbsent' — no object values inhabit this type.
---   * @'ObjectSlotOf' fs@ — values that have at least the fields in @fs@.
---     Unspecified fields are conceptually filled with 'NormalizedTypeUnknown', so
---     'ObjectSlotAbsent' is *not* the same as @'ObjectSlotOf' Map.empty@.
-data ObjectSlot where
-  ObjectSlotAbsent :: ObjectSlot
-  ObjectSlotOf :: (Map Text NormalizedType) -> ObjectSlot
+--   * 'NoObj' — no structural map values.
+--   * @'ClosedObj' fs@ — a closed object with exactly the field labels @fs@
+--     (more fields = subtype, via width).
+--   * @'RecordObj' v@ — a homogeneous @record[V]@; the top of the structural
+--     part (@{l: T} <: record[⋃T]@), absorbs closed objects on union.
+data BareObj
+  = NoObj
+  | ClosedObj (Map Text NormalizedType)
+  | RecordObj NormalizedType
   deriving (Eq, Show)
 
--- | Record slot.
+-- | Map layer — object, record and @data@ merged into one layer.
 --
---   * 'RecordSlotAbsent' — no record values inhabit this type.
---   * @'RecordSlotOf' v@ — homogeneous dictionaries from string keys
---     to v-typed values. Keys are implicitly @string@ (the wire form
---     is plain JSON object syntax, whose keys are always strings);
---     values are covariant.
-data RecordSlot where
-  RecordSlotAbsent :: RecordSlot
-  RecordSlotOf :: NormalizedType -> RecordSlot
+--   * 'dataFields' lists the @data@ type names inhabiting this type, each
+--     mapped to its concrete declared fields (stored **inline** so subtyping
+--     can compare a data's object view without an external env — the fields
+--     are filled when a @SemanticTypeData@ is normalized). Forms the
+--     discriminated-union part.
+--   * 'bare' is the structural part ('BareObj'). Data names are kept separate
+--     from 'bare' (not absorbed into a record), which keeps union / intersect
+--     env-free.
+data MapSlot = MapSlot
+  { dataFields :: Map QualifiedName (Map Text NormalizedType),
+    bare :: BareObj
+  }
   deriving (Eq, Show)
 
 -- | Function layer.
@@ -237,12 +236,13 @@ emptyLayered =
       secretLayer = False,
       fileLayer = False,
       functionLayer = FunctionSlotAbsent,
-      arrayLayer = ArraySlotAbsent,
-      tupleLayer = Map.empty,
-      dataLayer = Set.empty,
-      objectLayer = ObjectSlotAbsent,
-      recordLayer = RecordSlotAbsent
+      seqLayer = NoSeq,
+      mapLayer = emptyMapSlot
     }
+
+-- | The empty map slot: no @data@ names, no structural object.
+emptyMapSlot :: MapSlot
+emptyMapSlot = MapSlot {dataFields = Map.empty, bare = NoObj}
 
 -- ---------------------------------------------------------------------------
 -- Denormalisation: NormalizedType -> SemanticType Resolved
@@ -274,11 +274,8 @@ denormaliseBranches LayeredType {..} =
       secretBranches secretLayer,
       fileBranches fileLayer,
       functionBranches functionLayer,
-      arrayBranches arrayLayer,
-      tupleBranches tupleLayer,
-      dataBranches dataLayer,
-      objectBranches objectLayer,
-      recordBranches recordLayer
+      seqBranches seqLayer,
+      mapBranches mapLayer
     ]
 
 numberBranches :: NumberSlot -> [SemanticType Resolved]
@@ -327,27 +324,19 @@ functionBranches = \case
         (denormalise returnType)
         (SemanticRequest $ Set.map SemanticRequestElementConcrete requests)
 
-arrayBranches :: ArraySlot -> [SemanticType Resolved]
-arrayBranches = \case
-  ArraySlotAbsent -> []
-  ArraySlotOf elementType -> [SemanticTypeArray (denormalise elementType)]
+seqBranches :: BareSeq -> [SemanticType Resolved]
+seqBranches = \case
+  NoSeq -> []
+  Tuple elements -> [SemanticTypeTuple (denormalise <$> elements)]
+  Array elementType -> [SemanticTypeArray (denormalise elementType)]
 
-tupleBranches :: Map Int [NormalizedType] -> [SemanticType Resolved]
-tupleBranches = fmap (SemanticTypeTuple . fmap denormalise . snd) . Map.toList
-
-dataBranches :: Set QualifiedName -> [SemanticType Resolved]
-dataBranches = fmap SemanticTypeData . Set.toList
-
-objectBranches :: ObjectSlot -> [SemanticType Resolved]
-objectBranches = \case
-  ObjectSlotAbsent -> []
-  ObjectSlotOf fields -> [SemanticTypeObject (Map.map denormalise fields)]
-
-recordBranches :: RecordSlot -> [SemanticType Resolved]
-recordBranches = \case
-  RecordSlotAbsent -> []
-  RecordSlotOf valueType ->
-    [SemanticTypeRecord (denormalise valueType)]
+mapBranches :: MapSlot -> [SemanticType Resolved]
+mapBranches MapSlot {dataFields, bare} =
+  [SemanticTypeData qualifiedName | qualifiedName <- Map.keys dataFields]
+    ++ case bare of
+      NoObj -> []
+      ClosedObj fields -> [SemanticTypeObject (Map.map denormalise fields)]
+      RecordObj valueType -> [SemanticTypeRecord (denormalise valueType)]
 
 -- ---------------------------------------------------------------------------
 -- isNeverNT / isUnknownNT
@@ -374,11 +363,8 @@ isEmptyLayered LayeredType {..} =
     && not secretLayer
     && not fileLayer
     && isEmptyFunction functionLayer
-    && isEmptyArray arrayLayer
-    && Map.null tupleLayer
-    && Set.null dataLayer
-    && isEmptyObject objectLayer
-    && isEmptyRecord recordLayer
+    && isEmptySeq seqLayer
+    && isEmptyMap mapLayer
 
 isEmptyNumber :: NumberSlot -> Bool
 isEmptyNumber = \case
@@ -390,9 +376,9 @@ isEmptyString = \case
   StringSlotLiterals s -> Set.null s
   _ -> False
 
-isEmptyArray :: ArraySlot -> Bool
-isEmptyArray = \case
-  ArraySlotAbsent -> True
+isEmptySeq :: BareSeq -> Bool
+isEmptySeq = \case
+  NoSeq -> True
   _ -> False
 
 isEmptyFunction :: FunctionSlot -> Bool
@@ -400,14 +386,9 @@ isEmptyFunction = \case
   FunctionSlotAbsent -> True
   _ -> False
 
-isEmptyObject :: ObjectSlot -> Bool
-isEmptyObject = \case
-  ObjectSlotAbsent -> True
-  _ -> False
-
-isEmptyRecord :: RecordSlot -> Bool
-isEmptyRecord = \case
-  RecordSlotAbsent -> True
+isEmptyMap :: MapSlot -> Bool
+isEmptyMap (MapSlot dataFields bare) = Map.null dataFields && case bare of
+  NoObj -> True
   _ -> False
 
 -- ---------------------------------------------------------------------------
@@ -447,23 +428,23 @@ normaliseSemantic = \case
   SemanticTypeLiteralBoolean value ->
     NormalizedTypeLayered emptyLayered {booleanLayer = Set.singleton value}
   SemanticTypeArray element ->
-    NormalizedTypeLayered emptyLayered {arrayLayer = ArraySlotOf (normaliseSemantic element)}
+    NormalizedTypeLayered emptyLayered {seqLayer = Array (normaliseSemantic element)}
   SemanticTypeTuple elements ->
-    NormalizedTypeLayered
-      emptyLayered
-        { tupleLayer = Map.singleton (length elements) (normaliseSemantic <$> elements)
-        }
+    NormalizedTypeLayered emptyLayered {seqLayer = Tuple (normaliseSemantic <$> elements)}
+  -- TODO(#48): fill the data's concrete fields via the read-only data-fields
+  -- env so the @data <: object@ (rule ii) edge can fire. For now the fields
+  -- are empty and a data only matches another data by name.
   SemanticTypeData typeId ->
-    NormalizedTypeLayered emptyLayered {dataLayer = Set.singleton typeId}
+    NormalizedTypeLayered emptyLayered {mapLayer = emptyMapSlot {dataFields = Map.singleton typeId Map.empty}}
   SemanticTypeObject fields ->
     NormalizedTypeLayered
       emptyLayered
-        { objectLayer = ObjectSlotOf (Map.map normaliseSemantic fields)
+        { mapLayer = emptyMapSlot {bare = ClosedObj (Map.map normaliseSemantic fields)}
         }
   SemanticTypeRecord valueType ->
     NormalizedTypeLayered
       emptyLayered
-        { recordLayer = RecordSlotOf (normaliseSemantic valueType)
+        { mapLayer = emptyMapSlot {bare = RecordObj (normaliseSemantic valueType)}
         }
   SemanticTypeFunction parameterMap returnType (SemanticRequest requests) ->
     let shape =
@@ -505,11 +486,8 @@ unionLayered leftLayered rightLayered =
       secretLayer = leftLayered.secretLayer || rightLayered.secretLayer,
       fileLayer = leftLayered.fileLayer || rightLayered.fileLayer,
       functionLayer = unionFunctionLayer leftLayered.functionLayer rightLayered.functionLayer,
-      arrayLayer = unionArraySlot leftLayered.arrayLayer rightLayered.arrayLayer,
-      tupleLayer = unionTupleLayer leftLayered.tupleLayer rightLayered.tupleLayer,
-      dataLayer = Set.union leftLayered.dataLayer rightLayered.dataLayer,
-      objectLayer = unionObjectSlot leftLayered.objectLayer rightLayered.objectLayer,
-      recordLayer = unionRecordSlot leftLayered.recordLayer rightLayered.recordLayer
+      seqLayer = unionSeq leftLayered.seqLayer rightLayered.seqLayer,
+      mapLayer = unionMap leftLayered.mapLayer rightLayered.mapLayer
     }
 
 unionNumberSlot :: NumberSlot -> NumberSlot -> NumberSlot
@@ -529,12 +507,37 @@ unionStringSlot leftSlot rightSlot = case (leftSlot, rightSlot) of
   (StringSlotLiterals leftLiterals, StringSlotLiterals rightLiterals) ->
     StringSlotLiterals (Set.union leftLiterals rightLiterals)
 
-unionArraySlot :: ArraySlot -> ArraySlot -> ArraySlot
-unionArraySlot leftSlot rightSlot = case (leftSlot, rightSlot) of
-  (ArraySlotAbsent, other) -> other
-  (other, ArraySlotAbsent) -> other
-  (ArraySlotOf leftElement, ArraySlotOf rightElement) ->
-    ArraySlotOf (unionNT leftElement rightElement)
+-- | Union (join) of sequence layers. Same-arity tuples union pointwise;
+-- different arities coexist. An @array@ absorbs tuples (their element types
+-- join into the homogeneous element).
+unionSeq :: BareSeq -> BareSeq -> BareSeq
+unionSeq leftSeq rightSeq = case (leftSeq, rightSeq) of
+  (NoSeq, other) -> other
+  (other, NoSeq) -> other
+  -- join collapses to the common prefix (shorter length), positions unioned.
+  (Tuple leftElements, Tuple rightElements) -> Tuple (zipWith unionNT leftElements rightElements)
+  (Array leftElement, Array rightElement) -> Array (unionNT leftElement rightElement)
+  -- an array absorbs a tuple: all element types join into the homogeneous element.
+  (Tuple elements, Array element) -> Array (foldr unionNT element elements)
+  (Array element, Tuple elements) -> Array (foldr unionNT element elements)
+
+-- | Union (join) of map layers. Data names are unioned (kept separate);
+-- 'bare' parts join via 'unionBareObj'.
+unionMap :: MapSlot -> MapSlot -> MapSlot
+unionMap (MapSlot leftData leftBare) (MapSlot rightData rightBare) =
+  MapSlot (Map.union leftData rightData) (unionBareObj leftBare rightBare)
+
+unionBareObj :: BareObj -> BareObj -> BareObj
+unionBareObj leftBare rightBare = case (leftBare, rightBare) of
+  (NoObj, other) -> other
+  (other, NoObj) -> other
+  -- covariant join: keep only common labels, types unioned (width).
+  (ClosedObj leftFields, ClosedObj rightFields) ->
+    ClosedObj (Map.intersectionWith unionNT leftFields rightFields)
+  (RecordObj leftValue, RecordObj rightValue) -> RecordObj (unionNT leftValue rightValue)
+  -- a record absorbs a closed object: every field value joins into V.
+  (ClosedObj fields, RecordObj value) -> RecordObj (foldr unionNT value (Map.elems fields))
+  (RecordObj value, ClosedObj fields) -> RecordObj (foldr unionNT value (Map.elems fields))
 
 -- | Union of function slots.
 --
@@ -572,29 +575,6 @@ unionFunctionShape leftShape rightShape =
           optional = leftParameter.optional && rightParameter.optional
         }
 
-unionTupleLayer ::
-  Map Int [NormalizedType] ->
-  Map Int [NormalizedType] ->
-  Map Int [NormalizedType]
-unionTupleLayer = Map.unionWith (zipWith unionNT)
-
-unionObjectSlot :: ObjectSlot -> ObjectSlot -> ObjectSlot
-unionObjectSlot leftSlot rightSlot = case (leftSlot, rightSlot) of
-  (ObjectSlotAbsent, other) -> other
-  (other, ObjectSlotAbsent) -> other
-  (ObjectSlotOf leftFields, ObjectSlotOf rightFields) ->
-    -- Width subtyping: union keeps only common fields with widened types.
-    ObjectSlotOf (Map.intersectionWith unionNT leftFields rightFields)
-
--- | Union of record slots. Keys are implicitly @string@ at this
--- layer; values are unioned pointwise.
-unionRecordSlot :: RecordSlot -> RecordSlot -> RecordSlot
-unionRecordSlot leftSlot rightSlot = case (leftSlot, rightSlot) of
-  (RecordSlotAbsent, other) -> other
-  (other, RecordSlotAbsent) -> other
-  (RecordSlotOf leftValue, RecordSlotOf rightValue) ->
-    RecordSlotOf (unionNT leftValue rightValue)
-
 -- ---------------------------------------------------------------------------
 -- Intersection (greatest lower bound)
 -- ---------------------------------------------------------------------------
@@ -617,11 +597,8 @@ intersectLayered leftLayered rightLayered =
       secretLayer = leftLayered.secretLayer && rightLayered.secretLayer,
       fileLayer = leftLayered.fileLayer && rightLayered.fileLayer,
       functionLayer = intersectFunctionLayer leftLayered.functionLayer rightLayered.functionLayer,
-      arrayLayer = intersectArraySlot leftLayered.arrayLayer rightLayered.arrayLayer,
-      tupleLayer = intersectTupleLayer leftLayered.tupleLayer rightLayered.tupleLayer,
-      dataLayer = Set.intersection leftLayered.dataLayer rightLayered.dataLayer,
-      objectLayer = intersectObjectSlot leftLayered.objectLayer rightLayered.objectLayer,
-      recordLayer = intersectRecordSlot leftLayered.recordLayer rightLayered.recordLayer
+      seqLayer = intersectSeq leftLayered.seqLayer rightLayered.seqLayer,
+      mapLayer = intersectMap leftLayered.mapLayer rightLayered.mapLayer
     }
 
 intersectNumberSlot :: NumberSlot -> NumberSlot -> NumberSlot
@@ -640,12 +617,27 @@ intersectStringSlot leftSlot rightSlot = case (leftSlot, rightSlot) of
   (StringSlotLiterals leftLiterals, StringSlotLiterals rightLiterals) ->
     StringSlotLiterals (Set.intersection leftLiterals rightLiterals)
 
-intersectArraySlot :: ArraySlot -> ArraySlot -> ArraySlot
-intersectArraySlot leftSlot rightSlot = case (leftSlot, rightSlot) of
-  (ArraySlotAbsent, _) -> ArraySlotAbsent
-  (_, ArraySlotAbsent) -> ArraySlotAbsent
-  (ArraySlotOf leftElement, ArraySlotOf rightElement) ->
-    ArraySlotOf (intersectNT leftElement rightElement)
+-- | Intersection (meet) of sequence layers. A @tuple ∩ array@ keeps the
+-- tuple shape, intersecting each position with the array's element type.
+intersectSeq :: BareSeq -> BareSeq -> BareSeq
+intersectSeq leftSeq rightSeq = case (leftSeq, rightSeq) of
+  (NoSeq, _) -> NoSeq
+  (_, NoSeq) -> NoSeq
+  -- meet extends to all positions (longer length), common positions intersected.
+  (Tuple leftElements, Tuple rightElements) -> Tuple (intersectTupleElements leftElements rightElements)
+  (Array leftElement, Array rightElement) -> Array (intersectNT leftElement rightElement)
+  -- a tuple ∩ array keeps the tuple, each position intersected with the element.
+  (Tuple elements, Array element) -> Tuple (map (`intersectNT` element) elements)
+  (Array element, Tuple elements) -> Tuple (map (intersectNT element) elements)
+
+-- | Per-position intersection of two tuples: common positions intersected,
+-- trailing positions of the longer tuple kept (max length).
+intersectTupleElements :: [NormalizedType] -> [NormalizedType] -> [NormalizedType]
+intersectTupleElements leftElements rightElements = case (leftElements, rightElements) of
+  ([], rest) -> rest
+  (rest, []) -> rest
+  (left : leftRest, right : rightRest) ->
+    intersectNT left right : intersectTupleElements leftRest rightRest
 
 -- | Intersection of function slots.
 --
@@ -682,31 +674,23 @@ intersectFunctionShape leftShape rightShape =
           optional = leftParameter.optional || rightParameter.optional
         }
 
-intersectTupleLayer ::
-  Map Int [NormalizedType] ->
-  Map Int [NormalizedType] ->
-  Map Int [NormalizedType]
-intersectTupleLayer = Map.intersectionWith (zipWith intersectNT)
+-- | Intersection (meet) of map layers. Data names are intersected; 'bare'
+-- parts meet via 'intersectBareObj'.
+intersectMap :: MapSlot -> MapSlot -> MapSlot
+intersectMap (MapSlot leftData leftBare) (MapSlot rightData rightBare) =
+  MapSlot (Map.intersectionWith const leftData rightData) (intersectBareObj leftBare rightBare)
 
-intersectObjectSlot :: ObjectSlot -> ObjectSlot -> ObjectSlot
-intersectObjectSlot leftSlot rightSlot = case (leftSlot, rightSlot) of
-  (ObjectSlotAbsent, _) -> ObjectSlotAbsent
-  (_, ObjectSlotAbsent) -> ObjectSlotAbsent
-  (ObjectSlotOf leftFields, ObjectSlotOf rightFields) ->
-    -- Intersection: all fields, common ones intersected.
-    let commonFields = Map.intersectionWith intersectNT leftFields rightFields
-        leftOnlyFields = Map.difference leftFields rightFields
-        rightOnlyFields = Map.difference rightFields leftFields
-     in ObjectSlotOf (Map.unions [commonFields, leftOnlyFields, rightOnlyFields])
-
--- | Intersection of record slots. Keys are implicitly @string@;
--- values are intersected pointwise.
-intersectRecordSlot :: RecordSlot -> RecordSlot -> RecordSlot
-intersectRecordSlot leftSlot rightSlot = case (leftSlot, rightSlot) of
-  (RecordSlotAbsent, _) -> RecordSlotAbsent
-  (_, RecordSlotAbsent) -> RecordSlotAbsent
-  (RecordSlotOf leftValue, RecordSlotOf rightValue) ->
-    RecordSlotOf (intersectNT leftValue rightValue)
+intersectBareObj :: BareObj -> BareObj -> BareObj
+intersectBareObj leftBare rightBare = case (leftBare, rightBare) of
+  (NoObj, _) -> NoObj
+  (_, NoObj) -> NoObj
+  -- meet: union of labels, common intersected, single-side kept.
+  (ClosedObj leftFields, ClosedObj rightFields) ->
+    ClosedObj (Map.unionWith intersectNT leftFields rightFields)
+  (RecordObj leftValue, RecordObj rightValue) -> RecordObj (intersectNT leftValue rightValue)
+  -- record ∩ closed object: keep the object, each field intersected with V.
+  (ClosedObj fields, RecordObj value) -> ClosedObj (Map.map (`intersectNT` value) fields)
+  (RecordObj value, ClosedObj fields) -> ClosedObj (Map.map (intersectNT value) fields)
 
 -- ---------------------------------------------------------------------------
 -- Subtype check
@@ -731,11 +715,8 @@ subtypeLayered leftLayered rightLayered =
     && (not leftLayered.secretLayer || rightLayered.secretLayer)
     && (not leftLayered.fileLayer || rightLayered.fileLayer)
     && subtypeFunctionLayer leftLayered.functionLayer rightLayered.functionLayer
-    && subtypeArraySlot leftLayered.arrayLayer rightLayered.arrayLayer
-    && subtypeTupleLayer leftLayered.tupleLayer rightLayered.tupleLayer
-    && Set.isSubsetOf leftLayered.dataLayer rightLayered.dataLayer
-    && subtypeObjectSlot leftLayered.objectLayer rightLayered.objectLayer
-    && subtypeRecordSlot leftLayered.recordLayer rightLayered.recordLayer
+    && subtypeSeq leftLayered.seqLayer rightLayered.seqLayer
+    && subtypeMap leftLayered.mapLayer rightLayered.mapLayer
 
 subtypeNumberSlot :: NumberSlot -> NumberSlot -> Bool
 subtypeNumberSlot leftSlot rightSlot = case (leftSlot, rightSlot) of
@@ -756,12 +737,21 @@ subtypeStringSlot leftSlot rightSlot = case (leftSlot, rightSlot) of
   (StringSlotLiterals leftLiterals, StringSlotLiterals rightLiterals) ->
     Set.isSubsetOf leftLiterals rightLiterals
 
-subtypeArraySlot :: ArraySlot -> ArraySlot -> Bool
-subtypeArraySlot leftSlot rightSlot = case (leftSlot, rightSlot) of
-  (ArraySlotAbsent, _) -> True
-  (_, ArraySlotAbsent) -> False
-  (ArraySlotOf leftElement, ArraySlotOf rightElement) ->
-    subtypeNormalizedType leftElement rightElement -- covariant
+-- | @left <: right@ on the sequence layer. A tuple is a subtype of an array
+-- whose element type covers all positions (@tuple[T…] <: array[⋃T]@); an
+-- array is never a subtype of a tuple (variable length ⊄ fixed length).
+subtypeSeq :: BareSeq -> BareSeq -> Bool
+subtypeSeq leftSeq rightSeq = case (leftSeq, rightSeq) of
+  (NoSeq, _) -> True
+  (_, NoSeq) -> False
+  -- width subtyping: a longer tuple refines a shorter prefix.
+  (Tuple leftElements, Tuple rightElements) ->
+    length leftElements >= length rightElements
+      && and (zipWith subtypeNormalizedType leftElements rightElements)
+  (Tuple leftElements, Array rightElement) ->
+    all (`subtypeNormalizedType` rightElement) leftElements
+  (Array _, Tuple _) -> False
+  (Array leftElement, Array rightElement) -> subtypeNormalizedType leftElement rightElement
 
 subtypeFunctionLayer :: FunctionSlot -> FunctionSlot -> Bool
 subtypeFunctionLayer leftSlot rightSlot = case (leftSlot, rightSlot) of
@@ -804,39 +794,37 @@ subtypeFunctionShape leftShape rightShape =
         subtypeNormalizedType rightParameter.parameterType leftParameter.parameterType -- contravariant
       Nothing -> True -- optional left label absent on the right
 
-subtypeTupleLayer ::
-  Map Int [NormalizedType] ->
-  Map Int [NormalizedType] ->
-  Bool
-subtypeTupleLayer leftShapes rightShapes = all checkArity (Map.toList leftShapes)
-  where
-    checkArity (arity, leftElements) = case Map.lookup arity rightShapes of
-      Just rightElements ->
-        length leftElements == length rightElements
-          && and (zipWith subtypeNormalizedType leftElements rightElements)
-      Nothing -> False
+-- | @left <: right@ on the map layer.
+--
+-- Data names: every left data name must appear on the right
+-- (@dsL ⊆ dsR@). The @data <: object@ (rule ii) edge — a data usable where
+-- its object view is expected — is deferred to #48 (it needs the data's
+-- concrete fields, currently empty); until then a data only matches a data
+-- by name, which is sound (over-strict).
+--
+-- Structural part: object width subtyping, plus @object <: record@ (every
+-- field value <: the record value type). A record is never a subtype of a
+-- closed object.
+subtypeMap :: MapSlot -> MapSlot -> Bool
+subtypeMap (MapSlot leftData leftBare) (MapSlot rightData rightBare) =
+  Map.keysSet leftData `Set.isSubsetOf` Map.keysSet rightData
+    && subtypeBareObj leftBare rightBare
 
-subtypeObjectSlot :: ObjectSlot -> ObjectSlot -> Bool
-subtypeObjectSlot leftSlot rightSlot = case (leftSlot, rightSlot) of
-  (ObjectSlotAbsent, _) -> True
-  (_, ObjectSlotAbsent) -> False
-  (ObjectSlotOf leftFields, ObjectSlotOf rightFields) ->
-    -- left <: right: every required field of right is in left with compatible
-    -- type. (Width subtyping: left may have extra fields.)
+subtypeBareObj :: BareObj -> BareObj -> Bool
+subtypeBareObj leftBare rightBare = case (leftBare, rightBare) of
+  (NoObj, _) -> True
+  (_, NoObj) -> False
+  (ClosedObj leftFields, ClosedObj rightFields) ->
+    -- left <: right: every field of right is in left with a compatible type
+    -- (width: left may have extra fields).
     all (checkField leftFields) (Map.toList rightFields)
+  (ClosedObj leftFields, RecordObj rightValue) ->
+    -- object <: record: every field value <: the record's value type.
+    all (`subtypeNormalizedType` rightValue) (Map.elems leftFields)
+  (RecordObj _, ClosedObj _) -> False
+  (RecordObj leftValue, RecordObj rightValue) -> subtypeNormalizedType leftValue rightValue
   where
     checkField leftFields (fieldName, rightFieldType) =
       case Map.lookup fieldName leftFields of
         Just leftFieldType -> subtypeNormalizedType leftFieldType rightFieldType
         Nothing -> False
-
--- | @record[K1, V1] <: record[K2, V2]@ iff @K1@ and @K2@ are
--- mutually-subtype (invariant on keys, since the key set is
--- @V1 <: V2@ (covariant on values; the key type is implicitly
--- @string@ on both sides so there is nothing to compare for keys).
-subtypeRecordSlot :: RecordSlot -> RecordSlot -> Bool
-subtypeRecordSlot leftSlot rightSlot = case (leftSlot, rightSlot) of
-  (RecordSlotAbsent, _) -> True
-  (_, RecordSlotAbsent) -> False
-  (RecordSlotOf leftValue, RecordSlotOf rightValue) ->
-    subtypeNormalizedType leftValue rightValue

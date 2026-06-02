@@ -30,17 +30,19 @@ import Katari.Typechecker.Identifier
   )
 import Katari.Typechecker.Identifier qualified as Identifier
 import Katari.Typechecker.NormalizedType
-  ( ArraySlot (..),
+  ( BareObj (..),
+    BareSeq (..),
     FunctionShape (..),
     NormalizedParameter (..),
     FunctionSlot (..),
     LayeredType (..),
+    MapSlot (..),
     NormalizedType (..),
     NumberSlot (..),
-    ObjectSlot (..),
     StringSlot (..),
     denormalise,
     emptyLayered,
+    emptyMapSlot,
   )
 import Katari.Typechecker.Solver (SolverResult (..))
 import Katari.Typechecker.Zonker (ZonkError (..))
@@ -229,19 +231,22 @@ denormaliseUnit = describe "denormalise" $ do
       `shouldBe` SemanticTypeUnion [SemanticTypeInteger, SemanticTypeString]
 
   it "array of integer" $
-    denormalise (NormalizedTypeLayered emptyLayered {arrayLayer = ArraySlotOf (NormalizedTypeLayered emptyLayered {numberLayer = NumberSlotInteger})})
+    denormalise (NormalizedTypeLayered emptyLayered {seqLayer = Array (NormalizedTypeLayered emptyLayered {numberLayer = NumberSlotInteger})})
       `shouldBe` SemanticTypeArray SemanticTypeInteger
 
   it "object with one field" $
     denormalise
       ( NormalizedTypeLayered
           emptyLayered
-            { objectLayer =
-                ObjectSlotOf
-                  ( Map.singleton
-                      "x"
-                      (NormalizedTypeLayered emptyLayered {numberLayer = NumberSlotInteger})
-                  )
+            { mapLayer =
+                emptyMapSlot
+                  { bare =
+                      ClosedObj
+                        ( Map.singleton
+                            "x"
+                            (NormalizedTypeLayered emptyLayered {numberLayer = NumberSlotInteger})
+                        )
+                  }
             }
       )
       `shouldBe` SemanticTypeObject (Map.singleton "x" SemanticTypeInteger)
