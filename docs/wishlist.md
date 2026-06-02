@@ -10,11 +10,14 @@ release · **[later]** post-v0.1.0 · **[deferred]** acknowledged, no owner yet.
 
 ## Language
 
-- [ ] **[blocking] First-class lists / arrays.** stdlib only has `array_get` /
-      `array_length`; there is no `append` / `concat` / `map` / `filter`, and
-      `++` is string-only. You can't grow an ordered collection as a Katari
-      value, so a conversation history (discord_bot) has to live in the sidecar
-      instead of in the language. This is the single biggest gap.
+- [x] **First-class arrays (done).** The `array.*` module now has
+      `get` / `length` / `empty` / `of` / `append` / `concat` / `slice` /
+      `reverse` / `contains` / `index_of`, plus `string.*` and `math.*`. You can
+      grow an ordered collection as a Katari value (build a list with a `for`
+      loop + `array.append`). `map` / `filter` / `reduce` are **deferred on
+      purpose**: prims run ~synchronously, so a slow agent callback doesn't fit
+      the prim model — and `for … next with … array.append` already expresses
+      them. Revisit if a real higher-order need appears (would also want generics).
 - [ ] **[v0.1.0] Default / optional arguments.** Every parameter is required and
       labelled. A config-heavy API (an AI call with temperature / system /
       max_tokens / …) forces every call site to pass everything, and adding a
