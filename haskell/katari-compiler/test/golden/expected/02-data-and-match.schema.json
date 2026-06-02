@@ -1610,7 +1610,7 @@
     "requests": []
   },
   {
-    "description": "The empty array.",
+    "description": "The empty array. Its element type is `never` (the empty array has no elements), which is a subtype of every `array[T]`, so it can seed a typed accumulator: `var history = array.empty()` grown with `array.append`.",
     "input": {
       "additionalProperties": false,
       "properties": {},
@@ -1619,7 +1619,9 @@
     },
     "name": "primitive.array.empty",
     "output": {
-      "items": {},
+      "items": {
+        "not": {}
+      },
       "type": "array"
     },
     "requests": []

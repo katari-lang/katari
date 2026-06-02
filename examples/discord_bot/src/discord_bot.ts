@@ -1,9 +1,9 @@
 // Ext (sidecar) implementation for discord_bot.ktr.
 //
 // Two thin primitive groups:
-//   - AI:      `create_session` / `ai_infer` — one conversation turn against the
-//              provider, with the message history held here in the sidecar (the
-//              language has no list-append yet, so it can't carry the history).
+//   - AI:      `ai_infer` — one turn against the provider. The conversation
+//              history is a Katari value (an `array[turn]`) passed in, so the
+//              ext is stateless — no session is held in the sidecar.
 //   - Discord: `create_discord_client` / `discord_watch` / `discord_send` — a
 //              live gateway connection kept in the sidecar; `discord_watch`
 //              delegates a callback agent for each human message. (The ktr wraps
@@ -30,66 +30,65 @@ type GeminiPart =
 /** One turn in a conversation, in Gemini's `contents` shape. */
 type Turn = { role: "user" | "model"; parts: GeminiPart[] };
 
-/** Conversation histories, keyed by session id. Lost on sidecar restart
- *  (acceptable for the example; durable history needs language-side lists). */
-const sessions = new Map<string, Turn[]>();
-
-katari.agent("create_session", async () => {
-  const id = crypto.randomUUID();
-  sessions.set(id, []);
-  return id;
-});
-
 type AiClient = {
   provider: string;
   model: string;
   api_key: Secret;
 };
 
-katari.agent<{ client: AiClient; session: KatariString; prompt: KatariString }>(
-  "ai_infer",
-  async (ctx) => {
-    const { args } = ctx;
-    const { client } = args;
+/** A `data turn(role, text)` value as it arrives from Katari. Either field may
+ *  be a content ref if the runtime promoted a large string. */
+type KatariTurn = { role: KatariString; text: KatariString };
 
-    const session = await ctx.readString(args.session);
-    const prompt = await ctx.readString(args.prompt);
+/** Format a Katari conversation history (an `array[turn]`) into Gemini `contents`. */
+async function historyToContents(
+  readString: (value: KatariString) => Promise<string>,
+  history: RawValue,
+): Promise<Turn[]> {
+  if (!Array.isArray(history)) {
+    throw new Error("ai_infer: history must be an array of turns");
+  }
+  const contents: Turn[] = [];
+  for (const raw of history) {
+    const t = raw as KatariTurn;
+    const role = (await readString(t.role)) === "model" ? "model" : "user";
+    contents.push({ role, parts: [{ text: await readString(t.text) }] });
+  }
+  return contents;
+}
 
-    if (client.provider !== "gemini") {
-      throw new Error(`ai_infer: unsupported provider '${client.provider}' (only 'gemini')`);
-    }
-    const apiKey = client.api_key?.$secret;
-    if (typeof apiKey !== "string" || apiKey === "") {
-      throw new Error("ai_infer: missing api key (expected ai_client.api_key as a secret)");
-    }
+/** generateContent URL + key for an ai_client (gemini only; validates the key). */
+function geminiEndpoint(client: AiClient): string {
+  if (client.provider !== "gemini") {
+    throw new Error(`unsupported provider '${client.provider}' (only 'gemini')`);
+  }
+  const apiKey = client.api_key?.$secret;
+  if (typeof apiKey !== "string" || apiKey === "") {
+    throw new Error("missing api key (expected ai_client.api_key as a secret)");
+  }
+  return (
+    `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(client.model)}` +
+    `:generateContent?key=${encodeURIComponent(apiKey)}`
+  );
+}
 
-    const history = sessions.get(session) ?? [];
-    history.push({ role: "user", parts: [{ text: prompt }] });
-
-    const url =
-      `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(client.model)}` +
-      `:generateContent?key=${encodeURIComponent(apiKey)}`;
-    const res = await fetch(url, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ contents: history }),
-    });
-    if (!res.ok) {
-      const detail = await res.text().catch(() => "");
-      throw new Error(`ai_infer: gemini ${res.status}: ${detail}`);
-    }
-    const data = (await res.json()) as {
-      candidates?: { content?: { parts?: { text?: string }[] } }[];
-    };
-    const reply = (data.candidates?.[0]?.content?.parts ?? [])
-      .map((part) => part.text ?? "")
-      .join("");
-
-    history.push({ role: "model", parts: [{ text: reply }] });
-    sessions.set(session, history);
-    return reply;
-  },
-);
+katari.agent<{ client: AiClient; history: RawValue }>("ai_infer", async (ctx) => {
+  const url = geminiEndpoint(ctx.args.client);
+  const contents = await historyToContents((v) => ctx.readString(v), ctx.args.history);
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ contents }),
+  });
+  if (!res.ok) {
+    const detail = await res.text().catch(() => "");
+    throw new Error(`ai_infer: gemini ${res.status}: ${detail}`);
+  }
+  const data = (await res.json()) as {
+    candidates?: { content?: { parts?: { text?: string }[] } }[];
+  };
+  return (data.candidates?.[0]?.content?.parts ?? []).map((part) => part.text ?? "").join("");
+});
 
 // ── Discord ───────────────────────────────────────────────────────────────
 
@@ -235,16 +234,13 @@ function sanitizeSchemaForGemini(node: unknown): unknown {
 
 katari.agent<{
   client: AiClient;
-  session: KatariString;
-  prompt: KatariString;
+  history: RawValue;
   tool_name: KatariString;
   tool_description: KatariString;
   tool_input: KatariString;
   tool: KatariAgent;
 }>("infer_with_tools", async (ctx) => {
-  const { client } = ctx.args;
-  const session = await ctx.readString(ctx.args.session);
-  const prompt = await ctx.readString(ctx.args.prompt);
+  const url = geminiEndpoint(ctx.args.client);
 
   // v0: exactly one tool. v1 = build this list from `tools: array of agent`,
   // mapping get_metadata over each. The loop below is already list-shaped.
@@ -263,25 +259,16 @@ katari.agent<{
     parameters: t.parameters,
   }));
 
-  if (client.provider !== "gemini") {
-    throw new Error(`infer_with_tools: unsupported provider '${client.provider}' (only 'gemini')`);
-  }
-  const apiKey = client.api_key?.$secret;
-  if (typeof apiKey !== "string" || apiKey === "") {
-    throw new Error("infer_with_tools: missing api key (expected ai_client.api_key as a secret)");
-  }
-  const url =
-    `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(client.model)}` +
-    `:generateContent?key=${encodeURIComponent(apiKey)}`;
-
-  const history = sessions.get(session) ?? [];
-  history.push({ role: "user", parts: [{ text: prompt }] });
+  // The conversation so far (its last turn is the user's task). The tool-call /
+  // tool-response turns appended in the loop are local to this call — only the
+  // final answer flows back; Katari owns the persisted history.
+  const contents = await historyToContents((v) => ctx.readString(v), ctx.args.history);
 
   for (let step = 0; step < GEMINI_TOOL_MAX_STEPS; step++) {
     const res = await fetch(url, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ contents: history, tools: [{ functionDeclarations }] }),
+      body: JSON.stringify({ contents, tools: [{ functionDeclarations }] }),
     });
     if (!res.ok) {
       const detail = await res.text().catch(() => "");
@@ -295,14 +282,11 @@ katari.agent<{
     const calls = parts.flatMap((p) => ("functionCall" in p ? [p.functionCall] : []));
 
     if (calls.length === 0) {
-      const text = parts.flatMap((p) => ("text" in p ? [p.text] : [])).join("");
-      if (content) history.push(content);
-      sessions.set(session, history);
-      return text;
+      return parts.flatMap((p) => ("text" in p ? [p.text] : [])).join("");
     }
 
     // Record the model's tool-call turn, run each tool, feed the results back.
-    if (content) history.push(content);
+    if (content) contents.push(content);
     const responseParts: GeminiPart[] = [];
     for (const call of calls) {
       const spec = byName.get(call.name);
@@ -315,8 +299,7 @@ katari.agent<{
       }
       responseParts.push({ functionResponse: { name: call.name, response: { result } } });
     }
-    history.push({ role: "user", parts: responseParts });
-    sessions.set(session, history);
+    contents.push({ role: "user", parts: responseParts });
   }
 
   return `(stopped: the model kept calling tools past ${GEMINI_TOOL_MAX_STEPS} steps)`;

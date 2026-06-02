@@ -1812,11 +1812,11 @@
     },
     "88": {
       "body": {
-        "description": "The empty array.",
+        "description": "The empty array. Its element type is `never` (the empty array has no elements), which is a subtype of every `array[T]`, so it can seed a typed accumulator: `var history = array.empty()` grown with `array.append`.",
         "entryBody": 89,
         "inputSchema": "{\"additionalProperties\":false,\"properties\":{},\"required\":[],\"type\":\"object\"}",
         "name": "empty",
-        "outputSchema": "{\"items\":{},\"type\":\"array\"}",
+        "outputSchema": "{\"items\":{\"not\":{}},\"type\":\"array\"}",
         "parameters": [],
         "qualifiedName": "primitive.array.empty"
       },
