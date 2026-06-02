@@ -28,7 +28,8 @@ import Katari.Typechecker.ConstraintGenerator
     ConstraintReason,
   )
 import Katari.Typechecker.NormalizedType
-  ( normaliseSemantic,
+  ( DataFieldEnv,
+    normaliseSemantic,
     subtypeNormalizedType,
   )
 import Katari.Typechecker.Solver.Internal
@@ -49,21 +50,23 @@ import Katari.Typechecker.Solver.Internal
 -- Returns 'Left' on a hard contradiction (concrete-vs-concrete subtype
 -- failure or structural mismatch).
 decomposeConstraint ::
+  DataFieldEnv ->
   Constraint ->
   Either SolverError (Set Constraint)
-decomposeConstraint constraint = case constraint of
+decomposeConstraint env constraint = case constraint of
   -- Request constraints are handled separately; pass through.
   RequestConstraint {} -> Right (Set.singleton constraint)
   TypeConstraint leftType rightType reason ->
-    decomposeType constraint leftType rightType reason
+    decomposeType env constraint leftType rightType reason
 
 decomposeType ::
+  DataFieldEnv ->
   Constraint ->
   SemanticType Unresolved ->
   SemanticType Unresolved ->
   ConstraintReason ->
   Either SolverError (Set Constraint)
-decomposeType original leftType rightType reason = case (leftType, rightType) of
+decomposeType env original leftType rightType reason = case (leftType, rightType) of
   -- Trivial cases
   _ | leftType == rightType -> settled
   (SemanticTypeNever, _) -> settled
@@ -78,7 +81,7 @@ decomposeType original leftType rightType reason = case (leftType, rightType) of
   _
     | Just leftConcrete <- semanticToConcrete leftType,
       Just rightConcrete <- semanticToConcrete rightType ->
-        if subtypeNormalizedType (normaliseSemantic leftConcrete) (normaliseSemantic rightConcrete)
+        if subtypeNormalizedType env (normaliseSemantic leftConcrete) (normaliseSemantic rightConcrete)
           then settled
           else Left (SolverErrorContradiction reason leftConcrete rightConcrete)
   -- Structural decomposition.
@@ -245,12 +248,13 @@ decomposeObject leftFields rightFields reason =
 -- sub-constraints), then re-runs until a fixpoint is reached. On any
 -- 'Left', short-circuit and propagate the error.
 decomposeConstraintsAll ::
+  DataFieldEnv ->
   Set Constraint ->
   Either SolverError (Set Constraint)
-decomposeConstraintsAll = go
+decomposeConstraintsAll env = go
   where
     go constraints = do
-      stepped <- traverse decomposeConstraint (Set.toList constraints)
+      stepped <- traverse (decomposeConstraint env) (Set.toList constraints)
       let next = Set.unions stepped
       if next == constraints
         then pure constraints

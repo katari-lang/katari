@@ -34,6 +34,8 @@ module Katari.Typechecker.NormalizedType
     FunctionSlot (..),
     FunctionShape (..),
     NormalizedParameter (..),
+    DataFieldEnv,
+    buildDataFieldEnv,
 
     -- * Helpers
     emptyLayered,
@@ -172,16 +174,16 @@ data BareObj
 
 -- | Map layer — object, record and @data@ merged into one layer.
 --
---   * 'dataFields' lists the @data@ type names inhabiting this type, each
---     mapped to its concrete declared fields (stored **inline** so subtyping
---     can compare a data's object view without an external env — the fields
---     are filled when a @SemanticTypeData@ is normalized). Forms the
---     discriminated-union part.
+--   * 'dataNames' is the set of @data@ type names inhabiting this type (the
+--     discriminated-union part). Only the /name/ is stored — a data's
+--     concrete fields are looked up on demand from an external env during
+--     subtyping (the @data <: object@ rule), which keeps the normalized form
+--     finite even for recursive @data@ (e.g. @data tree(left: tree)@) and
+--     keeps union / intersect env-free.
 --   * 'bare' is the structural part ('BareObj'). Data names are kept separate
---     from 'bare' (not absorbed into a record), which keeps union / intersect
---     env-free.
+--     from 'bare' (not absorbed into a record).
 data MapSlot = MapSlot
-  { dataFields :: Map QualifiedName (Map Text NormalizedType),
+  { dataNames :: Set QualifiedName,
     bare :: BareObj
   }
   deriving (Eq, Show)
@@ -242,7 +244,7 @@ emptyLayered =
 
 -- | The empty map slot: no @data@ names, no structural object.
 emptyMapSlot :: MapSlot
-emptyMapSlot = MapSlot {dataFields = Map.empty, bare = NoObj}
+emptyMapSlot = MapSlot {dataNames = Set.empty, bare = NoObj}
 
 -- ---------------------------------------------------------------------------
 -- Denormalisation: NormalizedType -> SemanticType Resolved
@@ -331,8 +333,8 @@ seqBranches = \case
   Array elementType -> [SemanticTypeArray (denormalise elementType)]
 
 mapBranches :: MapSlot -> [SemanticType Resolved]
-mapBranches MapSlot {dataFields, bare} =
-  [SemanticTypeData qualifiedName | qualifiedName <- Map.keys dataFields]
+mapBranches MapSlot {dataNames, bare} =
+  [SemanticTypeData qualifiedName | qualifiedName <- Set.toList dataNames]
     ++ case bare of
       NoObj -> []
       ClosedObj fields -> [SemanticTypeObject (Map.map denormalise fields)]
@@ -387,7 +389,7 @@ isEmptyFunction = \case
   _ -> False
 
 isEmptyMap :: MapSlot -> Bool
-isEmptyMap (MapSlot dataFields bare) = Map.null dataFields && case bare of
+isEmptyMap (MapSlot dataNames bare) = Set.null dataNames && case bare of
   NoObj -> True
   _ -> False
 
@@ -435,7 +437,7 @@ normaliseSemantic = \case
   -- env so the @data <: object@ (rule ii) edge can fire. For now the fields
   -- are empty and a data only matches another data by name.
   SemanticTypeData typeId ->
-    NormalizedTypeLayered emptyLayered {mapLayer = emptyMapSlot {dataFields = Map.singleton typeId Map.empty}}
+    NormalizedTypeLayered emptyLayered {mapLayer = emptyMapSlot {dataNames = Set.singleton typeId}}
   SemanticTypeObject fields ->
     NormalizedTypeLayered
       emptyLayered
@@ -525,7 +527,7 @@ unionSeq leftSeq rightSeq = case (leftSeq, rightSeq) of
 -- 'bare' parts join via 'unionBareObj'.
 unionMap :: MapSlot -> MapSlot -> MapSlot
 unionMap (MapSlot leftData leftBare) (MapSlot rightData rightBare) =
-  MapSlot (Map.union leftData rightData) (unionBareObj leftBare rightBare)
+  MapSlot (Set.union leftData rightData) (unionBareObj leftBare rightBare)
 
 unionBareObj :: BareObj -> BareObj -> BareObj
 unionBareObj leftBare rightBare = case (leftBare, rightBare) of
@@ -678,7 +680,7 @@ intersectFunctionShape leftShape rightShape =
 -- parts meet via 'intersectBareObj'.
 intersectMap :: MapSlot -> MapSlot -> MapSlot
 intersectMap (MapSlot leftData leftBare) (MapSlot rightData rightBare) =
-  MapSlot (Map.intersectionWith const leftData rightData) (intersectBareObj leftBare rightBare)
+  MapSlot (Set.intersection leftData rightData) (intersectBareObj leftBare rightBare)
 
 intersectBareObj :: BareObj -> BareObj -> BareObj
 intersectBareObj leftBare rightBare = case (leftBare, rightBare) of
@@ -696,27 +698,114 @@ intersectBareObj leftBare rightBare = case (leftBare, rightBare) of
 -- Subtype check
 -- ---------------------------------------------------------------------------
 
--- | @subtypeNormalizedType leftType rightType@ holds when every value of @leftType@ is
--- also a value of @rightType@. Implemented as a per-layer check: each layer
--- slot of the left must be a subtype of the corresponding slot of the right.
-subtypeNormalizedType :: NormalizedType -> NormalizedType -> Bool
-subtypeNormalizedType leftType rightType = case (leftType, rightType) of
-  (_, NormalizedTypeUnknown) -> True
-  (NormalizedTypeUnknown, _) -> False
-  (NormalizedTypeLayered leftLayered, NormalizedTypeLayered rightLayered) ->
-    subtypeLayered leftLayered rightLayered
+-- | Read-only env mapping each @data@ type's qualified name to its
+-- normalized fields (an object view). Recursive @data@ references inside a
+-- field normalize to name-only map slots, so each entry is finite; the
+-- subtype check below stays well-founded because a recursive occurrence is
+-- compared by name (rule i) rather than re-expanded. Built once by the
+-- solver from the resolved constructor signatures.
+type DataFieldEnv = Map QualifiedName (Map Text NormalizedType)
 
-subtypeLayered :: LayeredType -> LayeredType -> Bool
-subtypeLayered leftLayered rightLayered =
-  subtypeNumberSlot leftLayered.numberLayer rightLayered.numberLayer
-    && subtypeStringSlot leftLayered.stringLayer rightLayered.stringLayer
-    && Set.isSubsetOf leftLayered.booleanLayer rightLayered.booleanLayer
-    && (not leftLayered.nullLayer || rightLayered.nullLayer)
-    && (not leftLayered.secretLayer || rightLayered.secretLayer)
-    && (not leftLayered.fileLayer || rightLayered.fileLayer)
-    && subtypeFunctionLayer leftLayered.functionLayer rightLayered.functionLayer
-    && subtypeSeq leftLayered.seqLayer rightLayered.seqLayer
-    && subtypeMap leftLayered.mapLayer rightLayered.mapLayer
+-- | Build a 'DataFieldEnv' from a resolved type environment. A @data@
+-- constructor is the unique entry whose qualified name equals its returned
+-- @data@ type's name (an ordinary agent returning a data value has a
+-- different name), so it is identified without a separate constructor table;
+-- its parameter types become that data type's normalized fields.
+buildDataFieldEnv :: Map QualifiedName (SemanticType Resolved) -> DataFieldEnv
+buildDataFieldEnv typeEnv =
+  Map.fromList
+    [ (dataQName, Map.map (normaliseSemantic . (.parameterType)) parameters)
+      | (constructorQName, SemanticTypeFunction parameters (SemanticTypeData dataQName) _) <- Map.toList typeEnv,
+        constructorQName == dataQName
+    ]
+
+-- | @subtypeNormalizedType env leftType rightType@ holds when every value of
+-- @leftType@ is also a value of @rightType@. A per-layer check; the @env@ is
+-- consulted only for the @data <: object@ edge. All the per-layer helpers are
+-- nested in 'go''s @where@ so they share @env@ implicitly.
+subtypeNormalizedType :: DataFieldEnv -> NormalizedType -> NormalizedType -> Bool
+subtypeNormalizedType env = go
+  where
+    go leftType rightType = case (leftType, rightType) of
+      (_, NormalizedTypeUnknown) -> True
+      (NormalizedTypeUnknown, _) -> False
+      (NormalizedTypeLayered leftLayered, NormalizedTypeLayered rightLayered) ->
+        subtypeLayered leftLayered rightLayered
+
+    subtypeLayered leftLayered rightLayered =
+      subtypeNumberSlot leftLayered.numberLayer rightLayered.numberLayer
+        && subtypeStringSlot leftLayered.stringLayer rightLayered.stringLayer
+        && Set.isSubsetOf leftLayered.booleanLayer rightLayered.booleanLayer
+        && (not leftLayered.nullLayer || rightLayered.nullLayer)
+        && (not leftLayered.secretLayer || rightLayered.secretLayer)
+        && (not leftLayered.fileLayer || rightLayered.fileLayer)
+        && subtypeFunctionLayer leftLayered.functionLayer rightLayered.functionLayer
+        && subtypeSeq leftLayered.seqLayer rightLayered.seqLayer
+        && subtypeMap leftLayered.mapLayer rightLayered.mapLayer
+
+    -- | Sequence layer. A tuple refines an array whose element covers all
+    -- positions; an array is never a subtype of a tuple. Width: a longer
+    -- tuple refines a shorter prefix.
+    subtypeSeq leftSeq rightSeq = case (leftSeq, rightSeq) of
+      (NoSeq, _) -> True
+      (_, NoSeq) -> False
+      (Tuple leftElements, Tuple rightElements) ->
+        length leftElements >= length rightElements
+          && and (zipWith go leftElements rightElements)
+      (Tuple leftElements, Array rightElement) ->
+        all (`go` rightElement) leftElements
+      (Array _, Tuple _) -> False
+      (Array leftElement, Array rightElement) -> go leftElement rightElement
+
+    -- | Map layer. Each left @data@ either appears on the right (rule i) or
+    -- its object view is a subtype of the right's structural part (rule ii,
+    -- @data <: object@ — consulting 'env'). Object width subtyping plus
+    -- @object <: record@; a record is never a subtype of a closed object.
+    subtypeMap (MapSlot leftData leftBare) (MapSlot rightData rightBare) =
+      all dataMatches (Set.toList leftData) && subtypeBareObj leftBare rightBare
+      where
+        dataMatches qualifiedName =
+          Set.member qualifiedName rightData
+            || subtypeBareObj (ClosedObj (dataObjectView qualifiedName)) rightBare
+        dataObjectView qualifiedName = Map.findWithDefault Map.empty qualifiedName env
+
+    subtypeBareObj leftBare rightBare = case (leftBare, rightBare) of
+      (NoObj, _) -> True
+      (_, NoObj) -> False
+      (ClosedObj leftFields, ClosedObj rightFields) ->
+        -- width: every field of right is in left with a compatible type.
+        all (checkField leftFields) (Map.toList rightFields)
+      (ClosedObj leftFields, RecordObj rightValue) ->
+        all (`go` rightValue) (Map.elems leftFields)
+      (RecordObj _, ClosedObj _) -> False
+      (RecordObj leftValue, RecordObj rightValue) -> go leftValue rightValue
+      where
+        checkField leftFields (fieldName, rightFieldType) =
+          case Map.lookup fieldName leftFields of
+            Just leftFieldType -> go leftFieldType rightFieldType
+            Nothing -> False
+
+    subtypeFunctionLayer leftSlot rightSlot = case (leftSlot, rightSlot) of
+      (FunctionSlotAbsent, _) -> True
+      (_, FunctionSlotAbsent) -> False
+      (_, FunctionSlotAny) -> True
+      (FunctionSlotAny, FunctionSlotOf _) -> False
+      (FunctionSlotOf leftShape, FunctionSlotOf rightShape) ->
+        subtypeFunctionShape leftShape rightShape
+
+    -- Contravariant params (required-label subset, optional left labels may be
+    -- omitted on the right), covariant return, covariant request set.
+    subtypeFunctionShape leftShape rightShape =
+      Set.fromList requiredLeftLabels `Set.isSubsetOf` Map.keysSet rightShape.parameters
+        && all checkParameter (Map.toList leftShape.parameters)
+        && go leftShape.returnType rightShape.returnType
+        && Set.isSubsetOf leftShape.requests rightShape.requests
+      where
+        requiredLeftLabels =
+          [label | (label, parameter) <- Map.toList leftShape.parameters, not parameter.optional]
+        checkParameter (label, leftParameter) = case Map.lookup label rightShape.parameters of
+          Just rightParameter -> go rightParameter.parameterType leftParameter.parameterType
+          Nothing -> True
 
 subtypeNumberSlot :: NumberSlot -> NumberSlot -> Bool
 subtypeNumberSlot leftSlot rightSlot = case (leftSlot, rightSlot) of
@@ -736,95 +825,3 @@ subtypeStringSlot leftSlot rightSlot = case (leftSlot, rightSlot) of
   (StringSlotAny, _) -> False
   (StringSlotLiterals leftLiterals, StringSlotLiterals rightLiterals) ->
     Set.isSubsetOf leftLiterals rightLiterals
-
--- | @left <: right@ on the sequence layer. A tuple is a subtype of an array
--- whose element type covers all positions (@tuple[T…] <: array[⋃T]@); an
--- array is never a subtype of a tuple (variable length ⊄ fixed length).
-subtypeSeq :: BareSeq -> BareSeq -> Bool
-subtypeSeq leftSeq rightSeq = case (leftSeq, rightSeq) of
-  (NoSeq, _) -> True
-  (_, NoSeq) -> False
-  -- width subtyping: a longer tuple refines a shorter prefix.
-  (Tuple leftElements, Tuple rightElements) ->
-    length leftElements >= length rightElements
-      && and (zipWith subtypeNormalizedType leftElements rightElements)
-  (Tuple leftElements, Array rightElement) ->
-    all (`subtypeNormalizedType` rightElement) leftElements
-  (Array _, Tuple _) -> False
-  (Array leftElement, Array rightElement) -> subtypeNormalizedType leftElement rightElement
-
-subtypeFunctionLayer :: FunctionSlot -> FunctionSlot -> Bool
-subtypeFunctionLayer leftSlot rightSlot = case (leftSlot, rightSlot) of
-  (FunctionSlotAbsent, _) -> True
-  (_, FunctionSlotAbsent) -> False
-  -- 'function' is the function-lattice top: any function (shape or
-  -- top) flows in; nothing other than top flows out of top.
-  (_, FunctionSlotAny) -> True
-  (FunctionSlotAny, FunctionSlotOf _) -> False
-  (FunctionSlotOf leftShape, FunctionSlotOf rightShape) ->
-    subtypeFunctionShape leftShape rightShape
-
--- | @subtypeFunctionShape leftShape rightShape@ holds when every value of
--- @leftShape@ is also a value of @rightShape@.
---
--- Rule (matching the union/intersection semantics specified by Katari):
---
---   * Label set: @leftShape@'s /required/ labels must be a subset of
---     @rightShape@'s. Optional labels of @leftShape@ may be absent on the
---     right — a call site (the right side) is allowed to omit them, and an
---     agent value with extra optional params is usable where fewer are
---     expected. (A function with fewer required labels is "more general".)
---   * For each label common to both sides, the parameter type is
---     contravariant: @rightShape@'s parameter type must be a subtype of
---     @leftShape@'s.
---   * Return type is covariant.
---   * Request set is covariant (subset).
-subtypeFunctionShape :: FunctionShape -> FunctionShape -> Bool
-subtypeFunctionShape leftShape rightShape =
-  Set.fromList requiredLeftLabels `Set.isSubsetOf` Map.keysSet rightShape.parameters
-    && all checkParameter (Map.toList leftShape.parameters)
-    && subtypeNormalizedType leftShape.returnType rightShape.returnType
-    && Set.isSubsetOf leftShape.requests rightShape.requests
-  where
-    -- Optional left labels may be absent on the right (the call omits them).
-    requiredLeftLabels =
-      [label | (label, parameter) <- Map.toList leftShape.parameters, not parameter.optional]
-    checkParameter (label, leftParameter) = case Map.lookup label rightShape.parameters of
-      Just rightParameter ->
-        subtypeNormalizedType rightParameter.parameterType leftParameter.parameterType -- contravariant
-      Nothing -> True -- optional left label absent on the right
-
--- | @left <: right@ on the map layer.
---
--- Data names: every left data name must appear on the right
--- (@dsL ⊆ dsR@). The @data <: object@ (rule ii) edge — a data usable where
--- its object view is expected — is deferred to #48 (it needs the data's
--- concrete fields, currently empty); until then a data only matches a data
--- by name, which is sound (over-strict).
---
--- Structural part: object width subtyping, plus @object <: record@ (every
--- field value <: the record value type). A record is never a subtype of a
--- closed object.
-subtypeMap :: MapSlot -> MapSlot -> Bool
-subtypeMap (MapSlot leftData leftBare) (MapSlot rightData rightBare) =
-  Map.keysSet leftData `Set.isSubsetOf` Map.keysSet rightData
-    && subtypeBareObj leftBare rightBare
-
-subtypeBareObj :: BareObj -> BareObj -> Bool
-subtypeBareObj leftBare rightBare = case (leftBare, rightBare) of
-  (NoObj, _) -> True
-  (_, NoObj) -> False
-  (ClosedObj leftFields, ClosedObj rightFields) ->
-    -- left <: right: every field of right is in left with a compatible type
-    -- (width: left may have extra fields).
-    all (checkField leftFields) (Map.toList rightFields)
-  (ClosedObj leftFields, RecordObj rightValue) ->
-    -- object <: record: every field value <: the record's value type.
-    all (`subtypeNormalizedType` rightValue) (Map.elems leftFields)
-  (RecordObj _, ClosedObj _) -> False
-  (RecordObj leftValue, RecordObj rightValue) -> subtypeNormalizedType leftValue rightValue
-  where
-    checkField leftFields (fieldName, rightFieldType) =
-      case Map.lookup fieldName leftFields of
-        Just leftFieldType -> subtypeNormalizedType leftFieldType rightFieldType
-        Nothing -> False

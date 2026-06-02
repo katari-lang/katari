@@ -49,6 +49,7 @@ import Katari.Typechecker.Identifier
     VariableData (..),
   )
 import Katari.Typechecker.ModuleInterface (ModuleInterface (..), extractModuleInterface)
+import Katari.Typechecker.NormalizedType (buildDataFieldEnv)
 import Katari.Typechecker.Solver (solve)
 import Katari.Typechecker.Solver qualified as Solver
 import Katari.Typechecker.Zonker (ModuleZonkResult (..), zonk)
@@ -153,7 +154,10 @@ runOneSCC subject accum sccQNames =
           subject.knownRequests
           subject.primRules
       cgDiags = map CG.toDiagnostic cgErrors
-      (solverResult, solverErrors) = solve cgResult
+      -- Data <: object needs each data type's fields; the constructors
+      -- resolved in earlier SCCs are already in 'sccImportedTypes'.
+      dataFieldEnv = buildDataFieldEnv accum.sccImportedTypes
+      (solverResult, solverErrors) = solve dataFieldEnv cgResult
       solverDiags = map Solver.toDiagnostic solverErrors
       (zonkOut, zonkErrors) = zonk subject.ownVariables cgResult solverResult
       zonkDiags = map Zonker.toDiagnostic zonkErrors

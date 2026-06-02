@@ -80,7 +80,8 @@ import Katari.Typechecker.ConstraintGenerator
     VariableSupply (..),
   )
 import Katari.Typechecker.NormalizedType
-  ( NormalizedType (..),
+  ( DataFieldEnv,
+    NormalizedType (..),
     denormalise,
     normaliseSemantic,
   )
@@ -95,13 +96,14 @@ import Katari.Typechecker.Solver.Substitution qualified as Substitution
 -- Top-level entry
 -- ===========================================================================
 
-solve :: ConstraintGenResult -> (SolverResult, [SolverError])
-solve cgResult =
+solve :: DataFieldEnv -> ConstraintGenResult -> (SolverResult, [SolverError])
+solve dataFieldEnv cgResult =
   let allConstraints = cgResult.constraints
       typeConstraints = Set.filter isTypeConstraint allConstraints
       requestConstraints = Set.filter isRequestConstraint allConstraints
       (typeSubstitution_, typeErrors) =
         solveTypeWorklist
+          dataFieldEnv
           cgResult.variableSupply.typeVarSupply
           cgResult.variableSupply.requestVarSupply
           typeConstraints
@@ -172,17 +174,18 @@ initialSolveState tvSupply rvSupply =
 -- bound-aggregation pins; the caller then runs request resolution and
 -- totalisation.
 solveTypeWorklist ::
+  DataFieldEnv ->
   Int ->
   Int ->
   Set Constraint ->
   (Substitution, [SolverError])
-solveTypeWorklist tvSupply rvSupply initialConstraints =
-  case solveLoop (initialSolveState tvSupply rvSupply) initialConstraints of
+solveTypeWorklist dataFieldEnv tvSupply rvSupply initialConstraints =
+  case solveLoop dataFieldEnv (initialSolveState tvSupply rvSupply) initialConstraints of
     Left fatal -> (Map.empty, [fatal])
     Right finalState ->
       let propagated = Bounds.propagateBoundsViaGraph finalState.stGraph finalState.stBounds
-          boundsErrors = collectBoundsErrors propagated
-          boundsSubst = boundsMapToSubstitution propagated
+          boundsErrors = collectBoundsErrors dataFieldEnv propagated
+          boundsSubst = boundsMapToSubstitution dataFieldEnv propagated
           -- Shape-narrow pins override bound aggregation when both exist
           -- (= once a var is committed to a shape via branching, its
           -- bound entries are stale and the shape value wins).
@@ -197,15 +200,15 @@ solveTypeWorklist tvSupply rvSupply initialConstraints =
 -- | Drive the worklist to a converged state (= no more eager pins, no
 -- more branching opportunities). Branching at the end fans out into
 -- alternatives via 'tryBranches'.
-solveLoop :: SolveState -> Set Constraint -> Either SolverError SolveState
-solveLoop state worklist
+solveLoop :: DataFieldEnv -> SolveState -> Set Constraint -> Either SolverError SolveState
+solveLoop dataFieldEnv state worklist
   | Set.null worklist = Right state
   | otherwise = do
       let substituted = Set.map (Substitution.applySubstConstraint state.stSubst) worklist
-      decomposed <- Decompose.decomposeConstraintsAll substituted
+      decomposed <- Decompose.decomposeConstraintsAll dataFieldEnv substituted
       let (classified, leftover) = classifyAll decomposed state
-      case Bounds.findEagerPins classified.stBounds of
-        pins@(_ : _) -> solveLoop (applyEagerPins pins classified) decomposed
+      case Bounds.findEagerPins dataFieldEnv classified.stBounds of
+        pins@(_ : _) -> solveLoop dataFieldEnv (applyEagerPins pins classified) decomposed
         [] ->
           -- No direct eager pins yet. Var-graph propagation can carry
           -- concrete bounds across var-var edges; the newly merged
@@ -214,13 +217,13 @@ solveLoop state worklist
           -- transitively-inherited bounds against the pinned shape.
           let propagatedBounds = Bounds.propagateBoundsViaGraph classified.stGraph classified.stBounds
               afterPropagation = classified {stBounds = propagatedBounds}
-           in case Bounds.findEagerPins propagatedBounds of
-                pins@(_ : _) -> solveLoop (applyEagerPins pins afterPropagation) decomposed
+           in case Bounds.findEagerPins dataFieldEnv propagatedBounds of
+                pins@(_ : _) -> solveLoop dataFieldEnv (applyEagerPins pins afterPropagation) decomposed
                 [] -> case findBranchable
                   afterPropagation.stNextTypeVarId
                   afterPropagation.stNextRequestVarId
                   leftover of
-                  Just (chosen, alts) -> tryBranches afterPropagation chosen leftover alts
+                  Just (chosen, alts) -> tryBranches dataFieldEnv afterPropagation chosen leftover alts
                   Nothing -> Right afterPropagation
 
 -- | Apply a batch of eager-pin decisions: each pin is inserted into
@@ -245,18 +248,19 @@ applyEagerPins = flip (foldr applyOne)
 -- we surface the FIRST alt's error rather than a synthetic message.
 -- 'branchConstraint' guarantees the alts list is non-empty.
 tryBranches ::
+  DataFieldEnv ->
   SolveState ->
   Constraint ->
   Set Constraint ->
   [Branch.BranchAlt] ->
   Either SolverError SolveState
-tryBranches state chosen worklist (mainAlt : restAlts) =
-  case runBranchAlt state chosen worklist mainAlt of
+tryBranches dataFieldEnv state chosen worklist (mainAlt : restAlts) =
+  case runBranchAlt dataFieldEnv state chosen worklist mainAlt of
     Right done -> Right done
-    Left mainErr -> case firstSuccess (map (runBranchAlt state chosen worklist) restAlts) of
+    Left mainErr -> case firstSuccess (map (runBranchAlt dataFieldEnv state chosen worklist) restAlts) of
       Just done -> Right done
       Nothing -> Left mainErr
-tryBranches _ _ _ [] =
+tryBranches _ _ _ _ [] =
   -- Unreachable: 'Branch.branchConstraint' always returns ≥ 1 alt.
   error "Solver.tryBranches: empty alt list"
 
@@ -264,12 +268,13 @@ firstSuccess :: [Either e a] -> Maybe a
 firstSuccess = foldr (\r acc -> either (const acc) Just r) Nothing
 
 runBranchAlt ::
+  DataFieldEnv ->
   SolveState ->
   Constraint ->
   Set Constraint ->
   Branch.BranchAlt ->
   Either SolverError SolveState
-runBranchAlt state chosen worklist alt =
+runBranchAlt dataFieldEnv state chosen worklist alt =
   let combinedSubst = Map.union alt.branchSubst state.stSubst
       -- For each var pinned by this alt's substitution, translate its
       -- existing bounds into fresh subtype constraints against the
@@ -293,7 +298,7 @@ runBranchAlt state chosen worklist alt =
             stNextTypeVarId = alt.branchNextTypeVariableId,
             stNextRequestVarId = alt.branchNextRequestVariableId
           }
-   in solveLoop state' newWorklist
+   in solveLoop dataFieldEnv state' newWorklist
 
 -- | Find the first constraint in the worklist that can be branched
 -- (= var vs composite shape or var ⊑ var-bearing union). 'Set.toAscList'
@@ -403,19 +408,19 @@ boundsToConstraints α value bm = case Map.lookup α bm of
 -- | Pick the final 'NormalizedType' for each variable from its bounds,
 -- then re-encode as 'SemanticType' 'Unresolved' for the substitution
 -- composition with the shape-narrow pins.
-boundsMapToSubstitution :: BoundsMap -> Substitution
-boundsMapToSubstitution = Map.map ntToUnresolved . Bounds.finalizeBoundsToSubstitution
+boundsMapToSubstitution :: DataFieldEnv -> BoundsMap -> Substitution
+boundsMapToSubstitution dataFieldEnv = Map.map ntToUnresolved . Bounds.finalizeBoundsToSubstitution dataFieldEnv
 
 -- | Emit a 'SolverErrorBoundsConflict' for every var whose lower is
 -- not a subtype of its upper. The reasons are picked from the most
 -- recent contribution on each side; richer aggregation is a future UX
 -- improvement.
-collectBoundsErrors :: BoundsMap -> [SolverError]
-collectBoundsErrors =
+collectBoundsErrors :: DataFieldEnv -> BoundsMap -> [SolverError]
+collectBoundsErrors dataFieldEnv =
   mapMaybe diag . Map.toList
   where
     diag (a, vb)
-      | Bounds.isVarBoundsConsistent vb = Nothing
+      | Bounds.isVarBoundsConsistent dataFieldEnv vb = Nothing
       | otherwise = Just (mkBoundsConflictErrorWith a vb defaultReason)
 
 -- ---------------------------------------------------------------------------

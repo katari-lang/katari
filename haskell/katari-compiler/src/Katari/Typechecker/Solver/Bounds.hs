@@ -40,7 +40,8 @@ import Data.Set qualified as Set
 import Katari.SemanticType (TypeVariableId)
 import Katari.Typechecker.ConstraintGenerator (ConstraintReason)
 import Katari.Typechecker.NormalizedType
-  ( NormalizedType (..),
+  ( DataFieldEnv,
+    NormalizedType (..),
     emptyLayered,
     intersectNT,
     subtypeNormalizedType,
@@ -89,8 +90,8 @@ addUpperConcrete newUpper reason vb =
 -- both sides simultaneously) iff this returns 'False'. Callers use this
 -- for the per-variable consistency check both during incremental
 -- bound-adds and at the final substitution step.
-isVarBoundsConsistent :: VarBounds -> Bool
-isVarBoundsConsistent vb = subtypeNormalizedType vb.vbLower vb.vbUpper
+isVarBoundsConsistent :: DataFieldEnv -> VarBounds -> Bool
+isVarBoundsConsistent env vb = subtypeNormalizedType env vb.vbLower vb.vbUpper
 
 -- | Look up bounds, defaulting to 'emptyVarBounds' (= lower = never,
 -- upper = unknown) if the variable has no entry yet. Saves callers the
@@ -234,15 +235,15 @@ data EagerPin where
 --     'SolverErrorBoundsConflict'.
 --
 -- Variables with neither condition met stay in 'BoundsMap'.
-findEagerPins :: BoundsMap -> [EagerPin]
-findEagerPins bm =
+findEagerPins :: DataFieldEnv -> BoundsMap -> [EagerPin]
+findEagerPins env bm =
   [ pin
     | (a, vb) <- Map.toList bm,
       Just pin <- [tryPin a vb]
   ]
   where
     tryPin a vb
-      | not (isVarBoundsConsistent vb) =
+      | not (isVarBoundsConsistent env vb) =
           Just (EagerPin a NormalizedTypeUnknown True vb)
       | vb.vbLower == vb.vbUpper && not (isUnknownNT vb.vbLower) =
           Just (EagerPin a vb.vbLower False vb)
@@ -269,10 +270,10 @@ findEagerPins bm =
 --     bound. This makes downstream phases see "the var is bounded above
 --     by X" rather than "the var must be never".
 --   * Else: pin to lower.
-finalizeBoundsToSubstitution :: BoundsMap -> Map TypeVariableId NormalizedType
-finalizeBoundsToSubstitution = Map.map pick
+finalizeBoundsToSubstitution :: DataFieldEnv -> BoundsMap -> Map TypeVariableId NormalizedType
+finalizeBoundsToSubstitution env = Map.map pick
   where
     pick vb
-      | not (isVarBoundsConsistent vb) = NormalizedTypeUnknown
+      | not (isVarBoundsConsistent env vb) = NormalizedTypeUnknown
       | isNeverNT vb.vbLower = vb.vbUpper
       | otherwise = vb.vbLower

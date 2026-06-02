@@ -37,7 +37,7 @@ runExhaustive source = do
     [] -> case TestSupport.identifyWithStdlib (Map.singleton "main" parsed) of
       (idResult, []) -> do
         let (cgResult, _) = TestSupport.generateConstraintsAll idResult
-            (solverResult, _) = solve cgResult
+            (solverResult, _) = solve Map.empty cgResult
             (zonkResult, _) = zonkAll "main" idResult cgResult solverResult
             topLevels =
               Map.fromList

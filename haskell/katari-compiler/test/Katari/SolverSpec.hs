@@ -51,7 +51,7 @@ runSolve source =
         [] -> case TestSupport.identifyWithStdlib (Map.singleton "main" parsed) of
           (idResult, []) ->
             let (cgResult, _) = TestSupport.generateConstraintsAll idResult
-                (solverResult, solverErrors) = solve cgResult
+                (solverResult, solverErrors) = solve Map.empty cgResult
              in pure (idResult, cgResult, solverResult, solverErrors)
           (_, errors) -> fail ("identify failure: " ++ show errors)
 
