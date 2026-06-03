@@ -656,6 +656,10 @@ walkInitializer ::
   Expression Identified ->
   Check (Expression Zonked, [(VariableResolution, SemanticType Resolved)])
 walkInitializer name typeAnnotation initial = do
+  -- No widening: an unannotated initializer infers its exact (singleton)
+  -- type, like every other binding. A mutable @var@ that is reassigned with a
+  -- wider value must annotate its type (e.g. @var counter: integer = 1@) —
+  -- consistent with the "annotate the boundaries" rule.
   (initial', bindingType) <- case typeAnnotation of
     Just t -> do
       annotated <- elaborateType t
