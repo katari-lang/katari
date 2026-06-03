@@ -294,28 +294,28 @@ matchPatterns = describe "match patterns" $ do
 
   it "tuple pattern: component type variables flow from the concrete tuple subject" $ do
     -- At CG time the subject `p` is a type variable p_type with eq constraint
-    -- p_type = (integer, string). projectTupleSubjectTypes cannot statically
+    -- p_type = [integer, string]. projectTupleSubjectTypes cannot statically
     -- decompose a type variable, so we verify there are no type errors and
     -- that the overall result is well-formed (the e2e sample 10 covers the
     -- runtime behaviour more directly).
     (_, errors) <-
       runOne $
         mconcat
-          [ "agent foo(p: (integer, string)) -> integer {\n",
-            "  match (p) { case (a, b) => { 0 } }\n",
+          [ "agent foo(p: [integer, string]) -> integer {\n",
+            "  match (p) { case [a, b] => { 0 } }\n",
             "}"
           ]
     errors `shouldBe` []
 
   it "tuple pattern on union subject: only the tuple branch constraint, no type error" $ do
-    -- subject: (integer, string) | boolean. The tuple arm (a, b) should not
+    -- subject: [integer, string] | boolean. The tuple arm [a, b] should not
     -- produce a type error even though the boolean branch cannot be a tuple.
     (_, errors) <-
       runOne $
         mconcat
-          [ "agent foo(p: (integer, string) | boolean) {\n",
+          [ "agent foo(p: [integer, string] | boolean) {\n",
             "  match (p) {\n",
-            "    case (a, b) => { 0 }\n",
+            "    case [a, b] => { 0 }\n",
             "    case _ => { 1 }\n",
             "  }\n",
             "}"
@@ -845,7 +845,7 @@ implicitReturnReason = describe "ReasonKindImplicitReturn vs ReasonKindReturnSta
 -- type is a subtype of its more-general counterpart. Exercised end-to-end
 -- through 'compileOne' (so the solver actually resolves the edge), using only
 -- syntax that exists today: field access for `data <: object`, `record[T]`
--- for `data <: record`, and the `(a, b)` tuple syntax for `tuple <: array`.
+-- for `data <: record`, and the `[a, b]` tuple syntax for `tuple <: array`.
 -- ---------------------------------------------------------------------------
 
 crossShapeEdges :: Spec
@@ -890,20 +890,20 @@ crossShapeEdges = describe "cross-shape subtype edges" $ do
   it "tuple <: array: a tuple is usable as an array whose element covers all positions" $ do
     diags <-
       compileOne
-        "agent main(t: (integer, string)) -> array[integer | string] { t }"
+        "agent main(t: [integer, string]) -> array[integer | string] { t }"
     diags `shouldNotSatisfy` hasErrors
 
   it "tuple <: array: a position outside the array element type is rejected" $ do
     -- the string position is not <: integer.
     diags <-
       compileOne
-        "agent main(t: (integer, string)) -> array[integer] { t }"
+        "agent main(t: [integer, string]) -> array[integer] { t }"
     diags `shouldSatisfy` hasErrors
 
   it "array </: tuple: an array is not usable where a specific tuple is demanded" $ do
     diags <-
       compileOne
-        "agent main(t: array[integer]) -> (integer, integer) { t }"
+        "agent main(t: array[integer]) -> [integer, integer] { t }"
     diags `shouldSatisfy` hasErrors
 
 -- ---------------------------------------------------------------------------

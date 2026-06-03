@@ -666,8 +666,8 @@ dataAndCompositeTypes = describe "data and composite types" $ do
     (_, _, solverResult, solverErrors) <-
       runSolve $
         mconcat
-          [ "agent pair() -> (integer, string) {\n",
-            "  return (42, \"hi\")\n",
+          [ "agent pair() -> [integer, string] {\n",
+            "  return [42, \"hi\"]\n",
             "}"
           ]
     solverErrors `shouldBe` []
@@ -940,9 +940,9 @@ illTypedRejection = describe "ill-typed program rejection" $ do
     null solverErrors `shouldBe` False
 
   -- Tuple element type mismatch.
-  it "let p: (integer, string) = (\"flip\", 1) → error" $ do
+  it "let p: [integer, string] = [\"flip\", 1] → error" $ do
     (_, _, _, solverErrors) <-
-      runSolve "agent f() { let p: (integer, string) = (\"flip\", 1); p }"
+      runSolve "agent f() { let p: [integer, string] = [\"flip\", 1]; p }"
     null solverErrors `shouldBe` False
 
   -- Data constructor field type mismatch.
@@ -1163,10 +1163,10 @@ unionReturnBoundAggregation =
           mconcat
             [ "data ok(n: integer)\n",
               "data err(message: string)\n",
-              "agent describe_pair(t: (integer, string)) -> string {\n",
+              "agent describe_pair(t: [integer, string]) -> string {\n",
               "  match (t) {\n",
-              "    case (0, s) => { f\"zero with ${s}\" }\n",
-              "    case (n, s) => { f\"${to_string(value = n)} with ${s}\" }\n",
+              "    case [0, s] => { f\"zero with ${s}\" }\n",
+              "    case [n, s] => { f\"${to_string(value = n)} with ${s}\" }\n",
               "  }\n",
               "}\n",
               "agent maybe_fail(b: boolean) -> ok | err {\n",

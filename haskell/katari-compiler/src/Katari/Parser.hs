@@ -1314,55 +1314,35 @@ parsePrimaryExpression =
         parseParExpression,
         parseTemplateLiteral,
         parseLiteralExpression,
-        parseArrayExpression,
-        parseTupleOrGroupedExpression,
+        parseTupleExpression,
+        parseGroupedExpression,
         parseRecordLiteralExpression,
         parseBlockExpression,
         parseVariableExpression
       ]
 
--- | @par for (...)@ / @par (e, e)@ / @par [e, e]@ — parallel modifier.
--- Dispatches based on the token following @par@. The `for` branch needs
--- @try@ because it consumes the @par@ keyword before checking for @for@;
--- without backtracking the tuple / array forms become unreachable.
+-- | @par for (...)@ / @par [e, e]@ — parallel modifier. Dispatches based on
+-- the token following @par@. The `for` branch needs @try@ because it consumes
+-- the @par@ keyword before checking for @for@; without backtracking the tuple
+-- form becomes unreachable.
 parseParExpression :: Parser (Expression Parsed)
 parseParExpression = do
   _ <- MP.lookAhead (parseKeyword KeywordParallel)
   choice
     [ -- par for (...) { ... }
       try (parseForExpression True),
-      -- par (e1, e2, ...) — parallel tuple
-      parseParTupleExpression,
-      -- par [e1, e2, ...] — parallel array
-      parseParArrayExpression
+      -- par [e1, e2, ...] — parallel tuple
+      parseParTupleExpression
     ]
 
--- | @par (e1, e2, ...)@ — parallel tuple construction.
+-- | @par [e1, e2, ...]@ — parallel tuple construction.
 parseParTupleExpression :: Parser (Expression Parsed)
 parseParTupleExpression = parseWithSpan $ do
   parseKeyword KeywordParallel
-  parsePunctuation PunctuationLeftParenthesis
-  elements <- parseExpression `sepBy1` parsePunctuation PunctuationComma
-  parsePunctuation PunctuationRightParenthesis
+  elements <- parseBracketedList parseExpression
   pure $ \sourceSpan ->
     ExpressionParTuple
       ParTupleExpression
-        { elements = elements,
-          sourceSpan = sourceSpan,
-          typeOf = ()
-        }
-
--- | @par [e1, e2, ...]@ — parallel array construction.
-parseParArrayExpression :: Parser (Expression Parsed)
-parseParArrayExpression = parseWithSpan $ do
-  parseKeyword KeywordParallel
-  parsePunctuation PunctuationLeftBracket
-  elements <- parseExpression `sepBy` parsePunctuation PunctuationComma
-  _ <- optional (parsePunctuation PunctuationComma)
-  parsePunctuation PunctuationRightBracket
-  pure $ \sourceSpan ->
-    ExpressionParArray
-      ParArrayExpression
         { elements = elements,
           sourceSpan = sourceSpan,
           typeOf = ()
@@ -1401,33 +1381,29 @@ parseVariableExpression = parseWithSpan $ do
           typeOf = ()
         }
 
-parseArrayExpression :: Parser (Expression Parsed)
-parseArrayExpression = parseWithSpan $ do
+-- | @[e1, e2, ...]@ — a tuple literal. The bracket form is the surface syntax
+-- for the ordered seq layer; values infer as the precise 'SemanticTypeTuple'
+-- and widen to @array[T]@ on demand (tuple <: array).
+parseTupleExpression :: Parser (Expression Parsed)
+parseTupleExpression = parseWithSpan $ do
   elements <- parseBracketedList parseExpression
   pure $ \sourceSpan ->
-    ExpressionArray
-      ArrayExpression
+    ExpressionTuple
+      TupleExpression
         { elements = elements,
           sourceSpan = sourceSpan,
           typeOf = ()
         }
 
--- | @(e)@ collapses to @e@ (grouped expression). @(e1, e2, ...)@ is a tuple.
--- A grouped expression keeps its inner span, so we cannot use 'parseWithSpan' here.
-parseTupleOrGroupedExpression :: Parser (Expression Parsed)
-parseTupleOrGroupedExpression = parseWithSpan $ do
+-- | @(e)@ collapses to @e@ (grouped expression). Parentheses are grouping only;
+-- the tuple literal is the @[...]@ form. A grouped expression keeps its inner
+-- span, so we return the inner expression directly.
+parseGroupedExpression :: Parser (Expression Parsed)
+parseGroupedExpression = do
   parsePunctuation PunctuationLeftParenthesis
-  expressions <- parseExpression `sepEndBy` parseComma
+  inner <- parseExpression
   parsePunctuation PunctuationRightParenthesis
-  pure $ \sourceSpan -> case expressions of
-    [onlyExpression] -> onlyExpression
-    _ ->
-      ExpressionTuple
-        TupleExpression
-          { elements = expressions,
-            sourceSpan = sourceSpan,
-            typeOf = ()
-          }
+  pure inner
 
 parseBlockExpression :: Parser (Expression Parsed)
 parseBlockExpression = parseWithSpan $ do
@@ -1662,7 +1638,8 @@ parsePattern =
         try parseQualifiedConstructorPattern,
         parseVariablePattern,
         parseWildcardPattern,
-        parseTupleOrGroupedPattern,
+        parseTuplePattern,
+        parseGroupedPattern,
         parseLiteralPattern
       ]
 
@@ -1807,22 +1784,27 @@ parsePatternField = labeled <|> sugar
               }
         )
 
--- | @(p)@ collapses to @p@ (grouped pattern). @(p, q, ...)@ is a tuple.
--- A grouped pattern keeps its inner span, so we cannot use 'parseWithSpan' here.
-parseTupleOrGroupedPattern :: Parser (Pattern Parsed)
-parseTupleOrGroupedPattern = parseWithSpan $ do
+-- | @[p, q, ...]@ — a tuple pattern. Matches the ordered seq layer position by
+-- position; minimum-elements semantics means a longer subject still matches.
+parseTuplePattern :: Parser (Pattern Parsed)
+parseTuplePattern = parseWithSpan $ do
+  elements <- parseBracketedList parsePattern
+  pure $ \sourceSpan ->
+    PatternTuple
+      TuplePattern
+        { elements = elements,
+          sourceSpan = sourceSpan,
+          typeOf = ()
+        }
+
+-- | @(p)@ collapses to @p@ (grouped pattern). Parentheses are grouping only;
+-- the tuple pattern is the @[...]@ form. The inner pattern keeps its own span.
+parseGroupedPattern :: Parser (Pattern Parsed)
+parseGroupedPattern = do
   parsePunctuation PunctuationLeftParenthesis
-  patterns <- parsePattern `sepEndBy` parseComma
+  inner <- parsePattern
   parsePunctuation PunctuationRightParenthesis
-  pure $ \sourceSpan -> case patterns of
-    [onlyPattern] -> onlyPattern
-    _ ->
-      PatternTuple
-        TuplePattern
-          { elements = patterns,
-            sourceSpan = sourceSpan,
-            typeOf = ()
-          }
+  pure inner
 
 parseLiteralPattern :: Parser (Pattern Parsed)
 parseLiteralPattern = parseWithSpan $ do
@@ -1879,7 +1861,8 @@ parseAtomicType =
       try parseArrayType,
       try parseRecordType,
       parseObjectType,
-      parseTupleOrGroupedType,
+      parseTupleType,
+      parseGroupedType,
       parseNamedOrQualifiedType
     ]
 
@@ -2044,27 +2027,32 @@ parseObjectType = parseWithSpan $ do
 
 parseObjectTypeField :: Parser (Text, SyntacticType Parsed)
 parseObjectTypeField = do
-  label <- parseIdentifier
+  fieldLabel <- parseIdentifier
   parsePunctuation PunctuationColon
   fieldType <- parseType
-  pure (label, fieldType)
+  pure (fieldLabel, fieldType)
 
--- | @(T)@ collapses to @T@ (grouped type). @(A, B, ...)@ is a tuple.
--- @()@ is the empty tuple type. A single-element grouping keeps its inner
--- span, so we cannot use 'parseWithSpan' here.
-parseTupleOrGroupedType :: Parser (SyntacticType Parsed)
-parseTupleOrGroupedType = parseWithSpan $ do
+-- | @[A, B, ...]@ — a tuple type (the ordered seq layer named by minimum
+-- positions). @[]@ is the empty tuple type; @[T]@ a one-element tuple. The
+-- general homogeneous form stays @array[T]@.
+parseTupleType :: Parser (SyntacticType Parsed)
+parseTupleType = parseWithSpan $ do
+  elementTypes <- parseBracketedList parseType
+  pure $ \sourceSpan ->
+    TypeTuple
+      TupleTypeNode
+        { elementTypes = elementTypes,
+          sourceSpan = sourceSpan
+        }
+
+-- | @(T)@ collapses to @T@ (grouped type). Parentheses are grouping only; the
+-- tuple type is the @[...]@ form. The inner type keeps its own span.
+parseGroupedType :: Parser (SyntacticType Parsed)
+parseGroupedType = do
   parsePunctuation PunctuationLeftParenthesis
-  types <- parseType `sepEndBy` parseComma
+  inner <- parseType
   parsePunctuation PunctuationRightParenthesis
-  pure $ \sourceSpan -> case types of
-    [onlyType] -> onlyType
-    _ ->
-      TypeTuple
-        TupleTypeNode
-          { elementTypes = types,
-            sourceSpan = sourceSpan
-          }
+  pure inner
 
 -- ===========================================================================
 -- Requests / parameters

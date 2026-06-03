@@ -519,7 +519,7 @@ stage3Spec = describe "Stage 3 \8212 block / let / scope" $ do
       lowerSource $
         Text.unlines
           [ "agent main() {",
-            "  let (a, b) = (1, 2)",
+            "  let [a, b] = [1, 2]",
             "  a + b",
             "}"
           ]

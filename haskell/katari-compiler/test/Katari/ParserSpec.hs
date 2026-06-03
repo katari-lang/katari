@@ -474,12 +474,8 @@ templateLiteral = describe "template literal" $ do
 
 tupleAndArray :: Spec
 tupleAndArray = describe "tuple and array" $ do
-  it "parses empty array" $ do
+  it "parses empty tuple" $ do
     _ <- shouldSucceed "agent main() { [] }"
-    pure ()
-
-  it "parses array literal" $ do
-    _ <- shouldSucceed "agent main() { [1, 2, 3] }"
     pure ()
 
   it "parses grouped expression" $ do
@@ -487,8 +483,12 @@ tupleAndArray = describe "tuple and array" $ do
     pure ()
 
   it "parses tuple" $ do
-    _ <- shouldSucceed "agent main() { (1, 2, 3) }"
-    pure ()
+    m <- shouldSucceed "agent main() { [1, 2, 3] }"
+    case head (decls m) of
+      DeclarationAgent a -> case a.body.returnExpression of
+        Just (ExpressionTuple t) -> length t.elements `shouldBe` 3
+        _ -> expectationFailure "expected tuple literal"
+      _ -> expectationFailure "expected agent"
 
   it "parses record literal" $ do
     _ <- shouldSucceed "agent main() { { name = \"a\", age = 30 } }"
@@ -1283,7 +1283,7 @@ patterns = describe "patterns" $ do
       shouldSucceed $
         mconcat
           [ "agent main() {",
-            "  match (p) { case (x, y) => { x } }",
+            "  match (p) { case [x, y] => { x } }",
             "}"
           ]
     pure ()
@@ -1293,7 +1293,7 @@ patterns = describe "patterns" $ do
       shouldSucceed $
         mconcat
           [ "agent main() {",
-            "  match (p) { case (x, y) => { x } }",
+            "  match (p) { case [x, y] => { x } }",
             "}"
           ]
     case head (decls m) of
@@ -1788,12 +1788,12 @@ arrayAndTupleTypes = describe "array and tuple types" $ do
     _ <- shouldSucceed "agent main(xss: array[array[string]]) { 1 }"
     pure ()
 
-  it "parses tuple type (integer, string)" $ do
-    _ <- shouldSucceed "agent main(p: (integer, string)) { 1 }"
+  it "parses tuple type [integer, string]" $ do
+    _ <- shouldSucceed "agent main(p: [integer, string]) { 1 }"
     pure ()
 
   it "tuple type yields TypeTuple node" $ do
-    m <- shouldSucceed "agent main(p: (integer, string)) { 1 }"
+    m <- shouldSucceed "agent main(p: [integer, string]) { 1 }"
     case head (decls m) of
       DeclarationAgent a -> case a.parameters of
         [pr] -> case pr.typeAnnotation of
@@ -1803,7 +1803,7 @@ arrayAndTupleTypes = describe "array and tuple types" $ do
       _ -> expectationFailure "expected agent"
 
   it "parses tuple type with trailing comma" $ do
-    _ <- shouldSucceed "agent main(p: (integer, string,)) { 1 }"
+    _ <- shouldSucceed "agent main(p: [integer, string,]) { 1 }"
     pure ()
 
   it "object type {x: T, y: U} yields TypeObject node" $ do
@@ -1831,11 +1831,11 @@ arrayAndTupleTypes = describe "array and tuple types" $ do
     pure ()
 
   it "parses agent type with tuple parameter type" $ do
-    _ <- shouldSucceed "agent main(f: agent (p: (integer, string)) -> integer) { 1 }"
+    _ <- shouldSucceed "agent main(f: agent (p: [integer, string]) -> integer) { 1 }"
     pure ()
 
-  it "parses empty tuple type ()" $ do
-    _ <- shouldSucceed "agent main(x: ()) { 1 }"
+  it "parses empty tuple type []" $ do
+    _ <- shouldSucceed "agent main(x: []) { 1 }"
     pure ()
 
   it "parses qualified type module.TypeName" $ do
@@ -1890,8 +1890,8 @@ parenthesesGrouping = describe "parentheses grouping" $ do
         _ -> expectationFailure "expected match"
       _ -> expectationFailure "expected agent"
 
-  it "parses nested grouped pattern ((x, y))" $ do
-    m <- shouldSucceed "agent main() { match (s) { case ((x, y)) => { x } } }"
+  it "parses grouped tuple pattern ([x, y])" $ do
+    m <- shouldSucceed "agent main() { match (s) { case ([x, y]) => { x } } }"
     case head (decls m) of
       DeclarationAgent a -> case a.body.returnExpression of
         Just (ExpressionMatch me) -> case me.cases of

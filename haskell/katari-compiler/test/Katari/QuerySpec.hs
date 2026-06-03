@@ -42,16 +42,16 @@ spec = describe "Katari.Query.lookupAtPosition (hover)" $ do
         h.hoverType `shouldNotBe` Nothing
       Nothing -> expectationFailure "expected literal hover to return Just"
 
-  it "case (n, s) pattern variable n gets the subject's first-element type (typechecker)" $ do
+  it "case [n, s] pattern variable n gets the subject's first-element type (typechecker)" $ do
     -- Direct typechecker test (no hover). Investigates the user-flagged
     -- bug: pattern-bound `n` should resolve to `integer` (the lower
     -- bound the constraint generator emits from
     -- @addTypeConstraint integer tv_n@), not `unknown`.
     let src =
           Text.unlines
-            [ "agent describe(p: (integer, string)) -> string {",
+            [ "agent describe(p: [integer, string]) -> string {",
               "  match (p) {",
-              "    case (n, s) => { \"ok\" }",
+              "    case [n, s] => { \"ok\" }",
               "  }",
               "}"
             ]
@@ -65,7 +65,7 @@ spec = describe "Katari.Query.lookupAtPosition (hover)" $ do
         expectationFailure $
           "expected SemanticTypeInteger for pattern-bound `n`, got: " <> show other
 
-  it "case (n, s) hover targets n, not a sibling pattern's type (regression)" $ do
+  it "case [n, s] hover targets n, not a sibling pattern's type (regression)" $ do
     -- Regression for the user-reported bug: hovering on `n` used to
     -- return @SemanticTypeString@ (the sibling `s`'s type, leaking
     -- through the match expression's generic typeOf fallback) because
@@ -79,14 +79,14 @@ spec = describe "Katari.Query.lookupAtPosition (hover)" $ do
     -- the wrong type.
     let src =
           Text.unlines
-            [ "agent describe(p: (integer, string)) -> string {",
+            [ "agent describe(p: [integer, string]) -> string {",
               "  match (p) {",
-              "    case (n, s) => { \"ok\" }",
+              "    case [n, s] => { \"ok\" }",
               "  }",
               "}"
             ]
     let r = prepare src
-    -- Line 3 col 11 = the `n` token (line is `    case (n, s) ...`).
+    -- Line 3 col 11 = the `n` token (line is `    case [n, s] ...`).
     let info = lookupAtPosition r.querySnapshot "<test>" Position {line = 3, column = 11}
     case info >>= (.hoverType) of
       Just ST.SemanticTypeString ->
@@ -121,19 +121,19 @@ spec = describe "Katari.Query.lookupAtPosition (hover)" $ do
           "expected integer for ctor-bound `v`, got: " <> show other
 
   it "nested pattern: tuple inside constructor (or vice versa) propagates element types" $ do
-    -- `data Wrapper(inner: (integer, string))` — matching
-    -- `case Wrapper(inner = (x, y)) => x` should bind `x` to integer.
+    -- `data Wrapper(inner: [integer, string])` — matching
+    -- `case Wrapper(inner = [x, y]) => x` should bind `x` to integer.
     let src =
           Text.unlines
-            [ "data Wrapper(inner: (integer, string))",
+            [ "data Wrapper(inner: [integer, string])",
               "agent first(w: Wrapper) -> integer {",
               "  match (w) {",
-              "    case Wrapper(inner = (x, y)) => { x }",
+              "    case Wrapper(inner = [x, y]) => { x }",
               "  }",
               "}"
             ]
     let r = prepare src
-    -- "    case Wrapper(inner = (x, y)) => { x }"
+    -- "    case Wrapper(inner = [x, y]) => { x }"
     --     1234567890123456789012345678901234567890
     --                                   ^col 26 = x
     let info = lookupAtPosition r.querySnapshot "<test>" Position {line = 4, column = 27}
