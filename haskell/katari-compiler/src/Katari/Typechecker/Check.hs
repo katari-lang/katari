@@ -47,6 +47,7 @@ import Katari.Diagnostic (Diagnostic, diagnosticError)
 import Katari.Id (VariableResolution (..))
 import Katari.Prim (PrimRule (..))
 import Katari.SemanticType
+import Katari.SemanticType.Render (renderSemanticType)
 import Katari.SourceSpan (HasSourceSpan (..), SourceSpan)
 import Katari.Typechecker.Identifier (TypeData (..))
 import Katari.Typechecker.NormalizedType
@@ -77,7 +78,7 @@ toDiagnostic = \case
   CheckErrorTypeMismatch sourceSpan actual expected ->
     diagnosticError
       "K0400"
-      ("type mismatch: '" <> renderType actual <> "' is not a subtype of '" <> renderType expected <> "'")
+      ("type mismatch: '" <> renderSemanticType actual <> "' is not a subtype of '" <> renderSemanticType expected <> "'")
       sourceSpan
   CheckErrorTypeSynonymCycle sourceSpan name ->
     diagnosticError "K0200" ("cyclic type synonym '" <> name <> "'") sourceSpan
@@ -85,10 +86,6 @@ toDiagnostic = \case
     diagnosticError "K0401" ("unresolved variable '" <> name <> "'") sourceSpan
   CheckErrorUnsupported sourceSpan what ->
     diagnosticError "K0499" ("typechecker (bidirectional, WIP): unsupported form: " <> what) sourceSpan
-
--- | Placeholder rendering until a shared type pretty-printer is wired in.
-renderType :: SemanticType Resolved -> Text
-renderType _ = "<type>"
 
 -- ===========================================================================
 -- Environment + monad
