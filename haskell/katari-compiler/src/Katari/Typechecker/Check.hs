@@ -46,7 +46,7 @@ import Data.Text qualified as Text
 import Katari.AST
 import Katari.Common (LiteralValue (..), QualifiedName (..), TypePatternTag (..))
 import Katari.Diagnostic (Diagnostic, diagnosticError)
-import Katari.Id (VariableResolution (..))
+import Katari.Id (TypeResolution (..), VariableResolution (..))
 import Katari.Prim (PrimRule (..))
 import Katari.SemanticType
 import Katari.SemanticType.Render (renderSemanticType)
@@ -245,7 +245,7 @@ elaborateType = \case
 
 resolveTypeRef :: NameRef Identified TypeRef -> Check (SemanticType Resolved)
 resolveTypeRef nameRef = case nameRef.resolution of
-  Just qualifiedName -> do
+  Just (ResolvedNamedType qualifiedName) -> do
     types <- asks (.checkTypeData)
     case Map.lookup qualifiedName types of
       Just TypeData {typeSynonymRhs = Just rhs} -> do
@@ -259,6 +259,11 @@ resolveTypeRef nameRef = case nameRef.resolution of
         pure (SemanticTypeData qualifiedName)
       Nothing ->
         pure SemanticTypeUnknown
+  -- Generic-parameter / request-as-effect-argument resolutions are produced
+  -- only once generics land; until then the Identifier never emits them, so
+  -- these arms are unreachable placeholders (TODO: generics steps D/E).
+  Just (ResolvedGenericParam _) -> pure SemanticTypeUnknown
+  Just (ResolvedRequestName _) -> pure SemanticTypeUnknown
   Nothing -> pure SemanticTypeUnknown
 
 -- | Elaborate a @with@ clause into a concrete request set (only names that are
@@ -1005,7 +1010,9 @@ checkNonAgentDeclaration :: Declaration Identified -> Check (Maybe SCCResult)
 checkNonAgentDeclaration = \case
   DeclarationData DataDeclaration {annotation, name, constructorName, typeName, parameters, sourceSpan} -> do
     fields <- mapM (\DataParameter {name = fieldName, parameterType} -> (fieldName,) <$> elaborateType parameterType) parameters
-    let returnType = maybe SemanticTypeUnknown SemanticTypeData typeName.resolution
+    let returnType = case typeName.resolution of
+          Just (ResolvedNamedType qualifiedName) -> SemanticTypeData qualifiedName
+          _ -> SemanticTypeUnknown
         sig = SemanticTypeFunction (requiredParameter <$> Map.fromList fields) returnType emptyEffect
         zonked =
           DeclarationData

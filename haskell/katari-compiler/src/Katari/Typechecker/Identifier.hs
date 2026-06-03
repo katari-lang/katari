@@ -59,6 +59,7 @@ import Katari.Diagnostic (Diagnostic (..), DiagnosticNote (..), diagnosticError)
 import Katari.Id
   ( LocalVarId (..),
     QualifiedName (..),
+    TypeResolution (..),
     VariableResolution (..),
   )
 import Katari.Internal qualified as Internal
@@ -823,7 +824,7 @@ liftSignatureVariable = liftSignature lookupVariableResolution
 -- | Counterpart of 'liftSignatureVariable' for type signatures (enum / data
 -- type role / type synonym name).
 liftSignatureType :: NameRef Parsed TypeRef -> Identifier (NameRef Identified TypeRef)
-liftSignatureType = liftSignature lookupType
+liftSignatureType = liftSignature (fmap (fmap ResolvedNamedType) . lookupType)
 
 liftSignatureRequest :: NameRef Parsed RequestRef -> Identifier (NameRef Identified RequestRef)
 liftSignatureRequest = liftSignature lookupRequest
@@ -1304,7 +1305,7 @@ resolveTypeName :: TypeNameNode Parsed -> Identifier (TypeNameNode Identified)
 resolveTypeName TypeNameNode {name, sourceSpan} = do
   metadata <-
     lookupType name.text >>= \case
-      Just qualifiedName -> pure (Just qualifiedName)
+      Just qualifiedName -> pure (Just (ResolvedNamedType qualifiedName))
       Nothing -> do
         emitError (ErrorNotAType name.sourceSpan name.text)
         pure Nothing
@@ -1325,7 +1326,7 @@ resolveQualifiedType QualifiedTypeNode {qualifier, target, sourceSpan} = do
   typeMetadata <- case maybeModuleName of
     Just moduleName ->
       lookupModuleExportType moduleName target.text >>= \case
-        Just qualifiedName -> pure (Just qualifiedName)
+        Just qualifiedName -> pure (Just (ResolvedNamedType qualifiedName))
         Nothing -> do
           emitError (ErrorUndefinedQualified target.sourceSpan qualifier.text target.text)
           pure Nothing

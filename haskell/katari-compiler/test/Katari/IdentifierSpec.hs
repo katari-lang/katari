@@ -6,7 +6,7 @@ import Data.Map.Strict qualified as Map
 import Data.Maybe (isNothing)
 import Data.Text (Text)
 import Katari.AST
-import Katari.Id (QualifiedName (..))
+import Katari.Id (QualifiedName (..), TypeResolution (..))
 import Katari.Lexer qualified as Lexer
 import Katari.Parser qualified as Parser
 import Katari.TestSupport (IdentifierResult (..))
@@ -262,8 +262,8 @@ dataDeclarations = describe "data declarations" $ do
                 qualifiedName.name == "widget"
             ]
     case typeNameRefResolution of
-      Just qname -> qname `shouldBe` widgetTypeQName
-      Nothing ->
+      Just (ResolvedNamedType qname) -> qname `shouldBe` widgetTypeQName
+      _ ->
         expectationFailure "data declaration typeName resolved as Unresolved"
 
   it "two modules with same-named data have distinct TypeIds on AST typeName" $ do
