@@ -136,6 +136,7 @@ declarationDependencies moduleName = \case
           <> collectFromBlock expression.body
       ExpressionParTuple expression -> Set.unions (map collectFromExpression expression.elements)
       ExpressionFieldAccess expression -> collectFromExpression expression.object
+      ExpressionTypeApplication expression -> collectFromExpression expression.callee
       ExpressionTemplate expression -> Set.unions (map collectFromTemplateElement expression.elements)
       ExpressionQualifiedReference expression -> collectFromVariableRef expression.target
 

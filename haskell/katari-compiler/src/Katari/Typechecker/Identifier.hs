@@ -864,15 +864,35 @@ resolveSignatureBody parameters returnType withRequests body =
 resolveAgent :: AgentDeclaration Parsed -> Identifier (AgentDeclaration Identified)
 resolveAgent AgentDeclaration {..} = do
   name' <- liftSignatureVariable name
+  typeParameters' <- mapM resolveGenericParameter typeParameters
   (parameters', returnType', withRequests', body') <- resolveSignatureBody parameters returnType withRequests body
   pure
     AgentDeclaration
       { annotation = annotation,
         name = name',
+        typeParameters = typeParameters',
         parameters = parameters',
         returnType = returnType',
         withRequests = withRequests',
         body = body',
+        sourceSpan = sourceSpan
+      }
+
+-- | Resolve a generic-parameter declaration.
+--
+-- Step B (structural): the binder is not yet bound into scope — it resolves to
+-- 'Nothing' and references to it elsewhere do not yet succeed. Full generic
+-- resolution (issuing a 'GenericsId' and registering the binder so signature /
+-- body references resolve) lands in a later step. The @extends@ bound is
+-- resolved best-effort.
+resolveGenericParameter :: GenericParameter Parsed -> Identifier (GenericParameter Identified)
+resolveGenericParameter GenericParameter {name, kind, upperBound, sourceSpan} = do
+  upperBound' <- traverse resolveType upperBound
+  pure
+    GenericParameter
+      { name = identifiedNameRef Nothing name,
+        kind = kind,
+        upperBound = upperBound',
         sourceSpan = sourceSpan
       }
 
@@ -968,6 +988,7 @@ resolveData DataDeclaration {..} = do
   name' <- liftSignatureVariable name
   typeName' <- liftSignatureType typeName
   constructorName' <- liftSignatureConstructor constructorName
+  typeParameters' <- mapM resolveGenericParameter typeParameters
   parameters' <- mapM resolveDataParameter parameters
   pure
     DataDeclaration
@@ -975,6 +996,7 @@ resolveData DataDeclaration {..} = do
         name = name',
         constructorName = constructorName',
         typeName = typeName',
+        typeParameters = typeParameters',
         parameters = parameters',
         sourceSpan = sourceSpan
       }
@@ -1487,13 +1509,15 @@ resolveLet LetStatement {pattern, value, sourceSpan} = do
 -- rules) before resolving the body, so the agent may call itself recursively.
 -- The body is resolved in a fresh scope frame.
 resolveAgentStatement :: AgentStatement Parsed -> Identifier (AgentStatement Identified)
-resolveAgentStatement AgentStatement {annotation, name, parameters, returnType, withRequests, body, sourceSpan} = do
+resolveAgentStatement AgentStatement {annotation, name, typeParameters, parameters, returnType, withRequests, body, sourceSpan} = do
   name' <- bindLocalVariable name
+  typeParameters' <- mapM resolveGenericParameter typeParameters
   (parameters', returnType', withRequests', body') <- resolveSignatureBody parameters returnType withRequests body
   pure
     AgentStatement
       { annotation = annotation,
         name = name',
+        typeParameters = typeParameters',
         parameters = parameters',
         returnType = returnType',
         withRequests = withRequests',
@@ -1557,6 +1581,7 @@ resolveExpression = \case
   ExpressionFor expression -> ExpressionFor <$> resolveForExpr expression
   ExpressionBlock expression -> ExpressionBlock <$> resolveBlockExpr expression
   ExpressionFieldAccess expression -> resolveFieldAccess expression
+  ExpressionTypeApplication expression -> ExpressionTypeApplication <$> resolveTypeApplicationExpr expression
   ExpressionTemplate expression -> ExpressionTemplate <$> resolveTemplateExpr expression
   ExpressionHandle expression -> ExpressionHandle <$> resolveHandleExpr expression
   ExpressionParTuple expression -> ExpressionParTuple <$> resolveParTupleExpr expression
@@ -1901,6 +1926,21 @@ resolveTemplateExpr TemplateExpression {elements, sourceSpan} = do
   pure
     TemplateExpression
       { elements = elements',
+        sourceSpan = sourceSpan,
+        typeOf = ()
+      }
+
+-- | Resolve a generic instantiation @callee[T1, eff, ...]@. The bracket
+-- arguments are resolved as types (the checker later reinterprets effect
+-- arguments by the callee's declared kinds).
+resolveTypeApplicationExpr :: TypeApplicationExpression Parsed -> Identifier (TypeApplicationExpression Identified)
+resolveTypeApplicationExpr TypeApplicationExpression {callee, typeArguments, sourceSpan} = do
+  callee' <- resolveExpression callee
+  typeArguments' <- mapM resolveType typeArguments
+  pure
+    TypeApplicationExpression
+      { callee = callee',
+        typeArguments = typeArguments',
         sourceSpan = sourceSpan,
         typeOf = ()
       }

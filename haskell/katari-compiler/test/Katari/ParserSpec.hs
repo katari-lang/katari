@@ -859,6 +859,26 @@ declarations = describe "declarations" $ do
     _ <- shouldSucceed "agent foo() with (req1 | req2) | req3 { 1 }"
     pure ()
 
+  it "parses a generic agent declaration" $ do
+    _ <- shouldSucceed "agent identity[T](x: T) -> T { x }"
+    pure ()
+
+  it "parses a generic agent with a bound + effect parameter" $ do
+    _ <- shouldSucceed "agent run[T extends integer, effect R](x: T) -> T with R { x }"
+    pure ()
+
+  it "parses a generic data declaration" $ do
+    _ <- shouldSucceed "data Box[T](value: T)"
+    pure ()
+
+  it "parses a generic application followed by a call" $ do
+    _ <- shouldSucceed "agent main() -> integer { identity[integer](x = 1) }"
+    pure ()
+
+  it "parses a generic application with an effect argument" $ do
+    _ <- shouldSucceed "agent main() -> integer { run[integer, req_a | req_b](x = 1) }"
+    pure ()
+
   it "parses agent with annotation" $ do
     _ <- shouldSucceed "@\"does something\" agent foo() { 1 }"
     pure ()

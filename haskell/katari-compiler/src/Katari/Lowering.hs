@@ -1147,6 +1147,9 @@ lowerExpr = \case
     object <- lowerExpr fieldAccessExpr.object
     fieldVar <- emitLoadLiteral (LiteralValueString fieldAccessExpr.fieldName.text)
     emitPrimCall "get_field" [Arg "object" object, Arg "field" fieldVar]
+  -- Generics are erased at runtime: lower the callee and drop the type
+  -- arguments (no monomorphisation).
+  AST.ExpressionTypeApplication typeApplicationExpr -> lowerExpr typeApplicationExpr.callee
   AST.ExpressionTemplate templateExpr -> lowerTemplate templateExpr
   AST.ExpressionBlock blockExpr -> lowerBlockExpr blockExpr
   AST.ExpressionIf ifExpr -> lowerIfExpr ifExpr

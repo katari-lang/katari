@@ -174,13 +174,42 @@ instance HasSourceSpan (Declaration phase) where
     DeclarationTypeSynonym declaration -> declaration.sourceSpan
     DeclarationError sourceSpan -> sourceSpan
 
--- | @agent name(...) -> T [with R] { body }@ — the primary callable form.
--- The optional @annotation@ is a leading @\@\"...\"@ string used for AI
--- tool-calling descriptions; @withRequests@ is the optional request set
+-- | The kind of a generic parameter: a type parameter (@T@ / @T extends t@)
+-- or an effect parameter (@effect R@). Kinds are written explicitly — the
+-- checker performs no kind inference.
+data GenericKind where
+  GenericKindType :: GenericKind
+  GenericKindEffect :: GenericKind
+
+deriving instance Eq GenericKind
+
+deriving instance Show GenericKind
+
+-- | A declared generic parameter of an @agent@ / @data@
+-- (@[T extends t, effect R]@). The binder @name@ is a 'TypeRef' that the
+-- Identifier resolves to a fresh 'Katari.Id.ResolvedGenericParam'; references
+-- to it (in parameter / return types, the @with@ clause, or nested bounds)
+-- resolve to the same id. 'upperBound' is the @extends@ clause (type kind
+-- only; 'Nothing' means @unknown@); effect parameters carry no bound.
+data GenericParameter (phase :: Phase) = GenericParameter
+  { name :: NameRef phase TypeRef,
+    kind :: GenericKind,
+    upperBound :: Maybe (SyntacticType phase),
+    sourceSpan :: SourceSpan
+  }
+
+instance HasSourceSpan (GenericParameter phase) where
+  sourceSpanOf parameter = parameter.sourceSpan
+
+-- | @agent name[generics](...) -> T [with R] { body }@ — the primary callable
+-- form. The optional @annotation@ is a leading @\@\"...\"@ string used for AI
+-- tool-calling descriptions; @typeParameters@ is the optional generic list
+-- (empty for a monomorphic agent); @withRequests@ is the optional request set
 -- (omit / @Nothing@ for pure agents).
 data AgentDeclaration (phase :: Phase) = AgentDeclaration
   { annotation :: Maybe Text,
     name :: NameRef phase VariableRef,
+    typeParameters :: [GenericParameter phase],
     parameters :: [ParameterBinding phase],
     returnType :: Maybe (SyntacticType phase),
     withRequests :: Maybe [SyntacticRequest phase],
@@ -315,6 +344,7 @@ data DataDeclaration (phase :: Phase) = DataDeclaration
     typeName :: NameRef phase TypeRef,
     -- | As constructor
     constructorName :: NameRef phase ConstructorRef,
+    typeParameters :: [GenericParameter phase],
     parameters :: [DataParameter phase],
     sourceSpan :: SourceSpan
   }
@@ -468,6 +498,7 @@ data AgentStatement (phase :: Phase) = AgentStatement
     -- so AI tool-calling consumers can read it via @get_metadata@.
     annotation :: Maybe Text,
     name :: NameRef phase VariableRef,
+    typeParameters :: [GenericParameter phase],
     parameters :: [ParameterBinding phase],
     returnType :: Maybe (SyntacticType phase),
     withRequests :: Maybe [SyntacticRequest phase],
@@ -1001,6 +1032,10 @@ data Expression (phase :: Phase) where
   ExpressionBlock :: BlockExpression phase -> Expression phase
   -- | @obj.field@.
   ExpressionFieldAccess :: FieldAccessExpression phase -> Expression phase
+  -- | @callee[T1, eff, ...]@ — generic instantiation of a callee that
+  -- declares generic parameters. A following @(...)@ is a separate
+  -- 'ExpressionCall' postfix.
+  ExpressionTypeApplication :: TypeApplicationExpression phase -> Expression phase
   -- | @f\"...\"@ template literal with interpolation.
   ExpressionTemplate :: TemplateExpression phase -> Expression phase
   -- | Koka-style handle expression. Captures the continuation as its body.
@@ -1027,6 +1062,7 @@ instance HasSourceSpan (Expression phase) where
     ExpressionFor expression -> expression.sourceSpan
     ExpressionBlock expression -> expression.sourceSpan
     ExpressionFieldAccess expression -> expression.sourceSpan
+    ExpressionTypeApplication expression -> expression.sourceSpan
     ExpressionTemplate expression -> expression.sourceSpan
     ExpressionHandle expression -> expression.sourceSpan
     ExpressionParTuple expression -> expression.sourceSpan
@@ -1254,6 +1290,21 @@ data FieldAccessExpression (phase :: Phase) = FieldAccessExpression
 instance HasSourceSpan (FieldAccessExpression phase) where
   sourceSpanOf expression = expression.sourceSpan
 
+-- | @callee[T1, eff, ...]@ — generic instantiation. The bracket arguments are
+-- parsed uniformly as 'SyntacticType's; the checker splits them into type and
+-- effect arguments according to the callee's declared generic-parameter kinds
+-- (a bare-name union like @req_a | req_b@ parses as a type union and is
+-- reinterpreted as an effect at an effect-parameter position).
+data TypeApplicationExpression (phase :: Phase) = TypeApplicationExpression
+  { callee :: Expression phase,
+    typeArguments :: [SyntacticType phase],
+    sourceSpan :: SourceSpan,
+    typeOf :: ExpressionType phase
+  }
+
+instance HasSourceSpan (TypeApplicationExpression phase) where
+  sourceSpanOf expression = expression.sourceSpan
+
 -- | Template literal @f\"...\"@ / @f\"\"\"...\"\"\"@. The body is split
 -- into a sequence of 'TemplateElement's (literal string chunks and
 -- interpolated expressions) by the lexer.
@@ -1445,6 +1496,25 @@ retagSyntacticRequest req =
       sourceSpan = req.sourceSpan
     }
 
+-- | Change the phase tag of a 'GenericParameter' (binder name + optional
+-- @extends@ bound). The binder and the bound share resolution payloads across
+-- phases, so this is an identity transport.
+retagGenericParameter ::
+  ( NameRefResolution phase1 TypeRef ~ NameRefResolution phase2 TypeRef,
+    NameRefResolution phase1 ModuleRef ~ NameRefResolution phase2 ModuleRef,
+    NameRefResolution phase1 LabelRef ~ NameRefResolution phase2 LabelRef,
+    NameRefResolution phase1 RequestRef ~ NameRefResolution phase2 RequestRef
+  ) =>
+  GenericParameter phase1 ->
+  GenericParameter phase2
+retagGenericParameter GenericParameter {name, kind, upperBound, sourceSpan} =
+  GenericParameter
+    { name = retagNameRef name,
+      kind = kind,
+      upperBound = retagSyntacticType <$> upperBound,
+      sourceSpan = sourceSpan
+    }
+
 -- ---------------------------------------------------------------------------
 -- Aggregate Eq / Show constraints
 --
@@ -1524,6 +1594,10 @@ deriving instance (ShowPhase phase) => Show (Module phase)
 deriving instance (EqPhase phase) => Eq (Declaration phase)
 
 deriving instance (ShowPhase phase) => Show (Declaration phase)
+
+deriving instance (EqPhase phase) => Eq (GenericParameter phase)
+
+deriving instance (ShowPhase phase) => Show (GenericParameter phase)
 
 deriving instance (EqPhase phase) => Eq (AgentDeclaration phase)
 
@@ -1768,6 +1842,10 @@ deriving instance (ShowPhase phase) => Show (BlockExpression phase)
 deriving instance (EqPhase phase) => Eq (FieldAccessExpression phase)
 
 deriving instance (ShowPhase phase) => Show (FieldAccessExpression phase)
+
+deriving instance (EqPhase phase) => Eq (TypeApplicationExpression phase)
+
+deriving instance (ShowPhase phase) => Show (TypeApplicationExpression phase)
 
 deriving instance (EqPhase phase) => Eq (TemplateExpression phase)
 

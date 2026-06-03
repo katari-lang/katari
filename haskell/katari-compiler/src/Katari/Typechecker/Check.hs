@@ -373,6 +373,21 @@ synthExpr = \case
       ( ExpressionFieldAccess FieldAccessExpression {object = object', fieldName = retagNameRef fieldName, sourceSpan = sourceSpan, typeOf = semantic},
         semantic
       )
+  ExpressionTypeApplication TypeApplicationExpression {callee, typeArguments, sourceSpan} -> do
+    -- Step B (structural): the callee's type passes through unchanged. Type-
+    -- argument substitution and the "generic must be instantiated" check land
+    -- in a later step.
+    (callee', calleeType) <- synthExpr callee
+    pure
+      ( ExpressionTypeApplication
+          TypeApplicationExpression
+            { callee = callee',
+              typeArguments = map retagSyntacticType typeArguments,
+              sourceSpan = sourceSpan,
+              typeOf = calleeType
+            },
+        calleeType
+      )
   ExpressionTemplate TemplateExpression {elements, sourceSpan} -> do
     walked <- mapM walkTemplateElement elements
     let interpolated = mapMaybe snd walked
@@ -705,7 +720,7 @@ walkInitializer name typeAnnotation initial = do
 -- check its body, and bind the agent's own name to its function type for the
 -- rest of the scope. Effects are computed by the SCC effect pass (not here).
 walkLocalAgent :: AgentStatement Identified -> Check (Statement Zonked, [(VariableResolution, SemanticType Resolved)])
-walkLocalAgent AgentStatement {annotation, name, parameters, returnType, withRequests, body, sourceSpan} = do
+walkLocalAgent AgentStatement {annotation, name, typeParameters, parameters, returnType, withRequests, body, sourceSpan} = do
   (parameters', paramSig, paramLocals) <- elaborateParameters parameters
   declaredReturn <- traverse elaborateType returnType
   -- Recursive local agents need their return annotation; bind the signature up
@@ -724,6 +739,7 @@ walkLocalAgent AgentStatement {annotation, name, parameters, returnType, withReq
         AgentStatement
           { annotation = annotation,
             name = retagNameRef name,
+            typeParameters = map retagGenericParameter typeParameters,
             parameters = parameters',
             returnType = fmap retagSyntacticType returnType,
             withRequests = fmap (fmap retagSyntacticRequest) withRequests,
@@ -1008,7 +1024,7 @@ isAgentDeclaration = \case DeclarationAgent _ -> True; _ -> False
 -- | A non-agent callable's signature + zonked declaration (no body to check).
 checkNonAgentDeclaration :: Declaration Identified -> Check (Maybe SCCResult)
 checkNonAgentDeclaration = \case
-  DeclarationData DataDeclaration {annotation, name, constructorName, typeName, parameters, sourceSpan} -> do
+  DeclarationData DataDeclaration {annotation, name, constructorName, typeName, typeParameters, parameters, sourceSpan} -> do
     fields <- mapM (\DataParameter {name = fieldName, parameterType} -> (fieldName,) <$> elaborateType parameterType) parameters
     let returnType = case typeName.resolution of
           Just (ResolvedNamedType qualifiedName) -> SemanticTypeData qualifiedName
@@ -1021,6 +1037,7 @@ checkNonAgentDeclaration = \case
                 name = retagNameRef name,
                 constructorName = retagNameRef constructorName,
                 typeName = retagNameRef typeName,
+                typeParameters = map retagGenericParameter typeParameters,
                 parameters = map retagDataParameter parameters,
                 sourceSpan = sourceSpan
               }
@@ -1123,7 +1140,7 @@ checkAgentResult decl = do
 -- return is inferred from the body. (For a recursive agent the env already
 -- carries the seeded signature, and the annotation is mandatory.)
 checkAgentDeclaration :: AgentDeclaration Identified -> Check (Declaration Zonked, SemanticType Resolved)
-checkAgentDeclaration AgentDeclaration {annotation, name, parameters, returnType, withRequests, body, sourceSpan} = do
+checkAgentDeclaration AgentDeclaration {annotation, name, typeParameters, parameters, returnType, withRequests, body, sourceSpan} = do
   (parameters', paramSig, paramLocals) <- elaborateParameters parameters
   declaredReturn <- traverse elaborateType returnType
   effect <- maybe (pure emptyEffect) elaborateRequestList withRequests
@@ -1139,6 +1156,7 @@ checkAgentDeclaration AgentDeclaration {annotation, name, parameters, returnType
           AgentDeclaration
             { annotation = annotation,
               name = retagNameRef name,
+              typeParameters = map retagGenericParameter typeParameters,
               parameters = parameters',
               returnType = fmap retagSyntacticType returnType,
               withRequests = fmap (fmap retagSyntacticRequest) withRequests,
@@ -1262,6 +1280,7 @@ exprEffect lookupEffect = go
       ExpressionBlock e -> blockEffect lookupEffect e.block
       ExpressionHandle e -> handleEffect e
       ExpressionFieldAccess e -> go e.object
+      ExpressionTypeApplication e -> go e.callee
       ExpressionTemplate e -> Set.unions (map templateEffect e.elements)
       ExpressionBinaryOperator _ -> Set.empty
       ExpressionUnaryOperator _ -> Set.empty
@@ -1299,6 +1318,7 @@ exprTypeOf = \case
   ExpressionBlock e -> e.typeOf
   ExpressionHandle e -> e.typeOf
   ExpressionFieldAccess e -> e.typeOf
+  ExpressionTypeApplication e -> e.typeOf
   ExpressionTemplate e -> e.typeOf
   ExpressionQualifiedReference e -> e.typeOf
   ExpressionBinaryOperator _ -> SemanticTypeUnknown

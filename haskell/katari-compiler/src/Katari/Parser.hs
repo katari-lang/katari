@@ -526,6 +526,7 @@ parseAgentDeclaration :: Maybe Text -> Parser (AgentDeclaration Parsed)
 parseAgentDeclaration annotation = parseWithSpan $ do
   parseKeyword KeywordAgent
   name <- parseNameRef
+  typeParameters <- parseGenericParameters
   parameters <- parseParameterList
   returnType <- optional (parsePunctuation PunctuationArrow *> parseType)
   requests <- optional (parseKeyword KeywordWith *> parseRequests)
@@ -534,6 +535,7 @@ parseAgentDeclaration annotation = parseWithSpan $ do
     AgentDeclaration
       { annotation = annotation,
         name = name,
+        typeParameters = typeParameters,
         parameters = parameters,
         returnType = returnType,
         withRequests = requests,
@@ -653,6 +655,7 @@ parseDataDeclaration :: Maybe Text -> Parser (DataDeclaration Parsed)
 parseDataDeclaration annotation = parseWithSpan $ do
   parseKeyword KeywordData
   name <- parseNameRef
+  typeParameters <- parseGenericParameters
   parameters <- parseParenthesizedList parseDataDeclarationParameter
   pure $ \sourceSpan ->
     DataDeclaration
@@ -660,6 +663,7 @@ parseDataDeclaration annotation = parseWithSpan $ do
         name = name,
         typeName = retagParsedNameRef name,
         constructorName = retagParsedNameRef name,
+        typeParameters = typeParameters,
         parameters = parameters,
         sourceSpan = sourceSpan
       }
@@ -969,6 +973,7 @@ parseAgentStatement = parseWithSpan $ do
   annotation <- parseAnnotation
   parseKeyword KeywordAgent
   name <- parseNameRef
+  typeParameters <- parseGenericParameters
   parameters <- parseParameterList
   returnType <- optional (parsePunctuation PunctuationArrow *> parseType)
   requests <- optional (parseKeyword KeywordWith *> parseRequests)
@@ -977,6 +982,7 @@ parseAgentStatement = parseWithSpan $ do
     AgentStatement
       { annotation = annotation,
         name = name,
+        typeParameters = typeParameters,
         parameters = parameters,
         returnType = returnType,
         withRequests = requests,
@@ -1204,6 +1210,7 @@ fuseNegativeLiteral operator operand fullSpan = case (operator, operand) of
 data Postfix where
   PostfixCall :: [CallArgument Parsed] -> SourceSpan -> Postfix
   PostfixField :: NameRef Parsed LabelRef -> SourceSpan -> Postfix
+  PostfixTypeApplication :: [SyntacticType Parsed] -> SourceSpan -> Postfix
 
 parsePostfixExpression :: Parser (Expression Parsed)
 parsePostfixExpression = do
@@ -1215,7 +1222,8 @@ parsePostfix :: Parser Postfix
 parsePostfix =
   choice
     [ parseCallPostfix,
-      parseFieldPostfix
+      parseFieldPostfix,
+      parseTypeApplicationPostfix
     ]
 
 parseCallPostfix :: Parser Postfix
@@ -1227,6 +1235,18 @@ parseFieldPostfix :: Parser Postfix
 parseFieldPostfix = parseWithSpan $ do
   parsePunctuation PunctuationDot
   PostfixField <$> parseNameRef
+
+-- | @callee[T1, eff, ...]@ — generic instantiation. At least one argument is
+-- required (a bare @[]@ is never a type application). Arguments parse as types;
+-- the checker reinterprets effect arguments by the callee's declared kinds.
+-- The postfix @[@ only binds tight against the callee on the same line — a
+-- @[@ that starts a fresh line is a tuple literal (virtual semicolon).
+parseTypeApplicationPostfix :: Parser Postfix
+parseTypeApplicationPostfix = parseWithSpan $ do
+  parsePunctuation PunctuationLeftBracket
+  arguments <- parseType `sepEndBy1` parseComma
+  parsePunctuation PunctuationRightBracket
+  pure (PostfixTypeApplication arguments)
 
 applyPostfixOperation :: Expression Parsed -> Postfix -> Expression Parsed
 applyPostfixOperation expression = \case
@@ -1243,6 +1263,14 @@ applyPostfixOperation expression = \case
       FieldAccessExpression
         { object = expression,
           fieldName = fieldName,
+          sourceSpan = mergePostfixSpan expression postfixSpan,
+          typeOf = ()
+        }
+  PostfixTypeApplication arguments postfixSpan ->
+    ExpressionTypeApplication
+      TypeApplicationExpression
+        { callee = expression,
+          typeArguments = arguments,
           sourceSpan = mergePostfixSpan expression postfixSpan,
           typeOf = ()
         }
@@ -2071,6 +2099,36 @@ parseRequest :: Parser (SyntacticRequest Parsed)
 parseRequest = parseWithSpan $ do
   name <- parseNameRef
   pure $ \sourceSpan -> SyntacticRequest {name = name, sourceSpan = sourceSpan}
+
+-- | Optional generic parameter list @[T extends t, effect R, U]@ following a
+-- callable / data name. Absent (no @[@) yields the empty list, so monomorphic
+-- declarations are unchanged. @extends@ / @effect@ are contextual keywords
+-- (plain identifiers elsewhere).
+parseGenericParameters :: Parser [GenericParameter Parsed]
+parseGenericParameters = option [] (parseBracketedList parseGenericParameter)
+
+parseGenericParameter :: Parser (GenericParameter Parsed)
+parseGenericParameter =
+  choice
+    [ try parseEffectGenericParameter,
+      parseTypeGenericParameter
+    ]
+
+-- | @effect R@ — an effect parameter (no bound).
+parseEffectGenericParameter :: Parser (GenericParameter Parsed)
+parseEffectGenericParameter = parseWithSpan $ do
+  parseSpecificIdentifier "effect"
+  name <- parseNameRef
+  pure $ \sourceSpan ->
+    GenericParameter {name = name, kind = GenericKindEffect, upperBound = Nothing, sourceSpan = sourceSpan}
+
+-- | @T@ or @T extends <type>@ — a type parameter (@Nothing@ bound = @unknown@).
+parseTypeGenericParameter :: Parser (GenericParameter Parsed)
+parseTypeGenericParameter = parseWithSpan $ do
+  name <- parseNameRef
+  upperBound <- optional (parseSpecificIdentifier "extends" *> parseType)
+  pure $ \sourceSpan ->
+    GenericParameter {name = name, kind = GenericKindType, upperBound = upperBound, sourceSpan = sourceSpan}
 
 parseParameterList :: Parser [ParameterBinding Parsed]
 parseParameterList =

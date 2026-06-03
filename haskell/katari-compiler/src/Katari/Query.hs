@@ -81,6 +81,7 @@ import Katari.AST
     TemplateExpressionElement (..),
     TupleExpression (..),
     TuplePattern (..),
+    TypeApplicationExpression (..),
     TypePattern (..),
     UnaryOperatorExpression (..),
     VariableExpression (..),
@@ -460,6 +461,8 @@ hoverFromExpression snap moduleName position expression
         listToMaybe (mapMaybe (hoverFromExpression snap moduleName position) pte.elements)
       ExpressionFieldAccess fae ->
         hoverFromExpression snap moduleName position fae.object
+      ExpressionTypeApplication tae ->
+        hoverFromExpression snap moduleName position tae.callee
       ExpressionTemplate te ->
         listToMaybe (mapMaybe (hoverFromTemplateElement snap moduleName position) te.elements)
       ExpressionHandle he ->
@@ -502,6 +505,7 @@ zonkedExpressionType = \case
   ExpressionFor e -> e.typeOf
   ExpressionBlock e -> e.typeOf
   ExpressionFieldAccess e -> e.typeOf
+  ExpressionTypeApplication e -> e.typeOf
   ExpressionTemplate e -> e.typeOf
   ExpressionHandle e -> e.typeOf
   ExpressionParTuple e -> e.typeOf
@@ -679,6 +683,8 @@ refFromExpression position expression
         listToMaybe (mapMaybe (refFromExpression position) pte.elements)
       ExpressionFieldAccess fae ->
         refFromExpression position fae.object
+      ExpressionTypeApplication tae ->
+        refFromExpression position tae.callee
       ExpressionTemplate te ->
         listToMaybe (mapMaybe (refFromTemplateElement position) te.elements)
       ExpressionHandle he ->
@@ -803,6 +809,8 @@ collectExpressionOccurrences expression index = case expression of
     foldr collectExpressionOccurrences index pte.elements
   ExpressionFieldAccess fae ->
     collectExpressionOccurrences fae.object index
+  ExpressionTypeApplication tae ->
+    collectExpressionOccurrences tae.callee index
   ExpressionTemplate te ->
     foldr collectTemplateElementOccurrences index te.elements
   ExpressionHandle he ->
