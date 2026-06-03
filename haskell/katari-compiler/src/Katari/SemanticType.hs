@@ -19,8 +19,6 @@
 module Katari.SemanticType where
 
 import Data.Map.Strict (Map)
-import Data.Set (Set)
-import Data.Set qualified as Set
 import Data.Text (Text)
 import Katari.Common (QualifiedName (..))
 
@@ -80,7 +78,7 @@ data SemanticType phase where
   SemanticTypeFunction ::
     Map Text (Parameter phase) ->
     SemanticType phase ->
-    SemanticRequest phase ->
+    SemanticEffect phase ->
     SemanticType phase
   -- | Top of the function-type lattice: any callable
   -- ('SemanticTypeFunction' with any params/return/effects) is a subtype.
@@ -149,45 +147,55 @@ unionSemantic = \case
   branches -> SemanticTypeUnion branches
 
 -- ---------------------------------------------------------------------------
--- Requests
+-- Effects
 -- ---------------------------------------------------------------------------
 
--- | A request (effect) set: the concrete @req@ qualified names an expression
--- can raise. Subtyping on requests is set inclusion. The @phase@ parameter is a
--- vestigial phantom (only @Resolved@ exists).
-data SemanticRequest phase where
-  SemanticRequest :: Set (SemanticRequestElement phase) -> SemanticRequest phase
+-- | An /effect expression/: the tree of @req@ effects an expression may raise,
+-- mirroring the surface @with@ syntax (@a | b | (c | d)@). Like 'SemanticType'
+-- (which keeps the un-normalised 'SemanticTypeUnion' tree rather than a
+-- canonical set), 'SemanticEffect' is the syntax-faithful describing form;
+-- 'Katari.Typechecker.NormalizedType' flattens it to a 'Set' for the lattice.
+-- The @phase@ parameter is a vestigial phantom (only @Resolved@ exists).
+--
+-- Once generics land, an effect-generic variable becomes another leaf of this
+-- tree (alongside 'SemanticEffectRequest').
+data SemanticEffect phase where
+  -- | A single concrete @req@ effect, by its qualified name.
+  SemanticEffectRequest :: QualifiedName -> SemanticEffect phase
+  -- | Union of effects (@e1 | e2 | ...@). Convention: 0 or 2+ branches — an
+  -- empty union is the pure / no-effect set, and a singleton flattens to its
+  -- branch. Always build via 'unionEffects' to maintain this.
+  SemanticEffectUnion :: [SemanticEffect phase] -> SemanticEffect phase
 
-deriving instance Show (SemanticRequest phase)
+deriving instance Show (SemanticEffect phase)
 
-deriving instance Eq (SemanticRequest phase)
+deriving instance Eq (SemanticEffect phase)
 
-deriving instance Ord (SemanticRequest phase)
+deriving instance Ord (SemanticEffect phase)
 
--- | One member of a 'SemanticRequest' set: a concrete element pointing at a
--- specific @req@ declaration by its 'QualifiedName'.
-data SemanticRequestElement phase where
-  SemanticRequestElementConcrete :: QualifiedName -> SemanticRequestElement phase
+-- | The empty (pure) effect — \"this expression performs no request\".
+-- Identity for 'unionEffect'.
+emptyEffect :: SemanticEffect phase
+emptyEffect = SemanticEffectUnion []
 
-deriving instance Show (SemanticRequestElement phase)
+-- | An effect containing exactly one concrete request.
+singletonEffect :: QualifiedName -> SemanticEffect phase
+singletonEffect = SemanticEffectRequest
 
-deriving instance Eq (SemanticRequestElement phase)
+-- | Smart union over effect trees: flattens nested unions so the result is a
+-- single top-level union of leaves, collapsing a singleton to its branch and
+-- an empty list to 'emptyEffect'. (Deduplication is left to normalisation —
+-- the tree stays faithful to what was written.)
+unionEffects :: [SemanticEffect phase] -> SemanticEffect phase
+unionEffects effects = case concatMap flatten effects of
+  [single] -> single
+  flat -> SemanticEffectUnion flat
+  where
+    flatten = \case
+      SemanticEffectUnion branches -> concatMap flatten branches
+      leaf -> [leaf]
 
-deriving instance Ord (SemanticRequestElement phase)
-
--- | The empty request set. Represents \"this expression performs no
--- request\". Identity for 'unionRequests'.
-emptyRequest :: SemanticRequest phase
-emptyRequest = SemanticRequest Set.empty
-
--- | A request set containing exactly one concrete request. Used when
--- the checker records that a particular call site triggers
--- a specific declared @req@.
-singletonRequest :: QualifiedName -> SemanticRequest phase
-singletonRequest requestId = SemanticRequest (Set.singleton (SemanticRequestElementConcrete requestId))
-
--- | Set union over request elements. Used to combine the request sets
--- of subexpressions (@e1 + e2@'s requests = @e1@'s ∪ @e2@'s).
-unionRequests :: SemanticRequest phase -> SemanticRequest phase -> SemanticRequest phase
-unionRequests (SemanticRequest elements1) (SemanticRequest elements2) =
-  SemanticRequest (Set.union elements1 elements2)
+-- | Binary union of two effect trees (@e1 | e2@). Combines the request sets of
+-- subexpressions (@e1 + e2@'s effects = @e1@'s ∪ @e2@'s).
+unionEffect :: SemanticEffect phase -> SemanticEffect phase -> SemanticEffect phase
+unionEffect leftEffect rightEffect = unionEffects [leftEffect, rightEffect]

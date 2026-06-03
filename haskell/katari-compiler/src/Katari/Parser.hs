@@ -2058,8 +2058,31 @@ parseGroupedType = do
 -- Requests / parameters
 -- ===========================================================================
 
+-- | Parse a @with@-clause /effect expression/: @a | b | (c | d)@. The grammar
+-- is @eff ::= term ('|' term)*@ and @term ::= '(' eff ')' | request_name@.
+-- Union is associative and flat, so the tree of @|@-unions and parenthesised
+-- groups is flattened into a list of request leaves (the AST keeps the leaf
+-- list; the un-normalised tree lives only in 'SemanticEffect'). A single
+-- trailing pipe is tolerated for multi-line declarations.
 parseRequests :: Parser [SyntacticRequest Parsed]
-parseRequests = parseRequest `sepBy1` parseComma
+parseRequests = do
+  first <- parseEffectTerm
+  rest <- many (try (parsePunctuation PunctuationPipe *> parseEffectTerm))
+  _ <- optional (try (parsePunctuation PunctuationPipe))
+  pure (concat (first : rest))
+
+-- | One term of an effect expression: a parenthesised sub-expression or a
+-- single request name. Returns its flattened leaf list.
+parseEffectTerm :: Parser [SyntacticRequest Parsed]
+parseEffectTerm =
+  choice
+    [ try $
+        between
+          (parsePunctuation PunctuationLeftParenthesis)
+          (parsePunctuation PunctuationRightParenthesis)
+          parseRequests,
+      (: []) <$> parseRequest
+    ]
 
 parseRequest :: Parser (SyntacticRequest Parsed)
 parseRequest = parseWithSpan $ do

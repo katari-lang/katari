@@ -191,7 +191,7 @@ data TypeData = TypeData
 
 -- | Metadata for a @req@ declaration. Keyed by 'QualifiedName' in
 -- 'IdentifierResult.identifiedRequests'. The 'requestId' is the semantic
--- identifier used by 'SemanticRequest' and the constraint solver. The
+-- identifier used by 'SemanticEffect' and the bidirectional checker. The
 -- request's call-side type lives in the type environment under the same
 -- 'QualifiedName' (via 'ResolvedTopLevel'), so no separate variable
 -- pointer is needed.

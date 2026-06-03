@@ -78,8 +78,7 @@ import Katari.Id
 import Katari.SemanticType
   ( Parameter (..),
     Resolved,
-    SemanticRequest (..),
-    SemanticRequestElement (..),
+    SemanticEffect (..),
     SemanticType (..),
   )
 import Katari.Typechecker.Identifier
@@ -671,12 +670,13 @@ jsonSchemaToText =
 -- Request schema expansion
 -- ===========================================================================
 
-buildRequestRefs :: SchemaContext -> SemanticRequest Resolved -> [RequestSchemaRef]
-buildRequestRefs ctx (SemanticRequest elements) =
-  mapMaybe buildRef (Set.toList elements)
+buildRequestRefs :: SchemaContext -> SemanticEffect Resolved -> [RequestSchemaRef]
+buildRequestRefs ctx effect =
+  mapMaybe (buildRequestRef ctx) (Set.toList (Set.fromList (effectRequests effect)))
   where
-    buildRef (SemanticRequestElementConcrete qualifiedName) =
-      buildRequestRef ctx qualifiedName
+    effectRequests = \case
+      SemanticEffectRequest qualifiedName -> [qualifiedName]
+      SemanticEffectUnion branches -> concatMap effectRequests branches
 
 buildRequestRef :: SchemaContext -> QualifiedName -> Maybe RequestSchemaRef
 buildRequestRef ctx qualifiedName = do

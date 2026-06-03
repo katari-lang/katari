@@ -14,8 +14,8 @@ import Katari.Diagnostic (Diagnostic (..))
 import Katari.Schema
 import Katari.SemanticType
   ( Resolved,
-    SemanticRequest (..),
     SemanticType (..),
+    emptyEffect,
   )
 import Test.Hspec
 
@@ -99,7 +99,7 @@ toJsonSchemaSpec = describe "toJsonSchema (SemanticType -> JsonSchema)" $ do
           SemanticTypeFunction
             Map.empty
             SemanticTypeNull
-            (SemanticRequest Set.empty)
+            emptyEffect
     case simpleToJson t of
       SchemaCoreObject {properties, required, additionalProperties} -> do
         Map.keys properties `shouldBe` ["$agent"]

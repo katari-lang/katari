@@ -62,7 +62,7 @@ import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Katari.Common (QualifiedName)
-import Katari.SemanticType (Parameter (..), Resolved, SemanticRequest (..), SemanticRequestElement (..), SemanticType (..))
+import Katari.SemanticType (Parameter (..), Resolved, SemanticEffect (..), SemanticType (..), unionEffects)
 
 -- ---------------------------------------------------------------------------
 -- NormalizedType
@@ -324,7 +324,7 @@ functionBranches = \case
             parameters
         )
         (denormalise returnType)
-        (SemanticRequest $ Set.map SemanticRequestElementConcrete requests)
+        (unionEffects (SemanticEffectRequest <$> Set.toList requests))
 
 seqBranches :: BareSeq -> [SemanticType Resolved]
 seqBranches = \case
@@ -448,7 +448,7 @@ normaliseSemantic = \case
       emptyLayered
         { mapLayer = emptyMapSlot {bare = RecordObj (normaliseSemantic valueType)}
         }
-  SemanticTypeFunction parameterMap returnType (SemanticRequest requests) ->
+  SemanticTypeFunction parameterMap returnType effect ->
     let shape =
           FunctionShape
             { parameters =
@@ -456,15 +456,19 @@ normaliseSemantic = \case
                   (\parameter -> NormalizedParameter {parameterType = normaliseSemantic parameter.parameterType, optional = parameter.optional})
                   parameterMap,
               returnType = normaliseSemantic returnType,
-              requests =
-                Set.map
-                  ( \(SemanticRequestElementConcrete requestId) -> requestId
-                  )
-                  requests
+              requests = flattenEffect effect
             }
      in NormalizedTypeLayered emptyLayered {functionLayer = FunctionSlotOf shape}
   SemanticTypeUnion branches ->
     foldr (unionNT . normaliseSemantic) (NormalizedTypeLayered emptyLayered) branches
+
+-- | Flatten an effect tree into its canonical set of concrete request names —
+-- the normalised (lattice) form of an effect. The product-normalisation
+-- analogue for effects: the @|@-tree collapses to set union.
+flattenEffect :: SemanticEffect Resolved -> Set QualifiedName
+flattenEffect = \case
+  SemanticEffectRequest qualifiedName -> Set.singleton qualifiedName
+  SemanticEffectUnion branches -> Set.unions (map flattenEffect branches)
 
 -- ---------------------------------------------------------------------------
 -- Union (least upper bound)

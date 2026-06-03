@@ -9,7 +9,7 @@ import Data.Text qualified as Text
 import Katari.Compile qualified as C
 import Katari.Query qualified as Query
 import Katari.Query.Completion
-import Katari.SemanticType (SemanticType (..), emptyRequest, requiredParameter)
+import Katari.SemanticType (SemanticType (..), emptyEffect, requiredParameter)
 import Katari.SourceSpan (Position (..))
 import Katari.TestSupport (compileSync)
 import Test.Hspec
@@ -263,7 +263,7 @@ spec = describe "Katari.Query.Completion" $ do
           SemanticTypeFunction
             (Map.singleton "name" (requiredParameter SemanticTypeString))
             SemanticTypeString
-            emptyRequest
+            emptyEffect
         fn2 =
           SemanticTypeFunction
             ( Map.fromList
@@ -272,7 +272,7 @@ spec = describe "Katari.Query.Completion" $ do
                 ]
             )
             SemanticTypeString
-            emptyRequest
+            emptyEffect
         union = SemanticTypeUnion [fn1, fn2]
         items = completionsOfCallLabels union Set.empty
     completionLabels items `shouldMatchList` ["name"]

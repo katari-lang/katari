@@ -7,12 +7,11 @@
 -- whole 'IdentifierResult' to this layer.
 module Katari.SemanticType.Render
   ( renderSemanticType,
-    renderSemanticRequest,
+    renderSemanticEffect,
   )
 where
 
 import Data.Map.Strict qualified as Map
-import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Katari.Common (QualifiedName (..))
@@ -61,7 +60,7 @@ renderSemanticType = render False
                 [ k <> (if parameter.optional then "?: " else ": ") <> render False parameter.parameterType
                   | (k, parameter) <- Map.toAscList parameters
                 ]
-            effectsText = renderSemanticRequest effects
+            effectsText = renderSemanticEffect effects
             body =
               "("
                 <> parameterText
@@ -73,18 +72,15 @@ renderSemanticType = render False
                    )
          in if parenthesise then "(" <> body <> ")" else body
 
--- | Render a 'SemanticRequest' as @{a, b, c}@. Empty requests render
--- to the empty string (caller decides whether to elide a leading
--- @with@).
-renderSemanticRequest ::
-  ST.SemanticRequest ST.Resolved ->
+-- | Render a 'SemanticEffect' as @a | b | c@ (the surface @with@ syntax),
+-- flattening the union tree. The empty (pure) effect renders to the empty
+-- string (the caller decides whether to elide a leading @with@).
+renderSemanticEffect ::
+  ST.SemanticEffect ST.Resolved ->
   Text
-renderSemanticRequest (ST.SemanticRequest elements) =
-  let names = [renderElem e | e <- Set.toAscList elements]
-   in if null names
-        then ""
-        else "{" <> Text.intercalate ", " names <> "}"
+renderSemanticEffect = Text.intercalate " | " . leaves
   where
-    renderElem :: ST.SemanticRequestElement ST.Resolved -> Text
-    renderElem = \case
-      ST.SemanticRequestElementConcrete qualifiedName -> qualifiedName.name
+    leaves :: ST.SemanticEffect ST.Resolved -> [Text]
+    leaves = \case
+      ST.SemanticEffectRequest qualifiedName -> [qualifiedName.name]
+      ST.SemanticEffectUnion branches -> concatMap leaves branches

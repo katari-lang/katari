@@ -263,15 +263,13 @@ resolveTypeRef nameRef = case nameRef.resolution of
 
 -- | Elaborate a @with@ clause into a concrete request set (only names that are
 -- known requests contribute).
-elaborateRequestList :: [SyntacticRequest Identified] -> Check (SemanticRequest Resolved)
+elaborateRequestList :: [SyntacticRequest Identified] -> Check (SemanticEffect Resolved)
 elaborateRequestList syntacticRequests =
   pure
-    ( SemanticRequest
-        ( Set.fromList
-            [ SemanticRequestElementConcrete qualifiedName
-              | SyntacticRequest {name = NameRef {resolution = Just qualifiedName}} <- syntacticRequests
-            ]
-        )
+    ( unionEffects
+        [ SemanticEffectRequest qualifiedName
+          | SyntacticRequest {name = NameRef {resolution = Just qualifiedName}} <- syntacticRequests
+        ]
     )
 
 primitiveToSemantic :: PrimitiveTypeKind -> SemanticType phase
@@ -715,14 +713,14 @@ walkLocalAgent AgentStatement {annotation, name, parameters, returnType, withReq
   declaredReturn <- traverse elaborateType returnType
   -- Recursive local agents need their return annotation; bind the signature up
   -- front when one is present so recursive calls resolve.
-  let selfBinding ret = maybe [] (\resolution -> [(resolution, SemanticTypeFunction paramSig ret emptyRequest)]) name.resolution
+  let selfBinding ret = maybe [] (\resolution -> [(resolution, SemanticTypeFunction paramSig ret emptyEffect)]) name.resolution
   (body', bodyType) <-
     withLocals (paramLocals ++ maybe [] selfBinding declaredReturn) $
       case declaredReturn of
         Just ret -> withExpectedReturn ret (walkBlock body)
         Nothing -> walkBlock body
   let returnSemantic = maybe bodyType id declaredReturn
-      functionType = SemanticTypeFunction paramSig returnSemantic emptyRequest
+      functionType = SemanticTypeFunction paramSig returnSemantic emptyEffect
       bindings = maybe [] (\resolution -> [(resolution, functionType)]) name.resolution
   pure
     ( StatementAgent
@@ -992,8 +990,20 @@ patchResultEffect published (qualifiedName, declaration, sig) =
 setEffect :: Set QualifiedName -> SemanticType Resolved -> SemanticType Resolved
 setEffect effect = \case
   SemanticTypeFunction params ret _ ->
-    SemanticTypeFunction params ret (SemanticRequest (Set.map SemanticRequestElementConcrete effect))
+    SemanticTypeFunction params ret (effectFromSet effect)
   other -> other
+
+-- | Build an effect tree from a (normalised) concrete request set. The leaves
+-- come out in qualified-name order for determinism.
+effectFromSet :: Set QualifiedName -> SemanticEffect Resolved
+effectFromSet requests = unionEffects (SemanticEffectRequest <$> Set.toList requests)
+
+-- | Flatten an effect tree to its concrete request set (inverse of
+-- 'effectFromSet'). Effect inference works over these sets internally.
+effectRequestSet :: SemanticEffect Resolved -> Set QualifiedName
+effectRequestSet = \case
+  SemanticEffectRequest qualifiedName -> Set.singleton qualifiedName
+  SemanticEffectUnion branches -> Set.unions (map effectRequestSet branches)
 
 isAgentDeclaration :: Declaration phase -> Bool
 isAgentDeclaration = \case DeclarationAgent _ -> True; _ -> False
@@ -1004,7 +1014,7 @@ checkNonAgentDeclaration = \case
   DeclarationData DataDeclaration {annotation, name, constructorName, typeName, parameters, sourceSpan} -> do
     fields <- mapM (\DataParameter {name = fieldName, parameterType} -> (fieldName,) <$> elaborateType parameterType) parameters
     let returnType = maybe SemanticTypeUnknown SemanticTypeData typeName.resolution
-        sig = SemanticTypeFunction (requiredParameter <$> Map.fromList fields) returnType emptyRequest
+        sig = SemanticTypeFunction (requiredParameter <$> Map.fromList fields) returnType emptyEffect
         zonked =
           DeclarationData
             DataDeclaration
@@ -1020,8 +1030,8 @@ checkNonAgentDeclaration = \case
     (parameters', paramSig, _) <- elaborateParameters parameters
     ret <- elaborateType returnType
     let effect = case requestName.resolution of
-          Just qualifiedName | not (isThrowRequest qualifiedName) -> singletonRequestSet qualifiedName
-          _ -> emptyRequest
+          Just qualifiedName | not (isThrowRequest qualifiedName) -> singletonEffect qualifiedName
+          _ -> emptyEffect
         sig = SemanticTypeFunction paramSig ret effect
         zonked =
           DeclarationRequest
@@ -1100,7 +1110,7 @@ seedAgentSignature AgentDeclaration {name, parameters, returnType, withRequests,
     Nothing -> do
       emitError (CheckErrorRecursiveReturn sourceSpan name.text)
       pure SemanticTypeUnknown
-  effect <- maybe (pure emptyRequest) elaborateRequestList withRequests
+  effect <- maybe (pure emptyEffect) elaborateRequestList withRequests
   pure (maybe [] (\qualifiedName -> [(qualifiedName, SemanticTypeFunction paramSig ret effect)]) (topLevelQName name))
 
 checkAgentResult :: AgentDeclaration Identified -> Check SCCResult
@@ -1117,7 +1127,7 @@ checkAgentDeclaration :: AgentDeclaration Identified -> Check (Declaration Zonke
 checkAgentDeclaration AgentDeclaration {annotation, name, parameters, returnType, withRequests, body, sourceSpan} = do
   (parameters', paramSig, paramLocals) <- elaborateParameters parameters
   declaredReturn <- traverse elaborateType returnType
-  effect <- maybe (pure emptyRequest) elaborateRequestList withRequests
+  effect <- maybe (pure emptyEffect) elaborateRequestList withRequests
   (body', returnSemantic) <-
     withLocals paramLocals $ case declaredReturn of
       Just ret -> withExpectedReturn ret $ do
@@ -1158,9 +1168,6 @@ retagDataParameter DataParameter {annotation, name, parameterType, sourceSpan} =
 withQName :: NameRef Identified VariableRef -> Declaration Zonked -> SemanticType Resolved -> Maybe SCCResult
 withQName name zonked sig = (\qualifiedName -> (qualifiedName, zonked, sig)) <$> topLevelQName name
 
-singletonRequestSet :: QualifiedName -> SemanticRequest Resolved
-singletonRequestSet qualifiedName = SemanticRequest (Set.singleton (SemanticRequestElementConcrete qualifiedName))
-
 isThrowRequest :: QualifiedName -> Bool
 isThrowRequest qualifiedName = qualifiedName.module_ == "primitive" && qualifiedName.name == "throw"
 
@@ -1182,8 +1189,7 @@ type EffectLookup = QualifiedName -> Set QualifiedName
 -- | Extract the concrete request set from a callable's function signature.
 effectOfSignature :: SemanticType Resolved -> Set QualifiedName
 effectOfSignature = \case
-  SemanticTypeFunction _ _ (SemanticRequest elements) ->
-    Set.fromList [qualifiedName | SemanticRequestElementConcrete qualifiedName <- Set.toList elements]
+  SemanticTypeFunction _ _ effect -> effectRequestSet effect
   _ -> Set.empty
 
 -- | Least fixpoint of the SCC agents' effects. Annotated agents are pinned to

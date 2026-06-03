@@ -860,7 +860,11 @@ declarations = describe "declarations" $ do
     shouldFail "agent foo(x: integer = y) -> integer { x }"
 
   it "parses agent with requests" $ do
-    _ <- shouldSucceed "agent foo() with req1, req2 { 1 }"
+    _ <- shouldSucceed "agent foo() with req1 | req2 { 1 }"
+    pure ()
+
+  it "parses agent with a parenthesised effect expression" $ do
+    _ <- shouldSucceed "agent foo() with (req1 | req2) | req3 { 1 }"
     pure ()
 
   it "parses agent with annotation" $ do
@@ -908,7 +912,7 @@ declarations = describe "declarations" $ do
     pure ()
 
   it "parses external with multiple requests" $ do
-    _ <- shouldSucceed "external ask(prompt: string) -> string with ai_req, log_req from \"FFI:lib.ask\""
+    _ <- shouldSucceed "external ask(prompt: string) -> string with ai_req | log_req from \"FFI:lib.ask\""
     pure ()
 
   it "parses external with annotation" $ do
@@ -1447,7 +1451,7 @@ types = describe "types" $ do
   it "parses agent type with multiple requests" $ do
     _ <-
       shouldSucceed
-        "agent main(f: agent (x: integer) -> integer with req1, req2) { f(x = 1) }"
+        "agent main(f: agent (x: integer) -> integer with req1 | req2) { f(x = 1) }"
     pure ()
 
   it "parses never type as return type" $ do
