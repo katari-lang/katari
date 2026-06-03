@@ -31,17 +31,21 @@ module Katari.Typechecker.Check
   )
 where
 
+import Control.Monad (forM, forM_)
 import Control.Monad.Reader
 import Control.Monad.State.Strict
+import Data.List (transpose)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
+import Data.Maybe (mapMaybe)
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Katari.AST
-import Katari.Common (LiteralValue (..), QualifiedName (..))
+import Katari.Common (LiteralValue (..), QualifiedName (..), TypePatternTag (..))
 import Katari.Diagnostic (Diagnostic, diagnosticError)
-import Katari.Id (VariableResolution)
+import Katari.Id (VariableResolution (..))
+import Katari.Prim (PrimRule (..))
 import Katari.SemanticType
 import Katari.SourceSpan (HasSourceSpan (..), SourceSpan)
 import Katari.Typechecker.Identifier (TypeData (..))
@@ -100,15 +104,28 @@ data CheckEnv = CheckEnv
     -- | Type synonyms currently being expanded (cycle detection).
     checkSynonymVisited :: Set QualifiedName,
     -- | Local variable types — parameters, @let@ bindings, pattern bindings,
-    -- state vars — and the module's own top-level callable signatures, all
-    -- keyed by 'VariableResolution'.
+    -- state vars — and the module's own + imported top-level callable
+    -- signatures, all keyed by 'VariableResolution'.
     checkLocals :: Map VariableResolution (SemanticType Resolved),
+    -- | Prim rules (operator / array prims whose result type isn't a plain
+    -- signature). Keyed by the prim's qualified name.
+    checkPrimRules :: Map QualifiedName PrimRule,
     -- | The enclosing agent body's declared / expected return type, if any.
     checkExpectedReturn :: Maybe (SemanticType Resolved)
   }
 
-newtype CheckState = CheckState
-  { stateErrors :: [CheckError]
+-- | Where a non-local control transfer goes — used to collect the value types
+-- a @for@ / handle expression can produce via @break@ / @next@.
+data ExitTag = ForBreakTag | HandleBreakTag | HandleNextTag
+  deriving (Eq, Show)
+
+data ExitRecord = ExitRecord ExitTag (SemanticType Resolved)
+
+data CheckState = CheckState
+  { stateErrors :: [CheckError],
+    -- | Pending @break@ / @next@ value types, consumed by the nearest
+    -- enclosing @for@ / handle scope (see 'collectExits').
+    stateExits :: [ExitRecord]
   }
 
 type Check = ReaderT CheckEnv (State CheckState)
@@ -117,14 +134,44 @@ type Check = ReaderT CheckEnv (State CheckState)
 -- accumulated diagnostics (in source order).
 runCheck :: CheckEnv -> Check a -> (a, [CheckError])
 runCheck env action =
-  let (result, finalState) = runState (runReaderT action env) (CheckState [])
+  let (result, finalState) = runState (runReaderT action env) (CheckState [] [])
    in (result, reverse finalState.stateErrors)
 
 emitError :: CheckError -> Check ()
-emitError err = modify' $ \s -> CheckState (err : s.stateErrors)
+emitError err = modify' $ \s -> s {stateErrors = err : s.stateErrors}
 
 lookupLocal :: VariableResolution -> Check (Maybe (SemanticType Resolved))
 lookupLocal resolution = asks (Map.lookup resolution . (.checkLocals))
+
+-- | Extend the local environment for the duration of an action.
+withLocals :: [(VariableResolution, SemanticType Resolved)] -> Check a -> Check a
+withLocals bindings =
+  local (\e -> e {checkLocals = Map.union (Map.fromList bindings) e.checkLocals})
+
+-- | Set the enclosing agent's expected return type.
+withExpectedReturn :: SemanticType Resolved -> Check a -> Check a
+withExpectedReturn expected = local (\e -> e {checkExpectedReturn = Just expected})
+
+-- | Record a pending exit value (a @break@ / @next@ payload) for the nearest
+-- enclosing scope to collect.
+recordExit :: ExitTag -> SemanticType Resolved -> Check ()
+recordExit tag semantic = modify' $ \s -> s {stateExits = ExitRecord tag semantic : s.stateExits}
+
+-- | Run an action, then peel off the exits matching @tags@ that it recorded,
+-- returning their value types. Non-matching exits are left in place so they
+-- propagate to an outer scope (a @break@ inside a @for@ targets an enclosing
+-- handle, etc.).
+collectExits :: [ExitTag] -> Check a -> Check (a, [SemanticType Resolved])
+collectExits tags action = do
+  before <- gets (.stateExits)
+  result <- action
+  after <- gets (.stateExits)
+  let added = take (length after - length before) after
+      (matching, rest) = foldr partition ([], []) added
+      partition rec@(ExitRecord tag semantic) (yes, no) =
+        if tag `elem` tags then (semantic : yes, no) else (yes, rec : no)
+  modify' $ \s -> s {stateExits = rest ++ before}
+  pure (result, matching)
 
 -- ===========================================================================
 -- Type elaboration (SyntacticType Identified -> SemanticType Resolved)
@@ -155,7 +202,7 @@ elaborateType = \case
   TypeRecord RecordTypeNode {valueType} ->
     SemanticTypeRecord <$> elaborateType valueType
   TypeObject ObjectTypeNode {fields} ->
-    SemanticTypeObject . Map.fromList <$> mapM (\(label, fieldType) -> (label,) <$> elaborateType fieldType) fields
+    SemanticTypeObject . Map.fromList <$> mapM (\(label, fieldSyntactic) -> (label,) <$> elaborateType fieldSyntactic) fields
 
 resolveTypeRef :: NameRef Identified TypeRef -> Check (SemanticType Resolved)
 resolveTypeRef nameRef = case nameRef.resolution of
@@ -238,17 +285,23 @@ synthExpr = \case
     let semantic = literalValueToSemantic value
      in pure (ExpressionLiteral LiteralExpression {value = value, sourceSpan = sourceSpan, typeOf = semantic}, semantic)
   ExpressionVariable VariableExpression {name, sourceSpan} -> do
-    semantic <- case name.resolution of
-      Just resolution ->
-        lookupLocal resolution >>= \case
-          Just found -> pure found
-          Nothing -> emitError (CheckErrorUnresolvedVariable sourceSpan name.text) >> pure SemanticTypeUnknown
-      Nothing -> emitError (CheckErrorUnresolvedVariable sourceSpan name.text) >> pure SemanticTypeUnknown
+    semantic <- lookupVariableType sourceSpan name.text name.resolution
     pure (ExpressionVariable VariableExpression {name = retagNameRef name, sourceSpan = sourceSpan, typeOf = semantic}, semantic)
+  ExpressionQualifiedReference QualifiedReferenceExpression {moduleQualifier, target, sourceSpan} -> do
+    semantic <- lookupVariableType sourceSpan target.text target.resolution
+    pure
+      ( ExpressionQualifiedReference
+          QualifiedReferenceExpression {moduleQualifier = retagNameRef moduleQualifier, target = retagNameRef target, sourceSpan = sourceSpan, typeOf = semantic},
+        semantic
+      )
   ExpressionTuple TupleExpression {elements, sourceSpan} -> do
     walked <- mapM synthExpr elements
     let semantic = SemanticTypeTuple (map snd walked)
     pure (ExpressionTuple TupleExpression {elements = map fst walked, sourceSpan = sourceSpan, typeOf = semantic}, semantic)
+  ExpressionParTuple ParTupleExpression {elements, sourceSpan} -> do
+    walked <- mapM synthExpr elements
+    let semantic = SemanticTypeTuple (map snd walked)
+    pure (ExpressionParTuple ParTupleExpression {elements = map fst walked, sourceSpan = sourceSpan, typeOf = semantic}, semantic)
   ExpressionRecord RecordExpression {entries, sourceSpan} -> do
     walked <- mapM (\(label, e) -> (,) label <$> synthExpr e) entries
     let semantic = SemanticTypeObject (Map.fromList [(label, snd we) | (label, we) <- walked])
@@ -256,35 +309,524 @@ synthExpr = \case
       ( ExpressionRecord RecordExpression {entries = [(label, fst we) | (label, we) <- walked], sourceSpan = sourceSpan, typeOf = semantic},
         semantic
       )
-  other -> unsupported other
+  ExpressionCall callExpr -> synthCall callExpr
+  ExpressionIf ifExpr -> synthIf ifExpr
+  ExpressionMatch matchExpr -> synthMatch matchExpr
+  ExpressionFor forExpr -> synthFor forExpr
+  ExpressionHandle handleExpr -> synthHandle handleExpr
+  ExpressionBlock BlockExpression {block, sourceSpan} -> do
+    (block', semantic) <- walkBlock block
+    pure (ExpressionBlock BlockExpression {block = block', sourceSpan = sourceSpan, typeOf = semantic}, semantic)
+  ExpressionFieldAccess FieldAccessExpression {object, fieldName, sourceSpan} -> do
+    (object', objectType) <- synthExpr object
+    semantic <- fieldType sourceSpan objectType fieldName.text
+    pure
+      ( ExpressionFieldAccess FieldAccessExpression {object = object', fieldName = retagNameRef fieldName, sourceSpan = sourceSpan, typeOf = semantic},
+        semantic
+      )
+  ExpressionIndexAccess IndexAccessExpression {array, index, sourceSpan} -> do
+    (array', arrayType) <- synthExpr array
+    index' <- checkExpr index SemanticTypeInteger
+    let semantic = seqElementType arrayType
+    pure
+      ( ExpressionIndexAccess IndexAccessExpression {array = array', index = index', sourceSpan = sourceSpan, typeOf = semantic},
+        semantic
+      )
+  ExpressionTemplate TemplateExpression {elements, sourceSpan} -> do
+    walked <- mapM walkTemplateElement elements
+    let interpolated = mapMaybe snd walked
+    let semantic = unionSemantic (SemanticTypeString : interpolated)
+    pure (ExpressionTemplate TemplateExpression {elements = map fst walked, sourceSpan = sourceSpan, typeOf = semantic}, semantic)
+  ExpressionBinaryOperator BinaryOperatorExpression {sourceSpan} -> internalNull sourceSpan "BinaryOperator survived past the Identifier desugar"
+  ExpressionUnaryOperator UnaryOperatorExpression {sourceSpan} -> internalNull sourceSpan "UnaryOperator survived past the Identifier desugar"
 
--- | Placeholder for forms not yet handled: record a diagnostic and yield a
--- @null@ literal of @unknown@ type so the walk stays total. WIP only.
-unsupported :: Expression Identified -> Check (Expression Zonked, SemanticType Resolved)
-unsupported expression = do
-  let sourceSpan = sourceSpanOf expression
-  emitError (CheckErrorUnsupported sourceSpan (formName expression))
+-- | Look up a variable / top-level callable reference's type.
+lookupVariableType :: SourceSpan -> Text -> Maybe VariableResolution -> Check (SemanticType Resolved)
+lookupVariableType sourceSpan name = \case
+  Just resolution ->
+    lookupLocal resolution >>= \case
+      Just found -> pure found
+      Nothing -> emitError (CheckErrorUnresolvedVariable sourceSpan name) >> pure SemanticTypeUnknown
+  Nothing -> emitError (CheckErrorUnresolvedVariable sourceSpan name) >> pure SemanticTypeUnknown
+
+-- | A form that the Identifier pass should have eliminated — record an
+-- internal-invariant diagnostic and yield a @null@ placeholder.
+internalNull :: SourceSpan -> Text -> Check (Expression Zonked, SemanticType Resolved)
+internalNull sourceSpan reason = do
+  emitError (CheckErrorUnsupported sourceSpan ("internal invariant: " <> reason))
+  pure (ExpressionLiteral LiteralExpression {value = LiteralValueNull, sourceSpan = sourceSpan, typeOf = SemanticTypeNull}, SemanticTypeNull)
+
+walkTemplateElement :: TemplateElement Identified -> Check (TemplateElement Zonked, Maybe (SemanticType Resolved))
+walkTemplateElement = \case
+  TemplateElementString TemplateStringElement {value, sourceSpan} ->
+    pure (TemplateElementString TemplateStringElement {value = value, sourceSpan = sourceSpan}, Nothing)
+  TemplateElementExpression TemplateExpressionElement {value, sourceSpan} -> do
+    (value', valueType) <- synthExpr value
+    subtypeAssert sourceSpan valueType (SemanticTypeUnion [SemanticTypeString, SemanticTypeSecret])
+    pure (TemplateElementExpression TemplateExpressionElement {value = value', sourceSpan = sourceSpan}, Just valueType)
+
+-- ---------------------------------------------------------------------------
+-- Call
+-- ---------------------------------------------------------------------------
+
+synthCall :: CallExpression Identified -> Check (Expression Zonked, SemanticType Resolved)
+synthCall CallExpression {callee, arguments, sourceSpan} = do
+  (callee', calleeType) <- synthExpr callee
+  walkedArgs <- mapM walkCallArgument arguments
+  let arguments' = map fst walkedArgs
+      argTypes = Map.fromList [(label, argType) | (_, (label, argType)) <- walkedArgs]
+  primRule <- calleePrimRule callee
+  result <- case primRule of
+    Just rule | rule /= PrimRuleSimple -> applyPrimRule rule argTypes sourceSpan
+    _ -> applyNormalCall sourceSpan calleeType argTypes
+  pure (ExpressionCall CallExpression {callee = callee', arguments = arguments', sourceSpan = sourceSpan, typeOf = result}, result)
+
+walkCallArgument :: CallArgument Identified -> Check (CallArgument Zonked, (Text, SemanticType Resolved))
+walkCallArgument CallArgument {label, value, sourceSpan} = do
+  (value', valueType) <- synthExpr value
+  pure (CallArgument {label = retagNameRef label, value = value', sourceSpan = sourceSpan}, (label.text, valueType))
+
+-- | Does the callee resolve to a prim with a special result rule?
+calleePrimRule :: Expression Identified -> Check (Maybe PrimRule)
+calleePrimRule = \case
+  ExpressionVariable VariableExpression {name = NameRef {resolution = Just (ResolvedTopLevel qualifiedName)}} ->
+    asks (Map.lookup qualifiedName . (.checkPrimRules))
+  ExpressionQualifiedReference QualifiedReferenceExpression {target = NameRef {resolution = Just (ResolvedTopLevel qualifiedName)}} ->
+    asks (Map.lookup qualifiedName . (.checkPrimRules))
+  _ -> pure Nothing
+
+-- | Generic call: the callee must be a function; each supplied argument is a
+-- subtype of its parameter; the result is the declared return type.
+applyNormalCall :: SourceSpan -> SemanticType Resolved -> Map Text (SemanticType Resolved) -> Check (SemanticType Resolved)
+applyNormalCall sourceSpan calleeType argTypes = case calleeType of
+  SemanticTypeFunction params returnType _ -> do
+    forM_ (Map.toList params) $ \(label, parameter) ->
+      case Map.lookup label argTypes of
+        Just argType -> subtypeAssert sourceSpan argType parameter.parameterType
+        Nothing
+          | parameter.optional -> pure ()
+          | otherwise -> emitError (CheckErrorUnsupported sourceSpan ("missing required argument '" <> label <> "'"))
+    pure returnType
+  SemanticTypeFunctionAny -> pure SemanticTypeUnknown
+  SemanticTypeUnknown -> pure SemanticTypeUnknown
+  _ -> do
+    emitError (CheckErrorTypeMismatch sourceSpan calleeType SemanticTypeFunctionAny)
+    pure SemanticTypeUnknown
+
+-- | Result-type rules for the prims whose result is not a plain signature
+-- (operators, array shape ops). Computed directly on concrete argument types.
+applyPrimRule :: PrimRule -> Map Text (SemanticType Resolved) -> SourceSpan -> Check (SemanticType Resolved)
+applyPrimRule rule argTypes sourceSpan =
+  let arg label = Map.findWithDefault SemanticTypeUnknown label argTypes
+   in case rule of
+        PrimRuleNumericJoinBinary -> do
+          subtypeAssert sourceSpan (arg "lhs") SemanticTypeNumber
+          subtypeAssert sourceSpan (arg "rhs") SemanticTypeNumber
+          pure (unionSemantic [arg "lhs", arg "rhs", SemanticTypeInteger])
+        PrimRuleNumericJoinUnary -> do
+          subtypeAssert sourceSpan (arg "value") SemanticTypeNumber
+          pure (unionSemantic [arg "value", SemanticTypeInteger])
+        PrimRuleFstringJoin -> do
+          let stringOrSecret = SemanticTypeUnion [SemanticTypeString, SemanticTypeSecret]
+          mapM_ (\argType -> subtypeAssert sourceSpan argType stringOrSecret) (Map.elems argTypes)
+          pure (unionSemantic (SemanticTypeString : Map.elems argTypes))
+        PrimRuleArrayGet -> do
+          subtypeAssert sourceSpan (arg "index") SemanticTypeInteger
+          pure (seqElementType (arg "array"))
+        PrimRuleArrayShape ->
+          let elements =
+                concat
+                  [ seqElementType <$> mapMaybe (`Map.lookup` argTypes) ["array", "lhs", "rhs"],
+                    maybe [] pure (Map.lookup "value" argTypes)
+                  ]
+           in pure (SemanticTypeArray (unionSemantic elements))
+        PrimRuleSimple -> pure SemanticTypeUnknown
+
+-- ---------------------------------------------------------------------------
+-- if / match / for / handle
+-- ---------------------------------------------------------------------------
+
+synthIf :: IfExpression Identified -> Check (Expression Zonked, SemanticType Resolved)
+synthIf IfExpression {condition, thenBlock, elseBlock, sourceSpan} = do
+  condition' <- checkExpr condition SemanticTypeBoolean
+  (thenBlock', thenType) <- walkBlock thenBlock
+  (elseBlock', elseType) <- case elseBlock of
+    Just b -> do (b', ty) <- walkBlock b; pure (Just b', ty)
+    Nothing -> pure (Nothing, SemanticTypeNull)
+  let semantic = unionSemantic [thenType, elseType]
   pure
-    ( ExpressionLiteral LiteralExpression {value = LiteralValueNull, sourceSpan = sourceSpan, typeOf = SemanticTypeUnknown},
-      SemanticTypeUnknown
+    ( ExpressionIf IfExpression {condition = condition', thenBlock = thenBlock', elseBlock = elseBlock', sourceSpan = sourceSpan, typeOf = semantic},
+      semantic
     )
 
-formName :: Expression phase -> Text
-formName = \case
-  ExpressionLiteral _ -> "literal"
-  ExpressionVariable _ -> "variable"
-  ExpressionTuple _ -> "tuple"
-  ExpressionRecord _ -> "record"
-  ExpressionCall _ -> "call"
-  ExpressionBinaryOperator _ -> "binary operator"
-  ExpressionUnaryOperator _ -> "unary operator"
-  ExpressionIf _ -> "if"
-  ExpressionMatch _ -> "match"
-  ExpressionFor _ -> "for"
-  ExpressionBlock _ -> "block"
-  ExpressionFieldAccess _ -> "field access"
-  ExpressionIndexAccess _ -> "index access"
-  ExpressionTemplate _ -> "template literal"
-  ExpressionHandle _ -> "handle"
-  ExpressionParTuple _ -> "par tuple"
-  ExpressionQualifiedReference _ -> "qualified reference"
+synthMatch :: MatchExpression Identified -> Check (Expression Zonked, SemanticType Resolved)
+synthMatch MatchExpression {subject, cases, sourceSpan} = do
+  (subject', subjectType) <- synthExpr subject
+  walked <- mapM (walkCaseArm subjectType) cases
+  let semantic = unionSemantic (map snd walked)
+  pure (ExpressionMatch MatchExpression {subject = subject', cases = map fst walked, sourceSpan = sourceSpan, typeOf = semantic}, semantic)
+
+walkCaseArm :: SemanticType Resolved -> CaseArm Identified -> Check (CaseArm Zonked, SemanticType Resolved)
+walkCaseArm subjectType CaseArm {pattern, body, sourceSpan} = do
+  (pattern', bindings) <- walkPattern subjectType pattern
+  (body', bodyType) <- withLocals bindings (walkBlock body)
+  pure (CaseArm {pattern = pattern', body = body', sourceSpan = sourceSpan}, bodyType)
+
+synthFor :: ForExpression Identified -> Check (Expression Zonked, SemanticType Resolved)
+synthFor ForExpression {parallel, inBindings, varBindings, body, thenBlock, sourceSpan} = do
+  (inBindings', inLocals) <- unzipBindings <$> mapM walkForInBinding inBindings
+  (varBindings', varLocals) <- unzipBindings <$> mapM walkForVarBinding varBindings
+  let loopLocals = inLocals ++ varLocals
+  ((body', thenBlock', thenType), breakTypes) <-
+    collectExits [ForBreakTag] $
+      withLocals loopLocals $ do
+        (body', _) <- walkBlock body
+        (thenBlock', thenType) <- case thenBlock of
+          Just b -> do (b', ty) <- walkBlock b; pure (Just b', ty)
+          Nothing -> pure (Nothing, SemanticTypeNull)
+        pure (body', thenBlock', thenType)
+  let semantic = unionSemantic (thenType : breakTypes)
+  pure
+    ( ExpressionFor ForExpression {parallel = parallel, inBindings = inBindings', varBindings = varBindings', body = body', thenBlock = thenBlock', sourceSpan = sourceSpan, typeOf = semantic},
+      semantic
+    )
+
+unzipBindings :: [(a, [b])] -> ([a], [b])
+unzipBindings xs = (map fst xs, concatMap snd xs)
+
+walkForInBinding :: ForInBinding Identified -> Check (ForInBinding Zonked, [(VariableResolution, SemanticType Resolved)])
+walkForInBinding ForInBinding {pattern, source, sourceSpan} = do
+  (source', sourceType) <- synthExpr source
+  let elementType = seqElementType sourceType
+  (pattern', bindings) <- walkPattern elementType pattern
+  pure (ForInBinding {pattern = pattern', source = source', sourceSpan = sourceSpan}, bindings)
+
+walkForVarBinding :: ForVarBinding Identified -> Check (ForVarBinding Zonked, [(VariableResolution, SemanticType Resolved)])
+walkForVarBinding ForVarBinding {name, typeAnnotation, initial, sourceSpan} = do
+  (initial', binding) <- walkInitializer name typeAnnotation initial
+  pure
+    ( ForVarBinding {name = retagNameRef name, typeAnnotation = fmap retagSyntacticType typeAnnotation, initial = initial', sourceSpan = sourceSpan},
+      binding
+    )
+
+synthHandle :: HandleExpression Identified -> Check (Expression Zonked, SemanticType Resolved)
+synthHandle HandleExpression {parallel, stateVariables, handlers, thenClause, body, sourceSpan} = do
+  (stateVariables', stateLocals) <- unzipBindings <$> mapM walkStateVariable stateVariables
+  ((body', bodyType, handlers', thenClause', thenType), breakTypes) <-
+    collectExits [HandleBreakTag, HandleNextTag] $
+      withLocals stateLocals $ do
+        (body', bodyType) <- walkBlock body
+        handlers' <- mapM walkRequestHandler handlers
+        (thenClause', thenType) <- case thenClause of
+          Nothing -> pure (Nothing, Nothing)
+          Just (maybePattern, thenBody) -> do
+            (pattern', bindings) <- case maybePattern of
+              Just p -> do (p', bs) <- walkPattern bodyType p; pure (Just p', bs)
+              Nothing -> pure (Nothing, [])
+            (thenBody', thenBodyType) <- withLocals bindings (walkBlock thenBody)
+            pure (Just (pattern', thenBody'), Just thenBodyType)
+        pure (body', bodyType, handlers', thenClause', thenType)
+  let semantic = unionSemantic (maybe bodyType id thenType : breakTypes)
+  pure
+    ( ExpressionHandle HandleExpression {parallel = parallel, stateVariables = stateVariables', handlers = handlers', thenClause = thenClause', body = body', sourceSpan = sourceSpan, typeOf = semantic},
+      semantic
+    )
+
+walkStateVariable :: StateVariableBinding Identified -> Check (StateVariableBinding Zonked, [(VariableResolution, SemanticType Resolved)])
+walkStateVariable StateVariableBinding {name, typeAnnotation, initial, sourceSpan} = do
+  (initial', binding) <- walkInitializer name typeAnnotation initial
+  pure
+    ( StateVariableBinding {name = retagNameRef name, typeAnnotation = fmap retagSyntacticType typeAnnotation, initial = initial', sourceSpan = sourceSpan},
+      binding
+    )
+
+walkRequestHandler :: RequestHandler Identified -> Check (RequestHandler Zonked)
+walkRequestHandler RequestHandler {moduleQualifier, name, parameters, returnType, body, sourceSpan} = do
+  (parameters', _, paramLocals) <- elaborateParameters parameters
+  (body', _) <- withLocals paramLocals (walkBlock body)
+  pure
+    RequestHandler
+      { moduleQualifier = fmap retagNameRef moduleQualifier,
+        name = retagNameRef name,
+        parameters = parameters',
+        returnType = fmap retagSyntacticType returnType,
+        body = body',
+        sourceSpan = sourceSpan
+      }
+
+-- ---------------------------------------------------------------------------
+-- Blocks and statements
+-- ---------------------------------------------------------------------------
+
+-- | Walk a block: thread @let@ bindings into the env for later statements and
+-- the tail expression. The block's type is its tail expression's type (or
+-- @null@ when absent / @never@ when an exit statement precedes the tail).
+walkBlock :: Block Identified -> Check (Block Zonked, SemanticType Resolved)
+walkBlock Block {statements, returnExpression, sourceSpan} = do
+  (statements', returnExpression') <- walkStatements statements returnExpression
+  let semantic
+        | any isExitStatement statements = SemanticTypeNever
+        | otherwise = maybe SemanticTypeNull snd returnExpression'
+  pure (Block {statements = statements', returnExpression = fmap fst returnExpression', sourceSpan = sourceSpan}, semantic)
+
+isExitStatement :: Statement phase -> Bool
+isExitStatement = \case
+  StatementReturn _ -> True
+  StatementNext _ -> True
+  StatementBreak _ -> True
+  StatementForNext _ -> True
+  StatementForBreak _ -> True
+  _ -> False
+
+-- | Walk statements left-to-right, extending the env with each binding so
+-- subsequent statements + the tail see it.
+walkStatements ::
+  [Statement Identified] ->
+  Maybe (Expression Identified) ->
+  Check ([Statement Zonked], Maybe (Expression Zonked, SemanticType Resolved))
+walkStatements [] returnExpression = do
+  tail' <- traverse synthExpr returnExpression
+  pure ([], tail')
+walkStatements (statement : rest) returnExpression = do
+  (statement', bindings) <- walkStatement statement
+  (rest', tail') <- withLocals bindings (walkStatements rest returnExpression)
+  pure (statement' : rest', tail')
+
+walkStatement :: Statement Identified -> Check (Statement Zonked, [(VariableResolution, SemanticType Resolved)])
+walkStatement = \case
+  StatementLet LetStatement {pattern, value, sourceSpan} -> do
+    (value', valueType) <- synthExpr value
+    (pattern', bindings) <- walkPattern valueType pattern
+    pure (StatementLet LetStatement {pattern = pattern', value = value', sourceSpan = sourceSpan}, bindings)
+  StatementReturn ReturnStatement {value, sourceSpan} -> do
+    expected <- asks (.checkExpectedReturn)
+    value' <- case expected of
+      Just t -> checkExpr value t
+      Nothing -> fst <$> synthExpr value
+    pure (StatementReturn ReturnStatement {value = value', sourceSpan = sourceSpan}, [])
+  StatementExpression expr -> do
+    (expr', _) <- synthExpr expr
+    pure (StatementExpression expr', [])
+  StatementBreak BreakStatement {value, sourceSpan} -> do
+    (value', valueType) <- synthExpr value
+    recordExit HandleBreakTag valueType
+    pure (StatementBreak BreakStatement {value = value', sourceSpan = sourceSpan}, [])
+  StatementNext NextStatement {value, modifiers, sourceSpan} -> do
+    (value', valueType) <- synthExpr value
+    modifiers' <- mapM walkModifier modifiers
+    recordExit HandleNextTag valueType
+    pure (StatementNext NextStatement {value = value', modifiers = modifiers', sourceSpan = sourceSpan}, [])
+  StatementForBreak ForBreakStatement {value, sourceSpan} -> do
+    (value', valueType) <- synthExpr value
+    recordExit ForBreakTag valueType
+    pure (StatementForBreak ForBreakStatement {value = value', sourceSpan = sourceSpan}, [])
+  StatementForNext ForNextStatement {modifiers, sourceSpan} -> do
+    modifiers' <- mapM walkModifier modifiers
+    pure (StatementForNext ForNextStatement {modifiers = modifiers', sourceSpan = sourceSpan}, [])
+  StatementAgent agentStatement -> walkLocalAgent agentStatement
+  StatementError span_ -> pure (StatementError span_, [])
+
+walkModifier :: Modifier Identified -> Check (Modifier Zonked)
+walkModifier Modifier {name, value, sourceSpan} = do
+  semantic <- lookupVariableType sourceSpan name.text name.resolution
+  value' <- checkExpr value semantic
+  pure Modifier {name = retagNameRef name, value = value', sourceSpan = sourceSpan}
+
+-- | A @let@ / state-var initializer: check against the annotation if present,
+-- else synthesise. Returns the variable's binding.
+walkInitializer ::
+  NameRef Identified VariableRef ->
+  Maybe (SyntacticType Identified) ->
+  Expression Identified ->
+  Check (Expression Zonked, [(VariableResolution, SemanticType Resolved)])
+walkInitializer name typeAnnotation initial = do
+  (initial', bindingType) <- case typeAnnotation of
+    Just t -> do
+      annotated <- elaborateType t
+      initial' <- checkExpr initial annotated
+      pure (initial', annotated)
+    Nothing -> synthExpr initial
+  let bindings = maybe [] (\resolution -> [(resolution, bindingType)]) name.resolution
+  pure (initial', bindings)
+
+-- | A nested @agent@ statement. Elaborate its signature, bind its parameters,
+-- check its body, and bind the agent's own name to its function type for the
+-- rest of the scope. Effects are computed by the SCC effect pass (not here).
+walkLocalAgent :: AgentStatement Identified -> Check (Statement Zonked, [(VariableResolution, SemanticType Resolved)])
+walkLocalAgent AgentStatement {annotation, name, parameters, returnType, withRequests, body, sourceSpan} = do
+  (parameters', paramSig, paramLocals) <- elaborateParameters parameters
+  declaredReturn <- traverse elaborateType returnType
+  -- Recursive local agents need their return annotation; bind the signature up
+  -- front when one is present so recursive calls resolve.
+  let selfBinding ret = maybe [] (\resolution -> [(resolution, SemanticTypeFunction paramSig ret emptyRequest)]) name.resolution
+  (body', bodyType) <-
+    withLocals (paramLocals ++ maybe [] selfBinding declaredReturn) $
+      case declaredReturn of
+        Just ret -> withExpectedReturn ret (walkBlock body)
+        Nothing -> walkBlock body
+  let returnSemantic = maybe bodyType id declaredReturn
+      functionType = SemanticTypeFunction paramSig returnSemantic emptyRequest
+      bindings = maybe [] (\resolution -> [(resolution, functionType)]) name.resolution
+  pure
+    ( StatementAgent
+        AgentStatement
+          { annotation = annotation,
+            name = retagNameRef name,
+            parameters = parameters',
+            returnType = fmap retagSyntacticType returnType,
+            withRequests = fmap (fmap retagSyntacticRequest) withRequests,
+            body = body',
+            sourceSpan = sourceSpan
+          },
+      bindings
+    )
+
+-- | Elaborate a parameter list into zonked params, the function-signature
+-- parameter map, and the env bindings for the parameters.
+elaborateParameters ::
+  [ParameterBinding Identified] ->
+  Check ([ParameterBinding Zonked], Map Text (Parameter Resolved), [(VariableResolution, SemanticType Resolved)])
+elaborateParameters parameters = do
+  walked <- mapM walkOne parameters
+  pure
+    ( map (\(p, _, _) -> p) walked,
+      Map.fromList [entry | (_, entry, _) <- walked],
+      mapMaybe (\(_, _, binding) -> binding) walked
+    )
+  where
+    walkOne ParameterBinding {annotation, name, typeAnnotation, defaultValue, sourceSpan} = do
+      paramType <- maybe (pure SemanticTypeUnknown) elaborateType typeAnnotation
+      case defaultValue of
+        Just paramDefault -> subtypeAssert sourceSpan (literalValueToSemantic paramDefault.value) paramType
+        Nothing -> pure ()
+      let parameter = Parameter {parameterType = paramType, optional = case defaultValue of Just _ -> True; Nothing -> False}
+          rebuilt =
+            ParameterBinding
+              { annotation = annotation,
+                name = retagNameRef name,
+                typeAnnotation = fmap retagSyntacticType typeAnnotation,
+                defaultValue = defaultValue,
+                sourceSpan = sourceSpan
+              }
+          binding = fmap (\resolution -> (resolution, paramType)) name.resolution
+      pure (rebuilt, (name.text, parameter), binding)
+
+-- ---------------------------------------------------------------------------
+-- Patterns (projection over a known subject type)
+-- ---------------------------------------------------------------------------
+
+-- | Walk a pattern against a known subject type, returning the zonked pattern
+-- and the variable bindings it introduces. The subject type is concrete (it
+-- was synthesised), so projection is a direct structural read.
+walkPattern :: SemanticType Resolved -> Pattern Identified -> Check (Pattern Zonked, [(VariableResolution, SemanticType Resolved)])
+walkPattern subject = \case
+  PatternVariable VariablePattern {name, typeAnnotation, sourceSpan} -> do
+    bindingType <- case typeAnnotation of
+      Just t -> elaborateType t
+      Nothing -> pure subject
+    let bindings = maybe [] (\resolution -> [(resolution, bindingType)]) name.resolution
+    pure (PatternVariable VariablePattern {name = retagNameRef name, typeAnnotation = fmap retagSyntacticType typeAnnotation, sourceSpan = sourceSpan, typeOf = bindingType}, bindings)
+  PatternWildcard WildcardPattern {typeAnnotation, sourceSpan} -> do
+    patternType <- maybe (pure subject) elaborateType typeAnnotation
+    pure (PatternWildcard WildcardPattern {typeAnnotation = fmap retagSyntacticType typeAnnotation, sourceSpan = sourceSpan, typeOf = patternType}, [])
+  PatternLiteral LiteralPattern {value, sourceSpan} ->
+    pure (PatternLiteral LiteralPattern {value = value, sourceSpan = sourceSpan, typeOf = literalValueToSemantic value}, [])
+  PatternTuple TuplePattern {elements, sourceSpan} -> do
+    let componentTypes = projectTupleComponents (length elements) subject
+    walked <- mapM (\(componentType, element) -> walkPattern componentType element) (zip componentTypes elements)
+    let patternType = SemanticTypeTuple (map (patternTypeOf . fst) walked)
+    pure (PatternTuple TuplePattern {elements = map fst walked, sourceSpan = sourceSpan, typeOf = patternType}, concatMap snd walked)
+  PatternQualifiedConstructor QualifiedConstructorPattern {moduleQualifier, constructorName, parameters, sourceSpan} -> do
+    fieldSubjects <- constructorFieldTypes constructorName.resolution
+    walked <-
+      forM parameters $ \(label, sub) -> do
+        let fieldSubject = Map.findWithDefault SemanticTypeUnknown label.text fieldSubjects
+        (sub', bindings) <- walkPattern fieldSubject sub
+        pure ((retagNameRef label, sub'), bindings)
+    let patternType = maybe SemanticTypeUnknown SemanticTypeData constructorName.resolution
+    pure
+      ( PatternQualifiedConstructor QualifiedConstructorPattern {moduleQualifier = fmap retagNameRef moduleQualifier, constructorName = retagNameRef constructorName, parameters = map fst walked, sourceSpan = sourceSpan, typeOf = patternType},
+        concatMap snd walked
+      )
+  PatternType TypePattern {typeTag, inner, sourceSpan} -> do
+    let narrowedType = typePatternTagToSemantic typeTag
+    (inner', bindings) <- walkPattern narrowedType inner
+    pure (PatternType TypePattern {typeTag = typeTag, inner = inner', sourceSpan = sourceSpan, typeOf = narrowedType}, bindings)
+  PatternRecord RecordPattern {entries, sourceSpan} -> do
+    walked <-
+      forM entries $ \(entryLabel, entryPattern) -> do
+        valueSubject <- fieldType sourceSpan subject entryLabel
+        (entryPattern', bindings) <- walkPattern valueSubject entryPattern
+        pure ((entryLabel, entryPattern'), bindings)
+    pure (PatternRecord RecordPattern {entries = map fst walked, sourceSpan = sourceSpan, typeOf = subject}, concatMap snd walked)
+
+patternTypeOf :: Pattern Zonked -> SemanticType Resolved
+patternTypeOf = \case
+  PatternVariable p -> p.typeOf
+  PatternWildcard p -> p.typeOf
+  PatternLiteral p -> p.typeOf
+  PatternTuple p -> p.typeOf
+  PatternQualifiedConstructor p -> p.typeOf
+  PatternType p -> p.typeOf
+  PatternRecord p -> p.typeOf
+
+typePatternTagToSemantic :: TypePatternTag -> SemanticType Resolved
+typePatternTagToSemantic = \case
+  TypePatternTagInteger -> SemanticTypeInteger
+  TypePatternTagNumber -> SemanticTypeNumber
+  TypePatternTagString -> SemanticTypeString
+  TypePatternTagBoolean -> SemanticTypeBoolean
+  TypePatternTagAgent -> SemanticTypeFunctionAny
+
+-- | The declared field types of a data constructor (its signature's
+-- parameters), keyed by field label.
+constructorFieldTypes :: Maybe QualifiedName -> Check (Map Text (SemanticType Resolved))
+constructorFieldTypes = \case
+  Just qualifiedName ->
+    lookupLocal (ResolvedTopLevel qualifiedName) >>= \case
+      Just (SemanticTypeFunction params _ _) -> pure (Map.map (.parameterType) params)
+      _ -> pure Map.empty
+  Nothing -> pure Map.empty
+
+-- ---------------------------------------------------------------------------
+-- Type projections over concrete subject types
+-- ---------------------------------------------------------------------------
+
+-- | The component subject types for a tuple pattern of the given arity.
+-- Minimum-elements: positions past those the static type names are @unknown@.
+projectTupleComponents :: Int -> SemanticType Resolved -> [SemanticType Resolved]
+projectTupleComponents arity = \case
+  SemanticTypeTuple ts -> take arity (ts ++ repeat SemanticTypeUnknown)
+  SemanticTypeArray e -> replicate arity e
+  SemanticTypeUnion branches ->
+    case [projectTupleComponents arity b | b <- branches] of
+      [] -> replicate arity SemanticTypeUnknown
+      projections -> map unionSemantic (transpose projections)
+  _ -> replicate arity SemanticTypeUnknown
+
+-- | The element type of a sequence (array / tuple) subject.
+seqElementType :: SemanticType Resolved -> SemanticType Resolved
+seqElementType = \case
+  SemanticTypeArray e -> e
+  SemanticTypeTuple ts -> unionSemantic ts
+  SemanticTypeUnion branches -> unionSemantic (map seqElementType branches)
+  _ -> SemanticTypeUnknown
+
+-- | The type of field @label@ read from a map-layer (object / data / record)
+-- subject. A missing field on an object / data is a hard error.
+fieldType :: SourceSpan -> SemanticType Resolved -> Text -> Check (SemanticType Resolved)
+fieldType sourceSpan subject label = case subject of
+  SemanticTypeObject fields -> case Map.lookup label fields of
+    Just t -> pure t
+    Nothing -> missing
+  SemanticTypeRecord valueType -> pure valueType
+  SemanticTypeData qualifiedName ->
+    constructorFieldTypes (Just qualifiedName) >>= \fields ->
+      case Map.lookup label fields of
+        Just t -> pure t
+        Nothing -> missing
+  SemanticTypeUnion branches -> unionSemantic <$> mapM (\b -> fieldType sourceSpan b label) branches
+  SemanticTypeUnknown -> pure SemanticTypeUnknown
+  _ -> missing
+  where
+    missing = emitError (CheckErrorUnsupported sourceSpan ("no field '" <> label <> "' on the accessed value")) >> pure SemanticTypeUnknown
