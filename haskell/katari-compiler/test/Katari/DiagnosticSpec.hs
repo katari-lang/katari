@@ -19,11 +19,10 @@ import Katari.Id (QualifiedName (..))
 import Katari.Lexer qualified as Lexer
 import Katari.Lowering qualified as Lowering
 import Katari.Parser qualified as Parser
-import Katari.SemanticType (RequestVariableId (..), TypeVariableId (..))
+import Katari.SemanticType (SemanticType (..))
 import Katari.SourceSpan (Position (..), SourceSpan (..))
-import Katari.Typechecker.ConstraintGenerator qualified as CG
+import Katari.Typechecker.Check qualified as Check
 import Katari.Typechecker.Identifier qualified as Identifier
-import Katari.Typechecker.Zonker qualified as Zonker
 import Test.Hspec
 
 -- ===========================================================================
@@ -116,20 +115,15 @@ perPhaseConverterSpec = describe "per-phase toDiagnostic" $ do
     mapM_ (\d -> d.severity `shouldBe` SeverityError) diags
     mapM_ (\d -> isReservedCode "K0100" "K0199" d.code `shouldBe` True) diags
 
-  it "ConstraintGenerator codes fall in K0200-K0299" $ do
-    let diag = CG.toDiagnostic (CG.ConstraintErrorTypeSynonymCycle dummySpan (QualifiedName "test" "Foo"))
-    diag.severity `shouldBe` SeverityError
-    isReservedCode "K0200" "K0299" diag.code `shouldBe` True
-
-  it "Zonker codes fall in K0200-K0299" $ do
+  it "Check (bidirectional typechecker) codes fall in K0400-K0499" $ do
     let diags =
           map
-            Zonker.toDiagnostic
-            [ Zonker.ZonkErrorMissingTypeVar dummySpan (TypeVariableId 0),
-              Zonker.ZonkErrorMissingRequestVar dummySpan (RequestVariableId 0)
+            Check.toDiagnostic
+            [ Check.CheckErrorTypeMismatch dummySpan SemanticTypeInteger SemanticTypeString,
+              Check.CheckErrorUndeclaredEffect dummySpan [QualifiedName "test" "foo"]
             ]
     mapM_ (\d -> d.severity `shouldBe` SeverityError) diags
-    mapM_ (\d -> isReservedCode "K0200" "K0299" d.code `shouldBe` True) diags
+    mapM_ (\d -> isReservedCode "K0400" "K0499" d.code `shouldBe` True) diags
 
   it "Lowering codes fall in K0300-K0399" $ do
     let diags =

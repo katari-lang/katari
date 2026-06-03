@@ -10,54 +10,22 @@
 -- arm is here.
 module Katari.ExhaustiveSpec (spec) where
 
-import Data.Map.Strict qualified as Map
 import Data.Text (Text)
+import Katari.Compile (CompileResult (..))
 import Katari.Diagnostic (Diagnostic (..))
-import Katari.Id (VariableResolution (..))
-import Katari.Lexer qualified as Lexer
-import Katari.Parser qualified as Parser
-import Katari.TestSupport (IdentifierResult (..), ZonkResult (..), zonkAll)
-import Katari.TestSupport qualified as TestSupport
-import Katari.Typechecker.Exhaustive (ExhaustiveEnv (..), checkExhaustiveModule, toDiagnostic)
-import Katari.Typechecker.Solver (solve)
+import Katari.TestSupport (compileSync, singleSourceInput)
 import Test.Hspec (Spec, describe, it, shouldBe)
 
 -- ---------------------------------------------------------------------------
 -- Pipeline helper
 -- ---------------------------------------------------------------------------
 
--- | Run parser → identify → constraint-gen → solve → zonk → exhaustive
--- and return the diagnostics. Used by the test cases below.
+-- | Compile a single-module source through the live pipeline (which runs the
+-- exhaustiveness pass) and return its diagnostics.
 runExhaustive :: Text -> IO [Diagnostic]
-runExhaustive source = do
-  let (stream, _) = Lexer.lex "<test>" source
-      (parsed, parseErrors) = Parser.parse "<test>" stream
-  case parseErrors of
-    (_ : _) -> fail ("parse failure: " ++ show parseErrors)
-    [] -> case TestSupport.identifyWithStdlib (Map.singleton "main" parsed) of
-      (idResult, []) -> do
-        let (cgResult, _) = TestSupport.generateConstraintsAll idResult
-            (solverResult, _) = solve Map.empty cgResult
-            (zonkResult, _) = zonkAll "main" idResult cgResult solverResult
-            topLevels =
-              Map.fromList
-                [ (qn, ty)
-                  | (_, perMod) <- Map.toList zonkResult.zonkedTypeEnvironment,
-                    (ResolvedTopLevel qn, ty) <- Map.toList perMod
-                ]
-            errorsAcross =
-              concat
-                [ checkExhaustiveModule
-                    ExhaustiveEnv
-                      { constructors = idResult.identifiedConstructors,
-                        topLevelTypes = topLevels,
-                        localTypeEnv = Map.findWithDefault Map.empty moduleName zonkResult.zonkedTypeEnvironment
-                      }
-                    moduleAST
-                  | (moduleName, moduleAST) <- Map.toList zonkResult.zonkedModules
-                ]
-        pure (map toDiagnostic errorsAcross)
-      (_, errs) -> fail ("identify failure: " ++ show errs)
+runExhaustive source =
+  let result = compileSync (singleSourceInput source)
+   in pure result.diagnostics
 
 -- | True iff @diags@ contains at least one error / warning with the given code.
 hasCode :: Text -> [Diagnostic] -> Bool

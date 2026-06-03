@@ -23,18 +23,10 @@ library:
     - Katari.SemanticType
     - Katari.SemanticType.Render
     - Katari.Typechecker.NormalizedType
-    - Katari.Typechecker.ConstraintGenerator
-    - Katari.Typechecker.Solver
-    - Katari.Typechecker.Solver.Branch
-    - Katari.Typechecker.Solver.Decompose
-    - Katari.Typechecker.Solver.Request
-    - Katari.Typechecker.Solver.Internal
-    - Katari.Typechecker.Solver.Substitution
     - Katari.Typechecker.Check
     - Katari.Typechecker.AgentGraph
     - Katari.Typechecker.ImportGraph
     - Katari.Typechecker.ModuleInterface
-    - Katari.Typechecker.Zonker
     - Katari.Typechecker.Exhaustive
     - Katari.Typechecker
     - Katari.IR
@@ -52,9 +44,6 @@ tests:
     other-modules:
       - Katari.ParserSpec
       - Katari.IdentifierSpec
-      - Katari.ConstraintGeneratorSpec
-      - Katari.ZonkerSpec
-      - Katari.SolverSpec
       - Katari.ExhaustiveSpec
       - Katari.IRSpec
       - Katari.LoweringSpec

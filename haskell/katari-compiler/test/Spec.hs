@@ -1,5 +1,4 @@
 import Katari.CompileSpec qualified as CompileSpec
-import Katari.ConstraintGeneratorSpec qualified as ConstraintGeneratorSpec
 import Katari.DiagnosticSpec qualified as DiagnosticSpec
 import Katari.ExhaustiveSpec qualified as ExhaustiveSpec
 import Katari.GoldenSpec qualified as GoldenSpec
@@ -12,17 +11,12 @@ import Katari.Query.CompletionSpec qualified as CompletionSpec
 import Katari.QuerySpec qualified as QuerySpec
 import Katari.SchemaSpec qualified as SchemaSpec
 import Katari.ScopeIndexSpec qualified as ScopeIndexSpec
-import Katari.SolverSpec qualified as SolverSpec
-import Katari.ZonkerSpec qualified as ZonkerSpec
 import Test.Hspec
 
 main :: IO ()
 main = hspec $ do
   ParserSpec.spec
   IdentifierSpec.spec
-  ConstraintGeneratorSpec.spec
-  ZonkerSpec.spec
-  SolverSpec.spec
   ExhaustiveSpec.spec
   IRSpec.spec
   LoweringSpec.spec

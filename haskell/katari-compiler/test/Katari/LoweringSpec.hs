@@ -11,79 +11,26 @@ import Data.Maybe (isJust, listToMaybe)
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as Text
+import Katari.Compile (CompileResult (..))
+import Katari.Diagnostic (Diagnostic)
 import Katari.IR
 import Katari.Id qualified as Id
-import Katari.Lexer qualified as Lexer
-import Katari.Lowering (LowerContext (..), LoweringError (..), lowerModule, mergeModuleLowerings)
-import Katari.Parser qualified as Parser
-import Katari.Schema qualified as Schema
-import Katari.SemanticType (RequestVariableId (..), TypeVariableId (..))
-import Katari.TestSupport (IdentifierResult (..), ZonkResult (..), zonkAll)
-import Katari.TestSupport qualified as TestSupport
-import Katari.Typechecker.ConstraintGenerator (ConstraintGenResult (..), VariableSupply (..))
-import Katari.Typechecker.NormalizedType (NormalizedType (..))
-import Katari.Typechecker.Solver (SolverResult (..))
+import Katari.TestSupport (compileSync, singleSourceInput)
 import Test.Hspec
-import Data.Either (lefts, rights)
 
 -- ===========================================================================
 -- Pipeline helper: source → IR
 -- ===========================================================================
 
--- | Run parser → identify → constraint-gen → totalised solver → zonk → lower.
--- Aborts the spec if upstream phases fail.
-lowerSource :: Text -> IO (IRModule, [LoweringError])
+-- | Compile a single-module source to its 'IRModule' via the live pipeline,
+-- returning the IR and any diagnostics. Aborts the spec if no IR is produced
+-- (the back end gates IR on a clean type-check).
+lowerSource :: Text -> IO (IRModule, [Diagnostic])
 lowerSource src =
-  let (stream, _) = Lexer.lex "<test>" src
-      (parsed, parseErrors) = Parser.parse "<test>" stream
-   in case parseErrors of
-        (_ : _) -> fail ("parse failure: " ++ show parseErrors)
-        [] -> case TestSupport.identifyWithStdlib (Map.singleton "main" parsed) of
-          (idResult, []) -> do
-            let (cg, _) = TestSupport.generateConstraintsAll idResult
-                solver =
-                  SolverResult
-                    { typeSubstitution =
-                        Map.fromList [(TypeVariableId i, NormalizedTypeUnknown) | i <- [0 .. cg.variableSupply.typeVarSupply - 1]],
-                      requestSubstitution =
-                        Map.fromList [(RequestVariableId i, Set.empty) | i <- [0 .. cg.variableSupply.requestVarSupply - 1]]
-                    }
-                (zr, _) = zonkAll "main" idResult cg solver
-                topLevels =
-                  Map.fromList
-                    [ (qn, ty)
-                      | (_, perMod) <- Map.toList zr.zonkedTypeEnvironment,
-                        (Id.ResolvedTopLevel qn, ty) <- Map.toList perMod
-                    ]
-                annotations =
-                  Map.unions
-                    [ Schema.collectDataAnnotations idResult.identifiedVariables m
-                      | m <- Map.elems zr.zonkedModules
-                    ]
-                lowerCtx =
-                  LowerContext
-                    { topLevelTypes = topLevels,
-                      dataDefs = Schema.buildDataDefs idResult.identifiedConstructors topLevels annotations,
-                      requestNames = Map.keysSet idResult.identifiedRequests,
-                      constructorNames = Map.keysSet idResult.identifiedConstructors
-                    }
-            let allResults =
-                  [ let localEnv = Map.findWithDefault Map.empty moduleName zr.zonkedTypeEnvironment
-                     in case lowerModule lowerCtx moduleName localEnv moduleAST of
-                          (Right mlr, errs) -> Right (mlr, errs)
-                          (Left internalDiag, _) -> Left internalDiag
-                    | (moduleName, moduleAST) <- Map.toList zr.zonkedModules
-                  ]
-                failures = lefts allResults
-                successes = rights allResults
-            case failures of
-              (d : _) -> fail ("lowering hit internal compiler error: " ++ show d)
-              [] ->
-                let mlrs = map fst successes
-                    errs = concatMap snd successes
-                    ir = mergeModuleLowerings mlrs
-                 in pure (ir, errs)
-          (_, errs) -> fail ("identify failure: " ++ show errs)
+  let result = compileSync (singleSourceInput src)
+   in case result.irModule of
+        Just ir -> pure (ir, result.diagnostics)
+        Nothing -> fail ("compile produced no IR: " ++ show result.diagnostics)
 
 -- ===========================================================================
 -- Spec
@@ -656,7 +603,7 @@ stage5Spec = describe "Stage 5 \8212 for / state / next" $ do
           [ "agent main() -> integer {",
             "  for (let x in [1,2,3], var acc: integer = 0) {",
             "    next with { acc = acc + x }",
-            "  }",
+            "  } then { acc }",
             "}"
           ]
     errs `shouldBe` []
@@ -757,7 +704,7 @@ stage6Spec = describe "Stage 6 \8212 handle scope / where / state vars" $ do
           [ "request fetch() -> integer",
             "agent main() -> integer {",
             "  handle {",
-            "    request fetch() { 42 }",
+            "    request fetch() { break 42 }",
             "  }",
             "  fetch()",
             "}"
@@ -768,14 +715,14 @@ stage6Spec = describe "Stage 6 \8212 handle scope / where / state vars" $ do
       [hb] -> length hb.handlers `shouldBe` 1
       _ -> expectationFailure ("expected 1 BlockHandle, got " <> show (length allHandleBlocks))
 
-  it "handler body's trailing becomes implicit StatementExit ExitKindBreak" $ do
+  it "handler body's break lowers to StatementExit ExitKindBreak" $ do
     (irMod, errs) <-
       lowerSource $
         Text.unlines
           [ "request fetch() -> integer",
             "agent main() -> integer {",
             "  handle {",
-            "    request fetch() { 42 }",
+            "    request fetch() { break 42 }",
             "  }",
             "  fetch()",
             "}"
@@ -889,7 +836,7 @@ stage7Spec = describe "Stage 7 \8212 non-local exit semantics" $ do
         Text.unlines
           [ "request fetch() -> integer",
             "agent main() -> integer {",
-            "  handle { request fetch() { 1 } } then(v) { v }",
+            "  handle { request fetch() { break 1 } } then(v) { v }",
             "  fetch()",
             "}"
           ]
@@ -915,8 +862,8 @@ stage8Spec = describe "Stage 8 \8212 edge cases" $ do
     (irMod, errs) <-
       lowerSource $
         Text.unlines
-          [ "agent main() -> integer {",
-            "  match (1) {",
+          [ "agent main(n: integer) -> integer {",
+            "  match (n) {",
             "    case 1 => {",
             "      return 1",
             "    }",

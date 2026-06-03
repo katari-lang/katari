@@ -17,14 +17,6 @@ module Katari.TestSupport
     IdentifierResult (..),
     identifyAll,
     identifyWithStdlib,
-
-    -- * Constraint-gen aggregation
-    generateConstraintsAll,
-    generateConstraintsForModule,
-
-    -- * Zonker aggregation
-    ZonkResult (..),
-    zonkAll,
   )
 where
 
@@ -49,12 +41,6 @@ import Katari.Parser qualified as Parser
 import Katari.SemanticType (Resolved, SemanticType)
 import Katari.SourceSpan (emptySourceSpan)
 import Katari.Stdlib qualified as Stdlib
-import Katari.Typechecker.ConstraintGenerator
-  ( ConstraintError,
-    ConstraintGenResult (..),
-    VariableSupply (..),
-    generateConstraintsForSCC,
-  )
 import Katari.Typechecker.Identifier
   ( ConstructorData,
     IdentifierError,
@@ -65,8 +51,6 @@ import Katari.Typechecker.Identifier
     VariableData (..),
   )
 import Katari.Typechecker.ScopeIndex (ScopeIndex, buildScopeIndex)
-import Katari.Typechecker.Solver (SolverResult)
-import Katari.Typechecker.Zonker (ModuleZonkResult (..), ZonkError, zonk)
 import System.IO.Unsafe (unsafePerformIO)
 
 -- ===========================================================================
@@ -160,100 +144,3 @@ identifyAll trustedStdlibNames moduleMap =
 identifyWithStdlib :: Map Text (Module Parsed) -> (IdentifierResult, [IdentifierError])
 identifyWithStdlib userMods =
   identifyAll Stdlib.stdlibModuleNames (Map.union userMods parsedStdlibModules)
-
--- ===========================================================================
--- Constraint-gen aggregation
--- ===========================================================================
-
--- | Run constraint generation over @moduleName@ treating every top-level
--- qname it declares as a single SCC. Enough for single-module pipeline tests.
-generateConstraintsForModule ::
-  Text ->
-  IdentifierResult ->
-  (ConstraintGenResult, [ConstraintError])
-generateConstraintsForModule moduleName idResult =
-  let moduleAST =
-        Map.findWithDefault
-          (Module {declarations = [], sourceSpan = emptySourceSpan})
-          moduleName
-          idResult.moduleASTs
-      sccQNames =
-        Set.fromList
-          [ qualifiedName
-            | qualifiedName <- Map.keys idResult.identifiedVariables,
-              qualifiedName.module_ == moduleName
-          ]
-      knownRequests = Map.keysSet idResult.identifiedRequests
-      primRules = Map.mapMaybe (.variablePrimRule) idResult.identifiedVariables
-   in generateConstraintsForSCC
-        Map.empty
-        moduleAST
-        sccQNames
-        idResult.identifiedTypes
-        knownRequests
-        primRules
-
--- | Constraint-gen over every user-defined module, merged into one
--- whole-program-shaped 'ConstraintGenResult' for phase-level tests.
-generateConstraintsAll ::
-  IdentifierResult ->
-  (ConstraintGenResult, [ConstraintError])
-generateConstraintsAll idResult =
-  let userModuleNames =
-        [ moduleName
-          | moduleName <- Map.keys idResult.moduleASTs,
-            not (Set.member moduleName Stdlib.stdlibModuleNames)
-        ]
-      perModule = map (`generateConstraintsForModule` idResult) userModuleNames
-      mergedConstraints = Set.unions (map ((.constraints) . fst) perModule)
-      mergedEnv = Map.unions (map ((.typeEnvironment) . fst) perModule)
-      mergedDeclarations = concatMap ((.declarations) . (.constrainedModule) . fst) perModule
-      mergedSourceSpan = case perModule of
-        ((firstResult, _) : _) -> firstResult.constrainedModule.sourceSpan
-        [] -> emptySourceSpan
-      mergedErrors = concatMap snd perModule
-      finalSupply = case perModule of
-        [] -> VariableSupply {typeVarSupply = 0, requestVarSupply = 0}
-        ((firstResult, _) : _) -> firstResult.variableSupply
-      result =
-        ConstraintGenResult
-          { constrainedModule =
-              Module {declarations = mergedDeclarations, sourceSpan = mergedSourceSpan},
-            typeEnvironment = mergedEnv,
-            constraints = mergedConstraints,
-            variableSupply = finalSupply
-          }
-   in (result, mergedErrors)
-
--- ===========================================================================
--- Zonker aggregation
--- ===========================================================================
-
--- | Whole-program-shaped zonker output for tests that expect the legacy
--- aggregated structure (one entry per module).
-data ZonkResult = ZonkResult
-  { zonkedModules :: Map Text (Module Zonked),
-    zonkedTypeEnvironment :: Map Text (Map VariableResolution (SemanticType Resolved))
-  }
-  deriving (Show)
-
--- | Run the per-module zonker for @moduleName@ and wrap the result in the
--- legacy 'ZonkResult' shape with a single-entry map.
-zonkAll ::
-  Text ->
-  IdentifierResult ->
-  ConstraintGenResult ->
-  SolverResult ->
-  (ZonkResult, [ZonkError])
-zonkAll moduleName idResult cgResult solverResult =
-  let ownVariables =
-        Map.filterWithKey
-          (\qualifiedName _ -> qualifiedName.module_ == moduleName)
-          idResult.identifiedVariables
-      (mzResult, errs) = zonk ownVariables cgResult solverResult
-      result =
-        ZonkResult
-          { zonkedModules = Map.singleton moduleName mzResult.zonkedModule,
-            zonkedTypeEnvironment = Map.singleton moduleName mzResult.zonkedTypeEnv
-          }
-   in (result, errs)

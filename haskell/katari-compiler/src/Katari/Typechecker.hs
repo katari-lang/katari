@@ -43,18 +43,11 @@ import Katari.SemanticType (Resolved, SemanticType)
 import Katari.SourceSpan (emptySourceSpan)
 import Katari.Typechecker.AgentGraph (agentSCCs)
 import Katari.Typechecker.Check (checkSCC)
-import Katari.Typechecker.ConstraintGenerator (generateConstraintsForSCC)
-import Katari.Typechecker.ConstraintGenerator qualified as CG
 import Katari.Typechecker.Identifier
   ( TypeData (..),
     VariableData (..),
   )
 import Katari.Typechecker.ModuleInterface (ModuleInterface (..), extractModuleInterface)
-import Katari.Typechecker.NormalizedType (buildDataFieldEnv)
-import Katari.Typechecker.Solver (solve)
-import Katari.Typechecker.Solver qualified as Solver
-import Katari.Typechecker.Zonker (ModuleZonkResult (..), zonk)
-import Katari.Typechecker.Zonker qualified as Zonker
 
 -- | Everything 'typecheckModule' needs about one module's input. The
 -- caller (compile orchestrator) assembles this from per-module
