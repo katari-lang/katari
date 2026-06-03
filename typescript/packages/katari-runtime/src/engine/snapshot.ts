@@ -113,7 +113,6 @@ const VALUE_KIND_TAGS: ReadonlySet<string> = new Set([
   "boolean",
   "null",
   "array",
-  "tagged",
   "record",
   "closure",
   "agentLiteral",

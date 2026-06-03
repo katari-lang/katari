@@ -30,20 +30,23 @@ function tryMatchInto(
       return matchLiteral(pattern.body, value);
     case "matchPatternConstructor": {
       const [ctorQName, fieldPatterns] = pattern.body;
-      if (value.kind !== "tagged" || value.ctorId !== ctorQName) return false;
+      // A data value is a `record` carrying the matching `ctor`. (A bare object
+      // / record value has no ctor and never matches a constructor pattern.)
+      if (value.kind !== "record" || value.ctor !== ctorQName) return false;
       for (const [fieldName, fieldPattern] of fieldPatterns) {
-        const fv = value.fields[fieldName];
+        const fv = value.entries[fieldName];
         if (fv === undefined) return false;
         if (!tryMatchInto(fieldPattern, fv, bindings)) return false;
       }
       return true;
     }
     case "matchPatternTuple": {
-      // Tuples are stored as arrays at runtime; the pattern enforces
-      // exact arity (matching the static type's tuple length, which
-      // the solver already pins via 'tuple arity mismatch' / K0220).
+      // Seq layer: tuples and arrays share the 'array' runtime kind. Minimum-
+      // elements semantics — the pattern names the FIRST n positions, and the
+      // value may carry more (a longer tuple, or an array of any length ≥ n).
+      // So the runtime requires AT LEAST the named arity, never exact length.
       if (value.kind !== "array") return false;
-      if (value.elements.length !== pattern.body.length) return false;
+      if (value.elements.length < pattern.body.length) return false;
       for (let i = 0; i < pattern.body.length; i++) {
         const sp = pattern.body[i]!;
         const sv = value.elements[i]!;
@@ -57,6 +60,12 @@ function tryMatchInto(
       return tryMatchInto(inner, value, bindings);
     }
     case "matchPatternRecord": {
+      // Map layer: object / data / record share the one `record` Value, so an
+      // object / record pattern matches any of them — a bare record OR a `data`
+      // value (which is a record carrying a `ctor`) — `data <: object <:
+      // record`. Tag-agnostic and minimum-elements: only the named keys must be
+      // present; extras (and any ctor) are ignored. The constructor pattern
+      // above is the one form that additionally pins the ctor.
       if (value.kind !== "record") return false;
       for (const [entryKey, sub] of pattern.body) {
         const fv = value.entries[entryKey];

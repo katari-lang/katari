@@ -26,8 +26,7 @@ export type EncryptedValue =
   | { kind: "string"; rep: BytesRep }
   | { kind: "file"; rep: RefRep }
   | { kind: "array"; elements: EncryptedValue[] }
-  | { kind: "tagged"; ctorId: QualifiedName; fields: Record<string, EncryptedValue> }
-  | { kind: "record"; entries: Record<string, EncryptedValue> }
+  | { kind: "record"; entries: Record<string, EncryptedValue>; ctor?: QualifiedName }
   | { kind: "closure"; ref: RefRep }
   | { kind: "agentLiteral"; qualifiedName: QualifiedName; snapshot?: string }
   | EncryptedSecret;
@@ -48,15 +47,12 @@ export function encryptValueTree(value: Value): EncryptedValue {
       return value;
     case "array":
       return { kind: "array", elements: value.elements.map(encryptValueTree) };
-    case "tagged": {
-      const fields: Record<string, EncryptedValue> = {};
-      for (const [k, v] of Object.entries(value.fields)) fields[k] = encryptValueTree(v);
-      return { kind: "tagged", ctorId: value.ctorId, fields };
-    }
     case "record": {
       const entries: Record<string, EncryptedValue> = {};
       for (const [k, v] of Object.entries(value.entries)) entries[k] = encryptValueTree(v);
-      return { kind: "record", entries };
+      return value.ctor !== undefined
+        ? { kind: "record", entries, ctor: value.ctor }
+        : { kind: "record", entries };
     }
     case "secret":
       if (value.rep.kind !== "inline") {
@@ -85,15 +81,12 @@ export function decryptValueTree(encrypted: EncryptedValue): Value {
       return encrypted;
     case "array":
       return { kind: "array", elements: encrypted.elements.map(decryptValueTree) };
-    case "tagged": {
-      const fields: Record<string, Value> = {};
-      for (const [k, v] of Object.entries(encrypted.fields)) fields[k] = decryptValueTree(v);
-      return { kind: "tagged", ctorId: encrypted.ctorId, fields };
-    }
     case "record": {
       const entries: Record<string, Value> = {};
       for (const [k, v] of Object.entries(encrypted.entries)) entries[k] = decryptValueTree(v);
-      return { kind: "record", entries };
+      return encrypted.ctor !== undefined
+        ? { kind: "record", entries, ctor: encrypted.ctor }
+        : { kind: "record", entries };
     }
   }
 }
@@ -118,15 +111,12 @@ export function redactSecretsInEncrypted(value: EncryptedValue): Value {
       return value;
     case "array":
       return { kind: "array", elements: value.elements.map(redactSecretsInEncrypted) };
-    case "tagged": {
-      const fields: Record<string, Value> = {};
-      for (const [k, v] of Object.entries(value.fields)) fields[k] = redactSecretsInEncrypted(v);
-      return { kind: "tagged", ctorId: value.ctorId, fields };
-    }
     case "record": {
       const entries: Record<string, Value> = {};
       for (const [k, v] of Object.entries(value.entries)) entries[k] = redactSecretsInEncrypted(v);
-      return { kind: "record", entries };
+      return value.ctor !== undefined
+        ? { kind: "record", entries, ctor: value.ctor }
+        : { kind: "record", entries };
     }
   }
 }

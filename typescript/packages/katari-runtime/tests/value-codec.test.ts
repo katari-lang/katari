@@ -42,11 +42,11 @@ describe("value-codec", () => {
     });
   });
 
-  it("encodes tagged values with $constructor + fields", () => {
+  it("encodes data values with $constructor + fields", () => {
     const v: Value = {
-      kind: "tagged",
-      ctorId: "main.point",
-      fields: {
+      kind: "record",
+      ctor: "main.point",
+      entries: {
         x: { kind: "number", value: 3 },
         y: { kind: "number", value: 4 },
       },
@@ -55,23 +55,23 @@ describe("value-codec", () => {
     expect(rt(v)).toEqual(v);
   });
 
-  it("encodes nested tagged values recursively", () => {
+  it("encodes nested data values recursively", () => {
     const v: Value = {
-      kind: "tagged",
-      ctorId: "main.line",
-      fields: {
+      kind: "record",
+      ctor: "main.line",
+      entries: {
         from: {
-          kind: "tagged",
-          ctorId: "main.point",
-          fields: {
+          kind: "record",
+          ctor: "main.point",
+          entries: {
             x: { kind: "number", value: 0 },
             y: { kind: "number", value: 0 },
           },
         },
         to: {
-          kind: "tagged",
-          ctorId: "main.point",
-          fields: {
+          kind: "record",
+          ctor: "main.point",
+          entries: {
             x: { kind: "number", value: 5 },
             y: { kind: "number", value: 7 },
           },
@@ -167,7 +167,7 @@ describe("value-codec", () => {
     ).toThrow(RawValueDecodeError);
   });
 
-  it("a secret nested inside a tagged value still triggers the inbound refusal", () => {
+  it("a secret nested inside a data value still triggers the inbound refusal", () => {
     expect(() =>
       valueFromRaw({
         [CTOR_DISCRIMINATOR]: "main.payload",

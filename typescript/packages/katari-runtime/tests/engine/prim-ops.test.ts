@@ -102,29 +102,29 @@ describe("engine: prim builtin", () => {
 
   it("json.parse wraps each JSON shape in its `primitive.json_*` constructor", async () => {
     expect(await executePrim("primitive.json.parse", { text: mkString("null") }, M)).toEqual({
-      kind: "tagged",
-      ctorId: "primitive.json_null",
-      fields: {},
+      kind: "record",
+      ctor: "primitive.json_null",
+      entries: {},
     });
     expect(await executePrim("primitive.json.parse", { text: mkString("true") }, M)).toEqual({
-      kind: "tagged",
-      ctorId: "primitive.json_boolean",
-      fields: { value: { kind: "boolean", value: true } },
+      kind: "record",
+      ctor: "primitive.json_boolean",
+      entries: { value: { kind: "boolean", value: true } },
     });
     expect(await executePrim("primitive.json.parse", { text: mkString("42") }, M)).toEqual({
-      kind: "tagged",
-      ctorId: "primitive.json_integer",
-      fields: { value: { kind: "number", value: 42 } },
+      kind: "record",
+      ctor: "primitive.json_integer",
+      entries: { value: { kind: "number", value: 42 } },
     });
     expect(await executePrim("primitive.json.parse", { text: mkString("3.5") }, M)).toEqual({
-      kind: "tagged",
-      ctorId: "primitive.json_number",
-      fields: { value: { kind: "number", value: 3.5 } },
+      kind: "record",
+      ctor: "primitive.json_number",
+      entries: { value: { kind: "number", value: 3.5 } },
     });
     expect(await executePrim("primitive.json.parse", { text: mkString('"hi"') }, M)).toEqual({
-      kind: "tagged",
-      ctorId: "primitive.json_string",
-      fields: { value: mkString("hi") },
+      kind: "record",
+      ctor: "primitive.json_string",
+      entries: { value: mkString("hi") },
     });
   });
 

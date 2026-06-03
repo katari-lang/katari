@@ -57,9 +57,13 @@ export type Value =
   // of 'Value's. The static type system enforces arity / homogeneity at
   // compile time. A JSON array decodes to this variant directly.
   | { kind: "array"; elements: Value[] }
-  | { kind: "tagged"; ctorId: QualifiedName; fields: Record<string, Value> }
-  // Homogeneous map from string keys to values (surface `record[K, V]`).
-  | { kind: "record"; entries: Record<string, Value> }
+  // Map layer — object / data / record share one string-keyed Value, mirroring
+  // the seq layer's single `array`. `entries` is the field/key→value map; an
+  // optional `ctor` carries the data constructor's qualified name. A bare
+  // object / record value has no `ctor`; a `data` value carries it. The static
+  // type system enforces which keys / ctor are required (`data <: object <:
+  // record`). A JSON object decodes here ( `$constructor` ⇒ `ctor`).
+  | { kind: "record"; entries: Record<string, Value>; ctor?: QualifiedName }
   // A closure is ALWAYS a content-addressed ref (Phase E / #5 — content-
   // addressed closures). Its body block + snapshot + captured environment are
   // serialized to a value-store blob at the closure literal (make-closure); the
@@ -111,9 +115,6 @@ export function collectRefs(value: Value): RefHandle[] {
         return;
       case "array":
         for (const e of v.elements) walk(e);
-        return;
-      case "tagged":
-        for (const f of Object.values(v.fields)) walk(f);
         return;
       case "record":
         for (const e of Object.values(v.entries)) walk(e);

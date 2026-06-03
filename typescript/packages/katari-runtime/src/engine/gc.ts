@@ -93,9 +93,6 @@ function traceValue(v: Value, visitScope: (s: ScopeId | null) => void): void {
     case "array":
       for (const e of v.elements) traceValue(e, visitScope);
       return;
-    case "tagged":
-      for (const f of Object.values(v.fields)) traceValue(f, visitScope);
-      return;
     case "record":
       for (const e of Object.values(v.entries)) traceValue(e, visitScope);
       return;

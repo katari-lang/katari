@@ -77,13 +77,11 @@ export function valueToRaw(value: Value): RawValue {
       return { [SECRET_DISCRIMINATOR]: value.rep.text };
     case "array":
       return value.elements.map(valueToRaw);
-    case "tagged": {
-      const out: Record<string, RawValue> = { [CTOR_DISCRIMINATOR]: value.ctorId };
-      for (const [k, v] of Object.entries(value.fields)) out[k] = valueToRaw(v);
-      return out;
-    }
     case "record": {
-      const out: Record<string, RawValue> = {};
+      // Map layer → JSON object. A `data` value (ctor present) emits the
+      // `$constructor` discriminator; a bare object / record omits it.
+      const out: Record<string, RawValue> =
+        value.ctor !== undefined ? { [CTOR_DISCRIMINATOR]: value.ctor } : {};
       for (const [k, v] of Object.entries(value.entries)) out[k] = valueToRaw(v);
       return out;
     }
@@ -263,12 +261,12 @@ function decodeTagged(obj: Record<string, unknown>): Value {
     );
   }
   assertSafeKeys(obj);
-  const fields: Record<string, Value> = Object.create(null);
+  const entries: Record<string, Value> = Object.create(null);
   for (const [k, v] of Object.entries(obj)) {
     if (k === CTOR_DISCRIMINATOR) continue;
-    fields[k] = valueFromRaw(v);
+    entries[k] = valueFromRaw(v);
   }
-  return { kind: "tagged", ctorId: ctorRaw as QualifiedName, fields };
+  return { kind: "record", entries, ctor: ctorRaw as QualifiedName };
 }
 
 function decodeRecord(obj: Record<string, unknown>): Value {

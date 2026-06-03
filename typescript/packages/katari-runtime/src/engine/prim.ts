@@ -69,14 +69,14 @@ async function materializeValueDeep(value: Value, materialize: Materialize): Pro
           value.elements.map((e) => materializeValueDeep(e, materialize)),
         ),
       };
-    case "tagged":
-      return {
-        kind: "tagged",
-        ctorId: value.ctorId,
-        fields: await deepFields(value.fields, materialize),
-      };
     case "record":
-      return { kind: "record", entries: await deepFields(value.entries, materialize) };
+      return value.ctor !== undefined
+        ? {
+            kind: "record",
+            entries: await deepFields(value.entries, materialize),
+            ctor: value.ctor,
+          }
+        : { kind: "record", entries: await deepFields(value.entries, materialize) };
     default:
       return value;
   }
@@ -502,11 +502,13 @@ export async function executePrim(
       return mkString(value.kind);
     }
     case "primitive.get_field": {
+      // Named field access on the map layer — reads from any `record` value
+      // (a bare object / record OR a `data` value, which carries a ctor).
       const value = args["object"],
         field = args["field"];
-      if (value?.kind === "tagged" && field?.kind === "string") {
+      if (value?.kind === "record" && field?.kind === "string") {
         const fieldName = await materializeValueText(field, materialize);
-        const v = value.fields[fieldName];
+        const v = value.entries[fieldName];
         if (v === undefined) {
           throw new RecoverableEngineError(`prim get_field: field ${fieldName} not found`);
         }
@@ -654,35 +656,35 @@ const JSON_OBJECT_QNAME = "primitive.json_object";
 // form on the wire.
 function jsonToTagged(raw: unknown): Value {
   if (raw === null) {
-    return { kind: "tagged", ctorId: JSON_NULL_QNAME, fields: {} };
+    return { kind: "record", ctor: JSON_NULL_QNAME, entries: {} };
   }
   if (typeof raw === "boolean") {
     return {
-      kind: "tagged",
-      ctorId: JSON_BOOLEAN_QNAME,
-      fields: { value: { kind: "boolean", value: raw } },
+      kind: "record",
+      ctor: JSON_BOOLEAN_QNAME,
+      entries: { value: { kind: "boolean", value: raw } },
     };
   }
   if (typeof raw === "number") {
-    const ctorId = Number.isInteger(raw) ? JSON_INTEGER_QNAME : JSON_NUMBER_QNAME;
+    const ctor = Number.isInteger(raw) ? JSON_INTEGER_QNAME : JSON_NUMBER_QNAME;
     return {
-      kind: "tagged",
-      ctorId,
-      fields: { value: { kind: "number", value: raw } },
+      kind: "record",
+      ctor,
+      entries: { value: { kind: "number", value: raw } },
     };
   }
   if (typeof raw === "string") {
     return {
-      kind: "tagged",
-      ctorId: JSON_STRING_QNAME,
-      fields: { value: mkString(raw) },
+      kind: "record",
+      ctor: JSON_STRING_QNAME,
+      entries: { value: mkString(raw) },
     };
   }
   if (Array.isArray(raw)) {
     return {
-      kind: "tagged",
-      ctorId: JSON_ARRAY_QNAME,
-      fields: {
+      kind: "record",
+      ctor: JSON_ARRAY_QNAME,
+      entries: {
         items: { kind: "array", elements: raw.map(jsonToTagged) },
       },
     };
@@ -693,9 +695,9 @@ function jsonToTagged(raw: unknown): Value {
       entries[k] = jsonToTagged(v);
     }
     return {
-      kind: "tagged",
-      ctorId: JSON_OBJECT_QNAME,
-      fields: { entries: { kind: "record", entries } },
+      kind: "record",
+      ctor: JSON_OBJECT_QNAME,
+      entries: { entries: { kind: "record", entries } },
     };
   }
   throw new RecoverableEngineError(`prim json.parse: unexpected JSON value of type ${typeof raw}`);
@@ -707,16 +709,16 @@ function jsonToTagged(raw: unknown): Value {
 // `primitive.json_*` constructors. Defensive checks remain so a
 // compiler bug doesn't silently corrupt the output.
 function jsonTaggedToRaw(value: Value): unknown {
-  if (value.kind !== "tagged") {
+  if (value.kind !== "record" || value.ctor === undefined) {
     throw new RecoverableEngineError(
       `prim json.stringify: expected a json value, got ${value.kind} (compiler invariant violated)`,
     );
   }
-  switch (value.ctorId) {
+  switch (value.ctor) {
     case JSON_NULL_QNAME:
       return null;
     case JSON_BOOLEAN_QNAME: {
-      const f = value.fields["value"];
+      const f = value.entries["value"];
       if (f?.kind !== "boolean") {
         throw new RecoverableEngineError(
           "prim json.stringify: json_boolean.value is not a boolean",
@@ -726,30 +728,30 @@ function jsonTaggedToRaw(value: Value): unknown {
     }
     case JSON_INTEGER_QNAME:
     case JSON_NUMBER_QNAME: {
-      const f = value.fields["value"];
+      const f = value.entries["value"];
       if (f?.kind !== "number") {
         throw new RecoverableEngineError(
-          `prim json.stringify: ${value.ctorId}.value is not a number`,
+          `prim json.stringify: ${value.ctor}.value is not a number`,
         );
       }
       return f.value;
     }
     case JSON_STRING_QNAME: {
-      const f = value.fields["value"];
+      const f = value.entries["value"];
       if (f?.kind !== "string") {
         throw new RecoverableEngineError("prim json.stringify: json_string.value is not a string");
       }
       return inlineText(f);
     }
     case JSON_ARRAY_QNAME: {
-      const items = value.fields["items"];
+      const items = value.entries["items"];
       if (items?.kind !== "array") {
         throw new RecoverableEngineError("prim json.stringify: json_array.items is not an array");
       }
       return items.elements.map(jsonTaggedToRaw);
     }
     case JSON_OBJECT_QNAME: {
-      const entries = value.fields["entries"];
+      const entries = value.entries["entries"];
       if (entries?.kind !== "record") {
         throw new RecoverableEngineError(
           "prim json.stringify: json_object.entries is not a record",
@@ -763,7 +765,7 @@ function jsonTaggedToRaw(value: Value): unknown {
     }
     default:
       throw new RecoverableEngineError(
-        `prim json.stringify: unknown json constructor '${value.ctorId}' (compiler invariant violated)`,
+        `prim json.stringify: unknown json constructor '${value.ctor}' (compiler invariant violated)`,
       );
   }
 }
@@ -839,18 +841,6 @@ export function valueEquals(a: Value, b: Value): boolean {
       return true;
     case "array":
       return arrayEqual(a.elements, (b as typeof a).elements);
-    case "tagged": {
-      const bt = b as typeof a;
-      if (a.ctorId !== bt.ctorId) return false;
-      const xk = Object.keys(a.fields),
-        yk = Object.keys(bt.fields);
-      if (xk.length !== yk.length) return false;
-      for (const k of xk) {
-        if (!Object.hasOwn(bt.fields, k)) return false;
-        if (!valueEquals(a.fields[k]!, bt.fields[k]!)) return false;
-      }
-      return true;
-    }
     // Plaintext equality on secrets is a deliberate compromise:
     // it's needed for legitimate "is this key the same as that
     // key" checks (e.g. token rotation logic), but the JS string
@@ -862,9 +852,20 @@ export function valueEquals(a: Value, b: Value): boolean {
       return bytesContentEqual(a.rep, (b as typeof a).rep);
     case "closure":
       return false;
-    case "record":
-      // Records are compared structurally (all entries must match).
-      return false;
+    case "record": {
+      // Map layer — equal iff same ctor (both bare, or the same data ctor) and
+      // structurally equal entries. This subsumes the old `tagged` equality.
+      const br = b as typeof a;
+      if (a.ctor !== br.ctor) return false;
+      const xk = Object.keys(a.entries),
+        yk = Object.keys(br.entries);
+      if (xk.length !== yk.length) return false;
+      for (const k of xk) {
+        if (!Object.hasOwn(br.entries, k)) return false;
+        if (!valueEquals(a.entries[k]!, br.entries[k]!)) return false;
+      }
+      return true;
+    }
     case "agentLiteral":
       return false;
     default: {

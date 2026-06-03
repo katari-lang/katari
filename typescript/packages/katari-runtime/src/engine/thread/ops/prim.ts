@@ -171,9 +171,9 @@ async function executeGetMetadata(ctx: StepCtx, args: Record<string, Value>): Pr
   }
   const meta = await resolveCallableMetadata(ctx, value);
   return {
-    kind: "tagged",
-    ctorId: "primitive.agent_metadata",
-    fields: {
+    kind: "record",
+    ctor: "primitive.agent_metadata",
+    entries: {
       name: mkString(meta.name),
       id: mkString(meta.id),
       description: mkString(meta.description ?? ""),

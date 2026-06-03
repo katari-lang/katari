@@ -1,4 +1,5 @@
-// CtorThread ops. Leaf — `create` builds a tagged value and emits done.
+// CtorThread ops. Leaf — `create` builds a data value (a `record` carrying its
+// constructor) and emits done.
 
 import type { CallId } from "../../id.js";
 import type { CtorThread } from "../types.js";
@@ -18,9 +19,9 @@ export const ctorOps: ThreadOps<CtorThread> = {
       target: t.parent,
       callId: t.parentCallId,
       value: {
-        kind: "tagged",
-        ctorId: t.ctorId,
-        fields: { ...t.args },
+        kind: "record",
+        entries: { ...t.args },
+        ctor: t.ctorId,
       },
     });
   },

@@ -32,9 +32,9 @@ describe("value-secret-codec", () => {
       { kind: "null" },
       { kind: "array", elements: [{ kind: "number", value: 1 }] },
       {
-        kind: "tagged",
-        ctorId: "main.point",
-        fields: { x: { kind: "number", value: 3 } },
+        kind: "record",
+        ctor: "main.point",
+        entries: { x: { kind: "number", value: 3 } },
       },
     ];
     for (const v of cases) {
@@ -53,11 +53,11 @@ describe("value-secret-codec", () => {
     expect(decryptValueTree(enc)).toEqual(v);
   });
 
-  it("encrypts secrets nested inside tagged and array containers", () => {
+  it("encrypts secrets nested inside data and array containers", () => {
     const v: Value = {
-      kind: "tagged",
-      ctorId: "main.payload",
-      fields: {
+      kind: "record",
+      ctor: "main.payload",
+      entries: {
         token: mkSecret("abc"),
         meta: {
           kind: "array",
@@ -70,10 +70,10 @@ describe("value-secret-codec", () => {
     };
     const enc = encryptValueTree(v);
     // Walk into the encrypted tree and assert the secrets were replaced.
-    expect(enc.kind).toEqual("tagged");
-    if (enc.kind !== "tagged") throw new Error("type narrowing");
-    expect("$envelope" in enc.fields.token!).toBe(true);
-    const innerArr = enc.fields.meta!;
+    expect(enc.kind).toEqual("record");
+    if (enc.kind !== "record") throw new Error("type narrowing");
+    expect("$envelope" in enc.entries.token!).toBe(true);
+    const innerArr = enc.entries.meta!;
     if (innerArr.kind !== "array") throw new Error("type narrowing");
     expect(innerArr.elements[0]).toEqual(mkString("first"));
     expect("$envelope" in innerArr.elements[1]!).toBe(true);
@@ -93,18 +93,18 @@ describe("value-secret-codec", () => {
 
   it("redactSecretsInEncrypted replaces envelopes with deterministic placeholders", () => {
     const enc: EncryptedValue = encryptValueTree({
-      kind: "tagged",
-      ctorId: "main.creds",
-      fields: {
+      kind: "record",
+      ctor: "main.creds",
+      entries: {
         a: mkSecret("alpha"),
         b: mkSecret("beta"),
       },
     });
     const redacted = redactSecretsInEncrypted(enc);
-    expect(redacted.kind).toEqual("tagged");
-    if (redacted.kind !== "tagged") throw new Error("type narrowing");
-    const a = redacted.fields.a!;
-    const b = redacted.fields.b!;
+    expect(redacted.kind).toEqual("record");
+    if (redacted.kind !== "record") throw new Error("type narrowing");
+    const a = redacted.entries.a!;
+    const b = redacted.entries.b!;
     if (a.kind !== "secret" || b.kind !== "secret") throw new Error("type narrowing");
     const aText = inlineText(a);
     const bText = inlineText(b);
