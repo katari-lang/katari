@@ -4,13 +4,15 @@ Status: design agreed 2026-06-04. Implementation pending.
 
 ## Motivation
 
-Every callable boundary is now fully annotated:
+Every callable *parameter* is now fully annotated:
 
 - **Parameters** carry a mandatory `: type` (enforced in the parser, K0020).
-- **Return types** are mandatory on `agent` / `req` / `ext` / `prim`.
+- **Return types** are mandatory on `req` / `ext` / `prim`, and on a **recursive**
+  `agent`; a **non-recursive** agent's return type is *inferred* by forward
+  synthesis of its body (see "Return types" below).
 
-With every boundary type known up-front, a value's type never has to be
-*inferred from its uses*, so the global type-variable machinery
+With every parameter type and every recursive boundary known up-front, a value's
+type never has to be *inferred from its uses*, so the global type-variable machinery
 (constraint generation → unification solver → zonking) is unnecessary. A
 single top-down **bidirectional** walk type-checks each body directly.
 
@@ -101,6 +103,35 @@ This is exactly the arity-mismatched / array-subject case that the
 variable-based projection could not serve in either direction; with a concrete
 subject type both work trivially.
 
+## Return types (infer for non-recursive, annotate recursion)
+
+Making `agent` return types mandatory was tried and rejected: 395 of 701
+compiler tests omit `-> T` (most agents are non-recursive and their return is
+obvious), so it is far too heavy. Instead:
+
+- A **non-recursive** agent's return type is **inferred** by forward-synthesising
+  its body. No annotation needed. (An annotation, if present, is still checked:
+  `bodySynth <: declared`.)
+- A **recursive** agent **must** annotate its return type. The type lattice has
+  infinite ascending chains, so forward synthesis through a cycle has no
+  terminating fixpoint; the annotation breaks the cycle (callers use it).
+
+Recursion is detected from the call graph we already build (`AgentGraph` /
+`agentSCCs`):
+
+```
+recursive(A) = (A's SCC has > 1 member) ∨ (A ∈ callees(A))   -- self-call
+```
+
+Enforcement lives in the **checker**, not the parser (the parser cannot see
+recursion). A recursive agent missing `-> T` is a dedicated diagnostic:
+"recursive agent 'foo' needs an explicit return type — it can't be inferred
+through the recursion." This keeps `-> T` optional in the grammar.
+
+Contrast with effects (next): the effect lattice is *finite*, so a recursive
+agent's effect can be inferred by fixpoint with no annotation — the asymmetry is
+infinite-vs-finite lattice, not types-vs-effects per se.
+
 ## Effects: per-SCC finite-lattice fixpoint
 
 Effects are **inferred** (annotation optional), so recursion is not broken by
@@ -144,11 +175,16 @@ inference variable is ever introduced.
 `Katari.Typechecker.typecheckModule` keeps the per-SCC fold. `runOneSCC`
 changes from `generateConstraintsForSCC → solve → zonk` to:
 
-1. **Seed signatures**: for every decl in the SCC, elaborate its signature
-   (param types + return type — all mandatory) into the env. This is possible
-   *before* any body is checked, so recursive calls resolve.
-2. **Check bodies**: `synth`/`check` each agent body against its return type
-   (single pass each), producing `Zonked` decls + per-agent effect terms.
+1. **Seed signatures**: elaborate every SCC decl's parameter types into the env.
+   - Recursive SCC (cycle): the return type is annotated (required) → seed the
+     full `param → return` signature *before* checking bodies, so recursive
+     calls resolve. A missing annotation here is the recursive-return diagnostic.
+   - Non-recursive singleton `{A}`: A is not referenced recursively, so no
+     pre-seed of its return is needed — synthesise it from the body in step 2.
+2. **Check bodies**: for each agent, walk the body once. Recursive agents:
+   `check body <: declaredReturn`. Non-recursive agents: `synth body` ⇒ the
+   inferred return type (then check against an annotation if one was written).
+   Produces `Zonked` decls + per-agent effect terms.
 3. **Effect fixpoint** over the SCC; effect checks.
 4. Accumulate resolved types forward (unchanged accumulator shape).
 
