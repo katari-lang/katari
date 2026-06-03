@@ -90,17 +90,17 @@ agent union_output(should_fail: boolean) -> ok | err {
 // ─── Tuple ──────────────────────────────────────────────────────────
 
 @"2-tuple input. Tests TupleField with mixed element types."
-agent tuple_input(t: (integer, string)) -> string {
+agent tuple_input(t: [integer, string]) -> string {
   match (t) {
-    case (0, s) => { f"zero with ${s}" }
-    case (n, s) => { f"${to_string(value = n)} with ${s}" }
+    case [0, s] => { f"zero with ${s}" }
+    case [n, s] => { f"${to_string(value = n)} with ${s}" }
   }
 }
 
 @"3-tuple with nested data. Tests nested tuple rendering."
-agent tuple_nested(t: (point, string, boolean)) -> string {
+agent tuple_nested(t: [point, string, boolean]) -> string {
   match (t) {
-    case (point(x = xv, y = yv), label, flag) => {
+    case [point(x = xv, y = yv), label, flag] => {
       f"(${to_string(value = xv)},${to_string(value = yv)}) ${label} ${to_string(value = flag)}"
     }
   }
@@ -139,14 +139,14 @@ agent nested_record_array(groups: record[array[integer]]) -> record[array[intege
 agent echo_array(ints: array[integer]) -> array[integer] { ints }
 
 @"Union containing tuple. Deep nesting test."
-data wrapped_pair(pair: (integer, string))
+data wrapped_pair(pair: [integer, string])
 data wrapped_single(value: integer)
 
 agent nested_union_tuple(input: wrapped_pair | wrapped_single) -> string {
   match (input) {
     case wrapped_pair(pair = t) => {
       match (t) {
-        case (n, s) => { f"pair: ${to_string(value = n)} ${s}" }
+        case [n, s] => { f"pair: ${to_string(value = n)} ${s}" }
       }
     }
     case wrapped_single(value = v) => { f"single: ${to_string(value = v)}" }
@@ -199,7 +199,7 @@ agent tree_sequential() -> string {
 
 @"Parallel sleeps. Tree shows three ext nodes simultaneously."
 agent tree_parallel() -> string {
-  let _ = parallel (sleep_ms(ms = 3000), sleep_ms(ms = 5000), sleep_ms(ms = 7000))
+  let _ = parallel [sleep_ms(ms = 3000), sleep_ms(ms = 5000), sleep_ms(ms = 7000)]
   "done"
 }
 
