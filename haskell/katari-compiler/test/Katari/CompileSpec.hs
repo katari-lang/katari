@@ -45,14 +45,6 @@ defaultArgumentsSpec = describe "default arguments" $ do
             ]
     hasErrors (compileSync (singleSourceInput src)).diagnostics `shouldBe` False
 
-  it "an untyped default infers the parameter type and is omittable" $ do
-    let src =
-          mconcat
-            [ "agent f(x = 2) -> integer { x }\n",
-              "agent main() -> integer { f() }\n"
-            ]
-    hasErrors (compileSync (singleSourceInput src)).diagnostics `shouldBe` False
-
   it "a required (non-defaulted) parameter may NOT be omitted" $ do
     let src =
           mconcat
@@ -73,15 +65,7 @@ defaultArgumentsSpec = describe "default arguments" $ do
             ]
     hasErrors (compileSync (singleSourceInput src)).diagnostics `shouldBe` False
 
-  it "an untyped optional after a required param may be omitted" $ do
-    let src =
-          mconcat
-            [ "agent bump(n: integer, by = 1) -> integer { n + by }\n",
-              "agent main() -> integer { bump(n = 10) }\n"
-            ]
-    hasErrors (compileSync (singleSourceInput src)).diagnostics `shouldBe` False
-
-  it "an untyped optional is omittable in a module with imports (seeded importedTypes)" $ do
+  it "a typed optional is omittable in a module with imports" $ do
     let result =
           compileSync
             ( multiSourceInput
@@ -89,7 +73,7 @@ defaultArgumentsSpec = describe "default arguments" $ do
                   ( "main",
                     mconcat
                       [ "import dep\n",
-                        "agent bump(by = 1) -> integer { by }\n",
+                        "agent bump(by: integer = 1) -> integer { by }\n",
                         "agent main() -> integer { bump() }\n"
                       ]
                   )

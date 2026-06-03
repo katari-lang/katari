@@ -850,12 +850,14 @@ declarations = describe "declarations" $ do
     _ <- shouldSucceed "agent foo(x: integer = 2) -> integer { x }"
     pure ()
 
-  it "parses an untyped parameter default" $ do
-    _ <- shouldSucceed "agent foo(x = 2) -> integer { x }"
-    pure ()
+  it "rejects an untyped parameter (type annotation is mandatory)" $
+    shouldFail "agent foo(x) -> integer { x }"
+
+  it "rejects an untyped parameter even with a default" $
+    shouldFail "agent foo(x = 2) -> integer { x }"
 
   it "rejects a non-literal default (no silent rename)" $
-    shouldFail "agent foo(x = y) -> integer { x }"
+    shouldFail "agent foo(x: integer = y) -> integer { x }"
 
   it "parses agent with requests" $ do
     _ <- shouldSucceed "agent foo() with req1, req2 { 1 }"

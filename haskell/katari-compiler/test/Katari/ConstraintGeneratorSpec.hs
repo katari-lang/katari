@@ -220,13 +220,6 @@ variablePatterns = describe "variable patterns" $ do
     -- and the request bound. So we expect a healthy non-zero number.
     countTypeConstraints cg `shouldSatisfy` (> 0)
 
-  it "unannotated parameter does not create extra type constraint per pattern" $ do
-    (cg1, _) <- runOne "agent foo(x: integer) { 0 }"
-    (cg2, _) <- runOne "agent foo(x) { 0 }"
-    -- The annotated one should have at least 2 more type constraints (the
-    -- extra eq introduced by the pattern annotation).
-    countTypeConstraints cg1 `shouldSatisfy` (>= countTypeConstraints cg2 + 2)
-
 -- ---------------------------------------------------------------------------
 -- Declarations: data ctor, request, ext-agent
 -- ---------------------------------------------------------------------------

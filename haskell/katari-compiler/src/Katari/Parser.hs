@@ -2070,16 +2070,20 @@ parseParameterList :: Parser [ParameterBinding Parsed]
 parseParameterList =
   label "parameter list" $ parseParenthesizedList parseParameterBinding
 
--- | A parameter is a plain binding @name (: type)? (= literal)?@. There is
--- no destructuring or label-rename form: the call-site label is always the
--- binding name. A trailing @= literal@ supplies an optional default — once
--- the @=@ is seen the right-hand side is committed to a literal (a
--- non-literal there is a parse error, never a silent rename).
+-- | A parameter is a plain binding @name : type (= literal)?@. The type
+-- annotation is MANDATORY (even with a default) — every callable boundary is
+-- fully annotated so the checker never has to infer a parameter's type from
+-- its uses. There is no destructuring or label-rename form: the call-site
+-- label is always the binding name. A trailing @= literal@ supplies an
+-- optional default — once the @=@ is seen the right-hand side is committed to
+-- a literal (a non-literal there is a parse error, never a silent rename).
 parseParameterBinding :: Parser (ParameterBinding Parsed)
 parseParameterBinding = parseWithSpan $ do
   annotation <- parseAnnotation
   name <- parseNameRef
-  typeAnnotation <- optional (parsePunctuation PunctuationColon *> parseType)
+  typeAnnotation <-
+    label "a type annotation — every parameter needs ': type' (e.g. 'x: integer')" $
+      Just <$> (parsePunctuation PunctuationColon *> parseType)
   defaultValue <- optional parseParameterDefault
   pure $ \sourceSpan ->
     ParameterBinding

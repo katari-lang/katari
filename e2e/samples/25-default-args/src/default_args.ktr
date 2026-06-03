@@ -3,8 +3,8 @@ agent greet(name: string, suffix: string = "!") -> string {
   f"hi ${name}${suffix}"
 }
 
-@"Add by to n. by has an untyped default, so its type is inferred as integer."
-agent bump(n: integer, by = 1) -> integer {
+@"Add by to n. by is optional (defaults to 1) and may be omitted."
+agent bump(n: integer, by: integer = 1) -> integer {
   n + by
 }
 
