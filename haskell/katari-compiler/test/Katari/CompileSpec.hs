@@ -81,6 +81,45 @@ defaultArgumentsSpec = describe "default arguments" $ do
             )
     hasErrors result.diagnostics `shouldBe` False
 
+  it "an agent that declares 'with E' but raises a request outside E is rejected" $ do
+    let src =
+          mconcat
+            [ "request foo() -> integer\n",
+              "request other() -> integer\n",
+              "agent baz() -> integer with other { foo() }\n"
+            ]
+    hasErrors (compileSync (singleSourceInput src)).diagnostics `shouldBe` True
+
+  it "an agent that declares the request it raises is accepted" $ do
+    let src =
+          mconcat
+            [ "request foo() -> integer\n",
+              "agent baz() -> integer with foo { foo() }\n"
+            ]
+    hasErrors (compileSync (singleSourceInput src)).diagnostics `shouldBe` False
+
+  it "an unannotated agent infers its effect (no 'with' needed)" $ do
+    let src =
+          mconcat
+            [ "request foo() -> integer\n",
+              "agent baz() -> integer { foo() }\n"
+            ]
+    hasErrors (compileSync (singleSourceInput src)).diagnostics `shouldBe` False
+
+  it "a handler discharges the request, so the outer agent's effect is clean" $ do
+    let src =
+          mconcat
+            [ "request tick() -> integer\n",
+              "agent run() -> integer with tick { tick() }\n",
+              "agent main() -> integer {\n",
+              "  handle (var counter: integer = 1) {\n",
+              "    request tick() { next counter with { counter = counter + 1 } }\n",
+              "  }\n",
+              "  run()\n",
+              "}\n"
+            ]
+    hasErrors (compileSync (singleSourceInput src)).diagnostics `shouldBe` False
+
 happyPathSpec :: Spec
 happyPathSpec = describe "well-formed single-module input" $ do
   it "produces an IRModule and schema entries for a trivial agent" $ do
