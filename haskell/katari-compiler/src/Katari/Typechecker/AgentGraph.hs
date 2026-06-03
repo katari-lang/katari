@@ -1,5 +1,6 @@
 module Katari.Typechecker.AgentGraph
   ( agentSCCs,
+    declarationDependencies,
   )
 where
 

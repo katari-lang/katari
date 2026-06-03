@@ -14,10 +14,12 @@
 --   * 'checkExpr' — check an expression against an expected type (synthesise,
 --     then assert @synthesised <: expected@).
 --
--- WORK IN PROGRESS: this module is built incrementally alongside the live
--- constraint pipeline (it is not yet wired into 'Katari.Typechecker'). Forms
--- not yet handled go through 'unsupported', which records a diagnostic and
--- yields a placeholder so the walk stays total.
+-- 'checkSCC' is the per-SCC entry point that 'Katari.Typechecker' drives in
+-- place of the constraint generator + solver + zonker.
+--
+-- Effect inference (the per-SCC request fixpoint) is not yet implemented here:
+-- an agent's effect is its declared @with@ clause, or empty when unannotated.
+-- That is the next slice.
 module Katari.Typechecker.Check
   ( CheckError (..),
     toDiagnostic,
@@ -28,8 +30,7 @@ module Katari.Typechecker.Check
     subtypeAssert,
     synthExpr,
     checkExpr,
-    CheckSubject (..),
-    checkModule,
+    checkSCC,
   )
 where
 
@@ -39,7 +40,7 @@ import Control.Monad.State.Strict
 import Data.List (transpose)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (mapMaybe)
+import Data.Maybe (catMaybes, mapMaybe)
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
@@ -52,7 +53,7 @@ import Katari.SemanticType
 import Katari.SemanticType.Render (renderSemanticType)
 import Katari.SourceSpan (HasSourceSpan (..), SourceSpan)
 import Katari.Typechecker.Identifier (TypeData (..))
-import Katari.Typechecker.AgentGraph (agentSCCs)
+import Katari.Typechecker.AgentGraph (declarationDependencies)
 import Katari.Typechecker.NormalizedType
   ( DataFieldEnv,
     buildDataFieldEnv,
@@ -126,17 +127,20 @@ data CheckState = CheckState
   { stateErrors :: [CheckError],
     -- | Pending @break@ / @next@ value types, consumed by the nearest
     -- enclosing @for@ / handle scope (see 'collectExits').
-    stateExits :: [ExitRecord]
+    stateExits :: [ExitRecord],
+    -- | Every local binding's resolved type, accumulated across all scopes
+    -- (not Reader-scoped) so the Query / hover layer can look up any variable.
+    stateLocalTypes :: Map VariableResolution (SemanticType Resolved)
   }
 
 type Check = ReaderT CheckEnv (State CheckState)
 
--- | Run a checker action against an environment, returning the result and the
--- accumulated diagnostics (in source order).
-runCheck :: CheckEnv -> Check a -> (a, [CheckError])
+-- | Run a checker action, returning the result, the diagnostics (in source
+-- order), and every local binding's type (for the Query layer).
+runCheck :: CheckEnv -> Check a -> (a, [CheckError], Map VariableResolution (SemanticType Resolved))
 runCheck env action =
-  let (result, finalState) = runState (runReaderT action env) (CheckState [] [])
-   in (result, reverse finalState.stateErrors)
+  let (result, finalState) = runState (runReaderT action env) (CheckState [] [] Map.empty)
+   in (result, reverse finalState.stateErrors, finalState.stateLocalTypes)
 
 emitError :: CheckError -> Check ()
 emitError err = modify' $ \s -> s {stateErrors = err : s.stateErrors}
@@ -144,10 +148,12 @@ emitError err = modify' $ \s -> s {stateErrors = err : s.stateErrors}
 lookupLocal :: VariableResolution -> Check (Maybe (SemanticType Resolved))
 lookupLocal resolution = asks (Map.lookup resolution . (.checkLocals))
 
--- | Extend the local environment for the duration of an action.
+-- | Extend the local environment for the duration of an action, and record the
+-- bindings in 'stateLocalTypes' (un-scoped) for the Query layer.
 withLocals :: [(VariableResolution, SemanticType Resolved)] -> Check a -> Check a
-withLocals bindings =
-  local (\e -> e {checkLocals = Map.union (Map.fromList bindings) e.checkLocals})
+withLocals bindings action = do
+  modify' $ \s -> s {stateLocalTypes = Map.union (Map.fromList bindings) s.stateLocalTypes}
+  local (\e -> e {checkLocals = Map.union (Map.fromList bindings) e.checkLocals}) action
 
 -- | Set the enclosing agent's expected return type.
 withExpectedReturn :: SemanticType Resolved -> Check a -> Check a
@@ -262,10 +268,17 @@ literalValueToSemantic = \case
 -- | Assert @actual <: expected@. On failure, record a 'CheckErrorTypeMismatch'
 -- and continue (the caller recovers by stamping the expected type).
 subtypeAssert :: SourceSpan -> SemanticType Resolved -> SemanticType Resolved -> Check ()
-subtypeAssert sourceSpan actual expected = do
-  dataFieldEnv <- asks (.checkDataFieldEnv)
-  let holds = subtypeNormalizedType dataFieldEnv (normaliseSemantic actual) (normaliseSemantic expected)
-  if holds then pure () else emitError (CheckErrorTypeMismatch sourceSpan actual expected)
+subtypeAssert sourceSpan actual expected
+  -- 'unknown' on either side is the error-recovery / not-yet-known type: a
+  -- prior diagnostic (e.g. an unresolved name) already fired, so suppress the
+  -- cascade rather than pile on a second error for the same root cause.
+  | isUnknown actual || isUnknown expected = pure ()
+  | otherwise = do
+      dataFieldEnv <- asks (.checkDataFieldEnv)
+      let holds = subtypeNormalizedType dataFieldEnv (normaliseSemantic actual) (normaliseSemantic expected)
+      if holds then pure () else emitError (CheckErrorTypeMismatch sourceSpan actual expected)
+  where
+    isUnknown = \case SemanticTypeUnknown -> True; _ -> False
 
 -- ===========================================================================
 -- Expression checking
@@ -341,14 +354,13 @@ synthExpr = \case
   ExpressionBinaryOperator BinaryOperatorExpression {sourceSpan} -> internalNull sourceSpan "BinaryOperator survived past the Identifier desugar"
   ExpressionUnaryOperator UnaryOperatorExpression {sourceSpan} -> internalNull sourceSpan "UnaryOperator survived past the Identifier desugar"
 
--- | Look up a variable / top-level callable reference's type.
+-- | Look up a variable / top-level callable reference's type. An unresolved
+-- reference (Identifier already reported it as an undefined name) yields
+-- @unknown@ silently — re-reporting it here would duplicate the diagnostic.
 lookupVariableType :: SourceSpan -> Text -> Maybe VariableResolution -> Check (SemanticType Resolved)
-lookupVariableType sourceSpan name = \case
-  Just resolution ->
-    lookupLocal resolution >>= \case
-      Just found -> pure found
-      Nothing -> emitError (CheckErrorUnresolvedVariable sourceSpan name) >> pure SemanticTypeUnknown
-  Nothing -> emitError (CheckErrorUnresolvedVariable sourceSpan name) >> pure SemanticTypeUnknown
+lookupVariableType _ _ = \case
+  Just resolution -> maybe SemanticTypeUnknown id <$> lookupLocal resolution
+  Nothing -> pure SemanticTypeUnknown
 
 -- | A form that the Identifier pass should have eliminated — record an
 -- internal-invariant diagnostic and yield a @null@ placeholder.
@@ -544,7 +556,10 @@ walkStateVariable StateVariableBinding {name, typeAnnotation, initial, sourceSpa
 walkRequestHandler :: RequestHandler Identified -> Check (RequestHandler Zonked)
 walkRequestHandler RequestHandler {moduleQualifier, name, parameters, returnType, body, sourceSpan} = do
   (parameters', _, paramLocals) <- elaborateParameters parameters
-  (body', _) <- withLocals paramLocals (walkBlock body)
+  (body', bodyType) <- withLocals paramLocals (walkBlock body)
+  -- A request handler body must transfer control with @break@ / @next@; falling
+  -- through to a value is an error (its type must be 'never').
+  subtypeAssert (sourceSpanOf body) bodyType SemanticTypeNever
   pure
     RequestHandler
       { moduleQualifier = fmap retagNameRef moduleQualifier,
@@ -832,151 +847,242 @@ fieldType sourceSpan subject label = case subject of
   where
     missing = emitError (CheckErrorUnsupported sourceSpan ("no field '" <> label <> "' on the accessed value")) >> pure SemanticTypeUnknown
 
+
 -- ===========================================================================
--- Module entry point
+-- Per-SCC entry point
 -- ===========================================================================
 
--- | Everything the checker needs for one module. Mirrors the constraint
--- pipeline's 'TypecheckSubject'.
-data CheckSubject = CheckSubject
-  { csModuleName :: Text,
-    csModuleAST :: Module Identified,
-    csTypeData :: Map QualifiedName TypeData,
-    csKnownRequests :: Set QualifiedName,
-    csPrimRules :: Map QualifiedName PrimRule,
-    csImportedTypes :: Map QualifiedName (SemanticType Resolved)
-  }
-
--- | Type-check a module bidirectionally, returning every diagnostic. (Module
--- @Zonked@ assembly + the effect SCC fixpoint land when the checker is wired
--- into 'Katari.Typechecker'; this entry validates the type-checking core.)
-checkModule :: CheckSubject -> [Diagnostic]
-checkModule subject =
-  let elaborationEnv =
+-- | Type-check one SCC of a module (mirrors the constraint pipeline's
+-- @runOneSCC@). Given the resolved signatures of everything checked so far
+-- (imports + earlier SCCs), it produces the zonked declarations the SCC owns,
+-- their signatures (to extend the resolved environment), and any diagnostics.
+-- The caller assembles the full @Module Zonked@ from these per-SCC maps.
+checkSCC ::
+  -- | Module name (for self-recursion detection).
+  Text ->
+  -- | Resolved callable signatures seen so far (imports + earlier SCCs).
+  Map QualifiedName (SemanticType Resolved) ->
+  Module Identified ->
+  -- | The qualified names this SCC owns.
+  Set QualifiedName ->
+  Map QualifiedName TypeData ->
+  Map QualifiedName PrimRule ->
+  ( Map QualifiedName (Declaration Zonked),
+    -- | Top-level signatures the SCC owns (extends the resolved environment).
+    Map QualifiedName (SemanticType Resolved),
+    -- | Every binding's type, top-level + local (for the Query / hover layer).
+    Map VariableResolution (SemanticType Resolved),
+    [Diagnostic]
+  )
+checkSCC moduleName resolvedCallables moduleAST sccQualifiedNames typeData primRules =
+  let env =
         CheckEnv
-          { checkTypeData = subject.csTypeData,
-            checkDataFieldEnv = mempty,
+          { checkTypeData = typeData,
+            checkDataFieldEnv = buildDataFieldEnv resolvedCallables,
             checkSynonymVisited = Set.empty,
-            checkLocals = Map.empty,
-            checkPrimRules = subject.csPrimRules,
+            checkLocals = Map.mapKeys ResolvedTopLevel resolvedCallables,
+            checkPrimRules = primRules,
             checkExpectedReturn = Nothing
           }
-      (nonAgentSignatures, signatureErrors) =
-        runCheck elaborationEnv (computeNonAgentSignatures subject.csModuleAST.declarations)
-      resolvedCallables = Map.union subject.csImportedTypes nonAgentSignatures
-      fullEnv =
-        elaborationEnv
-          { checkDataFieldEnv = buildDataFieldEnv resolvedCallables,
-            checkLocals = Map.mapKeys ResolvedTopLevel resolvedCallables
-          }
-      (_, bodyErrors) = runCheck fullEnv (processAgentSCCs subject)
-   in map toDiagnostic (signatureErrors ++ bodyErrors)
+      sccDeclarations = filter (declarationInSCC sccQualifiedNames) moduleAST.declarations
+      (results, errors, localTypes) = runCheck env (checkSCCDeclarations moduleName sccQualifiedNames sccDeclarations)
+      zonked = Map.fromList [(qualifiedName, declaration) | (qualifiedName, declaration, _) <- results]
+      signatures = Map.fromList [(qualifiedName, sig) | (qualifiedName, _, sig) <- results]
+      typeEnv = Map.union (Map.mapKeys ResolvedTopLevel signatures) localTypes
+   in (zonked, signatures, typeEnv, map toDiagnostic errors)
 
--- | Signatures of the non-agent callables (data ctors, requests, externals,
--- prims) — all derivable from annotations alone (no body to check).
-computeNonAgentSignatures :: [Declaration Identified] -> Check (Map QualifiedName (SemanticType Resolved))
-computeNonAgentSignatures declarations =
-  Map.fromList . concat <$> mapM one declarations
-  where
-    bind nameRef sig = pure (maybe [] (\qualifiedName -> [(qualifiedName, sig)]) (topLevelQName nameRef))
-    one = \case
-      DeclarationData DataDeclaration {name, typeName, parameters} -> do
-        fields <- mapM (\DataParameter {name = fieldName, parameterType} -> (fieldName,) <$> elaborateType parameterType) parameters
-        let returnType = maybe SemanticTypeUnknown SemanticTypeData typeName.resolution
-        bind name (SemanticTypeFunction (requiredParameter <$> Map.fromList fields) returnType emptyRequest)
-      DeclarationRequest RequestDeclaration {name, requestName, parameters, returnType} -> do
-        (_, paramSig, _) <- elaborateParameters parameters
-        ret <- elaborateType returnType
-        let effect = case requestName.resolution of
-              Just qualifiedName | not (isThrow qualifiedName) -> SemanticRequest (Set.singleton (SemanticRequestElementConcrete qualifiedName))
-              _ -> emptyRequest
-        bind name (SemanticTypeFunction paramSig ret effect)
-      DeclarationExternalAgent ExternalAgentDeclaration {name, parameters, returnType, withRequests} -> do
-        (_, paramSig, _) <- elaborateParameters parameters
-        ret <- elaborateType returnType
-        effect <- elaborateRequestList withRequests
-        bind name (SemanticTypeFunction paramSig ret effect)
-      DeclarationPrimAgent PrimAgentDeclaration {name, parameters, returnType, withRequests} -> do
-        (_, paramSig, _) <- elaborateParameters parameters
-        ret <- elaborateType returnType
-        effect <- elaborateRequestList withRequests
-        bind name (SemanticTypeFunction paramSig ret effect)
-      _ -> pure []
-    isThrow qualifiedName = qualifiedName.module_ == "primitive" && qualifiedName.name == "throw"
+declarationInSCC :: Set QualifiedName -> Declaration Identified -> Bool
+declarationInSCC sccQualifiedNames declaration = case declarationVarName declaration of
+  Just nameRef -> maybe False (`Set.member` sccQualifiedNames) (topLevelQName nameRef)
+  Nothing -> False
 
--- | Process the agent SCCs in topological order, extending the environment
--- with each SCC's finalised signatures before the next.
-processAgentSCCs :: CheckSubject -> Check ()
-processAgentSCCs subject = go (agentSCCs subject.csModuleName subject.csModuleAST)
-  where
-    declMap = Map.fromList (mapMaybe agentEntry subject.csModuleAST.declarations)
-    agentEntry = \case
-      DeclarationAgent decl -> (\qualifiedName -> (qualifiedName, decl)) <$> topLevelQName decl.name
-      _ -> Nothing
-    go [] = pure ()
-    go (scc : rest) = do
-      bindings <- processAgentSCC declMap scc
-      withLocals bindings (go rest)
+declarationVarName :: Declaration Identified -> Maybe (NameRef Identified VariableRef)
+declarationVarName = \case
+  DeclarationAgent decl -> Just decl.name
+  DeclarationRequest decl -> Just decl.name
+  DeclarationExternalAgent decl -> Just decl.name
+  DeclarationPrimAgent decl -> Just decl.name
+  DeclarationData decl -> Just decl.name
+  _ -> Nothing
 
--- | Type-check one SCC of mutually-recursive agents. A multi-member (hence
--- recursive) SCC requires every member to annotate its return type, which
--- breaks the recursion for checking; a non-recursive singleton infers its
--- return from the body.
-processAgentSCC ::
-  Map QualifiedName (AgentDeclaration Identified) ->
-  Set QualifiedName ->
-  Check [(VariableResolution, SemanticType Resolved)]
-processAgentSCC declMap scc = do
-  let members = mapMaybe (`Map.lookup` declMap) (Set.toList scc)
-      recursive = Set.size scc > 1
+type SCCResult = (QualifiedName, Declaration Zonked, SemanticType Resolved)
+
+checkSCCDeclarations :: Text -> Set QualifiedName -> [Declaration Identified] -> Check [SCCResult]
+checkSCCDeclarations moduleName sccQualifiedNames declarations = do
+  let agents = [decl | DeclarationAgent decl <- declarations]
+      nonAgents = [decl | decl <- declarations, not (isAgentDeclaration decl)]
+  nonAgentResults <- catMaybes <$> mapM checkNonAgentDeclaration nonAgents
+  agentResults <- checkAgentBatch moduleName sccQualifiedNames agents
+  pure (nonAgentResults ++ agentResults)
+
+isAgentDeclaration :: Declaration phase -> Bool
+isAgentDeclaration = \case DeclarationAgent _ -> True; _ -> False
+
+-- | A non-agent callable's signature + zonked declaration (no body to check).
+checkNonAgentDeclaration :: Declaration Identified -> Check (Maybe SCCResult)
+checkNonAgentDeclaration = \case
+  DeclarationData DataDeclaration {annotation, name, constructorName, typeName, parameters, sourceSpan} -> do
+    fields <- mapM (\DataParameter {name = fieldName, parameterType} -> (fieldName,) <$> elaborateType parameterType) parameters
+    let returnType = maybe SemanticTypeUnknown SemanticTypeData typeName.resolution
+        sig = SemanticTypeFunction (requiredParameter <$> Map.fromList fields) returnType emptyRequest
+        zonked =
+          DeclarationData
+            DataDeclaration
+              { annotation = annotation,
+                name = retagNameRef name,
+                constructorName = retagNameRef constructorName,
+                typeName = retagNameRef typeName,
+                parameters = map retagDataParameter parameters,
+                sourceSpan = sourceSpan
+              }
+    pure (withQName name zonked sig)
+  DeclarationRequest RequestDeclaration {annotation, name, requestName, parameters, returnType, sourceSpan} -> do
+    (parameters', paramSig, _) <- elaborateParameters parameters
+    ret <- elaborateType returnType
+    let effect = case requestName.resolution of
+          Just qualifiedName | not (isThrowRequest qualifiedName) -> singletonRequestSet qualifiedName
+          _ -> emptyRequest
+        sig = SemanticTypeFunction paramSig ret effect
+        zonked =
+          DeclarationRequest
+            RequestDeclaration
+              { annotation = annotation,
+                name = retagNameRef name,
+                requestName = retagNameRef requestName,
+                parameters = parameters',
+                returnType = retagSyntacticType returnType,
+                sourceSpan = sourceSpan
+              }
+    pure (withQName name zonked sig)
+  DeclarationExternalAgent ExternalAgentDeclaration {annotation, name, parameters, returnType, withRequests, endpoint, dispatchName, sourceSpan} -> do
+    (parameters', paramSig, _) <- elaborateParameters parameters
+    ret <- elaborateType returnType
+    effect <- elaborateRequestList withRequests
+    let sig = SemanticTypeFunction paramSig ret effect
+        zonked =
+          DeclarationExternalAgent
+            ExternalAgentDeclaration
+              { annotation = annotation,
+                name = retagNameRef name,
+                parameters = parameters',
+                returnType = retagSyntacticType returnType,
+                withRequests = map retagSyntacticRequest withRequests,
+                endpoint = endpoint,
+                dispatchName = dispatchName,
+                sourceSpan = sourceSpan
+              }
+    pure (withQName name zonked sig)
+  DeclarationPrimAgent PrimAgentDeclaration {annotation, name, parameters, returnType, withRequests, using, sourceSpan} -> do
+    (parameters', paramSig, _) <- elaborateParameters parameters
+    ret <- elaborateType returnType
+    effect <- elaborateRequestList withRequests
+    let sig = SemanticTypeFunction paramSig ret effect
+        zonked =
+          DeclarationPrimAgent
+            PrimAgentDeclaration
+              { annotation = annotation,
+                name = retagNameRef name,
+                parameters = parameters',
+                returnType = retagSyntacticType returnType,
+                withRequests = map retagSyntacticRequest withRequests,
+                using = using,
+                sourceSpan = sourceSpan
+              }
+    pure (withQName name zonked sig)
+  _ -> pure Nothing
+
+-- | Check a batch of mutually-recursive agents forming one SCC. A multi-member
+-- SCC (or a self-recursive singleton) is recursive: every member must annotate
+-- its return type, seeded up front to break the recursion. A non-recursive
+-- singleton infers its return from the body.
+checkAgentBatch :: Text -> Set QualifiedName -> [AgentDeclaration Identified] -> Check [SCCResult]
+checkAgentBatch moduleName sccQualifiedNames agents = do
+  let recursive = Set.size sccQualifiedNames > 1 || any (isSelfRecursive moduleName) agents
   if recursive
     then do
-      seeds <- mapM seedRecursiveSignature members
-      let bindings = [(ResolvedTopLevel qualifiedName, sig) | (qualifiedName, sig) <- concat seeds]
-      withLocals bindings $ mapM_ checkAgentBodyAgainstReturn members
-      pure bindings
-    else case members of
-      [decl] -> do
-        sig <- checkAgentBodyInferring decl
-        pure (maybe [] (\resolution -> [(resolution, sig)]) decl.name.resolution)
-      _ -> pure []
+      seeds <- concat <$> mapM seedAgentSignature agents
+      let bindings = [(ResolvedTopLevel qualifiedName, sig) | (qualifiedName, sig) <- seeds]
+      withLocals bindings (mapM checkAgentResult agents)
+    else mapM checkAgentResult agents
 
--- | A recursive agent's seeded signature, from its (mandatory) return
--- annotation. A missing annotation is the recursive-return diagnostic.
-seedRecursiveSignature :: AgentDeclaration Identified -> Check [(QualifiedName, SemanticType Resolved)]
-seedRecursiveSignature AgentDeclaration {name, parameters, returnType, sourceSpan} = do
-  (_, paramSig, _) <- elaborateParameters parameters
+isSelfRecursive :: Text -> AgentDeclaration Identified -> Bool
+isSelfRecursive moduleName decl = case topLevelQName decl.name of
+  Just qualifiedName -> Set.member qualifiedName (declarationDependencies moduleName (DeclarationAgent decl))
+  Nothing -> False
+
+-- | A recursive agent's seeded signature, from its mandatory return annotation
+-- (and its declared @with@ effect). Missing return = the recursive diagnostic.
+seedAgentSignature :: AgentDeclaration Identified -> Check [(QualifiedName, SemanticType Resolved)]
+seedAgentSignature AgentDeclaration {name, parameters, returnType, withRequests, sourceSpan} = do
+  paramSig <- parameterSignatureOnly parameters
   ret <- case returnType of
     Just t -> elaborateType t
     Nothing -> do
       emitError (CheckErrorUnsupported sourceSpan "a recursive agent needs an explicit return type — it can't be inferred through the recursion")
       pure SemanticTypeUnknown
-  pure (maybe [] (\qualifiedName -> [(qualifiedName, SemanticTypeFunction paramSig ret emptyRequest)]) (topLevelQName name))
+  effect <- maybe (pure emptyRequest) elaborateRequestList withRequests
+  pure (maybe [] (\qualifiedName -> [(qualifiedName, SemanticTypeFunction paramSig ret effect)]) (topLevelQName name))
 
--- | Check a recursive agent's body against its (already-seeded) declared
--- return type.
-checkAgentBodyAgainstReturn :: AgentDeclaration Identified -> Check ()
-checkAgentBodyAgainstReturn AgentDeclaration {parameters, returnType, body} = do
-  (_, _, paramLocals) <- elaborateParameters parameters
-  ret <- maybe (pure SemanticTypeUnknown) elaborateType returnType
-  withLocals paramLocals . withExpectedReturn ret $ do
-    (_, bodyType) <- walkBlock body
-    subtypeAssert (sourceSpanOf body) bodyType ret
+checkAgentResult :: AgentDeclaration Identified -> Check SCCResult
+checkAgentResult decl = do
+  (zonked, sig) <- checkAgentDeclaration decl
+  let qualifiedName = maybe (QualifiedName "" "") id (topLevelQName decl.name)
+  pure (qualifiedName, zonked, sig)
 
--- | Check a non-recursive agent's body, inferring its return type when no
--- annotation is present. Returns the finalised signature.
-checkAgentBodyInferring :: AgentDeclaration Identified -> Check (SemanticType Resolved)
-checkAgentBodyInferring AgentDeclaration {parameters, returnType, body} = do
-  (_, paramSig, paramLocals) <- elaborateParameters parameters
+-- | Check an agent's body and build its zonked declaration + signature. When
+-- the return type is annotated the body is checked against it; otherwise the
+-- return is inferred from the body. (For a recursive agent the env already
+-- carries the seeded signature, and the annotation is mandatory.)
+checkAgentDeclaration :: AgentDeclaration Identified -> Check (Declaration Zonked, SemanticType Resolved)
+checkAgentDeclaration AgentDeclaration {annotation, name, parameters, returnType, withRequests, body, sourceSpan} = do
+  (parameters', paramSig, paramLocals) <- elaborateParameters parameters
   declaredReturn <- traverse elaborateType returnType
-  bodyType <-
+  effect <- maybe (pure emptyRequest) elaborateRequestList withRequests
+  (body', returnSemantic) <-
     withLocals paramLocals $ case declaredReturn of
       Just ret -> withExpectedReturn ret $ do
-        (_, bodyType) <- walkBlock body
+        (body', bodyType) <- walkBlock body
         subtypeAssert (sourceSpanOf body) bodyType ret
-        pure ret
-      Nothing -> snd <$> walkBlock body
-  pure (SemanticTypeFunction paramSig bodyType emptyRequest)
+        pure (body', ret)
+      Nothing -> walkBlock body
+  let zonked =
+        DeclarationAgent
+          AgentDeclaration
+            { annotation = annotation,
+              name = retagNameRef name,
+              parameters = parameters',
+              returnType = fmap retagSyntacticType returnType,
+              withRequests = fmap (fmap retagSyntacticRequest) withRequests,
+              body = body',
+              sourceSpan = sourceSpan
+            }
+  pure (zonked, SemanticTypeFunction paramSig returnSemantic effect)
+
+-- | Elaborate just the parameter types into a signature map (no zonked output,
+-- no default-value subtype check — used for the recursive pre-seed so its
+-- diagnostics don't double with the real check).
+parameterSignatureOnly :: [ParameterBinding Identified] -> Check (Map Text (Parameter Resolved))
+parameterSignatureOnly parameters =
+  Map.fromList
+    <$> mapM
+      ( \ParameterBinding {name, typeAnnotation, defaultValue} -> do
+          paramType <- maybe (pure SemanticTypeUnknown) elaborateType typeAnnotation
+          pure (name.text, Parameter {parameterType = paramType, optional = case defaultValue of Just _ -> True; Nothing -> False})
+      )
+      parameters
+
+retagDataParameter :: DataParameter Identified -> DataParameter Zonked
+retagDataParameter DataParameter {annotation, name, parameterType, sourceSpan} =
+  DataParameter {annotation = annotation, name = name, parameterType = retagSyntacticType parameterType, sourceSpan = sourceSpan}
+
+withQName :: NameRef Identified VariableRef -> Declaration Zonked -> SemanticType Resolved -> Maybe SCCResult
+withQName name zonked sig = (\qualifiedName -> (qualifiedName, zonked, sig)) <$> topLevelQName name
+
+singletonRequestSet :: QualifiedName -> SemanticRequest Resolved
+singletonRequestSet qualifiedName = SemanticRequest (Set.singleton (SemanticRequestElementConcrete qualifiedName))
+
+isThrowRequest :: QualifiedName -> Bool
+isThrowRequest qualifiedName = qualifiedName.module_ == "primitive" && qualifiedName.name == "throw"
 
 topLevelQName :: NameRef Identified VariableRef -> Maybe QualifiedName
 topLevelQName nameRef = case nameRef.resolution of

@@ -1,5 +1,5 @@
-error[K0220]: type contradiction at ReasonKindRequestHandlerNever: expected `never`, found `42`
-  --> test/golden/cases/04-handle-block.ktr (7:5)
+error[K0400]: type mismatch: '42' is not a subtype of 'never'
+  --> test/golden/cases/04-handle-block.ktr (7:28)
   |
 7 |     request fetch_answer() { 42 }
-  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |                            ^^^^^^

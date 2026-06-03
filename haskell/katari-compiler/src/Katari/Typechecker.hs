@@ -42,6 +42,7 @@ import Katari.Prim (PrimRule)
 import Katari.SemanticType (Resolved, SemanticType)
 import Katari.SourceSpan (emptySourceSpan)
 import Katari.Typechecker.AgentGraph (agentSCCs)
+import Katari.Typechecker.Check (checkSCC)
 import Katari.Typechecker.ConstraintGenerator (generateConstraintsForSCC)
 import Katari.Typechecker.ConstraintGenerator qualified as CG
 import Katari.Typechecker.Identifier
@@ -145,35 +146,19 @@ runOneSCC ::
   Set QualifiedName ->
   SCCAccumulator
 runOneSCC subject accum sccQNames =
-  let (cgResult, cgErrors) =
-        generateConstraintsForSCC
+  let (zonkedDeclarations, signatures, typeEnv, diagnostics) =
+        checkSCC
+          subject.moduleName
           accum.sccImportedTypes
           subject.moduleAST
           sccQNames
           subject.typeData
-          subject.knownRequests
           subject.primRules
-      cgDiags = map CG.toDiagnostic cgErrors
-      -- Data <: object needs each data type's fields; the constructors
-      -- resolved in earlier SCCs are already in 'sccImportedTypes'.
-      dataFieldEnv = buildDataFieldEnv accum.sccImportedTypes
-      (solverResult, solverErrors) = solve dataFieldEnv cgResult
-      solverDiags = map Solver.toDiagnostic solverErrors
-      (zonkOut, zonkErrors) = zonk subject.ownVariables cgResult solverResult
-      zonkDiags = map Zonker.toDiagnostic zonkErrors
-      sccLocalEnv = zonkOut.zonkedTypeEnv
-      sccInterface = extractSCCInterface sccQNames sccLocalEnv
-      sccDecls = zonkOut.zonkedModule.declarations
-   in -- Previously-processed SCC entries reappear in 'sccLocalEnv' (the
-      -- CG seeds them from 'knownTypes' so cross-SCC references resolve)
-      -- but always with the same resolved type, so 'Map.union' is safe:
-      -- duplicate keys read back the identical value, and the SCC owns
-      -- whatever new locals it introduced.
-      SCCAccumulator
-        { sccImportedTypes = Map.union accum.sccImportedTypes sccInterface,
-          sccTypeEnv = Map.union accum.sccTypeEnv sccLocalEnv,
-          sccDeclarations = foldl' indexDeclaration accum.sccDeclarations sccDecls,
-          sccDiagnostics = accum.sccDiagnostics <> cgDiags <> solverDiags <> zonkDiags
+   in SCCAccumulator
+        { sccImportedTypes = Map.union accum.sccImportedTypes signatures,
+          sccTypeEnv = Map.union accum.sccTypeEnv typeEnv,
+          sccDeclarations = Map.union accum.sccDeclarations zonkedDeclarations,
+          sccDiagnostics = accum.sccDiagnostics <> diagnostics
         }
 
 -- ---------------------------------------------------------------------------
