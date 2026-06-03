@@ -368,14 +368,6 @@ synthExpr = \case
       ( ExpressionFieldAccess FieldAccessExpression {object = object', fieldName = retagNameRef fieldName, sourceSpan = sourceSpan, typeOf = semantic},
         semantic
       )
-  ExpressionIndexAccess IndexAccessExpression {array, index, sourceSpan} -> do
-    (array', arrayType) <- synthExpr array
-    index' <- checkExpr index SemanticTypeInteger
-    let semantic = seqElementType arrayType
-    pure
-      ( ExpressionIndexAccess IndexAccessExpression {array = array', index = index', sourceSpan = sourceSpan, typeOf = semantic},
-        semantic
-      )
   ExpressionTemplate TemplateExpression {elements, sourceSpan} -> do
     walked <- mapM walkTemplateElement elements
     let interpolated = mapMaybe snd walked
@@ -1263,7 +1255,6 @@ exprEffect lookupEffect = go
       ExpressionBlock e -> blockEffect lookupEffect e.block
       ExpressionHandle e -> handleEffect e
       ExpressionFieldAccess e -> go e.object
-      ExpressionIndexAccess e -> go e.array <> go e.index
       ExpressionTemplate e -> Set.unions (map templateEffect e.elements)
       ExpressionBinaryOperator _ -> Set.empty
       ExpressionUnaryOperator _ -> Set.empty
@@ -1301,7 +1292,6 @@ exprTypeOf = \case
   ExpressionBlock e -> e.typeOf
   ExpressionHandle e -> e.typeOf
   ExpressionFieldAccess e -> e.typeOf
-  ExpressionIndexAccess e -> e.typeOf
   ExpressionTemplate e -> e.typeOf
   ExpressionQualifiedReference e -> e.typeOf
   ExpressionBinaryOperator _ -> SemanticTypeUnknown

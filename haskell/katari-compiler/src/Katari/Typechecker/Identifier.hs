@@ -1556,7 +1556,6 @@ resolveExpression = \case
   ExpressionFor expression -> ExpressionFor <$> resolveForExpr expression
   ExpressionBlock expression -> ExpressionBlock <$> resolveBlockExpr expression
   ExpressionFieldAccess expression -> resolveFieldAccess expression
-  ExpressionIndexAccess expression -> ExpressionIndexAccess <$> resolveIndexExpr expression
   ExpressionTemplate expression -> ExpressionTemplate <$> resolveTemplateExpr expression
   ExpressionHandle expression -> ExpressionHandle <$> resolveHandleExpr expression
   ExpressionParTuple expression -> ExpressionParTuple <$> resolveParTupleExpr expression
@@ -1894,18 +1893,6 @@ resolveFieldAccess fieldExpr =
       -- field accesses.
       innerResolved <- resolveExpression innerExpr
       pure (rebuildFieldAccessChain innerResolved labels)
-
-resolveIndexExpr :: IndexAccessExpression Parsed -> Identifier (IndexAccessExpression Identified)
-resolveIndexExpr IndexAccessExpression {array, index, sourceSpan} = do
-  array' <- resolveExpression array
-  index' <- resolveExpression index
-  pure
-    IndexAccessExpression
-      { array = array',
-        index = index',
-        sourceSpan = sourceSpan,
-        typeOf = ()
-      }
 
 resolveTemplateExpr :: TemplateExpression Parsed -> Identifier (TemplateExpression Identified)
 resolveTemplateExpr TemplateExpression {elements, sourceSpan} = do

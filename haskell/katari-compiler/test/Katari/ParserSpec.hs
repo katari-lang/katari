@@ -577,14 +577,6 @@ fieldAndIndex = describe "field access and index" $ do
     _ <- shouldSucceed "agent main() { a.b.c }"
     pure ()
 
-  it "parses index access" $ do
-    _ <- shouldSucceed "agent main() { arr[0] }"
-    pure ()
-
-  it "parses chained field then index" $ do
-    _ <- shouldSucceed "agent main() { obj.items[0] }"
-    pure ()
-
 -- ---------------------------------------------------------------------------
 -- Statements
 -- ---------------------------------------------------------------------------

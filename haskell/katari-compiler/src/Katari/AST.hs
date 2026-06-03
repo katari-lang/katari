@@ -1000,8 +1000,6 @@ data Expression (phase :: Phase) where
   ExpressionBlock :: BlockExpression phase -> Expression phase
   -- | @obj.field@.
   ExpressionFieldAccess :: FieldAccessExpression phase -> Expression phase
-  -- | @arr[idx]@.
-  ExpressionIndexAccess :: IndexAccessExpression phase -> Expression phase
   -- | @f\"...\"@ template literal with interpolation.
   ExpressionTemplate :: TemplateExpression phase -> Expression phase
   -- | Koka-style handle expression. Captures the continuation as its body.
@@ -1028,7 +1026,6 @@ instance HasSourceSpan (Expression phase) where
     ExpressionFor expression -> expression.sourceSpan
     ExpressionBlock expression -> expression.sourceSpan
     ExpressionFieldAccess expression -> expression.sourceSpan
-    ExpressionIndexAccess expression -> expression.sourceSpan
     ExpressionTemplate expression -> expression.sourceSpan
     ExpressionHandle expression -> expression.sourceSpan
     ExpressionParTuple expression -> expression.sourceSpan
@@ -1254,17 +1251,6 @@ data FieldAccessExpression (phase :: Phase) = FieldAccessExpression
   }
 
 instance HasSourceSpan (FieldAccessExpression phase) where
-  sourceSpanOf expression = expression.sourceSpan
-
--- | @array[index]@ — array indexing.
-data IndexAccessExpression (phase :: Phase) = IndexAccessExpression
-  { array :: Expression phase,
-    index :: Expression phase,
-    sourceSpan :: SourceSpan,
-    typeOf :: ExpressionType phase
-  }
-
-instance HasSourceSpan (IndexAccessExpression phase) where
   sourceSpanOf expression = expression.sourceSpan
 
 -- | Template literal @f\"...\"@ / @f\"\"\"...\"\"\"@. The body is split
@@ -1781,10 +1767,6 @@ deriving instance (ShowPhase phase) => Show (BlockExpression phase)
 deriving instance (EqPhase phase) => Eq (FieldAccessExpression phase)
 
 deriving instance (ShowPhase phase) => Show (FieldAccessExpression phase)
-
-deriving instance (EqPhase phase) => Eq (IndexAccessExpression phase)
-
-deriving instance (ShowPhase phase) => Show (IndexAccessExpression phase)
 
 deriving instance (EqPhase phase) => Eq (TemplateExpression phase)
 

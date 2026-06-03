@@ -54,7 +54,6 @@ import Katari.AST
     ForVarBinding (..),
     HandleExpression (..),
     IfExpression (..),
-    IndexAccessExpression (..),
     LetStatement (..),
     LiteralExpression (..),
     LiteralPattern (..),
@@ -461,9 +460,6 @@ hoverFromExpression snap moduleName position expression
         listToMaybe (mapMaybe (hoverFromExpression snap moduleName position) pte.elements)
       ExpressionFieldAccess fae ->
         hoverFromExpression snap moduleName position fae.object
-      ExpressionIndexAccess iae ->
-        hoverFromExpression snap moduleName position iae.array
-          `orElse` hoverFromExpression snap moduleName position iae.index
       ExpressionTemplate te ->
         listToMaybe (mapMaybe (hoverFromTemplateElement snap moduleName position) te.elements)
       ExpressionHandle he ->
@@ -506,7 +502,6 @@ zonkedExpressionType = \case
   ExpressionFor e -> e.typeOf
   ExpressionBlock e -> e.typeOf
   ExpressionFieldAccess e -> e.typeOf
-  ExpressionIndexAccess e -> e.typeOf
   ExpressionTemplate e -> e.typeOf
   ExpressionHandle e -> e.typeOf
   ExpressionParTuple e -> e.typeOf
@@ -684,9 +679,6 @@ refFromExpression position expression
         listToMaybe (mapMaybe (refFromExpression position) pte.elements)
       ExpressionFieldAccess fae ->
         refFromExpression position fae.object
-      ExpressionIndexAccess iae ->
-        refFromExpression position iae.array
-          `orElse` refFromExpression position iae.index
       ExpressionTemplate te ->
         listToMaybe (mapMaybe (refFromTemplateElement position) te.elements)
       ExpressionHandle he ->
@@ -811,8 +803,6 @@ collectExpressionOccurrences expression index = case expression of
     foldr collectExpressionOccurrences index pte.elements
   ExpressionFieldAccess fae ->
     collectExpressionOccurrences fae.object index
-  ExpressionIndexAccess iae ->
-    collectExpressionOccurrences iae.array (collectExpressionOccurrences iae.index index)
   ExpressionTemplate te ->
     foldr collectTemplateElementOccurrences index te.elements
   ExpressionHandle he ->

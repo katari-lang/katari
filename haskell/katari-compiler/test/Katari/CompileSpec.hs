@@ -131,13 +131,13 @@ happyPathSpec = describe "well-formed single-module input" $ do
   it "multi-line array literal does NOT require trailing comma" $ do
     let src =
           mconcat
-            [ "agent main() -> integer {\n",
+            [ "agent main() -> array[integer] {\n",
               "  let xs = [\n",
               "    1,\n",
               "    2,\n",
               "    3\n",
               "  ]\n",
-              "  xs[0]\n",
+              "  xs\n",
               "}\n"
             ]
     let result = compileSync (singleSourceInput src)

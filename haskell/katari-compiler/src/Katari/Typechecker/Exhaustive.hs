@@ -468,7 +468,6 @@ getExpressionType = \case
   AST.ExpressionFor e -> e.typeOf
   AST.ExpressionBlock e -> e.typeOf
   AST.ExpressionFieldAccess e -> e.typeOf
-  AST.ExpressionIndexAccess e -> e.typeOf
   AST.ExpressionTemplate e -> e.typeOf
   AST.ExpressionHandle e -> e.typeOf
   AST.ExpressionParTuple e -> e.typeOf
@@ -645,8 +644,6 @@ walkExpression env = \case
     concatMap (walkExpression env . snd) re.entries
   AST.ExpressionFieldAccess fa ->
     walkExpression env fa.object
-  AST.ExpressionIndexAccess ia ->
-    walkExpression env ia.array ++ walkExpression env ia.index
   AST.ExpressionTemplate te ->
     concatMap (walkTemplateElement env) te.elements
   AST.ExpressionHandle he ->

@@ -1198,13 +1198,12 @@ fuseNegativeLiteral operator operand fullSpan = case (operator, operand) of
 -- Postfix expressions
 -- ---------------------------------------------------------------------------
 
--- | A single postfix operator (call, field access, or index) with its own
--- source span covering just the operator syntax. Final node spans are built by
+-- | A single postfix operator (call or field access) with its own source span
+-- covering just the operator syntax. Final node spans are built by
 -- 'applyPostfixOperation' as @primary.start ↦ postfix.end@.
 data Postfix where
   PostfixCall :: [CallArgument Parsed] -> SourceSpan -> Postfix
   PostfixField :: NameRef Parsed LabelRef -> SourceSpan -> Postfix
-  PostfixIndex :: Expression Parsed -> SourceSpan -> Postfix
 
 parsePostfixExpression :: Parser (Expression Parsed)
 parsePostfixExpression = do
@@ -1216,8 +1215,7 @@ parsePostfix :: Parser Postfix
 parsePostfix =
   choice
     [ parseCallPostfix,
-      parseFieldPostfix,
-      parseIndexPostfix
+      parseFieldPostfix
     ]
 
 parseCallPostfix :: Parser Postfix
@@ -1229,13 +1227,6 @@ parseFieldPostfix :: Parser Postfix
 parseFieldPostfix = parseWithSpan $ do
   parsePunctuation PunctuationDot
   PostfixField <$> parseNameRef
-
-parseIndexPostfix :: Parser Postfix
-parseIndexPostfix = parseWithSpan $ do
-  parsePunctuation PunctuationLeftBracket
-  indexExpression <- parseExpression
-  parsePunctuation PunctuationRightBracket
-  pure (PostfixIndex indexExpression)
 
 applyPostfixOperation :: Expression Parsed -> Postfix -> Expression Parsed
 applyPostfixOperation expression = \case
@@ -1252,14 +1243,6 @@ applyPostfixOperation expression = \case
       FieldAccessExpression
         { object = expression,
           fieldName = fieldName,
-          sourceSpan = mergePostfixSpan expression postfixSpan,
-          typeOf = ()
-        }
-  PostfixIndex indexExpression postfixSpan ->
-    ExpressionIndexAccess
-      IndexAccessExpression
-        { array = expression,
-          index = indexExpression,
           sourceSpan = mergePostfixSpan expression postfixSpan,
           typeOf = ()
         }

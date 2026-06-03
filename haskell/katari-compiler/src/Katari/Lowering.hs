@@ -1147,10 +1147,6 @@ lowerExpr = \case
     object <- lowerExpr fieldAccessExpr.object
     fieldVar <- emitLoadLiteral (LiteralValueString fieldAccessExpr.fieldName.text)
     emitPrimCall "get_field" [Arg "object" object, Arg "field" fieldVar]
-  AST.ExpressionIndexAccess indexAccessExpr -> do
-    array <- lowerExpr indexAccessExpr.array
-    index <- lowerExpr indexAccessExpr.index
-    emitPrimCall "array.get" [Arg "array" array, Arg "index" index]
   AST.ExpressionTemplate templateExpr -> lowerTemplate templateExpr
   AST.ExpressionBlock blockExpr -> lowerBlockExpr blockExpr
   AST.ExpressionIf ifExpr -> lowerIfExpr ifExpr
